@@ -1,6 +1,7 @@
 /// JavaScript lexer for Lumen.
 /// Converts source text into a stream of tokens.
 /// Operates on raw bytes (UTF-8) for performance.
+import gleam/bit_array
 import gleam/int
 import gleam/list
 import gleam/string
@@ -241,16 +242,16 @@ fn do_tokenize(
 }
 
 fn count_newlines_in(s: String) -> Int {
-  do_count_newlines(s, 0)
+  do_count_newlines(bit_array.from_string(s), 0)
 }
 
-fn do_count_newlines(s: String, count: Int) -> Int {
-  case string.pop_grapheme(s) {
-    Ok(#("\r\n", rest)) -> do_count_newlines(rest, count + 1)
-    Ok(#("\n", rest)) -> do_count_newlines(rest, count + 1)
-    Ok(#("\r", rest)) -> do_count_newlines(rest, count + 1)
-    Ok(#(_, rest)) -> do_count_newlines(rest, count)
-    Error(_) -> count
+fn do_count_newlines(bytes: BitArray, count: Int) -> Int {
+  case bytes {
+    <<13, 10, rest:bytes>> -> do_count_newlines(rest, count + 1)
+    <<10, rest:bytes>> -> do_count_newlines(rest, count + 1)
+    <<13, rest:bytes>> -> do_count_newlines(rest, count + 1)
+    <<_, rest:bytes>> -> do_count_newlines(rest, count)
+    _ -> count
   }
 }
 
@@ -1268,19 +1269,7 @@ fn make_identifier_token(src: String, start: Int, end: Int) -> Token {
 
 /// Check if a string contains a backslash character at or after position pos.
 fn string_contains_backslash(s: String, pos: Int) -> Bool {
-  case string.drop_start(s, pos) |> string.pop_grapheme {
-    Ok(#("\\", _)) -> True
-    Ok(#(_, rest)) -> string_contains_backslash_rest(rest)
-    Error(_) -> False
-  }
-}
-
-fn string_contains_backslash_rest(s: String) -> Bool {
-  case string.pop_grapheme(s) {
-    Ok(#("\\", _)) -> True
-    Ok(#(_, rest)) -> string_contains_backslash_rest(rest)
-    Error(_) -> False
-  }
+  string.drop_start(s, pos) |> string.contains("\\")
 }
 
 /// Decode unicode escape sequences in an identifier string.
@@ -1290,80 +1279,53 @@ fn decode_identifier_escapes(raw: String) -> String {
 }
 
 fn decode_id_escapes_loop(remaining: String, acc: String) -> String {
-  case string.pop_grapheme(remaining) {
-    Error(_) -> acc
-    Ok(#("\\", rest)) -> {
-      // Must be \u escape (already validated by lexer)
-      case string.pop_grapheme(rest) {
-        Ok(#("u", rest2)) -> {
-          case string.pop_grapheme(rest2) {
-            Ok(#("{", rest3)) -> {
-              // Braced: \u{XXXX} — collect hex digits until }
-              let #(hex_str, after_brace) = collect_hex_until_brace(rest3, "")
+  // Jump to the next backslash instead of iterating char-by-char
+  case string.split_once(remaining, "\\") {
+    Error(_) -> acc <> remaining
+    Ok(#(before, after)) -> {
+      // after starts just past the backslash
+      case after {
+        "u{" <> rest -> {
+          // Braced: \u{XXXX} — find closing brace
+          case string.split_once(rest, "}") {
+            Ok(#(hex_str, after_brace)) ->
               case int.base_parse(hex_str, 16) {
                 Ok(cp) ->
                   case string.utf_codepoint(cp) {
                     Ok(codepoint) -> {
                       let char = string.from_utf_codepoints([codepoint])
-                      decode_id_escapes_loop(after_brace, acc <> char)
+                      decode_id_escapes_loop(after_brace, acc <> before <> char)
                     }
                     // Already validated, shouldn't happen
-                    Error(_) -> decode_id_escapes_loop(after_brace, acc)
+                    Error(_) ->
+                      decode_id_escapes_loop(after_brace, acc <> before)
                   }
                 // Already validated
-                Error(_) -> decode_id_escapes_loop(after_brace, acc)
+                Error(_) -> decode_id_escapes_loop(after_brace, acc <> before)
               }
-            }
-            Ok(#(h1, rest3)) -> {
-              // Non-braced: \uXXXX — exactly 4 hex digits
-              case pop_n_graphemes(rest3, 3, h1) {
-                #(hex_str, after_digits) ->
-                  case int.base_parse(hex_str, 16) {
-                    Ok(cp) ->
-                      case string.utf_codepoint(cp) {
-                        Ok(codepoint) -> {
-                          let char = string.from_utf_codepoints([codepoint])
-                          decode_id_escapes_loop(after_digits, acc <> char)
-                        }
-                        Error(_) -> decode_id_escapes_loop(after_digits, acc)
-                      }
-                    Error(_) -> decode_id_escapes_loop(after_digits, acc)
-                  }
+            Error(_) -> acc <> before
+          }
+        }
+        "u" <> rest -> {
+          // Non-braced: \uXXXX — exactly 4 hex digits
+          let hex_str = string.slice(rest, 0, 4)
+          let after_digits = string.drop_start(rest, 4)
+          case int.base_parse(hex_str, 16) {
+            Ok(cp) ->
+              case string.utf_codepoint(cp) {
+                Ok(codepoint) -> {
+                  let char = string.from_utf_codepoints([codepoint])
+                  decode_id_escapes_loop(after_digits, acc <> before <> char)
+                }
+                Error(_) -> decode_id_escapes_loop(after_digits, acc <> before)
               }
-            }
-            // Shouldn't happen (already validated)
-            Error(_) -> acc
+            Error(_) -> decode_id_escapes_loop(after_digits, acc <> before)
           }
         }
         // Shouldn't happen (already validated)
-        Ok(#(ch, rest2)) -> decode_id_escapes_loop(rest2, acc <> ch)
-        Error(_) -> acc
+        _ -> acc <> before
       }
     }
-    Ok(#(ch, rest)) -> decode_id_escapes_loop(rest, acc <> ch)
-  }
-}
-
-/// Collect hex digits from a string until we hit '}'.
-/// Returns (hex_string, remaining_after_brace).
-fn collect_hex_until_brace(s: String, acc: String) -> #(String, String) {
-  case string.pop_grapheme(s) {
-    Ok(#("}", rest)) -> #(acc, rest)
-    Ok(#(ch, rest)) -> collect_hex_until_brace(rest, acc <> ch)
-    Error(_) -> #(acc, "")
-  }
-}
-
-/// Pop n graphemes from a string, accumulating them onto an initial string.
-/// Returns (accumulated_string, remaining).
-fn pop_n_graphemes(s: String, n: Int, acc: String) -> #(String, String) {
-  case n <= 0 {
-    True -> #(acc, s)
-    False ->
-      case string.pop_grapheme(s) {
-        Ok(#(ch, rest)) -> pop_n_graphemes(rest, n - 1, acc <> ch)
-        Error(_) -> #(acc, "")
-      }
   }
 }
 
@@ -1847,22 +1809,7 @@ fn keyword_or_identifier(word: String) -> TokenKind {
 fn char_at(s: String, pos: Int) -> String {
   case pos < 0 {
     True -> ""
-    False -> do_char_at(s, pos)
-  }
-}
-
-fn do_char_at(s: String, pos: Int) -> String {
-  case pos == 0 {
-    True ->
-      case string.pop_grapheme(s) {
-        Ok(#(ch, _)) -> ch
-        Error(_) -> ""
-      }
-    False ->
-      case string.pop_grapheme(s) {
-        Ok(#(_, rest)) -> do_char_at(rest, pos - 1)
-        Error(_) -> ""
-      }
+    False -> string.drop_start(s, pos) |> string.slice(0, 1)
   }
 }
 

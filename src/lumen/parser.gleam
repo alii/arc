@@ -5614,33 +5614,18 @@ fn scan_regex_flags(
 fn split_regex_value(raw: String) -> #(String, String) {
   // Strip leading /
   let body = string.drop_start(raw, 1)
-  // Find last / to split pattern from flags
-  split_regex_at_last_slash(body, "", "")
-}
-
-fn split_regex_at_last_slash(
-  remaining: String,
-  current: String,
-  last_pattern: String,
-) -> #(String, String) {
-  case string.pop_grapheme(remaining) {
-    Ok(#("/", rest)) ->
-      // Found a slash — current content becomes the pattern candidate,
-      // rest becomes the flags candidate. Keep scanning in case of more slashes.
-      split_regex_at_last_slash(rest, "", current <> "/" <> last_pattern)
-    Ok(#(ch, rest)) ->
-      split_regex_at_last_slash(rest, current <> ch, last_pattern)
-    Error(_) ->
-      // End of string — last_pattern has accumulated content before last /,
-      // current has content after last /
-      case last_pattern {
-        "" -> #(current, "")
-        _ -> {
-          // Remove the leading / that was appended
-          let pattern = string.drop_start(last_pattern, 1)
-          #(pattern, current)
-        }
-      }
+  // Split on "/" and rejoin all but the last segment as the pattern
+  let parts = string.split(body, "/")
+  case parts {
+    [single] -> #(single, "")
+    _ -> {
+      let assert Ok(flags) = list.last(parts)
+      let pattern =
+        parts
+        |> list.take(list.length(parts) - 1)
+        |> string.join("/")
+      #(pattern, flags)
+    }
   }
 }
 
@@ -5658,10 +5643,7 @@ fn skip_tokens_past(p: P, target_pos: Int) -> Result(P, ParseError) {
 }
 
 fn char_at_source(src: String, pos: Int) -> String {
-  case string.drop_start(src, pos) |> string.pop_grapheme {
-    Ok(#(ch, _)) -> ch
-    Error(_) -> ""
-  }
+  string.drop_start(src, pos) |> string.slice(0, 1)
 }
 
 /// Check if a single character is a hex digit (0-9, a-f, A-F).
