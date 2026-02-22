@@ -50,6 +50,17 @@ pub type VmError {
 // Internal state
 // ============================================================================
 
+/// A saved caller frame, pushed onto call_stack when Call enters a function.
+type SavedFrame {
+  SavedFrame(
+    func: FuncTemplate,
+    locals: List(JsValue),
+    stack: List(JsValue),
+    pc: Int,
+    try_stack: List(TryFrame),
+  )
+}
+
 /// Internal execution state for the VM loop.
 type State {
   State(
@@ -57,9 +68,11 @@ type State {
     locals: List(JsValue),
     constants: List(JsValue),
     globals: dict.Dict(String, JsValue),
+    func: FuncTemplate,
     code: List(Op),
     heap: Heap,
     pc: Int,
+    call_stack: List(SavedFrame),
     try_stack: List(TryFrame),
     finally_stack: List(FinallyCompletion),
     builtins: Builtins,
@@ -69,7 +82,7 @@ type State {
 /// Signals from step() — either continue with new state, or stop.
 type StepResult {
   Done
-  VmErr(VmError)
+  VmError(VmError)
   Thrown
 }
 
@@ -90,9 +103,11 @@ pub fn run(
       locals:,
       constants: func.constants,
       globals: dict.new(),
+      func:,
       code: func.bytecode,
       heap:,
       pc: 0,
+      call_stack: [],
       try_stack: [],
       finally_stack: [],
       builtins:,
@@ -118,7 +133,7 @@ fn execute(state: State) -> Result(Completion, VmError) {
       case step(state, op) {
         Ok(new_state) -> execute(new_state)
         Error(#(Done, result, heap)) -> Ok(NormalCompletion(result, heap))
-        Error(#(VmErr(err), _, _)) -> Error(err)
+        Error(#(VmError(err), _, _)) -> Error(err)
         Error(#(Thrown, thrown_value, heap)) -> {
           // Try to unwind to a catch handler
           let updated_state = State(..state, heap:)
@@ -187,7 +202,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     Pop -> {
       case state.stack {
         [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-        [] -> Error(#(VmErr(StackUnderflow("Pop")), JsUndefined, state.heap))
+        [] -> Error(#(VmError(StackUnderflow("Pop")), JsUndefined, state.heap))
       }
     }
 
@@ -195,7 +210,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [top, ..] ->
           Ok(State(..state, stack: [top, ..state.stack], pc: state.pc + 1))
-        [] -> Error(#(VmErr(StackUnderflow("Dup")), JsUndefined, state.heap))
+        [] -> Error(#(VmError(StackUnderflow("Dup")), JsUndefined, state.heap))
       }
     }
 
@@ -203,7 +218,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [a, b, ..rest] ->
           Ok(State(..state, stack: [b, a, ..rest], pc: state.pc + 1))
-        _ -> Error(#(VmErr(StackUnderflow("Swap")), JsUndefined, state.heap))
+        _ -> Error(#(VmError(StackUnderflow("Swap")), JsUndefined, state.heap))
       }
     }
 
@@ -221,7 +236,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         Ok(value) ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
         Error(_) ->
-          Error(#(VmErr(LocalIndexOutOfBounds(index)), JsUndefined, state.heap))
+          Error(#(
+            VmError(LocalIndexOutOfBounds(index)),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -240,14 +259,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               )
             Error(_) ->
               Error(#(
-                VmErr(LocalIndexOutOfBounds(index)),
+                VmError(LocalIndexOutOfBounds(index)),
                 JsUndefined,
                 state.heap,
               ))
           }
         }
         [] ->
-          Error(#(VmErr(StackUnderflow("PutLocal")), JsUndefined, state.heap))
+          Error(#(VmError(StackUnderflow("PutLocal")), JsUndefined, state.heap))
       }
     }
 
@@ -278,7 +297,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             ),
           )
         [] ->
-          Error(#(VmErr(StackUnderflow("PutGlobal")), JsUndefined, state.heap))
+          Error(#(VmError(StackUnderflow("PutGlobal")), JsUndefined, state.heap))
       }
     }
 
@@ -294,7 +313,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             ),
           )
         }
-        [] -> Error(#(VmErr(StackUnderflow("TypeOf")), JsUndefined, state.heap))
+        [] ->
+          Error(#(VmError(StackUnderflow("TypeOf")), JsUndefined, state.heap))
       }
     }
 
@@ -326,7 +346,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             }
           }
         }
-        _ -> Error(#(VmErr(StackUnderflow("BinOp")), JsUndefined, state.heap))
+        _ -> Error(#(VmError(StackUnderflow("BinOp")), JsUndefined, state.heap))
       }
     }
 
@@ -344,14 +364,151 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         [] ->
-          Error(#(VmErr(StackUnderflow("UnaryOp")), JsUndefined, state.heap))
+          Error(#(VmError(StackUnderflow("UnaryOp")), JsUndefined, state.heap))
       }
     }
 
     Return -> {
-      case state.stack {
-        [value, ..] -> Error(#(Done, value, state.heap))
-        [] -> Error(#(Done, JsUndefined, state.heap))
+      let return_value = case state.stack {
+        [value, ..] -> value
+        [] -> JsUndefined
+      }
+      case state.call_stack {
+        // No caller — top-level return, we're done
+        [] -> Error(#(Done, return_value, state.heap))
+        // Pop call frame, restore caller, push return value onto caller's stack
+        [SavedFrame(func:, locals:, stack:, pc:, try_stack:), ..rest_frames] ->
+          Ok(
+            State(
+              ..state,
+              stack: [return_value, ..stack],
+              locals:,
+              func:,
+              code: func.bytecode,
+              constants: func.constants,
+              pc:,
+              call_stack: rest_frames,
+              try_stack:,
+            ),
+          )
+      }
+    }
+
+    MakeClosure(func_index) -> {
+      case list_get(state.func.functions, func_index) {
+        Ok(_child_template) -> {
+          // Allocate a dummy env for now (no closure capture in MVP)
+          let #(heap, env_ref) = heap.alloc(state.heap, value.EnvSlot([]))
+          let #(heap, closure_ref) =
+            heap.alloc(heap, ClosureSlot(func_index:, env: env_ref))
+          Ok(
+            State(
+              ..state,
+              heap:,
+              stack: [JsFunction(closure_ref), ..state.stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        Error(_) -> {
+          let #(heap, err) =
+            object.make_range_error(
+              state.heap,
+              state.builtins,
+              "invalid function index: " <> int.to_string(func_index),
+            )
+          Error(#(Thrown, err, heap))
+        }
+      }
+    }
+
+    Call(arity) -> {
+      // Stack layout: [arg_n, ..., arg_1, callee, ...rest]
+      // Pop arity args, then callee
+      case pop_n(state.stack, arity) {
+        Ok(#(args, after_args)) -> {
+          case after_args {
+            [JsFunction(closure_ref), ..rest_stack] -> {
+              case heap.read(state.heap, closure_ref) {
+                Ok(ClosureSlot(func_index:, env: _env_ref)) -> {
+                  // Look up the template from the CLOSURE's defining context
+                  // We need to find it — closures store func_index relative to parent
+                  case find_func_template(state, closure_ref, func_index) {
+                    Ok(callee_template) -> {
+                      // Save caller frame (including caller's remaining stack)
+                      let saved =
+                        SavedFrame(
+                          func: state.func,
+                          locals: state.locals,
+                          stack: rest_stack,
+                          pc: state.pc + 1,
+                          try_stack: state.try_stack,
+                        )
+                      // Bind arguments to local slots (pad with undefined if too few)
+                      let padded_args = pad_args(args, callee_template.arity)
+                      let locals =
+                        list.append(
+                          padded_args,
+                          list.repeat(
+                            JsUndefined,
+                            callee_template.local_count - callee_template.arity,
+                          ),
+                        )
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [],
+                          locals:,
+                          func: callee_template,
+                          code: callee_template.bytecode,
+                          constants: callee_template.constants,
+                          pc: 0,
+                          call_stack: [saved, ..state.call_stack],
+                          try_stack: [],
+                        ),
+                      )
+                    }
+                    Error(msg) -> {
+                      let #(heap, err) =
+                        object.make_type_error(state.heap, state.builtins, msg)
+                      Error(#(Thrown, err, heap))
+                    }
+                  }
+                }
+                _ -> {
+                  let #(heap, err) =
+                    object.make_type_error(
+                      state.heap,
+                      state.builtins,
+                      "callee is not a function",
+                    )
+                  Error(#(Thrown, err, heap))
+                }
+              }
+            }
+            [non_func, ..] -> {
+              let #(heap, err) =
+                object.make_type_error(
+                  state.heap,
+                  state.builtins,
+                  typeof_value(non_func) <> " is not a function",
+                )
+              Error(#(Thrown, err, heap))
+            }
+            [] ->
+              Error(#(
+                VmError(StackUnderflow("Call: no callee")),
+                JsUndefined,
+                state.heap,
+              ))
+          }
+        }
+        Error(_) ->
+          Error(#(
+            VmError(StackUnderflow("Call: not enough args")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -366,7 +523,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         [] ->
-          Error(#(VmErr(StackUnderflow("JumpIfFalse")), JsUndefined, state.heap))
+          Error(#(
+            VmError(StackUnderflow("JumpIfFalse")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -379,7 +540,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         [] ->
-          Error(#(VmErr(StackUnderflow("JumpIfTrue")), JsUndefined, state.heap))
+          Error(#(
+            VmError(StackUnderflow("JumpIfTrue")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -393,7 +558,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         }
         [] ->
           Error(#(
-            VmErr(StackUnderflow("JumpIfNullish")),
+            VmError(StackUnderflow("JumpIfNullish")),
             JsUndefined,
             state.heap,
           ))
@@ -413,7 +578,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         [_, ..rest] -> Ok(State(..state, try_stack: rest, pc: state.pc + 1))
         [] ->
           Error(#(
-            VmErr(StackUnderflow("PopTry: empty try_stack")),
+            VmError(StackUnderflow("PopTry: empty try_stack")),
             JsUndefined,
             state.heap,
           ))
@@ -423,7 +588,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     opcode.Throw -> {
       case state.stack {
         [value, ..] -> Error(#(Thrown, value, state.heap))
-        [] -> Error(#(VmErr(StackUnderflow("Throw")), JsUndefined, state.heap))
+        [] ->
+          Error(#(VmError(StackUnderflow("Throw")), JsUndefined, state.heap))
       }
     }
 
@@ -447,7 +613,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Error(#(Done, value, state.heap))
         [] ->
           Error(#(
-            VmErr(StackUnderflow("LeaveFinally: empty finally_stack")),
+            VmError(StackUnderflow("LeaveFinally: empty finally_stack")),
             JsUndefined,
             state.heap,
           ))
@@ -506,7 +672,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Ok(State(..state, stack: [JsUndefined, ..rest], pc: state.pc + 1))
         }
         [] ->
-          Error(#(VmErr(StackUnderflow("GetField")), JsUndefined, state.heap))
+          Error(#(VmError(StackUnderflow("GetField")), JsUndefined, state.heap))
       }
     }
 
@@ -521,7 +687,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Ok(State(..state, stack: rest, pc: state.pc + 1))
         }
         _ ->
-          Error(#(VmErr(StackUnderflow("PutField")), JsUndefined, state.heap))
+          Error(#(VmError(StackUnderflow("PutField")), JsUndefined, state.heap))
       }
     }
 
@@ -537,16 +703,91 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Ok(State(..state, pc: state.pc + 1))
         }
         _ ->
-          Error(#(VmErr(StackUnderflow("DefineField")), JsUndefined, state.heap))
+          Error(#(
+            VmError(StackUnderflow("DefineField")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
     _ ->
       Error(#(
-        VmErr(Unimplemented("opcode: " <> string.inspect(op))),
+        VmError(Unimplemented("opcode: " <> string.inspect(op))),
         JsUndefined,
         state.heap,
       ))
+  }
+}
+
+// ============================================================================
+// Call helpers
+// ============================================================================
+
+/// Pop n items from stack. Returns #(popped_items_in_order, remaining_stack).
+fn pop_n(
+  stack: List(JsValue),
+  n: Int,
+) -> Result(#(List(JsValue), List(JsValue)), Nil) {
+  pop_n_loop(stack, n, [])
+}
+
+fn pop_n_loop(
+  stack: List(JsValue),
+  remaining: Int,
+  acc: List(JsValue),
+) -> Result(#(List(JsValue), List(JsValue)), Nil) {
+  case remaining {
+    0 -> Ok(#(acc, stack))
+    _ ->
+      case stack {
+        [top, ..rest] -> pop_n_loop(rest, remaining - 1, [top, ..acc])
+        [] -> Error(Nil)
+      }
+  }
+}
+
+/// Pad args to exactly `arity` length — truncate extras, fill missing with undefined.
+fn pad_args(args: List(JsValue), arity: Int) -> List(JsValue) {
+  let len = list.length(args)
+  case len >= arity {
+    True -> list.take(args, arity)
+    False -> list.append(args, list.repeat(JsUndefined, arity - len))
+  }
+}
+
+/// Find a function template for a closure. The func_index in the ClosureSlot
+/// is an index into the parent template's functions list. We search the call
+/// stack to find the template that created this closure.
+/// For MVP, we do a simpler approach: search current func + call stack for the child.
+fn find_func_template(
+  state: State,
+  _closure_ref: Ref,
+  func_index: Int,
+) -> Result(FuncTemplate, String) {
+  // Search current function's children first
+  case list_get(state.func.functions, func_index) {
+    Ok(template) -> Ok(template)
+    Error(_) ->
+      // Search call stack frames
+      find_in_call_stack(state.call_stack, func_index)
+  }
+}
+
+fn find_in_call_stack(
+  frames: List(SavedFrame),
+  func_index: Int,
+) -> Result(FuncTemplate, String) {
+  case frames {
+    [] ->
+      Error(
+        "function template not found for index " <> int.to_string(func_index),
+      )
+    [SavedFrame(func:, ..), ..rest] ->
+      case list_get(func.functions, func_index) {
+        Ok(template) -> Ok(template)
+        Error(_) -> find_in_call_stack(rest, func_index)
+      }
   }
 }
 

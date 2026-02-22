@@ -1,7 +1,11 @@
 /// Full test262 conformance tests with snapshot-based failure tracking.
 ///
-/// Normal mode: runs all tests in parallel, checks against snapshot.
-/// Generate mode (GENERATE_SNAPSHOT=1): runs all tests sequentially, writes snapshot file.
+/// Bypasses EUnit's per-test reporting to avoid 53K dots.
+/// Instead, shows a progress counter and prints only failures.
+///
+/// Usage:
+///   TEST262=1 gleam test          — run test262 with snapshot
+///   GENERATE_SNAPSHOT=1 gleam test — regenerate snapshot file
 import gleam/int
 import gleam/io
 import gleam/list
@@ -18,50 +22,24 @@ const test_dir = "vendor/test262/test"
 
 const snapshot_path = "test/test262_snapshot.txt"
 
-/// EUnit test generator — entry point.
-/// Only runs when TEST262=1 (or GENERATE_SNAPSHOT=1).
-/// Usage: TEST262=1 gleam test
+/// EUnit test generator — returns empty. Actual work done in test262_run_test().
 pub fn test262_test_() -> test_runner.EunitTests {
-  case test_runner.get_env("GENERATE_SNAPSHOT") {
-    Ok(_) -> test_runner.empty_tests()
-    _ ->
-      case test_runner.get_env("TEST262") {
-        Ok(_) -> {
-          let snapshot = test262_snapshot.load_snapshot(snapshot_path)
-          test_runner.generate_recursive_file_tests(test_dir, fn(path, source) {
-            run_test_with_snapshot(snapshot, path, source)
-          })
-        }
-        Error(_) -> test_runner.empty_tests()
+  test_runner.empty_tests()
+}
+
+/// Single EUnit test that runs the entire test262 suite with custom output.
+pub fn test262_run_test() {
+  let generate = test_runner.get_env_is_truthy("GENERATE_SNAPSHOT")
+  let run = test_runner.get_env_is_truthy("TEST262")
+
+  case generate || run {
+    False -> Nil
+    True -> {
+      let snapshot = case generate {
+        True -> set.new()
+        False -> test262_snapshot.load_snapshot(snapshot_path)
       }
-  }
-}
 
-fn run_test_with_snapshot(
-  snapshot: set.Set(String),
-  path: String,
-  source: String,
-) -> Result(Nil, String) {
-  let metadata = test262_metadata.parse_metadata(source)
-  let test_result = run_parse_test(metadata, source)
-  let in_snapshot = test262_snapshot.is_expected_failure(snapshot, path)
-
-  case in_snapshot, test_result {
-    True, Error(_) -> Ok(Nil)
-    True, Ok(_) ->
-      Error("UNEXPECTED PASS: " <> path <> " now passes; remove from snapshot")
-    False, Ok(_) -> Ok(Nil)
-    False, Error(reason) -> Error(reason)
-  }
-}
-
-/// Snapshot generation — only active when GENERATE_SNAPSHOT=1.
-/// Runs all files sequentially, collects failures, writes snapshot.
-pub fn generate_snapshot_test() {
-  case test_runner.get_env("GENERATE_SNAPSHOT") {
-    Error(_) -> Nil
-    Ok(_) -> {
-      io.println("\nGenerating test262 snapshot...")
       let assert Ok(all_files) = simplifile.get_files(in: test_dir)
       let js_files =
         all_files
@@ -70,47 +48,127 @@ pub fn generate_snapshot_test() {
         })
         |> list.sort(string.compare)
 
-      io.println(
-        "Found " <> int.to_string(list.length(js_files)) <> " test files",
-      )
-
+      let total = list.length(js_files)
       let prefix = test_dir <> "/"
-      let failures =
-        list.filter_map(js_files, fn(full_path) {
+
+      io.println("\ntest262: running " <> int.to_string(total) <> " tests...")
+
+      let result =
+        list.index_fold(js_files, #(0, 0, []), fn(acc, full_path, idx) {
+          let #(pass_count, fail_count, failures) = acc
+
+          // Progress counter every 500 tests
+          case idx % 500 {
+            0 -> print_progress(idx, total, pass_count, fail_count)
+            _ -> Nil
+          }
+
           let relative = case string.starts_with(full_path, prefix) {
             True -> string.drop_start(full_path, string.length(prefix))
             False -> full_path
           }
+
           case simplifile.read(full_path) {
-            Error(_) -> Ok(relative)
+            Error(_) -> #(pass_count, fail_count + 1, [relative, ..failures])
             Ok(source) -> {
               let metadata = test262_metadata.parse_metadata(source)
-              case run_parse_test(metadata, source) {
-                Ok(_) -> Error(Nil)
-                Error(_) -> Ok(relative)
+              let test_result = run_parse_test(metadata, source)
+              let in_snapshot =
+                test262_snapshot.is_expected_failure(snapshot, relative)
+
+              case generate {
+                True ->
+                  case test_result {
+                    Ok(_) -> #(pass_count + 1, fail_count, failures)
+                    Error(_) -> #(pass_count, fail_count + 1, [
+                      relative,
+                      ..failures
+                    ])
+                  }
+                False ->
+                  case in_snapshot, test_result {
+                    // Expected failure
+                    True, Error(_) -> #(pass_count + 1, fail_count, failures)
+                    // Unexpected pass
+                    True, Ok(_) -> {
+                      io.println(
+                        "\n  UNEXPECTED PASS: "
+                        <> relative
+                        <> " (remove from snapshot)",
+                      )
+                      #(pass_count, fail_count + 1, failures)
+                    }
+                    // Expected pass
+                    False, Ok(_) -> #(pass_count + 1, fail_count, failures)
+                    // Unexpected failure
+                    False, Error(reason) -> {
+                      io.println("\n  FAIL: " <> relative <> " — " <> reason)
+                      #(pass_count, fail_count + 1, failures)
+                    }
+                  }
               }
             }
           }
         })
 
-      let total = list.length(js_files)
-      let fail_count = list.length(failures)
-      let pass_count = total - fail_count
+      let #(pass_count, fail_count, failures) = result
 
-      io.println(
-        "\ntest262 snapshot results: "
-        <> int.to_string(pass_count)
-        <> " pass, "
-        <> int.to_string(fail_count)
-        <> " fail out of "
-        <> int.to_string(total),
-      )
+      // Clear progress line and print final summary
+      clear_line()
 
-      let assert Ok(_) =
-        test262_snapshot.write_snapshot(snapshot_path, failures)
-      io.println("Wrote snapshot to " <> snapshot_path)
+      case generate {
+        True -> {
+          let assert Ok(_) =
+            test262_snapshot.write_snapshot(snapshot_path, failures)
+          io.println(
+            "test262: "
+            <> int.to_string(pass_count)
+            <> " pass, "
+            <> int.to_string(fail_count)
+            <> " fail — wrote snapshot to "
+            <> snapshot_path,
+          )
+        }
+        False -> {
+          let snapshot_count = set.size(snapshot)
+          io.println(
+            "test262: "
+            <> int.to_string(pass_count)
+            <> " pass ("
+            <> int.to_string(snapshot_count)
+            <> " expected failures in snapshot)",
+          )
+          case fail_count > 0 {
+            True ->
+              panic as {
+                "test262: "
+                <> int.to_string(fail_count)
+                <> " unexpected failures"
+              }
+            False -> Nil
+          }
+        }
+      }
     }
   }
+}
+
+@external(erlang, "io", "format")
+fn erl_io_format(fmt: String, args: List(String)) -> Nil
+
+fn clear_line() -> Nil {
+  // \r moves to start of line, ESC[K clears to end of line
+  let assert Ok(esc) = string.utf_codepoint(0x1b)
+  io.print("\r" <> string.from_utf_codepoints([esc]) <> "[K")
+}
+
+fn print_progress(current: Int, total: Int, passes: Int, fails: Int) -> Nil {
+  erl_io_format("  \r  [~s/~s] ~s pass, ~s fail", [
+    int.to_string(current),
+    int.to_string(total),
+    int.to_string(passes),
+    int.to_string(fails),
+  ])
 }
 
 // --- Parse test logic ---

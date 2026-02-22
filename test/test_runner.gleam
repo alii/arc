@@ -1,3 +1,5 @@
+import gleam/result
+
 /// Generic file-based test runner for EUnit.
 /// Reads all .js files from a directory and runs a callback on each one,
 /// generating individual EUnit test descriptors.
@@ -48,6 +50,13 @@ fn generate_recursive_eunit_tests_ffi(
 /// Read an environment variable. Returns Ok(value) or Error(Nil).
 @external(erlang, "test_runner_ffi", "get_env")
 pub fn get_env(name: String) -> Result(String, Nil)
+
+pub fn get_env_is_truthy(name: String) {
+  case get_env(name) {
+    Ok("1") | Ok("true") -> True
+    _ -> False
+  }
+}
 
 /// Return an empty EUnit test descriptor (no tests to run).
 @external(erlang, "test_runner_ffi", "empty_tests")

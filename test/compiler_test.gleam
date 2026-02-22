@@ -375,3 +375,56 @@ pub fn uncaught_throw_test() {
 pub fn sequence_expression_test() {
   assert_normal_number("(1, 2, 3)", 3.0)
 }
+
+// ============================================================================
+// Function tests
+// ============================================================================
+
+pub fn function_declaration_basic_test() {
+  assert_normal_number("function add(a, b) { return a + b; } add(3, 4)", 7.0)
+}
+
+pub fn function_no_args_test() {
+  assert_normal_number("function f() { return 42; } f()", 42.0)
+}
+
+pub fn function_implicit_return_test() {
+  assert_normal("function f() {} f()", JsUndefined)
+}
+
+pub fn function_expression_test() {
+  assert_normal_number("var f = function(x) { return x * 2; }; f(5)", 10.0)
+}
+
+pub fn function_multiple_calls_test() {
+  assert_normal_number(
+    "function inc(x) { return x + 1; } inc(inc(inc(0)))",
+    3.0,
+  )
+}
+
+pub fn function_extra_args_ignored_test() {
+  assert_normal_number("function f(a) { return a; } f(1, 2, 3)", 1.0)
+}
+
+pub fn function_missing_args_undefined_test() {
+  assert_normal("function f(a, b) { return b; } f(1)", JsUndefined)
+}
+
+pub fn function_with_locals_test() {
+  assert_normal_number(
+    "function f(x) { var y = x + 1; return y * 2; } f(4)",
+    10.0,
+  )
+}
+
+pub fn function_hoisting_test() {
+  assert_normal_number("var x = f(); function f() { return 99; } x", 99.0)
+}
+
+pub fn function_recursion_test() {
+  assert_normal_number(
+    "function fact(n) { if (n <= 1) return 1; return n * fact(n - 1); } fact(5)",
+    120.0,
+  )
+}
