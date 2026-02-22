@@ -2,7 +2,7 @@ import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/order
 import gleam/string
 import lumen/vm/builtins.{type Builtins}
@@ -11,18 +11,18 @@ import lumen/vm/heap.{type Heap}
 import lumen/vm/object
 import lumen/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
-  BinOp, BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, DefineField, Div, Dup,
-  Eq, Exp, GetBoxed, GetElem, GetElem2, GetField, GetGlobal, GetLocal, Gt, GtEq,
-  Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq,
-  MakeClosure, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry,
-  PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return, ShiftLeft,
-  ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
-  UShiftRight, UnaryOp, Void,
+  BinOp, BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, CallConstructor,
+  CallMethod, DefineField, Div, Dup, Eq, Exp, GetBoxed, GetElem, GetElem2,
+  GetField, GetField2, GetGlobal, GetLocal, GetThis, Gt, GtEq, Jump, JumpIfFalse,
+  JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg,
+  NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem, PutField,
+  PutGlobal, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
+  Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
-  type JsNum, type JsValue, ArraySlot, ClosureSlot, Finite, Infinity, JsBigInt,
-  JsBool, JsFunction, JsNull, JsNumber, JsObject, JsString, JsSymbol,
-  JsUndefined, JsUninitialized, NaN, NegInfinity, ObjectSlot,
+  type JsNum, type JsValue, ArrayObject, Finite, FunctionObject, Infinity,
+  JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined,
+  JsUninitialized, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 
 // ============================================================================
@@ -59,6 +59,10 @@ type SavedFrame {
     stack: List(JsValue),
     pc: Int,
     try_stack: List(TryFrame),
+    this_binding: JsValue,
+    /// For constructor calls: the newly created object to return if the
+    /// constructor doesn't explicitly return an object.
+    constructor_this: option.Option(JsValue),
   )
 }
 
@@ -81,6 +85,9 @@ type State {
     /// This is needed because a closure's func_index is relative to its
     /// defining parent, which may no longer be on the call stack when called.
     closure_templates: dict.Dict(Int, FuncTemplate),
+    /// The current `this` binding. Set by CallMethod/CallConstructor,
+    /// defaults to JsUndefined for regular calls.
+    this_binding: JsValue,
   )
 }
 
@@ -127,6 +134,7 @@ pub fn run_with_globals(
       finally_stack: [],
       builtins:,
       closure_templates: dict.new(),
+      this_binding: JsUndefined,
     )
   execute(state)
 }
@@ -319,8 +327,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
 
     TypeOf -> {
       case state.stack {
-        [value, ..rest] -> {
-          let type_str = typeof_value(value)
+        [val, ..rest] -> {
+          let type_str = typeof_value(val, state.heap)
           Ok(
             State(
               ..state,
@@ -335,11 +343,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     }
 
     TypeofGlobal(name) -> {
-      let value = case dict.get(state.globals, name) {
+      let val = case dict.get(state.globals, name) {
         Ok(v) -> v
         Error(_) -> JsUndefined
       }
-      let type_str = typeof_value(value)
+      let type_str = typeof_value(val, state.heap)
       Ok(
         State(
           ..state,
@@ -393,11 +401,35 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         // No caller — top-level return, we're done
         [] -> Error(#(Done, return_value, state.heap))
         // Pop call frame, restore caller, push return value onto caller's stack
-        [SavedFrame(func:, locals:, stack:, pc:, try_stack:), ..rest_frames] ->
+        [
+          SavedFrame(
+            func:,
+            locals:,
+            stack:,
+            pc:,
+            try_stack:,
+            this_binding: saved_this,
+            constructor_this:,
+          ),
+          ..rest_frames
+        ] -> {
+          // Constructor return semantics: if constructor_this is Some(obj),
+          // use the constructed object unless the function explicitly returned
+          // an object/function.
+          let effective_return = case constructor_this {
+            Some(constructed_obj) ->
+              case return_value {
+                // If constructor returns an object, use that instead
+                JsObject(_) -> return_value
+                // Otherwise use the constructed object
+                _ -> constructed_obj
+              }
+            None -> return_value
+          }
           Ok(
             State(
               ..state,
-              stack: [return_value, ..stack],
+              stack: [effective_return, ..stack],
               locals:,
               func:,
               code: func.bytecode,
@@ -405,8 +437,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               pc:,
               call_stack: rest_frames,
               try_stack:,
+              this_binding: saved_this,
             ),
           )
+        }
       }
     }
 
@@ -431,8 +465,34 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             })
           let #(heap, env_ref) =
             heap.alloc(state.heap, value.EnvSlot(captured_values))
+          // For non-arrow functions, pre-populate .prototype with a fresh object
+          // so that `Foo.prototype.bar = ...` and `new Foo()` work.
+          let #(heap, fn_properties) = case child_template.is_arrow {
+            True -> #(heap, dict.new())
+            False -> {
+              let #(h, proto_obj_ref) =
+                heap.alloc(
+                  heap,
+                  ObjectSlot(
+                    kind: OrdinaryObject,
+                    properties: dict.new(),
+                    elements: dict.new(),
+                    prototype: Some(state.builtins.object_prototype),
+                  ),
+                )
+              #(h, dict.from_list([#("prototype", JsObject(proto_obj_ref))]))
+            }
+          }
           let #(heap, closure_ref) =
-            heap.alloc(heap, ClosureSlot(func_index:, env: env_ref))
+            heap.alloc(
+              heap,
+              ObjectSlot(
+                kind: FunctionObject(func_index:, env: env_ref),
+                properties: fn_properties,
+                elements: dict.new(),
+                prototype: Some(state.builtins.function_prototype),
+              ),
+            )
           // Cache the template so it can be found when the closure is called
           // from a different scope (after the defining function has returned)
           let closure_templates =
@@ -441,7 +501,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             State(
               ..state,
               heap:,
-              stack: [JsFunction(closure_ref), ..state.stack],
+              stack: [JsObject(closure_ref), ..state.stack],
               pc: state.pc + 1,
               closure_templates:,
             ),
@@ -534,71 +594,29 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case pop_n(state.stack, arity) {
         Ok(#(args, after_args)) -> {
           case after_args {
-            [JsFunction(closure_ref), ..rest_stack] -> {
-              case heap.read(state.heap, closure_ref) {
-                Ok(ClosureSlot(func_index: _, env: env_ref)) -> {
-                  // Look up template from closure_templates cache (populated at MakeClosure time)
-                  case dict.get(state.closure_templates, closure_ref.id) {
-                    Ok(callee_template) -> {
-                      // Save caller frame (including caller's remaining stack)
-                      let saved =
-                        SavedFrame(
-                          func: state.func,
-                          locals: state.locals,
-                          stack: rest_stack,
-                          pc: state.pc + 1,
-                          try_stack: state.try_stack,
-                        )
-                      // Read captured values from env
-                      let env_values = case heap.read(state.heap, env_ref) {
-                        Ok(value.EnvSlot(slots)) -> slots
-                        _ -> []
-                      }
-                      let env_count = list.length(env_values)
-                      // Bind arguments to local slots (pad with undefined if too few)
-                      let padded_args = pad_args(args, callee_template.arity)
-                      // Locals layout: [captures..., params..., body_vars...]
-                      let remaining =
-                        callee_template.local_count
-                        - env_count
-                        - callee_template.arity
-                      let locals =
-                        list.flatten([
-                          env_values,
-                          padded_args,
-                          list.repeat(JsUndefined, remaining),
-                        ])
-                      Ok(
-                        State(
-                          ..state,
-                          stack: [],
-                          locals:,
-                          func: callee_template,
-                          code: callee_template.bytecode,
-                          constants: callee_template.constants,
-                          pc: 0,
-                          call_stack: [saved, ..state.call_stack],
-                          try_stack: [],
-                        ),
-                      )
-                    }
-                    Error(_) -> {
-                      let #(heap, err) =
-                        object.make_type_error(
-                          state.heap,
-                          state.builtins,
-                          "closure template not found",
-                        )
-                      Error(#(Thrown, err, heap))
-                    }
-                  }
+            [JsObject(obj_ref), ..rest_stack] -> {
+              case heap.read(state.heap, obj_ref) {
+                Ok(ObjectSlot(
+                  kind: FunctionObject(func_index: _, env: env_ref),
+                  ..,
+                )) -> {
+                  call_function(
+                    state,
+                    obj_ref,
+                    env_ref,
+                    args,
+                    rest_stack,
+                    // Regular Call: this = undefined (or preserve for arrows)
+                    JsUndefined,
+                    None,
+                  )
                 }
                 _ -> {
                   let #(heap, err) =
                     object.make_type_error(
                       state.heap,
                       state.builtins,
-                      "callee is not a function",
+                      "object is not a function",
                     )
                   Error(#(Thrown, err, heap))
                 }
@@ -609,7 +627,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 object.make_type_error(
                   state.heap,
                   state.builtins,
-                  typeof_value(non_func) <> " is not a function",
+                  typeof_value(non_func, state.heap) <> " is not a function",
                 )
               Error(#(Thrown, err, heap))
             }
@@ -744,7 +762,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         heap.alloc(
           state.heap,
           ObjectSlot(
+            kind: OrdinaryObject,
             properties: dict.new(),
+            elements: dict.new(),
             prototype: Some(state.builtins.object_prototype),
           ),
         )
@@ -795,14 +815,16 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     }
 
     PutField(name) -> {
+      // Consumes [value, obj] and pushes value back (assignment is an expression).
+      // Consistent with PutElem which also leaves the value on the stack.
       case state.stack {
         [value, JsObject(ref), ..rest] -> {
           let heap = object.set_property(state.heap, ref, name, value)
-          Ok(State(..state, heap:, stack: rest, pc: state.pc + 1))
+          Ok(State(..state, heap:, stack: [value, ..rest], pc: state.pc + 1))
         }
-        [_, _, ..rest] -> {
-          // PutField on non-object: silently ignore (JS sloppy mode behavior)
-          Ok(State(..state, stack: rest, pc: state.pc + 1))
+        [value, _, ..rest] -> {
+          // PutField on non-object: silently ignore, still return value
+          Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
         }
         _ ->
           Error(#(VmError(StackUnderflow("PutField")), JsUndefined, state.heap))
@@ -840,7 +862,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           let #(heap, ref) =
             heap.alloc(
               state.heap,
-              ArraySlot(elements: elements_dict, length: count),
+              ObjectSlot(
+                kind: ArrayObject(count),
+                properties: dict.new(),
+                elements: elements_dict,
+                prototype: Some(state.builtins.array_prototype),
+              ),
             )
           Ok(
             State(
@@ -918,6 +945,196 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       }
     }
 
+    // -- this / method calls / constructors --
+    GetThis ->
+      Ok(
+        State(
+          ..state,
+          stack: [state.this_binding, ..state.stack],
+          pc: state.pc + 1,
+        ),
+      )
+
+    GetField2(name) -> {
+      // Like GetField but keeps the object on the stack for CallMethod.
+      // Stack: [obj, ..rest] → [prop_value, obj, ..rest]
+      case state.stack {
+        [JsNull, ..] -> {
+          let #(heap, err) =
+            object.make_type_error(
+              state.heap,
+              state.builtins,
+              "Cannot read properties of null (reading '" <> name <> "')",
+            )
+          Error(#(Thrown, err, heap))
+        }
+        [JsUndefined, ..] -> {
+          let #(heap, err) =
+            object.make_type_error(
+              state.heap,
+              state.builtins,
+              "Cannot read properties of undefined (reading '" <> name <> "')",
+            )
+          Error(#(Thrown, err, heap))
+        }
+        [JsObject(ref) as obj, ..rest] -> {
+          let val = case object.get_property(state.heap, ref, name) {
+            Ok(v) -> v
+            Error(_) -> JsUndefined
+          }
+          Ok(State(..state, stack: [val, obj, ..rest], pc: state.pc + 1))
+        }
+        [other, ..rest] -> {
+          // Non-object: property is undefined, keep object on stack
+          Ok(
+            State(
+              ..state,
+              stack: [JsUndefined, other, ..rest],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        [] ->
+          Error(#(VmError(StackUnderflow("GetField2")), JsUndefined, state.heap))
+      }
+    }
+
+    CallMethod(_name, arity) -> {
+      // Stack: [arg_n, ..., arg_1, method, receiver, ...rest]
+      // Pop arity args, then method, then receiver
+      case pop_n(state.stack, arity) {
+        Ok(#(args, after_args)) -> {
+          case after_args {
+            [JsObject(method_ref), receiver, ..rest_stack] -> {
+              case heap.read(state.heap, method_ref) {
+                Ok(ObjectSlot(
+                  kind: FunctionObject(func_index: _, env: env_ref),
+                  ..,
+                )) ->
+                  call_function(
+                    state,
+                    method_ref,
+                    env_ref,
+                    args,
+                    rest_stack,
+                    // Method call: this = receiver
+                    receiver,
+                    None,
+                  )
+                _ -> {
+                  let #(heap, err) =
+                    object.make_type_error(
+                      state.heap,
+                      state.builtins,
+                      "is not a function",
+                    )
+                  Error(#(Thrown, err, heap))
+                }
+              }
+            }
+            [non_func, _, ..] -> {
+              let #(heap, err) =
+                object.make_type_error(
+                  state.heap,
+                  state.builtins,
+                  typeof_value(non_func, state.heap) <> " is not a function",
+                )
+              Error(#(Thrown, err, heap))
+            }
+            _ ->
+              Error(#(
+                VmError(StackUnderflow("CallMethod")),
+                JsUndefined,
+                state.heap,
+              ))
+          }
+        }
+        Error(_) ->
+          Error(#(
+            VmError(StackUnderflow("CallMethod: not enough args")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    CallConstructor(arity) -> {
+      // Stack: [arg_n, ..., arg_1, constructor, ...rest]
+      case pop_n(state.stack, arity) {
+        Ok(#(args, after_args)) -> {
+          case after_args {
+            [JsObject(ctor_ref), ..rest_stack] -> {
+              case heap.read(state.heap, ctor_ref) {
+                Ok(ObjectSlot(
+                  kind: FunctionObject(func_index: _, env: env_ref),
+                  properties:,
+                  ..,
+                )) -> {
+                  // Read the constructor's .prototype property for the new object's __proto__
+                  let proto = case dict.get(properties, "prototype") {
+                    Ok(JsObject(proto_ref)) -> Some(proto_ref)
+                    _ -> Some(state.builtins.object_prototype)
+                  }
+                  // Create the new object (the `this` for the constructor)
+                  let #(heap, new_obj_ref) =
+                    heap.alloc(
+                      state.heap,
+                      ObjectSlot(
+                        kind: OrdinaryObject,
+                        properties: dict.new(),
+                        elements: dict.new(),
+                        prototype: proto,
+                      ),
+                    )
+                  let new_obj = JsObject(new_obj_ref)
+                  call_function(
+                    State(..state, heap:),
+                    ctor_ref,
+                    env_ref,
+                    args,
+                    rest_stack,
+                    // Constructor: this = new object
+                    new_obj,
+                    Some(new_obj),
+                  )
+                }
+                _ -> {
+                  let #(heap, err) =
+                    object.make_type_error(
+                      state.heap,
+                      state.builtins,
+                      "is not a constructor",
+                    )
+                  Error(#(Thrown, err, heap))
+                }
+              }
+            }
+            [non_func, ..] -> {
+              let #(heap, err) =
+                object.make_type_error(
+                  state.heap,
+                  state.builtins,
+                  typeof_value(non_func, state.heap) <> " is not a constructor",
+                )
+              Error(#(Thrown, err, heap))
+            }
+            _ ->
+              Error(#(
+                VmError(StackUnderflow("CallConstructor")),
+                JsUndefined,
+                state.heap,
+              ))
+          }
+        }
+        Error(_) ->
+          Error(#(
+            VmError(StackUnderflow("CallConstructor: not enough args")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
     _ ->
       Error(#(
         VmError(Unimplemented("opcode: " <> string.inspect(op))),
@@ -930,6 +1147,78 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
 // ============================================================================
 // Call helpers
 // ============================================================================
+
+/// Shared logic for Call, CallMethod, and CallConstructor.
+/// Looks up the callee template, saves the caller frame, sets up locals,
+/// and transitions to the callee's code.
+fn call_function(
+  state: State,
+  callee_ref: value.Ref,
+  env_ref: value.Ref,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  this_val: JsValue,
+  constructor_this: option.Option(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case dict.get(state.closure_templates, callee_ref.id) {
+    Ok(callee_template) -> {
+      // Save caller frame
+      let saved =
+        SavedFrame(
+          func: state.func,
+          locals: state.locals,
+          stack: rest_stack,
+          pc: state.pc + 1,
+          try_stack: state.try_stack,
+          this_binding: state.this_binding,
+          constructor_this:,
+        )
+      // Read captured values from env
+      let env_values = case heap.read(state.heap, env_ref) {
+        Ok(value.EnvSlot(slots)) -> slots
+        _ -> []
+      }
+      let env_count = list.length(env_values)
+      let padded_args = pad_args(args, callee_template.arity)
+      let remaining =
+        callee_template.local_count - env_count - callee_template.arity
+      let locals =
+        list.flatten([
+          env_values,
+          padded_args,
+          list.repeat(JsUndefined, remaining),
+        ])
+      // Arrow functions inherit this from their enclosing scope
+      let new_this = case callee_template.is_arrow {
+        True -> state.this_binding
+        False -> this_val
+      }
+      Ok(
+        State(
+          ..state,
+          stack: [],
+          locals:,
+          func: callee_template,
+          code: callee_template.bytecode,
+          constants: callee_template.constants,
+          pc: 0,
+          call_stack: [saved, ..state.call_stack],
+          try_stack: [],
+          this_binding: new_this,
+        ),
+      )
+    }
+    Error(_) -> {
+      let #(heap, err) =
+        object.make_type_error(
+          state.heap,
+          state.builtins,
+          "closure template not found",
+        )
+      Error(#(Thrown, err, heap))
+    }
+  }
+}
 
 /// Pop n items from stack. Returns #(popped_items_in_order, remaining_stack).
 fn pop_n(
@@ -967,38 +1256,49 @@ fn pad_args(args: List(JsValue), arity: Int) -> List(JsValue) {
 // Computed property access helpers
 // ============================================================================
 
-/// Read a property from an object/array using a JsValue key.
-/// For arrays: convert numeric keys to int indices.
-/// For objects: convert key to string and use get_property.
+/// Read a property from a unified object using a JsValue key.
+/// Dispatches on ExoticKind: arrays use elements dict, others use properties.
 fn get_elem_value(heap: Heap, ref: value.Ref, key: JsValue) -> JsValue {
   case heap.read(heap, ref) {
-    Ok(ArraySlot(elements:, length:)) -> {
-      case to_array_index(key) {
-        Ok(idx) ->
-          case dict.get(elements, idx) {
+    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) ->
+      case kind {
+        ArrayObject(length:) ->
+          case to_array_index(key) {
+            Ok(idx) ->
+              case dict.get(elements, idx) {
+                Ok(val) -> val
+                Error(_) -> JsUndefined
+              }
+            Error(_) ->
+              // Non-numeric key on array — check "length", then properties, then prototype
+              case key {
+                JsString("length") -> JsNumber(Finite(int.to_float(length)))
+                _ -> {
+                  let key_str = to_js_string(key)
+                  case dict.get(properties, key_str) {
+                    Ok(val) -> val
+                    Error(_) ->
+                      case prototype {
+                        Some(proto_ref) -> get_elem_value(heap, proto_ref, key)
+                        None -> JsUndefined
+                      }
+                  }
+                }
+              }
+          }
+        OrdinaryObject | FunctionObject(..) -> {
+          let key_str = to_js_string(key)
+          case object.get_property(heap, ref, key_str) {
             Ok(val) -> val
             Error(_) -> JsUndefined
           }
-        Error(_) ->
-          // Non-numeric key on array — check "length"
-          case key {
-            JsString("length") -> JsNumber(Finite(int.to_float(length)))
-            _ -> JsUndefined
-          }
+        }
       }
-    }
-    Ok(ObjectSlot(..)) -> {
-      let key_str = to_js_string(key)
-      case object.get_property(heap, ref, key_str) {
-        Ok(val) -> val
-        Error(_) -> JsUndefined
-      }
-    }
     _ -> JsUndefined
   }
 }
 
-/// Write a property to an object/array using a JsValue key.
+/// Write a property to a unified object using a JsValue key.
 fn put_elem_value(
   heap: Heap,
   ref: value.Ref,
@@ -1006,27 +1306,46 @@ fn put_elem_value(
   val: JsValue,
 ) -> Heap {
   case heap.read(heap, ref) {
-    Ok(ArraySlot(elements:, length:)) -> {
-      case to_array_index(key) {
-        Ok(idx) -> {
-          let new_elements = dict.insert(elements, idx, val)
-          let new_length = case idx >= length {
-            True -> idx + 1
-            False -> length
+    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) ->
+      case kind {
+        ArrayObject(length:) ->
+          case to_array_index(key) {
+            Ok(idx) -> {
+              let new_elements = dict.insert(elements, idx, val)
+              let new_length = case idx >= length {
+                True -> idx + 1
+                False -> length
+              }
+              heap.write(
+                heap,
+                ref,
+                ObjectSlot(
+                  kind: ArrayObject(new_length),
+                  properties:,
+                  elements: new_elements,
+                  prototype:,
+                ),
+              )
+            }
+            Error(_) -> {
+              let key_str = to_js_string(key)
+              heap.write(
+                heap,
+                ref,
+                ObjectSlot(
+                  kind:,
+                  properties: dict.insert(properties, key_str, val),
+                  elements:,
+                  prototype:,
+                ),
+              )
+            }
           }
-          heap.write(
-            heap,
-            ref,
-            ArraySlot(elements: new_elements, length: new_length),
-          )
+        OrdinaryObject | FunctionObject(..) -> {
+          let key_str = to_js_string(key)
+          object.set_property(heap, ref, key_str, val)
         }
-        Error(_) -> heap
       }
-    }
-    Ok(ObjectSlot(..)) -> {
-      let key_str = to_js_string(key)
-      object.set_property(heap, ref, key_str, val)
-    }
     _ -> heap
   }
 }
@@ -1054,8 +1373,9 @@ fn to_array_index(key: JsValue) -> Result(Int, Nil) {
 // JS type coercion and operators
 // ============================================================================
 
-fn typeof_value(value: JsValue) -> String {
-  case value {
+/// JS typeof — needs heap access to distinguish "function" from "object".
+fn typeof_value(val: JsValue, heap: Heap) -> String {
+  case val {
     JsUndefined | JsUninitialized -> "undefined"
     JsNull -> "object"
     JsBool(_) -> "boolean"
@@ -1063,14 +1383,17 @@ fn typeof_value(value: JsValue) -> String {
     JsString(_) -> "string"
     JsBigInt(_) -> "bigint"
     JsSymbol(_) -> "symbol"
-    JsFunction(_) -> "function"
-    JsObject(_) -> "object"
+    JsObject(ref) ->
+      case heap.read(heap, ref) {
+        Ok(ObjectSlot(kind: FunctionObject(..), ..)) -> "function"
+        _ -> "object"
+      }
   }
 }
 
 /// JS ToBoolean: https://tc39.es/ecma262/#sec-toboolean
-fn is_truthy(value: JsValue) -> Bool {
-  case value {
+fn is_truthy(val: JsValue) -> Bool {
+  case val {
     JsUndefined | JsNull | JsUninitialized -> False
     JsBool(b) -> b
     JsNumber(NaN) -> False
@@ -1078,8 +1401,8 @@ fn is_truthy(value: JsValue) -> Bool {
     JsNumber(Infinity) | JsNumber(NegInfinity) -> True
     JsString(s) -> s != ""
     JsBigInt(value.BigInt(n)) -> n != 0
-    // Objects, functions, symbols are always truthy
-    JsObject(_) | JsFunction(_) | JsSymbol(_) -> True
+    // Objects (including functions and arrays) and symbols are always truthy
+    JsObject(_) | JsSymbol(_) -> True
   }
 }
 
@@ -1306,8 +1629,8 @@ fn bitwise_binop(
 }
 
 /// JS ToNumber: https://tc39.es/ecma262/#sec-tonumber
-fn to_number(value: JsValue) -> Result(JsNum, String) {
-  case value {
+fn to_number(val: JsValue) -> Result(JsNum, String) {
+  case val {
     JsNumber(n) -> Ok(n)
     JsUndefined -> Ok(NaN)
     JsNull -> Ok(Finite(0.0))
@@ -1325,14 +1648,14 @@ fn to_number(value: JsValue) -> Result(JsNum, String) {
       }
     JsBigInt(_) -> Error("Cannot convert BigInt to number")
     JsSymbol(_) -> Error("Cannot convert Symbol to number")
-    JsObject(_) | JsFunction(_) -> Ok(NaN)
+    JsObject(_) -> Ok(NaN)
     JsUninitialized -> Error("Cannot access before initialization")
   }
 }
 
 /// JS ToString (simplified): https://tc39.es/ecma262/#sec-tostring
-fn to_js_string(value: JsValue) -> String {
-  case value {
+fn to_js_string(val: JsValue) -> String {
+  case val {
     JsUndefined -> "undefined"
     JsNull -> "null"
     JsBool(True) -> "true"
@@ -1345,7 +1668,6 @@ fn to_js_string(value: JsValue) -> String {
     JsBigInt(value.BigInt(n)) -> int.to_string(n)
     JsSymbol(_) -> "Symbol()"
     JsObject(_) -> "[object Object]"
-    JsFunction(_) -> "function() {}"
     JsUninitialized -> "undefined"
   }
 }
@@ -1361,9 +1683,8 @@ fn strict_equal(left: JsValue, right: JsValue) -> Bool {
     JsNumber(a), JsNumber(b) -> a == b
     JsString(a), JsString(b) -> a == b
     JsBigInt(a), JsBigInt(b) -> a == b
-    // Object identity (same Ref)
+    // Object identity (same Ref) — covers functions and arrays too
     JsObject(a), JsObject(b) -> a == b
-    JsFunction(a), JsFunction(b) -> a == b
     JsSymbol(a), JsSymbol(b) -> a == b
     _, _ -> False
   }
@@ -1382,7 +1703,6 @@ fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
     | JsBool(_), JsBool(_)
     | JsString(_), JsString(_)
     | JsObject(_), JsObject(_)
-    | JsFunction(_), JsFunction(_)
     | JsSymbol(_), JsSymbol(_)
     | JsBigInt(_), JsBigInt(_)
     -> strict_equal(left, right)

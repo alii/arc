@@ -1,70 +1,106 @@
 import gleam/dict
 import gleam/int
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import lumen/vm/builtins.{type Builtins}
 import lumen/vm/heap.{type Heap}
 import lumen/vm/value.{
-  type JsValue, type Ref, ArraySlot, Finite, JsNumber, JsObject, JsString,
-  ObjectSlot,
+  type JsValue, type Ref, ArrayObject, Finite, FunctionObject, JsNumber,
+  JsObject, JsString, ObjectSlot, OrdinaryObject,
 }
 
 /// Walk the prototype chain to find a property by key.
 /// Checks own properties first, then follows the prototype link.
-/// For ArraySlot: handles numeric index lookup and "length".
+/// For ArrayObject: handles numeric index lookup and "length".
 /// Returns Error(Nil) if the property is not found anywhere in the chain.
 pub fn get_property(heap: Heap, ref: Ref, key: String) -> Result(JsValue, Nil) {
   case heap.read(heap, ref) {
-    Ok(ObjectSlot(properties:, prototype:)) ->
-      case dict.get(properties, key) {
-        Ok(val) -> Ok(val)
-        Error(_) ->
-          case prototype {
-            Some(proto_ref) -> get_property(heap, proto_ref, key)
-            None -> Error(Nil)
-          }
-      }
-    Ok(ArraySlot(elements:, length:)) ->
-      case key {
-        "length" -> Ok(JsNumber(Finite(int.to_float(length))))
-        _ ->
-          case int.parse(key) {
-            Ok(idx) ->
-              case dict.get(elements, idx) {
-                Ok(val) -> Ok(val)
-                Error(_) -> Ok(value.JsUndefined)
+    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) ->
+      case kind {
+        ArrayObject(length:) ->
+          // Array: check numeric index in elements, then "length", then properties, then prototype
+          case key {
+            "length" -> Ok(JsNumber(Finite(int.to_float(length))))
+            _ ->
+              case int.parse(key) {
+                Ok(idx) ->
+                  case dict.get(elements, idx) {
+                    Ok(val) -> Ok(val)
+                    Error(_) -> Ok(value.JsUndefined)
+                  }
+                Error(_) ->
+                  case dict.get(properties, key) {
+                    Ok(val) -> Ok(val)
+                    Error(_) -> walk_prototype(heap, prototype, key)
+                  }
               }
-            Error(_) -> Error(Nil)
+          }
+        OrdinaryObject | FunctionObject(..) ->
+          // Ordinary object / function: check properties, then prototype chain
+          case dict.get(properties, key) {
+            Ok(val) -> Ok(val)
+            Error(_) -> walk_prototype(heap, prototype, key)
           }
       }
-    // Not an ObjectSlot/ArraySlot or dangling ref
+    // Not an ObjectSlot or dangling ref
     _ -> Error(Nil)
   }
 }
 
+/// Walk the prototype chain for a property.
+fn walk_prototype(
+  heap: Heap,
+  prototype: Option(Ref),
+  key: String,
+) -> Result(JsValue, Nil) {
+  case prototype {
+    Some(proto_ref) -> get_property(heap, proto_ref, key)
+    None -> Error(Nil)
+  }
+}
+
 /// Set an own property on an object (does NOT walk the prototype chain).
-/// For ArraySlot: handles numeric index writes and length updates.
-/// Returns the updated heap. No-op if ref doesn't point to an ObjectSlot/ArraySlot.
+/// For ArrayObject: numeric keys go to elements (updating length), string keys go to properties.
+/// Returns the updated heap. No-op if ref doesn't point to an ObjectSlot.
 pub fn set_property(heap: Heap, ref: Ref, key: String, val: JsValue) -> Heap {
   case heap.read(heap, ref) {
-    Ok(ObjectSlot(properties:, prototype:)) -> {
-      let new_props = dict.insert(properties, key, val)
-      heap.write(heap, ref, ObjectSlot(properties: new_props, prototype:))
-    }
-    Ok(ArraySlot(elements:, length:)) ->
-      case int.parse(key) {
-        Ok(idx) -> {
-          let new_elements = dict.insert(elements, idx, val)
-          let new_length = case idx >= length {
-            True -> idx + 1
-            False -> length
+    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) ->
+      case kind {
+        ArrayObject(length:) ->
+          case int.parse(key) {
+            Ok(idx) -> {
+              let new_elements = dict.insert(elements, idx, val)
+              let new_length = case idx >= length {
+                True -> idx + 1
+                False -> length
+              }
+              heap.write(
+                heap,
+                ref,
+                ObjectSlot(
+                  kind: ArrayObject(new_length),
+                  properties:,
+                  elements: new_elements,
+                  prototype:,
+                ),
+              )
+            }
+            Error(_) -> {
+              let new_props = dict.insert(properties, key, val)
+              heap.write(
+                heap,
+                ref,
+                ObjectSlot(kind:, properties: new_props, elements:, prototype:),
+              )
+            }
           }
+        OrdinaryObject | FunctionObject(..) -> {
+          let new_props = dict.insert(properties, key, val)
           heap.write(
             heap,
             ref,
-            ArraySlot(elements: new_elements, length: new_length),
+            ObjectSlot(kind:, properties: new_props, elements:, prototype:),
           )
         }
-        Error(_) -> heap
       }
     _ -> heap
   }
@@ -112,8 +148,10 @@ fn make_error(h: Heap, proto: Ref, message: String) -> #(Heap, JsValue) {
     heap.alloc(
       h,
       ObjectSlot(
-        prototype: Some(proto),
+        kind: OrdinaryObject,
         properties: dict.from_list([#("message", JsString(message))]),
+        elements: dict.new(),
+        prototype: Some(proto),
       ),
     )
   #(h, JsObject(ref))

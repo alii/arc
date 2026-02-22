@@ -3,13 +3,23 @@ import gleam/option.{None}
 import gleam/set
 import lumen/vm/heap
 import lumen/vm/value.{
-  ArraySlot, BigInt, BoxSlot, ClosureSlot, EnvSlot, Finite, JsBigInt, JsFunction,
-  JsNull, JsNumber, JsObject, JsString, JsSymbol, ObjectSlot, Ref, SymbolId,
+  ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FunctionObject, JsBigInt,
+  JsNull, JsNumber, JsObject, JsString, JsSymbol, ObjectSlot, OrdinaryObject,
+  Ref, SymbolId,
+}
+
+fn ordinary(props) {
+  ObjectSlot(
+    kind: OrdinaryObject,
+    properties: props,
+    elements: dict.new(),
+    prototype: None,
+  )
 }
 
 pub fn alloc_and_read_roundtrip_test() {
   let h = heap.new()
-  let slot = ObjectSlot(properties: dict.new(), prototype: None)
+  let slot = ordinary(dict.new())
   let #(h, ref) = heap.alloc(h, slot)
   let assert Ok(got) = heap.read(h, ref)
   assert got == slot
@@ -17,10 +27,8 @@ pub fn alloc_and_read_roundtrip_test() {
 
 pub fn multiple_allocs_distinct_refs_test() {
   let h = heap.new()
-  let #(h, r1) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
-  let #(_h, r2) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, r1) = heap.alloc(h, ordinary(dict.new()))
+  let #(_h, r2) = heap.alloc(h, ordinary(dict.new()))
   assert r1 != r2
 }
 
@@ -31,13 +39,8 @@ pub fn read_nonexistent_test() {
 
 pub fn write_and_read_test() {
   let h = heap.new()
-  let #(h, ref) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
-  let new_slot =
-    ObjectSlot(
-      prototype: None,
-      properties: dict.from_list([#("x", JsNumber(Finite(42.0)))]),
-    )
+  let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
+  let new_slot = ordinary(dict.from_list([#("x", JsNumber(Finite(42.0)))]))
   let h = heap.write(h, ref, new_slot)
   let assert Ok(got) = heap.read(h, ref)
   assert got == new_slot
@@ -45,7 +48,7 @@ pub fn write_and_read_test() {
 
 pub fn write_nonexistent_noop_test() {
   let h = heap.new()
-  let slot = ObjectSlot(properties: dict.new(), prototype: None)
+  let slot = ordinary(dict.new())
   // Writing to a ref that doesn't exist should be a no-op
   let h2 = heap.write(h, Ref(999), slot)
   assert heap.size(h2) == 0
@@ -53,8 +56,7 @@ pub fn write_nonexistent_noop_test() {
 
 pub fn gc_rooted_survives_test() {
   let h = heap.new()
-  let #(h, ref) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
   let h = heap.root(h, ref)
   let h = heap.collect(h)
   assert heap.size(h) == 1
@@ -63,8 +65,7 @@ pub fn gc_rooted_survives_test() {
 
 pub fn gc_unreachable_collected_test() {
   let h = heap.new()
-  let #(h, ref) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
   // Not rooted — should be collected
   let h = heap.collect(h)
   assert heap.size(h) == 0
@@ -74,16 +75,9 @@ pub fn gc_unreachable_collected_test() {
 pub fn gc_transitive_reachability_test() {
   // A -> B, root A => both survive
   let h = heap.new()
-  let #(h, ref_b) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref_b) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_a) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([#("child", JsObject(ref_b))]),
-      ),
-    )
+    heap.alloc(h, ordinary(dict.from_list([#("child", JsObject(ref_b))])))
   let h = heap.root(h, ref_a)
   let h = heap.collect(h)
   assert heap.size(h) == 2
@@ -94,24 +88,11 @@ pub fn gc_transitive_reachability_test() {
 pub fn gc_deep_chain_test() {
   // A -> B -> C, root A => all survive
   let h = heap.new()
-  let #(h, ref_c) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref_c) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_b) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([#("next", JsObject(ref_c))]),
-      ),
-    )
+    heap.alloc(h, ordinary(dict.from_list([#("next", JsObject(ref_c))])))
   let #(h, ref_a) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([#("next", JsObject(ref_b))]),
-      ),
-    )
+    heap.alloc(h, ordinary(dict.from_list([#("next", JsObject(ref_b))])))
   let h = heap.root(h, ref_a)
   let h = heap.collect(h)
   assert heap.size(h) == 3
@@ -124,25 +105,11 @@ pub fn gc_unrooted_cycle_collected_test() {
   // A -> B -> A (cycle), neither rooted => both collected
   let h = heap.new()
   // Alloc with placeholder, then fix up
-  let #(h, ref_a) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref_a) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_b) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([#("back", JsObject(ref_a))]),
-      ),
-    )
+    heap.alloc(h, ordinary(dict.from_list([#("back", JsObject(ref_a))])))
   let h =
-    heap.write(
-      h,
-      ref_a,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([#("fwd", JsObject(ref_b))]),
-      ),
-    )
+    heap.write(h, ref_a, ordinary(dict.from_list([#("fwd", JsObject(ref_b))])))
   let h = heap.collect(h)
   assert heap.size(h) == 0
 }
@@ -150,25 +117,11 @@ pub fn gc_unrooted_cycle_collected_test() {
 pub fn gc_rooted_cycle_survives_test() {
   // A -> B -> A (cycle), root A => both survive
   let h = heap.new()
-  let #(h, ref_a) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref_a) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_b) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([#("back", JsObject(ref_a))]),
-      ),
-    )
+    heap.alloc(h, ordinary(dict.from_list([#("back", JsObject(ref_a))])))
   let h =
-    heap.write(
-      h,
-      ref_a,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([#("fwd", JsObject(ref_b))]),
-      ),
-    )
+    heap.write(h, ref_a, ordinary(dict.from_list([#("fwd", JsObject(ref_b))])))
   let h = heap.root(h, ref_a)
   let h = heap.collect(h)
   assert heap.size(h) == 2
@@ -178,10 +131,8 @@ pub fn gc_rooted_cycle_survives_test() {
 
 pub fn free_list_reuse_after_gc_test() {
   let h = heap.new()
-  let #(h, _r1) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
-  let #(h, r2) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, _r1) = heap.alloc(h, ordinary(dict.new()))
+  let #(h, r2) = heap.alloc(h, ordinary(dict.new()))
   let h = heap.root(h, r2)
   // Collect — r1 should be freed and its index recycled
   let h = heap.collect(h)
@@ -189,8 +140,7 @@ pub fn free_list_reuse_after_gc_test() {
   let stats = heap.stats(h)
   assert stats.free == 1
   // Next alloc should reuse the freed index
-  let #(h, r3) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, r3) = heap.alloc(h, ordinary(dict.new()))
   assert r3 != r2
   assert heap.size(h) == 2
   let new_stats = heap.stats(h)
@@ -199,8 +149,7 @@ pub fn free_list_reuse_after_gc_test() {
 
 pub fn unroot_then_collect_test() {
   let h = heap.new()
-  let #(h, ref) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
   let h = heap.root(h, ref)
   let h = heap.collect(h)
   assert heap.size(h) == 1
@@ -214,12 +163,8 @@ pub fn multiple_independent_heaps_test() {
   // Two heaps are fully independent — mutating one doesn't affect the other
   let h1 = heap.new()
   let h2 = heap.new()
-  let slot1 = ObjectSlot(properties: dict.new(), prototype: None)
-  let slot2 =
-    ObjectSlot(
-      prototype: None,
-      properties: dict.from_list([#("a", JsString("hello"))]),
-    )
+  let slot1 = ordinary(dict.new())
+  let slot2 = ordinary(dict.from_list([#("a", JsString("hello"))]))
   let #(h1, r1) = heap.alloc(h1, slot1)
   let #(h2, _r2) = heap.alloc(h2, slot2)
   // h1 has slot1 at index 0, h2 has slot2 at index 0
@@ -235,20 +180,21 @@ pub fn multiple_independent_heaps_test() {
 }
 
 pub fn gc_traces_through_array_slot_test() {
-  // ArraySlot containing a ref — should be traced
+  // ArrayObject containing a ref in elements — should be traced
   let h = heap.new()
-  let #(h, ref_inner) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref_inner) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_arr) =
     heap.alloc(
       h,
-      ArraySlot(
+      ObjectSlot(
+        kind: ArrayObject(3),
+        properties: dict.new(),
         elements: dict.from_list([
           #(0, JsNumber(Finite(1.0))),
           #(1, JsObject(ref_inner)),
           #(2, JsNull),
         ]),
-        length: 3,
+        prototype: None,
       ),
     )
   let h = heap.root(h, ref_arr)
@@ -258,13 +204,20 @@ pub fn gc_traces_through_array_slot_test() {
 }
 
 pub fn gc_traces_through_closure_slot_test() {
-  // ClosureSlot -> EnvSlot -> captured object — all should be traced
+  // FunctionObject -> EnvSlot -> captured object — all should be traced
   let h = heap.new()
-  let #(h, ref_captured) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref_captured) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: [JsObject(ref_captured)]))
   let #(h, ref_closure) =
-    heap.alloc(h, ClosureSlot(func_index: 0, env: ref_env))
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: FunctionObject(func_index: 0, env: ref_env),
+        properties: dict.new(),
+        elements: dict.new(),
+        prototype: None,
+      ),
+    )
   let h = heap.root(h, ref_closure)
   let h = heap.collect(h)
   assert heap.size(h) == 3
@@ -275,8 +228,7 @@ pub fn gc_traces_through_closure_slot_test() {
 pub fn collect_with_roots_test() {
   // Object not in persistent roots but passed as temporary root
   let h = heap.new()
-  let #(h, ref) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
   let h = heap.collect_with_roots(h, set.from_list([ref.id]))
   assert heap.size(h) == 1
   let assert Ok(_) = heap.read(h, ref)
@@ -288,28 +240,31 @@ pub fn collect_with_roots_test() {
 pub fn mixed_live_dead_partition_test() {
   // 5 objects: root 2 of them (plus 1 transitive), 2 should die
   let h = heap.new()
-  let #(h, dead1) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, dead1) = heap.alloc(h, ordinary(dict.new()))
   let #(h, dead2) =
     heap.alloc(
       h,
-      ArraySlot(
+      ObjectSlot(
+        kind: ArrayObject(1),
+        properties: dict.new(),
         elements: dict.from_list([#(0, JsNumber(Finite(1.0)))]),
-        length: 1,
+        prototype: None,
       ),
     )
-  let #(h, live_leaf) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, live_leaf) = heap.alloc(h, ordinary(dict.new()))
   let #(h, live_parent) =
+    heap.alloc(h, ordinary(dict.from_list([#("child", JsObject(live_leaf))])))
+  let #(h, live_env) = heap.alloc(h, EnvSlot(slots: [JsString("hi")]))
+  let #(h, live_solo) =
     heap.alloc(
       h,
       ObjectSlot(
+        kind: FunctionObject(func_index: 1, env: live_env),
+        properties: dict.new(),
+        elements: dict.new(),
         prototype: None,
-        properties: dict.from_list([#("child", JsObject(live_leaf))]),
       ),
     )
-  let #(h, live_env) = heap.alloc(h, EnvSlot(slots: [JsString("hi")]))
-  let #(h, live_solo) = heap.alloc(h, ClosureSlot(func_index: 1, env: live_env))
   let h = heap.root(h, live_parent)
   let h = heap.root(h, live_solo)
   let h = heap.collect(h)
@@ -330,10 +285,8 @@ pub fn stats_test() {
   assert s.next == 0
   assert s.roots == 0
 
-  let #(h, r1) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
-  let #(h, _r2) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, r1) = heap.alloc(h, ordinary(dict.new()))
+  let #(h, _r2) = heap.alloc(h, ordinary(dict.new()))
   let h = heap.root(h, r1)
   let s = heap.stats(h)
   assert s.live == 2
@@ -342,19 +295,24 @@ pub fn stats_test() {
   assert s.roots == 1
 }
 
-pub fn gc_traces_through_jsfunction_test() {
-  // JsFunction(Ref) should be traced just like JsObject(Ref)
+pub fn gc_traces_through_function_object_test() {
+  // JsObject(Ref) pointing to a FunctionObject should be traced through properties
   let h = heap.new()
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: []))
   let #(h, ref_closure) =
-    heap.alloc(h, ClosureSlot(func_index: 0, env: ref_env))
-  let #(h, ref_obj) =
     heap.alloc(
       h,
       ObjectSlot(
+        kind: FunctionObject(func_index: 0, env: ref_env),
+        properties: dict.new(),
+        elements: dict.new(),
         prototype: None,
-        properties: dict.from_list([#("callback", JsFunction(ref_closure))]),
       ),
+    )
+  let #(h, ref_obj) =
+    heap.alloc(
+      h,
+      ordinary(dict.from_list([#("callback", JsObject(ref_closure))])),
     )
   let h = heap.root(h, ref_obj)
   let h = heap.collect(h)
@@ -367,8 +325,26 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
   // Two closures share the same EnvSlot — rooting either keeps the env alive
   let h = heap.new()
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: [JsNumber(Finite(0.0))]))
-  let #(h, ref_inc) = heap.alloc(h, ClosureSlot(func_index: 0, env: ref_env))
-  let #(h, ref_get) = heap.alloc(h, ClosureSlot(func_index: 1, env: ref_env))
+  let #(h, ref_inc) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: FunctionObject(func_index: 0, env: ref_env),
+        properties: dict.new(),
+        elements: dict.new(),
+        prototype: None,
+      ),
+    )
+  let #(h, ref_get) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: FunctionObject(func_index: 1, env: ref_env),
+        properties: dict.new(),
+        elements: dict.new(),
+        prototype: None,
+      ),
+    )
   // Root only ref_inc — env should still survive (reachable from ref_inc)
   let h = heap.root(h, ref_inc)
   let h = heap.collect(h)
@@ -382,12 +358,19 @@ pub fn gc_traces_through_box_slot_test() {
   // EnvSlot holds a ref to a BoxSlot (mutable capture) which holds a ref to an object.
   // Rooting the closure should keep: closure -> env -> box -> object all alive.
   let h = heap.new()
-  let #(h, ref_obj) =
-    heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
+  let #(h, ref_obj) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_box) = heap.alloc(h, BoxSlot(value: JsObject(ref_obj)))
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: [JsObject(ref_box)]))
   let #(h, ref_closure) =
-    heap.alloc(h, ClosureSlot(func_index: 0, env: ref_env))
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: FunctionObject(func_index: 0, env: ref_env),
+        properties: dict.new(),
+        elements: dict.new(),
+        prototype: None,
+      ),
+    )
   let h = heap.root(h, ref_closure)
   let h = heap.collect(h)
   assert heap.size(h) == 4
@@ -412,9 +395,8 @@ pub fn non_ref_values_dont_prevent_gc_test() {
   let #(h, _ref) =
     heap.alloc(
       h,
-      ObjectSlot(
-        prototype: None,
-        properties: dict.from_list([
+      ordinary(
+        dict.from_list([
           #("sym", JsSymbol(SymbolId(1))),
           #("big", JsBigInt(BigInt(999_999_999_999))),
           #("str", JsString("hello")),

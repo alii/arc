@@ -28,6 +28,10 @@ pub type JsNum {
 
 /// Stack values — the things that live on the VM stack or inside object properties.
 /// BEAM manages their lifecycle automatically, no GC involvement needed.
+///
+/// Everything heap-allocated is JsObject(Ref). The heap slot's `kind` tag
+/// distinguishes ordinary objects, arrays, and functions. `typeof` reads the
+/// heap to tell "function" from "object".
 pub type JsValue {
   JsUndefined
   JsNull
@@ -35,7 +39,6 @@ pub type JsValue {
   JsNumber(JsNum)
   JsString(String)
   JsObject(Ref)
-  JsFunction(Ref)
   JsSymbol(SymbolId)
   JsBigInt(BigInt)
   /// Internal sentinel for Temporal Dead Zone. Never exposed to JS code.
@@ -43,12 +46,29 @@ pub type JsValue {
   JsUninitialized
 }
 
+/// Distinguishes the kind of object stored in a unified ObjectSlot.
+pub type ExoticKind {
+  /// Plain JS object: `{}`, `new Object()`, error instances, prototypes, etc.
+  OrdinaryObject
+  /// JS array: `[]`, `new Array()`. `length` is tracked explicitly.
+  ArrayObject(length: Int)
+  /// JS function (closure). `func_index` identifies the bytecode template,
+  /// `env` points to the EnvSlot holding captured variables.
+  FunctionObject(func_index: Int, env: Ref)
+}
+
 /// What lives in a heap slot.
 pub type HeapSlot {
-  ObjectSlot(properties: Dict(String, JsValue), prototype: Option(Ref))
-  ArraySlot(elements: Dict(Int, JsValue), length: Int)
-  /// Closure: points to a bytecode function + a shared environment frame on the heap.
-  ClosureSlot(func_index: Int, env: Ref)
+  /// Unified object slot — covers ordinary objects, arrays, and functions.
+  /// - `properties`: string-keyed own properties (all object kinds)
+  /// - `elements`: integer-keyed elements (primarily for ArrayObject)
+  /// - `prototype`: link for prototype chain traversal
+  ObjectSlot(
+    kind: ExoticKind,
+    properties: Dict(String, JsValue),
+    elements: Dict(Int, JsValue),
+    prototype: Option(Ref),
+  )
   /// Flat environment frame. Multiple closures in the same scope reference
   /// the same EnvSlot, so mutations to captured variables are visible across them.
   /// Compiler flattens the scope chain — no parent pointer, all captures are direct.
@@ -60,10 +80,10 @@ pub type HeapSlot {
   BoxSlot(value: JsValue)
 }
 
-/// Extract refs from a single JsValue. JsObject and JsFunction carry heap refs.
+/// Extract refs from a single JsValue. Only JsObject carries heap refs now.
 pub fn refs_in_value(value: JsValue) -> List(Ref) {
   case value {
-    JsObject(ref) | JsFunction(ref) -> [ref]
+    JsObject(ref) -> [ref]
     JsUndefined
     | JsNull
     | JsBool(_)
@@ -78,18 +98,23 @@ pub fn refs_in_value(value: JsValue) -> List(Ref) {
 /// Extract all refs reachable from a heap slot by walking its JsValues.
 pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
   case slot {
-    ObjectSlot(properties:, prototype:) -> {
+    ObjectSlot(kind:, properties:, elements:, prototype:) -> {
       let prop_refs =
         dict.values(properties)
         |> list.flat_map(refs_in_value)
-      case prototype {
-        Some(ref) -> [ref, ..prop_refs]
-        None -> prop_refs
+      let elem_refs =
+        dict.values(elements)
+        |> list.flat_map(refs_in_value)
+      let proto_refs = case prototype {
+        Some(ref) -> [ref]
+        None -> []
       }
+      let kind_refs = case kind {
+        FunctionObject(env: env_ref, func_index: _) -> [env_ref]
+        OrdinaryObject | ArrayObject(_) -> []
+      }
+      list.flatten([prop_refs, elem_refs, proto_refs, kind_refs])
     }
-    ArraySlot(elements:, length: _) ->
-      dict.values(elements) |> list.flat_map(refs_in_value)
-    ClosureSlot(env:, func_index: _) -> [env]
     EnvSlot(slots:) -> list.flat_map(slots, refs_in_value)
     BoxSlot(value:) -> refs_in_value(value)
   }

@@ -678,12 +678,14 @@ pub fn put_and_get_field_test() {
   //  0: NewObject         -- push {}
   //  1: Dup               -- [obj, obj]
   //  2: PushConst(0)      -- [obj, obj, "hello"]
-  //  3: PutField("y")     -- pop "hello" and obj, set obj.y = "hello"
-  //  4: GetField("y")     -- pop obj (the Dup'd copy), push obj.y
+  //  3: PutField("y")     -- set obj.y = "hello", leaves "hello" on stack
+  //  4: Pop               -- discard the "hello" value
+  //  5: GetField("y")     -- pop obj (the Dup'd copy), push obj.y
   let assert Ok(JsString("hello")) =
-    run_simple([NewObject, Dup, PushConst(0), PutField("y"), GetField("y")], [
-      JsString("hello"),
-    ])
+    run_simple(
+      [NewObject, Dup, PushConst(0), PutField("y"), Pop, GetField("y")],
+      [JsString("hello")],
+    )
 }
 
 pub fn get_field_nonexistent_returns_undefined_test() {

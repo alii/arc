@@ -646,3 +646,107 @@ pub fn array_in_variable_test() {
 pub fn array_length_after_assignment_test() {
   assert_normal_number("var a = []; a[0] = 1; a[1] = 2; a.length", 2.0)
 }
+
+// ============================================================================
+// this / new / methods
+// ============================================================================
+
+pub fn new_basic_constructor_test() {
+  assert_normal_number(
+    "function Foo(x) { this.x = x; }
+     var o = new Foo(42);
+     o.x",
+    42.0,
+  )
+}
+
+pub fn function_prototype_exists_test() {
+  assert_normal(
+    "function Foo() {}
+     typeof Foo.prototype",
+    JsString("object"),
+  )
+}
+
+pub fn prototype_method_with_this_test() {
+  assert_normal_number(
+    "function Foo(x) { this.x = x; }
+     Foo.prototype.getX = function() { return this.x; };
+     var o = new Foo(5);
+     o.getX()",
+    5.0,
+  )
+}
+
+pub fn constructor_implicit_return_test() {
+  // Constructor returns undefined → new object used
+  assert_normal_number(
+    "function Foo(x) { this.x = x; }
+     var o = new Foo(7);
+     o.x",
+    7.0,
+  )
+}
+
+pub fn constructor_explicit_object_return_test() {
+  // Constructor returns an object → that object is used
+  assert_normal_number(
+    "function Foo() { this.a = 1; return { b: 99 }; }
+     var o = new Foo();
+     o.b",
+    99.0,
+  )
+}
+
+pub fn static_property_on_function_test() {
+  assert_normal_number(
+    "function Foo() {}
+     Foo.bar = 42;
+     Foo.bar",
+    42.0,
+  )
+}
+
+pub fn sta_js_pattern_test() {
+  // Full sta.js-style integration
+  assert_normal(
+    "function Test262Error(message) {
+       this.message = message || '';
+     }
+     Test262Error.prototype.toString = function() {
+       return 'Test262Error: ' + this.message;
+     };
+     Test262Error.thrower = function(message) {
+       throw new Test262Error(message);
+     };
+     var e = new Test262Error('hello');
+     e.toString()",
+    JsString("Test262Error: hello"),
+  )
+}
+
+pub fn prototype_chain_property_lookup_test() {
+  assert_normal_number(
+    "function Foo() {}
+     Foo.prototype.x = 10;
+     var o = new Foo();
+     o.x",
+    10.0,
+  )
+}
+
+pub fn this_undefined_in_plain_call_test() {
+  assert_normal(
+    "function f() { return this; }
+     f()",
+    JsUndefined,
+  )
+}
+
+pub fn method_call_binds_this_test() {
+  assert_normal_number(
+    "var obj = { x: 99, getX: function() { return this.x; } };
+     obj.getX()",
+    99.0,
+  )
+}

@@ -8,11 +8,12 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import lumen/ast
 import lumen/vm/opcode.{
-  type IrOp, IrArrayFrom, IrBinOp, IrDefineField, IrDup, IrGetElem, IrGetElem2,
-  IrGetField, IrGetThis, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue,
-  IrLabel, IrMakeClosure, IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry,
-  IrPutElem, IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar,
-  IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
+  type IrOp, IrArrayFrom, IrBinOp, IrCallConstructor, IrCallMethod,
+  IrDefineField, IrDup, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
+  IrGetThis, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrMakeClosure, IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem,
+  IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap,
+  IrThrow, IrTypeOf, IrUnaryOp,
 }
 import lumen/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -896,8 +897,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ) -> {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.map(emit_expr(e, right))
-      // Stack: [obj, val] — PutField expects [val, obj] so swap
-      let e = emit_ir(e, IrSwap)
+      // Stack: [val, obj, ...] — PutField pops both, leaves val
       emit_ir(e, IrPutField(prop))
     }
 
@@ -931,7 +931,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
     }
 
-    // Call expression
+    // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding
+    ast.CallExpression(
+      ast.MemberExpression(obj, ast.Identifier(method_name), False),
+      args,
+    ) -> {
+      use e <- result.try(emit_expr(e, obj))
+      let e = emit_ir(e, IrGetField2(method_name))
+      use e <- result.map(list.try_fold(args, e, emit_expr))
+      emit_ir(e, IrCallMethod(method_name, list.length(args)))
+    }
+    // Regular call expression
     ast.CallExpression(callee, args) -> {
       use e <- result.try(emit_expr(e, callee))
       use e <- result.map(list.try_fold(args, e, emit_expr))
@@ -1030,6 +1040,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // This expression
     ast.ThisExpression -> Ok(emit_ir(e, IrGetThis))
+
+    // New expression: new Foo(args)
+    ast.NewExpression(callee, args) -> {
+      use e <- result.try(emit_expr(e, callee))
+      use e <- result.map(list.try_fold(args, e, emit_expr))
+      emit_ir(e, IrCallConstructor(list.length(args)))
+    }
 
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
