@@ -3,12 +3,6 @@ name: test262 conformance
 on:
   push:
     branches: [master]
-  schedule:
-    # Run at midday UK time every day
-    # UK is UTC+0 in winter, UTC+1 in summer (BST)
-    # 12:00 BST = 11:00 UTC, 12:00 GMT = 12:00 UTC
-    # Use 12:00 UTC as a reasonable midday approximation
-    - cron: '0 12 * * *'
   workflow_dispatch: # Allow manual trigger
 
 permissions:
@@ -24,19 +18,17 @@ jobs:
           # Need full history to check for changes
           fetch-depth: 2
 
-      - name: Check for changes since last run
+      - name: Check for changes
         id: changes
         run: |
-          # On push events, always run. On schedule/dispatch, check for changes.
-          if [ "${{ github.event_name }}" = "push" ]; then
+          # On manual dispatch, always run. On push, check if source changed.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Push event, running test262"
           elif git diff --quiet HEAD~1 -- src/ test/ gleam.toml; then
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No source changes detected, skipping test262 run"
+            echo "No source changes, skipping"
           else
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Source changes detected, running test262"
           fi
 
       - uses: erlef/setup-beam@v1
