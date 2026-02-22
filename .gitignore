@@ -5,4 +5,4 @@ erl_crash.dump
 /vendor/*/
 !/vendor/test262-parser-tests
 .DS_Store
-PLAN.md
+*PLAN.md

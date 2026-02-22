@@ -221,6 +221,23 @@ let value = case maybe_value {
 let value = option.unwrap(maybe_value, default)
 ```
 
+## 3b. option.map + option.unwrap for transform-or-default
+
+When the `Some` branch transforms the value and `None` returns a default, combine `option.map` with `option.unwrap`:
+
+```gleam
+// BAD - unnecessary case expression
+let parent_refs = case parent {
+  Some(ref) -> [ref]
+  None -> []
+}
+
+// GOOD - map the transform, unwrap with default
+let parent_refs = parent |> option.map(list.wrap) |> option.unwrap([])
+```
+
+This applies whenever the pattern is `Some(x) -> f(x)` / `None -> default`. It's the combined form of sections 2 and 3.
+
 ## 4. option.flatten for Option(Option(a)) -> Option(a)
 
 ```gleam
@@ -289,6 +306,7 @@ case summon_and_subscribe(state, token) {
 ```
 
 The explicit `case` is better here because:
+
 1. The side effect (logging) is clearly visible in the error branch
 2. You're not abusing `result.map_error` for side effects
 3. The code structure matches the intent
@@ -406,7 +424,7 @@ use <- bool.guard(string.is_empty(token), decode.failure(Identify(""), "Token is
 decode.success(Identify(token))
 ```
 
-**Rule**: `bool.guard` is for when you *already have* a boolean. Don't convert a value to a boolean just to use `bool.guard` — pattern match on the value directly instead.
+**Rule**: `bool.guard` is for when you _already have_ a boolean. Don't convert a value to a boolean just to use `bool.guard` — pattern match on the value directly instead.
 
 ## 10. The `use` keyword for callbacks
 
