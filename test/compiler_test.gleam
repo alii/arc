@@ -456,6 +456,15 @@ pub fn arrow_nested_expression_test() {
 // ============================================================================
 
 pub fn closure_basic_test() {
+  // Use function expression (not declaration) so the closure is created
+  // AFTER x=10 is assigned (function declarations are hoisted above vars)
+  assert_normal_number(
+    "function make() { var x = 10; var inner = function() { return x; }; return inner; } make()()",
+    10.0,
+  )
+}
+
+pub fn closure_hoisted_declaration_test() {
   assert_normal_number(
     "function make() { var x = 10; function inner() { return x; } return inner; } make()()",
     10.0,
@@ -506,9 +515,10 @@ pub fn closure_arrow_expression_capture_test() {
 }
 
 pub fn closure_var_capture_test() {
+  // Closures capture by reference via BoxSlot — mutations are visible.
   assert_normal_number(
     "function f() { var x = 5; var g = function() { return x; }; x = 10; return g; } f()()",
-    5.0,
+    10.0,
   )
 }
 
@@ -518,4 +528,121 @@ pub fn closure_independent_copies_test() {
     "function make(n) { return function() { return n; }; } var a = make(1); var b = make(2); a() + b()",
     3.0,
   )
+}
+
+pub fn closure_mutation_after_creation_test() {
+  // Mutation after closure creation is visible through the closure
+  assert_normal_number(
+    "function f() { var x = 5; var g = function() { return x; }; x = 10; return g(); } f()",
+    10.0,
+  )
+}
+
+pub fn closure_mutation_through_closure_test() {
+  // Mutation through the closure is visible to the parent
+  assert_normal_number(
+    "function f() { var x = 0; var inc = function() { x = x + 1; }; inc(); inc(); inc(); return x; } f()",
+    3.0,
+  )
+}
+
+pub fn closure_shared_between_siblings_test() {
+  // Two closures share the same variable
+  assert_normal_number(
+    "function f() { var x = 0; var inc = function() { x = x + 1; return x; }; var get = function() { return x; }; inc(); inc(); return get(); } f()",
+    2.0,
+  )
+}
+
+pub fn closure_counter_pattern_test() {
+  // Classic counter closure pattern
+  assert_normal_number(
+    "function counter() { var n = 0; return function() { n = n + 1; return n; }; } var c = counter(); c(); c(); c()",
+    3.0,
+  )
+}
+
+pub fn closure_hoisted_fn_mutation_test() {
+  // Hoisted function declaration + mutation in parent
+  assert_normal_number(
+    "function f() { function get() { return x; } var x = 42; return get(); } f()",
+    42.0,
+  )
+}
+
+pub fn closure_param_mutation_test() {
+  // Closure captures a param, parent mutates it
+  assert_normal_number(
+    "function f(x) { var g = function() { return x; }; x = 99; return g(); } f(1)",
+    99.0,
+  )
+}
+
+// ============================================================================
+// Array tests
+// ============================================================================
+
+pub fn array_literal_test() {
+  // Array literal produces an object
+  case run_js("[1, 2, 3]") {
+    Ok(vm.NormalCompletion(value.JsObject(_), _)) -> Nil
+    _other -> panic as "expected array object"
+  }
+}
+
+pub fn array_index_access_test() {
+  assert_normal_number("[10, 20, 30][1]", 20.0)
+}
+
+pub fn array_index_zero_test() {
+  assert_normal_number("[42, 99][0]", 42.0)
+}
+
+pub fn array_length_test() {
+  assert_normal_number("[1, 2, 3].length", 3.0)
+}
+
+pub fn array_empty_length_test() {
+  assert_normal_number("[].length", 0.0)
+}
+
+pub fn array_out_of_bounds_test() {
+  assert_normal("[1, 2][5]", JsUndefined)
+}
+
+pub fn array_index_assignment_test() {
+  assert_normal_number("var a = [1, 2, 3]; a[0] = 42; a[0]", 42.0)
+}
+
+pub fn array_index_assignment_grows_length_test() {
+  assert_normal_number("var a = [1]; a[5] = 99; a.length", 6.0)
+}
+
+pub fn array_sparse_hole_test() {
+  // Holes in array literals become undefined
+  assert_normal_number("[1, , 3].length", 3.0)
+}
+
+pub fn array_sparse_hole_value_test() {
+  assert_normal("[1, , 3][1]", JsUndefined)
+}
+
+pub fn array_string_elements_test() {
+  assert_normal("['a', 'b', 'c'][2]", JsString("c"))
+}
+
+pub fn array_nested_access_test() {
+  assert_normal_number("var a = [10, 20]; var b = [a[0] + a[1]]; b[0]", 30.0)
+}
+
+pub fn array_compound_assignment_test() {
+  assert_normal_number("var a = [10]; a[0] += 5; a[0]", 15.0)
+}
+
+pub fn array_in_variable_test() {
+  assert_normal_number("var a = [5, 10, 15]; a[2]", 15.0)
+}
+
+pub fn array_length_after_assignment_test() {
+  assert_normal_number("var a = []; a[0] = 1; a[1] = 2; a.length", 2.0)
 }

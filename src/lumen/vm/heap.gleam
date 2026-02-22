@@ -1,6 +1,7 @@
 import gleam/dict
 import gleam/list
 import gleam/set.{type Set}
+import lumen/erlang
 import lumen/vm/value.{type HeapSlot, type Ref, Ref}
 
 /// Stats returned by the stats() function for introspection.
@@ -16,6 +17,16 @@ pub opaque type Heap {
     next: Int,
     roots: Set(Int),
   )
+}
+
+pub fn serialize(heap: Heap) -> BitArray {
+  erlang.term_to_binary(heap)
+}
+
+/// "dangerously" because this doesn't validate
+/// that the passed data is actually a heap 
+pub fn dangerously_deserialize(heap: BitArray) -> Heap {
+  erlang.binary_to_term(heap)
 }
 
 /// Create an empty heap.

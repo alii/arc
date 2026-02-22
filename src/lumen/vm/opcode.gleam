@@ -65,6 +65,12 @@ pub type Op {
   // -- Closures --
   MakeClosure(func_index: Int)
   CloseVar(index: Int)
+  /// Wrap locals[index] value into a BoxSlot on the heap, replace local with ref.
+  BoxLocal(index: Int)
+  /// Read locals[index] (a box ref), dereference BoxSlot, push value on stack.
+  GetBoxed(index: Int)
+  /// Pop value from stack, read locals[index] (a box ref), write value into BoxSlot.
+  PutBoxed(index: Int)
 
   // -- Operators --
   BinOp(kind: BinOpKind)
@@ -187,6 +193,9 @@ pub type IrOp {
   IrLeaveFinally
   IrMakeClosure(func_index: Int)
   IrCloseVar(index: Int)
+  IrBoxLocal(index: Int)
+  IrGetBoxed(index: Int)
+  IrPutBoxed(index: Int)
   IrBinOp(kind: BinOpKind)
   IrUnaryOp(kind: UnaryOpKind)
   IrTypeOf

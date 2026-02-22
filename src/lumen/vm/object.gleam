@@ -1,11 +1,16 @@
 import gleam/dict
+import gleam/int
 import gleam/option.{None, Some}
 import lumen/vm/builtins.{type Builtins}
 import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{type JsValue, type Ref, JsObject, JsString, ObjectSlot}
+import lumen/vm/value.{
+  type JsValue, type Ref, ArraySlot, Finite, JsNumber, JsObject, JsString,
+  ObjectSlot,
+}
 
 /// Walk the prototype chain to find a property by key.
 /// Checks own properties first, then follows the prototype link.
+/// For ArraySlot: handles numeric index lookup and "length".
 /// Returns Error(Nil) if the property is not found anywhere in the chain.
 pub fn get_property(heap: Heap, ref: Ref, key: String) -> Result(JsValue, Nil) {
   case heap.read(heap, ref) {
@@ -18,19 +23,49 @@ pub fn get_property(heap: Heap, ref: Ref, key: String) -> Result(JsValue, Nil) {
             None -> Error(Nil)
           }
       }
-    // Not an ObjectSlot or dangling ref
+    Ok(ArraySlot(elements:, length:)) ->
+      case key {
+        "length" -> Ok(JsNumber(Finite(int.to_float(length))))
+        _ ->
+          case int.parse(key) {
+            Ok(idx) ->
+              case dict.get(elements, idx) {
+                Ok(val) -> Ok(val)
+                Error(_) -> Ok(value.JsUndefined)
+              }
+            Error(_) -> Error(Nil)
+          }
+      }
+    // Not an ObjectSlot/ArraySlot or dangling ref
     _ -> Error(Nil)
   }
 }
 
 /// Set an own property on an object (does NOT walk the prototype chain).
-/// Returns the updated heap. No-op if ref doesn't point to an ObjectSlot.
+/// For ArraySlot: handles numeric index writes and length updates.
+/// Returns the updated heap. No-op if ref doesn't point to an ObjectSlot/ArraySlot.
 pub fn set_property(heap: Heap, ref: Ref, key: String, val: JsValue) -> Heap {
   case heap.read(heap, ref) {
     Ok(ObjectSlot(properties:, prototype:)) -> {
       let new_props = dict.insert(properties, key, val)
       heap.write(heap, ref, ObjectSlot(properties: new_props, prototype:))
     }
+    Ok(ArraySlot(elements:, length:)) ->
+      case int.parse(key) {
+        Ok(idx) -> {
+          let new_elements = dict.insert(elements, idx, val)
+          let new_length = case idx >= length {
+            True -> idx + 1
+            False -> length
+          }
+          heap.write(
+            heap,
+            ref,
+            ArraySlot(elements: new_elements, length: new_length),
+          )
+        }
+        Error(_) -> heap
+      }
     _ -> heap
   }
 }

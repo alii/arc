@@ -10,16 +10,17 @@ import lumen/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
 import lumen/vm/heap.{type Heap}
 import lumen/vm/object
 import lumen/vm/opcode.{
-  type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, BinOp,
-  BitAnd, BitNot, BitOr, BitXor, Call, DefineField, Div, Dup, Eq, Exp, GetField,
-  GetGlobal, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos,
-  PushConst, PushTry, PutField, PutGlobal, PutLocal, Return, ShiftLeft,
+  type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
+  BinOp, BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, DefineField, Div, Dup,
+  Eq, Exp, GetBoxed, GetElem, GetElem2, GetField, GetGlobal, GetLocal, Gt, GtEq,
+  Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq,
+  MakeClosure, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry,
+  PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return, ShiftLeft,
   ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
   UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
-  type JsNum, type JsValue, type Ref, ClosureSlot, Finite, Infinity, JsBigInt,
+  type JsNum, type JsValue, ArraySlot, ClosureSlot, Finite, Infinity, JsBigInt,
   JsBool, JsFunction, JsNull, JsNumber, JsObject, JsString, JsSymbol,
   JsUndefined, JsUninitialized, NaN, NegInfinity, ObjectSlot,
 }
@@ -76,6 +77,10 @@ type State {
     try_stack: List(TryFrame),
     finally_stack: List(FinallyCompletion),
     builtins: Builtins,
+    /// Maps closure heap ref → FuncTemplate, populated at MakeClosure time.
+    /// This is needed because a closure's func_index is relative to its
+    /// defining parent, which may no longer be on the call stack when called.
+    closure_templates: dict.Dict(Int, FuncTemplate),
   )
 }
 
@@ -96,13 +101,23 @@ pub fn run(
   heap: Heap,
   builtins: Builtins,
 ) -> Result(Completion, VmError) {
+  run_with_globals(func, heap, builtins, dict.new())
+}
+
+/// Run a function template with pre-populated global variables.
+pub fn run_with_globals(
+  func: FuncTemplate,
+  heap: Heap,
+  builtins: Builtins,
+  globals: dict.Dict(String, JsValue),
+) -> Result(Completion, VmError) {
   let locals = list.repeat(JsUndefined, func.local_count)
   let state =
     State(
       stack: [],
       locals:,
       constants: func.constants,
-      globals: dict.new(),
+      globals:,
       func:,
       code: func.bytecode,
       heap:,
@@ -111,6 +126,7 @@ pub fn run(
       try_stack: [],
       finally_stack: [],
       builtins:,
+      closure_templates: dict.new(),
     )
   execute(state)
 }
@@ -396,17 +412,38 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
 
     MakeClosure(func_index) -> {
       case list_get(state.func.functions, func_index) {
-        Ok(_child_template) -> {
-          // Allocate a dummy env for now (no closure capture in MVP)
-          let #(heap, env_ref) = heap.alloc(state.heap, value.EnvSlot([]))
+        Ok(child_template) -> {
+          // Capture values from current frame according to env_descriptors.
+          // For boxed captured vars, the local holds a JsObject(box_ref) —
+          // copying that ref means the closure shares the same BoxSlot.
+          let captured_values =
+            list.map(child_template.env_descriptors, fn(desc) {
+              case desc {
+                opcode.CaptureLocal(parent_index) ->
+                  case list_get(state.locals, parent_index) {
+                    Ok(val) -> val
+                    Error(_) -> JsUndefined
+                  }
+                opcode.CaptureEnv(_parent_env_index) ->
+                  // Transitive capture not yet implemented
+                  JsUndefined
+              }
+            })
+          let #(heap, env_ref) =
+            heap.alloc(state.heap, value.EnvSlot(captured_values))
           let #(heap, closure_ref) =
             heap.alloc(heap, ClosureSlot(func_index:, env: env_ref))
+          // Cache the template so it can be found when the closure is called
+          // from a different scope (after the defining function has returned)
+          let closure_templates =
+            dict.insert(state.closure_templates, closure_ref.id, child_template)
           Ok(
             State(
               ..state,
               heap:,
               stack: [JsFunction(closure_ref), ..state.stack],
               pc: state.pc + 1,
+              closure_templates:,
             ),
           )
         }
@@ -422,6 +459,75 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       }
     }
 
+    BoxLocal(index) -> {
+      // Wrap the current value in locals[index] into a BoxSlot on the heap.
+      // Replace the local with a JsObject(box_ref).
+      case list_get(state.locals, index) {
+        Ok(current_value) -> {
+          let #(heap, box_ref) =
+            heap.alloc(state.heap, value.BoxSlot(current_value))
+          case list_set(state.locals, index, JsObject(box_ref)) {
+            Ok(locals) -> Ok(State(..state, heap:, locals:, pc: state.pc + 1))
+            Error(_) ->
+              Error(#(VmError(LocalIndexOutOfBounds(index)), JsUndefined, heap))
+          }
+        }
+        Error(_) ->
+          Error(#(
+            VmError(LocalIndexOutOfBounds(index)),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    GetBoxed(index) -> {
+      // Read locals[index] (a JsObject(box_ref)), dereference BoxSlot, push value.
+      case list_get(state.locals, index) {
+        Ok(JsObject(box_ref)) -> {
+          case heap.read(state.heap, box_ref) {
+            Ok(value.BoxSlot(val)) ->
+              Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
+            _ ->
+              Error(#(
+                VmError(Unimplemented("GetBoxed: not a BoxSlot")),
+                JsUndefined,
+                state.heap,
+              ))
+          }
+        }
+        _ ->
+          Error(#(
+            VmError(Unimplemented("GetBoxed: local is not a box ref")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    PutBoxed(index) -> {
+      // Pop value from stack, write into the BoxSlot pointed to by locals[index].
+      case state.stack {
+        [new_value, ..rest_stack] -> {
+          case list_get(state.locals, index) {
+            Ok(JsObject(box_ref)) -> {
+              let heap =
+                heap.write(state.heap, box_ref, value.BoxSlot(new_value))
+              Ok(State(..state, heap:, stack: rest_stack, pc: state.pc + 1))
+            }
+            _ ->
+              Error(#(
+                VmError(Unimplemented("PutBoxed: local is not a box ref")),
+                JsUndefined,
+                state.heap,
+              ))
+          }
+        }
+        [] ->
+          Error(#(VmError(StackUnderflow("PutBoxed")), JsUndefined, state.heap))
+      }
+    }
+
     Call(arity) -> {
       // Stack layout: [arg_n, ..., arg_1, callee, ...rest]
       // Pop arity args, then callee
@@ -430,10 +536,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           case after_args {
             [JsFunction(closure_ref), ..rest_stack] -> {
               case heap.read(state.heap, closure_ref) {
-                Ok(ClosureSlot(func_index:, env: _env_ref)) -> {
-                  // Look up the template from the CLOSURE's defining context
-                  // We need to find it — closures store func_index relative to parent
-                  case find_func_template(state, closure_ref, func_index) {
+                Ok(ClosureSlot(func_index: _, env: env_ref)) -> {
+                  // Look up template from closure_templates cache (populated at MakeClosure time)
+                  case dict.get(state.closure_templates, closure_ref.id) {
                     Ok(callee_template) -> {
                       // Save caller frame (including caller's remaining stack)
                       let saved =
@@ -444,16 +549,25 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                           pc: state.pc + 1,
                           try_stack: state.try_stack,
                         )
+                      // Read captured values from env
+                      let env_values = case heap.read(state.heap, env_ref) {
+                        Ok(value.EnvSlot(slots)) -> slots
+                        _ -> []
+                      }
+                      let env_count = list.length(env_values)
                       // Bind arguments to local slots (pad with undefined if too few)
                       let padded_args = pad_args(args, callee_template.arity)
+                      // Locals layout: [captures..., params..., body_vars...]
+                      let remaining =
+                        callee_template.local_count
+                        - env_count
+                        - callee_template.arity
                       let locals =
-                        list.append(
+                        list.flatten([
+                          env_values,
                           padded_args,
-                          list.repeat(
-                            JsUndefined,
-                            callee_template.local_count - callee_template.arity,
-                          ),
-                        )
+                          list.repeat(JsUndefined, remaining),
+                        ])
                       Ok(
                         State(
                           ..state,
@@ -468,9 +582,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                         ),
                       )
                     }
-                    Error(msg) -> {
+                    Error(_) -> {
                       let #(heap, err) =
-                        object.make_type_error(state.heap, state.builtins, msg)
+                        object.make_type_error(
+                          state.heap,
+                          state.builtins,
+                          "closure template not found",
+                        )
                       Error(#(Thrown, err, heap))
                     }
                   }
@@ -711,6 +829,95 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       }
     }
 
+    // -- Array construction --
+    ArrayFrom(count) -> {
+      case pop_n(state.stack, count) {
+        Ok(#(elements, rest)) -> {
+          // elements are in order [first, ..., last]
+          let elements_dict =
+            list.index_map(elements, fn(val, idx) { #(idx, val) })
+            |> dict.from_list()
+          let #(heap, ref) =
+            heap.alloc(
+              state.heap,
+              ArraySlot(elements: elements_dict, length: count),
+            )
+          Ok(
+            State(
+              ..state,
+              heap:,
+              stack: [JsObject(ref), ..rest],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        Error(_) ->
+          Error(#(VmError(StackUnderflow("ArrayFrom")), JsUndefined, state.heap))
+      }
+    }
+
+    // -- Computed property access --
+    GetElem -> {
+      case state.stack {
+        [key, JsObject(ref), ..rest] -> {
+          let val = get_elem_value(state.heap, ref, key)
+          Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+        }
+        [_, JsNull, ..] -> {
+          let #(heap, err) =
+            object.make_type_error(
+              state.heap,
+              state.builtins,
+              "Cannot read properties of null",
+            )
+          Error(#(Thrown, err, heap))
+        }
+        [_, JsUndefined, ..] -> {
+          let #(heap, err) =
+            object.make_type_error(
+              state.heap,
+              state.builtins,
+              "Cannot read properties of undefined",
+            )
+          Error(#(Thrown, err, heap))
+        }
+        [_, _, ..rest] -> {
+          // Non-object: return undefined
+          Ok(State(..state, stack: [JsUndefined, ..rest], pc: state.pc + 1))
+        }
+        _ ->
+          Error(#(VmError(StackUnderflow("GetElem")), JsUndefined, state.heap))
+      }
+    }
+
+    GetElem2 -> {
+      // Like GetElem but keeps obj+key on stack: [key, obj, ...] -> [value, key, obj, ...]
+      case state.stack {
+        [key, JsObject(ref) as obj, ..rest] -> {
+          let val = get_elem_value(state.heap, ref, key)
+          Ok(State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1))
+        }
+        _ ->
+          Error(#(VmError(StackUnderflow("GetElem2")), JsUndefined, state.heap))
+      }
+    }
+
+    PutElem -> {
+      // Stack: [value, key, obj, ...rest]
+      case state.stack {
+        [val, key, JsObject(ref), ..rest] -> {
+          let heap = put_elem_value(state.heap, ref, key, val)
+          Ok(State(..state, heap:, stack: [val, ..rest], pc: state.pc + 1))
+        }
+        [_, _, _, ..rest] -> {
+          // PutElem on non-object: silently ignore (JS sloppy mode)
+          Ok(State(..state, stack: rest, pc: state.pc + 1))
+        }
+        _ ->
+          Error(#(VmError(StackUnderflow("PutElem")), JsUndefined, state.heap))
+      }
+    }
+
     _ ->
       Error(#(
         VmError(Unimplemented("opcode: " <> string.inspect(op))),
@@ -756,38 +963,90 @@ fn pad_args(args: List(JsValue), arity: Int) -> List(JsValue) {
   }
 }
 
-/// Find a function template for a closure. The func_index in the ClosureSlot
-/// is an index into the parent template's functions list. We search the call
-/// stack to find the template that created this closure.
-/// For MVP, we do a simpler approach: search current func + call stack for the child.
-fn find_func_template(
-  state: State,
-  _closure_ref: Ref,
-  func_index: Int,
-) -> Result(FuncTemplate, String) {
-  // Search current function's children first
-  case list_get(state.func.functions, func_index) {
-    Ok(template) -> Ok(template)
-    Error(_) ->
-      // Search call stack frames
-      find_in_call_stack(state.call_stack, func_index)
+// ============================================================================
+// Computed property access helpers
+// ============================================================================
+
+/// Read a property from an object/array using a JsValue key.
+/// For arrays: convert numeric keys to int indices.
+/// For objects: convert key to string and use get_property.
+fn get_elem_value(heap: Heap, ref: value.Ref, key: JsValue) -> JsValue {
+  case heap.read(heap, ref) {
+    Ok(ArraySlot(elements:, length:)) -> {
+      case to_array_index(key) {
+        Ok(idx) ->
+          case dict.get(elements, idx) {
+            Ok(val) -> val
+            Error(_) -> JsUndefined
+          }
+        Error(_) ->
+          // Non-numeric key on array — check "length"
+          case key {
+            JsString("length") -> JsNumber(Finite(int.to_float(length)))
+            _ -> JsUndefined
+          }
+      }
+    }
+    Ok(ObjectSlot(..)) -> {
+      let key_str = to_js_string(key)
+      case object.get_property(heap, ref, key_str) {
+        Ok(val) -> val
+        Error(_) -> JsUndefined
+      }
+    }
+    _ -> JsUndefined
   }
 }
 
-fn find_in_call_stack(
-  frames: List(SavedFrame),
-  func_index: Int,
-) -> Result(FuncTemplate, String) {
-  case frames {
-    [] ->
-      Error(
-        "function template not found for index " <> int.to_string(func_index),
-      )
-    [SavedFrame(func:, ..), ..rest] ->
-      case list_get(func.functions, func_index) {
-        Ok(template) -> Ok(template)
-        Error(_) -> find_in_call_stack(rest, func_index)
+/// Write a property to an object/array using a JsValue key.
+fn put_elem_value(
+  heap: Heap,
+  ref: value.Ref,
+  key: JsValue,
+  val: JsValue,
+) -> Heap {
+  case heap.read(heap, ref) {
+    Ok(ArraySlot(elements:, length:)) -> {
+      case to_array_index(key) {
+        Ok(idx) -> {
+          let new_elements = dict.insert(elements, idx, val)
+          let new_length = case idx >= length {
+            True -> idx + 1
+            False -> length
+          }
+          heap.write(
+            heap,
+            ref,
+            ArraySlot(elements: new_elements, length: new_length),
+          )
+        }
+        Error(_) -> heap
       }
+    }
+    Ok(ObjectSlot(..)) -> {
+      let key_str = to_js_string(key)
+      object.set_property(heap, ref, key_str, val)
+    }
+    _ -> heap
+  }
+}
+
+/// Try to convert a JsValue to an array index (non-negative integer).
+fn to_array_index(key: JsValue) -> Result(Int, Nil) {
+  case key {
+    JsNumber(Finite(n)) -> {
+      let i = float.truncate(n)
+      case int.to_float(i) == n && i >= 0 {
+        True -> Ok(i)
+        False -> Error(Nil)
+      }
+    }
+    JsString(s) ->
+      case int.parse(s) {
+        Ok(i) if i >= 0 -> Ok(i)
+        _ -> Error(Nil)
+      }
+    _ -> Error(Nil)
   }
 }
 

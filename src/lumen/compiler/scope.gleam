@@ -4,17 +4,23 @@
 /// to local slot indices. Consumes scope markers (EnterScope/LeaveScope/DeclareVar)
 /// and replaces IrScopeGetVar/IrScopePutVar/IrScopeTypeofVar with concrete
 /// GetLocal/PutLocal/GetGlobal/PutGlobal/TypeofGlobal ops.
+///
+/// Variables captured by child closures are "boxed" — stored in a heap-allocated
+/// BoxSlot. Both the parent and child dereference through the same box, so
+/// mutations are visible in both directions (true JS closure semantics).
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/set.{type Set}
 import lumen/compiler/emit.{
-  type BindingKind, type EmitterOp, BlockScope, CatchBinding, ConstBinding,
-  DeclareVar, EnterScope, FunctionScope, Ir, LeaveScope, LetBinding,
-  ParamBinding, VarBinding,
+  type BindingKind, type EmitterOp, BlockScope, CaptureBinding, CatchBinding,
+  ConstBinding, DeclareVar, EnterScope, FunctionScope, Ir, LeaveScope,
+  LetBinding, ParamBinding, VarBinding,
 }
 import lumen/vm/opcode.{
-  type IrOp, IrGetGlobal, IrGetLocal, IrPushConst, IrPutGlobal, IrPutLocal,
-  IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrTypeOf, IrTypeofGlobal,
+  type IrOp, IrBoxLocal, IrGetBoxed, IrGetGlobal, IrGetLocal, IrPushConst,
+  IrPutBoxed, IrPutGlobal, IrPutLocal, IrScopeGetVar, IrScopePutVar,
+  IrScopeTypeofVar, IrTypeOf, IrTypeofGlobal,
 }
 import lumen/vm/value.{type JsValue, JsUndefined, JsUninitialized}
 
@@ -24,7 +30,7 @@ import lumen/vm/value.{type JsValue, JsUndefined, JsUninitialized}
 
 /// A binding in a scope — maps name to local slot index.
 type Binding {
-  Binding(index: Int, kind: BindingKind)
+  Binding(index: Int, kind: BindingKind, is_boxed: Bool)
 }
 
 /// A single scope level.
@@ -42,6 +48,9 @@ type Resolver {
     constants: List(JsValue),
     constants_map: Dict(JsValue, Int),
     next_const: Int,
+    /// Names of variables that are captured by child closures.
+    /// Variables in this set will be boxed (stored via BoxSlot indirection).
+    captured_vars: Set(String),
   )
 }
 
@@ -55,6 +64,7 @@ pub fn resolve(
   code: List(EmitterOp),
   constants: List(JsValue),
   constants_map: Dict(JsValue, Int),
+  captured_vars: Set(String),
 ) -> #(List(IrOp), Int, List(JsValue), Dict(JsValue, Int)) {
   let r =
     Resolver(
@@ -65,6 +75,41 @@ pub fn resolve(
       constants:,
       constants_map:,
       next_const: list.length(constants),
+      captured_vars:,
+    )
+  let r = resolve_ops(r, code)
+  #(list.reverse(r.output), r.max_locals, r.constants, r.constants_map)
+}
+
+/// Resolve scopes with pre-populated capture bindings.
+/// Captures occupy local slots 0..len-1, before any params or body vars.
+/// Capture bindings are always boxed (they hold refs to parent's BoxSlots).
+/// Returns resolved IrOps, local_count, and updated constants.
+pub fn resolve_with_captures(
+  code: List(EmitterOp),
+  constants: List(JsValue),
+  constants_map: Dict(JsValue, Int),
+  captures: List(String),
+  captured_vars: Set(String),
+) -> #(List(IrOp), Int, List(JsValue), Dict(JsValue, Int)) {
+  let capture_count = list.length(captures)
+  // Pre-populate a function scope with capture bindings (always boxed)
+  let capture_bindings =
+    list.index_map(captures, fn(name, idx) {
+      #(name, Binding(index: idx, kind: CaptureBinding, is_boxed: True))
+    })
+    |> dict.from_list()
+  let initial_scope = Scope(kind: FunctionScope, bindings: capture_bindings)
+  let r =
+    Resolver(
+      scopes: [initial_scope],
+      next_local: capture_count,
+      max_locals: capture_count,
+      output: [],
+      constants:,
+      constants_map:,
+      next_const: list.length(constants),
+      captured_vars:,
     )
   let r = resolve_ops(r, code)
   #(list.reverse(r.output), r.max_locals, r.constants, r.constants_map)
@@ -100,7 +145,8 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
 
     DeclareVar(name, kind) -> {
       let index = r.next_local
-      let binding = Binding(index:, kind:)
+      let boxed = set.contains(r.captured_vars, name)
+      let binding = Binding(index:, kind:, is_boxed: boxed)
       let new_max = case index + 1 > r.max_locals {
         True -> index + 1
         False -> r.max_locals
@@ -109,43 +155,66 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
 
       // Add binding to the appropriate scope
       let r = case kind {
-        VarBinding | ParamBinding -> add_to_function_scope(r, name, binding)
+        VarBinding | ParamBinding | CaptureBinding ->
+          add_to_function_scope(r, name, binding)
         LetBinding | ConstBinding | CatchBinding ->
           add_to_current_scope(r, name, binding)
       }
 
-      // Emit initialization for var (undefined) and let/const (uninitialized/TDZ)
+      // Emit initialization + boxing
       case kind {
         VarBinding -> {
           let #(r, idx) = ensure_constant(r, JsUndefined)
-          emit(emit(r, IrPushConst(idx)), IrPutLocal(index))
+          let r = emit(emit(r, IrPushConst(idx)), IrPutLocal(index))
+          // Box the local if it's captured by a child closure
+          case boxed {
+            True -> emit(r, IrBoxLocal(index))
+            False -> r
+          }
         }
         LetBinding | ConstBinding -> {
           let #(r, idx) = ensure_constant(r, JsUninitialized)
-          emit(emit(r, IrPushConst(idx)), IrPutLocal(index))
+          let r = emit(emit(r, IrPushConst(idx)), IrPutLocal(index))
+          case boxed {
+            True -> emit(r, IrBoxLocal(index))
+            False -> r
+          }
         }
-        ParamBinding | CatchBinding -> r
-        // Params are set by call convention, catch by unwind
+        ParamBinding -> {
+          // Params are set by call convention. Box if captured.
+          case boxed {
+            True -> emit(r, IrBoxLocal(index))
+            False -> r
+          }
+        }
+        CatchBinding | CaptureBinding -> r
+        // Catch: set by unwind. Captures: already boxed refs from parent.
       }
     }
 
     Ir(IrScopeGetVar(name)) -> {
       case lookup(r.scopes, name) {
-        Some(Binding(index:, ..)) -> emit(r, IrGetLocal(index))
+        Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrGetBoxed(index))
+        Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrGetLocal(index))
         None -> emit(r, IrGetGlobal(name))
       }
     }
 
     Ir(IrScopePutVar(name)) -> {
       case lookup(r.scopes, name) {
-        Some(Binding(index:, ..)) -> emit(r, IrPutLocal(index))
+        Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrPutBoxed(index))
+        Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrPutLocal(index))
         None -> emit(r, IrPutGlobal(name))
       }
     }
 
     Ir(IrScopeTypeofVar(name)) -> {
       case lookup(r.scopes, name) {
-        Some(Binding(index:, ..)) -> {
+        Some(Binding(index:, is_boxed: True, ..)) -> {
+          let r = emit(r, IrGetBoxed(index))
+          emit(r, IrTypeOf)
+        }
+        Some(Binding(index:, is_boxed: False, ..)) -> {
           let r = emit(r, IrGetLocal(index))
           emit(r, IrTypeOf)
         }

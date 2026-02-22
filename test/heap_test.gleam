@@ -242,7 +242,14 @@ pub fn gc_traces_through_array_slot_test() {
   let #(h, ref_arr) =
     heap.alloc(
       h,
-      ArraySlot(elements: [JsNumber(Finite(1.0)), JsObject(ref_inner), JsNull]),
+      ArraySlot(
+        elements: dict.from_list([
+          #(0, JsNumber(Finite(1.0))),
+          #(1, JsObject(ref_inner)),
+          #(2, JsNull),
+        ]),
+        length: 3,
+      ),
     )
   let h = heap.root(h, ref_arr)
   let h = heap.collect(h)
@@ -283,7 +290,14 @@ pub fn mixed_live_dead_partition_test() {
   let h = heap.new()
   let #(h, dead1) =
     heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
-  let #(h, dead2) = heap.alloc(h, ArraySlot(elements: [JsNumber(Finite(1.0))]))
+  let #(h, dead2) =
+    heap.alloc(
+      h,
+      ArraySlot(
+        elements: dict.from_list([#(0, JsNumber(Finite(1.0)))]),
+        length: 1,
+      ),
+    )
   let #(h, live_leaf) =
     heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
   let #(h, live_parent) =

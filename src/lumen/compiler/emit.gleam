@@ -8,11 +8,11 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import lumen/ast
 import lumen/vm/opcode.{
-  type IrOp, IrBinOp, IrDefineField, IrDup, IrGetField, IrGetThis, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
-  IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutField, IrReturn,
-  IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf,
-  IrUnaryOp,
+  type IrOp, IrArrayFrom, IrBinOp, IrDefineField, IrDup, IrGetElem, IrGetElem2,
+  IrGetField, IrGetThis, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue,
+  IrLabel, IrMakeClosure, IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry,
+  IrPutElem, IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar,
+  IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
 }
 import lumen/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -45,6 +45,7 @@ pub type BindingKind {
   ConstBinding
   ParamBinding
   CatchBinding
+  CaptureBinding
 }
 
 /// A compiled child function (before Phase 2/3).
@@ -887,7 +888,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
     }
 
-    // Assignment to member expression
+    // Assignment to dot member expression (obj.prop = val)
     ast.AssignmentExpression(
       ast.Assign,
       ast.MemberExpression(obj, ast.Identifier(prop), False),
@@ -898,6 +899,36 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       // Stack: [obj, val] — PutField expects [val, obj] so swap
       let e = emit_ir(e, IrSwap)
       emit_ir(e, IrPutField(prop))
+    }
+
+    // Assignment to computed member expression (obj[key] = val)
+    ast.AssignmentExpression(
+      ast.Assign,
+      ast.MemberExpression(obj, key, True),
+      right,
+    ) -> {
+      use e <- result.try(emit_expr(e, obj))
+      use e <- result.try(emit_expr(e, key))
+      use e <- result.map(emit_expr(e, right))
+      // Stack: [obj, key, val] — PutElem expects [val, key, obj]
+      emit_ir(e, IrPutElem)
+    }
+
+    // Compound assignment to computed member (obj[key] += val)
+    ast.AssignmentExpression(op, ast.MemberExpression(obj, key, True), right) -> {
+      case compound_to_binop(op) {
+        Ok(bin_kind) -> {
+          use e <- result.try(emit_expr(e, obj))
+          use e <- result.try(emit_expr(e, key))
+          // GetElem2 reads obj[key] but keeps obj+key on stack
+          let e = emit_ir(e, IrGetElem2)
+          use e <- result.map(emit_expr(e, right))
+          let e = emit_ir(e, IrBinOp(bin_kind))
+          // Stack: [obj, key, result] — PutElem consumes all three
+          emit_ir(e, IrPutElem)
+        }
+        Error(_) -> Error(Unsupported("assignment op"))
+      }
     }
 
     // Call expression
@@ -956,9 +987,43 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_ir(e, IrGetField(prop))
     }
 
+    // Computed member expression (obj[key])
+    ast.MemberExpression(object, property, True) -> {
+      use e <- result.try(emit_expr(e, object))
+      use e <- result.map(emit_expr(e, property))
+      emit_ir(e, IrGetElem)
+    }
+
+    // Array literal
+    ast.ArrayExpression(elements) -> {
+      let count = list.length(elements)
+      use e <- result.map(
+        list.try_fold(elements, e, fn(e, elem) {
+          case elem {
+            Some(expr) -> emit_expr(e, expr)
+            // Hole in array — push undefined
+            None -> Ok(push_const(e, JsUndefined))
+          }
+        }),
+      )
+      emit_ir(e, IrArrayFrom(count))
+    }
+
     // Function expression
     ast.FunctionExpression(name, params, body, _is_gen, _is_async) -> {
       let child = compile_function_body(e, name, params, body, False)
+      let #(e, idx) = add_child_function(e, child)
+      Ok(emit_ir(e, IrMakeClosure(idx)))
+    }
+
+    // Arrow function expression
+    ast.ArrowFunctionExpression(params, body, _is_async) -> {
+      let body_stmt = case body {
+        ast.ArrowBodyExpression(expr) ->
+          ast.BlockStatement([ast.ReturnStatement(Some(expr))])
+        ast.ArrowBodyBlock(stmt) -> stmt
+      }
+      let child = compile_function_body(e, None, params, body_stmt, True)
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }

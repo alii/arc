@@ -9,14 +9,14 @@ import gleam/list
 import gleam/option.{type Option}
 import lumen/vm/opcode.{
   type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom, IrBinOp,
-  IrCall, IrCallApply, IrCallConstructor, IrCallMethod, IrCloseVar,
+  IrBoxLocal, IrCall, IrCallApply, IrCallConstructor, IrCallMethod, IrCloseVar,
   IrDefineAccessor, IrDefineField, IrDefineFieldComputed, IrDeleteElem,
-  IrDeleteField, IrDup, IrEnterFinally, IrForInNext, IrForInStart, IrGetElem,
-  IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
-  IrGetThis, IrIteratorClose, IrIteratorNext, IrJump, IrJumpIfFalse,
+  IrDeleteField, IrDup, IrEnterFinally, IrForInNext, IrForInStart, IrGetBoxed,
+  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
+  IrGetLocal, IrGetThis, IrIteratorClose, IrIteratorNext, IrJump, IrJumpIfFalse,
   IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure,
   IrNewObject, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
-  IrPutElem, IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrRot3,
+  IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrRot3,
   IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf,
   IrTypeofGlobal, IrUnaryOp,
 }
@@ -181,6 +181,12 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.MakeClosure(func_index), ..acc])
     [IrCloseVar(index), ..rest] ->
       resolve_ops(rest, labels, [opcode.CloseVar(index), ..acc])
+    [IrBoxLocal(index), ..rest] ->
+      resolve_ops(rest, labels, [opcode.BoxLocal(index), ..acc])
+    [IrGetBoxed(index), ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetBoxed(index), ..acc])
+    [IrPutBoxed(index), ..rest] ->
+      resolve_ops(rest, labels, [opcode.PutBoxed(index), ..acc])
 
     // Operators
     [IrBinOp(kind), ..rest] ->

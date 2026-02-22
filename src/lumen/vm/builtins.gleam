@@ -8,6 +8,7 @@ import lumen/vm/value.{type Ref, JsString, ObjectSlot}
 pub type Builtins {
   Builtins(
     object_prototype: Ref,
+    array_prototype: Ref,
     error_prototype: Ref,
     type_error_prototype: Ref,
     reference_error_prototype: Ref,
@@ -31,6 +32,14 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   let #(h, object_proto) =
     heap.alloc(h, ObjectSlot(properties: dict.new(), prototype: None))
   let h = heap.root(h, object_proto)
+
+  // Array.prototype
+  let #(h, array_proto) =
+    heap.alloc(
+      h,
+      ObjectSlot(prototype: Some(object_proto), properties: dict.new()),
+    )
+  let h = heap.root(h, array_proto)
 
   // Error.prototype
   let #(h, error_proto) =
@@ -94,6 +103,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     h,
     Builtins(
       object_prototype: object_proto,
+      array_prototype: array_proto,
       error_prototype: error_proto,
       type_error_prototype: type_error_proto,
       reference_error_prototype: reference_error_proto,

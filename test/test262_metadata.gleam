@@ -15,6 +15,8 @@ pub type TestMetadata {
     negative_phase: Option(NegativePhase),
     negative_type: Option(String),
     flags: List(String),
+    includes: List(String),
+    features: List(String),
   )
 }
 
@@ -32,7 +34,13 @@ pub fn parse_metadata(source: String) -> TestMetadata {
 }
 
 fn default_metadata() -> TestMetadata {
-  TestMetadata(negative_phase: None, negative_type: None, flags: [])
+  TestMetadata(
+    negative_phase: None,
+    negative_type: None,
+    flags: [],
+    includes: [],
+    features: [],
+  )
 }
 
 fn parse_yaml_block(yaml: String) -> TestMetadata {
@@ -84,11 +92,7 @@ fn parse_yaml_lines(
               case string.starts_with(trimmed, "negative:") {
                 True -> parse_yaml_lines(rest, meta, True)
                 False -> {
-                  let meta = case string.starts_with(trimmed, "flags:") {
-                    True ->
-                      TestMetadata(..meta, flags: parse_inline_array(trimmed))
-                    False -> meta
-                  }
+                  let meta = parse_top_level_field(trimmed, meta)
                   parse_yaml_lines(rest, meta, False)
                 }
               }
@@ -100,9 +104,23 @@ fn parse_yaml_lines(
   }
 }
 
-/// Parse a YAML inline array like `flags: [module, onlyStrict]`.
-fn parse_inline_array(line: String) -> List(String) {
-  case string.split_once(line, "[") {
+/// Parse a top-level YAML field that isn't `negative:`.
+fn parse_top_level_field(trimmed: String, meta: TestMetadata) -> TestMetadata {
+  case string.split_once(trimmed, ":") {
+    Ok(#("flags", rest)) ->
+      TestMetadata(..meta, flags: parse_inline_array(rest))
+    Ok(#("includes", rest)) ->
+      TestMetadata(..meta, includes: parse_inline_array(rest))
+    Ok(#("features", rest)) ->
+      TestMetadata(..meta, features: parse_inline_array(rest))
+    _ -> meta
+  }
+}
+
+/// Parse a YAML inline array from the value portion (after the colon).
+/// e.g. " [module, onlyStrict]" → ["module", "onlyStrict"]
+fn parse_inline_array(value: String) -> List(String) {
+  case string.split_once(value, "[") {
     Error(_) -> []
     Ok(#(_, rest)) ->
       case string.split_once(rest, "]") {

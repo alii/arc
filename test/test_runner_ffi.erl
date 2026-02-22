@@ -1,7 +1,8 @@
 -module(test_runner_ffi).
 
 -export([list_files/1, generate_eunit_tests/2,
-         generate_recursive_eunit_tests/2, get_env/1, empty_tests/0]).
+         generate_recursive_eunit_tests/2, get_env/1, empty_tests/0,
+         run_with_timeout/2, timeout_test/2]).
 
 %% List all .js files in a directory, returning their filenames (not full paths).
 list_files(Dir) ->
@@ -105,3 +106,28 @@ get_env(Name) ->
 
 %% Return an empty EUnit test descriptor (no tests to run).
 empty_tests() -> {inparallel, []}.
+
+%% Create a single EUnit test with a custom timeout (in seconds).
+timeout_test(TimeoutSec, Fun) ->
+    {timeout, TimeoutSec, Fun}.
+
+%% Run a zero-arg function with a timeout in milliseconds.
+%% Returns {ok, Result} or {error, <<"timeout">>}.
+run_with_timeout(Fun, TimeoutMs) ->
+    Parent = self(),
+    Ref = make_ref(),
+    Pid = spawn(fun() ->
+        try
+            Result = Fun(),
+            Parent ! {Ref, {ok, Result}}
+        catch
+            _:Reason ->
+                Parent ! {Ref, {error, list_to_binary(io_lib:format("~p", [Reason]))}}
+        end
+    end),
+    receive
+        {Ref, Result} -> Result
+    after TimeoutMs ->
+        exit(Pid, kill),
+        {error, <<"timeout">>}
+    end.

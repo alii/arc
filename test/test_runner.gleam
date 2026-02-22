@@ -1,5 +1,3 @@
-import gleam/result
-
 /// Generic file-based test runner for EUnit.
 /// Reads all .js files from a directory and runs a callback on each one,
 /// generating individual EUnit test descriptors.
@@ -61,3 +59,12 @@ pub fn get_env_is_truthy(name: String) {
 /// Return an empty EUnit test descriptor (no tests to run).
 @external(erlang, "test_runner_ffi", "empty_tests")
 pub fn empty_tests() -> EunitTests
+
+/// Create a single EUnit test with a custom timeout (in seconds).
+@external(erlang, "test_runner_ffi", "timeout_test")
+pub fn timeout_test(timeout_sec: Int, fun: fn() -> Nil) -> EunitTests
+
+/// Run a zero-arg function with a timeout in milliseconds.
+/// Returns Ok(result) or Error("timeout").
+@external(erlang, "test_runner_ffi", "run_with_timeout")
+pub fn run_with_timeout(fun: fn() -> a, timeout_ms: Int) -> Result(a, String)
