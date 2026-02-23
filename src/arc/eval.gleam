@@ -3,11 +3,10 @@
 /// Pipeline: parse → compile → vm.run_with_globals
 import arc/compiler
 import arc/parser
-import arc/vm/builtins.{type Builtins}
+import arc/vm/builtins
 import arc/vm/heap
 import arc/vm/value
 import arc/vm/vm
-import gleam/dict
 import gleam/int
 import gleam/string
 
@@ -26,7 +25,7 @@ pub fn eval(source: String) -> Result(String, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let globals = make_globals(b)
+          let globals = builtins.globals(b)
           case vm.run_with_globals(template, h, b, globals) {
             Ok(vm.NormalCompletion(val, _)) -> Ok(inspect_value(val))
             Ok(vm.ThrowCompletion(val, _)) ->
@@ -36,24 +35,6 @@ pub fn eval(source: String) -> Result(String, String) {
         }
       }
   }
-}
-
-/// Standard global bindings for JS execution.
-fn make_globals(b: Builtins) -> dict.Dict(String, value.JsValue) {
-  dict.from_list([
-    #("NaN", value.JsNumber(value.NaN)),
-    #("Infinity", value.JsNumber(value.Infinity)),
-    #("undefined", value.JsUndefined),
-    #("Object", value.JsObject(b.object.constructor)),
-    #("Function", value.JsObject(b.function.constructor)),
-    #("Array", value.JsObject(b.array.constructor)),
-    #("Error", value.JsObject(b.error.constructor)),
-    #("TypeError", value.JsObject(b.type_error.constructor)),
-    #("ReferenceError", value.JsObject(b.reference_error.constructor)),
-    #("RangeError", value.JsObject(b.range_error.constructor)),
-    #("SyntaxError", value.JsObject(b.syntax_error.constructor)),
-    #("Math", value.JsObject(b.math)),
-  ])
 }
 
 /// Convert a JsValue to a human-readable string representation.

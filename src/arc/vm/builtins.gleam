@@ -74,3 +74,22 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     ),
   )
 }
+
+/// Standard ECMAScript global bindings (NaN, Infinity, undefined, Object, etc.)
+/// Maps global variable names to their JsValue representations.
+pub fn globals(b: Builtins) -> dict.Dict(String, value.JsValue) {
+  dict.from_list([
+    #("NaN", value.JsNumber(value.NaN)),
+    #("Infinity", value.JsNumber(value.Infinity)),
+    #("undefined", value.JsUndefined),
+    #("Object", value.JsObject(b.object.constructor)),
+    #("Function", value.JsObject(b.function.constructor)),
+    #("Array", value.JsObject(b.array.constructor)),
+    #("Error", value.JsObject(b.error.constructor)),
+    #("TypeError", value.JsObject(b.type_error.constructor)),
+    #("ReferenceError", value.JsObject(b.reference_error.constructor)),
+    #("RangeError", value.JsObject(b.range_error.constructor)),
+    #("SyntaxError", value.JsObject(b.syntax_error.constructor)),
+    #("Math", value.JsObject(b.math)),
+  ])
+}

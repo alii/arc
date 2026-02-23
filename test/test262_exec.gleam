@@ -12,7 +12,6 @@ import arc/vm/builtins
 import arc/vm/heap
 import arc/vm/value
 import arc/vm/vm
-import gleam/dict
 import gleam/int
 import gleam/io
 import gleam/list
@@ -252,7 +251,7 @@ fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let globals = make_test262_globals(b)
+          let globals = builtins.globals(b)
           case vm.run_with_globals(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
@@ -260,26 +259,6 @@ fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
         }
       }
   }
-}
-
-/// Pre-populated globals for test262 execution.
-fn make_test262_globals(
-  b: builtins.Builtins,
-) -> dict.Dict(String, value.JsValue) {
-  dict.from_list([
-    #("NaN", value.JsNumber(value.NaN)),
-    #("Infinity", value.JsNumber(value.Infinity)),
-    #("undefined", value.JsUndefined),
-    #("Object", value.JsObject(b.object.constructor)),
-    #("Function", value.JsObject(b.function.constructor)),
-    #("Array", value.JsObject(b.array.constructor)),
-    #("Error", value.JsObject(b.error.constructor)),
-    #("TypeError", value.JsObject(b.type_error.constructor)),
-    #("ReferenceError", value.JsObject(b.reference_error.constructor)),
-    #("RangeError", value.JsObject(b.range_error.constructor)),
-    #("SyntaxError", value.JsObject(b.syntax_error.constructor)),
-    #("Math", value.JsObject(b.math)),
-  ])
 }
 
 /// Prepend harness files to test source.

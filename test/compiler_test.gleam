@@ -3,10 +3,9 @@ import arc/parser
 import arc/vm/builtins
 import arc/vm/heap
 import arc/vm/value.{
-  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, NaN,
+  Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN,
 }
 import arc/vm/vm
-import gleam/dict
 import gleam/int
 import gleam/string
 
@@ -29,21 +28,7 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let globals =
-            dict.from_list([
-              #("NaN", value.JsNumber(value.NaN)),
-              #("Infinity", value.JsNumber(value.Infinity)),
-              #("undefined", JsUndefined),
-              #("Object", JsObject(b.object.constructor)),
-              #("Function", JsObject(b.function.constructor)),
-              #("Array", JsObject(b.array.constructor)),
-              #("Error", JsObject(b.error.constructor)),
-              #("TypeError", JsObject(b.type_error.constructor)),
-              #("ReferenceError", JsObject(b.reference_error.constructor)),
-              #("RangeError", JsObject(b.range_error.constructor)),
-              #("SyntaxError", JsObject(b.syntax_error.constructor)),
-              #("Math", JsObject(b.math)),
-            ])
+          let globals = builtins.globals(b)
           case vm.run_with_globals(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
