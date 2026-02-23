@@ -79,5 +79,6 @@ jobs:
               r = json.load(f)
           print(f\"{r['percent']}% ({r['pass']}/{r['tested']})\")
           ")"
+            git pull --rebase origin master
             git push
           fi
