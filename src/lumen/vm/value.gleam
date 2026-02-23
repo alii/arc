@@ -127,10 +127,14 @@ pub type HeapSlot {
   /// by a closure AND mutated, both the local frame and EnvSlot hold a Ref to
   /// the same BoxSlot. Reads/writes go through this indirection.
   BoxSlot(value: JsValue)
-  /// Unified iterator state for for-in and for-of loops.
-  /// Both eagerly pre-collect values into a list. For for-in: string keys
-  /// wrapped as JsString. For for-of: array element values directly.
-  IteratorSlot(values: List(JsValue))
+  /// Iterator state for for-in loops. Eagerly snapshots enumerable keys
+  /// upfront (per spec: prototype shadowing requires full collection).
+  /// Stores pre-collected string keys as JsString values.
+  ForInIteratorSlot(keys: List(JsValue))
+  /// Iterator state for for-of loops over arrays. Lazy — holds a ref to
+  /// the source array and reads elements one at a time (like QuickJS).
+  /// Re-reads length each iteration to handle mutations during iteration.
+  ArrayIteratorSlot(source: Ref, index: Int)
 }
 
 /// Extract refs from a single JsValue. Only JsObject carries heap refs now.
@@ -171,7 +175,8 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
     }
     EnvSlot(slots:) -> list.flat_map(slots, refs_in_value)
     BoxSlot(value:) -> refs_in_value(value)
-    IteratorSlot(values:) -> list.flat_map(values, refs_in_value)
+    ForInIteratorSlot(keys:) -> list.flat_map(keys, refs_in_value)
+    ArrayIteratorSlot(source:, ..) -> [source]
   }
 }
 

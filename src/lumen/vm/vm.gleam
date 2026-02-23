@@ -25,10 +25,10 @@ import lumen/vm/opcode.{
   UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
-  type JsNum, type JsValue, type Ref, ArrayObject, DataProperty, Finite,
-  FunctionObject, Infinity, IteratorSlot, JsBigInt, JsBool, JsNull, JsNumber,
-  JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized, NaN,
-  NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
+  type JsNum, type JsValue, type Ref, ArrayIteratorSlot, ArrayObject,
+  DataProperty, Finite, ForInIteratorSlot, FunctionObject, Infinity, JsBigInt,
+  JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined,
+  JsUninitialized, NaN, NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 
 // ============================================================================
@@ -1293,9 +1293,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             // Primitives: no enumerable properties
             _ -> []
           }
-          // Wrap string keys as JsString values for unified IteratorSlot
-          let values = list.map(keys, JsString)
-          let #(heap, iter_ref) = heap.alloc(state.heap, IteratorSlot(values:))
+          // Wrap string keys as JsString values for ForInIteratorSlot
+          let key_values = list.map(keys, JsString)
+          let #(heap, iter_ref) =
+            heap.alloc(state.heap, ForInIteratorSlot(keys: key_values))
           Ok(
             State(
               ..state,
@@ -1318,17 +1319,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
-            Ok(IteratorSlot(values:)) ->
-              case values {
+            Ok(ForInIteratorSlot(keys:)) ->
+              case keys {
                 [val, ..remaining] -> {
                   // Advance the iterator
                   let heap =
                     heap.write(
                       state.heap,
                       iter_ref,
-                      IteratorSlot(values: remaining),
+                      ForInIteratorSlot(keys: remaining),
                     )
-                  // Push: iterator stays, value, done=false
+                  // Push: iterator stays, key, done=false
                   Ok(
                     State(
                       ..state,
@@ -1339,7 +1340,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   )
                 }
                 [] -> {
-                  // No more values — push undefined + done=true
+                  // No more keys — push undefined + done=true
                   Ok(
                     State(
                       ..state,
@@ -1356,7 +1357,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               }
             _ ->
               Error(#(
-                VmError(Unimplemented("ForInNext: not an IteratorSlot")),
+                VmError(Unimplemented("ForInNext: not a ForInIteratorSlot")),
                 JsUndefined,
                 state.heap,
               ))
@@ -1372,11 +1373,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           case iterable {
             JsObject(ref) ->
               case heap.read(state.heap, ref) {
-                Ok(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
-                  // Pre-collect array elements into a list for unified IteratorSlot
-                  let values = collect_array_values(elements, 0, length, [])
+                Ok(ObjectSlot(kind: ArrayObject(_), ..)) -> {
+                  // Lazy array iterator — stores source ref + index, reads elements one at a time
                   let #(heap, iter_ref) =
-                    heap.alloc(state.heap, IteratorSlot(values:))
+                    heap.alloc(
+                      state.heap,
+                      ArrayIteratorSlot(source: ref, index: 0),
+                    )
                   Ok(
                     State(
                       ..state,
@@ -1420,26 +1423,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
-            Ok(IteratorSlot(values:)) ->
-              case values {
-                [val, ..remaining] -> {
-                  // Advance the iterator
-                  let heap =
-                    heap.write(
-                      state.heap,
-                      iter_ref,
-                      IteratorSlot(values: remaining),
-                    )
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
-                      heap:,
-                      pc: state.pc + 1,
-                    ),
-                  )
-                }
-                [] -> {
+            Ok(ArrayIteratorSlot(source:, index:)) -> {
+              // Re-read the array length each time (handles mutations during iteration)
+              let #(length, elements) = case heap.read(state.heap, source) {
+                Ok(ObjectSlot(kind: ArrayObject(len), elements: elems, ..)) -> #(
+                  len,
+                  elems,
+                )
+                _ -> #(0, dict.new())
+              }
+              case index >= length {
+                True ->
                   // Done — push undefined + done=true
                   Ok(
                     State(
@@ -1453,11 +1447,33 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                       pc: state.pc + 1,
                     ),
                   )
+                False -> {
+                  // Read element at current index
+                  let val = case dict.get(elements, index) {
+                    Ok(v) -> v
+                    Error(_) -> JsUndefined
+                  }
+                  // Advance iterator index
+                  let heap =
+                    heap.write(
+                      state.heap,
+                      iter_ref,
+                      ArrayIteratorSlot(source:, index: index + 1),
+                    )
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
+                      heap:,
+                      pc: state.pc + 1,
+                    ),
+                  )
                 }
               }
+            }
             _ ->
               Error(#(
-                VmError(Unimplemented("IteratorNext: not an IteratorSlot")),
+                VmError(Unimplemented("IteratorNext: not an ArrayIteratorSlot")),
                 JsUndefined,
                 state.heap,
               ))
@@ -2278,25 +2294,6 @@ fn compare_nums(a: JsNum, b: JsNum) -> CompareOrd {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Pre-collect array elements into a list for IteratorSlot.
-fn collect_array_values(
-  elements: dict.Dict(Int, JsValue),
-  idx: Int,
-  length: Int,
-  acc: List(JsValue),
-) -> List(JsValue) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False -> {
-      let val = case dict.get(elements, idx) {
-        Ok(v) -> v
-        Error(_) -> JsUndefined
-      }
-      collect_array_values(elements, idx + 1, length, [val, ..acc])
-    }
-  }
-}
 
 /// Get element at index from a list. O(n) — will replace with Array later.
 fn list_get(items: List(a), index: Int) -> Result(a, Nil) {
