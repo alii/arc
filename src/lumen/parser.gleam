@@ -1671,6 +1671,9 @@ fn parse_for_declaration_scoped(
         scope_funcs: p.scope_funcs,
         outer_lexical: p.outer_lexical,
         in_block: p.in_block,
+        in_lexical_decl: p.in_lexical_decl,
+        decl_bound_names: p.decl_bound_names,
+        binding_kind: p.binding_kind,
       ),
       stmt,
     )
