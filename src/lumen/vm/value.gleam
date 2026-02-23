@@ -71,8 +71,14 @@ pub type NativeFn {
   NativeObjectDefineProperty
   NativeObjectGetOwnPropertyNames
   NativeObjectKeys
-  // Object.prototype instance method
+  // Object.prototype instance methods
   NativeObjectPrototypeHasOwnProperty
+  NativeObjectPrototypePropertyIsEnumerable
+  // Array.prototype instance methods
+  NativeArrayPrototypeJoin
+  NativeArrayPrototypePush
+  // Math methods
+  NativeMathPow
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.

@@ -278,6 +278,7 @@ fn make_test262_globals(
     #("ReferenceError", value.JsObject(b.reference_error.constructor)),
     #("RangeError", value.JsObject(b.range_error.constructor)),
     #("SyntaxError", value.JsObject(b.syntax_error.constructor)),
+    #("Math", value.JsObject(b.math)),
   ])
 }
 

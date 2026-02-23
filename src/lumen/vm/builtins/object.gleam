@@ -9,7 +9,8 @@ import lumen/vm/value.{
   JsObject, JsString, JsUndefined, NativeFunction, NativeObjectConstructor,
   NativeObjectDefineProperty, NativeObjectGetOwnPropertyDescriptor,
   NativeObjectGetOwnPropertyNames, NativeObjectKeys,
-  NativeObjectPrototypeHasOwnProperty, ObjectSlot, OrdinaryObject,
+  NativeObjectPrototypeHasOwnProperty, NativeObjectPrototypePropertyIsEnumerable,
+  ObjectSlot, OrdinaryObject,
 }
 
 /// Set up Object constructor and Object.prototype methods.
@@ -83,6 +84,17 @@ pub fn init(
       1,
     )
   let h = add_method(h, object_proto, "hasOwnProperty", hop_ref)
+
+  // Object.prototype.propertyIsEnumerable — instance method on prototype
+  let #(h, pie_ref) =
+    alloc_native_fn(
+      h,
+      function_proto,
+      NativeObjectPrototypePropertyIsEnumerable,
+      "propertyIsEnumerable",
+      1,
+    )
+  let h = add_method(h, object_proto, "propertyIsEnumerable", pie_ref)
 
   #(h, BuiltinType(prototype: object_proto, constructor: ctor_ref))
 }
@@ -508,6 +520,29 @@ pub fn has_own_property(
       let result = case get_own_property(heap, ref, key_str) {
         Ok(_) -> JsBool(True)
         Error(_) -> JsBool(False)
+      }
+      #(heap, Ok(result))
+    }
+    _ -> #(heap, Ok(JsBool(False)))
+  }
+}
+
+/// Object.prototype.propertyIsEnumerable(key)
+/// Returns true if the object has an own enumerable property with the given key.
+pub fn property_is_enumerable(
+  this: JsValue,
+  args: List(JsValue),
+  heap: Heap,
+) -> #(Heap, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) -> {
+      let key_str = case args {
+        [key_val, ..] -> value.to_js_string(key_val)
+        [] -> "undefined"
+      }
+      let result = case get_own_property(heap, ref, key_str) {
+        Ok(DataProperty(enumerable: True, ..)) -> JsBool(True)
+        _ -> JsBool(False)
       }
       #(heap, Ok(result))
     }

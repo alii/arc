@@ -8,6 +8,7 @@ import gleam/string
 import lumen/vm/builtins.{type Builtins}
 import lumen/vm/builtins/array as builtins_array
 import lumen/vm/builtins/error as builtins_error
+import lumen/vm/builtins/math as builtins_math
 import lumen/vm/builtins/object as builtins_object
 import lumen/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
 import lumen/vm/heap.{type Heap}
@@ -1950,6 +1951,13 @@ fn dispatch_native(
       builtins_object.keys(args, state.heap, state.builtins.array.prototype)
     value.NativeObjectPrototypeHasOwnProperty ->
       builtins_object.has_own_property(this, args, state.heap)
+    value.NativeObjectPrototypePropertyIsEnumerable ->
+      builtins_object.property_is_enumerable(this, args, state.heap)
+    value.NativeArrayPrototypeJoin ->
+      builtins_array.array_join(this, args, state.heap)
+    value.NativeArrayPrototypePush ->
+      builtins_array.array_push(this, args, state.heap)
+    value.NativeMathPow -> builtins_math.math_pow(args, state.heap)
     // These are handled in call_native before reaching dispatch_native.
     // If we ever get here, it's a bug.
     value.NativeFunctionCall

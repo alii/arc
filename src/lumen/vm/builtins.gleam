@@ -4,8 +4,10 @@ import lumen/vm/builtins/array as builtins_array
 import lumen/vm/builtins/common.{type BuiltinType}
 import lumen/vm/builtins/error as builtins_error
 import lumen/vm/builtins/function as builtins_function
+import lumen/vm/builtins/math as builtins_math
 import lumen/vm/builtins/object as builtins_object
 import lumen/vm/heap.{type Heap}
+import lumen/vm/value
 
 /// Pre-allocated prototype objects and constructor functions for JS built-ins.
 /// All refs are rooted so GC never collects them.
@@ -19,6 +21,7 @@ pub type Builtins {
     reference_error: BuiltinType,
     range_error: BuiltinType,
     syntax_error: BuiltinType,
+    math: value.Ref,
   )
 }
 
@@ -46,6 +49,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Error types
   let #(h, errors) = builtins_error.init(h, object_proto, function.prototype)
 
+  // Math global object
+  let #(h, math) = builtins_math.init(h, object_proto, function.prototype)
+
   #(
     h,
     Builtins(
@@ -57,6 +63,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       reference_error: errors.reference_error,
       range_error: errors.range_error,
       syntax_error: errors.syntax_error,
+      math:,
     ),
   )
 }

@@ -42,6 +42,7 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
               #("ReferenceError", JsObject(b.reference_error.constructor)),
               #("RangeError", JsObject(b.range_error.constructor)),
               #("SyntaxError", JsObject(b.syntax_error.constructor)),
+              #("Math", JsObject(b.math)),
             ])
           case vm.run_with_globals(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
@@ -1780,4 +1781,97 @@ pub fn test262_property_helper_pattern_test() {
      '' + desc.value + ',' + desc.enumerable + ',' + __hasOwnProperty(obj, 'a') + ',' + names.length",
     JsString("2,false,true,2"),
   )
+}
+
+// ============================================================================
+// Array.prototype.join tests
+// ============================================================================
+
+pub fn array_join_default_separator_test() {
+  assert_normal("[1,2,3].join()", JsString("1,2,3"))
+}
+
+pub fn array_join_custom_separator_test() {
+  assert_normal("[1,2,3].join('-')", JsString("1-2-3"))
+}
+
+pub fn array_join_empty_array_test() {
+  assert_normal("[].join()", JsString(""))
+}
+
+pub fn array_join_undefined_null_elements_test() {
+  assert_normal("[1,undefined,null,2].join(',')", JsString("1,,,2"))
+}
+
+pub fn array_join_single_element_test() {
+  assert_normal("[42].join(',')", JsString("42"))
+}
+
+pub fn array_join_empty_separator_test() {
+  assert_normal("[1,2,3].join('')", JsString("123"))
+}
+
+// ============================================================================
+// Array.prototype.push tests
+// ============================================================================
+
+pub fn array_push_basic_test() {
+  assert_normal(
+    "var a = [1,2]; a.push(3); '' + a[0] + ',' + a[1] + ',' + a[2] + ',' + a.length",
+    JsString("1,2,3,3"),
+  )
+}
+
+pub fn array_push_multiple_args_test() {
+  assert_normal("var a = []; a.push(1,2,3); a.length", JsNumber(Finite(3.0)))
+}
+
+pub fn array_push_returns_length_test() {
+  assert_normal("var a = [10]; a.push(20)", JsNumber(Finite(2.0)))
+}
+
+// ============================================================================
+// Object.prototype.propertyIsEnumerable tests
+// ============================================================================
+
+pub fn property_is_enumerable_own_enumerable_test() {
+  assert_normal("var o = {a: 1}; o.propertyIsEnumerable('a')", JsBool(True))
+}
+
+pub fn property_is_enumerable_non_enumerable_test() {
+  assert_normal(
+    "var o = {};
+     Object.defineProperty(o, 'x', {value: 1, enumerable: false});
+     o.propertyIsEnumerable('x')",
+    JsBool(False),
+  )
+}
+
+pub fn property_is_enumerable_inherited_test() {
+  // Inherited properties are NOT own, so should return false
+  assert_normal("var o = {}; o.propertyIsEnumerable('toString')", JsBool(False))
+}
+
+pub fn property_is_enumerable_missing_test() {
+  assert_normal("var o = {}; o.propertyIsEnumerable('nope')", JsBool(False))
+}
+
+// ============================================================================
+// Math.pow tests
+// ============================================================================
+
+pub fn math_pow_basic_test() {
+  assert_normal("Math.pow(2, 10)", JsNumber(Finite(1024.0)))
+}
+
+pub fn math_pow_zero_exponent_test() {
+  assert_normal("Math.pow(5, 0)", JsNumber(Finite(1.0)))
+}
+
+pub fn math_pow_fractional_test() {
+  assert_normal("Math.pow(4, 0.5)", JsNumber(Finite(2.0)))
+}
+
+pub fn math_pow_two_32_test() {
+  assert_normal("Math.pow(2, 32)", JsNumber(Finite(4_294_967_296.0)))
 }

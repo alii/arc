@@ -3,13 +3,15 @@ import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{Some}
+import gleam/string
 import lumen/vm/builtins/common.{
   type BuiltinType, BuiltinType, alloc_proto, set_constructor,
 }
 import lumen/vm/heap.{type Heap}
 import lumen/vm/value.{
-  type JsValue, type Ref, ArrayObject, JsBool, JsNumber, JsObject, JsString,
-  NativeArrayConstructor, NativeArrayIsArray, NativeFunction, ObjectSlot,
+  type JsValue, type Ref, ArrayObject, JsBool, JsNull, JsNumber, JsObject,
+  JsString, JsUndefined, NativeArrayConstructor, NativeArrayIsArray,
+  NativeArrayPrototypeJoin, NativeArrayPrototypePush, NativeFunction, ObjectSlot,
 }
 
 /// Set up Array.prototype and Array constructor.
@@ -71,6 +73,16 @@ pub fn init(
   }
 
   let h = set_constructor(h, array_proto, ctor_ref)
+
+  // Array.prototype.join — instance method
+  let #(h, join_ref) =
+    alloc_native_fn(h, function_proto, NativeArrayPrototypeJoin, "join", 1)
+  let h = add_method(h, array_proto, "join", join_ref)
+
+  // Array.prototype.push — instance method
+  let #(h, push_ref) =
+    alloc_native_fn(h, function_proto, NativeArrayPrototypePush, "push", 1)
+  let h = add_method(h, array_proto, "push", push_ref)
 
   #(h, BuiltinType(prototype: array_proto, constructor: ctor_ref))
 }
@@ -149,5 +161,145 @@ fn float_to_int(f: Float) -> Int {
   case f <. 0.0 {
     True -> 0 - float.truncate(float.negate(f))
     False -> float.truncate(f)
+  }
+}
+
+/// Allocate a native function object on the heap, root it, and return the ref.
+fn alloc_native_fn(
+  h: Heap,
+  function_proto: Ref,
+  native: value.NativeFn,
+  name: String,
+  length: Int,
+) -> #(Heap, Ref) {
+  let #(h, ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: NativeFunction(native),
+        properties: dict.from_list([
+          #("name", value.builtin_property(JsString(name))),
+          #(
+            "length",
+            value.builtin_property(JsNumber(value.Finite(int.to_float(length)))),
+          ),
+        ]),
+        elements: dict.new(),
+        prototype: Some(function_proto),
+      ),
+    )
+  let h = heap.root(h, ref)
+  #(h, ref)
+}
+
+/// Add a non-enumerable method property to an object on the heap.
+fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
+  case heap.read(h, obj_ref) {
+    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
+      let new_props =
+        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
+      heap.write(
+        h,
+        obj_ref,
+        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
+      )
+    }
+    _ -> h
+  }
+}
+
+/// Array.prototype.join(separator)
+/// Joins array elements into a string with the given separator (default ",").
+pub fn array_join(
+  this: JsValue,
+  args: List(JsValue),
+  heap: Heap,
+) -> #(Heap, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(heap, ref) {
+        Ok(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+          let separator = case args {
+            [JsUndefined, ..] -> ","
+            [sep_val, ..] -> value.to_js_string(sep_val)
+            [] -> ","
+          }
+          let result = join_elements(elements, 0, length, separator, [])
+          #(heap, Ok(JsString(result)))
+        }
+        _ -> #(heap, Ok(JsString("")))
+      }
+    _ -> #(heap, Ok(JsString("")))
+  }
+}
+
+/// Iterate elements 0..length-1, converting each to string.
+/// undefined/null → empty string per spec.
+fn join_elements(
+  elements: dict.Dict(Int, JsValue),
+  idx: Int,
+  length: Int,
+  separator: String,
+  acc: List(String),
+) -> String {
+  case idx >= length {
+    True -> acc |> list.reverse |> string.join(separator)
+    False -> {
+      let str = case dict.get(elements, idx) {
+        Ok(JsUndefined) | Ok(JsNull) | Error(_) -> ""
+        Ok(val) -> value.to_js_string(val)
+      }
+      join_elements(elements, idx + 1, length, separator, [str, ..acc])
+    }
+  }
+}
+
+/// Array.prototype.push(...items)
+/// Appends items to the array and returns the new length.
+pub fn array_push(
+  this: JsValue,
+  args: List(JsValue),
+  heap: Heap,
+) -> #(Heap, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(heap, ref) {
+        Ok(ObjectSlot(
+          kind: ArrayObject(length:),
+          properties:,
+          elements:,
+          prototype:,
+        )) -> {
+          let #(new_elements, new_length) =
+            push_elements(elements, args, length)
+          let heap =
+            heap.write(
+              heap,
+              ref,
+              ObjectSlot(
+                kind: ArrayObject(new_length),
+                properties:,
+                elements: new_elements,
+                prototype:,
+              ),
+            )
+          #(heap, Ok(JsNumber(value.Finite(int.to_float(new_length)))))
+        }
+        _ -> #(heap, Ok(JsNumber(value.Finite(0.0))))
+      }
+    _ -> #(heap, Ok(JsNumber(value.Finite(0.0))))
+  }
+}
+
+/// Insert args into elements dict starting at current length.
+fn push_elements(
+  elements: dict.Dict(Int, JsValue),
+  args: List(JsValue),
+  start: Int,
+) -> #(dict.Dict(Int, JsValue), Int) {
+  case args {
+    [] -> #(elements, start)
+    [val, ..rest] ->
+      push_elements(dict.insert(elements, start, val), rest, start + 1)
   }
 }
