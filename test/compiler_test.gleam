@@ -3,7 +3,7 @@ import arc/parser
 import arc/vm/builtins
 import arc/vm/heap
 import arc/vm/value.{
-  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
+  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, NaN,
 }
 import arc/vm/vm
 import gleam/dict
@@ -1874,4 +1874,287 @@ pub fn math_pow_fractional_test() {
 
 pub fn math_pow_two_32_test() {
   assert_normal("Math.pow(2, 32)", JsNumber(Finite(4_294_967_296.0)))
+}
+
+// ============================================================================
+// String.length and string indexing
+// ============================================================================
+
+pub fn string_length_test() {
+  assert_normal("'hello'.length", JsNumber(Finite(5.0)))
+}
+
+pub fn string_length_empty_test() {
+  assert_normal("''.length", JsNumber(Finite(0.0)))
+}
+
+pub fn string_index_test() {
+  assert_normal("'hello'[0]", JsString("h"))
+}
+
+pub fn string_index_last_test() {
+  assert_normal("'hello'[4]", JsString("o"))
+}
+
+pub fn string_index_out_of_bounds_test() {
+  assert_normal("'hello'[10]", JsUndefined)
+}
+
+pub fn string_index_negative_test() {
+  assert_normal("'hello'[-1]", JsUndefined)
+}
+
+pub fn string_length_via_var_test() {
+  assert_normal("var s = 'abc'; s.length", JsNumber(Finite(3.0)))
+}
+
+// ============================================================================
+// String.prototype methods
+// ============================================================================
+
+pub fn string_char_at_test() {
+  assert_normal("'hello'.charAt(1)", JsString("e"))
+}
+
+pub fn string_char_at_oob_test() {
+  assert_normal("'hello'.charAt(10)", JsString(""))
+}
+
+pub fn string_char_code_at_test() {
+  assert_normal("'A'.charCodeAt(0)", JsNumber(Finite(65.0)))
+}
+
+pub fn string_char_code_at_oob_test() {
+  assert_normal("'A'.charCodeAt(5)", JsNumber(NaN))
+}
+
+pub fn string_index_of_test() {
+  assert_normal("'hello world'.indexOf('world')", JsNumber(Finite(6.0)))
+}
+
+pub fn string_index_of_not_found_test() {
+  assert_normal("'hello'.indexOf('xyz')", JsNumber(Finite(-1.0)))
+}
+
+pub fn string_index_of_from_test() {
+  assert_normal("'abcabc'.indexOf('abc', 1)", JsNumber(Finite(3.0)))
+}
+
+pub fn string_last_index_of_test() {
+  assert_normal("'abcabc'.lastIndexOf('abc')", JsNumber(Finite(3.0)))
+}
+
+pub fn string_includes_test() {
+  assert_normal("'hello world'.includes('world')", JsBool(True))
+}
+
+pub fn string_includes_false_test() {
+  assert_normal("'hello'.includes('xyz')", JsBool(False))
+}
+
+pub fn string_starts_with_test() {
+  assert_normal("'hello'.startsWith('hel')", JsBool(True))
+}
+
+pub fn string_starts_with_false_test() {
+  assert_normal("'hello'.startsWith('ell')", JsBool(False))
+}
+
+pub fn string_ends_with_test() {
+  assert_normal("'hello'.endsWith('llo')", JsBool(True))
+}
+
+pub fn string_ends_with_false_test() {
+  assert_normal("'hello'.endsWith('hel')", JsBool(False))
+}
+
+pub fn string_slice_test() {
+  assert_normal("'hello'.slice(1, 3)", JsString("el"))
+}
+
+pub fn string_slice_negative_test() {
+  assert_normal("'hello'.slice(-3)", JsString("llo"))
+}
+
+pub fn string_slice_no_end_test() {
+  assert_normal("'hello'.slice(2)", JsString("llo"))
+}
+
+pub fn string_substring_test() {
+  assert_normal("'hello'.substring(1, 3)", JsString("el"))
+}
+
+pub fn string_substring_swap_test() {
+  // substring swaps args if start > end
+  assert_normal("'hello'.substring(3, 1)", JsString("el"))
+}
+
+pub fn string_to_lower_case_test() {
+  assert_normal("'HELLO'.toLowerCase()", JsString("hello"))
+}
+
+pub fn string_to_upper_case_test() {
+  assert_normal("'hello'.toUpperCase()", JsString("HELLO"))
+}
+
+pub fn string_trim_test() {
+  assert_normal("'  hello  '.trim()", JsString("hello"))
+}
+
+pub fn string_trim_start_test() {
+  assert_normal("'  hello  '.trimStart()", JsString("hello  "))
+}
+
+pub fn string_trim_end_test() {
+  assert_normal("'  hello  '.trimEnd()", JsString("  hello"))
+}
+
+pub fn string_prototype_concat_test() {
+  assert_normal("'hello'.concat(' ', 'world')", JsString("hello world"))
+}
+
+pub fn string_repeat_test() {
+  assert_normal("'ab'.repeat(3)", JsString("ababab"))
+}
+
+pub fn string_pad_start_test() {
+  assert_normal("'5'.padStart(3, '0')", JsString("005"))
+}
+
+pub fn string_pad_end_test() {
+  assert_normal("'5'.padEnd(3, '0')", JsString("500"))
+}
+
+pub fn string_at_test() {
+  assert_normal("'hello'.at(0)", JsString("h"))
+}
+
+pub fn string_at_negative_test() {
+  assert_normal("'hello'.at(-1)", JsString("o"))
+}
+
+pub fn string_at_oob_test() {
+  assert_normal("'hello'.at(10)", JsUndefined)
+}
+
+pub fn string_to_string_test() {
+  assert_normal("'hello'.toString()", JsString("hello"))
+}
+
+pub fn string_value_of_test() {
+  assert_normal("'hello'.valueOf()", JsString("hello"))
+}
+
+// ============================================================================
+// Math methods (abs, floor, ceil, round, trunc, sqrt, max, min, log, sin, cos)
+// ============================================================================
+
+pub fn math_abs_positive_test() {
+  assert_normal("Math.abs(5)", JsNumber(Finite(5.0)))
+}
+
+pub fn math_abs_negative_test() {
+  assert_normal("Math.abs(-5)", JsNumber(Finite(5.0)))
+}
+
+pub fn math_abs_zero_test() {
+  assert_normal("Math.abs(0)", JsNumber(Finite(0.0)))
+}
+
+pub fn math_floor_test() {
+  assert_normal("Math.floor(4.7)", JsNumber(Finite(4.0)))
+}
+
+pub fn math_floor_negative_test() {
+  assert_normal("Math.floor(-4.1)", JsNumber(Finite(-5.0)))
+}
+
+pub fn math_ceil_test() {
+  assert_normal("Math.ceil(4.1)", JsNumber(Finite(5.0)))
+}
+
+pub fn math_ceil_negative_test() {
+  assert_normal("Math.ceil(-4.7)", JsNumber(Finite(-4.0)))
+}
+
+pub fn math_round_test() {
+  assert_normal("Math.round(4.5)", JsNumber(Finite(5.0)))
+}
+
+pub fn math_round_down_test() {
+  assert_normal("Math.round(4.4)", JsNumber(Finite(4.0)))
+}
+
+pub fn math_round_negative_half_test() {
+  // JS: Math.round(-0.5) → 0 (rounds toward +Infinity)
+  assert_normal("Math.round(-0.5)", JsNumber(Finite(0.0)))
+}
+
+pub fn math_trunc_positive_test() {
+  assert_normal("Math.trunc(4.9)", JsNumber(Finite(4.0)))
+}
+
+pub fn math_trunc_negative_test() {
+  assert_normal("Math.trunc(-4.9)", JsNumber(Finite(-4.0)))
+}
+
+pub fn math_sqrt_test() {
+  assert_normal("Math.sqrt(9)", JsNumber(Finite(3.0)))
+}
+
+pub fn math_sqrt_negative_test() {
+  assert_normal("Math.sqrt(-1)", JsNumber(NaN))
+}
+
+pub fn math_max_test() {
+  assert_normal("Math.max(1, 3, 2)", JsNumber(Finite(3.0)))
+}
+
+pub fn math_min_test() {
+  assert_normal("Math.min(1, 3, 2)", JsNumber(Finite(1.0)))
+}
+
+pub fn math_max_no_args_test() {
+  assert_normal("Math.max()", JsNumber(value.NegInfinity))
+}
+
+pub fn math_min_no_args_test() {
+  assert_normal("Math.min()", JsNumber(value.Infinity))
+}
+
+// ============================================================================
+// Math constants
+// ============================================================================
+
+pub fn math_pi_test() {
+  assert_normal("Math.PI", JsNumber(Finite(3.141592653589793)))
+}
+
+pub fn math_e_test() {
+  assert_normal("Math.E", JsNumber(Finite(2.718281828459045)))
+}
+
+pub fn math_pi_computation_test() {
+  // Use PI in a computation
+  assert_normal("Math.floor(Math.PI)", JsNumber(Finite(3.0)))
+}
+
+// ============================================================================
+// String.prototype.split (returns array, test via .join or .length)
+// ============================================================================
+
+pub fn string_split_length_test() {
+  assert_normal("'a,b,c'.split(',').length", JsNumber(Finite(3.0)))
+}
+
+pub fn string_split_rejoin_test() {
+  assert_normal("'a,b,c'.split(',').join('-')", JsString("a-b-c"))
+}
+
+pub fn string_split_empty_sep_test() {
+  assert_normal("'abc'.split('').length", JsNumber(Finite(3.0)))
+}
+
+pub fn string_split_no_match_test() {
+  assert_normal("'abc'.split('x').length", JsNumber(Finite(1.0)))
 }

@@ -4,6 +4,7 @@ import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/function as builtins_function
 import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/object as builtins_object
+import arc/vm/builtins/string as builtins_string
 import arc/vm/heap.{type Heap}
 import arc/vm/value
 import gleam/dict
@@ -22,6 +23,7 @@ pub type Builtins {
     range_error: BuiltinType,
     syntax_error: BuiltinType,
     math: value.Ref,
+    string_proto: value.Ref,
   )
 }
 
@@ -52,6 +54,10 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Math global object
   let #(h, math) = builtins_math.init(h, object_proto, function.prototype)
 
+  // String.prototype (for primitive property access)
+  let #(h, string_proto) =
+    builtins_string.init(h, object_proto, function.prototype)
+
   #(
     h,
     Builtins(
@@ -64,6 +70,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       range_error: errors.range_error,
       syntax_error: errors.syntax_error,
       math:,
+      string_proto:,
     ),
   )
 }

@@ -79,6 +79,40 @@ pub type NativeFn {
   NativeArrayPrototypePush
   // Math methods
   NativeMathPow
+  NativeMathAbs
+  NativeMathFloor
+  NativeMathCeil
+  NativeMathRound
+  NativeMathTrunc
+  NativeMathSqrt
+  NativeMathMax
+  NativeMathMin
+  NativeMathLog
+  NativeMathSin
+  NativeMathCos
+  // String.prototype methods
+  NativeStringPrototypeCharAt
+  NativeStringPrototypeCharCodeAt
+  NativeStringPrototypeIndexOf
+  NativeStringPrototypeLastIndexOf
+  NativeStringPrototypeIncludes
+  NativeStringPrototypeStartsWith
+  NativeStringPrototypeEndsWith
+  NativeStringPrototypeSlice
+  NativeStringPrototypeSubstring
+  NativeStringPrototypeToLowerCase
+  NativeStringPrototypeToUpperCase
+  NativeStringPrototypeTrim
+  NativeStringPrototypeTrimStart
+  NativeStringPrototypeTrimEnd
+  NativeStringPrototypeSplit
+  NativeStringPrototypeConcat
+  NativeStringPrototypeToString
+  NativeStringPrototypeValueOf
+  NativeStringPrototypeRepeat
+  NativeStringPrototypePadStart
+  NativeStringPrototypePadEnd
+  NativeStringPrototypeAt
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.

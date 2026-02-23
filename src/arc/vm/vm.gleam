@@ -3,6 +3,7 @@ import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/object as builtins_object
+import arc/vm/builtins/string as builtins_string
 import arc/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
 import arc/vm/heap.{type Heap}
 import arc/vm/object
@@ -930,8 +931,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
           Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
         }
+        [JsString(s), ..rest] -> {
+          let val =
+            get_string_field(s, name, state.heap, state.builtins.string_proto)
+          Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+        }
         [_, ..rest] -> {
-          // Non-object, non-null/undefined: return undefined (simplified)
+          // Number/Bool/other primitives: no prototype yet
           Ok(State(..state, stack: [JsUndefined, ..rest], pc: state.pc + 1))
         }
         [] ->
@@ -1050,6 +1056,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             )
           Error(#(Thrown, err, heap))
         }
+        [key, JsString(s), ..rest] -> {
+          let val =
+            get_string_elem(s, key, state.heap, state.builtins.string_proto)
+          Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+        }
         [_, _, ..rest] -> {
           // Non-object: return undefined
           Ok(State(..state, stack: [JsUndefined, ..rest], pc: state.pc + 1))
@@ -1065,6 +1076,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         [key, JsObject(ref) as obj, ..rest] -> {
           let val = get_elem_value(state.heap, ref, key)
           Ok(State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1))
+        }
+        [key, JsString(s) as str, ..rest] -> {
+          let val =
+            get_string_elem(s, key, state.heap, state.builtins.string_proto)
+          Ok(State(..state, stack: [val, key, str, ..rest], pc: state.pc + 1))
         }
         _ ->
           Error(#(VmError(StackUnderflow("GetElem2")), JsUndefined, state.heap))
@@ -1125,6 +1141,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             Error(_) -> JsUndefined
           }
           Ok(State(..state, stack: [val, obj, ..rest], pc: state.pc + 1))
+        }
+        [JsString(s) as str, ..rest] -> {
+          let val =
+            get_string_field(s, name, state.heap, state.builtins.string_proto)
+          Ok(State(..state, stack: [val, str, ..rest], pc: state.pc + 1))
         }
         [other, ..rest] -> {
           // Non-object: property is undefined, keep object on stack
@@ -1958,6 +1979,68 @@ fn dispatch_native(
     value.NativeArrayPrototypePush ->
       builtins_array.array_push(this, args, state.heap)
     value.NativeMathPow -> builtins_math.math_pow(args, state.heap)
+    // Math methods
+    value.NativeMathAbs -> builtins_math.math_abs(args, state.heap)
+    value.NativeMathFloor -> builtins_math.math_floor(args, state.heap)
+    value.NativeMathCeil -> builtins_math.math_ceil(args, state.heap)
+    value.NativeMathRound -> builtins_math.math_round(args, state.heap)
+    value.NativeMathTrunc -> builtins_math.math_trunc(args, state.heap)
+    value.NativeMathSqrt -> builtins_math.math_sqrt(args, state.heap)
+    value.NativeMathMax -> builtins_math.math_max(args, state.heap)
+    value.NativeMathMin -> builtins_math.math_min(args, state.heap)
+    value.NativeMathLog -> builtins_math.math_log(args, state.heap)
+    value.NativeMathSin -> builtins_math.math_sin(args, state.heap)
+    value.NativeMathCos -> builtins_math.math_cos(args, state.heap)
+    // String.prototype methods
+    value.NativeStringPrototypeCharAt ->
+      builtins_string.string_char_at(this, args, state.heap)
+    value.NativeStringPrototypeCharCodeAt ->
+      builtins_string.string_char_code_at(this, args, state.heap)
+    value.NativeStringPrototypeIndexOf ->
+      builtins_string.string_index_of(this, args, state.heap)
+    value.NativeStringPrototypeLastIndexOf ->
+      builtins_string.string_last_index_of(this, args, state.heap)
+    value.NativeStringPrototypeIncludes ->
+      builtins_string.string_includes(this, args, state.heap)
+    value.NativeStringPrototypeStartsWith ->
+      builtins_string.string_starts_with(this, args, state.heap)
+    value.NativeStringPrototypeEndsWith ->
+      builtins_string.string_ends_with(this, args, state.heap)
+    value.NativeStringPrototypeSlice ->
+      builtins_string.string_slice(this, args, state.heap)
+    value.NativeStringPrototypeSubstring ->
+      builtins_string.string_substring(this, args, state.heap)
+    value.NativeStringPrototypeToLowerCase ->
+      builtins_string.string_to_lower_case(this, args, state.heap)
+    value.NativeStringPrototypeToUpperCase ->
+      builtins_string.string_to_upper_case(this, args, state.heap)
+    value.NativeStringPrototypeTrim ->
+      builtins_string.string_trim(this, args, state.heap)
+    value.NativeStringPrototypeTrimStart ->
+      builtins_string.string_trim_start(this, args, state.heap)
+    value.NativeStringPrototypeTrimEnd ->
+      builtins_string.string_trim_end(this, args, state.heap)
+    value.NativeStringPrototypeSplit ->
+      builtins_string.string_split(
+        this,
+        args,
+        state.heap,
+        state.builtins.array.prototype,
+      )
+    value.NativeStringPrototypeConcat ->
+      builtins_string.string_concat(this, args, state.heap)
+    value.NativeStringPrototypeToString ->
+      builtins_string.string_to_string(this, args, state.heap)
+    value.NativeStringPrototypeValueOf ->
+      builtins_string.string_value_of(this, args, state.heap)
+    value.NativeStringPrototypeRepeat ->
+      builtins_string.string_repeat(this, args, state.heap)
+    value.NativeStringPrototypePadStart ->
+      builtins_string.string_pad_start(this, args, state.heap)
+    value.NativeStringPrototypePadEnd ->
+      builtins_string.string_pad_end(this, args, state.heap)
+    value.NativeStringPrototypeAt ->
+      builtins_string.string_at(this, args, state.heap)
     // These are handled in call_native before reaching dispatch_native.
     // If we ever get here, it's a bug.
     value.NativeFunctionCall
@@ -1997,6 +2080,52 @@ fn pad_args(args: List(JsValue), arity: Int) -> List(JsValue) {
   case len >= arity {
     True -> list.take(args, arity)
     False -> list.append(args, list.repeat(JsUndefined, arity - len))
+  }
+}
+
+// ============================================================================
+// Primitive property access helpers
+// ============================================================================
+
+/// Look up a named property on a string primitive.
+/// Handles "length" directly, delegates the rest to String.prototype.
+fn get_string_field(
+  s: String,
+  name: String,
+  heap: Heap,
+  string_proto: Ref,
+) -> JsValue {
+  case name {
+    "length" -> JsNumber(Finite(int.to_float(string.length(s))))
+    _ ->
+      case object.get_property(heap, string_proto, name) {
+        Ok(v) -> v
+        Error(_) -> JsUndefined
+      }
+  }
+}
+
+/// Look up a computed property on a string primitive.
+/// Numeric index → character access, "length" → length, else String.prototype.
+fn get_string_elem(
+  s: String,
+  key: JsValue,
+  heap: Heap,
+  string_proto: Ref,
+) -> JsValue {
+  case to_array_index(key) {
+    Ok(idx) -> {
+      let len = string.length(s)
+      case idx >= 0 && idx < len {
+        True -> JsString(string.slice(s, idx, 1))
+        False -> JsUndefined
+      }
+    }
+    Error(_) ->
+      case key {
+        JsString(name) -> get_string_field(s, name, heap, string_proto)
+        _ -> JsUndefined
+      }
   }
 }
 
