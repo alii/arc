@@ -1,5 +1,6 @@
 import arc/vm/array
 import arc/vm/builtins
+import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/object
 import arc/vm/opcode.{
@@ -10,11 +11,30 @@ import arc/vm/opcode.{
   ShiftRight, StrictEq, StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void,
 }
 import arc/vm/value.{
-  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
+  AccessorProperty, DataProperty, Finite, JsBool, JsNull, JsNumber, JsObject,
+  JsString, JsUndefined,
 }
 import arc/vm/vm
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import gleam/result
+
+/// Test helper: read a data property walking the prototype chain.
+fn get_data(
+  h: heap.Heap,
+  ref: value.Ref,
+  key: String,
+) -> Result(value.JsValue, Nil) {
+  case object.get_own_property(h, ref, key) {
+    Some(DataProperty(value: val, ..)) -> Ok(val)
+    Some(AccessorProperty(..)) -> Error(Nil)
+    None ->
+      case heap.read(h, ref) {
+        Some(value.ObjectSlot(prototype: Some(proto_ref), ..)) ->
+          get_data(h, proto_ref, key)
+        _ -> Error(Nil)
+      }
+  }
+}
 
 fn make_func(
   bytecode: List(Op),
@@ -643,8 +663,7 @@ pub fn tdz_throws_reference_error_test() {
   let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
     vm.run(func, h, b)
   // Check it's a ReferenceError via prototype chain
-  let assert Ok(JsString("ReferenceError")) =
-    object.get_property(heap, ref, "name")
+  let assert Ok(JsString("ReferenceError")) = get_data(heap, ref, "name")
 }
 
 pub fn type_error_thrown_for_symbol_conversion_test() {
@@ -659,7 +678,7 @@ pub fn type_error_thrown_for_symbol_conversion_test() {
   let #(h, b) = builtins.init(h)
   let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
     vm.run(func, h, b)
-  let assert Ok(JsString("TypeError")) = object.get_property(heap, ref, "name")
+  let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 
 // ============================================================================
@@ -711,7 +730,7 @@ pub fn get_field_on_null_throws_type_error_test() {
   let #(h, b) = builtins.init(h)
   let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
     vm.run(func, h, b)
-  let assert Ok(JsString("TypeError")) = object.get_property(heap, ref, "name")
+  let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 
 pub fn get_field_on_undefined_throws_type_error_test() {
@@ -721,7 +740,7 @@ pub fn get_field_on_undefined_throws_type_error_test() {
   let #(h, b) = builtins.init(h)
   let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
     vm.run(func, h, b)
-  let assert Ok(JsString("TypeError")) = object.get_property(heap, ref, "name")
+  let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 
 // ============================================================================
@@ -734,14 +753,14 @@ pub fn prototype_chain_inherited_property_test() {
   // through the chain.
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, err_val) = object.make_type_error(h, b, "test error")
+  let #(h, err_val) = common.make_type_error(h, b, "test error")
   let assert JsObject(ref) = err_val
   // "message" is own property
-  let assert Ok(JsString("test error")) = object.get_property(h, ref, "message")
+  let assert Ok(JsString("test error")) = get_data(h, ref, "message")
   // "name" is inherited from TypeError.prototype
-  let assert Ok(JsString("TypeError")) = object.get_property(h, ref, "name")
+  let assert Ok(JsString("TypeError")) = get_data(h, ref, "name")
   // Property not in chain returns Error(Nil)
-  let assert Error(_) = object.get_property(h, ref, "nonexistent")
+  let assert Error(_) = get_data(h, ref, "nonexistent")
 }
 
 // ============================================================================

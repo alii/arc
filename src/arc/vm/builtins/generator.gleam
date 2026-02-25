@@ -45,6 +45,7 @@ pub fn init(
         symbol_properties:,
         elements: js_elements.new(),
         prototype: Some(iterator_proto),
+        extensible: True,
       ),
     )
   let h = heap.root(h, gen_proto)

@@ -60,6 +60,8 @@ pub type SavedFrame {
     /// The heap ref of the currently-executing function (needed by CallSuper
     /// to find the parent constructor via callee_ref.__proto__).
     callee_ref: Option(Ref),
+    /// Original args passed to this frame's call (for arguments object creation).
+    call_args: List(JsValue),
   )
 }
 
@@ -86,8 +88,12 @@ pub type State {
     /// The current `this` binding. Set by CallMethod/CallConstructor,
     /// defaults to JsUndefined for regular calls.
     this_binding: JsValue,
-    /// The heap ref of the currently-executing function (for derived constructors).
+    /// The heap ref of the currently-executing function (for derived constructors
+    /// and arguments.callee).
     callee_ref: Option(Ref),
+    /// Original arguments passed to the current function call. Consumed by
+    /// CreateArguments opcode to build the arguments object.
+    call_args: List(JsValue),
     /// Promise microtask job queue. Jobs enqueued during promise operations,
     /// drained after script completes (or by run_and_drain).
     job_queue: List(value.Job),
@@ -101,6 +107,11 @@ pub type State {
     /// via ToPrimitive with VM re-entry. Set by the VM executor.
     js_to_string: fn(State, JsValue) ->
       Result(#(String, State), #(JsValue, State)),
+    /// Re-entrant call mechanism — invoke a JS callable with (this, args).
+    /// Returns Ok(result, state) on normal completion, Error(thrown, state) on throw.
+    /// Set by the VM executor (wraps run_handler_with_this).
+    call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
+      Result(#(JsValue, State), #(JsValue, State)),
   )
 }
 
@@ -124,4 +135,41 @@ pub fn try_to_string(
     Ok(#(str, state)) -> cont(str, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
+}
+
+/// Call state.call_fn (re-entrant JS function call), handling the function field access.
+pub fn call(
+  state: State,
+  callee: JsValue,
+  this_val: JsValue,
+  args: List(JsValue),
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  let f = state.call_fn
+  f(state, callee, this_val, args)
+}
+
+/// Call a function or propagate thrown error. Use with `use` syntax:
+///   use result, state <- frame.try_call(state, callback, this_arg, [element, idx, arr])
+pub fn try_call(
+  state: State,
+  callee: JsValue,
+  this_val: JsValue,
+  args: List(JsValue),
+  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case call(state, callee, this_val, args) {
+    Ok(#(result, state)) -> cont(result, state)
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// Convenience wrapper: allocate a TypeError on the heap and return it as
+/// an Error result. Shared by all builtin modules to avoid boilerplate
+/// around common.make_type_error + state threading.
+pub fn type_error(
+  state: State,
+  msg: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
+  #(State(..state, heap:), Error(err))
 }

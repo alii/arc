@@ -102,7 +102,7 @@ pub fn init(
 
 /// Native error constructor: if (message !== undefined) this.message = message
 /// Creates a new error object with the proto embedded in the NativeFn.
-/// Error instance "message" IS enumerable (data_property).
+/// Per §20.5.6.3: "message" is writable+configurable but NOT enumerable.
 pub fn call_native(
   proto: Ref,
   args: List(JsValue),
@@ -115,7 +115,7 @@ pub fn call_native(
       alloc_error(
         state,
         proto,
-        dict.from_list([#("message", value.data_property(JsString(msg)))]),
+        dict.from_list([#("message", value.builtin_property(JsString(msg)))]),
       )
     [other, ..] ->
       case frame.to_string(state, other) {
@@ -123,7 +123,7 @@ pub fn call_native(
           alloc_error(
             state,
             proto,
-            dict.from_list([#("message", value.data_property(JsString(msg)))]),
+            dict.from_list([#("message", value.builtin_property(JsString(msg)))]),
           )
         Error(#(thrown, state)) -> #(state, Error(thrown))
       }
@@ -144,6 +144,7 @@ fn alloc_error(
         elements: js_elements.new(),
         prototype: Some(proto),
         symbol_properties: dict.new(),
+        extensible: True,
       ),
     )
   #(State(..state, heap:), Ok(JsObject(ref)))

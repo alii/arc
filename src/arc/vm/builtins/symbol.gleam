@@ -40,6 +40,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
         elements: js_elements.new(),
         prototype: Some(function_proto),
         symbol_properties: dict.new(),
+        extensible: True,
       ),
     )
   let h = heap.root(h, ctor_ref)

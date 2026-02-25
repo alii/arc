@@ -200,10 +200,15 @@ pub const prod_config = Config(..base_config, port: 80)
 
 ## Result vs Option
 
-- `Result(value, error)` with `Ok(value)` / `Error(reason)` - For operations that can fail
-- `Option(a)` with `Some(value)` / `None` - For optional values
+- `Option(a)` — a value that may or may not be present. The field/slot is empty, not that an operation failed.
+- `Result(a, ErrorType)` — an operation was attempted that can fail. Use a meaningful error type.
+- `Result(a, Nil)` — appropriate when there is exactly ONE obvious failure mode with no extra info (like `dict.get` — key not found). Gleam stdlib uses this pattern and it's fine there.
 
-**Important**: Use `Result(a, Nil)` for fallible operations with no meaningful error info, NOT `Option`. Reserve `Option` for truly optional data (optional function arguments, optional record fields).
+**In our own code, do NOT write `Result(a, Nil)`.** Our APIs are in flux. If a function has one failure mode today, it might have two tomorrow. Using `Option` for single-failure-mode lookups means that if we later change to `Result(a, SomeError)`, every callsite breaks at compile time — the compiler catches the API change. With `Result(a, Nil)`, callers write `Error(_)` which silently swallows new error types.
+
+**Rule of thumb**: If you're writing a new function and considering `Result(a, Nil)`, ask: is this an operation that failed, or is there just nothing here? If it's "nothing here" → `Option`. If it genuinely failed → define an error type, even a simple one.
+
+**When matching Error, always bind the value**: Write `Error(Nil)` not `Error(_)`, so that if the error type changes, the compiler catches it.
 
 ## gleam check
 

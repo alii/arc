@@ -1,3 +1,4 @@
+import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins, Builtins}
@@ -81,6 +82,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
         ]),
         elements: js_elements.new(),
         prototype: Some(object_proto),
+        extensible: True,
       ),
     )
   let h = heap.root(h, iterator_proto)
@@ -91,6 +93,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // Symbol constructor (callable, not new-able)
   let #(h, symbol) = builtins_symbol.init(h, object_proto, function.prototype)
+
+  // Arc global — engine-specific utilities (Arc.peek, etc.)
+  let #(h, arc) = builtins_arc.init(h, object_proto, function.prototype)
 
   #(
     h,
@@ -114,6 +119,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       promise:,
       generator:,
       symbol:,
+      arc:,
     ),
   )
 }
@@ -146,6 +152,7 @@ pub fn globals(
     #("isFinite", JsObject(b.is_finite)),
     #("Promise", JsObject(b.promise.constructor)),
     #("Symbol", JsObject(b.symbol)),
+    #("Arc", JsObject(b.arc)),
   ]
 
   // Create globalThis object with all global properties
@@ -164,6 +171,7 @@ pub fn globals(
         symbol_properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(b.object.prototype),
+        extensible: True,
       ),
     )
   let h = heap.root(h, global_ref)

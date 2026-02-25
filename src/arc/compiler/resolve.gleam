@@ -6,19 +6,21 @@
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
 import arc/vm/array
 import arc/vm/opcode.{
-  type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom, IrAwait,
-  IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor, IrCallMethod,
-  IrCallSuper, IrCloseVar, IrDefineAccessor, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup,
-  IrEnterFinally, IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetBoxed,
-  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
-  IrGetLocal, IrGetThis, IrInitialYield, IrIteratorClose, IrIteratorNext, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
-  IrMakeClosure, IrMarkGlobalConst, IrNewObject, IrObjectSpread, IrPop, IrPopTry,
-  IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal,
-  IrPutLocal, IrReturn, IrRot3, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar,
-  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp,
-  IrUnmarkGlobalConst, IrYield,
+  type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom,
+  IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole, IrArraySpread, IrAwait,
+  IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor,
+  IrCallConstructorApply, IrCallMethod, IrCallMethodApply, IrCallSuper,
+  IrCloseVar, IrCreateArguments, IrDefineAccessor, IrDefineAccessorComputed,
+  IrDefineField, IrDefineFieldComputed, IrDefineMethod, IrDeleteElem,
+  IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow, IrForInNext,
+  IrForInStart, IrGetBoxed, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
+  IrGetGlobal, IrGetIterator, IrGetLocal, IrGetThis, IrInitialYield,
+  IrIteratorClose, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrMarkGlobalConst,
+  IrNewObject, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
+  IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrRot3,
+  IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap,
+  IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp, IrUnmarkGlobalConst, IrYield,
 }
 import arc/vm/value.{type JsValue}
 import gleam/dict.{type Dict}
@@ -163,10 +165,20 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.DefineMethod(name), ..acc])
     [IrDefineAccessor(name, kind), ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineAccessor(name, kind), ..acc])
+    [IrDefineAccessorComputed(kind), ..rest] ->
+      resolve_ops(rest, labels, [opcode.DefineAccessorComputed(kind), ..acc])
     [IrObjectSpread, ..rest] ->
       resolve_ops(rest, labels, [opcode.ObjectSpread, ..acc])
     [IrArrayFrom(count), ..rest] ->
       resolve_ops(rest, labels, [opcode.ArrayFrom(count), ..acc])
+    [IrArrayFromWithHoles(count, holes), ..rest] ->
+      resolve_ops(rest, labels, [opcode.ArrayFromWithHoles(count, holes), ..acc])
+    [IrArrayPush, ..rest] ->
+      resolve_ops(rest, labels, [opcode.ArrayPush, ..acc])
+    [IrArrayPushHole, ..rest] ->
+      resolve_ops(rest, labels, [opcode.ArrayPushHole, ..acc])
+    [IrArraySpread, ..rest] ->
+      resolve_ops(rest, labels, [opcode.ArraySpread, ..acc])
 
     // Calls
     [IrCall(arity), ..rest] ->
@@ -177,6 +189,10 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.CallConstructor(arity), ..acc])
     [IrCallApply, ..rest] ->
       resolve_ops(rest, labels, [opcode.CallApply, ..acc])
+    [IrCallMethodApply, ..rest] ->
+      resolve_ops(rest, labels, [opcode.CallMethodApply, ..acc])
+    [IrCallConstructorApply, ..rest] ->
+      resolve_ops(rest, labels, [opcode.CallConstructorApply, ..acc])
     [IrReturn, ..rest] -> resolve_ops(rest, labels, [opcode.Return, ..acc])
 
     // Exception handling
@@ -233,6 +249,10 @@ fn resolve_ops(
 
     // Async
     [IrAwait, ..rest] -> resolve_ops(rest, labels, [opcode.Await, ..acc])
+
+    // Arguments object
+    [IrCreateArguments, ..rest] ->
+      resolve_ops(rest, labels, [opcode.CreateArguments, ..acc])
 
     // REPL const tracking
     [IrMarkGlobalConst(name), ..rest] ->

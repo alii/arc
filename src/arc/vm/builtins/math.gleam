@@ -57,6 +57,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
         elements: js_elements.new(),
         prototype: Some(object_proto),
         symbol_properties:,
+        extensible: True,
       ),
     )
   let h = heap.root(h, math_ref)

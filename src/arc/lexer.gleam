@@ -752,7 +752,7 @@ fn validate_unicode_escape(
                     // Total skip: \ u { digits } = 2 + 1 + digit_count + 1
                     False -> Ok(digit_count + 4)
                   }
-                Error(_) -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
+                Error(Nil) -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
               }
             }
             _ -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
@@ -1279,7 +1279,7 @@ fn decode_identifier_escapes(raw: String) -> String {
 fn decode_id_escapes_loop(remaining: String, acc: String) -> String {
   // Jump to the next backslash instead of iterating char-by-char
   case string.split_once(remaining, "\\") {
-    Error(_) -> acc <> remaining
+    Error(Nil) -> acc <> remaining
     Ok(#(before, after)) -> {
       // after starts just past the backslash
       case after {
@@ -1295,13 +1295,13 @@ fn decode_id_escapes_loop(remaining: String, acc: String) -> String {
                       decode_id_escapes_loop(after_brace, acc <> before <> char)
                     }
                     // Already validated, shouldn't happen
-                    Error(_) ->
+                    Error(Nil) ->
                       decode_id_escapes_loop(after_brace, acc <> before)
                   }
                 // Already validated
-                Error(_) -> decode_id_escapes_loop(after_brace, acc <> before)
+                Error(Nil) -> decode_id_escapes_loop(after_brace, acc <> before)
               }
-            Error(_) -> acc <> before
+            Error(Nil) -> acc <> before
           }
         }
         "u" <> rest -> {
@@ -1315,9 +1315,10 @@ fn decode_id_escapes_loop(remaining: String, acc: String) -> String {
                   let char = string.from_utf_codepoints([codepoint])
                   decode_id_escapes_loop(after_digits, acc <> before <> char)
                 }
-                Error(_) -> decode_id_escapes_loop(after_digits, acc <> before)
+                Error(Nil) ->
+                  decode_id_escapes_loop(after_digits, acc <> before)
               }
-            Error(_) -> decode_id_escapes_loop(after_digits, acc <> before)
+            Error(Nil) -> decode_id_escapes_loop(after_digits, acc <> before)
           }
         }
         // Shouldn't happen (already validated)
@@ -1406,7 +1407,7 @@ fn validate_identifier_escape(
                             False -> Error(InvalidUnicodeEscapeSequence(pos))
                           }
                       }
-                    Error(_) -> Error(InvalidUnicodeEscapeSequence(pos))
+                    Error(Nil) -> Error(InvalidUnicodeEscapeSequence(pos))
                   }
                 }
                 _ -> Error(InvalidUnicodeEscapeSequence(pos))
@@ -1803,7 +1804,7 @@ fn keyword_or_identifier(word: String) -> TokenKind {
 /// Returns 2 for \r\n (treated as single line ending).
 fn char_width_at(bytes: BitArray, pos: Int) -> Int {
   case bit_array.slice(bytes, pos, 1) {
-    Error(_) -> 0
+    Error(Nil) -> 0
     Ok(<<byte>>) ->
       case byte {
         0x0D ->

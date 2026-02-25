@@ -5,15 +5,18 @@
 /// jump targets use integer label IDs (IrJump). These are resolved in Phase 2 and 3.
 import arc/ast
 import arc/vm/opcode.{
-  type IrOp, IrArrayFrom, IrAwait, IrBinOp, IrCallConstructor, IrCallMethod,
-  IrCallSuper, IrDefineField, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup,
+  type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
+  IrArraySpread, IrAwait, IrBinOp, IrCallApply, IrCallConstructor,
+  IrCallConstructorApply, IrCallMethod, IrCallMethodApply, IrCallSuper,
+  IrCreateArguments, IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup,
   IrEnterFinally, IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetElem,
   IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrInitialYield,
   IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrLeaveFinally, IrMakeClosure, IrMarkGlobalConst, IrNewObject, IrPop, IrPopTry,
-  IrPushConst, IrPushTry, IrPutElem, IrPutField, IrReturn, IrScopeGetVar,
-  IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
-  IrTypeOf, IrUnaryOp, IrUnmarkGlobalConst, IrYield,
+  IrLeaveFinally, IrMakeClosure, IrMarkGlobalConst, IrNewObject, IrObjectSpread,
+  IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem, IrPutField, IrReturn,
+  IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap,
+  IrThrow, IrTypeOf, IrUnaryOp, IrUnmarkGlobalConst, IrYield,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -89,6 +92,10 @@ pub opaque type Emitter {
     /// Set by LabeledStatement before emitting a loop body.
     /// Consumed by push_loop to attach the label to the LoopContext.
     pending_label: Option(String),
+    /// True if the current compilation unit is strict. Inherited by child
+    /// functions; can be upgraded (never downgraded) by a "use strict"
+    /// directive in the function body prologue. Classes force strict.
+    strict: Bool,
   )
 }
 
@@ -104,11 +111,17 @@ pub type EmitError {
 // ============================================================================
 
 /// Emit IR for a list of top-level statements (script body).
-/// Returns the emitter ops, constants, and child functions.
+/// Returns the emitter ops, constants, child functions, and script strictness.
 pub fn emit_program(
   stmts: List(ast.Statement),
 ) -> Result(
-  #(List(EmitterOp), List(JsValue), Dict(JsValue, Int), List(CompiledChild)),
+  #(
+    List(EmitterOp),
+    List(JsValue),
+    Dict(JsValue, Int),
+    List(CompiledChild),
+    Bool,
+  ),
   EmitError,
 ) {
   emit_program_common(stmts, True, emit_stmt, emit_stmt_tail)
@@ -120,7 +133,13 @@ pub fn emit_program(
 pub fn emit_program_repl(
   stmts: List(ast.Statement),
 ) -> Result(
-  #(List(EmitterOp), List(JsValue), Dict(JsValue, Int), List(CompiledChild)),
+  #(
+    List(EmitterOp),
+    List(JsValue),
+    Dict(JsValue, Int),
+    List(CompiledChild),
+    Bool,
+  ),
   EmitError,
 ) {
   emit_program_common(stmts, False, emit_stmt_repl, emit_stmt_tail_repl)
@@ -135,10 +154,18 @@ fn emit_program_common(
   emit_non_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
   emit_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
 ) -> Result(
-  #(List(EmitterOp), List(JsValue), Dict(JsValue, Int), List(CompiledChild)),
+  #(
+    List(EmitterOp),
+    List(JsValue),
+    Dict(JsValue, Int),
+    List(CompiledChild),
+    Bool,
+  ),
   EmitError,
 ) {
-  let e = new_emitter()
+  // Detect top-level strict directive so child functions inherit.
+  let script_strict = has_use_strict_directive(stmts)
+  let e = Emitter(..new_emitter(), strict: script_strict)
 
   // Wrap in function scope
   let e = emit_op(e, EnterScope(FunctionScope))
@@ -168,7 +195,8 @@ fn emit_program_common(
   use e <- result.try(emit_program_body_with(stmts, e, emit_non_tail, emit_tail))
 
   let e = emit_op(e, LeaveScope)
-  Ok(finish(e))
+  let #(code, constants, constants_map, children) = finish(e)
+  Ok(#(code, constants, constants_map, children, script_strict))
 }
 
 /// Emit program body using provided statement emitters.
@@ -288,7 +316,22 @@ fn new_emitter() -> Emitter {
     functions: [],
     next_func: 0,
     pending_label: None,
+    strict: False,
   )
+}
+
+/// Check if a statement list begins with a Use Strict Directive.
+/// ES2024 section 11.2.1 "Directive Prologues and the Use Strict Directive":
+/// the directive prologue is the leading run of ExpressionStatements whose
+/// expression is a string literal. "use strict" anywhere in that run makes
+/// the function strict. We stop at the first non-string ExpressionStatement.
+fn has_use_strict_directive(stmts: List(ast.Statement)) -> Bool {
+  case stmts {
+    [ast.ExpressionStatement(ast.StringExpression("use strict")), ..] -> True
+    [ast.ExpressionStatement(ast.StringExpression(_)), ..rest] ->
+      has_use_strict_directive(rest)
+    _ -> False
+  }
 }
 
 fn emit_op(e: Emitter, op: EmitterOp) -> Emitter {
@@ -302,7 +345,7 @@ fn emit_ir(e: Emitter, op: IrOp) -> Emitter {
 fn add_constant(e: Emitter, val: JsValue) -> #(Emitter, Int) {
   case dict.get(e.constants_map, val) {
     Ok(idx) -> #(e, idx)
-    Error(_) -> {
+    Error(Nil) -> {
       let idx = e.next_const
       let e =
         Emitter(
@@ -620,6 +663,273 @@ fn collect_hoisted_funcs(
   })
 }
 
+// ============================================================================
+// `arguments` usage detection
+// ============================================================================
+//
+// We walk the AST looking for `Identifier("arguments")`. The walk recurses
+// into arrow function bodies (arrows inherit the enclosing `arguments`
+// binding, just like `this`) but does NOT recurse into non-arrow function
+// bodies, which have their own separate `arguments` binding.
+//
+// This is a compile-time scan so functions that never reference `arguments`
+// pay zero allocation cost.
+
+fn stmts_reference_arguments(stmts: List(ast.Statement)) -> Bool {
+  list.any(stmts, stmt_references_arguments)
+}
+
+fn stmt_references_arguments(stmt: ast.Statement) -> Bool {
+  case stmt {
+    ast.EmptyStatement
+    | ast.DebuggerStatement
+    | ast.BreakStatement(_)
+    | ast.ContinueStatement(_) -> False
+
+    ast.ExpressionStatement(expr) -> expr_references_arguments(expr)
+    ast.BlockStatement(body) -> stmts_reference_arguments(body)
+    ast.ReturnStatement(arg) -> opt_expr_references_arguments(arg)
+    ast.ThrowStatement(arg) -> expr_references_arguments(arg)
+
+    ast.IfStatement(cond, cons, alt) ->
+      expr_references_arguments(cond)
+      || stmt_references_arguments(cons)
+      || opt_stmt_references_arguments(alt)
+
+    ast.WhileStatement(cond, body) ->
+      expr_references_arguments(cond) || stmt_references_arguments(body)
+    ast.DoWhileStatement(cond, body) ->
+      expr_references_arguments(cond) || stmt_references_arguments(body)
+
+    ast.ForStatement(init, cond, upd, body) ->
+      opt_for_init_references_arguments(init)
+      || opt_expr_references_arguments(cond)
+      || opt_expr_references_arguments(upd)
+      || stmt_references_arguments(body)
+
+    ast.ForInStatement(left, right, body)
+    | ast.ForOfStatement(left, right, body, ..) ->
+      for_init_references_arguments(left)
+      || expr_references_arguments(right)
+      || stmt_references_arguments(body)
+
+    ast.SwitchStatement(disc, cases) ->
+      expr_references_arguments(disc)
+      || list.any(cases, fn(c) {
+        let ast.SwitchCase(cond, cons) = c
+        opt_expr_references_arguments(cond) || stmts_reference_arguments(cons)
+      })
+
+    ast.TryStatement(block, handler, finalizer) ->
+      stmt_references_arguments(block)
+      || case handler {
+        Some(ast.CatchClause(_, body)) -> stmt_references_arguments(body)
+        None -> False
+      }
+      || opt_stmt_references_arguments(finalizer)
+
+    ast.LabeledStatement(_, body) -> stmt_references_arguments(body)
+    ast.WithStatement(obj, body) ->
+      expr_references_arguments(obj) || stmt_references_arguments(body)
+
+    ast.VariableDeclaration(_, decls) ->
+      list.any(decls, fn(d) {
+        let ast.VariableDeclarator(id, init) = d
+        pattern_references_arguments(id) || opt_expr_references_arguments(init)
+      })
+
+    // Non-arrow function declaration: has its own `arguments` binding, do NOT
+    // recurse into body. But DO check default param expressions (they run in
+    // the enclosing scope before the new function's arguments is created).
+    // Actually — spec-wise, default param exprs of a nested function have
+    // access to the NESTED function's arguments, not the enclosing one.
+    // So fully skip.
+    ast.FunctionDeclaration(_, _, _, _, _) -> False
+
+    ast.ClassDeclaration(_, super_class, body) ->
+      opt_expr_references_arguments(super_class)
+      || class_body_references_arguments(body)
+  }
+}
+
+fn expr_references_arguments(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.Identifier("arguments") -> True
+    ast.Identifier(_) -> False
+
+    ast.NumberLiteral(_)
+    | ast.StringExpression(_)
+    | ast.BooleanLiteral(_)
+    | ast.NullLiteral
+    | ast.UndefinedExpression
+    | ast.ThisExpression
+    | ast.SuperExpression
+    | ast.MetaProperty(_, _)
+    | ast.RegExpLiteral(_, _) -> False
+
+    ast.BinaryExpression(_, l, r) | ast.LogicalExpression(_, l, r) ->
+      expr_references_arguments(l) || expr_references_arguments(r)
+
+    ast.UnaryExpression(_, _, arg)
+    | ast.UpdateExpression(_, _, arg)
+    | ast.AwaitExpression(arg)
+    | ast.SpreadElement(arg)
+    | ast.ImportExpression(arg) -> expr_references_arguments(arg)
+
+    ast.YieldExpression(arg, _) -> opt_expr_references_arguments(arg)
+
+    ast.AssignmentExpression(_, l, r) ->
+      expr_references_arguments(l) || expr_references_arguments(r)
+
+    ast.CallExpression(callee, args)
+    | ast.OptionalCallExpression(callee, args)
+    | ast.NewExpression(callee, args) ->
+      expr_references_arguments(callee)
+      || list.any(args, expr_references_arguments)
+
+    ast.MemberExpression(obj, prop, computed)
+    | ast.OptionalMemberExpression(obj, prop, computed) ->
+      expr_references_arguments(obj)
+      || case computed {
+        True -> expr_references_arguments(prop)
+        False -> False
+      }
+
+    ast.ConditionalExpression(c, t, a) ->
+      expr_references_arguments(c)
+      || expr_references_arguments(t)
+      || expr_references_arguments(a)
+
+    ast.ArrayExpression(elems) ->
+      list.any(elems, fn(e) {
+        case e {
+          Some(ex) -> expr_references_arguments(ex)
+          None -> False
+        }
+      })
+
+    ast.ObjectExpression(props) ->
+      list.any(props, fn(p) {
+        case p {
+          ast.Property(key, value, _, computed, _, _) ->
+            case computed {
+              True -> expr_references_arguments(key)
+              False -> False
+            }
+            || expr_references_arguments(value)
+          ast.SpreadProperty(arg) -> expr_references_arguments(arg)
+        }
+      })
+
+    ast.SequenceExpression(exprs) -> list.any(exprs, expr_references_arguments)
+
+    ast.TemplateLiteral(_, exprs) -> list.any(exprs, expr_references_arguments)
+
+    ast.TaggedTemplateExpression(tag, quasi) ->
+      expr_references_arguments(tag) || expr_references_arguments(quasi)
+
+    // Non-arrow function expression: has its own `arguments`, skip entirely.
+    ast.FunctionExpression(_, _, _, _, _) -> False
+
+    // Arrow: inherits enclosing `arguments`, recurse into body AND default
+    // param values (arrows have no own binding so `arguments` in defaults
+    // also refers to the enclosing scope).
+    ast.ArrowFunctionExpression(params, arrow_body, _) ->
+      list.any(params, pattern_references_arguments)
+      || case arrow_body {
+        ast.ArrowBodyExpression(e) -> expr_references_arguments(e)
+        ast.ArrowBodyBlock(s) -> stmt_references_arguments(s)
+      }
+
+    ast.ClassExpression(_, super_class, body) ->
+      opt_expr_references_arguments(super_class)
+      || class_body_references_arguments(body)
+  }
+}
+
+fn opt_expr_references_arguments(e: Option(ast.Expression)) -> Bool {
+  case e {
+    Some(ex) -> expr_references_arguments(ex)
+    None -> False
+  }
+}
+
+fn opt_stmt_references_arguments(s: Option(ast.Statement)) -> Bool {
+  case s {
+    Some(stmt) -> stmt_references_arguments(stmt)
+    None -> False
+  }
+}
+
+fn for_init_references_arguments(init: ast.ForInit) -> Bool {
+  case init {
+    ast.ForInitExpression(e) -> expr_references_arguments(e)
+    ast.ForInitDeclaration(s) -> stmt_references_arguments(s)
+    ast.ForInitPattern(p) -> pattern_references_arguments(p)
+  }
+}
+
+fn opt_for_init_references_arguments(init: Option(ast.ForInit)) -> Bool {
+  case init {
+    Some(i) -> for_init_references_arguments(i)
+    None -> False
+  }
+}
+
+fn pattern_references_arguments(p: ast.Pattern) -> Bool {
+  // Patterns only contain expressions in default-value positions (AssignmentPattern)
+  // and in computed object-pattern keys.
+  case p {
+    ast.IdentifierPattern(_) -> False
+    ast.RestElement(inner) -> pattern_references_arguments(inner)
+    ast.AssignmentPattern(left, right) ->
+      pattern_references_arguments(left) || expr_references_arguments(right)
+    ast.ArrayPattern(elems) ->
+      list.any(elems, fn(e) {
+        case e {
+          Some(pat) -> pattern_references_arguments(pat)
+          None -> False
+        }
+      })
+    ast.ObjectPattern(props) ->
+      list.any(props, fn(prop) {
+        case prop {
+          ast.PatternProperty(key, value, computed, _) ->
+            case computed {
+              True -> expr_references_arguments(key)
+              False -> False
+            }
+            || pattern_references_arguments(value)
+          ast.RestProperty(inner) -> pattern_references_arguments(inner)
+        }
+      })
+  }
+}
+
+fn class_body_references_arguments(body: List(ast.ClassElement)) -> Bool {
+  // Class methods are non-arrow functions — they have their own `arguments`.
+  // We only need to scan: computed keys, field initialisers (which spec-wise
+  // run in a scope where `arguments` from enclosing is NOT visible — but in
+  // practice they run as method bodies on the instance; skip for safety),
+  // and static blocks (which DO have their own `arguments` forbidden… skip).
+  // For the detector's purposes, only computed keys matter here.
+  list.any(body, fn(el) {
+    case el {
+      ast.ClassMethod(key, _, _, _, computed) ->
+        case computed {
+          True -> expr_references_arguments(key)
+          False -> False
+        }
+      ast.ClassField(key, _, _, computed) ->
+        case computed {
+          True -> expr_references_arguments(key)
+          False -> False
+        }
+      ast.StaticBlock(_) -> False
+    }
+  })
+}
+
 /// Compile a function body into a CompiledChild.
 fn compile_function_body(
   parent: Emitter,
@@ -630,8 +940,23 @@ fn compile_function_body(
   is_generator: Bool,
   is_async: Bool,
 ) -> CompiledChild {
-  // Use a fresh emitter inheriting nothing from parent (except label counter for uniqueness)
-  let e = Emitter(..new_emitter(), next_label: parent.next_label)
+  let stmts = case body {
+    ast.BlockStatement(s) -> s
+    other -> [other]
+  }
+
+  // Strictness: inherit from parent, upgrade if body prologue has "use strict".
+  // (Classes force strict at the call site by passing a strict parent emitter.)
+  let child_strict = parent.strict || has_use_strict_directive(stmts)
+
+  // Use a fresh emitter inheriting nothing from parent (except label counter
+  // for uniqueness, and strictness).
+  let e =
+    Emitter(
+      ..new_emitter(),
+      next_label: parent.next_label,
+      strict: child_strict,
+    )
 
   let e = emit_op(e, EnterScope(FunctionScope))
 
@@ -652,6 +977,31 @@ fn compile_function_body(
       }
     })
 
+  // Detect whether the function body references `arguments`. We scan the body
+  // AND the parameter patterns (default-value expressions can reference
+  // `arguments`), recursing into arrow functions (which inherit the enclosing
+  // arguments binding) but NOT into non-arrow nested functions (which have
+  // their own). Only non-arrow functions get the binding — arrows resolve
+  // `arguments` as a free variable captured from the enclosing scope.
+  let uses_args = case is_arrow {
+    True -> False
+    False ->
+      list.any(params, pattern_references_arguments)
+      || stmts_reference_arguments(stmts)
+  }
+  // Declare `arguments` immediately after params so it's local; emit
+  // IrCreateArguments to build the object at runtime from state.call_args,
+  // then store it into the local slot. This must happen before parameter
+  // destructuring so default-value expressions can use `arguments`.
+  let e = case uses_args {
+    True -> {
+      let e = emit_op(e, DeclareVar("arguments", VarBinding))
+      let e = emit_ir(e, IrCreateArguments)
+      emit_ir(e, IrScopePutVar("arguments"))
+    }
+    False -> e
+  }
+
   // Phase 2: Emit destructuring for non-identifier params
   let e =
     list.fold(destructured_params, e, fn(e, dp) {
@@ -662,11 +1012,6 @@ fn compile_function_body(
         Error(_) -> e
       }
     })
-
-  let stmts = case body {
-    ast.BlockStatement(s) -> s
-    other -> [other]
-  }
 
   // Hoisting for the function body
   let hoisted_vars = collect_hoisted_vars(stmts)
@@ -716,7 +1061,7 @@ fn compile_function_body(
     constants:,
     constants_map:,
     functions: children,
-    is_strict: False,
+    is_strict: child_strict,
     is_arrow:,
     is_derived_constructor: False,
     is_generator:,
@@ -1343,26 +1688,75 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     }
 
     // super(args) — call parent constructor
-    ast.CallExpression(ast.SuperExpression, args) -> {
-      use e <- result.map(list.try_fold(args, e, emit_expr))
-      emit_ir(e, IrCallSuper(list.length(args)))
-    }
+    ast.CallExpression(ast.SuperExpression, args) ->
+      // super(...) spread is rare and CallSuper's logic is complex (derived
+      // constructor chain, this_binding TDZ). Defer spread-super; for now,
+      // detect and error cleanly rather than miscompiling.
+      case has_spread_arg(args) {
+        True -> Error(Unsupported("spread in super() call"))
+        False -> {
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          emit_ir(e, IrCallSuper(list.length(args)))
+        }
+      }
 
-    // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding
+    // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding.
+    // Spread path: build args array after GetField2, then IrCallMethodApply.
     ast.CallExpression(
       ast.MemberExpression(obj, ast.Identifier(method_name), False),
       args,
     ) -> {
       use e <- result.try(emit_expr(e, obj))
       let e = emit_ir(e, IrGetField2(method_name))
-      use e <- result.map(list.try_fold(args, e, emit_expr))
-      emit_ir(e, IrCallMethod(method_name, list.length(args)))
+      case has_spread_arg(args) {
+        False -> {
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          emit_ir(e, IrCallMethod(method_name, list.length(args)))
+        }
+        True -> {
+          // Stack after GetField2: [method, receiver, ...]
+          // Build args array on top, then CallMethodApply pops [args, method, receiver].
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallMethodApply)
+        }
+      }
+    }
+    // Computed method call: obj[key](args) — must bind `this` to obj.
+    // GetElem2 leaves [method, key, receiver]; we shuffle to [method, receiver]
+    // via Swap+Pop so CallMethod sees the same shape as the dot-access path.
+    ast.CallExpression(ast.MemberExpression(obj, key, True), args) -> {
+      use e <- result.try(emit_expr(e, obj))
+      use e <- result.try(emit_expr(e, key))
+      let e = emit_ir(e, IrGetElem2)
+      // [method, key, receiver] → Swap → [key, method, receiver] → Pop → [method, receiver]
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPop)
+      case has_spread_arg(args) {
+        False -> {
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          // Static name unknown for computed access; CallMethod ignores name
+          // at runtime anyway — it's informational only.
+          emit_ir(e, IrCallMethod("[computed]", list.length(args)))
+        }
+        True -> {
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallMethodApply)
+        }
+      }
     }
     // Regular call expression
     ast.CallExpression(callee, args) -> {
       use e <- result.try(emit_expr(e, callee))
-      use e <- result.map(list.try_fold(args, e, emit_expr))
-      emit_ir(e, opcode.IrCall(list.length(args)))
+      case has_spread_arg(args) {
+        False -> {
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          emit_ir(e, opcode.IrCall(list.length(args)))
+        }
+        True -> {
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallApply)
+        }
+      }
     }
 
     // Conditional (ternary)
@@ -1384,28 +1778,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Object literal
     ast.ObjectExpression(properties) -> {
       let e = emit_ir(e, IrNewObject)
-      list.try_fold(properties, e, fn(e, prop) {
-        case prop {
-          ast.Property(
-            key: ast.Identifier(name),
-            value:,
-            kind: ast.Init,
-            computed: False,
-            ..,
-          )
-          | ast.Property(
-              key: ast.StringExpression(name),
-              value:,
-              kind: ast.Init,
-              computed: False,
-              ..,
-            ) -> {
-            use e <- result.map(emit_expr(e, value))
-            emit_ir(e, IrDefineField(name))
-          }
-          _ -> Error(Unsupported("computed/getter/setter property"))
-        }
-      })
+      list.try_fold(properties, e, emit_object_property)
     }
 
     // Member expression (dot access)
@@ -1461,9 +1834,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       use e <- result.try(emit_expr(e, callee))
       let e = emit_ir(e, IrDup)
       let e = emit_ir(e, IrJumpIfNullish(nullish_label))
-      let arity = list.length(args)
-      use e <- result.try(list.try_fold(args, e, emit_expr))
-      let e = emit_ir(e, opcode.IrCall(arity))
+      use e <- result.try(case has_spread_arg(args) {
+        False -> {
+          let arity = list.length(args)
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          emit_ir(e, opcode.IrCall(arity))
+        }
+        True -> {
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallApply)
+        }
+      })
       let e = emit_ir(e, IrJump(end_label))
       let e = emit_ir(e, IrLabel(nullish_label))
       let e = emit_ir(e, IrPop)
@@ -1473,19 +1854,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     }
 
     // Array literal
-    ast.ArrayExpression(elements) -> {
-      let count = list.length(elements)
-      use e <- result.map(
-        list.try_fold(elements, e, fn(e, elem) {
-          case elem {
-            Some(expr) -> emit_expr(e, expr)
-            // Hole in array — push undefined
-            None -> Ok(push_const(e, JsUndefined))
-          }
-        }),
-      )
-      emit_ir(e, IrArrayFrom(count))
-    }
+    // Fast path (no spread, no holes): push N elements, IrArrayFrom(N).
+    // Hole path (no spread, has holes): push only non-hole values,
+    //   IrArrayFromWithHoles(N, hole_indices) builds a sparse array.
+    // Slow path (any spread): push prefix, then incrementally
+    //   IrArrayPush / IrArrayPushHole / IrArraySpread the rest.
+    //   Mirrors QuickJS's OP_append approach.
+    ast.ArrayExpression(elements) ->
+      case has_spread_element(elements) {
+        False -> emit_array_no_spread(e, elements)
+        True -> emit_array_with_spread(e, elements)
+      }
 
     // Function expression
     ast.FunctionExpression(name, params, body, is_gen, is_async) -> {
@@ -1514,8 +1893,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // New expression: new Foo(args)
     ast.NewExpression(callee, args) -> {
       use e <- result.try(emit_expr(e, callee))
-      use e <- result.map(list.try_fold(args, e, emit_expr))
-      emit_ir(e, IrCallConstructor(list.length(args)))
+      case has_spread_arg(args) {
+        False -> {
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          emit_ir(e, IrCallConstructor(list.length(args)))
+        }
+        True -> {
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallConstructorApply)
+        }
+      }
     }
 
     // Template literal: `text ${expr} more`
@@ -1732,6 +2119,306 @@ fn emit_sequence(
       let e = emit_ir(e, IrPop)
       emit_sequence(e, rest)
     }
+  }
+}
+
+/// Emit one property in an object literal. Object is already on the stack.
+/// All handlers leave the object on the stack for the next property.
+fn emit_object_property(
+  e: Emitter,
+  prop: ast.Property,
+) -> Result(Emitter, EmitError) {
+  case prop {
+    // Static key: {name: value} or {"name": value}
+    // → IrDefineField(name) — pops value, keeps obj.
+    ast.Property(
+      key: ast.Identifier(name),
+      value:,
+      kind: ast.Init,
+      computed: False,
+      ..,
+    )
+    | ast.Property(
+        key: ast.StringExpression(name),
+        value:,
+        kind: ast.Init,
+        computed: False,
+        ..,
+      ) -> {
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineField(name))
+    }
+
+    // Numeric literal key: {1: "a"} — not computed in the AST, but needs
+    // ToPropertyKey at runtime to get the canonical string form ("1" not "1.0").
+    // Route through IrDefineFieldComputed which calls put_elem_value → js_to_string.
+    ast.Property(
+      key: ast.NumberLiteral(n),
+      value:,
+      kind: ast.Init,
+      computed: False,
+      ..,
+    ) -> {
+      let e = push_const(e, JsNumber(Finite(n)))
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineFieldComputed)
+    }
+
+    // Computed key: {[expr]: value}
+    // Emit key, emit value, IrDefineFieldComputed — pops both, keeps obj.
+    // The VM handles ToPropertyKey (Symbol preserved, else ToString).
+    ast.Property(key:, value:, kind: ast.Init, computed: True, ..) -> {
+      use e <- result.try(emit_expr(e, key))
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineFieldComputed)
+    }
+
+    // Spread: {...source}
+    // IrObjectSpread pops source, copies own enumerable props, keeps obj.
+    // null/undefined sources are no-ops per CopyDataProperties spec.
+    ast.SpreadProperty(argument:) -> {
+      use e <- result.map(emit_expr(e, argument))
+      emit_ir(e, IrObjectSpread)
+    }
+
+    // Getter: { get name() { ... } }
+    // Emit the function, then DefineAccessor(name, Getter).
+    ast.Property(
+      key: ast.Identifier(name),
+      value:,
+      kind: ast.Get,
+      computed: False,
+      ..,
+    )
+    | ast.Property(
+        key: ast.StringExpression(name),
+        value:,
+        kind: ast.Get,
+        computed: False,
+        ..,
+      ) -> {
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineAccessor(name, opcode.Getter))
+    }
+
+    // Setter: { set name(v) { ... } }
+    ast.Property(
+      key: ast.Identifier(name),
+      value:,
+      kind: ast.Set,
+      computed: False,
+      ..,
+    )
+    | ast.Property(
+        key: ast.StringExpression(name),
+        value:,
+        kind: ast.Set,
+        computed: False,
+        ..,
+      ) -> {
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineAccessor(name, opcode.Setter))
+    }
+
+    // Computed or exotic-key getter/setter: { get [expr]() {} }
+    // Stack: emit key, emit fn → DefineAccessorComputed
+    ast.Property(key:, value:, kind: ast.Get, ..) -> {
+      use e <- result.try(emit_expr(e, key))
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineAccessorComputed(opcode.Getter))
+    }
+    ast.Property(key:, value:, kind: ast.Set, ..) -> {
+      use e <- result.try(emit_expr(e, key))
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineAccessorComputed(opcode.Setter))
+    }
+
+    // Remaining case: non-computed Init with an exotic key expression
+    // (shouldn't happen — parser only produces Identifier/StringExpression/
+    // NumberLiteral for non-computed keys). Route through computed path anyway.
+    ast.Property(key:, value:, kind: ast.Init, computed: False, ..) -> {
+      use e <- result.try(emit_expr(e, key))
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrDefineFieldComputed)
+    }
+  }
+}
+
+// ============================================================================
+// Spread element support — array literals and call argument lists
+// ============================================================================
+
+/// Emit an array literal that contains no SpreadElement (ES2024 section
+/// 13.2.4 "Array Initializer" — the non-spread case). Decides between the
+/// dense fast path (IrArrayFrom) and the sparse path (IrArrayFromWithHoles)
+/// based on whether any element is an Elision (None in the AST).
+///
+/// Single pass over elements: push non-hole values onto the stack, collect
+/// hole indices. Accumulator threads #(emitter, index, holes_rev).
+fn emit_array_no_spread(
+  e: Emitter,
+  elements: List(Option(ast.Expression)),
+) -> Result(Emitter, EmitError) {
+  let count = list.length(elements)
+  use #(e, _idx, holes_rev) <- result.map(
+    list.try_fold(elements, #(e, 0, []), fn(acc, elem) {
+      let #(e, idx, holes_rev) = acc
+      case elem {
+        Some(expr) -> {
+          use e <- result.map(emit_expr(e, expr))
+          #(e, idx + 1, holes_rev)
+        }
+        None -> Ok(#(e, idx + 1, [idx, ..holes_rev]))
+      }
+    }),
+  )
+  case holes_rev {
+    [] -> emit_ir(e, IrArrayFrom(count))
+    _ -> emit_ir(e, IrArrayFromWithHoles(count, list.reverse(holes_rev)))
+  }
+}
+
+/// Emit the prefix of a spread-mode array literal (elements before the first
+/// SpreadElement). Delegates to emit_array_no_spread; factored out so the
+/// spread path can build the initial array then append spread elements.
+fn emit_array_prefix(
+  e: Emitter,
+  prefix: List(Option(ast.Expression)),
+) -> Result(Emitter, EmitError) {
+  emit_array_no_spread(e, prefix)
+}
+
+/// True if any element is Some(SpreadElement(_)). Used to choose the
+/// fast static-arity path vs the incremental-build spread path.
+fn has_spread_element(elements: List(Option(ast.Expression))) -> Bool {
+  list.any(elements, fn(el) {
+    case el {
+      Some(ast.SpreadElement(_)) -> True
+      _ -> False
+    }
+  })
+}
+
+/// True if any arg is SpreadElement(_). Call argument lists use plain
+/// List(Expression), not List(Option(Expression)), so no hole case here.
+fn has_spread_arg(args: List(ast.Expression)) -> Bool {
+  list.any(args, fn(a) {
+    case a {
+      ast.SpreadElement(_) -> True
+      _ -> False
+    }
+  })
+}
+
+/// Emit an array literal that contains at least one SpreadElement.
+///
+/// Strategy (QuickJS-style):
+///   1. Peel off the leading non-spread run (prefix), push those elements,
+///      then IrArrayFrom / IrArrayFromWithHoles to pack them. This handles
+///      the common `[a, b, ...rest]` shape in one opcode.
+///   2. For each remaining element, emit:
+///      - IrArraySpread (drain iterator into array) for spread elements
+///      - IrArrayPush (single append) for regular elements
+///      - IrArrayPushHole (increment length, no element) for holes
+///
+/// Stack invariant throughout step 2: array is on top; each IrArrayPush /
+/// IrArraySpread consumes [val-or-iter, arr] → [arr]; IrArrayPushHole
+/// consumes [arr] → [arr].
+///
+/// Holes in the *source* of a spread become undefined per the array
+/// iterator spec — that's a different thing from holes in the literal.
+fn emit_array_with_spread(
+  e: Emitter,
+  elements: List(Option(ast.Expression)),
+) -> Result(Emitter, EmitError) {
+  // Split at first spread: prefix has no spreads, tail starts at first spread.
+  let #(prefix, tail) = split_at_first_spread_element(elements)
+
+  // Pack the prefix (handles holes via IrArrayFromWithHoles if needed).
+  use e <- result.try(emit_array_prefix(e, prefix))
+
+  // Incrementally append the tail.
+  list.try_fold(tail, e, fn(e, elem) {
+    case elem {
+      Some(ast.SpreadElement(argument:)) -> {
+        use e <- result.map(emit_expr(e, argument))
+        emit_ir(e, IrArraySpread)
+      }
+      Some(expr) -> {
+        use e <- result.map(emit_expr(e, expr))
+        emit_ir(e, IrArrayPush)
+      }
+      None ->
+        // Hole after a spread — increment length without setting element.
+        Ok(emit_ir(e, IrArrayPushHole))
+    }
+  })
+}
+
+/// Build an args array for a spread-call (f(a, ...b, c) etc).
+/// Same algorithm as emit_array_with_spread but over List(Expression)
+/// (call args have no holes — the parser doesn't produce them in arglists).
+/// Leaves the args array on top of the stack; caller follows with an
+/// IrCallApply / IrCallMethodApply / IrCallConstructorApply.
+fn emit_args_array_with_spread(
+  e: Emitter,
+  args: List(ast.Expression),
+) -> Result(Emitter, EmitError) {
+  let #(prefix, tail) = split_at_first_spread_arg(args)
+
+  let prefix_count = list.length(prefix)
+  use e <- result.try(list.try_fold(prefix, e, emit_expr))
+  let e = emit_ir(e, IrArrayFrom(prefix_count))
+
+  list.try_fold(tail, e, fn(e, arg) {
+    case arg {
+      ast.SpreadElement(argument:) -> {
+        use e <- result.map(emit_expr(e, argument))
+        emit_ir(e, IrArraySpread)
+      }
+      _ -> {
+        use e <- result.map(emit_expr(e, arg))
+        emit_ir(e, IrArrayPush)
+      }
+    }
+  })
+}
+
+/// Split an array-literal element list at the first SpreadElement.
+/// Returns (prefix_with_no_spreads, tail_starting_at_first_spread).
+/// If no spread exists, tail is [] — but callers have already checked
+/// has_spread_element so tail is always non-empty in practice.
+fn split_at_first_spread_element(
+  elements: List(Option(ast.Expression)),
+) -> #(List(Option(ast.Expression)), List(Option(ast.Expression))) {
+  split_at_first_spread_element_loop(elements, [])
+}
+
+fn split_at_first_spread_element_loop(
+  remaining: List(Option(ast.Expression)),
+  acc: List(Option(ast.Expression)),
+) -> #(List(Option(ast.Expression)), List(Option(ast.Expression))) {
+  case remaining {
+    [] -> #(list.reverse(acc), [])
+    [Some(ast.SpreadElement(_)), ..] -> #(list.reverse(acc), remaining)
+    [el, ..rest] -> split_at_first_spread_element_loop(rest, [el, ..acc])
+  }
+}
+
+fn split_at_first_spread_arg(
+  args: List(ast.Expression),
+) -> #(List(ast.Expression), List(ast.Expression)) {
+  split_at_first_spread_arg_loop(args, [])
+}
+
+fn split_at_first_spread_arg_loop(
+  remaining: List(ast.Expression),
+  acc: List(ast.Expression),
+) -> #(List(ast.Expression), List(ast.Expression)) {
+  case remaining {
+    [] -> #(list.reverse(acc), [])
+    [ast.SpreadElement(_), ..] -> #(list.reverse(acc), remaining)
+    [a, ..rest] -> split_at_first_spread_arg_loop(rest, [a, ..acc])
   }
 }
 
@@ -2098,10 +2785,17 @@ fn compile_class(
   super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
 ) -> Result(Emitter, EmitError) {
-  case super_class {
+  // ES spec: class bodies are always strict (§15.7.1 "A class body is always
+  // strict mode code."). Force strict on the emitter so all compile_function_body
+  // calls for methods/constructor inherit it. Restore enclosing strictness on
+  // exit so a sloppy-mode caller isn't polluted.
+  let saved_strict = e.strict
+  let e = Emitter(..e, strict: True)
+  use e <- result.map(case super_class {
     Some(parent_expr) -> compile_derived_class(e, name, parent_expr, body)
     None -> compile_base_class(e, name, body)
-  }
+  })
+  Emitter(..e, strict: saved_strict)
 }
 
 fn compile_derived_class(

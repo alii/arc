@@ -28,6 +28,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
 
 pub type ParseMode {
@@ -496,7 +497,7 @@ type P {
     // Binding names seen so far in the current let/const declaration.
     // Used to detect duplicate bindings like `let a, a;`.
     // Only checked when in_lexical_decl is True.
-    decl_bound_names: List(String),
+    decl_bound_names: Set(String),
     // Whether the expression being parsed contains a cover-grammar initializer
     // like `{a = 0}` in an object literal. This is only valid if the
     // expression ends up as a destructuring pattern (assignment LHS or arrow
@@ -534,7 +535,7 @@ type P {
     has_invalid_pattern: Bool,
     // Module-level tracking: exported names seen so far.
     // Used to detect duplicate exports like `export {a}; export const a = 1;`.
-    export_names: List(String),
+    export_names: Set(String),
     // Module-level tracking: local names referenced in export specifiers.
     // Each entry is #(local_name, pos). Validated after module parsing.
     // NOT populated for re-exports (export { x } from "module").
@@ -542,7 +543,7 @@ type P {
     // Module-level tracking: import binding names seen so far in current
     // import declaration. Used to detect duplicate import bindings like
     // `import {a, a} from "m";`.
-    import_bindings: List(String),
+    import_bindings: Set(String),
     // Whether we are currently parsing an export var/let/const declaration.
     // When true, each binding name is also registered as an export name.
     in_export_decl: Bool,
@@ -555,26 +556,26 @@ type P {
     // array/object literal that could become a destructuring assignment
     // target. Checked in strict mode when `=` follows `[…]` or `{…}`.
     has_eval_args_target: Bool,
-    // Accumulated function name + param names during function parsing.
-    // When check_use_strict_in_body retroactively enables strict mode,
-    // these names are validated to reject eval/arguments.
-    pending_strict_names: List(String),
+    // Function name saved during function parsing. When
+    // check_use_strict_in_body retroactively enables strict mode, this name
+    // is validated to reject eval/arguments.
+    pending_strict_name: Option(String),
     // --- Block scope tracking for cross-statement duplicate detection ---
     // Lexical (let/const) binding names in the current block scope.
-    scope_lexical: List(String),
+    scope_lexical: Set(String),
     // Var binding names in the current function scope.
     // Duplicate var is always allowed, so this is only checked against lexical.
-    scope_var: List(String),
+    scope_var: Set(String),
     // Parameter names in the current function scope.
     // var does NOT conflict with params, but let/const does.
-    scope_params: List(String),
+    scope_params: Set(String),
     // Function declaration names in the current scope (sloppy mode only).
     // In sloppy mode, duplicate function declarations are allowed.
     // In strict mode, function declarations go into scope_lexical instead.
-    scope_funcs: List(String),
+    scope_funcs: Set(String),
     // Lexical names from parent block scopes up to the function boundary.
     // Used to detect var declarations that conflict with outer let/const.
-    outer_lexical: List(String),
+    outer_lexical: Set(String),
     // What kind of binding we are currently parsing.
     binding_kind: BindingKind,
     // Whether we are inside a block scope (as opposed to function/script top-level).
@@ -647,7 +648,7 @@ pub fn parse(source: String, mode: ParseMode) -> Result(ast.Program, ParseError)
           last_expr_assignable: False,
           last_expr_is_assignment: False,
           in_lexical_decl: False,
-          decl_bound_names: [],
+          decl_bound_names: set.new(),
           has_cover_initializer: False,
           in_formal_params: False,
           in_arrow_params: False,
@@ -656,18 +657,18 @@ pub fn parse(source: String, mode: ParseMode) -> Result(ast.Program, ParseError)
           param_bound_names: [],
           in_single_stmt_pos: False,
           has_invalid_pattern: False,
-          export_names: [],
+          export_names: set.new(),
           export_local_refs: [],
-          import_bindings: [],
+          import_bindings: set.new(),
           in_export_decl: False,
           last_expr_name: None,
           has_eval_args_target: False,
-          pending_strict_names: [],
-          scope_lexical: [],
-          scope_var: [],
-          scope_params: [],
-          scope_funcs: [],
-          outer_lexical: [],
+          pending_strict_name: None,
+          scope_lexical: set.new(),
+          scope_var: set.new(),
+          scope_params: set.new(),
+          scope_funcs: set.new(),
+          outer_lexical: set.new(),
           binding_kind: BindingNone,
           in_block: False,
           module_top_level: False,
@@ -730,19 +731,19 @@ fn validate_export_local_refs(p: P) -> Result(Nil, ParseError) {
 
 fn validate_export_refs_loop(
   refs: List(#(String, Int)),
-  scope_var: List(String),
-  scope_lexical: List(String),
-  scope_funcs: List(String),
-  import_bindings: List(String),
+  scope_var: Set(String),
+  scope_lexical: Set(String),
+  scope_funcs: Set(String),
+  import_bindings: Set(String),
 ) -> Result(Nil, ParseError) {
   case refs {
     [] -> Ok(Nil)
     [#(name, pos), ..rest] -> {
       let declared =
-        list.contains(scope_var, name)
-        || list.contains(scope_lexical, name)
-        || list.contains(scope_funcs, name)
-        || list.contains(import_bindings, name)
+        set.contains(scope_var, name)
+        || set.contains(scope_lexical, name)
+        || set.contains(scope_funcs, name)
+        || set.contains(import_bindings, name)
       case declared {
         True ->
           validate_export_refs_loop(
@@ -902,13 +903,12 @@ fn parse_block_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let p_inner =
     P(
       ..p2,
-      scope_lexical: [],
-      scope_var: [],
-      scope_funcs: [],
-      outer_lexical: list.append(
-        p2.scope_lexical,
-        list.append(p2.scope_funcs, p2.outer_lexical),
-      ),
+      scope_lexical: set.new(),
+      scope_var: set.new(),
+      scope_funcs: set.new(),
+      outer_lexical: p2.scope_lexical
+        |> set.union(p2.scope_funcs)
+        |> set.union(p2.outer_lexical),
       in_single_stmt_pos: False,
       in_block: True,
       module_top_level: False,
@@ -940,7 +940,7 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
       P(
         ..p2,
         in_lexical_decl: True,
-        decl_bound_names: [],
+        decl_bound_names: set.new(),
         binding_kind: BindingLexical,
       )
     False -> P(..p2, binding_kind: BindingVar)
@@ -1055,7 +1055,7 @@ fn validate_and_register_binding_no_advance(
 fn accumulate_param_name(p: P, name: String) -> Result(P, ParseError) {
   case p.in_formal_params || p.in_arrow_params || p.in_method {
     True ->
-      case list_contains(p.param_bound_names, name) {
+      case list.contains(p.param_bound_names, name) {
         True ->
           // In strict mode, arrow params, methods, or non-simple params: reject dups
           case
@@ -1121,9 +1121,10 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
 fn check_duplicate_binding(p: P, name: String) -> Result(P, ParseError) {
   case p.in_lexical_decl {
     True ->
-      case list.contains(p.decl_bound_names, name) {
+      case set.contains(p.decl_bound_names, name) {
         True -> Error(DuplicateBindingLexical(name, pos_of(p)))
-        False -> Ok(P(..p, decl_bound_names: [name, ..p.decl_bound_names]))
+        False ->
+          Ok(P(..p, decl_bound_names: set.insert(p.decl_bound_names, name)))
       }
     False -> Ok(p)
   }
@@ -1140,24 +1141,23 @@ fn register_scope_binding(p: P, name: String) -> Result(P, ParseError) {
   case p.binding_kind {
     BindingLexical -> {
       use <- bool.guard(
-        list_contains(p.scope_lexical, name)
-          || list_contains(p.scope_var, name)
-          || list_contains(p.scope_params, name)
-          || list_contains(p.scope_funcs, name),
+        set.contains(p.scope_lexical, name)
+          || set.contains(p.scope_var, name)
+          || set.contains(p.scope_params, name)
+          || set.contains(p.scope_funcs, name),
         Error(IdentifierAlreadyDeclared(name, pos_of(p))),
       )
-      Ok(P(..p, scope_lexical: [name, ..p.scope_lexical]))
+      Ok(P(..p, scope_lexical: set.insert(p.scope_lexical, name)))
     }
-    BindingParam -> Ok(P(..p, scope_params: [name, ..p.scope_params]))
+    BindingParam -> Ok(P(..p, scope_params: set.insert(p.scope_params, name)))
     BindingVar -> {
       use <- bool.guard(
-        list_contains(p.scope_lexical, name)
-          || list_contains(p.outer_lexical, name),
+        set.contains(p.scope_lexical, name)
+          || set.contains(p.outer_lexical, name),
         Error(IdentifierAlreadyDeclared(name, pos_of(p))),
       )
-      // Don't add duplicates to scope_var (var re-declaration is fine)
-      use <- bool.guard(list_contains(p.scope_var, name), Ok(p))
-      Ok(P(..p, scope_var: [name, ..p.scope_var]))
+      // set.insert is idempotent so no need to guard against re-declaration
+      Ok(P(..p, scope_var: set.insert(p.scope_var, name)))
     }
     BindingNone -> Ok(p)
   }
@@ -1177,24 +1177,23 @@ fn register_function_name(
       // In sloppy+block+single-stmt (Annex B function-in-if), function acts
       // like var and can shadow catch params — skip scope_params check
       let check_params = p.strict || !p.in_single_stmt_pos
-      let params_conflict = check_params && list_contains(p.scope_params, name)
+      let params_conflict = check_params && set.contains(p.scope_params, name)
       use <- bool.guard(
-        list_contains(p.scope_lexical, name)
-          || list_contains(p.scope_var, name)
+        set.contains(p.scope_lexical, name)
+          || set.contains(p.scope_var, name)
           || params_conflict
-          || list_contains(p.scope_funcs, name),
+          || set.contains(p.scope_funcs, name),
         Error(IdentifierAlreadyDeclared(name, name_pos)),
       )
-      Ok(P(..p, scope_lexical: [name, ..p.scope_lexical]))
+      Ok(P(..p, scope_lexical: set.insert(p.scope_lexical, name)))
     }
     False -> {
       // Sloppy mode at function/script top-level: only conflict with let/const
       use <- bool.guard(
-        list_contains(p.scope_lexical, name),
+        set.contains(p.scope_lexical, name),
         Error(IdentifierAlreadyDeclared(name, name_pos)),
       )
-      use <- bool.guard(list_contains(p.scope_funcs, name), Ok(p))
-      Ok(P(..p, scope_funcs: [name, ..p.scope_funcs]))
+      Ok(P(..p, scope_funcs: set.insert(p.scope_funcs, name)))
     }
   }
 }
@@ -1208,13 +1207,13 @@ fn register_class_name(
   name_pos: Int,
 ) -> Result(P, ParseError) {
   use <- bool.guard(
-    list_contains(p.scope_lexical, name)
-      || list_contains(p.scope_var, name)
-      || list_contains(p.scope_params, name)
-      || list_contains(p.scope_funcs, name),
+    set.contains(p.scope_lexical, name)
+      || set.contains(p.scope_var, name)
+      || set.contains(p.scope_params, name)
+      || set.contains(p.scope_funcs, name),
     Error(IdentifierAlreadyDeclared(name, name_pos)),
   )
-  Ok(P(..p, scope_lexical: [name, ..p.scope_lexical]))
+  Ok(P(..p, scope_lexical: set.insert(p.scope_lexical, name)))
 }
 
 /// Check if an export name is a duplicate. Only applies in Module mode.
@@ -1222,9 +1221,9 @@ fn register_class_name(
 fn check_duplicate_export(p: P, name: String) -> Result(P, ParseError) {
   case p.mode {
     Module ->
-      case list.contains(p.export_names, name) {
+      case set.contains(p.export_names, name) {
         True -> Error(DuplicateExport(name, pos_of(p)))
-        False -> Ok(P(..p, export_names: [name, ..p.export_names]))
+        False -> Ok(P(..p, export_names: set.insert(p.export_names, name)))
       }
     Script -> Ok(p)
   }
@@ -1235,9 +1234,10 @@ fn check_duplicate_export(p: P, name: String) -> Result(P, ParseError) {
 fn check_duplicate_import_binding(p: P, name: String) -> Result(P, ParseError) {
   case p.mode {
     Module ->
-      case list.contains(p.import_bindings, name) {
+      case set.contains(p.import_bindings, name) {
         True -> Error(DuplicateImportBinding(name, pos_of(p)))
-        False -> Ok(P(..p, import_bindings: [name, ..p.import_bindings]))
+        False ->
+          Ok(P(..p, import_bindings: set.insert(p.import_bindings, name)))
       }
     Script -> Ok(p)
   }
@@ -1651,13 +1651,12 @@ fn parse_for_declaration_scoped(
   let p2 =
     P(
       ..p,
-      scope_lexical: [],
-      scope_var: [],
-      scope_funcs: [],
-      outer_lexical: list.append(
-        p.scope_lexical,
-        list.append(p.scope_funcs, p.outer_lexical),
-      ),
+      scope_lexical: set.new(),
+      scope_var: set.new(),
+      scope_funcs: set.new(),
+      outer_lexical: p.scope_lexical
+        |> set.union(p.scope_funcs)
+        |> set.union(p.outer_lexical),
       in_block: True,
     )
   // After parsing, restore the original scope from p (immutable -- no saving needed)
@@ -1691,7 +1690,7 @@ fn parse_for_declaration(
       P(
         ..p2,
         in_lexical_decl: True,
-        decl_bound_names: [],
+        decl_bound_names: set.new(),
         binding_kind: BindingLexical,
       )
     False -> P(..p2, binding_kind: BindingVar)
@@ -2087,14 +2086,13 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
                 // Use BindingParam so catch param goes into scope_params,
                 // which allows var redeclaration but blocks let/const redeclaration
                 binding_kind: BindingParam,
-                scope_lexical: [],
-                scope_var: [],
-                scope_funcs: [],
-                scope_params: [],
-                outer_lexical: list.append(
-                  p5.scope_lexical,
-                  list.append(p5.scope_funcs, p5.outer_lexical),
-                ),
+                scope_lexical: set.new(),
+                scope_var: set.new(),
+                scope_funcs: set.new(),
+                scope_params: set.new(),
+                outer_lexical: p5.scope_lexical
+                  |> set.union(p5.scope_funcs)
+                  |> set.union(p5.outer_lexical),
                 in_block: True,
                 // Enable dup param detection for catch destructured bindings
                 in_formal_params: True,
@@ -2200,13 +2198,12 @@ fn parse_switch_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
       P(
         ..p6,
         switch_depth: p6.switch_depth + 1,
-        scope_lexical: [],
-        scope_var: [],
-        scope_funcs: [],
-        outer_lexical: list.append(
-          p6.scope_lexical,
-          list.append(p6.scope_funcs, p6.outer_lexical),
-        ),
+        scope_lexical: set.new(),
+        scope_var: set.new(),
+        scope_funcs: set.new(),
+        outer_lexical: p6.scope_lexical
+          |> set.union(p6.scope_funcs)
+          |> set.union(p6.outer_lexical),
         in_block: True,
       )
     use #(p7, cases) <- result.try(parse_switch_cases(p6, False, []))
@@ -2325,10 +2322,7 @@ fn parse_function_decl_body(
   // Optional name (identifier or contextual keyword like yield, await, let)
   use p4 <- result.try(eat_optional_name(p3))
   // Store function name for retroactive strict mode validation
-  let p4 = case func_name {
-    "" -> p4
-    name -> P(..p4, pending_strict_names: [name])
-  }
+  let p4 = P(..p4, pending_strict_name: string.to_option(func_name))
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(enter_function_context(
       p4,
@@ -2416,9 +2410,9 @@ fn parse_function_body_block(p: P) -> Result(#(P, ast.Statement), ParseError) {
 /// "use strict" is discovered in function body. Catches cases like
 /// `function eval() { 'use strict'; }`.
 fn check_pending_strict_names(p: P) -> Result(Nil, ParseError) {
-  case p.pending_strict_names {
-    [] -> Ok(Nil)
-    [name, ..] ->
+  case p.pending_strict_name {
+    None -> Ok(Nil)
+    Some(name) ->
       case is_strict_binding_error(name) {
         True -> Error(StrictModeParamName(name, pos_of(p)))
         False -> Ok(Nil)
@@ -2430,13 +2424,13 @@ fn check_pending_strict_names(p: P) -> Result(Nil, ParseError) {
 /// This catches cases like `function a(yield){ 'use strict'; }` where the
 /// param was accepted before strict mode was activated.
 fn check_param_names_for_dups(p: P) -> Result(Nil, ParseError) {
-  check_param_names_list(p, p.param_bound_names, [])
+  check_param_names_list(p, p.param_bound_names, set.new())
 }
 
 fn check_param_names_list(
   p: P,
   names: List(String),
-  seen: List(String),
+  seen: Set(String),
 ) -> Result(Nil, ParseError) {
   case names {
     [] -> Ok(Nil)
@@ -2446,9 +2440,9 @@ fn check_param_names_list(
         True -> Error(StrictModeParamName(name, pos_of(p)))
         False ->
           // Check for duplicates
-          case list_contains(seen, name) {
+          case set.contains(seen, name) {
             True -> Error(DuplicateParamNameStrictMode(name, pos_of(p)))
-            False -> check_param_names_list(p, rest, [name, ..seen])
+            False -> check_param_names_list(p, rest, set.insert(seen, name))
           }
       }
     }
@@ -2469,20 +2463,20 @@ fn mark_non_simple_params(p: P) -> Result(P, ParseError) {
 /// Used when transitioning to non-simple params to retroactively detect
 /// duplicates like function(a, a, [b]){}.
 fn check_param_names_for_dups_only(p: P) -> Result(Nil, ParseError) {
-  check_names_for_dups_loop(p, p.param_bound_names, [])
+  check_names_for_dups_loop(p, p.param_bound_names, set.new())
 }
 
 fn check_names_for_dups_loop(
   p: P,
   remaining: List(String),
-  seen: List(String),
+  seen: Set(String),
 ) -> Result(Nil, ParseError) {
   case remaining {
     [] -> Ok(Nil)
     [name, ..rest] ->
-      case list_contains(seen, name) {
+      case set.contains(seen, name) {
         True -> Error(DuplicateParameterName(name, pos_of(p)))
-        False -> check_names_for_dups_loop(p, rest, [name, ..seen])
+        False -> check_names_for_dups_loop(p, rest, set.insert(seen, name))
       }
   }
 }
@@ -2580,13 +2574,13 @@ fn parse_setter_params_and_body(
 fn parse_formal_parameters(p: P) -> Result(#(P, List(ast.Pattern)), ParseError) {
   case peek(p) {
     RightParen -> Ok(#(p, []))
-    _ -> parse_formal_parameter_list(p, [], [])
+    _ -> parse_formal_parameter_list(p, set.new(), [])
   }
 }
 
 fn parse_formal_parameter_list(
   p: P,
-  seen: List(String),
+  seen: Set(String),
   acc: List(ast.Pattern),
 ) -> Result(#(P, List(ast.Pattern)), ParseError) {
   case peek(p) {
@@ -2627,13 +2621,13 @@ fn parse_formal_parameter_list(
 fn parse_formal_param_after_dup_check(
   p: P,
   param_name: String,
-  seen: List(String),
+  seen: Set(String),
   acc: List(ast.Pattern),
 ) -> Result(#(P, List(ast.Pattern)), ParseError) {
   use Nil <- result.try(check_duplicate_param(p, param_name, seen))
   let new_seen = case param_name {
     "" -> seen
-    name -> [name, ..seen]
+    name -> set.insert(seen, name)
   }
   use #(p2, pat) <- result.try(parse_binding_pattern(p))
   // Optional default — makes param list non-simple
@@ -2653,7 +2647,7 @@ fn parse_formal_param_after_dup_check(
 /// Parse a parameter default value and continue.
 fn parse_formal_param_default(
   p: P,
-  seen: List(String),
+  seen: Set(String),
   pat: ast.Pattern,
   acc: List(ast.Pattern),
 ) -> Result(#(P, List(ast.Pattern)), ParseError) {
@@ -2670,7 +2664,7 @@ fn parse_formal_param_default(
 /// Continue parsing formal parameter list after a single parameter.
 fn parse_formal_param_rest(
   p: P,
-  seen: List(String),
+  seen: Set(String),
   acc: List(ast.Pattern),
 ) -> Result(#(P, List(ast.Pattern)), ParseError) {
   case peek(p) {
@@ -2702,48 +2696,34 @@ fn get_simple_binding_name(p: P) -> String {
 fn check_duplicate_param(
   p: P,
   name: String,
-  seen: List(String),
+  seen: Set(String),
 ) -> Result(Nil, ParseError) {
   use <- bool.guard(name == "", Ok(Nil))
   let must_be_unique =
     p.strict || p.in_arrow_params || p.in_method || p.has_non_simple_param
   use <- bool.guard(
-    must_be_unique && list_contains(seen, name),
+    must_be_unique && set.contains(seen, name),
     Error(DuplicateParameterName(name, pos_of(p))),
   )
   Ok(Nil)
 }
 
-fn list_contains(lst: List(String), item: String) -> Bool {
-  case lst {
-    [] -> False
-    [first, ..rest] ->
-      case first == item {
-        True -> True
-        False -> list_contains(rest, item)
-      }
-  }
-}
-
-/// Check if any newly-added scope_var entries (compared to saved list) conflict
+/// Check if any newly-added scope_var entries (compared to saved set) conflict
 /// with scope_params. Used for B.3.4: for-of var bindings must not shadow catch params.
 fn check_new_vars_vs_params(
-  current_vars: List(String),
-  saved_vars: List(String),
-  params: List(String),
+  current_vars: Set(String),
+  saved_vars: Set(String),
+  params: Set(String),
   pos: Int,
 ) -> Result(Nil, ParseError) {
-  case current_vars == saved_vars {
-    True -> Ok(Nil)
-    False ->
-      case current_vars {
-        [] -> Ok(Nil)
-        [name, ..rest] ->
-          case list_contains(params, name) {
-            True -> Error(IdentifierAlreadyDeclared(name, pos))
-            False -> check_new_vars_vs_params(rest, saved_vars, params, pos)
-          }
-      }
+  // Names added since the save point that also appear in params
+  let conflicts =
+    set.difference(current_vars, saved_vars)
+    |> set.intersection(params)
+    |> set.to_list
+  case conflicts {
+    [] -> Ok(Nil)
+    [name, ..] -> Error(IdentifierAlreadyDeclared(name, pos))
   }
 }
 
@@ -3513,7 +3493,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                     let p3 =
                       P(
                         ..p3,
-                        scope_params: [name],
+                        scope_params: set.from_list([name]),
                         allow_super_call: saved_super_call,
                         allow_super_property: saved_super_property,
                       )
@@ -3551,7 +3531,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                 let p3 =
                   P(
                     ..p3,
-                    scope_params: [name],
+                    scope_params: set.from_list([name]),
                     allow_super_call: saved_super_call,
                     allow_super_property: saved_super_property,
                   )
@@ -3637,7 +3617,7 @@ fn parse_possible_arrow_params(
   // This is the same as formal_parameters essentially
   case peek(p) {
     RightParen -> Ok(#(p, []))
-    _ -> parse_formal_parameter_list(p, [], [])
+    _ -> parse_formal_parameter_list(p, set.new(), [])
   }
 }
 
@@ -3885,12 +3865,12 @@ fn parse_js_number(raw: String) -> Float {
                     True ->
                       case gleam_float_parse(clean) {
                         Ok(f) -> f
-                        Error(_) -> 0.0
+                        Error(Nil) -> 0.0
                       }
                     False ->
                       case gleam_int_parse(clean) {
                         Ok(i) -> int_to_float(i)
-                        Error(_) -> 0.0
+                        Error(Nil) -> 0.0
                       }
                   }
                 }
@@ -5084,10 +5064,7 @@ fn parse_function_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let func_name = get_simple_binding_name(p3_for_name)
   use p4 <- result.try(eat_optional_name(p3_for_name))
   // Store function name for retroactive strict mode validation
-  let p4 = case func_name {
-    "" -> p4
-    name -> P(..p4, pending_strict_names: [name])
-  }
+  let p4 = P(..p4, pending_strict_name: string.to_option(func_name))
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(enter_function_context(
       // Restore the original token state from p4 but use original context
@@ -5127,10 +5104,7 @@ fn parse_async_function_expression(
   let p3_for_name = P(..p3, in_generator: is_generator, in_async: True)
   let func_name = get_simple_binding_name(p3_for_name)
   use p4 <- result.try(eat_optional_name(p3_for_name))
-  let p4 = case func_name {
-    "" -> p4
-    name -> P(..p4, pending_strict_names: [name])
-  }
+  let p4 = P(..p4, pending_strict_name: string.to_option(func_name))
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(enter_function_context(
       P(..p4, in_generator: p3.in_generator, in_async: p3.in_async),
@@ -5200,7 +5174,7 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       use #(flags_end, flags) <- result.try(skip_regex_flags(p.bytes, end_pos))
       // If /u flag is present, validate no lone braces in the body
       // body is from body_start to end_pos - 1 (exclusive of closing /)
-      use Nil <- result.try(case list_contains(flags, "u") {
+      use Nil <- result.try(case list.contains(flags, "u") {
         True ->
           validate_regex_unicode_body(p.bytes, body_start, end_pos - 1)
           |> result.map_error(fn(msg) {
@@ -5668,7 +5642,7 @@ fn scan_regex_flags(
   let ch = char_at_source(bytes, pos)
   case ch {
     "g" | "i" | "m" | "s" | "u" | "v" | "y" | "d" ->
-      case list_contains(seen, ch) {
+      case list.contains(seen, ch) {
         True ->
           Error(LexerError(
             "Duplicate regular expression flag '" <> ch <> "'",
@@ -6398,11 +6372,11 @@ fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
     in_single_stmt_pos: False,
     in_method: False,
     // Reset scope for new function body
-    scope_lexical: [],
-    scope_var: [],
-    scope_params: [],
-    scope_funcs: [],
-    outer_lexical: [],
+    scope_lexical: set.new(),
+    scope_var: set.new(),
+    scope_params: set.new(),
+    scope_funcs: set.new(),
+    outer_lexical: set.new(),
     binding_kind: BindingNone,
     in_block: False,
     module_top_level: False,
@@ -6429,11 +6403,11 @@ fn enter_method_context(
     in_single_stmt_pos: False,
     in_method: True,
     // Reset scope for new method body
-    scope_lexical: [],
-    scope_var: [],
-    scope_params: [],
-    scope_funcs: [],
-    outer_lexical: [],
+    scope_lexical: set.new(),
+    scope_var: set.new(),
+    scope_params: set.new(),
+    scope_funcs: set.new(),
+    outer_lexical: set.new(),
     binding_kind: BindingNone,
     in_block: False,
     module_top_level: False,

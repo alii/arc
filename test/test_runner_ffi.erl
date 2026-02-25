@@ -2,7 +2,8 @@
 
 -export([list_files/1, generate_eunit_tests/2,
          generate_recursive_eunit_tests/2, get_env/1, empty_tests/0,
-         run_with_timeout/2, timeout_test/2]).
+         run_with_timeout/2, timeout_test/2, make_test_suite/2,
+         make_test_suite/3, lazy_file_tests/3, with_cleanup/3]).
 
 %% List all .js files in a directory, returning their filenames (not full paths).
 list_files(Dir) ->
@@ -110,6 +111,108 @@ empty_tests() -> {inparallel, []}.
 %% Create a single EUnit test with a custom timeout (in seconds).
 timeout_test(TimeoutSec, Fun) ->
     {timeout, TimeoutSec, Fun}.
+
+%% Build a list of EUnit test descriptors from {Name, TestFn} pairs.
+%% Each test gets an individual timeout. Tests run in parallel.
+%% TestFn: fun() -> {ok, nil} | {error, Reason}
+%% Build parallel test suite with optional sequential cleanup test at the end.
+%% Tests: list of {Name, TestFn} where TestFn() -> {ok, nil} | {error, Reason}
+%% CleanupFn: {Name, Fun} to run sequentially after the parallel block, or 'none'.
+make_test_suite(Tests, TimeoutSec) ->
+    make_test_suite(Tests, TimeoutSec, none).
+
+make_test_suite(Tests, TimeoutSec, CleanupTest) ->
+    EunitTests = lists:map(
+        fun({Name, TestFn}) ->
+            NameStr = binary_to_list(Name),
+            {NameStr, {timeout, TimeoutSec, fun() ->
+                case TestFn() of
+                    {ok, nil} -> ok;
+                    {error, Reason} ->
+                        erlang:error({assertion_failed,
+                            [{test, Name},
+                             {reason, Reason}]})
+                end
+            end}}
+        end,
+        Tests
+    ),
+    ParallelBlock = {inparallel, EunitTests},
+    case CleanupTest of
+        none -> ParallelBlock;
+        {CName, CFun} ->
+            %% Sequential list: parallel block first, then cleanup
+            [ParallelBlock, {binary_to_list(CName), {timeout, 60, fun() ->
+                case CFun() of
+                    {ok, nil} -> ok;
+                    {error, Reason} ->
+                        erlang:error({assertion_failed, [{test, CName}, {reason, Reason}]})
+                end
+            end}}]
+    end.
+
+%% Lazily generate EUnit tests by walking a directory tree.
+%% Each subdirectory becomes a {generator, Fun} — only listed when EUnit
+%% reaches it. Files within a directory run in parallel.
+%% TestFn: fun(RelPathBin) -> {ok, nil} | {error, Reason}
+lazy_file_tests(RootDir, TestFn, TimeoutSec) ->
+    Prefix = binary_to_list(RootDir) ++ "/",
+    generate_dir_tests(binary_to_list(RootDir), Prefix, TestFn, TimeoutSec).
+
+generate_dir_tests(Dir, Prefix, TestFn, TimeoutSec) ->
+    case file:list_dir(Dir) of
+        {ok, Entries} ->
+            Sorted = lists:sort(Entries),
+            %% Separate into files and subdirectories
+            {Files, Dirs} = lists:partition(fun(E) ->
+                not filelib:is_dir(filename:join(Dir, E))
+            end, Sorted),
+            %% Filter to .js files, excluding _FIXTURE
+            JsFiles = [F || F <- Files,
+                        lists:suffix(".js", F),
+                        string:find(F, "_FIXTURE") =:= nomatch],
+            %% Build test descriptors for JS files
+            FileTests = lists:map(fun(Filename) ->
+                FullPath = filename:join(Dir, Filename),
+                RelPath = lists:nthtail(length(Prefix), FullPath),
+                RelPathBin = list_to_binary(RelPath),
+                {RelPath, {timeout, TimeoutSec, fun() ->
+                    case TestFn(RelPathBin) of
+                        {ok, nil} -> ok;
+                        {error, Reason} ->
+                            erlang:error({assertion_failed,
+                                [{test, RelPathBin},
+                                 {reason, Reason}]})
+                    end
+                end}}
+            end, JsFiles),
+            %% Build lazy generators for subdirectories
+            DirGens = lists:map(fun(SubDir) ->
+                SubDirPath = filename:join(Dir, SubDir),
+                {generator, fun() ->
+                    generate_dir_tests(SubDirPath, Prefix, TestFn, TimeoutSec)
+                end}
+            end, Dirs),
+            %% Files in parallel, then subdirectory generators
+            case FileTests of
+                [] -> DirGens;
+                _  -> [{inparallel, FileTests} | DirGens]
+            end;
+        {error, _} ->
+            []
+    end.
+
+%% Append a cleanup test that runs sequentially after a test block.
+%% Works with both lists and {inparallel, ...} tuples.
+with_cleanup(Tests, {Name, Fun}, TimeoutSec) ->
+    CleanupTest = {binary_to_list(Name), {timeout, TimeoutSec, fun() ->
+        case Fun() of
+            {ok, nil} -> ok;
+            {error, Reason} ->
+                erlang:error({assertion_failed, [{test, Name}, {reason, Reason}]})
+        end
+    end}},
+    [Tests, CleanupTest].
 
 %% Run a zero-arg function with a timeout in milliseconds.
 %% Returns {ok, Result} or {error, <<"timeout">>}.

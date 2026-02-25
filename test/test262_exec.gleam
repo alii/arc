@@ -1,21 +1,31 @@
-/// test262 execution conformance runner.
+/// test262 execution conformance runner (snapshot mode).
 ///
-/// Compiles and runs test262 tests through the full pipeline:
-///   Parse → Compile → Execute
+/// Each test262 file is an individual EUnit test case.
+/// Results are compared against a snapshot of expected outcomes.
 ///
 /// Usage:
-///   TEST262_EXEC=1 gleam test         — run execution tests, output results
+///   TEST262_EXEC=1 gleam test                  — run and compare against snapshot
+///   TEST262_EXEC=1 UPDATE_SNAPSHOT=1 gleam test — run and update the snapshot
+///   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
 ///   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
+///
+/// Snapshot semantics:
+///   - Regressions (was pass, now fail) → eunit FAILURE
+///   - New passes  (was fail, now pass) → eunit FAILURE (update snapshot)
+///   - Expected outcomes               → eunit pass (silent)
+///   - No snapshot file                → all outcomes accepted (no comparison)
 import arc/compiler
 import arc/parser
 import arc/vm/builtins
-import arc/vm/heap
+import arc/vm/heap.{type Heap}
+import arc/vm/object
 import arc/vm/value
 import arc/vm/vm
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/set.{type Set}
 import gleam/string
 import simplifile
 import test262_metadata.{type TestMetadata, Parse, Resolution, Runtime}
@@ -25,72 +35,222 @@ const test_dir = "vendor/test262/test"
 
 const harness_dir = "vendor/test262/harness"
 
-/// EUnit test generator — returns a test with 1-hour timeout when enabled,
-/// or empty when disabled (to avoid blocking normal test runs).
+const snapshot_path = ".github/test262/pass.txt"
+
 pub fn test262_exec_test_() -> test_runner.EunitTests {
   case test_runner.get_env_is_truthy("TEST262_EXEC") {
     False -> test_runner.empty_tests()
-    True -> test_runner.timeout_test(3600, run_execution_suite)
+    True -> generate_test_suite()
   }
 }
 
-/// Outcome of running a single test.
 type TestOutcome {
   Pass
   Fail(reason: String)
   Skip(reason: String)
 }
 
-fn run_execution_suite() {
-  let assert Ok(all_files) = simplifile.get_files(in: test_dir)
-  let js_files =
-    all_files
-    |> list.filter(fn(path) {
-      string.ends_with(path, ".js") && !string.contains(path, "_FIXTURE")
-    })
-    |> list.sort(string.compare)
+fn generate_test_suite() -> test_runner.EunitTests {
+  let fail_log = test_runner.get_env("FAIL_LOG") |> option.from_result
+  let update_mode = test_runner.get_env_is_truthy("UPDATE_SNAPSHOT")
+  let snapshot = load_snapshot(snapshot_path)
+  let has_snapshot = set.size(snapshot) > 0
 
-  let total = list.length(js_files)
-  let prefix = test_dir <> "/"
-
-  io.println("\ntest262 exec: running " <> int.to_string(total) <> " tests...")
-
-  let result =
-    list.index_fold(js_files, #(0, 0, 0), fn(acc, full_path, idx) {
-      let #(pass_count, fail_count, skip_count) = acc
-
-      // Progress counter every 1000 tests
-      case idx % 1000 {
-        0 -> print_progress(idx, total, pass_count, fail_count, skip_count)
-        _ -> Nil
+  // Clear fail log if set
+  case fail_log {
+    Some(path) ->
+      case simplifile.write(to: path, contents: "") {
+        Ok(Nil) -> Nil
+        Error(err) ->
+          io.println(
+            "Warning: could not clear fail log: " <> string.inspect(err),
+          )
       }
+    None -> Nil
+  }
 
-      let relative = case string.starts_with(full_path, prefix) {
-        True -> string.drop_start(full_path, string.length(prefix))
-        False -> full_path
+  init_stats()
+
+  // Single test function — receives relative path, does all I/O at test time
+  let test_fn = fn(relative: String) -> Result(Nil, String) {
+    let full_path = test_dir <> "/" <> relative
+    case simplifile.read(full_path) {
+      Error(err) -> {
+        record_fail()
+        Error("could not read file: " <> string.inspect(err))
       }
+      Ok(source) -> {
+        let metadata = test262_metadata.parse_metadata(source)
 
-      case simplifile.read(full_path) {
-        Error(_) -> #(pass_count, fail_count + 1, skip_count)
-        Ok(source) -> {
-          let metadata = test262_metadata.parse_metadata(source)
-          let outcome = run_single_test(metadata, source, relative)
-          case outcome {
-            Pass -> #(pass_count + 1, fail_count, skip_count)
-            Fail(_) -> #(pass_count, fail_count + 1, skip_count)
-            Skip(_) -> #(pass_count, fail_count, skip_count + 1)
+        let should_skip =
+          list.contains(metadata.flags, "module")
+          || list.contains(metadata.flags, "async")
+          || metadata.negative_phase == Some(Resolution)
+
+        case should_skip {
+          True -> {
+            record_skip()
+            Ok(Nil)
+          }
+          False -> {
+            let outcome = run_test_by_phase(metadata, source)
+            let expected_pass = set.contains(snapshot, relative)
+
+            case outcome {
+              Pass -> {
+                record_pass()
+                record_pass_path(relative)
+                case update_mode || !has_snapshot || expected_pass {
+                  True -> Ok(Nil)
+                  False ->
+                    Error(
+                      "NEW PASS — run with UPDATE_SNAPSHOT=1 to update snapshot",
+                    )
+                }
+              }
+              Skip(_) -> {
+                record_skip()
+                Ok(Nil)
+              }
+              Fail(reason) -> {
+                record_fail()
+                case fail_log {
+                  Some(path) ->
+                    case
+                      simplifile.append(
+                        to: path,
+                        contents: relative <> "\t" <> reason <> "\n",
+                      )
+                    {
+                      Ok(Nil) -> Nil
+                      Error(err) ->
+                        io.println(
+                          "Warning: fail log append error: "
+                          <> string.inspect(err),
+                        )
+                    }
+                  None -> Nil
+                }
+                case update_mode || !has_snapshot || !expected_pass {
+                  True -> Ok(Nil)
+                  False -> Error("REGRESSION: " <> reason)
+                }
+              }
+            }
           }
         }
       }
-    })
+    }
+  }
 
-  let #(pass_count, fail_count, skip_count) = result
-  clear_line()
+  // List all files upfront (fast — just filenames, no reading) and run in parallel
+  let tests =
+    test_runner.make_test_suite(
+      list_test_files(test_dir)
+        |> list.map(fn(relative) { #(relative, fn() { test_fn(relative) }) }),
+      10,
+    )
 
-  let tested = pass_count + fail_count
-  let pct = case tested > 0 {
+  let summary_test = #("__summary__", fn() {
+    let #(pass_count, fail_count, skip_count) = get_stats()
+    let tested = pass_count + fail_count
+    let pct = format_percent(pass_count, tested)
+
+    io.println(
+      "\ntest262 exec: "
+      <> int.to_string(pass_count)
+      <> " pass, "
+      <> int.to_string(fail_count)
+      <> " fail, "
+      <> int.to_string(skip_count)
+      <> " skip ("
+      <> pct
+      <> "% of "
+      <> int.to_string(tested)
+      <> " tested)",
+    )
+
+    case fail_log {
+      Some(path) -> io.println("Failures written to " <> path)
+      None -> Nil
+    }
+
+    // Write snapshot if UPDATE_SNAPSHOT=1
+    case update_mode {
+      True -> {
+        let paths = get_pass_paths()
+        let content = string.join(paths, "\n") <> "\n"
+        case simplifile.write(to: snapshot_path, contents: content) {
+          Ok(Nil) ->
+            io.println(
+              "Snapshot updated: "
+              <> snapshot_path
+              <> " ("
+              <> int.to_string(list.length(paths))
+              <> " passing tests)",
+            )
+          Error(err) ->
+            io.println(
+              "Warning: could not write snapshot: " <> string.inspect(err),
+            )
+        }
+      }
+      False -> Nil
+    }
+
+    // Write RESULTS_FILE if set
+    case test_runner.get_env("RESULTS_FILE") {
+      Ok(path) -> {
+        let total = pass_count + fail_count + skip_count
+        let json =
+          "{\"pass\":"
+          <> int.to_string(pass_count)
+          <> ",\"fail\":"
+          <> int.to_string(fail_count)
+          <> ",\"skip\":"
+          <> int.to_string(skip_count)
+          <> ",\"total\":"
+          <> int.to_string(total)
+          <> ",\"tested\":"
+          <> int.to_string(tested)
+          <> ",\"percent\":"
+          <> pct
+          <> "}"
+        case simplifile.write(to: path, contents: json) {
+          Ok(Nil) -> io.println("Results written to " <> path)
+          Error(err) ->
+            io.println(
+              "Warning: could not write results: " <> string.inspect(err),
+            )
+        }
+      }
+      Error(Nil) -> Nil
+    }
+
+    Ok(Nil)
+  })
+
+  test_runner.with_cleanup(tests, summary_test, 60)
+}
+
+@external(erlang, "test262_exec_ffi", "list_test_files")
+fn list_test_files(dir: String) -> List(String)
+
+fn load_snapshot(path: String) -> Set(String) {
+  case simplifile.read(path) {
+    Ok(content) ->
+      content
+      |> string.split("\n")
+      |> list.filter(fn(line) { line != "" })
+      |> set.from_list
+    Error(_) -> set.new()
+  }
+}
+
+fn format_percent(pass: Int, tested: Int) -> String {
+  case tested > 0 {
     True -> {
-      let pct_x100 = { pass_count * 10_000 } / tested
+      let pct_x100 = { pass * 10_000 } / tested
       let whole = pct_x100 / 100
       let frac = pct_x100 % 100
       int.to_string(whole)
@@ -102,90 +262,24 @@ fn run_execution_suite() {
     }
     False -> "0.00"
   }
-
-  io.println(
-    "test262 exec: "
-    <> int.to_string(pass_count)
-    <> " pass, "
-    <> int.to_string(fail_count)
-    <> " fail, "
-    <> int.to_string(skip_count)
-    <> " skip ("
-    <> pct
-    <> "% of "
-    <> int.to_string(tested)
-    <> " tested)",
-  )
-
-  // Write results to JSON file if RESULTS_FILE is set
-  case test_runner.get_env("RESULTS_FILE") {
-    Ok(path) -> {
-      let json =
-        "{\"pass\":"
-        <> int.to_string(pass_count)
-        <> ",\"fail\":"
-        <> int.to_string(fail_count)
-        <> ",\"skip\":"
-        <> int.to_string(skip_count)
-        <> ",\"total\":"
-        <> int.to_string(total)
-        <> ",\"tested\":"
-        <> int.to_string(tested)
-        <> ",\"percent\":"
-        <> pct
-        <> "}"
-      case simplifile.write(path, json) {
-        Ok(_) -> io.println("Results written to " <> path)
-        Error(err) ->
-          io.println(
-            "Warning: could not write results: " <> string.inspect(err),
-          )
-      }
-    }
-    Error(_) -> Nil
-  }
 }
 
-/// Run a single test262 test through the full pipeline.
-fn run_single_test(
-  metadata: TestMetadata,
-  source: String,
-  _relative_path: String,
-) -> TestOutcome {
-  // Skip module tests — not supported
-  case list.contains(metadata.flags, "module") {
-    True -> Skip("module")
-    False -> {
-      // Skip async tests — not supported
-      case list.contains(metadata.flags, "async") {
-        True -> Skip("async")
-        False -> run_test_by_phase(metadata, source)
-      }
-    }
-  }
-}
+// --- Test execution ---
 
-/// Route test based on its negative phase.
 fn run_test_by_phase(metadata: TestMetadata, source: String) -> TestOutcome {
-  // Handle onlyStrict flag
   let source = case list.contains(metadata.flags, "onlyStrict") {
     True -> "\"use strict\";\n" <> source
     False -> source
   }
 
   case metadata.negative_phase {
-    // Parse-phase negative test: should fail to parse
     Some(Parse) -> run_parse_negative_test(source)
-    // Resolution-phase: skip (module resolution)
     Some(Resolution) -> Skip("resolution")
-    // Runtime-phase negative test: should throw at runtime
     Some(Runtime) -> run_runtime_negative_test(metadata, source)
-    // No negative phase: should parse, compile, and run without throwing
     None -> run_positive_test(metadata, source)
   }
 }
 
-/// Test that should fail to parse.
 fn run_parse_negative_test(source: String) -> TestOutcome {
   case parser.parse(source, parser.Script) {
     Error(_) -> Pass
@@ -193,40 +287,33 @@ fn run_parse_negative_test(source: String) -> TestOutcome {
   }
 }
 
-/// Test that should throw at runtime.
 fn run_runtime_negative_test(
   metadata: TestMetadata,
   source: String,
 ) -> TestOutcome {
   let full_source = prepend_harness(metadata, source)
   case parse_compile_run(full_source) {
-    // Threw — that's what we want
     Ok(vm.ThrowCompletion(_, _)) -> Pass
-    // Normal completion — bad, should have thrown
     Ok(vm.NormalCompletion(_, _)) ->
       Fail("expected runtime throw but completed normally")
     Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
-    // Parse/compile error — also counts as "didn't throw at runtime"
     Error(reason) -> Fail("expected runtime throw but got: " <> reason)
   }
 }
 
-/// Test that should complete normally (no throw).
 fn run_positive_test(metadata: TestMetadata, source: String) -> TestOutcome {
   let full_source = prepend_harness(metadata, source)
   case parse_compile_run(full_source) {
     Ok(vm.NormalCompletion(_, _)) -> Pass
-    Ok(vm.ThrowCompletion(thrown, _)) ->
-      Fail("unexpected throw: " <> inspect_js_value(thrown))
+    Ok(vm.ThrowCompletion(thrown, heap)) ->
+      Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
     Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
     Error(reason) -> Fail(reason)
   }
 }
 
-/// Per-test timeout in milliseconds (5 seconds).
 const test_timeout_ms = 5000
 
-/// Parse, compile, and execute JS source (with timeout).
 fn parse_compile_run(source: String) -> Result(vm.Completion, String) {
   case
     test_runner.run_with_timeout(
@@ -239,7 +326,6 @@ fn parse_compile_run(source: String) -> Result(vm.Completion, String) {
   }
 }
 
-/// Parse, compile, and execute JS source (inner, no timeout).
 fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
@@ -263,25 +349,18 @@ fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
   }
 }
 
-/// Prepend harness files to test source.
-/// Per test262 spec: assert.js and sta.js are ALWAYS included (unless raw flag).
-/// Additional includes come from the test's metadata.
 fn prepend_harness(metadata: TestMetadata, source: String) -> String {
-  // Both assert.js and sta.js are always included unless raw flag
   let is_raw = list.contains(metadata.flags, "raw")
 
   case is_raw {
     True -> source
     False -> {
-      // Build list: assert.js + sta.js first, then metadata includes
-      // (dedup any that are already in the default set)
       let default_harness = ["assert.js", "sta.js"]
       let extra_includes =
         metadata.includes
         |> list.filter(fn(f) { !list.contains(default_harness, f) })
       let harness_files = list.append(default_harness, extra_includes)
 
-      // Read and prepend each harness file
       let harness_source =
         list.filter_map(harness_files, fn(filename) {
           let path = harness_dir <> "/" <> filename
@@ -300,45 +379,56 @@ fn prepend_harness(metadata: TestMetadata, source: String) -> String {
   }
 }
 
-/// Simple string representation of a JsValue for error messages.
-fn inspect_js_value(val: value.JsValue) -> String {
-  case val {
-    value.JsUndefined -> "undefined"
-    value.JsNull -> "null"
-    value.JsBool(True) -> "true"
-    value.JsBool(False) -> "false"
-    value.JsNumber(value.Finite(n)) -> string.inspect(n)
-    value.JsNumber(value.NaN) -> "NaN"
-    value.JsNumber(value.Infinity) -> "Infinity"
-    value.JsNumber(value.NegInfinity) -> "-Infinity"
-    value.JsString(s) -> "\"" <> s <> "\""
-    value.JsObject(_) -> "[object]"
-    value.JsSymbol(_) -> "Symbol()"
-    value.JsBigInt(value.BigInt(n)) -> int.to_string(n) <> "n"
-    value.JsUninitialized -> "<uninitialized>"
+fn get_data(h: Heap, ref: value.Ref, key: String) -> Result(value.JsValue, Nil) {
+  case object.get_own_property(h, ref, key) {
+    Some(value.DataProperty(value: val, ..)) -> Ok(val)
+    Some(_) -> Error(Nil)
+    None ->
+      case heap.read(h, ref) {
+        Some(value.ObjectSlot(prototype: Some(proto_ref), ..)) ->
+          get_data(h, proto_ref, key)
+        _ -> Error(Nil)
+      }
   }
 }
 
-@external(erlang, "io", "format")
-fn erl_io_format(fmt: String, args: List(String)) -> Nil
-
-fn clear_line() -> Nil {
-  let assert Ok(esc) = string.utf_codepoint(0x1b)
-  io.print("\r" <> string.from_utf_codepoints([esc]) <> "[K")
+fn inspect_thrown(val: value.JsValue, heap: Heap) -> String {
+  case val {
+    value.JsObject(ref) -> {
+      case get_data(heap, ref, "message") {
+        Ok(value.JsString(msg)) -> {
+          let name = case get_data(heap, ref, "name") {
+            Ok(value.JsString(n)) -> n
+            _ -> "Error"
+          }
+          name <> ": " <> msg
+        }
+        _ -> object.inspect(val, heap)
+      }
+    }
+    _ -> object.inspect(val, heap)
+  }
 }
 
-fn print_progress(
-  current: Int,
-  total: Int,
-  passes: Int,
-  fails: Int,
-  skips: Int,
-) -> Nil {
-  erl_io_format("  \r  [~s/~s] ~s pass, ~s fail, ~s skip", [
-    int.to_string(current),
-    int.to_string(total),
-    int.to_string(passes),
-    int.to_string(fails),
-    int.to_string(skips),
-  ])
-}
+// -- FFI --
+
+@external(erlang, "test262_exec_ffi", "init_stats")
+fn init_stats() -> Nil
+
+@external(erlang, "test262_exec_ffi", "record_pass")
+fn record_pass() -> Nil
+
+@external(erlang, "test262_exec_ffi", "record_fail")
+fn record_fail() -> Nil
+
+@external(erlang, "test262_exec_ffi", "record_skip")
+fn record_skip() -> Nil
+
+@external(erlang, "test262_exec_ffi", "get_stats")
+fn get_stats() -> #(Int, Int, Int)
+
+@external(erlang, "test262_exec_ffi", "record_pass_path")
+fn record_pass_path(path: String) -> Nil
+
+@external(erlang, "test262_exec_ffi", "get_pass_paths")
+fn get_pass_paths() -> List(String)

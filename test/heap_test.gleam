@@ -6,7 +6,7 @@ import arc/vm/value.{
   Ref, SymbolId,
 }
 import gleam/dict
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import gleam/set
 
 fn ordinary(props: dict.Dict(String, value.JsValue)) {
@@ -16,6 +16,7 @@ fn ordinary(props: dict.Dict(String, value.JsValue)) {
     symbol_properties: dict.new(),
     elements: js_elements.new(),
     prototype: None,
+    extensible: True,
   )
 }
 
@@ -23,7 +24,7 @@ pub fn alloc_and_read_roundtrip_test() {
   let h = heap.new()
   let slot = ordinary(dict.new())
   let #(h, ref) = heap.alloc(h, slot)
-  let assert Ok(got) = heap.read(h, ref)
+  let assert Some(got) = heap.read(h, ref)
   assert got == slot
 }
 
@@ -36,7 +37,7 @@ pub fn multiple_allocs_distinct_refs_test() {
 
 pub fn read_nonexistent_test() {
   let h = heap.new()
-  let assert Error(_) = heap.read(h, Ref(999))
+  let assert None = heap.read(h, Ref(999))
 }
 
 pub fn write_and_read_test() {
@@ -44,7 +45,7 @@ pub fn write_and_read_test() {
   let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
   let new_slot = ordinary(dict.from_list([#("x", JsNumber(Finite(42.0)))]))
   let h = heap.write(h, ref, new_slot)
-  let assert Ok(got) = heap.read(h, ref)
+  let assert Some(got) = heap.read(h, ref)
   assert got == new_slot
 }
 
@@ -62,7 +63,7 @@ pub fn gc_rooted_survives_test() {
   let h = heap.root(h, ref)
   let h = heap.collect(h)
   assert heap.size(h) == 1
-  let assert Ok(_) = heap.read(h, ref)
+  let assert Some(_) = heap.read(h, ref)
 }
 
 pub fn gc_unreachable_collected_test() {
@@ -71,7 +72,7 @@ pub fn gc_unreachable_collected_test() {
   // Not rooted — should be collected
   let h = heap.collect(h)
   assert heap.size(h) == 0
-  let assert Error(_) = heap.read(h, ref)
+  let assert None = heap.read(h, ref)
 }
 
 pub fn gc_transitive_reachability_test() {
@@ -83,8 +84,8 @@ pub fn gc_transitive_reachability_test() {
   let h = heap.root(h, ref_a)
   let h = heap.collect(h)
   assert heap.size(h) == 2
-  let assert Ok(_) = heap.read(h, ref_a)
-  let assert Ok(_) = heap.read(h, ref_b)
+  let assert Some(_) = heap.read(h, ref_a)
+  let assert Some(_) = heap.read(h, ref_b)
 }
 
 pub fn gc_deep_chain_test() {
@@ -98,9 +99,9 @@ pub fn gc_deep_chain_test() {
   let h = heap.root(h, ref_a)
   let h = heap.collect(h)
   assert heap.size(h) == 3
-  let assert Ok(_) = heap.read(h, ref_a)
-  let assert Ok(_) = heap.read(h, ref_b)
-  let assert Ok(_) = heap.read(h, ref_c)
+  let assert Some(_) = heap.read(h, ref_a)
+  let assert Some(_) = heap.read(h, ref_b)
+  let assert Some(_) = heap.read(h, ref_c)
 }
 
 pub fn gc_unrooted_cycle_collected_test() {
@@ -127,8 +128,8 @@ pub fn gc_rooted_cycle_survives_test() {
   let h = heap.root(h, ref_a)
   let h = heap.collect(h)
   assert heap.size(h) == 2
-  let assert Ok(_) = heap.read(h, ref_a)
-  let assert Ok(_) = heap.read(h, ref_b)
+  let assert Some(_) = heap.read(h, ref_a)
+  let assert Some(_) = heap.read(h, ref_b)
 }
 
 pub fn free_list_reuse_after_gc_test() {
@@ -170,10 +171,10 @@ pub fn multiple_independent_heaps_test() {
   let #(h1, r1) = heap.alloc(h1, slot1)
   let #(h2, _r2) = heap.alloc(h2, slot2)
   // h1 has slot1 at index 0, h2 has slot2 at index 0
-  let assert Ok(got1) = heap.read(h1, r1)
+  let assert Some(got1) = heap.read(h1, r1)
   assert got1 == slot1
   // h2 at same index has different content
-  let assert Ok(got2) = heap.read(h2, r1)
+  let assert Some(got2) = heap.read(h2, r1)
   assert got2 == slot2
   // Mutating h1 doesn't affect h2
   let h1 = heap.root(h1, r1)
@@ -198,12 +199,13 @@ pub fn gc_traces_through_array_slot_test() {
           JsNull,
         ]),
         prototype: None,
+        extensible: True,
       ),
     )
   let h = heap.root(h, ref_arr)
   let h = heap.collect(h)
   assert heap.size(h) == 2
-  let assert Ok(_) = heap.read(h, ref_inner)
+  let assert Some(_) = heap.read(h, ref_inner)
 }
 
 pub fn gc_traces_through_closure_slot_test() {
@@ -220,13 +222,14 @@ pub fn gc_traces_through_closure_slot_test() {
         symbol_properties: dict.new(),
         elements: js_elements.new(),
         prototype: None,
+        extensible: True,
       ),
     )
   let h = heap.root(h, ref_closure)
   let h = heap.collect(h)
   assert heap.size(h) == 3
-  let assert Ok(_) = heap.read(h, ref_captured)
-  let assert Ok(_) = heap.read(h, ref_env)
+  let assert Some(_) = heap.read(h, ref_captured)
+  let assert Some(_) = heap.read(h, ref_env)
 }
 
 pub fn collect_with_roots_test() {
@@ -235,7 +238,7 @@ pub fn collect_with_roots_test() {
   let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
   let h = heap.collect_with_roots(h, set.from_list([ref.id]))
   assert heap.size(h) == 1
-  let assert Ok(_) = heap.read(h, ref)
+  let assert Some(_) = heap.read(h, ref)
   // Without temporary roots, it's collected
   let h = heap.collect(h)
   assert heap.size(h) == 0
@@ -254,6 +257,7 @@ pub fn mixed_live_dead_partition_test() {
         symbol_properties: dict.new(),
         elements: js_elements.from_list([JsNumber(Finite(1.0))]),
         prototype: None,
+        extensible: True,
       ),
     )
   let #(h, live_leaf) = heap.alloc(h, ordinary(dict.new()))
@@ -269,18 +273,19 @@ pub fn mixed_live_dead_partition_test() {
         symbol_properties: dict.new(),
         elements: js_elements.new(),
         prototype: None,
+        extensible: True,
       ),
     )
   let h = heap.root(h, live_parent)
   let h = heap.root(h, live_solo)
   let h = heap.collect(h)
   assert heap.size(h) == 4
-  let assert Ok(_) = heap.read(h, live_parent)
-  let assert Ok(_) = heap.read(h, live_leaf)
-  let assert Ok(_) = heap.read(h, live_solo)
-  let assert Ok(_) = heap.read(h, live_env)
-  let assert Error(_) = heap.read(h, dead1)
-  let assert Error(_) = heap.read(h, dead2)
+  let assert Some(_) = heap.read(h, live_parent)
+  let assert Some(_) = heap.read(h, live_leaf)
+  let assert Some(_) = heap.read(h, live_solo)
+  let assert Some(_) = heap.read(h, live_env)
+  let assert None = heap.read(h, dead1)
+  let assert None = heap.read(h, dead2)
 }
 
 pub fn stats_test() {
@@ -314,6 +319,7 @@ pub fn gc_traces_through_function_object_test() {
         symbol_properties: dict.new(),
         elements: js_elements.new(),
         prototype: None,
+        extensible: True,
       ),
     )
   let #(h, ref_obj) =
@@ -324,8 +330,8 @@ pub fn gc_traces_through_function_object_test() {
   let h = heap.root(h, ref_obj)
   let h = heap.collect(h)
   assert heap.size(h) == 3
-  let assert Ok(_) = heap.read(h, ref_closure)
-  let assert Ok(_) = heap.read(h, ref_env)
+  let assert Some(_) = heap.read(h, ref_closure)
+  let assert Some(_) = heap.read(h, ref_env)
 }
 
 pub fn shared_env_both_closures_keep_it_alive_test() {
@@ -341,6 +347,7 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
         symbol_properties: dict.new(),
         elements: js_elements.new(),
         prototype: None,
+        extensible: True,
       ),
     )
   let #(h, ref_get) =
@@ -352,15 +359,16 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
         symbol_properties: dict.new(),
         elements: js_elements.new(),
         prototype: None,
+        extensible: True,
       ),
     )
   // Root only ref_inc — env should still survive (reachable from ref_inc)
   let h = heap.root(h, ref_inc)
   let h = heap.collect(h)
   assert heap.size(h) == 2
-  let assert Ok(_) = heap.read(h, ref_inc)
-  let assert Ok(_) = heap.read(h, ref_env)
-  let assert Error(_) = heap.read(h, ref_get)
+  let assert Some(_) = heap.read(h, ref_inc)
+  let assert Some(_) = heap.read(h, ref_env)
+  let assert None = heap.read(h, ref_get)
 }
 
 pub fn gc_traces_through_box_slot_test() {
@@ -379,24 +387,25 @@ pub fn gc_traces_through_box_slot_test() {
         symbol_properties: dict.new(),
         elements: js_elements.new(),
         prototype: None,
+        extensible: True,
       ),
     )
   let h = heap.root(h, ref_closure)
   let h = heap.collect(h)
   assert heap.size(h) == 4
-  let assert Ok(_) = heap.read(h, ref_closure)
-  let assert Ok(_) = heap.read(h, ref_env)
-  let assert Ok(_) = heap.read(h, ref_box)
-  let assert Ok(_) = heap.read(h, ref_obj)
+  let assert Some(_) = heap.read(h, ref_closure)
+  let assert Some(_) = heap.read(h, ref_env)
+  let assert Some(_) = heap.read(h, ref_box)
+  let assert Some(_) = heap.read(h, ref_obj)
 }
 
 pub fn box_slot_mutation_test() {
   // BoxSlot can be updated (write) and the new value is readable
   let h = heap.new()
   let #(h, ref_box) = heap.alloc(h, BoxSlot(value: JsNumber(Finite(0.0))))
-  let assert Ok(BoxSlot(value: JsNumber(Finite(0.0)))) = heap.read(h, ref_box)
+  let assert Some(BoxSlot(value: JsNumber(Finite(0.0)))) = heap.read(h, ref_box)
   let h = heap.write(h, ref_box, BoxSlot(value: JsNumber(Finite(1.0))))
-  let assert Ok(BoxSlot(value: JsNumber(Finite(1.0)))) = heap.read(h, ref_box)
+  let assert Some(BoxSlot(value: JsNumber(Finite(1.0)))) = heap.read(h, ref_box)
 }
 
 pub fn non_ref_values_dont_prevent_gc_test() {

@@ -265,7 +265,7 @@ fn add_to_func_scope_inner(
           case dict.get(scope.bindings, name) {
             Ok(_) -> [scope, ..rest]
             // Already exists, reuse
-            Error(_) -> {
+            Error(Nil) -> {
               let scope =
                 Scope(
                   ..scope,

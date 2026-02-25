@@ -32,10 +32,18 @@ type ReplState {
 
 /// Console-style inspect for REPL output (like Chrome DevTools, not toString).
 fn inspect(h: Heap, val: JsValue) -> String {
-  inspect_inner(h, val, 0, [])
+  inspect_inner(h, val, 0, set.new())
 }
 
-fn inspect_inner(h: Heap, val: JsValue, depth: Int, seen: List(Int)) -> String {
+/// REPL/debug value inspector (not a spec operation). Recursively renders
+/// a JsValue as a human-readable string similar to Chrome DevTools output.
+/// Tracks `seen` refs for cycle detection ([Circular]).
+fn inspect_inner(
+  h: Heap,
+  val: JsValue,
+  depth: Int,
+  seen: set.Set(Int),
+) -> String {
   case val {
     value.JsUndefined -> "undefined"
     value.JsNull -> "null"
@@ -66,14 +74,16 @@ fn escape_string(s: String) -> String {
   |> string.replace("\t", "\\t")
 }
 
-fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: List(Int)) -> String {
+/// REPL/debug helper: render an object (array, function, or plain object)
+/// as a human-readable string. Dispatches on ObjectKind for format selection.
+fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
   // Cycle detection
-  case list.contains(seen, ref.id) {
+  case set.contains(seen, ref.id) {
     True -> "[Circular]"
     False -> {
-      let seen = [ref.id, ..seen]
+      let seen = set.insert(seen, ref.id)
       case heap.read(h, ref) {
-        Ok(ObjectSlot(kind:, properties:, elements:, symbol_properties:, ..)) ->
+        Some(ObjectSlot(kind:, properties:, elements:, symbol_properties:, ..)) ->
           case kind {
             ArrayObject(length:) ->
               inspect_array(h, elements, length, depth, seen)
@@ -96,6 +106,20 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: List(Int)) -> String {
                 depth,
                 seen,
               )
+            value.ArgumentsObject(length:) ->
+              "[Arguments] " <> inspect_array(h, elements, length, depth, seen)
+            value.StringObject(value: s) ->
+              "[String: '" <> escape_string(s) <> "']"
+            value.NumberObject(value: n) ->
+              "[Number: "
+              <> inspect_inner(h, value.JsNumber(n), depth, seen)
+              <> "]"
+            value.BooleanObject(value: True) -> "[Boolean: true]"
+            value.BooleanObject(value: False) -> "[Boolean: false]"
+            value.SymbolObject(value: sym) ->
+              "[Symbol: "
+              <> inspect_inner(h, value.JsSymbol(sym), depth, seen)
+              <> "]"
           }
         _ -> "[Object]"
       }
@@ -108,7 +132,7 @@ fn inspect_array(
   elements: value.JsElements,
   length: Int,
   depth: Int,
-  seen: List(Int),
+  seen: set.Set(Int),
 ) -> String {
   case depth > 2 {
     True -> "[Array]"
@@ -143,7 +167,7 @@ fn inspect_tagged_object(
   properties: dict.Dict(String, value.Property),
   symbol_properties: dict.Dict(value.SymbolId, value.Property),
   depth: Int,
-  seen: List(Int),
+  seen: set.Set(Int),
 ) -> String {
   let tag = case dict.get(symbol_properties, value.symbol_to_string_tag) {
     Ok(DataProperty(value: value.JsString(t), ..)) -> Some(t)
@@ -160,7 +184,7 @@ fn inspect_plain_object(
   h: Heap,
   properties: dict.Dict(String, value.Property),
   depth: Int,
-  seen: List(Int),
+  seen: set.Set(Int),
 ) -> String {
   case depth > 2 {
     True -> "[Object]"
@@ -262,7 +286,7 @@ fn banner() -> Nil {
 
 fn repl_loop(state: ReplState) -> Nil {
   case read_line("> ") {
-    Error(_) -> {
+    Error(Nil) -> {
       io.println("")
       Nil
     }
@@ -325,14 +349,16 @@ pub fn main() -> Nil {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, globals) = builtins.globals(b, h)
-  let env =
-    vm.ReplEnv(
+
+  repl_loop(ReplState(
+    heap: h,
+    builtins: b,
+    env: vm.ReplEnv(
       globals:,
       closure_templates: dict.new(),
       const_globals: set.new(),
       next_symbol_id: 100,
       symbol_descriptions: dict.new(),
-    )
-  let state = ReplState(heap: h, builtins: b, env:)
-  repl_loop(state)
+    ),
+  ))
 }

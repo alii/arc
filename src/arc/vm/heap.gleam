@@ -2,6 +2,7 @@ import arc/erlang
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 
 /// Stats returned by the stats() function for introspection.
@@ -19,6 +20,11 @@ pub opaque type Heap {
   )
 }
 
+/// Create an empty heap.
+pub fn new() -> Heap {
+  Heap(data: dict.new(), free: [], next: 0, roots: set.new())
+}
+
 pub fn serialize(heap: Heap) -> BitArray {
   erlang.term_to_binary(heap)
 }
@@ -27,11 +33,6 @@ pub fn serialize(heap: Heap) -> BitArray {
 /// that the passed data is actually a heap 
 pub fn dangerously_deserialize(heap: BitArray) -> Heap {
   erlang.binary_to_term(heap)
-}
-
-/// Create an empty heap.
-pub fn new() -> Heap {
-  Heap(data: dict.new(), free: [], next: 0, roots: set.new())
 }
 
 /// Allocate a slot. Prefers recycled indices from the free list,
@@ -64,9 +65,14 @@ pub fn reserve(heap: Heap) -> #(Heap, Ref) {
   }
 }
 
-/// Read a slot by ref. Returns Error(Nil) if the ref is dangling.
-pub fn read(heap: Heap, ref: Ref) -> Result(HeapSlot, Nil) {
-  dict.get(heap.data, ref.id)
+/// Read a slot by ref. Returns None if the ref is dangling (never allocated
+/// or already collected). Uses Option rather than Result since a missing
+/// ref is a normal condition (e.g. prototype chain termination), not an error.
+pub fn read(heap: Heap, ref: Ref) -> Option(HeapSlot) {
+  case dict.get(heap.data, ref.id) {
+    Ok(slot) -> Some(slot)
+    Error(Nil) -> None
+  }
 }
 
 /// Overwrite a slot. No-op if the ref doesn't exist in the heap
@@ -75,6 +81,35 @@ pub fn write(heap: Heap, ref: Ref, slot: HeapSlot) -> Heap {
   case dict.has_key(heap.data, ref.id) {
     True -> Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
     False -> heap
+  }
+}
+
+/// Read-modify-write: apply a transform to the slot at ref.
+/// Returns the unchanged heap if the ref doesn't exist.
+/// Convenience wrapper over read + write for in-place slot mutation.
+pub fn update(heap: Heap, ref: Ref, f: fn(HeapSlot) -> HeapSlot) -> Heap {
+  case dict.get(heap.data, ref.id) {
+    Ok(slot) -> Heap(..heap, data: dict.insert(heap.data, ref.id, f(slot)))
+    Error(Nil) -> heap
+  }
+}
+
+/// Read-modify-write variant that returns an extra value alongside the updated
+/// heap. The transform returns #(new_slot, extra). Returns #(heap, default)
+/// if ref is missing. Useful when mutation needs to produce a side-channel
+/// result (e.g. the old value being replaced).
+pub fn update_with(
+  heap: Heap,
+  ref: Ref,
+  default: a,
+  f: fn(HeapSlot) -> #(HeapSlot, a),
+) -> #(Heap, a) {
+  case dict.get(heap.data, ref.id) {
+    Ok(slot) -> {
+      let #(new_slot, extra) = f(slot)
+      #(Heap(..heap, data: dict.insert(heap.data, ref.id, new_slot)), extra)
+    }
+    Error(Nil) -> #(heap, default)
   }
 }
 

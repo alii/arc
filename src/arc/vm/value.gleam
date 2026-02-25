@@ -113,14 +113,47 @@ pub type NativeFn {
   // Object static methods
   NativeObjectGetOwnPropertyDescriptor
   NativeObjectDefineProperty
+  NativeObjectDefineProperties
   NativeObjectGetOwnPropertyNames
   NativeObjectKeys
+  NativeObjectValues
+  NativeObjectEntries
+  NativeObjectCreate
+  NativeObjectAssign
+  NativeObjectIs
+  NativeObjectHasOwn
+  NativeObjectGetPrototypeOf
+  NativeObjectSetPrototypeOf
+  NativeObjectFreeze
+  NativeObjectIsFrozen
+  NativeObjectIsExtensible
+  NativeObjectPreventExtensions
   // Object.prototype instance methods
   NativeObjectPrototypeHasOwnProperty
   NativeObjectPrototypePropertyIsEnumerable
   // Array.prototype instance methods
   NativeArrayPrototypeJoin
   NativeArrayPrototypePush
+  NativeArrayPrototypePop
+  NativeArrayPrototypeShift
+  NativeArrayPrototypeUnshift
+  NativeArrayPrototypeSlice
+  NativeArrayPrototypeConcat
+  NativeArrayPrototypeReverse
+  NativeArrayPrototypeFill
+  NativeArrayPrototypeAt
+  NativeArrayPrototypeIndexOf
+  NativeArrayPrototypeLastIndexOf
+  NativeArrayPrototypeIncludes
+  NativeArrayPrototypeForEach
+  NativeArrayPrototypeMap
+  NativeArrayPrototypeFilter
+  NativeArrayPrototypeReduce
+  NativeArrayPrototypeReduceRight
+  NativeArrayPrototypeEvery
+  NativeArrayPrototypeSome
+  NativeArrayPrototypeFind
+  NativeArrayPrototypeFindIndex
   // Math methods
   NativeMathPow
   NativeMathAbs
@@ -172,6 +205,12 @@ pub type NativeFn {
   NativeNumberIsInteger
   NativeNumberParseInt
   NativeNumberParseFloat
+  // Number.prototype methods — unwrap [[NumberData]] (thisNumberValue)
+  NativeNumberPrototypeValueOf
+  NativeNumberPrototypeToString
+  // Boolean.prototype methods — unwrap [[BooleanData]] (thisBooleanValue)
+  NativeBooleanPrototypeValueOf
+  NativeBooleanPrototypeToString
   // Promise
   NativePromiseConstructor
   NativePromiseThen
@@ -219,6 +258,8 @@ pub type NativeFn {
   NativeObjectPrototypeValueOf
   /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
   NativeIteratorSymbolIterator
+  /// Arc.peek(promise) — synchronously inspect promise state.
+  NativeArcPeek
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -227,6 +268,15 @@ pub type ExoticKind {
   OrdinaryObject
   /// JS array: `[]`, `new Array()`. `length` is tracked explicitly.
   ArrayObject(length: Int)
+  /// Arguments object — `arguments` inside a non-arrow function. Structurally
+  /// identical to ArrayObject (indexed elements + tracked length), but per spec
+  /// it's an ordinary object with Object.prototype, NOT an array:
+  /// - Array.isArray(arguments) → false
+  /// - Object.prototype.toString.call(arguments) → "[object Arguments]"
+  /// We only implement unmapped arguments (indices independent of params),
+  /// which is what strict mode and functions with complex params get per
+  /// ES §10.4.4.6 CreateUnmappedArgumentsObject.
+  ArgumentsObject(length: Int)
   /// JS function (closure). `func_index` identifies the bytecode template,
   /// `env` points to the EnvSlot holding captured variables.
   FunctionObject(func_index: Int, env: Ref)
@@ -238,6 +288,20 @@ pub type ExoticKind {
   PromiseObject(promise_data: Ref)
   /// Generator object. Points to a GeneratorSlot that holds suspended state.
   GeneratorObject(generator_data: Ref)
+  /// Boxed String primitive (`new String("x")`, `Object("x")`, or sloppy-mode
+  /// this-boxing). Has [[StringData]] internal slot. Per spec §10.4.3 this is
+  /// an exotic object with own index properties and `length`; we expose those
+  /// virtually via the ExoticKind payload rather than materialising them on
+  /// the properties dict.
+  StringObject(value: String)
+  /// Boxed Number primitive (`new Number(42)`, etc.). Has [[NumberData]].
+  /// Ordinary object aside from the internal slot — no own properties.
+  NumberObject(value: JsNum)
+  /// Boxed Boolean primitive (`new Boolean(true)`, etc.). Has [[BooleanData]].
+  BooleanObject(value: Bool)
+  /// Boxed Symbol (`Object(sym)` only; `new Symbol()` is a TypeError).
+  /// Has [[SymbolData]]. Ordinary object aside from the internal slot.
+  SymbolObject(value: SymbolId)
 }
 
 /// Property descriptor — writable/enumerable/configurable flags per property.
@@ -246,6 +310,12 @@ pub type Property {
   DataProperty(
     value: JsValue,
     writable: Bool,
+    enumerable: Bool,
+    configurable: Bool,
+  )
+  AccessorProperty(
+    get: Option(JsValue),
+    set: Option(JsValue),
     enumerable: Bool,
     configurable: Bool,
   )
@@ -261,22 +331,33 @@ pub fn data(val: JsValue) -> Property {
   )
 }
 
-/// Set writable to True.
+/// Set writable to True (data properties only).
 pub fn writable(prop: Property) -> Property {
-  let DataProperty(value:, enumerable:, configurable:, ..) = prop
-  DataProperty(value:, writable: True, enumerable:, configurable:)
+  case prop {
+    DataProperty(value:, enumerable:, configurable:, ..) ->
+      DataProperty(value:, writable: True, enumerable:, configurable:)
+    AccessorProperty(..) -> panic as "Accessor property cannot be made writable"
+  }
 }
 
 /// Set enumerable to True.
 pub fn enumerable(prop: Property) -> Property {
-  let DataProperty(value:, writable:, configurable:, ..) = prop
-  DataProperty(value:, writable:, enumerable: True, configurable:)
+  case prop {
+    DataProperty(value:, writable:, configurable:, ..) ->
+      DataProperty(value:, writable:, enumerable: True, configurable:)
+    AccessorProperty(get:, set:, configurable:, ..) ->
+      AccessorProperty(get:, set:, enumerable: True, configurable:)
+  }
 }
 
 /// Set configurable to True.
 pub fn configurable(prop: Property) -> Property {
-  let DataProperty(value:, writable:, enumerable:, ..) = prop
-  DataProperty(value:, writable:, enumerable:, configurable: True)
+  case prop {
+    DataProperty(value:, writable:, enumerable:, ..) ->
+      DataProperty(value:, writable:, enumerable:, configurable: True)
+    AccessorProperty(get:, set:, enumerable:, ..) ->
+      AccessorProperty(get:, set:, enumerable:, configurable: True)
+  }
 }
 
 /// Normal assignment: all flags true (obj.x = val, object literals, etc.)
@@ -290,10 +371,22 @@ pub fn builtin_property(val: JsValue) -> Property {
   data(val) |> writable() |> configurable()
 }
 
-/// Extract refs reachable from a Property.
-pub fn refs_in_property(prop: Property) -> List(Ref) {
+/// GC root tracing: extract heap refs reachable from a Property
+/// (data value or accessor get/set slots).
+fn refs_in_property(prop: Property) -> List(Ref) {
   case prop {
     DataProperty(value:, ..) -> refs_in_value(value)
+    AccessorProperty(get:, set:, ..) -> {
+      let g = case get {
+        Some(v) -> refs_in_value(v)
+        None -> []
+      }
+      let s = case set {
+        Some(v) -> refs_in_value(v)
+        None -> []
+      }
+      list.append(g, s)
+    }
   }
 }
 
@@ -313,26 +406,6 @@ pub type Job {
     resolve: JsValue,
     reject: JsValue,
   )
-}
-
-/// Extract refs from a Job for GC root tracking.
-pub fn refs_in_job(job: Job) -> List(Ref) {
-  case job {
-    PromiseReactionJob(handler:, arg:, resolve:, reject:) ->
-      list.flatten([
-        refs_in_value(handler),
-        refs_in_value(arg),
-        refs_in_value(resolve),
-        refs_in_value(reject),
-      ])
-    PromiseResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
-      list.flatten([
-        refs_in_value(thenable),
-        refs_in_value(then_fn),
-        refs_in_value(resolve),
-        refs_in_value(reject),
-      ])
-  }
 }
 
 /// Internal promise state (pending/fulfilled/rejected).
@@ -387,6 +460,7 @@ pub type HeapSlot {
     elements: JsElements,
     prototype: Option(Ref),
     symbol_properties: Dict(SymbolId, Property),
+    extensible: Bool,
   )
   /// Flat environment frame. Multiple closures in the same scope reference
   /// the same EnvSlot, so mutations to captured variables are visible across them.
@@ -430,6 +504,7 @@ pub type HeapSlot {
     saved_try_stack: List(SavedTryFrame),
     saved_finally_stack: List(SavedFinallyCompletion),
     saved_this: JsValue,
+    saved_callee_ref: Option(Ref),
   )
   /// Engine-internal async function suspended state.
   /// Saves the full execution context so await can resume.
@@ -445,11 +520,13 @@ pub type HeapSlot {
     saved_try_stack: List(SavedTryFrame),
     saved_finally_stack: List(SavedFinallyCompletion),
     saved_this: JsValue,
+    saved_callee_ref: Option(Ref),
   )
 }
 
-/// Extract refs from a single JsValue. Only JsObject carries heap refs now.
-pub fn refs_in_value(value: JsValue) -> List(Ref) {
+/// GC root tracing: extract heap refs from a single JsValue.
+/// Only JsObject carries heap refs; all primitives return [].
+fn refs_in_value(value: JsValue) -> List(Ref) {
   case value {
     JsObject(ref) -> [ref]
     JsUndefined
@@ -466,7 +543,14 @@ pub fn refs_in_value(value: JsValue) -> List(Ref) {
 /// Extract all refs reachable from a heap slot by walking its JsValues.
 pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
   case slot {
-    ObjectSlot(kind:, properties:, elements:, prototype:, symbol_properties:) -> {
+    ObjectSlot(
+      kind:,
+      properties:,
+      elements:,
+      prototype:,
+      symbol_properties:,
+      extensible: _,
+    ) -> {
       let prop_refs =
         dict.values(properties)
         |> list.flat_map(refs_in_property)
@@ -516,7 +600,14 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         ]
         PromiseObject(promise_data:) -> [promise_data]
         GeneratorObject(generator_data:) -> [generator_data]
-        OrdinaryObject | ArrayObject(_) | NativeFunction(_) -> []
+        OrdinaryObject
+        | ArrayObject(_)
+        | ArgumentsObject(_)
+        | NativeFunction(_)
+        | StringObject(_)
+        | NumberObject(_)
+        | BooleanObject(_)
+        | SymbolObject(_) -> []
       }
       list.flatten([prop_refs, sym_prop_refs, elem_refs, proto_refs, kind_refs])
     }
@@ -551,6 +642,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
       saved_stack:,
       saved_finally_stack:,
       saved_this:,
+      saved_callee_ref:,
       ..,
     ) -> {
       let finally_refs =
@@ -567,6 +659,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         list.flat_map(saved_stack, refs_in_value),
         finally_refs,
         refs_in_value(saved_this),
+        option.map(saved_callee_ref, list.wrap) |> option.unwrap([]),
       ])
     }
     AsyncFunctionSlot(
@@ -578,6 +671,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
       saved_stack:,
       saved_finally_stack:,
       saved_this:,
+      saved_callee_ref:,
       ..,
     ) -> {
       let finally_refs =
@@ -597,6 +691,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         list.flat_map(saved_stack, refs_in_value),
         finally_refs,
         refs_in_value(saved_this),
+        option.map(saved_callee_ref, list.wrap) |> option.unwrap([]),
       ])
     }
   }
@@ -604,6 +699,9 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
 
 /// Format a JS number as a string. Integer-valued floats omit the decimal.
 pub fn js_format_number(n: Float) -> String {
+  // §6.1.6.1.20 Number::toString: -0 → "0"
+  // BEAM =:= distinguishes -0.0 from 0.0, so normalize first.
+  let n = n +. 0.0
   let truncated = float.truncate(n)
   case int.to_float(truncated) == n {
     True -> int.to_string(truncated)
@@ -631,5 +729,37 @@ pub fn float_to_int(f: Float) -> Int {
   case f <. 0.0 {
     True -> 0 - float.truncate(float.negate(f))
     False -> float.truncate(f)
+  }
+}
+
+/// JS === (IsStrictlyEqual). NaN !== NaN; +0 === -0.
+/// BEAM's =:= distinguishes ±0, so we normalize by adding 0.0 before comparing
+/// (IEEE 754: -0.0 + 0.0 = +0.0).
+pub fn strict_equal(left: JsValue, right: JsValue) -> Bool {
+  case left, right {
+    JsUndefined, JsUndefined -> True
+    JsNull, JsNull -> True
+    JsBool(a), JsBool(b) -> a == b
+    // NaN !== NaN
+    JsNumber(NaN), _ | _, JsNumber(NaN) -> False
+    // +0 === -0: normalize -0 → +0 via IEEE addition before comparing
+    JsNumber(Finite(a)), JsNumber(Finite(b)) -> a +. 0.0 == b +. 0.0
+    JsNumber(a), JsNumber(b) -> a == b
+    JsString(a), JsString(b) -> a == b
+    JsBigInt(a), JsBigInt(b) -> a == b
+    // Object identity (same Ref) — covers functions and arrays too
+    JsObject(a), JsObject(b) -> a == b
+    JsSymbol(a), JsSymbol(b) -> a == b
+    _, _ -> False
+  }
+}
+
+/// SameValueZero: like ===, but NaN equals NaN. ±0 are still equal.
+/// Used by Array.prototype.includes, Map/Set key equality.
+pub fn same_value_zero(left: JsValue, right: JsValue) -> Bool {
+  case left, right {
+    // NaN SameValueZero NaN → true (this is the only difference from ===)
+    JsNumber(NaN), JsNumber(NaN) -> True
+    _, _ -> strict_equal(left, right)
   }
 }

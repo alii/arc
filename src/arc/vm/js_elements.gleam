@@ -23,6 +23,13 @@ pub fn from_list(items: List(JsValue)) -> JsElements {
   DenseElements(array.from_list(items))
 }
 
+/// Build sparse elements from #(index, value) pairs. Produces a dict-backed
+/// representation where missing indices are treated as holes (return undefined
+/// on access). Used for array literals containing elisions (e.g. `[1,,3]`).
+pub fn from_indexed(items: List(#(Int, JsValue))) -> JsElements {
+  SparseElements(dict.from_list(items))
+}
+
 /// Get element at index. Returns JsUndefined for missing/out-of-bounds.
 pub fn get(elements: JsElements, index: Int) -> JsValue {
   case elements {

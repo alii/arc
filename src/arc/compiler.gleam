@@ -48,13 +48,14 @@ fn compile_script(
         List(value.JsValue),
         Dict(value.JsValue, Int),
         List(emit.CompiledChild),
+        Bool,
       ),
       emit.EmitError,
     ),
 ) -> Result(FuncTemplate, CompileError) {
   // Phase 1: Emit IR from AST
   case emit_fn(stmts) {
-    Ok(#(emitter_ops, constants, constants_map, children)) -> {
+    Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
       // Determine which variables are captured by children (need boxing)
       let captured_vars = collect_all_captured_vars(children, emitter_ops)
 
@@ -78,7 +79,7 @@ fn compile_script(
           None,
           0,
           [],
-          False,
+          is_strict,
           False,
           False,
           False,
@@ -101,7 +102,8 @@ fn compile_child(
 
   // Filter to names that exist in parent scope (others are globals)
   let captures =
-    list.filter(free_vars, fn(name) { dict.has_key(parent_scope, name) })
+    set.filter(free_vars, dict.has_key(parent_scope, _))
+    |> set.to_list
 
   // Build env_descriptors: for each captured name, CaptureLocal(parent_index)
   let env_descriptors =
@@ -172,13 +174,9 @@ fn collect_all_captured_vars(
 
   // For each child, collect free vars and intersect with parent declarations
   list.fold(children, set.new(), fn(acc, child) {
-    let free = collect_free_vars(child)
-    list.fold(free, acc, fn(acc2, name) {
-      case set.contains(parent_declared, name) {
-        True -> set.insert(acc2, name)
-        False -> acc2
-      }
-    })
+    collect_free_vars(child)
+    |> set.intersection(parent_declared)
+    |> set.union(acc)
   })
 }
 
@@ -197,9 +195,9 @@ fn collect_declared_names(ops: List(emit.EmitterOp)) -> set.Set(String) {
 // ============================================================================
 
 /// Collect variable names that are used but not declared in a child's EmitterOps.
-fn collect_free_vars(child: emit.CompiledChild) -> List(String) {
+fn collect_free_vars(child: emit.CompiledChild) -> set.Set(String) {
   let #(used, declared) = scan_ops(child.code, set.new(), set.new())
-  set.to_list(set.difference(used, declared))
+  set.difference(used, declared)
 }
 
 /// Scan EmitterOps to find used variable names and declared names.

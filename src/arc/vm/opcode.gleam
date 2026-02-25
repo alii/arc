@@ -41,14 +41,36 @@ pub type Op {
   DefineFieldComputed
   DefineMethod(name: String)
   DefineAccessor(name: String, kind: AccessorKind)
+  DefineAccessorComputed(kind: AccessorKind)
   ObjectSpread
   ArrayFrom(count: Int)
+  /// Pop `count - length(holes)` values, build a sparse array of length `count`
+  /// with the hole indices left empty. Used for array literals with elisions
+  /// (e.g. `[1,,3]` → ArrayFromWithHoles(3, [1])). Hole indices must be sorted
+  /// ascending. Falls back to ArrayFrom when holes is empty — emitter decides.
+  ArrayFromWithHoles(count: Int, holes: List(Int))
+  /// [val, arr] → [arr]; sets arr[arr.length] = val, increments length.
+  /// Used for non-spread elements after the first spread in an array literal.
+  ArrayPush
+  /// [arr] → [arr]; increments length WITHOUT setting any element (creates a
+  /// hole at the previous length). Used for elisions after the first spread
+  /// in an array literal (e.g. the hole in `[1, ...x, , 3]`).
+  ArrayPushHole
+  /// [iterable, arr] → [arr]; iterates iterable, appends each to arr.
+  /// Used for spread elements in array literals and argument lists.
+  /// Throws TypeError if iterable is not iterable (unlike ObjectSpread).
+  ArraySpread
 
   // -- Calls --
   Call(arity: Int)
   CallMethod(name: String, arity: Int)
   CallConstructor(arity: Int)
+  /// [args_array, callee] → [result]; this=undefined. Spread-call path.
   CallApply
+  /// [args_array, callee, receiver] → [result]; this=receiver. Spread-method-call.
+  CallMethodApply
+  /// [args_array, ctor] → [new instance]. Spread-new path.
+  CallConstructorApply
   Return
 
   // -- Control Flow (absolute PC targets) --
@@ -104,6 +126,11 @@ pub type Op {
   /// Pop value from stack, wrap in Promise.resolve, suspend async function.
   /// On resume, resolved value is pushed onto stack.
   Await
+
+  // -- Arguments object --
+  /// Create an arguments object from the current call's original args.
+  /// Reads state.call_args, allocates ArgumentsObject, pushes ref onto stack.
+  CreateArguments
 
   // -- REPL const tracking --
   /// Mark a global name as const (PutGlobal will throw TypeError for this name).
@@ -207,12 +234,19 @@ pub type IrOp {
   IrDefineFieldComputed
   IrDefineMethod(name: String)
   IrDefineAccessor(name: String, kind: AccessorKind)
+  IrDefineAccessorComputed(kind: AccessorKind)
   IrObjectSpread
   IrArrayFrom(count: Int)
+  IrArrayFromWithHoles(count: Int, holes: List(Int))
+  IrArrayPush
+  IrArrayPushHole
+  IrArraySpread
   IrCall(arity: Int)
   IrCallMethod(name: String, arity: Int)
   IrCallConstructor(arity: Int)
   IrCallApply
+  IrCallMethodApply
+  IrCallConstructorApply
   IrReturn
   IrThrow
   IrPopTry
@@ -237,6 +271,7 @@ pub type IrOp {
   IrInitialYield
   IrYield
   IrAwait
+  IrCreateArguments
 
   // -- REPL const tracking --
   IrMarkGlobalConst(name: String)
