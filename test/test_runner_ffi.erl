@@ -137,7 +137,11 @@ make_test_suite(Tests, TimeoutSec, CleanupTest) ->
         end,
         Tests
     ),
-    ParallelBlock = {inparallel, EunitTests},
+    %% Cap concurrency to avoid OOM when test count is huge (e.g. test262's
+    %% 46k+ tests). {inparallel, Tests} without N is unbounded and will spawn
+    %% all processes at once.
+    N = erlang:system_info(schedulers_online) * 4,
+    ParallelBlock = {inparallel, N, EunitTests},
     case CleanupTest of
         none -> ParallelBlock;
         {CName, CFun} ->
