@@ -441,8 +441,20 @@ fn serialize_heap_object(
       case heap.read(heap, ref) {
         Some(ObjectSlot(kind: value.ArrayObject(length:), elements:, ..)) ->
           serialize_array(heap, elements, length, 0, seen, [])
-        Some(ObjectSlot(kind: OrdinaryObject, properties:, ..)) ->
-          serialize_object_props(heap, dict.to_list(properties), seen, [])
+        Some(ObjectSlot(
+          kind: OrdinaryObject,
+          properties:,
+          symbol_properties:,
+          ..
+        )) ->
+          case dict.is_empty(symbol_properties) {
+            True ->
+              serialize_object_props(heap, dict.to_list(properties), seen, [])
+            False ->
+              Error(
+                "cannot send object with symbol properties between processes",
+              )
+          }
         Some(ObjectSlot(kind: PidObject(pid:), ..)) -> Ok(PmPid(pid))
         _ -> Error("cannot send functions or special objects between processes")
       }
@@ -481,7 +493,18 @@ fn serialize_object_props(
       use pm <- result.try(serialize_inner(heap, val, seen))
       serialize_object_props(heap, rest, seen, [#(key, pm), ..acc])
     }
-    [_, ..rest] -> serialize_object_props(heap, rest, seen, acc)
+    [#(key, DataProperty(enumerable: False, ..)), ..] ->
+      Error(
+        "cannot send object with non-enumerable property \""
+        <> key
+        <> "\" between processes",
+      )
+    [#(key, value.AccessorProperty(..)), ..] ->
+      Error(
+        "cannot send object with accessor property \""
+        <> key
+        <> "\" between processes",
+      )
   }
 }
 
