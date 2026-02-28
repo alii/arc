@@ -1,6 +1,3 @@
-import arc/vm/array.{type Array}
-import arc/vm/value.{type JsValue}
-import gleam/option.{type Option}
 
 // ============================================================================
 // Final Bytecode — resolved, ready for VM execution
@@ -278,34 +275,3 @@ pub type IrOp {
   IrUnmarkGlobalConst(name: String)
 }
 
-// ============================================================================
-// Function Template — metadata per compiled function
-// ============================================================================
-
-/// Compiled function definition. Stored in the module's function table.
-/// Referenced by MakeClosure(func_index).
-pub type FuncTemplate {
-  FuncTemplate(
-    name: Option(String),
-    arity: Int,
-    local_count: Int,
-    bytecode: Array(Op),
-    constants: Array(JsValue),
-    functions: Array(FuncTemplate),
-    env_descriptors: List(EnvCapture),
-    is_strict: Bool,
-    is_arrow: Bool,
-    is_derived_constructor: Bool,
-    is_generator: Bool,
-    is_async: Bool,
-  )
-}
-
-/// Describes how to capture one variable from the enclosing scope
-/// when creating a closure.
-pub type EnvCapture {
-  /// Capture from parent's local frame at the given index.
-  CaptureLocal(parent_index: Int)
-  /// Capture from parent's EnvSlot at the given index (transitive).
-  CaptureEnv(parent_env_index: Int)
-}

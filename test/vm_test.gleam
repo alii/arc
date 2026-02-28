@@ -4,15 +4,15 @@ import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/object
 import arc/vm/opcode.{
-  type FuncTemplate, type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor,
-  DefineField, Div, Dup, Eq, Exp, FuncTemplate, GetField, GetLocal, Gt, GtEq,
+  type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor,
+  DefineField, Div, Dup, Eq, Exp, GetField, GetLocal, Gt, GtEq,
   Jump, JumpIfFalse, JumpIfTrue, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject,
   NotEq, Pop, Pos, PushConst, PushTry, PutField, PutLocal, Return, ShiftLeft,
   ShiftRight, StrictEq, StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void,
 }
 import arc/vm/value.{
-  AccessorProperty, DataProperty, Finite, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsUndefined,
+  type FuncTemplate, AccessorProperty, DataProperty, FuncTemplate, Finite,
+  JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
 }
 import arc/vm/vm
 import gleam/option.{None, Some}

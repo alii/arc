@@ -1,4 +1,5 @@
 import arc/vm/array.{type Array}
+import arc/vm/opcode.{type Op}
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
@@ -55,6 +56,34 @@ pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
 /// Wrapper around BEAM's native arbitrary-precision integer.
 pub type BigInt {
   BigInt(value: Int)
+}
+
+/// Compiled function definition. Stored directly on FunctionObject
+/// per ES spec §10.2 (ordinary function objects carry [[ECMAScriptCode]]).
+pub type FuncTemplate {
+  FuncTemplate(
+    name: Option(String),
+    arity: Int,
+    local_count: Int,
+    bytecode: Array(Op),
+    constants: Array(JsValue),
+    functions: Array(FuncTemplate),
+    env_descriptors: List(EnvCapture),
+    is_strict: Bool,
+    is_arrow: Bool,
+    is_derived_constructor: Bool,
+    is_generator: Bool,
+    is_async: Bool,
+  )
+}
+
+/// Describes how to capture one variable from the enclosing scope
+/// when creating a closure.
+pub type EnvCapture {
+  /// Capture from parent's local frame at the given index.
+  CaptureLocal(parent_index: Int)
+  /// Capture from parent's EnvSlot at the given index (transitive).
+  CaptureEnv(parent_env_index: Int)
 }
 
 /// An opaque Erlang process identifier. Only created/consumed via FFI.
@@ -320,9 +349,10 @@ pub type ExoticKind {
   /// which is what strict mode and functions with complex params get per
   /// ES §10.4.4.6 CreateUnmappedArgumentsObject.
   ArgumentsObject(length: Int)
-  /// JS function (closure). `func_index` identifies the bytecode template,
+  /// JS function (closure). Per ES spec, a function object carries its
+  /// [[ECMAScriptCode]] directly. `func_template` is the compiled bytecode,
   /// `env` points to the EnvSlot holding captured variables.
-  FunctionObject(func_index: Int, env: Ref)
+  FunctionObject(func_template: FuncTemplate, env: Ref)
   /// Built-in function implemented in Gleam, not bytecode.
   /// Callable like any function but dispatches to native code.
   NativeFunction(native: NativeFn)
@@ -542,7 +572,7 @@ pub type HeapSlot {
   /// Saves the full execution context so .next() can resume.
   GeneratorSlot(
     gen_state: GeneratorState,
-    func_template_id: Int,
+    func_template: FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
     saved_locals: Array(JsValue),
@@ -558,7 +588,7 @@ pub type HeapSlot {
     promise_data_ref: Ref,
     resolve: JsValue,
     reject: JsValue,
-    func_template_id: Int,
+    func_template: FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
     saved_locals: Array(JsValue),
@@ -614,7 +644,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         None -> []
       }
       let kind_refs = case kind {
-        FunctionObject(env: env_ref, func_index: _) -> [env_ref]
+        FunctionObject(env: env_ref, func_template: _) -> [env_ref]
         NativeFunction(NativeErrorConstructor(proto: ref)) -> [ref]
         NativeFunction(NativeBoundFunction(target:, bound_this:, bound_args:)) -> [
           target,

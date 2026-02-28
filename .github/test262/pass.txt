@@ -8830,6 +8830,7 @@ language/import/import-defer/syntax/invalid-defer-default-and-namespace.js
 language/import/import-defer/syntax/invalid-defer-default.js
 language/import/import-defer/syntax/invalid-defer-named.js
 language/import/import-defer/syntax/invalid-export-defer-namespace.js
+language/import/import-defer/syntax/valid-default-binding-named-defer.js
 language/keywords/ident-ref-break.js
 language/keywords/ident-ref-case.js
 language/keywords/ident-ref-catch.js
@@ -9167,6 +9168,7 @@ language/module-code/eval-export-dflt-gen-anon-semi.js
 language/module-code/eval-export-dflt-gen-named-semi.js
 language/module-code/eval-export-fun-semi.js
 language/module-code/eval-export-gen-semi.js
+language/module-code/eval-gtbndng-indirect-trlng-comma.js
 language/module-code/eval-gtbndng-local-bndng-cls.js
 language/module-code/eval-gtbndng-local-bndng-const.js
 language/module-code/eval-gtbndng-local-bndng-let.js
@@ -9182,6 +9184,7 @@ language/module-code/export-default-function-declaration-binding-exists.js
 language/module-code/export-default-function-declaration-binding.js
 language/module-code/export-default-generator-declaration-binding-exists.js
 language/module-code/export-default-generator-declaration-binding.js
+language/module-code/export-expname-binding-string.js
 language/module-code/export-expname-from-star-unpaired-surrogate.js
 language/module-code/export-expname-import-string-binding.js
 language/module-code/import-attributes/early-dup-attribute-key-export.js
@@ -9191,7 +9194,19 @@ language/module-code/instn-iee-iee-cycle.js
 language/module-code/instn-local-bndng-for-dup.js
 language/module-code/instn-local-bndng-var-dup.js
 language/module-code/instn-once.js
+language/module-code/instn-star-as-props-dflt-skip.js
+language/module-code/instn-star-props-dflt-keep-indirect.js
+language/module-code/instn-star-props-dflt-keep-local.js
+language/module-code/instn-star-props-dflt-skip.js
+language/module-code/instn-star-props-nrml.js
+language/module-code/namespace/internals/get-nested-namespace-dflt-skip.js
+language/module-code/namespace/internals/get-nested-namespace-props-nrml.js
+language/module-code/namespace/internals/get-own-property-str-not-found.js
+language/module-code/namespace/internals/get-prototype-of.js
+language/module-code/namespace/internals/get-str-not-found.js
+language/module-code/namespace/internals/get-sym-not-found.js
 language/module-code/namespace/internals/is-extensible.js
+language/module-code/namespace/internals/set-prototype-of-null.js
 language/module-code/parse-err-decl-pos-export-arrow-function.js
 language/module-code/parse-err-decl-pos-export-block-stmt-list.js
 language/module-code/parse-err-decl-pos-export-block-stmt.js

@@ -1,13 +1,31 @@
+import arc/vm/array
 import arc/vm/heap
 import arc/vm/js_elements
 import arc/vm/value.{
-  ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FunctionObject, JsBigInt,
-  JsNull, JsNumber, JsObject, JsString, JsSymbol, ObjectSlot, OrdinaryObject,
-  Ref, WellKnownSymbol,
+  type FuncTemplate, ArrayObject, BigInt, BoxSlot, EnvSlot, FuncTemplate, Finite,
+  FunctionObject, JsBigInt, JsNull, JsNumber, JsObject, JsString, JsSymbol,
+  ObjectSlot, OrdinaryObject, Ref, WellKnownSymbol,
 }
 import gleam/dict
 import gleam/option.{None, Some}
 import gleam/set
+
+fn dummy_template() -> FuncTemplate {
+  FuncTemplate(
+    name: None,
+    arity: 0,
+    local_count: 0,
+    bytecode: array.from_list([]),
+    constants: array.from_list([]),
+    functions: array.from_list([]),
+    env_descriptors: [],
+    is_strict: False,
+    is_arrow: False,
+    is_derived_constructor: False,
+    is_generator: False,
+    is_async: False,
+  )
+}
 
 fn ordinary(props: dict.Dict(String, value.JsValue)) {
   ObjectSlot(
@@ -217,7 +235,7 @@ pub fn gc_traces_through_closure_slot_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_index: 0, env: ref_env),
+        kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
         symbol_properties: dict.new(),
         elements: js_elements.new(),
@@ -268,7 +286,7 @@ pub fn mixed_live_dead_partition_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_index: 1, env: live_env),
+        kind: FunctionObject(func_template: dummy_template(), env: live_env),
         properties: dict.new(),
         symbol_properties: dict.new(),
         elements: js_elements.new(),
@@ -314,7 +332,7 @@ pub fn gc_traces_through_function_object_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_index: 0, env: ref_env),
+        kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
         symbol_properties: dict.new(),
         elements: js_elements.new(),
@@ -342,7 +360,7 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_index: 0, env: ref_env),
+        kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
         symbol_properties: dict.new(),
         elements: js_elements.new(),
@@ -354,7 +372,7 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_index: 1, env: ref_env),
+        kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
         symbol_properties: dict.new(),
         elements: js_elements.new(),
@@ -382,7 +400,7 @@ pub fn gc_traces_through_box_slot_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_index: 0, env: ref_env),
+        kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
         symbol_properties: dict.new(),
         elements: js_elements.new(),

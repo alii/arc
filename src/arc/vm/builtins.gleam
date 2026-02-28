@@ -13,7 +13,6 @@ import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
-import arc/vm/object
 import arc/vm/value.{JsObject, JsUndefined, ObjectSlot, OrdinaryObject}
 import gleam/dict
 import gleam/list
@@ -181,55 +180,4 @@ pub fn globals(
     [#("globalThis", JsObject(global_ref)), ..entries]
     |> dict.from_list()
   #(h, globals)
-}
-
-/// Resolve module imports and inject the bindings into the globals dict.
-/// For each (specifier, [(imported_name, local_name)]) pair, looks up the
-/// module's exports and sets globals[local_name] = export[imported_name].
-///
-/// Currently supports:
-///   - "arc" → the Arc global namespace (Arc.peek, etc.)
-pub fn resolve_module_imports(
-  imports: List(#(String, List(#(String, String)))),
-  h: Heap,
-  b: Builtins,
-  globals: dict.Dict(String, value.JsValue),
-) -> dict.Dict(String, value.JsValue) {
-  list.fold(imports, globals, fn(globals, import_entry) {
-    let #(specifier, bindings) = import_entry
-    case specifier {
-      "arc" -> resolve_arc_imports(bindings, h, b.arc, globals)
-      _ -> globals
-    }
-  })
-}
-
-/// Resolve imports from the 'arc' module.
-/// The 'arc' module exports the same properties as the Arc global object.
-fn resolve_arc_imports(
-  bindings: List(#(String, String)),
-  h: Heap,
-  arc_ref: value.Ref,
-  globals: dict.Dict(String, value.JsValue),
-) -> dict.Dict(String, value.JsValue) {
-  list.fold(bindings, globals, fn(globals, binding) {
-    let #(imported, local) = binding
-    case imported {
-      // Namespace import: import * as arc from 'arc'
-      "*" -> dict.insert(globals, local, JsObject(arc_ref))
-      // Named/default import: look up the property on the Arc object
-      _ -> {
-        let val =
-          object.get_own_property(h, arc_ref, imported)
-          |> option.map(fn(prop) {
-            case prop {
-              value.DataProperty(value: v, ..) -> v
-              _ -> JsUndefined
-            }
-          })
-          |> option.unwrap(JsUndefined)
-        dict.insert(globals, local, val)
-      }
-    }
-  })
 }

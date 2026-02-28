@@ -3,7 +3,8 @@
 // the BEAM interleaving them in real time.
 
 function run(name, delay) {
-	var i = 0;
+	Arc.log(Arc.self());
+	let i = 0;
 	while (true) {
 		Arc.log(`${name} tick`, i);
 		i = i + 1;

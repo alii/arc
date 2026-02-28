@@ -9,12 +9,23 @@ import arc/ast
 import arc/compiler/emit
 import arc/compiler/resolve
 import arc/compiler/scope
-import arc/vm/opcode.{type FuncTemplate}
-import arc/vm/value
+import arc/vm/opcode
+import arc/vm/value.{type FuncTemplate, CaptureLocal}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None}
+import gleam/result
 import gleam/set
+
+/// A single import binding from an import declaration.
+pub type ImportBinding {
+  /// import { foo } from 'mod'  or  import { foo as bar } from 'mod'
+  NamedImport(imported: String, local: String)
+  /// import foo from 'mod'
+  DefaultImport(local: String)
+  /// import * as ns from 'mod'
+  NamespaceImport(local: String)
+}
 
 /// Compilation errors.
 pub type CompileError {
@@ -28,9 +39,53 @@ pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, emit.emit_program)
     ast.Module(body) -> {
-      let stmts = module_items_to_stmts(body)
-      compile_script(stmts, emit.emit_module)
+      use #(template, _scope_dict) <- result.map(compile_module_with_scope(body))
+      template
     }
+  }
+}
+
+/// Compile a module, returning both the template and the scope dict
+/// (name → local index) for export extraction after evaluation.
+pub fn compile_module(
+  program: ast.Program,
+) -> Result(#(FuncTemplate, Dict(String, Int)), CompileError) {
+  case program {
+    ast.Script(_) -> Error(Unsupported("compile_module called on Script"))
+    ast.Module(body) -> compile_module_with_scope(body)
+  }
+}
+
+fn compile_module_with_scope(
+  items: List(ast.ModuleItem),
+) -> Result(#(FuncTemplate, Dict(String, Int)), CompileError) {
+  case emit.emit_module(items) {
+    Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
+      let captured_vars = collect_all_captured_vars(children, emitter_ops)
+      let #(ir_ops, local_count, constants, _constants_map) =
+        scope.resolve(emitter_ops, constants, constants_map, captured_vars)
+      let parent_scope = build_scope_dict(emitter_ops)
+      let child_templates = list.map(children, compile_child(_, parent_scope))
+      let template =
+        resolve.resolve(
+          ir_ops,
+          constants,
+          local_count,
+          child_templates,
+          None,
+          0,
+          [],
+          is_strict,
+          False,
+          False,
+          False,
+          False,
+        )
+      Ok(#(template, parent_scope))
+    }
+    Error(emit.BreakOutsideLoop) -> Error(BreakOutsideLoop)
+    Error(emit.ContinueOutsideLoop) -> Error(ContinueOutsideLoop)
+    Error(emit.Unsupported(desc)) -> Error(Unsupported(desc))
   }
 }
 
@@ -47,7 +102,7 @@ pub fn compile_repl(program: ast.Program) -> Result(FuncTemplate, CompileError) 
 /// Used by the host to resolve imports before execution.
 pub fn extract_module_imports(
   program: ast.Program,
-) -> List(#(String, List(#(String, String)))) {
+) -> List(#(String, List(ImportBinding))) {
   case program {
     ast.Script(_) -> []
     ast.Module(body) ->
@@ -57,12 +112,11 @@ pub fn extract_module_imports(
             let bindings =
               list.map(specifiers, fn(spec) {
                 case spec {
-                  ast.ImportNamedSpecifier(imported:, local:) -> #(
-                    imported,
-                    local,
-                  )
-                  ast.ImportDefaultSpecifier(local:) -> #("default", local)
-                  ast.ImportNamespaceSpecifier(local:) -> #("*", local)
+                  ast.ImportNamedSpecifier(imported:, local:) ->
+                    NamedImport(imported:, local:)
+                  ast.ImportDefaultSpecifier(local:) -> DefaultImport(local:)
+                  ast.ImportNamespaceSpecifier(local:) ->
+                    NamespaceImport(local:)
                 }
               })
             Ok(#(source, bindings))
@@ -73,22 +127,96 @@ pub fn extract_module_imports(
   }
 }
 
-/// Convert module items to statements, stripping import/export wrappers.
-/// - StatementItem → unwrap to the underlying statement
-/// - ExportNamedDeclaration with a declaration → unwrap to the declaration
-/// - ExportDefaultDeclaration → emit as expression statement
-/// - ImportDeclaration, re-exports → filtered out (resolved by VM)
-fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
-  list.filter_map(items, fn(item) {
-    case item {
-      ast.StatementItem(stmt) -> Ok(stmt)
-      ast.ExportNamedDeclaration(option.Some(decl), _, _) -> Ok(decl)
-      ast.ExportDefaultDeclaration(decl) -> Ok(ast.ExpressionStatement(decl))
-      ast.ImportDeclaration(..) -> Error(Nil)
-      ast.ExportNamedDeclaration(None, _, _) -> Error(Nil)
-      ast.ExportAllDeclaration(..) -> Error(Nil)
-    }
-  })
+/// An export entry maps an exported name to how to find its value.
+pub type ExportEntry {
+  /// Export a local variable: `export let x = 42` or `export { x }`
+  /// For default exports, export_name is "default" and local_name is "*default*".
+  LocalExport(export_name: String, local_name: String)
+  /// Re-export a named binding: `export { x } from 'mod'` or `export { x as y } from 'mod'`
+  ReExport(export_name: String, imported_name: String, source_specifier: String)
+  /// Re-export everything: `export * from 'mod'`
+  ReExportAll(source_specifier: String)
+  /// Re-export everything under a namespace: `export * as ns from 'mod'`
+  ReExportNamespace(export_name: String, source_specifier: String)
+}
+
+/// Extract export entries from a module AST.
+/// Returns a list of ExportEntry describing what the module exports.
+pub fn extract_module_exports(program: ast.Program) -> List(ExportEntry) {
+  case program {
+    ast.Script(_) -> []
+    ast.Module(body) ->
+      list.flat_map(body, fn(item) {
+        case item {
+          ast.ExportNamedDeclaration(declaration:, specifiers:, source: None) ->
+            extract_named_exports(declaration, specifiers)
+          ast.ExportDefaultDeclaration(_) -> [
+            LocalExport(export_name: "default", local_name: "*default*"),
+          ]
+          // Re-exports from other modules
+          ast.ExportNamedDeclaration(
+            declaration: _,
+            specifiers:,
+            source: option.Some(ast.StringLit(source)),
+          ) ->
+            list.map(specifiers, fn(spec) {
+              case spec {
+                ast.ExportSpecifier(local:, exported:) ->
+                  ReExport(
+                    export_name: exported,
+                    imported_name: local,
+                    source_specifier: source,
+                  )
+              }
+            })
+          ast.ExportAllDeclaration(
+            exported: option.Some(name),
+            source: ast.StringLit(source),
+          ) -> [ReExportNamespace(export_name: name, source_specifier: source)]
+          ast.ExportAllDeclaration(
+            exported: None,
+            source: ast.StringLit(source),
+          ) -> [ReExportAll(source_specifier: source)]
+          _ -> []
+        }
+      })
+  }
+}
+
+/// Extract exported names from a named export declaration.
+fn extract_named_exports(
+  declaration: option.Option(ast.Statement),
+  specifiers: List(ast.ExportSpecifier),
+) -> List(ExportEntry) {
+  // From specifiers: `export { a, b as c }`
+  let spec_exports =
+    list.map(specifiers, fn(spec) {
+      case spec {
+        ast.ExportSpecifier(local:, exported:) ->
+          LocalExport(export_name: exported, local_name: local)
+      }
+    })
+
+  // From declaration: `export let x = 42`, `export function f() {}`
+  let decl_exports = case declaration {
+    option.Some(ast.VariableDeclaration(declarations:, ..)) ->
+      list.filter_map(declarations, fn(decl) {
+        case decl {
+          ast.VariableDeclarator(id: ast.IdentifierPattern(name:), ..) ->
+            Ok(LocalExport(export_name: name, local_name: name))
+          _ -> Error(Nil)
+        }
+      })
+    option.Some(ast.FunctionDeclaration(name: option.Some(name), ..)) -> [
+      LocalExport(export_name: name, local_name: name),
+    ]
+    option.Some(ast.ClassDeclaration(name: option.Some(name), ..)) -> [
+      LocalExport(export_name: name, local_name: name),
+    ]
+    _ -> []
+  }
+
+  list.append(spec_exports, decl_exports)
 }
 
 fn compile_script(
@@ -161,7 +289,7 @@ fn compile_child(
   let env_descriptors =
     list.map(captures, fn(name) {
       let assert Ok(parent_index) = dict.get(parent_scope, name)
-      opcode.CaptureLocal(parent_index)
+      CaptureLocal(parent_index)
     })
 
   // Determine which of this child's vars are captured by grandchildren

@@ -15,27 +15,31 @@
 ///   - Expected outcomes               → eunit pass (silent)
 ///   - No snapshot file                → all outcomes accepted (no comparison)
 import arc/compiler
+import arc/module
 import arc/parser
 import arc/vm/builtins
+import arc/vm/builtins/common
 import arc/vm/heap.{type Heap}
 import arc/vm/object
 import arc/vm/value
 import arc/vm/vm
+import gleam/dict
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import simplifile
 import test262_metadata.{type TestMetadata, Parse, Resolution, Runtime}
 import test_runner
 
-const test_dir = "vendor/test262/test"
+const test_dir: String = "vendor/test262/test"
 
-const harness_dir = "vendor/test262/harness"
+const harness_dir: String = "vendor/test262/harness"
 
-const snapshot_path = ".github/test262/pass.txt"
+const snapshot_path: String = ".github/test262/pass.txt"
 
 pub fn test262_exec_test_() -> test_runner.EunitTests {
   case test_runner.get_env_is_truthy("TEST262_EXEC") {
@@ -93,7 +97,7 @@ fn generate_test_suite() -> test_runner.EunitTests {
             Ok(Nil)
           }
           False -> {
-            let outcome = run_test_by_phase(metadata, source)
+            let outcome = run_test_by_phase(metadata, source, full_path)
             let expected_pass = set.contains(snapshot, relative)
 
             case outcome {
@@ -266,7 +270,11 @@ fn format_percent(pass: Int, tested: Int) -> String {
 
 // --- Test execution ---
 
-fn run_test_by_phase(metadata: TestMetadata, source: String) -> TestOutcome {
+fn run_test_by_phase(
+  metadata: TestMetadata,
+  source: String,
+  path: String,
+) -> TestOutcome {
   let source = case list.contains(metadata.flags, "onlyStrict") {
     True -> "\"use strict\";\n" <> source
     False -> source
@@ -276,8 +284,9 @@ fn run_test_by_phase(metadata: TestMetadata, source: String) -> TestOutcome {
   case metadata.negative_phase {
     Some(Parse) -> run_parse_negative_test(metadata, source)
     Some(Resolution) -> Skip("resolution")
-    Some(Runtime) -> run_runtime_negative_test(metadata, source, is_module)
-    None -> run_positive_test(metadata, source, is_module)
+    Some(Runtime) ->
+      run_runtime_negative_test(metadata, source, is_module, path)
+    None -> run_positive_test(metadata, source, is_module, path)
   }
 }
 
@@ -299,9 +308,23 @@ fn run_runtime_negative_test(
   metadata: TestMetadata,
   source: String,
   is_module: Bool,
+  path: String,
 ) -> TestOutcome {
-  let full_source = prepend_harness(metadata, source)
-  case parse_compile_run(full_source, is_module) {
+  let result = case
+    test_runner.run_with_timeout(
+      fn() {
+        case is_module {
+          True -> do_run_module(metadata, source, path)
+          False -> do_run_script(prepend_harness(metadata, source))
+        }
+      },
+      test_timeout_ms,
+    )
+  {
+    Ok(r) -> r
+    Error(reason) -> Error(reason)
+  }
+  case result {
     Ok(vm.ThrowCompletion(_, _)) -> Pass
     Ok(vm.NormalCompletion(_, _)) ->
       Fail("expected runtime throw but completed normally")
@@ -314,9 +337,23 @@ fn run_positive_test(
   metadata: TestMetadata,
   source: String,
   is_module: Bool,
+  path: String,
 ) -> TestOutcome {
-  let full_source = prepend_harness(metadata, source)
-  case parse_compile_run(full_source, is_module) {
+  let result = case
+    test_runner.run_with_timeout(
+      fn() {
+        case is_module {
+          True -> do_run_module(metadata, source, path)
+          False -> do_run_script(prepend_harness(metadata, source))
+        }
+      },
+      test_timeout_ms,
+    )
+  {
+    Ok(r) -> r
+    Error(_) -> Error("timeout")
+  }
+  case result {
     Ok(vm.NormalCompletion(_, _)) -> Pass
     Ok(vm.ThrowCompletion(thrown, heap)) ->
       Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
@@ -325,32 +362,103 @@ fn run_positive_test(
   }
 }
 
-const test_timeout_ms = 5000
+const test_timeout_ms: Int = 5000
 
-fn parse_compile_run(
+fn do_run_module(
+  metadata: TestMetadata,
   source: String,
-  is_module: Bool,
+  path: String,
 ) -> Result(vm.Completion, String) {
-  case
-    test_runner.run_with_timeout(
-      fn() { do_parse_compile_run(source, is_module) },
-      test_timeout_ms,
-    )
-  {
-    Ok(result) -> result
-    Error(_) -> Error("timeout")
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, globals) = builtins.globals(b, h)
+
+  // Evaluate harness files as REPL scripts to populate globals
+  use #(h, env) <- result.try(eval_harness(metadata, h, b, globals))
+  let globals = env.globals
+
+  let store = module.new_store(h, b)
+  case module.load_module(store, path, source) {
+    Error(err) -> Error("module: " <> string.inspect(err))
+    Ok(#(store, _record)) ->
+      case module.resolve_dependencies(store, path, test262_resolve_and_load) {
+        Error(err) -> Error("module: " <> string.inspect(err))
+        Ok(store) -> {
+          let #(_store, result) =
+            module.evaluate_module(store, path, h, b, globals)
+          case result {
+            Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
+            Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
+            Error(err) -> Error("module: " <> string.inspect(err))
+          }
+        }
+      }
   }
 }
 
-fn do_parse_compile_run(
-  source: String,
-  is_module: Bool,
-) -> Result(vm.Completion, String) {
-  let mode = case is_module {
-    True -> parser.Module
-    False -> parser.Script
+/// Resolve and load a dependency module for test262 tests.
+/// Resolves relative paths against the parent module's directory.
+fn test262_resolve_and_load(
+  raw_specifier: String,
+  parent_specifier: String,
+) -> Result(#(String, String), String) {
+  let resolved = resolve_test262_specifier(raw_specifier, parent_specifier)
+  case simplifile.read(resolved) {
+    Ok(source) -> Ok(#(resolved, source))
+    Error(err) ->
+      Error(
+        "file not found: " <> resolved <> " (" <> string.inspect(err) <> ")",
+      )
   }
-  case parser.parse(source, mode) {
+}
+
+/// Resolve a module specifier relative to the parent module's path.
+fn resolve_test262_specifier(raw: String, parent: String) -> String {
+  case string.starts_with(raw, "./"), string.starts_with(raw, "../") {
+    True, _ | _, True -> {
+      let parent_dir = test262_dirname(parent)
+      normalize_test262_path(parent_dir <> "/" <> raw)
+    }
+    _, _ -> raw
+  }
+}
+
+fn test262_dirname(path: String) -> String {
+  let parts = string.split(path, "/")
+  case list.reverse(parts) {
+    [_, ..rest] ->
+      case list.reverse(rest) {
+        [] -> "."
+        dir_parts -> string.join(dir_parts, "/")
+      }
+    [] -> "."
+  }
+}
+
+fn normalize_test262_path(path: String) -> String {
+  let parts = string.split(path, "/")
+  let resolved =
+    list.fold(parts, [], fn(acc, part) {
+      case part {
+        "." -> acc
+        ".." ->
+          case acc {
+            [_, ..rest] -> rest
+            [] -> [".."]
+          }
+        "" ->
+          case acc {
+            [] -> [""]
+            _ -> acc
+          }
+        _ -> [part, ..acc]
+      }
+    })
+  list.reverse(resolved) |> string.join("/")
+}
+
+fn do_run_script(source: String) -> Result(vm.Completion, String) {
+  case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
     Ok(program) ->
       case compiler.compile(program) {
@@ -363,24 +471,85 @@ fn do_parse_compile_run(
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, globals) = builtins.globals(b, h)
-          case is_module {
-            True -> {
-              // For modules, resolve import bindings and inject into globals
-              let imports = compiler.extract_module_imports(program)
-              let globals =
-                builtins.resolve_module_imports(imports, h, b, globals)
-              case vm.run_module(template, h, b, globals) {
-                Ok(completion) -> Ok(completion)
-                Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
-              }
-            }
-            False ->
-              case vm.run_and_drain(template, h, b, globals) {
-                Ok(completion) -> Ok(completion)
-                Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
-              }
+          case vm.run_and_drain(template, h, b, globals) {
+            Ok(completion) -> Ok(completion)
+            Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
           }
         }
+      }
+  }
+}
+
+/// Evaluate harness files as REPL scripts to populate globals.
+/// This is the spec-correct approach: harness is evaluated in the realm
+/// before the test module runs, making harness functions (assert, etc.)
+/// available as globals.
+fn eval_harness(
+  metadata: TestMetadata,
+  h: Heap,
+  b: common.Builtins,
+  globals: dict.Dict(String, value.JsValue),
+) -> Result(#(Heap, vm.ReplEnv), String) {
+  let is_raw = list.contains(metadata.flags, "raw")
+  case is_raw {
+    True -> {
+      let env =
+        vm.ReplEnv(
+          globals:,
+          const_globals: set.new(),
+          symbol_descriptions: dict.new(),
+        )
+      Ok(#(h, env))
+    }
+    False -> {
+      let default_harness = ["assert.js", "sta.js"]
+      let extra_includes =
+        metadata.includes
+        |> list.filter(fn(f) { !list.contains(default_harness, f) })
+      let harness_files = list.append(default_harness, extra_includes)
+
+      let env =
+        vm.ReplEnv(
+          globals:,
+          const_globals: set.new(),
+          symbol_descriptions: dict.new(),
+        )
+
+      list.try_fold(harness_files, #(h, env), fn(acc, filename) {
+        let #(heap, env) = acc
+        let path = harness_dir <> "/" <> filename
+        case simplifile.read(path) {
+          Error(err) -> Error("harness read: " <> string.inspect(err))
+          Ok(source) -> eval_harness_script(source, heap, b, env)
+        }
+      })
+    }
+  }
+}
+
+/// Evaluate a single harness file as a REPL script.
+fn eval_harness_script(
+  source: String,
+  h: Heap,
+  b: common.Builtins,
+  env: vm.ReplEnv,
+) -> Result(#(Heap, vm.ReplEnv), String) {
+  case parser.parse(source, parser.Script) {
+    Error(err) -> Error("harness parse: " <> parser.parse_error_to_string(err))
+    Ok(program) ->
+      case compiler.compile_repl(program) {
+        Error(err) -> Error("harness compile: " <> string.inspect(err))
+        Ok(template) ->
+          case vm.run_and_drain_repl(template, h, b, env) {
+            Error(vm_err) -> Error("harness vm: " <> string.inspect(vm_err))
+            Ok(#(completion, new_env)) ->
+              case completion {
+                vm.NormalCompletion(_, new_heap) -> Ok(#(new_heap, new_env))
+                vm.ThrowCompletion(thrown, new_heap) ->
+                  Error("harness threw: " <> inspect_thrown(thrown, new_heap))
+                vm.YieldCompletion(_, _) -> Error("harness yielded")
+              }
+          }
       }
   }
 }

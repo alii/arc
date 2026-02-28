@@ -1,8 +1,8 @@
 import arc/vm/array.{type Array}
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/heap.{type Heap}
-import arc/vm/opcode.{type FuncTemplate, type Op}
-import arc/vm/value.{type JsValue, type Ref}
+import arc/vm/opcode.{type Op}
+import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
 import gleam/dict
 import gleam/option.{type Option}
 import gleam/set
@@ -81,10 +81,6 @@ pub type State {
     try_stack: List(TryFrame),
     finally_stack: List(FinallyCompletion),
     builtins: Builtins,
-    /// Maps closure heap ref -> FuncTemplate, populated at MakeClosure time.
-    /// This is needed because a closure's func_index is relative to its
-    /// defining parent, which may no longer be on the call stack when called.
-    closure_templates: dict.Dict(Int, FuncTemplate),
     /// The current `this` binding. Set by CallMethod/CallConstructor,
     /// defaults to JsUndefined for regular calls.
     this_binding: JsValue,

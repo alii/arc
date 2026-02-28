@@ -1,4 +1,5 @@
 import arc/compiler
+import arc/module
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/arc as builtins_arc
@@ -314,7 +315,6 @@ fn repl_loop(state: ReplState) -> Nil {
           let env =
             vm.ReplEnv(
               globals:,
-              closure_templates: dict.new(),
               const_globals: set.new(),
               symbol_descriptions: dict.new(),
             )
@@ -358,36 +358,147 @@ type FileError
 /// Run a JS source file and print the result (or error).
 fn run_file(path: String) -> Nil {
   case read_file(path) {
-    Error(err) -> {
+    Error(err) ->
       io.println("Error reading " <> path <> ": " <> string.inspect(err))
-    }
     Ok(source) -> {
-      let h = heap.new()
-      let #(h, b) = builtins.init(h)
-      let #(h, globals) = builtins.globals(b, h)
-      case parser.parse(source, parser.Script) {
-        Error(err) ->
-          io.println("SyntaxError: " <> parser.parse_error_to_string(err))
-        Ok(program) ->
-          case compiler.compile(program) {
-            Error(compiler.Unsupported(desc)) ->
-              io.println("compile error: unsupported " <> desc)
-            Error(compiler.BreakOutsideLoop) ->
-              io.println("compile error: break outside loop")
-            Error(compiler.ContinueOutsideLoop) ->
-              io.println("compile error: continue outside loop")
-            Ok(template) ->
-              case vm.run_and_drain(template, h, b, globals) {
-                Ok(vm.NormalCompletion(_, _)) -> Nil
-                Ok(vm.ThrowCompletion(val, heap)) ->
-                  io.println("Uncaught " <> inspect(heap, val))
-                Ok(vm.YieldCompletion(_, _)) -> Nil
-                Error(vm_err) ->
-                  io.println("InternalError: " <> inspect_vm_error(vm_err))
-              }
-          }
+      let is_module = !string.ends_with(path, ".cjs")
+      case is_module {
+        True -> run_module_file(path, source)
+        False -> run_script_file(source)
       }
     }
+  }
+}
+
+/// Run a file as an ES module using the full module lifecycle.
+fn run_module_file(path: String, source: String) -> Nil {
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, globals) = builtins.globals(b, h)
+  let store = module.new_store(h, b)
+
+  case module.load_module(store, path, source) {
+    Error(err) -> print_module_error(h, err)
+    Ok(#(store, _record)) ->
+      case module.resolve_dependencies(store, path, resolve_and_load_dep) {
+        Error(err) -> print_module_error(h, err)
+        Ok(store) -> {
+          let #(_store, result) =
+            module.evaluate_module(store, path, h, b, globals)
+          case result {
+            Ok(_) -> Nil
+            Error(err) -> print_module_error(h, err)
+          }
+        }
+      }
+  }
+}
+
+/// Resolve and load source for a dependency module.
+/// Takes (raw_specifier, parent_specifier) and returns (resolved_path, source).
+/// Resolves relative paths (./foo, ../bar) against the parent module's directory.
+fn resolve_and_load_dep(
+  raw_specifier: String,
+  parent_specifier: String,
+) -> Result(#(String, String), String) {
+  let resolved = resolve_specifier(raw_specifier, parent_specifier)
+  case read_file(resolved) {
+    Ok(source) -> Ok(#(resolved, source))
+    Error(err) ->
+      Error(
+        "file not found: " <> resolved <> " (" <> string.inspect(err) <> ")",
+      )
+  }
+}
+
+/// Resolve a module specifier relative to the parent module's path.
+/// - Absolute paths are returned as-is
+/// - Relative paths (./foo, ../bar) are resolved against the parent's directory
+/// - Bare specifiers (no ./ or ../ prefix) are returned as-is (builtin/package)
+fn resolve_specifier(raw: String, parent: String) -> String {
+  case string.starts_with(raw, "./"), string.starts_with(raw, "../") {
+    True, _ | _, True -> {
+      let parent_dir = dirname(parent)
+      normalize_path(parent_dir <> "/" <> raw)
+    }
+    _, _ -> raw
+  }
+}
+
+/// Get the directory portion of a path (everything before the last /).
+fn dirname(path: String) -> String {
+  let parts = string.split(path, "/")
+  case list.reverse(parts) {
+    [_, ..rest] ->
+      case list.reverse(rest) {
+        [] -> "."
+        dir_parts -> string.join(dir_parts, "/")
+      }
+    [] -> "."
+  }
+}
+
+/// Normalize a path by resolving . and .. components.
+fn normalize_path(path: String) -> String {
+  let parts = string.split(path, "/")
+  let resolved =
+    list.fold(parts, [], fn(acc, part) {
+      case part {
+        "." -> acc
+        ".." ->
+          case acc {
+            [_, ..rest] -> rest
+            [] -> [".."]
+          }
+        "" ->
+          case acc {
+            [] -> [""]
+            _ -> acc
+          }
+        _ -> [part, ..acc]
+      }
+    })
+  list.reverse(resolved) |> string.join("/")
+}
+
+/// Run a file as a script (only for .cjs files).
+fn run_script_file(source: String) -> Nil {
+  case parser.parse(source, parser.Script) {
+    Error(err) ->
+      io.println("SyntaxError: " <> parser.parse_error_to_string(err))
+    Ok(program) ->
+      case compiler.compile(program) {
+        Error(compiler.Unsupported(desc)) ->
+          io.println("compile error: unsupported " <> desc)
+        Error(compiler.BreakOutsideLoop) ->
+          io.println("compile error: break outside loop")
+        Error(compiler.ContinueOutsideLoop) ->
+          io.println("compile error: continue outside loop")
+        Ok(template) -> {
+          let h = heap.new()
+          let #(h, b) = builtins.init(h)
+          let #(h, globals) = builtins.globals(b, h)
+          case vm.run_and_drain(template, h, b, globals) {
+            Ok(vm.NormalCompletion(_, _)) -> Nil
+            Ok(vm.ThrowCompletion(val, new_heap)) ->
+              io.println("Uncaught " <> inspect(new_heap, val))
+            Ok(vm.YieldCompletion(_, _)) -> Nil
+            Error(vm_err) ->
+              io.println("InternalError: " <> inspect_vm_error(vm_err))
+          }
+        }
+      }
+  }
+}
+
+/// Format a module error for display.
+fn print_module_error(h: Heap, err: module.ModuleError) -> Nil {
+  case err {
+    module.ParseError(msg) -> io.println("SyntaxError: " <> msg)
+    module.CompileError(msg) -> io.println("CompileError: " <> msg)
+    module.ResolutionError(msg) -> io.println("ResolutionError: " <> msg)
+    module.LinkError(msg) -> io.println("LinkError: " <> msg)
+    module.EvaluationError(val) -> io.println("Uncaught " <> inspect(h, val))
   }
 }
 
@@ -405,7 +516,6 @@ pub fn main() -> Nil {
         builtins: b,
         env: vm.ReplEnv(
           globals:,
-          closure_templates: dict.new(),
           const_globals: set.new(),
           symbol_descriptions: dict.new(),
         ),

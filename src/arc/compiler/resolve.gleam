@@ -6,7 +6,7 @@
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
 import arc/vm/array
 import arc/vm/opcode.{
-  type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom,
+  type IrOp, type Op, IrArrayFrom,
   IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole, IrArraySpread, IrAwait,
   IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor,
   IrCallConstructorApply, IrCallMethod, IrCallMethodApply, IrCallSuper,
@@ -22,7 +22,7 @@ import arc/vm/opcode.{
   IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap,
   IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp, IrUnmarkGlobalConst, IrYield,
 }
-import arc/vm/value.{type JsValue}
+import arc/vm/value.{type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
@@ -38,7 +38,7 @@ pub fn resolve(
   functions: List(FuncTemplate),
   name: Option(String),
   arity: Int,
-  env_descriptors: List(opcode.EnvCapture),
+  env_descriptors: List(EnvCapture),
   is_strict: Bool,
   is_arrow: Bool,
   is_derived_constructor: Bool,

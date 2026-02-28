@@ -17,7 +17,7 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/opcode.{
-  type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
+  type BinOpKind, type Op, type UnaryOpKind, Add, ArrayFrom,
   ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread, Await, BinOp,
   BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, CallApply, CallConstructor,
   CallConstructorApply, CallMethod, CallMethodApply, CallSuper, CreateArguments,
@@ -33,11 +33,12 @@ import arc/vm/opcode.{
   UnmarkGlobalConst, Void, Yield,
 }
 import arc/vm/value.{
-  type JsNum, type JsValue, type Ref, ArrayIteratorSlot, ArrayObject,
-  AsyncFunctionSlot, BigInt, DataProperty, Finite, ForInIteratorSlot,
-  FunctionObject, GeneratorObject, GeneratorSlot, Infinity, JsBigInt, JsBool,
-  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
-  NaN, NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject, PromiseObject,
+  type FuncTemplate, type JsNum, type JsValue, type Ref, ArrayIteratorSlot,
+  ArrayObject, AsyncFunctionSlot, BigInt, DataProperty, Finite,
+  ForInIteratorSlot, FunctionObject, GeneratorObject, GeneratorSlot, Infinity,
+  JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
+  JsUndefined, JsUninitialized, NaN, NativeFunction, NegInfinity, ObjectSlot,
+  OrdinaryObject, PromiseObject,
 }
 import gleam/dict
 import gleam/float
@@ -60,6 +61,17 @@ pub type Completion {
   /// Generator yielded a value — execution is suspended, not completed.
   /// The full State is available in the second element of the returned tuple.
   YieldCompletion(value: JsValue, heap: Heap)
+}
+
+/// Result of module evaluation — includes locals for export extraction.
+pub type ModuleResult {
+  ModuleOk(
+    value: JsValue,
+    heap: Heap,
+    locals: array.Array(JsValue),
+  )
+  ModuleThrow(value: JsValue, heap: Heap)
+  ModuleError(error: VmError)
 }
 
 /// Internal VM error — these are bugs in the VM, not JS-level errors.
@@ -149,7 +161,6 @@ fn init_state(
     try_stack: [],
     finally_stack: [],
     builtins:,
-    closure_templates: dict.new(),
     this_binding:,
     callee_ref: None,
     call_args: [],
@@ -178,16 +189,26 @@ pub fn run_module(
   heap: Heap,
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
-) -> Result(Completion, VmError) {
-  let result =
-    init_state(func, heap, builtins, globals, True) |> execute_inner()
-  use #(completion, final_state) <- result.try(result)
-  let drained_state = drain_jobs(final_state)
-  case completion {
-    NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
-    ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
-    YieldCompletion(_, _) ->
-      panic as "YieldCompletion should not appear at module level"
+) -> ModuleResult {
+  let state = init_state(func, heap, builtins, globals, True)
+  let result = execute_inner(state)
+  case result {
+    Error(vm_err) -> ModuleError(error: vm_err)
+    Ok(#(completion, final_state)) -> {
+      let drained_state = drain_jobs(final_state)
+      case completion {
+        NormalCompletion(val, _) ->
+          ModuleOk(
+            value: val,
+            heap: drained_state.heap,
+            locals: drained_state.locals,
+          )
+        ThrowCompletion(val, _) ->
+          ModuleThrow(value: val, heap: drained_state.heap)
+        YieldCompletion(_, _) ->
+          panic as "YieldCompletion should not appear at module level"
+      }
+    }
   }
 }
 
@@ -215,13 +236,12 @@ pub fn run_and_drain(
 pub type ReplEnv {
   ReplEnv(
     globals: dict.Dict(String, JsValue),
-    closure_templates: dict.Dict(Int, FuncTemplate),
     const_globals: set.Set(String),
     symbol_descriptions: dict.Dict(value.SymbolId, String),
   )
 }
 
-/// Like run_and_drain, but persists globals and closure_templates across calls.
+/// Like run_and_drain, but persists globals across calls.
 /// Used by the REPL so var declarations and function definitions survive.
 pub fn run_and_drain_repl(
   func: FuncTemplate,
@@ -244,7 +264,6 @@ pub fn run_and_drain_repl(
       try_stack: [],
       finally_stack: [],
       builtins:,
-      closure_templates: env.closure_templates,
       this_binding: JsUndefined,
       callee_ref: None,
       call_args: [],
@@ -259,7 +278,6 @@ pub fn run_and_drain_repl(
   let new_env =
     ReplEnv(
       globals: drained_state.globals,
-      closure_templates: drained_state.closure_templates,
       const_globals: drained_state.const_globals,
       symbol_descriptions: drained_state.symbol_descriptions,
     )
@@ -886,12 +904,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           let captured_values =
             list.map(child_template.env_descriptors, fn(desc) {
               case desc {
-                opcode.CaptureLocal(parent_index) ->
+                value.CaptureLocal(parent_index) ->
                   case array.get(parent_index, state.locals) {
                     Some(val) -> val
                     None -> JsUndefined
                   }
-                opcode.CaptureEnv(_parent_env_index) ->
+                value.CaptureEnv(_parent_env_index) ->
                   // Transitive capture not yet implemented
                   JsUndefined
               }
@@ -944,7 +962,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             heap.alloc(
               heap,
               ObjectSlot(
-                kind: FunctionObject(func_index:, env: env_ref),
+                kind: FunctionObject(func_template: child_template, env: env_ref),
                 properties: fn_properties,
                 elements: js_elements.new(),
                 prototype: Some(state.builtins.function.prototype),
@@ -971,17 +989,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             }
             None -> heap
           }
-          // Cache the template so it can be found when the closure is called
-          // from a different scope (after the defining function has returned)
-          let closure_templates =
-            dict.insert(state.closure_templates, closure_ref.id, child_template)
           Ok(
             State(
               ..state,
               heap:,
               stack: [JsObject(closure_ref), ..state.stack],
               pc: state.pc + 1,
-              closure_templates:,
             ),
           )
         }
@@ -1075,13 +1088,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             [JsObject(obj_ref), ..rest_stack] -> {
               case heap.read(state.heap, obj_ref) {
                 Some(ObjectSlot(
-                  kind: FunctionObject(func_index: _, env: env_ref),
+                  kind: FunctionObject(func_template:, env: env_ref),
                   ..,
                 )) ->
                   call_function(
                     state,
                     obj_ref,
                     env_ref,
+                    func_template,
                     args,
                     rest_stack,
                     JsUndefined,
@@ -1657,13 +1671,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             [JsObject(method_ref), receiver, ..rest_stack] -> {
               case heap.read(state.heap, method_ref) {
                 Some(ObjectSlot(
-                  kind: FunctionObject(func_index: _, env: env_ref),
+                  kind: FunctionObject(func_template:, env: env_ref),
                   ..,
                 )) ->
                   call_function(
                     state,
                     method_ref,
                     env_ref,
+                    func_template,
                     args,
                     rest_stack,
                     // Method call: this = receiver
@@ -1975,7 +1990,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                               ..rest
                             ],
                             pc: state.pc + 1,
-                            closure_templates: next_state.closure_templates,
                             globals: next_state.globals,
                             job_queue: next_state.job_queue,
                           ),
@@ -2213,13 +2227,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   // so further super() calls in the chain can find their parent
                   case heap.read(heap, parent_ref) {
                     Some(ObjectSlot(
-                      kind: FunctionObject(func_index: _, env: env_ref),
+                      kind: FunctionObject(func_template:, env: env_ref),
                       ..,
                     )) ->
                       call_function(
                         State(..state, heap:, this_binding: this_val),
                         parent_ref,
                         env_ref,
+                        func_template,
                         args,
                         rest_stack,
                         this_val,
@@ -2555,63 +2570,51 @@ fn call_function(
   state: State,
   fn_ref: value.Ref,
   env_ref: value.Ref,
+  callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
   new_callee_ref: option.Option(Ref),
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case dict.get(state.closure_templates, fn_ref.id) {
-    Ok(callee_template) -> {
-      let #(heap, this_val) = bind_this(state, callee_template, this_val)
-      let state = State(..state, heap:)
-      case callee_template.is_generator, callee_template.is_async {
-        // Note: async generators (True, True) not yet implemented — they'll
-        // fall through to call_generator_function which is incorrect but harmless
-        // until async generators are properly supported.
-        True, _ ->
-          call_generator_function(
-            state,
-            fn_ref,
-            env_ref,
-            callee_template,
-            args,
-            rest_stack,
-            this_val,
-          )
-        _, True ->
-          call_async_function(
-            state,
-            fn_ref,
-            env_ref,
-            callee_template,
-            args,
-            rest_stack,
-            this_val,
-          )
-        _, _ ->
-          call_regular_function(
-            state,
-            fn_ref,
-            env_ref,
-            callee_template,
-            args,
-            rest_stack,
-            this_val,
-            constructor_this,
-            new_callee_ref,
-          )
-      }
-    }
-    Error(_) -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "closure template not found",
-        )
-      Error(#(Thrown, err, heap))
-    }
+  let #(heap, this_val) = bind_this(state, callee_template, this_val)
+  let state = State(..state, heap:)
+  case callee_template.is_generator, callee_template.is_async {
+    // Note: async generators (True, True) not yet implemented — they'll
+    // fall through to call_generator_function which is incorrect but harmless
+    // until async generators are properly supported.
+    True, _ ->
+      call_generator_function(
+        state,
+        fn_ref,
+        env_ref,
+        callee_template,
+        args,
+        rest_stack,
+        this_val,
+      )
+    _, True ->
+      call_async_function(
+        state,
+        fn_ref,
+        env_ref,
+        callee_template,
+        args,
+        rest_stack,
+        this_val,
+      )
+    _, _ ->
+      call_regular_function(
+        state,
+        fn_ref,
+        env_ref,
+        callee_template,
+        args,
+        rest_stack,
+        this_val,
+        constructor_this,
+        new_callee_ref,
+      )
   }
 }
 
@@ -2710,7 +2713,7 @@ fn call_generator_function(
           suspended.heap,
           GeneratorSlot(
             gen_state: value.SuspendedStart,
-            func_template_id: fn_ref.id,
+            func_template: callee_template,
             env_ref:,
             saved_pc: suspended.pc,
             saved_locals: suspended.locals,
@@ -2741,7 +2744,6 @@ fn call_generator_function(
           heap: h,
           stack: [JsObject(gen_obj_ref), ..rest_stack],
           pc: state.pc + 1,
-          closure_templates: suspended.closure_templates,
           globals: suspended.globals,
           job_queue: suspended.job_queue,
         ),
@@ -2755,7 +2757,7 @@ fn call_generator_function(
           h,
           GeneratorSlot(
             gen_state: value.Completed,
-            func_template_id: fn_ref.id,
+            func_template: callee_template,
             env_ref:,
             saved_pc: 0,
             saved_locals: array.from_list([]),
@@ -2848,7 +2850,7 @@ fn call_async_function(
             promise_data_ref: data_ref,
             resolve: resolve_fn,
             reject: reject_fn,
-            func_template_id: fn_ref.id,
+            func_template: callee_template,
             env_ref:,
             saved_pc: suspended.pc,
             saved_locals: suspended.locals,
@@ -2867,7 +2869,6 @@ fn call_async_function(
           heap: h2,
           stack: [JsObject(promise_ref), ..rest_stack],
           pc: state.pc + 1,
-          closure_templates: suspended.closure_templates,
           globals: suspended.globals,
           job_queue: list.append(suspended.job_queue, jobs),
         ),
@@ -2883,7 +2884,6 @@ fn call_async_function(
           heap: h2,
           stack: [JsObject(promise_ref), ..rest_stack],
           pc: state.pc + 1,
-          closure_templates: final_state.closure_templates,
           globals: final_state.globals,
           job_queue: list.append(final_state.job_queue, jobs),
         ),
@@ -2898,7 +2898,6 @@ fn call_async_function(
           heap: h2,
           stack: [JsObject(promise_ref), ..rest_stack],
           pc: state.pc + 1,
-          closure_templates: final_state.closure_templates,
           globals: final_state.globals,
           job_queue: list.append(final_state.job_queue, jobs),
         ),
@@ -3001,7 +3000,7 @@ fn call_native_async_resume(
       promise_data_ref:,
       resolve: slot_resolve,
       reject: slot_reject,
-      func_template_id:,
+      func_template:,
       env_ref: slot_env_ref,
       saved_pc:,
       saved_locals:,
@@ -3011,9 +3010,6 @@ fn call_native_async_resume(
       saved_this:,
       saved_callee_ref:,
     )) -> {
-      // Look up the func template
-      let assert Ok(func_template) =
-        dict.get(state.closure_templates, func_template_id)
       // Restore try/finally stacks
       let #(restored_try, restored_finally) =
         restore_stacks(saved_try_stack, saved_finally_stack)
@@ -3061,7 +3057,6 @@ fn call_native_async_resume(
               heap: h2,
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
-              closure_templates: final_state.closure_templates,
               globals: final_state.globals,
               job_queue: list.append(final_state.job_queue, jobs),
             ),
@@ -3077,7 +3072,6 @@ fn call_native_async_resume(
               heap: h2,
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
-              closure_templates: final_state.closure_templates,
               globals: final_state.globals,
               job_queue: list.append(final_state.job_queue, jobs),
             ),
@@ -3095,7 +3089,7 @@ fn call_native_async_resume(
                 promise_data_ref:,
                 resolve: slot_resolve,
                 reject: slot_reject,
-                func_template_id:,
+                func_template:,
                 env_ref: slot_env_ref,
                 saved_pc: suspended.pc,
                 saved_locals: suspended.locals,
@@ -3114,7 +3108,6 @@ fn call_native_async_resume(
               heap: h2,
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
-              closure_templates: suspended.closure_templates,
               globals: suspended.globals,
               job_queue: list.append(suspended.job_queue, jobs),
             ),
@@ -3465,15 +3458,12 @@ fn do_construct(
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
   case heap.read(state.heap, ctor_ref) {
     Some(ObjectSlot(
-      kind: FunctionObject(func_index: _, env: env_ref),
+      kind: FunctionObject(func_template:, env: env_ref),
       properties:,
       ..,
     )) -> {
       // Check if this is a derived constructor
-      let is_derived = case dict.get(state.closure_templates, ctor_ref.id) {
-        Ok(tmpl) -> tmpl.is_derived_constructor
-        Error(_) -> False
-      }
+      let is_derived = func_template.is_derived_constructor
       case is_derived {
         True ->
           // Derived constructor: don't allocate object yet.
@@ -3483,6 +3473,7 @@ fn do_construct(
             state,
             ctor_ref,
             env_ref,
+            func_template,
             args,
             rest_stack,
             JsUninitialized,
@@ -3512,6 +3503,7 @@ fn do_construct(
             State(..state, heap:),
             ctor_ref,
             env_ref,
+            func_template,
             args,
             rest_stack,
             new_obj,
@@ -3554,7 +3546,7 @@ fn construct_value(
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
   case heap.read(state.heap, target_ref) {
     Some(ObjectSlot(
-      kind: FunctionObject(func_index: _, env: env_ref),
+      kind: FunctionObject(func_template:, env: env_ref),
       properties:,
       ..,
     )) -> {
@@ -3579,6 +3571,7 @@ fn construct_value(
         State(..state, heap: h),
         target_ref,
         env_ref,
+        func_template,
         args,
         rest_stack,
         new_obj,
@@ -3620,11 +3613,12 @@ fn call_value(
   case callee {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: FunctionObject(func_index: _, env: env_ref), ..)) ->
+        Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) ->
           call_function(
             state,
             ref,
             env_ref,
+            func_template,
             args,
             state.stack,
             this_val,
@@ -3831,7 +3825,6 @@ fn drain_generator_to_array(
                 State(
                   ..state,
                   heap: next_state.heap,
-                  closure_templates: next_state.closure_templates,
                   globals: next_state.globals,
                   job_queue: next_state.job_queue,
                 ),
@@ -3847,7 +3840,6 @@ fn drain_generator_to_array(
                 State(
                   ..state,
                   heap:,
-                  closure_templates: next_state.closure_templates,
                   globals: next_state.globals,
                   job_queue: next_state.job_queue,
                 ),
@@ -4202,41 +4194,37 @@ fn arc_spawn(
   case fn_arg {
     JsObject(fn_ref) ->
       case heap.read(state.heap, fn_ref) {
-        Some(ObjectSlot(kind: FunctionObject(env: env_ref, ..), ..)) ->
-          case dict.get(state.closure_templates, fn_ref.id) {
-            Ok(callee_template) -> {
-              // Snapshot everything the spawned process needs
-              let heap_snapshot = state.heap
-              let builtins = state.builtins
-              let globals = state.globals
-              let closure_templates = state.closure_templates
-              let symbol_descriptions = state.symbol_descriptions
+        Some(ObjectSlot(
+          kind: FunctionObject(func_template: callee_template, env: env_ref),
+          ..,
+        )) -> {
+          // Snapshot everything the spawned process needs
+          let heap_snapshot = state.heap
+          let builtins = state.builtins
+          let globals = state.globals
+          let symbol_descriptions = state.symbol_descriptions
 
-              let pid =
-                ffi_spawn(fn() {
-                  run_spawned_closure(
-                    callee_template,
-                    env_ref,
-                    heap_snapshot,
-                    builtins,
-                    globals,
-                    closure_templates,
-                    symbol_descriptions,
-                  )
-                })
+          let pid =
+            ffi_spawn(fn() {
+              run_spawned_closure(
+                callee_template,
+                env_ref,
+                heap_snapshot,
+                builtins,
+                globals,
+                symbol_descriptions,
+              )
+            })
 
-              let #(heap, pid_val) =
-                builtins_arc.alloc_pid_object(
-                  state.heap,
-                  state.builtins.object.prototype,
-                  state.builtins.function.prototype,
-                  pid,
-                )
-              #(State(..state, heap:), Ok(pid_val))
-            }
-            Error(Nil) ->
-              frame.type_error(state, "Arc.spawn: function template not found")
-          }
+          let #(heap, pid_val) =
+            builtins_arc.alloc_pid_object(
+              state.heap,
+              state.builtins.object.prototype,
+              state.builtins.function.prototype,
+              pid,
+            )
+          #(State(..state, heap:), Ok(pid_val))
+        }
         _ -> frame.type_error(state, "Arc.spawn: argument is not a function")
       }
     _ -> frame.type_error(state, "Arc.spawn: argument is not a function")
@@ -4251,7 +4239,6 @@ fn run_spawned_closure(
   heap: Heap,
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
-  closure_templates: dict.Dict(Int, FuncTemplate),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
 ) -> Nil {
   let env_values = case heap.read(heap, env_ref) {
@@ -4280,7 +4267,6 @@ fn run_spawned_closure(
       try_stack: [],
       finally_stack: [],
       builtins:,
-      closure_templates:,
       this_binding: JsUndefined,
       callee_ref: None,
       call_args: [],
@@ -5002,18 +4988,15 @@ fn call_native_generator_next(
             value.SuspendedYield -> [next_arg, ..gen.saved_stack]
             _ -> gen.saved_stack
           }
-          // Look up the func template from closure_templates
-          let assert Ok(func_template) =
-            dict.get(state.closure_templates, gen.func_template_id)
           let gen_exec_state =
             State(
               ..state,
               heap: h,
               stack: gen_stack,
               locals: gen.saved_locals,
-              func: func_template,
-              code: func_template.bytecode,
-              constants: func_template.constants,
+              func: gen.func_template,
+              code: gen.func_template.bytecode,
+              constants: gen.func_template.constants,
               pc: gen.saved_pc,
               call_stack: [],
               try_stack: restored_try,
@@ -5035,7 +5018,7 @@ fn call_native_generator_next(
                   gen.data_ref,
                   GeneratorSlot(
                     gen_state: value.SuspendedYield,
-                    func_template_id: gen.func_template_id,
+                    func_template: gen.func_template,
                     env_ref: gen.env_ref,
                     saved_pc: suspended.pc,
                     saved_locals: suspended.locals,
@@ -5054,7 +5037,6 @@ fn call_native_generator_next(
                   heap: h3,
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
-                  closure_templates: suspended.closure_templates,
                   globals: suspended.globals,
                   job_queue: suspended.job_queue,
                 ),
@@ -5076,7 +5058,6 @@ fn call_native_generator_next(
                   heap: h3,
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
-                  closure_templates: final_state.closure_templates,
                   globals: final_state.globals,
                   job_queue: final_state.job_queue,
                 ),
@@ -5175,17 +5156,15 @@ fn call_native_generator_return(
           // Restore the generator's execution state
           let #(restored_try, restored_finally) =
             restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
-          let assert Ok(func_template) =
-            dict.get(state.closure_templates, gen.func_template_id)
           let gen_exec_state =
             State(
               ..state,
               heap: h,
               stack: gen.saved_stack,
               locals: gen.saved_locals,
-              func: func_template,
-              code: func_template.bytecode,
-              constants: func_template.constants,
+              func: gen.func_template,
+              code: gen.func_template.bytecode,
+              constants: gen.func_template.constants,
               pc: gen.saved_pc,
               call_stack: [],
               try_stack: restored_try,
@@ -5260,17 +5239,15 @@ fn call_native_generator_throw(
           // Restore the generator's execution state
           let #(restored_try, restored_finally) =
             restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
-          let assert Ok(func_template) =
-            dict.get(state.closure_templates, gen.func_template_id)
           let gen_exec_state =
             State(
               ..state,
               heap: h,
               stack: gen.saved_stack,
               locals: gen.saved_locals,
-              func: func_template,
-              code: func_template.bytecode,
-              constants: func_template.constants,
+              func: gen.func_template,
+              code: gen.func_template.bytecode,
+              constants: gen.func_template.constants,
               pc: gen.saved_pc,
               call_stack: [],
               try_stack: restored_try,
@@ -5293,7 +5270,7 @@ fn call_native_generator_throw(
                       gen.data_ref,
                       GeneratorSlot(
                         gen_state: value.SuspendedYield,
-                        func_template_id: gen.func_template_id,
+                        func_template: gen.func_template,
                         env_ref: gen.env_ref,
                         saved_pc: suspended.pc,
                         saved_locals: suspended.locals,
@@ -5317,7 +5294,6 @@ fn call_native_generator_throw(
                       heap: h3,
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
-                      closure_templates: suspended.closure_templates,
                       globals: suspended.globals,
                       job_queue: suspended.job_queue,
                     ),
@@ -5343,7 +5319,6 @@ fn call_native_generator_throw(
                       heap: h3,
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
-                      closure_templates: final_state.closure_templates,
                       globals: final_state.globals,
                       job_queue: final_state.job_queue,
                     ),
@@ -5403,7 +5378,7 @@ type GenData {
   GenData(
     data_ref: Ref,
     gen_state: value.GeneratorState,
-    func_template_id: Int,
+    func_template: FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
     saved_locals: array.Array(JsValue),
@@ -5423,7 +5398,7 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
           case heap.read(h, data_ref) {
             Some(GeneratorSlot(
               gen_state:,
-              func_template_id:,
+              func_template:,
               env_ref:,
               saved_pc:,
               saved_locals:,
@@ -5436,7 +5411,7 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
               Some(GenData(
                 data_ref:,
                 gen_state:,
-                func_template_id:,
+                func_template:,
                 env_ref:,
                 saved_pc:,
                 saved_locals:,
@@ -5461,7 +5436,7 @@ fn gen_with_state(
 ) -> value.HeapSlot {
   GeneratorSlot(
     gen_state: new_state,
-    func_template_id: gen.func_template_id,
+    func_template: gen.func_template,
     env_ref: gen.env_ref,
     saved_pc: gen.saved_pc,
     saved_locals: gen.saved_locals,
@@ -5519,7 +5494,6 @@ fn process_generator_return(
           heap: h,
           stack: [result, ..rest_stack],
           pc: outer_state.pc + 1,
-          closure_templates: gen_state.closure_templates,
           globals: gen_state.globals,
           job_queue: gen_state.job_queue,
         ),
@@ -5553,7 +5527,6 @@ fn process_generator_return(
               finally_stack: final_state.finally_stack,
               stack: final_state.stack,
               locals: final_state.locals,
-              closure_templates: final_state.closure_templates,
               globals: final_state.globals,
               job_queue: final_state.job_queue,
             )
@@ -5576,7 +5549,7 @@ fn process_generator_return(
               gen.data_ref,
               GeneratorSlot(
                 gen_state: value.SuspendedYield,
-                func_template_id: gen.func_template_id,
+                func_template: gen.func_template,
                 env_ref: gen.env_ref,
                 saved_pc: suspended.pc,
                 saved_locals: suspended.locals,
@@ -5600,7 +5573,6 @@ fn process_generator_return(
               heap: h3,
               stack: [result, ..rest_stack],
               pc: outer_state.pc + 1,
-              closure_templates: suspended.closure_templates,
               globals: suspended.globals,
               job_queue: suspended.job_queue,
             ),
@@ -5752,8 +5724,8 @@ fn run_handler_with_this(
   case handler {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: FunctionObject(func_index: _, env: env_ref), ..)) ->
-          run_closure_for_job(state, ref, env_ref, args, this_val)
+        Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) ->
+          run_closure_for_job(state, ref, env_ref, func_template, args, this_val)
         Some(ObjectSlot(kind: NativeFunction(native), ..)) -> {
           // For native functions (like resolve/reject), call directly
           let job_state =
@@ -5808,74 +5780,68 @@ fn run_closure_for_job(
   state: State,
   fn_ref: value.Ref,
   env_ref: value.Ref,
+  callee_template: FuncTemplate,
   args: List(JsValue),
   this_val: JsValue,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  case dict.get(state.closure_templates, fn_ref.id) {
-    Ok(callee_template) -> {
-      let env_values = case heap.read(state.heap, env_ref) {
-        Some(value.EnvSlot(slots)) -> slots
-        _ -> []
-      }
-      let env_count = list.length(env_values)
-      let padded_args = pad_args(args, callee_template.arity)
-      let remaining =
-        callee_template.local_count - env_count - callee_template.arity
-      let locals =
-        list.flatten([
-          env_values,
-          padded_args,
-          list.repeat(JsUndefined, remaining),
-        ])
-        |> array.from_list
-      let #(heap, new_this) = bind_this(state, callee_template, this_val)
-      let job_state =
+  let env_values = case heap.read(state.heap, env_ref) {
+    Some(value.EnvSlot(slots)) -> slots
+    _ -> []
+  }
+  let env_count = list.length(env_values)
+  let padded_args = pad_args(args, callee_template.arity)
+  let remaining =
+    callee_template.local_count - env_count - callee_template.arity
+  let locals =
+    list.flatten([
+      env_values,
+      padded_args,
+      list.repeat(JsUndefined, remaining),
+    ])
+    |> array.from_list
+  let #(heap, new_this) = bind_this(state, callee_template, this_val)
+  let job_state =
+    State(
+      ..state,
+      heap:,
+      stack: [],
+      locals:,
+      constants: callee_template.constants,
+      func: callee_template,
+      code: callee_template.bytecode,
+      pc: 0,
+      call_stack: [],
+      try_stack: [],
+      finally_stack: [],
+      this_binding: new_this,
+      callee_ref: Some(fn_ref),
+      call_args: args,
+    )
+  case execute_inner(job_state) {
+    Ok(#(NormalCompletion(val, h), final_state)) ->
+      Ok(#(
+        val,
         State(
           ..state,
-          heap:,
-          stack: [],
-          locals:,
-          constants: callee_template.constants,
-          func: callee_template,
-          code: callee_template.bytecode,
-          pc: 0,
-          call_stack: [],
-          try_stack: [],
-          finally_stack: [],
-          this_binding: new_this,
-          callee_ref: Some(fn_ref),
-          call_args: args,
-        )
-      case execute_inner(job_state) {
-        Ok(#(NormalCompletion(val, h), final_state)) ->
-          Ok(#(
-            val,
-            State(
-              ..state,
-              heap: h,
-              job_queue: final_state.job_queue,
-              closure_templates: final_state.closure_templates,
-              globals: final_state.globals,
-            ),
-          ))
-        Ok(#(ThrowCompletion(thrown, h), final_state)) ->
-          Error(#(
-            thrown,
-            State(
-              ..state,
-              heap: h,
-              job_queue: final_state.job_queue,
-              closure_templates: final_state.closure_templates,
-              globals: final_state.globals,
-            ),
-          ))
-        Ok(#(YieldCompletion(_, _), _)) ->
-          panic as "YieldCompletion should not appear in job execution"
-        Error(vm_err) ->
-          panic as { "VM error in promise job: " <> string.inspect(vm_err) }
-      }
-    }
-    Error(_) -> Ok(#(JsUndefined, state))
+          heap: h,
+          job_queue: final_state.job_queue,
+          globals: final_state.globals,
+        ),
+      ))
+    Ok(#(ThrowCompletion(thrown, h), final_state)) ->
+      Error(#(
+        thrown,
+        State(
+          ..state,
+          heap: h,
+          job_queue: final_state.job_queue,
+          globals: final_state.globals,
+        ),
+      ))
+    Ok(#(YieldCompletion(_, _), _)) ->
+      panic as "YieldCompletion should not appear in job execution"
+    Error(vm_err) ->
+      panic as { "VM error in promise job: " <> string.inspect(vm_err) }
   }
 }
 

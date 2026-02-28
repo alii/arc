@@ -1,4 +1,5 @@
 import arc/compiler
+import arc/module
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common
@@ -5759,7 +5760,6 @@ fn run_repl_lines(
   let env =
     vm.ReplEnv(
       globals:,
-      closure_templates: dict.new(),
       const_globals: set.new(),
       symbol_descriptions: dict.new(),
     )
@@ -5828,7 +5828,6 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
   let env =
     vm.ReplEnv(
       globals:,
-      closure_templates: dict.new(),
       const_globals: set.new(),
       symbol_descriptions: dict.new(),
     )
@@ -6300,31 +6299,33 @@ pub fn strict_reference_error_type_test() -> Nil {
 // Module compilation
 // ============================================================================
 
-/// Parse + compile + run JS module source, return the completion value.
+/// Parse + compile + run JS module source via the module system.
 fn run_module(source: String) -> Result(vm.Completion, String) {
-  case parser.parse(source, parser.Module) {
-    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(program) -> {
-      let imports = compiler.extract_module_imports(program)
-      case compiler.compile(program) {
-        Error(compiler.Unsupported(desc)) ->
-          Error("compile error: unsupported " <> desc)
-        Error(compiler.BreakOutsideLoop) ->
-          Error("compile error: break outside loop")
-        Error(compiler.ContinueOutsideLoop) ->
-          Error("compile error: continue outside loop")
-        Ok(template) -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, globals) = builtins.globals(b, h)
-          let globals = builtins.resolve_module_imports(imports, h, b, globals)
-          case vm.run_module(template, h, b, globals) {
-            Ok(completion) -> Ok(completion)
-            Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, globals) = builtins.globals(b, h)
+  let store = module.new_store(h, b)
+  let specifier = "<test>"
+
+  case module.load_module(store, specifier, source) {
+    Error(err) -> Error("module error: " <> string.inspect(err))
+    Ok(#(store, _record)) ->
+      case
+        module.resolve_dependencies(store, specifier, fn(_dep, _parent) {
+          Error("no module loader in tests")
+        })
+      {
+        Error(err) -> Error("module error: " <> string.inspect(err))
+        Ok(store) -> {
+          let #(_store, result) =
+            module.evaluate_module(store, specifier, h, b, globals)
+          case result {
+            Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
+            Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
+            Error(err) -> Error("module error: " <> string.inspect(err))
           }
         }
       }
-    }
   }
 }
 
@@ -6391,4 +6392,55 @@ pub fn module_import_arc_namespace_test() -> Nil {
      typeof arc.peek",
     JsString("function"),
   )
+}
+
+pub fn module_repl_harness_globals_test() -> Nil {
+  // Test the REPL→module globals flow:
+  // 1. Evaluate a REPL script that defines a function
+  // 2. Run a module that accesses that function via GetGlobal
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, globals) = builtins.globals(b, h)
+
+  // Step 1: Compile and run harness script in REPL mode
+  let harness_source = "function greetFromHarness() { return 'hello from harness'; }"
+  let assert Ok(harness_program) = parser.parse(harness_source, parser.Script)
+  let assert Ok(harness_template) = compiler.compile_repl(harness_program)
+
+  let env = vm.ReplEnv(
+    globals:,
+    const_globals: set.new(),
+    symbol_descriptions: dict.new(),
+  )
+  let assert Ok(#(harness_completion, env)) =
+    vm.run_and_drain_repl(harness_template, h, b, env)
+  let assert vm.NormalCompletion(_, h) = harness_completion
+
+  // Verify greetFromHarness is in globals
+  let assert Ok(_) = dict.get(env.globals, "greetFromHarness")
+
+  // Step 2: Compile and run a module that uses the harness function
+  let module_source = "greetFromHarness()"
+  let store = module.new_store(h, b)
+  let specifier = "<test-module>"
+  let assert Ok(#(store, _record)) =
+    module.load_module(store, specifier, module_source)
+  let assert Ok(store) =
+    module.resolve_dependencies(store, specifier, fn(_dep, _parent) {
+      Error("no module loader")
+    })
+
+  // Evaluate the module, passing in REPL globals
+  let #(_store, result) =
+    module.evaluate_module(
+      store, specifier, h, b, env.globals,
+    )
+  case result {
+    Ok(#(val, _heap)) -> {
+      let assert True = val == JsString("hello from harness")
+      Nil
+    }
+    Error(err) ->
+      panic as { "module failed: " <> string.inspect(err) }
+  }
 }

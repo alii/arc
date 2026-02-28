@@ -146,9 +146,10 @@ pub fn emit_program_repl(
 }
 
 /// Emit IR for a module body. Always strict mode.
-/// Module items are pre-converted to statements by the compiler.
+/// Accepts raw module items and handles export default internally
+/// by declaring a `*default*` local binding (per ES spec §16.2.1.6.2).
 pub fn emit_module(
-  stmts: List(ast.Statement),
+  items: List(ast.ModuleItem),
 ) -> Result(
   #(
     List(EmitterOp),
@@ -159,7 +160,100 @@ pub fn emit_module(
   ),
   EmitError,
 ) {
-  emit_program_common(stmts, True, True, emit_stmt, emit_stmt_tail)
+  let has_default_export =
+    list.any(items, fn(item) {
+      case item {
+        ast.ExportDefaultDeclaration(_) -> True
+        _ -> False
+      }
+    })
+  let stmts = module_items_to_stmts(items)
+  emit_module_common(stmts, has_default_export)
+}
+
+/// Module emission: sets up scope, hoists, handles *default* binding, emits body.
+fn emit_module_common(
+  stmts: List(ast.Statement),
+  has_default_export: Bool,
+) -> Result(
+  #(
+    List(EmitterOp),
+    List(JsValue),
+    Dict(JsValue, Int),
+    List(CompiledChild),
+    Bool,
+  ),
+  EmitError,
+) {
+  let e = Emitter(..new_emitter(), strict: True)
+  let e = emit_op(e, EnterScope(FunctionScope))
+
+  // Hoist var declarations
+  let hoisted_vars = collect_hoisted_vars(stmts)
+  let e =
+    list.fold(hoisted_vars, e, fn(e, name) {
+      emit_op(e, DeclareVar(name, VarBinding))
+    })
+
+  // Declare *default* binding if module has a default export
+  let e = case has_default_export {
+    True -> emit_op(e, DeclareVar("*default*", ConstBinding))
+    False -> e
+  }
+
+  // Collect and emit hoisted function declarations
+  let #(e, hoisted_funcs) = collect_hoisted_funcs(e, stmts)
+  let e =
+    list.fold(hoisted_funcs, e, fn(e, hf) {
+      let #(name, func_idx) = hf
+      let e = emit_ir(e, IrMakeClosure(func_idx))
+      let e = emit_ir(e, IrScopePutVar(name))
+      e
+    })
+
+  // Emit body with module-aware tail emitter
+  use e <- result.try(emit_program_body_with(
+    stmts,
+    e,
+    emit_stmt_module,
+    emit_stmt_tail,
+  ))
+
+  let e = emit_op(e, LeaveScope)
+  let #(code, constants, constants_map, children) = finish(e)
+  Ok(#(code, constants, constants_map, children, True))
+}
+
+/// Convert module items to statements, stripping import/export wrappers.
+/// ExportDefaultDeclaration becomes an assignment to *default* (the binding
+/// is declared separately during module emission).
+fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
+  list.filter_map(items, fn(item) {
+    case item {
+      ast.StatementItem(stmt) -> Ok(stmt)
+      ast.ExportNamedDeclaration(option.Some(decl), _, _) -> Ok(decl)
+      ast.ExportDefaultDeclaration(expr) ->
+        // Emit as: *default* = expr;
+        // The *default* local is declared during module hoisting.
+        Ok(ast.ExpressionStatement(
+          ast.AssignmentExpression(
+            operator: ast.Assign,
+            left: ast.Identifier("*default*"),
+            right: expr,
+          ),
+        ))
+      ast.ImportDeclaration(..) -> Error(Nil)
+      ast.ExportNamedDeclaration(None, _, _) -> Error(Nil)
+      ast.ExportAllDeclaration(..) -> Error(Nil)
+    }
+  })
+}
+
+/// Module-mode statement emitter: identical to emit_stmt but handles
+/// the *default* assignment correctly (no special casing needed since
+/// it's a normal assignment to a declared local).
+fn emit_stmt_module(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
+  emit_stmt(e, stmt)
 }
 
 /// Common program emission: sets up scope, hoists, emits body, tears down.
