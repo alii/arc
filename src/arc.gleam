@@ -124,6 +124,12 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
               <> inspect_inner(h, value.JsSymbol(sym), depth, seen)
               <> "]"
             PidObject(pid:) -> "Pid" <> builtins_arc.ffi_pid_to_string(pid)
+            value.MapObject(data:, ..) ->
+              "Map(" <> int.to_string(dict.size(data)) <> ")"
+            value.SetObject(data:, ..) ->
+              "Set(" <> int.to_string(dict.size(data)) <> ")"
+            value.WeakMapObject(_) -> "WeakMap {}"
+            value.WeakSetObject(_) -> "WeakSet {}"
           }
         _ -> "[Object]"
       }
@@ -398,26 +404,18 @@ fn run_file(path: String) -> Nil {
   }
 }
 
-/// Run a file as an ES module using the full module lifecycle.
+/// Run a file as an ES module using the bundle lifecycle.
 fn run_module_file(path: String, source: String) -> Nil {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, globals) = builtins.globals(b, h)
-  let store = module.new_store(h, b)
 
-  case module.load_module(store, path, source) {
+  case module.compile_bundle(path, source, resolve_and_load_dep) {
     Error(err) -> print_module_error(h, err)
-    Ok(#(store, _record)) ->
-      case module.resolve_dependencies(store, path, resolve_and_load_dep) {
+    Ok(bundle) ->
+      case module.evaluate_bundle(bundle, h, b, globals) {
+        Ok(_) -> Nil
         Error(err) -> print_module_error(h, err)
-        Ok(store) -> {
-          let #(_store, result) =
-            module.evaluate_module(store, path, h, b, globals)
-          case result {
-            Ok(_) -> Nil
-            Error(err) -> print_module_error(h, err)
-          }
-        }
       }
   }
 }

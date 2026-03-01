@@ -2,9 +2,9 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/frame.{type State}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, BooleanObject, JsBool, JsObject, JsString,
-  NativeBooleanConstructor, NativeBooleanPrototypeToString,
-  NativeBooleanPrototypeValueOf, ObjectSlot,
+  type BooleanNativeFn, type JsValue, type Ref, BooleanConstructor,
+  BooleanNative, BooleanObject, BooleanPrototypeToString,
+  BooleanPrototypeValueOf, JsBool, JsObject, JsString, ObjectSlot,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -16,19 +16,61 @@ pub fn init(
 ) -> #(Heap, BuiltinType) {
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
-      #("valueOf", NativeBooleanPrototypeValueOf, 0),
-      #("toString", NativeBooleanPrototypeToString, 0),
+      #("valueOf", BooleanNative(BooleanPrototypeValueOf), 0),
+      #("toString", BooleanNative(BooleanPrototypeToString), 0),
     ])
-  common.init_type(
-    h,
-    object_proto,
-    function_proto,
-    proto_methods,
-    fn(_) { NativeBooleanConstructor },
-    "Boolean",
-    1,
-    [],
-  )
+  let #(h, bt) =
+    common.init_type(
+      h,
+      object_proto,
+      function_proto,
+      proto_methods,
+      fn(_) { BooleanNative(BooleanConstructor) },
+      "Boolean",
+      1,
+      [],
+    )
+
+  // ES2024 §20.3.3: The Boolean prototype object has a [[BooleanData]] internal
+  // slot with value false. Update from OrdinaryObject to BooleanObject.
+  let h =
+    heap.update(h, bt.prototype, fn(slot) {
+      case slot {
+        ObjectSlot(
+          properties:,
+          elements:,
+          prototype:,
+          symbol_properties:,
+          extensible:,
+          ..,
+        ) ->
+          ObjectSlot(
+            kind: BooleanObject(value: False),
+            properties:,
+            elements:,
+            prototype:,
+            symbol_properties:,
+            extensible:,
+          )
+        other -> other
+      }
+    })
+
+  #(h, bt)
+}
+
+/// Per-module dispatch for Boolean native functions.
+pub fn dispatch(
+  native: BooleanNativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case native {
+    BooleanConstructor -> call_as_function(args, state)
+    BooleanPrototypeValueOf -> boolean_value_of(this, args, state)
+    BooleanPrototypeToString -> boolean_to_string(this, args, state)
+  }
 }
 
 /// ES2024 §20.3.1.1 Boolean(value)

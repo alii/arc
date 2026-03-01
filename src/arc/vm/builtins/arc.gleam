@@ -3,13 +3,13 @@ import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, type PortableMessage, type Ref, DataProperty, JsBigInt, JsBool,
-  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
-  NativeArcLog, NativeArcPeek, NativeArcReceive, NativeArcSelf, NativeArcSend,
-  NativeArcSleep, NativeArcSpawn, NativePidToString, ObjectSlot, OrdinaryObject,
-  PidObject, PmArray, PmBigInt, PmBool, PmNull, PmNumber, PmObject, PmPid,
-  PmString, PmSymbol, PmUndefined, PromiseFulfilled, PromiseObject,
-  PromisePending, PromiseRejected, PromiseSlot,
+  type ArcNativeFn, type JsValue, type PortableMessage, type Ref, ArcLog,
+  ArcNative, ArcPeek, ArcPidToString, ArcReceive, ArcSelf, ArcSend, ArcSleep,
+  DataProperty, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString,
+  JsSymbol, JsUndefined, JsUninitialized, ObjectSlot, OrdinaryObject, PidObject,
+  PmArray, PmBigInt, PmBool, PmNull, PmNumber, PmObject, PmPid, PmString,
+  PmSymbol, PmUndefined, PromiseFulfilled, PromiseObject, PromisePending,
+  PromiseRejected, PromiseSlot,
 }
 import gleam/dict
 import gleam/io
@@ -45,13 +45,13 @@ fn ffi_sleep(ms: Int) -> Nil
 pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
-      #("peek", NativeArcPeek, 1),
-      #("spawn", NativeArcSpawn, 1),
-      #("send", NativeArcSend, 2),
-      #("receive", NativeArcReceive, 0),
-      #("self", NativeArcSelf, 0),
-      #("log", NativeArcLog, 1),
-      #("sleep", NativeArcSleep, 1),
+      #("peek", ArcNative(ArcPeek), 1),
+      #("spawn", value.NativeArcSpawn, 1),
+      #("send", ArcNative(ArcSend), 2),
+      #("receive", ArcNative(ArcReceive), 0),
+      #("self", ArcNative(ArcSelf), 0),
+      #("log", ArcNative(ArcLog), 1),
+      #("sleep", ArcNative(ArcSleep), 1),
     ])
 
   let properties = dict.from_list(methods)
@@ -78,6 +78,24 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
   let h = heap.root(h, arc_ref)
 
   #(h, arc_ref)
+}
+
+/// Per-module dispatch for Arc native functions.
+pub fn dispatch(
+  native: ArcNativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case native {
+    value.ArcPeek -> peek(args, state)
+    value.ArcSend -> send(args, state)
+    value.ArcReceive -> receive_(args, state)
+    value.ArcSelf -> self_(args, state)
+    value.ArcLog -> log(args, state)
+    value.ArcSleep -> sleep(args, state)
+    value.ArcPidToString -> pid_to_string(this, args, state)
+  }
 }
 
 // -- Arc.peek ----------------------------------------------------------------
@@ -332,7 +350,7 @@ pub fn alloc_pid_object(
     common.alloc_native_fn(
       heap,
       function_proto,
-      NativePidToString,
+      ArcNative(ArcPidToString),
       "toString",
       0,
     )

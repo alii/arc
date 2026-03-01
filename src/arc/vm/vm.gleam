@@ -4,12 +4,17 @@ import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/error as builtins_error
+import arc/vm/builtins/json as builtins_json
+import arc/vm/builtins/map as builtins_map
 import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
+import arc/vm/builtins/weak_map as builtins_weak_map
+import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/frame.{
   type FinallyCompletion, type State, type TryFrame, SavedFrame, State, TryFrame,
 }
@@ -121,6 +126,41 @@ type StepResult {
 // Public API
 // ============================================================================
 
+/// Create a fresh VM state from a function template.
+/// Most callers can use this directly; override fields with `State(..new_state(...), ...)`
+/// for cases that need non-default this_binding, const_globals, or symbol_descriptions.
+fn new_state(
+  func: FuncTemplate,
+  locals: array.Array(JsValue),
+  heap: Heap,
+  builtins: Builtins,
+  globals: dict.Dict(String, JsValue),
+  symbol_descriptions: dict.Dict(value.SymbolId, String),
+) -> State {
+  State(
+    stack: [],
+    locals:,
+    constants: func.constants,
+    globals:,
+    func:,
+    code: func.bytecode,
+    heap:,
+    pc: 0,
+    call_stack: [],
+    try_stack: [],
+    finally_stack: [],
+    builtins:,
+    this_binding: JsUndefined,
+    callee_ref: None,
+    call_args: [],
+    job_queue: [],
+    const_globals: set.new(),
+    symbol_descriptions:,
+    js_to_string: js_to_string_callback,
+    call_fn: call_fn_callback,
+  )
+}
+
 /// Run a function template and return its completion + updated heap.
 pub fn run(
   func: FuncTemplate,
@@ -146,26 +186,8 @@ fn init_state(
     False -> dict.get(globals, "globalThis") |> result.unwrap(JsUndefined)
   }
   State(
-    stack: [],
-    locals:,
-    constants: func.constants,
-    globals:,
-    func:,
-    code: func.bytecode,
-    heap:,
-    pc: 0,
-    call_stack: [],
-    try_stack: [],
-    finally_stack: [],
-    builtins:,
+    ..new_state(func, locals, heap, builtins, globals, dict.new()),
     this_binding:,
-    callee_ref: None,
-    call_args: [],
-    job_queue: [],
-    const_globals: set.new(),
-    symbol_descriptions: dict.new(),
-    js_to_string: js_to_string_callback,
-    call_fn: call_fn_callback,
   )
 }
 
@@ -249,26 +271,15 @@ pub fn run_and_drain_repl(
   let locals = array.repeat(JsUndefined, func.local_count)
   let state =
     State(
-      stack: [],
-      locals:,
-      constants: func.constants,
-      globals: env.globals,
-      func:,
-      code: func.bytecode,
-      heap:,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      finally_stack: [],
-      builtins:,
-      this_binding: JsUndefined,
-      callee_ref: None,
-      call_args: [],
-      job_queue: [],
+      ..new_state(
+        func,
+        locals,
+        heap,
+        builtins,
+        env.globals,
+        env.symbol_descriptions,
+      ),
       const_globals: env.const_globals,
-      symbol_descriptions: env.symbol_descriptions,
-      js_to_string: js_to_string_callback,
-      call_fn: call_fn_callback,
     )
   use #(completion, final_state) <- result.try(execute_inner(state))
   let drained_state = drain_jobs(final_state)
@@ -545,14 +556,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case dict.get(state.globals, name) {
         Ok(value) ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-        Error(_) ->
-          Ok(
-            State(
-              ..state,
-              stack: [JsUndefined, ..state.stack],
-              pc: state.pc + 1,
-            ),
-          )
+        Error(_) -> throw_reference_error(state, name <> " is not defined")
       }
     }
 
@@ -913,11 +917,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             })
           let #(heap, env_ref) =
             heap.alloc(state.heap, value.EnvSlot(captured_values))
-          // Set .name from the template
-          let fn_name = case child_template.name {
-            Some(n) -> JsString(n)
-            None -> JsString("")
-          }
           // For non-arrow functions, pre-populate .prototype with a fresh object
           // so that `Foo.prototype.bar = ...` and `new Foo()` work.
           // .constructor on prototype is set after we have the closure ref.
@@ -925,7 +924,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             True -> #(
               heap,
               dict.from_list([
-                #("name", value.data(fn_name) |> value.configurable()),
+                #(
+                  "name",
+                  common.fn_name_property(case child_template.name {
+                    Some(n) -> n
+                    None -> ""
+                  }),
+                ),
+                #("length", common.fn_length_property(child_template.arity)),
               ]),
               None,
             )
@@ -949,7 +955,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     "prototype",
                     value.data(JsObject(proto_obj_ref)) |> value.writable(),
                   ),
-                  #("name", value.data(fn_name) |> value.configurable()),
+                  #(
+                    "name",
+                    common.fn_name_property(case child_template.name {
+                      Some(n) -> n
+                      None -> ""
+                    }),
+                  ),
+                  #("length", common.fn_length_property(child_template.arity)),
                 ]),
                 Some(proto_obj_ref),
               )
@@ -3163,7 +3176,7 @@ fn call_native(
                   bound_args:,
                 )),
                 properties: dict.from_list([
-                  #("name", value.builtin_property(JsString(name))),
+                  #("name", common.fn_name_property(name)),
                 ]),
                 elements: js_elements.new(),
                 prototype: Some(state.builtins.function.prototype),
@@ -3750,6 +3763,50 @@ fn extract_elements_loop(
   }
 }
 
+/// Function.prototype.toString — ES2024 §20.2.3.5
+///
+/// For native functions: "function NAME() { [native code] }"
+/// For user-defined functions: "function NAME() { [native code] }" (simplified)
+fn function_to_string(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: FunctionObject(func_template:, ..), ..)) -> {
+          let name = case func_template.name {
+            option.Some(n) -> n
+            option.None -> "anonymous"
+          }
+          #(state, Ok(JsString("function " <> name <> "() { [native code] }")))
+        }
+        Some(ObjectSlot(kind: NativeFunction(_), properties:, ..)) -> {
+          let name =
+            dict.get(properties, "name")
+            |> result.map(fn(p) {
+              case p {
+                DataProperty(value: JsString(n), ..) -> n
+                _ -> ""
+              }
+            })
+            |> result.unwrap("")
+          #(state, Ok(JsString("function " <> name <> "() { [native code] }")))
+        }
+        _ ->
+          frame.type_error(
+            state,
+            "Function.prototype.toString requires that 'this' be a Function",
+          )
+      }
+    _ ->
+      frame.type_error(
+        state,
+        "Function.prototype.toString requires that 'this' be a Function",
+      )
+  }
+}
+
 /// Route a NativeFn call to the correct builtin module.
 fn dispatch_native(
   native: value.NativeFn,
@@ -3758,221 +3815,30 @@ fn dispatch_native(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case native {
-    value.NativeObjectConstructor ->
-      builtins_object.call_native(
-        args,
-        this,
-        state,
-        state.builtins.object.prototype,
-      )
+    // Per-module dispatch
+    value.ObjectNative(n) -> builtins_object.dispatch(n, args, this, state)
+    value.ArrayNative(n) -> builtins_array.dispatch(n, args, this, state)
+    value.StringNative(n) -> builtins_string.dispatch(n, args, this, state)
+    value.NumberNative(n) -> builtins_number.dispatch(n, args, this, state)
+    value.BooleanNative(n) -> builtins_boolean.dispatch(n, args, this, state)
+    value.MathNative(n) -> builtins_math.dispatch(n, args, this, state)
+    value.ErrorNative(n) -> builtins_error.dispatch(n, args, this, state)
+    value.ArcNative(n) -> builtins_arc.dispatch(n, args, this, state)
+    value.NativeArcSpawn -> arc_spawn(args, state)
+    value.JsonNative(n) -> builtins_json.dispatch(n, args, this, state)
+    value.MapNative(n) -> builtins_map.dispatch(n, args, this, state)
+    value.SetNative(n) -> builtins_set.dispatch(n, args, this, state)
+    value.WeakMapNative(n) -> builtins_weak_map.dispatch(n, args, this, state)
+    value.WeakSetNative(n) -> builtins_weak_set.dispatch(n, args, this, state)
+    // Standalone VM-level natives
     value.NativeFunctionConstructor ->
       frame.type_error(state, "Function constructor is not supported")
-    value.NativeArrayConstructor ->
-      builtins_array.construct(args, state, state.builtins.array.prototype)
-    value.NativeArrayIsArray -> builtins_array.is_array(args, state)
-    value.NativeErrorConstructor(proto:) ->
-      builtins_error.call_native(proto, args, this, state)
-    value.NativeObjectGetOwnPropertyDescriptor ->
-      builtins_object.get_own_property_descriptor(
-        args,
-        state,
-        state.builtins.object.prototype,
-      )
-    value.NativeObjectDefineProperty ->
-      builtins_object.define_property(args, state)
-    value.NativeObjectGetOwnPropertyNames ->
-      builtins_object.get_own_property_names(
-        args,
-        state,
-        state.builtins.array.prototype,
-      )
-    value.NativeObjectKeys ->
-      builtins_object.keys(args, state, state.builtins.array.prototype)
-    value.NativeObjectValues ->
-      builtins_object.values(args, state, state.builtins.array.prototype)
-    value.NativeObjectEntries ->
-      builtins_object.entries(args, state, state.builtins.array.prototype)
-    value.NativeObjectDefineProperties ->
-      builtins_object.define_properties(args, state)
-    value.NativeObjectCreate -> builtins_object.create(args, state)
-    value.NativeObjectAssign -> builtins_object.assign(args, state)
-    value.NativeObjectIs -> builtins_object.is(args, state)
-    value.NativeObjectHasOwn -> builtins_object.has_own(args, state)
-    value.NativeObjectGetPrototypeOf ->
-      builtins_object.get_prototype_of(args, state)
-    value.NativeObjectSetPrototypeOf ->
-      builtins_object.set_prototype_of(args, state)
-    value.NativeObjectFreeze -> builtins_object.freeze(args, state)
-    value.NativeObjectIsFrozen -> builtins_object.is_frozen(args, state)
-    value.NativeObjectIsExtensible -> builtins_object.is_extensible(args, state)
-    value.NativeObjectPreventExtensions ->
-      builtins_object.prevent_extensions(args, state)
-    value.NativeObjectPrototypeHasOwnProperty ->
-      builtins_object.has_own_property(this, args, state)
-    value.NativeObjectPrototypePropertyIsEnumerable ->
-      builtins_object.property_is_enumerable(this, args, state)
-    value.NativeObjectPrototypeToString ->
-      builtins_object.object_to_string(this, args, state)
-    value.NativeObjectPrototypeValueOf ->
-      builtins_object.object_value_of(this, args, state)
-    value.NativeArrayPrototypeJoin ->
-      builtins_array.array_join(this, args, state)
-    value.NativeArrayPrototypePush ->
-      builtins_array.array_push(this, args, state)
-    value.NativeArrayPrototypePop -> builtins_array.array_pop(this, args, state)
-    value.NativeArrayPrototypeShift ->
-      builtins_array.array_shift(this, args, state)
-    value.NativeArrayPrototypeUnshift ->
-      builtins_array.array_unshift(this, args, state)
-    value.NativeArrayPrototypeSlice ->
-      builtins_array.array_slice(
-        this,
-        args,
-        state,
-        state.builtins.array.prototype,
-      )
-    value.NativeArrayPrototypeConcat ->
-      builtins_array.array_concat(
-        this,
-        args,
-        state,
-        state.builtins.array.prototype,
-      )
-    value.NativeArrayPrototypeReverse ->
-      builtins_array.array_reverse(this, args, state)
-    value.NativeArrayPrototypeFill ->
-      builtins_array.array_fill(this, args, state)
-    value.NativeArrayPrototypeAt -> builtins_array.array_at(this, args, state)
-    value.NativeArrayPrototypeIndexOf ->
-      builtins_array.array_index_of(this, args, state)
-    value.NativeArrayPrototypeLastIndexOf ->
-      builtins_array.array_last_index_of(this, args, state)
-    value.NativeArrayPrototypeIncludes ->
-      builtins_array.array_includes(this, args, state)
-    value.NativeArrayPrototypeForEach ->
-      builtins_array.array_for_each(this, args, state)
-    value.NativeArrayPrototypeMap ->
-      builtins_array.array_map(
-        this,
-        args,
-        state,
-        state.builtins.array.prototype,
-      )
-    value.NativeArrayPrototypeFilter ->
-      builtins_array.array_filter(
-        this,
-        args,
-        state,
-        state.builtins.array.prototype,
-      )
-    value.NativeArrayPrototypeReduce ->
-      builtins_array.array_reduce(this, args, state)
-    value.NativeArrayPrototypeReduceRight ->
-      builtins_array.array_reduce_right(this, args, state)
-    value.NativeArrayPrototypeEvery ->
-      builtins_array.array_every(this, args, state)
-    value.NativeArrayPrototypeSome ->
-      builtins_array.array_some(this, args, state)
-    value.NativeArrayPrototypeFind ->
-      builtins_array.array_find(this, args, state)
-    value.NativeArrayPrototypeFindIndex ->
-      builtins_array.array_find_index(this, args, state)
-    value.NativeMathPow -> builtins_math.math_pow(args, state)
-    // Math methods
-    value.NativeMathAbs -> builtins_math.math_abs(args, state)
-    value.NativeMathFloor -> builtins_math.math_floor(args, state)
-    value.NativeMathCeil -> builtins_math.math_ceil(args, state)
-    value.NativeMathRound -> builtins_math.math_round(args, state)
-    value.NativeMathTrunc -> builtins_math.math_trunc(args, state)
-    value.NativeMathSqrt -> builtins_math.math_sqrt(args, state)
-    value.NativeMathMax -> builtins_math.math_max(args, state)
-    value.NativeMathMin -> builtins_math.math_min(args, state)
-    value.NativeMathLog -> builtins_math.math_log(args, state)
-    value.NativeMathSin -> builtins_math.math_sin(args, state)
-    value.NativeMathCos -> builtins_math.math_cos(args, state)
-    // String.prototype methods
-    value.NativeStringPrototypeCharAt ->
-      builtins_string.string_char_at(this, args, state)
-    value.NativeStringPrototypeCharCodeAt ->
-      builtins_string.string_char_code_at(this, args, state)
-    value.NativeStringPrototypeIndexOf ->
-      builtins_string.string_index_of(this, args, state)
-    value.NativeStringPrototypeLastIndexOf ->
-      builtins_string.string_last_index_of(this, args, state)
-    value.NativeStringPrototypeIncludes ->
-      builtins_string.string_includes(this, args, state)
-    value.NativeStringPrototypeStartsWith ->
-      builtins_string.string_starts_with(this, args, state)
-    value.NativeStringPrototypeEndsWith ->
-      builtins_string.string_ends_with(this, args, state)
-    value.NativeStringPrototypeSlice ->
-      builtins_string.string_slice(this, args, state)
-    value.NativeStringPrototypeSubstring ->
-      builtins_string.string_substring(this, args, state)
-    value.NativeStringPrototypeToLowerCase ->
-      builtins_string.string_to_lower_case(this, args, state)
-    value.NativeStringPrototypeToUpperCase ->
-      builtins_string.string_to_upper_case(this, args, state)
-    value.NativeStringPrototypeTrim ->
-      builtins_string.string_trim(this, args, state)
-    value.NativeStringPrototypeTrimStart ->
-      builtins_string.string_trim_start(this, args, state)
-    value.NativeStringPrototypeTrimEnd ->
-      builtins_string.string_trim_end(this, args, state)
-    value.NativeStringPrototypeSplit ->
-      builtins_string.string_split(
-        this,
-        args,
-        state,
-        state.builtins.array.prototype,
-      )
-    value.NativeStringPrototypeConcat ->
-      builtins_string.string_concat(this, args, state)
-    value.NativeStringPrototypeToString ->
-      builtins_string.string_to_string(this, args, state)
-    value.NativeStringPrototypeValueOf ->
-      builtins_string.string_value_of(this, args, state)
-    value.NativeStringPrototypeRepeat ->
-      builtins_string.string_repeat(this, args, state)
-    value.NativeStringPrototypePadStart ->
-      builtins_string.string_pad_start(this, args, state)
-    value.NativeStringPrototypePadEnd ->
-      builtins_string.string_pad_end(this, args, state)
-    value.NativeStringPrototypeAt ->
-      builtins_string.string_at(this, args, state)
-    // Number/Boolean constructors (type coercion)
-    // NativeStringConstructor is handled in call_native (needs ToPrimitive)
-    value.NativeStringConstructor ->
-      panic as "NativeStringConstructor should be handled in call_native"
-    value.NativeNumberConstructor ->
-      builtins_number.call_as_function(args, state)
-    value.NativeBooleanConstructor ->
-      builtins_boolean.call_as_function(args, state)
-    // Global utility functions
-    value.NativeParseInt -> builtins_number.parse_int(args, state)
-    value.NativeParseFloat -> builtins_number.parse_float(args, state)
-    value.NativeIsNaN -> builtins_number.js_is_nan(args, state)
-    value.NativeIsFinite -> builtins_number.js_is_finite(args, state)
-    // Number static methods (strict — no coercion)
-    value.NativeNumberIsNaN -> builtins_number.number_is_nan(args, state)
-    value.NativeNumberIsFinite -> builtins_number.number_is_finite(args, state)
-    value.NativeNumberIsInteger ->
-      builtins_number.number_is_integer(args, state)
-    // Number.parseInt/parseFloat are identical to global ones per spec
-    value.NativeNumberParseInt -> builtins_number.parse_int(args, state)
-    value.NativeNumberParseFloat -> builtins_number.parse_float(args, state)
-    // Number.prototype methods — unwrap [[NumberData]]
-    value.NativeNumberPrototypeValueOf ->
-      builtins_number.number_value_of(this, args, state)
-    value.NativeNumberPrototypeToString ->
-      builtins_number.number_to_string(this, args, state)
-    // Boolean.prototype methods — unwrap [[BooleanData]]
-    value.NativeBooleanPrototypeValueOf ->
-      builtins_boolean.boolean_value_of(this, args, state)
-    value.NativeBooleanPrototypeToString ->
-      builtins_boolean.boolean_to_string(this, args, state)
+    value.NativeIteratorSymbolIterator -> #(state, Ok(this))
     // These are handled in call_native before reaching dispatch_native.
     // If we ever get here, it's a bug.
+    value.NativeStringConstructor ->
+      panic as "NativeStringConstructor should be handled in call_native"
+    value.NativeFunctionToString -> function_to_string(this, state)
     value.NativeFunctionCall
     | value.NativeFunctionApply
     | value.NativeFunctionBind
@@ -3999,24 +3865,58 @@ fn dispatch_native(
       panic as "NativeAsyncResume should be handled in call_native"
     value.NativeSymbolConstructor ->
       panic as "NativeSymbolConstructor should be handled in call_native"
-    // %IteratorPrototype%[Symbol.iterator]() — returns `this`
-    value.NativeIteratorSymbolIterator -> #(state, Ok(this))
-    // Arc.peek — synchronously inspect promise state
-    value.NativeArcPeek -> builtins_arc.peek(args, state)
-    // Arc.spawn — spawn a new BEAM process running a JS function
-    value.NativeArcSpawn -> arc_spawn(args, state)
-    // Arc.send — send a message to a BEAM process
-    value.NativeArcSend -> builtins_arc.send(args, state)
-    // Arc.receive — receive a message from the current process mailbox
-    value.NativeArcReceive -> builtins_arc.receive_(args, state)
-    // Arc.self — return the current process's PID
-    value.NativeArcSelf -> builtins_arc.self_(args, state)
-    // Arc.log — print values to stdout
-    value.NativeArcLog -> builtins_arc.log(args, state)
-    // Arc.sleep — suspend the current BEAM process
-    value.NativeArcSleep -> builtins_arc.sleep(args, state)
-    // Pid.toString — return formatted pid string
-    value.NativePidToString -> builtins_arc.pid_to_string(this, args, state)
+    // Global functions: eval, URI encoding/decoding
+    value.NativeEval -> frame.type_error(state, "eval is not supported")
+    value.NativeDecodeURI -> {
+      let arg = case args {
+        [s, ..] -> s
+        [] -> value.JsUndefined
+      }
+      use str, state <- frame.try_to_string(state, arg)
+      #(state, Ok(value.JsString(uri_decode(str))))
+    }
+    value.NativeEncodeURI -> {
+      let arg = case args {
+        [s, ..] -> s
+        [] -> value.JsUndefined
+      }
+      use str, state <- frame.try_to_string(state, arg)
+      #(state, Ok(value.JsString(uri_encode(str, True))))
+    }
+    value.NativeDecodeURIComponent -> {
+      let arg = case args {
+        [s, ..] -> s
+        [] -> value.JsUndefined
+      }
+      use str, state <- frame.try_to_string(state, arg)
+      #(state, Ok(value.JsString(uri_decode(str))))
+    }
+    value.NativeEncodeURIComponent -> {
+      let arg = case args {
+        [s, ..] -> s
+        [] -> value.JsUndefined
+      }
+      use str, state <- frame.try_to_string(state, arg)
+      #(state, Ok(value.JsString(uri_encode(str, False))))
+    }
+    // AnnexB B.2.1.1 escape ( string )
+    value.NativeEscape -> {
+      let arg = case args {
+        [s, ..] -> s
+        [] -> value.JsUndefined
+      }
+      use str, state <- frame.try_to_string(state, arg)
+      #(state, Ok(value.JsString(js_escape(str))))
+    }
+    // AnnexB B.2.1.2 unescape ( string )
+    value.NativeUnescape -> {
+      let arg = case args {
+        [s, ..] -> s
+        [] -> value.JsUndefined
+      }
+      use str, state <- frame.try_to_string(state, arg)
+      #(state, Ok(value.JsString(js_unescape(str))))
+    }
   }
 }
 
@@ -4046,35 +3946,34 @@ fn arc_spawn(
       _ -> Error("Arc.spawn: argument is not a function object")
     })
 
-    use spawner <- result.try(
-      case heap.read(state.heap, fn_ref) {
-        Some(ObjectSlot(
-          kind: FunctionObject(func_template: callee_template, env: env_ref),
-          ..,
-        )) ->
-          Ok(fn() {
-            run_spawned_closure(
-              callee_template,
-              env_ref,
-              state.heap,
-              state.builtins,
-              state.globals,
-              state.symbol_descriptions,
-            )
-          })
-        Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
-          Ok(fn() {
-            run_spawned_native(
-              native,
-              state.heap,
-              state.builtins,
-              state.globals,
-              state.symbol_descriptions,
-            )
-          })
-        _ -> Error("Arc.spawn: argument is not a function")
-      },
-    )
+    use spawner <- result.try(case heap.read(state.heap, fn_ref) {
+      Some(ObjectSlot(
+        kind: FunctionObject(func_template: callee_template, env: env_ref),
+        ..,
+      )) ->
+        Ok(fn() {
+          run_spawned_closure(
+            callee_template,
+            env_ref,
+            state.heap,
+            state.builtins,
+            state.globals,
+            state.symbol_descriptions,
+          )
+        })
+      Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
+        Ok(fn() {
+          run_spawned_native(
+            native,
+            state.func,
+            state.heap,
+            state.builtins,
+            state.globals,
+            state.symbol_descriptions,
+          )
+        })
+      _ -> Error("Arc.spawn: argument is not a function")
+    })
 
     let #(heap, pid_val) =
       builtins_arc.alloc_pid_object(
@@ -4116,27 +4015,13 @@ fn run_spawned_closure(
     |> array.from_list
 
   let state =
-    State(
-      stack: [],
-      locals:,
-      constants: callee_template.constants,
-      globals:,
-      func: callee_template,
-      code: callee_template.bytecode,
-      heap:,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      finally_stack: [],
-      builtins:,
-      this_binding: JsUndefined,
-      callee_ref: None,
-      call_args: [],
-      job_queue: [],
-      const_globals: set.new(),
-      symbol_descriptions:,
-      js_to_string: js_to_string_callback,
-      call_fn: call_fn_callback,
+    new_state(
+      callee_template,
+      locals,
+      heap,
+      builtins,
+      globals,
+      symbol_descriptions,
     )
 
   case execute_inner(state) {
@@ -4149,54 +4034,22 @@ fn run_spawned_closure(
 }
 
 /// Run a native function in a standalone BEAM process.
-/// Sets up a minimal VM state and calls the native function directly.
+/// Sets up a full VM state (using the caller's func template as context)
+/// and drains the job queue after execution.
 fn run_spawned_native(
   native: value.NativeFn,
+  caller_func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
 ) -> Nil {
-  let empty_template =
-    value.FuncTemplate(
-      name: None,
-      arity: 0,
-      local_count: 0,
-      bytecode: array.from_list([]),
-      constants: array.from_list([]),
-      functions: array.from_list([]),
-      env_descriptors: [],
-      is_strict: False,
-      is_arrow: False,
-      is_derived_constructor: False,
-      is_generator: False,
-      is_async: False,
-    )
+  let locals = array.repeat(JsUndefined, caller_func.local_count)
   let state =
-    State(
-      stack: [],
-      locals: array.from_list([]),
-      constants: array.from_list([]),
-      globals:,
-      func: empty_template,
-      code: array.from_list([]),
-      heap:,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      finally_stack: [],
-      builtins:,
-      this_binding: JsUndefined,
-      callee_ref: None,
-      call_args: [],
-      job_queue: [],
-      const_globals: set.new(),
-      symbol_descriptions:,
-      js_to_string: js_to_string_callback,
-      call_fn: call_fn_callback,
-    )
+    new_state(caller_func, locals, heap, builtins, globals, symbol_descriptions)
 
-  let #(_state, _result) = dispatch_native(native, [], JsUndefined, state)
+  let #(final_state, _result) = dispatch_native(native, [], JsUndefined, state)
+  let _ = drain_jobs(final_state)
   Nil
 }
 
@@ -6646,3 +6499,102 @@ fn num_to_int32(n: JsNum) -> Int {
 
 @external(erlang, "math", "pow")
 fn float_power(base: Float, exp: Float) -> Float
+
+@external(erlang, "arc_uri_ffi", "encode")
+fn uri_encode(str: String, preserve_uri_chars: Bool) -> String
+
+@external(erlang, "arc_uri_ffi", "decode")
+fn uri_decode(str: String) -> String
+
+// ============================================================================
+// AnnexB escape / unescape (B.2.1.1 / B.2.1.2)
+// ============================================================================
+
+/// Characters that escape() preserves as-is (unreserved set).
+/// Per B.2.1.1: A-Z, a-z, 0-9, @, *, _, +, -, ., /
+fn is_escape_safe(cp: Int) -> Bool {
+  // A-Z
+  { cp >= 65 && cp <= 90 }
+  // a-z
+  || { cp >= 97 && cp <= 122 }
+  // 0-9
+  || { cp >= 48 && cp <= 57 }
+  // @
+  || cp == 64
+  // *
+  || cp == 42
+  // _
+  || cp == 95
+  // +
+  || cp == 43
+  // -
+  || cp == 45
+  // .
+  || cp == 46
+  // /
+  || cp == 47
+}
+
+/// Format an integer as uppercase hex with at least `width` digits.
+fn to_hex_upper(n: Int, width: Int) -> String {
+  let hex =
+    int.to_base_string(n, 16) |> result.unwrap("0") |> string.uppercase()
+  let pad = width - string.length(hex)
+  case pad > 0 {
+    True -> string.repeat("0", pad) <> hex
+    False -> hex
+  }
+}
+
+/// ES AnnexB B.2.1.1 escape ( string )
+fn js_escape(input: String) -> String {
+  string.to_utf_codepoints(input)
+  |> list.map(fn(cp) {
+    let code = string.utf_codepoint_to_int(cp)
+    case is_escape_safe(code) {
+      True -> string.from_utf_codepoints([cp])
+      False ->
+        case code < 256 {
+          True -> "%" <> to_hex_upper(code, 2)
+          False -> "%u" <> to_hex_upper(code, 4)
+        }
+    }
+  })
+  |> string.join("")
+}
+
+/// ES AnnexB B.2.1.2 unescape ( string )
+fn js_unescape(input: String) -> String {
+  js_unescape_loop(string.to_graphemes(input), "")
+}
+
+fn js_unescape_loop(chars: List(String), acc: String) -> String {
+  case chars {
+    [] -> acc
+    ["%", "u", a, b, c, d, ..rest] -> {
+      let hex = a <> b <> c <> d
+      case int.base_parse(hex, 16) {
+        Ok(code) ->
+          case string.utf_codepoint(code) {
+            Ok(cp) ->
+              js_unescape_loop(rest, acc <> string.from_utf_codepoints([cp]))
+            Error(Nil) -> js_unescape_loop(rest, acc <> "%u" <> hex)
+          }
+        Error(Nil) -> js_unescape_loop([a, b, c, d, ..rest], acc <> "%u")
+      }
+    }
+    ["%", a, b, ..rest] -> {
+      let hex = a <> b
+      case int.base_parse(hex, 16) {
+        Ok(code) ->
+          case string.utf_codepoint(code) {
+            Ok(cp) ->
+              js_unescape_loop(rest, acc <> string.from_utf_codepoints([cp]))
+            Error(Nil) -> js_unescape_loop(rest, acc <> "%" <> hex)
+          }
+        Error(Nil) -> js_unescape_loop([a, b, ..rest], acc <> "%")
+      }
+    }
+    [c, ..rest] -> js_unescape_loop(rest, acc <> c)
+  }
+}

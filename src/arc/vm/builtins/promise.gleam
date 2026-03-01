@@ -5,9 +5,9 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/value.{
-  type Job, type JsValue, type Ref, BoxSlot, JsBool, JsObject, JsString,
-  NativeFunction, NativePromiseCatch, NativePromiseConstructor,
-  NativePromiseFinally, NativePromiseRejectFunction, NativePromiseRejectStatic,
+  type Job, type JsValue, type Ref, BoxSlot, JsBool, JsObject, NativeFunction,
+  NativePromiseCatch, NativePromiseConstructor, NativePromiseFinally,
+  NativePromiseRejectFunction, NativePromiseRejectStatic,
   NativePromiseResolveFunction, NativePromiseResolveStatic, NativePromiseThen,
   ObjectSlot, PromiseObject, PromiseReaction, PromiseSlot,
 }
@@ -144,8 +144,8 @@ pub fn create_resolving_functions(
           already_resolved_ref:,
         )),
         properties: dict.from_list([
-          #("name", value.builtin_property(JsString(""))),
-          #("length", value.builtin_property(value.JsNumber(value.Finite(1.0)))),
+          #("name", common.fn_name_property("")),
+          #("length", common.fn_length_property(1)),
         ]),
         elements: js_elements.new(),
         prototype: Some(function_proto),
@@ -165,8 +165,8 @@ pub fn create_resolving_functions(
           already_resolved_ref:,
         )),
         properties: dict.from_list([
-          #("name", value.builtin_property(JsString(""))),
-          #("length", value.builtin_property(value.JsNumber(value.Finite(1.0)))),
+          #("name", common.fn_name_property("")),
+          #("length", common.fn_length_property(1)),
         ]),
         elements: js_elements.new(),
         prototype: Some(function_proto),

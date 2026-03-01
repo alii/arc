@@ -5,18 +5,18 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/value.{
-  type JsElements, type JsValue, type Ref, AccessorProperty, ArrayObject,
-  DataProperty, FunctionObject, GeneratorObject, JsBool, JsNull, JsNumber,
-  JsObject, JsString, JsSymbol, JsUndefined, NativeFunction, NativeObjectAssign,
-  NativeObjectConstructor, NativeObjectCreate, NativeObjectDefineProperties,
-  NativeObjectDefineProperty, NativeObjectEntries, NativeObjectFreeze,
-  NativeObjectGetOwnPropertyDescriptor, NativeObjectGetOwnPropertyNames,
-  NativeObjectGetPrototypeOf, NativeObjectHasOwn, NativeObjectIs,
-  NativeObjectIsExtensible, NativeObjectIsFrozen, NativeObjectKeys,
-  NativeObjectPreventExtensions, NativeObjectPrototypeHasOwnProperty,
-  NativeObjectPrototypePropertyIsEnumerable, NativeObjectPrototypeToString,
-  NativeObjectPrototypeValueOf, NativeObjectSetPrototypeOf, NativeObjectValues,
-  ObjectSlot, OrdinaryObject, PromiseObject,
+  type JsElements, type JsValue, type ObjectNativeFn, type Ref, AccessorProperty,
+  ArrayObject, DataProperty, FunctionObject, GeneratorObject, JsBool, JsNull,
+  JsNumber, JsObject, JsString, JsSymbol, JsUndefined, NativeFunction,
+  ObjectAssign, ObjectConstructor, ObjectCreate, ObjectDefineProperties,
+  ObjectDefineProperty, ObjectEntries, ObjectFreeze, ObjectFromEntries,
+  ObjectGetOwnPropertyDescriptor, ObjectGetOwnPropertyDescriptors,
+  ObjectGetOwnPropertyNames, ObjectGetOwnPropertySymbols, ObjectGetPrototypeOf,
+  ObjectHasOwn, ObjectIs, ObjectIsExtensible, ObjectIsFrozen, ObjectIsSealed,
+  ObjectKeys, ObjectNative, ObjectPreventExtensions,
+  ObjectPrototypeHasOwnProperty, ObjectPrototypePropertyIsEnumerable,
+  ObjectPrototypeToString, ObjectPrototypeValueOf, ObjectSeal,
+  ObjectSetPrototypeOf, ObjectSlot, ObjectValues, OrdinaryObject, PromiseObject,
 }
 import gleam/dict
 import gleam/int
@@ -45,41 +45,99 @@ pub fn init(
 ) -> #(Heap, BuiltinType) {
   let #(h, static_methods) =
     common.alloc_methods(h, function_proto, [
-      #("getOwnPropertyDescriptor", NativeObjectGetOwnPropertyDescriptor, 2),
-      #("defineProperty", NativeObjectDefineProperty, 3),
-      #("defineProperties", NativeObjectDefineProperties, 2),
-      #("getOwnPropertyNames", NativeObjectGetOwnPropertyNames, 1),
-      #("keys", NativeObjectKeys, 1),
-      #("values", NativeObjectValues, 1),
-      #("entries", NativeObjectEntries, 1),
-      #("create", NativeObjectCreate, 2),
-      #("assign", NativeObjectAssign, 2),
-      #("is", NativeObjectIs, 2),
-      #("hasOwn", NativeObjectHasOwn, 2),
-      #("getPrototypeOf", NativeObjectGetPrototypeOf, 1),
-      #("setPrototypeOf", NativeObjectSetPrototypeOf, 2),
-      #("freeze", NativeObjectFreeze, 1),
-      #("isFrozen", NativeObjectIsFrozen, 1),
-      #("isExtensible", NativeObjectIsExtensible, 1),
-      #("preventExtensions", NativeObjectPreventExtensions, 1),
+      #(
+        "getOwnPropertyDescriptor",
+        ObjectNative(ObjectGetOwnPropertyDescriptor),
+        2,
+      ),
+      #("defineProperty", ObjectNative(ObjectDefineProperty), 3),
+      #("defineProperties", ObjectNative(ObjectDefineProperties), 2),
+      #("getOwnPropertyNames", ObjectNative(ObjectGetOwnPropertyNames), 1),
+      #("keys", ObjectNative(ObjectKeys), 1),
+      #("values", ObjectNative(ObjectValues), 1),
+      #("entries", ObjectNative(ObjectEntries), 1),
+      #("create", ObjectNative(ObjectCreate), 2),
+      #("assign", ObjectNative(ObjectAssign), 2),
+      #("is", ObjectNative(ObjectIs), 2),
+      #("hasOwn", ObjectNative(ObjectHasOwn), 2),
+      #("getPrototypeOf", ObjectNative(ObjectGetPrototypeOf), 1),
+      #("setPrototypeOf", ObjectNative(ObjectSetPrototypeOf), 2),
+      #("freeze", ObjectNative(ObjectFreeze), 1),
+      #("isFrozen", ObjectNative(ObjectIsFrozen), 1),
+      #("isExtensible", ObjectNative(ObjectIsExtensible), 1),
+      #("preventExtensions", ObjectNative(ObjectPreventExtensions), 1),
+      #("fromEntries", ObjectNative(ObjectFromEntries), 1),
+      #("seal", ObjectNative(ObjectSeal), 1),
+      #("isSealed", ObjectNative(ObjectIsSealed), 1),
+      #(
+        "getOwnPropertyDescriptors",
+        ObjectNative(ObjectGetOwnPropertyDescriptors),
+        1,
+      ),
+      #("getOwnPropertySymbols", ObjectNative(ObjectGetOwnPropertySymbols), 1),
     ])
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
-      #("hasOwnProperty", NativeObjectPrototypeHasOwnProperty, 1),
-      #("propertyIsEnumerable", NativeObjectPrototypePropertyIsEnumerable, 1),
-      #("toString", NativeObjectPrototypeToString, 0),
-      #("valueOf", NativeObjectPrototypeValueOf, 0),
+      #("hasOwnProperty", ObjectNative(ObjectPrototypeHasOwnProperty), 1),
+      #(
+        "propertyIsEnumerable",
+        ObjectNative(ObjectPrototypePropertyIsEnumerable),
+        1,
+      ),
+      #("toString", ObjectNative(ObjectPrototypeToString), 0),
+      #("valueOf", ObjectNative(ObjectPrototypeValueOf), 0),
     ])
   common.init_type_on(
     h,
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { NativeObjectConstructor },
+    fn(_) { ObjectNative(ObjectConstructor) },
     "Object",
     1,
     static_methods,
   )
+}
+
+/// Per-module dispatch for Object native functions.
+pub fn dispatch(
+  native: ObjectNativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case native {
+    value.ObjectConstructor -> call_native(args, this, state)
+    value.ObjectGetOwnPropertyDescriptor ->
+      get_own_property_descriptor(args, state)
+    value.ObjectDefineProperty -> define_property(args, state)
+    value.ObjectDefineProperties -> define_properties(args, state)
+    value.ObjectGetOwnPropertyNames -> get_own_property_names(args, state)
+    value.ObjectKeys -> keys(args, state)
+    value.ObjectValues -> values(args, state)
+    value.ObjectEntries -> entries(args, state)
+    value.ObjectCreate -> create(args, state)
+    value.ObjectAssign -> assign(args, state)
+    value.ObjectIs -> is(args, state)
+    value.ObjectHasOwn -> has_own(args, state)
+    value.ObjectGetPrototypeOf -> get_prototype_of(args, state)
+    value.ObjectSetPrototypeOf -> set_prototype_of(args, state)
+    value.ObjectFreeze -> freeze(args, state)
+    value.ObjectIsFrozen -> is_frozen(args, state)
+    value.ObjectIsExtensible -> is_extensible(args, state)
+    value.ObjectPreventExtensions -> prevent_extensions(args, state)
+    value.ObjectPrototypeHasOwnProperty -> has_own_property(this, args, state)
+    value.ObjectPrototypePropertyIsEnumerable ->
+      property_is_enumerable(this, args, state)
+    value.ObjectPrototypeToString -> object_to_string(this, args, state)
+    value.ObjectPrototypeValueOf -> object_value_of(this, args, state)
+    value.ObjectFromEntries -> from_entries(args, state)
+    value.ObjectSeal -> seal(args, state)
+    value.ObjectIsSealed -> is_sealed(args, state)
+    value.ObjectGetOwnPropertyDescriptors ->
+      get_own_property_descriptors(args, state)
+    value.ObjectGetOwnPropertySymbols -> get_own_property_symbols(args, state)
+  }
 }
 
 /// Object() / new Object() constructor.
@@ -93,8 +151,8 @@ pub fn call_native(
   args: List(JsValue),
   _this: JsValue,
   state: State,
-  object_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
+  let object_proto = state.builtins.object.prototype
   case args {
     // §20.1.1.1 step 3: If value is an Object, return it directly.
     [JsObject(_) as obj, ..] -> #(state, Ok(obj))
@@ -137,8 +195,8 @@ pub fn call_native(
 pub fn get_own_property_descriptor(
   args: List(JsValue),
   state: State,
-  object_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
+  let object_proto = state.builtins.object.prototype
   let #(target, key_val) = case args {
     [t, k, ..] -> #(t, k)
     [t] -> #(t, JsUndefined)
@@ -634,8 +692,8 @@ fn read_desc_bool(
 pub fn get_own_property_names(
   args: List(JsValue),
   state: State,
-  array_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
+  let array_proto = state.builtins.array.prototype
   own_keys_impl(args, state, array_proto, False)
 }
 
@@ -648,8 +706,8 @@ pub fn get_own_property_names(
 pub fn keys(
   args: List(JsValue),
   state: State,
-  array_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
+  let array_proto = state.builtins.array.prototype
   own_keys_impl(args, state, array_proto, True)
 }
 
@@ -1028,6 +1086,10 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.BooleanObject(_) -> "Boolean"
             value.SymbolObject(_) -> "Symbol"
             value.PidObject(_) -> "Pid"
+            value.MapObject(..) -> "Map"
+            value.SetObject(..) -> "Set"
+            value.WeakMapObject(_) -> "WeakMap"
+            value.WeakSetObject(_) -> "WeakSet"
             OrdinaryObject -> "Object"
           }
       }
@@ -1088,8 +1150,8 @@ pub fn object_value_of(
 pub fn values(
   args: List(JsValue),
   state: State,
-  array_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
+  let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject + EnumerableOwnProperties(obj, value)
   use vals, state <- own_values_impl(args, state)
   // Step 3: CreateArrayFromList(nameList)
@@ -1109,8 +1171,8 @@ pub fn values(
 pub fn entries(
   args: List(JsValue),
   state: State,
-  array_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
+  let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject + EnumerableOwnProperties(obj, key+value)
   use pairs, state <- own_entries_impl(args, state)
   // Step 3: Build the result — each entry is CreateArrayFromList(« key, value »)
@@ -1162,7 +1224,14 @@ fn own_values_impl(
     }
     // ToObject: null/undefined → TypeError
     JsNull | JsUndefined -> frame.type_error(state, cannot_convert)
-    // ToObject on primitives: wrapper has no enumerable own string keys
+    // String primitives: enumerable own properties are the index characters.
+    // §7.1.18: ToObject(String) creates a String wrapper whose own enumerable
+    // string-keyed properties are the individual characters at indices 0..len-1.
+    JsString(s) -> {
+      let chars = string.to_graphemes(s)
+      cont(list.map(chars, JsString), state)
+    }
+    // Number/boolean/symbol wrappers have no own enumerable string keys.
     _ -> cont([], state)
   }
 }
@@ -1223,7 +1292,18 @@ fn own_entries_impl(
     }
     // ToObject: null/undefined → TypeError
     JsNull | JsUndefined -> frame.type_error(state, cannot_convert)
-    // ToObject on primitives: no enumerable own string keys
+    // String primitives: enumerable own properties are the index characters.
+    // §7.1.18: ToObject(String) creates a String wrapper whose own enumerable
+    // string-keyed properties are the individual characters at indices 0..len-1.
+    JsString(s) -> {
+      let chars = string.to_graphemes(s)
+      let pairs =
+        list.index_map(chars, fn(ch, idx) {
+          #(int.to_string(idx), JsString(ch))
+        })
+      cont(pairs, state)
+    }
+    // Number/boolean/symbol wrappers have no own enumerable string keys.
     _ -> cont([], state)
   }
 }
@@ -1415,26 +1495,29 @@ fn define_props_loop(
 ///           b. Perform ? Set(to, nextKey, propValue, true).
 ///   4. Return to.
 ///
-/// TODO(Deviation): Step 1 on primitive target — spec creates a ToObject
-/// wrapper and returns it. We return the primitive directly. This is observable
-/// if the caller inspects typeof on the return value.
 pub fn assign(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case args {
-    // Step 1: Let to be ? ToObject(target). (Object case — identity.)
-    [JsObject(target_ref), ..sources] ->
-      // Steps 3-4: Process each source, then return to.
-      case assign_sources(state, target_ref, sources) {
-        Ok(state) -> #(state, Ok(JsObject(target_ref)))
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
     // Step 1: ToObject throws TypeError on null/undefined.
-    [JsNull, ..] | [JsUndefined, ..] | [] ->
+    [] | [JsNull, ..] | [JsUndefined, ..] ->
       frame.type_error(state, cannot_convert)
-    // Primitive target — return as-is (see TODO(Deviation) above).
-    [prim, ..] -> #(state, Ok(prim))
+    [target, ..sources] -> {
+      // Step 1: Let to be ? ToObject(target).
+      // For Objects: identity. For primitives: create a wrapper object.
+      case common.to_object(state.heap, state.builtins, target) {
+        None -> frame.type_error(state, cannot_convert)
+        Some(#(heap, target_ref)) -> {
+          let state = State(..state, heap:)
+          // Steps 3-4: Process each source, then return to.
+          case assign_sources(state, target_ref, sources) {
+            Ok(state) -> #(state, Ok(JsObject(target_ref)))
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        }
+      }
+    }
   }
 }
 
@@ -1461,6 +1544,12 @@ fn assign_sources(
 /// Step 3.a.ii:  Let keys be ? from.[[OwnPropertyKeys]]().
 /// Step 3.a.iii: For each element nextKey of keys, do ...
 ///
+/// Per §9.1.11.1 OrdinaryOwnPropertyKeys, [[OwnPropertyKeys]] returns:
+///   1. Integer index keys in ascending numeric order.
+///   2. Non-index string keys in creation order.
+///   3. Symbol keys in creation order.
+/// String keys are copied first, then symbol keys.
+///
 fn assign_source(
   state: State,
   target_ref: Ref,
@@ -1469,9 +1558,19 @@ fn assign_source(
   case source {
     JsObject(src_ref) as receiver -> {
       // Step 3.a.ii: Let keys be ? from.[[OwnPropertyKeys]]().
+      // String keys first:
       let ks = collect_own_keys(state.heap, src_ref, True)
-      // Step 3.a.iii: For each element nextKey of keys, do ...
-      assign_keys(state, target_ref, src_ref, receiver, ks)
+      // Step 3.a.iii: For each string key, copy it.
+      use state <- result.try(assign_keys(
+        state,
+        target_ref,
+        src_ref,
+        receiver,
+        ks,
+      ))
+      // Symbol keys next (also enumerable-only):
+      let sym_ks = collect_own_symbol_keys(state.heap, src_ref, True)
+      assign_symbol_keys(state, target_ref, src_ref, receiver, sym_ks)
     }
     // String sources: each character is an enumerable own property.
     // "length" is own but non-enumerable, so it's excluded.
@@ -1547,6 +1646,63 @@ fn assign_keys(
         JsObject(target_ref),
       ))
       assign_keys(state, target_ref, src_ref, receiver, rest)
+    }
+  }
+}
+
+/// Collect enumerable own symbol keys from an object.
+/// Implements the symbol portion of [[OwnPropertyKeys]] (§10.1.11 step 3)
+/// with optional enumerable filtering.
+fn collect_own_symbol_keys(
+  heap: Heap,
+  ref: Ref,
+  enumerable_only: Bool,
+) -> List(value.SymbolId) {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(symbol_properties:, ..)) ->
+      dict.to_list(symbol_properties)
+      |> list.filter_map(fn(pair) {
+        let #(sym, prop) = pair
+        case enumerable_only {
+          True ->
+            case prop {
+              DataProperty(enumerable: True, ..)
+              | AccessorProperty(enumerable: True, ..) -> Ok(sym)
+              _ -> Error(Nil)
+            }
+          False -> Ok(sym)
+        }
+      })
+    _ -> []
+  }
+}
+
+/// Symbol-key-copy loop for Object.assign — copies enumerable own symbol
+/// properties from source to target.
+fn assign_symbol_keys(
+  state: State,
+  target_ref: Ref,
+  src_ref: Ref,
+  receiver: JsValue,
+  keys: List(value.SymbolId),
+) -> Result(State, #(JsValue, State)) {
+  case keys {
+    [] -> Ok(state)
+    [sym, ..rest] -> {
+      use #(val, state) <- result.try(object.get_symbol_value(
+        state,
+        src_ref,
+        sym,
+        receiver,
+      ))
+      use #(state, _ok) <- result.try(object.set_symbol_value(
+        state,
+        target_ref,
+        sym,
+        val,
+        JsObject(target_ref),
+      ))
+      assign_symbol_keys(state, target_ref, src_ref, receiver, rest)
     }
   }
 }
@@ -2003,4 +2159,301 @@ pub fn is_extensible(
     _ -> False
   }
   #(state, Ok(JsBool(result)))
+}
+
+/// Object.seal ( O ) — ES2024 §20.1.2.20
+///
+///   1. If O is not an Object, return O.
+///   2. Let status be ? SetIntegrityLevel(O, sealed).
+///   3. If status is false, throw a TypeError exception.
+///   4. Return O.
+///
+/// SetIntegrityLevel ( O, sealed ) — §7.3.16:
+///   1. Let status be ? O.[[PreventExtensions]]().
+///   3. For each key in keys, set configurable=false on all own properties.
+pub fn seal(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let target = first_arg(args)
+  case target {
+    JsObject(ref) -> {
+      let heap = {
+        use slot <- heap.update(state.heap, ref)
+        case slot {
+          ObjectSlot(properties:, symbol_properties:, ..) ->
+            ObjectSlot(
+              ..slot,
+              properties: dict.map_values(properties, fn(_, p) { seal_prop(p) }),
+              symbol_properties: dict.map_values(symbol_properties, fn(_, p) {
+                seal_prop(p)
+              }),
+              extensible: False,
+            )
+          _ -> slot
+        }
+      }
+      #(State(..state, heap:), Ok(target))
+    }
+    _ -> #(state, Ok(target))
+  }
+}
+
+/// Helper for seal — make property non-configurable (but keep writable as-is).
+fn seal_prop(prop: value.Property) -> value.Property {
+  case prop {
+    DataProperty(value:, writable:, enumerable:, ..) ->
+      DataProperty(value:, writable:, enumerable:, configurable: False)
+    AccessorProperty(get:, set:, enumerable:, ..) ->
+      AccessorProperty(get:, set:, enumerable:, configurable: False)
+  }
+}
+
+/// Object.isSealed ( O ) — ES2024 §20.1.2.15
+///
+///   1. If O is not an Object, return true.
+///   2. Return ? TestIntegrityLevel(O, sealed).
+///
+/// TestIntegrityLevel ( O, sealed ) — §7.3.17:
+///   1. If extensible is true, return false.
+///   4. For each property, if configurable is true, return false.
+///   5. Return true.
+pub fn is_sealed(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let result = case first_arg(args) {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(properties:, symbol_properties:, extensible: False, ..)) ->
+          all_sealed(properties) && all_sealed(symbol_properties)
+        Some(ObjectSlot(extensible: True, ..)) -> False
+        _ -> False
+      }
+    _ -> True
+  }
+  #(state, Ok(JsBool(result)))
+}
+
+/// Check if all properties are non-configurable (sealed check).
+fn all_sealed(props: dict.Dict(k, value.Property)) -> Bool {
+  dict.values(props)
+  |> list.all(fn(p) {
+    case p {
+      DataProperty(configurable: False, ..) -> True
+      AccessorProperty(configurable: False, ..) -> True
+      _ -> False
+    }
+  })
+}
+
+/// Object.fromEntries ( iterable ) — ES2024 §20.1.2.8
+///
+///   1. Perform ? RequireObjectCoercible(iterable).
+///   2. Let obj be OrdinaryObjectCreate(%Object.prototype%).
+///   3. Let adder be CreateDataPropertyOnObject (i.e. for each entry [k, v],
+///      set obj[k] = v using CreateDataPropertyOrThrow).
+///   4. Return ? AddEntriesFromIterable(obj, iterable, adder).
+///
+/// AddEntriesFromIterable (§7.4.8):
+///   - Iterates using GetIterator + IteratorStep.
+///   - For each next item:
+///     a. If item is not an Object, throw TypeError (and close iterator).
+///     b. k = Get(item, "0"), v = Get(item, "1").
+///     c. CreateDataPropertyOrThrow(obj, ToPropertyKey(k), v).
+///
+/// Property insertion order matches the iteration order of the iterable.
+/// Symbol keys (when k is a JsSymbol) are stored in symbol_properties.
+///
+/// Simplified: handles Arrays of [key, value] pairs. General iterables
+/// (objects with Symbol.iterator) are not yet supported.
+pub fn from_entries(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let target = first_arg(args)
+  case target {
+    // Step 1: RequireObjectCoercible — null/undefined throw TypeError.
+    JsNull | JsUndefined -> frame.type_error(state, cannot_convert)
+    JsObject(ref) -> {
+      // Read the source array/iterable
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: ArrayObject(..), elements:, ..)) -> {
+          // Iterate over array elements to build object properties.
+          // Use a list accumulator to preserve insertion order.
+          let entry_values = js_elements.values(elements)
+          from_entries_loop(entry_values, state, [], dict.new())
+        }
+        _ -> frame.type_error(state, "Object.fromEntries requires an iterable")
+      }
+    }
+    _ -> frame.type_error(state, "Object.fromEntries requires an iterable")
+  }
+}
+
+/// Loop over iterable entries for Object.fromEntries.
+///
+/// `str_acc` is a list of #(String, Property) pairs in insertion order.
+/// `sym_acc` is a dict of symbol-keyed properties.
+/// We use a list for string keys to preserve insertion order (dict loses it).
+fn from_entries_loop(
+  entries: List(JsValue),
+  state: State,
+  str_acc: List(#(String, value.Property)),
+  sym_acc: dict.Dict(value.SymbolId, value.Property),
+) -> #(State, Result(JsValue, JsValue)) {
+  case entries {
+    [] -> {
+      // Build the result object.
+      // String properties are inserted in iteration order: convert list to dict.
+      // Since later entries with the same key should overwrite earlier ones,
+      // we fold left-to-right.
+      let props =
+        list.fold(str_acc, dict.new(), fn(d, pair) {
+          dict.insert(d, pair.0, pair.1)
+        })
+      let #(heap, obj_ref) =
+        heap.alloc(
+          state.heap,
+          ObjectSlot(
+            kind: OrdinaryObject,
+            properties: props,
+            symbol_properties: sym_acc,
+            elements: js_elements.new(),
+            prototype: Some(state.builtins.object.prototype),
+            extensible: True,
+          ),
+        )
+      #(State(..state, heap:), Ok(JsObject(obj_ref)))
+    }
+    [entry, ..rest] -> {
+      case entry {
+        JsObject(entry_ref) -> {
+          // Step b: k = Get(item, "0"), v = Get(item, "1")
+          // Use object.get_value to invoke getters (handles accessor properties).
+          case object.get_value(state, entry_ref, "0", entry) {
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+            Ok(#(key_val, state)) ->
+              case object.get_value(state, entry_ref, "1", entry) {
+                Error(#(thrown, state)) -> #(state, Error(thrown))
+                Ok(#(val, state)) ->
+                  // Step c: ToPropertyKey(k) — symbol keys go to symbol_properties.
+                  case key_val {
+                    JsSymbol(sym) ->
+                      from_entries_loop(
+                        rest,
+                        state,
+                        str_acc,
+                        dict.insert(sym_acc, sym, value.data_property(val)),
+                      )
+                    _ -> {
+                      // ToPropertyKey via ToString for non-symbol keys.
+                      use key_str, state <- frame.try_to_string(state, key_val)
+                      from_entries_loop(
+                        rest,
+                        state,
+                        list.append(str_acc, [
+                          #(key_str, value.data_property(val)),
+                        ]),
+                        sym_acc,
+                      )
+                    }
+                  }
+              }
+          }
+        }
+        _ -> frame.type_error(state, "Iterator value is not an entry object")
+      }
+    }
+  }
+}
+
+/// Object.getOwnPropertyDescriptors ( O ) — ES2024 §20.1.2.9
+///
+///   1. Let obj be ? ToObject(O).
+///   2. Let ownKeys be ? obj.[[OwnPropertyKeys]]().
+///   3. Let descriptors be OrdinaryObjectCreate(%Object.prototype%).
+///   4. For each element key of ownKeys, do
+///      a. Let desc be ? obj.[[GetOwnProperty]](key).
+///      b. Let descriptor be FromPropertyDescriptor(desc).
+///      c. If descriptor is not undefined, CreateDataPropertyOrThrow(descriptors, key, descriptor).
+///   5. Return descriptors.
+pub fn get_own_property_descriptors(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let object_proto = state.builtins.object.prototype
+  let target = first_arg(args)
+  case target {
+    JsNull | JsUndefined -> frame.type_error(state, cannot_convert)
+    JsObject(ref) -> {
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(properties:, ..)) -> {
+          // Build descriptor objects for each own property
+          let #(heap, desc_props) =
+            dict.fold(properties, #(state.heap, dict.new()), fn(acc, key, prop) {
+              let #(h, descs) = acc
+              let #(h, desc_ref) = make_descriptor_object(h, prop, object_proto)
+              #(
+                h,
+                dict.insert(descs, key, value.data_property(JsObject(desc_ref))),
+              )
+            })
+          let #(heap, result_ref) =
+            heap.alloc(
+              heap,
+              ObjectSlot(
+                kind: OrdinaryObject,
+                properties: desc_props,
+                symbol_properties: dict.new(),
+                elements: js_elements.new(),
+                prototype: Some(object_proto),
+                extensible: True,
+              ),
+            )
+          #(State(..state, heap:), Ok(JsObject(result_ref)))
+        }
+        _ -> #(state, Ok(JsUndefined))
+      }
+    }
+    _ -> #(state, Ok(JsUndefined))
+  }
+}
+
+/// Object.getOwnPropertySymbols ( O ) — ES2024 §20.1.2.11 / GetOwnPropertyKeys(O, symbol)
+///
+///   1. Let obj be ? ToObject(O).
+///   2. Let keys be ? obj.[[OwnPropertyKeys]]().
+///   3. Let nameList be a new empty List.
+///   4. For each element nextKey of keys, do
+///      a. If Type(nextKey) is Symbol, append nextKey to nameList.
+///   5. Return CreateArrayFromList(nameList).
+///
+/// For non-null/undefined primitives (strings, numbers, booleans, symbols),
+/// ToObject creates a wrapper that has no own symbol-keyed properties,
+/// so the result is always an empty array.
+/// For null/undefined, throws TypeError.
+pub fn get_own_property_symbols(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let array_proto = state.builtins.array.prototype
+  case first_arg(args) {
+    // Step 1: ToObject — null/undefined throw TypeError.
+    JsNull | JsUndefined -> frame.type_error(state, cannot_convert)
+    JsObject(ref) -> {
+      // Step 4: Collect own symbol keys.
+      let syms = collect_own_symbol_keys(state.heap, ref, False)
+      // Step 5: CreateArrayFromList(nameList) — each element is a JsSymbol.
+      let #(heap, arr_ref) =
+        common.alloc_array(state.heap, list.map(syms, JsSymbol), array_proto)
+      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+    }
+    // For non-object primitives (string, number, boolean, symbol):
+    // ToObject creates a wrapper with no own symbol properties → return [].
+    _ -> {
+      let #(heap, arr_ref) = common.alloc_array(state.heap, [], array_proto)
+      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+    }
+  }
 }

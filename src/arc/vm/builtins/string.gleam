@@ -2,19 +2,20 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
+import arc/vm/object
 import arc/vm/value.{
-  type JsValue, type Ref, Finite, JsNumber, JsObject, JsString, JsUndefined, NaN,
-  NativeStringConstructor, NativeStringPrototypeAt, NativeStringPrototypeCharAt,
-  NativeStringPrototypeCharCodeAt, NativeStringPrototypeConcat,
-  NativeStringPrototypeEndsWith, NativeStringPrototypeIncludes,
-  NativeStringPrototypeIndexOf, NativeStringPrototypeLastIndexOf,
-  NativeStringPrototypePadEnd, NativeStringPrototypePadStart,
-  NativeStringPrototypeRepeat, NativeStringPrototypeSlice,
-  NativeStringPrototypeSplit, NativeStringPrototypeStartsWith,
-  NativeStringPrototypeSubstring, NativeStringPrototypeToLowerCase,
-  NativeStringPrototypeToString, NativeStringPrototypeToUpperCase,
-  NativeStringPrototypeTrim, NativeStringPrototypeTrimEnd,
-  NativeStringPrototypeTrimStart, NativeStringPrototypeValueOf, ObjectSlot,
+  type JsValue, type Ref, type StringNativeFn, Finite, JsNumber, JsObject,
+  JsString, JsUndefined, NaN, ObjectSlot, StringFromCharCode,
+  StringFromCodePoint, StringNative, StringPrototypeAt, StringPrototypeCharAt,
+  StringPrototypeCharCodeAt, StringPrototypeCodePointAt, StringPrototypeConcat,
+  StringPrototypeEndsWith, StringPrototypeIncludes, StringPrototypeIndexOf,
+  StringPrototypeLastIndexOf, StringPrototypeNormalize, StringPrototypePadEnd,
+  StringPrototypePadStart, StringPrototypeRepeat, StringPrototypeSlice,
+  StringPrototypeSplit, StringPrototypeStartsWith, StringPrototypeSubstring,
+  StringPrototypeToLocaleLowerCase, StringPrototypeToLocaleUpperCase,
+  StringPrototypeToLowerCase, StringPrototypeToString,
+  StringPrototypeToUpperCase, StringPrototypeTrim, StringPrototypeTrimEnd,
+  StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw,
 }
 import gleam/int
 import gleam/list
@@ -31,39 +32,94 @@ pub fn init(
 ) -> #(Heap, BuiltinType) {
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
-      #("charAt", NativeStringPrototypeCharAt, 1),
-      #("charCodeAt", NativeStringPrototypeCharCodeAt, 1),
-      #("indexOf", NativeStringPrototypeIndexOf, 1),
-      #("lastIndexOf", NativeStringPrototypeLastIndexOf, 1),
-      #("includes", NativeStringPrototypeIncludes, 1),
-      #("startsWith", NativeStringPrototypeStartsWith, 1),
-      #("endsWith", NativeStringPrototypeEndsWith, 1),
-      #("slice", NativeStringPrototypeSlice, 2),
-      #("substring", NativeStringPrototypeSubstring, 2),
-      #("toLowerCase", NativeStringPrototypeToLowerCase, 0),
-      #("toUpperCase", NativeStringPrototypeToUpperCase, 0),
-      #("trim", NativeStringPrototypeTrim, 0),
-      #("trimStart", NativeStringPrototypeTrimStart, 0),
-      #("trimEnd", NativeStringPrototypeTrimEnd, 0),
-      #("split", NativeStringPrototypeSplit, 2),
-      #("concat", NativeStringPrototypeConcat, 1),
-      #("toString", NativeStringPrototypeToString, 0),
-      #("valueOf", NativeStringPrototypeValueOf, 0),
-      #("repeat", NativeStringPrototypeRepeat, 1),
-      #("padStart", NativeStringPrototypePadStart, 1),
-      #("padEnd", NativeStringPrototypePadEnd, 1),
-      #("at", NativeStringPrototypeAt, 1),
+      #("charAt", StringNative(StringPrototypeCharAt), 1),
+      #("charCodeAt", StringNative(StringPrototypeCharCodeAt), 1),
+      #("indexOf", StringNative(StringPrototypeIndexOf), 1),
+      #("lastIndexOf", StringNative(StringPrototypeLastIndexOf), 1),
+      #("includes", StringNative(StringPrototypeIncludes), 1),
+      #("startsWith", StringNative(StringPrototypeStartsWith), 1),
+      #("endsWith", StringNative(StringPrototypeEndsWith), 1),
+      #("slice", StringNative(StringPrototypeSlice), 2),
+      #("substring", StringNative(StringPrototypeSubstring), 2),
+      #("toLowerCase", StringNative(StringPrototypeToLowerCase), 0),
+      #("toUpperCase", StringNative(StringPrototypeToUpperCase), 0),
+      #("toLocaleLowerCase", StringNative(StringPrototypeToLocaleLowerCase), 0),
+      #("toLocaleUpperCase", StringNative(StringPrototypeToLocaleUpperCase), 0),
+      #("trim", StringNative(StringPrototypeTrim), 0),
+      #("trimStart", StringNative(StringPrototypeTrimStart), 0),
+      #("trimEnd", StringNative(StringPrototypeTrimEnd), 0),
+      #("trimLeft", StringNative(StringPrototypeTrimStart), 0),
+      #("trimRight", StringNative(StringPrototypeTrimEnd), 0),
+      #("split", StringNative(StringPrototypeSplit), 2),
+      #("concat", StringNative(StringPrototypeConcat), 1),
+      #("toString", StringNative(StringPrototypeToString), 0),
+      #("valueOf", StringNative(StringPrototypeValueOf), 0),
+      #("repeat", StringNative(StringPrototypeRepeat), 1),
+      #("padStart", StringNative(StringPrototypePadStart), 1),
+      #("padEnd", StringNative(StringPrototypePadEnd), 1),
+      #("at", StringNative(StringPrototypeAt), 1),
+      #("codePointAt", StringNative(StringPrototypeCodePointAt), 1),
+      #("normalize", StringNative(StringPrototypeNormalize), 0),
     ])
+  // Static methods on the String constructor
+  let #(h, static_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("raw", StringNative(StringRaw), 1),
+      #("fromCharCode", StringNative(StringFromCharCode), 1),
+      #("fromCodePoint", StringNative(StringFromCodePoint), 1),
+    ])
+  // Note: NativeStringConstructor stays VM-level (needs ToPrimitive/ToString)
   common.init_type(
     h,
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { NativeStringConstructor },
+    fn(_) { value.NativeStringConstructor },
     "String",
     1,
-    [],
+    static_methods,
   )
+}
+
+/// Per-module dispatch for String native functions.
+pub fn dispatch(
+  native: StringNativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case native {
+    StringPrototypeCharAt -> string_char_at(this, args, state)
+    StringPrototypeCharCodeAt -> string_char_code_at(this, args, state)
+    StringPrototypeIndexOf -> string_index_of(this, args, state)
+    StringPrototypeLastIndexOf -> string_last_index_of(this, args, state)
+    StringPrototypeIncludes -> string_includes(this, args, state)
+    StringPrototypeStartsWith -> string_starts_with(this, args, state)
+    StringPrototypeEndsWith -> string_ends_with(this, args, state)
+    StringPrototypeSlice -> string_slice(this, args, state)
+    StringPrototypeSubstring -> string_substring(this, args, state)
+    StringPrototypeToLowerCase | StringPrototypeToLocaleLowerCase ->
+      string_to_lower_case(this, args, state)
+    StringPrototypeToUpperCase | StringPrototypeToLocaleUpperCase ->
+      string_to_upper_case(this, args, state)
+    StringPrototypeTrim -> string_trim(this, args, state)
+    StringPrototypeTrimStart -> string_trim_start(this, args, state)
+    StringPrototypeTrimEnd -> string_trim_end(this, args, state)
+    StringPrototypeSplit -> string_split(this, args, state)
+    StringPrototypeConcat -> string_concat(this, args, state)
+    StringPrototypeToString -> string_to_string(this, args, state)
+    StringPrototypeValueOf -> string_value_of(this, args, state)
+    StringPrototypeRepeat -> string_repeat(this, args, state)
+    StringPrototypePadStart -> string_pad_start(this, args, state)
+    StringPrototypePadEnd -> string_pad_end(this, args, state)
+    StringPrototypeAt -> string_at(this, args, state)
+    StringPrototypeCodePointAt -> string_code_point_at(this, args, state)
+    StringPrototypeNormalize -> string_normalize(this, args, state)
+    // Static methods
+    StringRaw -> string_raw(args, state)
+    StringFromCharCode -> string_from_char_code(args, state)
+    StringFromCodePoint -> string_from_code_point(args, state)
+  }
 }
 
 /// ES2024 22.1.1.1 — String ( value )
@@ -634,8 +690,8 @@ pub fn string_split(
   this: JsValue,
   args: List(JsValue),
   state: State,
-  array_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
+  let array_proto = state.builtins.array.prototype
   // Steps 1, 3: RequireObjectCoercible + ToString
   case coerce_to_string(this, state) {
     Ok(#(s, state)) -> {
@@ -926,6 +982,375 @@ pub fn string_at(
       }
     }
     Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 22.1.3.3 — String.prototype.codePointAt ( pos )
+///   1. Let O be ? RequireObjectCoercible(this value).
+///   2. Let S be ? ToString(O).
+///   3. Let position be ? ToIntegerOrInfinity(pos).
+///   4. Let size be the length of S.
+///   5. If position < 0 or position >= size, return undefined.
+///   6. Let cp be CodePointAt(S, position).
+///   7. Return the Number value of cp.[[CodePoint]].
+///
+/// Note: Gleam strings are UTF-8 internally. We convert to a list of Unicode
+/// codepoints with string.to_utf_codepoints, then index into that list.
+/// This correctly handles supplementary characters (U+10000+) as single
+/// codepoints, matching the JS spec's CodePointAt semantics.
+pub fn string_code_point_at(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Steps 1-2: RequireObjectCoercible + ToString
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      // Step 3: ToIntegerOrInfinity(pos)
+      let pos = helpers.get_int_arg(args, 0, 0)
+      // Step 4: size = length of S (in codepoints)
+      let codepoints = string.to_utf_codepoints(s)
+      let size = list.length(codepoints)
+      // Step 5: out of bounds => undefined
+      case pos >= 0 && pos < size {
+        False -> #(state, Ok(JsUndefined))
+        True -> {
+          // Step 6-7: get the codepoint at position and return it
+          let cp_value =
+            list.drop(codepoints, pos)
+            |> list.first
+          case cp_value {
+            Ok(cp) -> #(
+              state,
+              Ok(
+                JsNumber(Finite(int.to_float(string.utf_codepoint_to_int(cp)))),
+              ),
+            )
+            Error(Nil) -> #(state, Ok(JsUndefined))
+          }
+        }
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 22.1.3.13 — String.prototype.normalize ( [ form ] )
+///   1. Let O be ? RequireObjectCoercible(this value).
+///   2. Let S be ? ToString(O).
+///   3. If form is undefined, let f be "NFC".
+///   4. Else, let f be ? ToString(form).
+///   5. If f is not "NFC", "NFD", "NFKC", or "NFKD", throw a RangeError.
+///   6. Let ns be the result of the Unicode Normalization Algorithm applied
+///      to S using normalization form f.
+///   7. Return ns.
+///
+/// Note: This is a stub that returns the string unchanged. A full
+/// implementation requires Unicode normalization tables (NFC/NFD/NFKC/NFKD).
+/// Most JS strings encountered in practice are already in NFC form, so this
+/// is sufficient for basic tests. The form argument validation is done to
+/// match spec behaviour (throw on invalid form), but valid forms return the
+/// input unchanged.
+fn string_normalize(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Steps 1-2: RequireObjectCoercible + ToString
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      // Steps 3-4: resolve normalization form
+      let form_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      case form_val {
+        JsUndefined -> #(state, Ok(JsString(s)))
+        _ -> {
+          // Step 4: ToString(form)
+          use form, state <- frame.try_to_string(state, form_val)
+          // Step 5: validate form
+          case form {
+            "NFC" | "NFD" | "NFKC" | "NFKD" ->
+              // Step 6-7: return string unchanged (stub — no normalization tables)
+              #(state, Ok(JsString(s)))
+            _ ->
+              frame.range_error(
+                state,
+                "The normalization form should be one of NFC, NFD, NFKC, NFKD",
+              )
+          }
+        }
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+// ============================================================================
+// Static methods (String.raw, String.fromCharCode, String.fromCodePoint)
+// ============================================================================
+
+/// ES2024 22.1.2.4 — String.raw ( template, ...substitutions )
+///   1. Let numberOfSubstitutions be the number of elements in substitutions.
+///   2. Let cooked be ? ToObject(template).
+///   3. Let literals be ? ToObject(? Get(cooked, "raw")).
+///   4. Let literalCount be ? LengthOfArrayLike(literals).
+///   5. If literalCount <= 0, return the empty String.
+///   6. Let R be the empty String.
+///   7. Let nextIndex be 0.
+///   8. Repeat,
+///     a. Let nextLiteralVal be ? Get(literals, ! ToString(nextIndex)).
+///     b. Let nextLiteral be ? ToString(nextLiteralVal).
+///     c. Set R to the string-concatenation of R and nextLiteral.
+///     d. If nextIndex + 1 = literalCount, return R.
+///     e. If nextIndex < numberOfSubstitutions, then
+///        i. Let nextSubVal be substitutions[nextIndex].
+///        ii. Let nextSub be ? ToString(nextSubVal).
+///        iii. Set R to the string-concatenation of R and nextSub.
+///     f. Set nextIndex to nextIndex + 1.
+fn string_raw(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Step 2: ToObject(template)
+  let template = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  let substitutions = case args {
+    [_, ..rest] -> rest
+    [] -> []
+  }
+  // Step 3: Get(cooked, "raw")
+  case object.get_value_of(state, template, "raw") {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(raw_val, state)) -> {
+      // Step 4: LengthOfArrayLike(literals) — read "length" from raw
+      case object.get_value_of(state, raw_val, "length") {
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+        Ok(#(len_val, state)) -> {
+          let literal_count = helpers.to_number_int(len_val) |> option.unwrap(0)
+          // Step 5: If literalCount <= 0, return ""
+          case literal_count <= 0 {
+            True -> #(state, Ok(JsString("")))
+            False ->
+              string_raw_loop(
+                raw_val,
+                substitutions,
+                literal_count,
+                0,
+                "",
+                state,
+              )
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Step 8 of String.raw: iterate through raw strings and substitutions.
+fn string_raw_loop(
+  raw_val: JsValue,
+  substitutions: List(JsValue),
+  literal_count: Int,
+  index: Int,
+  acc: String,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Step 8a: Get(literals, ToString(nextIndex))
+  case object.get_value_of(state, raw_val, int.to_string(index)) {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(lit_val, state)) -> {
+      // Step 8b: ToString(nextLiteralVal)
+      case frame.to_string(state, lit_val) {
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+        Ok(#(lit, state)) -> {
+          let acc = acc <> lit
+          // Step 8d: If nextIndex + 1 = literalCount, return R
+          case index + 1 == literal_count {
+            True -> #(state, Ok(JsString(acc)))
+            False ->
+              // Step 8e: If nextIndex < numberOfSubstitutions, add substitution
+              string_raw_add_sub(
+                raw_val,
+                substitutions,
+                literal_count,
+                index,
+                acc,
+                state,
+              )
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Step 8e-8f of String.raw: add substitution and continue loop.
+fn string_raw_add_sub(
+  raw_val: JsValue,
+  substitutions: List(JsValue),
+  literal_count: Int,
+  index: Int,
+  acc: String,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case substitutions {
+    [sub_val, ..rest_subs] -> {
+      // Step 8e.ii: ToString(nextSubVal)
+      case frame.to_string(state, sub_val) {
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+        Ok(#(sub, state)) ->
+          // Step 8f: nextIndex = nextIndex + 1
+          string_raw_loop(
+            raw_val,
+            rest_subs,
+            literal_count,
+            index + 1,
+            acc <> sub,
+            state,
+          )
+      }
+    }
+    [] ->
+      // No more substitutions, continue with just literals
+      string_raw_loop(raw_val, [], literal_count, index + 1, acc, state)
+  }
+}
+
+/// ES2024 22.1.2.1 — String.fromCharCode ( ...codeUnits )
+///   1. Let result be the empty String.
+///   2. For each element next of codeUnits, do
+///     a. Let nextCU be the code unit whose numeric value is ? ToUint16(next).
+///     b. Set result to the string-concatenation of result and nextCU.
+///   3. Return result.
+///
+/// Note: fromCharCode takes UTF-16 code units. For BMP chars (0-0xFFFF), this
+/// maps directly to codepoints. For surrogate pairs, we combine them.
+fn string_from_char_code(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let codes =
+    list.map(args, fn(arg) {
+      let n = helpers.to_number_int(arg) |> option.unwrap(0)
+      // ToUint16: modulo 2^16
+      let code = modulo_uint16(n)
+      code
+    })
+  let result_str = char_codes_to_string(codes, "")
+  #(state, Ok(JsString(result_str)))
+}
+
+/// Convert a list of UTF-16 code units to a string.
+/// Handles surrogate pairs: if a high surrogate (0xD800-0xDBFF) is followed by
+/// a low surrogate (0xDC00-0xDFFF), combine them into a single codepoint.
+fn char_codes_to_string(codes: List(Int), acc: String) -> String {
+  case codes {
+    [] -> acc
+    [high, low, ..rest]
+      if high >= 0xD800 && high <= 0xDBFF && low >= 0xDC00 && low <= 0xDFFF
+    -> {
+      // Combine surrogate pair into a full codepoint
+      let codepoint = { high - 0xD800 } * 0x400 + { low - 0xDC00 } + 0x10000
+      let ch = case string.utf_codepoint(codepoint) {
+        Ok(cp) -> string.from_utf_codepoints([cp])
+        Error(_) -> "\u{FFFD}"
+      }
+      char_codes_to_string(rest, acc <> ch)
+    }
+    [code, ..rest] -> {
+      let ch = case string.utf_codepoint(code) {
+        Ok(cp) -> string.from_utf_codepoints([cp])
+        Error(_) -> "\u{FFFD}"
+      }
+      char_codes_to_string(rest, acc <> ch)
+    }
+  }
+}
+
+/// ToUint16: modulo 65536 (2^16), always returns 0..65535.
+fn modulo_uint16(n: Int) -> Int {
+  let m = n % 65_536
+  case m < 0 {
+    True -> m + 65_536
+    False -> m
+  }
+}
+
+/// ES2024 22.1.2.2 — String.fromCodePoint ( ...codePoints )
+///   1. Let result be the empty String.
+///   2. For each element next of codePoints, do
+///     a. Let nextCP be ? ToNumber(next).
+///     b. If nextCP is not an integral Number, throw a RangeError.
+///     c. If nextCP < 0 or nextCP > 0x10FFFF, throw a RangeError.
+///     d. Set result to the string-concatenation of result and
+///        UTF16EncodeCodePoint(nextCP).
+///   3. Return result.
+fn string_from_code_point(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  from_code_point_loop(args, "", state)
+}
+
+/// Iterate over args for String.fromCodePoint.
+fn from_code_point_loop(
+  args: List(JsValue),
+  acc: String,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case args {
+    [] -> #(state, Ok(JsString(acc)))
+    [arg, ..rest] -> {
+      // Step 2a: ToNumber(next) — inline simplified ToNumber
+      case to_number_for_code_point(arg) {
+        // Step 2b: must be integral
+        Ok(Finite(f)) -> {
+          let i = value.float_to_int(f)
+          case int.to_float(i) == f {
+            // Step 2c: must be in [0, 0x10FFFF]
+            True if i >= 0 && i <= 0x10FFFF -> {
+              // Step 2d: UTF16EncodeCodePoint
+              let ch = case string.utf_codepoint(i) {
+                Ok(cp) -> string.from_utf_codepoints([cp])
+                Error(_) -> "\u{FFFD}"
+              }
+              from_code_point_loop(rest, acc <> ch, state)
+            }
+            _ ->
+              frame.range_error(
+                state,
+                "Invalid code point " <> value.js_format_number(f),
+              )
+          }
+        }
+        Ok(NaN) -> frame.range_error(state, "Invalid code point NaN")
+        Ok(_) -> frame.range_error(state, "Invalid code point Infinity")
+        // Non-numeric (e.g. NaN from undefined/non-numeric string)
+        Error(Nil) -> frame.range_error(state, "Invalid code point NaN")
+      }
+    }
+  }
+}
+
+/// Simplified ToNumber for fromCodePoint — returns the JsNum or Error(Nil)
+/// for values that would produce NaN from non-obvious sources.
+fn to_number_for_code_point(val: JsValue) -> Result(value.JsNum, Nil) {
+  case val {
+    JsNumber(n) -> Ok(n)
+    JsUndefined -> Error(Nil)
+    value.JsNull -> Ok(Finite(0.0))
+    value.JsBool(True) -> Ok(Finite(1.0))
+    value.JsBool(False) -> Ok(Finite(0.0))
+    JsString(s) ->
+      case int.parse(s) {
+        Ok(n) -> Ok(Finite(int.to_float(n)))
+        Error(Nil) -> Error(Nil)
+      }
+    _ -> Error(Nil)
   }
 }
 

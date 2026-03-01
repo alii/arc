@@ -377,21 +377,13 @@ fn do_run_module(
   use #(h, env) <- result.try(eval_harness(metadata, h, b, globals))
   let globals = env.globals
 
-  let store = module.new_store(h, b)
-  case module.load_module(store, path, source) {
+  case module.compile_bundle(path, source, test262_resolve_and_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
-    Ok(#(store, _record)) ->
-      case module.resolve_dependencies(store, path, test262_resolve_and_load) {
+    Ok(bundle) ->
+      case module.evaluate_bundle(bundle, h, b, globals) {
+        Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
+        Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
         Error(err) -> Error("module: " <> string.inspect(err))
-        Ok(store) -> {
-          let #(_store, result) =
-            module.evaluate_module(store, path, h, b, globals)
-          case result {
-            Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
-            Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
-            Error(err) -> Error("module: " <> string.inspect(err))
-          }
-        }
       }
   }
 }

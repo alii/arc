@@ -1362,6 +1362,12 @@ fn inspect_object(
           <> inspect_inner(value.JsSymbol(sym), heap, depth, visited)
           <> "]"
         value.PidObject(_) -> "Pid {}"
+        value.MapObject(data:, ..) ->
+          "Map(" <> int.to_string(dict.size(data)) <> ")"
+        value.SetObject(data:, ..) ->
+          "Set(" <> int.to_string(dict.size(data)) <> ")"
+        value.WeakMapObject(_) -> "WeakMap {}"
+        value.WeakSetObject(_) -> "WeakSet {}"
         OrdinaryObject -> inspect_plain_object(heap, properties, depth, visited)
       }
     _ -> "[Object]"

@@ -2,7 +2,7 @@ import arc/vm/builtins/common.{type BuiltinType, alloc_proto}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
   type Ref, NativeFunctionApply, NativeFunctionBind, NativeFunctionCall,
-  NativeFunctionConstructor,
+  NativeFunctionConstructor, NativeFunctionToString,
 }
 import gleam/dict
 import gleam/option.{Some}
@@ -19,6 +19,7 @@ pub fn init(h: Heap, object_proto: Ref) -> #(Heap, BuiltinType) {
       #("call", NativeFunctionCall, 1),
       #("apply", NativeFunctionApply, 2),
       #("bind", NativeFunctionBind, 1),
+      #("toString", NativeFunctionToString, 0),
     ])
 
   // Constructor's [[Prototype]] is also func_proto (self-referencing bootstrap)

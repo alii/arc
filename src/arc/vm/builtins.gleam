@@ -5,12 +5,17 @@ import arc/vm/builtins/common.{type Builtins, Builtins}
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/function as builtins_function
 import arc/vm/builtins/generator as builtins_generator
+import arc/vm/builtins/json as builtins_json
+import arc/vm/builtins/map as builtins_map
 import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
+import arc/vm/builtins/weak_map as builtins_weak_map
+import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{JsObject, JsUndefined, ObjectSlot, OrdinaryObject}
@@ -97,6 +102,75 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Arc global — engine-specific utilities (Arc.peek, etc.)
   let #(h, arc) = builtins_arc.init(h, object_proto, function.prototype)
 
+  // JSON global object
+  let #(h, json) = builtins_json.init(h, object_proto, function.prototype)
+
+  // Map constructor + prototype
+  let #(h, map) = builtins_map.init(h, object_proto, function.prototype)
+
+  // Set constructor + prototype
+  let #(h, set) = builtins_set.init(h, object_proto, function.prototype)
+
+  // WeakMap constructor + prototype
+  let #(h, weak_map) =
+    builtins_weak_map.init(h, object_proto, function.prototype)
+
+  // WeakSet constructor + prototype
+  let #(h, weak_set) =
+    builtins_weak_set.init(h, object_proto, function.prototype)
+
+  // Global utility functions: eval, URI functions
+  let #(h, eval) =
+    common.alloc_native_fn(h, function.prototype, value.NativeEval, "eval", 1)
+  let #(h, decode_uri) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.NativeDecodeURI,
+      "decodeURI",
+      1,
+    )
+  let #(h, encode_uri) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.NativeEncodeURI,
+      "encodeURI",
+      1,
+    )
+  let #(h, decode_uri_component) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.NativeDecodeURIComponent,
+      "decodeURIComponent",
+      1,
+    )
+  let #(h, encode_uri_component) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.NativeEncodeURIComponent,
+      "encodeURIComponent",
+      1,
+    )
+  let #(h, escape) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.NativeEscape,
+      "escape",
+      1,
+    )
+  let #(h, unescape) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.NativeUnescape,
+      "unescape",
+      1,
+    )
+
   #(
     h,
     Builtins(
@@ -108,6 +182,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       reference_error: errors.reference_error,
       range_error: errors.range_error,
       syntax_error: errors.syntax_error,
+      eval_error: errors.eval_error,
+      uri_error: errors.uri_error,
+      aggregate_error: errors.aggregate_error,
       math:,
       string:,
       number:,
@@ -120,6 +197,18 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       generator:,
       symbol:,
       arc:,
+      json:,
+      map:,
+      set:,
+      weak_map:,
+      weak_set:,
+      eval:,
+      decode_uri:,
+      encode_uri:,
+      decode_uri_component:,
+      encode_uri_component:,
+      escape:,
+      unescape:,
     ),
   )
 }
@@ -142,6 +231,9 @@ pub fn globals(
     #("ReferenceError", JsObject(b.reference_error.constructor)),
     #("RangeError", JsObject(b.range_error.constructor)),
     #("SyntaxError", JsObject(b.syntax_error.constructor)),
+    #("EvalError", JsObject(b.eval_error.constructor)),
+    #("URIError", JsObject(b.uri_error.constructor)),
+    #("AggregateError", JsObject(b.aggregate_error.constructor)),
     #("Math", JsObject(b.math)),
     #("String", JsObject(b.string.constructor)),
     #("Number", JsObject(b.number.constructor)),
@@ -153,6 +245,18 @@ pub fn globals(
     #("Promise", JsObject(b.promise.constructor)),
     #("Symbol", JsObject(b.symbol)),
     #("Arc", JsObject(b.arc)),
+    #("JSON", JsObject(b.json)),
+    #("Map", JsObject(b.map.constructor)),
+    #("Set", JsObject(b.set.constructor)),
+    #("WeakMap", JsObject(b.weak_map.constructor)),
+    #("WeakSet", JsObject(b.weak_set.constructor)),
+    #("eval", JsObject(b.eval)),
+    #("decodeURI", JsObject(b.decode_uri)),
+    #("encodeURI", JsObject(b.encode_uri)),
+    #("decodeURIComponent", JsObject(b.decode_uri_component)),
+    #("encodeURIComponent", JsObject(b.encode_uri_component)),
+    #("escape", JsObject(b.escape)),
+    #("unescape", JsObject(b.unescape)),
   ]
 
   // Create globalThis object with all global properties

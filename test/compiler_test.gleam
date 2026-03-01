@@ -6299,32 +6299,24 @@ pub fn strict_reference_error_type_test() -> Nil {
 // Module compilation
 // ============================================================================
 
-/// Parse + compile + run JS module source via the module system.
+/// Parse + compile + run JS module source via the bundle system.
 fn run_module(source: String) -> Result(vm.Completion, String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, globals) = builtins.globals(b, h)
-  let store = module.new_store(h, b)
   let specifier = "<test>"
 
-  case module.load_module(store, specifier, source) {
+  case
+    module.compile_bundle(specifier, source, fn(_dep, _parent) {
+      Error("no module loader in tests")
+    })
+  {
     Error(err) -> Error("module error: " <> string.inspect(err))
-    Ok(#(store, _record)) ->
-      case
-        module.resolve_dependencies(store, specifier, fn(_dep, _parent) {
-          Error("no module loader in tests")
-        })
-      {
+    Ok(bundle) ->
+      case module.evaluate_bundle(bundle, h, b, globals) {
+        Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
+        Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
         Error(err) -> Error("module error: " <> string.inspect(err))
-        Ok(store) -> {
-          let #(_store, result) =
-            module.evaluate_module(store, specifier, h, b, globals)
-          case result {
-            Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
-            Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
-            Error(err) -> Error("module error: " <> string.inspect(err))
-          }
-        }
       }
   }
 }
@@ -6423,19 +6415,14 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   // Step 2: Compile and run a module that uses the harness function
   let module_source = "greetFromHarness()"
-  let store = module.new_store(h, b)
   let specifier = "<test-module>"
-  let assert Ok(#(store, _record)) =
-    module.load_module(store, specifier, module_source)
-  let assert Ok(store) =
-    module.resolve_dependencies(store, specifier, fn(_dep, _parent) {
+  let assert Ok(bundle) =
+    module.compile_bundle(specifier, module_source, fn(_dep, _parent) {
       Error("no module loader")
     })
 
   // Evaluate the module, passing in REPL globals
-  let #(_store, result) =
-    module.evaluate_module(store, specifier, h, b, env.globals)
-  case result {
+  case module.evaluate_bundle(bundle, h, b, env.globals) {
     Ok(#(val, _heap)) -> {
       let assert True = val == JsString("hello from harness")
       Nil

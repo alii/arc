@@ -3,12 +3,14 @@ import arc/vm/builtins/math as builtins_math
 import arc/vm/frame.{type State}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
-  type JsNum, type JsValue, type Ref, Finite, Infinity, JsNumber, JsObject,
-  JsString, JsUndefined, NaN, NativeIsFinite, NativeIsNaN,
-  NativeNumberConstructor, NativeNumberIsFinite, NativeNumberIsInteger,
-  NativeNumberIsNaN, NativeNumberParseFloat, NativeNumberParseInt,
-  NativeNumberPrototypeToString, NativeNumberPrototypeValueOf, NativeParseFloat,
-  NativeParseInt, NegInfinity, NumberObject, ObjectSlot,
+  type JsNum, type JsValue, type NumberNativeFn, type Ref, Finite,
+  GlobalIsFinite, GlobalIsNaN, GlobalParseFloat, GlobalParseInt, Infinity,
+  JsNumber, JsObject, JsString, JsUndefined, NaN, NegInfinity, NumberConstructor,
+  NumberIsFinite, NumberIsInteger, NumberIsNaN, NumberIsSafeInteger,
+  NumberNative, NumberObject, NumberParseFloat, NumberParseInt,
+  NumberPrototypeToExponential, NumberPrototypeToFixed,
+  NumberPrototypeToPrecision, NumberPrototypeToString, NumberPrototypeValueOf,
+  ObjectSlot,
 }
 import gleam/float
 import gleam/int
@@ -27,11 +29,12 @@ pub fn init(
   // Static methods on Number constructor
   let #(h, static_methods) =
     common.alloc_methods(h, function_proto, [
-      #("isNaN", NativeNumberIsNaN, 1),
-      #("isFinite", NativeNumberIsFinite, 1),
-      #("isInteger", NativeNumberIsInteger, 1),
-      #("parseInt", NativeNumberParseInt, 2),
-      #("parseFloat", NativeNumberParseFloat, 1),
+      #("isNaN", NumberNative(NumberIsNaN), 1),
+      #("isFinite", NumberNative(NumberIsFinite), 1),
+      #("isInteger", NumberNative(NumberIsInteger), 1),
+      #("isSafeInteger", NumberNative(NumberIsSafeInteger), 1),
+      #("parseInt", NumberNative(NumberParseInt), 2),
+      #("parseFloat", NumberNative(NumberParseFloat), 1),
     ])
 
   // Static constants
@@ -49,19 +52,46 @@ pub fn init(
 
   // Global utility functions (separate refs — these are standalone globals)
   let #(h, parse_int_ref) =
-    common.alloc_native_fn(h, function_proto, NativeParseInt, "parseInt", 2)
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalParseInt),
+      "parseInt",
+      2,
+    )
   let #(h, parse_float_ref) =
-    common.alloc_native_fn(h, function_proto, NativeParseFloat, "parseFloat", 1)
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalParseFloat),
+      "parseFloat",
+      1,
+    )
   let #(h, is_nan_ref) =
-    common.alloc_native_fn(h, function_proto, NativeIsNaN, "isNaN", 1)
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalIsNaN),
+      "isNaN",
+      1,
+    )
   let #(h, is_finite_ref) =
-    common.alloc_native_fn(h, function_proto, NativeIsFinite, "isFinite", 1)
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalIsFinite),
+      "isFinite",
+      1,
+    )
 
   // Number.prototype methods
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
-      #("valueOf", NativeNumberPrototypeValueOf, 0),
-      #("toString", NativeNumberPrototypeToString, 1),
+      #("valueOf", NumberNative(NumberPrototypeValueOf), 0),
+      #("toString", NumberNative(NumberPrototypeToString), 1),
+      #("toFixed", NumberNative(NumberPrototypeToFixed), 1),
+      #("toPrecision", NumberNative(NumberPrototypeToPrecision), 1),
+      #("toExponential", NumberNative(NumberPrototypeToExponential), 1),
     ])
 
   let ctor_props = list.append(constants, static_methods)
@@ -71,13 +101,65 @@ pub fn init(
       object_proto,
       function_proto,
       proto_methods,
-      fn(_) { NativeNumberConstructor },
+      fn(_) { NumberNative(NumberConstructor) },
       "Number",
       1,
       ctor_props,
     )
 
+  // ES2024 §21.1.3: The Number prototype object has a [[NumberData]] internal
+  // slot with value +0. Update from OrdinaryObject to NumberObject.
+  let h =
+    heap.update(h, bt.prototype, fn(slot) {
+      case slot {
+        ObjectSlot(
+          properties:,
+          elements:,
+          prototype:,
+          symbol_properties:,
+          extensible:,
+          ..,
+        ) ->
+          ObjectSlot(
+            kind: NumberObject(value: Finite(0.0)),
+            properties:,
+            elements:,
+            prototype:,
+            symbol_properties:,
+            extensible:,
+          )
+        other -> other
+      }
+    })
+
   #(h, bt, parse_int_ref, parse_float_ref, is_nan_ref, is_finite_ref)
+}
+
+/// Per-module dispatch for Number native functions.
+pub fn dispatch(
+  native: NumberNativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case native {
+    NumberConstructor -> call_as_function(args, state)
+    NumberIsNaN -> number_is_nan(args, state)
+    NumberIsFinite -> number_is_finite(args, state)
+    NumberIsInteger -> number_is_integer(args, state)
+    NumberParseInt -> parse_int(args, state)
+    NumberParseFloat -> parse_float(args, state)
+    NumberPrototypeValueOf -> number_value_of(this, args, state)
+    NumberPrototypeToString -> number_to_string(this, args, state)
+    GlobalParseInt -> parse_int(args, state)
+    GlobalParseFloat -> parse_float(args, state)
+    GlobalIsNaN -> js_is_nan(args, state)
+    GlobalIsFinite -> js_is_finite(args, state)
+    NumberIsSafeInteger -> number_is_safe_integer(args, state)
+    NumberPrototypeToFixed -> number_to_fixed(this, args, state)
+    NumberPrototypeToPrecision -> number_to_precision(this, args, state)
+    NumberPrototypeToExponential -> number_to_exponential(this, args, state)
+  }
 }
 
 /// Number(value) — ES2024 §21.1.1.1
@@ -453,6 +535,153 @@ fn this_number_value(state: State, this: JsValue) -> Option(JsNum) {
   }
 }
 
+/// Number.isSafeInteger(number) — ES2024 §21.1.2.5
+pub fn number_is_safe_integer(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let result = case args {
+    [JsNumber(Finite(n)), ..] -> {
+      let truncated = int.to_float(float.truncate(n))
+      value.JsBool(
+        truncated == n
+        && n >=. -9_007_199_254_740_991.0
+        && n <=. 9_007_199_254_740_991.0,
+      )
+    }
+    _ -> value.JsBool(False)
+  }
+  #(state, Ok(result))
+}
+
+/// Number.prototype.toFixed(fractionDigits) — ES2024 §21.1.3.3
+pub fn number_to_fixed(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_number_value(state, this) {
+    None ->
+      frame.type_error(
+        state,
+        "Number.prototype.toFixed requires that 'this' be a Number",
+      )
+    Some(n) -> {
+      let f = case args {
+        [v, ..] ->
+          case builtins_math.to_number(v) {
+            Finite(x) -> float.truncate(x)
+            _ -> 0
+          }
+        [] -> 0
+      }
+      case f < 0 || f > 100 {
+        True ->
+          frame.range_error(
+            state,
+            "toFixed() digits argument must be between 0 and 100",
+          )
+        False -> {
+          let s = case n {
+            NaN -> "NaN"
+            Infinity -> "Infinity"
+            NegInfinity -> "-Infinity"
+            Finite(x) -> format_to_fixed(x, f)
+          }
+          #(state, Ok(JsString(s)))
+        }
+      }
+    }
+  }
+}
+
+/// Number.prototype.toExponential(fractionDigits) — ES2024 §21.1.3.2
+pub fn number_to_exponential(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_number_value(state, this) {
+    None ->
+      frame.type_error(
+        state,
+        "Number.prototype.toExponential requires that 'this' be a Number",
+      )
+    Some(n) -> {
+      let f = case args {
+        [JsUndefined, ..] | [] -> -1
+        [v, ..] ->
+          case builtins_math.to_number(v) {
+            Finite(x) -> float.truncate(x)
+            _ -> 0
+          }
+      }
+      case f > 100 || { f < -1 } {
+        True ->
+          frame.range_error(
+            state,
+            "toExponential() argument must be between 0 and 100",
+          )
+        False -> {
+          let s = case n {
+            NaN -> "NaN"
+            Infinity -> "Infinity"
+            NegInfinity -> "-Infinity"
+            Finite(x) -> format_to_exponential(x, f)
+          }
+          #(state, Ok(JsString(s)))
+        }
+      }
+    }
+  }
+}
+
+/// Number.prototype.toPrecision(precision) — ES2024 §21.1.3.5
+pub fn number_to_precision(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_number_value(state, this) {
+    None ->
+      frame.type_error(
+        state,
+        "Number.prototype.toPrecision requires that 'this' be a Number",
+      )
+    Some(n) -> {
+      case args {
+        [JsUndefined, ..] | [] -> {
+          // If precision is undefined, use toString
+          let s = value.format_number_radix(n, 10)
+          #(state, Ok(JsString(s)))
+        }
+        [v, ..] -> {
+          let p = case builtins_math.to_number(v) {
+            Finite(x) -> float.truncate(x)
+            _ -> 0
+          }
+          case p < 1 || p > 100 {
+            True ->
+              frame.range_error(
+                state,
+                "toPrecision() argument must be between 1 and 100",
+              )
+            False -> {
+              let s = case n {
+                NaN -> "NaN"
+                Infinity -> "Infinity"
+                NegInfinity -> "-Infinity"
+                Finite(x) -> format_to_precision(x, p)
+              }
+              #(state, Ok(JsString(s)))
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 // ============================================================================
 // Internal helpers
 // ============================================================================
@@ -565,3 +794,12 @@ fn digit_value(ch: String) -> Option(Int) {
 
 @external(erlang, "gleam_stdlib", "parse_float")
 fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
+
+@external(erlang, "arc_number_ffi", "format_to_fixed")
+fn format_to_fixed(x: Float, digits: Int) -> String
+
+@external(erlang, "arc_number_ffi", "format_to_exponential")
+fn format_to_exponential(x: Float, fraction_digits: Int) -> String
+
+@external(erlang, "arc_number_ffi", "format_to_precision")
+fn format_to_precision(x: Float, precision: Int) -> String

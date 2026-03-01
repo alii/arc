@@ -32,6 +32,9 @@ pub type Builtins {
     reference_error: BuiltinType,
     range_error: BuiltinType,
     syntax_error: BuiltinType,
+    eval_error: BuiltinType,
+    uri_error: BuiltinType,
+    aggregate_error: BuiltinType,
     math: Ref,
     string: BuiltinType,
     number: BuiltinType,
@@ -44,6 +47,18 @@ pub type Builtins {
     generator: GeneratorBuiltin,
     symbol: Ref,
     arc: Ref,
+    json: Ref,
+    map: BuiltinType,
+    set: BuiltinType,
+    weak_map: BuiltinType,
+    weak_set: BuiltinType,
+    eval: Ref,
+    decode_uri: Ref,
+    encode_uri: Ref,
+    decode_uri_component: Ref,
+    encode_uri_component: Ref,
+    escape: Ref,
+    unescape: Ref,
   )
 }
 
@@ -110,13 +125,8 @@ pub fn alloc_native_fn(
       ObjectSlot(
         kind: NativeFunction(native),
         properties: dict.from_list([
-          #("name", value.builtin_property(JsString(name))),
-          #(
-            "length",
-            value.builtin_property(
-              value.JsNumber(value.Finite(int.to_float(arity))),
-            ),
-          ),
+          #("name", fn_name_property(name)),
+          #("length", fn_length_property(arity)),
         ]),
         symbol_properties: dict.new(),
         elements: js_elements.new(),
@@ -126,6 +136,17 @@ pub fn alloc_native_fn(
     )
   let h = heap.root(h, ref)
   #(h, ref)
+}
+
+/// ES2024 §20.2.2: Function name property — non-writable, non-enumerable, configurable.
+pub fn fn_name_property(name: String) -> Property {
+  value.data(JsString(name)) |> value.configurable()
+}
+
+/// ES2024 §20.2.2: Function length property — non-writable, non-enumerable, configurable.
+pub fn fn_length_property(arity: Int) -> Property {
+  value.data(value.JsNumber(value.Finite(int.to_float(arity))))
+  |> value.configurable()
 }
 
 /// Allocate N native function objects from specs, returning builtin_property
@@ -155,11 +176,8 @@ fn ctor_properties(
 ) -> List(#(String, Property)) {
   [
     #("prototype", value.builtin_property(JsObject(proto))),
-    #("name", value.builtin_property(JsString(name))),
-    #(
-      "length",
-      value.builtin_property(value.JsNumber(value.Finite(int.to_float(arity)))),
-    ),
+    #("name", fn_name_property(name)),
+    #("length", fn_length_property(arity)),
     ..extras
   ]
 }

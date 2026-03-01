@@ -190,19 +190,313 @@ pub type JsElements {
   SparseElements(data: Dict(Int, JsValue))
 }
 
+/// Per-module sub-enums for native function dispatch.
+/// These live in value.gleam (not in the builtin files) because Gleam
+/// forbids circular imports and builtins import from value.gleam.
+/// Math methods — pure functions, no `this`, no proto refs needed.
+pub type MathNativeFn {
+  MathPow
+  MathAbs
+  MathFloor
+  MathCeil
+  MathRound
+  MathTrunc
+  MathSqrt
+  MathMax
+  MathMin
+  MathLog
+  MathSin
+  MathCos
+  MathTan
+  MathAsin
+  MathAcos
+  MathAtan
+  MathAtan2
+  MathExp
+  MathLog2
+  MathLog10
+  MathRandom
+  MathSign
+  MathCbrt
+  MathHypot
+  MathFround
+  MathClz32
+  MathImul
+  MathExpm1
+  MathLog1p
+  MathSinh
+  MathCosh
+  MathTanh
+  MathAsinh
+  MathAcosh
+  MathAtanh
+}
+
+/// Boolean methods.
+pub type BooleanNativeFn {
+  BooleanConstructor
+  BooleanPrototypeValueOf
+  BooleanPrototypeToString
+}
+
+/// Number methods — includes static methods and global utility functions.
+pub type NumberNativeFn {
+  NumberConstructor
+  NumberIsNaN
+  NumberIsFinite
+  NumberIsInteger
+  NumberParseInt
+  NumberParseFloat
+  NumberPrototypeValueOf
+  NumberPrototypeToString
+  /// Global parseInt (coerces via ToNumber)
+  GlobalParseInt
+  /// Global parseFloat (coerces via ToNumber)
+  GlobalParseFloat
+  /// Global isNaN (coerces via ToNumber)
+  GlobalIsNaN
+  /// Global isFinite (coerces via ToNumber)
+  GlobalIsFinite
+  NumberIsSafeInteger
+  NumberPrototypeToFixed
+  NumberPrototypeToPrecision
+  NumberPrototypeToExponential
+}
+
+/// String.prototype methods.
+pub type StringNativeFn {
+  StringPrototypeCharAt
+  StringPrototypeCharCodeAt
+  StringPrototypeIndexOf
+  StringPrototypeLastIndexOf
+  StringPrototypeIncludes
+  StringPrototypeStartsWith
+  StringPrototypeEndsWith
+  StringPrototypeSlice
+  StringPrototypeSubstring
+  StringPrototypeToLowerCase
+  StringPrototypeToUpperCase
+  StringPrototypeToLocaleLowerCase
+  StringPrototypeToLocaleUpperCase
+  StringPrototypeTrim
+  StringPrototypeTrimStart
+  StringPrototypeTrimEnd
+  StringPrototypeSplit
+  StringPrototypeConcat
+  StringPrototypeToString
+  StringPrototypeValueOf
+  StringPrototypeRepeat
+  StringPrototypePadStart
+  StringPrototypePadEnd
+  StringPrototypeAt
+  StringPrototypeCodePointAt
+  StringPrototypeNormalize
+  // Static methods
+  StringRaw
+  StringFromCharCode
+  StringFromCodePoint
+}
+
+/// Error constructor — carries proto Ref.
+pub type ErrorNativeFn {
+  ErrorConstructor(proto: Ref)
+  ErrorPrototypeToString
+}
+
+/// Array methods — includes constructor, static, and prototype methods.
+pub type ArrayNativeFn {
+  ArrayConstructor
+  ArrayIsArray
+  ArrayPrototypeJoin
+  ArrayPrototypePush
+  ArrayPrototypePop
+  ArrayPrototypeShift
+  ArrayPrototypeUnshift
+  ArrayPrototypeSlice
+  ArrayPrototypeConcat
+  ArrayPrototypeReverse
+  ArrayPrototypeFill
+  ArrayPrototypeAt
+  ArrayPrototypeIndexOf
+  ArrayPrototypeLastIndexOf
+  ArrayPrototypeIncludes
+  ArrayPrototypeForEach
+  ArrayPrototypeMap
+  ArrayPrototypeFilter
+  ArrayPrototypeReduce
+  ArrayPrototypeReduceRight
+  ArrayPrototypeEvery
+  ArrayPrototypeSome
+  ArrayPrototypeFind
+  ArrayPrototypeFindIndex
+  ArrayPrototypeSort
+  ArrayPrototypeSplice
+  ArrayPrototypeFindLast
+  ArrayPrototypeFindLastIndex
+  ArrayPrototypeFlat
+  ArrayPrototypeFlatMap
+  ArrayPrototypeCopyWithin
+  ArrayPrototypeToSpliced
+  ArrayPrototypeWith
+  ArrayPrototypeToSorted
+  ArrayPrototypeToReversed
+  ArrayFrom
+  ArrayOf
+}
+
+/// Object methods — static + prototype methods.
+pub type ObjectNativeFn {
+  ObjectConstructor
+  ObjectGetOwnPropertyDescriptor
+  ObjectDefineProperty
+  ObjectDefineProperties
+  ObjectGetOwnPropertyNames
+  ObjectKeys
+  ObjectValues
+  ObjectEntries
+  ObjectCreate
+  ObjectAssign
+  ObjectIs
+  ObjectHasOwn
+  ObjectGetPrototypeOf
+  ObjectSetPrototypeOf
+  ObjectFreeze
+  ObjectIsFrozen
+  ObjectIsExtensible
+  ObjectPreventExtensions
+  ObjectPrototypeHasOwnProperty
+  ObjectPrototypePropertyIsEnumerable
+  ObjectPrototypeToString
+  ObjectPrototypeValueOf
+  ObjectFromEntries
+  ObjectSeal
+  ObjectIsSealed
+  ObjectGetOwnPropertyDescriptors
+  ObjectGetOwnPropertySymbols
+}
+
+/// Arc methods — non-standard engine-specific utilities.
+pub type ArcNativeFn {
+  ArcPeek
+  ArcSend
+  ArcReceive
+  ArcSelf
+  ArcLog
+  ArcSleep
+  ArcPidToString
+}
+
+/// JSON methods — JSON.parse and JSON.stringify.
+pub type JsonNativeFn {
+  JsonParse
+  JsonStringify
+}
+
+/// Map key type — normalizes JS values for use as Dict keys.
+/// Per ES2024 §24.1.3.1, Map uses SameValueZero for key comparison:
+///   - NaN equals NaN (unlike ===)
+///   - +0 equals -0 (like ===)
+///   - Objects compared by identity (heap Ref)
+pub type MapKey {
+  StringKey(String)
+  /// -0 normalized to +0 per SameValueZero.
+  NumberKey(Float)
+  /// NaN is a valid key that equals itself (SameValueZero: NaN === NaN).
+  NanKey
+  InfinityKey
+  NegInfinityKey
+  BoolKey(Bool)
+  NullKey
+  UndefinedKey
+  ObjectKey(Ref)
+  SymbolKey(SymbolId)
+  BigIntKey(BigInt)
+}
+
+/// Convert a JsValue to a MapKey for use in Dict-based Map storage.
+/// Implements SameValueZero normalization: -0 → +0, NaN → NanKey.
+pub fn js_to_map_key(val: JsValue) -> MapKey {
+  case val {
+    JsString(s) -> StringKey(s)
+    JsNumber(NaN) -> NanKey
+    // Normalize -0 to +0: IEEE 754 -0.0 + 0.0 = +0.0
+    JsNumber(Finite(f)) -> NumberKey(f +. 0.0)
+    JsNumber(Infinity) -> InfinityKey
+    JsNumber(NegInfinity) -> NegInfinityKey
+    JsBool(b) -> BoolKey(b)
+    JsNull -> NullKey
+    JsUndefined -> UndefinedKey
+    JsObject(ref) -> ObjectKey(ref)
+    JsSymbol(id) -> SymbolKey(id)
+    JsBigInt(bi) -> BigIntKey(bi)
+    JsUninitialized -> UndefinedKey
+  }
+}
+
+/// Map methods — constructor, prototype methods, size getter.
+pub type MapNativeFn {
+  MapConstructor(proto: Ref)
+  MapPrototypeGet
+  MapPrototypeSet
+  MapPrototypeHas
+  MapPrototypeDelete
+  MapPrototypeClear
+  MapPrototypeForEach
+  MapPrototypeGetSize
+}
+
+/// Set methods — constructor, prototype methods, size getter.
+pub type SetNativeFn {
+  SetConstructor(proto: Ref)
+  SetPrototypeAdd
+  SetPrototypeHas
+  SetPrototypeDelete
+  SetPrototypeClear
+  SetPrototypeForEach
+  SetPrototypeGetSize
+}
+
+/// WeakMap methods — constructor, get, set, has, delete.
+pub type WeakMapNativeFn {
+  WeakMapConstructor(proto: Ref)
+  WeakMapPrototypeGet
+  WeakMapPrototypeSet
+  WeakMapPrototypeHas
+  WeakMapPrototypeDelete
+}
+
+/// WeakSet methods — constructor, add, has, delete.
+pub type WeakSetNativeFn {
+  WeakSetConstructor(proto: Ref)
+  WeakSetPrototypeAdd
+  WeakSetPrototypeHas
+  WeakSetPrototypeDelete
+}
+
 /// Callback for ToString that supports ToPrimitive (VM re-entry for objects).
 /// Builtins receive this from the dispatch layer to break the vm↔builtins cycle.
 /// Identifies a built-in native function. Used by `NativeFunction` to dispatch
 /// to the correct Gleam implementation when called from JS.
 pub type NativeFn {
-  NativeObjectConstructor
+  // Per-module dispatch wrappers
+  MathNative(MathNativeFn)
+  BooleanNative(BooleanNativeFn)
+  NumberNative(NumberNativeFn)
+  StringNative(StringNativeFn)
+  ErrorNative(ErrorNativeFn)
+  ArrayNative(ArrayNativeFn)
+  ObjectNative(ObjectNativeFn)
+  ArcNative(ArcNativeFn)
+  JsonNative(JsonNativeFn)
+  MapNative(MapNativeFn)
+  SetNative(SetNativeFn)
+  WeakMapNative(WeakMapNativeFn)
+  WeakSetNative(WeakSetNativeFn)
   NativeFunctionConstructor
-  NativeArrayConstructor
-  NativeArrayIsArray
-  NativeErrorConstructor(proto: Ref)
   NativeFunctionCall
   NativeFunctionApply
   NativeFunctionBind
+  NativeFunctionToString
   /// A bound function created by Function.prototype.bind.
   /// When called, prepends bound_args to the call args and uses bound_this.
   NativeBoundFunction(
@@ -210,107 +504,8 @@ pub type NativeFn {
     bound_this: JsValue,
     bound_args: List(JsValue),
   )
-  // Object static methods
-  NativeObjectGetOwnPropertyDescriptor
-  NativeObjectDefineProperty
-  NativeObjectDefineProperties
-  NativeObjectGetOwnPropertyNames
-  NativeObjectKeys
-  NativeObjectValues
-  NativeObjectEntries
-  NativeObjectCreate
-  NativeObjectAssign
-  NativeObjectIs
-  NativeObjectHasOwn
-  NativeObjectGetPrototypeOf
-  NativeObjectSetPrototypeOf
-  NativeObjectFreeze
-  NativeObjectIsFrozen
-  NativeObjectIsExtensible
-  NativeObjectPreventExtensions
-  // Object.prototype instance methods
-  NativeObjectPrototypeHasOwnProperty
-  NativeObjectPrototypePropertyIsEnumerable
-  // Array.prototype instance methods
-  NativeArrayPrototypeJoin
-  NativeArrayPrototypePush
-  NativeArrayPrototypePop
-  NativeArrayPrototypeShift
-  NativeArrayPrototypeUnshift
-  NativeArrayPrototypeSlice
-  NativeArrayPrototypeConcat
-  NativeArrayPrototypeReverse
-  NativeArrayPrototypeFill
-  NativeArrayPrototypeAt
-  NativeArrayPrototypeIndexOf
-  NativeArrayPrototypeLastIndexOf
-  NativeArrayPrototypeIncludes
-  NativeArrayPrototypeForEach
-  NativeArrayPrototypeMap
-  NativeArrayPrototypeFilter
-  NativeArrayPrototypeReduce
-  NativeArrayPrototypeReduceRight
-  NativeArrayPrototypeEvery
-  NativeArrayPrototypeSome
-  NativeArrayPrototypeFind
-  NativeArrayPrototypeFindIndex
-  // Math methods
-  NativeMathPow
-  NativeMathAbs
-  NativeMathFloor
-  NativeMathCeil
-  NativeMathRound
-  NativeMathTrunc
-  NativeMathSqrt
-  NativeMathMax
-  NativeMathMin
-  NativeMathLog
-  NativeMathSin
-  NativeMathCos
-  // String.prototype methods
-  NativeStringPrototypeCharAt
-  NativeStringPrototypeCharCodeAt
-  NativeStringPrototypeIndexOf
-  NativeStringPrototypeLastIndexOf
-  NativeStringPrototypeIncludes
-  NativeStringPrototypeStartsWith
-  NativeStringPrototypeEndsWith
-  NativeStringPrototypeSlice
-  NativeStringPrototypeSubstring
-  NativeStringPrototypeToLowerCase
-  NativeStringPrototypeToUpperCase
-  NativeStringPrototypeTrim
-  NativeStringPrototypeTrimStart
-  NativeStringPrototypeTrimEnd
-  NativeStringPrototypeSplit
-  NativeStringPrototypeConcat
-  NativeStringPrototypeToString
-  NativeStringPrototypeValueOf
-  NativeStringPrototypeRepeat
-  NativeStringPrototypePadStart
-  NativeStringPrototypePadEnd
-  NativeStringPrototypeAt
-  // String/Number/Boolean constructors (type coercion functions)
+  // String constructor (type coercion function — stays VM-level, needs ToPrimitive)
   NativeStringConstructor
-  NativeNumberConstructor
-  NativeBooleanConstructor
-  // Global utility functions (these coerce via ToNumber first)
-  NativeParseInt
-  NativeParseFloat
-  NativeIsNaN
-  NativeIsFinite
-  // Number static methods (strict — NO coercion)
-  NativeNumberIsNaN
-  NativeNumberIsFinite
-  NativeNumberIsInteger
-  NativeNumberParseInt
-  NativeNumberParseFloat
-  // Number.prototype methods — unwrap [[NumberData]] (thisNumberValue)
-  NativeNumberPrototypeValueOf
-  NativeNumberPrototypeToString
-  // Boolean.prototype methods — unwrap [[BooleanData]] (thisBooleanValue)
-  NativeBooleanPrototypeValueOf
-  NativeBooleanPrototypeToString
   // Promise
   NativePromiseConstructor
   NativePromiseThen
@@ -352,28 +547,19 @@ pub type NativeFn {
   NativeAsyncResume(async_data_ref: Ref, is_reject: Bool)
   /// Symbol() constructor — callable but NOT new-able.
   NativeSymbolConstructor
-  /// Object.prototype.toString() — ES2024 §19.1.3.6.
-  NativeObjectPrototypeToString
-  /// Object.prototype.valueOf() — ES2024 §19.1.3.7.
-  NativeObjectPrototypeValueOf
   /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
   NativeIteratorSymbolIterator
-  /// Arc.peek(promise) — synchronously inspect promise state.
-  NativeArcPeek
-  /// Arc.spawn(fn) — spawn a new BEAM process running the given JS function.
+  /// Arc.spawn(fn) — needs VM internals (execute_inner, drain_jobs).
   NativeArcSpawn
-  /// Arc.send(pid, message) — send a message to a BEAM process.
-  NativeArcSend
-  /// Arc.receive(timeout?) — receive a message from the current process mailbox.
-  NativeArcReceive
-  /// Arc.self() — return the current BEAM process's PID.
-  NativeArcSelf
-  /// Arc.log(...args) — print values to stdout (like console.log).
-  NativeArcLog
-  /// Arc.sleep(ms) — suspend the current BEAM process for ms milliseconds.
-  NativeArcSleep
-  /// Pid.prototype.toString — returns "Pid<0.83.0>" style string.
-  NativePidToString
+  // Global functions
+  NativeEval
+  NativeDecodeURI
+  NativeEncodeURI
+  NativeDecodeURIComponent
+  NativeEncodeURIComponent
+  /// AnnexB legacy escape/unescape functions (B.2.1.1 / B.2.1.2)
+  NativeEscape
+  NativeUnescape
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -420,6 +606,26 @@ pub type ExoticKind {
   /// Erlang PID wrapper for Arc.spawn/self. Contains an opaque BEAM process
   /// identifier that can be used with Arc.send.
   PidObject(pid: ErlangPid)
+  /// Map object — ES2024 §24.1 Map Objects.
+  /// Stores key-value pairs using SameValueZero equality.
+  /// The `data` dict maps normalized MapKey → JsValue.
+  /// `keys` preserves insertion order for iteration/forEach.
+  /// `original_keys` maps MapKey back to the original JsValue (for forEach/entries).
+  MapObject(
+    data: Dict(MapKey, JsValue),
+    keys: List(MapKey),
+    original_keys: Dict(MapKey, JsValue),
+  )
+  /// Set object — ES2024 §24.2 Set Objects.
+  /// Stores unique values using SameValueZero equality.
+  SetObject(data: Dict(MapKey, JsValue), keys: List(MapKey))
+  /// WeakMap object — ES2024 §24.3 WeakMap Objects.
+  /// Uses object refs as keys. No iteration, no size.
+  /// Not truly weak (GC doesn't collect entries) but API-compatible.
+  WeakMapObject(data: Dict(Ref, JsValue))
+  /// WeakSet object — ES2024 §24.4 WeakSet Objects.
+  /// Uses object refs as values. No iteration, no size.
+  WeakSetObject(data: Dict(Ref, Bool))
 }
 
 /// Property descriptor — writable/enumerable/configurable flags per property.
@@ -788,7 +994,11 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
       }
       let kind_refs = case kind {
         FunctionObject(env: env_ref, func_template: _) -> [env_ref]
-        NativeFunction(NativeErrorConstructor(proto: ref)) -> [ref]
+        NativeFunction(ErrorNative(ErrorConstructor(proto: ref))) -> [ref]
+        NativeFunction(MapNative(MapConstructor(proto: ref))) -> [ref]
+        NativeFunction(SetNative(SetConstructor(proto: ref))) -> [ref]
+        NativeFunction(WeakMapNative(WeakMapConstructor(proto: ref))) -> [ref]
+        NativeFunction(WeakSetNative(WeakSetConstructor(proto: ref))) -> [ref]
         NativeFunction(NativeBoundFunction(target:, bound_this:, bound_args:)) -> [
           target,
           ..list.flatten([
@@ -819,6 +1029,28 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         ]
         PromiseObject(promise_data:) -> [promise_data]
         GeneratorObject(generator_data:) -> [generator_data]
+        MapObject(data:, original_keys:, ..) -> {
+          // Trace refs in map values
+          let value_refs = dict.values(data) |> list.flat_map(refs_in_value)
+          // Trace refs in original keys (object keys are JsObject(ref))
+          let key_refs =
+            dict.values(original_keys) |> list.flat_map(refs_in_value)
+          list.append(value_refs, key_refs)
+        }
+        SetObject(data:, ..) -> {
+          // Trace refs in set values (stored as dict values)
+          dict.values(data) |> list.flat_map(refs_in_value)
+        }
+        WeakMapObject(data:) -> {
+          // Trace refs in weak map keys and values
+          let key_refs = dict.keys(data)
+          let value_refs = dict.values(data) |> list.flat_map(refs_in_value)
+          list.append(key_refs, value_refs)
+        }
+        WeakSetObject(data:) -> {
+          // Trace refs in weak set keys
+          dict.keys(data)
+        }
         OrdinaryObject
         | ArrayObject(_)
         | ArgumentsObject(_)

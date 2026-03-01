@@ -2984,6 +2984,7 @@ fn compile_derived_class(
         ast.ClassMethod(
           key: ast.Identifier(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3007,6 +3008,7 @@ fn compile_derived_class(
         ast.ClassMethod(
           key: ast.StringExpression(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3027,7 +3029,71 @@ fn compile_derived_class(
           let e = emit_ir(e, IrDefineMethod(method_name))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed/getter/setter class method"))
+        // Getter: get name() { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodGet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodGet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let getter_child =
+            compile_function_body(
+              e,
+              Some("get " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, getter_idx) = add_child_function(e, getter_child)
+          let e = emit_ir(e, IrMakeClosure(getter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Getter))
+          Ok(emit_ir(e, IrPop))
+        }
+        // Setter: set name(v) { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodSet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodSet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let setter_child =
+            compile_function_body(
+              e,
+              Some("set " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, setter_idx) = add_child_function(e, setter_child)
+          let e = emit_ir(e, IrMakeClosure(setter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed class method"))
       }
     }),
   )
@@ -3039,6 +3105,7 @@ fn compile_derived_class(
         ast.ClassMethod(
           key: ast.Identifier(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3061,6 +3128,7 @@ fn compile_derived_class(
         ast.ClassMethod(
           key: ast.StringExpression(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3080,7 +3148,69 @@ fn compile_derived_class(
           let e = emit_ir(e, IrDefineMethod(method_name))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed/getter/setter static method"))
+        // Static getter: static get name() { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodGet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodGet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let getter_child =
+            compile_function_body(
+              e,
+              Some("get " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, getter_idx) = add_child_function(e, getter_child)
+          let e = emit_ir(e, IrMakeClosure(getter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Getter))
+          Ok(emit_ir(e, IrPop))
+        }
+        // Static setter: static set name(v) { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodSet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodSet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let setter_child =
+            compile_function_body(
+              e,
+              Some("set " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, setter_idx) = add_child_function(e, setter_child)
+          let e = emit_ir(e, IrMakeClosure(setter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed static method"))
       }
     }),
   )
@@ -3168,6 +3298,7 @@ fn compile_base_class(
         ast.ClassMethod(
           key: ast.Identifier(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3196,6 +3327,7 @@ fn compile_base_class(
         ast.ClassMethod(
           key: ast.StringExpression(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3216,7 +3348,71 @@ fn compile_base_class(
           let e = emit_ir(e, IrDefineMethod(method_name))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed/getter/setter class method"))
+        // Getter: get name() { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodGet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodGet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let getter_child =
+            compile_function_body(
+              e,
+              Some("get " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, getter_idx) = add_child_function(e, getter_child)
+          let e = emit_ir(e, IrMakeClosure(getter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Getter))
+          Ok(emit_ir(e, IrPop))
+        }
+        // Setter: set name(v) { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodSet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodSet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let setter_child =
+            compile_function_body(
+              e,
+              Some("set " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, setter_idx) = add_child_function(e, setter_child)
+          let e = emit_ir(e, IrMakeClosure(setter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed class method"))
       }
     }),
   )
@@ -3228,6 +3424,7 @@ fn compile_base_class(
         ast.ClassMethod(
           key: ast.Identifier(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3254,6 +3451,7 @@ fn compile_base_class(
         ast.ClassMethod(
           key: ast.StringExpression(method_name),
           value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodMethod,
           computed: False,
           ..,
         ) -> {
@@ -3273,7 +3471,69 @@ fn compile_base_class(
           let e = emit_ir(e, IrDefineMethod(method_name))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed/getter/setter static method"))
+        // Static getter: static get name() { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodGet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodGet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let getter_child =
+            compile_function_body(
+              e,
+              Some("get " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, getter_idx) = add_child_function(e, getter_child)
+          let e = emit_ir(e, IrMakeClosure(getter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Getter))
+          Ok(emit_ir(e, IrPop))
+        }
+        // Static setter: static set name(v) { ... }
+        ast.ClassMethod(
+          key: ast.Identifier(name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind: ast.MethodSet,
+          computed: False,
+          ..,
+        )
+        | ast.ClassMethod(
+            key: ast.StringExpression(name),
+            value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+            kind: ast.MethodSet,
+            computed: False,
+            ..,
+          ) -> {
+          let e = emit_ir(e, IrDup)
+          let setter_child =
+            compile_function_body(
+              e,
+              Some("set " <> name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, setter_idx) = add_child_function(e, setter_child)
+          let e = emit_ir(e, IrMakeClosure(setter_idx))
+          let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed static method"))
       }
     }),
   )
