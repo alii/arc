@@ -10,6 +10,7 @@ import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
@@ -26,6 +27,7 @@ import arc/vm/opcode.{
   ArrayPush, ArrayPushHole, ArraySpread, Await, BinOp, BitAnd, BitNot, BitOr,
   BitXor, BoxLocal, Call, CallApply, CallConstructor, CallConstructorApply,
   CallMethod, CallMethodApply, CallSuper, CreateArguments, DeclareGlobalLex,
+  NewRegExp,
   DeclareGlobalVar, DefineAccessor, DefineAccessorComputed, DefineField,
   DefineFieldComputed, DefineMethod, DeleteElem, DeleteField, Div, Dup,
   EnterFinallyThrow, Eq, Exp, ForInNext, ForInStart, GetBoxed, GetElem, GetElem2,
@@ -2523,6 +2525,35 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       )
     }
 
+    // -- RegExp literal --
+    NewRegExp -> {
+      case state.stack {
+        [JsString(flags), JsString(pattern), ..rest] -> {
+          let #(heap, ref) =
+            builtins_regexp.alloc_regexp(
+              state.heap,
+              state.builtins.regexp.prototype,
+              pattern,
+              flags,
+            )
+          Ok(
+            State(
+              ..state,
+              stack: [JsObject(ref), ..rest],
+              heap:,
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("NewRegExp")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
     // -- Spread element support (array literals + calls) --
     // These are emitted only when a SpreadElement appears; the no-spread
     // paths still use the static-arity ArrayFrom/Call/CallMethod/CallConstructor.
@@ -4152,6 +4183,7 @@ fn dispatch_native(
     value.SetNative(n) -> builtins_set.dispatch(n, args, this, state)
     value.WeakMapNative(n) -> builtins_weak_map.dispatch(n, args, this, state)
     value.WeakSetNative(n) -> builtins_weak_set.dispatch(n, args, this, state)
+    value.RegExpNative(n) -> builtins_regexp.dispatch(n, args, this, state)
     // Standalone VM-level natives
     value.VmNative(value.FunctionConstructor) ->
       frame.type_error(state, "Function constructor is not supported")

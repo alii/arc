@@ -1368,6 +1368,13 @@ fn inspect_object(
           "Set(" <> int.to_string(dict.size(data)) <> ")"
         value.WeakMapObject(_) -> "WeakMap {}"
         value.WeakSetObject(_) -> "WeakSet {}"
+        value.RegExpObject(pattern:, flags:) -> {
+          let source = case pattern {
+            "" -> "(?:)"
+            p -> p
+          }
+          "/" <> source <> "/" <> flags
+        }
         OrdinaryObject -> inspect_plain_object(heap, properties, depth, visited)
       }
     _ -> "[Object]"

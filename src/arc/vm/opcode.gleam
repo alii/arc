@@ -127,6 +127,10 @@ pub type Op {
   /// Reads state.call_args, allocates ArgumentsObject, pushes ref onto stack.
   CreateArguments
 
+  // -- RegExp --
+  /// Pop flags string, pop pattern string -> push new RegExp object.
+  NewRegExp
+
   // -- Global Environment Record --
   /// §9.1.1.4.17: Create writable/enumerable/configurable property on globalThis (if not already there).
   DeclareGlobalVar(name: String)
@@ -268,6 +272,7 @@ pub type IrOp {
   IrYield
   IrAwait
   IrCreateArguments
+  IrNewRegExp
 
   // -- Global Environment Record --
   IrDeclareGlobalVar(name: String)

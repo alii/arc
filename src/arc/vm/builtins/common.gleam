@@ -53,6 +53,7 @@ pub type Builtins {
     set: BuiltinType,
     weak_map: BuiltinType,
     weak_set: BuiltinType,
+    regexp: BuiltinType,
     eval: Ref,
     decode_uri: Ref,
     encode_uri: Ref,

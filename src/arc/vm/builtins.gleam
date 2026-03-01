@@ -11,6 +11,7 @@ import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
@@ -59,6 +60,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // Boolean constructor + prototype
   let #(h, boolean) = builtins_boolean.init(h, object_proto, function.prototype)
+
+  // RegExp constructor + prototype
+  let #(h, regexp) = builtins_regexp.init(h, object_proto, function.prototype)
 
   // Promise constructor + prototype
   let #(h, promise) = builtins_promise.init(h, object_proto, function.prototype)
@@ -195,6 +199,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       string:,
       number:,
       boolean:,
+      regexp:,
       parse_int:,
       parse_float:,
       is_nan:,
@@ -260,6 +265,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("String", JsObject(b.string.constructor)),
     Builtin("Number", JsObject(b.number.constructor)),
     Builtin("Boolean", JsObject(b.boolean.constructor)),
+    Builtin("RegExp", JsObject(b.regexp.constructor)),
     Builtin("parseInt", JsObject(b.parse_int)),
     Builtin("parseFloat", JsObject(b.parse_float)),
     Builtin("isNaN", JsObject(b.is_nan)),

@@ -497,6 +497,23 @@ pub type WeakSetNativeFn {
   WeakSetPrototypeDelete
 }
 
+/// RegExp methods — constructor, prototype methods, accessor getters.
+pub type RegExpNativeFn {
+  RegExpConstructor
+  RegExpPrototypeTest
+  RegExpPrototypeExec
+  RegExpPrototypeToString
+  RegExpGetSource
+  RegExpGetFlags
+  RegExpGetGlobal
+  RegExpGetIgnoreCase
+  RegExpGetMultiline
+  RegExpGetDotAll
+  RegExpGetSticky
+  RegExpGetUnicode
+  RegExpGetHasIndices
+}
+
 /// What's stored in NativeFunction — either a dispatch-level or call-level native.
 /// Dispatch-level natives are handled by dispatch_native (simple return value).
 /// Call-level natives are handled by call_native (need stack manipulation, VM re-entry).
@@ -522,6 +539,7 @@ pub type NativeFn {
   SetNative(SetNativeFn)
   WeakMapNative(WeakMapNativeFn)
   WeakSetNative(WeakSetNativeFn)
+  RegExpNative(RegExpNativeFn)
   /// VM-level natives handled in dispatch_native — don't need stack manipulation.
   VmNative(VmNativeFn)
 }
@@ -660,6 +678,10 @@ pub type ExoticKind {
   /// WeakSet object — ES2024 §24.4 WeakSet Objects.
   /// Uses object refs as values. No iteration, no size.
   WeakSetObject(data: Dict(Ref, Bool))
+  /// RegExp object — ES2024 §22.2 RegExp Objects.
+  /// Stores the source pattern and flags strings. Actual matching
+  /// is delegated to Erlang's `re` module (PCRE) via FFI.
+  RegExpObject(pattern: String, flags: String)
 }
 
 /// Property descriptor — writable/enumerable/configurable flags per property.
@@ -1099,7 +1121,8 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         | NumberObject(_)
         | BooleanObject(_)
         | SymbolObject(_)
-        | PidObject(_) -> []
+        | PidObject(_)
+        | RegExpObject(..) -> []
       }
       list.flatten([prop_refs, sym_prop_refs, elem_refs, proto_refs, kind_refs])
     }

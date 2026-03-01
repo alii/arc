@@ -130,6 +130,13 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
               "Set(" <> int.to_string(dict.size(data)) <> ")"
             value.WeakMapObject(_) -> "WeakMap {}"
             value.WeakSetObject(_) -> "WeakSet {}"
+            value.RegExpObject(pattern:, flags:) -> {
+              let source = case pattern {
+                "" -> "(?:)"
+                p -> p
+              }
+              "/" <> source <> "/" <> flags
+            }
           }
         _ -> "[Object]"
       }

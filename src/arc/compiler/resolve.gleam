@@ -9,7 +9,7 @@ import arc/vm/opcode.{
   type IrOp, type Op, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush,
   IrArrayPushHole, IrArraySpread, IrAwait, IrBinOp, IrBoxLocal, IrCall,
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
-  IrCallMethodApply, IrCallSuper, IrCloseVar, IrCreateArguments,
+  IrCallMethodApply, IrCallSuper, IrCloseVar, IrCreateArguments, IrNewRegExp,
   IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow,
@@ -254,6 +254,10 @@ fn resolve_ops(
     // Arguments object
     [IrCreateArguments, ..rest] ->
       resolve_ops(rest, labels, [opcode.CreateArguments, ..acc])
+
+    // RegExp
+    [IrNewRegExp, ..rest] ->
+      resolve_ops(rest, labels, [opcode.NewRegExp, ..acc])
 
     // Global Environment Record
     [IrDeclareGlobalVar(name), ..rest] ->

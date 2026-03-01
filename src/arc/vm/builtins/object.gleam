@@ -1120,7 +1120,7 @@ pub fn property_is_enumerable(
 ///  16. If tag is not a String, set tag to builtinTag.
 ///  17. Return the string-concatenation of "[object ", tag, and "]".
 ///
-/// TODO(Deviation): Steps 8, 12, 13 (Error, Date, RegExp) are not yet
+/// TODO(Deviation): Steps 8, 12 (Error, Date) are not yet
 /// implemented since those object kinds don't exist yet.
 pub fn object_to_string(
   this: JsValue,
@@ -1173,9 +1173,9 @@ pub fn object_to_string(
 ///   SymbolObject     -> "Symbol"      (same -- no spec builtinTag step)
 ///   OrdinaryObject   -> "Object"      (step 14: else)
 ///
-/// TODO(Deviation): The spec defines builtinTag steps for Error (step 8), Date
-/// (step 12), and RegExp (step 13) which are not yet implemented since those
-/// object kinds don't exist in this runtime.
+/// TODO(Deviation): The spec defines builtinTag steps for Error (step 8) and
+/// Date (step 12) which are not yet implemented since those object kinds
+/// don't exist in this runtime.
 fn object_tag(heap: Heap, ref: Ref) -> String {
   case heap.read(heap, ref) {
     Some(ObjectSlot(kind:, ..)) -> {
@@ -1202,6 +1202,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.SetObject(..) -> "Set"
             value.WeakMapObject(_) -> "WeakMap"
             value.WeakSetObject(_) -> "WeakSet"
+            value.RegExpObject(..) -> "RegExp"
             OrdinaryObject -> "Object"
           }
       }

@@ -9,6 +9,7 @@ import arc/vm/opcode.{
   IrArraySpread, IrAwait, IrBinOp, IrCallApply, IrCallConstructor,
   IrCallConstructorApply, IrCallMethod, IrCallMethodApply, IrCallSuper,
   IrCreateArguments, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
+  IrNewRegExp,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow,
   IrForInNext, IrForInStart, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
@@ -2120,6 +2121,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Parenthesized expression — transparent for evaluation, just unwrap
     ast.ParenthesizedExpression(inner) -> emit_expr(e, inner)
+
+    // RegExp literal — push pattern and flags, then NewRegExp opcode
+    ast.RegExpLiteral(pattern, flags) -> {
+      let e = push_const(e, JsString(pattern))
+      let e = push_const(e, JsString(flags))
+      Ok(emit_ir(e, IrNewRegExp))
+    }
 
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
