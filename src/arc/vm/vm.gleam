@@ -1,4 +1,7 @@
+import arc/compiler
+import arc/parser
 import arc/vm/array
+import arc/vm/builtins
 import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
@@ -162,6 +165,7 @@ fn new_state(
     job_queue: [],
     symbol_descriptions:,
     symbol_registry:,
+    realms: dict.new(),
     js_to_string: js_to_string_callback,
     call_fn: call_fn_callback,
   )
@@ -302,6 +306,9 @@ pub type ReplEnv {
     const_lexical_globals: set.Set(String),
     symbol_descriptions: dict.Dict(value.SymbolId, String),
     symbol_registry: dict.Dict(String, value.SymbolId),
+    /// Realm builtins registry, keyed by RealmSlot ref.
+    /// Persisted so $262.evalScript/createRealm work across REPL evaluations.
+    realms: dict.Dict(Ref, Builtins),
   )
 }
 
@@ -315,16 +322,19 @@ pub fn run_and_drain_repl(
 ) -> Result(#(Completion, ReplEnv), VmError) {
   let locals = array.repeat(JsUndefined, func.local_count)
   let state =
-    new_state(
-      func,
-      locals,
-      heap,
-      builtins,
-      env.global_object,
-      env.lexical_globals,
-      env.const_lexical_globals,
-      env.symbol_descriptions,
-      env.symbol_registry,
+    State(
+      ..new_state(
+        func,
+        locals,
+        heap,
+        builtins,
+        env.global_object,
+        env.lexical_globals,
+        env.const_lexical_globals,
+        env.symbol_descriptions,
+        env.symbol_registry,
+      ),
+      realms: env.realms,
     )
   use #(completion, final_state) <- result.try(execute_inner(state))
   let drained_state = drain_jobs(final_state)
@@ -335,6 +345,7 @@ pub fn run_and_drain_repl(
       const_lexical_globals: drained_state.const_lexical_globals,
       symbol_descriptions: drained_state.symbol_descriptions,
       symbol_registry: drained_state.symbol_registry,
+      realms: drained_state.realms,
     )
   case completion {
     NormalCompletion(val, _) ->
@@ -4173,6 +4184,9 @@ fn dispatch_native(
     value.ErrorNative(n) -> builtins_error.dispatch(n, args, this, state)
     value.ArcNative(n) -> builtins_arc.dispatch(n, args, this, state)
     value.VmNative(value.ArcSpawn) -> arc_spawn(args, state)
+    value.VmNative(value.EvalScript) -> eval_script_native(args, this, state)
+    value.VmNative(value.CreateRealm) -> create_realm_native(this, state)
+    value.VmNative(value.Gc) -> #(state, Ok(JsUndefined))
     value.JsonNative(n) -> builtins_json.dispatch(n, args, this, state)
     value.MapNative(n) -> builtins_map.dispatch(n, args, this, state)
     value.SetNative(n) -> builtins_set.dispatch(n, args, this, state)
@@ -4400,6 +4414,242 @@ fn run_spawned_native(
     }
     Error(_) -> Nil
   }
+}
+
+// ============================================================================
+// $262 — test262 host-defined realm functions
+// ============================================================================
+
+/// $262.evalScript(source) — parse and execute a script in the realm
+/// associated with the $262 object's __realm__ property.
+fn eval_script_native(
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let source = case args {
+    [s, ..] -> s
+    [] -> JsUndefined
+  }
+  use source_str, state <- frame.try_to_string(state, source)
+
+  // Read the __realm__ property from the $262 object to find the realm
+  let realm_result = case this {
+    JsObject(this_ref) ->
+      case object.get_own_property(state.heap, this_ref, "__realm__") {
+        Some(DataProperty(value: JsObject(realm_ref), ..)) ->
+          case heap.read(state.heap, realm_ref) {
+            Some(value.RealmSlot(
+              global_object: realm_global,
+              lexical_globals:,
+              const_lexical_globals:,
+              symbol_descriptions:,
+              symbol_registry:,
+            )) ->
+              case dict.get(state.realms, realm_ref) {
+                Ok(realm_builtins) ->
+                  Ok(#(
+                    realm_builtins,
+                    realm_global,
+                    realm_ref,
+                    lexical_globals,
+                    const_lexical_globals,
+                    symbol_descriptions,
+                    symbol_registry,
+                  ))
+                Error(Nil) -> Error("evalScript: realm builtins not found")
+              }
+            _ -> Error("evalScript: __realm__ is not a RealmSlot")
+          }
+        _ -> Error("evalScript: $262 has no __realm__ property")
+      }
+    _ -> Error("evalScript: this is not an object")
+  }
+
+  case realm_result {
+    Error(msg) -> frame.type_error(state, msg)
+    Ok(#(
+      realm_builtins,
+      realm_global,
+      realm_ref,
+      lexical_globals,
+      const_lexical_globals,
+      symbol_descriptions,
+      symbol_registry,
+    )) ->
+      case parser.parse(source_str, parser.Script) {
+        Error(err) -> {
+          let #(heap, syntax_err) =
+            common.make_syntax_error(
+              state.heap,
+              realm_builtins,
+              parser.parse_error_to_string(err),
+            )
+          #(State(..state, heap:), Error(syntax_err))
+        }
+        Ok(program) ->
+          case compiler.compile_repl(program) {
+            Error(err) -> {
+              let #(heap, syntax_err) =
+                common.make_syntax_error(
+                  state.heap,
+                  realm_builtins,
+                  string.inspect(err),
+                )
+              #(State(..state, heap:), Error(syntax_err))
+            }
+            Ok(template) -> {
+              let locals = array.repeat(JsUndefined, template.local_count)
+              let eval_state =
+                State(
+                  ..new_state(
+                    template,
+                    locals,
+                    state.heap,
+                    realm_builtins,
+                    realm_global,
+                    lexical_globals,
+                    const_lexical_globals,
+                    symbol_descriptions,
+                    symbol_registry,
+                  ),
+                  job_queue: state.job_queue,
+                  realms: state.realms,
+                )
+              case execute_inner(eval_state) {
+                Error(vm_err) ->
+                  frame.type_error(state, "evalScript: VM error: " <> string.inspect(vm_err))
+                Ok(#(completion, final_eval_state)) -> {
+                  // Drain microtasks in the eval realm
+                  let drained = drain_jobs(final_eval_state)
+                  // Update the realm slot with potentially modified lexical globals
+                  let updated_realm =
+                    value.RealmSlot(
+                      global_object: realm_global,
+                      lexical_globals: drained.lexical_globals,
+                      const_lexical_globals: drained.const_lexical_globals,
+                      symbol_descriptions: drained.symbol_descriptions,
+                      symbol_registry: drained.symbol_registry,
+                    )
+                  let heap = heap.write(drained.heap, realm_ref, updated_realm)
+                  // Propagate heap and job queue back to caller
+                  let state =
+                    State(
+                      ..state,
+                      heap:,
+                      job_queue: drained.job_queue,
+                      realms: drained.realms,
+                    )
+                  case completion {
+                    NormalCompletion(val, _) -> #(state, Ok(val))
+                    ThrowCompletion(thrown, _) -> #(state, Error(thrown))
+                    YieldCompletion(_, _) ->
+                      frame.type_error(state, "evalScript: unexpected yield")
+                  }
+                }
+              }
+            }
+          }
+      }
+  }
+}
+
+/// $262.createRealm() — create a fresh realm and return its $262 object.
+fn create_realm_native(
+  _this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Initialize fresh builtins and global object for the new realm
+  let #(heap, new_builtins) = builtins.init(state.heap)
+  let #(heap, new_global_ref) = builtins.globals(new_builtins, heap)
+
+  // Allocate a RealmSlot for the new realm
+  let #(heap, realm_ref) =
+    heap.alloc(
+      heap,
+      value.RealmSlot(
+        global_object: new_global_ref,
+        lexical_globals: dict.new(),
+        const_lexical_globals: set.new(),
+        symbol_descriptions: dict.new(),
+        symbol_registry: dict.new(),
+      ),
+    )
+  let heap = heap.root(heap, realm_ref)
+
+  // Build the $262 object for the new realm
+  let #(heap, dollar_262_ref) =
+    build_262(heap, new_builtins, new_global_ref, realm_ref)
+
+  // Install $262 on the new realm's global object
+  let #(heap, _) =
+    object.set_property(heap, new_global_ref, "$262", JsObject(dollar_262_ref))
+
+  // Register the realm's builtins
+  let realms = dict.insert(state.realms, realm_ref, new_builtins)
+
+  #(State(..state, heap:, realms:), Ok(JsObject(dollar_262_ref)))
+}
+
+/// Build a $262 object with evalScript, createRealm, gc methods and a global
+/// property. The realm_ref points to a RealmSlot on the heap.
+/// Public so test262_exec.gleam can use it for initial test setup.
+pub fn build_262(
+  h: Heap,
+  b: Builtins,
+  global_ref: Ref,
+  realm_ref: Ref,
+) -> #(Heap, Ref) {
+  let func_proto = b.function.prototype
+
+  // Allocate method function objects
+  let #(h, eval_script_fn) =
+    common.alloc_native_fn(
+      h,
+      func_proto,
+      value.VmNative(value.EvalScript),
+      "evalScript",
+      1,
+    )
+  let #(h, create_realm_fn) =
+    common.alloc_native_fn(
+      h,
+      func_proto,
+      value.VmNative(value.CreateRealm),
+      "createRealm",
+      0,
+    )
+  let #(h, gc_fn) =
+    common.alloc_native_fn(
+      h,
+      func_proto,
+      value.VmNative(value.Gc),
+      "gc",
+      0,
+    )
+
+  // Build the $262 object
+  let #(h, ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: dict.from_list([
+          #("global", value.builtin_property(JsObject(global_ref))),
+          #("evalScript", value.builtin_property(JsObject(eval_script_fn))),
+          #("createRealm", value.builtin_property(JsObject(create_realm_fn))),
+          #("gc", value.builtin_property(JsObject(gc_fn))),
+          // __realm__ is non-enumerable internal property
+          #("__realm__", value.data(JsObject(realm_ref)) |> value.configurable()),
+        ]),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
+        prototype: Some(b.object.prototype),
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, ref)
+  #(h, ref)
 }
 
 // ============================================================================

@@ -37,6 +37,10 @@ import test_runner
 
 const test_dir: String = "vendor/test262/test"
 
+/// JS preamble: defines `print` which captures output for async test protocol.
+/// $262 is installed natively via vm.build_262 instead.
+const print_preamble: String = "var __print_output__; function print(x) { __print_output__ = '' + x; }"
+
 const harness_dir: String = "vendor/test262/harness"
 
 const snapshot_path: String = ".github/test262/pass.txt"
@@ -52,6 +56,26 @@ type TestOutcome {
   Pass
   Fail(reason: String)
   Skip(reason: String)
+}
+
+type StrictnessVariant {
+  NonStrict
+  Strict
+}
+
+fn variants_for_test(metadata: TestMetadata) -> List(StrictnessVariant) {
+  let is_module = list.contains(metadata.flags, "module")
+  let is_raw = list.contains(metadata.flags, "raw")
+  let is_only_strict = list.contains(metadata.flags, "onlyStrict")
+  let is_no_strict = list.contains(metadata.flags, "noStrict")
+  case is_only_strict {
+    True -> [Strict]
+    False ->
+      case is_no_strict || is_raw || is_module {
+        True -> [NonStrict]
+        False -> [NonStrict, Strict]
+      }
+  }
 }
 
 fn generate_test_suite() -> test_runner.EunitTests {
@@ -87,8 +111,7 @@ fn generate_test_suite() -> test_runner.EunitTests {
         let metadata = test262_metadata.parse_metadata(source)
 
         let should_skip =
-          list.contains(metadata.flags, "async")
-          || metadata.negative_phase == Some(Resolution)
+          metadata.negative_phase == Some(Resolution)
           || list.contains(metadata.features, "top-level-await")
 
         case should_skip {
@@ -275,30 +298,55 @@ fn run_test_by_phase(
   source: String,
   path: String,
 ) -> TestOutcome {
-  let source = case list.contains(metadata.flags, "onlyStrict") {
-    True -> "\"use strict\";\n" <> source
-    False -> source
-  }
-
+  let variants = variants_for_test(metadata)
   let is_module = list.contains(metadata.flags, "module")
-  case metadata.negative_phase {
-    Some(Parse) -> run_parse_negative_test(metadata, source)
-    Some(Resolution) -> Skip("resolution")
-    Some(Runtime) ->
-      run_runtime_negative_test(metadata, source, is_module, path)
-    None -> run_positive_test(metadata, source, is_module, path)
-  }
+  let is_async = list.contains(metadata.flags, "async")
+
+  // Run all variants; a test passes only if ALL variants pass
+  list.fold_until(variants, Pass, fn(_acc, variant) {
+    let outcome = case metadata.negative_phase {
+      Some(Parse) -> run_parse_negative_test(metadata, source, variant)
+      Some(Resolution) -> Skip("resolution")
+      Some(Runtime) ->
+        run_runtime_negative_test(
+          metadata,
+          source,
+          is_module,
+          path,
+          variant,
+          is_async,
+        )
+      None ->
+        run_positive_test(metadata, source, is_module, path, variant, is_async)
+    }
+    case outcome {
+      Pass -> list.Continue(Pass)
+      Skip(reason) -> list.Stop(Skip(reason))
+      Fail(reason) -> {
+        let variant_label = case variant {
+          Strict -> " (strict)"
+          NonStrict -> " (non-strict)"
+        }
+        list.Stop(Fail(reason <> variant_label))
+      }
+    }
+  })
 }
 
 fn run_parse_negative_test(
   metadata: TestMetadata,
   source: String,
+  variant: StrictnessVariant,
 ) -> TestOutcome {
   let mode = case list.contains(metadata.flags, "module") {
     True -> parser.Module
     False -> parser.Script
   }
-  case parser.parse(source, mode) {
+  let test_source = case variant {
+    Strict -> "\"use strict\";\n" <> source
+    NonStrict -> source
+  }
+  case parser.parse(test_source, mode) {
     Error(_) -> Pass
     Ok(_) -> Fail("expected parse error but parsed successfully")
   }
@@ -309,27 +357,77 @@ fn run_runtime_negative_test(
   source: String,
   is_module: Bool,
   path: String,
+  variant: StrictnessVariant,
+  is_async: Bool,
 ) -> TestOutcome {
-  let result = case
-    test_runner.run_with_timeout(
-      fn() {
-        case is_module {
-          True -> do_run_module(metadata, source, path)
-          False -> do_run_script(prepend_harness(metadata, source))
-        }
-      },
-      test_timeout_ms,
-    )
-  {
-    Ok(r) -> r
-    Error(reason) -> Error(reason)
-  }
-  case result {
-    Ok(vm.ThrowCompletion(_, _)) -> Pass
-    Ok(vm.NormalCompletion(_, _)) ->
-      Fail("expected runtime throw but completed normally")
-    Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
-    Error(reason) -> Fail("expected runtime throw but got: " <> reason)
+  case is_module {
+    True -> {
+      let result = case
+        test_runner.run_with_timeout(
+          fn() { do_run_module(metadata, source, path) },
+          test_timeout_ms,
+        )
+      {
+        Ok(r) -> r
+        Error(reason) -> Error(reason)
+      }
+      case result {
+        Ok(vm.ThrowCompletion(thrown, heap)) ->
+          verify_negative_type(metadata, thrown, heap)
+        Ok(vm.NormalCompletion(_, _)) ->
+          Fail("expected runtime throw but completed normally")
+        Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
+        Error(reason) -> Fail("expected runtime throw but got: " <> reason)
+      }
+    }
+    False -> {
+      let result = case
+        test_runner.run_with_timeout(
+          fn() {
+            do_run_script_with_harness(metadata, source, variant, is_async)
+          },
+          test_timeout_ms,
+        )
+      {
+        Ok(r) -> r
+        Error(reason) -> Error(reason)
+      }
+      case result {
+        Error(reason) -> Fail("expected runtime throw but got: " <> reason)
+        Ok(#(completion, global_ref)) ->
+          case is_async {
+            False ->
+              case completion {
+                vm.ThrowCompletion(thrown, heap) ->
+                  verify_negative_type(metadata, thrown, heap)
+                vm.NormalCompletion(_, _) ->
+                  Fail("expected runtime throw but completed normally")
+                vm.YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
+              }
+            True ->
+              // For async negative tests, $DONE reports via print
+              check_async_completion(completion, global_ref)
+              |> result.map_error(fn(msg) {
+                // async negative: we expect failure, so a failure message is a pass
+                // if the error name matches
+                msg
+              })
+              |> fn(r) {
+                case r {
+                  Ok(Nil) ->
+                    // Test completed successfully — but we expected a throw
+                    Fail("expected runtime throw but async test completed")
+                  Error(msg) ->
+                    // Async test reported failure — check if it's the right error
+                    case string.contains(msg, metadata.negative_type |> option.unwrap("")) {
+                      True -> Pass
+                      False -> Fail("wrong async error: " <> msg)
+                    }
+                }
+              }
+          }
+      }
+    }
   }
 }
 
@@ -338,27 +436,132 @@ fn run_positive_test(
   source: String,
   is_module: Bool,
   path: String,
+  variant: StrictnessVariant,
+  is_async: Bool,
 ) -> TestOutcome {
-  let result = case
-    test_runner.run_with_timeout(
-      fn() {
-        case is_module {
-          True -> do_run_module(metadata, source, path)
-          False -> do_run_script(prepend_harness(metadata, source))
-        }
-      },
-      test_timeout_ms,
-    )
-  {
-    Ok(r) -> r
-    Error(_) -> Error("timeout")
+  case is_module {
+    True -> {
+      let result = case
+        test_runner.run_with_timeout(
+          fn() { do_run_module(metadata, source, path) },
+          test_timeout_ms,
+        )
+      {
+        Ok(r) -> r
+        Error(_) -> Error("timeout")
+      }
+      case result {
+        Ok(vm.NormalCompletion(_, _)) -> Pass
+        Ok(vm.ThrowCompletion(thrown, heap)) ->
+          Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
+        Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
+        Error(reason) -> Fail(reason)
+      }
+    }
+    False -> {
+      let result = case
+        test_runner.run_with_timeout(
+          fn() {
+            do_run_script_with_harness(metadata, source, variant, is_async)
+          },
+          test_timeout_ms,
+        )
+      {
+        Ok(r) -> r
+        Error(_) -> Error("timeout")
+      }
+      case result {
+        Error(reason) -> Fail(reason)
+        Ok(#(completion, global_ref)) ->
+          case is_async {
+            False ->
+              case completion {
+                vm.NormalCompletion(_, _) -> Pass
+                vm.ThrowCompletion(thrown, heap) ->
+                  Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
+                vm.YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
+              }
+            True -> check_async_positive(completion, global_ref)
+          }
+      }
+    }
   }
-  case result {
-    Ok(vm.NormalCompletion(_, _)) -> Pass
-    Ok(vm.ThrowCompletion(thrown, heap)) ->
-      Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
-    Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
+}
+
+/// Check async test completion for positive tests.
+/// Reads __print_output__ from the global object to determine pass/fail.
+fn check_async_positive(
+  completion: vm.Completion,
+  global_ref: value.Ref,
+) -> TestOutcome {
+  case check_async_completion(completion, global_ref) {
+    Ok(Nil) -> Pass
     Error(reason) -> Fail(reason)
+  }
+}
+
+/// Core async completion check. Returns Ok(Nil) for "Test262:AsyncTestComplete",
+/// Error with reason for everything else.
+fn check_async_completion(
+  completion: vm.Completion,
+  global_ref: value.Ref,
+) -> Result(Nil, String) {
+  case completion {
+    vm.ThrowCompletion(thrown, heap) ->
+      Error("unexpected throw: " <> inspect_thrown(thrown, heap))
+    vm.YieldCompletion(_, _) -> Error("unexpected YieldCompletion")
+    vm.NormalCompletion(_, heap) -> {
+      case get_data(heap, global_ref, "__print_output__") {
+        Ok(value.JsString(output)) ->
+          case output {
+            "Test262:AsyncTestComplete" -> Ok(Nil)
+            _ ->
+              case string.starts_with(output, "Test262:AsyncTestFailure:") {
+                True -> {
+                  let msg = string.drop_start(output, string.length("Test262:AsyncTestFailure:"))
+                  Error("async failure: " <> msg)
+                }
+                False -> Error("unexpected print output: " <> output)
+              }
+          }
+        Ok(value.JsUndefined) -> Error("async test did not call $DONE")
+        Ok(other) -> Error("unexpected __print_output__: " <> string.inspect(other))
+        Error(Nil) -> Error("async test did not call $DONE (no __print_output__)")
+      }
+    }
+  }
+}
+
+fn verify_negative_type(
+  metadata: TestMetadata,
+  thrown: value.JsValue,
+  heap: Heap,
+) -> TestOutcome {
+  case metadata.negative_type {
+    None -> Pass
+    Some(expected_type) -> {
+      let actual_name = case thrown {
+        value.JsObject(ref) ->
+          case get_data(heap, ref, "name") {
+            Ok(value.JsString(n)) -> Ok(n)
+            _ -> Error(Nil)
+          }
+        _ -> Error(Nil)
+      }
+      case actual_name {
+        Ok(name) if name == expected_type -> Pass
+        Ok(name) ->
+          Fail(
+            "expected "
+            <> expected_type
+            <> " but got "
+            <> name
+            <> ": "
+            <> inspect_thrown(thrown, heap),
+          )
+        Error(Nil) -> Pass
+      }
+    }
   }
 }
 
@@ -374,7 +577,14 @@ fn do_run_module(
   let #(h, global_object) = builtins.globals(b, h)
 
   // Evaluate harness files as REPL scripts to populate globals
-  use #(h, env) <- result.try(eval_harness(metadata, h, b, global_object))
+  // Modules don't use the async test protocol via print
+  use #(h, env) <- result.try(eval_harness(
+    metadata,
+    h,
+    b,
+    global_object,
+    False,
+  ))
   let global_object = env.global_object
 
   case module.compile_bundle(path, source, test262_resolve_and_load) {
@@ -449,25 +659,42 @@ fn normalize_test262_path(path: String) -> String {
   list.reverse(resolved) |> string.join("/")
 }
 
-fn do_run_script(source: String) -> Result(vm.Completion, String) {
-  case parser.parse(source, parser.Script) {
+fn do_run_script_with_harness(
+  metadata: TestMetadata,
+  source: String,
+  variant: StrictnessVariant,
+  is_async: Bool,
+) -> Result(#(vm.Completion, value.Ref), String) {
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, global_object) = builtins.globals(b, h)
+
+  // Evaluate harness files as REPL scripts to populate globals
+  use #(h, env) <- result.try(eval_harness(
+    metadata,
+    h,
+    b,
+    global_object,
+    is_async,
+  ))
+
+  // Prepend "use strict" to test source only (not harness) when strict
+  let test_source = case variant {
+    Strict -> "\"use strict\";\n" <> source
+    NonStrict -> source
+  }
+
+  case parser.parse(test_source, parser.Script) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
     Ok(program) ->
-      case compiler.compile(program) {
-        Error(compiler.Unsupported(desc)) ->
-          Error("compile: unsupported " <> desc)
-        Error(compiler.BreakOutsideLoop) -> Error("compile: break outside loop")
-        Error(compiler.ContinueOutsideLoop) ->
-          Error("compile: continue outside loop")
-        Ok(template) -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, global_object) = builtins.globals(b, h)
-          case vm.run_and_drain(template, h, b, global_object) {
-            Ok(completion) -> Ok(completion)
+      case compiler.compile_repl(program) {
+        Error(err) -> Error("compile: " <> string.inspect(err))
+        Ok(template) ->
+          case vm.run_and_drain_repl(template, h, b, env) {
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
+            Ok(#(completion, final_env)) ->
+              Ok(#(completion, final_env.global_object))
           }
-        }
       }
   }
 }
@@ -481,6 +708,7 @@ fn eval_harness(
   h: Heap,
   b: common.Builtins,
   global_object: value.Ref,
+  is_async: Bool,
 ) -> Result(#(Heap, vm.ReplEnv), String) {
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
@@ -492,15 +720,50 @@ fn eval_harness(
           const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
+          realms: dict.new(),
         )
       Ok(#(h, env))
     }
     False -> {
+      // Install native $262 object on the global
+      let #(h, realm_ref) =
+        heap.alloc(
+          h,
+          value.RealmSlot(
+            global_object:,
+            lexical_globals: dict.new(),
+            const_lexical_globals: set.new(),
+            symbol_descriptions: dict.new(),
+            symbol_registry: dict.new(),
+          ),
+        )
+      let h = heap.root(h, realm_ref)
+      let #(h, dollar_262_ref) = vm.build_262(h, b, global_object, realm_ref)
+      let #(h, _) =
+        object.set_property(
+          h,
+          global_object,
+          "$262",
+          value.JsObject(dollar_262_ref),
+        )
+
+      let realms = dict.from_list([#(realm_ref, b)])
+
+      // Harness file order: print preamble → assert.js → sta.js →
+      // doneprintHandle.js (if async) → extra includes
       let default_harness = ["assert.js", "sta.js"]
+      let async_harness = case is_async {
+        True -> ["doneprintHandle.js"]
+        False -> []
+      }
       let extra_includes =
         metadata.includes
-        |> list.filter(fn(f) { !list.contains(default_harness, f) })
-      let harness_files = list.append(default_harness, extra_includes)
+        |> list.filter(fn(f) {
+          !list.contains(default_harness, f)
+          && !list.contains(async_harness, f)
+        })
+      let harness_files =
+        list.flatten([default_harness, async_harness, extra_includes])
 
       let env =
         vm.ReplEnv(
@@ -509,7 +772,16 @@ fn eval_harness(
           const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
+          realms:,
         )
+
+      // Evaluate print preamble first (defines print + __print_output__)
+      use #(h, env) <- result.try(eval_harness_script(
+        print_preamble,
+        h,
+        b,
+        env,
+      ))
 
       list.try_fold(harness_files, #(h, env), fn(acc, filename) {
         let #(heap, env) = acc
@@ -547,36 +819,6 @@ fn eval_harness_script(
               }
           }
       }
-  }
-}
-
-fn prepend_harness(metadata: TestMetadata, source: String) -> String {
-  let is_raw = list.contains(metadata.flags, "raw")
-
-  case is_raw {
-    True -> source
-    False -> {
-      let default_harness = ["assert.js", "sta.js"]
-      let extra_includes =
-        metadata.includes
-        |> list.filter(fn(f) { !list.contains(default_harness, f) })
-      let harness_files = list.append(default_harness, extra_includes)
-
-      let harness_source =
-        list.filter_map(harness_files, fn(filename) {
-          let path = harness_dir <> "/" <> filename
-          case simplifile.read(path) {
-            Ok(content) -> Ok(content)
-            Error(_) -> Error(Nil)
-          }
-        })
-        |> string.join("\n")
-
-      case harness_source {
-        "" -> source
-        _ -> harness_source <> "\n" <> source
-      }
-    }
   }
 }
 

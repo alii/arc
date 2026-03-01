@@ -7,6 +7,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set
 import gleam/string
 
 /// A reference to a heap slot. Public so heap.gleam can construct/destructure.
@@ -612,6 +613,12 @@ pub type VmNativeFn {
   /// AnnexB legacy escape/unescape functions (B.2.1.1 / B.2.1.2)
   Escape
   Unescape
+  /// $262.evalScript(source) — parse + execute a script in a specific realm.
+  EvalScript
+  /// $262.createRealm() — create a new realm, return its $262.
+  CreateRealm
+  /// $262.gc() — no-op garbage collection hint.
+  Gc
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -901,6 +908,17 @@ pub type HeapSlot {
     saved_finally_stack: List(SavedFinallyCompletion),
     saved_this: JsValue,
     saved_callee_ref: Option(Ref),
+  )
+  /// Stores realm context for $262 methods.
+  /// evalScript and createRealm read this to know which realm to operate in.
+  /// Builtins are stored in State.realms (keyed by this slot's Ref) to avoid
+  /// an import cycle (value.gleam cannot import builtins/common.gleam).
+  RealmSlot(
+    global_object: Ref,
+    lexical_globals: Dict(String, JsValue),
+    const_lexical_globals: set.Set(String),
+    symbol_descriptions: Dict(SymbolId, String),
+    symbol_registry: Dict(String, SymbolId),
   )
 }
 
@@ -1208,6 +1226,17 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         refs_in_value(saved_this),
         option.map(saved_callee_ref, list.wrap) |> option.unwrap([]),
       ])
+    }
+    RealmSlot(
+      global_object:,
+      lexical_globals:,
+      symbol_descriptions: _,
+      symbol_registry: _,
+      ..,
+    ) -> {
+      let lexical_refs =
+        dict.values(lexical_globals) |> list.flat_map(refs_in_value)
+      [global_object, ..lexical_refs]
     }
   }
 }

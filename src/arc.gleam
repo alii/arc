@@ -346,6 +346,7 @@ fn handle_repl_line(state: ReplState, line: String) -> option.Option(ReplState) 
           const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
+          realms: dict.new(),
         )
       let state = ReplState(heap: h, builtins: b, env:)
       clear()
@@ -550,6 +551,7 @@ fn new_repl_state() {
       const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
+      realms: dict.new(),
     ),
   )
 }

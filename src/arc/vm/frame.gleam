@@ -102,6 +102,10 @@ pub type State {
     symbol_descriptions: dict.Dict(value.SymbolId, String),
     /// Global symbol registry for Symbol.for() / Symbol.keyFor().
     symbol_registry: dict.Dict(String, value.SymbolId),
+    /// Maps RealmSlot refs to their Builtins. Used by $262.evalScript/createRealm
+    /// to resolve realm-specific builtins (stored separately from heap to avoid
+    /// import cycle between value.gleam and builtins/common.gleam).
+    realms: dict.Dict(Ref, Builtins),
     /// ES2024 ToString — converts any JsValue to a string, including objects
     /// via ToPrimitive with VM re-entry. Set by the VM executor.
     js_to_string: fn(State, JsValue) ->
