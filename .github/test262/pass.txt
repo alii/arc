@@ -6308,6 +6308,7 @@ language/expressions/assignment/fn-name-class.js
 language/expressions/assignment/fn-name-cover.js
 language/expressions/assignment/fn-name-fn.js
 language/expressions/assignment/fn-name-gen.js
+language/expressions/assignment/fn-name-lhs-cover.js
 language/expressions/assignment/fn-name-lhs-member.js
 language/expressions/assignment/line-terminator.js
 language/expressions/assignment/member-expr-ident-name-break-escaped.js

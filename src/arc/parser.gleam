@@ -4610,7 +4610,9 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
             P(..p3, allow_in: saved_allow_in),
             RightParen,
           ))
-          Ok(#(p4, expr))
+          // Preserve parenthesization in the AST so the compiler can
+          // distinguish `x` from `(x)` for IsIdentifierRef (§13.15.2).
+          Ok(#(p4, ast.ParenthesizedExpression(expr)))
         }
       }
     }

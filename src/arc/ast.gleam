@@ -196,6 +196,10 @@ pub type Expression {
   MetaProperty(meta: String, property: String)
   ImportExpression(source: Expression)
   RegExpLiteral(pattern: String, flags: String)
+  /// Preserves parenthesization so the compiler can distinguish `x` from `(x)`.
+  /// Needed for ES spec §13.15.2: IsIdentifierRef returns false for
+  /// CoverParenthesizedExpressionAndArrowParameterList.
+  ParenthesizedExpression(expression: Expression)
 }
 
 pub type ArrowBody {

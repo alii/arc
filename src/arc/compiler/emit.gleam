@@ -991,6 +991,8 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
     ast.ClassExpression(_, super_class, body) ->
       opt_expr_references_arguments(super_class)
       || class_body_references_arguments(body)
+
+    ast.ParenthesizedExpression(inner) -> expr_references_arguments(inner)
   }
 }
 
@@ -1616,6 +1618,15 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
 // Expression emission
 // ============================================================================
 
+/// Strip ParenthesizedExpression wrappers (possibly nested).
+/// Used to look through parens when the spec says they're transparent.
+fn unwrap_parens(expr: ast.Expression) -> ast.Expression {
+  case expr {
+    ast.ParenthesizedExpression(inner) -> unwrap_parens(inner)
+    _ -> expr
+  }
+}
+
 fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
   case expr {
     // Literals
@@ -1678,53 +1689,53 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     }
 
     // Unary expressions
-    ast.UnaryExpression(ast.TypeOf, _, ast.Identifier(name)) -> {
-      // typeof x must NOT throw for undeclared variables
-      Ok(emit_ir(e, IrScopeTypeofVar(name)))
-    }
+    // typeof uses unwrap_parens because typeof (x) === typeof x per spec.
+    ast.UnaryExpression(ast.TypeOf, _, arg) ->
+      case unwrap_parens(arg) {
+        ast.Identifier(name) -> {
+          // typeof x must NOT throw for undeclared variables
+          Ok(emit_ir(e, IrScopeTypeofVar(name)))
+        }
+        _ -> {
+          use e <- result.map(emit_expr(e, arg))
+          emit_ir(e, IrTypeOf)
+        }
+      }
 
-    ast.UnaryExpression(ast.TypeOf, _, arg) -> {
-      use e <- result.map(emit_expr(e, arg))
-      emit_ir(e, IrTypeOf)
-    }
-
-    // delete expression — special handling per argument type
-    ast.UnaryExpression(
-      ast.Delete,
-      _,
-      ast.MemberExpression(obj, ast.Identifier(prop), False),
-    ) -> {
-      // delete obj.prop → emit obj, DeleteField(prop)
-      use e <- result.map(emit_expr(e, obj))
-      emit_ir(e, IrDeleteField(prop))
-    }
-    ast.UnaryExpression(
-      ast.Delete,
-      _,
-      ast.MemberExpression(obj, key_expr, True),
-    ) -> {
-      // delete obj[key] → emit obj, emit key, DeleteElem
-      use e <- result.try(emit_expr(e, obj))
-      use e <- result.map(emit_expr(e, key_expr))
-      emit_ir(e, IrDeleteElem)
-    }
-    ast.UnaryExpression(ast.Delete, _, ast.Identifier(_)) -> {
-      // delete x → always true in sloppy mode (can't delete plain vars)
-      Ok(push_const(e, JsBool(True)))
-    }
-    ast.UnaryExpression(ast.Delete, _, arg) -> {
-      // delete <other expr> → evaluate for side effects, discard, push true
-      use e <- result.map(emit_expr(e, arg))
-      let e = emit_ir(e, IrPop)
-      push_const(e, JsBool(True))
-    }
+    // delete expression — uses unwrap_parens because delete (x) === delete x.
+    ast.UnaryExpression(ast.Delete, _, arg) ->
+      case unwrap_parens(arg) {
+        ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
+          // delete obj.prop → emit obj, DeleteField(prop)
+          use e <- result.map(emit_expr(e, obj))
+          emit_ir(e, IrDeleteField(prop))
+        }
+        ast.MemberExpression(obj, key_expr, True) -> {
+          // delete obj[key] → emit obj, emit key, DeleteElem
+          use e <- result.try(emit_expr(e, obj))
+          use e <- result.map(emit_expr(e, key_expr))
+          emit_ir(e, IrDeleteElem)
+        }
+        ast.Identifier(_) -> {
+          // delete x → always true in sloppy mode (can't delete plain vars)
+          Ok(push_const(e, JsBool(True)))
+        }
+        _ -> {
+          // delete <other expr> → evaluate for side effects, discard, push true
+          use e <- result.map(emit_expr(e, arg))
+          let e = emit_ir(e, IrPop)
+          push_const(e, JsBool(True))
+        }
+      }
 
     ast.UnaryExpression(op, _, arg) -> {
       use e <- result.map(emit_expr(e, arg))
       emit_ir(e, IrUnaryOp(translate_unaryop(op)))
     }
 
-    // Update expressions (++/--)
+    // Update expressions (++/--) — unwrap parens because (x)++ === x++.
+    ast.UpdateExpression(op, prefix, ast.ParenthesizedExpression(inner)) ->
+      emit_expr(e, ast.UpdateExpression(op, prefix, unwrap_parens(inner)))
     ast.UpdateExpression(op, prefix, ast.Identifier(name)) -> {
       let one = JsNumber(Finite(1.0))
       let bin_kind = case op {
@@ -1752,6 +1763,25 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
       }
     }
+
+    // Parenthesized LHS assignment — unwrap parens but skip name inference.
+    // Per ES spec §13.15.2: IsIdentifierRef returns false for
+    // CoverParenthesizedExpressionAndArrowParameterList, so `(x) = function(){}`
+    // must NOT infer the name "x". We strip the wrapping and recurse, which
+    // reaches the identifier/member cases below with plain emit_expr (no naming).
+    ast.AssignmentExpression(
+      ast.Assign,
+      ast.ParenthesizedExpression(ast.Identifier(name)),
+      right,
+    ) -> {
+      use e <- result.map(emit_expr(e, right))
+      let e = emit_ir(e, IrDup)
+      emit_ir(e, IrScopePutVar(name))
+    }
+    // Non-simple-assign parenthesized LHS — safe to unwrap (no name inference
+    // for compound assignment anyway).
+    ast.AssignmentExpression(op, ast.ParenthesizedExpression(inner), right) ->
+      emit_expr(e, ast.AssignmentExpression(op, inner, right))
 
     // Assignment to identifier
     ast.AssignmentExpression(ast.Assign, ast.Identifier(name), right) -> {
@@ -2088,6 +2118,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_ir(e, IrAwait)
     }
 
+    // Parenthesized expression — transparent for evaluation, just unwrap
+    ast.ParenthesizedExpression(inner) -> emit_expr(e, inner)
+
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
 }
@@ -2281,6 +2314,9 @@ fn emit_named_expr(
   name: String,
 ) -> Result(Emitter, EmitError) {
   case expr {
+    // IsAnonymousFunctionDefinition looks through ParenthesizedExpression
+    // (ES spec §13.2.1.2), so (function(){}) is still anonymous.
+    ast.ParenthesizedExpression(inner) -> emit_named_expr(e, inner, name)
     // Anonymous function expression → bake name
     ast.FunctionExpression(None, params, body, is_gen, is_async) -> {
       let child =
@@ -2763,6 +2799,8 @@ fn emit_for_lhs_bind(
         _ -> Error(Unsupported("for-in/of with multiple declarators"))
       }
     }
+    ast.ForInitExpression(ast.ParenthesizedExpression(inner)) ->
+      emit_for_lhs_bind(e, ast.ForInitExpression(unwrap_parens(inner)))
     ast.ForInitExpression(ast.Identifier(name)) -> {
       Ok(emit_ir(e, IrScopePutVar(name)))
     }
@@ -3796,6 +3834,7 @@ fn string_inspect_expr_kind(expr: ast.Expression) -> String {
     ast.MetaProperty(..) -> "MetaProperty"
     ast.ImportExpression(_) -> "ImportExpression"
     ast.RegExpLiteral(..) -> "RegExpLiteral"
+    ast.ParenthesizedExpression(..) -> "ParenthesizedExpression"
   }
 }
 
