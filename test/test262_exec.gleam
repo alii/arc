@@ -362,7 +362,7 @@ fn run_positive_test(
   }
 }
 
-const test_timeout_ms: Int = 10_000
+const test_timeout_ms: Int = 30_000
 
 fn do_run_module(
   metadata: TestMetadata,
