@@ -5,11 +5,11 @@ import arc/vm/js_elements
 import arc/vm/value.{
   type ArcNativeFn, type JsValue, type PortableMessage, type Ref, ArcLog,
   ArcNative, ArcPeek, ArcPidToString, ArcReceive, ArcSelf, ArcSend, ArcSleep,
-  DataProperty, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString,
-  JsSymbol, JsUndefined, JsUninitialized, ObjectSlot, OrdinaryObject, PidObject,
-  PmArray, PmBigInt, PmBool, PmNull, PmNumber, PmObject, PmPid, PmString,
-  PmSymbol, PmUndefined, PromiseFulfilled, PromiseObject, PromisePending,
-  PromiseRejected, PromiseSlot,
+  DataProperty, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
+  JsUndefined, JsUninitialized, ObjectSlot, OrdinaryObject, PidObject, PmArray,
+  PmBigInt, PmBool, PmNull, PmNumber, PmObject, PmPid, PmString, PmSymbol,
+  PmUndefined, PromiseFulfilled, PromiseObject, PromisePending, PromiseRejected,
+  PromiseSlot,
 }
 import gleam/dict
 import gleam/io

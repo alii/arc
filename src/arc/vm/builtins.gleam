@@ -121,7 +121,13 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // Global utility functions: eval, URI functions
   let #(h, eval) =
-    common.alloc_native_fn(h, function.prototype, value.VmNative(value.Eval), "eval", 1)
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.VmNative(value.Eval),
+      "eval",
+      1,
+    )
   let #(h, decode_uri) =
     common.alloc_native_fn(
       h,

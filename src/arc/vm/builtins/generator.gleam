@@ -7,7 +7,8 @@ import arc/vm/builtins/common.{type GeneratorBuiltin, GeneratorBuiltin}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type Ref, CallNative, GeneratorNext, GeneratorReturn, GeneratorThrow, ObjectSlot,
+  type Ref, CallNative, GeneratorNext, GeneratorReturn, GeneratorThrow,
+  ObjectSlot,
 }
 import gleam/dict
 import gleam/option.{Some}

@@ -2834,10 +2834,9 @@ fn async_setup_await(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(value.CallNative(value.AsyncResume(
-          async_data_ref:,
-          is_reject: False,
-        ))),
+        kind: NativeFunction(
+          value.CallNative(value.AsyncResume(async_data_ref:, is_reject: False)),
+        ),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(builtins.function.prototype),
@@ -2849,10 +2848,9 @@ fn async_setup_await(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(value.CallNative(value.AsyncResume(
-          async_data_ref:,
-          is_reject: True,
-        ))),
+        kind: NativeFunction(
+          value.CallNative(value.AsyncResume(async_data_ref:, is_reject: True)),
+        ),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(builtins.function.prototype),
@@ -3170,11 +3168,13 @@ fn call_native(
             heap.alloc(
               state.heap,
               ObjectSlot(
-                kind: NativeFunction(value.CallNative(value.BoundFunction(
-                  target: target_ref,
-                  bound_this: this_arg,
-                  bound_args:,
-                ))),
+                kind: NativeFunction(
+                  value.CallNative(value.BoundFunction(
+                    target: target_ref,
+                    bound_this: this_arg,
+                    bound_args:,
+                  )),
+                ),
                 properties: dict.from_list([
                   #("name", common.fn_name_property(name)),
                 ]),
@@ -3407,7 +3407,11 @@ fn do_construct(
     }
     // Bound function used as constructor: resolve target, prepend args
     Some(ObjectSlot(
-      kind: NativeFunction(value.CallNative(value.BoundFunction(target:, bound_args:, ..))),
+      kind: NativeFunction(value.CallNative(value.BoundFunction(
+        target:,
+        bound_args:,
+        ..,
+      ))),
       ..,
     )) -> {
       let final_args = list.append(bound_args, args)
@@ -3469,7 +3473,11 @@ fn construct_value(
     }
     // Chained bound function: resolve further
     Some(ObjectSlot(
-      kind: NativeFunction(value.CallNative(value.BoundFunction(target:, bound_args:, ..))),
+      kind: NativeFunction(value.CallNative(value.BoundFunction(
+        target:,
+        bound_args:,
+        ..,
+      ))),
       ..,
     )) -> {
       let final_args = list.append(bound_args, args)
@@ -3889,7 +3897,8 @@ fn dispatch_native(
       #(state, Ok(value.JsString(js_unescape(str))))
     }
     // All other VmNative variants are handled in call_native
-    value.CallNative(_) -> panic as "CallNative should be handled in call_native"
+    value.CallNative(_) ->
+      panic as "CallNative should be handled in call_native"
   }
 }
 
@@ -4350,9 +4359,9 @@ fn call_native_promise_finally(
         heap.alloc(
           state.heap,
           value.ObjectSlot(
-            kind: value.NativeFunction(value.CallNative(value.PromiseFinallyFulfill(
-              on_finally:,
-            ))),
+            kind: value.NativeFunction(
+              value.CallNative(value.PromiseFinallyFulfill(on_finally:)),
+            ),
             properties: dict.new(),
             elements: js_elements.new(),
             prototype: Some(state.builtins.function.prototype),
@@ -4365,9 +4374,9 @@ fn call_native_promise_finally(
         heap.alloc(
           h,
           value.ObjectSlot(
-            kind: value.NativeFunction(value.CallNative(value.PromiseFinallyReject(
-              on_finally:,
-            ))),
+            kind: value.NativeFunction(
+              value.CallNative(value.PromiseFinallyReject(on_finally:)),
+            ),
             properties: dict.new(),
             elements: js_elements.new(),
             prototype: Some(state.builtins.function.prototype),
@@ -4468,9 +4477,9 @@ fn finally_chain_value(
     heap.alloc(
       state1.heap,
       value.ObjectSlot(
-        kind: value.NativeFunction(value.CallNative(value.PromiseFinallyValueThunk(
-          value: captured_value,
-        ))),
+        kind: value.NativeFunction(
+          value.CallNative(value.PromiseFinallyValueThunk(value: captured_value)),
+        ),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(state.builtins.function.prototype),
@@ -4517,9 +4526,9 @@ fn finally_chain_throw(
     heap.alloc(
       state1.heap,
       value.ObjectSlot(
-        kind: value.NativeFunction(value.CallNative(value.PromiseFinallyThrower(
-          reason: captured_reason,
-        ))),
+        kind: value.NativeFunction(
+          value.CallNative(value.PromiseFinallyThrower(reason: captured_reason)),
+        ),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(state.builtins.function.prototype),

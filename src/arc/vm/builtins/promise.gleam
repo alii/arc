@@ -5,11 +5,10 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/value.{
-  type Job, type JsValue, type Ref, BoxSlot, JsBool, JsObject, NativeFunction,
-  ObjectSlot, PromiseCatch, PromiseConstructor, PromiseFinally, PromiseObject,
-  PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
+  type Job, type JsValue, type Ref, BoxSlot, CallNative, JsBool, JsObject,
+  NativeFunction, ObjectSlot, PromiseCatch, PromiseConstructor, PromiseFinally,
+  PromiseObject, PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
-  CallNative,
 }
 import gleam/dict
 import gleam/list
@@ -138,11 +137,13 @@ pub fn create_resolving_functions(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(CallNative(PromiseResolveFunction(
-          promise_ref:,
-          data_ref:,
-          already_resolved_ref:,
-        ))),
+        kind: NativeFunction(
+          CallNative(PromiseResolveFunction(
+            promise_ref:,
+            data_ref:,
+            already_resolved_ref:,
+          )),
+        ),
         properties: dict.from_list([
           #("name", common.fn_name_property("")),
           #("length", common.fn_length_property(1)),
@@ -159,11 +160,13 @@ pub fn create_resolving_functions(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(CallNative(PromiseRejectFunction(
-          promise_ref:,
-          data_ref:,
-          already_resolved_ref:,
-        ))),
+        kind: NativeFunction(
+          CallNative(PromiseRejectFunction(
+            promise_ref:,
+            data_ref:,
+            already_resolved_ref:,
+          )),
+        ),
         properties: dict.from_list([
           #("name", common.fn_name_property("")),
           #("length", common.fn_length_property(1)),
