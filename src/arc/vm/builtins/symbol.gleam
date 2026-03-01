@@ -7,8 +7,8 @@ import arc/vm/builtins/common
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, type Ref, JsObject, JsString, JsSymbol, NativeFunction,
-  NativeSymbolConstructor, ObjectSlot,
+  type JsValue, type Ref, CallNative, JsObject, JsString, JsSymbol,
+  NativeFunction, ObjectSlot, SymbolConstructor,
 }
 import gleam/dict
 import gleam/option.{Some}
@@ -21,7 +21,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(NativeSymbolConstructor),
+        kind: NativeFunction(CallNative(SymbolConstructor)),
         properties: dict.from_list([
           #("name", common.fn_name_property("Symbol")),
           #("length", common.fn_length_property(0)),

@@ -69,7 +69,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.NativeIteratorSymbolIterator,
+      value.VmNative(value.IteratorSymbolIterator),
       "[Symbol.iterator]",
       0,
     )
@@ -121,12 +121,12 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // Global utility functions: eval, URI functions
   let #(h, eval) =
-    common.alloc_native_fn(h, function.prototype, value.NativeEval, "eval", 1)
+    common.alloc_native_fn(h, function.prototype, value.VmNative(value.Eval), "eval", 1)
   let #(h, decode_uri) =
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.NativeDecodeURI,
+      value.VmNative(value.DecodeURI),
       "decodeURI",
       1,
     )
@@ -134,7 +134,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.NativeEncodeURI,
+      value.VmNative(value.EncodeURI),
       "encodeURI",
       1,
     )
@@ -142,7 +142,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.NativeDecodeURIComponent,
+      value.VmNative(value.DecodeURIComponent),
       "decodeURIComponent",
       1,
     )
@@ -150,7 +150,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.NativeEncodeURIComponent,
+      value.VmNative(value.EncodeURIComponent),
       "encodeURIComponent",
       1,
     )
@@ -158,7 +158,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.NativeEscape,
+      value.VmNative(value.Escape),
       "escape",
       1,
     )
@@ -166,7 +166,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.NativeUnescape,
+      value.VmNative(value.Unescape),
       "unescape",
       1,
     )

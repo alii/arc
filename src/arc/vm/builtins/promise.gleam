@@ -6,10 +6,10 @@ import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/value.{
   type Job, type JsValue, type Ref, BoxSlot, JsBool, JsObject, NativeFunction,
-  NativePromiseCatch, NativePromiseConstructor, NativePromiseFinally,
-  NativePromiseRejectFunction, NativePromiseRejectStatic,
-  NativePromiseResolveFunction, NativePromiseResolveStatic, NativePromiseThen,
-  ObjectSlot, PromiseObject, PromiseReaction, PromiseSlot,
+  ObjectSlot, PromiseCatch, PromiseConstructor, PromiseFinally, PromiseObject,
+  PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
+  PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
+  CallNative,
 }
 import gleam/dict
 import gleam/list
@@ -30,23 +30,23 @@ pub fn init(
   // §27.2.5.3 Promise.prototype.finally(onFinally)
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
-      #("then", NativePromiseThen, 2),
-      #("catch", NativePromiseCatch, 1),
-      #("finally", NativePromiseFinally, 1),
+      #("then", CallNative(PromiseThen), 2),
+      #("catch", CallNative(PromiseCatch), 1),
+      #("finally", CallNative(PromiseFinally), 1),
     ])
   // §27.2.4.5 Promise.resolve(x)
   // §27.2.4.4 Promise.reject(r)
   let #(h, static_methods) =
     common.alloc_methods(h, function_proto, [
-      #("resolve", NativePromiseResolveStatic, 1),
-      #("reject", NativePromiseRejectStatic, 1),
+      #("resolve", CallNative(PromiseResolveStatic), 1),
+      #("reject", CallNative(PromiseRejectStatic), 1),
     ])
   common.init_type(
     h,
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { NativePromiseConstructor },
+    fn(_) { CallNative(PromiseConstructor) },
     "Promise",
     1,
     static_methods,
@@ -65,7 +65,7 @@ pub fn init(
 ///   7. Set promise.[[PromiseIsHandled]] to false.
 ///
 /// The actual executor call (steps 8-11) happens in the VM's
-/// NativePromiseConstructor handler, not here. This function only creates
+/// PromiseConstructor handler, not here. This function only creates
 /// the promise object. We split the internal slots into a separate PromiseSlot
 /// heap entry (data_ref) pointed to by the ObjectSlot's PromiseObject kind.
 ///
@@ -138,11 +138,11 @@ pub fn create_resolving_functions(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(NativePromiseResolveFunction(
+        kind: NativeFunction(CallNative(PromiseResolveFunction(
           promise_ref:,
           data_ref:,
           already_resolved_ref:,
-        )),
+        ))),
         properties: dict.from_list([
           #("name", common.fn_name_property("")),
           #("length", common.fn_length_property(1)),
@@ -159,11 +159,11 @@ pub fn create_resolving_functions(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(NativePromiseRejectFunction(
+        kind: NativeFunction(CallNative(PromiseRejectFunction(
           promise_ref:,
           data_ref:,
           already_resolved_ref:,
-        )),
+        ))),
         properties: dict.from_list([
           #("name", common.fn_name_property("")),
           #("length", common.fn_length_property(1)),

@@ -492,74 +492,76 @@ pub type NativeFn {
   SetNative(SetNativeFn)
   WeakMapNative(WeakMapNativeFn)
   WeakSetNative(WeakSetNativeFn)
-  NativeFunctionConstructor
-  NativeFunctionCall
-  NativeFunctionApply
-  NativeFunctionBind
-  NativeFunctionToString
+  /// Handled in call_native — needs rest_stack, call_value, VM re-entry.
+  CallNative(CallNativeFn)
+  /// Handled in dispatch_native — simpler VM-level natives.
+  VmNative(VmNativeFn)
+}
+
+/// Native functions handled in call_native — need stack manipulation,
+/// call frame pushing, or VM re-entry that dispatch_native can't do.
+pub type CallNativeFn {
+  FunctionCall
+  FunctionApply
+  FunctionBind
   /// A bound function created by Function.prototype.bind.
-  /// When called, prepends bound_args to the call args and uses bound_this.
-  NativeBoundFunction(
-    target: Ref,
-    bound_this: JsValue,
-    bound_args: List(JsValue),
-  )
-  // String constructor (type coercion function — stays VM-level, needs ToPrimitive)
-  NativeStringConstructor
+  BoundFunction(target: Ref, bound_this: JsValue, bound_args: List(JsValue))
+  // String constructor (type coercion — needs ToPrimitive)
+  StringConstructor
   // Promise
-  NativePromiseConstructor
-  NativePromiseThen
-  NativePromiseCatch
-  NativePromiseFinally
-  NativePromiseResolveStatic
-  NativePromiseRejectStatic
+  PromiseConstructor
+  PromiseThen
+  PromiseCatch
+  PromiseFinally
+  PromiseResolveStatic
+  PromiseRejectStatic
   /// Internal resolve function created by CreateResolvingFunctions.
-  /// Carries refs to the promise object, promise data slot, and shared
-  /// already-resolved BoxSlot.
-  NativePromiseResolveFunction(
+  PromiseResolveFunction(
     promise_ref: Ref,
     data_ref: Ref,
     already_resolved_ref: Ref,
   )
   /// Internal reject function created by CreateResolvingFunctions.
-  NativePromiseRejectFunction(
+  PromiseRejectFunction(
     promise_ref: Ref,
     data_ref: Ref,
     already_resolved_ref: Ref,
   )
-  /// Promise.prototype.finally wrapper: called on fulfill, calls onFinally()
-  /// then returns a promise that resolves to the original value.
-  NativePromiseFinallyFulfill(on_finally: JsValue)
-  /// Promise.prototype.finally wrapper: called on reject, calls onFinally()
-  /// then returns a promise that rejects with the original reason.
-  NativePromiseFinallyReject(on_finally: JsValue)
+  /// Promise.prototype.finally wrapper: called on fulfill.
+  PromiseFinallyFulfill(on_finally: JsValue)
+  /// Promise.prototype.finally wrapper: called on reject.
+  PromiseFinallyReject(on_finally: JsValue)
   /// Thunk that ignores its argument and returns the captured value.
-  NativePromiseFinallyValueThunk(value: JsValue)
+  PromiseFinallyValueThunk(value: JsValue)
   /// Thunk that ignores its argument and throws the captured reason.
-  NativePromiseFinallyThrower(reason: JsValue)
+  PromiseFinallyThrower(reason: JsValue)
   // Generator
-  NativeGeneratorNext
-  NativeGeneratorReturn
-  NativeGeneratorThrow
+  GeneratorNext
+  GeneratorReturn
+  GeneratorThrow
   /// Async function resume: called when awaited promise settles.
-  /// async_data_ref points to AsyncFunctionSlot on heap.
-  /// is_reject: False → fulfilled (push resolved value), True → rejected (throw value)
-  NativeAsyncResume(async_data_ref: Ref, is_reject: Bool)
+  AsyncResume(async_data_ref: Ref, is_reject: Bool)
   /// Symbol() constructor — callable but NOT new-able.
-  NativeSymbolConstructor
+  SymbolConstructor
+}
+
+/// VM-level natives handled in dispatch_native — don't need stack manipulation.
+pub type VmNativeFn {
+  FunctionConstructor
+  FunctionToString
   /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
-  NativeIteratorSymbolIterator
+  IteratorSymbolIterator
   /// Arc.spawn(fn) — needs VM internals (execute_inner, drain_jobs).
-  NativeArcSpawn
+  ArcSpawn
   // Global functions
-  NativeEval
-  NativeDecodeURI
-  NativeEncodeURI
-  NativeDecodeURIComponent
-  NativeEncodeURIComponent
+  Eval
+  DecodeURI
+  EncodeURI
+  DecodeURIComponent
+  EncodeURIComponent
   /// AnnexB legacy escape/unescape functions (B.2.1.1 / B.2.1.2)
-  NativeEscape
-  NativeUnescape
+  Escape
+  Unescape
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -999,32 +1001,32 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         NativeFunction(SetNative(SetConstructor(proto: ref))) -> [ref]
         NativeFunction(WeakMapNative(WeakMapConstructor(proto: ref))) -> [ref]
         NativeFunction(WeakSetNative(WeakSetConstructor(proto: ref))) -> [ref]
-        NativeFunction(NativeBoundFunction(target:, bound_this:, bound_args:)) -> [
+        NativeFunction(CallNative(BoundFunction(target:, bound_this:, bound_args:))) -> [
           target,
           ..list.flatten([
             refs_in_value(bound_this),
             list.flat_map(bound_args, refs_in_value),
           ])
         ]
-        NativeFunction(NativePromiseResolveFunction(
+        NativeFunction(CallNative(PromiseResolveFunction(
           promise_ref:,
           data_ref:,
           already_resolved_ref:,
-        )) -> [promise_ref, data_ref, already_resolved_ref]
-        NativeFunction(NativePromiseRejectFunction(
+        ))) -> [promise_ref, data_ref, already_resolved_ref]
+        NativeFunction(CallNative(PromiseRejectFunction(
           promise_ref:,
           data_ref:,
           already_resolved_ref:,
-        )) -> [promise_ref, data_ref, already_resolved_ref]
-        NativeFunction(NativePromiseFinallyFulfill(on_finally:)) ->
+        ))) -> [promise_ref, data_ref, already_resolved_ref]
+        NativeFunction(CallNative(PromiseFinallyFulfill(on_finally:))) ->
           refs_in_value(on_finally)
-        NativeFunction(NativePromiseFinallyReject(on_finally:)) ->
+        NativeFunction(CallNative(PromiseFinallyReject(on_finally:))) ->
           refs_in_value(on_finally)
-        NativeFunction(NativePromiseFinallyValueThunk(value:)) ->
+        NativeFunction(CallNative(PromiseFinallyValueThunk(value:))) ->
           refs_in_value(value)
-        NativeFunction(NativePromiseFinallyThrower(reason:)) ->
+        NativeFunction(CallNative(PromiseFinallyThrower(reason:))) ->
           refs_in_value(reason)
-        NativeFunction(NativeAsyncResume(async_data_ref:, ..)) -> [
+        NativeFunction(CallNative(AsyncResume(async_data_ref:, ..))) -> [
           async_data_ref,
         ]
         PromiseObject(promise_data:) -> [promise_data]

@@ -2834,10 +2834,10 @@ fn async_setup_await(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(value.NativeAsyncResume(
+        kind: NativeFunction(value.CallNative(value.AsyncResume(
           async_data_ref:,
           is_reject: False,
-        )),
+        ))),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(builtins.function.prototype),
@@ -2849,10 +2849,10 @@ fn async_setup_await(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(value.NativeAsyncResume(
+        kind: NativeFunction(value.CallNative(value.AsyncResume(
           async_data_ref:,
           is_reject: True,
-        )),
+        ))),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(builtins.function.prototype),
@@ -3127,7 +3127,7 @@ fn call_native(
   case native {
     // Function.prototype.call(thisArg, ...args)
     // `this` is the target function, args[0] is the thisArg
-    value.NativeFunctionCall -> {
+    value.CallNative(value.FunctionCall) -> {
       let #(this_arg, call_args) = case args {
         [t, ..rest] -> #(t, rest)
         [] -> #(JsUndefined, [])
@@ -3136,7 +3136,7 @@ fn call_native(
     }
     // Function.prototype.apply(thisArg, argsArray)
     // `this` is the target function, args[0] is thisArg, args[1] is array
-    value.NativeFunctionApply -> {
+    value.CallNative(value.FunctionApply) -> {
       let this_arg = case args {
         [t, ..] -> t
         _ -> JsUndefined
@@ -3150,7 +3150,7 @@ fn call_native(
     }
     // Function.prototype.bind(thisArg, ...args)
     // Creates a bound function object
-    value.NativeFunctionBind -> {
+    value.CallNative(value.FunctionBind) -> {
       let #(this_arg, bound_args) = case args {
         [t, ..rest] -> #(t, rest)
         [] -> #(JsUndefined, [])
@@ -3170,11 +3170,11 @@ fn call_native(
             heap.alloc(
               state.heap,
               ObjectSlot(
-                kind: NativeFunction(value.NativeBoundFunction(
+                kind: NativeFunction(value.CallNative(value.BoundFunction(
                   target: target_ref,
                   bound_this: this_arg,
                   bound_args:,
-                )),
+                ))),
                 properties: dict.from_list([
                   #("name", common.fn_name_property(name)),
                 ]),
@@ -3199,7 +3199,7 @@ fn call_native(
       }
     }
     // Bound function: prepend bound_args, use bound_this
-    value.NativeBoundFunction(target:, bound_this:, bound_args:) -> {
+    value.CallNative(value.BoundFunction(target:, bound_this:, bound_args:)) -> {
       let final_args = list.append(bound_args, args)
       call_value(
         State(..state, stack: rest_stack),
@@ -3209,14 +3209,14 @@ fn call_native(
       )
     }
     // Promise constructor: new Promise(executor)
-    value.NativePromiseConstructor ->
+    value.CallNative(value.PromiseConstructor) ->
       call_native_promise_constructor(state, args, rest_stack)
     // Promise resolve/reject internal functions
-    value.NativePromiseResolveFunction(
+    value.CallNative(value.PromiseResolveFunction(
       promise_ref:,
       data_ref:,
       already_resolved_ref:,
-    ) ->
+    )) ->
       call_native_promise_resolve_fn(
         state,
         promise_ref,
@@ -3225,11 +3225,11 @@ fn call_native(
         args,
         rest_stack,
       )
-    value.NativePromiseRejectFunction(
+    value.CallNative(value.PromiseRejectFunction(
       promise_ref: _,
       data_ref:,
       already_resolved_ref:,
-    ) ->
+    )) ->
       call_native_promise_reject_fn(
         state,
         data_ref,
@@ -3238,37 +3238,37 @@ fn call_native(
         rest_stack,
       )
     // Promise.prototype.then(onFulfilled, onRejected)
-    value.NativePromiseThen ->
+    value.CallNative(value.PromiseThen) ->
       call_native_promise_then(state, this, args, rest_stack)
     // Promise.prototype.catch(onRejected) — sugar for .then(undefined, onRejected)
-    value.NativePromiseCatch ->
+    value.CallNative(value.PromiseCatch) ->
       call_native_promise_then(state, this, [JsUndefined, ..args], rest_stack)
     // Promise.prototype.finally(onFinally)
-    value.NativePromiseFinally ->
+    value.CallNative(value.PromiseFinally) ->
       call_native_promise_finally(state, this, args, rest_stack)
     // Promise.resolve(value)
-    value.NativePromiseResolveStatic ->
+    value.CallNative(value.PromiseResolveStatic) ->
       call_native_promise_resolve_static(state, args, rest_stack)
     // Promise.reject(reason)
-    value.NativePromiseRejectStatic ->
+    value.CallNative(value.PromiseRejectStatic) ->
       call_native_promise_reject_static(state, args, rest_stack)
     // Promise.prototype.finally wrapper functions
-    value.NativePromiseFinallyFulfill(on_finally:) ->
+    value.CallNative(value.PromiseFinallyFulfill(on_finally:)) ->
       call_native_finally_fulfill(state, on_finally, args, rest_stack)
-    value.NativePromiseFinallyReject(on_finally:) ->
+    value.CallNative(value.PromiseFinallyReject(on_finally:)) ->
       call_native_finally_reject(state, on_finally, args, rest_stack)
-    value.NativePromiseFinallyValueThunk(value: captured_value) -> {
+    value.CallNative(value.PromiseFinallyValueThunk(value: captured_value)) -> {
       // Ignore argument, return the captured value
       Ok(
         State(..state, stack: [captured_value, ..rest_stack], pc: state.pc + 1),
       )
     }
-    value.NativePromiseFinallyThrower(reason:) -> {
+    value.CallNative(value.PromiseFinallyThrower(reason:)) -> {
       // Ignore argument, throw the captured reason
       Error(#(Thrown, reason, state.heap))
     }
     // Async function resume (called when awaited promise settles)
-    value.NativeAsyncResume(async_data_ref:, is_reject:) ->
+    value.CallNative(value.AsyncResume(async_data_ref:, is_reject:)) ->
       call_native_async_resume(
         state,
         async_data_ref,
@@ -3277,14 +3277,14 @@ fn call_native(
         rest_stack,
       )
     // Generator prototype methods
-    value.NativeGeneratorNext ->
+    value.CallNative(value.GeneratorNext) ->
       call_native_generator_next(state, this, args, rest_stack)
-    value.NativeGeneratorReturn ->
+    value.CallNative(value.GeneratorReturn) ->
       call_native_generator_return(state, this, args, rest_stack)
-    value.NativeGeneratorThrow ->
+    value.CallNative(value.GeneratorThrow) ->
       call_native_generator_throw(state, this, args, rest_stack)
     // Symbol() constructor — callable but NOT new-able
-    value.NativeSymbolConstructor -> {
+    value.CallNative(value.SymbolConstructor) -> {
       let #(new_descs, sym_val) =
         builtins_symbol.call_symbol(args, state.symbol_descriptions)
       Ok(
@@ -3297,7 +3297,7 @@ fn call_native(
       )
     }
     // String() constructor — uses full ToString (ToPrimitive for objects)
-    value.NativeStringConstructor ->
+    value.CallNative(value.StringConstructor) ->
       case args {
         [] ->
           Ok(
@@ -3407,7 +3407,7 @@ fn do_construct(
     }
     // Bound function used as constructor: resolve target, prepend args
     Some(ObjectSlot(
-      kind: NativeFunction(value.NativeBoundFunction(target:, bound_args:, ..)),
+      kind: NativeFunction(value.CallNative(value.BoundFunction(target:, bound_args:, ..))),
       ..,
     )) -> {
       let final_args = list.append(bound_args, args)
@@ -3469,7 +3469,7 @@ fn construct_value(
     }
     // Chained bound function: resolve further
     Some(ObjectSlot(
-      kind: NativeFunction(value.NativeBoundFunction(target:, bound_args:, ..)),
+      kind: NativeFunction(value.CallNative(value.BoundFunction(target:, bound_args:, ..))),
       ..,
     )) -> {
       let final_args = list.append(bound_args, args)
@@ -3824,50 +3824,21 @@ fn dispatch_native(
     value.MathNative(n) -> builtins_math.dispatch(n, args, this, state)
     value.ErrorNative(n) -> builtins_error.dispatch(n, args, this, state)
     value.ArcNative(n) -> builtins_arc.dispatch(n, args, this, state)
-    value.NativeArcSpawn -> arc_spawn(args, state)
+    value.VmNative(value.ArcSpawn) -> arc_spawn(args, state)
     value.JsonNative(n) -> builtins_json.dispatch(n, args, this, state)
     value.MapNative(n) -> builtins_map.dispatch(n, args, this, state)
     value.SetNative(n) -> builtins_set.dispatch(n, args, this, state)
     value.WeakMapNative(n) -> builtins_weak_map.dispatch(n, args, this, state)
     value.WeakSetNative(n) -> builtins_weak_set.dispatch(n, args, this, state)
     // Standalone VM-level natives
-    value.NativeFunctionConstructor ->
+    value.VmNative(value.FunctionConstructor) ->
       frame.type_error(state, "Function constructor is not supported")
-    value.NativeIteratorSymbolIterator -> #(state, Ok(this))
-    // These are handled in call_native before reaching dispatch_native.
-    // If we ever get here, it's a bug.
-    value.NativeStringConstructor ->
-      panic as "NativeStringConstructor should be handled in call_native"
-    value.NativeFunctionToString -> function_to_string(this, state)
-    value.NativeFunctionCall
-    | value.NativeFunctionApply
-    | value.NativeFunctionBind
-    | value.NativeBoundFunction(..) ->
-      panic as "Function call/apply/bind/bound should be handled in call_native"
-    value.NativePromiseConstructor
-    | value.NativePromiseThen
-    | value.NativePromiseCatch
-    | value.NativePromiseFinally
-    | value.NativePromiseResolveStatic
-    | value.NativePromiseRejectStatic
-    | value.NativePromiseResolveFunction(..)
-    | value.NativePromiseRejectFunction(..)
-    | value.NativePromiseFinallyFulfill(..)
-    | value.NativePromiseFinallyReject(..)
-    | value.NativePromiseFinallyValueThunk(..)
-    | value.NativePromiseFinallyThrower(..) ->
-      panic as "Promise natives should be handled in call_native"
-    value.NativeGeneratorNext
-    | value.NativeGeneratorReturn
-    | value.NativeGeneratorThrow ->
-      panic as "Generator natives should be handled in call_native"
-    value.NativeAsyncResume(..) ->
-      panic as "NativeAsyncResume should be handled in call_native"
-    value.NativeSymbolConstructor ->
-      panic as "NativeSymbolConstructor should be handled in call_native"
+    value.VmNative(value.IteratorSymbolIterator) -> #(state, Ok(this))
+    value.VmNative(value.FunctionToString) -> function_to_string(this, state)
     // Global functions: eval, URI encoding/decoding
-    value.NativeEval -> frame.type_error(state, "eval is not supported")
-    value.NativeDecodeURI -> {
+    value.VmNative(value.Eval) ->
+      frame.type_error(state, "eval is not supported")
+    value.VmNative(value.DecodeURI) -> {
       let arg = case args {
         [s, ..] -> s
         [] -> value.JsUndefined
@@ -3875,7 +3846,7 @@ fn dispatch_native(
       use str, state <- frame.try_to_string(state, arg)
       #(state, Ok(value.JsString(uri_decode(str))))
     }
-    value.NativeEncodeURI -> {
+    value.VmNative(value.EncodeURI) -> {
       let arg = case args {
         [s, ..] -> s
         [] -> value.JsUndefined
@@ -3883,7 +3854,7 @@ fn dispatch_native(
       use str, state <- frame.try_to_string(state, arg)
       #(state, Ok(value.JsString(uri_encode(str, True))))
     }
-    value.NativeDecodeURIComponent -> {
+    value.VmNative(value.DecodeURIComponent) -> {
       let arg = case args {
         [s, ..] -> s
         [] -> value.JsUndefined
@@ -3891,7 +3862,7 @@ fn dispatch_native(
       use str, state <- frame.try_to_string(state, arg)
       #(state, Ok(value.JsString(uri_decode(str))))
     }
-    value.NativeEncodeURIComponent -> {
+    value.VmNative(value.EncodeURIComponent) -> {
       let arg = case args {
         [s, ..] -> s
         [] -> value.JsUndefined
@@ -3900,7 +3871,7 @@ fn dispatch_native(
       #(state, Ok(value.JsString(uri_encode(str, False))))
     }
     // AnnexB B.2.1.1 escape ( string )
-    value.NativeEscape -> {
+    value.VmNative(value.Escape) -> {
       let arg = case args {
         [s, ..] -> s
         [] -> value.JsUndefined
@@ -3909,7 +3880,7 @@ fn dispatch_native(
       #(state, Ok(value.JsString(js_escape(str))))
     }
     // AnnexB B.2.1.2 unescape ( string )
-    value.NativeUnescape -> {
+    value.VmNative(value.Unescape) -> {
       let arg = case args {
         [s, ..] -> s
         [] -> value.JsUndefined
@@ -3917,6 +3888,8 @@ fn dispatch_native(
       use str, state <- frame.try_to_string(state, arg)
       #(state, Ok(value.JsString(js_unescape(str))))
     }
+    // All other VmNative variants are handled in call_native
+    value.CallNative(_) -> panic as "CallNative should be handled in call_native"
   }
 }
 
@@ -4377,9 +4350,9 @@ fn call_native_promise_finally(
         heap.alloc(
           state.heap,
           value.ObjectSlot(
-            kind: value.NativeFunction(value.NativePromiseFinallyFulfill(
+            kind: value.NativeFunction(value.CallNative(value.PromiseFinallyFulfill(
               on_finally:,
-            )),
+            ))),
             properties: dict.new(),
             elements: js_elements.new(),
             prototype: Some(state.builtins.function.prototype),
@@ -4392,9 +4365,9 @@ fn call_native_promise_finally(
         heap.alloc(
           h,
           value.ObjectSlot(
-            kind: value.NativeFunction(value.NativePromiseFinallyReject(
+            kind: value.NativeFunction(value.CallNative(value.PromiseFinallyReject(
               on_finally:,
-            )),
+            ))),
             properties: dict.new(),
             elements: js_elements.new(),
             prototype: Some(state.builtins.function.prototype),
@@ -4495,9 +4468,9 @@ fn finally_chain_value(
     heap.alloc(
       state1.heap,
       value.ObjectSlot(
-        kind: value.NativeFunction(value.NativePromiseFinallyValueThunk(
+        kind: value.NativeFunction(value.CallNative(value.PromiseFinallyValueThunk(
           value: captured_value,
-        )),
+        ))),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(state.builtins.function.prototype),
@@ -4544,9 +4517,9 @@ fn finally_chain_throw(
     heap.alloc(
       state1.heap,
       value.ObjectSlot(
-        kind: value.NativeFunction(value.NativePromiseFinallyThrower(
+        kind: value.NativeFunction(value.CallNative(value.PromiseFinallyThrower(
           reason: captured_reason,
-        )),
+        ))),
         properties: dict.new(),
         elements: js_elements.new(),
         prototype: Some(state.builtins.function.prototype),

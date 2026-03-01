@@ -68,13 +68,13 @@ pub fn init(
       #("fromCharCode", StringNative(StringFromCharCode), 1),
       #("fromCodePoint", StringNative(StringFromCodePoint), 1),
     ])
-  // Note: NativeStringConstructor stays VM-level (needs ToPrimitive/ToString)
+  // Note: StringConstructor stays VM-level (needs ToPrimitive/ToString)
   common.init_type(
     h,
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { value.NativeStringConstructor },
+    fn(_) { value.CallNative(value.StringConstructor) },
     "String",
     1,
     static_methods,

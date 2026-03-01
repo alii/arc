@@ -46,7 +46,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
       #("peek", ArcNative(ArcPeek), 1),
-      #("spawn", value.NativeArcSpawn, 1),
+      #("spawn", value.VmNative(value.ArcSpawn), 1),
       #("send", ArcNative(ArcSend), 2),
       #("receive", ArcNative(ArcReceive), 0),
       #("self", ArcNative(ArcSelf), 0),
