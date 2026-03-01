@@ -97,6 +97,8 @@ pub type State {
     const_globals: set.Set(String),
     /// Descriptions for user-created symbols (Symbol("desc")).
     symbol_descriptions: dict.Dict(value.SymbolId, String),
+    /// Global symbol registry for Symbol.for() / Symbol.keyFor().
+    symbol_registry: dict.Dict(String, value.SymbolId),
     /// ES2024 ToString — converts any JsValue to a string, including objects
     /// via ToPrimitive with VM re-entry. Set by the VM executor.
     js_to_string: fn(State, JsValue) ->

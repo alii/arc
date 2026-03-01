@@ -130,7 +130,7 @@ pub fn init(
       [#("name", value.builtin_property(JsString("AggregateError")))],
       fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "AggregateError",
-      1,
+      2,
       [],
     )
 

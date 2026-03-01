@@ -136,6 +136,7 @@ fn new_state(
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
+  symbol_registry: dict.Dict(String, value.SymbolId),
 ) -> State {
   State(
     stack: [],
@@ -156,6 +157,7 @@ fn new_state(
     job_queue: [],
     const_globals: set.new(),
     symbol_descriptions:,
+    symbol_registry:,
     js_to_string: js_to_string_callback,
     call_fn: call_fn_callback,
   )
@@ -186,7 +188,7 @@ fn init_state(
     False -> dict.get(globals, "globalThis") |> result.unwrap(JsUndefined)
   }
   State(
-    ..new_state(func, locals, heap, builtins, globals, dict.new()),
+    ..new_state(func, locals, heap, builtins, globals, dict.new(), dict.new()),
     this_binding:,
   )
 }
@@ -257,6 +259,7 @@ pub type ReplEnv {
     globals: dict.Dict(String, JsValue),
     const_globals: set.Set(String),
     symbol_descriptions: dict.Dict(value.SymbolId, String),
+    symbol_registry: dict.Dict(String, value.SymbolId),
   )
 }
 
@@ -278,6 +281,7 @@ pub fn run_and_drain_repl(
         builtins,
         env.globals,
         env.symbol_descriptions,
+        env.symbol_registry,
       ),
       const_globals: env.const_globals,
     )
@@ -288,6 +292,7 @@ pub fn run_and_drain_repl(
       globals: drained_state.globals,
       const_globals: drained_state.const_globals,
       symbol_descriptions: drained_state.symbol_descriptions,
+      symbol_registry: drained_state.symbol_registry,
     )
   case completion {
     NormalCompletion(val, _) ->
@@ -3296,6 +3301,64 @@ fn call_native(
         ),
       )
     }
+    // Symbol.for(key) — global symbol registry
+    value.Call(value.SymbolFor) -> {
+      // Step 1: Let stringKey be ? ToString(key).
+      let key_val = case args {
+        [k, ..] -> k
+        [] -> value.JsUndefined
+      }
+      use #(key_str, state) <- result.try(rethrow(js_to_string(state, key_val)))
+      // Step 2-4: Look up in GlobalSymbolRegistry, return existing or create new.
+      case dict.get(state.symbol_registry, key_str) {
+        Ok(existing_id) ->
+          Ok(
+            State(
+              ..state,
+              stack: [value.JsSymbol(existing_id), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        Error(Nil) -> {
+          let id = value.UserSymbol(builtins_symbol.new_symbol_ref())
+          let new_registry = dict.insert(state.symbol_registry, key_str, id)
+          let new_descs =
+            dict.insert(state.symbol_descriptions, id, key_str)
+          Ok(
+            State(
+              ..state,
+              stack: [value.JsSymbol(id), ..rest_stack],
+              pc: state.pc + 1,
+              symbol_registry: new_registry,
+              symbol_descriptions: new_descs,
+            ),
+          )
+        }
+      }
+    }
+    // Symbol.keyFor(sym) — reverse lookup in global registry
+    value.Call(value.SymbolKeyFor) -> {
+      case args {
+        [value.JsSymbol(id), ..] -> {
+          // Search the registry for this symbol ID
+          let result =
+            dict.to_list(state.symbol_registry)
+            |> list.find(fn(pair) { pair.1 == id })
+          let val = case result {
+            Ok(#(key, _)) -> value.JsString(key)
+            Error(Nil) -> value.JsUndefined
+          }
+          Ok(
+            State(..state, stack: [val, ..rest_stack], pc: state.pc + 1),
+          )
+        }
+        _ ->
+          rethrow(thrown_type_error(
+            state,
+            "Symbol.keyFor requires a Symbol argument",
+          ))
+      }
+    }
     // String() constructor — uses full ToString (ToPrimitive for objects)
     value.Call(value.StringConstructor) ->
       case args {
@@ -3938,6 +4001,7 @@ fn arc_spawn(
             state.builtins,
             state.globals,
             state.symbol_descriptions,
+            state.symbol_registry,
           )
         })
       Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
@@ -3949,6 +4013,7 @@ fn arc_spawn(
             state.builtins,
             state.globals,
             state.symbol_descriptions,
+            state.symbol_registry,
           )
         })
       _ -> Error("Arc.spawn: argument is not a function")
@@ -3980,6 +4045,7 @@ fn run_spawned_closure(
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
+  symbol_registry: dict.Dict(String, value.SymbolId),
 ) -> Nil {
   let env_values = case heap.read(heap, env_ref) {
     Some(value.EnvSlot(slots)) -> slots
@@ -4001,6 +4067,7 @@ fn run_spawned_closure(
       builtins,
       globals,
       symbol_descriptions,
+      symbol_registry,
     )
 
   case execute_inner(state) {
@@ -4022,10 +4089,19 @@ fn run_spawned_native(
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
+  symbol_registry: dict.Dict(String, value.SymbolId),
 ) -> Nil {
   let locals = array.repeat(JsUndefined, caller_func.local_count)
   let state =
-    new_state(caller_func, locals, heap, builtins, globals, symbol_descriptions)
+    new_state(
+      caller_func,
+      locals,
+      heap,
+      builtins,
+      globals,
+      symbol_descriptions,
+      symbol_registry,
+    )
 
   case call_native(state, native, [], state.stack, JsUndefined) {
     Ok(final_state) -> {

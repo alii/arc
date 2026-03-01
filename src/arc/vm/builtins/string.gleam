@@ -695,39 +695,58 @@ pub fn string_split(
   // Steps 1, 3: RequireObjectCoercible + ToString
   case coerce_to_string(this, state) {
     Ok(#(s, state)) -> {
-      case args {
-        // Step 7: separator is undefined => return [S]
-        [JsUndefined, ..] | [] -> {
-          let #(heap, ref) =
-            common.alloc_array(state.heap, [JsString(s)], array_proto)
+      let sep_val = case args {
+        [s, ..] -> s
+        [] -> JsUndefined
+      }
+      let limit_val = case args {
+        [_, l, ..] -> l
+        _ -> JsUndefined
+      }
+      // Step 4: If limit is undefined, let lim be 2^32-1; else ToUint32(limit).
+      // ToUint32 of NaN or non-numeric string is 0.
+      let lim = case limit_val {
+        JsUndefined -> 4_294_967_295
+        _ ->
+          case helpers.to_number_int(limit_val) {
+            Some(n) if n >= 0 -> n
+            _ -> 0
+          }
+      }
+      // Step 6: If lim = 0, return empty array.
+      case lim {
+        0 -> {
+          let #(heap, ref) = common.alloc_array(state.heap, [], array_proto)
           #(State(..state, heap:), Ok(JsObject(ref)))
         }
-        [sep_val, ..] -> {
-          // Step 5: R = ToString(separator)
-          case frame.to_string(state, sep_val) {
-            Ok(#(sep, state)) -> {
-              let heap = state.heap
-              // Steps 8-9: empty separator => split into individual chars
-              // Steps 10-15: general splitting
-              let parts = case sep {
-                "" -> string.to_graphemes(s) |> list.map(JsString)
-                _ -> string.split(s, sep) |> list.map(JsString)
-              }
-              // Step 4: apply limit if provided
-              let parts = case args {
-                [_, limit_val, ..] ->
-                  case helpers.to_number_int(limit_val) {
-                    Some(limit) -> list.take(parts, limit)
-                    None -> parts
-                  }
-                _ -> parts
-              }
-              let #(heap, ref) = common.alloc_array(heap, parts, array_proto)
+        _ ->
+          case sep_val {
+            // Step 7: If separator is undefined, return [S].
+            JsUndefined -> {
+              let #(heap, ref) =
+                common.alloc_array(state.heap, [JsString(s)], array_proto)
               #(State(..state, heap:), Ok(JsObject(ref)))
             }
-            Error(#(thrown, state)) -> #(state, Error(thrown))
+            _ -> {
+              // Step 5: R = ToString(separator)
+              case frame.to_string(state, sep_val) {
+                Ok(#(sep, state)) -> {
+                  // Steps 8-9: empty separator => split into individual chars
+                  // Steps 10-15: general splitting
+                  let parts = case sep {
+                    "" -> string.to_graphemes(s) |> list.map(JsString)
+                    _ -> string.split(s, sep) |> list.map(JsString)
+                  }
+                  // Apply limit
+                  let parts = list.take(parts, lim)
+                  let #(heap, ref) =
+                    common.alloc_array(state.heap, parts, array_proto)
+                  #(State(..state, heap:), Ok(JsObject(ref)))
+                }
+                Error(#(thrown, state)) -> #(state, Error(thrown))
+              }
+            }
           }
-        }
       }
     }
     Error(#(thrown, state)) -> #(state, Error(thrown))

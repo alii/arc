@@ -5762,6 +5762,7 @@ fn run_repl_lines(
       globals:,
       const_globals: set.new(),
       symbol_descriptions: dict.new(),
+      symbol_registry: dict.new(),
     )
   run_repl_lines_loop(lines, h, b, env)
 }
@@ -5830,6 +5831,7 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
       globals:,
       const_globals: set.new(),
       symbol_descriptions: dict.new(),
+      symbol_registry: dict.new(),
     )
   run_repl_throw_loop(lines, h, b, env)
 }
@@ -6405,6 +6407,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
       globals:,
       const_globals: set.new(),
       symbol_descriptions: dict.new(),
+      symbol_registry: dict.new(),
     )
   let assert Ok(#(harness_completion, env)) =
     vm.run_and_drain_repl(harness_template, h, b, env)

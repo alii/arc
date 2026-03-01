@@ -42,6 +42,22 @@ pub const symbol_species = WellKnownSymbol(6)
 
 pub const symbol_async_iterator = WellKnownSymbol(7)
 
+pub const symbol_match = WellKnownSymbol(8)
+
+pub const symbol_match_all = WellKnownSymbol(9)
+
+pub const symbol_replace = WellKnownSymbol(10)
+
+pub const symbol_search = WellKnownSymbol(11)
+
+pub const symbol_split = WellKnownSymbol(12)
+
+pub const symbol_unscopables = WellKnownSymbol(13)
+
+pub const symbol_dispose = WellKnownSymbol(14)
+
+pub const symbol_async_dispose = WellKnownSymbol(15)
+
 /// Get the description string for a well-known symbol.
 pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
   case id {
@@ -52,6 +68,14 @@ pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
     WellKnownSymbol(5) -> Some("Symbol.toPrimitive")
     WellKnownSymbol(6) -> Some("Symbol.species")
     WellKnownSymbol(7) -> Some("Symbol.asyncIterator")
+    WellKnownSymbol(8) -> Some("Symbol.match")
+    WellKnownSymbol(9) -> Some("Symbol.matchAll")
+    WellKnownSymbol(10) -> Some("Symbol.replace")
+    WellKnownSymbol(11) -> Some("Symbol.search")
+    WellKnownSymbol(12) -> Some("Symbol.split")
+    WellKnownSymbol(13) -> Some("Symbol.unscopables")
+    WellKnownSymbol(14) -> Some("Symbol.dispose")
+    WellKnownSymbol(15) -> Some("Symbol.asyncDispose")
     _ -> None
   }
 }
@@ -547,6 +571,10 @@ pub type CallNativeFn {
   AsyncResume(async_data_ref: Ref, is_reject: Bool)
   /// Symbol() constructor — callable but NOT new-able.
   SymbolConstructor
+  /// Symbol.for(key) — global symbol registry lookup/insert.
+  SymbolFor
+  /// Symbol.keyFor(sym) — reverse lookup in global symbol registry.
+  SymbolKeyFor
 }
 
 /// VM-level natives handled in dispatch_native — don't need stack manipulation.

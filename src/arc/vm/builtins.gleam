@@ -219,6 +219,34 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   )
 }
 
+/// A global entry: name, JsValue, and how to wrap it as a property descriptor.
+/// The value is the canonical data; the wrapper derives the property flags.
+type GlobalEntry {
+  /// §19.1: NaN, Infinity, undefined — {writable: false, enumerable: false, configurable: false}
+  Immutable(name: String, val: value.JsValue)
+  /// Normal builtin — {writable: true, enumerable: false, configurable: true}
+  Builtin(name: String, val: value.JsValue)
+}
+
+fn global_entry_name(entry: GlobalEntry) -> String {
+  case entry {
+    Immutable(name:, ..) | Builtin(name:, ..) -> name
+  }
+}
+
+fn global_entry_value(entry: GlobalEntry) -> value.JsValue {
+  case entry {
+    Immutable(val:, ..) | Builtin(val:, ..) -> val
+  }
+}
+
+fn global_entry_to_property(entry: GlobalEntry) -> #(String, value.Property) {
+  case entry {
+    Immutable(name:, val:) -> #(name, value.data(val))
+    Builtin(name:, val:) -> #(name, value.builtin_property(val))
+  }
+}
+
 /// Build the default global variable bindings from initialized builtins.
 /// Creates a globalThis object on the heap and returns updated heap + globals dict.
 pub fn globals(
@@ -226,52 +254,50 @@ pub fn globals(
   h: Heap,
 ) -> #(Heap, dict.Dict(String, value.JsValue)) {
   let entries = [
-    #("NaN", value.JsNumber(value.NaN)),
-    #("Infinity", value.JsNumber(value.Infinity)),
-    #("undefined", JsUndefined),
-    #("Object", JsObject(b.object.constructor)),
-    #("Function", JsObject(b.function.constructor)),
-    #("Array", JsObject(b.array.constructor)),
-    #("Error", JsObject(b.error.constructor)),
-    #("TypeError", JsObject(b.type_error.constructor)),
-    #("ReferenceError", JsObject(b.reference_error.constructor)),
-    #("RangeError", JsObject(b.range_error.constructor)),
-    #("SyntaxError", JsObject(b.syntax_error.constructor)),
-    #("EvalError", JsObject(b.eval_error.constructor)),
-    #("URIError", JsObject(b.uri_error.constructor)),
-    #("AggregateError", JsObject(b.aggregate_error.constructor)),
-    #("Math", JsObject(b.math)),
-    #("String", JsObject(b.string.constructor)),
-    #("Number", JsObject(b.number.constructor)),
-    #("Boolean", JsObject(b.boolean.constructor)),
-    #("parseInt", JsObject(b.parse_int)),
-    #("parseFloat", JsObject(b.parse_float)),
-    #("isNaN", JsObject(b.is_nan)),
-    #("isFinite", JsObject(b.is_finite)),
-    #("Promise", JsObject(b.promise.constructor)),
-    #("Symbol", JsObject(b.symbol)),
-    #("Arc", JsObject(b.arc)),
-    #("JSON", JsObject(b.json)),
-    #("Map", JsObject(b.map.constructor)),
-    #("Set", JsObject(b.set.constructor)),
-    #("WeakMap", JsObject(b.weak_map.constructor)),
-    #("WeakSet", JsObject(b.weak_set.constructor)),
-    #("eval", JsObject(b.eval)),
-    #("decodeURI", JsObject(b.decode_uri)),
-    #("encodeURI", JsObject(b.encode_uri)),
-    #("decodeURIComponent", JsObject(b.decode_uri_component)),
-    #("encodeURIComponent", JsObject(b.encode_uri_component)),
-    #("escape", JsObject(b.escape)),
-    #("unescape", JsObject(b.unescape)),
+    // §19.1: these are {writable: false, enumerable: false, configurable: false}
+    Immutable("NaN", value.JsNumber(value.NaN)),
+    Immutable("Infinity", value.JsNumber(value.Infinity)),
+    Immutable("undefined", JsUndefined),
+    // Normal builtins
+    Builtin("Object", JsObject(b.object.constructor)),
+    Builtin("Function", JsObject(b.function.constructor)),
+    Builtin("Array", JsObject(b.array.constructor)),
+    Builtin("Error", JsObject(b.error.constructor)),
+    Builtin("TypeError", JsObject(b.type_error.constructor)),
+    Builtin("ReferenceError", JsObject(b.reference_error.constructor)),
+    Builtin("RangeError", JsObject(b.range_error.constructor)),
+    Builtin("SyntaxError", JsObject(b.syntax_error.constructor)),
+    Builtin("EvalError", JsObject(b.eval_error.constructor)),
+    Builtin("URIError", JsObject(b.uri_error.constructor)),
+    Builtin("AggregateError", JsObject(b.aggregate_error.constructor)),
+    Builtin("Math", JsObject(b.math)),
+    Builtin("String", JsObject(b.string.constructor)),
+    Builtin("Number", JsObject(b.number.constructor)),
+    Builtin("Boolean", JsObject(b.boolean.constructor)),
+    Builtin("parseInt", JsObject(b.parse_int)),
+    Builtin("parseFloat", JsObject(b.parse_float)),
+    Builtin("isNaN", JsObject(b.is_nan)),
+    Builtin("isFinite", JsObject(b.is_finite)),
+    Builtin("Promise", JsObject(b.promise.constructor)),
+    Builtin("Symbol", JsObject(b.symbol)),
+    Builtin("Arc", JsObject(b.arc)),
+    Builtin("JSON", JsObject(b.json)),
+    Builtin("Map", JsObject(b.map.constructor)),
+    Builtin("Set", JsObject(b.set.constructor)),
+    Builtin("WeakMap", JsObject(b.weak_map.constructor)),
+    Builtin("WeakSet", JsObject(b.weak_set.constructor)),
+    Builtin("eval", JsObject(b.eval)),
+    Builtin("decodeURI", JsObject(b.decode_uri)),
+    Builtin("encodeURI", JsObject(b.encode_uri)),
+    Builtin("decodeURIComponent", JsObject(b.decode_uri_component)),
+    Builtin("encodeURIComponent", JsObject(b.encode_uri_component)),
+    Builtin("escape", JsObject(b.escape)),
+    Builtin("unescape", JsObject(b.unescape)),
   ]
 
-  // Create globalThis object with all global properties
+  // globalThis heap object — property descriptors for JS-visible reflection
   let properties =
-    list.map(entries, fn(pair) {
-      let #(name, val) = pair
-      #(name, value.builtin_property(val))
-    })
-    |> dict.from_list()
+    list.map(entries, global_entry_to_property) |> dict.from_list()
   let #(h, global_ref) =
     heap.alloc(
       h,
@@ -286,8 +312,10 @@ pub fn globals(
     )
   let h = heap.root(h, global_ref)
 
+  // VM globals dict — flat name→JsValue for fast GetGlobal opcode
   let globals =
-    [#("globalThis", JsObject(global_ref)), ..entries]
+    list.map(entries, fn(e) { #(global_entry_name(e), global_entry_value(e)) })
+    |> list.prepend(#("globalThis", JsObject(global_ref)))
     |> dict.from_list()
   #(h, globals)
 }

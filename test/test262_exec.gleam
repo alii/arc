@@ -490,6 +490,7 @@ fn eval_harness(
           globals:,
           const_globals: set.new(),
           symbol_descriptions: dict.new(),
+          symbol_registry: dict.new(),
         )
       Ok(#(h, env))
     }
@@ -505,6 +506,7 @@ fn eval_harness(
           globals:,
           const_globals: set.new(),
           symbol_descriptions: dict.new(),
+          symbol_registry: dict.new(),
         )
 
       list.try_fold(harness_files, #(h, env), fn(acc, filename) {
