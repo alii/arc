@@ -4,8 +4,8 @@ import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
 import arc/vm/object
 import arc/vm/value.{
-  type JsValue, type Ref, type StringNativeFn, Finite, JsNumber, JsObject,
-  JsString, JsUndefined, NaN, ObjectSlot, StringFromCharCode,
+  type JsValue, type Ref, type StringNativeFn, Finite, JsNull, JsNumber,
+  JsObject, JsString, JsUndefined, NaN, ObjectSlot, StringFromCharCode,
   StringFromCodePoint, StringNative, StringPrototypeAt, StringPrototypeCharAt,
   StringPrototypeCharCodeAt, StringPrototypeCodePointAt, StringPrototypeConcat,
   StringPrototypeEndsWith, StringPrototypeIncludes, StringPrototypeIndexOf,
@@ -1359,14 +1359,27 @@ fn to_number_for_code_point(val: JsValue) -> Result(value.JsNum, Nil) {
 // ============================================================================
 
 /// Extract the string value from `this`. Primitive strings pass through
-/// directly (fast path). For other values, calls ToString which handles
-/// RequireObjectCoercible implicitly (ToString on null/undefined throws).
+/// directly (fast path). For other values, first performs RequireObjectCoercible
+/// (throws TypeError on null/undefined), then calls ToString.
 fn coerce_to_string(
   this: JsValue,
   state: State,
 ) -> Result(#(String, State), #(JsValue, State)) {
   case this {
     JsString(s) -> Ok(#(s, state))
+    JsNull | JsUndefined -> {
+      let type_name = case this {
+        JsNull -> "null"
+        _ -> "undefined"
+      }
+      let #(h, err) =
+        common.make_type_error(
+          state.heap,
+          state.builtins,
+          "Cannot read properties of " <> type_name,
+        )
+      Error(#(err, State(..state, heap: h)))
+    }
     _ -> frame.to_string(state, this)
   }
 }

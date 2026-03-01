@@ -509,6 +509,112 @@ fn apply_descriptor(
         _, _ -> Ok(Nil)
       })
 
+      // §10.1.6.3 ValidateAndApplyPropertyDescriptor steps 4-11:
+      // Validate that the change is permitted on non-configurable properties.
+      use Nil <- result.try(case existing {
+        Ok(existing_prop) -> {
+          let current_configurable = case existing_prop {
+            DataProperty(configurable: c, ..)
+            | AccessorProperty(configurable: c, ..) -> c
+          }
+          case current_configurable {
+            True -> Ok(Nil)
+            False -> {
+              // Step 7a: Cannot make a non-configurable property configurable.
+              use Nil <- result.try(case desc_configurable {
+                Some(True) ->
+                  reject_define(state, "Cannot redefine property: " <> key)
+                _ -> Ok(Nil)
+              })
+              // Step 7b: Cannot change enumerable on non-configurable property.
+              let current_enumerable = case existing_prop {
+                DataProperty(enumerable: e, ..)
+                | AccessorProperty(enumerable: e, ..) -> e
+              }
+              use Nil <- result.try(case desc_enumerable {
+                Some(e) if e != current_enumerable ->
+                  reject_define(state, "Cannot redefine property: " <> key)
+                _ -> Ok(Nil)
+              })
+              // Step 9a: Cannot change property kind (data <-> accessor) on non-configurable.
+              let current_is_accessor = case existing_prop {
+                AccessorProperty(..) -> True
+                _ -> False
+              }
+              use Nil <- result.try(
+                case
+                  current_is_accessor != is_accessor
+                  && { has_accessor || has_data }
+                {
+                  True ->
+                    reject_define(state, "Cannot redefine property: " <> key)
+                  False -> Ok(Nil)
+                },
+              )
+              // Step 10a: Non-configurable data property checks.
+              use Nil <- result.try(case existing_prop {
+                DataProperty(writable: False, value: cur_val, ..)
+                  if !current_is_accessor
+                -> {
+                  // Step 10a.i: Cannot change writable from false to true.
+                  use Nil <- result.try(case desc_writable {
+                    Some(True) ->
+                      reject_define(state, "Cannot redefine property: " <> key)
+                    _ -> Ok(Nil)
+                  })
+                  // Step 10a.ii: Cannot change value on non-writable.
+                  use Nil <- result.try(case desc_value {
+                    Some(v) if v != cur_val ->
+                      reject_define(state, "Cannot redefine property: " <> key)
+                    _ -> Ok(Nil)
+                  })
+                  Ok(Nil)
+                }
+                _ -> Ok(Nil)
+              })
+              // Step 11a: Non-configurable accessor property checks.
+              use Nil <- result.try(case existing_prop {
+                AccessorProperty(get: cur_get, set: cur_set, ..) -> {
+                  // Cannot change getter on non-configurable accessor.
+                  use Nil <- result.try(case desc_get {
+                    Some(g) -> {
+                      let cur_g = option.unwrap(cur_get, JsUndefined)
+                      case g != cur_g {
+                        True ->
+                          reject_define(
+                            state,
+                            "Cannot redefine property: " <> key,
+                          )
+                        False -> Ok(Nil)
+                      }
+                    }
+                    _ -> Ok(Nil)
+                  })
+                  // Cannot change setter on non-configurable accessor.
+                  case desc_set {
+                    Some(s) -> {
+                      let cur_s = option.unwrap(cur_set, JsUndefined)
+                      case s != cur_s {
+                        True ->
+                          reject_define(
+                            state,
+                            "Cannot redefine property: " <> key,
+                          )
+                        False -> Ok(Nil)
+                      }
+                    }
+                    _ -> Ok(Nil)
+                  }
+                }
+                _ -> Ok(Nil)
+              })
+              Ok(Nil)
+            }
+          }
+        }
+        _ -> Ok(Nil)
+      })
+
       let new_prop = case is_accessor {
         True -> {
           // Accessor descriptor: merge get/set with existing accessor (if any).
@@ -618,6 +724,12 @@ fn apply_descriptor(
     }
     _ -> Ok(state)
   }
+}
+
+/// Helper to create a TypeError for defineProperty rejections.
+fn reject_define(state: State, msg: String) -> Result(Nil, #(JsValue, State)) {
+  let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
+  Error(#(err, State(..state, heap: h)))
 }
 
 /// Helper for ToPropertyDescriptor: reads a field via [[Get]] (calls getters).
