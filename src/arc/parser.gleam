@@ -5271,17 +5271,14 @@ fn validate_regex_unicode_loop(
               )
             _ -> Ok(2)
           }
-          case escape_result {
-            Ok(escape_len) ->
-              validate_regex_unicode_loop(
-                bytes,
-                pos + escape_len,
-                end,
-                in_class,
-                False,
-              )
-            Error(msg) -> Error(msg)
-          }
+          use escape_len <- result.try(escape_result)
+          validate_regex_unicode_loop(
+            bytes,
+            pos + escape_len,
+            end,
+            in_class,
+            False,
+          )
         }
         "[" -> validate_regex_unicode_loop(bytes, pos + 1, end, True, False)
         "]" ->

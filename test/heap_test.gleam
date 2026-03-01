@@ -2,7 +2,7 @@ import arc/vm/array
 import arc/vm/heap
 import arc/vm/js_elements
 import arc/vm/value.{
-  type FuncTemplate, ArrayObject, BigInt, BoxSlot, EnvSlot, FuncTemplate, Finite,
+  type FuncTemplate, ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FuncTemplate,
   FunctionObject, JsBigInt, JsNull, JsNumber, JsObject, JsString, JsSymbol,
   ObjectSlot, OrdinaryObject, Ref, WellKnownSymbol,
 }

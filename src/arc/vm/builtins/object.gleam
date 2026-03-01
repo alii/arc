@@ -575,8 +575,9 @@ fn read_desc_field(
   desc: JsValue,
   key: String,
 ) -> Result(#(option.Option(JsValue), State), #(JsValue, State)) {
-  case object.get_value_of(state, desc, key) {
-    Ok(#(JsUndefined, state)) -> {
+  use #(val, state) <- result.try(object.get_value_of(state, desc, key))
+  case val {
+    JsUndefined ->
       // get_value_of returns undefined for both "absent" and "present with value
       // undefined". We need HasProperty semantics (proto chain walk) to distinguish.
       case desc {
@@ -587,9 +588,7 @@ fn read_desc_field(
           }
         _ -> Ok(#(option.None, state))
       }
-    }
-    Ok(#(val, state)) -> Ok(#(Some(val), state))
-    Error(#(thrown, state)) -> Error(#(thrown, state))
+    _ -> Ok(#(Some(val), state))
   }
 }
 
@@ -604,20 +603,20 @@ fn read_desc_bool(
   desc: JsValue,
   key: String,
 ) -> Result(#(option.Option(Bool), State), #(JsValue, State)) {
-  case read_desc_field(state, desc, key) {
+  use #(field, state) <- result.map(read_desc_field(state, desc, key))
+  case field {
     // ToBoolean: already a boolean
-    Ok(#(Some(JsBool(b)), state)) -> Ok(#(Some(b), state))
+    Some(JsBool(b)) -> #(Some(b), state)
     // ToBoolean falsy values
-    Ok(#(Some(JsUndefined), state)) -> Ok(#(Some(False), state))
-    Ok(#(Some(JsNull), state)) -> Ok(#(Some(False), state))
-    Ok(#(Some(JsNumber(value.Finite(0.0))), state)) -> Ok(#(Some(False), state))
-    Ok(#(Some(JsNumber(value.NaN)), state)) -> Ok(#(Some(False), state))
-    Ok(#(Some(JsString("")), state)) -> Ok(#(Some(False), state))
+    Some(JsUndefined) -> #(Some(False), state)
+    Some(JsNull) -> #(Some(False), state)
+    Some(JsNumber(value.Finite(0.0))) -> #(Some(False), state)
+    Some(JsNumber(value.NaN)) -> #(Some(False), state)
+    Some(JsString("")) -> #(Some(False), state)
     // ToBoolean: everything else is truthy (objects, non-empty strings, non-zero numbers, symbols)
-    Ok(#(Some(_), state)) -> Ok(#(Some(True), state))
+    Some(_) -> #(Some(True), state)
     // Field absent — not set in descriptor (different from false!)
-    Ok(#(option.None, state)) -> Ok(#(option.None, state))
-    Error(#(thrown, state)) -> Error(#(thrown, state))
+    option.None -> #(option.None, state)
   }
 }
 
@@ -1184,13 +1183,11 @@ fn collect_values(
 ) -> Result(#(List(JsValue), State), #(JsValue, State)) {
   case keys {
     [] -> Ok(#(acc, state))
-    [k, ..rest] ->
+    [k, ..rest] -> {
       // §7.3.23 step 3.a.ii.1: Let value be ? Get(O, key)
-      case object.get_value(state, ref, k, receiver) {
-        Ok(#(val, state)) ->
-          collect_values(state, ref, receiver, rest, [val, ..acc])
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
+      use #(val, state) <- result.try(object.get_value(state, ref, k, receiver))
+      collect_values(state, ref, receiver, rest, [val, ..acc])
+    }
   }
 }
 
@@ -1248,13 +1245,11 @@ fn collect_entries(
 ) -> Result(#(List(#(String, JsValue)), State), #(JsValue, State)) {
   case keys {
     [] -> Ok(#(acc, state))
-    [k, ..rest] ->
+    [k, ..rest] -> {
       // §7.3.23 step 3.a.ii.1: Let value be ? Get(O, key)
-      case object.get_value(state, ref, k, receiver) {
-        Ok(#(val, state)) ->
-          collect_entries(state, ref, receiver, rest, [#(k, val), ..acc])
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
+      use #(val, state) <- result.try(object.get_value(state, ref, k, receiver))
+      collect_entries(state, ref, receiver, rest, [#(k, val), ..acc])
+    }
   }
 }
 
@@ -1452,11 +1447,10 @@ fn assign_sources(
 ) -> Result(State, #(JsValue, State)) {
   case sources {
     [] -> Ok(state)
-    [source, ..rest] ->
-      case assign_source(state, target_ref, source) {
-        Ok(state) -> assign_sources(state, target_ref, rest)
-        Error(err) -> Error(err)
-      }
+    [source, ..rest] -> {
+      use state <- result.try(assign_source(state, target_ref, source))
+      assign_sources(state, target_ref, rest)
+    }
   }
 }
 
@@ -1536,20 +1530,24 @@ fn assign_keys(
 ) -> Result(State, #(JsValue, State)) {
   case keys {
     [] -> Ok(state)
-    [k, ..rest] ->
+    [k, ..rest] -> {
       // Step 2.a: Let propValue be ? Get(from, nextKey).
-      case object.get_value(state, src_ref, k, receiver) {
-        Ok(#(val, state)) ->
-          // Step 2.b: Perform ? Set(to, nextKey, propValue, true).
-          case
-            object.set_value(state, target_ref, k, val, JsObject(target_ref))
-          {
-            Ok(#(state, _)) ->
-              assign_keys(state, target_ref, src_ref, receiver, rest)
-            Error(#(thrown, state)) -> Error(#(thrown, state))
-          }
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
+      use #(val, state) <- result.try(object.get_value(
+        state,
+        src_ref,
+        k,
+        receiver,
+      ))
+      // Step 2.b: Perform ? Set(to, nextKey, propValue, true).
+      use #(state, _) <- result.try(object.set_value(
+        state,
+        target_ref,
+        k,
+        val,
+        JsObject(target_ref),
+      ))
+      assign_keys(state, target_ref, src_ref, receiver, rest)
+    }
   }
 }
 

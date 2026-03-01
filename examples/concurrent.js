@@ -3,8 +3,8 @@
 // the BEAM interleaving them in real time.
 
 function run(name, delay) {
-	Arc.log(Arc.self());
-	let i = 0;
+	Arc.log(Arc.self(), 'is starting');
+	let i = 1;
 	while (true) {
 		Arc.log(`${name} tick`, i);
 		i = i + 1;
@@ -12,9 +12,9 @@ function run(name, delay) {
 	}
 }
 
-Arc.spawn(() => run('[Process A]', 200));
-Arc.spawn(() => run('[Process B]', 1000));
+Arc.spawn(() => run('[Process A]', 50));
+Arc.spawn(() => run('    [Process B]', 200));
 
-Arc.log('Main process sleeping... watch A and B interleave!');
-Arc.sleep(5000);
-Arc.log('Done!');
+Arc.log('  [Main] sleeping... watch A and B interleave!');
+Arc.sleep(800);
+Arc.log('  [Main] Done!');

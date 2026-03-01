@@ -1,10 +1,13 @@
 import arc/vm/array.{type Array}
 import arc/vm/opcode.{type Op}
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
+import gleam/string
 
 /// A reference to a heap slot. Public so heap.gleam can construct/destructure.
 pub type Ref {
@@ -115,6 +118,45 @@ pub type JsNum {
   NaN
   Infinity
   NegInfinity
+}
+
+/// Number::toString(x, radixMV) helper — ES2024 §21.1.3.6 step 5.
+///
+/// Per spec, NaN/+Infinity/-Infinity always use their canonical string forms
+/// regardless of radix. For finite values:
+///   - Radix 10: use standard Number::toString (decimal formatting).
+///   - Other radix: convert the integer part to the specified base using
+///     lowercase digits (a-z for 10-35).
+///
+/// Note: Non-integer values with non-10 radix fall back to decimal.
+/// The spec requires proper fractional digit conversion (e.g. 3.5 in base 16
+/// should produce "3.8"), but this is rarely used and complex to implement.
+pub fn format_number_radix(n: JsNum, radix: Int) -> String {
+  case n {
+    NaN -> "NaN"
+    Infinity -> "Infinity"
+    NegInfinity -> "-Infinity"
+    Finite(f) ->
+      case radix {
+        10 -> js_format_number(f)
+        _ -> {
+          let truncated = float.truncate(f)
+          case int.to_float(truncated) == f {
+            // Integer value — use radix conversion. int.to_base_string
+            // returns uppercase (via erlang integer_to_binary/2); JS wants
+            // lowercase. The function handles sign ("-ff" for -255) which
+            // matches JS semantics.
+            True ->
+              int.to_base_string(truncated, radix)
+              |> result.map(string.lowercase)
+              // radix already validated as 2-36 by caller
+              |> result.unwrap(js_format_number(f))
+            // Non-integer with non-10 radix — fall back to decimal.
+            False -> js_format_number(f)
+          }
+        }
+      }
+  }
 }
 
 /// Stack values — the things that live on the VM stack or inside object properties.
@@ -330,7 +372,7 @@ pub type NativeFn {
   NativeArcLog
   /// Arc.sleep(ms) — suspend the current BEAM process for ms milliseconds.
   NativeArcSleep
-  /// Pid.prototype.toString — returns "Pid<<0.83.0>>" style string.
+  /// Pid.prototype.toString — returns "Pid<0.83.0>" style string.
   NativePidToString
 }
 
@@ -412,6 +454,7 @@ pub fn writable(prop: Property) -> Property {
   case prop {
     DataProperty(value:, enumerable:, configurable:, ..) ->
       DataProperty(value:, writable: True, enumerable:, configurable:)
+
     AccessorProperty(..) -> panic as "Accessor property cannot be made writable"
   }
 }
@@ -421,6 +464,7 @@ pub fn enumerable(prop: Property) -> Property {
   case prop {
     DataProperty(value:, writable:, configurable:, ..) ->
       DataProperty(value:, writable:, enumerable: True, configurable:)
+
     AccessorProperty(get:, set:, configurable:, ..) ->
       AccessorProperty(get:, set:, enumerable: True, configurable:)
   }
@@ -431,6 +475,7 @@ pub fn configurable(prop: Property) -> Property {
   case prop {
     DataProperty(value:, writable:, enumerable:, ..) ->
       DataProperty(value:, writable:, enumerable:, configurable: True)
+
     AccessorProperty(get:, set:, enumerable:, ..) ->
       AccessorProperty(get:, set:, enumerable:, configurable: True)
   }
@@ -524,12 +569,9 @@ pub type GeneratorState {
   Completed
 }
 
-/// What lives in a heap slot.
+/// What lives in a heap slot.    
 pub type HeapSlot {
   /// Unified object slot — covers ordinary objects, arrays, and functions.
-  /// - `properties`: string-keyed own properties with descriptor flags
-  /// - `elements`: integer-keyed elements (primarily for ArrayObject, bare values)
-  /// - `prototype`: link for prototype chain traversal
   ObjectSlot(
     kind: ExoticKind,
     properties: Dict(String, Property),
@@ -598,6 +640,107 @@ pub type HeapSlot {
     saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
+}
+
+fn indent(lines: List(List(String)), indent: Int) -> String {
+  let indent = string.repeat("\t", indent)
+  use acc, line <- list.fold(lines, "")
+  let line = indent <> string.join(line, " ")
+
+  case acc {
+    "" -> line
+    acc -> acc <> "\n" <> line
+  }
+}
+
+// will probably get rid of this function or move it and remake it.s
+pub fn heap_slot_to_string(slot: HeapSlot) -> String {
+  case slot {
+    ObjectSlot(
+      kind:,
+      properties:,
+      elements:,
+      prototype:,
+      symbol_properties:,
+      extensible:,
+    ) -> {
+      [
+        "ObjectSlot(",
+        [
+          ["kind:", string.inspect(kind)],
+          [
+            "properties:",
+
+            "\n"
+              <> dict.fold(properties, [], fn(acc, key, property) {
+              [
+                [
+                  key <> ":",
+                  case property {
+                    DataProperty(value:, writable:, enumerable:, configurable:) -> [
+                      [],
+                      ["value:", string.inspect(value)],
+                      ["writable:", bool.to_string(writable)],
+                      ["enumerable:", bool.to_string(enumerable)],
+                      ["configurable:", bool.to_string(configurable)],
+                    ]
+                    AccessorProperty(get:, set:, enumerable:, configurable:) -> [
+                      [],
+                      ["get:", string.inspect(get)],
+                      ["set:", string.inspect(set)],
+                      ["enumerable:", bool.to_string(enumerable)],
+                      ["configurable:", bool.to_string(configurable)],
+                    ]
+                  }
+                    |> indent(4),
+                ],
+                ..acc
+              ]
+            })
+            |> indent(3),
+          ],
+          ["elements:", string.inspect(elements)],
+          [
+            "symbol properties:",
+
+            "\n"
+              <> dict.fold(symbol_properties, [], fn(acc, key, property) {
+              [
+                [
+                  string.inspect(key),
+                  case property {
+                    DataProperty(value:, writable:, enumerable:, configurable:) -> [
+                      [],
+                      ["value:", string.inspect(value)],
+                      ["writable:", bool.to_string(writable)],
+                      ["enumerable:", bool.to_string(enumerable)],
+                      ["configurable:", bool.to_string(configurable)],
+                    ]
+                    AccessorProperty(get:, set:, enumerable:, configurable:) -> [
+                      [],
+                      ["get:", string.inspect(get)],
+                      ["set:", string.inspect(set)],
+                      ["enumerable:", bool.to_string(enumerable)],
+                      ["configurable:", bool.to_string(configurable)],
+                    ]
+                  }
+                    |> indent(4),
+                ],
+                ..acc
+              ]
+            })
+            |> indent(3),
+          ],
+          ["prototype:", string.inspect(prototype)],
+          ["extensible:", string.inspect(extensible)],
+        ]
+          |> indent(2),
+        ")",
+      ]
+      |> string.join("\n")
+    }
+    _ -> "<internal>"
+  }
 }
 
 /// GC root tracing: extract heap refs from a single JsValue.
@@ -797,6 +940,14 @@ pub fn is_truthy(val: JsValue) -> Bool {
     JsString(s) -> s != ""
     JsBigInt(BigInt(n)) -> n != 0
     JsObject(_) | JsSymbol(_) -> True
+  }
+}
+
+/// Return "null" or "undefined" for error messages.
+pub fn nullish_label(val: JsValue) -> String {
+  case val {
+    JsNull -> "null"
+    _ -> "undefined"
   }
 }
 

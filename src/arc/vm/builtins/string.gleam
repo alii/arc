@@ -801,12 +801,12 @@ pub fn string_repeat(
       }
       case count_val {
         JsNumber(value.Infinity) | JsNumber(value.NegInfinity) ->
-          range_error(state, "Invalid count value: Infinity")
+          frame.range_error(state, "Invalid count value: Infinity")
         _ -> {
           let count = helpers.to_number_int(count_val) |> option.unwrap(0)
           case count < 0 {
             True ->
-              range_error(
+              frame.range_error(
                 state,
                 "Invalid count value: " <> int.to_string(count),
               )
@@ -932,11 +932,6 @@ pub fn string_at(
 // ============================================================================
 // Internal helpers
 // ============================================================================
-
-fn range_error(state: State, msg: String) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
-}
 
 /// Extract the string value from `this`. Primitive strings pass through
 /// directly (fast path). For other values, calls ToString which handles

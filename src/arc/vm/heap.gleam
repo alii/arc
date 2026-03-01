@@ -51,6 +51,16 @@ pub fn alloc(heap: Heap, slot: HeapSlot) -> #(Heap, Ref) {
   }
 }
 
+pub fn info_about_jsvalue(heap: Heap, value: value.JsValue) {
+  use ref <- option.map(case value {
+    value.JsObject(ref) -> Some(ref)
+    _ -> None
+  })
+
+  let assert Ok(data) = dict.get(heap.data, ref.id)
+  data
+}
+
 /// Reserve a Ref without writing any slot. The address is allocated
 /// (consumed from the free list or bumped), but no data exists yet.
 /// Use `write` to fill it in later. This enables forward references

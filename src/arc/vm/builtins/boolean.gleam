@@ -70,7 +70,7 @@ pub fn boolean_value_of(
   case this_boolean_value(state, this) {
     Some(b) -> #(state, Ok(JsBool(b)))
     None ->
-      type_error(
+      frame.type_error(
         state,
         "Boolean.prototype.valueOf requires that 'this' be a Boolean",
       )
@@ -96,7 +96,7 @@ pub fn boolean_to_string(
     Some(False) -> #(state, Ok(JsString("false")))
     // Step 1 threw: thisBooleanValue returned abrupt completion (TypeError).
     None ->
-      type_error(
+      frame.type_error(
         state,
         "Boolean.prototype.toString requires that 'this' be a Boolean",
       )
@@ -131,8 +131,4 @@ fn this_boolean_value(state: State, this: JsValue) -> Option(Bool) {
     // Step 3: Throw a TypeError exception.
     _ -> None
   }
-}
-
-fn type_error(state: State, msg: String) -> #(State, Result(JsValue, JsValue)) {
-  frame.type_error(state, msg)
 }

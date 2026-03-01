@@ -12,6 +12,7 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set
 import gleam/string
 
@@ -309,11 +310,10 @@ pub fn set_value(
     Some(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
     // §10.1.9.2 step 3.c: Perform ? Call(setter, Receiver, « V »).
     // §10.1.9.2 step 3.d: Return true.
-    Some(AccessorProperty(set: Some(setter), ..)) ->
-      case frame.call(state, setter, receiver, [val]) {
-        Ok(#(_, state)) -> Ok(#(state, True))
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
+    Some(AccessorProperty(set: Some(setter), ..)) -> {
+      use #(_, state) <- result.map(frame.call(state, setter, receiver, [val]))
+      #(state, True)
+    }
   }
 }
 
@@ -1054,22 +1054,24 @@ fn copy_keys_to_target(
 ) -> Result(State, #(JsValue, State)) {
   case keys {
     [] -> cont(state)
-    [k, ..rest] ->
+    [k, ..rest] -> {
       // Step 4.c.ii.1: Let propValue be ? Get(from, nextKey).
-      case get_value(state, src_ref, k, JsObject(src_ref)) {
-        Ok(#(val, state)) -> {
-          // Step 4.c.ii.2: Perform ! CreateDataPropertyOrThrow(target, nextKey, propValue).
-          let heap = define_own_property(state.heap, target_ref, k, val)
-          copy_keys_to_target(
-            State(..state, heap:),
-            src_ref,
-            target_ref,
-            rest,
-            cont,
-          )
-        }
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
+      use #(val, state) <- result.try(get_value(
+        state,
+        src_ref,
+        k,
+        JsObject(src_ref),
+      ))
+      // Step 4.c.ii.2: Perform ! CreateDataPropertyOrThrow(target, nextKey, propValue).
+      let heap = define_own_property(state.heap, target_ref, k, val)
+      copy_keys_to_target(
+        State(..state, heap:),
+        src_ref,
+        target_ref,
+        rest,
+        cont,
+      )
+    }
   }
 }
 
@@ -1237,11 +1239,12 @@ pub fn set_symbol_value(
           }
         }
         // Step 6-7: Accessor with setter → Call(setter, Receiver, << V >>), return true.
-        Ok(AccessorProperty(set: Some(setter), ..)) ->
-          case frame.call(state, setter, receiver, [val]) {
-            Ok(#(_, state)) -> Ok(#(state, True))
-            Error(#(thrown, state)) -> Error(#(thrown, state))
-          }
+        Ok(AccessorProperty(set: Some(setter), ..)) -> {
+          use #(_, state) <- result.map(
+            frame.call(state, setter, receiver, [val]),
+          )
+          #(state, True)
+        }
         // Step 5: setter is undefined → return false.
         Ok(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
       }

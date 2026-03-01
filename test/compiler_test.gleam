@@ -6403,15 +6403,17 @@ pub fn module_repl_harness_globals_test() -> Nil {
   let #(h, globals) = builtins.globals(b, h)
 
   // Step 1: Compile and run harness script in REPL mode
-  let harness_source = "function greetFromHarness() { return 'hello from harness'; }"
+  let harness_source =
+    "function greetFromHarness() { return 'hello from harness'; }"
   let assert Ok(harness_program) = parser.parse(harness_source, parser.Script)
   let assert Ok(harness_template) = compiler.compile_repl(harness_program)
 
-  let env = vm.ReplEnv(
-    globals:,
-    const_globals: set.new(),
-    symbol_descriptions: dict.new(),
-  )
+  let env =
+    vm.ReplEnv(
+      globals:,
+      const_globals: set.new(),
+      symbol_descriptions: dict.new(),
+    )
   let assert Ok(#(harness_completion, env)) =
     vm.run_and_drain_repl(harness_template, h, b, env)
   let assert vm.NormalCompletion(_, h) = harness_completion
@@ -6432,15 +6434,12 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   // Evaluate the module, passing in REPL globals
   let #(_store, result) =
-    module.evaluate_module(
-      store, specifier, h, b, env.globals,
-    )
+    module.evaluate_module(store, specifier, h, b, env.globals)
   case result {
     Ok(#(val, _heap)) -> {
       let assert True = val == JsString("hello from harness")
       Nil
     }
-    Error(err) ->
-      panic as { "module failed: " <> string.inspect(err) }
+    Error(err) -> panic as { "module failed: " <> string.inspect(err) }
   }
 }

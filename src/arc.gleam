@@ -123,8 +123,7 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
               "[Symbol: "
               <> inspect_inner(h, value.JsSymbol(sym), depth, seen)
               <> "]"
-            PidObject(pid:) ->
-              "Pid<" <> builtins_arc.ffi_pid_to_string(pid) <> ">"
+            PidObject(pid:) -> "Pid" <> builtins_arc.ffi_pid_to_string(pid)
           }
         _ -> "[Object]"
       }
@@ -199,7 +198,7 @@ fn inspect_plain_object(
         |> list.filter_map(fn(pair) {
           let #(key, prop) = pair
           case prop {
-            DataProperty(value: v, enumerable: True, ..) ->
+            DataProperty(value: v, ..) ->
               Ok(key <> ": " <> inspect_inner(h, v, depth + 1, seen))
             _ -> Error(Nil)
           }
@@ -264,7 +263,7 @@ fn eval(
             )
             Ok(#(vm.ThrowCompletion(val, heap), env)) -> #(
               ReplState(..state, heap:, env:),
-              Error("Uncaught " <> inspect(heap, val)),
+              Error("Uncaught exception: " <> inspect(heap, val)),
             )
             Ok(#(vm.YieldCompletion(_, _), _)) ->
               panic as "YieldCompletion should not appear at REPL level"
@@ -289,59 +288,88 @@ fn banner() -> Nil {
   io.println("")
 }
 
+fn handle_repl_line(state: ReplState, line: String) -> option.Option(ReplState) {
+  let source = string.trim(line)
+  case source {
+    "/clear" -> {
+      clear()
+      Some(state)
+    }
+
+    "/heap" -> {
+      io.println("Usage: `/heap <expression>`")
+      Some(state)
+    }
+
+    "/heap " <> source -> {
+      let #(new_state, result) = eval(state, source)
+
+      case result {
+        Ok(val) -> {
+          heap.info_about_jsvalue(new_state.heap, val)
+          |> option.map(value.heap_slot_to_string)
+          |> option.unwrap("none")
+          |> io.println
+        }
+        Error(err) -> io.println(err)
+      }
+
+      Some(new_state)
+    }
+
+    "/exit" -> {
+      io.println("Goodbye!")
+      None
+    }
+
+    "/reset" -> {
+      let h = heap.new()
+      let #(h, b) = builtins.init(h)
+      let #(h, globals) = builtins.globals(b, h)
+      let env =
+        vm.ReplEnv(
+          globals:,
+          const_globals: set.new(),
+          symbol_descriptions: dict.new(),
+        )
+      let state = ReplState(heap: h, builtins: b, env:)
+      clear()
+      banner()
+      Some(state)
+    }
+
+    "/help" -> {
+      io.println("    /clear - clear the console")
+      io.println("    /help  - show this message")
+      io.println("    /reset - reset the REPL state")
+      io.println("    /exit  - exit the REPL")
+      Some(state)
+    }
+
+    "" -> Some(state)
+
+    _ -> {
+      let #(new_state, result) = eval(state, source)
+      case result {
+        Ok(val) -> io.println(inspect(new_state.heap, val))
+        Error(err) -> io.println(err)
+      }
+      Some(new_state)
+    }
+  }
+}
+
 fn repl_loop(state: ReplState) -> Nil {
   case read_line("> ") {
     Error(Nil) -> {
       io.println("")
       Nil
     }
+
     Ok(line) -> {
-      let source = string.trim(line)
-      case source {
-        "/clear" -> {
-          clear()
-          repl_loop(state)
-        }
-
-        "/exit" -> {
-          io.println("Goodbye!")
-          Nil
-        }
-
-        "/reset" -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, globals) = builtins.globals(b, h)
-          let env =
-            vm.ReplEnv(
-              globals:,
-              const_globals: set.new(),
-              symbol_descriptions: dict.new(),
-            )
-          let state = ReplState(heap: h, builtins: b, env:)
-          clear()
-          banner()
-          repl_loop(state)
-        }
-
-        "/help" -> {
-          io.println("    /clear - clear the console")
-          io.println("    /help  - show this message")
-          io.println("    /reset - reset the REPL state")
-          io.println("    /exit  - exit the REPL")
-          repl_loop(state)
-        }
-
-        "" -> repl_loop(state)
-
-        _ -> {
-          let #(new_state, result) = eval(state, source)
-          case result {
-            Ok(val) -> io.println(inspect(new_state.heap, val))
-            Error(err) -> io.println(err)
-          }
-          repl_loop(new_state)
-        }
+      case handle_repl_line(state, line) {
+        Some(next) -> repl_loop(next)
+        None -> Nil
       }
     }
   }
@@ -481,7 +509,7 @@ fn run_script_file(source: String) -> Nil {
           case vm.run_and_drain(template, h, b, globals) {
             Ok(vm.NormalCompletion(_, _)) -> Nil
             Ok(vm.ThrowCompletion(val, new_heap)) ->
-              io.println("Uncaught " <> inspect(new_heap, val))
+              io.println("Uncaught exception: " <> inspect(new_heap, val))
             Ok(vm.YieldCompletion(_, _)) -> Nil
             Error(vm_err) ->
               io.println("InternalError: " <> inspect_vm_error(vm_err))
@@ -502,24 +530,34 @@ fn print_module_error(h: Heap, err: module.ModuleError) -> Nil {
   }
 }
 
+fn new_repl_state() {
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, globals) = builtins.globals(b, h)
+  ReplState(
+    heap: h,
+    builtins: b,
+    env: vm.ReplEnv(
+      globals:,
+      const_globals: set.new(),
+      symbol_descriptions: dict.new(),
+    ),
+  )
+}
+
 pub fn main() -> Nil {
   case get_script_args() {
+    ["-p", ..rest] -> {
+      let rest = string.join(rest, " ")
+      new_repl_state() |> handle_repl_line(rest)
+      Nil
+    }
+
     [path, ..] -> run_file(path)
+
     [] -> {
       banner()
-      let h = heap.new()
-      let #(h, b) = builtins.init(h)
-      let #(h, globals) = builtins.globals(b, h)
-
-      repl_loop(ReplState(
-        heap: h,
-        builtins: b,
-        env: vm.ReplEnv(
-          globals:,
-          const_globals: set.new(),
-          symbol_descriptions: dict.new(),
-        ),
-      ))
+      new_repl_state() |> repl_loop()
     }
   }
 }

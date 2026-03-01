@@ -6,23 +6,25 @@
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
 import arc/vm/array
 import arc/vm/opcode.{
-  type IrOp, type Op, IrArrayFrom,
-  IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole, IrArraySpread, IrAwait,
-  IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor,
-  IrCallConstructorApply, IrCallMethod, IrCallMethodApply, IrCallSuper,
-  IrCloseVar, IrCreateArguments, IrDefineAccessor, IrDefineAccessorComputed,
-  IrDefineField, IrDefineFieldComputed, IrDefineMethod, IrDeleteElem,
-  IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow, IrForInNext,
-  IrForInStart, IrGetBoxed, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
-  IrGetGlobal, IrGetIterator, IrGetLocal, IrGetThis, IrInitialYield,
-  IrIteratorClose, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrMarkGlobalConst,
-  IrNewObject, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
-  IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrRot3,
-  IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap,
-  IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp, IrUnmarkGlobalConst, IrYield,
+  type IrOp, type Op, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush,
+  IrArrayPushHole, IrArraySpread, IrAwait, IrBinOp, IrBoxLocal, IrCall,
+  IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
+  IrCallMethodApply, IrCallSuper, IrCloseVar, IrCreateArguments,
+  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup,
+  IrEnterFinally, IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetBoxed,
+  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
+  IrGetLocal, IrGetThis, IrInitialYield, IrIteratorClose, IrIteratorNext, IrJump,
+  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
+  IrMakeClosure, IrMarkGlobalConst, IrNewObject, IrObjectSpread, IrPop, IrPopTry,
+  IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal,
+  IrPutLocal, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar,
+  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp,
+  IrUnmarkGlobalConst, IrYield,
 }
-import arc/vm/value.{type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate}
+import arc/vm/value.{
+  type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
+}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
@@ -136,7 +138,6 @@ fn resolve_ops(
     [IrPop, ..rest] -> resolve_ops(rest, labels, [opcode.Pop, ..acc])
     [IrDup, ..rest] -> resolve_ops(rest, labels, [opcode.Dup, ..acc])
     [IrSwap, ..rest] -> resolve_ops(rest, labels, [opcode.Swap, ..acc])
-    [IrRot3, ..rest] -> resolve_ops(rest, labels, [opcode.Rot3, ..acc])
     [IrGetThis, ..rest] -> resolve_ops(rest, labels, [opcode.GetThis, ..acc])
 
     // Property access

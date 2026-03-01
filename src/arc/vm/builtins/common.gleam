@@ -74,6 +74,24 @@ pub fn alloc_proto(
   #(h, ref)
 }
 
+pub fn alloc_pojo(
+  heap: Heap,
+  object_proto: Ref,
+  props: List(#(String, value.Property)),
+) -> #(Heap, Ref) {
+  heap.alloc(
+    heap,
+    ObjectSlot(
+      kind: OrdinaryObject,
+      properties: dict.from_list(props),
+      symbol_properties: dict.new(),
+      elements: js_elements.new(),
+      prototype: Some(object_proto),
+      extensible: True,
+    ),
+  )
+}
+
 /// Allocate a NativeFunction ObjectSlot with standard name/length properties.
 ///
 /// Not a spec operation — internal helper for builtin initialization.

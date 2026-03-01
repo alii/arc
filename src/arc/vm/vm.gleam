@@ -17,17 +17,17 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/opcode.{
-  type BinOpKind, type Op, type UnaryOpKind, Add, ArrayFrom,
-  ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread, Await, BinOp,
-  BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, CallApply, CallConstructor,
-  CallConstructorApply, CallMethod, CallMethodApply, CallSuper, CreateArguments,
-  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
-  DefineMethod, DeleteElem, DeleteField, Div, Dup, EnterFinallyThrow, Eq, Exp,
-  ForInNext, ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2,
-  GetGlobal, GetIterator, GetLocal, GetThis, Gt, GtEq, InitialYield,
-  IteratorClose, IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  LogicalNot, Lt, LtEq, MakeClosure, MarkGlobalConst, Mod, Mul, Neg, NewObject,
-  NotEq, ObjectSpread, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem, PutField,
+  type BinOpKind, type Op, type UnaryOpKind, Add, ArrayFrom, ArrayFromWithHoles,
+  ArrayPush, ArrayPushHole, ArraySpread, Await, BinOp, BitAnd, BitNot, BitOr,
+  BitXor, BoxLocal, Call, CallApply, CallConstructor, CallConstructorApply,
+  CallMethod, CallMethodApply, CallSuper, CreateArguments, DefineAccessor,
+  DefineAccessorComputed, DefineField, DefineFieldComputed, DefineMethod,
+  DeleteElem, DeleteField, Div, Dup, EnterFinallyThrow, Eq, Exp, ForInNext,
+  ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2, GetGlobal,
+  GetIterator, GetLocal, GetThis, Gt, GtEq, InitialYield, IteratorClose,
+  IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, LogicalNot, Lt,
+  LtEq, MakeClosure, MarkGlobalConst, Mod, Mul, Neg, NewObject, NotEq,
+  ObjectSpread, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem, PutField,
   PutGlobal, PutLocal, Return, SetupDerivedClass, ShiftLeft, ShiftRight,
   StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp,
   UnmarkGlobalConst, Void, Yield,
@@ -36,10 +36,11 @@ import arc/vm/value.{
   type FuncTemplate, type JsNum, type JsValue, type Ref, ArrayIteratorSlot,
   ArrayObject, AsyncFunctionSlot, BigInt, DataProperty, Finite,
   ForInIteratorSlot, FunctionObject, GeneratorObject, GeneratorSlot, Infinity,
-  JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
-  JsUndefined, JsUninitialized, NaN, NativeFunction, NegInfinity, ObjectSlot,
-  OrdinaryObject, PromiseObject,
+  JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined,
+  JsUninitialized, NaN, NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
+  PromiseObject,
 }
+import gleam/bool
 import gleam/dict
 import gleam/float
 import gleam/int
@@ -65,11 +66,7 @@ pub type Completion {
 
 /// Result of module evaluation — includes locals for export extraction.
 pub type ModuleResult {
-  ModuleOk(
-    value: JsValue,
-    heap: Heap,
-    locals: array.Array(JsValue),
-  )
+  ModuleOk(value: JsValue, heap: Heap, locals: array.Array(JsValue))
   ModuleThrow(value: JsValue, heap: Heap)
   ModuleError(error: VmError)
 }
@@ -419,6 +416,46 @@ fn conditional_jump(
 // Step — single instruction dispatch
 // ============================================================================
 
+/// Convenience helpers to allocate a JS error object and return it as a thrown
+/// Error result. Eliminates the repeated 3-line pattern:
+///   let #(heap, err) = common.make_X_error(state.heap, state.builtins, msg)
+///   Error(#(Thrown, err, heap))
+fn throw_type_error(
+  state: State,
+  msg: String,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
+  Error(#(Thrown, err, heap))
+}
+
+fn throw_range_error(
+  state: State,
+  msg: String,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
+  Error(#(Thrown, err, heap))
+}
+
+fn throw_reference_error(
+  state: State,
+  msg: String,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(heap, err) =
+    common.make_reference_error(state.heap, state.builtins, msg)
+  Error(#(Thrown, err, heap))
+}
+
+/// Bridge from inner helpers that return Result(a, #(JsValue, State))
+/// to the step function's Result(a, #(StepResult, JsValue, Heap)).
+fn rethrow(
+  result: Result(a, #(JsValue, State)),
+) -> Result(a, #(StepResult, JsValue, Heap)) {
+  result.map_error(result, fn(err) {
+    let #(thrown, state) = err
+    #(Thrown, thrown, state.heap)
+  })
+}
+
 /// Execute a single instruction. Returns Ok(new_state) to continue,
 /// or Error(#(signal, value, heap)) to stop.
 fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
@@ -428,13 +465,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         Some(value) ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
         None -> {
-          let #(heap, err) =
-            common.make_range_error(
-              state.heap,
-              state.builtins,
-              "constant index out of bounds: " <> int.to_string(index),
-            )
-          Error(#(Thrown, err, heap))
+          throw_range_error(
+            state,
+            "constant index out of bounds: " <> int.to_string(index),
+          )
         }
       }
     }
@@ -465,13 +499,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     GetLocal(index) -> {
       case array.get(index, state.locals) {
         Some(JsUninitialized) -> {
-          let #(heap, err) =
-            common.make_reference_error(
-              state.heap,
-              state.builtins,
-              "Cannot access variable before initialization (TDZ)",
-            )
-          Error(#(Thrown, err, heap))
+          throw_reference_error(
+            state,
+            "Cannot access variable before initialization (TDZ)",
+          )
         }
         Some(value) ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
@@ -530,13 +561,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         [value, ..rest] ->
           case set.contains(state.const_globals, name) {
             True -> {
-              let #(heap, err) =
-                common.make_type_error(
-                  state.heap,
-                  state.builtins,
-                  "Assignment to constant variable.",
-                )
-              Error(#(Thrown, err, heap))
+              throw_type_error(state, "Assignment to constant variable.")
             }
             False ->
               // Strict mode: assignment to an undeclared variable throws
@@ -544,13 +569,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               // (ES §9.1.1.4.5 SetMutableBinding step 3.a for unresolvable refs.)
               case state.func.is_strict && !dict.has_key(state.globals, name) {
                 True -> {
-                  let #(heap, err) =
-                    common.make_reference_error(
-                      state.heap,
-                      state.builtins,
-                      name <> " is not defined",
-                    )
-                  Error(#(Thrown, err, heap))
+                  throw_reference_error(state, name <> " is not defined")
                 }
                 False ->
                   Ok(
@@ -621,18 +640,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         [right, left, ..rest] -> {
           // instanceof and in need heap access
           case kind {
-            opcode.InstanceOf ->
-              case js_instanceof(state, left, right) {
-                Ok(#(result, state)) ->
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(result), ..rest],
-                      pc: state.pc + 1,
-                    ),
-                  )
-                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-              }
+            opcode.InstanceOf -> {
+              use #(result, state) <- result.map(
+                rethrow(js_instanceof(state, left, right)),
+              )
+              State(..state, stack: [JsBool(result), ..rest], pc: state.pc + 1)
+            }
             opcode.In -> {
               // left = key, right = object
               case right {
@@ -651,18 +664,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     Error(#(thrown, state)) ->
                       Error(#(Thrown, thrown, state.heap))
                   }
-                _ -> {
-                  let #(heap, err) =
-                    common.make_type_error(
-                      state.heap,
-                      state.builtins,
-                      "Cannot use 'in' operator to search for '"
-                        <> object.inspect(left, state.heap)
-                        <> "' in "
-                        <> object.inspect(right, state.heap),
-                    )
-                  Error(#(Thrown, err, heap))
-                }
+                _ ->
+                  throw_type_error(
+                    state,
+                    "Cannot use 'in' operator to search for '"
+                      <> object.inspect(left, state.heap)
+                      <> "' in "
+                      <> object.inspect(right, state.heap),
+                  )
               }
             }
             // Add needs ToPrimitive for object operands (ES2024 §13.15.3)
@@ -717,9 +726,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                         ),
                       )
                     Error(msg) -> {
-                      let #(heap, err) =
-                        common.make_type_error(state.heap, state.builtins, msg)
-                      Error(#(Thrown, err, heap))
+                      throw_type_error(state, msg)
                     }
                   }
               }
@@ -728,9 +735,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 Ok(result) ->
                   Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
                 Error(msg) -> {
-                  let #(heap, err) =
-                    common.make_type_error(state.heap, state.builtins, msg)
-                  Error(#(Thrown, err, heap))
+                  throw_type_error(state, msg)
                 }
               }
           }
@@ -746,9 +751,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             Ok(result) ->
               Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
             Error(msg) -> {
-              let #(heap, err) =
-                common.make_type_error(state.heap, state.builtins, msg)
-              Error(#(Thrown, err, heap))
+              throw_type_error(state, msg)
             }
           }
         }
@@ -835,13 +838,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     JsUndefined ->
                       case state.this_binding {
                         JsUninitialized -> {
-                          let #(heap, err) =
-                            common.make_reference_error(
-                              state.heap,
-                              state.builtins,
-                              "Must call super constructor in derived class before returning from derived constructor",
-                            )
-                          Error(#(Thrown, err, heap))
+                          throw_reference_error(
+                            state,
+                            "Must call super constructor in derived class before returning from derived constructor",
+                          )
                         }
                         this_val ->
                           Ok(
@@ -862,13 +862,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                           )
                       }
                     _ -> {
-                      let #(heap, err) =
-                        common.make_type_error(
-                          state.heap,
-                          state.builtins,
-                          "Derived constructors may only return object or undefined",
-                        )
-                      Error(#(Thrown, err, heap))
+                      throw_type_error(
+                        state,
+                        "Derived constructors may only return object or undefined",
+                      )
                     }
                   }
                 }
@@ -962,7 +959,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             heap.alloc(
               heap,
               ObjectSlot(
-                kind: FunctionObject(func_template: child_template, env: env_ref),
+                kind: FunctionObject(
+                  func_template: child_template,
+                  env: env_ref,
+                ),
                 properties: fn_properties,
                 elements: js_elements.new(),
                 prototype: Some(state.builtins.function.prototype),
@@ -999,13 +999,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         }
         None -> {
-          let #(heap, err) =
-            common.make_range_error(
-              state.heap,
-              state.builtins,
-              "invalid function index: " <> int.to_string(func_index),
-            )
-          Error(#(Thrown, err, heap))
+          throw_range_error(
+            state,
+            "invalid function index: " <> int.to_string(func_index),
+          )
         }
       }
     }
@@ -1104,27 +1101,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   )
                 Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
                   call_native(state, native, args, rest_stack, JsUndefined)
-                _ -> {
-                  let #(heap, err) =
-                    common.make_type_error(
-                      state.heap,
-                      state.builtins,
-                      object.inspect(JsObject(obj_ref), state.heap)
-                        <> " is not a function",
-                    )
-                  Error(#(Thrown, err, heap))
-                }
+                _ ->
+                  throw_type_error(
+                    state,
+                    object.inspect(JsObject(obj_ref), state.heap)
+                      <> " is not a function",
+                  )
               }
             }
-            [non_func, ..] -> {
-              let #(heap, err) =
-                common.make_type_error(
-                  state.heap,
-                  state.builtins,
-                  object.inspect(non_func, state.heap) <> " is not a function",
-                )
-              Error(#(Thrown, err, heap))
-            }
+            [non_func, ..] ->
+              throw_type_error(
+                state,
+                object.inspect(non_func, state.heap) <> " is not a function",
+              )
             [] ->
               Error(#(
                 VmError(StackUnderflow("Call: no callee")),
@@ -1264,30 +1253,21 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
 
     GetField(name) -> {
       case state.stack {
-        [JsNull, ..] -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Cannot read properties of null (reading '" <> name <> "')",
-            )
-          Error(#(Thrown, err, heap))
+        [JsNull as v, ..] | [JsUndefined as v, ..] ->
+          throw_type_error(
+            state,
+            "Cannot read properties of "
+              <> value.nullish_label(v)
+              <> " (reading '"
+              <> name
+              <> "')",
+          )
+        [receiver, ..rest] -> {
+          use #(val, state) <- result.map(
+            rethrow(object.get_value_of(state, receiver, name)),
+          )
+          State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
-        [JsUndefined, ..] -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Cannot read properties of undefined (reading '" <> name <> "')",
-            )
-          Error(#(Thrown, err, heap))
-        }
-        [receiver, ..rest] ->
-          case object.get_value_of(state, receiver, name) {
-            Ok(#(val, state)) ->
-              Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
         [] ->
           Error(#(VmError(StackUnderflow("GetField")), JsUndefined, state.heap))
       }
@@ -1297,14 +1277,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // Consumes [value, obj] and pushes value back (assignment is an expression).
       // Consistent with PutElem which also leaves the value on the stack.
       case state.stack {
-        [value, JsObject(ref) as receiver, ..rest] ->
+        [value, JsObject(ref) as receiver, ..rest] -> {
           // set_value walks proto chain, calls setters, handles non-writable.
           // Sloppy mode: ignore failure (strict mode TypeError is a TODO).
-          case object.set_value(state, ref, name, value, receiver) {
-            Ok(#(state, _ok)) ->
-              Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
+          use #(state, _ok) <- result.map(
+            rethrow(object.set_value(state, ref, name, value, receiver)),
+          )
+          State(..state, stack: [value, ..rest], pc: state.pc + 1)
+        }
         [value, _, ..rest] -> {
           // PutField on non-object: silently ignore, still return value
           Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
@@ -1374,15 +1354,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // Computed getter/setter: { get [expr]() {} }
       // Stack: [fn, key, obj, ...] → [obj, ...]
       case state.stack {
-        [func, key, JsObject(ref) as obj, ..rest] ->
-          case js_to_string(state, key) {
-            Ok(#(key_str, state)) -> {
-              let heap =
-                object.define_accessor(state.heap, ref, key_str, func, kind)
-              Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
-            }
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
+        [func, key, JsObject(ref) as obj, ..rest] -> {
+          use #(key_str, state) <- result.map(rethrow(js_to_string(state, key)))
+          let heap =
+            object.define_accessor(state.heap, ref, key_str, func, kind)
+          State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+        }
         [_, _, _, ..] -> Ok(State(..state, pc: state.pc + 1))
         _ ->
           Error(#(
@@ -1400,12 +1377,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // put_elem_value already implements this (symbol → symbol_properties,
       // array index → elements, else → js_to_string → properties).
       case state.stack {
-        [val, key, JsObject(ref) as obj, ..rest] ->
-          case put_elem_value(state, ref, key, val) {
-            Ok(state) ->
-              Ok(State(..state, stack: [obj, ..rest], pc: state.pc + 1))
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
+        [val, key, JsObject(ref) as obj, ..rest] -> {
+          use state <- result.map(rethrow(put_elem_value(state, ref, key, val)))
+          State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+        }
         [_, _, _, ..rest] ->
           // Non-object target: shouldn't happen for literals, but pop and keep going.
           Ok(State(..state, stack: rest, pc: state.pc + 1))
@@ -1424,12 +1399,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // CopyDataProperties: own enumerable props of source → target.
       // null/undefined/primitives → no-op per spec (unlike assign target).
       case state.stack {
-        [source, JsObject(ref) as obj, ..rest] ->
-          case object.copy_data_properties(state, ref, source) {
-            Ok(state) ->
-              Ok(State(..state, stack: [obj, ..rest], pc: state.pc + 1))
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
+        [source, JsObject(ref) as obj, ..rest] -> {
+          use state <- result.map(
+            rethrow(object.copy_data_properties(state, ref, source)),
+          )
+          State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+        }
         [_, _, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
         _ ->
           Error(#(
@@ -1514,41 +1489,25 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     // -- Computed property access --
     GetElem -> {
       case state.stack {
-        [key, JsObject(ref), ..rest] ->
-          case get_elem_value(state, ref, key) {
-            Ok(#(val, state)) ->
-              Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
-        [_, JsNull, ..] -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Cannot read properties of null",
-            )
-          Error(#(Thrown, err, heap))
+        [key, JsObject(ref), ..rest] -> {
+          use #(val, state) <- result.map(
+            rethrow(get_elem_value(state, ref, key)),
+          )
+          State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
-        [_, JsUndefined, ..] -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Cannot read properties of undefined",
-            )
-          Error(#(Thrown, err, heap))
-        }
-        [key, receiver, ..rest] ->
+        [_, JsNull as v, ..] | [_, JsUndefined as v, ..] ->
+          throw_type_error(
+            state,
+            "Cannot read properties of " <> value.nullish_label(v),
+          )
+        [key, receiver, ..rest] -> {
           // Primitive receiver: stringify key, delegate to get_value_of
-          case js_to_string(state, key) {
-            Ok(#(key_str, state)) ->
-              case object.get_value_of(state, receiver, key_str) {
-                Ok(#(val, state)) ->
-                  Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-              }
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
+          use #(key_str, state) <- result.try(rethrow(js_to_string(state, key)))
+          use #(val, state) <- result.map(
+            rethrow(object.get_value_of(state, receiver, key_str)),
+          )
+          State(..state, stack: [val, ..rest], pc: state.pc + 1)
+        }
         _ ->
           Error(#(VmError(StackUnderflow("GetElem")), JsUndefined, state.heap))
       }
@@ -1557,30 +1516,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     GetElem2 -> {
       // Like GetElem but keeps obj+key on stack: [key, obj, ...] -> [value, key, obj, ...]
       case state.stack {
-        [key, JsObject(ref) as obj, ..rest] ->
-          case get_elem_value(state, ref, key) {
-            Ok(#(val, state)) ->
-              Ok(
-                State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1),
-              )
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
-        [key, receiver, ..rest] ->
-          case js_to_string(state, key) {
-            Ok(#(key_str, state)) ->
-              case object.get_value_of(state, receiver, key_str) {
-                Ok(#(val, state)) ->
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [val, key, receiver, ..rest],
-                      pc: state.pc + 1,
-                    ),
-                  )
-                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-              }
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
+        [key, JsObject(ref) as obj, ..rest] -> {
+          use #(val, state) <- result.map(
+            rethrow(get_elem_value(state, ref, key)),
+          )
+          State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1)
+        }
+        [key, receiver, ..rest] -> {
+          use #(key_str, state) <- result.try(rethrow(js_to_string(state, key)))
+          use #(val, state) <- result.map(
+            rethrow(object.get_value_of(state, receiver, key_str)),
+          )
+          State(..state, stack: [val, key, receiver, ..rest], pc: state.pc + 1)
+        }
         _ ->
           Error(#(VmError(StackUnderflow("GetElem2")), JsUndefined, state.heap))
       }
@@ -1589,12 +1537,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     PutElem -> {
       // Stack: [value, key, obj, ...rest]
       case state.stack {
-        [val, key, JsObject(ref), ..rest] ->
-          case put_elem_value(state, ref, key, val) {
-            Ok(state) ->
-              Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
+        [val, key, JsObject(ref), ..rest] -> {
+          use state <- result.map(rethrow(put_elem_value(state, ref, key, val)))
+          State(..state, stack: [val, ..rest], pc: state.pc + 1)
+        }
         [_, _, _, ..rest] -> {
           // PutElem on non-object: silently ignore (JS sloppy mode)
           Ok(State(..state, stack: rest, pc: state.pc + 1))
@@ -1609,13 +1555,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.this_binding {
         // TDZ check: in derived constructors, this is uninitialized until super() is called
         JsUninitialized -> {
-          let #(heap, err) =
-            common.make_reference_error(
-              state.heap,
-              state.builtins,
-              "Must call super constructor in derived class before accessing 'this'",
-            )
-          Error(#(Thrown, err, heap))
+          throw_reference_error(
+            state,
+            "Must call super constructor in derived class before accessing 'this'",
+          )
         }
         _ ->
           Ok(
@@ -1631,32 +1574,21 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // Like GetField but keeps the object on the stack for CallMethod.
       // Stack: [obj, ..rest] → [prop_value, obj, ..rest]
       case state.stack {
-        [JsNull, ..] -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Cannot read properties of null (reading '" <> name <> "')",
-            )
-          Error(#(Thrown, err, heap))
+        [JsNull as v, ..] | [JsUndefined as v, ..] ->
+          throw_type_error(
+            state,
+            "Cannot read properties of "
+              <> value.nullish_label(v)
+              <> " (reading '"
+              <> name
+              <> "')",
+          )
+        [receiver, ..rest] -> {
+          use #(val, state) <- result.map(
+            rethrow(object.get_value_of(state, receiver, name)),
+          )
+          State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
         }
-        [JsUndefined, ..] -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Cannot read properties of undefined (reading '" <> name <> "')",
-            )
-          Error(#(Thrown, err, heap))
-        }
-        [receiver, ..rest] ->
-          case object.get_value_of(state, receiver, name) {
-            Ok(#(val, state)) ->
-              Ok(
-                State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1),
-              )
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-          }
         [] ->
           Error(#(VmError(StackUnderflow("GetField2")), JsUndefined, state.heap))
       }
@@ -1688,27 +1620,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   )
                 Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
                   call_native(state, native, args, rest_stack, receiver)
-                _ -> {
-                  let #(heap, err) =
-                    common.make_type_error(
-                      state.heap,
-                      state.builtins,
-                      object.inspect(JsObject(method_ref), state.heap)
-                        <> " is not a function",
-                    )
-                  Error(#(Thrown, err, heap))
-                }
+                _ ->
+                  throw_type_error(
+                    state,
+                    object.inspect(JsObject(method_ref), state.heap)
+                      <> " is not a function",
+                  )
               }
             }
-            [non_func, _, ..] -> {
-              let #(heap, err) =
-                common.make_type_error(
-                  state.heap,
-                  state.builtins,
-                  object.inspect(non_func, state.heap) <> " is not a function",
-                )
-              Error(#(Thrown, err, heap))
-            }
+            [non_func, _, ..] ->
+              throw_type_error(
+                state,
+                object.inspect(non_func, state.heap) <> " is not a function",
+              )
             _ ->
               Error(#(
                 VmError(StackUnderflow("CallMethod")),
@@ -1732,13 +1656,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         Some(#(args, [JsObject(ctor_ref), ..rest_stack])) ->
           do_construct(state, ctor_ref, args, rest_stack)
         Some(#(_, [non_func, ..])) -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              object.inspect(non_func, state.heap) <> " is not a constructor",
-            )
-          Error(#(Thrown, err, heap))
+          throw_type_error(
+            state,
+            object.inspect(non_func, state.heap) <> " is not a constructor",
+          )
         }
         Some(#(_, [])) ->
           Error(#(
@@ -1876,27 +1797,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     ),
                   )
                 }
-                _ -> {
-                  // Non-array object — throw TypeError
-                  let #(heap, err) =
-                    common.make_type_error(
-                      state.heap,
-                      state.builtins,
-                      object.inspect(JsObject(ref), state.heap)
-                        <> " is not iterable",
-                    )
-                  Error(#(Thrown, err, heap))
-                }
+                // Non-array object — throw TypeError
+                _ ->
+                  throw_type_error(
+                    state,
+                    object.inspect(JsObject(ref), state.heap)
+                      <> " is not iterable",
+                  )
               }
-            _ -> {
-              let #(heap, err) =
-                common.make_type_error(
-                  state.heap,
-                  state.builtins,
-                  object.inspect(iterable, state.heap) <> " is not iterable",
-                )
-              Error(#(Thrown, err, heap))
-            }
+            _ ->
+              throw_type_error(
+                state,
+                object.inspect(iterable, state.heap) <> " is not iterable",
+              )
           }
         _ ->
           Error(#(
@@ -2080,22 +1993,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [key, obj, ..rest] ->
           case obj {
-            JsObject(ref) ->
-              case js_to_string(state, key) {
-                Ok(#(key_str, state)) -> {
-                  let #(heap, success) =
-                    object.delete_property(state.heap, ref, key_str)
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(success), ..rest],
-                      heap:,
-                      pc: state.pc + 1,
-                    ),
-                  )
-                }
-                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
-              }
+            JsObject(ref) -> {
+              use #(key_str, state) <- result.map(
+                rethrow(js_to_string(state, key)),
+              )
+              let #(heap, success) =
+                object.delete_property(state.heap, ref, key_str)
+              State(
+                ..state,
+                stack: [JsBool(success), ..rest],
+                heap:,
+                pc: state.pc + 1,
+              )
+            }
             _ ->
               Ok(
                 State(..state, stack: [JsBool(True), ..rest], pc: state.pc + 1),
@@ -2168,13 +2078,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         }
         _ -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Class extends value is not a constructor or null",
-            )
-          Error(#(Thrown, err, heap))
+          throw_type_error(
+            state,
+            "Class extends value is not a constructor or null",
+          )
         }
       }
     }
@@ -2249,26 +2156,18 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                         rest_stack,
                         this_val,
                       )
-                    _ -> {
-                      let #(heap2, err) =
-                        common.make_type_error(
-                          heap,
-                          state.builtins,
-                          "Super constructor is not a constructor",
-                        )
-                      Error(#(Thrown, err, heap2))
-                    }
+                    _ ->
+                      throw_type_error(
+                        State(..state, heap:),
+                        "Super constructor is not a constructor",
+                      )
                   }
                 }
-                _ -> {
-                  let #(heap, err) =
-                    common.make_type_error(
-                      state.heap,
-                      state.builtins,
-                      "Super constructor is not a constructor",
-                    )
-                  Error(#(Thrown, err, heap))
-                }
+                _ ->
+                  throw_type_error(
+                    state,
+                    "Super constructor is not a constructor",
+                  )
               }
             }
             None ->
@@ -2280,13 +2179,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         None -> {
-          let #(heap, err) =
-            common.make_reference_error(
-              state.heap,
-              state.builtins,
-              "'super' keyword unexpected here",
-            )
-          Error(#(Thrown, err, heap))
+          throw_reference_error(state, "'super' keyword unexpected here")
         }
       }
     }
@@ -2407,12 +2300,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // GetIterator(spreadObj, sync), then loop IteratorStepValue → CreateDataProperty.
       // Unlike object spread (CopyDataProperties), null/undefined throw.
       case state.stack {
-        [iterable, JsObject(arr_ref) as arr, ..rest] ->
-          case spread_into_array(state, arr_ref, iterable) {
-            Ok(state) ->
-              Ok(State(..state, stack: [arr, ..rest], pc: state.pc + 1))
-            Error(e) -> Error(e)
-          }
+        [iterable, JsObject(arr_ref) as arr, ..rest] -> {
+          use state <- result.map(spread_into_array(state, arr_ref, iterable))
+          State(..state, stack: [arr, ..rest], pc: state.pc + 1)
+        }
         _ ->
           Error(#(
             VmError(StackUnderflow("ArraySpread")),
@@ -2435,13 +2326,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         [_, callee, ..] -> {
           // args "array" is not an object — shouldn't happen for compiler-emitted
           // spread, but handle gracefully: zero args.
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              object.inspect(callee, state.heap) <> " is not a function",
-            )
-          Error(#(Thrown, err, heap))
+          throw_type_error(
+            state,
+            object.inspect(callee, state.heap) <> " is not a function",
+          )
         }
         _ ->
           Error(#(VmError(StackUnderflow("CallApply")), JsUndefined, state.heap))
@@ -2475,13 +2363,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           do_construct(state, ctor_ref, args, rest)
         }
         [_, non_ctor, ..] -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              object.inspect(non_ctor, state.heap) <> " is not a constructor",
-            )
-          Error(#(Thrown, err, heap))
+          throw_type_error(
+            state,
+            object.inspect(non_ctor, state.heap) <> " is not a constructor",
+          )
         }
         _ ->
           Error(#(
@@ -3296,13 +3181,7 @@ fn call_native(
           )
         }
         _ -> {
-          let #(h, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Bind must be called on a function",
-            )
-          Error(#(Thrown, err, h))
+          throw_type_error(state, "Bind must be called on a function")
         }
       }
     }
@@ -3523,16 +3402,12 @@ fn do_construct(
     }
     Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
       call_native(state, native, args, rest_stack, JsUndefined)
-    _ -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          object.inspect(JsObject(ctor_ref), state.heap)
-            <> " is not a constructor",
-        )
-      Error(#(Thrown, err, heap))
-    }
+    _ ->
+      throw_type_error(
+        state,
+        object.inspect(JsObject(ctor_ref), state.heap)
+          <> " is not a constructor",
+      )
   }
 }
 
@@ -3589,16 +3464,12 @@ fn construct_value(
     }
     Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
       call_native(state, native, args, rest_stack, JsUndefined)
-    _ -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          object.inspect(JsObject(target_ref), state.heap)
-            <> " is not a constructor",
-        )
-      Error(#(Thrown, err, h))
-    }
+    _ ->
+      throw_type_error(
+        state,
+        object.inspect(JsObject(target_ref), state.heap)
+          <> " is not a constructor",
+      )
   }
 }
 
@@ -3627,25 +3498,17 @@ fn call_value(
           )
         Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
           call_native(state, native, args, state.stack, this_val)
-        _ -> {
-          let #(h, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              object.inspect(callee, state.heap) <> " is not a function",
-            )
-          Error(#(Thrown, err, h))
-        }
+        _ ->
+          throw_type_error(
+            state,
+            object.inspect(callee, state.heap) <> " is not a function",
+          )
       }
-    _ -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          object.inspect(callee, state.heap) <> " is not a function",
-        )
-      Error(#(Thrown, err, h))
-    }
+    _ ->
+      throw_type_error(
+        state,
+        object.inspect(callee, state.heap) <> " is not a function",
+      )
   }
 }
 
@@ -3770,26 +3633,20 @@ fn spread_into_array(
           // Generators are self-iterators. Drain via repeated .next().
           drain_generator_to_array(state, src_ref, target_ref)
         _ -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              object.inspect(iterable, state.heap) <> " is not iterable",
-            )
-          Error(#(Thrown, err, heap))
+          throw_type_error(
+            state,
+            object.inspect(iterable, state.heap) <> " is not iterable",
+          )
         }
       }
     // null/undefined/primitives: not iterable.
     // (Strings are iterable per spec but GetIterator doesn't handle them yet;
     //  will be fixed when Symbol.iterator is wired for string wrappers.)
     _ -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          object.inspect(iterable, state.heap) <> " is not iterable",
-        )
-      Error(#(Thrown, err, heap))
+      throw_type_error(
+        state,
+        object.inspect(iterable, state.heap) <> " is not iterable",
+      )
     }
   }
 }
@@ -3908,15 +3765,8 @@ fn dispatch_native(
         state,
         state.builtins.object.prototype,
       )
-    value.NativeFunctionConstructor -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Function constructor is not supported",
-        )
-      #(State(..state, heap:), Error(err))
-    }
+    value.NativeFunctionConstructor ->
+      frame.type_error(state, "Function constructor is not supported")
     value.NativeArrayConstructor ->
       builtins_array.construct(args, state, state.builtins.array.prototype)
     value.NativeArrayIsArray -> builtins_array.is_array(args, state)
@@ -4152,8 +4002,7 @@ fn dispatch_native(
     // %IteratorPrototype%[Symbol.iterator]() — returns `this`
     value.NativeIteratorSymbolIterator -> #(state, Ok(this))
     // Arc.peek — synchronously inspect promise state
-    value.NativeArcPeek ->
-      builtins_arc.peek(args, state, state.builtins.object.prototype)
+    value.NativeArcPeek -> builtins_arc.peek(args, state)
     // Arc.spawn — spawn a new BEAM process running a JS function
     value.NativeArcSpawn -> arc_spawn(args, state)
     // Arc.send — send a message to a BEAM process
@@ -4176,7 +4025,7 @@ fn dispatch_native(
 // ============================================================================
 
 @external(erlang, "erlang", "spawn")
-fn ffi_spawn(fun: fn() -> Nil) -> value.ErlangPid
+fn spawn(fun: fn() -> Nil) -> value.ErlangPid
 
 /// Non-standard: Arc.spawn(fn)
 /// Spawns a new BEAM process that executes the given JS function.
@@ -4191,43 +4040,46 @@ fn arc_spawn(
     [] -> JsUndefined
   }
 
-  case fn_arg {
-    JsObject(fn_ref) ->
+  let result = {
+    use fn_ref <- result.try(case fn_arg {
+      JsObject(fn_ref) -> Ok(fn_ref)
+      _ -> Error("Arc.spawn: argument is not a function object")
+    })
+
+    use #(callee_template, env_ref) <- result.try(
       case heap.read(state.heap, fn_ref) {
         Some(ObjectSlot(
           kind: FunctionObject(func_template: callee_template, env: env_ref),
           ..,
-        )) -> {
-          // Snapshot everything the spawned process needs
-          let heap_snapshot = state.heap
-          let builtins = state.builtins
-          let globals = state.globals
-          let symbol_descriptions = state.symbol_descriptions
+        )) -> Ok(#(callee_template, env_ref))
+        _ -> Error("Arc.spawn: argument is not a function")
+      },
+    )
 
-          let pid =
-            ffi_spawn(fn() {
-              run_spawned_closure(
-                callee_template,
-                env_ref,
-                heap_snapshot,
-                builtins,
-                globals,
-                symbol_descriptions,
-              )
-            })
+    let #(heap, pid_val) =
+      builtins_arc.alloc_pid_object(
+        state.heap,
+        state.builtins.object.prototype,
+        state.builtins.function.prototype,
+        spawn(fn() {
+          run_spawned_closure(
+            callee_template,
+            env_ref,
+            // Copy everything we need:
+            state.heap,
+            state.builtins,
+            state.globals,
+            state.symbol_descriptions,
+          )
+        }),
+      )
 
-          let #(heap, pid_val) =
-            builtins_arc.alloc_pid_object(
-              state.heap,
-              state.builtins.object.prototype,
-              state.builtins.function.prototype,
-              pid,
-            )
-          #(State(..state, heap:), Ok(pid_val))
-        }
-        _ -> frame.type_error(state, "Arc.spawn: argument is not a function")
-      }
-    _ -> frame.type_error(state, "Arc.spawn: argument is not a function")
+    Ok(#(State(..state, heap:), Ok(pid_val)))
+  }
+
+  case result {
+    Ok(ret) -> ret
+    Error(msg) -> frame.type_error(state, msg)
   }
 }
 
@@ -4301,16 +4153,11 @@ fn call_native_promise_constructor(
     [f, ..] -> f
     [] -> JsUndefined
   }
+
   // Verify executor is callable
   case is_callable_value(state.heap, executor) {
     False -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Promise resolver is not a function",
-        )
-      Error(#(Thrown, err, h))
+      throw_type_error(state, "Promise resolver is not a function")
     }
     True -> {
       let #(h, promise_ref, data_ref) =
@@ -4372,11 +4219,14 @@ fn call_native_promise_resolve_fn(
     [v, ..] -> v
     [] -> JsUndefined
   }
+
   // Check if already resolved
   case heap.read(state.heap, already_resolved_ref) {
-    Some(value.BoxSlot(value: JsBool(True))) ->
+    Some(value.BoxSlot(value: JsBool(True))) -> {
       // Already resolved — ignore
       Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
+    }
+
     _ -> {
       // Mark as resolved
       let h =
@@ -4385,93 +4235,87 @@ fn call_native_promise_resolve_fn(
           already_resolved_ref,
           value.BoxSlot(value: JsBool(True)),
         )
-      // Check for self-resolution
-      case resolution == JsObject(promise_ref) {
-        True -> {
-          let #(h, err) =
-            common.make_type_error(
-              h,
-              state.builtins,
-              "Chaining cycle detected for promise",
-            )
-          let #(h, jobs) = builtins_promise.reject_promise(h, data_ref, err)
-          Ok(
-            State(
-              ..state,
-              heap: h,
-              stack: [JsUndefined, ..rest_stack],
-              pc: state.pc + 1,
-              job_queue: list.append(state.job_queue, jobs),
-            ),
+
+      use <- bool.guard(resolution == JsObject(promise_ref), {
+        let #(h, err) =
+          common.make_type_error(
+            h,
+            state.builtins,
+            "Chaining cycle detected for promise",
           )
-        }
-        False -> {
-          // Check if resolution is a thenable
-          case
-            builtins_promise.get_thenable_then(
-              State(..state, heap: h),
-              resolution,
+
+        let #(h, jobs) = builtins_promise.reject_promise(h, data_ref, err)
+
+        Ok(
+          State(
+            ..state,
+            heap: h,
+            stack: [JsUndefined, ..rest_stack],
+            pc: state.pc + 1,
+            job_queue: list.append(state.job_queue, jobs),
+          ),
+        )
+      })
+
+      // Check if resolution is a thenable
+      case
+        builtins_promise.get_thenable_then(State(..state, heap: h), resolution)
+      {
+        Ok(#(then_fn, state)) -> {
+          // Create resolving functions for assimilation
+          let #(h, resolve_fn, reject_fn) =
+            builtins_promise.create_resolving_functions(
+              state.heap,
+              state.builtins.function.prototype,
+              promise_ref,
+              data_ref,
             )
-          {
-            Ok(#(then_fn, state)) -> {
-              // Create resolving functions for assimilation
-              let #(h, resolve_fn, reject_fn) =
-                builtins_promise.create_resolving_functions(
-                  state.heap,
-                  state.builtins.function.prototype,
-                  promise_ref,
-                  data_ref,
-                )
-              let job =
-                value.PromiseResolveThenableJob(
-                  thenable: resolution,
-                  then_fn:,
-                  resolve: resolve_fn,
-                  reject: reject_fn,
-                )
-              Ok(
-                State(
-                  ..state,
-                  heap: h,
-                  stack: [JsUndefined, ..rest_stack],
-                  pc: state.pc + 1,
-                  job_queue: list.append(state.job_queue, [job]),
-                ),
-              )
-            }
-            Error(#(option.Some(thrown), state)) -> {
-              // Getter threw — reject promise with the error (spec 25.6.1.3.2 step 9)
-              let #(h, jobs) =
-                builtins_promise.reject_promise(state.heap, data_ref, thrown)
-              Ok(
-                State(
-                  ..state,
-                  heap: h,
-                  stack: [JsUndefined, ..rest_stack],
-                  pc: state.pc + 1,
-                  job_queue: list.append(state.job_queue, jobs),
-                ),
-              )
-            }
-            Error(#(option.None, state)) -> {
-              // Not a thenable — fulfill directly
-              let #(h, jobs) =
-                builtins_promise.fulfill_promise(
-                  state.heap,
-                  data_ref,
-                  resolution,
-                )
-              Ok(
-                State(
-                  ..state,
-                  heap: h,
-                  stack: [JsUndefined, ..rest_stack],
-                  pc: state.pc + 1,
-                  job_queue: list.append(state.job_queue, jobs),
-                ),
-              )
-            }
-          }
+          let job =
+            value.PromiseResolveThenableJob(
+              thenable: resolution,
+              then_fn:,
+              resolve: resolve_fn,
+              reject: reject_fn,
+            )
+
+          State(
+            ..state,
+            heap: h,
+            stack: [JsUndefined, ..rest_stack],
+            pc: state.pc + 1,
+            job_queue: list.append(state.job_queue, [job]),
+          )
+          |> Ok
+        }
+
+        Error(#(option.Some(thrown), state)) -> {
+          // Getter threw — reject promise with the error (spec 25.6.1.3.2 step 9)
+          let #(h, jobs) =
+            builtins_promise.reject_promise(state.heap, data_ref, thrown)
+
+          State(
+            ..state,
+            heap: h,
+            stack: [JsUndefined, ..rest_stack],
+            pc: state.pc + 1,
+            job_queue: list.append(state.job_queue, jobs),
+          )
+          |> Ok
+        }
+
+        Error(#(option.None, state)) -> {
+          // Not a thenable — fulfill directly
+          let #(h, jobs) =
+            builtins_promise.fulfill_promise(state.heap, data_ref, resolution)
+
+          State(
+            ..state,
+            heap: h,
+            stack: [JsUndefined, ..rest_stack],
+            pc: state.pc + 1,
+            job_queue: list.append(state.job_queue, jobs),
+          )
+          |> Ok
         }
       }
     }
@@ -4530,55 +4374,9 @@ fn call_native_promise_then(
     [_, r, ..] -> r
     _ -> JsUndefined
   }
-  // Get the promise data ref from `this`
-  case this {
-    JsObject(this_ref) ->
-      case builtins_promise.get_data_ref(state.heap, this_ref) {
-        Some(data_ref) -> {
-          // Create child promise (the one returned by .then)
-          let #(h, child_ref, child_data_ref) =
-            builtins_promise.create_promise(
-              state.heap,
-              state.builtins.promise.prototype,
-            )
-          // Create resolving functions for the child
-          let #(h, child_resolve, child_reject) =
-            builtins_promise.create_resolving_functions(
-              h,
-              state.builtins.function.prototype,
-              child_ref,
-              child_data_ref,
-            )
-          // Perform the .then logic
-          let #(h, jobs) =
-            builtins_promise.perform_promise_then(
-              h,
-              data_ref,
-              on_fulfilled,
-              on_rejected,
-              child_resolve,
-              child_reject,
-            )
-          Ok(
-            State(
-              ..state,
-              heap: h,
-              stack: [JsObject(child_ref), ..rest_stack],
-              pc: state.pc + 1,
-              job_queue: list.append(state.job_queue, jobs),
-            ),
-          )
-        }
-        None -> {
-          let #(h, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "then called on non-promise",
-            )
-          Error(#(Thrown, err, h))
-        }
-      }
+
+  use this_ref <- result.try(case this {
+    JsObject(this_ref) -> Ok(this_ref)
     _ -> {
       let #(h, err) =
         common.make_type_error(
@@ -4587,6 +4385,50 @@ fn call_native_promise_then(
           "then called on non-promise",
         )
       Error(#(Thrown, err, h))
+    }
+  })
+
+  case builtins_promise.get_data_ref(state.heap, this_ref) {
+    Some(data_ref) -> {
+      // Create child promise (the one returned by .then)
+      let #(h, child_ref, child_data_ref) =
+        builtins_promise.create_promise(
+          state.heap,
+          state.builtins.promise.prototype,
+        )
+
+      // Create resolving functions for the child
+      let #(h, child_resolve, child_reject) =
+        builtins_promise.create_resolving_functions(
+          h,
+          state.builtins.function.prototype,
+          child_ref,
+          child_data_ref,
+        )
+
+      // Perform the .then logic
+      let #(h, jobs) =
+        builtins_promise.perform_promise_then(
+          h,
+          data_ref,
+          on_fulfilled,
+          on_rejected,
+          child_resolve,
+          child_reject,
+        )
+
+      Ok(
+        State(
+          ..state,
+          heap: h,
+          stack: [JsObject(child_ref), ..rest_stack],
+          pc: state.pc + 1,
+          job_queue: list.append(state.job_queue, jobs),
+        ),
+      )
+    }
+    None -> {
+      throw_type_error(state, "then called on non-promise")
     }
   }
 }
@@ -4963,13 +4805,7 @@ fn call_native_generator_next(
           )
         }
         value.Executing -> {
-          let #(h, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Generator is already running",
-            )
-          Error(#(Thrown, err, h))
+          throw_type_error(state, "Generator is already running")
         }
         value.SuspendedStart | value.SuspendedYield -> {
           // Mark as executing
@@ -5090,13 +4926,7 @@ fn call_native_generator_next(
         }
       }
     None -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "not a generator object",
-        )
-      Error(#(Thrown, err, h))
+      throw_type_error(state, "not a generator object")
     }
   }
 }
@@ -5135,13 +4965,7 @@ fn call_native_generator_return(
           )
         }
         value.Executing -> {
-          let #(h, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Generator is already running",
-            )
-          Error(#(Thrown, err, h))
+          throw_type_error(state, "Generator is already running")
         }
         value.SuspendedYield -> {
           // Full spec: resume with return completion so finally blocks run.
@@ -5184,13 +5008,7 @@ fn call_native_generator_return(
         }
       }
     None -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "not a generator object",
-        )
-      Error(#(Thrown, err, h))
+      throw_type_error(state, "not a generator object")
     }
   }
 }
@@ -5220,13 +5038,7 @@ fn call_native_generator_throw(
           Error(#(Thrown, throw_val, h))
         }
         value.Executing -> {
-          let #(h, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Generator is already running",
-            )
-          Error(#(Thrown, err, h))
+          throw_type_error(state, "Generator is already running")
         }
         value.SuspendedYield -> {
           // Mark as executing
@@ -5361,13 +5173,7 @@ fn call_native_generator_throw(
         }
       }
     None -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "not a generator object",
-        )
-      Error(#(Thrown, err, h))
+      throw_type_error(state, "not a generator object")
     }
   }
 }
@@ -5725,7 +5531,14 @@ fn run_handler_with_this(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) ->
-          run_closure_for_job(state, ref, env_ref, func_template, args, this_val)
+          run_closure_for_job(
+            state,
+            ref,
+            env_ref,
+            func_template,
+            args,
+            this_val,
+          )
         Some(ObjectSlot(kind: NativeFunction(native), ..)) -> {
           // For native functions (like resolve/reject), call directly
           let job_state =
@@ -5963,13 +5776,11 @@ fn get_elem_value(
               // Non-array/arguments: delegate to get_value with stringified key
               object.get_value(state, ref, int.to_string(idx), JsObject(ref))
           }
-        None ->
+        None -> {
           // Non-numeric key: stringify and delegate to get_value
-          case js_to_string(state, key) {
-            Ok(#(key_str, state)) ->
-              object.get_value(state, ref, key_str, JsObject(ref))
-            Error(#(thrown, state)) -> Error(#(thrown, state))
-          }
+          use #(key_str, state) <- result.try(js_to_string(state, key))
+          object.get_value(state, ref, key_str, JsObject(ref))
+        }
       }
     }
   }
@@ -5986,11 +5797,16 @@ fn put_elem_value(
   let receiver = JsObject(ref)
   case key {
     // Symbol keys use the separate symbol_properties dict
-    value.JsSymbol(sym_id) ->
-      case object.set_symbol_value(state, ref, sym_id, val, receiver) {
-        Ok(#(state, _)) -> Ok(state)
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
+    value.JsSymbol(sym_id) -> {
+      use #(state, _) <- result.map(object.set_symbol_value(
+        state,
+        ref,
+        sym_id,
+        val,
+        receiver,
+      ))
+      state
+    }
     _ -> {
       // Numeric fast path for arrays/arguments (direct element write)
       case to_array_index(key) {
@@ -6005,21 +5821,18 @@ fn put_elem_value(
               extensible:,
             )) ->
               case extensible {
-                False ->
+                False -> {
                   // Non-extensible (frozen/sealed): delegate to set_value which
                   // properly checks writable/configurable/extensible constraints.
-                  case
-                    object.set_value(
-                      state,
-                      ref,
-                      int.to_string(idx),
-                      val,
-                      receiver,
-                    )
-                  {
-                    Ok(#(state, _)) -> Ok(state)
-                    Error(#(thrown, state)) -> Error(#(thrown, state))
-                  }
+                  use #(state, _) <- result.map(object.set_value(
+                    state,
+                    ref,
+                    int.to_string(idx),
+                    val,
+                    receiver,
+                  ))
+                  state
+                }
                 True -> {
                   let new_elements = js_elements.set(elements, idx, val)
                   let new_length = case idx >= length {
@@ -6065,25 +5878,30 @@ fn put_elem_value(
                 )
               Ok(State(..state, heap: new_heap))
             }
-            _ ->
+            _ -> {
               // Non-array/arguments: delegate to set_value
-              case
-                object.set_value(state, ref, int.to_string(idx), val, receiver)
-              {
-                Ok(#(state, _)) -> Ok(state)
-                Error(#(thrown, state)) -> Error(#(thrown, state))
-              }
+              use #(state, _) <- result.map(object.set_value(
+                state,
+                ref,
+                int.to_string(idx),
+                val,
+                receiver,
+              ))
+              state
+            }
           }
-        None ->
+        None -> {
           // Non-numeric key: stringify and delegate to set_value
-          case js_to_string(state, key) {
-            Ok(#(key_str, state)) ->
-              case object.set_value(state, ref, key_str, val, receiver) {
-                Ok(#(state, _)) -> Ok(state)
-                Error(#(thrown, state)) -> Error(#(thrown, state))
-              }
-            Error(#(thrown, state)) -> Error(#(thrown, state))
-          }
+          use #(key_str, state) <- result.try(js_to_string(state, key))
+          use #(state, _) <- result.map(object.set_value(
+            state,
+            ref,
+            key_str,
+            val,
+            receiver,
+          ))
+          state
+        }
       }
     }
   }
@@ -6400,52 +6218,39 @@ fn to_primitive(
     // Objects: try Symbol.toPrimitive, then OrdinaryToPrimitive
     JsObject(ref) -> {
       // §7.1.1 step 2.a: check @@toPrimitive
-      case object.get_symbol_value(state, ref, value.symbol_to_primitive, val) {
-        Ok(#(exotic_fn, state)) ->
-          case exotic_fn {
-            // @@toPrimitive not found → fall through to OrdinaryToPrimitive
-            JsUndefined -> ordinary_to_primitive(state, val, ref, hint)
-            _ ->
-              case is_callable_value(state.heap, exotic_fn) {
-                True -> {
-                  let hint_str = case hint {
-                    StringHint -> "string"
-                    NumberHint -> "number"
-                    DefaultHint -> "default"
-                  }
-                  case
-                    run_handler_with_this(state, exotic_fn, val, [
-                      JsString(hint_str),
-                    ])
-                  {
-                    Ok(#(result, new_state)) ->
-                      case result {
-                        JsObject(_) -> {
-                          let #(h, err) =
-                            common.make_type_error(
-                              new_state.heap,
-                              new_state.builtins,
-                              "Cannot convert object to primitive value",
-                            )
-                          Error(#(err, State(..new_state, heap: h)))
-                        }
-                        _ -> Ok(#(result, new_state))
-                      }
-                    Error(#(thrown, new_state)) -> Error(#(thrown, new_state))
-                  }
-                }
-                False -> {
-                  let #(h, err) =
-                    common.make_type_error(
-                      state.heap,
-                      state.builtins,
-                      "@@toPrimitive is not callable",
-                    )
-                  Error(#(err, State(..state, heap: h)))
-                }
+      use #(exotic_fn, state) <- result.try(object.get_symbol_value(
+        state,
+        ref,
+        value.symbol_to_primitive,
+        val,
+      ))
+      case exotic_fn {
+        // @@toPrimitive not found → fall through to OrdinaryToPrimitive
+        JsUndefined -> ordinary_to_primitive(state, val, ref, hint)
+        _ ->
+          case is_callable_value(state.heap, exotic_fn) {
+            True -> {
+              let hint_str = case hint {
+                StringHint -> "string"
+                NumberHint -> "number"
+                DefaultHint -> "default"
               }
+              use #(result, new_state) <- result.try(
+                run_handler_with_this(state, exotic_fn, val, [
+                  JsString(hint_str),
+                ]),
+              )
+              case result {
+                JsObject(_) ->
+                  thrown_type_error(
+                    new_state,
+                    "Cannot convert object to primitive value",
+                  )
+                _ -> Ok(#(result, new_state))
+              }
+            }
+            False -> thrown_type_error(state, "@@toPrimitive is not callable")
           }
-        Error(#(thrown, state)) -> Error(#(thrown, state))
       }
     }
   }
@@ -6474,33 +6279,22 @@ fn try_to_primitive_methods(
   method_names: List(String),
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   case method_names {
-    [] -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Cannot convert object to primitive value",
-        )
-      Error(#(err, State(..state, heap: h)))
-    }
-    [name, ..rest] ->
-      case object.get_value(state, ref, name, val) {
-        Ok(#(method, state)) ->
-          case is_callable_value(state.heap, method) {
-            True ->
-              case run_handler_with_this(state, method, val, []) {
-                Ok(#(result, new_state)) ->
-                  case result {
-                    JsObject(_) ->
-                      try_to_primitive_methods(new_state, val, ref, rest)
-                    _ -> Ok(#(result, new_state))
-                  }
-                Error(#(thrown, new_state)) -> Error(#(thrown, new_state))
-              }
-            False -> try_to_primitive_methods(state, val, ref, rest)
+    [] -> thrown_type_error(state, "Cannot convert object to primitive value")
+    [name, ..rest] -> {
+      use #(method, state) <- result.try(object.get_value(state, ref, name, val))
+      case is_callable_value(state.heap, method) {
+        True -> {
+          use #(result, new_state) <- result.try(
+            run_handler_with_this(state, method, val, []),
+          )
+          case result {
+            JsObject(_) -> try_to_primitive_methods(new_state, val, ref, rest)
+            _ -> Ok(#(result, new_state))
           }
-        Error(#(thrown, state)) -> Error(#(thrown, state))
+        }
+        False -> try_to_primitive_methods(state, val, ref, rest)
       }
+    }
   }
 }
 
@@ -6515,15 +6309,8 @@ fn js_to_string(
       use #(prim, new_state) <- result.try(to_primitive(state, val, StringHint))
       js_to_string(new_state, prim)
     }
-    JsSymbol(_) -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Cannot convert a Symbol value to a string",
-        )
-      Error(#(err, State(..state, heap: h)))
-    }
+    JsSymbol(_) ->
+      thrown_type_error(state, "Cannot convert a Symbol value to a string")
     JsString(s) -> Ok(#(s, state))
     JsNumber(Finite(n)) -> Ok(#(value.js_format_number(n), state))
     JsNumber(NaN) -> Ok(#("NaN", state))
@@ -6546,54 +6333,28 @@ fn binop_add_with_to_primitive(
   right: JsValue,
   rest: List(JsValue),
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case to_primitive(state, left, DefaultHint) {
-    Ok(#(lprim, s1)) ->
-      case to_primitive(s1, right, DefaultHint) {
-        Ok(#(rprim, s2)) ->
-          case lprim, rprim {
-            JsString(a), JsString(b) ->
-              Ok(
-                State(..s2, stack: [JsString(a <> b), ..rest], pc: state.pc + 1),
-              )
-            JsString(a), _ ->
-              case js_to_string(s2, rprim) {
-                Ok(#(b, s3)) ->
-                  Ok(
-                    State(
-                      ..s3,
-                      stack: [JsString(a <> b), ..rest],
-                      pc: state.pc + 1,
-                    ),
-                  )
-                Error(#(thrown, s3)) -> Error(#(Thrown, thrown, s3.heap))
-              }
-            _, JsString(b) ->
-              case js_to_string(s2, lprim) {
-                Ok(#(a, s3)) ->
-                  Ok(
-                    State(
-                      ..s3,
-                      stack: [JsString(a <> b), ..rest],
-                      pc: state.pc + 1,
-                    ),
-                  )
-                Error(#(thrown, s3)) -> Error(#(Thrown, thrown, s3.heap))
-              }
-            _, _ -> {
-              let a = to_number_for_binop(lprim)
-              let b = to_number_for_binop(rprim)
-              Ok(
-                State(
-                  ..s2,
-                  stack: [JsNumber(num_add(a, b)), ..rest],
-                  pc: state.pc + 1,
-                ),
-              )
-            }
-          }
-        Error(#(thrown, s2)) -> Error(#(Thrown, thrown, s2.heap))
-      }
-    Error(#(thrown, s1)) -> Error(#(Thrown, thrown, s1.heap))
+  use #(lprim, s1) <- result.try(
+    rethrow(to_primitive(state, left, DefaultHint)),
+  )
+  use #(rprim, s2) <- result.try(rethrow(to_primitive(s1, right, DefaultHint)))
+  case lprim, rprim {
+    JsString(a), JsString(b) ->
+      Ok(State(..s2, stack: [JsString(a <> b), ..rest], pc: state.pc + 1))
+    JsString(a), _ -> {
+      use #(b, s3) <- result.map(rethrow(js_to_string(s2, rprim)))
+      State(..s3, stack: [JsString(a <> b), ..rest], pc: state.pc + 1)
+    }
+    _, JsString(b) -> {
+      use #(a, s3) <- result.map(rethrow(js_to_string(s2, lprim)))
+      State(..s3, stack: [JsString(a <> b), ..rest], pc: state.pc + 1)
+    }
+    _, _ -> {
+      let a = to_number_for_binop(lprim)
+      let b = to_number_for_binop(rprim)
+      Ok(
+        State(..s2, stack: [JsNumber(num_add(a, b)), ..rest], pc: state.pc + 1),
+      )
+    }
   }
 }
 
@@ -6630,11 +6391,17 @@ fn js_instanceof(
       case heap.read(state.heap, ctor_ref) {
         // Step 4: IsCallable(target) — we check for function slot kinds.
         Some(ObjectSlot(kind: FunctionObject(..), ..))
-        | Some(ObjectSlot(kind: NativeFunction(_), ..)) ->
+        | Some(ObjectSlot(kind: NativeFunction(_), ..)) -> {
           // Step 5: OrdinaryHasInstance(target, V) — inlined below.
           // OrdinaryHasInstance step 4: Let P be ? Get(C, "prototype").
-          case object.get_value(state, ctor_ref, "prototype", constructor) {
-            Ok(#(JsObject(proto_ref), state)) ->
+          use #(proto_val, state) <- result.try(object.get_value(
+            state,
+            ctor_ref,
+            "prototype",
+            constructor,
+          ))
+          case proto_val {
+            JsObject(proto_ref) ->
               // OrdinaryHasInstance step 3: If O is not an Object, return false.
               case left {
                 JsObject(obj_ref) ->
@@ -6642,35 +6409,30 @@ fn js_instanceof(
                   Ok(#(instanceof_walk(state.heap, obj_ref, proto_ref), state))
                 _ -> Ok(#(False, state))
               }
-            Ok(#(_, state)) ->
+            _ ->
               // OrdinaryHasInstance step 5: If P is not an Object, throw TypeError.
-              instanceof_type_error(
+              thrown_type_error(
                 state,
                 "Function has non-object prototype in instanceof check",
               )
-            Error(#(thrown, state)) -> Error(#(thrown, state))
           }
+        }
         // Step 4: Not callable → TypeError.
         _ ->
-          instanceof_type_error(
+          thrown_type_error(
             state,
             "Right-hand side of instanceof is not callable",
           )
       }
     // Step 1: Not an Object → TypeError.
     _ ->
-      instanceof_type_error(
-        state,
-        "Right-hand side of instanceof is not callable",
-      )
+      thrown_type_error(state, "Right-hand side of instanceof is not callable")
   }
 }
 
-/// Helper to throw a TypeError for instanceof failures.
-fn instanceof_type_error(
-  state: State,
-  msg: String,
-) -> Result(#(Bool, State), #(JsValue, State)) {
+/// Helper to throw a TypeError in functions that return Result(a, #(JsValue, State)).
+/// Used by toPrimitive, toString, instanceof, etc.
+fn thrown_type_error(state: State, msg: String) -> Result(a, #(JsValue, State)) {
   let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
   Error(#(err, State(..state, heap: h)))
 }

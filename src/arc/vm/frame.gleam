@@ -167,3 +167,11 @@ pub fn type_error(
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
   #(State(..state, heap:), Error(err))
 }
+
+pub fn range_error(
+  state: State,
+  msg: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
+  #(State(..state, heap:), Error(err))
+}

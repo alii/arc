@@ -4,14 +4,14 @@ import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/object
 import arc/vm/opcode.{
-  type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor,
-  DefineField, Div, Dup, Eq, Exp, GetField, GetLocal, Gt, GtEq,
-  Jump, JumpIfFalse, JumpIfTrue, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject,
-  NotEq, Pop, Pos, PushConst, PushTry, PutField, PutLocal, Return, ShiftLeft,
-  ShiftRight, StrictEq, StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void,
+  type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq,
+  Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue, LogicalNot,
+  Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry,
+  PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
+  Swap, UShiftRight, UnaryOp, Void,
 }
 import arc/vm/value.{
-  type FuncTemplate, AccessorProperty, DataProperty, FuncTemplate, Finite,
+  type FuncTemplate, AccessorProperty, DataProperty, Finite, FuncTemplate,
   JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
 }
 import arc/vm/vm

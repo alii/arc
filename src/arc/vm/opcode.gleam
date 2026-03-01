@@ -1,4 +1,3 @@
-
 // ============================================================================
 // Final Bytecode — resolved, ready for VM execution
 // ============================================================================
@@ -11,7 +10,6 @@ pub type Op {
   Pop
   Dup
   Swap
-  Rot3
 
   // -- Variable Access (resolved) --
   GetLocal(index: Int)
@@ -216,7 +214,6 @@ pub type IrOp {
   IrPop
   IrDup
   IrSwap
-  IrRot3
   IrGetThis
   IrGetField(name: String)
   IrGetField2(name: String)
@@ -274,4 +271,3 @@ pub type IrOp {
   IrMarkGlobalConst(name: String)
   IrUnmarkGlobalConst(name: String)
 }
-

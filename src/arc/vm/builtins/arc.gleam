@@ -33,6 +33,7 @@ fn ffi_receive_infinite() -> PortableMessage
 @external(erlang, "arc_vm_ffi", "receive_message_timeout")
 fn ffi_receive_timeout(timeout: Int) -> Result(PortableMessage, Nil)
 
+/// Returns the pid in the format `<x.x.x>
 @external(erlang, "arc_vm_ffi", "pid_to_string")
 pub fn ffi_pid_to_string(pid: value.ErlangPid) -> String
 
@@ -41,8 +42,6 @@ fn ffi_sleep(ms: Int) -> Nil
 
 // -- Init --------------------------------------------------------------------
 
-/// Non-standard: Set up the Arc global namespace object.
-/// Arc is an engine-specific namespace (like Math) with BEAM process primitives.
 pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
@@ -88,7 +87,6 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
 pub fn peek(
   args: List(JsValue),
   state: State,
-  object_proto: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
   let arg = case args {
     [a, ..] -> a
@@ -108,18 +106,9 @@ pub fn peek(
           #("reason", value.data_property(reason)),
         ]
       }
+
       let #(heap, result_ref) =
-        heap.alloc(
-          state.heap,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.from_list(props),
-            symbol_properties: dict.new(),
-            elements: js_elements.new(),
-            prototype: Some(object_proto),
-            extensible: True,
-          ),
-        )
+        common.alloc_pojo(state.heap, state.builtins.object.prototype, props)
       #(State(..state, heap:), Ok(JsObject(result_ref)))
     }
     None -> {
@@ -155,7 +144,6 @@ fn read_promise_state(
 
 // -- Arc.send ----------------------------------------------------------------
 
-/// Non-standard: Arc.send(pid, message)
 /// Sends a message to a BEAM process. The message is serialized into a
 /// portable form (only primitives, plain objects, arrays, and PIDs are
 /// supported). Returns the sent message value.
@@ -170,31 +158,30 @@ pub fn send(
     [] -> #(JsUndefined, JsUndefined)
   }
 
-  // Extract the ErlangPid from the PidObject
-  case extract_pid(state.heap, pid_arg) {
-    Some(pid) ->
-      case serialize(state.heap, msg_arg) {
-        Ok(portable) -> {
-          ffi_send(pid, portable)
-          #(state, Ok(msg_arg))
-        }
-        Error(reason) -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
-              state.builtins,
-              "Arc.send: " <> reason,
-            )
-          #(State(..state, heap:), Error(err))
-        }
-      }
-    None -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Arc.send: first argument is not a Pid",
-        )
+  let result = {
+    use ref <- result.try(case pid_arg {
+      JsObject(ref) -> Ok(ref)
+      _ -> Error("Arc.send: first argument is not a Pid")
+    })
+
+    use pid <- result.try(case heap.read(state.heap, ref) {
+      Some(ObjectSlot(kind: PidObject(pid:), ..)) -> Ok(pid)
+      _ -> Error("Arc.send: first argument is not a Pid")
+    })
+
+    use portable <- result.try(
+      serialize(state.heap, msg_arg)
+      |> result.map_error(fn(reason) { "Arc.send: " <> reason }),
+    )
+
+    ffi_send(pid, portable)
+    Ok(msg_arg)
+  }
+
+  case result {
+    Ok(val) -> #(state, Ok(val))
+    Error(msg) -> {
+      let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
       #(State(..state, heap:), Error(err))
     }
   }
@@ -384,21 +371,9 @@ pub fn pid_to_string(
           state,
           Ok(JsString("Pid" <> ffi_pid_to_string(pid))),
         )
-        _ -> #(state, Ok(JsString("[object Object]")))
+        _ -> frame.type_error(state, "Dead Pid")
       }
-    _ -> #(state, Ok(JsString("[object Object]")))
-  }
-}
-
-/// Extract the ErlangPid from a JsValue if it's a PidObject.
-fn extract_pid(h: Heap, val: JsValue) -> option.Option(value.ErlangPid) {
-  use ref <- option.then(case val {
-    JsObject(r) -> Some(r)
-    _ -> None
-  })
-  case heap.read(h, ref) {
-    Some(ObjectSlot(kind: PidObject(pid:), ..)) -> Some(pid)
-    _ -> None
+    _ -> frame.type_error(state, "Invalid Pid object")
   }
 }
 

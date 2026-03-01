@@ -1,6 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/math as builtins_math
-import arc/vm/frame.{type State, State}
+import arc/vm/frame.{type State}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
   type JsNum, type JsValue, type Ref, Finite, Infinity, JsNumber, JsObject,
@@ -416,50 +416,12 @@ pub fn number_to_string(
       }
       // Step 4: If radixMV not in [2, 36], throw RangeError.
       case radix >= 2 && radix <= 36 {
-        False -> range_error(state, "toString() radix must be between 2 and 36")
+        False ->
+          frame.range_error(state, "toString() radix must be between 2 and 36")
         // Step 5: Return Number::toString(x, radixMV).
-        True -> #(state, Ok(JsString(format_number_radix(n, radix))))
+        True -> #(state, Ok(JsString(value.format_number_radix(n, radix))))
       }
     }
-  }
-}
-
-/// Number::toString(x, radixMV) helper — ES2024 §21.1.3.6 step 5.
-///
-/// Per spec, NaN/+Infinity/-Infinity always use their canonical string forms
-/// regardless of radix. For finite values:
-///   - Radix 10: use standard Number::toString (decimal formatting).
-///   - Other radix: convert the integer part to the specified base using
-///     lowercase digits (a-z for 10-35).
-///
-/// Note: Non-integer values with non-10 radix fall back to decimal.
-/// The spec requires proper fractional digit conversion (e.g. 3.5 in base 16
-/// should produce "3.8"), but this is rarely used and complex to implement.
-fn format_number_radix(n: JsNum, radix: Int) -> String {
-  case n {
-    NaN -> "NaN"
-    Infinity -> "Infinity"
-    NegInfinity -> "-Infinity"
-    Finite(f) ->
-      case radix {
-        10 -> value.js_format_number(f)
-        _ -> {
-          let truncated = float.truncate(f)
-          case int.to_float(truncated) == f {
-            // Integer value — use radix conversion. int.to_base_string
-            // returns uppercase (via erlang integer_to_binary/2); JS wants
-            // lowercase. The function handles sign ("-ff" for -255) which
-            // matches JS semantics.
-            True ->
-              int.to_base_string(truncated, radix)
-              |> result.map(string.lowercase)
-              // radix already validated as 2-36 by caller
-              |> result.unwrap(value.js_format_number(f))
-            // Non-integer with non-10 radix — fall back to decimal.
-            False -> value.js_format_number(f)
-          }
-        }
-      }
   }
 }
 
@@ -489,11 +451,6 @@ fn this_number_value(state: State, this: JsValue) -> Option(JsNum) {
     // Step 3: (caller throws TypeError)
     _ -> None
   }
-}
-
-fn range_error(state: State, msg: String) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
 }
 
 // ============================================================================

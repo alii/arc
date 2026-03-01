@@ -728,21 +728,28 @@ fn generic_set(
   val: JsValue,
 ) -> Result(State, #(JsValue, State)) {
   // §7.3.4 step 1: Let success be ? O.[[Set]](P, V, O).
-  case object.set_value(state, ref, key, val, JsObject(ref)) {
-    // success = true → return normally.
-    Ok(#(state, True)) -> Ok(state)
-    // §7.3.4 step 2: success = false and Throw = true → TypeError.
-    Ok(#(state, False)) -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Cannot assign to read only property '" <> key <> "' of object",
-        )
-      Error(#(err, State(..state, heap:)))
+  {
+    use #(state, success) <- result.try(object.set_value(
+      state,
+      ref,
+      key,
+      val,
+      JsObject(ref),
+    ))
+    case success {
+      // success = true → return normally.
+      True -> Ok(state)
+      // §7.3.4 step 2: success = false and Throw = true → TypeError.
+      False -> {
+        let #(heap, err) =
+          common.make_type_error(
+            state.heap,
+            state.builtins,
+            "Cannot assign to read only property '" <> key <> "' of object",
+          )
+        Error(#(err, State(..state, heap:)))
+      }
     }
-    // [[Set]] itself threw (e.g. setter threw) — propagate.
-    Error(#(thrown, state)) -> Error(#(thrown, state))
   }
 }
 

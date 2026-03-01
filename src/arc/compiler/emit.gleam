@@ -235,13 +235,13 @@ fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
       ast.ExportDefaultDeclaration(expr) ->
         // Emit as: *default* = expr;
         // The *default* local is declared during module hoisting.
-        Ok(ast.ExpressionStatement(
-          ast.AssignmentExpression(
+        Ok(
+          ast.ExpressionStatement(ast.AssignmentExpression(
             operator: ast.Assign,
             left: ast.Identifier("*default*"),
             right: expr,
-          ),
-        ))
+          )),
+        )
       ast.ImportDeclaration(..) -> Error(Nil)
       ast.ExportNamedDeclaration(None, _, _) -> Error(Nil)
       ast.ExportAllDeclaration(..) -> Error(Nil)
@@ -252,7 +252,10 @@ fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
 /// Module-mode statement emitter: identical to emit_stmt but handles
 /// the *default* assignment correctly (no special casing needed since
 /// it's a normal assignment to a declared local).
-fn emit_stmt_module(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
+fn emit_stmt_module(
+  e: Emitter,
+  stmt: ast.Statement,
+) -> Result(Emitter, EmitError) {
   emit_stmt(e, stmt)
 }
 
