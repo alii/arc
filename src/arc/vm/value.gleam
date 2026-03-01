@@ -316,6 +316,10 @@ pub type StringNativeFn {
   StringPrototypeAt
   StringPrototypeCodePointAt
   StringPrototypeNormalize
+  StringPrototypeMatch
+  StringPrototypeSearch
+  StringPrototypeReplace
+  StringPrototypeReplaceAll
   // Static methods
   StringRaw
   StringFromCharCode
@@ -513,6 +517,10 @@ pub type RegExpNativeFn {
   RegExpGetSticky
   RegExpGetUnicode
   RegExpGetHasIndices
+  RegExpSymbolMatch
+  RegExpSymbolReplace
+  RegExpSymbolSearch
+  RegExpSymbolSplit
 }
 
 /// What's stored in NativeFunction — either a dispatch-level or call-level native.

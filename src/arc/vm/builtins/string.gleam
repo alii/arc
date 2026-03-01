@@ -5,13 +5,15 @@ import arc/vm/heap.{type Heap}
 import arc/vm/object
 import arc/vm/value.{
   type JsValue, type Ref, type StringNativeFn, Finite, JsNull, JsNumber,
-  JsObject, JsString, JsUndefined, NaN, ObjectSlot, StringFromCharCode,
-  StringFromCodePoint, StringNative, StringPrototypeAt, StringPrototypeCharAt,
-  StringPrototypeCharCodeAt, StringPrototypeCodePointAt, StringPrototypeConcat,
-  StringPrototypeEndsWith, StringPrototypeIncludes, StringPrototypeIndexOf,
-  StringPrototypeLastIndexOf, StringPrototypeNormalize, StringPrototypePadEnd,
-  StringPrototypePadStart, StringPrototypeRepeat, StringPrototypeSlice,
-  StringPrototypeSplit, StringPrototypeStartsWith, StringPrototypeSubstring,
+  JsObject, JsString, JsUndefined, NaN, ObjectSlot, RegExpObject,
+  StringFromCharCode, StringFromCodePoint, StringNative, StringPrototypeAt,
+  StringPrototypeCharAt, StringPrototypeCharCodeAt, StringPrototypeCodePointAt,
+  StringPrototypeConcat, StringPrototypeEndsWith, StringPrototypeIncludes,
+  StringPrototypeIndexOf, StringPrototypeLastIndexOf, StringPrototypeMatch,
+  StringPrototypeNormalize, StringPrototypePadEnd, StringPrototypePadStart,
+  StringPrototypeRepeat, StringPrototypeReplace, StringPrototypeReplaceAll,
+  StringPrototypeSearch, StringPrototypeSlice, StringPrototypeSplit,
+  StringPrototypeStartsWith, StringPrototypeSubstring,
   StringPrototypeToLocaleLowerCase, StringPrototypeToLocaleUpperCase,
   StringPrototypeToLowerCase, StringPrototypeToString,
   StringPrototypeToUpperCase, StringPrototypeTrim, StringPrototypeTrimEnd,
@@ -60,6 +62,10 @@ pub fn init(
       #("at", StringNative(StringPrototypeAt), 1),
       #("codePointAt", StringNative(StringPrototypeCodePointAt), 1),
       #("normalize", StringNative(StringPrototypeNormalize), 0),
+      #("match", StringNative(StringPrototypeMatch), 1),
+      #("search", StringNative(StringPrototypeSearch), 1),
+      #("replace", StringNative(StringPrototypeReplace), 2),
+      #("replaceAll", StringNative(StringPrototypeReplaceAll), 2),
     ])
   // Static methods on the String constructor
   let #(h, static_methods) =
@@ -115,6 +121,10 @@ pub fn dispatch(
     StringPrototypeAt -> string_at(this, args, state)
     StringPrototypeCodePointAt -> string_code_point_at(this, args, state)
     StringPrototypeNormalize -> string_normalize(this, args, state)
+    StringPrototypeMatch -> string_match(this, args, state)
+    StringPrototypeSearch -> string_search(this, args, state)
+    StringPrototypeReplace -> string_replace(this, args, state)
+    StringPrototypeReplaceAll -> string_replace_all(this, args, state)
     // Static methods
     StringRaw -> string_raw(args, state)
     StringFromCharCode -> string_from_char_code(args, state)
@@ -663,6 +673,271 @@ pub fn string_trim_end(
   string_transform(this, state, string.trim_end)
 }
 
+// ---------------------------------------------------------------------------
+// Symbol method delegation helpers
+// ---------------------------------------------------------------------------
+
+/// Try to get a Symbol method from an object value.
+/// Returns Ok(#(Some(method), state)) if the object has the symbol method,
+/// Ok(#(None, state)) if it's not an object or doesn't have it,
+/// Error if the lookup throws.
+fn try_symbol_method(
+  state: State,
+  val: JsValue,
+  symbol: value.SymbolId,
+) -> Result(#(option.Option(JsValue), State), #(JsValue, State)) {
+  case val {
+    JsObject(ref) ->
+      case object.get_symbol_value(state, ref, symbol, val) {
+        Ok(#(JsUndefined, state)) -> Ok(#(None, state))
+        Ok(#(JsNull, state)) -> Ok(#(None, state))
+        Ok(#(method, state)) -> Ok(#(Some(method), state))
+        Error(#(thrown, state)) -> Error(#(thrown, state))
+      }
+    _ -> Ok(#(None, state))
+  }
+}
+
+/// Call a Symbol method on an object: method.call(obj, args)
+fn call_symbol_method(
+  state: State,
+  method: JsValue,
+  this_val: JsValue,
+  args: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  case frame.call(state, method, this_val, args) {
+    Ok(#(result, state)) -> #(state, Ok(result))
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 §22.1.3.12 String.prototype.match(regexp)
+fn string_match(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let regexp_val = case args {
+        [r, ..] -> r
+        [] -> JsUndefined
+      }
+      // Step 2: If regexp has Symbol.match, delegate
+      case try_symbol_method(state, regexp_val, value.symbol_match) {
+        Ok(#(Some(method), state)) ->
+          call_symbol_method(state, method, regexp_val, [JsString(s)])
+        _ -> {
+          // Step 3: Create a RegExp from the argument, then call Symbol.match on it
+          case
+            frame.call(
+              state,
+              JsObject(state.builtins.regexp.constructor),
+              JsUndefined,
+              [regexp_val],
+            )
+          {
+            Ok(#(rx, state)) ->
+              case try_symbol_method(state, rx, value.symbol_match) {
+                Ok(#(Some(method), state)) ->
+                  call_symbol_method(state, method, rx, [JsString(s)])
+                _ -> #(state, Ok(JsNull))
+              }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        }
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 §22.1.3.20 String.prototype.search(regexp)
+fn string_search(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let regexp_val = case args {
+        [r, ..] -> r
+        [] -> JsUndefined
+      }
+      // Step 2: If regexp has Symbol.search, delegate
+      case try_symbol_method(state, regexp_val, value.symbol_search) {
+        Ok(#(Some(method), state)) ->
+          call_symbol_method(state, method, regexp_val, [JsString(s)])
+        _ -> {
+          // Step 3: Create a RegExp from the argument
+          case
+            frame.call(
+              state,
+              JsObject(state.builtins.regexp.constructor),
+              JsUndefined,
+              [regexp_val],
+            )
+          {
+            Ok(#(rx, state)) ->
+              case try_symbol_method(state, rx, value.symbol_search) {
+                Ok(#(Some(method), state)) ->
+                  call_symbol_method(state, method, rx, [JsString(s)])
+                _ -> #(state, Ok(JsNumber(Finite(-1.0))))
+              }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        }
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 §22.1.3.18 String.prototype.replace(searchValue, replaceValue)
+fn string_replace(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let search_val = case args {
+        [sv, ..] -> sv
+        [] -> JsUndefined
+      }
+      let replace_val = case args {
+        [_, rv, ..] -> rv
+        _ -> JsUndefined
+      }
+      // Step 2: If searchValue has Symbol.replace, delegate
+      case try_symbol_method(state, search_val, value.symbol_replace) {
+        Ok(#(Some(method), state)) ->
+          call_symbol_method(state, method, search_val, [
+            JsString(s),
+            replace_val,
+          ])
+        _ -> {
+          // String-replace-string: replace first occurrence only
+          case frame.to_string(state, search_val) {
+            Ok(#(search_str, state)) ->
+              case frame.to_string(state, replace_val) {
+                Ok(#(replace_str, state)) -> {
+                  let result = string_replace_first(s, search_str, replace_str)
+                  #(state, Ok(JsString(result)))
+                }
+                Error(#(thrown, state)) -> #(state, Error(thrown))
+              }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        }
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// Replace the first occurrence of `search` in `str` with `replacement`.
+fn string_replace_first(
+  str: String,
+  search: String,
+  replacement: String,
+) -> String {
+  case string.split_once(str, search) {
+    Ok(#(before, after)) -> before <> replacement <> after
+    Error(Nil) -> str
+  }
+}
+
+/// ES2024 §22.1.3.19 String.prototype.replaceAll(searchValue, replaceValue)
+fn string_replace_all(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let search_val = case args {
+        [sv, ..] -> sv
+        [] -> JsUndefined
+      }
+      let replace_val = case args {
+        [_, rv, ..] -> rv
+        _ -> JsUndefined
+      }
+      // Step 2: If searchValue is a RegExp...
+      case search_val {
+        JsObject(ref) ->
+          case heap.read(state.heap, ref) {
+            Some(ObjectSlot(kind: RegExpObject(flags: flags, ..), ..)) -> {
+              // Must have global flag, otherwise throw TypeError
+              case string.contains(flags, "g") {
+                False ->
+                  frame.type_error(
+                    state,
+                    "String.prototype.replaceAll called with a non-global RegExp argument",
+                  )
+                True ->
+                  // Delegate to Symbol.replace
+                  case
+                    try_symbol_method(state, search_val, value.symbol_replace)
+                  {
+                    Ok(#(Some(method), state)) ->
+                      call_symbol_method(state, method, search_val, [
+                        JsString(s),
+                        replace_val,
+                      ])
+                    _ -> #(state, Ok(JsString(s)))
+                  }
+              }
+            }
+            _ ->
+              // Not a RegExp, check Symbol.replace anyway
+              try_replace_or_string_replace_all(
+                state,
+                s,
+                search_val,
+                replace_val,
+              )
+          }
+        _ ->
+          try_replace_or_string_replace_all(state, s, search_val, replace_val)
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// Helper for replaceAll: try Symbol.replace, fallback to string replace all occurrences.
+fn try_replace_or_string_replace_all(
+  state: State,
+  s: String,
+  search_val: JsValue,
+  replace_val: JsValue,
+) -> #(State, Result(JsValue, JsValue)) {
+  case try_symbol_method(state, search_val, value.symbol_replace) {
+    Ok(#(Some(method), state)) ->
+      call_symbol_method(state, method, search_val, [
+        JsString(s),
+        replace_val,
+      ])
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(None, state)) -> {
+      // String-replace-all: replace all occurrences
+      case frame.to_string(state, search_val) {
+        Ok(#(search_str, state)) ->
+          case frame.to_string(state, replace_val) {
+            Ok(#(replace_str, state)) -> {
+              let result = string.replace(s, search_str, replace_str)
+              #(state, Ok(JsString(result)))
+            }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
+    }
+  }
+}
+
 /// ES2024 22.1.3.21 — String.prototype.split ( separator, limit )
 ///   1. Let O be ? RequireObjectCoercible(this value).
 ///   2. If separator is not nullish,
@@ -681,8 +956,6 @@ pub fn string_trim_end(
 ///  10-15. (General splitting algorithm, collect substrings between
 ///      matches of R in S, up to lim entries.)
 ///
-/// TODO(Deviation): Steps 2a-2b (@@split symbol dispatch) not implemented — needs
-/// Symbol.split. RegExp and custom splitters will be coerced to strings.
 /// TODO(Deviation): Step 4 uses ToIntegerOrInfinity instead of ToUint32 for limit.
 /// TODO(Deviation): Step 9 uses graphemes instead of UTF-16 code units for
 /// empty-string split — needs UTF-16 string model.
@@ -691,65 +964,69 @@ pub fn string_split(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let array_proto = state.builtins.array.prototype
-  // Steps 1, 3: RequireObjectCoercible + ToString
-  case coerce_to_string(this, state) {
-    Ok(#(s, state)) -> {
-      let sep_val = case args {
-        [s, ..] -> s
-        [] -> JsUndefined
-      }
-      let limit_val = case args {
-        [_, l, ..] -> l
-        _ -> JsUndefined
-      }
-      // Step 4: If limit is undefined, let lim be 2^32-1; else ToUint32(limit).
-      // ToUint32 of NaN or non-numeric string is 0.
-      let lim = case limit_val {
-        JsUndefined -> 4_294_967_295
-        _ ->
-          case helpers.to_number_int(limit_val) {
-            Some(n) if n >= 0 -> n
-            _ -> 0
+  let sep_val = case args {
+    [s, ..] -> s
+    [] -> JsUndefined
+  }
+  let limit_val = case args {
+    [_, l, ..] -> l
+    _ -> JsUndefined
+  }
+  // Step 2: If separator is an object, check for Symbol.split
+  case try_symbol_method(state, sep_val, value.symbol_split) {
+    Ok(#(Some(method), state)) ->
+      call_symbol_method(state, method, sep_val, [this, limit_val])
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(None, _state)) -> {
+      let array_proto = state.builtins.array.prototype
+      // Steps 1, 3: RequireObjectCoercible + ToString
+      case coerce_to_string(this, state) {
+        Ok(#(s, state)) -> {
+          // Step 4: If limit is undefined, let lim be 2^32-1; else ToUint32(limit).
+          let lim = case limit_val {
+            JsUndefined -> 4_294_967_295
+            _ ->
+              case helpers.to_number_int(limit_val) {
+                Some(n) if n >= 0 -> n
+                _ -> 0
+              }
           }
-      }
-      // Step 6: If lim = 0, return empty array.
-      case lim {
-        0 -> {
-          let #(heap, ref) = common.alloc_array(state.heap, [], array_proto)
-          #(State(..state, heap:), Ok(JsObject(ref)))
-        }
-        _ ->
-          case sep_val {
-            // Step 7: If separator is undefined, return [S].
-            JsUndefined -> {
-              let #(heap, ref) =
-                common.alloc_array(state.heap, [JsString(s)], array_proto)
+          // Step 6: If lim = 0, return empty array.
+          case lim {
+            0 -> {
+              let #(heap, ref) = common.alloc_array(state.heap, [], array_proto)
               #(State(..state, heap:), Ok(JsObject(ref)))
             }
-            _ -> {
-              // Step 5: R = ToString(separator)
-              case frame.to_string(state, sep_val) {
-                Ok(#(sep, state)) -> {
-                  // Steps 8-9: empty separator => split into individual chars
-                  // Steps 10-15: general splitting
-                  let parts = case sep {
-                    "" -> string.to_graphemes(s) |> list.map(JsString)
-                    _ -> string.split(s, sep) |> list.map(JsString)
-                  }
-                  // Apply limit
-                  let parts = list.take(parts, lim)
+            _ ->
+              case sep_val {
+                // Step 7: If separator is undefined, return [S].
+                JsUndefined -> {
                   let #(heap, ref) =
-                    common.alloc_array(state.heap, parts, array_proto)
+                    common.alloc_array(state.heap, [JsString(s)], array_proto)
                   #(State(..state, heap:), Ok(JsObject(ref)))
                 }
-                Error(#(thrown, state)) -> #(state, Error(thrown))
+                _ -> {
+                  // Step 5: R = ToString(separator)
+                  case frame.to_string(state, sep_val) {
+                    Ok(#(sep, state)) -> {
+                      let parts = case sep {
+                        "" -> string.to_graphemes(s) |> list.map(JsString)
+                        _ -> string.split(s, sep) |> list.map(JsString)
+                      }
+                      let parts = list.take(parts, lim)
+                      let #(heap, ref) =
+                        common.alloc_array(state.heap, parts, array_proto)
+                      #(State(..state, heap:), Ok(JsObject(ref)))
+                    }
+                    Error(#(thrown, state)) -> #(state, Error(thrown))
+                  }
+                }
               }
-            }
           }
+        }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
       }
     }
-    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 

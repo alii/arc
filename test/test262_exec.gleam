@@ -109,60 +109,46 @@ fn generate_test_suite() -> test_runner.EunitTests {
       }
       Ok(source) -> {
         let metadata = test262_metadata.parse_metadata(source)
+        let outcome = run_test_by_phase(metadata, source, full_path)
+        let expected_pass = set.contains(snapshot, relative)
 
-        let should_skip =
-          metadata.negative_phase == Some(Resolution)
-          || list.contains(metadata.features, "top-level-await")
-
-        case should_skip {
-          True -> {
+        case outcome {
+          Pass -> {
+            record_pass()
+            record_pass_path(relative)
+            case update_mode || !has_snapshot || expected_pass {
+              True -> Ok(Nil)
+              False ->
+                Error(
+                  "NEW PASS — run with UPDATE_SNAPSHOT=1 to update snapshot",
+                )
+            }
+          }
+          Skip(_) -> {
             record_skip()
             Ok(Nil)
           }
-          False -> {
-            let outcome = run_test_by_phase(metadata, source, full_path)
-            let expected_pass = set.contains(snapshot, relative)
-
-            case outcome {
-              Pass -> {
-                record_pass()
-                record_pass_path(relative)
-                case update_mode || !has_snapshot || expected_pass {
-                  True -> Ok(Nil)
-                  False ->
-                    Error(
-                      "NEW PASS — run with UPDATE_SNAPSHOT=1 to update snapshot",
+          Fail(reason) -> {
+            record_fail()
+            case fail_log {
+              Some(path) ->
+                case
+                  simplifile.append(
+                    to: path,
+                    contents: relative <> "\t" <> reason <> "\n",
+                  )
+                {
+                  Ok(Nil) -> Nil
+                  Error(err) ->
+                    io.println(
+                      "Warning: fail log append error: " <> string.inspect(err),
                     )
                 }
-              }
-              Skip(_) -> {
-                record_skip()
-                Ok(Nil)
-              }
-              Fail(reason) -> {
-                record_fail()
-                case fail_log {
-                  Some(path) ->
-                    case
-                      simplifile.append(
-                        to: path,
-                        contents: relative <> "\t" <> reason <> "\n",
-                      )
-                    {
-                      Ok(Nil) -> Nil
-                      Error(err) ->
-                        io.println(
-                          "Warning: fail log append error: "
-                          <> string.inspect(err),
-                        )
-                    }
-                  None -> Nil
-                }
-                case update_mode || !has_snapshot || !expected_pass {
-                  True -> Ok(Nil)
-                  False -> Error("REGRESSION: " <> reason)
-                }
-              }
+              None -> Nil
+            }
+            case update_mode || !has_snapshot || !expected_pass {
+              True -> Ok(Nil)
+              False -> Error("REGRESSION: " <> reason)
             }
           }
         }
@@ -306,7 +292,15 @@ fn run_test_by_phase(
   list.fold_until(variants, Pass, fn(_acc, variant) {
     let outcome = case metadata.negative_phase {
       Some(Parse) -> run_parse_negative_test(metadata, source, variant)
-      Some(Resolution) -> Skip("resolution")
+      Some(Resolution) ->
+        run_runtime_negative_test(
+          metadata,
+          source,
+          is_module,
+          path,
+          variant,
+          is_async,
+        )
       Some(Runtime) ->
         run_runtime_negative_test(
           metadata,
@@ -419,7 +413,12 @@ fn run_runtime_negative_test(
                     Fail("expected runtime throw but async test completed")
                   Error(msg) ->
                     // Async test reported failure — check if it's the right error
-                    case string.contains(msg, metadata.negative_type |> option.unwrap("")) {
+                    case
+                      string.contains(
+                        msg,
+                        metadata.negative_type |> option.unwrap(""),
+                      )
+                    {
                       True -> Pass
                       False -> Fail("wrong async error: " <> msg)
                     }
@@ -518,15 +517,21 @@ fn check_async_completion(
             _ ->
               case string.starts_with(output, "Test262:AsyncTestFailure:") {
                 True -> {
-                  let msg = string.drop_start(output, string.length("Test262:AsyncTestFailure:"))
+                  let msg =
+                    string.drop_start(
+                      output,
+                      string.length("Test262:AsyncTestFailure:"),
+                    )
                   Error("async failure: " <> msg)
                 }
                 False -> Error("unexpected print output: " <> output)
               }
           }
         Ok(value.JsUndefined) -> Error("async test did not call $DONE")
-        Ok(other) -> Error("unexpected __print_output__: " <> string.inspect(other))
-        Error(Nil) -> Error("async test did not call $DONE (no __print_output__)")
+        Ok(other) ->
+          Error("unexpected __print_output__: " <> string.inspect(other))
+        Error(Nil) ->
+          Error("async test did not call $DONE (no __print_output__)")
       }
     }
   }
@@ -578,13 +583,7 @@ fn do_run_module(
 
   // Evaluate harness files as REPL scripts to populate globals
   // Modules don't use the async test protocol via print
-  use #(h, env) <- result.try(eval_harness(
-    metadata,
-    h,
-    b,
-    global_object,
-    False,
-  ))
+  use #(h, env) <- result.try(eval_harness(metadata, h, b, global_object, False))
   let global_object = env.global_object
 
   case module.compile_bundle(path, source, test262_resolve_and_load) {
@@ -759,8 +758,7 @@ fn eval_harness(
       let extra_includes =
         metadata.includes
         |> list.filter(fn(f) {
-          !list.contains(default_harness, f)
-          && !list.contains(async_harness, f)
+          !list.contains(default_harness, f) && !list.contains(async_harness, f)
         })
       let harness_files =
         list.flatten([default_harness, async_harness, extra_includes])
@@ -776,12 +774,7 @@ fn eval_harness(
         )
 
       // Evaluate print preamble first (defines print + __print_output__)
-      use #(h, env) <- result.try(eval_harness_script(
-        print_preamble,
-        h,
-        b,
-        env,
-      ))
+      use #(h, env) <- result.try(eval_harness_script(print_preamble, h, b, env))
 
       list.try_fold(harness_files, #(h, env), fn(acc, filename) {
         let #(heap, env) = acc

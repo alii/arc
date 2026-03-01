@@ -4518,7 +4518,10 @@ fn eval_script_native(
                 )
               case execute_inner(eval_state) {
                 Error(vm_err) ->
-                  frame.type_error(state, "evalScript: VM error: " <> string.inspect(vm_err))
+                  frame.type_error(
+                    state,
+                    "evalScript: VM error: " <> string.inspect(vm_err),
+                  )
                 Ok(#(completion, final_eval_state)) -> {
                   // Drain microtasks in the eval realm
                   let drained = drain_jobs(final_eval_state)
@@ -4620,13 +4623,7 @@ pub fn build_262(
       0,
     )
   let #(h, gc_fn) =
-    common.alloc_native_fn(
-      h,
-      func_proto,
-      value.VmNative(value.Gc),
-      "gc",
-      0,
-    )
+    common.alloc_native_fn(h, func_proto, value.VmNative(value.Gc), "gc", 0)
 
   // Build the $262 object
   let #(h, ref) =
@@ -4640,7 +4637,10 @@ pub fn build_262(
           #("createRealm", value.builtin_property(JsObject(create_realm_fn))),
           #("gc", value.builtin_property(JsObject(gc_fn))),
           // __realm__ is non-enumerable internal property
-          #("__realm__", value.data(JsObject(realm_ref)) |> value.configurable()),
+          #(
+            "__realm__",
+            value.data(JsObject(realm_ref)) |> value.configurable(),
+          ),
         ]),
         symbol_properties: dict.new(),
         elements: js_elements.new(),
