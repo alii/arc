@@ -228,17 +228,6 @@ type GlobalEntry {
   Builtin(name: String, val: value.JsValue)
 }
 
-fn global_entry_name(entry: GlobalEntry) -> String {
-  case entry {
-    Immutable(name:, ..) | Builtin(name:, ..) -> name
-  }
-}
-
-fn global_entry_value(entry: GlobalEntry) -> value.JsValue {
-  case entry {
-    Immutable(val:, ..) | Builtin(val:, ..) -> val
-  }
-}
 
 fn global_entry_to_property(entry: GlobalEntry) -> #(String, value.Property) {
   case entry {
@@ -247,12 +236,13 @@ fn global_entry_to_property(entry: GlobalEntry) -> #(String, value.Property) {
   }
 }
 
-/// Build the default global variable bindings from initialized builtins.
-/// Creates a globalThis object on the heap and returns updated heap + globals dict.
+/// Build the globalThis object on the heap with all built-in bindings.
+/// Returns updated heap + Ref to the globalThis heap object.
+/// The globalThis object IS the ObjectRecord of the Global Environment Record.
 pub fn globals(
   b: Builtins,
   h: Heap,
-) -> #(Heap, dict.Dict(String, value.JsValue)) {
+) -> #(Heap, value.Ref) {
   let entries = [
     // §19.1: these are {writable: false, enumerable: false, configurable: false}
     Immutable("NaN", value.JsNumber(value.NaN)),
@@ -312,10 +302,22 @@ pub fn globals(
     )
   let h = heap.root(h, global_ref)
 
-  // VM globals dict — flat name→JsValue for fast GetGlobal opcode
-  let globals =
-    list.map(entries, fn(e) { #(global_entry_name(e), global_entry_value(e)) })
-    |> list.prepend(#("globalThis", JsObject(global_ref)))
-    |> dict.from_list()
-  #(h, globals)
+  // Add globalThis self-reference property
+  let h =
+    heap.update(h, global_ref, fn(slot) {
+      case slot {
+        ObjectSlot(properties: props, ..) ->
+          ObjectSlot(
+            ..slot,
+            properties: dict.insert(
+              props,
+              "globalThis",
+              value.builtin_property(JsObject(global_ref)),
+            ),
+          )
+        _ -> slot
+      }
+    })
+
+  #(h, global_ref)
 }

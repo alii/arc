@@ -16,7 +16,6 @@ import arc/vm/value.{
 }
 import arc/vm/vm
 import gleam/option.{None, Some}
-import gleam/result
 
 /// Test helper: read a data property walking the prototype chain.
 fn get_data(
@@ -65,10 +64,11 @@ fn run_simple(
   let func = make_func(bytecode, constants, 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  case vm.run(func, h, b) {
-    Ok(#(vm.NormalCompletion(val, _heap), _state)) -> Ok(val)
-    Ok(#(vm.ThrowCompletion(_, _), _)) -> panic as "unexpected ThrowCompletion"
-    Ok(#(vm.YieldCompletion(_, _), _)) -> panic as "unexpected YieldCompletion"
+  let #(h, global_object) = builtins.globals(b, h)
+  case vm.run_and_drain(func, h, b, global_object) {
+    Ok(vm.NormalCompletion(val, _heap)) -> Ok(val)
+    Ok(vm.ThrowCompletion(_, _)) -> panic as "unexpected ThrowCompletion"
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
     Error(e) -> Error(e)
   }
 }
@@ -81,11 +81,12 @@ fn run_throwing(
   let func = make_func(bytecode, constants, 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  case vm.run(func, h, b) {
-    Ok(#(vm.ThrowCompletion(val, _heap), _state)) -> Ok(val)
-    Ok(#(vm.NormalCompletion(_, _), _)) ->
+  let #(h, global_object) = builtins.globals(b, h)
+  case vm.run_and_drain(func, h, b, global_object) {
+    Ok(vm.ThrowCompletion(val, _heap)) -> Ok(val)
+    Ok(vm.NormalCompletion(_, _)) ->
       panic as "expected ThrowCompletion, got NormalCompletion"
-    Ok(#(vm.YieldCompletion(_, _), _)) -> panic as "unexpected YieldCompletion"
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
     Error(e) -> Error(e)
   }
 }
@@ -94,8 +95,8 @@ fn run_throwing(
 fn run_func(func: FuncTemplate) -> Result(vm.Completion, vm.VmError) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  use #(completion, _state) <- result.map(vm.run(func, h, b))
-  completion
+  let #(h, global_object) = builtins.globals(b, h)
+  vm.run_and_drain(func, h, b, global_object)
 }
 
 // ============================================================================
@@ -660,8 +661,9 @@ pub fn tdz_throws_reference_error_test() {
     )
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
-    vm.run(func, h, b)
+  let #(h, global_object) = builtins.globals(b, h)
+  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) =
+    vm.run_and_drain(func, h, b, global_object)
   // Check it's a ReferenceError via prototype chain
   let assert Ok(JsString("ReferenceError")) = get_data(heap, ref, "name")
 }
@@ -676,8 +678,9 @@ pub fn type_error_thrown_for_symbol_conversion_test() {
     )
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
-    vm.run(func, h, b)
+  let #(h, global_object) = builtins.globals(b, h)
+  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) =
+    vm.run_and_drain(func, h, b, global_object)
   let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 
@@ -728,8 +731,9 @@ pub fn get_field_on_null_throws_type_error_test() {
   let func = make_func([PushConst(0), GetField("x")], [JsNull], 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
-    vm.run(func, h, b)
+  let #(h, global_object) = builtins.globals(b, h)
+  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) =
+    vm.run_and_drain(func, h, b, global_object)
   let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 
@@ -738,8 +742,9 @@ pub fn get_field_on_undefined_throws_type_error_test() {
   let func = make_func([PushConst(0), GetField("x")], [JsUndefined], 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
-    vm.run(func, h, b)
+  let #(h, global_object) = builtins.globals(b, h)
+  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) =
+    vm.run_and_drain(func, h, b, global_object)
   let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 

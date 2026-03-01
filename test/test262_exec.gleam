@@ -371,16 +371,16 @@ fn do_run_module(
 ) -> Result(vm.Completion, String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+  let #(h, global_object) = builtins.globals(b, h)
 
   // Evaluate harness files as REPL scripts to populate globals
-  use #(h, env) <- result.try(eval_harness(metadata, h, b, globals))
-  let globals = env.globals
+  use #(h, env) <- result.try(eval_harness(metadata, h, b, global_object))
+  let global_object = env.global_object
 
   case module.compile_bundle(path, source, test262_resolve_and_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
     Ok(bundle) ->
-      case module.evaluate_bundle(bundle, h, b, globals) {
+      case module.evaluate_bundle(bundle, h, b, global_object) {
         Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
         Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
         Error(err) -> Error("module: " <> string.inspect(err))
@@ -462,8 +462,8 @@ fn do_run_script(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let #(h, globals) = builtins.globals(b, h)
-          case vm.run_and_drain(template, h, b, globals) {
+          let #(h, global_object) = builtins.globals(b, h)
+          case vm.run_and_drain(template, h, b, global_object) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
           }
@@ -480,15 +480,16 @@ fn eval_harness(
   metadata: TestMetadata,
   h: Heap,
   b: common.Builtins,
-  globals: dict.Dict(String, value.JsValue),
+  global_object: value.Ref,
 ) -> Result(#(Heap, vm.ReplEnv), String) {
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
     True -> {
       let env =
         vm.ReplEnv(
-          globals:,
-          const_globals: set.new(),
+          global_object:,
+          lexical_globals: dict.new(),
+          const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
         )
@@ -503,8 +504,9 @@ fn eval_harness(
 
       let env =
         vm.ReplEnv(
-          globals:,
-          const_globals: set.new(),
+          global_object:,
+          lexical_globals: dict.new(),
+          const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
         )

@@ -15,8 +15,8 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, DataProperty, JsObject, JsString, JsUndefined, ObjectSlot,
-  OrdinaryObject,
+  type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined,
+  ObjectSlot, OrdinaryObject,
 }
 import arc/vm/vm
 import gleam/dict.{type Dict}
@@ -248,7 +248,7 @@ pub fn evaluate_bundle(
   bundle: ModuleBundle,
   heap: Heap,
   builtins: Builtins,
-  globals: Dict(String, JsValue),
+  global_object: Ref,
 ) -> Result(#(JsValue, Heap), ModuleError) {
   let builtin_exports = extract_builtin_exports(heap, builtins)
   let state =
@@ -259,7 +259,7 @@ pub fn evaluate_bundle(
       evaluating: set.new(),
     )
   let #(_state, result) =
-    eval_module_inner(bundle, state, bundle.entry, builtins, globals)
+    eval_module_inner(bundle, state, bundle.entry, builtins, global_object)
   result
 }
 
@@ -269,7 +269,7 @@ fn eval_module_inner(
   state: EvalState,
   specifier: String,
   builtins: Builtins,
-  globals: Dict(String, JsValue),
+  global_object: Ref,
 ) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
   // Already evaluated successfully
   case dict.has_key(state.evaluated, specifier) {
@@ -297,7 +297,7 @@ fn eval_module_inner(
                     specifier,
                     compiled,
                     builtins,
-                    globals,
+                    global_object,
                   )
               }
           }
@@ -312,7 +312,7 @@ fn eval_module_body(
   specifier: String,
   compiled: CompiledModule,
   builtins: Builtins,
-  globals: Dict(String, JsValue),
+  global_object: Ref,
 ) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
   // Mark as evaluating
   let state =
@@ -329,7 +329,13 @@ fn eval_module_body(
             dict.get(compiled.specifier_map, raw_dep)
             |> result.unwrap(raw_dep)
           let #(state, result) =
-            eval_module_inner(bundle, state, dep_specifier, builtins, globals)
+            eval_module_inner(
+              bundle,
+              state,
+              dep_specifier,
+              builtins,
+              global_object,
+            )
           case result {
             Ok(_) -> #(state, Ok(Nil))
             Error(err) -> #(state, Error(err))
@@ -353,17 +359,18 @@ fn eval_module_body(
       #(state, Error(err))
     }
     Ok(Nil) -> {
-      // All deps evaluated — resolve imports and execute this module
-      let #(heap, module_globals) =
+      // All deps evaluated — resolve imports and execute this module.
+      // Import bindings go into lexical_globals (not on globalThis).
+      let #(heap, import_globals) =
         resolve_imports(
           state.evaluated,
           compiled.specifier_map,
           compiled.import_bindings,
           state.heap,
-          globals,
+          global_object,
         )
 
-      case vm.run_module(compiled.template, heap, builtins, module_globals) {
+      case vm.run_module_with_imports(compiled.template, heap, builtins, global_object, import_globals) {
         vm.ModuleError(error: vm_err) -> {
           let error_val = JsString("InternalError: " <> string.inspect(vm_err))
           let state =
@@ -438,34 +445,35 @@ fn extract_builtin_exports(h: Heap, b: Builtins) -> Dict(String, JsValue) {
 }
 
 /// Resolve import bindings for a module, looking up exports from
-/// already-evaluated modules.
+/// already-evaluated modules. Returns import values as a dict to be
+/// used as lexical_globals in the module's VM state.
 fn resolve_imports(
   evaluated: Dict(String, Dict(String, JsValue)),
   specifier_map: Dict(String, String),
   import_bindings: List(#(String, List(compiler.ImportBinding))),
   heap: Heap,
-  base_globals: Dict(String, JsValue),
+  _global_object: Ref,
 ) -> #(Heap, Dict(String, JsValue)) {
-  list.fold(import_bindings, #(heap, base_globals), fn(acc, entry) {
-    let #(heap, globals) = acc
+  list.fold(import_bindings, #(heap, dict.new()), fn(acc, entry) {
+    let #(heap, imports) = acc
     let #(raw_dep, bindings) = entry
     let dep_specifier =
       dict.get(specifier_map, raw_dep) |> result.unwrap(raw_dep)
     case dict.get(evaluated, dep_specifier) {
-      Error(Nil) -> #(heap, globals)
+      Error(Nil) -> #(heap, imports)
       Ok(dep_exports) ->
-        list.fold(bindings, #(heap, globals), fn(acc, binding) {
-          let #(heap, globals) = acc
+        list.fold(bindings, #(heap, imports), fn(acc, binding) {
+          let #(heap, imports) = acc
           case binding {
             compiler.NamedImport(imported:, local:) -> {
               let val =
                 dict.get(dep_exports, imported) |> result.unwrap(JsUndefined)
-              #(heap, dict.insert(globals, local, val))
+              #(heap, dict.insert(imports, local, val))
             }
             compiler.DefaultImport(local:) -> {
               let val =
                 dict.get(dep_exports, "default") |> result.unwrap(JsUndefined)
-              #(heap, dict.insert(globals, local, val))
+              #(heap, dict.insert(imports, local, val))
             }
             compiler.NamespaceImport(local:) -> {
               let properties =
@@ -486,7 +494,7 @@ fn resolve_imports(
                     extensible: False,
                   ),
                 )
-              #(heap, dict.insert(globals, local, JsObject(ref)))
+              #(heap, dict.insert(imports, local, JsObject(ref)))
             }
           }
         })

@@ -10,17 +10,18 @@ import arc/vm/opcode.{
   IrArrayPushHole, IrArraySpread, IrAwait, IrBinOp, IrBoxLocal, IrCall,
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
   IrCallMethodApply, IrCallSuper, IrCloseVar, IrCreateArguments,
-  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup,
-  IrEnterFinally, IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetBoxed,
-  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
-  IrGetLocal, IrGetThis, IrInitialYield, IrIteratorClose, IrIteratorNext, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
-  IrMakeClosure, IrMarkGlobalConst, IrNewObject, IrObjectSpread, IrPop, IrPopTry,
+  IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
+  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed,
+  IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally,
+  IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetBoxed, IrGetElem,
+  IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
+  IrGetThis, IrInitGlobalLex, IrInitialYield, IrIteratorClose, IrIteratorNext,
+  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrLeaveFinally, IrMakeClosure, IrNewObject, IrObjectSpread, IrPop, IrPopTry,
   IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal,
   IrPutLocal, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar,
   IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp,
-  IrUnmarkGlobalConst, IrYield,
+  IrYield,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
@@ -255,10 +256,12 @@ fn resolve_ops(
     [IrCreateArguments, ..rest] ->
       resolve_ops(rest, labels, [opcode.CreateArguments, ..acc])
 
-    // REPL const tracking
-    [IrMarkGlobalConst(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.MarkGlobalConst(name), ..acc])
-    [IrUnmarkGlobalConst(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.UnmarkGlobalConst(name), ..acc])
+    // Global Environment Record
+    [IrDeclareGlobalVar(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.DeclareGlobalVar(name), ..acc])
+    [IrDeclareGlobalLex(name, is_const), ..rest] ->
+      resolve_ops(rest, labels, [opcode.DeclareGlobalLex(name, is_const), ..acc])
+    [IrInitGlobalLex(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.InitGlobalLex(name), ..acc])
   }
 }

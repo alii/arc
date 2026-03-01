@@ -25,17 +25,17 @@ import arc/vm/opcode.{
   type BinOpKind, type Op, type UnaryOpKind, Add, ArrayFrom, ArrayFromWithHoles,
   ArrayPush, ArrayPushHole, ArraySpread, Await, BinOp, BitAnd, BitNot, BitOr,
   BitXor, BoxLocal, Call, CallApply, CallConstructor, CallConstructorApply,
-  CallMethod, CallMethodApply, CallSuper, CreateArguments, DefineAccessor,
-  DefineAccessorComputed, DefineField, DefineFieldComputed, DefineMethod,
-  DeleteElem, DeleteField, Div, Dup, EnterFinallyThrow, Eq, Exp, ForInNext,
-  ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2, GetGlobal,
-  GetIterator, GetLocal, GetThis, Gt, GtEq, InitialYield, IteratorClose,
-  IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, LogicalNot, Lt,
-  LtEq, MakeClosure, MarkGlobalConst, Mod, Mul, Neg, NewObject, NotEq,
-  ObjectSpread, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem, PutField,
-  PutGlobal, PutLocal, Return, SetupDerivedClass, ShiftLeft, ShiftRight,
+  CallMethod, CallMethodApply, CallSuper, CreateArguments, DeclareGlobalLex,
+  DeclareGlobalVar, DefineAccessor, DefineAccessorComputed, DefineField,
+  DefineFieldComputed, DefineMethod, DeleteElem, DeleteField, Div, Dup,
+  EnterFinallyThrow, Eq, Exp, ForInNext, ForInStart, GetBoxed, GetElem, GetElem2,
+  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetThis, Gt, GtEq,
+  InitGlobalLex, InitialYield, IteratorClose, IteratorNext, Jump, JumpIfFalse,
+  JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg,
+  NewObject, NotEq, ObjectSpread, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem,
+  PutField, PutGlobal, PutLocal, Return, SetupDerivedClass, ShiftLeft, ShiftRight,
   StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp,
-  UnmarkGlobalConst, Void, Yield,
+  Void, Yield,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsNum, type JsValue, type Ref, ArrayIteratorSlot,
@@ -128,13 +128,15 @@ type StepResult {
 
 /// Create a fresh VM state from a function template.
 /// Most callers can use this directly; override fields with `State(..new_state(...), ...)`
-/// for cases that need non-default this_binding, const_globals, or symbol_descriptions.
+/// for cases that need non-default this_binding or symbol_descriptions.
 fn new_state(
   func: FuncTemplate,
   locals: array.Array(JsValue),
   heap: Heap,
   builtins: Builtins,
-  globals: dict.Dict(String, JsValue),
+  global_object: Ref,
+  lexical_globals: dict.Dict(String, JsValue),
+  const_lexical_globals: set.Set(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
 ) -> State {
@@ -142,7 +144,9 @@ fn new_state(
     stack: [],
     locals:,
     constants: func.constants,
-    globals:,
+    lexical_globals:,
+    const_lexical_globals:,
+    global_object:,
     func:,
     code: func.bytecode,
     heap:,
@@ -155,7 +159,6 @@ fn new_state(
     callee_ref: None,
     call_args: [],
     job_queue: [],
-    const_globals: set.new(),
     symbol_descriptions:,
     symbol_registry:,
     js_to_string: js_to_string_callback,
@@ -163,20 +166,11 @@ fn new_state(
   )
 }
 
-/// Run a function template and return its completion + updated heap.
-pub fn run(
-  func: FuncTemplate,
-  heap: Heap,
-  builtins: Builtins,
-) -> Result(#(Completion, State), VmError) {
-  run_with_globals(func, heap, builtins, dict.new())
-}
-
 fn init_state(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
-  globals: dict.Dict(String, JsValue),
+  global_object: Ref,
   is_module: Bool,
 ) -> State {
   let locals = array.repeat(JsUndefined, func.local_count)
@@ -185,33 +179,53 @@ fn init_state(
   // regardless of strict mode. (Strict only affects function-body this.)
   let this_binding = case is_module {
     True -> JsUndefined
-    False -> dict.get(globals, "globalThis") |> result.unwrap(JsUndefined)
+    False -> JsObject(global_object)
   }
   State(
-    ..new_state(func, locals, heap, builtins, globals, dict.new(), dict.new()),
+    ..new_state(
+      func,
+      locals,
+      heap,
+      builtins,
+      global_object,
+      dict.new(),
+      set.new(),
+      dict.new(),
+      dict.new(),
+    ),
     this_binding:,
   )
 }
 
-/// Run a function template with pre-populated global variables.
-pub fn run_with_globals(
+/// Run a function template with a globalThis object, then drain the promise job queue.
+/// Use this when you need promise reactions to execute (e.g., .then callbacks).
+pub fn run_and_drain(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
-  globals: dict.Dict(String, JsValue),
-) -> Result(#(Completion, State), VmError) {
-  init_state(func, heap, builtins, globals, False) |> execute_inner()
+  global_object: Ref,
+) -> Result(Completion, VmError) {
+  let result =
+    init_state(func, heap, builtins, global_object, False) |> execute_inner()
+  use #(completion, final_state) <- result.try(result)
+  let drained_state = drain_jobs(final_state)
+  case completion {
+    NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
+    ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
+    YieldCompletion(_, _) ->
+      panic as "YieldCompletion should not appear at script level"
+  }
 }
 
-/// Run a module template with pre-populated global variables, then drain jobs.
+/// Run a module template with a globalThis object, then drain jobs.
 /// Module `this` is undefined per ES §16.2.1.5.2.
 pub fn run_module(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
-  globals: dict.Dict(String, JsValue),
+  global_object: Ref,
 ) -> ModuleResult {
-  let state = init_state(func, heap, builtins, globals, True)
+  let state = init_state(func, heap, builtins, global_object, True)
   let result = execute_inner(state)
   case result {
     Error(vm_err) -> ModuleError(error: vm_err)
@@ -233,31 +247,58 @@ pub fn run_module(
   }
 }
 
-/// Run a function template with globals, then drain the promise job queue.
-/// Use this when you need promise reactions to execute (e.g., .then callbacks).
-pub fn run_and_drain(
+/// Run a module template with imports as lexical globals.
+/// Module `this` is undefined per ES §16.2.1.5.2.
+pub fn run_module_with_imports(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
-  globals: dict.Dict(String, JsValue),
-) -> Result(Completion, VmError) {
-  let result =
-    init_state(func, heap, builtins, globals, False) |> execute_inner()
-  use #(completion, final_state) <- result.try(result)
-  let drained_state = drain_jobs(final_state)
-  case completion {
-    NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
-    ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
-    YieldCompletion(_, _) ->
-      panic as "YieldCompletion should not appear at script level"
+  global_object: Ref,
+  import_globals: dict.Dict(String, JsValue),
+) -> ModuleResult {
+  let locals = array.repeat(JsUndefined, func.local_count)
+  let state =
+    State(
+      ..new_state(
+        func,
+        locals,
+        heap,
+        builtins,
+        global_object,
+        import_globals,
+        set.new(),
+        dict.new(),
+        dict.new(),
+      ),
+      this_binding: JsUndefined,
+    )
+  let result = execute_inner(state)
+  case result {
+    Error(vm_err) -> ModuleError(error: vm_err)
+    Ok(#(completion, final_state)) -> {
+      let drained_state = drain_jobs(final_state)
+      case completion {
+        NormalCompletion(val, _) ->
+          ModuleOk(
+            value: val,
+            heap: drained_state.heap,
+            locals: drained_state.locals,
+          )
+        ThrowCompletion(val, _) ->
+          ModuleThrow(value: val, heap: drained_state.heap)
+        YieldCompletion(_, _) ->
+          panic as "YieldCompletion should not appear at module level"
+      }
+    }
   }
 }
 
 /// Persistent REPL environment carried between evaluations.
 pub type ReplEnv {
   ReplEnv(
-    globals: dict.Dict(String, JsValue),
-    const_globals: set.Set(String),
+    global_object: Ref,
+    lexical_globals: dict.Dict(String, JsValue),
+    const_lexical_globals: set.Set(String),
     symbol_descriptions: dict.Dict(value.SymbolId, String),
     symbol_registry: dict.Dict(String, value.SymbolId),
   )
@@ -273,24 +314,24 @@ pub fn run_and_drain_repl(
 ) -> Result(#(Completion, ReplEnv), VmError) {
   let locals = array.repeat(JsUndefined, func.local_count)
   let state =
-    State(
-      ..new_state(
-        func,
-        locals,
-        heap,
-        builtins,
-        env.globals,
-        env.symbol_descriptions,
-        env.symbol_registry,
-      ),
-      const_globals: env.const_globals,
+    new_state(
+      func,
+      locals,
+      heap,
+      builtins,
+      env.global_object,
+      env.lexical_globals,
+      env.const_lexical_globals,
+      env.symbol_descriptions,
+      env.symbol_registry,
     )
   use #(completion, final_state) <- result.try(execute_inner(state))
   let drained_state = drain_jobs(final_state)
   let new_env =
     ReplEnv(
-      globals: drained_state.globals,
-      const_globals: drained_state.const_globals,
+      global_object: drained_state.global_object,
+      lexical_globals: drained_state.lexical_globals,
+      const_lexical_globals: drained_state.const_lexical_globals,
       symbol_descriptions: drained_state.symbol_descriptions,
       symbol_registry: drained_state.symbol_registry,
     )
@@ -557,62 +598,227 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       }
     }
 
+    // §9.1.1.4.4 GetBindingValue — two-phase: declarative then object record
     GetGlobal(name) -> {
-      case dict.get(state.globals, name) {
+      case dict.get(state.lexical_globals, name) {
+        // Lexical binding exists — check for TDZ
+        Ok(JsUninitialized) ->
+          throw_reference_error(
+            state,
+            "Cannot access '" <> name <> "' before initialization",
+          )
         Ok(value) ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-        Error(_) -> throw_reference_error(state, name <> " is not defined")
+        // Not in lexical → try object record (globalThis)
+        Error(_) ->
+          case
+            object.get_own_property(state.heap, state.global_object, name)
+          {
+            Some(DataProperty(value: val, ..)) ->
+              Ok(
+                State(..state, stack: [val, ..state.stack], pc: state.pc + 1),
+              )
+            Some(value.AccessorProperty(get: Some(getter), ..)) ->
+              case frame.call(state, getter, JsObject(state.global_object), []) {
+                Ok(#(val, state)) ->
+                  Ok(
+                    State(..state, stack: [val, ..state.stack], pc: state.pc + 1),
+                  )
+                Error(#(thrown, state)) ->
+                  Error(#(Thrown, thrown, state.heap))
+              }
+            Some(value.AccessorProperty(get: None, ..)) ->
+              Ok(
+                State(
+                  ..state,
+                  stack: [JsUndefined, ..state.stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            None ->
+              // Check prototype chain
+              case
+                object.has_property(state.heap, state.global_object, name)
+              {
+                True ->
+                  case
+                    object.get_value_of(
+                      state,
+                      JsObject(state.global_object),
+                      name,
+                    )
+                  {
+                    Ok(#(val, state)) ->
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [val, ..state.stack],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                    Error(#(thrown, state)) ->
+                      Error(#(Thrown, thrown, state.heap))
+                  }
+                False ->
+                  throw_reference_error(state, name <> " is not defined")
+              }
+          }
       }
     }
 
+    // §9.1.1.4.5 SetMutableBinding — two-phase: declarative then object record
     PutGlobal(name) -> {
       case state.stack {
-        [value, ..rest] ->
-          case set.contains(state.const_globals, name) {
-            True -> {
+        [value, ..rest] -> {
+          // 1. Check const lexical
+          case set.contains(state.const_lexical_globals, name) {
+            True ->
               throw_type_error(state, "Assignment to constant variable.")
-            }
             False ->
-              // Strict mode: assignment to an undeclared variable throws
-              // ReferenceError instead of implicitly creating a global.
-              // (ES §9.1.1.4.5 SetMutableBinding step 3.a for unresolvable refs.)
-              case state.func.is_strict && !dict.has_key(state.globals, name) {
-                True -> {
-                  throw_reference_error(state, name <> " is not defined")
-                }
-                False ->
+              // 2. Check lexical globals
+              case dict.get(state.lexical_globals, name) {
+                Ok(JsUninitialized) ->
+                  throw_reference_error(
+                    state,
+                    "Cannot access '" <> name <> "' before initialization",
+                  )
+                Ok(_) ->
                   Ok(
                     State(
                       ..state,
                       stack: rest,
-                      globals: dict.insert(state.globals, name, value),
+                      lexical_globals: dict.insert(
+                        state.lexical_globals,
+                        name,
+                        value,
+                      ),
                       pc: state.pc + 1,
                     ),
                   )
+                // 3. Object record path
+                Error(_) ->
+                  case state.func.is_strict {
+                    True ->
+                      // Strict mode: must exist on globalThis or throw
+                      case
+                        object.has_property(
+                          state.heap,
+                          state.global_object,
+                          name,
+                        )
+                      {
+                        False ->
+                          throw_reference_error(
+                            state,
+                            name <> " is not defined",
+                          )
+                        True ->
+                          case
+                            object.set_value(
+                              State(..state, stack: rest),
+                              state.global_object,
+                              name,
+                              value,
+                              JsObject(state.global_object),
+                            )
+                          {
+                            Ok(#(state, True)) ->
+                              Ok(State(..state, pc: state.pc + 1))
+                            Ok(#(state, False)) ->
+                              throw_type_error(
+                                state,
+                                "Cannot assign to read only property '"
+                                  <> name
+                                  <> "' of object '#<Object>'",
+                              )
+                            Error(#(thrown, state)) ->
+                              Error(#(Thrown, thrown, state.heap))
+                          }
+                      }
+                    False ->
+                      // Sloppy mode: set on globalThis (creates if needed,
+                      // returns False for non-writable → silently ignore)
+                      case
+                        object.set_value(
+                          State(..state, stack: rest),
+                          state.global_object,
+                          name,
+                          value,
+                          JsObject(state.global_object),
+                        )
+                      {
+                        Ok(#(state, _)) ->
+                          Ok(State(..state, pc: state.pc + 1))
+                        Error(#(thrown, state)) ->
+                          Error(#(Thrown, thrown, state.heap))
+                      }
+                  }
               }
           }
+        }
         [] ->
           Error(#(VmError(StackUnderflow("PutGlobal")), JsUndefined, state.heap))
       }
     }
 
-    MarkGlobalConst(name) ->
-      Ok(
-        State(
-          ..state,
-          const_globals: set.insert(state.const_globals, name),
-          pc: state.pc + 1,
-        ),
-      )
+    // §9.1.1.4.17 CreateGlobalVarBinding — create var on globalThis
+    DeclareGlobalVar(name) -> {
+      case object.has_property(state.heap, state.global_object, name) {
+        True ->
+          // Already exists — no-op
+          Ok(State(..state, pc: state.pc + 1))
+        False -> {
+          let #(heap, _) =
+            object.set_property(
+              state.heap,
+              state.global_object,
+              name,
+              JsUndefined,
+            )
+          Ok(State(..state, heap:, pc: state.pc + 1))
+        }
+      }
+    }
 
-    UnmarkGlobalConst(name) ->
-      Ok(
+    // §9.1.1.4.16 CreateGlobalLexBinding — create let/const in lexical record
+    DeclareGlobalLex(name, is_const) -> {
+      let state =
         State(
           ..state,
-          const_globals: set.delete(state.const_globals, name),
+          lexical_globals: dict.insert(
+            state.lexical_globals,
+            name,
+            JsUninitialized,
+          ),
+          const_lexical_globals: case is_const {
+            True -> set.insert(state.const_lexical_globals, name)
+            False -> set.delete(state.const_lexical_globals, name)
+          },
           pc: state.pc + 1,
-        ),
-      )
+        )
+      Ok(state)
+    }
+
+    // Initialize a lexical global (TDZ → value)
+    InitGlobalLex(name) -> {
+      case state.stack {
+        [value, ..rest] ->
+          Ok(
+            State(
+              ..state,
+              stack: rest,
+              lexical_globals: dict.insert(state.lexical_globals, name, value),
+              pc: state.pc + 1,
+            ),
+          )
+        [] ->
+          Error(#(
+            VmError(StackUnderflow("InitGlobalLex")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
 
     TypeOf -> {
       case state.stack {
@@ -630,18 +836,61 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       }
     }
 
+    // §9.1.1.4: typeof on globals — TDZ throws, undeclared returns "undefined"
     TypeofGlobal(name) -> {
-      let val = case dict.get(state.globals, name) {
-        Ok(v) -> v
-        Error(_) -> JsUndefined
+      case dict.get(state.lexical_globals, name) {
+        // TDZ — typeof on uninitialized lexical still throws per spec
+        Ok(JsUninitialized) ->
+          throw_reference_error(
+            state,
+            "Cannot access '" <> name <> "' before initialization",
+          )
+        Ok(val) ->
+          Ok(
+            State(
+              ..state,
+              stack: [
+                JsString(common.typeof_value(val, state.heap)),
+                ..state.stack
+              ],
+              pc: state.pc + 1,
+            ),
+          )
+        Error(_) -> {
+          // Object record: try globalThis, return "undefined" if not found
+          let val = case
+            object.get_own_property(state.heap, state.global_object, name)
+          {
+            Some(DataProperty(value: v, ..)) -> v
+            _ ->
+              case object.has_property(state.heap, state.global_object, name) {
+                True ->
+                  // Property exists on proto chain — use get_value_of for correct result
+                  case
+                    object.get_value_of(
+                      state,
+                      JsObject(state.global_object),
+                      name,
+                    )
+                  {
+                    Ok(#(v, _)) -> v
+                    Error(_) -> JsUndefined
+                  }
+                False -> JsUndefined
+              }
+          }
+          Ok(
+            State(
+              ..state,
+              stack: [
+                JsString(common.typeof_value(val, state.heap)),
+                ..state.stack
+              ],
+              pc: state.pc + 1,
+            ),
+          )
+        }
       }
-      Ok(
-        State(
-          ..state,
-          stack: [JsString(common.typeof_value(val, state.heap)), ..state.stack],
-          pc: state.pc + 1,
-        ),
-      )
     }
 
     BinOp(kind) -> {
@@ -1921,7 +2170,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                               ..rest
                             ],
                             pc: state.pc + 1,
-                            globals: next_state.globals,
+                            lexical_globals: next_state.lexical_globals,
+                            const_lexical_globals: next_state.const_lexical_globals,
                             job_queue: next_state.job_queue,
                           ),
                         )
@@ -2449,8 +2699,7 @@ fn bind_this(
             // Step 6a: undefined/null → globalThis.
             JsUndefined | value.JsNull -> #(
               state.heap,
-              dict.get(state.globals, "globalThis")
-                |> result.unwrap(JsUndefined),
+              JsObject(state.global_object),
             )
             // Step 6b: Objects pass through (ToObject is identity for objects).
             JsObject(_) -> #(state.heap, this_arg)
@@ -2647,7 +2896,8 @@ fn call_generator_function(
           heap: h,
           stack: [JsObject(gen_obj_ref), ..rest_stack],
           pc: state.pc + 1,
-          globals: suspended.globals,
+          lexical_globals: suspended.lexical_globals,
+          const_lexical_globals: suspended.const_lexical_globals,
           job_queue: suspended.job_queue,
         ),
       )
@@ -2772,7 +3022,8 @@ fn call_async_function(
           heap: h2,
           stack: [JsObject(promise_ref), ..rest_stack],
           pc: state.pc + 1,
-          globals: suspended.globals,
+          lexical_globals: suspended.lexical_globals,
+          const_lexical_globals: suspended.const_lexical_globals,
           job_queue: list.append(suspended.job_queue, jobs),
         ),
       )
@@ -2787,7 +3038,8 @@ fn call_async_function(
           heap: h2,
           stack: [JsObject(promise_ref), ..rest_stack],
           pc: state.pc + 1,
-          globals: final_state.globals,
+          lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
           job_queue: list.append(final_state.job_queue, jobs),
         ),
       )
@@ -2801,7 +3053,8 @@ fn call_async_function(
           heap: h2,
           stack: [JsObject(promise_ref), ..rest_stack],
           pc: state.pc + 1,
-          globals: final_state.globals,
+          lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
           job_queue: list.append(final_state.job_queue, jobs),
         ),
       )
@@ -2958,7 +3211,8 @@ fn call_native_async_resume(
               heap: h2,
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
-              globals: final_state.globals,
+              lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
               job_queue: list.append(final_state.job_queue, jobs),
             ),
           )
@@ -2973,7 +3227,8 @@ fn call_native_async_resume(
               heap: h2,
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
-              globals: final_state.globals,
+              lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
               job_queue: list.append(final_state.job_queue, jobs),
             ),
           )
@@ -3009,7 +3264,8 @@ fn call_native_async_resume(
               heap: h2,
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
-              globals: suspended.globals,
+              lexical_globals: suspended.lexical_globals,
+          const_lexical_globals: suspended.const_lexical_globals,
               job_queue: list.append(suspended.job_queue, jobs),
             ),
           )
@@ -3766,7 +4022,8 @@ fn drain_generator_to_array(
                 State(
                   ..state,
                   heap: next_state.heap,
-                  globals: next_state.globals,
+                  lexical_globals: next_state.lexical_globals,
+                  const_lexical_globals: next_state.const_lexical_globals,
                   job_queue: next_state.job_queue,
                 ),
               )
@@ -3781,7 +4038,8 @@ fn drain_generator_to_array(
                 State(
                   ..state,
                   heap:,
-                  globals: next_state.globals,
+                  lexical_globals: next_state.lexical_globals,
+                  const_lexical_globals: next_state.const_lexical_globals,
                   job_queue: next_state.job_queue,
                 ),
                 gen_ref,
@@ -3999,7 +4257,9 @@ fn arc_spawn(
             env_ref,
             state.heap,
             state.builtins,
-            state.globals,
+            state.global_object,
+            state.lexical_globals,
+            state.const_lexical_globals,
             state.symbol_descriptions,
             state.symbol_registry,
           )
@@ -4011,7 +4271,9 @@ fn arc_spawn(
             state.func,
             state.heap,
             state.builtins,
-            state.globals,
+            state.global_object,
+            state.lexical_globals,
+            state.const_lexical_globals,
             state.symbol_descriptions,
             state.symbol_registry,
           )
@@ -4043,7 +4305,9 @@ fn run_spawned_closure(
   env_ref: value.Ref,
   heap: Heap,
   builtins: Builtins,
-  globals: dict.Dict(String, JsValue),
+  global_object: Ref,
+  lexical_globals: dict.Dict(String, JsValue),
+  const_lexical_globals: set.Set(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
 ) -> Nil {
@@ -4065,7 +4329,9 @@ fn run_spawned_closure(
       locals,
       heap,
       builtins,
-      globals,
+      global_object,
+      lexical_globals,
+      const_lexical_globals,
       symbol_descriptions,
       symbol_registry,
     )
@@ -4087,7 +4353,9 @@ fn run_spawned_native(
   caller_func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
-  globals: dict.Dict(String, JsValue),
+  global_object: Ref,
+  lexical_globals: dict.Dict(String, JsValue),
+  const_lexical_globals: set.Set(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
 ) -> Nil {
@@ -4098,7 +4366,9 @@ fn run_spawned_native(
       locals,
       heap,
       builtins,
-      globals,
+      global_object,
+      lexical_globals,
+      const_lexical_globals,
       symbol_descriptions,
       symbol_registry,
     )
@@ -4847,7 +5117,8 @@ fn call_native_generator_next(
                   heap: h3,
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
-                  globals: suspended.globals,
+                  lexical_globals: suspended.lexical_globals,
+          const_lexical_globals: suspended.const_lexical_globals,
                   job_queue: suspended.job_queue,
                 ),
               )
@@ -4868,7 +5139,8 @@ fn call_native_generator_next(
                   heap: h3,
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
-                  globals: final_state.globals,
+                  lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
                   job_queue: final_state.job_queue,
                 ),
               )
@@ -5080,7 +5352,8 @@ fn call_native_generator_throw(
                       heap: h3,
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
-                      globals: suspended.globals,
+                      lexical_globals: suspended.lexical_globals,
+          const_lexical_globals: suspended.const_lexical_globals,
                       job_queue: suspended.job_queue,
                     ),
                   )
@@ -5105,7 +5378,8 @@ fn call_native_generator_throw(
                       heap: h3,
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
-                      globals: final_state.globals,
+                      lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
                       job_queue: final_state.job_queue,
                     ),
                   )
@@ -5274,7 +5548,8 @@ fn process_generator_return(
           heap: h,
           stack: [result, ..rest_stack],
           pc: outer_state.pc + 1,
-          globals: gen_state.globals,
+          lexical_globals: gen_state.lexical_globals,
+          const_lexical_globals: gen_state.const_lexical_globals,
           job_queue: gen_state.job_queue,
         ),
       )
@@ -5307,7 +5582,8 @@ fn process_generator_return(
               finally_stack: final_state.finally_stack,
               stack: final_state.stack,
               locals: final_state.locals,
-              globals: final_state.globals,
+              lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
               job_queue: final_state.job_queue,
             )
           process_generator_return(
@@ -5353,7 +5629,8 @@ fn process_generator_return(
               heap: h3,
               stack: [result, ..rest_stack],
               pc: outer_state.pc + 1,
-              globals: suspended.globals,
+              lexical_globals: suspended.lexical_globals,
+          const_lexical_globals: suspended.const_lexical_globals,
               job_queue: suspended.job_queue,
             ),
           )
@@ -5612,7 +5889,8 @@ fn run_closure_for_job(
           ..state,
           heap: h,
           job_queue: final_state.job_queue,
-          globals: final_state.globals,
+          lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
         ),
       ))
     Ok(#(ThrowCompletion(thrown, h), final_state)) ->
@@ -5622,7 +5900,8 @@ fn run_closure_for_job(
           ..state,
           heap: h,
           job_queue: final_state.job_queue,
-          globals: final_state.globals,
+          lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
         ),
       ))
     Ok(#(YieldCompletion(_, _), _)) ->

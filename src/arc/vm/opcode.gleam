@@ -127,11 +127,13 @@ pub type Op {
   /// Reads state.call_args, allocates ArgumentsObject, pushes ref onto stack.
   CreateArguments
 
-  // -- REPL const tracking --
-  /// Mark a global name as const (PutGlobal will throw TypeError for this name).
-  MarkGlobalConst(name: String)
-  /// Remove const protection from a global name (for redeclaration tolerance).
-  UnmarkGlobalConst(name: String)
+  // -- Global Environment Record --
+  /// §9.1.1.4.17: Create writable/enumerable/configurable property on globalThis (if not already there).
+  DeclareGlobalVar(name: String)
+  /// Create entry in lexical_globals (with JsUninitialized for TDZ).
+  DeclareGlobalLex(name: String, is_const: Bool)
+  /// Pop value from stack, initialize lexical binding (TDZ → value).
+  InitGlobalLex(name: String)
 }
 
 pub type AccessorKind {
@@ -267,7 +269,8 @@ pub type IrOp {
   IrAwait
   IrCreateArguments
 
-  // -- REPL const tracking --
-  IrMarkGlobalConst(name: String)
-  IrUnmarkGlobalConst(name: String)
+  // -- Global Environment Record --
+  IrDeclareGlobalVar(name: String)
+  IrDeclareGlobalLex(name: String, is_const: Bool)
+  IrInitGlobalLex(name: String)
 }

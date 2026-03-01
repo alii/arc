@@ -72,7 +72,12 @@ pub type State {
     stack: List(JsValue),
     locals: Array(JsValue),
     constants: Array(JsValue),
-    globals: dict.Dict(String, JsValue),
+    /// DeclarativeRecord: let/const at global scope. NOT on globalThis. Checked first.
+    lexical_globals: dict.Dict(String, JsValue),
+    /// Tracks which lexical globals are const (PutGlobal throws TypeError).
+    const_lexical_globals: set.Set(String),
+    /// ObjectRecord: Ref to globalThis heap object. var/function/builtins live here.
+    global_object: Ref,
     func: FuncTemplate,
     code: Array(Op),
     heap: Heap,
@@ -93,8 +98,6 @@ pub type State {
     /// Promise microtask job queue. Jobs enqueued during promise operations,
     /// drained after script completes (or by run_and_drain).
     job_queue: List(value.Job),
-    /// REPL: set of global names declared with `const` (PutGlobal throws TypeError).
-    const_globals: set.Set(String),
     /// Descriptions for user-created symbols (Symbol("desc")).
     symbol_descriptions: dict.Dict(value.SymbolId, String),
     /// Global symbol registry for Symbol.for() / Symbol.keyFor().

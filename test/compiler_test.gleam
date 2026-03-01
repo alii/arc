@@ -4,6 +4,7 @@ import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common
 import arc/vm/heap
+import arc/vm/object
 import arc/vm/value.{
   Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN,
 }
@@ -33,9 +34,9 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let #(h, globals) = builtins.globals(b, h)
-          case vm.run_with_globals(template, h, b, globals) {
-            Ok(#(completion, _state)) -> Ok(completion)
+          let #(h, global_object) = builtins.globals(b, h)
+          case vm.run_and_drain(template, h, b, global_object) {
+            Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
         }
@@ -58,8 +59,8 @@ fn run_js_drain(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let #(h, globals) = builtins.globals(b, h)
-          case vm.run_and_drain(template, h, b, globals) {
+          let #(h, global_object) = builtins.globals(b, h)
+          case vm.run_and_drain(template, h, b, global_object) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
@@ -5756,11 +5757,12 @@ fn run_repl_lines(
 ) -> Result(#(value.JsValue, heap.Heap), String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+  let #(h, global_object) = builtins.globals(b, h)
   let env =
     vm.ReplEnv(
-      globals:,
-      const_globals: set.new(),
+      global_object:,
+      lexical_globals: dict.new(),
+      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
     )
@@ -5825,11 +5827,12 @@ fn eval_repl_line(
 fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+  let #(h, global_object) = builtins.globals(b, h)
   let env =
     vm.ReplEnv(
-      globals:,
-      const_globals: set.new(),
+      global_object:,
+      lexical_globals: dict.new(),
+      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
     )
@@ -6305,7 +6308,7 @@ pub fn strict_reference_error_type_test() -> Nil {
 fn run_module(source: String) -> Result(vm.Completion, String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+  let #(h, global_object) = builtins.globals(b, h)
   let specifier = "<test>"
 
   case
@@ -6315,7 +6318,7 @@ fn run_module(source: String) -> Result(vm.Completion, String) {
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
-      case module.evaluate_bundle(bundle, h, b, globals) {
+      case module.evaluate_bundle(bundle, h, b, global_object) {
         Ok(#(val, new_heap)) -> Ok(vm.NormalCompletion(val, new_heap))
         Error(module.EvaluationError(val)) -> Ok(vm.ThrowCompletion(val, h))
         Error(err) -> Error("module error: " <> string.inspect(err))
@@ -6394,7 +6397,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
   // 2. Run a module that accesses that function via GetGlobal
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+  let #(h, global_object) = builtins.globals(b, h)
 
   // Step 1: Compile and run harness script in REPL mode
   let harness_source =
@@ -6404,8 +6407,9 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   let env =
     vm.ReplEnv(
-      globals:,
-      const_globals: set.new(),
+      global_object:,
+      lexical_globals: dict.new(),
+      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
     )
@@ -6413,8 +6417,8 @@ pub fn module_repl_harness_globals_test() -> Nil {
     vm.run_and_drain_repl(harness_template, h, b, env)
   let assert vm.NormalCompletion(_, h) = harness_completion
 
-  // Verify greetFromHarness is in globals
-  let assert Ok(_) = dict.get(env.globals, "greetFromHarness")
+  // Verify greetFromHarness is on globalThis object
+  let assert True = object.has_property(h, env.global_object, "greetFromHarness")
 
   // Step 2: Compile and run a module that uses the harness function
   let module_source = "greetFromHarness()"
@@ -6425,7 +6429,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
     })
 
   // Evaluate the module, passing in REPL globals
-  case module.evaluate_bundle(bundle, h, b, env.globals) {
+  case module.evaluate_bundle(bundle, h, b, env.global_object) {
     Ok(#(val, _heap)) -> {
       let assert True = val == JsString("hello from harness")
       Nil

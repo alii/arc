@@ -1848,6 +1848,7 @@ built-ins/GeneratorPrototype/throw/try-catch-within-try.js
 built-ins/GeneratorPrototype/throw/try-finally-nested-try-catch-within-inner-try.js
 built-ins/Infinity/15.1.1.2-0.js
 built-ins/Infinity/S15.1.1.2_A1.js
+built-ins/Infinity/S15.1.1.2_A2_T2.js
 built-ins/Infinity/S15.1.1.2_A4.js
 built-ins/Infinity/prop-desc.js
 built-ins/JSON/15.12-0-1.js
@@ -2185,6 +2186,7 @@ built-ins/Math/trunc/name.js
 built-ins/Math/trunc/prop-desc.js
 built-ins/NaN/15.1.1.1-0.js
 built-ins/NaN/S15.1.1.1_A1.js
+built-ins/NaN/S15.1.1.1_A2_T2.js
 built-ins/NaN/S15.1.1.1_A4.js
 built-ins/NaN/prop-desc.js
 built-ins/NativeErrors/EvalError/constructor.js
@@ -2639,6 +2641,10 @@ built-ins/Object/create/15.2.3.5-4-268.js
 built-ins/Object/create/15.2.3.5-4-269.js
 built-ins/Object/create/15.2.3.5-4-270.js
 built-ins/Object/create/15.2.3.5-4-271.js
+built-ins/Object/create/15.2.3.5-4-272.js
+built-ins/Object/create/15.2.3.5-4-273.js
+built-ins/Object/create/15.2.3.5-4-274.js
+built-ins/Object/create/15.2.3.5-4-275.js
 built-ins/Object/create/15.2.3.5-4-276.js
 built-ins/Object/create/15.2.3.5-4-277.js
 built-ins/Object/create/15.2.3.5-4-278.js
@@ -2715,6 +2721,7 @@ built-ins/Object/create/properties-arg-to-object-bigint.js
 built-ins/Object/create/properties-arg-to-object.js
 built-ins/Object/defineProperties/15.2.3.7-0-1.js
 built-ins/Object/defineProperties/15.2.3.7-0-2.js
+built-ins/Object/defineProperties/15.2.3.7-2-18.js
 built-ins/Object/defineProperties/15.2.3.7-2-3.js
 built-ins/Object/defineProperties/15.2.3.7-2-5.js
 built-ins/Object/defineProperties/15.2.3.7-2-7.js
@@ -2843,6 +2850,8 @@ built-ins/Object/defineProperties/15.2.3.7-5-b-230.js
 built-ins/Object/defineProperties/15.2.3.7-5-b-231.js
 built-ins/Object/defineProperties/15.2.3.7-5-b-232.js
 built-ins/Object/defineProperties/15.2.3.7-5-b-233.js
+built-ins/Object/defineProperties/15.2.3.7-5-b-234.js
+built-ins/Object/defineProperties/15.2.3.7-5-b-235.js
 built-ins/Object/defineProperties/15.2.3.7-5-b-236.js
 built-ins/Object/defineProperties/15.2.3.7-5-b-237.js
 built-ins/Object/defineProperties/15.2.3.7-5-b-238.js
@@ -3212,6 +3221,10 @@ built-ins/Object/defineProperty/15.2.3.6-3-238.js
 built-ins/Object/defineProperty/15.2.3.6-3-239.js
 built-ins/Object/defineProperty/15.2.3.6-3-24.js
 built-ins/Object/defineProperty/15.2.3.6-3-240.js
+built-ins/Object/defineProperty/15.2.3.6-3-241.js
+built-ins/Object/defineProperty/15.2.3.6-3-242.js
+built-ins/Object/defineProperty/15.2.3.6-3-243.js
+built-ins/Object/defineProperty/15.2.3.6-3-244.js
 built-ins/Object/defineProperty/15.2.3.6-3-245.js
 built-ins/Object/defineProperty/15.2.3.6-3-246.js
 built-ins/Object/defineProperty/15.2.3.6-3-247.js
@@ -3626,6 +3639,7 @@ built-ins/Object/defineProperty/15.2.3.6-4-619.js
 built-ins/Object/defineProperty/15.2.3.6-4-62.js
 built-ins/Object/defineProperty/15.2.3.6-4-620.js
 built-ins/Object/defineProperty/15.2.3.6-4-621.js
+built-ins/Object/defineProperty/15.2.3.6-4-625gs.js
 built-ins/Object/defineProperty/15.2.3.6-4-63.js
 built-ins/Object/defineProperty/15.2.3.6-4-64.js
 built-ins/Object/defineProperty/15.2.3.6-4-65.js
@@ -4721,6 +4735,7 @@ built-ins/String/S15.5.1.1_A1_T4.js
 built-ins/String/S15.5.1.1_A1_T5.js
 built-ins/String/S15.5.1.1_A1_T7.js
 built-ins/String/S15.5.1.1_A1_T8.js
+built-ins/String/S15.5.1.1_A1_T9.js
 built-ins/String/S15.5.1.1_A2_T1.js
 built-ins/String/S15.5.2.1_A1_T12.js
 built-ins/String/S15.5.2.1_A1_T13.js
@@ -5421,6 +5436,7 @@ built-ins/global/S10.2.3_A2.1_T1.js
 built-ins/global/S10.2.3_A2.1_T2.js
 built-ins/global/S10.2.3_A2.1_T3.js
 built-ins/global/S10.2.3_A2.1_T4.js
+built-ins/global/property-descriptor.js
 built-ins/isFinite/S15.1.2.5_A2.6.js
 built-ins/isFinite/prop-desc.js
 built-ins/isFinite/return-false-on-nan-or-infinities.js
@@ -5530,7 +5546,9 @@ language/arguments-object/10.6-5-1.js
 language/arguments-object/10.6-6-1.js
 language/arguments-object/10.6-6-2.js
 language/arguments-object/10.6-6-3-s.js
+language/arguments-object/10.6-6-3.js
 language/arguments-object/10.6-6-4-s.js
+language/arguments-object/10.6-6-4.js
 language/arguments-object/10.6-7-1.js
 language/arguments-object/S10.1.6_A1_T2.js
 language/arguments-object/S10.6_A1.js
@@ -6083,6 +6101,7 @@ language/expressions/arrow-function/dstr/ary-name-iter-val.js
 language/expressions/arrow-function/dstr/ary-ptrn-elem-ary-elem-init.js
 language/expressions/arrow-function/dstr/ary-ptrn-elem-ary-elem-iter.js
 language/expressions/arrow-function/dstr/ary-ptrn-elem-ary-elision-iter.js
+language/expressions/arrow-function/dstr/ary-ptrn-elem-ary-empty-init.js
 language/expressions/arrow-function/dstr/ary-ptrn-elem-ary-empty-iter.js
 language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-exhausted.js
 language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-hole.js
@@ -6106,6 +6125,7 @@ language/expressions/arrow-function/dstr/dflt-ary-name-iter-val.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-hole.js
@@ -6214,6 +6234,7 @@ language/expressions/arrow-function/syntax/early-errors/asi-restriction-invalid-
 language/expressions/arrow-function/syntax/early-errors/asi-restriction-invalid.js
 language/expressions/arrow-function/syntax/early-errors/use-strict-with-non-simple-param.js
 language/expressions/arrow-function/syntax/variations.js
+language/expressions/assignment/11.13.1-4-1.js
 language/expressions/assignment/8.12.5-3-b_1.js
 language/expressions/assignment/8.12.5-3-b_2.js
 language/expressions/assignment/8.12.5-5-b_1.js
@@ -7015,6 +7036,7 @@ language/expressions/class/dstr/gen-meth-ary-name-iter-val.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/gen-meth-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-elem-id-init-hole.js
@@ -7038,6 +7060,7 @@ language/expressions/class/dstr/gen-meth-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -7069,6 +7092,7 @@ language/expressions/class/dstr/gen-meth-static-ary-name-iter-val.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-hole.js
@@ -7092,6 +7116,7 @@ language/expressions/class/dstr/gen-meth-static-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -7123,6 +7148,7 @@ language/expressions/class/dstr/meth-ary-name-iter-val.js
 language/expressions/class/dstr/meth-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/meth-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/meth-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/meth-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/meth-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/meth-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/meth-ary-ptrn-elem-id-init-hole.js
@@ -7146,6 +7172,7 @@ language/expressions/class/dstr/meth-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -7177,6 +7204,7 @@ language/expressions/class/dstr/meth-static-ary-name-iter-val.js
 language/expressions/class/dstr/meth-static-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/meth-static-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/meth-static-ary-ptrn-elem-id-init-hole.js
@@ -7200,6 +7228,7 @@ language/expressions/class/dstr/meth-static-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -7231,6 +7260,7 @@ language/expressions/class/dstr/private-gen-meth-ary-name-iter-val.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-id-init-hole.js
@@ -7254,6 +7284,7 @@ language/expressions/class/dstr/private-gen-meth-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -7285,6 +7316,7 @@ language/expressions/class/dstr/private-gen-meth-static-ary-name-iter-val.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-id-init-hole.js
@@ -7308,6 +7340,7 @@ language/expressions/class/dstr/private-gen-meth-static-dflt-ary-name-iter-val.j
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -7339,6 +7372,7 @@ language/expressions/class/dstr/private-meth-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-meth-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-meth-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-meth-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-meth-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-meth-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-meth-ary-ptrn-elem-id-init-hole.js
@@ -7362,6 +7396,7 @@ language/expressions/class/dstr/private-meth-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -7393,6 +7428,7 @@ language/expressions/class/dstr/private-meth-static-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-id-init-hole.js
@@ -7416,6 +7452,7 @@ language/expressions/class/dstr/private-meth-static-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -8928,6 +8965,7 @@ language/expressions/function/dstr/ary-name-iter-val.js
 language/expressions/function/dstr/ary-ptrn-elem-ary-elem-init.js
 language/expressions/function/dstr/ary-ptrn-elem-ary-elem-iter.js
 language/expressions/function/dstr/ary-ptrn-elem-ary-elision-iter.js
+language/expressions/function/dstr/ary-ptrn-elem-ary-empty-init.js
 language/expressions/function/dstr/ary-ptrn-elem-ary-empty-iter.js
 language/expressions/function/dstr/ary-ptrn-elem-id-init-exhausted.js
 language/expressions/function/dstr/ary-ptrn-elem-id-init-hole.js
@@ -8951,6 +8989,7 @@ language/expressions/function/dstr/dflt-ary-name-iter-val.js
 language/expressions/function/dstr/dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/function/dstr/dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/function/dstr/dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/function/dstr/dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/function/dstr/dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/function/dstr/dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/function/dstr/dflt-ary-ptrn-elem-id-init-hole.js
@@ -8995,6 +9034,7 @@ language/expressions/function/name-eval-strict.js
 language/expressions/function/name.js
 language/expressions/function/object-destructuring-param-strict-body.js
 language/expressions/function/param-arguments-non-strict.js
+language/expressions/function/param-dflt-yield-non-strict.js
 language/expressions/function/param-dflt-yield-strict.js
 language/expressions/function/param-duplicated-non-strict.js
 language/expressions/function/param-duplicated-strict-1.js
@@ -9027,6 +9067,7 @@ language/expressions/generators/dstr/ary-name-iter-val.js
 language/expressions/generators/dstr/ary-ptrn-elem-ary-elem-init.js
 language/expressions/generators/dstr/ary-ptrn-elem-ary-elem-iter.js
 language/expressions/generators/dstr/ary-ptrn-elem-ary-elision-iter.js
+language/expressions/generators/dstr/ary-ptrn-elem-ary-empty-init.js
 language/expressions/generators/dstr/ary-ptrn-elem-ary-empty-iter.js
 language/expressions/generators/dstr/ary-ptrn-elem-id-init-exhausted.js
 language/expressions/generators/dstr/ary-ptrn-elem-id-init-hole.js
@@ -9050,6 +9091,7 @@ language/expressions/generators/dstr/dflt-ary-name-iter-val.js
 language/expressions/generators/dstr/dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/generators/dstr/dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/generators/dstr/dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/generators/dstr/dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/generators/dstr/dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/generators/dstr/dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/generators/dstr/dflt-ary-ptrn-elem-id-init-hole.js
@@ -9468,6 +9510,7 @@ language/expressions/object/__proto__-fn-name.js
 language/expressions/object/__proto__-permitted-dup-shorthand.js
 language/expressions/object/__proto__-permitted-dup.js
 language/expressions/object/accessor-name-computed-in.js
+language/expressions/object/accessor-name-computed-yield-expr.js
 language/expressions/object/accessor-name-computed-yield-id.js
 language/expressions/object/accessor-name-literal-numeric-binary.js
 language/expressions/object/accessor-name-literal-numeric-hex.js
@@ -9569,6 +9612,7 @@ language/expressions/object/dstr/gen-meth-ary-name-iter-val.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-elem-ary-elem-init.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/object/dstr/gen-meth-ary-ptrn-elem-ary-empty-init.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-elem-id-init-hole.js
@@ -9592,6 +9636,7 @@ language/expressions/object/dstr/gen-meth-dflt-ary-name-iter-val.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -9623,6 +9668,7 @@ language/expressions/object/dstr/meth-ary-name-iter-val.js
 language/expressions/object/dstr/meth-ary-ptrn-elem-ary-elem-init.js
 language/expressions/object/dstr/meth-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/object/dstr/meth-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/object/dstr/meth-ary-ptrn-elem-ary-empty-init.js
 language/expressions/object/dstr/meth-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/object/dstr/meth-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/object/dstr/meth-ary-ptrn-elem-id-init-hole.js
@@ -9646,6 +9692,7 @@ language/expressions/object/dstr/meth-dflt-ary-name-iter-val.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -10497,6 +10544,7 @@ language/future-reserved-words/volatile.js
 language/future-reserved-words/yield-strict-escaped.js
 language/future-reserved-words/yield-strict.js
 language/global-code/S10.1.7_A1_T1.js
+language/global-code/S10.4.1_A1_T2.js
 language/global-code/decl-func-dup.js
 language/global-code/export.js
 language/global-code/import.js
@@ -10509,6 +10557,7 @@ language/global-code/super-prop.js
 language/global-code/yield-non-strict.js
 language/global-code/yield-strict.js
 language/identifier-resolution/S10.2.2_A1_T1.js
+language/identifier-resolution/S10.2.2_A1_T2.js
 language/identifier-resolution/S10.2.2_A1_T3.js
 language/identifier-resolution/S10.2.2_A1_T4.js
 language/identifier-resolution/S11.1.2_A1_T2.js
@@ -11537,6 +11586,7 @@ language/statements/class/dstr/gen-meth-ary-name-iter-val.js
 language/statements/class/dstr/gen-meth-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/gen-meth-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/gen-meth-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/gen-meth-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/gen-meth-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/gen-meth-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/gen-meth-ary-ptrn-elem-id-init-hole.js
@@ -11560,6 +11610,7 @@ language/statements/class/dstr/gen-meth-dflt-ary-name-iter-val.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -11591,6 +11642,7 @@ language/statements/class/dstr/gen-meth-static-ary-name-iter-val.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-hole.js
@@ -11614,6 +11666,7 @@ language/statements/class/dstr/gen-meth-static-dflt-ary-name-iter-val.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -11645,6 +11698,7 @@ language/statements/class/dstr/meth-ary-name-iter-val.js
 language/statements/class/dstr/meth-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/meth-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/meth-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/meth-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/meth-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/meth-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/meth-ary-ptrn-elem-id-init-hole.js
@@ -11668,6 +11722,7 @@ language/statements/class/dstr/meth-dflt-ary-name-iter-val.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -11699,6 +11754,7 @@ language/statements/class/dstr/meth-static-ary-name-iter-val.js
 language/statements/class/dstr/meth-static-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/meth-static-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/meth-static-ary-ptrn-elem-id-init-hole.js
@@ -11722,6 +11778,7 @@ language/statements/class/dstr/meth-static-dflt-ary-name-iter-val.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -11753,6 +11810,7 @@ language/statements/class/dstr/private-gen-meth-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-id-init-hole.js
@@ -11776,6 +11834,7 @@ language/statements/class/dstr/private-gen-meth-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -11807,6 +11866,7 @@ language/statements/class/dstr/private-gen-meth-static-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-id-init-hole.js
@@ -11830,6 +11890,7 @@ language/statements/class/dstr/private-gen-meth-static-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -11861,6 +11922,7 @@ language/statements/class/dstr/private-meth-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-meth-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-meth-ary-ptrn-elem-id-init-hole.js
@@ -11884,6 +11946,7 @@ language/statements/class/dstr/private-meth-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-id-init-hole.js
@@ -11915,6 +11978,7 @@ language/statements/class/dstr/private-meth-static-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-meth-static-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-elem-id-init-hole.js
@@ -11938,6 +12002,7 @@ language/statements/class/dstr/private-meth-static-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-id-init-hole.js
@@ -13411,6 +13476,7 @@ language/statements/function/dstr/ary-name-iter-val.js
 language/statements/function/dstr/ary-ptrn-elem-ary-elem-init.js
 language/statements/function/dstr/ary-ptrn-elem-ary-elem-iter.js
 language/statements/function/dstr/ary-ptrn-elem-ary-elision-iter.js
+language/statements/function/dstr/ary-ptrn-elem-ary-empty-init.js
 language/statements/function/dstr/ary-ptrn-elem-ary-empty-iter.js
 language/statements/function/dstr/ary-ptrn-elem-id-init-exhausted.js
 language/statements/function/dstr/ary-ptrn-elem-id-init-hole.js
@@ -13434,6 +13500,7 @@ language/statements/function/dstr/dflt-ary-name-iter-val.js
 language/statements/function/dstr/dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/function/dstr/dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/function/dstr/dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/function/dstr/dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/function/dstr/dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/function/dstr/dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/function/dstr/dflt-ary-ptrn-elem-id-init-hole.js
@@ -13491,6 +13558,7 @@ language/statements/function/object-destructuring-param-strict-body.js
 language/statements/function/param-arguments-non-strict.js
 language/statements/function/param-arguments-strict-body.js
 language/statements/function/param-arguments-strict.js
+language/statements/function/param-dflt-yield-non-strict.js
 language/statements/function/param-dflt-yield-strict.js
 language/statements/function/param-duplicated-non-strict.js
 language/statements/function/param-duplicated-strict-1.js
@@ -13525,6 +13593,7 @@ language/statements/generators/dstr/ary-name-iter-val.js
 language/statements/generators/dstr/ary-ptrn-elem-ary-elem-init.js
 language/statements/generators/dstr/ary-ptrn-elem-ary-elem-iter.js
 language/statements/generators/dstr/ary-ptrn-elem-ary-elision-iter.js
+language/statements/generators/dstr/ary-ptrn-elem-ary-empty-init.js
 language/statements/generators/dstr/ary-ptrn-elem-ary-empty-iter.js
 language/statements/generators/dstr/ary-ptrn-elem-id-init-exhausted.js
 language/statements/generators/dstr/ary-ptrn-elem-id-init-hole.js
@@ -13548,6 +13617,7 @@ language/statements/generators/dstr/dflt-ary-name-iter-val.js
 language/statements/generators/dstr/dflt-ary-ptrn-elem-ary-elem-init.js
 language/statements/generators/dstr/dflt-ary-ptrn-elem-ary-elem-iter.js
 language/statements/generators/dstr/dflt-ary-ptrn-elem-ary-elision-iter.js
+language/statements/generators/dstr/dflt-ary-ptrn-elem-ary-empty-init.js
 language/statements/generators/dstr/dflt-ary-ptrn-elem-ary-empty-iter.js
 language/statements/generators/dstr/dflt-ary-ptrn-elem-id-init-exhausted.js
 language/statements/generators/dstr/dflt-ary-ptrn-elem-id-init-hole.js
@@ -13705,6 +13775,7 @@ language/statements/let/global-use-before-initialization-in-declaration-statemen
 language/statements/let/global-use-before-initialization-in-prior-statement.js
 language/statements/let/redeclaration-error-from-within-strict-mode-function.js
 language/statements/let/static-init-await-binding-invalid.js
+language/statements/let/syntax/escaped-let.js
 language/statements/let/syntax/identifier-let-allowed-as-lefthandside-expression-strict.js
 language/statements/let/syntax/identifier-let-disallowed-as-boundname.js
 language/statements/let/syntax/let-let-declaration-split-across-two-lines.js
@@ -13920,6 +13991,7 @@ language/statements/try/early-catch-lex.js
 language/statements/try/optional-catch-binding-finally.js
 language/statements/try/optional-catch-binding-parens.js
 language/statements/try/optional-catch-binding.js
+language/statements/try/scope-catch-block-lex-close.js
 language/statements/try/scope-catch-block-var-none.js
 language/statements/try/static-init-await-binding-invalid.js
 language/statements/using/redeclaration-error-from-within-strict-mode-function-using.js
@@ -13955,6 +14027,7 @@ language/statements/using/syntax/without-initializer-while-expression-statement.
 language/statements/variable/12.2.1-1gs.js
 language/statements/variable/12.2.1-4gs.js
 language/statements/variable/S12.2_A10.js
+language/statements/variable/S12.2_A11.js
 language/statements/variable/S12.2_A12.js
 language/statements/variable/S12.2_A3.js
 language/statements/variable/S12.2_A4.js
@@ -13969,6 +14042,7 @@ language/statements/variable/S12.2_A8_T5.js
 language/statements/variable/S12.2_A8_T6.js
 language/statements/variable/S12.2_A8_T7.js
 language/statements/variable/S12.2_A8_T8.js
+language/statements/variable/S12.2_A9.js
 language/statements/variable/S14_A1.js
 language/statements/variable/arguments-fn-non-strict.js
 language/statements/variable/arguments-fn-strict-list-final-init.js
@@ -14059,6 +14133,9 @@ language/statements/while/decl-let.js
 language/statements/while/labelled-fn-stmt.js
 language/statements/while/let-array-with-newline.js
 language/statements/with/12.10.1-11gs.js
+language/statements/with/S12.10_A1.3_T3.js
+language/statements/with/S12.10_A3.2_T3.js
+language/statements/with/S12.10_A3.3_T3.js
 language/statements/with/decl-cls.js
 language/statements/with/decl-const.js
 language/statements/with/decl-fun.js
@@ -14108,6 +14185,10 @@ language/types/object/S8.6.1_A3.js
 language/types/object/S8.6.2_A2.js
 language/types/object/S8.6.2_A3.js
 language/types/object/S8.6.2_A4.js
+language/types/object/S8.6.2_A5_T1.js
+language/types/object/S8.6.2_A5_T2.js
+language/types/object/S8.6.2_A5_T3.js
+language/types/object/S8.6.2_A5_T4.js
 language/types/object/S8.6.2_A6.js
 language/types/object/S8.6.2_A8.js
 language/types/object/S8.6_A4_T1.js
@@ -14217,6 +14298,8 @@ staging/sm/Number/20.1.2.6-MAX_SAFE_INTEGER.js
 staging/sm/Number/parseInt-default-to-decimal.js
 staging/sm/PrivateName/parse-utf8-non-ascii-identifier.js
 staging/sm/Promise/methods-non-enumerable.js
+staging/sm/Proxy/global-receiver.js
+staging/sm/Proxy/regress-bug1037770.js
 staging/sm/RegExp/replace-compile-elembase.js
 staging/sm/String/15.5.4.7.js
 staging/sm/String/internalUsage.js
@@ -14263,6 +14346,7 @@ staging/sm/fields/scopes.js
 staging/sm/generators/yield-non-regexp.js
 staging/sm/global/adding-global-var-nonextensible-error.js
 staging/sm/global/direct-eval-but-not.js
+staging/sm/global/globalThis-enumeration.js
 staging/sm/global/parseFloat-01.js
 staging/sm/global/parseInt-default-to-decimal.js
 staging/sm/lexical-environment/block-scoped-functions-annex-b-notapplicable.js
@@ -14292,9 +14376,11 @@ staging/sm/object/mutation-prevention-methods.js
 staging/sm/object/object-toString-01.js
 staging/sm/object/preventExtensions-idempotent.js
 staging/sm/object/preventExtensions.js
+staging/sm/object/proto-property-change-writability-set.js
 staging/sm/object/regress-459405.js
 staging/sm/object/seal.js
 staging/sm/object/setPrototypeOf-same-value.js
+staging/sm/object/vacuous-accessor-unqualified-name.js
 staging/sm/object/values-entries-indexed.js
 staging/sm/regress/regress-306794.js
 staging/sm/regress/regress-373843.js
@@ -14317,6 +14403,8 @@ staging/sm/regress/regress-561031.js
 staging/sm/regress/regress-567152.js
 staging/sm/regress/regress-573875.js
 staging/sm/regress/regress-580544.js
+staging/sm/regress/regress-592202-3.js
+staging/sm/regress/regress-592202-4.js
 staging/sm/regress/regress-595365-1.js
 staging/sm/regress/regress-596805-1.js
 staging/sm/regress/regress-597945-2.js
@@ -14336,10 +14424,17 @@ staging/sm/regress/regress-642247.js
 staging/sm/regress/regress-646820-1.js
 staging/sm/regress/regress-646820-2.js
 staging/sm/regress/regress-646820-3.js
+staging/sm/regress/regress-672893.js
 staging/sm/statements/arrow-function-at-end-of-for-statement-head.js
 staging/sm/statements/if-constant-folding.js
 staging/sm/strict/10.4.3.js
 staging/sm/strict/15.3.4.5.js
+staging/sm/strict/15.4.4.11.js
+staging/sm/strict/15.4.4.12.js
+staging/sm/strict/15.4.4.13.js
+staging/sm/strict/15.4.4.6.js
+staging/sm/strict/15.4.4.8.js
+staging/sm/strict/15.4.4.9.js
 staging/sm/strict/8.7.2-01.js
 staging/sm/strict/primitive-this-no-writeback.js
 staging/sm/strict/regress-532041.js

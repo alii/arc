@@ -331,11 +331,12 @@ fn handle_repl_line(state: ReplState, line: String) -> option.Option(ReplState) 
     "/reset" -> {
       let h = heap.new()
       let #(h, b) = builtins.init(h)
-      let #(h, globals) = builtins.globals(b, h)
+      let #(h, global_object) = builtins.globals(b, h)
       let env =
         vm.ReplEnv(
-          globals:,
-          const_globals: set.new(),
+          global_object:,
+          lexical_globals: dict.new(),
+          const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
         )
@@ -409,12 +410,12 @@ fn run_file(path: String) -> Nil {
 fn run_module_file(path: String, source: String) -> Nil {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+  let #(h, global_object) = builtins.globals(b, h)
 
   case module.compile_bundle(path, source, resolve_and_load_dep) {
     Error(err) -> print_module_error(h, err)
     Ok(bundle) ->
-      case module.evaluate_bundle(bundle, h, b, globals) {
+      case module.evaluate_bundle(bundle, h, b, global_object) {
         Ok(_) -> Nil
         Error(err) -> print_module_error(h, err)
       }
@@ -504,8 +505,8 @@ fn run_script_file(source: String) -> Nil {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let #(h, globals) = builtins.globals(b, h)
-          case vm.run_and_drain(template, h, b, globals) {
+          let #(h, global_object) = builtins.globals(b, h)
+          case vm.run_and_drain(template, h, b, global_object) {
             Ok(vm.NormalCompletion(_, _)) -> Nil
             Ok(vm.ThrowCompletion(val, new_heap)) ->
               io.println("Uncaught exception: " <> inspect(new_heap, val))
@@ -532,13 +533,14 @@ fn print_module_error(h: Heap, err: module.ModuleError) -> Nil {
 fn new_repl_state() {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+  let #(h, global_object) = builtins.globals(b, h)
   ReplState(
     heap: h,
     builtins: b,
     env: vm.ReplEnv(
-      globals:,
-      const_globals: set.new(),
+      global_object:,
+      lexical_globals: dict.new(),
+      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
     ),
