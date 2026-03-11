@@ -115,6 +115,9 @@ pub type State {
     /// Set by the VM executor (wraps run_handler_with_this).
     call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
       Result(#(JsValue, State), #(JsValue, State)),
+    /// Current call stack depth. Incremented on function entry, decremented on return.
+    /// Throws RangeError when exceeding max_call_depth.
+    call_depth: Int,
   )
 }
 

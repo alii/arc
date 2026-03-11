@@ -1,19 +1,14 @@
 /// test262 execution conformance runner (snapshot mode).
 ///
-/// Each test262 file is an individual EUnit test case.
-/// Results are compared against a snapshot of expected outcomes.
+/// Tests are registered with the main harness as individual entries.
+/// The harness calls init() before spawning, run_file() per test,
+/// and finish() after all complete.
 ///
 /// Usage:
 ///   TEST262_EXEC=1 gleam test                  — run and compare against snapshot
 ///   TEST262_EXEC=1 UPDATE_SNAPSHOT=1 gleam test — run and update the snapshot
 ///   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
 ///   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
-///
-/// Snapshot semantics:
-///   - Regressions (was pass, now fail) → eunit FAILURE
-///   - New passes  (was fail, now pass) → eunit FAILURE (update snapshot)
-///   - Expected outcomes               → eunit pass (silent)
-///   - No snapshot file                → all outcomes accepted (no comparison)
 import arc/compiler
 import arc/module
 import arc/parser
@@ -29,7 +24,7 @@ import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
-import gleam/set.{type Set}
+import gleam/set
 import gleam/string
 import simplifile
 import test262_metadata.{type TestMetadata, Parse, Resolution, Runtime}
@@ -45,10 +40,187 @@ const harness_dir: String = "vendor/test262/harness"
 
 const snapshot_path: String = ".github/test262/pass.txt"
 
-pub fn test262_exec_test_() -> test_runner.EunitTests {
-  case test_runner.get_env_is_truthy("TEST262_EXEC") {
-    False -> test_runner.empty_tests()
-    True -> generate_test_suite()
+/// Initialize ETS tables and config. Called once before tests start.
+pub fn init() -> Nil {
+  let fail_log = test_runner.get_env("FAIL_LOG") |> option.from_result
+  let update_mode = test_runner.get_env_is_truthy("UPDATE_SNAPSHOT")
+  let snapshot = load_snapshot(snapshot_path)
+  let has_snapshot = set.size(snapshot) > 0
+
+  // Clear fail log if set
+  case fail_log {
+    Some(path) ->
+      case simplifile.write(to: path, contents: "") {
+        Ok(Nil) -> Nil
+        Error(err) ->
+          io.println(
+            "Warning: could not clear fail log: " <> string.inspect(err),
+          )
+      }
+    None -> Nil
+  }
+
+  init_stats()
+  init_config(update_mode, has_snapshot, fail_log)
+  init_snapshot_set(snapshot |> set.to_list)
+}
+
+/// List all test262 .js files (relative paths).
+pub fn list_files() -> List(String) {
+  list_test_files(test_dir)
+}
+
+/// Run a single test262 file. Called per-test by the harness.
+/// Returns Ok(Nil) for expected outcomes, Error for regressions/new passes.
+pub fn run_file(relative: String) -> Result(Nil, String) {
+  let update_mode = get_update_mode()
+  let has_snapshot = get_has_snapshot()
+  let fail_log = get_fail_log()
+  let full_path = test_dir <> "/" <> relative
+  case simplifile.read(full_path) {
+    Error(err) -> {
+      record_fail()
+      Error("could not read file: " <> string.inspect(err))
+    }
+    Ok(source) -> {
+      let metadata = test262_metadata.parse_metadata(source)
+      let outcome = run_test_by_phase(metadata, source, full_path)
+      let expected_pass = snapshot_contains(relative)
+
+      case outcome {
+        Pass -> {
+          record_pass()
+          record_pass_path(relative)
+          case update_mode || !has_snapshot || expected_pass {
+            True -> Ok(Nil)
+            False ->
+              Error("NEW PASS — run with UPDATE_SNAPSHOT=1 to update snapshot")
+          }
+        }
+        Skip(_) -> {
+          record_skip()
+          Ok(Nil)
+        }
+        Fail(reason) -> {
+          record_fail()
+          case fail_log {
+            Some(path) ->
+              case
+                simplifile.append(
+                  to: path,
+                  contents: relative <> "\t" <> reason <> "\n",
+                )
+              {
+                Ok(Nil) -> Nil
+                Error(err) ->
+                  io.println(
+                    "Warning: fail log append error: " <> string.inspect(err),
+                  )
+              }
+            None -> Nil
+          }
+          case update_mode || !has_snapshot || !expected_pass {
+            True -> Ok(Nil)
+            False -> Error("REGRESSION: " <> reason)
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Print summary and write snapshot. Called once after all tests complete.
+/// Returns Error if there are regressions.
+pub fn finish(errors: List(#(String, String))) -> Result(Nil, String) {
+  let update_mode = get_update_mode()
+  let fail_log = get_fail_log()
+
+  // Print summary
+  let #(pass_count, fail_count, skip_count) = get_stats()
+  let tested = pass_count + fail_count
+  let pct = format_percent(pass_count, tested)
+
+  io.println(
+    "\ntest262 exec: "
+    <> int.to_string(pass_count)
+    <> " pass, "
+    <> int.to_string(fail_count)
+    <> " fail, "
+    <> int.to_string(skip_count)
+    <> " skip ("
+    <> pct
+    <> "% of "
+    <> int.to_string(tested)
+    <> " tested)",
+  )
+
+  case fail_log {
+    Some(path) -> io.println("Failures written to " <> path)
+    None -> Nil
+  }
+
+  // Write snapshot if UPDATE_SNAPSHOT=1
+  case update_mode {
+    True -> {
+      let paths = get_pass_paths()
+      let content = string.join(paths, "\n") <> "\n"
+      case simplifile.write(to: snapshot_path, contents: content) {
+        Ok(Nil) ->
+          io.println(
+            "Snapshot updated: "
+            <> snapshot_path
+            <> " ("
+            <> int.to_string(list.length(paths))
+            <> " passing tests)",
+          )
+        Error(err) ->
+          io.println(
+            "Warning: could not write snapshot: " <> string.inspect(err),
+          )
+      }
+    }
+    False -> Nil
+  }
+
+  // Write RESULTS_FILE if set
+  case test_runner.get_env("RESULTS_FILE") {
+    Ok(path) -> {
+      let total = pass_count + fail_count + skip_count
+      let json =
+        "{\"pass\":"
+        <> int.to_string(pass_count)
+        <> ",\"fail\":"
+        <> int.to_string(fail_count)
+        <> ",\"skip\":"
+        <> int.to_string(skip_count)
+        <> ",\"total\":"
+        <> int.to_string(total)
+        <> ",\"tested\":"
+        <> int.to_string(tested)
+        <> ",\"percent\":"
+        <> pct
+        <> "}"
+      case simplifile.write(to: path, contents: json) {
+        Ok(Nil) -> io.println("Results written to " <> path)
+        Error(err) ->
+          io.println(
+            "Warning: could not write results: " <> string.inspect(err),
+          )
+      }
+    }
+    Error(Nil) -> Nil
+  }
+
+  // Report regressions as test failure
+  case errors {
+    [] -> Ok(Nil)
+    _ -> {
+      let count = list.length(errors)
+      Error(
+        int.to_string(count)
+        <> " regression(s) — run with UPDATE_SNAPSHOT=1 to update",
+      )
+    }
   }
 }
 
@@ -78,178 +250,10 @@ fn variants_for_test(metadata: TestMetadata) -> List(StrictnessVariant) {
   }
 }
 
-fn generate_test_suite() -> test_runner.EunitTests {
-  let fail_log = test_runner.get_env("FAIL_LOG") |> option.from_result
-  let update_mode = test_runner.get_env_is_truthy("UPDATE_SNAPSHOT")
-  let snapshot = load_snapshot(snapshot_path)
-  let has_snapshot = set.size(snapshot) > 0
-
-  // Clear fail log if set
-  case fail_log {
-    Some(path) ->
-      case simplifile.write(to: path, contents: "") {
-        Ok(Nil) -> Nil
-        Error(err) ->
-          io.println(
-            "Warning: could not clear fail log: " <> string.inspect(err),
-          )
-      }
-    None -> Nil
-  }
-
-  init_stats()
-
-  // Single test function — receives relative path, does all I/O at test time
-  let test_fn = fn(relative: String) -> Result(Nil, String) {
-    let full_path = test_dir <> "/" <> relative
-    case simplifile.read(full_path) {
-      Error(err) -> {
-        record_fail()
-        Error("could not read file: " <> string.inspect(err))
-      }
-      Ok(source) -> {
-        let metadata = test262_metadata.parse_metadata(source)
-        let outcome = run_test_by_phase(metadata, source, full_path)
-        let expected_pass = set.contains(snapshot, relative)
-
-        case outcome {
-          Pass -> {
-            record_pass()
-            record_pass_path(relative)
-            case update_mode || !has_snapshot || expected_pass {
-              True -> Ok(Nil)
-              False ->
-                Error(
-                  "NEW PASS — run with UPDATE_SNAPSHOT=1 to update snapshot",
-                )
-            }
-          }
-          Skip(_) -> {
-            record_skip()
-            Ok(Nil)
-          }
-          Fail(reason) -> {
-            record_fail()
-            case fail_log {
-              Some(path) ->
-                case
-                  simplifile.append(
-                    to: path,
-                    contents: relative <> "\t" <> reason <> "\n",
-                  )
-                {
-                  Ok(Nil) -> Nil
-                  Error(err) ->
-                    io.println(
-                      "Warning: fail log append error: " <> string.inspect(err),
-                    )
-                }
-              None -> Nil
-            }
-            case update_mode || !has_snapshot || !expected_pass {
-              True -> Ok(Nil)
-              False -> Error("REGRESSION: " <> reason)
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // List all files upfront (fast — just filenames, no reading) and run in parallel
-  let tests =
-    test_runner.make_test_suite(
-      list_test_files(test_dir)
-        |> list.map(fn(relative) { #(relative, fn() { test_fn(relative) }) }),
-      10,
-    )
-
-  let summary_test = #("__summary__", fn() {
-    let #(pass_count, fail_count, skip_count) = get_stats()
-    let tested = pass_count + fail_count
-    let pct = format_percent(pass_count, tested)
-
-    io.println(
-      "\ntest262 exec: "
-      <> int.to_string(pass_count)
-      <> " pass, "
-      <> int.to_string(fail_count)
-      <> " fail, "
-      <> int.to_string(skip_count)
-      <> " skip ("
-      <> pct
-      <> "% of "
-      <> int.to_string(tested)
-      <> " tested)",
-    )
-
-    case fail_log {
-      Some(path) -> io.println("Failures written to " <> path)
-      None -> Nil
-    }
-
-    // Write snapshot if UPDATE_SNAPSHOT=1
-    case update_mode {
-      True -> {
-        let paths = get_pass_paths()
-        let content = string.join(paths, "\n") <> "\n"
-        case simplifile.write(to: snapshot_path, contents: content) {
-          Ok(Nil) ->
-            io.println(
-              "Snapshot updated: "
-              <> snapshot_path
-              <> " ("
-              <> int.to_string(list.length(paths))
-              <> " passing tests)",
-            )
-          Error(err) ->
-            io.println(
-              "Warning: could not write snapshot: " <> string.inspect(err),
-            )
-        }
-      }
-      False -> Nil
-    }
-
-    // Write RESULTS_FILE if set
-    case test_runner.get_env("RESULTS_FILE") {
-      Ok(path) -> {
-        let total = pass_count + fail_count + skip_count
-        let json =
-          "{\"pass\":"
-          <> int.to_string(pass_count)
-          <> ",\"fail\":"
-          <> int.to_string(fail_count)
-          <> ",\"skip\":"
-          <> int.to_string(skip_count)
-          <> ",\"total\":"
-          <> int.to_string(total)
-          <> ",\"tested\":"
-          <> int.to_string(tested)
-          <> ",\"percent\":"
-          <> pct
-          <> "}"
-        case simplifile.write(to: path, contents: json) {
-          Ok(Nil) -> io.println("Results written to " <> path)
-          Error(err) ->
-            io.println(
-              "Warning: could not write results: " <> string.inspect(err),
-            )
-        }
-      }
-      Error(Nil) -> Nil
-    }
-
-    Ok(Nil)
-  })
-
-  test_runner.with_cleanup(tests, summary_test, 60)
-}
-
 @external(erlang, "test262_exec_ffi", "list_test_files")
 fn list_test_files(dir: String) -> List(String)
 
-fn load_snapshot(path: String) -> Set(String) {
+fn load_snapshot(path: String) -> set.Set(String) {
   case simplifile.read(path) {
     Ok(content) ->
       content
@@ -570,7 +574,7 @@ fn verify_negative_type(
   }
 }
 
-const test_timeout_ms: Int = 30_000
+const test_timeout_ms: Int = 120_000
 
 fn do_run_module(
   metadata: TestMetadata,
@@ -850,6 +854,28 @@ fn inspect_thrown(val: value.JsValue, heap: Heap) -> String {
 
 @external(erlang, "test262_exec_ffi", "init_stats")
 fn init_stats() -> Nil
+
+@external(erlang, "test262_exec_ffi", "init_config")
+fn init_config(
+  update_mode: Bool,
+  has_snapshot: Bool,
+  fail_log: option.Option(String),
+) -> Nil
+
+@external(erlang, "test262_exec_ffi", "init_snapshot_set")
+fn init_snapshot_set(paths: List(String)) -> Nil
+
+@external(erlang, "test262_exec_ffi", "get_update_mode")
+fn get_update_mode() -> Bool
+
+@external(erlang, "test262_exec_ffi", "get_has_snapshot")
+fn get_has_snapshot() -> Bool
+
+@external(erlang, "test262_exec_ffi", "get_fail_log")
+fn get_fail_log() -> option.Option(String)
+
+@external(erlang, "test262_exec_ffi", "snapshot_contains")
+fn snapshot_contains(path: String) -> Bool
 
 @external(erlang, "test262_exec_ffi", "record_pass")
 fn record_pass() -> Nil

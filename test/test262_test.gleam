@@ -22,12 +22,8 @@ const test_dir = "vendor/test262/test"
 
 const snapshot_path = "test/test262_snapshot.txt"
 
-/// EUnit test generator — returns empty. Actual work done in test262_run_test().
-pub fn test262_test_() -> test_runner.EunitTests {
-  test_runner.empty_tests()
-}
-
-/// Single EUnit test that runs the entire test262 suite with custom output.
+/// Runs the test262 parse-only conformance suite.
+/// Gated behind TEST262=1 or GENERATE_SNAPSHOT=1 env vars.
 pub fn test262_run_test() {
   let generate = test_runner.get_env_is_truthy("GENERATE_SNAPSHOT")
   let run = test_runner.get_env_is_truthy("TEST262")

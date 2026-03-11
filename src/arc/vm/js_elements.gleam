@@ -120,6 +120,22 @@ pub fn stored_count(elements: JsElements) -> Int {
   }
 }
 
+/// Remove all elements at indices >= new_len. O(stored_count) not O(old_len).
+pub fn truncate(elements: JsElements, new_len: Int) -> JsElements {
+  case elements {
+    DenseElements(data) ->
+      case new_len >= array.size(data) {
+        True -> elements
+        False ->
+          DenseElements(
+            array.to_list(data) |> list.take(new_len) |> array.from_list(),
+          )
+      }
+    SparseElements(data) ->
+      SparseElements(dict.filter(data, fn(idx, _val) { idx < new_len }))
+  }
+}
+
 fn dense_to_sparse(data: array.Array(JsValue)) -> dict.Dict(Int, JsValue) {
   array.to_list(data)
   |> list.index_map(fn(val, idx) { #(idx, val) })

@@ -23,6 +23,10 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 
+/// Max string size in bytes before we throw "Invalid string length".
+/// V8 uses ~2^28-2^29 chars (512MB-1GB). We use 256MB — generous for tests.
+const max_string_bytes = 268_435_456
+
 /// FFI: test if pattern matches string
 @external(erlang, "arc_regexp_ffi", "regexp_test")
 fn ffi_regexp_test(pattern: String, flags: String, string: String) -> Bool
@@ -870,7 +874,7 @@ fn apply_replacements(
         False -> {
           case frame.to_string(state, replace_value) {
             Ok(#(template, state)) -> {
-              let replacement =
+              case
                 get_substitution(
                   match.matched,
                   str,
@@ -878,17 +882,30 @@ fn apply_replacements(
                   match.captures,
                   template,
                 )
-              let acc = acc <> replacement
-              let prev_end = match.position + string.length(match.matched)
-              apply_replacements(
-                str,
-                rest,
-                replace_value,
-                functional_replace,
-                state,
-                prev_end,
-                acc,
-              )
+              {
+                Error(Nil) -> {
+                  let #(heap, err) =
+                    common.make_range_error(
+                      state.heap,
+                      state.builtins,
+                      "Invalid string length",
+                    )
+                  #(State(..state, heap:), Error(err))
+                }
+                Ok(replacement) -> {
+                  let acc = acc <> replacement
+                  let prev_end = match.position + string.length(match.matched)
+                  apply_replacements(
+                    str,
+                    rest,
+                    replace_value,
+                    functional_replace,
+                    state,
+                    prev_end,
+                    acc,
+                  )
+                }
+              }
             }
             Error(#(thrown, state)) -> #(state, Error(thrown))
           }
@@ -898,22 +915,204 @@ fn apply_replacements(
   }
 }
 
-/// ES2024 §22.1.3.18.1 GetSubstitution — process replacement template
+/// ES2024 §22.1.3.18.1 GetSubstitution — process replacement template.
+/// Returns Error(Nil) if the result would exceed max_string_bytes.
 fn get_substitution(
   matched: String,
   str: String,
   position: Int,
   captures: List(JsValue),
   template: String,
-) -> String {
-  get_substitution_loop(
-    matched,
-    str,
-    position,
-    captures,
-    string.to_graphemes(template),
-    "",
-  )
+) -> Result(String, Nil) {
+  let chars = string.to_graphemes(template)
+  // Estimate output length upfront — bail immediately if it would exceed the
+  // limit. This avoids building hundreds of MB of string incrementally (the
+  // reason replace-math.js was slow: 32768 * 1MB = 32GB expected output).
+  let estimated =
+    estimate_substitution_length(matched, str, position, captures, chars, 0)
+  case estimated > max_string_bytes {
+    True -> Error(Nil)
+    False -> get_substitution_loop(matched, str, position, captures, chars, "")
+  }
+}
+
+/// Estimate the output byte length of GetSubstitution without building the
+/// string. Scans the template chars to compute how many bytes each $-reference
+/// would contribute. Used to bail early on pathological inputs (e.g. 32768
+/// backrefs each expanding to 1MB → 32GB expected output).
+fn estimate_substitution_length(
+  matched: String,
+  str: String,
+  position: Int,
+  captures: List(JsValue),
+  chars: List(String),
+  acc: Int,
+) -> Int {
+  case chars {
+    [] -> acc
+    ["$", "$", ..rest] ->
+      estimate_substitution_length(
+        matched,
+        str,
+        position,
+        captures,
+        rest,
+        acc + 1,
+      )
+    ["$", "&", ..rest] ->
+      estimate_substitution_length(
+        matched,
+        str,
+        position,
+        captures,
+        rest,
+        acc + string.byte_size(matched),
+      )
+    ["$", "`", ..rest] ->
+      // $` → everything before the match (position bytes for ASCII)
+      estimate_substitution_length(
+        matched,
+        str,
+        position,
+        captures,
+        rest,
+        acc + position,
+      )
+    ["$", "'", ..rest] -> {
+      // $' → everything after the match
+      let after_len =
+        string.byte_size(str) - position - string.byte_size(matched)
+      let after_len = case after_len < 0 {
+        True -> 0
+        False -> after_len
+      }
+      estimate_substitution_length(
+        matched,
+        str,
+        position,
+        captures,
+        rest,
+        acc + after_len,
+      )
+    }
+    ["$", d1, d2, ..rest] ->
+      case is_digit(d1) && is_digit(d2) {
+        True ->
+          case int.parse(d1 <> d2) {
+            Ok(idx) if idx >= 1 ->
+              case list_at(captures, idx - 1) {
+                Some(JsString(s)) ->
+                  estimate_substitution_length(
+                    matched,
+                    str,
+                    position,
+                    captures,
+                    rest,
+                    acc + string.byte_size(s),
+                  )
+                _ ->
+                  estimate_single_digit_len(
+                    matched,
+                    str,
+                    position,
+                    captures,
+                    d1,
+                    [d2, ..rest],
+                    acc,
+                  )
+              }
+            _ ->
+              estimate_single_digit_len(
+                matched,
+                str,
+                position,
+                captures,
+                d1,
+                [d2, ..rest],
+                acc,
+              )
+          }
+        False ->
+          estimate_single_digit_len(
+            matched,
+            str,
+            position,
+            captures,
+            d1,
+            [d2, ..rest],
+            acc,
+          )
+      }
+    ["$", d1] ->
+      estimate_single_digit_len(matched, str, position, captures, d1, [], acc)
+    [_ch, ..rest] ->
+      estimate_substitution_length(
+        matched,
+        str,
+        position,
+        captures,
+        rest,
+        acc + 1,
+      )
+  }
+}
+
+/// Estimate length for a single-digit $N reference (mirrors try_single_digit_ref).
+fn estimate_single_digit_len(
+  matched: String,
+  str: String,
+  position: Int,
+  captures: List(JsValue),
+  d1: String,
+  rest: List(String),
+  acc: Int,
+) -> Int {
+  case is_digit(d1) {
+    True ->
+      case int.parse(d1) {
+        Ok(idx) if idx >= 1 ->
+          case list_at(captures, idx - 1) {
+            Some(JsString(s)) ->
+              estimate_substitution_length(
+                matched,
+                str,
+                position,
+                captures,
+                rest,
+                acc + string.byte_size(s),
+              )
+            _ ->
+              estimate_substitution_length(
+                matched,
+                str,
+                position,
+                captures,
+                rest,
+                acc,
+              )
+          }
+        _ ->
+          // "$" + d1 literal
+          estimate_substitution_length(
+            matched,
+            str,
+            position,
+            captures,
+            rest,
+            acc + 2,
+          )
+      }
+    False ->
+      // Not a digit — "$" literal + reprocess d1
+      estimate_substitution_length(
+        matched,
+        str,
+        position,
+        captures,
+        [d1, ..rest],
+        acc + 1,
+      )
+  }
 }
 
 fn get_substitution_loop(
@@ -923,9 +1122,9 @@ fn get_substitution_loop(
   captures: List(JsValue),
   chars: List(String),
   acc: String,
-) -> String {
+) -> Result(String, Nil) {
   case chars {
-    [] -> acc
+    [] -> Ok(acc)
     ["$", "$", ..rest] ->
       get_substitution_loop(matched, str, position, captures, rest, acc <> "$")
     ["$", "&", ..rest] ->
@@ -960,7 +1159,6 @@ fn get_substitution_loop(
       )
     }
     ["$", d1, d2, ..rest] -> {
-      // Try two-digit capture reference ($10-$99), then single-digit ($1-$9)
       case is_digit(d1) && is_digit(d2) {
         True -> {
           let idx_str = d1 <> d2
@@ -977,7 +1175,6 @@ fn get_substitution_loop(
                     acc <> s,
                   )
                 _ ->
-                  // Two-digit ref out of range, try single-digit
                   try_single_digit_ref(
                     matched,
                     str,
@@ -1001,7 +1198,6 @@ fn get_substitution_loop(
           }
         }
         False ->
-          // d1 might be a single digit, d2 is not
           try_single_digit_ref(
             matched,
             str,
@@ -1013,7 +1209,6 @@ fn get_substitution_loop(
           )
       }
     }
-    // Handle "$" followed by exactly one more char (end of template)
     ["$", d1] ->
       try_single_digit_ref(matched, str, position, captures, d1, [], acc)
     [ch, ..rest] ->
@@ -1031,7 +1226,7 @@ fn try_single_digit_ref(
   d1: String,
   rest: List(String),
   acc: String,
-) -> String {
+) -> Result(String, Nil) {
   case is_digit(d1) {
     True ->
       case int.parse(d1) {

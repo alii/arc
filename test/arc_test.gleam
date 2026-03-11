@@ -1,5 +1,2 @@
-import gleeunit
-
-pub fn main() -> Nil {
-  gleeunit.main()
-}
+@external(erlang, "arc_test_ffi", "main")
+pub fn main() -> Nil

@@ -408,6 +408,9 @@ fn js_int(n: Int) -> JsValue {
 /// Real arrays don't go through this path (their length is already trusted).
 const max_array_like_length = 4_294_967_295
 
+/// 2^53 - 1: Maximum safe integer for array-like length operations.
+const max_safe_integer = 9_007_199_254_740_991
+
 /// Sentinel ref passed to `cont` for primitive `this` values. heap.read returns
 /// Error for any id not in the heap, and heap.write is a no-op for unallocated
 /// refs, so mutating methods safely no-op on primitives.
@@ -579,17 +582,13 @@ fn surrogate_to_string(code: Int) -> String {
 /// — that would require VM re-entry (State threading). Returns 0 for objects.
 /// TODO(Deviation): Accessor-valued "length" (get/set) would need State to invoke
 /// the getter. Returns 0 for now.
-/// Note: We cap at max_array_like_length (2^32 - 1) instead of 2^53 - 1
-/// because we eagerly materialize elements and unbounded lengths would OOM.
 fn read_length_property(properties: dict.Dict(String, Property)) -> Int {
   // §7.3.18 step 2: Get(obj, "length")
   case dict.get(properties, "length") {
     Ok(DataProperty(value: len_val, ..)) ->
-      // §7.1.17 step 1: ToIntegerOrInfinity(len_val)
+      // §7.1.17 ToLength: min(max(ToIntegerOrInfinity(v), 0), 2^53-1)
       case helpers.to_number_int(len_val) {
-        // §7.1.17 step 2: If len ≤ 0, return +0.
-        // §7.1.17 step 3: Return min(len, 2^53-1). We use max_array_like_length.
-        Some(n) if n > 0 -> int.min(n, max_array_like_length)
+        Some(n) if n > 0 -> int.min(n, max_safe_integer)
         _ -> 0
       }
     // Accessor length: would need State to call getter. Return 0 for now.
@@ -1119,33 +1118,36 @@ fn shift_left_generic(
 /// 5. Perform ? Set(O, "length", 𝔽(len + argCount), true).
 /// 6. Return 𝔽(len + argCount).
 ///
-/// TODO(Deviation): Step 4a overflow check (len + argCount > 2^53-1 → TypeError) is not
-/// implemented — Gleam ints are arbitrary-precision so no overflow occurs.
 pub fn array_unshift(
   this: JsValue,
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use ref, length, _elements, state <- require_array(this, state)
-  // Step 3: argCount = number of elements in items
   let arg_count = list.length(args)
-  // Short-circuit when argCount = 0 (spec would still Set length, we skip it)
   use <- bool.guard(arg_count == 0, #(state, Ok(js_int(length))))
-  // Step 5-6 value: len + argCount
   let new_len = length + arg_count
-  // Steps 4b-4c: shift existing elements right by argCount (right-to-left)
-  case shift_right_generic(state, ref, length - 1, arg_count) {
-    Ok(state) ->
-      // Steps 4d-4e: write items at indices [0..argCount)
-      case write_list_at(state, ref, 0, args) {
+  // §23.1.3.33 step 4a: If len + argCount > 2^53 - 1, throw TypeError
+  case new_len > max_safe_integer {
+    True -> {
+      let #(heap, err) =
+        common.make_type_error(
+          state.heap,
+          state.builtins,
+          "Array length exceeds maximum safe integer",
+        )
+      #(State(..state, heap:), Error(err))
+    }
+    False ->
+      case shift_right_generic(state, ref, length - 1, arg_count) {
         Ok(state) ->
-          // Step 5: Set(O, "length", len + argCount, true)
-          // Step 6: Return len + argCount
-          wrap(generic_set_length(state, ref, new_len), js_int(new_len))
+          case write_list_at(state, ref, 0, args) {
+            Ok(state) ->
+              wrap(generic_set_length(state, ref, new_len), js_int(new_len))
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
         Error(#(thrown, state)) -> #(state, Error(thrown))
       }
-    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -3183,23 +3185,44 @@ pub fn array_splice(
   let removed_arr = JsObject(removed_ref)
   // Steps 12-17: Shift elements and insert items.
   let item_count = list.length(items)
-  let shift = item_count - actual_delete_count
-  // If shift > 0: we need to move elements right. If shift < 0: move left.
-  // If shift == 0: no shifting needed.
-  case
-    splice_shift(state, ref, actual_start, actual_delete_count, length, shift)
-  {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(state) ->
-      // Step 15: Insert items at actualStart.
-      case splice_insert(state, ref, actual_start, items) {
+  let new_length = length - actual_delete_count + item_count
+  // §23.1.3.31 step 11: If len + insertCount - actualDeleteCount > 2^53 - 1, throw TypeError
+  case new_length > max_safe_integer {
+    True -> {
+      let #(heap, err) =
+        common.make_type_error(
+          state.heap,
+          state.builtins,
+          "Array length exceeds maximum safe integer",
+        )
+      #(State(..state, heap:), Error(err))
+    }
+    False -> {
+      let shift = item_count - actual_delete_count
+      // If shift > 0: we need to move elements right. If shift < 0: move left.
+      // If shift == 0: no shifting needed.
+      case
+        splice_shift(
+          state,
+          ref,
+          actual_start,
+          actual_delete_count,
+          length,
+          shift,
+        )
+      {
         Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(state) -> {
-          // Step 17: Set length.
-          let new_length = length + shift
-          wrap(generic_set_length(state, ref, new_length), removed_arr)
-        }
+        Ok(state) ->
+          // Step 15: Insert items at actualStart.
+          case splice_insert(state, ref, actual_start, items) {
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+            Ok(state) -> {
+              // Step 17: Set length.
+              wrap(generic_set_length(state, ref, new_length), removed_arr)
+            }
+          }
       }
+    }
   }
 }
 
@@ -4388,24 +4411,39 @@ pub fn array_to_reversed(
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
   use _ref, length, elements, state <- require_array(this, state)
-  // Collect all elements; holes become undefined (spec step 5c: Get returns undefined for holes).
-  let all_values = collect_all_elements(elements, length, 0, [])
-  // Reverse the collected list.
-  let reversed = list.reverse(all_values)
-  let new_elements = build_elements_from_list(reversed, 0, js_elements.new())
-  let #(heap, ref) =
-    heap.alloc(
-      state.heap,
-      ObjectSlot(
-        kind: ArrayObject(length),
-        properties: dict.new(),
-        elements: new_elements,
-        prototype: Some(array_proto),
-        symbol_properties: dict.new(),
-        extensible: True,
-      ),
-    )
-  #(State(..state, heap:), Ok(JsObject(ref)))
+  // §23.1.3.33 step 3: ArrayCreate(len) — throws RangeError if len > 2^32 - 1
+  case length > max_array_like_length {
+    True -> {
+      let #(heap, err) =
+        common.make_range_error(
+          state.heap,
+          state.builtins,
+          "Invalid array length",
+        )
+      #(State(..state, heap:), Error(err))
+    }
+    False -> {
+      // Collect all elements; holes become undefined (spec step 5c: Get returns undefined for holes).
+      let all_values = collect_all_elements(elements, length, 0, [])
+      // Reverse the collected list.
+      let reversed = list.reverse(all_values)
+      let new_elements =
+        build_elements_from_list(reversed, 0, js_elements.new())
+      let #(heap, ref) =
+        heap.alloc(
+          state.heap,
+          ObjectSlot(
+            kind: ArrayObject(length),
+            properties: dict.new(),
+            elements: new_elements,
+            prototype: Some(array_proto),
+            symbol_properties: dict.new(),
+            extensible: True,
+          ),
+        )
+      #(State(..state, heap:), Ok(JsObject(ref)))
+    }
+  }
 }
 
 /// Collect all elements at indices [0, length), reading holes as JsUndefined.

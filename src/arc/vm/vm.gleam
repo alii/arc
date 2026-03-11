@@ -168,6 +168,7 @@ fn new_state(
     realms: dict.new(),
     js_to_string: js_to_string_callback,
     call_fn: call_fn_callback,
+    call_depth: 0,
   )
 }
 
@@ -1068,6 +1069,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   constants: func.constants,
                   pc:,
                   call_stack: rest_frames,
+                  call_depth: state.call_depth - 1,
                   try_stack:,
                   this_binding: saved_this,
                   callee_ref: saved_callee_ref,
@@ -1078,11 +1080,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             None ->
               case state.func.is_derived_constructor {
                 True -> {
-                  // Derived constructor return semantics:
-                  // - If return value is an object, use it
-                  // - If return value is undefined, use this_binding (set by super())
-                  // - If this_binding is still uninitialized, throw ReferenceError
-                  // - If return value is non-object non-undefined, throw TypeError
                   case return_value {
                     JsObject(_) ->
                       Ok(
@@ -1095,6 +1092,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                           constants: func.constants,
                           pc:,
                           call_stack: rest_frames,
+                          call_depth: state.call_depth - 1,
                           try_stack:,
                           this_binding: saved_this,
                           callee_ref: saved_callee_ref,
@@ -1120,6 +1118,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                               constants: func.constants,
                               pc:,
                               call_stack: rest_frames,
+                              call_depth: state.call_depth - 1,
                               try_stack:,
                               this_binding: saved_this,
                               callee_ref: saved_callee_ref,
@@ -1147,6 +1146,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                       constants: func.constants,
                       pc:,
                       call_stack: rest_frames,
+                      call_depth: state.call_depth - 1,
                       try_stack:,
                       this_binding: saved_this,
                       callee_ref: saved_callee_ref,
@@ -2804,6 +2804,8 @@ fn call_function(
 }
 
 /// Regular (non-generator) function call: save frame, enter callee.
+const max_call_depth: Int = 10_000
+
 fn call_regular_function(
   state: State,
   fn_ref: value.Ref,
@@ -2815,6 +2817,9 @@ fn call_regular_function(
   constructor_this: option.Option(JsValue),
   new_callee_ref: option.Option(Ref),
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
+  use <- bool.lazy_guard(state.call_depth >= max_call_depth, fn() {
+    throw_range_error(state, "Maximum call stack size exceeded")
+  })
   // Save caller frame
   let saved =
     SavedFrame(
@@ -2850,6 +2855,7 @@ fn call_regular_function(
       constants: callee_template.constants,
       pc: 0,
       call_stack: [saved, ..state.call_stack],
+      call_depth: state.call_depth + 1,
       try_stack: [],
       this_binding: new_this,
       callee_ref: effective_callee_ref,

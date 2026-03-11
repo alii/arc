@@ -1,6 +1,6 @@
 // demonstrates that we copy the vm
 
-let i = 0;
+let i = 1;
 const main = Arc.self();
 
 Arc.spawn(() => {
@@ -8,5 +8,7 @@ Arc.spawn(() => {
 	Arc.log(Arc.self(), 'I set `i` to', i);
 	Arc.send(main); // with no arguemnts, sends undefined
 });
+
+Arc.receive();
 
 Arc.log(main, 'but I see that `i` is', i);

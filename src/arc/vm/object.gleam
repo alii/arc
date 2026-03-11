@@ -541,21 +541,16 @@ fn coerce_length(val: JsValue) -> Option(Int) {
   }
 }
 
-/// §10.4.2.4 step 17: "Repeat, while newLen < oldLen"
-///   step 17.a: Set oldLen to oldLen - 1.
-///   step 17.b: Let deleteSucceeded be ! A.[[Delete]](! ToString(F(oldLen))).
-///   step 17.c: If deleteSucceeded is false, [stop and fail at that index].
+/// §10.4.2.4 step 17: Delete elements at indices >= new_len.
 ///
-/// Delete elements in [new_len, old_len), working backward per spec. Stops
-/// immediately since all our elements are implicitly configurable — if we
-/// ever add per-element descriptors, this needs to stop at the first
-/// non-configurable and signal partial success (step 17.c).
-fn truncate_elements(elements: JsElements, new_len: Int, idx: Int) -> JsElements {
-  case idx <= new_len {
-    True -> elements
-    False ->
-      truncate_elements(js_elements.delete(elements, idx - 1), new_len, idx - 1)
-  }
+/// Instead of iterating the full [new_len, old_len) range (which could be
+/// billions for sparse arrays), we filter the underlying storage directly.
+fn truncate_elements(
+  elements: JsElements,
+  new_len: Int,
+  _idx: Int,
+) -> JsElements {
+  js_elements.truncate(elements, new_len)
 }
 
 /// §10.1.6.1 OrdinaryDefineOwnProperty / §10.1.6.3 ValidateAndApplyPropertyDescriptor

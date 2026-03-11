@@ -1,9 +1,11 @@
 /// Test262 parser conformance tests.
-/// Each test262 .js file becomes an individual EUnit test descriptor,
-/// so the output shows real pass/fail counts per file.
+/// Each test directory runs all .js files in parallel.
 import arc/parser
+import gleam/int
+import gleam/io
 import gleam/list
 import gleam/string
+import simplifile
 import test_runner
 
 /// Tests in the fail/ directory that are outdated due to spec changes.
@@ -56,26 +58,44 @@ fn early_test_fn(filename: String, source: String) -> Result(Nil, String) {
   }
 }
 
-/// EUnit test generator for the "pass" suite.
-pub fn pass_test_() {
-  test_runner.generate_file_tests(
-    "vendor/test262-parser-tests/pass",
-    pass_test_fn,
-  )
+pub fn pass_test() {
+  run_file_tests("vendor/test262-parser-tests/pass", pass_test_fn)
 }
 
-/// EUnit test generator for the "fail" suite.
-pub fn fail_test_() {
-  test_runner.generate_file_tests(
-    "vendor/test262-parser-tests/fail",
-    fail_test_fn,
-  )
+pub fn fail_test() {
+  run_file_tests("vendor/test262-parser-tests/fail", fail_test_fn)
 }
 
-/// EUnit test generator for the "early" suite.
-pub fn early_test_() {
-  test_runner.generate_file_tests(
-    "vendor/test262-parser-tests/early",
-    early_test_fn,
-  )
+pub fn early_test() {
+  run_file_tests("vendor/test262-parser-tests/early", early_test_fn)
+}
+
+fn run_file_tests(
+  dir: String,
+  test_fn: fn(String, String) -> Result(Nil, String),
+) {
+  case test_runner.list_files(dir) {
+    Error(err) -> panic as { "Could not list files in " <> dir <> ": " <> err }
+    Ok(files) -> {
+      let errors =
+        test_runner.run_parallel(files, fn(filename) {
+          case simplifile.read(dir <> "/" <> filename) {
+            Error(err) -> Error("read error: " <> string.inspect(err))
+            Ok(source) -> test_fn(filename, source)
+          }
+        })
+      case errors {
+        [] -> Nil
+        _ -> {
+          list.each(errors, fn(e) {
+            let #(file, reason) = e
+            io.println("  FAIL: " <> file <> " — " <> reason)
+          })
+          panic as {
+            int.to_string(list.length(errors)) <> " tests failed in " <> dir
+          }
+        }
+      }
+    }
+  }
 }
