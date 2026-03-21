@@ -14,9 +14,13 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
   type JsValue, type MapKey, type Ref, type SetNativeFn, AccessorProperty,
-  Dispatch, Finite, JsBool, JsNull, JsNumber, JsObject, JsUndefined, ObjectSlot,
-  SetConstructor, SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear,
-  SetPrototypeDelete, SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas,
+  ArrayObject, Dispatch, Finite, JsBool, JsNull, JsNumber, JsObject, JsUndefined,
+  ObjectSlot, SetConstructor, SetNative, SetObject, SetPrototypeAdd,
+  SetPrototypeClear, SetPrototypeDelete, SetPrototypeDifference,
+  SetPrototypeEntries, SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas,
+  SetPrototypeIntersection, SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf,
+  SetPrototypeIsSupersetOf, SetPrototypeSymmetricDifference, SetPrototypeUnion,
+  SetPrototypeValues,
 }
 import gleam/dict
 import gleam/int
@@ -38,6 +42,15 @@ pub fn init(
       #("delete", SetNative(SetPrototypeDelete), 1),
       #("clear", SetNative(SetPrototypeClear), 0),
       #("forEach", SetNative(SetPrototypeForEach), 1),
+      #("union", SetNative(SetPrototypeUnion), 1),
+      #("intersection", SetNative(SetPrototypeIntersection), 1),
+      #("difference", SetNative(SetPrototypeDifference), 1),
+      #("symmetricDifference", SetNative(SetPrototypeSymmetricDifference), 1),
+      #("isSubsetOf", SetNative(SetPrototypeIsSubsetOf), 1),
+      #("isSupersetOf", SetNative(SetPrototypeIsSupersetOf), 1),
+      #("isDisjointFrom", SetNative(SetPrototypeIsDisjointFrom), 1),
+      #("values", SetNative(SetPrototypeValues), 0),
+      #("entries", SetNative(SetPrototypeEntries), 0),
     ])
 
   // Allocate the size getter function
@@ -91,6 +104,15 @@ pub fn dispatch(
     SetPrototypeClear -> set_clear(this, state)
     SetPrototypeForEach -> set_for_each(this, args, state)
     SetPrototypeGetSize -> set_size(this, state)
+    SetPrototypeUnion -> set_union(this, args, state)
+    SetPrototypeIntersection -> set_intersection(this, args, state)
+    SetPrototypeDifference -> set_difference(this, args, state)
+    SetPrototypeSymmetricDifference -> set_symmetric_difference(this, args, state)
+    SetPrototypeIsSubsetOf -> set_is_subset_of(this, args, state)
+    SetPrototypeIsSupersetOf -> set_is_superset_of(this, args, state)
+    SetPrototypeIsDisjointFrom -> set_is_disjoint_from(this, args, state)
+    SetPrototypeValues -> set_values(this, state)
+    SetPrototypeEntries -> set_entries(this, state)
   }
 }
 
@@ -299,6 +321,300 @@ fn for_each_loop(
           for_each_loop(new_state, rest, callback, this_arg, set_this)
         Error(#(thrown, new_state)) -> #(new_state, Error(thrown))
       }
+  }
+}
+
+/// ES2025 §24.2.3.14 Set.prototype.union ( other )
+fn set_union(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  case require_set_like(first_arg(args), state) {
+    Error(r) -> r
+    Ok(#(other_data, other_keys, state)) -> {
+      // Start with this set's entries, then add entries from other
+      let #(result_data, result_keys) =
+        list.fold(other_keys, #(data, keys), fn(acc, key) {
+          let #(d, ks) = acc
+          case dict.has_key(d, key) {
+            True -> #(d, ks)
+            False ->
+              case dict.get(other_data, key) {
+                Ok(v) -> #(dict.insert(d, key, v), list.append(ks, [key]))
+                Error(Nil) -> #(d, ks)
+              }
+          }
+        })
+      alloc_new_set(state, result_data, result_keys)
+    }
+  }
+}
+
+/// ES2025 §24.2.3.7 Set.prototype.intersection ( other )
+fn set_intersection(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  case require_set_like(first_arg(args), state) {
+    Error(r) -> r
+    Ok(#(other_data, _other_keys, state)) -> {
+      let #(result_data, result_keys) =
+        list.fold(keys, #(dict.new(), []), fn(acc, key) {
+          let #(d, ks) = acc
+          case dict.has_key(other_data, key) {
+            True ->
+              case dict.get(data, key) {
+                Ok(v) -> #(dict.insert(d, key, v), [key, ..ks])
+                Error(Nil) -> #(d, ks)
+              }
+            False -> #(d, ks)
+          }
+        })
+      alloc_new_set(state, result_data, list.reverse(result_keys))
+    }
+  }
+}
+
+/// ES2025 §24.2.3.3 Set.prototype.difference ( other )
+fn set_difference(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  case require_set_like(first_arg(args), state) {
+    Error(r) -> r
+    Ok(#(other_data, _other_keys, state)) -> {
+      let #(result_data, result_keys) =
+        list.fold(keys, #(dict.new(), []), fn(acc, key) {
+          let #(d, ks) = acc
+          case dict.has_key(other_data, key) {
+            False ->
+              case dict.get(data, key) {
+                Ok(v) -> #(dict.insert(d, key, v), [key, ..ks])
+                Error(Nil) -> #(d, ks)
+              }
+            True -> #(d, ks)
+          }
+        })
+      alloc_new_set(state, result_data, list.reverse(result_keys))
+    }
+  }
+}
+
+/// ES2025 §24.2.3.13 Set.prototype.symmetricDifference ( other )
+fn set_symmetric_difference(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  case require_set_like(first_arg(args), state) {
+    Error(r) -> r
+    Ok(#(other_data, other_keys, state)) -> {
+      // Start with elements in this but not other
+      let #(result_data, result_keys) =
+        list.fold(keys, #(dict.new(), []), fn(acc, key) {
+          let #(d, ks) = acc
+          case dict.has_key(other_data, key) {
+            False ->
+              case dict.get(data, key) {
+                Ok(v) -> #(dict.insert(d, key, v), [key, ..ks])
+                Error(Nil) -> #(d, ks)
+              }
+            True -> #(d, ks)
+          }
+        })
+      // Add elements in other but not this
+      let #(result_data, result_keys) =
+        list.fold(other_keys, #(result_data, result_keys), fn(acc, key) {
+          let #(d, ks) = acc
+          case dict.has_key(data, key) {
+            False ->
+              case dict.get(other_data, key) {
+                Ok(v) -> #(dict.insert(d, key, v), [key, ..ks])
+                Error(Nil) -> #(d, ks)
+              }
+            True -> #(d, ks)
+          }
+        })
+      alloc_new_set(state, result_data, list.reverse(result_keys))
+    }
+  }
+}
+
+/// ES2025 §24.2.3.9 Set.prototype.isSubsetOf ( other )
+fn set_is_subset_of(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  case require_set_like(first_arg(args), state) {
+    Error(r) -> r
+    Ok(#(other_data, _other_keys, state)) -> {
+      let is_subset =
+        list.all(keys, fn(key) {
+          dict.has_key(data, key) && dict.has_key(other_data, key)
+        })
+      #(state, Ok(JsBool(is_subset)))
+    }
+  }
+}
+
+/// ES2025 §24.2.3.10 Set.prototype.isSupersetOf ( other )
+fn set_is_superset_of(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, _keys, _ref, state <- require_set(this, state)
+  case require_set_like(first_arg(args), state) {
+    Error(r) -> r
+    Ok(#(_other_data, other_keys, state)) -> {
+      let is_superset = list.all(other_keys, fn(key) { dict.has_key(data, key) })
+      #(state, Ok(JsBool(is_superset)))
+    }
+  }
+}
+
+/// ES2025 §24.2.3.8 Set.prototype.isDisjointFrom ( other )
+fn set_is_disjoint_from(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  case require_set_like(first_arg(args), state) {
+    Error(r) -> r
+    Ok(#(other_data, _other_keys, state)) -> {
+      let is_disjoint =
+        list.all(keys, fn(key) {
+          !{ dict.has_key(data, key) && dict.has_key(other_data, key) }
+        })
+      #(state, Ok(JsBool(is_disjoint)))
+    }
+  }
+}
+
+/// ES2024 §24.2.3.15 Set.prototype.values ()
+/// Returns an array of the set's values (simplified — no iterator protocol).
+fn set_values(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  let values =
+    list.filter_map(keys, fn(key) { dict.get(data, key) |> result.replace_error(Nil) })
+  let #(heap, arr_ref) =
+    heap.alloc(
+      state.heap,
+      ObjectSlot(
+        kind: ArrayObject(list.length(values)),
+        properties: dict.new(),
+        elements: js_elements.from_list(values),
+        prototype: None,
+        symbol_properties: dict.new(),
+        extensible: True,
+      ),
+    )
+  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+}
+
+/// ES2024 §24.2.3.4 Set.prototype.entries ()
+/// Returns an array of [value, value] pairs (simplified — no iterator protocol).
+fn set_entries(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use data, keys, _ref, state <- require_set(this, state)
+  let #(heap, entries) =
+    list.fold(keys, #(state.heap, []), fn(acc, key) {
+      let #(h, entries) = acc
+      case dict.get(data, key) {
+        Ok(v) -> {
+          let #(h, pair_ref) =
+            heap.alloc(
+              h,
+              ObjectSlot(
+                kind: ArrayObject(2),
+                properties: dict.new(),
+                elements: js_elements.from_list([v, v]),
+                prototype: None,
+                symbol_properties: dict.new(),
+                extensible: True,
+              ),
+            )
+          #(h, [JsObject(pair_ref), ..entries])
+        }
+        Error(Nil) -> #(h, entries)
+      }
+    })
+  let #(heap, arr_ref) =
+    heap.alloc(
+      heap,
+      ObjectSlot(
+        kind: ArrayObject(list.length(entries)),
+        properties: dict.new(),
+        elements: js_elements.from_list(list.reverse(entries)),
+        prototype: None,
+        symbol_properties: dict.new(),
+        extensible: True,
+      ),
+    )
+  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+}
+
+/// Allocate a new Set object from data + keys.
+fn alloc_new_set(
+  state: State,
+  data: dict.Dict(MapKey, JsValue),
+  keys: List(MapKey),
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, ref) =
+    heap.alloc(
+      state.heap,
+      ObjectSlot(
+        kind: SetObject(data:, keys:),
+        properties: dict.new(),
+        elements: js_elements.new(),
+        prototype: None,
+        symbol_properties: dict.new(),
+        extensible: True,
+      ),
+    )
+  #(State(..state, heap:), Ok(JsObject(ref)))
+}
+
+/// Extract Set data from a value, or treat it as set-like if it has .has and .size.
+/// For now, only supports actual Set objects.
+fn require_set_like(
+  val: JsValue,
+  state: State,
+) -> Result(
+  #(dict.Dict(MapKey, JsValue), List(MapKey), State),
+  #(State, Result(JsValue, JsValue)),
+) {
+  case val {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: SetObject(data:, keys:), ..)) ->
+          Ok(#(data, keys, state))
+        _ ->
+          Error(frame.type_error(
+            state,
+            "The .has method is not callable",
+          ))
+      }
+    _ ->
+      Error(frame.type_error(
+        state,
+        "The .has method is not callable",
+      ))
   }
 }
 

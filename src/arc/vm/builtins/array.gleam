@@ -70,6 +70,11 @@ pub fn init(
       #("with", ArrayNative(ArrayPrototypeWith), 2),
       #("toSorted", ArrayNative(ArrayPrototypeToSorted), 1),
       #("toReversed", ArrayNative(ArrayPrototypeToReversed), 0),
+      #("toString", ArrayNative(value.ArrayPrototypeToString), 0),
+      #("toLocaleString", ArrayNative(value.ArrayPrototypeToLocaleString), 0),
+      #("keys", ArrayNative(value.ArrayPrototypeKeys), 0),
+      #("values", ArrayNative(value.ArrayPrototypeValues), 0),
+      #("entries", ArrayNative(value.ArrayPrototypeEntries), 0),
     ])
   let #(h, static_methods) =
     common.alloc_methods(h, function_proto, [
@@ -134,6 +139,11 @@ pub fn dispatch(
     ArrayPrototypeToReversed -> array_to_reversed(this, args, state)
     ArrayFrom -> array_from(args, state)
     ArrayOf -> array_of(args, state)
+    value.ArrayPrototypeToString -> array_to_string(this, state)
+    value.ArrayPrototypeToLocaleString -> array_to_locale_string(this, state)
+    value.ArrayPrototypeKeys -> array_keys(this, state)
+    value.ArrayPrototypeValues -> array_values(this, state)
+    value.ArrayPrototypeEntries -> array_entries(this, state)
   }
 }
 
@@ -4461,5 +4471,202 @@ fn collect_all_elements(
         js_elements.get(elements, idx),
         ..acc
       ])
+  }
+}
+
+/// ES2024 §23.1.3.31 Array.prototype.toString ( )
+/// Calls this.join() — equivalent to Array.prototype.join().
+fn array_to_string(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Delegate to join with no separator (defaults to ",")
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+          let #(state, result) = join_elements(elements, 0, length, ",", [], state)
+          case result {
+            Ok(s) -> #(state, Ok(JsString(s)))
+            Error(thrown) -> #(state, Error(thrown))
+          }
+        }
+        _ -> #(state, Ok(JsString("")))
+      }
+    _ -> #(state, Ok(JsString("")))
+  }
+}
+
+/// ES2024 §23.1.3.30 Array.prototype.toLocaleString ( )
+/// Calls toLocaleString() on each element and joins with ",".
+fn array_to_locale_string(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) ->
+          to_locale_string_loop(state, elements, 0, length, [])
+        _ -> #(state, Ok(JsString("")))
+      }
+    _ -> #(state, Ok(JsString("")))
+  }
+}
+
+fn to_locale_string_loop(
+  state: State,
+  elements: JsElements,
+  idx: Int,
+  length: Int,
+  acc: List(String),
+) -> #(State, Result(JsValue, JsValue)) {
+  case idx >= length {
+    True -> {
+      let result = list.reverse(acc) |> string.join(",")
+      #(state, Ok(JsString(result)))
+    }
+    False -> {
+      let elem = js_elements.get(elements, idx)
+      case elem {
+        JsUndefined | JsNull ->
+          to_locale_string_loop(state, elements, idx + 1, length, ["", ..acc])
+        _ ->
+          case frame.to_string(state, elem) {
+            Ok(#(s, state)) ->
+              to_locale_string_loop(state, elements, idx + 1, length, [s, ..acc])
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+      }
+    }
+  }
+}
+
+/// ES2024 §23.1.3.16 Array.prototype.keys ( )
+/// Returns an array of indices (simplified — no iterator protocol).
+fn array_keys(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: ArrayObject(length:), ..)) -> {
+          let keys = build_index_list(0, length, [])
+          let #(heap, arr_ref) =
+            common.alloc_array(state.heap, keys, state.builtins.array.prototype)
+          #(State(..state, heap:), Ok(JsObject(arr_ref)))
+        }
+        _ -> {
+          let #(heap, arr_ref) =
+            common.alloc_array(state.heap, [], state.builtins.array.prototype)
+          #(State(..state, heap:), Ok(JsObject(arr_ref)))
+        }
+      }
+    _ -> {
+      let #(heap, arr_ref) =
+        common.alloc_array(state.heap, [], state.builtins.array.prototype)
+      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+    }
+  }
+}
+
+fn build_entry_pairs(
+  h: Heap,
+  elements: JsElements,
+  idx: Int,
+  length: Int,
+  array_proto: Ref,
+  acc: List(JsValue),
+) -> #(Heap, List(JsValue)) {
+  case idx >= length {
+    True -> #(h, list.reverse(acc))
+    False -> {
+      let val = js_elements.get(elements, idx)
+      let #(h, pair_ref) =
+        common.alloc_array(
+          h,
+          [JsNumber(Finite(int.to_float(idx))), val],
+          array_proto,
+        )
+      build_entry_pairs(h, elements, idx + 1, length, array_proto, [
+        JsObject(pair_ref),
+        ..acc
+      ])
+    }
+  }
+}
+
+fn build_index_list(idx: Int, length: Int, acc: List(JsValue)) -> List(JsValue) {
+  case idx >= length {
+    True -> list.reverse(acc)
+    False ->
+      build_index_list(idx + 1, length, [
+        JsNumber(Finite(int.to_float(idx))),
+        ..acc
+      ])
+  }
+}
+
+/// ES2024 §23.1.3.32 Array.prototype.values ( )
+/// Returns an array of values (simplified — no iterator protocol).
+fn array_values(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+          let vals = collect_all_elements(elements, length, 0, [])
+          let #(heap, arr_ref) =
+            common.alloc_array(state.heap, vals, state.builtins.array.prototype)
+          #(State(..state, heap:), Ok(JsObject(arr_ref)))
+        }
+        _ -> {
+          let #(heap, arr_ref) =
+            common.alloc_array(state.heap, [], state.builtins.array.prototype)
+          #(State(..state, heap:), Ok(JsObject(arr_ref)))
+        }
+      }
+    _ -> {
+      let #(heap, arr_ref) =
+        common.alloc_array(state.heap, [], state.builtins.array.prototype)
+      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+    }
+  }
+}
+
+/// ES2024 §23.1.3.4 Array.prototype.entries ( )
+/// Returns an array of [index, value] pairs (simplified — no iterator protocol).
+fn array_entries(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+          let #(heap, pairs) =
+            build_entry_pairs(state.heap, elements, 0, length, state.builtins.array.prototype, [])
+          let #(heap, arr_ref) =
+            common.alloc_array(
+              heap,
+              pairs,
+              state.builtins.array.prototype,
+            )
+          #(State(..state, heap:), Ok(JsObject(arr_ref)))
+        }
+        _ -> {
+          let #(heap, arr_ref) =
+            common.alloc_array(state.heap, [], state.builtins.array.prototype)
+          #(State(..state, heap:), Ok(JsObject(arr_ref)))
+        }
+      }
+    _ -> {
+      let #(heap, arr_ref) =
+        common.alloc_array(state.heap, [], state.builtins.array.prototype)
+      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+    }
   }
 }

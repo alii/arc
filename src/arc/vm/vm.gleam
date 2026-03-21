@@ -3568,6 +3568,92 @@ fn call_native(
     // Promise.reject(reason)
     value.Call(value.PromiseRejectStatic) ->
       call_native_promise_reject_static(state, args, rest_stack)
+    // Promise.all(iterable)
+    value.Call(value.PromiseAllStatic) ->
+      call_native_promise_all(state, args, rest_stack)
+    // Promise.race(iterable)
+    value.Call(value.PromiseRaceStatic) ->
+      call_native_promise_race(state, args, rest_stack)
+    // Promise.allSettled(iterable)
+    value.Call(value.PromiseAllSettledStatic) ->
+      call_native_promise_all_settled(state, args, rest_stack)
+    // Promise.any(iterable)
+    value.Call(value.PromiseAnyStatic) ->
+      call_native_promise_any(state, args, rest_stack)
+    // Promise.all per-element resolve handler
+    value.Call(value.PromiseAllResolveElement(
+      index:,
+      remaining_ref:,
+      values_ref:,
+      already_called_ref:,
+      resolve:,
+      reject: _,
+    )) ->
+      call_native_promise_all_resolve_element(
+        state,
+        args,
+        rest_stack,
+        index,
+        remaining_ref,
+        values_ref,
+        already_called_ref,
+        resolve,
+      )
+    // Promise.allSettled per-element resolve handler
+    value.Call(value.PromiseAllSettledResolveElement(
+      index:,
+      remaining_ref:,
+      values_ref:,
+      already_called_ref:,
+      resolve:,
+    )) ->
+      call_native_promise_all_settled_resolve_element(
+        state,
+        args,
+        rest_stack,
+        index,
+        remaining_ref,
+        values_ref,
+        already_called_ref,
+        resolve,
+      )
+    // Promise.allSettled per-element reject handler
+    value.Call(value.PromiseAllSettledRejectElement(
+      index:,
+      remaining_ref:,
+      values_ref:,
+      already_called_ref:,
+      resolve:,
+    )) ->
+      call_native_promise_all_settled_reject_element(
+        state,
+        args,
+        rest_stack,
+        index,
+        remaining_ref,
+        values_ref,
+        already_called_ref,
+        resolve,
+      )
+    // Promise.any per-element reject handler
+    value.Call(value.PromiseAnyRejectElement(
+      index:,
+      remaining_ref:,
+      errors_ref:,
+      already_called_ref:,
+      resolve: _,
+      reject:,
+    )) ->
+      call_native_promise_any_reject_element(
+        state,
+        args,
+        rest_stack,
+        index,
+        remaining_ref,
+        errors_ref,
+        already_called_ref,
+        reject,
+      )
     // Promise.prototype.finally wrapper functions
     value.Call(value.PromiseFinallyFulfill(on_finally:)) ->
       call_native_finally_fulfill(state, on_finally, args, rest_stack)
@@ -5281,6 +5367,1114 @@ fn call_native_promise_reject_static(
       pc: state.pc + 1,
     ),
   )
+}
+
+/// ES2024 §27.2.4.1 Promise.all(iterable)
+///
+/// Creates a promise that resolves when all input promises resolve,
+/// or rejects when any input promise rejects. The resolved value is
+/// an array of all the input promises' resolved values.
+fn call_native_promise_all(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  // 1. Create result promise capability
+  let #(h, promise_ref, data_ref) =
+    builtins_promise.create_promise(state.heap, state.builtins.promise.prototype)
+  let #(h, cap_resolve, cap_reject) =
+    builtins_promise.create_resolving_functions(
+      h,
+      state.builtins.function.prototype,
+      promise_ref,
+      data_ref,
+    )
+
+  // 2. Get iterable elements (array fast-path)
+  let iterable = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  case get_iterable_elements(h, iterable) {
+    Error(msg) -> {
+      let #(h, err) = common.make_type_error(h, state.builtins, msg)
+      let state =
+        builtins_promise.reject_promise(
+          State(..state, heap: h),
+          data_ref,
+          err,
+        )
+      Ok(
+        State(
+          ..state,
+          stack: [JsObject(promise_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    Ok(#(h, elements)) -> {
+      let count = list.length(elements)
+      // Empty iterable → resolve immediately with []
+      case count {
+        0 -> {
+          let #(h, arr_ref) =
+            common.alloc_array(h, [], state.builtins.array.prototype)
+          let #(h, jobs) =
+            builtins_promise.fulfill_promise(h, data_ref, JsObject(arr_ref))
+          Ok(
+            State(
+              ..state,
+              heap: h,
+              stack: [JsObject(promise_ref), ..rest_stack],
+              pc: state.pc + 1,
+              job_queue: list.append(state.job_queue, jobs),
+            ),
+          )
+        }
+        _ -> {
+          // Allocate shared state: values array + remaining counter
+          let #(h, values_ref) =
+            common.alloc_array(
+              h,
+              list.repeat(JsUndefined, count),
+              state.builtins.array.prototype,
+            )
+          // remaining = count + 1 (extra 1 for the "completion" step per spec)
+          let #(h, remaining_ref) =
+            heap.alloc(
+              h,
+              value.BoxSlot(value: JsNumber(Finite(int.to_float(count + 1)))),
+            )
+
+          // For each element, call Promise.resolve(elem).then(resolveElement, reject)
+          let state = State(..state, heap: h)
+          let state =
+            promise_all_loop(
+              state,
+              elements,
+              0,
+              remaining_ref,
+              values_ref,
+              cap_resolve,
+              cap_reject,
+            )
+
+          // Decrement remaining by 1 (the completion step)
+          let state =
+            promise_combinator_decrement_and_maybe_resolve(
+              state,
+              remaining_ref,
+              values_ref,
+              cap_resolve,
+            )
+
+          Ok(
+            State(
+              ..state,
+              stack: [JsObject(promise_ref), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+      }
+    }
+  }
+}
+
+/// Loop body for Promise.all — process each element.
+fn promise_all_loop(
+  state: State,
+  elements: List(JsValue),
+  index: Int,
+  remaining_ref: Ref,
+  values_ref: Ref,
+  cap_resolve: JsValue,
+  cap_reject: JsValue,
+) -> State {
+  case elements {
+    [] -> state
+    [elem, ..rest] -> {
+      // Create per-element already-called flag
+      let #(h, already_called_ref) =
+        heap.alloc(state.heap, value.BoxSlot(value: JsBool(False)))
+      // Create resolve element function
+      let #(h, resolve_fn_ref) =
+        heap.alloc(
+          h,
+          ObjectSlot(
+            kind: NativeFunction(
+              value.Call(value.PromiseAllResolveElement(
+                index:,
+                remaining_ref:,
+                values_ref:,
+                already_called_ref:,
+                resolve: cap_resolve,
+                reject: cap_reject,
+              )),
+            ),
+            properties: dict.from_list([
+              #("name", common.fn_name_property("")),
+              #("length", common.fn_length_property(1)),
+            ]),
+            elements: js_elements.new(),
+            prototype: Some(state.builtins.function.prototype),
+            symbol_properties: dict.new(),
+            extensible: True,
+          ),
+        )
+      // Resolve the element via Promise.resolve(elem)
+      let state = State(..state, heap: h)
+      let state =
+        promise_resolve_and_then(
+          state,
+          elem,
+          JsObject(resolve_fn_ref),
+          cap_reject,
+        )
+      promise_all_loop(
+        state,
+        rest,
+        index + 1,
+        remaining_ref,
+        values_ref,
+        cap_resolve,
+        cap_reject,
+      )
+    }
+  }
+}
+
+/// ES2024 §27.2.4.5 Promise.race(iterable)
+///
+/// Returns a promise that settles with the first input promise to settle.
+fn call_native_promise_race(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(h, promise_ref, data_ref) =
+    builtins_promise.create_promise(state.heap, state.builtins.promise.prototype)
+  let #(h, cap_resolve, cap_reject) =
+    builtins_promise.create_resolving_functions(
+      h,
+      state.builtins.function.prototype,
+      promise_ref,
+      data_ref,
+    )
+
+  let iterable = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  case get_iterable_elements(h, iterable) {
+    Error(msg) -> {
+      let #(h, err) = common.make_type_error(h, state.builtins, msg)
+      let state =
+        builtins_promise.reject_promise(
+          State(..state, heap: h),
+          data_ref,
+          err,
+        )
+      Ok(
+        State(
+          ..state,
+          stack: [JsObject(promise_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    Ok(#(h, elements)) -> {
+      // For each element: Promise.resolve(elem).then(resolve, reject)
+      let state = State(..state, heap: h)
+      let state =
+        promise_race_loop(state, elements, cap_resolve, cap_reject)
+      Ok(
+        State(
+          ..state,
+          stack: [JsObject(promise_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+  }
+}
+
+/// Loop body for Promise.race — each element uses the same resolve/reject.
+fn promise_race_loop(
+  state: State,
+  elements: List(JsValue),
+  cap_resolve: JsValue,
+  cap_reject: JsValue,
+) -> State {
+  case elements {
+    [] -> state
+    [elem, ..rest] -> {
+      let state =
+        promise_resolve_and_then(
+          state,
+          elem,
+          cap_resolve,
+          cap_reject,
+        )
+      promise_race_loop(state, rest, cap_resolve, cap_reject)
+    }
+  }
+}
+
+/// ES2024 §27.2.4.2 Promise.allSettled(iterable)
+///
+/// Returns a promise that resolves when all input promises settle (either
+/// fulfill or reject). The result is an array of objects with shape
+/// {status: "fulfilled", value: v} or {status: "rejected", reason: r}.
+fn call_native_promise_all_settled(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(h, promise_ref, data_ref) =
+    builtins_promise.create_promise(state.heap, state.builtins.promise.prototype)
+  let #(h, cap_resolve, _cap_reject) =
+    builtins_promise.create_resolving_functions(
+      h,
+      state.builtins.function.prototype,
+      promise_ref,
+      data_ref,
+    )
+
+  let iterable = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  case get_iterable_elements(h, iterable) {
+    Error(msg) -> {
+      let #(h, err) = common.make_type_error(h, state.builtins, msg)
+      let state =
+        builtins_promise.reject_promise(
+          State(..state, heap: h),
+          data_ref,
+          err,
+        )
+      Ok(
+        State(
+          ..state,
+          stack: [JsObject(promise_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    Ok(#(h, elements)) -> {
+      let count = list.length(elements)
+      case count {
+        0 -> {
+          let #(h, arr_ref) =
+            common.alloc_array(h, [], state.builtins.array.prototype)
+          let #(h, jobs) =
+            builtins_promise.fulfill_promise(h, data_ref, JsObject(arr_ref))
+          Ok(
+            State(
+              ..state,
+              heap: h,
+              stack: [JsObject(promise_ref), ..rest_stack],
+              pc: state.pc + 1,
+              job_queue: list.append(state.job_queue, jobs),
+            ),
+          )
+        }
+        _ -> {
+          let #(h, values_ref) =
+            common.alloc_array(
+              h,
+              list.repeat(JsUndefined, count),
+              state.builtins.array.prototype,
+            )
+          let #(h, remaining_ref) =
+            heap.alloc(
+              h,
+              value.BoxSlot(value: JsNumber(Finite(int.to_float(count + 1)))),
+            )
+
+          let state = State(..state, heap: h)
+          let state =
+            promise_all_settled_loop(
+              state,
+              elements,
+              0,
+              remaining_ref,
+              values_ref,
+              cap_resolve,
+            )
+
+          let state =
+            promise_combinator_decrement_and_maybe_resolve(
+              state,
+              remaining_ref,
+              values_ref,
+              cap_resolve,
+            )
+
+          Ok(
+            State(
+              ..state,
+              stack: [JsObject(promise_ref), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+      }
+    }
+  }
+}
+
+/// Loop body for Promise.allSettled.
+fn promise_all_settled_loop(
+  state: State,
+  elements: List(JsValue),
+  index: Int,
+  remaining_ref: Ref,
+  values_ref: Ref,
+  cap_resolve: JsValue,
+) -> State {
+  case elements {
+    [] -> state
+    [elem, ..rest] -> {
+      // Create per-element already-called flags (one for resolve, one for reject)
+      let #(h, already_called_resolve_ref) =
+        heap.alloc(state.heap, value.BoxSlot(value: JsBool(False)))
+      let #(h, already_called_reject_ref) =
+        heap.alloc(h, value.BoxSlot(value: JsBool(False)))
+      // Create resolve element function
+      let #(h, resolve_fn_ref) =
+        heap.alloc(
+          h,
+          ObjectSlot(
+            kind: NativeFunction(
+              value.Call(value.PromiseAllSettledResolveElement(
+                index:,
+                remaining_ref:,
+                values_ref:,
+                already_called_ref: already_called_resolve_ref,
+                resolve: cap_resolve,
+              )),
+            ),
+            properties: dict.from_list([
+              #("name", common.fn_name_property("")),
+              #("length", common.fn_length_property(1)),
+            ]),
+            elements: js_elements.new(),
+            prototype: Some(state.builtins.function.prototype),
+            symbol_properties: dict.new(),
+            extensible: True,
+          ),
+        )
+      // Create reject element function
+      let #(h, reject_fn_ref) =
+        heap.alloc(
+          h,
+          ObjectSlot(
+            kind: NativeFunction(
+              value.Call(value.PromiseAllSettledRejectElement(
+                index:,
+                remaining_ref:,
+                values_ref:,
+                already_called_ref: already_called_reject_ref,
+                resolve: cap_resolve,
+              )),
+            ),
+            properties: dict.from_list([
+              #("name", common.fn_name_property("")),
+              #("length", common.fn_length_property(1)),
+            ]),
+            elements: js_elements.new(),
+            prototype: Some(state.builtins.function.prototype),
+            symbol_properties: dict.new(),
+            extensible: True,
+          ),
+        )
+      let state = State(..state, heap: h)
+      let state =
+        promise_resolve_and_then(
+          state,
+          elem,
+          JsObject(resolve_fn_ref),
+          JsObject(reject_fn_ref),
+        )
+      promise_all_settled_loop(
+        state,
+        rest,
+        index + 1,
+        remaining_ref,
+        values_ref,
+        cap_resolve,
+      )
+    }
+  }
+}
+
+/// ES2024 §27.2.4.3 Promise.any(iterable)
+///
+/// Returns a promise that resolves with the first input promise to fulfill.
+/// If all input promises reject, rejects with an AggregateError.
+fn call_native_promise_any(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(h, promise_ref, data_ref) =
+    builtins_promise.create_promise(state.heap, state.builtins.promise.prototype)
+  let #(h, cap_resolve, cap_reject) =
+    builtins_promise.create_resolving_functions(
+      h,
+      state.builtins.function.prototype,
+      promise_ref,
+      data_ref,
+    )
+
+  let iterable = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  case get_iterable_elements(h, iterable) {
+    Error(msg) -> {
+      let #(h, err) = common.make_type_error(h, state.builtins, msg)
+      let state =
+        builtins_promise.reject_promise(
+          State(..state, heap: h),
+          data_ref,
+          err,
+        )
+      Ok(
+        State(
+          ..state,
+          stack: [JsObject(promise_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    Ok(#(h, elements)) -> {
+      let count = list.length(elements)
+      case count {
+        0 -> {
+          // Empty iterable → reject with AggregateError
+          let #(h, err) =
+            make_aggregate_error(h, state.builtins, [], "All promises were rejected")
+          let state =
+            builtins_promise.reject_promise(
+              State(..state, heap: h),
+              data_ref,
+              err,
+            )
+          Ok(
+            State(
+              ..state,
+              stack: [JsObject(promise_ref), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        _ -> {
+          let #(h, errors_ref) =
+            common.alloc_array(
+              h,
+              list.repeat(JsUndefined, count),
+              state.builtins.array.prototype,
+            )
+          let #(h, remaining_ref) =
+            heap.alloc(
+              h,
+              value.BoxSlot(value: JsNumber(Finite(int.to_float(count + 1)))),
+            )
+
+          let state = State(..state, heap: h)
+          let state =
+            promise_any_loop(
+              state,
+              elements,
+              0,
+              remaining_ref,
+              errors_ref,
+              cap_resolve,
+              cap_reject,
+            )
+
+          // Decrement remaining by 1 (the completion step)
+          let state =
+            promise_any_decrement_and_maybe_reject(
+              state,
+              remaining_ref,
+              errors_ref,
+              cap_reject,
+            )
+
+          Ok(
+            State(
+              ..state,
+              stack: [JsObject(promise_ref), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+      }
+    }
+  }
+}
+
+/// Loop body for Promise.any.
+fn promise_any_loop(
+  state: State,
+  elements: List(JsValue),
+  index: Int,
+  remaining_ref: Ref,
+  errors_ref: Ref,
+  cap_resolve: JsValue,
+  cap_reject: JsValue,
+) -> State {
+  case elements {
+    [] -> state
+    [elem, ..rest] -> {
+      let #(h, already_called_ref) =
+        heap.alloc(state.heap, value.BoxSlot(value: JsBool(False)))
+      // Create reject element function
+      let #(h, reject_fn_ref) =
+        heap.alloc(
+          h,
+          ObjectSlot(
+            kind: NativeFunction(
+              value.Call(value.PromiseAnyRejectElement(
+                index:,
+                remaining_ref:,
+                errors_ref:,
+                already_called_ref:,
+                resolve: cap_resolve,
+                reject: cap_reject,
+              )),
+            ),
+            properties: dict.from_list([
+              #("name", common.fn_name_property("")),
+              #("length", common.fn_length_property(1)),
+            ]),
+            elements: js_elements.new(),
+            prototype: Some(state.builtins.function.prototype),
+            symbol_properties: dict.new(),
+            extensible: True,
+          ),
+        )
+      let state = State(..state, heap: h)
+      // For Promise.any: resolve handler is the capability resolve (first one wins),
+      // reject handler is the per-element reject element function.
+      let state =
+        promise_resolve_and_then(
+          state,
+          elem,
+          cap_resolve,
+          JsObject(reject_fn_ref),
+        )
+      promise_any_loop(
+        state,
+        rest,
+        index + 1,
+        remaining_ref,
+        errors_ref,
+        cap_resolve,
+        cap_reject,
+      )
+    }
+  }
+}
+
+/// Shared helper: Promise.resolve(elem), then attach .then(on_fulfilled, on_rejected)
+/// using perform_promise_then directly.
+fn promise_resolve_and_then(
+  state: State,
+  elem: JsValue,
+  on_fulfilled: JsValue,
+  on_rejected: JsValue,
+) -> State {
+  let h = state.heap
+  // If elem is already a promise, use it directly; otherwise wrap via Promise.resolve logic
+  case builtins_promise.is_promise(h, elem) {
+    True -> {
+      let assert JsObject(elem_ref) = elem
+      case builtins_promise.get_data_ref(h, elem_ref) {
+        Some(elem_data_ref) -> {
+          // Create child promise for the .then chain
+          let #(h, child_ref, child_data_ref) =
+            builtins_promise.create_promise(
+              h,
+              state.builtins.promise.prototype,
+            )
+          let #(h, child_resolve, child_reject) =
+            builtins_promise.create_resolving_functions(
+              h,
+              state.builtins.function.prototype,
+              child_ref,
+              child_data_ref,
+            )
+          builtins_promise.perform_promise_then(
+            State(..state, heap: h),
+            elem_data_ref,
+            on_fulfilled,
+            on_rejected,
+            child_resolve,
+            child_reject,
+          )
+        }
+        None -> state
+      }
+    }
+    False -> {
+      // Wrap non-promise value: create a resolved promise, then attach .then
+      let #(h, wrap_ref, wrap_data_ref) =
+        builtins_promise.create_promise(h, state.builtins.promise.prototype)
+      // Check for thenable
+      case builtins_promise.get_thenable_then(State(..state, heap: h), elem) {
+        Ok(#(then_fn, state)) -> {
+          let #(h, resolve_fn, reject_fn) =
+            builtins_promise.create_resolving_functions(
+              state.heap,
+              state.builtins.function.prototype,
+              wrap_ref,
+              wrap_data_ref,
+            )
+          let job =
+            value.PromiseResolveThenableJob(
+              thenable: elem,
+              then_fn:,
+              resolve: resolve_fn,
+              reject: reject_fn,
+            )
+          // Create child for .then
+          let #(h, child_ref, child_data_ref) =
+            builtins_promise.create_promise(
+              h,
+              state.builtins.promise.prototype,
+            )
+          let #(h, child_resolve, child_reject) =
+            builtins_promise.create_resolving_functions(
+              h,
+              state.builtins.function.prototype,
+              child_ref,
+              child_data_ref,
+            )
+          let state =
+            builtins_promise.perform_promise_then(
+              State(
+                ..state,
+                heap: h,
+                job_queue: list.append(state.job_queue, [job]),
+              ),
+              wrap_data_ref,
+              on_fulfilled,
+              on_rejected,
+              child_resolve,
+              child_reject,
+            )
+          state
+        }
+        Error(#(Some(thrown), state)) -> {
+          // Thenable getter threw — reject the wrapper promise
+          let state =
+            builtins_promise.reject_promise(state, wrap_data_ref, thrown)
+          // Still attach .then to propagate to result
+          let #(h, child_ref, child_data_ref) =
+            builtins_promise.create_promise(
+              state.heap,
+              state.builtins.promise.prototype,
+            )
+          let #(h, child_resolve, child_reject) =
+            builtins_promise.create_resolving_functions(
+              h,
+              state.builtins.function.prototype,
+              child_ref,
+              child_data_ref,
+            )
+          builtins_promise.perform_promise_then(
+            State(..state, heap: h),
+            wrap_data_ref,
+            on_fulfilled,
+            on_rejected,
+            child_resolve,
+            child_reject,
+          )
+        }
+        Error(#(None, state)) -> {
+          // Not a thenable — fulfill the wrapper promise directly
+          let #(h, jobs) =
+            builtins_promise.fulfill_promise(state.heap, wrap_data_ref, elem)
+          // Now attach .then
+          let #(h, child_ref, child_data_ref) =
+            builtins_promise.create_promise(
+              h,
+              state.builtins.promise.prototype,
+            )
+          let #(h, child_resolve, child_reject) =
+            builtins_promise.create_resolving_functions(
+              h,
+              state.builtins.function.prototype,
+              child_ref,
+              child_data_ref,
+            )
+          builtins_promise.perform_promise_then(
+            State(
+              ..state,
+              heap: h,
+              job_queue: list.append(state.job_queue, jobs),
+            ),
+            wrap_data_ref,
+            on_fulfilled,
+            on_rejected,
+            child_resolve,
+            child_reject,
+          )
+        }
+      }
+    }
+  }
+}
+
+/// Extract elements from an iterable value (array fast-path).
+/// Returns Error(message) if not iterable.
+fn get_iterable_elements(
+  h: Heap,
+  iterable: JsValue,
+) -> Result(#(Heap, List(JsValue)), String) {
+  case iterable {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..))
+        | Some(ObjectSlot(
+            kind: value.ArgumentsObject(length:),
+            elements:,
+            ..,
+          )) -> Ok(#(h, extract_elements_loop(elements, 0, length, [])))
+        _ ->
+          Error(
+            object.inspect(iterable, h)
+              <> " is not iterable",
+          )
+      }
+    _ ->
+      Error(
+        object.inspect(iterable, h)
+          <> " is not iterable",
+      )
+  }
+}
+
+/// Promise.all resolve element function — stores value and checks if all done.
+fn call_native_promise_all_resolve_element(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  index: Int,
+  remaining_ref: Ref,
+  values_ref: Ref,
+  already_called_ref: Ref,
+  resolve: JsValue,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  // Check and set already-called flag
+  case heap.read(state.heap, already_called_ref) {
+    Some(value.BoxSlot(value: JsBool(True))) ->
+      Ok(
+        State(
+          ..state,
+          stack: [JsUndefined, ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    _ -> {
+      let h =
+        heap.write(
+          state.heap,
+          already_called_ref,
+          value.BoxSlot(value: JsBool(True)),
+        )
+      let val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      // Store value at index in the values array
+      let h = set_array_element(h, values_ref, index, val)
+      // Decrement remaining and maybe resolve
+      let state =
+        promise_combinator_decrement_and_maybe_resolve(
+          State(..state, heap: h),
+          remaining_ref,
+          values_ref,
+          resolve,
+        )
+      Ok(
+        State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
+      )
+    }
+  }
+}
+
+/// Promise.allSettled resolve element — stores {status:"fulfilled", value:v}.
+fn call_native_promise_all_settled_resolve_element(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  index: Int,
+  remaining_ref: Ref,
+  values_ref: Ref,
+  already_called_ref: Ref,
+  resolve: JsValue,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case heap.read(state.heap, already_called_ref) {
+    Some(value.BoxSlot(value: JsBool(True))) ->
+      Ok(
+        State(
+          ..state,
+          stack: [JsUndefined, ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    _ -> {
+      let h =
+        heap.write(
+          state.heap,
+          already_called_ref,
+          value.BoxSlot(value: JsBool(True)),
+        )
+      let val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      // Create {status: "fulfilled", value: val}
+      let #(h, obj_ref) =
+        common.alloc_pojo(h, state.builtins.object.prototype, [
+          #("status", value.builtin_property(JsString("fulfilled"))),
+          #("value", value.builtin_property(val)),
+        ])
+      let h = set_array_element(h, values_ref, index, JsObject(obj_ref))
+      let state =
+        promise_combinator_decrement_and_maybe_resolve(
+          State(..state, heap: h),
+          remaining_ref,
+          values_ref,
+          resolve,
+        )
+      Ok(
+        State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
+      )
+    }
+  }
+}
+
+/// Promise.allSettled reject element — stores {status:"rejected", reason:r}.
+fn call_native_promise_all_settled_reject_element(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  index: Int,
+  remaining_ref: Ref,
+  values_ref: Ref,
+  already_called_ref: Ref,
+  resolve: JsValue,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case heap.read(state.heap, already_called_ref) {
+    Some(value.BoxSlot(value: JsBool(True))) ->
+      Ok(
+        State(
+          ..state,
+          stack: [JsUndefined, ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    _ -> {
+      let h =
+        heap.write(
+          state.heap,
+          already_called_ref,
+          value.BoxSlot(value: JsBool(True)),
+        )
+      let reason = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      // Create {status: "rejected", reason: reason}
+      let #(h, obj_ref) =
+        common.alloc_pojo(h, state.builtins.object.prototype, [
+          #("status", value.builtin_property(JsString("rejected"))),
+          #("reason", value.builtin_property(reason)),
+        ])
+      let h = set_array_element(h, values_ref, index, JsObject(obj_ref))
+      let state =
+        promise_combinator_decrement_and_maybe_resolve(
+          State(..state, heap: h),
+          remaining_ref,
+          values_ref,
+          resolve,
+        )
+      Ok(
+        State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
+      )
+    }
+  }
+}
+
+/// Promise.any reject element — collects error and maybe rejects with AggregateError.
+fn call_native_promise_any_reject_element(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  index: Int,
+  remaining_ref: Ref,
+  errors_ref: Ref,
+  already_called_ref: Ref,
+  reject: JsValue,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case heap.read(state.heap, already_called_ref) {
+    Some(value.BoxSlot(value: JsBool(True))) ->
+      Ok(
+        State(
+          ..state,
+          stack: [JsUndefined, ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    _ -> {
+      let h =
+        heap.write(
+          state.heap,
+          already_called_ref,
+          value.BoxSlot(value: JsBool(True)),
+        )
+      let reason = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      let h = set_array_element(h, errors_ref, index, reason)
+      let state =
+        promise_any_decrement_and_maybe_reject(
+          State(..state, heap: h),
+          remaining_ref,
+          errors_ref,
+          reject,
+        )
+      Ok(
+        State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
+      )
+    }
+  }
+}
+
+/// Shared helper: decrement remaining counter; if it reaches 0, call resolve with values array.
+fn promise_combinator_decrement_and_maybe_resolve(
+  state: State,
+  remaining_ref: Ref,
+  values_ref: Ref,
+  resolve: JsValue,
+) -> State {
+  case heap.read(state.heap, remaining_ref) {
+    Some(value.BoxSlot(value: JsNumber(Finite(n)))) -> {
+      let new_count = n -. 1.0
+      let h =
+        heap.write(
+          state.heap,
+          remaining_ref,
+          value.BoxSlot(value: JsNumber(Finite(new_count))),
+        )
+      case new_count <=. 0.0 {
+        True -> {
+          // All elements resolved — call resolve(values)
+          let state = State(..state, heap: h)
+          case
+            run_handler_with_this(state, resolve, JsUndefined, [
+              JsObject(values_ref),
+            ])
+          {
+            Ok(#(_, after_state)) -> after_state
+            Error(#(_, after_state)) -> after_state
+          }
+        }
+        False -> State(..state, heap: h)
+      }
+    }
+    _ -> state
+  }
+}
+
+/// Shared helper for Promise.any: decrement remaining; if 0, reject with AggregateError.
+fn promise_any_decrement_and_maybe_reject(
+  state: State,
+  remaining_ref: Ref,
+  errors_ref: Ref,
+  reject: JsValue,
+) -> State {
+  case heap.read(state.heap, remaining_ref) {
+    Some(value.BoxSlot(value: JsNumber(Finite(n)))) -> {
+      let new_count = n -. 1.0
+      let h =
+        heap.write(
+          state.heap,
+          remaining_ref,
+          value.BoxSlot(value: JsNumber(Finite(new_count))),
+        )
+      case new_count <=. 0.0 {
+        True -> {
+          // All elements rejected — reject with AggregateError
+          let errors = extract_array_args(h, errors_ref)
+          let #(h, err) =
+            make_aggregate_error(
+              h,
+              state.builtins,
+              errors,
+              "All promises were rejected",
+            )
+          let state = State(..state, heap: h)
+          case
+            run_handler_with_this(state, reject, JsUndefined, [err])
+          {
+            Ok(#(_, after_state)) -> after_state
+            Error(#(_, after_state)) -> after_state
+          }
+        }
+        False -> State(..state, heap: h)
+      }
+    }
+    _ -> state
+  }
+}
+
+/// Set an element in a heap-allocated array at a specific index.
+fn set_array_element(h: Heap, arr_ref: Ref, index: Int, val: JsValue) -> Heap {
+  use slot <- heap.update(h, arr_ref)
+  case slot {
+    ObjectSlot(kind: ArrayObject(length:), elements:, ..) ->
+      ObjectSlot(
+        ..slot,
+        elements: js_elements.set(elements, index, val),
+        kind: ArrayObject(int.max(length, index + 1)),
+      )
+    _ -> slot
+  }
+}
+
+/// Create an AggregateError with an errors array and message.
+fn make_aggregate_error(
+  h: Heap,
+  b: Builtins,
+  errors: List(JsValue),
+  message: String,
+) -> #(Heap, JsValue) {
+  let #(h, errors_arr_ref) = common.alloc_array(h, errors, b.array.prototype)
+  let #(h, ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: dict.from_list([
+          #("message", value.builtin_property(JsString(message))),
+          #("errors", value.builtin_property(JsObject(errors_arr_ref))),
+        ]),
+        elements: js_elements.new(),
+        prototype: Some(b.aggregate_error.prototype),
+        symbol_properties: dict.new(),
+        extensible: True,
+      ),
+    )
+  #(h, JsObject(ref))
 }
 
 /// Helper: check if a JsValue is callable.

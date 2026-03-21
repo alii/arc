@@ -341,6 +341,25 @@ pub type StringNativeFn {
   StringPrototypeSearch
   StringPrototypeReplace
   StringPrototypeReplaceAll
+  StringPrototypeSubstr
+  StringPrototypeLocaleCompare
+  StringPrototypeMatchAll
+  StringPrototypeIsWellFormed
+  StringPrototypeToWellFormed
+  /// Annex B HTML wrapper methods — all share a single implementation.
+  StringPrototypeAnchor
+  StringPrototypeBig
+  StringPrototypeBlink
+  StringPrototypeBold
+  StringPrototypeFixed
+  StringPrototypeFontcolor
+  StringPrototypeFontsize
+  StringPrototypeItalics
+  StringPrototypeLink
+  StringPrototypeSmall
+  StringPrototypeStrike
+  StringPrototypeSub
+  StringPrototypeSup
   // Static methods
   StringRaw
   StringFromCharCode
@@ -390,6 +409,11 @@ pub type ArrayNativeFn {
   ArrayPrototypeWith
   ArrayPrototypeToSorted
   ArrayPrototypeToReversed
+  ArrayPrototypeToString
+  ArrayPrototypeToLocaleString
+  ArrayPrototypeKeys
+  ArrayPrototypeValues
+  ArrayPrototypeEntries
   ArrayFrom
   ArrayOf
 }
@@ -423,6 +447,9 @@ pub type ObjectNativeFn {
   ObjectIsSealed
   ObjectGetOwnPropertyDescriptors
   ObjectGetOwnPropertySymbols
+  ObjectPrototypeIsPrototypeOf
+  ObjectPrototypeToLocaleString
+  ObjectGroupBy
 }
 
 /// Arc methods — non-standard engine-specific utilities.
@@ -506,6 +533,15 @@ pub type SetNativeFn {
   SetPrototypeClear
   SetPrototypeForEach
   SetPrototypeGetSize
+  SetPrototypeUnion
+  SetPrototypeIntersection
+  SetPrototypeDifference
+  SetPrototypeSymmetricDifference
+  SetPrototypeIsSubsetOf
+  SetPrototypeIsSupersetOf
+  SetPrototypeIsDisjointFrom
+  SetPrototypeValues
+  SetPrototypeEntries
 }
 
 /// WeakMap methods — constructor, get, set, has, delete.
@@ -593,6 +629,46 @@ pub type CallNativeFn {
   PromiseFinally
   PromiseResolveStatic
   PromiseRejectStatic
+  PromiseAllStatic
+  PromiseRaceStatic
+  PromiseAllSettledStatic
+  PromiseAnyStatic
+  /// Per-element resolve handler for Promise.all.
+  /// Captures: index, remaining_ref (BoxSlot counter), values_ref (array),
+  /// already_called_ref (BoxSlot bool), capability resolve/reject.
+  PromiseAllResolveElement(
+    index: Int,
+    remaining_ref: Ref,
+    values_ref: Ref,
+    already_called_ref: Ref,
+    resolve: JsValue,
+    reject: JsValue,
+  )
+  /// Per-element resolve handler for Promise.allSettled — stores {status:"fulfilled",value}.
+  PromiseAllSettledResolveElement(
+    index: Int,
+    remaining_ref: Ref,
+    values_ref: Ref,
+    already_called_ref: Ref,
+    resolve: JsValue,
+  )
+  /// Per-element reject handler for Promise.allSettled — stores {status:"rejected",reason}.
+  PromiseAllSettledRejectElement(
+    index: Int,
+    remaining_ref: Ref,
+    values_ref: Ref,
+    already_called_ref: Ref,
+    resolve: JsValue,
+  )
+  /// Per-element reject handler for Promise.any — collects errors for AggregateError.
+  PromiseAnyRejectElement(
+    index: Int,
+    remaining_ref: Ref,
+    errors_ref: Ref,
+    already_called_ref: Ref,
+    resolve: JsValue,
+    reject: JsValue,
+  )
   /// Internal resolve function created by CreateResolvingFunctions.
   PromiseResolveFunction(
     promise_ref: Ref,

@@ -67,6 +67,7 @@ pub fn init(
         1,
       ),
       #("getOwnPropertySymbols", ObjectNative(ObjectGetOwnPropertySymbols), 1),
+      #("groupBy", ObjectNative(value.ObjectGroupBy), 2),
     ])
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
@@ -78,6 +79,12 @@ pub fn init(
       ),
       #("toString", ObjectNative(ObjectPrototypeToString), 0),
       #("valueOf", ObjectNative(ObjectPrototypeValueOf), 0),
+      #("isPrototypeOf", ObjectNative(value.ObjectPrototypeIsPrototypeOf), 1),
+      #(
+        "toLocaleString",
+        ObjectNative(value.ObjectPrototypeToLocaleString),
+        0,
+      ),
     ])
   common.init_type_on(
     h,
@@ -129,6 +136,10 @@ pub fn dispatch(
     value.ObjectGetOwnPropertyDescriptors ->
       get_own_property_descriptors(args, state)
     value.ObjectGetOwnPropertySymbols -> get_own_property_symbols(args, state)
+    value.ObjectPrototypeIsPrototypeOf -> is_prototype_of(this, args, state)
+    value.ObjectPrototypeToLocaleString ->
+      object_to_locale_string(this, args, state)
+    value.ObjectGroupBy -> group_by(args, state)
   }
 }
 
@@ -2559,6 +2570,174 @@ pub fn get_own_property_symbols(
     _ -> {
       let #(heap, arr_ref) = common.alloc_array(state.heap, [], array_proto)
       #(State(..state, heap:), Ok(JsObject(arr_ref)))
+    }
+  }
+}
+
+/// ES2024 §20.1.3.3 Object.prototype.isPrototypeOf ( V )
+fn is_prototype_of(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let v = first_arg(args)
+  // Step 1: If V is not an Object, return false.
+  case v {
+    JsObject(v_ref) -> {
+      // Step 2: Let O be ? ToObject(this value).
+      case this {
+        JsObject(this_ref) ->
+          is_prototype_of_loop(state, v_ref, this_ref)
+        _ -> #(state, Ok(JsBool(False)))
+      }
+    }
+    _ -> #(state, Ok(JsBool(False)))
+  }
+}
+
+/// Walk the prototype chain of v_ref looking for this_ref.
+fn is_prototype_of_loop(
+  state: State,
+  v_ref: Ref,
+  this_ref: Ref,
+) -> #(State, Result(JsValue, JsValue)) {
+  case heap.read(state.heap, v_ref) {
+    Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
+      case proto_ref == this_ref {
+        True -> #(state, Ok(JsBool(True)))
+        False -> is_prototype_of_loop(state, proto_ref, this_ref)
+      }
+    _ -> #(state, Ok(JsBool(False)))
+  }
+}
+
+/// ES2024 §20.1.3.5 Object.prototype.toLocaleString ( )
+/// Default implementation: call this.toString().
+fn object_to_locale_string(
+  this: JsValue,
+  _args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this {
+    JsObject(ref) ->
+      case object.get_value(state, ref, "toString", this) {
+        Ok(#(to_string_fn, state)) ->
+          case helpers.is_callable(state.heap, to_string_fn) {
+            True ->
+              case frame.call(state, to_string_fn, this, []) {
+                Ok(#(result, state)) -> #(state, Ok(result))
+                Error(#(thrown, state)) -> #(state, Error(thrown))
+              }
+            False ->
+              frame.type_error(state, "toLocaleString: toString is not callable")
+          }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
+    _ ->
+      case frame.to_string(state, this) {
+        Ok(#(s, state)) -> #(state, Ok(JsString(s)))
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
+  }
+}
+
+/// ES2024 §22.1.2.4 Object.groupBy ( items, callbackfn )
+fn group_by(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let items = first_arg(args)
+  let callback = case args {
+    [_, cb, ..] -> cb
+    _ -> JsUndefined
+  }
+  case helpers.is_callable(state.heap, callback) {
+    False -> frame.type_error(state, "Object.groupBy callback is not callable")
+    True -> {
+      // Get elements from iterable
+      case items {
+        JsObject(ref) ->
+          case heap.read(state.heap, ref) {
+            Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+              let elems = extract_elements(elements, 0, length, [])
+              group_by_loop(state, elems, callback, 0, dict.new())
+            }
+            _ -> frame.type_error(state, "Object.groupBy: items is not iterable")
+          }
+        _ -> frame.type_error(state, "Object.groupBy: items is not iterable")
+      }
+    }
+  }
+}
+
+fn group_by_loop(
+  state: State,
+  items: List(JsValue),
+  callback: JsValue,
+  index: Int,
+  groups: dict.Dict(String, List(JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case items {
+    [] -> {
+      // Build result object from groups — allocate arrays for each group
+      let #(heap, props) =
+        list.fold(dict.to_list(groups), #(state.heap, []), fn(acc, entry) {
+          let #(h, ps) = acc
+          let #(key, values) = entry
+          let #(h, arr_ref) =
+            common.alloc_array(h, list.reverse(values), state.builtins.array.prototype)
+          #(h, [#(key, value.builtin_property(JsObject(arr_ref))), ..ps])
+        })
+      let #(heap, obj_ref) =
+        heap.alloc(
+          heap,
+          ObjectSlot(
+            kind: OrdinaryObject,
+            properties: dict.from_list(props),
+            elements: js_elements.new(),
+            prototype: None,
+            symbol_properties: dict.new(),
+            extensible: True,
+          ),
+        )
+      #(State(..state, heap:), Ok(JsObject(obj_ref)))
+    }
+    [item, ..rest] -> {
+      case
+        frame.call(
+          state,
+          callback,
+          JsUndefined,
+          [item, value.JsNumber(value.Finite(int.to_float(index)))],
+        )
+      {
+        Ok(#(key_val, state)) -> {
+          use key, state <- frame.try_to_string(state, key_val)
+          let current = case dict.get(groups, key) {
+            Ok(vs) -> vs
+            Error(Nil) -> []
+          }
+          let groups = dict.insert(groups, key, [item, ..current])
+          group_by_loop(state, rest, callback, index + 1, groups)
+        }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
+    }
+  }
+}
+
+/// Helper: extract array elements as a list.
+fn extract_elements(
+  elements: JsElements,
+  idx: Int,
+  length: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
+  case idx >= length {
+    True -> list.reverse(acc)
+    False -> {
+      let val = js_elements.get(elements, idx)
+      extract_elements(elements, idx + 1, length, [val, ..acc])
     }
   }
 }

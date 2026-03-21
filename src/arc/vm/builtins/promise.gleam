@@ -35,10 +35,18 @@ pub fn init(
     ])
   // §27.2.4.5 Promise.resolve(x)
   // §27.2.4.4 Promise.reject(r)
+  // §27.2.4.1 Promise.all(iterable)
+  // §27.2.4.2 Promise.allSettled(iterable)
+  // §27.2.4.3 Promise.any(iterable)
+  // §27.2.4.5 Promise.race(iterable)
   let #(h, static_methods) =
     common.alloc_call_methods(h, function_proto, [
       #("resolve", PromiseResolveStatic, 1),
       #("reject", PromiseRejectStatic, 1),
+      #("all", value.PromiseAllStatic, 1),
+      #("race", value.PromiseRaceStatic, 1),
+      #("allSettled", value.PromiseAllSettledStatic, 1),
+      #("any", value.PromiseAnyStatic, 1),
     ])
   common.init_type(
     h,

@@ -6,22 +6,29 @@ import arc/vm/object
 import arc/vm/value.{
   type JsValue, type Ref, type StringNativeFn, Finite, JsNull, JsNumber,
   JsObject, JsString, JsUndefined, NaN, ObjectSlot, RegExpObject,
-  StringFromCharCode, StringFromCodePoint, StringNative, StringPrototypeAt,
-  StringPrototypeCharAt, StringPrototypeCharCodeAt, StringPrototypeCodePointAt,
-  StringPrototypeConcat, StringPrototypeEndsWith, StringPrototypeIncludes,
-  StringPrototypeIndexOf, StringPrototypeLastIndexOf, StringPrototypeMatch,
+  StringFromCharCode, StringFromCodePoint, StringNative, StringPrototypeAnchor,
+  StringPrototypeAt, StringPrototypeBig, StringPrototypeBlink,
+  StringPrototypeBold, StringPrototypeCharAt, StringPrototypeCharCodeAt,
+  StringPrototypeCodePointAt, StringPrototypeConcat, StringPrototypeEndsWith,
+  StringPrototypeFixed, StringPrototypeFontcolor, StringPrototypeFontsize,
+  StringPrototypeIncludes, StringPrototypeIndexOf, StringPrototypeIsWellFormed,
+  StringPrototypeItalics, StringPrototypeLastIndexOf, StringPrototypeLink,
+  StringPrototypeLocaleCompare, StringPrototypeMatch, StringPrototypeMatchAll,
   StringPrototypeNormalize, StringPrototypePadEnd, StringPrototypePadStart,
   StringPrototypeRepeat, StringPrototypeReplace, StringPrototypeReplaceAll,
-  StringPrototypeSearch, StringPrototypeSlice, StringPrototypeSplit,
-  StringPrototypeStartsWith, StringPrototypeSubstring,
-  StringPrototypeToLocaleLowerCase, StringPrototypeToLocaleUpperCase,
-  StringPrototypeToLowerCase, StringPrototypeToString,
-  StringPrototypeToUpperCase, StringPrototypeTrim, StringPrototypeTrimEnd,
-  StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw,
+  StringPrototypeSearch, StringPrototypeSlice, StringPrototypeSmall,
+  StringPrototypeSplit, StringPrototypeStartsWith, StringPrototypeStrike,
+  StringPrototypeSub, StringPrototypeSubstr, StringPrototypeSubstring,
+  StringPrototypeSup, StringPrototypeToLocaleLowerCase,
+  StringPrototypeToLocaleUpperCase, StringPrototypeToLowerCase,
+  StringPrototypeToString, StringPrototypeToUpperCase, StringPrototypeToWellFormed,
+  StringPrototypeTrim, StringPrototypeTrimEnd, StringPrototypeTrimStart,
+  StringPrototypeValueOf, StringRaw,
 }
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/order
 import gleam/string
 
 /// Set up String constructor + String.prototype.
@@ -66,6 +73,25 @@ pub fn init(
       #("search", StringNative(StringPrototypeSearch), 1),
       #("replace", StringNative(StringPrototypeReplace), 2),
       #("replaceAll", StringNative(StringPrototypeReplaceAll), 2),
+      #("substr", StringNative(StringPrototypeSubstr), 2),
+      #("localeCompare", StringNative(StringPrototypeLocaleCompare), 1),
+      #("matchAll", StringNative(StringPrototypeMatchAll), 1),
+      #("isWellFormed", StringNative(StringPrototypeIsWellFormed), 0),
+      #("toWellFormed", StringNative(StringPrototypeToWellFormed), 0),
+      // Annex B HTML wrapper methods
+      #("anchor", StringNative(StringPrototypeAnchor), 1),
+      #("big", StringNative(StringPrototypeBig), 0),
+      #("blink", StringNative(StringPrototypeBlink), 0),
+      #("bold", StringNative(StringPrototypeBold), 0),
+      #("fixed", StringNative(StringPrototypeFixed), 0),
+      #("fontcolor", StringNative(StringPrototypeFontcolor), 1),
+      #("fontsize", StringNative(StringPrototypeFontsize), 1),
+      #("italics", StringNative(StringPrototypeItalics), 0),
+      #("link", StringNative(StringPrototypeLink), 1),
+      #("small", StringNative(StringPrototypeSmall), 0),
+      #("strike", StringNative(StringPrototypeStrike), 0),
+      #("sub", StringNative(StringPrototypeSub), 0),
+      #("sup", StringNative(StringPrototypeSup), 0),
     ])
   // Static methods on the String constructor
   let #(h, static_methods) =
@@ -125,6 +151,25 @@ pub fn dispatch(
     StringPrototypeSearch -> string_search(this, args, state)
     StringPrototypeReplace -> string_replace(this, args, state)
     StringPrototypeReplaceAll -> string_replace_all(this, args, state)
+    StringPrototypeSubstr -> string_substr(this, args, state)
+    StringPrototypeLocaleCompare -> string_locale_compare(this, args, state)
+    StringPrototypeMatchAll -> string_match_all(this, args, state)
+    StringPrototypeIsWellFormed -> string_is_well_formed(this, state)
+    StringPrototypeToWellFormed -> string_to_well_formed(this, state)
+    // Annex B HTML wrapper methods
+    StringPrototypeAnchor -> html_wrap_attr(this, args, state, "a", "name")
+    StringPrototypeBig -> html_wrap(this, state, "big")
+    StringPrototypeBlink -> html_wrap(this, state, "blink")
+    StringPrototypeBold -> html_wrap(this, state, "b")
+    StringPrototypeFixed -> html_wrap(this, state, "tt")
+    StringPrototypeFontcolor -> html_wrap_attr(this, args, state, "font", "color")
+    StringPrototypeFontsize -> html_wrap_attr(this, args, state, "font", "size")
+    StringPrototypeItalics -> html_wrap(this, state, "i")
+    StringPrototypeLink -> html_wrap_attr(this, args, state, "a", "href")
+    StringPrototypeSmall -> html_wrap(this, state, "small")
+    StringPrototypeStrike -> html_wrap(this, state, "strike")
+    StringPrototypeSub -> html_wrap(this, state, "sub")
+    StringPrototypeSup -> html_wrap(this, state, "sup")
     // Static methods
     StringRaw -> string_raw(args, state)
     StringFromCharCode -> string_from_char_code(args, state)
@@ -1653,6 +1698,182 @@ fn to_number_for_code_point(val: JsValue) -> Result(value.JsNum, Nil) {
 // ============================================================================
 // Internal helpers
 // ============================================================================
+
+/// Annex B §B.2.2.2 String.prototype.substr ( start, length )
+fn string_substr(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let size = string.length(s)
+      let start = case helpers.to_number_int(helpers.first_arg(args)) {
+        Some(n) if n < 0 -> int.max(size + n, 0)
+        Some(n) -> n
+        None -> 0
+      }
+      let len = case args {
+        [_, length_arg, ..] ->
+          case helpers.to_number_int(length_arg) {
+            Some(n) -> int.max(0, n)
+            None -> size
+          }
+        _ -> size
+      }
+      let end = int.min(start + len, size)
+      case start >= size || len <= 0 {
+        True -> #(state, Ok(JsString("")))
+        False -> #(state, Ok(JsString(string.slice(s, start, end - start))))
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 §22.1.3.13 String.prototype.localeCompare ( that )
+/// Simplified — uses byte comparison (no locale support).
+fn string_locale_compare(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      use that, state <- frame.try_to_string(state, helpers.first_arg(args))
+      let result = string.compare(s, that)
+      let n = case result {
+        order.Lt -> -1.0
+        order.Eq -> 0.0
+        order.Gt -> 1.0
+      }
+      #(state, Ok(JsNumber(Finite(n))))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 §22.1.3.14 String.prototype.matchAll ( regexp )
+/// Simplified — creates array of matches (not a proper iterator).
+fn string_match_all(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(_s, state)) -> {
+      let regexp_arg = helpers.first_arg(args)
+      // Delegate to Symbol.matchAll on the regexp if present
+      case regexp_arg {
+        JsObject(ref) ->
+          case
+            object.get_symbol_value(
+              state,
+              ref,
+              value.symbol_match_all,
+              regexp_arg,
+            )
+          {
+            Ok(#(match_all_fn, state)) ->
+              case helpers.is_callable(state.heap, match_all_fn) {
+                True ->
+                  case frame.call(state, match_all_fn, regexp_arg, [this]) {
+                    Ok(#(result, state)) -> #(state, Ok(result))
+                    Error(#(thrown, state)) -> #(state, Error(thrown))
+                  }
+                False ->
+                  frame.type_error(
+                    state,
+                    "matchAll called with non-global RegExp",
+                  )
+              }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        _ -> frame.type_error(state, "matchAll requires a RegExp argument")
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 §22.1.3.12 String.prototype.isWellFormed ( )
+fn string_is_well_formed(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(_s, state)) -> {
+      // Gleam strings are valid UTF-8 so always well-formed
+      #(state, Ok(value.JsBool(True)))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ES2024 §22.1.3.33 String.prototype.toWellFormed ( )
+fn string_to_well_formed(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      // Gleam strings are valid UTF-8 — already well-formed
+      #(state, Ok(JsString(s)))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// Annex B §B.2.2.x — HTML wrapper with no attribute: <tag>str</tag>
+fn html_wrap(
+  this: JsValue,
+  state: State,
+  tag: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) ->
+      #(state, Ok(JsString("<" <> tag <> ">" <> s <> "</" <> tag <> ">")))
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// Annex B §B.2.2.x — HTML wrapper with attribute: <tag attr="val">str</tag>
+fn html_wrap_attr(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+  tag: String,
+  attr: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      use attr_val, state <- frame.try_to_string(
+        state,
+        helpers.first_arg(args),
+      )
+      // Escape quotes in attribute value per spec
+      let escaped =
+        string.replace(attr_val, "\"", "&quot;")
+      #(
+        state,
+        Ok(JsString(
+          "<"
+          <> tag
+          <> " "
+          <> attr
+          <> "=\""
+          <> escaped
+          <> "\">"
+          <> s
+          <> "</"
+          <> tag
+          <> ">",
+        )),
+      )
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
 
 /// Extract the string value from `this`. Primitive strings pass through
 /// directly (fast path). For other values, first performs RequireObjectCoercible
