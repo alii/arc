@@ -6674,10 +6674,10 @@ fn exec_binop(
     }
 
     // Comparison
-    StrictEq -> Ok(JsBool(strict_equal(left, right)))
-    StrictNotEq -> Ok(JsBool(!strict_equal(left, right)))
-    Eq -> Ok(JsBool(abstract_equal(left, right)))
-    NotEq -> Ok(JsBool(!abstract_equal(left, right)))
+    StrictEq -> Ok(JsBool(value.strict_equal(left, right)))
+    StrictNotEq -> Ok(JsBool(!value.strict_equal(left, right)))
+    Eq -> Ok(JsBool(value.abstract_equal(left, right)))
+    NotEq -> Ok(JsBool(!value.abstract_equal(left, right)))
 
     Lt -> {
       use ord <- compare_values(left, right)
@@ -6707,15 +6707,15 @@ fn exec_binop(
 fn exec_unaryop(kind: UnaryOpKind, operand: JsValue) -> Result(JsValue, String) {
   case kind {
     Neg -> {
-      use n <- result.map(to_number(operand))
+      use n <- result.map(value.to_number(operand))
       JsNumber(num_negate(n))
     }
     Pos -> {
-      use n <- result.map(to_number(operand))
+      use n <- result.map(value.to_number(operand))
       JsNumber(n)
     }
     BitNot -> {
-      use n <- result.map(to_number(operand))
+      use n <- result.map(value.to_number(operand))
       JsNumber(Finite(int.to_float(int.bitwise_not(num_to_int32(n)))))
     }
     LogicalNot -> Ok(JsBool(!value.is_truthy(operand)))
@@ -6839,8 +6839,8 @@ fn num_binop(
   right: JsValue,
   op: fn(JsNum, JsNum) -> JsNum,
 ) -> Result(JsValue, String) {
-  use a <- result.try(to_number(left))
-  use b <- result.map(to_number(right))
+  use a <- result.try(value.to_number(left))
+  use b <- result.map(value.to_number(right))
   JsNumber(op(a, b))
 }
 
@@ -6850,34 +6850,9 @@ fn bitwise_binop(
   right: JsValue,
   op: fn(Int, Int) -> Int,
 ) -> Result(JsValue, String) {
-  use a <- result.try(to_number(left))
-  use b <- result.map(to_number(right))
+  use a <- result.try(value.to_number(left))
+  use b <- result.map(value.to_number(right))
   JsNumber(Finite(int.to_float(op(num_to_int32(a), num_to_int32(b)))))
-}
-
-/// JS ToNumber: https://tc39.es/ecma262/#sec-tonumber
-fn to_number(val: JsValue) -> Result(JsNum, String) {
-  case val {
-    JsNumber(n) -> Ok(n)
-    JsUndefined -> Ok(NaN)
-    JsNull -> Ok(Finite(0.0))
-    JsBool(True) -> Ok(Finite(1.0))
-    JsBool(False) -> Ok(Finite(0.0))
-    JsString("") -> Ok(Finite(0.0))
-    JsString(s) ->
-      case float.parse(s) {
-        Ok(n) -> Ok(Finite(n))
-        Error(_) ->
-          case int.parse(s) {
-            Ok(n) -> Ok(Finite(int.to_float(n)))
-            Error(_) -> Ok(NaN)
-          }
-      }
-    JsBigInt(_) -> Error("Cannot convert BigInt to number")
-    JsSymbol(_) -> Error("Cannot convert Symbol to number")
-    JsObject(_) -> Ok(NaN)
-    JsUninitialized -> Error("Cannot access before initialization")
-  }
 }
 
 // ============================================================================
@@ -7053,7 +7028,7 @@ fn binop_add_with_to_primitive(
 
 /// Convert a primitive JsValue to JsNum for arithmetic (ToNumber lite).
 fn to_number_for_binop(val: JsValue) -> JsNum {
-  case to_number(val) {
+  case value.to_number(val) {
     Ok(n) -> n
     Error(_) -> NaN
   }
@@ -7156,45 +7131,6 @@ fn instanceof_walk(heap: Heap, obj_ref: Ref, target_proto: Ref) -> Bool {
   }
 }
 
-/// JS === (strict equality). Delegates to value.strict_equal.
-fn strict_equal(left: JsValue, right: JsValue) -> Bool {
-  value.strict_equal(left, right)
-}
-
-/// JS == (abstract equality, simplified)
-fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
-  case left, right {
-    // Same type — use strict equality
-    JsNull, JsNull
-    | JsUndefined, JsUndefined
-    | JsNull, JsUndefined
-    | JsUndefined, JsNull
-    -> True
-    JsNumber(_), JsNumber(_)
-    | JsBool(_), JsBool(_)
-    | JsString(_), JsString(_)
-    | JsObject(_), JsObject(_)
-    | JsSymbol(_), JsSymbol(_)
-    | JsBigInt(_), JsBigInt(_)
-    -> strict_equal(left, right)
-    // Number vs String — coerce string to number
-    JsNumber(_), JsString(s) ->
-      case to_number(JsString(s)) {
-        Ok(n) -> strict_equal(left, JsNumber(n))
-        Error(_) -> False
-      }
-    JsString(_), JsNumber(_) -> abstract_equal(right, left)
-    // Bool vs anything — coerce bool to number
-    JsBool(_), _ ->
-      case to_number(left) {
-        Ok(n) -> abstract_equal(JsNumber(n), right)
-        Error(_) -> False
-      }
-    _, JsBool(_) -> abstract_equal(right, left)
-    _, _ -> False
-  }
-}
-
 /// Comparison order for relational ops.
 type CompareOrd {
   LtOrd
@@ -7218,8 +7154,8 @@ fn compare_values(
       Ok(JsBool(pred(ord)))
     }
     _, _ -> {
-      use a <- result.try(to_number(left))
-      use b <- result.try(to_number(right))
+      use a <- result.try(value.to_number(left))
+      use b <- result.try(value.to_number(right))
       case a, b {
         NaN, _ | _, NaN -> Ok(JsBool(False))
         _, _ -> Ok(JsBool(pred(compare_nums(a, b))))

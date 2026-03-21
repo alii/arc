@@ -1337,6 +1337,65 @@ pub fn strict_equal(left: JsValue, right: JsValue) -> Bool {
   }
 }
 
+pub fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
+  case left, right {
+    // Same type — use strict equality
+    JsNull, JsNull
+    | JsUndefined, JsUndefined
+    | JsNull, JsUndefined
+    | JsUndefined, JsNull
+    -> True
+    JsNumber(_), JsNumber(_)
+    | JsBool(_), JsBool(_)
+    | JsString(_), JsString(_)
+    | JsObject(_), JsObject(_)
+    | JsSymbol(_), JsSymbol(_)
+    | JsBigInt(_), JsBigInt(_)
+    -> strict_equal(left, right)
+    // Number vs String — coerce string to number
+    JsNumber(_), JsString(s) ->
+      case to_number(JsString(s)) {
+        Ok(n) -> strict_equal(left, JsNumber(n))
+        Error(_) -> False
+      }
+    JsString(_), JsNumber(_) -> abstract_equal(right, left)
+    // Bool vs anything — coerce bool to number
+    JsBool(_), _ ->
+      case to_number(left) {
+        Ok(n) -> abstract_equal(JsNumber(n), right)
+        Error(_) -> False
+      }
+    _, JsBool(_) -> abstract_equal(right, left)
+    _, _ -> False
+  }
+}
+
+pub fn to_number(val: JsValue) -> Result(JsNum, String) {
+  case val {
+    JsNumber(n) -> Ok(n)
+    JsUndefined -> Ok(NaN)
+    JsNull -> Ok(Finite(0.0))
+    JsBool(True) -> Ok(Finite(1.0))
+    JsBool(False) -> Ok(Finite(0.0))
+    JsString("") -> Ok(Finite(0.0))
+    JsString(s) ->
+      case float.parse(s) {
+        Ok(n) -> Ok(Finite(n))
+        Error(_) ->
+          case int.parse(s) {
+            Ok(n) -> Ok(Finite(int.to_float(n)))
+            Error(_) -> Ok(NaN)
+          }
+      }
+    JsBigInt(_) -> Error("Cannot convert BigInt to number")
+    JsSymbol(_) -> Error("Cannot convert Symbol to number")
+    JsObject(_) -> Ok(NaN)
+    JsUninitialized -> Error("Cannot access before initialization")
+  }
+}
+
+/// JS ToNumber: https://tc39.es/ecma262/#sec-tonumber
+/// JS == (abstract equality, simplified)
 /// SameValueZero: like ===, but NaN equals NaN. ±0 are still equal.
 /// Used by Array.prototype.includes, Map/Set key equality.
 pub fn same_value_zero(left: JsValue, right: JsValue) -> Bool {
