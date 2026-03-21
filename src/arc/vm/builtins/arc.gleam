@@ -270,8 +270,27 @@ pub fn receive_(
 /// blocking `Arc.receive()` and `receiveAsync` share the same mailbox
 /// without any in-memory buffer.
 ///
-/// Requires the event loop to be running (run_with_event_loop or Arc.spawn).
+/// Requires the event loop to be running (--event-loop flag or Arc.spawn).
+/// Throws TypeError if the event loop is not enabled.
 pub fn receive_async(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case state.event_loop {
+    False -> {
+      let #(heap, err) =
+        common.make_type_error(
+          state.heap,
+          state.builtins,
+          "Arc.receiveAsync() requires the event loop (--event-loop flag)",
+        )
+      #(State(..state, heap:), Error(err))
+    }
+    True -> receive_async_inner(args, state)
+  }
+}
+
+fn receive_async_inner(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
@@ -310,8 +329,27 @@ pub fn receive_async(
 /// the promise's fulfill handler — so when the timer fires, the event loop
 /// resolves the promise, which schedules a reaction job that calls `fn`.
 ///
-/// Requires the event loop to be running (run_with_event_loop or Arc.spawn).
+/// Requires the event loop to be running (--event-loop flag or Arc.spawn).
+/// Throws TypeError if the event loop is not enabled.
 pub fn set_timeout(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case state.event_loop {
+    False -> {
+      let #(heap, err) =
+        common.make_type_error(
+          state.heap,
+          state.builtins,
+          "Arc.setTimeout() requires the event loop (--event-loop flag)",
+        )
+      #(State(..state, heap:), Error(err))
+    }
+    True -> set_timeout_inner(args, state)
+  }
+}
+
+fn set_timeout_inner(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {

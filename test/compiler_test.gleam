@@ -35,7 +35,7 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          case vm.run_and_drain(template, h, b, global_object) {
+          case vm.run(template, h, b, global_object, False) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
@@ -60,7 +60,7 @@ fn run_js_drain(source: String) -> Result(vm.Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          case vm.run_and_drain(template, h, b, global_object) {
+          case vm.run(template, h, b, global_object, False) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }

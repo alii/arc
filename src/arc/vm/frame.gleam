@@ -96,7 +96,7 @@ pub type State {
     /// CreateArguments opcode to build the arguments object.
     call_args: List(JsValue),
     /// Promise microtask job queue. Jobs enqueued during promise operations,
-    /// drained after script completes (or by run_and_drain).
+    /// drained after script completes.
     job_queue: List(value.Job),
     /// PromiseSlot data_refs created by `Arc.receiveAsync()` waiting for a
     /// `UserMessage` to arrive. FIFO — first caller gets first message. When
@@ -128,6 +128,9 @@ pub type State {
     /// Current call stack depth. Incremented on function entry, decremented on return.
     /// Throws RangeError when exceeding max_call_depth.
     call_depth: Int,
+    /// Whether the event loop is active. When False, APIs that require the
+    /// event loop (Arc.receiveAsync, Arc.setTimeout) throw a TypeError.
+    event_loop: Bool,
   )
 }
 

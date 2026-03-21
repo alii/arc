@@ -18,9 +18,9 @@ declare module 'arc' {
 	/**
 	 * Spawn a new process
 	 *
-	 * This function will copy the heap with copy-on-write semantics
-	 * which means it's roughly still fast enough considering we're
-	 * implementing a mutable lanugage in an immutable one.
+	 * This function will copy the heap with copy-on-write semantics which means
+	 * it's roughly still fast enough considering we're implementing a mutable
+	 * lanugage in an immutable one.
 	 *
 	 * @param fn The closure to evaluate on the new process
 	 */
@@ -29,12 +29,31 @@ declare module 'arc' {
 	/**
 	 * Receive a message from the process mailbox
 	 *
-	 * This API will probably change in the future to
-	 * support patterns
+	 * This API will probably change in the future to support patterns
 	 *
 	 * @param timeout The timeout to wait for
 	 */
 	export function receive<T>(timeout?: number): T;
+
+	/**
+	 * Receive a message from the process mailbox, returning a promise that
+	 * resolves when a message is received.
+	 *
+	 * This API will probably change in the future to support patterns
+	 *
+	 * @param timeout The timeout to wait for. Rejects the promise if no message
+	 * is received within the timeout.
+	 */
+	export function receiveAsync<T>(timeout?: number): Promise<T>;
+
+	/**
+	 * Schedule a callback to be executed after at-least {@link ms} milliseconds
+	 * have passed.
+	 *
+	 * @param cb The callback
+	 * @param ms Minimum amount of milliseconds before executiong
+	 */
+	export function setTimeout(cb: () => void, ms: number): void;
 
 	/**
 	 * Get the current process id
@@ -53,8 +72,8 @@ declare module 'arc' {
 	/**
 	 * Block the process until at-least {@link ms} has passed.
 	 *
-	 * BEAM will idle the process until the time is up, so this
-	 * function uses zero cpu.
+	 * BEAM will idle the process until the time is up, so this function uses
+	 * zero cpu.
 	 *
 	 * @param ms Millseconds to sleep for
 	 */

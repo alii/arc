@@ -143,6 +143,7 @@ fn new_state(
   const_lexical_globals: set.Set(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
+  event_loop: Bool,
 ) -> State {
   State(
     stack: [],
@@ -171,6 +172,7 @@ fn new_state(
     js_to_string: js_to_string_callback,
     call_fn: call_fn_callback,
     call_depth: 0,
+    event_loop:,
   )
 }
 
@@ -180,6 +182,7 @@ fn init_state(
   builtins: Builtins,
   global_object: Ref,
   is_module: Bool,
+  event_loop: Bool,
 ) -> State {
   let locals = array.repeat(JsUndefined, func.local_count)
   // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
@@ -200,80 +203,32 @@ fn init_state(
       set.new(),
       dict.new(),
       dict.new(),
+      event_loop,
     ),
     this_binding:,
   )
 }
 
-/// Run a function template with a globalThis object, then drain the promise job queue.
-/// Use this when you need promise reactions to execute (e.g., .then callbacks).
-pub fn run_and_drain(
+/// Run a function template with a globalThis object, then drain jobs.
+/// When event_loop is True, runs the mailbox-backed event loop (blocking
+/// until `outstanding` hits zero); otherwise just drains the microtask queue.
+pub fn run(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
+  event_loop: Bool,
 ) -> Result(Completion, VmError) {
   let result =
-    init_state(func, heap, builtins, global_object, False) |> execute_inner()
+    init_state(func, heap, builtins, global_object, False, event_loop)
+    |> execute_inner()
   use #(completion, final_state) <- result.try(result)
-  let drained_state = drain_jobs(final_state)
+  let drained_state = finish(final_state)
   case completion {
     NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
     ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
     YieldCompletion(_, _) ->
       panic as "YieldCompletion should not appear at script level"
-  }
-}
-
-/// Like `run_and_drain`, but runs the mailbox-backed event loop after the
-/// script completes. Blocks on the BEAM mailbox until `outstanding` hits
-/// zero, so `Arc.receiveAsync()` / `Arc.setTimeout()` keep the process
-/// alive. Opt-in — use `run_and_drain` for the microtask-only path.
-pub fn run_with_event_loop(
-  func: FuncTemplate,
-  heap: Heap,
-  builtins: Builtins,
-  global_object: Ref,
-) -> Result(Completion, VmError) {
-  let result =
-    init_state(func, heap, builtins, global_object, False) |> execute_inner()
-  use #(completion, final_state) <- result.try(result)
-  let drained_state = run_event_loop(final_state)
-  case completion {
-    NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
-    ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
-    YieldCompletion(_, _) ->
-      panic as "YieldCompletion should not appear at script level"
-  }
-}
-
-/// Run a module template with a globalThis object, then drain jobs.
-/// Module `this` is undefined per ES §16.2.1.5.2.
-pub fn run_module(
-  func: FuncTemplate,
-  heap: Heap,
-  builtins: Builtins,
-  global_object: Ref,
-) -> ModuleResult {
-  let state = init_state(func, heap, builtins, global_object, True)
-  let result = execute_inner(state)
-  case result {
-    Error(vm_err) -> ModuleError(error: vm_err)
-    Ok(#(completion, final_state)) -> {
-      let drained_state = drain_jobs(final_state)
-      case completion {
-        NormalCompletion(val, _) ->
-          ModuleOk(
-            value: val,
-            heap: drained_state.heap,
-            locals: drained_state.locals,
-          )
-        ThrowCompletion(val, _) ->
-          ModuleThrow(value: val, heap: drained_state.heap)
-        YieldCompletion(_, _) ->
-          panic as "YieldCompletion should not appear at module level"
-      }
-    }
   }
 }
 
@@ -300,6 +255,7 @@ pub fn run_module_with_imports(
         set.new(),
         dict.new(),
         dict.new(),
+        event_loop,
       ),
       this_binding: JsUndefined,
     )
@@ -307,10 +263,7 @@ pub fn run_module_with_imports(
   case result {
     Error(vm_err) -> ModuleError(error: vm_err)
     Ok(#(completion, final_state)) -> {
-      let drained_state = case event_loop {
-        True -> run_event_loop(final_state)
-        False -> drain_jobs(final_state)
-      }
+      let drained_state = finish(final_state)
       case completion {
         NormalCompletion(val, _) ->
           ModuleOk(
@@ -341,7 +294,7 @@ pub type ReplEnv {
   )
 }
 
-/// Like run_and_drain, but persists globals across calls.
+/// Like vm.run, but persists globals across calls.
 /// Used by the REPL so var declarations and function definitions survive.
 pub fn run_and_drain_repl(
   func: FuncTemplate,
@@ -362,6 +315,7 @@ pub fn run_and_drain_repl(
         env.const_lexical_globals,
         env.symbol_descriptions,
         env.symbol_registry,
+        False,
       ),
       realms: env.realms,
     )
@@ -4350,6 +4304,7 @@ fn arc_spawn(
             state.const_lexical_globals,
             state.symbol_descriptions,
             state.symbol_registry,
+            state.event_loop,
           )
         })
       Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
@@ -4364,6 +4319,7 @@ fn arc_spawn(
             state.const_lexical_globals,
             state.symbol_descriptions,
             state.symbol_registry,
+            state.event_loop,
           )
         })
       _ -> Error("Arc.spawn: argument is not a function")
@@ -4398,6 +4354,7 @@ fn run_spawned_closure(
   const_lexical_globals: set.Set(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
+  event_loop: Bool,
 ) -> Nil {
   let env_values = case heap.read(heap, env_ref) {
     Some(value.EnvSlot(slots)) -> slots
@@ -4422,11 +4379,12 @@ fn run_spawned_closure(
       const_lexical_globals,
       symbol_descriptions,
       symbol_registry,
+      event_loop,
     )
 
   case execute_inner(state) {
     Ok(#(_, final_state)) -> {
-      let _ = run_event_loop(final_state)
+      let _ = finish(final_state)
       Nil
     }
     Error(_) -> Nil
@@ -4446,6 +4404,7 @@ fn run_spawned_native(
   const_lexical_globals: set.Set(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
+  event_loop: Bool,
 ) -> Nil {
   let locals = array.repeat(JsUndefined, caller_func.local_count)
   let state =
@@ -4459,11 +4418,12 @@ fn run_spawned_native(
       const_lexical_globals,
       symbol_descriptions,
       symbol_registry,
+      event_loop,
     )
 
   case call_native(state, native, [], state.stack, JsUndefined) {
     Ok(final_state) -> {
-      let _ = run_event_loop(final_state)
+      let _ = finish(final_state)
       Nil
     }
     Error(_) -> Nil
@@ -4566,6 +4526,7 @@ fn eval_script_native(
                     const_lexical_globals,
                     symbol_descriptions,
                     symbol_registry,
+                    False,
                   ),
                   job_queue: state.job_queue,
                   realms: state.realms,
@@ -6021,6 +5982,15 @@ fn create_iterator_result(
 // ============================================================================
 // Promise job queue draining
 // ============================================================================
+
+/// Drain jobs, using the event loop if enabled on the state, otherwise
+/// just flushing the microtask queue.
+fn finish(state: State) -> State {
+  case state.event_loop {
+    True -> run_event_loop(state)
+    False -> drain_jobs(state)
+  }
+}
 
 /// Drain all jobs in the job queue, processing any new jobs that get enqueued
 /// during execution. Loops until the queue is empty.

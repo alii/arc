@@ -514,11 +514,7 @@ fn run_script_file(source: String, event_loop: Bool) -> Nil {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          let run = case event_loop {
-            True -> vm.run_with_event_loop
-            False -> vm.run_and_drain
-          }
-          case run(template, h, b, global_object) {
+          case vm.run(template, h, b, global_object, event_loop) {
             Ok(vm.NormalCompletion(_, _)) -> Nil
             Ok(vm.ThrowCompletion(val, new_heap)) ->
               io.println("Uncaught exception: " <> inspect(new_heap, val))
