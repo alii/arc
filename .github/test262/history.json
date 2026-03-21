@@ -61,5 +61,14 @@
     "tested": 52875,
     "total": 52875,
     "percent": 30.16
+  },
+  {
+    "date": "2026-03-21",
+    "pass": 15969,
+    "fail": 37113,
+    "skip": 0,
+    "tested": 53082,
+    "total": 53082,
+    "percent": 30.08
   }
 ]
