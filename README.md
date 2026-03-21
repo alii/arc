@@ -24,3 +24,7 @@ TEST262=1 gleam test
 ```
 
 ![test262 conformance chart](.github/test262/conformance.png)
+
+#### A note on unhandled promise rejections:
+
+Arc implements `HostPromiseRejectionTracker` from the ES spec. Unhandled rejections are reported to stderr after each microtask flush. Currently they are logged as warnings but are not fatal (unlike Node.js v15+ / QuickJS which exit on the first one). This will almost certainly change in the future.

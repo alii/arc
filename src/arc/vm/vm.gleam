@@ -6011,7 +6011,7 @@ fn drain_jobs(state: State) -> State {
   case state.job_queue {
     [] -> {
       report_unhandled_rejections(state)
-      state
+      State(..state, unhandled_rejections: [])
     }
     [job, ..rest] -> {
       let state = State(..state, job_queue: rest)
