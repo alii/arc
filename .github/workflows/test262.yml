@@ -68,7 +68,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .github/test262/history.json .github/test262/conformance.png
+          git add .github/test262/history.json .github/test262/conformance.png .github/test262/conformance-dark.png
           # Only commit if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit"

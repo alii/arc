@@ -18,6 +18,7 @@ from datetime import datetime
 
 HISTORY_FILE = os.path.join(os.path.dirname(__file__), "..", "test262", "history.json")
 CHART_FILE = os.path.join(os.path.dirname(__file__), "..", "test262", "conformance.png")
+CHART_FILE_DARK = os.path.join(os.path.dirname(__file__), "..", "test262", "conformance-dark.png")
 
 
 def load_history():
@@ -74,49 +75,70 @@ def generate_chart(history):
     dates = [datetime.strptime(h["date"], "%Y-%m-%d") for h in history]
     percents = [h["percent"] for h in history]
     passes = [h["pass"] for h in history]
-
-    fig, ax1 = plt.subplots(figsize=(10, 5))
-
-    color_pct = "#2563eb"
-    ax1.set_xlabel("Date")
-    ax1.set_ylabel("Conformance %", color=color_pct)
-    ax1.plot(dates, percents, color=color_pct, linewidth=2, marker="o" if len(dates) < 30 else None, markersize=5)
-    ax1.tick_params(axis="y", labelcolor=color_pct)
-    ax1.set_ylim(bottom=0)
-
-    # Add pass count on right axis
-    color_pass = "#16a34a"
-    ax2 = ax1.twinx()
-    ax2.set_ylabel("Tests passing", color=color_pass)
-    ax2.plot(dates, passes, color=color_pass, linewidth=1, linestyle="--", alpha=0.7)
-    ax2.tick_params(axis="y", labelcolor=color_pass)
-    ax2.set_ylim(bottom=0)
-
-    # Format x-axis dates
-    if len(dates) == 1:
-        # Single point: center it with some padding
-        from datetime import timedelta
-        ax1.set_xlim(dates[0] - timedelta(days=3), dates[0] + timedelta(days=3))
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    else:
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-        ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
-        fig.autofmt_xdate()
-
-    # Title with latest stats
     latest = history[-1]
-    ax1.set_title(
-        f"Arc test262 Conformance: {latest['percent']}% "
-        f"({latest['pass']:,} / {latest['tested']:,} tests)",
-        fontsize=14,
-        fontweight="bold",
-    )
 
-    ax1.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(CHART_FILE, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Chart saved to {CHART_FILE}")
+    def render(out_file, dark):
+        if dark:
+            fg = "#e5e7eb"
+            bg = "#0d1117"
+            color_pct = "#60a5fa"
+            color_pass = "#4ade80"
+            grid_alpha = 0.15
+        else:
+            fg = "black"
+            bg = "white"
+            color_pct = "#2563eb"
+            color_pass = "#16a34a"
+            grid_alpha = 0.3
+
+        fig, ax1 = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor(bg)
+        ax1.set_facecolor(bg)
+
+        ax1.set_xlabel("Date", color=fg)
+        ax1.set_ylabel("Conformance %", color=color_pct)
+        ax1.plot(dates, percents, color=color_pct, linewidth=2, marker="o" if len(dates) < 30 else None, markersize=5)
+        ax1.tick_params(axis="y", labelcolor=color_pct)
+        ax1.tick_params(axis="x", colors=fg)
+        ax1.set_ylim(bottom=0)
+        for spine in ax1.spines.values():
+            spine.set_color(fg)
+
+        # Add pass count on right axis
+        ax2 = ax1.twinx()
+        ax2.set_ylabel("Tests passing", color=color_pass)
+        ax2.plot(dates, passes, color=color_pass, linewidth=1, linestyle="--", alpha=0.7)
+        ax2.tick_params(axis="y", labelcolor=color_pass)
+        ax2.set_ylim(bottom=0)
+        for spine in ax2.spines.values():
+            spine.set_color(fg)
+
+        # Format x-axis dates
+        if len(dates) == 1:
+            from datetime import timedelta
+            ax1.set_xlim(dates[0] - timedelta(days=3), dates[0] + timedelta(days=3))
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        else:
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+            ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+            fig.autofmt_xdate()
+
+        ax1.set_title(
+            f"Arc test262 Conformance: {latest['percent']}% "
+            f"({latest['pass']:,} / {latest['tested']:,} tests)",
+            fontsize=14,
+            fontweight="bold",
+            color=fg,
+        )
+
+        ax1.grid(True, alpha=grid_alpha, color=fg)
+        fig.tight_layout()
+        fig.savefig(out_file, dpi=150, bbox_inches="tight", facecolor=bg)
+        plt.close(fig)
+        print(f"Chart saved to {out_file}")
+
+    render(CHART_FILE, dark=False)
+    render(CHART_FILE_DARK, dark=True)
 
 
 def main():

@@ -5,7 +5,10 @@
 
 (Highly experimental) JavaScript on the BEAM
 
-![js](./.github/js.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./.github/js.png">
+  <img alt="js" src="./.github/js-light.png">
+</picture>
 
 ## Development
 
@@ -26,7 +29,10 @@ TEST262_EXEC=1 RESULTS_FILE=results.json gleam test
 TEST262=1 gleam test
 ```
 
-![test262 conformance chart](.github/test262/conformance.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/test262/conformance-dark.png">
+  <img alt="test262 conformance chart" src=".github/test262/conformance.png">
+</picture>
 
 #### A note on unhandled promise rejections:
 
