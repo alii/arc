@@ -304,11 +304,8 @@ pub fn array_join(
 /// join_elements — implements step 7 of Array.prototype.join (§23.1.3.18).
 /// Iterates k from 0 to len-1, building the result string R.
 ///
-/// TODO(Deviation): reads elements directly from JsElements instead of calling
-/// [[Get]](O, ToString(k)). This skips prototype chain lookups for missing
-/// indices — holes return undefined directly rather than walking the prototype.
-/// For generic array-likes passed via .call/.apply, the spec's Get would
-/// invoke getters on the prototype chain.
+/// Elements are pre-gathered by require_array (which calls getters and walks
+/// the prototype chain), so reading from JsElements here is spec-equivalent.
 fn join_elements(
   elements: JsElements,
   idx: Int,
@@ -468,10 +465,13 @@ fn require_array(
     // §7.1.18: Object → return argument unchanged.
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        // Fast path: real array — length from [[ArrayLength]], elements
-        // already in the right shape. No need for LengthOfArrayLike.
-        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) ->
+        // Real array — length from [[ArrayLength]]. Check properties dict
+        // for accessor overrides on numeric indices (from Object.defineProperty).
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, properties:, ..)) -> {
+          let #(state, elements) =
+            apply_property_overrides(state, this, properties, elements, length)
           cont(ref, length, elements, state)
+        }
         // Arguments exotic object (§10.4.4): length stored in kind,
         // indexed values already in elements.
         Some(ObjectSlot(kind: value.ArgumentsObject(length:), elements:, ..)) ->
@@ -485,8 +485,16 @@ fn require_array(
         // Generic object: LengthOfArrayLike (§7.3.18) — Get(obj, "length"),
         // then ToLength (§7.1.17), then gather indexed properties.
         Some(ObjectSlot(properties:, elements:, ..)) -> {
-          let length = read_length_property(properties)
-          let elements = gather_indexed(properties, elements, length)
+          let length = to_length_from_properties(state, ref, properties)
+          let #(state, elements) =
+            gather_indexed_stateful(
+              state,
+              ref,
+              this,
+              elements,
+              properties,
+              length,
+            )
           cont(ref, length, elements, state)
         }
         // Non-object heap slot under a ref shouldn't happen, but fall through.
@@ -579,96 +587,251 @@ fn surrogate_to_string(code: Int) -> String {
 ///   1. Assert: Type(obj) is Object.
 ///   2. Return ? ToLength(? Get(obj, "length")).
 ///
+/// Uses object.get_value to support accessor-valued "length" and prototype
+/// chain lookups.
+///
 /// ToLength (§7.1.17):
 ///   1. Let len be ? ToIntegerOrInfinity(argument).
 ///   2. If len ≤ 0, return +0𝔽.
 ///   3. Return 𝔽(min(len, 2^53 - 1)).
-///
-/// This is a pure (no-State) approximation: it reads "length" from the
-/// properties dict directly rather than going through the full [[Get]]
-/// path, and uses helpers.to_number_int as a simplified ToIntegerOrInfinity.
-///
-/// TODO(Deviation): Does NOT do full ToPrimitive/ToNumber on object-valued length
-/// — that would require VM re-entry (State threading). Returns 0 for objects.
-/// TODO(Deviation): Accessor-valued "length" (get/set) would need State to invoke
-/// the getter. Returns 0 for now.
-fn read_length_property(properties: dict.Dict(String, Property)) -> Int {
-  // §7.3.18 step 2: Get(obj, "length")
+fn to_length_from_properties(
+  state: State,
+  ref: value.Ref,
+  properties: dict.Dict(String, Property),
+) -> Int {
+  // Fast path: own data property
   case dict.get(properties, "length") {
-    Ok(DataProperty(value: len_val, ..)) ->
-      // §7.1.17 ToLength: min(max(ToIntegerOrInfinity(v), 0), 2^53-1)
-      case helpers.to_number_int(len_val) {
-        Some(n) if n > 0 -> int.min(n, max_safe_integer)
-        _ -> 0
+    Ok(DataProperty(value: len_val, ..)) -> to_length(len_val)
+    // Accessor or missing: use full [[Get]] which handles getters + prototype chain
+    _ ->
+      case object.get_value(state, ref, "length", JsObject(ref)) {
+        Ok(#(len_val, _state)) -> to_length(len_val)
+        Error(_) -> 0
       }
-    // Accessor length: would need State to call getter. Return 0 for now.
-    Ok(value.AccessorProperty(..)) -> 0
-    // No "length" property → ToLength(undefined) → ToIntegerOrInfinity(NaN) → 0.
-    Error(_) -> 0
   }
 }
 
-/// Build a JsElements snapshot for a generic array-like object.
-///
-/// This implements the "indexed property" reading that Array.prototype methods
-/// do via repeated Get(O, ! ToString(𝔽(k))) calls (e.g. §23.1.3.13
-/// Array.prototype.forEach step 6c: Let kValue be ? Get(O, Pk)).
-///
-/// In the spec, each method individually calls HasProperty + Get for each
-/// index. We pre-compute all present indices into a SparseElements map so
-/// that `js_elements.has()` correctly reports holes — forEach/map/etc. skip
-/// indices not present, matching the spec's HasProperty check (§7.3.1).
-///
-/// Plain objects store numeric keys as strings in the `properties` dict
-/// (see put_elem_value for OrdinaryObject — it stringifies the key and calls
-/// object.set_property). We scan the properties dict for keys that parse as
-/// non-negative ints in [0, length) and build a SparseElements from them.
-///
-/// The `elements` field is technically also merged in, but for OrdinaryObject
-/// / FunctionObject / wrappers it's always empty (only ArrayObject and
-/// ArgumentsObject route numeric writes there, and those have their own
-/// cases above). We include it defensively at trivial cost.
-///
-/// TODO(Deviation): Accessor-valued indexed properties are skipped (can't call
-/// getter without State threading). The spec's Get would invoke [[Get]]
-/// which calls the getter.
-///
-/// Cost is O(|elements| + |properties|), independent of `length`.
-fn gather_indexed(
+/// ES2024 §7.1.17 ToLength(argument)
+fn to_length(val: JsValue) -> Int {
+  case helpers.to_number_int(val) {
+    Some(n) if n > 0 -> int.min(n, max_safe_integer)
+    _ -> 0
+  }
+}
+
+/// Check if a real array has any accessor overrides on numeric indices
+/// (from Object.defineProperty(arr, "0", {get: ...})). If so, merge the
+/// accessor values into elements by calling the getters.
+fn apply_property_overrides(
+  state: State,
+  this: JsValue,
   properties: dict.Dict(String, Property),
   elements: JsElements,
   length: Int,
-) -> JsElements {
-  // Seed from any existing elements entries (almost always empty here).
-  let seed = case elements {
-    value.DenseElements(_) ->
-      collect_elements(
-        elements,
-        0,
-        js_elements.stored_count(elements),
-        length,
-        dict.new(),
-      )
-    value.SparseElements(data) ->
-      dict.filter(data, fn(k, _) { k >= 0 && k < length })
-  }
-  // Merge in numeric-string keys from properties. Properties win on collision
-  // (they're where put_elem_value actually stores indices for OrdinaryObject).
-  // This corresponds to the spec's Get(O, ! ToString(𝔽(k))) resolving through
-  // the ordinary [[Get]] to an own data property.
-  let merged =
-    dict.fold(properties, seed, fn(acc, key, prop) {
-      case int.parse(key) {
-        Ok(idx) if idx >= 0 && idx < length ->
-          case prop {
-            DataProperty(value: v, ..) -> dict.insert(acc, idx, v)
-            // Accessor: can't call getter in this pure context, skip.
-            value.AccessorProperty(..) -> acc
-          }
-        _ -> acc
+) -> #(State, JsElements) {
+  // Quick check: if no properties parse as numeric indices, skip entirely
+  let has_numeric_props =
+    dict.to_list(properties)
+    |> list.any(fn(entry) {
+      case int.parse(entry.0) {
+        Ok(idx) if idx >= 0 && idx < length -> True
+        _ -> False
       }
     })
-  value.SparseElements(merged)
+  case has_numeric_props {
+    False -> #(state, elements)
+    True -> {
+      // Convert to sparse and merge in property values
+      let base = case elements {
+        value.DenseElements(_) ->
+          collect_elements(
+            elements,
+            0,
+            js_elements.stored_count(elements),
+            length,
+            dict.new(),
+          )
+        value.SparseElements(data) -> data
+      }
+      // Override with accessor/data properties from the properties dict
+      let #(state, merged) =
+        dict.fold(properties, #(state, base), fn(acc, key, prop) {
+          let #(state, elems) = acc
+          case int.parse(key) {
+            Ok(idx) if idx >= 0 && idx < length ->
+              case prop {
+                DataProperty(value: v, ..) -> #(
+                  state,
+                  dict.insert(elems, idx, v),
+                )
+                value.AccessorProperty(get: Some(getter), ..) ->
+                  case frame.call(state, getter, this, []) {
+                    Ok(#(v, state)) -> #(state, dict.insert(elems, idx, v))
+                    Error(#(_thrown, state)) -> #(state, elems)
+                  }
+                value.AccessorProperty(get: None, ..) -> #(
+                  state,
+                  dict.insert(elems, idx, value.JsUndefined),
+                )
+              }
+            _ -> #(state, elems)
+          }
+        })
+      #(state, value.SparseElements(merged))
+    }
+  }
+}
+
+/// Stateful version of gather_indexed that uses object.get_value to handle
+/// accessor properties (getters) and prototype chain lookups. Called for
+/// generic array-like objects where properties may include getters.
+fn gather_indexed_stateful(
+  state: State,
+  ref: value.Ref,
+  this: JsValue,
+  elements: JsElements,
+  properties: dict.Dict(String, Property),
+  length: Int,
+) -> #(State, JsElements) {
+  gather_indexed_loop(
+    state,
+    ref,
+    this,
+    elements,
+    properties,
+    0,
+    length,
+    dict.new(),
+  )
+}
+
+/// Loop through indices 0..length-1, using object.get_value for accessor
+/// properties and direct element reads for data properties.
+fn gather_indexed_loop(
+  state: State,
+  ref: value.Ref,
+  this: JsValue,
+  elements: JsElements,
+  properties: dict.Dict(String, Property),
+  idx: Int,
+  length: Int,
+  acc: dict.Dict(Int, JsValue),
+) -> #(State, JsElements) {
+  case idx >= length {
+    True -> #(state, value.SparseElements(acc))
+    False -> {
+      let key = int.to_string(idx)
+      // Check own property first (fast path)
+      case dict.get(properties, key) {
+        Ok(DataProperty(value: v, ..)) ->
+          gather_indexed_loop(
+            state,
+            ref,
+            this,
+            elements,
+            properties,
+            idx + 1,
+            length,
+            dict.insert(acc, idx, v),
+          )
+        Ok(value.AccessorProperty(get: Some(getter), ..)) ->
+          // Call the getter
+          case frame.call(state, getter, this, []) {
+            Ok(#(v, state)) ->
+              gather_indexed_loop(
+                state,
+                ref,
+                this,
+                elements,
+                properties,
+                idx + 1,
+                length,
+                dict.insert(acc, idx, v),
+              )
+            Error(#(_thrown, state)) ->
+              // Getter threw — skip this index
+              gather_indexed_loop(
+                state,
+                ref,
+                this,
+                elements,
+                properties,
+                idx + 1,
+                length,
+                acc,
+              )
+          }
+        Ok(value.AccessorProperty(get: None, ..)) ->
+          // Accessor with no getter → undefined per spec
+          gather_indexed_loop(
+            state,
+            ref,
+            this,
+            elements,
+            properties,
+            idx + 1,
+            length,
+            dict.insert(acc, idx, value.JsUndefined),
+          )
+        Error(Nil) ->
+          // Not an own string property — check elements dict, then prototype
+          case js_elements.get_option(elements, idx) {
+            Some(v) ->
+              gather_indexed_loop(
+                state,
+                ref,
+                this,
+                elements,
+                properties,
+                idx + 1,
+                length,
+                dict.insert(acc, idx, v),
+              )
+            None ->
+              // Check prototype chain via HasProperty + Get
+              case object.has_property(state.heap, ref, key) {
+                True ->
+                  case object.get_value(state, ref, key, this) {
+                    Ok(#(v, state)) ->
+                      gather_indexed_loop(
+                        state,
+                        ref,
+                        this,
+                        elements,
+                        properties,
+                        idx + 1,
+                        length,
+                        dict.insert(acc, idx, v),
+                      )
+                    Error(#(_thrown, state)) ->
+                      gather_indexed_loop(
+                        state,
+                        ref,
+                        this,
+                        elements,
+                        properties,
+                        idx + 1,
+                        length,
+                        acc,
+                      )
+                  }
+                False ->
+                  // Not present anywhere — hole, skip
+                  gather_indexed_loop(
+                    state,
+                    ref,
+                    this,
+                    elements,
+                    properties,
+                    idx + 1,
+                    length,
+                    acc,
+                  )
+              }
+          }
+      }
+    }
+  }
 }
 
 /// Tail-recursive helper: copy in-range present entries from `elements`
@@ -3080,10 +3243,8 @@ fn find_present(
 /// end is the exclusive termination bound. Both directions share the same
 /// algorithm structure (steps 9a-9d are identical between the two specs).
 ///
-/// TODO(Deviation): Reads directly from JsElements instead of HasProperty + Get on a
-/// generic object O. Equivalent for Array exotic objects but would differ for
-/// generic array-like objects passed via .call/.apply (getters on the proto
-/// chain would be missed).
+/// Elements are pre-gathered by require_array (which calls getters and walks
+/// the prototype chain), so reading from JsElements here is spec-equivalent.
 fn reduce_loop(
   state: State,
   elements: JsElements,
@@ -3962,9 +4123,17 @@ fn array_from_array_like(
               )
           }
         Some(ObjectSlot(properties:, elements:, ..)) -> {
-          // Generic array-like: read length property
-          let length = read_length_property(properties)
-          let elements = gather_indexed(properties, elements, length)
+          // Generic array-like: read length property (with accessor/prototype support)
+          let length = to_length_from_properties(state, ref, properties)
+          let #(state, elements) =
+            gather_indexed_stateful(
+              state,
+              ref,
+              JsObject(ref),
+              elements,
+              properties,
+              length,
+            )
           case map_fn {
             None -> {
               let #(heap, new_ref) =
@@ -4480,22 +4649,9 @@ fn array_to_string(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Delegate to join with no separator (defaults to ",")
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
-          let #(state, result) =
-            join_elements(elements, 0, length, ",", [], state)
-          case result {
-            Ok(s) -> #(state, Ok(JsString(s)))
-            Error(thrown) -> #(state, Error(thrown))
-          }
-        }
-        _ -> #(state, Ok(JsString("")))
-      }
-    _ -> #(state, Ok(JsString("")))
-  }
+  // §23.1.3.31: "Let func be ? Get(array, "join")." then call it.
+  // Simplified: delegate directly to array_join (which uses require_array).
+  array_join(this, [], state)
 }
 
 /// ES2024 §23.1.3.30 Array.prototype.toLocaleString ( )

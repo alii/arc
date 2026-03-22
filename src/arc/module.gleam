@@ -14,11 +14,11 @@ import arc/vm/array
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
+import arc/vm/run
 import arc/vm/value.{
   type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined,
   ObjectSlot, OrdinaryObject,
 }
-import arc/vm/vm
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None, Some}
@@ -383,7 +383,7 @@ fn eval_module_body(
         )
 
       case
-        vm.run_module_with_imports(
+        run.run_module_with_imports(
           compiled.template,
           heap,
           builtins,
@@ -392,7 +392,7 @@ fn eval_module_body(
           event_loop,
         )
       {
-        vm.ModuleError(error: vm_err) -> {
+        run.ModuleError(error: vm_err) -> {
           let error_val = JsString("InternalError: " <> string.inspect(vm_err))
           let state =
             EvalState(
@@ -401,7 +401,7 @@ fn eval_module_body(
             )
           #(state, Error(EvaluationError(error_val)))
         }
-        vm.ModuleThrow(value: thrown_val, ..) -> {
+        run.ModuleThrow(value: thrown_val, ..) -> {
           let state =
             EvalState(
               ..state,
@@ -409,7 +409,7 @@ fn eval_module_body(
             )
           #(state, Error(EvaluationError(thrown_val)))
         }
-        vm.ModuleOk(value: val, heap: new_heap, locals:) -> {
+        run.ModuleOk(value: val, heap: new_heap, locals:) -> {
           let #(module_exports, new_heap) =
             collect_exports(
               state.evaluated,

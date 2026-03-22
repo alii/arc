@@ -14,11 +14,11 @@ import arc/vm/opcode.{
   PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
   Swap, UShiftRight, UnaryOp, Void,
 }
+import arc/vm/run
 import arc/vm/value.{
   type FuncTemplate, AccessorProperty, DataProperty, Finite, FuncTemplate,
   JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
 }
-import arc/vm/vm
 import gleam/option.{None, Some}
 
 /// Test helper: read a data property walking the prototype chain.
@@ -69,7 +69,7 @@ fn run_simple(
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
-  case vm.run(func, h, b, global_object, False) {
+  case run.run(func, h, b, global_object, False) {
     Ok(NormalCompletion(val, _heap)) -> Ok(val)
     Ok(ThrowCompletion(_, _)) -> panic as "unexpected ThrowCompletion"
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
@@ -86,7 +86,7 @@ fn run_throwing(
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
-  case vm.run(func, h, b, global_object, False) {
+  case run.run(func, h, b, global_object, False) {
     Ok(ThrowCompletion(val, _heap)) -> Ok(val)
     Ok(NormalCompletion(_, _)) ->
       panic as "expected ThrowCompletion, got NormalCompletion"
@@ -100,7 +100,7 @@ fn run_func(func: FuncTemplate) -> Result(Completion, frame.VmError) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
-  vm.run(func, h, b, global_object, False)
+  run.run(func, h, b, global_object, False)
 }
 
 // ============================================================================
@@ -667,7 +667,7 @@ pub fn tdz_throws_reference_error_test() {
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
   let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    vm.run(func, h, b, global_object, False)
+    run.run(func, h, b, global_object, False)
   // Check it's a ReferenceError via prototype chain
   let assert Ok(JsString("ReferenceError")) = get_data(heap, ref, "name")
 }
@@ -684,7 +684,7 @@ pub fn type_error_thrown_for_symbol_conversion_test() {
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
   let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    vm.run(func, h, b, global_object, False)
+    run.run(func, h, b, global_object, False)
   let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 
@@ -737,7 +737,7 @@ pub fn get_field_on_null_throws_type_error_test() {
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
   let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    vm.run(func, h, b, global_object, False)
+    run.run(func, h, b, global_object, False)
   let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 
@@ -748,7 +748,7 @@ pub fn get_field_on_undefined_throws_type_error_test() {
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
   let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    vm.run(func, h, b, global_object, False)
+    run.run(func, h, b, global_object, False)
   let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
 }
 

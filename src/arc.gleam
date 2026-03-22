@@ -8,12 +8,12 @@ import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
 import arc/vm/frame
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
+import arc/vm/run
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, DataProperty, FunctionObject,
   GeneratorObject, NativeFunction, ObjectSlot, OrdinaryObject, PidObject,
   PromiseObject,
 }
-import arc/vm/vm
 import gleam/dict
 import gleam/int
 import gleam/io
@@ -30,7 +30,7 @@ fn read_line(prompt: String) -> Result(String, Nil)
 // -- REPL state --------------------------------------------------------------
 
 type ReplState {
-  ReplState(heap: Heap, builtins: Builtins, env: vm.ReplEnv)
+  ReplState(heap: Heap, builtins: Builtins, env: run.ReplEnv)
 }
 
 // -- Inspect -----------------------------------------------------------------
@@ -265,7 +265,7 @@ fn eval(
         )
         Ok(template) ->
           case
-            vm.run_and_drain_repl(
+            run.run_and_drain_repl(
               template,
               state.heap,
               state.builtins,
@@ -342,7 +342,7 @@ fn handle_repl_line(state: ReplState, line: String) -> option.Option(ReplState) 
       let #(h, b) = builtins.init(h)
       let #(h, global_object) = builtins.globals(b, h)
       let env =
-        vm.ReplEnv(
+        run.ReplEnv(
           global_object:,
           lexical_globals: dict.new(),
           const_lexical_globals: set.new(),
@@ -516,7 +516,7 @@ fn run_script_file(source: String, event_loop: Bool) -> Nil {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          case vm.run(template, h, b, global_object, event_loop) {
+          case run.run(template, h, b, global_object, event_loop) {
             Ok(NormalCompletion(_, _)) -> Nil
             Ok(ThrowCompletion(val, new_heap)) ->
               io.println("Uncaught exception: " <> inspect(new_heap, val))
@@ -547,7 +547,7 @@ fn new_repl_state() {
   ReplState(
     heap: h,
     builtins: b,
-    env: vm.ReplEnv(
+    env: run.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
       const_lexical_globals: set.new(),

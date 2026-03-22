@@ -9,10 +9,10 @@ import arc/vm/completion.{
 import arc/vm/frame
 import arc/vm/heap
 import arc/vm/object
+import arc/vm/run
 import arc/vm/value.{
   Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN,
 }
-import arc/vm/vm
 import gleam/dict
 import gleam/int
 import gleam/option.{None, Some}
@@ -39,7 +39,7 @@ fn run_js(source: String) -> Result(Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          case vm.run(template, h, b, global_object, False) {
+          case run.run(template, h, b, global_object, False) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
@@ -64,7 +64,7 @@ fn run_js_drain(source: String) -> Result(Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          case vm.run(template, h, b, global_object, False) {
+          case run.run(template, h, b, global_object, False) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
@@ -78,7 +78,7 @@ fn run_js_drain(source: String) -> Result(Completion, String) {
 fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
   case run_js_drain(source) {
     Ok(NormalCompletion(val, h)) ->
-      case vm.promise_result(h, val) {
+      case run.promise_result(h, val) {
         Some(resolved) -> {
           assert resolved == expected
         }
@@ -105,7 +105,7 @@ fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
 fn assert_promise_rejects(source: String, expected: value.JsValue) -> Nil {
   case run_js_drain(source) {
     Ok(NormalCompletion(val, h)) ->
-      case vm.promise_result(h, val) {
+      case run.promise_result(h, val) {
         Some(rejected) -> {
           assert rejected == expected
         }
@@ -5763,7 +5763,7 @@ fn run_repl_lines(
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
   let env =
-    vm.ReplEnv(
+    run.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
       const_lexical_globals: set.new(),
@@ -5778,7 +5778,7 @@ fn run_repl_lines_loop(
   lines: List(String),
   h: heap.Heap,
   b: common.Builtins,
-  env: vm.ReplEnv,
+  env: run.ReplEnv,
 ) -> Result(#(value.JsValue, heap.Heap), String) {
   case lines {
     [] -> Error("no lines to evaluate")
@@ -5803,8 +5803,8 @@ fn eval_repl_line(
   source: String,
   h: heap.Heap,
   b: common.Builtins,
-  env: vm.ReplEnv,
-) -> Result(#(value.JsValue, heap.Heap, vm.ReplEnv), String) {
+  env: run.ReplEnv,
+) -> Result(#(value.JsValue, heap.Heap, run.ReplEnv), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(program) ->
@@ -5816,7 +5816,7 @@ fn eval_repl_line(
         Error(compiler.ContinueOutsideLoop) ->
           Error("compile error: continue outside loop")
         Ok(template) ->
-          case vm.run_and_drain_repl(template, h, b, env) {
+          case run.run_and_drain_repl(template, h, b, env) {
             Ok(#(NormalCompletion(val, new_h), new_env)) ->
               Ok(#(val, new_h, new_env))
             Ok(#(ThrowCompletion(val, _), _)) ->
@@ -5834,7 +5834,7 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
   let env =
-    vm.ReplEnv(
+    run.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
       const_lexical_globals: set.new(),
@@ -5849,7 +5849,7 @@ fn run_repl_throw_loop(
   lines: List(String),
   h: heap.Heap,
   b: common.Builtins,
-  env: vm.ReplEnv,
+  env: run.ReplEnv,
 ) -> Result(Nil, String) {
   case lines {
     [] -> Error("no lines to evaluate")
@@ -5862,7 +5862,7 @@ fn run_repl_throw_loop(
           case compiler.compile_repl(program) {
             Error(_) -> Error("compile error on last line")
             Ok(template) ->
-              case vm.run_and_drain_repl(template, h, b, env) {
+              case run.run_and_drain_repl(template, h, b, env) {
                 Ok(#(ThrowCompletion(_, _), _)) -> Ok(Nil)
                 Ok(#(NormalCompletion(val, _), _)) ->
                   Error("expected throw, got normal: " <> string.inspect(val))
@@ -6412,7 +6412,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
   let assert Ok(harness_template) = compiler.compile_repl(harness_program)
 
   let env =
-    vm.ReplEnv(
+    run.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
       const_lexical_globals: set.new(),
@@ -6421,7 +6421,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
       realms: dict.new(),
     )
   let assert Ok(#(harness_completion, env)) =
-    vm.run_and_drain_repl(harness_template, h, b, env)
+    run.run_and_drain_repl(harness_template, h, b, env)
   let assert NormalCompletion(_, h) = harness_completion
 
   // Verify greetFromHarness is on globalThis object

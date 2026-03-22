@@ -1,17 +1,33 @@
 // ============================================================================
-// Promise job queue draining
+// Promise job queue draining + handler execution
 // ============================================================================
 
+import arc/vm/array
 import arc/vm/builtins/arc as builtins_arc
+import arc/vm/builtins/common
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/coerce
-import arc/vm/frame.{type State, State}
+import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
+import arc/vm/frame.{
+  type State, type StepResult, type VmError, State, StepVmError, Thrown,
+}
 import arc/vm/heap
 import arc/vm/object
-import arc/vm/value.{type JsValue, JsNull, JsUndefined}
+import arc/vm/value.{
+  type FuncTemplate, type JsValue, type Ref, FunctionObject, JsNull, JsObject,
+  JsUndefined, NativeFunction, ObjectSlot,
+}
 import gleam/io
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
+import gleam/string
+
+pub type ExecuteInnerFn =
+  fn(State) -> Result(#(completion.Completion, State), VmError)
+
+pub type CallNativeFn =
+  fn(State, value.NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
+    Result(State, #(StepResult, JsValue, heap.Heap))
 
 /// Drain jobs, using the event loop if enabled on the state, otherwise
 /// just flushing the microtask queue.
@@ -211,5 +227,200 @@ fn execute_thenable_job(
     Error(#(thrown, new_state)) ->
       // then() threw — reject the promise
       call_for_job(new_state, reject, [thrown])
+  }
+}
+
+// ============================================================================
+// Handler execution (for call_fn_callback / re-entrant calls)
+// ============================================================================
+
+/// Run a JS handler function with a this value and args.
+/// Returns Ok(return_value, state) on success, Error(thrown, state) on throw.
+pub fn run_handler_with_this(
+  state: State,
+  handler: JsValue,
+  this_val: JsValue,
+  args: List(JsValue),
+  execute_inner: ExecuteInnerFn,
+  call_native_fn: CallNativeFn,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case handler {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) ->
+          run_closure_for_job(
+            state,
+            ref,
+            env_ref,
+            func_template,
+            args,
+            this_val,
+            execute_inner,
+          )
+        Some(ObjectSlot(kind: NativeFunction(native), ..)) -> {
+          // For native functions (like resolve/reject), call directly
+          let job_state =
+            State(
+              ..state,
+              stack: [],
+              pc: 0,
+              code: array.from_list([]),
+              call_stack: [],
+              try_stack: [],
+            )
+          case call_native_fn(job_state, native, args, [], this_val) {
+            Ok(new_state) ->
+              case new_state.stack {
+                [result, ..] ->
+                  Ok(#(
+                    result,
+                    State(
+                      ..state,
+                      heap: new_state.heap,
+                      job_queue: new_state.job_queue,
+                      pending_receivers: new_state.pending_receivers,
+                      outstanding: new_state.outstanding,
+                    ),
+                  ))
+                [] ->
+                  Ok(#(
+                    JsUndefined,
+                    State(
+                      ..state,
+                      heap: new_state.heap,
+                      job_queue: new_state.job_queue,
+                      pending_receivers: new_state.pending_receivers,
+                      outstanding: new_state.outstanding,
+                    ),
+                  ))
+              }
+            Error(#(Thrown, thrown, h)) ->
+              Error(#(thrown, State(..state, heap: h)))
+            Error(#(StepVmError(vm_err), _, _heap)) ->
+              panic as {
+                "VM error in native call during job: " <> string.inspect(vm_err)
+              }
+            Error(#(_step, _value, h)) ->
+              Error(#(JsUndefined, State(..state, heap: h)))
+          }
+        }
+        _ -> Ok(#(JsUndefined, state))
+      }
+    _ -> Ok(#(JsUndefined, state))
+  }
+}
+
+/// Run a JS closure for a job. Sets up a temporary execution context.
+fn run_closure_for_job(
+  state: State,
+  fn_ref: Ref,
+  env_ref: Ref,
+  callee_template: FuncTemplate,
+  args: List(JsValue),
+  this_val: JsValue,
+  execute_inner: ExecuteInnerFn,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  let env_values = case heap.read(state.heap, env_ref) {
+    Some(value.EnvSlot(slots)) -> slots
+    _ -> []
+  }
+  let env_count = list.length(env_values)
+  let padded_args = pad_args(args, callee_template.arity)
+  let remaining =
+    callee_template.local_count - env_count - callee_template.arity
+  let locals =
+    list.flatten([
+      env_values,
+      padded_args,
+      list.repeat(JsUndefined, remaining),
+    ])
+    |> array.from_list
+  let #(heap, new_this) = bind_this(state, callee_template, this_val)
+  let job_state =
+    State(
+      ..state,
+      heap:,
+      stack: [],
+      locals:,
+      constants: callee_template.constants,
+      func: callee_template,
+      code: callee_template.bytecode,
+      pc: 0,
+      call_stack: [],
+      try_stack: [],
+      finally_stack: [],
+      this_binding: new_this,
+      callee_ref: Some(fn_ref),
+      call_args: args,
+    )
+  case execute_inner(job_state) {
+    Ok(#(NormalCompletion(val, h), final_state)) ->
+      Ok(#(
+        val,
+        State(
+          ..state,
+          heap: h,
+          job_queue: final_state.job_queue,
+          lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
+          pending_receivers: final_state.pending_receivers,
+          outstanding: final_state.outstanding,
+        ),
+      ))
+    Ok(#(ThrowCompletion(thrown, h), final_state)) ->
+      Error(#(
+        thrown,
+        State(
+          ..state,
+          heap: h,
+          job_queue: final_state.job_queue,
+          lexical_globals: final_state.lexical_globals,
+          const_lexical_globals: final_state.const_lexical_globals,
+          pending_receivers: final_state.pending_receivers,
+          outstanding: final_state.outstanding,
+        ),
+      ))
+    Ok(#(YieldCompletion(_, _), _)) ->
+      panic as "YieldCompletion should not appear in job execution"
+    Error(vm_err) ->
+      panic as { "VM error in promise job: " <> string.inspect(vm_err) }
+  }
+}
+
+// ============================================================================
+// Inlined helpers (avoid circular dependency with call.gleam)
+// ============================================================================
+
+/// Pad args to exactly `arity` length.
+fn pad_args(args: List(JsValue), arity: Int) -> List(JsValue) {
+  let len = list.length(args)
+  case len >= arity {
+    True -> list.take(args, arity)
+    False -> list.append(args, list.repeat(JsUndefined, arity - len))
+  }
+}
+
+/// Resolve `this` for a function call per ES2024 S10.2.1.2 OrdinaryCallBindThis.
+fn bind_this(
+  state: State,
+  callee: FuncTemplate,
+  this_arg: JsValue,
+) -> #(heap.Heap, JsValue) {
+  case callee.is_arrow {
+    True -> #(state.heap, state.this_binding)
+    False ->
+      case callee.is_strict {
+        True -> #(state.heap, this_arg)
+        False ->
+          case this_arg {
+            JsUndefined | JsNull -> #(state.heap, JsObject(state.global_object))
+            JsObject(_) -> #(state.heap, this_arg)
+            _ ->
+              case common.to_object(state.heap, state.builtins, this_arg) {
+                Some(#(heap, ref)) -> #(heap, JsObject(ref))
+                None -> #(state.heap, this_arg)
+              }
+          }
+      }
   }
 }

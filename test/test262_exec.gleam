@@ -19,8 +19,8 @@ import arc/vm/completion.{
 }
 import arc/vm/heap.{type Heap}
 import arc/vm/object
+import arc/vm/run
 import arc/vm/value
-import arc/vm/vm
 import gleam/dict
 import gleam/int
 import gleam/io
@@ -36,7 +36,7 @@ import test_runner
 const test_dir: String = "vendor/test262/test"
 
 /// JS preamble: defines `print` which captures output for async test protocol.
-/// $262 is installed natively via vm.build_262 instead.
+/// $262 is installed natively via run.build_262 instead.
 const print_preamble: String = "var __print_output__; function print(x) { __print_output__ = '' + x; }"
 
 const harness_dir: String = "vendor/test262/harness"
@@ -696,7 +696,7 @@ fn do_run_script_with_harness(
       case compiler.compile_repl(program) {
         Error(err) -> Error("compile: " <> string.inspect(err))
         Ok(template) ->
-          case vm.run_and_drain_repl(template, h, b, env) {
+          case run.run_and_drain_repl(template, h, b, env) {
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
             Ok(#(completion, final_env)) ->
               Ok(#(completion, final_env.global_object))
@@ -715,12 +715,12 @@ fn eval_harness(
   b: common.Builtins,
   global_object: value.Ref,
   is_async: Bool,
-) -> Result(#(Heap, vm.ReplEnv), String) {
+) -> Result(#(Heap, run.ReplEnv), String) {
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
     True -> {
       let env =
-        vm.ReplEnv(
+        run.ReplEnv(
           global_object:,
           lexical_globals: dict.new(),
           const_lexical_globals: set.new(),
@@ -744,7 +744,7 @@ fn eval_harness(
           ),
         )
       let h = heap.root(h, realm_ref)
-      let #(h, dollar_262_ref) = vm.build_262(h, b, global_object, realm_ref)
+      let #(h, dollar_262_ref) = run.build_262(h, b, global_object, realm_ref)
       let #(h, _) =
         object.set_property(
           h,
@@ -771,7 +771,7 @@ fn eval_harness(
         list.flatten([default_harness, async_harness, extra_includes])
 
       let env =
-        vm.ReplEnv(
+        run.ReplEnv(
           global_object:,
           lexical_globals: dict.new(),
           const_lexical_globals: set.new(),
@@ -800,15 +800,15 @@ fn eval_harness_script(
   source: String,
   h: Heap,
   b: common.Builtins,
-  env: vm.ReplEnv,
-) -> Result(#(Heap, vm.ReplEnv), String) {
+  env: run.ReplEnv,
+) -> Result(#(Heap, run.ReplEnv), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("harness parse: " <> parser.parse_error_to_string(err))
     Ok(program) ->
       case compiler.compile_repl(program) {
         Error(err) -> Error("harness compile: " <> string.inspect(err))
         Ok(template) ->
-          case vm.run_and_drain_repl(template, h, b, env) {
+          case run.run_and_drain_repl(template, h, b, env) {
             Error(vm_err) -> Error("harness vm: " <> string.inspect(vm_err))
             Ok(#(completion, new_env)) ->
               case completion {
