@@ -307,6 +307,9 @@ fn array_join(
   //            Let len be ? LengthOfArrayLike(O).
   // (handled by require_array — converts this to object, reads .length)
   use _ref, length, elements, state <- require_array(this, state)
+  use <- bool.lazy_guard(length > max_iteration_length, fn() {
+    state.range_error(state, "Invalid string length")
+  })
   // Steps 3-4: If separator is undefined, let sep be ",".
   //            Else, let sep be ? ToString(separator).
   let sep_val = case args {
@@ -427,10 +430,14 @@ fn js_int(n: Int) -> JsValue {
   JsNumber(Finite(int.to_float(n)))
 }
 
-/// Cap for LengthOfArrayLike on non-array objects. Spec allows up to 2^53-1
-/// but we synthesize elements eagerly here, so unbounded lengths would OOM.
-/// Real arrays don't go through this path (their length is already trusted).
-const max_array_like_length = 4_294_967_295
+/// Practical cap on iteration for methods that must materialize O(length)
+/// data (join, toLocaleString, keys/values/entries, fill, toReversed).
+/// Matches the FFI's MAX_DENSE_ELEMENTS. Beyond this, a sparse `Array(2**31)`
+/// would allocate billions of cons cells and OOM the BEAM process before
+/// max_heap_size can catch it — the GC check runs after allocation, by which
+/// point the heap has already overshot. V8 throws "Invalid string length"
+/// for the same reason on `Array(2**31).join()`.
+const max_iteration_length = 10_000_000
 
 /// 2^53 - 1: Maximum safe integer for array-like length operations.
 const max_safe_integer = 9_007_199_254_740_991
@@ -723,7 +730,7 @@ fn gather_indexed_stateful(
     elements,
     properties,
     0,
-    length,
+    int.min(length, max_iteration_length),
     dict.new(),
   )
 }
@@ -1827,6 +1834,9 @@ fn array_fill(
     [_, _, e, ..] -> resolve_index(e, length, length)
     _ -> length
   }
+  use <- bool.lazy_guard(end - start > max_iteration_length, fn() {
+    state.range_error(state, "Invalid array length")
+  })
   // Steps 12-13: fill loop, then return O
   wrap(fill_generic(state, ref, start, end, fill_val), this)
 }
@@ -4401,12 +4411,18 @@ fn array_to_sorted(
   case comparefn {
     JsUndefined -> {
       use _ref, length, elements, state <- require_array(this, state)
+      use <- bool.lazy_guard(length > max_iteration_length, fn() {
+        state.range_error(state, "Invalid array length")
+      })
       to_sorted_default(state, length, elements)
     }
     _ ->
       case helpers.is_callable(state.heap, comparefn) {
         True -> {
           use _ref, length, elements, state <- require_array(this, state)
+          use <- bool.lazy_guard(length > max_iteration_length, fn() {
+            state.range_error(state, "Invalid array length")
+          })
           to_sorted_with_comparefn(state, length, elements, comparefn)
         }
         False ->
@@ -4516,17 +4532,11 @@ fn array_to_reversed(
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
   use _ref, length, elements, state <- require_array(this, state)
-  // §23.1.3.33 step 3: ArrayCreate(len) — throws RangeError if len > 2^32 - 1
-  case length > max_array_like_length {
-    True -> {
-      let #(heap, err) =
-        common.make_range_error(
-          state.heap,
-          state.builtins,
-          "Invalid array length",
-        )
-      #(State(..state, heap:), Error(err))
-    }
+  // §23.1.3.33 step 3: ArrayCreate(len) — throws RangeError if len > 2^32 - 1.
+  // We cap tighter at max_iteration_length since collect_all_elements
+  // materializes O(length) cons cells.
+  case length > max_iteration_length {
+    True -> state.range_error(state, "Invalid array length")
     False -> {
       // Collect all elements; holes become undefined (spec step 5c: Get returns undefined for holes).
       let all_values = collect_all_elements(elements, length, 0, [])
@@ -4589,7 +4599,10 @@ fn array_to_locale_string(
     JsObject(ref) ->
       case heap.read_array(state.heap, ref) {
         Some(#(length, elements)) ->
-          to_locale_string_loop(state, elements, 0, length, [])
+          case length > max_iteration_length {
+            True -> state.range_error(state, "Invalid string length")
+            False -> to_locale_string_loop(state, elements, 0, length, [])
+          }
         None -> #(state, Ok(JsString("")))
       }
     _ -> #(state, Ok(JsString("")))
@@ -4625,13 +4638,17 @@ fn to_locale_string_loop(
 /// ES2024 §23.1.3.16 Array.prototype.keys ( )
 /// Returns an array of indices (simplified — no iterator protocol).
 fn array_keys(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
-  let keys = case this {
+  let length = case this {
     JsObject(ref) ->
       heap.read_array(state.heap, ref)
-      |> option.map(fn(p) { build_index_list(0, p.0, []) })
-      |> option.unwrap([])
-    _ -> []
+      |> option.map(fn(p) { p.0 })
+      |> option.unwrap(0)
+    _ -> 0
   }
+  use <- bool.lazy_guard(length > max_iteration_length, fn() {
+    state.range_error(state, "Invalid array length")
+  })
+  let keys = build_index_list(0, length, [])
   let #(heap, arr_ref) =
     common.alloc_array(state.heap, keys, state.builtins.array.prototype)
   #(State(..state, heap:), Ok(JsObject(arr_ref)))
@@ -4680,13 +4697,16 @@ fn array_values(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let vals = case this {
+  let #(length, elements) = case this {
     JsObject(ref) ->
       heap.read_array(state.heap, ref)
-      |> option.map(fn(p) { collect_all_elements(p.1, p.0, 0, []) })
-      |> option.unwrap([])
-    _ -> []
+      |> option.unwrap(#(0, elements.new()))
+    _ -> #(0, elements.new())
   }
+  use <- bool.lazy_guard(length > max_iteration_length, fn() {
+    state.range_error(state, "Invalid array length")
+  })
+  let vals = collect_all_elements(elements, length, 0, [])
   let #(heap, arr_ref) =
     common.alloc_array(state.heap, vals, state.builtins.array.prototype)
   #(State(..state, heap:), Ok(JsObject(arr_ref)))
@@ -4699,15 +4719,17 @@ fn array_entries(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let proto = state.builtins.array.prototype
-  let #(heap, pairs) = case this {
+  let #(length, elements) = case this {
     JsObject(ref) ->
-      case heap.read_array(state.heap, ref) {
-        Some(#(length, elements)) ->
-          build_entry_pairs(state.heap, elements, 0, length, proto, [])
-        None -> #(state.heap, [])
-      }
-    _ -> #(state.heap, [])
+      heap.read_array(state.heap, ref)
+      |> option.unwrap(#(0, elements.new()))
+    _ -> #(0, elements.new())
   }
+  use <- bool.lazy_guard(length > max_iteration_length, fn() {
+    state.range_error(state, "Invalid array length")
+  })
+  let #(heap, pairs) =
+    build_entry_pairs(state.heap, elements, 0, length, proto, [])
   let #(heap, arr_ref) = common.alloc_array(heap, pairs, proto)
   #(State(..state, heap:), Ok(JsObject(arr_ref)))
 }

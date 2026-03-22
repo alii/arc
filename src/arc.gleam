@@ -25,6 +25,7 @@ import gleam/string
 // -- FFI: read a line from stdin ---------------------------------------------
 
 @external(erlang, "arc_vm_ffi", "read_line")
+@external(javascript, "./arc_vm_ffi.mjs", "read_line")
 fn read_line(prompt: String) -> Result(String, Nil)
 
 // -- REPL state --------------------------------------------------------------
@@ -391,9 +392,11 @@ fn repl_loop(state: ReplState) -> Nil {
 }
 
 @external(erlang, "arc_vm_ffi", "get_script_args")
+@external(javascript, "./arc_vm_ffi.mjs", "get_script_args")
 fn get_script_args() -> List(String)
 
 @external(erlang, "file", "read_file")
+@external(javascript, "./arc_vm_ffi.mjs", "read_file")
 fn read_file(path: String) -> Result(String, FileError)
 
 type FileError

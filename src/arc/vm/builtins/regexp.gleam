@@ -30,10 +30,12 @@ const max_string_bytes = 268_435_456
 
 /// FFI: test if pattern matches string
 @external(erlang, "arc_regexp_ffi", "regexp_test")
+@external(javascript, "../../../arc_regexp_ffi.mjs", "regexp_test")
 fn ffi_regexp_test(pattern: String, flags: String, string: String) -> Bool
 
 /// FFI: execute pattern on string at offset, returning match indices
 @external(erlang, "arc_regexp_ffi", "regexp_exec")
+@external(javascript, "../../../arc_regexp_ffi.mjs", "regexp_exec")
 fn ffi_regexp_exec(
   pattern: String,
   flags: String,

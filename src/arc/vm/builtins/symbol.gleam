@@ -91,6 +91,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
 }
 
 @external(erlang, "erlang", "make_ref")
+@external(javascript, "../../../arc_vm_ffi.mjs", "make_ref")
 fn make_ref() -> value.ErlangRef
 
 /// Create a new unique symbol reference (exposed for Symbol.for).

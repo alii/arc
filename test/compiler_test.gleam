@@ -716,6 +716,56 @@ pub fn array_spread_copies_not_shares_test() -> Nil {
 }
 
 // ============================================================================
+// Sparse array iteration guards — regression for test262 CI OOM.
+// Methods that materialize O(length) data must throw RangeError on
+// sparse arrays with huge lengths instead of iterating billions of times.
+// ============================================================================
+
+pub fn huge_sparse_join_throws_test() -> Nil {
+  assert_thrown("Array(100000000).join(',')")
+}
+
+pub fn huge_sparse_tostring_throws_test() -> Nil {
+  assert_thrown("Array(100000000).toString()")
+}
+
+pub fn huge_sparse_tolocalestring_throws_test() -> Nil {
+  assert_thrown("Array(100000000).toLocaleString()")
+}
+
+pub fn huge_sparse_fill_throws_test() -> Nil {
+  assert_thrown("Array(100000000).fill(0)")
+}
+
+pub fn huge_sparse_keys_throws_test() -> Nil {
+  assert_thrown("Array(100000000).keys()")
+}
+
+pub fn huge_sparse_values_throws_test() -> Nil {
+  assert_thrown("Array(100000000).values()")
+}
+
+pub fn huge_sparse_entries_throws_test() -> Nil {
+  assert_thrown("Array(100000000).entries()")
+}
+
+pub fn huge_sparse_toreversed_throws_test() -> Nil {
+  assert_thrown("Array(100000000).toReversed()")
+}
+
+pub fn huge_sparse_tosorted_throws_test() -> Nil {
+  assert_thrown("Array(100000000).toSorted()")
+}
+
+pub fn under_limit_join_works_test() -> Nil {
+  assert_normal("Array(5).join('-')", JsString("----"))
+}
+
+pub fn under_limit_fill_works_test() -> Nil {
+  assert_normal("Array(3).fill(7).join(',')", JsString("7,7,7"))
+}
+
+// ============================================================================
 // Call spread tests — f(...x), obj.m(...x), new F(...x)
 // ============================================================================
 

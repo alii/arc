@@ -7,3 +7,8 @@ export function parse_float(s) {
   }
   return new Error(undefined);
 }
+
+const encoder = new TextEncoder();
+export function byte_size(s) {
+  return encoder.encode(s).length;
+}

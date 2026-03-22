@@ -21,27 +21,35 @@ import gleam/set
 import gleam/string
 
 // -- FFI declarations --------------------------------------------------------
+// On the JS target these all panic — there's no BEAM mailbox to back them.
 
 @external(erlang, "erlang", "self")
+@external(javascript, "../../../arc_vm_ffi.mjs", "erlang_self")
 fn ffi_self() -> value.ErlangPid
 
 @external(erlang, "arc_vm_ffi", "send_message")
+@external(javascript, "../../../arc_vm_ffi.mjs", "send_message")
 fn ffi_send(pid: value.ErlangPid, msg: MailboxEvent) -> Nil
 
 @external(erlang, "arc_vm_ffi", "receive_user_message")
+@external(javascript, "../../../arc_vm_ffi.mjs", "receive_user_message")
 fn ffi_receive_user() -> PortableMessage
 
 @external(erlang, "arc_vm_ffi", "receive_user_message_timeout")
+@external(javascript, "../../../arc_vm_ffi.mjs", "receive_user_message_timeout")
 fn ffi_receive_user_timeout(timeout: Int) -> Result(PortableMessage, Nil)
 
 /// Returns the pid in the format `<x.x.x>
 @external(erlang, "arc_vm_ffi", "pid_to_string")
+@external(javascript, "../../../arc_vm_ffi.mjs", "pid_to_string")
 pub fn ffi_pid_to_string(pid: value.ErlangPid) -> String
 
 @external(erlang, "arc_vm_ffi", "sleep")
+@external(javascript, "../../../arc_vm_ffi.mjs", "sleep")
 fn ffi_sleep(ms: Int) -> Nil
 
 @external(erlang, "arc_vm_ffi", "send_after")
+@external(javascript, "../../../arc_vm_ffi.mjs", "send_after")
 fn ffi_send_after(
   ms: Int,
   pid: value.ErlangPid,
@@ -49,6 +57,7 @@ fn ffi_send_after(
 ) -> value.ErlangTimerRef
 
 @external(erlang, "arc_vm_ffi", "cancel_timer")
+@external(javascript, "../../../arc_vm_ffi.mjs", "cancel_timer")
 fn ffi_cancel_timer(tref: value.ErlangTimerRef) -> Bool
 
 // -- Init --------------------------------------------------------------------

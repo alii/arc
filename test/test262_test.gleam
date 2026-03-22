@@ -150,7 +150,9 @@ pub fn test262_run_test() {
 }
 
 @external(erlang, "io", "format")
-fn erl_io_format(fmt: String, args: List(String)) -> Nil
+fn erl_io_format(_fmt: String, _args: List(String)) -> Nil {
+  Nil
+}
 
 fn clear_line() -> Nil {
   // \r moves to start of line, ESC[K clears to end of line

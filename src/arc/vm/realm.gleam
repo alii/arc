@@ -52,6 +52,7 @@ pub type NewStateFn =
 // ============================================================================
 
 @external(erlang, "erlang", "spawn")
+@external(javascript, "../../arc_vm_ffi.mjs", "spawn")
 fn spawn(fun: fn() -> Nil) -> value.ErlangPid
 
 /// Non-standard: Arc.spawn(fn)

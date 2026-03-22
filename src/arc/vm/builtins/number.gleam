@@ -733,13 +733,17 @@ fn digit_value(ch: String) -> Option(Int) {
 }
 
 @external(erlang, "gleam_stdlib", "parse_float")
+@external(javascript, "../../../arc_parser_ffi.mjs", "parse_float")
 fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
 
 @external(erlang, "arc_number_ffi", "format_to_fixed")
+@external(javascript, "../../../arc_number_ffi.mjs", "format_to_fixed")
 fn format_to_fixed(x: Float, digits: Int) -> String
 
 @external(erlang, "arc_number_ffi", "format_to_exponential")
+@external(javascript, "../../../arc_number_ffi.mjs", "format_to_exponential")
 fn format_to_exponential(x: Float, fraction_digits: Int) -> String
 
 @external(erlang, "arc_number_ffi", "format_to_precision")
+@external(javascript, "../../../arc_number_ffi.mjs", "format_to_precision")
 fn format_to_precision(x: Float, precision: Int) -> String

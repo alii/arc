@@ -328,6 +328,7 @@ pub fn to_number_for_binop(val: JsValue) -> JsNum {
 // ============================================================================
 
 @external(erlang, "math", "pow")
+@external(javascript, "../../../arc_math_ffi.mjs", "float_power")
 pub fn float_power(base: Float, exp: Float) -> Float
 
 // ============================================================================
@@ -335,9 +336,11 @@ pub fn float_power(base: Float, exp: Float) -> Float
 // ============================================================================
 
 @external(erlang, "arc_uri_ffi", "encode")
+@external(javascript, "../../../arc_uri_ffi.mjs", "encode")
 pub fn uri_encode(str: String, preserve_uri_chars: Bool) -> String
 
 @external(erlang, "arc_uri_ffi", "decode")
+@external(javascript, "../../../arc_uri_ffi.mjs", "decode")
 pub fn uri_decode(str: String) -> String
 
 // ============================================================================

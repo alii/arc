@@ -254,7 +254,9 @@ fn variants_for_test(metadata: TestMetadata) -> List(StrictnessVariant) {
 }
 
 @external(erlang, "test262_exec_ffi", "list_test_files")
-fn list_test_files(dir: String) -> List(String)
+fn list_test_files(_dir: String) -> List(String) {
+  panic as "test262 suite is BEAM-only"
+}
 
 fn load_snapshot(path: String) -> set.Set(String) {
   case simplifile.read(path) {
@@ -853,47 +855,75 @@ fn inspect_thrown(val: value.JsValue, heap: Heap) -> String {
   }
 }
 
-// -- FFI --
+// -- FFI (BEAM-only; JS target gets panic bodies) --
+
+const beam_only_test = "test262 suite is BEAM-only"
 
 @external(erlang, "test262_exec_ffi", "init_stats")
-fn init_stats() -> Nil
+fn init_stats() -> Nil {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "init_config")
 fn init_config(
-  update_mode: Bool,
-  has_snapshot: Bool,
-  fail_log: option.Option(String),
-) -> Nil
+  _update_mode: Bool,
+  _has_snapshot: Bool,
+  _fail_log: option.Option(String),
+) -> Nil {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "init_snapshot_set")
-fn init_snapshot_set(paths: List(String)) -> Nil
+fn init_snapshot_set(_paths: List(String)) -> Nil {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "get_update_mode")
-fn get_update_mode() -> Bool
+fn get_update_mode() -> Bool {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "get_has_snapshot")
-fn get_has_snapshot() -> Bool
+fn get_has_snapshot() -> Bool {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "get_fail_log")
-fn get_fail_log() -> option.Option(String)
+fn get_fail_log() -> option.Option(String) {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "snapshot_contains")
-fn snapshot_contains(path: String) -> Bool
+fn snapshot_contains(_path: String) -> Bool {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "record_pass")
-fn record_pass() -> Nil
+fn record_pass() -> Nil {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "record_fail")
-fn record_fail() -> Nil
+fn record_fail() -> Nil {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "record_skip")
-fn record_skip() -> Nil
+fn record_skip() -> Nil {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "get_stats")
-fn get_stats() -> #(Int, Int, Int)
+fn get_stats() -> #(Int, Int, Int) {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "record_pass_path")
-fn record_pass_path(path: String) -> Nil
+fn record_pass_path(_path: String) -> Nil {
+  panic as beam_only_test
+}
 
 @external(erlang, "test262_exec_ffi", "get_pass_paths")
-fn get_pass_paths() -> List(String)
+fn get_pass_paths() -> List(String) {
+  panic as beam_only_test
+}
