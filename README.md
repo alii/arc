@@ -1,3 +1,6 @@
+> [!NOTE]  
+> Arc is an extremely new and __highly experimental__ research project Tread with caution!
+
 # arc
 
 (Highly experimental) JavaScript on the BEAM
