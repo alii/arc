@@ -11,13 +11,13 @@ import arc/vm/opcode.{
   IrCreateArguments, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow,
-  IrForInNext, IrForInStart, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
-  IrGetIterator, IrGetThis, IrInitGlobalLex, IrInitialYield, IrIteratorNext,
-  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
-  IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectSpread, IrPop, IrPopTry,
-  IrPushConst, IrPushTry, IrPutElem, IrPutField, IrReturn, IrScopeGetVar,
-  IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
-  IrTypeOf, IrUnaryOp, IrYield,
+  IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2,
+  IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrInitGlobalLex,
+  IrInitialYield, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp,
+  IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem, IrPutField,
+  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass,
+  IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -1591,8 +1591,11 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
 
     ast.ForInStatement(left, right, body) -> emit_for_in(e, left, right, body)
 
-    ast.ForOfStatement(left, right, body, _is_await) ->
-      emit_for_of(e, left, right, body)
+    ast.ForOfStatement(left, right, body, is_await) ->
+      case is_await {
+        False -> emit_for_of(e, left, right, body)
+        True -> emit_for_await_of(e, left, right, body)
+      }
 
     _ -> Error(Unsupported("statement: " <> string_inspect_stmt_kind(stmt)))
   }
@@ -2750,6 +2753,64 @@ fn emit_for_of(
   let e = emit_ir(e, IrJump(loop_start))
 
   // cleanup: pop the value (done=true left it on stack)
+  let e = emit_ir(e, IrLabel(cleanup))
+  let e = emit_ir(e, IrPop)
+
+  // loop_end: pop the iterator
+  let e = emit_ir(e, IrLabel(loop_end))
+  let e = emit_ir(e, IrPop)
+
+  let e = pop_loop(e)
+  let e = emit_op(e, LeaveScope)
+  Ok(e)
+}
+
+/// Emit a for-await-of loop: `for await (lhs of rhs) body`
+///
+/// Unlike for-of, .next() returns a Promise so each iteration awaits it.
+/// Calls iter.next() as a regular method call (no IteratorNext fast-path
+/// since async iterators are always user objects with .next()).
+fn emit_for_await_of(
+  e: Emitter,
+  left: ast.ForInit,
+  right: ast.Expression,
+  body: ast.Statement,
+) -> Result(Emitter, EmitError) {
+  let #(e, loop_start) = fresh_label(e)
+  let #(e, loop_continue) = fresh_label(e)
+  let #(e, cleanup) = fresh_label(e)
+  let #(e, loop_end) = fresh_label(e)
+
+  let e = emit_op(e, EnterScope(BlockScope))
+
+  // Evaluate iterable, get its async iterator
+  use e <- result.try(emit_expr(e, right))
+  let e = emit_ir(e, IrGetAsyncIterator)
+
+  let e = push_loop(e, loop_end, loop_continue)
+  let e = emit_ir(e, IrLabel(loop_start))
+
+  // Dup iter, call iter.next(), await the promise → {value, done}
+  let e = emit_ir(e, IrDup)
+  let e = emit_ir(e, IrGetField2("next"))
+  let e = emit_ir(e, IrCallMethod("next", 0))
+  let e = emit_ir(e, IrAwait)
+
+  // Dup result, check .done
+  let e = emit_ir(e, IrDup)
+  let e = emit_ir(e, IrGetField("done"))
+  let e = emit_ir(e, IrJumpIfTrue(cleanup))
+
+  // Extract .value, bind to LHS
+  let e = emit_ir(e, IrGetField("value"))
+  use e <- result.try(emit_for_lhs_bind(e, left))
+
+  use e <- result.try(emit_stmt(e, body))
+
+  let e = emit_ir(e, IrLabel(loop_continue))
+  let e = emit_ir(e, IrJump(loop_start))
+
+  // cleanup: pop the {value,done} result object
   let e = emit_ir(e, IrLabel(cleanup))
   let e = emit_ir(e, IrPop)
 

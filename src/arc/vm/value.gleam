@@ -697,8 +697,17 @@ pub type CallNativeFn {
   GeneratorNext
   GeneratorReturn
   GeneratorThrow
+  /// %ArrayIteratorPrototype%.next() — ES §23.1.5.2.1
+  ArrayIteratorNext
   /// Async function resume: called when awaited promise settles.
   AsyncResume(async_data_ref: Ref, is_reject: Bool)
+  // Async generator
+  AsyncGeneratorNext
+  AsyncGeneratorReturn
+  AsyncGeneratorThrow
+  /// Async generator resume: called when an internal await settles.
+  /// is_return distinguishes the AwaitingReturn microtask from a body await.
+  AsyncGeneratorResume(data_ref: Ref, is_reject: Bool, is_return: Bool)
   /// Symbol() constructor — callable but NOT new-able.
   SymbolConstructor
   /// Symbol.for(key) — global symbol registry lookup/insert.
@@ -759,6 +768,8 @@ pub type ExoticKind {
   PromiseObject(promise_data: Ref)
   /// Generator object. Points to a GeneratorSlot that holds suspended state.
   GeneratorObject(generator_data: Ref)
+  /// Async generator object. Points to an AsyncGeneratorSlot.
+  AsyncGeneratorObject(generator_data: Ref)
   /// Boxed String primitive (`new String("x")`, `Object("x")`, or sloppy-mode
   /// this-boxing). Has [[StringData]] internal slot. Per spec §10.4.3 this is
   /// an exotic object with own index properties and `length`; we expose those
@@ -803,6 +814,10 @@ pub type ExoticKind {
   /// Stores the source pattern and flags strings. Actual matching
   /// is delegated to Erlang's `re` module (PCRE) via FFI.
   RegExpObject(pattern: String, flags: String)
+  /// Array iterator — ES2024 §23.1.5 Array Iterator Objects.
+  /// Created by Array.prototype[Symbol.iterator](), values(), keys(), entries().
+  /// Lazy — re-reads source length each .next() to handle mutation.
+  ArrayIteratorObject(source: Ref, index: Int)
 }
 
 /// Canonical property key. Per spec, property keys are String | Symbol, but
@@ -981,6 +996,36 @@ pub type GeneratorState {
   Completed
 }
 
+/// Async generator internal lifecycle state (ES §27.6.3.1).
+/// Unlike sync generators, async gens queue requests and can be awaiting.
+pub type AsyncGeneratorState {
+  AGSuspendedStart
+  AGSuspendedYield
+  /// Running — any .next()/.return()/.throw() just enqueues.
+  AGExecuting
+  /// .return(v) on a completed gen awaits Promise.resolve(v) first.
+  AGAwaitingReturn
+  AGCompleted
+}
+
+/// Kind of request enqueued on an async generator (next/return/throw).
+pub type AsyncGenCompletion {
+  AGNext
+  AGReturn
+  AGThrow
+}
+
+/// A pending .next()/.return()/.throw() call on an async generator.
+/// Each carries the promise capability that will settle when the request runs.
+pub type AsyncGenRequest {
+  AsyncGenRequest(
+    completion: AsyncGenCompletion,
+    value: JsValue,
+    resolve: JsValue,
+    reject: JsValue,
+  )
+}
+
 /// What lives in a heap slot.    
 pub type HeapSlot {
   /// Unified object slot — covers ordinary objects, arrays, and functions.
@@ -1005,10 +1050,6 @@ pub type HeapSlot {
   /// upfront (per spec: prototype shadowing requires full collection).
   /// Stores pre-collected string keys as JsString values.
   ForInIteratorSlot(keys: List(JsValue))
-  /// Iterator state for for-of loops over arrays. Lazy — holds a ref to
-  /// the source array and reads elements one at a time (like QuickJS).
-  /// Re-reads length each iteration to handle mutations during iteration.
-  ArrayIteratorSlot(source: Ref, index: Int)
   /// Engine-internal promise state, separate from the JS-visible ObjectSlot.
   /// A promise needs both a normal object (for properties, prototype chain,
   /// .then/.catch lookup) AND internal state (pending/fulfilled/rejected,
@@ -1042,6 +1083,24 @@ pub type HeapSlot {
     promise_data_ref: Ref,
     resolve: JsValue,
     reject: JsValue,
+    func_template: FuncTemplate,
+    env_ref: Ref,
+    saved_pc: Int,
+    saved_locals: Array(JsValue),
+    saved_stack: List(JsValue),
+    saved_try_stack: List(SavedTryFrame),
+    saved_finally_stack: List(SavedFinallyCompletion),
+    saved_this: JsValue,
+    saved_callee_ref: Option(Ref),
+  )
+  /// Engine-internal async generator state. The ObjectSlot has
+  /// `kind: AsyncGeneratorObject(generator_data: Ref)` pointing here.
+  /// Unlike sync generators, .next()/.return()/.throw() enqueue requests
+  /// and return promises; yield settles the head request, await suspends
+  /// without settling.
+  AsyncGeneratorSlot(
+    gen_state: AsyncGeneratorState,
+    queue: List(AsyncGenRequest),
     func_template: FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
@@ -1247,8 +1306,11 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         NativeFunction(Call(AsyncResume(async_data_ref:, ..))) -> [
           async_data_ref,
         ]
+        NativeFunction(Call(AsyncGeneratorResume(data_ref:, ..))) -> [data_ref]
         PromiseObject(promise_data:) -> [promise_data]
         GeneratorObject(generator_data:) -> [generator_data]
+        AsyncGeneratorObject(generator_data:) -> [generator_data]
+        ArrayIteratorObject(source:, ..) -> [source]
         MapObject(data:, original_keys:, ..) -> {
           // Trace refs in map values
           let value_refs = dict.values(data) |> list.flat_map(refs_in_value)
@@ -1288,7 +1350,6 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
     EnvSlot(slots:) -> list.flat_map(slots, refs_in_value)
     BoxSlot(value:) -> refs_in_value(value)
     ForInIteratorSlot(keys:) -> list.flat_map(keys, refs_in_value)
-    ArrayIteratorSlot(source:, ..) -> [source]
     PromiseSlot(state:, fulfill_reactions:, reject_reactions:, ..) -> {
       let state_refs = case state {
         PromiseFulfilled(value:) -> refs_in_value(value)
@@ -1360,6 +1421,42 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         [promise_data_ref],
         refs_in_value(resolve),
         refs_in_value(reject),
+        [env_ref],
+        tuple_array.to_list(saved_locals) |> list.flat_map(refs_in_value),
+        list.flat_map(saved_stack, refs_in_value),
+        finally_refs,
+        refs_in_value(saved_this),
+        option.map(saved_callee_ref, list.wrap) |> option.unwrap([]),
+      ])
+    }
+    AsyncGeneratorSlot(
+      queue:,
+      env_ref:,
+      saved_locals:,
+      saved_stack:,
+      saved_finally_stack:,
+      saved_this:,
+      saved_callee_ref:,
+      ..,
+    ) -> {
+      let finally_refs =
+        list.flat_map(saved_finally_stack, fn(fc) {
+          case fc {
+            SavedThrowCompletion(value:) -> refs_in_value(value)
+            SavedReturnCompletion(value:) -> refs_in_value(value)
+            SavedNormalCompletion -> []
+          }
+        })
+      let queue_refs =
+        list.flat_map(queue, fn(r) {
+          list.flatten([
+            refs_in_value(r.value),
+            refs_in_value(r.resolve),
+            refs_in_value(r.reject),
+          ])
+        })
+      list.flatten([
+        queue_refs,
         [env_ref],
         tuple_array.to_list(saved_locals) |> list.flat_map(refs_in_value),
         list.flat_map(saved_stack, refs_in_value),

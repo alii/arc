@@ -380,6 +380,8 @@ fn run_runtime_negative_test(
         Ok(NormalCompletion(_, _)) ->
           Fail("expected runtime throw but completed normally")
         Ok(YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
+        Ok(completion.AwaitCompletion(_, _)) ->
+          Fail("unexpected AwaitCompletion")
         Error(reason) -> Fail("expected runtime throw but got: " <> reason)
       }
     }
@@ -406,6 +408,8 @@ fn run_runtime_negative_test(
                 NormalCompletion(_, _) ->
                   Fail("expected runtime throw but completed normally")
                 YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
+                completion.AwaitCompletion(_, _) ->
+                  Fail("unexpected AwaitCompletion")
               }
             True ->
               // For async negative tests, $DONE reports via print
@@ -463,6 +467,8 @@ fn run_positive_test(
         Ok(ThrowCompletion(thrown, heap)) ->
           Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
         Ok(YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
+        Ok(completion.AwaitCompletion(_, _)) ->
+          Fail("unexpected AwaitCompletion")
         Error(reason) -> Fail(reason)
       }
     }
@@ -488,6 +494,8 @@ fn run_positive_test(
                 ThrowCompletion(thrown, heap) ->
                   Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
                 YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
+                completion.AwaitCompletion(_, _) ->
+                  Fail("unexpected AwaitCompletion")
               }
             True -> check_async_positive(completion, global_ref)
           }
@@ -518,6 +526,7 @@ fn check_async_completion(
     ThrowCompletion(thrown, heap) ->
       Error("unexpected throw: " <> inspect_thrown(thrown, heap))
     YieldCompletion(_, _) -> Error("unexpected YieldCompletion")
+    completion.AwaitCompletion(_, _) -> Error("unexpected AwaitCompletion")
     NormalCompletion(_, heap) -> {
       case get_data(heap, global_ref, "__print_output__") {
         Ok(value.JsString(output)) ->
@@ -818,6 +827,7 @@ fn eval_harness_script(
                 ThrowCompletion(thrown, new_heap) ->
                   Error("harness threw: " <> inspect_thrown(thrown, new_heap))
                 YieldCompletion(_, _) -> Error("harness yielded")
+                completion.AwaitCompletion(_, _) -> Error("harness awaited")
               }
           }
       }

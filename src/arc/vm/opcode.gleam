@@ -102,6 +102,7 @@ pub type Op {
   ForInStart
   ForInNext
   GetIterator
+  GetAsyncIterator
   IteratorNext
   IteratorClose
 
@@ -264,6 +265,7 @@ pub type IrOp {
   IrForInStart
   IrForInNext
   IrGetIterator
+  IrGetAsyncIterator
   IrIteratorNext
   IrIteratorClose
   IrSetupDerivedClass

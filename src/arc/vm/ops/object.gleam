@@ -1342,6 +1342,7 @@ fn inspect_object(
         }
         PromiseObject(_) -> "Promise {}"
         GeneratorObject(_) -> "Object [Generator] {}"
+        value.AsyncGeneratorObject(_) -> "Object [AsyncGenerator] {}"
         value.ArgumentsObject(length:) ->
           "[Arguments] "
           <> inspect_array(heap, elements, length, depth, visited)
@@ -1362,6 +1363,7 @@ fn inspect_object(
           "Set(" <> int.to_string(dict.size(data)) <> ")"
         value.WeakMapObject(_) -> "WeakMap {}"
         value.WeakSetObject(_) -> "WeakSet {}"
+        value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
         value.RegExpObject(pattern:, flags:) -> {
           let source = case pattern {
             "" -> "(?:)"

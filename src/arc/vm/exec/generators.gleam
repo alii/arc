@@ -1,6 +1,7 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/completion.{
-  type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
+  type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
+  YieldCompletion,
 }
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
@@ -167,6 +168,12 @@ pub fn call_native_generator_next(
                 )
               Error(#(Thrown, thrown, h3))
             }
+            Ok(#(AwaitCompletion(_, _), _)) ->
+              Error(#(
+                StepVmError(Unimplemented("await in sync generator")),
+                JsUndefined,
+                state.heap,
+              ))
             Error(_vm_err) -> {
               let h2 =
                 heap.write(
@@ -403,6 +410,12 @@ pub fn call_native_generator_throw(
                     )
                   Error(#(Thrown, thrown, h3))
                 }
+                Ok(#(AwaitCompletion(_, _), _)) ->
+                  Error(#(
+                    StepVmError(Unimplemented("await in sync generator")),
+                    JsUndefined,
+                    state.heap,
+                  ))
                 Error(_vm_err) -> {
                   let h2 =
                     heap.write(
@@ -649,6 +662,12 @@ fn process_generator_return(
             heap.write(h2, gen.data_ref, gen_with_state(gen, value.Completed))
           Error(#(Thrown, thrown, h3))
         }
+        Ok(#(AwaitCompletion(_, _), _)) ->
+          Error(#(
+            StepVmError(Unimplemented("await in sync generator")),
+            JsUndefined,
+            gen_state.heap,
+          ))
         Error(vm_err) -> {
           let h2 =
             heap.write(

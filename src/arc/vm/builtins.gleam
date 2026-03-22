@@ -1,5 +1,6 @@
 import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/array as builtins_array
+import arc/vm/builtins/async_generator as builtins_async_generator
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins, Builtins}
 import arc/vm/builtins/error as builtins_error
@@ -96,9 +97,67 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     )
   let h = heap.root(h, iterator_proto)
 
+  // %ArrayIteratorPrototype% — ES §23.1.5.2
+  let #(h, array_iter_methods) =
+    common.alloc_call_methods(h, function.prototype, [
+      #("next", value.ArrayIteratorNext, 0),
+    ])
+  let #(h, array_iterator_proto) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: common.named_props(array_iter_methods),
+        symbol_properties: dict.from_list([
+          #(
+            value.symbol_to_string_tag,
+            value.data(value.JsString("Array Iterator"))
+              |> value.configurable(),
+          ),
+        ]),
+        elements: elements.new(),
+        prototype: Some(iterator_proto),
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, array_iterator_proto)
+
   // Generator.prototype → %IteratorPrototype% → Object.prototype
   let #(h, generator) =
     builtins_generator.init(h, iterator_proto, function.prototype)
+
+  // %AsyncIteratorPrototype% — shared base for async iterators
+  // Has [Symbol.asyncIterator]() { return this; } so async iterators are async-iterable
+  let #(h, async_iter_sym_fn) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.VmNative(value.IteratorSymbolIterator),
+      "[Symbol.asyncIterator]",
+      0,
+    )
+  let #(h, async_iterator_proto) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: dict.new(),
+        symbol_properties: dict.from_list([
+          #(
+            value.symbol_async_iterator,
+            value.builtin_property(JsObject(async_iter_sym_fn)),
+          ),
+        ]),
+        elements: elements.new(),
+        prototype: Some(object_proto),
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, async_iterator_proto)
+
+  // AsyncGenerator.prototype → %AsyncIteratorPrototype% → Object.prototype
+  let #(h, async_generator) =
+    builtins_async_generator.init(h, async_iterator_proto, function.prototype)
 
   // Symbol constructor (callable, not new-able)
   let #(h, symbol) = builtins_symbol.init(h, object_proto, function.prototype)
@@ -206,6 +265,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       is_finite:,
       promise:,
       generator:,
+      async_generator:,
       symbol:,
       arc:,
       json:,
@@ -220,6 +280,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       encode_uri_component:,
       escape:,
       unescape:,
+      array_iterator_proto:,
     ),
   )
 }

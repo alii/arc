@@ -98,6 +98,8 @@ fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
         <> source
       }
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(completion.AwaitCompletion(_, _)) ->
+      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -125,6 +127,8 @@ fn assert_promise_rejects(source: String, expected: value.JsValue) -> Nil {
         <> source
       }
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(completion.AwaitCompletion(_, _)) ->
+      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -149,6 +153,8 @@ fn assert_normal(source: String, expected: value.JsValue) -> Nil {
         "expected NormalCompletion, got ThrowCompletion for: " <> source
       }
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(completion.AwaitCompletion(_, _)) ->
+      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -168,6 +174,8 @@ fn assert_thrown(source: String) -> Nil {
         <> source
       }
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(completion.AwaitCompletion(_, _)) ->
+      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -5872,6 +5880,8 @@ fn eval_repl_line(
             Ok(#(ThrowCompletion(val, _), _)) ->
               Error("throw: " <> string.inspect(val))
             Ok(#(YieldCompletion(_, _), _)) -> Error("unexpected yield")
+            Ok(#(completion.AwaitCompletion(_, _), _)) ->
+              Error("unexpected await")
             Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
           }
       }
@@ -6396,6 +6406,8 @@ fn assert_module_normal(source: String, expected: value.JsValue) -> Nil {
         <> string.inspect(heap)
       }
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(completion.AwaitCompletion(_, _)) ->
+      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "run_module failed: " <> err }
   }
 }

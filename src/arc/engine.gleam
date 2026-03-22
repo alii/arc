@@ -119,6 +119,7 @@ fn completion_heap(c: Completion) -> Heap {
     completion.NormalCompletion(_, h) -> h
     completion.ThrowCompletion(_, h) -> h
     completion.YieldCompletion(_, h) -> h
+    completion.AwaitCompletion(_, h) -> h
   }
 }
 

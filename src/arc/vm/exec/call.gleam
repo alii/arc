@@ -16,8 +16,10 @@ import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/completion.{
-  type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
+  type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
+  YieldCompletion,
 }
+import arc/vm/exec/async_generators
 import arc/vm/exec/generators
 import arc/vm/exec/promises
 import arc/vm/heap.{type Heap}
@@ -33,10 +35,10 @@ import arc/vm/state.{
   Thrown, Unimplemented,
 }
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot, DataProperty,
-  FunctionObject, GeneratorObject, GeneratorSlot, JsNull, JsObject, JsString,
-  JsUndefined, JsUninitialized, Named, NativeFunction, ObjectSlot,
-  OrdinaryObject,
+  type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot,
+  AsyncGeneratorObject, AsyncGeneratorSlot, DataProperty, FunctionObject,
+  GeneratorObject, GeneratorSlot, JsNull, JsObject, JsString, JsUndefined,
+  JsUninitialized, Named, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/bool
 import gleam/dict
@@ -114,10 +116,18 @@ pub fn call_function(
   let #(heap, this_val) = bind_this(state, callee_template, this_val)
   let state = State(..state, heap:)
   case callee_template.is_generator, callee_template.is_async {
-    // Note: async generators (True, True) not yet implemented -- they'll
-    // fall through to call_generator_function which is incorrect but harmless
-    // until async generators are properly supported.
-    True, _ ->
+    True, True ->
+      call_async_generator_function(
+        state,
+        fn_ref,
+        env_ref,
+        callee_template,
+        args,
+        rest_stack,
+        this_val,
+        execute_inner,
+      )
+    True, False ->
       call_generator_function(
         state,
         fn_ref,
@@ -128,7 +138,7 @@ pub fn call_function(
         this_val,
         execute_inner,
       )
-    _, True ->
+    False, True ->
       call_async_function(
         state,
         fn_ref,
@@ -140,7 +150,7 @@ pub fn call_function(
         execute_inner,
         unwind_to_catch,
       )
-    _, _ ->
+    False, False ->
       call_regular_function(
         state,
         fn_ref,
@@ -330,6 +340,96 @@ fn call_generator_function(
       )
     }
     Ok(#(ThrowCompletion(thrown, h), _)) -> Error(#(Thrown, thrown, h))
+    Ok(#(AwaitCompletion(_, _), _)) ->
+      Error(#(
+        StepVmError(Unimplemented("await in sync generator")),
+        JsUndefined,
+        state.heap,
+      ))
+    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
+  }
+}
+
+/// Async generator call: run to InitialYield, allocate AsyncGeneratorSlot with
+/// empty request queue, return AsyncGeneratorObject. Body doesn't actually
+/// execute until the first .next() — that's when the driver loop kicks in.
+fn call_async_generator_function(
+  state: State,
+  fn_ref: value.Ref,
+  env_ref: value.Ref,
+  callee_template: FuncTemplate,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  this_val: JsValue,
+  execute_inner: ExecuteInnerFn,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let locals = setup_locals(state.heap, env_ref, callee_template, args)
+  let gen_state =
+    State(
+      ..state,
+      stack: [],
+      locals:,
+      func: callee_template,
+      code: callee_template.bytecode,
+      constants: callee_template.constants,
+      pc: 0,
+      call_stack: [],
+      try_stack: [],
+      finally_stack: [],
+      this_binding: this_val,
+      callee_ref: Some(fn_ref),
+      call_args: args,
+    )
+  case execute_inner(gen_state) {
+    Ok(#(YieldCompletion(_, _), suspended)) -> {
+      let #(saved_try, saved_finally) =
+        generators.save_stacks(suspended.try_stack, suspended.finally_stack)
+      let #(h, data_ref) =
+        heap.alloc(
+          suspended.heap,
+          AsyncGeneratorSlot(
+            gen_state: value.AGSuspendedStart,
+            queue: [],
+            func_template: callee_template,
+            env_ref:,
+            saved_pc: suspended.pc,
+            saved_locals: suspended.locals,
+            saved_stack: suspended.stack,
+            saved_try_stack: saved_try,
+            saved_finally_stack: saved_finally,
+            saved_this: suspended.this_binding,
+            saved_callee_ref: suspended.callee_ref,
+          ),
+        )
+      let #(h, gen_obj_ref) =
+        heap.alloc(
+          h,
+          ObjectSlot(
+            kind: AsyncGeneratorObject(generator_data: data_ref),
+            properties: dict.new(),
+            elements: elements.new(),
+            prototype: Some(state.builtins.async_generator.prototype),
+            symbol_properties: dict.new(),
+            extensible: True,
+          ),
+        )
+      Ok(
+        State(
+          ..state.merge_globals(state, suspended, []),
+          heap: h,
+          stack: [JsObject(gen_obj_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    Ok(#(ThrowCompletion(thrown, h), _)) -> Error(#(Thrown, thrown, h))
+    Ok(#(NormalCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
+      // InitialYield is first op — body never runs before it. Unreachable.
+      Error(#(
+        StepVmError(Unimplemented("async generator didn't hit InitialYield")),
+        JsUndefined,
+        state.heap,
+      ))
     Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
   }
 }
@@ -381,7 +481,7 @@ fn call_async_function(
       call_args: args,
     )
   case execute_inner(async_state) {
-    Ok(#(YieldCompletion(awaited_value, h2), suspended)) -> {
+    Ok(#(AwaitCompletion(awaited_value, h2), suspended)) -> {
       // Body hit `await` -- save state, set up promise resolution
       let #(saved_try, saved_finally) =
         generators.save_stacks(suspended.try_stack, suspended.finally_stack)
@@ -446,6 +546,12 @@ fn call_async_function(
         ),
       )
     }
+    Ok(#(YieldCompletion(_, _), _)) ->
+      Error(#(
+        StepVmError(Unimplemented("yield in non-generator async function")),
+        JsUndefined,
+        state.heap,
+      ))
     Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
   }
 }
@@ -614,7 +720,7 @@ pub fn call_native_async_resume(
             State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
           )
         }
-        Ok(#(YieldCompletion(awaited_value, h2), suspended)) -> {
+        Ok(#(AwaitCompletion(awaited_value, h2), suspended)) -> {
           // Hit another `await` -- save state and set up promise resolution
           let #(saved_try, saved_finally) =
             generators.save_stacks(suspended.try_stack, suspended.finally_stack)
@@ -647,6 +753,12 @@ pub fn call_native_async_resume(
             State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
           )
         }
+        Ok(#(YieldCompletion(_, _), _)) ->
+          Error(#(
+            StepVmError(Unimplemented("yield in non-generator async function")),
+            JsUndefined,
+            state.heap,
+          ))
         Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
       }
     }
@@ -979,10 +1091,54 @@ pub fn call_native(
         rest_stack,
         execute_inner,
       )
+    value.Call(value.ArrayIteratorNext) ->
+      call_array_iterator_next(state, this, rest_stack)
     value.Call(value.GeneratorThrow) ->
       generators.call_native_generator_throw(
         state,
         this,
+        args,
+        rest_stack,
+        execute_inner,
+        unwind_to_catch,
+      )
+    // Async generator prototype methods — enqueue a request, return a promise
+    value.Call(value.AsyncGeneratorNext) ->
+      async_generators.call_native_method(
+        state,
+        this,
+        args,
+        rest_stack,
+        value.AGNext,
+        execute_inner,
+        unwind_to_catch,
+      )
+    value.Call(value.AsyncGeneratorReturn) ->
+      async_generators.call_native_method(
+        state,
+        this,
+        args,
+        rest_stack,
+        value.AGReturn,
+        execute_inner,
+        unwind_to_catch,
+      )
+    value.Call(value.AsyncGeneratorThrow) ->
+      async_generators.call_native_method(
+        state,
+        this,
+        args,
+        rest_stack,
+        value.AGThrow,
+        execute_inner,
+        unwind_to_catch,
+      )
+    value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, is_return:)) ->
+      async_generators.call_native_resume(
+        state,
+        data_ref,
+        is_reject,
+        is_return,
         args,
         rest_stack,
         execute_inner,
@@ -1374,6 +1530,77 @@ fn extract_elements_loop(
       let val = elements.get(elements, idx)
       extract_elements_loop(elements, idx + 1, length, [val, ..acc])
     }
+  }
+}
+
+/// ES §23.1.5.2.1 %ArrayIteratorPrototype%.next()
+fn call_array_iterator_next(
+  state: State,
+  this: JsValue,
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case this {
+    JsObject(iter_ref) ->
+      case heap.read(state.heap, iter_ref) {
+        Some(
+          ObjectSlot(kind: value.ArrayIteratorObject(source:, index:), ..) as slot,
+        ) -> {
+          let #(length, elems) =
+            heap.read_array_like(state.heap, source)
+            |> option.unwrap(#(0, elements.new()))
+          case index >= length {
+            True -> {
+              let #(h, result) =
+                generators.create_iterator_result(
+                  state.heap,
+                  state.builtins,
+                  JsUndefined,
+                  True,
+                )
+              Ok(
+                State(
+                  ..state,
+                  heap: h,
+                  stack: [result, ..rest_stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+            False -> {
+              let val = elements.get(elems, index)
+              let h =
+                heap.write(
+                  state.heap,
+                  iter_ref,
+                  ObjectSlot(
+                    ..slot,
+                    kind: value.ArrayIteratorObject(source:, index: index + 1),
+                  ),
+                )
+              let #(h, result) =
+                generators.create_iterator_result(h, state.builtins, val, False)
+              Ok(
+                State(
+                  ..state,
+                  heap: h,
+                  stack: [result, ..rest_stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+          }
+        }
+        _ ->
+          state.throw_type_error(
+            state,
+            "Array Iterator next called on incompatible receiver",
+          )
+      }
+    _ ->
+      state.throw_type_error(
+        state,
+        "Array Iterator next called on incompatible receiver",
+      )
   }
 }
 

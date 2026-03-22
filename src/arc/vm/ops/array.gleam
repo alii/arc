@@ -99,7 +99,7 @@ pub fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {
 
 /// Bulk-append a range [idx, end) from source elements onto the target array.
 /// Used for the array fast-path in ArraySpread — avoids creating an
-/// ArrayIteratorSlot when the source is a plain array.
+/// ArrayIteratorObject when the source is a plain array.
 pub fn append_range_to_array(
   h: Heap,
   target_ref: Ref,

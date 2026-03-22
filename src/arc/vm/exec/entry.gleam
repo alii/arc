@@ -76,6 +76,8 @@ pub fn run(
     ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
     YieldCompletion(_, _) ->
       panic as "YieldCompletion should not appear at script level"
+    completion.AwaitCompletion(_, _) ->
+      panic as "AwaitCompletion should not appear at script level"
   }
 }
 
@@ -122,6 +124,8 @@ pub fn run_module_with_imports(
           ModuleThrow(value: val, heap: drained_state.heap)
         YieldCompletion(_, _) ->
           panic as "YieldCompletion should not appear at module level"
+        completion.AwaitCompletion(_, _) ->
+          panic as "AwaitCompletion should not appear at module level"
       }
     }
   }
@@ -170,6 +174,8 @@ pub fn run_and_drain_repl(
       Ok(#(ThrowCompletion(val, drained_state.heap), new_env))
     YieldCompletion(_, _) ->
       panic as "YieldCompletion should not appear at script level"
+    completion.AwaitCompletion(_, _) ->
+      panic as "AwaitCompletion should not appear at script level"
   }
 }
 

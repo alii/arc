@@ -361,6 +361,8 @@ pub fn eval_script_native(
                     ThrowCompletion(thrown, _) -> #(state, Error(thrown))
                     YieldCompletion(_, _) ->
                       state.type_error(state, "evalScript: unexpected yield")
+                    completion.AwaitCompletion(_, _) ->
+                      state.type_error(state, "evalScript: unexpected await")
                   }
                 }
               }

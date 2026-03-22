@@ -1217,6 +1217,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             FunctionObject(..) | NativeFunction(_) -> "Function"
             PromiseObject(_) -> "Promise"
             GeneratorObject(_) -> "Generator"
+            value.AsyncGeneratorObject(_) -> "AsyncGenerator"
             value.StringObject(_) -> "String"
             value.NumberObject(_) -> "Number"
             value.BooleanObject(_) -> "Boolean"
@@ -1228,6 +1229,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.WeakMapObject(_) -> "WeakMap"
             value.WeakSetObject(_) -> "WeakSet"
             value.RegExpObject(..) -> "RegExp"
+            value.ArrayIteratorObject(..) -> "Array Iterator"
             OrdinaryObject -> "Object"
           }
       }

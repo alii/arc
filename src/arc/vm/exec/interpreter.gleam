@@ -1,7 +1,8 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/completion.{
-  type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
+  type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
+  YieldCompletion,
 }
 import arc/vm/exec/call
 import arc/vm/exec/event_loop
@@ -15,12 +16,12 @@ import arc/vm/opcode.{
   CallConstructorApply, CallMethod, CallMethodApply, CallSuper, CreateArguments,
   DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
   DefineField, DefineFieldComputed, DefineMethod, DeleteElem, DeleteField, Dup,
-  ForInNext, ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2,
-  GetGlobal, GetIterator, GetLocal, GetThis, InitGlobalLex, InitialYield,
-  IteratorClose, IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  MakeClosure, NewObject, NewRegExp, ObjectSpread, Pop, PushConst, PushTry,
-  PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return, SetupDerivedClass,
-  Swap, TypeOf, TypeofGlobal, UnaryOp, Yield,
+  ForInNext, ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetField,
+  GetField2, GetGlobal, GetIterator, GetLocal, GetThis, InitGlobalLex,
+  InitialYield, IteratorClose, IteratorNext, Jump, JumpIfFalse, JumpIfNullish,
+  JumpIfTrue, MakeClosure, NewObject, NewRegExp, ObjectSpread, Pop, PushConst,
+  PushTry, PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return,
+  SetupDerivedClass, Swap, TypeOf, TypeofGlobal, UnaryOp, Yield,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -28,12 +29,12 @@ import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/ops/property
 import arc/vm/state.{
-  type State, type StepResult, type VmError, Done, LocalIndexOutOfBounds,
-  SavedFrame, StackUnderflow, State, StepVmError, Thrown, TryFrame,
-  Unimplemented, Yielded,
+  type State, type StepResult, type VmError, Awaited, Done,
+  LocalIndexOutOfBounds, SavedFrame, StackUnderflow, State, StepVmError, Thrown,
+  TryFrame, Unimplemented, Yielded,
 }
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, ArrayIteratorSlot, ArrayObject,
+  type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
   DataProperty, Finite, ForInIteratorSlot, FunctionObject, GeneratorObject,
   JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, JsUninitialized,
   Named, NativeFunction, ObjectSlot, OrdinaryObject,
@@ -180,11 +181,11 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
           Ok(#(NormalCompletion(result, heap), State(..state, heap:)))
         Error(#(StepVmError(err), _, _)) -> Error(err)
         Error(#(Yielded, yielded_value, heap)) -> {
-          // Generator yielded or async awaited — build suspended state.
-          // For Yield/Await: pop the yielded value from stack, advance pc.
+          // Generator yielded — build suspended state.
+          // For Yield: pop the yielded value from stack, advance pc.
           // For InitialYield: stack unchanged, just advance pc.
           let suspended_state = case op {
-            Yield | Await ->
+            Yield ->
               State(
                 ..state,
                 heap:,
@@ -197,6 +198,20 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
             _ -> State(..state, heap:, pc: state.pc + 1)
           }
           Ok(#(YieldCompletion(yielded_value, heap), suspended_state))
+        }
+        Error(#(Awaited, awaited_value, heap)) -> {
+          // Async function/generator hit await — pop value, advance pc.
+          let suspended_state =
+            State(
+              ..state,
+              heap:,
+              stack: case state.stack {
+                [_, ..rest] -> rest
+                [] -> []
+              },
+              pc: state.pc + 1,
+            )
+          Ok(#(AwaitCompletion(awaited_value, heap), suspended_state))
         }
         Error(#(Thrown, thrown_value, heap)) -> {
           // Try to unwind to a catch handler
@@ -340,8 +355,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     | MakeClosure(_) -> step_calls(state, op)
 
     // Iteration
-    ForInStart | ForInNext | GetIterator | IteratorNext | IteratorClose ->
-      step_iteration(state, op)
+    ForInStart
+    | ForInNext
+    | GetIterator
+    | GetAsyncIterator
+    | IteratorNext
+    | IteratorClose -> step_iteration(state, op)
 
     // Generator/async
     InitialYield | Yield | Await -> step_generators(state, op)
@@ -2398,7 +2417,7 @@ fn step_iteration(
           case iterable {
             JsObject(ref) ->
               case heap.read(state.heap, ref) {
-                // Array/Arguments fast path: use ArrayIteratorSlot when
+                // Array/Arguments fast path: use ArrayIteratorObject when
                 // Symbol.iterator hasn't been overridden on the instance.
                 Some(ObjectSlot(kind: ArrayObject(_), ..))
                 | Some(ObjectSlot(kind: value.ArgumentsObject(_), ..)) ->
@@ -2429,10 +2448,7 @@ fn step_iteration(
               case common.to_object(state.heap, state.builtins, iterable) {
                 Some(#(h, wrapper_ref)) -> {
                   let #(h, iter_ref) =
-                    heap.alloc(
-                      h,
-                      ArrayIteratorSlot(source: wrapper_ref, index: 0),
-                    )
+                    alloc_array_iterator(h, state.builtins, wrapper_ref)
                   Ok(
                     State(
                       ..state,
@@ -2463,18 +2479,40 @@ fn step_iteration(
       }
     }
 
+    GetAsyncIterator -> {
+      case state.stack {
+        [iterable, ..rest] ->
+          case iterable {
+            JsObject(ref) ->
+              get_async_iterator_via_symbol(state, ref, iterable, rest)
+            _ ->
+              state.throw_type_error(
+                state,
+                object.inspect(iterable, state.heap) <> " is not async iterable",
+              )
+          }
+        _ ->
+          Error(#(
+            StepVmError(StackUnderflow("GetAsyncIterator")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
     IteratorNext -> {
       case state.stack {
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
-            Some(ArrayIteratorSlot(source:, index:)) -> {
+            Some(
+              ObjectSlot(kind: ArrayIteratorObject(source:, index:), ..) as slot,
+            ) -> {
               // Re-read the source length each time (handles mutations during iteration)
               let #(length, elements) =
                 heap.read_array_like(state.heap, source)
                 |> option.unwrap(#(0, elements.new()))
               case index >= length {
                 True ->
-                  // Done — push undefined + done=true
                   Ok(
                     State(
                       ..state,
@@ -2488,14 +2526,15 @@ fn step_iteration(
                     ),
                   )
                 False -> {
-                  // Read element at current index
                   let val = elements.get(elements, index)
-                  // Advance iterator index
                   let heap =
                     heap.write(
                       state.heap,
                       iter_ref,
-                      ArrayIteratorSlot(source:, index: index + 1),
+                      ObjectSlot(
+                        ..slot,
+                        kind: ArrayIteratorObject(source:, index: index + 1),
+                      ),
                     )
                   Ok(
                     State(
@@ -2628,8 +2667,8 @@ fn step_generators(
     Await -> {
       // Pop the awaited value from the stack and suspend the async function.
       case state.stack {
-        [awaited_value, ..] -> Error(#(Yielded, awaited_value, state.heap))
-        [] -> Error(#(Yielded, JsUndefined, state.heap))
+        [awaited_value, ..] -> Error(#(Awaited, awaited_value, state.heap))
+        [] -> Error(#(Awaited, JsUndefined, state.heap))
       }
     }
 
@@ -2985,9 +3024,9 @@ fn binop_add_with_to_primitive(
   }
 }
 
-/// Array/Arguments fast path for GetIterator: use ArrayIteratorSlot directly
-/// if Symbol.iterator hasn't been overridden on the instance. If it has been
-/// overridden, fall through to the spec-compliant Symbol.iterator lookup.
+/// Array/Arguments fast path for GetIterator: allocate an ArrayIteratorObject
+/// directly if Symbol.iterator hasn't been overridden on the instance. If it
+/// has, fall through to the spec-compliant Symbol.iterator lookup.
 fn get_iterator_array_fast_path(
   state: State,
   ref: value.Ref,
@@ -3001,8 +3040,7 @@ fn get_iterator_array_fast_path(
   }
   case has_override {
     False -> {
-      let #(h, iter_ref) =
-        heap.alloc(state.heap, ArrayIteratorSlot(source: ref, index: 0))
+      let #(h, iter_ref) = alloc_array_iterator(state.heap, state.builtins, ref)
       Ok(
         State(
           ..state,
@@ -3014,6 +3052,24 @@ fn get_iterator_array_fast_path(
     }
     True -> get_iterator_via_symbol(state, ref, iterable, rest_stack)
   }
+}
+
+fn alloc_array_iterator(
+  h: Heap,
+  builtins: common.Builtins,
+  source: value.Ref,
+) -> #(Heap, value.Ref) {
+  heap.alloc(
+    h,
+    ObjectSlot(
+      kind: ArrayIteratorObject(source:, index: 0),
+      properties: dict.new(),
+      elements: elements.new(),
+      prototype: Some(builtins.array_iterator_proto),
+      symbol_properties: dict.new(),
+      extensible: True,
+    ),
+  )
 }
 
 /// ES2024 §7.4.1 GetIterator(obj, kind) — look up Symbol.iterator and call it.
@@ -3060,5 +3116,51 @@ fn get_iterator_via_symbol(
         state,
         object.inspect(iterable, state.heap) <> " is not iterable",
       )
+  }
+}
+
+/// ES §7.4.3 GetIterator(obj, async). Tries Symbol.asyncIterator, falls back
+/// to Symbol.iterator. Sync iterator results are handled transparently by the
+/// awaits in the for-await-of body (`await x` on a non-promise is a no-op).
+fn get_async_iterator_via_symbol(
+  state: State,
+  ref: Ref,
+  iterable: JsValue,
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case try_iterator_symbol(state, ref, iterable, value.symbol_async_iterator) {
+    Ok(#(iter, state)) ->
+      Ok(State(..state, stack: [iter, ..rest_stack], pc: state.pc + 1))
+    Error(state) ->
+      case try_iterator_symbol(state, ref, iterable, value.symbol_iterator) {
+        Ok(#(iter, state)) ->
+          Ok(State(..state, stack: [iter, ..rest_stack], pc: state.pc + 1))
+        Error(state) ->
+          state.throw_type_error(
+            state,
+            object.inspect(iterable, state.heap) <> " is not async iterable",
+          )
+      }
+  }
+}
+
+fn try_iterator_symbol(
+  state: State,
+  ref: Ref,
+  iterable: JsValue,
+  sym: value.SymbolId,
+) -> Result(#(JsValue, State), State) {
+  case object.get_symbol_value(state, ref, sym, iterable) {
+    Ok(#(method, state)) ->
+      case coerce.is_callable_value(state.heap, method) {
+        True ->
+          case state.call(state, method, iterable, []) {
+            Ok(#(JsObject(r), state)) -> Ok(#(JsObject(r), state))
+            Ok(#(_, state)) -> Error(state)
+            Error(#(_, state)) -> Error(state)
+          }
+        False -> Error(state)
+      }
+    Error(#(_, state)) -> Error(state)
   }
 }

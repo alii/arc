@@ -103,7 +103,7 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
                 seen,
               )
             PromiseObject(_) -> "Promise {}"
-            GeneratorObject(_) ->
+            GeneratorObject(_) | value.AsyncGeneratorObject(_) ->
               inspect_tagged_object(
                 h,
                 properties,
@@ -133,6 +133,7 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
               "Set(" <> int.to_string(dict.size(data)) <> ")"
             value.WeakMapObject(_) -> "WeakMap {}"
             value.WeakSetObject(_) -> "WeakSet {}"
+            value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
             value.RegExpObject(pattern:, flags:) -> {
               let source = case pattern {
                 "" -> "(?:)"
@@ -286,6 +287,8 @@ fn eval(
             )
             Ok(#(YieldCompletion(_, _), _)) ->
               panic as "YieldCompletion should not appear at REPL level"
+            Ok(#(completion.AwaitCompletion(_, _), _)) ->
+              panic as "AwaitCompletion should not appear at REPL level"
             Error(vm_err) -> #(
               state,
               Error("InternalError: " <> inspect_vm_error(vm_err)),
@@ -527,6 +530,7 @@ fn run_script_file(source: String, event_loop: Bool) -> Nil {
             Ok(ThrowCompletion(val, new_heap)) ->
               io.println("Uncaught exception: " <> inspect(new_heap, val))
             Ok(YieldCompletion(_, _)) -> Nil
+            Ok(completion.AwaitCompletion(_, _)) -> Nil
             Error(vm_err) ->
               io.println("InternalError: " <> inspect_vm_error(vm_err))
           }

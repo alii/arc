@@ -73,6 +73,8 @@ fn run_simple(
     Ok(NormalCompletion(val, _heap)) -> Ok(val)
     Ok(ThrowCompletion(_, _)) -> panic as "unexpected ThrowCompletion"
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(completion.AwaitCompletion(_, _)) ->
+      panic as "unexpected AwaitCompletion"
     Error(e) -> Error(e)
   }
 }
@@ -91,6 +93,8 @@ fn run_throwing(
     Ok(NormalCompletion(_, _)) ->
       panic as "expected ThrowCompletion, got NormalCompletion"
     Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(completion.AwaitCompletion(_, _)) ->
+      panic as "unexpected AwaitCompletion"
     Error(e) -> Error(e)
   }
 }

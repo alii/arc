@@ -290,6 +290,8 @@ pub type StepResult {
   Thrown
   /// Generator suspension — yielded a value (or initial suspend).
   Yielded
+  /// Async suspension — hit `await`, waiting on a promise.
+  Awaited
 }
 
 // ============================================================================

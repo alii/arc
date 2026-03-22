@@ -47,6 +47,7 @@ pub type Builtins {
     is_finite: Ref,
     promise: BuiltinType,
     generator: GeneratorBuiltin,
+    async_generator: GeneratorBuiltin,
     symbol: Ref,
     arc: Ref,
     json: Ref,
@@ -62,6 +63,7 @@ pub type Builtins {
     encode_uri_component: Ref,
     escape: Ref,
     unescape: Ref,
+    array_iterator_proto: Ref,
   )
 }
 

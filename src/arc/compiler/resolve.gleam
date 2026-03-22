@@ -13,10 +13,10 @@ import arc/vm/opcode.{
   IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow,
-  IrForInNext, IrForInStart, IrGetBoxed, IrGetElem, IrGetElem2, IrGetField,
-  IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal, IrGetThis,
-  IrInitGlobalLex, IrInitialYield, IrIteratorClose, IrIteratorNext, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
+  IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem,
+  IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
+  IrGetThis, IrInitGlobalLex, IrInitialYield, IrIteratorClose, IrIteratorNext,
+  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
   IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectSpread, IrPop, IrPopTry,
   IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal,
   IrPutLocal, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar,
@@ -233,6 +233,8 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.ForInNext, ..acc])
     [IrGetIterator, ..rest] ->
       resolve_ops(rest, labels, [opcode.GetIterator, ..acc])
+    [IrGetAsyncIterator, ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetAsyncIterator, ..acc])
     [IrIteratorNext, ..rest] ->
       resolve_ops(rest, labels, [opcode.IteratorNext, ..acc])
     [IrIteratorClose, ..rest] ->

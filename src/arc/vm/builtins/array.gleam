@@ -4289,19 +4289,26 @@ fn build_index_list(idx: Int, length: Int, acc: List(JsValue)) -> List(JsValue) 
   }
 }
 
-/// ES2024 §23.1.3.32 Array.prototype.values ( )
-/// Returns an array of values (simplified — no iterator protocol).
+/// ES2024 §23.1.3.37 Array.prototype.values ( )
+/// Returns a new Array Iterator object (§23.1.5.1 CreateArrayIterator).
 fn array_values(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _ref, length, state <- require_array(this, state)
-  use vals, state <- state.try_op(
-    collect_all_elements(state, this, length, 0, []),
-  )
-  let #(heap, arr_ref) =
-    common.alloc_array(state.heap, vals, state.builtins.array.prototype)
-  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+  use ref, _length, state <- require_array(this, state)
+  let #(heap, iter_ref) =
+    heap.alloc(
+      state.heap,
+      ObjectSlot(
+        kind: value.ArrayIteratorObject(source: ref, index: 0),
+        properties: dict.new(),
+        elements: elements.new(),
+        prototype: Some(state.builtins.array_iterator_proto),
+        symbol_properties: dict.new(),
+        extensible: True,
+      ),
+    )
+  #(State(..state, heap:), Ok(JsObject(iter_ref)))
 }
 
 /// ES2024 §23.1.3.4 Array.prototype.entries ( )
