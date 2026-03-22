@@ -475,6 +475,27 @@ pub type JsonNativeFn {
   JsonStringify
 }
 
+/// Reflect static methods — ES2024 §28.1.
+/// Thin wrappers over internal object operations. Unlike Object.* counterparts,
+/// all throw TypeError if target isn't an Object (no coercion), and the
+/// mutation methods (defineProperty/deleteProperty/set/setPrototypeOf/
+/// preventExtensions) return Bool instead of throwing on failure.
+pub type ReflectNativeFn {
+  ReflectApply
+  ReflectConstruct
+  ReflectDefineProperty
+  ReflectDeleteProperty
+  ReflectGet
+  ReflectGetOwnPropertyDescriptor
+  ReflectGetPrototypeOf
+  ReflectHas
+  ReflectIsExtensible
+  ReflectOwnKeys
+  ReflectPreventExtensions
+  ReflectSet
+  ReflectSetPrototypeOf
+}
+
 /// Map key type — normalizes JS values for use as Dict keys.
 /// Per ES2024 §24.1.3.1, Map uses SameValueZero for key comparison:
 ///   - NaN equals NaN (unlike ===)
@@ -607,6 +628,7 @@ pub type NativeFn {
   ObjectNative(ObjectNativeFn)
   ArcNative(ArcNativeFn)
   JsonNative(JsonNativeFn)
+  ReflectNative(ReflectNativeFn)
   MapNative(MapNativeFn)
   SetNative(SetNativeFn)
   WeakMapNative(WeakMapNativeFn)

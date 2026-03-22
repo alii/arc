@@ -51,6 +51,7 @@ pub type Builtins {
     symbol: Ref,
     arc: Ref,
     json: Ref,
+    reflect: Ref,
     map: BuiltinType,
     set: BuiltinType,
     weak_map: BuiltinType,

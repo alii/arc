@@ -79,6 +79,97 @@ fn call_fn_callback(
   )
 }
 
+/// The construct_fn callback that gets stored in State.
+/// Wraps do_construct for re-entrant `new target(...args)` from native code
+/// (e.g. Reflect.construct).
+///
+/// Sets up an isolated frame with a sentinel empty-bytecode func so that when
+/// the constructor body returns, execute_inner hits end-of-code and yields
+/// NormalCompletion with the constructed object on top of stack. The sentinel
+/// func is required because Return restores `code` from SavedFrame.func.bytecode,
+/// not from the state's code field directly.
+fn construct_fn_callback(
+  state: State,
+  target: JsValue,
+  args: List(JsValue),
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case target {
+    JsObject(ref) -> {
+      let empty_code = tuple_array.from_list([])
+      // Sentinel func with no bytecode — SavedFrame stores this, so Return
+      // restores empty code and execute_inner terminates immediately.
+      let sentinel_func =
+        value.FuncTemplate(
+          name: None,
+          arity: 0,
+          local_count: 0,
+          bytecode: empty_code,
+          constants: tuple_array.from_list([]),
+          functions: tuple_array.from_list([]),
+          env_descriptors: [],
+          is_strict: True,
+          is_arrow: False,
+          is_derived_constructor: False,
+          is_generator: False,
+          is_async: False,
+        )
+      let isolated =
+        State(
+          ..state,
+          stack: [],
+          pc: 0,
+          func: sentinel_func,
+          code: empty_code,
+          call_stack: [],
+          try_stack: [],
+          finally_stack: [],
+        )
+      // do_construct either:
+      //  - pushes a SavedFrame and switches to the constructor's bytecode
+      //    (regular function path), or
+      //  - runs synchronously and leaves the result on stack at pc+1
+      //    (native constructor path).
+      // Either way, execute_inner drives to completion.
+      case do_construct(isolated, ref, args, []) {
+        Ok(entered) ->
+          case execute_inner(entered) {
+            Ok(#(NormalCompletion(val, h), final_state)) ->
+              Ok(#(
+                val,
+                State(..state.merge_globals(state, final_state, []), heap: h),
+              ))
+            Ok(#(ThrowCompletion(thrown, h), final_state)) ->
+              Error(#(
+                thrown,
+                State(..state.merge_globals(state, final_state, []), heap: h),
+              ))
+            Ok(#(YieldCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
+              panic as "Yield/Await completion during construct"
+            Error(vm_err) ->
+              panic as {
+                "VM error during construct: " <> string.inspect(vm_err)
+              }
+          }
+        Error(#(Thrown, thrown, h)) -> Error(#(thrown, State(..state, heap: h)))
+        Error(#(StepVmError(vm_err), _, _)) ->
+          panic as { "VM error in do_construct: " <> string.inspect(vm_err) }
+        Error(#(other, _, h)) ->
+          panic as {
+            "Unexpected step result from do_construct: "
+            <> string.inspect(other)
+            <> " heap="
+            <> string.inspect(h)
+          }
+      }
+    }
+    _ ->
+      coerce.thrown_type_error(
+        state,
+        object.inspect(target, state.heap) <> " is not a constructor",
+      )
+  }
+}
+
 /// Create a fresh VM state from a function template.
 /// Most callers can use this directly; override fields with `State(..new_state(...), ...)`
 /// for cases that need non-default this_binding or symbol_descriptions.
@@ -121,6 +212,7 @@ pub fn new_state(
     realms: dict.new(),
     js_to_string: js_to_string_callback,
     call_fn: call_fn_callback,
+    construct_fn: construct_fn_callback,
     call_depth: 0,
     event_loop:,
   )

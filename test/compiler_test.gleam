@@ -4180,6 +4180,165 @@ pub fn object_keys_error_message_test() -> Nil {
 }
 
 // ============================================================================
+// Reflect
+// ============================================================================
+
+pub fn reflect_get_test() -> Nil {
+  assert_normal_number("Reflect.get({a: 42}, 'a')", 42.0)
+}
+
+pub fn reflect_get_receiver_test() -> Nil {
+  // receiver is used as `this` for getters
+  assert_normal_number(
+    "var o = { get x() { return this.y } };
+     Reflect.get(o, 'x', {y: 99})",
+    99.0,
+  )
+}
+
+pub fn reflect_set_test() -> Nil {
+  assert_normal_number("var o = {}; Reflect.set(o, 'a', 7); o.a", 7.0)
+}
+
+pub fn reflect_set_returns_bool_test() -> Nil {
+  assert_normal("Reflect.set({}, 'a', 1)", JsBool(True))
+}
+
+pub fn reflect_set_nonwritable_returns_false_test() -> Nil {
+  assert_normal(
+    "var o = {}; Object.defineProperty(o, 'a', {value:1, writable:false});
+     Reflect.set(o, 'a', 2)",
+    JsBool(False),
+  )
+}
+
+pub fn reflect_has_test() -> Nil {
+  assert_normal("Reflect.has({a: 1}, 'a')", JsBool(True))
+}
+
+pub fn reflect_has_proto_test() -> Nil {
+  assert_normal("Reflect.has({}, 'toString')", JsBool(True))
+}
+
+pub fn reflect_has_missing_test() -> Nil {
+  assert_normal("Reflect.has({a: 1}, 'b')", JsBool(False))
+}
+
+pub fn reflect_own_keys_test() -> Nil {
+  assert_normal("Reflect.ownKeys({a:1, b:2}).sort().join(',')", JsString("a,b"))
+}
+
+pub fn reflect_own_keys_includes_symbols_test() -> Nil {
+  assert_normal_number(
+    "var s = Symbol('x'); var o = {a:1}; o[s] = 2;
+     Reflect.ownKeys(o).length",
+    2.0,
+  )
+}
+
+pub fn reflect_is_extensible_test() -> Nil {
+  assert_normal("Reflect.isExtensible({})", JsBool(True))
+}
+
+pub fn reflect_prevent_extensions_test() -> Nil {
+  assert_normal(
+    "var o = {}; Reflect.preventExtensions(o); Reflect.isExtensible(o)",
+    JsBool(False),
+  )
+}
+
+pub fn reflect_prevent_extensions_returns_true_test() -> Nil {
+  assert_normal("Reflect.preventExtensions({})", JsBool(True))
+}
+
+pub fn reflect_get_prototype_of_test() -> Nil {
+  assert_normal("Reflect.getPrototypeOf([]) === Array.prototype", JsBool(True))
+}
+
+pub fn reflect_set_prototype_of_test() -> Nil {
+  assert_normal(
+    "var o = {}; Reflect.setPrototypeOf(o, null); Reflect.getPrototypeOf(o)",
+    JsNull,
+  )
+}
+
+pub fn reflect_set_prototype_of_returns_bool_test() -> Nil {
+  assert_normal("Reflect.setPrototypeOf({}, null)", JsBool(True))
+}
+
+pub fn reflect_set_prototype_of_nonextensible_test() -> Nil {
+  assert_normal(
+    "var o = {}; Object.preventExtensions(o);
+     Reflect.setPrototypeOf(o, Array.prototype)",
+    JsBool(False),
+  )
+}
+
+pub fn reflect_define_property_returns_bool_test() -> Nil {
+  assert_normal("Reflect.defineProperty({}, 'a', {value: 1})", JsBool(True))
+}
+
+pub fn reflect_define_property_failure_returns_false_test() -> Nil {
+  assert_normal(
+    "var o = Object.freeze({a:1});
+     Reflect.defineProperty(o, 'b', {value: 2})",
+    JsBool(False),
+  )
+}
+
+pub fn reflect_delete_property_test() -> Nil {
+  assert_normal(
+    "var o = {a: 1}; Reflect.deleteProperty(o, 'a'); 'a' in o",
+    JsBool(False),
+  )
+}
+
+pub fn reflect_delete_property_returns_bool_test() -> Nil {
+  assert_normal("Reflect.deleteProperty({a:1}, 'a')", JsBool(True))
+}
+
+pub fn reflect_delete_nonconfigurable_returns_false_test() -> Nil {
+  assert_normal(
+    "var o = {}; Object.defineProperty(o, 'a', {value:1, configurable:false});
+     Reflect.deleteProperty(o, 'a')",
+    JsBool(False),
+  )
+}
+
+pub fn reflect_apply_test() -> Nil {
+  assert_normal_number("Reflect.apply(Math.max, undefined, [1, 5, 3])", 5.0)
+}
+
+pub fn reflect_construct_basic_test() -> Nil {
+  assert_normal(
+    "class C { constructor(x) { this.x = x; } } Reflect.construct(C, [42]).x",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn reflect_get_own_property_descriptor_test() -> Nil {
+  assert_normal_number(
+    "Reflect.getOwnPropertyDescriptor({a:42}, 'a').value",
+    42.0,
+  )
+}
+
+pub fn reflect_throws_on_nonobject_test() -> Nil {
+  assert_thrown("Reflect.get(5, 'x')")
+}
+
+pub fn reflect_throws_on_null_test() -> Nil {
+  assert_thrown("Reflect.has(null, 'x')")
+}
+
+pub fn reflect_to_string_tag_test() -> Nil {
+  assert_normal(
+    "Object.prototype.toString.call(Reflect)",
+    JsString("[object Reflect]"),
+  )
+}
+
+// ============================================================================
 // Object.getOwnPropertyNames
 // ============================================================================
 

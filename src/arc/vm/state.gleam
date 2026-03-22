@@ -132,6 +132,10 @@ pub type State {
     /// Set by the VM executor (wraps run_handler_with_this).
     call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
       Result(#(JsValue, State), #(JsValue, State)),
+    /// Re-entrant construct mechanism — `new target(...args)` from native code.
+    /// Same shape as call_fn. Set by the VM executor (wraps do_construct).
+    construct_fn: fn(State, JsValue, List(JsValue)) ->
+      Result(#(JsValue, State), #(JsValue, State)),
     /// Current call stack depth. Incremented on function entry, decremented on return.
     /// Throws RangeError when exceeding limits.max_call_depth.
     call_depth: Int,
@@ -190,6 +194,16 @@ pub fn call(
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   let f = state.call_fn
   f(state, callee, this_val, args)
+}
+
+/// Call state.construct_fn (re-entrant `new target(...args)`).
+pub fn construct(
+  state: State,
+  target: JsValue,
+  args: List(JsValue),
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  let f = state.construct_fn
+  f(state, target, args)
 }
 
 /// Call a function or propagate thrown error. Use with `use` syntax:

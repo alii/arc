@@ -300,7 +300,7 @@ fn get_own_property_descriptor(
 /// All created properties are {[[Writable]]: true, [[Enumerable]]: true,
 /// [[Configurable]]: true} per spec. We use value.data_property which
 /// defaults to writable=true, enumerable=true, configurable=true.
-fn make_descriptor_object(
+pub fn make_descriptor_object(
   heap: Heap,
   prop: value.Property,
   object_proto: Ref,
@@ -413,7 +413,7 @@ fn define_property(
 /// TODO(Deviation): Does not fully check non-configurable constraints
 /// (e.g. redefining a non-configurable property's attributes should throw
 /// in some cases per ValidateAndApplyPropertyDescriptor).
-fn apply_descriptor(
+pub fn apply_descriptor(
   state: State,
   target_ref: Ref,
   key: String,
@@ -915,7 +915,11 @@ fn own_keys_impl(
 /// TODO(Deviation): dict.to_list does not guarantee insertion-order for string
 /// keys. Gleam dicts are unordered, so property creation order is not preserved.
 /// The spec requires chronological order for non-index string keys (step 2).
-fn collect_own_keys(heap: Heap, ref: Ref, enumerable_only: Bool) -> List(String) {
+pub fn collect_own_keys(
+  heap: Heap,
+  ref: Ref,
+  enumerable_only: Bool,
+) -> List(String) {
   case heap.read(heap, ref) {
     Some(ObjectSlot(kind:, properties:, elements:, ..)) -> {
       // Step 1: Array index keys in ascending numeric order
@@ -1807,7 +1811,7 @@ fn assign_keys(
 /// Collect enumerable own symbol keys from an object.
 /// Implements the symbol portion of [[OwnPropertyKeys]] (§10.1.11 step 3)
 /// with optional enumerable filtering.
-fn collect_own_symbol_keys(
+pub fn collect_own_symbol_keys(
   heap: Heap,
   ref: Ref,
   enumerable_only: Bool,
@@ -2091,7 +2095,7 @@ fn set_prototype_of(
 /// Returns True if adding the link would create a cycle (step 7b triggers),
 /// False if the chain terminates without hitting target (step 7a).
 /// Step 7c (exotic objects) is not applicable — all our objects are ordinary.
-fn would_create_cycle(
+pub fn would_create_cycle(
   heap: Heap,
   target_ref: Ref,
   new_proto: Option(Ref),

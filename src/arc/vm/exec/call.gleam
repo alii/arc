@@ -9,6 +9,7 @@ import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/reflect as builtins_reflect
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
@@ -1694,6 +1695,7 @@ pub fn dispatch_native(
     value.VmNative(value.CreateRealm) -> realm.create_realm_native(this, state)
     value.VmNative(value.Gc) -> #(state, Ok(JsUndefined))
     value.JsonNative(n) -> builtins_json.dispatch(n, args, this, state)
+    value.ReflectNative(n) -> builtins_reflect.dispatch(n, args, this, state)
     value.MapNative(n) -> builtins_map.dispatch(n, args, this, state)
     value.SetNative(n) -> builtins_set.dispatch(n, args, this, state)
     value.WeakMapNative(n) -> builtins_weak_map.dispatch(n, args, this, state)

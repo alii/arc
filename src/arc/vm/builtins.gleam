@@ -12,6 +12,7 @@ import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/reflect as builtins_reflect
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
@@ -168,6 +169,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // JSON global object
   let #(h, json) = builtins_json.init(h, object_proto, function.prototype)
 
+  // Reflect global object
+  let #(h, reflect) = builtins_reflect.init(h, object_proto, function.prototype)
+
   // Map constructor + prototype
   let #(h, map) = builtins_map.init(h, object_proto, function.prototype)
 
@@ -269,6 +273,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       symbol:,
       arc:,
       json:,
+      reflect:,
       map:,
       set:,
       weak_map:,
@@ -335,6 +340,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("Symbol", JsObject(b.symbol)),
     Builtin("Arc", JsObject(b.arc)),
     Builtin("JSON", JsObject(b.json)),
+    Builtin("Reflect", JsObject(b.reflect)),
     Builtin("Map", JsObject(b.map.constructor)),
     Builtin("Set", JsObject(b.set.constructor)),
     Builtin("WeakMap", JsObject(b.weak_map.constructor)),
