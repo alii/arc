@@ -43,32 +43,41 @@ fn default_metadata() -> TestMetadata {
   )
 }
 
-fn parse_yaml_block(yaml: String) -> TestMetadata {
-  let lines = string.split(yaml, "\n")
-  parse_yaml_lines(lines, default_metadata(), False)
+/// Which multi-line block we're currently inside.
+type BlockState {
+  TopLevel
+  InNegative
+  InList(field: ListField)
 }
 
-/// Walk YAML lines, tracking whether we're inside a `negative:` block.
+type ListField {
+  FlagsList
+  IncludesList
+  FeaturesList
+}
+
+fn parse_yaml_block(yaml: String) -> TestMetadata {
+  let lines = string.split(yaml, "\n")
+  parse_yaml_lines(lines, default_metadata(), TopLevel)
+}
+
 fn parse_yaml_lines(
   lines: List(String),
   meta: TestMetadata,
-  in_negative: Bool,
+  block: BlockState,
 ) -> TestMetadata {
   case lines {
     [] -> meta
     [line, ..rest] -> {
       let trimmed = string.trim(line)
       case trimmed {
-        // Skip empty lines and comments
-        "" -> parse_yaml_lines(rest, meta, in_negative)
-        "#" <> _ -> parse_yaml_lines(rest, meta, in_negative)
+        "" -> parse_yaml_lines(rest, meta, block)
+        "#" <> _ -> parse_yaml_lines(rest, meta, block)
         _ -> {
-          // Check if this is an indented line (part of a block)
           let is_indented =
             string.starts_with(line, "  ") || string.starts_with(line, "\t")
-          case in_negative, is_indented {
-            // Inside negative block, reading indented fields
-            True, True -> {
+          case block, is_indented {
+            InNegative, True -> {
               let meta = case string.split_once(trimmed, ":") {
                 Ok(#("phase", value)) -> {
                   let phase = case string.trim(value) {
@@ -83,19 +92,22 @@ fn parse_yaml_lines(
                   TestMetadata(..meta, negative_type: Some(string.trim(value)))
                 _ -> meta
               }
-              parse_yaml_lines(rest, meta, True)
+              parse_yaml_lines(rest, meta, InNegative)
             }
-            // Was in negative block but hit non-indented line — exit block
-            True, False -> parse_yaml_lines([line, ..rest], meta, False)
-            // Not in negative block
-            False, _ -> {
-              case string.starts_with(trimmed, "negative:") {
-                True -> parse_yaml_lines(rest, meta, True)
-                False -> {
-                  let meta = parse_top_level_field(trimmed, meta)
-                  parse_yaml_lines(rest, meta, False)
+            InList(field), True ->
+              case trimmed {
+                "- " <> item -> {
+                  let meta = append_list_item(meta, field, string.trim(item))
+                  parse_yaml_lines(rest, meta, block)
                 }
+                _ -> parse_yaml_lines(rest, meta, block)
               }
+            // In a block but hit non-indented line — exit and reprocess.
+            _, False if block != TopLevel ->
+              parse_yaml_lines([line, ..rest], meta, TopLevel)
+            _, _ -> {
+              let #(meta, next_block) = parse_top_level_field(trimmed, meta)
+              parse_yaml_lines(rest, meta, next_block)
             }
           }
         }
@@ -104,16 +116,52 @@ fn parse_yaml_lines(
   }
 }
 
-/// Parse a top-level YAML field that isn't `negative:`.
-fn parse_top_level_field(trimmed: String, meta: TestMetadata) -> TestMetadata {
+fn append_list_item(
+  meta: TestMetadata,
+  field: ListField,
+  item: String,
+) -> TestMetadata {
+  case field {
+    FlagsList -> TestMetadata(..meta, flags: list.append(meta.flags, [item]))
+    IncludesList ->
+      TestMetadata(..meta, includes: list.append(meta.includes, [item]))
+    FeaturesList ->
+      TestMetadata(..meta, features: list.append(meta.features, [item]))
+  }
+}
+
+/// Parse a top-level YAML field. Returns updated meta and the next block
+/// state — `InList(field)` when the value is empty (YAML list follows),
+/// `InNegative` for `negative:`, `TopLevel` otherwise.
+fn parse_top_level_field(
+  trimmed: String,
+  meta: TestMetadata,
+) -> #(TestMetadata, BlockState) {
   case string.split_once(trimmed, ":") {
-    Ok(#("flags", rest)) ->
-      TestMetadata(..meta, flags: parse_inline_array(rest))
-    Ok(#("includes", rest)) ->
-      TestMetadata(..meta, includes: parse_inline_array(rest))
-    Ok(#("features", rest)) ->
-      TestMetadata(..meta, features: parse_inline_array(rest))
-    _ -> meta
+    Ok(#("negative", _)) -> #(meta, InNegative)
+    Ok(#("flags", rest)) -> parse_array_field(meta, rest, FlagsList)
+    Ok(#("includes", rest)) -> parse_array_field(meta, rest, IncludesList)
+    Ok(#("features", rest)) -> parse_array_field(meta, rest, FeaturesList)
+    _ -> #(meta, TopLevel)
+  }
+}
+
+fn parse_array_field(
+  meta: TestMetadata,
+  rest: String,
+  field: ListField,
+) -> #(TestMetadata, BlockState) {
+  case string.trim(rest) {
+    "" -> #(meta, InList(field))
+    _ -> {
+      let items = parse_inline_array(rest)
+      let meta = case field {
+        FlagsList -> TestMetadata(..meta, flags: items)
+        IncludesList -> TestMetadata(..meta, includes: items)
+        FeaturesList -> TestMetadata(..meta, features: items)
+      }
+      #(meta, TopLevel)
+    }
   }
 }
 
