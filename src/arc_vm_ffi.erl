@@ -24,19 +24,28 @@ array_set(Index, Value, Tuple) ->
         true -> {ok, setelement(Index + 1, Tuple, Value)};
         false -> {error, nil}
     end.
-array_repeat(Value, Count) -> erlang:make_tuple(Count, Value).
+%% Cap tuple-backed arrays at 10M elements (~80MB on 64-bit).
+%% JS specs allow arrays up to 2^32-1 but we use a sparse dict for those.
+-define(MAX_DENSE_ELEMENTS, 10000000).
+
+array_repeat(Value, Count) when Count =< ?MAX_DENSE_ELEMENTS ->
+    erlang:make_tuple(Count, Value);
+array_repeat(_Value, _Count) ->
+    erlang:error(array_too_large).
 
 %% Grow a tuple to NewSize, filling new slots with Default.
 %% If NewSize =< current size, returns Tuple unchanged.
 %% O(NewSize) — converts to list, pads, converts back. No repeated setelement.
-array_grow(Tuple, NewSize, Default) ->
+array_grow(Tuple, NewSize, Default) when NewSize =< ?MAX_DENSE_ELEMENTS ->
     Old = tuple_size(Tuple),
     case NewSize =< Old of
         true -> Tuple;
         false ->
             Pad = lists:duplicate(NewSize - Old, Default),
             list_to_tuple(tuple_to_list(Tuple) ++ Pad)
-    end.
+    end;
+array_grow(_Tuple, _NewSize, _Default) ->
+    erlang:error(array_too_large).
 
 %% Process primitives for Arc.send/receive
 send_message(Pid, Msg) -> Pid ! Msg, nil.

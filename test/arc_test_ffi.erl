@@ -155,17 +155,22 @@ feeder_loop(Remaining, Parent, Ref, Self, FeedRef, Active, PidMap) ->
 spawn_worker({Name, Fun}, Parent, Ref, Feeder, FeedRef) ->
     spawn_link(fun() ->
         %% Run the test in a sub-process with a 10s timeout.
-        %% If it hangs, we kill it and report a timeout failure.
+        %% If it hangs or uses >512MB, we kill it and report a failure.
         Self = self(),
         TestRef = make_ref(),
+        process_flag(trap_exit, true),
         Pid = spawn_link(fun() ->
+            %% Limit heap to 4M words (~32MB on 64-bit) to prevent
+            %% pathological tests (e.g. Array(2**32-1)) from consuming all RAM
+            process_flag(max_heap_size, #{size => 4000000, kill => true, error_logger => false}),
             Res = try Fun(), ok
             catch Class:Reason:Stack -> {error, {Class, Reason, Stack}}
             end,
             Self ! {TestRef, Res}
         end),
         Result = receive
-            {TestRef, R} -> R
+            {TestRef, R} -> R;
+            {'EXIT', Pid, killed} -> {error, {error, heap_limit_exceeded, []}}
         after 10000 ->
             exit(Pid, kill),
             {error, {error, test_timeout, []}}
