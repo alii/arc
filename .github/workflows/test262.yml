@@ -35,7 +35,7 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         with:
           otp-version: "28"
-          gleam-version: "1.14.0"
+          gleam-version: "1.15"
           rebar3-version: "3"
 
       - name: Setup Python
