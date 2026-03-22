@@ -1,4 +1,4 @@
-import arc/erlang
+import arc/internal/erlang
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
 import gleam/list

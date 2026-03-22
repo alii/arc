@@ -8,7 +8,7 @@
 ///
 /// Based on ECMAScript §16.2 and QuickJS's module implementation.
 import arc/compiler
-import arc/erlang
+import arc/internal/erlang
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/exec/entry

@@ -1,8 +1,8 @@
 /// Token classification and conversion helpers.
 /// Pure functions that map TokenKind → Bool/String/AST enums.
 /// Split from parser.gleam to reduce file size.
-import arc/ast
-import arc/lexer.{
+import arc/parser/ast
+import arc/parser/lexer.{
   type TokenKind, Ampersand, AmpersandAmpersand, AmpersandAmpersandEqual,
   AmpersandEqual, Arrow, As, Async, Await, Bang, BangEqual, BangEqualEqual,
   Break, Caret, CaretEqual, Case, Catch, Class, Colon, Comma, Const, Continue,

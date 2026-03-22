@@ -5,10 +5,10 @@
 ///   Phase 1 (emit): AST → EmitterOp (symbolic names + label IDs)
 ///   Phase 2 (scope): EmitterOp → IrOp (resolved local indices + label IDs)
 ///   Phase 3 (resolve): IrOp → Op (absolute PC addresses)
-import arc/ast
 import arc/compiler/emit
 import arc/compiler/resolve
 import arc/compiler/scope
+import arc/parser/ast
 import arc/vm/opcode
 import arc/vm/value.{type FuncTemplate, CaptureLocal}
 import gleam/dict.{type Dict}

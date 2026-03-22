@@ -13,21 +13,7 @@
 ///
 /// The mutually-recursive core (statements ↔ expressions ↔ patterns) lives
 /// here since Gleam doesn't support cross-module recursion.
-import arc/ast
-import arc/lexer.{
-  type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
-  Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
-  Continue, Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal,
-  Export, Extends, Finally, For, From, Function, GreaterThanGreaterThanEqual,
-  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Import, In, KFalse,
-  KString, KTrue, LeftBrace, LeftBracket, LeftParen, LessThanLessThanEqual, Let,
-  Minus, MinusEqual, MinusMinus, New, Null, Number, Of, PercentEqual, PipeEqual,
-  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
-  QuestionQuestionEqual, RegularExpression, Return, RightBrace, RightBracket,
-  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
-  StarStarEqual, Static, Super, Switch, TemplateLiteral, This, Throw, Tilde, Try,
-  Typeof, Undefined, Var, Void, While, With, Yield,
-}
+import arc/parser/ast
 import arc/parser/error.{
   AwaitInAsyncFunction, AwaitInModule, BreakOutsideLoopOrSwitch,
   ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
@@ -69,6 +55,20 @@ import arc/parser/error.{
   UnexpectedCloseParen, UnexpectedExport, UnexpectedSuper, UnexpectedToken,
   UnicodeEscapeInMetaProperty, WithNotAllowedStrictMode, YieldInFormalParameter,
   YieldInGenerator, YieldReservedStrictMode,
+}
+import arc/parser/lexer.{
+  type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
+  Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
+  Continue, Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal,
+  Export, Extends, Finally, For, From, Function, GreaterThanGreaterThanEqual,
+  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Import, In, KFalse,
+  KString, KTrue, LeftBrace, LeftBracket, LeftParen, LessThanLessThanEqual, Let,
+  Minus, MinusEqual, MinusMinus, New, Null, Number, Of, PercentEqual, PipeEqual,
+  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
+  QuestionQuestionEqual, RegularExpression, Return, RightBrace, RightBracket,
+  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
+  StarStarEqual, Static, Super, Switch, TemplateLiteral, This, Throw, Tilde, Try,
+  Typeof, Undefined, Var, Void, While, With, Yield,
 }
 import arc/parser/number.{parse_js_number}
 import arc/parser/regex

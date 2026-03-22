@@ -12,7 +12,8 @@ import arc/vm/completion.{type Completion}
 import arc/vm/exec/entry
 import arc/vm/heap.{type Heap}
 import arc/vm/state
-import arc/vm/value.{type JsValue, type Ref}
+import arc/vm/value.{type Ref}
+import gleam/result
 import gleam/string
 
 // ----------------------------------------------------------------------------
@@ -29,10 +30,9 @@ pub opaque type Engine {
 
 /// Errors from `eval` — covers the whole parse → compile → run pipeline.
 pub type EvalError {
-  ParseError(message: String)
-  CompileError(message: String)
-  /// Internal VM error (a bug in Arc, not a JS exception).
-  VmError(message: String)
+  ParseError(parser.ParseError)
+  CompileError(compiler.CompileError)
+  VmError(state.VmError)
 }
 
 // ----------------------------------------------------------------------------
@@ -80,30 +80,19 @@ fn do_eval(
   source: String,
   event_loop: Bool,
 ) -> Result(#(Completion, Engine), EvalError) {
-  case parser.parse(source, parser.Script) {
-    Error(err) -> Error(ParseError(parser.parse_error_to_string(err)))
-    Ok(program) ->
-      case compiler.compile(program) {
-        Error(err) -> Error(CompileError(compile_error_message(err)))
-        Ok(template) ->
-          case
-            entry.run(
-              template,
-              engine.heap,
-              engine.builtins,
-              engine.global,
-              event_loop,
-            )
-          {
-            Error(vm_err) -> Error(VmError(vm_error_message(vm_err)))
-            Ok(completion) ->
-              Ok(#(
-                completion,
-                Engine(..engine, heap: completion_heap(completion)),
-              ))
-          }
-      }
-  }
+  use program <- result.try(
+    parser.parse(source, parser.Script)
+    |> result.map_error(ParseError),
+  )
+  use template <- result.try(
+    compiler.compile(program)
+    |> result.map_error(CompileError),
+  )
+  use completion <- result.map(
+    entry.run(template, engine.heap, engine.builtins, engine.global, event_loop)
+    |> result.map_error(VmError),
+  )
+  #(completion, Engine(..engine, heap: completion_heap(completion)))
 }
 
 // ----------------------------------------------------------------------------
@@ -120,19 +109,6 @@ pub fn heap(engine: Engine) -> Heap {
 pub fn global(engine: Engine) -> Ref {
   engine.global
 }
-
-// ----------------------------------------------------------------------------
-// Re-exports
-// ----------------------------------------------------------------------------
-//
-// So users can `import arc/engine` and get the key types without reaching
-// into arc/vm/value, arc/vm/completion, etc.
-
-pub type ArcJsValue =
-  JsValue
-
-pub type ArcCompletion =
-  Completion
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -161,5 +137,13 @@ fn vm_error_message(err: state.VmError) -> String {
     state.LocalIndexOutOfBounds(i) ->
       "local index out of bounds: " <> string.inspect(i)
     state.Unimplemented(op) -> "unimplemented opcode: " <> op
+  }
+}
+
+pub fn eval_error_message(err: EvalError) -> String {
+  case err {
+    ParseError(e) -> parser.parse_error_to_string(e)
+    CompileError(e) -> compile_error_message(e)
+    VmError(e) -> vm_error_message(e)
   }
 }

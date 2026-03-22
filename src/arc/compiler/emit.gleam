@@ -3,7 +3,7 @@
 /// Walks the AST and produces a list of EmitterOps — symbolic IR instructions
 /// mixed with scope markers. Variable references use string names (IrScopeGetVar),
 /// jump targets use integer label IDs (IrJump). These are resolved in Phase 2 and 3.
-import arc/ast
+import arc/parser/ast
 import arc/vm/opcode.{
   type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
   IrArraySpread, IrAwait, IrBinOp, IrCallApply, IrCallConstructor,
