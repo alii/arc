@@ -2763,6 +2763,63 @@ fn emit_for_of(
 ///   - ForInitExpression(Identifier(name)) e.g. `for (x ...)`
 ///   - ForInitPattern(pattern) e.g. `for ({a, b} ...)`
 /// Consumes the value on top of stack.
+/// Convert an expression AST to a destructuring pattern AST.
+/// JS allows expressions and patterns to share syntax:
+///   [a, b] can be an ArrayExpression or an ArrayPattern
+///   {a, b} can be an ObjectExpression or an ObjectPattern
+/// This is needed for assignment destructuring in for-of: `for ([a, b] of arr)`
+/// Convert an expression AST to a destructuring pattern AST.
+/// JS allows expressions and patterns to share syntax:
+///   [a, b] can be an ArrayExpression or an ArrayPattern
+///   {a, b} can be an ObjectExpression or an ObjectPattern
+/// This is needed for assignment destructuring in for-of: `for ([a, b] of arr)`
+fn expression_to_pattern(expr: ast.Expression) -> Result(ast.Pattern, Nil) {
+  case expr {
+    ast.Identifier(name) -> Ok(ast.IdentifierPattern(name))
+    ast.ArrayExpression(elements) -> {
+      use elems <- result.map(
+        list.try_map(elements, fn(elem) {
+          case elem {
+            None -> Ok(None)
+            Some(ast.SpreadElement(arg)) -> {
+              use pat <- result.map(expression_to_pattern(arg))
+              Some(ast.RestElement(pat))
+            }
+            Some(e) -> {
+              use pat <- result.map(expression_to_pattern(e))
+              Some(pat)
+            }
+          }
+        }),
+      )
+      ast.ArrayPattern(elems)
+    }
+    ast.ObjectExpression(properties) -> {
+      use props <- result.map(
+        list.try_map(properties, fn(prop) {
+          case prop {
+            ast.Property(key:, value:, computed:, shorthand:, ..) -> {
+              use val_pat <- result.map(expression_to_pattern(value))
+              ast.PatternProperty(key:, value: val_pat, computed:, shorthand:)
+            }
+            ast.SpreadProperty(argument:) -> {
+              use pat <- result.map(expression_to_pattern(argument))
+              ast.RestProperty(pat)
+            }
+          }
+        }),
+      )
+      ast.ObjectPattern(props)
+    }
+    ast.AssignmentExpression(ast.Assign, left, right) -> {
+      use left_pat <- result.map(expression_to_pattern(left))
+      ast.AssignmentPattern(left_pat, right)
+    }
+    ast.ParenthesizedExpression(inner) -> expression_to_pattern(inner)
+    _ -> Error(Nil)
+  }
+}
+
 fn emit_for_lhs_bind(
   e: Emitter,
   left: ast.ForInit,
@@ -2780,6 +2837,7 @@ fn emit_for_lhs_bind(
         _ -> Error(Unsupported("for-in/of with multiple declarators"))
       }
     }
+    ast.ForInitDeclaration(_) -> Error(Unsupported("for-in/of left-hand side"))
     ast.ForInitExpression(ast.ParenthesizedExpression(inner)) ->
       emit_for_lhs_bind(e, ast.ForInitExpression(unwrap_parens(inner)))
     ast.ForInitExpression(ast.Identifier(name)) -> {
@@ -2793,7 +2851,12 @@ fn emit_for_lhs_bind(
     }
     ast.ForInitPattern(pattern) ->
       emit_destructuring_bind(e, pattern, VarBinding)
-    _ -> Error(Unsupported("for-in/of left-hand side"))
+    // Assignment destructuring: for ([a, b] of arr) or for ({a, b} of arr)
+    ast.ForInitExpression(expr) ->
+      case expression_to_pattern(expr) {
+        Ok(pattern) -> emit_destructuring_bind(e, pattern, VarBinding)
+        Error(Nil) -> Error(Unsupported("for-in/of left-hand side"))
+      }
   }
 }
 

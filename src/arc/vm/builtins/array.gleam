@@ -489,8 +489,19 @@ fn require_array(
         // Real array — length from [[ArrayLength]]. Check properties dict
         // for accessor overrides on numeric indices (from Object.defineProperty).
         Some(ObjectSlot(kind: ArrayObject(length:), elements:, properties:, ..)) -> {
-          let #(state, elements) =
-            apply_property_overrides(state, this, properties, elements, length)
+          // Fast path: skip property override scan when no named properties exist
+          // (the common case — arrays rarely have Object.defineProperty overrides)
+          let #(state, elements) = case dict.is_empty(properties) {
+            True -> #(state, elements)
+            False ->
+              apply_property_overrides(
+                state,
+                this,
+                properties,
+                elements,
+                length,
+              )
+          }
           cont(ref, length, elements, state)
         }
         // Arguments exotic object (§10.4.4): length stored in kind,
@@ -650,57 +661,55 @@ fn apply_property_overrides(
   elements: JsElements,
   length: Int,
 ) -> #(State, JsElements) {
-  // Quick check: if no properties parse as numeric indices, skip entirely
-  let has_numeric_props =
-    dict.to_list(properties)
-    |> list.any(fn(entry) {
-      case int.parse(entry.0) {
-        Ok(idx) if idx >= 0 && idx < length -> True
-        _ -> False
-      }
-    })
-  case has_numeric_props {
-    False -> #(state, elements)
-    True -> {
-      // Convert to sparse and merge in property values
-      let base = case elements {
-        value.DenseElements(_) ->
-          collect_elements(
-            elements,
-            0,
-            js_elements.stored_count(elements),
-            length,
-            dict.new(),
+  // Single pass: fold over properties, only converting to sparse if we find
+  // a numeric index override. Avoids allocating a list via dict.to_list.
+  dict.fold(properties, #(state, elements), fn(acc, key, prop) {
+    let #(state, elems) = acc
+    case int.parse(key) {
+      Ok(idx) if idx >= 0 && idx < length -> {
+        // Lazily convert to sparse on first numeric override
+        let base = case elems {
+          value.DenseElements(_) ->
+            value.SparseElements(collect_elements(
+              elems,
+              0,
+              js_elements.stored_count(elems),
+              length,
+              dict.new(),
+            ))
+          _ -> elems
+        }
+        let sparse_data = case base {
+          value.SparseElements(data) -> data
+          // Already handled above, but satisfy exhaustiveness
+          value.DenseElements(_) -> dict.new()
+        }
+        case prop {
+          DataProperty(value: v, ..) -> #(
+            state,
+            value.SparseElements(dict.insert(sparse_data, idx, v)),
           )
-        value.SparseElements(data) -> data
+          value.AccessorProperty(get: Some(getter), ..) ->
+            case frame.call(state, getter, this, []) {
+              Ok(#(v, state)) -> #(
+                state,
+                value.SparseElements(dict.insert(sparse_data, idx, v)),
+              )
+              Error(#(_thrown, state)) -> #(state, base)
+            }
+          value.AccessorProperty(get: None, ..) -> #(
+            state,
+            value.SparseElements(dict.insert(
+              sparse_data,
+              idx,
+              value.JsUndefined,
+            )),
+          )
+        }
       }
-      // Override with accessor/data properties from the properties dict
-      let #(state, merged) =
-        dict.fold(properties, #(state, base), fn(acc, key, prop) {
-          let #(state, elems) = acc
-          case int.parse(key) {
-            Ok(idx) if idx >= 0 && idx < length ->
-              case prop {
-                DataProperty(value: v, ..) -> #(
-                  state,
-                  dict.insert(elems, idx, v),
-                )
-                value.AccessorProperty(get: Some(getter), ..) ->
-                  case frame.call(state, getter, this, []) {
-                    Ok(#(v, state)) -> #(state, dict.insert(elems, idx, v))
-                    Error(#(_thrown, state)) -> #(state, elems)
-                  }
-                value.AccessorProperty(get: None, ..) -> #(
-                  state,
-                  dict.insert(elems, idx, value.JsUndefined),
-                )
-              }
-            _ -> #(state, elems)
-          }
-        })
-      #(state, value.SparseElements(merged))
+      _ -> acc
     }
-  }
+  })
 }
 
 /// Stateful version of gather_indexed that uses object.get_value to handle
