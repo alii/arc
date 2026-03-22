@@ -1621,7 +1621,12 @@ fn promise_any_decrement_and_maybe_reject(
 }
 
 /// Set an element in a heap-allocated array at a specific index.
-pub fn set_array_element(h: Heap, arr_ref: Ref, index: Int, val: JsValue) -> Heap {
+pub fn set_array_element(
+  h: Heap,
+  arr_ref: Ref,
+  index: Int,
+  val: JsValue,
+) -> Heap {
   use slot <- heap.update(h, arr_ref)
   case slot {
     ObjectSlot(kind: ArrayObject(length:), elements:, ..) ->

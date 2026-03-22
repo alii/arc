@@ -6,7 +6,6 @@ import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins}
-import arc/vm/coerce
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/json as builtins_json
 import arc/vm/builtins/map as builtins_map
@@ -20,33 +19,34 @@ import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
+import arc/vm/coerce
 import arc/vm/completion.{
   type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
 }
 import arc/vm/frame.{
   type State, type StepResult, type VmError, Done, LocalIndexOutOfBounds,
-  SavedFrame, StackUnderflow, State, StepVmError, Thrown, TryFrame, Unimplemented,
-  Yielded,
+  SavedFrame, StackUnderflow, State, StepVmError, Thrown, TryFrame,
+  Unimplemented, Yielded,
 }
 import arc/vm/generators
 import arc/vm/heap.{type Heap}
 import arc/vm/job_queue
 import arc/vm/js_elements
 import arc/vm/object
-import arc/vm/operators
 import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
   ArraySpread, Await, BinOp, BoxLocal, Call, CallApply, CallConstructor,
   CallConstructorApply, CallMethod, CallMethodApply, CallSuper, CreateArguments,
   DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
   DefineField, DefineFieldComputed, DefineMethod, DeleteElem, DeleteField, Dup,
-  ForInNext, ForInStart, GetBoxed, GetElem, GetElem2,
-  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetThis, InitGlobalLex,
-  InitialYield, IteratorClose, IteratorNext, Jump, JumpIfFalse, JumpIfNullish,
-  JumpIfTrue, MakeClosure, NewObject, NewRegExp, ObjectSpread, Pop, PushConst,
-  PushTry, PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return,
-  SetupDerivedClass, Swap, TypeOf, TypeofGlobal, UnaryOp, Yield,
+  ForInNext, ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2,
+  GetGlobal, GetIterator, GetLocal, GetThis, InitGlobalLex, InitialYield,
+  IteratorClose, IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
+  MakeClosure, NewObject, NewRegExp, ObjectSpread, Pop, PushConst, PushTry,
+  PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return, SetupDerivedClass,
+  Swap, TypeOf, TypeofGlobal, UnaryOp, Yield,
 }
+import arc/vm/operators
 import arc/vm/promises
 import arc/vm/property_access
 import arc/vm/value.{
@@ -464,7 +464,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     Pop -> {
       case state.stack {
         [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-        [] -> Error(#(StepVmError(StackUnderflow("Pop")), JsUndefined, state.heap))
+        [] ->
+          Error(#(StepVmError(StackUnderflow("Pop")), JsUndefined, state.heap))
       }
     }
 
@@ -472,7 +473,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [top, ..] ->
           Ok(State(..state, stack: [top, ..state.stack], pc: state.pc + 1))
-        [] -> Error(#(StepVmError(StackUnderflow("Dup")), JsUndefined, state.heap))
+        [] ->
+          Error(#(StepVmError(StackUnderflow("Dup")), JsUndefined, state.heap))
       }
     }
 
@@ -480,7 +482,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [a, b, ..rest] ->
           Ok(State(..state, stack: [b, a, ..rest], pc: state.pc + 1))
-        _ -> Error(#(StepVmError(StackUnderflow("Swap")), JsUndefined, state.heap))
+        _ ->
+          Error(#(StepVmError(StackUnderflow("Swap")), JsUndefined, state.heap))
       }
     }
 
@@ -525,7 +528,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         [] ->
-          Error(#(StepVmError(StackUnderflow("PutLocal")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("PutLocal")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -589,7 +596,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     Error(#(thrown, state)) ->
                       Error(#(Thrown, thrown, state.heap))
                   }
-                False -> frame.throw_reference_error(state, name <> " is not defined")
+                False ->
+                  frame.throw_reference_error(state, name <> " is not defined")
               }
           }
       }
@@ -601,7 +609,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         [value, ..rest] -> {
           // 1. Check const lexical
           case set.contains(state.const_lexical_globals, name) {
-            True -> frame.throw_type_error(state, "Assignment to constant variable.")
+            True ->
+              frame.throw_type_error(state, "Assignment to constant variable.")
             False ->
               // 2. Check lexical globals
               case dict.get(state.lexical_globals, name) {
@@ -684,7 +693,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         [] ->
-          Error(#(StepVmError(StackUnderflow("PutGlobal")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("PutGlobal")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -759,7 +772,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         }
         [] ->
-          Error(#(StepVmError(StackUnderflow("TypeOf")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("TypeOf")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -925,7 +942,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               }
           }
         }
-        _ -> Error(#(StepVmError(StackUnderflow("BinOp")), JsUndefined, state.heap))
+        _ ->
+          Error(#(StepVmError(StackUnderflow("BinOp")), JsUndefined, state.heap))
       }
     }
 
@@ -941,7 +959,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         [] ->
-          Error(#(StepVmError(StackUnderflow("UnaryOp")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("UnaryOp")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1210,7 +1232,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           case array.set(index, JsObject(box_ref), state.locals) {
             Ok(locals) -> Ok(State(..state, heap:, locals:, pc: state.pc + 1))
             Error(_) ->
-              Error(#(StepVmError(LocalIndexOutOfBounds(index)), JsUndefined, heap))
+              Error(#(
+                StepVmError(LocalIndexOutOfBounds(index)),
+                JsUndefined,
+                heap,
+              ))
           }
         }
         None ->
@@ -1265,7 +1291,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           }
         }
         [] ->
-          Error(#(StepVmError(StackUnderflow("PutBoxed")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("PutBoxed")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1462,7 +1492,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
         [] ->
-          Error(#(StepVmError(StackUnderflow("GetField")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("GetField")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1483,7 +1517,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
         }
         _ ->
-          Error(#(StepVmError(StackUnderflow("PutField")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("PutField")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1548,7 +1586,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // Stack: [fn, key, obj, ...] → [obj, ...]
       case state.stack {
         [func, key, JsObject(ref) as obj, ..rest] -> {
-          use #(key_str, state) <- result.map(frame.rethrow(coerce.js_to_string(state, key)))
+          use #(key_str, state) <- result.map(
+            frame.rethrow(coerce.js_to_string(state, key)),
+          )
           let heap =
             object.define_accessor(state.heap, ref, key_str, func, kind)
           State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
@@ -1571,7 +1611,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // array index → elements, else → js_to_string → properties).
       case state.stack {
         [val, key, JsObject(ref) as obj, ..rest] -> {
-          use state <- result.map(frame.rethrow(property_access.put_elem_value(state, ref, key, val)))
+          use state <- result.map(
+            frame.rethrow(property_access.put_elem_value(state, ref, key, val)),
+          )
           State(..state, stack: [obj, ..rest], pc: state.pc + 1)
         }
         [_, _, _, ..rest] ->
@@ -1635,7 +1677,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         }
         None ->
-          Error(#(StepVmError(StackUnderflow("ArrayFrom")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("ArrayFrom")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1695,14 +1741,20 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         [key, receiver, ..rest] -> {
           // Primitive receiver: stringify key, delegate to get_value_of
-          use #(key_str, state) <- result.try(frame.rethrow(coerce.js_to_string(state, key)))
+          use #(key_str, state) <- result.try(
+            frame.rethrow(coerce.js_to_string(state, key)),
+          )
           use #(val, state) <- result.map(
             frame.rethrow(object.get_value_of(state, receiver, key_str)),
           )
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
         _ ->
-          Error(#(StepVmError(StackUnderflow("GetElem")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("GetElem")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1716,14 +1768,20 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1)
         }
         [key, receiver, ..rest] -> {
-          use #(key_str, state) <- result.try(frame.rethrow(coerce.js_to_string(state, key)))
+          use #(key_str, state) <- result.try(
+            frame.rethrow(coerce.js_to_string(state, key)),
+          )
           use #(val, state) <- result.map(
             frame.rethrow(object.get_value_of(state, receiver, key_str)),
           )
           State(..state, stack: [val, key, receiver, ..rest], pc: state.pc + 1)
         }
         _ ->
-          Error(#(StepVmError(StackUnderflow("GetElem2")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("GetElem2")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1731,7 +1789,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // Stack: [value, key, obj, ...rest]
       case state.stack {
         [val, key, JsObject(ref), ..rest] -> {
-          use state <- result.map(frame.rethrow(property_access.put_elem_value(state, ref, key, val)))
+          use state <- result.map(
+            frame.rethrow(property_access.put_elem_value(state, ref, key, val)),
+          )
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
         [_, _, _, ..rest] -> {
@@ -1739,7 +1799,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Ok(State(..state, stack: rest, pc: state.pc + 1))
         }
         _ ->
-          Error(#(StepVmError(StackUnderflow("PutElem")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("PutElem")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1783,7 +1847,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
         }
         [] ->
-          Error(#(StepVmError(StackUnderflow("GetField2")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("GetField2")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -1951,7 +2019,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               ))
           }
         _ ->
-          Error(#(StepVmError(StackUnderflow("ForInNext")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("ForInNext")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -2483,7 +2555,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         }
         _ ->
-          Error(#(StepVmError(StackUnderflow("NewRegExp")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("NewRegExp")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -2500,7 +2576,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Ok(State(..state, heap:, stack: [arr, ..rest], pc: state.pc + 1))
         }
         _ ->
-          Error(#(StepVmError(StackUnderflow("ArrayPush")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("ArrayPush")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -2560,7 +2640,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         }
         _ ->
-          Error(#(StepVmError(StackUnderflow("CallApply")), JsUndefined, state.heap))
+          Error(#(
+            StepVmError(StackUnderflow("CallApply")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -3065,12 +3149,14 @@ fn async_setup_await(
       case heap.read(h, ref) {
         Some(ObjectSlot(kind: PromiseObject(pdata_ref), ..)) -> #(h, pdata_ref)
         _ -> {
-          let #(h, _, dr) = promises.create_resolved_promise(h, builtins, awaited_value)
+          let #(h, _, dr) =
+            promises.create_resolved_promise(h, builtins, awaited_value)
           #(h, dr)
         }
       }
     _ -> {
-      let #(h, _, dr) = promises.create_resolved_promise(h, builtins, awaited_value)
+      let #(h, _, dr) =
+        promises.create_resolved_promise(h, builtins, awaited_value)
       #(h, dr)
     }
   }
@@ -3606,7 +3692,9 @@ fn call_native(
         [k, ..] -> k
         [] -> value.JsUndefined
       }
-      use #(key_str, state) <- result.try(frame.rethrow(coerce.js_to_string(state, key_val)))
+      use #(key_str, state) <- result.try(
+        frame.rethrow(coerce.js_to_string(state, key_val)),
+      )
       // Step 2-4: Look up in GlobalSymbolRegistry, return existing or create new.
       case dict.get(state.symbol_registry, key_str) {
         Ok(existing_id) ->
@@ -4042,16 +4130,14 @@ fn drain_generator_to_array(
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
   // call_native_generator_next pushes the result object onto rest_stack.
   // We pass an empty rest_stack so the result is the only thing on the stack.
-  use next_state <- result.try(
-    generators.call_native_generator_next(
-      state,
-      JsObject(gen_ref),
-      [],
-      [],
-      execute_inner,
-      unwind_to_catch,
-    ),
-  )
+  use next_state <- result.try(generators.call_native_generator_next(
+    state,
+    JsObject(gen_ref),
+    [],
+    [],
+    execute_inner,
+    unwind_to_catch,
+  ))
   case next_state.stack {
     [JsObject(result_ref), ..] ->
       case heap.read(next_state.heap, result_ref) {
@@ -4929,4 +5015,3 @@ fn binop_add_with_to_primitive(
     }
   }
 }
-

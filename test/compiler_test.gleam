@@ -3,15 +3,15 @@ import arc/module
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common
+import arc/vm/completion.{
+  type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
+}
+import arc/vm/frame
 import arc/vm/heap
 import arc/vm/object
 import arc/vm/value.{
   Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN,
 }
-import arc/vm/completion.{
-  type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
-}
-import arc/vm/frame
 import arc/vm/vm
 import gleam/dict
 import gleam/int

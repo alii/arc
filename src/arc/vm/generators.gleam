@@ -11,8 +11,8 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/opcode.{type Op, EnterFinallyThrow}
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, GeneratorObject,
-  GeneratorSlot, JsBool, JsObject, JsUndefined, ObjectSlot, OrdinaryObject,
+  type FuncTemplate, type JsValue, type Ref, GeneratorObject, GeneratorSlot,
+  JsBool, JsObject, JsUndefined, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
 import gleam/list
@@ -431,7 +431,9 @@ pub fn call_native_generator_throw(
                       gen_with_state(gen, value.Completed),
                     )
                   Error(#(
-                    StepVmError(Unimplemented("generator throw execution failed")),
+                    StepVmError(Unimplemented(
+                      "generator throw execution failed",
+                    )),
                     JsUndefined,
                     h2,
                   ))

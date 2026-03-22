@@ -4,6 +4,8 @@ import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/common.{type Builtins}
+import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
+import arc/vm/frame
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
@@ -11,8 +13,6 @@ import arc/vm/value.{
   GeneratorObject, NativeFunction, ObjectSlot, OrdinaryObject, PidObject,
   PromiseObject,
 }
-import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
-import arc/vm/frame
 import arc/vm/vm
 import gleam/dict
 import gleam/int

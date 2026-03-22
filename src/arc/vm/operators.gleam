@@ -1,11 +1,11 @@
 import arc/vm/opcode.{
   type BinOpKind, type UnaryOpKind, Add, BitAnd, BitNot, BitOr, BitXor, Div, Eq,
-  Exp, Gt, GtEq, Lt, LtEq, LogicalNot, Mod, Mul, Neg, NotEq, Pos, ShiftLeft,
+  Exp, Gt, GtEq, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NotEq, Pos, ShiftLeft,
   ShiftRight, StrictEq, StrictNotEq, Sub, UShiftRight, Void,
 }
 import arc/vm/value.{
-  type JsNum, type JsValue, Finite, Infinity, JsBool,
-  JsNumber, JsString, NaN, NegInfinity,
+  type JsNum, type JsValue, Finite, Infinity, JsBool, JsNumber, JsString, NaN,
+  NegInfinity,
 }
 import gleam/float
 import gleam/int

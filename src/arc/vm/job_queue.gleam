@@ -155,11 +155,7 @@ fn execute_job(state: State, job: value.Job) -> State {
 
 /// Helper: Call a function via frame.call during job execution (fire-and-forget).
 /// Used for calling resolve/reject on child promises after a handler runs.
-fn call_for_job(
-  state: State,
-  target: JsValue,
-  args: List(JsValue),
-) -> State {
+fn call_for_job(state: State, target: JsValue, args: List(JsValue)) -> State {
   case frame.call(state, target, JsUndefined, args) {
     Ok(#(_, new_state)) -> new_state
     Error(#(_, new_state)) -> new_state
