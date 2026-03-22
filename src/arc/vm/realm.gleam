@@ -530,6 +530,9 @@ fn run_source_in_current_realm(
               ),
               job_queue: state.job_queue,
               realms: state.realms,
+              // §19.2.1.1 PerformEval: indirect eval runs in global scope,
+              // so its `this` is the global object.
+              this_binding: JsObject(state.global_object),
             )
           case execute_inner(eval_state) {
             Error(vm_err) ->
