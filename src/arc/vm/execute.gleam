@@ -2420,18 +2420,18 @@ fn step_iteration(
                 _ ->
                   frame.throw_type_error(
                     state,
-                    object.inspect(iterable, state.heap)
-                      <> " is not iterable",
+                    object.inspect(iterable, state.heap) <> " is not iterable",
                   )
               }
             // String primitive: iterate UTF-16 code units
             JsString(_) ->
-              case
-                common.to_object(state.heap, state.builtins, iterable)
-              {
+              case common.to_object(state.heap, state.builtins, iterable) {
                 Some(#(h, wrapper_ref)) -> {
                   let #(h, iter_ref) =
-                    heap.alloc(h, ArrayIteratorSlot(source: wrapper_ref, index: 0))
+                    heap.alloc(
+                      h,
+                      ArrayIteratorSlot(source: wrapper_ref, index: 0),
+                    )
                   Ok(
                     State(
                       ..state,
@@ -2444,8 +2444,7 @@ fn step_iteration(
                 None ->
                   frame.throw_type_error(
                     state,
-                    object.inspect(iterable, state.heap)
-                      <> " is not iterable",
+                    object.inspect(iterable, state.heap) <> " is not iterable",
                   )
               }
             _ ->
@@ -3060,8 +3059,7 @@ fn get_iterator_via_symbol(
                     "Iterator result is not an object",
                   )
               }
-            Error(#(thrown, state)) ->
-              Error(#(Thrown, thrown, state.heap))
+            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
           }
         False ->
           frame.throw_type_error(
