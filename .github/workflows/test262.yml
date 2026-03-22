@@ -78,7 +78,7 @@ jobs:
           with open('.github/test262/results.json') as f:
               r = json.load(f)
           print(f\"{r['percent']}% ({r['pass']}/{r['tested']})\")
-          ")"
+          ")" -m "Co-authored-by: Alistair Smith <hi@alistair.sh>"
             git pull --rebase origin master
             git push
           fi
