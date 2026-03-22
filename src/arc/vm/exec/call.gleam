@@ -1703,12 +1703,17 @@ pub fn dispatch_native(
     value.RegExpNative(n) -> builtins_regexp.dispatch(n, args, this, state)
     // Standalone VM-level natives
     value.VmNative(value.FunctionConstructor) ->
-      state.type_error(state, "Function constructor is not supported")
+      realm.function_constructor_native(
+        args,
+        state,
+        execute_inner,
+        new_state_fn,
+      )
     value.VmNative(value.IteratorSymbolIterator) -> #(state, Ok(this))
     value.VmNative(value.FunctionToString) -> function_to_string(this, state)
     // Global functions: eval, URI encoding/decoding
     value.VmNative(value.Eval) ->
-      state.type_error(state, "eval is not supported")
+      realm.eval_native(args, state, execute_inner, new_state_fn)
     value.VmNative(value.DecodeURI) -> {
       let arg = case args {
         [s, ..] -> s

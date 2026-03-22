@@ -6666,3 +6666,34 @@ pub fn module_repl_harness_globals_test() -> Nil {
     Error(err) -> panic as { "module failed: " <> string.inspect(err) }
   }
 }
+
+// ============================================================================
+// eval() and Function() constructor
+// ============================================================================
+
+pub fn eval_basic_test() -> Nil {
+  assert_normal("eval('1+1')", JsNumber(Finite(2.0)))
+}
+
+pub fn eval_global_write_test() -> Nil {
+  assert_normal("eval('var x=5'); x", JsNumber(Finite(5.0)))
+}
+
+pub fn eval_nonstring_passthrough_test() -> Nil {
+  assert_normal("eval(42)", JsNumber(Finite(42.0)))
+}
+
+pub fn eval_syntax_error_test() -> Nil {
+  assert_thrown("eval('if if')")
+}
+
+pub fn function_constructor_basic_test() -> Nil {
+  assert_normal(
+    "new Function('a','b','return a+b')(2,3)",
+    JsNumber(Finite(5.0)),
+  )
+}
+
+pub fn function_constructor_no_args_test() -> Nil {
+  assert_normal("new Function('return 42')()", JsNumber(Finite(42.0)))
+}

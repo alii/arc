@@ -11,8 +11,8 @@ import arc/vm/internal/tuple_array
 import arc/vm/ops/object
 import arc/vm/state.{type State, type StepResult, type VmError, State}
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, DataProperty, JsObject, JsUndefined,
-  Named, ObjectSlot, OrdinaryObject,
+  type FuncTemplate, type JsValue, type Ref, DataProperty, JsObject, JsString,
+  JsUndefined, Named, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
 import gleam/list
@@ -476,4 +476,145 @@ pub fn build_262(
     )
   let h = heap.root(h, ref)
   #(h, ref)
+}
+
+// ============================================================================
+// eval() and Function() constructor — runtime code evaluation
+// ============================================================================
+
+/// Parse + compile + execute source in an isolated global-scope state built
+/// from the current realm. Threads heap/globals/job_queue back to caller.
+/// Shared core for eval_native and function_constructor_native.
+fn run_source_in_current_realm(
+  source: String,
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  case parser.parse(source, parser.Script) {
+    Error(err) -> {
+      let #(h, syntax_err) =
+        common.make_syntax_error(
+          state.heap,
+          state.builtins,
+          parser.parse_error_to_string(err),
+        )
+      #(State(..state, heap: h), Error(syntax_err))
+    }
+    Ok(program) ->
+      case compiler.compile_repl(program) {
+        Error(err) -> {
+          let #(h, syntax_err) =
+            common.make_syntax_error(
+              state.heap,
+              state.builtins,
+              string.inspect(err),
+            )
+          #(State(..state, heap: h), Error(syntax_err))
+        }
+        Ok(template) -> {
+          let locals = tuple_array.repeat(JsUndefined, template.local_count)
+          let eval_state =
+            State(
+              ..new_state_fn(
+                template,
+                locals,
+                state.heap,
+                state.builtins,
+                state.global_object,
+                state.lexical_globals,
+                state.const_lexical_globals,
+                state.symbol_descriptions,
+                state.symbol_registry,
+                state.event_loop,
+              ),
+              job_queue: state.job_queue,
+              realms: state.realms,
+            )
+          case execute_inner(eval_state) {
+            Error(vm_err) ->
+              state.type_error(
+                state,
+                "eval: VM error: " <> string.inspect(vm_err),
+              )
+            Ok(#(completion, final_state)) -> {
+              // Thread VM-global state back to caller
+              let state =
+                State(
+                  ..state.merge_globals(state, final_state, []),
+                  heap: final_state.heap,
+                  symbol_descriptions: final_state.symbol_descriptions,
+                  symbol_registry: final_state.symbol_registry,
+                  realms: final_state.realms,
+                )
+              case completion {
+                NormalCompletion(val, _) -> #(state, Ok(val))
+                ThrowCompletion(thrown, _) -> #(state, Error(thrown))
+                YieldCompletion(_, _) ->
+                  state.type_error(state, "eval: unexpected yield")
+                completion.AwaitCompletion(_, _) ->
+                  state.type_error(state, "eval: unexpected await")
+              }
+            }
+          }
+        }
+      }
+  }
+}
+
+/// ES2024 §19.2.1 eval ( x )
+/// Indirect eval — runs in global scope only, no access to caller's locals.
+/// If x is not a string, returns x unchanged.
+pub fn eval_native(
+  args: List(JsValue),
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  case args {
+    [JsString(source), ..] ->
+      run_source_in_current_realm(source, state, execute_inner, new_state_fn)
+    // Non-string first arg: return it unchanged (spec §19.2.1 step 2)
+    [x, ..] -> #(state, Ok(x))
+    [] -> #(state, Ok(JsUndefined))
+  }
+}
+
+/// Coerce a list of JsValues to strings, threading state.
+fn coerce_all_to_string(
+  args: List(JsValue),
+  state: State,
+  acc: List(String),
+) -> Result(#(List(String), State), #(JsValue, State)) {
+  case args {
+    [] -> Ok(#(list.reverse(acc), state))
+    [arg, ..rest] -> {
+      use #(str, state) <- result.try(state.to_string(state, arg))
+      coerce_all_to_string(rest, state, [str, ..acc])
+    }
+  }
+}
+
+/// ES2024 §20.2.1.1 Function ( ...parameterArgs, bodyArg )
+/// Last arg is the body, preceding args are parameter names.
+/// Builds a function expression source string and evaluates it.
+/// Same behavior for `Function(...)` and `new Function(...)`.
+pub fn function_constructor_native(
+  args: List(JsValue),
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  use str_args, state <- state.try_op(coerce_all_to_string(args, state, []))
+  let #(param_strs, body) = case list.reverse(str_args) {
+    [] -> #([], "")
+    [b, ..params_rev] -> #(list.reverse(params_rev), b)
+  }
+  let source =
+    "(function anonymous("
+    <> string.join(param_strs, ",")
+    <> ") {\n"
+    <> body
+    <> "\n})"
+  run_source_in_current_realm(source, state, execute_inner, new_state_fn)
 }
