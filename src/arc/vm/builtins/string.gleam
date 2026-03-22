@@ -5,25 +5,25 @@ import arc/vm/heap.{type Heap}
 import arc/vm/object
 import arc/vm/value.{
   type JsValue, type Ref, type StringNativeFn, Finite, JsNull, JsNumber,
-  JsObject, JsString, JsUndefined, NaN, ObjectSlot, RegExpObject,
-  StringFromCharCode, StringFromCodePoint, StringNative, StringPrototypeAnchor,
-  StringPrototypeAt, StringPrototypeBig, StringPrototypeBlink,
-  StringPrototypeBold, StringPrototypeCharAt, StringPrototypeCharCodeAt,
-  StringPrototypeCodePointAt, StringPrototypeConcat, StringPrototypeEndsWith,
-  StringPrototypeFixed, StringPrototypeFontcolor, StringPrototypeFontsize,
-  StringPrototypeIncludes, StringPrototypeIndexOf, StringPrototypeIsWellFormed,
-  StringPrototypeItalics, StringPrototypeLastIndexOf, StringPrototypeLink,
-  StringPrototypeLocaleCompare, StringPrototypeMatch, StringPrototypeMatchAll,
-  StringPrototypeNormalize, StringPrototypePadEnd, StringPrototypePadStart,
-  StringPrototypeRepeat, StringPrototypeReplace, StringPrototypeReplaceAll,
-  StringPrototypeSearch, StringPrototypeSlice, StringPrototypeSmall,
-  StringPrototypeSplit, StringPrototypeStartsWith, StringPrototypeStrike,
-  StringPrototypeSub, StringPrototypeSubstr, StringPrototypeSubstring,
-  StringPrototypeSup, StringPrototypeToLocaleLowerCase,
-  StringPrototypeToLocaleUpperCase, StringPrototypeToLowerCase,
-  StringPrototypeToString, StringPrototypeToUpperCase,
-  StringPrototypeToWellFormed, StringPrototypeTrim, StringPrototypeTrimEnd,
-  StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw,
+  JsObject, JsString, JsUndefined, NaN, StringFromCharCode, StringFromCodePoint,
+  StringNative, StringPrototypeAnchor, StringPrototypeAt, StringPrototypeBig,
+  StringPrototypeBlink, StringPrototypeBold, StringPrototypeCharAt,
+  StringPrototypeCharCodeAt, StringPrototypeCodePointAt, StringPrototypeConcat,
+  StringPrototypeEndsWith, StringPrototypeFixed, StringPrototypeFontcolor,
+  StringPrototypeFontsize, StringPrototypeIncludes, StringPrototypeIndexOf,
+  StringPrototypeIsWellFormed, StringPrototypeItalics,
+  StringPrototypeLastIndexOf, StringPrototypeLink, StringPrototypeLocaleCompare,
+  StringPrototypeMatch, StringPrototypeMatchAll, StringPrototypeNormalize,
+  StringPrototypePadEnd, StringPrototypePadStart, StringPrototypeRepeat,
+  StringPrototypeReplace, StringPrototypeReplaceAll, StringPrototypeSearch,
+  StringPrototypeSlice, StringPrototypeSmall, StringPrototypeSplit,
+  StringPrototypeStartsWith, StringPrototypeStrike, StringPrototypeSub,
+  StringPrototypeSubstr, StringPrototypeSubstring, StringPrototypeSup,
+  StringPrototypeToLocaleLowerCase, StringPrototypeToLocaleUpperCase,
+  StringPrototypeToLowerCase, StringPrototypeToString,
+  StringPrototypeToUpperCase, StringPrototypeToWellFormed, StringPrototypeTrim,
+  StringPrototypeTrimEnd, StringPrototypeTrimStart, StringPrototypeValueOf,
+  StringRaw,
 }
 import gleam/int
 import gleam/list
@@ -681,11 +681,10 @@ fn delegate_or_regexp(
   str_arg: JsValue,
   fallback: JsValue,
 ) -> #(State, Result(JsValue, JsValue)) {
-  case try_symbol_method(state, val, symbol) {
-    Ok(#(Some(method), state)) ->
-      call_symbol_method(state, method, val, [str_arg])
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(None, state)) -> {
+  use method_opt, state <- frame.try_op(try_symbol_method(state, val, symbol))
+  case method_opt {
+    Some(method) -> call_symbol_method(state, method, val, [str_arg])
+    None -> {
       // Construct RegExp from the argument, then delegate to its symbol method
       use rx, state <- frame.try_call(
         state,
@@ -745,11 +744,15 @@ fn string_replace(
     _ -> JsUndefined
   }
   // Step 2: If searchValue has Symbol.replace, delegate
-  case try_symbol_method(state, search_val, value.symbol_replace) {
-    Ok(#(Some(method), state)) ->
+  use method_opt, state <- frame.try_op(try_symbol_method(
+    state,
+    search_val,
+    value.symbol_replace,
+  ))
+  case method_opt {
+    Some(method) ->
       call_symbol_method(state, method, search_val, [JsString(s), replace_val])
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(None, state)) -> {
+    None -> {
       // String-replace-string: replace first occurrence only
       use search_str, state <- frame.try_to_string(state, search_val)
       use replace_str, state <- frame.try_to_string(state, replace_val)
@@ -811,10 +814,7 @@ fn string_replace_all(
 fn regexp_flags(state: State, val: JsValue) -> option.Option(String) {
   case val {
     JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: RegExpObject(flags:, ..), ..)) -> Some(flags)
-        _ -> None
-      }
+      heap.read_regexp(state.heap, ref) |> option.map(fn(p) { p.1 })
     _ -> None
   }
 }
@@ -826,11 +826,15 @@ fn try_replace_or_string_replace_all(
   search_val: JsValue,
   replace_val: JsValue,
 ) -> #(State, Result(JsValue, JsValue)) {
-  case try_symbol_method(state, search_val, value.symbol_replace) {
-    Ok(#(Some(method), state)) ->
+  use method_opt, state <- frame.try_op(try_symbol_method(
+    state,
+    search_val,
+    value.symbol_replace,
+  ))
+  case method_opt {
+    Some(method) ->
       call_symbol_method(state, method, search_val, [JsString(s), replace_val])
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(None, state)) -> {
+    None -> {
       // String-replace-all: replace all occurrences
       use search_str, state <- frame.try_to_string(state, search_val)
       use replace_str, state <- frame.try_to_string(state, replace_val)
@@ -874,11 +878,15 @@ pub fn string_split(
     _ -> JsUndefined
   }
   // Step 2: If separator is an object, check for Symbol.split
-  case try_symbol_method(state, sep_val, value.symbol_split) {
-    Ok(#(Some(method), state)) ->
+  use method_opt, state <- frame.try_op(try_symbol_method(
+    state,
+    sep_val,
+    value.symbol_split,
+  ))
+  case method_opt {
+    Some(method) ->
       call_symbol_method(state, method, sep_val, [this, limit_val])
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(None, _state)) -> {
+    None -> {
       // Steps 1, 3: RequireObjectCoercible + ToString
       use s, state <- with_this_string(this, state)
       // Step 4: If limit is undefined, let lim be 2^32-1; else ToUint32(limit).
@@ -973,11 +981,7 @@ fn this_string_value(state: State, this: JsValue) -> option.Option(String) {
     // Step 1: value is a String primitive
     JsString(s) -> Some(s)
     // Step 2: value is a String wrapper object
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: value.StringObject(value: s), ..)) -> Some(s)
-        _ -> None
-      }
+    JsObject(ref) -> heap.read_string_object(state.heap, ref)
     // Step 3: would throw TypeError (caller handles)
     _ -> None
   }
@@ -1549,26 +1553,24 @@ fn string_match_all(
   let regexp_arg = helpers.first_arg(args)
   // Delegate to Symbol.matchAll on the regexp if present
   case regexp_arg {
-    JsObject(ref) ->
-      case
-        object.get_symbol_value(state, ref, value.symbol_match_all, regexp_arg)
-      {
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(match_all_fn, state)) ->
-          case helpers.is_callable(state.heap, match_all_fn) {
-            True -> {
-              use result, state <- frame.try_call(
-                state,
-                match_all_fn,
-                regexp_arg,
-                [this],
-              )
-              #(state, Ok(result))
-            }
-            False ->
-              frame.type_error(state, "matchAll called with non-global RegExp")
-          }
+    JsObject(ref) -> {
+      use match_all_fn, state <- frame.try_op(object.get_symbol_value(
+        state,
+        ref,
+        value.symbol_match_all,
+        regexp_arg,
+      ))
+      case helpers.is_callable(state.heap, match_all_fn) {
+        True -> {
+          use result, state <- frame.try_call(state, match_all_fn, regexp_arg, [
+            this,
+          ])
+          #(state, Ok(result))
+        }
+        False ->
+          frame.type_error(state, "matchAll called with non-global RegExp")
       }
+    }
     _ -> frame.type_error(state, "matchAll requires a RegExp argument")
   }
 }

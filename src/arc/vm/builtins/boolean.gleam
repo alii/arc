@@ -165,11 +165,7 @@ fn this_boolean_value(state: State, this: JsValue) -> Option(Bool) {
     // Step 1: If value is a Boolean, return value.
     JsBool(b) -> Some(b)
     // Step 2: If value is an Object with [[BooleanData]], return it.
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: BooleanObject(value: b), ..)) -> Some(b)
-        _ -> None
-      }
+    JsObject(ref) -> heap.read_boolean_object(state.heap, ref)
     // Step 3: Throw a TypeError exception.
     _ -> None
   }

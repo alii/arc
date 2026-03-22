@@ -43,8 +43,8 @@ pub fn finish(state: State) -> State {
 /// js_std_promise_rejection_check).
 fn report_unhandled_rejections(state: State) -> Nil {
   list.each(state.unhandled_rejections, fn(data_ref) {
-    case heap.read(state.heap, data_ref) {
-      Some(value.PromiseSlot(state: value.PromiseRejected(reason), ..)) ->
+    case heap.read_promise_state(state.heap, data_ref) {
+      Some(value.PromiseRejected(reason)) ->
         io.println_error(
           "Uncaught (in promise): " <> object.inspect(reason, state.heap),
         )
@@ -269,31 +269,17 @@ pub fn run_handler_with_this(
               try_stack: [],
             )
           case call_native_fn(job_state, native, args, [], this_val) {
-            Ok(new_state) ->
+            Ok(new_state) -> {
+              let merged =
+                State(
+                  ..frame.merge_globals(state, new_state, []),
+                  heap: new_state.heap,
+                )
               case new_state.stack {
-                [result, ..] ->
-                  Ok(#(
-                    result,
-                    State(
-                      ..state,
-                      heap: new_state.heap,
-                      job_queue: new_state.job_queue,
-                      pending_receivers: new_state.pending_receivers,
-                      outstanding: new_state.outstanding,
-                    ),
-                  ))
-                [] ->
-                  Ok(#(
-                    JsUndefined,
-                    State(
-                      ..state,
-                      heap: new_state.heap,
-                      job_queue: new_state.job_queue,
-                      pending_receivers: new_state.pending_receivers,
-                      outstanding: new_state.outstanding,
-                    ),
-                  ))
+                [result, ..] -> Ok(#(result, merged))
+                [] -> Ok(#(JsUndefined, merged))
               }
+            }
             Error(#(Thrown, thrown, h)) ->
               Error(#(thrown, State(..state, heap: h)))
             Error(#(StepVmError(vm_err), _, _heap)) ->
@@ -320,10 +306,7 @@ fn run_closure_for_job(
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  let env_values = case heap.read(state.heap, env_ref) {
-    Some(value.EnvSlot(slots)) -> slots
-    _ -> []
-  }
+  let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
   let env_count = list.length(env_values)
   let padded_args = pad_args(args, callee_template.arity)
   let remaining =
@@ -355,30 +338,11 @@ fn run_closure_for_job(
     )
   case execute_inner(job_state) {
     Ok(#(NormalCompletion(val, h), final_state)) ->
-      Ok(#(
-        val,
-        State(
-          ..state,
-          heap: h,
-          job_queue: final_state.job_queue,
-          lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
-          pending_receivers: final_state.pending_receivers,
-          outstanding: final_state.outstanding,
-        ),
-      ))
+      Ok(#(val, State(..frame.merge_globals(state, final_state, []), heap: h)))
     Ok(#(ThrowCompletion(thrown, h), final_state)) ->
       Error(#(
         thrown,
-        State(
-          ..state,
-          heap: h,
-          job_queue: final_state.job_queue,
-          lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
-          pending_receivers: final_state.pending_receivers,
-          outstanding: final_state.outstanding,
-        ),
+        State(..frame.merge_globals(state, final_state, []), heap: h),
       ))
     Ok(#(YieldCompletion(_, _), _)) ->
       panic as "YieldCompletion should not appear in job execution"

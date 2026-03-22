@@ -10,8 +10,7 @@ import arc/vm/value.{
   JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined,
   JsUninitialized, ObjectSlot, OrdinaryObject, PidObject, PmArray, PmBigInt,
   PmBool, PmNull, PmNumber, PmObject, PmPid, PmString, PmSymbol, PmUndefined,
-  PromiseFulfilled, PromiseObject, PromisePending, PromiseRejected, PromiseSlot,
-  SettlePromise, UserMessage,
+  PromiseFulfilled, PromisePending, PromiseRejected, SettlePromise, UserMessage,
 }
 import gleam/dict
 import gleam/io
@@ -167,15 +166,8 @@ fn read_promise_state(
     JsObject(r) -> Some(r)
     _ -> None
   })
-  use data_ref <- option.then(case heap.read(h, ref) {
-    Some(ObjectSlot(kind: PromiseObject(promise_data:), ..)) ->
-      Some(promise_data)
-    _ -> None
-  })
-  case heap.read(h, data_ref) {
-    Some(PromiseSlot(state:, ..)) -> Some(state)
-    _ -> None
-  }
+  use data_ref <- option.then(heap.read_promise_data_ref(h, ref))
+  heap.read_promise_state(h, data_ref)
 }
 
 // -- Arc.send ----------------------------------------------------------------
@@ -200,10 +192,10 @@ pub fn send(
       _ -> Error("Arc.send: first argument is not a Pid")
     })
 
-    use pid <- result.try(case heap.read(state.heap, ref) {
-      Some(ObjectSlot(kind: PidObject(pid:), ..)) -> Ok(pid)
-      _ -> Error("Arc.send: first argument is not a Pid")
-    })
+    use pid <- result.try(
+      heap.read_pid(state.heap, ref)
+      |> option.to_result("Arc.send: first argument is not a Pid"),
+    )
 
     use portable <- result.try(
       serialize(state.heap, msg_arg)
@@ -507,18 +499,14 @@ fn log_stringify_one(val: JsValue, state: State) -> #(State, String) {
     JsSymbol(_) -> #(state, "Symbol()")
     JsUninitialized -> #(state, "undefined")
     JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: PidObject(pid:), ..)) -> #(
-          state,
-          "Pid" <> ffi_pid_to_string(pid),
-        )
-        _ -> {
+      case heap.read_pid(state.heap, ref) {
+        Some(pid) -> #(state, "Pid" <> ffi_pid_to_string(pid))
+        None ->
           // Try to convert to string via toString
           case frame.to_string(state, val) {
             Ok(#(s, state)) -> #(state, s)
             Error(#(_, state)) -> #(state, "[object Object]")
           }
-        }
       }
   }
 }
@@ -590,12 +578,9 @@ pub fn pid_to_string(
 ) -> #(State, Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: PidObject(pid:), ..)) -> #(
-          state,
-          Ok(JsString("Pid" <> ffi_pid_to_string(pid))),
-        )
-        _ -> frame.type_error(state, "Dead Pid")
+      case heap.read_pid(state.heap, ref) {
+        Some(pid) -> #(state, Ok(JsString("Pid" <> ffi_pid_to_string(pid))))
+        None -> frame.type_error(state, "Dead Pid")
       }
     _ -> frame.type_error(state, "Invalid Pid object")
   }

@@ -13,7 +13,7 @@ import arc/vm/frame.{type State, type VmError, State}
 import arc/vm/heap.{type Heap}
 import arc/vm/realm
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, JsObject, JsUndefined, ObjectSlot,
+  type FuncTemplate, type JsValue, type Ref, JsObject, JsUndefined,
 }
 import gleam/dict
 import gleam/option.{type Option, None, Some}
@@ -168,19 +168,14 @@ pub fn run_and_drain_repl(
 
 /// Get the fulfilled value of a promise JsValue, or None if not fulfilled.
 pub fn promise_result(h: Heap, val: JsValue) -> Option(JsValue) {
-  case val {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: value.PromiseObject(promise_data:), ..)) ->
-          case heap.read(h, promise_data) {
-            Some(value.PromiseSlot(state: value.PromiseFulfilled(v), ..)) ->
-              Some(v)
-            Some(value.PromiseSlot(state: value.PromiseRejected(r), ..)) ->
-              Some(r)
-            _ -> None
-          }
-        _ -> None
-      }
+  use ref <- option.then(case val {
+    JsObject(ref) -> Some(ref)
+    _ -> None
+  })
+  use data_ref <- option.then(heap.read_promise_data_ref(h, ref))
+  case heap.read_promise_state(h, data_ref) {
+    Some(value.PromiseFulfilled(v)) -> Some(v)
+    Some(value.PromiseRejected(r)) -> Some(r)
     _ -> None
   }
 }

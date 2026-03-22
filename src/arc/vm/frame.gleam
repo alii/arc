@@ -4,6 +4,7 @@ import arc/vm/heap.{type Heap}
 import arc/vm/opcode.{type Op}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
 import gleam/dict
+import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/set
@@ -139,6 +140,24 @@ pub type State {
   )
 }
 
+/// Thread VM-global state from a child execution back to parent.
+/// Covers job_queue, event loop state, lexical globals. Does NOT thread
+/// heap (caller handles separately since it's often further mutated).
+pub fn merge_globals(
+  parent: State,
+  child: State,
+  extra_jobs: List(value.Job),
+) -> State {
+  State(
+    ..parent,
+    lexical_globals: child.lexical_globals,
+    const_lexical_globals: child.const_lexical_globals,
+    job_queue: list.append(child.job_queue, extra_jobs),
+    pending_receivers: child.pending_receivers,
+    outstanding: child.outstanding,
+  )
+}
+
 /// Call state.js_to_string, handling the function field access.
 pub fn to_string(
   state: State,
@@ -153,8 +172,8 @@ pub fn to_string(
 pub fn try_to_string(
   state: State,
   val: JsValue,
-  cont: fn(String, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(String, State) -> #(State, Result(b, JsValue)),
+) -> #(State, Result(b, JsValue)) {
   case to_string(state, val) {
     Ok(#(str, state)) -> cont(str, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -179,10 +198,38 @@ pub fn try_call(
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State) -> #(State, Result(b, JsValue)),
+) -> #(State, Result(b, JsValue)) {
   case call(state, callee, this_val, args) {
     Ok(#(result, state)) -> cont(result, state)
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// Generic CPS helper for any fallible state operation returning
+/// `Result(#(a, State), #(JsValue, State))`. Use with `use` syntax:
+///   use val, state <- frame.try_op(some_operation(state, ...))
+/// Polymorphic in both the unwrapped value type and the continuation's result
+/// type, so it works in loops returning non-JsValue results too.
+pub fn try_op(
+  result: Result(#(a, State), #(JsValue, State)),
+  cont: fn(a, State) -> #(State, Result(b, JsValue)),
+) -> #(State, Result(b, JsValue)) {
+  case result {
+    Ok(#(val, state)) -> cont(val, state)
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// CPS helper for fallible state operations that return only an updated State
+/// (no extra value). Use with `use` syntax:
+///   use state <- frame.try_state(some_operation(state, ...))
+pub fn try_state(
+  result: Result(State, #(JsValue, State)),
+  cont: fn(State) -> #(State, Result(b, JsValue)),
+) -> #(State, Result(b, JsValue)) {
+  case result {
+    Ok(state) -> cont(state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }

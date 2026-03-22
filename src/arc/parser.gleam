@@ -3,28 +3,86 @@
 ///
 /// The parser consumes a token list and validates syntax.
 /// Uses Pratt parsing for expression precedence.
+///
+/// Submodules:
+///   parser/error    — ParseError type, formatting, position extraction
+///   parser/token    — TokenKind classification and conversion
+///   parser/number   — JS number literal parsing
+///   parser/regex    — Regex literal scanning and /u validation
+///   parser/template — Template literal splitting and octal detection
+///
+/// The mutually-recursive core (statements ↔ expressions ↔ patterns) lives
+/// here since Gleam doesn't support cross-module recursion.
 import arc/ast
 import arc/lexer.{
-  type Token, type TokenKind, Ampersand, AmpersandAmpersand,
-  AmpersandAmpersandEqual, AmpersandEqual, Arrow, As, Async, Await, Bang,
-  BangEqual, BangEqualEqual, Break, Caret, CaretEqual, Case, Catch, Class, Colon,
-  Comma, Const, Continue, Debugger, Default, Delete, Do, Dot, DotDotDot, Else,
-  Eof, Equal, EqualEqual, EqualEqualEqual, Export, Extends, Finally, For, From,
-  Function, GreaterThan, GreaterThanEqual, GreaterThanGreaterThan,
-  GreaterThanGreaterThanEqual, GreaterThanGreaterThanGreaterThan,
-  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Import, In, Instanceof,
-  KFalse, KString, KTrue, LeftBrace, LeftBracket, LeftParen, LessThan,
-  LessThanEqual, LessThanLessThan, LessThanLessThanEqual, Let, Minus, MinusEqual,
-  MinusMinus, New, Null, Number, Of, Percent, PercentEqual, Pipe, PipeEqual,
-  PipePipe, PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
-  QuestionQuestion, QuestionQuestionEqual, RegularExpression, Return, RightBrace,
-  RightBracket, RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual,
-  StarStar, StarStarEqual, Static, Super, Switch, TemplateLiteral, This, Throw,
-  Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
+  type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
+  Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
+  Continue, Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal,
+  Export, Extends, Finally, For, From, Function, GreaterThanGreaterThanEqual,
+  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Import, In, KFalse,
+  KString, KTrue, LeftBrace, LeftBracket, LeftParen, LessThanLessThanEqual, Let,
+  Minus, MinusEqual, MinusMinus, New, Null, Number, Of, PercentEqual, PipeEqual,
+  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
+  QuestionQuestionEqual, RegularExpression, Return, RightBrace, RightBracket,
+  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
+  StarStarEqual, Static, Super, Switch, TemplateLiteral, This, Throw, Tilde, Try,
+  Typeof, Undefined, Var, Void, While, With, Yield,
+}
+import arc/parser/error.{
+  AwaitInAsyncFunction, AwaitInModule, BreakOutsideLoopOrSwitch,
+  ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
+  ClassConstructorNotSetter, ClassDuplicateConstructor, ContinueOutsideLoop,
+  DeleteUnqualifiedStrictMode, DestructuringMissingInitializer,
+  DuplicateBindingLexical, DuplicateDefaultCase, DuplicateExport,
+  DuplicateImportBinding, DuplicateLabel, DuplicateParamNameStrictMode,
+  DuplicateParameterName, DuplicateProtoProperty, EnumReservedWord,
+  EvalArgsAssignStrictMode, ExpectedAfterOptionalChain,
+  ExpectedAsOrFromAfterExportStar, ExpectedBindingPattern,
+  ExpectedBraceOrStarAfterComma, ExpectedCallOrDotAfterImport,
+  ExpectedCaseDefaultOrBrace, ExpectedCloseAfterSetter,
+  ExpectedCommaOrBraceInExport, ExpectedCommaOrBraceInImport,
+  ExpectedCommaOrBraceInObject, ExpectedCommaOrBraceInObjectLiteral,
+  ExpectedCommaOrBracket, ExpectedCommaOrBracketInExpr,
+  ExpectedCommaOrCloseParen, ExpectedCommaOrObjectClose, ExpectedExportAlias,
+  ExpectedExportSpecifierName, ExpectedForDeclSeparator,
+  ExpectedForHeadSeparator, ExpectedForSeparator, ExpectedFromOrComma,
+  ExpectedFunctionAfterAsync, ExpectedIdentifier, ExpectedIdentifierAfterDot,
+  ExpectedImportMeta, ExpectedImportMetaGot, ExpectedImportSpecifier,
+  ExpectedImportSpecifierName, ExpectedModuleSpecifier, ExpectedNewTarget,
+  ExpectedNewTargetGot, ExpectedPropertyName, ExpectedSemicolon, ExpectedToken,
+  ExportNotTopLevel, ForInInitializer, ForOfInitializer, FunctionDeclInLabelBody,
+  FunctionDeclInSingleStatement, GeneratorDeclLabeled, GetterNoParams,
+  IdentifierAlreadyDeclared, ImportNotTopLevel, InvalidAssignmentLhs,
+  InvalidDestructuringTarget, InvalidForInOfLhs, InvalidLhsPrefixOp,
+  InvalidPostfixLhs, LetBindingInLexicalDecl, LetIdentifierStrictMode,
+  LexerError, LexicalDeclInLabel, LexicalDeclInSingleStatement,
+  MissingCatchOrFinally, MissingConstInitializer, NewTargetOutsideFunction,
+  NotAnArrowFunction, OctalEscapeStrictMode, OctalLiteralStrictMode,
+  ReservedWordImportBinding, ReservedWordStrictMode, RestDefaultInitializer,
+  RestMustBeLast, RestTrailingComma, ReturnOutsideFunction,
+  SetterExactlyOneParam, SetterNoRest, ShorthandDefaultOutsideDestructuring,
+  StaticPrototype, StaticReservedStrictMode, StrictModeAssignment,
+  StrictModeBindingName, StrictModeModification, StrictModeModifyRestricted,
+  StrictModeParamName, SuperCallNotInDerivedConstructor,
+  SuperPropertyNotInMethod, ThrowLineBreak, UndeclaredExportBinding,
+  UndefinedLabel, UnexpectedAfterExport, UnexpectedCloseBrace,
+  UnexpectedCloseParen, UnexpectedExport, UnexpectedSuper, UnexpectedToken,
+  UnicodeEscapeInMetaProperty, WithNotAllowedStrictMode, YieldInFormalParameter,
+  YieldInGenerator, YieldReservedStrictMode,
+}
+import arc/parser/number.{parse_js_number}
+import arc/parser/regex
+import arc/parser/template.{
+  has_legacy_octal_escape, is_legacy_octal_number, split_template_parts,
+}
+import arc/parser/token.{
+  binary_precedence, is_assignment_operator, is_contextual_keyword,
+  is_identifier_or_keyword, is_keyword_as_identifier, is_logical_op,
+  is_reserved_word_kind, token_kind_to_string, token_to_assignment_op,
+  token_to_binary_op,
 }
 import gleam/bit_array
 import gleam/bool
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -36,416 +94,17 @@ pub type ParseMode {
   Module
 }
 
-// NOTE FOR OTHER AGENTS: ParseError uses typed variants (like LexError in lexer.gleam).
-// Use parse_error_to_string(e) and parse_error_pos(e) to read errors.
-// Add new variants here instead of using string messages.
-pub type ParseError {
-  LexerError(message: String, pos: Int)
-  ExpectedToken(expected: String, got: String, pos: Int)
-  ExpectedIdentifier(pos: Int)
-  ExpectedSemicolon(pos: Int)
-  ExpectedBindingPattern(pos: Int)
-  ExpectedPropertyName(pos: Int)
-  ExpectedImportSpecifierName(pos: Int)
-  ExpectedExportSpecifierName(pos: Int)
-  ExpectedCaseDefaultOrBrace(pos: Int)
-  UnexpectedCloseBrace(pos: Int)
-  UnexpectedExport(pos: Int)
-  UnexpectedSuper(pos: Int)
-  UnexpectedCloseParen(pos: Int)
-  UnexpectedToken(token: String, pos: Int)
-  NotAnArrowFunction(pos: Int)
-  ReturnOutsideFunction(pos: Int)
-  BreakOutsideLoopOrSwitch(pos: Int)
-  ContinueOutsideLoop(pos: Int)
-  ReservedWordStrictMode(name: String, pos: Int)
-  YieldReservedStrictMode(pos: Int)
-  LetIdentifierStrictMode(pos: Int)
-  StaticReservedStrictMode(pos: Int)
-  WithNotAllowedStrictMode(pos: Int)
-  DeleteUnqualifiedStrictMode(pos: Int)
-  OctalEscapeStrictMode(pos: Int)
-  OctalLiteralStrictMode(pos: Int)
-  YieldInGenerator(pos: Int)
-  AwaitInModule(pos: Int)
-  AwaitInAsyncFunction(pos: Int)
-  EnumReservedWord(pos: Int)
-  DuplicateParameterName(name: String, pos: Int)
-  DuplicateBindingLexical(name: String, pos: Int)
-  DuplicateExport(name: String, pos: Int)
-  DuplicateImportBinding(name: String, pos: Int)
-  DuplicateLabel(label: String, pos: Int)
-  DuplicateProtoProperty(pos: Int)
-  IdentifierAlreadyDeclared(name: String, pos: Int)
-  LexicalDeclInSingleStatement(pos: Int)
-  YieldInFormalParameter(pos: Int)
-  InvalidLhsPrefixOp(pos: Int)
-  SuperCallNotInDerivedConstructor(pos: Int)
-  SuperPropertyNotInMethod(pos: Int)
-  NewTargetOutsideFunction(pos: Int)
-  MissingConstInitializer(pos: Int)
-  RestTrailingComma(pos: Int)
-  ExpectedForHeadSeparator(pos: Int)
-  MissingCatchOrFinally(pos: Int)
-  StrictModeModification(name: String, pos: Int)
-  ExpectedModuleSpecifier(pos: Int)
-  DestructuringMissingInitializer(pos: Int)
-  ExpectedCommaOrBracket(pos: Int)
-  SetterExactlyOneParam(pos: Int)
-  ClassConstructorNotGetter(pos: Int)
-  ExpectedCommaOrObjectClose(pos: Int)
-  ExpectedForDeclSeparator(pos: Int)
-  ExpectedCloseAfterSetter(pos: Int)
-  ClassConstructorNotSetter(pos: Int)
-  InvalidForInOfLhs(kind: String, pos: Int)
-  ExpectedForSeparator(pos: Int)
-  UndefinedLabel(label: String, pos: Int)
-  ThrowLineBreak(pos: Int)
-  GetterNoParams(pos: Int)
-  SetterNoRest(pos: Int)
-  RestMustBeLast(pos: Int)
-  ClassConstructorGenerator(pos: Int)
-  ClassConstructorAsync(pos: Int)
-  ClassDuplicateConstructor(pos: Int)
-  StaticPrototype(pos: Int)
-  LexicalDeclInLabel(pos: Int)
-  GeneratorDeclLabeled(pos: Int)
-  InvalidDestructuringTarget(pos: Int)
-  InvalidAssignmentLhs(pos: Int)
-  ExpectedNewTarget(pos: Int)
-  ExpectedImportMeta(pos: Int)
-  ExpectedCallOrDotAfterImport(pos: Int)
-  ExpectedIdentifierAfterDot(pos: Int)
-  ExpectedAfterOptionalChain(pos: Int)
-  ExpectedCommaOrCloseParen(pos: Int)
-  ExpectedCommaOrBracketInArray(pos: Int)
-  ExpectedCommaOrBracketInExpr(pos: Int)
-  ExpectedCommaOrBraceInObject(pos: Int)
-  ExpectedCommaOrBraceInObjectLiteral(pos: Int)
-  ExpectedBraceOrStarAfterComma(pos: Int)
-  ExpectedFromOrComma(pos: Int)
-  ExpectedImportSpecifier(pos: Int)
-  ExpectedCommaOrBraceInImport(pos: Int)
-  ExpectedFunctionAfterAsync(pos: Int)
-  ExpectedAsOrFromAfterExportStar(pos: Int)
-  UnexpectedAfterExport(pos: Int)
-  ExpectedCommaOrBraceInExport(pos: Int)
-  ExpectedExportAlias(pos: Int)
-  FunctionDeclInSingleStatement(pos: Int)
-  StrictModeBindingName(name: String, pos: Int)
-  LetBindingInLexicalDecl(pos: Int)
-  ForInInitializer(pos: Int)
-  ForOfInitializer(pos: Int)
-  StrictModeParamName(name: String, pos: Int)
-  RestDefaultInitializer(pos: Int)
-  FunctionDeclInLabelBody(pos: Int)
-  ShorthandDefaultOutsideDestructuring(pos: Int)
-  StrictModeAssignment(name: String, pos: Int)
-  EvalArgsAssignStrictMode(pos: Int)
-  InvalidPostfixLhs(pos: Int)
-  ExpectedNewTargetGot(got: String, pos: Int)
-  ExpectedImportMetaGot(got: String, pos: Int)
-  StrictModeModifyRestricted(name: String, pos: Int)
-  ExpectedIdentifierAsString(name: String, pos: Int)
-  DuplicateParamNameStrictMode(name: String, pos: Int)
-  ReservedWordImportBinding(name: String, pos: Int)
-  DuplicateDefaultCase(pos: Int)
-  UndeclaredExportBinding(name: String, pos: Int)
-  ImportNotTopLevel(pos: Int)
-  ExportNotTopLevel(pos: Int)
-  UnicodeEscapeInMetaProperty(pos: Int)
+// Re-export ParseError type and helpers for callers that import arc/parser.
+// The actual type lives in arc/parser/error.
+pub type ParseError =
+  error.ParseError
+
+pub fn parse_error_to_string(err: ParseError) -> String {
+  error.parse_error_to_string(err)
 }
 
-pub fn parse_error_to_string(error: ParseError) -> String {
-  case error {
-    LexerError(message:, ..) -> message
-    ExpectedToken(expected:, got:, ..) ->
-      "Expected " <> expected <> " but got " <> got
-    ExpectedIdentifier(_) -> "Expected identifier"
-    ExpectedSemicolon(_) -> "Expected ';'"
-    ExpectedBindingPattern(_) -> "Expected binding pattern"
-    ExpectedPropertyName(_) -> "Expected property name"
-    ExpectedImportSpecifierName(_) -> "Expected import specifier name"
-    ExpectedExportSpecifierName(_) -> "Expected export specifier name"
-    ExpectedCaseDefaultOrBrace(_) -> "Expected 'case', 'default', or '}'"
-    UnexpectedCloseBrace(_) -> "Unexpected '}'"
-    UnexpectedExport(_) -> "Unexpected 'export'"
-    UnexpectedSuper(_) -> "Unexpected 'super'"
-    UnexpectedCloseParen(_) -> "Unexpected token ')'"
-    UnexpectedToken(token:, ..) -> "Unexpected token: " <> token
-    NotAnArrowFunction(_) -> "Not an arrow function"
-    ReturnOutsideFunction(_) -> "'return' outside of function"
-    BreakOutsideLoopOrSwitch(_) -> "'break' outside of loop or switch"
-    ContinueOutsideLoop(_) -> "'continue' outside of loop"
-    ReservedWordStrictMode(name:, ..) ->
-      "'" <> name <> "' is a reserved word in strict mode"
-    YieldReservedStrictMode(_) -> "'yield' is a reserved word in strict mode"
-    LetIdentifierStrictMode(_) ->
-      "'let' cannot be used as identifier in strict mode"
-    StaticReservedStrictMode(_) -> "'static' is a reserved word in strict mode"
-    WithNotAllowedStrictMode(_) -> "'with' not allowed in strict mode"
-    DeleteUnqualifiedStrictMode(_) ->
-      "Cannot delete unqualified identifier in strict mode"
-    OctalEscapeStrictMode(_) ->
-      "Octal escape sequences are not allowed in strict mode"
-    OctalLiteralStrictMode(_) -> "Octal literals are not allowed in strict mode"
-    YieldInGenerator(_) -> "'yield' cannot be used as identifier in generator"
-    AwaitInModule(_) -> "'await' cannot be used as identifier in module"
-    AwaitInAsyncFunction(_) ->
-      "'await' cannot be used as identifier in async function"
-    EnumReservedWord(_) -> "'enum' is a reserved word"
-    DuplicateParameterName(name:, ..) ->
-      "Duplicate parameter name '" <> name <> "' not allowed"
-    DuplicateBindingLexical(name:, ..) ->
-      "Duplicate binding '" <> name <> "' in lexical declaration"
-    DuplicateExport(name:, ..) -> "Duplicate export of '" <> name <> "'"
-    DuplicateImportBinding(name:, ..) ->
-      "Duplicate import binding '" <> name <> "'"
-    DuplicateLabel(label:, ..) -> "Duplicate label '" <> label <> "'"
-    DuplicateProtoProperty(_) ->
-      "Duplicate '__proto__' property in object literal"
-    IdentifierAlreadyDeclared(name:, ..) ->
-      "Identifier '" <> name <> "' has already been declared"
-    LexicalDeclInSingleStatement(_) ->
-      "Lexical declaration cannot appear in a single-statement context"
-    YieldInFormalParameter(_) ->
-      "Yield expression not allowed in formal parameter"
-    InvalidLhsPrefixOp(_) ->
-      "Invalid left-hand side expression in prefix operation"
-    SuperCallNotInDerivedConstructor(_) ->
-      "'super()' is only valid in a derived class constructor"
-    SuperPropertyNotInMethod(_) ->
-      "'super' property access is only valid inside a method"
-    NewTargetOutsideFunction(_) -> "'new.target' outside of function"
-    MissingConstInitializer(_) -> "Missing initializer in const declaration"
-    RestTrailingComma(_) -> "Rest element may not have a trailing comma"
-    ExpectedForHeadSeparator(_) -> "Expected 'in', 'of', ';', or ','"
-    MissingCatchOrFinally(_) -> "Missing catch or finally after try"
-    StrictModeModification(name:, ..) ->
-      "'" <> name <> "' cannot be modified in strict mode"
-    ExpectedModuleSpecifier(_) -> "Expected module specifier"
-    DestructuringMissingInitializer(_) ->
-      "Destructuring declaration must have an initializer"
-    ExpectedCommaOrBracket(_) -> "Expected ',' or ']' in array destructuring"
-    SetterExactlyOneParam(_) -> "Setter must have exactly one parameter"
-    ClassConstructorNotGetter(_) -> "Class constructor may not be a getter"
-    ExpectedCommaOrObjectClose(_) ->
-      "Expected ',' or '}' in object destructuring"
-    ExpectedForDeclSeparator(_) -> "Expected 'in', 'of', ';', '=', or ','"
-    ExpectedCloseAfterSetter(_) -> "Expected ')' after setter parameter"
-    ClassConstructorNotSetter(_) -> "Class constructor may not be a setter"
-    InvalidForInOfLhs(kind:, ..) ->
-      "Invalid left-hand side in for-" <> kind <> " statement"
-    ExpectedForSeparator(_) -> "Expected ';', 'in', or 'of' in for statement"
-    UndefinedLabel(label:, ..) -> "Undefined label '" <> label <> "'"
-    ThrowLineBreak(_) ->
-      "No line break is allowed between 'throw' and its expression"
-    GetterNoParams(_) -> "Getter must have no parameters"
-    SetterNoRest(_) -> "Setter parameter cannot be a rest parameter"
-    RestMustBeLast(_) -> "Rest parameter must be last formal parameter"
-    ClassConstructorGenerator(_) -> "Class constructor may not be a generator"
-    ClassConstructorAsync(_) -> "Class constructor may not be an async method"
-    ClassDuplicateConstructor(_) -> "A class may only have one constructor"
-    StaticPrototype(_) ->
-      "Classes may not have a static property named 'prototype'"
-    LexicalDeclInLabel(_) ->
-      "Lexical declaration cannot appear in a labeled statement"
-    GeneratorDeclLabeled(_) -> "Generator declarations cannot be labeled"
-    InvalidDestructuringTarget(_) -> "Invalid destructuring assignment target"
-    InvalidAssignmentLhs(_) -> "Invalid left-hand side in assignment"
-    ExpectedNewTarget(_) -> "Expected 'target' after 'new.'"
-    ExpectedImportMeta(_) -> "Expected 'meta' after 'import.'"
-    ExpectedCallOrDotAfterImport(_) -> "Expected '(' or '.' after 'import'"
-    ExpectedIdentifierAfterDot(_) -> "Expected identifier after '.'"
-    ExpectedAfterOptionalChain(_) ->
-      "Expected identifier, '[', or '(' after '?.'"
-    ExpectedCommaOrCloseParen(_) -> "Expected ',' or ')' in arguments"
-    ExpectedCommaOrBracketInArray(_) -> "Expected ',' or ']'"
-    ExpectedCommaOrBracketInExpr(_) -> "Expected ',' or ']'"
-    ExpectedCommaOrBraceInObject(_) -> "Expected ',' or '}' in object"
-    ExpectedCommaOrBraceInObjectLiteral(_) ->
-      "Expected ',' or '}' in object literal"
-    ExpectedBraceOrStarAfterComma(_) -> "Expected '{' or '*' after ','"
-    ExpectedFromOrComma(_) -> "Expected 'from' or ','"
-    ExpectedImportSpecifier(_) -> "Expected import specifier"
-    ExpectedCommaOrBraceInImport(_) ->
-      "Expected ',' or '}' in import specifiers"
-    ExpectedFunctionAfterAsync(_) ->
-      "Expected 'function' after 'async' in export"
-    ExpectedAsOrFromAfterExportStar(_) ->
-      "Expected 'as' or 'from' after 'export *'"
-    UnexpectedAfterExport(_) -> "Unexpected token after 'export'"
-    ExpectedCommaOrBraceInExport(_) ->
-      "Expected ',' or '}' in export specifiers"
-    ExpectedExportAlias(_) -> "Expected export alias"
-    FunctionDeclInSingleStatement(_) ->
-      "Function declarations are not allowed in single-statement context"
-    StrictModeBindingName(name:, ..) ->
-      "'" <> name <> "' cannot be used as a binding name in strict mode"
-    LetBindingInLexicalDecl(_) ->
-      "'let' cannot be used as a binding name in lexical declaration"
-    ForInInitializer(_) ->
-      "for-in variable declaration may not have an initializer"
-    ForOfInitializer(_) ->
-      "for-of variable declaration may not have an initializer"
-    StrictModeParamName(name:, ..) ->
-      "'" <> name <> "' is not allowed as a parameter name in strict mode"
-    RestDefaultInitializer(_) ->
-      "Rest parameter may not have a default initializer"
-    FunctionDeclInLabelBody(_) ->
-      "Function declarations are not allowed as the body of a labeled statement in strict mode"
-    ShorthandDefaultOutsideDestructuring(_) ->
-      "Shorthand property with default is not valid outside destructuring"
-    StrictModeAssignment(name:, ..) ->
-      "'" <> name <> "' cannot be assigned to in strict mode"
-    EvalArgsAssignStrictMode(_) ->
-      "'eval' or 'arguments' cannot be assigned to in strict mode"
-    InvalidPostfixLhs(_) ->
-      "Invalid left-hand side expression in postfix operation"
-    ExpectedNewTargetGot(got:, ..) ->
-      "Expected 'target' after 'new.' but got '" <> got <> "'"
-    ExpectedImportMetaGot(got:, ..) ->
-      "Expected 'meta' after 'import.' but got '" <> got <> "'"
-    StrictModeModifyRestricted(name:, ..) ->
-      "'" <> name <> "' cannot be modified in strict mode"
-    ExpectedIdentifierAsString(name:, ..) ->
-      "'" <> name <> "' is a reserved word and cannot be used as an identifier"
-    DuplicateParamNameStrictMode(name:, ..) ->
-      "Duplicate parameter name '" <> name <> "' not allowed in strict mode"
-    ReservedWordImportBinding(name:, ..) ->
-      "'"
-      <> name
-      <> "' is a reserved word and cannot be used as an import binding"
-    DuplicateDefaultCase(_) ->
-      "More than one default clause in switch statement"
-    UndeclaredExportBinding(name:, ..) ->
-      "Export '" <> name <> "' is not defined in module scope"
-    ImportNotTopLevel(_) ->
-      "'import' declarations may only appear at top level of a module"
-    ExportNotTopLevel(_) ->
-      "'export' declarations may only appear at top level of a module"
-    UnicodeEscapeInMetaProperty(_) ->
-      "'target' in new.target must not contain unicode escape sequences"
-  }
-}
-
-pub fn parse_error_pos(error: ParseError) -> Int {
-  case error {
-    LexerError(pos:, ..) -> pos
-    ExpectedToken(pos:, ..) -> pos
-    ExpectedIdentifier(pos:) -> pos
-    ExpectedSemicolon(pos:) -> pos
-    ExpectedBindingPattern(pos:) -> pos
-    ExpectedPropertyName(pos:) -> pos
-    ExpectedImportSpecifierName(pos:) -> pos
-    ExpectedExportSpecifierName(pos:) -> pos
-    ExpectedCaseDefaultOrBrace(pos:) -> pos
-    UnexpectedCloseBrace(pos:) -> pos
-    UnexpectedExport(pos:) -> pos
-    UnexpectedSuper(pos:) -> pos
-    UnexpectedCloseParen(pos:) -> pos
-    UnexpectedToken(pos:, ..) -> pos
-    NotAnArrowFunction(pos:) -> pos
-    ReturnOutsideFunction(pos:) -> pos
-    BreakOutsideLoopOrSwitch(pos:) -> pos
-    ContinueOutsideLoop(pos:) -> pos
-    ReservedWordStrictMode(pos:, ..) -> pos
-    YieldReservedStrictMode(pos:) -> pos
-    LetIdentifierStrictMode(pos:) -> pos
-    StaticReservedStrictMode(pos:) -> pos
-    WithNotAllowedStrictMode(pos:) -> pos
-    DeleteUnqualifiedStrictMode(pos:) -> pos
-    OctalEscapeStrictMode(pos:) -> pos
-    OctalLiteralStrictMode(pos:) -> pos
-    YieldInGenerator(pos:) -> pos
-    AwaitInModule(pos:) -> pos
-    AwaitInAsyncFunction(pos:) -> pos
-    EnumReservedWord(pos:) -> pos
-    DuplicateParameterName(pos:, ..) -> pos
-    DuplicateBindingLexical(pos:, ..) -> pos
-    DuplicateExport(pos:, ..) -> pos
-    DuplicateImportBinding(pos:, ..) -> pos
-    DuplicateLabel(pos:, ..) -> pos
-    DuplicateProtoProperty(pos:) -> pos
-    IdentifierAlreadyDeclared(pos:, ..) -> pos
-    LexicalDeclInSingleStatement(pos:) -> pos
-    YieldInFormalParameter(pos:) -> pos
-    InvalidLhsPrefixOp(pos:) -> pos
-    SuperCallNotInDerivedConstructor(pos:) -> pos
-    SuperPropertyNotInMethod(pos:) -> pos
-    NewTargetOutsideFunction(pos:) -> pos
-    MissingConstInitializer(pos:) -> pos
-    RestTrailingComma(pos:) -> pos
-    ExpectedForHeadSeparator(pos:) -> pos
-    MissingCatchOrFinally(pos:) -> pos
-    StrictModeModification(pos:, ..) -> pos
-    ExpectedModuleSpecifier(pos:) -> pos
-    DestructuringMissingInitializer(pos:) -> pos
-    ExpectedCommaOrBracket(pos:) -> pos
-    SetterExactlyOneParam(pos:) -> pos
-    ClassConstructorNotGetter(pos:) -> pos
-    ExpectedCommaOrObjectClose(pos:) -> pos
-    ExpectedForDeclSeparator(pos:) -> pos
-    ExpectedCloseAfterSetter(pos:) -> pos
-    ClassConstructorNotSetter(pos:) -> pos
-    InvalidForInOfLhs(pos:, ..) -> pos
-    ExpectedForSeparator(pos:) -> pos
-    UndefinedLabel(pos:, ..) -> pos
-    ThrowLineBreak(pos:) -> pos
-    GetterNoParams(pos:) -> pos
-    SetterNoRest(pos:) -> pos
-    RestMustBeLast(pos:) -> pos
-    ClassConstructorGenerator(pos:) -> pos
-    ClassConstructorAsync(pos:) -> pos
-    ClassDuplicateConstructor(pos:) -> pos
-    StaticPrototype(pos:) -> pos
-    LexicalDeclInLabel(pos:) -> pos
-    GeneratorDeclLabeled(pos:) -> pos
-    InvalidDestructuringTarget(pos:) -> pos
-    InvalidAssignmentLhs(pos:) -> pos
-    ExpectedNewTarget(pos:) -> pos
-    ExpectedImportMeta(pos:) -> pos
-    ExpectedCallOrDotAfterImport(pos:) -> pos
-    ExpectedIdentifierAfterDot(pos:) -> pos
-    ExpectedAfterOptionalChain(pos:) -> pos
-    ExpectedCommaOrCloseParen(pos:) -> pos
-    ExpectedCommaOrBracketInArray(pos:) -> pos
-    ExpectedCommaOrBracketInExpr(pos:) -> pos
-    ExpectedCommaOrBraceInObject(pos:) -> pos
-    ExpectedCommaOrBraceInObjectLiteral(pos:) -> pos
-    ExpectedBraceOrStarAfterComma(pos:) -> pos
-    ExpectedFromOrComma(pos:) -> pos
-    ExpectedImportSpecifier(pos:) -> pos
-    ExpectedCommaOrBraceInImport(pos:) -> pos
-    ExpectedFunctionAfterAsync(pos:) -> pos
-    ExpectedAsOrFromAfterExportStar(pos:) -> pos
-    UnexpectedAfterExport(pos:) -> pos
-    ExpectedCommaOrBraceInExport(pos:) -> pos
-    ExpectedExportAlias(pos:) -> pos
-    FunctionDeclInSingleStatement(pos:) -> pos
-    StrictModeBindingName(pos:, ..) -> pos
-    LetBindingInLexicalDecl(pos:) -> pos
-    ForInInitializer(pos:) -> pos
-    ForOfInitializer(pos:) -> pos
-    StrictModeParamName(pos:, ..) -> pos
-    RestDefaultInitializer(pos:) -> pos
-    FunctionDeclInLabelBody(pos:) -> pos
-    ShorthandDefaultOutsideDestructuring(pos:) -> pos
-    StrictModeAssignment(pos:, ..) -> pos
-    EvalArgsAssignStrictMode(pos:) -> pos
-    InvalidPostfixLhs(pos:) -> pos
-    ExpectedNewTargetGot(pos:, ..) -> pos
-    ExpectedImportMetaGot(pos:, ..) -> pos
-    StrictModeModifyRestricted(pos:, ..) -> pos
-    ExpectedIdentifierAsString(pos:, ..) -> pos
-    DuplicateParamNameStrictMode(pos:, ..) -> pos
-    ReservedWordImportBinding(pos:, ..) -> pos
-    DuplicateDefaultCase(pos:) -> pos
-    UndeclaredExportBinding(pos:, ..) -> pos
-    ImportNotTopLevel(pos:) -> pos
-    ExportNotTopLevel(pos:) -> pos
-    UnicodeEscapeInMetaProperty(pos:) -> pos
-  }
+pub fn parse_error_pos(err: ParseError) -> Int {
+  error.parse_error_pos(err)
 }
 
 /// What kind of binding declaration we are currently parsing.
@@ -1244,47 +903,6 @@ fn check_duplicate_import_binding(p: P, name: String) -> Result(P, ParseError) {
 }
 
 /// Check if a token kind is a reserved word that can NEVER be a binding identifier.
-fn is_reserved_word_kind(kind: TokenKind) -> Bool {
-  case kind {
-    Break
-    | Case
-    | Catch
-    | Class
-    | Const
-    | Continue
-    | Debugger
-    | Default
-    | Delete
-    | Do
-    | Else
-    | Export
-    | Extends
-    | Finally
-    | For
-    | Function
-    | If
-    | Import
-    | In
-    | Instanceof
-    | New
-    | Return
-    | Super
-    | Switch
-    | This
-    | Throw
-    | Try
-    | Typeof
-    | Var
-    | Void
-    | While
-    | With
-    | Null
-    | KTrue
-    | KFalse -> True
-    _ -> False
-  }
-}
-
 /// Validate that the local binding name in an import specifier is not a
 /// reserved word. The imported name (LHS of 'as') can be any IdentifierName
 /// including keywords, but the local binding must be a valid BindingIdentifier.
@@ -3283,28 +2901,6 @@ fn parse_assignment_expression_inner(
   }
 }
 
-fn is_assignment_operator(kind: TokenKind) -> Bool {
-  case kind {
-    Equal
-    | PlusEqual
-    | MinusEqual
-    | StarEqual
-    | StarStarEqual
-    | SlashEqual
-    | PercentEqual
-    | AmpersandEqual
-    | PipeEqual
-    | CaretEqual
-    | LessThanLessThanEqual
-    | GreaterThanGreaterThanEqual
-    | GreaterThanGreaterThanGreaterThanEqual
-    | AmpersandAmpersandEqual
-    | PipePipeEqual
-    | QuestionQuestionEqual -> True
-    _ -> False
-  }
-}
-
 fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
   // Remember the LHS start token for destructuring pattern detection
   let lhs_start = peek(p)
@@ -3750,244 +3346,6 @@ fn parse_binary_rhs(
       parse_binary_rhs(P(..p3, last_expr_assignable: False), expr, min_prec)
     }
     False -> Ok(#(p, left))
-  }
-}
-
-fn binary_precedence(kind: TokenKind, allow_in: Bool) -> Int {
-  case kind {
-    PipePipe -> 1
-    AmpersandAmpersand -> 2
-    Pipe -> 3
-    Caret -> 4
-    Ampersand -> 5
-    EqualEqual | BangEqual | EqualEqualEqual | BangEqualEqual -> 6
-    LessThan | LessThanEqual | GreaterThan | GreaterThanEqual | Instanceof -> 7
-    In ->
-      case allow_in {
-        True -> 7
-        False -> 0
-      }
-    LessThanLessThan
-    | GreaterThanGreaterThan
-    | GreaterThanGreaterThanGreaterThan -> 8
-    Plus | Minus -> 9
-    Star | Slash | Percent -> 10
-    StarStar -> 11
-    QuestionQuestion -> 1
-    _ -> 0
-  }
-}
-
-fn token_to_binary_op(kind: TokenKind) -> ast.BinaryOp {
-  case kind {
-    Plus -> ast.Add
-    Minus -> ast.Subtract
-    Star -> ast.Multiply
-    Slash -> ast.Divide
-    Percent -> ast.Modulo
-    StarStar -> ast.Exponentiation
-    EqualEqualEqual -> ast.StrictEqual
-    BangEqualEqual -> ast.StrictNotEqual
-    EqualEqual -> ast.Equal
-    BangEqual -> ast.NotEqual
-    LessThan -> ast.LessThan
-    GreaterThan -> ast.GreaterThan
-    LessThanEqual -> ast.LessThanEqual
-    GreaterThanEqual -> ast.GreaterThanEqual
-    LessThanLessThan -> ast.LeftShift
-    GreaterThanGreaterThan -> ast.RightShift
-    GreaterThanGreaterThanGreaterThan -> ast.UnsignedRightShift
-    Ampersand -> ast.BitwiseAnd
-    Pipe -> ast.BitwiseOr
-    Caret -> ast.BitwiseXor
-    AmpersandAmpersand -> ast.LogicalAnd
-    PipePipe -> ast.LogicalOr
-    QuestionQuestion -> ast.NullishCoalescing
-    In -> ast.In
-    Instanceof -> ast.InstanceOf
-    _ -> ast.Add
-  }
-}
-
-fn is_logical_op(kind: TokenKind) -> Bool {
-  case kind {
-    AmpersandAmpersand | PipePipe | QuestionQuestion -> True
-    _ -> False
-  }
-}
-
-fn token_to_assignment_op(kind: TokenKind) -> ast.AssignmentOp {
-  case kind {
-    Equal -> ast.Assign
-    PlusEqual -> ast.AddAssign
-    MinusEqual -> ast.SubtractAssign
-    StarEqual -> ast.MultiplyAssign
-    SlashEqual -> ast.DivideAssign
-    PercentEqual -> ast.ModuloAssign
-    StarStarEqual -> ast.ExponentiationAssign
-    LessThanLessThanEqual -> ast.LeftShiftAssign
-    GreaterThanGreaterThanEqual -> ast.RightShiftAssign
-    GreaterThanGreaterThanGreaterThanEqual -> ast.UnsignedRightShiftAssign
-    AmpersandEqual -> ast.BitwiseAndAssign
-    PipeEqual -> ast.BitwiseOrAssign
-    CaretEqual -> ast.BitwiseXorAssign
-    AmpersandAmpersandEqual -> ast.LogicalAndAssign
-    PipePipeEqual -> ast.LogicalOrAssign
-    QuestionQuestionEqual -> ast.NullishCoalesceAssign
-    _ -> ast.Assign
-  }
-}
-
-fn parse_js_number(raw: String) -> Float {
-  // Simple number parsing — handles basic cases
-  case raw {
-    "0" -> 0.0
-    _ ->
-      case string.starts_with(raw, "0x") || string.starts_with(raw, "0X") {
-        True ->
-          string.drop_start(raw, 2)
-          |> string.replace("_", "")
-          |> parse_int_radix(16)
-          |> result.map(int_to_float)
-          |> result.unwrap(0.0)
-        False ->
-          case string.starts_with(raw, "0o") || string.starts_with(raw, "0O") {
-            True ->
-              string.drop_start(raw, 2)
-              |> string.replace("_", "")
-              |> parse_int_radix(8)
-              |> result.map(int_to_float)
-              |> result.unwrap(0.0)
-            False ->
-              case
-                string.starts_with(raw, "0b") || string.starts_with(raw, "0B")
-              {
-                True ->
-                  string.drop_start(raw, 2)
-                  |> string.replace("_", "")
-                  |> parse_int_radix(2)
-                  |> result.map(int_to_float)
-                  |> result.unwrap(0.0)
-                False -> {
-                  // Remove numeric separators
-                  let clean = string.replace(raw, "_", "")
-                  // Try float parse first, then int
-                  case
-                    string.contains(clean, ".")
-                    || string.contains(clean, "e")
-                    || string.contains(clean, "E")
-                  {
-                    True ->
-                      case gleam_float_parse(clean) {
-                        Ok(f) -> f
-                        Error(Nil) -> 0.0
-                      }
-                    False ->
-                      case gleam_int_parse(clean) {
-                        Ok(i) -> int_to_float(i)
-                        Error(Nil) -> 0.0
-                      }
-                  }
-                }
-              }
-          }
-      }
-  }
-}
-
-fn int_to_float(i: Int) -> Float {
-  int.to_float(i)
-}
-
-fn gleam_float_parse(s: String) -> Result(Float, Nil) {
-  case string.contains(s, ".") {
-    True -> {
-      // Normalize trailing dot (e.g. "1." -> "1.0") and leading dot (e.g. ".5" -> "0.5")
-      // for Erlang's binary_to_float which requires digits on both sides
-      let normalized = case string.ends_with(s, ".") {
-        True -> s <> "0"
-        False ->
-          case string.starts_with(s, ".") {
-            True -> "0" <> s
-            False -> s
-          }
-      }
-      case catch_float_parse(normalized) {
-        Ok(f) -> Ok(f)
-        Error(_) -> Error(Nil)
-      }
-    }
-    False ->
-      case string.contains(s, "e") || string.contains(s, "E") {
-        True ->
-          case catch_float_parse(s) {
-            Ok(f) -> Ok(f)
-            Error(_) -> Error(Nil)
-          }
-        False -> Error(Nil)
-      }
-  }
-}
-
-@external(erlang, "arc_parser_ffi", "parse_float")
-@external(javascript, "../arc_parser_ffi.mjs", "parse_float")
-fn catch_float_parse(s: String) -> Result(Float, Nil)
-
-fn parse_int_radix(s: String, radix: Int) -> Result(Int, Nil) {
-  case string.to_graphemes(s) {
-    [] -> Error(Nil)
-    graphemes ->
-      list.try_fold(graphemes, 0, fn(acc, ch) {
-        let digit = case ch {
-          "0" -> Ok(0)
-          "1" -> Ok(1)
-          "2" -> Ok(2)
-          "3" -> Ok(3)
-          "4" -> Ok(4)
-          "5" -> Ok(5)
-          "6" -> Ok(6)
-          "7" -> Ok(7)
-          "8" -> Ok(8)
-          "9" -> Ok(9)
-          "a" | "A" -> Ok(10)
-          "b" | "B" -> Ok(11)
-          "c" | "C" -> Ok(12)
-          "d" | "D" -> Ok(13)
-          "e" | "E" -> Ok(14)
-          "f" | "F" -> Ok(15)
-          _ -> Error(Nil)
-        }
-        use d <- result.try(digit)
-        case d < radix {
-          True -> Ok(acc * radix + d)
-          False -> Error(Nil)
-        }
-      })
-  }
-}
-
-fn gleam_int_parse(s: String) -> Result(Int, Nil) {
-  case string.to_graphemes(s) {
-    [] -> Error(Nil)
-    _ -> {
-      let result =
-        list.try_fold(string.to_graphemes(s), 0, fn(acc, ch) {
-          case ch {
-            "0" -> Ok(acc * 10)
-            "1" -> Ok(acc * 10 + 1)
-            "2" -> Ok(acc * 10 + 2)
-            "3" -> Ok(acc * 10 + 3)
-            "4" -> Ok(acc * 10 + 4)
-            "5" -> Ok(acc * 10 + 5)
-            "6" -> Ok(acc * 10 + 6)
-            "7" -> Ok(acc * 10 + 7)
-            "8" -> Ok(acc * 10 + 8)
-            "9" -> Ok(acc * 10 + 9)
-            _ -> Error(Nil)
-          }
-        })
-      result
-    }
   }
 }
 
@@ -4644,7 +4002,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     RegularExpression -> {
       // Pre-tokenized regex: value is /pattern/flags
       let raw = peek_value(p)
-      let #(pattern, flags) = split_regex_value(raw)
+      let #(pattern, flags) = regex.split_regex_value(raw)
       Ok(#(
         P(..advance(p), last_expr_assignable: False),
         ast.RegExpLiteral(pattern: pattern, flags: flags),
@@ -5229,15 +4587,18 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let start_pos = pos_of(p)
   // Scan the regex body starting after the opening /
   let body_start = start_pos + 1
-  case scan_regex_source(p.bytes, body_start, False) {
+  case regex.scan_regex_source(p.bytes, body_start, False) {
     Ok(end_pos) -> {
       // end_pos is past the closing /, now skip optional flags
-      use #(flags_end, flags) <- result.try(skip_regex_flags(p.bytes, end_pos))
+      use #(flags_end, flags) <- result.try(regex.skip_regex_flags(
+        p.bytes,
+        end_pos,
+      ))
       // If /u flag is present, validate no lone braces in the body
       // body is from body_start to end_pos - 1 (exclusive of closing /)
       use Nil <- result.try(case list.contains(flags, "u") {
         True ->
-          validate_regex_unicode_body(p.bytes, body_start, end_pos - 1)
+          regex.validate_regex_unicode_body(p.bytes, body_start, end_pos - 1)
           |> result.map_error(fn(msg) {
             LexerError(message: msg, pos: start_pos)
           })
@@ -5245,489 +4606,13 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       })
       // Extract pattern body and flags as strings
       let pattern =
-        byte_slice_source(p.bytes, body_start, end_pos - 1 - body_start)
+        regex.byte_slice_source(p.bytes, body_start, end_pos - 1 - body_start)
       let flags_str = string.join(flags, "")
       // Now skip tokens until we're past this regex in the token stream
       use p2 <- result.try(skip_tokens_past(p, flags_end))
       Ok(#(p2, ast.RegExpLiteral(pattern: pattern, flags: flags_str)))
     }
     Error(msg) -> Error(LexerError(message: msg, pos: start_pos))
-  }
-}
-
-/// Validate regex body with the /u flag.
-/// In Unicode mode:
-/// 1. `{` must start a valid quantifier ({n}, {n,}, {n,m}) and `}` must close one
-/// 2. Quantifiers (*, +, ?, {n,m}) cannot follow assertion groups (?=, ?!, ?<=, ?<!)
-/// Braces inside character classes [...] are allowed.
-fn validate_regex_unicode_body(
-  bytes: BitArray,
-  pos: Int,
-  end: Int,
-) -> Result(Nil, String) {
-  validate_regex_unicode_loop(bytes, pos, end, False, False)
-}
-
-fn validate_regex_unicode_loop(
-  bytes: BitArray,
-  pos: Int,
-  end: Int,
-  in_class: Bool,
-  after_assertion: Bool,
-) -> Result(Nil, String) {
-  case pos >= end {
-    True -> Ok(Nil)
-    False -> {
-      let ch = char_at_source(bytes, pos)
-      case ch {
-        "\\" -> {
-          // Skip escaped character — not a quantifier, not an assertion.
-          // For \u escapes, skip the full escape sequence length,
-          // not just 2 chars, otherwise \u{XXXX} leaves the { exposed
-          // and the validator incorrectly rejects it as a lone brace.
-          let escape_result = case char_at_source(bytes, pos + 1) {
-            "u" ->
-              case char_at_source(bytes, pos + 2) {
-                "{" -> {
-                  // \u{...} — find the closing }, validate codepoint value
-                  let after = skip_regex_hex_run(bytes, pos + 3, end)
-                  case char_at_source(bytes, after) {
-                    "}" -> {
-                      // Validate the hex value is <= 0x10FFFF
-                      let hex_str =
-                        byte_slice_source(bytes, pos + 3, after - { pos + 3 })
-                      case parse_hex_value(hex_str) {
-                        Ok(val) ->
-                          case val > 0x10FFFF {
-                            True ->
-                              Error(
-                                "Invalid regular expression: Unicode escape value > 0x10FFFF",
-                              )
-                            False -> Ok(after + 1 - pos)
-                          }
-                        Error(_) -> Ok(2)
-                      }
-                    }
-                    _ -> Ok(2)
-                  }
-                }
-                _ -> {
-                  // \uXXXX — check for 4 hex digits
-                  case
-                    pos + 6 <= end
-                    && is_hex_char(char_at_source(bytes, pos + 2))
-                    && is_hex_char(char_at_source(bytes, pos + 3))
-                    && is_hex_char(char_at_source(bytes, pos + 4))
-                    && is_hex_char(char_at_source(bytes, pos + 5))
-                  {
-                    True -> Ok(6)
-                    False -> Ok(2)
-                  }
-                }
-              }
-            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-              // Backreferences (\1-\9) are not allowed in Unicode mode
-              Error(
-                "Invalid regular expression: decimal escape in Unicode mode",
-              )
-            _ -> Ok(2)
-          }
-          use escape_len <- result.try(escape_result)
-          validate_regex_unicode_loop(
-            bytes,
-            pos + escape_len,
-            end,
-            in_class,
-            False,
-          )
-        }
-        "[" -> validate_regex_unicode_loop(bytes, pos + 1, end, True, False)
-        "]" ->
-          case in_class {
-            True ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, False, False)
-            False ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-          }
-        "(" ->
-          case in_class {
-            True ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-            False -> {
-              // Check if this is an assertion group: (?=, (?!, (?<=, (?<!
-              let is_assertion = is_assertion_group(bytes, pos + 1, end)
-              case is_assertion {
-                True -> {
-                  // Find matching closing paren, then mark after_assertion
-                  case find_matching_paren(bytes, pos + 1, end) {
-                    Ok(close_pos) ->
-                      validate_regex_unicode_loop(
-                        bytes,
-                        close_pos + 1,
-                        end,
-                        in_class,
-                        True,
-                      )
-                    // If we can't find matching paren, just continue normally
-                    // (the error will be caught elsewhere)
-                    Error(_) ->
-                      validate_regex_unicode_loop(
-                        bytes,
-                        pos + 1,
-                        end,
-                        in_class,
-                        False,
-                      )
-                  }
-                }
-                False -> {
-                  // Regular group — find matching close and mark NOT assertion
-                  case find_matching_paren(bytes, pos + 1, end) {
-                    Ok(close_pos) ->
-                      validate_regex_unicode_loop(
-                        bytes,
-                        close_pos + 1,
-                        end,
-                        in_class,
-                        False,
-                      )
-                    Error(_) ->
-                      validate_regex_unicode_loop(
-                        bytes,
-                        pos + 1,
-                        end,
-                        in_class,
-                        False,
-                      )
-                  }
-                }
-              }
-            }
-          }
-        // Quantifiers: *, +, ?
-        "*" | "+" ->
-          case in_class {
-            True ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-            False ->
-              case after_assertion {
-                True ->
-                  Error(
-                    "Invalid regular expression: quantifier on assertion in Unicode mode",
-                  )
-                False -> {
-                  // Skip optional ? for lazy quantifier
-                  let next_pos = case char_at_source(bytes, pos + 1) {
-                    "?" -> pos + 2
-                    _ -> pos + 1
-                  }
-                  validate_regex_unicode_loop(
-                    bytes,
-                    next_pos,
-                    end,
-                    in_class,
-                    False,
-                  )
-                }
-              }
-          }
-        "?" ->
-          case in_class {
-            True ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-            False ->
-              case after_assertion {
-                True ->
-                  Error(
-                    "Invalid regular expression: quantifier on assertion in Unicode mode",
-                  )
-                False -> {
-                  // ? as quantifier — skip optional ? for lazy
-                  let next_pos = case char_at_source(bytes, pos + 1) {
-                    "?" -> pos + 2
-                    _ -> pos + 1
-                  }
-                  validate_regex_unicode_loop(
-                    bytes,
-                    next_pos,
-                    end,
-                    in_class,
-                    False,
-                  )
-                }
-              }
-          }
-        "{" ->
-          case in_class {
-            True ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-            False ->
-              // Try to parse as valid quantifier: {digits}, {digits,}, {digits,digits}
-              case try_parse_quantifier_brace(bytes, pos + 1, end) {
-                Ok(after_brace) ->
-                  case after_assertion {
-                    True ->
-                      Error(
-                        "Invalid regular expression: quantifier on assertion in Unicode mode",
-                      )
-                    False -> {
-                      // Skip optional ? for lazy quantifier
-                      let next_pos = case char_at_source(bytes, after_brace) {
-                        "?" -> after_brace + 1
-                        _ -> after_brace
-                      }
-                      validate_regex_unicode_loop(
-                        bytes,
-                        next_pos,
-                        end,
-                        in_class,
-                        False,
-                      )
-                    }
-                  }
-                Error(_) ->
-                  Error("Invalid regular expression: lone '{' in Unicode mode")
-              }
-          }
-        "}" ->
-          case in_class {
-            True ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-            False ->
-              Error("Invalid regular expression: lone '}' in Unicode mode")
-          }
-        // Any other character resets after_assertion
-        _ -> validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-      }
-    }
-  }
-}
-
-/// Parse a hex string into an integer value.
-fn parse_hex_value(hex_str: String) -> Result(Int, Nil) {
-  int.base_parse(hex_str, 16)
-}
-
-/// Check if position starts an assertion group: ?=, ?!, ?<=, ?<!
-fn is_assertion_group(bytes: BitArray, pos: Int, end: Int) -> Bool {
-  case pos >= end {
-    True -> False
-    False -> {
-      let ch = char_at_source(bytes, pos)
-      case ch {
-        "?" -> {
-          let ch2 = char_at_source(bytes, pos + 1)
-          case ch2 {
-            "=" | "!" -> True
-            "<" -> {
-              let ch3 = char_at_source(bytes, pos + 2)
-              case ch3 {
-                "=" | "!" -> True
-                _ -> False
-              }
-            }
-            _ -> False
-          }
-        }
-        _ -> False
-      }
-    }
-  }
-}
-
-/// Find the matching closing paren for a group, accounting for nesting,
-/// character classes, and escapes. pos starts inside the group (after opening `(`).
-fn find_matching_paren(bytes: BitArray, pos: Int, end: Int) -> Result(Int, Nil) {
-  find_matching_paren_loop(bytes, pos, end, 1, False)
-}
-
-fn find_matching_paren_loop(
-  bytes: BitArray,
-  pos: Int,
-  end: Int,
-  depth: Int,
-  in_class: Bool,
-) -> Result(Int, Nil) {
-  case pos >= end {
-    True -> Error(Nil)
-    False -> {
-      let ch = char_at_source(bytes, pos)
-      case ch {
-        "\\" ->
-          // Skip escaped char
-          find_matching_paren_loop(bytes, pos + 2, end, depth, in_class)
-        "[" -> find_matching_paren_loop(bytes, pos + 1, end, depth, True)
-        "]" ->
-          case in_class {
-            True -> find_matching_paren_loop(bytes, pos + 1, end, depth, False)
-            False ->
-              find_matching_paren_loop(bytes, pos + 1, end, depth, in_class)
-          }
-        "(" ->
-          case in_class {
-            True ->
-              find_matching_paren_loop(bytes, pos + 1, end, depth, in_class)
-            False ->
-              find_matching_paren_loop(bytes, pos + 1, end, depth + 1, in_class)
-          }
-        ")" ->
-          case in_class {
-            True ->
-              find_matching_paren_loop(bytes, pos + 1, end, depth, in_class)
-            False ->
-              case depth <= 1 {
-                True -> Ok(pos)
-                False ->
-                  find_matching_paren_loop(
-                    bytes,
-                    pos + 1,
-                    end,
-                    depth - 1,
-                    in_class,
-                  )
-              }
-          }
-        _ -> find_matching_paren_loop(bytes, pos + 1, end, depth, in_class)
-      }
-    }
-  }
-}
-
-/// Try to parse a valid quantifier starting after the opening `{`.
-/// Valid forms: {n}, {n,}, {n,m} where n and m are decimal digits.
-/// Returns the position after the closing `}` on success.
-fn try_parse_quantifier_brace(
-  bytes: BitArray,
-  pos: Int,
-  end: Int,
-) -> Result(Int, Nil) {
-  // Must start with at least one digit
-  case skip_digits(bytes, pos, end) {
-    Ok(after_digits) ->
-      case after_digits == pos {
-        // No digits found — not a valid quantifier
-        True -> Error(Nil)
-        False -> {
-          let ch = char_at_source(bytes, after_digits)
-          case ch {
-            "}" ->
-              // {n} form
-              Ok(after_digits + 1)
-            "," -> {
-              // Could be {n,} or {n,m}
-              let after_comma = after_digits + 1
-              case skip_digits(bytes, after_comma, end) {
-                Ok(after_digits2) -> {
-                  let ch2 = char_at_source(bytes, after_digits2)
-                  case ch2 {
-                    "}" ->
-                      // {n,} or {n,m} form
-                      Ok(after_digits2 + 1)
-                    _ -> Error(Nil)
-                  }
-                }
-                Error(_) -> Error(Nil)
-              }
-            }
-            _ -> Error(Nil)
-          }
-        }
-      }
-    Error(_) -> Error(Nil)
-  }
-}
-
-/// Skip decimal digits from pos, returning the position after the last digit.
-/// Always succeeds (returns pos unchanged if no digits found).
-fn skip_digits(bytes: BitArray, pos: Int, end: Int) -> Result(Int, Nil) {
-  case pos >= end {
-    True -> Ok(pos)
-    False -> {
-      let ch = char_at_source(bytes, pos)
-      case ch {
-        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-          skip_digits(bytes, pos + 1, end)
-        _ -> Ok(pos)
-      }
-    }
-  }
-}
-
-fn scan_regex_source(
-  bytes: BitArray,
-  pos: Int,
-  in_class: Bool,
-) -> Result(Int, String) {
-  let ch = char_at_source(bytes, pos)
-  case ch {
-    "" -> Error("Unterminated regular expression")
-    "\n" | "\r" -> Error("Unterminated regular expression")
-    "\\" -> {
-      // Escaped character — skip next char
-      let next = char_at_source(bytes, pos + 1)
-      case next {
-        "" | "\n" | "\r" -> Error("Unterminated regular expression")
-        _ -> scan_regex_source(bytes, pos + 2, in_class)
-      }
-    }
-    "[" -> scan_regex_source(bytes, pos + 1, True)
-    "]" ->
-      case in_class {
-        True -> scan_regex_source(bytes, pos + 1, False)
-        False -> scan_regex_source(bytes, pos + 1, in_class)
-      }
-    "/" ->
-      case in_class {
-        True -> scan_regex_source(bytes, pos + 1, in_class)
-        False -> Ok(pos + 1)
-      }
-    _ -> scan_regex_source(bytes, pos + 1, in_class)
-  }
-}
-
-fn skip_regex_flags(
-  bytes: BitArray,
-  pos: Int,
-) -> Result(#(Int, List(String)), ParseError) {
-  scan_regex_flags(bytes, pos, [])
-}
-
-fn scan_regex_flags(
-  bytes: BitArray,
-  pos: Int,
-  seen: List(String),
-) -> Result(#(Int, List(String)), ParseError) {
-  let ch = char_at_source(bytes, pos)
-  case ch {
-    "g" | "i" | "m" | "s" | "u" | "v" | "y" | "d" ->
-      case list.contains(seen, ch) {
-        True ->
-          Error(LexerError(
-            "Duplicate regular expression flag '" <> ch <> "'",
-            pos,
-          ))
-        False -> scan_regex_flags(bytes, pos + 1, [ch, ..seen])
-      }
-    _ -> Ok(#(pos, seen))
-  }
-}
-
-/// Split a pre-tokenized regex value like "/pattern/flags" into (pattern, flags).
-fn split_regex_value(raw: String) -> #(String, String) {
-  // Strip leading /
-  let body = string.drop_start(raw, 1)
-  // Split on "/" and rejoin all but the last segment as the pattern
-  let parts = string.split(body, "/")
-  case parts {
-    [single] -> #(single, "")
-    _ -> {
-      let assert Ok(flags) = list.last(parts)
-      let pattern =
-        parts
-        |> list.take(list.length(parts) - 1)
-        |> string.join("/")
-      #(pattern, flags)
-    }
   }
 }
 
@@ -5741,55 +4626,6 @@ fn skip_tokens_past(p: P, target_pos: Int) -> Result(P, ParseError) {
         False -> skip_tokens_past(advance(p), target_pos)
       }
     }
-  }
-}
-
-/// O(1) character access into the source bytes (ASCII only, for regex scanning).
-fn char_at_source(bytes: BitArray, pos: Int) -> String {
-  case bit_array.slice(bytes, pos, 1) {
-    Error(_) -> ""
-    Ok(<<byte>>) if byte < 0x80 -> {
-      case bit_array.to_string(<<byte>>) {
-        Ok(s) -> s
-        Error(_) -> ""
-      }
-    }
-    _ -> ""
-  }
-}
-
-/// O(1) byte slice from the source bytes.
-fn byte_slice_source(bytes: BitArray, start: Int, len: Int) -> String {
-  case bit_array.slice(bytes, start, len) {
-    Ok(s) ->
-      case bit_array.to_string(s) {
-        Ok(str) -> str
-        Error(_) -> ""
-      }
-    Error(_) -> ""
-  }
-}
-
-/// Check if a single character is a hex digit (0-9, a-f, A-F).
-fn is_hex_char(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
-    "a" | "b" | "c" | "d" | "e" | "f" -> True
-    "A" | "B" | "C" | "D" | "E" | "F" -> True
-    _ -> False
-  }
-}
-
-/// Skip consecutive hex digits in the source bytes starting at pos,
-/// returning the position after the last hex digit.
-fn skip_regex_hex_run(bytes: BitArray, pos: Int, end: Int) -> Int {
-  case pos >= end {
-    True -> pos
-    False ->
-      case is_hex_char(char_at_source(bytes, pos)) {
-        True -> skip_regex_hex_run(bytes, pos + 1, end)
-        False -> pos
-      }
   }
 }
 
@@ -6529,72 +5365,6 @@ fn peek_at(p: P, n: Int) -> TokenKind {
 }
 
 /// Check if a number literal value is a legacy octal (e.g. 0123, 09)
-fn is_legacy_octal_number(value: String) -> Bool {
-  case string.first(value) {
-    Ok("0") ->
-      case string.slice(value, 1, 1) {
-        // 0x, 0o, 0b, 0X, 0O, 0B are modern prefixed forms
-        "x" | "o" | "b" | "X" | "O" | "B" -> False
-        // 0. or 0e/0E are decimal floats
-        "." | "e" | "E" -> False
-        // 0n is BigInt 0
-        "n" -> False
-        // Just "0" is fine
-        "" -> False
-        // 0 followed by digit is legacy octal (01, 07, 08, 09 etc.)
-        _ -> string.length(value) > 1
-      }
-    _ -> False
-  }
-}
-
-/// Check if a string literal value contains legacy octal escapes (\0-\7 followed by more)
-fn has_legacy_octal_escape(value: String) -> Bool {
-  check_string_escapes(value, 0, string.length(value))
-}
-
-fn check_string_escapes(s: String, pos: Int, end: Int) -> Bool {
-  case pos >= end {
-    True -> False
-    False ->
-      case string.slice(s, pos, 1) {
-        "\\" ->
-          case string.slice(s, pos + 1, 1) {
-            "0" ->
-              // \0 followed by a digit is legacy octal
-              case string.slice(s, pos + 2, 1) {
-                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-                  True
-                _ -> check_string_escapes(s, pos + 2, end)
-              }
-            "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
-            "x" -> check_string_escapes(s, pos + 4, end)
-            "u" ->
-              case string.slice(s, pos + 2, 1) {
-                "{" -> {
-                  // Skip to closing brace
-                  skip_to_brace(s, pos + 3, end)
-                }
-                _ -> check_string_escapes(s, pos + 6, end)
-              }
-            _ -> check_string_escapes(s, pos + 2, end)
-          }
-        _ -> check_string_escapes(s, pos + 1, end)
-      }
-  }
-}
-
-fn skip_to_brace(s: String, pos: Int, end: Int) -> Bool {
-  case pos >= end {
-    True -> False
-    False ->
-      case string.slice(s, pos, 1) {
-        "}" -> check_string_escapes(s, pos + 1, end)
-        _ -> skip_to_brace(s, pos + 1, end)
-      }
-  }
-}
-
 /// Parse a raw template literal string into quasis and expression ASTs.
 /// The raw string includes backticks, e.g. `hello ${x} world`
 fn parse_template_raw(
@@ -6627,157 +5397,6 @@ fn parse_template_raw(
     }),
   )
   Ok(#(quasis, expressions))
-}
-
-/// Split template inner text (without backticks) into quasi strings and
-/// expression source strings. Tracks brace depth for nested `{}`.
-fn split_template_parts(inner: String) -> #(List(String), List(String)) {
-  let graphemes = string.to_graphemes(inner)
-  do_split_template(graphemes, "", [], [], 0, False)
-}
-
-fn do_split_template(
-  chars: List(String),
-  current_quasi: String,
-  quasis: List(String),
-  expr_sources: List(String),
-  brace_depth: Int,
-  in_expr: Bool,
-) -> #(List(String), List(String)) {
-  case chars, in_expr {
-    // End of input
-    [], False -> #(
-      list.reverse([current_quasi, ..quasis]),
-      list.reverse(expr_sources),
-    )
-    [], True ->
-      // Unterminated expression (shouldn't happen if lexer is correct)
-      #(list.reverse([current_quasi, ..quasis]), list.reverse(expr_sources))
-    // In quasi mode: look for ${ to start an expression
-    ["\\", next, ..rest], False ->
-      // Escaped character in quasi — include both chars, process escape
-      do_split_template(
-        rest,
-        current_quasi <> process_template_escape(next),
-        quasis,
-        expr_sources,
-        brace_depth,
-        False,
-      )
-    ["$", "{", ..rest], False ->
-      // Start of expression: save current quasi, begin expression collection
-      do_split_template(
-        rest,
-        "",
-        [current_quasi, ..quasis],
-        expr_sources,
-        0,
-        True,
-      )
-    [ch, ..rest], False ->
-      do_split_template(
-        rest,
-        current_quasi <> ch,
-        quasis,
-        expr_sources,
-        brace_depth,
-        False,
-      )
-    // In expression mode: track brace depth, look for closing }
-    ["}", ..rest], True ->
-      case brace_depth {
-        0 ->
-          // End of expression
-          do_split_template(
-            rest,
-            "",
-            quasis,
-            [current_quasi, ..expr_sources],
-            0,
-            False,
-          )
-        _ ->
-          do_split_template(
-            rest,
-            current_quasi <> "}",
-            quasis,
-            expr_sources,
-            brace_depth - 1,
-            True,
-          )
-      }
-    ["{", ..rest], True ->
-      do_split_template(
-        rest,
-        current_quasi <> "{",
-        quasis,
-        expr_sources,
-        brace_depth + 1,
-        True,
-      )
-    // Handle string literals inside expressions (to avoid counting braces in strings)
-    ["\"", ..rest], True -> {
-      let #(str_content, remaining) = collect_string_in_expr(rest, "\"", "\"")
-      do_split_template(
-        remaining,
-        current_quasi <> str_content,
-        quasis,
-        expr_sources,
-        brace_depth,
-        True,
-      )
-    }
-    ["'", ..rest], True -> {
-      let #(str_content, remaining) = collect_string_in_expr(rest, "'", "'")
-      do_split_template(
-        remaining,
-        current_quasi <> str_content,
-        quasis,
-        expr_sources,
-        brace_depth,
-        True,
-      )
-    }
-    [ch, ..rest], True ->
-      do_split_template(
-        rest,
-        current_quasi <> ch,
-        quasis,
-        expr_sources,
-        brace_depth,
-        True,
-      )
-  }
-}
-
-/// Collect characters inside a string literal in a template expression,
-/// preserving escapes and tracking the closing quote.
-fn collect_string_in_expr(
-  chars: List(String),
-  quote: String,
-  acc: String,
-) -> #(String, List(String)) {
-  case chars {
-    [] -> #(acc, [])
-    ["\\", next, ..rest] ->
-      collect_string_in_expr(rest, quote, acc <> "\\" <> next)
-    [ch, ..rest] if ch == quote -> #(acc <> ch, rest)
-    [ch, ..rest] -> collect_string_in_expr(rest, quote, acc <> ch)
-  }
-}
-
-/// Process a single escape sequence in a template quasi.
-fn process_template_escape(ch: String) -> String {
-  case ch {
-    "n" -> "\n"
-    "t" -> "\t"
-    "r" -> "\r"
-    "\\" -> "\\"
-    "`" -> "`"
-    "$" -> "$"
-    "0" -> "\u{0000}"
-    _ -> ch
-  }
 }
 
 fn peek_value(p: P) -> String {
@@ -6871,14 +5490,6 @@ fn list_nth(lst: List(a), n: Int) -> Result(a, Nil) {
 }
 
 /// Contextual keywords that can be used as identifiers in non-strict mode.
-/// These are NOT reserved words — they have special meaning only in specific contexts.
-fn is_contextual_keyword(kind: TokenKind) -> Bool {
-  case kind {
-    Let | Static | Yield | Await | Async | From | As | Of | Undefined -> True
-    _ -> False
-  }
-}
-
 /// Try to consume an optional name (identifier or contextual keyword) for
 /// function/class declarations. Returns advanced state if found, original if not.
 fn eat_optional_name(p: P) -> Result(P, ParseError) {
@@ -6890,159 +5501,5 @@ fn eat_optional_name(p: P) -> Result(P, ParseError) {
       Ok(advance(p))
     }
     False -> Ok(p)
-  }
-}
-
-/// Check if a token kind is an identifier or any keyword usable as identifier.
-fn is_identifier_or_keyword(kind: TokenKind) -> Bool {
-  kind == Identifier || is_keyword_as_identifier(kind)
-}
-
-fn is_keyword_as_identifier(kind: TokenKind) -> Bool {
-  case kind {
-    Let
-    | Const
-    | Var
-    | Function
-    | Return
-    | If
-    | Else
-    | While
-    | Do
-    | For
-    | Break
-    | Continue
-    | Switch
-    | Case
-    | Default
-    | Throw
-    | Try
-    | Catch
-    | Finally
-    | New
-    | Delete
-    | Typeof
-    | Void
-    | In
-    | Instanceof
-    | This
-    | Class
-    | Extends
-    | Super
-    | Import
-    | Export
-    | From
-    | As
-    | Of
-    | Async
-    | Await
-    | Yield
-    | Null
-    | Undefined
-    | KTrue
-    | KFalse
-    | Debugger
-    | With
-    | Static -> True
-    _ -> False
-  }
-}
-
-/// Returns True for keywords that can NEVER be used as binding identifiers,
-fn token_kind_to_string(kind: TokenKind) -> String {
-  case kind {
-    Number -> "number"
-    KString -> "string"
-    TemplateLiteral -> "template"
-    RegularExpression -> "regex"
-    Identifier -> "identifier"
-    Var -> "'var'"
-    Let -> "'let'"
-    Const -> "'const'"
-    Function -> "'function'"
-    Return -> "'return'"
-    If -> "'if'"
-    Else -> "'else'"
-    While -> "'while'"
-    Do -> "'do'"
-    For -> "'for'"
-    Break -> "'break'"
-    Continue -> "'continue'"
-    Switch -> "'switch'"
-    Case -> "'case'"
-    Default -> "'default'"
-    Throw -> "'throw'"
-    Try -> "'try'"
-    Catch -> "'catch'"
-    Finally -> "'finally'"
-    New -> "'new'"
-    Delete -> "'delete'"
-    Typeof -> "'typeof'"
-    Void -> "'void'"
-    In -> "'in'"
-    Instanceof -> "'instanceof'"
-    This -> "'this'"
-    Class -> "'class'"
-    Extends -> "'extends'"
-    Super -> "'super'"
-    Import -> "'import'"
-    Export -> "'export'"
-    From -> "'from'"
-    As -> "'as'"
-    Of -> "'of'"
-    Async -> "'async'"
-    Await -> "'await'"
-    Yield -> "'yield'"
-    Null -> "'null'"
-    Undefined -> "'undefined'"
-    KTrue -> "'true'"
-    KFalse -> "'false'"
-    Debugger -> "'debugger'"
-    With -> "'with'"
-    Static -> "'static'"
-    LeftParen -> "'('"
-    RightParen -> "')'"
-    LeftBrace -> "'{'"
-    RightBrace -> "'}'"
-    LeftBracket -> "'['"
-    RightBracket -> "']'"
-    Semicolon -> "';'"
-    Comma -> "','"
-    Dot -> "'.'"
-    DotDotDot -> "'...'"
-    QuestionDot -> "'?.'"
-    QuestionQuestion -> "'??'"
-    Arrow -> "'=>'"
-    Colon -> "':'"
-    Plus -> "'+'"
-    Minus -> "'-'"
-    Star -> "'*'"
-    StarStar -> "'**'"
-    Slash -> "'/'"
-    Percent -> "'%'"
-    Ampersand -> "'&'"
-    AmpersandAmpersand -> "'&&'"
-    Pipe -> "'|'"
-    PipePipe -> "'||'"
-    Caret -> "'^'"
-    Tilde -> "'~'"
-    Bang -> "'!'"
-    Equal -> "'='"
-    EqualEqual -> "'=='"
-    EqualEqualEqual -> "'==='"
-    BangEqual -> "'!='"
-    BangEqualEqual -> "'!=='"
-    LessThan -> "'<'"
-    LessThanEqual -> "'<='"
-    GreaterThan -> "'>'"
-    GreaterThanEqual -> "'>='"
-    LessThanLessThan -> "'<<'"
-    GreaterThanGreaterThan -> "'>>'"
-    GreaterThanGreaterThanGreaterThan -> "'>>>'"
-    PlusPlus -> "'++'"
-    MinusMinus -> "'--'"
-    Question -> "'?'"
-    Eof -> "end of file"
-    _ -> "token"
   }
 }

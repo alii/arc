@@ -82,6 +82,116 @@ pub fn read(heap: Heap, ref: Ref) -> Option(HeapSlot) {
   dict.get(heap.data, ref.id) |> option.from_result
 }
 
+// -- Typed reader helpers -----------------------------------------------------
+// These collapse the common `case read(h, ref) { Some(ObjectSlot(kind: X, ..)) -> ... }`
+// pyramids found throughout the VM. Each reads a specific slot shape and returns
+// Option — use with option.map/option.then/option.unwrap at callsites.
+
+/// Read an ArrayObject, returning #(length, elements).
+pub fn read_array(h: Heap, ref: Ref) -> Option(#(Int, value.JsElements)) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.ArrayObject(length:), elements:, ..)) ->
+      Some(#(length, elements))
+    _ -> None
+  }
+}
+
+/// Read an ArrayObject OR ArgumentsObject, returning #(length, elements).
+/// Both have indexed elements and a tracked length.
+pub fn read_array_like(h: Heap, ref: Ref) -> Option(#(Int, value.JsElements)) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.ArrayObject(length:), elements:, ..))
+    | Some(value.ObjectSlot(kind: value.ArgumentsObject(length:), elements:, ..)) ->
+      Some(#(length, elements))
+    _ -> None
+  }
+}
+
+/// Read a FunctionObject, returning #(func_template, env_ref).
+pub fn read_function(h: Heap, ref: Ref) -> Option(#(value.FuncTemplate, Ref)) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.FunctionObject(func_template:, env:), ..)) ->
+      Some(#(func_template, env))
+    _ -> None
+  }
+}
+
+/// Read a PromiseObject, returning the inner promise_data ref.
+pub fn read_promise_data_ref(h: Heap, ref: Ref) -> Option(Ref) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.PromiseObject(promise_data:), ..)) ->
+      Some(promise_data)
+    _ -> None
+  }
+}
+
+/// Read a PromiseSlot's state.
+pub fn read_promise_state(h: Heap, ref: Ref) -> Option(value.PromiseState) {
+  case read(h, ref) {
+    Some(value.PromiseSlot(state:, ..)) -> Some(state)
+    _ -> None
+  }
+}
+
+/// Read an EnvSlot's captured values.
+pub fn read_env(h: Heap, ref: Ref) -> Option(List(value.JsValue)) {
+  case read(h, ref) {
+    Some(value.EnvSlot(slots:)) -> Some(slots)
+    _ -> None
+  }
+}
+
+/// Read a BoxSlot's inner value.
+pub fn read_box(h: Heap, ref: Ref) -> Option(value.JsValue) {
+  case read(h, ref) {
+    Some(value.BoxSlot(value:)) -> Some(value)
+    _ -> None
+  }
+}
+
+/// Read a PidObject's Erlang pid.
+pub fn read_pid(h: Heap, ref: Ref) -> Option(value.ErlangPid) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.PidObject(pid:), ..)) -> Some(pid)
+    _ -> None
+  }
+}
+
+/// Read a RegExpObject, returning #(pattern, flags).
+pub fn read_regexp(h: Heap, ref: Ref) -> Option(#(String, String)) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.RegExpObject(pattern:, flags:), ..)) ->
+      Some(#(pattern, flags))
+    _ -> None
+  }
+}
+
+/// Read a StringObject's [[StringData]] slot.
+pub fn read_string_object(h: Heap, ref: Ref) -> Option(String) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.StringObject(value:), ..)) -> Some(value)
+    _ -> None
+  }
+}
+
+/// Read a NumberObject's [[NumberData]] slot.
+pub fn read_number_object(h: Heap, ref: Ref) -> Option(value.JsNum) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.NumberObject(value:), ..)) -> Some(value)
+    _ -> None
+  }
+}
+
+/// Read a BooleanObject's [[BooleanData]] slot.
+pub fn read_boolean_object(h: Heap, ref: Ref) -> Option(Bool) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.BooleanObject(value:), ..)) -> Some(value)
+    _ -> None
+  }
+}
+
+// -----------------------------------------------------------------------------
+
 /// Overwrite a slot. No-op if the ref doesn't exist in the heap
 /// (i.e. was never allocated or reserved).
 pub fn write(heap: Heap, ref: Ref, slot: HeapSlot) -> Heap {

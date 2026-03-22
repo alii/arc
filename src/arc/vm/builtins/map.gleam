@@ -15,10 +15,10 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, AccessorProperty,
-  ArrayObject, Dispatch, JsBool, JsNumber, JsObject, JsUndefined, MapConstructor,
-  MapNative, MapObject, MapPrototypeClear, MapPrototypeDelete,
-  MapPrototypeForEach, MapPrototypeGet, MapPrototypeGetSize, MapPrototypeHas,
-  MapPrototypeSet, ObjectSlot,
+  Dispatch, JsBool, JsNumber, JsObject, JsUndefined, MapConstructor, MapNative,
+  MapObject, MapPrototypeClear, MapPrototypeDelete, MapPrototypeForEach,
+  MapPrototypeGet, MapPrototypeGetSize, MapPrototypeHas, MapPrototypeSet,
+  ObjectSlot,
 }
 import gleam/dict
 import gleam/int
@@ -228,8 +228,8 @@ fn add_entries_from_iterable(
 ) -> #(State, Result(JsValue, JsValue)) {
   case iterable {
     JsObject(iter_ref) ->
-      case heap.read(state.heap, iter_ref) {
-        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+      case heap.read_array(state.heap, iter_ref) {
+        Some(#(length, elements)) ->
           // Iterate through the array entries
           add_entries_loop(
             state,
@@ -241,8 +241,7 @@ fn add_entries_from_iterable(
             keys,
             original_keys,
           )
-        }
-        _ ->
+        None ->
           frame.type_error(state, "Iterator value is not an entry-like object")
       }
     _ -> frame.type_error(state, string.inspect(iterable) <> " is not iterable")
@@ -272,8 +271,8 @@ fn add_entries_loop(
       // Each entry must be an array-like [key, value]
       case entry {
         JsObject(entry_ref) ->
-          case heap.read(state.heap, entry_ref) {
-            Some(ObjectSlot(kind: ArrayObject(..), elements: entry_elems, ..)) -> {
+          case heap.read_array(state.heap, entry_ref) {
+            Some(#(_, entry_elems)) -> {
               let key = js_elements.get(entry_elems, 0)
               let val = js_elements.get(entry_elems, 1)
               let map_key = value.js_to_map_key(key)
@@ -297,7 +296,7 @@ fn add_entries_loop(
                 original_keys,
               )
             }
-            _ ->
+            None ->
               frame.type_error(
                 state,
                 "Iterator value "

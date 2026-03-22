@@ -139,11 +139,9 @@ fn construct(
     [JsUndefined, ..] -> []
     [JsNull, ..] -> []
     [JsObject(ref), ..] ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: value.ArrayObject(length:), elements:, ..)) ->
-          read_array_elements(elements, 0, length, [])
-        _ -> []
-      }
+      heap.read_array(state.heap, ref)
+      |> option.map(fn(p) { read_array_elements(p.1, 0, p.0, []) })
+      |> option.unwrap([])
     _ -> []
   }
 
@@ -345,19 +343,21 @@ fn set_union(
   case require_set_like(first_arg(args), state) {
     Error(r) -> r
     Ok(#(other_data, other_keys, state)) -> {
-      // Start with this set's entries, then add entries from other
-      let #(result_data, result_keys) =
-        list.fold(other_keys, #(data, keys), fn(acc, key) {
+      // Start with this set's entries, then add entries from other.
+      // Accumulate new keys by prepending (O(1)), reverse once at the end.
+      let #(result_data, new_keys_rev) =
+        list.fold(other_keys, #(data, []), fn(acc, key) {
           let #(d, ks) = acc
           case dict.has_key(d, key) {
             True -> #(d, ks)
             False ->
               case dict.get(other_data, key) {
-                Ok(v) -> #(dict.insert(d, key, v), list.append(ks, [key]))
+                Ok(v) -> #(dict.insert(d, key, v), [key, ..ks])
                 Error(Nil) -> #(d, ks)
               }
           }
         })
+      let result_keys = list.append(keys, list.reverse(new_keys_rev))
       alloc_new_set(state, result_data, result_keys)
     }
   }

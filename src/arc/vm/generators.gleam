@@ -131,15 +131,10 @@ pub fn call_native_generator_next(
                 create_iterator_result(h3, state.builtins, yielded_value, False)
               Ok(
                 State(
-                  ..state,
+                  ..frame.merge_globals(state, suspended, []),
                   heap: h3,
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
-                  lexical_globals: suspended.lexical_globals,
-                  const_lexical_globals: suspended.const_lexical_globals,
-                  job_queue: suspended.job_queue,
-                  pending_receivers: suspended.pending_receivers,
-                  outstanding: suspended.outstanding,
                 ),
               )
             }
@@ -155,15 +150,10 @@ pub fn call_native_generator_next(
                 create_iterator_result(h3, state.builtins, return_value, True)
               Ok(
                 State(
-                  ..state,
+                  ..frame.merge_globals(state, final_state, []),
                   heap: h3,
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
-                  lexical_globals: final_state.lexical_globals,
-                  const_lexical_globals: final_state.const_lexical_globals,
-                  job_queue: final_state.job_queue,
-                  pending_receivers: final_state.pending_receivers,
-                  outstanding: final_state.outstanding,
                 ),
               )
             }
@@ -374,15 +364,10 @@ pub fn call_native_generator_throw(
                     )
                   Ok(
                     State(
-                      ..state,
+                      ..frame.merge_globals(state, suspended, []),
                       heap: h3,
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
-                      lexical_globals: suspended.lexical_globals,
-                      const_lexical_globals: suspended.const_lexical_globals,
-                      job_queue: suspended.job_queue,
-                      pending_receivers: suspended.pending_receivers,
-                      outstanding: suspended.outstanding,
                     ),
                   )
                 }
@@ -402,15 +387,10 @@ pub fn call_native_generator_throw(
                     )
                   Ok(
                     State(
-                      ..state,
+                      ..frame.merge_globals(state, final_state, []),
                       heap: h3,
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
-                      lexical_globals: final_state.lexical_globals,
-                      const_lexical_globals: final_state.const_lexical_globals,
-                      job_queue: final_state.job_queue,
-                      pending_receivers: final_state.pending_receivers,
-                      outstanding: final_state.outstanding,
                     ),
                   )
                 }
@@ -609,17 +589,12 @@ fn process_generator_return(
           // Continue processing any remaining outer finally blocks.
           let updated_gen_state =
             State(
-              ..gen_state,
+              ..frame.merge_globals(gen_state, final_state, []),
               heap: h2,
               try_stack: final_state.try_stack,
               finally_stack: final_state.finally_stack,
               stack: final_state.stack,
               locals: final_state.locals,
-              lexical_globals: final_state.lexical_globals,
-              const_lexical_globals: final_state.const_lexical_globals,
-              job_queue: final_state.job_queue,
-              pending_receivers: final_state.pending_receivers,
-              outstanding: final_state.outstanding,
             )
           process_generator_return(
             updated_gen_state,
@@ -661,15 +636,10 @@ fn process_generator_return(
             )
           Ok(
             State(
-              ..outer_state,
+              ..frame.merge_globals(outer_state, suspended, []),
               heap: h3,
               stack: [result, ..rest_stack],
               pc: outer_state.pc + 1,
-              lexical_globals: suspended.lexical_globals,
-              const_lexical_globals: suspended.const_lexical_globals,
-              job_queue: suspended.job_queue,
-              pending_receivers: suspended.pending_receivers,
-              outstanding: suspended.outstanding,
             ),
           )
         }

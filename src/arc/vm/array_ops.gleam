@@ -211,13 +211,8 @@ pub fn drain_generator_to_array(
               // (ArraySpread handler) sets the stack explicitly.
               Ok(
                 State(
-                  ..state,
+                  ..frame.merge_globals(state, next_state, []),
                   heap: next_state.heap,
-                  lexical_globals: next_state.lexical_globals,
-                  const_lexical_globals: next_state.const_lexical_globals,
-                  job_queue: next_state.job_queue,
-                  pending_receivers: next_state.pending_receivers,
-                  outstanding: next_state.outstanding,
                 ),
               )
             False -> {
@@ -228,15 +223,7 @@ pub fn drain_generator_to_array(
               let heap = push_onto_array(next_state.heap, target_ref, val)
               // Recurse with the post-next state but cleaned stack.
               drain_generator_to_array(
-                State(
-                  ..state,
-                  heap:,
-                  lexical_globals: next_state.lexical_globals,
-                  const_lexical_globals: next_state.const_lexical_globals,
-                  job_queue: next_state.job_queue,
-                  pending_receivers: next_state.pending_receivers,
-                  outstanding: next_state.outstanding,
-                ),
+                State(..frame.merge_globals(state, next_state, []), heap:),
                 gen_ref,
                 target_ref,
                 execute_inner,

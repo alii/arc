@@ -815,26 +815,28 @@ fn collect_hoisted_funcs(
   e: Emitter,
   stmts: List(ast.Statement),
 ) -> #(Emitter, List(#(String, Int))) {
-  list.fold(stmts, #(e, []), fn(acc, stmt) {
-    let #(e, funcs) = acc
-    case stmt {
-      ast.FunctionDeclaration(Some(name), params, body, is_gen, is_async) -> {
-        let child =
-          compile_function_body(
-            e,
-            Some(name),
-            params,
-            body,
-            False,
-            is_gen,
-            is_async,
-          )
-        let #(e, idx) = add_child_function(e, child)
-        #(e, list.append(funcs, [#(name, idx)]))
+  let #(e, funcs_rev) =
+    list.fold(stmts, #(e, []), fn(acc, stmt) {
+      let #(e, funcs) = acc
+      case stmt {
+        ast.FunctionDeclaration(Some(name), params, body, is_gen, is_async) -> {
+          let child =
+            compile_function_body(
+              e,
+              Some(name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, idx) = add_child_function(e, child)
+          #(e, [#(name, idx), ..funcs])
+        }
+        _ -> #(e, funcs)
       }
-      _ -> #(e, funcs)
-    }
-  })
+    })
+  #(e, list.reverse(funcs_rev))
 }
 
 // ============================================================================
@@ -1118,7 +1120,7 @@ fn compile_function_body(
   let e = emit_op(e, EnterScope(FunctionScope))
 
   // Phase 1: Declare parameters (identifier or synthetic for destructuring)
-  let #(e, destructured_params) =
+  let #(e, destructured_params_rev) =
     list.index_fold(params, #(e, []), fn(acc, param, idx) {
       let #(e, destr) = acc
       case param {
@@ -1129,10 +1131,11 @@ fn compile_function_body(
         _ -> {
           let synthetic = "$param_" <> int.to_string(idx)
           let e = emit_op(e, DeclareVar(synthetic, ParamBinding))
-          #(e, list.append(destr, [#(synthetic, param)]))
+          #(e, [#(synthetic, param), ..destr])
         }
       }
     })
+  let destructured_params = list.reverse(destructured_params_rev)
 
   // Detect whether the function body references `arguments`. We scan the body
   // AND the parameter patterns (default-value expressions can reference
@@ -2180,25 +2183,27 @@ fn emit_switch(
   // The trampoline pops the discriminant then jumps to the body label.
   // This ensures the discriminant is off the stack for all body code,
   // allowing fall-through between case bodies to work correctly.
-  let #(e, body_labels) =
+  let #(e, body_labels_rev) =
     list.fold(cases, #(e, []), fn(acc, _case) {
       let #(e, labels) = acc
       let #(e, label) = fresh_label(e)
-      #(e, list.append(labels, [label]))
+      #(e, [label, ..labels])
     })
+  let body_labels = list.reverse(body_labels_rev)
 
   // Allocate found (trampoline) labels for non-default cases
-  let #(e, found_labels) =
+  let #(e, found_labels_rev) =
     list.fold(cases, #(e, []), fn(acc, c) {
       let #(e, labels) = acc
       case c {
         ast.SwitchCase(Some(_), _) -> {
           let #(e, label) = fresh_label(e)
-          #(e, list.append(labels, [Some(label)]))
+          #(e, [Some(label), ..labels])
         }
-        ast.SwitchCase(None, _) -> #(e, list.append(labels, [None]))
+        ast.SwitchCase(None, _) -> #(e, [None, ..labels])
       }
     })
+  let found_labels = list.reverse(found_labels_rev)
 
   // Phase 1: Emit comparison jumps
   // For each case with a test: Dup discriminant, emit test, StrictEq, JumpIfTrue(found_N)
@@ -3729,48 +3734,50 @@ fn classify_class_body(
   List(ast.ClassElement),
   List(ast.ClassElement),
 ) {
-  list.fold(body, #(None, [], [], []), fn(acc, elem) {
-    let #(ctor, instance_methods, static_methods, instance_fields) = acc
-    case elem {
-      // Constructor
-      ast.ClassMethod(kind: ast.MethodConstructor, ..) -> #(
-        Some(elem),
-        instance_methods,
-        static_methods,
-        instance_fields,
-      )
-      // Instance method (non-static, non-constructor)
-      ast.ClassMethod(is_static: False, kind: ast.MethodMethod, ..) -> #(
-        ctor,
-        list.append(instance_methods, [elem]),
-        static_methods,
-        instance_fields,
-      )
-      // Static method
-      ast.ClassMethod(is_static: True, ..) -> #(
-        ctor,
-        instance_methods,
-        list.append(static_methods, [elem]),
-        instance_fields,
-      )
-      // Instance field (non-static)
-      ast.ClassField(is_static: False, ..) -> #(
-        ctor,
-        instance_methods,
-        static_methods,
-        list.append(instance_fields, [elem]),
-      )
-      // Getter/setter on instance
-      ast.ClassMethod(is_static: False, ..) -> #(
-        ctor,
-        list.append(instance_methods, [elem]),
-        static_methods,
-        instance_fields,
-      )
-      // Skip static fields and static blocks for now
-      _ -> acc
-    }
-  })
+  let #(ctor, im_rev, sm_rev, if_rev) =
+    list.fold(body, #(None, [], [], []), fn(acc, elem) {
+      let #(ctor, instance_methods, static_methods, instance_fields) = acc
+      case elem {
+        // Constructor
+        ast.ClassMethod(kind: ast.MethodConstructor, ..) -> #(
+          Some(elem),
+          instance_methods,
+          static_methods,
+          instance_fields,
+        )
+        // Instance method (non-static, non-constructor)
+        ast.ClassMethod(is_static: False, kind: ast.MethodMethod, ..) -> #(
+          ctor,
+          [elem, ..instance_methods],
+          static_methods,
+          instance_fields,
+        )
+        // Static method
+        ast.ClassMethod(is_static: True, ..) -> #(
+          ctor,
+          instance_methods,
+          [elem, ..static_methods],
+          instance_fields,
+        )
+        // Instance field (non-static)
+        ast.ClassField(is_static: False, ..) -> #(
+          ctor,
+          instance_methods,
+          static_methods,
+          [elem, ..instance_fields],
+        )
+        // Getter/setter on instance
+        ast.ClassMethod(is_static: False, ..) -> #(
+          ctor,
+          [elem, ..instance_methods],
+          static_methods,
+          instance_fields,
+        )
+        // Skip static fields and static blocks for now
+        _ -> acc
+      }
+    })
+  #(ctor, list.reverse(im_rev), list.reverse(sm_rev), list.reverse(if_rev))
 }
 
 /// Inject field initializer code at the start of a constructor body.

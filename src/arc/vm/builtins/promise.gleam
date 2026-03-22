@@ -12,7 +12,7 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, Some}
 
 /// ES2024 §27.2.4 Properties of the Promise Constructor &
 /// ES2024 §27.2.5 Properties of the Promise Prototype Object
@@ -474,12 +474,8 @@ pub fn perform_promise_then(
 pub fn is_promise(h: Heap, val: JsValue) -> Bool {
   case val {
     // Step 1: If x is not an Object, return false.
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        // Step 2-3: Check for [[PromiseState]] via PromiseObject kind tag
-        Some(ObjectSlot(kind: PromiseObject(_), ..)) -> True
-        _ -> False
-      }
+    // Step 2-3: Check for [[PromiseState]] via PromiseObject kind tag.
+    JsObject(ref) -> heap.read_promise_data_ref(h, ref) |> option.is_some
     _ -> False
   }
 }
@@ -488,11 +484,7 @@ pub fn is_promise(h: Heap, val: JsValue) -> Bool {
 /// object ref. Used to access [[PromiseState]]/[[PromiseResult]] etc.
 /// Returns None if the ref is not a promise object.
 pub fn get_data_ref(h: Heap, promise_ref: Ref) -> Option(Ref) {
-  case heap.read(h, promise_ref) {
-    Some(ObjectSlot(kind: PromiseObject(promise_data:), ..)) ->
-      Some(promise_data)
-    _ -> None
-  }
+  heap.read_promise_data_ref(h, promise_ref)
 }
 
 /// Partial ES2024 §27.2.1.3.2 Promise Resolve Functions, steps 8-13

@@ -150,10 +150,7 @@ fn run_spawned_closure(
   execute_inner: ExecuteInnerFn,
   new_state_fn: NewStateFn,
 ) -> Nil {
-  let env_values = case heap.read(heap, env_ref) {
-    Some(value.EnvSlot(slots)) -> slots
-    _ -> []
-  }
+  let env_values = heap.read_env(heap, env_ref) |> option.unwrap([])
   let env_count = list.length(env_values)
   let remaining =
     callee_template.local_count - env_count - callee_template.arity

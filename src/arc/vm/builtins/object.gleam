@@ -374,11 +374,14 @@ pub fn define_property(
       use key_str, state <- frame.try_to_string(state, key_val)
       // Steps 3-4: ToPropertyDescriptor + DefinePropertyOrThrow
       // (apply_descriptor combines both steps.)
-      case apply_descriptor(state, ref, key_str, desc_ref) {
-        // Step 5: Return O.
-        Ok(state) -> #(state, Ok(obj))
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
+      use state <- frame.try_state(apply_descriptor(
+        state,
+        ref,
+        key_str,
+        desc_ref,
+      ))
+      // Step 5: Return O.
+      #(state, Ok(obj))
     }
     // Step 3 (implicit): Attributes is not an Object — TypeError.
     // Spec: ToPropertyDescriptor step 1 throws if Type(Obj) is not Object.
@@ -1346,10 +1349,10 @@ fn own_values_impl(
       // (filtered to enumerable-only string keys)
       let ks = collect_own_keys(state.heap, ref, True)
       // §7.3.23 step 3: For each key, Get(O, key) and collect
-      case collect_values(state, ref, receiver, ks, []) {
-        Ok(#(vals, state)) -> cont(list.reverse(vals), state)
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
+      use vals, state <- frame.try_op(
+        collect_values(state, ref, receiver, ks, []),
+      )
+      cont(list.reverse(vals), state)
     }
     // ToObject: null/undefined → TypeError
     JsNull | JsUndefined -> frame.type_error(state, cannot_convert)
@@ -1414,10 +1417,10 @@ fn own_entries_impl(
       // §7.3.23 step 1: ownKeys (filtered to enumerable string keys)
       let ks = collect_own_keys(state.heap, ref, True)
       // §7.3.23 step 3: collect key+value pairs
-      case collect_entries(state, ref, receiver, ks, []) {
-        Ok(#(pairs, state)) -> cont(list.reverse(pairs), state)
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
+      use pairs, state <- frame.try_op(
+        collect_entries(state, ref, receiver, ks, []),
+      )
+      cont(list.reverse(pairs), state)
     }
     // ToObject: null/undefined → TypeError
     JsNull | JsUndefined -> frame.type_error(state, cannot_convert)
@@ -1594,12 +1597,16 @@ fn define_props_loop(
     [key, ..rest] ->
       case object.get_own_property(state.heap, props_ref, key) {
         // Steps 4.b.i + 4.b.ii: descObj is an Object → ToPropertyDescriptor.
-        Some(DataProperty(value: JsObject(desc_ref), ..)) ->
+        Some(DataProperty(value: JsObject(desc_ref), ..)) -> {
           // Step 5.a: DefinePropertyOrThrow(O, key, desc).
-          case apply_descriptor(state, target_ref, key, desc_ref) {
-            Ok(state) -> define_props_loop(state, target_ref, props_ref, rest)
-            Error(#(thrown, state)) -> #(state, Error(thrown))
-          }
+          use state <- frame.try_state(apply_descriptor(
+            state,
+            target_ref,
+            key,
+            desc_ref,
+          ))
+          define_props_loop(state, target_ref, props_ref, rest)
+        }
         // Step 4.b.ii: ToPropertyDescriptor throws if descObj is not an Object.
         Some(_) ->
           frame.type_error(state, "Property description must be an object")
@@ -1640,10 +1647,12 @@ pub fn assign(
         Some(#(heap, target_ref)) -> {
           let state = State(..state, heap:)
           // Steps 3-4: Process each source, then return to.
-          case assign_sources(state, target_ref, sources) {
-            Ok(state) -> #(state, Ok(JsObject(target_ref)))
-            Error(#(thrown, state)) -> #(state, Error(thrown))
-          }
+          use state <- frame.try_state(assign_sources(
+            state,
+            target_ref,
+            sources,
+          ))
+          #(state, Ok(JsObject(target_ref)))
         }
       }
     }
@@ -2422,9 +2431,8 @@ pub fn from_entries(
 
 /// Loop over iterable entries for Object.fromEntries.
 ///
-/// `str_acc` is a list of #(String, Property) pairs in insertion order.
-/// `sym_acc` is a dict of symbol-keyed properties.
-/// We use a list for string keys to preserve insertion order (dict loses it).
+/// `str_acc` is a list of #(String, Property) pairs in reverse insertion order
+/// (prepended for O(1) accumulation). `sym_acc` is a dict of symbol-keyed properties.
 fn from_entries_loop(
   entries: List(JsValue),
   state: State,
@@ -2436,9 +2444,9 @@ fn from_entries_loop(
       // Build the result object.
       // String properties are inserted in iteration order: convert list to dict.
       // Since later entries with the same key should overwrite earlier ones,
-      // we fold left-to-right.
+      // we reverse (to restore insertion order) then fold left-to-right.
       let props =
-        list.fold(str_acc, dict.new(), fn(d, pair) {
+        list.fold(list.reverse(str_acc), dict.new(), fn(d, pair) {
           dict.insert(d, pair.0, pair.1)
         })
       let #(heap, obj_ref) =
@@ -2475,7 +2483,7 @@ fn from_entries_loop(
           from_entries_loop(
             rest,
             state,
-            list.append(str_acc, [#(key_str, value.data_property(val))]),
+            [#(key_str, value.data_property(val)), ..str_acc],
             sym_acc,
           )
         }
@@ -2653,12 +2661,12 @@ fn group_by(
       // Get elements from iterable
       case items {
         JsObject(ref) ->
-          case heap.read(state.heap, ref) {
-            Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+          case heap.read_array(state.heap, ref) {
+            Some(#(length, elements)) -> {
               let elems = extract_elements(elements, 0, length, [])
               group_by_loop(state, elems, callback, 0, dict.new())
             }
-            _ ->
+            None ->
               frame.type_error(state, "Object.groupBy: items is not iterable")
           }
         _ -> frame.type_error(state, "Object.groupBy: items is not iterable")

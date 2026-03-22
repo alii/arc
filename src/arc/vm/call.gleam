@@ -32,10 +32,9 @@ import arc/vm/operators
 import arc/vm/promises
 import arc/vm/realm
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, ArrayObject, AsyncFunctionSlot,
-  DataProperty, FunctionObject, GeneratorObject, GeneratorSlot, JsNull, JsObject,
-  JsString, JsUndefined, JsUninitialized, NativeFunction, ObjectSlot,
-  OrdinaryObject, PromiseObject,
+  type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot, DataProperty,
+  FunctionObject, GeneratorObject, GeneratorSlot, JsNull, JsObject, JsString,
+  JsUndefined, JsUninitialized, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/bool
 import gleam/dict
@@ -283,15 +282,10 @@ fn call_generator_function(
       // Return to caller with the generator object on the stack
       Ok(
         State(
-          ..state,
+          ..frame.merge_globals(state, suspended, []),
           heap: h,
           stack: [JsObject(gen_obj_ref), ..rest_stack],
           pc: state.pc + 1,
-          lexical_globals: suspended.lexical_globals,
-          const_lexical_globals: suspended.const_lexical_globals,
-          job_queue: suspended.job_queue,
-          pending_receivers: suspended.pending_receivers,
-          outstanding: suspended.outstanding,
         ),
       )
     }
@@ -411,15 +405,7 @@ fn call_async_function(
         )
       let state =
         async_setup_await(
-          State(
-            ..state,
-            heap: h2,
-            lexical_globals: suspended.lexical_globals,
-            const_lexical_globals: suspended.const_lexical_globals,
-            job_queue: suspended.job_queue,
-            pending_receivers: suspended.pending_receivers,
-            outstanding: suspended.outstanding,
-          ),
+          State(..frame.merge_globals(state, suspended, []), heap: h2),
           async_data_ref,
           awaited_value,
         )
@@ -437,15 +423,10 @@ fn call_async_function(
         builtins_promise.fulfill_promise(h2, data_ref, return_value)
       Ok(
         State(
-          ..state,
+          ..frame.merge_globals(state, final_state, jobs),
           heap: h2,
           stack: [JsObject(promise_ref), ..rest_stack],
           pc: state.pc + 1,
-          lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
-          job_queue: list.append(final_state.job_queue, jobs),
-          pending_receivers: final_state.pending_receivers,
-          outstanding: final_state.outstanding,
         ),
       )
     }
@@ -453,14 +434,7 @@ fn call_async_function(
       // Async function threw without awaiting -- reject the promise
       let state =
         builtins_promise.reject_promise(
-          State(
-            ..state,
-            heap: h2,
-            lexical_globals: final_state.lexical_globals,
-            const_lexical_globals: final_state.const_lexical_globals,
-            pending_receivers: final_state.pending_receivers,
-            outstanding: final_state.outstanding,
-          ),
+          State(..frame.merge_globals(state, final_state, []), heap: h2),
           data_ref,
           thrown,
         )
@@ -487,17 +461,13 @@ fn async_setup_await(
   let h = state.heap
   let builtins = state.builtins
   // Wrap awaited_value in Promise.resolve() if not already a promise
-  let #(h, promise_data_ref) = case awaited_value {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: PromiseObject(pdata_ref), ..)) -> #(h, pdata_ref)
-        _ -> {
-          let #(h, _, dr) =
-            promises.create_resolved_promise(h, builtins, awaited_value)
-          #(h, dr)
-        }
-      }
-    _ -> {
+  let existing_data_ref = case awaited_value {
+    JsObject(ref) -> heap.read_promise_data_ref(h, ref)
+    _ -> None
+  }
+  let #(h, promise_data_ref) = case existing_data_ref {
+    Some(dr) -> #(h, dr)
+    None -> {
       let #(h, _, dr) =
         promises.create_resolved_promise(h, builtins, awaited_value)
       #(h, dr)
@@ -625,15 +595,10 @@ pub fn call_native_async_resume(
             builtins_promise.fulfill_promise(h2, promise_data_ref, return_value)
           Ok(
             State(
-              ..state,
+              ..frame.merge_globals(state, final_state, jobs),
               heap: h2,
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
-              lexical_globals: final_state.lexical_globals,
-              const_lexical_globals: final_state.const_lexical_globals,
-              job_queue: list.append(final_state.job_queue, jobs),
-              pending_receivers: final_state.pending_receivers,
-              outstanding: final_state.outstanding,
             ),
           )
         }
@@ -641,14 +606,7 @@ pub fn call_native_async_resume(
           // Async function threw -- reject the outer promise
           let state =
             builtins_promise.reject_promise(
-              State(
-                ..state,
-                heap: h2,
-                lexical_globals: final_state.lexical_globals,
-                const_lexical_globals: final_state.const_lexical_globals,
-                pending_receivers: final_state.pending_receivers,
-                outstanding: final_state.outstanding,
-              ),
+              State(..frame.merge_globals(state, final_state, []), heap: h2),
               promise_data_ref,
               thrown,
             )
@@ -681,15 +639,7 @@ pub fn call_native_async_resume(
             )
           let state =
             async_setup_await(
-              State(
-                ..state,
-                heap: h2,
-                lexical_globals: suspended.lexical_globals,
-                const_lexical_globals: suspended.const_lexical_globals,
-                job_queue: suspended.job_queue,
-                pending_receivers: suspended.pending_receivers,
-                outstanding: suspended.outstanding,
-              ),
+              State(..frame.merge_globals(state, suspended, []), heap: h2),
               async_data_ref,
               awaited_value,
             )
@@ -719,10 +669,7 @@ pub fn setup_locals(
   callee_template: FuncTemplate,
   args: List(JsValue),
 ) -> array.Array(JsValue) {
-  let env_values = case heap.read(h, env_ref) {
-    Some(value.EnvSlot(slots)) -> slots
-    _ -> []
-  }
+  let env_values = heap.read_env(h, env_ref) |> option.unwrap([])
   let env_count = list.length(env_values)
   let padded_args = pad_args(args, callee_template.arity)
   let remaining =
@@ -1410,12 +1357,9 @@ pub fn call_value(
 /// Extract elements from an array object as a list of JsValues.
 /// Used by Function.prototype.apply to unpack the args array.
 pub fn extract_array_args(h: Heap, ref: Ref) -> List(JsValue) {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..))
-    | Some(ObjectSlot(kind: value.ArgumentsObject(length:), elements:, ..)) ->
-      extract_elements_loop(elements, 0, length, [])
-    _ -> []
-  }
+  heap.read_array_like(h, ref)
+  |> option.map(fn(p) { extract_elements_loop(p.1, 0, p.0, []) })
+  |> option.unwrap([])
 }
 
 fn extract_elements_loop(

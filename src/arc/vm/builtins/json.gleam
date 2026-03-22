@@ -98,32 +98,25 @@ fn json_parse(
     [] -> Ok(#("undefined", state))
   }
 
-  case to_string_result {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(json_str, state)) -> {
-      // Step 2: Parse as JSON text
-      let chars = string.to_graphemes(json_str)
-      case parse_value(chars) {
-        Ok(#(val, rest)) -> {
-          // After parsing, skip trailing whitespace and ensure nothing else
-          let rest = skip_whitespace(rest)
-          case rest {
-            [] -> {
-              // Successfully parsed — materialize the value on the heap
-              let #(heap, js_val) = materialize(state.heap, state.builtins, val)
-              #(State(..state, heap:), Ok(js_val))
-            }
-            _ ->
-              syntax_error(
-                state,
-                "Unexpected non-whitespace character after JSON",
-              )
-          }
+  use json_str, state <- frame.try_op(to_string_result)
+  // Step 2: Parse as JSON text
+  let chars = string.to_graphemes(json_str)
+  case parse_value(chars) {
+    Ok(#(val, rest)) -> {
+      // After parsing, skip trailing whitespace and ensure nothing else
+      let rest = skip_whitespace(rest)
+      case rest {
+        [] -> {
+          // Successfully parsed — materialize the value on the heap
+          let #(heap, js_val) = materialize(state.heap, state.builtins, val)
+          #(State(..state, heap:), Ok(js_val))
         }
-        // Step 3: If parse fails, throw SyntaxError
-        Error(msg) -> syntax_error(state, msg)
+        _ ->
+          syntax_error(state, "Unexpected non-whitespace character after JSON")
       }
     }
+    // Step 3: If parse fails, throw SyntaxError
+    Error(msg) -> syntax_error(state, msg)
   }
 }
 

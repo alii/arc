@@ -223,35 +223,31 @@ pub fn parse_int(
     }
     [] -> Ok(#("", state))
   }
-  case str_result {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(str, state)) -> {
-      // Steps 6-9: Determine radix R.
-      // If R is 0, NaN, or Infinity, default to 10.
-      let radix = case args {
-        [_, r, ..] ->
-          case arg_to_int(r, 10) {
-            0 -> 10
-            n -> n
-          }
-        _ -> 10
+  use str, state <- frame.try_op(str_result)
+  // Steps 6-9: Determine radix R.
+  // If R is 0, NaN, or Infinity, default to 10.
+  let radix = case args {
+    [_, r, ..] ->
+      case arg_to_int(r, 10) {
+        0 -> 10
+        n -> n
       }
-      // Step 10: If radix is 10 or 16, check for "0x"/"0X" prefix.
-      let has_hex_prefix =
-        string.starts_with(str, "0x") || string.starts_with(str, "0X")
-      let #(str, radix) = case radix, has_hex_prefix {
-        10, True | 16, True -> #(string.drop_start(str, 2), 16)
-        _, _ -> #(str, radix)
-      }
-      // Step 8a: If R < 2 or R > 36, return NaN.
-      case radix >= 2 && radix <= 36 {
-        False -> #(state, Ok(JsNumber(NaN)))
-        True -> {
-          // Steps 3-5, 11-16: Parse sign + digits in parse_int_digits.
-          let result = parse_int_digits(str, radix)
-          #(state, Ok(JsNumber(result)))
-        }
-      }
+    _ -> 10
+  }
+  // Step 10: If radix is 10 or 16, check for "0x"/"0X" prefix.
+  let has_hex_prefix =
+    string.starts_with(str, "0x") || string.starts_with(str, "0X")
+  let #(str, radix) = case radix, has_hex_prefix {
+    10, True | 16, True -> #(string.drop_start(str, 2), 16)
+    _, _ -> #(str, radix)
+  }
+  // Step 8a: If R < 2 or R > 36, return NaN.
+  case radix >= 2 && radix <= 36 {
+    False -> #(state, Ok(JsNumber(NaN)))
+    True -> {
+      // Steps 3-5, 11-16: Parse sign + digits in parse_int_digits.
+      let result = parse_int_digits(str, radix)
+      #(state, Ok(JsNumber(result)))
     }
   }
 }
@@ -288,11 +284,9 @@ pub fn parse_float(
     }
     [] -> Ok(#("", state))
   }
-  case str_result {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    // Steps 3-6: Parse as StrDecimalLiteral.
-    Ok(#(str, state)) -> #(state, Ok(JsNumber(parse_decimal_string(str))))
-  }
+  use str, state <- frame.try_op(str_result)
+  // Steps 3-6: Parse as StrDecimalLiteral.
+  #(state, Ok(JsNumber(parse_decimal_string(str))))
 }
 
 /// Parse a trimmed string as a StrDecimalLiteral. Handles Infinity literals,
@@ -492,11 +486,7 @@ fn this_number_value(state: State, this: JsValue) -> Option(JsNum) {
     // Step 1: If value is a Number, return value.
     JsNumber(n) -> Some(n)
     // Step 2: If value is an Object with [[NumberData]], return it.
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: NumberObject(value: n), ..)) -> Some(n)
-        _ -> None
-      }
+    JsObject(ref) -> heap.read_number_object(state.heap, ref)
     // Step 3: (caller throws TypeError)
     _ -> None
   }

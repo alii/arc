@@ -498,18 +498,17 @@ fn step_locals(
     GetBoxed(index) -> {
       // Read locals[index] (a JsObject(box_ref)), dereference BoxSlot, push value.
       case array.get(index, state.locals) {
-        Some(JsObject(box_ref)) -> {
-          case heap.read(state.heap, box_ref) {
-            Some(value.BoxSlot(val)) ->
+        Some(JsObject(box_ref)) ->
+          case heap.read_box(state.heap, box_ref) {
+            Some(val) ->
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
-            _ ->
+            None ->
               Error(#(
                 StepVmError(Unimplemented("GetBoxed: not a BoxSlot")),
                 JsUndefined,
                 state.heap,
               ))
           }
-        }
         _ ->
           Error(#(
             StepVmError(Unimplemented("GetBoxed: local is not a box ref")),
@@ -2454,15 +2453,9 @@ fn step_iteration(
           case heap.read(state.heap, iter_ref) {
             Some(ArrayIteratorSlot(source:, index:)) -> {
               // Re-read the source length each time (handles mutations during iteration)
-              let #(length, elements) = case heap.read(state.heap, source) {
-                Some(ObjectSlot(kind: ArrayObject(len), elements: elems, ..))
-                | Some(ObjectSlot(
-                    kind: value.ArgumentsObject(len),
-                    elements: elems,
-                    ..,
-                  )) -> #(len, elems)
-                _ -> #(0, js_elements.new())
-              }
+              let #(length, elements) =
+                heap.read_array_like(state.heap, source)
+                |> option.unwrap(#(0, js_elements.new()))
               case index >= length {
                 True ->
                   // Done — push undefined + done=true
@@ -2527,7 +2520,7 @@ fn step_iteration(
                         }
                         Ok(
                           State(
-                            ..state,
+                            ..frame.merge_globals(state, next_state, []),
                             heap: next_state.heap,
                             stack: [
                               JsBool(done),
@@ -2536,11 +2529,6 @@ fn step_iteration(
                               ..rest
                             ],
                             pc: state.pc + 1,
-                            lexical_globals: next_state.lexical_globals,
-                            const_lexical_globals: next_state.const_lexical_globals,
-                            job_queue: next_state.job_queue,
-                            pending_receivers: next_state.pending_receivers,
-                            outstanding: next_state.outstanding,
                           ),
                         )
                       }
