@@ -22,7 +22,11 @@ pub fn get(index: Int, arr: TupleArray(a)) -> Option(a)
 /// Write element at index (0-based), returning a new array. O(n) copy.
 @external(erlang, "arc_vm_ffi", "array_set")
 @external(javascript, "../../../arc_vm_ffi.mjs", "array_set")
-pub fn set(index: Int, value: a, arr: TupleArray(a)) -> Result(TupleArray(a), Nil)
+pub fn set(
+  index: Int,
+  value: a,
+  arr: TupleArray(a),
+) -> Result(TupleArray(a), Nil)
 
 /// Number of elements. O(1).
 @external(erlang, "erlang", "tuple_size")
