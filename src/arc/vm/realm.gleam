@@ -84,35 +84,35 @@ pub fn arc_spawn(
       )) ->
         Ok(fn() {
           run_spawned_closure(
-            callee_template,
-            env_ref,
-            state.heap,
-            state.builtins,
-            state.global_object,
-            state.lexical_globals,
-            state.const_lexical_globals,
-            state.symbol_descriptions,
-            state.symbol_registry,
-            state.event_loop,
-            execute_inner,
-            new_state,
+            callee_template:,
+            env_ref:,
+            heap: state.heap,
+            builtins: state.builtins,
+            global_object: state.global_object,
+            lexical_globals: state.lexical_globals,
+            const_lexical_globals: state.const_lexical_globals,
+            symbol_descriptions: state.symbol_descriptions,
+            symbol_registry: state.symbol_registry,
+            event_loop: state.event_loop,
+            execute_inner:,
+            new_state_fn: new_state,
           )
         })
       Some(ObjectSlot(kind: value.NativeFunction(native), ..)) ->
         Ok(fn() {
           run_spawned_native(
-            native,
-            state.func,
-            state.heap,
-            state.builtins,
-            state.global_object,
-            state.lexical_globals,
-            state.const_lexical_globals,
-            state.symbol_descriptions,
-            state.symbol_registry,
-            state.event_loop,
-            call_native,
-            new_state,
+            native:,
+            caller_func: state.func,
+            heap: state.heap,
+            builtins: state.builtins,
+            global_object: state.global_object,
+            lexical_globals: state.lexical_globals,
+            const_lexical_globals: state.const_lexical_globals,
+            symbol_descriptions: state.symbol_descriptions,
+            symbol_registry: state.symbol_registry,
+            event_loop: state.event_loop,
+            call_native: call_native,
+            new_state_fn: new_state,
           )
         })
       _ -> Error("Arc.spawn: argument is not a function")
@@ -138,18 +138,18 @@ pub fn arc_spawn(
 /// Run a JS closure in a standalone BEAM process. Sets up a fresh VM
 /// state from the snapshot and executes the function to completion.
 fn run_spawned_closure(
-  callee_template: FuncTemplate,
-  env_ref: value.Ref,
-  heap: heap.Heap,
-  builtins: Builtins,
-  global_object: Ref,
-  lexical_globals: dict.Dict(String, JsValue),
-  const_lexical_globals: set.Set(String),
-  symbol_descriptions: dict.Dict(value.SymbolId, String),
-  symbol_registry: dict.Dict(String, value.SymbolId),
-  event_loop: Bool,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
+  callee_template callee_template: FuncTemplate,
+  env_ref env_ref: value.Ref,
+  heap heap: heap.Heap,
+  builtins builtins: Builtins,
+  global_object global_object: Ref,
+  lexical_globals lexical_globals: dict.Dict(String, JsValue),
+  const_lexical_globals const_lexical_globals: set.Set(String),
+  symbol_descriptions symbol_descriptions: dict.Dict(value.SymbolId, String),
+  symbol_registry symbol_registry: dict.Dict(String, value.SymbolId),
+  event_loop event_loop: Bool,
+  execute_inner execute_inner: ExecuteInnerFn,
+  new_state_fn new_state_fn: NewStateFn,
 ) -> Nil {
   let env_values = heap.read_env(heap, env_ref) |> option.unwrap([])
   let env_count = list.length(env_values)
@@ -187,18 +187,18 @@ fn run_spawned_closure(
 /// Sets up a full VM state (using the caller's func template as context)
 /// and drains the job queue after execution.
 fn run_spawned_native(
-  native: value.NativeFnSlot,
-  caller_func: FuncTemplate,
-  heap: heap.Heap,
-  builtins: Builtins,
-  global_object: Ref,
-  lexical_globals: dict.Dict(String, JsValue),
-  const_lexical_globals: set.Set(String),
-  symbol_descriptions: dict.Dict(value.SymbolId, String),
-  symbol_registry: dict.Dict(String, value.SymbolId),
-  event_loop: Bool,
-  call_native: CallNativeFn,
-  new_state_fn: NewStateFn,
+  native native: value.NativeFnSlot,
+  caller_func caller_func: FuncTemplate,
+  heap heap: heap.Heap,
+  builtins builtins: Builtins,
+  global_object global_object: Ref,
+  lexical_globals lexical_globals: dict.Dict(String, JsValue),
+  const_lexical_globals const_lexical_globals: set.Set(String),
+  symbol_descriptions symbol_descriptions: dict.Dict(value.SymbolId, String),
+  symbol_registry symbol_registry: dict.Dict(String, value.SymbolId),
+  event_loop event_loop: Bool,
+  call_native call_native: CallNativeFn,
+  new_state_fn new_state_fn: NewStateFn,
 ) -> Nil {
   let locals = tuple_array.repeat(JsUndefined, caller_func.local_count)
   let state =
