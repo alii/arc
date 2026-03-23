@@ -14,7 +14,7 @@ get_env(Name) ->
 run_with_timeout(Fun, TimeoutMs) ->
     Parent = self(),
     Ref = make_ref(),
-    Pid = spawn(fun() ->
+    Pid = spawn_link(fun() ->
         try
             Result = Fun(),
             Parent ! {Ref, {ok, Result}}
@@ -26,6 +26,7 @@ run_with_timeout(Fun, TimeoutMs) ->
     receive
         {Ref, Result} -> Result
     after TimeoutMs ->
+        unlink(Pid),
         exit(Pid, kill),
         {error, <<"timeout">>}
     end.
