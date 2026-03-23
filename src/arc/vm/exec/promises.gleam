@@ -1,10 +1,10 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/ops/object
-import arc/vm/state.{type State, type StepResult, State, Thrown}
+import arc/vm/state.{type Heap, type State, type StepResult, State, Thrown}
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, Finite, JsBool, JsNumber, JsObject,
   JsString, JsUndefined, Named, NativeFunction, ObjectSlot, OrdinaryObject,

@@ -1,6 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/heap.{type Heap}
-import arc/vm/state.{type State}
+import arc/vm/heap
+import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type BooleanNativeFn, type JsValue, type Ref, BooleanConstructor,
   BooleanNative, BooleanObject, BooleanPrototypeToString,

@@ -17,7 +17,7 @@ import gleam/string
 /// We check for FunctionObject or NativeFunction object kinds instead of a
 /// [[Call]] internal method slot, since our object representation uses tagged
 /// kinds rather than method tables.
-pub fn is_callable(h: Heap, val: JsValue) -> Bool {
+pub fn is_callable(h: Heap(ctx), val: JsValue) -> Bool {
   // Step 1: If argument is not an Object, return false.
   case val {
     JsObject(ref) ->

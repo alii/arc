@@ -9,7 +9,7 @@ import gleam/list
 import gleam/option.{Some}
 
 /// Set up Function.prototype and Function constructor.
-pub fn init(h: Heap, object_proto: Ref) -> #(Heap, BuiltinType) {
+pub fn init(h: Heap(ctx), object_proto: Ref) -> #(Heap(ctx), BuiltinType) {
   // Allocate func_proto first (empty) so call/apply/bind can reference it
   // as their [[Prototype]] from the start — no fix-up needed.
   let #(h, func_proto) = alloc_proto(h, Some(object_proto), dict.new())

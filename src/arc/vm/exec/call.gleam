@@ -23,7 +23,7 @@ import arc/vm/completion.{
 import arc/vm/exec/async_generators
 import arc/vm/exec/generators
 import arc/vm/exec/promises
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/limits
@@ -32,8 +32,8 @@ import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/realm
 import arc/vm/state.{
-  type State, type StepResult, type VmError, SavedFrame, State, StepVmError,
-  Thrown, Unimplemented,
+  type Heap, type NativeFnSlot, type State, type StepResult, type VmError,
+  SavedFrame, State, StepVmError, Thrown, Unimplemented,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot,
@@ -802,7 +802,7 @@ pub fn setup_locals(
 /// handling because they invoke other functions (potentially pushing call frames).
 pub fn call_native(
   state: State,
-  native: value.NativeFnSlot,
+  native: NativeFnSlot,
   args: List(JsValue),
   rest_stack: List(JsValue),
   this: JsValue,
@@ -1256,6 +1256,21 @@ pub fn call_native(
         Error(thrown) -> Error(#(Thrown, thrown, new_state.heap))
       }
     }
+    // Host-provided native: call the embedder's closure directly
+    value.Host(f) -> {
+      let #(new_state, result) = f(args, this, state)
+      case result {
+        Ok(return_value) ->
+          Ok(
+            State(
+              ..new_state,
+              stack: [return_value, ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        Error(thrown) -> Error(#(Thrown, thrown, new_state.heap))
+      }
+    }
   }
 }
 
@@ -1670,13 +1685,7 @@ pub fn dispatch_native(
   this: JsValue,
   state: State,
   execute_inner: ExecuteInnerFn,
-  call_native_fn: fn(
-    State,
-    value.NativeFnSlot,
-    List(JsValue),
-    List(JsValue),
-    JsValue,
-  ) ->
+  call_native_fn: fn(State, NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
     Result(State, #(StepResult, JsValue, Heap)),
   new_state_fn: realm.NewStateFn,
 ) -> #(State, Result(JsValue, JsValue)) {

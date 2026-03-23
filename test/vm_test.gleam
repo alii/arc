@@ -23,7 +23,7 @@ import gleam/option.{None, Some}
 
 /// Test helper: read a data property walking the prototype chain.
 fn get_data(
-  h: heap.Heap,
+  h: state.Heap,
   ref: value.Ref,
   key: String,
 ) -> Result(value.JsValue, Nil) {

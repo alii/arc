@@ -1,7 +1,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/math as builtins_math
-import arc/vm/heap.{type Heap}
-import arc/vm/state.{type State}
+import arc/vm/heap
+import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsNum, type JsValue, type NumberNativeFn, type Ref, Dispatch, Finite,
   GlobalIsFinite, GlobalIsNaN, GlobalParseFloat, GlobalParseInt, Infinity,

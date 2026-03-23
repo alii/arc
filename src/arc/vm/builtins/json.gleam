@@ -1,7 +1,7 @@
 import arc/vm/builtins/common
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type JsonNativeFn, type Property, type Ref, ArrayObject,
   DataProperty, Finite, FunctionObject, JsBool, JsNull, JsNumber, JsObject,

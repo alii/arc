@@ -1,8 +1,8 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/state.{type State}
+import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, type MathNativeFn, type Ref, Finite, Infinity, JsNumber,
   JsString, MathAbs, MathAcos, MathAcosh, MathAsin, MathAsinh, MathAtan,

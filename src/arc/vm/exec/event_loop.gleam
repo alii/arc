@@ -11,7 +11,8 @@ import arc/vm/internal/tuple_array
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{
-  type State, type StepResult, type VmError, State, StepVmError, Thrown,
+  type Heap, type NativeFnSlot, type State, type StepResult, type VmError, State,
+  StepVmError, Thrown,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, FunctionObject, JsNull, JsObject,
@@ -26,8 +27,8 @@ pub type ExecuteInnerFn =
   fn(State) -> Result(#(completion.Completion, State), VmError)
 
 pub type CallNativeFn =
-  fn(State, value.NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
-    Result(State, #(StepResult, JsValue, heap.Heap))
+  fn(State, NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
+    Result(State, #(StepResult, JsValue, Heap))
 
 /// Drain jobs, using the event loop if enabled on the state, otherwise
 /// just flushing the microtask queue.
@@ -371,7 +372,7 @@ fn bind_this(
   state: State,
   callee: FuncTemplate,
   this_arg: JsValue,
-) -> #(heap.Heap, JsValue) {
+) -> #(Heap, JsValue) {
   case callee.is_arrow {
     True -> #(state.heap, state.this_binding)
     False ->

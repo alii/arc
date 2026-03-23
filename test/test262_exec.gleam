@@ -18,8 +18,9 @@ import arc/vm/completion.{
   type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
 }
 import arc/vm/exec/entry
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/ops/object
+import arc/vm/state.{type Heap}
 import arc/vm/value
 import gleam/dict
 import gleam/int

@@ -5,9 +5,9 @@
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg}
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsObject,
   ObjectSlot, WeakSetConstructor, WeakSetNative, WeakSetObject,

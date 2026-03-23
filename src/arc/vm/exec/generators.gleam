@@ -3,13 +3,13 @@ import arc/vm/completion.{
   type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
   YieldCompletion,
 }
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/opcode.{type Op, EnterFinallyThrow}
 import arc/vm/state.{
-  type FinallyCompletion, type State, type StepResult, type TryFrame, State,
-  StepVmError, Thrown, TryFrame, Unimplemented,
+  type FinallyCompletion, type Heap, type HeapSlot, type State, type StepResult,
+  type TryFrame, State, StepVmError, Thrown, TryFrame, Unimplemented,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, GeneratorObject, GeneratorSlot,
@@ -509,10 +509,7 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
 }
 
 /// Create a GeneratorSlot with only the gen_state changed.
-fn gen_with_state(
-  gen: GenData,
-  new_state: value.GeneratorState,
-) -> value.HeapSlot {
+fn gen_with_state(gen: GenData, new_state: value.GeneratorState) -> HeapSlot {
   GeneratorSlot(
     gen_state: new_state,
     func_template: gen.func_template,

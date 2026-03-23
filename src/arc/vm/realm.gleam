@@ -9,7 +9,9 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/ops/object
-import arc/vm/state.{type State, type StepResult, type VmError, State}
+import arc/vm/state.{
+  type Heap, type NativeFnSlot, type State, type StepResult, type VmError, State,
+}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, DataProperty, JsObject, JsString,
   JsUndefined, Named, ObjectSlot, OrdinaryObject,
@@ -29,14 +31,14 @@ pub type ExecuteInnerFn =
   fn(State) -> Result(#(completion.Completion, State), VmError)
 
 pub type CallNativeFn =
-  fn(State, value.NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
-    Result(State, #(StepResult, JsValue, heap.Heap))
+  fn(State, NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
+    Result(State, #(StepResult, JsValue, Heap))
 
 pub type NewStateFn =
   fn(
     FuncTemplate,
     tuple_array.TupleArray(JsValue),
-    heap.Heap,
+    Heap,
     Builtins,
     Ref,
     dict.Dict(String, JsValue),
@@ -140,7 +142,7 @@ pub fn arc_spawn(
 fn run_spawned_closure(
   callee_template callee_template: FuncTemplate,
   env_ref env_ref: value.Ref,
-  heap heap: heap.Heap,
+  heap heap: Heap,
   builtins builtins: Builtins,
   global_object global_object: Ref,
   lexical_globals lexical_globals: dict.Dict(String, JsValue),
@@ -187,9 +189,9 @@ fn run_spawned_closure(
 /// Sets up a full VM state (using the caller's func template as context)
 /// and drains the job queue after execution.
 fn run_spawned_native(
-  native native: value.NativeFnSlot,
+  native native: NativeFnSlot,
   caller_func caller_func: FuncTemplate,
-  heap heap: heap.Heap,
+  heap heap: Heap,
   builtins builtins: Builtins,
   global_object global_object: Ref,
   lexical_globals lexical_globals: dict.Dict(String, JsValue),
@@ -418,11 +420,11 @@ pub fn create_realm_native(
 /// property. The realm_ref points to a RealmSlot on the heap.
 /// Public so test262_exec.gleam can use it for initial test setup.
 pub fn build_262(
-  h: heap.Heap,
+  h: Heap,
   b: Builtins,
   global_ref: Ref,
   realm_ref: Ref,
-) -> #(heap.Heap, Ref) {
+) -> #(Heap, Ref) {
   let func_proto = b.function.prototype
 
   // Allocate method function objects

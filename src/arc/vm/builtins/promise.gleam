@@ -1,9 +1,9 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/object
-import arc/vm/state
+import arc/vm/state.{type Heap}
 import arc/vm/value.{
   type Job, type JsValue, type Ref, BoxSlot, Call, JsBool, JsObject, Named,
   NativeFunction, ObjectSlot, PromiseCatch, PromiseConstructor, PromiseFinally,

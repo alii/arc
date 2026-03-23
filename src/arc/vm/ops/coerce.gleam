@@ -1,7 +1,7 @@
 import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/ops/object
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, BigInt, Finite, FunctionObject, Infinity, JsBigInt, JsBool,
   JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
@@ -205,7 +205,7 @@ pub fn js_instanceof(
 
 /// ES2024 §7.3.22 OrdinaryHasInstance ( C, O ) — step 6 (prototype chain walk)
 fn instanceof_walk(
-  heap: heap.Heap,
+  heap: Heap,
   obj_ref: value.Ref,
   target_proto: value.Ref,
 ) -> Bool {
@@ -234,7 +234,7 @@ pub fn thrown_type_error(
 }
 
 /// Helper: check if a JsValue is callable.
-pub fn is_callable_value(h: heap.Heap, val: JsValue) -> Bool {
+pub fn is_callable_value(h: Heap, val: JsValue) -> Bool {
   case val {
     JsObject(ref) ->
       case heap.read(h, ref) {

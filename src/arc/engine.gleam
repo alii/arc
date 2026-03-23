@@ -10,9 +10,15 @@ import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/completion.{type Completion}
 import arc/vm/exec/entry
-import arc/vm/heap.{type Heap}
-import arc/vm/state
-import arc/vm/value.{type Ref}
+import arc/vm/heap
+import arc/vm/internal/elements
+import arc/vm/state.{type Heap, type HostFn}
+import arc/vm/value.{
+  type JsValue, type Ref, JsObject, Named, ObjectSlot, OrdinaryObject,
+}
+import gleam/dict
+import gleam/list
+import gleam/option.{Some}
 import gleam/result
 import gleam/string
 
@@ -45,6 +51,94 @@ pub fn new() -> Engine {
   let #(h, b) = builtins.init(h)
   let #(h, global) = builtins.globals(b, h)
   Engine(heap: h, builtins: b, global:)
+}
+
+// ----------------------------------------------------------------------------
+// Host FFI — extend the engine with embedder-provided globals
+// ----------------------------------------------------------------------------
+
+/// Add a top-level global native function.
+///
+/// The function becomes callable from JS as `name(...)`. `arity` is the
+/// reported `.length` property; the impl still receives all passed args.
+pub fn define_fn(
+  engine: Engine,
+  name: String,
+  arity: Int,
+  impl: HostFn,
+) -> Engine {
+  let #(h, fn_ref) =
+    common.alloc_host_fn(
+      engine.heap,
+      engine.builtins.function.prototype,
+      impl,
+      name,
+      arity,
+    )
+  let h = set_global_property(h, engine.global, name, JsObject(fn_ref))
+  Engine(..engine, heap: h)
+}
+
+/// Add a top-level namespace object (like `Math` or `JSON`) with methods.
+///
+/// Creates a plain object at the given global name whose own properties are
+/// the supplied methods. Each method spec is `#(name, arity, impl)`.
+pub fn define_namespace(
+  engine: Engine,
+  name: String,
+  methods: List(#(String, Int, HostFn)),
+) -> Engine {
+  let fn_proto = engine.builtins.function.prototype
+  let #(h, props) =
+    list.fold(methods, #(engine.heap, []), fn(acc, spec) {
+      let #(h, props) = acc
+      let #(method_name, arity, impl) = spec
+      let #(h, fn_ref) =
+        common.alloc_host_fn(h, fn_proto, impl, method_name, arity)
+      #(h, [#(method_name, value.builtin_property(JsObject(fn_ref))), ..props])
+    })
+  let #(h, ns_ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: common.named_props(props),
+        symbol_properties: dict.new(),
+        elements: elements.new(),
+        prototype: Some(engine.builtins.object.prototype),
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, ns_ref)
+  let h = set_global_property(h, engine.global, name, JsObject(ns_ref))
+  Engine(..engine, heap: h)
+}
+
+/// Add a raw JsValue as a top-level global binding.
+///
+/// For constants or pre-built objects that don't fit `define_fn` or
+/// `define_namespace`. The value is installed as a writable, configurable,
+/// non-enumerable data property on `globalThis`.
+pub fn define_global(engine: Engine, name: String, val: JsValue) -> Engine {
+  let h = set_global_property(engine.heap, engine.global, name, val)
+  Engine(..engine, heap: h)
+}
+
+fn set_global_property(h: Heap, global: Ref, name: String, val: JsValue) -> Heap {
+  heap.update(h, global, fn(slot) {
+    case slot {
+      ObjectSlot(properties:, ..) ->
+        ObjectSlot(
+          ..slot,
+          properties: dict.insert(
+            properties,
+            Named(name),
+            value.builtin_property(val),
+          ),
+        )
+      other -> other
+    }
+  })
 }
 
 // ----------------------------------------------------------------------------

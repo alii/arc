@@ -1,9 +1,10 @@
 import arc/vm/exec/generators
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/object
 import arc/vm/state.{
-  type State, type StepResult, type VmError, State, StepVmError, Unimplemented,
+  type Heap, type State, type StepResult, type VmError, State, StepVmError,
+  Unimplemented,
 }
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, DataProperty, GeneratorObject, JsBool,

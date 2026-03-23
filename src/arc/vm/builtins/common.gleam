@@ -75,10 +75,10 @@ pub type Builtins {
 /// Creates the prototype object that will be used as [[Prototype]] for
 /// instances of a builtin type.
 pub fn alloc_proto(
-  h: Heap,
+  h: Heap(ctx),
   prototype: Option(Ref),
   properties: Dict(PropertyKey, Property),
-) -> #(Heap, Ref) {
+) -> #(Heap(ctx), Ref) {
   let #(h, ref) =
     heap.alloc(
       h,
@@ -96,10 +96,10 @@ pub fn alloc_proto(
 }
 
 pub fn alloc_pojo(
-  heap: Heap,
+  heap: Heap(ctx),
   object_proto: Ref,
   props: List(#(String, value.Property)),
-) -> #(Heap, Ref) {
+) -> #(Heap(ctx), Ref) {
   heap.alloc(
     heap,
     ObjectSlot(
@@ -128,23 +128,23 @@ pub fn named_props(
 /// Creates a function object with the correct .name and .length data
 /// properties per §20.2.3 (Function instances).
 pub fn alloc_native_fn(
-  h: Heap,
+  h: Heap(ctx),
   function_proto: Ref,
   native: NativeFn,
   name: String,
   arity: Int,
-) -> #(Heap, Ref) {
+) -> #(Heap(ctx), Ref) {
   alloc_native_fn_slot(h, function_proto, Dispatch(native), name, arity)
 }
 
 /// Allocate a NativeFunction ObjectSlot from a NativeFnSlot directly.
 fn alloc_native_fn_slot(
-  h: Heap,
+  h: Heap(ctx),
   function_proto: Ref,
-  slot: NativeFnSlot,
+  slot: NativeFnSlot(ctx),
   name: String,
   arity: Int,
-) -> #(Heap, Ref) {
+) -> #(Heap(ctx), Ref) {
   let #(h, ref) =
     heap.alloc(
       h,
@@ -164,6 +164,19 @@ fn alloc_native_fn_slot(
   #(h, ref)
 }
 
+/// Allocate a host-provided native function. Same heap shape as built-in
+/// natives (name/length properties, Function.prototype), but dispatches
+/// to the embedder's closure via the Host variant.
+pub fn alloc_host_fn(
+  h: Heap(ctx),
+  function_proto: Ref,
+  impl: fn(List(JsValue), JsValue, ctx) -> #(ctx, Result(JsValue, JsValue)),
+  name: String,
+  arity: Int,
+) -> #(Heap(ctx), Ref) {
+  alloc_native_fn_slot(h, function_proto, value.Host(impl), name, arity)
+}
+
 /// ES2024 §20.2.2: Function name property — non-writable, non-enumerable, configurable.
 pub fn fn_name_property(name: String) -> Property {
   value.data(JsString(name)) |> value.configurable()
@@ -181,10 +194,10 @@ pub fn fn_length_property(arity: Int) -> Property {
 /// Not a spec operation — internal helper that batch-allocates method
 /// function objects for a prototype's property list.
 pub fn alloc_methods(
-  h: Heap,
+  h: Heap(ctx),
   function_proto: Ref,
   specs: List(#(String, NativeFn, Int)),
-) -> #(Heap, List(#(String, Property))) {
+) -> #(Heap(ctx), List(#(String, Property))) {
   list.fold(specs, #(h, []), fn(acc, spec) {
     let #(h, props) = acc
     let #(name, native, arity) = spec
@@ -196,10 +209,10 @@ pub fn alloc_methods(
 /// Batch allocate call-level native method objects (Function.call/apply/bind,
 /// Promise.then/catch, Generator.next/return/throw, etc.).
 pub fn alloc_call_methods(
-  h: Heap,
+  h: Heap(ctx),
   function_proto: Ref,
   specs: List(#(String, CallNativeFn, Int)),
-) -> #(Heap, List(#(String, Property))) {
+) -> #(Heap(ctx), List(#(String, Property))) {
   list.fold(specs, #(h, []), fn(acc, spec) {
     let #(h, props) = acc
     let #(name, native, arity) = spec
@@ -252,7 +265,7 @@ fn proto_properties(
 /// This matches V8/SpiderMonkey behavior where accessing a TDZ variable throws
 /// a ReferenceError before typeof ever runs, but our compiler may allow typeof
 /// on uninitialized bindings as a defensive measure.
-pub fn typeof_value(val: JsValue, heap: Heap) -> String {
+pub fn typeof_value(val: JsValue, heap: Heap(ctx)) -> String {
   case val {
     // Table 41 row 1: Undefined → "undefined"
     // Also handles JsUninitialized (internal TDZ sentinel, not in spec)
@@ -288,15 +301,15 @@ pub fn typeof_value(val: JsValue, heap: Heap) -> String {
 /// no read-modify-write. Both proto and constructor are written exactly once.
 /// This is the common case for most builtins.
 pub fn init_type(
-  h: Heap,
+  h: Heap(ctx),
   parent_proto: Ref,
   function_proto: Ref,
   proto_props: List(#(String, Property)),
-  ctor_fn: fn(Ref) -> NativeFnSlot,
+  ctor_fn: fn(Ref) -> NativeFnSlot(ctx),
   name: String,
   arity: Int,
   ctor_props: List(#(String, Property)),
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(ctx), BuiltinType) {
   // Reserve proto address — no data written yet
   let #(h, proto_ref) = heap.reserve(h)
   let h = heap.root(h, proto_ref)
@@ -342,11 +355,11 @@ pub fn init_type(
 /// Add a symbol-keyed property to an existing object (typically a prototype).
 /// Used after init_type to wire up Symbol.iterator, Symbol.toStringTag, etc.
 pub fn add_symbol_property(
-  h: Heap,
+  h: Heap(ctx),
   ref: Ref,
   symbol: value.SymbolId,
   prop: Property,
-) -> Heap {
+) -> Heap(ctx) {
   heap.update(h, ref, fn(slot) {
     case slot {
       ObjectSlot(symbol_properties:, ..) ->
@@ -366,15 +379,15 @@ pub fn add_symbol_property(
 /// Reads its current state, merges in proto_props + constructor, writes back.
 /// This read-modify-write is unavoidable for pre-existing protos.
 pub fn init_type_on(
-  h: Heap,
+  h: Heap(ctx),
   proto: Ref,
   function_proto: Ref,
   proto_props: List(#(String, Property)),
-  ctor_fn: fn(Ref) -> NativeFnSlot,
+  ctor_fn: fn(Ref) -> NativeFnSlot(ctx),
   name: String,
   arity: Int,
   ctor_props: List(#(String, Property)),
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(ctx), BuiltinType) {
   // Allocate constructor — proto ref already known
   let #(h, ctor_ref) =
     heap.alloc(
@@ -441,7 +454,11 @@ pub fn init_type_on(
 ///
 /// Local copy of object.make_error to avoid the import cycle
 /// (object.gleam -> builtins -> builtins/* -> object).
-fn alloc_error(h: Heap, proto: Ref, message: String) -> #(Heap, JsValue) {
+fn alloc_error(
+  h: Heap(ctx),
+  proto: Ref,
+  message: String,
+) -> #(Heap(ctx), JsValue) {
   let #(h, ref) =
     heap.alloc(
       h,
@@ -465,40 +482,40 @@ fn alloc_error(h: Heap, proto: Ref, message: String) -> #(Heap, JsValue) {
 /// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
 /// Allocates a TypeError instance. See alloc_error for spec step details.
 pub fn make_type_error(
-  h: Heap,
+  h: Heap(ctx),
   b: Builtins,
   message: String,
-) -> #(Heap, JsValue) {
+) -> #(Heap(ctx), JsValue) {
   alloc_error(h, b.type_error.prototype, message)
 }
 
 /// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
 /// Allocates a RangeError instance. See alloc_error for spec step details.
 pub fn make_range_error(
-  h: Heap,
+  h: Heap(ctx),
   b: Builtins,
   message: String,
-) -> #(Heap, JsValue) {
+) -> #(Heap(ctx), JsValue) {
   alloc_error(h, b.range_error.prototype, message)
 }
 
 /// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
 /// Allocates a ReferenceError instance. See alloc_error for spec step details.
 pub fn make_reference_error(
-  h: Heap,
+  h: Heap(ctx),
   b: Builtins,
   message: String,
-) -> #(Heap, JsValue) {
+) -> #(Heap(ctx), JsValue) {
   alloc_error(h, b.reference_error.prototype, message)
 }
 
 /// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
 /// Allocates a SyntaxError instance. See alloc_error for spec step details.
 pub fn make_syntax_error(
-  h: Heap,
+  h: Heap(ctx),
   b: Builtins,
   message: String,
-) -> #(Heap, JsValue) {
+) -> #(Heap(ctx), JsValue) {
   alloc_error(h, b.syntax_error.prototype, message)
 }
 
@@ -529,7 +546,11 @@ pub fn make_syntax_error(
 ///   (no dedicated Symbol.prototype with toString/valueOf/description yet).
 /// TODO(Deviation): BigInt falls back to OrdinaryObject with Object.prototype (no
 ///   BigInt wrapper object kind or BigInt.prototype yet).
-pub fn to_object(h: Heap, b: Builtins, val: JsValue) -> Option(#(Heap, Ref)) {
+pub fn to_object(
+  h: Heap(ctx),
+  b: Builtins,
+  val: JsValue,
+) -> Option(#(Heap(ctx), Ref)) {
   case val {
     // Table 15 row 8: Object → return argument (identity)
     JsObject(ref) -> Some(#(h, ref))
@@ -562,7 +583,11 @@ pub fn to_object(h: Heap, b: Builtins, val: JsValue) -> Option(#(Heap, Ref)) {
 /// Creates an ordinary object with the given ExoticKind (which carries the
 /// [[PrimitiveData]] internal slot, e.g. StringObject(s) = [[StringData]])
 /// and the appropriate builtin prototype.
-fn alloc_wrapper(h: Heap, kind: ExoticKind, proto: Ref) -> #(Heap, Ref) {
+fn alloc_wrapper(
+  h: Heap(ctx),
+  kind: ExoticKind(ctx),
+  proto: Ref,
+) -> #(Heap(ctx), Ref) {
   heap.alloc(
     h,
     ObjectSlot(
@@ -595,10 +620,10 @@ fn alloc_wrapper(h: Heap, kind: ExoticKind, proto: Ref) -> #(Heap, Ref) {
 ///
 /// Note: does not enforce the 2^32-1 length limit (step 2).
 pub fn alloc_array(
-  h: Heap,
+  h: Heap(ctx),
   values: List(JsValue),
   array_proto: Ref,
-) -> #(Heap, Ref) {
+) -> #(Heap(ctx), Ref) {
   // Step 1: length = number of values
   let count = list.length(values)
   // Steps 4-8: create array exotic object

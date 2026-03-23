@@ -617,9 +617,15 @@ pub type RegExpNativeFn {
 /// What's stored in NativeFunction — either a dispatch-level or call-level native.
 /// Dispatch-level natives are handled by dispatch_native (simple return value).
 /// Call-level natives are handled by call_native (need stack manipulation, VM re-entry).
-pub type NativeFnSlot {
+/// Host-level natives are closures supplied by the embedder at engine-init time.
+///
+/// The `ctx` parameter is the VM state type. It's generic here because `State`
+/// lives above value.gleam in the import DAG; it's instantiated as `State` at
+/// the state.gleam layer. Only one concrete instantiation exists.
+pub type NativeFnSlot(ctx) {
   Dispatch(NativeFn)
   Call(CallNativeFn)
+  Host(fn(List(JsValue), JsValue, ctx) -> #(ctx, Result(JsValue, JsValue)))
 }
 
 /// Identifies a dispatch-level built-in native function.
@@ -771,7 +777,8 @@ pub type VmNativeFn {
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
-pub type ExoticKind {
+/// Generic over `ctx` because NativeFunction carries a NativeFnSlot(ctx).
+pub type ExoticKind(ctx) {
   /// Plain JS object: `{}`, `new Object()`, error instances, prototypes, etc.
   OrdinaryObject
   /// JS array: `[]`, `new Array()`. `length` is tracked explicitly.
@@ -791,7 +798,7 @@ pub type ExoticKind {
   FunctionObject(func_template: FuncTemplate, env: Ref)
   /// Built-in function implemented in Gleam, not bytecode.
   /// Callable like any function but dispatches to native code.
-  NativeFunction(native: NativeFnSlot)
+  NativeFunction(native: NativeFnSlot(ctx))
   /// Promise object. The visible JS object has this kind, pointing to
   /// an internal PromiseSlot that holds state/reactions.
   PromiseObject(promise_data: Ref)
@@ -1055,11 +1062,12 @@ pub type AsyncGenRequest {
   )
 }
 
-/// What lives in a heap slot.    
-pub type HeapSlot {
+/// What lives in a heap slot.
+/// Generic over `ctx` because ObjectSlot.kind carries an ExoticKind(ctx).
+pub type HeapSlot(ctx) {
   /// Unified object slot — covers ordinary objects, arrays, and functions.
   ObjectSlot(
-    kind: ExoticKind,
+    kind: ExoticKind(ctx),
     properties: Dict(PropertyKey, Property),
     elements: JsElements,
     prototype: Option(Ref),
@@ -1171,7 +1179,7 @@ fn indent(lines: List(List(String)), indent: Int) -> String {
 }
 
 // will probably get rid of this function or move it and remake it.s
-pub fn heap_slot_to_string(slot: HeapSlot) -> String {
+pub fn heap_slot_to_string(slot: HeapSlot(ctx)) -> String {
   case slot {
     ObjectSlot(
       kind:,
@@ -1277,7 +1285,7 @@ fn refs_in_value(value: JsValue) -> List(Ref) {
 }
 
 /// Extract all refs reachable from a heap slot by walking its JsValues.
-pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
+pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
   case slot {
     ObjectSlot(
       kind:,

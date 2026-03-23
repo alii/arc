@@ -5,10 +5,10 @@
 /// Uses Erlang's `re` module (PCRE) via FFI for actual matching.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/limits
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type RegExpNativeFn, AccessorProperty, DataProperty,
   Dispatch, Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,

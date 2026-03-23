@@ -16,10 +16,10 @@ import gleam/option.{Some}
 /// Generator.prototype inherits from %IteratorPrototype% (not Object.prototype directly).
 /// Returns the Generator.prototype ref (no constructor needed).
 pub fn init(
-  h: Heap,
+  h: Heap(ctx),
   iterator_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, GeneratorBuiltin) {
+) -> #(Heap(ctx), GeneratorBuiltin) {
   let #(h, methods) =
     common.alloc_call_methods(h, function_proto, [
       #("next", GeneratorNext, 1),

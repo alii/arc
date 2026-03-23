@@ -1,8 +1,8 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/promise as builtins_promise
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArcNativeFn, type JsValue, type MailboxEvent, type PortableMessage,
   type Ref, ArcLog, ArcNative, ArcPeek, ArcPidToString, ArcReceive,

@@ -1,5 +1,5 @@
 import arc/vm/builtins/common.{type Builtins}
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/limits
 import arc/vm/opcode.{type Op}
@@ -9,6 +9,29 @@ import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/set
+
+// -- Concrete type aliases ----------------------------------------------------
+// heap.gleam and value.gleam are generic over `ctx` so NativeFnSlot can carry
+// host-function closures typed against State without an import cycle. This is
+// where the recursive knot gets tied — State refers to itself through Heap.
+
+pub type Heap =
+  heap.Heap(State)
+
+pub type HeapSlot =
+  value.HeapSlot(State)
+
+pub type ExoticKind =
+  value.ExoticKind(State)
+
+pub type NativeFnSlot =
+  value.NativeFnSlot(State)
+
+/// Signature for host-provided native functions installed via engine.define_fn
+/// or engine.define_namespace. Receives (args, this, state), returns
+/// (new_state, Ok(return_value) | Error(thrown_value)).
+pub type HostFn =
+  fn(List(JsValue), JsValue, State) -> #(State, Result(JsValue, JsValue))
 
 /// A single call frame on the VM call stack.
 pub type CallFrame {

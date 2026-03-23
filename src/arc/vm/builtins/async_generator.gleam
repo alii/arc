@@ -15,10 +15,10 @@ import gleam/option.{Some}
 /// Set up AsyncGenerator.prototype with .next/.return/.throw.
 /// Inherits from %AsyncIteratorPrototype%.
 pub fn init(
-  h: Heap,
+  h: Heap(ctx),
   async_iterator_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, GeneratorBuiltin) {
+) -> #(Heap(ctx), GeneratorBuiltin) {
   let #(h, methods) =
     common.alloc_call_methods(h, function_proto, [
       #("next", AsyncGeneratorNext, 1),

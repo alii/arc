@@ -19,8 +19,9 @@ import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/state.{type Heap}
 import arc/vm/value.{JsObject, JsUndefined, Named, ObjectSlot, OrdinaryObject}
 import gleam/dict
 import gleam/list

@@ -15,7 +15,11 @@ import gleam/option.{Some}
 
 /// Set up Symbol constructor function with well-known symbol properties.
 /// Returns #(heap, constructor_ref).
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+pub fn init(
+  h: Heap(ctx),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap(ctx), Ref) {
   // Allocate Symbol.for and Symbol.keyFor static method function objects
   let #(h, for_ref) =
     heap.alloc(

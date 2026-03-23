@@ -12,9 +12,10 @@ import arc/internal/erlang
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/exec/entry
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
+import arc/vm/state.{type Heap}
 import arc/vm/value.{
   type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined,
   ObjectSlot, OrdinaryObject,

@@ -10,9 +10,9 @@
 /// elements in the collection.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, AccessorProperty,
   Dispatch, JsBool, JsNumber, JsObject, JsUndefined, MapConstructor, MapNative,

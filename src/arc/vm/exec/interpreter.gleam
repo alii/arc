@@ -7,7 +7,7 @@ import arc/vm/completion.{
 import arc/vm/exec/call
 import arc/vm/exec/event_loop
 import arc/vm/exec/generators
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/opcode.{
@@ -31,9 +31,9 @@ import arc/vm/ops/operators
 import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
-  type State, type StepResult, type VmError, Awaited, Done,
-  LocalIndexOutOfBounds, SavedFrame, StackUnderflow, State, StepVmError, Thrown,
-  TryFrame, Unimplemented, Yielded,
+  type Heap, type NativeFnSlot, type State, type StepResult, type VmError,
+  Awaited, Done, LocalIndexOutOfBounds, SavedFrame, StackUnderflow, State,
+  StepVmError, Thrown, TryFrame, Unimplemented, Yielded,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
@@ -3106,7 +3106,7 @@ fn call_function(
 /// Thin wrapper: delegates to call.call_native with execute_inner/unwind_to_catch/dispatch_native.
 fn call_native(
   state: State,
-  native: value.NativeFnSlot,
+  native: NativeFnSlot,
   args: List(JsValue),
   rest_stack: List(JsValue),
   this: JsValue,

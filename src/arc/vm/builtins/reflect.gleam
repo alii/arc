@@ -1,11 +1,11 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/object as builtins_object
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/object
 import arc/vm/ops/property
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type ReflectNativeFn, JsBool, JsNull, JsObject,
   JsString, JsSymbol, JsUndefined, ObjectSlot, OrdinaryObject, ReflectApply,

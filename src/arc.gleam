@@ -6,9 +6,9 @@ import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
 import arc/vm/exec/entry
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/state
+import arc/vm/state.{type Heap}
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, DataProperty, FunctionObject,
   GeneratorObject, NativeFunction, ObjectSlot, OrdinaryObject, PidObject,

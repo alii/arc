@@ -8,10 +8,10 @@ import arc/vm/completion.{
 }
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/realm
-import arc/vm/state.{type State, type VmError, State}
+import arc/vm/state.{type Heap, type State, type VmError, State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, JsObject, JsUndefined,
 }

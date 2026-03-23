@@ -1,7 +1,7 @@
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/opcode
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type HeapSlot, type State, State}
 import arc/vm/value.{
   type JsElements, type JsValue, type Property, type PropertyKey, type Ref,
   type SymbolId, AccessorProperty, ArrayObject, DataProperty, Finite,
@@ -489,7 +489,7 @@ fn array_set_length(
   h: Heap,
   ref: Ref,
   val: JsValue,
-  slot: value.HeapSlot,
+  slot: HeapSlot,
   old_length: Int,
 ) -> #(Heap, Bool) {
   // §10.4.2.4 steps 1-4: Coerce value to valid uint32 length.
@@ -574,7 +574,7 @@ fn set_string_property(
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
-  slot: value.HeapSlot,
+  slot: HeapSlot,
 ) -> #(Heap, Bool) {
   case slot {
     ObjectSlot(properties:, extensible:, ..) ->
@@ -857,7 +857,7 @@ fn delete_string_property(
   h: Heap,
   ref: Ref,
   key: PropertyKey,
-  slot: value.HeapSlot,
+  slot: HeapSlot,
 ) -> #(Heap, Bool) {
   case slot {
     ObjectSlot(properties:, ..) ->

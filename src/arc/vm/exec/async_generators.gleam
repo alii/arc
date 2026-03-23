@@ -18,11 +18,12 @@ import arc/vm/completion.{
 }
 import arc/vm/exec/generators
 import arc/vm/exec/promises
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/state.{
-  type State, type StepResult, State, StepVmError, Unimplemented,
+  type Heap, type HeapSlot, type State, type StepResult, State, StepVmError,
+  Unimplemented,
 }
 import arc/vm/value.{
   type AsyncGenCompletion, type AsyncGenRequest, type JsValue, type Ref,
@@ -565,17 +566,11 @@ fn read_slot(h: Heap, data_ref: Ref) -> Option(AsyncGenData) {
   }
 }
 
-fn slot_with_state(
-  gen: AsyncGenData,
-  s: value.AsyncGeneratorState,
-) -> value.HeapSlot {
+fn slot_with_state(gen: AsyncGenData, s: value.AsyncGeneratorState) -> HeapSlot {
   slot_with(gen, s, gen.queue)
 }
 
-fn slot_with_queue(
-  gen: AsyncGenData,
-  q: List(AsyncGenRequest),
-) -> value.HeapSlot {
+fn slot_with_queue(gen: AsyncGenData, q: List(AsyncGenRequest)) -> HeapSlot {
   slot_with(gen, gen.gen_state, q)
 }
 
@@ -583,7 +578,7 @@ fn slot_with(
   gen: AsyncGenData,
   s: value.AsyncGeneratorState,
   q: List(AsyncGenRequest),
-) -> value.HeapSlot {
+) -> HeapSlot {
   AsyncGeneratorSlot(
     gen_state: s,
     queue: q,

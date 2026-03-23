@@ -1,4 +1,4 @@
-import arc/vm/heap.{type Heap}
+import arc/vm/state.{type Heap}
 import arc/vm/value.{type JsValue}
 
 /// JS-level completion -- either normal return or uncaught exception.
