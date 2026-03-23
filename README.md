@@ -1,39 +1,31 @@
-> [!NOTE]  
-> arc is an extremely new and __highly experimental__ research project. Tread with caution!
+> [!NOTE]
+> arc is an **extremely early** research project, tread carefully!
 
 # arc ⌒
 
-(Highly experimental) JavaScript on the BEAM
+JavaScript on the BEAM.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./.github/js.png">
   <img alt="js" src="./.github/js-light.png">
 </picture>
 
-## Development
+Traditionally, JavaScript does concurrency with one event loop and a shared heap. The BEAM does it with isolated processes that share nothing. Arc is an experiment in running the former on the latter.
 
-```sh
-gleam test  # Run the tests
-```
+Arc is an entire JavaScript engine written in [Gleam](https://gleam.run). Every `Arc.spawn` is a real Erlang process. You can have millions of them, each with its own heap - no stop-the-world garbage collection, and a crash in one leaves the others untouched. These are guarantees JavaScript has never had.
 
-### Running test262
-
-```sh
-# Run the full test262 execution suite
-TEST262_EXEC=1 gleam test
-
-# Also write results to a JSON file
-TEST262_EXEC=1 RESULTS_FILE=results.json gleam test
-
-# Run parser-only test262 (faster, parse conformance only)
-TEST262=1 gleam test
-```
+Tested against [test262](https://github.com/tc39/test262) on every commit:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/test262/conformance-dark.png">
   <img alt="test262 conformance chart" src=".github/test262/conformance.png">
 </picture>
 
-#### A note on unhandled promise rejections:
+---
 
-Arc implements `HostPromiseRejectionTracker` from the ES spec. Unhandled rejections are reported to stderr after each microtask flush. Currently they are logged as warnings but are not fatal (unlike Node.js v15+ / QuickJS which exit on the first one). This will almost certainly change in the future.
+```sh
+gleam run -- file.js       # run a script
+gleam test                 # unit tests
+TEST262_EXEC=1 gleam test  # full test262 suite
+TEST262=1 gleam test       # parser-only test262
+```
