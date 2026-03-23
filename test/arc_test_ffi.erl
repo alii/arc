@@ -239,6 +239,12 @@ collect(N, Ref, Passed, Failed, Total, Pending) ->
         {Ref, Name, {error, {Class, Reason, Stack}}} ->
             Done = Total - N + 1,
             NewPending = maps:remove(Name, Pending),
+            %% Print test262 failures immediately so they survive job
+            %% cancellation (finish() only runs at the end).
+            case binary:match(Name, <<"test262/">>) of
+                nomatch -> ok;
+                _ -> io:format("~n  FAIL ~ts: ~ts~n", [Name, to_list(Reason)])
+            end,
             maybe_progress(Done, Total, Passed, length(Failed) + 1),
             collect(N - 1, Ref, Passed, [{Name, Class, Reason, Stack} | Failed], Total, NewPending)
     after 10000 ->
@@ -333,7 +339,6 @@ is_slow_test(Name) ->
         <<"decodeURI/S15.1.3.1_A2.5_T1">>,
         <<"decodeURIComponent/S15.1.3.2_A2.5_T1">>,
         <<"encodeURI/S15.1.3.3_A2.3_T1">>,
-        <<"encodeURIComponent/S15.1.3.4_A2.3_T1">>,
-        <<"sm/regress/regress-610026">>
+        <<"encodeURIComponent/S15.1.3.4_A2.3_T1">>
     ],
     lists:any(fun(P) -> binary:match(Name, P) =/= nomatch end, Slow).

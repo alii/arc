@@ -24020,7 +24020,6 @@ staging/sm/regress/regress-596805-2.js
 staging/sm/regress/regress-597945-1.js
 staging/sm/regress/regress-598176.js
 staging/sm/regress/regress-601399.js
-staging/sm/regress/regress-610026.js
 staging/sm/regress/regress-617405-1.js
 staging/sm/regress/regress-617405-2.js
 staging/sm/regress/regress-618572.js
