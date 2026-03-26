@@ -295,14 +295,10 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
                 pc: state.pc + 1,
               )
             YieldStar ->
-              State(
-                ..state,
-                heap:,
-                stack: case state.stack {
-                  [_arg, ..rest] -> rest
-                  [] -> []
-                },
-              )
+              State(..state, heap:, stack: case state.stack {
+                [_arg, ..rest] -> rest
+                [] -> []
+              })
             _ -> State(..state, heap:, pc: state.pc + 1)
           }
           Ok(#(YieldCompletion(yielded_value, heap), suspended_state))
@@ -2976,12 +2972,7 @@ fn step_generators(
       case state.stack {
         [arg, JsObject(iter_ref) as iter, ..rest] -> {
           use #(next_fn, state) <- result.try(
-            state.rethrow(object.get_value(
-              state,
-              iter_ref,
-              Named("next"),
-              iter,
-            )),
+            state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
           )
           use #(res, state) <- result.try(
             state.rethrow(state.call(state, next_fn, iter, [arg])),
@@ -2989,20 +2980,10 @@ fn step_generators(
           case res {
             JsObject(rref) -> {
               use #(done, state) <- result.try(
-                state.rethrow(object.get_value(
-                  state,
-                  rref,
-                  Named("done"),
-                  res,
-                )),
+                state.rethrow(object.get_value(state, rref, Named("done"), res)),
               )
               use #(val, state) <- result.try(
-                state.rethrow(object.get_value(
-                  state,
-                  rref,
-                  Named("value"),
-                  res,
-                )),
+                state.rethrow(object.get_value(state, rref, Named("value"), res)),
               )
               case value.is_truthy(done) {
                 True ->
