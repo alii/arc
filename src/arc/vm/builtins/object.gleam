@@ -2,6 +2,7 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg}
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -28,6 +29,47 @@ import gleam/string
 
 /// V8/Node's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
+
+/// Resolved ToPropertyKey result — unifies string and symbol keys for
+/// apply_descriptor so it can look up/write to the right dict without
+/// threading two code paths through the validation logic.
+type DefineKey {
+  StringKey(pkey: value.PropertyKey, display: String)
+  SymbolKey(sym: value.SymbolId)
+}
+
+/// ToPropertyKey (§7.1.19) — resolves a JsValue to either a SymbolId or a
+/// canonical string key. CPS so callers can `use` before `case this`, preserving
+/// spec ordering (hasOwnProperty does ToPropertyKey step 1, ToObject step 2).
+///
+/// Per spec: ToPrimitive(argument, string) first, THEN check if the result is
+/// a Symbol. Covers `{[Symbol.toPrimitive]: () => sym}` used as a key.
+fn try_to_property_key(
+  state: State,
+  key_val: JsValue,
+  cont: fn(DefineKey, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce.to_primitive(state, key_val, coerce.StringHint) {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(JsSymbol(sym), state)) -> cont(SymbolKey(sym), state)
+    Ok(#(prim, state)) -> {
+      use s, state <- state.try_to_string(state, prim)
+      cont(StringKey(value.canonical_key(s), s), state)
+    }
+  }
+}
+
+/// [[GetOwnProperty]] dispatching on a resolved DefineKey.
+fn get_own_property_by_key(
+  heap: Heap,
+  ref: Ref,
+  key: DefineKey,
+) -> Option(value.Property) {
+  case key {
+    SymbolKey(sym) -> object.get_own_symbol_property(heap, ref, sym)
+    StringKey(pkey:, ..) -> object.get_own_property(heap, ref, pkey)
+  }
+}
 
 /// CPS wrapper for `object.get_value`. Use with `use` syntax:
 ///   use val, state <- try_get(state, ref, key, receiver)
@@ -218,15 +260,15 @@ fn get_own_property_descriptor(
     [t] -> #(t, JsUndefined)
     [] -> #(JsUndefined, JsUndefined)
   }
+  // Step 2: Let key be ? ToPropertyKey(P). (Spec orders this after step 1
+  // ToObject, but since our ToObject is a case match with no side effects
+  // before the null/undefined throw, resolving the key first is observably
+  // equivalent and keeps the code flat.)
+  use key, state <- try_to_property_key(state, key_val)
   case target {
-    JsObject(ref) -> {
-      // Step 2: Let key be ? ToPropertyKey(P).
-      // (We use ToString here; spec uses ToPropertyKey which also handles Symbols.)
-      use key_str, state <- state.try_to_string(state, key_val)
+    JsObject(ref) ->
       // Step 3: Let desc be ? obj.[[GetOwnProperty]](key).
-      case
-        object.get_own_property(state.heap, ref, value.canonical_key(key_str))
-      {
+      case get_own_property_by_key(state.heap, ref, key) {
         Some(prop) -> {
           // Step 4: Return FromPropertyDescriptor(desc).
           // (desc is not undefined, so we build a descriptor object.)
@@ -237,12 +279,14 @@ fn get_own_property_descriptor(
         // Step 4: desc is undefined, return undefined.
         None -> #(state, Ok(JsUndefined))
       }
-    }
     // Step 1: ToObject throws TypeError for null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: index properties + "length" are own properties.
     JsString(s) -> {
-      use key_str, state <- state.try_to_string(state, key_val)
+      let key_str = case key {
+        StringKey(display:, ..) -> display
+        SymbolKey(_) -> ""
+      }
       let len = string.length(s)
       case key_str == "length" {
         True -> {
@@ -372,15 +416,12 @@ fn define_property(
 ) -> #(State, Result(JsValue, JsValue)) {
   case args {
     [JsObject(ref) as obj, key_val, JsObject(desc_ref), ..] -> {
-      // Step 2: Let key be ? ToPropertyKey(P).
-      // (Uses ToString; spec uses ToPropertyKey which also handles Symbols.)
-      use key_str, state <- state.try_to_string(state, key_val)
-      // Steps 3-4: ToPropertyDescriptor + DefinePropertyOrThrow
-      // (apply_descriptor combines both steps.)
+      // Steps 2-4: ToPropertyKey + ToPropertyDescriptor + DefinePropertyOrThrow
+      // (apply_descriptor combines all three steps.)
       use state <- state.try_state(apply_descriptor(
         state,
         ref,
-        key_str,
+        key_val,
         desc_ref,
       ))
       // Step 5: Return O.
@@ -416,9 +457,17 @@ fn define_property(
 pub fn apply_descriptor(
   state: State,
   target_ref: Ref,
-  key: String,
+  key_val: JsValue,
   desc_ref: Ref,
 ) -> Result(State, #(JsValue, State)) {
+  // ToPropertyKey (§7.1.19): Symbol → symbol key, else ToString.
+  use #(dkey, state) <- result.try(case key_val {
+    JsSymbol(sym) -> Ok(#(SymbolKey(sym), state))
+    _ -> {
+      use #(s, state) <- result.map(state.to_string(state, key_val))
+      #(StringKey(value.canonical_key(s), s), state)
+    }
+  })
   let desc_obj = JsObject(desc_ref)
   // ToPropertyDescriptor steps 3-8: Read fields via [[Get]] (calls getters).
   // Step 7: If Obj has "get", let getter = Get(Obj, "get").
@@ -514,8 +563,14 @@ pub fn apply_descriptor(
       prototype:,
       extensible:,
     )) -> {
-      let pkey = value.canonical_key(key)
-      let existing = dict.get(properties, pkey)
+      let existing = case dkey {
+        StringKey(pkey:, ..) -> dict.get(properties, pkey)
+        SymbolKey(sym:) -> dict.get(symbol_properties, sym)
+      }
+      let key = case dkey {
+        StringKey(display:, ..) -> display
+        SymbolKey(_) -> "[Symbol]"
+      }
 
       // §10.1.6.3 step 2: If property doesn't exist and object is not extensible, reject.
       use Nil <- result.try(case existing, extensible {
@@ -727,15 +782,24 @@ pub fn apply_descriptor(
         }
       }
 
-      // Write the new/updated property to the object.
-      let new_props = dict.insert(properties, pkey, new_prop)
+      // Write the new/updated property to the right dict.
+      let #(properties, symbol_properties) = case dkey {
+        StringKey(pkey:, ..) -> #(
+          dict.insert(properties, pkey, new_prop),
+          symbol_properties,
+        )
+        SymbolKey(sym:) -> #(
+          properties,
+          dict.insert(symbol_properties, sym, new_prop),
+        )
+      }
       let h =
         heap.write(
           state.heap,
           target_ref,
           ObjectSlot(
             kind:,
-            properties: new_props,
+            properties:,
             symbol_properties:,
             elements:,
             prototype:,
@@ -1030,8 +1094,6 @@ fn string_index_keys(i: Int, len: Int) -> List(JsValue) {
 ///   4. If desc is undefined, return false.
 ///   5. Return true.
 ///
-/// TODO(Deviation): ToPropertyKey is approximated by ToString — symbol
-/// arguments are not yet handled as property keys.
 fn has_own_property(
   this: JsValue,
   args: List(JsValue),
@@ -1042,36 +1104,31 @@ fn has_own_property(
     [] -> JsUndefined
   }
   // Step 1: Let P be ? ToPropertyKey(V).
-  use key_str, state <- state.try_to_string(state, key_val)
+  use key, state <- try_to_property_key(state, key_val)
   case this {
     // Step 2: Let O be ? ToObject(this value).
     // Step 3: Return ? HasOwnProperty(O, P).
-    JsObject(ref) -> {
-      let result = case
-        object.get_own_property(state.heap, ref, value.canonical_key(key_str))
-      {
-        Some(_) -> JsBool(True)
-        None -> JsBool(False)
-      }
-      #(state, Ok(result))
-    }
+    JsObject(ref) -> #(
+      state,
+      Ok(JsBool(option.is_some(get_own_property_by_key(state.heap, ref, key)))),
+    )
     // Step 2: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: own keys are index chars + "length"
-    JsString(s) -> {
-      let len = string.length(s)
-      let result = case key_str == "length" {
-        True -> JsBool(True)
-        False ->
-          case int.parse(key_str) {
-            Ok(i) if i >= 0 && i < len -> JsBool(True)
-            _ -> JsBool(False)
-          }
-      }
-      #(state, Ok(result))
-    }
+    JsString(s) -> #(state, Ok(JsBool(string_own_key(s, key))))
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsBool(False)))
+  }
+}
+
+/// Whether a DefineKey names an own property on a string primitive — only
+/// "length" and valid indices; symbol keys are never own on string wrappers.
+fn string_own_key(s: String, key: DefineKey) -> Bool {
+  case key {
+    SymbolKey(_) -> False
+    StringKey(pkey: Named("length"), ..) -> True
+    StringKey(pkey: Index(i), ..) -> i >= 0 && i < string.length(s)
+    StringKey(pkey: Named(_), ..) -> False
   }
 }
 
@@ -1083,8 +1140,6 @@ fn has_own_property(
 ///   4. If desc is undefined, return false.
 ///   5. Return desc.[[Enumerable]].
 ///
-/// TODO(Deviation): ToPropertyKey is approximated by ToString — symbol
-/// keys are not yet handled as property keys.
 fn property_is_enumerable(
   this: JsValue,
   args: List(JsValue),
@@ -1095,16 +1150,11 @@ fn property_is_enumerable(
     [] -> JsUndefined
   }
   // Step 1: Let P be ? ToPropertyKey(V).
-  use key_str, state <- state.try_to_string(state, key_val)
+  use key, state <- try_to_property_key(state, key_val)
   case this {
     JsObject(ref) -> {
-      // Step 2: Let O be ? ToObject(this value).
-      // Step 3: Let desc be ? O.[[GetOwnProperty]](P).
-      // Steps 4-5: If desc is undefined return false, else return
-      //   desc.[[Enumerable]].
-      let result = case
-        object.get_own_property(state.heap, ref, value.canonical_key(key_str))
-      {
+      // Steps 3-5: [[GetOwnProperty]] → desc.[[Enumerable]] or false.
+      let result = case get_own_property_by_key(state.heap, ref, key) {
         Some(DataProperty(enumerable: e, ..))
         | Some(AccessorProperty(enumerable: e, ..)) -> JsBool(e)
         _ -> JsBool(False)
@@ -1113,15 +1163,14 @@ fn property_is_enumerable(
     }
     // Step 2: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // String primitives: index properties are own+enumerable.
+    // String primitives: index properties are own+enumerable,
     // "length" is own but non-enumerable.
     JsString(s) -> {
-      let len = string.length(s)
-      let result = case int.parse(key_str) {
-        Ok(i) if i >= 0 && i < len -> JsBool(True)
-        _ -> JsBool(False)
+      let result = case key {
+        StringKey(pkey: Index(i), ..) -> i >= 0 && i < string.length(s)
+        _ -> False
       }
-      #(state, Ok(result))
+      #(state, Ok(JsBool(result)))
     }
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsBool(False)))
@@ -1626,7 +1675,7 @@ fn define_props_loop(
           use state <- state.try_state(apply_descriptor(
             state,
             target_ref,
-            key,
+            JsString(key),
             desc_ref,
           ))
           define_props_loop(state, target_ref, props_ref, rest)
@@ -1907,8 +1956,6 @@ fn is(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue)) {
 /// This differs from Object.prototype.hasOwnProperty which does ToPropertyKey
 /// first (§20.1.3.2 step 1) then ToObject (step 2).
 ///
-/// TODO(Deviation): ToPropertyKey is approximated by ToString — symbol keys
-/// are not yet handled as property keys.
 fn has_own(
   args: List(JsValue),
   state: State,
@@ -1921,32 +1968,21 @@ fn has_own(
   case target {
     JsObject(ref) -> {
       // Step 1: ToObject(O) — identity for objects.
-      // Step 2: Let key be ? ToPropertyKey(P).
-      use key_str, state <- state.try_to_string(state, key_val)
-      // Step 3: Return ? HasOwnProperty(obj, key).
-      let result = case
-        object.get_own_property(state.heap, ref, value.canonical_key(key_str))
-      {
-        Some(_) -> JsBool(True)
-        None -> JsBool(False)
-      }
-      #(state, Ok(result))
+      // Steps 2-3: ToPropertyKey + HasOwnProperty(obj, key).
+      use key, state <- try_to_property_key(state, key_val)
+      #(
+        state,
+        Ok(
+          JsBool(option.is_some(get_own_property_by_key(state.heap, ref, key))),
+        ),
+      )
     }
     // Step 1: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: own keys are index chars + "length"
     JsString(s) -> {
-      use key_str, state <- state.try_to_string(state, key_val)
-      let len = string.length(s)
-      let result = case key_str == "length" {
-        True -> JsBool(True)
-        False ->
-          case int.parse(key_str) {
-            Ok(i) if i >= 0 && i < len -> JsBool(True)
-            _ -> JsBool(False)
-          }
-      }
-      #(state, Ok(result))
+      use key, state <- try_to_property_key(state, key_val)
+      #(state, Ok(JsBool(string_own_key(s, key))))
     }
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsBool(False)))

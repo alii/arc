@@ -1216,7 +1216,9 @@ pub fn call_native(
           ))
       }
     }
-    // String() constructor -- uses full ToString (ToPrimitive for objects)
+    // String() constructor -- uses full ToString (ToPrimitive for objects).
+    // §22.1.1.1 step 1.a: if value is a Symbol, return SymbolDescriptiveString
+    // (does NOT throw — only implicit ToString on a Symbol throws).
     value.Call(value.StringConstructor) ->
       case args {
         [] ->
@@ -1227,6 +1229,17 @@ pub fn call_native(
               pc: state.pc + 1,
             ),
           )
+        [value.JsSymbol(id), ..] -> {
+          let s =
+            builtins_symbol.descriptive_string(id, state.symbol_descriptions)
+          Ok(
+            State(
+              ..state,
+              stack: [JsString(s), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
         [val, ..] ->
           case coerce.js_to_string(state, val) {
             Ok(#(s, new_state)) ->
@@ -1367,6 +1380,32 @@ pub fn do_construct(
         dispatch_fn,
       )
     }
+    // `new String(sym)` must throw (§22.1.1.1 — the Symbol→descriptive-string
+    // special case only applies when NewTarget is undefined). Intercept here so
+    // the Symbol arg hits ToString and throws, instead of the non-throwing path
+    // in call_native's StringConstructor handler.
+    Some(ObjectSlot(
+      kind: NativeFunction(value.Call(value.StringConstructor)),
+      ..,
+    )) ->
+      case args {
+        [value.JsSymbol(_), ..] ->
+          state.rethrow(coerce.thrown_type_error(
+            state,
+            "Cannot convert a Symbol value to a string",
+          ))
+        _ ->
+          call_native(
+            state,
+            value.Call(value.StringConstructor),
+            args,
+            rest_stack,
+            JsUndefined,
+            execute_inner,
+            unwind_to_catch,
+            dispatch_fn,
+          )
+      }
     Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
       call_native(
         state,

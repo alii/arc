@@ -71,6 +71,27 @@ pub fn get_value_of(
   }
 }
 
+/// Symbol-keyed variant of get_value_of — delegates to the primitive's
+/// prototype for symbol lookups (e.g. `"str"[Symbol.iterator]`).
+pub fn get_symbol_value_of(
+  state: State,
+  val: JsValue,
+  sym: SymbolId,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case val {
+    JsObject(ref) -> get_symbol_value(state, ref, sym, val)
+    JsString(_) ->
+      get_symbol_value(state, state.builtins.string.prototype, sym, val)
+    JsNumber(_) ->
+      get_symbol_value(state, state.builtins.number.prototype, sym, val)
+    value.JsBool(_) ->
+      get_symbol_value(state, state.builtins.boolean.prototype, sym, val)
+    value.JsSymbol(_) ->
+      get_symbol_value(state, state.builtins.object.prototype, sym, val)
+    _ -> Ok(#(value.JsUndefined, state))
+  }
+}
+
 /// **OrdinaryGet(O, P, Receiver)** — ES2024 §10.1.8.1
 ///
 /// Called by [[Get]](P, Receiver) (§10.1.8) which simply delegates here for
@@ -747,6 +768,95 @@ pub fn define_accessor(
   }
 }
 
+/// Symbol-keyed variant of define_accessor — used by DefineAccessorComputed
+/// when the computed key is a Symbol (e.g. `{ get [Symbol.iterator]() {} }`).
+pub fn define_symbol_accessor(
+  heap: Heap,
+  ref: Ref,
+  sym: SymbolId,
+  func: JsValue,
+  kind: opcode.AccessorKind,
+) -> Heap {
+  use slot <- heap.update(heap, ref)
+  case slot {
+    ObjectSlot(symbol_properties:, ..) -> {
+      let existing = dict.get(symbol_properties, sym)
+      let new_prop = case kind {
+        opcode.Getter ->
+          case existing {
+            Ok(AccessorProperty(set: s, ..)) ->
+              AccessorProperty(
+                get: Some(func),
+                set: s,
+                enumerable: True,
+                configurable: True,
+              )
+            _ ->
+              AccessorProperty(
+                get: Some(func),
+                set: None,
+                enumerable: True,
+                configurable: True,
+              )
+          }
+        opcode.Setter ->
+          case existing {
+            Ok(AccessorProperty(get: g, ..)) ->
+              AccessorProperty(
+                get: g,
+                set: Some(func),
+                enumerable: True,
+                configurable: True,
+              )
+            _ ->
+              AccessorProperty(
+                get: None,
+                set: Some(func),
+                enumerable: True,
+                configurable: True,
+              )
+          }
+      }
+      ObjectSlot(
+        ..slot,
+        symbol_properties: dict.insert(symbol_properties, sym, new_prop),
+      )
+    }
+    _ -> slot
+  }
+}
+
+/// §10.1.5.1 OrdinaryGetOwnProperty ( O, P ) — symbol-keyed variant.
+/// Returns the own property descriptor for a symbol key, or None.
+pub fn get_own_symbol_property(
+  heap: Heap,
+  ref: Ref,
+  sym: SymbolId,
+) -> Option(Property) {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(symbol_properties:, ..)) ->
+      dict.get(symbol_properties, sym) |> option.from_result
+    _ -> None
+  }
+}
+
+/// §10.1.7.1 OrdinaryHasProperty ( O, P ) — symbol-keyed variant.
+/// Walks the prototype chain looking for a symbol key.
+pub fn has_symbol_property(heap: Heap, ref: Ref, sym: SymbolId) -> Bool {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
+      case dict.has_key(symbol_properties, sym) {
+        True -> True
+        False ->
+          case prototype {
+            Some(proto_ref) -> has_symbol_property(heap, proto_ref, sym)
+            None -> False
+          }
+      }
+    _ -> False
+  }
+}
+
 /// §10.1.7 [[HasProperty]] ( P ) / §10.1.7.1 OrdinaryHasProperty ( O, P )
 ///
 /// Step 1: Let hasOwn be ? O.[[GetOwnProperty]](P).
@@ -1287,7 +1397,7 @@ pub fn set_symbol_value(
 /// TODO(Deviation): no ValidateAndApplyPropertyDescriptor checks (extensibility,
 /// existing property compatibility). Full descriptor validation needed for
 /// Object.defineProperty with symbol keys.
-fn define_symbol_property(
+pub fn define_symbol_property(
   heap: Heap,
   ref: Ref,
   key: SymbolId,

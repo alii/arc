@@ -359,6 +359,7 @@ built-ins/Array/prototype/concat/S15.4.4.4_A2_T1.js
 built-ins/Array/prototype/concat/S15.4.4.4_A2_T2.js
 built-ins/Array/prototype/concat/S15.4.4.4_A3_T1.js
 built-ins/Array/prototype/concat/create-non-array.js
+built-ins/Array/prototype/concat/create-proto-from-ctor-realm-array.js
 built-ins/Array/prototype/concat/create-species-null.js
 built-ins/Array/prototype/concat/create-species-undef.js
 built-ins/Array/prototype/concat/create-species-with-non-writable-property-spreadable.js
@@ -742,6 +743,7 @@ built-ins/Array/prototype/filter/15.4.4.20-9-c-iii-8.js
 built-ins/Array/prototype/filter/15.4.4.20-9-c-iii-9.js
 built-ins/Array/prototype/filter/call-with-boolean.js
 built-ins/Array/prototype/filter/create-non-array.js
+built-ins/Array/prototype/filter/create-proto-from-ctor-realm-array.js
 built-ins/Array/prototype/filter/create-species-null.js
 built-ins/Array/prototype/filter/create-species-undef.js
 built-ins/Array/prototype/filter/length.js
@@ -1468,12 +1470,14 @@ built-ins/Array/prototype/map/15.4.4.19-9-9.js
 built-ins/Array/prototype/map/call-with-boolean.js
 built-ins/Array/prototype/map/create-non-array-invalid-len.js
 built-ins/Array/prototype/map/create-non-array.js
+built-ins/Array/prototype/map/create-proto-from-ctor-realm-array.js
 built-ins/Array/prototype/map/create-species-null.js
 built-ins/Array/prototype/map/create-species-undef.js
 built-ins/Array/prototype/map/length.js
 built-ins/Array/prototype/map/name.js
 built-ins/Array/prototype/map/prop-desc.js
 built-ins/Array/prototype/map/target-array-with-non-writable-property.js
+built-ins/Array/prototype/methods-called-as-functions.js
 built-ins/Array/prototype/pop/S15.4.4.6_A1.1_T1.js
 built-ins/Array/prototype/pop/S15.4.4.6_A1.2_T1.js
 built-ins/Array/prototype/pop/S15.4.4.6_A2_T1.js
@@ -1958,6 +1962,7 @@ built-ins/Array/prototype/slice/S15.4.4.10_A4_T1.js
 built-ins/Array/prototype/slice/call-with-boolean.js
 built-ins/Array/prototype/slice/create-non-array-invalid-len.js
 built-ins/Array/prototype/slice/create-non-array.js
+built-ins/Array/prototype/slice/create-proto-from-ctor-realm-array.js
 built-ins/Array/prototype/slice/create-species-null.js
 built-ins/Array/prototype/slice/create-species-undef.js
 built-ins/Array/prototype/slice/length.js
@@ -2213,6 +2218,7 @@ built-ins/Array/prototype/splice/S15.4.4.12_A6.1_T3.js
 built-ins/Array/prototype/splice/called_with_one_argument.js
 built-ins/Array/prototype/splice/create-non-array-invalid-len.js
 built-ins/Array/prototype/splice/create-non-array.js
+built-ins/Array/prototype/splice/create-proto-from-ctor-realm-array.js
 built-ins/Array/prototype/splice/create-species-null.js
 built-ins/Array/prototype/splice/create-species-undef.js
 built-ins/Array/prototype/splice/length.js
@@ -2237,6 +2243,7 @@ built-ins/Array/prototype/toReversed/zero-or-one-element.js
 built-ins/Array/prototype/toSorted/comparefn-called-after-get-elements.js
 built-ins/Array/prototype/toSorted/comparefn-controls-sort.js
 built-ins/Array/prototype/toSorted/comparefn-default.js
+built-ins/Array/prototype/toSorted/comparefn-not-a-function.js
 built-ins/Array/prototype/toSorted/comparefn-stop-after-error.js
 built-ins/Array/prototype/toSorted/frozen-this-value.js
 built-ins/Array/prototype/toSorted/ignores-species.js
@@ -2314,6 +2321,7 @@ built-ins/Array/prototype/with/name.js
 built-ins/Array/prototype/with/negative-fractional-index-truncated-to-zero.js
 built-ins/Array/prototype/with/property-descriptor.js
 built-ins/Array/prototype/with/this-value-nullish.js
+built-ins/ArrayIteratorPrototype/Symbol.toStringTag/property-descriptor.js
 built-ins/ArrayIteratorPrototype/Symbol.toStringTag/value-direct.js
 built-ins/ArrayIteratorPrototype/Symbol.toStringTag/value-from-to-string.js
 built-ins/ArrayIteratorPrototype/next/args-mapped-expansion-after-exhaustion.js
@@ -2420,6 +2428,7 @@ built-ins/Error/prototype/S15.11.4_A4.js
 built-ins/Error/prototype/constructor/prop-desc.js
 built-ins/Error/prototype/message/prop-desc.js
 built-ins/Error/prototype/name/prop-desc.js
+built-ins/Error/prototype/no-error-data.js
 built-ins/Error/prototype/toString/15.11.4.4-10-1.js
 built-ins/Error/prototype/toString/15.11.4.4-6-1.js
 built-ins/Error/prototype/toString/15.11.4.4-6-2.js
@@ -2428,6 +2437,7 @@ built-ins/Error/prototype/toString/15.11.4.4-8-2.js
 built-ins/Error/prototype/toString/15.11.4.4-9-1.js
 built-ins/Error/prototype/toString/S15.11.4.4_A2.js
 built-ins/Error/prototype/toString/called-as-function.js
+built-ins/Error/prototype/toString/invalid-receiver.js
 built-ins/Error/prototype/toString/length.js
 built-ins/Error/prototype/toString/name.js
 built-ins/Error/prototype/toString/prop-desc.js
@@ -2796,6 +2806,7 @@ built-ins/Infinity/prop-desc.js
 built-ins/Iterator/prototype/Symbol.iterator/is-function.js
 built-ins/Iterator/prototype/Symbol.iterator/length.js
 built-ins/Iterator/prototype/Symbol.iterator/name.js
+built-ins/Iterator/prototype/Symbol.iterator/prop-desc.js
 built-ins/Iterator/prototype/Symbol.iterator/return-val.js
 built-ins/Iterator/prototype/every/non-callable-predicate.js
 built-ins/Iterator/prototype/filter/non-callable-predicate.js
@@ -2808,6 +2819,7 @@ built-ins/JSON/15.12-0-1.js
 built-ins/JSON/15.12-0-2.js
 built-ins/JSON/15.12-0-3.js
 built-ins/JSON/15.12-0-4.js
+built-ins/JSON/Symbol.toStringTag.js
 built-ins/JSON/parse/15.12.1.1-0-1.js
 built-ins/JSON/parse/15.12.1.1-0-2.js
 built-ins/JSON/parse/15.12.1.1-0-3.js
@@ -3004,6 +3016,7 @@ built-ins/Math/SQRT1_2/prop-desc.js
 built-ins/Math/SQRT1_2/value.js
 built-ins/Math/SQRT2/prop-desc.js
 built-ins/Math/SQRT2/value.js
+built-ins/Math/Symbol.toStringTag.js
 built-ins/Math/abs/S15.8.2.1_A1.js
 built-ins/Math/abs/S15.8.2.1_A3.js
 built-ins/Math/abs/length.js
@@ -3569,7 +3582,10 @@ built-ins/Object/assign/assign-descriptor.js
 built-ins/Object/assign/assign-length.js
 built-ins/Object/assign/name.js
 built-ins/Object/assign/source-non-enum.js
+built-ins/Object/assign/target-is-frozen-accessor-property-set-succeeds.js
+built-ins/Object/assign/target-is-non-extensible-existing-accessor-property.js
 built-ins/Object/assign/target-is-non-extensible-existing-data-property.js
+built-ins/Object/assign/target-is-sealed-existing-accessor-property.js
 built-ins/Object/assign/target-is-sealed-existing-data-property.js
 built-ins/Object/assign/target-set-user-error.js
 built-ins/Object/create/15.2.3.5-0-1.js
@@ -5033,6 +5049,7 @@ built-ins/Object/defineProperty/property-description-must-be-an-object-not-strin
 built-ins/Object/defineProperty/property-description-must-be-an-object-not-symbol.js
 built-ins/Object/defineProperty/property-description-must-be-an-object-not-true.js
 built-ins/Object/defineProperty/property-description-must-be-an-object-not-undefined.js
+built-ins/Object/defineProperty/symbol-data-property-default-non-strict.js
 built-ins/Object/entries/exception-not-object-coercible.js
 built-ins/Object/entries/function-length.js
 built-ins/Object/entries/function-name.js
@@ -5043,6 +5060,7 @@ built-ins/Object/entries/primitive-booleans.js
 built-ins/Object/entries/primitive-numbers.js
 built-ins/Object/entries/primitive-strings.js
 built-ins/Object/entries/primitive-symbols.js
+built-ins/Object/entries/symbols-omitted.js
 built-ins/Object/entries/tamper-with-global-object.js
 built-ins/Object/entries/tamper-with-object-keys.js
 built-ins/Object/freeze/15.2.3.9-0-1.js
@@ -5369,6 +5387,7 @@ built-ins/Object/getOwnPropertySymbols/non-object-argument-invalid.js
 built-ins/Object/getOwnPropertySymbols/non-object-argument-valid.js
 built-ins/Object/getOwnPropertySymbols/object-contains-symbol-property-with-description.js
 built-ins/Object/getOwnPropertySymbols/object-contains-symbol-property-without-description.js
+built-ins/Object/getOwnPropertySymbols/order-after-define-property.js
 built-ins/Object/getPrototypeOf/15.2.3.2-0-1.js
 built-ins/Object/getPrototypeOf/15.2.3.2-0-2.js
 built-ins/Object/getPrototypeOf/15.2.3.2-0-3.js
@@ -5462,6 +5481,10 @@ built-ins/Object/hasOwn/hasown_own_writable_nonconfigurable_nonenumerable.js
 built-ins/Object/hasOwn/length.js
 built-ins/Object/hasOwn/name.js
 built-ins/Object/hasOwn/prototype.js
+built-ins/Object/hasOwn/symbol_own_property.js
+built-ins/Object/hasOwn/symbol_property_toPrimitive.js
+built-ins/Object/hasOwn/symbol_property_toString.js
+built-ins/Object/hasOwn/symbol_property_valueOf.js
 built-ins/Object/hasOwn/toobject_before_topropertykey.js
 built-ins/Object/hasOwn/toobject_null.js
 built-ins/Object/hasOwn/toobject_undefined.js
@@ -5743,6 +5766,10 @@ built-ins/Object/prototype/hasOwnProperty/S15.2.4.5_A1_T3.js
 built-ins/Object/prototype/hasOwnProperty/S15.2.4.5_A6.js
 built-ins/Object/prototype/hasOwnProperty/length.js
 built-ins/Object/prototype/hasOwnProperty/name.js
+built-ins/Object/prototype/hasOwnProperty/symbol_own_property.js
+built-ins/Object/prototype/hasOwnProperty/symbol_property_toPrimitive.js
+built-ins/Object/prototype/hasOwnProperty/symbol_property_toString.js
+built-ins/Object/prototype/hasOwnProperty/symbol_property_valueOf.js
 built-ins/Object/prototype/hasOwnProperty/topropertykey_before_toobject.js
 built-ins/Object/prototype/isPrototypeOf/builtin.js
 built-ins/Object/prototype/isPrototypeOf/length.js
@@ -5760,6 +5787,10 @@ built-ins/Object/prototype/propertyIsEnumerable/S15.2.4.7_A2_T2.js
 built-ins/Object/prototype/propertyIsEnumerable/S15.2.4.7_A6.js
 built-ins/Object/prototype/propertyIsEnumerable/S15.2.4.7_A8.js
 built-ins/Object/prototype/propertyIsEnumerable/name.js
+built-ins/Object/prototype/propertyIsEnumerable/symbol_own_property.js
+built-ins/Object/prototype/propertyIsEnumerable/symbol_property_toPrimitive.js
+built-ins/Object/prototype/propertyIsEnumerable/symbol_property_toString.js
+built-ins/Object/prototype/propertyIsEnumerable/symbol_property_valueOf.js
 built-ins/Object/prototype/proto.js
 built-ins/Object/prototype/setPrototypeOf-with-different-values.js
 built-ins/Object/prototype/setPrototypeOf-with-non-circular-values-__proto__.js
@@ -5878,6 +5909,7 @@ built-ins/Object/values/primitive-booleans.js
 built-ins/Object/values/primitive-numbers.js
 built-ins/Object/values/primitive-strings.js
 built-ins/Object/values/primitive-symbols.js
+built-ins/Object/values/symbols-omitted.js
 built-ins/Object/values/tamper-with-global-object.js
 built-ins/Object/values/tamper-with-object-keys.js
 built-ins/Promise/all/S25.4.4.1_A1.1_T1.js
@@ -5888,6 +5920,7 @@ built-ins/Promise/all/S25.4.4.1_A2.3_T2.js
 built-ins/Promise/all/S25.4.4.1_A2.3_T3.js
 built-ins/Promise/all/S25.4.4.1_A3.1_T1.js
 built-ins/Promise/all/S25.4.4.1_A3.1_T2.js
+built-ins/Promise/all/S25.4.4.1_A3.1_T3.js
 built-ins/Promise/all/S25.4.4.1_A7.1_T1.js
 built-ins/Promise/all/S25.4.4.1_A7.2_T1.js
 built-ins/Promise/all/S25.4.4.1_A8.1_T1.js
@@ -5926,14 +5959,17 @@ built-ins/Promise/all/reject-ignored-immed.js
 built-ins/Promise/all/reject-immed.js
 built-ins/Promise/all/resolve-ignores-late-rejection-deferred.js
 built-ins/Promise/all/resolve-ignores-late-rejection.js
+built-ins/Promise/all/resolve-non-callable.js
 built-ins/Promise/all/resolve-non-thenable.js
 built-ins/Promise/all/resolve-not-callable-reject-with-typeerror.js
+built-ins/Promise/all/species-get-error.js
 built-ins/Promise/allSettled/capability-resolve-throws-no-close.js
 built-ins/Promise/allSettled/does-not-invoke-array-setters.js
 built-ins/Promise/allSettled/is-function.js
 built-ins/Promise/allSettled/iter-arg-is-false-reject.js
 built-ins/Promise/allSettled/iter-arg-is-null-reject.js
 built-ins/Promise/allSettled/iter-arg-is-number-reject.js
+built-ins/Promise/allSettled/iter-arg-is-poisoned.js
 built-ins/Promise/allSettled/iter-arg-is-string-resolve.js
 built-ins/Promise/allSettled/iter-arg-is-symbol-reject.js
 built-ins/Promise/allSettled/iter-arg-is-true-reject.js
@@ -5962,6 +5998,7 @@ built-ins/Promise/allSettled/reject-ignored-immed.js
 built-ins/Promise/allSettled/reject-immed.js
 built-ins/Promise/allSettled/resolve-ignores-late-rejection-deferred.js
 built-ins/Promise/allSettled/resolve-ignores-late-rejection.js
+built-ins/Promise/allSettled/resolve-non-callable.js
 built-ins/Promise/allSettled/resolve-non-thenable.js
 built-ins/Promise/allSettled/resolve-not-callable-reject-with-typeerror.js
 built-ins/Promise/allSettled/resolved-all-fulfilled.js
@@ -5976,6 +6013,7 @@ built-ins/Promise/allSettled/resolved-then-catch-finally.js
 built-ins/Promise/allSettled/resolves-empty-array.js
 built-ins/Promise/allSettled/resolves-to-array.js
 built-ins/Promise/allSettled/returns-promise.js
+built-ins/Promise/allSettled/species-get-error.js
 built-ins/Promise/any/capability-resolve-throws-reject.js
 built-ins/Promise/any/invoke-resolve-error-reject.js
 built-ins/Promise/any/invoke-resolve-get-error-reject.js
@@ -6010,6 +6048,7 @@ built-ins/Promise/any/resolve-from-reject-catch.js
 built-ins/Promise/any/resolve-from-resolve-reject-catch.js
 built-ins/Promise/any/resolve-ignores-late-rejection-deferred.js
 built-ins/Promise/any/resolve-ignores-late-rejection.js
+built-ins/Promise/any/resolve-non-callable.js
 built-ins/Promise/any/resolve-non-thenable.js
 built-ins/Promise/any/resolve-not-callable-reject-with-typeerror.js
 built-ins/Promise/any/resolved-sequence-extra-ticks.js
@@ -6017,6 +6056,7 @@ built-ins/Promise/any/resolved-sequence-mixed.js
 built-ins/Promise/any/resolved-sequence-with-rejections.js
 built-ins/Promise/any/resolved-sequence.js
 built-ins/Promise/any/returns-promise.js
+built-ins/Promise/any/species-get-error.js
 built-ins/Promise/constructor.js
 built-ins/Promise/exception-after-resolve-in-thenable-job.js
 built-ins/Promise/exec-args.js
@@ -6122,6 +6162,8 @@ built-ins/Promise/race/S25.4.4.3_A1.1_T1.js
 built-ins/Promise/race/S25.4.4.3_A2.1_T1.js
 built-ins/Promise/race/S25.4.4.3_A2.2_T1.js
 built-ins/Promise/race/S25.4.4.3_A2.2_T2.js
+built-ins/Promise/race/S25.4.4.3_A2.2_T3.js
+built-ins/Promise/race/S25.4.4.3_A4.1_T2.js
 built-ins/Promise/race/S25.4.4.3_A5.1_T1.js
 built-ins/Promise/race/S25.4.4.3_A6.1_T1.js
 built-ins/Promise/race/S25.4.4.3_A6.2_T1.js
@@ -6162,6 +6204,7 @@ built-ins/Promise/race/reject-ignored-deferred.js
 built-ins/Promise/race/reject-ignored-immed.js
 built-ins/Promise/race/reject-immed.js
 built-ins/Promise/race/resolve-ignores-late-rejection.js
+built-ins/Promise/race/resolve-non-callable.js
 built-ins/Promise/race/resolve-non-obj.js
 built-ins/Promise/race/resolve-non-thenable.js
 built-ins/Promise/race/resolve-poisoned-then.js
@@ -6171,6 +6214,7 @@ built-ins/Promise/race/resolved-sequence-mixed.js
 built-ins/Promise/race/resolved-sequence-with-rejections.js
 built-ins/Promise/race/resolved-sequence.js
 built-ins/Promise/race/resolved-then-catch-finally.js
+built-ins/Promise/race/species-get-error.js
 built-ins/Promise/reject-function-extensible.js
 built-ins/Promise/reject-function-length.js
 built-ins/Promise/reject-function-name.js
@@ -6230,6 +6274,7 @@ built-ins/Promise/try/ctx-non-ctor.js
 built-ins/Promise/try/ctx-non-object.js
 built-ins/Promise/withResolvers/ctx-non-ctor.js
 built-ins/Promise/withResolvers/ctx-non-object.js
+built-ins/Reflect/Symbol.toStringTag.js
 built-ins/Reflect/apply/apply.js
 built-ins/Reflect/apply/call-target.js
 built-ins/Reflect/apply/length.js
@@ -6242,6 +6287,7 @@ built-ins/Reflect/construct/name.js
 built-ins/Reflect/construct/return-without-newtarget-argument.js
 built-ins/Reflect/construct/use-arguments-list.js
 built-ins/Reflect/defineProperty/define-properties.js
+built-ins/Reflect/defineProperty/define-symbol-properties.js
 built-ins/Reflect/defineProperty/defineProperty.js
 built-ins/Reflect/defineProperty/length.js
 built-ins/Reflect/defineProperty/name.js
@@ -6249,6 +6295,7 @@ built-ins/Reflect/defineProperty/return-boolean.js
 built-ins/Reflect/defineProperty/target-is-not-object-throws.js
 built-ins/Reflect/defineProperty/target-is-symbol-throws.js
 built-ins/Reflect/deleteProperty/delete-properties.js
+built-ins/Reflect/deleteProperty/delete-symbol-properties.js
 built-ins/Reflect/deleteProperty/deleteProperty.js
 built-ins/Reflect/deleteProperty/length.js
 built-ins/Reflect/deleteProperty/name.js
@@ -6726,6 +6773,7 @@ built-ins/RegExp/prototype/Symbol.match/g-success-return-val.js
 built-ins/RegExp/prototype/Symbol.match/g-zero-matches.js
 built-ins/RegExp/prototype/Symbol.match/length.js
 built-ins/RegExp/prototype/Symbol.match/name.js
+built-ins/RegExp/prototype/Symbol.match/prop-desc.js
 built-ins/RegExp/prototype/Symbol.match/this-val-non-obj.js
 built-ins/RegExp/prototype/Symbol.match/y-init-lastindex.js
 built-ins/RegExp/prototype/Symbol.match/y-set-lastindex.js
@@ -6744,6 +6792,7 @@ built-ins/RegExp/prototype/Symbol.replace/g-init-lastindex.js
 built-ins/RegExp/prototype/Symbol.replace/length.js
 built-ins/RegExp/prototype/Symbol.replace/match-failure.js
 built-ins/RegExp/prototype/Symbol.replace/name.js
+built-ins/RegExp/prototype/Symbol.replace/prop-desc.js
 built-ins/RegExp/prototype/Symbol.replace/replace-with-trailing.js
 built-ins/RegExp/prototype/Symbol.replace/replace-without-trailing.js
 built-ins/RegExp/prototype/Symbol.replace/subst-before.js
@@ -6756,11 +6805,13 @@ built-ins/RegExp/prototype/Symbol.search/cstm-exec-return-invalid.js
 built-ins/RegExp/prototype/Symbol.search/failure-return-val.js
 built-ins/RegExp/prototype/Symbol.search/length.js
 built-ins/RegExp/prototype/Symbol.search/name.js
+built-ins/RegExp/prototype/Symbol.search/prop-desc.js
 built-ins/RegExp/prototype/Symbol.search/success-return-val.js
 built-ins/RegExp/prototype/Symbol.search/this-val-non-obj.js
 built-ins/RegExp/prototype/Symbol.split/coerce-string.js
 built-ins/RegExp/prototype/Symbol.split/length.js
 built-ins/RegExp/prototype/Symbol.split/name.js
+built-ins/RegExp/prototype/Symbol.split/prop-desc.js
 built-ins/RegExp/prototype/Symbol.split/species-ctor-ctor-undef.js
 built-ins/RegExp/prototype/Symbol.split/species-ctor-species-undef.js
 built-ins/RegExp/prototype/Symbol.split/str-empty-match.js
@@ -7494,7 +7545,9 @@ built-ins/String/prototype/match/S15.5.4.10_A2_T7.js
 built-ins/String/prototype/match/S15.5.4.10_A6.js
 built-ins/String/prototype/match/S15.5.4.10_A7.js
 built-ins/String/prototype/match/S15.5.4.10_A8.js
+built-ins/String/prototype/match/cstm-matcher-get-err.js
 built-ins/String/prototype/match/cstm-matcher-invocation.js
+built-ins/String/prototype/match/cstm-matcher-on-string-primitive.js
 built-ins/String/prototype/match/invoke-builtin-match.js
 built-ins/String/prototype/match/length.js
 built-ins/String/prototype/match/name.js
@@ -7504,9 +7557,11 @@ built-ins/String/prototype/matchAll/flags-undefined-throws.js
 built-ins/String/prototype/matchAll/length.js
 built-ins/String/prototype/matchAll/name.js
 built-ins/String/prototype/matchAll/prop-desc.js
+built-ins/String/prototype/matchAll/regexp-get-matchAll-throws.js
 built-ins/String/prototype/matchAll/regexp-matchAll-invocation.js
 built-ins/String/prototype/matchAll/regexp-matchAll-not-callable.js
 built-ins/String/prototype/matchAll/regexp-matchAll-throws.js
+built-ins/String/prototype/matchAll/regexp-prototype-get-matchAll-throws.js
 built-ins/String/prototype/matchAll/regexp-prototype-matchAll-invocation.js
 built-ins/String/prototype/matchAll/regexp-prototype-matchAll-throws.js
 built-ins/String/prototype/matchAll/this-val-non-obj-coercible.js
@@ -7583,7 +7638,11 @@ built-ins/String/prototype/replace/S15.5.4.11_A4_T4.js
 built-ins/String/prototype/replace/S15.5.4.11_A5_T1.js
 built-ins/String/prototype/replace/S15.5.4.11_A6.js
 built-ins/String/prototype/replace/S15.5.4.11_A7.js
+built-ins/String/prototype/replace/cstm-replace-get-err.js
 built-ins/String/prototype/replace/cstm-replace-invocation.js
+built-ins/String/prototype/replace/cstm-replace-on-boolean-primitive.js
+built-ins/String/prototype/replace/cstm-replace-on-number-primitive.js
+built-ins/String/prototype/replace/cstm-replace-on-string-primitive.js
 built-ins/String/prototype/replace/length.js
 built-ins/String/prototype/replace/name.js
 built-ins/String/prototype/replace/replaceValue-evaluation-order-regexp-object.js
@@ -7591,6 +7650,9 @@ built-ins/String/prototype/replace/replaceValue-evaluation-order.js
 built-ins/String/prototype/replace/this-value-not-obj-coercible.js
 built-ins/String/prototype/replace/tostring-this-throws-symbol.js
 built-ins/String/prototype/replace/tostring-this-throws-toprimitive.js
+built-ins/String/prototype/replaceAll/cstm-replaceall-on-boolean-primitive.js
+built-ins/String/prototype/replaceAll/cstm-replaceall-on-number-primitive.js
+built-ins/String/prototype/replaceAll/cstm-replaceall-on-string-primitive.js
 built-ins/String/prototype/replaceAll/length.js
 built-ins/String/prototype/replaceAll/name.js
 built-ins/String/prototype/replaceAll/replaceAll.js
@@ -7598,6 +7660,7 @@ built-ins/String/prototype/replaceAll/replaceValue-call-skip-no-match.js
 built-ins/String/prototype/replaceAll/replaceValue-tostring-abrupt.js
 built-ins/String/prototype/replaceAll/replaceValue-value-replaces-string.js
 built-ins/String/prototype/replaceAll/replaceValue-value-tostring.js
+built-ins/String/prototype/replaceAll/searchValue-replacer-call.js
 built-ins/String/prototype/replaceAll/searchValue-tostring-abrupt.js
 built-ins/String/prototype/replaceAll/this-is-null-throws.js
 built-ins/String/prototype/replaceAll/this-is-undefined-throws.js
@@ -7624,7 +7687,9 @@ built-ins/String/prototype/search/S15.5.4.12_A3_T2.js
 built-ins/String/prototype/search/S15.5.4.12_A6.js
 built-ins/String/prototype/search/S15.5.4.12_A7.js
 built-ins/String/prototype/search/S15.5.4.12_A8.js
+built-ins/String/prototype/search/cstm-search-get-err.js
 built-ins/String/prototype/search/cstm-search-invocation.js
+built-ins/String/prototype/search/cstm-search-on-string-primitive.js
 built-ins/String/prototype/search/invoke-builtin-search.js
 built-ins/String/prototype/search/name.js
 built-ins/String/prototype/search/this-value-not-obj-coercible.js
@@ -7723,8 +7788,12 @@ built-ins/String/prototype/split/checking-if-enumerating-the-string-prototype-sp
 built-ins/String/prototype/split/checking-if-varying-the-string-prototype-split-length-property-fails.js
 built-ins/String/prototype/split/checking-string-prototype-split-length.js
 built-ins/String/prototype/split/checking-string-prototype-split-prototype.js
+built-ins/String/prototype/split/cstm-split-get-err.js
 built-ins/String/prototype/split/cstm-split-invocation.js
 built-ins/String/prototype/split/cstm-split-is-null.js
+built-ins/String/prototype/split/cstm-split-on-boolean-primitive.js
+built-ins/String/prototype/split/cstm-split-on-number-primitive.js
+built-ins/String/prototype/split/cstm-split-on-string-primitive.js
 built-ins/String/prototype/split/instance-is-array-1-2-3-4-5.js
 built-ins/String/prototype/split/instance-is-function.js
 built-ins/String/prototype/split/instance-is-math.js
@@ -7955,13 +8024,17 @@ built-ins/String/prototype/trimEnd/this-value-boolean.js
 built-ins/String/prototype/trimEnd/this-value-not-obj-coercible.js
 built-ins/String/prototype/trimEnd/this-value-number.js
 built-ins/String/prototype/trimEnd/this-value-object-cannot-convert-to-primitive-err.js
+built-ins/String/prototype/trimEnd/this-value-object-toprimitive-call-err.js
 built-ins/String/prototype/trimEnd/this-value-object-toprimitive-meth-err.js
+built-ins/String/prototype/trimEnd/this-value-object-toprimitive-meth-priority.js
 built-ins/String/prototype/trimEnd/this-value-object-toprimitive-returns-object-err.js
 built-ins/String/prototype/trimEnd/this-value-object-tostring-call-err.js
 built-ins/String/prototype/trimEnd/this-value-object-tostring-meth-err.js
+built-ins/String/prototype/trimEnd/this-value-object-tostring-meth-priority.js
 built-ins/String/prototype/trimEnd/this-value-object-tostring-returns-object-err.js
 built-ins/String/prototype/trimEnd/this-value-object-valueof-call-err.js
 built-ins/String/prototype/trimEnd/this-value-object-valueof-meth-err.js
+built-ins/String/prototype/trimEnd/this-value-object-valueof-meth-priority.js
 built-ins/String/prototype/trimEnd/this-value-object-valueof-returns-object-err.js
 built-ins/String/prototype/trimEnd/this-value-symbol-typeerror.js
 built-ins/String/prototype/trimStart/length.js
@@ -7971,13 +8044,17 @@ built-ins/String/prototype/trimStart/this-value-boolean.js
 built-ins/String/prototype/trimStart/this-value-not-obj-coercible.js
 built-ins/String/prototype/trimStart/this-value-number.js
 built-ins/String/prototype/trimStart/this-value-object-cannot-convert-to-primitive-err.js
+built-ins/String/prototype/trimStart/this-value-object-toprimitive-call-err.js
 built-ins/String/prototype/trimStart/this-value-object-toprimitive-meth-err.js
+built-ins/String/prototype/trimStart/this-value-object-toprimitive-meth-priority.js
 built-ins/String/prototype/trimStart/this-value-object-toprimitive-returns-object-err.js
 built-ins/String/prototype/trimStart/this-value-object-tostring-call-err.js
 built-ins/String/prototype/trimStart/this-value-object-tostring-meth-err.js
+built-ins/String/prototype/trimStart/this-value-object-tostring-meth-priority.js
 built-ins/String/prototype/trimStart/this-value-object-tostring-returns-object-err.js
 built-ins/String/prototype/trimStart/this-value-object-valueof-call-err.js
 built-ins/String/prototype/trimStart/this-value-object-valueof-meth-err.js
+built-ins/String/prototype/trimStart/this-value-object-valueof-meth-priority.js
 built-ins/String/prototype/trimStart/this-value-object-valueof-returns-object-err.js
 built-ins/String/prototype/trimStart/this-value-symbol-typeerror.js
 built-ins/String/prototype/valueOf/length.js
@@ -8005,6 +8082,7 @@ built-ins/String/raw/substitutions-are-appended-on-same-index.js
 built-ins/String/raw/substitutions-are-limited-to-template-raw-length.js
 built-ins/String/raw/template-length-throws.js
 built-ins/String/raw/template-raw-throws.js
+built-ins/String/symbol-string-coercion.js
 built-ins/String/symbol-wrapping.js
 built-ins/Symbol/asyncDispose/cross-realm.js
 built-ins/Symbol/asyncDispose/no-key.js
@@ -8454,6 +8532,7 @@ harness/compare-array-same-elements-different-order.js
 harness/compare-array-same-elements-same-order.js
 harness/compare-array-samevalue.js
 harness/compare-array-sparse.js
+harness/compare-array-symbol.js
 harness/dateConstants.js
 harness/decimalToHexString.js
 harness/fnGlobalObject.js
@@ -8461,11 +8540,15 @@ harness/promiseHelper.js
 harness/propertyhelper-verifyconfigurable-configurable-object.js
 harness/propertyhelper-verifyconfigurable-configurable.js
 harness/propertyhelper-verifyconfigurable-not-configurable.js
+harness/propertyhelper-verifyenumerable-enumerable-symbol.js
 harness/propertyhelper-verifyenumerable-enumerable.js
+harness/propertyhelper-verifyenumerable-not-enumerable-symbol.js
 harness/propertyhelper-verifyenumerable-not-enumerable.js
 harness/propertyhelper-verifynotconfigurable-configurable.js
 harness/propertyhelper-verifynotconfigurable-not-configurable.js
+harness/propertyhelper-verifynotenumerable-enumerable-symbol.js
 harness/propertyhelper-verifynotenumerable-enumerable.js
+harness/propertyhelper-verifynotenumerable-not-enumerable-symbol.js
 harness/propertyhelper-verifynotenumerable-not-enumerable.js
 harness/propertyhelper-verifynotwritable-not-writable-strict.js
 harness/propertyhelper-verifynotwritable-writable.js
@@ -8478,7 +8561,10 @@ harness/sta.js
 harness/tcoHelper.js
 harness/verifyProperty-arguments.js
 harness/verifyProperty-configurable-object.js
+harness/verifyProperty-desc-is-not-object.js
 harness/verifyProperty-noproperty.js
+harness/verifyProperty-restore-accessor-symbol.js
+harness/verifyProperty-restore-symbol.js
 harness/verifyProperty-restore.js
 harness/verifyProperty-same-value.js
 harness/verifyProperty-string-prop.js
@@ -8691,6 +8777,7 @@ language/arguments-object/gen-meth-args-trailing-comma-null.js
 language/arguments-object/gen-meth-args-trailing-comma-single-args.js
 language/arguments-object/gen-meth-args-trailing-comma-spread-operator.js
 language/arguments-object/gen-meth-args-trailing-comma-undefined.js
+language/arguments-object/mapped/Symbol.iterator.js
 language/arguments-object/mapped/enumerable-configurable-accessor-descriptor.js
 language/arguments-object/mapped/nonwritable-nonenumerable-nonconfigurable-descriptors-set-by-define-property.js
 language/arguments-object/meth-args-trailing-comma-multiple.js
@@ -8698,6 +8785,7 @@ language/arguments-object/meth-args-trailing-comma-null.js
 language/arguments-object/meth-args-trailing-comma-single-args.js
 language/arguments-object/meth-args-trailing-comma-spread-operator.js
 language/arguments-object/meth-args-trailing-comma-undefined.js
+language/arguments-object/unmapped/Symbol.iterator.js
 language/arguments-object/unmapped/via-params-dflt.js
 language/arguments-object/unmapped/via-params-dstr.js
 language/arguments-object/unmapped/via-params-rest.js
@@ -8973,7 +9061,9 @@ language/computed-property-names/basics/number.js
 language/computed-property-names/basics/string.js
 language/computed-property-names/basics/symbol.js
 language/computed-property-names/object/accessor/getter-duplicates.js
+language/computed-property-names/object/accessor/getter.js
 language/computed-property-names/object/accessor/setter-duplicates.js
+language/computed-property-names/object/accessor/setter.js
 language/computed-property-names/object/method/generator.js
 language/computed-property-names/object/method/number.js
 language/computed-property-names/object/method/string.js
@@ -9217,8 +9307,10 @@ language/expressions/addition/S11.6.1_A4_T1.js
 language/expressions/addition/S11.6.1_A4_T2.js
 language/expressions/addition/S11.6.1_A4_T3.js
 language/expressions/addition/bigint-wrapped-values.js
+language/expressions/addition/coerce-symbol-to-prim-err.js
 language/expressions/addition/coerce-symbol-to-prim-invocation.js
 language/expressions/addition/coerce-symbol-to-prim-return-obj.js
+language/expressions/addition/get-symbol-to-prim-err.js
 language/expressions/addition/symbol-to-string.js
 language/expressions/array/11.1.4-0.js
 language/expressions/array/11.1.4_4-5-1.js
@@ -9232,6 +9324,7 @@ language/expressions/array/S11.1.4_A1.6.js
 language/expressions/array/S11.1.4_A1.7.js
 language/expressions/array/S11.1.4_A2.js
 language/expressions/array/spread-err-mult-err-expr-throws.js
+language/expressions/array/spread-err-mult-err-iter-get-value.js
 language/expressions/array/spread-err-mult-err-obj-unresolvable.js
 language/expressions/array/spread-err-mult-err-unresolvable.js
 language/expressions/array/spread-err-sngl-err-expr-throws.js
@@ -9251,6 +9344,7 @@ language/expressions/array/spread-obj-null.js
 language/expressions/array/spread-obj-override-immutable.js
 language/expressions/array/spread-obj-overrides-prev-properties.js
 language/expressions/array/spread-obj-skip-non-enumerable.js
+language/expressions/array/spread-obj-symbol-property.js
 language/expressions/array/spread-obj-undefined.js
 language/expressions/array/spread-sngl-empty.js
 language/expressions/array/spread-sngl-expr.js
@@ -10457,6 +10551,7 @@ language/expressions/async-generator/named-yield-as-identifier-reference.js
 language/expressions/async-generator/named-yield-as-label-identifier-escaped.js
 language/expressions/async-generator/named-yield-as-label-identifier.js
 language/expressions/async-generator/named-yield-identifier-non-strict.js
+language/expressions/async-generator/named-yield-identifier-spread-non-strict.js
 language/expressions/async-generator/named-yield-identifier-spread-strict.js
 language/expressions/async-generator/named-yield-identifier-strict.js
 language/expressions/async-generator/named-yield-spread-obj.js
@@ -10469,6 +10564,7 @@ language/expressions/async-generator/yield-as-identifier-reference.js
 language/expressions/async-generator/yield-as-label-identifier-escaped.js
 language/expressions/async-generator/yield-as-label-identifier.js
 language/expressions/async-generator/yield-identifier-non-strict.js
+language/expressions/async-generator/yield-identifier-spread-non-strict.js
 language/expressions/async-generator/yield-identifier-spread-strict.js
 language/expressions/async-generator/yield-identifier-strict.js
 language/expressions/async-generator/yield-spread-obj.js
@@ -10597,6 +10693,7 @@ language/expressions/call/scope-lex-open.js
 language/expressions/call/scope-var-close.js
 language/expressions/call/scope-var-open.js
 language/expressions/call/spread-err-mult-err-expr-throws.js
+language/expressions/call/spread-err-mult-err-iter-get-value.js
 language/expressions/call/spread-err-mult-err-obj-unresolvable.js
 language/expressions/call/spread-err-mult-err-unresolvable.js
 language/expressions/call/spread-err-sngl-err-expr-throws.js
@@ -10616,6 +10713,7 @@ language/expressions/call/spread-obj-null.js
 language/expressions/call/spread-obj-override-immutable.js
 language/expressions/call/spread-obj-overrides-prev-properties.js
 language/expressions/call/spread-obj-skip-non-enumerable.js
+language/expressions/call/spread-obj-symbol-property.js
 language/expressions/call/spread-obj-undefined.js
 language/expressions/call/spread-sngl-empty.js
 language/expressions/call/spread-sngl-expr.js
@@ -14629,6 +14727,7 @@ language/expressions/generators/named-yield-as-identifier-reference.js
 language/expressions/generators/named-yield-as-label-identifier-escaped.js
 language/expressions/generators/named-yield-as-label-identifier.js
 language/expressions/generators/named-yield-identifier-non-strict.js
+language/expressions/generators/named-yield-identifier-spread-non-strict.js
 language/expressions/generators/named-yield-identifier-spread-strict.js
 language/expressions/generators/named-yield-identifier-strict.js
 language/expressions/generators/named-yield-spread-obj.js
@@ -14660,6 +14759,7 @@ language/expressions/generators/yield-as-property-name.js
 language/expressions/generators/yield-as-statement.js
 language/expressions/generators/yield-as-yield-operand.js
 language/expressions/generators/yield-identifier-non-strict.js
+language/expressions/generators/yield-identifier-spread-non-strict.js
 language/expressions/generators/yield-identifier-spread-strict.js
 language/expressions/generators/yield-identifier-strict.js
 language/expressions/generators/yield-newline.js
@@ -15001,6 +15101,7 @@ language/expressions/new/ctorExpr-fn-ref-before-args-eval.js
 language/expressions/new/ctorExpr-isCtor-after-args-eval-fn-wrapup.js
 language/expressions/new/ctorExpr-isCtor-after-args-eval.js
 language/expressions/new/spread-err-mult-err-expr-throws.js
+language/expressions/new/spread-err-mult-err-iter-get-value.js
 language/expressions/new/spread-err-mult-err-obj-unresolvable.js
 language/expressions/new/spread-err-mult-err-unresolvable.js
 language/expressions/new/spread-err-sngl-err-expr-throws.js
@@ -15020,6 +15121,7 @@ language/expressions/new/spread-obj-null.js
 language/expressions/new/spread-obj-override-immutable.js
 language/expressions/new/spread-obj-overrides-prev-properties.js
 language/expressions/new/spread-obj-skip-non-enumerable.js
+language/expressions/new/spread-obj-symbol-property.js
 language/expressions/new/spread-obj-undefined.js
 language/expressions/new/spread-sngl-empty.js
 language/expressions/new/spread-sngl-expr.js
@@ -15759,6 +15861,7 @@ language/expressions/object/method-definition/async-gen-yield-as-identifier-refe
 language/expressions/object/method-definition/async-gen-yield-as-label-identifier-escaped.js
 language/expressions/object/method-definition/async-gen-yield-as-label-identifier.js
 language/expressions/object/method-definition/async-gen-yield-identifier-non-strict.js
+language/expressions/object/method-definition/async-gen-yield-identifier-spread-non-strict.js
 language/expressions/object/method-definition/async-gen-yield-identifier-spread-strict.js
 language/expressions/object/method-definition/async-gen-yield-identifier-strict.js
 language/expressions/object/method-definition/async-gen-yield-spread-obj.js
@@ -15827,6 +15930,7 @@ language/expressions/object/method-definition/gen-yield-as-identifier-reference.
 language/expressions/object/method-definition/gen-yield-as-label-identifier-escaped.js
 language/expressions/object/method-definition/gen-yield-as-label-identifier.js
 language/expressions/object/method-definition/gen-yield-identifier-non-strict.js
+language/expressions/object/method-definition/gen-yield-identifier-spread-non-strict.js
 language/expressions/object/method-definition/gen-yield-identifier-spread-strict.js
 language/expressions/object/method-definition/gen-yield-identifier-strict.js
 language/expressions/object/method-definition/gen-yield-spread-obj.js
@@ -16180,6 +16284,7 @@ language/expressions/super/call-spread-obj-null.js
 language/expressions/super/call-spread-obj-override-immutable.js
 language/expressions/super/call-spread-obj-overrides-prev-properties.js
 language/expressions/super/call-spread-obj-skip-non-enumerable.js
+language/expressions/super/call-spread-obj-symbol-property.js
 language/expressions/super/call-spread-obj-undefined.js
 language/expressions/super/call-spread-sngl-obj-ident.js
 language/expressions/super/prop-expr-uninitialized-this-getvalue.js
@@ -16316,6 +16421,7 @@ language/expressions/yield/in-rltn-expr.js
 language/expressions/yield/invalid-left-hand-side.js
 language/expressions/yield/iter-value-specified.js
 language/expressions/yield/iter-value-unspecified.js
+language/expressions/yield/rhs-iter.js
 language/expressions/yield/rhs-omitted.js
 language/expressions/yield/rhs-primitive.js
 language/expressions/yield/rhs-regexp.js
@@ -16586,6 +16692,7 @@ language/global-code/super-call-arrow.js
 language/global-code/super-call.js
 language/global-code/super-prop-arrow.js
 language/global-code/super-prop.js
+language/global-code/unscopables-ignored.js
 language/global-code/yield-non-strict.js
 language/global-code/yield-strict.js
 language/identifier-resolution/S10.2.2_A1_T1.js
@@ -17710,6 +17817,7 @@ language/statements/async-generator/yield-as-identifier-reference.js
 language/statements/async-generator/yield-as-label-identifier-escaped.js
 language/statements/async-generator/yield-as-label-identifier.js
 language/statements/async-generator/yield-identifier-non-strict.js
+language/statements/async-generator/yield-identifier-spread-non-strict.js
 language/statements/async-generator/yield-identifier-spread-strict.js
 language/statements/async-generator/yield-identifier-strict.js
 language/statements/async-generator/yield-spread-obj.js
@@ -22904,6 +23012,7 @@ language/statements/generators/yield-as-property-name.js
 language/statements/generators/yield-as-statement.js
 language/statements/generators/yield-as-yield-operand.js
 language/statements/generators/yield-identifier-non-strict.js
+language/statements/generators/yield-identifier-spread-non-strict.js
 language/statements/generators/yield-identifier-spread-strict.js
 language/statements/generators/yield-identifier-strict.js
 language/statements/generators/yield-newline.js
@@ -23793,8 +23902,10 @@ staging/sm/Number/toString-radix-handling.js
 staging/sm/PrivateName/parse-utf8-non-ascii-identifier.js
 staging/sm/PrivateName/read-private-eval.js
 staging/sm/PrivateName/unicode-names.js
+staging/sm/Promise/bug-1287334.js
 staging/sm/Promise/bug-1288382.js
 staging/sm/Promise/bug-1289040.js
+staging/sm/Promise/for-of-iterator-uses-getv.js
 staging/sm/Promise/methods-non-enumerable.js
 staging/sm/Proxy/global-receiver.js
 staging/sm/Proxy/regress-bug1037770.js
@@ -23807,9 +23918,12 @@ staging/sm/RegExp/constructor-regexp.js
 staging/sm/RegExp/descriptor.js
 staging/sm/RegExp/empty-lookahead.js
 staging/sm/RegExp/match-this.js
+staging/sm/RegExp/match.js
 staging/sm/RegExp/replace-this.js
 staging/sm/RegExp/search-this.js
+staging/sm/RegExp/search.js
 staging/sm/RegExp/split-this.js
+staging/sm/RegExp/split.js
 staging/sm/RegExp/test-emptyMatch.js
 staging/sm/RegExp/unicode-ignoreCase-negated.js
 staging/sm/String/15.5.4.2.js
@@ -23835,6 +23949,7 @@ staging/sm/Symbol/equality.js
 staging/sm/Symbol/for.js
 staging/sm/Symbol/json-stringify-keys.js
 staging/sm/Symbol/keyFor.js
+staging/sm/Symbol/property-accessor.js
 staging/sm/Symbol/typeof.js
 staging/sm/Symbol/well-known.js
 staging/sm/argumentsLengthOpt.js

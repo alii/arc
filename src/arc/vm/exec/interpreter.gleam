@@ -1126,21 +1126,27 @@ fn step_operators(
             opcode.In -> {
               // left = key, right = object
               case right {
-                JsObject(ref) ->
-                  case property.to_property_key(state, left) {
-                    Ok(#(pk, state)) -> {
-                      let result = object.has_property(state.heap, ref, pk)
-                      Ok(
-                        State(
-                          ..state,
-                          stack: [JsBool(result), ..rest],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                    }
-                    Error(#(thrown, state)) ->
-                      Error(#(Thrown, thrown, state.heap))
-                  }
+                JsObject(ref) -> {
+                  use #(result, state) <- result.map(case left {
+                    value.JsSymbol(sym) ->
+                      Ok(#(
+                        object.has_symbol_property(state.heap, ref, sym),
+                        state,
+                      ))
+                    _ ->
+                      case property.to_property_key(state, left) {
+                        Ok(#(pk, state)) ->
+                          Ok(#(object.has_property(state.heap, ref, pk), state))
+                        Error(#(thrown, state)) ->
+                          Error(#(Thrown, thrown, state.heap))
+                      }
+                  })
+                  State(
+                    ..state,
+                    stack: [JsBool(result), ..rest],
+                    pc: state.pc + 1,
+                  )
+                }
                 _ ->
                   state.throw_type_error(
                     state,
@@ -1670,6 +1676,11 @@ fn step_objects(
       // Computed getter/setter: { get [expr]() {} }
       // Stack: [fn, key, obj, ...] → [obj, ...]
       case state.stack {
+        [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
+          let heap =
+            object.define_symbol_accessor(state.heap, ref, sym, func, kind)
+          Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+        }
         [func, key, JsObject(ref) as obj, ..rest] -> {
           use #(pk, state) <- result.map(
             state.rethrow(property.to_property_key(state, key)),
@@ -1907,6 +1918,22 @@ fn step_objects(
   }
 }
 
+/// GetElem on a primitive receiver — ToPropertyKey (Symbol → symbol lookup
+/// on prototype, else ToString → string lookup) then delegate to get_value_of.
+fn get_elem_on_primitive(
+  state: State,
+  receiver: JsValue,
+  key: JsValue,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case key {
+    value.JsSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
+    _ -> {
+      use #(pk, state) <- result.try(property.to_property_key(state, key))
+      object.get_value_of(state, receiver, pk)
+    }
+  }
+}
+
 fn step_arrays(
   state: State,
   op: Op,
@@ -2003,11 +2030,8 @@ fn step_arrays(
           )
         [key, receiver, ..rest] -> {
           // Primitive receiver: canonicalize key, delegate to get_value_of
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
-          )
           use #(val, state) <- result.map(
-            state.rethrow(object.get_value_of(state, receiver, pk)),
+            state.rethrow(get_elem_on_primitive(state, receiver, key)),
           )
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
@@ -2030,11 +2054,8 @@ fn step_arrays(
           State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1)
         }
         [key, receiver, ..rest] -> {
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
-          )
           use #(val, state) <- result.map(
-            state.rethrow(object.get_value_of(state, receiver, pk)),
+            state.rethrow(get_elem_on_primitive(state, receiver, key)),
           )
           State(..state, stack: [val, key, receiver, ..rest], pc: state.pc + 1)
         }

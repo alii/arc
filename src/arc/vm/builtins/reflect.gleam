@@ -234,17 +234,14 @@ fn reflect_define_property(
     [] -> #(JsUndefined, JsUndefined)
   }
   case desc_val {
-    JsObject(desc_ref) -> {
-      // Step 2: Let key be ? ToPropertyKey(propertyKey).
-      use key_str, state <- state.try_to_string(state, key_val)
-      // Steps 3-4: ToPropertyDescriptor + [[DefineOwnProperty]].
+    JsObject(desc_ref) ->
+      // Steps 2-4: ToPropertyKey + ToPropertyDescriptor + [[DefineOwnProperty]].
       // apply_descriptor throws on failure; we catch and return false.
-      case builtins_object.apply_descriptor(state, ref, key_str, desc_ref) {
+      case builtins_object.apply_descriptor(state, ref, key_val, desc_ref) {
         Ok(state) -> #(state, Ok(JsBool(True)))
         // Validation failure → return false instead of re-throwing.
         Error(#(_thrown, state)) -> #(state, Ok(JsBool(False)))
       }
-    }
     _ -> state.type_error(state, "Property description must be an object")
   }
 }
@@ -414,29 +411,13 @@ fn reflect_has(
   case key_val {
     JsSymbol(sym) -> #(
       state,
-      Ok(JsBool(has_symbol_property(state.heap, ref, sym))),
+      Ok(JsBool(object.has_symbol_property(state.heap, ref, sym))),
     )
     _ -> {
       use pk, state <- state.try_op(property.to_property_key(state, key_val))
       // Step 3: Return ? target.[[HasProperty]](key).
       #(state, Ok(JsBool(object.has_property(state.heap, ref, pk))))
     }
-  }
-}
-
-/// Walk the prototype chain looking for a symbol-keyed property.
-fn has_symbol_property(h: Heap, ref: Ref, sym: value.SymbolId) -> Bool {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
-      case dict.has_key(symbol_properties, sym) {
-        True -> True
-        False ->
-          case prototype {
-            Some(proto_ref) -> has_symbol_property(h, proto_ref, sym)
-            None -> False
-          }
-      }
-    _ -> False
   }
 }
 

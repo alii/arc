@@ -12,6 +12,7 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/option.{Some}
+import gleam/result
 
 /// Set up Symbol constructor function with well-known symbol properties.
 /// Returns #(heap, constructor_ref).
@@ -118,4 +119,19 @@ pub fn call_symbol(
   }
 
   #(new_descriptions, JsSymbol(id))
+}
+
+/// §20.4.3.3.1 SymbolDescriptiveString — "Symbol(" + description + ")".
+/// Used by String(sym) and Symbol.prototype.toString. Unlike ToString(sym),
+/// this never throws.
+pub fn descriptive_string(
+  id: value.SymbolId,
+  symbol_descriptions: dict.Dict(value.SymbolId, String),
+) -> String {
+  let desc =
+    value.well_known_symbol_description(id)
+    |> option.lazy_unwrap(fn() {
+      dict.get(symbol_descriptions, id) |> result.unwrap("")
+    })
+  "Symbol(" <> desc <> ")"
 }
