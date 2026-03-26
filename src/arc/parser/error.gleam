@@ -29,6 +29,7 @@ pub type ParseError {
   StaticReservedStrictMode(pos: Int)
   WithNotAllowedStrictMode(pos: Int)
   DeleteUnqualifiedStrictMode(pos: Int)
+  DeletePrivateName(pos: Int)
   OctalEscapeStrictMode(pos: Int)
   OctalLiteralStrictMode(pos: Int)
   YieldInGenerator(pos: Int)
@@ -151,6 +152,7 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     WithNotAllowedStrictMode(_) -> "'with' not allowed in strict mode"
     DeleteUnqualifiedStrictMode(_) ->
       "Cannot delete unqualified identifier in strict mode"
+    DeletePrivateName(_) -> "Private fields cannot be deleted"
     OctalEscapeStrictMode(_) ->
       "Octal escape sequences are not allowed in strict mode"
     OctalLiteralStrictMode(_) -> "Octal literals are not allowed in strict mode"
@@ -320,6 +322,7 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     StaticReservedStrictMode(pos:) -> pos
     WithNotAllowedStrictMode(pos:) -> pos
     DeleteUnqualifiedStrictMode(pos:) -> pos
+    DeletePrivateName(pos:) -> pos
     OctalEscapeStrictMode(pos:) -> pos
     OctalLiteralStrictMode(pos:) -> pos
     YieldInGenerator(pos:) -> pos

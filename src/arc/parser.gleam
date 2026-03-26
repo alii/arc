@@ -18,7 +18,8 @@ import arc/parser/error.{
   AwaitInAsyncFunction, AwaitInModule, BreakOutsideLoopOrSwitch,
   ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
   ClassConstructorNotSetter, ClassDuplicateConstructor, ContinueOutsideLoop,
-  DeleteUnqualifiedStrictMode, DestructuringMissingInitializer,
+  DeletePrivateName, DeleteUnqualifiedStrictMode,
+  DestructuringMissingInitializer,
   DuplicateBindingLexical, DuplicateDefaultCase, DuplicateExport,
   DuplicateImportBinding, DuplicateLabel, DuplicateParamNameStrictMode,
   DuplicateParameterName, DuplicateProtoProperty, EnumReservedWord,
@@ -3360,11 +3361,20 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   case peek(p) {
     Delete -> {
       let p2 = advance(p)
+      use #(p3, expr) <- result.try(unary(p2, ast.Delete))
+      let operand = delete_operand(expr)
+      // §13.5.1.1 early errors — check the parsed AST, not tokens:
+      //   - `delete x` (bare identifier, through parens) → strict-mode error
+      //   - `delete expr.#priv` (private name, through parens) → always error
       use <- bool.guard(
-        p.strict && is_delete_of_identifier(p2, 0),
+        p.strict && is_bare_identifier(operand),
         Error(DeleteUnqualifiedStrictMode(pos_of(p))),
       )
-      unary(p2, ast.Delete)
+      use <- bool.guard(
+        is_private_name_access(operand),
+        Error(DeletePrivateName(pos_of(p))),
+      )
+      Ok(#(p3, expr))
     }
     Bang -> unary(advance(p), ast.LogicalNot)
     Tilde -> unary(advance(p), ast.BitwiseNot)
@@ -3407,29 +3417,41 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   }
 }
 
-/// Check if the delete operand is a (possibly parenthesized) identifier.
-/// Looks through nested LeftParen tokens to find an Identifier, then
-/// checks for matching RightParen tokens.
-fn is_delete_of_identifier(p: P, offset: Int) -> Bool {
-  case peek_at(p, offset) {
-    Identifier ->
-      // Check for matching closing parens
-      is_all_right_parens(p, offset + 1, offset)
-    LeftParen -> is_delete_of_identifier(p, offset + 1)
+/// Unwrap the UnaryExpression(Delete, ...) to get at the operand for
+/// §13.5.1.1 early-error checks.
+fn delete_operand(expr: ast.Expression) -> ast.Expression {
+  case expr {
+    ast.UnaryExpression(operator: ast.Delete, argument:, ..) ->
+      unwrap_parens(argument)
+    _ -> expr
+  }
+}
+
+fn unwrap_parens(expr: ast.Expression) -> ast.Expression {
+  case expr {
+    ast.ParenthesizedExpression(inner) -> unwrap_parens(inner)
+    _ -> expr
+  }
+}
+
+fn is_bare_identifier(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.Identifier(_) -> True
     _ -> False
   }
 }
 
-/// Check that there are at least  closing parens starting at .
-///  is the number of open parens we need to match.
-fn is_all_right_parens(p: P, offset: Int, count: Int) -> Bool {
-  case count {
-    0 -> True
-    _ ->
-      case peek_at(p, offset) {
-        RightParen -> is_all_right_parens(p, offset + 1, count - 1)
-        _ -> False
-      }
+/// `expr.#priv` or `expr?.#priv` — private names lex as Identifier tokens
+/// with a "#" prefix, so check the property name's first char.
+fn is_private_name_access(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.MemberExpression(property: ast.Identifier(name:), computed: False, ..)
+    | ast.OptionalMemberExpression(
+        property: ast.Identifier(name:),
+        computed: False,
+        ..,
+      ) -> string.starts_with(name, "#")
+    _ -> False
   }
 }
 
