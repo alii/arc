@@ -137,8 +137,6 @@ fn inspect_vm_error(err: state.VmError) -> String {
   case err {
     state.PcOutOfBounds(pc) -> "PcOutOfBounds(" <> pc |> int.to_string <> ")"
     state.StackUnderflow(op) -> "StackUnderflow(" <> op <> ")"
-    state.LocalIndexOutOfBounds(i) ->
-      "LocalIndexOutOfBounds(" <> i |> int.to_string <> ")"
     state.Unimplemented(op) -> "Unimplemented(" <> op <> ")"
   }
 }
@@ -6616,6 +6614,57 @@ pub fn module_import_arc_namespace_test() -> Nil {
      typeof arc.peek",
     JsString("function"),
   )
+}
+
+@external(erlang, "test_runner_ffi", "counter_reset")
+fn do_counter_reset(_key: String) -> Nil {
+  panic as "counter FFI is Erlang-only (process dictionary)"
+}
+
+@external(erlang, "test_runner_ffi", "counter_bump")
+fn do_counter_bump(_key: String) -> Nil {
+  panic as "counter FFI is Erlang-only (process dictionary)"
+}
+
+@external(erlang, "test_runner_ffi", "counter_read")
+fn do_counter_read(_key: String) -> Int {
+  panic as "counter FFI is Erlang-only (process dictionary)"
+}
+
+fn counter(key: String, next: fn(fn() -> Int, fn() -> Nil) -> Nil) {
+  do_counter_reset(key)
+  next(fn() { do_counter_read(key) }, fn() { do_counter_bump(key) })
+}
+
+/// Diamond dependency graph must compile each module exactly once.
+/// Graph: A → [B, C]; B → D; C → D; D → E.
+/// Previously a non-threaded `visited` set caused D and E to be
+/// re-parsed + re-compiled on the C branch (O(2^depth) for deep diamonds).
+pub fn module_diamond_deps_compiled_once_test() -> Nil {
+  use read, bump <- counter("resolve")
+  let resolve = fn(raw: String, _parent: String) {
+    bump()
+    case raw {
+      "./b.js" -> Ok(#("/b.js", "import './d.js';"))
+      "./c.js" -> Ok(#("/c.js", "import './d.js';"))
+      "./d.js" -> Ok(#("/d.js", "import './e.js';"))
+      "./e.js" -> Ok(#("/e.js", "export const e = 1;"))
+      other -> Error("unknown: " <> other)
+    }
+  }
+  let entry = "import './b.js'; import './c.js';"
+  let assert Ok(bundle) = module.compile_bundle("/a.js", entry, resolve)
+
+  // 5 unique modules in the bundle: a, b, c, d, e
+  let assert 5 = dict.size(bundle.modules)
+
+  // Resolver is called once per import edge. Edges: A→B, A→C, B→D, C→D, D→E.
+  // With proper dedup, C→D finds D already compiled and does NOT recurse
+  // into D→E again. 5 calls total.
+  // With the old bug: C→D misses the visited check, recompiles D,
+  // recurses into D→E → 6 calls.
+  let assert 5 = read()
+  Nil
 }
 
 pub fn module_repl_harness_globals_test() -> Nil {

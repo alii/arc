@@ -78,13 +78,12 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
     ])
 
   let properties = common.named_props(methods)
-  let symbol_properties =
-    dict.from_list([
-      #(
-        value.symbol_to_string_tag,
-        value.data(JsString("Arc")) |> value.configurable(),
-      ),
-    ])
+  let symbol_properties = [
+    #(
+      value.symbol_to_string_tag,
+      value.data(JsString("Arc")) |> value.configurable(),
+    ),
+  ]
 
   let #(h, arc_ref) =
     heap.alloc(
@@ -394,7 +393,7 @@ fn set_timeout_inner(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(state.builtins.object.prototype),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -558,12 +557,12 @@ pub fn alloc_pid_object(
         ]),
         elements: elements.new(),
         prototype: Some(object_proto),
-        symbol_properties: dict.from_list([
+        symbol_properties: [
           #(
             value.symbol_to_string_tag,
             value.data(JsString("Pid")) |> value.configurable(),
           ),
-        ]),
+        ],
         extensible: True,
       ),
     )
@@ -635,12 +634,7 @@ fn serialize_heap_object(
             serialize_object_props(heap, dict.to_list(properties), seen, []),
           )
           use sym_props <- result.try(
-            serialize_symbol_props(
-              heap,
-              dict.to_list(symbol_properties),
-              seen,
-              [],
-            ),
+            serialize_symbol_props(heap, symbol_properties, seen, []),
           )
           Ok(PmObject(properties: props, symbol_properties: sym_props))
         }
@@ -756,7 +750,7 @@ pub fn deserialize(
             properties: dict.from_list(props),
             elements: elements.new(),
             prototype: Some(builtins.object.prototype),
-            symbol_properties: dict.from_list(sym_props),
+            symbol_properties: sym_props,
             extensible: True,
           ),
         )

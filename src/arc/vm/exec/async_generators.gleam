@@ -494,7 +494,7 @@ fn alloc_resume(
       properties: dict.new(),
       elements: elements.new(),
       prototype: Some(function_proto),
-      symbol_properties: dict.new(),
+      symbol_properties: [],
       extensible: True,
     ),
   )

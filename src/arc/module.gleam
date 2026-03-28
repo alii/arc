@@ -78,13 +78,11 @@ pub fn compile_bundle(
 ) -> Result(ModuleBundle, ModuleError) {
   use entry_compiled <- result.try(compile_single(entry_specifier, entry_source))
   let modules = dict.from_list([#(entry_specifier, entry_compiled)])
-  let visited = set.from_list([entry_specifier])
   use modules <- result.map(resolve_and_compile_deps(
     entry_specifier,
     entry_compiled.requested_modules,
     resolve_and_load,
     modules,
-    visited,
   ))
   ModuleBundle(entry: entry_specifier, modules:)
 }
@@ -154,7 +152,6 @@ fn resolve_and_compile_deps(
   requested_modules: List(String),
   resolve_and_load: fn(String, String) -> Result(#(String, String), String),
   modules: Dict(String, CompiledModule),
-  visited: Set(String),
 ) -> Result(Dict(String, CompiledModule), ModuleError) {
   list.try_fold(requested_modules, modules, fn(modules, raw_dep) {
     // Skip builtin modules — they're not in the bundle
@@ -181,7 +178,7 @@ fn resolve_and_compile_deps(
                 resolved_path,
               )
             // Skip if already compiled (handles cycles + shared deps)
-            case set.contains(visited, resolved_path) {
+            case dict.has_key(modules, resolved_path) {
               True -> Ok(modules)
               False -> {
                 use dep_compiled <- result.try(compile_single(
@@ -189,13 +186,11 @@ fn resolve_and_compile_deps(
                   source,
                 ))
                 let modules = dict.insert(modules, resolved_path, dep_compiled)
-                let visited = set.insert(visited, resolved_path)
                 resolve_and_compile_deps(
                   resolved_path,
                   dep_compiled.requested_modules,
                   resolve_and_load,
                   modules,
-                  visited,
                 )
               }
             }
@@ -517,7 +512,7 @@ fn resolve_imports(
                     properties:,
                     elements: elements.new(),
                     prototype: None,
-                    symbol_properties: dict.new(),
+                    symbol_properties: [],
                     extensible: False,
                   ),
                 )
@@ -600,7 +595,7 @@ fn collect_exports(
                   properties:,
                   elements: elements.new(),
                   prototype: None,
-                  symbol_properties: dict.new(),
+                  symbol_properties: [],
                   extensible: False,
                 ),
               )

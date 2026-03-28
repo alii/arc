@@ -83,7 +83,7 @@ fn construct(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )

@@ -27,6 +27,16 @@ export function array_set(index, value, arr) {
 	return new Error(undefined);
 }
 
+export function array_unsafe_get(index, arr) {
+	return arr[index];
+}
+
+export function array_set_unchecked(index, value, arr) {
+	const copy = arr.slice();
+	copy[index] = value;
+	return copy;
+}
+
 export function array_size(arr) {
 	return arr.length;
 }
@@ -38,16 +48,6 @@ export function array_repeat(value, count) {
 		throw new globalThis.Error('array_too_large');
 	}
 	return new Array(count).fill(value);
-}
-
-export function array_grow(arr, new_size, default_) {
-	if (new_size > MAX_DENSE_ELEMENTS) {
-		throw new globalThis.Error('array_too_large');
-	}
-	if (new_size <= arr.length) return arr;
-	const grown = arr.slice();
-	for (let i = arr.length; i < new_size; i++) grown.push(default_);
-	return grown;
 }
 
 // -- tree_array: same JS Array backing, tracks default for unset slots -------
@@ -65,9 +65,12 @@ export function tree_array_get(index, { d, a }) {
 	if (index >= 0 && index < a.length) return a[index];
 	return d;
 }
-export function tree_array_get_option(index, { a }) {
-	if (index >= 0 && index < a.length) return new Some(a[index]);
-	return new None();
+export function tree_array_get_option(index, { d, a }) {
+	if (index < 0 || index >= a.length) return new None();
+	const v = a[index];
+	// Default-valued slot = hole. Gleam zero-arity constructors are singletons
+	// on the JS target, so === is correct for the JsUninitialized sentinel.
+	return v === d ? new None() : new Some(v);
 }
 export function tree_array_set(index, value, { d, a }) {
 	if (index < 0 || index >= MAX_DENSE_ELEMENTS) return { d, a };
@@ -82,6 +85,32 @@ export function tree_array_size({ a }) {
 export function tree_array_resize({ d, a }, new_size) {
 	if (new_size < 0) return { d, a };
 	return { d, a: a.slice(0, new_size) };
+}
+export function tree_array_reset(index, { d, a }) {
+	if (index < 0 || index >= a.length) return { d, a };
+	const copy = a.slice();
+	copy[index] = d;
+	return { d, a: copy };
+}
+export function tree_array_sparse_fold(f, acc, { d, a }) {
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== d) acc = f(i, a[i], acc);
+	}
+	return acc;
+}
+
+// -- job_queue: plain JS Array, O(1) push / O(n) shift (acceptable on JS target)
+
+export function job_queue_new() {
+	return [];
+}
+export function job_queue_push(q, item) {
+	return [...q, item];
+}
+export function job_queue_pop(q) {
+	if (q.length === 0) return new None();
+	const [head, ...rest] = q;
+	return new Some([head, rest]);
 }
 
 // -- Fast string indexing (codepoint-based, no grapheme clustering) ---------

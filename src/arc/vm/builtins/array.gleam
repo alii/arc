@@ -266,7 +266,7 @@ fn alloc_array(
         properties: dict.new(),
         elements:,
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -1188,7 +1188,7 @@ fn array_slice(
         properties: dict.new(),
         elements: copied,
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -1310,7 +1310,7 @@ fn array_concat(
             properties: dict.new(),
             elements: elems,
             prototype: Some(array_proto),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -2036,7 +2036,7 @@ fn finish_array(
             properties: dict.new(),
             elements:,
             prototype: Some(array_proto),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -3113,7 +3113,7 @@ fn array_splice(
         properties: dict.new(),
         elements: removed_elements,
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -3743,7 +3743,7 @@ fn array_from_loop(
             properties: dict.new(),
             elements: elements.from_list(vals),
             prototype: Some(array_proto),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -3810,7 +3810,7 @@ fn array_of(
         properties: dict.new(),
         elements: elements.from_list(args),
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -3904,7 +3904,7 @@ fn array_to_spliced(
         properties: dict.new(),
         elements: new_elements,
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -3987,7 +3987,7 @@ fn array_with(
             properties: dict.new(),
             elements: new_elements,
             prototype: Some(array_proto),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -4068,7 +4068,7 @@ fn to_sorted_default(
         properties: dict.new(),
         elements: new_elements,
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -4105,7 +4105,7 @@ fn to_sorted_with_comparefn(
         properties: dict.new(),
         elements: new_elements,
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -4166,7 +4166,7 @@ fn array_to_reversed(
         properties: dict.new(),
         elements: new_elements,
         prototype: Some(array_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -4304,7 +4304,7 @@ fn array_values(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(state.builtins.array_iterator_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )

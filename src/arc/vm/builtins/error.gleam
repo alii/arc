@@ -203,7 +203,7 @@ fn alloc_error(
         properties: props,
         elements: elements.new(),
         prototype: Some(proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )

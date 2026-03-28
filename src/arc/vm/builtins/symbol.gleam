@@ -33,7 +33,7 @@ pub fn init(
         ]),
         elements: elements.new(),
         prototype: Some(function_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -48,7 +48,7 @@ pub fn init(
         ]),
         elements: elements.new(),
         prototype: Some(function_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -86,7 +86,7 @@ pub fn init(
         ]),
         elements: elements.new(),
         prototype: Some(function_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )

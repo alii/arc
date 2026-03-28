@@ -1,11 +1,11 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/heap
+import arc/vm/internal/job_queue.{type JobQueue}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/limits
 import arc/vm/opcode.{type Op}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
 import gleam/dict
-import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/set
@@ -126,7 +126,7 @@ pub type State {
     call_args: List(JsValue),
     /// Promise microtask job queue. Jobs enqueued during promise operations,
     /// drained after script completes.
-    job_queue: List(value.Job),
+    job_queue: JobQueue(value.Job),
     /// ES2024 HostPromiseRejectionTracker: data_refs of promises rejected while
     /// [[PromiseIsHandled]] was false. Removed when a handler is later attached.
     /// Any remaining after job draining are reported as unhandled rejections.
@@ -189,7 +189,7 @@ pub fn merge_globals(
     ..parent,
     lexical_globals: child.lexical_globals,
     const_lexical_globals: child.const_lexical_globals,
-    job_queue: list.append(child.job_queue, extra_jobs),
+    job_queue: job_queue.append(child.job_queue, extra_jobs),
     pending_receivers: child.pending_receivers,
     outstanding: child.outstanding,
   )
@@ -323,8 +323,6 @@ pub type VmError {
   PcOutOfBounds(pc: Int)
   /// Stack underflow
   StackUnderflow(op: String)
-  /// Local variable index out of bounds
-  LocalIndexOutOfBounds(index: Int)
   /// Unimplemented opcode
   Unimplemented(op: String)
 }

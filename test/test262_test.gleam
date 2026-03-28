@@ -54,7 +54,7 @@ pub fn test262_run_test() {
           let #(pass_count, fail_count, failures) = acc
 
           // Progress counter every 500 tests
-          case idx % 500 {
+          let Nil = case idx % 500 {
             0 -> print_progress(idx, total, pass_count, fail_count)
             _ -> Nil
           }

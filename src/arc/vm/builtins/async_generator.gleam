@@ -9,7 +9,6 @@ import arc/vm/value.{
   type Ref, AsyncGeneratorNext, AsyncGeneratorReturn, AsyncGeneratorThrow,
   ObjectSlot,
 }
-import gleam/dict
 import gleam/option.{Some}
 
 /// Set up AsyncGenerator.prototype with .next/.return/.throw.
@@ -26,13 +25,12 @@ pub fn init(
       #("throw", AsyncGeneratorThrow, 1),
     ])
 
-  let symbol_properties =
-    dict.from_list([
-      #(
-        value.symbol_to_string_tag,
-        value.data(value.JsString("AsyncGenerator")) |> value.configurable(),
-      ),
-    ])
+  let symbol_properties = [
+    #(
+      value.symbol_to_string_tag,
+      value.data(value.JsString("AsyncGenerator")) |> value.configurable(),
+    ),
+  ]
 
   let #(h, proto) =
     heap.alloc(

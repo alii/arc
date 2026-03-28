@@ -86,13 +86,16 @@ fn build_label_map(
 }
 
 /// Pass 2: Walk the IR, resolve labels to PCs, translate IrOp → Op.
+/// Appends a sentinel Return at the end so the interpreter's fetch loop
+/// can use unchecked element/2 — termination happens via normal Return
+/// dispatch instead of Option/None detection on every instruction.
 fn resolve_ops(
   code: List(IrOp),
   labels: Dict(Int, Int),
   acc: List(Op),
 ) -> List(Op) {
   case code {
-    [] -> list.reverse(acc)
+    [] -> list.reverse([opcode.Return, ..acc])
 
     // Labels are dropped (they were just markers)
     [IrLabel(_), ..rest] -> resolve_ops(rest, labels, acc)

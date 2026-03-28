@@ -12,7 +12,6 @@ import arc/vm/value.{
   MathRandom, MathRound, MathSign, MathSin, MathSinh, MathSqrt, MathTan,
   MathTanh, MathTrunc, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
 }
-import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
@@ -73,13 +72,12 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
     ])
 
   let properties = common.named_props(list.append(methods, constants))
-  let symbol_properties =
-    dict.from_list([
-      #(
-        value.symbol_to_string_tag,
-        value.data(JsString("Math")) |> value.configurable(),
-      ),
-    ])
+  let symbol_properties = [
+    #(
+      value.symbol_to_string_tag,
+      value.data(JsString("Math")) |> value.configurable(),
+    ),
+  ]
 
   let #(h, math_ref) =
     heap.alloc(

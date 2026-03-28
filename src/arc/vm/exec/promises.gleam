@@ -2,6 +2,7 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/job_queue
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type StepResult, State, Thrown}
@@ -184,7 +185,7 @@ pub fn call_native_promise_resolve_fn(
             heap: h,
             stack: [JsUndefined, ..rest_stack],
             pc: state.pc + 1,
-            job_queue: list.append(state.job_queue, [job]),
+            job_queue: job_queue.push(state.job_queue, job),
           )
           |> Ok
         }
@@ -207,7 +208,7 @@ pub fn call_native_promise_resolve_fn(
             heap: h,
             stack: [JsUndefined, ..rest_stack],
             pc: state.pc + 1,
-            job_queue: list.append(state.job_queue, jobs),
+            job_queue: job_queue.append(state.job_queue, jobs),
           )
           |> Ok
         }
@@ -345,7 +346,7 @@ pub fn call_native_promise_finally(
             properties: dict.new(),
             elements: elements.new(),
             prototype: Some(state.builtins.function.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -360,7 +361,7 @@ pub fn call_native_promise_finally(
             properties: dict.new(),
             elements: elements.new(),
             prototype: Some(state.builtins.function.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -453,7 +454,7 @@ fn finally_chain_value(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(state.builtins.function.prototype),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -492,7 +493,7 @@ fn finally_chain_throw(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(state.builtins.function.prototype),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -549,7 +550,7 @@ pub fn call_native_promise_resolve_static(
               heap: h,
               stack: [JsObject(promise_ref), ..rest_stack],
               pc: state.pc + 1,
-              job_queue: list.append(state.job_queue, [job]),
+              job_queue: job_queue.push(state.job_queue, job),
             ),
           )
         }
@@ -573,7 +574,7 @@ pub fn call_native_promise_resolve_static(
               heap: h,
               stack: [JsObject(promise_ref), ..rest_stack],
               pc: state.pc + 1,
-              job_queue: list.append(state.job_queue, jobs),
+              job_queue: job_queue.append(state.job_queue, jobs),
             ),
           )
         }
@@ -655,7 +656,7 @@ pub fn call_native_promise_all(
               heap: h,
               stack: [JsObject(promise_ref), ..rest_stack],
               pc: state.pc + 1,
-              job_queue: list.append(state.job_queue, jobs),
+              job_queue: job_queue.append(state.job_queue, jobs),
             ),
           )
         }
@@ -737,7 +738,7 @@ fn promise_all_loop(
             ]),
             elements: elements.new(),
             prototype: Some(state.builtins.function.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -866,7 +867,7 @@ pub fn call_native_promise_all_settled(
               heap: h,
               stack: [JsObject(promise_ref), ..rest_stack],
               pc: state.pc + 1,
-              job_queue: list.append(state.job_queue, jobs),
+              job_queue: job_queue.append(state.job_queue, jobs),
             ),
           )
         }
@@ -943,7 +944,7 @@ fn promise_all_settled_loop(
             ]),
             elements: elements.new(),
             prototype: Some(state.builtins.function.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -967,7 +968,7 @@ fn promise_all_settled_loop(
             ]),
             elements: elements.new(),
             prototype: Some(state.builtins.function.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -1120,7 +1121,7 @@ fn promise_any_loop(
             ]),
             elements: elements.new(),
             prototype: Some(state.builtins.function.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -1206,7 +1207,7 @@ pub fn promise_resolve_and_then(
               State(
                 ..state,
                 heap: h,
-                job_queue: list.append(state.job_queue, [job]),
+                job_queue: job_queue.push(state.job_queue, job),
               ),
               wrap_data_ref,
               on_fulfilled,
@@ -1243,7 +1244,7 @@ pub fn promise_resolve_and_then(
             State(
               ..state,
               heap: h,
-              job_queue: list.append(state.job_queue, jobs),
+              job_queue: job_queue.append(state.job_queue, jobs),
             ),
             wrap_data_ref,
             on_fulfilled,
@@ -1555,7 +1556,7 @@ pub fn make_aggregate_error(
         ]),
         elements: elements.new(),
         prototype: Some(b.aggregate_error.prototype),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )

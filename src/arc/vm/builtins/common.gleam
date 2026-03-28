@@ -87,7 +87,7 @@ pub fn alloc_proto(
         properties:,
         elements: elements.new(),
         prototype:,
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -105,7 +105,7 @@ pub fn alloc_pojo(
     ObjectSlot(
       kind: OrdinaryObject,
       properties: named_props(props),
-      symbol_properties: dict.new(),
+      symbol_properties: [],
       elements: elements.new(),
       prototype: Some(object_proto),
       extensible: True,
@@ -154,7 +154,7 @@ fn alloc_native_fn_slot(
           #("name", fn_name_property(name)),
           #("length", fn_length_property(arity)),
         ]),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: Some(function_proto),
         extensible: True,
@@ -328,7 +328,7 @@ pub fn init_type(
         )),
         elements: elements.new(),
         prototype: Some(function_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -344,7 +344,7 @@ pub fn init_type(
         properties: named_props(proto_properties(ctor_ref, proto_props)),
         elements: elements.new(),
         prototype: Some(parent_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -365,7 +365,7 @@ pub fn add_symbol_property(
       ObjectSlot(symbol_properties:, ..) ->
         ObjectSlot(
           ..slot,
-          symbol_properties: dict.insert(symbol_properties, symbol, prop),
+          symbol_properties: list.key_set(symbol_properties, symbol, prop),
         )
       other -> other
     }
@@ -397,7 +397,7 @@ pub fn init_type_on(
         properties: named_props(ctor_properties(proto, name, arity, ctor_props)),
         elements: elements.new(),
         prototype: Some(function_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -472,7 +472,7 @@ fn alloc_error(
         elements: elements.new(),
         // Step 2: [[Prototype]] set to the NativeError prototype
         prototype: Some(proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -595,7 +595,7 @@ fn alloc_wrapper(
       properties: dict.new(),
       elements: elements.new(),
       prototype: Some(proto),
-      symbol_properties: dict.new(),
+      symbol_properties: [],
       extensible: True,
     ),
   )
@@ -637,7 +637,7 @@ pub fn alloc_array(
       elements: elements.from_list(values),
       // Step 5: [[Prototype]] = proto
       prototype: Some(array_proto),
-      symbol_properties: dict.new(),
+      symbol_properties: [],
       // Step 4: [[Extensible]] = true
       extensible: True,
     ),

@@ -86,12 +86,12 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       ObjectSlot(
         kind: OrdinaryObject,
         properties: dict.new(),
-        symbol_properties: dict.from_list([
+        symbol_properties: [
           #(
             value.symbol_iterator,
             value.builtin_property(JsObject(iterator_symbol_iterator)),
           ),
-        ]),
+        ],
         elements: elements.new(),
         prototype: Some(object_proto),
         extensible: True,
@@ -110,13 +110,13 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       ObjectSlot(
         kind: OrdinaryObject,
         properties: common.named_props(array_iter_methods),
-        symbol_properties: dict.from_list([
+        symbol_properties: [
           #(
             value.symbol_to_string_tag,
             value.data(value.JsString("Array Iterator"))
               |> value.configurable(),
           ),
-        ]),
+        ],
         elements: elements.new(),
         prototype: Some(iterator_proto),
         extensible: True,
@@ -144,12 +144,12 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       ObjectSlot(
         kind: OrdinaryObject,
         properties: dict.new(),
-        symbol_properties: dict.from_list([
+        symbol_properties: [
           #(
             value.symbol_async_iterator,
             value.builtin_property(JsObject(async_iter_sym_fn)),
           ),
-        ]),
+        ],
         elements: elements.new(),
         prototype: Some(object_proto),
         extensible: True,
@@ -364,7 +364,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
       ObjectSlot(
         kind: OrdinaryObject,
         properties:,
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: Some(b.object.prototype),
         extensible: True,

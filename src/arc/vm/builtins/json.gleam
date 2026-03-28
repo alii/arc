@@ -32,13 +32,12 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
     ])
 
   let properties = common.named_props(methods)
-  let symbol_properties =
-    dict.from_list([
-      #(
-        value.symbol_to_string_tag,
-        value.data(JsString("JSON")) |> value.configurable(),
-      ),
-    ])
+  let symbol_properties = [
+    #(
+      value.symbol_to_string_tag,
+      value.data(JsString("JSON")) |> value.configurable(),
+    ),
+  ]
 
   let #(h, json_ref) =
     heap.alloc(
@@ -442,7 +441,7 @@ fn materialize(h: Heap, b: common.Builtins, val: JsonValue) -> #(Heap, JsValue) 
             properties: dict.from_list(props),
             elements: elements.new(),
             prototype: Some(b.object.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )

@@ -1,6 +1,7 @@
 -module(test_runner_ffi).
 
--export([get_env/1, run_with_timeout/2, list_files/1, run_parallel/2]).
+-export([get_env/1, run_with_timeout/2, list_files/1, run_parallel/2,
+         counter_reset/1, counter_bump/1, counter_read/1]).
 
 %% Read an environment variable. Returns {ok, Value} or {error, nil}.
 get_env(Name) ->
@@ -92,3 +93,21 @@ progress(Done, Total, Pass, Fail, true) ->
     end;
 progress(_Done, _Total, _Pass, _Fail, false) ->
     ok.
+
+%% --- Process-dictionary counters (for counting side effects in tests) ---
+
+counter_reset(Key) -> erlang:put({test_counter, Key}, 0), nil.
+
+counter_bump(Key) ->
+    N = case erlang:get({test_counter, Key}) of
+        undefined -> 0;
+        V -> V
+    end,
+    erlang:put({test_counter, Key}, N + 1),
+    nil.
+
+counter_read(Key) ->
+    case erlang:get({test_counter, Key}) of
+        undefined -> 0;
+        V -> V
+    end.

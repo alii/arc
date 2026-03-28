@@ -9,7 +9,6 @@ import arc/vm/internal/elements
 import arc/vm/value.{
   type Ref, GeneratorNext, GeneratorReturn, GeneratorThrow, ObjectSlot,
 }
-import gleam/dict
 import gleam/option.{Some}
 
 /// Set up Generator.prototype with .next(), .return(), .throw() methods.
@@ -27,13 +26,12 @@ pub fn init(
       #("throw", GeneratorThrow, 1),
     ])
 
-  let symbol_properties =
-    dict.from_list([
-      #(
-        value.symbol_to_string_tag,
-        value.data(value.JsString("Generator")) |> value.configurable(),
-      ),
-    ])
+  let symbol_properties = [
+    #(
+      value.symbol_to_string_tag,
+      value.data(value.JsString("Generator")) |> value.configurable(),
+    ),
+  ]
 
   let #(h, gen_proto) =
     heap.alloc(

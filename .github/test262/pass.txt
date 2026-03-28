@@ -359,6 +359,8 @@ built-ins/Array/prototype/concat/S15.4.4.4_A1_T4.js
 built-ins/Array/prototype/concat/S15.4.4.4_A2_T1.js
 built-ins/Array/prototype/concat/S15.4.4.4_A2_T2.js
 built-ins/Array/prototype/concat/S15.4.4.4_A3_T1.js
+built-ins/Array/prototype/concat/S15.4.4.4_A3_T2.js
+built-ins/Array/prototype/concat/S15.4.4.4_A3_T3.js
 built-ins/Array/prototype/concat/create-non-array.js
 built-ins/Array/prototype/concat/create-proto-from-ctor-realm-array.js
 built-ins/Array/prototype/concat/create-species-null.js
@@ -469,10 +471,12 @@ built-ins/Array/prototype/every/15.4.4.16-7-1.js
 built-ins/Array/prototype/every/15.4.4.16-7-2.js
 built-ins/Array/prototype/every/15.4.4.16-7-3.js
 built-ins/Array/prototype/every/15.4.4.16-7-4.js
+built-ins/Array/prototype/every/15.4.4.16-7-5.js
 built-ins/Array/prototype/every/15.4.4.16-7-6.js
 built-ins/Array/prototype/every/15.4.4.16-7-7.js
 built-ins/Array/prototype/every/15.4.4.16-7-8.js
 built-ins/Array/prototype/every/15.4.4.16-7-9.js
+built-ins/Array/prototype/every/15.4.4.16-7-b-1.js
 built-ins/Array/prototype/every/15.4.4.16-7-b-10.js
 built-ins/Array/prototype/every/15.4.4.16-7-b-11.js
 built-ins/Array/prototype/every/15.4.4.16-7-b-12.js
@@ -670,10 +674,12 @@ built-ins/Array/prototype/filter/15.4.4.20-9-1.js
 built-ins/Array/prototype/filter/15.4.4.20-9-2.js
 built-ins/Array/prototype/filter/15.4.4.20-9-3.js
 built-ins/Array/prototype/filter/15.4.4.20-9-4.js
+built-ins/Array/prototype/filter/15.4.4.20-9-5.js
 built-ins/Array/prototype/filter/15.4.4.20-9-6.js
 built-ins/Array/prototype/filter/15.4.4.20-9-7.js
 built-ins/Array/prototype/filter/15.4.4.20-9-8.js
 built-ins/Array/prototype/filter/15.4.4.20-9-9.js
+built-ins/Array/prototype/filter/15.4.4.20-9-b-1.js
 built-ins/Array/prototype/filter/15.4.4.20-9-b-10.js
 built-ins/Array/prototype/filter/15.4.4.20-9-b-11.js
 built-ins/Array/prototype/filter/15.4.4.20-9-b-12.js
@@ -930,10 +936,12 @@ built-ins/Array/prototype/forEach/15.4.4.18-5-9.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-1.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-2.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-3.js
+built-ins/Array/prototype/forEach/15.4.4.18-7-4.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-5.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-7.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-8.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-9.js
+built-ins/Array/prototype/forEach/15.4.4.18-7-b-1.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-b-10.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-b-11.js
 built-ins/Array/prototype/forEach/15.4.4.18-7-b-12.js
@@ -1435,10 +1443,12 @@ built-ins/Array/prototype/map/15.4.4.19-8-1.js
 built-ins/Array/prototype/map/15.4.4.19-8-2.js
 built-ins/Array/prototype/map/15.4.4.19-8-3.js
 built-ins/Array/prototype/map/15.4.4.19-8-4.js
+built-ins/Array/prototype/map/15.4.4.19-8-5.js
 built-ins/Array/prototype/map/15.4.4.19-8-6.js
 built-ins/Array/prototype/map/15.4.4.19-8-7.js
 built-ins/Array/prototype/map/15.4.4.19-8-8.js
 built-ins/Array/prototype/map/15.4.4.19-8-9.js
+built-ins/Array/prototype/map/15.4.4.19-8-b-1.js
 built-ins/Array/prototype/map/15.4.4.19-8-b-10.js
 built-ins/Array/prototype/map/15.4.4.19-8-b-11.js
 built-ins/Array/prototype/map/15.4.4.19-8-b-12.js
@@ -1660,6 +1670,7 @@ built-ins/Array/prototype/reduce/15.4.4.21-8-b-iii-1-7.js
 built-ins/Array/prototype/reduce/15.4.4.21-8-b-iii-1-8.js
 built-ins/Array/prototype/reduce/15.4.4.21-8-b-iii-1-9.js
 built-ins/Array/prototype/reduce/15.4.4.21-8-c-1.js
+built-ins/Array/prototype/reduce/15.4.4.21-8-c-2.js
 built-ins/Array/prototype/reduce/15.4.4.21-8-c-3.js
 built-ins/Array/prototype/reduce/15.4.4.21-8-c-4.js
 built-ins/Array/prototype/reduce/15.4.4.21-9-1.js
@@ -1878,6 +1889,7 @@ built-ins/Array/prototype/reduceRight/15.4.4.22-8-b-iii-1-7.js
 built-ins/Array/prototype/reduceRight/15.4.4.22-8-b-iii-1-8.js
 built-ins/Array/prototype/reduceRight/15.4.4.22-8-b-iii-1-9.js
 built-ins/Array/prototype/reduceRight/15.4.4.22-8-c-1.js
+built-ins/Array/prototype/reduceRight/15.4.4.22-8-c-2.js
 built-ins/Array/prototype/reduceRight/15.4.4.22-8-c-3.js
 built-ins/Array/prototype/reduceRight/15.4.4.22-8-c-4.js
 built-ins/Array/prototype/reduceRight/15.4.4.22-9-1.js
@@ -2128,9 +2140,11 @@ built-ins/Array/prototype/some/15.4.4.17-7-1.js
 built-ins/Array/prototype/some/15.4.4.17-7-2.js
 built-ins/Array/prototype/some/15.4.4.17-7-3.js
 built-ins/Array/prototype/some/15.4.4.17-7-4.js
+built-ins/Array/prototype/some/15.4.4.17-7-5.js
 built-ins/Array/prototype/some/15.4.4.17-7-6.js
 built-ins/Array/prototype/some/15.4.4.17-7-8.js
 built-ins/Array/prototype/some/15.4.4.17-7-9.js
+built-ins/Array/prototype/some/15.4.4.17-7-b-1.js
 built-ins/Array/prototype/some/15.4.4.17-7-b-10.js
 built-ins/Array/prototype/some/15.4.4.17-7-b-11.js
 built-ins/Array/prototype/some/15.4.4.17-7-b-12.js
@@ -2361,7 +2375,6 @@ built-ins/Array/prototype/toSpliced/deleteCount-undefined.js
 built-ins/Array/prototype/toSpliced/discarded-element-not-read.js
 built-ins/Array/prototype/toSpliced/elements-read-in-order.js
 built-ins/Array/prototype/toSpliced/frozen-this-value.js
-built-ins/Array/prototype/toSpliced/holes-not-preserved.js
 built-ins/Array/prototype/toSpliced/ignores-species.js
 built-ins/Array/prototype/toSpliced/immutable.js
 built-ins/Array/prototype/toSpliced/length-casted-to-zero.js
@@ -2408,7 +2421,6 @@ built-ins/Array/prototype/values/returns-iterator-from-object.js
 built-ins/Array/prototype/values/returns-iterator.js
 built-ins/Array/prototype/values/this-val-non-obj-coercible.js
 built-ins/Array/prototype/with/frozen-this-value.js
-built-ins/Array/prototype/with/holes-not-preserved.js
 built-ins/Array/prototype/with/ignores-species.js
 built-ins/Array/prototype/with/immutable.js
 built-ins/Array/prototype/with/index-casted-to-number.js
@@ -24451,6 +24463,7 @@ staging/sm/Array/lastIndexOf-never-returns-negative-zero.js
 staging/sm/Array/length-01.js
 staging/sm/Array/length-truncate-with-indexed.js
 staging/sm/Array/pop-nonarray-higher-elements.js
+staging/sm/Array/regress-386030.js
 staging/sm/Array/regress-424954.js
 staging/sm/Array/regress-566651.js
 staging/sm/Array/regress-599159.js

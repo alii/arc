@@ -50,3 +50,14 @@ pub fn size(arr: TreeArray(a)) -> Int
 @external(erlang, "arc_vm_ffi", "tree_array_resize")
 @external(javascript, "../arc_vm_ffi.mjs", "tree_array_resize")
 pub fn resize(arr: TreeArray(a), new_size: Int) -> TreeArray(a)
+
+/// Reset slot to default value (creates a hole). O(log n).
+@external(erlang, "arc_vm_ffi", "tree_array_reset")
+@external(javascript, "../arc_vm_ffi.mjs", "tree_array_reset")
+pub fn reset(index: Int, arr: TreeArray(a)) -> TreeArray(a)
+
+/// Fold over non-default entries only, in ascending index order. Skips holes.
+/// O(k) where k is the number of set entries.
+@external(erlang, "arc_vm_ffi", "tree_array_sparse_fold")
+@external(javascript, "../arc_vm_ffi.mjs", "tree_array_sparse_fold")
+pub fn sparse_fold(f: fn(Int, a, b) -> b, initial: b, arr: TreeArray(a)) -> b

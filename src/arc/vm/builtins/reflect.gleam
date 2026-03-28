@@ -15,7 +15,6 @@ import arc/vm/value.{
   ReflectSet, ReflectSetPrototypeOf,
 }
 import gleam/bool
-import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 
@@ -49,13 +48,12 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
     ])
 
   let properties = common.named_props(methods)
-  let symbol_properties =
-    dict.from_list([
-      #(
-        value.symbol_to_string_tag,
-        value.data(JsString("Reflect")) |> value.configurable(),
-      ),
-    ])
+  let symbol_properties = [
+    #(
+      value.symbol_to_string_tag,
+      value.data(JsString("Reflect")) |> value.configurable(),
+    ),
+  ]
 
   let #(h, reflect_ref) =
     heap.alloc(
@@ -278,21 +276,14 @@ fn reflect_delete_property(
 fn delete_symbol_prop(h: Heap, ref: Ref, sym: value.SymbolId) -> #(Heap, Bool) {
   case heap.read(h, ref) {
     Some(ObjectSlot(symbol_properties:, ..) as slot) ->
-      case dict.get(symbol_properties, sym) {
-        Ok(value.DataProperty(configurable: True, ..))
-        | Ok(value.AccessorProperty(configurable: True, ..)) -> #(
-          heap.write(
-            h,
-            ref,
-            ObjectSlot(
-              ..slot,
-              symbol_properties: dict.delete(symbol_properties, sym),
-            ),
-          ),
+      case list.key_pop(symbol_properties, sym) {
+        Ok(#(value.DataProperty(configurable: True, ..), rest))
+        | Ok(#(value.AccessorProperty(configurable: True, ..), rest)) -> #(
+          heap.write(h, ref, ObjectSlot(..slot, symbol_properties: rest)),
           True,
         )
         Ok(_) -> #(h, False)
-        Error(_) -> #(h, True)
+        Error(Nil) -> #(h, True)
       }
     _ -> #(h, True)
   }
@@ -357,7 +348,7 @@ fn reflect_get_own_property_descriptor(
       Ok(#(
         case heap.read(state.heap, ref) {
           Some(ObjectSlot(symbol_properties:, ..)) ->
-            dict.get(symbol_properties, sym) |> option.from_result
+            list.key_find(symbol_properties, sym) |> option.from_result
           _ -> None
         },
         state,

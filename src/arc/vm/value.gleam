@@ -233,15 +233,20 @@ pub type JsValue {
   JsUninitialized
 }
 
-/// Dual-representation JS array elements.
+/// Tri-representation JS array elements.
 ///
+/// None: zero-cost empty. Every non-array object (functions, promises, maps,
+/// plain objects) starts here and never allocates element storage.
 /// Dense: Erlang's `array` module — O(log n) get/set, ~5× tuple memory.
 /// Sequential append is n·log(n) not n² (tuple set is O(n) copy on BEAM).
+/// Holes are represented as unset slots (default = JsUninitialized sentinel),
+/// so `delete arr[i]` stays dense via array:reset instead of O(n) dict promotion.
 /// Sparse: Dict — O(log n) get/set, ~75× tuple memory. Only for arrays with
-/// huge gaps (e.g. `a[100000] = 1`) or deleted elements (holes).
+/// huge index gaps (e.g. `a[100000] = 1` on an empty array).
 ///
 /// Operations on this type are in `arc/vm/internal/elements`.
 pub type JsElements {
+  NoElements
   DenseElements(data: TreeArray(JsValue))
   SparseElements(data: Dict(Int, JsValue))
 }
@@ -544,6 +549,26 @@ pub fn js_to_map_key(val: JsValue) -> MapKey {
   }
 }
 
+/// Inverse of js_to_map_key. Lossless except for the -0 → +0 normalization,
+/// which is exactly what ES2024 §24.1.3.9 step 4 requires ("If key is -0𝔽,
+/// set key to +0𝔽"). Used by Map forEach/entries to reconstruct the original
+/// JS key without needing a second Dict(MapKey, JsValue) lookup table.
+pub fn map_key_to_js(key: MapKey) -> JsValue {
+  case key {
+    StringKey(s) -> JsString(s)
+    NumberKey(f) -> JsNumber(Finite(f))
+    NanKey -> JsNumber(NaN)
+    InfinityKey -> JsNumber(Infinity)
+    NegInfinityKey -> JsNumber(NegInfinity)
+    BoolKey(b) -> JsBool(b)
+    NullKey -> JsNull
+    UndefinedKey -> JsUndefined
+    ObjectKey(ref) -> JsObject(ref)
+    SymbolKey(id) -> JsSymbol(id)
+    BigIntKey(bi) -> JsBigInt(bi)
+  }
+}
+
 /// Map methods — constructor, prototype methods, size getter.
 pub type MapNativeFn {
   MapConstructor(proto: Ref)
@@ -828,16 +853,23 @@ pub type ExoticKind(ctx) {
   TimerObject(timer_ref: ErlangTimerRef, data_ref: Ref)
   /// Map object — ES2024 §24.1 Map Objects.
   /// Stores key-value pairs using SameValueZero equality.
-  /// The `data` dict maps normalized MapKey → JsValue.
-  /// `keys` preserves insertion order for iteration/forEach.
-  /// `original_keys` maps MapKey back to the original JsValue (for forEach/entries).
+  /// `entries` maps normalized MapKey → value. Original JS keys are
+  /// reconstructed via `map_key_to_js` (lossless inverse modulo -0→+0, which
+  /// §24.1.3.9 step 4 mandates anyway), so no second dict is needed.
+  /// `keys_rev` is insertion order REVERSED so set() is O(1) prepend instead
+  /// of O(n) append; iteration points reverse once on read. Deleted keys stay
+  /// in the list as tombstones (skipped at iteration via dict lookup) — delete
+  /// is O(log n) dict-only. `keys_len` tracks list length for O(1) compaction
+  /// checks; when it exceeds 2× dict.size we rebuild to drop tombstones/dupes.
   MapObject(
-    data: Dict(MapKey, JsValue),
-    keys: List(MapKey),
-    original_keys: Dict(MapKey, JsValue),
+    entries: Dict(MapKey, JsValue),
+    keys_rev: List(MapKey),
+    keys_len: Int,
   )
   /// Set object — ES2024 §24.2 Set Objects.
   /// Stores unique values using SameValueZero equality.
+  /// `keys` is stored in REVERSE insertion order so Set.prototype.add is O(1)
+  /// prepend instead of O(n) append; iteration points reverse once on read.
   SetObject(data: Dict(MapKey, JsValue), keys: List(MapKey))
   /// WeakMap object — ES2024 §24.3 WeakMap Objects.
   /// Uses object refs as keys. No iteration, no size.
@@ -1071,7 +1103,9 @@ pub type HeapSlot(ctx) {
     properties: Dict(PropertyKey, Property),
     elements: JsElements,
     prototype: Option(Ref),
-    symbol_properties: Dict(SymbolId, Property),
+    /// Keyword list, not Dict — preserves ES §10.1.11 property-creation order
+    /// and `[]` is a zero-alloc shared atom (99% of objects have no symbol props).
+    symbol_properties: List(#(SymbolId, Property)),
     extensible: Bool,
   )
   /// Flat environment state. Multiple closures in the same scope reference
@@ -1229,7 +1263,8 @@ pub fn heap_slot_to_string(slot: HeapSlot(ctx)) -> String {
             "symbol properties:",
 
             "\n"
-              <> dict.fold(symbol_properties, [], fn(acc, key, property) {
+              <> list.fold(symbol_properties, [], fn(acc, pair) {
+              let #(key, property) = pair
               [
                 [
                   string.inspect(key),
@@ -1299,9 +1334,12 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
         dict.values(properties)
         |> list.flat_map(refs_in_property)
       let sym_prop_refs =
-        dict.values(symbol_properties)
-        |> list.flat_map(refs_in_property)
+        list.flat_map(symbol_properties, fn(pair) {
+          let #(_, prop) = pair
+          refs_in_property(prop)
+        })
       let elem_refs = case elements {
+        NoElements -> []
         DenseElements(data) ->
           tree_array.to_list(data) |> list.flat_map(refs_in_value)
         SparseElements(data) ->
@@ -1354,12 +1392,15 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
         GeneratorObject(generator_data:) -> [generator_data]
         AsyncGeneratorObject(generator_data:) -> [generator_data]
         ArrayIteratorObject(source:, ..) -> [source]
-        MapObject(data:, original_keys:, ..) -> {
+        MapObject(entries:, keys_rev:, keys_len: _) -> {
           // Trace refs in map values
-          let value_refs = dict.values(data) |> list.flat_map(refs_in_value)
-          // Trace refs in original keys (object keys are JsObject(ref))
+          let value_refs =
+            dict.values(entries) |> list.flat_map(refs_in_value)
+          // Trace refs in keys (object keys hold heap refs). Reconstruct
+          // original JsValue via map_key_to_js — the -0→+0 normalization
+          // doesn't affect ref tracing since numbers carry no refs.
           let key_refs =
-            dict.values(original_keys) |> list.flat_map(refs_in_value)
+            list.flat_map(keys_rev, fn(k) { refs_in_value(map_key_to_js(k)) })
           list.append(value_refs, key_refs)
         }
         SetObject(data:, ..) -> {

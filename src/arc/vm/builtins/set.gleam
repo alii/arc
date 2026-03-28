@@ -5,7 +5,8 @@
 ///
 /// Stores values in a Dict(MapKey, JsValue) + List(MapKey) for insertion order.
 /// The dict maps normalized MapKey → original JsValue.
-/// The keys list preserves insertion order for forEach.
+/// The keys list is stored in REVERSE insertion order so add() is O(1) prepend;
+/// iteration points call list.reverse() once to recover forward order.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg}
 import arc/vm/heap
@@ -154,7 +155,7 @@ fn construct(
         False -> #(dict.insert(d, key, val), [key, ..ks])
       }
     })
-  let keys = list.reverse(keys)
+  // keys accumulated via prepend = reverse insertion order, which is our storage invariant
 
   let #(heap, ref) =
     heap.alloc(
@@ -164,7 +165,7 @@ fn construct(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(set_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -229,7 +230,7 @@ fn set_add(
   let new_data = dict.insert(data, key, val)
   let new_keys = case dict.has_key(data, key) {
     True -> keys
-    False -> list.append(keys, [key])
+    False -> [key, ..keys]
   }
   let heap = update_set(state.heap, ref, new_data, new_keys)
   #(State(..state, heap:), Ok(this))
@@ -255,10 +256,15 @@ fn set_delete(
   use data, keys, ref, state <- require_set(this, state)
   let key = value.js_to_map_key(first_arg(args))
   let had = dict.has_key(data, key)
-  let new_data = dict.delete(data, key)
-  let new_keys = list.filter(keys, fn(k) { k != key })
-  let heap = update_set(state.heap, ref, new_data, new_keys)
-  #(State(..state, heap:), Ok(JsBool(had)))
+  case had {
+    False -> #(state, Ok(JsBool(False)))
+    True -> {
+      let new_data = dict.delete(data, key)
+      let new_keys = list.filter(keys, fn(k) { k != key })
+      let heap = update_set(state.heap, ref, new_data, new_keys)
+      #(State(..state, heap:), Ok(JsBool(True)))
+    }
+  }
 }
 
 /// ES2024 §24.2.3.2 Set.prototype.clear ()
@@ -294,7 +300,8 @@ fn set_for_each(
       )
     True -> {
       let entries =
-        list.filter_map(keys, fn(key) {
+        list.reverse(keys)
+        |> list.filter_map(fn(key) {
           dict.get(data, key) |> result.map(fn(v) { #(key, v) })
         })
       for_each_loop(state, entries, callback, this_arg, this)
@@ -331,10 +338,10 @@ fn set_union(
   case require_set_like(first_arg(args), state) {
     Error(r) -> r
     Ok(#(other_data, other_keys, state)) -> {
-      // Start with this set's entries, then add entries from other.
-      // Accumulate new keys by prepending (O(1)), reverse once at the end.
-      let #(result_data, new_keys_rev) =
-        list.fold(other_keys, #(data, []), fn(acc, key) {
+      // Keys stored reversed. Iterate other's keys in forward insertion order
+      // and prepend new ones onto this's reversed keys — result stays reversed.
+      let #(result_data, result_keys) =
+        list.fold(list.reverse(other_keys), #(data, keys), fn(acc, key) {
           let #(d, ks) = acc
           case dict.has_key(d, key) {
             True -> #(d, ks)
@@ -345,7 +352,6 @@ fn set_union(
               }
           }
         })
-      let result_keys = list.append(keys, list.reverse(new_keys_rev))
       alloc_new_set(state, result_data, result_keys)
     }
   }
@@ -415,6 +421,10 @@ fn set_symmetric_difference(
   case require_set_like(first_arg(args), state) {
     Error(r) -> r
     Ok(#(other_data, other_keys, state)) -> {
+      // Keys stored reversed — flip to forward for ordered accumulation.
+      // Prepending forward-order elements yields reversed output = storage invariant.
+      let keys = list.reverse(keys)
+      let other_keys = list.reverse(other_keys)
       // Start with elements in this but not other
       let #(result_data, result_keys) =
         list.fold(keys, #(dict.new(), []), fn(acc, key) {
@@ -441,7 +451,7 @@ fn set_symmetric_difference(
             True -> #(d, ks)
           }
         })
-      alloc_new_set(state, result_data, list.reverse(result_keys))
+      alloc_new_set(state, result_data, result_keys)
     }
   }
 }
@@ -506,7 +516,8 @@ fn set_is_disjoint_from(
 fn set_values(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
   use data, keys, _ref, state <- require_set(this, state)
   let values =
-    list.filter_map(keys, fn(key) {
+    list.reverse(keys)
+    |> list.filter_map(fn(key) {
       dict.get(data, key) |> result.replace_error(Nil)
     })
   let #(heap, arr_ref) =
@@ -517,7 +528,7 @@ fn set_values(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue))
         properties: dict.new(),
         elements: elements.from_list(values),
         prototype: None,
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -544,7 +555,7 @@ fn set_entries(
                 properties: dict.new(),
                 elements: elements.from_list([v, v]),
                 prototype: None,
-                symbol_properties: dict.new(),
+                symbol_properties: [],
                 extensible: True,
               ),
             )
@@ -559,9 +570,10 @@ fn set_entries(
       ObjectSlot(
         kind: ArrayObject(list.length(entries)),
         properties: dict.new(),
-        elements: elements.from_list(list.reverse(entries)),
+        // keys stored reversed + fold-prepend = forward order, no reverse needed
+        elements: elements.from_list(entries),
         prototype: None,
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -582,7 +594,7 @@ fn alloc_new_set(
         properties: dict.new(),
         elements: elements.new(),
         prototype: None,
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )

@@ -288,7 +288,7 @@ fn call_generator_function(
             properties: dict.new(),
             elements: elements.new(),
             prototype: Some(state.builtins.generator.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -329,7 +329,7 @@ fn call_generator_function(
             properties: dict.new(),
             elements: elements.new(),
             prototype: Some(state.builtins.generator.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -412,7 +412,7 @@ fn call_async_generator_function(
             properties: dict.new(),
             elements: elements.new(),
             prototype: Some(state.builtins.async_generator.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -593,7 +593,7 @@ fn async_setup_await(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(builtins.function.prototype),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -607,7 +607,7 @@ fn async_setup_await(
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(builtins.function.prototype),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -884,7 +884,7 @@ pub fn call_native(
                 ]),
                 elements: elements.new(),
                 prototype: Some(state.builtins.function.prototype),
-                symbol_properties: dict.new(),
+                symbol_properties: [],
                 extensible: True,
               ),
             )
@@ -1335,7 +1335,7 @@ pub fn do_construct(
                 properties: dict.new(),
                 elements: elements.new(),
                 prototype: proto,
-                symbol_properties: dict.new(),
+                symbol_properties: [],
                 extensible: True,
               ),
             )
@@ -1451,7 +1451,7 @@ pub fn construct_value(
             properties: dict.new(),
             elements: elements.new(),
             prototype: proto,
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )

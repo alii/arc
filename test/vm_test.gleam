@@ -19,6 +19,7 @@ import arc/vm/value.{
   type FuncTemplate, AccessorProperty, DataProperty, Finite, FuncTemplate,
   JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
 }
+import gleam/list
 import gleam/option.{None, Some}
 
 /// Test helper: read a data property walking the prototype chain.
@@ -44,6 +45,9 @@ fn make_func(
   constants: List(value.JsValue),
   local_count: Int,
 ) -> FuncTemplate {
+  // Append sentinel Return so the interpreter's unchecked fetch terminates.
+  // (Mirrors what resolve.gleam does for compiled code.)
+  let bytecode = list.append(bytecode, [Return])
   FuncTemplate(
     name: None,
     arity: 0,
@@ -611,19 +615,9 @@ pub fn stack_underflow_test() {
   let assert Error(state.StackUnderflow("Pop")) = run_simple([Pop], [])
 }
 
-pub fn local_out_of_bounds_test() {
-  let func = make_func([GetLocal(5)], [], 1)
-  let assert Error(state.LocalIndexOutOfBounds(5)) = run_func(func)
-}
-
 // ============================================================================
 // JS-level thrown errors (ThrowCompletion, not VmError)
 // ============================================================================
-
-pub fn const_out_of_bounds_throws_range_error_test() {
-  // Constant index out of bounds now throws a RangeError (JS object)
-  let assert Ok(JsObject(_)) = run_throwing([PushConst(99)], [])
-}
 
 pub fn throw_without_catch_test() {
   // throw "boom" => ThrowCompletion with "boom" string

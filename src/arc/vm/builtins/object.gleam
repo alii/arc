@@ -232,7 +232,7 @@ fn call_native(
           ObjectSlot(
             kind: OrdinaryObject,
             properties: dict.new(),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             elements: elements.new(),
             prototype: Some(object_proto),
             extensible: True,
@@ -366,7 +366,7 @@ pub fn make_descriptor_object(
             // Step 6: "configurable"
             #("configurable", value.data_property(JsBool(configurable))),
           ]),
-          symbol_properties: dict.new(),
+          symbol_properties: [],
           elements: elements.new(),
           prototype: Some(object_proto),
           extensible: True,
@@ -392,7 +392,7 @@ pub fn make_descriptor_object(
             // Step 6: "configurable"
             #("configurable", value.data_property(JsBool(configurable))),
           ]),
-          symbol_properties: dict.new(),
+          symbol_properties: [],
           elements: elements.new(),
           prototype: Some(object_proto),
           extensible: True,
@@ -565,7 +565,7 @@ pub fn apply_descriptor(
     )) -> {
       let existing = case dkey {
         StringKey(pkey:, ..) -> dict.get(properties, pkey)
-        SymbolKey(sym:) -> dict.get(symbol_properties, sym)
+        SymbolKey(sym:) -> list.key_find(symbol_properties, sym)
       }
       let key = case dkey {
         StringKey(display:, ..) -> display
@@ -790,7 +790,7 @@ pub fn apply_descriptor(
         )
         SymbolKey(sym:) -> #(
           properties,
-          dict.insert(symbol_properties, sym, new_prop),
+          list.key_set(symbol_properties, sym, new_prop),
         )
       }
       let h =
@@ -988,9 +988,8 @@ pub fn collect_own_keys(
     Some(ObjectSlot(kind:, properties:, elements:, ..)) -> {
       // Step 1: Array index keys in ascending numeric order
       let index_keys = case kind {
-        ArrayObject(length:) -> collect_index_keys(elements, 0, length, [])
-        value.ArgumentsObject(length:) ->
-          collect_index_keys(elements, 0, length, [])
+        ArrayObject(length:) -> collect_index_keys(elements, length)
+        value.ArgumentsObject(length:) -> collect_index_keys(elements, length)
         _ -> []
       }
       // Step 2: Non-index string property keys (with optional enumerable filter)
@@ -1033,24 +1032,14 @@ pub fn collect_own_keys(
 /// Only includes indices where the element actually exists (not holes).
 /// This correctly handles sparse arrays: [1,,3] has indices "0" and "2" but
 /// not "1", matching the spec behavior where holes are not own properties.
-fn collect_index_keys(
-  elements: JsElements,
-  idx: Int,
-  length: Int,
-  acc: List(String),
-) -> List(String) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False ->
-      case elements.has(elements, idx) {
-        True ->
-          collect_index_keys(elements, idx + 1, length, [
-            int.to_string(idx),
-            ..acc
-          ])
-        False -> collect_index_keys(elements, idx + 1, length, acc)
-      }
-  }
+///
+/// Iterates elements.indices() (O(k)) instead of probing 0..length — a sparse
+/// array with length=1e9 and one entry now completes instantly instead of
+/// hitting the max_iteration RangeError workaround.
+fn collect_index_keys(elements: JsElements, length: Int) -> List(String) {
+  elements.indices(elements)
+  |> list.filter(fn(idx) { idx < length })
+  |> list.map(int.to_string)
 }
 
 /// [[HasProperty]] — §7.3.11. Walks the prototype chain looking for a string key.
@@ -1296,7 +1285,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
 fn get_to_string_tag(heap: Heap, ref: Ref) -> option.Option(String) {
   case heap.read(heap, ref) {
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
-      case dict.get(symbol_properties, value.symbol_to_string_tag) {
+      case list.key_find(symbol_properties, value.symbol_to_string_tag) {
         Ok(DataProperty(value: JsString(tag), ..)) -> Some(tag)
         _ ->
           case prototype {
@@ -1570,7 +1559,7 @@ fn create(
           ObjectSlot(
             kind: OrdinaryObject,
             properties: dict.new(),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             elements: elements.new(),
             prototype:,
             extensible: True,
@@ -1867,7 +1856,7 @@ pub fn collect_own_symbol_keys(
 ) -> List(value.SymbolId) {
   case heap.read(heap, ref) {
     Some(ObjectSlot(symbol_properties:, ..)) ->
-      dict.to_list(symbol_properties)
+      symbol_properties
       |> list.filter_map(fn(pair) {
         let #(sym, prop) = pair
         case enumerable_only {
@@ -2213,8 +2202,8 @@ fn freeze(
               properties: dict.map_values(properties, fn(_, p) {
                 freeze_prop(p)
               }),
-              symbol_properties: dict.map_values(symbol_properties, fn(_, p) {
-                freeze_prop(p)
+              symbol_properties: list.map(symbol_properties, fn(pair) {
+                #(pair.0, freeze_prop(pair.1))
               }),
               // §7.3.16 step 1: O.[[PreventExtensions]]()
               extensible: False,
@@ -2274,17 +2263,15 @@ fn prevent_extensions(
 ///   4.b.ii. If currentDesc.[[Configurable]] is true, return false.
 ///
 /// Returns True only if ALL properties satisfy the frozen constraint.
-fn all_frozen(props: dict.Dict(k, value.Property)) -> Bool {
-  dict.values(props)
-  |> list.all(fn(p) {
-    case p {
-      // §7.3.17 step 4.b.i + 4.b.ii: data prop must be non-writable AND non-configurable.
-      DataProperty(writable: False, configurable: False, ..) -> True
-      // §7.3.17 step 4.b.ii: accessor prop must be non-configurable.
-      AccessorProperty(configurable: False, ..) -> True
-      _ -> False
-    }
-  })
+fn all_frozen(props: List(value.Property)) -> Bool {
+  use p <- list.all(props)
+  case p {
+    // §7.3.17 step 4.b.i + 4.b.ii: data prop must be non-writable AND non-configurable.
+    DataProperty(writable: False, configurable: False, ..) -> True
+    // §7.3.17 step 4.b.ii: accessor prop must be non-configurable.
+    AccessorProperty(configurable: False, ..) -> True
+    _ -> False
+  }
 }
 
 /// Object.isFrozen ( O ) — ES2024 §20.1.2.14
@@ -2316,7 +2303,8 @@ fn is_frozen(
         Some(ObjectSlot(properties:, symbol_properties:, extensible: False, ..)) ->
           // §7.3.17 step 2: extensible is false, proceed to step 4.
           // §7.3.17 step 4: check each own property descriptor.
-          all_frozen(properties) && all_frozen(symbol_properties)
+          all_frozen(dict.values(properties))
+          && all_frozen(list.map(symbol_properties, fn(p) { p.1 }))
         // §7.3.17 step 2: extensible is true → return false.
         Some(ObjectSlot(extensible: True, ..)) -> False
         _ -> False
@@ -2375,8 +2363,8 @@ fn seal(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue))
             ObjectSlot(
               ..slot,
               properties: dict.map_values(properties, fn(_, p) { seal_prop(p) }),
-              symbol_properties: dict.map_values(symbol_properties, fn(_, p) {
-                seal_prop(p)
+              symbol_properties: list.map(symbol_properties, fn(pair) {
+                #(pair.0, seal_prop(pair.1))
               }),
               extensible: False,
             )
@@ -2416,7 +2404,8 @@ fn is_sealed(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(properties:, symbol_properties:, extensible: False, ..)) ->
-          all_sealed(properties) && all_sealed(symbol_properties)
+          all_sealed(dict.values(properties))
+          && all_sealed(list.map(symbol_properties, fn(p) { p.1 }))
         Some(ObjectSlot(extensible: True, ..)) -> False
         _ -> False
       }
@@ -2426,15 +2415,13 @@ fn is_sealed(
 }
 
 /// Check if all properties are non-configurable (sealed check).
-fn all_sealed(props: dict.Dict(k, value.Property)) -> Bool {
-  dict.values(props)
-  |> list.all(fn(p) {
-    case p {
-      DataProperty(configurable: False, ..) -> True
-      AccessorProperty(configurable: False, ..) -> True
-      _ -> False
-    }
-  })
+fn all_sealed(props: List(value.Property)) -> Bool {
+  use p <- list.all(props)
+  case p {
+    DataProperty(configurable: False, ..) -> True
+    AccessorProperty(configurable: False, ..) -> True
+    _ -> False
+  }
 }
 
 /// Object.fromEntries ( iterable ) — ES2024 §20.1.2.8
@@ -2472,7 +2459,7 @@ fn from_entries(
           // Iterate over array elements to build object properties.
           // Use a list accumulator to preserve insertion order.
           let entry_values = elements.values(elements)
-          from_entries_loop(entry_values, state, [], dict.new())
+          from_entries_loop(entry_values, state, [], [])
         }
         _ -> state.type_error(state, "Object.fromEntries requires an iterable")
       }
@@ -2489,7 +2476,7 @@ fn from_entries_loop(
   entries: List(JsValue),
   state: State,
   str_acc: List(#(String, value.Property)),
-  sym_acc: dict.Dict(value.SymbolId, value.Property),
+  sym_acc: List(#(value.SymbolId, value.Property)),
 ) -> #(State, Result(JsValue, JsValue)) {
   case entries {
     [] -> {
@@ -2527,7 +2514,7 @@ fn from_entries_loop(
             rest,
             state,
             str_acc,
-            dict.insert(sym_acc, sym, value.data_property(val)),
+            list.key_set(sym_acc, sym, value.data_property(val)),
           )
         _ -> {
           // ToPropertyKey via ToString for non-symbol keys.
@@ -2582,7 +2569,7 @@ fn get_own_property_descriptors(
               ObjectSlot(
                 kind: OrdinaryObject,
                 properties: desc_props,
-                symbol_properties: dict.new(),
+                symbol_properties: [],
                 elements: elements.new(),
                 prototype: Some(object_proto),
                 extensible: True,
@@ -2763,7 +2750,7 @@ fn group_by_loop(
             properties: dict.from_list(props),
             elements: elements.new(),
             prototype: None,
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )

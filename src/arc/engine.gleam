@@ -103,7 +103,7 @@ pub fn define_namespace(
       ObjectSlot(
         kind: OrdinaryObject,
         properties: common.named_props(props),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: Some(engine.builtins.object.prototype),
         extensible: True,
@@ -229,8 +229,6 @@ fn vm_error_message(err: state.VmError) -> String {
   case err {
     state.PcOutOfBounds(pc) -> "pc out of bounds: " <> string.inspect(pc)
     state.StackUnderflow(op) -> "stack underflow in " <> op
-    state.LocalIndexOutOfBounds(i) ->
-      "local index out of bounds: " <> string.inspect(i)
     state.Unimplemented(op) -> "unimplemented opcode: " <> op
   }
 }

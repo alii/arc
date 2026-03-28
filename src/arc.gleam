@@ -128,8 +128,8 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
               <> "]"
             PidObject(pid:) -> "Pid" <> builtins_arc.ffi_pid_to_string(pid)
             value.TimerObject(..) -> "Timer {}"
-            value.MapObject(data:, ..) ->
-              "Map(" <> int.to_string(dict.size(data)) <> ")"
+            value.MapObject(entries:, ..) ->
+              "Map(" <> int.to_string(dict.size(entries)) <> ")"
             value.SetObject(data:, ..) ->
               "Set(" <> int.to_string(dict.size(data)) <> ")"
             value.WeakMapObject(_) -> "WeakMap {}"
@@ -189,12 +189,12 @@ fn inspect_function(
 fn inspect_tagged_object(
   h: Heap,
   properties: dict.Dict(value.PropertyKey, value.Property),
-  symbol_properties: dict.Dict(value.SymbolId, value.Property),
+  symbol_properties: List(#(value.SymbolId, value.Property)),
   depth: Int,
   seen: set.Set(Int),
 ) -> String {
   let body = inspect_plain_object(h, properties, depth, seen)
-  case dict.get(symbol_properties, value.symbol_to_string_tag) {
+  case list.key_find(symbol_properties, value.symbol_to_string_tag) {
     Ok(DataProperty(value: value.JsString(t), ..)) ->
       "Object [" <> t <> "] " <> body
     _ -> body
@@ -238,8 +238,6 @@ fn inspect_vm_error(vm_err: state.VmError) -> String {
   case vm_err {
     state.PcOutOfBounds(pc) -> "PC out of bounds: " <> int.to_string(pc)
     state.StackUnderflow(op) -> "stack underflow at " <> op
-    state.LocalIndexOutOfBounds(idx) ->
-      "local index out of bounds: " <> int.to_string(idx)
     state.Unimplemented(op) -> "unimplemented: " <> op
   }
 }

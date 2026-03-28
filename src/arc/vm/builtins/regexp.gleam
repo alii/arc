@@ -205,19 +205,19 @@ pub fn init(
           ObjectSlot(
             ..slot,
             symbol_properties: sp
-              |> dict.insert(
+              |> list.key_set(
                 value.symbol_match,
                 value.builtin_property(JsObject(match_fn)),
               )
-              |> dict.insert(
+              |> list.key_set(
                 value.symbol_replace,
                 value.builtin_property(JsObject(replace_fn)),
               )
-              |> dict.insert(
+              |> list.key_set(
                 value.symbol_search,
                 value.builtin_property(JsObject(search_fn)),
               )
-              |> dict.insert(
+              |> list.key_set(
                 value.symbol_split,
                 value.builtin_property(JsObject(split_fn)),
               ),
@@ -309,7 +309,7 @@ pub fn alloc_regexp(
       ]),
       elements: elements.new(),
       prototype: Some(regexp_proto),
-      symbol_properties: dict.new(),
+      symbol_properties: [],
       extensible: True,
     ),
   )

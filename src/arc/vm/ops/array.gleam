@@ -63,21 +63,16 @@ pub fn assign_non_hole_indices(
 ///
 /// Related to ES2024 §10.4.2.4 ArraySetLength — when length is increased
 /// without setting an element, the spec allows holes (missing properties)
-/// in the index range. Dense backing must be sparsified so the hole
-/// survives later ArrayPush appends (otherwise the dense tuple would
-/// fill the gap with undefined, violating hole semantics for methods
-/// like forEach/map that skip holes per §23.1.3).
+/// in the index range. DenseElements represents holes natively via its
+/// JsUninitialized default, so no representation change is needed — the
+/// gap between old length and new length is implicitly a hole. Later
+/// ArrayPush appends past the hole leave it intact (tree_array default
+/// slots stay unset). forEach/map correctly skip these per §23.1.3.
 pub fn grow_array_length(h: Heap, ref: Ref) -> Heap {
   use slot <- heap.update(h, ref)
   case slot {
-    ObjectSlot(kind: ArrayObject(length:), elements:, ..) -> {
-      // Force sparse representation so the hole survives later appends.
-      let elements = case elements {
-        value.DenseElements(_) -> elements.delete(elements, length)
-        value.SparseElements(_) -> elements
-      }
-      ObjectSlot(..slot, kind: ArrayObject(length + 1), elements:)
-    }
+    ObjectSlot(kind: ArrayObject(length:), ..) ->
+      ObjectSlot(..slot, kind: ArrayObject(length + 1))
     _ -> slot
   }
 }

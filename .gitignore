@@ -6,6 +6,6 @@ erl_crash.dump
 !/vendor/test262-parser-tests
 !/vendor/test262
 .DS_Store
-*PLAN.md
 .github/test262/results.json
 node_modules
+.local

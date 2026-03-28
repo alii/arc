@@ -606,8 +606,9 @@ fn gen_with_state(gen: GenData, new_state: value.GeneratorState) -> HeapSlot {
 /// saved_stack). YieldStar keeps pc unchanged on yield, so this check is
 /// exact — no extra delegate slot needed.
 fn delegate_iterator(gen: GenData) -> Option(Ref) {
-  case tuple_array.get(gen.saved_pc, gen.func_template.bytecode) {
-    Some(YieldStar) ->
+  // saved_pc was a valid dispatch target — always in bounds.
+  case tuple_array.unsafe_get(gen.saved_pc, gen.func_template.bytecode) {
+    YieldStar ->
       case gen.saved_stack {
         [JsObject(iter_ref), ..] -> Some(iter_ref)
         _ -> None
@@ -858,8 +859,9 @@ fn find_next_finally(
   case try_stack {
     [] -> None
     [TryFrame(catch_target:, stack_depth:), ..rest] ->
-      case tuple_array.get(catch_target, code) {
-        Some(EnterFinallyThrow) -> Some(#(catch_target, stack_depth, rest))
+      // catch_target is a compiler-resolved label PC — always in bounds.
+      case tuple_array.unsafe_get(catch_target, code) {
+        EnterFinallyThrow -> Some(#(catch_target, stack_depth, rest))
         _ -> find_next_finally(code, rest)
       }
   }
@@ -1021,7 +1023,7 @@ pub fn create_iterator_result(
         ]),
         elements: elements.new(),
         prototype: Some(builtins.object.prototype),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )

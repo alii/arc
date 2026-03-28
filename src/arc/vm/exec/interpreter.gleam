@@ -9,6 +9,7 @@ import arc/vm/exec/event_loop
 import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
@@ -33,8 +34,8 @@ import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
   type Heap, type NativeFnSlot, type State, type StepResult, type VmError,
-  Awaited, Done, LocalIndexOutOfBounds, SavedFrame, StackUnderflow, State,
-  StepVmError, Thrown, TryFrame, Unimplemented, Yielded,
+  Awaited, Done, SavedFrame, StackUnderflow, State, StepVmError, Thrown,
+  TryFrame, Unimplemented, Yielded,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
@@ -98,15 +99,16 @@ fn construct_fn_callback(
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   case target {
     JsObject(ref) -> {
-      let empty_code = tuple_array.from_list([])
-      // Sentinel func with no bytecode — SavedFrame stores this, so Return
-      // restores empty code and execute_inner terminates immediately.
+      // Sentinel bytecode: do_construct saves pc+1 into the SavedFrame (or
+      // advances pc+1 for native constructors), so we need Return at index 1.
+      // Index 0 is never dispatched but present for belt-and-braces.
+      let sentinel_code = tuple_array.from_list([Return, Return])
       let sentinel_func =
         value.FuncTemplate(
           name: None,
           arity: 0,
           local_count: 0,
-          bytecode: empty_code,
+          bytecode: sentinel_code,
           constants: tuple_array.from_list([]),
           functions: tuple_array.from_list([]),
           env_descriptors: [],
@@ -123,7 +125,7 @@ fn construct_fn_callback(
           stack: [],
           pc: 0,
           func: sentinel_func,
-          code: empty_code,
+          code: sentinel_code,
           call_stack: [],
           try_stack: [],
           finally_stack: [],
@@ -207,7 +209,7 @@ pub fn new_state(
     this_binding: JsUndefined,
     callee_ref: None,
     call_args: [],
-    job_queue: [],
+    job_queue: job_queue.new(),
     unhandled_rejections: [],
     pending_receivers: [],
     outstanding: 0,
@@ -262,70 +264,64 @@ pub fn init_state(
 
 /// Main execution loop. Tail-recursive.
 /// Returns the completion and the final state (for job queue access).
+///
+/// Every bytecode stream ends with a sentinel Return (appended by
+/// resolve.gleam), so fetch uses unchecked element/2 — no Option box,
+/// no bounds check. Termination flows through the Return handler.
 pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
-  case tuple_array.get(state.pc, state.code) {
-    None -> {
-      // Reached end of bytecode — return top of stack or undefined
-      case state.stack {
-        [top, ..] -> Ok(#(NormalCompletion(top, state.heap), state))
-        [] -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
+  let op = tuple_array.unsafe_get(state.pc, state.code)
+  case step(state, op) {
+    Ok(new_state) -> execute_inner(new_state)
+    Error(#(Done, result, heap)) ->
+      Ok(#(NormalCompletion(result, heap), State(..state, heap:)))
+    Error(#(StepVmError(err), _, _)) -> Error(err)
+    Error(#(Yielded, yielded_value, heap)) -> {
+      // Generator yielded — build suspended state.
+      // For Yield: pop the yielded value from stack, advance pc.
+      // For YieldStar: pop arg (keep iter), DON'T advance pc — resume
+      //   re-executes YieldStar with [resume_val, iter, ..].
+      // For InitialYield: stack unchanged, just advance pc.
+      let suspended_state = case op {
+        Yield ->
+          State(
+            ..state,
+            heap:,
+            stack: case state.stack {
+              [_, ..rest] -> rest
+              [] -> []
+            },
+            pc: state.pc + 1,
+          )
+        YieldStar ->
+          State(..state, heap:, stack: case state.stack {
+            [_arg, ..rest] -> rest
+            [] -> []
+          })
+        _ -> State(..state, heap:, pc: state.pc + 1)
       }
+      Ok(#(YieldCompletion(yielded_value, heap), suspended_state))
     }
-    Some(op) -> {
-      case step(state, op) {
-        Ok(new_state) -> execute_inner(new_state)
-        Error(#(Done, result, heap)) ->
-          Ok(#(NormalCompletion(result, heap), State(..state, heap:)))
-        Error(#(StepVmError(err), _, _)) -> Error(err)
-        Error(#(Yielded, yielded_value, heap)) -> {
-          // Generator yielded — build suspended state.
-          // For Yield: pop the yielded value from stack, advance pc.
-          // For YieldStar: pop arg (keep iter), DON'T advance pc — resume
-          //   re-executes YieldStar with [resume_val, iter, ..].
-          // For InitialYield: stack unchanged, just advance pc.
-          let suspended_state = case op {
-            Yield ->
-              State(
-                ..state,
-                heap:,
-                stack: case state.stack {
-                  [_, ..rest] -> rest
-                  [] -> []
-                },
-                pc: state.pc + 1,
-              )
-            YieldStar ->
-              State(..state, heap:, stack: case state.stack {
-                [_arg, ..rest] -> rest
-                [] -> []
-              })
-            _ -> State(..state, heap:, pc: state.pc + 1)
-          }
-          Ok(#(YieldCompletion(yielded_value, heap), suspended_state))
-        }
-        Error(#(Awaited, awaited_value, heap)) -> {
-          // Async function/generator hit await — pop value, advance pc.
-          let suspended_state =
-            State(
-              ..state,
-              heap:,
-              stack: case state.stack {
-                [_, ..rest] -> rest
-                [] -> []
-              },
-              pc: state.pc + 1,
-            )
-          Ok(#(AwaitCompletion(awaited_value, heap), suspended_state))
-        }
-        Error(#(Thrown, thrown_value, heap)) -> {
-          // Try to unwind to a catch handler
-          let updated_state = State(..state, heap:)
-          case unwind_to_catch(updated_state, thrown_value) {
-            Some(caught_state) -> execute_inner(caught_state)
-            None ->
-              Ok(#(ThrowCompletion(thrown_value, heap), State(..state, heap:)))
-          }
-        }
+    Error(#(Awaited, awaited_value, heap)) -> {
+      // Async function/generator hit await — pop value, advance pc.
+      let suspended_state =
+        State(
+          ..state,
+          heap:,
+          stack: case state.stack {
+            [_, ..rest] -> rest
+            [] -> []
+          },
+          pc: state.pc + 1,
+        )
+      Ok(#(AwaitCompletion(awaited_value, heap), suspended_state))
+    }
+    Error(#(Thrown, thrown_value, heap)) -> {
+      // Try to unwind to a catch handler
+      let updated_state = State(..state, heap:)
+      case unwind_to_catch(updated_state, thrown_value) {
+        Some(caught_state) -> execute_inner(caught_state)
+        None ->
+          Ok(#(ThrowCompletion(thrown_value, heap), State(..state, heap:)))
       }
     }
   }
@@ -532,16 +528,8 @@ fn step_stack(
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
   case op {
     PushConst(index) -> {
-      case tuple_array.get(index, state.constants) {
-        Some(value) ->
-          Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-        None -> {
-          state.throw_range_error(
-            state,
-            "constant index out of bounds: " <> int.to_string(index),
-          )
-        }
-      }
+      let value = tuple_array.unsafe_get(index, state.constants)
+      Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
     }
 
     Pop -> {
@@ -585,44 +573,22 @@ fn step_locals(
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
   case op {
     GetLocal(index) -> {
-      case tuple_array.get(index, state.locals) {
-        Some(JsUninitialized) -> {
+      case tuple_array.unsafe_get(index, state.locals) {
+        JsUninitialized ->
           state.throw_reference_error(
             state,
             "Cannot access variable before initialization (TDZ)",
           )
-        }
-        Some(value) ->
+        value ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-        None ->
-          Error(#(
-            StepVmError(LocalIndexOutOfBounds(index)),
-            JsUndefined,
-            state.heap,
-          ))
       }
     }
 
     PutLocal(index) -> {
       case state.stack {
         [value, ..rest] -> {
-          case tuple_array.set(index, value, state.locals) {
-            Ok(new_locals) ->
-              Ok(
-                State(
-                  ..state,
-                  stack: rest,
-                  locals: new_locals,
-                  pc: state.pc + 1,
-                ),
-              )
-            Error(_) ->
-              Error(#(
-                StepVmError(LocalIndexOutOfBounds(index)),
-                JsUndefined,
-                state.heap,
-              ))
-          }
+          let locals = tuple_array.set_unchecked(index, value, state.locals)
+          Ok(State(..state, stack: rest, locals:, pc: state.pc + 1))
         }
         [] ->
           Error(#(
@@ -634,35 +600,17 @@ fn step_locals(
     }
 
     BoxLocal(index) -> {
-      // Wrap the current value in locals[index] into a BoxSlot on the heap.
-      // Replace the local with a JsObject(box_ref).
-      case tuple_array.get(index, state.locals) {
-        Some(current_value) -> {
-          let #(heap, box_ref) =
-            heap.alloc(state.heap, value.BoxSlot(current_value))
-          case tuple_array.set(index, JsObject(box_ref), state.locals) {
-            Ok(locals) -> Ok(State(..state, heap:, locals:, pc: state.pc + 1))
-            Error(_) ->
-              Error(#(
-                StepVmError(LocalIndexOutOfBounds(index)),
-                JsUndefined,
-                heap,
-              ))
-          }
-        }
-        None ->
-          Error(#(
-            StepVmError(LocalIndexOutOfBounds(index)),
-            JsUndefined,
-            state.heap,
-          ))
-      }
+      let current_value = tuple_array.unsafe_get(index, state.locals)
+      let #(heap, box_ref) =
+        heap.alloc(state.heap, value.BoxSlot(current_value))
+      let locals =
+        tuple_array.set_unchecked(index, JsObject(box_ref), state.locals)
+      Ok(State(..state, heap:, locals:, pc: state.pc + 1))
     }
 
     GetBoxed(index) -> {
-      // Read locals[index] (a JsObject(box_ref)), dereference BoxSlot, push value.
-      case tuple_array.get(index, state.locals) {
-        Some(JsObject(box_ref)) ->
+      case tuple_array.unsafe_get(index, state.locals) {
+        JsObject(box_ref) ->
           case heap.read_box(state.heap, box_ref) {
             Some(val) ->
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
@@ -683,11 +631,10 @@ fn step_locals(
     }
 
     PutBoxed(index) -> {
-      // Pop value from stack, write into the BoxSlot pointed to by locals[index].
       case state.stack {
         [new_value, ..rest_stack] -> {
-          case tuple_array.get(index, state.locals) {
-            Some(JsObject(box_ref)) -> {
+          case tuple_array.unsafe_get(index, state.locals) {
+            JsObject(box_ref) -> {
               let heap =
                 heap.write(state.heap, box_ref, value.BoxSlot(new_value))
               Ok(State(..state, heap:, stack: rest_stack, pc: state.pc + 1))
@@ -1525,7 +1472,7 @@ fn step_objects(
             properties: dict.new(),
             elements: elements.new(),
             prototype: Some(state.builtins.object.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: [],
             extensible: True,
           ),
         )
@@ -1960,7 +1907,7 @@ fn step_arrays(
                 properties: dict.new(),
                 elements: elements.from_list(elements),
                 prototype: Some(state.builtins.array.prototype),
-                symbol_properties: dict.new(),
+                symbol_properties: [],
                 extensible: True,
               ),
             )
@@ -2000,7 +1947,7 @@ fn step_arrays(
                 properties: dict.new(),
                 elements: elements.from_indexed(indexed),
                 prototype: Some(state.builtins.array.prototype),
-                symbol_properties: dict.new(),
+                symbol_properties: [],
                 extensible: True,
               ),
             )
@@ -2373,7 +2320,7 @@ fn step_calls(
                             properties: dict.new(),
                             elements: elements.new(),
                             prototype: derived_proto,
-                            symbol_properties: dict.new(),
+                            symbol_properties: [],
                             extensible: True,
                           ),
                         )
@@ -2499,116 +2446,105 @@ fn step_calls(
     }
 
     MakeClosure(func_index) -> {
-      case tuple_array.get(func_index, state.func.functions) {
-        Some(child_template) -> {
-          // Capture values from current frame according to env_descriptors.
-          // For boxed captured vars, the local holds a JsObject(box_ref) —
-          // copying that ref means the closure shares the same BoxSlot.
-          let captured_values =
-            list.map(child_template.env_descriptors, fn(desc) {
-              case desc {
-                value.CaptureLocal(parent_index) ->
-                  tuple_array.get(parent_index, state.locals)
-                  |> option.unwrap(JsUndefined)
-                value.CaptureEnv(_parent_env_index) ->
-                  // Transitive capture not yet implemented
-                  JsUndefined
-              }
-            })
-          let #(heap, env_ref) =
-            heap.alloc(state.heap, value.EnvSlot(captured_values))
-          // For non-arrow functions, pre-populate .prototype with a fresh object
-          // so that `Foo.prototype.bar = ...` and `new Foo()` work.
-          // .constructor on prototype is set after we have the closure ref.
-          let name_prop =
-            common.fn_name_property(option.unwrap(child_template.name, ""))
-          let length_prop = common.fn_length_property(child_template.arity)
-          let #(heap, fn_properties, proto_ref) = case child_template.is_arrow {
-            True -> #(
-              heap,
-              dict.from_list([
-                #(Named("name"), name_prop),
-                #(Named("length"), length_prop),
-              ]),
-              None,
-            )
-            False -> {
-              let #(h, proto_obj_ref) =
-                heap.alloc(
-                  heap,
-                  ObjectSlot(
-                    kind: OrdinaryObject,
-                    properties: dict.new(),
-                    elements: elements.new(),
-                    prototype: Some(state.builtins.object.prototype),
-                    symbol_properties: dict.new(),
-                    extensible: True,
-                  ),
-                )
-              #(
-                h,
-                dict.from_list([
-                  #(
-                    Named("prototype"),
-                    value.data(JsObject(proto_obj_ref)) |> value.writable(),
-                  ),
-                  #(Named("name"), name_prop),
-                  #(Named("length"), length_prop),
-                ]),
-                Some(proto_obj_ref),
-              )
-            }
+      // Compiler-generated index into the function table — always in bounds.
+      let child_template =
+        tuple_array.unsafe_get(func_index, state.func.functions)
+      // Capture values from current frame according to env_descriptors.
+      // For boxed captured vars, the local holds a JsObject(box_ref) —
+      // copying that ref means the closure shares the same BoxSlot.
+      let captured_values =
+        list.map(child_template.env_descriptors, fn(desc) {
+          case desc {
+            value.CaptureLocal(parent_index) ->
+              tuple_array.unsafe_get(parent_index, state.locals)
+            value.CaptureEnv(_parent_env_index) ->
+              // Transitive capture not yet implemented
+              JsUndefined
           }
-          let #(heap, closure_ref) =
+        })
+      let #(heap, env_ref) =
+        heap.alloc(state.heap, value.EnvSlot(captured_values))
+      // For non-arrow functions, pre-populate .prototype with a fresh object
+      // so that `Foo.prototype.bar = ...` and `new Foo()` work.
+      // .constructor on prototype is set after we have the closure ref.
+      let name_prop =
+        common.fn_name_property(option.unwrap(child_template.name, ""))
+      let length_prop = common.fn_length_property(child_template.arity)
+      let #(heap, fn_properties, proto_ref) = case child_template.is_arrow {
+        True -> #(
+          heap,
+          dict.from_list([
+            #(Named("name"), name_prop),
+            #(Named("length"), length_prop),
+          ]),
+          None,
+        )
+        False -> {
+          let #(h, proto_obj_ref) =
             heap.alloc(
               heap,
               ObjectSlot(
-                kind: FunctionObject(
-                  func_template: child_template,
-                  env: env_ref,
-                ),
-                properties: fn_properties,
+                kind: OrdinaryObject,
+                properties: dict.new(),
                 elements: elements.new(),
-                prototype: Some(state.builtins.function.prototype),
-                symbol_properties: dict.new(),
+                prototype: Some(state.builtins.object.prototype),
+                symbol_properties: [],
                 extensible: True,
               ),
             )
-          // Set .constructor on the prototype pointing back to this function
-          let heap = case proto_ref {
-            Some(pr) -> {
-              use slot <- heap.update(heap, pr)
-              case slot {
-                ObjectSlot(properties: props, ..) ->
-                  ObjectSlot(
-                    ..slot,
-                    properties: dict.insert(
-                      props,
-                      Named("constructor"),
-                      value.builtin_property(JsObject(closure_ref)),
-                    ),
-                  )
-                _ -> slot
-              }
-            }
-            None -> heap
-          }
-          Ok(
-            State(
-              ..state,
-              heap:,
-              stack: [JsObject(closure_ref), ..state.stack],
-              pc: state.pc + 1,
-            ),
-          )
-        }
-        None -> {
-          state.throw_range_error(
-            state,
-            "invalid function index: " <> int.to_string(func_index),
+          #(
+            h,
+            dict.from_list([
+              #(
+                Named("prototype"),
+                value.data(JsObject(proto_obj_ref)) |> value.writable(),
+              ),
+              #(Named("name"), name_prop),
+              #(Named("length"), length_prop),
+            ]),
+            Some(proto_obj_ref),
           )
         }
       }
+      let #(heap, closure_ref) =
+        heap.alloc(
+          heap,
+          ObjectSlot(
+            kind: FunctionObject(func_template: child_template, env: env_ref),
+            properties: fn_properties,
+            elements: elements.new(),
+            prototype: Some(state.builtins.function.prototype),
+            symbol_properties: [],
+            extensible: True,
+          ),
+        )
+      // Set .constructor on the prototype pointing back to this function
+      let heap = case proto_ref {
+        Some(pr) -> {
+          use slot <- heap.update(heap, pr)
+          case slot {
+            ObjectSlot(properties: props, ..) ->
+              ObjectSlot(
+                ..slot,
+                properties: dict.insert(
+                  props,
+                  Named("constructor"),
+                  value.builtin_property(JsObject(closure_ref)),
+                ),
+              )
+            _ -> slot
+          }
+        }
+        None -> heap
+      }
+      Ok(
+        State(
+          ..state,
+          heap:,
+          stack: [JsObject(closure_ref), ..state.stack],
+          pc: state.pc + 1,
+        ),
+      )
     }
 
     _ ->
@@ -3054,12 +2990,11 @@ fn step_special(
         heap.read(state.heap, state.builtins.array.prototype)
       {
         Some(ObjectSlot(symbol_properties: arr_syms, ..)) ->
-          case dict.get(arr_syms, value.symbol_iterator) {
-            Ok(values_fn) ->
-              dict.from_list([#(value.symbol_iterator, values_fn)])
-            Error(Nil) -> dict.new()
+          case list.key_find(arr_syms, value.symbol_iterator) {
+            Ok(values_fn) -> [#(value.symbol_iterator, values_fn)]
+            Error(Nil) -> []
           }
-        _ -> dict.new()
+        _ -> []
       }
       let #(heap, ref) =
         heap.alloc(
@@ -3392,7 +3327,7 @@ fn alloc_array_iterator(
       properties: dict.new(),
       elements: elements.new(),
       prototype: Some(builtins.array_iterator_proto),
-      symbol_properties: dict.new(),
+      symbol_properties: [],
       extensible: True,
     ),
   )

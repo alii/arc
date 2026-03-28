@@ -780,7 +780,7 @@ pub fn define_symbol_accessor(
   use slot <- heap.update(heap, ref)
   case slot {
     ObjectSlot(symbol_properties:, ..) -> {
-      let existing = dict.get(symbol_properties, sym)
+      let existing = list.key_find(symbol_properties, sym)
       let new_prop = case kind {
         opcode.Getter ->
           case existing {
@@ -819,7 +819,7 @@ pub fn define_symbol_accessor(
       }
       ObjectSlot(
         ..slot,
-        symbol_properties: dict.insert(symbol_properties, sym, new_prop),
+        symbol_properties: list.key_set(symbol_properties, sym, new_prop),
       )
     }
     _ -> slot
@@ -835,7 +835,7 @@ pub fn get_own_symbol_property(
 ) -> Option(Property) {
   case heap.read(heap, ref) {
     Some(ObjectSlot(symbol_properties:, ..)) ->
-      dict.get(symbol_properties, sym) |> option.from_result
+      list.key_find(symbol_properties, sym) |> option.from_result
     _ -> None
   }
 }
@@ -845,9 +845,9 @@ pub fn get_own_symbol_property(
 pub fn has_symbol_property(heap: Heap, ref: Ref, sym: SymbolId) -> Bool {
   case heap.read(heap, ref) {
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
-      case dict.has_key(symbol_properties, sym) {
-        True -> True
-        False ->
+      case list.key_find(symbol_properties, sym) {
+        Ok(_) -> True
+        Error(Nil) ->
           case prototype {
             Some(proto_ref) -> has_symbol_property(heap, proto_ref, sym)
             None -> False
@@ -906,18 +906,14 @@ pub fn delete_symbol_property(
 ) -> #(Heap, Bool) {
   case heap.read(h, ref) {
     Some(ObjectSlot(symbol_properties:, ..) as slot) ->
-      case dict.get(symbol_properties, sym) {
-        Ok(value.DataProperty(configurable: False, ..))
-        | Ok(value.AccessorProperty(configurable: False, ..)) -> #(h, False)
-        Ok(_) -> #(
-          heap.write(
-            h,
-            ref,
-            ObjectSlot(
-              ..slot,
-              symbol_properties: dict.delete(symbol_properties, sym),
-            ),
-          ),
+      case list.key_pop(symbol_properties, sym) {
+        Ok(#(value.DataProperty(configurable: False, ..), _))
+        | Ok(#(value.AccessorProperty(configurable: False, ..), _)) -> #(
+          h,
+          False,
+        )
+        Ok(#(_, rest)) -> #(
+          heap.write(h, ref, ObjectSlot(..slot, symbol_properties: rest)),
           True,
         )
         Error(Nil) -> #(h, True)
@@ -1034,7 +1030,7 @@ fn enumerate_keys_loop(
           // of [[OwnPropertyKeys]], which returns indices in ascending order).
           let #(elem_acc, elem_seen) = case kind {
             ArrayObject(length:) | value.ArgumentsObject(length:) ->
-              collect_element_keys(elements, 0, length, seen, acc)
+              collect_element_keys(elements, length, seen, acc)
             _ -> #(acc, seen)
           }
           // Step 3: For each string key, check desc.[[Enumerable]].
@@ -1070,27 +1066,24 @@ fn enumerate_keys_loop(
 /// index portion of §10.1.11.1 OrdinaryOwnPropertyKeys step 1: "For each
 /// own property key P of O that is an array index, in ascending numeric
 /// index order, add P to keys."
+///
+/// Iterates elements.indices() (O(k)) instead of probing 0..length (O(length))
+/// so sparse arrays with huge length but few entries don't degenerate.
 fn collect_element_keys(
   elements: JsElements,
-  idx: Int,
   length: Int,
   seen: set.Set(String),
   acc: List(String),
 ) -> #(List(String), set.Set(String)) {
-  case idx >= length {
-    True -> #(acc, seen)
-    False -> {
+  use state, idx <- list.fold(elements.indices(elements), #(acc, seen))
+  case idx < length {
+    False -> state
+    True -> {
+      let #(a, s) = state
       let key = int.to_string(idx)
-      case elements.has(elements, idx) && !set.contains(seen, key) {
-        True ->
-          collect_element_keys(
-            elements,
-            idx + 1,
-            length,
-            set.insert(seen, key),
-            [key, ..acc],
-          )
-        False -> collect_element_keys(elements, idx + 1, length, seen, acc)
+      case set.contains(s, key) {
+        True -> state
+        False -> #([key, ..a], set.insert(s, key))
       }
     }
   }
@@ -1133,7 +1126,7 @@ pub fn copy_data_properties(
           // These are always enumerable data properties.
           let heap = case kind {
             ArrayObject(length:) | value.ArgumentsObject(length:) ->
-              copy_element_range(state.heap, target_ref, elements, 0, length)
+              copy_element_range(state.heap, target_ref, elements, length)
             _ -> state.heap
           }
           let state = State(..state, heap:)
@@ -1153,7 +1146,8 @@ pub fn copy_data_properties(
           use state <- copy_keys_to_target(state, src_ref, target_ref, keys)
           // Step 4 (symbol keys): Copy enumerable symbol-keyed data properties.
           let sym_heap =
-            dict.fold(symbol_properties, state.heap, fn(h, k, prop) {
+            list.fold(symbol_properties, state.heap, fn(h, pair) {
+              let #(k, prop) = pair
               case prop {
                 DataProperty(value: v, enumerable: True, ..) ->
                   define_symbol_property(
@@ -1218,34 +1212,27 @@ fn copy_keys_to_target(
 /// property descriptor, so step 4.c.i "desc is undefined" applies).
 ///
 /// This is an optimization: instead of going through [[OwnPropertyKeys]]
-/// and then Get for each index, we iterate the elements storage directly.
-/// The result is the same because array elements are always enumerable
-/// data properties (step 4.c.ii check always passes for present elements).
+/// and then Get for each index, we iterate the elements storage directly
+/// via indices() — O(k) not O(length). The result is the same because
+/// array elements are always enumerable data properties (step 4.c.ii
+/// check always passes for present elements).
 fn copy_element_range(
   heap: Heap,
   target_ref: Ref,
   elements: JsElements,
-  idx: Int,
   end: Int,
 ) -> Heap {
-  case idx >= end {
-    True -> heap
-    False ->
-      case elements.has(elements, idx) {
-        True -> {
-          // Step 4.c.ii.2: CreateDataPropertyOrThrow(target, ToString(idx), value).
-          let h =
-            define_own_property(
-              heap,
-              target_ref,
-              Index(idx),
-              elements.get(elements, idx),
-            )
-          copy_element_range(h, target_ref, elements, idx + 1, end)
-        }
-        // Hole — no descriptor, skip per step 4.c.i.
-        False -> copy_element_range(heap, target_ref, elements, idx + 1, end)
-      }
+  use h, idx <- list.fold(elements.indices(elements), heap)
+  case idx < end {
+    False -> h
+    True ->
+      // Step 4.c.ii.2: CreateDataPropertyOrThrow(target, ToString(idx), value).
+      define_own_property(
+        h,
+        target_ref,
+        Index(idx),
+        elements.get(elements, idx),
+      )
   }
 }
 
@@ -1275,7 +1262,7 @@ pub fn get_symbol_value(
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
       // Step 1: Let desc be O.[[GetOwnProperty]](P).
-      case dict.get(symbol_properties, key) {
+      case list.key_find(symbol_properties, key) {
         // Step 3: IsDataDescriptor → return desc.[[Value]].
         Ok(DataProperty(value: val, ..)) -> Ok(#(val, state))
         // Step 5-7: Accessor with getter → Call(getter, Receiver).
@@ -1284,7 +1271,7 @@ pub fn get_symbol_value(
         // Step 6: getter is undefined → return undefined.
         Ok(AccessorProperty(get: None, ..)) -> Ok(#(value.JsUndefined, state))
         // Step 2: desc is undefined → walk prototype chain.
-        Error(_) ->
+        Error(Nil) ->
           case prototype {
             // Step 2.c: Return ? parent.[[Get]](P, Receiver).
             Some(proto_ref) -> get_symbol_value(state, proto_ref, key, receiver)
@@ -1330,9 +1317,9 @@ pub fn set_symbol_value(
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
       // Step 1: Let ownDesc be O.[[GetOwnProperty]](P).
-      case dict.get(symbol_properties, key) {
+      case list.key_find(symbol_properties, key) {
         // Step 1 (OrdinarySetWithOwnDescriptor): ownDesc is undefined.
-        Error(_) ->
+        Error(Nil) ->
           case prototype {
             // Step 1.b: parent is not null → parent.[[Set]](P, V, Receiver).
             Some(proto_ref) ->
@@ -1406,7 +1393,7 @@ pub fn define_symbol_property(
   use slot <- heap.update(heap, ref)
   case slot {
     ObjectSlot(symbol_properties:, ..) -> {
-      let new_sym_props = dict.insert(symbol_properties, key, prop)
+      let new_sym_props = list.key_set(symbol_properties, key, prop)
       ObjectSlot(..slot, symbol_properties: new_sym_props)
     }
     _ -> slot
@@ -1497,8 +1484,8 @@ fn inspect_object(
           <> "]"
         value.PidObject(_) -> "Pid {}"
         value.TimerObject(..) -> "Timer {}"
-        value.MapObject(data:, ..) ->
-          "Map(" <> int.to_string(dict.size(data)) <> ")"
+        value.MapObject(entries:, ..) ->
+          "Map(" <> int.to_string(dict.size(entries)) <> ")"
         value.SetObject(data:, ..) ->
           "Set(" <> int.to_string(dict.size(data)) <> ")"
         value.WeakMapObject(_) -> "WeakMap {}"

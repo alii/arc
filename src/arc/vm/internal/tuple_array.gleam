@@ -19,6 +19,16 @@ pub fn to_list(arr: TupleArray(a)) -> List(a)
 @external(javascript, "../arc_vm_ffi.mjs", "array_get")
 pub fn get(index: Int, arr: TupleArray(a)) -> Option(a)
 
+/// Read element at index with no bounds check. O(1), zero allocation.
+///
+/// CALLER MUST GUARANTEE `0 <= index < size(arr)` or BEAM will badarg.
+/// Use only for compiler-generated indices (bytecode PC, constant pool,
+/// local slots, function table) where the invariant holds by construction.
+/// For untrusted indices use `get` which returns Option.
+@external(erlang, "arc_vm_ffi", "array_unsafe_get")
+@external(javascript, "../arc_vm_ffi.mjs", "array_unsafe_get")
+pub fn unsafe_get(index: Int, arr: TupleArray(a)) -> a
+
 /// Write element at index (0-based), returning a new array. O(n) copy.
 @external(erlang, "arc_vm_ffi", "array_set")
 @external(javascript, "../arc_vm_ffi.mjs", "array_set")
@@ -27,6 +37,14 @@ pub fn set(
   value: a,
   arr: TupleArray(a),
 ) -> Result(TupleArray(a), Nil)
+
+/// Write element at index with no bounds check. O(n) copy.
+///
+/// CALLER MUST GUARANTEE `0 <= index < size(arr)` or BEAM will badarg.
+/// Use only for compiler-generated indices. For untrusted indices use `set`.
+@external(erlang, "arc_vm_ffi", "array_set_unchecked")
+@external(javascript, "../arc_vm_ffi.mjs", "array_set_unchecked")
+pub fn set_unchecked(index: Int, value: a, arr: TupleArray(a)) -> TupleArray(a)
 
 /// Number of elements. O(1).
 @external(erlang, "erlang", "tuple_size")
@@ -37,9 +55,3 @@ pub fn size(arr: TupleArray(a)) -> Int
 @external(erlang, "arc_vm_ffi", "array_repeat")
 @external(javascript, "../arc_vm_ffi.mjs", "array_repeat")
 pub fn repeat(value: a, count: Int) -> TupleArray(a)
-
-/// Grow an array to `new_size`, filling new slots with `default`. O(n).
-/// If `new_size` <= current size, returns the array unchanged.
-@external(erlang, "arc_vm_ffi", "array_grow")
-@external(javascript, "../arc_vm_ffi.mjs", "array_grow")
-pub fn grow(arr: TupleArray(a), new_size: Int, default: a) -> TupleArray(a)

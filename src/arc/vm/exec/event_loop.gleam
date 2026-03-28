@@ -7,7 +7,9 @@ import arc/vm/builtins/common
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
 import arc/vm/heap
+import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
+import arc/vm/opcode
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{
@@ -58,12 +60,12 @@ fn report_unhandled_rejections(state: State) -> Nil {
 /// during execution. Loops until the queue is empty. When empty, reports any
 /// unhandled promise rejections (like Node.js checking after each microtask flush).
 pub fn drain_jobs(state: State) -> State {
-  case state.job_queue {
-    [] -> {
+  case job_queue.pop(state.job_queue) {
+    None -> {
       report_unhandled_rejections(state)
       State(..state, unhandled_rejections: [])
     }
-    [job, ..rest] -> {
+    Some(#(job, rest)) -> {
       let state = State(..state, job_queue: rest)
       let state = execute_job(state, job)
       drain_jobs(state)
@@ -121,7 +123,7 @@ fn handle_mailbox_event(state: State, event: value.MailboxEvent) -> State {
         heap:,
         pending_receivers: rest,
         outstanding: state.outstanding - 1,
-        job_queue: list.append(state.job_queue, jobs),
+        job_queue: job_queue.append(state.job_queue, jobs),
       )
     }
     value.SettlePromise(data_ref:, outcome: Ok(pm)) -> {
@@ -132,7 +134,7 @@ fn handle_mailbox_event(state: State, event: value.MailboxEvent) -> State {
         ..state,
         heap:,
         outstanding: state.outstanding - 1,
-        job_queue: list.append(state.job_queue, jobs),
+        job_queue: job_queue.append(state.job_queue, jobs),
       )
     }
     value.SettlePromise(data_ref:, outcome: Error(pm)) -> {
@@ -155,7 +157,7 @@ fn handle_mailbox_event(state: State, event: value.MailboxEvent) -> State {
               r != data_ref
             }),
             outstanding: state.outstanding - 1,
-            job_queue: list.append(state.job_queue, jobs),
+            job_queue: job_queue.append(state.job_queue, jobs),
           )
         }
       }
@@ -267,7 +269,7 @@ pub fn run_handler_with_this(
               ..state,
               stack: [],
               pc: 0,
-              code: tuple_array.from_list([]),
+              code: tuple_array.from_list([opcode.Return]),
               call_stack: [],
               try_stack: [],
             )

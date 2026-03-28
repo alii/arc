@@ -470,7 +470,7 @@ pub fn build_262(
             value.data(JsObject(realm_ref)) |> value.configurable(),
           ),
         ]),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: Some(b.object.prototype),
         extensible: True,

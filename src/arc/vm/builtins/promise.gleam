@@ -2,6 +2,7 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/job_queue
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
@@ -112,7 +113,7 @@ pub fn create_promise(h: Heap, promise_proto: Ref) -> #(Heap, Ref, Ref) {
         properties: dict.new(),
         elements: elements.new(),
         prototype: Some(promise_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -168,7 +169,7 @@ pub fn create_resolving_functions(
         ]),
         elements: elements.new(),
         prototype: Some(function_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -191,7 +192,7 @@ pub fn create_resolving_functions(
         ]),
         elements: elements.new(),
         prototype: Some(function_proto),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         extensible: True,
       ),
     )
@@ -319,7 +320,7 @@ pub fn reject_promise(
       state.State(
         ..state,
         heap: h,
-        job_queue: list.append(state.job_queue, jobs),
+        job_queue: job_queue.append(state.job_queue, jobs),
         unhandled_rejections:,
       )
     }
@@ -422,14 +423,15 @@ pub fn perform_promise_then(
       state.State(
         ..state,
         heap: h,
-        job_queue: list.append(state.job_queue, [
+        job_queue: job_queue.push(
+          state.job_queue,
           value.PromiseReactionJob(
             handler: fulfill_handler,
             arg: val,
             resolve: child_resolve,
             reject: child_reject,
           ),
-        ]),
+        ),
       )
     }
     // Step 8: Else (rejected)
@@ -446,14 +448,15 @@ pub fn perform_promise_then(
       state.State(
         ..state,
         heap: h,
-        job_queue: list.append(state.job_queue, [
+        job_queue: job_queue.push(
+          state.job_queue,
           value.PromiseReactionJob(
             handler: reject_handler,
             arg: reason,
             resolve: child_resolve,
             reject: child_reject,
           ),
-        ]),
+        ),
         unhandled_rejections:,
       )
     }

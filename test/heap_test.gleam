@@ -36,7 +36,7 @@ fn ordinary(props: dict.Dict(String, value.JsValue)) {
   ObjectSlot(
     kind: OrdinaryObject,
     properties: keyed,
-    symbol_properties: dict.new(),
+    symbol_properties: [],
     elements: elements.new(),
     prototype: None,
     extensible: True,
@@ -215,7 +215,7 @@ pub fn gc_traces_through_array_slot_test() {
       ObjectSlot(
         kind: ArrayObject(3),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.from_list([
           JsNumber(Finite(1.0)),
           JsObject(ref_inner),
@@ -242,7 +242,7 @@ pub fn gc_traces_through_closure_slot_test() {
       ObjectSlot(
         kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: None,
         extensible: True,
@@ -277,7 +277,7 @@ pub fn mixed_live_dead_partition_test() {
       ObjectSlot(
         kind: ArrayObject(1),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.from_list([JsNumber(Finite(1.0))]),
         prototype: None,
         extensible: True,
@@ -293,7 +293,7 @@ pub fn mixed_live_dead_partition_test() {
       ObjectSlot(
         kind: FunctionObject(func_template: dummy_template(), env: live_env),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: None,
         extensible: True,
@@ -339,7 +339,7 @@ pub fn gc_traces_through_function_object_test() {
       ObjectSlot(
         kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: None,
         extensible: True,
@@ -367,7 +367,7 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
       ObjectSlot(
         kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: None,
         extensible: True,
@@ -379,7 +379,7 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
       ObjectSlot(
         kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: None,
         extensible: True,
@@ -407,7 +407,7 @@ pub fn gc_traces_through_box_slot_test() {
       ObjectSlot(
         kind: FunctionObject(func_template: dummy_template(), env: ref_env),
         properties: dict.new(),
-        symbol_properties: dict.new(),
+        symbol_properties: [],
         elements: elements.new(),
         prototype: None,
         extensible: True,
