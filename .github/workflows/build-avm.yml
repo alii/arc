@@ -1,0 +1,39 @@
+name: build-avm
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'website/atomvm_shims/**'
+      - 'website/scripts/**'
+      - '.github/workflows/build-avm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.actor != 'alistair-bot'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          gleam-version: '1.15'
+          rebar3-version: '3'
+
+      - run: gleam deps download
+
+      - run: website/scripts/build-avm.sh
+
+      - name: commit artifacts
+        run: |
+          git config user.name 'alistair-bot'
+          git config user.email 'alistair-bot@users.noreply.github.com'
+          git add website/public/atomvm
+          git diff --staged --quiet || git commit -m 'rebuild arc.avm'
+          git push

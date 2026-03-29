@@ -223,6 +223,7 @@ pub type IrOp {
   IrScopeGetVar(name: String)
   IrScopePutVar(name: String)
   IrScopeTypeofVar(name: String)
+  IrScopeReboxVar(name: String)
 
   // -- Labels and jumps (resolved in Phase 3) --
   IrLabel(id: Int)

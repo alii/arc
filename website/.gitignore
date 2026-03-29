@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# AtomVM build scratch. public/atomvm/* is committed (CI rebuilds on src changes)
+.atomvm-build
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

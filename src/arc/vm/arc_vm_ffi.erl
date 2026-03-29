@@ -12,7 +12,6 @@
 -export([get_script_args/0, sleep/1]).
 -export([string_char_at/2, string_codepoint_length/1]).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1]).
-
 read_line(Prompt) ->
     case io:get_line(Prompt) of
         eof -> {error, nil};

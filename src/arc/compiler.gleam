@@ -584,14 +584,17 @@ fn build_scope_dict_loop(
     [] -> acc
     [op, ..rest] ->
       case op {
-        emit.DeclareVar(name, _kind) -> {
-          // Only record first declaration (matches scope.resolve which keeps first)
-          let acc = case dict.has_key(acc, name) {
-            True -> acc
-            False -> dict.insert(acc, name, next_local)
+        emit.DeclareVar(name, _kind) ->
+          case dict.has_key(acc, name) {
+            True -> build_scope_dict_loop(rest, scopes, next_local, acc)
+            False ->
+              build_scope_dict_loop(
+                rest,
+                scopes,
+                next_local + 1,
+                dict.insert(acc, name, next_local),
+              )
           }
-          build_scope_dict_loop(rest, scopes, next_local + 1, acc)
-        }
         emit.EnterScope(kind) ->
           build_scope_dict_loop(rest, [kind, ..scopes], next_local, acc)
         emit.LeaveScope ->

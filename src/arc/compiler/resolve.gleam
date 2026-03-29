@@ -20,8 +20,8 @@ import arc/vm/opcode.{
   IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectSpread, IrPop,
   IrPopTry, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar,
   IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrScopeGetVar, IrScopePutVar,
-  IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf,
-  IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
+  IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
+  IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
@@ -123,7 +123,10 @@ fn resolve_ops(
     }
 
     // Scope-aware ops should NOT appear here (consumed by Phase 2)
-    [IrScopeGetVar(_), ..] | [IrScopePutVar(_), ..] | [IrScopeTypeofVar(_), ..] ->
+    [IrScopeGetVar(_), ..]
+    | [IrScopePutVar(_), ..]
+    | [IrScopeTypeofVar(_), ..]
+    | [IrScopeReboxVar(_), ..] ->
       panic as "resolve: scope ops should be consumed by Phase 2"
 
     // Resolved variable access (emitted by Phase 2)

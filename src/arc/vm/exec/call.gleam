@@ -789,11 +789,7 @@ pub fn setup_locals(
   let padded_args = pad_args(args, callee_template.arity)
   let remaining =
     callee_template.local_count - env_count - callee_template.arity
-  list.flatten([
-    env_values,
-    padded_args,
-    list.repeat(JsUndefined, remaining),
-  ])
+  list.flatten([env_values, padded_args, list.repeat(JsUndefined, remaining)])
   |> tuple_array.from_list
 }
 

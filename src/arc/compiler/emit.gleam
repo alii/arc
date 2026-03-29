@@ -16,8 +16,9 @@ import arc/vm/opcode.{
   IrInitialYield, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
   IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp,
   IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem, IrPutField,
-  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass,
-  IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
+  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar,
+  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield,
+  IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -714,6 +715,17 @@ fn collect_pattern_names(pattern: ast.Pattern) -> List(String) {
   }
 }
 
+fn for_let_names(decl: ast.Statement) -> List(String) {
+  case decl {
+    ast.VariableDeclaration(ast.Let, ds) ->
+      list.flat_map(ds, fn(d) {
+        let ast.VariableDeclarator(p, _) = d
+        collect_pattern_names(p)
+      })
+    _ -> []
+  }
+}
+
 fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
   case stmt {
     ast.VariableDeclaration(ast.Var, declarators) ->
@@ -1358,24 +1370,25 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       let #(e, loop_continue) = fresh_label(e)
       let #(e, loop_end) = fresh_label(e)
 
-      // For-init may create a block scope (for let/const)
       let e = emit_op(e, EnterScope(BlockScope))
 
-      // Init
-      let e = case init {
-        Some(ast.ForInitExpression(expr)) ->
+      let #(e, per_iter) = case init {
+        Some(ast.ForInitExpression(expr)) -> #(
           emit_expr(e, expr)
-          |> result.map(emit_ir(_, IrPop))
-          |> result.unwrap(e)
-        Some(ast.ForInitDeclaration(decl)) ->
-          emit_stmt(e, decl) |> result.unwrap(e)
-        _ -> e
+            |> result.map(emit_ir(_, IrPop))
+            |> result.unwrap(e),
+          [],
+        )
+        Some(ast.ForInitDeclaration(decl)) -> #(
+          emit_stmt(e, decl) |> result.unwrap(e),
+          for_let_names(decl),
+        )
+        _ -> #(e, [])
       }
 
       let e = push_loop(e, loop_end, loop_continue)
       let e = emit_ir(e, IrLabel(loop_start))
 
-      // Condition
       let e = case condition {
         Some(cond) ->
           emit_expr(e, cond)
@@ -1384,13 +1397,12 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
         None -> e
       }
 
-      // Body
       let e = emit_stmt(e, body) |> result.unwrap(e)
 
-      // Continue target
       let e = emit_ir(e, IrLabel(loop_continue))
+      let e =
+        list.fold(per_iter, e, fn(e, n) { emit_ir(e, IrScopeReboxVar(n)) })
 
-      // Update
       let e = case update {
         Some(upd) ->
           emit_expr(e, upd) |> result.map(emit_ir(_, IrPop)) |> result.unwrap(e)

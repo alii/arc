@@ -16,8 +16,8 @@ import arc/compiler/emit.{
 import arc/vm/opcode.{
   type IrOp, IrBoxLocal, IrDeclareEvalVar, IrDeclareGlobalVar, IrGetBoxed,
   IrGetEvalVar, IrGetGlobal, IrGetLocal, IrPushConst, IrPutBoxed, IrPutEvalVar,
-  IrPutGlobal, IrPutLocal, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar,
-  IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal,
+  IrPutGlobal, IrPutLocal, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar,
+  IrScopeTypeofVar, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal,
 }
 import arc/vm/value.{type JsValue, JsUndefined, JsUninitialized}
 import gleam/dict.{type Dict}
@@ -246,6 +246,15 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       case r.fallthrough {
         ToGlobal -> emit(r, IrDeclareGlobalVar(name))
         ToEvalEnv -> emit(r, IrDeclareEvalVar(name))
+      }
+
+    Ir(IrScopeReboxVar(name)) ->
+      case lookup(r.scopes, name) {
+        Some(Binding(index:, is_boxed: True, ..)) ->
+          emit(r, IrGetBoxed(index))
+          |> emit(IrPutLocal(index))
+          |> emit(IrBoxLocal(index))
+        _ -> r
       }
 
     Ir(IrScopeTypeofVar(name)) -> {
