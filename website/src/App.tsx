@@ -32,8 +32,8 @@ export default function App() {
 					Tested against <ExternalLink href="https://github.com/tc39/test262">test262</ExternalLink> on every commit:
 				</p>
 				<picture className="block mt-3">
-					<source media="(prefers-color-scheme: dark)" srcSet="/conformance-dark.png" />
-					<img alt="test262 conformance chart" src="/conformance.png" className="w-full rounded-lg" />
+					<source media="(prefers-color-scheme: dark)" srcSet="https://raw.githubusercontent.com/alii/arc/master/.github/test262/conformance-dark.png" />
+					<img alt="test262 conformance chart" src="https://raw.githubusercontent.com/alii/arc/master/.github/test262/conformance.png" className="w-full rounded-lg" />
 				</picture>
 			</div>
 
