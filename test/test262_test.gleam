@@ -7,6 +7,7 @@
 ///   TEST262=1 gleam test          — run test262 with snapshot
 ///   GENERATE_SNAPSHOT=1 gleam test — regenerate snapshot file
 import arc/parser
+import gleam/dynamic
 import gleam/int
 import gleam/io
 import gleam/list
@@ -150,8 +151,8 @@ pub fn test262_run_test() {
 }
 
 @external(erlang, "io", "format")
-fn erl_io_format(_fmt: String, _args: List(String)) -> Nil {
-  Nil
+fn erl_io_format(_fmt: String, _args: List(String)) -> dynamic.Dynamic {
+  dynamic.nil()
 }
 
 fn clear_line() -> Nil {
@@ -161,12 +162,14 @@ fn clear_line() -> Nil {
 }
 
 fn print_progress(current: Int, total: Int, passes: Int, fails: Int) -> Nil {
-  erl_io_format("  \r  [~s/~s] ~s pass, ~s fail", [
-    int.to_string(current),
-    int.to_string(total),
-    int.to_string(passes),
-    int.to_string(fails),
-  ])
+  let _ =
+    erl_io_format("  \r  [~s/~s] ~s pass, ~s fail", [
+      int.to_string(current),
+      int.to_string(total),
+      int.to_string(passes),
+      int.to_string(fails),
+    ])
+  Nil
 }
 
 // --- Parse test logic ---
