@@ -3,6 +3,22 @@ import arc/vm/completion.{NormalCompletion}
 import arc/vm/value.{Finite, JsNumber, JsString, JsUndefined}
 
 // ----------------------------------------------------------------------------
+// Serialization — roundtrip
+// ----------------------------------------------------------------------------
+
+pub fn serialize_deserialize_roundtrip_test() {
+  let eng =
+    engine.new()
+    |> engine.define_global("x", JsNumber(Finite(42.0)))
+
+  let restored = eng |> engine.serialize |> engine.deserialize
+
+  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+    engine.eval(restored, "x")
+  assert value == JsNumber(Finite(42.0))
+}
+
+// ----------------------------------------------------------------------------
 // Host FFI — define_fn / define_namespace / define_global
 // ----------------------------------------------------------------------------
 

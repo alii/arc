@@ -5,6 +5,7 @@
 //// instead of wiring up heap + builtins + entry directly.
 
 import arc/compiler
+import arc/internal/erlang
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
@@ -187,6 +188,25 @@ fn do_eval(
     |> result.map_error(VmError),
   )
   #(completion, Engine(..engine, heap: completion_heap(completion)))
+}
+
+// ----------------------------------------------------------------------------
+// Serialization
+// ----------------------------------------------------------------------------
+
+/// Serialize the entire engine state to a binary.
+///
+/// Host function closures stored in the heap will NOT survive — their Ref
+/// slots persist but the Erlang closure data is lost. Embedders must
+/// re-register host functions after `deserialize`.
+pub fn serialize(engine: Engine) -> BitArray {
+  erlang.term_to_binary(#(engine.heap, engine.builtins, engine.global))
+}
+
+/// Restore an engine from a binary produced by `serialize`.
+pub fn deserialize(data: BitArray) -> Engine {
+  let #(heap, builtins, global) = erlang.binary_to_term(data)
+  Engine(heap:, builtins:, global:)
 }
 
 // ----------------------------------------------------------------------------
