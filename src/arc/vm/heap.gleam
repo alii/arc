@@ -269,6 +269,16 @@ pub fn unroot(heap: Heap(ctx), ref: Ref) -> Heap(ctx) {
   Heap(..heap, roots: set.delete(heap.roots, ref.id))
 }
 
+/// Number of persistent GC roots.
+pub fn root_count(heap: Heap(ctx)) -> Int {
+  set.size(heap.roots)
+}
+
+/// The persistent root set (for external use like spawn GC).
+pub fn root_set(heap: Heap(ctx)) -> Set(Int) {
+  heap.roots
+}
+
 /// Number of live (allocated) slots.
 pub fn size(heap: Heap(ctx)) -> Int {
   dict.size(heap.data)
@@ -323,9 +333,11 @@ fn mark_loop(
               // Dangling ref — skip
               mark_loop(heap, rest, visited)
             Ok(slot) -> {
+              // Prepend child ref IDs directly onto frontier — avoids
+              // intermediate list from list.map + the O(n) list.append.
               let child_refs = value.refs_in_slot(slot)
-              let child_ids = list.map(child_refs, fn(r) { r.id })
-              mark_loop(heap, list.append(child_ids, rest), visited)
+              let frontier = prepend_ref_ids(child_refs, rest)
+              mark_loop(heap, frontier, visited)
             }
           }
         }
@@ -334,15 +346,24 @@ fn mark_loop(
   }
 }
 
-/// Sweep phase: single pass over data dict. Keep live entries,
+/// Prepend Ref IDs onto a list without intermediate allocation.
+fn prepend_ref_ids(refs: List(Ref), tail: List(Int)) -> List(Int) {
+  case refs {
+    [] -> tail
+    [Ref(id), ..rest] -> prepend_ref_ids(rest, [id, ..tail])
+  }
+}
+
+/// Sweep phase: filter the data dict to keep only live entries,
 /// collect freed indices into the free list.
 fn sweep(heap: Heap(ctx), live: Set(Int)) -> Heap(ctx) {
-  let #(new_data, new_free) =
-    dict.fold(heap.data, #(dict.new(), heap.free), fn(acc, id, slot) {
-      let #(data, free) = acc
+  let new_data = dict.filter(heap.data, fn(id, _) { set.contains(live, id) })
+  // Collect freed IDs for reuse
+  let new_free =
+    dict.fold(heap.data, heap.free, fn(free, id, _) {
       case set.contains(live, id) {
-        True -> #(dict.insert(data, id, slot), free)
-        False -> #(data, [id, ..free])
+        True -> free
+        False -> [id, ..free]
       }
     })
   Heap(..heap, data: new_data, free: new_free)

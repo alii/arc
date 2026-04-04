@@ -98,6 +98,12 @@ fetch() {
 fetch "AtomVM-web-v${ATOMVM_VERSION}.js" "$OUT/AtomVM.js"
 fetch "AtomVM-web-v${ATOMVM_VERSION}.wasm" "$OUT/AtomVM.wasm"
 
+# The prebuilt WASM declares max memory of 256 pages (16MB) which is too small
+# for programs that spawn many processes. Patch the memory import's maximum from
+# 256 pages to 4096 pages (256MB) so it matches INITIAL_MEMORY in use-atomvm.ts.
+echo "==> patch WASM max memory (256 -> 4096 pages)"
+python3 "$WEBSITE/scripts/patch_wasm_memory.py" "$OUT/AtomVM.wasm" 4096
+
 echo "==> pack arc.avm"
 # Shims first so they shadow the real unicode_ffi/arc_regexp_ffi beams.
 escript "$WEBSITE/scripts/pack_avm.escript" "$OUT/arc.avm" arc_wasm_ffi \

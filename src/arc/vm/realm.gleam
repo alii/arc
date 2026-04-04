@@ -79,16 +79,27 @@ pub fn arc_spawn(
       _ -> Error("Arc.spawn: argument is not a function object")
     })
 
+    // Only GC the heap if it has grown significantly beyond the root set
+    // (i.e. there's actual garbage to collect). Avoids expensive no-op GC
+    // when the heap is mostly builtins.
+    let has_garbage =
+      heap.size(state.heap) > set.size(heap.root_set(state.heap)) * 2
+
     use spawner <- result.try(case heap.read(state.heap, fn_ref) {
       Some(ObjectSlot(
         kind: value.FunctionObject(func_template: callee_template, env: env_ref),
         ..,
-      )) ->
+      )) -> {
+        let spawn_heap = case has_garbage {
+          True ->
+            heap.collect_with_roots(state.heap, set.from_list([env_ref.id]))
+          False -> state.heap
+        }
         Ok(fn() {
           run_spawned_closure(
             callee_template:,
             env_ref:,
-            heap: state.heap,
+            heap: spawn_heap,
             builtins: state.builtins,
             global_object: state.global_object,
             lexical_globals: state.lexical_globals,
@@ -100,12 +111,17 @@ pub fn arc_spawn(
             new_state_fn: new_state,
           )
         })
-      Some(ObjectSlot(kind: value.NativeFunction(native), ..)) ->
+      }
+      Some(ObjectSlot(kind: value.NativeFunction(native), ..)) -> {
+        let spawn_heap = case has_garbage {
+          True -> heap.collect(state.heap)
+          False -> state.heap
+        }
         Ok(fn() {
           run_spawned_native(
             native:,
             caller_func: state.func,
-            heap: state.heap,
+            heap: spawn_heap,
             builtins: state.builtins,
             global_object: state.global_object,
             lexical_globals: state.lexical_globals,
@@ -117,6 +133,7 @@ pub fn arc_spawn(
             new_state_fn: new_state,
           )
         })
+      }
       _ -> Error("Arc.spawn: argument is not a function")
     })
 
