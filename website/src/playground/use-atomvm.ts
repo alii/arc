@@ -11,6 +11,7 @@ type EmscriptenModule = Partial<AtomVM> & {
 	print?: (s: string) => void;
 	printErr?: (s: string) => void;
 	onRuntimeInitialized?: () => void;
+	INITIAL_MEMORY?: number;
 };
 
 type Status = { kind: 'loading' } | { kind: 'ready'; vm: AtomVM } | { kind: 'error'; message: string };
@@ -46,6 +47,7 @@ export function useAtomVM(onPrint: (line: string) => void) {
 		const mod: EmscriptenModule = {
 			arguments: ['/atomvm/arc.avm'],
 			locateFile: (p) => `/atomvm/${p}`,
+			INITIAL_MEMORY: 256 * 1024 * 1024,
 			print: (s) => {
 				onPrintStable(s);
 				handleAbort(s);
