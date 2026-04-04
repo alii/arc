@@ -1,5 +1,5 @@
 const link =
-	'underline decoration-neutral-400/70 underline-offset-[3px] decoration-1 hover:decoration-neutral-600 dark:decoration-neutral-600/70 dark:hover:decoration-neutral-400';
+	'underline decoration-rpd-muted/70 underline-offset-[3px] decoration-1 hover:decoration-rpd-subtle dark:decoration-rp-muted/70 dark:hover:decoration-rp-subtle';
 
 export function ExternalLink({ href, children }: { href: string; children: React.ReactNode }) {
 	return (

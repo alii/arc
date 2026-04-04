@@ -7,8 +7,11 @@ import { javascript } from '@codemirror/lang-javascript';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
+import gitExamples from 'virtual:examples';
 
-const EXAMPLE = `const parent = Arc.self();
+const DEFAULT_EXAMPLE = {
+	name: 'playground',
+	code: `const parent = Arc.self();
 Arc.log("starting...");
 
 for (let i = 0; i < 3; i++) {
@@ -20,7 +23,10 @@ for (let i = 0; i < 3; i++) {
 
 for (let i = 0; i < 3; i++) {
   Arc.log(Arc.receive());
-}`;
+}`,
+};
+
+const examples = [DEFAULT_EXAMPLE, ...gitExamples];
 
 // Rose Pine
 const rp = {
@@ -164,11 +170,35 @@ function getIsDark() {
 	return window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
+function getIsMac() {
+	return /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+}
+
+function Spinner() {
+	return (
+		<svg className="h-3.5 w-3.5 inline-block animate-spinner-fade" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+			{[...Array(8)].map((_, i) => {
+				const angle = i * 45;
+				const rad = (angle * Math.PI) / 180;
+				const x1 = 12 + 6 * Math.cos(rad);
+				const y1 = 12 + 6 * Math.sin(rad);
+				const x2 = 12 + 10 * Math.cos(rad);
+				const y2 = 12 + 10 * Math.sin(rad);
+				return (
+					<line key={i} x1={x1} y1={y1} x2={x2} y2={y2} opacity={1 - i * 0.1} style={{ animationDelay: `${i * -0.125}s` }} />
+				);
+			})}
+		</svg>
+	);
+}
+
 export function Playground() {
-	const [code, setCode] = useState(EXAMPLE);
+	const [code, setCode] = useState(examples[0]?.code ?? '');
 	const [output, setOutput] = useState<{ id: number; text: string }[]>([]);
 	const [running, setRunning] = useState(false);
 	const [didRun, setDidRun] = useState(false);
+	const [elapsed, setElapsed] = useState(0);
+	const [expanded, setExpanded] = useState(false);
 	const nextId = useRef(0);
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<EditorView | null>(null);
@@ -176,6 +206,14 @@ export function Playground() {
 	const runRef = useRef<() => void>(() => {});
 
 	if (running && !didRun) setDidRun(true);
+
+	useEffect(() => {
+		if (!running) return;
+		setElapsed(0);
+		const start = performance.now();
+		const id = setInterval(() => setElapsed(performance.now() - start), 32);
+		return () => clearInterval(id);
+	}, [running]);
 
 	const push = (text: string) => setOutput((o) => [...o, { id: nextId.current++, text }]);
 
@@ -260,27 +298,76 @@ export function Playground() {
 		};
 	}, []);
 
+	const loadExample = useCallback((code: string) => {
+		const view = viewRef.current;
+		if (!view) return;
+		view.dispatch({
+			changes: { from: 0, to: view.state.doc.length, insert: code },
+		});
+		setOutput([]);
+		setDidRun(false);
+	}, []);
+
 	return (
-		<div className="rounded-lg border border-neutral-200 dark:border-[#26233a] overflow-hidden">
-			<div className="flex items-center justify-between px-3 py-1.5 bg-neutral-50 dark:bg-[#13111e] border-b border-neutral-200 dark:border-[#26233a]">
-				<span className="text-xs text-neutral-500 dark:text-[#908caa]">
+		<div className="rounded-lg border border-rpd-overlay dark:border-rp-overlay overflow-hidden">
+			<div className="flex items-center px-3 py-1.5 bg-rpd-overlay dark:bg-[#13111e] border-b border-rpd-overlay dark:border-rp-overlay">
+				<span className={`text-xs ${running ? 'animate-rainbow bg-[length:200%_auto] bg-clip-text text-transparent bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)]' : 'text-rpd-muted dark:text-rp-subtle'}`}>
 					{vm.kind === 'loading' && 'Loading AtomVM…'}
 					{vm.kind === 'error' && `error: ${vm.message}`}
-					{vm.kind === 'ready' && (running ? 'Running' : didRun ? 'Idle' : 'Ready')}
+					{vm.kind === 'ready' && (running ? `Running ${(elapsed / 1000).toFixed(1)}s` : didRun ? `Done ${(elapsed / 1000).toFixed(1)}s` : 'Ready')}
 				</span>
-				<div className="flex items-center gap-2">
-					<span className="text-xs text-neutral-400 dark:text-[#6e6a86] hidden sm:inline">⌘↵ to run</span>
+				<div className="flex items-center gap-1 ml-auto">
+					<select
+						onChange={(e) => {
+							const ex = examples[Number(e.target.value)];
+							if (ex) loadExample(ex.code);
+						}}
+						className="text-xs bg-transparent text-rpd-muted dark:text-rp-subtle border-none p-0 h-8 cursor-pointer outline-none"
+					>
+						{examples.map((ex, i) => (
+							<option key={i} value={i}>{ex.name}</option>
+						))}
+					</select>
 					<button
 						onClick={run}
 						disabled={vm.kind !== 'ready' || running}
-						className="px-2.5 py-0.5 text-xs rounded bg-neutral-900 text-neutral-100 dark:bg-[#e0def4] dark:text-[#191724] disabled:opacity-40 cursor-pointer"
+						aria-label={running ? 'Running code' : 'Run code'}
+						className="flex items-center gap-1.5 px-3 py-1.5 h-8 text-sm rounded-md bg-[#E0DEF4] text-rp-base disabled:opacity-40 cursor-pointer font-medium"
 					>
-						{running ? '…' : 'run'}
+						{running && <Spinner />} run <kbd className="px-1 py-0.5 text-xs rounded bg-rp-base/15 border border-rp-base/20 font-mono leading-none">{getIsMac() ? '⌘↵' : 'Ctrl↵'}</kbd>
 					</button>
 				</div>
 			</div>
 
-			<div ref={editorRef} />
+			<div className="relative">
+				<div
+					ref={editorRef}
+					className="overflow-hidden transition-[max-height] duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
+					style={{ maxHeight: expanded ? 2000 : 300 }}
+				/>
+				{!expanded && (
+					<div className="absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-rpd-base dark:from-rp-base pointer-events-none" />
+				)}
+				<button
+					onClick={() => setExpanded((e) => !e)}
+					className="absolute bottom-0 right-2 p-1 text-rpd-muted dark:text-rp-subtle cursor-pointer hover:text-rpd-text dark:hover:text-rp-text transition-colors"
+					aria-label={expanded ? 'Collapse editor' : 'Expand editor'}
+				>
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 16 16"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="1.5"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+						className={`transition-transform duration-300 ${expanded ? 'rotate-180' : ''}`}
+					>
+						<path d="M4 6l4 4 4-4" />
+					</svg>
+				</button>
+			</div>
 
 			<AnimatePresence>
 				{output.length > 0 && (
@@ -289,18 +376,19 @@ export function Playground() {
 						animate={{ opacity: 1 }}
 						exit={{ height: 0, opacity: 0 }}
 						transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
-						className="m-0 bg-neutral-50 text-neutral-600 dark:bg-[#13111e] dark:text-[#908caa] font-mono text-xs border-t border-neutral-200 dark:border-[#26233a] max-h-40 overflow-auto"
+						className="m-0 bg-rpd-surface text-rpd-subtle dark:bg-[#13111e] dark:text-rp-subtle font-mono text-xs border-t border-rpd-overlay dark:border-rp-overlay max-h-40 overflow-auto"
 					>
-						<div className="p-4">
-							{output.map((line) => (
+						<div className="p-3 flex flex-col gap-0.5">
+							{output.map((line, i) => (
 								<motion.div
 									key={line.id}
 									initial={{ opacity: 0, filter: 'blur(4px)', height: 0 }}
 									animate={{ opacity: 1, filter: 'blur(0px)', height: 'auto' }}
 									transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-									className="will-change-[filter] overflow-hidden"
+									className="will-change-[filter] overflow-hidden flex"
 								>
-									{line.text}
+									<span className="select-none text-rpd-muted/50 dark:text-rp-muted/50 mr-3 tabular-nums">{i + 1}</span>
+									<span>{line.text}</span>
 								</motion.div>
 							))}
 						</div>
