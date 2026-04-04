@@ -11,8 +11,56 @@
 @theme {
   --font-sans: "Inter", sans-serif;
   --font-mono: "Iosevka Curly", ui-monospace, monospace;
+
+  /* Rose Pine */
+  --color-rp-base: #191724;
+  --color-rp-surface: #1f1d2e;
+  --color-rp-overlay: #26233a;
+  --color-rp-muted: #6e6a86;
+  --color-rp-subtle: #908caa;
+  --color-rp-text: #e0def4;
+  --color-rp-love: #eb6f92;
+  --color-rp-gold: #f6c177;
+  --color-rp-rose: #ebbcba;
+  --color-rp-pine: #31748f;
+  --color-rp-foam: #9ccfd8;
+  --color-rp-iris: #c4a7e7;
+
+  /* Rose Pine Dawn */
+  --color-rpd-base: #faf4ed;
+  --color-rpd-surface: #fffaf3;
+  --color-rpd-overlay: #f2e9e1;
+  --color-rpd-muted: #9893a5;
+  --color-rpd-subtle: #797593;
+  --color-rpd-text: #575279;
+  --color-rpd-love: #b4637a;
+  --color-rpd-gold: #ea9d34;
+  --color-rpd-rose: #d7827e;
+  --color-rpd-pine: #286983;
+  --color-rpd-foam: #56949f;
+  --color-rpd-iris: #907aa9;
 }
 
 :root {
   color-scheme: light dark;
+}
+
+@keyframes rainbow {
+  0% { background-position: 0% center; }
+  100% { background-position: 200% center; }
+}
+
+@utility animate-rainbow {
+  animation: rainbow 0.8s linear infinite;
+}
+
+@keyframes spinner-fade {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.15; }
+}
+
+@utility animate-spinner-fade {
+  & line {
+    animation: spinner-fade 1s ease-in-out infinite;
+  }
 }

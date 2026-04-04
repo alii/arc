@@ -1,10 +1,10 @@
-const kw = 'text-sky-600 dark:text-sky-300';
-const id = 'text-rose-600 dark:text-rose-400';
-const str = 'text-amber-600 dark:text-yellow-200';
-const interp = 'text-rose-600 dark:text-rose-400';
-const dim = 'text-neutral-400 dark:text-neutral-500';
-const prompt = 'text-rose-600 dark:text-rose-400';
-const cmd = 'text-sky-600 dark:text-sky-300';
+const kw = 'text-rpd-love dark:text-rp-love';
+const id = 'text-rpd-iris dark:text-rp-iris';
+const str = 'text-rpd-gold dark:text-rp-gold';
+const interp = 'text-rpd-rose dark:text-rp-rose';
+const dim = 'text-rpd-muted dark:text-rp-muted';
+const prompt = 'text-rpd-rose dark:text-rp-rose';
+const cmd = 'text-rpd-foam dark:text-rp-foam';
 
 function Line({ children, indent = false }: { children: React.ReactNode; indent?: boolean }) {
 	return <div className={'whitespace-pre' + (indent ? ' pl-8' : '')}>{children}</div>;
@@ -22,7 +22,7 @@ function Tmpl({ children }: { children: React.ReactNode }) {
 
 export function HeroCode() {
 	return (
-		<div className="rounded-xl bg-neutral-50 dark:bg-neutral-900/50 p-6 font-mono text-sm leading-relaxed text-neutral-700 dark:text-neutral-200 overflow-x-auto">
+		<div className="rounded-xl bg-rpd-surface dark:bg-rp-surface p-6 font-mono text-sm leading-relaxed text-rpd-text dark:text-rp-text overflow-x-auto">
 			<Line>
 				<span className={dim}>$ </span>
 				<span className={cmd}>cat</span> ./example.js
