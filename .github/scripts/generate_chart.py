@@ -79,17 +79,21 @@ def generate_chart(history):
 
     def render(out_file, dark):
         if dark:
-            fg = "#e5e7eb"
-            bg = "#0d1117"
-            color_pct = "#60a5fa"
-            color_pass = "#4ade80"
-            grid_alpha = 0.15
+            # Rose Pine
+            fg = "#e0def4"
+            bg = "#191724"
+            color_pct = "#9ccfd8"  # foam
+            color_pass = "#c4a7e7"  # iris
+            grid_color = "#26233a"  # overlay
+            grid_alpha = 0.8
         else:
-            fg = "black"
-            bg = "white"
-            color_pct = "#2563eb"
-            color_pass = "#16a34a"
-            grid_alpha = 0.3
+            # Rose Pine Dawn
+            fg = "#575279"
+            bg = "#faf4ed"
+            color_pct = "#56949f"  # foam
+            color_pass = "#907aa9"  # iris
+            grid_color = "#f2e9e1"  # overlay
+            grid_alpha = 0.8
 
         fig, ax1 = plt.subplots(figsize=(10, 5))
         fig.patch.set_facecolor(bg)
@@ -131,7 +135,7 @@ def generate_chart(history):
             color=fg,
         )
 
-        ax1.grid(True, alpha=grid_alpha, color=fg)
+        ax1.grid(True, alpha=grid_alpha, color=grid_color)
         fig.tight_layout()
         fig.savefig(out_file, dpi=150, bbox_inches="tight", facecolor=bg)
         plt.close(fig)
