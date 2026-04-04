@@ -83,12 +83,17 @@ pub fn arc_spawn(
       Some(ObjectSlot(
         kind: value.FunctionObject(func_template: callee_template, env: env_ref),
         ..,
-      )) ->
+      )) -> {
+        // GC the heap before spawning — only keep builtins (permanently rooted)
+        // and the closure's captured environment. This avoids copying the entire
+        // parent heap (with all its temporaries) into every spawned process.
+        let spawn_heap =
+          heap.collect_with_roots(state.heap, set.from_list([env_ref.id]))
         Ok(fn() {
           run_spawned_closure(
             callee_template:,
             env_ref:,
-            heap: state.heap,
+            heap: spawn_heap,
             builtins: state.builtins,
             global_object: state.global_object,
             lexical_globals: state.lexical_globals,
@@ -100,12 +105,14 @@ pub fn arc_spawn(
             new_state_fn: new_state,
           )
         })
-      Some(ObjectSlot(kind: value.NativeFunction(native), ..)) ->
+      }
+      Some(ObjectSlot(kind: value.NativeFunction(native), ..)) -> {
+        let spawn_heap = heap.collect(state.heap)
         Ok(fn() {
           run_spawned_native(
             native:,
             caller_func: state.func,
-            heap: state.heap,
+            heap: spawn_heap,
             builtins: state.builtins,
             global_object: state.global_object,
             lexical_globals: state.lexical_globals,
@@ -117,6 +124,7 @@ pub fn arc_spawn(
             new_state_fn: new_state,
           )
         })
+      }
       _ -> Error("Arc.spawn: argument is not a function")
     })
 
