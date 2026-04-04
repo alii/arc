@@ -198,6 +198,7 @@ export function Playground() {
 	const [running, setRunning] = useState(false);
 	const [didRun, setDidRun] = useState(false);
 	const [elapsed, setElapsed] = useState(0);
+	const [expanded, setExpanded] = useState(false);
 	const nextId = useRef(0);
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<EditorView | null>(null);
@@ -338,7 +339,35 @@ export function Playground() {
 				</div>
 			</div>
 
-			<div ref={editorRef} />
+			<div className="relative">
+				<div
+					ref={editorRef}
+					className="overflow-hidden transition-[max-height] duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
+					style={{ maxHeight: expanded ? 2000 : 300 }}
+				/>
+				{!expanded && (
+					<div className="absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-rpd-base dark:from-rp-base pointer-events-none" />
+				)}
+				<button
+					onClick={() => setExpanded((e) => !e)}
+					className="absolute bottom-0 right-2 p-1 text-rpd-muted dark:text-rp-subtle cursor-pointer hover:text-rpd-text dark:hover:text-rp-text transition-colors"
+					aria-label={expanded ? 'Collapse editor' : 'Expand editor'}
+				>
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 16 16"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="1.5"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+						className={`transition-transform duration-300 ${expanded ? 'rotate-180' : ''}`}
+					>
+						<path d="M4 6l4 4 4-4" />
+					</svg>
+				</button>
+			</div>
 
 			<AnimatePresence>
 				{output.length > 0 && (
