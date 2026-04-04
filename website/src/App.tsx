@@ -1,6 +1,5 @@
 import { Code } from './components/code';
 import { ExternalLink } from './components/external-link';
-import { HeroCode } from './components/hero-code';
 import { Playground } from './playground/Playground';
 
 export default function App() {
@@ -13,7 +12,7 @@ export default function App() {
 				<p className="mt-1">JavaScript on the BEAM</p>
 			</div>
 
-			<HeroCode />
+			<Playground />
 
 			<p>
 				Traditionally, JavaScript does concurrency with one event loop and a shared heap. The BEAM does it with isolated
@@ -38,34 +37,6 @@ export default function App() {
 			</div>
 
 			<hr className="w-12 border-neutral-200 dark:border-neutral-800" />
-
-			<div>
-				<p className="mb-3">
-					Try it — this is Arc running on <ExternalLink href="https://github.com/atomvm/AtomVM">AtomVM</ExternalLink>{' '}
-					compiled to WebAssembly, so <Code>Arc.spawn</Code>, <Code>Arc.send</Code> and <Code>Arc.receive</Code> are
-					real Erlang processes in your browser tab.
-				</p>
-				<Playground />
-			</div>
-
-			<hr className="w-12 border-neutral-200 dark:border-neutral-800" />
-
-			{/* <div className="bg-neutral-100 dark:bg-neutral-900/50 rounded-lg p-4 font-mono text-sm text-neutral-700 dark:text-neutral-300 space-y-1">
-        <p>
-          <span className="text-neutral-400 dark:text-neutral-500 select-none">$ </span>gleam run --
-          file.js
-          <span className="text-neutral-400 dark:text-neutral-600 ml-4"># run a script</span>
-        </p>
-        <p>
-          <span className="text-neutral-400 dark:text-neutral-500 select-none">$ </span>gleam test
-          <span className="text-neutral-400 dark:text-neutral-600 ml-4"># unit tests</span>
-        </p>
-        <p>
-          <span className="text-neutral-400 dark:text-neutral-500 select-none">$ </span>
-          TEST262_EXEC=1 gleam test
-          <span className="text-neutral-400 dark:text-neutral-600 ml-4"># full test262 suite</span>
-        </p>
-      </div> */}
 
 			<div className="flex items-center gap-4">
 				<ExternalLink href="https://github.com/alii/arc">GitHub</ExternalLink>
