@@ -1,7 +1,5 @@
 const pid = Arc.spawn(() => {
-	const message = Arc.receive();
-	Arc.log(message);
-	Arc.log(`${Arc.self()}: Hello from child`);
+  Arc.log(Arc.receive());
 });
 
-Arc.send(pid, `${Arc.self()}: Hello from main`);
+Arc.send(pid, "hello from " + Arc.self());

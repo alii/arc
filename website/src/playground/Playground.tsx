@@ -1,13 +1,14 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { useAtomVM } from './use-atomvm';
-import { EditorView, keymap, placeholder } from '@codemirror/view';
-import { EditorState, Compartment } from '@codemirror/state';
-import { javascript } from '@codemirror/lang-javascript';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { javascript } from '@codemirror/lang-javascript';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { Compartment, EditorState } from '@codemirror/state';
+import { EditorView, keymap, placeholder } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
+import * as Select from '@radix-ui/react-select';
+import { AnimatePresence, motion } from 'motion/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import gitExamples from 'virtual:examples';
+import { useAtomVM } from './use-atomvm';
 
 const DEFAULT_EXAMPLE = {
 	name: 'playground',
@@ -176,7 +177,14 @@ function getIsMac() {
 
 function Spinner() {
 	return (
-		<svg className="h-3.5 w-3.5 inline-block animate-spinner-fade" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+		<svg
+			className="h-3.5 w-3.5 inline-block animate-spinner-fade"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="2"
+			strokeLinecap="round"
+		>
 			{[...Array(8)].map((_, i) => {
 				const angle = i * 45;
 				const rad = (angle * Math.PI) / 180;
@@ -185,7 +193,15 @@ function Spinner() {
 				const x2 = 12 + 10 * Math.cos(rad);
 				const y2 = 12 + 10 * Math.sin(rad);
 				return (
-					<line key={i} x1={x1} y1={y1} x2={x2} y2={y2} opacity={1 - i * 0.1} style={{ animationDelay: `${i * -0.125}s` }} />
+					<line
+						key={i}
+						x1={x1}
+						y1={y1}
+						x2={x2}
+						y2={y2}
+						opacity={1 - i * 0.1}
+						style={{ animationDelay: `${i * -0.125}s` }}
+					/>
 				);
 			})}
 		</svg>
@@ -306,35 +322,80 @@ export function Playground() {
 		});
 		setOutput([]);
 		setDidRun(false);
+		setExpanded(false);
 	}, []);
 
 	return (
-		<div className="rounded-lg border border-rpd-overlay dark:border-rp-overlay overflow-hidden">
-			<div className="flex items-center px-3 py-1.5 bg-rpd-overlay dark:bg-[#13111e] border-b border-rpd-overlay dark:border-rp-overlay">
-				<span className={`text-xs ${running ? 'animate-rainbow bg-[length:200%_auto] bg-clip-text text-transparent bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)]' : 'text-rpd-muted dark:text-rp-subtle'}`}>
+		<div className="rounded-lg border border-rpd-text/15 dark:border-rp-overlay overflow-hidden">
+			<div className="flex items-center px-3 py-1.5 bg-rpd-overlay/60 dark:bg-[#13111e] border-b border-rpd-text/10 dark:border-rp-overlay">
+				<span
+					className={`text-xs ${running ? 'animate-rainbow bg-[length:200%_auto] bg-clip-text text-transparent bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)]' : 'text-rpd-muted dark:text-rp-subtle'}`}
+				>
 					{vm.kind === 'loading' && 'Loading AtomVM…'}
 					{vm.kind === 'error' && `error: ${vm.message}`}
-					{vm.kind === 'ready' && (running ? `Running ${(elapsed / 1000).toFixed(1)}s` : didRun ? `Done ${(elapsed / 1000).toFixed(1)}s` : 'Ready')}
+					{vm.kind === 'ready' &&
+						(running
+							? `Running ${(elapsed / 1000).toFixed(1)}s`
+							: didRun
+								? `Done ${(elapsed / 1000).toFixed(1)}s`
+								: 'Ready')}
 				</span>
-				<div className="flex items-center gap-1 ml-auto">
-					<select
-						onChange={(e) => {
-							const ex = examples[Number(e.target.value)];
+				<div className="flex items-center gap-1.5 ml-auto">
+					<Select.Root
+						defaultValue="0"
+						onValueChange={(value) => {
+							const ex = examples[Number(value)];
 							if (ex) loadExample(ex.code);
 						}}
-						className="text-xs bg-transparent text-rpd-muted dark:text-rp-subtle border-none p-0 h-8 cursor-pointer outline-none"
 					>
-						{examples.map((ex, i) => (
-							<option key={i} value={i}>{ex.name}</option>
-						))}
-					</select>
+						<Select.Trigger className="inline-flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md text-rpd-muted dark:text-rp-subtle bg-rpd-base/60 dark:bg-rp-base/40 border border-rpd-text/10 dark:border-rp-overlay hover:border-rpd-text/25 dark:hover:border-rp-subtle/40 hover:text-rpd-subtle dark:hover:text-rp-text cursor-pointer outline-none transition-all duration-150 data-[state=open]:border-rpd-text/25 dark:data-[state=open]:border-rp-subtle/40">
+							<Select.Value />
+							<Select.Icon>
+								<svg
+									width="12"
+									height="12"
+									viewBox="0 0 12 12"
+									fill="none"
+									stroke="currentColor"
+									strokeWidth="1.5"
+									strokeLinecap="round"
+									strokeLinejoin="round"
+									className="opacity-50"
+								>
+									<path d="M3 4.5l3 3 3-3" />
+								</svg>
+							</Select.Icon>
+						</Select.Trigger>
+						<Select.Portal>
+							<Select.Content
+								position="popper"
+								sideOffset={6}
+								className="z-50 min-w-[var(--radix-select-trigger-width)] max-h-64 overflow-hidden rounded-lg border border-rpd-text/15 dark:border-rp-overlay bg-rpd-surface dark:bg-rp-surface shadow-lg shadow-black/10 dark:shadow-black/30 data-[state=open]:animate-[select-in_150ms_ease-out] data-[state=closed]:animate-[select-out_100ms_ease-in]"
+							>
+								<Select.Viewport className="p-1">
+									{examples.map((ex, i) => (
+										<Select.Item
+											key={i}
+											value={String(i)}
+											className="relative flex items-center px-2.5 py-1.5 text-xs rounded-md text-rpd-subtle dark:text-rp-subtle outline-none cursor-pointer select-none data-[highlighted]:bg-rpd-overlay/80 dark:data-[highlighted]:bg-rp-overlay data-[highlighted]:text-rpd-text dark:data-[highlighted]:text-rp-text data-[state=checked]:text-rpd-text dark:data-[state=checked]:text-rp-text transition-colors duration-100"
+										>
+											<Select.ItemText>{ex.name}</Select.ItemText>
+										</Select.Item>
+									))}
+								</Select.Viewport>
+							</Select.Content>
+						</Select.Portal>
+					</Select.Root>
 					<button
 						onClick={run}
 						disabled={vm.kind !== 'ready' || running}
 						aria-label={running ? 'Running code' : 'Run code'}
-						className="flex items-center gap-1.5 px-3 py-1.5 h-8 text-sm rounded-md bg-[#E0DEF4] text-rp-base disabled:opacity-40 cursor-pointer font-medium"
+						className="flex items-center gap-1.5 px-3 py-1.5 h-8 text-sm rounded-md bg-rpd-text text-rpd-surface dark:bg-[#E0DEF4] dark:text-rp-base disabled:opacity-40 cursor-pointer font-medium"
 					>
-						{running && <Spinner />} run <kbd className="px-1 py-0.5 text-xs rounded bg-rp-base/15 border border-rp-base/20 font-mono leading-none">{getIsMac() ? '⌘↵' : 'Ctrl↵'}</kbd>
+						{running && <Spinner />} run{' '}
+						<kbd className="px-1 py-0.5 text-xs rounded bg-current/15 border border-current/20 font-mono leading-none">
+							{getIsMac() ? '⌘↵' : 'Ctrl↵'}
+						</kbd>
 					</button>
 				</div>
 			</div>
@@ -376,7 +437,7 @@ export function Playground() {
 						animate={{ opacity: 1 }}
 						exit={{ height: 0, opacity: 0 }}
 						transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
-						className="m-0 bg-rpd-surface text-rpd-subtle dark:bg-[#13111e] dark:text-rp-subtle font-mono text-xs border-t border-rpd-overlay dark:border-rp-overlay max-h-40 overflow-auto"
+						className="m-0 bg-rpd-surface text-rpd-subtle dark:bg-[#13111e] dark:text-rp-subtle font-mono text-xs border-t border-rpd-text/10 dark:border-rp-overlay max-h-40 overflow-auto"
 					>
 						<div className="p-3 flex flex-col gap-0.5">
 							{output.map((line, i) => (

@@ -24,6 +24,7 @@
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.41.0",
+    "@radix-ui/react-select": "^2.2.6",
     "codemirror": "^6.0.2",
     "motion": "^12.36.0",
     "react": "^19.2.4",
