@@ -7,8 +7,11 @@ import { javascript } from '@codemirror/lang-javascript';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
+import gitExamples from 'virtual:examples';
 
-const EXAMPLE = `const parent = Arc.self();
+const DEFAULT_EXAMPLE = {
+	name: 'playground',
+	code: `const parent = Arc.self();
 Arc.log("starting...");
 
 for (let i = 0; i < 3; i++) {
@@ -20,7 +23,10 @@ for (let i = 0; i < 3; i++) {
 
 for (let i = 0; i < 3; i++) {
   Arc.log(Arc.receive());
-}`;
+}`,
+};
+
+const examples = [DEFAULT_EXAMPLE, ...gitExamples];
 
 // Rose Pine
 const rp = {
@@ -187,7 +193,7 @@ function Spinner() {
 }
 
 export function Playground() {
-	const [code, setCode] = useState(EXAMPLE);
+	const [code, setCode] = useState(examples[0]?.code ?? '');
 	const [output, setOutput] = useState<{ id: number; text: string }[]>([]);
 	const [running, setRunning] = useState(false);
 	const [didRun, setDidRun] = useState(false);
@@ -291,22 +297,45 @@ export function Playground() {
 		};
 	}, []);
 
+	const loadExample = useCallback((code: string) => {
+		const view = viewRef.current;
+		if (!view) return;
+		view.dispatch({
+			changes: { from: 0, to: view.state.doc.length, insert: code },
+		});
+		setOutput([]);
+		setDidRun(false);
+	}, []);
+
 	return (
 		<div className="rounded-lg border border-rpd-overlay dark:border-rp-overlay overflow-hidden">
-			<div className="flex items-center justify-between px-3 py-1.5 bg-rpd-overlay dark:bg-[#13111e] border-b border-rpd-overlay dark:border-rp-overlay">
+			<div className="flex items-center px-3 py-1.5 bg-rpd-overlay dark:bg-[#13111e] border-b border-rpd-overlay dark:border-rp-overlay">
 				<span className={`text-xs ${running ? 'animate-rainbow bg-[length:200%_auto] bg-clip-text text-transparent bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)]' : 'text-rpd-muted dark:text-rp-subtle'}`}>
 					{vm.kind === 'loading' && 'Loading AtomVM…'}
 					{vm.kind === 'error' && `error: ${vm.message}`}
 					{vm.kind === 'ready' && (running ? `Running ${(elapsed / 1000).toFixed(1)}s` : didRun ? `Done ${(elapsed / 1000).toFixed(1)}s` : 'Ready')}
 				</span>
-				<button
-					onClick={run}
-					disabled={vm.kind !== 'ready' || running}
-					aria-label={running ? 'Running code' : 'Run code'}
-					className="flex items-center gap-1.5 px-3 py-1.5 h-8 text-sm rounded-md bg-[#E0DEF4] text-rp-base disabled:opacity-40 cursor-pointer font-medium"
-				>
-					{running && <Spinner />} run <kbd className="px-1 py-0.5 text-xs rounded bg-rp-base/15 border border-rp-base/20 font-mono leading-none">{getIsMac() ? '⌘↵' : 'Ctrl↵'}</kbd>
-				</button>
+				<div className="flex items-center gap-1 ml-auto">
+					<select
+						onChange={(e) => {
+							const ex = examples[Number(e.target.value)];
+							if (ex) loadExample(ex.code);
+						}}
+						className="text-xs bg-transparent text-rpd-muted dark:text-rp-subtle border-none p-0 h-8 cursor-pointer outline-none"
+					>
+						{examples.map((ex, i) => (
+							<option key={i} value={i}>{ex.name}</option>
+						))}
+					</select>
+					<button
+						onClick={run}
+						disabled={vm.kind !== 'ready' || running}
+						aria-label={running ? 'Running code' : 'Run code'}
+						className="flex items-center gap-1.5 px-3 py-1.5 h-8 text-sm rounded-md bg-[#E0DEF4] text-rp-base disabled:opacity-40 cursor-pointer font-medium"
+					>
+						{running && <Spinner />} run <kbd className="px-1 py-0.5 text-xs rounded bg-rp-base/15 border border-rp-base/20 font-mono leading-none">{getIsMac() ? '⌘↵' : 'Ctrl↵'}</kbd>
+					</button>
+				</div>
 			</div>
 
 			<div ref={editorRef} />

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { Code } from './components/code';
 import { ExternalLink } from './components/external-link';
@@ -6,6 +7,24 @@ import { Playground } from './playground/Playground';
 const item = { hidden: { opacity: 0 }, show: { opacity: 1 } };
 
 export default function App() {
+	const [shimmer, setShimmer] = useState(false);
+
+	useEffect(() => {
+		let interval: ReturnType<typeof setInterval>;
+		const play = () => {
+			setShimmer(true);
+			setTimeout(() => setShimmer(false), 1600);
+		};
+		const timeout = setTimeout(() => {
+			play();
+			interval = setInterval(play, 15000);
+		}, 2000);
+		return () => {
+			clearTimeout(timeout);
+			clearInterval(interval);
+		};
+	}, []);
+
 	return (
 		<motion.main
 			initial="hidden"
@@ -15,7 +34,7 @@ export default function App() {
 		>
 			<motion.div variants={item}>
 				<h1 className="group text-lg font-semibold text-rpd-text dark:text-rp-text cursor-default">
-					<span className="bg-[length:200%_auto] bg-clip-text bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)] transition-colors duration-500 group-hover:text-transparent group-hover:animate-rainbow">
+					<span className={`bg-[length:200%_auto] bg-clip-text bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)] transition-colors duration-500 group-hover:text-transparent group-hover:animate-rainbow ${shimmer ? 'text-transparent animate-rainbow' : ''}`}>
 						arc <span className="align-top text-sm leading-none">⌒</span>
 					</span>
 				</h1>
