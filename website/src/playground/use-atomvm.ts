@@ -34,12 +34,39 @@ export function useAtomVM(onPrint: (line: string) => void) {
 	useEffect(() => {
 		if (window.Module) return;
 
+		let rejectPending: ((reason: Error) => void) | null = null;
+
+		const handleAbort = (s: string) => {
+			if (rejectPending && (s.includes('Aborted') || s.includes('RuntimeError'))) {
+				rejectPending(new Error(s));
+				rejectPending = null;
+			}
+		};
+
 		const mod: EmscriptenModule = {
 			arguments: ['/atomvm/arc.avm'],
 			locateFile: (p) => `/atomvm/${p}`,
-			print: onPrintStable,
-			printErr: onPrintStable,
-			onRuntimeInitialized: () => setStatus({ kind: 'ready', vm: mod as AtomVM }),
+			print: (s) => {
+				onPrintStable(s);
+				handleAbort(s);
+			},
+			printErr: (s) => {
+				onPrintStable(s);
+				handleAbort(s);
+			},
+			onRuntimeInitialized: () => {
+				const rawCall = mod.call!.bind(mod);
+				const wrappedCall = (proc: string, msg: string): Promise<string> => {
+					return new Promise<string>((resolve, reject) => {
+						rejectPending = reject;
+						rawCall(proc, msg).then(
+							(result) => { rejectPending = null; resolve(result); },
+							(err) => { rejectPending = null; reject(err); },
+						);
+					});
+				};
+				setStatus({ kind: 'ready', vm: { call: wrappedCall, cast: mod.cast!.bind(mod) } });
+			},
 		};
 		window.Module = mod;
 

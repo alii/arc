@@ -394,7 +394,7 @@ export function Playground() {
 					>
 						{running && <Spinner />} run{' '}
 						<kbd className="px-1 py-0.5 text-xs rounded bg-current/15 border border-current/20 font-mono leading-none">
-							{getIsMac() ? '⌘↵' : 'Ctrl↵'}
+							{getIsMac() ? <>⌘⏎</> : 'Ctrl⏎'}
 						</kbd>
 					</button>
 				</div>
