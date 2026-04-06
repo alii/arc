@@ -748,93 +748,70 @@ fn count_leading_zeros_loop(n: Int, bit: Int, count: Int) -> Int {
 // -- FFI --
 
 @external(erlang, "math", "pow")
-@external(javascript, "./arc_math_ffi.mjs", "float_power")
 fn float_power(base: Float, exp: Float) -> Float
 
 @external(erlang, "math", "sqrt")
-@external(javascript, "./arc_math_ffi.mjs", "sqrt")
 fn ffi_math_sqrt(x: Float) -> Float
 
 @external(erlang, "math", "log")
-@external(javascript, "./arc_math_ffi.mjs", "log")
 fn ffi_math_log(x: Float) -> Float
 
 @external(erlang, "math", "sin")
-@external(javascript, "./arc_math_ffi.mjs", "sin")
 fn ffi_math_sin(x: Float) -> Float
 
 @external(erlang, "math", "cos")
-@external(javascript, "./arc_math_ffi.mjs", "cos")
 fn ffi_math_cos(x: Float) -> Float
 
 @external(erlang, "math", "floor")
-@external(javascript, "./arc_math_ffi.mjs", "floor")
 fn ffi_math_floor(x: Float) -> Float
 
 @external(erlang, "math", "ceil")
-@external(javascript, "./arc_math_ffi.mjs", "ceil")
 fn ffi_math_ceil(x: Float) -> Float
 
 @external(erlang, "math", "tan")
-@external(javascript, "./arc_math_ffi.mjs", "tan")
 fn ffi_math_tan(x: Float) -> Float
 
 @external(erlang, "math", "asin")
-@external(javascript, "./arc_math_ffi.mjs", "asin")
 fn ffi_math_asin(x: Float) -> Float
 
 @external(erlang, "math", "acos")
-@external(javascript, "./arc_math_ffi.mjs", "acos")
 fn ffi_math_acos(x: Float) -> Float
 
 @external(erlang, "math", "atan")
-@external(javascript, "./arc_math_ffi.mjs", "atan")
 fn ffi_math_atan(x: Float) -> Float
 
 @external(erlang, "math", "atan2")
-@external(javascript, "./arc_math_ffi.mjs", "atan2")
 fn ffi_math_atan2(y: Float, x: Float) -> Float
 
 @external(erlang, "math", "exp")
-@external(javascript, "./arc_math_ffi.mjs", "exp")
 fn ffi_math_exp(x: Float) -> Float
 
 @external(erlang, "math", "log2")
-@external(javascript, "./arc_math_ffi.mjs", "log2")
 fn ffi_math_log2(x: Float) -> Float
 
 @external(erlang, "math", "log10")
-@external(javascript, "./arc_math_ffi.mjs", "log10")
 fn ffi_math_log10(x: Float) -> Float
 
 @external(erlang, "math", "sinh")
-@external(javascript, "./arc_math_ffi.mjs", "sinh")
 fn ffi_math_sinh(x: Float) -> Float
 
 @external(erlang, "math", "cosh")
-@external(javascript, "./arc_math_ffi.mjs", "cosh")
 fn ffi_math_cosh(x: Float) -> Float
 
 @external(erlang, "math", "tanh")
-@external(javascript, "./arc_math_ffi.mjs", "tanh")
 fn ffi_math_tanh(x: Float) -> Float
 
 @external(erlang, "math", "asinh")
-@external(javascript, "./arc_math_ffi.mjs", "asinh")
 fn ffi_math_asinh(x: Float) -> Float
 
 @external(erlang, "math", "acosh")
-@external(javascript, "./arc_math_ffi.mjs", "acosh")
 fn ffi_math_acosh(x: Float) -> Float
 
 @external(erlang, "math", "atanh")
-@external(javascript, "./arc_math_ffi.mjs", "atanh")
 fn ffi_math_atanh(x: Float) -> Float
 
 @external(erlang, "rand", "uniform")
-@external(javascript, "./arc_math_ffi.mjs", "random")
 fn ffi_rand_uniform() -> Float
 
 @external(erlang, "arc_math_ffi", "fround")
-@external(javascript, "./arc_math_ffi.mjs", "fround")
 fn ffi_fround(x: Float) -> Float

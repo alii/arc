@@ -74,11 +74,9 @@ pub fn drain_jobs(state: State) -> State {
 }
 
 @external(erlang, "arc_vm_ffi", "receive_any_event")
-@external(javascript, "../arc_vm_ffi.mjs", "receive_any_event")
 fn ffi_receive_any() -> value.MailboxEvent
 
 @external(erlang, "arc_vm_ffi", "receive_settle_only")
-@external(javascript, "../arc_vm_ffi.mjs", "receive_settle_only")
 fn ffi_receive_settle_only() -> value.MailboxEvent
 
 /// Mailbox-backed event loop. Runs drain microtasks -> block on BEAM mailbox

@@ -1773,11 +1773,9 @@ fn is_cp_id_continue(n: Int) -> Bool {
 }
 
 @external(erlang, "unicode_ffi", "is_id_start")
-@external(javascript, "./unicode_ffi.mjs", "is_id_start")
 fn is_unicode_id_start(cp: Int) -> Bool
 
 @external(erlang, "unicode_ffi", "is_id_continue")
-@external(javascript, "./unicode_ffi.mjs", "is_id_continue")
 fn is_unicode_id_continue(cp: Int) -> Bool
 
 fn keyword_or_identifier(word: String) -> TokenKind {
@@ -1880,7 +1878,6 @@ fn byte_slice(bytes: BitArray, start: Int, len: Int) -> String {
 
 /// O(1) byte_size of a String. Erlang: byte_size BIF. JS: TextEncoder.
 @external(erlang, "erlang", "byte_size")
-@external(javascript, "./arc_parser_ffi.mjs", "byte_size")
 pub fn string_byte_size(s: String) -> Int
 
 fn drop_bytes(bytes: BitArray, pos: Int) -> BitArray {

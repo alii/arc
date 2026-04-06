@@ -353,7 +353,6 @@ fn parse_json_number_string(s: String) -> Result(Float, Nil) {
 }
 
 @external(erlang, "gleam_stdlib", "parse_float")
-@external(javascript, "../../parser/arc_parser_ffi.mjs", "parse_float")
 fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
 
 /// Parse a JSON array (after the opening '[').

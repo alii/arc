@@ -157,5 +157,4 @@ pub fn get_num_arg(
 }
 
 @external(erlang, "gleam_stdlib", "parse_float")
-@external(javascript, "../../parser/arc_parser_ffi.mjs", "parse_float")
 fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)

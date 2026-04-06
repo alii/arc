@@ -98,7 +98,6 @@ fn gleam_float_parse(s: String) -> Result(Float, Nil) {
 }
 
 @external(erlang, "arc_parser_ffi", "parse_float")
-@external(javascript, "./arc_parser_ffi.mjs", "parse_float")
 fn catch_float_parse(s: String) -> Result(Float, Nil)
 
 fn parse_int_radix(s: String, radix: Int) -> Result(Int, Nil) {
