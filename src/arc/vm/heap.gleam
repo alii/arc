@@ -188,6 +188,18 @@ pub fn read_subject(
   }
 }
 
+/// Read a SelectorObject's (tag, handler) entries.
+pub fn read_selector(
+  h: Heap(ctx),
+  ref: Ref,
+) -> Option(List(#(value.ErlangRef, value.JsValue))) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.SelectorObject(entries:), ..)) ->
+      Some(entries)
+    _ -> None
+  }
+}
+
 /// Read a RegExpObject, returning #(pattern, flags).
 pub fn read_regexp(h: Heap(ctx), ref: Ref) -> Option(#(String, String)) {
   case read(h, ref) {

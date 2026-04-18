@@ -1,5 +1,5 @@
 declare module 'arc:internal' {
-	type Brands = 'Pid' | 'Timer';
+	type Brands = 'Pid' | 'Timer' | 'Subject' | 'Selector';
 }
 
 declare module 'arc' {
@@ -9,12 +9,104 @@ declare module 'arc' {
 	export interface Timer extends Brand<'Timer'> {}
 
 	/**
-	 * Send a message to a process
+	 * A typed channel bound to the process that created it.
 	 *
-	 * @param pid The pid to send the message to
-	 * @param message The message
+	 * Subjects can be sent across processes — call {@link Subject.send} from
+	 * anywhere and {@link Subject.receive} on the owning process. Each subject is
+	 * tagged with a unique ref so selective receive is O(1) for the common case.
 	 */
-	export function send<T>(pid: Pid, message: T): void;
+	export interface Subject<T> extends Brand<'Subject'> {
+		/**
+		 * Send a message to this subject's owner process.
+		 *
+		 * The message is structurally cloned. Returns {@link message}.
+		 */
+		send(message: T): T;
+
+		/**
+		 * Block until a message arrives on this subject.
+		 *
+		 * Only the owning process should call this.
+		 */
+		receive(): T;
+		/**
+		 * Block until a message arrives or {@link timeout} ms elapse.
+		 * Returns `undefined` on timeout.
+		 */
+		receive(timeout: number): T | undefined;
+
+		/**
+		 * Returns a promise that resolves with the next message on this subject.
+		 *
+		 * Non-blocking — the event loop keeps running while you `await`.
+		 */
+		receiveAsync(): Promise<T>;
+		/**
+		 * Returns a promise that resolves with the next message, or `undefined`
+		 * if {@link timeout} ms elapse first.
+		 */
+		receiveAsync(timeout: number): Promise<T | undefined>;
+
+		toString(): string;
+	}
+
+	/**
+	 * An immutable set of subjects to receive on. Chain {@link Selector.on} to
+	 * register subjects, then call {@link Selector.receive} to block until a
+	 * message arrives on any of them.
+	 */
+	export interface Selector<R = never> extends Brand<'Selector'> {
+		/**
+		 * Return a new selector that also listens on {@link subject}. Messages
+		 * matched on it are returned as-is from {@link Selector.receive}.
+		 */
+		on<T>(subject: Subject<T>): Selector<R | T>;
+		/**
+		 * Return a new selector that also listens on {@link subject}. Messages
+		 * matched on it are passed through {@link map} before being returned.
+		 */
+		on<T, R2>(subject: Subject<T>, map: (message: T) => R2): Selector<R | R2>;
+
+		/**
+		 * Block until a message arrives on any registered subject, then return
+		 * it (after applying its mapper, if any).
+		 */
+		receive(): R;
+		/**
+		 * Block until a message arrives or {@link timeout} ms elapse.
+		 * Returns `undefined` on timeout.
+		 */
+		receive(timeout: number): R | undefined;
+	}
+
+	/**
+	 * Create a new subject bound to the current process.
+	 *
+	 * In TypeScript, you should always pass the type parameter
+	 * to specify the values this subject can send/receive:
+	 *
+	 * ```ts
+	 * const s = Arc.subject<string>() // Accepts strings
+	 * ```
+	 */
+	export function subject(): Subject<never>;
+	/**
+	 * Create a new subject bound to the current process.
+	 */
+	export function subject<T>(): Subject<T>;
+
+	/**
+	 * Create an empty {@link Selector}. Chain {@link Selector.on} to register
+	 * subjects, then call {@link Selector.receive} to block until a message
+	 * arrives on any of them.
+	 *
+	 * @example
+	 * const selector = Arc.select()
+	 *   .on(replies)
+	 *   .on(errors, err => { throw err });
+	 * const result = selector.receive(1000);
+	 */
+	export function select(): Selector;
 
 	/**
 	 * Spawn a new process
@@ -26,26 +118,6 @@ declare module 'arc' {
 	 * @param fn The closure to evaluate on the new process
 	 */
 	export function spawn<T>(fn: () => T): Pid;
-
-	/**
-	 * Receive a message from the process mailbox
-	 *
-	 * This API will probably change in the future to support patterns
-	 *
-	 * @param timeout The timeout to wait for
-	 */
-	export function receive<T>(timeout?: number): T;
-
-	/**
-	 * Receive a message from the process mailbox, returning a promise that
-	 * resolves when a message is received.
-	 *
-	 * This API will probably change in the future to support patterns
-	 *
-	 * @param timeout The timeout to wait for. Rejects the promise if no message
-	 * is received within the timeout.
-	 */
-	export function receiveAsync<T>(timeout?: number): Promise<T>;
 
 	/**
 	 * Schedule a callback to be executed after at-least {@link ms} milliseconds

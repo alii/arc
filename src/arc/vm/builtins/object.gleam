@@ -1183,6 +1183,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.SymbolObject(_) -> "Symbol"
             value.PidObject(_) -> "Pid"
             value.SubjectObject(..) -> "Subject"
+            value.SelectorObject(..) -> "Selector"
             value.TimerObject(..) -> "Timer"
             value.MapObject(..) -> "Map"
             value.SetObject(..) -> "Set"

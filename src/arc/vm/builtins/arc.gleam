@@ -6,14 +6,14 @@ import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArcNativeFn, type JsValue, type MailboxEvent, type PortableMessage,
-  type Ref, ArcLog, ArcNative, ArcPeek, ArcPidToString, ArcSelect, ArcSelf,
-  ArcSetTimeout, ArcSleep, ArcSubject, ArcSubjectReceive, ArcSubjectReceiveAsync,
-  ArcSubjectSend, ArcSubjectToString, DataProperty, JsBigInt, JsBool, JsNull,
-  JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
-  ObjectSlot, OrdinaryObject, PidObject, PmArray, PmBigInt, PmBool, PmNull,
-  PmNumber, PmObject, PmPid, PmString, PmSubject, PmSymbol, PmUndefined,
-  PromiseFulfilled, PromisePending, PromiseRejected, SettlePromise,
-  SubjectObject,
+  type Ref, ArcLog, ArcNative, ArcPeek, ArcPidToString, ArcSelect, ArcSelectorOn,
+  ArcSelectorReceive, ArcSelf, ArcSetTimeout, ArcSleep, ArcSubject,
+  ArcSubjectReceive, ArcSubjectReceiveAsync, ArcSubjectSend, ArcSubjectToString,
+  DataProperty, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
+  JsUndefined, JsUninitialized, ObjectSlot, OrdinaryObject, PidObject, PmArray,
+  PmBigInt, PmBool, PmNull, PmNumber, PmObject, PmPid, PmString, PmSubject,
+  PmSymbol, PmUndefined, PromiseFulfilled, PromisePending, PromiseRejected,
+  SelectorObject, SettlePromise, SubjectObject,
 }
 import gleam/dict
 import gleam/io
@@ -90,7 +90,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
       #("log", ArcNative(ArcLog), 1),
       #("sleep", ArcNative(ArcSleep), 1),
       #("subject", ArcNative(ArcSubject), 0),
-      #("select", ArcNative(ArcSelect), 1),
+      #("select", ArcNative(ArcSelect), 0),
     ])
 
   common.init_namespace(h, object_proto, "Arc", methods)
@@ -112,7 +112,9 @@ pub fn dispatch(
     value.ArcSleep -> sleep(args, state)
     value.ArcPidToString -> pid_to_string(this, args, state)
     value.ArcSubject -> subject(state)
-    value.ArcSelect -> select(args, state)
+    value.ArcSelect -> select(state)
+    value.ArcSelectorOn -> selector_on(this, args, state)
+    value.ArcSelectorReceive -> selector_receive(this, args, state)
     value.ArcSubjectSend -> subject_send(this, args, state)
     value.ArcSubjectReceive -> subject_receive(this, args, state)
     ArcSubjectReceiveAsync -> subject_receive_async(this, args, state)
@@ -670,198 +672,137 @@ fn subject_receive_async(
 
 // -- Arc.select --------------------------------------------------------------
 
-/// Arc.select(s => s.on(subject, handler).on(subject2, handler2).timeout(ms, fn))
-/// Blocks until a message arrives on any of the specified subjects, then runs
-/// the corresponding handler and returns its result.
-fn select(
-  args: List(JsValue),
+/// Arc.select() — returns an empty Selector. Chain `.on(subject, mapper?)`
+/// to register subjects, then call `.receive()` / `.receive(timeout)` to
+/// block until a message arrives on any of them.
+fn select(state: State) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, selector) = alloc_selector_object(state, [])
+  #(State(..state, heap:), Ok(selector))
+}
+
+fn alloc_selector_object(
   state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let callback = case args {
-    [cb, ..] -> cb
-    [] -> JsUndefined
-  }
-
-  // 1. Allocate accumulator array + timeout box on the heap
-  let #(heap, acc_ref) =
-    common.alloc_array(state.heap, [], state.builtins.array.prototype)
-  let #(heap, timeout_ref) = heap.alloc(heap, value.BoxSlot(JsUndefined))
-
-  // 2. Create builder object with .on() and .timeout() methods
-  let #(heap, on_fn_ref) =
-    common.alloc_host_fn(
-      heap,
-      state.builtins.function.prototype,
-      fn(on_args, this, st) {
-        // .on(subject, handler) — push subject and handler to accumulator
-        let #(subj_arg, handler_arg) = case on_args {
-          [s, h, ..] -> #(s, h)
-          [s] -> #(s, JsUndefined)
-          [] -> #(JsUndefined, JsUndefined)
-        }
-        // Append subject and handler as consecutive elements
-        let h = st.heap
-        case heap.read(h, acc_ref) {
-          Some(ObjectSlot(kind: value.ArrayObject(length:), elements: elems, ..)) -> {
-            let elems = elements.set(elems, length, subj_arg)
-            let elems = elements.set(elems, length + 1, handler_arg)
-            let h =
-              heap.update(h, acc_ref, fn(slot) {
-                case slot {
-                  ObjectSlot(..) ->
-                    ObjectSlot(
-                      ..slot,
-                      kind: value.ArrayObject(length: length + 2),
-                      elements: elems,
-                    )
-                  _ -> slot
-                }
-              })
-            #(State(..st, heap: h), Ok(this))
-          }
-          _ -> #(st, Ok(this))
-        }
-      },
+  entries: List(#(value.ErlangRef, JsValue)),
+) -> #(Heap, JsValue) {
+  let function_proto = state.builtins.function.prototype
+  let #(heap, on_ref) =
+    common.alloc_native_fn(
+      state.heap,
+      function_proto,
+      ArcNative(ArcSelectorOn),
       "on",
-      2,
+      1,
     )
-
-  let #(heap, timeout_fn_ref) =
-    common.alloc_host_fn(
+  let #(heap, receive_ref) =
+    common.alloc_native_fn(
       heap,
-      state.builtins.function.prototype,
-      fn(t_args, this, st) {
-        // .timeout(ms, handler) — store in the timeout box
-        let #(ms_arg, handler_arg) = case t_args {
-          [m, h, ..] -> #(m, h)
-          [m] -> #(m, JsUndefined)
-          [] -> #(JsUndefined, JsUndefined)
-        }
-        // Store as a 2-element: [ms, handler] in the BoxSlot
-        let h = st.heap
-        let #(h, pair_ref) =
-          common.alloc_array(
-            h,
-            [ms_arg, handler_arg],
-            st.builtins.array.prototype,
-          )
-        let h =
-          heap.update(h, timeout_ref, fn(_) {
-            value.BoxSlot(JsObject(pair_ref))
-          })
-        #(State(..st, heap: h), Ok(this))
-      },
-      "timeout",
-      2,
+      function_proto,
+      ArcNative(ArcSelectorReceive),
+      "receive",
+      0,
     )
-
-  let #(heap, builder_ref) =
+  let #(heap, ref) =
     heap.alloc(
       heap,
       ObjectSlot(
-        kind: OrdinaryObject,
+        kind: SelectorObject(entries:),
         properties: common.named_props([
-          #("on", value.builtin_property(JsObject(on_fn_ref))),
-          #("timeout", value.builtin_property(JsObject(timeout_fn_ref))),
+          #("on", value.builtin_property(JsObject(on_ref))),
+          #("receive", value.builtin_property(JsObject(receive_ref))),
         ]),
         elements: elements.new(),
         prototype: Some(state.builtins.object.prototype),
-        symbol_properties: [],
+        symbol_properties: [common.to_string_tag("Selector")],
         extensible: True,
       ),
     )
+  #(heap, JsObject(ref))
+}
 
-  let state = State(..state, heap:)
-
-  // 3. Call the user's builder callback
-  let call_result =
-    state.call(state, callback, JsUndefined, [JsObject(builder_ref)])
-  let state = case call_result {
-    Ok(#(_result, st)) -> st
-    Error(#(thrown, st)) -> {
-      // If callback throws, propagate
-      let _ = thrown
-      st
-    }
+/// selector.on(subject, mapper?) — return a NEW selector with `subject`
+/// registered. `mapper` defaults to identity (the raw message is returned).
+fn selector_on(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let entries = case this {
+    JsObject(ref) -> heap.read_selector(state.heap, ref)
+    _ -> None
   }
-  case call_result {
-    Error(#(thrown, _)) -> #(state, Error(thrown))
-    Ok(_) -> {
-      // 4. Read accumulated entries from the array
-      select_from_accumulated(state, acc_ref, timeout_ref)
+  case entries {
+    None -> state.type_error(state, "Selector.on: this is not a Selector")
+    Some(entries) -> {
+      let #(subj_arg, mapper_arg) = case args {
+        [s, m, ..] -> #(s, m)
+        [s] -> #(s, JsUndefined)
+        [] -> #(JsUndefined, JsUndefined)
+      }
+      let tag = case subj_arg {
+        JsObject(ref) ->
+          heap.read_subject(state.heap, ref)
+          |> option.map(fn(p) { p.1 })
+        _ -> None
+      }
+      case tag {
+        None ->
+          state.type_error(state, "Selector.on: argument is not a Subject")
+        Some(tag) -> {
+          let #(heap, selector) =
+            alloc_selector_object(state, [#(tag, mapper_arg), ..entries])
+          #(State(..state, heap:), Ok(selector))
+        }
+      }
     }
   }
 }
 
-/// Read the accumulated .on() entries and timeout, build ref maps, call FFI select.
-fn select_from_accumulated(
+/// selector.receive(timeout?) — block until a message arrives on any
+/// registered subject, run its mapper (or identity), and return the result.
+/// With a timeout, returns `undefined` if it elapses.
+fn selector_receive(
+  this: JsValue,
+  args: List(JsValue),
   state: State,
-  acc_ref: Ref,
-  timeout_ref: Ref,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Read the accumulator array: [subject1, handler1, subject2, handler2, ...]
-  let entries = case heap.read(state.heap, acc_ref) {
-    Some(ObjectSlot(kind: value.ArrayObject(length:), elements: elems, ..)) ->
-      read_select_entries(state.heap, elems, 0, length, [])
-    _ -> []
+  let entries = case this {
+    JsObject(ref) -> heap.read_selector(state.heap, ref)
+    _ -> None
   }
-
   case entries {
-    [] -> state.type_error(state, "Arc.select: no subjects registered")
-    _ -> {
-      // Build ref_map for FFI and handler_map for lookup
+    None -> state.type_error(state, "Selector.receive: this is not a Selector")
+    Some([]) ->
+      state.type_error(state, "Selector.receive: no subjects registered")
+    Some(entries) -> {
       let #(ref_map, handler_map) =
         list.fold(entries, #(dict.new(), dict.new()), fn(acc, entry) {
           let #(rm, hm) = acc
           let #(tag, handler) = entry
           #(dict.insert(rm, tag, True), dict.insert(hm, tag, handler))
         })
-
-      // Read timeout
-      let timeout_info = case heap.read(state.heap, timeout_ref) {
-        Some(value.BoxSlot(JsObject(pair_ref))) ->
-          case heap.read(state.heap, pair_ref) {
-            Some(ObjectSlot(kind: value.ArrayObject(..), elements: elems, ..)) -> {
-              let ms_val =
-                elements.get_option(elems, 0) |> option.unwrap(JsUndefined)
-              let handler_val =
-                elements.get_option(elems, 1) |> option.unwrap(JsUndefined)
-              case ms_val {
-                JsNumber(value.Finite(n)) ->
-                  Some(#(value.float_to_int(n), handler_val))
-                _ -> None
+      case args {
+        [JsNumber(value.Finite(n)), ..] -> {
+          let ms = value.float_to_int(n)
+          case ms >= 0 {
+            False -> #(state, Ok(JsUndefined))
+            True ->
+              case ffi_select_timeout(ref_map, ms) {
+                Ok(#(matched_ref, pm)) ->
+                  select_handle_match(state, matched_ref, pm, handler_map)
+                Error(Nil) -> #(state, Ok(JsUndefined))
               }
-            }
-            _ -> None
           }
-        _ -> None
-      }
-
-      // Call FFI select
-      case timeout_info {
-        None -> {
+        }
+        _ -> {
           let #(matched_ref, pm) = ffi_select(ref_map)
           select_handle_match(state, matched_ref, pm, handler_map)
-        }
-        Some(#(ms, timeout_handler)) -> {
-          case ffi_select_timeout(ref_map, ms) {
-            Ok(#(matched_ref, pm)) ->
-              select_handle_match(state, matched_ref, pm, handler_map)
-            Error(Nil) -> {
-              // Timeout — call the timeout handler
-              case state.call(state, timeout_handler, JsUndefined, []) {
-                Ok(#(result, state)) -> #(state, Ok(result))
-                Error(#(thrown, state)) -> #(state, Error(thrown))
-              }
-            }
-          }
         }
       }
     }
   }
 }
 
-/// Deserialize the matched message and call the handler.
+/// Deserialize the matched message and call its mapper if one was registered.
 fn select_handle_match(
   state: State,
   matched_ref: value.ErlangRef,
@@ -870,46 +811,13 @@ fn select_handle_match(
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(heap, val) = deserialize(state.heap, state.builtins, pm)
   let state = State(..state, heap:)
-  case dict.get(handler_map, matched_ref) {
-    Ok(handler) ->
-      case state.call(state, handler, JsUndefined, [val]) {
+  case dict.get(handler_map, matched_ref) |> result.unwrap(JsUndefined) {
+    JsUndefined -> #(state, Ok(val))
+    mapper ->
+      case state.call(state, mapper, JsUndefined, [val]) {
         Ok(#(result, state)) -> #(state, Ok(result))
         Error(#(thrown, state)) -> #(state, Error(thrown))
       }
-    Error(Nil) ->
-      // Shouldn't happen — the ref came from our map
-      #(state, Ok(val))
-  }
-}
-
-/// Read pairs of [subject, handler] from the accumulator array,
-/// extracting ErlangRef tags from SubjectObjects.
-fn read_select_entries(
-  h: Heap,
-  elems: value.JsElements,
-  i: Int,
-  length: Int,
-  acc: List(#(value.ErlangRef, JsValue)),
-) -> List(#(value.ErlangRef, JsValue)) {
-  case i >= length {
-    True -> list.reverse(acc)
-    False -> {
-      let subj_val = elements.get_option(elems, i) |> option.unwrap(JsUndefined)
-      let handler_val =
-        elements.get_option(elems, i + 1) |> option.unwrap(JsUndefined)
-      case subj_val {
-        JsObject(ref) ->
-          case heap.read_subject(h, ref) {
-            Some(#(_pid, tag)) ->
-              read_select_entries(h, elems, i + 2, length, [
-                #(tag, handler_val),
-                ..acc
-              ])
-            None -> read_select_entries(h, elems, i + 2, length, acc)
-          }
-        _ -> read_select_entries(h, elems, i + 2, length, acc)
-      }
-    }
   }
 }
 

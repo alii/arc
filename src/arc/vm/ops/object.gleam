@@ -1469,6 +1469,7 @@ fn inspect_object(
           <> "]"
         value.PidObject(_) -> "Pid {}"
         value.SubjectObject(..) -> "Subject {}"
+        value.SelectorObject(..) -> "Selector {}"
         value.TimerObject(..) -> "Timer {}"
         value.MapObject(entries:, ..) ->
           "Map(" <> int.to_string(dict.size(entries)) <> ")"

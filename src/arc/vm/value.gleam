@@ -479,6 +479,8 @@ pub type ArcNativeFn {
   ArcPidToString
   ArcSubject
   ArcSelect
+  ArcSelectorOn
+  ArcSelectorReceive
   ArcSubjectSend
   ArcSubjectReceive
   ArcSubjectReceiveAsync
@@ -989,6 +991,9 @@ pub type ExoticKind(ctx) {
   /// `{tag, PortableMessage}` in the BEAM mailbox, enabling efficient selective
   /// receive via `is_map_key` guards. Maps to Gleam's `process.Subject`.
   SubjectObject(pid: ErlangPid, tag: ErlangRef)
+  /// Selector — built by Arc.select(). Holds the (tag → handler) entries from
+  /// the builder so `.receive()` can be called repeatedly without rebuilding.
+  SelectorObject(entries: List(#(ErlangRef, JsValue)))
   /// Timer handle returned by Arc.setTimeout — wraps the Erlang timer ref
   /// and the promise data_ref so clearTimeout can cancel cleanly.
   TimerObject(timer_ref: ErlangTimerRef, data_ref: Ref)
@@ -1641,6 +1646,8 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
           // Trace refs in weak set keys
           dict.keys(data)
         }
+        SelectorObject(entries:) ->
+          list.flat_map(entries, fn(e) { refs_in_value(e.1) })
         OrdinaryObject
         | ArrayObject(_)
         | ArgumentsObject(_)

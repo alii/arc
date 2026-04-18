@@ -5412,6 +5412,72 @@ pub fn arc_peek_after_microtask_test() -> Nil {
   )
 }
 
+pub fn arc_select_returns_selector_test() -> Nil {
+  assert_normal("typeof Arc.select().receive", JsString("function"))
+}
+
+pub fn arc_select_receive_identity_test() -> Nil {
+  assert_normal(
+    "var s = Arc.subject();
+     s.send(42);
+     Arc.select().on(s).receive()",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn arc_select_receive_mapper_test() -> Nil {
+  assert_normal(
+    "var s = Arc.subject();
+     s.send(21);
+     Arc.select().on(s, function(m) { return m * 2 }).receive()",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn arc_select_receive_timeout_test() -> Nil {
+  assert_normal(
+    "var s = Arc.subject();
+     Arc.select().on(s).receive(0)",
+    JsUndefined,
+  )
+}
+
+pub fn arc_select_receive_reusable_test() -> Nil {
+  assert_normal(
+    "var s = Arc.subject();
+     s.send(1); s.send(2);
+     var sel = Arc.select().on(s);
+     sel.receive() + sel.receive()",
+    JsNumber(Finite(3.0)),
+  )
+}
+
+pub fn arc_select_immutable_test() -> Nil {
+  assert_normal(
+    "var a = Arc.subject(); var b = Arc.subject();
+     b.send('b');
+     var base = Arc.select().on(a);
+     var withB = base.on(b);
+     withB.receive(); base.receive(0)",
+    JsUndefined,
+  )
+}
+
+pub fn arc_select_empty_receive_throws_test() -> Nil {
+  assert_thrown("Arc.select().receive()")
+}
+
+pub fn arc_select_on_non_subject_throws_test() -> Nil {
+  assert_thrown("Arc.select().on({})")
+}
+
+pub fn arc_select_tostring_tag_test() -> Nil {
+  assert_normal(
+    "Object.prototype.toString.call(Arc.select())",
+    JsString("[object Selector]"),
+  )
+}
+
 // ============================================================================
 // Generators
 // ============================================================================
