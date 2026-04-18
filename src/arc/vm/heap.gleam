@@ -176,6 +176,18 @@ pub fn read_pid(h: Heap(ctx), ref: Ref) -> Option(value.ErlangPid) {
   }
 }
 
+/// Read a SubjectObject's pid and tag.
+pub fn read_subject(
+  h: Heap(ctx),
+  ref: Ref,
+) -> Option(#(value.ErlangPid, value.ErlangRef)) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.SubjectObject(pid:, tag:), ..)) ->
+      Some(#(pid, tag))
+    _ -> None
+  }
+}
+
 /// Read a RegExpObject, returning #(pattern, flags).
 pub fn read_regexp(h: Heap(ctx), ref: Ref) -> Option(#(String, String)) {
   case read(h, ref) {

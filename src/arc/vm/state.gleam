@@ -131,12 +131,12 @@ pub type State {
     /// [[PromiseIsHandled]] was false. Removed when a handler is later attached.
     /// Any remaining after job draining are reported as unhandled rejections.
     unhandled_rejections: List(Ref),
-    /// PromiseSlot data_refs created by `Arc.receiveAsync()` waiting for a
-    /// `UserMessage` to arrive. FIFO — first caller gets first message. When
-    /// this is empty, the event loop uses selective receive to leave any
-    /// `UserMessage` in the BEAM mailbox so blocking `Arc.receive()` can pick
-    /// it up later.
-    pending_receivers: List(Ref),
+    /// Async subject receivers: each entry is `#(promise_data_ref, subject_tag)`
+    /// where promise_data_ref identifies the promise to fulfill and subject_tag
+    /// is the ErlangRef of the subject being awaited. The event loop builds a
+    /// ref map from these to selectively receive subject messages alongside
+    /// SettlePromise/ReceiverTimeout events.
+    pending_receivers: List(#(Ref, value.ErlangRef)),
     /// Count of in-flight external operations: each `receiveAsync`,
     /// `setTimeout`, `fetch`, etc. increments this. The event loop blocks
     /// on the BEAM mailbox while outstanding > 0; exits when it hits 0.

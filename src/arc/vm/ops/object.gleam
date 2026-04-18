@@ -1437,6 +1437,7 @@ fn inspect_object(
           <> inspect_inner(value.JsSymbol(sym), heap, depth, visited)
           <> "]"
         value.PidObject(_) -> "Pid {}"
+        value.SubjectObject(..) -> "Subject {}"
         value.TimerObject(..) -> "Timer {}"
         value.MapObject(entries:, ..) ->
           "Map(" <> int.to_string(dict.size(entries)) <> ")"

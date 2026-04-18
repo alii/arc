@@ -1,5 +1,5 @@
-const pid = Arc.spawn(() => {
-  Arc.log(Arc.receive());
-});
+const inbox = Arc.subject();
 
-Arc.send(pid, "hello from " + Arc.self());
+Arc.spawn(() => inbox.send('hello from ' + Arc.self()));
+
+Arc.log(inbox.receive());

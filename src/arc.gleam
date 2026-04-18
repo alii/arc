@@ -126,6 +126,8 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
               <> inspect_inner(h, value.JsSymbol(sym), depth, seen)
               <> "]"
             PidObject(pid:) -> "Pid" <> builtins_arc.ffi_pid_to_string(pid)
+            value.SubjectObject(pid:, ..) ->
+              "Subject" <> builtins_arc.ffi_pid_to_string(pid)
             value.TimerObject(..) -> "Timer {}"
             value.MapObject(entries:, ..) ->
               "Map(" <> int.to_string(dict.size(entries)) <> ")"

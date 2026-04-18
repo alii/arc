@@ -7,9 +7,10 @@
          tree_array_size/1, tree_array_resize/2,
          tree_array_reset/2, tree_array_sparse_fold/3]).
 -export([send_message/2, receive_message_infinite/0, receive_message_timeout/1, pid_to_string/1]).
--export([receive_any_event/0, receive_settle_only/0, send_after/3, cancel_timer/1]).
--export([receive_user_message/0, receive_user_message_timeout/1]).
+-export([receive_settle_only/0, receive_settle_or_subject/1, send_after/3, cancel_timer/1]).
 -export([get_script_args/0, sleep/1]).
+-export([send_subject_message/3, receive_subject_message/1, receive_subject_message_timeout/2]).
+-export([select_message/1, select_message_timeout/2]).
 -export([string_char_at/2, string_codepoint_length/1]).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1]).
 read_line(Prompt) ->
@@ -143,34 +144,38 @@ pid_to_string(Pid) -> list_to_binary(pid_to_list(Pid)).
 get_script_args() -> [list_to_binary(A) || A <- init:get_plain_arguments()].
 sleep(Ms) -> timer:sleep(Ms), nil.
 
-%% Selective receive for the event loop. Gleam MailboxEvent variants compile to
-%% tagged tuples: UserMessage(pm) = {user_message, Pm},
-%% SettlePromise(ref, outcome) = {settle_promise, Ref, Outcome}.
-%%
-%% When the event loop has pending receivers it accepts any event. Otherwise it
-%% only accepts settle_promise, leaving user_message in the mailbox for blocking
-%% Arc.receive() or a future receiveAsync() call to pick up.
-receive_any_event() ->
-    receive
-        {user_message, _} = E -> E;
-        {settle_promise, _, _} = E -> E;
-        {receiver_timeout, _} = E -> E
-    end.
+%% Event loop selective receive. Accepts SettlePromise, ReceiverTimeout,
+%% and optionally subject messages whose ref is in RefMap.
 receive_settle_only() ->
     receive
         {settle_promise, _, _} = E -> E;
         {receiver_timeout, _} = E -> E
     end.
-
-%% Selective receive for Arc.receive() — only matches user_message, leaves
-%% settle_promise in the mailbox for the event loop.
-receive_user_message() ->
+receive_settle_or_subject(RefMap) ->
     receive
-        {user_message, Pm} -> Pm
+        {settle_promise, _, _} = E -> E;
+        {receiver_timeout, _} = E -> E;
+        {Ref, Pm} when is_map_key(Ref, RefMap) -> {subject_message, Ref, Pm}
     end.
-receive_user_message_timeout(Timeout) ->
-    receive
-        {user_message, Pm} -> {ok, Pm}
+
+%% Subject-based selective receive. Messages are {Ref, PortableMessage} tuples
+%% where Ref is the subject's unique erlang:make_ref() tag.
+%% The BEAM optimizes receive on a bound ref by skipping older messages.
+send_subject_message(Pid, Ref, Msg) ->
+    Pid ! {Ref, Msg}, nil.
+receive_subject_message(Ref) ->
+    receive {Ref, Pm} -> Pm end.
+receive_subject_message_timeout(Ref, Timeout) ->
+    receive {Ref, Pm} -> {ok, Pm}
+    after Timeout -> {error, nil}
+    end.
+
+%% Multi-subject select: RefMap is #{Ref1 => true, Ref2 => true, ...}.
+%% Uses is_map_key/2 guard BIF for dynamic selective receive.
+select_message(RefMap) ->
+    receive {Ref, _} = Msg when is_map_key(Ref, RefMap) -> Msg end.
+select_message_timeout(RefMap, Timeout) ->
+    receive {Ref, _} = Msg when is_map_key(Ref, RefMap) -> {ok, Msg}
     after Timeout -> {error, nil}
     end.
 

@@ -1,22 +1,22 @@
-// Async functions in one process, with BEAM mailbox delivery.
-const self = Arc.self();
+// Async receive on a subject, with timers in the same process.
+const inbox = Arc.subject();
 
-async function waiter() {
-  Arc.log("waiter: listening...");
-  Arc.log("waiter: got", await Arc.receiveAsync());
+async function waiter(s) {
+	Arc.log('waiter: listening...');
+	Arc.log('waiter: got', await s.receiveAsync());
 }
 
 async function ticker() {
-  for (let i = 1; i <= 3; i++) {
-    await new Promise((r) => Arc.setTimeout(r, 100));
-    Arc.log("ticker:", i);
-  }
+	for (let i = 1; i <= 3; i++) {
+		await new Promise((r) => Arc.setTimeout(r, 100));
+		Arc.log('tick', i);
+	}
 }
 
-waiter();
+waiter(inbox);
 ticker();
 
 Arc.spawn(() => {
-  Arc.sleep(250);
-  Arc.send(self, "hello");
+	Arc.sleep(250);
+	inbox.send('hello');
 });

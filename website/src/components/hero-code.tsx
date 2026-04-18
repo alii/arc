@@ -3,7 +3,6 @@ const id = 'text-rpd-iris dark:text-rp-iris';
 const str = 'text-rpd-gold dark:text-rp-gold';
 const interp = 'text-rpd-rose dark:text-rp-rose';
 const dim = 'text-rpd-muted dark:text-rp-muted';
-const prompt = 'text-rpd-rose dark:text-rp-rose';
 const cmd = 'text-rpd-foam dark:text-rp-foam';
 
 function Line({ children, indent = false }: { children: React.ReactNode; indent?: boolean }) {
@@ -28,34 +27,25 @@ export function HeroCode() {
 				<span className={cmd}>cat</span> ./example.js
 			</Line>
 			<Line indent>
-				<span className={kw}>const</span> <span className={id}>pid</span> = Arc.spawn(() =&gt; {'{'}
+				<span className={kw}>const</span> <span className={id}>inbox</span> = Arc.subject();
 			</Line>
 			<Line indent>
-				{'    '}
-				<span className={kw}>const</span> <span className={id}>message</span> = Arc.receive();
+				Arc.spawn(() =&gt; {'{'}
 			</Line>
-			<Line indent>{'    '}Arc.log(message);</Line>
 			<Line indent>
-				{'    '}Arc.log(
+				{'    '}inbox.send(
 				<Tmpl>
 					Arc.self()<span className={str}>: Hello from child</span>
 				</Tmpl>
 				);
 			</Line>
 			<Line indent>{'}'});</Line>
-			<Line indent>
-				Arc.send(pid,{' '}
-				<Tmpl>
-					Arc.self()<span className={str}>: Hello from main</span>
-				</Tmpl>
-				);
-			</Line>
+			<Line indent>Arc.log(inbox.receive());</Line>
 			<Line> </Line>
 			<Line>
 				<span className={dim}>$ </span>
 				<span className={cmd}>arc</span> ./example.js
 			</Line>
-			<Line indent>Pid&lt;0.82.0&gt;: Hello from main</Line>
 			<Line indent>Pid&lt;0.83.0&gt;: Hello from child</Line>
 		</div>
 	);

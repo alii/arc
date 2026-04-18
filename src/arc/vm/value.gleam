@@ -141,6 +141,7 @@ pub type PortableMessage {
     symbol_properties: List(#(SymbolId, PortableMessage)),
   )
   PmPid(ErlangPid)
+  PmSubject(pid: ErlangPid, tag: ErlangRef)
   PmSymbol(SymbolId)
 }
 
@@ -148,10 +149,6 @@ pub type PortableMessage {
 /// loop blocks on these when the microtask queue drains but outstanding work
 /// remains (pending receiveAsync, in-flight fetch, active timers).
 pub type MailboxEvent {
-  /// A message sent via `Arc.send`. Delivered to the next `Arc.receiveAsync()`
-  /// caller (or left in the mailbox via selective receive if none is waiting).
-  /// Blocking `Arc.receive()` also unwraps this.
-  UserMessage(PortableMessage)
   /// An external operation (fetch, timer) completed. Resolves or rejects the
   /// promise identified by `data_ref` (a PromiseSlot ref — just an Int, so
   /// safe to round-trip through a worker process that doesn't touch the heap).
@@ -159,10 +156,14 @@ pub type MailboxEvent {
     data_ref: Ref,
     outcome: Result(PortableMessage, PortableMessage),
   )
-  /// A `receiveAsync(ms)` timeout fired. If `data_ref` is still in
+  /// A `subject.receiveAsync(ms)` timeout fired. If `data_ref` is still in
   /// `pending_receivers`, resolves that promise with undefined and retires
   /// it; otherwise a no-op (a message already arrived).
   ReceiverTimeout(data_ref: Ref)
+  /// A subject message matched by the event loop's selective receive.
+  /// The `tag` identifies which subject it was sent to, `payload` is the
+  /// serialized message. Produced by `receive_settle_or_subject` FFI.
+  SubjectMessage(tag: ErlangRef, payload: PortableMessage)
 }
 
 /// JS number representation. BEAM floats can't represent NaN or Infinity,
@@ -470,15 +471,18 @@ pub type ObjectNativeFn {
 /// Arc methods — non-standard engine-specific utilities.
 pub type ArcNativeFn {
   ArcPeek
-  ArcSend
-  ArcReceive
-  ArcReceiveAsync
   ArcSetTimeout
   ArcClearTimeout
   ArcSelf
   ArcLog
   ArcSleep
   ArcPidToString
+  ArcSubject
+  ArcSelect
+  ArcSubjectSend
+  ArcSubjectReceive
+  ArcSubjectReceiveAsync
+  ArcSubjectToString
 }
 
 /// JSON methods — JSON.parse and JSON.stringify.
@@ -858,6 +862,11 @@ pub type ExoticKind(ctx) {
   /// Erlang PID wrapper for Arc.spawn/self. Contains an opaque BEAM process
   /// identifier that can be used with Arc.send.
   PidObject(pid: ErlangPid)
+  /// Subject — a typed channel bound to a process. Wraps a PID (the owner)
+  /// and a unique ref (the tag). Messages sent to a subject are enveloped as
+  /// `{tag, PortableMessage}` in the BEAM mailbox, enabling efficient selective
+  /// receive via `is_map_key` guards. Maps to Gleam's `process.Subject`.
+  SubjectObject(pid: ErlangPid, tag: ErlangRef)
   /// Timer handle returned by Arc.setTimeout — wraps the Erlang timer ref
   /// and the promise data_ref so clearTimeout can cancel cleanly.
   TimerObject(timer_ref: ErlangTimerRef, data_ref: Ref)
@@ -1454,6 +1463,7 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
         | BooleanObject(_)
         | SymbolObject(_)
         | PidObject(_)
+        | SubjectObject(..)
         | TimerObject(..)
         | RegExpObject(..) -> []
       }

@@ -12,18 +12,18 @@ import { useAtomVM } from './use-atomvm';
 
 const DEFAULT_EXAMPLE = {
 	name: 'playground',
-	code: `const parent = Arc.self();
+	code: `const inbox = Arc.subject();
 Arc.log("starting...");
 
 for (let i = 0; i < 3; i++) {
   Arc.spawn(() => {
     Arc.sleep(300 * (i + 1));
-    Arc.send(parent, "hello from process " + i);
+    inbox.send("hello from process " + i);
   });
 }
 
 for (let i = 0; i < 3; i++) {
-  Arc.log(Arc.receive());
+  Arc.log(inbox.receive());
 }`,
 };
 

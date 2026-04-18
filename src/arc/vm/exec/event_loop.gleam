@@ -20,6 +20,7 @@ import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, FunctionObject, JsNull, JsObject,
   JsUndefined, NativeFunction, ObjectSlot,
 }
+import gleam/dict
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
@@ -73,11 +74,13 @@ pub fn drain_jobs(state: State) -> State {
   }
 }
 
-@external(erlang, "arc_vm_ffi", "receive_any_event")
-fn ffi_receive_any() -> value.MailboxEvent
-
 @external(erlang, "arc_vm_ffi", "receive_settle_only")
 fn ffi_receive_settle_only() -> value.MailboxEvent
+
+@external(erlang, "arc_vm_ffi", "receive_settle_or_subject")
+fn ffi_receive_settle_or_subject(
+  ref_map: dict.Dict(value.ErlangRef, Bool),
+) -> value.MailboxEvent
 
 /// Mailbox-backed event loop. Runs drain microtasks -> block on BEAM mailbox
 /// -> handle event -> repeat, until `outstanding` hits zero. With no outstanding
@@ -88,9 +91,9 @@ fn ffi_receive_settle_only() -> value.MailboxEvent
 /// the macrotask queue, and every arrival resolves a promise which schedules
 /// a PromiseReactionJob that resumes whoever was waiting.
 ///
-/// Selective receive: when no receivers are pending we only accept
-/// `SettlePromise`, leaving `UserMessage` in the BEAM mailbox for blocking
-/// `Arc.receive()` or a future `receiveAsync` to pick up.
+/// Selective receive: when pending subject receivers exist, accept their
+/// subject messages alongside SettlePromise/ReceiverTimeout. Otherwise only
+/// accept SettlePromise/ReceiverTimeout.
 pub fn run_event_loop(state: State) -> State {
   let state = drain_jobs(state)
   case state.outstanding {
@@ -98,7 +101,14 @@ pub fn run_event_loop(state: State) -> State {
     _ -> {
       let event = case state.pending_receivers {
         [] -> ffi_receive_settle_only()
-        [_, ..] -> ffi_receive_any()
+        receivers -> {
+          let ref_map =
+            list.fold(receivers, dict.new(), fn(acc, entry) {
+              let #(_data_ref, subject_tag) = entry
+              dict.insert(acc, subject_tag, True)
+            })
+          ffi_receive_settle_or_subject(ref_map)
+        }
       }
       let state = handle_mailbox_event(state, event)
       run_event_loop(state)
@@ -110,19 +120,24 @@ pub fn run_event_loop(state: State) -> State {
 /// enqueue its reaction jobs, adjust the outstanding count.
 fn handle_mailbox_event(state: State, event: value.MailboxEvent) -> State {
   case event {
-    value.UserMessage(pm) -> {
-      // Selective receive guarantees pending_receivers is non-empty here.
-      let assert [data_ref, ..rest] = state.pending_receivers
-      let #(heap, val) =
-        builtins_arc.deserialize(state.heap, state.builtins, pm)
-      let #(heap, jobs) = builtins_promise.fulfill_promise(heap, data_ref, val)
-      State(
-        ..state,
-        heap:,
-        pending_receivers: rest,
-        outstanding: state.outstanding - 1,
-        job_queue: job_queue.append(state.job_queue, jobs),
-      )
+    value.SubjectMessage(tag:, payload: pm) -> {
+      // Find the pending receiver for this subject tag.
+      case find_receiver_by_tag(state.pending_receivers, tag) {
+        Ok(#(data_ref, rest)) -> {
+          let #(heap, val) =
+            builtins_arc.deserialize(state.heap, state.builtins, pm)
+          let #(heap, jobs) =
+            builtins_promise.fulfill_promise(heap, data_ref, val)
+          State(
+            ..state,
+            heap:,
+            pending_receivers: rest,
+            outstanding: state.outstanding - 1,
+            job_queue: job_queue.append(state.job_queue, jobs),
+          )
+        }
+        Error(Nil) -> state
+      }
     }
     value.SettlePromise(data_ref:, outcome: Ok(pm)) -> {
       let #(heap, val) =
@@ -142,8 +157,10 @@ fn handle_mailbox_event(state: State, event: value.MailboxEvent) -> State {
         builtins_promise.reject_promise(State(..state, heap:), data_ref, reason)
       State(..state, outstanding: state.outstanding - 1)
     }
-    value.ReceiverTimeout(data_ref:) ->
-      case list.contains(state.pending_receivers, data_ref) {
+    value.ReceiverTimeout(data_ref:) -> {
+      let has_receiver =
+        list.any(state.pending_receivers, fn(entry) { entry.0 == data_ref })
+      case has_receiver {
         False -> state
         True -> {
           let #(heap, jobs) =
@@ -151,14 +168,37 @@ fn handle_mailbox_event(state: State, event: value.MailboxEvent) -> State {
           State(
             ..state,
             heap:,
-            pending_receivers: list.filter(state.pending_receivers, fn(r) {
-              r != data_ref
+            pending_receivers: list.filter(state.pending_receivers, fn(entry) {
+              entry.0 != data_ref
             }),
             outstanding: state.outstanding - 1,
             job_queue: job_queue.append(state.job_queue, jobs),
           )
         }
       }
+    }
+  }
+}
+
+/// Find the first pending receiver matching a subject tag, returning its
+/// promise data_ref and the remaining list with it removed.
+fn find_receiver_by_tag(
+  receivers: List(#(Ref, value.ErlangRef)),
+  tag: value.ErlangRef,
+) -> Result(#(Ref, List(#(Ref, value.ErlangRef))), Nil) {
+  find_receiver_by_tag_inner(receivers, tag, [])
+}
+
+fn find_receiver_by_tag_inner(
+  receivers: List(#(Ref, value.ErlangRef)),
+  tag: value.ErlangRef,
+  acc: List(#(Ref, value.ErlangRef)),
+) -> Result(#(Ref, List(#(Ref, value.ErlangRef))), Nil) {
+  case receivers {
+    [] -> Error(Nil)
+    [#(data_ref, t), ..rest] if t == tag ->
+      Ok(#(data_ref, list.append(list.reverse(acc), rest)))
+    [entry, ..rest] -> find_receiver_by_tag_inner(rest, tag, [entry, ..acc])
   }
 }
 

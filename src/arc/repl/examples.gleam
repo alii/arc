@@ -1,7 +1,6 @@
 /// REPL-runnable demos showcasing Arc's actor model on the BEAM.
-/// Each example is a self-contained JS snippet using only blocking
-/// primitives (spawn/send/receive/sleep) so it runs in the REPL
-/// without the event loop.
+/// Each example is a self-contained JS snippet using subjects for
+/// message passing between processes.
 import gleam/int
 import gleam/io
 import gleam/list
@@ -59,14 +58,13 @@ fn spawn_hello() -> Example {
   Example(
     title: "Spawn & Message",
     blurb: "The hello-world of actors: spawn a process, send it a message.",
-    source: "const child = Arc.spawn(() => {
-  const msg = Arc.receive();
-  Arc.log('[' + Arc.self() + '] got:', msg.greeting);
+    source: "const inbox = Arc.subject();
+
+Arc.spawn(() => {
+  inbox.send('hello from ' + Arc.self());
 });
 
-Arc.log('[' + Arc.self() + '] spawned', child);
-Arc.send(child, { greeting: 'hello from main!' });
-Arc.sleep(50);",
+Arc.log(inbox.receive());",
   )
 }
 
@@ -76,24 +74,29 @@ fn ping_pong() -> Example {
   Example(
     title: "Ping Pong",
     blurb: "Two processes volleying messages back and forth.",
-    source: "const pong = Arc.spawn(() => {
+    source: "const ping = Arc.subject();
+
+Arc.spawn(() => {
+  const pong = Arc.subject();
+  ping.send(pong);
   while (true) {
-    const m = Arc.receive();
+    const m = pong.receive();
     if (m === 'stop') return;
     Arc.log('    <- pong', m.n);
-    Arc.send(m.from, { n: m.n + 1 });
+    m.reply.send({ n: m.n + 1, reply: pong });
   }
 });
 
+const pong = ping.receive();
 let n = 0;
-Arc.send(pong, { n, from: Arc.self() });
+pong.send({ n, reply: ping });
 while (n < 5) {
-  const m = Arc.receive(1000);
+  const m = ping.receive(1000);
   n = m.n;
   Arc.log('ping ->', n);
-  Arc.send(pong, { n, from: Arc.self() });
+  pong.send({ n, reply: ping });
 }
-Arc.send(pong, 'stop');",
+pong.send('stop');",
   )
 }
 
@@ -103,23 +106,28 @@ fn counter_actor() -> Example {
   Example(
     title: "Counter Actor",
     blurb: "A stateful server process — the GenServer pattern in JS.",
-    source: "const counter = Arc.spawn(() => {
+    source: "const ready = Arc.subject();
+
+Arc.spawn(() => {
+  const commands = Arc.subject();
+  ready.send(commands);
   let n = 0;
   while (true) {
-    const msg = Arc.receive();
+    const msg = commands.receive();
     if (msg.op === 'inc') n += msg.by;
-    if (msg.op === 'get') Arc.send(msg.from, n);
+    if (msg.op === 'get') msg.reply.send(n);
     if (msg.op === 'stop') return;
   }
 });
 
-const me = Arc.self();
-Arc.send(counter, { op: 'inc', by: 10 });
-Arc.send(counter, { op: 'inc', by: 5 });
-Arc.send(counter, { op: 'inc', by: 27 });
-Arc.send(counter, { op: 'get', from: me });
-Arc.log('counter value:', Arc.receive(1000));
-Arc.send(counter, { op: 'stop' });",
+const counter = ready.receive();
+const reply = Arc.subject();
+counter.send({ op: 'inc', by: 10 });
+counter.send({ op: 'inc', by: 5 });
+counter.send({ op: 'inc', by: 27 });
+counter.send({ op: 'get', reply });
+Arc.log('counter value:', reply.receive(1000));
+counter.send({ op: 'stop' });",
   )
 }
 
@@ -129,19 +137,19 @@ fn parallel_map() -> Example {
   Example(
     title: "Parallel Map",
     blurb: "Fan-out work to N processes, fan-in the results. True parallelism.",
-    source: "const me = Arc.self();
+    source: "const results = Arc.subject();
 const inputs = [22, 23, 24, 25, 26, 27];
 
 function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
 
 // Fan out: one process per input, each runs on its own BEAM scheduler.
 for (const x of inputs) {
-  Arc.spawn(() => Arc.send(me, { x, y: fib(x) }));
+  Arc.spawn(() => results.send({ x, y: fib(x) }));
 }
 
 // Fan in: results arrive in completion order, not input order.
 for (let i = 0; i < inputs.length; i++) {
-  const r = Arc.receive(5000);
+  const r = results.receive(5000);
   Arc.log('fib(' + r.x + ') =', r.y);
 }
 Arc.log('done —', inputs.length, 'results computed in parallel');",
@@ -154,33 +162,40 @@ fn pubsub() -> Example {
   Example(
     title: "PubSub",
     blurb: "A broker fanning messages out to many subscribers.",
-    source: "const broker = Arc.spawn(() => {
+    source: "const ready = Arc.subject();
+
+Arc.spawn(() => {
+  const commands = Arc.subject();
+  ready.send(commands);
   const subs = [];
   while (true) {
-    const m = Arc.receive();
+    const m = commands.receive();
     if (m.sub) { subs.push(m.sub); Arc.log('[broker] +sub, total:', subs.length); }
-    if (m.pub) for (const s of subs) Arc.send(s, m.pub);
+    if (m.pub) for (const s of subs) s.send(m.pub);
     if (m.stop) return;
   }
 });
 
+const broker = ready.receive();
+
 // Spawn three subscribers.
 for (let i = 1; i <= 3; i++) {
-  const pid = Arc.spawn(() => {
+  const sub = Arc.subject();
+  Arc.spawn(() => {
     while (true) {
-      const m = Arc.receive();
+      const m = sub.receive();
       if (m === 'stop') return;
       Arc.log('  [sub', i + ']', 'received:', m);
     }
   });
-  Arc.send(broker, { sub: pid });
+  broker.send({ sub });
 }
 
 Arc.sleep(20);
-Arc.send(broker, { pub: 'breaking news' });
-Arc.send(broker, { pub: 'more news' });
+broker.send({ pub: 'breaking news' });
+broker.send({ pub: 'more news' });
 Arc.sleep(50);
-Arc.send(broker, { stop: true });",
+broker.send({ stop: true });",
   )
 }
 
@@ -190,27 +205,31 @@ fn request_reply() -> Example {
   Example(
     title: "Request/Reply",
     blurb: "Synchronous calls over async messages — the `call` pattern.",
-    source: "const server = Arc.spawn(() => {
+    source: "const ready = Arc.subject();
+
+Arc.spawn(() => {
+  const inbox = Arc.subject();
+  ready.send(inbox);
   const data = { alice: 30, bob: 25, carol: 35 };
   while (true) {
-    const m = Arc.receive();
+    const m = inbox.receive();
     if (m === 'stop') return;
-    Arc.send(m.from, { ref: m.ref, result: data[m.key] });
+    m.reply.send(data[m.key]);
   }
 });
 
-let ref = 0;
+const server = ready.receive();
+const reply = Arc.subject();
+
 function call(key) {
-  const myRef = ++ref;
-  Arc.send(server, { from: Arc.self(), ref: myRef, key });
-  const reply = Arc.receive(1000);
-  return reply.result;
+  server.send({ key, reply });
+  return reply.receive(1000);
 }
 
 Arc.log('alice is', call('alice'));
 Arc.log('bob is', call('bob'));
 Arc.log('carol is', call('carol'));
-Arc.send(server, 'stop');",
+server.send('stop');",
   )
 }
 
@@ -220,29 +239,36 @@ fn worker_pool() -> Example {
   Example(
     title: "Worker Pool",
     blurb: "A pool of workers pulling jobs from a shared queue.",
-    source: "const queue = Arc.spawn(() => {
+    source: "const ready = Arc.subject();
+
+Arc.spawn(() => {
+  const inbox = Arc.subject();
+  ready.send(inbox);
   const jobs = [];
   const waiting = [];
   while (true) {
-    const m = Arc.receive();
+    const m = inbox.receive();
     if (m.push) {
-      if (waiting.length) Arc.send(waiting.shift(), m.push);
+      if (waiting.length) waiting.shift().send(m.push);
       else jobs.push(m.push);
     }
     if (m.pull) {
-      if (jobs.length) Arc.send(m.pull, jobs.shift());
+      if (jobs.length) m.pull.send(jobs.shift());
       else waiting.push(m.pull);
     }
-    if (m.stop) { for (const w of waiting) Arc.send(w, null); return; }
+    if (m.stop) { for (const w of waiting) w.send(null); return; }
   }
 });
+
+const queue = ready.receive();
 
 // Spawn 3 workers that pull jobs forever.
 for (let w = 1; w <= 3; w++) {
   Arc.spawn(() => {
+    const inbox = Arc.subject();
     while (true) {
-      Arc.send(queue, { pull: Arc.self() });
-      const job = Arc.receive();
+      queue.send({ pull: inbox });
+      const job = inbox.receive();
       if (job === null) return;
       Arc.sleep(30); // simulate work
       Arc.log('[worker', w + ']', 'finished job', job);
@@ -251,9 +277,9 @@ for (let w = 1; w <= 3; w++) {
 }
 
 // Push 8 jobs — watch them get distributed across workers.
-for (let j = 1; j <= 8; j++) Arc.send(queue, { push: j });
+for (let j = 1; j <= 8; j++) queue.send({ push: j });
 Arc.sleep(400);
-Arc.send(queue, { stop: true });",
+queue.send({ stop: true });",
   )
 }
 
@@ -264,28 +290,34 @@ fn ring() -> Example {
     title: "Ring Benchmark",
     blurb: "Pass a token around a ring of 500 processes, 10 times.",
     source: "const N = 500, LAPS = 10;
-const first = Arc.self();
-let prev = first;
+const setup = Arc.subject();
+const main = Arc.subject();
 
 for (let i = 0; i < N; i++) {
-  const next = prev;
-  prev = Arc.spawn(() => {
+  Arc.spawn(() => {
+    const inbox = Arc.subject();
+    setup.send(inbox);
+    const next = inbox.receive();
     while (true) {
-      const m = Arc.receive();
-      if (m === 'stop') { Arc.send(next, 'stop'); return; }
-      Arc.send(next, m + 1);
+      const m = inbox.receive();
+      if (m === 'stop') { next.send('stop'); return; }
+      next.send(m + 1);
     }
   });
 }
 
+const inboxes = [];
+for (let i = 0; i < N; i++) inboxes.push(setup.receive());
+for (let i = 0; i < N; i++) inboxes[i].send(i === N - 1 ? main : inboxes[i + 1]);
+
 Arc.log('ring of', N, 'processes built, sending token...');
-Arc.send(prev, 0);
+inboxes[0].send(0);
 for (let lap = 1; lap <= LAPS; lap++) {
-  const hops = Arc.receive(5000);
+  const hops = main.receive(5000);
   Arc.log('lap', lap, '->', hops, 'hops');
-  if (lap < LAPS) Arc.send(prev, 0);
+  if (lap < LAPS) inboxes[0].send(0);
 }
-Arc.send(prev, 'stop');
+inboxes[0].send('stop');
 Arc.log('total:', N * LAPS, 'message passes');",
   )
 }
