@@ -19,9 +19,9 @@ declare module 'arc' {
 		/**
 		 * Send a message to this subject's owner process.
 		 *
-		 * The message is structurally cloned. Returns {@link message}.
+		 * The message is structurally cloned.
 		 */
-		send(message: T): T;
+		send(message: T): void;
 
 		/**
 		 * Block until a message arrives on this subject.

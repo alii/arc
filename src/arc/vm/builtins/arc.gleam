@@ -523,7 +523,7 @@ fn subject_send(
           case serialize(state.heap, msg_arg) {
             Ok(portable) -> {
               ffi_send_subject(pid, tag, portable)
-              #(state, Ok(msg_arg))
+              #(state, Ok(JsUndefined))
             }
             Error(reason) -> {
               let #(heap, err) =
