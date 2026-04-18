@@ -48,9 +48,16 @@ pub type Op {
   DefineField(name: String)
   DefineFieldComputed
   DefineMethod(name: String)
+  DefineMethodComputed
   DefineAccessor(name: String, kind: AccessorKind)
   DefineAccessorComputed(kind: AccessorKind)
   ObjectSpread
+  /// Stack: [src, key_n, ..., key_1, ...] → [rest_obj, ...]
+  /// Allocates a fresh object and CopyDataProperties(rest_obj, src, excluded)
+  /// where excluded is the `excluded_count` keys popped beneath src. Throws
+  /// TypeError if src is null/undefined (RequireObjectCoercible). Used for
+  /// destructuring rest pattern `{a, b, ...rest}`.
+  ObjectRestCopy(excluded_count: Int)
   ArrayFrom(count: Int)
   /// Pop `count - length(holes)` values, build a sparse array of length `count`
   /// with the hole indices left empty. Used for array literals with elisions
@@ -84,6 +91,9 @@ pub type Op {
   CallMethodApply
   /// [args_array, ctor] → [new instance]. Spread-new path.
   CallConstructorApply
+  /// [args_array] → [this]. Spread-super path; same semantics as CallSuper
+  /// but reads its arg list from a runtime array (built by IrArraySpread).
+  CallSuperApply
   Return
 
   // -- Control Flow (absolute PC targets) --
@@ -262,9 +272,11 @@ pub type IrOp {
   IrDefineField(name: String)
   IrDefineFieldComputed
   IrDefineMethod(name: String)
+  IrDefineMethodComputed
   IrDefineAccessor(name: String, kind: AccessorKind)
   IrDefineAccessorComputed(kind: AccessorKind)
   IrObjectSpread
+  IrObjectRestCopy(excluded_count: Int)
   IrArrayFrom(count: Int)
   IrArrayFromWithHoles(count: Int, holes: List(Int))
   IrArrayPush
@@ -299,6 +311,7 @@ pub type IrOp {
   IrIteratorClose
   IrSetupDerivedClass
   IrCallSuper(arity: Int)
+  IrCallSuperApply
   IrInitialYield
   IrYield
   IrYieldStar

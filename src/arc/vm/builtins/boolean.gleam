@@ -75,11 +75,12 @@ pub fn dispatch(
 
 /// ES2024 §20.3.1.1 Boolean(value)
 /// Called as a function (without new). When called as a constructor,
-/// the VM handles wrapping the result in a BooleanObject via CreateNew.
+/// exec/call.gleam's do_construct intercepts and wraps the result in a
+/// BooleanObject before this path is reached.
 ///
 /// 1. Let b be ToBoolean(value).
 /// 2. If NewTarget is undefined, return b.
-/// 3. (constructor path — handled by VM CreateNew opcode)
+/// 3. (constructor path — handled in do_construct)
 ///
 /// Note: ToBoolean is implemented by value.is_truthy. When no argument
 /// is provided, value defaults to undefined which is falsy (step 1).

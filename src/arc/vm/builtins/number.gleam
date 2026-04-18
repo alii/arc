@@ -173,7 +173,7 @@ pub fn dispatch(
 ///   4. Return n.
 ///
 /// Note: Constructor semantics (new Number(value)) are handled separately
-/// in vm.gleam's construct path, which wraps the result in a NumberObject.
+/// in exec/call.gleam's do_construct, which wraps the result in a NumberObject.
 fn call_as_function(
   args: List(JsValue),
   state: State,

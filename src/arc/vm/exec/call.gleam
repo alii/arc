@@ -2,8 +2,10 @@ import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common
+import arc/vm/builtins/date as builtins_date
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/builtins/json as builtins_json
 import arc/vm/builtins/map as builtins_map
 import arc/vm/builtins/math as builtins_math
@@ -1090,6 +1092,10 @@ pub fn call_native(
       )
     value.Call(value.ArrayIteratorNext) ->
       call_array_iterator_next(state, this, rest_stack)
+    value.Call(value.SetIteratorNext) ->
+      call_set_iterator_next(state, this, rest_stack)
+    value.Call(value.MapIteratorNext) ->
+      call_map_iterator_next(state, this, rest_stack)
     value.Call(value.GeneratorThrow) ->
       generators.call_native_generator_throw(
         state,
@@ -1398,32 +1404,95 @@ pub fn do_construct(
         dispatch_fn,
       )
     }
-    // `new String(sym)` must throw (§22.1.1.1 — the Symbol→descriptive-string
-    // special case only applies when NewTarget is undefined). Intercept here so
-    // the Symbol arg hits ToString and throws, instead of the non-throwing path
-    // in call_native's StringConstructor handler.
+    // new String(value) — §22.1.1.1: s = ToString(value), then return a
+    // String exotic wrapper with [[StringData]] = s. Unlike String(value),
+    // the Symbol→descriptive-string shortcut does NOT apply when NewTarget
+    // is defined, so a Symbol arg flows into ToString and throws.
+    // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
       kind: NativeFunction(value.Call(value.StringConstructor)),
       ..,
-    )) ->
-      case args {
-        [value.JsSymbol(_), ..] ->
-          state.rethrow(coerce.thrown_type_error(
-            state,
-            "Cannot convert a Symbol value to a string",
-          ))
-        _ ->
-          call_native(
-            state,
-            value.Call(value.StringConstructor),
-            args,
-            rest_stack,
-            JsUndefined,
-            execute_inner,
-            unwind_to_catch,
-            dispatch_fn,
-          )
+    )) -> {
+      let coerced = case args {
+        [] -> Ok(#("", state))
+        [v, ..] -> coerce.js_to_string(state, v)
       }
+      case coerced {
+        Error(#(thrown, st)) -> Error(#(Thrown, thrown, st.heap))
+        Ok(#(s, state)) -> {
+          let #(heap, ref) =
+            common.alloc_wrapper(
+              state.heap,
+              value.StringObject(s),
+              state.builtins.string.prototype,
+            )
+          Ok(
+            State(
+              ..state,
+              heap:,
+              stack: [JsObject(ref), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+      }
+    }
+    // new Number(value) — §21.1.1.1: n = ToNumber(value), then return a
+    // wrapper object with [[NumberData]] = n.
+    // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
+    Some(ObjectSlot(
+      kind: NativeFunction(value.Dispatch(value.NumberNative(
+        value.NumberConstructor,
+      ))),
+      ..,
+    )) -> {
+      let n = case args {
+        [] -> value.Finite(0.0)
+        [v, ..] -> builtins_math.to_number(v)
+      }
+      let #(heap, ref) =
+        common.alloc_wrapper(
+          state.heap,
+          value.NumberObject(n),
+          state.builtins.number.prototype,
+        )
+      Ok(
+        State(
+          ..state,
+          heap:,
+          stack: [JsObject(ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    // new Boolean(value) — §20.3.1.1: b = ToBoolean(value), then return a
+    // wrapper object with [[BooleanData]] = b.
+    // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
+    Some(ObjectSlot(
+      kind: NativeFunction(value.Dispatch(value.BooleanNative(
+        value.BooleanConstructor,
+      ))),
+      ..,
+    )) -> {
+      let b = case args {
+        [] -> False
+        [v, ..] -> value.is_truthy(v)
+      }
+      let #(heap, ref) =
+        common.alloc_wrapper(
+          state.heap,
+          value.BooleanObject(b),
+          state.builtins.boolean.prototype,
+        )
+      Ok(
+        State(
+          ..state,
+          heap:,
+          stack: [JsObject(ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
     Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
       call_native(
         state,
@@ -1679,6 +1748,174 @@ fn call_array_iterator_next(
   }
 }
 
+/// ES §24.2.5.2.1 %SetIteratorPrototype%.next()
+fn call_set_iterator_next(
+  state: State,
+  this: JsValue,
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case this {
+    JsObject(iter_ref) ->
+      case heap.read(state.heap, iter_ref) {
+        Some(
+          ObjectSlot(kind: value.SetIteratorObject(remaining:, kind:), ..) as slot,
+        ) ->
+          case remaining {
+            [] -> {
+              let #(h, result) =
+                generators.create_iterator_result(
+                  state.heap,
+                  state.builtins,
+                  JsUndefined,
+                  True,
+                )
+              Ok(
+                State(
+                  ..state,
+                  heap: h,
+                  stack: [result, ..rest_stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+            [v, ..rest] -> {
+              // For "entries" yield [v, v]; for "values"/"keys" yield v.
+              let #(h, yielded) = case kind {
+                value.SetIterValues -> #(state.heap, v)
+                value.SetIterEntries -> {
+                  let #(h, pair_ref) =
+                    common.alloc_array(
+                      state.heap,
+                      [v, v],
+                      state.builtins.array.prototype,
+                    )
+                  #(h, JsObject(pair_ref))
+                }
+              }
+              let h =
+                heap.write(
+                  h,
+                  iter_ref,
+                  ObjectSlot(
+                    ..slot,
+                    kind: value.SetIteratorObject(remaining: rest, kind:),
+                  ),
+                )
+              let #(h, result) =
+                generators.create_iterator_result(
+                  h,
+                  state.builtins,
+                  yielded,
+                  False,
+                )
+              Ok(
+                State(
+                  ..state,
+                  heap: h,
+                  stack: [result, ..rest_stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+          }
+        _ ->
+          state.throw_type_error(
+            state,
+            "Set Iterator next called on incompatible receiver",
+          )
+      }
+    _ ->
+      state.throw_type_error(
+        state,
+        "Set Iterator next called on incompatible receiver",
+      )
+  }
+}
+
+/// ES §24.1.5.2.1 %MapIteratorPrototype%.next()
+fn call_map_iterator_next(
+  state: State,
+  this: JsValue,
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case this {
+    JsObject(iter_ref) ->
+      case heap.read(state.heap, iter_ref) {
+        Some(
+          ObjectSlot(kind: value.MapIteratorObject(remaining:, kind:), ..) as slot,
+        ) ->
+          case remaining {
+            [] -> {
+              let #(h, result) =
+                generators.create_iterator_result(
+                  state.heap,
+                  state.builtins,
+                  JsUndefined,
+                  True,
+                )
+              Ok(
+                State(
+                  ..state,
+                  heap: h,
+                  stack: [result, ..rest_stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+            [#(k, v), ..rest] -> {
+              let #(h, yielded) = case kind {
+                value.MapIterKeys -> #(state.heap, k)
+                value.MapIterValues -> #(state.heap, v)
+                value.MapIterEntries -> {
+                  let #(h, pair_ref) =
+                    common.alloc_array(
+                      state.heap,
+                      [k, v],
+                      state.builtins.array.prototype,
+                    )
+                  #(h, JsObject(pair_ref))
+                }
+              }
+              let h =
+                heap.write(
+                  h,
+                  iter_ref,
+                  ObjectSlot(
+                    ..slot,
+                    kind: value.MapIteratorObject(remaining: rest, kind:),
+                  ),
+                )
+              let #(h, result) =
+                generators.create_iterator_result(
+                  h,
+                  state.builtins,
+                  yielded,
+                  False,
+                )
+              Ok(
+                State(
+                  ..state,
+                  heap: h,
+                  stack: [result, ..rest_stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+          }
+        _ ->
+          state.throw_type_error(
+            state,
+            "Map Iterator next called on incompatible receiver",
+          )
+      }
+    _ ->
+      state.throw_type_error(
+        state,
+        "Map Iterator next called on incompatible receiver",
+      )
+  }
+}
+
 /// Function.prototype.toString -- ES2024 S20.2.3.5
 ///
 /// For native functions: "function NAME() { [native code] }"
@@ -1768,7 +2005,9 @@ pub fn dispatch_native(
     value.SetNative(n) -> builtins_set.dispatch(n, args, this, state)
     value.WeakMapNative(n) -> builtins_weak_map.dispatch(n, args, this, state)
     value.WeakSetNative(n) -> builtins_weak_set.dispatch(n, args, this, state)
+    value.IteratorNative(n) -> builtins_iterator.dispatch(n, args, this, state)
     value.RegExpNative(n) -> builtins_regexp.dispatch(n, args, this, state)
+    value.DateNative(n) -> builtins_date.dispatch(n, args, this, state)
     // Standalone VM-level natives
     value.VmNative(value.FunctionConstructor) ->
       realm.function_constructor_native(

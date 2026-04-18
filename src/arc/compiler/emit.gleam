@@ -8,13 +8,14 @@ import arc/vm/opcode.{
   type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
   IrArraySpread, IrAwait, IrBinOp, IrCallApply, IrCallConstructor,
   IrCallConstructorApply, IrCallMethod, IrCallMethodApply, IrCallSuper,
-  IrCreateArguments, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
-  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow,
-  IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2,
-  IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrInitGlobalLex,
-  IrInitialYield, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp,
+  IrCallSuperApply, IrCreateArguments, IrDeclareGlobalLex, IrDeclareGlobalVar,
+  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed, IrDeleteElem,
+  IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow, IrForInNext,
+  IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
+  IrGetField2, IrGetIterator, IrGetThis, IrInitGlobalLex, IrInitialYield,
+  IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy,
   IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem, IrPutField,
   IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar,
   IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield,
@@ -27,6 +28,7 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 
 // ============================================================================
 // Types
@@ -949,6 +951,10 @@ fn stmt_references_arguments(stmt: ast.Statement) -> Bool {
     ast.ClassDeclaration(_, super_class, body) ->
       opt_expr_references_arguments(super_class)
       || class_body_references_arguments(body)
+
+    ast.ClassFieldInit(key:, value:, computed:) ->
+      { computed && expr_references_arguments(key) }
+      || opt_expr_references_arguments(value)
   }
 }
 
@@ -1273,6 +1279,36 @@ fn emit_stmts(
 fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
   case stmt {
     ast.EmptyStatement | ast.DebuggerStatement -> Ok(e)
+
+    // §7.3.32 DefineField — synthesized by inject_field_inits for class
+    // instance fields. Uses CreateDataPropertyOrThrow ([[DefineOwnProperty]]),
+    // not [[Set]], so prototype setters are NOT invoked and an own data
+    // property is always created (even shadowing an inherited accessor).
+    ast.ClassFieldInit(key:, value:, computed:) -> {
+      let e = emit_ir(e, IrGetThis)
+      // §15.7.14: if Initializer is absent, initValue = undefined.
+      let init = option.unwrap(value, ast.UndefinedExpression)
+      use e <- result.map(case key, computed {
+        ast.Identifier(name), False | ast.StringExpression(name), False -> {
+          use e <- result.map(emit_expr(e, init))
+          emit_ir(e, IrDefineField(name))
+        }
+        ast.NumberLiteral(n), False -> {
+          let e = push_const(e, JsNumber(Finite(n)))
+          use e <- result.map(emit_expr(e, init))
+          emit_ir(e, IrDefineFieldComputed)
+        }
+        _, _ -> {
+          // computed: True (or exotic non-computed key) — evaluate key at
+          // construct time. Spec stashes computed keys at class-definition
+          // time; this first-pass approximation is correct for stable keys.
+          use e <- result.try(emit_expr(e, key))
+          use e <- result.map(emit_expr(e, init))
+          emit_ir(e, IrDefineFieldComputed)
+        }
+      })
+      emit_ir(e, IrPop)
+    }
 
     ast.ExpressionStatement(expr) -> {
       use e <- result.map(emit_expr(e, expr))
@@ -1928,13 +1964,26 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
     }
 
+    // Destructuring assignment expression: `[a, x.y] = rhs` or `({a, b} = rhs)`.
+    // Parser guarantees LHS is ArrayExpression/ObjectExpression here
+    // (parse_assignment_rhs only accepts these when last_expr_assignable=False).
+    // Result of the whole expression is rhs (§13.15.2 step 3), so Dup before
+    // destructure since emit_destructuring_assign consumes its input.
+    ast.AssignmentExpression(ast.Assign, lhs, right) -> {
+      use e <- result.try(emit_expr(e, right))
+      let e = emit_ir(e, IrDup)
+      emit_destructuring_assign(e, lhs)
+    }
+
     // super(args) — call parent constructor
     ast.CallExpression(ast.SuperExpression, args) ->
-      // super(...) spread is rare and CallSuper's logic is complex (derived
-      // constructor chain, this_binding TDZ). Defer spread-super; for now,
-      // detect and error cleanly rather than miscompiling.
       case has_spread_arg(args) {
-        True -> Error(Unsupported("spread in super() call"))
+        True -> {
+          // super(...spread): collect args into a runtime array (same as
+          // the other *Apply call paths) then CallSuperApply.
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallSuperApply)
+        }
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
           emit_ir(e, IrCallSuper(list.length(args)))
@@ -2928,66 +2977,10 @@ fn emit_for_await_of(
 /// Bind the current value (on top of stack) to the for-in/for-of LHS.
 /// The LHS can be:
 ///   - ForInitDeclaration(VariableDeclaration(...)) e.g. `for (let x ...)`
-///   - ForInitExpression(Identifier(name)) e.g. `for (x ...)`
-///   - ForInitPattern(pattern) e.g. `for ({a, b} ...)`
+///   - ForInitExpression(expr) e.g. `for (x ...)`, `for (obj.k ...)`,
+///     `for ([a,b] ...)`, `for ({a} ...)` — destructuring-assign semantics
+///   - ForInitPattern(pattern) e.g. catch-param-style binding pattern
 /// Consumes the value on top of stack.
-/// Convert an expression AST to a destructuring pattern AST.
-/// JS allows expressions and patterns to share syntax:
-///   [a, b] can be an ArrayExpression or an ArrayPattern
-///   {a, b} can be an ObjectExpression or an ObjectPattern
-/// This is needed for assignment destructuring in for-of: `for ([a, b] of arr)`
-/// Convert an expression AST to a destructuring pattern AST.
-/// JS allows expressions and patterns to share syntax:
-///   [a, b] can be an ArrayExpression or an ArrayPattern
-///   {a, b} can be an ObjectExpression or an ObjectPattern
-/// This is needed for assignment destructuring in for-of: `for ([a, b] of arr)`
-fn expression_to_pattern(expr: ast.Expression) -> Result(ast.Pattern, Nil) {
-  case expr {
-    ast.Identifier(name) -> Ok(ast.IdentifierPattern(name))
-    ast.ArrayExpression(elements) -> {
-      use elems <- result.map(
-        list.try_map(elements, fn(elem) {
-          case elem {
-            None -> Ok(None)
-            Some(ast.SpreadElement(arg)) -> {
-              use pat <- result.map(expression_to_pattern(arg))
-              Some(ast.RestElement(pat))
-            }
-            Some(e) -> {
-              use pat <- result.map(expression_to_pattern(e))
-              Some(pat)
-            }
-          }
-        }),
-      )
-      ast.ArrayPattern(elems)
-    }
-    ast.ObjectExpression(properties) -> {
-      use props <- result.map(
-        list.try_map(properties, fn(prop) {
-          case prop {
-            ast.Property(key:, value:, computed:, shorthand:, ..) -> {
-              use val_pat <- result.map(expression_to_pattern(value))
-              ast.PatternProperty(key:, value: val_pat, computed:, shorthand:)
-            }
-            ast.SpreadProperty(argument:) -> {
-              use pat <- result.map(expression_to_pattern(argument))
-              ast.RestProperty(pat)
-            }
-          }
-        }),
-      )
-      ast.ObjectPattern(props)
-    }
-    ast.AssignmentExpression(ast.Assign, left, right) -> {
-      use left_pat <- result.map(expression_to_pattern(left))
-      ast.AssignmentPattern(left_pat, right)
-    }
-    ast.ParenthesizedExpression(inner) -> expression_to_pattern(inner)
-    _ -> Error(Nil)
-  }
-}
-
 fn emit_for_lhs_bind(
   e: Emitter,
   left: ast.ForInit,
@@ -3006,25 +2999,13 @@ fn emit_for_lhs_bind(
       }
     }
     ast.ForInitDeclaration(_) -> Error(Unsupported("for-in/of left-hand side"))
-    ast.ForInitExpression(ast.ParenthesizedExpression(inner)) ->
-      emit_for_lhs_bind(e, ast.ForInitExpression(unwrap_parens(inner)))
-    ast.ForInitExpression(ast.Identifier(name)) -> {
-      Ok(emit_ir(e, IrScopePutVar(name)))
-    }
-    ast.ForInitExpression(ast.MemberExpression(obj, ast.Identifier(prop), False)) -> {
-      // e.g. for (obj.prop in ...) — rare but valid
-      use e <- result.try(emit_expr(e, obj))
-      let e = emit_ir(e, IrSwap)
-      Ok(emit_ir(e, IrPutField(prop)))
-    }
     ast.ForInitPattern(pattern) ->
       emit_destructuring_bind(e, pattern, VarBinding)
-    // Assignment destructuring: for ([a, b] of arr) or for ({a, b} of arr)
+    // Assignment-target LHS: `for (x of …)`, `for (obj.k of …)`,
+    // `for ([a,b] of …)`, `for ({a} of …)`. Destructuring-assign semantics
+    // (PutVar/PutField/PutElem, no declaration).
     ast.ForInitExpression(expr) ->
-      case expression_to_pattern(expr) {
-        Ok(pattern) -> emit_destructuring_bind(e, pattern, VarBinding)
-        Error(Nil) -> Error(Unsupported("for-in/of left-hand side"))
-      }
+      emit_destructuring_assign(e, unwrap_parens(expr))
   }
 }
 
@@ -3080,50 +3061,427 @@ fn emit_destructuring_bind(
   }
 }
 
-/// Destructure an object: for each property, Dup obj, GetField, recurse; then Pop obj.
+/// Destructure an object — §13.15.5.2 ObjectBindingPattern.
+///
+/// Stack invariant maintained by emit_object_props:
+///   [src, key_n, ..., key_1, ...]
+/// where key_1..key_n are excluded-key JsValues stashed BENEATH src, accumulated
+/// only when a RestProperty is present (so ObjectRestCopy can filter them out).
+/// When no rest: no key stash, src is popped at the end.
 fn emit_object_destructure(
   e: Emitter,
   properties: List(ast.PatternProperty),
   binding_kind: BindingKind,
 ) -> Result(Emitter, EmitError) {
-  use e <- result.map(emit_object_props(e, properties, binding_kind))
-  emit_ir(e, IrPop)
+  let has_rest =
+    list.any(properties, fn(p) {
+      case p {
+        ast.RestProperty(_) -> True
+        ast.PatternProperty(..) -> False
+      }
+    })
+  use #(e, _n_excl) <- result.map(emit_object_props(
+    e,
+    properties,
+    binding_kind,
+    has_rest,
+    0,
+  ))
+  // RestProperty branch issues ObjectRestCopy which consumes src + all keys.
+  // Otherwise src is still on top — drop it.
+  case has_rest {
+    True -> e
+    False -> emit_ir(e, IrPop)
+  }
 }
 
 fn emit_object_props(
   e: Emitter,
   properties: List(ast.PatternProperty),
   binding_kind: BindingKind,
-) -> Result(Emitter, EmitError) {
+  has_rest: Bool,
+  n_excl: Int,
+) -> Result(#(Emitter, Int), EmitError) {
   case properties {
-    [] -> Ok(e)
+    [] -> Ok(#(e, n_excl))
     [prop, ..rest] -> {
-      use e <- result.try(emit_single_object_prop(e, prop, binding_kind))
-      emit_object_props(e, rest, binding_kind)
+      use #(e, n_excl) <- result.try(emit_single_object_prop(
+        e,
+        prop,
+        binding_kind,
+        has_rest,
+        n_excl,
+      ))
+      emit_object_props(e, rest, binding_kind, has_rest, n_excl)
     }
   }
 }
 
+/// Emit one property of an ObjectPattern. Entry stack: [src, ...keys].
+/// Exit stack: [src, key', ...keys] when has_rest (key stashed beneath src),
+/// or [src, ...keys] otherwise. RestProperty exits with [] (consumed everything).
 fn emit_single_object_prop(
   e: Emitter,
   prop: ast.PatternProperty,
   binding_kind: BindingKind,
-) -> Result(Emitter, EmitError) {
+  has_rest: Bool,
+  n_excl: Int,
+) -> Result(#(Emitter, Int), EmitError) {
   case prop {
-    ast.PatternProperty(key:, value:, computed: False, ..) -> {
-      let field_name = case key {
-        ast.Identifier(name) -> Ok(name)
-        ast.StringExpression(name) -> Ok(name)
-        _ -> Error(Unsupported("computed property key in destructuring"))
-      }
-      use name <- result.try(field_name)
+    // Static identifier/string key: {a: pat} or {"a": pat}
+    ast.PatternProperty(key: ast.Identifier(name), value:, computed: False, ..)
+    | ast.PatternProperty(
+        key: ast.StringExpression(name),
+        value:,
+        computed: False,
+        ..,
+      ) -> {
+      // [src,..] → Dup → [src,src,..] → GetField → [val,src,..] → bind → [src,..]
       let e = emit_ir(e, IrDup)
       let e = emit_ir(e, IrGetField(name))
-      emit_destructuring_bind(e, value, binding_kind)
+      use e <- result.map(emit_destructuring_bind(e, value, binding_kind))
+      // Stash key string beneath src for later exclusion.
+      case has_rest {
+        False -> #(e, n_excl)
+        True -> {
+          let e = push_const(e, JsString(name))
+          #(emit_ir(e, IrSwap), n_excl + 1)
+        }
+      }
     }
-    ast.PatternProperty(computed: True, ..) ->
-      Error(Unsupported("computed property in destructuring"))
-    ast.RestProperty(_) -> Error(Unsupported("rest property in destructuring"))
+
+    // Numeric literal key: {1: pat} — not flagged computed by parser, but
+    // needs runtime ToPropertyKey for canonical "1" (mirrors object-literal
+    // numeric-key path at line ~2500).
+    ast.PatternProperty(key: ast.NumberLiteral(n), value:, computed: False, ..) ->
+      emit_computed_key_prop(
+        e,
+        fn(e) { Ok(push_const(e, JsNumber(Finite(n)))) },
+        value,
+        binding_kind,
+        has_rest,
+        n_excl,
+      )
+
+    // Computed key {[expr]: pat}, plus any remaining non-computed literal
+    // key (e.g. BigInt) — evaluate the key expression and route via GetElem.
+    ast.PatternProperty(key:, value:, ..) ->
+      emit_computed_key_prop(
+        e,
+        emit_expr(_, key),
+        value,
+        binding_kind,
+        has_rest,
+        n_excl,
+      )
+
+    // {a, b, ...rest} — §13.15.5.3 RestBindingInitialization.
+    // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → bind.
+    ast.RestProperty(argument) -> {
+      let e = emit_ir(e, IrObjectRestCopy(n_excl))
+      use e <- result.map(emit_destructuring_bind(e, argument, binding_kind))
+      #(e, 0)
+    }
+  }
+}
+
+/// Shared path for computed and numeric-literal keys in object patterns.
+/// `emit_key` pushes the key value onto the stack (returning Result(Emitter)).
+///
+/// Without rest: [src] → Dup → [src,src] → key → [k,src,src] → GetElem
+///   → [val,src] → bind → [src].
+/// With rest: uses GetElem2 to keep the evaluated key for the exclusion set
+///   (single evaluation per §13.15.5.2 step 2): [src,..keys] → Dup →
+///   [src,src,..] → key → [k,src,src,..] → GetElem2 → [val,k,src,src,..]
+///   → bind → [k,src,src,..] → Swap;Pop;Swap → [src,k,..keys].
+fn emit_computed_key_prop(
+  e: Emitter,
+  emit_key: fn(Emitter) -> Result(Emitter, EmitError),
+  inner: ast.Pattern,
+  binding_kind: BindingKind,
+  has_rest: Bool,
+  n_excl: Int,
+) -> Result(#(Emitter, Int), EmitError) {
+  let e = emit_ir(e, IrDup)
+  use e <- result.try(emit_key(e))
+  case has_rest {
+    False -> {
+      let e = emit_ir(e, IrGetElem)
+      use e <- result.map(emit_destructuring_bind(e, inner, binding_kind))
+      #(e, n_excl)
+    }
+    True -> {
+      let e = emit_ir(e, IrGetElem2)
+      use e <- result.map(emit_destructuring_bind(e, inner, binding_kind))
+      // [k,src,src,..] → swap → [src,k,src,..] → pop → [k,src,..]
+      // → swap → [src,k,..]
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPop)
+      #(emit_ir(e, IrSwap), n_excl + 1)
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Destructuring ASSIGNMENT (§13.15.5) — `[a, x.y] = rhs`, `({k: v} = rhs)`.
+// Unlike emit_destructuring_bind (binding patterns over ast.Pattern), targets
+// here are LHS *expressions* and may be MemberExpressions. Value to assign is
+// on top of stack on entry; consumed on exit.
+//
+// Mirrors QuickJS js_parse_destructuring_element with tok==0: leaves route
+// through put_lvalue (PutVar/PutField/PutElem) instead of DeclareVar.
+// ----------------------------------------------------------------------------
+
+fn emit_destructuring_assign(
+  e: Emitter,
+  target: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case target {
+    ast.Identifier(name) -> Ok(emit_ir(e, IrScopePutVar(name)))
+
+    ast.ParenthesizedExpression(inner) -> emit_destructuring_assign(e, inner)
+
+    // obj.prop — stack [val] → eval obj → [obj,val] → swap → [val,obj]
+    // → PutField → [val] → Pop. (PutField pops [value,obj], leaves value.)
+    ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
+      use e <- result.map(emit_expr(e, obj))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPutField(prop))
+      emit_ir(e, IrPop)
+    }
+
+    // Non-computed string-keyed member (defensive; parser usually emits
+    // computed=True for obj["lit"]).
+    ast.MemberExpression(obj, ast.StringExpression(prop), False) -> {
+      use e <- result.map(emit_expr(e, obj))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPutField(prop))
+      emit_ir(e, IrPop)
+    }
+
+    // obj[key] — PutElem wants [val,key,obj]. With only Dup/Swap (no rot3):
+    // [val] → emit obj → [obj,val] → swap → [val,obj] → emit key → [key,val,obj]
+    // → swap → [val,key,obj] → PutElem → [val] → Pop.
+    ast.MemberExpression(obj, key, True) -> {
+      use e <- result.try(emit_expr(e, obj))
+      let e = emit_ir(e, IrSwap)
+      use e <- result.map(emit_expr(e, key))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPutElem)
+      emit_ir(e, IrPop)
+    }
+
+    // target = default  (AssignmentElement with Initializer, §13.15.5.3)
+    // If incoming value === undefined, replace with default; then recurse.
+    ast.AssignmentExpression(ast.Assign, left, default_expr) -> {
+      let #(e, has_val) = fresh_label(e)
+      let e = emit_ir(e, IrDup)
+      let e = push_const(e, JsUndefined)
+      let e = emit_ir(e, IrBinOp(opcode.StrictEq))
+      let e = emit_ir(e, IrJumpIfFalse(has_val))
+      let e = emit_ir(e, IrPop)
+      use e <- result.try(case left {
+        ast.Identifier(name) -> emit_named_expr(e, default_expr, name)
+        _ -> emit_expr(e, default_expr)
+      })
+      let e = emit_ir(e, IrLabel(has_val))
+      emit_destructuring_assign(e, left)
+    }
+
+    ast.ArrayExpression(elements) -> {
+      let e = emit_ir(e, IrGetIterator)
+      use e <- result.map(emit_array_assign_elements(e, elements))
+      emit_ir(e, IrPop)
+    }
+
+    ast.ObjectExpression(properties) -> {
+      let has_rest =
+        list.any(properties, fn(p) {
+          case p {
+            ast.SpreadProperty(_) -> True
+            ast.Property(..) -> False
+          }
+        })
+      use #(e, _n) <- result.map(emit_object_assign_props(
+        e,
+        properties,
+        has_rest,
+        0,
+      ))
+      case has_rest {
+        True -> e
+        False -> emit_ir(e, IrPop)
+      }
+    }
+
+    other ->
+      Error(Unsupported(
+        "destructuring assignment target: " <> string_inspect_expr_kind(other),
+      ))
+  }
+}
+
+/// Array assignment pattern elements. Clone of emit_array_elements but
+/// recurses via emit_destructuring_assign on ast.Expression elements.
+/// Stack invariant: [iter, ...] on entry, [iter, ...] on exit.
+fn emit_array_assign_elements(
+  e: Emitter,
+  elements: List(Option(ast.Expression)),
+) -> Result(Emitter, EmitError) {
+  case elements {
+    [] -> Ok(e)
+    // Hole: step iterator, discard done+value.
+    [None, ..rest] -> {
+      let e = emit_ir(e, IrIteratorNext)
+      let e = emit_ir(e, IrPop)
+      let e = emit_ir(e, IrPop)
+      emit_array_assign_elements(e, rest)
+    }
+    // Rest: drain remaining iterations into a fresh array via ArraySpread.
+    [Some(ast.SpreadElement(argument:)), ..] -> {
+      // [iter] → [arr, iter] → swap → [iter, arr] → spread → [arr]
+      let e = emit_ir(e, IrArrayFrom(0))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrArraySpread)
+      use e <- result.map(emit_destructuring_assign(e, argument))
+      // Spread consumed iter; push dummy so the outer Pop balances.
+      push_const(e, JsUndefined)
+    }
+    [Some(target), ..rest] -> {
+      let e = emit_ir(e, IrIteratorNext)
+      // [done, value, iter] — discard done, assign value.
+      let e = emit_ir(e, IrPop)
+      use e <- result.try(emit_destructuring_assign(e, target))
+      emit_array_assign_elements(e, rest)
+    }
+  }
+}
+
+/// Object assignment pattern properties — §13.15.5.2. Same stack invariant
+/// as emit_object_props (binding-pattern path): [src, key_n,..,key_1] with
+/// excluded keys stashed beneath src when has_rest, else just [src].
+fn emit_object_assign_props(
+  e: Emitter,
+  properties: List(ast.Property),
+  has_rest: Bool,
+  n_excl: Int,
+) -> Result(#(Emitter, Int), EmitError) {
+  case properties {
+    [] -> Ok(#(e, n_excl))
+    [prop, ..rest] -> {
+      use #(e, n_excl) <- result.try(emit_single_object_assign_prop(
+        e,
+        prop,
+        has_rest,
+        n_excl,
+      ))
+      emit_object_assign_props(e, rest, has_rest, n_excl)
+    }
+  }
+}
+
+fn emit_single_object_assign_prop(
+  e: Emitter,
+  prop: ast.Property,
+  has_rest: Bool,
+  n_excl: Int,
+) -> Result(#(Emitter, Int), EmitError) {
+  case prop {
+    // {key: target} or shorthand {key} (value==Identifier(key)).
+    // Non-computed string/identifier/number key.
+    ast.Property(
+      key:,
+      value:,
+      computed: False,
+      kind: ast.Init,
+      method: False,
+      ..,
+    ) ->
+      case object_prop_key_name(key) {
+        Ok(name) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField(name))
+          use e <- result.map(emit_destructuring_assign(e, value))
+          case has_rest {
+            False -> #(e, n_excl)
+            True -> {
+              let e = push_const(e, JsString(name))
+              #(emit_ir(e, IrSwap), n_excl + 1)
+            }
+          }
+        }
+        Error(Nil) -> {
+          // Non-stringifiable static key — fall through to computed-key path.
+          let e = emit_ir(e, IrDup)
+          use e <- result.try(emit_expr(e, key))
+          emit_elem_key_assign(e, value, has_rest, n_excl)
+        }
+      }
+
+    // {[expr]: target} — Dup obj, eval key, GetElem, recurse.
+    ast.Property(
+      key:,
+      value:,
+      computed: True,
+      kind: ast.Init,
+      method: False,
+      ..,
+    ) -> {
+      let e = emit_ir(e, IrDup)
+      use e <- result.try(emit_expr(e, key))
+      emit_elem_key_assign(e, value, has_rest, n_excl)
+    }
+
+    // Getter/setter/method properties never appear in valid assignment
+    // patterns (parser sets has_invalid_pattern). Guard defensively.
+    ast.Property(kind: ast.Get, ..)
+    | ast.Property(kind: ast.Set, ..)
+    | ast.Property(method: True, ..) ->
+      Error(Unsupported("accessor/method in destructuring assignment"))
+
+    // {a, b, ...target} — §13.15.5.4 RestDestructuringAssignmentEvaluation.
+    // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → assign.
+    ast.SpreadProperty(argument) -> {
+      let e = emit_ir(e, IrObjectRestCopy(n_excl))
+      use e <- result.map(emit_destructuring_assign(e, argument))
+      #(e, 0)
+    }
+  }
+}
+
+/// Computed-key portion shared by assignment-pattern path. Entry stack:
+/// [key, src, src, ...keys] (after caller's Dup + emit key). See
+/// emit_computed_key_prop for stack-shuffle rationale.
+fn emit_elem_key_assign(
+  e: Emitter,
+  value: ast.Expression,
+  has_rest: Bool,
+  n_excl: Int,
+) -> Result(#(Emitter, Int), EmitError) {
+  case has_rest {
+    False -> {
+      let e = emit_ir(e, IrGetElem)
+      use e <- result.map(emit_destructuring_assign(e, value))
+      #(e, n_excl)
+    }
+    True -> {
+      let e = emit_ir(e, IrGetElem2)
+      use e <- result.map(emit_destructuring_assign(e, value))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPop)
+      #(emit_ir(e, IrSwap), n_excl + 1)
+    }
+  }
+}
+
+/// Static property-key → string for non-computed object pattern keys.
+/// Numeric keys go through js_format_number for canonical form ("1" not "1.0").
+fn object_prop_key_name(key: ast.Expression) -> Result(String, Nil) {
+  case key {
+    ast.Identifier(name) -> Ok(name)
+    ast.StringExpression(name) -> Ok(name)
+    ast.NumberLiteral(n) -> Ok(value.js_format_number(n))
+    _ -> Error(Nil)
   }
 }
 
@@ -3288,9 +3646,10 @@ fn compile_derived_class(
   let #(ctor_method, instance_methods, static_methods, instance_fields) =
     classify_class_body(body)
 
-  // Build constructor: if none provided, synthesize default derived constructor
-  // Default: constructor(...args) { super(...args); }
-  // Simplified: constructor() { super(); }
+  // Build constructor: if none provided, synthesize the spec default derived
+  // constructor (§15.7.14 step 10.a): constructor(...args) { super(...args); }.
+  // Arc doesn't support rest parameters yet, so spread `arguments` instead —
+  // observably equivalent here since the synthetic body never re-reads it.
   let #(ctor_params, ctor_body) = case ctor_method {
     Some(ast.ClassMethod(value: ast.FunctionExpression(_, params, body, ..), ..)) -> #(
       params,
@@ -3299,7 +3658,11 @@ fn compile_derived_class(
     _ -> #(
       [],
       ast.BlockStatement([
-        ast.ExpressionStatement(ast.CallExpression(ast.SuperExpression, [])),
+        ast.ExpressionStatement(
+          ast.CallExpression(ast.SuperExpression, [
+            ast.SpreadElement(ast.Identifier("arguments")),
+          ]),
+        ),
       ]),
     )
   }
@@ -3455,7 +3818,24 @@ fn compile_derived_class(
           let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed class method"))
+        // Computed key or numeric-literal key (`[expr]() {}`, `0b10() {}`).
+        ast.ClassMethod(
+          key:,
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind:,
+          ..,
+        ) ->
+          emit_computed_class_method(
+            e,
+            key,
+            params,
+            body,
+            is_gen,
+            is_async,
+            kind,
+            True,
+          )
+        _ -> Error(Unsupported("class method with non-function value"))
       }
     }),
   )
@@ -3572,7 +3952,24 @@ fn compile_derived_class(
           let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed static method"))
+        // Computed key or numeric-literal key (`static [expr]() {}`, `static 0() {}`).
+        ast.ClassMethod(
+          key:,
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind:,
+          ..,
+        ) ->
+          emit_computed_class_method(
+            e,
+            key,
+            params,
+            body,
+            is_gen,
+            is_async,
+            kind,
+            False,
+          )
+        _ -> Error(Unsupported("class method with non-function value"))
       }
     }),
   )
@@ -3581,7 +3978,46 @@ fn compile_derived_class(
   Ok(e)
 }
 
-/// Inject field initializers after existing statements (for default derived constructor).
+/// Computed-key (or numeric-literal-key) class method/accessor.
+/// `class { [expr]() {} }`, `get [expr]() {}`, `static [expr]() {}`, `0b10() {}`.
+/// Stack on entry: [ctor]. Dups ctor, optionally fetches .prototype, evaluates
+/// the key expression, builds the closure, then DefineMethodComputed /
+/// DefineAccessorComputed (both consume [fn, key, target] → [target]), and pops
+/// the target back to [ctor]. Function name is left None — SetFunctionName from
+/// runtime keys is not yet implemented (matches object-literal computed methods).
+fn emit_computed_class_method(
+  e: Emitter,
+  key: ast.Expression,
+  params: List(ast.Pattern),
+  body: ast.Statement,
+  is_gen: Bool,
+  is_async: Bool,
+  kind: ast.MethodKind,
+  on_prototype: Bool,
+) -> Result(Emitter, EmitError) {
+  let e = emit_ir(e, IrDup)
+  let e = case on_prototype {
+    True -> emit_ir(e, IrGetField("prototype"))
+    False -> e
+  }
+  use e <- result.try(emit_expr(e, key))
+  let child =
+    compile_function_body(e, None, params, body, False, is_gen, is_async)
+  let #(e, idx) = add_child_function(e, child)
+  let e = emit_ir(e, IrMakeClosure(idx))
+  let e = case kind {
+    ast.MethodMethod -> emit_ir(e, IrDefineMethodComputed)
+    ast.MethodGet -> emit_ir(e, IrDefineAccessorComputed(opcode.Getter))
+    ast.MethodSet -> emit_ir(e, IrDefineAccessorComputed(opcode.Setter))
+    // MethodConstructor is filtered out by classify_class_body before we get
+    // here; treat as a plain method defensively rather than crashing.
+    ast.MethodConstructor -> emit_ir(e, IrDefineMethodComputed)
+  }
+  Ok(emit_ir(e, IrPop))
+}
+
+/// Inject field initializers after existing statements (for default derived
+/// constructor — fields run after `super()`).
 fn inject_field_inits_after(
   fields: List(ast.ClassElement),
   body: ast.Statement,
@@ -3589,24 +4025,7 @@ fn inject_field_inits_after(
   case fields {
     [] -> body
     _ -> {
-      let field_stmts =
-        list.filter_map(fields, fn(field) {
-          case field {
-            ast.ClassField(key: ast.Identifier(name), value: Some(init), ..) ->
-              Ok(
-                ast.ExpressionStatement(ast.AssignmentExpression(
-                  operator: ast.Assign,
-                  left: ast.MemberExpression(
-                    ast.ThisExpression,
-                    ast.Identifier(name),
-                    False,
-                  ),
-                  right: init,
-                )),
-              )
-            _ -> Error(Nil)
-          }
-        })
+      let field_stmts = field_init_stmts(fields)
       let existing_stmts = case body {
         ast.BlockStatement(stmts) -> stmts
         other -> [other]
@@ -3774,7 +4193,24 @@ fn compile_base_class(
           let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed class method"))
+        // Computed key or numeric-literal key (`[expr]() {}`, `0b10() {}`).
+        ast.ClassMethod(
+          key:,
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind:,
+          ..,
+        ) ->
+          emit_computed_class_method(
+            e,
+            key,
+            params,
+            body,
+            is_gen,
+            is_async,
+            kind,
+            True,
+          )
+        _ -> Error(Unsupported("class method with non-function value"))
       }
     }),
   )
@@ -3895,7 +4331,24 @@ fn compile_base_class(
           let e = emit_ir(e, IrDefineAccessor(name, opcode.Setter))
           Ok(emit_ir(e, IrPop))
         }
-        _ -> Error(Unsupported("computed static method"))
+        // Computed key or numeric-literal key (`static [expr]() {}`, `static 0() {}`).
+        ast.ClassMethod(
+          key:,
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          kind:,
+          ..,
+        ) ->
+          emit_computed_class_method(
+            e,
+            key,
+            params,
+            body,
+            is_gen,
+            is_async,
+            kind,
+            False,
+          )
+        _ -> Error(Unsupported("class method with non-function value"))
       }
     }),
   )
@@ -3961,7 +4414,8 @@ fn classify_class_body(
 }
 
 /// Inject field initializer code at the start of a constructor body.
-/// Each field `x = expr` becomes: `this.x = expr;` prepended to the body.
+/// Each instance field becomes a ClassFieldInit statement (§7.3.32 DefineField
+/// → CreateDataPropertyOrThrow), prepended to the body.
 fn inject_field_inits(
   fields: List(ast.ClassElement),
   body: ast.Statement,
@@ -3969,43 +4423,26 @@ fn inject_field_inits(
   case fields {
     [] -> body
     _ -> {
-      let init_stmts =
-        list.filter_map(fields, fn(field) {
-          case field {
-            ast.ClassField(
-              key: ast.Identifier(name),
-              value: Some(init_expr),
-              computed: False,
-              ..,
-            ) ->
-              Ok(
-                ast.ExpressionStatement(ast.AssignmentExpression(
-                  ast.Assign,
-                  ast.MemberExpression(
-                    ast.ThisExpression,
-                    ast.Identifier(name),
-                    False,
-                  ),
-                  init_expr,
-                )),
-              )
-            ast.ClassField(
-              key: ast.Identifier(_name),
-              value: None,
-              computed: False,
-              ..,
-            ) ->
-              // Field with no initializer: this.x = undefined
-              Error(Nil)
-            _ -> Error(Nil)
-          }
-        })
+      let init_stmts = field_init_stmts(fields)
       let body_stmts = case body {
         ast.BlockStatement(stmts) -> stmts
         other -> [other]
       }
       ast.BlockStatement(list.append(init_stmts, body_stmts))
     }
+  }
+}
+
+/// Map every instance ClassField → ClassFieldInit statement.
+/// Per §15.7.14 ClassFieldDefinitionEvaluation, value:None becomes undefined
+/// (handled in emit_stmt). Static fields are filtered out upstream by
+/// classify_class_body, but we guard on is_static:False here for safety.
+fn field_init_stmts(fields: List(ast.ClassElement)) -> List(ast.Statement) {
+  use field <- list.filter_map(fields)
+  case field {
+    ast.ClassField(key:, value:, computed:, is_static: False) ->
+      Ok(ast.ClassFieldInit(key:, value:, computed:))
+    _ -> Error(Nil)
   }
 }
 
@@ -4036,6 +4473,7 @@ fn string_inspect_stmt_kind(stmt: ast.Statement) -> String {
     ast.WithStatement(..) -> "WithStatement"
     ast.FunctionDeclaration(..) -> "FunctionDeclaration"
     ast.ClassDeclaration(..) -> "ClassDeclaration"
+    ast.ClassFieldInit(..) -> "ClassFieldInit"
   }
 }
 
@@ -4077,6 +4515,3 @@ fn string_inspect_expr_kind(expr: ast.Expression) -> String {
     ast.ParenthesizedExpression(..) -> "ParenthesizedExpression"
   }
 }
-
-// Need to import result for map/try
-import gleam/result

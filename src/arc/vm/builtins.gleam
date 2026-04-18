@@ -3,9 +3,11 @@ import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/async_generator as builtins_async_generator
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins, Builtins}
+import arc/vm/builtins/date as builtins_date
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/function as builtins_function
 import arc/vm/builtins/generator as builtins_generator
+import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/builtins/json as builtins_json
 import arc/vm/builtins/map as builtins_map
 import arc/vm/builtins/math as builtins_math
@@ -67,6 +69,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // RegExp constructor + prototype
   let #(h, regexp) = builtins_regexp.init(h, object_proto, function.prototype)
 
+  // Date constructor + prototype
+  let #(h, date) = builtins_date.init(h, object_proto, function.prototype)
+
   // Promise constructor + prototype
   let #(h, promise) = builtins_promise.init(h, object_proto, function.prototype)
 
@@ -99,6 +104,11 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     )
   let h = heap.root(h, iterator_proto)
 
+  // Iterator constructor + prototype helpers + %IteratorHelperPrototype% +
+  // %WrapForValidIteratorPrototype% — ES2025 §27.1.
+  let #(h, iterator, iterator_helper_proto, wrap_for_valid_iterator_proto) =
+    builtins_iterator.init(h, iterator_proto, function.prototype)
+
   // %ArrayIteratorPrototype% — ES §23.1.5.2
   let #(h, array_iter_methods) =
     common.alloc_call_methods(h, function.prototype, [
@@ -123,6 +133,56 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       ),
     )
   let h = heap.root(h, array_iterator_proto)
+
+  // %SetIteratorPrototype% — ES §24.2.5.2
+  let #(h, set_iter_methods) =
+    common.alloc_call_methods(h, function.prototype, [
+      #("next", value.SetIteratorNext, 0),
+    ])
+  let #(h, set_iterator_proto) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: common.named_props(set_iter_methods),
+        symbol_properties: [
+          #(
+            value.symbol_to_string_tag,
+            value.data(value.JsString("Set Iterator"))
+              |> value.configurable(),
+          ),
+        ],
+        elements: elements.new(),
+        prototype: Some(iterator_proto),
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, set_iterator_proto)
+
+  // %MapIteratorPrototype% — ES §24.1.5.2
+  let #(h, map_iter_methods) =
+    common.alloc_call_methods(h, function.prototype, [
+      #("next", value.MapIteratorNext, 0),
+    ])
+  let #(h, map_iterator_proto) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: common.named_props(map_iter_methods),
+        symbol_properties: [
+          #(
+            value.symbol_to_string_tag,
+            value.data(value.JsString("Map Iterator"))
+              |> value.configurable(),
+          ),
+        ],
+        elements: elements.new(),
+        prototype: Some(iterator_proto),
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, map_iterator_proto)
 
   // Generator.prototype → %IteratorPrototype% → Object.prototype
   let #(h, generator) =
@@ -285,6 +345,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       number:,
       boolean:,
       regexp:,
+      date:,
       parse_int:,
       parse_float:,
       is_nan:,
@@ -300,6 +361,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       set:,
       weak_map:,
       weak_set:,
+      iterator:,
+      iterator_helper_proto:,
+      wrap_for_valid_iterator_proto:,
       eval:,
       decode_uri:,
       encode_uri:,
@@ -308,6 +372,8 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       escape:,
       unescape:,
       array_iterator_proto:,
+      set_iterator_proto:,
+      map_iterator_proto:,
       async_from_sync_iterator_proto:,
     ),
   )
@@ -355,6 +421,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("Number", JsObject(b.number.constructor)),
     Builtin("Boolean", JsObject(b.boolean.constructor)),
     Builtin("RegExp", JsObject(b.regexp.constructor)),
+    Builtin("Date", JsObject(b.date.constructor)),
     Builtin("parseInt", JsObject(b.parse_int)),
     Builtin("parseFloat", JsObject(b.parse_float)),
     Builtin("isNaN", JsObject(b.is_nan)),
@@ -368,6 +435,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("Set", JsObject(b.set.constructor)),
     Builtin("WeakMap", JsObject(b.weak_map.constructor)),
     Builtin("WeakSet", JsObject(b.weak_set.constructor)),
+    Builtin("Iterator", JsObject(b.iterator.constructor)),
     Builtin("eval", JsObject(b.eval)),
     Builtin("decodeURI", JsObject(b.decode_uri)),
     Builtin("encodeURI", JsObject(b.encode_uri)),

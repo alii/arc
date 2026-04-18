@@ -583,6 +583,9 @@ pub type MapNativeFn {
   MapPrototypeClear
   MapPrototypeForEach
   MapPrototypeGetSize
+  MapPrototypeKeys
+  MapPrototypeValues
+  MapPrototypeEntries
 }
 
 /// Set methods — constructor, prototype methods, size getter.
@@ -605,6 +608,20 @@ pub type SetNativeFn {
   SetPrototypeEntries
 }
 
+/// What a Set iterator yields on each .next() — values or [v,v] pairs.
+/// (Set has no separate "keys" kind — keys === values per §24.2.5.1.)
+pub type SetIterKind {
+  SetIterValues
+  SetIterEntries
+}
+
+/// What a Map iterator yields on each .next().
+pub type MapIterKind {
+  MapIterKeys
+  MapIterValues
+  MapIterEntries
+}
+
 /// WeakMap methods — constructor, get, set, has, delete.
 pub type WeakMapNativeFn {
   WeakMapConstructor(proto: Ref)
@@ -620,6 +637,47 @@ pub type WeakSetNativeFn {
   WeakSetPrototypeAdd
   WeakSetPrototypeHas
   WeakSetPrototypeDelete
+}
+
+/// Iterator Helper kind — ES2025 §27.1.3. Which lazy combinator created
+/// this %IteratorHelper% object. Stored in IteratorHelperObject.kind.
+pub type IteratorHelperKind {
+  HelperMap
+  HelperFilter
+  HelperTake
+  HelperDrop
+  HelperFlatMap
+}
+
+/// Iterator methods — ES2025 §27.1. Iterator constructor, Iterator.from,
+/// Iterator.prototype helper methods, and the per-helper next/return.
+pub type IteratorNativeFn {
+  IteratorConstructor
+  IteratorFrom
+  // Iterator.prototype eager consumers
+  IteratorPrototypeToArray
+  IteratorPrototypeForEach
+  IteratorPrototypeReduce
+  IteratorPrototypeSome
+  IteratorPrototypeEvery
+  IteratorPrototypeFind
+  // Iterator.prototype lazy producers (all create IteratorHelperObject)
+  IteratorPrototypeMap
+  IteratorPrototypeFilter
+  IteratorPrototypeTake
+  IteratorPrototypeDrop
+  IteratorPrototypeFlatMap
+  // %IteratorHelperPrototype%.next / .return
+  IteratorHelperNext
+  IteratorHelperReturn
+  // %WrapForValidIteratorPrototype%.next / .return
+  WrapForValidIteratorNext
+  WrapForValidIteratorReturn
+  // get/set %Iterator.prototype%[@@toStringTag] + .constructor
+  IteratorProtoGetToStringTag
+  IteratorProtoSetToStringTag
+  IteratorProtoGetConstructor
+  IteratorProtoSetConstructor
 }
 
 /// RegExp methods — constructor, prototype methods, accessor getters.
@@ -641,6 +699,60 @@ pub type RegExpNativeFn {
   RegExpSymbolReplace
   RegExpSymbolSearch
   RegExpSymbolSplit
+}
+
+/// Date methods — constructor, static, prototype getters/setters/stringifiers.
+pub type DateNativeFn {
+  DateConstructor(proto: Ref)
+  DateNow
+  DateParse
+  DateUTC
+  DatePrototypeValueOf
+  DatePrototypeGetTime
+  DatePrototypeGetTimezoneOffset
+  DatePrototypeGetFullYear
+  DatePrototypeGetUTCFullYear
+  DatePrototypeGetMonth
+  DatePrototypeGetUTCMonth
+  DatePrototypeGetDate
+  DatePrototypeGetUTCDate
+  DatePrototypeGetDay
+  DatePrototypeGetUTCDay
+  DatePrototypeGetHours
+  DatePrototypeGetUTCHours
+  DatePrototypeGetMinutes
+  DatePrototypeGetUTCMinutes
+  DatePrototypeGetSeconds
+  DatePrototypeGetUTCSeconds
+  DatePrototypeGetMilliseconds
+  DatePrototypeGetUTCMilliseconds
+  DatePrototypeSetTime
+  DatePrototypeSetMilliseconds
+  DatePrototypeSetUTCMilliseconds
+  DatePrototypeSetSeconds
+  DatePrototypeSetUTCSeconds
+  DatePrototypeSetMinutes
+  DatePrototypeSetUTCMinutes
+  DatePrototypeSetHours
+  DatePrototypeSetUTCHours
+  DatePrototypeSetDate
+  DatePrototypeSetUTCDate
+  DatePrototypeSetMonth
+  DatePrototypeSetUTCMonth
+  DatePrototypeSetFullYear
+  DatePrototypeSetUTCFullYear
+  DatePrototypeGetYear
+  DatePrototypeSetYear
+  DatePrototypeToString
+  DatePrototypeToDateString
+  DatePrototypeToTimeString
+  DatePrototypeToISOString
+  DatePrototypeToUTCString
+  DatePrototypeToLocaleString
+  DatePrototypeToLocaleDateString
+  DatePrototypeToLocaleTimeString
+  DatePrototypeToJSON
+  DatePrototypeSymbolToPrimitive
 }
 
 /// What's stored in NativeFunction — either a dispatch-level or call-level native.
@@ -675,7 +787,9 @@ pub type NativeFn {
   SetNative(SetNativeFn)
   WeakMapNative(WeakMapNativeFn)
   WeakSetNative(WeakSetNativeFn)
+  IteratorNative(IteratorNativeFn)
   RegExpNative(RegExpNativeFn)
+  DateNative(DateNativeFn)
   /// VM-level natives handled in dispatch_native — don't need stack manipulation.
   VmNative(VmNativeFn)
 }
@@ -763,6 +877,10 @@ pub type CallNativeFn {
   GeneratorThrow
   /// %ArrayIteratorPrototype%.next() — ES §23.1.5.2.1
   ArrayIteratorNext
+  /// %SetIteratorPrototype%.next() — ES §24.2.5.2.1
+  SetIteratorNext
+  /// %MapIteratorPrototype%.next() — ES §24.1.5.2.1
+  MapIteratorNext
   /// Async function resume: called when awaited promise settles.
   AsyncResume(async_data_ref: Ref, is_reject: Bool)
   // Async generator
@@ -901,14 +1019,45 @@ pub type ExoticKind(ctx) {
   /// Stores the source pattern and flags strings. Actual matching
   /// is delegated to Erlang's `re` module (PCRE) via FFI.
   RegExpObject(pattern: String, flags: String)
+  /// Date object — ES2024 §21.4. Has [[DateValue]] internal slot holding the
+  /// time value (ms since epoch) as a JsNum. NaN represents an invalid date.
+  /// After TimeClip only Finite or NaN are possible, but the type stays JsNum.
+  DateObject(time_value: JsNum)
   /// Array iterator — ES2024 §23.1.5 Array Iterator Objects.
   /// Created by Array.prototype[Symbol.iterator](), values(), keys(), entries().
   /// Lazy — re-reads source length each .next() to handle mutation.
   ArrayIteratorObject(source: Ref, index: Int)
+  /// Set iterator — ES2024 §24.2.5. Snapshots forward-order entries at
+  /// creation time. Snapshot is simpler than live source+index because Set
+  /// stores keys reversed with tombstones; re-deriving order each .next()
+  /// would be O(n²). Only mutation-during-iteration tests observe the diff.
+  SetIteratorObject(remaining: List(JsValue), kind: SetIterKind)
+  /// Map iterator — ES2024 §24.1.5. Snapshots forward-order (key, value)
+  /// pairs at creation time. Same snapshot rationale as SetIteratorObject.
+  MapIteratorObject(remaining: List(#(JsValue, JsValue)), kind: MapIterKind)
   /// Async-from-Sync Iterator — ES2024 §27.1.4. Created by GetIterator(async)
   /// when the source has only Symbol.iterator. next/return/throw await the
   /// sync result's `.value` and close the sync iterator on rejection.
   AsyncFromSyncIteratorObject(sync_iter: Ref)
+  /// Iterator Helper — ES2025 §27.1.3.2. Created by
+  /// Iterator.prototype.{map,filter,take,drop,flatMap}.
+  /// `next_method` is cached once per GetIteratorDirect (spec §7.4.9) so
+  /// monkey-patching `underlying.next` after creation has no effect.
+  /// `count` is remaining limit (take/drop) OR running counter
+  /// (map/filter/flatMap). `inner` is flatMap's current inner iterator.
+  IteratorHelperObject(
+    kind: IteratorHelperKind,
+    underlying: JsValue,
+    next_method: JsValue,
+    func: JsValue,
+    inner: JsValue,
+    inner_next: JsValue,
+    count: Int,
+    done: Bool,
+  )
+  /// Wrap For Valid Iterator — ES2025 §27.1.2.1.2. Created by Iterator.from
+  /// when the source isn't already an instance of %Iterator.prototype%.
+  WrapForValidIteratorObject(iterated: JsValue, next_method: JsValue)
 }
 
 /// Canonical property key. Per spec, property keys are String | Symbol, but
@@ -1388,6 +1537,9 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
           ref,
         ]
         NativeFunction(Dispatch(MapNative(MapConstructor(proto: ref)))) -> [ref]
+        NativeFunction(Dispatch(DateNative(DateConstructor(proto: ref)))) -> [
+          ref,
+        ]
         NativeFunction(Dispatch(SetNative(SetConstructor(proto: ref)))) -> [ref]
         NativeFunction(Dispatch(WeakMapNative(WeakMapConstructor(proto: ref)))) -> [
           ref,
@@ -1429,7 +1581,27 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
         GeneratorObject(generator_data:) -> [generator_data]
         AsyncGeneratorObject(generator_data:) -> [generator_data]
         ArrayIteratorObject(source:, ..) -> [source]
+        SetIteratorObject(remaining:, ..) ->
+          list.flat_map(remaining, refs_in_value)
+        MapIteratorObject(remaining:, ..) ->
+          list.flat_map(remaining, fn(p) {
+            list.append(refs_in_value(p.0), refs_in_value(p.1))
+          })
         AsyncFromSyncIteratorObject(sync_iter:) -> [sync_iter]
+        IteratorHelperObject(
+          underlying:,
+          next_method:,
+          func:,
+          inner:,
+          inner_next:,
+          ..,
+        ) ->
+          list.flat_map(
+            [underlying, next_method, func, inner, inner_next],
+            refs_in_value,
+          )
+        WrapForValidIteratorObject(iterated:, next_method:) ->
+          list.flat_map([iterated, next_method], refs_in_value)
         MapObject(entries:, keys_rev:, keys_len: _) -> {
           // Trace refs in map values
           let value_refs = dict.values(entries) |> list.flat_map(refs_in_value)
@@ -1465,6 +1637,7 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
         | PidObject(_)
         | SubjectObject(..)
         | TimerObject(..)
+        | DateObject(_)
         | RegExpObject(..) -> []
       }
       list.flatten([prop_refs, sym_prop_refs, elem_refs, proto_refs, kind_refs])

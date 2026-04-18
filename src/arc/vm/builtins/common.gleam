@@ -56,7 +56,11 @@ pub type Builtins {
     set: BuiltinType,
     weak_map: BuiltinType,
     weak_set: BuiltinType,
+    iterator: BuiltinType,
+    iterator_helper_proto: Ref,
+    wrap_for_valid_iterator_proto: Ref,
     regexp: BuiltinType,
+    date: BuiltinType,
     eval: Ref,
     decode_uri: Ref,
     encode_uri: Ref,
@@ -65,6 +69,8 @@ pub type Builtins {
     escape: Ref,
     unescape: Ref,
     array_iterator_proto: Ref,
+    set_iterator_proto: Ref,
+    map_iterator_proto: Ref,
     async_from_sync_iterator_proto: Ref,
   )
 }
@@ -602,12 +608,13 @@ pub fn to_object(
   }
 }
 
-/// Helper for ToObject (§7.1.18): allocate a wrapper object for a primitive.
+/// Helper for ToObject (§7.1.18) and primitive-wrapper constructors
+/// (`new String/Number/Boolean`): allocate a wrapper object for a primitive.
 ///
 /// Creates an ordinary object with the given ExoticKind (which carries the
 /// [[PrimitiveData]] internal slot, e.g. StringObject(s) = [[StringData]])
 /// and the appropriate builtin prototype.
-fn alloc_wrapper(
+pub fn alloc_wrapper(
   h: Heap(ctx),
   kind: ExoticKind(ctx),
   proto: Ref,

@@ -1063,13 +1063,27 @@ fn collect_element_keys(
 ///
 /// Used by object spread `{...source}` and Object.assign.
 ///
-/// TODO(Deviation): we do not support excludedItems (always empty for object spread).
-/// Needed for destructuring rest patterns. Also, symbol-keyed accessor
-/// getters are not invoked — the descriptor is copied directly.
+/// TODO(Deviation): symbol-keyed accessor getters are not invoked — the
+/// descriptor is copied directly.
 pub fn copy_data_properties(
   state: State,
   target_ref: Ref,
   source: JsValue,
+) -> Result(State, #(JsValue, State)) {
+  copy_data_properties_excluding(state, target_ref, source, [], [])
+}
+
+/// §7.3.25 CopyDataProperties with non-empty excludedItems — used by
+/// destructuring rest pattern `{a, b, ...rest}`. `excluded_keys` holds
+/// string/index PropertyKeys already bound; `excluded_syms` holds SymbolIds.
+/// Step 4.c: "If excludedItems does not contain nextKey..." — filter both
+/// the element-range copy and the string/symbol property copies.
+pub fn copy_data_properties_excluding(
+  state: State,
+  target_ref: Ref,
+  source: JsValue,
+  excluded_keys: List(PropertyKey),
+  excluded_syms: List(SymbolId),
 ) -> Result(State, #(JsValue, State)) {
   case source {
     // Step 2: source is already an object (from is source).
@@ -1080,19 +1094,31 @@ pub fn copy_data_properties(
           // These are always enumerable data properties.
           let heap = case kind {
             ArrayObject(length:) | value.ArgumentsObject(length:) ->
-              copy_element_range(state.heap, target_ref, elements, length)
+              copy_element_range(
+                state.heap,
+                target_ref,
+                elements,
+                length,
+                excluded_keys,
+              )
             _ -> state.heap
           }
           let state = State(..state, heap:)
-          // Step 4 (string keys): Filter to enumerable, then Get + CreateDataProperty.
+          // Step 4 (string keys): Filter to enumerable + not-excluded, then
+          // Get + CreateDataProperty.
           let keys =
             dict.to_list(properties)
             |> list.filter_map(fn(pair) {
               let #(k, prop) = pair
               case prop {
                 // Step 4.c.ii: desc.[[Enumerable]] is true.
-                DataProperty(enumerable: True, ..) -> Ok(k)
-                AccessorProperty(enumerable: True, ..) -> Ok(k)
+                DataProperty(enumerable: True, ..)
+                | AccessorProperty(enumerable: True, ..) ->
+                  // Step 4.c: excludedItems does not contain nextKey.
+                  case list.contains(excluded_keys, k) {
+                    True -> Error(Nil)
+                    False -> Ok(k)
+                  }
                 _ -> Error(Nil)
               }
             })
@@ -1104,12 +1130,16 @@ pub fn copy_data_properties(
               let #(k, prop) = pair
               case prop {
                 DataProperty(value: v, enumerable: True, ..) ->
-                  define_symbol_property(
-                    h,
-                    target_ref,
-                    k,
-                    value.data_property(v),
-                  )
+                  case list.contains(excluded_syms, k) {
+                    True -> h
+                    False ->
+                      define_symbol_property(
+                        h,
+                        target_ref,
+                        k,
+                        value.data_property(v),
+                      )
+                  }
                 _ -> h
               }
             })
@@ -1175,9 +1205,11 @@ fn copy_element_range(
   target_ref: Ref,
   elements: JsElements,
   end: Int,
+  excluded_keys: List(PropertyKey),
 ) -> Heap {
   use h, idx <- list.fold(elements.indices(elements), heap)
-  case idx < end {
+  // Step 4.c: skip excluded indices (rest-pattern `{0: a, ...r} = arr`).
+  case idx < end && !list.contains(excluded_keys, Index(idx)) {
     False -> h
     True ->
       // Step 4.c.ii.2: CreateDataPropertyOrThrow(target, ToString(idx), value).
@@ -1446,8 +1478,15 @@ fn inspect_object(
         value.WeakMapObject(_) -> "WeakMap {}"
         value.WeakSetObject(_) -> "WeakSet {}"
         value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
+        value.SetIteratorObject(..) -> "Object [Set Iterator] {}"
+        value.MapIteratorObject(..) -> "Object [Map Iterator] {}"
         value.AsyncFromSyncIteratorObject(..) ->
           "Object [Async-from-Sync Iterator] {}"
+        value.DateObject(time_value:) ->
+          case time_value {
+            value.Finite(f) -> "Date(" <> value.js_format_number(f) <> ")"
+            _ -> "Invalid Date"
+          }
         value.RegExpObject(pattern:, flags:) -> {
           let source = case pattern {
             "" -> "(?:)"
@@ -1455,6 +1494,8 @@ fn inspect_object(
           }
           "/" <> source <> "/" <> flags
         }
+        value.IteratorHelperObject(..) -> "[Iterator Helper]"
+        value.WrapForValidIteratorObject(..) -> "[Iterator]"
         OrdinaryObject ->
           case dict.get(properties, Named("message")) {
             // Error objects: display as "ErrorName: message"

@@ -1474,11 +1474,21 @@ fn parse_for_expression(
             || { is_bare_pattern && !p2.has_invalid_pattern }
           }
         {
-          True ->
+          True -> {
+            // LHS accepted as assignment pattern — clear cover-grammar flags
+            // so they don't leak into the for-body (e.g. `for ({x=1} of …) {…}`).
+            let p2 =
+              P(
+                ..p2,
+                has_cover_initializer: False,
+                has_invalid_pattern: False,
+                has_eval_args_target: False,
+              )
             case peek(p2) {
               In -> parse_for_in_rest(p2, left)
               _ -> parse_for_of_rest(p2, left, is_await)
             }
+          }
           False -> {
             let kind = case peek(p2) {
               In -> "in"
@@ -4097,7 +4107,16 @@ fn parse_array_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let p2 = advance(p)
   // Restore allow_in inside array literals
   let saved_allow_in = p.allow_in
-  let p2 = P(..p2, allow_in: True)
+  // Cover-grammar pattern-validity flags are scoped per literal: reset so
+  // a previous `[4]` or `{m(){}}` doesn't poison this literal's check.
+  // parse_array_elements then accumulates per-element validity fresh.
+  let p2 =
+    P(
+      ..p2,
+      allow_in: True,
+      has_invalid_pattern: False,
+      has_eval_args_target: False,
+    )
   use #(p3, elems) <- result.try(parse_array_elements(p2, []))
   Ok(#(
     P(..p3, allow_in: saved_allow_in),
@@ -4113,20 +4132,23 @@ fn parse_array_elements(
     RightBracket -> Ok(#(advance(p), acc))
     Comma -> parse_array_elements(advance(p), [None, ..acc])
     DotDotDot -> {
+      let saved_invalid = p.has_invalid_pattern
       let spread_start = peek_at(p, 1)
       let p2 = advance(p)
       use #(p3, expr) <- result.try(parse_assignment_expression(p2))
-      // If spread target is not a valid assignment target (e.g. ...0,
-      // ...new x), mark as invalid for destructuring. Allow nested
-      // patterns like ...{0: b} or ...[a]
-      let p3 = case
-        p3.last_expr_assignable
-        || spread_start == LeftBrace
-        || spread_start == LeftBracket
-      {
-        True -> p3
-        False -> P(..p3, has_invalid_pattern: True)
+      // Compute this rest element's contribution to pattern-invalidity:
+      // - simple LHS target (ident/member) → valid (ignore inner flags)
+      // - nested `[...]`/`{...}` → propagate the nested literal's own flag
+      // - anything else (literal, call, etc.) → invalid
+      let elem_invalid = case p3.last_expr_assignable {
+        True -> False
+        False ->
+          case spread_start {
+            LeftBrace | LeftBracket -> p3.has_invalid_pattern
+            _ -> True
+          }
       }
+      let p3 = P(..p3, has_invalid_pattern: saved_invalid || elem_invalid)
       let elem = Some(ast.SpreadElement(argument: expr))
       case peek(p3) {
         Comma -> {
@@ -4140,20 +4162,25 @@ fn parse_array_elements(
       }
     }
     _ -> {
+      let saved_invalid = p.has_invalid_pattern
       let elem_start = peek(p)
       use #(p2, expr) <- result.try(parse_assignment_expression(p))
-      // Mark invalid pattern if element is not a valid destructuring
-      // component. Valid: assignable target, nested pattern ({}/[]),
-      // or assignment expression (covers AssignmentPattern: target = default)
-      let p2 = case
-        p2.last_expr_assignable
-        || p2.last_expr_is_assignment
-        || elem_start == LeftBrace
-        || elem_start == LeftBracket
+      // Compute this element's contribution to pattern-invalidity:
+      // - simple LHS target (ident/member) or `target = default` → valid
+      //   (ignore any has_invalid_pattern set inside, e.g. `{m(){}}.y`)
+      // - nested `[...]`/`{...}` → propagate the nested literal's own flag
+      // - anything else (literal, call, etc.) → invalid
+      let elem_invalid = case
+        p2.last_expr_assignable || p2.last_expr_is_assignment
       {
-        True -> p2
-        False -> P(..p2, has_invalid_pattern: True)
+        True -> False
+        False ->
+          case elem_start {
+            LeftBrace | LeftBracket -> p2.has_invalid_pattern
+            _ -> True
+          }
       }
+      let p2 = P(..p2, has_invalid_pattern: saved_invalid || elem_invalid)
       case peek(p2) {
         Comma -> parse_array_elements(advance(p2), [Some(expr), ..acc])
         RightBracket -> Ok(#(advance(p2), [Some(expr), ..acc]))
@@ -4167,7 +4194,15 @@ fn parse_object_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let p2 = advance(p)
   // Restore allow_in inside object literals
   let saved_allow_in = p.allow_in
-  let p2 = P(..p2, allow_in: True)
+  // Cover-grammar pattern-validity flags are scoped per literal: reset so
+  // a sibling literal's invalidity doesn't poison this one's check.
+  let p2 =
+    P(
+      ..p2,
+      allow_in: True,
+      has_invalid_pattern: False,
+      has_eval_args_target: False,
+    )
   use #(p3, props) <- result.try(parse_object_properties(p2, False, []))
   Ok(#(
     P(..p3, allow_in: saved_allow_in),
@@ -4389,20 +4424,24 @@ fn parse_object_property_value(
     }
     Colon -> {
       // key: value — mark invalid pattern if value is not a valid
-      // destructuring component. Valid: assignable target, nested
-      // pattern ({}/[]), or assignment (covers AssignmentPattern)
+      // destructuring component. Same per-element isolation as
+      // parse_array_elements: a simple LHS target shadows inner
+      // invalid-pattern flags (e.g. `{k: {m(){}}.y}` is valid).
+      let saved_invalid = p5.has_invalid_pattern
       let p6 = advance(p5)
       let value_start = peek(p6)
       use #(p7, expr) <- result.try(parse_assignment_expression(p6))
-      let p7 = case
-        p7.last_expr_assignable
-        || p7.last_expr_is_assignment
-        || value_start == LeftBrace
-        || value_start == LeftBracket
+      let elem_invalid = case
+        p7.last_expr_assignable || p7.last_expr_is_assignment
       {
-        True -> p7
-        False -> P(..p7, has_invalid_pattern: True)
+        True -> False
+        False ->
+          case value_start {
+            LeftBrace | LeftBracket -> p7.has_invalid_pattern
+            _ -> True
+          }
       }
+      let p7 = P(..p7, has_invalid_pattern: saved_invalid || elem_invalid)
       Ok(#(
         p7,
         ast.Property(

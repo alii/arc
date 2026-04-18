@@ -81,7 +81,7 @@ pub fn to_primitive(
 
 /// ES2024 §7.1.1.1 OrdinaryToPrimitive(O, hint)
 /// Tries toString/valueOf (or valueOf/toString for number hint).
-fn ordinary_to_primitive(
+pub fn ordinary_to_primitive(
   state: State,
   val: JsValue,
   ref: value.Ref,

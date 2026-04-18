@@ -16,16 +16,16 @@ import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
   ArraySpread, Await, BinOp, BoxLocal, Call, CallApply, CallConstructor,
   CallConstructorApply, CallEval, CallMethod, CallMethodApply, CallSuper,
-  CreateArguments, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
-  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
-  DefineMethod, DeleteElem, DeleteField, Dup, ForInNext, ForInStart,
-  GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2,
-  GetGlobal, GetIterator, GetLocal, GetThis, InitGlobalLex, InitialYield,
-  IteratorClose, IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  MakeClosure, NewObject, NewRegExp, ObjectSpread, Pop, PushConst, PushTry,
-  PutBoxed, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal, Return,
-  SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield,
-  YieldStar,
+  CallSuperApply, CreateArguments, DeclareEvalVar, DeclareGlobalLex,
+  DeclareGlobalVar, DefineAccessor, DefineAccessorComputed, DefineField,
+  DefineFieldComputed, DefineMethod, DefineMethodComputed, DeleteElem,
+  DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator, GetBoxed, GetElem,
+  GetElem2, GetEvalVar, GetField, GetField2, GetGlobal, GetIterator, GetLocal,
+  GetThis, InitGlobalLex, InitialYield, IteratorClose, IteratorNext, Jump,
+  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, NewObject, NewRegExp,
+  ObjectRestCopy, ObjectSpread, Pop, PushConst, PushTry, PutBoxed, PutElem,
+  PutEvalVar, PutField, PutGlobal, PutLocal, Return, SetupDerivedClass, Swap,
+  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -458,10 +458,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     | PutField(_)
     | DefineField(_)
     | DefineMethod(_)
+    | DefineMethodComputed
     | DefineAccessor(_, _)
     | DefineAccessorComputed(_)
     | DefineFieldComputed
     | ObjectSpread
+    | ObjectRestCopy(_)
     | DeleteField(_)
     | DeleteElem
     | SetupDerivedClass
@@ -483,6 +485,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     | CallMethod(_, _)
     | CallConstructor(_)
     | CallSuper(_)
+    | CallSuperApply
     | CallApply
     | CallMethodApply
     | CallConstructorApply
@@ -1133,13 +1136,26 @@ fn step_operators(
                     }
                   }
               }
+            // Strict equality compares object references — never coerce.
+            opcode.StrictEq | opcode.StrictNotEq ->
+              binop_direct(state, kind, left, right, rest)
+            // Loose equality: §7.2.14 step 12 only ToPrimitives the object
+            // side when the other is Number/String/BigInt/Symbol. Bool is
+            // first ToNumber'd (step 10) so it ends up here too. For
+            // object×object (reference equality) and object×nullish (always
+            // false) we stay on the direct path.
+            opcode.Eq | opcode.NotEq ->
+              case is_eq_coercible(left, right) {
+                True -> binop_with_to_primitive(state, kind, left, right, rest)
+                False -> binop_direct(state, kind, left, right, rest)
+              }
+            // All remaining ops are numeric/relational/bitwise: ToNumeric →
+            // ToPrimitive(number) on both operands (§13.15.4).
             _ ->
-              case operators.exec_binop(kind, left, right) {
-                Ok(result) ->
-                  Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-                Error(msg) -> {
-                  state.throw_type_error(state, msg)
-                }
+              case left, right {
+                JsObject(_), _ | _, JsObject(_) ->
+                  binop_with_to_primitive(state, kind, left, right, rest)
+                _, _ -> binop_direct(state, kind, left, right, rest)
               }
           }
         }
@@ -1149,15 +1165,19 @@ fn step_operators(
 
     UnaryOp(kind) -> {
       case state.stack {
-        [operand, ..rest] -> {
-          case operators.exec_unaryop(kind, operand) {
-            Ok(result) ->
-              Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-            Error(msg) -> {
-              state.throw_type_error(state, msg)
-            }
+        [operand, ..rest] ->
+          case operand, kind {
+            JsObject(_), opcode.Neg
+            | JsObject(_), opcode.Pos
+            | JsObject(_), opcode.BitNot
+            -> unaryop_with_to_primitive(state, kind, operand, rest)
+            _, _ ->
+              case operators.exec_unaryop(kind, operand) {
+                Ok(result) ->
+                  Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
+                Error(msg) -> state.throw_type_error(state, msg)
+              }
           }
-        }
         [] -> underflow(state, "UnaryOp")
       }
     }
@@ -1525,6 +1545,33 @@ fn step_objects(
       }
     }
 
+    DefineMethodComputed -> {
+      // Computed class method: class { [expr]() {} }
+      // Stack: [fn, key, obj, ...] → [obj, ...]
+      // Non-enumerable data property (writable, configurable).
+      case state.stack {
+        [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
+          let heap =
+            object.define_symbol_property(
+              state.heap,
+              ref,
+              sym,
+              value.builtin_property(func),
+            )
+          Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+        }
+        [func, key, JsObject(ref) as obj, ..rest] -> {
+          use #(pk, state) <- result.map(
+            state.rethrow(property.to_property_key(state, key)),
+          )
+          let heap = object.define_method_property(state.heap, ref, pk, func)
+          State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+        }
+        [_, _, _, ..] -> Ok(State(..state, pc: state.pc + 1))
+        _ -> underflow(state, "DefineMethodComputed")
+      }
+    }
+
     DefineAccessor(name, kind) -> {
       // Object literal getter/setter: { get x() {}, set x(v) {} }
       // Stack: [fn, obj, ...] → [obj, ...]
@@ -1597,6 +1644,70 @@ fn step_objects(
         _ -> underflow(state, "ObjectSpread")
       }
     }
+
+    // Destructuring rest: `let {a, b, ...rest} = src`
+    // Stack: [src, key_n, ..., key_1, ...] → [rest_obj, ...]
+    // §13.15.5.3 RestBindingInitialization → CopyDataProperties with
+    // excludedNames = the n keys already bound.
+    ObjectRestCopy(excluded_count) ->
+      case state.stack {
+        [source, ..below] ->
+          case pop_n(below, excluded_count) {
+            Some(#(raw_keys, rest)) -> {
+              let state = State(..state, stack: rest)
+              // §8.6.2 RequireObjectCoercible — unlike object-spread,
+              // `let {...x} = null` MUST throw TypeError.
+              case source {
+                JsNull ->
+                  state.throw_type_error(
+                    state,
+                    "Cannot destructure 'null' as it is null.",
+                  )
+                JsUndefined ->
+                  state.throw_type_error(
+                    state,
+                    "Cannot destructure 'undefined' as it is undefined.",
+                  )
+                _ -> {
+                  // ToPropertyKey each excluded key (computed keys arrive
+                  // as raw JsValue; static keys are already JsString).
+                  use #(ex_keys, ex_syms, state) <- result.try(
+                    state.rethrow(build_exclusion_sets(state, raw_keys)),
+                  )
+                  let #(heap, ref) =
+                    heap.alloc(
+                      state.heap,
+                      ObjectSlot(
+                        kind: OrdinaryObject,
+                        properties: dict.new(),
+                        elements: elements.new(),
+                        prototype: Some(state.builtins.object.prototype),
+                        symbol_properties: [],
+                        extensible: True,
+                      ),
+                    )
+                  let state = State(..state, heap:)
+                  use state <- result.map(
+                    state.rethrow(object.copy_data_properties_excluding(
+                      state,
+                      ref,
+                      source,
+                      ex_keys,
+                      ex_syms,
+                    )),
+                  )
+                  State(
+                    ..state,
+                    stack: [JsObject(ref), ..state.stack],
+                    pc: state.pc + 1,
+                  )
+                }
+              }
+            }
+            None -> underflow(state, "ObjectRestCopy")
+          }
+        _ -> underflow(state, "ObjectRestCopy")
+      }
 
     // -- Delete operator --
     DeleteField(name) -> {
@@ -1675,7 +1786,8 @@ fn step_objects(
       case state.stack {
         [JsObject(ctor_ref), JsObject(parent_ref), ..rest] -> {
           case heap.read(state.heap, parent_ref) {
-            Some(ObjectSlot(kind: FunctionObject(..), ..)) -> {
+            Some(ObjectSlot(kind: FunctionObject(..), ..))
+            | Some(ObjectSlot(kind: NativeFunction(..), ..)) -> {
               let parent_proto =
                 get_field_ref(state.heap, parent_ref, "prototype")
                 |> option.unwrap(state.builtins.object.prototype)
@@ -2103,100 +2215,23 @@ fn step_calls(
       }
     }
 
-    CallSuper(arity) -> {
+    CallSuper(arity) ->
       // Stack: [arg_n, ..., arg_1, ..rest] → [new_obj, ..rest]
-      // Find parent constructor via callee_ref.__proto__
-      case state.callee_ref {
-        Some(my_ctor_ref) -> {
-          case pop_n(state.stack, arity) {
-            Some(#(args, rest_stack)) -> {
-              // Find parent constructor: callee_ref.__proto__
-              case heap.read(state.heap, my_ctor_ref) {
-                Some(ObjectSlot(
-                  prototype: Some(parent_ref),
-                  properties: my_props,
-                  ..,
-                )) -> {
-                  // For multi-level inheritance: only allocate a new object
-                  // when this_binding == JsUninitialized (first super() in chain).
-                  // Intermediate derived constructors reuse the existing this.
-                  let #(heap, this_val) = case state.this_binding {
-                    JsUninitialized -> {
-                      // First super() in chain — allocate new object
-                      let derived_proto = case
-                        dict.get(my_props, Named("prototype"))
-                      {
-                        Ok(DataProperty(value: JsObject(dp_ref), ..)) ->
-                          Some(dp_ref)
-                        _ -> Some(state.builtins.object.prototype)
-                      }
-                      let #(h, new_obj_ref) =
-                        heap.alloc(
-                          state.heap,
-                          ObjectSlot(
-                            kind: OrdinaryObject,
-                            properties: dict.new(),
-                            elements: elements.new(),
-                            prototype: derived_proto,
-                            symbol_properties: [],
-                            extensible: True,
-                          ),
-                        )
-                      #(h, JsObject(new_obj_ref))
-                    }
-                    existing_this -> {
-                      // Intermediate super() — reuse existing this
-                      #(state.heap, existing_this)
-                    }
-                  }
-                  // Call parent constructor, passing parent_ref as callee_ref
-                  // so further super() calls in the chain can find their parent
-                  case heap.read(heap, parent_ref) {
-                    Some(ObjectSlot(
-                      kind: FunctionObject(func_template:, env: env_ref),
-                      ..,
-                    )) ->
-                      call_function(
-                        State(..state, heap:, this_binding: this_val),
-                        parent_ref,
-                        env_ref,
-                        func_template,
-                        args,
-                        rest_stack,
-                        this_val,
-                        Some(this_val),
-                        Some(parent_ref),
-                      )
-                    Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
-                      call_native(
-                        State(..state, heap:, this_binding: this_val),
-                        native,
-                        args,
-                        rest_stack,
-                        this_val,
-                      )
-                    _ ->
-                      state.throw_type_error(
-                        State(..state, heap:),
-                        "Super constructor is not a constructor",
-                      )
-                  }
-                }
-                _ ->
-                  state.throw_type_error(
-                    state,
-                    "Super constructor is not a constructor",
-                  )
-              }
-            }
-            None -> underflow(state, "CallSuper: not enough args")
-          }
-        }
-        None -> {
-          state.throw_reference_error(state, "'super' keyword unexpected here")
-        }
+      case pop_n(state.stack, arity) {
+        Some(#(args, rest_stack)) -> do_call_super(state, args, rest_stack)
+        None -> underflow(state, "CallSuper: not enough args")
       }
-    }
+
+    CallSuperApply ->
+      // Stack: [args_array, ..rest] → [new_obj, ..rest]
+      // Spread-super path: args were collected into a runtime array.
+      case state.stack {
+        [JsObject(args_ref), ..rest] -> {
+          let args = extract_array_args(state.heap, args_ref)
+          do_call_super(state, args, rest)
+        }
+        _ -> underflow(state, "CallSuperApply")
+      }
 
     CallApply -> {
       // [args_array, callee] → [result]; this=undefined.
@@ -2447,7 +2482,9 @@ fn step_iteration(
                 // Iterators are their own iterator — [Symbol.iterator]() on
                 // %IteratorPrototype% returns `this`. Skip the proto walk.
                 Some(ObjectSlot(kind: GeneratorObject(_), ..))
-                | Some(ObjectSlot(kind: ArrayIteratorObject(..), ..)) ->
+                | Some(ObjectSlot(kind: ArrayIteratorObject(..), ..))
+                | Some(ObjectSlot(kind: value.SetIteratorObject(..), ..))
+                | Some(ObjectSlot(kind: value.MapIteratorObject(..), ..)) ->
                   Ok(
                     State(
                       ..state,
@@ -2888,6 +2925,167 @@ fn call_native(
   )
 }
 
+/// ES2024 §13.3.7.1 SuperCall — `super(args)` inside a derived constructor.
+///
+/// Find the parent constructor via callee_ref.[[Prototype]], invoke it with
+/// the supplied args, and bind the result as `this`. Shared between CallSuper
+/// (fixed arity, args on stack) and CallSuperApply (spread, args from array).
+fn do_call_super(
+  state: State,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case state.callee_ref {
+    None ->
+      state.throw_reference_error(state, "'super' keyword unexpected here")
+    Some(my_ctor_ref) ->
+      case heap.read(state.heap, my_ctor_ref) {
+        Some(ObjectSlot(prototype: Some(parent_ref), properties: my_props, ..)) -> {
+          // Compute newTarget.prototype — the [[Prototype]] for the new
+          // instance. First super() in a chain reads my_ctor.prototype;
+          // intermediate super() reuses the existing this's proto (which is
+          // already the leaf subclass's prototype).
+          let derived_proto = case state.this_binding {
+            JsUninitialized ->
+              case dict.get(my_props, Named("prototype")) {
+                Ok(DataProperty(value: JsObject(dp_ref), ..)) -> Some(dp_ref)
+                _ -> Some(state.builtins.object.prototype)
+              }
+            JsObject(existing_ref) ->
+              case heap.read(state.heap, existing_ref) {
+                Some(ObjectSlot(prototype: p, ..)) -> p
+                _ -> Some(state.builtins.object.prototype)
+              }
+            _ -> Some(state.builtins.object.prototype)
+          }
+          do_call_super_dispatch(
+            state,
+            parent_ref,
+            derived_proto,
+            args,
+            rest_stack,
+          )
+        }
+        _ ->
+          state.throw_type_error(
+            state,
+            "Super constructor is not a constructor",
+          )
+      }
+  }
+}
+
+/// SuperCall step 5: Construct(func, argList, newTarget). Dispatches on the
+/// resolved parent constructor kind. Split out so a bound-function parent can
+/// recurse on its [[BoundTargetFunction]] with prepended args.
+fn do_call_super_dispatch(
+  state: State,
+  parent_ref: Ref,
+  derived_proto: Option(Ref),
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case heap.read(state.heap, parent_ref) {
+    Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) -> {
+      // JS-defined parent: allocate (or reuse) an OrdinaryObject as `this` and
+      // enter the parent body. parent_ref becomes the new callee_ref so further
+      // super() in the chain finds *its* parent.
+      let #(heap, this_val) = case state.this_binding {
+        JsUninitialized -> {
+          let #(h, ref) =
+            heap.alloc(
+              state.heap,
+              ObjectSlot(
+                kind: OrdinaryObject,
+                properties: dict.new(),
+                elements: elements.new(),
+                prototype: derived_proto,
+                symbol_properties: [],
+                extensible: True,
+              ),
+            )
+          #(h, JsObject(ref))
+        }
+        existing -> #(state.heap, existing)
+      }
+      call_function(
+        State(..state, heap:, this_binding: this_val),
+        parent_ref,
+        env_ref,
+        func_template,
+        args,
+        rest_stack,
+        this_val,
+        Some(this_val),
+        Some(parent_ref),
+      )
+    }
+    // Bound function as superclass (§10.4.1.2): construct the
+    // [[BoundTargetFunction]] with [[BoundArguments]] prepended; bound `this`
+    // is ignored under [[Construct]].
+    Some(ObjectSlot(
+      kind: NativeFunction(value.Call(value.BoundFunction(
+        target:,
+        bound_args:,
+        ..,
+      ))),
+      ..,
+    )) ->
+      do_call_super_dispatch(
+        state,
+        target,
+        derived_proto,
+        list.append(bound_args, args),
+        rest_stack,
+      )
+    Some(ObjectSlot(kind: NativeFunction(native), ..)) -> {
+      // Built-in parent (Array, Map, Error, …): per spec the result of
+      // Construct(func, args, newTarget) becomes `this`. Arc's native ctors
+      // don't thread newTarget, so pre-allocate the derived instance and pass
+      // it as `this`. Natives that return `this` (abstract Iterator) keep it;
+      // natives that allocate their own exotic object (Map, Array, …) ignore
+      // it and we re-prototype the result below.
+      let #(heap, this_ref) =
+        heap.alloc(
+          state.heap,
+          ObjectSlot(
+            kind: OrdinaryObject,
+            properties: dict.new(),
+            elements: elements.new(),
+            prototype: derived_proto,
+            symbol_properties: [],
+            extensible: True,
+          ),
+        )
+      let this_obj = JsObject(this_ref)
+      use new_state <- result.try(call_native(
+        State(..state, heap:),
+        native,
+        args,
+        rest_stack,
+        this_obj,
+      ))
+      case new_state.stack {
+        [JsObject(result_ref), ..] -> {
+          let heap =
+            set_slot_prototype(new_state.heap, result_ref, derived_proto)
+          Ok(State(..new_state, heap:, this_binding: JsObject(result_ref)))
+        }
+        [_, ..tail] ->
+          Ok(
+            State(
+              ..new_state,
+              stack: [this_obj, ..tail],
+              this_binding: this_obj,
+            ),
+          )
+        [] -> underflow(new_state, "CallSuper: native returned nothing")
+      }
+    }
+    _ -> state.throw_type_error(state, "Super constructor is not a constructor")
+  }
+}
+
 /// Thin wrapper: delegates to call.do_construct with execute_inner/unwind_to_catch/dispatch_native.
 fn do_construct(
   state: State,
@@ -3011,6 +3209,26 @@ fn set_slot_prototype(
   }
 }
 
+/// Partition raw JsValue keys (from ObjectRestCopy stack) into PropertyKey
+/// (string/index) and SymbolId sets for CopyDataProperties exclusion.
+/// Non-symbol keys go through ToPropertyKey (§7.1.19) for canonical form.
+fn build_exclusion_sets(
+  state: State,
+  keys: List(JsValue),
+) -> Result(
+  #(List(value.PropertyKey), List(value.SymbolId), State),
+  #(JsValue, State),
+) {
+  use #(pks, syms, state), key <- list.try_fold(keys, #([], [], state))
+  case key {
+    value.JsSymbol(id) -> Ok(#(pks, [id, ..syms], state))
+    _ -> {
+      use #(pk, state) <- result.map(property.to_property_key(state, key))
+      #([pk, ..pks], syms, state)
+    }
+  }
+}
+
 /// Pop n items from stack. Returns #(popped_items_in_order, remaining_stack).
 fn pop_n(
   stack: List(JsValue),
@@ -3036,6 +3254,77 @@ fn pop_n_loop(
 
 /// BinOp Add with ToPrimitive for object operands.
 /// ES2024 §13.15.3: ToPrimitive(default) both sides, then string-concat or numeric-add.
+fn binop_direct(
+  state: State,
+  kind: opcode.BinOpKind,
+  left: JsValue,
+  right: JsValue,
+  rest: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case operators.exec_binop(kind, left, right) {
+    Ok(result) -> Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
+    Error(msg) -> state.throw_type_error(state, msg)
+  }
+}
+
+/// §7.2.14 IsLooselyEqual: ToPrimitive fires only for object × {Number,
+/// String, BigInt, Symbol, Bool}. Object×object and object×nullish go
+/// straight to abstract_equal.
+fn is_eq_coercible(left: JsValue, right: JsValue) -> Bool {
+  case left, right {
+    JsObject(_), JsObject(_) -> False
+    JsObject(_), JsNull | JsObject(_), JsUndefined -> False
+    JsNull, JsObject(_) | JsUndefined, JsObject(_) -> False
+    JsObject(_), _ | _, JsObject(_) -> True
+    _, _ -> False
+  }
+}
+
+/// ES2024 §13.15.4 / §7.2.14: ToPrimitive both operands before delegating
+/// to the pure operator. The fast path already short-circuits on
+/// primitive×primitive. Relational/numeric ops use number hint; loose
+/// equality uses default hint (matters for Date @@toPrimitive).
+fn binop_with_to_primitive(
+  state: State,
+  kind: opcode.BinOpKind,
+  left: JsValue,
+  right: JsValue,
+  rest: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let hint = case kind {
+    opcode.Eq | opcode.NotEq -> coerce.DefaultHint
+    _ -> coerce.NumberHint
+  }
+  use #(lprim, s1) <- result.try(
+    state.rethrow(coerce.to_primitive(state, left, hint)),
+  )
+  use #(rprim, s2) <- result.try(
+    state.rethrow(coerce.to_primitive(s1, right, hint)),
+  )
+  case operators.exec_binop(kind, lprim, rprim) {
+    Ok(result) -> Ok(State(..s2, stack: [result, ..rest], pc: state.pc + 1))
+    Error(msg) -> state.throw_type_error(s2, msg)
+  }
+}
+
+/// ES2024 §13.5.4/5/6: numeric unary ops call ToNumber → ToPrimitive on
+/// object operands. LogicalNot/Void are handled in the fast path (they do
+/// not coerce).
+fn unaryop_with_to_primitive(
+  state: State,
+  kind: opcode.UnaryOpKind,
+  operand: JsValue,
+  rest: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  use #(prim, s1) <- result.try(
+    state.rethrow(coerce.to_primitive(state, operand, coerce.NumberHint)),
+  )
+  case operators.exec_unaryop(kind, prim) {
+    Ok(result) -> Ok(State(..s1, stack: [result, ..rest], pc: state.pc + 1))
+    Error(msg) -> state.throw_type_error(s1, msg)
+  }
+}
+
 fn binop_add_with_to_primitive(
   state: State,
   left: JsValue,

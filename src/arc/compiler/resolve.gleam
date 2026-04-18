@@ -9,16 +9,17 @@ import arc/vm/opcode.{
   type IrOp, type Op, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush,
   IrArrayPushHole, IrArraySpread, IrAwait, IrBinOp, IrBoxLocal, IrCall,
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallEval,
-  IrCallMethod, IrCallMethodApply, IrCallSuper, IrCloseVar, IrCreateArguments,
-  IrDeclareEvalVar, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
-  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow,
-  IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem,
-  IrGetElem2, IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
-  IrGetLocal, IrGetThis, IrInitGlobalLex, IrInitialYield, IrIteratorClose,
-  IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectSpread, IrPop,
-  IrPopTry, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar,
+  IrCallMethod, IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCloseVar,
+  IrCreateArguments, IrDeclareEvalVar, IrDeclareGlobalLex, IrDeclareGlobalVar,
+  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed, IrDeleteElem,
+  IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow, IrForInNext,
+  IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
+  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
+  IrGetThis, IrInitGlobalLex, IrInitialYield, IrIteratorClose, IrIteratorNext,
+  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
+  IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
+  IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar,
   IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrScopeGetVar, IrScopePutVar,
   IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
   IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
@@ -181,12 +182,16 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.DefineFieldComputed, ..acc])
     [IrDefineMethod(name), ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineMethod(name), ..acc])
+    [IrDefineMethodComputed, ..rest] ->
+      resolve_ops(rest, labels, [opcode.DefineMethodComputed, ..acc])
     [IrDefineAccessor(name, kind), ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineAccessor(name, kind), ..acc])
     [IrDefineAccessorComputed(kind), ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineAccessorComputed(kind), ..acc])
     [IrObjectSpread, ..rest] ->
       resolve_ops(rest, labels, [opcode.ObjectSpread, ..acc])
+    [IrObjectRestCopy(n), ..rest] ->
+      resolve_ops(rest, labels, [opcode.ObjectRestCopy(n), ..acc])
     [IrArrayFrom(count), ..rest] ->
       resolve_ops(rest, labels, [opcode.ArrayFrom(count), ..acc])
     [IrArrayFromWithHoles(count, holes), ..rest] ->
@@ -263,6 +268,8 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.SetupDerivedClass, ..acc])
     [IrCallSuper(arity), ..rest] ->
       resolve_ops(rest, labels, [opcode.CallSuper(arity), ..acc])
+    [IrCallSuperApply, ..rest] ->
+      resolve_ops(rest, labels, [opcode.CallSuperApply, ..acc])
 
     // Generator
     [IrInitialYield, ..rest] ->

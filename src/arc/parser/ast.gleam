@@ -86,6 +86,11 @@ pub type Statement {
     super_class: Option(Expression),
     body: List(ClassElement),
   )
+  /// Internal-only — never produced by the parser. Synthesized by class
+  /// compilation for §7.3.32 DefineField (CreateDataPropertyOrThrow on `this`).
+  /// Unlike `this.x = v` (which uses [[Set]] and triggers prototype setters),
+  /// this compiles to IrDefineField / IrDefineFieldComputed ([[DefineOwnProperty]]).
+  ClassFieldInit(key: Expression, value: Option(Expression), computed: Bool)
 }
 
 pub type ForInit {

@@ -24,13 +24,15 @@ import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, Dispatch, JsBool,
   JsNumber, JsObject, JsUndefined, MapConstructor, MapNative, MapObject,
-  MapPrototypeClear, MapPrototypeDelete, MapPrototypeForEach, MapPrototypeGet,
-  MapPrototypeGetSize, MapPrototypeHas, MapPrototypeSet, ObjectSlot,
+  MapPrototypeClear, MapPrototypeDelete, MapPrototypeEntries,
+  MapPrototypeForEach, MapPrototypeGet, MapPrototypeGetSize, MapPrototypeHas,
+  MapPrototypeKeys, MapPrototypeSet, MapPrototypeValues, ObjectSlot,
 }
 import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/set
 import gleam/string
 
@@ -57,7 +59,9 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, BuiltinType) {
-  // Allocate prototype method function objects
+  // Allocate prototype method function objects (entries handled separately so
+  // it can alias [Symbol.iterator] to the SAME function object — test262
+  // built-ins/Map/prototype/Symbol.iterator.js asserts strict equality).
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
       #("get", MapNative(MapPrototypeGet), 1),
@@ -66,14 +70,28 @@ pub fn init(
       #("delete", MapNative(MapPrototypeDelete), 1),
       #("clear", MapNative(MapPrototypeClear), 0),
       #("forEach", MapNative(MapPrototypeForEach), 1),
+      #("keys", MapNative(MapPrototypeKeys), 0),
+      #("values", MapNative(MapPrototypeValues), 0),
     ])
+
+  // §24.1.3.4 Map.prototype.entries — also installed as [@@iterator]
+  let #(h, entries_fn) =
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      MapNative(MapPrototypeEntries),
+      "entries",
+      0,
+    )
+  let entries_prop = value.builtin_property(JsObject(entries_fn))
 
   // size accessor property (getter, no setter)
   let #(h, getters) =
     common.alloc_getters(h, function_proto, [
       #("size", MapNative(MapPrototypeGetSize)),
     ])
-  let proto_methods = list.append(getters, proto_methods)
+  let proto_methods =
+    list.append(getters, [#("entries", entries_prop), ..proto_methods])
 
   // Build the prototype + constructor using the standard init_type helper.
   // The constructor carries the proto ref so it can set [[Prototype]] on
@@ -90,12 +108,21 @@ pub fn init(
       [],
     )
   // §24.1.3.14 Map.prototype [ @@toStringTag ] = "Map"
+  // { writable: false, enumerable: false, configurable: true }
   let h =
     common.add_symbol_property(
       h,
       bt.prototype,
       value.symbol_to_string_tag,
-      value.builtin_property(value.JsString("Map")),
+      value.data(value.JsString("Map")) |> value.configurable(),
+    )
+  // §24.1.3.13 Map.prototype [ @@iterator ] — same function object as .entries
+  let h =
+    common.add_symbol_property(
+      h,
+      bt.prototype,
+      value.symbol_iterator,
+      entries_prop,
     )
   #(h, bt)
 }
@@ -120,6 +147,9 @@ pub fn dispatch(
     MapPrototypeClear -> map_clear(this, state)
     MapPrototypeForEach -> map_for_each(this, args, state)
     MapPrototypeGetSize -> map_get_size(this, state)
+    MapPrototypeKeys -> map_iterator(this, state, value.MapIterKeys)
+    MapPrototypeValues -> map_iterator(this, state, value.MapIterValues)
+    MapPrototypeEntries -> map_iterator(this, state, value.MapIterEntries)
   }
 }
 
@@ -559,6 +589,39 @@ fn map_get_size(
   use entries, _keys_rev, _keys_len, _ref, state <- require_map(this, state)
   let size = dict.size(entries)
   #(state, Ok(JsNumber(value.Finite(int.to_float(size)))))
+}
+
+// ============================================================================
+// Map.prototype.keys() / values() / entries() — ES2024 §24.1.3.8/11/4
+// ============================================================================
+
+/// CreateMapIterator (§24.1.5.1) — snapshot forward-order (key,value) pairs
+/// and wrap in a MapIteratorObject. The iterator's `kind` controls what
+/// .next() yields (key only / value only / [key,value] array).
+fn map_iterator(
+  this: JsValue,
+  state: State,
+  kind: value.MapIterKind,
+) -> #(State, Result(JsValue, JsValue)) {
+  use entries, keys_rev, _len, _ref, state <- require_map(this, state)
+  let snapshot =
+    iteration_order(keys_rev, entries)
+    |> list.filter_map(fn(k) {
+      dict.get(entries, k) |> result.map(fn(v) { #(value.map_key_to_js(k), v) })
+    })
+  let #(heap, ref) =
+    heap.alloc(
+      state.heap,
+      ObjectSlot(
+        kind: value.MapIteratorObject(remaining: snapshot, kind:),
+        properties: dict.new(),
+        elements: elements.new(),
+        prototype: Some(state.builtins.map_iterator_proto),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
 // ============================================================================

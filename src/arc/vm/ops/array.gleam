@@ -1,3 +1,4 @@
+import arc/vm/builtins/common
 import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
@@ -11,6 +12,7 @@ import arc/vm/value.{
   JsObject, JsUndefined, ObjectSlot,
 }
 import gleam/dict
+import gleam/list
 import gleam/option.{Some}
 
 // ============================================================================
@@ -165,6 +167,72 @@ pub fn spread_into_array(
               index,
               length,
             )
+          Ok(State(..state, heap:))
+        }
+        Some(ObjectSlot(kind: value.SetObject(data:, keys:), ..)) -> {
+          // Set fast path — push values in insertion order.
+          let heap =
+            list.reverse(keys)
+            |> list.filter_map(dict.get(data, _))
+            |> list.fold(state.heap, fn(h, v) {
+              push_onto_array(h, target_ref, v)
+            })
+          Ok(State(..state, heap:))
+        }
+        Some(ObjectSlot(kind: value.SetIteratorObject(remaining:, kind:), ..)) -> {
+          let heap = case kind {
+            value.SetIterValues ->
+              list.fold(remaining, state.heap, fn(h, v) {
+                push_onto_array(h, target_ref, v)
+              })
+            value.SetIterEntries ->
+              list.fold(remaining, state.heap, fn(h, v) {
+                let #(h, pair) =
+                  common.alloc_array(h, [v, v], state.builtins.array.prototype)
+                push_onto_array(h, target_ref, JsObject(pair))
+              })
+          }
+          Ok(State(..state, heap:))
+        }
+        Some(ObjectSlot(kind: value.MapObject(entries:, keys_rev:, ..), ..)) -> {
+          // Map fast path — push [k,v] pairs in insertion order. keys_rev is
+          // reversed with tombstones; flip + filter live entries.
+          let heap =
+            list.reverse(keys_rev)
+            |> list.fold(state.heap, fn(h, k) {
+              case dict.get(entries, k) {
+                Error(Nil) -> h
+                Ok(v) -> {
+                  let #(h, pair) =
+                    common.alloc_array(
+                      h,
+                      [value.map_key_to_js(k), v],
+                      state.builtins.array.prototype,
+                    )
+                  push_onto_array(h, target_ref, JsObject(pair))
+                }
+              }
+            })
+          Ok(State(..state, heap:))
+        }
+        Some(ObjectSlot(kind: value.MapIteratorObject(remaining:, kind:), ..)) -> {
+          let heap =
+            list.fold(remaining, state.heap, fn(h, pair) {
+              let #(k, v) = pair
+              case kind {
+                value.MapIterKeys -> push_onto_array(h, target_ref, k)
+                value.MapIterValues -> push_onto_array(h, target_ref, v)
+                value.MapIterEntries -> {
+                  let #(h, arr) =
+                    common.alloc_array(
+                      h,
+                      [k, v],
+                      state.builtins.array.prototype,
+                    )
+                  push_onto_array(h, target_ref, JsObject(arr))
+                }
+              }
+            })
           Ok(State(..state, heap:))
         }
         _ -> {

@@ -804,20 +804,10 @@ fn read_desc_bool(
   key: String,
 ) -> Result(#(option.Option(Bool), State), #(JsValue, State)) {
   use #(field, state) <- result.map(read_desc_field(state, desc, key))
-  case field {
-    // ToBoolean: already a boolean
-    Some(JsBool(b)) -> #(Some(b), state)
-    // ToBoolean falsy values
-    Some(JsUndefined) -> #(Some(False), state)
-    Some(JsNull) -> #(Some(False), state)
-    Some(JsNumber(value.Finite(0.0))) -> #(Some(False), state)
-    Some(JsNumber(value.NaN)) -> #(Some(False), state)
-    Some(JsString("")) -> #(Some(False), state)
-    // ToBoolean: everything else is truthy (objects, non-empty strings, non-zero numbers, symbols)
-    Some(_) -> #(Some(True), state)
-    // Field absent — not set in descriptor (different from false!)
-    option.None -> #(option.None, state)
-  }
+  // Delegate to value.is_truthy for spec-correct ToBoolean — its numeric
+  // check uses `!= 0.0` (Erlang `/=`) which correctly treats -0 as falsy,
+  // unlike a `Finite(0.0)` pattern match (Erlang `=:=` distinguishes ±0).
+  #(option.map(field, value.is_truthy), state)
 }
 
 /// Object.getOwnPropertyNames ( O ) — ES2024 §20.1.2.9
@@ -1176,9 +1166,8 @@ fn object_to_string(
 ///   SymbolObject     -> "Symbol"      (same -- no spec builtinTag step)
 ///   OrdinaryObject   -> "Object"      (step 14: else)
 ///
-/// TODO(Deviation): The spec defines builtinTag steps for Error (step 8) and
-/// Date (step 12) which are not yet implemented since those object kinds
-/// don't exist in this runtime.
+/// TODO(Deviation): The spec defines a builtinTag step for Error (step 8)
+/// which is not yet implemented since that object kind doesn't exist.
 fn object_tag(heap: Heap, ref: Ref) -> String {
   case heap.read(heap, ref) {
     Some(ObjectSlot(kind:, ..)) -> {
@@ -1209,8 +1198,13 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.WeakMapObject(_) -> "WeakMap"
             value.WeakSetObject(_) -> "WeakSet"
             value.RegExpObject(..) -> "RegExp"
+            value.DateObject(_) -> "Date"
             value.ArrayIteratorObject(..) -> "Array Iterator"
+            value.SetIteratorObject(..) -> "Set Iterator"
+            value.MapIteratorObject(..) -> "Map Iterator"
             value.AsyncFromSyncIteratorObject(..) -> "Async-from-Sync Iterator"
+            value.IteratorHelperObject(..) -> "Iterator Helper"
+            value.WrapForValidIteratorObject(..) -> "Iterator"
             OrdinaryObject -> "Object"
           }
       }
