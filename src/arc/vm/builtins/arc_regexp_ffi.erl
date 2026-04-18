@@ -1,5 +1,9 @@
 -module(arc_regexp_ffi).
--export([regexp_exec/4, regexp_test/3]).
+-export([regexp_exec/4, regexp_test/3, canonical_flags/1]).
+
+%% Spec order "dgimsuvy" is ascending ASCII, so byte-sort = canonical order.
+canonical_flags(Flags) ->
+    list_to_binary(lists:sort(binary_to_list(Flags))).
 
 %% Convert JS flags to re:compile options
 flags_to_opts(Flags) ->

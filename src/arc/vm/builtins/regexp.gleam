@@ -26,6 +26,12 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
+/// FFI: byte-sort flag string. Spec canonical order "dgimsuvy" (§22.2.6.4) is
+/// ascending ASCII, so a byte-sort yields it.
+@external(erlang, "arc_regexp_ffi", "canonical_flags")
+@external(javascript, "./arc_regexp_ffi.mjs", "canonical_flags")
+fn canonical_flags(flags: String) -> String
+
 /// FFI: test if pattern matches string
 @external(erlang, "arc_regexp_ffi", "regexp_test")
 @external(javascript, "./arc_regexp_ffi.mjs", "regexp_test")
@@ -441,13 +447,14 @@ fn regexp_get_source(
   #(state, Ok(JsString(source_string(pattern))))
 }
 
-/// RegExp.prototype.flags getter
+/// RegExp.prototype.flags getter — ES §22.2.6.4
+/// Returns flags in canonical spec order regardless of source order.
 fn regexp_get_flags(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use _pattern, flags, _ref, state <- require_regexp(this, state, "flags")
-  #(state, Ok(JsString(flags)))
+  #(state, Ok(JsString(canonical_flags(flags))))
 }
 
 /// Generic flag getter — checks if a specific flag character is in the flags string.

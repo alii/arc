@@ -1,5 +1,10 @@
 import { Ok, Error, toList } from './gleam.mjs';
 
+// Spec order "dgimsuvy" is ascending ASCII, so byte-sort = canonical order.
+export function canonical_flags(flags) {
+  return [...flags].sort().join('');
+}
+
 // JS RegExp flags that map directly; g/y are handled at the Gleam level
 // via the offset-based exec loop, so we strip them here.
 function normalize_flags(flags) {

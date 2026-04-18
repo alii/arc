@@ -311,3 +311,17 @@ pub fn host_fn_can_throw_test() {
     engine.eval(eng, "try { boom() } catch (e) { 'caught:' + e }")
   assert value == JsString("caught:kaboom")
 }
+
+// ----------------------------------------------------------------------------
+// RegExp — flags canonical order (ES §22.2.6.4)
+// ----------------------------------------------------------------------------
+
+pub fn regexp_flags_canonical_order_test() {
+  let eng = engine.new()
+  // Reported bug: source order 'gi' must return canonical 'gi', not 'ig'.
+  assert assert_eval(eng, "(/abc/gi).flags") == JsString("gi")
+  // Comprehensive: scrambled source order → spec order (d,g,i,m,s,u,y).
+  assert assert_eval(eng, "(/abc/yusmigd).flags") == JsString("dgimsuy")
+  // Constructor path matches literal path.
+  assert assert_eval(eng, "new RegExp('abc', 'mig').flags") == JsString("gim")
+}
