@@ -29,7 +29,6 @@ import gleam/string
 /// FFI: byte-sort flag string. Spec canonical order "dgimsuvy" (§22.2.6.4) is
 /// ascending ASCII, so a byte-sort yields it.
 @external(erlang, "arc_regexp_ffi", "canonical_flags")
-@external(javascript, "./arc_regexp_ffi.mjs", "canonical_flags")
 fn canonical_flags(flags: String) -> String
 
 /// FFI: test if pattern matches string
