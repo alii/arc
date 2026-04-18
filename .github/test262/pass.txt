@@ -7584,6 +7584,7 @@ built-ins/Promise/promise.js
 built-ins/Promise/property-order.js
 built-ins/Promise/prototype/S25.4.4.2_A1.1_T1.js
 built-ins/Promise/prototype/S25.4.5_A3.1_T1.js
+built-ins/Promise/prototype/Symbol.toStringTag.js
 built-ins/Promise/prototype/catch/S25.4.5.1_A1.1_T1.js
 built-ins/Promise/prototype/catch/S25.4.5.1_A2.1_T1.js
 built-ins/Promise/prototype/catch/S25.4.5.1_A3.1_T1.js
@@ -9843,6 +9844,7 @@ built-ins/WeakMap/no-iterable.js
 built-ins/WeakMap/properties-of-map-instances.js
 built-ins/WeakMap/properties-of-the-weakmap-prototype-object.js
 built-ins/WeakMap/prototype-of-weakmap.js
+built-ins/WeakMap/prototype/Symbol.toStringTag.js
 built-ins/WeakMap/prototype/constructor.js
 built-ins/WeakMap/prototype/delete/delete-entry-with-object-key.js
 built-ins/WeakMap/prototype/delete/delete.js
@@ -9929,6 +9931,7 @@ built-ins/WeakSet/name.js
 built-ins/WeakSet/no-iterable.js
 built-ins/WeakSet/properties-of-the-weakset-prototype-object.js
 built-ins/WeakSet/prototype-of-weakset.js
+built-ins/WeakSet/prototype/Symbol.toStringTag.js
 built-ins/WeakSet/prototype/add/add.js
 built-ins/WeakSet/prototype/add/adds-object-element.js
 built-ins/WeakSet/prototype/add/does-not-have-weaksetdata-internal-slot-array.js
