@@ -2446,6 +2446,8 @@ built-ins/ArrayIteratorPrototype/next/name.js
 built-ins/ArrayIteratorPrototype/next/non-own-slots.js
 built-ins/ArrayIteratorPrototype/next/property-descriptor.js
 built-ins/AsyncFromSyncIteratorPrototype/next/absent-value-not-passed.js
+built-ins/AsyncFromSyncIteratorPrototype/next/for-await-iterator-next-rejected-promise-close.js
+built-ins/AsyncFromSyncIteratorPrototype/next/for-await-next-rejected-promise-close.js
 built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-prototype.js
 built-ins/AsyncFromSyncIteratorPrototype/next/return-promise.js
 built-ins/AsyncFromSyncIteratorPrototype/return/iterator-result.js
@@ -6219,6 +6221,7 @@ built-ins/Promise/all/resolve-non-callable.js
 built-ins/Promise/all/resolve-non-thenable.js
 built-ins/Promise/all/resolve-not-callable-reject-with-typeerror.js
 built-ins/Promise/all/species-get-error.js
+built-ins/Promise/allKeyed/ctx-non-ctor.js
 built-ins/Promise/allSettled/capability-resolve-throws-no-close.js
 built-ins/Promise/allSettled/does-not-invoke-array-setters.js
 built-ins/Promise/allSettled/is-function.js
@@ -6270,6 +6273,7 @@ built-ins/Promise/allSettled/resolves-empty-array.js
 built-ins/Promise/allSettled/resolves-to-array.js
 built-ins/Promise/allSettled/returns-promise.js
 built-ins/Promise/allSettled/species-get-error.js
+built-ins/Promise/allSettledKeyed/ctx-non-ctor.js
 built-ins/Promise/any/capability-resolve-throws-reject.js
 built-ins/Promise/any/invoke-resolve-error-reject.js
 built-ins/Promise/any/invoke-resolve-get-error-reject.js
@@ -10848,6 +10852,7 @@ language/expressions/async-generator/named-yield-identifier-non-strict.js
 language/expressions/async-generator/named-yield-identifier-spread-non-strict.js
 language/expressions/async-generator/named-yield-identifier-spread-strict.js
 language/expressions/async-generator/named-yield-identifier-strict.js
+language/expressions/async-generator/named-yield-promise-reject-next-for-await-of-sync-iterator.js
 language/expressions/async-generator/named-yield-spread-obj.js
 language/expressions/async-generator/params-trailing-comma-multiple.js
 language/expressions/async-generator/params-trailing-comma-single.js
@@ -10861,6 +10866,7 @@ language/expressions/async-generator/yield-identifier-non-strict.js
 language/expressions/async-generator/yield-identifier-spread-non-strict.js
 language/expressions/async-generator/yield-identifier-spread-strict.js
 language/expressions/async-generator/yield-identifier-strict.js
+language/expressions/async-generator/yield-promise-reject-next-for-await-of-sync-iterator.js
 language/expressions/async-generator/yield-spread-obj.js
 language/expressions/await/async-await-interleaved.js
 language/expressions/await/async-generator-interleaved.js
@@ -11049,6 +11055,7 @@ language/expressions/class/async-gen-method-static/yield-as-label-identifier-esc
 language/expressions/class/async-gen-method-static/yield-as-label-identifier.js
 language/expressions/class/async-gen-method-static/yield-identifier-spread-strict.js
 language/expressions/class/async-gen-method-static/yield-identifier-strict.js
+language/expressions/class/async-gen-method-static/yield-promise-reject-next-for-await-of-sync-iterator.js
 language/expressions/class/async-gen-method-static/yield-spread-obj.js
 language/expressions/class/async-gen-method/await-as-binding-identifier-escaped.js
 language/expressions/class/async-gen-method/await-as-binding-identifier.js
@@ -11076,6 +11083,7 @@ language/expressions/class/async-gen-method/yield-as-label-identifier-escaped.js
 language/expressions/class/async-gen-method/yield-as-label-identifier.js
 language/expressions/class/async-gen-method/yield-identifier-spread-strict.js
 language/expressions/class/async-gen-method/yield-identifier-strict.js
+language/expressions/class/async-gen-method/yield-promise-reject-next-for-await-of-sync-iterator.js
 language/expressions/class/async-gen-method/yield-spread-obj.js
 language/expressions/class/async-method-static/await-as-binding-identifier-escaped.js
 language/expressions/class/async-method-static/await-as-binding-identifier.js
@@ -16319,6 +16327,7 @@ language/expressions/object/method-definition/async-gen-yield-identifier-non-str
 language/expressions/object/method-definition/async-gen-yield-identifier-spread-non-strict.js
 language/expressions/object/method-definition/async-gen-yield-identifier-spread-strict.js
 language/expressions/object/method-definition/async-gen-yield-identifier-strict.js
+language/expressions/object/method-definition/async-gen-yield-promise-reject-next-for-await-of-sync-iterator.js
 language/expressions/object/method-definition/async-gen-yield-spread-obj.js
 language/expressions/object/method-definition/async-meth-dflt-params-abrupt.js
 language/expressions/object/method-definition/async-meth-dflt-params-arg-val-not-undefined.js
@@ -17801,6 +17810,8 @@ language/module-code/instn-resolve-empty-export.js
 language/module-code/instn-same-global.js
 language/module-code/instn-star-as-props-dflt-skip.js
 language/module-code/instn-star-err-not-found.js
+language/module-code/instn-star-iee-multi-cycle-same-name.js
+language/module-code/instn-star-iee-single-cycle-same-name.js
 language/module-code/instn-star-props-dflt-keep-indirect.js
 language/module-code/instn-star-props-dflt-keep-local.js
 language/module-code/instn-star-props-dflt-skip.js
@@ -18296,6 +18307,7 @@ language/statements/async-generator/yield-identifier-non-strict.js
 language/statements/async-generator/yield-identifier-spread-non-strict.js
 language/statements/async-generator/yield-identifier-spread-strict.js
 language/statements/async-generator/yield-identifier-strict.js
+language/statements/async-generator/yield-promise-reject-next-for-await-of-sync-iterator.js
 language/statements/async-generator/yield-spread-obj.js
 language/statements/async-generator/yield-star-return-missing-value-is-awaited.js
 language/statements/async-generator/yield-star-throw-notdone-iter-value-throws.js
@@ -18397,6 +18409,7 @@ language/statements/class/async-gen-method-static/yield-as-label-identifier-esca
 language/statements/class/async-gen-method-static/yield-as-label-identifier.js
 language/statements/class/async-gen-method-static/yield-identifier-spread-strict.js
 language/statements/class/async-gen-method-static/yield-identifier-strict.js
+language/statements/class/async-gen-method-static/yield-promise-reject-next-for-await-of-sync-iterator.js
 language/statements/class/async-gen-method-static/yield-spread-obj.js
 language/statements/class/async-gen-method/await-as-binding-identifier-escaped.js
 language/statements/class/async-gen-method/await-as-binding-identifier.js
@@ -18424,6 +18437,7 @@ language/statements/class/async-gen-method/yield-as-label-identifier-escaped.js
 language/statements/class/async-gen-method/yield-as-label-identifier.js
 language/statements/class/async-gen-method/yield-identifier-spread-strict.js
 language/statements/class/async-gen-method/yield-identifier-strict.js
+language/statements/class/async-gen-method/yield-promise-reject-next-for-await-of-sync-iterator.js
 language/statements/class/async-gen-method/yield-spread-obj.js
 language/statements/class/async-meth-escaped-async.js
 language/statements/class/async-method-static/await-as-binding-identifier-escaped.js
