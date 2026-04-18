@@ -1033,14 +1033,17 @@ fn parse_iso(s: String) -> Option(JsNum) {
   }
   // Zone (optional). Date-only forms are UTC; date-time forms with no zone
   // are local time per spec — but only when no zone is present.
-  use #(tz_min, rest) <- option.then(parse_zone(rest, has_time, has_sign))
+  use #(tz_min, rest, is_local) <- option.then(parse_zone(
+    rest,
+    has_time,
+    has_sign,
+  ))
   case rest {
-    "" -> {
-      let tv =
-        make_date(year, mon - 1, day, h, mi, sec, ms, False)
-        |> jsnum_add_minutes(tz_min)
-      Some(tv)
-    }
+    "" ->
+      Some(
+        make_date(year, mon - 1, day, h, mi, sec, ms, is_local)
+        |> jsnum_add_minutes(tz_min),
+      )
     _ -> None
   }
 }
@@ -1079,25 +1082,20 @@ fn parse_time(s: String) -> #(Int, Int, Int, Int, String, Bool) {
   #(h, mi, sec, ms, rest, True)
 }
 
-/// Returns Some(#(minutes_to_subtract, remaining)). For local time we resolve
-/// the offset later inside make_date, so return 0 and let the caller handle.
+/// Returns Some(#(tz_minutes, remaining, is_local)). When is_local is True the
+/// caller computes the offset at the parsed time; tz_minutes is 0 in that case.
 /// `has_time` selects the no-zone default: date-only → UTC, date-time → local.
 fn parse_zone(
   s: String,
   has_time: Bool,
   has_sign: Bool,
-) -> Option(#(Int, String)) {
+) -> Option(#(Int, String, Bool)) {
   case s {
-    "Z" <> rest -> Some(#(0, rest))
-    "+" <> rest -> parse_hhmm(rest) |> option.map(fn(p) { #(0 - p.0, p.1) })
-    "-" <> rest -> parse_hhmm(rest) |> option.map(fn(p) { #(p.0, p.1) })
-    "" ->
-      case has_time && !has_sign {
-        // date-time with no zone: spec says local time. We approximate by
-        // using the current tz offset (good enough for test262 shape tests).
-        True -> Some(#(0 - ffi_tz_offset_minutes(ffi_now_ms()), ""))
-        False -> Some(#(0, ""))
-      }
+    "Z" <> rest -> Some(#(0, rest, False))
+    "+" <> rest ->
+      parse_hhmm(rest) |> option.map(fn(p) { #(0 - p.0, p.1, False) })
+    "-" <> rest -> parse_hhmm(rest) |> option.map(fn(p) { #(p.0, p.1, False) })
+    "" -> Some(#(0, "", has_time && !has_sign))
     _ -> None
   }
 }

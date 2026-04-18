@@ -2715,6 +2715,7 @@ built-ins/Date/parse/length.js
 built-ins/Date/parse/name.js
 built-ins/Date/parse/prop-desc.js
 built-ins/Date/parse/time-value-maximum-range.js
+built-ins/Date/parse/without-utc-offset.js
 built-ins/Date/prop-desc.js
 built-ins/Date/prototype/S15.9.5_A01_T1.js
 built-ins/Date/prototype/S15.9.5_A02_T1.js
