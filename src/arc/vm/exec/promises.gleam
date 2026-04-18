@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
@@ -1574,6 +1575,322 @@ pub fn create_resolved_promise(
     builtins_promise.create_promise(h, builtins.promise.prototype)
   let #(h, _jobs) = builtins_promise.fulfill_promise(h, data_ref, val)
   #(h, JsObject(promise_ref), data_ref)
+}
+
+// ============================================================================
+// %AsyncFromSyncIteratorPrototype% — ES2024 §27.1.4
+// ============================================================================
+
+pub type AsyncFromSyncKind {
+  AfsNext
+  AfsReturn
+  AfsThrow
+}
+
+/// Shared body for %AsyncFromSyncIteratorPrototype%.next/return/throw.
+pub fn call_native_async_from_sync(
+  state: State,
+  this: JsValue,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  kind: AsyncFromSyncKind,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(h, promise_ref, data_ref, cap_resolve, cap_reject) =
+    new_promise_capability(state.heap, state.builtins)
+  let state = State(..state, heap: h)
+
+  let state = case
+    do_async_from_sync(state, this, args, kind, data_ref, cap_resolve, cap_reject)
+  {
+    Ok(state) -> state
+    Error(#(thrown, state)) ->
+      builtins_promise.reject_promise(state, data_ref, thrown)
+  }
+  Ok(
+    State(
+      ..state,
+      stack: [JsObject(promise_ref), ..rest_stack],
+      pc: state.pc + 1,
+    ),
+  )
+}
+
+fn do_async_from_sync(
+  state: State,
+  this: JsValue,
+  args: List(JsValue),
+  kind: AsyncFromSyncKind,
+  data_ref: Ref,
+  cap_resolve: JsValue,
+  cap_reject: JsValue,
+) -> Result(State, #(JsValue, State)) {
+  use sync_iter <- result.try(case this {
+    JsObject(this_ref) ->
+      case heap.read(state.heap, this_ref) {
+        Some(ObjectSlot(
+          kind: value.AsyncFromSyncIteratorObject(sync_iter:),
+          ..,
+        )) -> Ok(sync_iter)
+        _ -> afs_type_error(state, "not an Async-from-Sync Iterator")
+      }
+    _ -> afs_type_error(state, "not an Async-from-Sync Iterator")
+  })
+
+  let sync_iter_val = JsObject(sync_iter)
+  let method_name = case kind {
+    AfsNext -> "next"
+    AfsReturn -> "return"
+    AfsThrow -> "throw"
+  }
+  use #(method, state) <- result.try(object.get_value(
+    state,
+    sync_iter,
+    Named(method_name),
+    sync_iter_val,
+  ))
+
+  case kind, coerce.is_callable_value(state.heap, method) {
+    AfsReturn, False -> {
+      let arg = list.first(args) |> result.unwrap(JsUndefined)
+      let #(h, iter_result) =
+        generators.create_iterator_result(state.heap, state.builtins, arg, True)
+      let #(h, jobs) = builtins_promise.fulfill_promise(h, data_ref, iter_result)
+      Ok(
+        State(
+          ..state,
+          heap: h,
+          job_queue: job_queue.append(state.job_queue, jobs),
+        ),
+      )
+    }
+    AfsThrow, False -> {
+      use state <- result.try(iterator_close_normal(state, sync_iter))
+      afs_type_error(state, "The iterator does not provide a 'throw' method")
+    }
+    _, _ -> {
+      use #(result_val, state) <- result.try(state.call(
+        state,
+        method,
+        sync_iter_val,
+        args,
+      ))
+      use result_ref <- result.try(case result_val {
+        JsObject(r) -> Ok(r)
+        _ -> afs_type_error(state, "Iterator result is not an object")
+      })
+      let close_on_rejection = case kind {
+        AfsReturn -> False
+        AfsNext | AfsThrow -> True
+      }
+      async_from_sync_continuation(
+        state,
+        result_ref,
+        sync_iter,
+        close_on_rejection,
+        cap_resolve,
+        cap_reject,
+      )
+    }
+  }
+}
+
+fn async_from_sync_continuation(
+  state: State,
+  result_ref: Ref,
+  sync_iter: Ref,
+  close_on_rejection: Bool,
+  cap_resolve: JsValue,
+  cap_reject: JsValue,
+) -> Result(State, #(JsValue, State)) {
+  let result_val = JsObject(result_ref)
+  use #(done_val, state) <- result.try(object.get_value(
+    state,
+    result_ref,
+    Named("done"),
+    result_val,
+  ))
+  let done = value.is_truthy(done_val)
+  use #(inner, state) <- result.try(object.get_value(
+    state,
+    result_ref,
+    Named("value"),
+    result_val,
+  ))
+
+  let #(h, on_fulfilled) =
+    alloc_closure(state.heap, state.builtins, value.AsyncFromSyncUnwrap(done:))
+  let #(h, on_rejected) = case done || !close_on_rejection {
+    True -> #(h, JsUndefined)
+    False ->
+      alloc_closure(h, state.builtins, value.AsyncFromSyncClose(sync_iter:))
+  }
+
+  Ok(promise_resolve_then_with_capability(
+    State(..state, heap: h),
+    inner,
+    on_fulfilled,
+    on_rejected,
+    cap_resolve,
+    cap_reject,
+  ))
+}
+
+fn iterator_close_normal(
+  state: State,
+  sync_iter: Ref,
+) -> Result(State, #(JsValue, State)) {
+  let sync_iter_val = JsObject(sync_iter)
+  use #(ret_fn, state) <- result.try(object.get_value(
+    state,
+    sync_iter,
+    Named("return"),
+    sync_iter_val,
+  ))
+  use <- bool.guard(!coerce.is_callable_value(state.heap, ret_fn), Ok(state))
+  use #(ret_result, state) <- result.try(state.call(
+    state,
+    ret_fn,
+    sync_iter_val,
+    [],
+  ))
+  case ret_result {
+    JsObject(_) -> Ok(state)
+    _ -> afs_type_error(state, "Iterator result is not an object")
+  }
+}
+
+fn afs_type_error(state: State, msg: String) -> Result(a, #(JsValue, State)) {
+  let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
+  Error(#(err, State(..state, heap: h)))
+}
+
+fn alloc_closure(
+  h: Heap,
+  b: Builtins,
+  native: value.CallNativeFn,
+) -> #(Heap, JsValue) {
+  let #(h, ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: NativeFunction(value.Call(native)),
+        properties: dict.new(),
+        elements: elements.new(),
+        prototype: Some(b.function.prototype),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  #(h, JsObject(ref))
+}
+
+/// AsyncFromSyncUnwrap onFulfilled — `v => ({value: v, done})`.
+pub fn call_native_async_from_sync_unwrap(
+  state: State,
+  done: Bool,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let v = list.first(args) |> result.unwrap(JsUndefined)
+  let #(h, iter_result) =
+    generators.create_iterator_result(state.heap, state.builtins, v, done)
+  Ok(
+    State(..state, heap: h, stack: [iter_result, ..rest_stack], pc: state.pc + 1),
+  )
+}
+
+/// AsyncFromSyncClose onRejected — `err => { syncIter.return?.(); throw err }`.
+pub fn call_native_async_from_sync_close(
+  state: State,
+  sync_iter: Ref,
+  args: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let err = list.first(args) |> result.unwrap(JsUndefined)
+  let sync_iter_val = JsObject(sync_iter)
+  let state = case
+    object.get_value(state, sync_iter, Named("return"), sync_iter_val)
+  {
+    Ok(#(ret_fn, state)) ->
+      case coerce.is_callable_value(state.heap, ret_fn) {
+        True ->
+          case state.call(state, ret_fn, sync_iter_val, []) {
+            Ok(#(_, state)) | Error(#(_, state)) -> state
+          }
+        False -> state
+      }
+    Error(#(_, state)) -> state
+  }
+  Error(#(Thrown, err, state.heap))
+}
+
+/// PromiseResolve(value) then PerformPromiseThen with the supplied capability.
+fn promise_resolve_then_with_capability(
+  state: State,
+  inner: JsValue,
+  on_fulfilled: JsValue,
+  on_rejected: JsValue,
+  cap_resolve: JsValue,
+  cap_reject: JsValue,
+) -> State {
+  let h = state.heap
+  case builtins_promise.is_promise(h, inner) {
+    True -> {
+      let assert JsObject(inner_ref) = inner
+      let assert Some(inner_data_ref) = builtins_promise.get_data_ref(h, inner_ref)
+      builtins_promise.perform_promise_then(
+        state,
+        inner_data_ref,
+        on_fulfilled,
+        on_rejected,
+        cap_resolve,
+        cap_reject,
+      )
+    }
+    False -> {
+      let #(h, wrap_ref, wrap_data_ref) =
+        builtins_promise.create_promise(h, state.builtins.promise.prototype)
+      let state = case
+        builtins_promise.get_thenable_then(State(..state, heap: h), inner)
+      {
+        Ok(#(then_fn, state)) -> {
+          let #(h, resolve_fn, reject_fn) =
+            builtins_promise.create_resolving_functions(
+              state.heap,
+              state.builtins.function.prototype,
+              wrap_ref,
+              wrap_data_ref,
+            )
+          let job =
+            value.PromiseResolveThenableJob(
+              thenable: inner,
+              then_fn:,
+              resolve: resolve_fn,
+              reject: reject_fn,
+            )
+          State(..state, heap: h, job_queue: job_queue.push(state.job_queue, job))
+        }
+        Error(#(Some(thrown), state)) ->
+          builtins_promise.reject_promise(state, wrap_data_ref, thrown)
+        Error(#(None, state)) -> {
+          let #(h, jobs) =
+            builtins_promise.fulfill_promise(state.heap, wrap_data_ref, inner)
+          State(
+            ..state,
+            heap: h,
+            job_queue: job_queue.append(state.job_queue, jobs),
+          )
+        }
+      }
+      builtins_promise.perform_promise_then(
+        state,
+        wrap_data_ref,
+        on_fulfilled,
+        on_rejected,
+        cap_resolve,
+        cap_reject,
+      )
+    }
+  }
 }
 
 // ============================================================================

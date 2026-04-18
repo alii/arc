@@ -157,6 +157,27 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     )
   let h = heap.root(h, async_iterator_proto)
 
+  // %AsyncFromSyncIteratorPrototype% — ES §27.1.4.2
+  let #(h, afs_methods) =
+    common.alloc_call_methods(h, function.prototype, [
+      #("next", value.AsyncFromSyncNext, 1),
+      #("return", value.AsyncFromSyncReturn, 1),
+      #("throw", value.AsyncFromSyncThrow, 1),
+    ])
+  let #(h, async_from_sync_iterator_proto) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: common.named_props(afs_methods),
+        symbol_properties: [],
+        elements: elements.new(),
+        prototype: Some(async_iterator_proto),
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, async_from_sync_iterator_proto)
+
   // AsyncGenerator.prototype → %AsyncIteratorPrototype% → Object.prototype
   let #(h, async_generator) =
     builtins_async_generator.init(h, async_iterator_proto, function.prototype)
@@ -287,6 +308,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       escape:,
       unescape:,
       array_iterator_proto:,
+      async_from_sync_iterator_proto:,
     ),
   )
 }

@@ -3413,8 +3413,7 @@ fn get_iterator_via_symbol(
 }
 
 /// ES §7.4.3 GetIterator(obj, async). Tries Symbol.asyncIterator, falls back
-/// to Symbol.iterator. Sync iterator results are handled transparently by the
-/// awaits in the for-await-of body (`await x` on a non-promise is a no-op).
+/// to Symbol.iterator wrapped via CreateAsyncFromSyncIterator (§27.1.6.1).
 fn get_async_iterator_via_symbol(
   state: State,
   ref: Ref,
@@ -3426,9 +3425,31 @@ fn get_async_iterator_via_symbol(
       Ok(State(..state, stack: [iter, ..rest_stack], pc: state.pc + 1))
     Error(state) ->
       case try_iterator_symbol(state, ref, iterable, value.symbol_iterator) {
-        Ok(#(iter, state)) ->
-          Ok(State(..state, stack: [iter, ..rest_stack], pc: state.pc + 1))
-        Error(state) ->
+        Ok(#(JsObject(sync_iter), state)) -> {
+          let #(h, wrapped) =
+            heap.alloc(
+              state.heap,
+              ObjectSlot(
+                kind: value.AsyncFromSyncIteratorObject(sync_iter:),
+                properties: dict.new(),
+                elements: elements.new(),
+                prototype: Some(
+                  state.builtins.async_from_sync_iterator_proto,
+                ),
+                symbol_properties: [],
+                extensible: True,
+              ),
+            )
+          Ok(
+            State(
+              ..state,
+              heap: h,
+              stack: [JsObject(wrapped), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        Ok(#(_, state)) | Error(state) ->
           state.throw_type_error(
             state,
             object.inspect(iterable, state.heap) <> " is not async iterable",

@@ -1491,6 +1491,8 @@ fn inspect_object(
         value.WeakMapObject(_) -> "WeakMap {}"
         value.WeakSetObject(_) -> "WeakSet {}"
         value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
+        value.AsyncFromSyncIteratorObject(..) ->
+          "Object [Async-from-Sync Iterator] {}"
         value.RegExpObject(pattern:, flags:) -> {
           let source = case pattern {
             "" -> "(?:)"

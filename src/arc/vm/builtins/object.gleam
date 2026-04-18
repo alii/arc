@@ -1272,6 +1272,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.WeakSetObject(_) -> "WeakSet"
             value.RegExpObject(..) -> "RegExp"
             value.ArrayIteratorObject(..) -> "Array Iterator"
+            value.AsyncFromSyncIteratorObject(..) -> "Async-from-Sync Iterator"
             OrdinaryObject -> "Object"
           }
       }

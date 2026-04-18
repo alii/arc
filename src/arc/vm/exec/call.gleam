@@ -1132,6 +1132,34 @@ pub fn call_native(
         execute_inner,
         unwind_to_catch,
       )
+    value.Call(value.AsyncFromSyncNext) ->
+      promises.call_native_async_from_sync(
+        state,
+        this,
+        args,
+        rest_stack,
+        promises.AfsNext,
+      )
+    value.Call(value.AsyncFromSyncReturn) ->
+      promises.call_native_async_from_sync(
+        state,
+        this,
+        args,
+        rest_stack,
+        promises.AfsReturn,
+      )
+    value.Call(value.AsyncFromSyncThrow) ->
+      promises.call_native_async_from_sync(
+        state,
+        this,
+        args,
+        rest_stack,
+        promises.AfsThrow,
+      )
+    value.Call(value.AsyncFromSyncUnwrap(done:)) ->
+      promises.call_native_async_from_sync_unwrap(state, done, args, rest_stack)
+    value.Call(value.AsyncFromSyncClose(sync_iter:)) ->
+      promises.call_native_async_from_sync_close(state, sync_iter, args)
     value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, is_return:)) ->
       async_generators.call_native_resume(
         state,

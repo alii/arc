@@ -768,6 +768,16 @@ pub type CallNativeFn {
   /// Async generator resume: called when an internal await settles.
   /// is_return distinguishes the AwaitingReturn microtask from a body await.
   AsyncGeneratorResume(data_ref: Ref, is_reject: Bool, is_return: Bool)
+  /// %AsyncFromSyncIteratorPrototype%.next/return/throw — ES §27.1.4.2
+  AsyncFromSyncNext
+  AsyncFromSyncReturn
+  AsyncFromSyncThrow
+  /// onFulfilled closure for AsyncFromSyncIteratorContinuation: wraps the
+  /// awaited value back into `{value, done}`.
+  AsyncFromSyncUnwrap(done: Bool)
+  /// onRejected closure for AsyncFromSyncIteratorContinuation: closes the
+  /// underlying sync iterator then rethrows the rejection reason.
+  AsyncFromSyncClose(sync_iter: Ref)
   /// Symbol() constructor — callable but NOT new-able.
   SymbolConstructor
   /// Symbol.for(key) — global symbol registry lookup/insert.
@@ -886,6 +896,10 @@ pub type ExoticKind(ctx) {
   /// Created by Array.prototype[Symbol.iterator](), values(), keys(), entries().
   /// Lazy — re-reads source length each .next() to handle mutation.
   ArrayIteratorObject(source: Ref, index: Int)
+  /// Async-from-Sync Iterator — ES2024 §27.1.4. Created by GetIterator(async)
+  /// when the source has only Symbol.iterator. next/return/throw await the
+  /// sync result's `.value` and close the sync iterator on rejection.
+  AsyncFromSyncIteratorObject(sync_iter: Ref)
 }
 
 /// Canonical property key. Per spec, property keys are String | Symbol, but
@@ -1388,10 +1402,12 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
           async_data_ref,
         ]
         NativeFunction(Call(AsyncGeneratorResume(data_ref:, ..))) -> [data_ref]
+        NativeFunction(Call(AsyncFromSyncClose(sync_iter:))) -> [sync_iter]
         PromiseObject(promise_data:) -> [promise_data]
         GeneratorObject(generator_data:) -> [generator_data]
         AsyncGeneratorObject(generator_data:) -> [generator_data]
         ArrayIteratorObject(source:, ..) -> [source]
+        AsyncFromSyncIteratorObject(sync_iter:) -> [sync_iter]
         MapObject(entries:, keys_rev:, keys_len: _) -> {
           // Trace refs in map values
           let value_refs = dict.values(entries) |> list.flat_map(refs_in_value)

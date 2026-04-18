@@ -65,6 +65,7 @@ pub type Builtins {
     escape: Ref,
     unescape: Ref,
     array_iterator_proto: Ref,
+    async_from_sync_iterator_proto: Ref,
   )
 }
 
