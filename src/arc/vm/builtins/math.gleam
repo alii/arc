@@ -1,7 +1,5 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
-import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, type MathNativeFn, type Ref, Finite, Infinity, JsNumber,
@@ -10,12 +8,11 @@ import arc/vm/value.{
   MathExp, MathExpm1, MathFloor, MathFround, MathHypot, MathImul, MathLog,
   MathLog10, MathLog1p, MathLog2, MathMax, MathMin, MathNative, MathPow,
   MathRandom, MathRound, MathSign, MathSin, MathSinh, MathSqrt, MathTan,
-  MathTanh, MathTrunc, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
+  MathTanh, MathTrunc, NaN, NegInfinity,
 }
 import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option.{Some}
 import gleam/result
 
 /// Set up the Math global object.
@@ -71,29 +68,12 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
       #("atanh", MathNative(MathAtanh), 1),
     ])
 
-  let properties = common.named_props(list.append(methods, constants))
-  let symbol_properties = [
-    #(
-      value.symbol_to_string_tag,
-      value.data(JsString("Math")) |> value.configurable(),
-    ),
-  ]
-
-  let #(h, math_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties:,
-        elements: elements.new(),
-        prototype: Some(object_proto),
-        symbol_properties:,
-        extensible: True,
-      ),
-    )
-  let h = heap.root(h, math_ref)
-
-  #(h, math_ref)
+  common.init_namespace(
+    h,
+    object_proto,
+    "Math",
+    list.append(methods, constants),
+  )
 }
 
 /// Per-module dispatch for Math native functions.
@@ -106,37 +86,37 @@ pub fn dispatch(
   case native {
     MathPow -> math_pow(args, state)
     MathAbs -> math_abs(args, state)
-    MathFloor -> math_floor(args, state)
-    MathCeil -> math_ceil(args, state)
-    MathRound -> math_round(args, state)
-    MathTrunc -> math_trunc(args, state)
+    MathFloor -> finite_passthrough(args, state, ffi_math_floor)
+    MathCeil -> finite_passthrough(args, state, ffi_math_ceil)
+    MathRound -> finite_passthrough(args, state, js_round)
+    MathTrunc -> finite_passthrough(args, state, js_trunc)
     MathSqrt -> math_sqrt(args, state)
     MathMax -> math_max(args, state)
     MathMin -> math_min(args, state)
-    MathLog -> math_log(args, state)
-    MathSin -> math_sin(args, state)
-    MathCos -> math_cos(args, state)
-    MathTan -> math_tan(args, state)
-    MathAsin -> math_asin(args, state)
-    MathAcos -> math_acos(args, state)
+    MathLog -> log_domain(args, state, ffi_math_log)
+    MathSin -> finite_or_nan(args, state, ffi_math_sin)
+    MathCos -> finite_or_nan(args, state, ffi_math_cos)
+    MathTan -> finite_or_nan(args, state, ffi_math_tan)
+    MathAsin -> domain_unit(args, state, ffi_math_asin)
+    MathAcos -> domain_unit(args, state, ffi_math_acos)
     MathAtan -> math_atan(args, state)
     MathAtan2 -> math_atan2(args, state)
     MathExp -> math_exp(args, state)
-    MathLog2 -> math_log2(args, state)
-    MathLog10 -> math_log10(args, state)
+    MathLog2 -> log_domain(args, state, ffi_math_log2)
+    MathLog10 -> log_domain(args, state, ffi_math_log10)
     MathRandom -> math_random(args, state)
     MathSign -> math_sign(args, state)
     MathCbrt -> math_cbrt(args, state)
     MathHypot -> math_hypot(args, state)
-    MathFround -> math_fround(args, state)
+    MathFround -> finite_passthrough(args, state, ffi_fround)
     MathClz32 -> math_clz32(args, state)
     MathImul -> math_imul(args, state)
     MathExpm1 -> math_expm1(args, state)
     MathLog1p -> math_log1p(args, state)
-    MathSinh -> math_sinh(args, state)
+    MathSinh -> finite_passthrough(args, state, ffi_math_sinh)
     MathCosh -> math_cosh(args, state)
     MathTanh -> math_tanh(args, state)
-    MathAsinh -> math_asinh(args, state)
+    MathAsinh -> finite_passthrough(args, state, ffi_math_asinh)
     MathAcosh -> math_acosh(args, state)
     MathAtanh -> math_atanh(args, state)
   }
@@ -167,42 +147,6 @@ fn math_abs(
     NaN -> NaN
     Infinity | NegInfinity -> Infinity
   }
-}
-
-/// Math.floor(x)
-fn math_floor(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_passthrough(x, ffi_math_floor)
-}
-
-/// Math.ceil(x)
-fn math_ceil(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_passthrough(x, ffi_math_ceil)
-}
-
-/// Math.round(x) — JS round: round half toward +Infinity (NOT banker's rounding)
-fn math_round(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_passthrough(x, js_round)
-}
-
-/// Math.trunc(x)
-fn math_trunc(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_passthrough(x, fn(n) { int.to_float(value.float_to_int(n)) })
 }
 
 /// Math.sqrt(x)
@@ -256,60 +200,6 @@ fn math_min(
       }
     })
   #(state, Ok(JsNumber(result)))
-}
-
-/// Math.log(x)
-fn math_log(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  log_domain(x, ffi_math_log)
-}
-
-/// Math.sin(x)
-fn math_sin(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_or_nan(x, ffi_math_sin)
-}
-
-/// Math.cos(x)
-fn math_cos(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_or_nan(x, ffi_math_cos)
-}
-
-/// Math.tan(x)
-fn math_tan(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_or_nan(x, ffi_math_tan)
-}
-
-/// Math.asin(x) — domain [-1, 1], returns NaN outside
-fn math_asin(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  domain_unit(x, ffi_math_asin)
-}
-
-/// Math.acos(x) — domain [-1, 1], returns NaN outside
-fn math_acos(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  domain_unit(x, ffi_math_acos)
 }
 
 /// Math.atan(x)
@@ -368,24 +258,6 @@ fn math_exp(
     Infinity -> Infinity
     NegInfinity -> Finite(0.0)
   }
-}
-
-/// Math.log2(x)
-fn math_log2(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  log_domain(x, ffi_math_log2)
-}
-
-/// Math.log10(x)
-fn math_log10(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  log_domain(x, ffi_math_log10)
 }
 
 /// Math.random() — returns a random float in [0, 1)
@@ -457,15 +329,6 @@ fn math_hypot(
   #(state, Ok(JsNumber(result)))
 }
 
-/// Math.fround(x) — round to nearest 32-bit float
-fn math_fround(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  finite_passthrough(x, ffi_fround)
-}
-
 /// Math.clz32(x) — count leading zeros in 32-bit integer representation
 fn math_clz32(
   args: List(JsValue),
@@ -476,7 +339,7 @@ fn math_clz32(
     Finite(f) -> to_uint32(f)
     _ -> 0
   }
-  #(state, Ok(JsNumber(Finite(int.to_float(count_leading_zeros_32(n))))))
+  #(state, Ok(value.from_int(count_leading_zeros_32(n))))
 }
 
 /// Math.imul(a, b) — 32-bit integer multiplication
@@ -495,7 +358,7 @@ fn math_imul(
     _ -> 0
   }
   let result = to_int32(int.to_float(a32 * b32))
-  #(state, Ok(JsNumber(Finite(int.to_float(result)))))
+  #(state, Ok(value.from_int(result)))
 }
 
 /// Math.expm1(x) — e^x - 1 (more precise for small x)
@@ -527,18 +390,6 @@ fn math_log1p(
   }
 }
 
-/// Math.sinh(x)
-fn math_sinh(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  case x {
-    Finite(n) -> Finite(ffi_math_sinh(n))
-    other -> other
-  }
-}
-
 /// Math.cosh(x)
 fn math_cosh(
   args: List(JsValue),
@@ -563,18 +414,6 @@ fn math_tanh(
     NaN -> NaN
     Infinity -> Finite(1.0)
     NegInfinity -> Finite(-1.0)
-  }
-}
-
-/// Math.asinh(x)
-fn math_asinh(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use x <- math_unary(args, state)
-  case x {
-    Finite(n) -> Finite(ffi_math_asinh(n))
-    other -> other
   }
 }
 
@@ -624,24 +463,39 @@ fn math_unary(
   #(state, Ok(JsNumber(apply(x))))
 }
 
-/// For ops where Finite(n) -> Finite(f(n)) and non-finite passes through.
-fn finite_passthrough(x: value.JsNum, f: fn(Float) -> Float) -> value.JsNum {
+/// Unary op where Finite(n) -> Finite(f(n)) and non-finite passes through.
+fn finite_passthrough(
+  args: List(JsValue),
+  state: State,
+  f: fn(Float) -> Float,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(f(n))
     other -> other
   }
 }
 
-/// For ops where Finite(n) -> Finite(f(n)) and anything else is NaN.
-fn finite_or_nan(x: value.JsNum, f: fn(Float) -> Float) -> value.JsNum {
+/// Unary op where Finite(n) -> Finite(f(n)) and anything else is NaN.
+fn finite_or_nan(
+  args: List(JsValue),
+  state: State,
+  f: fn(Float) -> Float,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(f(n))
     _ -> NaN
   }
 }
 
-/// For log-like ops: domain [0, ∞), NaN for <0, -∞ at 0, ∞ passes through.
-fn log_domain(x: value.JsNum, f: fn(Float) -> Float) -> value.JsNum {
+/// Unary log-like op: domain [0, ∞), NaN for <0, -∞ at 0, ∞ passes through.
+fn log_domain(
+  args: List(JsValue),
+  state: State,
+  f: fn(Float) -> Float,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
   case x {
     Finite(n) if n <. 0.0 -> NaN
     Finite(0.0) -> NegInfinity
@@ -651,8 +505,13 @@ fn log_domain(x: value.JsNum, f: fn(Float) -> Float) -> value.JsNum {
   }
 }
 
-/// For ops with domain [-1, 1]: NaN outside, Finite(f(n)) inside.
-fn domain_unit(x: value.JsNum, f: fn(Float) -> Float) -> value.JsNum {
+/// Unary op with domain [-1, 1]: NaN outside, Finite(f(n)) inside.
+fn domain_unit(
+  args: List(JsValue),
+  state: State,
+  f: fn(Float) -> Float,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
   case x {
     Finite(n) if n <. -1.0 || n >. 1.0 -> NaN
     Finite(n) -> Finite(f(n))
@@ -688,6 +547,10 @@ fn js_round(n: Float) -> Float {
     True -> floored +. 1.0
     False -> floored
   }
+}
+
+fn js_trunc(n: Float) -> Float {
+  int.to_float(value.float_to_int(n))
 }
 
 /// Exponentiation with special-value handling (mirrors vm.gleam's num_exp).

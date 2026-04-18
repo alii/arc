@@ -343,24 +343,7 @@ fn alloc_iterator_proto(
 ) -> #(Heap, value.Ref) {
   let #(h, methods) =
     common.alloc_call_methods(h, function_proto, [#("next", next, 0)])
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: common.named_props(methods),
-        symbol_properties: [
-          #(
-            value.symbol_to_string_tag,
-            value.data(value.JsString(tag)) |> value.configurable(),
-          ),
-        ],
-        elements: elements.new(),
-        prototype: Some(iterator_proto),
-        extensible: True,
-      ),
-    )
-  #(heap.root(h, ref), ref)
+  common.init_namespace(h, iterator_proto, tag, methods)
 }
 
 /// A global entry: name, JsValue, and how to wrap it as a property descriptor.

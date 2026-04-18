@@ -33,29 +33,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
       #("stringify", JsonNative(JsonStringify), 1),
     ])
 
-  let properties = common.named_props(methods)
-  let symbol_properties = [
-    #(
-      value.symbol_to_string_tag,
-      value.data(JsString("JSON")) |> value.configurable(),
-    ),
-  ]
-
-  let #(h, json_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties:,
-        elements: elements.new(),
-        prototype: Some(object_proto),
-        symbol_properties:,
-        extensible: True,
-      ),
-    )
-  let h = heap.root(h, json_ref)
-
-  #(h, json_ref)
+  common.init_namespace(h, object_proto, "JSON", methods)
 }
 
 // ============================================================================

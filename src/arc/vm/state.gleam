@@ -274,6 +274,17 @@ pub fn range_error(
   #(State(..state, heap:), Error(err))
 }
 
+/// Allocate a JS Array with the given values and return it as Ok.
+/// Collapses the common alloc_array → State(..state, heap:) → Ok(JsObject) triple.
+pub fn ok_array(
+  state: State,
+  values: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, ref) =
+    common.alloc_array(state.heap, values, state.builtins.array.prototype)
+  #(State(..state, heap:), Ok(value.JsObject(ref)))
+}
+
 /// Guard against array length exceeding Number.MAX_SAFE_INTEGER.
 /// Throws TypeError (per spec §23.1.3.23/31/33) if length > 2^53-1.
 pub fn guard_safe_length(

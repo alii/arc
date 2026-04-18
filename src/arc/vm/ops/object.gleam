@@ -45,8 +45,7 @@ pub fn get_value_of(
       // StringGetOwnProperty, then fall through to String.prototype.
       case key {
         // §10.4.3.5 step 7: "length" → {value: len, W:F, E:F, C:F}
-        Named("length") ->
-          Ok(#(JsNumber(Finite(int.to_float(string_length(s)))), state))
+        Named("length") -> Ok(#(value.from_int(string_length(s)), state))
         // §10.4.3.5 steps 3-6,8-14: numeric index → single-char string
         Index(idx) ->
           case string_char_at(s, idx) {
@@ -217,7 +216,7 @@ pub fn get_own_property(
             // Virtual "length" property (§10.4.2.4 ArraySetLength)
             Named("length") ->
               Some(DataProperty(
-                value: JsNumber(Finite(int.to_float(length))),
+                value: value.from_int(length),
                 writable: True,
                 enumerable: False,
                 configurable: False,
@@ -255,7 +254,7 @@ pub fn get_own_property(
             // §10.4.3.5 step 7: "length" → {value: len, W:F, E:F, C:F}
             Named("length") ->
               Some(DataProperty(
-                value: JsNumber(Finite(int.to_float(string_length(s)))),
+                value: value.from_int(string_length(s)),
                 writable: False,
                 enumerable: False,
                 configurable: False,

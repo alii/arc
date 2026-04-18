@@ -378,7 +378,7 @@ fn array_push(
   // Steps 5-7 delegated to push_generic.
   use new_length, state <- state.try_op(push_generic(state, ref, length, args))
   // Step 7: Return 𝔽(len).
-  #(state, Ok(js_int(new_length)))
+  #(state, Ok(value.from_int(new_length)))
 }
 
 /// ES2024 §23.1.3.22 steps 5-7 (loop + length update + return).
@@ -410,11 +410,6 @@ fn push_generic(
 
 /// V8's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
-
-/// Convert an Int to JsNumber.
-fn js_int(n: Int) -> JsValue {
-  JsNumber(Finite(int.to_float(n)))
-}
 
 /// Sentinel ref passed to `cont` for primitive `this` values. heap.read returns
 /// Error for any id not in the heap, and heap.write is a no-op for unallocated
@@ -680,15 +675,11 @@ fn generic_set(
       // success = true → return normally.
       True -> Ok(state)
       // §7.3.4 step 2: success = false and Throw = true → TypeError.
-      False -> {
-        let #(heap, err) =
-          common.make_type_error(
-            state.heap,
-            state.builtins,
-            "Cannot assign to read only property '" <> key <> "' of object",
-          )
-        Error(#(err, State(..state, heap:)))
-      }
+      False ->
+        coerce.thrown_type_error(
+          state,
+          "Cannot assign to read only property '" <> key <> "' of object",
+        )
     }
   }
 }
@@ -721,7 +712,7 @@ fn generic_set_length(
   ref: Ref,
   len: Int,
 ) -> Result(State, #(JsValue, State)) {
-  generic_set(state, ref, "length", JsNumber(Finite(int.to_float(len))))
+  generic_set(state, ref, "length", value.from_int(len))
 }
 
 /// DeletePropertyOrThrow (ES2024 §7.3.9).
@@ -753,15 +744,11 @@ fn generic_delete(
     // success = true → return normally.
     True -> Ok(state)
     // §7.3.9 step 2: success = false → throw TypeError.
-    False -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Cannot delete property '" <> key <> "' of object",
-        )
-      Error(#(err, State(..state, heap:)))
-    }
+    False ->
+      coerce.thrown_type_error(
+        state,
+        "Cannot delete property '" <> key <> "' of object",
+      )
   }
 }
 
@@ -848,7 +835,11 @@ fn array_pop(
       // Step 4d: element = Get(O, ToString(newLen))
       use val, state <- state.try_op(generic_get(state, ref, new_len))
       // Step 4e: DeletePropertyOrThrow(O, index)
-      use state <- try_wrap(generic_delete(state, ref, int.to_string(new_len)))
+      use state <- state.try_state(generic_delete(
+        state,
+        ref,
+        int.to_string(new_len),
+      ))
       // Step 4f: Set(O, "length", newLen, true)
       // Step 4g: Return element
       wrap(generic_set_length(state, ref, new_len), val)
@@ -896,9 +887,9 @@ fn array_shift(
       // Step 4: first = Get(O, "0")
       use val, state <- state.try_op(generic_get(state, ref, 0))
       // Steps 5-6: shift indices [1..len) down by 1 (see shift_left_generic)
-      use state <- try_wrap(shift_left_generic(state, ref, 1, length))
+      use state <- state.try_state(shift_left_generic(state, ref, 1, length))
       // Step 7: DeletePropertyOrThrow(O, ToString(len - 1))
-      use state <- try_wrap(generic_delete(
+      use state <- state.try_state(generic_delete(
         state,
         ref,
         int.to_string(length - 1),
@@ -993,7 +984,7 @@ fn array_unshift(
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, length, state <- require_array(this, state)
   let arg_count = list.length(args)
-  use <- bool.guard(arg_count == 0, #(state, Ok(js_int(length))))
+  use <- bool.guard(arg_count == 0, #(state, Ok(value.from_int(length))))
   let new_len = length + arg_count
   // §23.1.3.33 step 4a: If len + argCount > 2^53 - 1, throw TypeError
   use <- state.guard_safe_length(state, new_len)
@@ -1004,7 +995,7 @@ fn array_unshift(
     arg_count,
   ))
   use state <- state.try_state(write_list_at(state, ref, 0, args))
-  wrap(generic_set_length(state, ref, new_len), js_int(new_len))
+  wrap(generic_set_length(state, ref, new_len), value.from_int(new_len))
 }
 
 /// Implements the shift-up loop from Array.prototype.unshift (§23.1.3.33 steps 4b-4c).
@@ -1098,21 +1089,6 @@ fn wrap(
 ) -> #(State, Result(JsValue, JsValue)) {
   case r {
     Ok(state) -> #(state, Ok(val))
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-  }
-}
-
-/// Utility: chain a generic op Result, continuing with `cont` on success.
-/// Like `wrap` but instead of returning a fixed value, it passes the updated
-/// State to a continuation that produces the final builtin return tuple.
-/// Not a spec operation — purely internal CPS plumbing for sequencing
-/// multiple fallible operations (e.g. Set then Set then return).
-fn try_wrap(
-  r: Result(State, #(JsValue, State)),
-  cont: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  case r {
-    Ok(state) -> cont(state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
@@ -1631,12 +1607,12 @@ fn array_index_of(
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use _ref, length, state <- require_array(this, state)
   // Step 3: If len = 0, return -1
-  use <- bool.guard(length == 0, #(state, Ok(js_int(-1))))
+  use <- bool.guard(length == 0, #(state, Ok(value.from_int(-1))))
   let search = helpers.first_arg_or_undefined(args)
   // Steps 4-6: n = ToIntegerOrInfinity(fromIndex), handle ±Infinity
   case args {
     // Step 5: If n = +∞, return -1 (no index >= +∞)
-    [_, JsNumber(value.Infinity), ..] -> #(state, Ok(js_int(-1)))
+    [_, JsNumber(value.Infinity), ..] -> #(state, Ok(value.from_int(-1)))
     _ -> {
       let from = case args {
         // Step 6: If n = -∞, set n to 0
@@ -1659,7 +1635,7 @@ fn array_index_of(
         value.strict_equal,
         True,
       ))
-      #(state, Ok(js_int(found)))
+      #(state, Ok(value.from_int(found)))
     }
   }
 }
@@ -1695,13 +1671,13 @@ fn array_last_index_of(
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use _ref, length, state <- require_array(this, state)
   // Step 3: If len = 0, return -1
-  use <- bool.guard(length == 0, #(state, Ok(js_int(-1))))
+  use <- bool.guard(length == 0, #(state, Ok(value.from_int(-1))))
   let search = helpers.first_arg_or_undefined(args)
   // Steps 4-6: fromIndex present → ToIntegerOrInfinity; absent → len - 1
   // Checked by arg COUNT, not value (see MEMORY.md lastIndexOf gotcha).
   case args {
     // Step 6: If n = -∞, return -1
-    [_, JsNumber(value.NegInfinity), ..] -> #(state, Ok(js_int(-1)))
+    [_, JsNumber(value.NegInfinity), ..] -> #(state, Ok(value.from_int(-1)))
     _ -> {
       let from = case args {
         // +∞ → clamp to len - 1 via step 7
@@ -1723,7 +1699,7 @@ fn array_last_index_of(
         start,
         search,
       ))
-      #(state, Ok(js_int(found)))
+      #(state, Ok(value.from_int(found)))
     }
   }
 }
@@ -2048,14 +2024,9 @@ fn finish_list(
   result: #(State, Result(List(JsValue), JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(state, outcome) = result
-  let array_proto = state.builtins.array.prototype
   case outcome {
     Error(thrown) -> #(state, Error(thrown))
-    Ok(kept) -> {
-      let vals = list.reverse(kept)
-      let #(heap, ref) = common.alloc_array(state.heap, vals, array_proto)
-      #(State(..state, heap:), Ok(JsObject(ref)))
-    }
+    Ok(kept) -> state.ok_array(state, list.reverse(kept))
   }
 }
 
@@ -2289,8 +2260,8 @@ fn array_find_index(
   // Step 4: Return findRec.[[Index]].
   // FindViaPredicate step 4d: found → 𝔽(k); step 5: not found → -1𝔽.
   case idx < length {
-    True -> #(state, Ok(js_int(idx)))
-    False -> #(state, Ok(js_int(-1)))
+    True -> #(state, Ok(value.from_int(idx)))
+    False -> #(state, Ok(value.from_int(-1)))
   }
 }
 
@@ -2689,7 +2660,7 @@ fn iterate_loop(
           // testResult = ToBoolean(Call(callbackfn, thisArg, « kValue, 𝔽(k), O »)).
           use result, state <- state.try_call(state, cb, this_arg, [
             elem,
-            js_int(idx),
+            value.from_int(idx),
             arr,
           ])
           // Pattern A step 5c.iii / Pattern B step 4d:
@@ -2780,7 +2751,7 @@ fn fold_loop(
           // Step 6c.ii: result = Call(callbackfn, thisArg, « kValue, 𝔽(k), O »)
           use result, state <- state.try_call(state, cb, this_arg, [
             elem,
-            js_int(idx),
+            value.from_int(idx),
             arr,
           ])
           // Step 6c.iii: method-specific accumulator update
@@ -3031,7 +3002,7 @@ fn reduce_loop(
           use result, state <- state.try_call(state, cb, JsUndefined, [
             acc,
             elem,
-            js_int(idx),
+            value.from_int(idx),
             arr,
           ])
           // Step 9d: Set k to k + 1 (or k - 1 for reduceRight).
@@ -3303,8 +3274,8 @@ fn array_find_last_index(
   )
   // Step 4: Return findRec.[[Index]].
   // Found (idx >= 0) → 𝔽(k); not found → -1𝔽. idx is already -1 when not
-  // found (the descending loop's terminal sentinel), so js_int(idx) covers both.
-  #(state, Ok(js_int(idx)))
+  // found (the descending loop's terminal sentinel), so value.from_int(idx) covers both.
+  #(state, Ok(value.from_int(idx)))
 }
 
 // ============================================================================
@@ -3473,7 +3444,7 @@ fn flat_map_loop(
           use elem, state <- state.try_op(get_index(state, arr, idx))
           use mapped, state <- state.try_call(state, cb, this_arg, [
             elem,
-            js_int(idx),
+            value.from_int(idx),
             arr,
           ])
           case is_array_value(mapped, state.heap) {
@@ -3759,7 +3730,7 @@ fn array_from_loop(
           // Step 12.f: mappedValue = Call(mapfn, thisArg, «kValue, k»)
           use mapped, state <- state.try_call(state, mf, this_arg, [
             elem,
-            js_int(idx),
+            value.from_int(idx),
           ])
           array_from_loop(
             state,
@@ -4234,9 +4205,7 @@ fn to_locale_string_loop(
 fn array_keys(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
   use _ref, length, state <- require_array(this, state)
   let keys = build_index_list(0, length, [])
-  let #(heap, arr_ref) =
-    common.alloc_array(state.heap, keys, state.builtins.array.prototype)
-  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+  state.ok_array(state, keys)
 }
 
 fn build_entry_pairs(
@@ -4252,11 +4221,7 @@ fn build_entry_pairs(
     False -> {
       use #(val, state) <- result.try(get_index(state, this, idx))
       let #(heap, pair_ref) =
-        common.alloc_array(
-          state.heap,
-          [JsNumber(Finite(int.to_float(idx))), val],
-          array_proto,
-        )
+        common.alloc_array(state.heap, [value.from_int(idx), val], array_proto)
       build_entry_pairs(
         State(..state, heap:),
         this,
@@ -4272,11 +4237,7 @@ fn build_entry_pairs(
 fn build_index_list(idx: Int, length: Int, acc: List(JsValue)) -> List(JsValue) {
   case idx >= length {
     True -> list.reverse(acc)
-    False ->
-      build_index_list(idx + 1, length, [
-        JsNumber(Finite(int.to_float(idx))),
-        ..acc
-      ])
+    False -> build_index_list(idx + 1, length, [value.from_int(idx), ..acc])
   }
 }
 
@@ -4313,6 +4274,5 @@ fn array_entries(
   use pairs, state <- state.try_op(
     build_entry_pairs(state, this, 0, length, proto, []),
   )
-  let #(heap, arr_ref) = common.alloc_array(state.heap, pairs, proto)
-  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+  state.ok_array(state, pairs)
 }

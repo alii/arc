@@ -6,7 +6,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -21,13 +20,12 @@ import arc/vm/value.{
   IteratorPrototypeDrop, IteratorPrototypeEvery, IteratorPrototypeFilter,
   IteratorPrototypeFind, IteratorPrototypeFlatMap, IteratorPrototypeForEach,
   IteratorPrototypeMap, IteratorPrototypeReduce, IteratorPrototypeSome,
-  IteratorPrototypeTake, IteratorPrototypeToArray, JsBool, JsNull, JsNumber,
-  JsObject, JsString, JsUndefined, NaN, Named, NegInfinity, ObjectSlot,
-  OrdinaryObject, WrapForValidIteratorNext, WrapForValidIteratorObject,
+  IteratorPrototypeTake, IteratorPrototypeToArray, JsBool, JsNull, JsObject,
+  JsString, JsUndefined, NaN, Named, NegInfinity, ObjectSlot,
+  WrapForValidIteratorNext, WrapForValidIteratorObject,
   WrapForValidIteratorReturn,
 }
 import gleam/dict
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -130,23 +128,7 @@ pub fn init(
       #("return", IteratorNative(IteratorHelperReturn), 0),
     ])
   let #(h, helper_proto) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: common.named_props(helper_methods),
-        symbol_properties: [
-          #(
-            value.symbol_to_string_tag,
-            value.data(JsString("Iterator Helper")) |> value.configurable(),
-          ),
-        ],
-        elements: elements.new(),
-        prototype: Some(iterator_proto),
-        extensible: True,
-      ),
-    )
-  let h = heap.root(h, helper_proto)
+    common.init_namespace(h, iterator_proto, "Iterator Helper", helper_methods)
 
   // %WrapForValidIteratorPrototype% — ES2025 §27.1.2.1.2. Inherits from
   // %IteratorPrototype%, has next/return.
@@ -156,18 +138,11 @@ pub fn init(
       #("return", IteratorNative(WrapForValidIteratorReturn), 0),
     ])
   let #(h, wrap_proto) =
-    heap.alloc(
+    common.alloc_proto(
       h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: common.named_props(wrap_methods),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: Some(iterator_proto),
-        extensible: True,
-      ),
+      Some(iterator_proto),
+      common.named_props(wrap_methods),
     )
-  let h = heap.root(h, wrap_proto)
 
   #(h, bt, helper_proto, wrap_proto)
 }
@@ -493,7 +468,7 @@ fn step_map(
     None -> finish(state, ref)
     Some(v) -> {
       let state = write_count(state, ref, count + 1)
-      let counter = JsNumber(Finite(int.to_float(count)))
+      let counter = value.from_int(count)
       case state.call(state, func, JsUndefined, [v, counter]) {
         Ok(#(mapped, state)) -> create_iter_result(state, mapped, False)
         Error(#(thrown, state)) ->
@@ -516,7 +491,7 @@ fn step_filter(
     None -> finish(state, ref)
     Some(v) -> {
       let state = write_count(state, ref, count + 1)
-      let counter = JsNumber(Finite(int.to_float(count)))
+      let counter = value.from_int(count)
       case state.call(state, func, JsUndefined, [v, counter]) {
         Error(#(thrown, state)) ->
           close_throw(mark_done(state, ref), underlying, thrown)
@@ -621,7 +596,7 @@ fn step_flat_map(
       case step {
         None -> finish(state, ref)
         Some(v) -> {
-          let counter = JsNumber(Finite(int.to_float(count)))
+          let counter = value.from_int(count)
           let state = write_count(state, ref, count + 1)
           case state.call(state, func, JsUndefined, [v, counter]) {
             Error(#(thrown, state)) ->
@@ -735,12 +710,7 @@ fn to_array_loop(
   let #(state, step) = iterator_step_value(state, iter, next)
   case step {
     Error(thrown) -> #(state, Error(thrown))
-    Ok(None) -> {
-      let values = list.reverse(acc)
-      let #(heap, arr) =
-        common.alloc_array(state.heap, values, state.builtins.array.prototype)
-      #(State(..state, heap:), Ok(JsObject(arr)))
-    }
+    Ok(None) -> state.ok_array(state, list.reverse(acc))
     Ok(Some(v)) -> to_array_loop(state, iter, next, [v, ..acc])
   }
 }
@@ -771,7 +741,7 @@ fn for_each_loop(
     Error(thrown) -> #(state, Error(thrown))
     Ok(None) -> #(state, Ok(JsUndefined))
     Ok(Some(v)) -> {
-      let idx = JsNumber(Finite(int.to_float(counter)))
+      let idx = value.from_int(counter)
       case state.call(state, func, JsUndefined, [v, idx]) {
         Error(#(thrown, state)) -> close_throw(state, iter, thrown)
         Ok(#(_result, state)) ->
@@ -823,7 +793,7 @@ fn reduce_loop(
     Error(thrown) -> #(state, Error(thrown))
     Ok(None) -> #(state, Ok(acc))
     Ok(Some(v)) -> {
-      let idx = JsNumber(Finite(int.to_float(counter)))
+      let idx = value.from_int(counter)
       case state.call(state, func, JsUndefined, [acc, v, idx]) {
         Error(#(thrown, state)) -> close_throw(state, iter, thrown)
         Ok(#(new_acc, state)) ->
@@ -862,7 +832,7 @@ fn predicate_loop(
     Error(thrown) -> #(state, Error(thrown))
     Ok(None) -> #(state, Ok(None))
     Ok(Some(v)) -> {
-      let idx = JsNumber(Finite(int.to_float(counter)))
+      let idx = value.from_int(counter)
       case state.call(state, func, JsUndefined, [v, idx]) {
         Error(#(thrown, state)) -> close_throw(state, iter, thrown)
         Ok(#(result, state)) ->

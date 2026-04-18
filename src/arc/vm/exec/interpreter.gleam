@@ -40,12 +40,11 @@ import arc/vm/state.{
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
-  DataProperty, EvalEnvSlot, Finite, ForInIteratorSlot, FunctionObject,
-  GeneratorObject, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
-  JsUninitialized, Named, NativeFunction, ObjectSlot, OrdinaryObject,
+  DataProperty, EvalEnvSlot, ForInIteratorSlot, FunctionObject, GeneratorObject,
+  JsBool, JsNull, JsObject, JsString, JsUndefined, JsUninitialized, Named,
+  NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -2684,7 +2683,7 @@ fn step_special(
         dict.from_list([
           #(
             Named("length"),
-            value.data(JsNumber(Finite(int.to_float(length))))
+            value.data(value.from_int(length))
               |> value.writable
               |> value.configurable,
           ),

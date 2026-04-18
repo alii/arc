@@ -42,13 +42,7 @@ pub fn init(
       0,
       [],
     )
-  let h =
-    common.add_symbol_property(
-      h,
-      bt.prototype,
-      value.symbol_to_string_tag,
-      value.builtin_property(value.JsString("WeakMap")),
-    )
+  let h = common.add_to_string_tag(h, bt.prototype, "WeakMap")
   #(h, bt)
 }
 
@@ -183,25 +177,5 @@ fn require_weak_map(
 
 /// Helper to update a WeakMapObject's data on the heap.
 fn update_weak_map(h: Heap, ref: Ref, data: dict.Dict(Ref, JsValue)) -> Heap {
-  heap.update(h, ref, fn(slot) {
-    case slot {
-      ObjectSlot(
-        properties:,
-        elements:,
-        prototype:,
-        symbol_properties:,
-        extensible:,
-        ..,
-      ) ->
-        ObjectSlot(
-          kind: WeakMapObject(data:),
-          properties:,
-          elements:,
-          prototype:,
-          symbol_properties:,
-          extensible:,
-        )
-      other -> other
-    }
-  })
+  heap.update_kind(h, ref, WeakMapObject(data:))
 }

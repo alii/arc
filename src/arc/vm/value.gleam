@@ -573,6 +573,10 @@ pub fn map_key_to_js(key: MapKey) -> JsValue {
   }
 }
 
+pub fn from_int(n: Int) -> JsValue {
+  JsNumber(Finite(int.to_float(n)))
+}
+
 /// Map methods — constructor, prototype methods, size getter.
 pub type MapNativeFn {
   MapConstructor(proto: Ref)

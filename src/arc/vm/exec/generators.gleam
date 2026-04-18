@@ -70,16 +70,6 @@ pub fn call_native_generator_next(
           state.throw_type_error(state, "Generator is already running")
         }
         value.SuspendedStart | value.SuspendedYield -> {
-          // Mark as executing
-          let h =
-            heap.write(
-              state.heap,
-              gen.data_ref,
-              gen_with_state(gen, value.Executing),
-            )
-          // Restore the generator's execution state
-          let #(restored_try, restored_finally) =
-            restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
           // For SuspendedYield, push the .next() arg onto the saved stack
           // (the Yield opcode left pc pointing past Yield, stack has value popped)
           let gen_stack = case gen.gen_state {
@@ -87,106 +77,14 @@ pub fn call_native_generator_next(
             _ -> gen.saved_stack
           }
           let gen_exec_state =
-            State(
-              ..state,
-              heap: h,
-              stack: gen_stack,
-              locals: gen.saved_locals,
-              func: gen.func_template,
-              code: gen.func_template.bytecode,
-              constants: gen.func_template.constants,
-              pc: gen.saved_pc,
-              call_stack: [],
-              try_stack: restored_try,
-              finally_stack: restored_finally,
-              this_binding: gen.saved_this,
-              callee_ref: gen.saved_callee_ref,
-              // arguments was created before InitialYield; post-resume never needs call_args
-              call_args: [],
-            )
-          // Execute until yield/return/throw
-          case execute_inner(gen_exec_state) {
-            Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
-              // Generator yielded -- save state back
-              let #(saved_try2, saved_finally2) =
-                save_stacks(suspended.try_stack, suspended.finally_stack)
-              let h3 =
-                heap.write(
-                  h2,
-                  gen.data_ref,
-                  GeneratorSlot(
-                    gen_state: value.SuspendedYield,
-                    func_template: gen.func_template,
-                    env_ref: gen.env_ref,
-                    saved_pc: suspended.pc,
-                    saved_locals: suspended.locals,
-                    saved_stack: suspended.stack,
-                    saved_try_stack: saved_try2,
-                    saved_finally_stack: saved_finally2,
-                    saved_this: suspended.this_binding,
-                    saved_callee_ref: suspended.callee_ref,
-                  ),
-                )
-              let #(h3, result) =
-                create_iterator_result(h3, state.builtins, yielded_value, False)
-              Ok(
-                State(
-                  ..state.merge_globals(state, suspended, []),
-                  heap: h3,
-                  stack: [result, ..rest_stack],
-                  pc: state.pc + 1,
-                ),
-              )
-            }
-            Ok(#(NormalCompletion(return_value, h2), final_state)) -> {
-              // Generator returned -- mark completed
-              let h3 =
-                heap.write(
-                  h2,
-                  gen.data_ref,
-                  gen_with_state(gen, value.Completed),
-                )
-              let #(h3, result) =
-                create_iterator_result(h3, state.builtins, return_value, True)
-              Ok(
-                State(
-                  ..state.merge_globals(state, final_state, []),
-                  heap: h3,
-                  stack: [result, ..rest_stack],
-                  pc: state.pc + 1,
-                ),
-              )
-            }
-            Ok(#(ThrowCompletion(thrown, h2), _final_state)) -> {
-              // Generator threw -- mark completed and propagate
-              let h3 =
-                heap.write(
-                  h2,
-                  gen.data_ref,
-                  gen_with_state(gen, value.Completed),
-                )
-              Error(#(Thrown, thrown, h3))
-            }
-            Ok(#(AwaitCompletion(_, _), _)) ->
-              Error(#(
-                StepVmError(Unimplemented("await in sync generator")),
-                JsUndefined,
-                state.heap,
-              ))
-            Error(_vm_err) -> {
-              let h2 =
-                heap.write(
-                  state.heap,
-                  gen.data_ref,
-                  gen_with_state(gen, value.Completed),
-                )
-              Error(#(
-                StepVmError(Unimplemented("generator execution failed")),
-                JsUndefined,
-                h2,
-              ))
-            }
-          }
+            build_resumed_state(state, gen, gen_stack, gen.saved_pc)
+          run_to_completion(
+            gen_exec_state,
+            state,
+            gen,
+            rest_stack,
+            execute_inner,
+          )
         }
       }
     None -> {
@@ -277,27 +175,8 @@ fn do_return_resume(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
-  let h =
-    heap.write(state.heap, gen.data_ref, gen_with_state(gen, value.Executing))
-  let #(restored_try, restored_finally) =
-    restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
   let gen_exec_state =
-    State(
-      ..state,
-      heap: h,
-      stack: gen.saved_stack,
-      locals: gen.saved_locals,
-      func: gen.func_template,
-      code: gen.func_template.bytecode,
-      constants: gen.func_template.constants,
-      pc: gen.saved_pc,
-      call_stack: [],
-      try_stack: restored_try,
-      finally_stack: restored_finally,
-      this_binding: gen.saved_this,
-      callee_ref: gen.saved_callee_ref,
-      call_args: [],
-    )
+    build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
   process_generator_return(
     gen_exec_state,
     state,
@@ -362,136 +241,24 @@ pub fn call_native_generator_throw(
                 },
               )
             None -> {
-              // Mark as executing
-              let h =
-                heap.write(
-                  state.heap,
-                  gen.data_ref,
-                  gen_with_state(gen, value.Executing),
-                )
-              // Restore the generator's execution state
-              let #(restored_try, restored_finally) =
-                restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
               let gen_exec_state =
-                State(
-                  ..state,
-                  heap: h,
-                  stack: gen.saved_stack,
-                  locals: gen.saved_locals,
-                  func: gen.func_template,
-                  code: gen.func_template.bytecode,
-                  constants: gen.func_template.constants,
-                  pc: gen.saved_pc,
-                  call_stack: [],
-                  try_stack: restored_try,
-                  finally_stack: restored_finally,
-                  this_binding: gen.saved_this,
-                  callee_ref: gen.saved_callee_ref,
-                  call_args: [],
-                )
+                build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
               // Try to unwind to a catch handler within the generator
               case unwind_to_catch(gen_exec_state, throw_val) {
                 Some(caught_state) ->
                   // The generator caught it -- continue executing
-                  case execute_inner(caught_state) {
-                    Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
-                      let #(saved_try2, saved_finally2) =
-                        save_stacks(
-                          suspended.try_stack,
-                          suspended.finally_stack,
-                        )
-                      let h3 =
-                        heap.write(
-                          h2,
-                          gen.data_ref,
-                          GeneratorSlot(
-                            gen_state: value.SuspendedYield,
-                            func_template: gen.func_template,
-                            env_ref: gen.env_ref,
-                            saved_pc: suspended.pc,
-                            saved_locals: suspended.locals,
-                            saved_stack: suspended.stack,
-                            saved_try_stack: saved_try2,
-                            saved_finally_stack: saved_finally2,
-                            saved_this: suspended.this_binding,
-                            saved_callee_ref: suspended.callee_ref,
-                          ),
-                        )
-                      let #(h3, result) =
-                        create_iterator_result(
-                          h3,
-                          state.builtins,
-                          yielded_value,
-                          False,
-                        )
-                      Ok(
-                        State(
-                          ..state.merge_globals(state, suspended, []),
-                          heap: h3,
-                          stack: [result, ..rest_stack],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                    }
-                    Ok(#(NormalCompletion(return_value, h2), final_state)) -> {
-                      let h3 =
-                        heap.write(
-                          h2,
-                          gen.data_ref,
-                          gen_with_state(gen, value.Completed),
-                        )
-                      let #(h3, result) =
-                        create_iterator_result(
-                          h3,
-                          state.builtins,
-                          return_value,
-                          True,
-                        )
-                      Ok(
-                        State(
-                          ..state.merge_globals(state, final_state, []),
-                          heap: h3,
-                          stack: [result, ..rest_stack],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                    }
-                    Ok(#(ThrowCompletion(thrown, h2), _final_state)) -> {
-                      let h3 =
-                        heap.write(
-                          h2,
-                          gen.data_ref,
-                          gen_with_state(gen, value.Completed),
-                        )
-                      Error(#(Thrown, thrown, h3))
-                    }
-                    Ok(#(AwaitCompletion(_, _), _)) ->
-                      Error(#(
-                        StepVmError(Unimplemented("await in sync generator")),
-                        JsUndefined,
-                        state.heap,
-                      ))
-                    Error(_vm_err) -> {
-                      let h2 =
-                        heap.write(
-                          state.heap,
-                          gen.data_ref,
-                          gen_with_state(gen, value.Completed),
-                        )
-                      Error(#(
-                        StepVmError(Unimplemented(
-                          "generator throw execution failed",
-                        )),
-                        JsUndefined,
-                        h2,
-                      ))
-                    }
-                  }
+                  run_to_completion(
+                    caught_state,
+                    state,
+                    gen,
+                    rest_stack,
+                    execute_inner,
+                  )
                 None -> {
                   // No catch handler -- mark completed and propagate the throw
                   let h2 =
                     heap.write(
-                      h,
+                      gen_exec_state.heap,
                       gen.data_ref,
                       gen_with_state(gen, value.Completed),
                     )
@@ -591,6 +358,36 @@ fn gen_with_state(gen: GenData, new_state: value.GeneratorState) -> HeapSlot {
     saved_finally_stack: gen.saved_finally_stack,
     saved_this: gen.saved_this,
     saved_callee_ref: gen.saved_callee_ref,
+  )
+}
+
+/// Mark a generator Executing and restore its saved execution context into a
+/// fresh State for resumption. `stack` and `pc` vary per resume mode.
+fn build_resumed_state(
+  outer: State,
+  gen: GenData,
+  stack: List(JsValue),
+  pc: Int,
+) -> State {
+  let h =
+    heap.write(outer.heap, gen.data_ref, gen_with_state(gen, value.Executing))
+  let #(restored_try, restored_finally) =
+    restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
+  State(
+    ..outer,
+    heap: h,
+    stack:,
+    locals: gen.saved_locals,
+    func: gen.func_template,
+    code: gen.func_template.bytecode,
+    constants: gen.func_template.constants,
+    pc:,
+    call_stack: [],
+    try_stack: restored_try,
+    finally_stack: restored_finally,
+    this_binding: gen.saved_this,
+    callee_ref: gen.saved_callee_ref,
+    call_args: [],
   )
 }
 
@@ -746,31 +543,8 @@ fn resume_after_delegate(
         [_iter, ..rest] -> [val, ..rest]
         _ -> [val]
       }
-      let h =
-        heap.write(
-          state.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Executing),
-        )
-      let #(restored_try, restored_finally) =
-        restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
       let resumed =
-        State(
-          ..state,
-          heap: h,
-          stack: stack_after,
-          locals: gen.saved_locals,
-          func: gen.func_template,
-          code: gen.func_template.bytecode,
-          constants: gen.func_template.constants,
-          pc: gen.saved_pc + 1,
-          call_stack: [],
-          try_stack: restored_try,
-          finally_stack: restored_finally,
-          this_binding: gen.saved_this,
-          callee_ref: gen.saved_callee_ref,
-          call_args: [],
-        )
+        build_resumed_state(state, gen, stack_after, gen.saved_pc + 1)
       run_to_completion(resumed, state, gen, rest_stack, execute_inner)
     }
   }
@@ -837,7 +611,15 @@ fn run_to_completion(
         JsUndefined,
         outer.heap,
       ))
-    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, outer.heap))
+    Error(vm_err) -> {
+      let h =
+        heap.write(
+          outer.heap,
+          gen.data_ref,
+          gen_with_state(gen, value.Completed),
+        )
+      Error(#(StepVmError(vm_err), JsUndefined, h))
+    }
   }
 }
 

@@ -7,7 +7,6 @@ import arc/vm/value.{
   ObjectSlot, OrdinaryObject,
 }
 import gleam/dict.{type Dict}
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -102,6 +101,29 @@ pub fn alloc_proto(
   #(h, ref)
 }
 
+/// Allocate+root an OrdinaryObject with @@toStringTag = `tag`. Covers namespace
+/// globals (Math/JSON/Reflect/Arc) and tagged prototypes (Generator, Iterator Helper).
+pub fn init_namespace(
+  h: Heap(ctx),
+  proto: Ref,
+  tag: String,
+  props: List(#(String, Property)),
+) -> #(Heap(ctx), Ref) {
+  let #(h, ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: named_props(props),
+        symbol_properties: [to_string_tag(tag)],
+        elements: elements.new(),
+        prototype: Some(proto),
+        extensible: True,
+      ),
+    )
+  #(heap.root(h, ref), ref)
+}
+
 pub fn alloc_pojo(
   heap: Heap(ctx),
   object_proto: Ref,
@@ -191,8 +213,7 @@ pub fn fn_name_property(name: String) -> Property {
 
 /// ES2024 §20.2.2: Function length property — non-writable, non-enumerable, configurable.
 pub fn fn_length_property(arity: Int) -> Property {
-  value.data(value.JsNumber(value.Finite(int.to_float(arity))))
-  |> value.configurable()
+  value.data(value.from_int(arity)) |> value.configurable()
 }
 
 /// Allocate N native function objects from specs, returning builtin_property
@@ -423,6 +444,24 @@ pub fn add_symbol_property(
       other -> other
     }
   })
+}
+
+/// @@toStringTag symbol-property pair: { writable: false, enumerable: false, configurable: true }.
+pub fn to_string_tag(name: String) -> #(value.SymbolId, Property) {
+  #(
+    value.symbol_to_string_tag,
+    value.data(JsString(name)) |> value.configurable(),
+  )
+}
+
+/// Add @@toStringTag = name to an existing object (typically a prototype).
+pub fn add_to_string_tag(h: Heap(ctx), ref: Ref, name: String) -> Heap(ctx) {
+  add_symbol_property(
+    h,
+    ref,
+    value.symbol_to_string_tag,
+    value.data(JsString(name)) |> value.configurable(),
+  )
 }
 
 /// Proto-ctor cycle for a pre-allocated prototype (Object, Function bootstrap).

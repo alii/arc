@@ -23,10 +23,10 @@ import arc/vm/internal/elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, Dispatch, JsBool,
-  JsNumber, JsObject, JsUndefined, MapConstructor, MapNative, MapObject,
-  MapPrototypeClear, MapPrototypeDelete, MapPrototypeEntries,
-  MapPrototypeForEach, MapPrototypeGet, MapPrototypeGetSize, MapPrototypeHas,
-  MapPrototypeKeys, MapPrototypeSet, MapPrototypeValues, ObjectSlot,
+  JsObject, JsUndefined, MapConstructor, MapNative, MapObject, MapPrototypeClear,
+  MapPrototypeDelete, MapPrototypeEntries, MapPrototypeForEach, MapPrototypeGet,
+  MapPrototypeGetSize, MapPrototypeHas, MapPrototypeKeys, MapPrototypeSet,
+  MapPrototypeValues, ObjectSlot,
 }
 import gleam/dict
 import gleam/int
@@ -109,13 +109,7 @@ pub fn init(
     )
   // §24.1.3.14 Map.prototype [ @@toStringTag ] = "Map"
   // { writable: false, enumerable: false, configurable: true }
-  let h =
-    common.add_symbol_property(
-      h,
-      bt.prototype,
-      value.symbol_to_string_tag,
-      value.data(value.JsString("Map")) |> value.configurable(),
-    )
+  let h = common.add_to_string_tag(h, bt.prototype, "Map")
   // §24.1.3.13 Map.prototype [ @@iterator ] — same function object as .entries
   let h =
     common.add_symbol_property(
@@ -578,7 +572,7 @@ fn map_get_size(
 ) -> #(State, Result(JsValue, JsValue)) {
   use entries, _keys_rev, _keys_len, _ref, state <- require_map(this, state)
   let size = dict.size(entries)
-  #(state, Ok(JsNumber(value.Finite(int.to_float(size)))))
+  #(state, Ok(value.from_int(size)))
 }
 
 // ============================================================================
@@ -650,27 +644,7 @@ fn update_map_data(
   keys_rev: List(MapKey),
   keys_len: Int,
 ) -> Heap {
-  heap.update(h, ref, fn(slot) {
-    case slot {
-      ObjectSlot(
-        properties:,
-        elements:,
-        prototype:,
-        symbol_properties:,
-        extensible:,
-        ..,
-      ) ->
-        ObjectSlot(
-          kind: MapObject(entries:, keys_rev:, keys_len:),
-          properties:,
-          elements:,
-          prototype:,
-          symbol_properties:,
-          extensible:,
-        )
-      other -> other
-    }
-  })
+  heap.update_kind(h, ref, MapObject(entries:, keys_rev:, keys_len:))
 }
 
 /// Derive forward iteration order from a reversed, possibly-dirty key list.

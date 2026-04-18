@@ -12,7 +12,6 @@ import arc/vm/value.{
   NumberNative, NumberObject, NumberParseFloat, NumberParseInt,
   NumberPrototypeToExponential, NumberPrototypeToFixed,
   NumberPrototypeToPrecision, NumberPrototypeToString, NumberPrototypeValueOf,
-  ObjectSlot,
 }
 import gleam/float
 import gleam/int
@@ -111,28 +110,7 @@ pub fn init(
 
   // ES2024 §21.1.3: The Number prototype object has a [[NumberData]] internal
   // slot with value +0. Update from OrdinaryObject to NumberObject.
-  let h =
-    heap.update(h, bt.prototype, fn(slot) {
-      case slot {
-        ObjectSlot(
-          properties:,
-          elements:,
-          prototype:,
-          symbol_properties:,
-          extensible:,
-          ..,
-        ) ->
-          ObjectSlot(
-            kind: NumberObject(value: Finite(0.0)),
-            properties:,
-            elements:,
-            prototype:,
-            symbol_properties:,
-            extensible:,
-          )
-        other -> other
-      }
-    })
+  let h = heap.update_kind(h, bt.prototype, NumberObject(value: Finite(0.0)))
 
   #(h, bt, parse_int_ref, parse_float_ref, is_nan_ref, is_finite_ref)
 }

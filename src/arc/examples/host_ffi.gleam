@@ -6,8 +6,7 @@ import arc/engine
 import arc/host
 import arc/vm/completion.{NormalCompletion}
 import arc/vm/state
-import arc/vm/value.{Finite, JsNumber, JsString, JsUndefined}
-import gleam/int
+import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
 import gleam/list
 import gleam/string
@@ -65,7 +64,7 @@ fn map_range_loop(s, cb, i, n, acc) {
     }
     False -> {
       use r, s <- host.try_call(s, cb, "callback", JsUndefined, [
-        JsNumber(Finite(int.to_float(i))),
+        value.from_int(i),
       ])
       map_range_loop(s, cb, i + 1, n, [r, ..acc])
     }

@@ -292,7 +292,7 @@ fn get_own_property_descriptor(
         True -> {
           let prop =
             DataProperty(
-              value: JsNumber(value.Finite(int.to_float(len))),
+              value: value.from_int(len),
               writable: False,
               enumerable: False,
               configurable: False,
@@ -825,8 +825,7 @@ fn get_own_property_names(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let array_proto = state.builtins.array.prototype
-  own_keys_impl(args, state, array_proto, False)
+  own_keys_impl(args, state, False)
 }
 
 /// Object.keys ( O ) — ES2024 §20.1.2.16
@@ -836,8 +835,7 @@ fn get_own_property_names(
 ///   3. Return CreateArrayFromList(nameList).
 ///
 fn keys(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue)) {
-  let array_proto = state.builtins.array.prototype
-  own_keys_impl(args, state, array_proto, True)
+  own_keys_impl(args, state, True)
 }
 
 /// Shared implementation for Object.getOwnPropertyNames and Object.keys.
@@ -853,7 +851,6 @@ fn keys(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue))
 fn own_keys_impl(
   args: List(JsValue),
   state: State,
-  array_proto: Ref,
   enumerable_only: Bool,
 ) -> #(State, Result(JsValue, JsValue)) {
   case first_arg_or_undefined(args) {
@@ -861,9 +858,7 @@ fn own_keys_impl(
       // Step 2: Collect own string-keyed properties
       let ks = collect_own_keys(state.heap, ref, enumerable_only)
       // Step 3: CreateArrayFromList(nameList)
-      let #(heap, arr_ref) =
-        common.alloc_array(state.heap, list.map(ks, JsString), array_proto)
-      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+      state.ok_array(state, list.map(ks, JsString))
     }
     // Step 1: ToObject — null/undefined throw TypeError
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
@@ -876,14 +871,10 @@ fn own_keys_impl(
         True -> index_keys
         False -> list.append(index_keys, [JsString("length")])
       }
-      let #(heap, arr_ref) = common.alloc_array(state.heap, ks, array_proto)
-      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+      state.ok_array(state, ks)
     }
     // Number/boolean/symbol wrappers have no own string-keyed properties.
-    _ -> {
-      let #(heap, arr_ref) = common.alloc_array(state.heap, [], array_proto)
-      #(State(..state, heap:), Ok(JsObject(arr_ref)))
-    }
+    _ -> state.ok_array(state, [])
   }
 }
 
@@ -1266,12 +1257,10 @@ fn values(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject + EnumerableOwnProperties(obj, value)
   use vals, state <- own_values_impl(args, state)
   // Step 3: CreateArrayFromList(nameList)
-  let #(heap, arr_ref) = common.alloc_array(state.heap, vals, array_proto)
-  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+  state.ok_array(state, vals)
 }
 
 /// Object.entries ( O ) — ES2024 §20.1.2.5
@@ -1300,9 +1289,7 @@ fn entries(
       #(h, [JsObject(r), ..rs])
     })
   // Outer CreateArrayFromList for the result array
-  let #(heap, arr_ref) =
-    common.alloc_array(heap, list.reverse(refs), array_proto)
-  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+  state.ok_array(State(..state, heap:), list.reverse(refs))
 }
 
 /// Shared driver implementing steps 1-2 of Object.values / the value-collection
@@ -1993,51 +1980,58 @@ fn set_prototype_of(
       // §20.1.2.21 step 2: proto is not Object or null.
       state.type_error(state, "Object prototype may only be an Object or null")
     JsObject(ref), Ok(new_proto) ->
-      // §20.1.2.21 step 4: O.[[SetPrototypeOf]](proto)
-      // OrdinarySetPrototypeOf §10.1.2.1:
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(prototype: current, extensible:, ..)) -> {
-          // §10.1.2.1 step 2: If SameValue(V, current) is true, return true.
-          case new_proto == current {
-            True ->
-              // Already the same — return O.
-              #(state, Ok(target))
-            False ->
-              // §10.1.2.1 step 4: If extensible is false, return false.
-              case extensible {
-                False ->
-                  state.type_error(
-                    state,
-                    "Cannot set prototype of a non-extensible object",
-                  )
-                True ->
-                  // §10.1.2.1 step 7: cycle detection
-                  case would_create_cycle(state.heap, ref, new_proto) {
-                    // §20.1.2.21 step 5: status is false → throw TypeError.
-                    True -> state.type_error(state, "Cyclic __proto__ value")
-                    False -> {
-                      // §10.1.2.1 step 8: Set O.[[Prototype]] to V.
-                      let heap = {
-                        use slot <- heap.update(state.heap, ref)
-                        case slot {
-                          ObjectSlot(..) ->
-                            ObjectSlot(..slot, prototype: new_proto)
-                          _ -> slot
-                        }
-                      }
-                      // §20.1.2.21 step 6: Return O.
-                      #(State(..state, heap:), Ok(target))
-                    }
-                  }
-              }
-          }
-        }
-        _ ->
-          // Should not happen — ref doesn't point to an ObjectSlot
-          #(state, Ok(target))
+      // §20.1.2.21 step 4-6: O.[[SetPrototypeOf]](proto); throw if false.
+      case ordinary_set_prototype_of(state, ref, new_proto) {
+        Ok(state) -> #(state, Ok(target))
+        Error(NotExtensible) ->
+          state.type_error(
+            state,
+            "Cannot set prototype of a non-extensible object",
+          )
+        Error(Cyclic) -> state.type_error(state, "Cyclic __proto__ value")
       }
     // §20.1.2.21 step 3: If O is not an Object, return O.
     _, Ok(_) -> #(state, Ok(target))
+  }
+}
+
+pub type SetProtoFail {
+  NotExtensible
+  Cyclic
+}
+
+/// OrdinarySetPrototypeOf — ES2024 §10.1.2.1
+///
+/// Shared core for Object.setPrototypeOf (§20.1.2.21, throws on fail)
+/// and Reflect.setPrototypeOf (§28.1.13, returns Bool on fail).
+pub fn ordinary_set_prototype_of(
+  state: State,
+  ref: Ref,
+  new_proto: Option(Ref),
+) -> Result(State, SetProtoFail) {
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(prototype: current, extensible:, ..))
+      if new_proto != current
+    ->
+      case extensible {
+        False -> Error(NotExtensible)
+        True ->
+          case would_create_cycle(state.heap, ref, new_proto) {
+            True -> Error(Cyclic)
+            False -> {
+              let heap = {
+                use slot <- heap.update(state.heap, ref)
+                case slot {
+                  ObjectSlot(..) -> ObjectSlot(..slot, prototype: new_proto)
+                  _ -> slot
+                }
+              }
+              Ok(State(..state, heap:))
+            }
+          }
+      }
+    // Same proto already, or ref isn't an ObjectSlot (unreachable) — no-op success.
+    _ -> Ok(state)
   }
 }
 
@@ -2053,7 +2047,7 @@ fn set_prototype_of(
 /// Returns True if adding the link would create a cycle (step 7b triggers),
 /// False if the chain terminates without hitting target (step 7a).
 /// Step 7c (exotic objects) is not applicable — all our objects are ordinary.
-pub fn would_create_cycle(
+fn would_create_cycle(
   heap: Heap,
   target_ref: Ref,
   new_proto: Option(Ref),
@@ -2490,7 +2484,6 @@ fn get_own_property_symbols(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let array_proto = state.builtins.array.prototype
   case first_arg_or_undefined(args) {
     // Step 1: ToObject — null/undefined throw TypeError.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
@@ -2498,16 +2491,11 @@ fn get_own_property_symbols(
       // Step 4: Collect own symbol keys.
       let syms = collect_own_symbol_keys(state.heap, ref, False)
       // Step 5: CreateArrayFromList(nameList) — each element is a JsSymbol.
-      let #(heap, arr_ref) =
-        common.alloc_array(state.heap, list.map(syms, JsSymbol), array_proto)
-      #(State(..state, heap:), Ok(JsObject(arr_ref)))
+      state.ok_array(state, list.map(syms, JsSymbol))
     }
     // For non-object primitives (string, number, boolean, symbol):
     // ToObject creates a wrapper with no own symbol properties → return [].
-    _ -> {
-      let #(heap, arr_ref) = common.alloc_array(state.heap, [], array_proto)
-      #(State(..state, heap:), Ok(JsObject(arr_ref)))
-    }
+    _ -> state.ok_array(state, [])
   }
 }
 
@@ -2648,7 +2636,7 @@ fn group_by_loop(
     [item, ..rest] -> {
       use key_val, state <- state.try_call(state, callback, JsUndefined, [
         item,
-        value.JsNumber(value.Finite(int.to_float(index))),
+        value.from_int(index),
       ])
       use key, state <- coerce.try_to_string(state, key_val)
       let current = dict.get(groups, key) |> result.unwrap([])

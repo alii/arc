@@ -93,29 +93,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
       #("select", ArcNative(ArcSelect), 1),
     ])
 
-  let properties = common.named_props(methods)
-  let symbol_properties = [
-    #(
-      value.symbol_to_string_tag,
-      value.data(JsString("Arc")) |> value.configurable(),
-    ),
-  ]
-
-  let #(h, arc_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties:,
-        elements: elements.new(),
-        prototype: Some(object_proto),
-        symbol_properties:,
-        extensible: True,
-      ),
-    )
-  let h = heap.root(h, arc_ref)
-
-  #(h, arc_ref)
+  common.init_namespace(h, object_proto, "Arc", methods)
 }
 
 /// Per-module dispatch for Arc native functions.
@@ -423,12 +401,7 @@ pub fn alloc_pid_object(
         ]),
         elements: elements.new(),
         prototype: Some(object_proto),
-        symbol_properties: [
-          #(
-            value.symbol_to_string_tag,
-            value.data(JsString("Pid")) |> value.configurable(),
-          ),
-        ],
+        symbol_properties: [common.to_string_tag("Pid")],
         extensible: True,
       ),
     )
@@ -524,12 +497,7 @@ pub fn alloc_subject_object(
         ]),
         elements: elements.new(),
         prototype: Some(object_proto),
-        symbol_properties: [
-          #(
-            value.symbol_to_string_tag,
-            value.data(JsString("Subject")) |> value.configurable(),
-          ),
-        ],
+        symbol_properties: [common.to_string_tag("Subject")],
         extensible: True,
       ),
     )

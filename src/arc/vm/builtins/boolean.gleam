@@ -4,7 +4,7 @@ import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type BooleanNativeFn, type JsValue, type Ref, BooleanConstructor,
   BooleanNative, BooleanObject, BooleanPrototypeToString,
-  BooleanPrototypeValueOf, Dispatch, JsBool, JsObject, JsString, ObjectSlot,
+  BooleanPrototypeValueOf, Dispatch, JsBool, JsObject, JsString,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -33,28 +33,7 @@ pub fn init(
 
   // ES2024 §20.3.3: The Boolean prototype object has a [[BooleanData]] internal
   // slot with value false. Update from OrdinaryObject to BooleanObject.
-  let h =
-    heap.update(h, bt.prototype, fn(slot) {
-      case slot {
-        ObjectSlot(
-          properties:,
-          elements:,
-          prototype:,
-          symbol_properties:,
-          extensible:,
-          ..,
-        ) ->
-          ObjectSlot(
-            kind: BooleanObject(value: False),
-            properties:,
-            elements:,
-            prototype:,
-            symbol_properties:,
-            extensible:,
-          )
-        other -> other
-      }
-    })
+  let h = heap.update_kind(h, bt.prototype, BooleanObject(value: False))
 
   #(h, bt)
 }

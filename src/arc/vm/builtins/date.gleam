@@ -183,7 +183,7 @@ pub fn dispatch(
 ) -> #(State, Result(JsValue, JsValue)) {
   case native {
     DateConstructor(proto:) -> date_constructor(proto, args, state)
-    DateNow -> #(state, Ok(JsNumber(Finite(int.to_float(ffi_now_ms())))))
+    DateNow -> #(state, Ok(value.from_int(ffi_now_ms())))
     DateParse -> date_parse(args, state)
     DateUTC -> date_utc(args, state)
     DatePrototypeValueOf | DatePrototypeGetTime -> date_get_time(this, state)
@@ -675,10 +675,7 @@ fn date_get_field(
   case tv {
     Finite(f) -> {
       let fields = get_date_fields(value.float_to_int(f), is_local)
-      #(
-        state,
-        Ok(JsNumber(Finite(int.to_float(field_at(fields, field_index))))),
-      )
+      #(state, Ok(value.from_int(field_at(fields, field_index))))
     }
     _ -> #(state, Ok(JsNumber(NaN)))
   }
@@ -1277,7 +1274,7 @@ fn date_get_year(
   case tv {
     Finite(f) -> {
       let fields = get_date_fields(value.float_to_int(f), True)
-      #(state, Ok(JsNumber(Finite(int.to_float(fields.year - 1900)))))
+      #(state, Ok(value.from_int(fields.year - 1900)))
     }
     _ -> #(state, Ok(JsNumber(NaN)))
   }

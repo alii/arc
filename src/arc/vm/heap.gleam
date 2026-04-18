@@ -265,6 +265,19 @@ pub fn update_with(
   }
 }
 
+/// Replace the `kind` of an ObjectSlot in place. No-op for non-object slots.
+pub fn update_kind(
+  heap: Heap(ctx),
+  ref: Ref,
+  kind: value.ExoticKind(ctx),
+) -> Heap(ctx) {
+  use slot <- update(heap, ref)
+  case slot {
+    value.ObjectSlot(..) -> value.ObjectSlot(..slot, kind:)
+    other -> other
+  }
+}
+
 /// Write a slot at a ref unconditionally. Used to fill reserved
 /// (forward-reference) slots that have no data in the heap yet.
 pub fn fill(heap: Heap(ctx), ref: Ref, slot: HeapSlot(ctx)) -> Heap(ctx) {

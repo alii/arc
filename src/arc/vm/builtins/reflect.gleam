@@ -8,8 +8,8 @@ import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type ReflectNativeFn, JsBool, JsNull, JsObject,
-  JsString, JsSymbol, JsUndefined, ObjectSlot, OrdinaryObject, ReflectApply,
-  ReflectConstruct, ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
+  JsString, JsSymbol, JsUndefined, ObjectSlot, ReflectApply, ReflectConstruct,
+  ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
   ReflectGetOwnPropertyDescriptor, ReflectGetPrototypeOf, ReflectHas,
   ReflectIsExtensible, ReflectNative, ReflectOwnKeys, ReflectPreventExtensions,
   ReflectSet, ReflectSetPrototypeOf,
@@ -47,29 +47,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
       #("setPrototypeOf", ReflectNative(ReflectSetPrototypeOf), 2),
     ])
 
-  let properties = common.named_props(methods)
-  let symbol_properties = [
-    #(
-      value.symbol_to_string_tag,
-      value.data(JsString("Reflect")) |> value.configurable(),
-    ),
-  ]
-
-  let #(h, reflect_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties:,
-        elements: elements.new(),
-        prototype: Some(object_proto),
-        symbol_properties:,
-        extensible: True,
-      ),
-    )
-  let h = heap.root(h, reflect_ref)
-
-  #(h, reflect_ref)
+  common.init_namespace(h, object_proto, "Reflect", methods)
 }
 
 // ============================================================================
@@ -441,7 +419,6 @@ fn reflect_own_keys(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "ownKeys")
-  let array_proto = state.builtins.array.prototype
   // String keys: indices first (ascending), then named keys.
   let string_keys =
     builtins_object.collect_own_keys(state.heap, ref, False)
@@ -451,8 +428,7 @@ fn reflect_own_keys(
     builtins_object.collect_own_symbol_keys(state.heap, ref, False)
     |> list.map(JsSymbol)
   let all_keys = list.append(string_keys, symbol_keys)
-  let #(heap, arr_ref) = common.alloc_array(state.heap, all_keys, array_proto)
-  #(State(..state, heap:), Ok(JsObject(arr_ref)))
+  state.ok_array(state, all_keys)
 }
 
 /// Reflect.preventExtensions ( target ) — ES2024 §28.1.11
@@ -539,42 +515,12 @@ fn reflect_set_prototype_of(
     Error(_) ->
       state.type_error(state, "Object prototype may only be an Object or null")
     Ok(new_proto) ->
-      // Step 3: OrdinarySetPrototypeOf (§10.1.2.1).
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(prototype: current, extensible:, ..)) ->
-          case new_proto == current {
-            // §10.1.2.1 step 2: If SameValue(V, current) is true, return true.
-            True -> #(state, Ok(JsBool(True)))
-            False ->
-              case extensible {
-                // §10.1.2.1 step 4: If extensible is false, return false.
-                False -> #(state, Ok(JsBool(False)))
-                True ->
-                  // §10.1.2.1 step 7: cycle detection.
-                  case
-                    builtins_object.would_create_cycle(
-                      state.heap,
-                      ref,
-                      new_proto,
-                    )
-                  {
-                    True -> #(state, Ok(JsBool(False)))
-                    False -> {
-                      // §10.1.2.1 step 8: Set O.[[Prototype]] to V.
-                      let heap = {
-                        use slot <- heap.update(state.heap, ref)
-                        case slot {
-                          ObjectSlot(..) ->
-                            ObjectSlot(..slot, prototype: new_proto)
-                          _ -> slot
-                        }
-                      }
-                      #(State(..state, heap:), Ok(JsBool(True)))
-                    }
-                  }
-              }
-          }
-        _ -> #(state, Ok(JsBool(False)))
+      case builtins_object.ordinary_set_prototype_of(state, ref, new_proto) {
+        Ok(state) -> #(state, Ok(JsBool(True)))
+        Error(builtins_object.NotExtensible) | Error(builtins_object.Cyclic) -> #(
+          state,
+          Ok(JsBool(False)),
+        )
       }
   }
 }

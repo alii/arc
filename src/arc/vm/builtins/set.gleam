@@ -26,7 +26,6 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/float
-import gleam/int
 import gleam/list
 import gleam/option.{Some}
 import gleam/result
@@ -93,13 +92,7 @@ pub fn init(
     )
   // §24.2.3.16 Set.prototype [ @@toStringTag ] = "Set"
   // { writable: false, enumerable: false, configurable: true }
-  let h =
-    common.add_symbol_property(
-      h,
-      bt.prototype,
-      value.symbol_to_string_tag,
-      value.data(value.JsString("Set")) |> value.configurable(),
-    )
+  let h = common.add_to_string_tag(h, bt.prototype, "Set")
   // §24.2.3.13 Set.prototype [ @@iterator ] — same function object as .values
   let h =
     common.add_symbol_property(
@@ -181,27 +174,7 @@ fn update_set(
   data: dict.Dict(MapKey, JsValue),
   keys: List(MapKey),
 ) -> Heap {
-  heap.update(h, ref, fn(slot) {
-    case slot {
-      ObjectSlot(
-        properties:,
-        elements:,
-        prototype:,
-        symbol_properties:,
-        extensible:,
-        ..,
-      ) ->
-        ObjectSlot(
-          kind: SetObject(data:, keys:),
-          properties:,
-          elements:,
-          prototype:,
-          symbol_properties:,
-          extensible:,
-        )
-      other -> other
-    }
-  })
+  heap.update_kind(h, ref, SetObject(data:, keys:))
 }
 
 /// ES2024 §24.2.3.1 Set.prototype.add ( value )
@@ -263,7 +236,7 @@ fn set_clear(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) 
 /// ES2024 §24.2.3.5 get Set.prototype.size
 fn set_size(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
   use data, _keys, _ref, state <- require_set(this, state)
-  #(state, Ok(JsNumber(Finite(int.to_float(dict.size(data))))))
+  #(state, Ok(value.from_int(dict.size(data))))
 }
 
 /// ES2024 §24.2.3.6 Set.prototype.forEach ( callbackfn [ , thisArg ] )

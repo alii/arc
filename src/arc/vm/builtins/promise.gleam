@@ -61,13 +61,7 @@ pub fn init(
       static_methods,
     )
   // §27.2.5.6 Promise.prototype [ @@toStringTag ] = "Promise"
-  let h =
-    common.add_symbol_property(
-      h,
-      bt.prototype,
-      value.symbol_to_string_tag,
-      value.builtin_property(value.JsString("Promise")),
-    )
+  let h = common.add_to_string_tag(h, bt.prototype, "Promise")
   #(h, bt)
 }
 

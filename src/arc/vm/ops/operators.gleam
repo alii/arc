@@ -99,7 +99,7 @@ pub fn exec_unaryop(
     }
     BitNot -> {
       use n <- result.map(value.to_number(operand))
-      JsNumber(Finite(int.to_float(int.bitwise_not(num_to_int32(n)))))
+      value.from_int(int.bitwise_not(num_to_int32(n)))
     }
     LogicalNot -> Ok(JsBool(!value.is_truthy(operand)))
     Void -> Ok(value.JsUndefined)
@@ -235,7 +235,7 @@ fn bitwise_binop(
 ) -> Result(JsValue, String) {
   use a <- result.try(value.to_number(left))
   use b <- result.map(value.to_number(right))
-  JsNumber(Finite(int.to_float(op(num_to_int32(a), num_to_int32(b)))))
+  value.from_int(op(num_to_int32(a), num_to_int32(b)))
 }
 
 // ============================================================================

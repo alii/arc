@@ -304,7 +304,7 @@ fn write_last_index(state: State, ref: Ref, idx: Int) -> State {
               properties,
               Named("lastIndex"),
               DataProperty(
-                value: JsNumber(Finite(int.to_float(idx))),
+                value: value.from_int(idx),
                 writable: True,
                 enumerable: False,
                 configurable: False,
@@ -397,9 +397,7 @@ fn regexp_exec(
                 properties: props
                   |> dict.insert(
                     Named("index"),
-                    value.data_property(
-                      JsNumber(Finite(int.to_float(match_start))),
-                    ),
+                    value.data_property(value.from_int(match_start)),
                   )
                   |> dict.insert(
                     Named("input"),
@@ -483,12 +481,7 @@ fn regexp_symbol_match(
         collect_global_matches(pattern, flags, str, ref, state, [])
       case matches {
         [] -> #(state, Ok(JsNull))
-        _ -> {
-          let vals = list.reverse(matches)
-          let #(heap, arr_ref) =
-            common.alloc_array(state.heap, vals, state.builtins.array.prototype)
-          #(State(..state, heap:), Ok(JsObject(arr_ref)))
-        }
+        _ -> state.ok_array(state, list.reverse(matches))
       }
     }
   }
@@ -537,7 +530,7 @@ fn regexp_symbol_search(
   let previous_last_index = read_last_index(state, ref)
   let state = write_last_index(state, ref, 0)
   let result = case ffi_regexp_exec(pattern, flags, str, 0) {
-    Ok([#(start, _), ..]) -> JsNumber(Finite(int.to_float(start)))
+    Ok([#(start, _), ..]) -> value.from_int(start)
     _ -> JsNumber(Finite(-1.0))
   }
   let state = write_last_index(state, ref, previous_last_index)
@@ -671,7 +664,7 @@ fn apply_replacements(
             list.flatten([
               [JsString(match.matched)],
               match.captures,
-              [JsNumber(Finite(int.to_float(match.position))), JsString(str)],
+              [value.from_int(match.position), JsString(str)],
             ])
           use result, state <- state.try_call(
             state,
@@ -1091,24 +1084,18 @@ fn regexp_symbol_split(
         _ -> 0
       }
   }
-  let array_proto = state.builtins.array.prototype
-  let alloc_result = fn(state: State, parts: List(JsValue)) {
-    let #(heap, ref) = common.alloc_array(state.heap, parts, array_proto)
-    #(State(..state, heap:), Ok(JsObject(ref)))
-  }
-
   case lim, string.length(str) {
     // If limit is 0, return empty array
-    0, _ -> alloc_result(state, [])
+    0, _ -> state.ok_array(state, [])
     // Empty string: if regex matches → [], else → [""]
     _, 0 ->
       case ffi_regexp_exec(pattern, flags, str, 0) {
-        Ok(_) -> alloc_result(state, [])
-        Error(Nil) -> alloc_result(state, [JsString(str)])
+        Ok(_) -> state.ok_array(state, [])
+        Error(Nil) -> state.ok_array(state, [JsString(str)])
       }
     _, str_len -> {
       let parts = split_loop(pattern, flags, str, str_len, 0, 0, lim, [])
-      alloc_result(state, parts)
+      state.ok_array(state, parts)
     }
   }
 }

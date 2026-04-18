@@ -4,7 +4,7 @@ import arc/vm/heap
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
-import arc/vm/state.{type Heap, type State, State}
+import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, type Ref, type StringNativeFn, Finite, JsNull, JsNumber,
   JsObject, JsString, JsUndefined, NaN, StringFromCharCode, StringFromCodePoint,
@@ -237,7 +237,7 @@ fn string_char_code_at(
       case string.to_utf_codepoints(ch) {
         [cp, ..] -> {
           let code = string.utf_codepoint_to_int(cp)
-          #(state, Ok(JsNumber(Finite(int.to_float(code)))))
+          #(state, Ok(value.from_int(code)))
         }
         [] -> #(state, Ok(JsNumber(NaN)))
       }
@@ -271,7 +271,7 @@ fn string_index_of(
   let from = helpers.get_int_arg(args, 1, 0)
   // Step 8: StringIndexOf(S, searchStr, start)
   let result = index_of_from(s, search, from)
-  #(state, Ok(JsNumber(Finite(int.to_float(result)))))
+  #(state, Ok(value.from_int(result)))
 }
 
 /// ES2024 22.1.3.11 — String.prototype.lastIndexOf ( searchString [ , position ] )
@@ -318,7 +318,7 @@ fn string_last_index_of(
   }
   // Steps 10-11: search backwards from start
   let result = last_index_of_from(s, search, from)
-  #(state, Ok(JsNumber(Finite(int.to_float(result)))))
+  #(state, Ok(value.from_int(result)))
 }
 
 /// ES2024 22.1.3.8 — String.prototype.includes ( searchString [ , position ] )
@@ -892,16 +892,11 @@ fn string_split_parts(
   sep_val: JsValue,
   lim: Int,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let array_proto = state.builtins.array.prototype
-  let alloc = fn(state: State, parts) {
-    let #(heap, ref) = common.alloc_array(state.heap, parts, array_proto)
-    #(State(..state, heap:), Ok(JsObject(ref)))
-  }
   case lim, sep_val {
     // Step 6: If lim = 0, return empty array.
-    0, _ -> alloc(state, [])
+    0, _ -> state.ok_array(state, [])
     // Step 7: If separator is undefined, return [S].
-    _, JsUndefined -> alloc(state, [JsString(s)])
+    _, JsUndefined -> state.ok_array(state, [JsString(s)])
     _, _ -> {
       // Step 5: R = ToString(separator)
       use sep, state <- coerce.try_to_string(state, sep_val)
@@ -909,7 +904,7 @@ fn string_split_parts(
         "" -> string.to_graphemes(s) |> list.map(JsString)
         _ -> string.split(s, sep) |> list.map(JsString)
       }
-      alloc(state, list.take(parts, lim))
+      state.ok_array(state, list.take(parts, lim))
     }
   }
 }
@@ -1180,9 +1175,7 @@ fn string_code_point_at(
       // Step 6-7: get the codepoint at position and return it
       list.drop(codepoints, pos)
       |> list.first
-      |> result.map(fn(cp) {
-        JsNumber(Finite(int.to_float(string.utf_codepoint_to_int(cp))))
-      })
+      |> result.map(fn(cp) { value.from_int(string.utf_codepoint_to_int(cp)) })
       |> result.unwrap(JsUndefined)
       |> fn(v) { #(state, Ok(v)) }
   }

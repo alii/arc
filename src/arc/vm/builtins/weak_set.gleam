@@ -40,13 +40,7 @@ pub fn init(
       0,
       [],
     )
-  let h =
-    common.add_symbol_property(
-      h,
-      bt.prototype,
-      value.symbol_to_string_tag,
-      value.builtin_property(value.JsString("WeakSet")),
-    )
+  let h = common.add_to_string_tag(h, bt.prototype, "WeakSet")
   #(h, bt)
 }
 
@@ -159,25 +153,5 @@ fn require_weak_set(
 
 /// Helper to update a WeakSetObject's data on the heap.
 fn update_weak_set(h: Heap, ref: Ref, data: dict.Dict(Ref, Bool)) -> Heap {
-  heap.update(h, ref, fn(slot) {
-    case slot {
-      ObjectSlot(
-        properties:,
-        elements:,
-        prototype:,
-        symbol_properties:,
-        extensible:,
-        ..,
-      ) ->
-        ObjectSlot(
-          kind: WeakSetObject(data:),
-          properties:,
-          elements:,
-          prototype:,
-          symbol_properties:,
-          extensible:,
-        )
-      other -> other
-    }
-  })
+  heap.update_kind(h, ref, WeakSetObject(data:))
 }

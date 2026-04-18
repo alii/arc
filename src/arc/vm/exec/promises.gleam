@@ -50,10 +50,7 @@ fn alloc_combinator_state(h: Heap, b: Builtins, count: Int) -> #(Heap, Ref, Ref)
   let #(h, values_ref) =
     common.alloc_array(h, list.repeat(JsUndefined, count), b.array.prototype)
   let #(h, remaining_ref) =
-    heap.alloc(
-      h,
-      value.BoxSlot(value: JsNumber(Finite(int.to_float(count + 1)))),
-    )
+    heap.alloc(h, value.BoxSlot(value: value.from_int(count + 1)))
   #(h, values_ref, remaining_ref)
 }
 
