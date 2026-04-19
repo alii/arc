@@ -280,6 +280,14 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       "unescape",
       1,
     )
+  let #(h, structured_clone) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.ArcNative(value.ArcStructuredClone),
+      "structuredClone",
+      1,
+    )
 
   #(
     h,
@@ -326,6 +334,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       encode_uri_component:,
       escape:,
       unescape:,
+      structured_clone:,
       array_iterator_proto:,
       set_iterator_proto:,
       map_iterator_proto:,
@@ -410,6 +419,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("encodeURIComponent", JsObject(b.encode_uri_component)),
     Builtin("escape", JsObject(b.escape)),
     Builtin("unescape", JsObject(b.unescape)),
+    Builtin("structuredClone", JsObject(b.structured_clone)),
   ]
 
   // globalThis heap object — property descriptors for JS-visible reflection

@@ -1,26 +1,28 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/regexp
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArcNativeFn, type JsValue, type MailboxEvent, type PortableMessage,
-  type Ref, ArcLog, ArcNative, ArcPeek, ArcPidToString, ArcSelect, ArcSelectorOn,
-  ArcSelectorReceive, ArcSelf, ArcSetTimeout, ArcSleep, ArcSubject,
-  ArcSubjectReceive, ArcSubjectReceiveAsync, ArcSubjectSend, ArcSubjectToString,
-  DataProperty, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
-  JsUndefined, JsUninitialized, ObjectSlot, OrdinaryObject, PidObject, PmArray,
-  PmBigInt, PmBool, PmNull, PmNumber, PmObject, PmPid, PmString, PmSubject,
-  PmSymbol, PmUndefined, PromiseFulfilled, PromisePending, PromiseRejected,
-  SelectorObject, SettlePromise, SubjectObject,
+  type Ref, AccessorProperty, ArcLog, ArcNative, ArcPeek, ArcPidToString,
+  ArcSelect, ArcSelectorOn, ArcSelectorReceive, ArcSelf, ArcSetTimeout, ArcSleep,
+  ArcSubject, ArcSubjectReceive, ArcSubjectReceiveAsync, ArcSubjectSend,
+  ArcSubjectToString, DataProperty, JsBigInt, JsBool, JsNull, JsNumber, JsObject,
+  JsString, JsSymbol, JsUndefined, JsUninitialized, ObjectSlot, OrdinaryObject,
+  PidObject, PortableMessage, PrArray, PrBooleanObject, PrDate, PrMap,
+  PrNumberObject, PrObject, PrPid, PrRegExp, PrSet, PrStringObject, PrSubject,
+  PromiseFulfilled, PromisePending, PromiseRejected, PvBigInt, PvBool, PvNull,
+  PvNumber, PvRef, PvString, PvSymbol, PvUndefined, SelectorObject,
+  SettlePromise, SubjectObject, WellKnownSymbol,
 }
 import gleam/dict
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/set
 import gleam/string
 
 // -- FFI declarations --------------------------------------------------------
@@ -119,6 +121,7 @@ pub fn dispatch(
     value.ArcSubjectReceive -> subject_receive(this, args, state)
     ArcSubjectReceiveAsync -> subject_receive_async(this, args, state)
     value.ArcSubjectToString -> subject_to_string(this, state)
+    value.ArcStructuredClone -> structured_clone(args, state)
   }
 }
 
@@ -219,7 +222,14 @@ fn set_timeout_inner(
       JsUndefined,
     )
   let timer_ref =
-    ffi_send_after(ms, ffi_self(), SettlePromise(data_ref, Ok(PmUndefined)))
+    ffi_send_after(
+      ms,
+      ffi_self(),
+      SettlePromise(
+        data_ref,
+        Ok(PortableMessage(root: PvUndefined, records: dict.new())),
+      ),
+    )
   let #(heap, timer_obj) =
     heap.alloc(
       state.heap,
@@ -520,7 +530,7 @@ fn subject_send(
     JsObject(ref) ->
       case heap.read_subject(state.heap, ref) {
         Some(#(pid, tag)) ->
-          case serialize(state.heap, msg_arg) {
+          case serialize(state.heap, msg_arg, ArcClone) {
             Ok(portable) -> {
               ffi_send_subject(pid, tag, portable)
               #(state, Ok(JsUndefined))
@@ -823,228 +833,505 @@ fn select_handle_match(
 
 // -- Message serialization ---------------------------------------------------
 
-/// Serialize a JsValue into a PortableMessage for cross-process transfer.
-/// Only supports primitives, plain objects, arrays, and PIDs.
-/// Returns Error(reason) for unsupported types (functions, promises, etc.).
-fn serialize(heap: Heap, val: JsValue) -> Result(PortableMessage, String) {
-  serialize_inner(heap, val, set.new())
+/// How strictly to enforce HTML §2.7.3 StructuredSerializeInternal.
+pub type CloneMode {
+  /// HTML structuredClone semantics: reject Symbol primitives, symbol-keyed
+  /// properties, Function objects, and Arc platform objects (Pid/Subject/…).
+  SpecClone
+  /// Arc IPC semantics: also allow well-known symbols, PidObject,
+  /// SubjectObject. Everything else as SpecClone.
+  ArcClone
 }
 
-fn serialize_inner(
+/// Threaded serialization state:
+/// (heap-ref.id → record-id memo, records table, next record id).
+type SerCtx =
+  #(dict.Dict(Int, Int), dict.Dict(Int, value.PortableRecord), Int)
+
+/// Serialize a JsValue into a PortableMessage per HTML
+/// StructuredSerializeInternal. Heap objects are interned into a flat
+/// `records` table keyed by integer id so cycles and shared identity survive
+/// the round-trip; primitives are inlined.
+pub fn serialize(
   heap: Heap,
   val: JsValue,
-  seen: set.Set(Int),
+  mode: CloneMode,
 ) -> Result(PortableMessage, String) {
-  case val {
-    JsUndefined -> Ok(PmUndefined)
-    JsNull -> Ok(PmNull)
-    JsBool(b) -> Ok(PmBool(b))
-    JsNumber(n) -> Ok(PmNumber(n))
-    JsString(s) -> Ok(PmString(s))
-    JsBigInt(n) -> Ok(PmBigInt(n))
-    JsObject(ref) -> serialize_heap_object(heap, ref, seen)
-    JsSymbol(id) -> Ok(value.PmSymbol(id))
-    JsUninitialized -> Error("cannot send uninitialized value")
-  }
+  let ctx = #(dict.new(), dict.new(), 0)
+  use #(root, #(_memo, records, _next)) <- result.map(serialize_value(
+    heap,
+    val,
+    mode,
+    ctx,
+  ))
+  PortableMessage(root:, records:)
 }
 
-fn serialize_heap_object(
+fn serialize_value(
   heap: Heap,
-  ref: Ref,
-  seen: set.Set(Int),
-) -> Result(PortableMessage, String) {
-  case set.contains(seen, ref.id) {
-    True -> Error("cannot send circular structure between processes")
-    False -> {
-      let seen = set.insert(seen, ref.id)
-      case heap.read(heap, ref) {
-        Some(ObjectSlot(kind: value.ArrayObject(length:), elements:, ..)) ->
-          serialize_array(heap, elements, length, 0, seen, [])
-        Some(ObjectSlot(
-          kind: OrdinaryObject,
-          properties:,
-          symbol_properties:,
-          ..,
-        )) -> {
-          use props <- result.try(
-            serialize_object_props(heap, dict.to_list(properties), seen, []),
-          )
-          use sym_props <- result.try(
-            serialize_symbol_props(heap, symbol_properties, seen, []),
-          )
-          Ok(PmObject(properties: props, symbol_properties: sym_props))
+  val: JsValue,
+  mode: CloneMode,
+  ctx: SerCtx,
+) -> Result(#(value.PortableValue, SerCtx), String) {
+  case val {
+    JsUndefined | JsUninitialized -> Ok(#(PvUndefined, ctx))
+    JsNull -> Ok(#(PvNull, ctx))
+    JsBool(b) -> Ok(#(PvBool(b), ctx))
+    JsNumber(n) -> Ok(#(PvNumber(n), ctx))
+    JsString(s) -> Ok(#(PvString(s), ctx))
+    JsBigInt(n) -> Ok(#(PvBigInt(n), ctx))
+    JsSymbol(WellKnownSymbol(id:)) ->
+      case mode {
+        ArcClone -> Ok(#(PvSymbol(id), ctx))
+        SpecClone -> Error(uncloneable("Symbol"))
+      }
+    JsSymbol(_) -> Error(uncloneable("Symbol"))
+    JsObject(ref) -> {
+      let #(memo, records, next) = ctx
+      case dict.get(memo, ref.id) {
+        Ok(existing) -> Ok(#(PvRef(existing), ctx))
+        Error(Nil) -> {
+          let id = next
+          // Memo BEFORE recursing so cycles resolve to PvRef(id).
+          let ctx = #(dict.insert(memo, ref.id, id), records, next + 1)
+          use #(record, #(memo, records, next)) <- result.map(serialize_object(
+            heap,
+            ref,
+            mode,
+            ctx,
+          ))
+          #(PvRef(id), #(memo, dict.insert(records, id, record), next))
         }
-        Some(ObjectSlot(kind: PidObject(pid:), ..)) -> Ok(PmPid(pid))
-        Some(ObjectSlot(kind: SubjectObject(pid:, tag:), ..)) ->
-          Ok(PmSubject(pid:, tag:))
-        _ -> Error("cannot send functions or special objects between processes")
       }
     }
   }
 }
 
-fn serialize_array(
+fn serialize_object(
   heap: Heap,
-  elements: value.JsElements,
+  ref: Ref,
+  mode: CloneMode,
+  ctx: SerCtx,
+) -> Result(#(value.PortableRecord, SerCtx), String) {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(kind:, properties:, symbol_properties:, elements: els, ..)) ->
+      serialize_kind(heap, kind, properties, symbol_properties, els, mode, ctx)
+    // JsObject refs only ever point to ObjectSlot — anything else is heap
+    // corruption. Bind so the diagnostic is actionable.
+    Some(other) ->
+      Error("internal slot " <> string.inspect(other) <> " could not be cloned")
+    None -> Error("dangling reference could not be cloned")
+  }
+}
+
+fn serialize_kind(
+  heap: Heap,
+  kind: value.ExoticKind(ctx),
+  properties: dict.Dict(value.PropertyKey, value.Property),
+  symbol_properties: List(#(value.SymbolId, value.Property)),
+  els: value.JsElements,
+  mode: CloneMode,
+  ctx: SerCtx,
+) -> Result(#(value.PortableRecord, SerCtx), String) {
+  case kind {
+    value.ArrayObject(length:) -> {
+      use #(items, ctx) <- result.map(
+        serialize_indexed(heap, els, length, 0, mode, ctx, []),
+      )
+      #(PrArray(items:, length:), ctx)
+    }
+    OrdinaryObject -> {
+      use #(props, ctx) <- result.try(
+        serialize_props(heap, dict.to_list(properties), mode, ctx, []),
+      )
+      use #(syms, ctx) <- result.map(case mode {
+        SpecClone -> Ok(#([], ctx))
+        ArcClone -> serialize_sym_props(heap, symbol_properties, mode, ctx, [])
+      })
+      #(PrObject(properties: props, symbol_properties: syms), ctx)
+    }
+    value.MapObject(entries:, keys_rev:, ..) -> {
+      let pairs =
+        list.reverse(keys_rev)
+        |> list.filter_map(fn(k) {
+          dict.get(entries, k)
+          |> result.map(fn(v) { #(value.map_key_to_js(k), v) })
+        })
+      use #(out, ctx) <- result.map(serialize_pairs(heap, pairs, mode, ctx, []))
+      #(PrMap(entries: out), ctx)
+    }
+    value.SetObject(data:, keys:) -> {
+      let vals = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+      use #(out, ctx) <- result.map(serialize_list(heap, vals, mode, ctx, []))
+      #(PrSet(entries: out), ctx)
+    }
+    value.DateObject(time_value:) -> Ok(#(PrDate(time_value), ctx))
+    value.RegExpObject(pattern:, flags:) ->
+      Ok(#(PrRegExp(pattern:, flags:), ctx))
+    value.BooleanObject(value: b) -> Ok(#(PrBooleanObject(b), ctx))
+    value.NumberObject(value: n) -> Ok(#(PrNumberObject(n), ctx))
+    value.StringObject(value: s) -> Ok(#(PrStringObject(s), ctx))
+    PidObject(pid:) ->
+      case mode {
+        ArcClone -> Ok(#(PrPid(pid), ctx))
+        SpecClone -> Error(uncloneable("Pid"))
+      }
+    SubjectObject(pid:, tag:) ->
+      case mode {
+        ArcClone -> Ok(#(PrSubject(pid:, tag:), ctx))
+        SpecClone -> Error(uncloneable("Subject"))
+      }
+    value.FunctionObject(..) | value.NativeFunction(..) ->
+      Error(uncloneable("Function"))
+    value.PromiseObject(..) -> Error(uncloneable("Promise"))
+    value.GeneratorObject(..) -> Error(uncloneable("Generator"))
+    value.AsyncGeneratorObject(..) -> Error(uncloneable("AsyncGenerator"))
+    value.WeakMapObject(..) -> Error(uncloneable("WeakMap"))
+    value.WeakSetObject(..) -> Error(uncloneable("WeakSet"))
+    SelectorObject(..) -> Error(uncloneable("Selector"))
+    value.TimerObject(..) -> Error(uncloneable("Timer"))
+    value.SymbolObject(..) -> Error(uncloneable("Symbol"))
+    value.ArgumentsObject(..) -> Error(uncloneable("Arguments"))
+    value.ArrayIteratorObject(..)
+    | value.SetIteratorObject(..)
+    | value.MapIteratorObject(..)
+    | value.IteratorHelperObject(..)
+    | value.WrapForValidIteratorObject(..)
+    | value.AsyncFromSyncIteratorObject(..) -> Error(uncloneable("Iterator"))
+  }
+}
+
+fn uncloneable(name: String) -> String {
+  "#<" <> name <> "> could not be cloned"
+}
+
+/// Walk array elements 0..length, treating holes as undefined.
+fn serialize_indexed(
+  heap: Heap,
+  els: value.JsElements,
   length: Int,
   i: Int,
-  seen: set.Set(Int),
-  acc: List(PortableMessage),
-) -> Result(PortableMessage, String) {
+  mode: CloneMode,
+  ctx: SerCtx,
+  acc: List(value.PortableValue),
+) -> Result(#(List(value.PortableValue), SerCtx), String) {
   case i >= length {
-    True -> Ok(PmArray(list.reverse(acc)))
+    True -> Ok(#(list.reverse(acc), ctx))
     False -> {
-      let val = elements.get_option(elements, i) |> option.unwrap(JsUndefined)
-      use pm <- result.try(serialize_inner(heap, val, seen))
-      serialize_array(heap, elements, length, i + 1, seen, [pm, ..acc])
+      let v = elements.get_option(els, i) |> option.unwrap(JsUndefined)
+      use #(pv, ctx) <- result.try(serialize_value(heap, v, mode, ctx))
+      serialize_indexed(heap, els, length, i + 1, mode, ctx, [pv, ..acc])
     }
   }
 }
 
-fn serialize_object_props(
+fn serialize_list(
+  heap: Heap,
+  vals: List(JsValue),
+  mode: CloneMode,
+  ctx: SerCtx,
+  acc: List(value.PortableValue),
+) -> Result(#(List(value.PortableValue), SerCtx), String) {
+  case vals {
+    [] -> Ok(#(list.reverse(acc), ctx))
+    [v, ..rest] -> {
+      use #(pv, ctx) <- result.try(serialize_value(heap, v, mode, ctx))
+      serialize_list(heap, rest, mode, ctx, [pv, ..acc])
+    }
+  }
+}
+
+fn serialize_pairs(
+  heap: Heap,
+  pairs: List(#(JsValue, JsValue)),
+  mode: CloneMode,
+  ctx: SerCtx,
+  acc: List(#(value.PortableValue, value.PortableValue)),
+) -> Result(
+  #(List(#(value.PortableValue, value.PortableValue)), SerCtx),
+  String,
+) {
+  case pairs {
+    [] -> Ok(#(list.reverse(acc), ctx))
+    [#(k, v), ..rest] -> {
+      use #(pk, ctx) <- result.try(serialize_value(heap, k, mode, ctx))
+      use #(pv, ctx) <- result.try(serialize_value(heap, v, mode, ctx))
+      serialize_pairs(heap, rest, mode, ctx, [#(pk, pv), ..acc])
+    }
+  }
+}
+
+/// Serialize string/index-keyed own properties. Per HTML §2.7.3 step 26.1,
+/// accessor and non-enumerable data properties are silently SKIPPED in both
+/// modes (only enumerable own data properties are copied).
+fn serialize_props(
   heap: Heap,
   entries: List(#(value.PropertyKey, value.Property)),
-  seen: set.Set(Int),
-  acc: List(#(value.PropertyKey, PortableMessage)),
-) -> Result(List(#(value.PropertyKey, PortableMessage)), String) {
+  mode: CloneMode,
+  ctx: SerCtx,
+  acc: List(#(value.PropertyKey, value.PortableValue)),
+) -> Result(#(List(#(value.PropertyKey, value.PortableValue)), SerCtx), String) {
   case entries {
-    [] -> Ok(list.reverse(acc))
-    [#(key, DataProperty(value: val, enumerable: True, ..)), ..rest] -> {
-      use pm <- result.try(serialize_inner(heap, val, seen))
-      serialize_object_props(heap, rest, seen, [#(key, pm), ..acc])
+    [] -> Ok(#(list.reverse(acc), ctx))
+    [#(key, DataProperty(value: v, enumerable: True, ..)), ..rest] -> {
+      use #(pv, ctx) <- result.try(serialize_value(heap, v, mode, ctx))
+      serialize_props(heap, rest, mode, ctx, [#(key, pv), ..acc])
     }
-    [#(key, DataProperty(enumerable: False, ..)), ..] ->
-      Error(
-        "cannot send object with non-enumerable property \""
-        <> value.key_to_string(key)
-        <> "\" between processes",
-      )
-    [#(key, value.AccessorProperty(..)), ..] ->
-      Error(
-        "cannot send object with accessor property \""
-        <> value.key_to_string(key)
-        <> "\" between processes",
-      )
+    [#(_, DataProperty(enumerable: False, ..)), ..rest]
+    | [#(_, AccessorProperty(..)), ..rest] ->
+      serialize_props(heap, rest, mode, ctx, acc)
   }
 }
 
-fn serialize_symbol_props(
+/// Serialize symbol-keyed own properties — ArcClone only. Same skip rules
+/// as `serialize_props`.
+fn serialize_sym_props(
   heap: Heap,
   entries: List(#(value.SymbolId, value.Property)),
-  seen: set.Set(Int),
-  acc: List(#(value.SymbolId, PortableMessage)),
-) -> Result(List(#(value.SymbolId, PortableMessage)), String) {
+  mode: CloneMode,
+  ctx: SerCtx,
+  acc: List(#(value.SymbolId, value.PortableValue)),
+) -> Result(#(List(#(value.SymbolId, value.PortableValue)), SerCtx), String) {
   case entries {
-    [] -> Ok(list.reverse(acc))
-    [#(key, DataProperty(value: val, ..)), ..rest] -> {
-      use pm <- result.try(serialize_inner(heap, val, seen))
-      serialize_symbol_props(heap, rest, seen, [#(key, pm), ..acc])
+    [] -> Ok(#(list.reverse(acc), ctx))
+    [#(id, DataProperty(value: v, enumerable: True, ..)), ..rest] -> {
+      use #(pv, ctx) <- result.try(serialize_value(heap, v, mode, ctx))
+      serialize_sym_props(heap, rest, mode, ctx, [#(id, pv), ..acc])
     }
-    [#(_key, value.AccessorProperty(..)), ..] ->
-      Error(
-        "cannot send object with accessor symbol property between processes",
-      )
+    [#(_, DataProperty(enumerable: False, ..)), ..rest]
+    | [#(_, AccessorProperty(..)), ..rest] ->
+      serialize_sym_props(heap, rest, mode, ctx, acc)
   }
 }
 
 // -- Message deserialization -------------------------------------------------
 
+/// Record-id → heap Ref. Built fully in pass 1 before any child resolution,
+/// so cyclic `PvRef`s always hit a live shell.
+type DeMemo =
+  dict.Dict(Int, Ref)
+
 /// Deserialize a PortableMessage into a JsValue, allocating objects on the heap.
+///
+/// Two-pass to make cycles and shared identity work:
+///   1. Allocate an empty shell for every record, building the id→Ref memo.
+///   2. Fill container records' children by resolving PortableValues against
+///      the now-complete memo, then mutate each shell in place.
 pub fn deserialize(
   heap: Heap,
   builtins: common.Builtins,
   msg: PortableMessage,
 ) -> #(Heap, JsValue) {
-  case msg {
-    PmUndefined -> #(heap, JsUndefined)
-    PmNull -> #(heap, JsNull)
-    PmBool(b) -> #(heap, JsBool(b))
-    PmNumber(n) -> #(heap, JsNumber(n))
-    PmString(s) -> #(heap, JsString(s))
-    PmBigInt(n) -> #(heap, JsBigInt(n))
-    PmSymbol(id) -> #(heap, JsSymbol(id))
-    PmPid(pid) ->
-      alloc_pid_object(
+  let PortableMessage(root:, records:) = msg
+  // Pass 1: allocate a shell for every record so all refs exist.
+  let #(heap, memo) =
+    dict.fold(records, #(heap, dict.new()), fn(acc, id, record) {
+      let #(heap, memo) = acc
+      let #(heap, ref) = alloc_shell(heap, builtins, record)
+      #(heap, dict.insert(memo, id, ref))
+    })
+  // Pass 2: fill container records now that every PvRef is resolvable.
+  let heap =
+    dict.fold(records, heap, fn(heap, id, record) {
+      case dict.get(memo, id) {
+        Ok(ref) -> fill_record(heap, memo, ref, record)
+        // unreachable — pass 1 inserted every id
+        Error(Nil) -> heap
+      }
+    })
+  #(heap, resolve_value(root, memo))
+}
+
+/// Pass 1: allocate the right ExoticKind + prototype, no children yet.
+/// Leaf kinds (Date/RegExp/wrappers/Pid/Subject) are fully built here since
+/// they carry no PortableValue children.
+fn alloc_shell(
+  heap: Heap,
+  builtins: common.Builtins,
+  record: value.PortableRecord,
+) -> #(Heap, Ref) {
+  case record {
+    PrObject(..) ->
+      common.alloc_wrapper(heap, OrdinaryObject, builtins.object.prototype)
+    PrArray(length:, ..) ->
+      common.alloc_wrapper(
         heap,
-        builtins.object.prototype,
-        builtins.function.prototype,
-        pid,
+        value.ArrayObject(length:),
+        builtins.array.prototype,
       )
-    PmSubject(pid:, tag:) ->
-      alloc_subject_object(
+    PrMap(..) ->
+      common.alloc_wrapper(
         heap,
-        builtins.object.prototype,
-        builtins.function.prototype,
-        pid,
-        tag,
+        value.MapObject(entries: dict.new(), keys_rev: [], keys_len: 0),
+        builtins.map.prototype,
       )
-    PmArray(items) -> {
-      let #(heap, values) = deserialize_list(heap, builtins, items)
-      let #(heap, ref) =
-        common.alloc_array(heap, values, builtins.array.prototype)
-      #(heap, JsObject(ref))
-    }
-    PmObject(properties: entries, symbol_properties: sym_entries) -> {
-      let #(heap, props) = deserialize_object_entries(heap, builtins, entries)
-      let #(heap, sym_props) =
-        deserialize_symbol_entries(heap, builtins, sym_entries)
-      let #(heap, ref) =
-        heap.alloc(
+    PrSet(..) ->
+      common.alloc_wrapper(
+        heap,
+        value.SetObject(data: dict.new(), keys: []),
+        builtins.set.prototype,
+      )
+    PrDate(time_value) ->
+      common.alloc_wrapper(
+        heap,
+        value.DateObject(time_value:),
+        builtins.date.prototype,
+      )
+    PrRegExp(pattern:, flags:) ->
+      regexp.alloc_regexp(heap, builtins.regexp.prototype, pattern, flags)
+    PrBooleanObject(b) ->
+      common.alloc_wrapper(
+        heap,
+        value.BooleanObject(b),
+        builtins.boolean.prototype,
+      )
+    PrNumberObject(n) ->
+      common.alloc_wrapper(
+        heap,
+        value.NumberObject(n),
+        builtins.number.prototype,
+      )
+    PrStringObject(s) ->
+      common.alloc_wrapper(
+        heap,
+        value.StringObject(s),
+        builtins.string.prototype,
+      )
+    PrPid(pid) -> {
+      let #(heap, v) =
+        alloc_pid_object(
           heap,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.from_list(props),
-            elements: elements.new(),
-            prototype: Some(builtins.object.prototype),
-            symbol_properties: sym_props,
-            extensible: True,
-          ),
+          builtins.object.prototype,
+          builtins.function.prototype,
+          pid,
         )
-      #(heap, JsObject(ref))
+      let assert JsObject(ref) = v
+      #(heap, ref)
+    }
+    PrSubject(pid:, tag:) -> {
+      let #(heap, v) =
+        alloc_subject_object(
+          heap,
+          builtins.object.prototype,
+          builtins.function.prototype,
+          pid,
+          tag,
+        )
+      let assert JsObject(ref) = v
+      #(heap, ref)
     }
   }
 }
 
-fn deserialize_list(
-  heap: Heap,
-  builtins: common.Builtins,
-  items: List(PortableMessage),
-) -> #(Heap, List(JsValue)) {
-  let #(heap, rev) =
-    list.fold(items, #(heap, []), fn(acc, item) {
-      let #(heap, vals) = acc
-      let #(heap, val) = deserialize(heap, builtins, item)
-      #(heap, [val, ..vals])
-    })
-  #(heap, list.reverse(rev))
+/// PortableValue → JsValue once the memo is complete. Pure, no heap writes.
+fn resolve_value(pv: value.PortableValue, memo: DeMemo) -> JsValue {
+  case pv {
+    PvUndefined -> JsUndefined
+    PvNull -> JsNull
+    PvBool(b) -> JsBool(b)
+    PvNumber(n) -> JsNumber(n)
+    PvString(s) -> JsString(s)
+    PvBigInt(n) -> JsBigInt(n)
+    PvSymbol(id) -> JsSymbol(WellKnownSymbol(id:))
+    PvRef(id) ->
+      case dict.get(memo, id) {
+        Ok(ref) -> JsObject(ref)
+        // Dangling ref — only possible via a malformed message.
+        Error(Nil) -> JsUndefined
+      }
+  }
 }
 
-fn deserialize_symbol_entries(
+/// Pass 2: fill children of container records. Leaf kinds are no-ops.
+fn fill_record(
   heap: Heap,
-  builtins: common.Builtins,
-  entries: List(#(value.SymbolId, PortableMessage)),
-) -> #(Heap, List(#(value.SymbolId, value.Property))) {
-  let #(heap, rev) =
-    list.fold(entries, #(heap, []), fn(acc, entry) {
-      let #(heap, props) = acc
-      let #(key, pm) = entry
-      let #(heap, val) = deserialize(heap, builtins, pm)
-      #(heap, [#(key, value.data_property(val)), ..props])
-    })
-  #(heap, list.reverse(rev))
+  memo: DeMemo,
+  ref: Ref,
+  record: value.PortableRecord,
+) -> Heap {
+  case record {
+    PrObject(properties:, symbol_properties:) -> {
+      let props =
+        list.map(properties, fn(e) {
+          #(e.0, value.data_property(resolve_value(e.1, memo)))
+        })
+      let syms =
+        list.map(symbol_properties, fn(e) {
+          #(e.0, value.data_property(resolve_value(e.1, memo)))
+        })
+      use slot <- heap.update(heap, ref)
+      case slot {
+        ObjectSlot(..) ->
+          ObjectSlot(
+            ..slot,
+            properties: dict.from_list(props),
+            symbol_properties: syms,
+          )
+        other -> other
+      }
+    }
+    PrArray(items:, ..) -> {
+      let values = list.map(items, resolve_value(_, memo))
+      use slot <- heap.update(heap, ref)
+      case slot {
+        ObjectSlot(..) ->
+          ObjectSlot(..slot, elements: elements.from_list(values))
+        other -> other
+      }
+    }
+    PrMap(entries:) -> {
+      let #(data, keys_rev, keys_len) =
+        list.fold(entries, #(dict.new(), [], 0), fn(acc, e) {
+          let #(data, keys_rev, n) = acc
+          let k = value.js_to_map_key(resolve_value(e.0, memo))
+          let v = resolve_value(e.1, memo)
+          #(dict.insert(data, k, v), [k, ..keys_rev], n + 1)
+        })
+      heap.update_kind(
+        heap,
+        ref,
+        value.MapObject(entries: data, keys_rev:, keys_len:),
+      )
+    }
+    PrSet(entries:) -> {
+      let #(data, keys) =
+        list.fold(entries, #(dict.new(), []), fn(acc, pv) {
+          let #(data, keys) = acc
+          let v = resolve_value(pv, memo)
+          let k = value.js_to_map_key(v)
+          #(dict.insert(data, k, v), [k, ..keys])
+        })
+      heap.update_kind(heap, ref, value.SetObject(data:, keys:))
+    }
+    // Leaf records — fully built in pass 1, nothing to fill.
+    PrDate(..)
+    | PrRegExp(..)
+    | PrBooleanObject(..)
+    | PrNumberObject(..)
+    | PrStringObject(..)
+    | PrPid(..)
+    | PrSubject(..) -> heap
+  }
 }
 
-fn deserialize_object_entries(
-  heap: Heap,
-  builtins: common.Builtins,
-  entries: List(#(value.PropertyKey, PortableMessage)),
-) -> #(Heap, List(#(value.PropertyKey, value.Property))) {
-  let #(heap, rev) =
-    list.fold(entries, #(heap, []), fn(acc, entry) {
-      let #(heap, props) = acc
-      let #(key, pm) = entry
-      let #(heap, val) = deserialize(heap, builtins, pm)
-      #(heap, [#(key, value.data_property(val)), ..props])
-    })
-  #(heap, list.reverse(rev))
+// -- structuredClone ---------------------------------------------------------
+
+/// HTML structuredClone(value) — serialize with SpecClone semantics then
+/// deserialize on the same heap. No transfer-list support. DataCloneError is
+/// surfaced as TypeError (Arc has no DOMException hierarchy).
+fn structured_clone(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let val = case args {
+    [a, ..] -> a
+    [] -> JsUndefined
+  }
+  case serialize(state.heap, val, SpecClone) {
+    Ok(msg) -> {
+      let #(heap, cloned) = deserialize(state.heap, state.builtins, msg)
+      #(State(..state, heap:), Ok(cloned))
+    }
+    Error(reason) -> state.type_error(state, reason)
+  }
 }

@@ -128,21 +128,51 @@ pub type ErlangTimerRef
 /// A serializable message that can be sent between BEAM processes.
 /// Materializes heap-allocated structures (objects, arrays) into
 /// self-contained values that don't reference any specific VM heap.
+/// A serialized JS value graph, structured per the HTML spec's
+/// StructuredSerializeInternal (§2.7.3): primitives are inlined, heap objects
+/// are interned into `records` and referenced by integer id so that cycles
+/// and shared identity survive the round-trip. Arc IPC uses this same shape
+/// with extra record kinds (Pid, Subject) that the spec algorithm would
+/// reject — see `CloneMode` at the serialize site.
 pub type PortableMessage {
-  PmUndefined
-  PmNull
-  PmBool(Bool)
-  PmNumber(JsNum)
-  PmString(String)
-  PmBigInt(BigInt)
-  PmArray(List(PortableMessage))
-  PmObject(
-    properties: List(#(PropertyKey, PortableMessage)),
-    symbol_properties: List(#(SymbolId, PortableMessage)),
+  PortableMessage(root: PortableValue, records: Dict(Int, PortableRecord))
+}
+
+/// Leaf in a serialized graph — either an inlined primitive or a pointer
+/// into the message's `records` table.
+pub type PortableValue {
+  PvUndefined
+  PvNull
+  PvBool(Bool)
+  PvNumber(JsNum)
+  PvString(String)
+  PvBigInt(BigInt)
+  /// Arc extension: well-known symbols are sent by id.
+  PvSymbol(id: Int)
+  /// Reference into `PortableMessage.records`.
+  PvRef(Int)
+}
+
+/// One interned heap object in a serialized graph. Children are
+/// `PortableValue`s, so they may point back into the same table (cycles).
+pub type PortableRecord {
+  PrObject(
+    properties: List(#(PropertyKey, PortableValue)),
+    /// Arc extension; always empty in spec mode.
+    symbol_properties: List(#(SymbolId, PortableValue)),
   )
-  PmPid(ErlangPid)
-  PmSubject(pid: ErlangPid, tag: ErlangRef)
-  PmSymbol(SymbolId)
+  PrArray(items: List(PortableValue), length: Int)
+  PrMap(entries: List(#(PortableValue, PortableValue)))
+  PrSet(entries: List(PortableValue))
+  PrDate(time_value: JsNum)
+  PrRegExp(pattern: String, flags: String)
+  PrBooleanObject(Bool)
+  PrNumberObject(JsNum)
+  PrStringObject(String)
+  /// Arc extension.
+  PrPid(ErlangPid)
+  /// Arc extension.
+  PrSubject(pid: ErlangPid, tag: ErlangRef)
 }
 
 /// Envelope for all messages that land in a VM process's mailbox. The event
@@ -485,6 +515,7 @@ pub type ArcNativeFn {
   ArcSubjectReceive
   ArcSubjectReceiveAsync
   ArcSubjectToString
+  ArcStructuredClone
 }
 
 /// JSON methods — JSON.parse and JSON.stringify.

@@ -6951,3 +6951,244 @@ pub fn direct_eval_var_survives_throw_test() -> Nil {
     JsNumber(Finite(1.0)),
   )
 }
+
+// ============================================================================
+// structuredClone (HTML §2.7.3 StructuredSerializeInternal)
+// ============================================================================
+
+pub fn structured_clone_exists_test() -> Nil {
+  assert_normal("typeof structuredClone", JsString("function"))
+}
+
+pub fn structured_clone_primitives_test() -> Nil {
+  assert_normal("structuredClone(undefined)", JsUndefined)
+  assert_normal("structuredClone(null)", JsNull)
+  assert_normal("structuredClone(true)", JsBool(True))
+  assert_normal("structuredClone(42)", JsNumber(Finite(42.0)))
+  assert_normal("structuredClone('hi')", JsString("hi"))
+}
+
+// NOTE: BigInt round-trip is implemented in serialize/deserialize
+// (arc.gleam PvBigInt), but Arc currently has no user-reachable BigInt
+// constructor — `123n` lexes but compiles to NumberLiteral(Float), and there
+// is no global BigInt(). So a JS-snippet test isn't possible yet.
+
+pub fn structured_clone_cycle_test() -> Nil {
+  assert_normal(
+    "var a = {}; a.self = a;
+     var b = structuredClone(a);
+     b.self === b && b !== a",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_shared_identity_test() -> Nil {
+  assert_normal(
+    "var x = {}; var arr = [x, x];
+     var c = structuredClone(arr);
+     c[0] === c[1] && c[0] !== x",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_map_test() -> Nil {
+  assert_normal(
+    "var m = new Map(); m.set('k', 7);
+     var c = structuredClone(m);
+     c instanceof Map && c !== m && c.get('k') === 7 && c.size === 1",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_set_test() -> Nil {
+  assert_normal(
+    "var s = new Set(); s.add(1); s.add(2);
+     var c = structuredClone(s);
+     c instanceof Set && c !== s && c.has(1) && c.has(2) && c.size === 2",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_date_test() -> Nil {
+  assert_normal(
+    "var d = new Date(1000);
+     var c = structuredClone(d);
+     c instanceof Date && c !== d && c.getTime() === 1000",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_regexp_test() -> Nil {
+  assert_normal(
+    "var r = /abc/gi;
+     var c = structuredClone(r);
+     c instanceof RegExp && c !== r && c.source === 'abc' && c.flags === 'gi'",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_boolean_wrapper_test() -> Nil {
+  assert_normal(
+    "var b = new Boolean(true);
+     var c = structuredClone(b);
+     Object.getPrototypeOf(c) === Boolean.prototype
+       && typeof c === 'object' && c.valueOf() === true && c !== b",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_number_wrapper_test() -> Nil {
+  assert_normal(
+    "var n = new Number(5);
+     var c = structuredClone(n);
+     Object.getPrototypeOf(c) === Number.prototype
+       && typeof c === 'object' && c.valueOf() === 5 && c !== n",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_string_wrapper_test() -> Nil {
+  assert_normal(
+    "var s = new String('ab');
+     var c = structuredClone(s);
+     Object.getPrototypeOf(c) === String.prototype
+       && typeof c === 'object' && c.valueOf() === 'ab' && c !== s",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_symbol_throws_test() -> Nil {
+  assert_normal(
+    "try { structuredClone(Symbol()) } catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_function_throws_test() -> Nil {
+  assert_normal(
+    "try { structuredClone(function(){}) }
+     catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_promise_throws_test() -> Nil {
+  assert_normal(
+    "try { structuredClone(Promise.resolve(1)) }
+     catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_weakmap_throws_test() -> Nil {
+  assert_normal(
+    "try { structuredClone(new WeakMap()) }
+     catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_pid_throws_test() -> Nil {
+  // SpecClone rejects Arc platform objects.
+  assert_normal(
+    "try { structuredClone(Arc.self()) }
+     catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_skips_accessor_test() -> Nil {
+  assert_normal(
+    "var o = {};
+     Object.defineProperty(o, 'x', { get: function(){ return 1 },
+                                     enumerable: true, configurable: true });
+     var c = structuredClone(o);
+     'x' in c",
+    JsBool(False),
+  )
+}
+
+pub fn structured_clone_skips_non_enumerable_test() -> Nil {
+  assert_normal(
+    "var o = {};
+     Object.defineProperty(o, 'x', { value: 1, enumerable: false });
+     var c = structuredClone(o);
+     'x' in c",
+    JsBool(False),
+  )
+}
+
+pub fn structured_clone_skips_symbol_keys_test() -> Nil {
+  assert_normal(
+    "var o = {}; o[Symbol.iterator] = 1; o.a = 2;
+     var c = structuredClone(o);
+     c.a === 2 && c[Symbol.iterator] === undefined",
+    JsBool(True),
+  )
+}
+
+// ============================================================================
+// Arc IPC clone (subject.send → ArcClone serialize/deserialize)
+// ============================================================================
+
+pub fn arc_send_symbol_and_pid_roundtrip_test() -> Nil {
+  // ArcClone permits well-known Symbol values + Pid objects, unlike SpecClone.
+  assert_normal(
+    "var s = Arc.subject();
+     var pid = Arc.self();
+     var msg = { sym: Symbol.iterator, p: pid, n: 7 };
+     s.send(msg);
+     var r = s.receive();
+     r.sym === Symbol.iterator
+       && Object.prototype.toString.call(r.p) === '[object Pid]'
+       && String(r.p) === String(pid)
+       && r.n === 7",
+    JsBool(True),
+  )
+}
+
+pub fn arc_send_symbol_key_roundtrip_test() -> Nil {
+  // ArcClone preserves well-known-symbol-keyed own properties.
+  assert_normal(
+    "var s = Arc.subject();
+     var msg = {}; msg[Symbol.toStringTag] = 'Tag';
+     s.send(msg);
+     var r = s.receive();
+     r[Symbol.toStringTag]",
+    JsString("Tag"),
+  )
+}
+
+pub fn arc_send_cycle_roundtrip_test() -> Nil {
+  assert_normal(
+    "var s = Arc.subject();
+     var a = {}; a.self = a;
+     s.send(a);
+     var r = s.receive();
+     r.self === r",
+    JsBool(True),
+  )
+}
+
+pub fn arc_send_function_throws_test() -> Nil {
+  // ArcClone still rejects functions.
+  assert_normal(
+    "var s = Arc.subject();
+     try { s.send(function(){}) } catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn arc_send_skips_non_enumerable_test() -> Nil {
+  // Behavior change: ArcClone now silently SKIPS non-enumerable own props
+  // (previously errored).
+  assert_normal(
+    "var s = Arc.subject();
+     var o = { keep: 1 };
+     Object.defineProperty(o, 'hidden', { value: 2, enumerable: false });
+     s.send(o);
+     var r = s.receive();
+     r.keep === 1 && !('hidden' in r)",
+    JsBool(True),
+  )
+}

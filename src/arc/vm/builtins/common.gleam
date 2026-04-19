@@ -67,6 +67,7 @@ pub type Builtins {
     encode_uri_component: Ref,
     escape: Ref,
     unescape: Ref,
+    structured_clone: Ref,
     array_iterator_proto: Ref,
     set_iterator_proto: Ref,
     map_iterator_proto: Ref,
