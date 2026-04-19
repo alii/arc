@@ -4,6 +4,7 @@ import arc/vm/builtins/async_generator as builtins_async_generator
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins, Builtins}
 import arc/vm/builtins/date as builtins_date
+import arc/vm/builtins/dom_exception as builtins_dom_exception
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/function as builtins_function
 import arc/vm/builtins/generator as builtins_generator
@@ -52,6 +53,8 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // Error types
   let #(h, errors) = builtins_error.init(h, object_proto, function.prototype)
+  let #(h, dom_exception) =
+    builtins_dom_exception.init(h, function.prototype, errors.error.prototype)
 
   // Math global object
   let #(h, math) = builtins_math.init(h, object_proto, function.prototype)
@@ -303,6 +306,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       eval_error: errors.eval_error,
       uri_error: errors.uri_error,
       aggregate_error: errors.aggregate_error,
+      dom_exception:,
       math:,
       string:,
       number:,
@@ -392,6 +396,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("EvalError", JsObject(b.eval_error.constructor)),
     Builtin("URIError", JsObject(b.uri_error.constructor)),
     Builtin("AggregateError", JsObject(b.aggregate_error.constructor)),
+    Builtin("DOMException", JsObject(b.dom_exception.constructor)),
     Builtin("Math", JsObject(b.math)),
     Builtin("String", JsObject(b.string.constructor)),
     Builtin("Number", JsObject(b.number.constructor)),

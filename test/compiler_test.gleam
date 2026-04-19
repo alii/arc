@@ -7057,9 +7057,40 @@ pub fn structured_clone_string_wrapper_test() -> Nil {
   )
 }
 
+pub fn structured_clone_array_own_props_test() -> Nil {
+  assert_normal(
+    "var a = [1, 2]; a.foo = 'bar';
+     var c = structuredClone(a);
+     c.foo === 'bar' && c.length === 2 && c[0] === 1 && c !== a",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_map_own_props_test() -> Nil {
+  assert_normal(
+    "var m = new Map([['k', 1]]); m.foo = 'bar';
+     var c = structuredClone(m);
+     c.foo === 'bar' && c.get('k') === 1 && c instanceof Map && c !== m",
+    JsBool(True),
+  )
+}
+
+pub fn structured_clone_set_own_props_test() -> Nil {
+  assert_normal(
+    "var s = new Set([1, 2]); s.foo = 'bar';
+     var c = structuredClone(s);
+     c.foo === 'bar' && c.has(1) && c.size === 2 && c instanceof Set && c !== s",
+    JsBool(True),
+  )
+}
+
 pub fn structured_clone_symbol_throws_test() -> Nil {
   assert_normal(
-    "try { structuredClone(Symbol()) } catch (e) { e instanceof TypeError }",
+    "try { structuredClone(Symbol()) }
+     catch (e) {
+       e instanceof DOMException && e.name === 'DataCloneError'
+         && e.code === 25
+     }",
     JsBool(True),
   )
 }
@@ -7067,7 +7098,7 @@ pub fn structured_clone_symbol_throws_test() -> Nil {
 pub fn structured_clone_function_throws_test() -> Nil {
   assert_normal(
     "try { structuredClone(function(){}) }
-     catch (e) { e instanceof TypeError }",
+     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
     JsBool(True),
   )
 }
@@ -7075,7 +7106,7 @@ pub fn structured_clone_function_throws_test() -> Nil {
 pub fn structured_clone_promise_throws_test() -> Nil {
   assert_normal(
     "try { structuredClone(Promise.resolve(1)) }
-     catch (e) { e instanceof TypeError }",
+     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
     JsBool(True),
   )
 }
@@ -7083,7 +7114,7 @@ pub fn structured_clone_promise_throws_test() -> Nil {
 pub fn structured_clone_weakmap_throws_test() -> Nil {
   assert_normal(
     "try { structuredClone(new WeakMap()) }
-     catch (e) { e instanceof TypeError }",
+     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
     JsBool(True),
   )
 }
@@ -7092,8 +7123,74 @@ pub fn structured_clone_pid_throws_test() -> Nil {
   // SpecClone rejects Arc platform objects.
   assert_normal(
     "try { structuredClone(Arc.self()) }
-     catch (e) { e instanceof TypeError }",
+     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
     JsBool(True),
+  )
+}
+
+// ----------------------------------------------------------------------------
+// DOMException (WebIDL §2.8.1)
+// ----------------------------------------------------------------------------
+
+pub fn dom_exception_exists_test() -> Nil {
+  assert_normal("typeof DOMException", JsString("function"))
+}
+
+pub fn dom_exception_default_name_test() -> Nil {
+  assert_normal("new DOMException().name", JsString("Error"))
+  assert_normal("new DOMException().message", JsString(""))
+  assert_normal("new DOMException().code", JsNumber(Finite(0.0)))
+}
+
+pub fn dom_exception_construct_test() -> Nil {
+  assert_normal(
+    "var e = new DOMException('m', 'SyntaxError');
+     e.name === 'SyntaxError' && e.message === 'm' && e.code === 12",
+    JsBool(True),
+  )
+}
+
+pub fn dom_exception_data_clone_code_test() -> Nil {
+  assert_normal(
+    "new DOMException('', 'DataCloneError').code",
+    JsNumber(Finite(25.0)),
+  )
+}
+
+pub fn dom_exception_unknown_name_code_test() -> Nil {
+  assert_normal(
+    "new DOMException('', 'NoSuchError').code",
+    JsNumber(Finite(0.0)),
+  )
+}
+
+pub fn dom_exception_proto_chain_test() -> Nil {
+  assert_normal(
+    "Object.getPrototypeOf(DOMException.prototype) === Error.prototype",
+    JsBool(True),
+  )
+}
+
+pub fn dom_exception_instanceof_error_test() -> Nil {
+  assert_normal(
+    "var e = new DOMException('m', 'AbortError');
+     e instanceof DOMException && e instanceof Error
+       && !(e instanceof TypeError)",
+    JsBool(True),
+  )
+}
+
+pub fn dom_exception_to_string_test() -> Nil {
+  assert_normal(
+    "new DOMException('boom', 'DataCloneError').toString()",
+    JsString("DataCloneError: boom"),
+  )
+}
+
+pub fn dom_exception_to_string_tag_test() -> Nil {
+  assert_normal(
+    "Object.prototype.toString.call(new DOMException())",
+    JsString("[object DOMException]"),
   )
 }
 

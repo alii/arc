@@ -36,6 +36,7 @@ pub type Builtins {
     eval_error: BuiltinType,
     uri_error: BuiltinType,
     aggregate_error: BuiltinType,
+    dom_exception: BuiltinType,
     math: Ref,
     string: BuiltinType,
     number: BuiltinType,

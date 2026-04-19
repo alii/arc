@@ -161,9 +161,22 @@ pub type PortableRecord {
     /// Arc extension; always empty in spec mode.
     symbol_properties: List(#(SymbolId, PortableValue)),
   )
-  PrArray(items: List(PortableValue), length: Int)
-  PrMap(entries: List(#(PortableValue, PortableValue)))
-  PrSet(entries: List(PortableValue))
+  /// `properties` carries own enumerable string-keyed data props on the
+  /// container itself (HTML §2.7.3 step 26 deep=true), separate from the
+  /// type-specific contents.
+  PrArray(
+    items: List(PortableValue),
+    length: Int,
+    properties: List(#(PropertyKey, PortableValue)),
+  )
+  PrMap(
+    entries: List(#(PortableValue, PortableValue)),
+    properties: List(#(PropertyKey, PortableValue)),
+  )
+  PrSet(
+    entries: List(PortableValue),
+    properties: List(#(PropertyKey, PortableValue)),
+  )
   PrDate(time_value: JsNum)
   PrRegExp(pattern: String, flags: String)
   PrBooleanObject(Bool)
@@ -260,7 +273,7 @@ pub type JsValue {
   JsSymbol(SymbolId)
   JsBigInt(BigInt)
   /// Internal sentinel for Temporal Dead Zone. Never exposed to JS code.
-  /// GetLocal/GetEnvVar throw ReferenceError when they encounter this.
+  /// GetLocal throws ReferenceError when it encounters this.
   JsUninitialized
 }
 
@@ -416,6 +429,8 @@ pub type StringNativeFn {
 pub type ErrorNativeFn {
   ErrorConstructor(proto: Ref)
   ErrorPrototypeToString
+  DomExceptionConstructor(proto: Ref)
+  DomExceptionGetCode
 }
 
 /// Array methods — includes constructor, static, and prototype methods.
@@ -1584,9 +1599,10 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
       let proto_refs = prototype |> option.map(list.wrap) |> option.unwrap([])
       let kind_refs = case kind {
         FunctionObject(env: env_ref, func_template: _) -> [env_ref]
-        NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref)))) -> [
-          ref,
-        ]
+        NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref))))
+        | NativeFunction(Dispatch(ErrorNative(DomExceptionConstructor(
+            proto: ref,
+          )))) -> [ref]
         NativeFunction(Dispatch(MapNative(MapConstructor(proto: ref)))) -> [ref]
         NativeFunction(Dispatch(DateNative(DateConstructor(proto: ref)))) -> [
           ref,

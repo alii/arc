@@ -37,7 +37,7 @@ pub type CompileError {
 /// Compile a parsed program into a FuncTemplate the VM can interpreter.
 pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
-    ast.Script(body) -> compile_script(body, emit.emit_program)
+    ast.Script(body) -> compile_script(body, emit.LexLocal)
     ast.Module(body) -> {
       use #(template, _scope_dict) <- result.map(compile_module_with_scope(body))
       template
@@ -96,15 +96,26 @@ fn compile_module_with_scope(
   }
 }
 
-/// Compile in REPL mode: top-level var/let/const resolve to globals.
+/// Compile in REPL mode: top-level let/const/class go to the global lexical
+/// record so they persist across inputs.
 pub fn compile_repl(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
-    ast.Script(body) -> compile_script(body, emit.emit_program_repl)
+    ast.Script(body) -> compile_script(body, emit.LexGlobal)
     ast.Module(_) -> Error(Unsupported("modules not supported in REPL"))
   }
 }
 
-/// Compile code for a DIRECT eval call. Like compile_repl, but seeds the
+/// Compile code for an INDIRECT eval call (or any global-scope dynamic
+/// evaluation). Top-level var → globalThis, let/const/class → fresh local
+/// LexicalEnvironment per §19.2.1.1 PerformEval steps 9–10.
+pub fn compile_eval(program: ast.Program) -> Result(FuncTemplate, CompileError) {
+  case program {
+    ast.Script(body) -> compile_script(body, emit.LexLocal)
+    ast.Module(_) -> Error(Unsupported("modules not supported in eval"))
+  }
+}
+
+/// Compile code for a DIRECT eval call. Like compile_eval, but seeds the
 /// scope with the caller's local variable names as pre-boxed captures in
 /// slots 0..N-1. Free vars matching a parent name emit GetBoxed/PutBoxed
 /// against those slots. At runtime, the caller's BoxSlot refs are copied
@@ -123,7 +134,7 @@ pub fn compile_eval_direct(
   case program {
     ast.Module(_) -> Error(Unsupported("modules not supported in eval"))
     ast.Script(body) ->
-      case emit.emit_program_repl(body) {
+      case emit.emit_program(body, emit.LexLocal) {
         Error(emit.BreakOutsideLoop) -> Error(BreakOutsideLoop)
         Error(emit.ContinueOutsideLoop) -> Error(ContinueOutsideLoop)
         Error(emit.Unsupported(desc)) -> Error(Unsupported(desc))
@@ -307,20 +318,10 @@ fn extract_named_exports(
 
 fn compile_script(
   stmts: List(ast.Statement),
-  emit_fn: fn(List(ast.Statement)) ->
-    Result(
-      #(
-        List(emit.EmitterOp),
-        List(value.JsValue),
-        Dict(value.JsValue, Int),
-        List(emit.CompiledChild),
-        Bool,
-      ),
-      emit.EmitError,
-    ),
+  top_lex: emit.TopLevelLex,
 ) -> Result(FuncTemplate, CompileError) {
   // Phase 1: Emit IR from AST
-  case emit_fn(stmts) {
+  case emit.emit_program(stmts, top_lex) {
     Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
       // Determine which variables are captured by children (need boxing)
       let captured_vars = collect_all_captured_vars(children, emitter_ops)

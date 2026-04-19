@@ -311,7 +311,7 @@ pub fn eval_script_native(
         state,
         realm_builtins,
         source_str,
-        compiler.compile_repl,
+        compiler.compile_eval,
       )
       let locals = tuple_array.repeat(JsUndefined, template.local_count)
       let eval_state =
@@ -521,7 +521,7 @@ fn run_source_in_current_realm(
     state,
     state.builtins,
     source,
-    compiler.compile_repl,
+    compiler.compile_eval,
   )
   let locals = tuple_array.repeat(JsUndefined, template.local_count)
   let eval_state =

@@ -1,4 +1,5 @@
 import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/builtins/dom_exception
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/coerce
@@ -160,6 +161,9 @@ pub fn dispatch(
   case native {
     ErrorConstructor(proto:) -> call_native(proto, args, JsUndefined, state)
     value.ErrorPrototypeToString -> error_to_string(this, state)
+    value.DomExceptionConstructor(proto:) ->
+      dom_exception.construct(proto, args, state)
+    value.DomExceptionGetCode -> dom_exception.get_code(this, state)
   }
 }
 

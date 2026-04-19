@@ -1,4 +1,5 @@
 import arc/vm/builtins/common
+import arc/vm/builtins/dom_exception
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/builtins/regexp
 import arc/vm/heap
@@ -935,10 +936,13 @@ fn serialize_kind(
 ) -> Result(#(value.PortableRecord, SerCtx), String) {
   case kind {
     value.ArrayObject(length:) -> {
-      use #(items, ctx) <- result.map(
+      use #(items, ctx) <- result.try(
         serialize_indexed(heap, els, length, 0, mode, ctx, []),
       )
-      #(PrArray(items:, length:), ctx)
+      use #(props, ctx) <- result.map(
+        serialize_props(heap, dict.to_list(properties), mode, ctx, []),
+      )
+      #(PrArray(items:, length:, properties: props), ctx)
     }
     OrdinaryObject -> {
       use #(props, ctx) <- result.try(
@@ -957,13 +961,19 @@ fn serialize_kind(
           dict.get(entries, k)
           |> result.map(fn(v) { #(value.map_key_to_js(k), v) })
         })
-      use #(out, ctx) <- result.map(serialize_pairs(heap, pairs, mode, ctx, []))
-      #(PrMap(entries: out), ctx)
+      use #(out, ctx) <- result.try(serialize_pairs(heap, pairs, mode, ctx, []))
+      use #(props, ctx) <- result.map(
+        serialize_props(heap, dict.to_list(properties), mode, ctx, []),
+      )
+      #(PrMap(entries: out, properties: props), ctx)
     }
     value.SetObject(data:, keys:) -> {
       let vals = list.reverse(keys) |> list.filter_map(dict.get(data, _))
-      use #(out, ctx) <- result.map(serialize_list(heap, vals, mode, ctx, []))
-      #(PrSet(entries: out), ctx)
+      use #(out, ctx) <- result.try(serialize_list(heap, vals, mode, ctx, []))
+      use #(props, ctx) <- result.map(
+        serialize_props(heap, dict.to_list(properties), mode, ctx, []),
+      )
+      #(PrSet(entries: out, properties: props), ctx)
     }
     value.DateObject(time_value:) -> Ok(#(PrDate(time_value), ctx))
     value.RegExpObject(pattern:, flags:) ->
@@ -1242,6 +1252,16 @@ fn resolve_value(pv: value.PortableValue, memo: DeMemo) -> JsValue {
   }
 }
 
+fn resolve_props(
+  entries: List(#(value.PropertyKey, value.PortableValue)),
+  memo: DeMemo,
+) -> dict.Dict(value.PropertyKey, value.Property) {
+  list.map(entries, fn(e) {
+    #(e.0, value.data_property(resolve_value(e.1, memo)))
+  })
+  |> dict.from_list
+}
+
 /// Pass 2: fill children of container records. Leaf kinds are no-ops.
 fn fill_record(
   heap: Heap,
@@ -1251,10 +1271,7 @@ fn fill_record(
 ) -> Heap {
   case record {
     PrObject(properties:, symbol_properties:) -> {
-      let props =
-        list.map(properties, fn(e) {
-          #(e.0, value.data_property(resolve_value(e.1, memo)))
-        })
+      let props = resolve_props(properties, memo)
       let syms =
         list.map(symbol_properties, fn(e) {
           #(e.0, value.data_property(resolve_value(e.1, memo)))
@@ -1262,24 +1279,25 @@ fn fill_record(
       use slot <- heap.update(heap, ref)
       case slot {
         ObjectSlot(..) ->
+          ObjectSlot(..slot, properties: props, symbol_properties: syms)
+        other -> other
+      }
+    }
+    PrArray(items:, properties:, ..) -> {
+      let values = list.map(items, resolve_value(_, memo))
+      let props = resolve_props(properties, memo)
+      use slot <- heap.update(heap, ref)
+      case slot {
+        ObjectSlot(..) ->
           ObjectSlot(
             ..slot,
-            properties: dict.from_list(props),
-            symbol_properties: syms,
+            elements: elements.from_list(values),
+            properties: props,
           )
         other -> other
       }
     }
-    PrArray(items:, ..) -> {
-      let values = list.map(items, resolve_value(_, memo))
-      use slot <- heap.update(heap, ref)
-      case slot {
-        ObjectSlot(..) ->
-          ObjectSlot(..slot, elements: elements.from_list(values))
-        other -> other
-      }
-    }
-    PrMap(entries:) -> {
+    PrMap(entries:, properties:) -> {
       let #(data, keys_rev, keys_len) =
         list.fold(entries, #(dict.new(), [], 0), fn(acc, e) {
           let #(data, keys_rev, n) = acc
@@ -1287,13 +1305,19 @@ fn fill_record(
           let v = resolve_value(e.1, memo)
           #(dict.insert(data, k, v), [k, ..keys_rev], n + 1)
         })
-      heap.update_kind(
-        heap,
-        ref,
-        value.MapObject(entries: data, keys_rev:, keys_len:),
-      )
+      let props = resolve_props(properties, memo)
+      use slot <- heap.update(heap, ref)
+      case slot {
+        ObjectSlot(..) ->
+          ObjectSlot(
+            ..slot,
+            kind: value.MapObject(entries: data, keys_rev:, keys_len:),
+            properties: props,
+          )
+        other -> other
+      }
     }
-    PrSet(entries:) -> {
+    PrSet(entries:, properties:) -> {
       let #(data, keys) =
         list.fold(entries, #(dict.new(), []), fn(acc, pv) {
           let #(data, keys) = acc
@@ -1301,7 +1325,17 @@ fn fill_record(
           let k = value.js_to_map_key(v)
           #(dict.insert(data, k, v), [k, ..keys])
         })
-      heap.update_kind(heap, ref, value.SetObject(data:, keys:))
+      let props = resolve_props(properties, memo)
+      use slot <- heap.update(heap, ref)
+      case slot {
+        ObjectSlot(..) ->
+          ObjectSlot(
+            ..slot,
+            kind: value.SetObject(data:, keys:),
+            properties: props,
+          )
+        other -> other
+      }
     }
     // Leaf records — fully built in pass 1, nothing to fill.
     PrDate(..)
@@ -1317,8 +1351,8 @@ fn fill_record(
 // -- structuredClone ---------------------------------------------------------
 
 /// HTML structuredClone(value) — serialize with SpecClone semantics then
-/// deserialize on the same heap. No transfer-list support. DataCloneError is
-/// surfaced as TypeError (Arc has no DOMException hierarchy).
+/// deserialize on the same heap. No transfer-list support. Uncloneable values
+/// throw a "DataCloneError" DOMException.
 fn structured_clone(
   args: List(JsValue),
   state: State,
@@ -1332,6 +1366,10 @@ fn structured_clone(
       let #(heap, cloned) = deserialize(state.heap, state.builtins, msg)
       #(State(..state, heap:), Ok(cloned))
     }
-    Error(reason) -> state.type_error(state, reason)
+    Error(reason) -> {
+      let #(heap, err) =
+        dom_exception.make(state.heap, state.builtins, "DataCloneError", reason)
+      #(State(..state, heap:), Error(err))
+    }
   }
 }

@@ -60,6 +60,18 @@ pub type BindingKind {
   CaptureBinding
 }
 
+/// Where top-level let/const/class declarations land. Decided once per
+/// compilation unit; nested block scopes are always local regardless.
+pub type TopLevelLex {
+  /// Global lexical record (state.lexical_globals). Used by the REPL so
+  /// `let x = 1` persists across inputs.
+  LexGlobal
+  /// Local slot in this template. Used by scripts, modules, function bodies,
+  /// and eval — §19.2.1.1 PerformEval steps 9–10 always create a fresh
+  /// LexicalEnvironment, so eval'd let/const/class never escape.
+  LexLocal
+}
+
 /// A compiled child function (before Phase 2/3).
 pub type CompiledChild {
   CompiledChild(
@@ -111,6 +123,14 @@ pub opaque type Emitter {
     /// True while emitting an async function body. Checked by yield* to
     /// route to the async-delegation path (GetAsyncIterator + await).
     is_async: Bool,
+    /// Where top-level let/const/class go. LexGlobal only for the REPL
+    /// program emitter; everything else (scripts, eval, modules, function
+    /// bodies) uses LexLocal.
+    top_lex: TopLevelLex,
+    /// Tracks EnterScope/LeaveScope nesting so emit_stmt can tell when a
+    /// let/const/class is at the program top level (depth 1) vs inside a
+    /// nested block. Only meaningful when top_lex == LexGlobal.
+    scope_depth: Int,
   )
 }
 
@@ -129,6 +149,7 @@ pub type EmitError {
 /// Returns the emitter ops, constants, child functions, and script strictness.
 pub fn emit_program(
   stmts: List(ast.Statement),
+  top_lex: TopLevelLex,
 ) -> Result(
   #(
     List(EmitterOp),
@@ -139,25 +160,7 @@ pub fn emit_program(
   ),
   EmitError,
 ) {
-  emit_program_common(stmts, False, True, emit_stmt, emit_stmt_tail)
-}
-
-/// Emit IR for REPL mode: top-level var uses DeclareGlobalVar (on globalThis),
-/// let/const use DeclareGlobalLex/InitGlobalLex (lexical globals).
-/// Nested scopes (blocks, functions) use normal emit_stmt.
-pub fn emit_program_repl(
-  stmts: List(ast.Statement),
-) -> Result(
-  #(
-    List(EmitterOp),
-    List(JsValue),
-    Dict(JsValue, Int),
-    List(CompiledChild),
-    Bool,
-  ),
-  EmitError,
-) {
-  emit_program_common(stmts, False, False, emit_stmt_repl, emit_stmt_tail_repl)
+  emit_program_common(stmts, False, top_lex)
 }
 
 /// Emit IR for a module body. Always strict mode.
@@ -226,13 +229,7 @@ fn emit_module_common(
       e
     })
 
-  // Emit body with module-aware tail emitter
-  use e <- result.try(emit_program_body_with(
-    stmts,
-    e,
-    emit_stmt_module,
-    emit_stmt_tail,
-  ))
+  use e <- result.try(emit_stmts_tail(e, stmts))
 
   let e = emit_op(e, LeaveScope)
   let #(code, constants, constants_map, children) = finish(e)
@@ -264,25 +261,13 @@ fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
   })
 }
 
-/// Module-mode statement emitter: identical to emit_stmt but handles
-/// the *default* assignment correctly (no special casing needed since
-/// it's a normal assignment to a declared local).
-fn emit_stmt_module(
-  e: Emitter,
-  stmt: ast.Statement,
-) -> Result(Emitter, EmitError) {
-  emit_stmt(e, stmt)
-}
-
 /// Common program emission: sets up scope, hoists, emits body, tears down.
 /// When hoist_vars is True, collects and emits DeclareVar for var declarations.
 /// When force_strict is True, the program is always strict (modules).
 fn emit_program_common(
   stmts: List(ast.Statement),
   force_strict: Bool,
-  hoist_lex: Bool,
-  emit_non_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
-  emit_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
+  top_lex: TopLevelLex,
 ) -> Result(
   #(
     List(EmitterOp),
@@ -296,7 +281,7 @@ fn emit_program_common(
   // Detect top-level strict directive so child functions inherit.
   // Modules are always strict regardless of directives.
   let script_strict = force_strict || has_use_strict_directive(stmts)
-  let e = Emitter(..new_emitter(), strict: script_strict)
+  let e = Emitter(..new_emitter(), strict: script_strict, top_lex:)
 
   // Wrap in function scope
   let e = emit_op(e, EnterScope(FunctionScope))
@@ -309,17 +294,17 @@ fn emit_program_common(
       emit_ir(e, IrDeclareGlobalVar(name))
     })
 
-  // In non-REPL script mode, top-level let/const become locals (emit_stmt
-  // emits DeclareVar for them). Hoist those slots before hoisted-func
-  // MakeClosure so captured variables are boxed by the time the closure
-  // reads them. REPL mode uses DeclareGlobalLex instead, so skip this there.
-  let e = case hoist_lex {
-    True ->
+  // Hoist top-level let/const/class slots before hoisted-func MakeClosure so
+  // closures capture the boxed slot, not a stale pre-box value. LexGlobal
+  // skips this — those names live in the global lexical record and child
+  // closures reach them via GetGlobal at runtime, not via boxed captures.
+  let e = case top_lex {
+    LexLocal ->
       list.fold(collect_top_lex_names(stmts), e, fn(e, lex) {
         let #(name, kind) = lex
         emit_op(e, DeclareVar(name, kind))
       })
-    False -> e
+    LexGlobal -> e
   }
 
   // Collect and emit hoisted function declarations
@@ -333,152 +318,11 @@ fn emit_program_common(
     })
 
   // Emit body — last statement in tail position keeps its value on stack
-  use e <- result.try(emit_program_body_with(stmts, e, emit_non_tail, emit_tail))
+  use e <- result.try(emit_stmts_tail(e, stmts))
 
   let e = emit_op(e, LeaveScope)
   let #(code, constants, constants_map, children) = finish(e)
   Ok(#(code, constants, constants_map, children, script_strict))
-}
-
-/// Emit program body using provided statement emitters.
-/// The last statement is emitted with emit_tail (keeps value on stack),
-/// all others use emit_non_tail (which pops the value).
-fn emit_program_body_with(
-  stmts: List(ast.Statement),
-  e: Emitter,
-  emit_non_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
-  emit_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
-) -> Result(Emitter, EmitError) {
-  case stmts {
-    [] -> Ok(push_const(e, JsUndefined))
-    [only] -> emit_tail(e, only)
-    [first, ..rest] -> {
-      use e <- result.try(emit_non_tail(e, first))
-      emit_program_body_with(rest, e, emit_non_tail, emit_tail)
-    }
-  }
-}
-
-/// REPL statement emit: only differs from emit_stmt for VariableDeclaration
-/// and FunctionDeclaration (skips DeclareVar so they resolve to globals).
-///
-/// var → PutGlobal (falls through to object record since DeclareGlobalVar hoisted)
-/// let → DeclareGlobalLex + InitGlobalLex (lexical record)
-/// const → DeclareGlobalLex(is_const=True) + InitGlobalLex (lexical record)
-///
-/// All other statements delegate to normal emit_stmt.
-fn emit_stmt_repl(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
-  case stmt {
-    ast.VariableDeclaration(kind, declarators) -> {
-      list.try_fold(declarators, e, fn(e, decl) {
-        case kind {
-          // var: just emit expr + PutGlobal (DeclareGlobalVar already hoisted)
-          ast.Var ->
-            case decl {
-              ast.VariableDeclarator(ast.IdentifierPattern(name), init) ->
-                case init {
-                  Some(init_expr) -> {
-                    use e <- result.map(emit_named_expr(e, init_expr, name))
-                    emit_ir(e, IrScopePutVar(name))
-                  }
-                  None -> Ok(e)
-                }
-              ast.VariableDeclarator(pattern, init) -> {
-                use e <- result.try(case init {
-                  Some(init_expr) -> emit_expr(e, init_expr)
-                  None -> Ok(push_const(e, JsUndefined))
-                })
-                emit_destructuring_bind(e, pattern, VarBinding)
-              }
-            }
-          // let/const: DeclareGlobalLex + emit expr + InitGlobalLex
-          ast.Let | ast.Const -> {
-            let is_const = kind == ast.Const
-            case decl {
-              ast.VariableDeclarator(ast.IdentifierPattern(name), init) -> {
-                let e = emit_ir(e, IrDeclareGlobalLex(name, is_const))
-                case init {
-                  Some(init_expr) -> {
-                    use e <- result.map(emit_named_expr(e, init_expr, name))
-                    emit_ir(e, IrInitGlobalLex(name))
-                  }
-                  // let x; with no init → initialize to undefined
-                  None -> {
-                    let e = push_const(e, JsUndefined)
-                    Ok(emit_ir(e, IrInitGlobalLex(name)))
-                  }
-                }
-              }
-              ast.VariableDeclarator(pattern, init) -> {
-                // For destructuring let/const, declare all names as lexical
-                let names = collect_pattern_names(pattern)
-                let e =
-                  list.fold(names, e, fn(e, name) {
-                    emit_ir(e, IrDeclareGlobalLex(name, is_const))
-                  })
-                use e <- result.try(case init {
-                  Some(init_expr) -> emit_expr(e, init_expr)
-                  None -> Ok(push_const(e, JsUndefined))
-                })
-                // Bind via destructuring, then init each lexical global
-                // Use VarBinding since names won't be in local scope
-                use e <- result.map(emit_destructuring_bind(
-                  e,
-                  pattern,
-                  VarBinding,
-                ))
-                // After destructuring, the names are in globals via PutGlobal.
-                // We need to move them to lexical — but destructuring already
-                // used ScopePutVar → PutGlobal. For destructuring let/const
-                // in REPL, the values end up in the object record via PutGlobal.
-                // This is a simplification — destructuring let/const in REPL
-                // behaves like var for now (values on globalThis).
-                // TODO: Full destructuring let/const REPL support needs each
-                // name to be individually initialized via InitGlobalLex.
-                e
-              }
-            }
-          }
-        }
-      })
-    }
-
-    // Function declarations are already handled by hoisting — skip
-    ast.FunctionDeclaration(..) -> Ok(e)
-
-    // Class declarations are let-scoped → lexical global, not a local slot.
-    ast.ClassDeclaration(Some(name), super_class, body) -> {
-      let e = emit_ir(e, IrDeclareGlobalLex(name, False))
-      use e <- result.map(compile_class(e, Some(name), super_class, body))
-      emit_ir(e, IrInitGlobalLex(name))
-    }
-
-    // Everything else delegates to normal emit_stmt
-    _ -> emit_stmt(e, stmt)
-  }
-}
-
-/// REPL tail position: handles the last statement in the REPL input.
-fn emit_stmt_tail_repl(
-  e: Emitter,
-  stmt: ast.Statement,
-) -> Result(Emitter, EmitError) {
-  case stmt {
-    ast.ExpressionStatement(expr) ->
-      // Tail position: keep value on stack (no IrPop)
-      emit_expr(e, expr)
-
-    ast.VariableDeclaration(..) | ast.ClassDeclaration(..) -> {
-      // Emit the declaration via REPL path, then push undefined as completion value
-      use e <- result.map(emit_stmt_repl(e, stmt))
-      push_const(e, JsUndefined)
-    }
-
-    // All other statements: delegate to normal emit_stmt_tail
-    // (which recurses into normal emit_stmt for nested blocks — correct
-    // since those aren't top-level REPL declarations)
-    _ -> emit_stmt_tail(e, stmt)
-  }
 }
 
 // ============================================================================
@@ -499,6 +343,8 @@ fn new_emitter() -> Emitter {
     strict: False,
     has_eval_call: False,
     is_async: False,
+    top_lex: LexLocal,
+    scope_depth: 0,
   )
 }
 
@@ -517,7 +363,43 @@ fn has_use_strict_directive(stmts: List(ast.Statement)) -> Bool {
 }
 
 fn emit_op(e: Emitter, op: EmitterOp) -> Emitter {
-  Emitter(..e, code: [op, ..e.code])
+  let scope_depth = case op {
+    EnterScope(_) -> e.scope_depth + 1
+    LeaveScope -> e.scope_depth - 1
+    _ -> e.scope_depth
+  }
+  Emitter(..e, code: [op, ..e.code], scope_depth:)
+}
+
+/// True when the current statement is at the program top level (not inside
+/// any block) and this compilation unit targets the global lexical record.
+fn at_global_lex(e: Emitter) -> Bool {
+  e.top_lex == LexGlobal && e.scope_depth == 1
+}
+
+/// Declare a let/const binding, routing to either a local slot or the
+/// global lexical record depending on top_lex + scope depth.
+fn declare_lex(e: Emitter, name: String, is_const: Bool) -> Emitter {
+  case at_global_lex(e) {
+    True -> emit_ir(e, IrDeclareGlobalLex(name, is_const))
+    False -> {
+      let kind = case is_const {
+        True -> ConstBinding
+        False -> LetBinding
+      }
+      emit_op(e, DeclareVar(name, kind))
+    }
+  }
+}
+
+/// Store the value on top of stack into a let/const binding declared via
+/// declare_lex. Routes to IrInitGlobalLex (bypasses TDZ/const checks) or
+/// IrScopePutVar (resolves to PutLocal).
+fn init_lex(e: Emitter, name: String) -> Emitter {
+  case at_global_lex(e) {
+    True -> emit_ir(e, IrInitGlobalLex(name))
+    False -> emit_ir(e, IrScopePutVar(name))
+  }
 }
 
 fn emit_ir(e: Emitter, op: IrOp) -> Emitter {
@@ -1339,16 +1221,25 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           ast.VariableDeclarator(ast.IdentifierPattern(name), init) -> {
             // For let/const, emit declaration marker (var already hoisted)
             let e = case kind {
-              ast.Let | ast.Const -> emit_op(e, DeclareVar(name, binding_kind))
+              ast.Let -> declare_lex(e, name, False)
+              ast.Const -> declare_lex(e, name, True)
               ast.Var -> e
             }
-            // Emit initializer if present
             case init {
               Some(init_expr) -> {
                 use e <- result.map(emit_named_expr(e, init_expr, name))
-                emit_ir(e, IrScopePutVar(name))
+                case kind {
+                  ast.Var -> emit_ir(e, IrScopePutVar(name))
+                  ast.Let | ast.Const -> init_lex(e, name)
+                }
               }
-              None -> Ok(e)
+              // `let x;` at REPL top level must explicitly init to undefined
+              // (otherwise the global-lex slot stays in TDZ forever).
+              None ->
+                case kind != ast.Var && at_global_lex(e) {
+                  True -> Ok(init_lex(push_const(e, JsUndefined), name))
+                  False -> Ok(e)
+                }
             }
           }
           // Destructuring patterns
@@ -1650,10 +1541,10 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       case name {
         Some(n) -> {
           // Class names are block-scoped (like let)
-          let e = emit_op(e, DeclareVar(n, LetBinding))
+          let e = declare_lex(e, n, False)
           use e <- result.map(compile_class(e, name, super_class, body))
-          // compile_class leaves [ctor] on stack; PutVar pops it
-          emit_ir(e, IrScopePutVar(n))
+          // compile_class leaves [ctor] on stack; init pops it
+          init_lex(e, n)
         }
         None -> Error(Unsupported("anonymous class declaration"))
       }
@@ -3032,11 +2923,17 @@ fn emit_destructuring_bind(
   case pattern {
     ast.IdentifierPattern(name) -> {
       let e = case binding_kind {
-        LetBinding | ConstBinding | ParamBinding | CatchBinding ->
+        LetBinding -> declare_lex(e, name, False)
+        ConstBinding -> declare_lex(e, name, True)
+        ParamBinding | CatchBinding ->
           emit_op(e, DeclareVar(name, binding_kind))
         VarBinding | CaptureBinding -> e
       }
-      Ok(emit_ir(e, IrScopePutVar(name)))
+      case binding_kind {
+        LetBinding | ConstBinding -> Ok(init_lex(e, name))
+        VarBinding | ParamBinding | CatchBinding | CaptureBinding ->
+          Ok(emit_ir(e, IrScopePutVar(name)))
+      }
     }
 
     ast.ObjectPattern(properties) ->
