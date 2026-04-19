@@ -446,6 +446,13 @@ fn emit_stmt_repl(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError)
     // Function declarations are already handled by hoisting — skip
     ast.FunctionDeclaration(..) -> Ok(e)
 
+    // Class declarations are let-scoped → lexical global, not a local slot.
+    ast.ClassDeclaration(Some(name), super_class, body) -> {
+      let e = emit_ir(e, IrDeclareGlobalLex(name, False))
+      use e <- result.map(compile_class(e, Some(name), super_class, body))
+      emit_ir(e, IrInitGlobalLex(name))
+    }
+
     // Everything else delegates to normal emit_stmt
     _ -> emit_stmt(e, stmt)
   }
@@ -461,7 +468,7 @@ fn emit_stmt_tail_repl(
       // Tail position: keep value on stack (no IrPop)
       emit_expr(e, expr)
 
-    ast.VariableDeclaration(..) -> {
+    ast.VariableDeclaration(..) | ast.ClassDeclaration(..) -> {
       // Emit the declaration via REPL path, then push undefined as completion value
       use e <- result.map(emit_stmt_repl(e, stmt))
       push_const(e, JsUndefined)
