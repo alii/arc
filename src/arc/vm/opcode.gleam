@@ -14,8 +14,6 @@ pub type Op {
   // -- Variable Access (resolved) --
   GetLocal(index: Int)
   PutLocal(index: Int)
-  GetEnvVar(index: Int)
-  PutEnvVar(index: Int)
   GetGlobal(name: String)
   PutGlobal(name: String)
   /// Check state.eval_env dict for `name`; if present push its value, else
