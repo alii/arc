@@ -2645,26 +2645,14 @@ fn step_generators(
           use #(res, state) <- result.try(
             state.rethrow(state.call(state, next_fn, iter, [arg])),
           )
-          case res {
-            JsObject(rref) -> {
-              use #(done, state) <- result.try(
-                state.rethrow(object.get_value(state, rref, Named("done"), res)),
-              )
-              use #(val, state) <- result.try(
-                state.rethrow(object.get_value(state, rref, Named("value"), res)),
-              )
-              case value.is_truthy(done) {
-                True ->
-                  Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-                False ->
-                  // execute_inner's YieldStar arm strips arg from the
-                  // original stack and keeps pc here, so resume loops back
-                  // with [resume_val, iter, ..rest].
-                  Error(#(Yielded, val, state.heap))
-              }
-            }
-            _ ->
-              state.throw_type_error(state, "Iterator result is not an object")
+          use #(done, val, state) <- result.try(read_iter_result(state, res))
+          case done {
+            True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+            False ->
+              // execute_inner's YieldStar arm strips arg from the
+              // original stack and keeps pc here, so resume loops back
+              // with [resume_val, iter, ..rest].
+              Error(#(Yielded, val, state.heap))
           }
         }
         _ -> underflow(state, "YieldStar")
@@ -2690,20 +2678,13 @@ fn step_generators(
     AsyncYieldStarResume(_) ->
       // [result_obj, iter, ..rest]. done? → push value, pc+1 : Yielded(value).
       case state.stack {
-        [JsObject(rref) as res, _iter, ..rest] -> {
-          use #(done, state) <- result.try(
-            state.rethrow(object.get_value(state, rref, Named("done"), res)),
-          )
-          use #(val, state) <- result.try(
-            state.rethrow(object.get_value(state, rref, Named("value"), res)),
-          )
-          case value.is_truthy(done) {
+        [res, _iter, ..rest] -> {
+          use #(done, val, state) <- result.try(read_iter_result(state, res))
+          case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
             False -> Error(#(Yielded, val, state.heap))
           }
         }
-        [_non_obj, _iter, ..] ->
-          state.throw_type_error(state, "Iterator result is not an object")
         _ -> underflow(state, "AsyncYieldStarResume")
       }
 
@@ -3351,6 +3332,26 @@ fn alloc_array_iterator(
   )
 }
 
+/// ES IteratorComplete + IteratorValue: read {done, value} from an iterator
+/// result; TypeError if not an object.
+fn read_iter_result(
+  state: State,
+  res: JsValue,
+) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, Heap)) {
+  case res {
+    JsObject(rref) -> {
+      use #(done, state) <- result.try(
+        state.rethrow(object.get_value(state, rref, Named("done"), res)),
+      )
+      use #(val, state) <- result.map(
+        state.rethrow(object.get_value(state, rref, Named("value"), res)),
+      )
+      #(value.is_truthy(done), val, state)
+    }
+    _ -> state.throw_type_error(state, "Iterator result is not an object")
+  }
+}
+
 /// IteratorNext fallback for user-defined iterators: call .next(), extract
 /// {value, done}, push [done, value, iter] onto stack.
 fn step_generic_iterator(
@@ -3365,22 +3366,8 @@ fn step_generic_iterator(
   use #(result_obj, state) <- result.try(
     state.rethrow(state.call(state, next_fn, iter, [])),
   )
-  case result_obj {
-    JsObject(rref) -> {
-      use #(done_v, state) <- result.try(
-        state.rethrow(object.get_value(state, rref, Named("done"), result_obj)),
-      )
-      use #(val, state) <- result.map(
-        state.rethrow(object.get_value(state, rref, Named("value"), result_obj)),
-      )
-      State(
-        ..state,
-        stack: [JsBool(value.is_truthy(done_v)), val, iter, ..rest],
-        pc: state.pc + 1,
-      )
-    }
-    _ -> state.throw_type_error(state, "Iterator result is not an object")
-  }
+  use #(done, val, state) <- result.map(read_iter_result(state, result_obj))
+  State(..state, stack: [JsBool(done), val, iter, ..rest], pc: state.pc + 1)
 }
 
 /// ES2024 §7.4.1 GetIterator(obj, kind) — look up Symbol.iterator and call it.

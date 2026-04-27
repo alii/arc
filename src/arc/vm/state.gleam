@@ -331,7 +331,7 @@ pub type StepResult {
 pub fn throw_type_error(
   state: State,
   msg: String,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(a, #(StepResult, JsValue, Heap)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
   Error(#(Thrown, err, heap))
 }
@@ -340,7 +340,7 @@ pub fn throw_type_error(
 pub fn throw_range_error(
   state: State,
   msg: String,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(a, #(StepResult, JsValue, Heap)) {
   let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
   Error(#(Thrown, err, heap))
 }
@@ -349,7 +349,7 @@ pub fn throw_range_error(
 pub fn throw_reference_error(
   state: State,
   msg: String,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(a, #(StepResult, JsValue, Heap)) {
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
   Error(#(Thrown, err, heap))

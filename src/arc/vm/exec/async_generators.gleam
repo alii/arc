@@ -39,6 +39,7 @@ import arc/vm/value.{
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 
 pub type ExecuteInnerFn =
@@ -46,6 +47,18 @@ pub type ExecuteInnerFn =
 
 pub type UnwindToCatchFn =
   fn(State, JsValue) -> Option(State)
+
+/// Bundle of per-request context threaded through the body-execution helpers.
+type Run {
+  Run(
+    data_ref: Ref,
+    gen: AsyncGenData,
+    req: AsyncGenRequest,
+    rest_queue: List(AsyncGenRequest),
+    execute_inner: ExecuteInnerFn,
+    unwind_to_catch: UnwindToCatchFn,
+  )
+}
 
 /// AsyncGenerator.prototype.{next,return,throw} — shared entry point.
 /// Per spec §27.6.1.2-4: create a promise capability, validate `this`
@@ -114,7 +127,16 @@ fn resume_next(
     Some(gen) ->
       case gen.queue {
         [] -> state
-        [req, ..rest_queue] ->
+        [req, ..rest_queue] -> {
+          let run =
+            Run(
+              data_ref:,
+              gen:,
+              req:,
+              rest_queue:,
+              execute_inner:,
+              unwind_to_catch:,
+            )
           case gen.gen_state {
             AGExecuting | AGAwaitingReturn -> state
 
@@ -122,13 +144,13 @@ fn resume_next(
               case req.completion {
                 AGNext -> {
                   // Resolve {undefined, done:true}, dequeue, loop
-                  let state = settle_head(state, data_ref, rest_queue, req)
+                  let state = settle_head(state, data_ref, rest_queue)
                   let state =
                     fulfill_iter(state, req.resolve, JsUndefined, True)
                   resume_next(state, data_ref, execute_inner, unwind_to_catch)
                 }
                 AGThrow -> {
-                  let state = settle_head(state, data_ref, rest_queue, req)
+                  let state = settle_head(state, data_ref, rest_queue)
                   let state = reject_with(state, req.reject, req.value)
                   resume_next(state, data_ref, execute_inner, unwind_to_catch)
                 }
@@ -167,31 +189,12 @@ fn resume_next(
                     unwind_to_catch,
                   )
                 }
-                AGNext ->
-                  run_body(
-                    state,
-                    data_ref,
-                    gen,
-                    req,
-                    rest_queue,
-                    False,
-                    execute_inner,
-                    unwind_to_catch,
-                  )
+                AGNext -> run_body(state, run, False)
               }
 
-            AGSuspendedYield ->
-              run_body(
-                state,
-                data_ref,
-                gen,
-                req,
-                rest_queue,
-                True,
-                execute_inner,
-                unwind_to_catch,
-              )
+            AGSuspendedYield -> run_body(state, run, True)
           }
+        }
       }
   }
 }
@@ -199,16 +202,8 @@ fn resume_next(
 /// Resume the generator body from a suspended state. Dispatches on the
 /// request kind to push the arg / throw / inject return, then runs until
 /// the body yields, awaits, returns, or throws.
-fn run_body(
-  state: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
-  push_arg: Bool,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> State {
+fn run_body(state: State, run: Run, push_arg: Bool) -> State {
+  let Run(data_ref:, gen:, req:, ..) = run
   // Mark executing FIRST so concurrent calls enqueue. saved_pc/stack preserved.
   let h = heap.write(state.heap, data_ref, slot_with_state(gen, AGExecuting))
   let state = State(..state, heap: h)
@@ -220,30 +215,18 @@ fn run_body(
     _, _ -> None
   }
   case delegated {
-    Some(iter_ref) ->
-      forward_async_delegate(
-        state,
-        data_ref,
-        gen,
-        req,
-        rest_queue,
-        iter_ref,
-        execute_inner,
-        unwind_to_catch,
-      )
+    Some(iter_ref) -> forward_async_delegate(state, run, iter_ref)
     None -> {
       let gen_stack = case push_arg, req.completion {
         True, AGNext -> [req.value, ..gen.saved_stack]
-        True, AGReturn -> gen.saved_stack
-        True, AGThrow -> gen.saved_stack
-        False, _ -> gen.saved_stack
+        _, _ -> gen.saved_stack
       }
       let exec_state = build_exec_state(state, gen, gen_stack, gen.saved_pc)
       let exec_result = case req.completion {
-        AGNext -> execute_inner(exec_state)
+        AGNext -> run.execute_inner(exec_state)
         AGThrow ->
-          case unwind_to_catch(exec_state, req.value) {
-            Some(caught) -> execute_inner(caught)
+          case run.unwind_to_catch(exec_state, req.value) {
+            Some(caught) -> run.execute_inner(caught)
             None ->
               Ok(#(ThrowCompletion(req.value, exec_state.heap), exec_state))
           }
@@ -253,16 +236,7 @@ fn run_body(
           // TODO: proper finally unwinding like sync gen's process_generator_return.
           Ok(#(NormalCompletion(req.value, exec_state.heap), exec_state))
       }
-      handle_exec_result(
-        state,
-        data_ref,
-        gen,
-        req,
-        rest_queue,
-        exec_result,
-        execute_inner,
-        unwind_to_catch,
-      )
+      handle_exec_result(state, run, exec_result)
     }
   }
 }
@@ -317,62 +291,29 @@ fn async_delegate_iterator(gen: AsyncGenData) -> Option(Ref) {
 /// call it, then AWAIT the result (unlike sync). The await suspends via
 /// setup_await with AGResumeDelegate; settlement is handled in
 /// resume_after_delegate.
-fn forward_async_delegate(
-  state: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
-  iter_ref: Ref,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> State {
+fn forward_async_delegate(state: State, run: Run, iter_ref: Ref) -> State {
   let iter = JsObject(iter_ref)
-  let method_name = case req.completion {
+  let method_name = case run.req.completion {
     AGThrow -> "throw"
     // AGReturn (AGNext never reaches here by construction)
     _ -> "return"
   }
   case object_ops.get_value(state, iter_ref, Named(method_name), iter) {
-    Error(#(thrown, state)) ->
-      throw_into_gen_body(
-        state,
-        data_ref,
-        gen,
-        req,
-        rest_queue,
-        thrown,
-        execute_inner,
-        unwind_to_catch,
-      )
+    Error(#(thrown, state)) -> throw_into_gen_body(state, run, thrown)
     Ok(#(JsUndefined, state)) | Ok(#(JsNull, state)) ->
-      delegate_method_missing(
-        state,
-        data_ref,
-        gen,
-        req,
-        rest_queue,
-        iter_ref,
-        execute_inner,
-        unwind_to_catch,
-      )
+      delegate_method_missing(state, run, iter_ref)
     Ok(#(method_fn, state)) ->
-      case state.call(state, method_fn, iter, [req.value]) {
-        Error(#(thrown, state)) ->
-          throw_into_gen_body(
-            state,
-            data_ref,
-            gen,
-            req,
-            rest_queue,
-            thrown,
-            execute_inner,
-            unwind_to_catch,
-          )
+      case state.call(state, method_fn, iter, [run.req.value]) {
+        Error(#(thrown, state)) -> throw_into_gen_body(state, run, thrown)
         Ok(#(result, state)) ->
           // Await the result. Gen stays AGExecuting, req stays at queue head,
           // saved_pc/stack unchanged. Resume via AGResumeDelegate.
-          setup_await(state, data_ref, result, AGResumeDelegate(req.completion))
+          setup_await(
+            state,
+            run.data_ref,
+            result,
+            AGResumeDelegate(run.req.completion),
+          )
       }
   }
 }
@@ -380,17 +321,8 @@ fn forward_async_delegate(
 /// Inner iterator lacks .return/.throw. Per ES §15.5.5:
 ///   - missing throw → AsyncIteratorClose(iter), throw TypeError into body
 ///   - missing return → Await(received), then ReturnCompletion out of body
-fn delegate_method_missing(
-  state: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
-  iter_ref: Ref,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> State {
-  case req.completion {
+fn delegate_method_missing(state: State, run: Run, iter_ref: Ref) -> State {
+  case run.req.completion {
     AGThrow ->
       // §7.b.iii.1-4: AsyncIteratorClose(iter, NormalCompletion(unused)),
       // then throw TypeError into body. Close calls iter.return() and AWAITS
@@ -399,18 +331,10 @@ fn delegate_method_missing(
         #(state, Some(close_result)) ->
           // Await the close. Gen stays AGExecuting; settle via
           // AGResumeDelegateClose which throws the TypeError into the body.
-          setup_await(state, data_ref, close_result, AGResumeDelegateClose)
+          setup_await(state, run.data_ref, close_result, AGResumeDelegateClose)
         #(state, None) ->
           // No .return on iter (or its lookup threw) — skip the await.
-          throw_missing_throw_type_error(
-            state,
-            data_ref,
-            gen,
-            req,
-            rest_queue,
-            execute_inner,
-            unwind_to_catch,
-          )
+          throw_missing_throw_type_error(state, run)
       }
     AGReturn | AGNext -> {
       // §7.c.ii.1-3: no .return → Await(received), then ReturnCompletion out.
@@ -419,11 +343,15 @@ fn delegate_method_missing(
       // NOTE: skips outer try/finally — same pre-existing limitation as the
       // non-delegating AGReturn path in run_body (see TODO there).
       let h =
-        heap.write(state.heap, data_ref, slot_with_state(gen, AGAwaitingReturn))
+        heap.write(
+          state.heap,
+          run.data_ref,
+          slot_with_state(run.gen, AGAwaitingReturn),
+        )
       setup_await(
         State(..state, heap: h),
-        data_ref,
-        req.value,
+        run.data_ref,
+        run.req.value,
         AGResumeAwaitingReturn,
       )
     }
@@ -433,61 +361,26 @@ fn delegate_method_missing(
 /// Throw a TypeError("does not provide a 'throw' method") into the generator
 /// body. Shared by delegate_method_missing's no-.return-on-iter fast path and
 /// the AGResumeDelegateClose settlement.
-fn throw_missing_throw_type_error(
-  state: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> State {
+fn throw_missing_throw_type_error(state: State, run: Run) -> State {
   let #(h, err) =
     common.make_type_error(
       state.heap,
       state.builtins,
       "The iterator does not provide a 'throw' method.",
     )
-  throw_into_gen_body(
-    State(..state, heap: h),
-    data_ref,
-    gen,
-    req,
-    rest_queue,
-    err,
-    execute_inner,
-    unwind_to_catch,
-  )
+  throw_into_gen_body(State(..state, heap: h), run, err)
 }
 
 /// Throw a value into the generator body at saved_pc (through its try/catch),
-/// then dispatch via handle_exec_result. Shared by forward_async_delegate and
-/// resume_after_delegate.
-fn throw_into_gen_body(
-  state: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
-  thrown: JsValue,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> State {
-  let exec_state = build_exec_state(state, gen, gen.saved_stack, gen.saved_pc)
-  let exec_result = case unwind_to_catch(exec_state, thrown) {
-    Some(caught) -> execute_inner(caught)
+/// then dispatch via handle_exec_result.
+fn throw_into_gen_body(state: State, run: Run, thrown: JsValue) -> State {
+  let exec_state =
+    build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
+  let exec_result = case run.unwind_to_catch(exec_state, thrown) {
+    Some(caught) -> run.execute_inner(caught)
     None -> Ok(#(ThrowCompletion(thrown, exec_state.heap), exec_state))
   }
-  handle_exec_result(
-    state,
-    data_ref,
-    gen,
-    req,
-    rest_queue,
-    exec_result,
-    execute_inner,
-    unwind_to_catch,
-  )
+  handle_exec_result(state, run, exec_result)
 }
 
 /// AsyncIteratorClose step 1-4: GetMethod(iter, "return"); if present, call it
@@ -517,15 +410,21 @@ fn read_iter_result(
   settled: JsValue,
 ) -> Result(#(Bool, JsValue, State), #(JsValue, State)) {
   case settled {
-    JsObject(rref) ->
-      case object_ops.get_value(state, rref, Named("done"), settled) {
-        Error(err) -> Error(err)
-        Ok(#(done_v, state)) ->
-          case object_ops.get_value(state, rref, Named("value"), settled) {
-            Error(err) -> Error(err)
-            Ok(#(val, state)) -> Ok(#(value.is_truthy(done_v), val, state))
-          }
-      }
+    JsObject(rref) -> {
+      use #(done_v, state) <- result.try(object_ops.get_value(
+        state,
+        rref,
+        Named("done"),
+        settled,
+      ))
+      use #(val, state) <- result.map(object_ops.get_value(
+        state,
+        rref,
+        Named("value"),
+        settled,
+      ))
+      #(value.is_truthy(done_v), val, state)
+    }
     _non_obj -> {
       let #(h, err) =
         common.make_type_error(
@@ -542,67 +441,36 @@ fn read_iter_result(
 /// Called from call_native_resume's AGResumeDelegate branch.
 fn resume_after_delegate(
   state: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
+  run: Run,
   method: AsyncGenCompletion,
   is_reject: Bool,
   settled: JsValue,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
 ) -> State {
   // Awaited promise rejected → throw into body.
   case is_reject {
-    True ->
-      throw_into_gen_body(
-        state,
-        data_ref,
-        gen,
-        req,
-        rest_queue,
-        settled,
-        execute_inner,
-        unwind_to_catch,
-      )
+    True -> throw_into_gen_body(state, run, settled)
     False ->
       case read_iter_result(state, settled) {
-        Error(#(thrown, state)) ->
-          throw_into_gen_body(
-            state,
-            data_ref,
-            gen,
-            req,
-            rest_queue,
-            thrown,
-            execute_inner,
-            unwind_to_catch,
-          )
+        Error(#(thrown, state)) -> throw_into_gen_body(state, run, thrown)
         Ok(#(False, val, state)) -> {
           // Still delegating — yield val out, stay suspended at SAME
           // saved_pc/stack (AsyncYieldStarNext, [iter,..]).
           let h =
             heap.write(
               state.heap,
-              data_ref,
-              slot_with(gen, AGSuspendedYield, rest_queue),
+              run.data_ref,
+              slot_with(run.gen, AGSuspendedYield, run.rest_queue),
             )
           let state = State(..state, heap: h)
-          let state = fulfill_iter(state, req.resolve, val, False)
-          resume_next(state, data_ref, execute_inner, unwind_to_catch)
-        }
-        Ok(#(True, val, state)) ->
-          delegate_done(
+          let state = fulfill_iter(state, run.req.resolve, val, False)
+          resume_next(
             state,
-            data_ref,
-            gen,
-            req,
-            rest_queue,
-            method,
-            val,
-            execute_inner,
-            unwind_to_catch,
+            run.data_ref,
+            run.execute_inner,
+            run.unwind_to_catch,
           )
+        }
+        Ok(#(True, val, state)) -> delegate_done(state, run, method, val)
       }
   }
 }
@@ -613,15 +481,11 @@ fn resume_after_delegate(
 ///   return → inner returned done — outer gen returns val.
 fn delegate_done(
   state: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
+  run: Run,
   method: AsyncGenCompletion,
   val: JsValue,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
 ) -> State {
+  let gen = run.gen
   case method {
     AGThrow -> {
       // Bytecode layout (emit.gleam): N=AsyncYieldStarNext, N+1=Await,
@@ -632,16 +496,7 @@ fn delegate_done(
       }
       let exec_state =
         build_exec_state(state, gen, stack_after, gen.saved_pc + 3)
-      handle_exec_result(
-        state,
-        data_ref,
-        gen,
-        req,
-        rest_queue,
-        execute_inner(exec_state),
-        execute_inner,
-        unwind_to_catch,
-      )
+      handle_exec_result(state, run, run.execute_inner(exec_state))
     }
     AGReturn | AGNext -> {
       // Inner returned done — outer gen returns val.
@@ -650,13 +505,8 @@ fn delegate_done(
         build_exec_state(state, gen, gen.saved_stack, gen.saved_pc)
       handle_exec_result(
         state,
-        data_ref,
-        gen,
-        req,
-        rest_queue,
+        run,
         Ok(#(NormalCompletion(val, exec_state.heap), exec_state)),
-        execute_inner,
-        unwind_to_catch,
       )
     }
   }
@@ -665,14 +515,11 @@ fn delegate_done(
 /// Dispatch on the body's completion: yield/await/return/throw.
 fn handle_exec_result(
   outer: State,
-  data_ref: Ref,
-  gen: AsyncGenData,
-  req: AsyncGenRequest,
-  rest_queue: List(AsyncGenRequest),
+  run: Run,
   result: Result(#(Completion, State), state.VmError),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
 ) -> State {
+  let Run(data_ref:, gen:, req:, rest_queue:, execute_inner:, unwind_to_catch:) =
+    run
   case result {
     Ok(#(YieldCompletion(value, h), suspended)) -> {
       // Body yielded — save suspended state, dequeue + resolve request, loop.
@@ -750,94 +597,53 @@ pub fn call_native_resume(
         state.heap,
       ))
     Some(gen) ->
-      case kind {
-        AGResumeAwaitingReturn ->
-          // AwaitingReturn callback: settle the head return request.
-          case gen.queue {
-            [req, ..rest] -> {
+      case gen.queue {
+        [] -> ret(state)
+        [req, ..rest_queue] -> {
+          let run =
+            Run(
+              data_ref:,
+              gen:,
+              req:,
+              rest_queue:,
+              execute_inner:,
+              unwind_to_catch:,
+            )
+          let state = case kind {
+            AGResumeAwaitingReturn -> {
+              // AwaitingReturn callback: settle the head return request.
               let h =
                 heap.write(
                   state.heap,
                   data_ref,
-                  slot_with(gen, AGCompleted, rest),
+                  slot_with(gen, AGCompleted, rest_queue),
                 )
               let state = State(..state, heap: h)
               let state = case is_reject {
                 False -> fulfill_iter(state, req.resolve, settled, True)
                 True -> reject_with(state, req.reject, settled)
               }
-              ret(resume_next(state, data_ref, execute_inner, unwind_to_catch))
+              resume_next(state, data_ref, execute_inner, unwind_to_catch)
             }
-            [] -> ret(state)
-          }
-        AGResumeBody ->
-          // Body await resumed — restore, push settled value (or throw), run.
-          case gen.queue {
-            [req, ..rest_queue] -> {
-              let resume_stack = case is_reject {
-                False -> [settled, ..gen.saved_stack]
-                True -> gen.saved_stack
+            AGResumeBody ->
+              // Body await resumed — push settled value and run, or throw it in.
+              case is_reject {
+                True -> throw_into_gen_body(state, run, settled)
+                False -> {
+                  let stack = [settled, ..gen.saved_stack]
+                  let es = build_exec_state(state, gen, stack, gen.saved_pc)
+                  handle_exec_result(state, run, execute_inner(es))
+                }
               }
-              let exec_state =
-                build_exec_state(state, gen, resume_stack, gen.saved_pc)
-              let exec_result = case is_reject {
-                False -> execute_inner(exec_state)
-                True ->
-                  case unwind_to_catch(exec_state, settled) {
-                    Some(caught) -> execute_inner(caught)
-                    None ->
-                      Ok(#(
-                        ThrowCompletion(settled, exec_state.heap),
-                        exec_state,
-                      ))
-                  }
-              }
-              ret(handle_exec_result(
-                state,
-                data_ref,
-                gen,
-                req,
-                rest_queue,
-                exec_result,
-                execute_inner,
-                unwind_to_catch,
-              ))
-            }
-            [] -> ret(state)
+            AGResumeDelegate(method) ->
+              resume_after_delegate(state, run, method, is_reject, settled)
+            AGResumeDelegateClose ->
+              // AsyncIteratorClose await settled — discard settled/is_reject
+              // (outer abrupt completion wins), throw the missing-throw TypeError.
+              throw_missing_throw_type_error(state, run)
           }
-        AGResumeDelegate(method) ->
-          case gen.queue {
-            [req, ..rest_queue] ->
-              ret(resume_after_delegate(
-                state,
-                data_ref,
-                gen,
-                req,
-                rest_queue,
-                method,
-                is_reject,
-                settled,
-                execute_inner,
-                unwind_to_catch,
-              ))
-            [] -> ret(state)
-          }
-        AGResumeDelegateClose ->
-          // AsyncIteratorClose await settled — discard settled/is_reject
-          // (outer abrupt completion wins), throw the missing-throw TypeError.
-          case gen.queue {
-            [req, ..rest_queue] ->
-              ret(throw_missing_throw_type_error(
-                state,
-                data_ref,
-                gen,
-                req,
-                rest_queue,
-                execute_inner,
-                unwind_to_catch,
-              ))
-            [] -> ret(state)
-          }
+          ret(state)
+        }
       }
   }
 }
@@ -1053,7 +859,6 @@ fn settle_head(
   state: State,
   data_ref: Ref,
   rest_queue: List(AsyncGenRequest),
-  _req: AsyncGenRequest,
 ) -> State {
   case read_slot(state.heap, data_ref) {
     Some(gen) -> {
