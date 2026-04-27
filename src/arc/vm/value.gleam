@@ -940,8 +940,8 @@ pub type CallNativeFn {
   AsyncGeneratorReturn
   AsyncGeneratorThrow
   /// Async generator resume: called when an internal await settles.
-  /// is_return distinguishes the AwaitingReturn microtask from a body await.
-  AsyncGeneratorResume(data_ref: Ref, is_reject: Bool, is_return: Bool)
+  /// kind distinguishes body-await / AwaitingReturn / yield*-delegate awaits.
+  AsyncGeneratorResume(data_ref: Ref, is_reject: Bool, kind: AGResumeKind)
   /// %AsyncFromSyncIteratorPrototype%.next/return/throw — ES §27.1.4.2
   AsyncFromSyncNext
   AsyncFromSyncReturn
@@ -1321,6 +1321,22 @@ pub type AsyncGenCompletion {
   AGNext
   AGReturn
   AGThrow
+}
+
+/// What an AsyncGeneratorResume callback is waiting on.
+pub type AGResumeKind {
+  /// Body `await` settled — push value / throw into body, continue executing.
+  AGResumeBody
+  /// .return(v) on a completed gen — settle the head request with awaited v.
+  AGResumeAwaitingReturn
+  /// yield* delegated iter.return()/iter.throw() result settled.
+  /// Carries the ORIGINAL request kind (AGReturn or AGThrow) for done-dispatch.
+  AGResumeDelegate(method: AsyncGenCompletion)
+  /// AsyncIteratorClose await settled — inner .throw was missing, so we
+  /// closed the iter and now throw a TypeError into the body. Result/error
+  /// from the close await is discarded per spec (outer abrupt completion
+  /// takes precedence, ES §7.4.12 step 5).
+  AGResumeDelegateClose
 }
 
 /// A pending .next()/.return()/.throw() call on an async generator.

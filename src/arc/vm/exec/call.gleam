@@ -1164,12 +1164,12 @@ pub fn call_native(
       promises.call_native_async_from_sync_unwrap(state, done, args, rest_stack)
     value.Call(value.AsyncFromSyncClose(sync_iter:)) ->
       promises.call_native_async_from_sync_close(state, sync_iter, args)
-    value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, is_return:)) ->
+    value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, kind:)) ->
       async_generators.call_native_resume(
         state,
         data_ref,
         is_reject,
-        is_return,
+        kind,
         args,
         rest_stack,
         execute_inner,

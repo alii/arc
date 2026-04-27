@@ -174,7 +174,10 @@ fn print_progress(current: Int, total: Int, passes: Int, fails: Int) -> Nil {
 
 // --- Parse test logic ---
 
-fn run_parse_test(metadata: TestMetadata, source: String) -> Result(Nil, String) {
+fn run_parse_test(
+  metadata: TestMetadata,
+  source: String,
+) -> Result(Nil, String) {
   let mode = case list.contains(metadata.flags, "module") {
     True -> parser.Module
     False -> parser.Script

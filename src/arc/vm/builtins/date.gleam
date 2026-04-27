@@ -1396,10 +1396,9 @@ fn date_to_json(
       use prim, st <- state.try_op(prim_r)
       case prim {
         // Step 3: non-finite Number → return null.
-        JsNumber(NaN) | JsNumber(value.Infinity) | JsNumber(value.NegInfinity) -> #(
-          st,
-          Ok(JsNull),
-        )
+        JsNumber(NaN)
+        | JsNumber(value.Infinity)
+        | JsNumber(value.NegInfinity) -> #(st, Ok(JsNull))
         // Step 4: Invoke(O, "toISOString").
         _ -> invoke_to_iso_string(st, obj, ref)
       }

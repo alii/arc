@@ -46,7 +46,11 @@ fn new_promise_capability(
 /// Allocate shared state for Promise.all/allSettled/any combinators:
 /// a values array (pre-filled with undefined) and a remaining-count box.
 /// Returns #(heap, values_ref, remaining_ref).
-fn alloc_combinator_state(h: Heap, b: Builtins, count: Int) -> #(Heap, Ref, Ref) {
+fn alloc_combinator_state(
+  h: Heap,
+  b: Builtins,
+  count: Int,
+) -> #(Heap, Ref, Ref) {
   let #(h, values_ref) =
     common.alloc_array(h, list.repeat(JsUndefined, count), b.array.prototype)
   let #(h, remaining_ref) =

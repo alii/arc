@@ -16,7 +16,10 @@ pub fn get_env_is_truthy(name: String) {
 /// Run a zero-arg function with a timeout in milliseconds.
 /// Returns Ok(result) or Error("timeout").
 @external(erlang, "test_runner_ffi", "run_with_timeout")
-pub fn run_with_timeout(_fun: fn() -> a, _timeout_ms: Int) -> Result(a, String) {
+pub fn run_with_timeout(
+  _fun: fn() -> a,
+  _timeout_ms: Int,
+) -> Result(a, String) {
   panic as "test_runner is BEAM-only"
 }
 

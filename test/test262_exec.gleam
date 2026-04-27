@@ -835,7 +835,11 @@ fn eval_harness_script(
   }
 }
 
-fn get_data(h: Heap, ref: value.Ref, key: String) -> Result(value.JsValue, Nil) {
+fn get_data(
+  h: Heap,
+  ref: value.Ref,
+  key: String,
+) -> Result(value.JsValue, Nil) {
   case object.get_own_property(h, ref, value.Named(key)) {
     Some(value.DataProperty(value: val, ..)) -> Ok(val)
     Some(_) -> Error(Nil)

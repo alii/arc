@@ -6,20 +6,20 @@
 import arc/parser/ast
 import arc/vm/opcode.{
   type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
-  IrArraySpread, IrAwait, IrBinOp, IrCallApply, IrCallConstructor,
-  IrCallConstructorApply, IrCallMethod, IrCallMethodApply, IrCallSuper,
-  IrCallSuperApply, IrCreateArguments, IrDeclareGlobalLex, IrDeclareGlobalVar,
-  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed, IrDeleteElem,
-  IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow, IrForInNext,
-  IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
-  IrGetField2, IrGetIterator, IrGetThis, IrInitGlobalLex, IrInitialYield,
-  IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy,
-  IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem, IrPutField,
-  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar,
-  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield,
-  IrYieldStar,
+  IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp,
+  IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
+  IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCreateArguments,
+  IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
+  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
+  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally,
+  IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem,
+  IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrInitGlobalLex,
+  IrInitialYield, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp,
+  IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
+  IrPutElem, IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar,
+  IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
+  IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -494,7 +494,10 @@ fn finish(
 /// For expression statements, this means NOT emitting IrPop.
 /// For compound statements (blocks, if/else, try/catch), propagates tail into
 /// the inner last statement.
-fn emit_stmt_tail(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
+fn emit_stmt_tail(
+  e: Emitter,
+  stmt: ast.Statement,
+) -> Result(Emitter, EmitError) {
   case stmt {
     ast.ExpressionStatement(expr) ->
       // Tail position: keep value on stack (no IrPop)
@@ -2136,12 +2139,22 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> Ok(emit_ir(e, IrYield))
         True ->
           case e.is_async {
-            // Async-generator yield* needs GetAsyncIterator + await on each
-            // step — not yet wired. Falls through the emit_stmts error-swallow
-            // so the generator just completes.
-            True -> Error(Unsupported("yield* in async generator"))
+            True -> {
+              // Async-gen yield* — GetIterator(expr, async) wraps sync
+              // iterables via CreateAsyncFromSyncIterator. Seed undefined arg,
+              // self-loop: Next calls iter.next(arg), Await settles result,
+              // Resume checks done / yields and jumps back to Next via label.
+              // Leaves final result.value on stack.
+              let e = emit_ir(e, IrGetAsyncIterator)
+              let e = push_const(e, JsUndefined)
+              let #(e, next_label) = fresh_label(e)
+              let e = emit_ir(e, IrLabel(next_label))
+              let e = emit_ir(e, IrAsyncYieldStarNext)
+              let e = emit_ir(e, IrAwait)
+              Ok(emit_ir(e, IrAsyncYieldStarResume(next_label)))
+            }
             False -> {
-              // Sync yield* — get iterator, seed with undefined, self-looping
+              // Sync yield* — get iterator, seed undefined, self-looping
               // YieldStar handles the rest. Leaves final result.value on stack.
               let e = emit_ir(e, IrGetIterator)
               let e = push_const(e, JsUndefined)

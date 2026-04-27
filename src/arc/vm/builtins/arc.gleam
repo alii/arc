@@ -130,7 +130,10 @@ pub fn dispatch(
 
 /// Arc.peek(promise)
 /// Returns {type: 'pending'} | {type: 'resolved', value} | {type: 'rejected', reason}
-fn peek(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue)) {
+fn peek(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let arg = case args {
     [a, ..] -> a
     [] -> JsUndefined
@@ -309,7 +312,10 @@ fn self_(
 /// Arc.log(...args)
 /// Prints values to stdout, space-separated, with a newline.
 /// Similar to console.log but available in spawned processes.
-fn log(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue)) {
+fn log(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let #(state, parts) = log_stringify_args(args, state, [])
   io.println(string.join(parts, " "))
   #(state, Ok(JsUndefined))

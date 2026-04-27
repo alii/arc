@@ -98,7 +98,9 @@ fn compile_module_with_scope(
 
 /// Compile in REPL mode: top-level let/const/class go to the global lexical
 /// record so they persist across inputs.
-pub fn compile_repl(program: ast.Program) -> Result(FuncTemplate, CompileError) {
+pub fn compile_repl(
+  program: ast.Program,
+) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, emit.LexGlobal)
     ast.Module(_) -> Error(Unsupported("modules not supported in REPL"))
@@ -108,7 +110,9 @@ pub fn compile_repl(program: ast.Program) -> Result(FuncTemplate, CompileError) 
 /// Compile code for an INDIRECT eval call (or any global-scope dynamic
 /// evaluation). Top-level var → globalThis, let/const/class → fresh local
 /// LexicalEnvironment per §19.2.1.1 PerformEval steps 9–10.
-pub fn compile_eval(program: ast.Program) -> Result(FuncTemplate, CompileError) {
+pub fn compile_eval(
+  program: ast.Program,
+) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, emit.LexLocal)
     ast.Module(_) -> Error(Unsupported("modules not supported in eval"))

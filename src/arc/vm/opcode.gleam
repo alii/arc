@@ -148,6 +148,21 @@ pub type Op {
   /// result.value, leaves [iter] on stack, pc stays (re-executes on resume
   /// with [resume_val, iter]).
   YieldStar
+  /// Async-generator yield* — phase 1/2. Stack: [arg, iter, ..]. Calls
+  /// iter.next(arg), pops arg, pushes the (possibly thenable) result →
+  /// [result, iter, ..], pc+1. Always followed by Await then
+  /// AsyncYieldStarResume; Await suspends and resume pushes the settled
+  /// {value,done} object back → [result_obj, iter, ..].
+  /// Ok-returning (not Awaited) so job_queue mutations from the inner
+  /// .next() call (e.g. AsyncFromSyncIterator's unwrap microtask) thread
+  /// through to the Await step. ES §15.5.5 step 6.a.iii.
+  AsyncYieldStarNext
+  /// Async-generator yield* — phase 2/2. Stack: [result_obj, iter, ..].
+  /// IteratorComplete(result_obj): if done → pop both, push value, pc+1.
+  /// If !done → Yielded(value); execute_inner's Yielded arm pops result_obj,
+  /// keeps iter, sets pc to `next_pc` (the AsyncYieldStarNext op) so
+  /// .next(v) resumes with [v, iter, ..]. ES §15.5.5 step 6.a.v-vii.
+  AsyncYieldStarResume(next_pc: Int)
 
   // -- Async --
   /// Pop value from stack, wrap in Promise.resolve, suspend async function.
@@ -313,6 +328,8 @@ pub type IrOp {
   IrInitialYield
   IrYield
   IrYieldStar
+  IrAsyncYieldStarNext
+  IrAsyncYieldStarResume(next_label: Int)
   IrAwait
   IrCreateArguments
   IrNewRegExp

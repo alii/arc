@@ -399,7 +399,11 @@ fn parse_object(
 }
 
 /// Materialize a parsed JsonValue into a JsValue, allocating objects on the heap.
-fn materialize(h: Heap, b: common.Builtins, val: JsonValue) -> #(Heap, JsValue) {
+fn materialize(
+  h: Heap,
+  b: common.Builtins,
+  val: JsonValue,
+) -> #(Heap, JsValue) {
   case val {
     JsonNull -> #(h, JsNull)
     JsonBool(b_val) -> #(h, JsBool(b_val))
@@ -652,7 +656,10 @@ fn stringify_object(
 // ============================================================================
 
 /// Create a SyntaxError and return it as an Error result.
-fn syntax_error(state: State, msg: String) -> #(State, Result(JsValue, JsValue)) {
+fn syntax_error(
+  state: State,
+  msg: String,
+) -> #(State, Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
   #(State(..state, heap:), Error(err))
 }

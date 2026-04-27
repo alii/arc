@@ -4202,7 +4202,10 @@ fn to_locale_string_loop(
 
 /// ES2024 §23.1.3.16 Array.prototype.keys ( )
 /// Returns an array of indices (simplified — no iterator protocol).
-fn array_keys(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn array_keys(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   use _ref, length, state <- require_array(this, state)
   let keys = build_index_list(0, length, [])
   state.ok_array(state, keys)
@@ -4234,7 +4237,11 @@ fn build_entry_pairs(
   }
 }
 
-fn build_index_list(idx: Int, length: Int, acc: List(JsValue)) -> List(JsValue) {
+fn build_index_list(
+  idx: Int,
+  length: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
   case idx >= length {
     True -> list.reverse(acc)
     False -> build_index_list(idx + 1, length, [value.from_int(idx), ..acc])

@@ -16,9 +16,9 @@ jobs:
           submodules: true
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "28"
-          gleam-version: "1.15"
-          rebar3-version: "3"
+          otp-version: '28'
+          gleam-version: '1.16'
+          rebar3-version: '3'
           # elixir-version: "1"
       - run: gleam deps download
       - run: gleam test

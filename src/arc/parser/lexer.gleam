@@ -898,7 +898,10 @@ fn scan_string_inner(rest: BitArray, n: Int, quote: Int) -> StrScan {
 
 // --- Template literal reader ---
 
-fn read_template_literal(bytes: BitArray, start: Int) -> Result(Token, LexError) {
+fn read_template_literal(
+  bytes: BitArray,
+  start: Int,
+) -> Result(Token, LexError) {
   read_template_body(bytes, start + 1, start, 0)
 }
 

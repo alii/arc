@@ -428,7 +428,11 @@ fn is_assertion_group(bytes: BitArray, pos: Int, end: Int) -> Bool {
 
 /// Find the matching closing paren for a group, accounting for nesting,
 /// character classes, and escapes. pos starts inside the group (after opening `(`).
-fn find_matching_paren(bytes: BitArray, pos: Int, end: Int) -> Result(Int, Nil) {
+fn find_matching_paren(
+  bytes: BitArray,
+  pos: Int,
+  end: Int,
+) -> Result(Int, Nil) {
   find_matching_paren_loop(bytes, pos, end, 1, False)
 }
 

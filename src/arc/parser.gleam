@@ -278,7 +278,10 @@ fn statement_to_default_export_expr(stmt: ast.Statement) -> ast.Expression {
 
 /// Parse JavaScript source code into an AST.
 /// Returns Ok(ast.Program) on valid parse, Error on parse failure.
-pub fn parse(source: String, mode: ParseMode) -> Result(ast.Program, ParseError) {
+pub fn parse(
+  source: String,
+  mode: ParseMode,
+) -> Result(ast.Program, ParseError) {
   let tokenize_fn = case mode {
     Module -> lexer.tokenize_module
     Script -> lexer.tokenize
@@ -1592,7 +1595,9 @@ fn parse_return_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   }
 }
 
-fn parse_return_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_return_statement_body(
+  p: P,
+) -> Result(#(P, ast.Statement), ParseError) {
   let p2 = advance(p)
   case peek(p2) {
     Semicolon -> Ok(#(advance(p2), ast.ReturnStatement(argument: option.None)))
@@ -2199,7 +2204,9 @@ fn parse_setter_params_and_body(
   }
 }
 
-fn parse_formal_parameters(p: P) -> Result(#(P, List(ast.Pattern)), ParseError) {
+fn parse_formal_parameters(
+  p: P,
+) -> Result(#(P, List(ast.Pattern)), ParseError) {
   case peek(p) {
     RightParen -> Ok(#(p, []))
     _ -> parse_formal_parameter_list(p, set.new(), [])
@@ -2841,7 +2848,9 @@ fn parse_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   }
 }
 
-fn parse_assignment_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_assignment_expression(
+  p: P,
+) -> Result(#(P, ast.Expression), ParseError) {
   case peek(p) {
     Yield -> {
       // Only parse yield expression inside generators.
@@ -4822,7 +4831,9 @@ fn parse_import_specifiers(
   }
 }
 
-fn parse_import_specifier(p: P) -> Result(#(P, ast.ImportSpecifier), ParseError) {
+fn parse_import_specifier(
+  p: P,
+) -> Result(#(P, ast.ImportSpecifier), ParseError) {
   // name or name as alias or "string" as alias
   // The local binding name is the alias (after 'as') or the original name.
   let is_specifier_name =
@@ -5151,7 +5162,9 @@ fn parse_export_specifiers(
   }
 }
 
-fn parse_export_specifier(p: P) -> Result(#(P, ast.ExportSpecifier), ParseError) {
+fn parse_export_specifier(
+  p: P,
+) -> Result(#(P, ast.ExportSpecifier), ParseError) {
   let is_specifier_name =
     peek(p) == Identifier
     || peek(p) == KString

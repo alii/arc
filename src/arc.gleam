@@ -322,7 +322,10 @@ fn banner() -> Nil {
   io.println("")
 }
 
-fn handle_repl_line(state: ReplState, line: String) -> option.Option(ReplState) {
+fn handle_repl_line(
+  state: ReplState,
+  line: String,
+) -> option.Option(ReplState) {
   let source = string.trim(line)
   case source {
     "/clear" -> {

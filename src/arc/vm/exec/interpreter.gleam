@@ -14,18 +14,19 @@ import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
-  ArraySpread, Await, BinOp, BoxLocal, Call, CallApply, CallConstructor,
-  CallConstructorApply, CallEval, CallMethod, CallMethodApply, CallSuper,
-  CallSuperApply, CreateArguments, DeclareEvalVar, DeclareGlobalLex,
-  DeclareGlobalVar, DefineAccessor, DefineAccessorComputed, DefineField,
-  DefineFieldComputed, DefineMethod, DefineMethodComputed, DeleteElem,
-  DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator, GetBoxed, GetElem,
-  GetElem2, GetEvalVar, GetField, GetField2, GetGlobal, GetIterator, GetLocal,
-  GetThis, InitGlobalLex, InitialYield, IteratorClose, IteratorNext, Jump,
-  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, NewObject, NewRegExp,
-  ObjectRestCopy, ObjectSpread, Pop, PushConst, PushTry, PutBoxed, PutElem,
-  PutEvalVar, PutField, PutGlobal, PutLocal, Return, SetupDerivedClass, Swap,
-  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield, YieldStar,
+  ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal,
+  Call, CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
+  CallMethodApply, CallSuper, CallSuperApply, CreateArguments, DeclareEvalVar,
+  DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
+  DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
+  DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
+  GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal,
+  GetIterator, GetLocal, GetThis, InitGlobalLex, InitialYield, IteratorClose,
+  IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure,
+  NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop, PushConst, PushTry,
+  PutBoxed, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal, Return,
+  SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield,
+  YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -287,6 +288,15 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
             [_arg, ..rest] -> rest
             [] -> []
           })
+        AsyncYieldStarResume(next_pc:) ->
+          // Pre-step stack is [result_obj, iter, ..]. result_obj was fully
+          // consumed by step_generators (its .value is yielded_value, .done
+          // was false). Drop it so saved stack = [iter, ..]; resume pushes
+          // the .next(v) arg → [v, iter, ..] and pc jumps back to Next.
+          State(..state, heap:, pc: next_pc, stack: case state.stack {
+            [_result_obj, ..rest] -> rest
+            [] -> []
+          })
         _ -> State(..state, heap:, pc: state.pc + 1)
       }
       Ok(#(YieldCompletion(yielded_value, heap), suspended_state))
@@ -511,7 +521,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     | IteratorClose -> step_iteration(state, op)
 
     // Generator/async
-    InitialYield | Yield | YieldStar | Await -> step_generators(state, op)
+    InitialYield
+    | Yield
+    | YieldStar
+    | AsyncYieldStarNext
+    | AsyncYieldStarResume(_)
+    | Await -> step_generators(state, op)
 
     // Special
     CreateArguments | NewRegExp -> step_special(state, op)
@@ -2656,6 +2671,42 @@ fn step_generators(
       }
     }
 
+    AsyncYieldStarNext ->
+      // [arg, iter, ..rest]. Call iter.next(arg), replace arg with result →
+      // [result, iter, ..rest], pc+1. The following Await op suspends on it.
+      case state.stack {
+        [arg, JsObject(iter_ref) as iter, ..rest] -> {
+          use #(next_fn, state) <- result.try(
+            state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
+          )
+          use #(res, state) <- result.try(
+            state.rethrow(state.call(state, next_fn, iter, [arg])),
+          )
+          Ok(State(..state, stack: [res, iter, ..rest], pc: state.pc + 1))
+        }
+        _ -> underflow(state, "AsyncYieldStarNext")
+      }
+
+    AsyncYieldStarResume(_) ->
+      // [result_obj, iter, ..rest]. done? → push value, pc+1 : Yielded(value).
+      case state.stack {
+        [JsObject(rref) as res, _iter, ..rest] -> {
+          use #(done, state) <- result.try(
+            state.rethrow(object.get_value(state, rref, Named("done"), res)),
+          )
+          use #(val, state) <- result.try(
+            state.rethrow(object.get_value(state, rref, Named("value"), res)),
+          )
+          case value.is_truthy(done) {
+            True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+            False -> Error(#(Yielded, val, state.heap))
+          }
+        }
+        [_non_obj, _iter, ..] ->
+          state.throw_type_error(state, "Iterator result is not an object")
+        _ -> underflow(state, "AsyncYieldStarResume")
+      }
+
     Await -> {
       // Pop the awaited value from the stack and suspend the async function.
       case state.stack {
@@ -3090,7 +3141,11 @@ fn dispatch_native(
 /// Get the Ref of a named property's JsObject value from a heap object.
 /// Returns Error(Nil) if the object doesn't exist, the property is missing,
 /// or the property value is not a JsObject.
-fn get_field_ref(h: Heap, obj_ref: value.Ref, name: String) -> Option(value.Ref) {
+fn get_field_ref(
+  h: Heap,
+  obj_ref: value.Ref,
+  name: String,
+) -> Option(value.Ref) {
   use slot <- option.then(heap.read(h, obj_ref))
   case slot {
     ObjectSlot(properties: props, ..) ->

@@ -48,8 +48,7 @@ pub type NewStateFn =
     dict.Dict(value.SymbolId, String),
     dict.Dict(String, value.SymbolId),
     Bool,
-  ) ->
-    State
+  ) -> State
 
 // ============================================================================
 // Arc.spawn — spawn a new BEAM process running a JS closure

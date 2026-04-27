@@ -227,7 +227,10 @@ fn set_delete(
 }
 
 /// ES2024 §24.2.3.2 Set.prototype.clear ()
-fn set_clear(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn set_clear(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   use _data, _keys, ref, state <- require_set(this, state)
   let heap = update_set(state.heap, ref, dict.new(), [])
   #(State(..state, heap:), Ok(JsUndefined))
@@ -429,7 +432,10 @@ fn set_is_disjoint_from(
 
 /// ES2024 §24.2.3.12 Set.prototype.values ()
 /// Returns a new Set Iterator object (§24.2.5.1 CreateSetIterator).
-fn set_values(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn set_values(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   use data, keys, _ref, state <- require_set(this, state)
   let snapshot = list.reverse(keys) |> list.filter_map(dict.get(data, _))
   alloc_set_iterator(state, snapshot, value.SetIterValues)

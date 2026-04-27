@@ -469,7 +469,10 @@ fn map_delete(
 ///      a. Set p.[[Key]] to empty.
 ///      b. Set p.[[Value]] to empty.
 ///   4. Return undefined.
-fn map_clear(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn map_clear(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   use _entries, _keys_rev, _keys_len, ref, state <- require_map(this, state)
   let heap = update_map_data(state.heap, ref, dict.new(), [], 0)
   #(State(..state, heap:), Ok(JsUndefined))

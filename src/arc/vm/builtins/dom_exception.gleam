@@ -75,7 +75,12 @@ fn arg_string(
 }
 
 /// Allocate a DOMException instance with own name+message data properties.
-fn alloc(h: Heap, proto: Ref, name: String, message: String) -> #(Heap, JsValue) {
+fn alloc(
+  h: Heap,
+  proto: Ref,
+  name: String,
+  message: String,
+) -> #(Heap, JsValue) {
   let #(h, ref) =
     heap.alloc(
       h,

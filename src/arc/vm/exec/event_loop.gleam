@@ -387,7 +387,8 @@ fn run_closure_for_job(
         thrown,
         State(..state.merge_globals(state, final_state, []), heap: h),
       ))
-    Ok(#(YieldCompletion(_, _), _)) | Ok(#(completion.AwaitCompletion(_, _), _)) ->
+    Ok(#(YieldCompletion(_, _), _))
+    | Ok(#(completion.AwaitCompletion(_, _), _)) ->
       panic as "Yield/Await completion should not appear in job execution"
     Error(vm_err) ->
       panic as { "VM error in promise job: " <> string.inspect(vm_err) }

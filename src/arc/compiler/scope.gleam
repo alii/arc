@@ -284,7 +284,11 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
 // Scope helpers
 // ============================================================================
 
-fn add_to_current_scope(r: Resolver, name: String, binding: Binding) -> Resolver {
+fn add_to_current_scope(
+  r: Resolver,
+  name: String,
+  binding: Binding,
+) -> Resolver {
   case r.scopes {
     [scope, ..rest] -> {
       let scope =
@@ -344,7 +348,10 @@ fn lookup(scopes: List(Scope), name: String) -> Option(Binding) {
   }
 }
 
-fn lookup_in_current_scope(scopes: List(Scope), name: String) -> Option(Binding) {
+fn lookup_in_current_scope(
+  scopes: List(Scope),
+  name: String,
+) -> Option(Binding) {
   case scopes {
     [] -> None
     [scope, ..] -> dict.get(scope.bindings, name) |> option.from_result

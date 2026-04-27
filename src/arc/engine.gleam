@@ -125,7 +125,12 @@ pub fn define_global(engine: Engine, name: String, val: JsValue) -> Engine {
   Engine(..engine, heap: h)
 }
 
-fn set_global_property(h: Heap, global: Ref, name: String, val: JsValue) -> Heap {
+fn set_global_property(
+  h: Heap,
+  global: Ref,
+  name: String,
+  val: JsValue,
+) -> Heap {
   heap.update(h, global, fn(slot) {
     case slot {
       ObjectSlot(properties:, ..) ->

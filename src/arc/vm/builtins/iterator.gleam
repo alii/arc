@@ -197,7 +197,10 @@ pub fn dispatch(
 /// returns `this` when reached via `super()` in a subclass. Arc's CallSuper
 /// passes the freshly-allocated subclass instance as `this`; direct call /
 /// `new Iterator()` both arrive with `this = undefined`.
-fn construct(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn construct(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   case this {
     JsObject(_) -> #(state, Ok(this))
     _ ->
@@ -212,7 +215,10 @@ fn construct(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) 
 // §27.1.2.1 Iterator.from ( O )
 // ============================================================================
 
-fn from(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue)) {
+fn from(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let o = first_arg_or_undefined(args)
   // GetIteratorFlattenable(O, iterate-strings): O must be Object or String.
   use Nil, state <- after(case o {
@@ -664,7 +670,10 @@ fn open_inner(
 // %WrapForValidIteratorPrototype%.next / .return
 // ============================================================================
 
-fn wrap_next(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn wrap_next(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   use iterated, next_method <- require_wrap(this, state)
   use result, state <- state.try_call(state, next_method, iterated, [])
   #(state, Ok(result))
@@ -1075,7 +1084,10 @@ fn iterator_close_normal(
 /// Shared body of IteratorClose: GetMethod(iterator, "return") and call it.
 /// Ok(JsUndefined) means "no return method" (so the not-an-object check is
 /// skipped). Ok(other) is the return method's result.
-fn call_return(state: State, obj: JsValue) -> #(State, Result(JsValue, JsValue)) {
+fn call_return(
+  state: State,
+  obj: JsValue,
+) -> #(State, Result(JsValue, JsValue)) {
   use ret_fn, state <- state.try_op(object.get_value_of(
     state,
     obj,
@@ -1148,8 +1160,7 @@ fn require_helper(
     JsValue,
     Int,
     Bool,
-  ) ->
-    #(State, Result(JsValue, JsValue)),
+  ) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   let err = "Iterator Helper method called on incompatible receiver"
   case this {

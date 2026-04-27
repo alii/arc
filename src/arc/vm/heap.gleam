@@ -134,7 +134,10 @@ pub fn read_promise_data_ref(h: Heap(ctx), ref: Ref) -> Option(Ref) {
 }
 
 /// Read a PromiseSlot's state.
-pub fn read_promise_state(h: Heap(ctx), ref: Ref) -> Option(value.PromiseState) {
+pub fn read_promise_state(
+  h: Heap(ctx),
+  ref: Ref,
+) -> Option(value.PromiseState) {
   case read(h, ref) {
     Some(value.PromiseSlot(state:, ..)) -> Some(state)
     _ -> None

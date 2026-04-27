@@ -834,7 +834,10 @@ fn get_own_property_names(
 ///   2. Let nameList be ? EnumerableOwnProperties(obj, key).
 ///   3. Return CreateArrayFromList(nameList).
 ///
-fn keys(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue)) {
+fn keys(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   own_keys_impl(args, state, True)
 }
 
@@ -2273,7 +2276,10 @@ fn is_extensible(
 ///   1. If O is not an Object, return O.
 ///   2. Let status be ? SetIntegrityLevel(O, sealed).
 ///   4. Return O.
-fn seal(args: List(JsValue), state: State) -> #(State, Result(JsValue, JsValue)) {
+fn seal(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   set_integrity_level(args, state, seal_prop)
 }
 

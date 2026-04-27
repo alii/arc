@@ -7,22 +7,23 @@
 import arc/vm/internal/tuple_array
 import arc/vm/opcode.{
   type IrOp, type Op, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush,
-  IrArrayPushHole, IrArraySpread, IrAwait, IrBinOp, IrBoxLocal, IrCall,
-  IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallEval,
-  IrCallMethod, IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCloseVar,
-  IrCreateArguments, IrDeclareEvalVar, IrDeclareGlobalLex, IrDeclareGlobalVar,
-  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed, IrDeleteElem,
-  IrDeleteField, IrDup, IrEnterFinally, IrEnterFinallyThrow, IrForInNext,
-  IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
-  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
-  IrGetThis, IrInitGlobalLex, IrInitialYield, IrIteratorClose, IrIteratorNext,
-  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
-  IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
-  IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar,
-  IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrScopeGetVar, IrScopePutVar,
-  IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
-  IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
+  IrArrayPushHole, IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume,
+  IrAwait, IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor,
+  IrCallConstructorApply, IrCallEval, IrCallMethod, IrCallMethodApply,
+  IrCallSuper, IrCallSuperApply, IrCloseVar, IrCreateArguments, IrDeclareEvalVar,
+  IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
+  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
+  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally,
+  IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetBoxed,
+  IrGetElem, IrGetElem2, IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal,
+  IrGetIterator, IrGetLocal, IrGetThis, IrInitGlobalLex, IrInitialYield,
+  IrIteratorClose, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp,
+  IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
+  IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal, IrPutLocal,
+  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar,
+  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrTypeofEvalVar,
+  IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
@@ -277,6 +278,12 @@ fn resolve_ops(
     [IrYield, ..rest] -> resolve_ops(rest, labels, [opcode.Yield, ..acc])
     [IrYieldStar, ..rest] ->
       resolve_ops(rest, labels, [opcode.YieldStar, ..acc])
+    [IrAsyncYieldStarNext, ..rest] ->
+      resolve_ops(rest, labels, [opcode.AsyncYieldStarNext, ..acc])
+    [IrAsyncYieldStarResume(next_label), ..rest] -> {
+      let assert Ok(next_pc) = dict.get(labels, next_label)
+      resolve_ops(rest, labels, [opcode.AsyncYieldStarResume(next_pc), ..acc])
+    }
 
     // Async
     [IrAwait, ..rest] -> resolve_ops(rest, labels, [opcode.Await, ..acc])
