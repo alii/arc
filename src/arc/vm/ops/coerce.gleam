@@ -42,7 +42,7 @@ pub fn to_primitive(
     | JsUninitialized -> Ok(#(val, state))
     // Objects: try Symbol.toPrimitive, then OrdinaryToPrimitive
     JsObject(ref) -> {
-      // §7.1.1 step 2.a: check @@toPrimitive
+      // §7.1.1 step 1.a: check @@toPrimitive
       use #(exotic_fn, state) <- result.try(object.get_symbol_value(
         state,
         ref,

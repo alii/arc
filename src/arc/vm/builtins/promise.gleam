@@ -328,38 +328,37 @@ pub fn reject_promise(
 ///
 /// Spec steps:
 ///   1. Assert: IsPromise(promise) is true.
-///   2. If resultCapability is undefined, then
-///      a. Let onFulfilledJobCallback be empty.
-///      b. Let onRejectedJobCallback be empty.
-///   3. Else,
-///      a. Let onFulfilledJobCallback be HostMakeJobCallback(onFulfilled).
-///      b. Let onRejectedJobCallback be HostMakeJobCallback(onRejected).
-///   4. Let fulfillReaction be the PromiseReaction Record { [[Capability]]:
+///   2. If resultCapability is not present, set resultCapability to undefined.
+///   3. If IsCallable(onFulfilled) is false, let onFulfilledJobCallback be empty.
+///   4. Else, let onFulfilledJobCallback be HostMakeJobCallback(onFulfilled).
+///   5. If IsCallable(onRejected) is false, let onRejectedJobCallback be empty.
+///   6. Else, let onRejectedJobCallback be HostMakeJobCallback(onRejected).
+///   7. Let fulfillReaction be the PromiseReaction Record { [[Capability]]:
 ///      resultCapability, [[Type]]: fulfill, [[Handler]]: onFulfilledJobCallback }.
-///   5. Let rejectReaction be the PromiseReaction Record { [[Capability]]:
+///   8. Let rejectReaction be the PromiseReaction Record { [[Capability]]:
 ///      resultCapability, [[Type]]: reject, [[Handler]]: onRejectedJobCallback }.
-///   6. If promise.[[PromiseState]] is pending, then
+///   9. If promise.[[PromiseState]] is pending, then
 ///      a. Append fulfillReaction to promise.[[PromiseFulfillReactions]].
 ///      b. Append rejectReaction to promise.[[PromiseRejectReactions]].
-///   7. Else if promise.[[PromiseState]] is fulfilled, then
+///   10. Else if promise.[[PromiseState]] is fulfilled, then
 ///      a. Let value be promise.[[PromiseResult]].
 ///      b. Let fulfillJob be NewPromiseReactionJob(fulfillReaction, value).
 ///      c. Perform HostEnqueuePromiseJob(fulfillJob.[[Job]], fulfillJob.[[Realm]]).
-///   8. Else (rejected),
+///   11. Else (rejected),
 ///      a. Assert: The value of promise.[[PromiseState]] is rejected.
 ///      b. Let reason be promise.[[PromiseResult]].
 ///      c. If promise.[[PromiseIsHandled]] is false, perform
 ///         HostPromiseRejectionTracker(promise, "handle").
 ///      d. Let rejectJob be NewPromiseReactionJob(rejectReaction, reason).
 ///      e. Perform HostEnqueuePromiseJob(rejectJob.[[Job]], rejectJob.[[Realm]]).
-///   9. Set promise.[[PromiseIsHandled]] to true.
-///   10. If resultCapability is undefined, return undefined.
-///   11. Return resultCapability.[[Promise]].
+///   12. Set promise.[[PromiseIsHandled]] to true.
+///   13. If resultCapability is undefined, return undefined.
+///   14. Return resultCapability.[[Promise]].
 ///
 /// Non-callable handlers are replaced with sentinel values (JsUndefined =
 /// identity pass-through, JsNull = thrower pass-through) rather than using
 /// the spec's "empty" concept. Jobs are appended to state.job_queue.
-/// Step 8c: HostPromiseRejectionTracker — untracks previously-unhandled
+/// Step 11c: HostPromiseRejectionTracker — untracks previously-unhandled
 /// rejections on State when a handler is attached.
 pub fn perform_promise_then(
   state: state.State,
@@ -533,7 +532,7 @@ pub fn get_thenable_then(
 }
 
 /// Non-spec utility: set [[PromiseIsHandled]] to true on a PromiseSlot.
-/// Corresponds to §27.2.5.4.1 step 9 and §27.2.1.7 step 7 context.
+/// Corresponds to §27.2.5.4.1 step 12 and §27.2.1.7 step 7 context.
 /// Used for unhandled rejection tracking.
 fn mark_handled(h: Heap, data_ref: Ref) -> Heap {
   use slot <- heap.update(h, data_ref)

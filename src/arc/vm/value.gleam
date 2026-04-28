@@ -129,8 +129,8 @@ pub type ErlangTimerRef
 /// Materializes heap-allocated structures (objects, arrays) into
 /// self-contained values that don't reference any specific VM heap.
 /// A serialized JS value graph, structured per the HTML spec's
-/// StructuredSerializeInternal (§2.7.3): primitives are inlined, heap objects
-/// are interned into `records` and referenced by integer id so that cycles
+/// StructuredSerializeInternal (§2.7.3): primitives are inlined and a memory
+/// map keyed by object (here: integer ids into `records`) ensures cycles
 /// and shared identity survive the round-trip. Arc IPC uses this same shape
 /// with extra record kinds (Pid, Subject) that the spec algorithm would
 /// reject — see `CloneMode` at the serialize site.
@@ -218,7 +218,7 @@ pub type JsNum {
   NegInfinity
 }
 
-/// Number::toString(x, radixMV) helper — ES2024 §21.1.3.6 step 5.
+/// Number::toString(x, radixMV) helper — ES2024 §6.1.6.1.20.
 ///
 /// Per spec, NaN/+Infinity/-Infinity always use their canonical string forms
 /// regardless of radix. For finite values:
@@ -1068,7 +1068,7 @@ pub type ExoticKind(ctx) {
   /// Not truly weak (GC doesn't collect entries) but API-compatible.
   WeakMapObject(data: Dict(Ref, JsValue))
   /// WeakSet object — ES2024 §24.4 WeakSet Objects.
-  /// Uses object refs as values. No iteration, no size.
+  /// Holds objects or non-registered Symbols (CanBeHeldWeakly). No iteration, no size.
   WeakSetObject(data: Dict(Ref, Bool))
   /// RegExp object — ES2024 §22.2 RegExp Objects.
   /// Stores the source pattern and flags strings. Actual matching
@@ -1952,9 +1952,8 @@ pub fn to_number(val: JsValue) -> Result(JsNum, String) {
   }
 }
 
-/// JS ToNumber: https://tc39.es/ecma262/#sec-tonumber
-/// JS == (abstract equality, simplified)
-/// SameValueZero: like ===, but NaN equals NaN. ±0 are still equal.
+/// JS SameValueZero: https://tc39.es/ecma262/#sec-samevaluezero
+/// Like ===, but NaN equals NaN. ±0 are still equal.
 /// Used by Array.prototype.includes, Map/Set key equality.
 pub fn same_value_zero(left: JsValue, right: JsValue) -> Bool {
   case left, right {

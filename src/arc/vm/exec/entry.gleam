@@ -155,7 +155,7 @@ pub fn run_and_drain_repl(
         False,
       ),
       realms: env.realms,
-      // §16.1.6 ScriptEvaluation: script `this` is the global object.
+      // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
       this_binding: JsObject(env.global_object),
     )
   use #(completion, final_state) <- result.try(interpreter.execute_inner(state))

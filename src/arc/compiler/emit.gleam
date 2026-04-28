@@ -67,7 +67,7 @@ pub type TopLevelLex {
   /// `let x = 1` persists across inputs.
   LexGlobal
   /// Local slot in this template. Used by scripts, modules, function bodies,
-  /// and eval — §19.2.1.1 PerformEval steps 9–10 always create a fresh
+  /// and eval — §19.2.1.1 PerformEval steps 27–28 always create a fresh
   /// LexicalEnvironment, so eval'd let/const/class never escape.
   LexLocal
 }
@@ -1704,7 +1704,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           Ok(e)
         }
         False -> {
-          // x++: get, ToNumeric (§13.4 step 2), dup (old value stays as
+          // x++: get, ToNumeric (§13.4.2.1 step 3), dup (old value stays as
           // result), add 1, store. Unary `+` is the ToNumber coercion.
           let e = emit_ir(e, IrScopeGetVar(name))
           let e = emit_ir(e, IrUnaryOp(opcode.Pos))
@@ -1870,7 +1870,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Destructuring assignment expression: `[a, x.y] = rhs` or `({a, b} = rhs)`.
     // Parser guarantees LHS is ArrayExpression/ObjectExpression here
     // (parse_assignment_rhs only accepts these when last_expr_assignable=False).
-    // Result of the whole expression is rhs (§13.15.2 step 3), so Dup before
+    // Result of the whole expression is rhs (§13.15.2 step 6), so Dup before
     // destructure since emit_destructuring_assign consumes its input.
     ast.AssignmentExpression(ast.Assign, lhs, right) -> {
       use e <- result.try(emit_expr(e, right))
@@ -3566,7 +3566,7 @@ fn compile_derived_class(
     classify_class_body(body)
 
   // Build constructor: if none provided, synthesize the spec default derived
-  // constructor (§15.7.14 step 10.a): constructor(...args) { super(...args); }.
+  // constructor (§15.7.14 step 14): constructor(...args) { super(...args); }.
   // Arc doesn't support rest parameters yet, so spread `arguments` instead —
   // observably equivalent here since the synthetic body never re-reads it.
   let #(ctor_params, ctor_body) = case ctor_method {

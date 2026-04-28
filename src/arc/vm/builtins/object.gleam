@@ -331,15 +331,14 @@ fn get_own_property_descriptor(
 /// Converts an internal Property Descriptor to a plain object.
 /// 1. If Desc is undefined, return undefined.  (handled by caller)
 /// 2. Let obj be OrdinaryObjectCreate(%Object.prototype%).
-/// 3. If IsDataDescriptor(Desc):
-///    a. Create "value" property with Desc.[[Value]]
-///    b. Create "writable" property with Desc.[[Writable]]
-/// 4. Else (IsAccessorDescriptor):
-///    a. Create "get" property with Desc.[[Get]]
-///    b. Create "set" property with Desc.[[Set]]
-/// 5. Create "enumerable" property with Desc.[[Enumerable]]
-/// 6. Create "configurable" property with Desc.[[Configurable]]
-/// 7. Return obj.
+/// 3. Assert: obj is extensible with no own properties.
+/// 4. If Desc has a [[Value]] field, create "value" with Desc.[[Value]].
+/// 5. If Desc has a [[Writable]] field, create "writable" with Desc.[[Writable]].
+/// 6. If Desc has a [[Get]] field, create "get" with Desc.[[Get]].
+/// 7. If Desc has a [[Set]] field, create "set" with Desc.[[Set]].
+/// 8. If Desc has an [[Enumerable]] field, create "enumerable" with Desc.[[Enumerable]].
+/// 9. If Desc has a [[Configurable]] field, create "configurable" with Desc.[[Configurable]].
+/// 10. Return obj.
 ///
 /// All created properties are {[[Writable]]: true, [[Enumerable]]: true,
 /// [[Configurable]]: true} per spec. We use value.data_property which
@@ -562,7 +561,7 @@ pub fn apply_descriptor(
         _, _ -> Ok(Nil)
       })
 
-      // §10.1.6.3 ValidateAndApplyPropertyDescriptor steps 4-11:
+      // §10.1.6.3 ValidateAndApplyPropertyDescriptor step 5 (sub-steps 5a–5e):
       // Validate that the change is permitted on non-configurable properties.
       use Nil <- result.try(case existing {
         Ok(existing_prop) -> {
@@ -795,7 +794,7 @@ fn read_desc_field(
 /// Helper for ToPropertyDescriptor: reads a field and applies ToBoolean (§7.1.2).
 /// Used for the "enumerable", "configurable", and "writable" fields.
 ///
-/// Per §6.2.6.5 steps 3/4/6: the raw value is coerced via ToBoolean.
+/// Per §6.2.6.5 steps 4/6/10: the raw value is coerced via ToBoolean.
 /// ToBoolean(x) returns false for: undefined, null, false, +0, -0, NaN, "".
 /// Everything else (including objects, non-empty strings, non-zero numbers) is true.
 fn read_desc_bool(
@@ -819,7 +818,8 @@ fn read_desc_bool(
 ///   4. For each element nextKey of keys, do
 ///      a. If nextKey is a String, then
 ///         i. Append nextKey to nameList.
-///   5. Return CreateArrayFromList(nameList).
+///   5. Return nameList.
+/// (CreateArrayFromList is applied by the caller, Object.getOwnPropertyNames.)
 ///
 fn get_own_property_names(
   args: List(JsValue),
@@ -953,7 +953,7 @@ pub fn collect_own_keys(
 }
 
 /// Collect string representations of array indices that exist in elements.
-/// Implements the array-index portion of [[OwnPropertyKeys]] (§10.1.11 step 1):
+/// Implements the array-index portion of OrdinaryOwnPropertyKeys (§10.1.11.1 step 2):
 ///   "For each own property key P of O that is an array index, in ascending
 ///    numeric index order, add P to keys."
 ///
@@ -1273,9 +1273,9 @@ fn values(
 ///   2. Let nameList be ? EnumerableOwnProperties(obj, key+value).
 ///   3. Return CreateArrayFromList(nameList).
 ///
-/// EnumerableOwnProperties with kind=key+value (§7.3.23 step 3.a.ii.2):
+/// EnumerableOwnProperties with kind=key+value (§7.3.23 step 3.a.ii.2.c):
 ///   "Let entry be CreateArrayFromList(« key, value »)."
-///   "Append entry to properties."
+///   "Append entry to results."
 fn entries(
   args: List(JsValue),
   state: State,
@@ -1288,7 +1288,7 @@ fn entries(
     list.fold(pairs, #(state.heap, []), fn(acc, kv) {
       let #(h, rs) = acc
       let #(k, v) = kv
-      // §7.3.23 step 3.a.ii.2: CreateArrayFromList(« key, value »)
+      // §7.3.23 step 3.a.ii.2.c.ii: CreateArrayFromList(« key, value »)
       let #(h, r) = common.alloc_array(h, [JsString(k), v], array_proto)
       #(h, [JsObject(r), ..rs])
     })
@@ -1331,8 +1331,8 @@ fn own_values_impl(
     // ToObject: null/undefined → TypeError
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: enumerable own properties are the index characters.
-    // §7.1.18: ToObject(String) creates a String wrapper whose own enumerable
-    // string-keyed properties are the individual characters at indices 0..len-1.
+    // §7.1.18: ToObject(String) creates a String exotic object; the indexed
+    // character properties (enumerable, 0..len-1) come from §10.4.3 String exotics.
     JsString(s) -> {
       let chars = string.to_graphemes(s)
       cont(list.map(chars, JsString), state)
@@ -1342,9 +1342,9 @@ fn own_values_impl(
   }
 }
 
-/// Collect values for Object.values — implements §7.3.23 step 3.a.ii.1:
+/// Collect values for Object.values — implements §7.3.23 steps 3.a.ii.2.a–b:
 ///   "Let value be ? Get(O, key)."
-///   "Append value to properties."
+///   "Append value to results."
 ///
 /// Uses object.get_value which is the [[Get]] internal method (§10.1.8),
 /// properly invoking getter accessors and walking the prototype chain.
@@ -1359,7 +1359,7 @@ fn collect_values(
   case keys {
     [] -> Ok(#(acc, state))
     [k, ..rest] -> {
-      // §7.3.23 step 3.a.ii.1: Let value be ? Get(O, key)
+      // §7.3.23 step 3.a.ii.2.a: Let value be ? Get(O, key)
       use #(val, state) <- result.try(object.get_value(
         state,
         ref,
@@ -1393,7 +1393,7 @@ fn own_entries_impl(
 ) -> #(State, Result(JsValue, JsValue)) {
   case first_arg_or_undefined(args) {
     JsObject(ref) as receiver -> {
-      // §7.3.23 step 1: ownKeys (filtered to enumerable string keys)
+      // §7.3.23 steps 1 + 3.a/3.a.ii: own keys, pre-filtered here to enumerable string keys
       let ks = collect_own_keys(state.heap, ref, True)
       // §7.3.23 step 3: collect key+value pairs
       use pairs, state <- state.try_op(
@@ -1404,8 +1404,8 @@ fn own_entries_impl(
     // ToObject: null/undefined → TypeError
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: enumerable own properties are the index characters.
-    // §7.1.18: ToObject(String) creates a String wrapper whose own enumerable
-    // string-keyed properties are the individual characters at indices 0..len-1.
+    // §7.1.18: ToObject(String) creates a String exotic object; the indexed
+    // character properties (enumerable, 0..len-1) come from §10.4.3 String exotics.
     JsString(s) -> {
       let chars = string.to_graphemes(s)
       let pairs =
@@ -1419,10 +1419,10 @@ fn own_entries_impl(
   }
 }
 
-/// Collect entries for Object.entries — implements §7.3.23 step 3.a.ii (key+value):
-///   "Let value be ? Get(O, key)."
-///   "Let entry be CreateArrayFromList(« key, value »)."
-///   "Append entry to properties."
+/// Collect entries for Object.entries — implements §7.3.23 step 3.a.ii.2 (kind=key+value):
+///   3.a.ii.2.a: "Let value be ? Get(O, key)."
+///   3.a.ii.2.c.ii: "Let entry be CreateArrayFromList(« key, value »)."
+///   3.a.ii.2.c.iii: "Append entry to results."
 ///
 /// Returns #(key, value) tuples; the caller (entries/own_entries_impl) wraps
 /// each tuple into a [key, value] array via CreateArrayFromList.
@@ -1437,7 +1437,7 @@ fn collect_entries(
   case keys {
     [] -> Ok(#(acc, state))
     [k, ..rest] -> {
-      // §7.3.23 step 3.a.ii.1: Let value be ? Get(O, key)
+      // §7.3.23 step 3.a.ii.2.a: Let value be ? Get(O, key)
       use #(val, state) <- result.try(object.get_value(
         state,
         ref,
@@ -1771,7 +1771,7 @@ fn assign_keys(
 }
 
 /// Collect enumerable own symbol keys from an object.
-/// Implements the symbol portion of [[OwnPropertyKeys]] (§10.1.11 step 3)
+/// Implements the symbol portion of OrdinaryOwnPropertyKeys (§10.1.11.1 step 4)
 /// with optional enumerable filtering.
 pub fn collect_own_symbol_keys(
   heap: Heap,
@@ -2061,7 +2061,7 @@ fn would_create_cycle(
     None -> False
     // §10.1.2.1 step 7b: SameValue(p, O) → cycle detected.
     Some(p) if p == target_ref -> True
-    // §10.1.2.1 step 7d: set p to p.[[Prototype]] and continue.
+    // §10.1.2.1 step 7c.ii: set p to p.[[Prototype]] and continue.
     Some(p) ->
       case heap.read(heap, p) {
         Some(ObjectSlot(prototype: next, ..)) ->
@@ -2138,6 +2138,7 @@ fn set_integrity_level(
 ///
 ///   1. If O is not an Object, return O.
 ///   2. Let status be ? SetIntegrityLevel(O, frozen).
+///   3. If status is false, throw a TypeError exception.
 ///   4. Return O.
 fn freeze(
   args: List(JsValue),
@@ -2275,6 +2276,7 @@ fn is_extensible(
 ///
 ///   1. If O is not an Object, return O.
 ///   2. Let status be ? SetIntegrityLevel(O, sealed).
+///   3. If status is false, throw a TypeError exception.
 ///   4. Return O.
 fn seal(
   args: List(JsValue),

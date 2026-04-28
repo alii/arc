@@ -676,8 +676,8 @@ pub fn to_object(
 /// (`new String/Number/Boolean`): allocate a wrapper object for a primitive.
 ///
 /// Creates an ordinary object with the given ExoticKind (which carries the
-/// [[PrimitiveData]] internal slot, e.g. StringObject(s) = [[StringData]])
-/// and the appropriate builtin prototype.
+/// type-specific internal slot — [[StringData]] / [[NumberData]] /
+/// [[BooleanData]] etc.) and the appropriate builtin prototype.
 pub fn alloc_wrapper(
   h: Heap(ctx),
   kind: ExoticKind(ctx),

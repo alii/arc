@@ -155,13 +155,13 @@ pub type Op {
   /// {value,done} object back → [result_obj, iter, ..].
   /// Ok-returning (not Awaited) so job_queue mutations from the inner
   /// .next() call (e.g. AsyncFromSyncIterator's unwrap microtask) thread
-  /// through to the Await step. ES §15.5.5 step 6.a.iii.
+  /// through to the Await step. ES §15.5.5 step 8.a.i-ii.
   AsyncYieldStarNext
   /// Async-generator yield* — phase 2/2. Stack: [result_obj, iter, ..].
   /// IteratorComplete(result_obj): if done → pop both, push value, pc+1.
   /// If !done → Yielded(value); execute_inner's Yielded arm pops result_obj,
   /// keeps iter, sets pc to `next_pc` (the AsyncYieldStarNext op) so
-  /// .next(v) resumes with [v, iter, ..]. ES §15.5.5 step 6.a.v-vii.
+  /// .next(v) resumes with [v, iter, ..]. ES §15.5.5 step 8.a.iv-vii.
   AsyncYieldStarResume(next_pc: Int)
 
   // -- Async --

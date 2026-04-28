@@ -686,7 +686,7 @@ fn run_direct_eval(
       job_queue: state.job_queue,
       realms: state.realms,
       // Direct eval inherits the caller's `this` (spec §19.2.1.1
-      // step 27.a — the calling context's LexicalEnvironment).
+      // step 16.a — the calling context's LexicalEnvironment).
       this_binding: state.this_binding,
       eval_env:,
     )

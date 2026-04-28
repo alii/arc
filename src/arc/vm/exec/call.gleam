@@ -1245,8 +1245,9 @@ pub fn call_native(
       }
     }
     // String() constructor -- uses full ToString (ToPrimitive for objects).
-    // §22.1.1.1 step 1.a: if value is a Symbol, return SymbolDescriptiveString
-    // (does NOT throw — only implicit ToString on a Symbol throws).
+    // §22.1.1.1 step 2.a: if NewTarget is undefined and value is a Symbol,
+    // return SymbolDescriptiveString (does NOT throw — only implicit ToString
+    // on a Symbol throws).
     value.Call(value.StringConstructor) ->
       case args {
         [] ->
@@ -1442,8 +1443,9 @@ pub fn do_construct(
           )
       }
     }
-    // new Number(value) — §21.1.1.1: n = ToNumber(value), then return a
-    // wrapper object with [[NumberData]] = n.
+    // new Number(value) — §21.1.1.1: prim = ToNumeric(value); if prim is a
+    // BigInt let n = 𝔽(ℝ(prim)), else n = prim; then return a wrapper object
+    // with [[NumberData]] = n.
     // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
       kind: NativeFunction(value.Dispatch(value.NumberNative(

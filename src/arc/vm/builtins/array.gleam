@@ -196,11 +196,11 @@ fn is_array(
   #(State(..state, heap:), Ok(native_is_array(args, heap)))
 }
 
-/// Array ( ...values ) — §23.1.1 The Array Constructor
-/// Dispatches on numberOfArgs to one of three sub-algorithms:
-///   §23.1.1.1 Array() — 0 args
-///   §23.1.1.2 Array(len) — 1 arg
-///   §23.1.1.3 Array(...items) — 2+ args
+/// Array ( ...values ) — §23.1.1.1
+/// A single unified algorithm that branches on numberOfArgs:
+///   step 4: numberOfArgs = 0 → ArrayCreate(0, proto)
+///   step 5: numberOfArgs = 1 → single-arg (len) path
+///   step 6: numberOfArgs ≥ 2 → ...items path
 ///
 /// NewTarget / subclassing is not supported — proto is always the passed-in
 /// array_proto (equivalent to %Array.prototype%).
@@ -325,7 +325,7 @@ fn array_join(
   }
 }
 
-/// join_elements — implements step 7 of Array.prototype.join (§23.1.3.18).
+/// join_elements — implements step 6 of Array.prototype.join (§23.1.3.18).
 /// Iterates k from 0 to len-1, building the result string R.
 ///
 /// Per-index reads via get_index (which uses object.get_value_of — walks
@@ -524,8 +524,7 @@ fn has_index(heap: Heap, this: JsValue, idx: Int) -> Bool {
 /// LengthOfArrayLike (ES2024 §7.3.18) — pure approximation.
 ///
 /// §7.3.18 LengthOfArrayLike ( obj ):
-///   1. Assert: Type(obj) is Object.
-///   2. Return ? ToLength(? Get(obj, "length")).
+///   1. Return ℝ(? ToLength(? Get(obj, "length"))).
 ///
 /// Uses object.get_value to support accessor-valued "length" and prototype
 /// chain lookups.
@@ -1515,7 +1514,7 @@ fn array_fill(
   wrap(fill_generic(state, ref, start, end, fill_val), this)
 }
 
-/// Implements §23.1.3.7 step 12: Repeat, while k < final.
+/// Implements §23.1.3.7 step 11: Repeat, while k < final.
 fn fill_generic(
   state: State,
   ref: Ref,
@@ -1523,7 +1522,7 @@ fn fill_generic(
   end: Int,
   val: JsValue,
 ) -> Result(State, #(JsValue, State)) {
-  // Step 12: Repeat, while k < final
+  // Step 11: Repeat, while k < final
   case idx >= end {
     True -> Ok(state)
     False -> {
@@ -3712,7 +3711,7 @@ fn array_from_loop(
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
     False -> {
-      // Step 12.e: Let kValue be ? Get(items, Pk). Holes → undefined.
+      // Step 12.b: Let kValue be ? Get(items, Pk). Holes → undefined.
       use elem, state <- state.try_op(get_index(state, items, idx))
       case map_fn {
         None ->
@@ -3727,7 +3726,7 @@ fn array_from_loop(
             [elem, ..acc],
           )
         Some(mf) -> {
-          // Step 12.f: mappedValue = Call(mapfn, thisArg, «kValue, k»)
+          // Step 12.c: mappedValue = Call(mapfn, thisArg, «kValue, k»)
           use mapped, state <- state.try_call(state, mf, this_arg, [
             elem,
             value.from_int(idx),

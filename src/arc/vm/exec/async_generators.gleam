@@ -270,7 +270,7 @@ fn build_exec_state(
 }
 
 // ============================================================================
-// yield* delegation — ES §15.5.5 step 7.b/7.c
+// yield* delegation — ES §15.5.5 step 8.b/8.c
 // ============================================================================
 
 /// If suspended at AsyncYieldStarNext, return the delegated iterator ref.

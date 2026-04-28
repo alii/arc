@@ -145,8 +145,11 @@ pub fn dispatch(
 /// Number(value) — ES2024 §21.1.1.1
 ///
 /// When called as a function (not as a constructor):
-///   1. If value is not present, let n be +0.
-///   2. Else, let n be ? ToNumber(value).
+///   1. If value is present, then
+///      a. Let prim be ? ToNumeric(value).
+///      b. If prim is a BigInt, let n be 𝔽(ℝ(prim)).
+///      c. Otherwise, let n be prim.
+///   2. Else, let n be +0.
 ///   3. (If called as constructor, would create wrapper — not handled here.)
 ///   4. Return n.
 ///

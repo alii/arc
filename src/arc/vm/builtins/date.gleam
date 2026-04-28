@@ -523,7 +523,7 @@ fn set_this_time_value(state: State, ref: Ref, tv: JsNum) -> State {
 ///
 /// Known deviation: arc's call layer passes `this=JsUndefined` for both `f()`
 /// and `new f()` so we can't distinguish — this always returns a Date object,
-/// never the §21.4.2.1 step 2 string. Only ~2 test262 tests rely on that path.
+/// never the §21.4.2.1 step 1 string. Only ~2 test262 tests rely on that path.
 fn date_constructor(
   proto: Ref,
   args: List(JsValue),
@@ -560,7 +560,7 @@ fn single_arg_time_value(
   state: State,
   arg: JsValue,
 ) -> #(State, Result(JsNum, JsValue)) {
-  // §21.4.2.1 step 4.a: if value is a Date object, copy its [[DateValue]].
+  // §21.4.2.1 step 4.b: if value is a Date object, copy its [[DateValue]].
   case this_time_value(state, arg) {
     Some(#(_, tv)) -> #(state, Ok(time_clip(tv)))
     None ->
@@ -704,7 +704,7 @@ fn date_set_time(
 /// from QuickJS `set_date_field`.
 ///
 /// When `first==0` (setFullYear/setUTCFullYear) and the current value is NaN,
-/// the spec uses +0 as the base time (§21.4.4.21 step 2). For all other
+/// the spec uses +0 as the base time (§21.4.4.21 step 5). For all other
 /// setters, NaN base → result stays NaN.
 fn date_set_field(
   this: JsValue,
@@ -761,7 +761,7 @@ fn compute_set_field(
     }
     _ ->
       case first == 0 {
-        // setFullYear on Invalid Date: per §21.4.4.21 step 2, t becomes +0
+        // setFullYear on Invalid Date: per §21.4.4.21 step 5, t becomes +0
         // (NOT LocalTime(+0)) → Year 1970, Month 0, Date 1, all-zero time.
         True -> {
           let base_floats = [1970.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]

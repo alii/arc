@@ -3383,7 +3383,8 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let operand = delete_operand(expr)
       // §13.5.1.1 early errors — check the parsed AST, not tokens:
       //   - `delete x` (bare identifier, through parens) → strict-mode error
-      //   - `delete expr.#priv` (private name, through parens) → always error
+      //   - `delete expr.#priv` (private name, through parens) → strict-mode error
+      //     (private names only occur in class bodies, which are always strict)
       use <- bool.guard(
         p.strict && is_bare_identifier(operand),
         Error(DeleteUnqualifiedStrictMode(pos_of(p))),

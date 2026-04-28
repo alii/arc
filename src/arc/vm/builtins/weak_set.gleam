@@ -1,6 +1,7 @@
 /// ES2024 §24.4 WeakSet Objects
 ///
-/// A WeakSet is a collection of objects. Only objects can be values.
+/// A WeakSet is a collection of objects and/or non-registered Symbols
+/// (values for which CanBeHeldWeakly is true).
 /// In this implementation, values are stored by Ref (object identity).
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
 import arc/vm/builtins/common.{type BuiltinType}

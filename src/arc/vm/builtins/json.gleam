@@ -94,7 +94,7 @@ fn json_parse(
           syntax_error(state, "Unexpected non-whitespace character after JSON")
       }
     }
-    // Step 3: If parse fails, throw SyntaxError
+    // Step 2: If parse fails, throw SyntaxError
     Error(msg) -> syntax_error(state, msg)
   }
 }
@@ -474,9 +474,9 @@ fn materialize_object_entries(
 ///
 /// Simplified: replacer and space parameters are not yet implemented.
 ///
-/// Steps (simplified):
-///   1. Let str be ? SerializeJSONProperty(value).
-///   2. Return str (or undefined if not serializable).
+/// After setup (stack, indent, gap, ReplacerFunction, wrapper), the final step
+/// returns ? SerializeJSONProperty(state, "", wrapper) — or undefined if the
+/// value is not serializable.
 fn json_stringify(
   args: List(JsValue),
   state: State,

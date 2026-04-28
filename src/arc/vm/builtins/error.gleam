@@ -283,7 +283,7 @@ fn error_to_string_msg(
   }
 }
 
-/// Helper: combine name and msg per §20.5.3.4 steps 9-11.
+/// Helper: combine name and msg per §20.5.3.4 steps 7-9.
 fn error_to_string_combine(
   state: State,
   name: String,

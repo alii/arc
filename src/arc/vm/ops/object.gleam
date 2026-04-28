@@ -27,8 +27,9 @@ import gleam/string
 ///    which preserves the correct `this` binding for getters.
 ///
 /// We never allocate a wrapper object for primitives. Instead:
-///   - String primitives synthesize "length" and index properties inline
-///     (matching §10.4.3.5 StringGetOwnProperty without a StringObject).
+///   - String primitives synthesize index properties inline (matching
+///     §10.4.3.5 StringGetOwnProperty) and "length" inline (an ordinary own
+///     data property created by §10.4.3.4 StringCreate) without a StringObject.
 ///   - Number/Boolean/Symbol primitives jump straight to prototype [[Get]].
 ///   - null/undefined return undefined instead of throwing TypeError (callers
 ///     are expected to guard against this before calling get_value_of).
@@ -44,9 +45,10 @@ pub fn get_value_of(
       // String primitive: synthesize own properties per §10.4.3.5
       // StringGetOwnProperty, then fall through to String.prototype.
       case key {
-        // §10.4.3.5 step 7: "length" → {value: len, W:F, E:F, C:F}
+        // §10.4.3.4 StringCreate: "length" is an ordinary own data property
+        // {value: len, W:F, E:F, C:F} (NOT produced by StringGetOwnProperty).
         Named("length") -> Ok(#(value.from_int(string_length(s)), state))
-        // §10.4.3.5 steps 3-6,8-14: numeric index → single-char string
+        // §10.4.3.5 steps 2-10: numeric index → single-char string
         Index(idx) ->
           case string_char_at(s, idx) {
             Some(ch) -> Ok(#(JsString(ch), state))
@@ -138,7 +140,7 @@ pub fn get_value(
 
 /// Get the character at codepoint index `idx`, or None if out of bounds.
 ///
-/// Implements **StringGetOwnProperty** §10.4.3.5 steps 10-14.
+/// Implements **StringGetOwnProperty** §10.4.3.5 steps 8-10.
 ///
 /// FFI walks UTF-8 codepoints directly — ~20x faster than gleam/string.slice
 /// which does grapheme cluster segmentation via unicode_util:gc.
@@ -181,15 +183,16 @@ pub fn string_length(s: String) -> Int
 ///     2. If desc is not undefined, return desc.
 ///     3. Return StringGetOwnProperty(S, P).
 ///
-///   **StringGetOwnProperty(S, P)** — §10.4.3.5:
-///     1-2. If P is not a String or not a canonical numeric index, return undefined.
-///     3-4. Let index be CanonicalNumericIndexString(P). If index is undefined, return undefined.
-///     5. If index is not an integer, return undefined.
-///     6. If index is -0, return undefined.
-///     7. Let str be S.[[StringData]].
-///     8-9. Let len be the length of str. If index < 0 or index >= len, return undefined.
-///     10-14. Return {value: str[index..index+1], W:false, E:true, C:false}.
-///     Also: "length" → {value: len, W:false, E:false, C:false}.
+///   **StringGetOwnProperty(S, P)** — §10.4.3.5 (10 steps; index keys only):
+///     1. If P is not a String, return undefined.
+///     2. Let index be CanonicalNumericIndexString(P). If undefined, return undefined.
+///     3-4. If index is not an integral Number, or is -0, return undefined.
+///     5-6. Let stringData be S.[[StringData]].
+///     7. Let len be the length of stringData.
+///     8. If index < 0 or index >= len, return undefined.
+///     9-10. Return {value: substring at index, W:false, E:true, C:false}.
+///   ("length" is NOT handled here — it is an ordinary own property created
+///    by §10.4.3.4 StringCreate and returned at §10.4.3.1 step 1.)
 ///
 /// For **Arguments exotic**: indices from elements storage, everything else
 ///   (including "length" and "callee") from the properties dict.
@@ -234,7 +237,9 @@ pub fn get_own_property(
               }
             Named(_) -> dict_get_option(properties, key)
           }
-        // --- Arguments exotic [[GetOwnProperty]] (§10.4.4) ---
+        // --- Arguments exotic [[GetOwnProperty]] (§10.4.4.1) ---
+        // Spec layers a [[ParameterMap]] over OrdinaryGetOwnProperty; our
+        // elements/properties split is an internal storage optimization.
         value.ArgumentsObject(_) ->
           case key {
             Index(idx) ->
@@ -251,7 +256,8 @@ pub fn get_own_property(
         // --- String exotic [[GetOwnProperty]] (§10.4.3.1) ---
         value.StringObject(value: s) ->
           case key {
-            // §10.4.3.5 step 7: "length" → {value: len, W:F, E:F, C:F}
+            // §10.4.3.4 StringCreate: "length" is an ordinary own data
+            // property {value: len, W:F, E:F, C:F}; returned at §10.4.3.1 step 1.
             Named("length") ->
               Some(DataProperty(
                 value: value.from_int(string_length(s)),
@@ -259,10 +265,10 @@ pub fn get_own_property(
                 enumerable: False,
                 configurable: False,
               ))
-            // §10.4.3.5 steps 3-6: CanonicalNumericIndexString → integer index
+            // §10.4.3.5 steps 2-4: CanonicalNumericIndexString → integer index
             Index(idx) ->
               case string_char_at(s, idx) {
-                // §10.4.3.5 steps 10-14: return {value: char, W:F, E:T, C:F}
+                // §10.4.3.5 step 10: return {value: char, W:F, E:T, C:F}
                 Some(ch) ->
                   Some(DataProperty(
                     value: JsString(ch),
@@ -270,10 +276,12 @@ pub fn get_own_property(
                     enumerable: True,
                     configurable: False,
                   ))
-                // §10.4.3.5 step 9: index >= len → undefined, fall to ordinary
+                // §10.4.3.5 step 8: index >= len → undefined, fall to ordinary
                 None -> dict_get_option(properties, key)
               }
-            // §10.4.3.1 step 1-2: not a numeric index → OrdinaryGetOwnProperty
+            // §10.4.3.1 step 1: OrdinaryGetOwnProperty is called first for ALL
+            // keys; for non-index keys StringGetOwnProperty (step 3) yields
+            // undefined, so the ordinary result is the only answer.
             Named(_) -> dict_get_option(properties, key)
           }
         // --- Ordinary [[GetOwnProperty]] (§10.1.5.1) ---
@@ -284,9 +292,9 @@ pub fn get_own_property(
 }
 
 /// Helper: dict.get but returns Option instead of Result.
-/// Implements §10.1.5.1 OrdinaryGetOwnProperty step 1: look up the key in
-/// the object's own property storage. Returns None (spec "undefined") if
-/// the key is not present, or Some(descriptor) if found.
+/// Implements §10.1.5.1 OrdinaryGetOwnProperty: step 1 returns undefined when
+/// the key is not an own property; steps 2-8 build and return the descriptor
+/// when it is. We collapse both into a single Option lookup.
 fn dict_get_option(
   d: dict.Dict(PropertyKey, Property),
   key: PropertyKey,
@@ -324,17 +332,18 @@ pub fn set_value(
     // §10.1.9.2 step 2: If IsDataDescriptor(ownDesc) is true, then
     //   step 2.a: If ownDesc.[[Writable]] is false, return false.
     Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
-    // §10.1.9.2 steps 2.b-2.e: ownDesc is writable data — delegate to receiver.
+    // §10.1.9.2 steps 2.b-2.h: ownDesc is writable data — delegate to receiver.
     // We delegate to set_on_receiver which handles both create and update
-    // via set_property (spec distinguishes steps 2.c vs 2.e but result is same).
+    // via set_property (spec distinguishes step 2.d.ii CreateDataProperty vs
+    // step 2.h OrdinaryDefineOwnProperty but result is same).
     Some(DataProperty(writable: True, ..)) ->
       set_on_receiver(state, receiver, key, val)
     // §10.1.9.2 step 3: Assert: ownDesc is an accessor descriptor.
-    //   step 3.a: Let setter be ownDesc.[[Set]].
-    //   step 3.b: If setter is undefined, return false.
+    //   step 4: Let setter be ownDesc.[[Set]].
+    //   step 5: If setter is undefined, return false.
     Some(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
-    // §10.1.9.2 step 3.c: Perform ? Call(setter, Receiver, « V »).
-    // §10.1.9.2 step 3.d: Return true.
+    // §10.1.9.2 step 6: Perform ? Call(setter, Receiver, « V »).
+    // §10.1.9.2 step 7: Return true.
     Some(AccessorProperty(set: Some(setter), ..)) -> {
       use #(_, state) <- result.map(state.call(state, setter, receiver, [val]))
       #(state, True)
@@ -342,15 +351,15 @@ pub fn set_value(
   }
 }
 
-/// §10.1.9.2 OrdinarySetWithOwnDescriptor steps 2.b-2.e (receiver half).
+/// §10.1.9.2 OrdinarySetWithOwnDescriptor steps 2.b-2.h (receiver half).
 ///
 /// Create or update an own data property on the receiver. Shared by
 /// set_value's "not found in proto chain" and "writable proto data" branches.
 ///
-/// The spec distinguishes "receiver has existing own property" (step 2.c —
-/// only updates [[Value]]) vs "receiver has no own property" (step 2.e —
-/// CreateDataProperty). We delegate both cases to set_property which handles
-/// the distinction internally with identical semantics.
+/// The spec distinguishes "receiver has no own property" (step 2.d.ii —
+/// CreateDataProperty) vs "receiver has existing own property" (step 2.h —
+/// OrdinaryDefineOwnProperty with {[[Value]]: V}). We delegate both cases to
+/// set_property which handles the distinction internally with identical semantics.
 ///
 /// §10.1.9.2 step 2.b: If receiver is not an Object, return false.
 fn set_on_receiver(
@@ -360,7 +369,7 @@ fn set_on_receiver(
   val: JsValue,
 ) -> Result(#(State, Bool), #(JsValue, State)) {
   case receiver {
-    // §10.1.9.2 step 2.c-e: Receiver is an object — define/update own property.
+    // §10.1.9.2 steps 2.c-2.h: Receiver is an object — define/update own property.
     JsObject(recv_ref) -> {
       let #(h, ok) = set_property(state.heap, recv_ref, key, val)
       Ok(#(State(..state, heap: h), ok))
@@ -379,7 +388,10 @@ fn set_on_receiver(
 /// `success = False` when:
 ///   - Existing property is non-writable (OrdinaryDefineOwnProperty step 3/4)
 ///   - New property on non-extensible object (step 2)
-///   - StringObject guarded key: in-range index or "length" (§10.4.3.2 step 2-3)
+///   - StringObject in-range index key: §10.4.3.2 step 2b returns
+///     IsCompatiblePropertyDescriptor, which is false for a value-change Desc.
+///     "length" goes through step 3 OrdinaryDefineOwnProperty and is rejected
+///     because StringCreate (§10.4.3.4) made it non-writable/non-configurable.
 ///   - ref is invalid / not an ObjectSlot
 ///
 /// Callers decide what to do with `False`: sloppy mode ignores it, strict mode
@@ -412,12 +424,14 @@ pub fn set_property(
             Named("length") -> array_set_length(h, ref, val, slot, length)
             // §10.4.2.1 step 2: If P is an array index (ToUint32 is valid index):
             Index(idx) ->
-              // §10.4.2.1 step 2.b: If index >= oldLen, growing length —
-              // check extensible first (non-extensible can't add new indices).
+              // §10.4.2.1 step 2.h: If index >= oldLen and lengthDesc.[[Writable]]
+              // is false, return false. (We approximate with extensible since
+              // we don't yet track length's [[Writable]] separately.)
               case idx >= length && !extensible {
                 True -> #(h, False)
                 False -> {
-                  // §10.4.2.1 step 2.c-d: Set element, update length to max(oldLen, index+1).
+                  // §10.4.2.1 steps 2.i-2.k: define element, then set length to
+                  // index+1 when index >= oldLen.
                   let new_elements = elements.set(elements, idx, val)
                   let new_length = int.max(length, idx + 1)
                   #(
@@ -438,7 +452,9 @@ pub fn set_property(
             // OrdinaryDefineOwnProperty(A, P, Desc).
             Named(_) -> set_string_property(h, ref, key, val, slot)
           }
-        // --- §10.4.4 Arguments exotic — similar element-based storage ---
+        // --- §10.4.4.2 Arguments exotic [[DefineOwnProperty]] ---
+        // Spec calls OrdinaryDefineOwnProperty then syncs [[ParameterMap]];
+        // our element-based storage is an internal optimization.
         value.ArgumentsObject(_) ->
           case key {
             Index(idx) ->
@@ -464,16 +480,20 @@ pub fn set_property(
           // §10.4.3.2 step 2: If P is a CanonicalNumericIndexString for an
           // integer in [0, length), the property is non-configurable/non-writable,
           // so [[DefineOwnProperty]] returns false for any change.
-          // §10.4.3.2 step 3: "length" is also immutable.
+          // "length" falls through to §10.4.3.2 step 3 (OrdinaryDefineOwnProperty),
+          // which rejects because §10.4.3.4 StringCreate made it {W:F, C:F}.
           let is_guarded = case key {
             Named("length") -> True
             Index(idx) -> idx < len
             Named(_) -> False
           }
           case is_guarded {
-            // §10.4.3.2: Reject — property is immutable on String exotic.
+            // §10.4.3.2 step 2b: returns IsCompatiblePropertyDescriptor(ext,
+            // Desc, stringDesc) — false for our value-only Desc against a
+            // {W:F, C:F} current descriptor. (Compatible no-op redefines would
+            // return true per spec; we conservatively reject.)
             True -> #(h, False)
-            // §10.4.3.2 step 4: Else, OrdinaryDefineOwnProperty(S, P, Desc).
+            // §10.4.3.2 step 3: Else, OrdinaryDefineOwnProperty(S, P, Desc).
             False -> set_string_property(h, ref, key, val, slot)
           }
         }
@@ -486,20 +506,20 @@ pub fn set_property(
 
 /// §10.4.2.4 ArraySetLength ( A, Desc ) — simplified.
 ///
-/// Steps 1-3: Let newLen be ToUint32(Desc.[[Value]]).
-/// Step 4: If newLen != ToNumber(Desc.[[Value]]), throw RangeError.
+/// Step 3: Let newLen be ToUint32(Desc.[[Value]]).
+/// Step 5: If SameValueZero(newLen, ToNumber(Desc.[[Value]])) is false, throw RangeError.
 /// TODO(Deviation): we use coerce_length which rejects non-integer/negative/NaN but
 /// returns False instead of throwing RangeError. Should throw RangeError
-/// per spec step 4 when newLen != ToNumber(Desc.[[Value]]).
+/// per spec step 5 when newLen != ToNumber(Desc.[[Value]]).
 ///
-/// Steps 5-7: Let oldLen be A.[[ArrayLength]].
-/// Steps 8-11: If newLen >= oldLen, set length and return true.
-/// Steps 12-14: If oldLen length property is non-writable, return false.
+/// Steps 9-10: Let oldLen be the current "length" property's [[Value]].
+/// Step 11: If newLen >= oldLen, set length and return true.
+/// Step 12: If the old "length" property is non-writable, return false.
 /// TODO(Deviation): we don't track writable on the virtual length property yet.
 /// Object.defineProperty(arr, 'length', {writable: false}) should freeze length.
 ///
-/// Steps 15-18: Delete elements from oldLen-1 down to newLen.
-/// TODO(Deviation): spec stops at first non-configurable element (step 17.b) and
+/// Step 18: Delete own elements with index >= newLen, in descending order.
+/// TODO(Deviation): spec stops at first non-configurable element (step 18.b) and
 /// returns false with length set to that index+1. Our elements have no
 /// per-index descriptors, so all are implicitly configurable. Needs
 /// per-element property descriptors to handle non-configurable indices.
@@ -510,9 +530,9 @@ fn array_set_length(
   slot: HeapSlot,
   old_length: Int,
 ) -> #(Heap, Bool) {
-  // §10.4.2.4 steps 1-4: Coerce value to valid uint32 length.
+  // §10.4.2.4 steps 3-5: Coerce value to valid uint32 length.
   case coerce_length(val) {
-    // Step 4: Would be RangeError; we return False.
+    // Step 5: Would be RangeError; we return False.
     None -> #(h, False)
     Some(new_length) -> {
       let assert ObjectSlot(elements:, ..) = slot
@@ -521,7 +541,8 @@ fn array_set_length(
         True -> truncate_elements(elements, new_length, old_length)
         False -> elements
       }
-      // §10.4.2.4 step 19: Set A.[[ArrayLength]] to newLen; return true.
+      // §10.4.2.4 step 16 sets "length" to newLen via OrdinaryDefineOwnProperty
+      // (no [[ArrayLength]] internal slot in ES2015+); step 20 returns true.
       #(
         heap.write(
           h,
@@ -538,10 +559,11 @@ fn array_set_length(
   }
 }
 
-/// §10.4.2.4 ArraySetLength steps 1-4: ToUint32 + RangeError validation.
+/// §10.4.2.4 ArraySetLength steps 3-5: ToUint32 + RangeError validation.
 ///
-/// Spec: Let newLen be ToUint32(Desc.[[Value]]). If newLen != ToNumber(Desc.[[Value]]),
-/// throw RangeError.
+/// Spec: step 3 newLen = ToUint32(Desc.[[Value]]); step 4 numberLen =
+/// ToNumber(Desc.[[Value]]); step 5 if SameValueZero(newLen, numberLen) is
+/// false, throw RangeError.
 ///
 /// Simplified: we accept finite numbers that are non-negative integers.
 /// Fractional, negative, NaN, Infinity, and non-numeric values return None
@@ -560,7 +582,7 @@ fn coerce_length(val: JsValue) -> Option(Int) {
   }
 }
 
-/// §10.4.2.4 step 17: Delete elements at indices >= new_len.
+/// §10.4.2.4 step 18: Delete elements at indices >= new_len.
 ///
 /// Instead of iterating the full [new_len, old_len) range (which could be
 /// billions for sparse arrays), we filter the underlying storage directly.
@@ -577,11 +599,11 @@ fn truncate_elements(
 ///
 /// Set a string-keyed own property in the properties dict. Returns #(Heap, success).
 ///
-/// Step 2 (ValidateAndApply): If current is undefined and extensible is false, return false.
-/// Step 3: If current is undefined and extensible is true, create the property.
-/// Step 4-7: If current exists, check writable. If writable is true, update [[Value]].
-///           If writable is false, return false. Accessors also return false
-///           (would need [[Set]] path, not [[DefineOwnProperty]]).
+/// Step 2.a (ValidateAndApply): If current is undefined and extensible is false, return false.
+/// Steps 2.b-2.e: If current is undefined and extensible is true, create the property.
+/// Steps 5-6: If current exists, check writable. If writable is true, update [[Value]]
+///            (step 6.c). If writable is false, return false (step 5.e). Accessors
+///            also return false (would need [[Set]] path, not [[DefineOwnProperty]]).
 ///
 /// TODO(Deviation): spec's ValidateAndApplyPropertyDescriptor does full descriptor
 /// merging (attribute changes, data<->accessor conversion). We only handle
@@ -598,7 +620,7 @@ fn set_string_property(
     ObjectSlot(properties:, extensible:, ..) ->
       // §10.1.6.1 step 1: Let current be ? O.[[GetOwnProperty]](P).
       case dict.get(properties, key) {
-        // §10.1.6.3 step 4-7: current exists and is writable data — update [[Value]].
+        // §10.1.6.3 step 6.c: current exists and is writable data — update [[Value]].
         Ok(DataProperty(writable: True, enumerable:, configurable:, ..)) -> {
           let new_props =
             dict.insert(
@@ -613,19 +635,19 @@ fn set_string_property(
             )
           #(heap.write(h, ref, ObjectSlot(..slot, properties: new_props)), True)
         }
-        // §10.1.6.3 step 6: current.[[Writable]] is false → reject.
+        // §10.1.6.3 step 5.e: current.[[Writable]] is false → reject.
         Ok(DataProperty(writable: False, ..)) -> #(h, False)
         // Accessor property: [[DefineOwnProperty]] with just a value on an
         // accessor would convert it to data, but we don't support that yet.
         Ok(value.AccessorProperty(..)) -> #(h, False)
-        // §10.1.6.3 step 2-3: Property doesn't exist on this object.
-        Error(_) ->
+        // §10.1.6.3 step 2: current is undefined — property doesn't exist.
+        Error(Nil) ->
           case extensible {
-            // §10.1.6.3 step 2: If extensible is false, return false.
+            // §10.1.6.3 step 2.a: If extensible is false, return false.
             False -> #(h, False)
-            // §10.1.6.3 step 3: extensible is true — create new data property
-            // with {[[Value]]: V, [[Writable]]: true, [[Enumerable]]: true,
-            // [[Configurable]]: true}.
+            // §10.1.6.3 steps 2.b-2.e: extensible is true — create new data
+            // property with {[[Value]]: V, [[Writable]]: true,
+            // [[Enumerable]]: true, [[Configurable]]: true}.
             True -> {
               let new_props =
                 dict.insert(properties, key, value.data_property(val))
@@ -669,8 +691,9 @@ fn define_own_property(
   }
 }
 
-/// §7.3.6 CreateMethodProperty ( O, P, V ) — ES2022 numbering; renamed to
-/// CreateNonEnumerableDataPropertyOrThrow (§7.3.7) in ES2024.
+/// §7.3.6 CreateMethodProperty ( O, P, V ) — ES2022 numbering; removed in
+/// ES2024 with call sites migrated to the pre-existing
+/// CreateNonEnumerableDataPropertyOrThrow (same {W:T, E:F, C:T} semantics).
 ///
 /// Step 1: Let newDesc be the PropertyDescriptor {[[Value]]: V, [[Writable]]: true,
 ///         [[Enumerable]]: false, [[Configurable]]: true}.
@@ -695,7 +718,7 @@ pub fn define_method_property(
   }
 }
 
-/// §10.1.6.3 step 4.b: merge a getter/setter into an existing accessor
+/// §10.1.6.3 step 6.c.i: merge a getter/setter into an existing accessor
 /// descriptor, or build a fresh one if absent / a data property.
 fn merge_accessor(
   existing: Result(Property, Nil),
@@ -734,9 +757,9 @@ fn merge_accessor(
 ///
 /// If the property already exists as an accessor, merges the new get/set
 /// (the spec achieves this via [[DefineOwnProperty]] descriptor merging in
-/// §10.1.6.3 ValidateAndApplyPropertyDescriptor step 4.b: "For each field of
-/// Desc that is present, set the corresponding attribute of the property to
-/// the value of the field").
+/// §10.1.6.3 ValidateAndApplyPropertyDescriptor step 6.c.i: "For each field
+/// name fieldName of desc, set the attribute named fieldName of the property
+/// ... to the value of the field").
 ///
 /// Used by object literal `{ get x() {}, set x(v) {} }` syntax.
 pub fn define_accessor(
@@ -952,14 +975,16 @@ fn delete_string_property(
 ///       Step 3.a.ii.1: (kind = "key") Append key to results.
 /// Step 4: Return results.
 ///
-/// Extended to walk the prototype chain for for-in enumeration (§14.7.5.9
-/// ForIn/OfHeadEvaluation uses [[Enumerate]] which walks prototypes).
-/// Uses a seen set to skip shadowed keys per §14.7.5.10 step 5.b:
-/// "If key is already in the set visitedKeys, skip it."
+/// Extended to walk the prototype chain for for-in enumeration: §14.7.5.6
+/// ForIn/OfHeadEvaluation calls §14.7.5.9 EnumerateObjectProperties, which
+/// walks prototypes (the [[Enumerate]] internal method was removed in ES2016).
+/// Uses a seen set to skip shadowed keys per §14.7.5.10.2.1
+/// %ForInIteratorPrototype%.next() step 5.b.iii: a key already in
+/// [[VisitedKeys]] is not re-yielded.
 ///
 /// The spec's EnumerableOwnProperties only handles own properties; we extend
-/// it with prototype walking here because for-in needs it, matching the
-/// [[Enumerate]] internal method behavior. Symbol keys are excluded per
+/// it with prototype walking here because for-in needs it, matching
+/// EnumerateObjectProperties behavior. Symbol keys are excluded per
 /// step 3.a (only String keys).
 pub fn enumerate_keys(heap: Heap, ref: Ref) -> List(String) {
   enumerate_keys_loop(heap, Some(ref), set.new(), [])
@@ -1016,9 +1041,9 @@ fn enumerate_keys_loop(
 
 /// Helper: collect element indices [0, length) as string keys in ascending
 /// order. Skips holes and already-seen keys. This corresponds to the array
-/// index portion of §10.1.11.1 OrdinaryOwnPropertyKeys step 1: "For each
+/// index portion of §10.1.11.1 OrdinaryOwnPropertyKeys step 2: "For each
 /// own property key P of O that is an array index, in ascending numeric
-/// index order, add P to keys."
+/// index order, append P to keys."
 ///
 /// Iterates elements.indices() (O(k)) instead of probing 0..length (O(length))
 /// so sparse arrays with huge length but few entries don't degenerate.
@@ -1047,7 +1072,7 @@ fn collect_element_keys(
 
 /// §7.3.25 CopyDataProperties ( target, source, excludedItems )
 ///
-/// Step 1: If source is undefined or null, return target.
+/// Step 1: If source is undefined or null, return unused.
 /// Step 2: Let from be ! ToObject(source).
 /// Step 3: Let keys be ? from.[[OwnPropertyKeys]]().
 /// Step 4: For each element nextKey of keys, do
@@ -1058,7 +1083,7 @@ fn collect_element_keys(
 ///     Step 4.c.ii: If desc is not undefined and desc.[[Enumerable]] is true, then
 ///       Step 4.c.ii.1: Let propValue be ? Get(from, nextKey).
 ///       Step 4.c.ii.2: Perform ! CreateDataPropertyOrThrow(target, nextKey, propValue).
-/// Step 5: Return target.
+/// Step 5: Return unused.
 ///
 /// Used by object spread `{...source}` and Object.assign.
 ///

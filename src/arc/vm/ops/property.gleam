@@ -13,10 +13,10 @@ import gleam/result
 // Computed property access helpers
 // ============================================================================
 
-/// ToPropertyKey (§7.1.19) for non-symbol keys — canonicalizes a JsValue to a
-/// PropertyKey ONCE so downstream [[Get]]/[[Set]] don't round-trip through
-/// strings. Numbers that are valid array indices → Index(n) (no stringify).
-/// Strings go through canonical_key. Everything else → ToString → canonical_key.
+/// ToPropertyKey (§7.1.19) for non-symbol keys — spec is ToPrimitive(hint
+/// string) then ToString. We canonicalize to a PropertyKey ONCE so downstream
+/// [[Get]]/[[Set]] don't round-trip through strings: array-index numbers →
+/// Index(n) (skip stringify), strings → canonical_key, else ToString → canonical_key.
 pub fn to_property_key(
   state: State,
   key: JsValue,

@@ -109,7 +109,7 @@ pub fn compile_repl(
 
 /// Compile code for an INDIRECT eval call (or any global-scope dynamic
 /// evaluation). Top-level var → globalThis, let/const/class → fresh local
-/// LexicalEnvironment per §19.2.1.1 PerformEval steps 9–10.
+/// LexicalEnvironment per §19.2.1.1 PerformEval step 16.
 pub fn compile_eval(
   program: ast.Program,
 ) -> Result(FuncTemplate, CompileError) {
@@ -145,7 +145,7 @@ pub fn compile_eval_direct(
         Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
           let strict = caller_is_strict || is_strict
           // Strict direct eval gets its own VarEnvironment (spec §19.2.1.1
-          // step 12): rewrite hoisted var declarations from DeclareGlobalVar
+          // step 18): rewrite hoisted var declarations from DeclareGlobalVar
           // to local DeclareVar so they stay scoped to the eval body.
           // Sloppy keeps DeclareGlobalVar which scope.gleam rewrites to
           // DeclareEvalVar via ToEvalEnv.

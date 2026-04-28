@@ -1,6 +1,7 @@
 /// ES2024 §24.3 WeakMap Objects
 ///
-/// A WeakMap is a collection of key-value pairs where keys must be objects.
+/// A WeakMap is a collection of key-value pairs where keys must be objects or
+/// non-registered Symbols (per CanBeHeldWeakly).
 /// In this implementation, keys are stored by Ref (object identity).
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
 import arc/vm/builtins/common.{type BuiltinType}

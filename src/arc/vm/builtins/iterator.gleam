@@ -520,8 +520,8 @@ fn step_take(
 ) -> #(State, Result(JsValue, JsValue)) {
   case remaining <= 0 {
     True -> {
-      // §27.1.3.12: when remaining is 0, return ? IteratorClose(iterated,
-      // NormalCompletion(undefined)) and yield done.
+      // §27.1.3.3.11: when remaining is 0, Return ? IteratorClose(iterated,
+      // ReturnCompletion(undefined)) and yield done.
       let state = mark_done(state, ref)
       let #(state, close_res) = iterator_close_normal(state, underlying)
       case close_res {
