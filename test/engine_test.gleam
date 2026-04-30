@@ -1,4 +1,6 @@
+import arc/beam
 import arc/engine
+import arc/vm/builtins/console
 import arc/vm/completion.{NormalCompletion}
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
 
@@ -310,6 +312,91 @@ pub fn host_fn_can_throw_test() {
   let assert Ok(#(NormalCompletion(value:, ..), _)) =
     engine.eval(eng, "try { boom() } catch (e) { 'caught:' + e }")
   assert value == JsString("caught:kaboom")
+}
+
+// ----------------------------------------------------------------------------
+// console — WHATWG Console §2 Logger / Formatter
+// ----------------------------------------------------------------------------
+
+/// Host fn that returns what `console.log(...args)` would print, so the
+/// formatter is assertable from JS without touching stdout.
+fn fmt_engine() -> engine.Engine {
+  engine.new()
+  |> engine.define_fn("fmt", 0, fn(args, _this, s) {
+    let #(s, line) = console.format(args, s)
+    #(s, Ok(JsString(line)))
+  })
+}
+
+pub fn console_shape_test() {
+  let eng = engine.new()
+  assert assert_eval(eng, "typeof console.log") == JsString("function")
+  assert assert_eval(eng, "console.log.length") == JsNumber(Finite(0.0))
+  assert assert_eval(eng, "Object.prototype.toString.call(console)")
+    == JsString("[object console]")
+}
+
+pub fn console_inspect_objects_test() {
+  let eng = fmt_engine()
+  assert assert_eval(eng, "fmt({a: 1}, [1, 2])")
+    == JsString("{ a: 1 } [ 1, 2 ]")
+  // Top-level strings are unquoted.
+  assert assert_eval(eng, "fmt('raw', 1)") == JsString("raw 1")
+}
+
+pub fn console_format_specifiers_test() {
+  let eng = fmt_engine()
+  assert assert_eval(eng, "fmt('hi %s!', 'world')") == JsString("hi world!")
+  assert assert_eval(eng, "fmt('%d/%i', 42.9, '7.5')") == JsString("42/7")
+  assert assert_eval(eng, "fmt('%f', 3.14)") == JsString("3.14")
+  assert assert_eval(eng, "fmt('%o', {x: 1})") == JsString("{ x: 1 }")
+  // `%%` only collapses inside Formatter, i.e. with 2+ args.
+  assert assert_eval(eng, "fmt('%% done', 0)") == JsString("% done 0")
+}
+
+pub fn console_format_edge_cases_test() {
+  let eng = fmt_engine()
+  // §2.1 step 4: single string arg never enters Formatter.
+  assert assert_eval(eng, "fmt('100%')") == JsString("100%")
+  // Trailing lone `%` stays literal, leftover args still appended.
+  assert assert_eval(eng, "fmt('100%', 'x')") == JsString("100% x")
+  // §2.2.1 step 2: out-of-args specifier stays literal (Node behaviour).
+  assert assert_eval(eng, "fmt('%d %d %d', 'abc', 5)") == JsString("NaN 5 %d")
+  // Unknown specifier left as-is.
+  assert assert_eval(eng, "fmt('a%zb', 1)") == JsString("a%zb 1")
+  // %c consumes its arg, emits nothing.
+  assert assert_eval(eng, "fmt('a%cb', 'color:red')") == JsString("ab")
+  // §2.2 step 5: leftover args after format string.
+  assert assert_eval(eng, "fmt('x=%d', 1, {y: 2})") == JsString("x=1 { y: 2 }")
+}
+
+// ----------------------------------------------------------------------------
+// arc/beam — opt-in BEAM primitives as host fns
+// ----------------------------------------------------------------------------
+
+pub fn beam_not_installed_by_default_test() {
+  let eng = engine.new()
+  assert assert_eval(eng, "typeof Arc") == JsString("undefined")
+}
+
+pub fn beam_install_test() {
+  let eng = engine.new() |> beam.install("Arc")
+  assert assert_eval(eng, "typeof Arc.spawn") == JsString("function")
+  assert assert_eval(eng, "typeof Arc.subject") == JsString("function")
+  assert assert_eval(eng, "Arc.peek(Promise.resolve(1)).type")
+    == JsString("resolved")
+}
+
+pub fn beam_install_custom_name_test() {
+  let eng = engine.new() |> beam.install("proc")
+  assert assert_eval(eng, "typeof proc.self") == JsString("function")
+  assert assert_eval(eng, "typeof Arc") == JsString("undefined")
+}
+
+pub fn beam_subject_roundtrip_test() {
+  let eng = engine.new() |> beam.install("Arc")
+  assert assert_eval(eng, "var s = Arc.subject(); s.send(42); s.receive()")
+    == JsNumber(Finite(42.0))
 }
 
 // ----------------------------------------------------------------------------

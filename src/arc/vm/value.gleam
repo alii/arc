@@ -188,27 +188,6 @@ pub type PortableRecord {
   PrSubject(pid: ErlangPid, tag: ErlangRef)
 }
 
-/// Envelope for all messages that land in a VM process's mailbox. The event
-/// loop blocks on these when the microtask queue drains but outstanding work
-/// remains (pending receiveAsync, in-flight fetch, active timers).
-pub type MailboxEvent {
-  /// An external operation (fetch, timer) completed. Resolves or rejects the
-  /// promise identified by `data_ref` (a PromiseSlot ref — just an Int, so
-  /// safe to round-trip through a worker process that doesn't touch the heap).
-  SettlePromise(
-    data_ref: Ref,
-    outcome: Result(PortableMessage, PortableMessage),
-  )
-  /// A `subject.receiveAsync(ms)` timeout fired. If `data_ref` is still in
-  /// `pending_receivers`, resolves that promise with undefined and retires
-  /// it; otherwise a no-op (a message already arrived).
-  ReceiverTimeout(data_ref: Ref)
-  /// A subject message matched by the event loop's selective receive.
-  /// The `tag` identifies which subject it was sent to, `payload` is the
-  /// serialized message. Produced by `receive_settle_or_subject` FFI.
-  SubjectMessage(tag: ErlangRef, payload: PortableMessage)
-}
-
 /// JS number representation. BEAM floats can't represent NaN or Infinity,
 /// so we use an explicit tagged type.
 pub type JsNum {
@@ -514,23 +493,11 @@ pub type ObjectNativeFn {
 }
 
 /// Arc methods — non-standard engine-specific utilities.
-pub type ArcNativeFn {
-  ArcPeek
-  ArcSetTimeout
-  ArcClearTimeout
-  ArcSelf
-  ArcLog
-  ArcSleep
-  ArcPidToString
-  ArcSubject
-  ArcSelect
-  ArcSelectorOn
-  ArcSelectorReceive
-  ArcSubjectSend
-  ArcSubjectReceive
-  ArcSubjectReceiveAsync
-  ArcSubjectToString
-  ArcStructuredClone
+pub type ConsoleNativeFn {
+  /// console.{log,info,debug} → stdout
+  ConsoleLog
+  /// console.{warn,error} → stderr
+  ConsoleLogError
 }
 
 /// JSON methods — JSON.parse and JSON.stringify.
@@ -832,7 +799,7 @@ pub type NativeFn {
   ErrorNative(ErrorNativeFn)
   ArrayNative(ArrayNativeFn)
   ObjectNative(ObjectNativeFn)
-  ArcNative(ArcNativeFn)
+  ConsoleNative(ConsoleNativeFn)
   JsonNative(JsonNativeFn)
   ReflectNative(ReflectNativeFn)
   MapNative(MapNativeFn)
@@ -966,8 +933,8 @@ pub type VmNativeFn {
   FunctionToString
   /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
   IteratorSymbolIterator
-  /// Arc.spawn(fn) — needs VM internals (execute_inner, drain_jobs).
-  ArcSpawn
+  /// HTML structuredClone(value) — serialize + deserialize on the same heap.
+  StructuredClone
   // Global functions
   Eval
   DecodeURI

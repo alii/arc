@@ -1,57 +1,30 @@
+//// HTML structured clone (serialize/deserialize) plus the Subject object,
+//// whose `.send`/`.receive` methods are mutually recursive with serialize/
+//// deserialize and so must live in the same module.
+
 import arc/vm/builtins/common
 import arc/vm/builtins/dom_exception
-import arc/vm/builtins/promise as builtins_promise
+import arc/vm/builtins/process_objects
 import arc/vm/builtins/regexp
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type ArcNativeFn, type JsValue, type MailboxEvent, type PortableMessage,
-  type Ref, AccessorProperty, ArcLog, ArcNative, ArcPeek, ArcPidToString,
-  ArcSelect, ArcSelectorOn, ArcSelectorReceive, ArcSelf, ArcSetTimeout, ArcSleep,
-  ArcSubject, ArcSubjectReceive, ArcSubjectReceiveAsync, ArcSubjectSend,
-  ArcSubjectToString, DataProperty, JsBigInt, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsSymbol, JsUndefined, JsUninitialized, ObjectSlot, OrdinaryObject,
-  PidObject, PortableMessage, PrArray, PrBooleanObject, PrDate, PrMap,
-  PrNumberObject, PrObject, PrPid, PrRegExp, PrSet, PrStringObject, PrSubject,
-  PromiseFulfilled, PromisePending, PromiseRejected, PvBigInt, PvBool, PvNull,
-  PvNumber, PvRef, PvString, PvSymbol, PvUndefined, SelectorObject,
-  SettlePromise, SubjectObject, WellKnownSymbol,
+  type JsValue, type PortableMessage, type Ref, AccessorProperty, DataProperty,
+  JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined,
+  JsUninitialized, ObjectSlot, OrdinaryObject, PidObject, PortableMessage,
+  PrArray, PrBooleanObject, PrDate, PrMap, PrNumberObject, PrObject, PrPid,
+  PrRegExp, PrSet, PrStringObject, PrSubject, PvBigInt, PvBool, PvNull, PvNumber,
+  PvRef, PvString, PvSymbol, PvUndefined, SelectorObject, SubjectObject,
+  WellKnownSymbol,
 }
 import gleam/dict
-import gleam/io
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 
 // -- FFI declarations --------------------------------------------------------
-
-@external(erlang, "erlang", "self")
-fn ffi_self() -> value.ErlangPid
-
-/// Returns the pid in the format `<x.x.x>
-@external(erlang, "arc_vm_ffi", "pid_to_string")
-pub fn ffi_pid_to_string(pid: value.ErlangPid) -> String
-
-@external(erlang, "arc_vm_ffi", "sleep")
-fn ffi_sleep(ms: Int) -> Nil
-
-@external(erlang, "arc_vm_ffi", "send_after")
-fn ffi_send_after(
-  ms: Int,
-  pid: value.ErlangPid,
-  msg: MailboxEvent,
-) -> value.ErlangTimerRef
-
-@external(erlang, "arc_vm_ffi", "cancel_timer")
-fn ffi_cancel_timer(tref: value.ErlangTimerRef) -> Bool
-
-// -- Subject FFI declarations ------------------------------------------------
-
-@external(erlang, "erlang", "make_ref")
-fn ffi_make_ref() -> value.ErlangRef
 
 @external(erlang, "arc_vm_ffi", "send_subject_message")
 fn ffi_send_subject(
@@ -69,399 +42,7 @@ fn ffi_receive_subject_timeout(
   timeout: Int,
 ) -> Result(PortableMessage, Nil)
 
-@external(erlang, "arc_vm_ffi", "select_message")
-fn ffi_select(
-  ref_map: dict.Dict(value.ErlangRef, Bool),
-) -> #(value.ErlangRef, PortableMessage)
-
-@external(erlang, "arc_vm_ffi", "select_message_timeout")
-fn ffi_select_timeout(
-  ref_map: dict.Dict(value.ErlangRef, Bool),
-  timeout: Int,
-) -> Result(#(value.ErlangRef, PortableMessage), Nil)
-
-// -- Init --------------------------------------------------------------------
-
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
-  let #(h, methods) =
-    common.alloc_methods(h, function_proto, [
-      #("peek", ArcNative(ArcPeek), 1),
-      #("spawn", value.VmNative(value.ArcSpawn), 1),
-      #("setTimeout", ArcNative(ArcSetTimeout), 2),
-      #("clearTimeout", ArcNative(value.ArcClearTimeout), 1),
-      #("self", ArcNative(ArcSelf), 0),
-      #("log", ArcNative(ArcLog), 1),
-      #("sleep", ArcNative(ArcSleep), 1),
-      #("subject", ArcNative(ArcSubject), 0),
-      #("select", ArcNative(ArcSelect), 0),
-    ])
-
-  common.init_namespace(h, object_proto, "Arc", methods)
-}
-
-/// Per-module dispatch for Arc native functions.
-pub fn dispatch(
-  native: ArcNativeFn,
-  args: List(JsValue),
-  this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  case native {
-    value.ArcPeek -> peek(args, state)
-    value.ArcSetTimeout -> set_timeout(args, state)
-    value.ArcClearTimeout -> clear_timeout(args, state)
-    value.ArcSelf -> self_(args, state)
-    value.ArcLog -> log(args, state)
-    value.ArcSleep -> sleep(args, state)
-    value.ArcPidToString -> pid_to_string(this, args, state)
-    value.ArcSubject -> subject(state)
-    value.ArcSelect -> select(state)
-    value.ArcSelectorOn -> selector_on(this, args, state)
-    value.ArcSelectorReceive -> selector_receive(this, args, state)
-    value.ArcSubjectSend -> subject_send(this, args, state)
-    value.ArcSubjectReceive -> subject_receive(this, args, state)
-    ArcSubjectReceiveAsync -> subject_receive_async(this, args, state)
-    value.ArcSubjectToString -> subject_to_string(this, state)
-    value.ArcStructuredClone -> structured_clone(args, state)
-  }
-}
-
-// -- Arc.peek ----------------------------------------------------------------
-
-/// Arc.peek(promise)
-/// Returns {type: 'pending'} | {type: 'resolved', value} | {type: 'rejected', reason}
-fn peek(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let arg = case args {
-    [a, ..] -> a
-    [] -> JsUndefined
-  }
-
-  case read_promise_state(state.heap, arg) {
-    Some(promise_state) -> {
-      let props = case promise_state {
-        PromisePending -> [#("type", value.data_property(JsString("pending")))]
-        PromiseFulfilled(value:) -> [
-          #("type", value.data_property(JsString("resolved"))),
-          #("value", value.data_property(value)),
-        ]
-        PromiseRejected(reason:) -> [
-          #("type", value.data_property(JsString("rejected"))),
-          #("reason", value.data_property(reason)),
-        ]
-      }
-
-      let #(heap, result_ref) =
-        common.alloc_pojo(state.heap, state.builtins.object.prototype, props)
-      #(State(..state, heap:), Ok(JsObject(result_ref)))
-    }
-    None -> state.type_error(state, "Arc.peek: argument is not a Promise")
-  }
-}
-
-fn read_promise_state(
-  h: Heap,
-  val: JsValue,
-) -> option.Option(value.PromiseState) {
-  use ref <- option.then(case val {
-    JsObject(r) -> Some(r)
-    _ -> None
-  })
-  use data_ref <- option.then(heap.read_promise_data_ref(h, ref))
-  heap.read_promise_state(h, data_ref)
-}
-
-// -- Arc.setTimeout ----------------------------------------------------------
-
-/// Arc.setTimeout(fn, ms)
-/// Schedules `fn` to be called after `ms` milliseconds. Returns undefined.
-/// Works by creating a pending promise, telling BEAM to send a
-/// SettlePromise message back to self after `ms`, and attaching `fn` as
-/// the promise's fulfill handler — so when the timer fires, the event loop
-/// resolves the promise, which schedules a reaction job that calls `fn`.
-///
-/// Requires the event loop to be running (--event-loop flag or Arc.spawn).
-/// Throws TypeError if the event loop is not enabled.
-fn set_timeout(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  case state.event_loop {
-    False ->
-      state.type_error(
-        state,
-        "Arc.setTimeout() requires the event loop (--event-loop flag)",
-      )
-    True -> set_timeout_inner(args, state)
-  }
-}
-
-fn set_timeout_inner(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let #(callback, ms) = case args {
-    [cb, JsNumber(value.Finite(n)), ..] -> #(cb, value.float_to_int(n))
-    [cb, ..] -> #(cb, 0)
-    [] -> #(JsUndefined, 0)
-  }
-  let ms = case ms < 0 {
-    True -> 0
-    False -> ms
-  }
-  let #(heap, _obj_ref, data_ref) =
-    builtins_promise.create_promise(
-      state.heap,
-      state.builtins.promise.prototype,
-    )
-  let state =
-    builtins_promise.perform_promise_then(
-      State(..state, heap:),
-      data_ref,
-      callback,
-      JsUndefined,
-      JsUndefined,
-      JsUndefined,
-    )
-  let timer_ref =
-    ffi_send_after(
-      ms,
-      ffi_self(),
-      SettlePromise(
-        data_ref,
-        Ok(PortableMessage(root: PvUndefined, records: dict.new())),
-      ),
-    )
-  let #(heap, timer_obj) =
-    heap.alloc(
-      state.heap,
-      ObjectSlot(
-        kind: value.TimerObject(timer_ref:, data_ref:),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(state.builtins.object.prototype),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
-  #(
-    State(..state, heap:, outstanding: state.outstanding + 1),
-    Ok(JsObject(timer_obj)),
-  )
-}
-
-// -- Arc.clearTimeout --------------------------------------------------------
-
-/// Arc.clearTimeout(timer)
-/// Cancels a timer created by `Arc.setTimeout`. If the timer hasn't fired
-/// yet, the callback will not be invoked and `outstanding` is decremented.
-/// If it already fired (or `timer` isn't a timer), this is a no-op.
-fn clear_timeout(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let cancelled =
-    args
-    |> list.first
-    |> option.from_result
-    |> option.then(as_timer_ref(state.heap, _))
-    |> option.map(ffi_cancel_timer)
-    |> option.unwrap(False)
-  let state = case cancelled {
-    True -> State(..state, outstanding: state.outstanding - 1)
-    False -> state
-  }
-  #(state, Ok(JsUndefined))
-}
-
-fn as_timer_ref(h: Heap, val: JsValue) -> Option(value.ErlangTimerRef) {
-  case val {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: value.TimerObject(timer_ref:, ..), ..)) ->
-          Some(timer_ref)
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
-// -- Arc.self ----------------------------------------------------------------
-
-/// Arc.self()
-/// Returns a Pid object representing the current BEAM process.
-fn self_(
-  _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let pid = ffi_self()
-  let #(heap, pid_val) =
-    alloc_pid_object(
-      state.heap,
-      state.builtins.object.prototype,
-      state.builtins.function.prototype,
-      pid,
-    )
-  #(State(..state, heap:), Ok(pid_val))
-}
-
-// -- Arc.log -----------------------------------------------------------------
-
-/// Arc.log(...args)
-/// Prints values to stdout, space-separated, with a newline.
-/// Similar to console.log but available in spawned processes.
-fn log(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let #(state, parts) = log_stringify_args(args, state, [])
-  io.println(string.join(parts, " "))
-  #(state, Ok(JsUndefined))
-}
-
-fn log_stringify_args(
-  args: List(JsValue),
-  state: State,
-  acc: List(String),
-) -> #(State, List(String)) {
-  case args {
-    [] -> #(state, list.reverse(acc))
-    [arg, ..rest] -> {
-      let #(state, s) = log_stringify_one(arg, state)
-      log_stringify_args(rest, state, [s, ..acc])
-    }
-  }
-}
-
-fn log_stringify_one(val: JsValue, state: State) -> #(State, String) {
-  case val {
-    JsUndefined -> #(state, "undefined")
-    JsNull -> #(state, "null")
-    JsBool(True) -> #(state, "true")
-    JsBool(False) -> #(state, "false")
-    JsNumber(value.Finite(n)) -> #(state, value.js_format_number(n))
-    JsNumber(value.NaN) -> #(state, "NaN")
-    JsNumber(value.Infinity) -> #(state, "Infinity")
-    JsNumber(value.NegInfinity) -> #(state, "-Infinity")
-    JsString(s) -> #(state, s)
-    JsBigInt(value.BigInt(n)) -> #(state, string.inspect(n) <> "n")
-    JsSymbol(_) -> #(state, "Symbol()")
-    JsUninitialized -> #(state, "undefined")
-    JsObject(ref) ->
-      case log_stringify_object(state.heap, ref) {
-        Some(s) -> #(state, s)
-        None ->
-          // Try to convert to string via toString
-          case coerce.js_to_string(state, val) {
-            Ok(#(s, state)) -> #(state, s)
-            Error(#(_, state)) -> #(state, "[object Object]")
-          }
-      }
-  }
-}
-
-/// Check if a heap object has a special log representation (Pid, Subject, etc.).
-fn log_stringify_object(h: Heap, ref: Ref) -> Option(String) {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(kind: PidObject(pid:), ..)) ->
-      Some("Pid" <> ffi_pid_to_string(pid))
-    Some(ObjectSlot(kind: SubjectObject(pid:, ..), ..)) ->
-      Some("Subject" <> ffi_pid_to_string(pid))
-    _ -> None
-  }
-}
-
-// -- Arc.sleep ---------------------------------------------------------------
-
-/// Arc.sleep(ms)
-/// Suspends the current BEAM process for the given number of milliseconds.
-/// Maps directly to Erlang's timer:sleep/1.
-fn sleep(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let ms = case args {
-    [JsNumber(value.Finite(n)), ..] -> value.float_to_int(n)
-    _ -> 0
-  }
-  case ms > 0 {
-    True -> ffi_sleep(ms)
-    False -> Nil
-  }
-  #(state, Ok(JsUndefined))
-}
-
-// -- Pid helpers -------------------------------------------------------------
-
-/// Allocate a PidObject on the heap wrapping an Erlang PID.
-pub fn alloc_pid_object(
-  heap: Heap,
-  object_proto: Ref,
-  function_proto: Ref,
-  pid: value.ErlangPid,
-) -> #(Heap, JsValue) {
-  let #(heap, to_string_ref) =
-    common.alloc_native_fn(
-      heap,
-      function_proto,
-      ArcNative(ArcPidToString),
-      "toString",
-      0,
-    )
-  let #(heap, ref) =
-    heap.alloc(
-      heap,
-      ObjectSlot(
-        kind: PidObject(pid:),
-        properties: common.named_props([
-          #("toString", value.builtin_property(JsObject(to_string_ref))),
-        ]),
-        elements: elements.new(),
-        prototype: Some(object_proto),
-        symbol_properties: [common.to_string_tag("Pid")],
-        extensible: True,
-      ),
-    )
-  #(heap, JsObject(ref))
-}
-
-/// Pid toString — returns "Pid<0.83.0>" when called on a PidObject.
-fn pid_to_string(
-  this: JsValue,
-  _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  case this {
-    JsObject(ref) ->
-      case heap.read_pid(state.heap, ref) {
-        Some(pid) -> #(state, Ok(JsString("Pid" <> ffi_pid_to_string(pid))))
-        None -> state.type_error(state, "Dead Pid")
-      }
-    _ -> state.type_error(state, "Invalid Pid object")
-  }
-}
-
 // -- Subject -----------------------------------------------------------------
-
-/// Arc.subject()
-/// Creates a new subject bound to the current process. Returns a Subject object
-/// with send(msg) and receive(timeout?) methods. The subject has a unique tag
-/// (via erlang:make_ref) so selective receive on it is O(1) for the common case.
-fn subject(state: State) -> #(State, Result(JsValue, JsValue)) {
-  let pid = ffi_self()
-  let tag = ffi_make_ref()
-  let #(heap, subject_val) =
-    alloc_subject_object(
-      state.heap,
-      state.builtins.object.prototype,
-      state.builtins.function.prototype,
-      pid,
-      tag,
-    )
-  #(State(..state, heap:), Ok(subject_val))
-}
 
 /// Allocate a SubjectObject on the heap wrapping an Erlang PID + ref tag.
 pub fn alloc_subject_object(
@@ -472,37 +53,11 @@ pub fn alloc_subject_object(
   tag: value.ErlangRef,
 ) -> #(Heap, JsValue) {
   let #(heap, send_ref) =
-    common.alloc_native_fn(
-      heap,
-      function_proto,
-      ArcNative(ArcSubjectSend),
-      "send",
-      1,
-    )
+    common.alloc_host_fn(heap, function_proto, subject_send, "send", 1)
   let #(heap, receive_ref) =
-    common.alloc_native_fn(
-      heap,
-      function_proto,
-      ArcNative(ArcSubjectReceive),
-      "receive",
-      0,
-    )
-  let #(heap, receive_async_ref) =
-    common.alloc_native_fn(
-      heap,
-      function_proto,
-      ArcNative(ArcSubjectReceiveAsync),
-      "receiveAsync",
-      0,
-    )
+    common.alloc_host_fn(heap, function_proto, subject_receive, "receive", 0)
   let #(heap, to_string_ref) =
-    common.alloc_native_fn(
-      heap,
-      function_proto,
-      ArcNative(ArcSubjectToString),
-      "toString",
-      0,
-    )
+    common.alloc_host_fn(heap, function_proto, subject_to_string, "toString", 0)
   let #(heap, ref) =
     heap.alloc(
       heap,
@@ -511,7 +66,6 @@ pub fn alloc_subject_object(
         properties: common.named_props([
           #("send", value.builtin_property(JsObject(send_ref))),
           #("receive", value.builtin_property(JsObject(receive_ref))),
-          #("receiveAsync", value.builtin_property(JsObject(receive_async_ref))),
           #("toString", value.builtin_property(JsObject(to_string_ref))),
         ]),
         elements: elements.new(),
@@ -525,8 +79,8 @@ pub fn alloc_subject_object(
 
 /// subject.send(msg) — serialize and send a message to this subject's owner.
 fn subject_send(
-  this: JsValue,
   args: List(JsValue),
+  this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let msg_arg = case args {
@@ -560,8 +114,8 @@ fn subject_send(
 
 /// subject.receive(timeout?) — blocking selective receive on this subject's tag.
 fn subject_receive(
-  this: JsValue,
   args: List(JsValue),
+  this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case this {
@@ -599,6 +153,7 @@ fn subject_receive(
 
 /// subject.toString() — returns "Subject<0.83.0>".
 fn subject_to_string(
+  _args: List(JsValue),
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
@@ -607,234 +162,12 @@ fn subject_to_string(
       case heap.read_subject(state.heap, ref) {
         Some(#(pid, _tag)) -> #(
           state,
-          Ok(JsString("Subject" <> ffi_pid_to_string(pid))),
+          Ok(JsString("Subject" <> process_objects.ffi_pid_to_string(pid))),
         )
         None ->
           state.type_error(state, "Subject.toString: this is not a Subject")
       }
     _ -> state.type_error(state, "Subject.toString: this is not a Subject")
-  }
-}
-
-/// subject.receiveAsync(timeout?) — returns a Promise that resolves with the
-/// next message sent to this subject. Non-blocking: the async function suspends
-/// at `await` while other async functions keep running via the event loop.
-fn subject_receive_async(
-  this: JsValue,
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  case state.event_loop {
-    False -> {
-      let #(heap, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "subject.receiveAsync() requires the event loop (--event-loop flag)",
-        )
-      #(State(..state, heap:), Error(err))
-    }
-    True ->
-      case this {
-        JsObject(ref) ->
-          case heap.read_subject(state.heap, ref) {
-            Some(#(_pid, tag)) -> {
-              let #(h, obj_ref, data_ref) =
-                builtins_promise.create_promise(
-                  state.heap,
-                  state.builtins.promise.prototype,
-                )
-              // Set up optional timeout
-              case args {
-                [JsNumber(value.Finite(n)), ..] -> {
-                  let ms = value.float_to_int(n)
-                  case ms >= 0 {
-                    True -> {
-                      let _ =
-                        ffi_send_after(
-                          ms,
-                          ffi_self(),
-                          value.ReceiverTimeout(data_ref),
-                        )
-                      Nil
-                    }
-                    False -> Nil
-                  }
-                }
-                _ -> Nil
-              }
-              #(
-                State(
-                  ..state,
-                  heap: h,
-                  pending_receivers: list.append(state.pending_receivers, [
-                    #(data_ref, tag),
-                  ]),
-                  outstanding: state.outstanding + 1,
-                ),
-                Ok(JsObject(obj_ref)),
-              )
-            }
-            None ->
-              state.type_error(
-                state,
-                "Subject.receiveAsync: this is not a Subject",
-              )
-          }
-        _ ->
-          state.type_error(state, "Subject.receiveAsync: this is not a Subject")
-      }
-  }
-}
-
-// -- Arc.select --------------------------------------------------------------
-
-/// Arc.select() — returns an empty Selector. Chain `.on(subject, mapper?)`
-/// to register subjects, then call `.receive()` / `.receive(timeout)` to
-/// block until a message arrives on any of them.
-fn select(state: State) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, selector) = alloc_selector_object(state, [])
-  #(State(..state, heap:), Ok(selector))
-}
-
-fn alloc_selector_object(
-  state: State,
-  entries: List(#(value.ErlangRef, JsValue)),
-) -> #(Heap, JsValue) {
-  let function_proto = state.builtins.function.prototype
-  let #(heap, on_ref) =
-    common.alloc_native_fn(
-      state.heap,
-      function_proto,
-      ArcNative(ArcSelectorOn),
-      "on",
-      1,
-    )
-  let #(heap, receive_ref) =
-    common.alloc_native_fn(
-      heap,
-      function_proto,
-      ArcNative(ArcSelectorReceive),
-      "receive",
-      0,
-    )
-  let #(heap, ref) =
-    heap.alloc(
-      heap,
-      ObjectSlot(
-        kind: SelectorObject(entries:),
-        properties: common.named_props([
-          #("on", value.builtin_property(JsObject(on_ref))),
-          #("receive", value.builtin_property(JsObject(receive_ref))),
-        ]),
-        elements: elements.new(),
-        prototype: Some(state.builtins.object.prototype),
-        symbol_properties: [common.to_string_tag("Selector")],
-        extensible: True,
-      ),
-    )
-  #(heap, JsObject(ref))
-}
-
-/// selector.on(subject, mapper?) — return a NEW selector with `subject`
-/// registered. `mapper` defaults to identity (the raw message is returned).
-fn selector_on(
-  this: JsValue,
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let entries = case this {
-    JsObject(ref) -> heap.read_selector(state.heap, ref)
-    _ -> None
-  }
-  case entries {
-    None -> state.type_error(state, "Selector.on: this is not a Selector")
-    Some(entries) -> {
-      let #(subj_arg, mapper_arg) = case args {
-        [s, m, ..] -> #(s, m)
-        [s] -> #(s, JsUndefined)
-        [] -> #(JsUndefined, JsUndefined)
-      }
-      let tag = case subj_arg {
-        JsObject(ref) ->
-          heap.read_subject(state.heap, ref)
-          |> option.map(fn(p) { p.1 })
-        _ -> None
-      }
-      case tag {
-        None ->
-          state.type_error(state, "Selector.on: argument is not a Subject")
-        Some(tag) -> {
-          let #(heap, selector) =
-            alloc_selector_object(state, [#(tag, mapper_arg), ..entries])
-          #(State(..state, heap:), Ok(selector))
-        }
-      }
-    }
-  }
-}
-
-/// selector.receive(timeout?) — block until a message arrives on any
-/// registered subject, run its mapper (or identity), and return the result.
-/// With a timeout, returns `undefined` if it elapses.
-fn selector_receive(
-  this: JsValue,
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let entries = case this {
-    JsObject(ref) -> heap.read_selector(state.heap, ref)
-    _ -> None
-  }
-  case entries {
-    None -> state.type_error(state, "Selector.receive: this is not a Selector")
-    Some([]) ->
-      state.type_error(state, "Selector.receive: no subjects registered")
-    Some(entries) -> {
-      let #(ref_map, handler_map) =
-        list.fold(entries, #(dict.new(), dict.new()), fn(acc, entry) {
-          let #(rm, hm) = acc
-          let #(tag, handler) = entry
-          #(dict.insert(rm, tag, True), dict.insert(hm, tag, handler))
-        })
-      case args {
-        [JsNumber(value.Finite(n)), ..] -> {
-          let ms = value.float_to_int(n)
-          case ms >= 0 {
-            False -> #(state, Ok(JsUndefined))
-            True ->
-              case ffi_select_timeout(ref_map, ms) {
-                Ok(#(matched_ref, pm)) ->
-                  select_handle_match(state, matched_ref, pm, handler_map)
-                Error(Nil) -> #(state, Ok(JsUndefined))
-              }
-          }
-        }
-        _ -> {
-          let #(matched_ref, pm) = ffi_select(ref_map)
-          select_handle_match(state, matched_ref, pm, handler_map)
-        }
-      }
-    }
-  }
-}
-
-/// Deserialize the matched message and call its mapper if one was registered.
-fn select_handle_match(
-  state: State,
-  matched_ref: value.ErlangRef,
-  pm: PortableMessage,
-  handler_map: dict.Dict(value.ErlangRef, JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, val) = deserialize(state.heap, state.builtins, pm)
-  let state = State(..state, heap:)
-  case dict.get(handler_map, matched_ref) |> result.unwrap(JsUndefined) {
-    JsUndefined -> #(state, Ok(val))
-    mapper ->
-      case state.call(state, mapper, JsUndefined, [val]) {
-        Ok(#(result, state)) -> #(state, Ok(result))
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
   }
 }
 
@@ -1215,7 +548,7 @@ fn alloc_shell(
       )
     PrPid(pid) -> {
       let #(heap, v) =
-        alloc_pid_object(
+        process_objects.alloc_pid_object(
           heap,
           builtins.object.prototype,
           builtins.function.prototype,
@@ -1359,7 +692,7 @@ fn fill_record(
 /// HTML structuredClone(value) — serialize with SpecClone semantics then
 /// deserialize on the same heap. No transfer-list support. Uncloneable values
 /// throw a "DataCloneError" DOMException.
-fn structured_clone(
+pub fn structured_clone(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {

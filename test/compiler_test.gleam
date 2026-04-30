@@ -1,3 +1,4 @@
+import arc/beam
 import arc/compiler
 import arc/module
 import arc/parser
@@ -39,7 +40,8 @@ fn run_js(source: String) -> Result(Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          case entry.run(template, h, b, global_object, False) {
+          let h = beam.install_globals(h, b, global_object, "Arc")
+          case entry.run(template, h, b, global_object) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
@@ -64,7 +66,8 @@ fn run_js_drain(source: String) -> Result(Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          case entry.run(template, h, b, global_object, False) {
+          let h = beam.install_globals(h, b, global_object, "Arc")
+          case entry.run(template, h, b, global_object) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
@@ -6607,7 +6610,7 @@ fn run_module(source: String) -> Result(Completion, String) {
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
-      case module.evaluate_bundle(bundle, h, b, global_object, False) {
+      case module.evaluate_bundle(bundle, h, b, global_object, beam.run) {
         Ok(#(val, new_heap)) -> Ok(NormalCompletion(val, new_heap))
         Error(module.EvaluationError(val)) -> Ok(ThrowCompletion(val, h))
         Error(err) -> Error("module error: " <> string.inspect(err))
@@ -6660,25 +6663,6 @@ pub fn module_export_function_test() -> Nil {
   assert_module_normal(
     "export function greet() { return 'hello'; } greet()",
     JsString("hello"),
-  )
-}
-
-pub fn module_import_arc_peek_test() -> Nil {
-  // import { peek } from 'arc' should resolve peek to Arc.peek
-  assert_module_normal(
-    "import { peek } from 'arc';
-     var p = Promise.resolve(42);
-     peek(p).type",
-    JsString("resolved"),
-  )
-}
-
-pub fn module_import_arc_namespace_test() -> Nil {
-  // import * as arc from 'arc' should give the Arc object
-  assert_module_normal(
-    "import * as arc from 'arc';
-     typeof arc.peek",
-    JsString("function"),
   )
 }
 
@@ -6773,7 +6757,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
     })
 
   // Evaluate the module, passing in REPL globals
-  case module.evaluate_bundle(bundle, h, b, env.global_object, False) {
+  case module.evaluate_bundle(bundle, h, b, env.global_object, beam.run) {
     Ok(#(val, _heap)) -> {
       let assert True = val == JsString("hello from harness")
       Nil

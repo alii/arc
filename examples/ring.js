@@ -24,12 +24,12 @@ for (let i = 0; i < N; i++) {
 	inboxes[i].send(i === N - 1 ? main : inboxes[i + 1]);
 }
 
-Arc.log("ring of", N, "processes created");
+console.log("ring of", N, "processes created");
 inboxes[0].send({ lap: 0, hops: 0 });
 
 for (let lap = 0; lap < M; ) {
 	const msg = main.receive();
 	lap = msg.lap + 1;
-	Arc.log("lap", lap, "-", msg.hops, "hops");
+	console.log("lap", lap, "-", msg.hops, "hops");
 	if (lap < M) inboxes[0].send({ lap, hops: 0 });
 }

@@ -21,7 +21,7 @@ counter.send({ type: 'inc', n: 10 });
 counter.send({ type: 'inc', n: 5 });
 counter.send({ type: 'dec', n: 3 });
 counter.send({ type: 'get', reply });
-Arc.log('count:', reply.receive());
+console.log('count:', reply.receive());
 
 counter.send({ type: 'stop', reply });
-Arc.log('stopped at:', reply.receive());
+console.log('stopped at:', reply.receive());

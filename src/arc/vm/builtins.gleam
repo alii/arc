@@ -1,8 +1,8 @@
-import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/async_generator as builtins_async_generator
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins, Builtins}
+import arc/vm/builtins/console as builtins_console
 import arc/vm/builtins/date as builtins_date
 import arc/vm/builtins/dom_exception as builtins_dom_exception
 import arc/vm/builtins/error as builtins_error
@@ -203,8 +203,8 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Symbol constructor (callable, not new-able)
   let #(h, symbol) = builtins_symbol.init(h, object_proto, function.prototype)
 
-  // Arc global — engine-specific utilities (Arc.peek, etc.)
-  let #(h, arc) = builtins_arc.init(h, object_proto, function.prototype)
+  // console global — log/warn/error/info/debug
+  let #(h, console) = builtins_console.init(h, object_proto, function.prototype)
 
   // JSON global object
   let #(h, json) = builtins_json.init(h, object_proto, function.prototype)
@@ -287,7 +287,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.ArcNative(value.ArcStructuredClone),
+      value.VmNative(value.StructuredClone),
       "structuredClone",
       1,
     )
@@ -321,7 +321,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       generator:,
       async_generator:,
       symbol:,
-      arc:,
+      console:,
       json:,
       reflect:,
       map:,
@@ -409,7 +409,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("isFinite", JsObject(b.is_finite)),
     Builtin("Promise", JsObject(b.promise.constructor)),
     Builtin("Symbol", JsObject(b.symbol)),
-    Builtin("Arc", JsObject(b.arc)),
+    Builtin("console", JsObject(b.console)),
     Builtin("JSON", JsObject(b.json)),
     Builtin("Reflect", JsObject(b.reflect)),
     Builtin("Map", JsObject(b.map.constructor)),

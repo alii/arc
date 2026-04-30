@@ -2,14 +2,14 @@
 const inbox = Arc.subject();
 
 async function waiter(s) {
-	Arc.log('waiter: listening...');
-	Arc.log('waiter: got', await s.receiveAsync());
+	console.log('waiter: listening...');
+	console.log('waiter: got', await s.receiveAsync());
 }
 
 async function ticker() {
 	for (let i = 1; i <= 3; i++) {
 		await new Promise((r) => Arc.setTimeout(r, 100));
-		Arc.log('tick', i);
+		console.log('tick', i);
 	}
 }
 

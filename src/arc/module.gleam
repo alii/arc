@@ -17,12 +17,12 @@ import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined,
-  ObjectSlot, OrdinaryObject,
+  type JsValue, type Ref, JsObject, JsString, JsUndefined, ObjectSlot,
+  OrdinaryObject,
 }
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{None}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
@@ -70,7 +70,6 @@ pub type ModuleError {
 /// Compile a module and all its dependencies into a self-contained ModuleBundle.
 /// The resolve_and_load callback provides source code for dependencies:
 ///   fn(raw_specifier, parent_specifier) -> Result(#(resolved_path, source), error)
-/// Builtin modules ("arc") are referenced but not included in the bundle.
 pub fn compile_bundle(
   entry_specifier: String,
   entry_source: String,
@@ -154,48 +153,40 @@ fn resolve_and_compile_deps(
   modules: Dict(String, CompiledModule),
 ) -> Result(Dict(String, CompiledModule), ModuleError) {
   list.try_fold(requested_modules, modules, fn(modules, raw_dep) {
-    // Skip builtin modules — they're not in the bundle
-    case raw_dep == "arc" {
-      True -> Ok(modules)
-      False ->
-        case resolve_and_load(raw_dep, parent_specifier) {
-          Error(err) ->
-            Error(ResolutionError(
-              "Cannot resolve module '"
-              <> raw_dep
-              <> "' from '"
-              <> parent_specifier
-              <> "': "
-              <> err,
-            ))
-          Ok(#(resolved_path, source)) -> {
-            // Record raw→resolved mapping in the parent module
-            let modules =
-              update_compiled_specifier_map(
-                modules,
-                parent_specifier,
-                raw_dep,
-                resolved_path,
-              )
-            // Skip if already compiled (handles cycles + shared deps)
-            case dict.has_key(modules, resolved_path) {
-              True -> Ok(modules)
-              False -> {
-                use dep_compiled <- result.try(compile_single(
-                  resolved_path,
-                  source,
-                ))
-                let modules = dict.insert(modules, resolved_path, dep_compiled)
-                resolve_and_compile_deps(
-                  resolved_path,
-                  dep_compiled.requested_modules,
-                  resolve_and_load,
-                  modules,
-                )
-              }
-            }
+    case resolve_and_load(raw_dep, parent_specifier) {
+      Error(err) ->
+        Error(ResolutionError(
+          "Cannot resolve module '"
+          <> raw_dep
+          <> "' from '"
+          <> parent_specifier
+          <> "': "
+          <> err,
+        ))
+      Ok(#(resolved_path, source)) -> {
+        // Record raw→resolved mapping in the parent module
+        let modules =
+          update_compiled_specifier_map(
+            modules,
+            parent_specifier,
+            raw_dep,
+            resolved_path,
+          )
+        // Skip if already compiled (handles cycles + shared deps)
+        case dict.has_key(modules, resolved_path) {
+          True -> Ok(modules)
+          False -> {
+            use dep_compiled <- result.try(compile_single(resolved_path, source))
+            let modules = dict.insert(modules, resolved_path, dep_compiled)
+            resolve_and_compile_deps(
+              resolved_path,
+              dep_compiled.requested_modules,
+              resolve_and_load,
+              modules,
+            )
           }
         }
+      }
     }
   })
 }
@@ -245,13 +236,12 @@ pub fn evaluate_bundle(
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
-  event_loop: Bool,
+  finish: fn(state.State) -> state.State,
 ) -> Result(#(JsValue, Heap), ModuleError) {
-  let builtin_exports = extract_builtin_exports(heap, builtins)
   let state =
     EvalState(
       heap:,
-      evaluated: dict.from_list([#("arc", builtin_exports)]),
+      evaluated: dict.new(),
       errors: dict.new(),
       evaluating: set.new(),
     )
@@ -262,7 +252,7 @@ pub fn evaluate_bundle(
       bundle.entry,
       builtins,
       global_object,
-      event_loop,
+      finish,
     )
   result
 }
@@ -274,7 +264,7 @@ fn eval_module_inner(
   specifier: String,
   builtins: Builtins,
   global_object: Ref,
-  event_loop: Bool,
+  finish: fn(state.State) -> state.State,
 ) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
   // Already evaluated successfully
   case dict.has_key(state.evaluated, specifier) {
@@ -303,7 +293,7 @@ fn eval_module_inner(
                     compiled,
                     builtins,
                     global_object,
-                    event_loop,
+                    finish,
                   )
               }
           }
@@ -319,7 +309,7 @@ fn eval_module_body(
   compiled: CompiledModule,
   builtins: Builtins,
   global_object: Ref,
-  event_loop: Bool,
+  finish: fn(state.State) -> state.State,
 ) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
   // Mark as evaluating
   let state =
@@ -342,7 +332,7 @@ fn eval_module_body(
               dep_specifier,
               builtins,
               global_object,
-              event_loop,
+              finish,
             )
           case result {
             Ok(_) -> #(state, Ok(Nil))
@@ -385,7 +375,7 @@ fn eval_module_body(
           builtins,
           global_object,
           import_globals,
-          event_loop,
+          finish,
         )
       {
         entry.ModuleError(error: vm_err) -> {
@@ -446,21 +436,6 @@ pub fn deserialize_bundle(data: BitArray) -> ModuleBundle {
 // =============================================================================
 // Helper Functions
 // =============================================================================
-
-/// Extract builtin module exports from the heap (for the "arc" module).
-fn extract_builtin_exports(h: Heap, b: Builtins) -> Dict(String, JsValue) {
-  case heap.read(h, b.arc) {
-    Some(ObjectSlot(properties: props, ..)) ->
-      dict.fold(props, dict.new(), fn(acc, name, prop) {
-        case prop {
-          DataProperty(value: v, ..) ->
-            dict.insert(acc, value.key_to_string(name), v)
-          _ -> acc
-        }
-      })
-    _ -> dict.new()
-  }
-}
 
 /// Resolve import bindings for a module, looking up exports from
 /// already-evaluated modules. Returns import values as a dict to be

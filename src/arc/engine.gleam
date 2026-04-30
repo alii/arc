@@ -11,6 +11,7 @@ import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/completion.{type Completion}
 import arc/vm/exec/entry
+import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/state.{type Heap, type HostFn}
@@ -155,30 +156,24 @@ fn set_global_property(
 /// (normal return value or uncaught exception) plus a new engine carrying
 /// the updated heap.
 ///
-/// Drains the microtask queue but does NOT run the mailbox-backed event
-/// loop — use `eval_with_event_loop` if you need `Arc.receiveAsync` or
-/// `Arc.setTimeout` to actually fire.
+/// Drains the microtask queue only — there is no macrotask loop in core.
+/// If your host functions use `host.suspend`, drive your own loop via
+/// `eval_with` (e.g. `eval_with(eng, src, beam.run)` for the Erlang
+/// mailbox loop).
 pub fn eval(
   engine: Engine,
   source: String,
 ) -> Result(#(Completion, Engine), EvalError) {
-  do_eval(engine, source, False)
+  eval_with(engine, source, event_loop.finish)
 }
 
-/// Like `eval` but runs the BEAM-mailbox-backed event loop, so
-/// `Arc.receiveAsync`, `Arc.setTimeout`, and friends work. Blocks until
-/// `outstanding` reaches zero.
-pub fn eval_with_event_loop(
+/// Like `eval` but the caller supplies the post-script driver. `finish`
+/// is handed the State after the top-level script returns and must drain
+/// microtasks plus whatever macrotask loop the embedder owns.
+pub fn eval_with(
   engine: Engine,
   source: String,
-) -> Result(#(Completion, Engine), EvalError) {
-  do_eval(engine, source, True)
-}
-
-fn do_eval(
-  engine: Engine,
-  source: String,
-  event_loop: Bool,
+  finish: fn(state.State) -> state.State,
 ) -> Result(#(Completion, Engine), EvalError) {
   use program <- result.try(
     parser.parse(source, parser.Script)
@@ -189,7 +184,13 @@ fn do_eval(
     |> result.map_error(CompileError),
   )
   use completion <- result.map(
-    entry.run(template, engine.heap, engine.builtins, engine.global, event_loop)
+    entry.run_with(
+      template,
+      engine.heap,
+      engine.builtins,
+      engine.global,
+      finish,
+    )
     |> result.map_error(VmError),
   )
   #(completion, Engine(..engine, heap: completion_heap(completion)))

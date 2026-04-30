@@ -9,4 +9,4 @@ Arc.spawn(() => {
 
 const worker = reply.receive();
 worker.send({ n: 21, reply });
-Arc.log(reply.receive()); // 42
+console.log(reply.receive()); // 42

@@ -5,7 +5,7 @@ Arc.spawn(() => {
 	ping.send(pong);
 	while (true) {
 		const msg = pong.receive();
-		Arc.log("pong:", msg.n);
+		console.log("pong:", msg.n);
 		msg.reply.send({ n: msg.n + 1, reply: pong });
 		if (msg.n >= 5) return;
 	}
@@ -16,7 +16,7 @@ pong.send({ n: 1, reply: ping });
 
 while (true) {
 	const msg = ping.receive();
-	Arc.log("ping:", msg.n);
+	console.log("ping:", msg.n);
 	if (msg.n >= 5) break;
 	pong.send({ n: msg.n + 1, reply: ping });
 }

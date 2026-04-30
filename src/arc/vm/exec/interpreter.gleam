@@ -181,7 +181,6 @@ pub fn new_state(
   const_lexical_globals: set.Set(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
-  event_loop: Bool,
 ) -> State {
   State(
     stack: [],
@@ -203,7 +202,6 @@ pub fn new_state(
     call_args: [],
     job_queue: job_queue.new(),
     unhandled_rejections: [],
-    pending_receivers: [],
     outstanding: 0,
     symbol_descriptions:,
     symbol_registry:,
@@ -211,7 +209,6 @@ pub fn new_state(
     call_fn: call_fn_callback,
     construct_fn: construct_fn_callback,
     call_depth: 0,
-    event_loop:,
     eval_env: None,
   )
 }
@@ -222,7 +219,6 @@ pub fn init_state(
   builtins: Builtins,
   global_object: Ref,
   is_module: Bool,
-  event_loop: Bool,
 ) -> State {
   let locals = tuple_array.repeat(JsUndefined, func.local_count)
   // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
@@ -243,7 +239,6 @@ pub fn init_state(
       set.new(),
       dict.new(),
       dict.new(),
-      event_loop,
     ),
     this_binding:,
   )
@@ -3108,15 +3103,7 @@ fn dispatch_native(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  call.dispatch_native(
-    native,
-    args,
-    this,
-    state,
-    execute_inner,
-    call_native,
-    new_state,
-  )
+  call.dispatch_native(native, args, this, state, execute_inner, new_state)
 }
 
 /// Get the Ref of a named property's JsObject value from a heap object.

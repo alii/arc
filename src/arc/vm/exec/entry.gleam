@@ -49,28 +49,34 @@ pub type ReplEnv {
 // Public functions
 // ============================================================================
 
-/// Run a function template with a globalThis object, then drain jobs.
-/// When event_loop is True, runs the mailbox-backed event loop (blocking
-/// until `outstanding` hits zero); otherwise just drains the microtask queue.
+/// Run a function template with a globalThis object, then drain microtasks.
+/// No macrotask loop — for that, pass a driver to `run_with`.
 pub fn run(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
-  event_loop: Bool,
+) -> Result(Completion, VmError) {
+  run_with(func, heap, builtins, global_object, event_loop.finish)
+}
+
+/// Like `run` but the caller supplies the post-script driver. `finish`
+/// receives the State after the top-level script returns and is expected
+/// to drain microtasks plus whatever macrotask loop the embedder owns
+/// (e.g. `arc/beam.run`). Core's `event_loop.finish` is the no-macrotask
+/// default.
+pub fn run_with(
+  func: FuncTemplate,
+  heap: Heap,
+  builtins: Builtins,
+  global_object: Ref,
+  finish: fn(State) -> State,
 ) -> Result(Completion, VmError) {
   let result =
-    interpreter.init_state(
-      func,
-      heap,
-      builtins,
-      global_object,
-      False,
-      event_loop,
-    )
+    interpreter.init_state(func, heap, builtins, global_object, False)
     |> interpreter.execute_inner()
   use #(completion, final_state) <- result.try(result)
-  let drained_state = event_loop.finish(final_state)
+  let drained_state = finish(final_state)
   case completion {
     NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
     ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
@@ -89,7 +95,7 @@ pub fn run_module_with_imports(
   builtins: Builtins,
   global_object: Ref,
   import_globals: dict.Dict(String, JsValue),
-  event_loop: Bool,
+  finish: fn(State) -> State,
 ) -> ModuleResult {
   let locals = tuple_array.repeat(JsUndefined, func.local_count)
   let state =
@@ -104,7 +110,6 @@ pub fn run_module_with_imports(
         set.new(),
         dict.new(),
         dict.new(),
-        event_loop,
       ),
       this_binding: JsUndefined,
     )
@@ -112,7 +117,7 @@ pub fn run_module_with_imports(
   case result {
     Error(vm_err) -> ModuleError(error: vm_err)
     Ok(#(completion, final_state)) -> {
-      let drained_state = event_loop.finish(final_state)
+      let drained_state = finish(final_state)
       case completion {
         NormalCompletion(val, _) ->
           ModuleOk(
@@ -152,7 +157,6 @@ pub fn run_and_drain_repl(
         env.const_lexical_globals,
         env.symbol_descriptions,
         env.symbol_registry,
-        False,
       ),
       realms: env.realms,
       // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
@@ -204,9 +208,4 @@ pub fn build_262(
   realm_ref: Ref,
 ) -> #(Heap, Ref) {
   realm.build_262(h, b, global_ref, realm_ref)
-}
-
-/// Run the event loop. Delegates to event_loop.run_event_loop.
-pub fn run_event_loop(state: State) -> State {
-  event_loop.run_event_loop(state)
 }

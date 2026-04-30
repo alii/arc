@@ -1,11 +1,14 @@
 // ============================================================================
-// Promise job queue draining + handler execution
+// Promise microtask queue draining + handler execution.
+//
+// Core knows nothing about macrotasks. `drain_jobs` flushes the Promise
+// reaction queue to empty and that's it. Embedders that need timers / IO /
+// process messages run their own loop on top — see `arc/beam.run` for the
+// Erlang-mailbox version, built on `host.suspend`/`host.resume`.
 // ============================================================================
 
-import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
-import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
 import arc/vm/heap
 import arc/vm/internal/job_queue
@@ -20,7 +23,6 @@ import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, FunctionObject, JsNull, JsObject,
   JsUndefined, NativeFunction, ObjectSlot,
 }
-import gleam/dict
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
@@ -33,13 +35,9 @@ pub type CallNativeFn =
   fn(State, NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
     Result(State, #(StepResult, JsValue, Heap))
 
-/// Drain jobs, using the event loop if enabled on the state, otherwise
-/// just flushing the microtask queue.
+/// Drain the microtask queue.
 pub fn finish(state: State) -> State {
-  case state.event_loop {
-    True -> run_event_loop(state)
-    False -> drain_jobs(state)
-  }
+  drain_jobs(state)
 }
 
 /// Print warnings for any promises that were rejected without a handler.
@@ -71,134 +69,6 @@ pub fn drain_jobs(state: State) -> State {
       let state = execute_job(state, job)
       drain_jobs(state)
     }
-  }
-}
-
-@external(erlang, "arc_vm_ffi", "receive_settle_only")
-fn ffi_receive_settle_only() -> value.MailboxEvent
-
-@external(erlang, "arc_vm_ffi", "receive_settle_or_subject")
-fn ffi_receive_settle_or_subject(
-  ref_map: dict.Dict(value.ErlangRef, Bool),
-) -> value.MailboxEvent
-
-/// Mailbox-backed event loop. Runs drain microtasks -> block on BEAM mailbox
-/// -> handle event -> repeat, until `outstanding` hits zero. With no outstanding
-/// work this is identical to `drain_jobs` (never touches the mailbox).
-///
-/// This is what lets `await Arc.receiveAsync()` suspend the current async
-/// function while other async functions keep running -- the BEAM mailbox IS
-/// the macrotask queue, and every arrival resolves a promise which schedules
-/// a PromiseReactionJob that resumes whoever was waiting.
-///
-/// Selective receive: when pending subject receivers exist, accept their
-/// subject messages alongside SettlePromise/ReceiverTimeout. Otherwise only
-/// accept SettlePromise/ReceiverTimeout.
-pub fn run_event_loop(state: State) -> State {
-  let state = drain_jobs(state)
-  case state.outstanding {
-    0 -> state
-    _ -> {
-      let event = case state.pending_receivers {
-        [] -> ffi_receive_settle_only()
-        receivers -> {
-          let ref_map =
-            list.fold(receivers, dict.new(), fn(acc, entry) {
-              let #(_data_ref, subject_tag) = entry
-              dict.insert(acc, subject_tag, True)
-            })
-          ffi_receive_settle_or_subject(ref_map)
-        }
-      }
-      let state = handle_mailbox_event(state, event)
-      run_event_loop(state)
-    }
-  }
-}
-
-/// Apply a single mailbox event to VM state: resolve the right promise,
-/// enqueue its reaction jobs, adjust the outstanding count.
-fn handle_mailbox_event(state: State, event: value.MailboxEvent) -> State {
-  case event {
-    value.SubjectMessage(tag:, payload: pm) -> {
-      // Find the pending receiver for this subject tag.
-      case find_receiver_by_tag(state.pending_receivers, tag) {
-        Ok(#(data_ref, rest)) -> {
-          let #(heap, val) =
-            builtins_arc.deserialize(state.heap, state.builtins, pm)
-          let #(heap, jobs) =
-            builtins_promise.fulfill_promise(heap, data_ref, val)
-          State(
-            ..state,
-            heap:,
-            pending_receivers: rest,
-            outstanding: state.outstanding - 1,
-            job_queue: job_queue.append(state.job_queue, jobs),
-          )
-        }
-        Error(Nil) -> state
-      }
-    }
-    value.SettlePromise(data_ref:, outcome: Ok(pm)) -> {
-      let #(heap, val) =
-        builtins_arc.deserialize(state.heap, state.builtins, pm)
-      let #(heap, jobs) = builtins_promise.fulfill_promise(heap, data_ref, val)
-      State(
-        ..state,
-        heap:,
-        outstanding: state.outstanding - 1,
-        job_queue: job_queue.append(state.job_queue, jobs),
-      )
-    }
-    value.SettlePromise(data_ref:, outcome: Error(pm)) -> {
-      let #(heap, reason) =
-        builtins_arc.deserialize(state.heap, state.builtins, pm)
-      let state =
-        builtins_promise.reject_promise(State(..state, heap:), data_ref, reason)
-      State(..state, outstanding: state.outstanding - 1)
-    }
-    value.ReceiverTimeout(data_ref:) -> {
-      let has_receiver =
-        list.any(state.pending_receivers, fn(entry) { entry.0 == data_ref })
-      case has_receiver {
-        False -> state
-        True -> {
-          let #(heap, jobs) =
-            builtins_promise.fulfill_promise(state.heap, data_ref, JsUndefined)
-          State(
-            ..state,
-            heap:,
-            pending_receivers: list.filter(state.pending_receivers, fn(entry) {
-              entry.0 != data_ref
-            }),
-            outstanding: state.outstanding - 1,
-            job_queue: job_queue.append(state.job_queue, jobs),
-          )
-        }
-      }
-    }
-  }
-}
-
-/// Find the first pending receiver matching a subject tag, returning its
-/// promise data_ref and the remaining list with it removed.
-fn find_receiver_by_tag(
-  receivers: List(#(Ref, value.ErlangRef)),
-  tag: value.ErlangRef,
-) -> Result(#(Ref, List(#(Ref, value.ErlangRef))), Nil) {
-  find_receiver_by_tag_inner(receivers, tag, [])
-}
-
-fn find_receiver_by_tag_inner(
-  receivers: List(#(Ref, value.ErlangRef)),
-  tag: value.ErlangRef,
-  acc: List(#(Ref, value.ErlangRef)),
-) -> Result(#(Ref, List(#(Ref, value.ErlangRef))), Nil) {
-  case receivers {
-    [] -> Error(Nil)
-    [#(data_ref, t), ..rest] if t == tag ->
-      Ok(#(data_ref, list.append(list.reverse(acc), rest)))
-    [entry, ..rest] -> find_receiver_by_tag_inner(rest, tag, [entry, ..acc])
   }
 }
 

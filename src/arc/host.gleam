@@ -24,6 +24,8 @@
 
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
+import arc/vm/builtins/promise as builtins_promise
+import arc/vm/internal/job_queue
 import arc/vm/state.{type State}
 import arc/vm/value.{
   type JsValue, type Ref, Finite, JsBool, JsNumber, JsObject, JsString,
@@ -170,6 +172,61 @@ pub fn to_int(
   cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   cont(helpers.to_number_int(val) |> option.unwrap(0), s)
+}
+
+// -- Suspend / resume --------------------------------------------------------
+//
+// The macrotask loop is the embedder's. Core only knows about Promises and
+// the microtask queue. These two functions are the bridge: a host function
+// hands JS a pending Promise and walks away with a settle handle; later,
+// from its own loop (BEAM mailbox, libuv, epoll, whatever), it calls
+// `resume` to settle that Promise and re-enters `drain_jobs`.
+//
+//     fn fetch(args, _this, s) {
+//       let #(s, promise, ticket) = host.suspend(s)
+//       kick_off_http(url, on_done: my_queue.push(ticket, _))
+//       #(s, Ok(promise))
+//     }
+//     fn my_loop(s) {
+//       let s = event_loop.drain_jobs(s)
+//       case state.outstanding(s) {
+//         0 -> s
+//         _ -> {
+//           let #(ticket, result) = my_queue.block()
+//           my_loop(host.resume(s, ticket, result))
+//         }
+//       }
+//     }
+
+/// Create a pending Promise and bump `outstanding`. Return the JsValue from
+/// your host function so JS can `await` it; keep the `Ref` to pass to
+/// `resume` once your external work completes.
+pub fn suspend(s: State) -> #(State, JsValue, Ref) {
+  let #(heap, obj_ref, data_ref) =
+    builtins_promise.create_promise(s.heap, s.builtins.promise.prototype)
+  #(
+    state.State(..s, heap:, outstanding: s.outstanding + 1),
+    JsObject(obj_ref),
+    data_ref,
+  )
+}
+
+/// Settle a Promise created by `suspend` — fulfils on `Ok`, rejects on
+/// `Error`, decrements `outstanding`, and enqueues the reaction microtasks.
+/// Call from your event-loop driver, then re-drain.
+pub fn resume(
+  s: State,
+  ticket: Ref,
+  outcome: Result(JsValue, JsValue),
+) -> State {
+  let s = case outcome {
+    Ok(v) -> {
+      let #(heap, jobs) = builtins_promise.fulfill_promise(s.heap, ticket, v)
+      state.State(..s, heap:, job_queue: job_queue.append(s.job_queue, jobs))
+    }
+    Error(reason) -> builtins_promise.reject_promise(s, ticket, reason)
+  }
+  state.State(..s, outstanding: s.outstanding - 1)
 }
 
 // -- Constructors ------------------------------------------------------------

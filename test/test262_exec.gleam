@@ -18,6 +18,7 @@ import arc/vm/completion.{
   type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
 }
 import arc/vm/exec/entry
+import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
@@ -608,7 +609,9 @@ fn do_run_module(
   case module.compile_bundle(path, source, test262_resolve_and_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
     Ok(bundle) ->
-      case module.evaluate_bundle(bundle, h, b, global_object, True) {
+      case
+        module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
+      {
         Ok(#(val, new_heap)) -> Ok(NormalCompletion(val, new_heap))
         Error(module.EvaluationError(val)) -> Ok(ThrowCompletion(val, h))
         Error(err) -> Error("module: " <> string.inspect(err))

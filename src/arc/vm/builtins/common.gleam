@@ -49,7 +49,7 @@ pub type Builtins {
     generator: GeneratorBuiltin,
     async_generator: GeneratorBuiltin,
     symbol: Ref,
-    arc: Ref,
+    console: Ref,
     json: Ref,
     reflect: Ref,
     map: BuiltinType,
@@ -104,7 +104,7 @@ pub fn alloc_proto(
 }
 
 /// Allocate+root an OrdinaryObject with @@toStringTag = `tag`. Covers namespace
-/// globals (Math/JSON/Reflect/Arc) and tagged prototypes (Generator, Iterator Helper).
+/// globals (Math/JSON/Reflect/console) and tagged prototypes (Generator, Iterator Helper).
 pub fn init_namespace(
   h: Heap(ctx),
   proto: Ref,

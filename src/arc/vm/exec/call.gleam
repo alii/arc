@@ -1,7 +1,7 @@
-import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common
+import arc/vm/builtins/console as builtins_console
 import arc/vm/builtins/date as builtins_date
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/helpers
@@ -16,6 +16,7 @@ import arc/vm/builtins/reflect as builtins_reflect
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
+import arc/vm/builtins/structured_clone
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
@@ -1892,8 +1893,6 @@ pub fn dispatch_native(
   this: JsValue,
   state: State,
   execute_inner: ExecuteInnerFn,
-  call_native_fn: fn(State, NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
-    Result(State, #(StepResult, JsValue, Heap)),
   new_state_fn: realm.NewStateFn,
 ) -> #(State, Result(JsValue, JsValue)) {
   case native {
@@ -1905,9 +1904,9 @@ pub fn dispatch_native(
     value.BooleanNative(n) -> builtins_boolean.dispatch(n, args, this, state)
     value.MathNative(n) -> builtins_math.dispatch(n, args, this, state)
     value.ErrorNative(n) -> builtins_error.dispatch(n, args, this, state)
-    value.ArcNative(n) -> builtins_arc.dispatch(n, args, this, state)
-    value.VmNative(value.ArcSpawn) ->
-      realm.arc_spawn(args, state, execute_inner, call_native_fn, new_state_fn)
+    value.ConsoleNative(n) -> builtins_console.dispatch(n, args, this, state)
+    value.VmNative(value.StructuredClone) ->
+      structured_clone.structured_clone(args, state)
     value.VmNative(value.EvalScript) ->
       realm.eval_script_native(args, this, state, execute_inner, new_state_fn)
     value.VmNative(value.CreateRealm) -> realm.create_realm_native(this, state)

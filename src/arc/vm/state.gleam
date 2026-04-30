@@ -131,15 +131,9 @@ pub type State {
     /// [[PromiseIsHandled]] was false. Removed when a handler is later attached.
     /// Any remaining after job draining are reported as unhandled rejections.
     unhandled_rejections: List(Ref),
-    /// Async subject receivers: each entry is `#(promise_data_ref, subject_tag)`
-    /// where promise_data_ref identifies the promise to fulfill and subject_tag
-    /// is the ErlangRef of the subject being awaited. The event loop builds a
-    /// ref map from these to selectively receive subject messages alongside
-    /// SettlePromise/ReceiverTimeout events.
-    pending_receivers: List(#(Ref, value.ErlangRef)),
-    /// Count of in-flight external operations: each `receiveAsync`,
-    /// `setTimeout`, `fetch`, etc. increments this. The event loop blocks
-    /// on the BEAM mailbox while outstanding > 0; exits when it hits 0.
+    /// Count of in-flight external promises created via `host.suspend` and
+    /// not yet settled via `host.resume`. Core never blocks on this — it's
+    /// the embedder's macrotask loop that reads it to decide when to stop.
     outstanding: Int,
     /// Descriptions for user-created symbols (Symbol("desc")).
     symbol_descriptions: dict.Dict(value.SymbolId, String),
@@ -161,9 +155,6 @@ pub type State {
     /// Current call stack depth. Incremented on function entry, decremented on return.
     /// Throws RangeError when exceeding limits.max_call_depth.
     call_depth: Int,
-    /// Whether the event loop is active. When False, APIs that require the
-    /// event loop (Arc.receiveAsync, Arc.setTimeout) throw a TypeError.
-    event_loop: Bool,
     /// Sloppy direct-eval var-injection dict (EvalEnvSlot ref). Allocated the
     /// first time a sloppy direct eval runs in this frame. `var` declarations
     /// in the eval'd code write here; subsequent reads/writes in the caller
@@ -186,9 +177,13 @@ pub fn merge_globals(
     lexical_globals: child.lexical_globals,
     const_lexical_globals: child.const_lexical_globals,
     job_queue: job_queue.append(child.job_queue, extra_jobs),
-    pending_receivers: child.pending_receivers,
     outstanding: child.outstanding,
   )
+}
+
+/// Count of unsettled `host.suspend` promises. Embedder loops exit at 0.
+pub fn outstanding(s: State) -> Int {
+  s.outstanding
 }
 
 /// Call state.call_fn (re-entrant JS function call), handling the function field access.

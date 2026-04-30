@@ -64,7 +64,7 @@ Arc.spawn(() => {
   inbox.send('hello from ' + Arc.self());
 });
 
-Arc.log(inbox.receive());",
+console.log(inbox.receive());",
   )
 }
 
@@ -82,7 +82,7 @@ Arc.spawn(() => {
   while (true) {
     const m = pong.receive();
     if (m === 'stop') return;
-    Arc.log('    <- pong', m.n);
+    console.log('    <- pong', m.n);
     m.reply.send({ n: m.n + 1, reply: pong });
   }
 });
@@ -93,7 +93,7 @@ pong.send({ n, reply: ping });
 while (n < 5) {
   const m = ping.receive(1000);
   n = m.n;
-  Arc.log('ping ->', n);
+  console.log('ping ->', n);
   pong.send({ n, reply: ping });
 }
 pong.send('stop');",
@@ -126,7 +126,7 @@ counter.send({ op: 'inc', by: 10 });
 counter.send({ op: 'inc', by: 5 });
 counter.send({ op: 'inc', by: 27 });
 counter.send({ op: 'get', reply });
-Arc.log('counter value:', reply.receive(1000));
+console.log('counter value:', reply.receive(1000));
 counter.send({ op: 'stop' });",
   )
 }
@@ -150,9 +150,9 @@ for (const x of inputs) {
 // Fan in: results arrive in completion order, not input order.
 for (let i = 0; i < inputs.length; i++) {
   const r = results.receive(5000);
-  Arc.log('fib(' + r.x + ') =', r.y);
+  console.log('fib(' + r.x + ') =', r.y);
 }
-Arc.log('done —', inputs.length, 'results computed in parallel');",
+console.log('done —', inputs.length, 'results computed in parallel');",
   )
 }
 
@@ -170,7 +170,7 @@ Arc.spawn(() => {
   const subs = [];
   while (true) {
     const m = commands.receive();
-    if (m.sub) { subs.push(m.sub); Arc.log('[broker] +sub, total:', subs.length); }
+    if (m.sub) { subs.push(m.sub); console.log('[broker] +sub, total:', subs.length); }
     if (m.pub) for (const s of subs) s.send(m.pub);
     if (m.stop) return;
   }
@@ -185,7 +185,7 @@ for (let i = 1; i <= 3; i++) {
     while (true) {
       const m = sub.receive();
       if (m === 'stop') return;
-      Arc.log('  [sub', i + ']', 'received:', m);
+      console.log('  [sub', i + ']', 'received:', m);
     }
   });
   broker.send({ sub });
@@ -226,9 +226,9 @@ function call(key) {
   return reply.receive(1000);
 }
 
-Arc.log('alice is', call('alice'));
-Arc.log('bob is', call('bob'));
-Arc.log('carol is', call('carol'));
+console.log('alice is', call('alice'));
+console.log('bob is', call('bob'));
+console.log('carol is', call('carol'));
 server.send('stop');",
   )
 }
@@ -271,7 +271,7 @@ for (let w = 1; w <= 3; w++) {
       const job = inbox.receive();
       if (job === null) return;
       Arc.sleep(30); // simulate work
-      Arc.log('[worker', w + ']', 'finished job', job);
+      console.log('[worker', w + ']', 'finished job', job);
     }
   });
 }
@@ -310,14 +310,14 @@ const inboxes = [];
 for (let i = 0; i < N; i++) inboxes.push(setup.receive());
 for (let i = 0; i < N; i++) inboxes[i].send(i === N - 1 ? main : inboxes[i + 1]);
 
-Arc.log('ring of', N, 'processes built, sending token...');
+console.log('ring of', N, 'processes built, sending token...');
 inboxes[0].send(0);
 for (let lap = 1; lap <= LAPS; lap++) {
   const hops = main.receive(5000);
-  Arc.log('lap', lap, '->', hops, 'hops');
+  console.log('lap', lap, '->', hops, 'hops');
   if (lap < LAPS) inboxes[0].send(0);
 }
 inboxes[0].send('stop');
-Arc.log('total:', N * LAPS, 'message passes');",
+console.log('total:', N * LAPS, 'message passes');",
   )
 }

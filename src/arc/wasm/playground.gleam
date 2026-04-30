@@ -3,12 +3,14 @@
 //// The Erlang side (arc_wasm_ffi) owns the receive loop and try/catch so a
 //// stdlib gap doesn't kill the listener. This module is just the eval step.
 
+import arc/beam
 import arc/engine
 import arc/vm/completion
 import arc/vm/ops/object
 
 pub fn eval(source: String) -> Result(String, String) {
-  case engine.eval_with_event_loop(engine.new(), source) {
+  let eng = engine.new() |> beam.install("Arc")
+  case engine.eval_with(eng, source, beam.run) {
     Ok(#(comp, eng)) ->
       case comp {
         completion.NormalCompletion(v, _) ->
