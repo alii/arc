@@ -318,11 +318,6 @@ pub fn num_to_int32(n: JsNum) -> Int {
   }
 }
 
-/// Convert a primitive JsValue to JsNum for arithmetic (ToNumber lite).
-pub fn to_number_for_binop(val: JsValue) -> JsNum {
-  value.to_number(val) |> result.unwrap(NaN)
-}
-
 // ============================================================================
 // Float helpers — only power needs FFI now
 // ============================================================================

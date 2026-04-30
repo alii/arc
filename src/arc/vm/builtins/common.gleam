@@ -3,7 +3,7 @@ import arc/vm/internal/elements
 import arc/vm/value.{
   type CallNativeFn, type ExoticKind, type JsValue, type NativeFn,
   type NativeFnSlot, type Property, type PropertyKey, type Ref, AccessorProperty,
-  ArrayObject, Call, Dispatch, JsObject, JsString, Named, NativeFunction,
+  ArrayObject, Call, Dispatch, JsBool, JsObject, JsString, Named, NativeFunction,
   ObjectSlot, OrdinaryObject,
 }
 import gleam/dict.{type Dict}
@@ -142,6 +142,21 @@ pub fn alloc_pojo(
       extensible: True,
     ),
   )
+}
+
+/// CreateIterResultObject(value, done) — §7.4.11. Allocates `{value, done}`.
+pub fn create_iter_result(
+  h: Heap(ctx),
+  builtins: Builtins,
+  val: JsValue,
+  done: Bool,
+) -> #(Heap(ctx), JsValue) {
+  let #(h, ref) =
+    alloc_pojo(h, builtins.object.prototype, [
+      #("value", value.data_property(val)),
+      #("done", value.data_property(JsBool(done))),
+    ])
+  #(h, JsObject(ref))
 }
 
 /// Build a PropertyKey-keyed dict from String-keyed entries. Builtin init code

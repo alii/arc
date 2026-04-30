@@ -1106,31 +1106,15 @@ fn call_return(
 // Small helpers
 // ============================================================================
 
-/// CreateIterResultObject(value, done) — local copy to avoid importing
-/// arc/vm/exec/generators (would create a cycle).
+/// CreateIterResultObject(value, done) — adapts common helper to State result.
 fn create_iter_result(
   state: State,
   val: JsValue,
   done: Bool,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, ref) =
-    common.alloc_pojo(state.heap, state.builtins.object.prototype, [
-      #(
-        "value",
-        value.data(val)
-          |> value.writable
-          |> value.enumerable
-          |> value.configurable,
-      ),
-      #(
-        "done",
-        value.data(JsBool(done))
-          |> value.writable
-          |> value.enumerable
-          |> value.configurable,
-      ),
-    ])
-  #(State(..state, heap:), Ok(JsObject(ref)))
+  let #(heap, v) =
+    common.create_iter_result(state.heap, state.builtins, val, done)
+  #(State(..state, heap:), Ok(v))
 }
 
 /// Unwrap `this` as an Object ref or TypeError. CPS — `use ref <- ...`.

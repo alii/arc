@@ -1,16 +1,12 @@
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, Dispatch, DomExceptionConstructor, DomExceptionGetCode,
   ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined, Named,
-  ObjectSlot, OrdinaryObject,
 }
 import gleam/int
-import gleam/option.{Some}
 
 /// WebIDL §2.8.1 DOMException — Error-like with a `name` drawn from a fixed
 /// table that maps to a legacy integer `code`. Prototype chain goes through
@@ -82,20 +78,10 @@ fn alloc(
   message: String,
 ) -> #(Heap, JsValue) {
   let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: common.named_props([
-          #("message", value.builtin_property(JsString(message))),
-          #("name", value.builtin_property(JsString(name))),
-        ]),
-        elements: elements.new(),
-        prototype: Some(proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
+    common.alloc_pojo(h, proto, [
+      #("message", value.builtin_property(JsString(message))),
+      #("name", value.builtin_property(JsString(name))),
+    ])
   #(h, JsObject(ref))
 }
 

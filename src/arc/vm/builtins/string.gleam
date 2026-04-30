@@ -851,10 +851,7 @@ fn string_split(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let sep_val = case args {
-    [s, ..] -> s
-    [] -> JsUndefined
-  }
+  let sep_val = helpers.first_arg_or_undefined(args)
   let limit_val = case args {
     [_, l, ..] -> l
     _ -> JsUndefined

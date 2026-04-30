@@ -1,11 +1,10 @@
-import arc/vm/builtins/common.{type Builtins}
+import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/completion.{
   type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
   YieldCompletion,
 }
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/opcode.{type Op, EnterFinallyThrow, YieldStar}
 import arc/vm/ops/object as object_ops
@@ -15,9 +14,8 @@ import arc/vm/state.{
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, GeneratorObject, GeneratorSlot,
-  JsBool, JsObject, JsUndefined, Named, ObjectSlot, OrdinaryObject,
+  JsObject, JsUndefined, Named, ObjectSlot,
 }
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -51,7 +49,7 @@ pub fn call_native_generator_next(
         value.Completed -> {
           // Already done -- return {value: undefined, done: true}
           let #(h, result) =
-            create_iterator_result(
+            common.create_iter_result(
               state.heap,
               state.builtins,
               JsUndefined,
@@ -114,7 +112,7 @@ pub fn call_native_generator_return(
               gen_with_state(gen, value.Completed),
             )
           let #(h, result) =
-            create_iterator_result(h, state.builtins, return_val, True)
+            common.create_iter_result(h, state.builtins, return_val, True)
           Ok(
             State(
               ..state,
@@ -469,7 +467,7 @@ fn forward_delegate(
                   gen_with_state(gen, value.SuspendedYield),
                 )
               let #(h, result) =
-                create_iterator_result(h, state.builtins, val, False)
+                common.create_iter_result(h, state.builtins, val, False)
               Ok(
                 State(
                   ..state,
@@ -531,7 +529,7 @@ fn resume_after_delegate(
           gen.data_ref,
           gen_with_state(gen, value.Completed),
         )
-      let #(h, result) = create_iterator_result(h, state.builtins, val, True)
+      let #(h, result) = common.create_iter_result(h, state.builtins, val, True)
       Ok(
         State(..state, heap: h, stack: [result, ..rest_stack], pc: state.pc + 1),
       )
@@ -579,7 +577,7 @@ fn run_to_completion(
             saved_callee_ref: suspended.callee_ref,
           ),
         )
-      let #(h, result) = create_iterator_result(h, outer.builtins, yv, False)
+      let #(h, result) = common.create_iter_result(h, outer.builtins, yv, False)
       Ok(
         State(
           ..state.merge_globals(outer, suspended, []),
@@ -591,7 +589,7 @@ fn run_to_completion(
     }
     Ok(#(NormalCompletion(rv, h), final_state)) -> {
       let h = heap.write(h, gen.data_ref, gen_with_state(gen, value.Completed))
-      let #(h, result) = create_iterator_result(h, outer.builtins, rv, True)
+      let #(h, result) = common.create_iter_result(h, outer.builtins, rv, True)
       Ok(
         State(
           ..state.merge_globals(outer, final_state, []),
@@ -664,7 +662,7 @@ fn process_generator_return(
           gen_with_state(gen, value.Completed),
         )
       let #(h, result) =
-        create_iterator_result(h, outer_state.builtins, return_val, True)
+        common.create_iter_result(h, outer_state.builtins, return_val, True)
       Ok(
         State(
           ..outer_state,
@@ -738,7 +736,7 @@ fn process_generator_return(
               ),
             )
           let #(h3, result) =
-            create_iterator_result(
+            common.create_iter_result(
               h3,
               outer_state.builtins,
               yielded_value,
@@ -777,31 +775,6 @@ fn process_generator_return(
       }
     }
   }
-}
-
-/// Create a {value: val, done: bool} iterator result object.
-pub fn create_iterator_result(
-  h: Heap,
-  builtins: Builtins,
-  val: JsValue,
-  done: Bool,
-) -> #(Heap, JsValue) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: dict.from_list([
-          #(Named("value"), value.data_property(val)),
-          #(Named("done"), value.data_property(JsBool(done))),
-        ]),
-        elements: elements.new(),
-        prototype: Some(builtins.object.prototype),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
-  #(h, JsObject(ref))
 }
 
 /// Save try/finally stacks to serializable form for generator suspension.

@@ -1647,8 +1647,7 @@ fn push_iter_result(
   val: JsValue,
   done: Bool,
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
-  let #(h, result) =
-    generators.create_iterator_result(h, state.builtins, val, done)
+  let #(h, result) = common.create_iter_result(h, state.builtins, val, done)
   Ok(State(..state, heap: h, stack: [result, ..rest_stack], pc: state.pc + 1))
 }
 

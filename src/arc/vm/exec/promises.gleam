@@ -1,7 +1,6 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
-import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
@@ -1420,7 +1419,7 @@ fn do_async_from_sync(
     AfsReturn, False -> {
       let arg = list.first(args) |> result.unwrap(JsUndefined)
       let #(h, iter_result) =
-        generators.create_iterator_result(state.heap, state.builtins, arg, True)
+        common.create_iter_result(state.heap, state.builtins, arg, True)
       let #(h, jobs) =
         builtins_promise.fulfill_promise(h, data_ref, iter_result)
       Ok(
@@ -1561,7 +1560,7 @@ pub fn call_native_async_from_sync_unwrap(
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
   let v = list.first(args) |> result.unwrap(JsUndefined)
   let #(h, iter_result) =
-    generators.create_iterator_result(state.heap, state.builtins, v, done)
+    common.create_iter_result(state.heap, state.builtins, v, done)
   Ok(
     State(
       ..state,

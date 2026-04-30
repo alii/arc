@@ -4,6 +4,7 @@
 
 import arc/vm/builtins/common
 import arc/vm/builtins/dom_exception
+import arc/vm/builtins/helpers
 import arc/vm/builtins/process_objects
 import arc/vm/builtins/regexp
 import arc/vm/heap
@@ -83,10 +84,7 @@ fn subject_send(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let msg_arg = case args {
-    [m, ..] -> m
-    [] -> JsUndefined
-  }
+  let msg_arg = helpers.first_arg_or_undefined(args)
   case this {
     JsObject(ref) ->
       case heap.read_subject(state.heap, ref) {
@@ -696,10 +694,7 @@ pub fn structured_clone(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let val = case args {
-    [a, ..] -> a
-    [] -> JsUndefined
-  }
+  let val = helpers.first_arg_or_undefined(args)
   case serialize(state.heap, val, SpecClone) {
     Ok(msg) -> {
       let #(heap, cloned) = deserialize(state.heap, state.builtins, msg)

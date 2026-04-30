@@ -112,18 +112,6 @@ pub fn read_array_like(
   }
 }
 
-/// Read a FunctionObject, returning #(func_template, env_ref).
-pub fn read_function(
-  h: Heap(ctx),
-  ref: Ref,
-) -> Option(#(value.FuncTemplate, Ref)) {
-  case read(h, ref) {
-    Some(value.ObjectSlot(kind: value.FunctionObject(func_template:, env:), ..)) ->
-      Some(#(func_template, env))
-    _ -> None
-  }
-}
-
 /// Read a PromiseObject, returning the inner promise_data ref.
 pub fn read_promise_data_ref(h: Heap(ctx), ref: Ref) -> Option(Ref) {
   case read(h, ref) {
@@ -261,25 +249,6 @@ pub fn update(
   }
 }
 
-/// Read-modify-write variant that returns an extra value alongside the updated
-/// heap. The transform returns #(new_slot, extra). Returns #(heap, default)
-/// if ref is missing. Useful when mutation needs to produce a side-channel
-/// result (e.g. the old value being replaced).
-pub fn update_with(
-  heap: Heap(ctx),
-  ref: Ref,
-  default: a,
-  f: fn(HeapSlot(ctx)) -> #(HeapSlot(ctx), a),
-) -> #(Heap(ctx), a) {
-  case dict.get(heap.data, ref.id) {
-    Ok(slot) -> {
-      let #(new_slot, extra) = f(slot)
-      #(Heap(..heap, data: dict.insert(heap.data, ref.id, new_slot)), extra)
-    }
-    Error(Nil) -> #(heap, default)
-  }
-}
-
 /// Replace the `kind` of an ObjectSlot in place. No-op for non-object slots.
 pub fn update_kind(
   heap: Heap(ctx),
@@ -307,11 +276,6 @@ pub fn root(heap: Heap(ctx), ref: Ref) -> Heap(ctx) {
 /// Remove a ref from the persistent GC root set.
 pub fn unroot(heap: Heap(ctx), ref: Ref) -> Heap(ctx) {
   Heap(..heap, roots: set.delete(heap.roots, ref.id))
-}
-
-/// Number of persistent GC roots.
-pub fn root_count(heap: Heap(ctx)) -> Int {
-  set.size(heap.roots)
 }
 
 /// The persistent root set (for external use like spawn GC).

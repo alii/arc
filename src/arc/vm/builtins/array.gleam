@@ -2195,19 +2195,25 @@ fn array_some(
 ///
 /// Note: FindViaPredicate step 4b uses Get (not HasProperty + Get). This means
 /// holes are visited as undefined, not skipped — hence VisitHoles mode.
-fn array_find(
+///
+/// FindViaPredicate (§23.1.3.9.1) shared driver for find / findIndex /
+/// findLast / findLastIndex. ToObject + LengthOfArrayLike + IsCallable, then
+/// iterate with VisitHoles + is_truthy. cont gets (elem, idx, length, state);
+/// not-found ⇒ idx==length (forward) or idx==-1 (reverse).
+fn find_via_predicate(
   this: JsValue,
   args: List(JsValue),
   state: State,
+  reverse: Bool,
+  cont: fn(JsValue, Int, Int, State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Steps 1-2: ToObject + LengthOfArrayLike (via require_array).
   use _ref, length, state <- require_array(this, state)
-  // FindViaPredicate step 1: IsCallable check (via require_callback).
   use cb, this_arg, state <- require_callback(args, state)
-  // FindViaPredicate steps 2-4: iterate [0..len-1] ascending.
-  // VisitHoles: step 4b uses Get without HasProperty, so holes → undefined.
-  // stop_on = is_truthy: step 4d stops when testResult is true.
-  use elem, idx, state <- iterate_array(
+  let iter = case reverse {
+    True -> iterate_array_rev
+    False -> iterate_array
+  }
+  use elem, idx, state <- iter(
     state,
     this,
     length,
@@ -2216,8 +2222,15 @@ fn array_find(
     VisitHoles,
     value.is_truthy,
   )
-  // Step 4: Return findRec.[[Value]].
-  // FindViaPredicate step 4d: found → kValue; step 5: not found → undefined.
+  cont(elem, idx, length, state)
+}
+
+fn array_find(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use elem, idx, length, state <- find_via_predicate(this, args, state, False)
   case idx < length {
     True -> #(state, Ok(elem))
     False -> #(state, Ok(JsUndefined))
@@ -2240,24 +2253,7 @@ fn array_find_index(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Steps 1-2: ToObject + LengthOfArrayLike (via require_array).
-  use _ref, length, state <- require_array(this, state)
-  // FindViaPredicate step 1: IsCallable check (via require_callback).
-  use cb, this_arg, state <- require_callback(args, state)
-  // FindViaPredicate steps 2-4: iterate [0..len-1] ascending.
-  // VisitHoles: step 4b uses Get without HasProperty, so holes → undefined.
-  // stop_on = is_truthy: step 4d stops when testResult is true.
-  use _elem, idx, state <- iterate_array(
-    state,
-    this,
-    length,
-    cb,
-    this_arg,
-    VisitHoles,
-    value.is_truthy,
-  )
-  // Step 4: Return findRec.[[Index]].
-  // FindViaPredicate step 4d: found → 𝔽(k); step 5: not found → -1𝔽.
+  use _elem, idx, length, state <- find_via_predicate(this, args, state, False)
   case idx < length {
     True -> #(state, Ok(value.from_int(idx)))
     False -> #(state, Ok(value.from_int(-1)))
@@ -2287,10 +2283,7 @@ fn array_sort(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Step 1: If comparefn is not undefined and not callable, throw TypeError.
-  let comparefn = case args {
-    [c, ..] -> c
-    [] -> JsUndefined
-  }
+  let comparefn = helpers.first_arg_or_undefined(args)
   case comparefn {
     JsUndefined -> {
       // No comparefn — sort by string conversion (default sort).
@@ -2803,10 +2796,7 @@ fn array_reduce(
   // Steps 1-2: Let O be ? ToObject(this value). Let len be ? LengthOfArrayLike(O).
   use _ref, length, state <- require_array(this, state)
   // Step 3 setup: extract callbackfn argument
-  let cb = case args {
-    [c, ..] -> c
-    [] -> JsUndefined
-  }
+  let cb = helpers.first_arg_or_undefined(args)
   // Step 3: If IsCallable(callbackfn) is false, throw a TypeError exception.
   use <- bool.guard(
     !helpers.is_callable(state.heap, cb),
@@ -2878,10 +2868,7 @@ fn array_reduce_right(
   // Steps 1-2: Let O be ? ToObject(this value). Let len be ? LengthOfArrayLike(O).
   use _ref, length, state <- require_array(this, state)
   // Step 3 setup: extract callbackfn argument
-  let cb = case args {
-    [c, ..] -> c
-    [] -> JsUndefined
-  }
+  let cb = helpers.first_arg_or_undefined(args)
   // Step 3: If IsCallable(callbackfn) is false, throw a TypeError exception.
   use <- bool.guard(
     !helpers.is_callable(state.heap, cb),
@@ -3222,24 +3209,7 @@ fn array_find_last(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Steps 1-2: ToObject + LengthOfArrayLike
-  use _ref, length, state <- require_array(this, state)
-  // Step 3: If IsCallable(predicate) is false, throw TypeError
-  use cb, this_arg, state <- require_callback(args, state)
-  // FindViaPredicate with descending direction: iterate [len-1..0].
-  // VisitHoles: step 4b uses Get without HasProperty, so holes → undefined.
-  // stop_on = is_truthy: step 4d stops when testResult is true.
-  use elem, idx, state <- iterate_array_rev(
-    state,
-    this,
-    length,
-    cb,
-    this_arg,
-    VisitHoles,
-    value.is_truthy,
-  )
-  // Step 4: Return findRec.[[Value]].
-  // Found (idx >= 0) → kValue; not found (idx = -1) → undefined.
+  use elem, idx, _len, state <- find_via_predicate(this, args, state, True)
   case idx >= 0 {
     True -> #(state, Ok(elem))
     False -> #(state, Ok(JsUndefined))
@@ -3255,25 +3225,8 @@ fn array_find_last_index(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Steps 1-2: ToObject + LengthOfArrayLike
-  use _ref, length, state <- require_array(this, state)
-  // Step 3: If IsCallable(predicate) is false, throw TypeError
-  use cb, this_arg, state <- require_callback(args, state)
-  // FindViaPredicate with descending direction: iterate [len-1..0].
-  // VisitHoles: step 4b uses Get without HasProperty, so holes → undefined.
-  // stop_on = is_truthy: step 4d stops when testResult is true.
-  use _elem, idx, state <- iterate_array_rev(
-    state,
-    this,
-    length,
-    cb,
-    this_arg,
-    VisitHoles,
-    value.is_truthy,
-  )
-  // Step 4: Return findRec.[[Index]].
-  // Found (idx >= 0) → 𝔽(k); not found → -1𝔽. idx is already -1 when not
-  // found (the descending loop's terminal sentinel), so value.from_int(idx) covers both.
+  use _elem, idx, _len, state <- find_via_predicate(this, args, state, True)
+  // idx is already -1 when not found (descending sentinel).
   #(state, Ok(value.from_int(idx)))
 }
 
@@ -3926,7 +3879,7 @@ fn array_with(
     False -> {
       // Get the replacement value
       let replacement = case args {
-        [_, v, ..] -> v
+        [_, r, ..] -> r
         _ -> JsUndefined
       }
       // Steps 7-11: Copy all elements, replacing actualIndex with value
@@ -3976,10 +3929,7 @@ fn array_to_sorted(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let comparefn = case args {
-    [c, ..] -> c
-    [] -> JsUndefined
-  }
+  let comparefn = helpers.first_arg_or_undefined(args)
   case comparefn {
     JsUndefined -> {
       use _ref, length, state <- require_array(this, state)

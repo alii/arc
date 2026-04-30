@@ -891,10 +891,7 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
     ast.MemberExpression(obj, prop, computed)
     | ast.OptionalMemberExpression(obj, prop, computed) ->
       expr_references_arguments(obj)
-      || case computed {
-        True -> expr_references_arguments(prop)
-        False -> False
-      }
+      || { computed && expr_references_arguments(prop) }
 
     ast.ConditionalExpression(c, t, a) ->
       expr_references_arguments(c)
@@ -907,10 +904,7 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
       list.any(props, fn(p) {
         case p {
           ast.Property(key, value, _, computed, _, _) ->
-            case computed {
-              True -> expr_references_arguments(key)
-              False -> False
-            }
+            { computed && expr_references_arguments(key) }
             || expr_references_arguments(value)
           ast.SpreadProperty(arg) -> expr_references_arguments(arg)
         }
@@ -980,10 +974,7 @@ fn pattern_references_arguments(p: ast.Pattern) -> Bool {
       list.any(props, fn(prop) {
         case prop {
           ast.PatternProperty(key, value, computed, _) ->
-            case computed {
-              True -> expr_references_arguments(key)
-              False -> False
-            }
+            { computed && expr_references_arguments(key) }
             || pattern_references_arguments(value)
           ast.RestProperty(inner) -> pattern_references_arguments(inner)
         }
@@ -1000,16 +991,9 @@ fn class_body_references_arguments(body: List(ast.ClassElement)) -> Bool {
   // For the detector's purposes, only computed keys matter here.
   list.any(body, fn(el) {
     case el {
-      ast.ClassMethod(key, _, _, _, computed) ->
-        case computed {
-          True -> expr_references_arguments(key)
-          False -> False
-        }
-      ast.ClassField(key, _, _, computed) ->
-        case computed {
-          True -> expr_references_arguments(key)
-          False -> False
-        }
+      ast.ClassMethod(key, _, _, _, computed)
+      | ast.ClassField(key, _, _, computed) ->
+        computed && expr_references_arguments(key)
       ast.StaticBlock(_) -> False
     }
   })

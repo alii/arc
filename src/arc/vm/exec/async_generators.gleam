@@ -889,7 +889,7 @@ fn fulfill_iter(
   done: Bool,
 ) -> State {
   let #(h, result) =
-    generators.create_iterator_result(state.heap, state.builtins, val, done)
+    common.create_iter_result(state.heap, state.builtins, val, done)
   call_fn(State(..state, heap: h), resolve, [result])
 }
 

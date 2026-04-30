@@ -1879,10 +1879,6 @@ fn byte_slice(bytes: BitArray, start: Int, len: Int) -> String {
   }
 }
 
-/// O(1) byte_size of a String. Erlang: byte_size BIF. JS: TextEncoder.
-@external(erlang, "erlang", "byte_size")
-pub fn string_byte_size(s: String) -> Int
-
 fn drop_bytes(bytes: BitArray, pos: Int) -> BitArray {
   case bit_array.slice(bytes, pos, bit_array.byte_size(bytes) - pos) {
     Ok(rest) -> rest

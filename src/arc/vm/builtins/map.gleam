@@ -321,10 +321,7 @@ fn map_get(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let key_arg = case args {
-    [k, ..] -> k
-    [] -> JsUndefined
-  }
+  let key_arg = helpers.first_arg_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
   use entries, _keys_rev, _keys_len, _ref, state <- require_map(this, state)
   // Steps 3-4: Look up key
@@ -408,10 +405,7 @@ fn map_has(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let key_arg = case args {
-    [k, ..] -> k
-    [] -> JsUndefined
-  }
+  let key_arg = helpers.first_arg_or_undefined(args)
   use entries, _keys_rev, _keys_len, _ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
   #(state, Ok(JsBool(dict.has_key(entries, map_key))))
@@ -440,10 +434,7 @@ fn map_delete(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let key_arg = case args {
-    [k, ..] -> k
-    [] -> JsUndefined
-  }
+  let key_arg = helpers.first_arg_or_undefined(args)
   use entries, keys_rev, keys_len, ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
   case dict.has_key(entries, map_key) {

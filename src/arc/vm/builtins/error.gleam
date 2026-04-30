@@ -1,17 +1,12 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/dom_exception
-import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ErrorNativeFn, type JsValue, type Ref, Dispatch, ErrorConstructor,
-  ErrorNative, JsNull, JsObject, JsString, JsUndefined, Named, ObjectSlot,
-  OrdinaryObject,
+  ErrorNative, JsNull, JsObject, JsString, JsUndefined, Named,
 }
-import gleam/dict
-import gleam/option.{Some}
 
 /// All error-related builtin types.
 pub type ErrorBuiltins {
@@ -119,20 +114,16 @@ fn call_native(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case args {
-    [JsUndefined, ..] | [] -> alloc_error(state, proto, dict.new())
+    [JsUndefined, ..] | [] -> alloc_error(state, proto, [])
     [JsString(msg), ..] ->
-      alloc_error(
-        state,
-        proto,
-        common.named_props([#("message", value.builtin_property(JsString(msg)))]),
-      )
+      alloc_error(state, proto, [
+        #("message", value.builtin_property(JsString(msg))),
+      ])
     [other, ..] -> {
       use msg, state <- coerce.try_to_string(state, other)
-      alloc_error(
-        state,
-        proto,
-        common.named_props([#("message", value.builtin_property(JsString(msg)))]),
-      )
+      alloc_error(state, proto, [
+        #("message", value.builtin_property(JsString(msg))),
+      ])
     }
   }
 }
@@ -140,20 +131,9 @@ fn call_native(
 fn alloc_error(
   state: State,
   proto: Ref,
-  props: dict.Dict(value.PropertyKey, value.Property),
+  props: List(#(String, value.Property)),
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, ref) =
-    heap.alloc(
-      state.heap,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: props,
-        elements: elements.new(),
-        prototype: Some(proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
+  let #(heap, ref) = common.alloc_pojo(state.heap, proto, props)
   #(State(..state, heap:), Ok(JsObject(ref)))
 }
 

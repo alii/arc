@@ -226,18 +226,7 @@ fn call_native(
       }
     // §20.1.1.1 step 2: undefined, null, or absent → new empty object.
     _ -> {
-      let #(heap, ref) =
-        heap.alloc(
-          state.heap,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.new(),
-            symbol_properties: [],
-            elements: elements.new(),
-            prototype: Some(object_proto),
-            extensible: True,
-          ),
-        )
+      let #(heap, ref) = common.alloc_pojo(state.heap, object_proto, [])
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
   }
@@ -351,52 +340,32 @@ pub fn make_descriptor_object(
   case prop {
     // Step 3: IsDataDescriptor — create "value" and "writable" properties.
     DataProperty(value: val, writable:, enumerable:, configurable:) ->
-      heap.alloc(
-        heap,
-        ObjectSlot(
-          kind: OrdinaryObject,
-          properties: common.named_props([
-            // Step 3a: "value"
-            #("value", value.data_property(val)),
-            // Step 3b: "writable"
-            #("writable", value.data_property(JsBool(writable))),
-            // Step 5: "enumerable"
-            #("enumerable", value.data_property(JsBool(enumerable))),
-            // Step 6: "configurable"
-            #("configurable", value.data_property(JsBool(configurable))),
-          ]),
-          symbol_properties: [],
-          elements: elements.new(),
-          prototype: Some(object_proto),
-          extensible: True,
-        ),
-      )
+      common.alloc_pojo(heap, object_proto, [
+        // Step 3a: "value"
+        #("value", value.data_property(val)),
+        // Step 3b: "writable"
+        #("writable", value.data_property(JsBool(writable))),
+        // Step 5: "enumerable"
+        #("enumerable", value.data_property(JsBool(enumerable))),
+        // Step 6: "configurable"
+        #("configurable", value.data_property(JsBool(configurable))),
+      ])
     // Step 4: IsAccessorDescriptor — create "get" and "set" properties.
     AccessorProperty(get:, set:, enumerable:, configurable:) -> {
       // Spec: Desc.[[Get]] / Desc.[[Set]] are stored as-is. If absent
       // internally (None), we emit undefined per convention.
       let get_val = option.unwrap(get, JsUndefined)
       let set_val = option.unwrap(set, JsUndefined)
-      heap.alloc(
-        heap,
-        ObjectSlot(
-          kind: OrdinaryObject,
-          properties: common.named_props([
-            // Step 4a: "get"
-            #("get", value.data_property(get_val)),
-            // Step 4b: "set"
-            #("set", value.data_property(set_val)),
-            // Step 5: "enumerable"
-            #("enumerable", value.data_property(JsBool(enumerable))),
-            // Step 6: "configurable"
-            #("configurable", value.data_property(JsBool(configurable))),
-          ]),
-          symbol_properties: [],
-          elements: elements.new(),
-          prototype: Some(object_proto),
-          extensible: True,
-        ),
-      )
+      common.alloc_pojo(heap, object_proto, [
+        // Step 4a: "get"
+        #("get", value.data_property(get_val)),
+        // Step 4b: "set"
+        #("set", value.data_property(set_val)),
+        // Step 5: "enumerable"
+        #("enumerable", value.data_property(JsBool(enumerable))),
+        // Step 6: "configurable"
+        #("configurable", value.data_property(JsBool(configurable))),
+      ])
     }
   }
 }

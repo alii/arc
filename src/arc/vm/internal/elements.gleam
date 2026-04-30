@@ -116,15 +116,6 @@ pub fn indices(elements: JsElements) -> List(Int) {
   }
 }
 
-/// Number of stored entries. NOT JS .length — use ArrayObject(length:) for that.
-pub fn stored_count(elements: JsElements) -> Int {
-  case elements {
-    NoElements -> 0
-    DenseElements(data) -> tree_array.size(data)
-    SparseElements(data) -> dict.size(data)
-  }
-}
-
 /// Remove all elements at indices >= new_len. O(log n).
 pub fn truncate(elements: JsElements, new_len: Int) -> JsElements {
   case elements {
