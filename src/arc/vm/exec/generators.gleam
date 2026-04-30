@@ -831,8 +831,9 @@ fn restore_finally_completion(
 
 /// Truncate stack to a given depth.
 fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
-  case list.length(stack) > depth {
-    True -> truncate_stack(list.drop(stack, 1), depth)
+  let excess = list.length(stack) - depth
+  case excess > 0 {
+    True -> list.drop(stack, excess)
     False -> stack
   }
 }

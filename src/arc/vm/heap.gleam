@@ -226,10 +226,15 @@ pub fn read_boolean_object(h: Heap(ctx), ref: Ref) -> Option(Bool) {
 
 // -----------------------------------------------------------------------------
 
-/// Overwrite a slot. No-op if the ref doesn't exist in the heap
-/// (i.e. was never allocated or reserved).
+/// Sentinel ref with no backing slot. `read` returns Error, `write`/`update`
+/// no-op. Used when array generics are called with a primitive `this` so
+/// mutating methods drop their writes without allocating a wrapper.
+pub const sentinel_ref = Ref(-1)
+
+/// Overwrite a slot. No-op on `sentinel_ref`. All other refs are assumed
+/// live — callers obtain them only via alloc/reserve.
 pub fn write(heap: Heap(ctx), ref: Ref, slot: HeapSlot(ctx)) -> Heap(ctx) {
-  case dict.has_key(heap.data, ref.id) {
+  case ref.id >= 0 {
     True -> Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
     False -> heap
   }

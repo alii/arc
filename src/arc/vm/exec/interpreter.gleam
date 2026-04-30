@@ -381,8 +381,9 @@ fn unwind_to_catch(state: State, thrown_value: JsValue) -> Option(State) {
 
 /// Truncate stack to a given depth.
 fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
-  case list.length(stack) > depth {
-    True -> truncate_stack(list.drop(stack, 1), depth)
+  let excess = list.length(stack) - depth
+  case excess > 0 {
+    True -> list.drop(stack, excess)
     False -> stack
   }
 }
@@ -392,18 +393,6 @@ fn underflow(
   op: String,
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
   Error(#(StepVmError(StackUnderflow(op)), JsUndefined, state.heap))
-}
-
-fn unimplemented(
-  state: State,
-  label: String,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  Error(#(
-    StepVmError(Unimplemented(label <> ": " <> string.inspect(op))),
-    JsUndefined,
-    state.heap,
-  ))
 }
 
 /// Pop top of stack and jump to `target` if `condition(value)` is true,
@@ -431,114 +420,7 @@ fn conditional_jump(
 /// or Error(#(signal, value, heap)) to stop.
 fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
   case op {
-    // Stack operations
-    PushConst(_) | Pop | Dup | Swap -> step_stack(state, op)
-
-    // Local variable access
-    GetLocal(_) | PutLocal(_) | BoxLocal(_) | GetBoxed(_) | PutBoxed(_) ->
-      step_locals(state, op)
-
-    // Global variable access
-    GetGlobal(_)
-    | PutGlobal(_)
-    | GetEvalVar(_)
-    | PutEvalVar(_)
-    | DeclareEvalVar(_)
-    | TypeofEvalVar(_)
-    | DeclareGlobalVar(_)
-    | DeclareGlobalLex(_, _)
-    | InitGlobalLex(_)
-    | TypeOf
-    | TypeofGlobal(_) -> step_globals(state, op)
-
-    // Operators
-    BinOp(_) | UnaryOp(_) -> step_operators(state, op)
-
-    // Control flow
-    Return
-    | Jump(_)
-    | JumpIfFalse(_)
-    | JumpIfTrue(_)
-    | JumpIfNullish(_)
-    | PushTry(_)
-    | opcode.PopTry
-    | opcode.Throw
-    | opcode.EnterFinally
-    | opcode.EnterFinallyThrow
-    | opcode.LeaveFinally -> step_control_flow(state, op)
-
-    // Object property access
-    NewObject
-    | GetField(_)
-    | GetField2(_)
-    | PutField(_)
-    | DefineField(_)
-    | DefineMethod(_)
-    | DefineMethodComputed
-    | DefineAccessor(_, _)
-    | DefineAccessorComputed(_)
-    | DefineFieldComputed
-    | ObjectSpread
-    | ObjectRestCopy(_)
-    | DeleteField(_)
-    | DeleteElem
-    | SetupDerivedClass
-    | GetThis -> step_objects(state, op)
-
-    // Array operations
-    ArrayFrom(_)
-    | ArrayFromWithHoles(_, _)
-    | GetElem
-    | GetElem2
-    | PutElem
-    | ArrayPush
-    | ArrayPushHole
-    | ArraySpread -> step_arrays(state, op)
-
-    // Function calls
-    Call(_)
-    | CallEval(_)
-    | CallMethod(_, _)
-    | CallConstructor(_)
-    | CallSuper(_)
-    | CallSuperApply
-    | CallApply
-    | CallMethodApply
-    | CallConstructorApply
-    | MakeClosure(_) -> step_calls(state, op)
-
-    // Iteration
-    ForInStart
-    | ForInNext
-    | GetIterator
-    | GetAsyncIterator
-    | IteratorNext
-    | IteratorClose -> step_iteration(state, op)
-
-    // Generator/async
-    InitialYield
-    | Yield
-    | YieldStar
-    | AsyncYieldStarNext
-    | AsyncYieldStarResume(_)
-    | Await -> step_generators(state, op)
-
-    // Special
-    CreateArguments | NewRegExp -> step_special(state, op)
-
-    _ -> unimplemented(state, "opcode", op)
-  }
-}
-
-// ============================================================================
-// Step sub-functions by opcode category
-// ============================================================================
-
-fn step_stack(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Stack operations --------------------------------------------
     PushConst(index) -> {
       let value = tuple_array.unsafe_get(index, state.constants)
       Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
@@ -567,15 +449,7 @@ fn step_stack(
       }
     }
 
-    _ -> unimplemented(state, "step_stack", op)
-  }
-}
-
-fn step_locals(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Local variable access ---------------------------------------
     GetLocal(index) -> {
       case tuple_array.unsafe_get(index, state.locals) {
         JsUninitialized ->
@@ -650,20 +524,7 @@ fn step_locals(
       }
     }
 
-    _ -> unimplemented(state, "step_locals", op)
-  }
-}
-
-fn lookup_eval_env(state: State, name: String) -> Option(JsValue) {
-  option.then(state.eval_env, heap.read_eval_env(state.heap, _))
-  |> option.then(fn(vars) { dict.get(vars, name) |> option.from_result })
-}
-
-fn step_globals(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Global variable access --------------------------------------
     // §9.1.1.4.4 GetBindingValue — two-phase: declarative then object record
     GetGlobal(name) -> {
       case dict.get(state.lexical_globals, name) {
@@ -853,7 +714,7 @@ fn step_globals(
       case lookup_eval_env(state, name) {
         Some(v) ->
           Ok(State(..state, stack: [v, ..state.stack], pc: state.pc + 1))
-        None -> step_globals(state, GetGlobal(name))
+        None -> step(state, GetGlobal(name))
       }
     }
 
@@ -871,7 +732,7 @@ fn step_globals(
               pc: state.pc + 1,
             ),
           )
-        None -> step_globals(state, TypeofGlobal(name))
+        None -> step(state, TypeofGlobal(name))
       }
     }
 
@@ -882,7 +743,7 @@ fn step_globals(
           let vars =
             heap.read_eval_env(state.heap, ref) |> option.unwrap(dict.new())
           case dict.has_key(vars, name) {
-            False -> step_globals(state, PutGlobal(name))
+            False -> step(state, PutGlobal(name))
             True -> {
               let heap =
                 heap.write(
@@ -894,14 +755,14 @@ fn step_globals(
             }
           }
         }
-        _, _ -> step_globals(state, PutGlobal(name))
+        _, _ -> step(state, PutGlobal(name))
       }
     }
 
     // Sloppy direct-eval var declaration: seed name=undefined into eval_env.
     DeclareEvalVar(name) -> {
       case state.eval_env {
-        None -> step_globals(state, DeclareGlobalVar(name))
+        None -> step(state, DeclareGlobalVar(name))
         Some(ref) -> {
           let vars =
             heap.read_eval_env(state.heap, ref) |> option.unwrap(dict.new())
@@ -1027,15 +888,7 @@ fn step_globals(
       }
     }
 
-    _ -> unimplemented(state, "step_globals", op)
-  }
-}
-
-fn step_operators(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Operators ---------------------------------------------------
     BinOp(kind) -> {
       case state.stack {
         [right, left, ..rest] -> {
@@ -1134,15 +987,7 @@ fn step_operators(
       }
     }
 
-    _ -> unimplemented(state, "step_operators", op)
-  }
-}
-
-fn step_control_flow(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Control flow ------------------------------------------------
     Return -> {
       let return_value = case state.stack {
         [value, ..] -> value
@@ -1359,15 +1204,7 @@ fn step_control_flow(
       }
     }
 
-    _ -> unimplemented(state, "step_control_flow", op)
-  }
-}
-
-fn step_objects(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Object property access --------------------------------------
     NewObject -> {
       let #(heap, ref) =
         common.alloc_wrapper(
@@ -1794,31 +1631,7 @@ fn step_objects(
           )
       }
 
-    _ -> unimplemented(state, "step_objects", op)
-  }
-}
-
-/// GetElem on a primitive receiver — ToPropertyKey (Symbol → symbol lookup
-/// on prototype, else ToString → string lookup) then delegate to get_value_of.
-fn get_elem_on_primitive(
-  state: State,
-  receiver: JsValue,
-  key: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
-  case key {
-    value.JsSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
-    _ -> {
-      use #(pk, state) <- result.try(property.to_property_key(state, key))
-      object.get_value_of(state, receiver, pk)
-    }
-  }
-}
-
-fn step_arrays(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Array operations --------------------------------------------
     // -- Array construction --
     ArrayFrom(count) -> {
       case pop_n(state.stack, count) {
@@ -1979,15 +1792,7 @@ fn step_arrays(
       }
     }
 
-    _ -> unimplemented(state, "step_arrays", op)
-  }
-}
-
-fn step_calls(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Function calls ----------------------------------------------
     CallEval(arity) -> {
       // Syntactic `eval(...)` call. Runtime identity check: if the callee
       // resolves to the intrinsic eval function, do a DIRECT eval (sees
@@ -2024,7 +1829,7 @@ fn step_calls(
           }
         }
         // Not the intrinsic eval — regular call semantics.
-        _ -> step_calls(state, Call(arity))
+        _ -> step(state, Call(arity))
       }
     }
 
@@ -2294,15 +2099,7 @@ fn step_calls(
       )
     }
 
-    _ -> unimplemented(state, "step_calls", op)
-  }
-}
-
-fn step_iteration(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Iteration ---------------------------------------------------
     ForInStart -> {
       case state.stack {
         [obj, ..rest] -> {
@@ -2587,15 +2384,7 @@ fn step_iteration(
       }
     }
 
-    _ -> unimplemented(state, "step_iteration", op)
-  }
-}
-
-fn step_generators(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Generator/async ---------------------------------------------
     InitialYield ->
       // Suspend immediately at start of generator body.
       // PC advances past InitialYield so resumption starts at the next op.
@@ -2673,15 +2462,7 @@ fn step_generators(
       }
     }
 
-    _ -> unimplemented(state, "step_generators", op)
-  }
-}
-
-fn step_special(
-  state: State,
-  op: Op,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  case op {
+    // ---- Special -----------------------------------------------------
     CreateArguments -> {
       // Allocate an unmapped arguments object from state.call_args.
       let args = state.call_args
@@ -2757,8 +2538,27 @@ fn step_special(
         _ -> underflow(state, "NewRegExp")
       }
     }
+  }
+}
 
-    _ -> unimplemented(state, "step_special", op)
+fn lookup_eval_env(state: State, name: String) -> Option(JsValue) {
+  option.then(state.eval_env, heap.read_eval_env(state.heap, _))
+  |> option.then(fn(vars) { dict.get(vars, name) |> option.from_result })
+}
+
+/// GetElem on a primitive receiver — ToPropertyKey (Symbol → symbol lookup
+/// on prototype, else ToString → string lookup) then delegate to get_value_of.
+fn get_elem_on_primitive(
+  state: State,
+  receiver: JsValue,
+  key: JsValue,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case key {
+    value.JsSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
+    _ -> {
+      use #(pk, state) <- result.try(property.to_property_key(state, key))
+      object.get_value_of(state, receiver, pk)
+    }
   }
 }
 
@@ -3128,15 +2928,19 @@ fn build_exclusion_sets(
   state: State,
   keys: List(JsValue),
 ) -> Result(
-  #(List(value.PropertyKey), List(value.SymbolId), State),
+  #(set.Set(value.PropertyKey), set.Set(value.SymbolId), State),
   #(JsValue, State),
 ) {
-  use #(pks, syms, state), key <- list.try_fold(keys, #([], [], state))
+  use #(pks, syms, state), key <- list.try_fold(keys, #(
+    set.new(),
+    set.new(),
+    state,
+  ))
   case key {
-    value.JsSymbol(id) -> Ok(#(pks, [id, ..syms], state))
+    value.JsSymbol(id) -> Ok(#(pks, set.insert(syms, id), state))
     _ -> {
       use #(pk, state) <- result.map(property.to_property_key(state, key))
-      #([pk, ..pks], syms, state)
+      #(set.insert(pks, pk), syms, state)
     }
   }
 }

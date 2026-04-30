@@ -748,7 +748,7 @@ pub fn call_native_async_resume(
   }
 }
 
-/// Set up locals for a function call: [env_values, padded_args, uninitialized].
+/// Set up locals for a function call: [env_values, args(padded to arity), undefined×remaining].
 pub fn setup_locals(
   h: Heap,
   env_ref: value.Ref,
@@ -756,12 +756,37 @@ pub fn setup_locals(
   args: List(JsValue),
 ) -> tuple_array.TupleArray(JsValue) {
   let env_values = heap.read_env(h, env_ref) |> option.unwrap([])
-  let env_count = list.length(env_values)
-  let padded_args = pad_args(args, callee_template.arity)
-  let remaining =
-    callee_template.local_count - env_count - callee_template.arity
-  list.flatten([env_values, padded_args, list.repeat(JsUndefined, remaining)])
+  build_locals(
+    env_values,
+    args,
+    callee_template.arity,
+    callee_template.local_count,
+    [],
+  )
+  |> list.reverse
   |> tuple_array.from_list
+}
+
+fn build_locals(
+  env: List(JsValue),
+  args: List(JsValue),
+  arity: Int,
+  slots_left: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
+  case slots_left, env {
+    0, _ -> acc
+    _, [e, ..rest] ->
+      build_locals(rest, args, arity, slots_left - 1, [e, ..acc])
+    _, [] ->
+      case arity, args {
+        0, _ -> build_locals([], [], 0, slots_left - 1, [JsUndefined, ..acc])
+        _, [a, ..rest] ->
+          build_locals([], rest, arity - 1, slots_left - 1, [a, ..acc])
+        _, [] ->
+          build_locals([], [], arity - 1, slots_left - 1, [JsUndefined, ..acc])
+      }
+  }
 }
 
 /// Call a native (Gleam-implemented) function. Most natives execute synchronously
@@ -1840,15 +1865,6 @@ pub fn function_to_string(
         state,
         "Function.prototype.toString requires that 'this' be a Function",
       )
-  }
-}
-
-/// Pad args to exactly `arity` length -- truncate extras, fill missing with undefined.
-pub fn pad_args(args: List(JsValue), arity: Int) -> List(JsValue) {
-  let len = list.length(args)
-  case len >= arity {
-    True -> list.take(args, arity)
-    False -> list.append(args, list.repeat(JsUndefined, arity - len))
   }
 }
 

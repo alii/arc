@@ -411,11 +411,6 @@ fn push_generic(
 /// V8's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
 
-/// Sentinel ref passed to `cont` for primitive `this` values. heap.read returns
-/// Error for any id not in the heap, and heap.write is a no-op for unallocated
-/// refs, so mutating methods safely no-op on primitives.
-const invalid_ref = value.Ref(-1)
-
 /// Combined ToObject (ES2024 §7.1.18) + LengthOfArrayLike (§7.3.18).
 ///
 /// Captures `length` once, passes `(ref, length, state)` to `cont`. Per-index
@@ -437,7 +432,7 @@ const invalid_ref = value.Ref(-1)
 ///     2. Return ? ToLength(? Get(obj, "length")).
 ///       where ToLength (§7.1.17) clamps to [0, 2^53 - 1].
 ///
-/// For String primitives/wrappers, ref is the wrapper ref or invalid_ref;
+/// For String primitives/wrappers, ref is the wrapper ref or heap.sentinel_ref;
 /// iteration helpers use `get_index(state, this, idx)` which delegates to
 /// `object.get_value_of` — handles both objects and string primitives.
 fn require_array(
@@ -482,12 +477,12 @@ fn require_array(
     // §7.1.18 String row: ToObject creates a String exotic object (§10.4.3).
     // We don't actually allocate the wrapper — iteration uses get_value_of
     // which handles string primitives via StringGetOwnProperty semantics.
-    // Mutating methods will fail via generic_set on invalid_ref (no-op), which
+    // Mutating methods will fail via generic_set on heap.sentinel_ref (no-op), which
     // is correct since string indices are non-writable (§10.4.3.5 step 11).
-    JsString(s) -> cont(invalid_ref, string.length(s), state)
+    JsString(s) -> cont(heap.sentinel_ref, string.length(s), state)
     // §7.1.18 Boolean/Number/Symbol/BigInt rows: ToObject creates a wrapper
     // object with no own `.length` property → LengthOfArrayLike returns 0.
-    _ -> cont(invalid_ref, 0, state)
+    _ -> cont(heap.sentinel_ref, 0, state)
   }
 }
 
@@ -2395,9 +2390,9 @@ fn stringify_elements(
   }
 }
 
-/// Sort with a user-provided comparefn. Uses insertion sort since each
-/// comparison requires re-entering the VM to call the JS function.
-/// Undefined values sort to the end per spec; holes are removed.
+/// Sort with a user-provided comparefn. Each comparison re-enters the VM to
+/// call the JS function. Undefined values sort to the end per spec; holes are
+/// removed.
 fn sort_with_comparefn(
   state: State,
   ref: Ref,
@@ -2414,66 +2409,79 @@ fn sort_with_comparefn(
     [],
     0,
   ))
-  // Sort using insertion sort with comparefn.
-  use sorted, state <- state.try_op(
-    insertion_sort(state, defined, comparefn, []),
-  )
+  use sorted, state <- state.try_op(merge_sort(state, defined, comparefn))
   let all_values = list.append(sorted, list.repeat(JsUndefined, undefs))
   wrap(write_sort_result(state, ref, all_values, length, 0), this)
 }
 
-/// Insertion sort that calls comparefn for each comparison.
-/// Processes elements one at a time, inserting each into the correct
-/// position in the already-sorted accumulator.
-fn insertion_sort(
+/// Stable bottom-up merge sort that threads State through an effectful
+/// comparator. O(n log n) compares, O(n log n) cons cells.
+fn merge_sort(
   state: State,
-  remaining: List(JsValue),
+  items: List(JsValue),
   comparefn: JsValue,
-  sorted: List(JsValue),
 ) -> Result(#(List(JsValue), State), #(JsValue, State)) {
-  case remaining {
-    [] -> Ok(#(sorted, state))
-    [elem, ..rest] -> {
-      use #(new_sorted, state) <- result.try(
-        insert_into_sorted(state, sorted, elem, comparefn, []),
-      )
-      insertion_sort(state, rest, comparefn, new_sorted)
+  case items {
+    [] | [_] -> Ok(#(items, state))
+    _ -> merge_all(state, list.map(items, list.wrap), comparefn)
+  }
+}
+
+/// Repeatedly merge adjacent pairs of runs until one run remains.
+fn merge_all(
+  state: State,
+  runs: List(List(JsValue)),
+  comparefn: JsValue,
+) -> Result(#(List(JsValue), State), #(JsValue, State)) {
+  case runs {
+    [] -> Ok(#([], state))
+    [done] -> Ok(#(done, state))
+    _ -> {
+      use #(next, state) <- result.try(merge_pairs(state, runs, comparefn, []))
+      merge_all(state, next, comparefn)
     }
   }
 }
 
-/// Insert an element into its correct position in a sorted list.
-/// Walks through `sorted` comparing `elem` against each entry.
-/// When comparefn(elem, entry) <= 0, inserts before that entry.
-fn insert_into_sorted(
+/// Merge runs pairwise, preserving left-to-right order for stability.
+fn merge_pairs(
   state: State,
-  sorted: List(JsValue),
-  elem: JsValue,
+  runs: List(List(JsValue)),
   comparefn: JsValue,
-  before: List(JsValue),
+  acc: List(List(JsValue)),
+) -> Result(#(List(List(JsValue)), State), #(JsValue, State)) {
+  case runs {
+    [] -> Ok(#(list.reverse(acc), state))
+    [a] -> Ok(#(list.reverse([a, ..acc]), state))
+    [a, b, ..rest] -> {
+      use #(ab, state) <- result.try(merge_two(state, a, b, comparefn, []))
+      merge_pairs(state, rest, comparefn, [ab, ..acc])
+    }
+  }
+}
+
+/// Merge two sorted runs. Ties go to `left` (stable: left holds earlier elems).
+fn merge_two(
+  state: State,
+  left: List(JsValue),
+  right: List(JsValue),
+  comparefn: JsValue,
+  acc: List(JsValue),
 ) -> Result(#(List(JsValue), State), #(JsValue, State)) {
-  case sorted {
-    [] ->
-      // End of list — insert here.
-      Ok(#(list.reverse([elem, ..before]), state))
-    [head, ..tail] -> {
-      // Call comparefn(elem, head) to determine ordering.
-      use #(result, state) <- result.try(
-        state.call(state, comparefn, JsUndefined, [elem, head]),
+  case left, right {
+    [], _ -> Ok(#(list.append(list.reverse(acc), right), state))
+    _, [] -> Ok(#(list.append(list.reverse(acc), left), state))
+    [l, ..ls], [r, ..rs] -> {
+      use #(res, state) <- result.try(
+        state.call(state, comparefn, JsUndefined, [l, r]),
       )
-      // SortCompare: if result is NaN, treat as +0 (equal).
-      let cmp = case result {
+      let cmp = case res {
         JsNumber(Finite(n)) -> n
         _ -> 0.0
       }
       case cmp <=. 0.0 {
-        True ->
-          Ok(#(
-            list.append(list.reverse([elem, ..before]), [head, ..tail]),
-            state,
-          ))
-        False ->
-          insert_into_sorted(state, tail, elem, comparefn, [head, ..before])
+        True -> merge_two(state, ls, right, comparefn, [l, ..acc])
+        False -> merge_two(state, left, rs, comparefn, [r, ..acc])
       }
     }
   }
@@ -3986,7 +3994,7 @@ fn to_sorted_default(
   #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
-/// Comparefn sort for toSorted: collect elements, insertion-sort using comparefn,
+/// Comparefn sort for toSorted: collect elements, merge-sort using comparefn,
 /// then build a new array from the result.
 fn to_sorted_with_comparefn(
   state: State,
@@ -4003,9 +4011,7 @@ fn to_sorted_with_comparefn(
     [],
     0,
   ))
-  use sorted, state <- state.try_op(
-    insertion_sort(state, defined, comparefn, []),
-  )
+  use sorted, state <- state.try_op(merge_sort(state, defined, comparefn))
   let all_values = list.append(sorted, list.repeat(JsUndefined, undefs))
   let new_elements = build_elements_from_list(all_values, 0, elements.new())
   let #(heap, ref) =

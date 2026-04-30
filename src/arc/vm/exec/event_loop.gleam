@@ -220,16 +220,15 @@ fn run_closure_for_job(
   execute_inner: ExecuteInnerFn,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
-  let env_count = list.length(env_values)
-  let padded_args = pad_args(args, callee_template.arity)
-  let remaining =
-    callee_template.local_count - env_count - callee_template.arity
   let locals =
-    list.flatten([
+    build_locals(
       env_values,
-      padded_args,
-      list.repeat(JsUndefined, remaining),
-    ])
+      args,
+      callee_template.arity,
+      callee_template.local_count,
+      [],
+    )
+    |> list.reverse
     |> tuple_array.from_list
   let #(heap, new_this) = bind_this(state, callee_template, this_val)
   let job_state =
@@ -269,12 +268,25 @@ fn run_closure_for_job(
 // Inlined helpers (avoid circular dependency with call.gleam)
 // ============================================================================
 
-/// Pad args to exactly `arity` length.
-fn pad_args(args: List(JsValue), arity: Int) -> List(JsValue) {
-  let len = list.length(args)
-  case len >= arity {
-    True -> list.take(args, arity)
-    False -> list.append(args, list.repeat(JsUndefined, arity - len))
+fn build_locals(
+  env: List(JsValue),
+  args: List(JsValue),
+  arity: Int,
+  slots_left: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
+  case slots_left, env {
+    0, _ -> acc
+    _, [e, ..rest] ->
+      build_locals(rest, args, arity, slots_left - 1, [e, ..acc])
+    _, [] ->
+      case arity, args {
+        0, _ -> build_locals([], [], 0, slots_left - 1, [JsUndefined, ..acc])
+        _, [a, ..rest] ->
+          build_locals([], rest, arity - 1, slots_left - 1, [a, ..acc])
+        _, [] ->
+          build_locals([], [], arity - 1, slots_left - 1, [JsUndefined, ..acc])
+      }
   }
 }
 

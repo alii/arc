@@ -10,7 +10,7 @@ import arc/vm/opcode.{
   IrArrayPushHole, IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume,
   IrAwait, IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor,
   IrCallConstructorApply, IrCallEval, IrCallMethod, IrCallMethodApply,
-  IrCallSuper, IrCallSuperApply, IrCloseVar, IrCreateArguments, IrDeclareEvalVar,
+  IrCallSuper, IrCallSuperApply, IrCreateArguments, IrDeclareEvalVar,
   IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally,
@@ -234,8 +234,6 @@ fn resolve_ops(
     // Closures
     [IrMakeClosure(func_index), ..rest] ->
       resolve_ops(rest, labels, [opcode.MakeClosure(func_index), ..acc])
-    [IrCloseVar(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.CloseVar(index), ..acc])
     [IrBoxLocal(index), ..rest] ->
       resolve_ops(rest, labels, [opcode.BoxLocal(index), ..acc])
     [IrGetBoxed(index), ..rest] ->

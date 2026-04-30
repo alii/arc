@@ -118,23 +118,26 @@ pub fn get_value(
   key: PropertyKey,
   receiver: JsValue,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  // Step 1: Let desc be ? O.[[GetOwnProperty]](P).
-  case get_own_property(state.heap, ref, key) {
-    // Step 3: IsDataDescriptor(desc) → return desc.[[Value]].
-    Some(DataProperty(value: val, ..)) -> Ok(#(val, state))
-    // Steps 5-7: IsAccessorDescriptor → Call(getter, Receiver) or undefined.
-    Some(AccessorProperty(get: Some(getter), ..)) ->
-      state.call(state, getter, receiver, [])
-    Some(AccessorProperty(get: None, ..)) -> Ok(#(value.JsUndefined, state))
-    // Step 2: desc is undefined — walk prototype chain.
-    None ->
-      case heap.read(state.heap, ref) {
-        // Step 2c: parent.[[Get]](P, Receiver)
-        Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
-          get_value(state, proto_ref, key, receiver)
-        // Step 2b: parent is null → return undefined.
-        _ -> Ok(#(value.JsUndefined, state))
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
+      // Step 1: Let desc be ? O.[[GetOwnProperty]](P).
+      case own_property_of_slot(kind, properties, elements, key) {
+        // Step 3: IsDataDescriptor(desc) → return desc.[[Value]].
+        Some(DataProperty(value: val, ..)) -> Ok(#(val, state))
+        // Steps 5-7: IsAccessorDescriptor → Call(getter, Receiver) or undefined.
+        Some(AccessorProperty(get: Some(getter), ..)) ->
+          state.call(state, getter, receiver, [])
+        Some(AccessorProperty(get: None, ..)) -> Ok(#(value.JsUndefined, state))
+        // Step 2: desc is undefined — walk prototype chain.
+        None ->
+          case prototype {
+            // Step 2c: parent.[[Get]](P, Receiver)
+            Some(proto_ref) -> get_value(state, proto_ref, key, receiver)
+            // Step 2b: parent is null → return undefined.
+            None -> Ok(#(value.JsUndefined, state))
+          }
       }
+    _ -> Ok(#(value.JsUndefined, state))
   }
 }
 
@@ -207,87 +210,98 @@ pub fn get_own_property(
 ) -> Option(Property) {
   case heap.read(heap, ref) {
     Some(ObjectSlot(kind:, properties:, elements:, ..)) ->
-      case kind {
-        // --- Array exotic [[GetOwnProperty]] (§10.4.2) ---
-        // Per spec this IS OrdinaryGetOwnProperty — arrays only override
-        // [[DefineOwnProperty]]. Our elements/properties split is an internal
-        // optimization: properties dict is authoritative (holds accessors set
-        // via Object.defineProperty(arr, "0", {get:...})), elements is the
-        // fast-path data-value cache. Check properties first.
-        ArrayObject(length:) ->
-          case key {
-            // Virtual "length" property (§10.4.2.4 ArraySetLength)
-            Named("length") ->
-              Some(DataProperty(
-                value: value.from_int(length),
-                writable: True,
-                enumerable: False,
-                configurable: False,
-              ))
-            Index(idx) ->
-              case dict_get_option(properties, key) {
-                // accessor override at this index wins
-                Some(prop) -> Some(prop)
-                None ->
-                  case elements.has(elements, idx) {
-                    True ->
-                      Some(value.data_property(elements.get(elements, idx)))
-                    False -> None
-                  }
-              }
-            Named(_) -> dict_get_option(properties, key)
-          }
-        // --- Arguments exotic [[GetOwnProperty]] (§10.4.4.1) ---
-        // Spec layers a [[ParameterMap]] over OrdinaryGetOwnProperty; our
-        // elements/properties split is an internal storage optimization.
-        value.ArgumentsObject(_) ->
-          case key {
-            Index(idx) ->
-              case dict_get_option(properties, key) {
-                Some(prop) -> Some(prop)
-                None ->
-                  option.map(
-                    elements.get_option(elements, idx),
-                    value.data_property,
-                  )
-              }
-            Named(_) -> dict_get_option(properties, key)
-          }
-        // --- String exotic [[GetOwnProperty]] (§10.4.3.1) ---
-        value.StringObject(value: s) ->
-          case key {
-            // §10.4.3.4 StringCreate: "length" is an ordinary own data
-            // property {value: len, W:F, E:F, C:F}; returned at §10.4.3.1 step 1.
-            Named("length") ->
-              Some(DataProperty(
-                value: value.from_int(string_length(s)),
-                writable: False,
-                enumerable: False,
-                configurable: False,
-              ))
-            // §10.4.3.5 steps 2-4: CanonicalNumericIndexString → integer index
-            Index(idx) ->
-              case string_char_at(s, idx) {
-                // §10.4.3.5 step 10: return {value: char, W:F, E:T, C:F}
-                Some(ch) ->
-                  Some(DataProperty(
-                    value: JsString(ch),
-                    writable: False,
-                    enumerable: True,
-                    configurable: False,
-                  ))
-                // §10.4.3.5 step 8: index >= len → undefined, fall to ordinary
-                None -> dict_get_option(properties, key)
-              }
-            // §10.4.3.1 step 1: OrdinaryGetOwnProperty is called first for ALL
-            // keys; for non-index keys StringGetOwnProperty (step 3) yields
-            // undefined, so the ordinary result is the only answer.
-            Named(_) -> dict_get_option(properties, key)
-          }
-        // --- Ordinary [[GetOwnProperty]] (§10.1.5.1) ---
-        _ -> dict_get_option(properties, key)
-      }
+      own_property_of_slot(kind, properties, elements, key)
     _ -> None
+  }
+}
+
+/// **[[GetOwnProperty]](P)** dispatch given an already-read ObjectSlot's
+/// fields. Same algorithm as get_own_property; callers that already hold the
+/// slot use this directly instead of re-reading the heap.
+fn own_property_of_slot(
+  kind: state.ExoticKind,
+  properties: dict.Dict(PropertyKey, Property),
+  elements: JsElements,
+  key: PropertyKey,
+) -> Option(Property) {
+  case kind {
+    // --- Array exotic [[GetOwnProperty]] (§10.4.2) ---
+    // Per spec this IS OrdinaryGetOwnProperty — arrays only override
+    // [[DefineOwnProperty]]. Our elements/properties split is an internal
+    // optimization: properties dict is authoritative (holds accessors set
+    // via Object.defineProperty(arr, "0", {get:...})), elements is the
+    // fast-path data-value cache. Check properties first.
+    ArrayObject(length:) ->
+      case key {
+        // Virtual "length" property (§10.4.2.4 ArraySetLength)
+        Named("length") ->
+          Some(DataProperty(
+            value: value.from_int(length),
+            writable: True,
+            enumerable: False,
+            configurable: False,
+          ))
+        Index(idx) ->
+          case dict_get_option(properties, key) {
+            // accessor override at this index wins
+            Some(prop) -> Some(prop)
+            None ->
+              case elements.has(elements, idx) {
+                True -> Some(value.data_property(elements.get(elements, idx)))
+                False -> None
+              }
+          }
+        Named(_) -> dict_get_option(properties, key)
+      }
+    // --- Arguments exotic [[GetOwnProperty]] (§10.4.4.1) ---
+    // Spec layers a [[ParameterMap]] over OrdinaryGetOwnProperty; our
+    // elements/properties split is an internal storage optimization.
+    value.ArgumentsObject(_) ->
+      case key {
+        Index(idx) ->
+          case dict_get_option(properties, key) {
+            Some(prop) -> Some(prop)
+            None ->
+              option.map(
+                elements.get_option(elements, idx),
+                value.data_property,
+              )
+          }
+        Named(_) -> dict_get_option(properties, key)
+      }
+    // --- String exotic [[GetOwnProperty]] (§10.4.3.1) ---
+    value.StringObject(value: s) ->
+      case key {
+        // §10.4.3.4 StringCreate: "length" is an ordinary own data
+        // property {value: len, W:F, E:F, C:F}; returned at §10.4.3.1 step 1.
+        Named("length") ->
+          Some(DataProperty(
+            value: value.from_int(string_length(s)),
+            writable: False,
+            enumerable: False,
+            configurable: False,
+          ))
+        // §10.4.3.5 steps 2-4: CanonicalNumericIndexString → integer index
+        Index(idx) ->
+          case string_char_at(s, idx) {
+            // §10.4.3.5 step 10: return {value: char, W:F, E:T, C:F}
+            Some(ch) ->
+              Some(DataProperty(
+                value: JsString(ch),
+                writable: False,
+                enumerable: True,
+                configurable: False,
+              ))
+            // §10.4.3.5 step 8: index >= len → undefined, fall to ordinary
+            None -> dict_get_option(properties, key)
+          }
+        // §10.4.3.1 step 1: OrdinaryGetOwnProperty is called first for ALL
+        // keys; for non-index keys StringGetOwnProperty (step 3) yields
+        // undefined, so the ordinary result is the only answer.
+        Named(_) -> dict_get_option(properties, key)
+      }
+    // --- Ordinary [[GetOwnProperty]] (§10.1.5.1) ---
+    _ -> dict_get_option(properties, key)
   }
 }
 
@@ -314,40 +328,45 @@ pub fn set_value(
   val: JsValue,
   receiver: JsValue,
 ) -> Result(#(State, Bool), #(JsValue, State)) {
-  // §10.1.9.1 step 1: Let ownDesc be ? O.[[GetOwnProperty]](P).
-  // §10.1.9.1 step 2: Return OrdinarySetWithOwnDescriptor(O, P, V, Receiver, ownDesc).
-  case get_own_property(state.heap, ref, key) {
-    // §10.1.9.2 step 1: If ownDesc is undefined, then
-    None ->
-      // §10.1.9.2 step 1.a: Let parent be ? O.[[GetPrototypeOf]]().
-      case heap.read(state.heap, ref) {
-        // §10.1.9.2 step 1.b: If parent is not null, return ? parent.[[Set]](P, V, Receiver).
-        Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
-          set_value(state, proto_ref, key, val, receiver)
-        // §10.1.9.2 step 1.c: Else, set ownDesc to {[[Value]]: undefined, [[Writable]]: true,
-        //   [[Enumerable]]: true, [[Configurable]]: true}.
-        // (Falls through to set_on_receiver which creates the property.)
-        _ -> set_on_receiver(state, receiver, key, val)
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
+      // §10.1.9.1 step 1: Let ownDesc be ? O.[[GetOwnProperty]](P).
+      // §10.1.9.1 step 2: Return OrdinarySetWithOwnDescriptor(O, P, V, Receiver, ownDesc).
+      case own_property_of_slot(kind, properties, elements, key) {
+        // §10.1.9.2 step 1: If ownDesc is undefined, then
+        //   step 1.a: Let parent be ? O.[[GetPrototypeOf]]().
+        None ->
+          case prototype {
+            // §10.1.9.2 step 1.b: If parent is not null, return ? parent.[[Set]](P, V, Receiver).
+            Some(proto_ref) -> set_value(state, proto_ref, key, val, receiver)
+            // §10.1.9.2 step 1.c: Else, set ownDesc to {[[Value]]: undefined, [[Writable]]: true,
+            //   [[Enumerable]]: true, [[Configurable]]: true}.
+            // (Falls through to set_on_receiver which creates the property.)
+            None -> set_on_receiver(state, receiver, key, val)
+          }
+        // §10.1.9.2 step 2: If IsDataDescriptor(ownDesc) is true, then
+        //   step 2.a: If ownDesc.[[Writable]] is false, return false.
+        Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
+        // §10.1.9.2 steps 2.b-2.h: ownDesc is writable data — delegate to receiver.
+        // We delegate to set_on_receiver which handles both create and update
+        // via set_property (spec distinguishes step 2.d.ii CreateDataProperty vs
+        // step 2.h OrdinaryDefineOwnProperty but result is same).
+        Some(DataProperty(writable: True, ..)) ->
+          set_on_receiver(state, receiver, key, val)
+        // §10.1.9.2 step 3: Assert: ownDesc is an accessor descriptor.
+        //   step 4: Let setter be ownDesc.[[Set]].
+        //   step 5: If setter is undefined, return false.
+        Some(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
+        // §10.1.9.2 step 6: Perform ? Call(setter, Receiver, « V »).
+        // §10.1.9.2 step 7: Return true.
+        Some(AccessorProperty(set: Some(setter), ..)) -> {
+          use #(_, state) <- result.map(
+            state.call(state, setter, receiver, [val]),
+          )
+          #(state, True)
+        }
       }
-    // §10.1.9.2 step 2: If IsDataDescriptor(ownDesc) is true, then
-    //   step 2.a: If ownDesc.[[Writable]] is false, return false.
-    Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
-    // §10.1.9.2 steps 2.b-2.h: ownDesc is writable data — delegate to receiver.
-    // We delegate to set_on_receiver which handles both create and update
-    // via set_property (spec distinguishes step 2.d.ii CreateDataProperty vs
-    // step 2.h OrdinaryDefineOwnProperty but result is same).
-    Some(DataProperty(writable: True, ..)) ->
-      set_on_receiver(state, receiver, key, val)
-    // §10.1.9.2 step 3: Assert: ownDesc is an accessor descriptor.
-    //   step 4: Let setter be ownDesc.[[Set]].
-    //   step 5: If setter is undefined, return false.
-    Some(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
-    // §10.1.9.2 step 6: Perform ? Call(setter, Receiver, « V »).
-    // §10.1.9.2 step 7: Return true.
-    Some(AccessorProperty(set: Some(setter), ..)) -> {
-      use #(_, state) <- result.map(state.call(state, setter, receiver, [val]))
-      #(state, True)
-    }
+    _ -> set_on_receiver(state, receiver, key, val)
   }
 }
 
@@ -847,17 +866,20 @@ pub fn has_symbol_property(heap: Heap, ref: Ref, sym: SymbolId) -> Bool {
 /// Pure (no Result) — our GetOwnProperty and GetPrototypeOf cannot throw
 /// (no Proxy traps), so steps 1/3 never produce abrupt completions.
 pub fn has_property(heap: Heap, ref: Ref, key: PropertyKey) -> Bool {
-  // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined, return true.
-  case get_own_property(heap, ref, key) {
-    Some(_) -> True
-    None ->
-      // Step 3-4: Let parent be O.[[GetPrototypeOf]](). If not null, recurse.
-      case heap.read(heap, ref) {
-        Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
-          has_property(heap, proto_ref, key)
-        // Step 5: Return false (null prototype or non-object slot).
-        _ -> False
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
+      // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined, return true.
+      case own_property_of_slot(kind, properties, elements, key) {
+        Some(_) -> True
+        // Step 3-4: Let parent be O.[[GetPrototypeOf]](). If not null, recurse.
+        None ->
+          case prototype {
+            Some(proto_ref) -> has_property(heap, proto_ref, key)
+            // Step 5: Return false (null prototype).
+            None -> False
+          }
       }
+    _ -> False
   }
 }
 
@@ -1094,7 +1116,13 @@ pub fn copy_data_properties(
   target_ref: Ref,
   source: JsValue,
 ) -> Result(State, #(JsValue, State)) {
-  copy_data_properties_excluding(state, target_ref, source, [], [])
+  copy_data_properties_excluding(
+    state,
+    target_ref,
+    source,
+    set.new(),
+    set.new(),
+  )
 }
 
 /// §7.3.25 CopyDataProperties with non-empty excludedItems — used by
@@ -1106,8 +1134,8 @@ pub fn copy_data_properties_excluding(
   state: State,
   target_ref: Ref,
   source: JsValue,
-  excluded_keys: List(PropertyKey),
-  excluded_syms: List(SymbolId),
+  excluded_keys: set.Set(PropertyKey),
+  excluded_syms: set.Set(SymbolId),
 ) -> Result(State, #(JsValue, State)) {
   case source {
     // Step 2: source is already an object (from is source).
@@ -1139,7 +1167,7 @@ pub fn copy_data_properties_excluding(
                 DataProperty(enumerable: True, ..)
                 | AccessorProperty(enumerable: True, ..) ->
                   // Step 4.c: excludedItems does not contain nextKey.
-                  case list.contains(excluded_keys, k) {
+                  case set.contains(excluded_keys, k) {
                     True -> Error(Nil)
                     False -> Ok(k)
                   }
@@ -1154,7 +1182,7 @@ pub fn copy_data_properties_excluding(
               let #(k, prop) = pair
               case prop {
                 DataProperty(value: v, enumerable: True, ..) ->
-                  case list.contains(excluded_syms, k) {
+                  case set.contains(excluded_syms, k) {
                     True -> h
                     False ->
                       define_symbol_property(
@@ -1229,11 +1257,11 @@ fn copy_element_range(
   target_ref: Ref,
   elements: JsElements,
   end: Int,
-  excluded_keys: List(PropertyKey),
+  excluded_keys: set.Set(PropertyKey),
 ) -> Heap {
   use h, idx <- list.fold(elements.indices(elements), heap)
   // Step 4.c: skip excluded indices (rest-pattern `{0: a, ...r} = arr`).
-  case idx < end && !list.contains(excluded_keys, Index(idx)) {
+  case idx < end && !set.contains(excluded_keys, Index(idx)) {
     False -> h
     True ->
       // Step 4.c.ii.2: CreateDataPropertyOrThrow(target, ToString(idx), value).

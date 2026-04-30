@@ -72,11 +72,10 @@ pub fn write_and_read_test() {
   assert got == new_slot
 }
 
-pub fn write_nonexistent_noop_test() {
+pub fn write_sentinel_ref_noop_test() {
   let h = heap.new()
   let slot = ordinary(dict.new())
-  // Writing to a ref that doesn't exist should be a no-op
-  let h2 = heap.write(h, Ref(999), slot)
+  let h2 = heap.write(h, heap.sentinel_ref, slot)
   assert heap.size(h2) == 0
 }
 

@@ -1353,7 +1353,7 @@ fn string_from_char_code(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use codes, state <- from_char_code_coerce(args, state, [])
-  let result_str = char_codes_to_string(list.reverse(codes), "")
+  let result_str = char_codes_to_string(list.reverse(codes), [])
   #(state, Ok(JsString(result_str)))
 }
 
@@ -1386,29 +1386,35 @@ fn from_char_code_coerce(
 /// Convert a list of UTF-16 code units to a string.
 /// Handles surrogate pairs: if a high surrogate (0xD800-0xDBFF) is followed by
 /// a low surrogate (0xDC00-0xDFFF), combine them into a single codepoint.
-fn char_codes_to_string(codes: List(Int), acc: String) -> String {
+fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
   case codes {
-    [] -> acc
+    [] -> string.from_utf_codepoints(list.reverse(acc))
     [high, low, ..rest]
       if high >= 0xD800 && high <= 0xDBFF && low >= 0xDC00 && low <= 0xDFFF
     -> {
       // Combine surrogate pair into a full codepoint
       let codepoint = { high - 0xD800 } * 0x400 + { low - 0xDC00 } + 0x10000
-      let ch = case string.utf_codepoint(codepoint) {
-        Ok(cp) -> string.from_utf_codepoints([cp])
-        Error(_) -> "\u{FFFD}"
+      let cp = case string.utf_codepoint(codepoint) {
+        Ok(cp) -> cp
+        Error(Nil) -> replacement_codepoint()
       }
-      char_codes_to_string(rest, acc <> ch)
+      char_codes_to_string(rest, [cp, ..acc])
     }
     [code, ..rest] -> {
-      let ch = case string.utf_codepoint(code) {
-        Ok(cp) -> string.from_utf_codepoints([cp])
-        Error(_) -> "\u{FFFD}"
+      let cp = case string.utf_codepoint(code) {
+        Ok(cp) -> cp
+        Error(Nil) -> replacement_codepoint()
       }
-      char_codes_to_string(rest, acc <> ch)
+      char_codes_to_string(rest, [cp, ..acc])
     }
   }
 }
+
+/// U+FFFD REPLACEMENT CHARACTER. FFI because UtfCodepoint has no public
+/// constructor — on Erlang it's just an Int, so this is a constant-pool load
+/// instead of a `string.utf_codepoint` call + Result unwrap + assert.
+@external(erlang, "arc_vm_ffi", "replacement_codepoint")
+fn replacement_codepoint() -> UtfCodepoint
 
 /// ToUint16: modulo 65536 (2^16), always returns 0..65535.
 fn modulo_uint16(n: Int) -> Int {
@@ -1432,17 +1438,17 @@ fn string_from_code_point(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  from_code_point_loop(args, "", state)
+  from_code_point_loop(args, [], state)
 }
 
 /// Iterate over args for String.fromCodePoint.
 fn from_code_point_loop(
   args: List(JsValue),
-  acc: String,
+  acc: List(UtfCodepoint),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case args {
-    [] -> #(state, Ok(JsString(acc)))
+    [] -> #(state, Ok(JsString(string.from_utf_codepoints(list.reverse(acc)))))
     [arg, ..rest] -> {
       // Step 2a: ToNumber(next) — inline simplified ToNumber
       case to_number_for_code_point(arg) {
@@ -1453,11 +1459,11 @@ fn from_code_point_loop(
             // Step 2c: must be in [0, 0x10FFFF]
             True if i >= 0 && i <= 0x10FFFF -> {
               // Step 2d: UTF16EncodeCodePoint
-              let ch = case string.utf_codepoint(i) {
-                Ok(cp) -> string.from_utf_codepoints([cp])
-                Error(_) -> "\u{FFFD}"
+              let cp = case string.utf_codepoint(i) {
+                Ok(cp) -> cp
+                Error(Nil) -> replacement_codepoint()
               }
-              from_code_point_loop(rest, acc <> ch, state)
+              from_code_point_loop(rest, [cp, ..acc], state)
             }
             _ ->
               state.range_error(
@@ -1697,74 +1703,24 @@ fn string_transform(
 ///     b. If candidate is searchValue, return i.
 ///   5. Return -1 (not found).
 fn index_of_from(s: String, search: String, from: Int) -> Int {
-  let len = string.length(s)
-  let search_len = string.length(search)
-  // Step 2: empty search at valid position returns that position
-  case search_len == 0 {
-    True ->
-      case from >= 0 && from <= len {
-        True -> from
-        False ->
-          case from < 0 {
-            True -> 0
-            False -> len
-          }
-      }
-    // Steps 3-5: linear scan
-    False -> index_of_loop(s, search, int.max(from, 0), len, search_len)
+  case search {
+    "" -> int.clamp(from, 0, object.string_length(s))
+    _ -> ffi_index_of(s, search, from)
   }
 }
 
-/// Step 4 of StringIndexOf: linear scan from pos to len - search_len.
-fn index_of_loop(
-  s: String,
-  search: String,
-  pos: Int,
-  len: Int,
-  search_len: Int,
-) -> Int {
-  // Step 4: i <= len - searchLen (equivalently, pos + search_len <= len)
-  case pos + search_len > len {
-    True -> -1
-    False ->
-      // Step 4a-4b: candidate = substring, check equality
-      case string.slice(s, pos, search_len) == search {
-        True -> pos
-        False -> index_of_loop(s, search, pos + 1, len, search_len)
-      }
-  }
-}
+@external(erlang, "arc_vm_ffi", "string_index_of")
+fn ffi_index_of(haystack: String, needle: String, from: Int) -> Int
 
 /// Reverse StringIndexOf: find last occurrence of `search` in `s`
 /// searching backwards from index `from`.
 /// Used by String.prototype.lastIndexOf (ES2024 22.1.3.11, steps 10-11).
 fn last_index_of_from(s: String, search: String, from: Int) -> Int {
-  let len = string.length(s)
-  let search_len = string.length(search)
-  // Empty search: return min(from, len)
-  case search_len == 0 {
-    True -> int.min(from, len)
-    False -> {
-      // Start from min(from, len - searchLen) and scan backwards
-      let start = int.min(from, len - search_len)
-      last_index_of_loop(s, search, start, search_len)
-    }
+  case search {
+    "" -> int.clamp(from, 0, object.string_length(s))
+    _ -> ffi_last_index_of(s, search, from)
   }
 }
 
-/// Backwards scan for lastIndexOf: check each position from start down to 0.
-fn last_index_of_loop(
-  s: String,
-  search: String,
-  pos: Int,
-  search_len: Int,
-) -> Int {
-  case pos < 0 {
-    True -> -1
-    False ->
-      case string.slice(s, pos, search_len) == search {
-        True -> pos
-        False -> last_index_of_loop(s, search, pos - 1, search_len)
-      }
-  }
-}
+@external(erlang, "arc_vm_ffi", "string_last_index_of")
+fn ffi_last_index_of(haystack: String, needle: String, from: Int) -> Int

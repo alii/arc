@@ -11,7 +11,8 @@
 -export([get_script_args/0, sleep/1]).
 -export([send_subject_message/3, receive_subject_message/1, receive_subject_message_timeout/2]).
 -export([select_message/1, select_message_timeout/2]).
--export([string_char_at/2, string_codepoint_length/1]).
+-export([string_char_at/2, string_codepoint_length/1, replacement_codepoint/0]).
+-export([string_index_of/3, string_last_index_of/3]).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1]).
 read_line(Prompt) ->
     case io:get_line(Prompt) of
@@ -127,10 +128,43 @@ char_at_skip(<<C/utf8, _/binary>>, 0) -> {some, <<C/utf8>>};
 char_at_skip(<<_/utf8, Rest/binary>>, N) -> char_at_skip(Rest, N - 1);
 char_at_skip(_, _) -> none.
 
+%% U+FFFD REPLACEMENT CHARACTER. UtfCodepoint is an integer on the Erlang
+%% target, so this is a constant-pool literal — no Result/assert overhead.
+replacement_codepoint() -> 16#FFFD.
+
 string_codepoint_length(Bin) -> cp_length(Bin, 0).
 cp_length(<<>>, N) -> N;
 cp_length(<<_/utf8, Rest/binary>>, N) -> cp_length(Rest, N + 1);
 cp_length(<<_, Rest/binary>>, N) -> cp_length(Rest, N + 1).
+
+%% O(n) StringIndexOf: skip From codepoints to a byte offset, run
+%% binary:match (Boyer-Moore BIF) over the remaining scope, convert the
+%% match's byte position back to a codepoint index. Caller handles the
+%% empty-needle case (binary:match badargs on <<>>).
+string_index_of(Hay, Needle, From) ->
+    Start = cp_byte_offset(Hay, max(From, 0)),
+    case binary:match(Hay, Needle, [{scope, {Start, byte_size(Hay) - Start}}]) of
+        nomatch -> -1;
+        {BytePos, _} -> cp_length(binary:part(Hay, 0, BytePos), 0)
+    end.
+
+%% O(n) reverse StringIndexOf: restrict to the first (From + |Needle|_cp)
+%% codepoints, ask string:find/3 for the trailing (last) occurrence —
+%% handles overlapping needles — then count codepoints before the match.
+string_last_index_of(Hay, Needle, From) ->
+    Limit = cp_byte_offset(Hay, max(From, 0) + cp_length(Needle, 0)),
+    Prefix = binary:part(Hay, 0, Limit),
+    case string:find(Prefix, Needle, trailing) of
+        nomatch -> -1;
+        Suffix -> cp_length(binary:part(Hay, 0, byte_size(Prefix) - byte_size(Suffix)), 0)
+    end.
+
+%% Byte offset after skipping N codepoints (clamps at end). Alloc-free.
+cp_byte_offset(Bin, N) -> byte_size(Bin) - byte_size(cp_drop(Bin, N)).
+cp_drop(Bin, 0) -> Bin;
+cp_drop(<<>>, _) -> <<>>;
+cp_drop(<<_/utf8, R/binary>>, N) -> cp_drop(R, N - 1);
+cp_drop(<<_, R/binary>>, N) -> cp_drop(R, N - 1).
 
 %% Process primitives for Arc.send/receive
 send_message(Pid, Msg) -> Pid ! Msg, nil.

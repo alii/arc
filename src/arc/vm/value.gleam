@@ -1200,16 +1200,20 @@ pub fn builtin_property(val: JsValue) -> Property {
   data(val) |> writable() |> configurable()
 }
 
-/// GC root tracing: extract heap refs reachable from a Property
-/// (data value or accessor get/set slots).
-fn refs_in_property(prop: Property) -> List(Ref) {
+/// GC root tracing: prepend heap refs reachable from a Property onto `acc`.
+fn push_property_refs(prop: Property, acc: List(Ref)) -> List(Ref) {
   case prop {
-    DataProperty(value:, ..) -> refs_in_value(value)
-    AccessorProperty(get:, set:, ..) ->
-      list.append(
-        get |> option.map(refs_in_value) |> option.unwrap([]),
-        set |> option.map(refs_in_value) |> option.unwrap([]),
-      )
+    DataProperty(value:, ..) -> push_value_ref(value, acc)
+    AccessorProperty(get:, set:, ..) -> {
+      let acc = case get {
+        Some(v) -> push_value_ref(v, acc)
+        None -> acc
+      }
+      case set {
+        Some(v) -> push_value_ref(v, acc)
+        None -> acc
+      }
+    }
   }
 }
 
@@ -1513,11 +1517,11 @@ pub fn heap_slot_to_string(slot: HeapSlot(ctx)) -> String {
   }
 }
 
-/// GC root tracing: extract heap refs from a single JsValue.
-/// Only JsObject carries heap refs; all primitives return [].
-fn refs_in_value(value: JsValue) -> List(Ref) {
+/// GC root tracing: prepend the heap ref carried by `value` (if any) onto `acc`.
+/// Zero-alloc for primitives.
+fn push_value_ref(value: JsValue, acc: List(Ref)) -> List(Ref) {
   case value {
-    JsObject(ref) -> [ref]
+    JsObject(ref) -> [ref, ..acc]
     JsUndefined
     | JsNull
     | JsBool(_)
@@ -1525,36 +1529,50 @@ fn refs_in_value(value: JsValue) -> List(Ref) {
     | JsString(_)
     | JsSymbol(_)
     | JsBigInt(_)
-    | JsUninitialized -> []
+    | JsUninitialized -> acc
   }
 }
 
-fn refs_in_saved_frame(
+fn push_option_ref(r: Option(Ref), acc: List(Ref)) -> List(Ref) {
+  case r {
+    Some(ref) -> [ref, ..acc]
+    None -> acc
+  }
+}
+
+fn push_saved_frame_refs(
   env_ref: Ref,
   saved_locals: TupleArray(JsValue),
   saved_stack: List(JsValue),
   saved_finally_stack: List(SavedFinallyCompletion),
   saved_this: JsValue,
   saved_callee_ref: Option(Ref),
+  acc: List(Ref),
 ) -> List(Ref) {
-  list.flatten([
-    [env_ref],
-    tuple_array.to_list(saved_locals) |> list.flat_map(refs_in_value),
-    list.flat_map(saved_stack, refs_in_value),
-    list.flat_map(saved_finally_stack, fn(fc) {
+  let acc = [env_ref, ..acc]
+  let acc =
+    list.fold(tuple_array.to_list(saved_locals), acc, fn(a, v) {
+      push_value_ref(v, a)
+    })
+  let acc = list.fold(saved_stack, acc, fn(a, v) { push_value_ref(v, a) })
+  let acc =
+    list.fold(saved_finally_stack, acc, fn(a, fc) {
       case fc {
         SavedThrowCompletion(value:) | SavedReturnCompletion(value:) ->
-          refs_in_value(value)
-        SavedNormalCompletion -> []
+          push_value_ref(value, a)
+        SavedNormalCompletion -> a
       }
-    }),
-    refs_in_value(saved_this),
-    option.map(saved_callee_ref, list.wrap) |> option.unwrap([]),
-  ])
+    })
+  let acc = push_value_ref(saved_this, acc)
+  push_option_ref(saved_callee_ref, acc)
 }
 
-/// Extract all refs reachable from a heap slot by walking its JsValues.
+/// Prepend all refs reachable from a heap slot onto `acc`. 
 pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
+  do_refs_in_slot(slot, [])
+}
+
+fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
   case slot {
     ObjectSlot(
       kind:,
@@ -1564,80 +1582,86 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
       symbol_properties:,
       extensible: _,
     ) -> {
-      let prop_refs =
-        dict.values(properties)
-        |> list.flat_map(refs_in_property)
-      let sym_prop_refs =
-        list.flat_map(symbol_properties, fn(pair) {
-          let #(_, prop) = pair
-          refs_in_property(prop)
+      let acc =
+        dict.fold(properties, acc, fn(a, _k, prop) {
+          push_property_refs(prop, a)
         })
-      let elem_refs = case elements {
-        NoElements -> []
+      let acc =
+        list.fold(symbol_properties, acc, fn(a, pair) {
+          push_property_refs(pair.1, a)
+        })
+      let acc = case elements {
+        NoElements -> acc
         DenseElements(data) ->
-          tree_array.to_list(data) |> list.flat_map(refs_in_value)
+          tree_array.sparse_fold(
+            fn(_i, v, a) { push_value_ref(v, a) },
+            acc,
+            data,
+          )
         SparseElements(data) ->
-          dict.values(data) |> list.flat_map(refs_in_value)
+          dict.fold(data, acc, fn(a, _i, v) { push_value_ref(v, a) })
       }
-      let proto_refs = prototype |> option.map(list.wrap) |> option.unwrap([])
-      let kind_refs = case kind {
-        FunctionObject(env: env_ref, func_template: _) -> [env_ref]
+      let acc = push_option_ref(prototype, acc)
+      case kind {
+        FunctionObject(env: env_ref, func_template: _) -> [env_ref, ..acc]
         NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref))))
         | NativeFunction(Dispatch(ErrorNative(DomExceptionConstructor(
             proto: ref,
-          )))) -> [ref]
-        NativeFunction(Dispatch(MapNative(MapConstructor(proto: ref)))) -> [ref]
-        NativeFunction(Dispatch(DateNative(DateConstructor(proto: ref)))) -> [
+          ))))
+        | NativeFunction(Dispatch(MapNative(MapConstructor(proto: ref))))
+        | NativeFunction(Dispatch(DateNative(DateConstructor(proto: ref))))
+        | NativeFunction(Dispatch(SetNative(SetConstructor(proto: ref))))
+        | NativeFunction(Dispatch(WeakMapNative(WeakMapConstructor(proto: ref))))
+        | NativeFunction(Dispatch(WeakSetNative(WeakSetConstructor(proto: ref)))) -> [
           ref,
+          ..acc
         ]
-        NativeFunction(Dispatch(SetNative(SetConstructor(proto: ref)))) -> [ref]
-        NativeFunction(Dispatch(WeakMapNative(WeakMapConstructor(proto: ref)))) -> [
-          ref,
-        ]
-        NativeFunction(Dispatch(WeakSetNative(WeakSetConstructor(proto: ref)))) -> [
-          ref,
-        ]
-        NativeFunction(Call(BoundFunction(target:, bound_this:, bound_args:))) -> [
-          target,
-          ..list.flatten([
-            refs_in_value(bound_this),
-            list.flat_map(bound_args, refs_in_value),
-          ])
-        ]
+        NativeFunction(Call(BoundFunction(target:, bound_this:, bound_args:))) ->
+          list.fold(
+            bound_args,
+            push_value_ref(bound_this, [target, ..acc]),
+            fn(a, v) { push_value_ref(v, a) },
+          )
         NativeFunction(Call(PromiseResolveFunction(
           promise_ref:,
           data_ref:,
           already_resolved_ref:,
-        ))) -> [promise_ref, data_ref, already_resolved_ref]
-        NativeFunction(Call(PromiseRejectFunction(
-          promise_ref:,
-          data_ref:,
-          already_resolved_ref:,
-        ))) -> [promise_ref, data_ref, already_resolved_ref]
-        NativeFunction(Call(PromiseFinallyFulfill(on_finally:))) ->
-          refs_in_value(on_finally)
-        NativeFunction(Call(PromiseFinallyReject(on_finally:))) ->
-          refs_in_value(on_finally)
+        )))
+        | NativeFunction(Call(PromiseRejectFunction(
+            promise_ref:,
+            data_ref:,
+            already_resolved_ref:,
+          ))) -> [promise_ref, data_ref, already_resolved_ref, ..acc]
+        NativeFunction(Call(PromiseFinallyFulfill(on_finally:)))
+        | NativeFunction(Call(PromiseFinallyReject(on_finally:))) ->
+          push_value_ref(on_finally, acc)
         NativeFunction(Call(PromiseFinallyValueThunk(value:))) ->
-          refs_in_value(value)
+          push_value_ref(value, acc)
         NativeFunction(Call(PromiseFinallyThrower(reason:))) ->
-          refs_in_value(reason)
+          push_value_ref(reason, acc)
         NativeFunction(Call(AsyncResume(async_data_ref:, ..))) -> [
           async_data_ref,
+          ..acc
         ]
-        NativeFunction(Call(AsyncGeneratorResume(data_ref:, ..))) -> [data_ref]
-        NativeFunction(Call(AsyncFromSyncClose(sync_iter:))) -> [sync_iter]
-        PromiseObject(promise_data:) -> [promise_data]
-        GeneratorObject(generator_data:) -> [generator_data]
-        AsyncGeneratorObject(generator_data:) -> [generator_data]
-        ArrayIteratorObject(source:, ..) -> [source]
+        NativeFunction(Call(AsyncGeneratorResume(data_ref:, ..))) -> [
+          data_ref,
+          ..acc
+        ]
+        NativeFunction(Call(AsyncFromSyncClose(sync_iter:))) -> [
+          sync_iter,
+          ..acc
+        ]
+        PromiseObject(promise_data:) -> [promise_data, ..acc]
+        GeneratorObject(generator_data:) -> [generator_data, ..acc]
+        AsyncGeneratorObject(generator_data:) -> [generator_data, ..acc]
+        ArrayIteratorObject(source:, ..) -> [source, ..acc]
         SetIteratorObject(remaining:, ..) ->
-          list.flat_map(remaining, refs_in_value)
+          list.fold(remaining, acc, fn(a, v) { push_value_ref(v, a) })
         MapIteratorObject(remaining:, ..) ->
-          list.flat_map(remaining, fn(p) {
-            list.append(refs_in_value(p.0), refs_in_value(p.1))
+          list.fold(remaining, acc, fn(a, p) {
+            push_value_ref(p.1, push_value_ref(p.0, a))
           })
-        AsyncFromSyncIteratorObject(sync_iter:) -> [sync_iter]
+        AsyncFromSyncIteratorObject(sync_iter:) -> [sync_iter, ..acc]
         IteratorHelperObject(
           underlying:,
           next_method:,
@@ -1646,38 +1670,28 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
           inner_next:,
           ..,
         ) ->
-          list.flat_map(
-            [underlying, next_method, func, inner, inner_next],
-            refs_in_value,
-          )
+          acc
+          |> push_value_ref(underlying, _)
+          |> push_value_ref(next_method, _)
+          |> push_value_ref(func, _)
+          |> push_value_ref(inner, _)
+          |> push_value_ref(inner_next, _)
         WrapForValidIteratorObject(iterated:, next_method:) ->
-          list.flat_map([iterated, next_method], refs_in_value)
+          push_value_ref(next_method, push_value_ref(iterated, acc))
         MapObject(entries:, keys_rev:, keys_len: _) -> {
-          // Trace refs in map values
-          let value_refs = dict.values(entries) |> list.flat_map(refs_in_value)
-          // Trace refs in keys (object keys hold heap refs). Reconstruct
-          // original JsValue via map_key_to_js — the -0→+0 normalization
-          // doesn't affect ref tracing since numbers carry no refs.
-          let key_refs =
-            list.flat_map(keys_rev, fn(k) { refs_in_value(map_key_to_js(k)) })
-          list.append(value_refs, key_refs)
+          let acc =
+            dict.fold(entries, acc, fn(a, _k, v) { push_value_ref(v, a) })
+          list.fold(keys_rev, acc, fn(a, k) {
+            push_value_ref(map_key_to_js(k), a)
+          })
         }
-        SetObject(data:, ..) -> {
-          // Trace refs in set values (stored as dict values)
-          dict.values(data) |> list.flat_map(refs_in_value)
-        }
-        WeakMapObject(data:) -> {
-          // Trace refs in weak map keys and values
-          let key_refs = dict.keys(data)
-          let value_refs = dict.values(data) |> list.flat_map(refs_in_value)
-          list.append(key_refs, value_refs)
-        }
-        WeakSetObject(data:) -> {
-          // Trace refs in weak set keys
-          dict.keys(data)
-        }
+        SetObject(data:, ..) ->
+          dict.fold(data, acc, fn(a, _k, v) { push_value_ref(v, a) })
+        WeakMapObject(data:) ->
+          dict.fold(data, acc, fn(a, k, v) { push_value_ref(v, [k, ..a]) })
+        WeakSetObject(data:) -> dict.fold(data, acc, fn(a, k, _v) { [k, ..a] })
         SelectorObject(entries:) ->
-          list.flat_map(entries, fn(e) { refs_in_value(e.1) })
+          list.fold(entries, acc, fn(a, e) { push_value_ref(e.1, a) })
         OrdinaryObject
         | ArrayObject(_)
         | ArgumentsObject(_)
@@ -1690,34 +1704,30 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
         | SubjectObject(..)
         | TimerObject(..)
         | DateObject(_)
-        | RegExpObject(..) -> []
+        | RegExpObject(..) -> acc
       }
-      list.flatten([prop_refs, sym_prop_refs, elem_refs, proto_refs, kind_refs])
     }
-    EnvSlot(slots:) -> list.flat_map(slots, refs_in_value)
-    BoxSlot(value:) -> refs_in_value(value)
-    EvalEnvSlot(vars:) -> dict.values(vars) |> list.flat_map(refs_in_value)
-    ForInIteratorSlot(keys:) -> list.flat_map(keys, refs_in_value)
+    EnvSlot(slots:) -> list.fold(slots, acc, fn(a, v) { push_value_ref(v, a) })
+    BoxSlot(value:) -> push_value_ref(value, acc)
+    EvalEnvSlot(vars:) ->
+      dict.fold(vars, acc, fn(a, _k, v) { push_value_ref(v, a) })
+    ForInIteratorSlot(keys:) ->
+      list.fold(keys, acc, fn(a, v) { push_value_ref(v, a) })
     PromiseSlot(state:, fulfill_reactions:, reject_reactions:, ..) -> {
-      let state_refs = case state {
-        PromiseFulfilled(value:) -> refs_in_value(value)
-        PromiseRejected(reason:) -> refs_in_value(reason)
-        PromisePending -> []
+      let acc = case state {
+        PromiseFulfilled(value:) -> push_value_ref(value, acc)
+        PromiseRejected(reason:) -> push_value_ref(reason, acc)
+        PromisePending -> acc
       }
-      let reaction_refs = fn(reactions: List(PromiseReaction)) {
-        list.flat_map(reactions, fn(r) {
-          list.flatten([
-            refs_in_value(r.child_resolve),
-            refs_in_value(r.child_reject),
-            refs_in_value(r.handler),
-          ])
+      let push_reactions = fn(reactions, a) {
+        list.fold(reactions, a, fn(a, r: PromiseReaction) {
+          a
+          |> push_value_ref(r.child_resolve, _)
+          |> push_value_ref(r.child_reject, _)
+          |> push_value_ref(r.handler, _)
         })
       }
-      list.flatten([
-        state_refs,
-        reaction_refs(fulfill_reactions),
-        reaction_refs(reject_reactions),
-      ])
+      push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
     GeneratorSlot(
       env_ref:,
@@ -1728,13 +1738,14 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
       saved_callee_ref:,
       ..,
     ) ->
-      refs_in_saved_frame(
+      push_saved_frame_refs(
         env_ref,
         saved_locals,
         saved_stack,
         saved_finally_stack,
         saved_this,
         saved_callee_ref,
+        acc,
       )
     AsyncFunctionSlot(
       promise_data_ref:,
@@ -1747,20 +1758,21 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
       saved_this:,
       saved_callee_ref:,
       ..,
-    ) ->
-      list.flatten([
-        [promise_data_ref],
-        refs_in_value(resolve),
-        refs_in_value(reject),
-        refs_in_saved_frame(
-          env_ref,
-          saved_locals,
-          saved_stack,
-          saved_finally_stack,
-          saved_this,
-          saved_callee_ref,
-        ),
-      ])
+    ) -> {
+      let acc =
+        [promise_data_ref, ..acc]
+        |> push_value_ref(resolve, _)
+        |> push_value_ref(reject, _)
+      push_saved_frame_refs(
+        env_ref,
+        saved_locals,
+        saved_stack,
+        saved_finally_stack,
+        saved_this,
+        saved_callee_ref,
+        acc,
+      )
+    }
     AsyncGeneratorSlot(
       queue:,
       env_ref:,
@@ -1770,35 +1782,34 @@ pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
       saved_this:,
       saved_callee_ref:,
       ..,
-    ) ->
-      list.flatten([
-        list.flat_map(queue, fn(r) {
-          list.flatten([
-            refs_in_value(r.value),
-            refs_in_value(r.resolve),
-            refs_in_value(r.reject),
-          ])
-        }),
-        refs_in_saved_frame(
-          env_ref,
-          saved_locals,
-          saved_stack,
-          saved_finally_stack,
-          saved_this,
-          saved_callee_ref,
-        ),
-      ])
+    ) -> {
+      let acc =
+        list.fold(queue, acc, fn(a, r) {
+          a
+          |> push_value_ref(r.value, _)
+          |> push_value_ref(r.resolve, _)
+          |> push_value_ref(r.reject, _)
+        })
+      push_saved_frame_refs(
+        env_ref,
+        saved_locals,
+        saved_stack,
+        saved_finally_stack,
+        saved_this,
+        saved_callee_ref,
+        acc,
+      )
+    }
     RealmSlot(
       global_object:,
       lexical_globals:,
       symbol_descriptions: _,
       symbol_registry: _,
       ..,
-    ) -> {
-      let lexical_refs =
-        dict.values(lexical_globals) |> list.flat_map(refs_in_value)
-      [global_object, ..lexical_refs]
-    }
+    ) ->
+      dict.fold(lexical_globals, [global_object, ..acc], fn(a, _k, v) {
+        push_value_ref(v, a)
+      })
   }
 }
 
