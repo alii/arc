@@ -57,84 +57,26 @@ pub fn init(
     )
 
   // Error subclasses — each inherits from Error.prototype
-  let #(h, type_error) =
+  let subclass = fn(h, name, arity) {
     common.init_type(
       h,
       error.prototype,
       function_proto,
-      [#("name", value.builtin_property(JsString("TypeError")))],
+      [#("name", value.builtin_property(JsString(name)))],
       fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
-      "TypeError",
-      1,
+      name,
+      arity,
       [],
     )
-  let #(h, reference_error) =
-    common.init_type(
-      h,
-      error.prototype,
-      function_proto,
-      [#("name", value.builtin_property(JsString("ReferenceError")))],
-      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
-      "ReferenceError",
-      1,
-      [],
-    )
-  let #(h, range_error) =
-    common.init_type(
-      h,
-      error.prototype,
-      function_proto,
-      [#("name", value.builtin_property(JsString("RangeError")))],
-      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
-      "RangeError",
-      1,
-      [],
-    )
-  let #(h, syntax_error) =
-    common.init_type(
-      h,
-      error.prototype,
-      function_proto,
-      [#("name", value.builtin_property(JsString("SyntaxError")))],
-      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
-      "SyntaxError",
-      1,
-      [],
-    )
+  }
 
-  let #(h, eval_error) =
-    common.init_type(
-      h,
-      error.prototype,
-      function_proto,
-      [#("name", value.builtin_property(JsString("EvalError")))],
-      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
-      "EvalError",
-      1,
-      [],
-    )
-  let #(h, uri_error) =
-    common.init_type(
-      h,
-      error.prototype,
-      function_proto,
-      [#("name", value.builtin_property(JsString("URIError")))],
-      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
-      "URIError",
-      1,
-      [],
-    )
-  let #(h, aggregate_error) =
-    common.init_type(
-      h,
-      error.prototype,
-      function_proto,
-      [#("name", value.builtin_property(JsString("AggregateError")))],
-      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
-      "AggregateError",
-      2,
-      [],
-    )
+  let #(h, type_error) = subclass(h, "TypeError", 1)
+  let #(h, reference_error) = subclass(h, "ReferenceError", 1)
+  let #(h, range_error) = subclass(h, "RangeError", 1)
+  let #(h, syntax_error) = subclass(h, "SyntaxError", 1)
+  let #(h, eval_error) = subclass(h, "EvalError", 1)
+  let #(h, uri_error) = subclass(h, "URIError", 1)
+  let #(h, aggregate_error) = subclass(h, "AggregateError", 2)
 
   #(
     h,
