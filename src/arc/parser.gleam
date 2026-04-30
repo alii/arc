@@ -253,15 +253,6 @@ fn set_not_assignable(
   #(P(..p, last_expr_assignable: False, last_expr_is_assignment: False), expr)
 }
 
-/// Adapter: extract just P from an expression result.
-/// Used by callers not yet converted to consume expressions.
-fn expr_p(
-  res: Result(#(P, ast.Expression), ParseError),
-) -> Result(P, ParseError) {
-  use #(p, _) <- result.map(res)
-  p
-}
-
 /// Convert a declaration statement to an expression for export default.
 /// FunctionDeclaration -> FunctionExpression, ClassDeclaration -> ClassExpression.
 fn statement_to_default_export_expr(stmt: ast.Statement) -> ast.Expression {
@@ -3606,20 +3597,21 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           let p3 = advance(p2)
           use #(p4, source_expr) <- result.try(parse_assignment_expression(p3))
           // Optional second argument (import attributes)
-          let p5 = case peek(p4) {
+          use #(p5, options) <- result.try(case peek(p4) {
             Comma ->
               case peek_at(p4, 1) {
-                RightParen -> advance(p4)
-                _ ->
-                  case expr_p(parse_assignment_expression(advance(p4))) {
-                    Ok(p_val) -> p_val
-                    Error(_) -> advance(p4)
-                  }
+                RightParen -> Ok(#(advance(p4), None))
+                _ -> {
+                  use #(p_attrs, attrs) <- result.map(
+                    parse_assignment_expression(advance(p4)),
+                  )
+                  #(p_attrs, Some(attrs))
+                }
               }
-            _ -> p4
-          }
+            _ -> Ok(#(p4, None))
+          })
           use p6 <- result.try(expect(p5, RightParen))
-          Ok(#(p6, ast.ImportExpression(source: source_expr)))
+          Ok(#(p6, ast.ImportExpression(source: source_expr, options:)))
         }
         Dot -> {
           // import.meta

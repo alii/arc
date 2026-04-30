@@ -199,7 +199,7 @@ pub type Expression {
   TemplateLiteral(quasis: List(String), expressions: List(Expression))
   TaggedTemplateExpression(tag: Expression, quasi: Expression)
   MetaProperty(meta: String, property: String)
-  ImportExpression(source: Expression)
+  ImportExpression(source: Expression, options: Option(Expression))
   RegExpLiteral(pattern: String, flags: String)
   /// Preserves parenthesization so the compiler can distinguish `x` from `(x)`.
   /// Needed for ES spec §13.15.2: IsIdentifierRef returns false for

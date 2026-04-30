@@ -871,8 +871,11 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
     ast.UnaryExpression(_, _, arg)
     | ast.UpdateExpression(_, _, arg)
     | ast.AwaitExpression(arg)
-    | ast.SpreadElement(arg)
-    | ast.ImportExpression(arg) -> expr_references_arguments(arg)
+    | ast.SpreadElement(arg) -> expr_references_arguments(arg)
+
+    ast.ImportExpression(source, options) ->
+      expr_references_arguments(source)
+      || opt_expr_references_arguments(options)
 
     ast.YieldExpression(arg, _) -> opt_expr_references_arguments(arg)
 
@@ -3976,7 +3979,7 @@ fn string_inspect_expr_kind(expr: ast.Expression) -> String {
     ast.TemplateLiteral(..) -> "TemplateLiteral"
     ast.TaggedTemplateExpression(..) -> "TaggedTemplateExpression"
     ast.MetaProperty(..) -> "MetaProperty"
-    ast.ImportExpression(_) -> "ImportExpression"
+    ast.ImportExpression(..) -> "ImportExpression"
     ast.RegExpLiteral(..) -> "RegExpLiteral"
     ast.ParenthesizedExpression(..) -> "ParenthesizedExpression"
   }
