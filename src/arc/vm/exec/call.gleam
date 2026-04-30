@@ -117,7 +117,7 @@ pub fn call_function(
   new_callee_ref: option.Option(Ref),
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let #(heap, this_val) = bind_this(state, callee_template, this_val)
   let state = State(..state, heap:)
   case callee_template.is_generator, callee_template.is_async {
@@ -181,7 +181,7 @@ fn call_regular_function(
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
   new_callee_ref: option.Option(Ref),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use <- bool.lazy_guard(state.call_depth >= limits.max_call_depth, fn() {
     state.throw_range_error(state, "Maximum call stack size exceeded")
   })
@@ -242,7 +242,7 @@ fn call_generator_function(
   rest_stack: List(JsValue),
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let locals = setup_locals(state.heap, env_ref, callee_template, args)
   // Set up an isolated execution state for the generator body
   let gen_state =
@@ -334,14 +334,15 @@ fn call_generator_function(
         ),
       )
     }
-    Ok(#(ThrowCompletion(thrown, h), _)) -> Error(#(Thrown, thrown, h))
+    Ok(#(ThrowCompletion(thrown, h), _)) ->
+      Error(#(Thrown, thrown, State(..state, heap: h)))
     Ok(#(AwaitCompletion(_, _), _)) ->
       Error(#(
         StepVmError(Unimplemented("await in sync generator")),
         JsUndefined,
-        state.heap,
+        state,
       ))
-    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
+    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
   }
 }
 
@@ -357,7 +358,7 @@ fn call_async_generator_function(
   rest_stack: List(JsValue),
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let locals = setup_locals(state.heap, env_ref, callee_template, args)
   let gen_state =
     State(
@@ -411,15 +412,16 @@ fn call_async_generator_function(
         ),
       )
     }
-    Ok(#(ThrowCompletion(thrown, h), _)) -> Error(#(Thrown, thrown, h))
+    Ok(#(ThrowCompletion(thrown, h), _)) ->
+      Error(#(Thrown, thrown, State(..state, heap: h)))
     Ok(#(NormalCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
       // InitialYield is first op — body never runs before it. Unreachable.
       Error(#(
         StepVmError(Unimplemented("async generator didn't hit InitialYield")),
         JsUndefined,
-        state.heap,
+        state,
       ))
-    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
+    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
   }
 }
 
@@ -436,7 +438,7 @@ fn call_async_function(
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
   _unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   // Create the outer promise that the async function returns
   let #(h, promise_ref, data_ref) =
     builtins_promise.create_promise(
@@ -539,9 +541,9 @@ fn call_async_function(
       Error(#(
         StepVmError(Unimplemented("yield in non-generator async function")),
         JsUndefined,
-        state.heap,
+        state,
       ))
-    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
+    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
   }
 }
 
@@ -615,7 +617,7 @@ pub fn call_native_async_resume(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let settled_value = helpers.first_arg_or_undefined(args)
   case heap.read(state.heap, async_data_ref) {
     Some(AsyncFunctionSlot(
@@ -731,9 +733,9 @@ pub fn call_native_async_resume(
           Error(#(
             StepVmError(Unimplemented("yield in non-generator async function")),
             JsUndefined,
-            state.heap,
+            state,
           ))
-        Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state.heap))
+        Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
       }
     }
     _ ->
@@ -743,7 +745,7 @@ pub fn call_native_async_resume(
           <> string.inspect(async_data_ref),
         )),
         JsUndefined,
-        state.heap,
+        state,
       ))
   }
 }
@@ -801,7 +803,7 @@ pub fn call_native(
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
   dispatch_fn: DispatchNativeFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case native {
     // Function.prototype.call(thisArg, ...args)
     // `this` is the target function, args[0] is the thisArg
@@ -1055,7 +1057,7 @@ pub fn call_native(
     }
     value.Call(value.PromiseFinallyThrower(reason:)) -> {
       // Ignore argument, throw the captured reason
-      Error(#(Thrown, reason, state.heap))
+      Error(#(Thrown, reason, state))
     }
     // Async function resume (called when awaited promise settles)
     value.Call(value.AsyncResume(async_data_ref:, is_reject:)) ->
@@ -1271,8 +1273,7 @@ pub fn call_native(
                   pc: state.pc + 1,
                 ),
               )
-            Error(#(thrown, new_state)) ->
-              Error(#(Thrown, thrown, new_state.heap))
+            Error(#(thrown, new_state)) -> Error(#(Thrown, thrown, new_state))
           }
       }
     // All other native functions: synchronous dispatch via Dispatch slot
@@ -1287,7 +1288,7 @@ pub fn call_native(
               pc: state.pc + 1,
             ),
           )
-        Error(thrown) -> Error(#(Thrown, thrown, new_state.heap))
+        Error(thrown) -> Error(#(Thrown, thrown, new_state))
       }
     }
     // Host-provided native: call the embedder's closure directly
@@ -1302,7 +1303,7 @@ pub fn call_native(
               pc: state.pc + 1,
             ),
           )
-        Error(thrown) -> Error(#(Thrown, thrown, new_state.heap))
+        Error(thrown) -> Error(#(Thrown, thrown, new_state))
       }
     }
   }
@@ -1333,7 +1334,7 @@ pub fn do_construct(
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
   dispatch_fn: DispatchNativeFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case heap.read(state.heap, ctor_ref) {
     Some(ObjectSlot(
       kind: FunctionObject(func_template:, env: env_ref),
@@ -1429,7 +1430,7 @@ pub fn do_construct(
         [v, ..] -> coerce.js_to_string(state, v)
       }
       case coerced {
-        Error(#(thrown, st)) -> Error(#(Thrown, thrown, st.heap))
+        Error(#(thrown, st)) -> Error(#(Thrown, thrown, st))
         Ok(#(s, state)) ->
           push_wrapper(
             state,
@@ -1510,7 +1511,7 @@ pub fn construct_value(
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
   dispatch_fn: DispatchNativeFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case heap.read(state.heap, target_ref) {
     Some(ObjectSlot(
       kind: FunctionObject(func_template:, env: env_ref),
@@ -1598,7 +1599,7 @@ pub fn call_value(
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
   dispatch_fn: DispatchNativeFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case callee {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -1671,7 +1672,7 @@ fn push_iter_result(
   h: Heap,
   val: JsValue,
   done: Bool,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let #(h, result) = common.create_iter_result(h, state.builtins, val, done)
   Ok(State(..state, heap: h, stack: [result, ..rest_stack], pc: state.pc + 1))
 }
@@ -1679,7 +1680,7 @@ fn push_iter_result(
 fn iter_incompatible(
   state: State,
   tag: String,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   state.throw_type_error(
     state,
     tag <> " Iterator next called on incompatible receiver",
@@ -1691,7 +1692,7 @@ fn call_array_iterator_next(
   state: State,
   this: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case this {
     JsObject(iter_ref) ->
       case heap.read(state.heap, iter_ref) {
@@ -1735,7 +1736,7 @@ fn call_set_iterator_next(
   state: State,
   this: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case this {
     JsObject(iter_ref) ->
       case heap.read(state.heap, iter_ref) {
@@ -1782,7 +1783,7 @@ fn call_map_iterator_next(
   state: State,
   this: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case this {
     JsObject(iter_ref) ->
       case heap.read(state.heap, iter_ref) {

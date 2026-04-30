@@ -1869,6 +1869,65 @@ pub fn array_destructuring_default_test() -> Nil {
   assert_normal_number("let [a = 99] = []; a", 99.0)
 }
 
+pub fn array_destructuring_closes_iterator_test() -> Nil {
+  // §8.6.2: iterator not exhausted after binding → IteratorClose.
+  assert_normal_number(
+    "var closed = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 7, done: false}; },
+       return() { closed++; return {}; }
+     }; } };
+     let [a, b] = it;
+     closed",
+    1.0,
+  )
+}
+
+pub fn array_destructuring_assign_closes_iterator_test() -> Nil {
+  // Assignment-pattern variant (emit_destructuring_assign path).
+  assert_normal_number(
+    "var closed = 0, a, b;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 7, done: false}; },
+       return() { closed++; return {}; }
+     }; } };
+     [a, b] = it;
+     closed",
+    1.0,
+  )
+}
+
+pub fn array_destructuring_rest_no_close_test() -> Nil {
+  // Rest element drains the iterator → [[Done]]=true → no close.
+  // Validates the JsUndefined sentinel reorder in emit_array_elements.
+  assert_normal_number(
+    "var closed = 0, n = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return n++ < 3 ? {value: n, done: false} : {done: true}; },
+       return() { closed++; return {}; }
+     }; } };
+     let [a, ...rest] = it;
+     closed",
+    0.0,
+  )
+}
+
+pub fn array_destructuring_default_throw_closes_test() -> Nil {
+  // Default initializer throws → IteratorCloseThrow: .return() called,
+  // its error swallowed, original rethrown.
+  assert_normal_number(
+    "var closed = 0, caught;
+     function boom() { throw 'orig'; }
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: undefined, done: false}; },
+       return() { closed++; throw 'swallowed'; }
+     }; } };
+     try { let [a = boom()] = it; } catch (e) { caught = e; }
+     caught === 'orig' && closed === 1 ? 1 : 0",
+    1.0,
+  )
+}
+
 pub fn const_destructuring_test() -> Nil {
   assert_normal_number("const {x, y} = {x: 3, y: 7}; x + y", 10.0)
 }
@@ -1981,6 +2040,281 @@ pub fn for_of_continue_test() -> Nil {
 
 pub fn for_of_empty_array_test() -> Nil {
   assert_normal_number("var sum = 0; for (var x of []) { sum += x; } sum", 0.0)
+}
+
+pub fn for_of_break_closes_iterator_test() -> Nil {
+  assert_normal_number(
+    "var closed = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { closed++; return {}; }
+     }; } };
+     for (var x of it) break;
+     closed",
+    1.0,
+  )
+}
+
+pub fn for_of_throw_closes_iterator_test() -> Nil {
+  assert_normal_number(
+    "var closed = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { closed++; return {}; }
+     }; } };
+     try { for (var x of it) throw 0; } catch (e) {}
+     closed",
+    1.0,
+  )
+}
+
+pub fn for_of_next_error_no_close_test() -> Nil {
+  // §14.7.5.6 step 6.a: a throw from .next() must NOT close the iterator.
+  assert_normal_number(
+    "var closed = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { throw 7; },
+       return() { closed++; return {}; }
+     }; } };
+     try { for (var x of it) {} } catch (e) {}
+     closed",
+    0.0,
+  )
+}
+
+pub fn for_of_exhausted_no_close_test() -> Nil {
+  // Natural exhaustion (done=true) does NOT close the iterator.
+  assert_normal_number(
+    "var closed = 0, n = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return n++ < 2 ? {value: n, done: false} : {value: undefined, done: true}; },
+       return() { closed++; return {}; }
+     }; } };
+     for (var x of it) {}
+     closed",
+    0.0,
+  )
+}
+
+pub fn for_of_throw_close_error_swallowed_test() -> Nil {
+  // §7.4.11 step 5: body throws 'body'; .return() also throws 'ret'.
+  // Original 'body' must win and .return() must still have been called.
+  assert_normal_number(
+    "var closed = 0, caught;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { closed++; throw 'ret'; }
+     }; } };
+     try { for (var x of it) throw 'body'; } catch (e) { caught = e; }
+     caught === 'body' && closed === 1 ? 1 : 0",
+    1.0,
+  )
+}
+
+pub fn for_of_break_close_non_object_test() -> Nil {
+  // §7.4.11 step 7: normal-completion close where .return() yields a
+  // non-object → TypeError. Use null (not undefined) to dodge the
+  // call_return undefined-sentinel gap.
+  assert_normal(
+    "var caught;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { return null; }
+     }; } };
+     try { for (var x of it) break; } catch (e) { caught = e; }
+     caught instanceof TypeError",
+    JsBool(True),
+  )
+}
+
+pub fn for_of_break_no_return_method_test() -> Nil {
+  // Iterator has no .return — break must just exit, no throw, body ran once.
+  assert_normal_number(
+    "var seen = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; }
+     }; } };
+     for (var x of it) { seen++; break; }
+     seen",
+    1.0,
+  )
+}
+
+pub fn for_of_return_closes_iterator_test() -> Nil {
+  // §7.4.11: return inside for-of must close the iterator.
+  assert_normal_number(
+    "var closed = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { closed++; return {}; }
+     }; } };
+     (function() { for (var x of it) return 9; })();
+     closed",
+    1.0,
+  )
+}
+
+pub fn for_await_of_break_closes_iterator_test() -> Nil {
+  // §7.4.12: break inside for-await-of must close (and await) the iterator.
+  assert_promise_resolves(
+    "var closed = 0;
+     var it = { [Symbol.asyncIterator]() { return {
+       next() { return Promise.resolve({value: 1, done: false}); },
+       return() { closed++; return Promise.resolve({}); }
+     }; } };
+     (async () => { for await (var x of it) break; return closed; })()",
+    JsNumber(Finite(1.0)),
+  )
+}
+
+pub fn for_await_of_throw_closes_iterator_test() -> Nil {
+  // §7.4.12 throw-completion: body throw → close, await, swallow inner,
+  // rethrow original.
+  assert_promise_resolves(
+    "var closed = 0;
+     var it = { [Symbol.asyncIterator]() { return {
+       next() { return Promise.resolve({value: 1, done: false}); },
+       return() { closed++; return Promise.resolve({}); }
+     }; } };
+     (async () => {
+       try { for await (var x of it) throw 7; } catch (e) {}
+       return closed;
+     })()",
+    JsNumber(Finite(1.0)),
+  )
+}
+
+pub fn for_await_of_throw_swallows_close_error_test() -> Nil {
+  // §7.4.12: if .return() rejects, the original body error still wins.
+  assert_promise_resolves(
+    "var it = { [Symbol.asyncIterator]() { return {
+       next() { return Promise.resolve({value: 1, done: false}); },
+       return() { return Promise.reject('inner'); }
+     }; } };
+     (async () => {
+       try { for await (var x of it) throw 'orig'; }
+       catch (e) { return e; }
+     })()",
+    JsString("orig"),
+  )
+}
+
+pub fn for_await_of_next_reject_no_close_test() -> Nil {
+  // §14.7.5.6 step 6.a: a rejection from .next() must NOT close the iterator.
+  assert_promise_resolves(
+    "var closed = 0;
+     var it = { [Symbol.asyncIterator]() { return {
+       next() { return Promise.reject(7); },
+       return() { closed++; return Promise.resolve({}); }
+     }; } };
+     (async () => {
+       try { for await (var x of it) {} } catch (e) {}
+       return closed;
+     })()",
+    JsNumber(Finite(0.0)),
+  )
+}
+
+pub fn for_await_of_exhausted_no_close_test() -> Nil {
+  assert_promise_resolves(
+    "var closed = 0, n = 0;
+     var it = { [Symbol.asyncIterator]() { return {
+       next() { return Promise.resolve(n++ < 2 ? {value:n,done:false} : {done:true}); },
+       return() { closed++; return Promise.resolve({}); }
+     }; } };
+     (async () => { for await (var x of it) {} return closed; })()",
+    JsNumber(Finite(0.0)),
+  )
+}
+
+pub fn for_await_of_break_close_non_object_throws_test() -> Nil {
+  // §7.4.12 step 6: awaited .return() result must be an Object.
+  assert_promise_resolves(
+    "var it = { [Symbol.asyncIterator]() { return {
+       next() { return Promise.resolve({value: 1, done: false}); },
+       return() { return Promise.resolve(42); }
+     }; } };
+     (async () => {
+       try { for await (var x of it) break; return 0; }
+       catch (e) { return e instanceof TypeError ? 1 : 2; }
+     })()",
+    JsNumber(Finite(1.0)),
+  )
+}
+
+pub fn for_await_of_break_no_return_ok_test() -> Nil {
+  // .return is undefined → no-op, no await, normal completion.
+  assert_promise_resolves(
+    "var it = { [Symbol.asyncIterator]() { return {
+       next() { return Promise.resolve({value: 1, done: false}); }
+     }; } };
+     (async () => { for await (var x of it) break; return 9; })()",
+    JsNumber(Finite(9.0)),
+  )
+}
+
+pub fn for_of_nested_labeled_break_closes_both_test() -> Nil {
+  // break L crossing the inner for-of and targeting the outer must close both.
+  assert_normal_number(
+    "var closed = 0;
+     function mk() { return { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { closed++; return {}; }
+     }; } }; }
+     L: for (var a of mk()) for (var b of mk()) break L;
+     closed",
+    2.0,
+  )
+}
+
+pub fn for_of_labeled_continue_outer_closes_inner_test() -> Nil {
+  // continue L crossing the for-of must close it.
+  assert_normal_number(
+    "var closed = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { closed++; return {}; }
+     }; } };
+     L: do { for (var x of it) continue L; } while (0);
+     closed",
+    1.0,
+  )
+}
+
+pub fn for_of_return_in_try_pops_user_frame_test() -> Nil {
+  // return inside a user try inside for-of: must pop the user try frame
+  // AND F_body, then close iter. The user catch must NOT run.
+  assert_normal_number(
+    "var closed = 0;
+     var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { closed++; return {}; }
+     }; } };
+     (function() { for (var x of it) try { return 9; } catch (e) {} })();
+     closed",
+    1.0,
+  )
+}
+
+pub fn for_of_return_close_throws_replaces_return_test() -> Nil {
+  // §7.4.11 step 6: throw from .return() supersedes the return completion.
+  assert_normal_number(
+    "var it = { [Symbol.iterator]() { return {
+       next() { return {value: 1, done: false}; },
+       return() { throw 42; }
+     }; } };
+     var got;
+     try { (function() { for (var x of it) return 9; })(); }
+     catch (e) { got = e; }
+     got",
+    42.0,
+  )
+}
+
+pub fn unlabeled_break_skips_labeled_block_test() -> Nil {
+  // Regression: unlabeled break must target the nearest loop/switch, not a
+  // labeled block (§14.8). Previously arc broke to L, looping forever to n=3.
+  assert_normal_number("var n = 0; while (n < 3) { n++; L: { break; } } n", 1.0)
 }
 
 pub fn for_of_destructuring_test() -> Nil {

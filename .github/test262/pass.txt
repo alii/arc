@@ -2379,6 +2379,10 @@ built-ins/Array/prototype/sort/precise-setter-pops-elements.js
 built-ins/Array/prototype/sort/precise-setter-sets-predecessor.js
 built-ins/Array/prototype/sort/precise-setter-sets-successor.js
 built-ins/Array/prototype/sort/prop-desc.js
+built-ins/Array/prototype/sort/stability-11-elements.js
+built-ins/Array/prototype/sort/stability-2048-elements.js
+built-ins/Array/prototype/sort/stability-5-elements.js
+built-ins/Array/prototype/sort/stability-513-elements.js
 built-ins/Array/prototype/splice/15.4.4.12-9-a-1.js
 built-ins/Array/prototype/splice/15.4.4.12-9-c-ii-1.js
 built-ins/Array/prototype/splice/S15.4.4.12_A1.1_T1.js
@@ -2551,6 +2555,7 @@ built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-unwrap-promise.js
 built-ins/AsyncFromSyncIteratorPrototype/next/return-promise.js
 built-ins/AsyncFromSyncIteratorPrototype/next/yield-iterator-next-rejected-promise-close.js
 built-ins/AsyncFromSyncIteratorPrototype/next/yield-next-rejected-promise-close.js
+built-ins/AsyncFromSyncIteratorPrototype/return/absent-value-not-passed.js
 built-ins/AsyncFromSyncIteratorPrototype/return/iterator-result-poisoned-done.js
 built-ins/AsyncFromSyncIteratorPrototype/return/iterator-result-poisoned-value.js
 built-ins/AsyncFromSyncIteratorPrototype/return/iterator-result-unwrap-promise.js
@@ -2558,6 +2563,7 @@ built-ins/AsyncFromSyncIteratorPrototype/return/iterator-result.js
 built-ins/AsyncFromSyncIteratorPrototype/return/poisoned-get-return.js
 built-ins/AsyncFromSyncIteratorPrototype/return/poisoned-return.js
 built-ins/AsyncFromSyncIteratorPrototype/return/result-object-error.js
+built-ins/AsyncFromSyncIteratorPrototype/return/return-null.js
 built-ins/AsyncFromSyncIteratorPrototype/return/return-undefined.js
 built-ins/AsyncFromSyncIteratorPrototype/throw/iterator-result-poisoned-done.js
 built-ins/AsyncFromSyncIteratorPrototype/throw/iterator-result-poisoned-value.js
@@ -3683,6 +3689,8 @@ built-ins/Iterator/prototype/every/predicate-returns-non-boolean.js
 built-ins/Iterator/prototype/every/predicate-returns-truthy-then-falsey.js
 built-ins/Iterator/prototype/every/predicate-returns-truthy.js
 built-ins/Iterator/prototype/every/predicate-this.js
+built-ins/Iterator/prototype/every/predicate-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/every/predicate-throws.js
 built-ins/Iterator/prototype/every/prop-desc.js
 built-ins/Iterator/prototype/every/proto.js
 built-ins/Iterator/prototype/every/result-is-boolean.js
@@ -3711,6 +3719,8 @@ built-ins/Iterator/prototype/filter/predicate-args.js
 built-ins/Iterator/prototype/filter/predicate-filters.js
 built-ins/Iterator/prototype/filter/predicate-returns-non-boolean.js
 built-ins/Iterator/prototype/filter/predicate-this.js
+built-ins/Iterator/prototype/filter/predicate-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/filter/predicate-throws.js
 built-ins/Iterator/prototype/filter/prop-desc.js
 built-ins/Iterator/prototype/filter/proto.js
 built-ins/Iterator/prototype/filter/result-is-iterator.js
@@ -3746,6 +3756,8 @@ built-ins/Iterator/prototype/find/predicate-returns-falsey.js
 built-ins/Iterator/prototype/find/predicate-returns-non-boolean.js
 built-ins/Iterator/prototype/find/predicate-returns-truthy.js
 built-ins/Iterator/prototype/find/predicate-this.js
+built-ins/Iterator/prototype/find/predicate-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/find/predicate-throws.js
 built-ins/Iterator/prototype/find/prop-desc.js
 built-ins/Iterator/prototype/find/proto.js
 built-ins/Iterator/prototype/find/this-non-callable-next.js
@@ -3763,7 +3775,10 @@ built-ins/Iterator/prototype/flatMap/iterator-return-method-throws.js
 built-ins/Iterator/prototype/flatMap/length.js
 built-ins/Iterator/prototype/flatMap/mapper-args.js
 built-ins/Iterator/prototype/flatMap/mapper-returns-closed-iterator.js
+built-ins/Iterator/prototype/flatMap/mapper-returns-non-object.js
 built-ins/Iterator/prototype/flatMap/mapper-this.js
+built-ins/Iterator/prototype/flatMap/mapper-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/flatMap/mapper-throws.js
 built-ins/Iterator/prototype/flatMap/name.js
 built-ins/Iterator/prototype/flatMap/next-method-returns-non-object.js
 built-ins/Iterator/prototype/flatMap/next-method-returns-throwing-done.js
@@ -3789,6 +3804,8 @@ built-ins/Iterator/prototype/forEach/callable.js
 built-ins/Iterator/prototype/forEach/fn-args.js
 built-ins/Iterator/prototype/forEach/fn-called-for-each-yielded-value.js
 built-ins/Iterator/prototype/forEach/fn-this.js
+built-ins/Iterator/prototype/forEach/fn-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/forEach/fn-throws.js
 built-ins/Iterator/prototype/forEach/get-next-method-only-once.js
 built-ins/Iterator/prototype/forEach/get-next-method-throws.js
 built-ins/Iterator/prototype/forEach/is-function.js
@@ -3820,6 +3837,8 @@ built-ins/Iterator/prototype/map/iterator-return-method-throws.js
 built-ins/Iterator/prototype/map/length.js
 built-ins/Iterator/prototype/map/mapper-args.js
 built-ins/Iterator/prototype/map/mapper-this.js
+built-ins/Iterator/prototype/map/mapper-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/map/mapper-throws.js
 built-ins/Iterator/prototype/map/name.js
 built-ins/Iterator/prototype/map/next-method-returns-non-object.js
 built-ins/Iterator/prototype/map/next-method-returns-throwing-done.js
@@ -3863,6 +3882,8 @@ built-ins/Iterator/prototype/reduce/reducer-args-initial-value.js
 built-ins/Iterator/prototype/reduce/reducer-args-no-initial-value.js
 built-ins/Iterator/prototype/reduce/reducer-memo-can-be-any-type.js
 built-ins/Iterator/prototype/reduce/reducer-this.js
+built-ins/Iterator/prototype/reduce/reducer-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/reduce/reducer-throws.js
 built-ins/Iterator/prototype/reduce/this-non-callable-next.js
 built-ins/Iterator/prototype/reduce/this-non-object.js
 built-ins/Iterator/prototype/reduce/this-plain-iterator.js
@@ -3890,6 +3911,8 @@ built-ins/Iterator/prototype/some/predicate-returns-falsey.js
 built-ins/Iterator/prototype/some/predicate-returns-non-boolean.js
 built-ins/Iterator/prototype/some/predicate-returns-truthy.js
 built-ins/Iterator/prototype/some/predicate-this.js
+built-ins/Iterator/prototype/some/predicate-throws-then-closing-iterator-also-throws.js
+built-ins/Iterator/prototype/some/predicate-throws.js
 built-ins/Iterator/prototype/some/prop-desc.js
 built-ins/Iterator/prototype/some/proto.js
 built-ins/Iterator/prototype/some/result-is-boolean.js
@@ -11163,6 +11186,7 @@ language/expressions/arrow-function/dflt-params-arg-val-undefined.js
 language/expressions/arrow-function/dflt-params-duplicates.js
 language/expressions/arrow-function/dflt-params-ref-prior.js
 language/expressions/arrow-function/dflt-params-rest.js
+language/expressions/arrow-function/dstr/ary-init-iter-close.js
 language/expressions/arrow-function/dstr/ary-init-iter-get-err-array-prototype.js
 language/expressions/arrow-function/dstr/ary-init-iter-get-err.js
 language/expressions/arrow-function/dstr/ary-init-iter-no-close.js
@@ -11211,6 +11235,7 @@ language/expressions/arrow-function/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-id-elision.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-id-exhausted.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/expressions/arrow-function/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-id.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-init-ary.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-init-id.js
@@ -11220,6 +11245,7 @@ language/expressions/arrow-function/dstr/ary-ptrn-rest-not-final-id.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-not-final-obj.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-obj-id.js
 language/expressions/arrow-function/dstr/ary-ptrn-rest-obj-prop-id.js
+language/expressions/arrow-function/dstr/dflt-ary-init-iter-close.js
 language/expressions/arrow-function/dstr/dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/arrow-function/dstr/dflt-ary-init-iter-get-err.js
 language/expressions/arrow-function/dstr/dflt-ary-init-iter-no-close.js
@@ -11268,6 +11294,7 @@ language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-id-elision-next-err.
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-id-elision.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-id.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-init-ary.js
 language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-init-id.js
@@ -11438,7 +11465,9 @@ language/expressions/assignment/S8.12.4_A1.js
 language/expressions/assignment/S8.12.5_A1.js
 language/expressions/assignment/S8.12.5_A2.js
 language/expressions/assignment/assignment-operator-calls-putvalue-lref--rval--1.js
+language/expressions/assignment/destructuring/default-expr-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-is-not-callable.js
+language/expressions/assignment/destructuring/target-assign-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/target-assign-throws-iterator-return-is-not-callable.js
 language/expressions/assignment/dstr/array-elem-init-assignment.js
 language/expressions/assignment/dstr/array-elem-init-evaluation.js
@@ -11455,7 +11484,10 @@ language/expressions/assignment/dstr/array-elem-init-yield-expr.js
 language/expressions/assignment/dstr/array-elem-init-yield-ident-invalid.js
 language/expressions/assignment/dstr/array-elem-init-yield-ident-valid.js
 language/expressions/assignment/dstr/array-elem-iter-get-err.js
+language/expressions/assignment/dstr/array-elem-iter-nrml-close-err.js
+language/expressions/assignment/dstr/array-elem-iter-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elem-iter-nrml-close.js
 language/expressions/assignment/dstr/array-elem-iter-thrw-close-skip.js
 language/expressions/assignment/dstr/array-elem-nested-array-invalid.js
 language/expressions/assignment/dstr/array-elem-nested-array-null.js
@@ -11493,13 +11525,24 @@ language/expressions/assignment/dstr/array-elem-target-yield-expr.js
 language/expressions/assignment/dstr/array-elem-target-yield-invalid.js
 language/expressions/assignment/dstr/array-elem-target-yield-valid.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-abpt.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close-err.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-get-err.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-err.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-thrw-close-skip.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-rest-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-rest-thrw-close-skip.js
 language/expressions/assignment/dstr/array-elision-iter-abpt.js
 language/expressions/assignment/dstr/array-elision-iter-get-err.js
+language/expressions/assignment/dstr/array-elision-iter-nrml-close-err.js
+language/expressions/assignment/dstr/array-elision-iter-nrml-close-null.js
 language/expressions/assignment/dstr/array-elision-iter-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elision-iter-nrml-close.js
 language/expressions/assignment/dstr/array-elision-val-array.js
 language/expressions/assignment/dstr/array-elision-val-bool.js
 language/expressions/assignment/dstr/array-elision-val-null.js
@@ -11507,6 +11550,9 @@ language/expressions/assignment/dstr/array-elision-val-num.js
 language/expressions/assignment/dstr/array-elision-val-string.js
 language/expressions/assignment/dstr/array-elision-val-symbol.js
 language/expressions/assignment/dstr/array-elision-val-undef.js
+language/expressions/assignment/dstr/array-empty-iter-close-err.js
+language/expressions/assignment/dstr/array-empty-iter-close-null.js
+language/expressions/assignment/dstr/array-empty-iter-close.js
 language/expressions/assignment/dstr/array-empty-iter-get-err.js
 language/expressions/assignment/dstr/array-empty-val-array.js
 language/expressions/assignment/dstr/array-empty-val-bool.js
@@ -11526,8 +11572,12 @@ language/expressions/assignment/dstr/array-rest-elision-iter-abpt.js
 language/expressions/assignment/dstr/array-rest-elision.js
 language/expressions/assignment/dstr/array-rest-init.js
 language/expressions/assignment/dstr/array-rest-iter-get-err.js
+language/expressions/assignment/dstr/array-rest-iter-nrml-close-skip.js
+language/expressions/assignment/dstr/array-rest-iter-thrw-close-skip.js
 language/expressions/assignment/dstr/array-rest-iteration.js
+language/expressions/assignment/dstr/array-rest-lref.js
 language/expressions/assignment/dstr/array-rest-nested-array-invalid.js
+language/expressions/assignment/dstr/array-rest-nested-array-iter-thrw-close-skip.js
 language/expressions/assignment/dstr/array-rest-nested-array-null.js
 language/expressions/assignment/dstr/array-rest-nested-array-undefined-hole.js
 language/expressions/assignment/dstr/array-rest-nested-array-undefined-own.js
@@ -11547,6 +11597,7 @@ language/expressions/assignment/dstr/array-rest-nested-obj-yield-ident-valid.js
 language/expressions/assignment/dstr/array-rest-nested-obj.js
 language/expressions/assignment/dstr/array-rest-put-const.js
 language/expressions/assignment/dstr/array-rest-put-prop-ref-no-get.js
+language/expressions/assignment/dstr/array-rest-put-prop-ref-user-err-iter-close-skip.js
 language/expressions/assignment/dstr/array-rest-put-prop-ref-user-err.js
 language/expressions/assignment/dstr/array-rest-put-prop-ref.js
 language/expressions/assignment/dstr/array-rest-put-unresolvable-no-strict.js
@@ -12216,6 +12267,7 @@ language/expressions/async-generator/dflt-params-arg-val-undefined.js
 language/expressions/async-generator/dflt-params-duplicates.js
 language/expressions/async-generator/dflt-params-ref-prior.js
 language/expressions/async-generator/dflt-params-rest.js
+language/expressions/async-generator/dstr/ary-init-iter-close.js
 language/expressions/async-generator/dstr/ary-init-iter-get-err-array-prototype.js
 language/expressions/async-generator/dstr/ary-init-iter-get-err.js
 language/expressions/async-generator/dstr/ary-init-iter-no-close.js
@@ -12264,6 +12316,7 @@ language/expressions/async-generator/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-id-elision.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-id-exhausted.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/expressions/async-generator/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-id.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-init-ary.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-init-id.js
@@ -12273,6 +12326,7 @@ language/expressions/async-generator/dstr/ary-ptrn-rest-not-final-id.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-not-final-obj.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-obj-id.js
 language/expressions/async-generator/dstr/ary-ptrn-rest-obj-prop-id.js
+language/expressions/async-generator/dstr/dflt-ary-init-iter-close.js
 language/expressions/async-generator/dstr/dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/async-generator/dstr/dflt-ary-init-iter-get-err.js
 language/expressions/async-generator/dstr/dflt-ary-init-iter-no-close.js
@@ -12321,6 +12375,7 @@ language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-id-elision-next-err
 language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-id-elision.js
 language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-id.js
 language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-init-ary.js
 language/expressions/async-generator/dstr/dflt-ary-ptrn-rest-init-id.js
@@ -12361,6 +12416,7 @@ language/expressions/async-generator/dstr/dflt-obj-ptrn-prop-obj.js
 language/expressions/async-generator/dstr/dflt-obj-ptrn-rest-getter.js
 language/expressions/async-generator/dstr/dflt-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/async-generator/dstr/dflt-obj-ptrn-rest-val-obj.js
+language/expressions/async-generator/dstr/named-ary-init-iter-close.js
 language/expressions/async-generator/dstr/named-ary-init-iter-get-err-array-prototype.js
 language/expressions/async-generator/dstr/named-ary-init-iter-get-err.js
 language/expressions/async-generator/dstr/named-ary-init-iter-no-close.js
@@ -12409,6 +12465,7 @@ language/expressions/async-generator/dstr/named-ary-ptrn-rest-id-elision-next-er
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-id-elision.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-id-exhausted.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/async-generator/dstr/named-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-id.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-init-ary.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-init-id.js
@@ -12418,6 +12475,7 @@ language/expressions/async-generator/dstr/named-ary-ptrn-rest-not-final-id.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-not-final-obj.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-obj-id.js
 language/expressions/async-generator/dstr/named-ary-ptrn-rest-obj-prop-id.js
+language/expressions/async-generator/dstr/named-dflt-ary-init-iter-close.js
 language/expressions/async-generator/dstr/named-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/async-generator/dstr/named-dflt-ary-init-iter-get-err.js
 language/expressions/async-generator/dstr/named-dflt-ary-init-iter-no-close.js
@@ -12466,6 +12524,7 @@ language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-id-elision-ne
 language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-id.js
 language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/async-generator/dstr/named-dflt-ary-ptrn-rest-init-id.js
@@ -13164,6 +13223,7 @@ language/expressions/class/cpn-class-expr-computed-property-name-from-null.js
 language/expressions/class/cpn-class-expr-computed-property-name-from-numeric-literal.js
 language/expressions/class/cpn-class-expr-computed-property-name-from-string-literal.js
 language/expressions/class/cpn-class-expr-computed-property-name-from-yield-expression.js
+language/expressions/class/dstr/async-gen-meth-ary-init-iter-close.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-get-err.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-no-close.js
@@ -13212,6 +13272,7 @@ language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-id-elision-next-err
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-id.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-init-id.js
@@ -13221,6 +13282,7 @@ language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-not-final-id.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/async-gen-meth-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-init-iter-get-err.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-init-iter-no-close.js
@@ -13269,6 +13331,7 @@ language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-elision-nex
 language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-init-id.js
@@ -13340,6 +13403,7 @@ language/expressions/class/dstr/async-gen-meth-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/async-gen-meth-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/async-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/async-gen-meth-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/async-gen-meth-static-ary-init-iter-close.js
 language/expressions/class/dstr/async-gen-meth-static-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/async-gen-meth-static-ary-init-iter-get-err.js
 language/expressions/class/dstr/async-gen-meth-static-ary-init-iter-no-close.js
@@ -13388,6 +13452,7 @@ language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-elision-n
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-id.js
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-init-id.js
@@ -13397,6 +13462,7 @@ language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-not-final-id
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/async-gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/async-gen-meth-static-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-init-iter-get-err.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-init-iter-no-close.js
@@ -13445,6 +13511,7 @@ language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-elis
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-init-id.js
@@ -13516,6 +13583,7 @@ language/expressions/class/dstr/async-gen-meth-static-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/async-gen-meth-static-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/async-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/async-gen-meth-static-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/async-private-gen-meth-ary-init-iter-close.js
 language/expressions/class/dstr/async-private-gen-meth-ary-init-iter-no-close.js
 language/expressions/class/dstr/async-private-gen-meth-ary-name-iter-val.js
 language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-elem-ary-elem-init.js
@@ -13561,6 +13629,7 @@ language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-rest-not-final-i
 language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/async-private-gen-meth-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/async-private-gen-meth-dflt-ary-init-iter-no-close.js
 language/expressions/class/dstr/async-private-gen-meth-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/async-private-gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -13646,6 +13715,7 @@ language/expressions/class/dstr/async-private-gen-meth-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/async-private-gen-meth-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/async-private-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/async-private-gen-meth-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/async-private-gen-meth-static-ary-init-iter-close.js
 language/expressions/class/dstr/async-private-gen-meth-static-ary-init-iter-no-close.js
 language/expressions/class/dstr/async-private-gen-meth-static-ary-name-iter-val.js
 language/expressions/class/dstr/async-private-gen-meth-static-ary-ptrn-elem-ary-elem-init.js
@@ -13691,6 +13761,7 @@ language/expressions/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-not-
 language/expressions/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/async-private-gen-meth-static-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/async-private-gen-meth-static-dflt-ary-init-iter-no-close.js
 language/expressions/class/dstr/async-private-gen-meth-static-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/async-private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -13776,6 +13847,7 @@ language/expressions/class/dstr/async-private-gen-meth-static-obj-ptrn-prop-obj.
 language/expressions/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/gen-meth-ary-init-iter-close.js
 language/expressions/class/dstr/gen-meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/gen-meth-ary-init-iter-get-err.js
 language/expressions/class/dstr/gen-meth-ary-init-iter-no-close.js
@@ -13824,6 +13896,7 @@ language/expressions/class/dstr/gen-meth-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/gen-meth-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-id.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-init-id.js
@@ -13833,6 +13906,7 @@ language/expressions/class/dstr/gen-meth-ary-ptrn-rest-not-final-id.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/gen-meth-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/gen-meth-dflt-ary-init-iter-get-err.js
 language/expressions/class/dstr/gen-meth-dflt-ary-init-iter-no-close.js
@@ -13881,6 +13955,7 @@ language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-elision-next-err.
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-id.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-rest-init-id.js
@@ -13952,6 +14027,7 @@ language/expressions/class/dstr/gen-meth-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/gen-meth-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/gen-meth-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/gen-meth-static-ary-init-iter-close.js
 language/expressions/class/dstr/gen-meth-static-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/gen-meth-static-ary-init-iter-get-err.js
 language/expressions/class/dstr/gen-meth-static-ary-init-iter-no-close.js
@@ -14000,6 +14076,7 @@ language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-id-elision-next-er
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-id.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-init-id.js
@@ -14009,6 +14086,7 @@ language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-not-final-id.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/gen-meth-static-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-init-iter-no-close.js
@@ -14057,6 +14135,7 @@ language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-elision-ne
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-init-id.js
@@ -14128,6 +14207,7 @@ language/expressions/class/dstr/gen-meth-static-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/gen-meth-static-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/gen-meth-static-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/meth-ary-init-iter-close.js
 language/expressions/class/dstr/meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/meth-ary-init-iter-get-err.js
 language/expressions/class/dstr/meth-ary-init-iter-no-close.js
@@ -14176,6 +14256,7 @@ language/expressions/class/dstr/meth-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/meth-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-id.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-init-id.js
@@ -14185,6 +14266,7 @@ language/expressions/class/dstr/meth-ary-ptrn-rest-not-final-id.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/meth-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/meth-dflt-ary-init-iter-get-err.js
 language/expressions/class/dstr/meth-dflt-ary-init-iter-no-close.js
@@ -14233,6 +14315,7 @@ language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-id.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/meth-dflt-ary-ptrn-rest-init-id.js
@@ -14304,6 +14387,7 @@ language/expressions/class/dstr/meth-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/meth-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/meth-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/meth-static-ary-init-iter-close.js
 language/expressions/class/dstr/meth-static-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/meth-static-ary-init-iter-get-err.js
 language/expressions/class/dstr/meth-static-ary-init-iter-no-close.js
@@ -14352,6 +14436,7 @@ language/expressions/class/dstr/meth-static-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/meth-static-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-id.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-init-id.js
@@ -14361,6 +14446,7 @@ language/expressions/class/dstr/meth-static-ary-ptrn-rest-not-final-id.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/meth-static-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/meth-static-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/meth-static-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/meth-static-dflt-ary-init-iter-get-err.js
 language/expressions/class/dstr/meth-static-dflt-ary-init-iter-no-close.js
@@ -14409,6 +14495,7 @@ language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-id-elision-next-e
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-id.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/class/dstr/meth-static-dflt-ary-ptrn-rest-init-id.js
@@ -14480,6 +14567,7 @@ language/expressions/class/dstr/meth-static-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/meth-static-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/meth-static-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/private-gen-meth-ary-init-iter-close.js
 language/expressions/class/dstr/private-gen-meth-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-gen-meth-ary-name-iter-val.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elem-init.js
@@ -14525,6 +14613,7 @@ language/expressions/class/dstr/private-gen-meth-ary-ptrn-rest-not-final-id.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/private-gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/private-gen-meth-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -14610,6 +14699,7 @@ language/expressions/class/dstr/private-gen-meth-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/private-gen-meth-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/private-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/private-gen-meth-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/private-gen-meth-static-ary-init-iter-close.js
 language/expressions/class/dstr/private-gen-meth-static-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-gen-meth-static-ary-name-iter-val.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elem-init.js
@@ -14655,6 +14745,7 @@ language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-rest-not-final-
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/private-gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/private-gen-meth-static-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -14740,6 +14831,7 @@ language/expressions/class/dstr/private-gen-meth-static-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/private-gen-meth-static-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/private-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/private-gen-meth-static-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/private-meth-ary-init-iter-close.js
 language/expressions/class/dstr/private-meth-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-meth-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-ary-ptrn-elem-ary-elem-init.js
@@ -14785,6 +14877,7 @@ language/expressions/class/dstr/private-meth-ary-ptrn-rest-not-final-id.js
 language/expressions/class/dstr/private-meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/private-meth-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/private-meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/private-meth-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/private-meth-dflt-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-meth-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -14870,6 +14963,7 @@ language/expressions/class/dstr/private-meth-obj-ptrn-prop-obj.js
 language/expressions/class/dstr/private-meth-obj-ptrn-rest-getter.js
 language/expressions/class/dstr/private-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/class/dstr/private-meth-obj-ptrn-rest-val-obj.js
+language/expressions/class/dstr/private-meth-static-ary-init-iter-close.js
 language/expressions/class/dstr/private-meth-static-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-meth-static-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-elem-ary-elem-init.js
@@ -14915,6 +15009,7 @@ language/expressions/class/dstr/private-meth-static-ary-ptrn-rest-not-final-id.j
 language/expressions/class/dstr/private-meth-static-ary-ptrn-rest-not-final-obj.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-rest-obj-id.js
 language/expressions/class/dstr/private-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/expressions/class/dstr/private-meth-static-dflt-ary-init-iter-close.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-init-iter-no-close.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-name-iter-val.js
 language/expressions/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -17071,6 +17166,7 @@ language/expressions/function/dflt-params-arg-val-undefined.js
 language/expressions/function/dflt-params-duplicates.js
 language/expressions/function/dflt-params-ref-prior.js
 language/expressions/function/dflt-params-rest.js
+language/expressions/function/dstr/ary-init-iter-close.js
 language/expressions/function/dstr/ary-init-iter-get-err-array-prototype.js
 language/expressions/function/dstr/ary-init-iter-get-err.js
 language/expressions/function/dstr/ary-init-iter-no-close.js
@@ -17119,6 +17215,7 @@ language/expressions/function/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/expressions/function/dstr/ary-ptrn-rest-id-elision.js
 language/expressions/function/dstr/ary-ptrn-rest-id-exhausted.js
 language/expressions/function/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/expressions/function/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/expressions/function/dstr/ary-ptrn-rest-id.js
 language/expressions/function/dstr/ary-ptrn-rest-init-ary.js
 language/expressions/function/dstr/ary-ptrn-rest-init-id.js
@@ -17128,6 +17225,7 @@ language/expressions/function/dstr/ary-ptrn-rest-not-final-id.js
 language/expressions/function/dstr/ary-ptrn-rest-not-final-obj.js
 language/expressions/function/dstr/ary-ptrn-rest-obj-id.js
 language/expressions/function/dstr/ary-ptrn-rest-obj-prop-id.js
+language/expressions/function/dstr/dflt-ary-init-iter-close.js
 language/expressions/function/dstr/dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/function/dstr/dflt-ary-init-iter-get-err.js
 language/expressions/function/dstr/dflt-ary-init-iter-no-close.js
@@ -17176,6 +17274,7 @@ language/expressions/function/dstr/dflt-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/function/dstr/dflt-ary-ptrn-rest-id-elision.js
 language/expressions/function/dstr/dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/function/dstr/dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/function/dstr/dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/function/dstr/dflt-ary-ptrn-rest-id.js
 language/expressions/function/dstr/dflt-ary-ptrn-rest-init-ary.js
 language/expressions/function/dstr/dflt-ary-ptrn-rest-init-id.js
@@ -17292,6 +17391,7 @@ language/expressions/generators/dflt-params-arg-val-undefined.js
 language/expressions/generators/dflt-params-duplicates.js
 language/expressions/generators/dflt-params-ref-prior.js
 language/expressions/generators/dflt-params-rest.js
+language/expressions/generators/dstr/ary-init-iter-close.js
 language/expressions/generators/dstr/ary-init-iter-get-err-array-prototype.js
 language/expressions/generators/dstr/ary-init-iter-get-err.js
 language/expressions/generators/dstr/ary-init-iter-no-close.js
@@ -17340,6 +17440,7 @@ language/expressions/generators/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/expressions/generators/dstr/ary-ptrn-rest-id-elision.js
 language/expressions/generators/dstr/ary-ptrn-rest-id-exhausted.js
 language/expressions/generators/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/expressions/generators/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/expressions/generators/dstr/ary-ptrn-rest-id.js
 language/expressions/generators/dstr/ary-ptrn-rest-init-ary.js
 language/expressions/generators/dstr/ary-ptrn-rest-init-id.js
@@ -17349,6 +17450,7 @@ language/expressions/generators/dstr/ary-ptrn-rest-not-final-id.js
 language/expressions/generators/dstr/ary-ptrn-rest-not-final-obj.js
 language/expressions/generators/dstr/ary-ptrn-rest-obj-id.js
 language/expressions/generators/dstr/ary-ptrn-rest-obj-prop-id.js
+language/expressions/generators/dstr/dflt-ary-init-iter-close.js
 language/expressions/generators/dstr/dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/generators/dstr/dflt-ary-init-iter-get-err.js
 language/expressions/generators/dstr/dflt-ary-init-iter-no-close.js
@@ -17397,6 +17499,7 @@ language/expressions/generators/dstr/dflt-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/generators/dstr/dflt-ary-ptrn-rest-id-elision.js
 language/expressions/generators/dstr/dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/generators/dstr/dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/generators/dstr/dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/generators/dstr/dflt-ary-ptrn-rest-id.js
 language/expressions/generators/dstr/dflt-ary-ptrn-rest-init-ary.js
 language/expressions/generators/dstr/dflt-ary-ptrn-rest-init-id.js
@@ -18039,6 +18142,7 @@ language/expressions/object/cpn-obj-lit-computed-property-name-from-null.js
 language/expressions/object/cpn-obj-lit-computed-property-name-from-numeric-literal.js
 language/expressions/object/cpn-obj-lit-computed-property-name-from-string-literal.js
 language/expressions/object/cpn-obj-lit-computed-property-name-from-yield-expression.js
+language/expressions/object/dstr/async-gen-meth-ary-init-iter-close.js
 language/expressions/object/dstr/async-gen-meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/object/dstr/async-gen-meth-ary-init-iter-get-err.js
 language/expressions/object/dstr/async-gen-meth-ary-init-iter-no-close.js
@@ -18087,6 +18191,7 @@ language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-id-elision-next-er
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-id-elision.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-id-exhausted.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-id.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-init-ary.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-init-id.js
@@ -18096,6 +18201,7 @@ language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-not-final-id.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-obj-id.js
 language/expressions/object/dstr/async-gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/object/dstr/async-gen-meth-dflt-ary-init-iter-close.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-init-iter-get-err.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-init-iter-no-close.js
@@ -18144,6 +18250,7 @@ language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-elision-ne
 language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-id.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/object/dstr/async-gen-meth-dflt-ary-ptrn-rest-init-id.js
@@ -18215,6 +18322,7 @@ language/expressions/object/dstr/async-gen-meth-obj-ptrn-prop-obj.js
 language/expressions/object/dstr/async-gen-meth-obj-ptrn-rest-getter.js
 language/expressions/object/dstr/async-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/object/dstr/async-gen-meth-obj-ptrn-rest-val-obj.js
+language/expressions/object/dstr/gen-meth-ary-init-iter-close.js
 language/expressions/object/dstr/gen-meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/object/dstr/gen-meth-ary-init-iter-get-err.js
 language/expressions/object/dstr/gen-meth-ary-init-iter-no-close.js
@@ -18263,6 +18371,7 @@ language/expressions/object/dstr/gen-meth-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-id-elision.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-id-exhausted.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/object/dstr/gen-meth-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-id.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-init-ary.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-init-id.js
@@ -18272,6 +18381,7 @@ language/expressions/object/dstr/gen-meth-ary-ptrn-rest-not-final-id.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-obj-id.js
 language/expressions/object/dstr/gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/object/dstr/gen-meth-dflt-ary-init-iter-close.js
 language/expressions/object/dstr/gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/object/dstr/gen-meth-dflt-ary-init-iter-get-err.js
 language/expressions/object/dstr/gen-meth-dflt-ary-init-iter-no-close.js
@@ -18320,6 +18430,7 @@ language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id-elision-next-err
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-init-id.js
@@ -18391,6 +18502,7 @@ language/expressions/object/dstr/gen-meth-obj-ptrn-prop-obj.js
 language/expressions/object/dstr/gen-meth-obj-ptrn-rest-getter.js
 language/expressions/object/dstr/gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/object/dstr/gen-meth-obj-ptrn-rest-val-obj.js
+language/expressions/object/dstr/meth-ary-init-iter-close.js
 language/expressions/object/dstr/meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/object/dstr/meth-ary-init-iter-get-err.js
 language/expressions/object/dstr/meth-ary-init-iter-no-close.js
@@ -18439,6 +18551,7 @@ language/expressions/object/dstr/meth-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-id-elision.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-id-exhausted.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/object/dstr/meth-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-id.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-init-ary.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-init-id.js
@@ -18448,6 +18561,7 @@ language/expressions/object/dstr/meth-ary-ptrn-rest-not-final-id.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-not-final-obj.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-obj-id.js
 language/expressions/object/dstr/meth-ary-ptrn-rest-obj-prop-id.js
+language/expressions/object/dstr/meth-dflt-ary-init-iter-close.js
 language/expressions/object/dstr/meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/expressions/object/dstr/meth-dflt-ary-init-iter-get-err.js
 language/expressions/object/dstr/meth-dflt-ary-init-iter-no-close.js
@@ -18496,6 +18610,7 @@ language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-id-elision-next-err.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-id-elision.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-id.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-init-ary.js
 language/expressions/object/dstr/meth-dflt-ary-ptrn-rest-init-id.js
@@ -20580,6 +20695,7 @@ language/statements/async-generator/dflt-params-arg-val-undefined.js
 language/statements/async-generator/dflt-params-duplicates.js
 language/statements/async-generator/dflt-params-ref-prior.js
 language/statements/async-generator/dflt-params-rest.js
+language/statements/async-generator/dstr/ary-init-iter-close.js
 language/statements/async-generator/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/async-generator/dstr/ary-init-iter-get-err.js
 language/statements/async-generator/dstr/ary-init-iter-no-close.js
@@ -20628,6 +20744,7 @@ language/statements/async-generator/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/statements/async-generator/dstr/ary-ptrn-rest-id-elision.js
 language/statements/async-generator/dstr/ary-ptrn-rest-id-exhausted.js
 language/statements/async-generator/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/statements/async-generator/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/statements/async-generator/dstr/ary-ptrn-rest-id.js
 language/statements/async-generator/dstr/ary-ptrn-rest-init-ary.js
 language/statements/async-generator/dstr/ary-ptrn-rest-init-id.js
@@ -20637,6 +20754,7 @@ language/statements/async-generator/dstr/ary-ptrn-rest-not-final-id.js
 language/statements/async-generator/dstr/ary-ptrn-rest-not-final-obj.js
 language/statements/async-generator/dstr/ary-ptrn-rest-obj-id.js
 language/statements/async-generator/dstr/ary-ptrn-rest-obj-prop-id.js
+language/statements/async-generator/dstr/dflt-ary-init-iter-close.js
 language/statements/async-generator/dstr/dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/async-generator/dstr/dflt-ary-init-iter-get-err.js
 language/statements/async-generator/dstr/dflt-ary-init-iter-no-close.js
@@ -20685,6 +20803,7 @@ language/statements/async-generator/dstr/dflt-ary-ptrn-rest-id-elision-next-err.
 language/statements/async-generator/dstr/dflt-ary-ptrn-rest-id-elision.js
 language/statements/async-generator/dstr/dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/async-generator/dstr/dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/async-generator/dstr/dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/async-generator/dstr/dflt-ary-ptrn-rest-id.js
 language/statements/async-generator/dstr/dflt-ary-ptrn-rest-init-ary.js
 language/statements/async-generator/dstr/dflt-ary-ptrn-rest-init-id.js
@@ -21224,6 +21343,7 @@ language/statements/class/definition/methods-named-eval-arguments.js
 language/statements/class/definition/setters-restricted-ids.js
 language/statements/class/definition/side-effects-in-extends.js
 language/statements/class/definition/side-effects-in-property-define.js
+language/statements/class/dstr/async-gen-meth-ary-init-iter-close.js
 language/statements/class/dstr/async-gen-meth-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/async-gen-meth-ary-init-iter-get-err.js
 language/statements/class/dstr/async-gen-meth-ary-init-iter-no-close.js
@@ -21272,6 +21392,7 @@ language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-id-elision-next-err.
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-id.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-init-id.js
@@ -21281,6 +21402,7 @@ language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/async-gen-meth-dflt-ary-init-iter-close.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-init-iter-get-err.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-init-iter-no-close.js
@@ -21329,6 +21451,7 @@ language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-elision-next
 language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-id.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/async-gen-meth-dflt-ary-ptrn-rest-init-id.js
@@ -21400,6 +21523,7 @@ language/statements/class/dstr/async-gen-meth-obj-ptrn-prop-obj.js
 language/statements/class/dstr/async-gen-meth-obj-ptrn-rest-getter.js
 language/statements/class/dstr/async-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/async-gen-meth-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/async-gen-meth-static-ary-init-iter-close.js
 language/statements/class/dstr/async-gen-meth-static-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/async-gen-meth-static-ary-init-iter-get-err.js
 language/statements/class/dstr/async-gen-meth-static-ary-init-iter-no-close.js
@@ -21448,6 +21572,7 @@ language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-elision-ne
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-id.js
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-init-id.js
@@ -21457,6 +21582,7 @@ language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-not-final-id.
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/async-gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/async-gen-meth-static-dflt-ary-init-iter-close.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-init-iter-get-err.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-init-iter-no-close.js
@@ -21505,6 +21631,7 @@ language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-elisi
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-id.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-rest-init-id.js
@@ -21576,6 +21703,7 @@ language/statements/class/dstr/async-gen-meth-static-obj-ptrn-prop-obj.js
 language/statements/class/dstr/async-gen-meth-static-obj-ptrn-rest-getter.js
 language/statements/class/dstr/async-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/async-gen-meth-static-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/async-private-gen-meth-ary-init-iter-close.js
 language/statements/class/dstr/async-private-gen-meth-ary-init-iter-no-close.js
 language/statements/class/dstr/async-private-gen-meth-ary-name-iter-val.js
 language/statements/class/dstr/async-private-gen-meth-ary-ptrn-elem-ary-elem-init.js
@@ -21621,6 +21749,7 @@ language/statements/class/dstr/async-private-gen-meth-ary-ptrn-rest-not-final-id
 language/statements/class/dstr/async-private-gen-meth-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/async-private-gen-meth-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/async-private-gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/async-private-gen-meth-dflt-ary-init-iter-close.js
 language/statements/class/dstr/async-private-gen-meth-dflt-ary-init-iter-no-close.js
 language/statements/class/dstr/async-private-gen-meth-dflt-ary-name-iter-val.js
 language/statements/class/dstr/async-private-gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -21706,6 +21835,7 @@ language/statements/class/dstr/async-private-gen-meth-obj-ptrn-prop-obj.js
 language/statements/class/dstr/async-private-gen-meth-obj-ptrn-rest-getter.js
 language/statements/class/dstr/async-private-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/async-private-gen-meth-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/async-private-gen-meth-static-ary-init-iter-close.js
 language/statements/class/dstr/async-private-gen-meth-static-ary-init-iter-no-close.js
 language/statements/class/dstr/async-private-gen-meth-static-ary-name-iter-val.js
 language/statements/class/dstr/async-private-gen-meth-static-ary-ptrn-elem-ary-elem-init.js
@@ -21751,6 +21881,7 @@ language/statements/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-not-f
 language/statements/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/async-private-gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/async-private-gen-meth-static-dflt-ary-init-iter-close.js
 language/statements/class/dstr/async-private-gen-meth-static-dflt-ary-init-iter-no-close.js
 language/statements/class/dstr/async-private-gen-meth-static-dflt-ary-name-iter-val.js
 language/statements/class/dstr/async-private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -21836,6 +21967,7 @@ language/statements/class/dstr/async-private-gen-meth-static-obj-ptrn-prop-obj.j
 language/statements/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-getter.js
 language/statements/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/gen-meth-ary-init-iter-close.js
 language/statements/class/dstr/gen-meth-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/gen-meth-ary-init-iter-get-err.js
 language/statements/class/dstr/gen-meth-ary-init-iter-no-close.js
@@ -21884,6 +22016,7 @@ language/statements/class/dstr/gen-meth-ary-ptrn-rest-id-elision-next-err.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/gen-meth-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-id.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-init-id.js
@@ -21893,6 +22026,7 @@ language/statements/class/dstr/gen-meth-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/gen-meth-dflt-ary-init-iter-close.js
 language/statements/class/dstr/gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/gen-meth-dflt-ary-init-iter-get-err.js
 language/statements/class/dstr/gen-meth-dflt-ary-init-iter-no-close.js
@@ -21941,6 +22075,7 @@ language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-elision-next-err.j
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-id.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/gen-meth-dflt-ary-ptrn-rest-init-id.js
@@ -22012,6 +22147,7 @@ language/statements/class/dstr/gen-meth-obj-ptrn-prop-obj.js
 language/statements/class/dstr/gen-meth-obj-ptrn-rest-getter.js
 language/statements/class/dstr/gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/gen-meth-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/gen-meth-static-ary-init-iter-close.js
 language/statements/class/dstr/gen-meth-static-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/gen-meth-static-ary-init-iter-get-err.js
 language/statements/class/dstr/gen-meth-static-ary-init-iter-no-close.js
@@ -22060,6 +22196,7 @@ language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-id-elision-next-err
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-id.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-init-id.js
@@ -22069,6 +22206,7 @@ language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-close.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-no-close.js
@@ -22117,6 +22255,7 @@ language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-elision-nex
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-id.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-rest-init-id.js
@@ -22188,6 +22327,7 @@ language/statements/class/dstr/gen-meth-static-obj-ptrn-prop-obj.js
 language/statements/class/dstr/gen-meth-static-obj-ptrn-rest-getter.js
 language/statements/class/dstr/gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/gen-meth-static-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/meth-ary-init-iter-close.js
 language/statements/class/dstr/meth-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/meth-ary-init-iter-get-err.js
 language/statements/class/dstr/meth-ary-init-iter-no-close.js
@@ -22236,6 +22376,7 @@ language/statements/class/dstr/meth-ary-ptrn-rest-id-elision-next-err.js
 language/statements/class/dstr/meth-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/meth-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/meth-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/meth-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/meth-ary-ptrn-rest-id.js
 language/statements/class/dstr/meth-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/meth-ary-ptrn-rest-init-id.js
@@ -22245,6 +22386,7 @@ language/statements/class/dstr/meth-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/meth-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/meth-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/meth-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/meth-dflt-ary-init-iter-close.js
 language/statements/class/dstr/meth-dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/meth-dflt-ary-init-iter-get-err.js
 language/statements/class/dstr/meth-dflt-ary-init-iter-no-close.js
@@ -22293,6 +22435,7 @@ language/statements/class/dstr/meth-dflt-ary-ptrn-rest-id-elision-next-err.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/meth-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-rest-id.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/meth-dflt-ary-ptrn-rest-init-id.js
@@ -22364,6 +22507,7 @@ language/statements/class/dstr/meth-obj-ptrn-prop-obj.js
 language/statements/class/dstr/meth-obj-ptrn-rest-getter.js
 language/statements/class/dstr/meth-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/meth-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/meth-static-ary-init-iter-close.js
 language/statements/class/dstr/meth-static-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/meth-static-ary-init-iter-get-err.js
 language/statements/class/dstr/meth-static-ary-init-iter-no-close.js
@@ -22412,6 +22556,7 @@ language/statements/class/dstr/meth-static-ary-ptrn-rest-id-elision-next-err.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/meth-static-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-id.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-init-id.js
@@ -22421,6 +22566,7 @@ language/statements/class/dstr/meth-static-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/meth-static-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/meth-static-dflt-ary-init-iter-close.js
 language/statements/class/dstr/meth-static-dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/class/dstr/meth-static-dflt-ary-init-iter-get-err.js
 language/statements/class/dstr/meth-static-dflt-ary-init-iter-no-close.js
@@ -22469,6 +22615,7 @@ language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-id-elision-next-er
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-id-elision.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-id.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/meth-static-dflt-ary-ptrn-rest-init-id.js
@@ -22540,6 +22687,7 @@ language/statements/class/dstr/meth-static-obj-ptrn-prop-obj.js
 language/statements/class/dstr/meth-static-obj-ptrn-rest-getter.js
 language/statements/class/dstr/meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/meth-static-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/private-gen-meth-ary-init-iter-close.js
 language/statements/class/dstr/private-gen-meth-ary-init-iter-no-close.js
 language/statements/class/dstr/private-gen-meth-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-elem-ary-elem-init.js
@@ -22585,6 +22733,7 @@ language/statements/class/dstr/private-gen-meth-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/private-gen-meth-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/private-gen-meth-dflt-ary-init-iter-close.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-init-iter-no-close.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -22670,6 +22819,7 @@ language/statements/class/dstr/private-gen-meth-obj-ptrn-prop-obj.js
 language/statements/class/dstr/private-gen-meth-obj-ptrn-rest-getter.js
 language/statements/class/dstr/private-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/private-gen-meth-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/private-gen-meth-static-ary-init-iter-close.js
 language/statements/class/dstr/private-gen-meth-static-ary-init-iter-no-close.js
 language/statements/class/dstr/private-gen-meth-static-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-elem-ary-elem-init.js
@@ -22715,6 +22865,7 @@ language/statements/class/dstr/private-gen-meth-static-ary-ptrn-rest-not-final-i
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/private-gen-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/private-gen-meth-static-dflt-ary-init-iter-close.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-init-iter-no-close.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -22800,6 +22951,7 @@ language/statements/class/dstr/private-gen-meth-static-obj-ptrn-prop-obj.js
 language/statements/class/dstr/private-gen-meth-static-obj-ptrn-rest-getter.js
 language/statements/class/dstr/private-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/private-gen-meth-static-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/private-meth-ary-init-iter-close.js
 language/statements/class/dstr/private-meth-ary-init-iter-no-close.js
 language/statements/class/dstr/private-meth-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-ary-ptrn-elem-ary-elem-init.js
@@ -22845,6 +22997,7 @@ language/statements/class/dstr/private-meth-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/private-meth-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/private-meth-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/private-meth-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/private-meth-dflt-ary-init-iter-close.js
 language/statements/class/dstr/private-meth-dflt-ary-init-iter-no-close.js
 language/statements/class/dstr/private-meth-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -22930,6 +23083,7 @@ language/statements/class/dstr/private-meth-obj-ptrn-prop-obj.js
 language/statements/class/dstr/private-meth-obj-ptrn-rest-getter.js
 language/statements/class/dstr/private-meth-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/class/dstr/private-meth-obj-ptrn-rest-val-obj.js
+language/statements/class/dstr/private-meth-static-ary-init-iter-close.js
 language/statements/class/dstr/private-meth-static-ary-init-iter-no-close.js
 language/statements/class/dstr/private-meth-static-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-elem-ary-elem-init.js
@@ -22975,6 +23129,7 @@ language/statements/class/dstr/private-meth-static-ary-ptrn-rest-not-final-id.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-rest-not-final-obj.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-rest-obj-id.js
 language/statements/class/dstr/private-meth-static-ary-ptrn-rest-obj-prop-id.js
+language/statements/class/dstr/private-meth-static-dflt-ary-init-iter-close.js
 language/statements/class/dstr/private-meth-static-dflt-ary-init-iter-no-close.js
 language/statements/class/dstr/private-meth-static-dflt-ary-name-iter-val.js
 language/statements/class/dstr/private-meth-static-dflt-ary-ptrn-elem-ary-elem-init.js
@@ -24278,6 +24433,9 @@ language/statements/class/subclass/class-definition-null-proto.js
 language/statements/class/subclass/class-definition-parent-proto-null.js
 language/statements/class/subclass/default-constructor-spread-override.js
 language/statements/class/subclass/derived-class-return-override-catch-super-arrow.js
+language/statements/class/subclass/derived-class-return-override-catch-super.js
+language/statements/class/subclass/derived-class-return-override-catch.js
+language/statements/class/subclass/derived-class-return-override-for-of.js
 language/statements/class/subclass/derived-class-return-override-with-boolean.js
 language/statements/class/subclass/derived-class-return-override-with-empty.js
 language/statements/class/subclass/derived-class-return-override-with-null.js
@@ -24308,6 +24466,7 @@ language/statements/class/syntax/early-errors/class-definition-evaluation-script
 language/statements/class/syntax/escaped-static.js
 language/statements/const/block-local-use-before-initialization-in-declaration-statement.js
 language/statements/const/block-local-use-before-initialization-in-prior-statement.js
+language/statements/const/dstr/ary-init-iter-close.js
 language/statements/const/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/const/dstr/ary-init-iter-get-err.js
 language/statements/const/dstr/ary-init-iter-no-close.js
@@ -24356,6 +24515,7 @@ language/statements/const/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/statements/const/dstr/ary-ptrn-rest-id-elision.js
 language/statements/const/dstr/ary-ptrn-rest-id-exhausted.js
 language/statements/const/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/statements/const/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/statements/const/dstr/ary-ptrn-rest-id.js
 language/statements/const/dstr/ary-ptrn-rest-init-ary.js
 language/statements/const/dstr/ary-ptrn-rest-init-id.js
@@ -24648,6 +24808,7 @@ language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elem-obj-prop-id
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elem-obj-val-null.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elision-exhausted.js
+language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elision-iter-close.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elision-step-err.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elision.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-empty.js
@@ -24660,6 +24821,7 @@ language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-id-elision.
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-id-exhausted.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-id-iter-close.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-id.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-init-ary.js
 language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-init-id.js
@@ -24801,6 +24963,7 @@ language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elem-obj-prop-id.j
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elem-obj-val-null.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elision-exhausted.js
+language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elision-iter-close.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elision-step-err.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elision.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-empty.js
@@ -24813,6 +24976,7 @@ language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-id-elision.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-id-exhausted.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-id-iter-close.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-id.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-init-ary.js
 language/statements/for-await-of/async-func-dstr-let-ary-ptrn-rest-init-id.js
@@ -24954,6 +25118,7 @@ language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elem-obj-prop-id.j
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elem-obj-val-null.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elision-exhausted.js
+language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elision-iter-close.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elision-step-err.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elision.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-empty.js
@@ -24966,6 +25131,7 @@ language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-id-elision.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-id-exhausted.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-id-iter-close.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-id.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-init-ary.js
 language/statements/for-await-of/async-func-dstr-var-ary-ptrn-rest-init-id.js
@@ -25088,6 +25254,7 @@ language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close-
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close-skip.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-rtrn-close-null.js
+language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-thrw-close-skip.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-null.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-undefined-hole.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-undefined-own.js
@@ -25114,6 +25281,8 @@ language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elisio
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-nrml-close-err.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-nrml-close-skip.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-nrml-close.js
+language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-thrw-close-skip.js
+language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-rest-nrml-close-skip.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elision-iter-nrml-close-skip.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elision-iter-nrml-close.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elision-val-array.js
@@ -25241,6 +25410,7 @@ language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elem-obj-prop-id.
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elem-obj-val-null.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elision-exhausted.js
+language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elision-iter-close.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elision-step-err.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elision.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-empty.js
@@ -25254,6 +25424,7 @@ language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-id-elision.j
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-id-exhausted.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-id-iter-close.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-id.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-init-ary.js
 language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-rest-init-id.js
@@ -25396,6 +25567,7 @@ language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elem-obj-prop-id.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elem-obj-val-null.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elision-exhausted.js
+language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elision-iter-close.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elision-step-err.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elision.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-empty.js
@@ -25409,6 +25581,7 @@ language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-id-elision.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-id-exhausted.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-id-iter-close.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-id.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-init-ary.js
 language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-rest-init-id.js
@@ -25551,6 +25724,7 @@ language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elem-obj-prop-id.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elem-obj-val-null.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elision-exhausted.js
+language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elision-iter-close.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elision-step-err.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elision.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-empty.js
@@ -25564,6 +25738,7 @@ language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-id-elision.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-id-exhausted.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-id-iter-close.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-id.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-init-ary.js
 language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-rest-init-id.js
@@ -25677,6 +25852,9 @@ language/statements/for-await-of/head-let-init.js
 language/statements/for-await-of/head-lhs-async.js
 language/statements/for-await-of/head-using-init.js
 language/statements/for-await-of/head-var-init.js
+language/statements/for-await-of/iterator-close-non-throw-get-method-abrupt.js
+language/statements/for-await-of/iterator-close-non-throw-get-method-is-null.js
+language/statements/for-await-of/iterator-close-non-throw-get-method-non-callable.js
 language/statements/for-await-of/iterator-close-throw-get-method-abrupt.js
 language/statements/for-await-of/iterator-close-throw-get-method-non-callable.js
 language/statements/for-await-of/let-array-with-newline.js
@@ -25779,7 +25957,9 @@ language/statements/for-of/array-contract.js
 language/statements/for-of/array-expand-contract.js
 language/statements/for-of/array-expand.js
 language/statements/for-of/array.js
+language/statements/for-of/body-dstr-assign-error.js
 language/statements/for-of/body-dstr-assign.js
+language/statements/for-of/body-put-error.js
 language/statements/for-of/break-from-catch.js
 language/statements/for-of/break-from-finally.js
 language/statements/for-of/break-from-try.js
@@ -25818,7 +25998,10 @@ language/statements/for-of/dstr/array-elem-init-yield-expr.js
 language/statements/for-of/dstr/array-elem-init-yield-ident-invalid.js
 language/statements/for-of/dstr/array-elem-init-yield-ident-valid.js
 language/statements/for-of/dstr/array-elem-iter-get-err.js
+language/statements/for-of/dstr/array-elem-iter-nrml-close-err.js
+language/statements/for-of/dstr/array-elem-iter-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close-skip.js
+language/statements/for-of/dstr/array-elem-iter-nrml-close.js
 language/statements/for-of/dstr/array-elem-iter-thrw-close-skip.js
 language/statements/for-of/dstr/array-elem-nested-array-invalid.js
 language/statements/for-of/dstr/array-elem-nested-array-null.js
@@ -25855,13 +26038,24 @@ language/statements/for-of/dstr/array-elem-target-yield-expr.js
 language/statements/for-of/dstr/array-elem-target-yield-invalid.js
 language/statements/for-of/dstr/array-elem-target-yield-valid.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-abpt.js
+language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-err.js
+language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-skip.js
+language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close.js
 language/statements/for-of/dstr/array-elem-trlg-iter-get-err.js
+language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-err.js
+language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-skip.js
+language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-thrw-close-skip.js
+language/statements/for-of/dstr/array-elem-trlg-iter-rest-nrml-close-skip.js
+language/statements/for-of/dstr/array-elem-trlg-iter-rest-thrw-close-skip.js
 language/statements/for-of/dstr/array-elision-iter-abpt.js
 language/statements/for-of/dstr/array-elision-iter-get-err.js
+language/statements/for-of/dstr/array-elision-iter-nrml-close-err.js
+language/statements/for-of/dstr/array-elision-iter-nrml-close-null.js
 language/statements/for-of/dstr/array-elision-iter-nrml-close-skip.js
+language/statements/for-of/dstr/array-elision-iter-nrml-close.js
 language/statements/for-of/dstr/array-elision-val-array.js
 language/statements/for-of/dstr/array-elision-val-bool.js
 language/statements/for-of/dstr/array-elision-val-null.js
@@ -25869,6 +26063,9 @@ language/statements/for-of/dstr/array-elision-val-num.js
 language/statements/for-of/dstr/array-elision-val-string.js
 language/statements/for-of/dstr/array-elision-val-symbol.js
 language/statements/for-of/dstr/array-elision-val-undef.js
+language/statements/for-of/dstr/array-empty-iter-close-err.js
+language/statements/for-of/dstr/array-empty-iter-close-null.js
+language/statements/for-of/dstr/array-empty-iter-close.js
 language/statements/for-of/dstr/array-empty-iter-get-err.js
 language/statements/for-of/dstr/array-empty-val-array.js
 language/statements/for-of/dstr/array-empty-val-bool.js
@@ -25888,8 +26085,12 @@ language/statements/for-of/dstr/array-rest-elision-iter-abpt.js
 language/statements/for-of/dstr/array-rest-elision.js
 language/statements/for-of/dstr/array-rest-init.js
 language/statements/for-of/dstr/array-rest-iter-get-err.js
+language/statements/for-of/dstr/array-rest-iter-nrml-close-skip.js
+language/statements/for-of/dstr/array-rest-iter-thrw-close-skip.js
 language/statements/for-of/dstr/array-rest-iteration.js
+language/statements/for-of/dstr/array-rest-lref.js
 language/statements/for-of/dstr/array-rest-nested-array-invalid.js
+language/statements/for-of/dstr/array-rest-nested-array-iter-thrw-close-skip.js
 language/statements/for-of/dstr/array-rest-nested-array-null.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined-hole.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined-own.js
@@ -25909,6 +26110,7 @@ language/statements/for-of/dstr/array-rest-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/array-rest-nested-obj.js
 language/statements/for-of/dstr/array-rest-put-const.js
 language/statements/for-of/dstr/array-rest-put-prop-ref-no-get.js
+language/statements/for-of/dstr/array-rest-put-prop-ref-user-err-iter-close-skip.js
 language/statements/for-of/dstr/array-rest-put-prop-ref-user-err.js
 language/statements/for-of/dstr/array-rest-put-prop-ref.js
 language/statements/for-of/dstr/array-rest-put-unresolvable-no-strict.js
@@ -25916,6 +26118,7 @@ language/statements/for-of/dstr/array-rest-put-unresolvable-strict.js
 language/statements/for-of/dstr/array-rest-yield-expr.js
 language/statements/for-of/dstr/array-rest-yield-ident-invalid.js
 language/statements/for-of/dstr/array-rest-yield-ident-valid.js
+language/statements/for-of/dstr/const-ary-init-iter-close.js
 language/statements/for-of/dstr/const-ary-init-iter-get-err-array-prototype.js
 language/statements/for-of/dstr/const-ary-init-iter-get-err.js
 language/statements/for-of/dstr/const-ary-init-iter-no-close.js
@@ -25952,6 +26155,7 @@ language/statements/for-of/dstr/const-ary-ptrn-elem-obj-prop-id.js
 language/statements/for-of/dstr/const-ary-ptrn-elem-obj-val-null.js
 language/statements/for-of/dstr/const-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-of/dstr/const-ary-ptrn-elision-exhausted.js
+language/statements/for-of/dstr/const-ary-ptrn-elision-iter-close.js
 language/statements/for-of/dstr/const-ary-ptrn-elision-step-err.js
 language/statements/for-of/dstr/const-ary-ptrn-elision.js
 language/statements/for-of/dstr/const-ary-ptrn-empty.js
@@ -25966,6 +26170,7 @@ language/statements/for-of/dstr/const-ary-ptrn-rest-id-elision.js
 language/statements/for-of/dstr/const-ary-ptrn-rest-id-exhausted.js
 language/statements/for-of/dstr/const-ary-ptrn-rest-id-iter-close.js
 language/statements/for-of/dstr/const-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-of/dstr/const-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-of/dstr/const-ary-ptrn-rest-id.js
 language/statements/for-of/dstr/const-ary-ptrn-rest-init-ary.js
 language/statements/for-of/dstr/const-ary-ptrn-rest-init-id.js
@@ -26007,6 +26212,7 @@ language/statements/for-of/dstr/const-obj-ptrn-prop-obj.js
 language/statements/for-of/dstr/const-obj-ptrn-rest-getter.js
 language/statements/for-of/dstr/const-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/for-of/dstr/const-obj-ptrn-rest-val-obj.js
+language/statements/for-of/dstr/let-ary-init-iter-close.js
 language/statements/for-of/dstr/let-ary-init-iter-get-err-array-prototype.js
 language/statements/for-of/dstr/let-ary-init-iter-get-err.js
 language/statements/for-of/dstr/let-ary-init-iter-no-close.js
@@ -26043,6 +26249,7 @@ language/statements/for-of/dstr/let-ary-ptrn-elem-obj-prop-id.js
 language/statements/for-of/dstr/let-ary-ptrn-elem-obj-val-null.js
 language/statements/for-of/dstr/let-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-of/dstr/let-ary-ptrn-elision-exhausted.js
+language/statements/for-of/dstr/let-ary-ptrn-elision-iter-close.js
 language/statements/for-of/dstr/let-ary-ptrn-elision-step-err.js
 language/statements/for-of/dstr/let-ary-ptrn-elision.js
 language/statements/for-of/dstr/let-ary-ptrn-empty.js
@@ -26057,6 +26264,7 @@ language/statements/for-of/dstr/let-ary-ptrn-rest-id-elision.js
 language/statements/for-of/dstr/let-ary-ptrn-rest-id-exhausted.js
 language/statements/for-of/dstr/let-ary-ptrn-rest-id-iter-close.js
 language/statements/for-of/dstr/let-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-of/dstr/let-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-of/dstr/let-ary-ptrn-rest-id.js
 language/statements/for-of/dstr/let-ary-ptrn-rest-init-ary.js
 language/statements/for-of/dstr/let-ary-ptrn-rest-init-id.js
@@ -26204,6 +26412,7 @@ language/statements/for-of/dstr/obj-rest-to-property.js
 language/statements/for-of/dstr/obj-rest-val-null.js
 language/statements/for-of/dstr/obj-rest-val-undefined.js
 language/statements/for-of/dstr/obj-rest-valid-object.js
+language/statements/for-of/dstr/var-ary-init-iter-close.js
 language/statements/for-of/dstr/var-ary-init-iter-get-err-array-prototype.js
 language/statements/for-of/dstr/var-ary-init-iter-get-err.js
 language/statements/for-of/dstr/var-ary-init-iter-no-close.js
@@ -26240,6 +26449,7 @@ language/statements/for-of/dstr/var-ary-ptrn-elem-obj-prop-id.js
 language/statements/for-of/dstr/var-ary-ptrn-elem-obj-val-null.js
 language/statements/for-of/dstr/var-ary-ptrn-elem-obj-val-undef.js
 language/statements/for-of/dstr/var-ary-ptrn-elision-exhausted.js
+language/statements/for-of/dstr/var-ary-ptrn-elision-iter-close.js
 language/statements/for-of/dstr/var-ary-ptrn-elision-step-err.js
 language/statements/for-of/dstr/var-ary-ptrn-elision.js
 language/statements/for-of/dstr/var-ary-ptrn-empty.js
@@ -26254,6 +26464,7 @@ language/statements/for-of/dstr/var-ary-ptrn-rest-id-elision.js
 language/statements/for-of/dstr/var-ary-ptrn-rest-id-exhausted.js
 language/statements/for-of/dstr/var-ary-ptrn-rest-id-iter-close.js
 language/statements/for-of/dstr/var-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for-of/dstr/var-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for-of/dstr/var-ary-ptrn-rest-id.js
 language/statements/for-of/dstr/var-ary-ptrn-rest-init-ary.js
 language/statements/for-of/dstr/var-ary-ptrn-rest-init-id.js
@@ -26296,6 +26507,10 @@ language/statements/for-of/dstr/var-obj-ptrn-rest-getter.js
 language/statements/for-of/dstr/var-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/for-of/dstr/var-obj-ptrn-rest-val-obj.js
 language/statements/for-of/escaped-of.js
+language/statements/for-of/generator-close-via-break.js
+language/statements/for-of/generator-close-via-continue.js
+language/statements/for-of/generator-close-via-return.js
+language/statements/for-of/generator-close-via-throw.js
 language/statements/for-of/generator-next-error.js
 language/statements/for-of/generator.js
 language/statements/for-of/generic-iterable.js
@@ -26336,8 +26551,15 @@ language/statements/for-of/head-var-bound-names-in-stmt.js
 language/statements/for-of/head-var-bound-names-let.js
 language/statements/for-of/head-var-init.js
 language/statements/for-of/head-var-no-expr.js
+language/statements/for-of/iterator-close-non-object.js
+language/statements/for-of/iterator-close-non-throw-get-method-abrupt.js
+language/statements/for-of/iterator-close-non-throw-get-method-is-null.js
 language/statements/for-of/iterator-close-throw-get-method-abrupt.js
 language/statements/for-of/iterator-close-throw-get-method-non-callable.js
+language/statements/for-of/iterator-close-via-break.js
+language/statements/for-of/iterator-close-via-continue.js
+language/statements/for-of/iterator-close-via-return.js
+language/statements/for-of/iterator-close-via-throw.js
 language/statements/for-of/iterator-next-error.js
 language/statements/for-of/iterator-next-result-done-attr.js
 language/statements/for-of/iterator-next-result-value-attr-error.js
@@ -26440,6 +26662,7 @@ language/statements/for/decl-const.js
 language/statements/for/decl-fun.js
 language/statements/for/decl-gen.js
 language/statements/for/decl-let.js
+language/statements/for/dstr/const-ary-init-iter-close.js
 language/statements/for/dstr/const-ary-init-iter-get-err-array-prototype.js
 language/statements/for/dstr/const-ary-init-iter-get-err.js
 language/statements/for/dstr/const-ary-init-iter-no-close.js
@@ -26476,6 +26699,7 @@ language/statements/for/dstr/const-ary-ptrn-elem-obj-prop-id.js
 language/statements/for/dstr/const-ary-ptrn-elem-obj-val-null.js
 language/statements/for/dstr/const-ary-ptrn-elem-obj-val-undef.js
 language/statements/for/dstr/const-ary-ptrn-elision-exhausted.js
+language/statements/for/dstr/const-ary-ptrn-elision-iter-close.js
 language/statements/for/dstr/const-ary-ptrn-elision-step-err.js
 language/statements/for/dstr/const-ary-ptrn-elision.js
 language/statements/for/dstr/const-ary-ptrn-empty.js
@@ -26489,6 +26713,7 @@ language/statements/for/dstr/const-ary-ptrn-rest-id-elision.js
 language/statements/for/dstr/const-ary-ptrn-rest-id-exhausted.js
 language/statements/for/dstr/const-ary-ptrn-rest-id-iter-close.js
 language/statements/for/dstr/const-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for/dstr/const-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for/dstr/const-ary-ptrn-rest-id.js
 language/statements/for/dstr/const-ary-ptrn-rest-init-ary.js
 language/statements/for/dstr/const-ary-ptrn-rest-init-id.js
@@ -26529,6 +26754,7 @@ language/statements/for/dstr/const-obj-ptrn-prop-obj.js
 language/statements/for/dstr/const-obj-ptrn-rest-getter.js
 language/statements/for/dstr/const-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/for/dstr/const-obj-ptrn-rest-val-obj.js
+language/statements/for/dstr/let-ary-init-iter-close.js
 language/statements/for/dstr/let-ary-init-iter-get-err-array-prototype.js
 language/statements/for/dstr/let-ary-init-iter-get-err.js
 language/statements/for/dstr/let-ary-init-iter-no-close.js
@@ -26565,6 +26791,7 @@ language/statements/for/dstr/let-ary-ptrn-elem-obj-prop-id.js
 language/statements/for/dstr/let-ary-ptrn-elem-obj-val-null.js
 language/statements/for/dstr/let-ary-ptrn-elem-obj-val-undef.js
 language/statements/for/dstr/let-ary-ptrn-elision-exhausted.js
+language/statements/for/dstr/let-ary-ptrn-elision-iter-close.js
 language/statements/for/dstr/let-ary-ptrn-elision-step-err.js
 language/statements/for/dstr/let-ary-ptrn-elision.js
 language/statements/for/dstr/let-ary-ptrn-empty.js
@@ -26578,6 +26805,7 @@ language/statements/for/dstr/let-ary-ptrn-rest-id-elision.js
 language/statements/for/dstr/let-ary-ptrn-rest-id-exhausted.js
 language/statements/for/dstr/let-ary-ptrn-rest-id-iter-close.js
 language/statements/for/dstr/let-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for/dstr/let-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for/dstr/let-ary-ptrn-rest-id.js
 language/statements/for/dstr/let-ary-ptrn-rest-init-ary.js
 language/statements/for/dstr/let-ary-ptrn-rest-init-id.js
@@ -26618,6 +26846,7 @@ language/statements/for/dstr/let-obj-ptrn-prop-obj.js
 language/statements/for/dstr/let-obj-ptrn-rest-getter.js
 language/statements/for/dstr/let-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/for/dstr/let-obj-ptrn-rest-val-obj.js
+language/statements/for/dstr/var-ary-init-iter-close.js
 language/statements/for/dstr/var-ary-init-iter-get-err-array-prototype.js
 language/statements/for/dstr/var-ary-init-iter-get-err.js
 language/statements/for/dstr/var-ary-init-iter-no-close.js
@@ -26654,6 +26883,7 @@ language/statements/for/dstr/var-ary-ptrn-elem-obj-prop-id.js
 language/statements/for/dstr/var-ary-ptrn-elem-obj-val-null.js
 language/statements/for/dstr/var-ary-ptrn-elem-obj-val-undef.js
 language/statements/for/dstr/var-ary-ptrn-elision-exhausted.js
+language/statements/for/dstr/var-ary-ptrn-elision-iter-close.js
 language/statements/for/dstr/var-ary-ptrn-elision-step-err.js
 language/statements/for/dstr/var-ary-ptrn-elision.js
 language/statements/for/dstr/var-ary-ptrn-empty.js
@@ -26667,6 +26897,7 @@ language/statements/for/dstr/var-ary-ptrn-rest-id-elision.js
 language/statements/for/dstr/var-ary-ptrn-rest-id-exhausted.js
 language/statements/for/dstr/var-ary-ptrn-rest-id-iter-close.js
 language/statements/for/dstr/var-ary-ptrn-rest-id-iter-step-err.js
+language/statements/for/dstr/var-ary-ptrn-rest-id-iter-val-err.js
 language/statements/for/dstr/var-ary-ptrn-rest-id.js
 language/statements/for/dstr/var-ary-ptrn-rest-init-ary.js
 language/statements/for/dstr/var-ary-ptrn-rest-init-id.js
@@ -26870,6 +27101,7 @@ language/statements/function/dflt-params-arg-val-undefined.js
 language/statements/function/dflt-params-duplicates.js
 language/statements/function/dflt-params-ref-prior.js
 language/statements/function/dflt-params-rest.js
+language/statements/function/dstr/ary-init-iter-close.js
 language/statements/function/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/function/dstr/ary-init-iter-get-err.js
 language/statements/function/dstr/ary-init-iter-no-close.js
@@ -26918,6 +27150,7 @@ language/statements/function/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/statements/function/dstr/ary-ptrn-rest-id-elision.js
 language/statements/function/dstr/ary-ptrn-rest-id-exhausted.js
 language/statements/function/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/statements/function/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/statements/function/dstr/ary-ptrn-rest-id.js
 language/statements/function/dstr/ary-ptrn-rest-init-ary.js
 language/statements/function/dstr/ary-ptrn-rest-init-id.js
@@ -26927,6 +27160,7 @@ language/statements/function/dstr/ary-ptrn-rest-not-final-id.js
 language/statements/function/dstr/ary-ptrn-rest-not-final-obj.js
 language/statements/function/dstr/ary-ptrn-rest-obj-id.js
 language/statements/function/dstr/ary-ptrn-rest-obj-prop-id.js
+language/statements/function/dstr/dflt-ary-init-iter-close.js
 language/statements/function/dstr/dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/function/dstr/dflt-ary-init-iter-get-err.js
 language/statements/function/dstr/dflt-ary-init-iter-no-close.js
@@ -26975,6 +27209,7 @@ language/statements/function/dstr/dflt-ary-ptrn-rest-id-elision-next-err.js
 language/statements/function/dstr/dflt-ary-ptrn-rest-id-elision.js
 language/statements/function/dstr/dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/function/dstr/dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/function/dstr/dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/function/dstr/dflt-ary-ptrn-rest-id.js
 language/statements/function/dstr/dflt-ary-ptrn-rest-init-ary.js
 language/statements/function/dstr/dflt-ary-ptrn-rest-init-id.js
@@ -27108,6 +27343,7 @@ language/statements/generators/dflt-params-arg-val-undefined.js
 language/statements/generators/dflt-params-duplicates.js
 language/statements/generators/dflt-params-ref-prior.js
 language/statements/generators/dflt-params-rest.js
+language/statements/generators/dstr/ary-init-iter-close.js
 language/statements/generators/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/generators/dstr/ary-init-iter-get-err.js
 language/statements/generators/dstr/ary-init-iter-no-close.js
@@ -27156,6 +27392,7 @@ language/statements/generators/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/statements/generators/dstr/ary-ptrn-rest-id-elision.js
 language/statements/generators/dstr/ary-ptrn-rest-id-exhausted.js
 language/statements/generators/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/statements/generators/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/statements/generators/dstr/ary-ptrn-rest-id.js
 language/statements/generators/dstr/ary-ptrn-rest-init-ary.js
 language/statements/generators/dstr/ary-ptrn-rest-init-id.js
@@ -27165,6 +27402,7 @@ language/statements/generators/dstr/ary-ptrn-rest-not-final-id.js
 language/statements/generators/dstr/ary-ptrn-rest-not-final-obj.js
 language/statements/generators/dstr/ary-ptrn-rest-obj-id.js
 language/statements/generators/dstr/ary-ptrn-rest-obj-prop-id.js
+language/statements/generators/dstr/dflt-ary-init-iter-close.js
 language/statements/generators/dstr/dflt-ary-init-iter-get-err-array-prototype.js
 language/statements/generators/dstr/dflt-ary-init-iter-get-err.js
 language/statements/generators/dstr/dflt-ary-init-iter-no-close.js
@@ -27213,6 +27451,7 @@ language/statements/generators/dstr/dflt-ary-ptrn-rest-id-elision-next-err.js
 language/statements/generators/dstr/dflt-ary-ptrn-rest-id-elision.js
 language/statements/generators/dstr/dflt-ary-ptrn-rest-id-exhausted.js
 language/statements/generators/dstr/dflt-ary-ptrn-rest-id-iter-step-err.js
+language/statements/generators/dstr/dflt-ary-ptrn-rest-id-iter-val-err.js
 language/statements/generators/dstr/dflt-ary-ptrn-rest-id.js
 language/statements/generators/dstr/dflt-ary-ptrn-rest-init-ary.js
 language/statements/generators/dstr/dflt-ary-ptrn-rest-init-id.js
@@ -27396,6 +27635,7 @@ language/statements/labeled/value-yield-strict-escaped.js
 language/statements/labeled/value-yield-strict.js
 language/statements/let/block-local-use-before-initialization-in-declaration-statement.js
 language/statements/let/block-local-use-before-initialization-in-prior-statement.js
+language/statements/let/dstr/ary-init-iter-close.js
 language/statements/let/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/let/dstr/ary-init-iter-get-err.js
 language/statements/let/dstr/ary-init-iter-no-close.js
@@ -27444,6 +27684,7 @@ language/statements/let/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/statements/let/dstr/ary-ptrn-rest-id-elision.js
 language/statements/let/dstr/ary-ptrn-rest-id-exhausted.js
 language/statements/let/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/statements/let/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/statements/let/dstr/ary-ptrn-rest-id.js
 language/statements/let/dstr/ary-ptrn-rest-init-ary.js
 language/statements/let/dstr/ary-ptrn-rest-init-id.js
@@ -27650,9 +27891,7 @@ language/statements/try/12.14-8.js
 language/statements/try/12.14-9.js
 language/statements/try/S12.14_A1.js
 language/statements/try/S12.14_A10_T1.js
-language/statements/try/S12.14_A10_T4.js
 language/statements/try/S12.14_A11_T1.js
-language/statements/try/S12.14_A11_T4.js
 language/statements/try/S12.14_A12_T1.js
 language/statements/try/S12.14_A13_T1.js
 language/statements/try/S12.14_A16_T1.js
@@ -27687,7 +27926,6 @@ language/statements/try/S12.14_A7_T2.js
 language/statements/try/S12.14_A7_T3.js
 language/statements/try/S12.14_A8.js
 language/statements/try/S12.14_A9_T1.js
-language/statements/try/S12.14_A9_T4.js
 language/statements/try/catch-parameter-boundnames-restriction-arguments-negative-early.js
 language/statements/try/catch-parameter-boundnames-restriction-eval-negative-early.js
 language/statements/try/cptn-catch-empty-break.js
@@ -27701,6 +27939,7 @@ language/statements/try/cptn-finally-from-catch.js
 language/statements/try/cptn-finally-skip-catch.js
 language/statements/try/cptn-finally-wo-catch.js
 language/statements/try/cptn-try.js
+language/statements/try/dstr/ary-init-iter-close.js
 language/statements/try/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/try/dstr/ary-init-iter-get-err.js
 language/statements/try/dstr/ary-init-iter-no-close.js
@@ -27749,6 +27988,7 @@ language/statements/try/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/statements/try/dstr/ary-ptrn-rest-id-elision.js
 language/statements/try/dstr/ary-ptrn-rest-id-exhausted.js
 language/statements/try/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/statements/try/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/statements/try/dstr/ary-ptrn-rest-id.js
 language/statements/try/dstr/ary-ptrn-rest-init-ary.js
 language/statements/try/dstr/ary-ptrn-rest-init-id.js
@@ -27884,6 +28124,7 @@ language/statements/variable/arguments-strict-list-middle.js
 language/statements/variable/arguments-strict-list-repeated.js
 language/statements/variable/arguments-strict-single-init.js
 language/statements/variable/arguments-strict-single.js
+language/statements/variable/dstr/ary-init-iter-close.js
 language/statements/variable/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/variable/dstr/ary-init-iter-get-err.js
 language/statements/variable/dstr/ary-init-iter-no-close.js
@@ -27933,6 +28174,7 @@ language/statements/variable/dstr/ary-ptrn-rest-id-elision-next-err.js
 language/statements/variable/dstr/ary-ptrn-rest-id-elision.js
 language/statements/variable/dstr/ary-ptrn-rest-id-exhausted.js
 language/statements/variable/dstr/ary-ptrn-rest-id-iter-step-err.js
+language/statements/variable/dstr/ary-ptrn-rest-id-iter-val-err.js
 language/statements/variable/dstr/ary-ptrn-rest-id.js
 language/statements/variable/dstr/ary-ptrn-rest-init-ary.js
 language/statements/variable/dstr/ary-ptrn-rest-init-id.js
@@ -28236,6 +28478,7 @@ staging/sm/Array/regress-619970.js
 staging/sm/Array/set-with-indexed-property-on-prototype-chain.js
 staging/sm/Array/sort-01.js
 staging/sm/Array/sort-array-with-holes-and-undefined.js
+staging/sm/Array/sort_native_string_nan.js
 staging/sm/Array/splice-return-array-elements-defined-not-set.js
 staging/sm/Array/toSpliced.js
 staging/sm/Array/with.js
@@ -28549,10 +28792,6 @@ staging/sm/eval/undeclared-name-in-nested-strict-eval.js
 staging/sm/expressions/binary-literals.js
 staging/sm/expressions/constant-folded-labeled-statement.js
 staging/sm/expressions/delete-name-parenthesized-early-error-strict-mode.js
-staging/sm/expressions/destructuring-array-default-call.js
-staging/sm/expressions/destructuring-array-default-function-nested.js
-staging/sm/expressions/destructuring-array-default-function.js
-staging/sm/expressions/destructuring-array-default-yield.js
 staging/sm/expressions/destructuring-pattern-parenthesized.js
 staging/sm/expressions/inNotObjectError.js
 staging/sm/expressions/named-accessor-function.js
@@ -28735,6 +28974,7 @@ staging/sm/statements/for-in-with-gc-and-unvisited-deletion.js
 staging/sm/statements/for-inof-loop-const-declaration.js
 staging/sm/statements/for-loop-declaration-contains-computed-name.js
 staging/sm/statements/for-loop-declaration-contains-initializer.js
+staging/sm/statements/for-of-iterator-close.js
 staging/sm/statements/for-of-iterator-primitive.js
 staging/sm/statements/for-of-var-with-initializer.js
 staging/sm/statements/if-constant-folding.js

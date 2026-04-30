@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/completion.{
   type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
@@ -21,8 +22,9 @@ import arc/vm/opcode.{
   DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
   DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
   GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal,
-  GetIterator, GetLocal, GetThis, InitGlobalLex, InitialYield, IteratorClose,
-  IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure,
+  GetIterator, GetLocal, GetThis, InitGlobalLex, InitialYield,
+  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
+  IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure,
   NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop, PushConst, PushTry,
   PutBoxed, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal, Return,
   SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield,
@@ -148,15 +150,14 @@ fn construct_fn_callback(
                 "VM error during construct: " <> string.inspect(vm_err)
               }
           }
-        Error(#(Thrown, thrown, h)) -> Error(#(thrown, State(..state, heap: h)))
+        Error(#(Thrown, thrown, post)) ->
+          Error(#(thrown, State(..state, heap: post.heap)))
         Error(#(StepVmError(vm_err), _, _)) ->
           panic as { "VM error in do_construct: " <> string.inspect(vm_err) }
-        Error(#(other, _, h)) ->
+        Error(#(other, _, _post)) ->
           panic as {
             "Unexpected step result from do_construct: "
             <> string.inspect(other)
-            <> " heap="
-            <> string.inspect(h)
           }
       }
     }
@@ -258,15 +259,18 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
   let op = tuple_array.unsafe_get(state.pc, state.code)
   case step(state, op) {
     Ok(new_state) -> execute_inner(new_state)
-    Error(#(Done, result, heap)) ->
-      Ok(#(NormalCompletion(result, heap), State(..state, heap:)))
+    Error(#(Done, result, post)) ->
+      Ok(#(NormalCompletion(result, post.heap), post))
     Error(#(StepVmError(err), _, _)) -> Error(err)
-    Error(#(Yielded, yielded_value, heap)) -> {
+    Error(#(Yielded, yielded_value, post)) -> {
       // Generator yielded — build suspended state.
       // For Yield: pop the yielded value from stack, advance pc.
       // For YieldStar: pop arg (keep iter), DON'T advance pc — resume
       //   re-executes YieldStar with [resume_val, iter, ..].
       // For InitialYield: stack unchanged, just advance pc.
+      // Yield/Await handlers don't mutate stack before erroring; pc/stack
+      // surgery here is written against pre-step state.
+      let heap = post.heap
       let suspended_state = case op {
         Yield ->
           State(
@@ -296,8 +300,9 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
       }
       Ok(#(YieldCompletion(yielded_value, heap), suspended_state))
     }
-    Error(#(Awaited, awaited_value, heap)) -> {
+    Error(#(Awaited, awaited_value, post)) -> {
       // Async function/generator hit await — pop value, advance pc.
+      let heap = post.heap
       let suspended_state =
         State(
           ..state,
@@ -310,13 +315,13 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
         )
       Ok(#(AwaitCompletion(awaited_value, heap), suspended_state))
     }
-    Error(#(Thrown, thrown_value, heap)) -> {
-      // Try to unwind to a catch handler
-      let updated_state = State(..state, heap:)
-      case unwind_to_catch(updated_state, thrown_value) {
+    Error(#(Thrown, thrown_value, post)) -> {
+      // Try to unwind to a catch handler. The handler's full post-step state
+      // (stack/pc included) is threaded here so opcodes can mutate stack
+      // before throwing (e.g., undef the iter slot then propagate).
+      case unwind_to_catch(post, thrown_value) {
         Some(caught_state) -> execute_inner(caught_state)
-        None ->
-          Ok(#(ThrowCompletion(thrown_value, heap), State(..state, heap:)))
+        None -> Ok(#(ThrowCompletion(thrown_value, post.heap), post))
       }
     }
   }
@@ -391,8 +396,8 @@ fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
 fn underflow(
   state: State,
   op: String,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
-  Error(#(StepVmError(StackUnderflow(op)), JsUndefined, state.heap))
+) -> Result(State, #(StepResult, JsValue, State)) {
+  Error(#(StepVmError(StackUnderflow(op)), JsUndefined, state))
 }
 
 /// Pop top of stack and jump to `target` if `condition(value)` is true,
@@ -401,7 +406,7 @@ fn conditional_jump(
   state: State,
   target: Int,
   condition: fn(JsValue) -> Bool,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case state.stack {
     [top, ..rest] ->
       case condition(top) {
@@ -418,7 +423,7 @@ fn conditional_jump(
 
 /// Execute a single instruction. Returns Ok(new_state) to continue,
 /// or Error(#(signal, value, heap)) to stop.
-fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
+fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
   case op {
     // ---- Stack operations --------------------------------------------
     PushConst(index) -> {
@@ -491,14 +496,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               Error(#(
                 StepVmError(Unimplemented("GetBoxed: not a BoxSlot")),
                 JsUndefined,
-                state.heap,
+                state,
               ))
           }
         _ ->
           Error(#(
             StepVmError(Unimplemented("GetBoxed: local is not a box ref")),
             JsUndefined,
-            state.heap,
+            state,
           ))
       }
     }
@@ -516,7 +521,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               Error(#(
                 StepVmError(Unimplemented("PutBoxed: local is not a box ref")),
                 JsUndefined,
-                state.heap,
+                state,
               ))
           }
         }
@@ -554,7 +559,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                       pc: state.pc + 1,
                     ),
                   )
-                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
+                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
               }
             Some(value.AccessorProperty(get: None, ..)) ->
               Ok(
@@ -583,8 +588,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                           pc: state.pc + 1,
                         ),
                       )
-                    Error(#(thrown, state)) ->
-                      Error(#(Thrown, thrown, state.heap))
+                    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
                   }
                 False ->
                   state.throw_reference_error(state, name <> " is not defined")
@@ -661,7 +665,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                                   <> "' of object '#<Object>'",
                               )
                             Error(#(thrown, state)) ->
-                              Error(#(Thrown, thrown, state.heap))
+                              Error(#(Thrown, thrown, state))
                           }
                       }
                     False ->
@@ -678,7 +682,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                       {
                         Ok(#(state, _)) -> Ok(State(..state, pc: state.pc + 1))
                         Error(#(thrown, state)) ->
-                          Error(#(Thrown, thrown, state.heap))
+                          Error(#(Thrown, thrown, state))
                       }
                   }
                 }
@@ -915,7 +919,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                         Ok(#(pk, state)) ->
                           Ok(#(object.has_property(state.heap, ref, pk), state))
                         Error(#(thrown, state)) ->
-                          Error(#(Thrown, thrown, state.heap))
+                          Error(#(Thrown, thrown, state))
                       }
                   })
                   State(
@@ -995,7 +999,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       }
       case state.call_stack {
         // No caller — top-level return, we're done
-        [] -> Error(#(Done, return_value, state.heap))
+        [] -> Error(#(Done, return_value, state))
         // Pop call frame, restore caller, push return value onto caller's stack
         [
           SavedFrame(
@@ -1158,7 +1162,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
 
     opcode.Throw -> {
       case state.stack {
-        [value, ..] -> Error(#(Thrown, value, state.heap))
+        [value, ..] -> Error(#(Thrown, value, state))
         [] -> underflow(state, "Throw")
       }
     }
@@ -1196,10 +1200,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.finally_stack {
         [state.NormalCompletion, ..rest] ->
           Ok(State(..state, finally_stack: rest, pc: state.pc + 1))
-        [state.ThrowCompletion(value:), ..] ->
-          Error(#(Thrown, value, state.heap))
-        [state.ReturnCompletion(value:), ..] ->
-          Error(#(Done, value, state.heap))
+        [state.ThrowCompletion(value:), ..] -> Error(#(Thrown, value, state))
+        [state.ReturnCompletion(value:), ..] -> Error(#(Done, value, state))
         [] -> underflow(state, "LeaveFinally: empty finally_stack")
       }
     }
@@ -1824,7 +1826,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             Error(thrown) ->
               case unwind_to_catch(new_state, thrown) {
                 Some(caught) -> Ok(caught)
-                None -> Error(#(Thrown, thrown, new_state.heap))
+                None -> Error(#(Thrown, thrown, new_state))
               }
           }
         }
@@ -2172,7 +2174,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               Error(#(
                 StepVmError(Unimplemented("ForInNext: not a ForInIteratorSlot")),
                 JsUndefined,
-                state.heap,
+                state,
               ))
           }
         _ -> underflow(state, "ForInNext")
@@ -2257,7 +2259,25 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     }
 
     IteratorNext -> {
+      // [[Done]] tracking (QuickJS-style): on done=true OR .next() abrupt,
+      // the iter slot becomes JsUndefined so subsequent IteratorNext
+      // short-circuits and IteratorClose/CloseThrow no-op (§7.4.11/.6).
+      let mark_done = fn(rest) {
+        fn(e: #(StepResult, JsValue, State)) {
+          let #(r, v, s) = e
+          #(r, v, State(..s, stack: [JsUndefined, ..rest]))
+        }
+      }
       case state.stack {
+        // Iter already exhausted/aborted — short-circuit to done.
+        [JsUndefined, ..rest] ->
+          Ok(
+            State(
+              ..state,
+              stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
+              pc: state.pc + 1,
+            ),
+          )
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
             Some(
@@ -2272,12 +2292,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   Ok(
                     State(
                       ..state,
-                      stack: [
-                        JsBool(True),
-                        JsUndefined,
-                        JsObject(iter_ref),
-                        ..rest
-                      ],
+                      stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
                       pc: state.pc + 1,
                     ),
                   )
@@ -2305,66 +2320,66 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             }
             Some(ObjectSlot(kind: GeneratorObject(_), ..)) -> {
               // Generator iterator: call .next() and extract {value, done}
-              {
-                use next_state <- result.try(
-                  generators.call_native_generator_next(
-                    state,
-                    JsObject(iter_ref),
-                    [],
-                    [],
-                    execute_inner,
-                    unwind_to_catch,
-                  ),
+              use next_state <- result.try(
+                generators.call_native_generator_next(
+                  state,
+                  JsObject(iter_ref),
+                  [],
+                  [],
+                  execute_inner,
+                  unwind_to_catch,
                 )
-                // next_state.stack has [result_obj, ...], extract value and done
-                case next_state.stack {
-                  [JsObject(result_ref), ..] ->
-                    case heap.read(next_state.heap, result_ref) {
-                      Some(ObjectSlot(properties: props, ..)) -> {
-                        let val = case dict.get(props, Named("value")) {
-                          Ok(DataProperty(value: v, ..)) -> v
-                          _ -> JsUndefined
-                        }
-                        let done = case dict.get(props, Named("done")) {
-                          Ok(DataProperty(value: JsBool(d), ..)) -> d
-                          _ -> False
-                        }
-                        Ok(
-                          State(
-                            ..state.merge_globals(state, next_state, []),
-                            heap: next_state.heap,
-                            stack: [
-                              JsBool(done),
-                              val,
-                              JsObject(iter_ref),
-                              ..rest
-                            ],
-                            pc: state.pc + 1,
-                          ),
-                        )
+                |> result.map_error(mark_done(rest)),
+              )
+              // next_state.stack has [result_obj, ...], extract value and done
+              case next_state.stack {
+                [JsObject(result_ref), ..] ->
+                  case heap.read(next_state.heap, result_ref) {
+                    Some(ObjectSlot(properties: props, ..)) -> {
+                      let val = case dict.get(props, Named("value")) {
+                        Ok(DataProperty(value: v, ..)) -> v
+                        _ -> JsUndefined
                       }
-                      _ ->
-                        Error(#(
-                          StepVmError(Unimplemented(
-                            "IteratorNext: generator .next() returned non-object",
-                          )),
-                          JsUndefined,
-                          next_state.heap,
-                        ))
+                      let done = case dict.get(props, Named("done")) {
+                        Ok(DataProperty(value: JsBool(d), ..)) -> d
+                        _ -> False
+                      }
+                      let iter_slot = case done {
+                        True -> JsUndefined
+                        False -> JsObject(iter_ref)
+                      }
+                      Ok(
+                        State(
+                          ..state.merge_globals(state, next_state, []),
+                          heap: next_state.heap,
+                          stack: [JsBool(done), val, iter_slot, ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
                     }
-                  _ ->
-                    Error(#(
-                      StepVmError(Unimplemented(
-                        "IteratorNext: generator .next() empty stack",
-                      )),
-                      JsUndefined,
-                      next_state.heap,
-                    ))
-                }
+                    _ ->
+                      Error(#(
+                        StepVmError(Unimplemented(
+                          "IteratorNext: generator .next() returned non-object",
+                        )),
+                        JsUndefined,
+                        next_state,
+                      ))
+                  }
+                _ ->
+                  Error(#(
+                    StepVmError(Unimplemented(
+                      "IteratorNext: generator .next() empty stack",
+                    )),
+                    JsUndefined,
+                    next_state,
+                  ))
               }
             }
             // Generic iterator: any object with .next(). Call it, extract {value, done}.
-            Some(ObjectSlot(..)) -> step_generic_iterator(state, iter_ref, rest)
+            Some(ObjectSlot(..)) ->
+              step_generic_iterator(state, iter_ref, rest)
+              |> result.map_error(mark_done(rest))
             _ ->
               state.throw_type_error(
                 state,
@@ -2377,25 +2392,78 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     }
 
     IteratorClose -> {
-      // MVP: just pop the iterator from the stack
+      // §7.4.11 normal-completion close. Stack: [iter, ..rest] → [..rest].
+      // iter slot is JsUndefined when [[Done]] (set by IteratorNext) → no-op.
       case state.stack {
+        [JsObject(_) as iter, ..rest] -> {
+          let state = State(..state, stack: rest, pc: state.pc + 1)
+          case builtins_iterator.iterator_close_normal(state, iter) {
+            #(state, Ok(Nil)) -> Ok(state)
+            #(state, Error(thrown)) -> Error(#(Thrown, thrown, state))
+          }
+        }
         [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-        _ -> underflow(state, "IteratorClose")
+        [] -> underflow(state, "IteratorClose")
       }
     }
+
+    IteratorCloseThrow -> {
+      // §7.4.11 throw-completion close. Stack: [thrown, iter, ..] → rethrows.
+      // unwind_to_catch truncated to PushTry-time depth (iter on top) then
+      // pushed thrown, so layout is guaranteed. iter slot is JsUndefined when
+      // [[Done]] (set by IteratorNext on done/abrupt) → skip .return().
+      case state.stack {
+        [thrown, JsObject(_) as iter, ..rest] -> {
+          let state = State(..state, stack: rest)
+          // Original error wins regardless of what .return() does.
+          let #(state, _inner) = builtins_iterator.call_return(state, iter)
+          Error(#(Thrown, thrown, state))
+        }
+        [thrown, _, ..rest] ->
+          Error(#(Thrown, thrown, State(..state, stack: rest)))
+        _ -> underflow(state, "IteratorCloseThrow")
+      }
+    }
+
+    IteratorRest -> {
+      // §13.15.5.3 / §14.3.3 rest element. [iter, ..rest] → [arr, ..rest].
+      // Drains via .next() loop without re-GetIterator. Emitter pops the
+      // close-guard try frame before this op so a .next() throw propagates
+      // without IteratorClose (spec: [[Done]]=true → no close on rest abrupt).
+      case state.stack {
+        [iter, ..rest] -> {
+          let state = State(..state, stack: rest, pc: state.pc + 1)
+          case builtins_iterator.iterator_rest(state, iter) {
+            #(state, Ok(arr)) -> Ok(State(..state, stack: [arr, ..rest]))
+            #(state, Error(thrown)) -> Error(#(Thrown, thrown, state))
+          }
+        }
+        [] -> underflow(state, "IteratorRest")
+      }
+    }
+
+    IteratorCheckObject ->
+      // §7.4.12 step 6 / §14.7.5.6 step 6.c: awaited iterator result must be
+      // an Object. Peeks; leaves the value on the stack on success.
+      case state.stack {
+        [JsObject(_), ..] -> Ok(State(..state, pc: state.pc + 1))
+        [_, ..] ->
+          state.throw_type_error(state, "Iterator result is not an object")
+        [] -> underflow(state, "IteratorCheckObject")
+      }
 
     // ---- Generator/async ---------------------------------------------
     InitialYield ->
       // Suspend immediately at start of generator body.
       // PC advances past InitialYield so resumption starts at the next op.
-      Error(#(Yielded, JsUndefined, state.heap))
+      Error(#(Yielded, JsUndefined, state))
 
     Yield -> {
       // Pop value from stack and suspend the generator.
       // On resume, .next(arg) value will be pushed onto the stack.
       case state.stack {
-        [yielded_value, ..] -> Error(#(Yielded, yielded_value, state.heap))
-        [] -> Error(#(Yielded, JsUndefined, state.heap))
+        [yielded_value, ..] -> Error(#(Yielded, yielded_value, state))
+        [] -> Error(#(Yielded, JsUndefined, state))
       }
     }
 
@@ -2418,7 +2486,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               // execute_inner's YieldStar arm strips arg from the
               // original stack and keeps pc here, so resume loops back
               // with [resume_val, iter, ..rest].
-              Error(#(Yielded, val, state.heap))
+              Error(#(Yielded, val, state))
           }
         }
         _ -> underflow(state, "YieldStar")
@@ -2448,7 +2516,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           use #(done, val, state) <- result.try(read_iter_result(state, res))
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-            False -> Error(#(Yielded, val, state.heap))
+            False -> Error(#(Yielded, val, state))
           }
         }
         _ -> underflow(state, "AsyncYieldStarResume")
@@ -2457,8 +2525,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     Await -> {
       // Pop the awaited value from the stack and suspend the async function.
       case state.stack {
-        [awaited_value, ..] -> Error(#(Awaited, awaited_value, state.heap))
-        [] -> Error(#(Awaited, JsUndefined, state.heap))
+        [awaited_value, ..] -> Error(#(Awaited, awaited_value, state))
+        [] -> Error(#(Awaited, JsUndefined, state))
       }
     }
 
@@ -2600,7 +2668,7 @@ fn call_function(
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
   new_callee_ref: option.Option(Ref),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   call.call_function(
     state,
     fn_ref,
@@ -2623,7 +2691,7 @@ fn call_native(
   args: List(JsValue),
   rest_stack: List(JsValue),
   this: JsValue,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   call.call_native(
     state,
     native,
@@ -2645,7 +2713,7 @@ fn do_call_super(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case state.callee_ref {
     None ->
       state.throw_reference_error(state, "'super' keyword unexpected here")
@@ -2695,7 +2763,7 @@ fn do_call_super_dispatch(
   derived_proto: Option(Ref),
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case heap.read(state.heap, parent_ref) {
     Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) -> {
       // JS-defined parent: allocate (or reuse) an OrdinaryObject as `this` and
@@ -2808,7 +2876,7 @@ fn do_construct(
   ctor_ref: Ref,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   call.do_construct(
     state,
     ctor_ref,
@@ -2826,7 +2894,7 @@ fn call_value(
   callee: JsValue,
   args: List(JsValue),
   this_val: JsValue,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   call.call_value(
     state,
     callee,
@@ -2864,7 +2932,7 @@ fn spread_into_array(
   state: State,
   target_ref: Ref,
   iterable: JsValue,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   array_ops.spread_into_array(
     state,
     target_ref,
@@ -2976,7 +3044,7 @@ fn binop_direct(
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case operators.exec_binop(kind, left, right) {
     Ok(result) -> Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
     Error(msg) -> state.throw_type_error(state, msg)
@@ -3006,7 +3074,7 @@ fn binop_with_to_primitive(
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let hint = case kind {
     opcode.Eq | opcode.NotEq -> coerce.DefaultHint
     _ -> coerce.NumberHint
@@ -3031,7 +3099,7 @@ fn unaryop_with_to_primitive(
   kind: opcode.UnaryOpKind,
   operand: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use #(prim, s1) <- result.try(
     state.rethrow(coerce.to_primitive(state, operand, coerce.NumberHint)),
   )
@@ -3047,7 +3115,7 @@ fn add_primitives(
   lprim: JsValue,
   rprim: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case lprim, rprim {
     JsString(a), JsString(b) ->
       Ok(State(..state, stack: [JsString(a <> b), ..rest], pc: state.pc + 1))
@@ -3077,7 +3145,7 @@ fn binop_add_with_to_primitive(
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use #(lprim, s1) <- result.try(
     state.rethrow(coerce.to_primitive(state, left, coerce.DefaultHint)),
   )
@@ -3104,7 +3172,7 @@ fn alloc_array_iterator(
 fn read_iter_result(
   state: State,
   res: JsValue,
-) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, Heap)) {
+) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
   case res {
     JsObject(rref) -> {
       use #(done, state) <- result.try(
@@ -3120,12 +3188,14 @@ fn read_iter_result(
 }
 
 /// IteratorNext fallback for user-defined iterators: call .next(), extract
-/// {value, done}, push [done, value, iter] onto stack.
+/// {value, done}, push [done, value, iter] onto stack. On done=true the iter
+/// slot becomes JsUndefined ([[Done]] tracking — see IteratorNext); abrupt
+/// completion is undef'd by the caller's mark_done wrapper.
 fn step_generic_iterator(
   state: State,
   iter_ref: Ref,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let iter = JsObject(iter_ref)
   use #(next_fn, state) <- result.try(
     state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
@@ -3134,7 +3204,15 @@ fn step_generic_iterator(
     state.rethrow(state.call(state, next_fn, iter, [])),
   )
   use #(done, val, state) <- result.map(read_iter_result(state, result_obj))
-  State(..state, stack: [JsBool(done), val, iter, ..rest], pc: state.pc + 1)
+  let iter_slot = case done {
+    True -> JsUndefined
+    False -> iter
+  }
+  State(
+    ..state,
+    stack: [JsBool(done), val, iter_slot, ..rest],
+    pc: state.pc + 1,
+  )
 }
 
 /// ES2024 §7.4.1 GetIterator(obj, kind) — look up Symbol.iterator and call it.
@@ -3144,7 +3222,7 @@ fn get_iterator_via_symbol(
   ref: value.Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   // Step 1: Let method be ? GetMethod(obj, @@iterator)
   case object.get_symbol_value(state, ref, value.symbol_iterator, iterable) {
     Ok(#(method, state)) ->
@@ -3168,7 +3246,7 @@ fn get_iterator_via_symbol(
                     "Iterator result is not an object",
                   )
               }
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
+            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
           }
         False ->
           state.throw_type_error(
@@ -3191,7 +3269,7 @@ fn get_async_iterator_via_symbol(
   ref: Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case try_iterator_symbol(state, ref, iterable, value.symbol_async_iterator) {
     Ok(#(iter, state)) ->
       Ok(State(..state, stack: [iter, ..rest_stack], pc: state.pc + 1))

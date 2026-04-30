@@ -64,7 +64,7 @@ fn with_combinator_iterable(
   args: List(JsValue),
   rest_stack: List(JsValue),
   body: fn(State, List(JsValue), Ref, JsValue, JsValue) -> State,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let #(h, promise_ref, data_ref, cap_resolve, cap_reject) =
     new_promise_capability(state.heap, state.builtins)
   let iterable = case args {
@@ -106,7 +106,7 @@ fn with_element_once(
   rest_stack: List(JsValue),
   already_called_ref: Ref,
   body: fn(Heap, JsValue) -> State,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let state = case
     heap.read_box(state.heap, already_called_ref) == Some(JsBool(True))
   {
@@ -134,7 +134,7 @@ pub fn call_native_promise_constructor(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let executor = case args {
     [f, ..] -> f
     [] -> JsUndefined
@@ -188,7 +188,7 @@ pub fn call_native_promise_resolve_fn(
   already_resolved_ref: Ref,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let resolution = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -292,7 +292,7 @@ pub fn call_native_promise_reject_fn(
   already_resolved_ref: Ref,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let reason = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -325,7 +325,7 @@ pub fn call_native_promise_then(
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let on_fulfilled = case args {
     [f, ..] -> f
     [] -> JsUndefined
@@ -344,7 +344,7 @@ pub fn call_native_promise_then(
           state.builtins,
           "then called on non-promise",
         )
-      Error(#(Thrown, err, h))
+      Error(#(Thrown, err, State(..state, heap: h)))
     }
   })
 
@@ -388,7 +388,7 @@ pub fn call_native_promise_finally(
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let on_finally = case args {
     [f, ..] -> f
     [] -> JsUndefined
@@ -438,7 +438,7 @@ pub fn call_native_finally_fulfill(
   on_finally: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let original_value = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -451,7 +451,7 @@ pub fn call_native_finally_fulfill(
       finally_chain_value(new_state, finally_result, original_value, rest_stack)
     Error(#(thrown, new_state)) ->
       // onFinally() threw — propagate the throw
-      Error(#(Thrown, thrown, new_state.heap))
+      Error(#(Thrown, thrown, new_state))
   }
 }
 
@@ -462,7 +462,7 @@ pub fn call_native_finally_reject(
   on_finally: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let original_reason = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -480,7 +480,7 @@ pub fn call_native_finally_reject(
       )
     Error(#(thrown, new_state)) ->
       // onFinally() threw — propagate the throw (overrides original reason)
-      Error(#(Thrown, thrown, new_state.heap))
+      Error(#(Thrown, thrown, new_state))
   }
 }
 
@@ -490,7 +490,7 @@ fn finally_chain_value(
   resolve_value: JsValue,
   captured_value: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   // Promise.resolve(resolve_value)
   let #(h, resolved_ref, _, resolve_fn, _) =
     new_promise_capability(state.heap, state.builtins)
@@ -523,7 +523,7 @@ fn finally_chain_throw(
   resolve_value: JsValue,
   captured_reason: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   // Promise.resolve(resolve_value)
   let #(h, resolved_ref, _, resolve_fn, _) =
     new_promise_capability(state.heap, state.builtins)
@@ -556,7 +556,7 @@ pub fn call_native_promise_resolve_static(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let val = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -632,7 +632,7 @@ pub fn call_native_promise_reject_static(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let reason = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -662,7 +662,7 @@ pub fn call_native_promise_all(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use state, elements, data_ref, cap_resolve, cap_reject <- with_combinator_iterable(
     state,
     args,
@@ -750,7 +750,7 @@ pub fn call_native_promise_race(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use state, elements, _data_ref, cap_resolve, cap_reject <- with_combinator_iterable(
     state,
     args,
@@ -784,7 +784,7 @@ pub fn call_native_promise_all_settled(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use state, elements, data_ref, cap_resolve, _cap_reject <- with_combinator_iterable(
     state,
     args,
@@ -883,7 +883,7 @@ pub fn call_native_promise_any(
   state: State,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use state, elements, data_ref, cap_resolve, cap_reject <- with_combinator_iterable(
     state,
     args,
@@ -1109,7 +1109,7 @@ pub fn call_native_promise_all_resolve_element(
   values_ref: Ref,
   already_called_ref: Ref,
   resolve: JsValue,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use h, val <- with_element_once(state, args, rest_stack, already_called_ref)
   let h = set_array_element(h, values_ref, index, val)
   promise_combinator_decrement_and_maybe_resolve(
@@ -1130,7 +1130,7 @@ pub fn call_native_promise_all_settled_resolve_element(
   values_ref: Ref,
   already_called_ref: Ref,
   resolve: JsValue,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use h, val <- with_element_once(state, args, rest_stack, already_called_ref)
   let #(h, obj_ref) =
     common.alloc_pojo(h, state.builtins.object.prototype, [
@@ -1156,7 +1156,7 @@ pub fn call_native_promise_all_settled_reject_element(
   values_ref: Ref,
   already_called_ref: Ref,
   resolve: JsValue,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use h, reason <- with_element_once(
     state,
     args,
@@ -1187,7 +1187,7 @@ pub fn call_native_promise_any_reject_element(
   errors_ref: Ref,
   already_called_ref: Ref,
   reject: JsValue,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   use h, reason <- with_element_once(
     state,
     args,
@@ -1354,7 +1354,7 @@ pub fn call_native_async_from_sync(
   args: List(JsValue),
   rest_stack: List(JsValue),
   kind: AsyncFromSyncKind,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let #(h, promise_ref, data_ref, cap_resolve, cap_reject) =
     new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
@@ -1557,7 +1557,7 @@ pub fn call_native_async_from_sync_unwrap(
   done: Bool,
   args: List(JsValue),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let v = list.first(args) |> result.unwrap(JsUndefined)
   let #(h, iter_result) =
     common.create_iter_result(state.heap, state.builtins, v, done)
@@ -1576,7 +1576,7 @@ pub fn call_native_async_from_sync_close(
   state: State,
   sync_iter: Ref,
   args: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let err = list.first(args) |> result.unwrap(JsUndefined)
   let sync_iter_val = JsObject(sync_iter)
   let state = case
@@ -1592,7 +1592,7 @@ pub fn call_native_async_from_sync_close(
       }
     Error(#(_, state)) -> state
   }
-  Error(#(Thrown, err, state.heap))
+  Error(#(Thrown, err, state))
 }
 
 /// PromiseResolve(value) then PerformPromiseThen with the supplied capability.

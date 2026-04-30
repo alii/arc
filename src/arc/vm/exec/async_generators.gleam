@@ -70,7 +70,7 @@ pub fn call_native_method(
   completion: AsyncGenCompletion,
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let arg = helpers.first_arg_or_undefined(args)
   let #(h, promise_ref, _data_ref, resolve, reject) =
     new_promise_capability(state.heap, state.builtins)
@@ -582,7 +582,7 @@ pub fn call_native_resume(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let settled = helpers.first_arg_or_undefined(args)
   let ret = fn(state: State) {
     Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
@@ -592,7 +592,7 @@ pub fn call_native_resume(
       Error(#(
         StepVmError(Unimplemented("async gen resume: slot missing")),
         JsUndefined,
-        state.heap,
+        state,
       ))
     Some(gen) ->
       case gen.queue {

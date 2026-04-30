@@ -129,7 +129,21 @@ pub type Op {
   GetIterator
   GetAsyncIterator
   IteratorNext
+  /// §7.4.11 normal-completion close. Stack: [iter, ..] → [..]. Get .return;
+  /// undef/null → no-op; call it; throw → propagate; non-object → TypeError.
   IteratorClose
+  /// §7.4.11 throw-completion close. Stack: [thrown, iter, ..] → rethrows
+  /// thrown. Get .return; call it swallowing any error; rethrow original.
+  /// Reached as a PushTry catch_target when a for-of/destructuring body throws.
+  IteratorCloseThrow
+  /// Stack: [v, ..] → [v, ..]. Throws TypeError if v is not a JsObject.
+  /// Used after Await in AsyncIteratorClose normal path (§7.4.12 step 6) and
+  /// after Await(next()) in for-await-of (§14.7.5.6 step 6.c).
+  IteratorCheckObject
+  /// §13.15.5.3 / §14.3.3 rest element. Stack: [iter, ..] → [arr, ..]. Drains
+  /// iter via .next() into a fresh Array — does NOT re-GetIterator. Emitter
+  /// pops the close-guard try frame first so .next() throw skips close.
+  IteratorRest
 
   // -- Class Inheritance --
   /// Wire prototype chain for derived class: [parent, ctor] → [ctor]
@@ -320,6 +334,9 @@ pub type IrOp {
   IrGetAsyncIterator
   IrIteratorNext
   IrIteratorClose
+  IrIteratorCloseThrow
+  IrIteratorCheckObject
+  IrIteratorRest
   IrSetupDerivedClass
   IrCallSuper(arity: Int)
   IrCallSuperApply

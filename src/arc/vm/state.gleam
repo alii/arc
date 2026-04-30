@@ -326,37 +326,37 @@ pub type StepResult {
 pub fn throw_type_error(
   state: State,
   msg: String,
-) -> Result(a, #(StepResult, JsValue, Heap)) {
+) -> Result(a, #(StepResult, JsValue, State)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  Error(#(Thrown, err, heap))
+  Error(#(Thrown, err, State(..state, heap:)))
 }
 
 /// Allocate a JS RangeError and return it as a step-level thrown error.
 pub fn throw_range_error(
   state: State,
   msg: String,
-) -> Result(a, #(StepResult, JsValue, Heap)) {
+) -> Result(a, #(StepResult, JsValue, State)) {
   let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  Error(#(Thrown, err, heap))
+  Error(#(Thrown, err, State(..state, heap:)))
 }
 
 /// Allocate a JS ReferenceError and return it as a step-level thrown error.
 pub fn throw_reference_error(
   state: State,
   msg: String,
-) -> Result(a, #(StepResult, JsValue, Heap)) {
+) -> Result(a, #(StepResult, JsValue, State)) {
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
-  Error(#(Thrown, err, heap))
+  Error(#(Thrown, err, State(..state, heap:)))
 }
 
 /// Bridge from inner helpers that return Result(a, #(JsValue, State))
-/// to the step function's Result(a, #(StepResult, JsValue, Heap)).
+/// to the step function's Result(a, #(StepResult, JsValue, State)).
 pub fn rethrow(
   res: Result(a, #(JsValue, State)),
-) -> Result(a, #(StepResult, JsValue, Heap)) {
+) -> Result(a, #(StepResult, JsValue, State)) {
   result.map_error(res, fn(err) {
     let #(thrown, state) = err
-    #(Thrown, thrown, state.heap)
+    #(Thrown, thrown, state)
   })
 }

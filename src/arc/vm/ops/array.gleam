@@ -134,7 +134,7 @@ pub fn spread_into_array(
   iterable: JsValue,
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case iterable {
     JsObject(src_ref) ->
       case heap.read(state.heap, src_ref) {
@@ -265,7 +265,7 @@ pub fn drain_generator_to_array(
   target_ref: Ref,
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   // call_native_generator_next pushes the result object onto rest_stack.
   // We pass an empty rest_stack so the result is the only thing on the stack.
   use next_state <- result.try(generators.call_native_generator_next(
@@ -317,14 +317,14 @@ pub fn drain_generator_to_array(
               "ArraySpread: generator .next() returned non-object",
             )),
             JsUndefined,
-            next_state.heap,
+            next_state,
           ))
       }
     _ ->
       Error(#(
         StepVmError(Unimplemented("ArraySpread: generator .next() empty stack")),
         JsUndefined,
-        next_state.heap,
+        next_state,
       ))
   }
 }

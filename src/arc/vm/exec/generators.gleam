@@ -41,7 +41,7 @@ pub fn call_native_generator_next(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
   _unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let next_arg = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
     Some(gen) ->
@@ -98,7 +98,7 @@ pub fn call_native_generator_return(
   args: List(JsValue),
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let return_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
     Some(gen) ->
@@ -172,7 +172,7 @@ fn do_return_resume(
   return_val: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let gen_exec_state =
     build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
   process_generator_return(
@@ -193,7 +193,7 @@ pub fn call_native_generator_throw(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   let throw_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
     Some(gen) ->
@@ -206,7 +206,7 @@ pub fn call_native_generator_throw(
               gen.data_ref,
               gen_with_state(gen, value.Completed),
             )
-          Error(#(Thrown, throw_val, h))
+          Error(#(Thrown, throw_val, State(..state, heap: h)))
         }
         value.Executing -> {
           state.throw_type_error(state, "Generator is already running")
@@ -260,7 +260,7 @@ pub fn call_native_generator_throw(
                       gen.data_ref,
                       gen_with_state(gen, value.Completed),
                     )
-                  Error(#(Thrown, throw_val, h2))
+                  Error(#(Thrown, throw_val, State(..state, heap: h2)))
                 }
               }
             }
@@ -418,8 +418,8 @@ fn forward_delegate(
   arg: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
-  on_missing: fn(State) -> Result(State, #(StepResult, JsValue, Heap)),
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+  on_missing: fn(State) -> Result(State, #(StepResult, JsValue, State)),
+) -> Result(State, #(StepResult, JsValue, State)) {
   let iter = JsObject(iter_ref)
   case object_ops.get_value(state, iter_ref, Named(method), iter) {
     Error(#(thrown, state)) -> {
@@ -429,7 +429,7 @@ fn forward_delegate(
           gen.data_ref,
           gen_with_state(gen, value.Completed),
         )
-      Error(#(Thrown, thrown, h))
+      Error(#(Thrown, thrown, State(..state, heap: h)))
     }
     Ok(#(JsUndefined, state)) | Ok(#(value.JsNull, state)) -> on_missing(state)
     Ok(#(method_fn, state)) ->
@@ -441,7 +441,7 @@ fn forward_delegate(
               gen.data_ref,
               gen_with_state(gen, value.Completed),
             )
-          Error(#(Thrown, thrown, h))
+          Error(#(Thrown, thrown, State(..state, heap: h)))
         }
         Ok(#(JsObject(rref) as res, state)) -> {
           let done = case
@@ -518,7 +518,7 @@ fn resume_after_delegate(
   method: String,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case method {
     "return" -> {
       // §27.5.3.8 step 7.c.viii: if the inner iterator's return completed,
@@ -556,7 +556,7 @@ fn run_to_completion(
   gen: GenData,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case execute_inner(resumed) {
     Ok(#(YieldCompletion(yv, h), suspended)) -> {
       let #(st, sf) = save_stacks(suspended.try_stack, suspended.finally_stack)
@@ -601,13 +601,13 @@ fn run_to_completion(
     }
     Ok(#(ThrowCompletion(thrown, h), _)) -> {
       let h = heap.write(h, gen.data_ref, gen_with_state(gen, value.Completed))
-      Error(#(Thrown, thrown, h))
+      Error(#(Thrown, thrown, State(..outer, heap: h)))
     }
     Ok(#(AwaitCompletion(_, _), _)) ->
       Error(#(
         StepVmError(Unimplemented("await in sync generator")),
         JsUndefined,
-        outer.heap,
+        outer,
       ))
     Error(vm_err) -> {
       let h =
@@ -616,7 +616,7 @@ fn run_to_completion(
           gen.data_ref,
           gen_with_state(gen, value.Completed),
         )
-      Error(#(StepVmError(vm_err), JsUndefined, h))
+      Error(#(StepVmError(vm_err), JsUndefined, State(..outer, heap: h)))
     }
   }
 }
@@ -651,7 +651,7 @@ fn process_generator_return(
   return_val: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, Heap)) {
+) -> Result(State, #(StepResult, JsValue, State)) {
   case find_next_finally(gen_state.code, gen_state.try_stack) {
     None -> {
       // No more finally blocks. Mark completed and return {value, done: true}.
@@ -755,13 +755,13 @@ fn process_generator_return(
           // Finally block threw. Mark completed and propagate the throw.
           let h3 =
             heap.write(h2, gen.data_ref, gen_with_state(gen, value.Completed))
-          Error(#(Thrown, thrown, h3))
+          Error(#(Thrown, thrown, State(..outer_state, heap: h3)))
         }
         Ok(#(AwaitCompletion(_, _), _)) ->
           Error(#(
             StepVmError(Unimplemented("await in sync generator")),
             JsUndefined,
-            gen_state.heap,
+            gen_state,
           ))
         Error(vm_err) -> {
           let h2 =
@@ -770,7 +770,11 @@ fn process_generator_return(
               gen.data_ref,
               gen_with_state(gen, value.Completed),
             )
-          Error(#(StepVmError(vm_err), JsUndefined, h2))
+          Error(#(
+            StepVmError(vm_err),
+            JsUndefined,
+            State(..gen_state, heap: h2),
+          ))
         }
       }
     }

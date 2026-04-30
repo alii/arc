@@ -17,13 +17,14 @@ import arc/vm/opcode.{
   IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetBoxed,
   IrGetElem, IrGetElem2, IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal,
   IrGetIterator, IrGetLocal, IrGetThis, IrInitGlobalLex, IrInitialYield,
-  IrIteratorClose, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp,
-  IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
-  IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal, IrPutLocal,
-  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar,
-  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrTypeofEvalVar,
-  IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
+  IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
+  IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy,
+  IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem,
+  IrPutEvalVar, IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrScopeGetVar,
+  IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap,
+  IrThrow, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield,
+  IrYieldStar,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
@@ -261,6 +262,12 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.IteratorNext, ..acc])
     [IrIteratorClose, ..rest] ->
       resolve_ops(rest, labels, [opcode.IteratorClose, ..acc])
+    [IrIteratorCloseThrow, ..rest] ->
+      resolve_ops(rest, labels, [opcode.IteratorCloseThrow, ..acc])
+    [IrIteratorCheckObject, ..rest] ->
+      resolve_ops(rest, labels, [opcode.IteratorCheckObject, ..acc])
+    [IrIteratorRest, ..rest] ->
+      resolve_ops(rest, labels, [opcode.IteratorRest, ..acc])
 
     // Class inheritance
     [IrSetupDerivedClass, ..rest] ->

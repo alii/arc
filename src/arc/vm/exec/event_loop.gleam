@@ -33,7 +33,7 @@ pub type ExecuteInnerFn =
 
 pub type CallNativeFn =
   fn(State, NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
-    Result(State, #(StepResult, JsValue, Heap))
+    Result(State, #(StepResult, JsValue, State))
 
 /// Drain the microtask queue.
 pub fn finish(state: State) -> State {
@@ -193,14 +193,14 @@ pub fn run_handler_with_this(
                 [] -> Ok(#(JsUndefined, merged))
               }
             }
-            Error(#(Thrown, thrown, h)) ->
-              Error(#(thrown, State(..state, heap: h)))
-            Error(#(StepVmError(vm_err), _, _heap)) ->
+            Error(#(Thrown, thrown, post)) ->
+              Error(#(thrown, State(..state, heap: post.heap)))
+            Error(#(StepVmError(vm_err), _, _post)) ->
               panic as {
                 "VM error in native call during job: " <> string.inspect(vm_err)
               }
-            Error(#(_step, _value, h)) ->
-              Error(#(JsUndefined, State(..state, heap: h)))
+            Error(#(_step, _value, post)) ->
+              Error(#(JsUndefined, State(..state, heap: post.heap)))
           }
         }
         _ -> Ok(#(JsUndefined, state))

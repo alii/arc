@@ -1036,7 +1036,7 @@ fn iterator_step_value(
 
 /// §7.4.11 IteratorClose with throw completion: get .return; if callable, call
 /// it (swallowing any throw — original error wins); return original error.
-fn close_throw(
+pub fn close_throw(
   state: State,
   obj: JsValue,
   original: JsValue,
@@ -1046,7 +1046,7 @@ fn close_throw(
 }
 
 /// IteratorClose with a freshly-allocated TypeError.
-fn close_throw_type(
+pub fn close_throw_type(
   state: State,
   obj: JsValue,
   msg: String,
@@ -1056,7 +1056,7 @@ fn close_throw_type(
 }
 
 /// IteratorClose with a freshly-allocated RangeError.
-fn close_throw_range(
+pub fn close_throw_range(
   state: State,
   obj: JsValue,
   msg: String,
@@ -1068,7 +1068,7 @@ fn close_throw_range(
 /// §7.4.11 IteratorClose with normal completion: get .return; if undefined →
 /// Ok; else call it; if call throws → propagate; if result not Object →
 /// TypeError; else Ok.
-fn iterator_close_normal(
+pub fn iterator_close_normal(
   state: State,
   obj: JsValue,
 ) -> #(State, Result(Nil, JsValue)) {
@@ -1084,7 +1084,7 @@ fn iterator_close_normal(
 /// Shared body of IteratorClose: GetMethod(iterator, "return") and call it.
 /// Ok(JsUndefined) means "no return method" (so the not-an-object check is
 /// skipped). Ok(other) is the return method's result.
-fn call_return(
+pub fn call_return(
   state: State,
   obj: JsValue,
 ) -> #(State, Result(JsValue, JsValue)) {
@@ -1099,6 +1099,37 @@ fn call_return(
       use result, state <- state.try_call(state, ret_fn, obj, [])
       #(state, Ok(result))
     }
+  }
+}
+
+/// §13.15.5.3 / §14.3.3 BindingRestElement: drain an already-obtained
+/// iterator object into a fresh Array via repeated .next() — does NOT
+/// re-GetIterator, so works for bare {next} iterators that don't inherit
+/// %IteratorPrototype%. .next() throwing propagates without close (caller
+/// has already seated the [[Done]] sentinel).
+pub fn iterator_rest(
+  state: State,
+  iter: JsValue,
+) -> #(State, Result(JsValue, JsValue)) {
+  use next, state <- state.try_op(object.get_value_of(
+    state,
+    iter,
+    Named("next"),
+  ))
+  iterator_rest_loop(state, iter, next, [])
+}
+
+fn iterator_rest_loop(
+  state: State,
+  iter: JsValue,
+  next: JsValue,
+  acc: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(state, step) = iterator_step_value(state, iter, next)
+  case step {
+    Error(thrown) -> #(state, Error(thrown))
+    Ok(None) -> state.ok_array(state, list.reverse(acc))
+    Ok(Some(v)) -> iterator_rest_loop(state, iter, next, [v, ..acc])
   }
 }
 
