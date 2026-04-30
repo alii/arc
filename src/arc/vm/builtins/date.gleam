@@ -16,7 +16,6 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/math as builtins_math
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
@@ -43,7 +42,6 @@ import arc/vm/value.{
   DatePrototypeValueOf, DateUTC, Dispatch, Finite, JsNull, JsNumber, JsObject,
   JsString, NaN, ObjectSlot,
 }
-import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
@@ -538,17 +536,7 @@ fn date_constructor(
     Error(e) -> #(state, Error(e))
     Ok(tv) -> {
       let #(heap, ref) =
-        heap.alloc(
-          state.heap,
-          ObjectSlot(
-            kind: DateObject(time_value: tv),
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: Some(proto),
-            symbol_properties: [],
-            extensible: True,
-          ),
-        )
+        common.alloc_wrapper(state.heap, DateObject(time_value: tv), proto)
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
   }

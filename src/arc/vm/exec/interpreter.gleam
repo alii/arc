@@ -1370,16 +1370,10 @@ fn step_objects(
   case op {
     NewObject -> {
       let #(heap, ref) =
-        heap.alloc(
+        common.alloc_wrapper(
           state.heap,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: Some(state.builtins.object.prototype),
-            symbol_properties: [],
-            extensible: True,
-          ),
+          OrdinaryObject,
+          state.builtins.object.prototype,
         )
       Ok(
         State(
@@ -1617,16 +1611,10 @@ fn step_objects(
                     state.rethrow(build_exclusion_sets(state, raw_keys)),
                   )
                   let #(heap, ref) =
-                    heap.alloc(
+                    common.alloc_wrapper(
                       state.heap,
-                      ObjectSlot(
-                        kind: OrdinaryObject,
-                        properties: dict.new(),
-                        elements: elements.new(),
-                        prototype: Some(state.builtins.object.prototype),
-                        symbol_properties: [],
-                        extensible: True,
-                      ),
+                      OrdinaryObject,
+                      state.builtins.object.prototype,
                     )
                   let state = State(..state, heap:)
                   use state <- result.map(
@@ -2246,16 +2234,10 @@ fn step_calls(
         )
         False -> {
           let #(h, proto_obj_ref) =
-            heap.alloc(
+            common.alloc_wrapper(
               heap,
-              ObjectSlot(
-                kind: OrdinaryObject,
-                properties: dict.new(),
-                elements: elements.new(),
-                prototype: Some(state.builtins.object.prototype),
-                symbol_properties: [],
-                extensible: True,
-              ),
+              OrdinaryObject,
+              state.builtins.object.prototype,
             )
           #(
             h,
@@ -3306,16 +3288,10 @@ fn alloc_array_iterator(
   builtins: common.Builtins,
   source: value.Ref,
 ) -> #(Heap, value.Ref) {
-  heap.alloc(
+  common.alloc_wrapper(
     h,
-    ObjectSlot(
-      kind: ArrayIteratorObject(source:, index: 0),
-      properties: dict.new(),
-      elements: elements.new(),
-      prototype: Some(builtins.array_iterator_proto),
-      symbol_properties: [],
-      extensible: True,
-    ),
+    ArrayIteratorObject(source:, index: 0),
+    builtins.array_iterator_proto,
   )
 }
 
@@ -3419,16 +3395,10 @@ fn get_async_iterator_via_symbol(
       case try_iterator_symbol(state, ref, iterable, value.symbol_iterator) {
         Ok(#(JsObject(sync_iter), state)) -> {
           let #(h, wrapped) =
-            heap.alloc(
+            common.alloc_wrapper(
               state.heap,
-              ObjectSlot(
-                kind: value.AsyncFromSyncIteratorObject(sync_iter:),
-                properties: dict.new(),
-                elements: elements.new(),
-                prototype: Some(state.builtins.async_from_sync_iterator_proto),
-                symbol_properties: [],
-                extensible: True,
-              ),
+              value.AsyncFromSyncIteratorObject(sync_iter:),
+              state.builtins.async_from_sync_iterator_proto,
             )
           Ok(
             State(

@@ -11,7 +11,6 @@ import arc/vm/value.{
   PromiseObject, PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
 }
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, Some}
 
@@ -100,16 +99,10 @@ pub fn create_promise(h: Heap, promise_proto: Ref) -> #(Heap, Ref, Ref) {
     )
   // Step 3: OrdinaryCreateFromConstructor — allocate the visible object
   let #(h, obj_ref) =
-    heap.alloc(
+    common.alloc_wrapper(
       h,
-      ObjectSlot(
-        kind: PromiseObject(promise_data: data_ref),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(promise_proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
+      PromiseObject(promise_data: data_ref),
+      promise_proto,
     )
   #(h, obj_ref, data_ref)
 }

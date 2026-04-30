@@ -7,7 +7,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type WeakMapNativeFn, Dispatch, JsObject, JsUndefined,
@@ -71,17 +70,7 @@ fn construct(
 ) -> #(State, Result(JsValue, JsValue)) {
   // For now, ignore iterable argument (most tests just test new WeakMap())
   let #(heap, ref) =
-    heap.alloc(
-      state.heap,
-      ObjectSlot(
-        kind: WeakMapObject(data: dict.new()),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
+    common.alloc_wrapper(state.heap, WeakMapObject(data: dict.new()), proto)
   #(State(..state, heap:), Ok(JsObject(ref)))
 }
 

@@ -285,16 +285,10 @@ fn call_generator_function(
         )
       // Create the generator object with Generator.prototype
       let #(h, gen_obj_ref) =
-        heap.alloc(
+        common.alloc_wrapper(
           h,
-          ObjectSlot(
-            kind: GeneratorObject(generator_data: data_ref),
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: Some(state.builtins.generator.prototype),
-            symbol_properties: [],
-            extensible: True,
-          ),
+          GeneratorObject(generator_data: data_ref),
+          state.builtins.generator.prototype,
         )
       // Return to caller with the generator object on the stack
       Ok(
@@ -326,16 +320,10 @@ fn call_generator_function(
           ),
         )
       let #(h, gen_obj_ref) =
-        heap.alloc(
+        common.alloc_wrapper(
           h,
-          ObjectSlot(
-            kind: GeneratorObject(generator_data: data_ref),
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: Some(state.builtins.generator.prototype),
-            symbol_properties: [],
-            extensible: True,
-          ),
+          GeneratorObject(generator_data: data_ref),
+          state.builtins.generator.prototype,
         )
       Ok(
         State(
@@ -409,16 +397,10 @@ fn call_async_generator_function(
           ),
         )
       let #(h, gen_obj_ref) =
-        heap.alloc(
+        common.alloc_wrapper(
           h,
-          ObjectSlot(
-            kind: AsyncGeneratorObject(generator_data: data_ref),
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: Some(state.builtins.async_generator.prototype),
-            symbol_properties: [],
-            extensible: True,
-          ),
+          AsyncGeneratorObject(generator_data: data_ref),
+          state.builtins.async_generator.prototype,
         )
       Ok(
         State(
@@ -588,32 +570,20 @@ fn async_setup_await(
   }
   // Create NativeAsyncResume callbacks
   let #(h, fulfill_resume_ref) =
-    heap.alloc(
+    common.alloc_wrapper(
       h,
-      ObjectSlot(
-        kind: NativeFunction(
-          value.Call(value.AsyncResume(async_data_ref:, is_reject: False)),
-        ),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(builtins.function.prototype),
-        symbol_properties: [],
-        extensible: True,
+      NativeFunction(
+        value.Call(value.AsyncResume(async_data_ref:, is_reject: False)),
       ),
+      builtins.function.prototype,
     )
   let #(h, reject_resume_ref) =
-    heap.alloc(
+    common.alloc_wrapper(
       h,
-      ObjectSlot(
-        kind: NativeFunction(
-          value.Call(value.AsyncResume(async_data_ref:, is_reject: True)),
-        ),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(builtins.function.prototype),
-        symbol_properties: [],
-        extensible: True,
+      NativeFunction(
+        value.Call(value.AsyncResume(async_data_ref:, is_reject: True)),
       ),
+      builtins.function.prototype,
     )
   // Attach .then(fulfillResume, rejectResume) to the awaited promise
   let #(h, child_ref, child_data_ref) =

@@ -4255,16 +4255,10 @@ fn array_values(
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, _length, state <- require_array(this, state)
   let #(heap, iter_ref) =
-    heap.alloc(
+    common.alloc_wrapper(
       state.heap,
-      ObjectSlot(
-        kind: value.ArrayIteratorObject(source: ref, index: 0),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(state.builtins.array_iterator_proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
+      value.ArrayIteratorObject(source: ref, index: 0),
+      state.builtins.array_iterator_proto,
     )
   #(State(..state, heap:), Ok(JsObject(iter_ref)))
 }

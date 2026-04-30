@@ -20,7 +20,6 @@ import arc/vm/completion.{
 import arc/vm/exec/generators
 import arc/vm/exec/promises
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/opcode.{AsyncYieldStarNext}
 import arc/vm/ops/object as object_ops
@@ -36,7 +35,6 @@ import arc/vm/value.{
   AsyncGeneratorObject, AsyncGeneratorSlot, JsNull, JsObject, JsUndefined, Named,
   NativeFunction, ObjectSlot,
 }
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -702,18 +700,12 @@ fn alloc_resume(
   is_reject: Bool,
   kind: AGResumeKind,
 ) -> #(Heap, Ref) {
-  heap.alloc(
+  common.alloc_wrapper(
     h,
-    ObjectSlot(
-      kind: NativeFunction(
-        value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, kind:)),
-      ),
-      properties: dict.new(),
-      elements: elements.new(),
-      prototype: Some(function_proto),
-      symbol_properties: [],
-      extensible: True,
+    NativeFunction(
+      value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, kind:)),
     ),
+    function_proto,
   )
 }
 

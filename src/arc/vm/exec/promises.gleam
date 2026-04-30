@@ -406,33 +406,21 @@ pub fn call_native_promise_finally(
     True -> {
       // Create fulfill wrapper: calls onFinally(), then returns original value
       let #(h, fulfill_ref) =
-        heap.alloc(
+        common.alloc_wrapper(
           state.heap,
-          value.ObjectSlot(
-            kind: value.NativeFunction(
-              value.Call(value.PromiseFinallyFulfill(on_finally:)),
-            ),
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: Some(state.builtins.function.prototype),
-            symbol_properties: [],
-            extensible: True,
+          value.NativeFunction(
+            value.Call(value.PromiseFinallyFulfill(on_finally:)),
           ),
+          state.builtins.function.prototype,
         )
       // Create reject wrapper: calls onFinally(), then re-throws original reason
       let #(h, reject_ref) =
-        heap.alloc(
+        common.alloc_wrapper(
           h,
-          value.ObjectSlot(
-            kind: value.NativeFunction(
-              value.Call(value.PromiseFinallyReject(on_finally:)),
-            ),
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: Some(state.builtins.function.prototype),
-            symbol_properties: [],
-            extensible: True,
+          value.NativeFunction(
+            value.Call(value.PromiseFinallyReject(on_finally:)),
           ),
+          state.builtins.function.prototype,
         )
       call_native_promise_then(
         State(..state, heap: h),
@@ -514,18 +502,12 @@ fn finally_chain_value(
     ])
   // Create the value thunk
   let #(h2, thunk_ref) =
-    heap.alloc(
+    common.alloc_wrapper(
       state1.heap,
-      value.ObjectSlot(
-        kind: value.NativeFunction(
-          value.Call(value.PromiseFinallyValueThunk(value: captured_value)),
-        ),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(state.builtins.function.prototype),
-        symbol_properties: [],
-        extensible: True,
+      value.NativeFunction(
+        value.Call(value.PromiseFinallyValueThunk(value: captured_value)),
       ),
+      state.builtins.function.prototype,
     )
   // Chain .then(thunk) on the resolved promise
   call_native_promise_then(
@@ -553,18 +535,12 @@ fn finally_chain_throw(
     ])
   // Create the thrower
   let #(h2, thrower_ref) =
-    heap.alloc(
+    common.alloc_wrapper(
       state1.heap,
-      value.ObjectSlot(
-        kind: value.NativeFunction(
-          value.Call(value.PromiseFinallyThrower(reason: captured_reason)),
-        ),
-        properties: dict.new(),
-        elements: elements.new(),
-        prototype: Some(state.builtins.function.prototype),
-        symbol_properties: [],
-        extensible: True,
+      value.NativeFunction(
+        value.Call(value.PromiseFinallyThrower(reason: captured_reason)),
       ),
+      state.builtins.function.prototype,
     )
   // Chain .then(thrower) on the resolved promise
   call_native_promise_then(
