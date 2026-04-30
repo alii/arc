@@ -298,120 +298,120 @@ pub fn parse_error_to_string(error: ParseError) -> String {
 
 pub fn parse_error_pos(error: ParseError) -> Int {
   case error {
-    LexerError(pos:, ..) -> pos
-    ExpectedToken(pos:, ..) -> pos
-    ExpectedIdentifier(pos:) -> pos
-    ExpectedSemicolon(pos:) -> pos
-    ExpectedBindingPattern(pos:) -> pos
-    ExpectedPropertyName(pos:) -> pos
-    ExpectedImportSpecifierName(pos:) -> pos
-    ExpectedExportSpecifierName(pos:) -> pos
-    ExpectedCaseDefaultOrBrace(pos:) -> pos
-    UnexpectedCloseBrace(pos:) -> pos
-    UnexpectedExport(pos:) -> pos
-    UnexpectedSuper(pos:) -> pos
-    UnexpectedCloseParen(pos:) -> pos
-    UnexpectedToken(pos:, ..) -> pos
-    NotAnArrowFunction(pos:) -> pos
-    ReturnOutsideFunction(pos:) -> pos
-    BreakOutsideLoopOrSwitch(pos:) -> pos
-    ContinueOutsideLoop(pos:) -> pos
-    ReservedWordStrictMode(pos:, ..) -> pos
-    YieldReservedStrictMode(pos:) -> pos
-    LetIdentifierStrictMode(pos:) -> pos
-    StaticReservedStrictMode(pos:) -> pos
-    WithNotAllowedStrictMode(pos:) -> pos
-    DeleteUnqualifiedStrictMode(pos:) -> pos
-    DeletePrivateName(pos:) -> pos
-    OctalEscapeStrictMode(pos:) -> pos
-    OctalLiteralStrictMode(pos:) -> pos
-    YieldInGenerator(pos:) -> pos
-    AwaitInModule(pos:) -> pos
-    AwaitInAsyncFunction(pos:) -> pos
-    EnumReservedWord(pos:) -> pos
-    DuplicateParameterName(pos:, ..) -> pos
-    DuplicateBindingLexical(pos:, ..) -> pos
-    DuplicateExport(pos:, ..) -> pos
-    DuplicateImportBinding(pos:, ..) -> pos
-    DuplicateLabel(pos:, ..) -> pos
-    DuplicateProtoProperty(pos:) -> pos
-    IdentifierAlreadyDeclared(pos:, ..) -> pos
-    LexicalDeclInSingleStatement(pos:) -> pos
-    YieldInFormalParameter(pos:) -> pos
-    InvalidLhsPrefixOp(pos:) -> pos
-    SuperCallNotInDerivedConstructor(pos:) -> pos
-    SuperPropertyNotInMethod(pos:) -> pos
-    NewTargetOutsideFunction(pos:) -> pos
-    MissingConstInitializer(pos:) -> pos
-    RestTrailingComma(pos:) -> pos
-    ExpectedForHeadSeparator(pos:) -> pos
-    MissingCatchOrFinally(pos:) -> pos
-    StrictModeModification(pos:, ..) -> pos
-    ExpectedModuleSpecifier(pos:) -> pos
-    DestructuringMissingInitializer(pos:) -> pos
-    ExpectedCommaOrBracket(pos:) -> pos
-    SetterExactlyOneParam(pos:) -> pos
-    ClassConstructorNotGetter(pos:) -> pos
-    ExpectedCommaOrObjectClose(pos:) -> pos
-    ExpectedForDeclSeparator(pos:) -> pos
-    ExpectedCloseAfterSetter(pos:) -> pos
-    ClassConstructorNotSetter(pos:) -> pos
-    InvalidForInOfLhs(pos:, ..) -> pos
-    ExpectedForSeparator(pos:) -> pos
-    UndefinedLabel(pos:, ..) -> pos
-    ThrowLineBreak(pos:) -> pos
-    GetterNoParams(pos:) -> pos
-    SetterNoRest(pos:) -> pos
-    RestMustBeLast(pos:) -> pos
-    ClassConstructorGenerator(pos:) -> pos
-    ClassConstructorAsync(pos:) -> pos
-    ClassDuplicateConstructor(pos:) -> pos
-    StaticPrototype(pos:) -> pos
-    LexicalDeclInLabel(pos:) -> pos
-    GeneratorDeclLabeled(pos:) -> pos
-    InvalidDestructuringTarget(pos:) -> pos
-    InvalidAssignmentLhs(pos:) -> pos
-    ExpectedNewTarget(pos:) -> pos
-    ExpectedImportMeta(pos:) -> pos
-    ExpectedCallOrDotAfterImport(pos:) -> pos
-    ExpectedIdentifierAfterDot(pos:) -> pos
-    ExpectedAfterOptionalChain(pos:) -> pos
-    ExpectedCommaOrCloseParen(pos:) -> pos
-    ExpectedCommaOrBracketInArray(pos:) -> pos
-    ExpectedCommaOrBracketInExpr(pos:) -> pos
-    ExpectedCommaOrBraceInObject(pos:) -> pos
-    ExpectedCommaOrBraceInObjectLiteral(pos:) -> pos
-    ExpectedBraceOrStarAfterComma(pos:) -> pos
-    ExpectedFromOrComma(pos:) -> pos
-    ExpectedImportSpecifier(pos:) -> pos
-    ExpectedCommaOrBraceInImport(pos:) -> pos
-    ExpectedFunctionAfterAsync(pos:) -> pos
-    ExpectedAsOrFromAfterExportStar(pos:) -> pos
-    UnexpectedAfterExport(pos:) -> pos
-    ExpectedCommaOrBraceInExport(pos:) -> pos
-    ExpectedExportAlias(pos:) -> pos
-    FunctionDeclInSingleStatement(pos:) -> pos
-    StrictModeBindingName(pos:, ..) -> pos
-    LetBindingInLexicalDecl(pos:) -> pos
-    ForInInitializer(pos:) -> pos
-    ForOfInitializer(pos:) -> pos
-    StrictModeParamName(pos:, ..) -> pos
-    RestDefaultInitializer(pos:) -> pos
-    FunctionDeclInLabelBody(pos:) -> pos
-    ShorthandDefaultOutsideDestructuring(pos:) -> pos
-    StrictModeAssignment(pos:, ..) -> pos
-    EvalArgsAssignStrictMode(pos:) -> pos
-    InvalidPostfixLhs(pos:) -> pos
-    ExpectedNewTargetGot(pos:, ..) -> pos
-    ExpectedImportMetaGot(pos:, ..) -> pos
-    StrictModeModifyRestricted(pos:, ..) -> pos
-    ExpectedIdentifierAsString(pos:, ..) -> pos
-    DuplicateParamNameStrictMode(pos:, ..) -> pos
-    ReservedWordImportBinding(pos:, ..) -> pos
-    DuplicateDefaultCase(pos:) -> pos
-    UndeclaredExportBinding(pos:, ..) -> pos
-    ImportNotTopLevel(pos:) -> pos
-    ExportNotTopLevel(pos:) -> pos
-    UnicodeEscapeInMetaProperty(pos:) -> pos
+    LexerError(pos:, ..)
+    | ExpectedToken(pos:, ..)
+    | ExpectedIdentifier(pos:)
+    | ExpectedSemicolon(pos:)
+    | ExpectedBindingPattern(pos:)
+    | ExpectedPropertyName(pos:)
+    | ExpectedImportSpecifierName(pos:)
+    | ExpectedExportSpecifierName(pos:)
+    | ExpectedCaseDefaultOrBrace(pos:)
+    | UnexpectedCloseBrace(pos:)
+    | UnexpectedExport(pos:)
+    | UnexpectedSuper(pos:)
+    | UnexpectedCloseParen(pos:)
+    | UnexpectedToken(pos:, ..)
+    | NotAnArrowFunction(pos:)
+    | ReturnOutsideFunction(pos:)
+    | BreakOutsideLoopOrSwitch(pos:)
+    | ContinueOutsideLoop(pos:)
+    | ReservedWordStrictMode(pos:, ..)
+    | YieldReservedStrictMode(pos:)
+    | LetIdentifierStrictMode(pos:)
+    | StaticReservedStrictMode(pos:)
+    | WithNotAllowedStrictMode(pos:)
+    | DeleteUnqualifiedStrictMode(pos:)
+    | DeletePrivateName(pos:)
+    | OctalEscapeStrictMode(pos:)
+    | OctalLiteralStrictMode(pos:)
+    | YieldInGenerator(pos:)
+    | AwaitInModule(pos:)
+    | AwaitInAsyncFunction(pos:)
+    | EnumReservedWord(pos:)
+    | DuplicateParameterName(pos:, ..)
+    | DuplicateBindingLexical(pos:, ..)
+    | DuplicateExport(pos:, ..)
+    | DuplicateImportBinding(pos:, ..)
+    | DuplicateLabel(pos:, ..)
+    | DuplicateProtoProperty(pos:)
+    | IdentifierAlreadyDeclared(pos:, ..)
+    | LexicalDeclInSingleStatement(pos:)
+    | YieldInFormalParameter(pos:)
+    | InvalidLhsPrefixOp(pos:)
+    | SuperCallNotInDerivedConstructor(pos:)
+    | SuperPropertyNotInMethod(pos:)
+    | NewTargetOutsideFunction(pos:)
+    | MissingConstInitializer(pos:)
+    | RestTrailingComma(pos:)
+    | ExpectedForHeadSeparator(pos:)
+    | MissingCatchOrFinally(pos:)
+    | StrictModeModification(pos:, ..)
+    | ExpectedModuleSpecifier(pos:)
+    | DestructuringMissingInitializer(pos:)
+    | ExpectedCommaOrBracket(pos:)
+    | SetterExactlyOneParam(pos:)
+    | ClassConstructorNotGetter(pos:)
+    | ExpectedCommaOrObjectClose(pos:)
+    | ExpectedForDeclSeparator(pos:)
+    | ExpectedCloseAfterSetter(pos:)
+    | ClassConstructorNotSetter(pos:)
+    | InvalidForInOfLhs(pos:, ..)
+    | ExpectedForSeparator(pos:)
+    | UndefinedLabel(pos:, ..)
+    | ThrowLineBreak(pos:)
+    | GetterNoParams(pos:)
+    | SetterNoRest(pos:)
+    | RestMustBeLast(pos:)
+    | ClassConstructorGenerator(pos:)
+    | ClassConstructorAsync(pos:)
+    | ClassDuplicateConstructor(pos:)
+    | StaticPrototype(pos:)
+    | LexicalDeclInLabel(pos:)
+    | GeneratorDeclLabeled(pos:)
+    | InvalidDestructuringTarget(pos:)
+    | InvalidAssignmentLhs(pos:)
+    | ExpectedNewTarget(pos:)
+    | ExpectedImportMeta(pos:)
+    | ExpectedCallOrDotAfterImport(pos:)
+    | ExpectedIdentifierAfterDot(pos:)
+    | ExpectedAfterOptionalChain(pos:)
+    | ExpectedCommaOrCloseParen(pos:)
+    | ExpectedCommaOrBracketInArray(pos:)
+    | ExpectedCommaOrBracketInExpr(pos:)
+    | ExpectedCommaOrBraceInObject(pos:)
+    | ExpectedCommaOrBraceInObjectLiteral(pos:)
+    | ExpectedBraceOrStarAfterComma(pos:)
+    | ExpectedFromOrComma(pos:)
+    | ExpectedImportSpecifier(pos:)
+    | ExpectedCommaOrBraceInImport(pos:)
+    | ExpectedFunctionAfterAsync(pos:)
+    | ExpectedAsOrFromAfterExportStar(pos:)
+    | UnexpectedAfterExport(pos:)
+    | ExpectedCommaOrBraceInExport(pos:)
+    | ExpectedExportAlias(pos:)
+    | FunctionDeclInSingleStatement(pos:)
+    | StrictModeBindingName(pos:, ..)
+    | LetBindingInLexicalDecl(pos:)
+    | ForInInitializer(pos:)
+    | ForOfInitializer(pos:)
+    | StrictModeParamName(pos:, ..)
+    | RestDefaultInitializer(pos:)
+    | FunctionDeclInLabelBody(pos:)
+    | ShorthandDefaultOutsideDestructuring(pos:)
+    | StrictModeAssignment(pos:, ..)
+    | EvalArgsAssignStrictMode(pos:)
+    | InvalidPostfixLhs(pos:)
+    | ExpectedNewTargetGot(pos:, ..)
+    | ExpectedImportMetaGot(pos:, ..)
+    | StrictModeModifyRestricted(pos:, ..)
+    | ExpectedIdentifierAsString(pos:, ..)
+    | DuplicateParamNameStrictMode(pos:, ..)
+    | ReservedWordImportBinding(pos:, ..)
+    | DuplicateDefaultCase(pos:)
+    | UndeclaredExportBinding(pos:, ..)
+    | ImportNotTopLevel(pos:)
+    | ExportNotTopLevel(pos:)
+    | UnicodeEscapeInMetaProperty(pos:) -> pos
   }
 }
