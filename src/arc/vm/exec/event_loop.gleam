@@ -243,7 +243,6 @@ fn run_closure_for_job(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      finally_stack: [],
       this_binding: new_this,
       callee_ref: Some(fn_ref),
       call_args: args,

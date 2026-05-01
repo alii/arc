@@ -13,18 +13,17 @@ import arc/vm/opcode.{
   IrCallSuper, IrCallSuperApply, IrCreateArguments, IrDeclareEvalVar,
   IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally,
-  IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetBoxed,
-  IrGetElem, IrGetElem2, IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal,
-  IrGetIterator, IrGetLocal, IrGetThis, IrInitGlobalLex, IrInitialYield,
-  IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
-  IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy,
-  IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem,
-  IrPutEvalVar, IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrScopeGetVar,
-  IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap,
-  IrThrow, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield,
-  IrYieldStar,
+  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
+  IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
+  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
+  IrGetThis, IrGosub, IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject,
+  IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump,
+  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
+  IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry,
+  IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField,
+  IrPutGlobal, IrPutLocal, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
+  IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
+  IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
@@ -120,9 +119,13 @@ fn resolve_ops(
       let assert Ok(pc) = dict.get(labels, label)
       resolve_ops(rest, labels, [opcode.JumpIfNullish(pc), ..acc])
     }
-    [IrPushTry(catch_label, _finally_label), ..rest] -> {
+    [IrPushTry(catch_label), ..rest] -> {
       let assert Ok(catch_pc) = dict.get(labels, catch_label)
       resolve_ops(rest, labels, [opcode.PushTry(catch_pc), ..acc])
+    }
+    [IrGosub(label), ..rest] -> {
+      let assert Ok(pc) = dict.get(labels, label)
+      resolve_ops(rest, labels, [opcode.Gosub(pc), ..acc])
     }
 
     // Scope-aware ops should NOT appear here (consumed by Phase 2)
@@ -225,12 +228,7 @@ fn resolve_ops(
     // Exception handling
     [IrThrow, ..rest] -> resolve_ops(rest, labels, [opcode.Throw, ..acc])
     [IrPopTry, ..rest] -> resolve_ops(rest, labels, [opcode.PopTry, ..acc])
-    [IrEnterFinally, ..rest] ->
-      resolve_ops(rest, labels, [opcode.EnterFinally, ..acc])
-    [IrEnterFinallyThrow, ..rest] ->
-      resolve_ops(rest, labels, [opcode.EnterFinallyThrow, ..acc])
-    [IrLeaveFinally, ..rest] ->
-      resolve_ops(rest, labels, [opcode.LeaveFinally, ..acc])
+    [IrRet, ..rest] -> resolve_ops(rest, labels, [opcode.Ret, ..acc])
 
     // Closures
     [IrMakeClosure(func_index), ..rest] ->

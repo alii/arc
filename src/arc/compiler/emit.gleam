@@ -11,16 +11,16 @@ import arc/vm/opcode.{
   IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCreateArguments,
   IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally,
-  IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem,
-  IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrInitGlobalLex,
+  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
+  IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
+  IrGetField2, IrGetIterator, IrGetThis, IrGosub, IrInitGlobalLex,
   IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
   IrIteratorNext, IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure, IrNewObject, IrNewRegExp,
+  IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrNewRegExp,
   IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
-  IrPutElem, IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar,
-  IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
-  IrYield, IrYieldStar,
+  IrPutElem, IrPutField, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
+  IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
+  IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -113,6 +113,17 @@ pub type LoopContext {
     /// After cross_pop_try, emit IrIteratorClose (or IrSwap+IrIteratorClose
     /// when a return value sits above iter). Exactly one stack slot (iter).
     has_iterator: Bool,
+    /// If Some(L): when break/continue/return *crosses* this frame, after
+    /// dropping try frames, emit `push undef; Gosub(L); Pop` so the finally
+    /// subroutine runs before the jump proceeds. Mirrors QuickJS
+    /// BlockEnv.label_finally (quickjs.c:21326).
+    label_finally: Option(Int),
+    /// Raw IrPop count when *crossed*. Non-zero only on the finally-body
+    /// barrier, where it discards [slot, gosub_retpc] so a break/continue/
+    /// return inside finally never reaches IrRet — spec-correct completion
+    /// replacement (§14.15.3). Mirrors QuickJS BlockEnv.drop_count
+    /// (quickjs.c:21325).
+    drop_count: Int,
   )
 }
 
@@ -463,6 +474,8 @@ fn push_loop(e: Emitter, break_label: Int, continue_label: Int) -> Emitter {
         is_regular: False,
         cross_pop_try: 0,
         has_iterator: False,
+        label_finally: None,
+        drop_count: 0,
       ),
       ..e.loop_stack
     ],
@@ -488,6 +501,8 @@ fn push_loop_iter(
         is_regular: False,
         cross_pop_try: 1,
         has_iterator: True,
+        label_finally: None,
+        drop_count: 0,
       ),
       ..e.loop_stack
     ],
@@ -507,6 +522,48 @@ fn push_barrier(e: Emitter, pop_try: Int) -> Emitter {
       is_regular: False,
       cross_pop_try: pop_try,
       has_iterator: False,
+      label_finally: None,
+      drop_count: 0,
+    ),
+    ..e.loop_stack
+  ])
+}
+
+/// Barrier for a try-body or catch-body that has a `finally`. When crossed,
+/// emit_goto_loop / ReturnStatement walk will: PopTry×pop_try, then
+/// `push undef; Gosub(fin_label); Pop`. QuickJS: push_break_entry then
+/// `block_env.label_finally = label_finally` (quickjs.c:28826-28828, 28889).
+fn push_barrier_finally(e: Emitter, pop_try: Int, fin_label: Int) -> Emitter {
+  Emitter(..e, loop_stack: [
+    LoopContext(
+      break_label: -1,
+      continue_label: -1,
+      label: None,
+      is_regular: False,
+      cross_pop_try: pop_try,
+      has_iterator: False,
+      label_finally: Some(fin_label),
+      drop_count: 0,
+    ),
+    ..e.loop_stack
+  ])
+}
+
+/// Barrier for the finally body itself. Crossing it drops `drop` value-stack
+/// slots — the [slot, gosub_retpc] pair pushed by the caller+Gosub — so the
+/// abrupt completion inside finally replaces the saved one (never reaches
+/// IrRet). QuickJS: push_break_entry(..., -1, -1, 2) at quickjs.c:28934-28935.
+fn push_barrier_drop(e: Emitter, drop: Int) -> Emitter {
+  Emitter(..e, loop_stack: [
+    LoopContext(
+      break_label: -1,
+      continue_label: -1,
+      label: None,
+      is_regular: False,
+      cross_pop_try: 0,
+      has_iterator: False,
+      label_finally: None,
+      drop_count: drop,
     ),
     ..e.loop_stack
   ])
@@ -524,6 +581,26 @@ fn repeat_ir(e: Emitter, op: IrOp, n: Int) -> Emitter {
     True -> e
     False -> repeat_ir(emit_ir(e, op), op, n - 1)
   }
+}
+
+/// Emit Swap;Pop n times — discards n slots from *under* top-of-stack.
+/// Used by ReturnStatement to nip saved [retpc, slot] when return crosses a
+/// finally-body barrier (Arc has no IrNip / OP_nip_catch).
+fn repeat_nip(e: Emitter, n: Int) -> Emitter {
+  case n <= 0 {
+    True -> e
+    False -> repeat_nip(e |> emit_ir(IrSwap) |> emit_ir(IrPop), n - 1)
+  }
+}
+
+/// Normal-completion entry to a finally subroutine: dummy slot + Gosub + drop.
+/// Stack-neutral round trip. QuickJS: `OP_undefined; OP_gosub L; OP_drop`
+/// (quickjs.c:28839-28841, 28903-28905).
+fn emit_gosub_normal(e: Emitter, fin_label: Int) -> Emitter {
+  e
+  |> push_const(JsUndefined)
+  |> emit_ir(IrGosub(fin_label))
+  |> emit_ir(IrPop)
 }
 
 /// Shared body of break/continue. Walks loop_stack emitting PopTry and
@@ -568,11 +645,18 @@ fn emit_goto_loop_walk(
       case is_target {
         True -> Ok(emit_ir(e, IrJump(target_label)))
         False -> {
-          // Crossing this frame: drop its try frames + iterator.
+          // Crossing this frame: balance try_stack, discard saved gosub slots,
+          // close iterator, then run any pending finally as a subroutine.
+          // QuickJS emit_break (quickjs.c:27794-27806).
           let e = repeat_ir(e, IrPopTry, ctx.cross_pop_try)
+          let e = repeat_ir(e, IrPop, ctx.drop_count)
           let e = case ctx.has_iterator {
             True -> emit_ir(e, IrIteratorClose)
             False -> e
+          }
+          let e = case ctx.label_finally {
+            Some(lbl) -> emit_gosub_normal(e, lbl)
+            None -> e
           }
           emit_goto_loop_walk(e, rest, name, is_cont)
         }
@@ -646,7 +730,7 @@ fn emit_stmt_tail(
           let #(e, catch_label) = fresh_label(e)
           let #(e, end_label) = fresh_label(e)
 
-          let e = emit_ir(e, IrPushTry(catch_label, -1))
+          let e = emit_ir(e, IrPushTry(catch_label))
           use e <- result.try(emit_stmt_tail(e, block))
           let e = emit_ir(e, IrPopTry)
           let e = emit_ir(e, IrJump(end_label))
@@ -1460,16 +1544,20 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
         Some(expr) -> emit_expr(e, expr)
         None -> Ok(push_const(e, JsUndefined))
       })
-      // §7.4.11: return inside for-of must close every enclosing iterator.
-      // Walk the whole loop_stack; for each crossed frame drop its try
-      // frames; if it owns an iterator, swap retval below iter then close.
-      // A throw from .return() replaces the return (spec step 6).
+      // retval on top throughout. PopTry doesn't touch value stack. drop_count
+      // slots sit *under* retval → nip. has_iterator: iter under retval → swap+close.
+      // label_finally: retval IS the gosub slot (QuickJS emit_return quickjs.c:27876).
       let e =
         list.fold(e.loop_stack, e, fn(e, ctx) {
           let e = repeat_ir(e, IrPopTry, ctx.cross_pop_try)
-          case ctx.has_iterator {
+          let e = repeat_nip(e, ctx.drop_count)
+          let e = case ctx.has_iterator {
             True -> e |> emit_ir(IrSwap) |> emit_ir(IrIteratorClose)
             False -> e
+          }
+          case ctx.label_finally {
+            Some(lbl) -> emit_ir(e, IrGosub(lbl))
+            None -> e
           }
         })
       Ok(emit_ir(e, IrReturn))
@@ -1487,7 +1575,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           let #(e, catch_label) = fresh_label(e)
           let #(e, end_label) = fresh_label(e)
 
-          let e = emit_ir(e, IrPushTry(catch_label, -1))
+          let e = emit_ir(e, IrPushTry(catch_label))
           let e = push_barrier(e, 1)
           use e <- result.try(emit_stmt(e, block))
           let e = pop_loop(e)
@@ -1509,51 +1597,66 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           Ok(e)
         }
 
-        // try/finally (no catch)
+        // try/finally (no catch). QuickJS js_parse_try TOK_FINALLY-only path
+        // (quickjs.c:28917-28922 + 28926-28962).
         None, Some(finally_body) -> {
-          let #(e, finally_throw_label) = fresh_label(e)
-          let #(e, finally_body_label) = fresh_label(e)
+          let #(e, throw_label) = fresh_label(e)
+          let #(e, fin_label) = fresh_label(e)
+          let #(e, end_label) = fresh_label(e)
 
-          let e = emit_ir(e, IrPushTry(finally_throw_label, -1))
-          let e = push_barrier(e, 1)
+          // -- try body --------------------------------------------------
+          let e = emit_ir(e, IrPushTry(throw_label))
+          let e = push_barrier_finally(e, 1, fin_label)
           use e <- result.try(emit_stmt(e, block))
           let e = pop_loop(e)
           let e = emit_ir(e, IrPopTry)
-          let e = emit_ir(e, IrEnterFinally)
-          let e = emit_ir(e, IrJump(finally_body_label))
+          let e = emit_gosub_normal(e, fin_label)
+          let e = emit_ir(e, IrJump(end_label))
 
-          // Exception path: thrown value on stack from unwind_to_catch
-          let e = emit_ir(e, IrLabel(finally_throw_label))
-          let e = emit_ir(e, IrEnterFinallyThrow)
+          // -- throw entry: thrown value is the gosub slot ---------------
+          // unwind_to_catch leaves stack = [thrown, ..base], try_stack popped.
+          let e = emit_ir(e, IrLabel(throw_label))
+          let e = emit_ir(e, IrGosub(fin_label))
+          let e = emit_ir(e, IrThrow)
 
-          // Finally body
-          let e = emit_ir(e, IrLabel(finally_body_label))
+          // -- finally subroutine ----------------------------------------
+          // Entry stack: [retpc, slot, ..base] for ALL callers.
+          let e = emit_ir(e, IrLabel(fin_label))
+          let e = push_barrier_drop(e, 2)
           use e <- result.try(emit_stmt(e, finally_body))
-          let e = emit_ir(e, IrLeaveFinally)
+          let e = pop_loop(e)
+          let e = emit_ir(e, IrRet)
+
+          let e = emit_ir(e, IrLabel(end_label))
           Ok(e)
         }
 
-        // try/catch/finally
+        // try/catch/finally. QuickJS js_parse_try with-catch path
+        // (quickjs.c:28824-28912 + 28926-28962). Arc keeps the existing
+        // two-PushTry-upfront structure (vs QuickJS's catch2-inside-handler) so
+        // throws during catch-param destructuring are also wrapped by finally.
         Some(ast.CatchClause(param, catch_body)), Some(finally_body) -> {
-          let #(e, finally_throw_label) = fresh_label(e)
+          let #(e, throw_label) = fresh_label(e)
           let #(e, catch_label) = fresh_label(e)
-          let #(e, finally_body_label) = fresh_label(e)
+          let #(e, fin_label) = fresh_label(e)
+          let #(e, end_label) = fresh_label(e)
 
-          // Outer try: catches exceptions from catch body → finally with ThrowCompletion
-          let e = emit_ir(e, IrPushTry(finally_throw_label, -1))
-          // Inner try: catches exceptions from try body → catch handler
-          let e = emit_ir(e, IrPushTry(catch_label, -1))
-          let e = push_barrier(e, 2)
+          // -- try body --------------------------------------------------
+          // Outer: catches throws from catch body (and catch-param binding).
+          let e = emit_ir(e, IrPushTry(throw_label))
+          // Inner: catches throws from try body → catch handler.
+          let e = emit_ir(e, IrPushTry(catch_label))
+          let e = push_barrier_finally(e, 2, fin_label)
           use e <- result.try(emit_stmt(e, block))
           let e = pop_loop(e)
           let e = emit_ir(e, IrPopTry)
-          // Pop inner try
           let e = emit_ir(e, IrPopTry)
-          // Pop outer try
-          let e = emit_ir(e, IrEnterFinally)
-          let e = emit_ir(e, IrJump(finally_body_label))
+          let e = emit_gosub_normal(e, fin_label)
+          let e = emit_ir(e, IrJump(end_label))
 
-          // Catch handler
+          // -- catch handler ---------------------------------------------
+          // unwind popped inner try; outer (throw_label) still on try_stack.
+          // stack = [thrown, ..base].
           let e = emit_ir(e, IrLabel(catch_label))
           let e = emit_op(e, EnterScope(BlockScope))
           let e = case param {
@@ -1562,23 +1665,28 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
               |> result.unwrap(e)
             None -> emit_ir(e, IrPop)
           }
-          let e = push_barrier(e, 1)
+          let e = push_barrier_finally(e, 1, fin_label)
           use e <- result.try(emit_stmt(e, catch_body))
           let e = pop_loop(e)
           let e = emit_op(e, LeaveScope)
           let e = emit_ir(e, IrPopTry)
-          // Pop outer try
-          let e = emit_ir(e, IrEnterFinally)
-          let e = emit_ir(e, IrJump(finally_body_label))
+          let e = emit_gosub_normal(e, fin_label)
+          let e = emit_ir(e, IrJump(end_label))
 
-          // Exception path (from catch body re-throwing)
-          let e = emit_ir(e, IrLabel(finally_throw_label))
-          let e = emit_ir(e, IrEnterFinallyThrow)
+          // -- throw entry (catch body threw) ----------------------------
+          // unwind popped outer try; stack = [thrown, ..base].
+          let e = emit_ir(e, IrLabel(throw_label))
+          let e = emit_ir(e, IrGosub(fin_label))
+          let e = emit_ir(e, IrThrow)
 
-          // Finally body (shared by all paths)
-          let e = emit_ir(e, IrLabel(finally_body_label))
+          // -- finally subroutine ----------------------------------------
+          let e = emit_ir(e, IrLabel(fin_label))
+          let e = push_barrier_drop(e, 2)
           use e <- result.try(emit_stmt(e, finally_body))
-          let e = emit_ir(e, IrLeaveFinally)
+          let e = pop_loop(e)
+          let e = emit_ir(e, IrRet)
+
+          let e = emit_ir(e, IrLabel(end_label))
           Ok(e)
         }
 
@@ -1618,6 +1726,8 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
                 is_regular: True,
                 cross_pop_try: 0,
                 has_iterator: False,
+                label_finally: None,
+                drop_count: 0,
               ),
               ..e.loop_stack
             ])
@@ -2870,15 +2980,14 @@ fn emit_for_in(
 /// Per ES2024 §14.7.5.6 ForIn/OfBodyEvaluation, the iterator must be closed
 /// (§7.4.11 IteratorClose) when the body completes abruptly via break or
 /// throw, but NOT when `.next()` itself throws (step 6.a) and NOT on natural
-/// exhaustion (done=true). To get that split we wrap the bind+body in an
-/// outer try frame (F_body → catch_body) and additionally guard each
-/// IteratorNext call with an inner frame (F_next → catch_next) whose handler
-/// rethrows past F_body without closing.
+/// exhaustion (done=true). A single F_body try frame routes all throws to
+/// IteratorCloseThrow; the `.next()`-throw and exhausted cases are handled
+/// by IteratorNext's [[Done]] tracking — it overwrites the iter slot with
+/// JsUndefined on done OR abrupt, so IteratorCloseThrow no-ops on those.
 ///
-/// Stack layout: after GetIterator the stack is [iter, ..base]. Both PushTry
-/// frames record depth = len(base)+1, so unwind_to_catch always restores to
-/// [thrown, iter, ..base] — exactly the [thrown, iter] shape that
-/// IteratorCloseThrow expects.
+/// Stack layout: after GetIterator the stack is [iter, ..base]. F_body
+/// records depth = len(base)+1, so unwind_to_catch always restores to
+/// [thrown, iter|undef, ..base] — exactly what IteratorCloseThrow expects.
 fn emit_for_of(
   e: Emitter,
   left: ast.ForInit,
@@ -2889,7 +2998,6 @@ fn emit_for_of(
   let #(e, loop_continue) = fresh_label(e)
   let #(e, exhausted) = fresh_label(e)
   let #(e, break_target) = fresh_label(e)
-  let #(e, catch_next) = fresh_label(e)
   let #(e, catch_body) = fresh_label(e)
   let #(e, end) = fresh_label(e)
 
@@ -2900,10 +3008,11 @@ fn emit_for_of(
   use e <- result.try(emit_expr(e, right))
   let e = emit_ir(e, IrGetIterator)
 
-  // F_body: catches throws from the LHS bind and the loop body. Recorded
-  // stack depth captures iter on top, so the catch handler sees
-  // [thrown, iter, ..base].
-  let e = emit_ir(e, IrPushTry(catch_body, -1))
+  // F_body: catches throws from IteratorNext, the LHS bind, and the body.
+  // IteratorNext writes JsUndefined into the iter slot on done/abrupt
+  // ([[Done]] sentinel), so a `.next()` throw lands at catch_body with
+  // [thrown, undef, ..] and IteratorCloseThrow no-ops.
+  let e = emit_ir(e, IrPushTry(catch_body))
 
   // break must route through PopTry + IteratorClose; continue stays in the
   // loop (no close on continue per spec). The frame has cross_pop_try=1 and
@@ -2913,13 +3022,8 @@ fn emit_for_of(
   let e = push_loop_iter(e, break_target, loop_continue)
 
   let e = emit_ir(e, IrLabel(loop_start))
-  // F_next shadows F_body for the duration of IteratorNext only. Same
-  // recorded depth (stack is still [iter, ..base] here). §14.7.5.6 step 6.a:
-  // if .next() throws, the iterator must NOT be closed.
-  let e = emit_ir(e, IrPushTry(catch_next, -1))
   let e = emit_ir(e, IrIteratorNext)
-  let e = emit_ir(e, IrPopTry)
-  // stack: [done, value, iter, ..base], try=[F_body]
+  // stack: [done, value, iter|undef, ..base], try=[F_body]
   let e = emit_ir(e, IrJumpIfTrue(exhausted))
 
   // stack: [value, iter, ..base] — bind consumes the value → [iter, ..base]
@@ -2929,23 +3033,15 @@ fn emit_for_of(
   let e = emit_ir(e, IrLabel(loop_continue))
   let e = emit_ir(e, IrJump(loop_start))
 
-  // catch_next: .next() threw. stack=[thrown, iter, ..base], try=[F_body, ..].
-  // Drop F_body so the rethrow skips IteratorClose, drop iter, rethrow
-  // the original error to the enclosing handler.
-  let e = emit_ir(e, IrLabel(catch_next))
-  let e = emit_ir(e, IrPopTry)
-  let e = emit_ir(e, IrSwap)
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrThrow)
-
-  // catch_body: bind/body threw. stack=[thrown, iter, ..base], try=[..outer].
-  // IteratorCloseThrow calls .return() (ignoring its result) then rethrows
-  // the original — never falls through.
+  // catch_body: bind/body threw (real iter) OR .next() threw (undef
+  // sentinel). IteratorCloseThrow calls .return() iff iter is an object,
+  // then rethrows the original — never falls through.
   let e = emit_ir(e, IrLabel(catch_body))
   let e = emit_ir(e, IrIteratorCloseThrow)
 
-  // exhausted: done=true, stack=[value, iter, ..base], try=[F_body, ..].
-  // Spec does NOT close on natural exhaustion.
+  // exhausted: done=true, stack=[value, undef, ..base], try=[F_body, ..].
+  // Spec does NOT close on natural exhaustion — slot is already undef so
+  // a hypothetical close would no-op anyway, but we just drop and exit.
   let e = emit_ir(e, IrLabel(exhausted))
   let e = emit_ir(e, IrPop)
   let e = emit_ir(e, IrPopTry)
@@ -3008,7 +3104,7 @@ fn emit_for_await_of(
   use e <- result.try(emit_expr(e, right))
   let e = emit_ir(e, IrGetAsyncIterator)
   // stack: [iter, ..base]. F_body recorded depth captures iter on top.
-  let e = emit_ir(e, IrPushTry(catch_body, -1))
+  let e = emit_ir(e, IrPushTry(catch_body))
   // push_loop_iter so a labeled break/continue *crossing* this loop pops
   // F_body and the iterator (sync close — see known async-crossing gap below).
   let e = push_loop_iter(e, break_target, loop_continue)
@@ -3017,7 +3113,7 @@ fn emit_for_await_of(
   // F_next shadows F_body for the next/await/unwrap region. Same recorded
   // depth (stack is [iter, ..base]). §14.7.5.6 step 6.a-f: errors here must
   // NOT close the iterator.
-  let e = emit_ir(e, IrPushTry(catch_next, -1))
+  let e = emit_ir(e, IrPushTry(catch_next))
   let e = emit_ir(e, IrDup)
   let e = emit_ir(e, IrGetField2("next"))
   let e = emit_ir(e, IrCallMethod("next", 0))
@@ -3049,7 +3145,7 @@ fn emit_for_await_of(
   // [thrown, iter, ..base], try=[..outer]. F_swallow recorded at depth B+2
   // catches every error from get/call/await; original error always wins.
   let e = emit_ir(e, IrLabel(catch_body))
-  let e = emit_ir(e, IrPushTry(rethrow, -1))
+  let e = emit_ir(e, IrPushTry(rethrow))
   let e = emit_ir(e, IrSwap)
   // [iter, thrown, ..base]
   let e = emit_ir(e, IrGetField2("return"))
@@ -3444,7 +3540,7 @@ fn emit_destructuring_assign(
       // stack_depth has iter on top — unwind_to_catch will leave
       // [thrown, iter, ..] for IteratorCloseThrow.
       let e = emit_ir(e, IrGetIterator)
-      let e = emit_ir(e, IrPushTry(close_throw, -1))
+      let e = emit_ir(e, IrPushTry(close_throw))
       use #(e, rested) <- result.map(emit_array_assign_elements(e, elements))
       let e = case rested {
         // Rest path already PopTry'd, drained iter, assigned. Stack at base.
@@ -3670,7 +3766,7 @@ fn emit_array_destructure(
   // [source] → [iter]. PushTry immediately after so the recorded stack_depth
   // has iter on top — unwind_to_catch will leave [thrown, iter, ..].
   let e = emit_ir(e, IrGetIterator)
-  let e = emit_ir(e, IrPushTry(close_throw, -1))
+  let e = emit_ir(e, IrPushTry(close_throw))
   use #(e, rested) <- result.map(emit_array_elements(e, elements, binding_kind))
   let e = case rested {
     // Rest path already PopTry'd, drained iter, bound it. Stack at base.

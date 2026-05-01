@@ -1256,13 +1256,6 @@ pub type SavedTryFrame {
   SavedTryFrame(catch_target: Int, stack_depth: Int)
 }
 
-/// Saved finally-completion for generator suspension (mirrors FinallyCompletion).
-pub type SavedFinallyCompletion {
-  SavedNormalCompletion
-  SavedThrowCompletion(value: JsValue)
-  SavedReturnCompletion(value: JsValue)
-}
-
 /// Generator internal lifecycle state.
 pub type GeneratorState {
   /// Created but body not yet entered (before first .next())
@@ -1377,7 +1370,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_finally_stack: List(SavedFinallyCompletion),
     saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
@@ -1393,7 +1385,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_finally_stack: List(SavedFinallyCompletion),
     saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
@@ -1411,7 +1402,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_finally_stack: List(SavedFinallyCompletion),
     saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
@@ -1544,7 +1534,6 @@ fn push_saved_frame_refs(
   env_ref: Ref,
   saved_locals: TupleArray(JsValue),
   saved_stack: List(JsValue),
-  saved_finally_stack: List(SavedFinallyCompletion),
   saved_this: JsValue,
   saved_callee_ref: Option(Ref),
   acc: List(Ref),
@@ -1555,14 +1544,6 @@ fn push_saved_frame_refs(
       push_value_ref(v, a)
     })
   let acc = list.fold(saved_stack, acc, fn(a, v) { push_value_ref(v, a) })
-  let acc =
-    list.fold(saved_finally_stack, acc, fn(a, fc) {
-      case fc {
-        SavedThrowCompletion(value:) | SavedReturnCompletion(value:) ->
-          push_value_ref(value, a)
-        SavedNormalCompletion -> a
-      }
-    })
   let acc = push_value_ref(saved_this, acc)
   push_option_ref(saved_callee_ref, acc)
 }
@@ -1733,7 +1714,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       env_ref:,
       saved_locals:,
       saved_stack:,
-      saved_finally_stack:,
       saved_this:,
       saved_callee_ref:,
       ..,
@@ -1742,7 +1722,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         env_ref,
         saved_locals,
         saved_stack,
-        saved_finally_stack,
         saved_this,
         saved_callee_ref,
         acc,
@@ -1754,7 +1733,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       env_ref:,
       saved_locals:,
       saved_stack:,
-      saved_finally_stack:,
       saved_this:,
       saved_callee_ref:,
       ..,
@@ -1767,7 +1745,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         env_ref,
         saved_locals,
         saved_stack,
-        saved_finally_stack,
         saved_this,
         saved_callee_ref,
         acc,
@@ -1778,7 +1755,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       env_ref:,
       saved_locals:,
       saved_stack:,
-      saved_finally_stack:,
       saved_this:,
       saved_callee_ref:,
       ..,
@@ -1794,7 +1770,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         env_ref,
         saved_locals,
         saved_stack,
-        saved_finally_stack,
         saved_this,
         saved_callee_ref,
         acc,

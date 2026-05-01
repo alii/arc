@@ -248,8 +248,7 @@ fn build_exec_state(
   stack: List(JsValue),
   pc: Int,
 ) -> State {
-  let #(restored_try, restored_finally) =
-    generators.restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
+  let restored_try = generators.restore_stacks(gen.saved_try_stack)
   State(
     ..state,
     stack:,
@@ -260,7 +259,6 @@ fn build_exec_state(
     constants: gen.func_template.constants,
     call_stack: [],
     try_stack: restored_try,
-    finally_stack: restored_finally,
     this_binding: gen.saved_this,
     callee_ref: gen.saved_callee_ref,
     call_args: [],
@@ -724,7 +722,6 @@ type AsyncGenData {
     saved_locals: tuple_array.TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
-    saved_finally_stack: List(value.SavedFinallyCompletion),
     saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
@@ -753,7 +750,6 @@ fn read_slot(h: Heap, data_ref: Ref) -> Option(AsyncGenData) {
       saved_locals:,
       saved_stack:,
       saved_try_stack:,
-      saved_finally_stack:,
       saved_this:,
       saved_callee_ref:,
     )) ->
@@ -767,7 +763,6 @@ fn read_slot(h: Heap, data_ref: Ref) -> Option(AsyncGenData) {
         saved_locals:,
         saved_stack:,
         saved_try_stack:,
-        saved_finally_stack:,
         saved_this:,
         saved_callee_ref:,
       ))
@@ -800,7 +795,6 @@ fn slot_with(
     saved_locals: gen.saved_locals,
     saved_stack: gen.saved_stack,
     saved_try_stack: gen.saved_try_stack,
-    saved_finally_stack: gen.saved_finally_stack,
     saved_this: gen.saved_this,
     saved_callee_ref: gen.saved_callee_ref,
   )
@@ -814,8 +808,7 @@ fn save_suspended(
   new_state: value.AsyncGeneratorState,
   queue: List(AsyncGenRequest),
 ) -> State {
-  let #(saved_try, saved_finally) =
-    generators.save_stacks(suspended.try_stack, suspended.finally_stack)
+  let saved_try = generators.save_stacks(suspended.try_stack)
   let h =
     heap.write(
       state.heap,
@@ -829,7 +822,6 @@ fn save_suspended(
         saved_locals: suspended.locals,
         saved_stack: suspended.stack,
         saved_try_stack: saved_try,
-        saved_finally_stack: saved_finally,
         saved_this: suspended.this_binding,
         saved_callee_ref: suspended.callee_ref,
       ),

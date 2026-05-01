@@ -256,7 +256,6 @@ fn call_generator_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      finally_stack: [],
       this_binding: this_val,
       callee_ref: Some(fn_ref),
       call_args: args,
@@ -265,8 +264,7 @@ fn call_generator_function(
   case execute_inner(gen_state) {
     Ok(#(YieldCompletion(_, _), suspended)) -> {
       // Save the suspended state into a GeneratorSlot on the heap
-      let #(saved_try, saved_finally) =
-        generators.save_stacks(suspended.try_stack, suspended.finally_stack)
+      let saved_try = generators.save_stacks(suspended.try_stack)
       let #(h, data_ref) =
         heap.alloc(
           suspended.heap,
@@ -278,7 +276,6 @@ fn call_generator_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_finally_stack: saved_finally,
             saved_this: suspended.this_binding,
             saved_callee_ref: suspended.callee_ref,
           ),
@@ -314,7 +311,6 @@ fn call_generator_function(
             saved_locals: tuple_array.from_list([]),
             saved_stack: [],
             saved_try_stack: [],
-            saved_finally_stack: [],
             saved_this: JsUndefined,
             saved_callee_ref: None,
           ),
@@ -371,15 +367,13 @@ fn call_async_generator_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      finally_stack: [],
       this_binding: this_val,
       callee_ref: Some(fn_ref),
       call_args: args,
     )
   case execute_inner(gen_state) {
     Ok(#(YieldCompletion(_, _), suspended)) -> {
-      let #(saved_try, saved_finally) =
-        generators.save_stacks(suspended.try_stack, suspended.finally_stack)
+      let saved_try = generators.save_stacks(suspended.try_stack)
       let #(h, data_ref) =
         heap.alloc(
           suspended.heap,
@@ -392,7 +386,6 @@ fn call_async_generator_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_finally_stack: saved_finally,
             saved_this: suspended.this_binding,
             saved_callee_ref: suspended.callee_ref,
           ),
@@ -466,7 +459,6 @@ fn call_async_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      finally_stack: [],
       this_binding: this_val,
       callee_ref: Some(fn_ref),
       call_args: args,
@@ -474,8 +466,7 @@ fn call_async_function(
   case execute_inner(async_state) {
     Ok(#(AwaitCompletion(awaited_value, h2), suspended)) -> {
       // Body hit `await` -- save state, set up promise resolution
-      let #(saved_try, saved_finally) =
-        generators.save_stacks(suspended.try_stack, suspended.finally_stack)
+      let saved_try = generators.save_stacks(suspended.try_stack)
       let #(h2, async_data_ref) =
         heap.alloc(
           h2,
@@ -489,7 +480,6 @@ fn call_async_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_finally_stack: saved_finally,
             saved_this: suspended.this_binding,
             saved_callee_ref: suspended.callee_ref,
           ),
@@ -630,13 +620,11 @@ pub fn call_native_async_resume(
       saved_locals:,
       saved_stack:,
       saved_try_stack:,
-      saved_finally_stack:,
       saved_this:,
       saved_callee_ref:,
     )) -> {
-      // Restore try/finally stacks
-      let #(restored_try, restored_finally) =
-        generators.restore_stacks(saved_try_stack, saved_finally_stack)
+      // Restore try-stack
+      let restored_try = generators.restore_stacks(saved_try_stack)
       // Build the resume stack: push resolved value for fulfillment
       let resume_stack = case is_reject {
         False -> [settled_value, ..saved_stack]
@@ -653,7 +641,6 @@ pub fn call_native_async_resume(
           pc: saved_pc,
           call_stack: [],
           try_stack: restored_try,
-          finally_stack: restored_finally,
           this_binding: saved_this,
           callee_ref: saved_callee_ref,
           // arguments was created before first await; post-resume never needs call_args
@@ -698,8 +685,7 @@ pub fn call_native_async_resume(
         }
         Ok(#(AwaitCompletion(awaited_value, h2), suspended)) -> {
           // Hit another `await` -- save state and set up promise resolution
-          let #(saved_try, saved_finally) =
-            generators.save_stacks(suspended.try_stack, suspended.finally_stack)
+          let saved_try = generators.save_stacks(suspended.try_stack)
           let h2 =
             heap.write(
               h2,
@@ -714,7 +700,6 @@ pub fn call_native_async_resume(
                 saved_locals: suspended.locals,
                 saved_stack: suspended.stack,
                 saved_try_stack: saved_try,
-                saved_finally_stack: saved_finally,
                 saved_this: suspended.this_binding,
                 saved_callee_ref: suspended.callee_ref,
               ),

@@ -48,6 +48,7 @@ import arc/vm/value.{
   NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
+import gleam/float
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -122,7 +123,6 @@ fn construct_fn_callback(
           code: sentinel_code,
           call_stack: [],
           try_stack: [],
-          finally_stack: [],
         )
       // do_construct either:
       //  - pushes a SavedFrame and switches to the constructor's bytecode
@@ -196,7 +196,6 @@ pub fn new_state(
     pc: 0,
     call_stack: [],
     try_stack: [],
-    finally_stack: [],
     builtins:,
     this_binding: JsUndefined,
     callee_ref: None,
@@ -1145,6 +1144,29 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
+    // QuickJS OP_gosub: push return-PC as a tagged number, jump to finally body.
+    opcode.Gosub(target) ->
+      Ok(
+        State(
+          ..state,
+          stack: [value.from_int(state.pc + 1), ..state.stack],
+          pc: target,
+        ),
+      )
+
+    // QuickJS OP_ret: pop return-PC, jump back to it. A negative retpc is the
+    // sentinel pushed by generator .return() finally-unwinding (see
+    // process_generator_return) — it means "the slot below me is a return
+    // value, complete the frame with it".
+    opcode.Ret ->
+      case state.stack {
+        [value.JsNumber(value.Finite(f)), slot, ..rest] if f <. 0.0 ->
+          Error(#(Done, slot, State(..state, stack: rest)))
+        [value.JsNumber(value.Finite(f)), ..rest] ->
+          Ok(State(..state, stack: rest, pc: float.truncate(f)))
+        _ -> underflow(state, "Ret")
+      }
+
     // -- Exception handling --
     PushTry(catch_target) -> {
       let frame = TryFrame(catch_target:, stack_depth: list.length(state.stack))
@@ -1164,45 +1186,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       case state.stack {
         [value, ..] -> Error(#(Thrown, value, state))
         [] -> underflow(state, "Throw")
-      }
-    }
-
-    opcode.EnterFinally -> {
-      Ok(
-        State(
-          ..state,
-          finally_stack: [state.NormalCompletion, ..state.finally_stack],
-          pc: state.pc + 1,
-        ),
-      )
-    }
-
-    opcode.EnterFinallyThrow -> {
-      // Pop thrown value from stack, push ThrowCompletion to finally_stack
-      case state.stack {
-        [thrown_value, ..rest_stack] ->
-          Ok(
-            State(
-              ..state,
-              stack: rest_stack,
-              finally_stack: [
-                state.ThrowCompletion(thrown_value),
-                ..state.finally_stack
-              ],
-              pc: state.pc + 1,
-            ),
-          )
-        [] -> underflow(state, "EnterFinallyThrow")
-      }
-    }
-
-    opcode.LeaveFinally -> {
-      case state.finally_stack {
-        [state.NormalCompletion, ..rest] ->
-          Ok(State(..state, finally_stack: rest, pc: state.pc + 1))
-        [state.ThrowCompletion(value:), ..] -> Error(#(Thrown, value, state))
-        [state.ReturnCompletion(value:), ..] -> Error(#(Done, value, state))
-        [] -> underflow(state, "LeaveFinally: empty finally_stack")
       }
     }
 

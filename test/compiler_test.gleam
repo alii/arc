@@ -1037,6 +1037,50 @@ pub fn try_catch_finally_rethrow_test() -> Nil {
   }
 }
 
+// test262 try/S12.14_A11_T4: finally's continue replaces try's break.
+pub fn try_finally_continue_replaces_break_test() -> Nil {
+  assert_normal_number(
+    "var c=0,fin=0; do{try{c+=1;break}catch(e){}finally{fin=1;continue}}while(c<2); c*10+fin",
+    21.0,
+  )
+}
+
+// break crossing a finally runs the finally, then proceeds with break.
+pub fn try_finally_break_runs_finally_test() -> Nil {
+  assert_normal_number("var f=0; while(true){try{break}finally{f=1}} f", 1.0)
+}
+
+// continue crossing a finally runs it on every iteration.
+pub fn try_finally_continue_runs_finally_test() -> Nil {
+  assert_normal_number(
+    "var f=0,i=0; while(i<2){try{i++;continue}finally{f++}} f",
+    2.0,
+  )
+}
+
+// return crossing finally: finally runs, original return value preserved.
+pub fn try_finally_return_preserved_test() -> Nil {
+  assert_normal_number("(function(){try{return 7}finally{var x=1}})()", 7.0)
+}
+
+// §14.15.3: finally's abrupt return REPLACES try's return.
+pub fn try_finally_return_replaces_return_test() -> Nil {
+  assert_normal_number("(function(){try{return 1}finally{return 2}})()", 2.0)
+}
+
+// §14.15.3: finally's break swallows a throw (labeled block target).
+pub fn try_finally_break_swallows_throw_test() -> Nil {
+  assert_normal_number("var r=0; L: try{throw 1}finally{r=9;break L} r", 9.0)
+}
+
+// nested finally ordering: inner finally → outer catch → outer finally.
+pub fn try_finally_nested_order_test() -> Nil {
+  assert_normal(
+    "var s=''; try{try{throw 0}finally{s+='a'}}catch(e){s+='c'}finally{s+='b'} s",
+    JsString("acb"),
+  )
+}
+
 // ============================================================================
 // Throw as ThrowCompletion test
 // ============================================================================

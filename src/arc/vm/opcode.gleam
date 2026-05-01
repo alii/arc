@@ -99,14 +99,17 @@ pub type Op {
   JumpIfFalse(target: Int)
   JumpIfTrue(target: Int)
   JumpIfNullish(target: Int)
+  /// Push (pc+1) onto operand stack as return address, jump to target.
+  /// QuickJS OP_gosub — used to enter the finally block as a subroutine.
+  Gosub(target: Int)
+  /// Pop return address from operand stack, jump to it. QuickJS OP_ret —
+  /// used to return from the finally block to the caller's continuation.
+  Ret
 
   // -- Exception Handling --
   Throw
   PushTry(catch_target: Int)
   PopTry
-  EnterFinally
-  EnterFinallyThrow
-  LeaveFinally
 
   // -- Closures --
   MakeClosure(func_index: Int)
@@ -267,7 +270,9 @@ pub type IrOp {
   IrJumpIfFalse(label: Int)
   IrJumpIfTrue(label: Int)
   IrJumpIfNullish(label: Int)
-  IrPushTry(catch_label: Int, finally_label: Int)
+  IrPushTry(catch_label: Int)
+  IrGosub(label: Int)
+  IrRet
 
   // -- Resolved variable access (emitted by Phase 2) --
   IrGetLocal(index: Int)
@@ -318,9 +323,6 @@ pub type IrOp {
   IrReturn
   IrThrow
   IrPopTry
-  IrEnterFinally
-  IrEnterFinallyThrow
-  IrLeaveFinally
   IrMakeClosure(func_index: Int)
   IrBoxLocal(index: Int)
   IrGetBoxed(index: Int)

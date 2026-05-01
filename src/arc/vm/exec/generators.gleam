@@ -6,11 +6,11 @@ import arc/vm/completion.{
 }
 import arc/vm/heap
 import arc/vm/internal/tuple_array
-import arc/vm/opcode.{type Op, EnterFinallyThrow, YieldStar}
+import arc/vm/opcode.{type Op, Gosub, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
-  type FinallyCompletion, type Heap, type HeapSlot, type State, type StepResult,
-  type TryFrame, State, StepVmError, Thrown, TryFrame, Unimplemented,
+  type Heap, type HeapSlot, type State, type StepResult, type TryFrame, State,
+  StepVmError, Thrown, TryFrame, Unimplemented,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, GeneratorObject, GeneratorSlot,
@@ -298,7 +298,6 @@ type GenData {
     saved_locals: tuple_array.TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
-    saved_finally_stack: List(value.SavedFinallyCompletion),
     saved_this: JsValue,
     saved_callee_ref: option.Option(Ref),
   )
@@ -318,7 +317,6 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
               saved_locals:,
               saved_stack:,
               saved_try_stack:,
-              saved_finally_stack:,
               saved_this:,
               saved_callee_ref:,
             )) ->
@@ -331,7 +329,6 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
                 saved_locals:,
                 saved_stack:,
                 saved_try_stack:,
-                saved_finally_stack:,
                 saved_this:,
                 saved_callee_ref:,
               ))
@@ -353,7 +350,6 @@ fn gen_with_state(gen: GenData, new_state: value.GeneratorState) -> HeapSlot {
     saved_locals: gen.saved_locals,
     saved_stack: gen.saved_stack,
     saved_try_stack: gen.saved_try_stack,
-    saved_finally_stack: gen.saved_finally_stack,
     saved_this: gen.saved_this,
     saved_callee_ref: gen.saved_callee_ref,
   )
@@ -369,8 +365,7 @@ fn build_resumed_state(
 ) -> State {
   let h =
     heap.write(outer.heap, gen.data_ref, gen_with_state(gen, value.Executing))
-  let #(restored_try, restored_finally) =
-    restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
+  let restored_try = restore_stacks(gen.saved_try_stack)
   State(
     ..outer,
     heap: h,
@@ -382,7 +377,6 @@ fn build_resumed_state(
     pc:,
     call_stack: [],
     try_stack: restored_try,
-    finally_stack: restored_finally,
     this_binding: gen.saved_this,
     callee_ref: gen.saved_callee_ref,
     call_args: [],
@@ -559,7 +553,7 @@ fn run_to_completion(
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case execute_inner(resumed) {
     Ok(#(YieldCompletion(yv, h), suspended)) -> {
-      let #(st, sf) = save_stacks(suspended.try_stack, suspended.finally_stack)
+      let st = save_stacks(suspended.try_stack)
       let h =
         heap.write(
           h,
@@ -572,7 +566,6 @@ fn run_to_completion(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: st,
-            saved_finally_stack: sf,
             saved_this: suspended.this_binding,
             saved_callee_ref: suspended.callee_ref,
           ),
@@ -621,9 +614,11 @@ fn run_to_completion(
   }
 }
 
-/// Walk the try_stack, skipping catch-only entries, looking for the first
-/// try/finally handler (identified by EnterFinallyThrow at catch_target).
-/// Returns Some(#(catch_target, stack_depth, remaining_try_stack)) or None.
+/// Walk the try_stack, skipping catch-only / for-of entries, looking for the
+/// first try/finally handler. Since the gosub/ret rewrite (wave 3) the throw
+/// entry of a try/finally is `Gosub(fin_label); Throw`, so a finally-owning
+/// frame is identified by `Gosub` at its catch_target. Returns
+/// Some(#(fin_label, stack_depth, remaining_try_stack)) or None.
 fn find_next_finally(
   code: tuple_array.TupleArray(Op),
   try_stack: List(TryFrame),
@@ -633,7 +628,7 @@ fn find_next_finally(
     [TryFrame(catch_target:, stack_depth:), ..rest] ->
       // catch_target is a compiler-resolved label PC — always in bounds.
       case tuple_array.unsafe_get(catch_target, code) {
-        EnterFinallyThrow -> Some(#(catch_target, stack_depth, rest))
+        Gosub(fin_label) -> Some(#(fin_label, stack_depth, rest))
         _ -> find_next_finally(code, rest)
       }
   }
@@ -675,32 +670,28 @@ fn process_generator_return(
         ),
       )
     }
-    Some(#(catch_target, stack_depth, remaining_try)) -> {
-      // Found a finally handler. Set up state to execute the finally body.
-      // Skip EnterFinallyThrow (at catch_target), jump to catch_target + 1.
-      // Push ReturnCompletion onto finally_stack so LeaveFinally knows to return.
+    Some(#(fin_label, stack_depth, remaining_try)) -> {
+      // Found a finally handler. Enter the finally subroutine directly with
+      // the gosub calling convention: stack = [retpc, slot, ..base]. The slot
+      // is the return value; retpc = -1 is a sentinel that Ret recognises as
+      // "complete the frame with slot" (interpreter.gleam Ret case).
       let restored_stack = truncate_stack(gen_state.stack, stack_depth)
       let finally_state =
         State(
           ..gen_state,
           try_stack: remaining_try,
-          stack: restored_stack,
-          finally_stack: [
-            state.ReturnCompletion(return_val),
-            ..gen_state.finally_stack
-          ],
-          pc: catch_target + 1,
+          stack: [value.from_int(-1), return_val, ..restored_stack],
+          pc: fin_label,
         )
       case execute_inner(finally_state) {
         Ok(#(NormalCompletion(_val, h2), final_state)) -> {
-          // Finally completed normally. LeaveFinally saw ReturnCompletion -> Done.
+          // Finally completed normally — Ret hit the -1 sentinel → Done(return_val).
           // Continue processing any remaining outer finally blocks.
           let updated_gen_state =
             State(
               ..state.merge_globals(gen_state, final_state, []),
               heap: h2,
               try_stack: final_state.try_stack,
-              finally_stack: final_state.finally_stack,
               stack: final_state.stack,
               locals: final_state.locals,
             )
@@ -716,8 +707,7 @@ fn process_generator_return(
         Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
           // Generator yielded from inside the finally block.
           // Save state so next .next() resumes inside the finally.
-          let #(saved_try2, saved_finally2) =
-            save_stacks(suspended.try_stack, suspended.finally_stack)
+          let saved_try2 = save_stacks(suspended.try_stack)
           let h3 =
             heap.write(
               h2,
@@ -730,7 +720,6 @@ fn process_generator_return(
                 saved_locals: suspended.locals,
                 saved_stack: suspended.stack,
                 saved_try_stack: saved_try2,
-                saved_finally_stack: saved_finally2,
                 saved_this: suspended.this_binding,
                 saved_callee_ref: suspended.callee_ref,
               ),
@@ -781,56 +770,21 @@ fn process_generator_return(
   }
 }
 
-/// Save try/finally stacks to serializable form for generator suspension.
-pub fn save_stacks(
-  try_stack: List(TryFrame),
-  finally_stack: List(FinallyCompletion),
-) -> #(List(value.SavedTryFrame), List(value.SavedFinallyCompletion)) {
-  let saved_try =
-    list.map(try_stack, fn(tf) {
-      value.SavedTryFrame(
-        catch_target: tf.catch_target,
-        stack_depth: tf.stack_depth,
-      )
-    })
-  let saved_finally = list.map(finally_stack, convert_finally_completion)
-  #(saved_try, saved_finally)
+/// Save try-stack to serializable form for generator suspension.
+pub fn save_stacks(try_stack: List(TryFrame)) -> List(value.SavedTryFrame) {
+  use tf <- list.map(try_stack)
+  value.SavedTryFrame(
+    catch_target: tf.catch_target,
+    stack_depth: tf.stack_depth,
+  )
 }
 
-/// Restore saved try/finally stacks back to frame types for generator resumption.
+/// Restore saved try-stack back to frame types for generator resumption.
 pub fn restore_stacks(
   saved_try_stack: List(value.SavedTryFrame),
-  saved_finally_stack: List(value.SavedFinallyCompletion),
-) -> #(List(TryFrame), List(FinallyCompletion)) {
-  let restored_try =
-    list.map(saved_try_stack, fn(stf) {
-      TryFrame(catch_target: stf.catch_target, stack_depth: stf.stack_depth)
-    })
-  let restored_finally =
-    list.map(saved_finally_stack, restore_finally_completion)
-  #(restored_try, restored_finally)
-}
-
-/// Convert state.FinallyCompletion to value.SavedFinallyCompletion for storage.
-fn convert_finally_completion(
-  fc: FinallyCompletion,
-) -> value.SavedFinallyCompletion {
-  case fc {
-    state.NormalCompletion -> value.SavedNormalCompletion
-    state.ThrowCompletion(v) -> value.SavedThrowCompletion(v)
-    state.ReturnCompletion(v) -> value.SavedReturnCompletion(v)
-  }
-}
-
-/// Convert value.SavedFinallyCompletion back to state.FinallyCompletion.
-fn restore_finally_completion(
-  sfc: value.SavedFinallyCompletion,
-) -> FinallyCompletion {
-  case sfc {
-    value.SavedNormalCompletion -> state.NormalCompletion
-    value.SavedThrowCompletion(v) -> state.ThrowCompletion(v)
-    value.SavedReturnCompletion(v) -> state.ReturnCompletion(v)
-  }
+) -> List(TryFrame) {
+  use stf <- list.map(saved_try_stack)
+  TryFrame(catch_target: stf.catch_target, stack_depth: stf.stack_depth)
 }
 
 /// Truncate stack to a given depth.
