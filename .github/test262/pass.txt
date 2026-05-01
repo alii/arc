@@ -28818,6 +28818,10 @@ staging/sm/eval/undeclared-name-in-nested-strict-eval.js
 staging/sm/expressions/binary-literals.js
 staging/sm/expressions/constant-folded-labeled-statement.js
 staging/sm/expressions/delete-name-parenthesized-early-error-strict-mode.js
+staging/sm/expressions/destructuring-array-default-call.js
+staging/sm/expressions/destructuring-array-default-function-nested.js
+staging/sm/expressions/destructuring-array-default-function.js
+staging/sm/expressions/destructuring-array-default-yield.js
 staging/sm/expressions/destructuring-pattern-parenthesized.js
 staging/sm/expressions/inNotObjectError.js
 staging/sm/expressions/named-accessor-function.js

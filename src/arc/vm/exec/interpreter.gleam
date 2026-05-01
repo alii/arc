@@ -2414,12 +2414,26 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // close-guard try frame before this op so a .next() throw propagates
       // without IteratorClose (spec: [[Done]]=true → no close on rest abrupt).
       case state.stack {
-        [iter, ..rest] -> {
+        [JsObject(_) as iter, ..rest] -> {
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case builtins_iterator.iterator_rest(state, iter) {
             #(state, Ok(arr)) -> Ok(State(..state, stack: [arr, ..rest]))
             #(state, Error(thrown)) -> Error(#(Thrown, thrown, state))
           }
+        }
+        // [[Done]] sentinel — a prior IteratorNext exhausted/aborted the
+        // iterator and undef'd the slot. Rest result is an empty array.
+        [_, ..rest] -> {
+          let #(heap, ref) =
+            common.alloc_array(state.heap, [], state.builtins.array.prototype)
+          Ok(
+            State(
+              ..state,
+              heap:,
+              stack: [JsObject(ref), ..rest],
+              pc: state.pc + 1,
+            ),
+          )
         }
         [] -> underflow(state, "IteratorRest")
       }
