@@ -22,11 +22,12 @@ import arc/vm/opcode.{
   DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
   DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
   GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal,
-  GetIterator, GetLocal, GetThis, InitGlobalLex, InitialYield,
-  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
-  IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure,
-  NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop, PushConst, PushTry,
-  PutBoxed, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal, Return,
+  GetIterator, GetLocal, GetPrivateField, GetPrivateField2, GetThis,
+  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
+  IteratorCloseThrow, IteratorNext, IteratorRest, Jump, JumpIfFalse,
+  JumpIfNullish, JumpIfTrue, MakeClosure, NewObject, NewRegExp, ObjectRestCopy,
+  ObjectSpread, Pop, PrivateIn, PushConst, PushTry, PutBoxed, PutElem,
+  PutEvalVar, PutField, PutGlobal, PutLocal, PutPrivateField, Return,
   SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield,
   YieldStar,
 }
@@ -1271,6 +1272,112 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
         }
         _ -> underflow(state, "PutField")
+      }
+    }
+
+    GetPrivateField(name) -> {
+      let key = value.canonical_key(name)
+      case state.stack {
+        [JsObject(ref) as receiver, ..rest] ->
+          case object.has_property(state.heap, ref, key) {
+            True -> {
+              use #(val, state) <- result.map(
+                state.rethrow(object.get_value_of(state, receiver, key)),
+              )
+              State(..state, stack: [val, ..rest], pc: state.pc + 1)
+            }
+            False ->
+              state.throw_type_error(
+                state,
+                "Cannot read private member "
+                  <> name
+                  <> " from an object whose class did not declare it",
+              )
+          }
+        [_, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot read private member " <> name <> " on non-object",
+          )
+        [] -> underflow(state, "GetPrivateField")
+      }
+    }
+
+    GetPrivateField2(name) -> {
+      let key = value.canonical_key(name)
+      case state.stack {
+        [JsObject(ref) as receiver, ..rest] ->
+          case object.has_property(state.heap, ref, key) {
+            True -> {
+              use #(val, state) <- result.map(
+                state.rethrow(object.get_value_of(state, receiver, key)),
+              )
+              State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
+            }
+            False ->
+              state.throw_type_error(
+                state,
+                "Cannot read private member "
+                  <> name
+                  <> " from an object whose class did not declare it",
+              )
+          }
+        [_, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot read private member " <> name <> " on non-object",
+          )
+        [] -> underflow(state, "GetPrivateField2")
+      }
+    }
+
+    PutPrivateField(name) -> {
+      let key = value.canonical_key(name)
+      case state.stack {
+        [val, JsObject(ref) as receiver, ..rest] ->
+          case object.has_property(state.heap, ref, key) {
+            True -> {
+              use #(state, _ok) <- result.map(
+                state.rethrow(object.set_value(state, ref, key, val, receiver)),
+              )
+              State(..state, stack: [val, ..rest], pc: state.pc + 1)
+            }
+            False ->
+              state.throw_type_error(
+                state,
+                "Cannot write private member "
+                  <> name
+                  <> " to an object whose class did not declare it",
+              )
+          }
+        [_, _, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot write private member " <> name <> " on non-object",
+          )
+        _ -> underflow(state, "PutPrivateField")
+      }
+    }
+
+    PrivateIn(name) -> {
+      let key = value.canonical_key(name)
+      case state.stack {
+        [JsObject(ref), ..rest] ->
+          Ok(
+            State(
+              ..state,
+              stack: [JsBool(object.has_property(state.heap, ref, key)), ..rest],
+              pc: state.pc + 1,
+            ),
+          )
+        [_, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot use 'in' operator to search for private name "
+              <> name
+              <> " in non-object",
+          )
+        [] -> underflow(state, "PrivateIn")
       }
     }
 

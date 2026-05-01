@@ -2570,6 +2570,110 @@ pub fn class_no_constructor_test() -> Nil {
   )
 }
 
+// ---- Private class elements (§15.7, §13.10.1) ----
+
+pub fn class_private_instance_field_test() -> Nil {
+  assert_normal_number(
+    "class A { #x = 1; m() { return this.#x } } new A().m()",
+    1.0,
+  )
+}
+
+pub fn class_private_instance_method_test() -> Nil {
+  // (7) private method callable via this.#m()
+  assert_normal_number(
+    "class A { #m() { return 9 } call() { return this.#m() } } new A().call()",
+    9.0,
+  )
+}
+
+pub fn class_static_public_field_test() -> Nil {
+  // (1) static x = 5 readable via static method
+  assert_normal_number(
+    "class A { static x = 5; static m() { return A.x } } A.m()",
+    5.0,
+  )
+}
+
+pub fn class_static_private_field_test() -> Nil {
+  // (2) static #y = 7 readable via static method
+  assert_normal_number(
+    "class B { static #y = 7; static n() { return B.#y } } B.n()",
+    7.0,
+  )
+}
+
+pub fn class_static_private_method_test() -> Nil {
+  assert_normal_number(
+    "class A { static #m() { return 11 } static call() { return A.#m() } } A.call()",
+    11.0,
+  )
+}
+
+pub fn class_static_private_accessor_test() -> Nil {
+  // (3) static get #z() → 3
+  assert_normal_number(
+    "class A { static get #z() { return 3 } static m() { return A.#z } } A.m()",
+    3.0,
+  )
+}
+
+pub fn class_static_field_derived_test() -> Nil {
+  assert_normal_number(
+    "class A { static x = 1 } class C extends A { static z = 9 } C.z",
+    9.0,
+  )
+}
+
+pub fn class_private_in_self_test() -> Nil {
+  // (4a) #x in this → true
+  assert_normal(
+    "class A { #x = 1; has() { return #x in this } } new A().has()",
+    JsBool(True),
+  )
+}
+
+pub fn class_private_in_foreign_test() -> Nil {
+  // (4b) #x in {} → false
+  assert_normal(
+    "class A { #x = 1; has(o) { return #x in o } } new A().has({})",
+    JsBool(False),
+  )
+}
+
+pub fn class_private_get_brand_check_test() -> Nil {
+  // (5) o.#x on foreign {} → TypeError (§7.3.31 PrivateGet)
+  assert_normal(
+    "class A { #x = 1; get(o) { return o.#x } }
+     try { new A().get({}); false } catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn class_private_set_brand_check_test() -> Nil {
+  // (6) o.#x = v on foreign {} → TypeError (§7.3.32 PrivateSet)
+  assert_normal(
+    "class A { #x = 1; set(o) { o.#x = 9 } }
+     try { new A().set({}); false } catch (e) { e instanceof TypeError }",
+    JsBool(True),
+  )
+}
+
+pub fn class_private_field_postfix_increment_test() -> Nil {
+  // (8) this.#n++ on valid instance increments
+  assert_normal_number(
+    "class C { #n = 5; bump() { this.#n++; return this.#n } } new C().bump()",
+    6.0,
+  )
+}
+
+pub fn class_private_field_compound_assign_test() -> Nil {
+  assert_normal_number(
+    "class C { #n = 5; add(v) { this.#n += v; return this.#n } } new C().add(10)",
+    15.0,
+  )
+}
+
 // ============================================================================
 // Function.prototype.call / apply / bind
 // ============================================================================

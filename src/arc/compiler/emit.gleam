@@ -13,14 +13,15 @@ import arc/vm/opcode.{
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
-  IrGetField2, IrGetIterator, IrGetThis, IrGosub, IrInitGlobalLex,
-  IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
-  IrIteratorNext, IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrNewRegExp,
-  IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
-  IrPutElem, IrPutField, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
-  IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
-  IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
+  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGetThis,
+  IrGosub, IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject,
+  IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump,
+  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
+  IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry,
+  IrPrivateIn, IrPushConst, IrPushTry, IrPutElem, IrPutField, IrPutPrivateField,
+  IrRet, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar,
+  IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
+  IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -455,6 +456,30 @@ fn add_constant(e: Emitter, val: JsValue) -> #(Emitter, Int) {
 fn push_const(e: Emitter, val: JsValue) -> Emitter {
   let #(e, idx) = add_constant(e, val)
   emit_ir(e, IrPushConst(idx))
+}
+
+/// Private names lex as Identifier tokens with the "#" prefix included
+/// (lexer.gleam). Route them through the brand-checked private opcodes;
+/// everything else uses ordinary [[Get]]/[[Set]].
+fn get_field_op(name: String) -> IrOp {
+  case name {
+    "#" <> _ -> IrGetPrivateField(name)
+    _ -> IrGetField(name)
+  }
+}
+
+fn get_field2_op(name: String) -> IrOp {
+  case name {
+    "#" <> _ -> IrGetPrivateField2(name)
+    _ -> IrGetField2(name)
+  }
+}
+
+fn put_field_op(name: String) -> IrOp {
+  case name {
+    "#" <> _ -> IrPutPrivateField(name)
+    _ -> IrPutField(name)
+  }
 }
 
 fn fresh_label(e: Emitter) -> #(Emitter, Int) {
@@ -1792,9 +1817,21 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Identifier
     ast.Identifier("undefined") -> Ok(push_const(e, JsUndefined))
+    // Bare PrivateIdentifier outside `#x in obj` — early error per §13.10.1.
+    // The `#x in obj` BinaryExpression arm below does NOT recurse on its LHS,
+    // so this only catches genuinely-bare `#x` used as a value.
+    ast.Identifier("#" <> rest) ->
+      Error(Unsupported("Unexpected private name #" <> rest))
     ast.Identifier(name) -> Ok(emit_ir(e, IrScopeGetVar(name)))
 
     // Binary expressions
+    // §13.10.1 RelationalExpression : PrivateIdentifier `in` ShiftExpression.
+    // LHS is a name, not a value — emit only RHS, then PrivateIn(name).
+    // Stack: [obj] → [bool].
+    ast.BinaryExpression(ast.In, ast.Identifier("#" <> rest), right) -> {
+      use e <- result.map(emit_expr(e, right))
+      emit_ir(e, IrPrivateIn("#" <> rest))
+    }
     ast.BinaryExpression(op, left, right) -> {
       use e <- result.try(emit_expr(e, left))
       use e <- result.map(emit_expr(e, right))
@@ -1933,10 +1970,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         ast.Decrement -> #(opcode.Sub, opcode.Add)
       }
       use e <- result.map(emit_expr(e, obj))
-      let e = emit_ir(e, IrGetField2(prop))
+      let e = emit_ir(e, get_field2_op(prop))
       let e = push_const(e, one)
       let e = emit_ir(e, IrBinOp(bin_kind))
-      let e = emit_ir(e, IrPutField(prop))
+      let e = emit_ir(e, put_field_op(prop))
       case prefix {
         True -> e
         False -> {
@@ -2019,7 +2056,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.map(emit_expr(e, right))
       // Stack: [val, obj, ...] — PutField pops both, leaves val
-      emit_ir(e, IrPutField(prop))
+      emit_ir(e, put_field_op(prop))
     }
 
     // Compound assignment to dot member (obj.prop += val)
@@ -2031,10 +2068,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       case compound_to_binop(op) {
         Ok(bin_kind) -> {
           use e <- result.try(emit_expr(e, obj))
-          let e = emit_ir(e, IrGetField2(prop))
+          let e = emit_ir(e, get_field2_op(prop))
           use e <- result.map(emit_expr(e, right))
           let e = emit_ir(e, IrBinOp(bin_kind))
-          emit_ir(e, IrPutField(prop))
+          emit_ir(e, put_field_op(prop))
         }
         Error(_) -> Error(Unsupported("assignment op"))
       }
@@ -2103,7 +2140,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       args,
     ) -> {
       use e <- result.try(emit_expr(e, obj))
-      let e = emit_ir(e, IrGetField2(method_name))
+      let e = emit_ir(e, get_field2_op(method_name))
       case has_spread_arg(args) {
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
@@ -2201,7 +2238,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Member expression (dot access)
     ast.MemberExpression(object, ast.Identifier(prop), False) -> {
       use e <- result.map(emit_expr(e, object))
-      emit_ir(e, IrGetField(prop))
+      emit_ir(e, get_field_op(prop))
     }
 
     // Computed member expression (obj[key])
@@ -2218,7 +2255,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       use e <- result.try(emit_expr(e, object))
       let e = emit_ir(e, IrDup)
       let e = emit_ir(e, IrJumpIfNullish(nullish_label))
-      let e = emit_ir(e, IrGetField(prop))
+      let e = emit_ir(e, get_field_op(prop))
       let e = emit_ir(e, IrJump(end_label))
       let e = emit_ir(e, IrLabel(nullish_label))
       let e = emit_ir(e, IrPop)
@@ -3491,7 +3528,7 @@ fn emit_destructuring_assign(
     ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
       use e <- result.map(emit_expr(e, obj))
       let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPutField(prop))
+      let e = emit_ir(e, put_field_op(prop))
       emit_ir(e, IrPop)
     }
 
@@ -3931,8 +3968,13 @@ fn compile_derived_class(
   parent_expr: ast.Expression,
   body: List(ast.ClassElement),
 ) -> Result(Emitter, EmitError) {
-  let #(ctor_method, instance_methods, static_methods, instance_fields) =
-    classify_class_body(body)
+  let #(
+    ctor_method,
+    instance_methods,
+    static_methods,
+    instance_fields,
+    static_fields,
+  ) = classify_class_body(body)
 
   // Build constructor: if none provided, synthesize the spec default derived
   // constructor (§15.7.14 step 14): constructor(...args) { super(...args); }.
@@ -3999,6 +4041,9 @@ fn compile_derived_class(
 
   // Step 5: Define static methods on ctor
   use e <- result.try(emit_class_methods(e, static_methods, on_prototype: False))
+
+  // Step 6: Define static fields on ctor
+  use e <- result.try(emit_static_fields(e, static_fields))
 
   // Stack: [ctor]
   Ok(e)
@@ -4122,6 +4167,43 @@ fn emit_computed_class_method(
   Ok(emit_ir(e, IrPop))
 }
 
+/// Define static class fields directly on the constructor.
+/// Stack: [ctor] → [ctor]. §15.7.14 step 31: static field initializers run at
+/// class-definition time. First-pass limitation: initializers run in the
+/// enclosing lexical scope, so `this`/`arguments` inside are NOT yet rebound
+/// to the constructor (spec wraps each in a synthetic function — QuickJS
+/// emit_class_init_start/end). Correct for `static x = 5` / `static #y = 7`.
+/// IrDefineField/IrDefineFieldComputed both consume the value (and key) and
+/// leave the target on TOS, so no Dup/Pop is needed per field.
+fn emit_static_fields(
+  e: Emitter,
+  fields: List(ast.ClassElement),
+) -> Result(Emitter, EmitError) {
+  use e, field <- list.try_fold(fields, e)
+  case field {
+    ast.ClassField(key:, value:, computed:, is_static: True) -> {
+      let init = option.unwrap(value, ast.UndefinedExpression)
+      case key, computed {
+        ast.Identifier(name), False | ast.StringExpression(name), False -> {
+          use e <- result.map(emit_expr(e, init))
+          emit_ir(e, IrDefineField(name))
+        }
+        ast.NumberLiteral(n), False -> {
+          let e = push_const(e, JsNumber(Finite(n)))
+          use e <- result.map(emit_expr(e, init))
+          emit_ir(e, IrDefineFieldComputed)
+        }
+        _, _ -> {
+          use e <- result.try(emit_expr(e, key))
+          use e <- result.map(emit_expr(e, init))
+          emit_ir(e, IrDefineFieldComputed)
+        }
+      }
+    }
+    _ -> Ok(e)
+  }
+}
+
 /// Inject field initializers after existing statements (for default derived
 /// constructor — fields run after `super()`).
 fn inject_field_inits_after(
@@ -4147,8 +4229,13 @@ fn compile_base_class(
   body: List(ast.ClassElement),
 ) -> Result(Emitter, EmitError) {
   // Separate class elements into categories
-  let #(ctor_method, instance_methods, static_methods, instance_fields) =
-    classify_class_body(body)
+  let #(
+    ctor_method,
+    instance_methods,
+    static_methods,
+    instance_fields,
+    static_fields,
+  ) = classify_class_body(body)
 
   // Build the constructor body statement, injecting field initializers at the top
   let #(ctor_params, ctor_body) = case ctor_method {
@@ -4188,12 +4275,12 @@ fn compile_base_class(
   // Step 3: Define static methods on ctor
   use e <- result.try(emit_class_methods(e, static_methods, on_prototype: False))
 
-  // Stack: [ctor]
-  Ok(e)
+  // Step 4: Define static fields on ctor — Stack: [ctor] → [ctor]
+  emit_static_fields(e, static_fields)
 }
 
 /// Classify class body elements into constructor, instance methods,
-/// static methods, and instance fields.
+/// static methods, instance fields, and static fields.
 fn classify_class_body(
   body: List(ast.ClassElement),
 ) -> #(
@@ -4201,10 +4288,17 @@ fn classify_class_body(
   List(ast.ClassElement),
   List(ast.ClassElement),
   List(ast.ClassElement),
+  List(ast.ClassElement),
 ) {
-  let #(ctor, im_rev, sm_rev, if_rev) =
-    list.fold(body, #(None, [], [], []), fn(acc, elem) {
-      let #(ctor, instance_methods, static_methods, instance_fields) = acc
+  let #(ctor, im_rev, sm_rev, if_rev, sf_rev) =
+    list.fold(body, #(None, [], [], [], []), fn(acc, elem) {
+      let #(
+        ctor,
+        instance_methods,
+        static_methods,
+        instance_fields,
+        static_fields,
+      ) = acc
       case elem {
         // Constructor
         ast.ClassMethod(kind: ast.MethodConstructor, ..) -> #(
@@ -4212,6 +4306,7 @@ fn classify_class_body(
           instance_methods,
           static_methods,
           instance_fields,
+          static_fields,
         )
         // Instance method (non-static, non-constructor)
         ast.ClassMethod(is_static: False, kind: ast.MethodMethod, ..) -> #(
@@ -4219,6 +4314,7 @@ fn classify_class_body(
           [elem, ..instance_methods],
           static_methods,
           instance_fields,
+          static_fields,
         )
         // Static method
         ast.ClassMethod(is_static: True, ..) -> #(
@@ -4226,6 +4322,7 @@ fn classify_class_body(
           instance_methods,
           [elem, ..static_methods],
           instance_fields,
+          static_fields,
         )
         // Instance field (non-static)
         ast.ClassField(is_static: False, ..) -> #(
@@ -4233,6 +4330,7 @@ fn classify_class_body(
           instance_methods,
           static_methods,
           [elem, ..instance_fields],
+          static_fields,
         )
         // Getter/setter on instance
         ast.ClassMethod(is_static: False, ..) -> #(
@@ -4240,12 +4338,27 @@ fn classify_class_body(
           [elem, ..instance_methods],
           static_methods,
           instance_fields,
+          static_fields,
         )
-        // Skip static fields and static blocks for now
-        _ -> acc
+        // Static field — defined on the constructor at class-definition time
+        ast.ClassField(is_static: True, ..) -> #(
+          ctor,
+          instance_methods,
+          static_methods,
+          instance_fields,
+          [elem, ..static_fields],
+        )
+        // TODO: static initializer blocks (separate unit)
+        ast.StaticBlock(..) -> acc
       }
     })
-  #(ctor, list.reverse(im_rev), list.reverse(sm_rev), list.reverse(if_rev))
+  #(
+    ctor,
+    list.reverse(im_rev),
+    list.reverse(sm_rev),
+    list.reverse(if_rev),
+    list.reverse(sf_rev),
+  )
 }
 
 /// Inject field initializer code at the start of a constructor body.

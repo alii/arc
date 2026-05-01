@@ -40,6 +40,21 @@ pub type Op {
   PutElem
   DeleteField(name: String)
   DeleteElem
+  /// §7.3.31 PrivateGet. Stack: [obj, ..] → [val, ..]. Throws TypeError if
+  /// obj is not a JsObject or if obj lacks the private brand (has_property
+  /// returns False). Brand check uses proto-chain walk so private methods
+  /// stored on the prototype pass — pragmatic, not spec-pure PrivateName.
+  GetPrivateField(name: String)
+  /// Like GetPrivateField but keeps obj on stack: [obj, ..] → [val, obj, ..].
+  /// Used for `obj.#m(args)` method calls (mirrors GetField2).
+  GetPrivateField2(name: String)
+  /// §7.3.32 PrivateSet. Stack: [val, obj, ..] → [val, ..]. Throws TypeError
+  /// if obj is not a JsObject or lacks the brand.
+  PutPrivateField(name: String)
+  /// §13.10.1 `#x in obj`. Stack: [obj, ..] → [JsBool, ..]. Throws TypeError
+  /// if obj is not a JsObject (step 2). Name is encoded in the opcode, not
+  /// on the stack — unlike BinOp(In) which pops two operands.
+  PrivateIn(name: String)
 
   // -- Object/Array Construction --
   NewObject
@@ -299,6 +314,10 @@ pub type IrOp {
   IrPutElem
   IrDeleteField(name: String)
   IrDeleteElem
+  IrGetPrivateField(name: String)
+  IrGetPrivateField2(name: String)
+  IrPutPrivateField(name: String)
+  IrPrivateIn(name: String)
   IrNewObject
   IrDefineField(name: String)
   IrDefineFieldComputed

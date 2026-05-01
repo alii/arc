@@ -16,12 +16,13 @@ import arc/vm/opcode.{
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
   IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
-  IrGetThis, IrGosub, IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject,
-  IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
-  IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry,
-  IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField,
-  IrPutGlobal, IrPutLocal, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
+  IrGetPrivateField, IrGetPrivateField2, IrGetThis, IrGosub, IrInitGlobalLex,
+  IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
+  IrIteratorNext, IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrNewRegExp,
+  IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPrivateIn, IrPushConst,
+  IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal,
+  IrPutLocal, IrPutPrivateField, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
   IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
   IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
 }
@@ -177,6 +178,14 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.DeleteField(name), ..acc])
     [IrDeleteElem, ..rest] ->
       resolve_ops(rest, labels, [opcode.DeleteElem, ..acc])
+    [IrGetPrivateField(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetPrivateField(name), ..acc])
+    [IrGetPrivateField2(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetPrivateField2(name), ..acc])
+    [IrPutPrivateField(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.PutPrivateField(name), ..acc])
+    [IrPrivateIn(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.PrivateIn(name), ..acc])
 
     // Object/array construction
     [IrNewObject, ..rest] ->
