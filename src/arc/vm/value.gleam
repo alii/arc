@@ -1788,17 +1788,11 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
   }
 }
 
-/// Format a JS number as a string. Integer-valued floats omit the decimal.
-pub fn js_format_number(n: Float) -> String {
-  // §6.1.6.1.20 Number::toString: -0 → "0"
-  // BEAM =:= distinguishes -0.0 from 0.0, so normalize first.
-  let n = n +. 0.0
-  let truncated = float.truncate(n)
-  case int.to_float(truncated) == n {
-    True -> int.to_string(truncated)
-    False -> float.to_string(n)
-  }
-}
+/// Format a JS number as a string per ES2024 §6.1.6.1.20 Number::toString.
+/// Delegates to Erlang FFI for proper JS-compatible output (e.g., 1e21 → "1e+21",
+/// 1e-6 → "0.000001", -0 → "0").
+@external(erlang, "arc_math_ffi", "js_number_to_string")
+pub fn js_format_number(n: Float) -> String
 
 /// JS ToBoolean: https://tc39.es/ecma262/#sec-toboolean
 pub fn is_truthy(val: JsValue) -> Bool {

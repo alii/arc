@@ -1321,6 +1321,16 @@ pub fn do_construct(
   dispatch_fn: DispatchNativeFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case heap.read(state.heap, ctor_ref) {
+    Some(ObjectSlot(kind: FunctionObject(func_template:, ..), ..))
+      if func_template.is_arrow
+      || func_template.is_generator
+      || func_template.is_async
+    ->
+      state.throw_type_error(
+        state,
+        object.inspect(JsObject(ctor_ref), state.heap)
+          <> " is not a constructor",
+      )
     Some(ObjectSlot(
       kind: FunctionObject(func_template:, env: env_ref),
       properties:,
@@ -1467,16 +1477,25 @@ pub fn do_construct(
       )
     }
     Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
-      call_native(
-        state,
-        native,
-        args,
-        rest_stack,
-        JsUndefined,
-        execute_inner,
-        unwind_to_catch,
-        dispatch_fn,
-      )
+      case is_native_constructible(native) {
+        True ->
+          call_native(
+            state,
+            native,
+            args,
+            rest_stack,
+            JsUndefined,
+            execute_inner,
+            unwind_to_catch,
+            dispatch_fn,
+          )
+        False ->
+          state.throw_type_error(
+            state,
+            object.inspect(JsObject(ctor_ref), state.heap)
+              <> " is not a constructor",
+          )
+      }
     _ ->
       state.throw_type_error(
         state,
@@ -1498,6 +1517,19 @@ pub fn construct_value(
   dispatch_fn: DispatchNativeFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case heap.read(state.heap, target_ref) {
+    Some(ObjectSlot(
+      kind: FunctionObject(func_template:, ..),
+      ..,
+    ))
+      if func_template.is_arrow
+      || func_template.is_generator
+      || func_template.is_async
+    ->
+      state.throw_type_error(
+        state,
+        object.inspect(JsObject(target_ref), state.heap)
+          <> " is not a constructor",
+      )
     Some(ObjectSlot(
       kind: FunctionObject(func_template:, env: env_ref),
       properties:,
@@ -1555,16 +1587,25 @@ pub fn construct_value(
       )
     }
     Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
-      call_native(
-        state,
-        native,
-        args,
-        rest_stack,
-        JsUndefined,
-        execute_inner,
-        unwind_to_catch,
-        dispatch_fn,
-      )
+      case is_native_constructible(native) {
+        True ->
+          call_native(
+            state,
+            native,
+            args,
+            rest_stack,
+            JsUndefined,
+            execute_inner,
+            unwind_to_catch,
+            dispatch_fn,
+          )
+        False ->
+          state.throw_type_error(
+            state,
+            object.inspect(JsObject(target_ref), state.heap)
+              <> " is not a constructor",
+          )
+      }
     _ ->
       state.throw_type_error(
         state,
@@ -1954,5 +1995,29 @@ pub fn dispatch_native(
       use str, state <- coerce.try_to_string(state, arg)
       #(state, Ok(value.JsString(operators.js_unescape(str))))
     }
+  }
+}
+
+/// Checks whether a native function is constructible (can be used with `new`).
+/// Only specific constructor functions are constructible; all other built-in
+/// functions (Math methods, prototype methods, etc.) are not.
+fn is_native_constructible(native: value.NativeFnSlot(ctx)) -> Bool {
+  case native {
+    // Dispatch-level constructors
+    value.Dispatch(value.ArrayNative(value.ArrayConstructor)) -> True
+    value.Dispatch(value.ObjectNative(value.ObjectConstructor)) -> True
+    value.Dispatch(value.ErrorNative(value.ErrorConstructor(..))) -> True
+    value.Dispatch(value.ErrorNative(value.DomExceptionConstructor(..))) -> True
+    value.Dispatch(value.MapNative(value.MapConstructor(..))) -> True
+    value.Dispatch(value.SetNative(value.SetConstructor(..))) -> True
+    value.Dispatch(value.WeakMapNative(value.WeakMapConstructor(..))) -> True
+    value.Dispatch(value.WeakSetNative(value.WeakSetConstructor(..))) -> True
+    value.Dispatch(value.RegExpNative(value.RegExpConstructor)) -> True
+    value.Dispatch(value.DateNative(value.DateConstructor(..))) -> True
+    value.Dispatch(value.VmNative(value.FunctionConstructor)) -> True
+    // Call-level constructors
+    value.Call(value.PromiseConstructor) -> True
+    // Everything else is not constructible
+    _ -> False
   }
 }

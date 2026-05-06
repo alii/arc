@@ -89,6 +89,12 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 
+/// Decode JS string literal escape sequences (\n, \t, \xNN, \uNNNN, etc.)
+/// per ES2024 §12.9.4. The lexer validates escape syntax; this transforms
+/// the raw content into the cooked string value.
+@external(erlang, "arc_parser_ffi", "decode_string_escapes")
+fn decode_string_escapes(raw: String) -> String
+
 pub type ParseMode {
   Script
   Module
@@ -1132,7 +1138,11 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
         p.strict && has_legacy_octal_escape(peek_value(p)),
         Error(OctalEscapeStrictMode(pos_of(p))),
       )
-      Ok(#(advance(p), ast.StringExpression(value: peek_value(p)), False))
+      Ok(#(
+        advance(p),
+        ast.StringExpression(value: decode_string_escapes(peek_value(p))),
+        False,
+      ))
     }
     LeftBracket -> {
       let p2 = advance(p)
@@ -3939,7 +3949,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       )
       Ok(#(
         P(..advance(p), last_expr_assignable: False),
-        ast.StringExpression(value: peek_value(p)),
+        ast.StringExpression(value: decode_string_escapes(peek_value(p))),
       ))
     }
     KTrue ->
@@ -4701,7 +4711,7 @@ fn expect_from_module_specifier(
   use p2 <- result.try(expect(p, From))
   case peek(p2) {
     KString -> {
-      let value = peek_value(p2)
+      let value = decode_string_escapes(peek_value(p2))
       use p3 <- result.try(eat_semicolon(advance(p2)))
       Ok(#(p3, ast.StringLit(value:)))
     }
@@ -4714,7 +4724,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
   case peek(p2) {
     KString -> {
       // import "module"
-      let value = peek_value(p2)
+      let value = decode_string_escapes(peek_value(p2))
       use p3 <- result.try(eat_semicolon(advance(p2)))
       Ok(#(
         p3,

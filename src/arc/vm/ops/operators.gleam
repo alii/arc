@@ -1,3 +1,4 @@
+import arc/vm/builtins/math as builtins_math
 import arc/vm/opcode.{
   type BinOpKind, type UnaryOpKind, Add, BitAnd, BitNot, BitOr, BitXor, Div, Eq,
   Exp, Gt, GtEq, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NotEq, Pos, ShiftLeft,
@@ -154,24 +155,49 @@ fn num_div(a: JsNum, b: JsNum) -> JsNum {
     | NegInfinity, NegInfinity
     -> NaN
     Infinity, Finite(x) ->
-      case x >=. 0.0 {
-        True -> Infinity
-        False -> NegInfinity
-      }
-    NegInfinity, Finite(x) ->
-      case x >=. 0.0 {
+      case is_negative_float(x) {
         True -> NegInfinity
         False -> Infinity
       }
-    Finite(_), Infinity | Finite(_), NegInfinity -> Finite(0.0)
-    Finite(0.0), Finite(0.0) -> NaN
+    NegInfinity, Finite(x) ->
+      case is_negative_float(x) {
+        True -> Infinity
+        False -> NegInfinity
+      }
+    Finite(x), Infinity ->
+      case is_negative_float(x) {
+        True -> Finite(-0.0)
+        False -> Finite(0.0)
+      }
+    Finite(x), NegInfinity ->
+      case is_negative_float(x) {
+        True -> Finite(0.0)
+        False -> Finite(-0.0)
+      }
+    // 0 / 0 = NaN (covers both ±0 / ±0)
+    Finite(0.0), Finite(0.0)
+    | Finite(-0.0), Finite(0.0)
+    | Finite(0.0), Finite(-0.0)
+    | Finite(-0.0), Finite(-0.0)
+    -> NaN
+    // x / ±0 = ±Infinity (sign depends on both operands)
     Finite(x), Finite(0.0) ->
       case x >. 0.0 {
         True -> Infinity
         False -> NegInfinity
       }
+    Finite(x), Finite(-0.0) ->
+      case x >. 0.0 {
+        True -> NegInfinity
+        False -> Infinity
+      }
     Finite(x), Finite(y) -> Finite(x /. y)
   }
+}
+
+/// Check if a float is negative (including -0.0).
+fn is_negative_float(x: Float) -> Bool {
+  x <. 0.0 || builtins_math.is_neg_zero(x)
 }
 
 fn num_mod(a: JsNum, b: JsNum) -> JsNum {
@@ -187,24 +213,7 @@ fn num_mod(a: JsNum, b: JsNum) -> JsNum {
 }
 
 fn num_exp(a: JsNum, b: JsNum) -> JsNum {
-  case a, b {
-    _, Finite(0.0) -> Finite(1.0)
-    _, NaN -> NaN
-    NaN, _ -> NaN
-    Finite(x), Finite(y) -> Finite(float_power(x, y))
-    Infinity, Finite(y) ->
-      case y >. 0.0 {
-        True -> Infinity
-        False -> Finite(0.0)
-      }
-    NegInfinity, Finite(y) ->
-      case y >. 0.0 {
-        True -> Infinity
-        False -> Finite(0.0)
-      }
-    _, Infinity -> NaN
-    _, NegInfinity -> NaN
-  }
+  builtins_math.num_exp(a, b)
 }
 
 pub fn num_negate(n: JsNum) -> JsNum {

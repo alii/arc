@@ -160,23 +160,84 @@ fn reflect_apply(
 ///   4. Let args be ? CreateListFromArrayLike(argumentsList).
 ///   5. Return ? Construct(target, args, newTarget).
 ///
-/// TODO: newTarget (third arg) not yet wired — needs separate plumbing through
-/// do_construct to override the prototype source.
+/// TODO: newTarget (third arg) not yet fully wired — needs separate plumbing
+/// through do_construct to override the prototype source. The IsConstructor
+/// check for newTarget IS implemented.
 fn reflect_construct(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(target, args_list) = case args {
-    [t, a, ..] -> #(t, a)
-    [t] -> #(t, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
+  let #(target, args_list, new_target) = case args {
+    [t, a, nt, ..] -> #(t, a, Some(nt))
+    [t, a] -> #(t, a, None)
+    [t] -> #(t, JsUndefined, None)
+    [] -> #(JsUndefined, JsUndefined, None)
   }
+  // Step 1: If IsConstructor(target) is false, throw a TypeError exception.
+  use <- bool.lazy_guard(!is_constructor(state.heap, target), fn() {
+    state.type_error(state, "target is not a constructor")
+  })
+  // Step 3: If newTarget is present and IsConstructor(newTarget) is false,
+  // throw a TypeError exception.
+  let new_target_valid = case new_target {
+    Some(nt) -> is_constructor(state.heap, nt)
+    None -> True
+  }
+  use <- bool.lazy_guard(!new_target_valid, fn() {
+    state.type_error(state, "newTarget is not a constructor")
+  })
   // Step 4: Let args be ? CreateListFromArrayLike(argumentsList).
   use ctor_args, state <- require_array_like(state, args_list)
-  // Steps 1, 5: state.construct validates target is an object and runs
-  // [[Construct]]. Non-constructor objects throw inside do_construct.
+  // Step 5: Return ? Construct(target, args, newTarget).
   use result, state <- state.try_op(state.construct(state, target, ctor_args))
   #(state, Ok(result))
+}
+
+/// Checks whether a JsValue is a constructor per ES2024 §7.2.4.
+/// A value is a constructor if it is an object with a [[Construct]] internal method.
+fn is_constructor(h: Heap, val: JsValue) -> Bool {
+  case val {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        // User-defined function: constructible unless it's an arrow, generator,
+        // or async function (these lack [[Construct]] per spec).
+        Some(ObjectSlot(
+          kind: value.FunctionObject(func_template:, ..),
+          ..,
+        )) ->
+          !func_template.is_arrow
+          && !func_template.is_generator
+          && !func_template.is_async
+        // Native function: only specific constructor variants are constructible.
+        Some(ObjectSlot(kind: value.NativeFunction(native), ..)) ->
+          is_native_constructible(native)
+        _ -> False
+      }
+    _ -> False
+  }
+}
+
+/// Checks whether a native function slot is constructible.
+fn is_native_constructible(native: value.NativeFnSlot(ctx)) -> Bool {
+  case native {
+    value.Dispatch(value.ArrayNative(value.ArrayConstructor)) -> True
+    value.Dispatch(value.ObjectNative(value.ObjectConstructor)) -> True
+    value.Dispatch(value.ErrorNative(value.ErrorConstructor(..))) -> True
+    value.Dispatch(value.ErrorNative(value.DomExceptionConstructor(..))) -> True
+    value.Dispatch(value.MapNative(value.MapConstructor(..))) -> True
+    value.Dispatch(value.SetNative(value.SetConstructor(..))) -> True
+    value.Dispatch(value.WeakMapNative(value.WeakMapConstructor(..))) -> True
+    value.Dispatch(value.WeakSetNative(value.WeakSetConstructor(..))) -> True
+    value.Dispatch(value.RegExpNative(value.RegExpConstructor)) -> True
+    value.Dispatch(value.DateNative(value.DateConstructor(..))) -> True
+    value.Dispatch(value.VmNative(value.FunctionConstructor)) -> True
+    value.Dispatch(value.NumberNative(value.NumberConstructor)) -> True
+    value.Dispatch(value.BooleanNative(value.BooleanConstructor)) -> True
+    value.Call(value.PromiseConstructor) -> True
+    value.Call(value.StringConstructor) -> True
+    value.Call(value.BoundFunction(..)) -> True
+    _ -> False
+  }
 }
 
 /// CreateListFromArrayLike per §7.3.19 — throws TypeError on non-object.
