@@ -54,9 +54,35 @@ jobs:
 
       - name: Run test262 suite
         if: steps.changes.outputs.changed == 'true'
+        # UPDATE_SNAPSHOT=1 rewrites pass.txt to exactly the tests passing now,
+        # in a single run, and never fails the build on a snapshot mismatch.
+        # Real unit-test failures still fail the build. We turn snapshot
+        # *regressions* back into a failure in the next step (a removed line in
+        # pass.txt), so the only thing this lets through automatically is new
+        # passes — which is the whole point.
         run: |
-          TEST262_EXEC=1 RESULTS_FILE=.github/test262/results.json gleam test
+          TEST262_EXEC=1 UPDATE_SNAPSHOT=1 RESULTS_FILE=.github/test262/results.json gleam test
         timeout-minutes: 60
+
+      - name: Guard against test262 regressions
+        if: steps.changes.outputs.changed == 'true'
+        # The suite above rewrote pass.txt. Added lines = new passing tests
+        # (fine — we'll commit them). A removed line = a test that used to pass
+        # and now fails: fail the job and leave pass.txt untouched.
+        run: |
+          git diff -- .github/test262/pass.txt > /tmp/pass-txt.diff
+          if [ ! -s /tmp/pass-txt.diff ]; then
+            echo "No change to pass.txt"
+            exit 0
+          fi
+          if grep -qE '^-[^-]' /tmp/pass-txt.diff; then
+            echo "::error::test262 regression — previously-passing test(s) now fail; pass.txt left unchanged"
+            grep -E '^[+-][^+-]' /tmp/pass-txt.diff || true
+            git checkout -- .github/test262/pass.txt
+            exit 1
+          fi
+          echo "New passing test(s):"
+          git diff --stat -- .github/test262/pass.txt
 
       - name: Generate conformance chart
         if: steps.changes.outputs.changed == 'true'
@@ -68,7 +94,7 @@ jobs:
         run: |
           git config user.name "alistair-bot"
           git config user.email "alistair-bot@users.noreply.github.com"
-          git add .github/test262/history.json .github/test262/conformance.png .github/test262/conformance-dark.png
+          git add .github/test262/history.json .github/test262/conformance.png .github/test262/conformance-dark.png .github/test262/pass.txt
           # Only commit if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit"

@@ -29,7 +29,6 @@ pub type Op {
   DeclareEvalVar(name: String)
   /// `typeof name` — check eval_env first, fall through to TypeofGlobal.
   TypeofEvalVar(name: String)
-  GetThis
 
   // -- Property Access --
   GetField(name: String)
@@ -305,7 +304,6 @@ pub type IrOp {
   IrPop
   IrDup
   IrSwap
-  IrGetThis
   IrGetField(name: String)
   IrGetField2(name: String)
   IrPutField(name: String)

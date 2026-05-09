@@ -3203,6 +3203,20 @@ pub fn object_literal_getter_this_binding_test() -> Nil {
   )
 }
 
+pub fn arrow_captured_this_through_getter_test() -> Nil {
+  // Arrow captures `this` from m's frame; the getter's own receiver must NOT
+  // shadow it. Exercises the *this*-as-captured-local path: arrow's `this`
+  // resolves via GetBoxed to m's box, not the getter's bound receiver.
+  assert_normal(
+    "function m() {
+       let a = () => this;
+       return { get x() { return a(); } }.x;
+     }
+     m.call({tag: 'OK'}).tag",
+    JsString("OK"),
+  )
+}
+
 pub fn get_own_property_descriptor_accessor_test() -> Nil {
   assert_normal(
     "let o = {};
@@ -5652,6 +5666,117 @@ pub fn class_extends_expression_test() -> Nil {
   )
 }
 
+// ---- §10.2.2 [[Construct]] return-override + §15.7.14 field initializers ----
+// When a base constructor does `return obj`, the derived `this` becomes that
+// object, and InitializeInstanceElements runs on it (not the discarded alloc).
+
+pub fn class_extends_return_override_public_field_test() -> Nil {
+  // Default derived ctor: field initializer must land on the override target.
+  assert_normal_number(
+    "class B { constructor(o) { return o } }
+     class C extends B { x = 1 }
+     var p = {};
+     new C(p);
+     p.x",
+    1.0,
+  )
+}
+
+pub fn class_extends_return_override_identity_test() -> Nil {
+  // §10.2.2 step 11: Construct result is the returned object itself.
+  assert_normal(
+    "class B { constructor(o) { return o } }
+     class C extends B {}
+     var p = {};
+     new C(p) === p",
+    JsBool(True),
+  )
+}
+
+pub fn class_extends_return_override_this_after_super_test() -> Nil {
+  // §13.3.7.1 step 8: `this` after super() must reflect the override.
+  assert_normal_number(
+    "class B { constructor(o) { return o } }
+     class C extends B { constructor(o) { super(o); this.y = 2 } }
+     var p = {};
+     new C(p);
+     p.y",
+    2.0,
+  )
+}
+
+pub fn class_extends_explicit_ctor_field_ordering_test() -> Nil {
+  // Field inits in an explicit derived ctor must run AFTER super(), not before
+  // (before super() `this` is TDZ-uninitialized → would throw ReferenceError).
+  assert_normal_number(
+    "class B { constructor() {} }
+     class C extends B { x = 1; constructor() { super() } }
+     new C().x",
+    1.0,
+  )
+}
+
+pub fn class_extends_return_override_explicit_ctor_field_test() -> Nil {
+  // Override + explicit ctor + field: combines the two fixes above.
+  assert_normal_number(
+    "class B { constructor(o) { return o } }
+     class C extends B { x = 1; constructor(o) { super(o) } }
+     var p = {};
+     new C(p);
+     p.x",
+    1.0,
+  )
+}
+
+pub fn class_extends_return_override_private_field_test() -> Nil {
+  // Private brand + field must be installed on the override target; a static
+  // method with lexical access to #f can then read it off the foreign object.
+  assert_normal_number(
+    "class B { constructor(o) { return o } }
+     class C extends B { #f = 42; static read(o) { return o.#f } }
+     var p = {};
+     new C(p);
+     C.read(p)",
+    42.0,
+  )
+}
+
+pub fn class_extends_arrow_sees_post_super_this_test() -> Nil {
+  // Arrow created BEFORE super() must observe the post-super() `this`.
+  // *this* is boxed (captured by the arrow); CallSuper writes the constructed
+  // instance into the box via PutBoxed, so the arrow's later GetBoxed reads it.
+  assert_normal(
+    "var result;
+     class B {}
+     class C extends B {
+       constructor() {
+         let a = () => this;
+         super();
+         result = a() instanceof C && a() === this;
+       }
+     }
+     new C();
+     result",
+    JsBool(True),
+  )
+}
+
+pub fn class_extends_arrow_this_tdz_before_super_test() -> Nil {
+  // Reading captured *this* BEFORE super() must throw ReferenceError (TDZ).
+  // Exercises the GetBoxed JsUninitialized check.
+  assert_thrown(
+    "class B {}
+     class C extends B {
+       constructor() {
+         let a = () => this;
+         a();
+         super();
+       }
+     }
+     new C()",
+  )
+}
+
 // ============================================================================
 // Promise tests
 // ============================================================================
@@ -7309,6 +7434,23 @@ pub fn direct_eval_this_test() -> Nil {
   assert_normal(
     "const o = {x:1, f(){ return eval('this.x'); }}; o.f()",
     JsNumber(Finite(1.0)),
+  )
+}
+
+pub fn direct_eval_this_and_locals_test() -> Nil {
+  // *this* arrives via the captured-locals box table alongside ordinary
+  // locals; both must resolve in the same eval body.
+  assert_normal(
+    "function f() { let x = 42; return eval('this; x'); } f.call({})",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn direct_eval_this_identity_test() -> Nil {
+  // eval('this') must be the caller's bound `this`, not globalThis.
+  assert_normal(
+    "function f() { return eval('this') === this; } f.call({})",
+    JsBool(True),
   )
 }
 

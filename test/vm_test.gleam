@@ -62,6 +62,7 @@ fn make_func(
     is_generator: False,
     is_async: False,
     local_names: None,
+    this_slot: None,
   )
 }
 

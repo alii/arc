@@ -72,6 +72,8 @@ fn compile_module_with_scope(
         )
       let parent_scope = build_scope_dict(emitter_ops)
       let child_templates = list.map(children, compile_child(_, parent_scope))
+      let this_slot =
+        dict.get(parent_scope, emit.this_var) |> option.from_result
       let template =
         resolve.resolve(
           ir_ops,
@@ -87,6 +89,7 @@ fn compile_module_with_scope(
           False,
           False,
           None,
+          this_slot,
         )
       Ok(#(template, parent_scope))
     }
@@ -149,17 +152,18 @@ pub fn compile_eval_direct(
           // to local DeclareVar so they stay scoped to the eval body.
           // Sloppy keeps DeclareGlobalVar which scope.gleam rewrites to
           // DeclareEvalVar via ToEvalEnv.
-          let emitter_ops = case strict {
-            False -> emitter_ops
-            True ->
-              list.map(emitter_ops, fn(op) {
-                case op {
-                  emit.Ir(opcode.IrDeclareGlobalVar(name)) ->
-                    emit.DeclareVar(name, emit.VarBinding)
-                  _ -> op
-                }
-              })
-          }
+          // Also drop the body's own *this* DeclareVar — *this* arrives via
+          // parent_names capture (slot in the pre-seeded capture scope) and
+          // a shadow slot here would hide it from lookup.
+          let emitter_ops =
+            list.filter_map(emitter_ops, fn(op) {
+              case op {
+                emit.DeclareVar(name, _) if name == emit.this_var -> Error(Nil)
+                emit.Ir(opcode.IrDeclareGlobalVar(name)) if strict ->
+                  Ok(emit.DeclareVar(name, emit.VarBinding))
+                _ -> Ok(op)
+              }
+            })
           let captured_vars = collect_all_captured_vars(children, emitter_ops)
           let fallthrough = case strict {
             True -> scope.ToGlobal
@@ -178,6 +182,8 @@ pub fn compile_eval_direct(
             build_scope_dict_with_captures(emitter_ops, parent_names)
           let child_templates =
             list.map(children, compile_child(_, parent_scope))
+          let this_slot =
+            dict.get(parent_scope, emit.this_var) |> option.from_result
           Ok(resolve.resolve(
             ir_ops,
             constants,
@@ -192,6 +198,7 @@ pub fn compile_eval_direct(
             False,
             False,
             None,
+            this_slot,
           ))
         }
       }
@@ -346,6 +353,9 @@ fn compile_script(
       // Process child functions through Phase 2 + Phase 3 recursively
       let child_templates = list.map(children, compile_child(_, parent_scope))
 
+      let this_slot =
+        dict.get(parent_scope, emit.this_var) |> option.from_result
+
       // Phase 3: Resolve labels (label IDs → PC addresses)
       let template =
         resolve.resolve(
@@ -362,6 +372,7 @@ fn compile_script(
           False,
           False,
           None,
+          this_slot,
         )
       Ok(template)
     }
@@ -401,6 +412,15 @@ fn compile_child(
       set.filter(free_vars, dict.has_key(parent_scope, _))
       |> set.to_list
     True -> dict.keys(parent_scope)
+  }
+  // Non-arrows declare their own `*this*` (slot = len(captures)); capturing the
+  // parent's would create a redundant shadowed slot AND make scope.resolve and
+  // build_scope_dict disagree on indices (resolve allocates a fresh slot for
+  // the ParamBinding redeclare, build_scope_dict skips it). Arrows keep the
+  // capture — it IS their lexical `this`.
+  let captures = case child.is_arrow {
+    True -> captures
+    False -> list.filter(captures, fn(name) { name != emit.this_var })
   }
 
   // Build env_descriptors: for each captured name, CaptureLocal(parent_index)
@@ -459,6 +479,11 @@ fn compile_child(
     True -> Some(dict.to_list(child_scope))
   }
 
+  // Slot index of the synthetic `*this*` local. Non-arrows declare it as
+  // their first ParamBinding (right after captures); arrows don't declare it
+  // at all — they capture it from the enclosing scope, so dict.get → None.
+  let this_slot = dict.get(child_scope, emit.this_var) |> option.from_result
+
   // Recursively compile grandchildren
   let grandchild_templates =
     list.map(child.functions, compile_child(_, child_scope))
@@ -478,6 +503,7 @@ fn compile_child(
     child.is_generator,
     child.is_async,
     local_names,
+    this_slot,
   )
 }
 

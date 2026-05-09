@@ -13,15 +13,15 @@ import arc/vm/opcode.{
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
-  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGetThis,
-  IrGosub, IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject,
-  IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
-  IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry,
-  IrPrivateIn, IrPushConst, IrPushTry, IrPutElem, IrPutField, IrPutPrivateField,
-  IrRet, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar,
-  IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
-  IrYield, IrYieldStar,
+  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGosub,
+  IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject, IrIteratorClose,
+  IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump, IrJumpIfFalse,
+  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject,
+  IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPrivateIn,
+  IrPushConst, IrPushTry, IrPutElem, IrPutField, IrPutPrivateField, IrRet,
+  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar,
+  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield,
+  IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -153,6 +153,9 @@ pub opaque type Emitter {
     /// True while emitting an async function body. Checked by yield* to
     /// route to the async-delegation path (GetAsyncIterator + await).
     is_async: Bool,
+    /// True while emitting an arrow function body. Gates whether the
+    /// `*this*` and `arguments` locals are declared in the prologue.
+    is_arrow: Bool,
     /// Where top-level let/const/class go. LexGlobal only for the REPL
     /// program emitter; everything else (scripts, eval, modules, function
     /// bodies) uses LexLocal.
@@ -235,6 +238,9 @@ fn emit_module_common(
 ) {
   let e = Emitter(..new_emitter(), strict: True)
   let e = emit_op(e, EnterScope(FunctionScope))
+  // Module top-level `this === undefined` (§16.2.1.6.4). ParamBinding emits no
+  // init so slot 0 stays JsUndefined from runtime padding.
+  let e = emit_op(e, DeclareVar(this_var, ParamBinding))
 
   // Hoist var declarations
   let hoisted_vars = collect_hoisted_vars(stmts)
@@ -315,6 +321,9 @@ fn emit_program_common(
 
   // Wrap in function scope
   let e = emit_op(e, EnterScope(FunctionScope))
+  // Script/eval top-level owns a `this` slot (slot 0). Runtime entry writes
+  // globalThis (or the caller's `this` for direct eval) into it before pc=0.
+  let e = emit_op(e, DeclareVar(this_var, ParamBinding))
 
   // Hoisting pre-pass: emit DeclareGlobalVar for top-level var declarations.
   // Both script and REPL modes create globalThis properties for hoisted vars.
@@ -373,10 +382,19 @@ fn new_emitter() -> Emitter {
     strict: False,
     has_eval_call: False,
     is_async: False,
+    is_arrow: False,
     top_lex: LexLocal,
     scope_depth: 0,
   )
 }
+
+/// Synthetic local name for the lexical-`this` slot. Non-arrows declare it
+/// as the first ParamBinding (slot = len(captures)); runtime call setup
+/// writes the bound `this` there before pc=0. Arrows do not declare it —
+/// `IrScopeGetVar(this_var)` becomes a free var captured via the normal
+/// closure machinery. Asterisks make it an invalid JS identifier so it can
+/// never collide with user code.
+pub const this_var = "*this*"
 
 /// Check if a statement list begins with a Use Strict Directive.
 /// ES2024 section 11.2.1 "Directive Prologues and the Use Strict Directive":
@@ -1250,9 +1268,20 @@ fn compile_function_body(
       next_label: parent.next_label,
       strict: child_strict,
       is_async:,
+      is_arrow:,
     )
 
   let e = emit_op(e, EnterScope(FunctionScope))
+
+  // Non-arrows own `this` as the first local (slot = len(captures)). Runtime
+  // setup_locals writes the bound value (or JsUninitialized for derived ctors)
+  // before pc=0; ParamBinding emits only BoxLocal-if-captured. Arrows skip —
+  // their IrScopeGetVar(*this*) is a free var captured from the enclosing
+  // non-arrow.
+  let e = case is_arrow {
+    True -> e
+    False -> emit_op(e, DeclareVar(this_var, ParamBinding))
+  }
 
   // Phase 1: Declare parameters (identifier or synthetic for destructuring)
   let #(e, destructured_params_rev) =
@@ -1388,7 +1417,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
     // not [[Set]], so prototype setters are NOT invoked and an own data
     // property is always created (even shadowing an inherited accessor).
     ast.ClassFieldInit(key:, value:, computed:) -> {
-      let e = emit_ir(e, IrGetThis)
+      let e = emit_ir(e, IrScopeGetVar(this_var))
       // §15.7.14: if Initializer is absent, initValue = undefined.
       let init = option.unwrap(value, ast.UndefinedExpression)
       use e <- result.map(case key, computed {
@@ -2118,18 +2147,27 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_destructuring_assign(e, lhs)
     }
 
-    // super(args) — call parent constructor
+    // super(args) — call parent constructor. After CallSuper binds `this`
+    // (§13.3.7.1 step 8), Dup the result and write it into the *this* local
+    // so arrows that captured it (boxed, by reference) see the post-super
+    // value instead of the TDZ JsUninitialized seeded at prologue.
     ast.CallExpression(ast.SuperExpression, args) ->
       case has_spread_arg(args) {
         True -> {
           // super(...spread): collect args into a runtime array (same as
           // the other *Apply call paths) then CallSuperApply.
           use e <- result.map(emit_args_array_with_spread(e, args))
-          emit_ir(e, IrCallSuperApply)
+          e
+          |> emit_ir(IrCallSuperApply)
+          |> emit_ir(IrDup)
+          |> emit_ir(IrScopePutVar(this_var))
         }
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
-          emit_ir(e, IrCallSuper(list.length(args)))
+          e
+          |> emit_ir(IrCallSuper(list.length(args)))
+          |> emit_ir(IrDup)
+          |> emit_ir(IrScopePutVar(this_var))
         }
       }
 
@@ -2341,8 +2379,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }
 
-    // This expression
-    ast.ThisExpression -> Ok(emit_ir(e, IrGetThis))
+    // `this` — always read the *this* local. Non-arrows declared it; arrows
+    // resolve it as a captured free var from the nearest enclosing non-arrow.
+    ast.ThisExpression -> Ok(emit_ir(e, IrScopeGetVar(this_var)))
 
     // New expression: new Foo(args)
     ast.NewExpression(callee, args) -> {
@@ -3704,9 +3743,7 @@ fn emit_single_object_assign_prop(
     ) ->
       case object_prop_key_name(key) {
         Ok(name) -> {
-          let e = emit_ir(e, IrDup)
-          let e = emit_ir(e, IrGetField(name))
-          use e <- result.map(emit_destructuring_assign(e, value))
+          use e <- result.map(emit_keyed_destructure_assign(e, name, value))
           case has_rest {
             False -> #(e, n_excl)
             True -> {
@@ -3750,6 +3787,67 @@ fn emit_single_object_assign_prop(
       let e = emit_ir(e, IrObjectRestCopy(n_excl))
       use e <- result.map(emit_destructuring_assign(e, argument))
       #(e, 0)
+    }
+  }
+}
+
+/// `{name: target}` — read src[name] and assign to target. Entry/exit: [src].
+/// §13.15.5.6 KeyedDestructuringAssignmentEvaluation: when target is a
+/// non-pattern (Identifier/MemberExpression), lref is evaluated (step 1a)
+/// BEFORE GetV (step 2). For obj.prop / obj.#priv targets we therefore emit
+/// the base obj first so its TDZ/side-effects fire ahead of the source read —
+/// e.g. `({a: this.#f} = o)` in a derived ctor before super() must throw on
+/// `this`, never reach o.a's getter (privatefieldset-evaluation-order-1).
+/// PutValue itself (the #priv presence check) still happens last, so a getter
+/// that installs #f on the already-evaluated base is observed (-order-3).
+fn emit_keyed_destructure_assign(
+  e: Emitter,
+  name: String,
+  target: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case unwrap_parens(target) {
+    // [src] → Dup → [src,src] → obj → [obj,src,src] → Swap → [src,obj,src]
+    // → GetField → [v,obj,src] → Put → [v,src] → Pop → [src].
+    ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
+      let e = emit_ir(e, IrDup)
+      use e <- result.map(emit_expr(e, obj))
+      e
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrGetField(name))
+      |> emit_ir(put_field_op(prop))
+      |> emit_ir(IrPop)
+    }
+    ast.MemberExpression(obj, ast.StringExpression(prop), False) -> {
+      let e = emit_ir(e, IrDup)
+      use e <- result.map(emit_expr(e, obj))
+      e
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrGetField(name))
+      |> emit_ir(IrPutField(prop))
+      |> emit_ir(IrPop)
+    }
+    // obj[key]: [src] → Dup → [src,src] → obj → [obj,src,src] → Swap →
+    // [src,obj,src] → key → [key,src,obj,src] → Swap → [src,key,obj,src] →
+    // GetField → [v,key,obj,src] → PutElem → [v,src] → Pop → [src].
+    // base→key→GetV order matches §13.3.2.1 + §13.15.5.6 step 1a.
+    ast.MemberExpression(obj, key, True) -> {
+      let e = emit_ir(e, IrDup)
+      use e <- result.try(emit_expr(e, obj))
+      let e = emit_ir(e, IrSwap)
+      use e <- result.map(emit_expr(e, key))
+      e
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrGetField(name))
+      |> emit_ir(IrPutElem)
+      |> emit_ir(IrPop)
+    }
+    // Identifier / nested pattern / default targets keep GetV-first — that's
+    // spec-correct: step 1 only applies when target is NOT a pattern, and
+    // Identifier lref evaluation has no observable effect ahead of GetV.
+    _ -> {
+      let e = emit_ir(e, IrDup)
+      let e = emit_ir(e, IrGetField(name))
+      emit_destructuring_assign(e, target)
     }
   }
 }
@@ -3997,16 +4095,14 @@ fn compile_derived_class(
     )
   }
 
-  // Compile constructor with field initializer preamble
-  // For derived classes, field inits go AFTER super() call
-  // (but for simplicity, if user wrote explicit ctor we trust them;
-  //  for default ctor, fields need to go after super())
-  let ctor_body_with_fields = case ctor_method {
-    Some(_) -> inject_field_inits(instance_fields, ctor_body)
-    None ->
-      // For default derived constructor: super() first, then fields
-      inject_field_inits_after(instance_fields, ctor_body)
-  }
+  // §13.3.7.1 SuperCall step 12: InitializeInstanceElements runs immediately
+  // after super() returns, on the bound `this`. Splice ClassFieldInit stmts
+  // after the first top-level super() call (covers explicit and synthesized
+  // ctors). TODO: super() in non-statement position (let x=super(), return
+  // super(), conditional super()) needs emission at the IrCallSuper site —
+  // see QuickJS emit_class_field_init.
+  let ctor_body_with_fields =
+    inject_field_inits_after_super(instance_fields, ctor_body)
 
   // Constructors cannot be generators or async (spec forbids it)
   let child =
@@ -4204,22 +4300,37 @@ fn emit_static_fields(
   }
 }
 
-/// Inject field initializers after existing statements (for default derived
-/// constructor — fields run after `super()`).
-fn inject_field_inits_after(
+/// Splice field-init statements immediately after the first top-level
+/// `super(...)` ExpressionStatement. If none found (super() nested or absent),
+/// append at end — runtime TDZ on the *this* local will still enforce ordering.
+fn inject_field_inits_after_super(
   fields: List(ast.ClassElement),
   body: ast.Statement,
 ) -> ast.Statement {
   case fields {
     [] -> body
     _ -> {
-      let field_stmts = field_init_stmts(fields)
-      let existing_stmts = case body {
+      let init_stmts = field_init_stmts(fields)
+      let body_stmts = case body {
         ast.BlockStatement(stmts) -> stmts
         other -> [other]
       }
-      ast.BlockStatement(list.append(existing_stmts, field_stmts))
+      ast.BlockStatement(splice_after_super(body_stmts, init_stmts))
     }
+  }
+}
+
+fn splice_after_super(
+  stmts: List(ast.Statement),
+  inits: List(ast.Statement),
+) -> List(ast.Statement) {
+  case stmts {
+    [] -> inits
+    [
+      ast.ExpressionStatement(ast.CallExpression(ast.SuperExpression, _)) as s,
+      ..rest
+    ] -> [s, ..list.append(inits, rest)]
+    [s, ..rest] -> [s, ..splice_after_super(rest, inits)]
   }
 }
 

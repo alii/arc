@@ -25,6 +25,7 @@ fn dummy_template() -> FuncTemplate {
     is_generator: False,
     is_async: False,
     local_names: None,
+    this_slot: None,
   )
 }
 

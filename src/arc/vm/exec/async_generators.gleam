@@ -259,7 +259,6 @@ fn build_exec_state(
     constants: gen.func_template.constants,
     call_stack: [],
     try_stack: restored_try,
-    this_binding: gen.saved_this,
     callee_ref: gen.saved_callee_ref,
     call_args: [],
   )
@@ -722,7 +721,6 @@ type AsyncGenData {
     saved_locals: tuple_array.TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
-    saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
 }
@@ -750,7 +748,6 @@ fn read_slot(h: Heap, data_ref: Ref) -> Option(AsyncGenData) {
       saved_locals:,
       saved_stack:,
       saved_try_stack:,
-      saved_this:,
       saved_callee_ref:,
     )) ->
       Some(AsyncGenData(
@@ -763,7 +760,6 @@ fn read_slot(h: Heap, data_ref: Ref) -> Option(AsyncGenData) {
         saved_locals:,
         saved_stack:,
         saved_try_stack:,
-        saved_this:,
         saved_callee_ref:,
       ))
     _ -> None
@@ -795,7 +791,6 @@ fn slot_with(
     saved_locals: gen.saved_locals,
     saved_stack: gen.saved_stack,
     saved_try_stack: gen.saved_try_stack,
-    saved_this: gen.saved_this,
     saved_callee_ref: gen.saved_callee_ref,
   )
 }
@@ -822,7 +817,6 @@ fn save_suspended(
         saved_locals: suspended.locals,
         saved_stack: suspended.stack,
         saved_try_stack: saved_try,
-        saved_this: suspended.this_binding,
         saved_callee_ref: suspended.callee_ref,
       ),
     )

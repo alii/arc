@@ -220,9 +220,16 @@ fn run_closure_for_job(
   execute_inner: ExecuteInnerFn,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
+  let #(heap, new_this) = bind_this(state, callee_template, this_val)
+  // Mirror call.setup_locals: insert the bound `this` between captures and
+  // params when the callee owns a *this* slot.
+  let prefix = case callee_template.this_slot {
+    Some(_) -> list.append(env_values, [new_this])
+    None -> env_values
+  }
   let locals =
     build_locals(
-      env_values,
+      prefix,
       args,
       callee_template.arity,
       callee_template.local_count,
@@ -230,7 +237,6 @@ fn run_closure_for_job(
     )
     |> list.reverse
     |> tuple_array.from_list
-  let #(heap, new_this) = bind_this(state, callee_template, this_val)
   let job_state =
     State(
       ..state,
@@ -243,7 +249,6 @@ fn run_closure_for_job(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      this_binding: new_this,
       callee_ref: Some(fn_ref),
       call_args: args,
     )
@@ -296,7 +301,7 @@ fn bind_this(
   this_arg: JsValue,
 ) -> #(Heap, JsValue) {
   case callee.is_arrow {
-    True -> #(state.heap, state.this_binding)
+    True -> #(state.heap, JsUndefined)
     False ->
       case callee.is_strict {
         True -> #(state.heap, this_arg)

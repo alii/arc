@@ -71,14 +71,20 @@ pub type DispatchNativeFn =
 // ============================================================================
 
 /// Resolve `this` for a function call per ES2024 §10.2.1.2 OrdinaryCallBindThis.
+/// Computes the value to write into the callee's `*this*` local slot
+/// (FuncTemplate.this_slot). Arrows have no own slot — the value returned
+/// for them is unused — they read `this` via the captured `*this*` local
+/// from the enclosing non-arrow.
 pub fn bind_this(
   state: State,
   callee: FuncTemplate,
   this_arg: JsValue,
 ) -> #(Heap, JsValue) {
   case callee.is_arrow {
-    // Step 2: thisMode is LEXICAL -> return caller's this_binding unchanged.
-    True -> #(state.heap, state.this_binding)
+    // Step 2: thisMode is LEXICAL → arrows have no own `this` binding.
+    // Their `*this*` reads resolve to a captured local from the enclosing
+    // non-arrow, so the value computed here is never written anywhere.
+    True -> #(state.heap, JsUndefined)
     False ->
       case callee.is_strict {
         // Step 5: thisMode is STRICT -> thisValue = thisArgument (no coercion).
@@ -193,18 +199,13 @@ fn call_regular_function(
       stack: rest_stack,
       pc: state.pc + 1,
       try_stack: state.try_stack,
-      this_binding: state.this_binding,
       constructor_this:,
       callee_ref: state.callee_ref,
       call_args: state.call_args,
       eval_env: state.eval_env,
     )
-  let locals = setup_locals(state.heap, env_ref, callee_template, args)
-  // Arrow functions inherit this from their enclosing scope
-  let new_this = case callee_template.is_arrow {
-    True -> state.this_binding
-    False -> this_val
-  }
+  let locals =
+    setup_locals(state.heap, env_ref, callee_template, args, this_val)
   // For arguments.callee: constructors already pass new_callee_ref=Some(ctor_ref),
   // regular calls pass None -- fall back to fn_ref so arguments.callee works.
   let effective_callee_ref = case new_callee_ref {
@@ -223,7 +224,6 @@ fn call_regular_function(
       call_stack: [saved, ..state.call_stack],
       call_depth: state.call_depth + 1,
       try_stack: [],
-      this_binding: new_this,
       callee_ref: effective_callee_ref,
       call_args: args,
       eval_env: None,
@@ -243,7 +243,8 @@ fn call_generator_function(
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  let locals = setup_locals(state.heap, env_ref, callee_template, args)
+  let locals =
+    setup_locals(state.heap, env_ref, callee_template, args, this_val)
   // Set up an isolated execution state for the generator body
   let gen_state =
     State(
@@ -256,7 +257,6 @@ fn call_generator_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      this_binding: this_val,
       callee_ref: Some(fn_ref),
       call_args: args,
     )
@@ -276,7 +276,6 @@ fn call_generator_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_this: suspended.this_binding,
             saved_callee_ref: suspended.callee_ref,
           ),
         )
@@ -311,7 +310,6 @@ fn call_generator_function(
             saved_locals: tuple_array.from_list([]),
             saved_stack: [],
             saved_try_stack: [],
-            saved_this: JsUndefined,
             saved_callee_ref: None,
           ),
         )
@@ -355,7 +353,8 @@ fn call_async_generator_function(
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  let locals = setup_locals(state.heap, env_ref, callee_template, args)
+  let locals =
+    setup_locals(state.heap, env_ref, callee_template, args, this_val)
   let gen_state =
     State(
       ..state,
@@ -367,7 +366,6 @@ fn call_async_generator_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      this_binding: this_val,
       callee_ref: Some(fn_ref),
       call_args: args,
     )
@@ -386,7 +384,6 @@ fn call_async_generator_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_this: suspended.this_binding,
             saved_callee_ref: suspended.callee_ref,
           ),
         )
@@ -446,7 +443,7 @@ fn call_async_function(
       data_ref,
     )
   // Set up locals and execute body eagerly
-  let locals = setup_locals(h, env_ref, callee_template, args)
+  let locals = setup_locals(h, env_ref, callee_template, args, this_val)
   let async_state =
     State(
       ..state,
@@ -459,7 +456,6 @@ fn call_async_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      this_binding: this_val,
       callee_ref: Some(fn_ref),
       call_args: args,
     )
@@ -480,7 +476,6 @@ fn call_async_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_this: suspended.this_binding,
             saved_callee_ref: suspended.callee_ref,
           ),
         )
@@ -620,7 +615,6 @@ pub fn call_native_async_resume(
       saved_locals:,
       saved_stack:,
       saved_try_stack:,
-      saved_this:,
       saved_callee_ref:,
     )) -> {
       // Restore try-stack
@@ -641,7 +635,6 @@ pub fn call_native_async_resume(
           pc: saved_pc,
           call_stack: [],
           try_stack: restored_try,
-          this_binding: saved_this,
           callee_ref: saved_callee_ref,
           // arguments was created before first await; post-resume never needs call_args
           call_args: [],
@@ -700,7 +693,6 @@ pub fn call_native_async_resume(
                 saved_locals: suspended.locals,
                 saved_stack: suspended.stack,
                 saved_try_stack: saved_try,
-                saved_this: suspended.this_binding,
                 saved_callee_ref: suspended.callee_ref,
               ),
             )
@@ -735,16 +727,28 @@ pub fn call_native_async_resume(
   }
 }
 
-/// Set up locals for a function call: [env_values, args(padded to arity), undefined×remaining].
+/// Set up locals for a function call:
+/// [env_values, *this*?, args(padded to arity), undefined×remaining].
+/// Non-arrows reserve one slot for the synthetic `*this*` local immediately
+/// after captures (FuncTemplate.this_slot = Some(len(env_values))). Arrows
+/// have this_slot=None — they capture `*this*` via env_values instead.
 pub fn setup_locals(
   h: Heap,
   env_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
+  this_val: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
   let env_values = heap.read_env(h, env_ref) |> option.unwrap([])
+  // Append the bound `this` to the env-prefix when the callee owns a slot
+  // for it. The emitter guarantees that slot index == len(captures), so
+  // appending here lands it at the right index without an extra set call.
+  let prefix = case callee_template.this_slot {
+    Some(_) -> list.append(env_values, [this_val])
+    None -> env_values
+  }
   build_locals(
-    env_values,
+    prefix,
     args,
     callee_template.arity,
     callee_template.local_count,

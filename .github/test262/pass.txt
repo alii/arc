@@ -11387,6 +11387,7 @@ language/expressions/arrow-function/forbidden-ext/b2/arrow-function-forbidden-ex
 language/expressions/arrow-function/forbidden-ext/b2/arrow-function-forbidden-ext-indirect-access-prop-caller.js
 language/expressions/arrow-function/lexical-arguments.js
 language/expressions/arrow-function/lexical-bindings-overriden-by-formal-parameters-non-strict.js
+language/expressions/arrow-function/lexical-this.js
 language/expressions/arrow-function/low-precedence-expression-body-no-parens.js
 language/expressions/arrow-function/name.js
 language/expressions/arrow-function/non-strict.js
@@ -13198,6 +13199,7 @@ language/expressions/class/class-name-ident-static-escaped.js
 language/expressions/class/class-name-ident-static.js
 language/expressions/class/class-name-ident-yield-escaped.js
 language/expressions/class/class-name-ident-yield.js
+language/expressions/class/constructor-this-tdz-during-initializers.js
 language/expressions/class/cpn-class-expr-computed-property-name-from-additive-expression-add.js
 language/expressions/class/cpn-class-expr-computed-property-name-from-additive-expression-subtract.js
 language/expressions/class/cpn-class-expr-computed-property-name-from-arrow-function-expression.js
@@ -19416,6 +19418,7 @@ language/expressions/subtraction/S11.6.2_A4_T2.js
 language/expressions/subtraction/S11.6.2_A4_T3.js
 language/expressions/subtraction/bigint-wrapped-values.js
 language/expressions/super/call-arg-evaluation-err.js
+language/expressions/super/call-bind-this-value.js
 language/expressions/super/call-construct-error.js
 language/expressions/super/call-expr-value.js
 language/expressions/super/call-poisoned-underscore-proto.js
@@ -24022,6 +24025,7 @@ language/statements/class/elements/privatefieldget-typeerror-3.js
 language/statements/class/elements/privatefieldput-primitive-receiver.js
 language/statements/class/elements/privatefieldset-evaluation-order-1.js
 language/statements/class/elements/privatefieldset-evaluation-order-2.js
+language/statements/class/elements/privatefieldset-evaluation-order-3.js
 language/statements/class/elements/privatefieldset-typeerror-1.js
 language/statements/class/elements/privatefieldset-typeerror-10.js
 language/statements/class/elements/privatefieldset-typeerror-11.js
@@ -24706,6 +24710,7 @@ language/statements/class/subclass/class-definition-evaluation-empty-constructor
 language/statements/class/subclass/class-definition-null-proto-contains-return-override.js
 language/statements/class/subclass/class-definition-null-proto-missing-return-override.js
 language/statements/class/subclass/class-definition-null-proto-super.js
+language/statements/class/subclass/class-definition-null-proto-this.js
 language/statements/class/subclass/class-definition-null-proto.js
 language/statements/class/subclass/class-definition-parent-proto-null.js
 language/statements/class/subclass/default-constructor-spread-override.js
@@ -24840,6 +24845,7 @@ language/statements/const/fn-name-class.js
 language/statements/const/fn-name-cover.js
 language/statements/const/fn-name-fn.js
 language/statements/const/fn-name-gen.js
+language/statements/const/function-local-closure-get-before-initialization.js
 language/statements/const/function-local-use-before-initialization-in-declaration-statement.js
 language/statements/const/function-local-use-before-initialization-in-prior-statement.js
 language/statements/const/global-closure-get-before-initialization.js
@@ -28009,6 +28015,7 @@ language/statements/let/fn-name-class.js
 language/statements/let/fn-name-cover.js
 language/statements/let/fn-name-fn.js
 language/statements/let/fn-name-gen.js
+language/statements/let/function-local-closure-get-before-initialization.js
 language/statements/let/function-local-use-before-initialization-in-declaration-statement.js
 language/statements/let/function-local-use-before-initialization-in-prior-statement.js
 language/statements/let/global-closure-get-before-initialization.js
@@ -29051,6 +29058,8 @@ staging/sm/class/compPropDestr.js
 staging/sm/class/constructorCalled.js
 staging/sm/class/defaultConstructorBase.js
 staging/sm/class/defaultConstructorDerivedSpread.js
+staging/sm/class/derivedConstructorArrowEvalBinding.js
+staging/sm/class/derivedConstructorArrowEvalEscape.js
 staging/sm/class/derivedConstructorArrowEvalGetThis.js
 staging/sm/class/derivedConstructorInlining.js
 staging/sm/class/derivedConstructorName.js

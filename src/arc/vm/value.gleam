@@ -107,6 +107,11 @@ pub type FuncTemplate {
     /// Maps variable name → local slot index. All such locals are boxed
     /// (BoxSlot refs), so direct eval can read/write them by index.
     local_names: Option(List(#(String, Int))),
+    /// Local-slot index of the synthetic `*this*` binding. Some(idx) for
+    /// non-arrows (and top-level script/module/eval bodies); None for arrows,
+    /// which capture `*this*` from the enclosing non-arrow via env_descriptors.
+    /// setup_locals reads this to write the bound `this` into locals[idx].
+    this_slot: Option(Int),
   )
 }
 
@@ -970,7 +975,9 @@ pub type ExoticKind(ctx) {
   ArgumentsObject(length: Int)
   /// JS function (closure). Per ES spec, a function object carries its
   /// [[ECMAScriptCode]] directly. `func_template` is the compiled bytecode,
-  /// `env` points to the EnvSlot holding captured variables.
+  /// `env` points to the EnvSlot holding captured variables. Arrows capture
+  /// the enclosing frame's `this` as an ordinary free variable via `env`
+  /// (the synthetic `*this*` local — see FuncTemplate.this_slot).
   FunctionObject(func_template: FuncTemplate, env: Ref)
   /// Built-in function implemented in Gleam, not bytecode.
   /// Callable like any function but dispatches to native code.
@@ -1370,7 +1377,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
   /// Engine-internal async function suspended state.
@@ -1385,7 +1391,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
   /// Engine-internal async generator state. The ObjectSlot has
@@ -1402,7 +1407,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_this: JsValue,
     saved_callee_ref: Option(Ref),
   )
   /// Stores realm context for $262 methods.
@@ -1534,7 +1538,6 @@ fn push_saved_frame_refs(
   env_ref: Ref,
   saved_locals: TupleArray(JsValue),
   saved_stack: List(JsValue),
-  saved_this: JsValue,
   saved_callee_ref: Option(Ref),
   acc: List(Ref),
 ) -> List(Ref) {
@@ -1544,7 +1547,6 @@ fn push_saved_frame_refs(
       push_value_ref(v, a)
     })
   let acc = list.fold(saved_stack, acc, fn(a, v) { push_value_ref(v, a) })
-  let acc = push_value_ref(saved_this, acc)
   push_option_ref(saved_callee_ref, acc)
 }
 
@@ -1710,19 +1712,11 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
-    GeneratorSlot(
-      env_ref:,
-      saved_locals:,
-      saved_stack:,
-      saved_this:,
-      saved_callee_ref:,
-      ..,
-    ) ->
+    GeneratorSlot(env_ref:, saved_locals:, saved_stack:, saved_callee_ref:, ..) ->
       push_saved_frame_refs(
         env_ref,
         saved_locals,
         saved_stack,
-        saved_this,
         saved_callee_ref,
         acc,
       )
@@ -1733,7 +1727,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       env_ref:,
       saved_locals:,
       saved_stack:,
-      saved_this:,
       saved_callee_ref:,
       ..,
     ) -> {
@@ -1745,7 +1738,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         env_ref,
         saved_locals,
         saved_stack,
-        saved_this,
         saved_callee_ref,
         acc,
       )
@@ -1755,7 +1747,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       env_ref:,
       saved_locals:,
       saved_stack:,
-      saved_this:,
       saved_callee_ref:,
       ..,
     ) -> {
@@ -1770,7 +1761,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         env_ref,
         saved_locals,
         saved_stack,
-        saved_this,
         saved_callee_ref,
         acc,
       )

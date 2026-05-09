@@ -29,6 +29,19 @@ import gleam/string
 pub type ExecuteInnerFn =
   fn(State) -> Result(#(completion.Completion, State), VmError)
 
+/// Inline of interpreter.init_top_level_locals (realm.gleam can't import
+/// interpreter — cycle). JsUndefined everywhere, then seed *this* slot.
+fn seed_top_level_locals(
+  template: FuncTemplate,
+  this_val: JsValue,
+) -> tuple_array.TupleArray(JsValue) {
+  let locals = tuple_array.repeat(JsUndefined, template.local_count)
+  case template.this_slot {
+    Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
+    None -> locals
+  }
+}
+
 pub type NewStateFn =
   fn(
     FuncTemplate,
@@ -111,7 +124,8 @@ pub fn eval_script_native(
         source_str,
         compiler.compile_eval,
       )
-      let locals = tuple_array.repeat(JsUndefined, template.local_count)
+      // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
+      let locals = seed_top_level_locals(template, JsObject(realm_global))
       let eval_state =
         State(
           ..new_state_fn(
@@ -319,7 +333,9 @@ fn run_source_in_current_realm(
     source,
     compiler.compile_eval,
   )
-  let locals = tuple_array.repeat(JsUndefined, template.local_count)
+  // §19.2.1.1 PerformEval: indirect eval runs in global scope,
+  // so its `this` is the global object.
+  let locals = seed_top_level_locals(template, JsObject(state.global_object))
   let eval_state =
     State(
       ..new_state_fn(
@@ -335,9 +351,6 @@ fn run_source_in_current_realm(
       ),
       job_queue: state.job_queue,
       realms: state.realms,
-      // §19.2.1.1 PerformEval: indirect eval runs in global scope,
-      // so its `this` is the global object.
-      this_binding: JsObject(state.global_object),
     )
   case execute_inner(eval_state) {
     Error(vm_err) ->
@@ -480,9 +493,8 @@ fn run_direct_eval(
       ),
       job_queue: state.job_queue,
       realms: state.realms,
-      // Direct eval inherits the caller's `this` (spec §19.2.1.1
-      // step 16.a — the calling context's LexicalEnvironment).
-      this_binding: state.this_binding,
+      // Direct eval inherits the caller's `this` (spec §19.2.1.1 step 16.a)
+      // via the captured *this* box arriving in caller_box_refs above.
       eval_env:,
     )
   case execute_inner(eval_state) {

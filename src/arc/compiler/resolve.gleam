@@ -16,7 +16,7 @@ import arc/vm/opcode.{
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
   IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
-  IrGetPrivateField, IrGetPrivateField2, IrGetThis, IrGosub, IrInitGlobalLex,
+  IrGetPrivateField, IrGetPrivateField2, IrGosub, IrInitGlobalLex,
   IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
   IrIteratorNext, IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish,
   IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrNewRegExp,
@@ -51,6 +51,7 @@ pub fn resolve(
   is_generator: Bool,
   is_async: Bool,
   local_names: Option(List(#(String, Int))),
+  this_slot: Option(Int),
 ) -> FuncTemplate {
   let label_map = build_label_map(code, 0, dict.new())
   let ops = resolve_ops(code, label_map, [])
@@ -68,6 +69,7 @@ pub fn resolve(
     is_generator:,
     is_async:,
     local_names:,
+    this_slot:,
   )
 }
 
@@ -162,7 +164,6 @@ fn resolve_ops(
     [IrPop, ..rest] -> resolve_ops(rest, labels, [opcode.Pop, ..acc])
     [IrDup, ..rest] -> resolve_ops(rest, labels, [opcode.Dup, ..acc])
     [IrSwap, ..rest] -> resolve_ops(rest, labels, [opcode.Swap, ..acc])
-    [IrGetThis, ..rest] -> resolve_ops(rest, labels, [opcode.GetThis, ..acc])
 
     // Property access
     [IrGetField(name), ..rest] ->

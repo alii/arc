@@ -46,7 +46,6 @@ pub type SavedFrame {
     stack: List(JsValue),
     pc: Int,
     try_stack: List(TryFrame),
-    this_binding: JsValue,
     /// For constructor calls: the newly created object to return if the
     /// constructor doesn't explicitly return an object.
     constructor_this: Option(JsValue),
@@ -81,9 +80,6 @@ pub type State {
     call_stack: List(SavedFrame),
     try_stack: List(TryFrame),
     builtins: Builtins,
-    /// The current `this` binding. Set by CallMethod/CallConstructor,
-    /// defaults to JsUndefined for regular calls.
-    this_binding: JsValue,
     /// The heap ref of the currently-executing function (for derived constructors
     /// and arguments.callee).
     callee_ref: Option(Ref),

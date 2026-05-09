@@ -97,21 +97,18 @@ pub fn run_module_with_imports(
   import_globals: dict.Dict(String, JsValue),
   finish: fn(State) -> State,
 ) -> ModuleResult {
-  let locals = tuple_array.repeat(JsUndefined, func.local_count)
+  let locals = interpreter.init_top_level_locals(func, JsUndefined)
   let state =
-    State(
-      ..interpreter.new_state(
-        func,
-        locals,
-        heap,
-        builtins,
-        global_object,
-        import_globals,
-        set.new(),
-        dict.new(),
-        dict.new(),
-      ),
-      this_binding: JsUndefined,
+    interpreter.new_state(
+      func,
+      locals,
+      heap,
+      builtins,
+      global_object,
+      import_globals,
+      set.new(),
+      dict.new(),
+      dict.new(),
     )
   let result = interpreter.execute_inner(state)
   case result {
@@ -144,7 +141,9 @@ pub fn run_and_drain_repl(
   builtins: Builtins,
   env: ReplEnv,
 ) -> Result(#(Completion, ReplEnv), VmError) {
-  let locals = tuple_array.repeat(JsUndefined, func.local_count)
+  // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
+  let this_val = JsObject(env.global_object)
+  let locals = interpreter.init_top_level_locals(func, this_val)
   let state =
     State(
       ..interpreter.new_state(
@@ -159,8 +158,6 @@ pub fn run_and_drain_repl(
         env.symbol_registry,
       ),
       realms: env.realms,
-      // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
-      this_binding: JsObject(env.global_object),
     )
   use #(completion, final_state) <- result.try(interpreter.execute_inner(state))
   let drained_state = event_loop.drain_jobs(final_state)

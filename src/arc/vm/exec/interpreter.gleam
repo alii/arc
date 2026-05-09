@@ -22,14 +22,13 @@ import arc/vm/opcode.{
   DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
   DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
   GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal,
-  GetIterator, GetLocal, GetPrivateField, GetPrivateField2, GetThis,
-  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
-  IteratorCloseThrow, IteratorNext, IteratorRest, Jump, JumpIfFalse,
-  JumpIfNullish, JumpIfTrue, MakeClosure, NewObject, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pop, PrivateIn, PushConst, PushTry, PutBoxed, PutElem,
-  PutEvalVar, PutField, PutGlobal, PutLocal, PutPrivateField, Return,
-  SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield,
-  YieldStar,
+  GetIterator, GetLocal, GetPrivateField, GetPrivateField2, InitGlobalLex,
+  InitialYield, IteratorCheckObject, IteratorClose, IteratorCloseThrow,
+  IteratorNext, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
+  MakeClosure, NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop,
+  PrivateIn, PushConst, PushTry, PutBoxed, PutElem, PutEvalVar, PutField,
+  PutGlobal, PutLocal, PutPrivateField, Return, SetupDerivedClass, Swap, TypeOf,
+  TypeofEvalVar, TypeofGlobal, UnaryOp, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -114,6 +113,7 @@ fn construct_fn_callback(
           is_generator: False,
           is_async: False,
           local_names: None,
+          this_slot: None,
         )
       let isolated =
         State(
@@ -172,7 +172,7 @@ fn construct_fn_callback(
 
 /// Create a fresh VM state from a function template.
 /// Most callers can use this directly; override fields with `State(..new_state(...), ...)`
-/// for cases that need non-default this_binding or symbol_descriptions.
+/// for cases that need non-default symbol_descriptions.
 pub fn new_state(
   func: FuncTemplate,
   locals: tuple_array.TupleArray(JsValue),
@@ -198,7 +198,6 @@ pub fn new_state(
     call_stack: [],
     try_stack: [],
     builtins:,
-    this_binding: JsUndefined,
     callee_ref: None,
     call_args: [],
     job_queue: job_queue.new(),
@@ -221,28 +220,58 @@ pub fn init_state(
   global_object: Ref,
   is_module: Bool,
 ) -> State {
-  let locals = tuple_array.repeat(JsUndefined, func.local_count)
   // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
   // ES §16.1.6 ScriptEvaluation: the script's this is the global object,
   // regardless of strict mode. (Strict only affects function-body this.)
-  let this_binding = case is_module {
+  let this_val = case is_module {
     True -> JsUndefined
     False -> JsObject(global_object)
   }
-  State(
-    ..new_state(
-      func,
-      locals,
-      heap,
-      builtins,
-      global_object,
-      dict.new(),
-      set.new(),
-      dict.new(),
-      dict.new(),
-    ),
-    this_binding:,
+  let locals = init_top_level_locals(func, this_val)
+  new_state(
+    func,
+    locals,
+    heap,
+    builtins,
+    global_object,
+    dict.new(),
+    set.new(),
+    dict.new(),
+    dict.new(),
   )
+}
+
+/// Build the locals array for a top-level (script/module/eval/REPL) template:
+/// JsUndefined everywhere, then seed the synthetic `*this*` slot if present.
+/// Function bodies use call.setup_locals instead — this is only for entries
+/// that don't go through the call protocol.
+pub fn init_top_level_locals(
+  func: FuncTemplate,
+  this_val: JsValue,
+) -> tuple_array.TupleArray(JsValue) {
+  let locals = tuple_array.repeat(JsUndefined, func.local_count)
+  case func.this_slot {
+    Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
+    None -> locals
+  }
+}
+
+/// Read the current frame's `this` from its `*this*` local. Unboxes when the
+/// slot was boxed (captured by an inner arrow). Returns JsUndefined for arrows
+/// (this_slot=None) — defensive; arrows never reach Return-derived/CallSuper.
+pub fn read_this_local(state: State) -> JsValue {
+  case state.func.this_slot {
+    None -> JsUndefined
+    Some(idx) ->
+      case tuple_array.unsafe_get(idx, state.locals) {
+        JsObject(ref) as raw ->
+          case heap.read_box(state.heap, ref) {
+            Some(boxed) -> boxed
+            None -> raw
+          }
+        raw -> raw
+      }
+  }
 }
 
 // ============================================================================
@@ -353,7 +382,6 @@ fn unwind_to_catch(state: State, thrown_value: JsValue) -> Option(State) {
             stack:,
             pc:,
             try_stack:,
-            this_binding:,
             callee_ref:,
             call_args:,
             eval_env:,
@@ -371,7 +399,6 @@ fn unwind_to_catch(state: State, thrown_value: JsValue) -> Option(State) {
               stack:,
               pc:,
               try_stack:,
-              this_binding:,
               callee_ref:,
               call_args:,
               eval_env:,
@@ -490,6 +517,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       case tuple_array.unsafe_get(index, state.locals) {
         JsObject(box_ref) ->
           case heap.read_box(state.heap, box_ref) {
+            Some(JsUninitialized) ->
+              state.throw_reference_error(
+                state,
+                "Cannot access variable before initialization (TDZ)",
+              )
             Some(val) ->
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
             None ->
@@ -1008,7 +1040,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             stack:,
             pc:,
             try_stack:,
-            this_binding: saved_this,
             constructor_this:,
             callee_ref: saved_callee_ref,
             call_args: saved_call_args,
@@ -1021,6 +1052,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             Some(constructed_obj) -> {
               // Base constructor: use the constructed object unless the
               // function explicitly returned an object.
+              // §13.3.7.1 SuperCall step 8 BindThisValue(result) is now handled
+              // at the call site: emit's `CallSuper; Dup; ScopePutVar(*this*)`
+              // writes effective_return into the caller's *this* local.
               let effective_return = case return_value {
                 JsObject(_) -> return_value
                 _ -> constructed_obj
@@ -1037,7 +1071,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                   call_stack: rest_frames,
                   call_depth: state.call_depth - 1,
                   try_stack:,
-                  this_binding: saved_this,
                   callee_ref: saved_callee_ref,
                   call_args: saved_call_args,
                   eval_env: saved_eval_env,
@@ -1061,14 +1094,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                           call_stack: rest_frames,
                           call_depth: state.call_depth - 1,
                           try_stack:,
-                          this_binding: saved_this,
                           callee_ref: saved_callee_ref,
                           call_args: saved_call_args,
                           eval_env: saved_eval_env,
                         ),
                       )
                     JsUndefined ->
-                      case state.this_binding {
+                      case read_this_local(state) {
                         JsUninitialized -> {
                           state.throw_reference_error(
                             state,
@@ -1088,7 +1120,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                               call_stack: rest_frames,
                               call_depth: state.call_depth - 1,
                               try_stack:,
-                              this_binding: saved_this,
                               callee_ref: saved_callee_ref,
                               call_args: saved_call_args,
                               eval_env: saved_eval_env,
@@ -1117,7 +1148,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                       call_stack: rest_frames,
                       call_depth: state.call_depth - 1,
                       try_stack:,
-                      this_binding: saved_this,
                       callee_ref: saved_callee_ref,
                       eval_env: saved_eval_env,
                     ),
@@ -1703,25 +1733,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         }
       }
     }
-
-    GetThis ->
-      case state.this_binding {
-        // TDZ check: in derived constructors, this is uninitialized until super() is called
-        JsUninitialized -> {
-          state.throw_reference_error(
-            state,
-            "Must call super constructor in derived class before accessing 'this'",
-          )
-        }
-        _ ->
-          Ok(
-            State(
-              ..state,
-              stack: [state.this_binding, ..state.stack],
-              pc: state.pc + 1,
-            ),
-          )
-      }
 
     // ---- Array operations --------------------------------------------
     // -- Array construction --
@@ -2760,7 +2771,7 @@ fn get_elem_on_primitive(
 ///
 /// Our implementation threads the returned thisValue into the new call frame
 /// directly via call_function. Arrow functions use is_arrow instead of
-/// [[ThisMode]] = LEXICAL, inheriting the caller's this_binding from state.
+/// [[ThisMode]] = LEXICAL, capturing the enclosing frame's *this* local.
 /// Thin wrapper: delegates to call.call_function with execute_inner/unwind_to_catch.
 fn call_function(
   state: State,
@@ -2828,7 +2839,7 @@ fn do_call_super(
           // instance. First super() in a chain reads my_ctor.prototype;
           // intermediate super() reuses the existing this's proto (which is
           // already the leaf subclass's prototype).
-          let derived_proto = case state.this_binding {
+          let derived_proto = case read_this_local(state) {
             JsUninitialized ->
               case dict.get(my_props, Named("prototype")) {
                 Ok(DataProperty(value: JsObject(dp_ref), ..)) -> Some(dp_ref)
@@ -2873,7 +2884,7 @@ fn do_call_super_dispatch(
       // JS-defined parent: allocate (or reuse) an OrdinaryObject as `this` and
       // enter the parent body. parent_ref becomes the new callee_ref so further
       // super() in the chain finds *its* parent.
-      let #(heap, this_val) = case state.this_binding {
+      let #(heap, this_val) = case read_this_local(state) {
         JsUninitialized -> {
           let #(h, ref) =
             heap.alloc(
@@ -2892,7 +2903,7 @@ fn do_call_super_dispatch(
         existing -> #(state.heap, existing)
       }
       call_function(
-        State(..state, heap:, this_binding: this_val),
+        State(..state, heap:),
         parent_ref,
         env_ref,
         func_template,
@@ -2957,16 +2968,9 @@ fn do_call_super_dispatch(
         [JsObject(result_ref), ..] -> {
           let heap =
             set_slot_prototype(new_state.heap, result_ref, derived_proto)
-          Ok(State(..new_state, heap:, this_binding: JsObject(result_ref)))
+          Ok(State(..new_state, heap:))
         }
-        [_, ..tail] ->
-          Ok(
-            State(
-              ..new_state,
-              stack: [this_obj, ..tail],
-              this_binding: this_obj,
-            ),
-          )
+        [_, ..tail] -> Ok(State(..new_state, stack: [this_obj, ..tail]))
         [] -> underflow(new_state, "CallSuper: native returned nothing")
       }
     }
