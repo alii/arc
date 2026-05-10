@@ -10,17 +10,19 @@
 /// mutations are visible in both directions (true JS closure semantics).
 import arc/compiler/emit.{
   type BindingKind, type EmitterOp, BlockScope, CaptureBinding, CatchBinding,
-  ConstBinding, DeclareVar, EnterScope, FunctionScope, Ir, LeaveScope,
-  LetBinding, ParamBinding, VarBinding,
+  ConstBinding, DeclareThis, DeclareVar, EnterScope, FunctionScope, Ir,
+  LeaveScope, LetBinding, ParamBinding, VarBinding,
 }
 import arc/vm/opcode.{
   type IrOp, IrBoxLocal, IrDeclareEvalVar, IrDeclareGlobalVar, IrGetBoxed,
-  IrGetEvalVar, IrGetGlobal, IrGetLocal, IrPushConst, IrPutBoxed, IrPutEvalVar,
-  IrPutGlobal, IrPutLocal, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar,
-  IrScopeTypeofVar, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal,
+  IrGetEvalVar, IrGetGlobal, IrGetLocal, IrGetThis, IrPushConst, IrPutBoxed,
+  IrPutEvalVar, IrPutGlobal, IrPutLocal, IrScopeGetVar, IrScopePutVar,
+  IrScopeReboxVar, IrScopeTypeofVar, IrSetThis, IrTypeOf, IrTypeofEvalVar,
+  IrTypeofGlobal,
 }
 import arc/vm/value.{type JsValue, JsUndefined, JsUninitialized}
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
@@ -62,6 +64,26 @@ type Resolver {
     /// Variables in this set will be boxed (stored via BoxSlot indirection).
     captured_vars: Set(String),
     fallthrough: GlobalFallthrough,
+    /// Binding for the lexical-`this` slot. Some when DeclareThis has been
+    /// processed (owned slot) or when this body inherits `this` as a capture
+    /// (arrows, direct-eval); None until then.
+    this_binding: Option(Binding),
+    /// True when an inner closure (or direct eval in this subtree) captures
+    /// `this` — DeclareThis will box the slot so writes (super()) propagate.
+    this_is_captured: Bool,
+  )
+}
+
+/// Result of scope resolution.
+pub type Resolved {
+  Resolved(
+    code: List(IrOp),
+    local_count: Int,
+    constants: List(JsValue),
+    constants_map: Dict(JsValue, Int),
+    /// Local slot index where lexical `this` lives in this body — owned
+    /// (DeclareThis) or inherited as a capture. None if `this` is unreferenced.
+    this_slot: Option(Int),
   )
 }
 
@@ -69,54 +91,61 @@ type Resolver {
 // Public API
 // ============================================================================
 
-/// Resolve scopes in a list of EmitterOps.
-/// Returns resolved IrOps (no scope markers), local_count, and updated constants.
+/// Resolve scopes in a list of EmitterOps. Top-level (no captures) entry.
 pub fn resolve(
   code: List(EmitterOp),
   constants: List(JsValue),
   constants_map: Dict(JsValue, Int),
   captured_vars: Set(String),
+  this_is_captured: Bool,
   fallthrough: GlobalFallthrough,
-) -> #(List(IrOp), Int, List(JsValue), Dict(JsValue, Int)) {
-  let r =
-    Resolver(
-      scopes: [],
-      next_local: 0,
-      max_locals: 0,
-      output: [],
-      constants:,
-      constants_map:,
-      next_const: list.length(constants),
-      captured_vars:,
-      fallthrough:,
-    )
-  let r = resolve_ops(r, code)
-  #(list.reverse(r.output), r.max_locals, r.constants, r.constants_map)
+) -> Resolved {
+  resolve_with_captures(
+    code,
+    constants,
+    constants_map,
+    [],
+    None,
+    captured_vars,
+    this_is_captured,
+    fallthrough,
+  )
 }
 
 /// Resolve scopes with pre-populated capture bindings.
-/// Captures occupy local slots 0..len-1, before any params or body vars.
-/// Capture bindings are always boxed (they hold refs to parent's BoxSlots).
-/// Returns resolved IrOps, local_count, and updated constants.
+/// Named captures occupy local slots 0..len-1. When `this_capture_slot` is
+/// Some(idx) (arrows, direct-eval), `this` is a boxed CaptureBinding at idx
+/// — caller must size env_descriptors/seed-locals accordingly. When None,
+/// `this` comes from a `DeclareThis` in `code` (or is unreferenced).
 pub fn resolve_with_captures(
   code: List(EmitterOp),
   constants: List(JsValue),
   constants_map: Dict(JsValue, Int),
   captures: List(String),
+  this_capture_slot: Option(Int),
   captured_vars: Set(String),
+  this_is_captured: Bool,
   fallthrough: GlobalFallthrough,
-) -> #(List(IrOp), Int, List(JsValue), Dict(JsValue, Int)) {
-  let capture_count = list.length(captures)
-  // Pre-populate a function scope with capture bindings (always boxed)
+) -> Resolved {
   let capture_bindings =
     list.index_map(captures, fn(name, idx) {
       #(name, Binding(index: idx, kind: CaptureBinding, is_boxed: True))
     })
     |> dict.from_list()
-  let initial_scope = Scope(kind: FunctionScope, bindings: capture_bindings)
+  let this_binding =
+    option.map(this_capture_slot, Binding(_, CaptureBinding, True))
+  // Captures occupy slots 0..N-1 (named + this-capture if present).
+  let capture_count = case this_capture_slot {
+    Some(idx) -> int.max(list.length(captures), idx + 1)
+    None -> list.length(captures)
+  }
+  let scopes = case captures, this_capture_slot {
+    [], None -> []
+    _, _ -> [Scope(kind: FunctionScope, bindings: capture_bindings)]
+  }
   let r =
     Resolver(
-      scopes: [initial_scope],
+      scopes:,
       next_local: capture_count,
       max_locals: capture_count,
       output: [],
@@ -125,9 +154,17 @@ pub fn resolve_with_captures(
       next_const: list.length(constants),
       captured_vars:,
       fallthrough:,
+      this_binding:,
+      this_is_captured:,
     )
   let r = resolve_ops(r, code)
-  #(list.reverse(r.output), r.max_locals, r.constants, r.constants_map)
+  Resolved(
+    code: list.reverse(r.output),
+    local_count: r.max_locals,
+    constants: r.constants,
+    constants_map: r.constants_map,
+    this_slot: option.map(r.this_binding, fn(b) { b.index }),
+  )
 }
 
 // ============================================================================
@@ -157,6 +194,48 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
         [] -> r
       }
     }
+
+    DeclareThis -> {
+      // Allocate the lexical-`this` slot. Non-arrows emit this first after
+      // EnterScope(FunctionScope) so index == len(captures), matching what
+      // setup_locals expects. Box if any inner closure captures `this` (so
+      // arrow→super() write-backs alias the same cell).
+      use <- on_some(r.this_binding, r)
+      let index = r.next_local
+      let boxed = r.this_is_captured
+      let binding = Binding(index:, kind: ParamBinding, is_boxed: boxed)
+      let r =
+        Resolver(
+          ..r,
+          next_local: index + 1,
+          max_locals: int.max(r.max_locals, index + 1),
+          this_binding: Some(binding),
+        )
+      case boxed {
+        True -> emit(r, IrBoxLocal(index))
+        False -> r
+      }
+    }
+
+    Ir(IrGetThis) ->
+      case r.this_binding {
+        Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrGetBoxed(index))
+        Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrGetLocal(index))
+        // Unreachable for well-formed input: every body that references `this`
+        // either DeclareThis'd or got a this_capture_slot. Mirror
+        // read_this_local's defensive JsUndefined.
+        None -> {
+          let #(r, idx) = ensure_constant(r, JsUndefined)
+          emit(r, IrPushConst(idx))
+        }
+      }
+
+    Ir(IrSetThis) ->
+      case r.this_binding {
+        Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrPutBoxed(index))
+        Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrPutLocal(index))
+        None -> r
+      }
 
     DeclareVar(name, kind) -> {
       // If already declared in the target scope, skip entirely (no new slot,

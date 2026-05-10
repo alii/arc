@@ -13,7 +13,7 @@ import arc/vm/opcode
 import arc/vm/value.{type FuncTemplate, CaptureLocal}
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 
@@ -62,23 +62,24 @@ fn compile_module_with_scope(
   case emit.emit_module(items) {
     Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
       let captured_vars = collect_all_captured_vars(children, emitter_ops)
-      let #(ir_ops, local_count, constants, _constants_map) =
+      let this_is_captured = list.any(children, arrow_needs_parent_this)
+      let resolved =
         scope.resolve(
           emitter_ops,
           constants,
           constants_map,
           captured_vars,
+          this_is_captured,
           scope.ToGlobal,
         )
       let parent_scope = build_scope_dict(emitter_ops)
-      let child_templates = list.map(children, compile_child(_, parent_scope))
-      let this_slot =
-        dict.get(parent_scope, emit.this_var) |> option.from_result
+      let child_templates =
+        list.map(children, compile_child(_, parent_scope, resolved.this_slot))
       let template =
         resolve.resolve(
-          ir_ops,
-          constants,
-          local_count,
+          resolved.code,
+          resolved.constants,
+          resolved.local_count,
           child_templates,
           None,
           0,
@@ -89,7 +90,7 @@ fn compile_module_with_scope(
           False,
           False,
           None,
-          this_slot,
+          resolved.this_slot,
         )
       Ok(#(template, parent_scope))
     }
@@ -136,6 +137,7 @@ pub fn compile_eval(
 pub fn compile_eval_direct(
   program: ast.Program,
   parent_names: List(String),
+  inherits_this: Bool,
   caller_is_strict: Bool,
 ) -> Result(FuncTemplate, CompileError) {
   case program {
@@ -152,42 +154,57 @@ pub fn compile_eval_direct(
           // to local DeclareVar so they stay scoped to the eval body.
           // Sloppy keeps DeclareGlobalVar which scope.gleam rewrites to
           // DeclareEvalVar via ToEvalEnv.
-          // Also drop the body's own *this* DeclareVar — *this* arrives via
-          // parent_names capture (slot in the pre-seeded capture scope) and
-          // a shadow slot here would hide it from lookup.
+          // Also drop the body's own DeclareThis — `this` arrives via the
+          // caller's boxed slot (this_capture_slot below) and an owned slot
+          // here would shadow it.
           let emitter_ops =
             list.filter_map(emitter_ops, fn(op) {
               case op {
-                emit.DeclareVar(name, _) if name == emit.this_var -> Error(Nil)
+                emit.DeclareThis -> Error(Nil)
                 emit.Ir(opcode.IrDeclareGlobalVar(name)) if strict ->
                   Ok(emit.DeclareVar(name, emit.VarBinding))
                 _ -> Ok(op)
               }
             })
           let captured_vars = collect_all_captured_vars(children, emitter_ops)
+          let this_is_captured = list.any(children, arrow_needs_parent_this)
           let fallthrough = case strict {
             True -> scope.ToGlobal
             False -> scope.ToEvalEnv
           }
-          let #(ir_ops, local_count, constants, _cm) =
+          // Caller's `this` box ref is seeded at slot len(parent_names) by
+          // run_direct_eval; treat it as a capture so IrGetThis → GetBoxed.
+          let this_capture_slot = case inherits_this {
+            True -> Some(list.length(parent_names))
+            False -> None
+          }
+          let resolved =
             scope.resolve_with_captures(
               emitter_ops,
               constants,
               constants_map,
               parent_names,
+              this_capture_slot,
               captured_vars,
+              this_is_captured,
               fallthrough,
             )
           let parent_scope =
-            build_scope_dict_with_captures(emitter_ops, parent_names)
+            build_scope_dict_with_captures(
+              emitter_ops,
+              parent_names,
+              this_capture_slot,
+            )
           let child_templates =
-            list.map(children, compile_child(_, parent_scope))
-          let this_slot =
-            dict.get(parent_scope, emit.this_var) |> option.from_result
+            list.map(children, compile_child(
+              _,
+              parent_scope,
+              resolved.this_slot,
+            ))
           Ok(resolve.resolve(
-            ir_ops,
-            constants,
-            local_count,
+            resolved.code,
+            resolved.constants,
+            resolved.local_count,
             child_templates,
             None,
             0,
@@ -198,7 +215,7 @@ pub fn compile_eval_direct(
             False,
             False,
             None,
-            this_slot,
+            resolved.this_slot,
           ))
         }
       }
@@ -336,14 +353,16 @@ fn compile_script(
     Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
       // Determine which variables are captured by children (need boxing)
       let captured_vars = collect_all_captured_vars(children, emitter_ops)
+      let this_is_captured = list.any(children, arrow_needs_parent_this)
 
       // Phase 2: Resolve scopes (names → local indices), with capture info
-      let #(ir_ops, local_count, constants, _constants_map) =
+      let resolved =
         scope.resolve(
           emitter_ops,
           constants,
           constants_map,
           captured_vars,
+          this_is_captured,
           scope.ToGlobal,
         )
 
@@ -351,17 +370,15 @@ fn compile_script(
       let parent_scope = build_scope_dict(emitter_ops)
 
       // Process child functions through Phase 2 + Phase 3 recursively
-      let child_templates = list.map(children, compile_child(_, parent_scope))
-
-      let this_slot =
-        dict.get(parent_scope, emit.this_var) |> option.from_result
+      let child_templates =
+        list.map(children, compile_child(_, parent_scope, resolved.this_slot))
 
       // Phase 3: Resolve labels (label IDs → PC addresses)
       let template =
         resolve.resolve(
-          ir_ops,
-          constants,
-          local_count,
+          resolved.code,
+          resolved.constants,
+          resolved.local_count,
           child_templates,
           None,
           0,
@@ -372,7 +389,7 @@ fn compile_script(
           False,
           False,
           None,
-          this_slot,
+          resolved.this_slot,
         )
       Ok(template)
     }
@@ -391,6 +408,7 @@ fn any_descendant_has_eval(child: emit.CompiledChild) -> Bool {
 fn compile_child(
   child: emit.CompiledChild,
   parent_scope: Dict(String, Int),
+  parent_this_slot: Option(Int),
 ) -> FuncTemplate {
   // If this function OR any descendant contains a direct eval call, ALL of
   // this function's locals must be boxed — eval can see the full lexical
@@ -413,22 +431,31 @@ fn compile_child(
       |> set.to_list
     True -> dict.keys(parent_scope)
   }
-  // Non-arrows declare their own `*this*` (slot = len(captures)); capturing the
-  // parent's would create a redundant shadowed slot AND make scope.resolve and
-  // build_scope_dict disagree on indices (resolve allocates a fresh slot for
-  // the ParamBinding redeclare, build_scope_dict skips it). Arrows keep the
-  // capture — it IS their lexical `this`.
-  let captures = case child.is_arrow {
-    True -> captures
-    False -> list.filter(captures, fn(name) { name != emit.this_var })
+
+  // Arrows that (transitively) reference `this` capture the enclosing
+  // non-arrow's slot. Non-arrows DeclareThis their own. With eval in the
+  // subtree, an arrow captures `this` unconditionally so eval('this') works.
+  let captures_this =
+    child.is_arrow
+    && option.is_some(parent_this_slot)
+    && { eval_in_subtree || child.references_this }
+  let this_capture_slot = case captures_this {
+    True -> Some(list.length(captures))
+    False -> None
   }
 
-  // Build env_descriptors: for each captured name, CaptureLocal(parent_index)
+  // Build env_descriptors: one CaptureLocal per named capture, then the
+  // `this` capture (if any) at index len(captures) — same layout the
+  // resolver and setup_locals assume.
   let env_descriptors =
     list.map(captures, fn(name) {
       let assert Ok(parent_index) = dict.get(parent_scope, name)
       CaptureLocal(parent_index)
     })
+  let env_descriptors = case captures_this, parent_this_slot {
+    True, Some(pidx) -> list.append(env_descriptors, [CaptureLocal(pidx)])
+    _, _ -> env_descriptors
+  }
 
   // Determine which of this child's vars are captured by grandchildren
   let grandchild_captured =
@@ -438,6 +465,9 @@ fn compile_child(
     False -> grandchild_captured
     True -> set.union(grandchild_captured, collect_declared_names(child.code))
   }
+  // Box `this` when a grandchild arrow captures it, or when eval may read it.
+  let this_is_captured =
+    eval_in_subtree || list.any(child.functions, arrow_needs_parent_this)
 
   // Sloppy functions that contain a direct eval must resolve unresolved
   // names through eval_env first (for vars injected by eval("var y=1")).
@@ -447,28 +477,21 @@ fn compile_child(
   }
 
   // Phase 2: Resolve scopes, with captures pre-populated
-  let #(ir_ops, local_count, constants, _constants_map) = case captures {
-    [] ->
-      scope.resolve(
-        child.code,
-        child.constants,
-        child.constants_map,
-        vars_to_box,
-        fallthrough,
-      )
-    _ ->
-      scope.resolve_with_captures(
-        child.code,
-        child.constants,
-        child.constants_map,
-        captures,
-        vars_to_box,
-        fallthrough,
-      )
-  }
+  let resolved =
+    scope.resolve_with_captures(
+      child.code,
+      child.constants,
+      child.constants_map,
+      captures,
+      this_capture_slot,
+      vars_to_box,
+      this_is_captured,
+      fallthrough,
+    )
 
   // Build scope dict for this child (for grandchildren captures)
-  let child_scope = build_scope_dict_with_captures(child.code, captures)
+  let child_scope =
+    build_scope_dict_with_captures(child.code, captures, this_capture_slot)
 
   // For direct eval: record name→index so the runtime can map variable
   // names in the eval'd source to the caller's boxed local slots.
@@ -479,20 +502,17 @@ fn compile_child(
     True -> Some(dict.to_list(child_scope))
   }
 
-  // Slot index of the synthetic `*this*` local. Non-arrows declare it as
-  // their first ParamBinding (right after captures); arrows don't declare it
-  // at all — they capture it from the enclosing scope, so dict.get → None.
-  let this_slot = dict.get(child_scope, emit.this_var) |> option.from_result
-
-  // Recursively compile grandchildren
+  // Recursively compile grandchildren. resolved.this_slot is where lexical
+  // `this` lives in THIS body (owned for non-arrows, capture for arrows),
+  // so it's the parent_this_slot for grandchildren either way.
   let grandchild_templates =
-    list.map(child.functions, compile_child(_, child_scope))
+    list.map(child.functions, compile_child(_, child_scope, resolved.this_slot))
 
   // Phase 3: Resolve labels
   resolve.resolve(
-    ir_ops,
-    constants,
-    local_count,
+    resolved.code,
+    resolved.constants,
+    resolved.local_count,
     grandchild_templates,
     child.name,
     child.arity,
@@ -503,8 +523,16 @@ fn compile_child(
     child.is_generator,
     child.is_async,
     local_names,
-    this_slot,
+    resolved.this_slot,
   )
+}
+
+/// A child needs the parent's lexical `this` iff it's an arrow that
+/// references `this` (directly or via a nested arrow). Non-arrows own
+/// their slot. The emitter computes `references_this` at emit time and
+/// propagates it through arrow boundaries, so this is an O(1) read.
+fn arrow_needs_parent_this(child: emit.CompiledChild) -> Bool {
+  child.is_arrow && child.references_this
 }
 
 // ============================================================================
@@ -591,11 +619,18 @@ fn build_scope_dict(ops: List(emit.EmitterOp)) -> Dict(String, Int) {
 }
 
 /// Build scope dict with pre-populated captures.
+/// `this_capture_slot` must match what was passed to scope.resolve_with_captures
+/// so name→index agrees with the slots the resolver actually allocated — the
+/// `this` capture occupies a slot but isn't a named entry.
 fn build_scope_dict_with_captures(
   ops: List(emit.EmitterOp),
   captures: List(String),
+  this_capture_slot: Option(Int),
 ) -> Dict(String, Int) {
-  let capture_count = list.length(captures)
+  let named = list.length(captures)
+  let capture_count =
+    option.map(this_capture_slot, fn(idx) { idx + 1 })
+    |> option.unwrap(named)
   let initial =
     list.index_map(captures, fn(name, idx) { #(name, idx) })
     |> dict.from_list()
@@ -615,6 +650,9 @@ fn build_scope_dict_loop(
     [] -> acc
     [op, ..rest] ->
       case op {
+        // `this` occupies a slot but isn't a named binding.
+        emit.DeclareThis ->
+          build_scope_dict_loop(rest, scopes, next_local + 1, acc)
         emit.DeclareVar(name, _kind) ->
           case dict.has_key(acc, name) {
             True -> build_scope_dict_loop(rest, scopes, next_local, acc)

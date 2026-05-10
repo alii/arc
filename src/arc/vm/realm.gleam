@@ -30,7 +30,7 @@ pub type ExecuteInnerFn =
   fn(State) -> Result(#(completion.Completion, State), VmError)
 
 /// Inline of interpreter.init_top_level_locals (realm.gleam can't import
-/// interpreter — cycle). JsUndefined everywhere, then seed *this* slot.
+/// interpreter — cycle). JsUndefined everywhere, then seed the `this` slot.
 fn seed_top_level_locals(
   template: FuncTemplate,
   this_val: JsValue,
@@ -445,23 +445,38 @@ fn run_direct_eval(
   new_state_fn: NewStateFn,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Compile with caller's local names as pre-boxed captures. The eval'd
-  // code's slot i corresponds to name_table[i]'s variable.
+  // code's slot i corresponds to name_table[i]'s variable. The caller's
+  // lexical `this` (if any) is threaded as one extra capture after the
+  // named ones, so eval('this') aliases the caller's slot.
   let parent_names = list.map(name_table, fn(pair) { pair.0 })
+  let inherits_this = option.is_some(state.func.this_slot)
   let caller_strict = state.func.is_strict
   use template <- compile_or_throw(
     state,
     state.builtins,
     source,
-    compiler.compile_eval_direct(_, parent_names, caller_strict),
+    compiler.compile_eval_direct(
+      _,
+      parent_names,
+      inherits_this,
+      caller_strict,
+    ),
   )
   // Seed locals[0..N-1] with the caller's box refs (pulled from
-  // caller's locals at the indices in name_table). Remaining slots
-  // default to undefined.
+  // caller's locals at the indices in name_table), then the caller's
+  // `this` box ref. Remaining slots default to undefined.
   let caller_box_refs =
     list.map(name_table, fn(pair) {
       tuple_array.get(pair.1, state.locals)
       |> option.unwrap(JsUndefined)
     })
+  let caller_box_refs = case state.func.this_slot {
+    Some(idx) ->
+      list.append(caller_box_refs, [
+        tuple_array.get(idx, state.locals) |> option.unwrap(JsUndefined),
+      ])
+    None -> caller_box_refs
+  }
   let remaining = template.local_count - list.length(caller_box_refs)
   let locals =
     list.append(caller_box_refs, list.repeat(JsUndefined, remaining))
@@ -494,7 +509,7 @@ fn run_direct_eval(
       job_queue: state.job_queue,
       realms: state.realms,
       // Direct eval inherits the caller's `this` (spec §19.2.1.1 step 16.a)
-      // via the captured *this* box arriving in caller_box_refs above.
+      // via the boxed capture appended to caller_box_refs above.
       eval_env:,
     )
   case execute_inner(eval_state) {

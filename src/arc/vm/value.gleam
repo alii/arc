@@ -107,10 +107,12 @@ pub type FuncTemplate {
     /// Maps variable name → local slot index. All such locals are boxed
     /// (BoxSlot refs), so direct eval can read/write them by index.
     local_names: Option(List(#(String, Int))),
-    /// Local-slot index of the synthetic `*this*` binding. Some(idx) for
-    /// non-arrows (and top-level script/module/eval bodies); None for arrows,
-    /// which capture `*this*` from the enclosing non-arrow via env_descriptors.
-    /// setup_locals reads this to write the bound `this` into locals[idx].
+    /// Local-slot index where lexical `this` lives. For non-arrows (and
+    /// script/module/eval bodies) it's an owned slot at len(env_descriptors)
+    /// that setup_locals writes the bound `this` into. For arrows that
+    /// reference `this` it points at the env_descriptors capture slot
+    /// (setup_locals does NOT write — is_arrow guards that). None when
+    /// `this` is unreferenced.
     this_slot: Option(Int),
   )
 }
@@ -976,8 +978,7 @@ pub type ExoticKind(ctx) {
   /// JS function (closure). Per ES spec, a function object carries its
   /// [[ECMAScriptCode]] directly. `func_template` is the compiled bytecode,
   /// `env` points to the EnvSlot holding captured variables. Arrows capture
-  /// the enclosing frame's `this` as an ordinary free variable via `env`
-  /// (the synthetic `*this*` local — see FuncTemplate.this_slot).
+  /// the enclosing frame's `this` via `env` — see FuncTemplate.this_slot.
   FunctionObject(func_template: FuncTemplate, env: Ref)
   /// Built-in function implemented in Gleam, not bytecode.
   /// Callable like any function but dispatches to native code.

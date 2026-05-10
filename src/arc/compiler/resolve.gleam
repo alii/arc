@@ -16,14 +16,15 @@ import arc/vm/opcode.{
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
   IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
-  IrGetPrivateField, IrGetPrivateField2, IrGosub, IrInitGlobalLex,
+  IrGetPrivateField, IrGetPrivateField2, IrGetThis, IrGosub, IrInitGlobalLex,
   IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
   IrIteratorNext, IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish,
   IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrNewRegExp,
   IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPrivateIn, IrPushConst,
   IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal,
   IrPutLocal, IrPutPrivateField, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
-  IrScopeReboxVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
+  IrScopeReboxVar, IrScopeTypeofVar, IrSetThis, IrSetupDerivedClass, IrSwap,
+  IrThrow,
   IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
@@ -135,7 +136,9 @@ fn resolve_ops(
     [IrScopeGetVar(_), ..]
     | [IrScopePutVar(_), ..]
     | [IrScopeTypeofVar(_), ..]
-    | [IrScopeReboxVar(_), ..] ->
+    | [IrScopeReboxVar(_), ..]
+    | [IrGetThis, ..]
+    | [IrSetThis, ..] ->
       panic as "resolve: scope ops should be consumed by Phase 2"
 
     // Resolved variable access (emitted by Phase 2)

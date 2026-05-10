@@ -13,14 +13,15 @@ import arc/vm/opcode.{
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
-  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGosub,
+  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGetThis,
+  IrGosub,
   IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject, IrIteratorClose,
   IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump, IrJumpIfFalse,
   IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject,
   IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPrivateIn,
   IrPushConst, IrPushTry, IrPutElem, IrPutField, IrPutPrivateField, IrRet,
   IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar,
-  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield,
+  IrSetThis, IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrUnaryOp, IrYield,
   IrYieldStar,
 }
 import arc/vm/value.{
@@ -46,6 +47,11 @@ pub type EmitterOp {
   LeaveScope
   /// Declare a variable in the current scope
   DeclareVar(name: String, kind: BindingKind)
+  /// Declare the lexical-`this` slot for the current function scope.
+  /// Non-arrows (and script/module/eval bodies) emit this as the first
+  /// declaration after EnterScope(FunctionScope) so the slot index equals
+  /// len(captures). Arrows skip it — `IrGetThis` resolves to a capture.
+  DeclareThis
 }
 
 pub type ScopeKind {
@@ -92,6 +98,10 @@ pub type CompiledChild {
     /// identifier callee. Such functions get all locals boxed and a
     /// name→index table stored on FuncTemplate so direct eval can see them.
     has_eval_call: Bool,
+    /// True if this body (or any nested arrow) reads/writes lexical `this`.
+    /// For arrows, the parent must capture/box its `this` slot; for
+    /// non-arrows this is informational (they own their slot).
+    references_this: Bool,
   )
 }
 
@@ -153,9 +163,14 @@ pub opaque type Emitter {
     /// True while emitting an async function body. Checked by yield* to
     /// route to the async-delegation path (GetAsyncIterator + await).
     is_async: Bool,
-    /// True while emitting an arrow function body. Gates whether the
-    /// `*this*` and `arguments` locals are declared in the prologue.
+    /// True while emitting an arrow function body. Gates whether
+    /// `DeclareThis` and the `arguments` local are emitted in the prologue.
     is_arrow: Bool,
+    /// True once an `IrGetThis`/`IrSetThis` has been emitted in this body,
+    /// or an inner ARROW child propagated its own flag up via
+    /// add_child_function. Mirrors JSC's needsThisRecord — lets the compiler
+    /// decide capture/box without re-walking the IR.
+    references_this: Bool,
     /// Where top-level let/const/class go. LexGlobal only for the REPL
     /// program emitter; everything else (scripts, eval, modules, function
     /// bodies) uses LexLocal.
@@ -238,9 +253,9 @@ fn emit_module_common(
 ) {
   let e = Emitter(..new_emitter(), strict: True)
   let e = emit_op(e, EnterScope(FunctionScope))
-  // Module top-level `this === undefined` (§16.2.1.6.4). ParamBinding emits no
-  // init so slot 0 stays JsUndefined from runtime padding.
-  let e = emit_op(e, DeclareVar(this_var, ParamBinding))
+  // Module top-level `this === undefined` (§16.2.1.6.4). DeclareThis allocates
+  // slot 0; runtime padding leaves it JsUndefined.
+  let e = emit_op(e, DeclareThis)
 
   // Hoist var declarations
   let hoisted_vars = collect_hoisted_vars(stmts)
@@ -323,7 +338,7 @@ fn emit_program_common(
   let e = emit_op(e, EnterScope(FunctionScope))
   // Script/eval top-level owns a `this` slot (slot 0). Runtime entry writes
   // globalThis (or the caller's `this` for direct eval) into it before pc=0.
-  let e = emit_op(e, DeclareVar(this_var, ParamBinding))
+  let e = emit_op(e, DeclareThis)
 
   // Hoisting pre-pass: emit DeclareGlobalVar for top-level var declarations.
   // Both script and REPL modes create globalThis properties for hoisted vars.
@@ -383,18 +398,11 @@ fn new_emitter() -> Emitter {
     has_eval_call: False,
     is_async: False,
     is_arrow: False,
+    references_this: False,
     top_lex: LexLocal,
     scope_depth: 0,
   )
 }
-
-/// Synthetic local name for the lexical-`this` slot. Non-arrows declare it
-/// as the first ParamBinding (slot = len(captures)); runtime call setup
-/// writes the bound `this` there before pc=0. Arrows do not declare it —
-/// `IrScopeGetVar(this_var)` becomes a free var captured via the normal
-/// closure machinery. Asterisks make it an invalid JS identifier so it can
-/// never collide with user code.
-pub const this_var = "*this*"
 
 /// Check if a statement list begins with a Use Strict Directive.
 /// ES2024 section 11.2.1 "Directive Prologues and the Use Strict Directive":
@@ -710,14 +718,29 @@ fn emit_goto_loop_walk(
 
 fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
   let idx = e.next_func
+  // Arrow children inherit lexical `this`, so their reference is the parent's
+  // reference. Non-arrows own their slot — their flag does not propagate.
+  let references_this =
+    e.references_this || { child.is_arrow && child.references_this }
   #(
     Emitter(
       ..e,
       functions: list.append(e.functions, [child]),
       next_func: idx + 1,
+      references_this:,
     ),
     idx,
   )
+}
+
+/// Emit IrGetThis and mark this body as referencing lexical `this`.
+fn get_this(e: Emitter) -> Emitter {
+  Emitter(..emit_ir(e, IrGetThis), references_this: True)
+}
+
+/// Emit IrSetThis and mark this body as referencing lexical `this`.
+fn set_this(e: Emitter) -> Emitter {
+  Emitter(..emit_ir(e, IrSetThis), references_this: True)
 }
 
 /// Extract final results from the emitter.
@@ -1275,12 +1298,11 @@ fn compile_function_body(
 
   // Non-arrows own `this` as the first local (slot = len(captures)). Runtime
   // setup_locals writes the bound value (or JsUninitialized for derived ctors)
-  // before pc=0; ParamBinding emits only BoxLocal-if-captured. Arrows skip —
-  // their IrScopeGetVar(*this*) is a free var captured from the enclosing
-  // non-arrow.
+  // before pc=0. Arrows skip — their `IrGetThis` resolves to a capture from
+  // the enclosing non-arrow.
   let e = case is_arrow {
     True -> e
-    False -> emit_op(e, DeclareVar(this_var, ParamBinding))
+    False -> emit_op(e, DeclareThis)
   }
 
   // Phase 1: Declare parameters (identifier or synthetic for destructuring)
@@ -1394,6 +1416,7 @@ fn compile_function_body(
     is_generator:,
     is_async:,
     has_eval_call: e.has_eval_call,
+    references_this: e.references_this,
   )
 }
 
@@ -1417,7 +1440,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
     // not [[Set]], so prototype setters are NOT invoked and an own data
     // property is always created (even shadowing an inherited accessor).
     ast.ClassFieldInit(key:, value:, computed:) -> {
-      let e = emit_ir(e, IrScopeGetVar(this_var))
+      let e = get_this(e)
       // §15.7.14: if Initializer is absent, initValue = undefined.
       let init = option.unwrap(value, ast.UndefinedExpression)
       use e <- result.map(case key, computed {
@@ -2148,8 +2171,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     }
 
     // super(args) — call parent constructor. After CallSuper binds `this`
-    // (§13.3.7.1 step 8), Dup the result and write it into the *this* local
-    // so arrows that captured it (boxed, by reference) see the post-super
+    // (§13.3.7.1 step 8), Dup the result and write it into the lexical-`this`
+    // slot so arrows that captured it (boxed, by reference) see the post-super
     // value instead of the TDZ JsUninitialized seeded at prologue.
     ast.CallExpression(ast.SuperExpression, args) ->
       case has_spread_arg(args) {
@@ -2160,14 +2183,14 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           e
           |> emit_ir(IrCallSuperApply)
           |> emit_ir(IrDup)
-          |> emit_ir(IrScopePutVar(this_var))
+          |> set_this
         }
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
           e
           |> emit_ir(IrCallSuper(list.length(args)))
           |> emit_ir(IrDup)
-          |> emit_ir(IrScopePutVar(this_var))
+          |> set_this
         }
       }
 
@@ -2379,9 +2402,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }
 
-    // `this` — always read the *this* local. Non-arrows declared it; arrows
-    // resolve it as a captured free var from the nearest enclosing non-arrow.
-    ast.ThisExpression -> Ok(emit_ir(e, IrScopeGetVar(this_var)))
+    // `this` — non-arrows own the slot; arrows resolve it as a capture from
+    // the nearest enclosing non-arrow.
+    ast.ThisExpression -> Ok(get_this(e))
 
     // New expression: new Foo(args)
     ast.NewExpression(callee, args) -> {
@@ -4302,7 +4325,7 @@ fn emit_static_fields(
 
 /// Splice field-init statements immediately after the first top-level
 /// `super(...)` ExpressionStatement. If none found (super() nested or absent),
-/// append at end — runtime TDZ on the *this* local will still enforce ordering.
+/// append at end — runtime TDZ on the `this` slot will still enforce ordering.
 fn inject_field_inits_after_super(
   fields: List(ast.ClassElement),
   body: ast.Statement,

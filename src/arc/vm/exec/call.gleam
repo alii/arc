@@ -71,10 +71,10 @@ pub type DispatchNativeFn =
 // ============================================================================
 
 /// Resolve `this` for a function call per ES2024 §10.2.1.2 OrdinaryCallBindThis.
-/// Computes the value to write into the callee's `*this*` local slot
-/// (FuncTemplate.this_slot). Arrows have no own slot — the value returned
-/// for them is unused — they read `this` via the captured `*this*` local
-/// from the enclosing non-arrow.
+/// Computes the value to write into the callee's lexical-`this` slot
+/// (FuncTemplate.this_slot). Arrows don't own a slot — the value returned
+/// for them is unused; they read `this` via a capture from the enclosing
+/// non-arrow.
 pub fn bind_this(
   state: State,
   callee: FuncTemplate,
@@ -82,8 +82,8 @@ pub fn bind_this(
 ) -> #(Heap, JsValue) {
   case callee.is_arrow {
     // Step 2: thisMode is LEXICAL → arrows have no own `this` binding.
-    // Their `*this*` reads resolve to a captured local from the enclosing
-    // non-arrow, so the value computed here is never written anywhere.
+    // Their `this` reads resolve to a capture from the enclosing non-arrow,
+    // so the value computed here is never written anywhere.
     True -> #(state.heap, JsUndefined)
     False ->
       case callee.is_strict {
@@ -728,10 +728,10 @@ pub fn call_native_async_resume(
 }
 
 /// Set up locals for a function call:
-/// [env_values, *this*?, args(padded to arity), undefined×remaining].
-/// Non-arrows reserve one slot for the synthetic `*this*` local immediately
-/// after captures (FuncTemplate.this_slot = Some(len(env_values))). Arrows
-/// have this_slot=None — they capture `*this*` via env_values instead.
+/// [env_values, this?, args(padded to arity), undefined×remaining].
+/// Non-arrows own a `this` slot immediately after captures (this_slot ==
+/// len(env_values)); write the bound value there. Arrows inherit `this` via
+/// env_values (their this_slot, if Some, points at a capture) so skip.
 pub fn setup_locals(
   h: Heap,
   env_ref: value.Ref,
@@ -743,9 +743,9 @@ pub fn setup_locals(
   // Append the bound `this` to the env-prefix when the callee owns a slot
   // for it. The emitter guarantees that slot index == len(captures), so
   // appending here lands it at the right index without an extra set call.
-  let prefix = case callee_template.this_slot {
-    Some(_) -> list.append(env_values, [this_val])
-    None -> env_values
+  let prefix = case callee_template.this_slot, callee_template.is_arrow {
+    Some(_), False -> list.append(env_values, [this_val])
+    _, _ -> env_values
   }
   build_locals(
     prefix,

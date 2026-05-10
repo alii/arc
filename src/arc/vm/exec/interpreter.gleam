@@ -242,7 +242,7 @@ pub fn init_state(
 }
 
 /// Build the locals array for a top-level (script/module/eval/REPL) template:
-/// JsUndefined everywhere, then seed the synthetic `*this*` slot if present.
+/// JsUndefined everywhere, then seed the lexical-`this` slot if present.
 /// Function bodies use call.setup_locals instead — this is only for entries
 /// that don't go through the call protocol.
 pub fn init_top_level_locals(
@@ -256,9 +256,9 @@ pub fn init_top_level_locals(
   }
 }
 
-/// Read the current frame's `this` from its `*this*` local. Unboxes when the
-/// slot was boxed (captured by an inner arrow). Returns JsUndefined for arrows
-/// (this_slot=None) — defensive; arrows never reach Return-derived/CallSuper.
+/// Read the current frame's lexical `this`. Unboxes when the slot is boxed
+/// (captured by an inner arrow, or the frame IS an arrow reading its capture).
+/// Returns JsUndefined when this_slot is None (defensive — `this` unreferenced).
 pub fn read_this_local(state: State) -> JsValue {
   case state.func.this_slot {
     None -> JsUndefined
@@ -1053,8 +1053,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               // Base constructor: use the constructed object unless the
               // function explicitly returned an object.
               // §13.3.7.1 SuperCall step 8 BindThisValue(result) is now handled
-              // at the call site: emit's `CallSuper; Dup; ScopePutVar(*this*)`
-              // writes effective_return into the caller's *this* local.
+              // at the call site: emit's `CallSuper; Dup; IrSetThis` writes
+              // effective_return into the caller's lexical-`this` slot.
               let effective_return = case return_value {
                 JsObject(_) -> return_value
                 _ -> constructed_obj
@@ -2771,7 +2771,7 @@ fn get_elem_on_primitive(
 ///
 /// Our implementation threads the returned thisValue into the new call frame
 /// directly via call_function. Arrow functions use is_arrow instead of
-/// [[ThisMode]] = LEXICAL, capturing the enclosing frame's *this* local.
+/// [[ThisMode]] = LEXICAL, capturing the enclosing frame's `this` slot.
 /// Thin wrapper: delegates to call.call_function with execute_inner/unwind_to_catch.
 fn call_function(
   state: State,

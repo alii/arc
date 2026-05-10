@@ -222,10 +222,10 @@ fn run_closure_for_job(
   let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
   let #(heap, new_this) = bind_this(state, callee_template, this_val)
   // Mirror call.setup_locals: insert the bound `this` between captures and
-  // params when the callee owns a *this* slot.
-  let prefix = case callee_template.this_slot {
-    Some(_) -> list.append(env_values, [new_this])
-    None -> env_values
+  // params when the callee owns the slot (non-arrow).
+  let prefix = case callee_template.this_slot, callee_template.is_arrow {
+    Some(_), False -> list.append(env_values, [new_this])
+    _, _ -> env_values
   }
   let locals =
     build_locals(

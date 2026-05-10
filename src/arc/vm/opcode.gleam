@@ -277,6 +277,11 @@ pub type IrOp {
   IrScopePutVar(name: String)
   IrScopeTypeofVar(name: String)
   IrScopeReboxVar(name: String)
+  /// Read/write the lexical-`this` slot. Phase 2 lowers to GetLocal/GetBoxed
+  /// (or PutLocal/PutBoxed) against the slot allocated by `DeclareThis` or
+  /// the capture slot threaded in for arrows/direct-eval.
+  IrGetThis
+  IrSetThis
 
   // -- Labels and jumps (resolved in Phase 3) --
   IrLabel(id: Int)
