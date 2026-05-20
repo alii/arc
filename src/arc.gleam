@@ -95,7 +95,7 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
             ArrayObject(length:) ->
               inspect_array(h, elements, length, depth, seen)
             FunctionObject(..) -> inspect_function(properties)
-            NativeFunction(_) -> inspect_function(properties)
+            NativeFunction(..) -> inspect_function(properties)
             OrdinaryObject ->
               inspect_tagged_object(
                 h,

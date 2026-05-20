@@ -409,6 +409,7 @@ pub fn call_native_promise_finally(
           state.heap,
           value.NativeFunction(
             value.Call(value.PromiseFinallyFulfill(on_finally:)),
+            constructible: False,
           ),
           state.builtins.function.prototype,
         )
@@ -418,6 +419,7 @@ pub fn call_native_promise_finally(
           h,
           value.NativeFunction(
             value.Call(value.PromiseFinallyReject(on_finally:)),
+            constructible: False,
           ),
           state.builtins.function.prototype,
         )
@@ -505,6 +507,7 @@ fn finally_chain_value(
       state1.heap,
       value.NativeFunction(
         value.Call(value.PromiseFinallyValueThunk(value: captured_value)),
+        constructible: False,
       ),
       state.builtins.function.prototype,
     )
@@ -538,6 +541,7 @@ fn finally_chain_throw(
       state1.heap,
       value.NativeFunction(
         value.Call(value.PromiseFinallyThrower(reason: captured_reason)),
+        constructible: False,
       ),
       state.builtins.function.prototype,
     )
@@ -1537,7 +1541,8 @@ fn alloc_closure(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(value.Call(native)),
+        // Promise reaction job functions — not constructors.
+        kind: NativeFunction(value.Call(native), constructible: False),
         properties: dict.from_list([
           #(Named("name"), common.fn_name_property("")),
           #(Named("length"), common.fn_length_property(1)),

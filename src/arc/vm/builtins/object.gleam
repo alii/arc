@@ -150,6 +150,7 @@ pub fn init(
     "Object",
     1,
     static_methods,
+    True,
   )
 }
 
@@ -1145,7 +1146,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
           case kind {
             ArrayObject(_) -> "Array"
             value.ArgumentsObject(_) -> "Arguments"
-            FunctionObject(..) | NativeFunction(_) -> "Function"
+            FunctionObject(..) | NativeFunction(..) -> "Function"
             PromiseObject(_) -> "Promise"
             GeneratorObject(_) -> "Generator"
             value.AsyncGeneratorObject(_) -> "AsyncGenerator"

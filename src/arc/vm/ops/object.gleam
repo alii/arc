@@ -1498,7 +1498,7 @@ fn inspect_object(
           }
           "[Function: " <> name <> "]"
         }
-        NativeFunction(_) -> {
+        NativeFunction(..) -> {
           let name = case dict.get(properties, Named("name")) {
             Ok(DataProperty(value: JsString(n), ..)) -> n
             _ -> "native"
@@ -1640,5 +1640,34 @@ fn inspect_error_name(heap: Heap, ref: value.Ref) -> String {
         _ -> "Error"
       }
     _ -> "Error"
+  }
+}
+
+/// **IsConstructor(argument)** — ES2024 §7.2.4. Returns True iff `value` is an
+/// object with a [[Construct]] internal method. Single source of truth for
+/// constructibility, shared by the `new` / construct path (exec/call) and
+/// `Reflect.construct` (builtins/reflect).
+pub fn is_constructor(heap: Heap, value: JsValue) -> Bool {
+  case value {
+    JsObject(ref) ->
+      case heap.read(heap, ref) {
+        // ECMAScript function: a constructor unless it's an arrow, generator,
+        // or async function — those lack [[Construct]] (§10.2). Derived from
+        // the function's own template (intrinsic, already-stored data).
+        // NOTE: concise methods/getters/setters are also non-constructors per
+        // spec, but FuncTemplate doesn't yet flag them (follow-up).
+        Some(ObjectSlot(kind: FunctionObject(func_template:, ..), ..)) ->
+          !func_template.is_arrow
+          && !func_template.is_generator
+          && !func_template.is_async
+        // Built-in function: read the [[Construct]] capability stored on the
+        // slot — set True for constructor intrinsics at allocation, and copied
+        // from its target by `bind` (§10.4.1.3 step 6). A native's dispatch tag
+        // alone doesn't encode this, so unlike user functions it is stored.
+        Some(ObjectSlot(kind: NativeFunction(constructible:, ..), ..)) ->
+          constructible
+        _ -> False
+      }
+    _ -> False
   }
 }

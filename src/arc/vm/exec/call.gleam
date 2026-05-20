@@ -561,6 +561,7 @@ fn async_setup_await(
       h,
       NativeFunction(
         value.Call(value.AsyncResume(async_data_ref:, is_reject: False)),
+        constructible: False,
       ),
       builtins.function.prototype,
     )
@@ -569,6 +570,7 @@ fn async_setup_await(
       h,
       NativeFunction(
         value.Call(value.AsyncResume(async_data_ref:, is_reject: True)),
+        constructible: False,
       ),
       builtins.function.prototype,
     )
@@ -861,6 +863,12 @@ pub fn call_native(
                     bound_this: this_arg,
                     bound_args:,
                   )),
+                  // §10.4.1.3 step 6: the bound function has [[Construct]] iff
+                  // its target does. Copy the target's bit at bind time.
+                  constructible: object.is_constructor(
+                    state.heap,
+                    JsObject(target_ref),
+                  ),
                 ),
                 properties: dict.from_list([
                   #(Named("name"), common.fn_name_property(name)),
@@ -1325,6 +1333,16 @@ pub fn do_construct(
   dispatch_fn: DispatchNativeFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case heap.read(state.heap, ctor_ref) {
+    Some(ObjectSlot(kind: FunctionObject(func_template:, ..), ..))
+      if func_template.is_arrow
+      || func_template.is_generator
+      || func_template.is_async
+    ->
+      state.throw_type_error(
+        state,
+        object.inspect(JsObject(ctor_ref), state.heap)
+          <> " is not a constructor",
+      )
     Some(ObjectSlot(
       kind: FunctionObject(func_template:, env: env_ref),
       properties:,
@@ -1385,17 +1403,19 @@ pub fn do_construct(
         }
       }
     }
-    // Bound function used as constructor: resolve target, prepend args
+    // Bound function used as constructor (§10.4.1.2): prepend the bound args
+    // and recurse on the target through the same construct path, so the
+    // target's [[Construct]] — derived classes, primitive wrappers, and
+    // chained bound functions — is handled uniformly by do_construct itself.
     Some(ObjectSlot(
-      kind: NativeFunction(value.Call(value.BoundFunction(
-        target:,
-        bound_args:,
+      kind: NativeFunction(
+        value.Call(value.BoundFunction(target:, bound_args:, ..)),
         ..,
-      ))),
+      ),
       ..,
     )) -> {
       let final_args = list.append(bound_args, args)
-      construct_value(
+      do_construct(
         state,
         target,
         final_args,
@@ -1411,7 +1431,7 @@ pub fn do_construct(
     // is defined, so a Symbol arg flows into ToString and throws.
     // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
-      kind: NativeFunction(value.Call(value.StringConstructor)),
+      kind: NativeFunction(value.Call(value.StringConstructor), ..),
       ..,
     )) -> {
       let coerced = case args {
@@ -1434,9 +1454,10 @@ pub fn do_construct(
     // with [[NumberData]] = n.
     // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
-      kind: NativeFunction(value.Dispatch(value.NumberNative(
-        value.NumberConstructor,
-      ))),
+      kind: NativeFunction(
+        value.Dispatch(value.NumberNative(value.NumberConstructor)),
+        ..,
+      ),
       ..,
     )) -> {
       let n = case args {
@@ -1454,9 +1475,10 @@ pub fn do_construct(
     // wrapper object with [[BooleanData]] = b.
     // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
-      kind: NativeFunction(value.Dispatch(value.BooleanNative(
-        value.BooleanConstructor,
-      ))),
+      kind: NativeFunction(
+        value.Dispatch(value.BooleanNative(value.BooleanConstructor)),
+        ..,
+      ),
       ..,
     )) -> {
       let b = case args {
@@ -1470,109 +1492,36 @@ pub fn do_construct(
         state.builtins.boolean.prototype,
       )
     }
-    Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
-      call_native(
-        state,
-        native,
-        args,
-        rest_stack,
-        JsUndefined,
-        execute_inner,
-        unwind_to_catch,
-        dispatch_fn,
-      )
+    // §20.4.1.1: Symbol has [[Construct]] (so IsConstructor is true and it can
+    // appear in `extends`), but invoking it as a constructor always throws.
+    Some(ObjectSlot(
+      kind: NativeFunction(value.Call(value.SymbolConstructor), ..),
+      ..,
+    )) -> state.throw_type_error(state, "Symbol is not a constructor")
+    Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
+      case object.is_constructor(state.heap, JsObject(ctor_ref)) {
+        True ->
+          call_native(
+            state,
+            native,
+            args,
+            rest_stack,
+            JsUndefined,
+            execute_inner,
+            unwind_to_catch,
+            dispatch_fn,
+          )
+        False ->
+          state.throw_type_error(
+            state,
+            object.inspect(JsObject(ctor_ref), state.heap)
+              <> " is not a constructor",
+          )
+      }
     _ ->
       state.throw_type_error(
         state,
         object.inspect(JsObject(ctor_ref), state.heap)
-          <> " is not a constructor",
-      )
-  }
-}
-
-/// Construct a new object using the target function ref.
-/// Used by CallConstructor when the constructor is a bound function.
-pub fn construct_value(
-  state: State,
-  target_ref: Ref,
-  args: List(JsValue),
-  rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-  dispatch_fn: DispatchNativeFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
-  case heap.read(state.heap, target_ref) {
-    Some(ObjectSlot(
-      kind: FunctionObject(func_template:, env: env_ref),
-      properties:,
-      ..,
-    )) -> {
-      let proto = case dict.get(properties, Named("prototype")) {
-        Ok(DataProperty(value: JsObject(proto_ref), ..)) -> Some(proto_ref)
-        _ -> Some(state.builtins.object.prototype)
-      }
-      let #(h, new_obj_ref) =
-        heap.alloc(
-          state.heap,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: proto,
-            symbol_properties: [],
-            extensible: True,
-          ),
-        )
-      let new_obj = JsObject(new_obj_ref)
-      call_function(
-        State(..state, heap: h),
-        target_ref,
-        env_ref,
-        func_template,
-        args,
-        rest_stack,
-        new_obj,
-        Some(new_obj),
-        None,
-        execute_inner,
-        unwind_to_catch,
-      )
-    }
-    // Chained bound function: resolve further
-    Some(ObjectSlot(
-      kind: NativeFunction(value.Call(value.BoundFunction(
-        target:,
-        bound_args:,
-        ..,
-      ))),
-      ..,
-    )) -> {
-      let final_args = list.append(bound_args, args)
-      construct_value(
-        state,
-        target,
-        final_args,
-        rest_stack,
-        execute_inner,
-        unwind_to_catch,
-        dispatch_fn,
-      )
-    }
-    Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
-      call_native(
-        state,
-        native,
-        args,
-        rest_stack,
-        JsUndefined,
-        execute_inner,
-        unwind_to_catch,
-        dispatch_fn,
-      )
-    _ ->
-      state.throw_type_error(
-        state,
-        object.inspect(JsObject(target_ref), state.heap)
           <> " is not a constructor",
       )
   }
@@ -1606,7 +1555,7 @@ pub fn call_value(
             execute_inner,
             unwind_to_catch,
           )
-        Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
+        Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
           call_native(
             state,
             native,
@@ -1832,7 +1781,7 @@ pub fn function_to_string(
           }
           #(state, Ok(JsString("function " <> name <> "() { [native code] }")))
         }
-        Some(ObjectSlot(kind: NativeFunction(_), properties:, ..)) -> {
+        Some(ObjectSlot(kind: NativeFunction(_, ..), properties:, ..)) -> {
           let name =
             dict.get(properties, Named("name"))
             |> result.map(fn(p) {

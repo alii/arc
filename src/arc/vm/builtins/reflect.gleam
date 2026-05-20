@@ -160,21 +160,35 @@ fn reflect_apply(
 ///   4. Let args be ? CreateListFromArrayLike(argumentsList).
 ///   5. Return ? Construct(target, args, newTarget).
 ///
-/// TODO: newTarget (third arg) not yet wired — needs separate plumbing through
-/// do_construct to override the prototype source.
+/// TODO: newTarget (third arg) not yet fully wired — needs separate plumbing
+/// through do_construct to override the prototype source. The IsConstructor
+/// check for newTarget IS implemented.
 fn reflect_construct(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(target, args_list) = case args {
-    [t, a, ..] -> #(t, a)
-    [t] -> #(t, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
+  let #(target, args_list, new_target) = case args {
+    [t, a, nt, ..] -> #(t, a, Some(nt))
+    [t, a] -> #(t, a, None)
+    [t] -> #(t, JsUndefined, None)
+    [] -> #(JsUndefined, JsUndefined, None)
   }
+  // Step 1: If IsConstructor(target) is false, throw a TypeError exception.
+  use <- bool.lazy_guard(!object.is_constructor(state.heap, target), fn() {
+    state.type_error(state, "target is not a constructor")
+  })
+  // Step 3: If newTarget is present and IsConstructor(newTarget) is false,
+  // throw a TypeError exception.
+  let new_target_valid = case new_target {
+    Some(nt) -> object.is_constructor(state.heap, nt)
+    None -> True
+  }
+  use <- bool.lazy_guard(!new_target_valid, fn() {
+    state.type_error(state, "newTarget is not a constructor")
+  })
   // Step 4: Let args be ? CreateListFromArrayLike(argumentsList).
   use ctor_args, state <- require_array_like(state, args_list)
-  // Steps 1, 5: state.construct validates target is an object and runs
-  // [[Construct]]. Non-constructor objects throw inside do_construct.
+  // Step 5: Return ? Construct(target, args, newTarget).
   use result, state <- state.try_op(state.construct(state, target, ctor_args))
   #(state, Ok(result))
 }

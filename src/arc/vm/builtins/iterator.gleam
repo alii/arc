@@ -76,6 +76,11 @@ pub fn init(
       "Iterator",
       0,
       ctor_props,
+      // §27.1.3.1: Iterator is an abstract constructor — it HAS [[Construct]]
+      // (IsConstructor(Iterator) is true and it's subclassable), but `new
+      // Iterator()` directly throws. The IteratorConstructor native enforces
+      // that: it returns `this` for a subclass super() call, throws otherwise.
+      True,
     )
 
   // §27.1.3.2 Iterator.prototype.constructor and §27.1.3.13 [@@toStringTag] are

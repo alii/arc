@@ -149,6 +149,7 @@ pub fn create_resolving_functions(
             data_ref:,
             already_resolved_ref:,
           )),
+          constructible: False,
         ),
         properties: common.named_props([
           #("name", common.fn_name_property("")),
@@ -172,6 +173,7 @@ pub fn create_resolving_functions(
             data_ref:,
             already_resolved_ref:,
           )),
+          constructible: False,
         ),
         properties: common.named_props([
           #("name", common.fn_name_property("")),

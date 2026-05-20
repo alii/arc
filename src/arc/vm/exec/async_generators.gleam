@@ -701,6 +701,7 @@ fn alloc_resume(
     h,
     NativeFunction(
       value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, kind:)),
+      constructible: False,
     ),
     function_proto,
   )
