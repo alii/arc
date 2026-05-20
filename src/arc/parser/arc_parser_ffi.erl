@@ -6,12 +6,31 @@ parse_float(S) ->
         {ok, erlang:binary_to_float(S)}
     catch
         error:badarg ->
-            %% Try adding .0 for integer-like strings with exponent
-            try
-                {ok, erlang:binary_to_float(<<S/binary, ".0">>)}
-            catch
-                error:badarg -> {error, nil}
+            %% Erlang's binary_to_float requires a decimal point. For inputs
+            %% like "1e10" or "1E20" we insert ".0" before the exponent so the
+            %% string becomes "1.0e10" / "1.0E20" which Erlang accepts.
+            case insert_dot_before_exp(S) of
+                {ok, S2} ->
+                    try
+                        {ok, erlang:binary_to_float(S2)}
+                    catch
+                        error:badarg -> {error, nil}
+                    end;
+                error -> {error, nil}
             end
+    end.
+
+%% Insert ".0" before the first 'e' or 'E' in a binary, if no '.' precedes it.
+%% Returns {ok, NewBinary} or `error` if no exponent or already has decimal.
+insert_dot_before_exp(S) ->
+    case binary:match(S, [<<"e">>, <<"E">>]) of
+        {Pos, _Len} ->
+            <<Mantissa:Pos/binary, Rest/binary>> = S,
+            case binary:match(Mantissa, <<".">>) of
+                nomatch -> {ok, <<Mantissa/binary, ".0", Rest/binary>>};
+                _ -> error
+            end;
+        nomatch -> error
     end.
 
 %% Decode a JavaScript string literal's escape sequences per ES2024 §12.9.4.
