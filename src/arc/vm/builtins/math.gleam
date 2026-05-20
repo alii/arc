@@ -113,10 +113,10 @@ pub fn dispatch(
     MathImul -> math_imul(args, state)
     MathExpm1 -> math_expm1(args, state)
     MathLog1p -> math_log1p(args, state)
-    MathSinh -> finite_passthrough(args, state, ffi_math_sinh)
+    MathSinh -> neg_zero_preserving(args, state, ffi_math_sinh)
     MathCosh -> math_cosh(args, state)
     MathTanh -> math_tanh(args, state)
-    MathAsinh -> finite_passthrough(args, state, ffi_math_asinh)
+    MathAsinh -> neg_zero_preserving(args, state, ffi_math_asinh)
     MathAcosh -> math_acosh(args, state)
     MathAtanh -> math_atanh(args, state)
   }
@@ -175,7 +175,12 @@ fn math_max(
     list.fold(args, NegInfinity, fn(acc, arg) {
       case acc, to_number(arg) {
         NaN, _ | _, NaN -> NaN
-        Finite(a), Finite(b) if a >=. b -> Finite(a)
+        Finite(a), Finite(b) if a >=. b ->
+          // Per spec: Math.max(+0, -0) → +0
+          case a <=. b && is_neg_zero(a) {
+            True -> Finite(b)
+            False -> Finite(a)
+          }
         Finite(_), Finite(b) -> Finite(b)
         Infinity, _ | _, Infinity -> Infinity
         NegInfinity, other | other, NegInfinity -> other
@@ -193,7 +198,12 @@ fn math_min(
     list.fold(args, Infinity, fn(acc, arg) {
       case acc, to_number(arg) {
         NaN, _ | _, NaN -> NaN
-        Finite(a), Finite(b) if a <=. b -> Finite(a)
+        Finite(a), Finite(b) if a <=. b ->
+          // Per spec: Math.min(+0, -0) → -0
+          case a >=. b && is_neg_zero(b) {
+            True -> Finite(b)
+            False -> Finite(a)
+          }
         Finite(_), Finite(b) -> Finite(b)
         NegInfinity, _ | _, NegInfinity -> NegInfinity
         Infinity, other | other, Infinity -> other
@@ -292,12 +302,16 @@ fn math_cbrt(
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
-      case n <. 0.0 {
-        True -> {
-          let result = float_power(float.absolute_value(n), 1.0 /. 3.0)
-          Finite(float.negate(result))
-        }
-        False -> Finite(float_power(n, 1.0 /. 3.0))
+      case is_neg_zero(n) {
+        True -> Finite(-0.0)
+        False ->
+          case n <. 0.0 {
+            True -> {
+              let result = float_power(float.absolute_value(n), 1.0 /. 3.0)
+              Finite(float.negate(result))
+            }
+            False -> Finite(float_power(n, 1.0 /. 3.0))
+          }
       }
     NaN -> NaN
     Infinity -> Infinity
@@ -368,7 +382,11 @@ fn math_expm1(
 ) -> #(State, Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) -> Finite(ffi_math_exp(n) -. 1.0)
+    Finite(n) ->
+      case is_neg_zero(n) {
+        True -> Finite(-0.0)
+        False -> Finite(ffi_math_exp(n) -. 1.0)
+      }
     NaN -> NaN
     Infinity -> Infinity
     NegInfinity -> Finite(-1.0)
@@ -384,7 +402,11 @@ fn math_log1p(
   case x {
     Finite(n) if n <. -1.0 -> NaN
     Finite(-1.0) -> NegInfinity
-    Finite(n) -> Finite(ffi_math_log(1.0 +. n))
+    Finite(n) ->
+      case is_neg_zero(n) {
+        True -> Finite(-0.0)
+        False -> Finite(ffi_math_log(1.0 +. n))
+      }
     NaN | NegInfinity -> NaN
     Infinity -> Infinity
   }
@@ -410,7 +432,11 @@ fn math_tanh(
 ) -> #(State, Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) -> Finite(ffi_math_tanh(n))
+    Finite(n) ->
+      case is_neg_zero(n) {
+        True -> Finite(-0.0)
+        False -> Finite(ffi_math_tanh(n))
+      }
     NaN -> NaN
     Infinity -> Finite(1.0)
     NegInfinity -> Finite(-1.0)
@@ -444,7 +470,11 @@ fn math_atanh(
     Finite(n) if n <. -1.0 || n >. 1.0 -> NaN
     Finite(-1.0) -> NegInfinity
     Finite(1.0) -> Infinity
-    Finite(n) -> Finite(ffi_math_atanh(n))
+    Finite(n) ->
+      case is_neg_zero(n) {
+        True -> Finite(-0.0)
+        False -> Finite(ffi_math_atanh(n))
+      }
     _ -> NaN
   }
 }
@@ -461,6 +491,23 @@ fn math_unary(
 ) -> #(State, Result(JsValue, JsValue)) {
   let x = helpers.get_num_arg(args, 0, to_number)
   #(state, Ok(JsNumber(apply(x))))
+}
+
+/// Like finite_passthrough but preserves -0.0 (for sinh, asinh, etc.)
+fn neg_zero_preserving(
+  args: List(JsValue),
+  state: State,
+  f: fn(Float) -> Float,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  case x {
+    Finite(n) ->
+      case is_neg_zero(n) {
+        True -> Finite(-0.0)
+        False -> Finite(f(n))
+      }
+    other -> other
+  }
 }
 
 /// Unary op where Finite(n) -> Finite(f(n)) and non-finite passes through.
@@ -540,39 +587,154 @@ pub fn to_number(val: JsValue) -> value.JsNum {
 }
 
 /// JS Math.round: round half toward +Infinity.
-/// Math.round(-0.5) → 0, Math.round(0.5) → 1
+/// Math.round(-0.5) → -0, Math.round(0.5) → 1
 fn js_round(n: Float) -> Float {
-  let floored = ffi_math_floor(n)
-  case n -. floored >=. 0.5 {
-    True -> floored +. 1.0
-    False -> floored
+  case is_neg_zero(n) {
+    True -> n
+    False -> {
+      let floored = ffi_math_floor(n)
+      case n -. floored >=. 0.5 {
+        True -> floored +. 1.0
+        False -> {
+          // Per spec, if result is 0 and input was negative, return -0
+          case floored == 0.0 && n <. 0.0 {
+            True -> -0.0
+            False -> floored
+          }
+        }
+      }
+    }
   }
 }
 
 fn js_trunc(n: Float) -> Float {
-  int.to_float(value.float_to_int(n))
+  case is_neg_zero(n) {
+    // -0 → -0
+    True -> n
+    False -> {
+      let truncated = int.to_float(value.float_to_int(n))
+      // Values in (-1, 0) truncate to -0 per spec
+      case truncated == 0.0 && n <. 0.0 {
+        True -> -0.0
+        False -> truncated
+      }
+    }
+  }
 }
 
-/// Exponentiation with special-value handling (mirrors vm.gleam's num_exp).
-fn num_exp(a: value.JsNum, b: value.JsNum) -> value.JsNum {
-  case a, b {
-    _, Finite(0.0) -> Finite(1.0)
+/// Exponentiation per ES2024 §6.1.6.1.3 Number::exponentiate.
+pub fn num_exp(base: value.JsNum, exp: value.JsNum) -> value.JsNum {
+  case base, exp {
+    // 1. If exponent is NaN, return NaN
     _, NaN -> NaN
+    // 2. If exponent is +0 or -0, return 1 (even for NaN/Infinity base)
+    _, Finite(0.0) -> Finite(1.0)
+    // 3. If base is NaN, return NaN
     NaN, _ -> NaN
-    Finite(x), Finite(y) -> Finite(float_power(x, y))
+    // 4-5. ±Infinity base with ±Infinity exponent
+    Infinity, Infinity -> Infinity
+    Infinity, NegInfinity -> Finite(0.0)
+    NegInfinity, Infinity -> Infinity
+    NegInfinity, NegInfinity -> Finite(0.0)
+    // abs(base) vs 1 with ±Infinity exponent
+    Finite(x), Infinity -> num_exp_finite_inf(x)
+    Finite(x), NegInfinity -> num_exp_finite_neginf(x)
+    // 6-7. Base is +Infinity
     Infinity, Finite(y) ->
       case y >. 0.0 {
         True -> Infinity
         False -> Finite(0.0)
       }
+    // 8-11. Base is -Infinity
     NegInfinity, Finite(y) ->
       case y >. 0.0 {
-        True -> Infinity
-        False -> Finite(0.0)
+        True ->
+          case is_odd_integer(y) {
+            True -> NegInfinity
+            False -> Infinity
+          }
+        False ->
+          case is_odd_integer(y) {
+            True -> Finite(-0.0)
+            False -> Finite(0.0)
+          }
       }
-    _, Infinity -> NaN
-    _, NegInfinity -> NaN
+    // 12-17. Base is ±0
+    Finite(x), Finite(y) -> num_exp_finite(x, y)
   }
+}
+
+fn num_exp_finite_inf(x: Float) -> value.JsNum {
+  let abs_x = float.absolute_value(x)
+  case abs_x >. 1.0 {
+    True -> Infinity
+    False ->
+      case abs_x <. 1.0 {
+        True -> Finite(0.0)
+        // abs == 1
+        False -> NaN
+      }
+  }
+}
+
+fn num_exp_finite_neginf(x: Float) -> value.JsNum {
+  let abs_x = float.absolute_value(x)
+  case abs_x >. 1.0 {
+    True -> Finite(0.0)
+    False ->
+      case abs_x <. 1.0 {
+        True -> Infinity
+        // abs == 1
+        False -> NaN
+      }
+  }
+}
+
+fn num_exp_finite(x: Float, y: Float) -> value.JsNum {
+  case is_neg_zero(x) {
+    // Base is -0
+    True ->
+      case y >. 0.0 {
+        True ->
+          case is_odd_integer(y) {
+            True -> Finite(-0.0)
+            False -> Finite(0.0)
+          }
+        False ->
+          case is_odd_integer(y) {
+            True -> NegInfinity
+            False -> Infinity
+          }
+      }
+    False ->
+      case x == 0.0 {
+        // Base is +0
+        True ->
+          case y >. 0.0 {
+            True -> Finite(0.0)
+            False -> Infinity
+          }
+        // Normal finite case
+        False ->
+          case x <. 0.0 {
+            True -> {
+              let truncated = int.to_float(value.float_to_int(y))
+              case truncated == y {
+                True -> Finite(float_power(x, y))
+                // Non-integer exponent with negative base
+                False -> NaN
+              }
+            }
+            False -> Finite(float_power(x, y))
+          }
+      }
+  }
+}
+
+/// Check if a float is an odd integer.
+fn is_odd_integer(f: Float) -> Bool {
+  let truncated = value.float_to_int(f)
+  int.to_float(truncated) == f && int.is_odd(truncated)
 }
 
 /// ToUint32: convert a float to a 32-bit unsigned integer (ES S7.1.7).

@@ -213,24 +213,7 @@ fn num_mod(a: JsNum, b: JsNum) -> JsNum {
 }
 
 fn num_exp(a: JsNum, b: JsNum) -> JsNum {
-  case a, b {
-    _, Finite(0.0) -> Finite(1.0)
-    _, NaN -> NaN
-    NaN, _ -> NaN
-    Finite(x), Finite(y) -> Finite(float_power(x, y))
-    Infinity, Finite(y) ->
-      case y >. 0.0 {
-        True -> Infinity
-        False -> Finite(0.0)
-      }
-    NegInfinity, Finite(y) ->
-      case y >. 0.0 {
-        True -> Infinity
-        False -> Finite(0.0)
-      }
-    _, Infinity -> NaN
-    _, NegInfinity -> NaN
-  }
+  builtins_math.num_exp(a, b)
 }
 
 pub fn num_negate(n: JsNum) -> JsNum {
