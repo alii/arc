@@ -24,7 +24,7 @@ pub fn is_callable(h: Heap(ctx), val: JsValue) -> Bool {
       case heap.read(h, ref) {
         // Step 2: If argument has a [[Call]] internal method, return true.
         Some(ObjectSlot(kind: value.FunctionObject(..), ..)) -> True
-        Some(ObjectSlot(kind: value.NativeFunction(_), ..)) -> True
+        Some(ObjectSlot(kind: value.NativeFunction(..), ..)) -> True
         // Step 3: Return false.
         _ -> False
       }

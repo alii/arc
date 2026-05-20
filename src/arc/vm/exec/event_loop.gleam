@@ -170,7 +170,7 @@ pub fn run_handler_with_this(
             this_val,
             execute_inner,
           )
-        Some(ObjectSlot(kind: NativeFunction(native), ..)) -> {
+        Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) -> {
           // For native functions (like resolve/reject), call directly
           let job_state =
             State(

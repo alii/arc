@@ -36,5 +36,6 @@ pub fn init(h: Heap(ctx), object_proto: Ref) -> #(Heap(ctx), BuiltinType) {
     "Function",
     1,
     [],
+    True,
   )
 }

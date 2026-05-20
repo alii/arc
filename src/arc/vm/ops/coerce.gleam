@@ -227,7 +227,7 @@ pub fn js_instanceof(
       case heap.read(state.heap, ctor_ref) {
         // Step 4: IsCallable(target) — we check for function slot kinds.
         Some(ObjectSlot(kind: FunctionObject(..), ..))
-        | Some(ObjectSlot(kind: NativeFunction(_), ..)) -> {
+        | Some(ObjectSlot(kind: NativeFunction(..), ..)) -> {
           // Step 5: OrdinaryHasInstance(target, V) — inlined below.
           // OrdinaryHasInstance step 4: Let P be ? Get(C, "prototype").
           use #(proto_val, state) <- result.try(object.get_value(

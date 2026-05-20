@@ -195,7 +195,10 @@ fn alloc_native_fn_slot(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(slot),
+        // Ordinary built-ins (methods, standalone functions, host fns) are
+        // not constructors. The constructor intrinsics take a separate path
+        // (init_type / init_type_on), and bind copies its target's bit.
+        kind: NativeFunction(slot, constructible: False),
         properties: named_props([
           #("name", fn_name_property(name)),
           #("length", fn_length_property(arity)),
@@ -410,7 +413,8 @@ pub fn init_type(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(ctor_fn(proto_ref)),
+        // init_type creates a constructor intrinsic — it has [[Construct]].
+        kind: NativeFunction(ctor_fn(proto_ref), constructible: True),
         properties: named_props(ctor_properties(
           proto_ref,
           name,
@@ -496,13 +500,16 @@ pub fn init_type_on(
   name: String,
   arity: Int,
   ctor_props: List(#(String, Property)),
+  // Whether the created function has [[Construct]]. True for real constructors
+  // (Object, Function); False for abstract/non-constructor types (Iterator).
+  constructible: Bool,
 ) -> #(Heap(ctx), BuiltinType) {
   // Allocate constructor — proto ref already known
   let #(h, ctor_ref) =
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(ctor_fn(proto)),
+        kind: NativeFunction(ctor_fn(proto), constructible:),
         properties: named_props(ctor_properties(proto, name, arity, ctor_props)),
         elements: elements.new(),
         prototype: Some(function_proto),

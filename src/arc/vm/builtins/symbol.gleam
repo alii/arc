@@ -26,7 +26,7 @@ pub fn init(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(Call(SymbolFor)),
+        kind: NativeFunction(Call(SymbolFor), constructible: False),
         properties: common.named_props([
           #("name", common.fn_name_property("for")),
           #("length", common.fn_length_property(1)),
@@ -41,7 +41,7 @@ pub fn init(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(Call(SymbolKeyFor)),
+        kind: NativeFunction(Call(SymbolKeyFor), constructible: False),
         properties: common.named_props([
           #("name", common.fn_name_property("keyFor")),
           #("length", common.fn_length_property(1)),
@@ -57,7 +57,10 @@ pub fn init(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(Call(SymbolConstructor)),
+        // §20.4.1: Symbol HAS [[Construct]] (it may appear in an `extends`
+        // clause), so IsConstructor(Symbol) is true — but invoking it as a
+        // constructor always throws (do_construct / super() handle that).
+        kind: NativeFunction(Call(SymbolConstructor), constructible: True),
         properties: common.named_props([
           #("name", common.fn_name_property("Symbol")),
           #("length", common.fn_length_property(0)),

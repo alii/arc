@@ -982,7 +982,11 @@ pub type ExoticKind(ctx) {
   FunctionObject(func_template: FuncTemplate, env: Ref)
   /// Built-in function implemented in Gleam, not bytecode.
   /// Callable like any function but dispatches to native code.
-  NativeFunction(native: NativeFnSlot(ctx))
+  /// `constructible` is the stored [[Construct]] capability (ES2024 §7.2.4):
+  /// True for the constructor intrinsics (Array, Map, …) and for bound
+  /// functions whose target is a constructor; False for ordinary built-ins
+  /// (Math.*, prototype methods, promise reaction jobs, …).
+  NativeFunction(native: NativeFnSlot(ctx), constructible: Bool)
   /// Promise object. The visible JS object has this kind, pointing to
   /// an internal PromiseSlot that holds state/reactions.
   PromiseObject(promise_data: Ref)
@@ -1588,50 +1592,63 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       let acc = push_option_ref(prototype, acc)
       case kind {
         FunctionObject(env: env_ref, func_template: _) -> [env_ref, ..acc]
-        NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref))))
-        | NativeFunction(Dispatch(ErrorNative(DomExceptionConstructor(
-            proto: ref,
-          ))))
-        | NativeFunction(Dispatch(MapNative(MapConstructor(proto: ref))))
-        | NativeFunction(Dispatch(DateNative(DateConstructor(proto: ref))))
-        | NativeFunction(Dispatch(SetNative(SetConstructor(proto: ref))))
-        | NativeFunction(Dispatch(WeakMapNative(WeakMapConstructor(proto: ref))))
-        | NativeFunction(Dispatch(WeakSetNative(WeakSetConstructor(proto: ref)))) -> [
-          ref,
-          ..acc
-        ]
-        NativeFunction(Call(BoundFunction(target:, bound_this:, bound_args:))) ->
+        NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref))), ..)
+        | NativeFunction(
+            Dispatch(ErrorNative(DomExceptionConstructor(proto: ref))),
+            ..,
+          )
+        | NativeFunction(Dispatch(MapNative(MapConstructor(proto: ref))), ..)
+        | NativeFunction(Dispatch(DateNative(DateConstructor(proto: ref))), ..)
+        | NativeFunction(Dispatch(SetNative(SetConstructor(proto: ref))), ..)
+        | NativeFunction(
+            Dispatch(WeakMapNative(WeakMapConstructor(proto: ref))),
+            ..,
+          )
+        | NativeFunction(
+            Dispatch(WeakSetNative(WeakSetConstructor(proto: ref))),
+            ..,
+          ) -> [ref, ..acc]
+        NativeFunction(
+          Call(BoundFunction(target:, bound_this:, bound_args:)),
+          ..,
+        ) ->
           list.fold(
             bound_args,
             push_value_ref(bound_this, [target, ..acc]),
             fn(a, v) { push_value_ref(v, a) },
           )
-        NativeFunction(Call(PromiseResolveFunction(
-          promise_ref:,
-          data_ref:,
-          already_resolved_ref:,
-        )))
-        | NativeFunction(Call(PromiseRejectFunction(
+        NativeFunction(
+          Call(PromiseResolveFunction(
             promise_ref:,
             data_ref:,
             already_resolved_ref:,
-          ))) -> [promise_ref, data_ref, already_resolved_ref, ..acc]
-        NativeFunction(Call(PromiseFinallyFulfill(on_finally:)))
-        | NativeFunction(Call(PromiseFinallyReject(on_finally:))) ->
+          )),
+          ..,
+        )
+        | NativeFunction(
+            Call(PromiseRejectFunction(
+              promise_ref:,
+              data_ref:,
+              already_resolved_ref:,
+            )),
+            ..,
+          ) -> [promise_ref, data_ref, already_resolved_ref, ..acc]
+        NativeFunction(Call(PromiseFinallyFulfill(on_finally:)), ..)
+        | NativeFunction(Call(PromiseFinallyReject(on_finally:)), ..) ->
           push_value_ref(on_finally, acc)
-        NativeFunction(Call(PromiseFinallyValueThunk(value:))) ->
+        NativeFunction(Call(PromiseFinallyValueThunk(value:)), ..) ->
           push_value_ref(value, acc)
-        NativeFunction(Call(PromiseFinallyThrower(reason:))) ->
+        NativeFunction(Call(PromiseFinallyThrower(reason:)), ..) ->
           push_value_ref(reason, acc)
-        NativeFunction(Call(AsyncResume(async_data_ref:, ..))) -> [
+        NativeFunction(Call(AsyncResume(async_data_ref:, ..)), ..) -> [
           async_data_ref,
           ..acc
         ]
-        NativeFunction(Call(AsyncGeneratorResume(data_ref:, ..))) -> [
+        NativeFunction(Call(AsyncGeneratorResume(data_ref:, ..)), ..) -> [
           data_ref,
           ..acc
         ]
-        NativeFunction(Call(AsyncFromSyncClose(sync_iter:))) -> [
+        NativeFunction(Call(AsyncFromSyncClose(sync_iter:)), ..) -> [
           sync_iter,
           ..acc
         ]
@@ -1679,7 +1696,7 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         OrdinaryObject
         | ArrayObject(_)
         | ArgumentsObject(_)
-        | NativeFunction(_)
+        | NativeFunction(..)
         | StringObject(_)
         | NumberObject(_)
         | BooleanObject(_)

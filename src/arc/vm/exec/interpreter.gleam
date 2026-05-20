@@ -1959,7 +1959,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                     None,
                     None,
                   )
-                Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
+                Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
                   call_native(state, native, args, rest_stack, JsUndefined)
                 _ ->
                   state.throw_type_error(
@@ -2005,7 +2005,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                     None,
                     None,
                   )
-                Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
+                Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
                   call_native(state, native, args, rest_stack, receiver)
                 _ ->
                   state.throw_type_error(
@@ -2918,11 +2918,10 @@ fn do_call_super_dispatch(
     // [[BoundTargetFunction]] with [[BoundArguments]] prepended; bound `this`
     // is ignored under [[Construct]].
     Some(ObjectSlot(
-      kind: NativeFunction(value.Call(value.BoundFunction(
-        target:,
-        bound_args:,
+      kind: NativeFunction(
+        value.Call(value.BoundFunction(target:, bound_args:, ..)),
         ..,
-      ))),
+      ),
       ..,
     )) ->
       do_call_super_dispatch(
@@ -2934,10 +2933,10 @@ fn do_call_super_dispatch(
       )
     // §20.4.1: Symbol has no [[Construct]]; super() into Symbol must throw.
     Some(ObjectSlot(
-      kind: NativeFunction(value.Call(value.SymbolConstructor)),
+      kind: NativeFunction(value.Call(value.SymbolConstructor), ..),
       ..,
     )) -> state.throw_type_error(state, "Symbol is not a constructor")
-    Some(ObjectSlot(kind: NativeFunction(native), ..)) -> {
+    Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) -> {
       // Built-in parent (Array, Map, Error, …): per spec the result of
       // Construct(func, args, newTarget) becomes `this`. Arc's native ctors
       // don't thread newTarget, so pre-allocate the derived instance and pass
