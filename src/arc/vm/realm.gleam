@@ -455,12 +455,7 @@ fn run_direct_eval(
     state,
     state.builtins,
     source,
-    compiler.compile_eval_direct(
-      _,
-      parent_names,
-      inherits_this,
-      caller_strict,
-    ),
+    compiler.compile_eval_direct(_, parent_names, inherits_this, caller_strict),
   )
   // Seed locals[0..N-1] with the caller's box refs (pulled from
   // caller's locals at the indices in name_table), then the caller's

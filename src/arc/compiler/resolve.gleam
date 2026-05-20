@@ -24,8 +24,8 @@ import arc/vm/opcode.{
   IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal,
   IrPutLocal, IrPutPrivateField, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
   IrScopeReboxVar, IrScopeTypeofVar, IrSetThis, IrSetupDerivedClass, IrSwap,
-  IrThrow,
-  IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield, IrYieldStar,
+  IrThrow, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield,
+  IrYieldStar,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
