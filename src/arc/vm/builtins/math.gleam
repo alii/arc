@@ -610,6 +610,9 @@ fn count_leading_zeros_loop(n: Int, bit: Int, count: Int) -> Int {
 
 // -- FFI --
 
+@external(erlang, "arc_math_ffi", "is_neg_zero")
+pub fn is_neg_zero(x: Float) -> Bool
+
 @external(erlang, "math", "pow")
 fn float_power(base: Float, exp: Float) -> Float
 
