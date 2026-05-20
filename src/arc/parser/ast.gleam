@@ -35,7 +35,12 @@ pub type StringLiteral {
 
 pub type Statement {
   EmptyStatement
-  ExpressionStatement(expression: Expression)
+  /// `directive` holds the raw (un-decoded) string content when this statement
+  /// is a lone string-literal expression (a Directive in the spec sense), else
+  /// None. Directive prologue detection ("use strict") must compare the raw
+  /// text, since an escaped/continued literal like `'use strict'` is not a
+  /// directive even though its decoded value is "use strict".
+  ExpressionStatement(expression: Expression, directive: Option(String))
   BlockStatement(body: List(Statement))
   VariableDeclaration(
     kind: VariableKind,

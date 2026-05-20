@@ -297,13 +297,14 @@ fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
       ast.ExportDefaultDeclaration(expr) ->
         // Emit as: *default* = expr;
         // The *default* local is declared during module hoisting.
-        Ok(
-          ast.ExpressionStatement(ast.AssignmentExpression(
+        Ok(ast.ExpressionStatement(
+          expression: ast.AssignmentExpression(
             operator: ast.Assign,
             left: ast.Identifier("*default*"),
             right: expr,
-          )),
-        )
+          ),
+          directive: None,
+        ))
       ast.ImportDeclaration(..) -> Error(Nil)
       ast.ExportNamedDeclaration(None, _, _) -> Error(Nil)
       ast.ExportAllDeclaration(..) -> Error(Nil)
@@ -408,11 +409,24 @@ fn new_emitter() -> Emitter {
 /// the directive prologue is the leading run of ExpressionStatements whose
 /// expression is a string literal. "use strict" anywhere in that run makes
 /// the function strict. We stop at the first non-string ExpressionStatement.
+///
+/// Detection compares the *raw* directive text (the `directive` field), not the
+/// decoded expression value: a literal containing an escape or line
+/// continuation (e.g. `'use strict'`) is not a Use Strict Directive even
+/// though its decoded value is "use strict".
 fn has_use_strict_directive(stmts: List(ast.Statement)) -> Bool {
   case stmts {
-    [ast.ExpressionStatement(ast.StringExpression("use strict")), ..] -> True
-    [ast.ExpressionStatement(ast.StringExpression(_)), ..rest] ->
-      has_use_strict_directive(rest)
+    [
+      ast.ExpressionStatement(
+        expression: ast.StringExpression(_),
+        directive: directive,
+      ),
+      ..rest
+    ] ->
+      case directive {
+        option.Some("use strict") -> True
+        _ -> has_use_strict_directive(rest)
+      }
     _ -> False
   }
 }
@@ -763,7 +777,7 @@ fn emit_stmt_tail(
   stmt: ast.Statement,
 ) -> Result(Emitter, EmitError) {
   case stmt {
-    ast.ExpressionStatement(expr) ->
+    ast.ExpressionStatement(expression: expr, ..) ->
       // Tail position: keep value on stack (no IrPop)
       emit_expr(e, expr)
 
@@ -1045,7 +1059,8 @@ fn stmt_references_arguments(stmt: ast.Statement) -> Bool {
     | ast.BreakStatement(_)
     | ast.ContinueStatement(_) -> False
 
-    ast.ExpressionStatement(expr) -> expr_references_arguments(expr)
+    ast.ExpressionStatement(expression: expr, ..) ->
+      expr_references_arguments(expr)
     ast.BlockStatement(body) -> stmts_reference_arguments(body)
     ast.ReturnStatement(arg) -> opt_expr_references_arguments(arg)
     ast.ThrowStatement(arg) -> expr_references_arguments(arg)
@@ -1464,7 +1479,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       emit_ir(e, IrPop)
     }
 
-    ast.ExpressionStatement(expr) -> {
+    ast.ExpressionStatement(expression: expr, ..) -> {
       use e <- result.map(emit_expr(e, expr))
       emit_ir(e, IrPop)
     }
@@ -4109,9 +4124,10 @@ fn compile_derived_class(
       [],
       ast.BlockStatement([
         ast.ExpressionStatement(
-          ast.CallExpression(ast.SuperExpression, [
+          expression: ast.CallExpression(ast.SuperExpression, [
             ast.SpreadElement(ast.Identifier("arguments")),
           ]),
+          directive: None,
         ),
       ]),
     )
@@ -4349,7 +4365,10 @@ fn splice_after_super(
   case stmts {
     [] -> inits
     [
-      ast.ExpressionStatement(ast.CallExpression(ast.SuperExpression, _)) as s,
+      ast.ExpressionStatement(
+        expression: ast.CallExpression(ast.SuperExpression, _),
+        ..,
+      ) as s,
       ..rest
     ] -> [s, ..list.append(inits, rest)]
     [s, ..rest] -> [s, ..splice_after_super(rest, inits)]
@@ -4534,7 +4553,7 @@ fn field_init_stmts(fields: List(ast.ClassElement)) -> List(ast.Statement) {
 fn string_inspect_stmt_kind(stmt: ast.Statement) -> String {
   case stmt {
     ast.EmptyStatement -> "EmptyStatement"
-    ast.ExpressionStatement(_) -> "ExpressionStatement"
+    ast.ExpressionStatement(..) -> "ExpressionStatement"
     ast.BlockStatement(_) -> "BlockStatement"
     ast.VariableDeclaration(..) -> "VariableDeclaration"
     ast.ReturnStatement(_) -> "ReturnStatement"

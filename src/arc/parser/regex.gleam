@@ -3,6 +3,7 @@
 /// The parser re-lexes regex literals from source bytes since the lexer
 /// can't always distinguish / (divide) from / (regex start).
 import arc/parser/error.{type ParseError, LexerError}
+import arc/parser/lexer
 import gleam/bit_array
 import gleam/int
 import gleam/list
@@ -69,30 +70,270 @@ pub fn scan_regex_source(
   pos: Int,
   in_class: Bool,
 ) -> Result(Int, String) {
-  let ch = char_at_source(bytes, pos)
-  case ch {
-    "" -> Error("Unterminated regular expression")
-    "\n" | "\r" -> Error("Unterminated regular expression")
-    "\\" -> {
-      // Escaped character — skip next char
-      let next = char_at_source(bytes, pos + 1)
-      case next {
-        "" | "\n" | "\r" -> Error("Unterminated regular expression")
-        _ -> scan_regex_source(bytes, pos + 2, in_class)
+  case bit_array.slice(bytes, pos, 1) {
+    // End of source before the closing /.
+    Error(_) -> Error("Unterminated regular expression")
+    // Non-ASCII byte: part of the regex body (any SourceCharacter is allowed,
+    // e.g. the Cf format-control U+180E). char_at_source is ASCII-only, so we
+    // handle these here. U+2028/U+2029 are line terminators and end the regex.
+    Ok(<<b>>) if b >= 0x80 ->
+      case is_unicode_line_terminator(bytes, pos) {
+        True -> Error("Unterminated regular expression")
+        False -> scan_regex_source(bytes, pos + utf8_byte_width(b), in_class)
+      }
+    Ok(_) -> {
+      let ch = char_at_source(bytes, pos)
+      case ch {
+        "\n" | "\r" -> Error("Unterminated regular expression")
+        "\\" -> {
+          // Escaped character — skip the backslash and the next character
+          // (which may itself be multi-byte, e.g. an escaped non-ASCII char).
+          // A line terminator after `\` is not allowed (RegularExpressionChar
+          // excludes LineTerminator), including U+2028/U+2029.
+          case bit_array.slice(bytes, pos + 1, 1) {
+            Error(_) -> Error("Unterminated regular expression")
+            Ok(<<0x0A>>) | Ok(<<0x0D>>) ->
+              Error("Unterminated regular expression")
+            Ok(<<nb>>) if nb >= 0x80 ->
+              case is_unicode_line_terminator(bytes, pos + 1) {
+                True -> Error("Unterminated regular expression")
+                False ->
+                  scan_regex_source(
+                    bytes,
+                    pos + 1 + utf8_byte_width(nb),
+                    in_class,
+                  )
+              }
+            Ok(<<nb>>) ->
+              scan_regex_source(bytes, pos + 1 + utf8_byte_width(nb), in_class)
+            Ok(_) -> scan_regex_source(bytes, pos + 2, in_class)
+          }
+        }
+        "[" -> scan_regex_source(bytes, pos + 1, True)
+        "]" ->
+          case in_class {
+            True -> scan_regex_source(bytes, pos + 1, False)
+            False -> scan_regex_source(bytes, pos + 1, in_class)
+          }
+        "/" ->
+          case in_class {
+            True -> scan_regex_source(bytes, pos + 1, in_class)
+            False -> Ok(pos + 1)
+          }
+        _ -> scan_regex_source(bytes, pos + 1, in_class)
       }
     }
-    "[" -> scan_regex_source(bytes, pos + 1, True)
-    "]" ->
-      case in_class {
-        True -> scan_regex_source(bytes, pos + 1, False)
-        False -> scan_regex_source(bytes, pos + 1, in_class)
+  }
+}
+
+/// UTF-8 byte width from a leading byte.
+fn utf8_byte_width(lead: Int) -> Int {
+  case lead {
+    b if b >= 0xF0 -> 4
+    b if b >= 0xE0 -> 3
+    b if b >= 0xC0 -> 2
+    _ -> 1
+  }
+}
+
+/// True if the bytes at `pos` are U+2028 (E2 80 A8) or U+2029 (E2 80 A9),
+/// the Unicode line/paragraph separators (line terminators in ES).
+fn is_unicode_line_terminator(bytes: BitArray, pos: Int) -> Bool {
+  case bit_array.slice(bytes, pos, 3) {
+    Ok(<<0xE2, 0x80, 0xA8>>) | Ok(<<0xE2, 0x80, 0xA9>>) -> True
+    _ -> False
+  }
+}
+
+/// Validate JS-specific regex syntax that PCRE checks differently or not at
+/// all, over the body [start, end): named-group names must be IdentifierName,
+/// and inline modifier flags `(?ims:` / `(?ims-ims:` may contain only i/m/s
+/// with no repeats. Now that the scanner accepts non-ASCII regex bodies, this
+/// is what rejects e.g. `/(?<❤>a)/` and `/(?s‍:a)/`.
+pub fn validate_regex_pattern(
+  bytes: BitArray,
+  start: Int,
+  end: Int,
+) -> Result(Nil, String) {
+  validate_pattern_loop(bytes, start, end, False)
+}
+
+fn validate_pattern_loop(
+  bytes: BitArray,
+  pos: Int,
+  end: Int,
+  in_class: Bool,
+) -> Result(Nil, String) {
+  case pos >= end {
+    True -> Ok(Nil)
+    False -> {
+      let #(_, width) = codepoint_at(bytes, pos)
+      case char_at_source(bytes, pos), in_class {
+        // Escape: skip the backslash and the following code point.
+        "\\", _ -> {
+          let #(_, next_width) = codepoint_at(bytes, pos + 1)
+          validate_pattern_loop(bytes, pos + 1 + next_width, end, in_class)
+        }
+        "[", False -> validate_pattern_loop(bytes, pos + 1, end, True)
+        "]", True -> validate_pattern_loop(bytes, pos + 1, end, False)
+        "(", False ->
+          case validate_group(bytes, pos, end) {
+            Ok(Nil) -> validate_pattern_loop(bytes, pos + 1, end, in_class)
+            Error(msg) -> Error(msg)
+          }
+        _, _ -> validate_pattern_loop(bytes, pos + width, end, in_class)
       }
-    "/" ->
-      case in_class {
-        True -> scan_regex_source(bytes, pos + 1, in_class)
-        False -> Ok(pos + 1)
+    }
+  }
+}
+
+/// At `pos` (an unescaped `(` outside a class), validate any `(?...)` prefix
+/// that JS constrains: named-group names and inline modifier flags. Other
+/// group kinds are left for re to handle. Does not consume — the caller
+/// continues the walk one byte on.
+fn validate_group(bytes: BitArray, pos: Int, end: Int) -> Result(Nil, String) {
+  case char_at_source(bytes, pos + 1) {
+    "?" ->
+      case char_at_source(bytes, pos + 2) {
+        ":" | "=" | "!" -> Ok(Nil)
+        "<" ->
+          case char_at_source(bytes, pos + 3) {
+            "=" | "!" -> Ok(Nil)
+            _ -> validate_group_name(bytes, pos + 3, end, True)
+          }
+        _ -> validate_modifier_flags(bytes, pos + 2, end, [], False)
       }
-    _ -> scan_regex_source(bytes, pos + 1, in_class)
+    _ -> Ok(Nil)
+  }
+}
+
+/// Validate a named-group name (after `(?<`) up to `>`: first code point
+/// ID_Start, the rest ID_Continue (per IdentifierName).
+fn validate_group_name(
+  bytes: BitArray,
+  pos: Int,
+  end: Int,
+  is_first: Bool,
+) -> Result(Nil, String) {
+  case pos >= end, char_at_source(bytes, pos) {
+    True, _ -> Error("Invalid regular expression: unterminated group name")
+    _, ">" ->
+      case is_first {
+        True -> Error("Invalid regular expression: empty group name")
+        False -> Ok(Nil)
+      }
+    _, "\\" ->
+      // \uHHHH / \u{H..} escape in a group name — decode and validate.
+      case decode_name_escape(bytes, pos) {
+        Ok(#(cp, next)) ->
+          case lexer.validate_identifier_codepoint(cp, is_first) {
+            True -> validate_group_name(bytes, next, end, False)
+            False -> Error("Invalid regular expression: invalid group name")
+          }
+        Error(msg) -> Error(msg)
+      }
+    _, _ -> {
+      let #(cp, width) = codepoint_at(bytes, pos)
+      case lexer.validate_identifier_codepoint(cp, is_first) {
+        True -> validate_group_name(bytes, pos + width, end, False)
+        False -> Error("Invalid regular expression: invalid group name")
+      }
+    }
+  }
+}
+
+fn decode_name_escape(
+  bytes: BitArray,
+  pos: Int,
+) -> Result(#(Int, Int), String) {
+  case char_at_source(bytes, pos + 1) {
+    "u" ->
+      case char_at_source(bytes, pos + 2) {
+        "{" -> {
+          let after = skip_regex_hex_run(bytes, pos + 3, pos + 100)
+          case char_at_source(bytes, after) {
+            "}" ->
+              case
+                parse_hex_value(byte_slice_source(
+                  bytes,
+                  pos + 3,
+                  after - { pos + 3 },
+                ))
+              {
+                Ok(cp) -> Ok(#(cp, after + 1))
+                Error(_) ->
+                  Error("Invalid regular expression: invalid group name")
+              }
+            _ -> Error("Invalid regular expression: invalid group name")
+          }
+        }
+        _ ->
+          case parse_hex_value(byte_slice_source(bytes, pos + 2, 4)) {
+            Ok(cp) -> Ok(#(cp, pos + 6))
+            Error(_) -> Error("Invalid regular expression: invalid group name")
+          }
+      }
+    _ -> Error("Invalid regular expression: invalid group name")
+  }
+}
+
+/// Validate inline modifier flags (after `(?`), e.g. `(?ims:`, `(?ims-ims:`,
+/// `(?-i:`. Only i/m/s are allowed, with no repeat within a group and a single
+/// optional `-` separating added from removed flags.
+fn validate_modifier_flags(
+  bytes: BitArray,
+  pos: Int,
+  end: Int,
+  seen: List(String),
+  saw_dash: Bool,
+) -> Result(Nil, String) {
+  case pos >= end, char_at_source(bytes, pos) {
+    True, _ -> Error("Invalid regular expression: invalid modifier flags")
+    _, ":" -> Ok(Nil)
+    _, "-" ->
+      case saw_dash {
+        True -> Error("Invalid regular expression: invalid modifier flags")
+        False -> validate_modifier_flags(bytes, pos + 1, end, [], True)
+      }
+    _, "i" | _, "m" | _, "s" -> {
+      let f = char_at_source(bytes, pos)
+      case list.contains(seen, f) {
+        True -> Error("Invalid regular expression: repeated modifier flag")
+        False ->
+          validate_modifier_flags(bytes, pos + 1, end, [f, ..seen], saw_dash)
+      }
+    }
+    _, _ -> Error("Invalid regular expression: invalid modifier flags")
+  }
+}
+
+/// Decode the UTF-8 code point at `pos`, returning #(codepoint, byte_width).
+/// Returns #(-1, 1) at end of input.
+fn codepoint_at(bytes: BitArray, pos: Int) -> #(Int, Int) {
+  case bit_array.slice(bytes, pos, 1) {
+    Ok(<<b>>) if b < 0x80 -> #(b, 1)
+    Ok(<<b>>) -> {
+      let w = case b {
+        _ if b >= 0xF0 -> 4
+        _ if b >= 0xE0 -> 3
+        _ if b >= 0xC0 -> 2
+        _ -> 1
+      }
+      case bit_array.slice(bytes, pos, w) {
+        Ok(chunk) ->
+          case bit_array.to_string(chunk) {
+            Ok(s) ->
+              case string.to_utf_codepoints(s) {
+                [c, ..] -> #(string.utf_codepoint_to_int(c), w)
+                [] -> #(b, 1)
+              }
+            Error(_) -> #(b, 1)
+          }
+        Error(_) -> #(b, 1)
+      }
+    }
+    Ok(_) -> #(-1, 1)
+    Error(_) -> #(-1, 1)
   }
 }
 

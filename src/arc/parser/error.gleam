@@ -36,6 +36,7 @@ pub type ParseError {
   AwaitInModule(pos: Int)
   AwaitInAsyncFunction(pos: Int)
   EnumReservedWord(pos: Int)
+  EscapedReservedWord(name: String, pos: Int)
   DuplicateParameterName(name: String, pos: Int)
   DuplicateBindingLexical(name: String, pos: Int)
   DuplicateExport(name: String, pos: Int)
@@ -161,6 +162,8 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     AwaitInAsyncFunction(_) ->
       "'await' cannot be used as identifier in async function"
     EnumReservedWord(_) -> "'enum' is a reserved word"
+    EscapedReservedWord(name:, ..) ->
+      "Keyword '" <> name <> "' must not contain escape sequences"
     DuplicateParameterName(name:, ..) ->
       "Duplicate parameter name '" <> name <> "' not allowed"
     DuplicateBindingLexical(name:, ..) ->
@@ -317,6 +320,7 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | BreakOutsideLoopOrSwitch(pos:)
     | ContinueOutsideLoop(pos:)
     | ReservedWordStrictMode(pos:, ..)
+    | EscapedReservedWord(pos:, ..)
     | YieldReservedStrictMode(pos:)
     | LetIdentifierStrictMode(pos:)
     | StaticReservedStrictMode(pos:)
