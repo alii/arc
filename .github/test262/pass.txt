@@ -8714,6 +8714,7 @@ built-ins/RegExp/S15.10.7_A3_T2.js
 built-ins/RegExp/call_with_regexp_match_falsy.js
 built-ins/RegExp/call_with_regexp_not_same_constructor.js
 built-ins/RegExp/character-class-escape-non-whitespace-u180e.js
+built-ins/RegExp/dotall/with-dotall-unicode.js
 built-ins/RegExp/duplicate-flags.js
 built-ins/RegExp/is-a-constructor.js
 built-ins/RegExp/lastIndex.js
@@ -8877,6 +8878,7 @@ built-ins/RegExp/prototype/Symbol.match/builtin-failure-g-set-lastindex.js
 built-ins/RegExp/prototype/Symbol.match/builtin-failure-return-val.js
 built-ins/RegExp/prototype/Symbol.match/builtin-success-return-val-groups.js
 built-ins/RegExp/prototype/Symbol.match/builtin-success-return-val.js
+built-ins/RegExp/prototype/Symbol.match/builtin-success-u-return-val-groups.js
 built-ins/RegExp/prototype/Symbol.match/builtin-success-y-set-lastindex.js
 built-ins/RegExp/prototype/Symbol.match/coerce-arg.js
 built-ins/RegExp/prototype/Symbol.match/g-init-lastindex.js
@@ -8925,6 +8927,7 @@ built-ins/RegExp/prototype/Symbol.search/not-a-constructor.js
 built-ins/RegExp/prototype/Symbol.search/prop-desc.js
 built-ins/RegExp/prototype/Symbol.search/success-return-val.js
 built-ins/RegExp/prototype/Symbol.search/this-val-non-obj.js
+built-ins/RegExp/prototype/Symbol.search/u-lastindex-advance.js
 built-ins/RegExp/prototype/Symbol.split/coerce-string.js
 built-ins/RegExp/prototype/Symbol.split/length.js
 built-ins/RegExp/prototype/Symbol.split/name.js
@@ -8938,6 +8941,8 @@ built-ins/RegExp/prototype/Symbol.split/str-limit-capturing.js
 built-ins/RegExp/prototype/Symbol.split/str-limit.js
 built-ins/RegExp/prototype/Symbol.split/str-trailing-chars.js
 built-ins/RegExp/prototype/Symbol.split/this-val-non-obj.js
+built-ins/RegExp/prototype/Symbol.split/u-lastindex-adv-thru-failure.js
+built-ins/RegExp/prototype/Symbol.split/u-lastindex-adv-thru-match.js
 built-ins/RegExp/prototype/dotAll/length.js
 built-ins/RegExp/prototype/dotAll/name.js
 built-ins/RegExp/prototype/dotAll/prop-desc.js
@@ -9001,6 +9006,7 @@ built-ins/RegExp/prototype/exec/S15.10.6.2_A8.js
 built-ins/RegExp/prototype/exec/S15.10.6.2_A9.js
 built-ins/RegExp/prototype/exec/name.js
 built-ins/RegExp/prototype/exec/not-a-constructor.js
+built-ins/RegExp/prototype/exec/u-lastindex-adv.js
 built-ins/RegExp/prototype/exec/y-init-lastindex.js
 built-ins/RegExp/prototype/exec/y-set-lastindex.js
 built-ins/RegExp/prototype/flags/length.js
@@ -9666,6 +9672,7 @@ built-ins/String/fromCodePoint/length.js
 built-ins/String/fromCodePoint/name.js
 built-ins/String/fromCodePoint/not-a-constructor.js
 built-ins/String/fromCodePoint/number-is-out-of-range.js
+built-ins/String/fromCodePoint/return-string-value.js
 built-ins/String/is-a-constructor.js
 built-ins/String/prop-desc.js
 built-ins/String/prototype/S15.5.3.1_A1.js
@@ -9676,6 +9683,7 @@ built-ins/String/prototype/at/length.js
 built-ins/String/prototype/at/name.js
 built-ins/String/prototype/at/prop-desc.js
 built-ins/String/prototype/at/return-abrupt-from-this.js
+built-ins/String/prototype/at/returns-code-unit.js
 built-ins/String/prototype/at/returns-item-relative-index.js
 built-ins/String/prototype/at/returns-item.js
 built-ins/String/prototype/at/returns-undefined-for-out-of-range-index.js
@@ -9736,6 +9744,7 @@ built-ins/String/prototype/codePointAt/name.js
 built-ins/String/prototype/codePointAt/not-a-constructor.js
 built-ins/String/prototype/codePointAt/return-abrupt-from-this-as-symbol.js
 built-ins/String/prototype/codePointAt/return-abrupt-from-this.js
+built-ins/String/prototype/codePointAt/return-utf16-decode.js
 built-ins/String/prototype/codePointAt/this-is-null-throws.js
 built-ins/String/prototype/codePointAt/this-is-undefined-throws.js
 built-ins/String/prototype/concat/S15.5.4.6_A10.js
@@ -10288,6 +10297,7 @@ built-ins/String/prototype/toLocaleLowerCase/S15.5.4.17_A9.js
 built-ins/String/prototype/toLocaleLowerCase/name.js
 built-ins/String/prototype/toLocaleLowerCase/not-a-constructor.js
 built-ins/String/prototype/toLocaleLowerCase/special_casing.js
+built-ins/String/prototype/toLocaleLowerCase/supplementary_plane.js
 built-ins/String/prototype/toLocaleLowerCase/this-value-not-obj-coercible.js
 built-ins/String/prototype/toLocaleUpperCase/S15.5.4.19_A10.js
 built-ins/String/prototype/toLocaleUpperCase/S15.5.4.19_A11.js
@@ -10313,6 +10323,7 @@ built-ins/String/prototype/toLocaleUpperCase/S15.5.4.19_A9.js
 built-ins/String/prototype/toLocaleUpperCase/name.js
 built-ins/String/prototype/toLocaleUpperCase/not-a-constructor.js
 built-ins/String/prototype/toLocaleUpperCase/special_casing.js
+built-ins/String/prototype/toLocaleUpperCase/supplementary_plane.js
 built-ins/String/prototype/toLocaleUpperCase/this-value-not-obj-coercible.js
 built-ins/String/prototype/toLowerCase/S15.5.4.16_A10.js
 built-ins/String/prototype/toLowerCase/S15.5.4.16_A11.js
@@ -10338,6 +10349,7 @@ built-ins/String/prototype/toLowerCase/S15.5.4.16_A9.js
 built-ins/String/prototype/toLowerCase/name.js
 built-ins/String/prototype/toLowerCase/not-a-constructor.js
 built-ins/String/prototype/toLowerCase/special_casing.js
+built-ins/String/prototype/toLowerCase/supplementary_plane.js
 built-ins/String/prototype/toLowerCase/this-value-not-obj-coercible.js
 built-ins/String/prototype/toLowerCase/this-value-tostring-throws-symbol.js
 built-ins/String/prototype/toLowerCase/this-value-tostring-throws-toprimitive.js
@@ -10371,12 +10383,14 @@ built-ins/String/prototype/toUpperCase/S15.5.4.18_A9.js
 built-ins/String/prototype/toUpperCase/name.js
 built-ins/String/prototype/toUpperCase/not-a-constructor.js
 built-ins/String/prototype/toUpperCase/special_casing.js
+built-ins/String/prototype/toUpperCase/supplementary_plane.js
 built-ins/String/prototype/toUpperCase/this-value-not-obj-coercible.js
 built-ins/String/prototype/toWellFormed/length.js
 built-ins/String/prototype/toWellFormed/name.js
 built-ins/String/prototype/toWellFormed/not-a-constructor.js
 built-ins/String/prototype/toWellFormed/prop-desc.js
 built-ins/String/prototype/toWellFormed/return-abrupt-from-this.js
+built-ins/String/prototype/toWellFormed/returns-well-formed-string.js
 built-ins/String/prototype/toWellFormed/to-string.js
 built-ins/String/prototype/trim/15.5.4.20-0-1.js
 built-ins/String/prototype/trim/15.5.4.20-0-2.js
@@ -21469,6 +21483,7 @@ language/literals/regexp/mongolian-vowel-separator-eval.js
 language/literals/regexp/mongolian-vowel-separator.js
 language/literals/regexp/named-groups/invalid-empty-groupspecifier-u.js
 language/literals/regexp/named-groups/invalid-empty-groupspecifier.js
+language/literals/regexp/named-groups/invalid-lone-surrogate-groupname.js
 language/literals/regexp/named-groups/invalid-non-id-continue-groupspecifier-4-u.js
 language/literals/regexp/named-groups/invalid-non-id-continue-groupspecifier-4.js
 language/literals/regexp/named-groups/invalid-non-id-continue-groupspecifier.js
@@ -21498,6 +21513,7 @@ language/literals/regexp/regexp-first-char-no-paragraph-separator.js
 language/literals/regexp/regexp-source-char-no-line-separator.js
 language/literals/regexp/regexp-source-char-no-paragraph-separator.js
 language/literals/regexp/u-astral-char-class-invert.js
+language/literals/regexp/u-astral.js
 language/literals/regexp/u-invalid-extended-pattern-char.js
 language/literals/regexp/u-invalid-legacy-octal-escape.js
 language/literals/regexp/u-invalid-oob-decimal-escape.js
@@ -21509,7 +21525,10 @@ language/literals/regexp/u-invalid-range-lookahead.js
 language/literals/regexp/u-invalid-range-lookbehind.js
 language/literals/regexp/u-invalid-range-negative-lookahead.js
 language/literals/regexp/u-invalid-range-negative-lookbehind.js
+language/literals/regexp/u-surrogate-pairs-atom-dot.js
+language/literals/regexp/u-surrogate-pairs-atom-escape-char-class.js
 language/literals/regexp/u-unicode-esc-bounds.js
+language/literals/regexp/u-unicode-esc.js
 language/literals/regexp/unicode-escape-nls-err.js
 language/literals/regexp/y-assertion-start.js
 language/literals/string/S7.8.4_A1.1_T1.js
@@ -30288,6 +30307,7 @@ staging/sm/RegExp/split.js
 staging/sm/RegExp/test-emptyMatch.js
 staging/sm/RegExp/test-trailing.js
 staging/sm/RegExp/unicode-class-ignoreCase.js
+staging/sm/RegExp/unicode-everything.js
 staging/sm/RegExp/unicode-ignoreCase-ascii.js
 staging/sm/RegExp/unicode-ignoreCase-negated.js
 staging/sm/String/15.5.4.2.js
