@@ -204,6 +204,11 @@ pub type Op {
   /// Reads state.call_args, allocates ArgumentsObject, pushes ref onto stack.
   CreateArguments
 
+  /// Create a rest-parameter array from the current call's args, taking those
+  /// at index `from_index` and beyond. Reads state.call_args, allocates a plain
+  /// Array, pushes ref onto stack.
+  CreateRestArray(from_index: Int)
+
   // -- RegExp --
   /// Pop flags string, pop pattern string -> push new RegExp object.
   NewRegExp
@@ -371,6 +376,7 @@ pub type IrOp {
   IrAsyncYieldStarResume(next_label: Int)
   IrAwait
   IrCreateArguments
+  IrCreateRestArray(from_index: Int)
   IrNewRegExp
 
   // -- Global Environment Record --

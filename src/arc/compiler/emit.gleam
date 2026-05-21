@@ -9,7 +9,7 @@ import arc/vm/opcode.{
   IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp,
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
   IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCreateArguments,
-  IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
+  IrCreateRestArray, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
@@ -1300,6 +1300,18 @@ fn class_body_references_arguments(body: List(ast.ClassElement)) -> Bool {
   })
 }
 
+/// Split off a trailing rest parameter. Returns the fixed params (in order)
+/// and the rest target pattern (the binding inside `...`), if present. A rest
+/// element is only valid as the last parameter, so we only check the tail.
+fn split_trailing_rest(
+  params: List(ast.Pattern),
+) -> #(List(ast.Pattern), Option(ast.Pattern)) {
+  case list.reverse(params) {
+    [ast.RestElement(inner), ..rev_fixed] -> #(list.reverse(rev_fixed), Some(inner))
+    _ -> #(params, None)
+  }
+}
+
 /// Compile a function body into a CompiledChild.
 fn compile_function_body(
   parent: Emitter,
@@ -1342,9 +1354,17 @@ fn compile_function_body(
     False -> emit_op(e, DeclareThis)
   }
 
+  // A trailing rest parameter (`...rest`) is bound separately from the fixed
+  // params: the fixed ones bind positionally (arity counts only them, so
+  // build_locals leaves the rest slot undefined), then IrCreateRestArray
+  // collects the leftover args into an Array. `arity` excludes the rest param,
+  // which also gives the correct `fn.length` (§15.1.5).
+  let #(fixed_params, rest_param) = split_trailing_rest(params)
+  let arity = list.length(fixed_params)
+
   // Phase 1: Declare parameters (identifier or synthetic for destructuring)
   let #(e, destructured_params_rev) =
-    list.index_fold(params, #(e, []), fn(acc, param, idx) {
+    list.index_fold(fixed_params, #(e, []), fn(acc, param, idx) {
       let #(e, destr) = acc
       case param {
         ast.IdentifierPattern(pname) -> #(
@@ -1392,6 +1412,17 @@ fn compile_function_body(
       let e = emit_ir(e, IrScopeGetVar(synthetic))
       emit_destructuring_bind(e, pattern, LetBinding) |> result.unwrap(e)
     })
+
+  // Phase 2b: Bind the trailing rest parameter, if any. Build the array from
+  // the args at `arity` and beyond, then bind it (an identifier, or a nested
+  // destructuring target like `...[a, b]`). ParamBinding declares the slot.
+  let e = case rest_param {
+    None -> e
+    Some(rest_target) -> {
+      let e = emit_ir(e, IrCreateRestArray(arity))
+      emit_destructuring_bind(e, rest_target, ParamBinding) |> result.unwrap(e)
+    }
+  }
 
   // Hoisting for the function body
   let hoisted_vars = collect_hoisted_vars(stmts)
@@ -1442,7 +1473,7 @@ fn compile_function_body(
 
   CompiledChild(
     name:,
-    arity: list.length(params),
+    arity:,
     code:,
     constants:,
     constants_map:,

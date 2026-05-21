@@ -17,7 +17,8 @@ import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
   ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal,
   Call, CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
-  CallMethodApply, CallSuper, CallSuperApply, CreateArguments, DeclareEvalVar,
+  CallMethodApply, CallSuper, CallSuperApply, CreateArguments, CreateRestArray,
+  DeclareEvalVar,
   DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
   DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
   DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
@@ -2728,6 +2729,22 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             extensible: True,
           ),
         )
+      Ok(
+        State(
+          ..state,
+          heap:,
+          stack: [JsObject(ref), ..state.stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+
+    CreateRestArray(from_index) -> {
+      // §10.4.4 rest parameter: a plain Array of the call args from
+      // `from_index` onward (the params before the rest are bound positionally).
+      let rest_args = list.drop(state.call_args, from_index)
+      let #(heap, ref) =
+        common.alloc_array(state.heap, rest_args, state.builtins.array.prototype)
       Ok(
         State(
           ..state,
