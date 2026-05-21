@@ -267,11 +267,31 @@ fn string_index_of(
     state,
     helpers.first_arg_or_undefined(args),
   )
-  // Steps 4-7: ToIntegerOrInfinity(position), clamp
-  let from = helpers.get_int_arg(args, 1, 0)
+  // Steps 4-7: ToIntegerOrInfinity(position), clamp between 0 and len.
+  // This goes through ToNumber, so an object position argument (e.g.
+  // `{valueOf(){return 1}}`) is coerced via valueOf/@@toPrimitive rather than
+  // silently falling back to 0.
+  let pos_val = case helpers.list_at(args, 1) {
+    Some(v) -> v
+    None -> JsUndefined
+  }
+  use num, state <- coerce.try_to_number(state, pos_val)
+  let from = integer_or_infinity_to_start(num, object.string_length(s))
   // Step 8: StringIndexOf(S, searchStr, start)
   let result = index_of_from(s, search, from)
   #(state, Ok(value.from_int(result)))
+}
+
+/// ToIntegerOrInfinity (§7.1.5) of an already-ToNumber'd value, clamped to a
+/// valid string start index in [0, len] (the indexOf step-7 clamp). NaN and
+/// ±0 → 0; +inf → len; -inf → 0; finite → truncate toward zero, then clamp.
+fn integer_or_infinity_to_start(num: value.JsNum, len: Int) -> Int {
+  case num {
+    Finite(n) -> int.clamp(value.float_to_int(n), 0, len)
+    NaN -> 0
+    value.Infinity -> len
+    value.NegInfinity -> 0
+  }
 }
 
 /// ES2024 22.1.3.11 — String.prototype.lastIndexOf ( searchString [ , position ] )

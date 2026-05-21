@@ -22,39 +22,39 @@ import arc/parser/error.{
   DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,
   DuplicateExport, DuplicateImportBinding, DuplicateLabel,
   DuplicateParamNameStrictMode, DuplicateParameterName, DuplicateProtoProperty,
-  EnumReservedWord, EvalArgsAssignStrictMode, ExpectedAfterOptionalChain,
-  ExpectedAsOrFromAfterExportStar, ExpectedBindingPattern,
-  ExpectedBraceOrStarAfterComma, ExpectedCallOrDotAfterImport,
-  ExpectedCaseDefaultOrBrace, ExpectedCloseAfterSetter,
-  ExpectedCommaOrBraceInExport, ExpectedCommaOrBraceInImport,
-  ExpectedCommaOrBraceInObject, ExpectedCommaOrBraceInObjectLiteral,
-  ExpectedCommaOrBracket, ExpectedCommaOrBracketInExpr,
-  ExpectedCommaOrCloseParen, ExpectedCommaOrObjectClose, ExpectedExportAlias,
-  ExpectedExportSpecifierName, ExpectedForDeclSeparator,
-  ExpectedForHeadSeparator, ExpectedForSeparator, ExpectedFromOrComma,
-  ExpectedFunctionAfterAsync, ExpectedIdentifier, ExpectedIdentifierAfterDot,
-  ExpectedImportMeta, ExpectedImportMetaGot, ExpectedImportSpecifier,
-  ExpectedImportSpecifierName, ExpectedModuleSpecifier, ExpectedNewTarget,
-  ExpectedNewTargetGot, ExpectedPropertyName, ExpectedSemicolon, ExpectedToken,
-  ExportNotTopLevel, ForInInitializer, ForOfInitializer, FunctionDeclInLabelBody,
-  FunctionDeclInSingleStatement, GeneratorDeclLabeled, GetterNoParams,
-  IdentifierAlreadyDeclared, ImportNotTopLevel, InvalidAssignmentLhs,
-  InvalidDestructuringTarget, InvalidForInOfLhs, InvalidLhsPrefixOp,
-  InvalidPostfixLhs, LetBindingInLexicalDecl, LetIdentifierStrictMode,
-  LexerError, LexicalDeclInLabel, LexicalDeclInSingleStatement,
-  MissingCatchOrFinally, MissingConstInitializer, NewTargetOutsideFunction,
-  NotAnArrowFunction, OctalEscapeStrictMode, OctalLiteralStrictMode,
-  ReservedWordImportBinding, ReservedWordStrictMode, RestDefaultInitializer,
-  RestMustBeLast, RestTrailingComma, ReturnOutsideFunction,
-  SetterExactlyOneParam, SetterNoRest, ShorthandDefaultOutsideDestructuring,
-  StaticPrototype, StaticReservedStrictMode, StrictModeAssignment,
-  StrictModeBindingName, StrictModeModification, StrictModeModifyRestricted,
-  StrictModeParamName, SuperCallNotInDerivedConstructor,
-  SuperPropertyNotInMethod, ThrowLineBreak, UndeclaredExportBinding,
-  UndefinedLabel, UnexpectedAfterExport, UnexpectedCloseBrace,
-  UnexpectedCloseParen, UnexpectedExport, UnexpectedSuper, UnexpectedToken,
-  UnicodeEscapeInMetaProperty, WithNotAllowedStrictMode, YieldInFormalParameter,
-  YieldInGenerator, YieldReservedStrictMode,
+  EnumReservedWord, EscapedReservedWord, EvalArgsAssignStrictMode,
+  ExpectedAfterOptionalChain, ExpectedAsOrFromAfterExportStar,
+  ExpectedBindingPattern, ExpectedBraceOrStarAfterComma,
+  ExpectedCallOrDotAfterImport, ExpectedCaseDefaultOrBrace,
+  ExpectedCloseAfterSetter, ExpectedCommaOrBraceInExport,
+  ExpectedCommaOrBraceInImport, ExpectedCommaOrBraceInObject,
+  ExpectedCommaOrBraceInObjectLiteral, ExpectedCommaOrBracket,
+  ExpectedCommaOrBracketInExpr, ExpectedCommaOrCloseParen,
+  ExpectedCommaOrObjectClose, ExpectedExportAlias, ExpectedExportSpecifierName,
+  ExpectedForDeclSeparator, ExpectedForHeadSeparator, ExpectedForSeparator,
+  ExpectedFromOrComma, ExpectedFunctionAfterAsync, ExpectedIdentifier,
+  ExpectedIdentifierAfterDot, ExpectedImportMeta, ExpectedImportMetaGot,
+  ExpectedImportSpecifier, ExpectedImportSpecifierName, ExpectedModuleSpecifier,
+  ExpectedNewTarget, ExpectedNewTargetGot, ExpectedPropertyName,
+  ExpectedSemicolon, ExpectedToken, ExportNotTopLevel, ForInInitializer,
+  ForOfInitializer, FunctionDeclInLabelBody, FunctionDeclInSingleStatement,
+  GeneratorDeclLabeled, GetterNoParams, IdentifierAlreadyDeclared,
+  ImportNotTopLevel, InvalidAssignmentLhs, InvalidDestructuringTarget,
+  InvalidForInOfLhs, InvalidLhsPrefixOp, InvalidPostfixLhs,
+  LetBindingInLexicalDecl, LetIdentifierStrictMode, LexerError,
+  LexicalDeclInLabel, LexicalDeclInSingleStatement, MissingCatchOrFinally,
+  MissingConstInitializer, NewTargetOutsideFunction, NotAnArrowFunction,
+  OctalEscapeStrictMode, OctalLiteralStrictMode, ReservedWordImportBinding,
+  ReservedWordStrictMode, RestDefaultInitializer, RestMustBeLast,
+  RestTrailingComma, ReturnOutsideFunction, SetterExactlyOneParam, SetterNoRest,
+  ShorthandDefaultOutsideDestructuring, StaticPrototype,
+  StaticReservedStrictMode, StrictModeAssignment, StrictModeBindingName,
+  StrictModeModification, StrictModeModifyRestricted, StrictModeParamName,
+  SuperCallNotInDerivedConstructor, SuperPropertyNotInMethod, ThrowLineBreak,
+  UndeclaredExportBinding, UndefinedLabel, UnexpectedAfterExport,
+  UnexpectedCloseBrace, UnexpectedCloseParen, UnexpectedExport, UnexpectedSuper,
+  UnexpectedToken, UnicodeEscapeInMetaProperty, WithNotAllowedStrictMode,
+  YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode,
 }
 import arc/parser/lexer.{
   type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
@@ -736,7 +736,23 @@ fn accumulate_param_name(p: P, name: String) -> Result(P, ParseError) {
 }
 
 /// Validate an identifier used as a binding name (let/const/var/param/catch)
+/// An `Identifier` token whose name spells an always-reserved word can only
+/// have arisen from a \u escape (the lexer maps unescaped reserved words to
+/// keyword tokens). Such an escaped keyword is never a valid binding or
+/// reference. ES2024 §13.1.1 makes it an early SyntaxError. yield/await are
+/// excluded here — they are contextual and validated elsewhere.
+fn check_not_escaped_reserved_word(
+  p: P,
+  name: String,
+) -> Result(Nil, ParseError) {
+  case is_reserved_word_kind(lexer.keyword_or_identifier(name)) {
+    True -> Error(EscapedReservedWord(name, pos_of(p)))
+    False -> Ok(Nil)
+  }
+}
+
 fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
+  use Nil <- result.try(check_not_escaped_reserved_word(p, name))
   case name {
     "enum" -> Error(EnumReservedWord(pos_of(p)))
     "eval" | "arguments" ->
@@ -2488,9 +2504,10 @@ fn parse_class_element(
     True -> advance(p2)
     False -> p2
   }
-  // Check for getter/setter — track kind for param validation
-  let class_accessor_kind = case peek(p3) {
-    Identifier -> {
+  // Check for getter/setter — track kind for param validation. An escaped
+  // `get`/`set` (e.g. get) is not the contextual keyword (§12.7.2).
+  let class_accessor_kind = case peek(p3), peek_had_escape(p3) {
+    Identifier, False -> {
       let val = peek_value(p3)
       case val {
         "get" ->
@@ -2506,7 +2523,7 @@ fn parse_class_element(
         _ -> ""
       }
     }
-    _ -> ""
+    _, _ -> ""
   }
   let p4 = case class_accessor_kind {
     "get" | "set" -> advance(p3)
@@ -2812,13 +2829,25 @@ fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
 }
 
 fn parse_expression_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+  // Capture the raw string content before parsing, so a lone string-literal
+  // statement can be recorded as a Directive with its un-decoded text.
+  let directive_raw = case peek(p) {
+    KString -> option.Some(peek_value(p))
+    _ -> option.None
+  }
   use #(p2, expr) <- result.try(parse_expression(p))
   use <- bool.guard(
     p2.has_cover_initializer,
     Error(ShorthandDefaultOutsideDestructuring(pos_of(p))),
   )
   use p3 <- result.try(eat_semicolon(p2))
-  Ok(#(p3, ast.ExpressionStatement(expression: expr)))
+  // A Directive is an expression statement whose expression is exactly a
+  // string literal (not e.g. a concatenation), so only tag it then.
+  let directive = case expr {
+    ast.StringExpression(_) -> directive_raw
+    _ -> option.None
+  }
+  Ok(#(p3, ast.ExpressionStatement(expression: expr, directive:)))
 }
 
 // ---- Expression parsing (Pratt parser) ----
@@ -3091,9 +3120,14 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
         Identifier -> {
           case peek_at(p, 2) {
             Arrow -> {
-              // Check identifier is valid as a binding name
+              // Check identifier is valid as a binding name. The arrow is
+              // async, so its parameter is in async context — `await` (incl. an
+              // escaped `await`, which lexes as an identifier) is reserved.
               let name = peek_value_at(p, 1)
-              use Nil <- result.try(check_binding_identifier(p, name))
+              use Nil <- result.try(check_binding_identifier(
+                P(..p, in_async: True),
+                name,
+              ))
               {
                 // advance past async + ident to land on Arrow
                 let p2 = advance(advance(p))
@@ -3915,6 +3949,11 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           ))
         }
         _ -> {
+          // An identifier reference whose name is an always-reserved word can
+          // only have come from a \u escape; reject it (§13.1.1). Property
+          // names and member accesses use other paths, so they still allow
+          // escaped reserved words.
+          use Nil <- result.try(check_not_escaped_reserved_word(p, val))
           let eval_args_target = case p.strict, val {
             True, "eval" | True, "arguments" -> True
             _, _ -> p.has_eval_args_target
@@ -4303,9 +4342,10 @@ fn parse_object_property(p: P) -> Result(#(P, ast.Property), ParseError) {
     False -> p
   }
 
-  // get/set accessor — track which kind for param count validation
-  let accessor_kind = case peek(p2) {
-    Identifier -> {
+  // get/set accessor — track which kind for param count validation. An escaped
+  // `get`/`set` (e.g. get) is not the contextual keyword (§12.7.2).
+  let accessor_kind = case peek(p2), peek_had_escape(p2) {
+    Identifier, False -> {
       let val = peek_value(p2)
       case val {
         "get" ->
@@ -4321,7 +4361,7 @@ fn parse_object_property(p: P) -> Result(#(P, ast.Property), ParseError) {
         _ -> ""
       }
     }
-    _ -> ""
+    _, _ -> ""
   }
   let p3 = case accessor_kind {
     "get" | "set" -> advance(p2)
@@ -4666,6 +4706,13 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
         p.bytes,
         end_pos,
       ))
+      // Validate JS-specific syntax (named-group names, inline modifier flags)
+      // over the body [body_start, end_pos - 1). Runs for every regex now that
+      // the scanner accepts non-ASCII bodies.
+      use Nil <- result.try(
+        regex.validate_regex_pattern(p.bytes, body_start, end_pos - 1)
+        |> result.map_error(fn(msg) { LexerError(message: msg, pos: start_pos) }),
+      )
       // If /u flag is present, validate no lone braces in the body
       // body is from body_start to end_pos - 1 (exclusive of closing /)
       use Nil <- result.try(case list.contains(flags, "u") {
@@ -5486,6 +5533,16 @@ fn peek_value_at(p: P, n: Int) -> String {
   case list_nth(p.tokens, n) {
     Ok(lexer.Token(value: v, ..)) -> v
     Error(_) -> ""
+  }
+}
+
+/// True if the current token's source contained a unicode escape. A contextual
+/// keyword (get/set/async/of/static/…) written with an escape must not be
+/// recognized as that keyword (ES2024 §12.7.2 / §13.1).
+fn peek_had_escape(p: P) -> Bool {
+  case p.tokens {
+    [lexer.Token(had_escape: e, ..), ..] -> e
+    [] -> False
   }
 }
 

@@ -8,7 +8,17 @@ import gleam/result
 import gleam/string
 
 pub type Token {
-  Token(kind: TokenKind, value: String, pos: Int, line: Int, raw_len: Int)
+  /// `had_escape` is True when the token's source contained a unicode escape
+  /// (only set for identifiers). A contextual keyword written with an escape
+  /// (e.g. `get`) is not treated as that keyword by the grammar.
+  Token(
+    kind: TokenKind,
+    value: String,
+    pos: Int,
+    line: Int,
+    raw_len: Int,
+    had_escape: Bool,
+  )
 }
 
 pub type TokenKind {
@@ -229,7 +239,8 @@ fn do_tokenize(
   ))
   let token_line = line + ws_newlines
   case char_at(bytes, new_pos) {
-    "" -> Ok(list.reverse([Token(Eof, "", new_pos, token_line, 0), ..acc]))
+    "" ->
+      Ok(list.reverse([Token(Eof, "", new_pos, token_line, 0, False), ..acc]))
     _ -> {
       use token <- result.try(read_token(bytes, new_pos))
       let token = Token(..token, line: token_line)
@@ -416,7 +427,7 @@ fn skip_block_inner(
 
 /// Create a token with explicit raw_len (in bytes).
 fn tokn(kind: TokenKind, value: String, pos: Int, raw_len: Int) -> Token {
-  Token(kind:, value:, pos:, line: 0, raw_len:)
+  Token(kind:, value:, pos:, line: 0, raw_len:, had_escape: False)
 }
 
 fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
@@ -482,6 +493,7 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
                 pos: pos,
                 line: 0,
                 raw_len: escape_span,
+                had_escape: True,
               ))
             }
           }
@@ -493,7 +505,19 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
     _ ->
       case is_identifier_start(ch) {
         True -> read_identifier(bytes, pos)
-        False -> Error(UnexpectedCharacter(ch, pos))
+        False -> {
+          let width = char_width_at(bytes, pos)
+          // A non-ASCII character that starts no token is still legal inside a
+          // regex literal (e.g. the Cf format-control U+180E), which the parser
+          // re-scans from source — emit an Illegal token so the lex doesn't
+          // fail outright. ASCII non-token chars (@, #, …) remain hard errors,
+          // matching prior behavior. A stray Illegal token reached outside a
+          // regex is rejected by the parser, still a SyntaxError.
+          case width > 1 {
+            True -> Ok(tokn(Illegal, ch, pos, width))
+            False -> Error(UnexpectedCharacter(ch, pos))
+          }
+        }
       }
   }
 }
@@ -1300,13 +1324,20 @@ fn make_identifier_token(bytes: BitArray, start: Int, end: Int) -> Token {
   case string.contains(raw, "\\") {
     False -> {
       let kind = keyword_or_identifier(raw)
-      Token(kind:, value: raw, pos: start, line: 0, raw_len:)
+      Token(kind:, value: raw, pos: start, line: 0, raw_len:, had_escape: False)
     }
     True -> {
       // Decode unicode escapes to canonical form.
       // Escaped identifiers are always Identifier, never keywords.
       let decoded = decode_identifier_escapes(raw)
-      Token(kind: Identifier, value: decoded, pos: start, line: 0, raw_len:)
+      Token(
+        kind: Identifier,
+        value: decoded,
+        pos: start,
+        line: 0,
+        raw_len:,
+        had_escape: True,
+      )
     }
   }
 }
@@ -1490,7 +1521,7 @@ fn validate_identifier_escape(
 /// Check if a decoded codepoint is valid for an identifier position.
 /// For ID_Start: must be a letter, _, or $ (or Unicode ID_Start).
 /// For ID_Continue: must also allow digits, ZWNJ, ZWJ (or Unicode ID_Continue).
-fn validate_identifier_codepoint(cp: Int, is_start: Bool) -> Bool {
+pub fn validate_identifier_codepoint(cp: Int, is_start: Bool) -> Bool {
   // Reject null (U+0000) and surrogates (U+D800-U+DFFF)
   case cp {
     0 -> False
@@ -1781,7 +1812,7 @@ fn is_unicode_id_start(cp: Int) -> Bool
 @external(erlang, "unicode_ffi", "is_id_continue")
 fn is_unicode_id_continue(cp: Int) -> Bool
 
-fn keyword_or_identifier(word: String) -> TokenKind {
+pub fn keyword_or_identifier(word: String) -> TokenKind {
   case word {
     "var" -> Var
     "let" -> Let

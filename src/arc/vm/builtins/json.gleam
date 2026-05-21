@@ -212,7 +212,22 @@ fn parse_string_content(
         [c, ..] -> Error("Invalid escape character '\\" <> c <> "' in JSON")
       }
     }
-    [c, ..rest] -> parse_string_content(rest, string_tree.append(acc, c))
+    // ECMA-404: unescaped control characters (U+0000–U+001F) are not allowed
+    // in JSON strings; they must be written as escape sequences.
+    [c, ..rest] ->
+      case is_json_control_char(c) {
+        True -> Error("Unexpected control character in JSON string")
+        False -> parse_string_content(rest, string_tree.append(acc, c))
+      }
+  }
+}
+
+/// True if `c` is a single character in the JSON-forbidden control range
+/// U+0000 through U+001F.
+fn is_json_control_char(c: String) -> Bool {
+  case string.to_utf_codepoints(c) {
+    [cp, ..] -> string.utf_codepoint_to_int(cp) < 0x20
+    [] -> False
   }
 }
 

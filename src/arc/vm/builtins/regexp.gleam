@@ -201,9 +201,46 @@ fn regexp_constructor(
     _ -> #("", "")
   }
 
-  let #(heap, ref) =
-    alloc_regexp(state.heap, state.builtins.regexp.prototype, pattern, flags)
-  #(State(..state, heap:), Ok(JsObject(ref)))
+  // §22.2.3.4 RegExpInitialize step 1: flags must each be one of d g i m s u v
+  // y, with no duplicates, else a SyntaxError.
+  case list.try_fold(string.to_graphemes(flags), [], validate_flag) {
+    Error(msg) -> regexp_syntax_error(state, msg)
+    Ok(_) -> {
+      let #(heap, ref) =
+        alloc_regexp(
+          state.heap,
+          state.builtins.regexp.prototype,
+          pattern,
+          flags,
+        )
+      #(State(..state, heap:), Ok(JsObject(ref)))
+    }
+  }
+}
+
+/// Fold step for RegExp flag validation: accumulate seen flags, rejecting any
+/// invalid character or duplicate.
+fn validate_flag(
+  seen: List(String),
+  f: String,
+) -> Result(List(String), String) {
+  let is_valid = case f {
+    "d" | "g" | "i" | "m" | "s" | "u" | "v" | "y" -> True
+    _ -> False
+  }
+  case is_valid, list.contains(seen, f) {
+    False, _ -> Error("Invalid regular expression flag '" <> f <> "'")
+    True, True -> Error("Duplicate regular expression flag '" <> f <> "'")
+    True, False -> Ok([f, ..seen])
+  }
+}
+
+fn regexp_syntax_error(
+  state: State,
+  msg: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
+  #(State(..state, heap:), Error(err))
 }
 
 /// Allocate a RegExp object on the heap.
