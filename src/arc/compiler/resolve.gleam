@@ -51,6 +51,7 @@ pub fn resolve(
   is_derived_constructor: Bool,
   is_generator: Bool,
   is_async: Bool,
+  is_constructor: Bool,
   local_names: Option(List(#(String, Int))),
   this_slot: Option(Int),
 ) -> FuncTemplate {
@@ -69,6 +70,7 @@ pub fn resolve(
     is_derived_constructor:,
     is_generator:,
     is_async:,
+    is_constructor:,
     local_names:,
     this_slot:,
   )

@@ -1652,14 +1652,12 @@ pub fn is_constructor(heap: Heap, value: JsValue) -> Bool {
     JsObject(ref) ->
       case heap.read(heap, ref) {
         // ECMAScript function: a constructor unless it's an arrow, generator,
-        // or async function — those lack [[Construct]] (§10.2). Derived from
-        // the function's own template (intrinsic, already-stored data).
-        // NOTE: concise methods/getters/setters are also non-constructors per
-        // spec, but FuncTemplate doesn't yet flag them (follow-up).
+        // ECMAScript function: read the [[Construct]] capability stored on its
+        // template, set at compile time from the function's syntactic kind
+        // (normal functions + class constructors carry it; arrows, generators,
+        // async functions, and methods/getters/setters do not).
         Some(ObjectSlot(kind: FunctionObject(func_template:, ..), ..)) ->
-          !func_template.is_arrow
-          && !func_template.is_generator
-          && !func_template.is_async
+          func_template.is_constructor
         // Built-in function: read the [[Construct]] capability stored on the
         // slot — set True for constructor intrinsics at allocation, and copied
         // from its target by `bind` (§10.4.1.3 step 6). A native's dispatch tag

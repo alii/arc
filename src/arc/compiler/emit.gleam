@@ -93,6 +93,10 @@ pub type CompiledChild {
     is_derived_constructor: Bool,
     is_generator: Bool,
     is_async: Bool,
+    /// Stored [[Construct]] capability: True for normal functions and class
+    /// constructors; False for arrows, generators, async, and methods /
+    /// getters / setters. (cf. QuickJS `is_constructor` / JSC `ConstructAbility`.)
+    is_constructor: Bool,
     /// True if this function contains a syntactic `eval(...)` call with
     /// identifier callee. Such functions get all locals boxed and a
     /// name→index table stored on FuncTemplate so direct eval can see them.
@@ -1026,6 +1030,8 @@ fn collect_hoisted_funcs(
               False,
               is_gen,
               is_async,
+              // Function declaration: a constructor unless gen/async.
+              !is_gen && !is_async,
             )
           let #(e, idx) = add_child_function(e, child)
           #(e, [#(name, idx), ..funcs])
@@ -1287,6 +1293,7 @@ fn compile_function_body(
   is_arrow: Bool,
   is_generator: Bool,
   is_async: Bool,
+  is_constructor: Bool,
 ) -> CompiledChild {
   let stmts = case body {
     ast.BlockStatement(s) -> s
@@ -1429,6 +1436,7 @@ fn compile_function_body(
     is_derived_constructor: False,
     is_generator:,
     is_async:,
+    is_constructor:,
     has_eval_call: e.has_eval_call,
     references_this: e.references_this,
   )
@@ -2398,7 +2406,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Function expression
     ast.FunctionExpression(name, params, body, is_gen, is_async) -> {
       let child =
-        compile_function_body(e, name, params, body, False, is_gen, is_async)
+        compile_function_body(
+          e,
+          name,
+          params,
+          body,
+          False,
+          is_gen,
+          is_async,
+          // Normal function expression: a constructor unless gen/async.
+          !is_gen && !is_async,
+        )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }
@@ -2411,7 +2429,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         ast.ArrowBodyBlock(stmt) -> stmt
       }
       let child =
-        compile_function_body(e, None, params, body_stmt, True, False, is_async)
+        compile_function_body(
+          e,
+          None,
+          params,
+          body_stmt,
+          True,
+          False,
+          is_async,
+          False,
+        )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }
@@ -2693,6 +2720,8 @@ fn emit_named_expr(
           False,
           is_gen,
           is_async,
+          // Named function expression: a constructor unless gen/async.
+          !is_gen && !is_async,
         )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
@@ -2713,6 +2742,8 @@ fn emit_named_expr(
           True,
           False,
           is_async,
+          // Arrow function — not a constructor.
+          False,
         )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
@@ -2727,6 +2758,36 @@ fn emit_named_expr(
 
 /// Emit one property in an object literal. Object is already on the stack.
 /// All handlers leave the object on the stack for the next property.
+/// Compile an object-literal *method* value — a concise method, getter, or
+/// setter — so it is NOT a constructor (methods/accessors have no
+/// [[Construct]], so `new o.m()` must throw). These values are always
+/// FunctionExpressions; fall back defensively for anything unexpected.
+fn emit_method_value(
+  e: Emitter,
+  value: ast.Expression,
+  name: Option(String),
+) -> Result(Emitter, EmitError) {
+  case value {
+    ast.FunctionExpression(_, params, body, is_gen, is_async) -> {
+      let child =
+        compile_function_body(
+          e,
+          name,
+          params,
+          body,
+          False,
+          is_gen,
+          is_async,
+          // method / getter / setter — not a constructor
+          False,
+        )
+      let #(e, idx) = add_child_function(e, child)
+      Ok(emit_ir(e, IrMakeClosure(idx)))
+    }
+    _ -> emit_expr(e, value)
+  }
+}
+
 fn emit_object_property(
   e: Emitter,
   prop: ast.Property,
@@ -2739,6 +2800,7 @@ fn emit_object_property(
       value:,
       kind: ast.Init,
       computed: False,
+      method:,
       ..,
     )
     | ast.Property(
@@ -2746,9 +2808,14 @@ fn emit_object_property(
         value:,
         kind: ast.Init,
         computed: False,
+        method:,
         ..,
       ) -> {
-      use e <- result.map(emit_named_expr(e, value, name))
+      // `{ m() {} }` is a method (not a constructor); `{ x: v }` is data.
+      use e <- result.map(case method {
+        True -> emit_method_value(e, value, Some(name))
+        False -> emit_named_expr(e, value, name)
+      })
       emit_ir(e, IrDefineField(name))
     }
 
@@ -2760,19 +2827,26 @@ fn emit_object_property(
       value:,
       kind: ast.Init,
       computed: False,
+      method:,
       ..,
     ) -> {
       let e = push_const(e, JsNumber(Finite(n)))
-      use e <- result.map(emit_expr(e, value))
+      use e <- result.map(case method {
+        True -> emit_method_value(e, value, None)
+        False -> emit_expr(e, value)
+      })
       emit_ir(e, IrDefineFieldComputed)
     }
 
     // Computed key: {[expr]: value}
     // Emit key, emit value, IrDefineFieldComputed — pops both, keeps obj.
     // The VM handles ToPropertyKey (Symbol preserved, else ToString).
-    ast.Property(key:, value:, kind: ast.Init, computed: True, ..) -> {
+    ast.Property(key:, value:, kind: ast.Init, computed: True, method:, ..) -> {
       use e <- result.try(emit_expr(e, key))
-      use e <- result.map(emit_expr(e, value))
+      use e <- result.map(case method {
+        True -> emit_method_value(e, value, None)
+        False -> emit_expr(e, value)
+      })
       emit_ir(e, IrDefineFieldComputed)
     }
 
@@ -2800,7 +2874,7 @@ fn emit_object_property(
         computed: False,
         ..,
       ) -> {
-      use e <- result.map(emit_named_expr(e, value, "get " <> name))
+      use e <- result.map(emit_method_value(e, value, Some("get " <> name)))
       emit_ir(e, IrDefineAccessor(name, opcode.Getter))
     }
 
@@ -2819,7 +2893,7 @@ fn emit_object_property(
         computed: False,
         ..,
       ) -> {
-      use e <- result.map(emit_named_expr(e, value, "set " <> name))
+      use e <- result.map(emit_method_value(e, value, Some("set " <> name)))
       emit_ir(e, IrDefineAccessor(name, opcode.Setter))
     }
 
@@ -2827,12 +2901,12 @@ fn emit_object_property(
     // Stack: emit key, emit fn → DefineAccessorComputed
     ast.Property(key:, value:, kind: ast.Get, ..) -> {
       use e <- result.try(emit_expr(e, key))
-      use e <- result.map(emit_expr(e, value))
+      use e <- result.map(emit_method_value(e, value, None))
       emit_ir(e, IrDefineAccessorComputed(opcode.Getter))
     }
     ast.Property(key:, value:, kind: ast.Set, ..) -> {
       use e <- result.try(emit_expr(e, key))
-      use e <- result.map(emit_expr(e, value))
+      use e <- result.map(emit_method_value(e, value, None))
       emit_ir(e, IrDefineAccessorComputed(opcode.Setter))
     }
 
@@ -4152,6 +4226,8 @@ fn compile_derived_class(
       False,
       False,
       False,
+      // Class constructor — IS a constructor.
+      True,
     )
   // Mark as derived constructor
   let child = CompiledChild(..child, is_derived_constructor: True)
@@ -4236,6 +4312,8 @@ fn emit_class_methods(
           False,
           is_gen,
           is_async,
+          // Class method / getter / setter — not a constructor.
+          False,
         )
       let #(e, idx) = add_child_function(e, child)
       let e = emit_ir(e, IrMakeClosure(idx))
@@ -4287,7 +4365,17 @@ fn emit_computed_class_method(
   }
   use e <- result.try(emit_expr(e, key))
   let child =
-    compile_function_body(e, None, params, body, False, is_gen, is_async)
+    compile_function_body(
+      e,
+      None,
+      params,
+      body,
+      False,
+      is_gen,
+      is_async,
+      // Computed class method / getter / setter — not a constructor.
+      False,
+    )
   let #(e, idx) = add_child_function(e, child)
   let e = emit_ir(e, IrMakeClosure(idx))
   let e = case kind {
@@ -4410,6 +4498,8 @@ fn compile_base_class(
       False,
       False,
       False,
+      // Class constructor — IS a constructor.
+      True,
     )
   let #(e, ctor_idx) = add_child_function(e, child)
 

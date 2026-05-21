@@ -61,6 +61,7 @@ fn make_func(
     is_derived_constructor: False,
     is_generator: False,
     is_async: False,
+    is_constructor: True,
     local_names: None,
     this_slot: None,
   )
