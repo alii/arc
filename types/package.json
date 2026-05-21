@@ -1,0 +1,9 @@
+{
+	"name": "@types/arc",
+	"type": "module",
+	"description": "Bindings to OTP",
+	"types": "./index.d.ts",
+	"devDependencies": {
+		"typescript": "^5.9.3"
+	}
+}
