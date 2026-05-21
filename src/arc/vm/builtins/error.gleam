@@ -1,12 +1,16 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/dom_exception
+import arc/vm/heap
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type ErrorNativeFn, type JsValue, type Ref, Dispatch, ErrorConstructor,
-  ErrorNative, JsNull, JsObject, JsString, JsUndefined, Named,
+  type ErrorNativeFn, type JsValue, type Ref, DataProperty, Dispatch,
+  ErrorConstructor, ErrorNative, JsNull, JsObject, JsString, JsUndefined, Named,
+  ObjectSlot,
 }
+import gleam/dict
+import gleam/option.{type Option, None, Some}
 
 /// All error-related builtin types.
 pub type ErrorBuiltins {
@@ -34,6 +38,18 @@ pub fn init(
       #("toString", ErrorNative(value.ErrorPrototypeToString), 0),
     ])
 
+  // Static (constructor) members — V8 extensions, only on the base Error:
+  //   Error.captureStackTrace(target [, constructorOpt])
+  //   Error.stackTraceLimit = 10  (mutable cap honored when building traces)
+  let #(h, capture_method) =
+    common.alloc_methods(h, function_proto, [
+      #("captureStackTrace", ErrorNative(value.ErrorCaptureStackTrace), 2),
+    ])
+  let error_static = [
+    #("stackTraceLimit", value.builtin_property(value.JsNumber(value.Finite(10.0)))),
+    ..capture_method
+  ]
+
   // Error — base error type with name + message on prototype
   let #(h, error) =
     common.init_type(
@@ -48,7 +64,7 @@ pub fn init(
       fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "Error",
       1,
-      [],
+      error_static,
     )
 
   // Error subclasses — each inherits from Error.prototype
@@ -98,10 +114,55 @@ pub fn dispatch(
   case native {
     ErrorConstructor(proto:) -> call_native(proto, args, JsUndefined, state)
     value.ErrorPrototypeToString -> error_to_string(this, state)
+    value.ErrorCaptureStackTrace -> capture_stack_trace(args, state)
     value.DomExceptionConstructor(proto:) ->
       dom_exception.construct(proto, args, state)
     value.DomExceptionGetCode -> dom_exception.get_code(this, state)
   }
+}
+
+/// Error.captureStackTrace ( target [ , constructorOpt ] ) — V8 extension.
+/// Installs a `stack` string on `target` describing the call site, then returns
+/// undefined. `constructorOpt` (a function) tells V8 to omit all frames at and
+/// above it; Arc's frame model can't reliably match by function identity, so it
+/// is accepted but does not trim frames (a documented deviation).
+///
+/// The first line uses target's own `name`/`message` if it looks like an error,
+/// matching V8's `${target.name}: ${target.message}` prefix.
+fn capture_stack_trace(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case args {
+    [JsObject(ref), ..] -> {
+      let header = target_header(state.heap, ref)
+      let state = state.attach_stack(state, JsObject(ref), header)
+      #(state, Ok(JsUndefined))
+    }
+    // Per V8, a non-object target throws a TypeError.
+    _ ->
+      state.type_error(
+        state,
+        "Error.captureStackTrace requires that the first argument be an object",
+      )
+  }
+}
+
+/// First line for captureStackTrace: read the target's own `name` and `message`
+/// data properties (if present) and combine, defaulting `name` to "Error".
+fn target_header(h: Heap, ref: Ref) -> String {
+  let read = fn(key) {
+    case heap.read(h, ref) {
+      Some(ObjectSlot(properties:, ..)) ->
+        case dict.get(properties, Named(key)) {
+          Ok(DataProperty(value: JsString(s), ..)) -> Some(s)
+          _ -> None
+        }
+      _ -> None
+    }
+  }
+  let name = option.unwrap(read("name"), "Error")
+  state.error_header(name, option.unwrap(read("message"), ""))
 }
 
 /// Native error constructor: if (message !== undefined) this.message = message
@@ -114,27 +175,45 @@ fn call_native(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case args {
-    [JsUndefined, ..] | [] -> alloc_error(state, proto, [])
-    [JsString(msg), ..] ->
-      alloc_error(state, proto, [
-        #("message", value.builtin_property(JsString(msg))),
-      ])
+    [JsUndefined, ..] | [] -> alloc_error(state, proto, None)
+    [JsString(msg), ..] -> alloc_error(state, proto, Some(msg))
     [other, ..] -> {
       use msg, state <- coerce.try_to_string(state, other)
-      alloc_error(state, proto, [
-        #("message", value.builtin_property(JsString(msg))),
-      ])
+      alloc_error(state, proto, Some(msg))
     }
   }
 }
 
+/// Allocate an error object with the given message (None = no `message`
+/// property) and attach a `stack` trace captured from the current call stack.
 fn alloc_error(
   state: State,
   proto: Ref,
-  props: List(#(String, value.Property)),
+  message: Option(String),
 ) -> #(State, Result(JsValue, JsValue)) {
+  let props = case message {
+    Some(msg) -> [#("message", value.builtin_property(JsString(msg)))]
+    None -> []
+  }
   let #(heap, ref) = common.alloc_pojo(state.heap, proto, props)
-  #(State(..state, heap:), Ok(JsObject(ref)))
+  let state = State(..state, heap:)
+  let header =
+    state.error_header(error_name(state.heap, proto), option.unwrap(message, ""))
+  let state = state.attach_stack(state, JsObject(ref), header)
+  #(state, Ok(JsObject(ref)))
+}
+
+/// Read the `name` data property off an error prototype (e.g. "TypeError"),
+/// for the first line of the stack trace. Defaults to "Error".
+fn error_name(h: Heap, proto: Ref) -> String {
+  case heap.read(h, proto) {
+    Some(ObjectSlot(properties:, ..)) ->
+      case dict.get(properties, Named("name")) {
+        Ok(DataProperty(value: JsString(n), ..)) -> n
+        _ -> "Error"
+      }
+    _ -> "Error"
+  }
 }
 
 /// Error.prototype.toString ( ) — ES2024 §20.5.3.4

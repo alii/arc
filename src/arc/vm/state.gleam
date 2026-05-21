@@ -6,9 +6,13 @@ import arc/vm/limits
 import arc/vm/opcode.{type Op}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
 import gleam/dict
+import gleam/float
+import gleam/int
+import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/set
+import gleam/string
 
 // -- Concrete type aliases ----------------------------------------------------
 // heap.gleam and value.gleam are generic over `ctx` so NativeFnSlot can carry
@@ -57,6 +61,10 @@ pub type SavedFrame {
     /// Caller's eval_env ref (sloppy direct-eval var-injection dict).
     /// Restored on Return so eval-created vars survive the callee's lifetime.
     eval_env: Option(Ref),
+    /// Source line this frame was executing when it made the call (set by the
+    /// most recent SetLine before the Call). Restored into state.current_line
+    /// on Return, and read when building a stack trace.
+    current_line: Int,
   )
 }
 
@@ -123,6 +131,10 @@ pub type State {
     /// check here before global. Frame-local — saved to SavedFrame on call,
     /// restored on return. None for frames with no direct eval.
     eval_env: Option(Ref),
+    /// Source line of the instruction currently executing, updated by the
+    /// SetLine opcode. Captured (per active frame) when an Error object is
+    /// constructed to build `Error.prototype.stack`. 0 before any SetLine.
+    current_line: Int,
   )
 }
 
@@ -212,6 +224,111 @@ pub fn try_state(
   }
 }
 
+// ============================================================================
+// Stack traces (Error.prototype.stack)
+// ============================================================================
+
+/// Pseudo-filename used in stack frames. Arc has no real source paths reaching
+/// the VM yet, so every frame is attributed to "script:<line>".
+const stack_source = "script"
+
+/// Default Error.stackTraceLimit (V8 parity). Used when the constructor's
+/// `stackTraceLimit` property is missing or not a number.
+const default_stack_limit = 10
+
+/// Build a V8-style stack-trace string. `header` is the first line — the error's
+/// `name: message` (or just `name`). The frames are the active call chain at the
+/// moment the error is constructed: the executing function first, then its
+/// callers. Honors Error.stackTraceLimit. Lines look like:
+///
+///   TypeError: x is not a function
+///       at inner (script:3)
+///       at outer (script:7)
+///       at script:10
+///
+pub fn build_stack_trace(state: State, header: String) -> String {
+  let limit = stack_trace_limit(state)
+  let frames =
+    [
+      #(state.func.name, state.current_line),
+      ..list.map(state.call_stack, fn(f) { #(f.func.name, f.current_line) })
+    ]
+    |> list.take(limit)
+  case list.map(frames, format_frame) {
+    [] -> header
+    lines -> header <> "\n" <> string.join(lines, "\n")
+  }
+}
+
+/// Format one frame: `    at name (script:line)`, or `    at script:line` when
+/// the function is anonymous (e.g. the top-level script body).
+fn format_frame(frame: #(Option(String), Int)) -> String {
+  let #(name, line) = frame
+  let loc = case line {
+    0 -> stack_source
+    _ -> stack_source <> ":" <> int.to_string(line)
+  }
+  case name {
+    option.Some(n) -> "    at " <> n <> " (" <> loc <> ")"
+    option.None -> "    at " <> loc
+  }
+}
+
+/// Read Error.stackTraceLimit off the Error constructor. Non-numbers fall back
+/// to the default; Infinity means "no limit"; negatives clamp to 0 (no frames).
+fn stack_trace_limit(state: State) -> Int {
+  case heap.read(state.heap, state.builtins.error.constructor) {
+    option.Some(value.ObjectSlot(properties:, ..)) ->
+      case dict.get(properties, value.Named("stackTraceLimit")) {
+        Ok(value.DataProperty(value: value.JsNumber(value.Finite(n)), ..)) ->
+          int.max(0, float.truncate(n))
+        Ok(value.DataProperty(value: value.JsNumber(value.Infinity), ..)) ->
+          // Effectively unbounded — far above any real call depth.
+          1_000_000
+        _ -> default_stack_limit
+      }
+    _ -> default_stack_limit
+  }
+}
+
+/// Build a stack trace from the current call chain and set it as a
+/// non-enumerable own `stack` data property on `err` (matching V8/QuickJS,
+/// where `stack` is writable + configurable but not enumerable). No-op when
+/// `err` is not an object.
+pub fn attach_stack(state: State, err: JsValue, header: String) -> State {
+  case err {
+    value.JsObject(ref) -> {
+      let trace = build_stack_trace(state, header)
+      let heap =
+        heap.update(state.heap, ref, fn(slot) {
+          case slot {
+            value.ObjectSlot(properties:, ..) ->
+              value.ObjectSlot(
+                ..slot,
+                properties: dict.insert(
+                  properties,
+                  value.Named("stack"),
+                  value.builtin_property(value.JsString(trace)),
+                ),
+              )
+            _ -> slot
+          }
+        })
+      State(..state, heap:)
+    }
+    _ -> state
+  }
+}
+
+/// First line of a stack trace / error toString: `name: message`, or just
+/// `name` when the message is empty.
+pub fn error_header(name: String, msg: String) -> String {
+  case msg {
+    "" -> name
+    _ -> name <> ": " <> msg
+  }
+}
+
 /// Convenience wrapper: allocate a TypeError on the heap and return it as
 /// an Error result. Shared by all builtin modules to avoid boilerplate
 /// around common.make_type_error + state threading.
@@ -220,7 +337,8 @@ pub fn type_error(
   msg: String,
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
+  let state = attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  #(state, Error(err))
 }
 
 pub fn range_error(
@@ -228,7 +346,9 @@ pub fn range_error(
   msg: String,
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("RangeError", msg))
+  #(state, Error(err))
 }
 
 /// Allocate a ReferenceError and return it as the bare #(thrown, state) tuple
@@ -237,7 +357,9 @@ pub fn range_error(
 pub fn reference_error_value(state: State, msg: String) -> #(JsValue, State) {
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
-  #(err, State(..state, heap:))
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("ReferenceError", msg))
+  #(err, state)
 }
 
 /// Allocate a ReferenceError in the builtin-shape `#(State, Result)`.
@@ -247,7 +369,9 @@ pub fn reference_error(
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("ReferenceError", msg))
+  #(state, Error(err))
 }
 
 /// Allocate a JS Array with the given values and return it as Ok.
@@ -309,7 +433,8 @@ pub fn throw_type_error(
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  Error(#(Thrown, err, State(..state, heap:)))
+  let state = attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  Error(#(Thrown, err, state))
 }
 
 /// Allocate a JS RangeError and return it as a step-level thrown error.
@@ -318,7 +443,9 @@ pub fn throw_range_error(
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State)) {
   let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  Error(#(Thrown, err, State(..state, heap:)))
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("RangeError", msg))
+  Error(#(Thrown, err, state))
 }
 
 /// Allocate a JS ReferenceError and return it as a step-level thrown error.
@@ -328,7 +455,9 @@ pub fn throw_reference_error(
 ) -> Result(a, #(StepResult, JsValue, State)) {
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
-  Error(#(Thrown, err, State(..state, heap:)))
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("ReferenceError", msg))
+  Error(#(Thrown, err, state))
 }
 
 /// Bridge from inner helpers that return Result(a, #(JsValue, State))

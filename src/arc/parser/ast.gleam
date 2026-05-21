@@ -3,12 +3,21 @@
 import gleam/option.{type Option}
 
 pub type Program {
-  Script(body: List(Statement))
+  Script(body: List(StmtWithLine))
   Module(body: List(ModuleItem))
 }
 
+/// A statement paired with the 1-based source line where it begins. Statement
+/// *lists* (block bodies, program bodies, switch-case bodies) hold `Stmt` so the
+/// compiler can emit `SetLine` ops and build line numbers for `Error.stack`.
+/// Sub-statements held singly (an `if` consequent, a loop body) stay bare
+/// `Statement` and inherit the enclosing line.
+pub type StmtWithLine {
+  StmtWithLine(line: Int, statement: Statement)
+}
+
 pub type ModuleItem {
-  StatementItem(Statement)
+  StatementItem(StmtWithLine)
   ImportDeclaration(specifiers: List(ImportSpecifier), source: StringLiteral)
   ExportNamedDeclaration(
     declaration: Option(Statement),
@@ -41,7 +50,7 @@ pub type Statement {
   /// text, since an escaped/continued literal like `'use strict'` is not a
   /// directive even though its decoded value is "use strict".
   ExpressionStatement(expression: Expression, directive: Option(String))
-  BlockStatement(body: List(Statement))
+  BlockStatement(body: List(StmtWithLine))
   VariableDeclaration(
     kind: VariableKind,
     declarations: List(VariableDeclarator),
@@ -105,7 +114,7 @@ pub type ForInit {
 }
 
 pub type SwitchCase {
-  SwitchCase(condition: Option(Expression), consequent: List(Statement))
+  SwitchCase(condition: Option(Expression), consequent: List(StmtWithLine))
 }
 
 pub type CatchClause {
@@ -126,7 +135,7 @@ pub type ClassElement {
     is_static: Bool,
     computed: Bool,
   )
-  StaticBlock(body: List(Statement))
+  StaticBlock(body: List(StmtWithLine))
 }
 
 pub type MethodKind {

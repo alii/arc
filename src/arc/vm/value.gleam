@@ -422,6 +422,9 @@ pub type StringNativeFn {
 pub type ErrorNativeFn {
   ErrorConstructor(proto: Ref)
   ErrorPrototypeToString
+  /// V8 extension Error.captureStackTrace(target [, constructorOpt]) — sets a
+  /// `stack` property on `target` from the current call stack.
+  ErrorCaptureStackTrace
   DomExceptionConstructor(proto: Ref)
   DomExceptionGetCode
 }
@@ -986,7 +989,14 @@ pub type ExoticKind(ctx) {
   /// [[ECMAScriptCode]] directly. `func_template` is the compiled bytecode,
   /// `env` points to the EnvSlot holding captured variables. Arrows capture
   /// the enclosing frame's `this` via `env` — see FuncTemplate.this_slot.
-  FunctionObject(func_template: FuncTemplate, env: Ref)
+  /// `home_object` is the ES [[HomeObject]]: the object a method was defined
+  /// on (a class prototype, the constructor for statics, or an object literal).
+  /// `super.x` resolves against its [[Prototype]]. None for plain functions.
+  FunctionObject(
+    func_template: FuncTemplate,
+    env: Ref,
+    home_object: option.Option(Ref),
+  )
   /// Built-in function implemented in Gleam, not bytecode.
   /// Callable like any function but dispatches to native code.
   /// `constructible` is the stored [[Construct]] capability (ES2024 §7.2.4):
@@ -1605,7 +1615,8 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       }
       let acc = push_option_ref(prototype, acc)
       case kind {
-        FunctionObject(env: env_ref, func_template: _) -> [env_ref, ..acc]
+        FunctionObject(env: env_ref, home_object: home, ..) ->
+          push_option_ref(home, [env_ref, ..acc])
         NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref))), ..)
         | NativeFunction(
             Dispatch(ErrorNative(DomExceptionConstructor(proto: ref))),

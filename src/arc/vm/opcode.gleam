@@ -5,6 +5,13 @@
 /// Resolved bytecode instruction. All variable references are numeric indices,
 /// all jump targets are absolute PC addresses. The VM only sees these.
 pub type Op {
+  // -- Source mapping --
+  /// Record the source line of the following instructions into
+  /// `state.current_line`. Emitted by the compiler at the start of each
+  /// statement whose line differs from the previous one. Used to build the
+  /// line numbers in `Error.prototype.stack`. No stack effect; pc+1.
+  SetLine(line: Int)
+
   // -- Literals + Stack --
   PushConst(index: Int)
   Pop
@@ -61,6 +68,12 @@ pub type Op {
   DefineFieldComputed
   DefineMethod(name: String)
   DefineMethodComputed
+  /// Object-literal concise method `{ m() {} }`: an enumerable data property
+  /// (unlike class methods, which DefineMethod makes non-enumerable) whose
+  /// value records its [[HomeObject]] for `super`. Distinct from DefineField so
+  /// `{ x: function(){} }` (a plain function value) gets no home object.
+  DefineMethodField(name: String)
+  DefineMethodFieldComputed
   DefineAccessor(name: String, kind: AccessorKind)
   DefineAccessorComputed(kind: AccessorKind)
   ObjectSpread
@@ -167,6 +180,30 @@ pub type Op {
   SetupDerivedClass
   /// Call super constructor: [arg_n, ..., arg_1] → [new_obj]
   CallSuper(arity: Int)
+
+  // -- Super property access (§13.3.7) --
+  /// §13.3.7.2 step 1-2: GetThisBinding before a super reference is built.
+  /// Throws ReferenceError if `this` is uninitialized (super property access
+  /// in a derived constructor before super()). Emitted first in every super
+  /// path so the check precedes any computed-key or RHS evaluation. No stack
+  /// effect.
+  CheckSuperThis
+  /// `super.name` as a value. Resolves the running method's [[HomeObject]]
+  /// prototype as the lookup base, with the current `this` as the [[Get]]
+  /// receiver. Stack: [..] → [value, ..].
+  GetSuperProp(name: String)
+  /// `super[key]` as a value. Stack: [key, ..] → [value, ..].
+  GetSuperPropComputed
+  /// `super.name` for a method call: pushes the current `this` as the receiver
+  /// and the looked-up method, mirroring GetField2. Stack: [..] → [method, this, ..].
+  GetSuperProp2(name: String)
+  /// `super[key]` for a method call. Stack: [key, ..] → [method, this, ..].
+  GetSuperPropComputed2
+  /// `super.name = value`. [[Set]] on the super base with `this` as receiver,
+  /// so own data lands on `this` but parent setters fire. Stack: [value, ..] → [value, ..].
+  PutSuperProp(name: String)
+  /// `super[key] = value`. Stack: [value, key, ..] → [value, ..].
+  PutSuperPropComputed
 
   // -- Generator --
   /// Emitted at start of generator body. Suspends immediately (SuspendedStart).
@@ -310,6 +347,8 @@ pub type IrOp {
   IrTypeofEvalVar(name: String)
 
   // -- Everything else is the same as final Op --
+  /// Lowers 1:1 to SetLine. See Op.SetLine.
+  IrSetLine(line: Int)
   IrPushConst(index: Int)
   IrPop
   IrDup
@@ -331,6 +370,8 @@ pub type IrOp {
   IrDefineFieldComputed
   IrDefineMethod(name: String)
   IrDefineMethodComputed
+  IrDefineMethodField(name: String)
+  IrDefineMethodFieldComputed
   IrDefineAccessor(name: String, kind: AccessorKind)
   IrDefineAccessorComputed(kind: AccessorKind)
   IrObjectSpread
@@ -368,6 +409,13 @@ pub type IrOp {
   IrIteratorRest
   IrSetupDerivedClass
   IrCallSuper(arity: Int)
+  IrCheckSuperThis
+  IrGetSuperProp(name: String)
+  IrGetSuperPropComputed
+  IrGetSuperProp2(name: String)
+  IrGetSuperPropComputed2
+  IrPutSuperProp(name: String)
+  IrPutSuperPropComputed
   IrCallSuperApply
   IrInitialYield
   IrYield

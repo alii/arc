@@ -279,7 +279,7 @@ fn read_closure(
     _ -> None
   })
   case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: value.FunctionObject(func_template:, env:), ..)) ->
+    Some(ObjectSlot(kind: value.FunctionObject(func_template:, env:, ..), ..)) ->
       Some(#(func_template, env))
     _ -> None
   }

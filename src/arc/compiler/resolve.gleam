@@ -14,7 +14,8 @@ import arc/vm/opcode.{
   IrDeclareEvalVar,
   IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
+  IrDefineMethodComputed, IrDefineMethodField, IrDefineMethodFieldComputed,
+  IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
   IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
   IrGetPrivateField, IrGetPrivateField2, IrGetThis, IrGosub, IrInitGlobalLex,
@@ -24,8 +25,10 @@ import arc/vm/opcode.{
   IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPrivateIn, IrPushConst,
   IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal,
   IrPutLocal, IrPutPrivateField, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
-  IrScopeReboxVar, IrScopeTypeofVar, IrSetThis, IrSetupDerivedClass, IrSwap,
-  IrThrow, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield,
+  IrCheckSuperThis, IrGetSuperProp, IrGetSuperProp2, IrGetSuperPropComputed,
+  IrGetSuperPropComputed2, IrPutSuperProp, IrPutSuperPropComputed,
+  IrScopeReboxVar, IrScopeTypeofVar, IrSetLine, IrSetThis, IrSetupDerivedClass,
+  IrSwap, IrThrow, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield,
   IrYieldStar,
 }
 import arc/vm/value.{
@@ -165,6 +168,8 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.TypeofEvalVar(name), ..acc])
 
     // 1:1 translations
+    [IrSetLine(line), ..rest] ->
+      resolve_ops(rest, labels, [opcode.SetLine(line), ..acc])
     [IrPushConst(i), ..rest] ->
       resolve_ops(rest, labels, [opcode.PushConst(i), ..acc])
     [IrPop, ..rest] -> resolve_ops(rest, labels, [opcode.Pop, ..acc])
@@ -205,6 +210,10 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.DefineMethod(name), ..acc])
     [IrDefineMethodComputed, ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineMethodComputed, ..acc])
+    [IrDefineMethodField(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.DefineMethodField(name), ..acc])
+    [IrDefineMethodFieldComputed, ..rest] ->
+      resolve_ops(rest, labels, [opcode.DefineMethodFieldComputed, ..acc])
     [IrDefineAccessor(name, kind), ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineAccessor(name, kind), ..acc])
     [IrDefineAccessorComputed(kind), ..rest] ->
@@ -290,6 +299,20 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.CallSuper(arity), ..acc])
     [IrCallSuperApply, ..rest] ->
       resolve_ops(rest, labels, [opcode.CallSuperApply, ..acc])
+    [IrCheckSuperThis, ..rest] ->
+      resolve_ops(rest, labels, [opcode.CheckSuperThis, ..acc])
+    [IrGetSuperProp(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetSuperProp(name), ..acc])
+    [IrGetSuperPropComputed, ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetSuperPropComputed, ..acc])
+    [IrGetSuperProp2(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetSuperProp2(name), ..acc])
+    [IrGetSuperPropComputed2, ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetSuperPropComputed2, ..acc])
+    [IrPutSuperProp(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.PutSuperProp(name), ..acc])
+    [IrPutSuperPropComputed, ..rest] ->
+      resolve_ops(rest, labels, [opcode.PutSuperPropComputed, ..acc])
 
     // Generator
     [IrInitialYield, ..rest] ->

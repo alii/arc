@@ -473,11 +473,26 @@ fn set_on_receiver(
   val: JsValue,
 ) -> Result(#(State, Bool), #(JsValue, State)) {
   case receiver {
-    // §10.1.9.2 steps 2.c-2.h: Receiver is an object — define/update own property.
-    JsObject(recv_ref) -> {
-      let #(h, ok) = set_property(state.heap, recv_ref, key, val)
-      Ok(#(State(..state, heap: h), ok))
-    }
+    JsObject(recv_ref) ->
+      case heap.read(state.heap, recv_ref) {
+        // §10.1.9.2 step 2.e: Receiver.[[GetOwnProperty]](P). For a module
+        // namespace this performs [[Get]] on the binding, which throws a
+        // ReferenceError when the export is still in TDZ. The set never
+        // succeeds (namespaces aren't extensible), so return False afterwards.
+        Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> {
+          let names = case key {
+            Named(n) -> [n]
+            _ -> []
+          }
+          use state <- result.try(namespace_tdz_guard(state, recv_ref, names))
+          Ok(#(state, False))
+        }
+        // §10.1.9.2 steps 2.c-2.h: ordinary object — define/update own property.
+        _ -> {
+          let #(h, ok) = set_property(state.heap, recv_ref, key, val)
+          Ok(#(State(..state, heap: h), ok))
+        }
+      }
     // §10.1.9.2 step 2.b: Receiver is not an Object, return false.
     _ -> Ok(#(state, False))
   }

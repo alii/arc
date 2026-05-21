@@ -11,17 +11,21 @@ import arc/vm/opcode.{
   IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCreateArguments,
   IrCreateRestArray, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDefineMethodComputed, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
+  IrDefineMethodComputed, IrDefineMethodField, IrDefineMethodFieldComputed,
+  IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
-  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGetThis,
+  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGetSuperProp,
+  IrGetSuperProp2, IrGetSuperPropComputed, IrGetSuperPropComputed2, IrGetThis,
+  IrCheckSuperThis,
   IrGosub, IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject,
   IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump,
   IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
   IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry,
   IrPrivateIn, IrPushConst, IrPushTry, IrPutElem, IrPutField, IrPutPrivateField,
-  IrRet, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeReboxVar,
-  IrScopeTypeofVar, IrSetThis, IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf,
-  IrUnaryOp, IrYield, IrYieldStar,
+  IrPutSuperProp, IrPutSuperPropComputed, IrRet, IrReturn, IrScopeGetVar,
+  IrScopePutVar, IrScopeReboxVar,
+  IrScopeTypeofVar, IrSetLine, IrSetThis, IrSetupDerivedClass, IrSwap, IrThrow,
+  IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -199,7 +203,7 @@ pub type EmitError {
 /// Emit IR for a list of top-level statements (script body).
 /// Returns the emitter ops, constants, child functions, and script strictness.
 pub fn emit_program(
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
   top_lex: TopLevelLex,
 ) -> Result(
   #(
@@ -246,7 +250,7 @@ pub fn emit_module(
 /// (name, func_index) pairs — used by the linker to instantiate exported
 /// functions before any module body runs (cyclic function hoisting).
 fn emit_module_common(
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
   has_default_export: Bool,
 ) -> Result(
   #(
@@ -309,21 +313,25 @@ fn emit_module_common(
 /// Convert module items to statements, stripping import/export wrappers.
 /// ExportDefaultDeclaration becomes an assignment to *default* (the binding
 /// is declared separately during module emission).
-fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
+fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.StmtWithLine) {
   list.filter_map(items, fn(item) {
     case item {
-      ast.StatementItem(stmt) -> Ok(stmt)
-      ast.ExportNamedDeclaration(option.Some(decl), _, _) -> Ok(decl)
+      ast.StatementItem(located) -> Ok(located)
+      ast.ExportNamedDeclaration(option.Some(decl), _, _) ->
+        Ok(ast.StmtWithLine(0, decl))
       ast.ExportDefaultDeclaration(expr) ->
         // Emit as: *default* = expr;
         // The *default* local is declared during module hoisting.
-        Ok(ast.ExpressionStatement(
-          expression: ast.AssignmentExpression(
-            operator: ast.Assign,
-            left: ast.Identifier("*default*"),
-            right: expr,
+        Ok(ast.StmtWithLine(
+          0,
+          ast.ExpressionStatement(
+            expression: ast.AssignmentExpression(
+              operator: ast.Assign,
+              left: ast.Identifier("*default*"),
+              right: expr,
+            ),
+            directive: None,
           ),
-          directive: None,
         ))
       ast.ImportDeclaration(..) -> Error(Nil)
       ast.ExportNamedDeclaration(None, _, _) -> Error(Nil)
@@ -336,7 +344,7 @@ fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
 /// When hoist_vars is True, collects and emits DeclareVar for var declarations.
 /// When force_strict is True, the program is always strict (modules).
 fn emit_program_common(
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
   force_strict: Bool,
   top_lex: TopLevelLex,
 ) -> Result(
@@ -434,12 +442,15 @@ fn new_emitter() -> Emitter {
 /// decoded expression value: a literal containing an escape or line
 /// continuation (e.g. `'use strict'`) is not a Use Strict Directive even
 /// though its decoded value is "use strict".
-fn has_use_strict_directive(stmts: List(ast.Statement)) -> Bool {
+fn has_use_strict_directive(stmts: List(ast.StmtWithLine)) -> Bool {
   case stmts {
     [
-      ast.ExpressionStatement(
-        expression: ast.StringExpression(_),
-        directive: directive,
+      ast.StmtWithLine(
+        statement: ast.ExpressionStatement(
+          expression: ast.StringExpression(_),
+          directive: directive,
+        ),
+        ..,
       ),
       ..rest
     ] ->
@@ -862,16 +873,26 @@ fn emit_stmt_tail(
   }
 }
 
+/// Emit an IrSetLine for the statement's source line (so `Error.stack` can
+/// report it), unless the line is 0 — the sentinel for synthetic statements
+/// the parser never produced (class field inits, desugared arrow bodies).
+fn set_line(e: Emitter, line: Int) -> Emitter {
+  case line {
+    0 -> e
+    _ -> emit_ir(e, IrSetLine(line))
+  }
+}
+
 /// Like emit_stmts but the last statement is emitted in tail position.
 fn emit_stmts_tail(
   e: Emitter,
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
   case stmts {
     [] -> Ok(push_const(e, JsUndefined))
-    [only] -> emit_stmt_tail(e, only)
+    [only] -> emit_stmt_tail(set_line(e, only.line), only.statement)
     [first, ..rest] -> {
-      use e <- result.try(emit_stmt(e, first))
+      use e <- result.try(emit_stmt(set_line(e, first.line), first.statement))
       emit_stmts_tail(e, rest)
     }
   }
@@ -882,9 +903,14 @@ fn emit_stmts_tail(
 // ============================================================================
 
 /// Collect all var-declared names in a function body (not entering nested functions).
-fn collect_hoisted_vars(stmts: List(ast.Statement)) -> List(String) {
-  list.flat_map(stmts, collect_vars_stmt)
+fn collect_hoisted_vars(stmts: List(ast.StmtWithLine)) -> List(String) {
+  list.flat_map(stmts, collect_vars_located)
   |> list.unique()
+}
+
+/// Peel a StmtWithLine for the recursive var-collection walk.
+fn collect_vars_located(s: ast.StmtWithLine) -> List(String) {
+  collect_vars_stmt(s.statement)
 }
 
 /// Recursively extract all bound variable names from a pattern.
@@ -926,7 +952,7 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
           ast.VariableDeclarator(pattern, _) -> collect_pattern_names(pattern)
         }
       })
-    ast.BlockStatement(body) -> list.flat_map(body, collect_vars_stmt)
+    ast.BlockStatement(body) -> list.flat_map(body, collect_vars_located)
     ast.IfStatement(_, consequent, alternate) ->
       list.append(
         collect_vars_stmt(consequent),
@@ -949,13 +975,13 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
     }
     ast.TryStatement(block, handler, finalizer) -> {
       let block_vars = case block {
-        ast.BlockStatement(body) -> list.flat_map(body, collect_vars_stmt)
+        ast.BlockStatement(body) -> list.flat_map(body, collect_vars_located)
         _ -> collect_vars_stmt(block)
       }
       let handler_vars = case handler {
         Some(ast.CatchClause(_, body)) ->
           case body {
-            ast.BlockStatement(b) -> list.flat_map(b, collect_vars_stmt)
+            ast.BlockStatement(b) -> list.flat_map(b, collect_vars_located)
             _ -> collect_vars_stmt(body)
           }
         None -> []
@@ -963,7 +989,7 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
       let finally_vars = case finalizer {
         Some(f) ->
           case f {
-            ast.BlockStatement(b) -> list.flat_map(b, collect_vars_stmt)
+            ast.BlockStatement(b) -> list.flat_map(b, collect_vars_located)
             _ -> collect_vars_stmt(f)
           }
         None -> []
@@ -988,7 +1014,7 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
       list.flat_map(cases, fn(c) {
         case c {
           ast.SwitchCase(_, consequent) ->
-            list.flat_map(consequent, collect_vars_stmt)
+            list.flat_map(consequent, collect_vars_located)
         }
       })
     // Function declarations: include the name for hoisting (DeclareVar)
@@ -1004,10 +1030,10 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
 /// hoisted-function MakeClosure so closures capture the box ref, not a stale
 /// pre-box value.
 fn collect_top_lex_names(
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
 ) -> List(#(String, BindingKind)) {
-  list.flat_map(stmts, fn(stmt) {
-    case stmt {
+  list.flat_map(stmts, fn(located) {
+    case located.statement {
       ast.VariableDeclaration(ast.Let, declarators) ->
         list.flat_map(declarators, fn(d) {
           let ast.VariableDeclarator(pattern, _) = d
@@ -1030,12 +1056,12 @@ fn collect_top_lex_names(
 /// Returns updated emitter + list of (name, func_index) pairs.
 fn collect_hoisted_funcs(
   e: Emitter,
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
 ) -> #(Emitter, List(#(String, Int))) {
   let #(e, funcs_rev) =
-    list.fold(stmts, #(e, []), fn(acc, stmt) {
+    list.fold(stmts, #(e, []), fn(acc, located) {
       let #(e, funcs) = acc
-      case stmt {
+      case located.statement {
         ast.FunctionDeclaration(Some(name), params, body, is_gen, is_async) -> {
           let child =
             compile_function_body(
@@ -1070,8 +1096,8 @@ fn collect_hoisted_funcs(
 // This is a compile-time scan so functions that never reference `arguments`
 // pay zero allocation cost.
 
-fn stmts_reference_arguments(stmts: List(ast.Statement)) -> Bool {
-  list.any(stmts, stmt_references_arguments)
+fn stmts_reference_arguments(stmts: List(ast.StmtWithLine)) -> Bool {
+  list.any(stmts, fn(located) { stmt_references_arguments(located.statement) })
 }
 
 fn stmt_references_arguments(stmt: ast.Statement) -> Bool {
@@ -1325,7 +1351,7 @@ fn compile_function_body(
 ) -> CompiledChild {
   let stmts = case body {
     ast.BlockStatement(s) -> s
-    other -> [other]
+    other -> [ast.StmtWithLine(0, other)]
   }
 
   // Strictness: inherit from parent, upgrade if body prologue has "use strict".
@@ -1495,9 +1521,11 @@ fn compile_function_body(
 
 fn emit_stmts(
   e: Emitter,
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
-  list.try_fold(stmts, e, emit_stmt)
+  list.try_fold(stmts, e, fn(e, located) {
+    emit_stmt(set_line(e, located.line), located.statement)
+  })
 }
 
 fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
@@ -2172,6 +2200,66 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     }
 
     // Assignment to dot member expression (obj.prop = val)
+    // super.prop = val
+    ast.AssignmentExpression(
+      ast.Assign,
+      ast.MemberExpression(ast.SuperExpression, ast.Identifier(prop), False),
+      right,
+    ) -> {
+      let e = emit_ir(e, IrCheckSuperThis)
+      use e <- result.map(emit_expr(e, right))
+      emit_ir(e, IrPutSuperProp(prop))
+    }
+
+    // super.prop op= val
+    ast.AssignmentExpression(
+      op,
+      ast.MemberExpression(ast.SuperExpression, ast.Identifier(prop), False),
+      right,
+    ) ->
+      case compound_to_binop(op) {
+        Ok(bin_kind) -> {
+          let e = emit_ir(e, IrCheckSuperThis)
+          let e = emit_ir(e, IrGetSuperProp(prop))
+          use e <- result.map(emit_expr(e, right))
+          let e = emit_ir(e, IrBinOp(bin_kind))
+          emit_ir(e, IrPutSuperProp(prop))
+        }
+        Error(_) -> Error(Unsupported("assignment op"))
+      }
+
+    // super[key] = val
+    ast.AssignmentExpression(
+      ast.Assign,
+      ast.MemberExpression(ast.SuperExpression, key, True),
+      right,
+    ) -> {
+      let e = emit_ir(e, IrCheckSuperThis)
+      use e <- result.try(emit_expr(e, key))
+      use e <- result.map(emit_expr(e, right))
+      // Stack: [val, key, ..] — matches PutSuperPropComputed.
+      emit_ir(e, IrPutSuperPropComputed)
+    }
+
+    // super[key] op= val
+    ast.AssignmentExpression(
+      op,
+      ast.MemberExpression(ast.SuperExpression, key, True),
+      right,
+    ) ->
+      case compound_to_binop(op) {
+        Ok(bin_kind) -> {
+          let e = emit_ir(e, IrCheckSuperThis)
+          use e <- result.try(emit_expr(e, key))
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetSuperPropComputed)
+          use e <- result.map(emit_expr(e, right))
+          let e = emit_ir(e, IrBinOp(bin_kind))
+          emit_ir(e, IrPutSuperPropComputed)
+        }
+        Error(_) -> Error(Unsupported("assignment op"))
+      }
+
     ast.AssignmentExpression(
       ast.Assign,
       ast.MemberExpression(obj, ast.Identifier(prop), False),
@@ -2268,6 +2356,43 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding.
     // Spread path: build args array after GetField2, then IrCallMethodApply.
+    // super.method(args) — the method is looked up on the super base but `this`
+    // stays the current receiver. GetSuperProp2 leaves [method, this, ..],
+    // matching the [method, receiver, ..] shape CallMethod expects.
+    ast.CallExpression(
+      ast.MemberExpression(ast.SuperExpression, ast.Identifier(method_name), False),
+      args,
+    ) -> {
+      let e = emit_ir(e, IrCheckSuperThis)
+      let e = emit_ir(e, IrGetSuperProp2(method_name))
+      case has_spread_arg(args) {
+        False -> {
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          emit_ir(e, IrCallMethod(method_name, list.length(args)))
+        }
+        True -> {
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallMethodApply)
+        }
+      }
+    }
+    // super[key](args)
+    ast.CallExpression(ast.MemberExpression(ast.SuperExpression, key, True), args) -> {
+      let e = emit_ir(e, IrCheckSuperThis)
+      use e <- result.try(emit_expr(e, key))
+      let e = emit_ir(e, IrGetSuperPropComputed2)
+      case has_spread_arg(args) {
+        False -> {
+          use e <- result.map(list.try_fold(args, e, emit_expr))
+          emit_ir(e, IrCallMethod("[computed]", list.length(args)))
+        }
+        True -> {
+          use e <- result.map(emit_args_array_with_spread(e, args))
+          emit_ir(e, IrCallMethodApply)
+        }
+      }
+    }
+
     ast.CallExpression(
       ast.MemberExpression(obj, ast.Identifier(method_name), False),
       args,
@@ -2366,6 +2491,20 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.ObjectExpression(properties) -> {
       let e = emit_ir(e, IrNewObject)
       list.try_fold(properties, e, emit_object_property)
+    }
+
+    // super.prop — resolved against the home object's prototype, not a value
+    // on the stack, so it does not go through emit_expr(object).
+    ast.MemberExpression(ast.SuperExpression, ast.Identifier(prop), False) -> {
+      let e = emit_ir(e, IrCheckSuperThis)
+      Ok(emit_ir(e, IrGetSuperProp(prop)))
+    }
+
+    // super[key] — the `this` check precedes key evaluation (§13.3.7.2).
+    ast.MemberExpression(ast.SuperExpression, property, True) -> {
+      let e = emit_ir(e, IrCheckSuperThis)
+      use e <- result.map(emit_expr(e, property))
+      emit_ir(e, IrGetSuperPropComputed)
     }
 
     // Member expression (dot access)
@@ -2475,7 +2614,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.ArrowFunctionExpression(params, body, is_async) -> {
       let body_stmt = case body {
         ast.ArrowBodyExpression(expr) ->
-          ast.BlockStatement([ast.ReturnStatement(Some(expr))])
+          ast.BlockStatement([
+            ast.StmtWithLine(0, ast.ReturnStatement(Some(expr))),
+          ])
         ast.ArrowBodyBlock(stmt) -> stmt
       }
       let child =
@@ -2724,7 +2865,7 @@ fn emit_switch(
       let e = emit_ir(e, IrLabel(label))
       case c {
         ast.SwitchCase(_, consequent) ->
-          list.try_fold(consequent, e, emit_stmt) |> result.unwrap(e)
+          emit_stmts(e, consequent) |> result.unwrap(e)
       }
     })
 
@@ -2780,7 +2921,9 @@ fn emit_named_expr(
     ast.ArrowFunctionExpression(params, body, is_async) -> {
       let body_stmt = case body {
         ast.ArrowBodyExpression(expr_inner) ->
-          ast.BlockStatement([ast.ReturnStatement(Some(expr_inner))])
+          ast.BlockStatement([
+            ast.StmtWithLine(0, ast.ReturnStatement(Some(expr_inner))),
+          ])
         ast.ArrowBodyBlock(stmt) -> stmt
       }
       let child =
@@ -2862,11 +3005,18 @@ fn emit_object_property(
         ..,
       ) -> {
       // `{ m() {} }` is a method (not a constructor); `{ x: v }` is data.
-      use e <- result.map(case method {
-        True -> emit_method_value(e, value, Some(name))
-        False -> emit_named_expr(e, value, name)
-      })
-      emit_ir(e, IrDefineField(name))
+      // Methods get a [[HomeObject]] (for `super`) via IrDefineMethodField;
+      // a plain function value `{ x: function(){} }` does not.
+      case method {
+        True -> {
+          use e <- result.map(emit_method_value(e, value, Some(name)))
+          emit_ir(e, IrDefineMethodField(name))
+        }
+        False -> {
+          use e <- result.map(emit_named_expr(e, value, name))
+          emit_ir(e, IrDefineField(name))
+        }
+      }
     }
 
     // Numeric literal key: {1: "a"} — not computed in the AST, but needs
@@ -2881,11 +3031,16 @@ fn emit_object_property(
       ..,
     ) -> {
       let e = push_const(e, JsNumber(Finite(n)))
-      use e <- result.map(case method {
-        True -> emit_method_value(e, value, None)
-        False -> emit_expr(e, value)
-      })
-      emit_ir(e, IrDefineFieldComputed)
+      case method {
+        True -> {
+          use e <- result.map(emit_method_value(e, value, None))
+          emit_ir(e, IrDefineMethodFieldComputed)
+        }
+        False -> {
+          use e <- result.map(emit_expr(e, value))
+          emit_ir(e, IrDefineFieldComputed)
+        }
+      }
     }
 
     // Computed key: {[expr]: value}
@@ -2893,11 +3048,16 @@ fn emit_object_property(
     // The VM handles ToPropertyKey (Symbol preserved, else ToString).
     ast.Property(key:, value:, kind: ast.Init, computed: True, method:, ..) -> {
       use e <- result.try(emit_expr(e, key))
-      use e <- result.map(case method {
-        True -> emit_method_value(e, value, None)
-        False -> emit_expr(e, value)
-      })
-      emit_ir(e, IrDefineFieldComputed)
+      case method {
+        True -> {
+          use e <- result.map(emit_method_value(e, value, None))
+          emit_ir(e, IrDefineMethodFieldComputed)
+        }
+        False -> {
+          use e <- result.map(emit_expr(e, value))
+          emit_ir(e, IrDefineFieldComputed)
+        }
+      }
     }
 
     // Spread: {...source}
@@ -4247,11 +4407,14 @@ fn compile_derived_class(
     _ -> #(
       [],
       ast.BlockStatement([
-        ast.ExpressionStatement(
-          expression: ast.CallExpression(ast.SuperExpression, [
-            ast.SpreadElement(ast.Identifier("arguments")),
-          ]),
-          directive: None,
+        ast.StmtWithLine(
+          0,
+          ast.ExpressionStatement(
+            expression: ast.CallExpression(ast.SuperExpression, [
+              ast.SpreadElement(ast.Identifier("arguments")),
+            ]),
+            directive: None,
+          ),
         ),
       ]),
     )
@@ -4489,7 +4652,7 @@ fn inject_field_inits_after_super(
       let init_stmts = field_init_stmts(fields)
       let body_stmts = case body {
         ast.BlockStatement(stmts) -> stmts
-        other -> [other]
+        other -> [ast.StmtWithLine(0, other)]
       }
       ast.BlockStatement(splice_after_super(body_stmts, init_stmts))
     }
@@ -4497,14 +4660,17 @@ fn inject_field_inits_after_super(
 }
 
 fn splice_after_super(
-  stmts: List(ast.Statement),
-  inits: List(ast.Statement),
-) -> List(ast.Statement) {
+  stmts: List(ast.StmtWithLine),
+  inits: List(ast.StmtWithLine),
+) -> List(ast.StmtWithLine) {
   case stmts {
     [] -> inits
     [
-      ast.ExpressionStatement(
-        expression: ast.CallExpression(ast.SuperExpression, _),
+      ast.StmtWithLine(
+        statement: ast.ExpressionStatement(
+          expression: ast.CallExpression(ast.SuperExpression, _),
+          ..,
+        ),
         ..,
       ) as s,
       ..rest
@@ -4666,7 +4832,7 @@ fn inject_field_inits(
       let init_stmts = field_init_stmts(fields)
       let body_stmts = case body {
         ast.BlockStatement(stmts) -> stmts
-        other -> [other]
+        other -> [ast.StmtWithLine(0, other)]
       }
       ast.BlockStatement(list.append(init_stmts, body_stmts))
     }
@@ -4677,11 +4843,11 @@ fn inject_field_inits(
 /// Per §15.7.14 ClassFieldDefinitionEvaluation, value:None becomes undefined
 /// (handled in emit_stmt). Static fields are filtered out upstream by
 /// classify_class_body, but we guard on is_static:False here for safety.
-fn field_init_stmts(fields: List(ast.ClassElement)) -> List(ast.Statement) {
+fn field_init_stmts(fields: List(ast.ClassElement)) -> List(ast.StmtWithLine) {
   use field <- list.filter_map(fields)
   case field {
     ast.ClassField(key:, value:, computed:, is_static: False) ->
-      Ok(ast.ClassFieldInit(key:, value:, computed:))
+      Ok(ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:)))
     _ -> Error(Nil)
   }
 }

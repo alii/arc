@@ -130,7 +130,7 @@ fn collect_undef_export_names(
   item: ast.ModuleItem,
 ) -> set.Set(String) {
   let declaration = case item {
-    ast.StatementItem(stmt) -> Some(stmt)
+    ast.StatementItem(located) -> Some(located.statement)
     ast.ExportNamedDeclaration(declaration: Some(d), ..) -> Some(d)
     _ -> None
   }
@@ -464,7 +464,7 @@ fn extract_named_exports(
 }
 
 fn compile_script(
-  stmts: List(ast.Statement),
+  stmts: List(ast.StmtWithLine),
   top_lex: emit.TopLevelLex,
 ) -> Result(FuncTemplate, CompileError) {
   // Phase 1: Emit IR from AST

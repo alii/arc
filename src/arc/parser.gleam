@@ -370,8 +370,12 @@ fn parse_module_body(
       parse_module_body(p2, [item, ..acc])
     }
     _ -> {
+      let line = line_of(p)
       use #(p2, stmt) <- result.try(parse_statement(p))
-      parse_module_body(p2, [ast.StatementItem(stmt), ..acc])
+      parse_module_body(p2, [
+        ast.StatementItem(ast.StmtWithLine(line, stmt)),
+        ..acc
+      ])
     }
   }
 }
@@ -423,8 +427,8 @@ fn validate_export_refs_loop(
 fn parse_statement_list(
   p: P,
   top_level: Bool,
-  acc: List(ast.Statement),
-) -> Result(#(P, List(ast.Statement)), ParseError) {
+  acc: List(ast.StmtWithLine),
+) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
   case peek(p) {
     Eof -> Ok(#(p, list.reverse(acc)))
     RightBrace -> {
@@ -432,8 +436,9 @@ fn parse_statement_list(
       Ok(#(p, list.reverse(acc)))
     }
     _ -> {
+      let line = line_of(p)
       use #(p2, stmt) <- result.try(parse_statement(p))
-      parse_statement_list(p2, top_level, [stmt, ..acc])
+      parse_statement_list(p2, top_level, [ast.StmtWithLine(line, stmt), ..acc])
     }
   }
 }
@@ -1906,7 +1911,7 @@ fn parse_switch_case_stmts(
   p: P,
   has_default: Bool,
   condition: Option(ast.Expression),
-  stmt_acc: List(ast.Statement),
+  stmt_acc: List(ast.StmtWithLine),
   case_acc: List(ast.SwitchCase),
 ) -> Result(#(P, List(ast.SwitchCase)), ParseError) {
   case peek(p) {
@@ -1916,12 +1921,13 @@ fn parse_switch_case_stmts(
       parse_switch_cases(p, has_default, [case_node, ..case_acc])
     }
     _ -> {
+      let line = line_of(p)
       use #(p2, stmt) <- result.try(parse_statement(p))
       parse_switch_case_stmts(
         p2,
         has_default,
         condition,
-        [stmt, ..stmt_acc],
+        [ast.StmtWithLine(line, stmt), ..stmt_acc],
         case_acc,
       )
     }
@@ -5557,6 +5563,15 @@ fn pos_of(p: P) -> Int {
   case p.tokens {
     [lexer.Token(pos: pos, ..), ..] -> pos
     [] -> 0
+  }
+}
+
+/// 1-based source line of the current token, used to tag parsed statements
+/// for stack traces. Falls back to the previous token's line at EOF.
+fn line_of(p: P) -> Int {
+  case p.tokens {
+    [lexer.Token(line: line, ..), ..] -> line
+    [] -> p.prev_line
   }
 }
 

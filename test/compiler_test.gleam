@@ -2570,6 +2570,169 @@ pub fn class_no_constructor_test() -> Nil {
   )
 }
 
+// ---- Rest parameters (§15.1.5, §10.2.11) ----
+
+pub fn rest_param_function_test() -> Nil {
+  assert_normal_number(
+    "function f(a, b, ...rest) { return rest.length } f(1, 2, 3, 4, 5)",
+    3.0,
+  )
+}
+
+pub fn rest_param_empty_test() -> Nil {
+  assert_normal_number("function f(...xs) { return xs.length } f()", 0.0)
+}
+
+pub fn rest_param_collects_values_test() -> Nil {
+  assert_normal(
+    "function f(...xs) { return xs.join(',') } f('a', 'b', 'c')",
+    JsString("a,b,c"),
+  )
+}
+
+pub fn rest_param_length_excludes_rest_test() -> Nil {
+  // §15.1.5: a rest parameter does not contribute to `Function.length`.
+  assert_normal_number("(function(a, b, ...rest) {}).length", 2.0)
+}
+
+pub fn rest_param_arrow_test() -> Nil {
+  assert_normal_number(
+    "const h = (first, ...others) => others.length; h('a', 'b', 'c')",
+    2.0,
+  )
+}
+
+pub fn rest_param_method_test() -> Nil {
+  assert_normal_number(
+    "class M { collect(...xs) { return xs.length } } new M().collect(1, 2, 3)",
+    3.0,
+  )
+}
+
+pub fn rest_param_constructor_test() -> Nil {
+  assert_normal_number(
+    "class Box { constructor(...vals) { this.items = vals } } new Box(1, 2, 3).items.length",
+    3.0,
+  )
+}
+
+pub fn rest_param_destructured_test() -> Nil {
+  assert_normal_number("function g(...[x, y]) { return x + y } g(10, 20, 30)", 30.0)
+}
+
+pub fn rest_param_arguments_independent_test() -> Nil {
+  // `arguments` reflects all args regardless of the rest binding.
+  assert_normal_number(
+    "function f(a, ...rest) { return arguments.length } f(1, 2, 3, 4)",
+    4.0,
+  )
+}
+
+// ---- Super property access (§13.3.7) ----
+
+pub fn super_method_override_test() -> Nil {
+  assert_normal(
+    "class A { greet() { return 'A' } } class B extends A { greet() { return super.greet() + 'B' } } new B().greet()",
+    JsString("AB"),
+  )
+}
+
+pub fn super_method_multi_level_test() -> Nil {
+  // Resolution must use each method's [[HomeObject]], not the instance's
+  // prototype, so a three-level chain threads correctly.
+  assert_normal(
+    "class A { who() { return 'A' } }
+     class B extends A { who() { return 'B<' + super.who() + '>' } }
+     class C extends B { who() { return 'C<' + super.who() + '>' } }
+     new C().who()",
+    JsString("C<B<A>>"),
+  )
+}
+
+pub fn super_getter_test() -> Nil {
+  assert_normal_number(
+    "class A { get val() { return 42 } } class B extends A { test() { return super.val } } new B().test()",
+    42.0,
+  )
+}
+
+pub fn super_method_with_args_test() -> Nil {
+  assert_normal_number(
+    "class A { add(a, b) { return a + b } } class B extends A { add(a, b) { return super.add(a, b) * 2 } } new B().add(3, 4)",
+    14.0,
+  )
+}
+
+pub fn super_computed_test() -> Nil {
+  assert_normal(
+    "class A { m() { return 'base' } } class B extends A { call(n) { return super[n]() } } new B().call('m')",
+    JsString("base"),
+  )
+}
+
+pub fn super_in_constructor_test() -> Nil {
+  assert_normal(
+    "class A { hi() { return 'hello' } } class B extends A { constructor() { super(); this.g = super.hi() } } new B().g",
+    JsString("hello"),
+  )
+}
+
+pub fn super_static_method_test() -> Nil {
+  assert_normal(
+    "class A { static make() { return 'A' } } class B extends A { static make() { return super.make() + 'B' } } B.make()",
+    JsString("AB"),
+  )
+}
+
+pub fn super_setter_test() -> Nil {
+  // `super.x = v` invokes the parent setter with `this` as the receiver.
+  assert_normal_number(
+    "class A { set val(v) { this.stored = v * 10 } } class B extends A { setIt(v) { super.val = v; return this.stored } } new B().setIt(5)",
+    50.0,
+  )
+}
+
+pub fn super_object_literal_test() -> Nil {
+  assert_normal(
+    "const parent = { greet() { return 'parent' } };
+     const child = { greet() { return super.greet() + '+child' } };
+     Object.setPrototypeOf(child, parent);
+     child.greet()",
+    JsString("parent+child"),
+  )
+}
+
+pub fn super_property_uninitialized_this_test() -> Nil {
+  // §13.3.7.2: a super property reference calls GetThisBinding first, which
+  // throws when `this` is uninitialized (derived ctor before super()).
+  assert_normal(
+    "class A { get x() { return 1 } }
+     class B extends A { constructor() { super.x; super() } }
+     (function(){ try { new B() } catch (e) { return e.constructor.name } })()",
+    JsString("ReferenceError"),
+  )
+}
+
+pub fn super_property_eval_order_test() -> Nil {
+  // `super[super()]`: the `this` check precedes evaluating the key (`super()`),
+  // so it throws a ReferenceError before the super constructor runs.
+  assert_normal(
+    "class A { m() { return 1 } }
+     class B extends A { constructor() { super[super()]() } }
+     (function(){ try { new B() } catch (e) { return e.constructor.name } })()",
+    JsString("ReferenceError"),
+  )
+}
+
+pub fn object_literal_method_enumerable_test() -> Nil {
+  // Object-literal concise methods stay enumerable (unlike class methods),
+  // even though they now carry a [[HomeObject]].
+  assert_normal(
+    "const o = { m() {}, x: 2 }; Object.keys(o).sort().join(',')",
+    JsString("m,x"),
+  )
+}
+
 // ---- Private class elements (§15.7, §13.10.1) ----
 
 pub fn class_private_instance_field_test() -> Nil {

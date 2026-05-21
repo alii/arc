@@ -160,7 +160,10 @@ pub fn run_handler_with_this(
   case handler {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) ->
+        Some(ObjectSlot(
+          kind: FunctionObject(func_template:, env: env_ref, ..),
+          ..,
+        )) ->
           run_closure_for_job(
             state,
             ref,

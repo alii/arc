@@ -203,6 +203,7 @@ fn call_regular_function(
       callee_ref: state.callee_ref,
       call_args: state.call_args,
       eval_env: state.eval_env,
+      current_line: state.current_line,
     )
   let locals =
     setup_locals(state.heap, env_ref, callee_template, args, this_val)
@@ -1346,7 +1347,7 @@ pub fn do_construct(
           <> " is not a constructor",
       )
     Some(ObjectSlot(
-      kind: FunctionObject(func_template:, env: env_ref),
+      kind: FunctionObject(func_template:, env: env_ref, ..),
       properties:,
       ..,
     )) -> {
@@ -1543,7 +1544,10 @@ pub fn call_value(
   case callee {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref), ..)) ->
+        Some(ObjectSlot(
+          kind: FunctionObject(func_template:, env: env_ref, ..),
+          ..,
+        )) ->
           call_function(
             state,
             ref,
