@@ -8,6 +8,7 @@ import arc/vm/value.{
   FunctionObject, GeneratorObject, Index, JsNumber, JsObject, JsString, Named,
   NativeFunction, ObjectSlot, OrdinaryObject, PromiseObject,
 }
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -1660,16 +1661,11 @@ fn inspect_object(
           <> string.join(list.sort(dict.keys(exports), string.compare), ", ")
           <> " }]"
         OrdinaryObject ->
-          case dict.get(properties, Named("message")) {
-            // Error objects: display as "ErrorName: message"
-            Ok(DataProperty(value: JsString(msg), ..)) -> {
-              let name = case dict.get(properties, Named("name")) {
-                Ok(DataProperty(value: JsString(n), ..)) -> n
-                _ -> inspect_error_name(heap, ref)
-              }
-              name <> ": " <> msg
-            }
-            _ -> inspect_plain_object(heap, properties, depth, visited)
+          // Error instances render as "Name: message" (or the full stack, once
+          // we capture one); everything else as a plain object.
+          case error_display(heap, ref) {
+            Some(s) -> s
+            None -> inspect_plain_object(heap, properties, depth, visited)
           }
       }
     _ -> "[Object]"
@@ -1737,19 +1733,83 @@ fn inspect_plain_object(
   }
 }
 
-/// Walk the prototype chain to find the "name" property for error display.
-fn inspect_error_name(heap: Heap, ref: value.Ref) -> String {
+/// Format a value for an uncaught-exception / unhandled-rejection report.
+/// Error instances become "Name: message" (or their `stack`, once we capture
+/// one); thrown strings are shown raw (browser-style "Uncaught boom"); anything
+/// else falls back to `inspect`. Read-only — never invokes JS.
+pub fn format_error(val: value.JsValue, heap: Heap) -> String {
+  case val {
+    JsString(s) -> s
+    JsObject(ref) ->
+      error_display(heap, ref) |> option.unwrap(inspect(val, heap))
+    _ -> inspect(val, heap)
+  }
+}
+
+/// If `ref` is an Error instance, render it for display, else None.
+///
+/// Once errors carry a `stack` property, that becomes the rendering (it already
+/// embeds the "Name: message" header, V8-style); until then we synthesize the
+/// header from `name` and `message` per `Error.prototype.toString` (§20.5.3.4).
+fn error_display(heap: Heap, ref: value.Ref) -> Option(String) {
+  use <- bool.guard(!is_error(heap, ref), None)
+  case error_property(heap, ref, "stack") {
+    Some(stack) -> Some(stack)
+    None -> {
+      let name = error_property(heap, ref, "name") |> option.unwrap("Error")
+      let message = error_property(heap, ref, "message") |> option.unwrap("")
+      Some(case name, message {
+        "", _ -> message
+        _, "" -> name
+        _, _ -> name <> ": " <> message
+      })
+    }
+  }
+}
+
+/// Read-only test for whether `ref` is an Error instance: true iff some object
+/// in its *prototype* chain owns a `message` property — the marker carried by
+/// `Error.prototype`. Checking the prototype chain (not the instance's own
+/// properties) correctly excludes plain objects like `{ message: "x" }`.
+fn is_error(heap: Heap, ref: value.Ref) -> Bool {
   case heap.read(heap, ref) {
     Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
-      case heap.read(heap, proto_ref) {
-        Some(ObjectSlot(properties: proto_props, ..)) ->
-          case dict.get(proto_props, Named("name")) {
-            Ok(DataProperty(value: JsString(n), ..)) -> n
-            _ -> "Error"
+      prototype_owns_message(heap, proto_ref, 100)
+    _ -> False
+  }
+}
+
+fn prototype_owns_message(heap: Heap, ref: value.Ref, fuel: Int) -> Bool {
+  use <- bool.guard(fuel <= 0, False)
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(properties:, prototype:, ..)) ->
+      case dict.has_key(properties, Named("message")) {
+        True -> True
+        False ->
+          case prototype {
+            Some(parent) -> prototype_owns_message(heap, parent, fuel - 1)
+            None -> False
           }
-        _ -> "Error"
       }
-    _ -> "Error"
+    _ -> False
+  }
+}
+
+/// Read a string-valued data property by walking the prototype chain (own
+/// shadows inherited, like [[Get]]). Returns None when absent or non-string.
+fn error_property(heap: Heap, ref: value.Ref, key: String) -> Option(String) {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(properties:, prototype:, ..)) ->
+      case dict.get(properties, Named(key)) {
+        Ok(DataProperty(value: JsString(s), ..)) -> Some(s)
+        Ok(_) -> None
+        Error(Nil) ->
+          case prototype {
+            Some(parent) -> error_property(heap, parent, key)
+            None -> None
+          }
+      }
+    _ -> None
   }
 }
 

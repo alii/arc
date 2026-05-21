@@ -11,6 +11,7 @@ import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, DataProperty, FunctionObject,
@@ -304,7 +305,7 @@ fn eval(
             )
             Ok(#(ThrowCompletion(val, heap), env)) -> #(
               ReplState(..state, heap:, env:),
-              Error("Uncaught exception: " <> inspect(heap, val)),
+              Error("Uncaught " <> object.format_error(val, heap)),
             )
             Ok(#(YieldCompletion(_, _), _)) ->
               panic as "YieldCompletion should not appear at REPL level"
@@ -493,11 +494,11 @@ fn run_module_file(
   let h = beam.install_globals(h, b, global_object, "Arc")
 
   case module.compile_bundle(path, source, resolve_and_load_dep) {
-    Error(err) -> print_module_error(h, err)
+    Error(err) -> print_module_error(err)
     Ok(bundle) ->
       case module.evaluate_bundle(bundle, h, b, global_object, finish) {
         Ok(_) -> Nil
-        Error(err) -> print_module_error(h, err)
+        Error(err) -> print_module_error(err)
       }
   }
 }
@@ -593,7 +594,7 @@ fn run_script_file(
           case entry.run_with(template, h, b, global_object, finish) {
             Ok(NormalCompletion(_, _)) -> Nil
             Ok(ThrowCompletion(val, new_heap)) ->
-              io.println("Uncaught exception: " <> inspect(new_heap, val))
+              io.println("Uncaught " <> object.format_error(val, new_heap))
             Ok(YieldCompletion(_, _)) -> Nil
             Ok(completion.AwaitCompletion(_, _)) -> Nil
             Error(vm_err) ->
@@ -605,13 +606,14 @@ fn run_script_file(
 }
 
 /// Format a module error for display.
-fn print_module_error(h: Heap, err: module.ModuleError) -> Nil {
+fn print_module_error(err: module.ModuleError) -> Nil {
   case err {
     module.ParseError(msg) -> io.println("SyntaxError: " <> msg)
     module.CompileError(msg) -> io.println("CompileError: " <> msg)
     module.ResolutionError(msg) -> io.println("ResolutionError: " <> msg)
     module.LinkError(msg) -> io.println("LinkError: " <> msg)
-    module.EvaluationError(val) -> io.println("Uncaught " <> inspect(h, val))
+    module.EvaluationError(val, heap) ->
+      io.println("Uncaught " <> object.format_error(val, heap))
   }
 }
 

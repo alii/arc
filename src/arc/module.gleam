@@ -68,7 +68,10 @@ pub type ModuleError {
   CompileError(String)
   ResolutionError(String)
   LinkError(String)
-  EvaluationError(JsValue)
+  /// A module threw during evaluation. Carries both the thrown value and the
+  /// heap it was allocated in — the value is a Ref into this heap, so callers
+  /// must use it (not a pre-evaluation heap) to inspect the thrown object.
+  EvaluationError(value: JsValue, heap: Heap)
 }
 
 // =============================================================================
@@ -466,8 +469,8 @@ pub fn evaluate_bundle(
   // exports are a SyntaxError raised at link time, not a runtime ReferenceError.
   case link_bundle(bundle) {
     Error(message) -> {
-      let #(_heap, err) = common.make_syntax_error(heap, builtins, message)
-      Error(EvaluationError(err))
+      let #(heap, err) = common.make_syntax_error(heap, builtins, message)
+      Error(EvaluationError(err, heap))
     }
     Ok(Nil) -> {
       // Instantiate: pre-allocate every binding cell + namespace object, then
@@ -513,7 +516,7 @@ fn eval_module_inner(
     False ->
       // Cached error — re-throw, never re-evaluate
       case dict.get(state.errors, specifier) {
-        Ok(err_val) -> #(state, Error(EvaluationError(err_val)))
+        Ok(err_val) -> #(state, Error(EvaluationError(err_val, state.heap)))
         Error(Nil) ->
           // Circular dependency — return without re-entering
           case set.contains(state.evaluating, specifier) {
@@ -590,7 +593,7 @@ fn eval_module_body(
     Error(err) -> {
       // Dependency failed — cache the error on this module too
       let error_val = case err {
-        EvaluationError(val) -> val
+        EvaluationError(value: val, ..) -> val
         _ -> JsString(string.inspect(err))
       }
       let state =
@@ -626,7 +629,7 @@ fn eval_module_body(
               ..state,
               errors: dict.insert(state.errors, specifier, error_val),
             )
-          #(state, Error(EvaluationError(error_val)))
+          #(state, Error(EvaluationError(error_val, state.heap)))
         }
         entry.ModuleThrow(value: thrown_val, heap: new_heap) -> {
           let state =
@@ -635,7 +638,7 @@ fn eval_module_body(
               heap: new_heap,
               errors: dict.insert(state.errors, specifier, thrown_val),
             )
-          #(state, Error(EvaluationError(thrown_val)))
+          #(state, Error(EvaluationError(thrown_val, new_heap)))
         }
         entry.ModuleOk(value: val, heap: new_heap, locals: _) -> {
           let state =

@@ -16,7 +16,7 @@ pub fn eval(source: String) -> Result(String, String) {
         completion.NormalCompletion(v, _) ->
           Ok(object.inspect(v, engine.heap(eng)))
         completion.ThrowCompletion(v, _) ->
-          Error("Uncaught " <> object.inspect(v, engine.heap(eng)))
+          Error("Uncaught " <> object.format_error(v, engine.heap(eng)))
         _ -> Error("unexpected completion")
       }
     Error(e) -> Error(engine.eval_error_message(e))

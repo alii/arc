@@ -7219,7 +7219,8 @@ fn run_module(source: String) -> Result(Completion, String) {
     Ok(bundle) ->
       case module.evaluate_bundle(bundle, h, b, global_object, beam.run) {
         Ok(#(val, new_heap)) -> Ok(NormalCompletion(val, new_heap))
-        Error(module.EvaluationError(val)) -> Ok(ThrowCompletion(val, h))
+        Error(module.EvaluationError(value: val, heap: new_heap)) ->
+          Ok(ThrowCompletion(val, new_heap))
         Error(err) -> Error("module error: " <> string.inspect(err))
       }
   }

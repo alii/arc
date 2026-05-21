@@ -48,7 +48,7 @@ fn report_unhandled_rejections(state: State) -> Nil {
     case heap.read_promise_state(state.heap, data_ref) {
       Some(value.PromiseRejected(reason)) ->
         io.println_error(
-          "Uncaught (in promise): " <> object.inspect(reason, state.heap),
+          "Uncaught (in promise) " <> object.format_error(reason, state.heap),
         )
       _ -> Nil
     }
