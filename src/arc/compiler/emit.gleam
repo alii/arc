@@ -226,6 +226,7 @@ pub fn emit_module(
     Dict(JsValue, Int),
     List(CompiledChild),
     Bool,
+    List(#(String, Int)),
   ),
   EmitError,
 ) {
@@ -241,6 +242,9 @@ pub fn emit_module(
 }
 
 /// Module emission: sets up scope, hoists, handles *default* binding, emits body.
+/// The final tuple element is the hoisted top-level function declarations as
+/// (name, func_index) pairs — used by the linker to instantiate exported
+/// functions before any module body runs (cyclic function hoisting).
 fn emit_module_common(
   stmts: List(ast.Statement),
   has_default_export: Bool,
@@ -251,6 +255,7 @@ fn emit_module_common(
     Dict(JsValue, Int),
     List(CompiledChild),
     Bool,
+    List(#(String, Int)),
   ),
   EmitError,
 ) {
@@ -298,7 +303,7 @@ fn emit_module_common(
 
   let e = emit_op(e, LeaveScope)
   let #(code, constants, constants_map, children) = finish(e)
-  Ok(#(code, constants, constants_map, children, True))
+  Ok(#(code, constants, constants_map, children, True, hoisted_funcs))
 }
 
 /// Convert module items to statements, stripping import/export wrappers.

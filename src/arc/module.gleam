@@ -12,8 +12,10 @@ import arc/internal/erlang
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/exec/entry
+import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/tuple_array
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
   type JsValue, type Ref, BoxSlot, JsObject, JsString, JsUndefined, ObjectSlot,
@@ -44,6 +46,10 @@ pub type CompiledModule {
     /// body runs: `uninitialized` (TDZ) for let/const/class/default, `undefined`
     /// for var/function. See compiler.module_export_seeds.
     export_seeds: Dict(String, JsValue),
+    /// Top-level hoisted function declarations as (name, func_index) into
+    /// template.functions. The linker instantiates the *exported* ones before
+    /// any body runs, so cyclic function imports are callable (§16.2.1.6.4).
+    hoisted_funcs: List(#(String, Int)),
   )
 }
 
@@ -122,7 +128,7 @@ fn compile_single(
   let requested_modules =
     list.unique(list.append(import_specifiers, reexport_specifiers))
 
-  use #(template, scope_dict) <- result.map(
+  use #(template, scope_dict, hoisted_funcs) <- result.map(
     compiler.compile_module(program)
     |> result.map_error(fn(err) {
       case err {
@@ -145,6 +151,7 @@ fn compile_single(
     specifier_map: dict.new(),
     requested_modules:,
     export_seeds: compiler.module_export_seeds(program),
+    hoisted_funcs:,
   )
 }
 
@@ -463,8 +470,11 @@ pub fn evaluate_bundle(
       Error(EvaluationError(err))
     }
     Ok(Nil) -> {
-      // Instantiate: pre-allocate every binding cell + namespace object.
+      // Instantiate: pre-allocate every binding cell + namespace object, then
+      // create exported function-declaration closures so cyclic function
+      // imports are callable before any body runs (§16.2.1.6.4 step 9).
       let #(heap, linked) = build_linked(bundle, heap)
+      let heap = instantiate_hoisted_functions(bundle, linked, builtins, heap)
       let state =
         EvalState(
           heap:,
@@ -723,6 +733,51 @@ fn build_linked(bundle: ModuleBundle, heap: Heap) -> #(Heap, Linked) {
       }
     })
   #(heap, Linked(local_boxes:, exports:, namespace_boxes:))
+}
+
+/// §16.2.1.6.4 step 9 (InstantiateFunctionObject): create closures for every
+/// module's EXPORTED hoisted function declarations and write them into their
+/// shared export cells, BEFORE any body runs. This is what makes a cyclic
+/// function import callable during the cycle. Bodies still re-create their own
+/// closures (the final, fully-correct ones); these are the link-time values
+/// importers see until then.
+fn instantiate_hoisted_functions(
+  bundle: ModuleBundle,
+  linked: Linked,
+  builtins: Builtins,
+  heap: Heap,
+) -> Heap {
+  dict.fold(bundle.modules, heap, fn(heap, spec, compiled) {
+    let local_boxes =
+      dict.get(linked.local_boxes, spec) |> result.unwrap(dict.new())
+    // Reconstruct the module's seeded frame so closures capture the same cells
+    // a body run would (imports in slots 0..N-1, own exports in their slots).
+    let seeds =
+      import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
+      |> list.append(own_export_seeds(linked, spec, compiled.scope_dict))
+    let frame = interpreter.init_module_locals(compiled.template, seeds)
+    list.fold(compiled.hoisted_funcs, heap, fn(heap, hf) {
+      let #(name, func_idx) = hf
+      // Only exported functions have a shared cell; the rest are body-local.
+      case dict.get(local_boxes, name) {
+        Error(Nil) -> heap
+        Ok(box) -> {
+          let child =
+            tuple_array.unsafe_get(func_idx, compiled.template.functions)
+          let captures =
+            list.map(child.env_descriptors, fn(desc) {
+              case desc {
+                value.CaptureLocal(i) -> tuple_array.unsafe_get(i, frame)
+                value.CaptureEnv(_) -> JsUndefined
+              }
+            })
+          let #(heap, closure) =
+            interpreter.make_closure(heap, builtins, child, captures)
+          heap.write(heap, box, BoxSlot(JsObject(closure)))
+        }
+      }
+    })
+  })
 }
 
 /// One BoxSlot per exported local, seeded with its instantiation value:

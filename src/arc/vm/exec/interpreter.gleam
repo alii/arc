@@ -273,6 +273,84 @@ pub fn init_module_locals(
   })
 }
 
+/// Allocate a closure (FunctionObject) for `child_template`, capturing
+/// `captured_values` (gathered per the template's env_descriptors). Builds the
+/// env, the `name`/`length` props, the `.prototype` object (+ `.constructor`)
+/// for non-arrows, and links the function prototype. Shared by the MakeClosure
+/// op and module link-time hoisting (so cyclic function exports are callable
+/// before bodies run).
+pub fn make_closure(
+  heap: Heap,
+  builtins: Builtins,
+  child_template: FuncTemplate,
+  captured_values: List(JsValue),
+) -> #(Heap, Ref) {
+  let #(heap, env_ref) = heap.alloc(heap, value.EnvSlot(captured_values))
+  // For non-arrow functions, pre-populate .prototype with a fresh object so
+  // `Foo.prototype.bar = ...` and `new Foo()` work; .constructor is set after.
+  let name_prop =
+    common.fn_name_property(option.unwrap(child_template.name, ""))
+  let length_prop = common.fn_length_property(child_template.arity)
+  let #(heap, fn_properties, proto_ref) = case child_template.is_arrow {
+    True -> #(
+      heap,
+      dict.from_list([
+        #(value.Named("name"), name_prop),
+        #(value.Named("length"), length_prop),
+      ]),
+      None,
+    )
+    False -> {
+      let #(h, proto_obj_ref) =
+        common.alloc_wrapper(heap, OrdinaryObject, builtins.object.prototype)
+      #(
+        h,
+        dict.from_list([
+          #(
+            value.Named("prototype"),
+            value.data(JsObject(proto_obj_ref)) |> value.writable(),
+          ),
+          #(value.Named("name"), name_prop),
+          #(value.Named("length"), length_prop),
+        ]),
+        Some(proto_obj_ref),
+      )
+    }
+  }
+  let #(heap, closure_ref) =
+    heap.alloc(
+      heap,
+      ObjectSlot(
+        kind: FunctionObject(func_template: child_template, env: env_ref),
+        properties: fn_properties,
+        elements: elements.new(),
+        prototype: Some(builtins.function.prototype),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  // Set .constructor on the prototype pointing back to this function.
+  let heap = case proto_ref {
+    Some(pr) -> {
+      use slot <- heap.update(heap, pr)
+      case slot {
+        ObjectSlot(properties: props, ..) ->
+          ObjectSlot(
+            ..slot,
+            properties: dict.insert(
+              props,
+              value.Named("constructor"),
+              value.builtin_property(JsObject(closure_ref)),
+            ),
+          )
+        _ -> slot
+      }
+    }
+    None -> heap
+  }
+  #(heap, closure_ref)
+}
+
 /// Read the current frame's lexical `this`. Unboxes when the slot is boxed
 /// (captured by an inner arrow, or the frame IS an arrow reading its capture).
 /// Returns JsUndefined when this_slot is None (defensive — `this` unreferenced).
@@ -2140,75 +2218,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               JsUndefined
           }
         })
-      let #(heap, env_ref) =
-        heap.alloc(state.heap, value.EnvSlot(captured_values))
-      // For non-arrow functions, pre-populate .prototype with a fresh object
-      // so that `Foo.prototype.bar = ...` and `new Foo()` work.
-      // .constructor on prototype is set after we have the closure ref.
-      let name_prop =
-        common.fn_name_property(option.unwrap(child_template.name, ""))
-      let length_prop = common.fn_length_property(child_template.arity)
-      let #(heap, fn_properties, proto_ref) = case child_template.is_arrow {
-        True -> #(
-          heap,
-          dict.from_list([
-            #(Named("name"), name_prop),
-            #(Named("length"), length_prop),
-          ]),
-          None,
-        )
-        False -> {
-          let #(h, proto_obj_ref) =
-            common.alloc_wrapper(
-              heap,
-              OrdinaryObject,
-              state.builtins.object.prototype,
-            )
-          #(
-            h,
-            dict.from_list([
-              #(
-                Named("prototype"),
-                value.data(JsObject(proto_obj_ref)) |> value.writable(),
-              ),
-              #(Named("name"), name_prop),
-              #(Named("length"), length_prop),
-            ]),
-            Some(proto_obj_ref),
-          )
-        }
-      }
       let #(heap, closure_ref) =
-        heap.alloc(
-          heap,
-          ObjectSlot(
-            kind: FunctionObject(func_template: child_template, env: env_ref),
-            properties: fn_properties,
-            elements: elements.new(),
-            prototype: Some(state.builtins.function.prototype),
-            symbol_properties: [],
-            extensible: True,
-          ),
+        make_closure(
+          state.heap,
+          state.builtins,
+          child_template,
+          captured_values,
         )
-      // Set .constructor on the prototype pointing back to this function
-      let heap = case proto_ref {
-        Some(pr) -> {
-          use slot <- heap.update(heap, pr)
-          case slot {
-            ObjectSlot(properties: props, ..) ->
-              ObjectSlot(
-                ..slot,
-                properties: dict.insert(
-                  props,
-                  Named("constructor"),
-                  value.builtin_property(JsObject(closure_ref)),
-                ),
-              )
-            _ -> slot
-          }
-        }
-        None -> heap
-      }
       Ok(
         State(
           ..state,

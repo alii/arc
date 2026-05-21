@@ -41,7 +41,9 @@ pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, emit.LexLocal)
     ast.Module(_) -> {
-      use #(template, _scope_dict) <- result.map(compile_module(program))
+      use #(template, _scope_dict, _hoisted) <- result.map(compile_module(
+        program,
+      ))
       template
     }
   }
@@ -58,7 +60,10 @@ pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
 /// can be shared with importers. Mirrors QuickJS's JSVarRef aliasing.
 pub fn compile_module(
   program: ast.Program,
-) -> Result(#(FuncTemplate, Dict(String, Int)), CompileError) {
+) -> Result(
+  #(FuncTemplate, Dict(String, Int), List(#(String, Int))),
+  CompileError,
+) {
   case program {
     ast.Script(_) -> Error(Unsupported("compile_module called on Script"))
     ast.Module(body) -> {
@@ -147,9 +152,19 @@ fn compile_module_with_scope(
   items: List(ast.ModuleItem),
   import_locals: List(String),
   forced_box: List(String),
-) -> Result(#(FuncTemplate, Dict(String, Int)), CompileError) {
+) -> Result(
+  #(FuncTemplate, Dict(String, Int), List(#(String, Int))),
+  CompileError,
+) {
   case emit.emit_module(items) {
-    Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
+    Ok(#(
+      emitter_ops,
+      constants,
+      constants_map,
+      children,
+      is_strict,
+      hoisted_funcs,
+    )) -> {
       let captured_vars = collect_all_captured_vars(children, emitter_ops)
       // Exported locals are linker-seeded: the linker pre-allocates each
       // export's BoxSlot (so it can be shared with importers, including cyclic
@@ -193,7 +208,7 @@ fn compile_module_with_scope(
           None,
           resolved.this_slot,
         )
-      Ok(#(template, parent_scope))
+      Ok(#(template, parent_scope, hoisted_funcs))
     }
     Error(emit.BreakOutsideLoop) -> Error(BreakOutsideLoop)
     Error(emit.ContinueOutsideLoop) -> Error(ContinueOutsideLoop)
