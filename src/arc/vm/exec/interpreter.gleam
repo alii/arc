@@ -257,6 +257,22 @@ pub fn init_top_level_locals(
   }
 }
 
+/// Build the locals array for a module body. Module `this` is undefined
+/// (§16.2.1.5.2). `seeds` places pre-allocated BoxSlot refs into specific local
+/// slots: import bindings into capture slots 0..N-1 (each the exporting
+/// module's live cell), plus this module's own export cells into their declared
+/// slots. The body reads/writes both through GetBoxed/PutBoxed.
+pub fn init_module_locals(
+  func: FuncTemplate,
+  seeds: List(#(Int, JsValue)),
+) -> tuple_array.TupleArray(JsValue) {
+  let locals = tuple_array.repeat(JsUndefined, func.local_count)
+  list.fold(seeds, locals, fn(acc, seed) {
+    let #(index, box) = seed
+    tuple_array.set_unchecked(index, box, acc)
+  })
+}
+
 /// Read the current frame's lexical `this`. Unboxes when the slot is boxed
 /// (captured by an inner arrow, or the frame IS an arrow reading its capture).
 /// Returns JsUndefined when this_slot is None (defensive — `this` unreferenced).
@@ -2215,6 +2231,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             // Primitives: no enumerable properties
             _ -> []
           }
+          // EnumerateObjectProperties checks each key via [[GetOwnProperty]], so
+          // a TDZ namespace binding throws ReferenceError before iteration.
+          let guard = case obj {
+            JsObject(ref) -> object.namespace_tdz_guard(state, ref, keys)
+            _ -> Ok(state)
+          }
+          use state <- result.try(state.rethrow(guard))
           // Wrap string keys as JsString values for ForInIteratorSlot
           let key_values = list.map(keys, JsString)
           let #(heap, iter_ref) =

@@ -10,7 +10,9 @@ import arc/compiler/resolve
 import arc/compiler/scope
 import arc/parser/ast
 import arc/vm/opcode
-import arc/vm/value.{type FuncTemplate, CaptureLocal}
+import arc/vm/value.{
+  type FuncTemplate, type JsValue, CaptureLocal, JsUndefined, JsUninitialized,
+}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -38,8 +40,8 @@ pub type CompileError {
 pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, emit.LexLocal)
-    ast.Module(body) -> {
-      use #(template, _scope_dict) <- result.map(compile_module_with_scope(body))
+    ast.Module(_) -> {
+      use #(template, _scope_dict) <- result.map(compile_module(program))
       template
     }
   }
@@ -47,32 +49,129 @@ pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
 
 /// Compile a module, returning both the template and the scope dict
 /// (name → local index) for export extraction after evaluation.
+///
+/// Imports are compiled as pre-boxed captures in slots 0..N-1 (the same
+/// mechanism direct eval uses to alias a caller's variables). At link time
+/// the module's import slots are seeded with the *exporting module's* BoxSlot
+/// refs, so reads of an imported name dereference the live cell — ES live
+/// bindings (§16.2). Exported local bindings are force-boxed so their BoxSlot
+/// can be shared with importers. Mirrors QuickJS's JSVarRef aliasing.
 pub fn compile_module(
   program: ast.Program,
 ) -> Result(#(FuncTemplate, Dict(String, Int)), CompileError) {
   case program {
     ast.Script(_) -> Error(Unsupported("compile_module called on Script"))
-    ast.Module(body) -> compile_module_with_scope(body)
+    ast.Module(body) -> {
+      let import_locals = import_local_names(extract_module_imports(program))
+      let forced_box = local_export_names(extract_module_exports(program))
+      compile_module_with_scope(body, import_locals, forced_box)
+    }
+  }
+}
+
+/// The local binding names introduced by a module's import declarations, in
+/// declaration order. This is the canonical order of capture slots 0..N-1;
+/// link-time import seeding must produce box refs in exactly this order.
+pub fn import_local_names(
+  import_bindings: List(#(String, List(ImportBinding))),
+) -> List(String) {
+  list.flat_map(import_bindings, fn(entry) {
+    list.map(entry.1, fn(binding) {
+      case binding {
+        NamedImport(local:, ..) -> local
+        DefaultImport(local:) -> local
+        NamespaceImport(local:) -> local
+      }
+    })
+  })
+}
+
+/// Local binding names that a module exports (LocalExport only). These must be
+/// force-boxed so the exported cell is a heap BoxSlot shareable with importers.
+fn local_export_names(exports: List(ExportEntry)) -> List(String) {
+  list.filter_map(exports, fn(entry) {
+    case entry {
+      LocalExport(local_name:, ..) -> Ok(local_name)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+/// The value the linker pre-seeds into each exported local's BoxSlot before the
+/// module body runs (§16.2 instantiation): `undefined` for var and function
+/// declarations (hoisted, never TDZ), `uninitialized` for let/const/class and
+/// the default export (TDZ until the body initializes them).
+pub fn module_export_seeds(program: ast.Program) -> Dict(String, JsValue) {
+  case program {
+    ast.Script(_) -> dict.new()
+    ast.Module(items) -> {
+      let undef = list.fold(items, set.new(), collect_undef_export_names)
+      local_export_names(extract_module_exports(program))
+      |> list.fold(dict.new(), fn(acc, name) {
+        let seed = case set.contains(undef, name) {
+          True -> JsUndefined
+          False -> JsUninitialized
+        }
+        dict.insert(acc, name, seed)
+      })
+    }
+  }
+}
+
+/// Names declared by `var` or `function` at module top level — hoisted to
+/// `undefined`, so seeded `undefined` (not TDZ). Unwraps `export <decl>`.
+fn collect_undef_export_names(
+  acc: set.Set(String),
+  item: ast.ModuleItem,
+) -> set.Set(String) {
+  let declaration = case item {
+    ast.StatementItem(stmt) -> Some(stmt)
+    ast.ExportNamedDeclaration(declaration: Some(d), ..) -> Some(d)
+    _ -> None
+  }
+  case declaration {
+    Some(ast.VariableDeclaration(kind: ast.Var, declarations:)) ->
+      list.fold(declarations, acc, fn(a, decl) {
+        case decl {
+          ast.VariableDeclarator(id: ast.IdentifierPattern(name:), ..) ->
+            set.insert(a, name)
+          _ -> a
+        }
+      })
+    Some(ast.FunctionDeclaration(name: Some(name), ..)) -> set.insert(acc, name)
+    _ -> acc
   }
 }
 
 fn compile_module_with_scope(
   items: List(ast.ModuleItem),
+  import_locals: List(String),
+  forced_box: List(String),
 ) -> Result(#(FuncTemplate, Dict(String, Int)), CompileError) {
   case emit.emit_module(items) {
     Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
       let captured_vars = collect_all_captured_vars(children, emitter_ops)
+      // Exported locals are linker-seeded: the linker pre-allocates each
+      // export's BoxSlot (so it can be shared with importers, including cyclic
+      // ones) and seeds it into the slot before the body runs. Their DeclareVar
+      // reserves the slot + a boxed binding but emits no init/box op.
+      let linker_seeded = set.from_list(forced_box)
       let this_is_captured = list.any(children, arrow_needs_parent_this)
+      // Imports occupy boxed capture slots 0..N-1; `this` is owned (None).
       let resolved =
-        scope.resolve(
+        scope.resolve_with_captures(
           emitter_ops,
           constants,
           constants_map,
+          import_locals,
+          None,
           captured_vars,
+          linker_seeded,
           this_is_captured,
           scope.ToGlobal,
         )
-      let parent_scope = build_scope_dict(emitter_ops)
+      let parent_scope =
+        build_scope_dict_with_captures(emitter_ops, import_locals, None)
       let child_templates =
         list.map(children, compile_child(_, parent_scope, resolved.this_slot))
       let template =
@@ -188,6 +287,7 @@ pub fn compile_eval_direct(
               parent_names,
               this_capture_slot,
               captured_vars,
+              set.new(),
               this_is_captured,
               fallthrough,
             )
@@ -491,6 +591,7 @@ fn compile_child(
       captures,
       this_capture_slot,
       vars_to_box,
+      set.new(),
       this_is_captured,
       fallthrough,
     )

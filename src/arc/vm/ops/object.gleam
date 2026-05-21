@@ -119,6 +119,11 @@ pub fn get_value(
   receiver: JsValue,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   case heap.read(state.heap, ref) {
+    // §10.4.6.8 Module Namespace [[Get]]: read the live binding cell, throwing
+    // ReferenceError if it is still uninitialized (TDZ). Non-export keys fall
+    // through to undefined (null prototype, no inheritance).
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+      namespace_get(state, exports, key)
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       // Step 1: Let desc be ? O.[[GetOwnProperty]](P).
       case own_property_of_slot(kind, properties, elements, key) {
@@ -138,6 +143,62 @@ pub fn get_value(
           }
       }
     _ -> Ok(#(value.JsUndefined, state))
+  }
+}
+
+/// §10.4.6.8 Module Namespace [[Get]] for a string key. Resolves the export's
+/// live BoxSlot and returns its value, throwing ReferenceError when the binding
+/// is still uninitialized (TDZ). Unknown keys return undefined.
+fn namespace_get(
+  state: State,
+  exports: dict.Dict(String, Ref),
+  key: PropertyKey,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  let name = case key {
+    Named(n) -> n
+    Index(i) -> int.to_string(i)
+  }
+  case dict.get(exports, name) {
+    Error(Nil) -> Ok(#(value.JsUndefined, state))
+    Ok(box) ->
+      case heap.read_box(state.heap, box) {
+        Some(value.JsUninitialized) ->
+          Error(state.reference_error_value(
+            state,
+            "Cannot access '" <> name <> "' before initialization",
+          ))
+        Some(val) -> Ok(#(val, state))
+        None -> Ok(#(value.JsUndefined, state))
+      }
+  }
+}
+
+/// For a Module Namespace, throw ReferenceError if any of `names` is an
+/// uninitialized (TDZ) binding. §10.4.6.5 [[GetOwnProperty]] eagerly performs
+/// [[Get]], so even key-only operations (Object.keys, hasOwnProperty, for-in)
+/// surface the TDZ error. A no-op for non-namespace objects.
+pub fn namespace_tdz_guard(
+  state: State,
+  ref: Ref,
+  names: List(String),
+) -> Result(State, #(JsValue, State)) {
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+      list.try_fold(names, state, fn(state, name) {
+        case dict.get(exports, name) {
+          Ok(box) ->
+            case heap.read_box(state.heap, box) {
+              Some(value.JsUninitialized) ->
+                Error(state.reference_error_value(
+                  state,
+                  "Cannot access '" <> name <> "' before initialization",
+                ))
+              _ -> Ok(state)
+            }
+          Error(Nil) -> Ok(state)
+        }
+      })
+    _ -> Ok(state)
   }
 }
 
@@ -209,9 +270,30 @@ pub fn get_own_property(
   key: PropertyKey,
 ) -> Option(Property) {
   case heap.read(heap, ref) {
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+      namespace_own_property(heap, exports, key)
     Some(ObjectSlot(kind:, properties:, elements:, ..)) ->
       own_property_of_slot(kind, properties, elements, key)
     _ -> None
+  }
+}
+
+/// §10.4.6.5 Module Namespace [[GetOwnProperty]] for a string key: a data
+/// descriptor { value: <live binding>, writable: true, enumerable: true,
+/// configurable: false }. The value is read from the BoxSlot (so it may be
+/// JsUninitialized — callers that read the value, e.g. getOwnPropertyDescriptor,
+/// must surface the TDZ ReferenceError). Unknown keys → None.
+fn namespace_own_property(
+  heap: Heap,
+  exports: dict.Dict(String, Ref),
+  key: PropertyKey,
+) -> Option(Property) {
+  case dict.get(exports, value.key_to_string(key)) {
+    Error(Nil) -> None
+    Ok(box) -> {
+      let val = heap.read_box(heap, box) |> option.unwrap(value.JsUndefined)
+      Some(value.data(val) |> value.writable() |> value.enumerable())
+    }
   }
 }
 
@@ -329,6 +411,8 @@ pub fn set_value(
   receiver: JsValue,
 ) -> Result(#(State, Bool), #(JsValue, State)) {
   case heap.read(state.heap, ref) {
+    // §10.4.6.9 Module Namespace [[Set]]: always returns false (read-only).
+    Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> Ok(#(state, False))
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       // §10.1.9.1 step 1: Let ownDesc be ? O.[[GetOwnProperty]](P).
       // §10.1.9.1 step 2: Return OrdinarySetWithOwnDescriptor(O, P, V, Receiver, ownDesc).
@@ -867,6 +951,10 @@ pub fn has_symbol_property(heap: Heap, ref: Ref, sym: SymbolId) -> Bool {
 /// (no Proxy traps), so steps 1/3 never produce abrupt completions.
 pub fn has_property(heap: Heap, ref: Ref, key: PropertyKey) -> Bool {
   case heap.read(heap, ref) {
+    // §10.4.6.6 Module Namespace [[HasProperty]]: true iff the key is an
+    // exported name. Null prototype → no inheritance.
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+      dict.has_key(exports, value.key_to_string(key))
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined, return true.
       case own_property_of_slot(kind, properties, elements, key) {
@@ -922,6 +1010,13 @@ pub fn delete_symbol_property(
 
 pub fn delete_property(h: Heap, ref: Ref, key: PropertyKey) -> #(Heap, Bool) {
   case heap.read(h, ref) {
+    // §10.4.6.10 Module Namespace [[Delete]]: deleting an exported name fails
+    // (non-configurable); a non-export "succeeds" vacuously.
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+      case dict.has_key(exports, value.key_to_string(key)) {
+        True -> #(h, False)
+        False -> #(h, True)
+      }
     Some(ObjectSlot(kind:, elements:, ..) as slot) ->
       case kind {
         // Array/Arguments exotic: check if key is an array index
@@ -1025,6 +1120,17 @@ fn enumerate_keys_loop(
     None -> list.reverse(acc)
     Some(ref) ->
       case heap.read(heap, ref) {
+        // Module namespace: enumerable keys are the sorted export names; the
+        // null prototype ends the walk. (TDZ throws are handled by the caller.)
+        Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+          list.sort(dict.keys(exports), string.compare)
+          |> list.fold(acc, fn(a, name) {
+            case set.contains(seen, name) {
+              True -> a
+              False -> [name, ..a]
+            }
+          })
+          |> list.reverse
         Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) -> {
           // Step 1 (partial): Collect element keys first (array index portion
           // of [[OwnPropertyKeys]], which returns indices in ascending order).
@@ -1549,6 +1655,10 @@ fn inspect_object(
         }
         value.IteratorHelperObject(..) -> "[Iterator Helper]"
         value.WrapForValidIteratorObject(..) -> "[Iterator]"
+        value.ModuleNamespace(exports:) ->
+          "[Module: { "
+          <> string.join(list.sort(dict.keys(exports), string.compare), ", ")
+          <> " }]"
         OrdinaryObject ->
           case dict.get(properties, Named("message")) {
             // Error objects: display as "ErrorName: message"

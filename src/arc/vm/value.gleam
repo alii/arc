@@ -1099,6 +1099,13 @@ pub type ExoticKind(ctx) {
   /// Wrap For Valid Iterator — ES2025 §27.1.2.1.2. Created by Iterator.from
   /// when the source isn't already an instance of %Iterator.prototype%.
   WrapForValidIteratorObject(iterated: JsValue, next_method: JsValue)
+  /// Module Namespace Exotic Object — ES2024 §10.4.6. `exports` maps each
+  /// exported name to the BoxSlot ref holding the binding's live value, so
+  /// [[Get]] re-reads the cell (and throws ReferenceError on a TDZ binding).
+  /// String keys come from `exports` (sorted in [[OwnPropertyKeys]]); the only
+  /// symbol key is @@toStringTag = "Module" (in `symbol_properties`). The
+  /// object has a null prototype, is non-extensible, and is read-only.
+  ModuleNamespace(exports: Dict(String, Ref))
 }
 
 /// Canonical property key. Per spec, property keys are String | Symbol, but
@@ -1700,6 +1707,9 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         WeakSetObject(data:) -> dict.fold(data, acc, fn(a, k, _v) { [k, ..a] })
         SelectorObject(entries:) ->
           list.fold(entries, acc, fn(a, e) { push_value_ref(e.1, a) })
+        // The namespace's live bindings are BoxSlot refs reachable via exports.
+        ModuleNamespace(exports:) ->
+          dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
         OrdinaryObject
         | ArrayObject(_)
         | ArgumentsObject(_)

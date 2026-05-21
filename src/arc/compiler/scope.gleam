@@ -21,6 +21,7 @@ import arc/vm/opcode.{
   IrTypeofGlobal,
 }
 import arc/vm/value.{type JsValue, JsUndefined, JsUninitialized}
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -63,6 +64,11 @@ type Resolver {
     /// Names of variables that are captured by child closures.
     /// Variables in this set will be boxed (stored via BoxSlot indirection).
     captured_vars: Set(String),
+    /// Module exports the linker pre-allocates a BoxSlot for and seeds into the
+    /// slot before the body runs (§16.2 instantiation). Their DeclareVar
+    /// reserves the slot and a boxed binding but emits NO init/box op — the
+    /// linker owns the cell so it can be shared with importers (incl. cyclic).
+    linker_seeded: Set(String),
     fallthrough: GlobalFallthrough,
     /// Binding for the lexical-`this` slot. Some when DeclareThis has been
     /// processed (owned slot) or when this body inherits `this` as a capture
@@ -107,6 +113,7 @@ pub fn resolve(
     [],
     None,
     captured_vars,
+    set.new(),
     this_is_captured,
     fallthrough,
   )
@@ -124,6 +131,7 @@ pub fn resolve_with_captures(
   captures: List(String),
   this_capture_slot: Option(Int),
   captured_vars: Set(String),
+  linker_seeded: Set(String),
   this_is_captured: Bool,
   fallthrough: GlobalFallthrough,
 ) -> Resolved {
@@ -153,6 +161,7 @@ pub fn resolve_with_captures(
       constants_map:,
       next_const: list.length(constants),
       captured_vars:,
+      linker_seeded:,
       fallthrough:,
       this_binding:,
       this_is_captured:,
@@ -249,7 +258,10 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       }
       use <- on_some(already, r)
       let index = r.next_local
-      let boxed = set.contains(r.captured_vars, name)
+      // Linker-seeded module exports are always boxed: the linker pre-allocates
+      // the cell and seeds it into this slot, so no init/box op is emitted.
+      let linker_seeded = set.contains(r.linker_seeded, name)
+      let boxed = linker_seeded || set.contains(r.captured_vars, name)
       let binding = Binding(index:, kind:, is_boxed: boxed)
       let new_max = case index + 1 > r.max_locals {
         True -> index + 1
@@ -265,7 +277,9 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
           add_to_current_scope(r, name, binding)
       }
 
-      // Emit initialization + boxing
+      // Emit initialization + boxing — skipped entirely for linker-seeded
+      // exports (the linker writes the initial value into the pre-made box).
+      use <- bool.guard(linker_seeded, r)
       case kind {
         VarBinding -> {
           let #(r, idx) = ensure_constant(r, JsUndefined)

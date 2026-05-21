@@ -14,11 +14,9 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/exec/entry
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/tuple_array
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, JsObject, JsString, JsUndefined, ObjectSlot,
-  OrdinaryObject,
+  type JsValue, type Ref, BoxSlot, JsObject, JsString, JsUndefined, ObjectSlot,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -42,6 +40,10 @@ pub type CompiledModule {
     scope_dict: Dict(String, Int),
     specifier_map: Dict(String, String),
     requested_modules: List(String),
+    /// Exported local name → value the linker seeds into its BoxSlot before the
+    /// body runs: `uninitialized` (TDZ) for let/const/class/default, `undefined`
+    /// for var/function. See compiler.module_export_seeds.
+    export_seeds: Dict(String, JsValue),
   )
 }
 
@@ -142,6 +144,7 @@ fn compile_single(
     scope_dict:,
     specifier_map: dict.new(),
     requested_modules:,
+    export_seeds: compiler.module_export_seeds(program),
   )
 }
 
@@ -213,15 +216,227 @@ fn update_compiled_specifier_map(
 }
 
 // =============================================================================
+// Linking — ResolveExport (§16.2.1.6.3) + import/re-export checks (§16.2.1.6.4)
+// =============================================================================
+
+/// Result of resolving an export name through a module graph.
+type ExportResolution {
+  /// Resolves to a concrete binding `binding` owned by module `module`.
+  ResolvedTo(module: String, binding: String)
+  /// Resolves to a module namespace object (`export * as ns from`).
+  ResolvedNamespace(module: String)
+  /// No export of this name exists (or only via a circular path).
+  Unresolvable
+  /// Two distinct `export *` sources provide the name — ambiguous.
+  Ambiguous
+}
+
+/// §16.2.1.6.3 ResolveExport. `resolve_set` guards circular re-exports.
+fn resolve_export(
+  bundle: ModuleBundle,
+  specifier: String,
+  name: String,
+  resolve_set: Set(#(String, String)),
+) -> ExportResolution {
+  case set.contains(resolve_set, #(specifier, name)) {
+    // Already resolving this exact export → circular request, not resolvable.
+    True -> Unresolvable
+    False ->
+      case dict.get(bundle.modules, specifier) {
+        Error(Nil) -> Unresolvable
+        Ok(m) ->
+          resolve_export_in(
+            bundle,
+            m,
+            specifier,
+            name,
+            set.insert(resolve_set, #(specifier, name)),
+          )
+      }
+  }
+}
+
+fn resolve_export_in(
+  bundle: ModuleBundle,
+  m: CompiledModule,
+  specifier: String,
+  name: String,
+  resolve_set: Set(#(String, String)),
+) -> ExportResolution {
+  // Direct local export, then named/namespace re-export, take priority over
+  // `export *` (§16.2.1.6.3 steps 4–6 before step 7).
+  let direct =
+    list.find_map(m.export_entries, fn(e) {
+      case e {
+        compiler.LocalExport(export_name:, local_name:)
+          if export_name == name
+        -> Ok(ResolvedTo(specifier, local_name))
+        compiler.ReExport(export_name:, imported_name:, source_specifier:)
+          if export_name == name
+        -> {
+          let src = resolved_specifier(m, source_specifier)
+          Ok(resolve_export(bundle, src, imported_name, resolve_set))
+        }
+        compiler.ReExportNamespace(export_name:, source_specifier:)
+          if export_name == name
+        -> Ok(ResolvedNamespace(resolved_specifier(m, source_specifier)))
+        _ -> Error(Nil)
+      }
+    })
+  case direct {
+    Ok(resolution) -> resolution
+    // `default` is never provided by `export *` (step 6).
+    Error(Nil) ->
+      case name {
+        "default" -> Unresolvable
+        _ -> resolve_star_exports(bundle, m, name, resolve_set)
+      }
+  }
+}
+
+/// §16.2.1.6.3 step 7: gather across `export *` sources, flagging ambiguity.
+fn resolve_star_exports(
+  bundle: ModuleBundle,
+  m: CompiledModule,
+  name: String,
+  resolve_set: Set(#(String, String)),
+) -> ExportResolution {
+  let star_sources =
+    list.filter_map(m.export_entries, fn(e) {
+      case e {
+        compiler.ReExportAll(source_specifier:) ->
+          Ok(resolved_specifier(m, source_specifier))
+        _ -> Error(Nil)
+      }
+    })
+  list.fold(star_sources, Unresolvable, fn(acc, src) {
+    case acc {
+      Ambiguous -> Ambiguous
+      _ ->
+        case resolve_export(bundle, src, name, resolve_set), acc {
+          Ambiguous, _ -> Ambiguous
+          Unresolvable, _ -> acc
+          found, Unresolvable -> found
+          ResolvedTo(m1, b1), ResolvedTo(m2, b2) ->
+            case m1 == m2 && b1 == b2 {
+              True -> acc
+              False -> Ambiguous
+            }
+          ResolvedNamespace(m1), ResolvedNamespace(m2) ->
+            case m1 == m2 {
+              True -> acc
+              False -> Ambiguous
+            }
+          _, _ -> Ambiguous
+        }
+    }
+  })
+}
+
+fn resolved_specifier(m: CompiledModule, raw: String) -> String {
+  dict.get(m.specifier_map, raw) |> result.unwrap(raw)
+}
+
+/// Verify every import and indirect re-export in the graph resolves to a
+/// unique binding. Returns the SyntaxError message for the first failure.
+fn link_bundle(bundle: ModuleBundle) -> Result(Nil, String) {
+  list.try_each(dict.to_list(bundle.modules), fn(entry) {
+    let #(specifier, m) = entry
+    use _ <- result.try(check_imports(bundle, m))
+    check_indirect_exports(bundle, specifier, m)
+  })
+}
+
+fn check_imports(
+  bundle: ModuleBundle,
+  m: CompiledModule,
+) -> Result(Nil, String) {
+  list.try_each(m.import_bindings, fn(entry) {
+    let #(raw_dep, bindings) = entry
+    let dep = resolved_specifier(m, raw_dep)
+    list.try_each(bindings, fn(binding) {
+      case binding {
+        // `import * as ns` always resolves (the namespace gathers names).
+        compiler.NamespaceImport(..) -> Ok(Nil)
+        compiler.NamedImport(imported:, ..) ->
+          check_resolves(bundle, dep, imported, raw_dep)
+        compiler.DefaultImport(..) ->
+          check_resolves(bundle, dep, "default", raw_dep)
+      }
+    })
+  })
+}
+
+fn check_indirect_exports(
+  bundle: ModuleBundle,
+  specifier: String,
+  m: CompiledModule,
+) -> Result(Nil, String) {
+  list.try_each(m.export_entries, fn(e) {
+    case e {
+      // `export { x } from 'mod'` — resolve THIS module's export name, which
+      // recurses into the source (§16.2.1.6.4 step 1).
+      compiler.ReExport(export_name:, source_specifier:, ..) ->
+        check_resolves(bundle, specifier, export_name, source_specifier)
+      _ -> Ok(Nil)
+    }
+  })
+}
+
+fn check_resolves(
+  bundle: ModuleBundle,
+  specifier: String,
+  name: String,
+  raw_dep: String,
+) -> Result(Nil, String) {
+  case resolve_export(bundle, specifier, name, set.new()) {
+    ResolvedTo(..) | ResolvedNamespace(..) -> Ok(Nil)
+    Unresolvable ->
+      Error(
+        "The requested module '"
+        <> raw_dep
+        <> "' does not provide an export named '"
+        <> name
+        <> "'",
+      )
+    Ambiguous ->
+      Error(
+        "The requested module '"
+        <> raw_dep
+        <> "' provides an ambiguous export named '"
+        <> name
+        <> "'",
+      )
+  }
+}
+
+// =============================================================================
 // Runtime Evaluation (evaluate_bundle)
 // =============================================================================
+
+/// The result of linking: every module's binding cells, pre-allocated before
+/// any body runs (§16.2 instantiation) so cyclic/self imports reference the
+/// same live cells. Immutable once built; threaded read-only through the DFS.
+type Linked {
+  Linked(
+    /// specifier → local binding name → BoxSlot ref (seeded TDZ/undefined).
+    local_boxes: Dict(String, Dict(String, Ref)),
+    /// specifier → exported name → BoxSlot ref (LocalExport and re-exports
+    /// resolved to the owning module's cell; namespace re-exports → a box
+    /// wrapping the target's namespace object).
+    exports: Dict(String, Dict(String, Ref)),
+    /// specifier → a BoxSlot wrapping that module's cached Module Namespace
+    /// Exotic Object (seeded for `import * as ns`).
+    namespace_boxes: Dict(String, Ref),
+  )
+}
 
 /// Internal evaluation state threaded through the DFS.
 type EvalState {
   EvalState(
     heap: Heap,
-    /// Specifier → exports dict for successfully evaluated modules.
-    evaluated: Dict(String, Dict(String, JsValue)),
+    /// Specifiers whose body has finished successfully.
+    evaluated: Set(String),
     /// Specifier → cached error for modules that threw during evaluation.
     errors: Dict(String, JsValue),
     /// Currently evaluating (cycle detection).
@@ -229,7 +444,8 @@ type EvalState {
   )
 }
 
-/// Evaluate a compiled module bundle. Executes all modules in DFS post-order
+/// Evaluate a compiled module bundle. Links the whole graph (pre-allocating
+/// every binding cell), then executes module bodies in DFS post-order
 /// (dependencies first). Returns the entry module's completion value.
 pub fn evaluate_bundle(
   bundle: ModuleBundle,
@@ -238,28 +454,43 @@ pub fn evaluate_bundle(
   global_object: Ref,
   finish: fn(state.State) -> state.State,
 ) -> Result(#(JsValue, Heap), ModuleError) {
-  let state =
-    EvalState(
-      heap:,
-      evaluated: dict.new(),
-      errors: dict.new(),
-      evaluating: set.new(),
-    )
-  let #(_state, result) =
-    eval_module_inner(
-      bundle,
-      state,
-      bundle.entry,
-      builtins,
-      global_object,
-      finish,
-    )
-  result
+  // Link phase (§16.2.1.6.4): resolve every import and indirect re-export
+  // across the whole graph BEFORE evaluating any body. Missing or ambiguous
+  // exports are a SyntaxError raised at link time, not a runtime ReferenceError.
+  case link_bundle(bundle) {
+    Error(message) -> {
+      let #(_heap, err) = common.make_syntax_error(heap, builtins, message)
+      Error(EvaluationError(err))
+    }
+    Ok(Nil) -> {
+      // Instantiate: pre-allocate every binding cell + namespace object.
+      let #(heap, linked) = build_linked(bundle, heap)
+      let state =
+        EvalState(
+          heap:,
+          evaluated: set.new(),
+          errors: dict.new(),
+          evaluating: set.new(),
+        )
+      let #(_state, result) =
+        eval_module_inner(
+          bundle,
+          linked,
+          state,
+          bundle.entry,
+          builtins,
+          global_object,
+          finish,
+        )
+      result
+    }
+  }
 }
 
 /// DFS post-order evaluation of a single module and its dependencies.
 fn eval_module_inner(
   bundle: ModuleBundle,
+  linked: Linked,
   state: EvalState,
   specifier: String,
   builtins: Builtins,
@@ -267,7 +498,7 @@ fn eval_module_inner(
   finish: fn(state.State) -> state.State,
 ) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
   // Already evaluated successfully
-  case dict.has_key(state.evaluated, specifier) {
+  case set.contains(state.evaluated, specifier) {
     True -> #(state, Ok(#(JsUndefined, state.heap)))
     False ->
       // Cached error — re-throw, never re-evaluate
@@ -288,6 +519,7 @@ fn eval_module_inner(
                 Ok(compiled) ->
                   eval_module_body(
                     bundle,
+                    linked,
                     state,
                     specifier,
                     compiled,
@@ -304,6 +536,7 @@ fn eval_module_inner(
 /// Evaluate a module's dependencies and then its body.
 fn eval_module_body(
   bundle: ModuleBundle,
+  linked: Linked,
   state: EvalState,
   specifier: String,
   compiled: CompiledModule,
@@ -328,6 +561,7 @@ fn eval_module_body(
           let #(state, result) =
             eval_module_inner(
               bundle,
+              linked,
               state,
               dep_specifier,
               builtins,
@@ -357,24 +591,21 @@ fn eval_module_body(
       #(state, Error(err))
     }
     Ok(Nil) -> {
-      // All deps evaluated — resolve imports and execute this module.
-      // Import bindings go into lexical_globals (not on globalThis).
-      let #(heap, import_globals) =
-        resolve_imports(
-          state.evaluated,
-          compiled.specifier_map,
-          compiled.import_bindings,
-          state.heap,
-          global_object,
-        )
+      // Bindings already exist (pre-allocated at link time). Seed the slots:
+      // imports as boxed captures in slots 0..N-1 (each the *exporter's* live
+      // cell), plus this module's own export cells into their declared slots so
+      // the body reads/writes through the shared boxes.
+      let seeds =
+        import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
+        |> list.append(own_export_seeds(linked, specifier, compiled.scope_dict))
 
       case
-        entry.run_module_with_imports(
+        entry.run_module(
           compiled.template,
-          heap,
+          state.heap,
           builtins,
           global_object,
-          import_globals,
+          seeds,
           finish,
         )
       {
@@ -387,29 +618,21 @@ fn eval_module_body(
             )
           #(state, Error(EvaluationError(error_val)))
         }
-        entry.ModuleThrow(value: thrown_val, ..) -> {
-          let state =
-            EvalState(
-              ..state,
-              errors: dict.insert(state.errors, specifier, thrown_val),
-            )
-          #(state, Error(EvaluationError(thrown_val)))
-        }
-        entry.ModuleOk(value: val, heap: new_heap, locals:) -> {
-          let #(module_exports, new_heap) =
-            collect_exports(
-              state.evaluated,
-              compiled.specifier_map,
-              compiled.export_entries,
-              compiled.scope_dict,
-              locals,
-              new_heap,
-            )
+        entry.ModuleThrow(value: thrown_val, heap: new_heap) -> {
           let state =
             EvalState(
               ..state,
               heap: new_heap,
-              evaluated: dict.insert(state.evaluated, specifier, module_exports),
+              errors: dict.insert(state.errors, specifier, thrown_val),
+            )
+          #(state, Error(EvaluationError(thrown_val)))
+        }
+        entry.ModuleOk(value: val, heap: new_heap, locals: _) -> {
+          let state =
+            EvalState(
+              ..state,
+              heap: new_heap,
+              evaluated: set.insert(state.evaluated, specifier),
               evaluating: set.delete(state.evaluating, specifier),
             )
           #(state, Ok(#(val, new_heap)))
@@ -437,148 +660,200 @@ pub fn deserialize_bundle(data: BitArray) -> ModuleBundle {
 // Helper Functions
 // =============================================================================
 
-/// Resolve import bindings for a module, looking up exports from
-/// already-evaluated modules. Returns import values as a dict to be
-/// used as lexical_globals in the module's VM state.
-fn resolve_imports(
-  evaluated: Dict(String, Dict(String, JsValue)),
-  specifier_map: Dict(String, String),
-  import_bindings: List(#(String, List(compiler.ImportBinding))),
-  heap: Heap,
-  _global_object: Ref,
-) -> #(Heap, Dict(String, JsValue)) {
-  list.fold(import_bindings, #(heap, dict.new()), fn(acc, entry) {
-    let #(heap, imports) = acc
-    let #(raw_dep, bindings) = entry
-    let dep_specifier =
-      dict.get(specifier_map, raw_dep) |> result.unwrap(raw_dep)
-    case dict.get(evaluated, dep_specifier) {
-      Error(Nil) -> #(heap, imports)
-      Ok(dep_exports) ->
-        list.fold(bindings, #(heap, imports), fn(acc, binding) {
-          let #(heap, imports) = acc
-          case binding {
-            compiler.NamedImport(imported:, local:) -> {
-              let val =
-                dict.get(dep_exports, imported) |> result.unwrap(JsUndefined)
-              #(heap, dict.insert(imports, local, val))
-            }
-            compiler.DefaultImport(local:) -> {
-              let val =
-                dict.get(dep_exports, "default") |> result.unwrap(JsUndefined)
-              #(heap, dict.insert(imports, local, val))
-            }
-            compiler.NamespaceImport(local:) -> {
-              let properties =
-                dict.fold(dep_exports, dict.new(), fn(props, name, val) {
-                  dict.insert(
-                    props,
-                    value.Named(name),
-                    value.builtin_property(val),
-                  )
-                })
-              // Per spec §10.4.6, Module Namespace Exotic Objects
-              // have a null prototype and are not extensible.
-              let #(heap, ref) =
-                heap.alloc(
-                  heap,
-                  ObjectSlot(
-                    kind: OrdinaryObject,
-                    properties:,
-                    elements: elements.new(),
-                    prototype: None,
-                    symbol_properties: [],
-                    extensible: False,
-                  ),
-                )
-              #(heap, dict.insert(imports, local, JsObject(ref)))
-            }
+/// Allocate a GC-rooted BoxSlot holding `val`. Module binding cells are rooted
+/// so they survive collection between a dependency being linked and its
+/// importer's body running (they live for the duration of the module graph).
+fn alloc_box(heap: Heap, val: JsValue) -> #(Heap, Ref) {
+  let #(heap, ref) = heap.alloc(heap, BoxSlot(val))
+  #(heap.root(heap, ref), ref)
+}
+
+// -----------------------------------------------------------------------------
+// Instantiation — pre-allocate every binding cell + namespace object (§16.2).
+// -----------------------------------------------------------------------------
+
+/// Build the whole graph's binding cells before any body runs, so cyclic and
+/// self imports reference the same live cells (and observe TDZ correctly).
+fn build_linked(bundle: ModuleBundle, heap: Heap) -> #(Heap, Linked) {
+  let #(heap, local_boxes) = preallocate_local_boxes(bundle, heap)
+  let specs = dict.keys(bundle.modules)
+  // Reserve a namespace object ref per module, then a rooted box wrapping it,
+  // up front so cyclic / star-reached namespace re-exports resolve to a ref.
+  let #(heap, ns_obj, namespace_boxes) =
+    list.fold(specs, #(heap, dict.new(), dict.new()), fn(acc, spec) {
+      let #(heap, objs, boxes) = acc
+      let #(heap, obj) = heap.reserve(heap)
+      let heap = heap.root(heap, obj)
+      let #(heap, box) = alloc_box(heap, JsObject(obj))
+      #(heap, dict.insert(objs, spec, obj), dict.insert(boxes, spec, box))
+    })
+  // Resolve every exported name to a cell: a local binding's box (ResolvedTo)
+  // or the target's namespace box (ResolvedNamespace — `export * as ns`,
+  // including names reached transitively through `export *`).
+  let exports =
+    list.fold(specs, dict.new(), fn(all, spec) {
+      let map =
+        get_exported_names(bundle, spec, set.new())
+        |> list.fold(dict.new(), fn(map, name) {
+          case resolve_export(bundle, spec, name, set.new()) {
+            ResolvedTo(owner, binding) ->
+              case
+                dict.get(local_boxes, owner) |> result.try(dict.get(_, binding))
+              {
+                Ok(box) -> dict.insert(map, name, box)
+                Error(Nil) -> map
+              }
+            ResolvedNamespace(target) ->
+              case dict.get(namespace_boxes, target) {
+                Ok(box) -> dict.insert(map, name, box)
+                Error(Nil) -> map
+              }
+            _ -> map
           }
         })
-    }
+      dict.insert(all, spec, map)
+    })
+  // Write each reserved namespace object now that its export map is complete.
+  let heap =
+    list.fold(specs, heap, fn(heap, spec) {
+      let exp = dict.get(exports, spec) |> result.unwrap(dict.new())
+      case dict.get(ns_obj, spec) {
+        Ok(obj) -> heap.write(heap, obj, namespace_slot(exp))
+        Error(Nil) -> heap
+      }
+    })
+  #(heap, Linked(local_boxes:, exports:, namespace_boxes:))
+}
+
+/// One BoxSlot per exported local, seeded with its instantiation value:
+/// `uninitialized` (TDZ) for let/const/class/default, `undefined` for
+/// var/function (hoisted). Keyed specifier → local name → box.
+fn preallocate_local_boxes(
+  bundle: ModuleBundle,
+  heap: Heap,
+) -> #(Heap, Dict(String, Dict(String, Ref))) {
+  dict.fold(bundle.modules, #(heap, dict.new()), fn(acc, spec, m) {
+    let #(heap, all) = acc
+    let #(heap, boxes) =
+      dict.fold(m.export_seeds, #(heap, dict.new()), fn(a, local, seed) {
+        let #(heap, boxes) = a
+        let #(heap, box) = alloc_box(heap, seed)
+        #(heap, dict.insert(boxes, local, box))
+      })
+    #(heap, dict.insert(all, spec, boxes))
   })
 }
 
-/// Collect export values from a module's locals array after evaluation.
-/// Uses the export entries (from AST) and scope dict (from compilation)
-/// to map export names to their runtime values.
-/// Re-exports are resolved by looking up already-evaluated module exports.
-fn collect_exports(
-  evaluated: Dict(String, Dict(String, JsValue)),
-  specifier_map: Dict(String, String),
-  export_entries: List(compiler.ExportEntry),
-  scope_dict: Dict(String, Int),
-  locals: tuple_array.TupleArray(JsValue),
-  heap: Heap,
-) -> #(Dict(String, JsValue), Heap) {
-  list.fold(export_entries, #(dict.new(), heap), fn(acc, entry) {
-    let #(acc, heap) = acc
-    case entry {
-      compiler.LocalExport(export_name:, local_name:) ->
-        dict.get(scope_dict, local_name)
-        |> result.try(fn(index) {
-          tuple_array.get(index, locals) |> option.to_result(Nil)
-        })
-        |> result.map(fn(val) { #(dict.insert(acc, export_name, val), heap) })
-        |> result.unwrap(#(acc, heap))
-      compiler.ReExport(export_name:, imported_name:, source_specifier:) -> {
-        let resolved =
-          dict.get(specifier_map, source_specifier)
-          |> result.unwrap(source_specifier)
-        dict.get(evaluated, resolved)
-        |> result.try(dict.get(_, imported_name))
-        |> result.map(fn(val) { #(dict.insert(acc, export_name, val), heap) })
-        |> result.unwrap(#(acc, heap))
-      }
-      compiler.ReExportAll(source_specifier:) -> {
-        let resolved =
-          dict.get(specifier_map, source_specifier)
-          |> result.unwrap(source_specifier)
-        let acc =
-          dict.get(evaluated, resolved)
-          |> result.map(
-            // Re-export all except "default" (per spec §16.2.1.12.1)
-            dict.fold(_, acc, fn(acc, name, val) {
-              case name {
-                "default" -> acc
-                _ -> dict.insert(acc, name, val)
-              }
-            }),
-          )
-          |> result.unwrap(acc)
-        #(acc, heap)
-      }
-      compiler.ReExportNamespace(export_name:, source_specifier:) -> {
-        let resolved =
-          dict.get(specifier_map, source_specifier)
-          |> result.unwrap(source_specifier)
-        case dict.get(evaluated, resolved) {
-          Ok(dep_exports) -> {
-            let properties =
-              dict.fold(dep_exports, dict.new(), fn(props, name, val) {
-                dict.insert(
-                  props,
-                  value.Named(name),
-                  value.builtin_property(val),
-                )
-              })
-            let #(heap, ref) =
-              heap.alloc(
-                heap,
-                ObjectSlot(
-                  kind: OrdinaryObject,
-                  properties:,
-                  elements: elements.new(),
-                  prototype: None,
-                  symbol_properties: [],
-                  extensible: False,
-                ),
-              )
-            #(dict.insert(acc, export_name, JsObject(ref)), heap)
+/// §10.4.6 Module Namespace Exotic Object slot: a ModuleNamespace kind holding
+/// the export name → BoxSlot-ref map (so [[Get]] re-reads the live cell and
+/// throws on TDZ), null prototype, non-extensible, with @@toStringTag = "Module"
+/// (§28.3.1, the all-false attributes of value.data).
+fn namespace_slot(exports: Dict(String, Ref)) -> state.HeapSlot {
+  ObjectSlot(
+    kind: value.ModuleNamespace(exports:),
+    properties: dict.new(),
+    elements: elements.new(),
+    prototype: None,
+    symbol_properties: [
+      #(value.symbol_to_string_tag, value.data(JsString("Module"))),
+    ],
+    extensible: False,
+  )
+}
+
+/// §16.2.1.6.2 GetExportedNames — local + indirect names, plus `export *` names
+/// (excluding `default`), de-duplicated. `star_set` guards `export *` cycles.
+fn get_exported_names(
+  bundle: ModuleBundle,
+  spec: String,
+  star_set: Set(String),
+) -> List(String) {
+  case set.contains(star_set, spec), dict.get(bundle.modules, spec) {
+    True, _ | _, Error(Nil) -> []
+    False, Ok(m) -> {
+      let star_set = set.insert(star_set, spec)
+      let direct =
+        list.filter_map(m.export_entries, fn(e) {
+          case e {
+            compiler.LocalExport(export_name:, ..) -> Ok(export_name)
+            compiler.ReExport(export_name:, ..) -> Ok(export_name)
+            compiler.ReExportNamespace(export_name:, ..) -> Ok(export_name)
+            compiler.ReExportAll(..) -> Error(Nil)
           }
-          Error(Nil) -> #(acc, heap)
-        }
+        })
+      let star =
+        list.flat_map(m.export_entries, fn(e) {
+          case e {
+            compiler.ReExportAll(source_specifier:) ->
+              get_exported_names(
+                bundle,
+                resolved_specifier(m, source_specifier),
+                star_set,
+              )
+              |> list.filter(fn(n) { n != "default" })
+            _ -> []
+          }
+        })
+      list.append(direct, star) |> list.unique
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Seeding — place the pre-allocated cells into a module's local slots.
+// -----------------------------------------------------------------------------
+
+/// Import bindings seeded into capture slots 0..N-1, in declaration order
+/// (matching compiler.import_local_names). Named/default forward the
+/// exporting module's live cell; namespace imports get the shared namespace box.
+fn import_seeds(
+  linked: Linked,
+  specifier_map: Dict(String, String),
+  import_bindings: List(#(String, List(compiler.ImportBinding))),
+) -> List(#(Int, JsValue)) {
+  list.flat_map(import_bindings, fn(entry) {
+    let #(raw_dep, bindings) = entry
+    let dep = dict.get(specifier_map, raw_dep) |> result.unwrap(raw_dep)
+    let dep_exports = dict.get(linked.exports, dep) |> result.unwrap(dict.new())
+    list.map(bindings, fn(binding) {
+      case binding {
+        compiler.NamedImport(imported:, ..) ->
+          forward_box(dep_exports, imported)
+        compiler.DefaultImport(..) -> forward_box(dep_exports, "default")
+        compiler.NamespaceImport(..) ->
+          case dict.get(linked.namespace_boxes, dep) {
+            Ok(box) -> JsObject(box)
+            Error(Nil) -> JsUndefined
+          }
       }
+    })
+  })
+  |> list.index_map(fn(box, idx) { #(idx, box) })
+}
+
+/// The exporting module's live cell for `name` (link-checked to exist).
+fn forward_box(dep_exports: Dict(String, Ref), name: String) -> JsValue {
+  case dict.get(dep_exports, name) {
+    Ok(box) -> JsObject(box)
+    Error(Nil) -> JsUndefined
+  }
+}
+
+/// This module's own export cells, placed into their declared local slots so
+/// the body initializes and reads/writes them through the shared boxes.
+fn own_export_seeds(
+  linked: Linked,
+  specifier: String,
+  scope_dict: Dict(String, Int),
+) -> List(#(Int, JsValue)) {
+  dict.get(linked.local_boxes, specifier)
+  |> result.unwrap(dict.new())
+  |> dict.to_list
+  |> list.filter_map(fn(pair) {
+    let #(local_name, box) = pair
+    case dict.get(scope_dict, local_name) {
+      Ok(index) -> Ok(#(index, JsObject(box)))
+      Error(Nil) -> Error(Nil)
     }
   })
 }

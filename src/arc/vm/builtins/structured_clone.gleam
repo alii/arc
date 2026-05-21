@@ -221,9 +221,9 @@ fn serialize_value(
     JsSymbol(WellKnownSymbol(id:)) ->
       case mode {
         ArcClone -> Ok(#(PvSymbol(id), ctx))
-        SpecClone -> Error(uncloneable("Symbol"))
+        SpecClone -> uncloneable("Symbol")
       }
-    JsSymbol(_) -> Error(uncloneable("Symbol"))
+    JsSymbol(_) -> uncloneable("Symbol")
     JsObject(ref) -> {
       let #(memo, records, next) = ctx
       case dict.get(memo, ref.id) {
@@ -321,35 +321,36 @@ fn serialize_kind(
     PidObject(pid:) ->
       case mode {
         ArcClone -> Ok(#(PrPid(pid), ctx))
-        SpecClone -> Error(uncloneable("Pid"))
+        SpecClone -> uncloneable("Pid")
       }
     SubjectObject(pid:, tag:) ->
       case mode {
         ArcClone -> Ok(#(PrSubject(pid:, tag:), ctx))
-        SpecClone -> Error(uncloneable("Subject"))
+        SpecClone -> uncloneable("Subject")
       }
     value.FunctionObject(..) | value.NativeFunction(..) ->
-      Error(uncloneable("Function"))
-    value.PromiseObject(..) -> Error(uncloneable("Promise"))
-    value.GeneratorObject(..) -> Error(uncloneable("Generator"))
-    value.AsyncGeneratorObject(..) -> Error(uncloneable("AsyncGenerator"))
-    value.WeakMapObject(..) -> Error(uncloneable("WeakMap"))
-    value.WeakSetObject(..) -> Error(uncloneable("WeakSet"))
-    SelectorObject(..) -> Error(uncloneable("Selector"))
-    value.TimerObject(..) -> Error(uncloneable("Timer"))
-    value.SymbolObject(..) -> Error(uncloneable("Symbol"))
-    value.ArgumentsObject(..) -> Error(uncloneable("Arguments"))
+      uncloneable("Function")
+    value.PromiseObject(..) -> uncloneable("Promise")
+    value.GeneratorObject(..) -> uncloneable("Generator")
+    value.AsyncGeneratorObject(..) -> uncloneable("AsyncGenerator")
+    value.WeakMapObject(..) -> uncloneable("WeakMap")
+    value.WeakSetObject(..) -> uncloneable("WeakSet")
+    SelectorObject(..) -> uncloneable("Selector")
+    value.TimerObject(..) -> uncloneable("Timer")
+    value.SymbolObject(..) -> uncloneable("Symbol")
+    value.ModuleNamespace(..) -> uncloneable("Module")
+    value.ArgumentsObject(..) -> uncloneable("Arguments")
     value.ArrayIteratorObject(..)
     | value.SetIteratorObject(..)
     | value.MapIteratorObject(..)
     | value.IteratorHelperObject(..)
     | value.WrapForValidIteratorObject(..)
-    | value.AsyncFromSyncIteratorObject(..) -> Error(uncloneable("Iterator"))
+    | value.AsyncFromSyncIteratorObject(..) -> uncloneable("Iterator")
   }
 }
 
-fn uncloneable(name: String) -> String {
-  "#<" <> name <> "> could not be cloned"
+fn uncloneable(name: String) -> Result(a, String) {
+  Error("#<" <> name <> "> could not be cloned")
 }
 
 /// Walk array elements 0..length, treating holes as undefined.

@@ -273,6 +273,17 @@ fn emit_module_common(
     False -> e
   }
 
+  // Hoist top-level let/const/class slots before hoisted-func MakeClosure so
+  // closures capture the boxed slot, not a stale pre-box value. Module-scoped
+  // lexical bindings are locals (not the global lexical record), so — like
+  // LexLocal scripts in emit_program_common — they must be declared (and thus
+  // boxed if captured) ahead of the hoisted functions that close over them.
+  let e =
+    list.fold(collect_top_lex_names(stmts), e, fn(e, lex) {
+      let #(name, kind) = lex
+      emit_op(e, DeclareVar(name, kind))
+    })
+
   // Collect and emit hoisted function declarations
   let #(e, hoisted_funcs) = collect_hoisted_funcs(e, stmts)
   let e =
@@ -1521,10 +1532,13 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
                   ast.Let | ast.Const -> init_lex(e, name)
                 }
               }
-              // `let x;` at REPL top level must explicitly init to undefined
-              // (otherwise the global-lex slot stays in TDZ forever).
+              // `let x;` (no initializer) initializes the binding to undefined
+              // (§14.3.1.2). Without this the slot stays in TDZ forever —
+              // observable now that module exports read live (e.g. `export let
+              // x;` then accessing it through the namespace). `var` is hoisted
+              // to undefined already; only lexical bindings need this.
               None ->
-                case kind != ast.Var && at_global_lex(e) {
+                case kind != ast.Var {
                   True -> Ok(init_lex(push_const(e, JsUndefined), name))
                   False -> Ok(e)
                 }

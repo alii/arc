@@ -12,9 +12,7 @@ import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/realm
 import arc/vm/state.{type Heap, type State, type VmError, State}
-import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, JsObject, JsUndefined,
-}
+import arc/vm/value.{type FuncTemplate, type JsValue, type Ref, JsObject}
 import gleam/dict
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -87,17 +85,20 @@ pub fn run_with(
   }
 }
 
-/// Run a module template with imports as lexical globals.
-/// Module `this` is undefined per ES S16.2.1.5.2.
-pub fn run_module_with_imports(
+/// Run a module template with its binding cells seeded into local slots.
+/// `seeds` are (slot index, BoxSlot ref) pairs: import bindings in capture
+/// slots 0..N-1 (each the exporting module's live cell) plus this module's own
+/// export cells in their declared slots — ES live bindings (§16.2). Reads/writes
+/// go through GetBoxed/PutBoxed. Module `this` is undefined per ES §16.2.1.5.2.
+pub fn run_module(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
-  import_globals: dict.Dict(String, JsValue),
+  seeds: List(#(Int, JsValue)),
   finish: fn(State) -> State,
 ) -> ModuleResult {
-  let locals = interpreter.init_top_level_locals(func, JsUndefined)
+  let locals = interpreter.init_module_locals(func, seeds)
   let state =
     interpreter.new_state(
       func,
@@ -105,7 +106,7 @@ pub fn run_module_with_imports(
       heap,
       builtins,
       global_object,
-      import_globals,
+      dict.new(),
       set.new(),
       dict.new(),
       dict.new(),

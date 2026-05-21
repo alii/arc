@@ -157,6 +157,13 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
                 value.Finite(f) -> "Date(" <> value.js_format_number(f) <> ")"
                 _ -> "Invalid Date"
               }
+            value.ModuleNamespace(exports:) ->
+              "[Module: { "
+              <> string.join(
+                list.sort(dict.keys(exports), string.compare),
+                ", ",
+              )
+              <> " }]"
           }
         _ -> "[Object]"
       }

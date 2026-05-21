@@ -30,6 +30,10 @@ import gleam/string
 /// V8/Node's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
 
+/// Thrown when a Module Namespace operation touches a still-uninitialized
+/// (TDZ) export binding (§10.4.6 [[Get]] / [[GetOwnProperty]]).
+const tdz_message = "Cannot access module export before initialization"
+
 /// Resolved ToPropertyKey result — unifies string and symbol keys for
 /// apply_descriptor so it can look up/write to the right dict without
 /// threading two code paths through the validation logic.
@@ -259,6 +263,10 @@ fn get_own_property_descriptor(
     JsObject(ref) ->
       // Step 3: Let desc be ? obj.[[GetOwnProperty]](key).
       case get_own_property_by_key(state.heap, ref, key) {
+        // §10.4.6.5: a namespace [[GetOwnProperty]] performs [[Get]], so a TDZ
+        // binding throws before a descriptor can be built.
+        Some(DataProperty(value: value.JsUninitialized, ..)) ->
+          state.reference_error(state, tdz_message)
         Some(prop) -> {
           // Step 4: Return FromPropertyDescriptor(desc).
           // (desc is not undefined, so we build a descriptor object.)
@@ -830,8 +838,18 @@ fn own_keys_impl(
     JsObject(ref) -> {
       // Step 2: Collect own string-keyed properties
       let ks = collect_own_keys(state.heap, ref, enumerable_only)
-      // Step 3: CreateArrayFromList(nameList)
-      state.ok_array(state, list.map(ks, JsString))
+      // Object.keys (EnumerableOwnProperties) calls [[GetOwnProperty]] per key,
+      // which throws on a TDZ namespace binding. getOwnPropertyNames only calls
+      // [[OwnPropertyKeys]] (no throw), so guard only the enumerable path.
+      let guard = case enumerable_only {
+        True -> object.namespace_tdz_guard(state, ref, ks)
+        False -> Ok(state)
+      }
+      case guard {
+        Error(#(err, state)) -> #(state, Error(err))
+        // Step 3: CreateArrayFromList(nameList)
+        Ok(state) -> state.ok_array(state, list.map(ks, JsString))
+      }
     }
     // Step 1: ToObject — null/undefined throw TypeError
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
@@ -883,6 +901,10 @@ pub fn collect_own_keys(
   enumerable_only: Bool,
 ) -> List(String) {
   case heap.read(heap, ref) {
+    // §10.4.6.11 Module Namespace [[OwnPropertyKeys]]: the exported names,
+    // sorted by code-unit order. All are enumerable, so the filter is a no-op.
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+      list.sort(dict.keys(exports), string.compare)
     Some(ObjectSlot(kind:, properties:, elements:, ..)) -> {
       // Step 1: Array index keys in ascending numeric order
       let index_keys = case kind {
@@ -992,10 +1014,14 @@ fn has_own_property(
   case this {
     // Step 2: Let O be ? ToObject(this value).
     // Step 3: Return ? HasOwnProperty(O, P).
-    JsObject(ref) -> #(
-      state,
-      Ok(JsBool(option.is_some(get_own_property_by_key(state.heap, ref, key)))),
-    )
+    JsObject(ref) ->
+      case get_own_property_by_key(state.heap, ref, key) {
+        // §10.4.6.5: a namespace [[GetOwnProperty]] performs [[Get]], so a TDZ
+        // binding throws (only namespace descriptors carry JsUninitialized).
+        Some(DataProperty(value: value.JsUninitialized, ..)) ->
+          state.reference_error(state, tdz_message)
+        prop -> #(state, Ok(JsBool(option.is_some(prop))))
+      }
     // Step 2: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: own keys are index chars + "length"
@@ -1033,14 +1059,15 @@ fn property_is_enumerable(
   // Step 1: Let P be ? ToPropertyKey(V).
   use key, state <- try_to_property_key(state, key_val)
   case this {
-    JsObject(ref) -> {
-      // Steps 3-5: [[GetOwnProperty]] → desc.[[Enumerable]] or false.
-      let result = case get_own_property_by_key(state.heap, ref, key) {
-        Some(p) -> JsBool(value.prop_enumerable(p))
-        None -> JsBool(False)
+    JsObject(ref) ->
+      // Steps 3-5: [[GetOwnProperty]] → desc.[[Enumerable]] or false. A namespace
+      // TDZ binding throws (its [[GetOwnProperty]] performs [[Get]]).
+      case get_own_property_by_key(state.heap, ref, key) {
+        Some(DataProperty(value: value.JsUninitialized, ..)) ->
+          state.reference_error(state, tdz_message)
+        Some(p) -> #(state, Ok(JsBool(value.prop_enumerable(p))))
+        None -> #(state, Ok(JsBool(False)))
       }
-      #(state, Ok(result))
-    }
     // Step 2: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: index properties are own+enumerable,
@@ -1170,6 +1197,8 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.AsyncFromSyncIteratorObject(..) -> "Async-from-Sync Iterator"
             value.IteratorHelperObject(..) -> "Iterator Helper"
             value.WrapForValidIteratorObject(..) -> "Iterator"
+            // Unreached in practice: @@toStringTag = "Module" wins above.
+            value.ModuleNamespace(_) -> "Object"
             OrdinaryObject -> "Object"
           }
       }

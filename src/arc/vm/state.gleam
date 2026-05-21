@@ -231,6 +231,25 @@ pub fn range_error(
   #(State(..state, heap:), Error(err))
 }
 
+/// Allocate a ReferenceError and return it as the bare #(thrown, state) tuple
+/// used by ops-level results `Result(_, #(JsValue, State))` (e.g. get_value's
+/// error arm). Used for module-namespace TDZ access (§10.4.6 [[Get]]).
+pub fn reference_error_value(state: State, msg: String) -> #(JsValue, State) {
+  let #(heap, err) =
+    common.make_reference_error(state.heap, state.builtins, msg)
+  #(err, State(..state, heap:))
+}
+
+/// Allocate a ReferenceError in the builtin-shape `#(State, Result)`.
+pub fn reference_error(
+  state: State,
+  msg: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, err) =
+    common.make_reference_error(state.heap, state.builtins, msg)
+  #(State(..state, heap:), Error(err))
+}
+
 /// Allocate a JS Array with the given values and return it as Ok.
 /// Collapses the common alloc_array → State(..state, heap:) → Ok(JsObject) triple.
 pub fn ok_array(
