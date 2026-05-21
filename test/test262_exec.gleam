@@ -612,7 +612,8 @@ fn do_run_module(
       case
         module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
       {
-        Ok(#(val, new_heap)) -> Ok(NormalCompletion(val, new_heap))
+        Ok(module.EvaluatedBundle(value: val, heap: new_heap, ..)) ->
+          Ok(NormalCompletion(val, new_heap))
         Error(module.EvaluationError(value: val, heap: new_heap)) ->
           Ok(ThrowCompletion(val, new_heap))
         Error(err) -> Error("module: " <> string.inspect(err))

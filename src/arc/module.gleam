@@ -22,7 +22,7 @@ import arc/vm/value.{
 }
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
@@ -72,6 +72,16 @@ pub type ModuleError {
   /// heap it was allocated in — the value is a Ref into this heap, so callers
   /// must use it (not a pre-evaluation heap) to inspect the thrown object.
   EvaluationError(value: JsValue, heap: Heap)
+}
+
+/// The successful result of `evaluate_bundle`: the entry module's completion
+/// value, the resulting heap, and the entry module's Module Namespace Exotic
+/// Object (§10.4.6). Read named exports off `namespace` via its [[Get]] — a
+/// live, TDZ-throwing, write-protected view of the export bindings. This is the
+/// embedder's `GetModuleNamespace` handle (cf. V8 `Module::GetModuleNamespace`,
+/// QuickJS `JS_GetModuleNamespace`).
+pub type EvaluatedBundle {
+  EvaluatedBundle(value: JsValue, heap: Heap, namespace: Option(JsValue))
 }
 
 // =============================================================================
@@ -463,7 +473,7 @@ pub fn evaluate_bundle(
   builtins: Builtins,
   global_object: Ref,
   finish: fn(state.State) -> state.State,
-) -> Result(#(JsValue, Heap), ModuleError) {
+) -> Result(EvaluatedBundle, ModuleError) {
   // Link phase (§16.2.1.6.4): resolve every import and indirect re-export
   // across the whole graph BEFORE evaluating any body. Missing or ambiguous
   // exports are a SyntaxError raised at link time, not a runtime ReferenceError.
@@ -495,8 +505,58 @@ pub fn evaluate_bundle(
           global_object,
           finish,
         )
-      result
+      // Surface the entry namespace alongside the completion value (post-eval,
+      // so its bindings are initialized — no TDZ for the embedder to hit).
+      use #(completion_value, final_heap) <- result.map(result)
+      EvaluatedBundle(
+        value: completion_value,
+        heap: final_heap,
+        namespace: entry_namespace(linked, bundle.entry, final_heap),
+      )
     }
+  }
+}
+
+/// The entry module's Module Namespace Exotic Object, read out of the rooted
+/// box the linker reserved for it (`build_linked`). This is what `evaluate_bundle`
+/// hands back as `EvaluatedBundle.namespace`. Falls back to `undefined` only if
+/// the entry has no namespace box, which shouldn't happen for a linked bundle.
+fn entry_namespace(
+  linked: Linked,
+  entry: String,
+  heap: Heap,
+) -> Option(JsValue) {
+  case dict.get(linked.namespace_boxes, entry) {
+    Ok(box) -> heap.read_box(heap, box)
+    Error(Nil) -> None
+  }
+}
+
+/// Read a named export off a Module Namespace Exotic Object (the `namespace`
+/// from `EvaluatedBundle`), at the heap level — the embedder's `ns.name`,
+/// without needing a VM `State`. Returns the export's live binding value, or
+/// `None` if `namespace` isn't a module namespace, has no such export, or the
+/// binding is still uninitialized (TDZ). Unlike the in-VM namespace [[Get]] (§
+/// 10.4.6.8), an uninitialized binding yields `None` rather than throwing a
+/// ReferenceError — there is no JS context to throw into here, and after a
+/// completed `evaluate_bundle` an entry export is always initialized anyway.
+pub fn read_export(
+  heap: Heap,
+  namespace: JsValue,
+  name: String,
+) -> Option(JsValue) {
+  use ref <- option.then(case namespace {
+    JsObject(ref) -> Some(ref)
+    _ -> None
+  })
+  use exports <- option.then(case heap.read(heap, ref) {
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) -> Some(exports)
+    _ -> None
+  })
+  use box <- option.then(dict.get(exports, name) |> option.from_result)
+  case heap.read_box(heap, box) {
+    Some(value.JsUninitialized) | None -> None
+    Some(v) -> Some(v)
   }
 }
 

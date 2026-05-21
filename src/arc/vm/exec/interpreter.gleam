@@ -278,6 +278,79 @@ pub fn init_module_locals(
   })
 }
 
+/// Call a function `callee` with `this` and `args` from a fresh top-level
+/// frame, running the call (and anything synchronous it triggers) to
+/// completion. This is the embedder analogue of the `Call` opcode and the
+/// counterpart to `run`/`run_with` for a value you already hold — e.g. a module
+/// export read off a namespace — rather than a script template.
+///
+/// A thrown value comes back as a `ThrowCompletion`; a malformed-bytecode
+/// `VmError` propagates as `Error` (unlike `state.call`, which is the
+/// re-entrant call used from within host functions and panics on `VmError`).
+/// Calling an async function returns its pending Promise as the
+/// `NormalCompletion` value — drive the returned State with a `finish` driver
+/// (microtask/macrotask draining) to settle it.
+pub fn call_to_completion(
+  callee: JsValue,
+  this_val: JsValue,
+  args: List(JsValue),
+  heap: Heap,
+  builtins: Builtins,
+  global_object: Ref,
+) -> Result(#(Completion, State), VmError) {
+  let seed = bare_call_state(heap, builtins, global_object)
+  case call_value(seed, callee, args, this_val) {
+    // call_value either set up the callee's frame (regular function) or ran it
+    // synchronously (native), leaving control to resume at the sentinel Return;
+    // execute_inner drives that to NormalCompletion with the result on top.
+    Ok(ready) -> execute_inner(ready)
+    Error(#(StepVmError(vm_err), _, _)) -> Error(vm_err)
+    // Thrown at call setup (e.g. callee not callable, or a native threw); the
+    // other StepResults can't escape call_value's setup, handled defensively.
+    Error(#(_step, thrown, errored)) ->
+      Ok(#(ThrowCompletion(thrown, errored.heap), errored))
+  }
+}
+
+/// A do-nothing top-level frame for `call_to_completion`. Mirrors
+/// `construct_fn_callback`'s sentinel: when the called function returns, the
+/// `Return` op restores `code` from the saved frame's template (not the live
+/// `code` field), and `call_function` saved the caller pc as pc+1 = 1, so a
+/// `Return` must sit at index 1. Index 0 is never dispatched — execution starts
+/// in the callee's frame, not here.
+fn bare_call_state(heap: Heap, builtins: Builtins, global_object: Ref) -> State {
+  let sentinel_code = tuple_array.from_list([Return, Return])
+  let sentinel_func =
+    value.FuncTemplate(
+      name: None,
+      arity: 0,
+      local_count: 0,
+      bytecode: sentinel_code,
+      constants: tuple_array.from_list([]),
+      functions: tuple_array.from_list([]),
+      env_descriptors: [],
+      is_strict: True,
+      is_arrow: False,
+      is_derived_constructor: False,
+      is_generator: False,
+      is_async: False,
+      is_constructor: False,
+      local_names: None,
+      this_slot: None,
+    )
+  new_state(
+    sentinel_func,
+    tuple_array.from_list([]),
+    heap,
+    builtins,
+    global_object,
+    dict.new(),
+    set.new(),
+    dict.new(),
+    dict.new(),
+  )
+}
+
 /// Allocate a closure (FunctionObject) for `child_template`, capturing
 /// `captured_values` (gathered per the template's env_descriptors). Builds the
 /// env, the `name`/`length` props, the `.prototype` object (+ `.constructor`)

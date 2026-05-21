@@ -7381,7 +7381,8 @@ fn run_module(source: String) -> Result(Completion, String) {
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
       case module.evaluate_bundle(bundle, h, b, global_object, beam.run) {
-        Ok(#(val, new_heap)) -> Ok(NormalCompletion(val, new_heap))
+        Ok(module.EvaluatedBundle(value: val, heap: new_heap, ..)) ->
+          Ok(NormalCompletion(val, new_heap))
         Error(module.EvaluationError(value: val, heap: new_heap)) ->
           Ok(ThrowCompletion(val, new_heap))
         Error(err) -> Error("module error: " <> string.inspect(err))
@@ -7529,12 +7530,76 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   // Evaluate the module, passing in REPL globals
   case module.evaluate_bundle(bundle, h, b, env.global_object, beam.run) {
-    Ok(#(val, _heap)) -> {
+    Ok(module.EvaluatedBundle(value: val, ..)) -> {
       let assert True = val == JsString("hello from harness")
       Nil
     }
     Error(err) -> panic as { "module failed: " <> string.inspect(err) }
   }
+}
+
+pub fn run_export_namespace_call_test() -> Nil {
+  // End-to-end embedder path: evaluate a module, read an export off its
+  // namespace (GetModuleNamespace), and invoke it with entry.run_export, which
+  // calls the function AND drains the microtask queue. Mirrors how a host
+  // dispatches each message to a module's `receive` export.
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, global_object) = builtins.globals(b, h)
+
+  let source =
+    "let total = 0;
+     let drained = 0;
+     export function receive(n) {
+       Promise.resolve(n).then(v => { drained += v; });
+       total += n;
+       return total;
+     }
+     export function getDrained() { return drained; }"
+  let assert Ok(bundle) =
+    module.compile_bundle("<run_export-test>", source, fn(_d, _p) {
+      Error("no module loader")
+    })
+  let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(namespace), ..)) =
+    module.evaluate_bundle(bundle, h, b, global_object, beam.run)
+
+  // Read `receive` off the namespace — no VM State needed.
+  let assert Some(receive) = module.read_export(h, namespace, "receive")
+
+  // receive(5): returns `total` (5) synchronously; the .then microtask is
+  // drained by run_export, bumping `drained` to 5.
+  let assert Ok(NormalCompletion(v1, h)) =
+    entry.run_export(
+      receive,
+      JsUndefined,
+      [value.from_int(5)],
+      h,
+      b,
+      global_object,
+      beam.run,
+    )
+  let assert True = v1 == value.from_int(5)
+
+  // receive(3): module-scoped state persisted on the threaded heap → total 8.
+  let assert Ok(NormalCompletion(v2, h)) =
+    entry.run_export(
+      receive,
+      JsUndefined,
+      [value.from_int(3)],
+      h,
+      b,
+      global_object,
+      beam.run,
+    )
+  let assert True = v2 == value.from_int(8)
+
+  // Both .then microtasks ran (5 + 3), proving the queue was drained on each
+  // call: getDrained() == 8.
+  let assert Some(get_drained) = module.read_export(h, namespace, "getDrained")
+  let assert Ok(NormalCompletion(v3, _)) =
+    entry.run_export(get_drained, JsUndefined, [], h, b, global_object, beam.run)
+  let assert True = v3 == value.from_int(8)
+  Nil
 }
 
 // ============================================================================

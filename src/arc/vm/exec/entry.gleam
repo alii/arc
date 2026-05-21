@@ -70,19 +70,11 @@ pub fn run_with(
   global_object: Ref,
   finish: fn(State) -> State,
 ) -> Result(Completion, VmError) {
-  let result =
+  let executed =
     interpreter.init_state(func, heap, builtins, global_object, False)
     |> interpreter.execute_inner()
-  use #(completion, final_state) <- result.try(result)
-  let drained_state = finish(final_state)
-  case completion {
-    NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
-    ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
-    YieldCompletion(_, _) ->
-      panic as "YieldCompletion should not appear at script level"
-    completion.AwaitCompletion(_, _) ->
-      panic as "AwaitCompletion should not appear at script level"
-  }
+  use #(settled, drained) <- result.map(settle(executed, finish))
+  completion_of(settled, drained.heap)
 }
 
 /// Run a module template with its binding cells seeded into local slots.
@@ -111,26 +103,11 @@ pub fn run_module(
       dict.new(),
       dict.new(),
     )
-  let result = interpreter.execute_inner(state)
-  case result {
+  case settle(interpreter.execute_inner(state), finish) {
     Error(vm_err) -> ModuleError(error: vm_err)
-    Ok(#(completion, final_state)) -> {
-      let drained_state = finish(final_state)
-      case completion {
-        NormalCompletion(val, _) ->
-          ModuleOk(
-            value: val,
-            heap: drained_state.heap,
-            locals: drained_state.locals,
-          )
-        ThrowCompletion(val, _) ->
-          ModuleThrow(value: val, heap: drained_state.heap)
-        YieldCompletion(_, _) ->
-          panic as "YieldCompletion should not appear at module level"
-        completion.AwaitCompletion(_, _) ->
-          panic as "AwaitCompletion should not appear at module level"
-      }
-    }
+    Ok(#(Ok(val), drained)) ->
+      ModuleOk(value: val, heap: drained.heap, locals: drained.locals)
+    Ok(#(Error(val), drained)) -> ModuleThrow(value: val, heap: drained.heap)
   }
 }
 
@@ -160,26 +137,79 @@ pub fn run_and_drain_repl(
       ),
       realms: env.realms,
     )
-  use #(completion, final_state) <- result.try(interpreter.execute_inner(state))
-  let drained_state = event_loop.drain_jobs(final_state)
+  use #(settled, drained) <- result.map(settle(
+    interpreter.execute_inner(state),
+    event_loop.drain_jobs,
+  ))
   let new_env =
     ReplEnv(
-      global_object: drained_state.global_object,
-      lexical_globals: drained_state.lexical_globals,
-      const_lexical_globals: drained_state.const_lexical_globals,
-      symbol_descriptions: drained_state.symbol_descriptions,
-      symbol_registry: drained_state.symbol_registry,
-      realms: drained_state.realms,
+      global_object: drained.global_object,
+      lexical_globals: drained.lexical_globals,
+      const_lexical_globals: drained.const_lexical_globals,
+      symbol_descriptions: drained.symbol_descriptions,
+      symbol_registry: drained.symbol_registry,
+      realms: drained.realms,
     )
+  #(completion_of(settled, drained.heap), new_env)
+}
+
+/// Call a function value with `this` and `args`, then run the `finish` driver
+/// to drain. The counterpart to `run`/`run_with` for a value you already hold
+/// — e.g. a `receive` export read off a module namespace — so an embedder can
+/// invoke it the way the engine would, without re-evaluating a script. This is
+/// the host-call-then-drain pattern (cf. Node's MakeCallback, QuickJS
+/// `JS_Call` + the `JS_ExecutePendingJob` loop): draining happens at this
+/// outermost call only, so don't call it from inside a host function — use the
+/// re-entrant `state.call` there.
+pub fn run_export(
+  callee: JsValue,
+  this_val: JsValue,
+  args: List(JsValue),
+  heap: Heap,
+  builtins: Builtins,
+  global_object: Ref,
+  finish: fn(State) -> State,
+) -> Result(Completion, VmError) {
+  let executed =
+    interpreter.call_to_completion(
+      callee,
+      this_val,
+      args,
+      heap,
+      builtins,
+      global_object,
+    )
+  use #(settled, drained) <- result.map(settle(executed, finish))
+  completion_of(settled, drained.heap)
+}
+
+/// Drain microtasks/macrotasks via `finish`, then narrow a top-level completion
+/// to its settled outcome — `Ok(value)` for a normal completion,
+/// `Error(thrown)` for a throw — paired with the drained State. A top-level
+/// script, module, or embedder call can only finish Normal or Throw, so a
+/// Yield/Await reaching here is a compiler bug; this is the single place that
+/// invariant is enforced for the whole `run*` family.
+fn settle(
+  executed: Result(#(Completion, State), VmError),
+  finish: fn(State) -> State,
+) -> Result(#(Result(JsValue, JsValue), State), VmError) {
+  use #(completion, final_state) <- result.try(executed)
+  let drained = finish(final_state)
   case completion {
-    NormalCompletion(val, _) ->
-      Ok(#(NormalCompletion(val, drained_state.heap), new_env))
-    ThrowCompletion(val, _) ->
-      Ok(#(ThrowCompletion(val, drained_state.heap), new_env))
+    NormalCompletion(val, _) -> Ok(#(Ok(val), drained))
+    ThrowCompletion(val, _) -> Ok(#(Error(val), drained))
     YieldCompletion(_, _) ->
-      panic as "YieldCompletion should not appear at script level"
+      panic as "YieldCompletion should not appear at top level"
     completion.AwaitCompletion(_, _) ->
-      panic as "AwaitCompletion should not appear at script level"
+      panic as "AwaitCompletion should not appear at top level"
+  }
+}
+
+/// Rebuild a Completion from a settled outcome and the drained heap.
+fn completion_of(settled: Result(JsValue, JsValue), heap: Heap) -> Completion {
+  case settled {
+    Ok(val) -> NormalCompletion(val, heap)
+    Error(thrown) -> ThrowCompletion(thrown, heap)
   }
 }
 
