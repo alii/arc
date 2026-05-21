@@ -17,7 +17,6 @@ import arc/vm/value.{
 import gleam/dict
 import gleam/int
 import gleam/option.{None, Some}
-import gleam/set
 import gleam/string
 
 // ============================================================================
@@ -6820,7 +6819,6 @@ fn run_repl_lines(
     entry.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
-      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
       realms: dict.new(),
@@ -6893,7 +6891,6 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
     entry.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
-      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
       realms: dict.new(),
@@ -7507,7 +7504,6 @@ pub fn module_repl_harness_globals_test() -> Nil {
     entry.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
-      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
       realms: dict.new(),

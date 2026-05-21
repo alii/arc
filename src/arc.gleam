@@ -378,7 +378,6 @@ fn handle_repl_line(
         entry.ReplEnv(
           global_object:,
           lexical_globals: dict.new(),
-          const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
           realms: dict.new(),
@@ -628,7 +627,6 @@ fn new_repl_state() {
     env: entry.ReplEnv(
       global_object:,
       lexical_globals: dict.new(),
-      const_lexical_globals: set.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),
       realms: dict.new(),

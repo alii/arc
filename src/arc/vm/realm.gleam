@@ -19,7 +19,6 @@ import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
-import gleam/set
 import gleam/string
 
 // ============================================================================
@@ -49,8 +48,7 @@ pub type NewStateFn =
     Heap,
     Builtins,
     Ref,
-    dict.Dict(String, JsValue),
-    set.Set(String),
+    dict.Dict(String, value.LexicalGlobal),
     dict.Dict(value.SymbolId, String),
     dict.Dict(String, value.SymbolId),
   ) -> State
@@ -83,7 +81,6 @@ pub fn eval_script_native(
             Some(value.RealmSlot(
               global_object: realm_global,
               lexical_globals:,
-              const_lexical_globals:,
               symbol_descriptions:,
               symbol_registry:,
             )) ->
@@ -94,7 +91,6 @@ pub fn eval_script_native(
                     realm_global,
                     realm_ref,
                     lexical_globals,
-                    const_lexical_globals,
                     symbol_descriptions,
                     symbol_registry,
                   ))
@@ -114,7 +110,6 @@ pub fn eval_script_native(
       realm_global,
       realm_ref,
       lexical_globals,
-      const_lexical_globals,
       symbol_descriptions,
       symbol_registry,
     )) -> {
@@ -135,7 +130,6 @@ pub fn eval_script_native(
             realm_builtins,
             realm_global,
             lexical_globals,
-            const_lexical_globals,
             symbol_descriptions,
             symbol_registry,
           ),
@@ -156,7 +150,6 @@ pub fn eval_script_native(
             value.RealmSlot(
               global_object: realm_global,
               lexical_globals: drained.lexical_globals,
-              const_lexical_globals: drained.const_lexical_globals,
               symbol_descriptions: drained.symbol_descriptions,
               symbol_registry: drained.symbol_registry,
             )
@@ -200,7 +193,6 @@ pub fn create_realm_native(
       value.RealmSlot(
         global_object: new_global_ref,
         lexical_globals: dict.new(),
-        const_lexical_globals: set.new(),
         symbol_descriptions: dict.new(),
         symbol_registry: dict.new(),
       ),
@@ -345,7 +337,6 @@ fn run_source_in_current_realm(
         state.builtins,
         state.global_object,
         state.lexical_globals,
-        state.const_lexical_globals,
         state.symbol_descriptions,
         state.symbol_registry,
       ),
@@ -497,7 +488,6 @@ fn run_direct_eval(
         state.builtins,
         state.global_object,
         state.lexical_globals,
-        state.const_lexical_globals,
         state.symbol_descriptions,
         state.symbol_registry,
       ),

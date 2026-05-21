@@ -23,7 +23,7 @@ import arc/vm/opcode.{
   IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry,
   IrPrivateIn, IrPushConst, IrPushTry, IrPutElem, IrPutField, IrPutPrivateField,
   IrPutSuperProp, IrPutSuperPropComputed, IrRet, IrReturn, IrScopeGetVar,
-  IrScopePutVar, IrScopeReboxVar,
+  IrScopeInitVar, IrScopePutVar, IrScopeReboxVar,
   IrScopeTypeofVar, IrSetLine, IrSetThis, IrSetupDerivedClass, IrSwap, IrThrow,
   IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
 }
@@ -493,12 +493,13 @@ fn declare_lex(e: Emitter, name: String, is_const: Bool) -> Emitter {
 }
 
 /// Store the value on top of stack into a let/const binding declared via
-/// declare_lex. Routes to IrInitGlobalLex (bypasses TDZ/const checks) or
-/// IrScopePutVar (resolves to PutLocal).
+/// declare_lex. Routes to IrInitGlobalLex (global lexical record) or
+/// IrScopeInitVar (local slot). Both are *initialization*, so neither triggers
+/// the const-reassignment check — only IrScopePutVar (true assignment) does.
 fn init_lex(e: Emitter, name: String) -> Emitter {
   case at_global_lex(e) {
     True -> emit_ir(e, IrInitGlobalLex(name))
-    False -> emit_ir(e, IrScopePutVar(name))
+    False -> emit_ir(e, IrScopeInitVar(name))
   }
 }
 

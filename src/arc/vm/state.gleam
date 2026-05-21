@@ -11,7 +11,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
-import gleam/set
 import gleam/string
 
 // -- Concrete type aliases ----------------------------------------------------
@@ -75,10 +74,10 @@ pub type State {
     stack: List(JsValue),
     locals: TupleArray(JsValue),
     constants: TupleArray(JsValue),
-    /// DeclarativeRecord: let/const at global scope. NOT on globalThis. Checked first.
-    lexical_globals: dict.Dict(String, JsValue),
-    /// Tracks which lexical globals are const (PutGlobal throws TypeError).
-    const_lexical_globals: set.Set(String),
+    /// DeclarativeRecord: let/const at global scope. NOT on globalThis. Checked
+    /// first. Each binding is `Let`/`Const` (const rejects assignment) wrapping
+    /// `JsUninitialized` while in TDZ, then its bound value.
+    lexical_globals: dict.Dict(String, value.LexicalGlobal),
     /// ObjectRecord: Ref to globalThis heap object. var/function/builtins live here.
     global_object: Ref,
     func: FuncTemplate,
@@ -115,7 +114,7 @@ pub type State {
     realms: dict.Dict(Ref, Builtins),
     /// Re-entrant call mechanism — invoke a JS callable with (this, args).
     /// Returns Ok(result, state) on normal completion, Error(thrown, state) on throw.
-    /// Set by the VM executor (wraps run_handler_with_this).
+    /// Set by the VM executor (narrows the lossless call_to_completion).
     call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
       Result(#(JsValue, State), #(JsValue, State)),
     /// Re-entrant construct mechanism — `new target(...args)` from native code.
@@ -149,7 +148,6 @@ pub fn merge_globals(
   State(
     ..parent,
     lexical_globals: child.lexical_globals,
-    const_lexical_globals: child.const_lexical_globals,
     job_queue: job_queue.append(child.job_queue, extra_jobs),
     outstanding: child.outstanding,
   )
@@ -337,7 +335,8 @@ pub fn type_error(
   msg: String,
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  let state = attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
   #(state, Error(err))
 }
 
@@ -358,7 +357,11 @@ pub fn reference_error_value(state: State, msg: String) -> #(JsValue, State) {
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
   let state =
-    attach_stack(State(..state, heap:), err, error_header("ReferenceError", msg))
+    attach_stack(
+      State(..state, heap:),
+      err,
+      error_header("ReferenceError", msg),
+    )
   #(err, state)
 }
 
@@ -370,7 +373,11 @@ pub fn reference_error(
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
   let state =
-    attach_stack(State(..state, heap:), err, error_header("ReferenceError", msg))
+    attach_stack(
+      State(..state, heap:),
+      err,
+      error_header("ReferenceError", msg),
+    )
   #(state, Error(err))
 }
 
@@ -433,7 +440,8 @@ pub fn throw_type_error(
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  let state = attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
   Error(#(Thrown, err, state))
 }
 
@@ -456,7 +464,11 @@ pub fn throw_reference_error(
   let #(heap, err) =
     common.make_reference_error(state.heap, state.builtins, msg)
   let state =
-    attach_stack(State(..state, heap:), err, error_header("ReferenceError", msg))
+    attach_stack(
+      State(..state, heap:),
+      err,
+      error_header("ReferenceError", msg),
+    )
   Error(#(Thrown, err, state))
 }
 

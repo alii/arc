@@ -24,12 +24,13 @@ import arc/vm/opcode.{
   IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrNewRegExp,
   IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPrivateIn, IrPushConst,
   IrPushTry, IrPutBoxed, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal,
-  IrPutLocal, IrPutPrivateField, IrRet, IrReturn, IrScopeGetVar, IrScopePutVar,
+  IrPutLocal, IrPutPrivateField, IrRet, IrReturn, IrScopeGetVar, IrScopeInitVar,
+  IrScopePutVar,
   IrCheckSuperThis, IrGetSuperProp, IrGetSuperProp2, IrGetSuperPropComputed,
   IrGetSuperPropComputed2, IrPutSuperProp, IrPutSuperPropComputed,
   IrScopeReboxVar, IrScopeTypeofVar, IrSetLine, IrSetThis, IrSetupDerivedClass,
-  IrSwap, IrThrow, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrYield,
-  IrYieldStar,
+  IrSwap, IrThrow, IrThrowError, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal,
+  IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
@@ -141,6 +142,7 @@ fn resolve_ops(
     // Scope-aware ops should NOT appear here (consumed by Phase 2)
     [IrScopeGetVar(_), ..]
     | [IrScopePutVar(_), ..]
+    | [IrScopeInitVar(_), ..]
     | [IrScopeTypeofVar(_), ..]
     | [IrScopeReboxVar(_), ..]
     | [IrGetThis, ..]
@@ -252,6 +254,8 @@ fn resolve_ops(
 
     // Exception handling
     [IrThrow, ..rest] -> resolve_ops(rest, labels, [opcode.Throw, ..acc])
+    [IrThrowError(kind), ..rest] ->
+      resolve_ops(rest, labels, [opcode.ThrowError(kind), ..acc])
     [IrPopTry, ..rest] -> resolve_ops(rest, labels, [opcode.PopTry, ..acc])
     [IrRet, ..rest] -> resolve_ops(rest, labels, [opcode.Ret, ..acc])
 

@@ -304,7 +304,6 @@ fn make_spawner(
   let builtins = state.builtins
   let global_object = state.global_object
   let lexical_globals = state.lexical_globals
-  let const_lexical_globals = state.const_lexical_globals
   let symbol_descriptions = state.symbol_descriptions
   let symbol_registry = state.symbol_registry
   fn() {
@@ -326,7 +325,6 @@ fn make_spawner(
         builtins,
         global_object,
         lexical_globals,
-        const_lexical_globals,
         symbol_descriptions,
         symbol_registry,
       )

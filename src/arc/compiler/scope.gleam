@@ -14,11 +14,11 @@ import arc/compiler/emit.{
   LeaveScope, LetBinding, ParamBinding, VarBinding,
 }
 import arc/vm/opcode.{
-  type IrOp, IrBoxLocal, IrDeclareEvalVar, IrDeclareGlobalVar, IrGetBoxed,
-  IrGetEvalVar, IrGetGlobal, IrGetLocal, IrGetThis, IrPushConst, IrPutBoxed,
-  IrPutEvalVar, IrPutGlobal, IrPutLocal, IrScopeGetVar, IrScopePutVar,
-  IrScopeReboxVar, IrScopeTypeofVar, IrSetThis, IrTypeOf, IrTypeofEvalVar,
-  IrTypeofGlobal,
+  type IrOp, ConstAssignment, IrBoxLocal, IrDeclareEvalVar, IrDeclareGlobalVar,
+  IrGetBoxed, IrGetEvalVar, IrGetGlobal, IrGetLocal, IrGetThis, IrPushConst,
+  IrPutBoxed, IrPutEvalVar, IrPutGlobal, IrPutLocal, IrScopeGetVar,
+  IrScopeInitVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar, IrSetThis,
+  IrThrowError, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal,
 }
 import arc/vm/value.{type JsValue, JsUndefined, JsUninitialized}
 import gleam/bool
@@ -323,7 +323,27 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       }
     }
 
+    // Assignment (`x = …`, `x += …`, `x++`, destructuring-assign). A store to a
+    // const local binding is a runtime TypeError; the local store ops carry no
+    // const flag, so — like QuickJS's resolve_scope_var — we resolve it here and
+    // emit a throw. Initialization goes through IrScopeInitVar, never here.
     Ir(IrScopePutVar(name)) -> {
+      case lookup(r.scopes, name) {
+        Some(Binding(kind: ConstBinding, ..)) ->
+          emit(r, IrThrowError(ConstAssignment))
+        Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrPutBoxed(index))
+        Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrPutLocal(index))
+        None ->
+          case r.fallthrough {
+            ToGlobal -> emit(r, IrPutGlobal(name))
+            ToEvalEnv -> emit(r, IrPutEvalVar(name))
+          }
+      }
+    }
+
+    // Initialization of a let/const binding — same lowering as IrScopePutVar
+    // but never const-checked (binding a const for the first time is allowed).
+    Ir(IrScopeInitVar(name)) -> {
       case lookup(r.scopes, name) {
         Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrPutBoxed(index))
         Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrPutLocal(index))

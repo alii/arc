@@ -8,7 +8,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/set
 import gleam/string
 
 /// A reference to a heap slot. Public so heap.gleam can construct/destructure.
@@ -1444,11 +1443,35 @@ pub type HeapSlot(ctx) {
   /// an import cycle (value.gleam cannot import builtins/common.gleam).
   RealmSlot(
     global_object: Ref,
-    lexical_globals: Dict(String, JsValue),
-    const_lexical_globals: set.Set(String),
+    lexical_globals: Dict(String, LexicalGlobal),
     symbol_descriptions: Dict(SymbolId, String),
     symbol_registry: Dict(String, SymbolId),
   )
+}
+
+/// A binding in the global declarative record (let/const at global scope).
+/// The wrapped value is `JsUninitialized` while in TDZ, then the bound value
+/// after initialization. `Const` bindings reject assignment — PutGlobal throws
+/// a TypeError.
+pub type LexicalGlobal {
+  Let(JsValue)
+  Const(JsValue)
+}
+
+/// The bound value of a lexical global, regardless of let/const-ness.
+pub fn lexical_global_value(g: LexicalGlobal) -> JsValue {
+  case g {
+    Let(v) | Const(v) -> v
+  }
+}
+
+/// Replace the bound value of a lexical global, preserving let/const-ness.
+/// Used by InitGlobalLex to fill a TDZ slot without losing its const flag.
+pub fn set_lexical_global_value(g: LexicalGlobal, value: JsValue) -> LexicalGlobal {
+  case g {
+    Let(_) -> Let(value)
+    Const(_) -> Const(value)
+  }
 }
 
 fn indent(lines: List(List(String)), indent: Int) -> String {
@@ -1816,10 +1839,9 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       lexical_globals:,
       symbol_descriptions: _,
       symbol_registry: _,
-      ..,
     ) ->
       dict.fold(lexical_globals, [global_object, ..acc], fn(a, _k, v) {
-        push_value_ref(v, a)
+        push_value_ref(lexical_global_value(v), a)
       })
   }
 }

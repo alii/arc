@@ -9,7 +9,7 @@
 
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
-import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
+import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/heap
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
@@ -26,7 +26,6 @@ import arc/vm/value.{
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
-import gleam/string
 
 pub type ExecuteInnerFn =
   fn(State) -> Result(#(completion.Completion, State), VmError)
@@ -147,24 +146,29 @@ fn execute_thenable_job(
 // Handler execution (for call_fn_callback / re-entrant calls)
 // ============================================================================
 
-/// Run a JS handler function with a this value and args.
-/// Returns Ok(return_value, state) on success, Error(thrown, state) on throw.
-pub fn run_handler_with_this(
+/// Call a JS function value with `this` and `args`, running it (and anything
+/// synchronous it triggers) to completion. **Lossless**: hands back the full
+/// `Completion` — or a `VmError` — and panics on nothing, so each caller narrows
+/// only as far as its own contract demands (`call_fn_callback` to the host-fn
+/// value/throw, panicking on the impossible; `entry.run_export` not at all).
+/// Parameterized over `execute_inner`/`call_native_fn` to avoid a cycle with the
+/// interpreter.
+pub fn call_to_completion(
   state: State,
-  handler: JsValue,
+  callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
   execute_inner: ExecuteInnerFn,
   call_native_fn: CallNativeFn,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
-  case handler {
+) -> Result(#(completion.Completion, State), VmError) {
+  case callee {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
           kind: FunctionObject(func_template:, env: env_ref, ..),
           ..,
         )) ->
-          run_closure_for_job(
+          call_closure(
             state,
             ref,
             env_ref,
@@ -173,47 +177,64 @@ pub fn run_handler_with_this(
             this_val,
             execute_inner,
           )
-        Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) -> {
-          // For native functions (like resolve/reject), call directly
-          let job_state =
-            State(
-              ..state,
-              stack: [],
-              pc: 0,
-              code: tuple_array.from_list([opcode.Return]),
-              call_stack: [],
-              try_stack: [],
-            )
-          case call_native_fn(job_state, native, args, [], this_val) {
-            Ok(new_state) -> {
-              let merged =
-                State(
-                  ..state.merge_globals(state, new_state, []),
-                  heap: new_state.heap,
-                )
-              case new_state.stack {
-                [result, ..] -> Ok(#(result, merged))
-                [] -> Ok(#(JsUndefined, merged))
-              }
-            }
-            Error(#(Thrown, thrown, post)) ->
-              Error(#(thrown, State(..state, heap: post.heap)))
-            Error(#(StepVmError(vm_err), _, _post)) ->
-              panic as {
-                "VM error in native call during job: " <> string.inspect(vm_err)
-              }
-            Error(#(_step, _value, post)) ->
-              Error(#(JsUndefined, State(..state, heap: post.heap)))
-          }
-        }
-        _ -> Ok(#(JsUndefined, state))
+        Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
+          call_native_to_completion(
+            state,
+            native,
+            args,
+            this_val,
+            call_native_fn,
+          )
+        // Not callable: preserve the legacy pass-through (undefined, no throw)
+        // that promise reactions and friends rely on.
+        _ -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
       }
-    _ -> Ok(#(JsUndefined, state))
+    _ -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
   }
 }
 
-/// Run a JS closure for a job. Sets up a temporary execution context.
-fn run_closure_for_job(
+/// Native arm of `call_to_completion`: run the native synchronously and wrap its
+/// stack result (or thrown value) as a Completion. A `VmError` propagates.
+fn call_native_to_completion(
+  state: State,
+  native: NativeFnSlot,
+  args: List(JsValue),
+  this_val: JsValue,
+  call_native_fn: CallNativeFn,
+) -> Result(#(completion.Completion, State), VmError) {
+  let job_state =
+    State(
+      ..state,
+      stack: [],
+      pc: 0,
+      code: tuple_array.from_list([opcode.Return]),
+      call_stack: [],
+      try_stack: [],
+    )
+  case call_native_fn(job_state, native, args, [], this_val) {
+    Ok(new_state) -> {
+      let merged =
+        State(..state.merge_globals(state, new_state, []), heap: new_state.heap)
+      let result = case new_state.stack {
+        [r, ..] -> r
+        [] -> JsUndefined
+      }
+      Ok(#(NormalCompletion(result, merged.heap), merged))
+    }
+    Error(#(StepVmError(vm_err), _, _post)) -> Error(vm_err)
+    Error(#(Thrown, thrown, post)) ->
+      Ok(#(ThrowCompletion(thrown, post.heap), State(..state, heap: post.heap)))
+    Error(#(_step, _value, post)) ->
+      Ok(#(
+        ThrowCompletion(JsUndefined, post.heap),
+        State(..state, heap: post.heap),
+      ))
+  }
+}
+
+/// Closure arm of `call_to_completion`: set up the callee as the sole frame and
+/// drive it; the completion (and its heap) flow straight through, untouched.
+fn call_closure(
   state: State,
   fn_ref: Ref,
   env_ref: Ref,
@@ -221,7 +242,7 @@ fn run_closure_for_job(
   args: List(JsValue),
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(completion.Completion, State), VmError) {
   let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
   let #(heap, new_this) = bind_this(state, callee_template, this_val)
   // Mirror call.setup_locals: insert the bound `this` between captures and
@@ -256,18 +277,12 @@ fn run_closure_for_job(
       call_args: args,
     )
   case execute_inner(job_state) {
-    Ok(#(NormalCompletion(val, h), final_state)) ->
-      Ok(#(val, State(..state.merge_globals(state, final_state, []), heap: h)))
-    Ok(#(ThrowCompletion(thrown, h), final_state)) ->
-      Error(#(
-        thrown,
-        State(..state.merge_globals(state, final_state, []), heap: h),
+    Ok(#(comp, final_state)) ->
+      Ok(#(
+        comp,
+        State(..state.merge_globals(state, final_state, []), heap: final_state.heap),
       ))
-    Ok(#(YieldCompletion(_, _), _))
-    | Ok(#(completion.AwaitCompletion(_, _), _)) ->
-      panic as "Yield/Await completion should not appear in job execution"
-    Error(vm_err) ->
-      panic as { "VM error in promise job: " <> string.inspect(vm_err) }
+    Error(vm_err) -> Error(vm_err)
   }
 }
 

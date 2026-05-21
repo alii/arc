@@ -16,7 +16,6 @@ import arc/vm/value.{type FuncTemplate, type JsValue, type Ref, JsObject}
 import gleam/dict
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/set
 
 // ============================================================================
 // Public types
@@ -33,8 +32,7 @@ pub type ModuleResult {
 pub type ReplEnv {
   ReplEnv(
     global_object: Ref,
-    lexical_globals: dict.Dict(String, JsValue),
-    const_lexical_globals: set.Set(String),
+    lexical_globals: dict.Dict(String, value.LexicalGlobal),
     symbol_descriptions: dict.Dict(value.SymbolId, String),
     symbol_registry: dict.Dict(String, value.SymbolId),
     /// Realm builtins registry, keyed by RealmSlot ref.
@@ -99,7 +97,6 @@ pub fn run_module(
       builtins,
       global_object,
       dict.new(),
-      set.new(),
       dict.new(),
       dict.new(),
     )
@@ -131,7 +128,6 @@ pub fn run_and_drain_repl(
         builtins,
         env.global_object,
         env.lexical_globals,
-        env.const_lexical_globals,
         env.symbol_descriptions,
         env.symbol_registry,
       ),
@@ -145,7 +141,6 @@ pub fn run_and_drain_repl(
     ReplEnv(
       global_object: drained.global_object,
       lexical_globals: drained.lexical_globals,
-      const_lexical_globals: drained.const_lexical_globals,
       symbol_descriptions: drained.symbol_descriptions,
       symbol_registry: drained.symbol_registry,
       realms: drained.realms,
@@ -154,13 +149,15 @@ pub fn run_and_drain_repl(
 }
 
 /// Call a function value with `this` and `args`, then run the `finish` driver
-/// to drain. The counterpart to `run`/`run_with` for a value you already hold
-/// — e.g. a `receive` export read off a module namespace — so an embedder can
-/// invoke it the way the engine would, without re-evaluating a script. This is
-/// the host-call-then-drain pattern (cf. Node's MakeCallback, QuickJS
-/// `JS_Call` + the `JS_ExecutePendingJob` loop): draining happens at this
-/// outermost call only, so don't call it from inside a host function — use the
-/// re-entrant `state.call` there.
+/// to drain. The counterpart to `run`/`run_with` for a value you already hold —
+/// e.g. a `receive` export read off a module namespace — letting an embedder
+/// invoke it without re-evaluating a script. The host-call-then-drain pattern
+/// (cf. Node's MakeCallback, QuickJS `JS_Call` + `JS_ExecutePendingJob`).
+///
+/// Built on the lossless `interpreter.call_root`, so it shares its shape with
+/// `run`/`run_with`: a thrown value is a `ThrowCompletion`, an engine `VmError`
+/// surfaces as `Error` (not a panic — the embedder is outside the VM and can
+/// handle it). Draining happens once, at this outermost call.
 pub fn run_export(
   callee: JsValue,
   this_val: JsValue,
@@ -170,16 +167,10 @@ pub fn run_export(
   global_object: Ref,
   finish: fn(State) -> State,
 ) -> Result(Completion, VmError) {
-  let executed =
-    interpreter.call_to_completion(
-      callee,
-      this_val,
-      args,
-      heap,
-      builtins,
-      global_object,
-    )
-  use #(settled, drained) <- result.map(settle(executed, finish))
+  use #(settled, drained) <- result.map(settle(
+    interpreter.call_root(callee, this_val, args, heap, builtins, global_object),
+    finish,
+  ))
   completion_of(settled, drained.heap)
 }
 

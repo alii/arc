@@ -659,7 +659,6 @@ fn process_generator_return(
           stack: [result, ..rest_stack],
           pc: outer_state.pc + 1,
           lexical_globals: gen_state.lexical_globals,
-          const_lexical_globals: gen_state.const_lexical_globals,
           job_queue: gen_state.job_queue,
         ),
       )

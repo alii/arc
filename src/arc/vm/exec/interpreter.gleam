@@ -63,23 +63,35 @@ import gleam/string
 // Internal state (types defined in state.gleam for cross-module access)
 // ============================================================================
 
-/// The call_fn callback that gets stored in State.
-/// Delegates to event_loop.run_handler_with_this for re-entrant JS function calls
-/// from native code (e.g. Array.prototype.map's callback invocation).
+/// The call_fn callback stored in State, backing `state.call` — the re-entrant
+/// JS call made from native code (e.g. Array.prototype.map's callback). The
+/// caller already holds a State, so it drives the lossless
+/// `event_loop.call_to_completion` directly and narrows it to the host-fn
+/// `Ok(value)`/`Error(thrown)` contract; a `VmError` or a stray Yield/Await is an
+/// engine bug here (no channel to surface it through, mid-execution) → panic.
 fn call_fn_callback(
   state: State,
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  event_loop.run_handler_with_this(
-    state,
-    callee,
-    this_val,
-    args,
-    execute_inner,
-    call_native,
-  )
+  case
+    event_loop.call_to_completion(
+      state,
+      callee,
+      this_val,
+      args,
+      execute_inner,
+      call_native,
+    )
+  {
+    Ok(#(NormalCompletion(val, _), s)) -> Ok(#(val, s))
+    Ok(#(ThrowCompletion(thrown, _), s)) -> Error(#(thrown, s))
+    Ok(#(YieldCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
+      panic as "Yield/Await completion should not appear in a re-entrant call"
+    Error(vm_err) ->
+      panic as { "VM error in re-entrant call: " <> string.inspect(vm_err) }
+  }
 }
 
 /// The construct_fn callback that gets stored in State.
@@ -98,35 +110,21 @@ fn construct_fn_callback(
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   case target {
     JsObject(ref) -> {
-      // Sentinel bytecode: do_construct saves pc+1 into the SavedFrame (or
-      // advances pc+1 for native constructors), so we need Return at index 1.
-      // Index 0 is never dispatched but present for belt-and-braces.
-      let sentinel_code = tuple_array.from_list([Return, Return])
-      let sentinel_func =
+      // Sentinel frame: do_construct saves pc+1 into the SavedFrame (or advances
+      // pc+1 for native constructors), so the returning constructor resumes at
+      // index 1 — hence a Return there; index 0 is never dispatched.
+      let sentinel =
         value.FuncTemplate(
-          name: None,
-          arity: 0,
-          local_count: 0,
-          bytecode: sentinel_code,
-          constants: tuple_array.from_list([]),
-          functions: tuple_array.from_list([]),
-          env_descriptors: [],
-          is_strict: True,
-          is_arrow: False,
-          is_derived_constructor: False,
-          is_generator: False,
-          is_async: False,
-          is_constructor: False,
-          local_names: None,
-          this_slot: None,
+          ..empty_template(),
+          bytecode: tuple_array.from_list([Return, Return]),
         )
       let isolated =
         State(
           ..state,
           stack: [],
           pc: 0,
-          func: sentinel_func,
-          code: sentinel_code,
+          func: sentinel,
+          code: sentinel.bytecode,
           call_stack: [],
           try_stack: [],
         )
@@ -184,8 +182,7 @@ pub fn new_state(
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
-  lexical_globals: dict.Dict(String, JsValue),
-  const_lexical_globals: set.Set(String),
+  lexical_globals: dict.Dict(String, value.LexicalGlobal),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
 ) -> State {
@@ -194,7 +191,6 @@ pub fn new_state(
     locals:,
     constants: func.constants,
     lexical_globals:,
-    const_lexical_globals:,
     global_object:,
     func:,
     code: func.bytecode,
@@ -241,7 +237,6 @@ pub fn init_state(
     builtins,
     global_object,
     dict.new(),
-    set.new(),
     dict.new(),
     dict.new(),
   )
@@ -278,19 +273,37 @@ pub fn init_module_locals(
   })
 }
 
-/// Call a function `callee` with `this` and `args` from a fresh top-level
-/// frame, running the call (and anything synchronous it triggers) to
-/// completion. This is the embedder analogue of the `Call` opcode and the
-/// counterpart to `run`/`run_with` for a value you already hold — e.g. a module
-/// export read off a namespace — rather than a script template.
-///
-/// A thrown value comes back as a `ThrowCompletion`; a malformed-bytecode
-/// `VmError` propagates as `Error` (unlike `state.call`, which is the
-/// re-entrant call used from within host functions and panics on `VmError`).
-/// Calling an async function returns its pending Promise as the
-/// `NormalCompletion` value — drive the returned State with a `finish` driver
-/// (microtask/macrotask draining) to settle it.
-pub fn call_to_completion(
+/// A function template with no body — every flag off, empty bytecode. Lets the
+/// few places that need a structurally-valid frame they never actually run
+/// (`call_root`, and `construct_fn_callback` with a `Return` spliced in) avoid
+/// hand-rolling the full record.
+fn empty_template() -> FuncTemplate {
+  value.FuncTemplate(
+    name: None,
+    arity: 0,
+    local_count: 0,
+    bytecode: tuple_array.from_list([]),
+    constants: tuple_array.from_list([]),
+    functions: tuple_array.from_list([]),
+    env_descriptors: [],
+    is_strict: True,
+    is_arrow: False,
+    is_derived_constructor: False,
+    is_generator: False,
+    is_async: False,
+    is_constructor: False,
+    local_names: None,
+    this_slot: None,
+  )
+}
+
+/// Call a function value to completion from outside the VM — the cold-start
+/// counterpart to the re-entrant `state.call`, and the engine half of
+/// `entry.run_export`. Stands up a fresh root State (no enclosing frame, no
+/// loaded code) on the given heap/builtins/global and invokes `callee` on it,
+/// losslessly: the full `Completion`, or a `VmError`. Callers already inside the
+/// VM hold a State and use `state.call` instead.
+pub fn call_root(
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
@@ -298,57 +311,8 @@ pub fn call_to_completion(
   builtins: Builtins,
   global_object: Ref,
 ) -> Result(#(Completion, State), VmError) {
-  let seed = bare_call_state(heap, builtins, global_object)
-  case call_value(seed, callee, args, this_val) {
-    // call_value either set up the callee's frame (regular function) or ran it
-    // synchronously (native), leaving control to resume at the sentinel Return;
-    // execute_inner drives that to NormalCompletion with the result on top.
-    Ok(ready) -> execute_inner(ready)
-    Error(#(StepVmError(vm_err), _, _)) -> Error(vm_err)
-    // Thrown at call setup (e.g. callee not callable, or a native threw); the
-    // other StepResults can't escape call_value's setup, handled defensively.
-    Error(#(_step, thrown, errored)) ->
-      Ok(#(ThrowCompletion(thrown, errored.heap), errored))
-  }
-}
-
-/// A do-nothing top-level frame for `call_to_completion`. Mirrors
-/// `construct_fn_callback`'s sentinel: when the called function returns, the
-/// `Return` op restores `code` from the saved frame's template (not the live
-/// `code` field), and `call_function` saved the caller pc as pc+1 = 1, so a
-/// `Return` must sit at index 1. Index 0 is never dispatched — execution starts
-/// in the callee's frame, not here.
-fn bare_call_state(heap: Heap, builtins: Builtins, global_object: Ref) -> State {
-  let sentinel_code = tuple_array.from_list([Return, Return])
-  let sentinel_func =
-    value.FuncTemplate(
-      name: None,
-      arity: 0,
-      local_count: 0,
-      bytecode: sentinel_code,
-      constants: tuple_array.from_list([]),
-      functions: tuple_array.from_list([]),
-      env_descriptors: [],
-      is_strict: True,
-      is_arrow: False,
-      is_derived_constructor: False,
-      is_generator: False,
-      is_async: False,
-      is_constructor: False,
-      local_names: None,
-      this_slot: None,
-    )
-  new_state(
-    sentinel_func,
-    tuple_array.from_list([]),
-    heap,
-    builtins,
-    global_object,
-    dict.new(),
-    set.new(),
-    dict.new(),
-    dict.new(),
-  )
+  init_state(empty_template(), heap, builtins, global_object, False)
+  |> event_loop.call_to_completion(callee, this_val, args, execute_inner, call_native)
 }
 
 /// Allocate a closure (FunctionObject) for `child_template`, capturing
@@ -753,13 +717,15 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     GetGlobal(name) -> {
       case dict.get(state.lexical_globals, name) {
         // Lexical binding exists — check for TDZ
-        Ok(JsUninitialized) ->
+        Ok(value.Let(JsUninitialized)) | Ok(value.Const(JsUninitialized)) ->
           state.throw_reference_error(
             state,
             "Cannot access '" <> name <> "' before initialization",
           )
-        Ok(value) ->
-          Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
+        Ok(binding) -> {
+          let val = value.lexical_global_value(binding)
+          Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
+        }
         // Not in lexical → try object record (globalThis)
         Error(_) -> {
           let key = Named(name)
@@ -820,92 +786,85 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     // §9.1.1.4.5 SetMutableBinding — two-phase: declarative then object record
     PutGlobal(name) -> {
       case state.stack {
-        [value, ..rest] -> {
-          // 1. Check const lexical
-          case set.contains(state.const_lexical_globals, name) {
-            True ->
+        [val, ..rest] -> {
+          case dict.get(state.lexical_globals, name) {
+            // const → assignment rejected (even in TDZ, per spec ordering)
+            Ok(value.Const(_)) ->
               state.throw_type_error(state, "Assignment to constant variable.")
-            False ->
-              // 2. Check lexical globals
-              case dict.get(state.lexical_globals, name) {
-                Ok(JsUninitialized) ->
-                  state.throw_reference_error(
-                    state,
-                    "Cannot access '" <> name <> "' before initialization",
-                  )
-                Ok(_) ->
-                  Ok(
-                    State(
-                      ..state,
-                      stack: rest,
-                      lexical_globals: dict.insert(
-                        state.lexical_globals,
-                        name,
-                        value,
-                      ),
-                      pc: state.pc + 1,
-                    ),
-                  )
-                // 3. Object record path
-                Error(_) -> {
-                  let key = Named(name)
-                  case state.func.is_strict {
-                    True ->
-                      // Strict mode: must exist on globalThis or throw
-                      case
-                        object.has_property(
-                          state.heap,
-                          state.global_object,
-                          key,
-                        )
-                      {
-                        False ->
-                          state.throw_reference_error(
-                            state,
-                            name <> " is not defined",
-                          )
-                        True ->
-                          case
-                            object.set_value(
-                              State(..state, stack: rest),
-                              state.global_object,
-                              key,
-                              value,
-                              JsObject(state.global_object),
-                            )
-                          {
-                            Ok(#(state, True)) ->
-                              Ok(State(..state, pc: state.pc + 1))
-                            Ok(#(state, False)) ->
-                              state.throw_type_error(
-                                state,
-                                "Cannot assign to read only property '"
-                                  <> name
-                                  <> "' of object '#<Object>'",
-                              )
-                            Error(#(thrown, state)) ->
-                              Error(#(Thrown, thrown, state))
-                          }
-                      }
+            // let in TDZ → reference error
+            Ok(value.Let(JsUninitialized)) ->
+              state.throw_reference_error(
+                state,
+                "Cannot access '" <> name <> "' before initialization",
+              )
+            // initialized let → rebind
+            Ok(value.Let(_)) ->
+              Ok(
+                State(
+                  ..state,
+                  stack: rest,
+                  lexical_globals: dict.insert(
+                    state.lexical_globals,
+                    name,
+                    value.Let(val),
+                  ),
+                  pc: state.pc + 1,
+                ),
+              )
+            // Not in lexical → object record path
+            Error(_) -> {
+              let key = Named(name)
+              case state.func.is_strict {
+                True ->
+                  // Strict mode: must exist on globalThis or throw
+                  case
+                    object.has_property(state.heap, state.global_object, key)
+                  {
                     False ->
-                      // Sloppy mode: set on globalThis (creates if needed,
-                      // returns False for non-writable → silently ignore)
+                      state.throw_reference_error(
+                        state,
+                        name <> " is not defined",
+                      )
+                    True ->
                       case
                         object.set_value(
                           State(..state, stack: rest),
                           state.global_object,
                           key,
-                          value,
+                          val,
                           JsObject(state.global_object),
                         )
                       {
-                        Ok(#(state, _)) -> Ok(State(..state, pc: state.pc + 1))
+                        Ok(#(state, True)) ->
+                          Ok(State(..state, pc: state.pc + 1))
+                        Ok(#(state, False)) ->
+                          state.throw_type_error(
+                            state,
+                            "Cannot assign to read only property '"
+                              <> name
+                              <> "' of object '#<Object>'",
+                          )
                         Error(#(thrown, state)) ->
                           Error(#(Thrown, thrown, state))
                       }
                   }
-                }
+                False ->
+                  // Sloppy mode: set on globalThis (creates if needed,
+                  // returns False for non-writable → silently ignore)
+                  case
+                    object.set_value(
+                      State(..state, stack: rest),
+                      state.global_object,
+                      key,
+                      val,
+                      JsObject(state.global_object),
+                    )
+                  {
+                    Ok(#(state, _)) -> Ok(State(..state, pc: state.pc + 1))
+                    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+                  }
               }
+            }
           }
         }
         [] -> underflow(state, "PutGlobal")
@@ -1005,35 +964,38 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
 
     // §9.1.1.4.16 CreateGlobalLexBinding — create let/const in lexical record
     DeclareGlobalLex(name, is_const) -> {
-      let state =
+      // TDZ slot, tagged const/let so PutGlobal and InitGlobalLex can tell them apart.
+      let binding = case is_const {
+        True -> value.Const(JsUninitialized)
+        False -> value.Let(JsUninitialized)
+      }
+      Ok(
         State(
           ..state,
-          lexical_globals: dict.insert(
-            state.lexical_globals,
-            name,
-            JsUninitialized,
-          ),
-          const_lexical_globals: case is_const {
-            True -> set.insert(state.const_lexical_globals, name)
-            False -> set.delete(state.const_lexical_globals, name)
-          },
+          lexical_globals: dict.insert(state.lexical_globals, name, binding),
           pc: state.pc + 1,
-        )
-      Ok(state)
+        ),
+      )
     }
 
-    // Initialize a lexical global (TDZ → value)
+    // Initialize a lexical global (TDZ → value), preserving its const/let tag.
     InitGlobalLex(name) -> {
       case state.stack {
-        [value, ..rest] ->
+        [val, ..rest] -> {
+          let binding = case dict.get(state.lexical_globals, name) {
+            Ok(existing) -> value.set_lexical_global_value(existing, val)
+            // No prior DeclareGlobalLex — default to let.
+            Error(Nil) -> value.Let(val)
+          }
           Ok(
             State(
               ..state,
               stack: rest,
-              lexical_globals: dict.insert(state.lexical_globals, name, value),
+              lexical_globals: dict.insert(state.lexical_globals, name, binding),
               pc: state.pc + 1,
             ),
           )
+        }
         [] -> underflow(state, "InitGlobalLex")
       }
     }
@@ -1057,12 +1019,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     TypeofGlobal(name) -> {
       case dict.get(state.lexical_globals, name) {
         // TDZ — typeof on uninitialized lexical still throws per spec
-        Ok(JsUninitialized) ->
+        Ok(value.Let(JsUninitialized)) | Ok(value.Const(JsUninitialized)) ->
           state.throw_reference_error(
             state,
             "Cannot access '" <> name <> "' before initialization",
           )
-        Ok(val) ->
+        Ok(binding) -> {
+          let val = value.lexical_global_value(binding)
           Ok(
             State(
               ..state,
@@ -1073,6 +1036,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               pc: state.pc + 1,
             ),
           )
+        }
         Error(_) -> {
           // Object record: try globalThis, return "undefined" if not found
           let key = Named(name)
@@ -1411,6 +1375,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         [] -> underflow(state, "Throw")
       }
     }
+
+    // Compiler-proven throw (resolved during scope resolution). Const-assignment
+    // mirrors PutGlobal's const branch for global lexicals.
+    opcode.ThrowError(opcode.ConstAssignment) ->
+      state.throw_type_error(state, "Assignment to constant variable.")
 
     // ---- Object property access --------------------------------------
     NewObject -> {

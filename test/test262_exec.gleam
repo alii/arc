@@ -740,7 +740,6 @@ fn eval_harness(
         entry.ReplEnv(
           global_object:,
           lexical_globals: dict.new(),
-          const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
           realms: dict.new(),
@@ -755,7 +754,6 @@ fn eval_harness(
           value.RealmSlot(
             global_object:,
             lexical_globals: dict.new(),
-            const_lexical_globals: set.new(),
             symbol_descriptions: dict.new(),
             symbol_registry: dict.new(),
           ),
@@ -791,7 +789,6 @@ fn eval_harness(
         entry.ReplEnv(
           global_object:,
           lexical_globals: dict.new(),
-          const_lexical_globals: set.new(),
           symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
           realms:,

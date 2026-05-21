@@ -135,6 +135,11 @@ pub type Op {
 
   // -- Exception Handling --
   Throw
+  /// Throw an error the compiler proved is unconditional at this point — the
+  /// binding kind / syntactic context is only known during scope resolution, so
+  /// the throw is resolved there and emitted as this op. Mirrors QuickJS
+  /// `OP_throw_error(atom, type)`. See ThrowErrorKind.
+  ThrowError(kind: ThrowErrorKind)
   PushTry(catch_target: Int)
   PopTry
 
@@ -264,6 +269,15 @@ pub type AccessorKind {
   Setter
 }
 
+/// The kind of compiler-proven throw emitted by `ThrowError`. Mirrors QuickJS's
+/// `OP_throw_error` type byte (e.g. `JS_THROW_VAR_RO`); add variants here as
+/// more statically-resolvable throws are needed.
+pub type ThrowErrorKind {
+  /// Assignment to a `const` binding (read-only). §9.1.1.1.5 SetMutableBinding
+  /// on an immutable binding → TypeError.
+  ConstAssignment
+}
+
 // ============================================================================
 // Operator Kinds
 // ============================================================================
@@ -317,6 +331,10 @@ pub type IrOp {
   // -- Scope-aware variable access (resolved in Phase 2) --
   IrScopeGetVar(name: String)
   IrScopePutVar(name: String)
+  /// Initialization of a let/const binding (not reassignment). Lowers like
+  /// IrScopePutVar but is never const-checked. Mirrors QuickJS
+  /// `OP_scope_put_var_init` vs `OP_scope_put_var`.
+  IrScopeInitVar(name: String)
   IrScopeTypeofVar(name: String)
   IrScopeReboxVar(name: String)
   /// Read/write the lexical-`this` slot. Phase 2 lowers to GetLocal/GetBoxed
@@ -431,4 +449,8 @@ pub type IrOp {
   IrDeclareGlobalVar(name: String)
   IrDeclareGlobalLex(name: String, is_const: Bool)
   IrInitGlobalLex(name: String)
+
+  /// Lowers 1:1 to ThrowError. Emitted by Phase 2 when scope resolution proves
+  /// a throw (e.g. an assignment targets a const local binding).
+  IrThrowError(kind: ThrowErrorKind)
 }
