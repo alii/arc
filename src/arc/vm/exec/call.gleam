@@ -1333,10 +1333,12 @@ pub fn do_construct(
   dispatch_fn: DispatchNativeFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case heap.read(state.heap, ctor_ref) {
+    // Functions lacking [[Construct]] — arrows, generators, async functions,
+    // and methods/getters/setters — throw when used with `new` (§7.2.4). The
+    // capability is stored on the template (set at compile from the syntactic
+    // kind); class constructors and normal functions carry it.
     Some(ObjectSlot(kind: FunctionObject(func_template:, ..), ..))
-      if func_template.is_arrow
-      || func_template.is_generator
-      || func_template.is_async
+      if !func_template.is_constructor
     ->
       state.throw_type_error(
         state,

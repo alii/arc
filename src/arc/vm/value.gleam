@@ -103,6 +103,13 @@ pub type FuncTemplate {
     is_derived_constructor: Bool,
     is_generator: Bool,
     is_async: Bool,
+    /// Stored [[Construct]] capability (ES2024 §7.2.4), the user-function
+    /// analogue of NativeFunction's `constructible`. True for normal function
+    /// declarations/expressions and class constructors; False for arrows,
+    /// generators, async functions, and methods/getters/setters. Computed at
+    /// compile time from the function's syntactic kind (cf. QuickJS
+    /// `is_constructor` / JSC `ConstructAbility`).
+    is_constructor: Bool,
     /// Present only for functions that contain a direct eval call.
     /// Maps variable name → local slot index. All such locals are boxed
     /// (BoxSlot refs), so direct eval can read/write them by index.

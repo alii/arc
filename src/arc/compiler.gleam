@@ -89,6 +89,8 @@ fn compile_module_with_scope(
           False,
           False,
           False,
+          // Script / module body — not a constructor.
+          False,
           None,
           resolved.this_slot,
         )
@@ -213,6 +215,8 @@ pub fn compile_eval_direct(
             False,
             False,
             False,
+            False,
+            // Eval body — not a constructor.
             False,
             None,
             resolved.this_slot,
@@ -388,6 +392,8 @@ fn compile_script(
           False,
           False,
           False,
+          // Script / module body — not a constructor.
+          False,
           None,
           resolved.this_slot,
         )
@@ -522,6 +528,7 @@ fn compile_child(
     child.is_derived_constructor,
     child.is_generator,
     child.is_async,
+    child.is_constructor,
     local_names,
     resolved.this_slot,
   )
