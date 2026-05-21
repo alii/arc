@@ -1,0 +1,15 @@
+{
+  "name": "arc-hero",
+  "private": true,
+  "type": "module",
+  "description": "Generates the README hero image (dark + light) from one source, matching the website's Rose Pine theme and Iosevka Curly font.",
+  "scripts": {
+    "generate": "bun run generate.ts"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "satori": "0.12.2",
+    "sharp": "0.33.5",
+    "wawoff2": "2.0.1"
+  }
+}
