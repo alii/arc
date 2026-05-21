@@ -72,12 +72,12 @@ decode_escapes_loop(<<"\\", Rest/binary>>, Acc) ->
         %% \u{...} — variable hex digits
         <<"u{", T/binary>> ->
             {Hex, Rest1} = read_until_brace(T, []),
-            CP = list_to_integer(Hex, 16),
-            decode_escapes_loop(Rest1, [encode_codepoint(CP) | Acc]);
+            CU = list_to_integer(Hex, 16),
+            handle_unicode_escape(CU, Rest1, Acc);
         %% \uHHHH — 4 hex digits
         <<"u", H1, H2, H3, H4, T/binary>> ->
-            CP = list_to_integer([H1, H2, H3, H4], 16),
-            decode_escapes_loop(T, [encode_codepoint(CP) | Acc]);
+            CU = list_to_integer([H1, H2, H3, H4], 16),
+            handle_unicode_escape(CU, T, Acc);
         %% Legacy octal escapes \0..\7 (sloppy mode; lexer validated this)
         %% \0 not followed by digit → null character
         <<"0", T/binary>> ->
@@ -125,8 +125,44 @@ read_until_brace(<<C, Rest/binary>>, Acc) ->
 read_until_brace(<<>>, Acc) ->
     {lists:reverse(Acc), <<>>}.
 
+%% Handle the code unit from a \u escape. JS string literals are UTF-16, so a
+%% high surrogate (D800..DBFF) immediately followed by a low-surrogate escape
+%% (DC00..DFFF) forms a single astral codepoint. Lone surrogates can't be
+%% encoded as UTF-8, so encode_codepoint maps them to U+FFFD (matching the rest
+%% of the runtime — JSON.parse, String.fromCharCode).
+handle_unicode_escape(CU, Rest, Acc) when CU >= 16#D800, CU =< 16#DBFF ->
+    case read_low_surrogate_escape(Rest) of
+        {ok, Low, Rest1} ->
+            CP = 16#10000 + (CU - 16#D800) * 16#400 + (Low - 16#DC00),
+            decode_escapes_loop(Rest1, [encode_codepoint(CP) | Acc]);
+        error ->
+            decode_escapes_loop(Rest, [encode_codepoint(CU) | Acc])
+    end;
+handle_unicode_escape(CU, Rest, Acc) ->
+    decode_escapes_loop(Rest, [encode_codepoint(CU) | Acc]).
+
+%% Peek for a \uHHHH or \u{...} escape that is a low surrogate (DC00..DFFF).
+%% Returns {ok, Low, Rest} consuming it, or `error` without consuming so the
+%% high surrogate is emitted on its own. The lexer has already validated escape
+%% syntax, so the hex digits are well-formed.
+read_low_surrogate_escape(<<"\\u{", T/binary>>) ->
+    {Hex, Rest} = read_until_brace(T, []),
+    classify_low_surrogate(list_to_integer(Hex, 16), Rest);
+read_low_surrogate_escape(<<"\\u", H1, H2, H3, H4, T/binary>>) ->
+    classify_low_surrogate(list_to_integer([H1, H2, H3, H4], 16), T);
+read_low_surrogate_escape(_) ->
+    error.
+
+classify_low_surrogate(Low, Rest) when Low >= 16#DC00, Low =< 16#DFFF ->
+    {ok, Low, Rest};
+classify_low_surrogate(_, _) ->
+    error.
+
 encode_codepoint(CP) when CP =< 16#7F ->
     <<CP>>;
+%% Lone surrogates have no UTF-8 encoding (<<CP/utf8>> raises badarg) → U+FFFD.
+encode_codepoint(CP) when CP >= 16#D800, CP =< 16#DFFF ->
+    <<16#EF, 16#BF, 16#BD>>;
 encode_codepoint(CP) when CP =< 16#10FFFF ->
     <<CP/utf8>>;
 encode_codepoint(_) ->
