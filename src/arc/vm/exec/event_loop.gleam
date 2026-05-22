@@ -280,7 +280,10 @@ fn call_closure(
     Ok(#(comp, final_state)) ->
       Ok(#(
         comp,
-        State(..state.merge_globals(state, final_state, []), heap: final_state.heap),
+        State(
+          ..state.merge_globals(state, final_state, []),
+          heap: final_state.heap,
+        ),
       ))
     Error(vm_err) -> Error(vm_err)
   }

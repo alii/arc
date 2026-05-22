@@ -1,9 +1,8 @@
 import arc/beam
 import arc/compiler
-import arc/module
+import arc/engine
 import arc/parser
 import arc/repl/examples
-import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/process_objects
 import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
@@ -370,22 +369,9 @@ fn handle_repl_line(
     }
 
     "/reset" -> {
-      let h = heap.new()
-      let #(h, b) = builtins.init(h)
-      let #(h, global_object) = builtins.globals(b, h)
-      let h = beam.install_globals(h, b, global_object, "Arc")
-      let env =
-        entry.ReplEnv(
-          global_object:,
-          lexical_globals: dict.new(),
-          symbol_descriptions: dict.new(),
-          symbol_registry: dict.new(),
-          realms: dict.new(),
-        )
-      let state = ReplState(heap: h, builtins: b, env:)
       clear()
       banner()
-      Some(state)
+      Some(new_repl_state())
     }
 
     "/help" -> {
@@ -487,18 +473,12 @@ fn run_module_file(
   source: String,
   finish: fn(state.State) -> state.State,
 ) -> Nil {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  let h = beam.install_globals(h, b, global_object, "Arc")
-
-  case module.compile_bundle(path, source, resolve_and_load_dep) {
-    Error(err) -> print_module_error(err)
-    Ok(bundle) ->
-      case module.evaluate_bundle(bundle, h, b, global_object, finish) {
-        Ok(_) -> Nil
-        Error(err) -> print_module_error(err)
-      }
+  let eng = engine.new() |> beam.install("Arc")
+  case
+    engine.eval_module_with(eng, path, source, resolve_and_load_dep, finish)
+  {
+    Ok(_) -> Nil
+    Error(err) -> io.println(engine.eval_error_message(err))
   }
 }
 
@@ -574,58 +554,22 @@ fn run_script_file(
   source: String,
   finish: fn(state.State) -> state.State,
 ) -> Nil {
-  case parser.parse(source, parser.Script) {
-    Error(err) ->
-      io.println("SyntaxError: " <> parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compiler.compile(program) {
-        Error(compiler.Unsupported(desc)) ->
-          io.println("compile error: unsupported " <> desc)
-        Error(compiler.BreakOutsideLoop) ->
-          io.println("compile error: break outside loop")
-        Error(compiler.ContinueOutsideLoop) ->
-          io.println("compile error: continue outside loop")
-        Ok(template) -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, global_object) = builtins.globals(b, h)
-          let h = beam.install_globals(h, b, global_object, "Arc")
-          case entry.run_with(template, h, b, global_object, finish) {
-            Ok(NormalCompletion(_, _)) -> Nil
-            Ok(ThrowCompletion(val, new_heap)) ->
-              io.println("Uncaught " <> object.format_error(val, new_heap))
-            Ok(YieldCompletion(_, _)) -> Nil
-            Ok(completion.AwaitCompletion(_, _)) -> Nil
-            Error(vm_err) ->
-              io.println("InternalError: " <> inspect_vm_error(vm_err))
-          }
-        }
-      }
+  let eng = engine.new() |> beam.install("Arc")
+  case engine.eval_with(eng, source, finish) {
+    Ok(#(ThrowCompletion(val, new_heap), _)) ->
+      io.println("Uncaught " <> object.format_error(val, new_heap))
+    Ok(_) -> Nil
+    Error(err) -> io.println(engine.eval_error_message(err))
   }
 }
 
-/// Format a module error for display.
-fn print_module_error(err: module.ModuleError) -> Nil {
-  case err {
-    module.ParseError(msg) -> io.println("SyntaxError: " <> msg)
-    module.CompileError(msg) -> io.println("CompileError: " <> msg)
-    module.ResolutionError(msg) -> io.println("ResolutionError: " <> msg)
-    module.LinkError(msg) -> io.println("LinkError: " <> msg)
-    module.EvaluationError(val, heap) ->
-      io.println("Uncaught " <> object.format_error(val, heap))
-  }
-}
-
-fn new_repl_state() {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  let h = beam.install_globals(h, b, global_object, "Arc")
+fn new_repl_state() -> ReplState {
+  let eng = engine.new() |> beam.install("Arc")
   ReplState(
-    heap: h,
-    builtins: b,
+    heap: engine.heap(eng),
+    builtins: engine.builtins(eng),
     env: entry.ReplEnv(
-      global_object:,
+      global_object: engine.global(eng),
       lexical_globals: dict.new(),
       symbol_descriptions: dict.new(),
       symbol_registry: dict.new(),

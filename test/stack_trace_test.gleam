@@ -33,7 +33,8 @@ fn run_js(source: String) -> Result(Completion, String) {
 fn eval_string(source: String) -> String {
   case run_js(source) {
     Ok(NormalCompletion(JsString(s), _)) -> s
-    other -> panic as { "expected string completion, got " <> string.inspect(other) }
+    other ->
+      panic as { "expected string completion, got " <> string.inspect(other) }
   }
 }
 
@@ -77,10 +78,7 @@ pub fn stack_trace_limit_default_test() {
 
 pub fn stack_trace_limit_zero_drops_frames_test() {
   // limit 0 => only the header line, no "    at " frames.
-  let s =
-    eval_string(
-      "Error.stackTraceLimit = 0; new Error('x').stack",
-    )
+  let s = eval_string("Error.stackTraceLimit = 0; new Error('x').stack")
   assert s == "Error: x"
 }
 
@@ -97,10 +95,7 @@ pub fn stack_trace_limit_one_keeps_one_frame_test() {
 }
 
 pub fn capture_stack_trace_sets_string_test() {
-  let s =
-    eval_string(
-      "var o = {}; Error.captureStackTrace(o); typeof o.stack",
-    )
+  let s = eval_string("var o = {}; Error.captureStackTrace(o); typeof o.stack")
   assert s == "string"
 }
 
@@ -123,9 +118,7 @@ pub fn capture_stack_trace_non_object_throws_test() {
 }
 
 pub fn subclass_error_has_stack_test() {
-  let src =
-    "class MyError extends Error {}\n"
-    <> "new MyError('boom').stack"
+  let src = "class MyError extends Error {}\n" <> "new MyError('boom').stack"
   let s = eval_string(src)
   assert string.contains(s, "boom")
   assert string.contains(s, "at ")

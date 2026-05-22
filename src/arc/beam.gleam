@@ -31,6 +31,7 @@ import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
+import arc/vm/ops/object
 import arc/vm/state.{type Heap, type HostFn, type State, State}
 import arc/vm/value.{
   type JsValue, type PortableMessage, type Ref, JsNumber, JsObject, JsString,
@@ -196,27 +197,9 @@ pub fn install_globals(
   name: String,
 ) -> Heap {
   let #(h, methods) =
-    list.fold(namespace(), #(h, []), fn(acc, spec) {
-      let #(h, props) = acc
-      let #(method_name, arity, impl) = spec
-      let #(h, fn_ref) =
-        common.alloc_host_fn(h, b.function.prototype, impl, method_name, arity)
-      #(h, [#(method_name, value.builtin_property(JsObject(fn_ref))), ..props])
-    })
+    common.alloc_host_methods(h, b.function.prototype, namespace())
   let #(h, ns_ref) = common.init_namespace(h, b.object.prototype, name, methods)
-  use slot <- heap.update(h, global)
-  case slot {
-    ObjectSlot(properties:, ..) ->
-      ObjectSlot(
-        ..slot,
-        properties: dict.insert(
-          properties,
-          Named(name),
-          value.builtin_property(JsObject(ns_ref)),
-        ),
-      )
-    other -> other
-  }
+  object.define_method_property(h, global, value.Named(name), JsObject(ns_ref))
 }
 
 /// Method specs for `engine.define_namespace`. Exposed so embedders can

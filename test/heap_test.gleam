@@ -241,7 +241,11 @@ pub fn gc_traces_through_closure_slot_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_template: dummy_template(), env: ref_env, home_object: None),
+        kind: FunctionObject(
+          func_template: dummy_template(),
+          env: ref_env,
+          home_object: None,
+        ),
         properties: dict.new(),
         symbol_properties: [],
         elements: elements.new(),
@@ -292,7 +296,11 @@ pub fn mixed_live_dead_partition_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_template: dummy_template(), env: live_env, home_object: None),
+        kind: FunctionObject(
+          func_template: dummy_template(),
+          env: live_env,
+          home_object: None,
+        ),
         properties: dict.new(),
         symbol_properties: [],
         elements: elements.new(),
@@ -338,7 +346,11 @@ pub fn gc_traces_through_function_object_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_template: dummy_template(), env: ref_env, home_object: None),
+        kind: FunctionObject(
+          func_template: dummy_template(),
+          env: ref_env,
+          home_object: None,
+        ),
         properties: dict.new(),
         symbol_properties: [],
         elements: elements.new(),
@@ -366,7 +378,11 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_template: dummy_template(), env: ref_env, home_object: None),
+        kind: FunctionObject(
+          func_template: dummy_template(),
+          env: ref_env,
+          home_object: None,
+        ),
         properties: dict.new(),
         symbol_properties: [],
         elements: elements.new(),
@@ -378,7 +394,11 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_template: dummy_template(), env: ref_env, home_object: None),
+        kind: FunctionObject(
+          func_template: dummy_template(),
+          env: ref_env,
+          home_object: None,
+        ),
         properties: dict.new(),
         symbol_properties: [],
         elements: elements.new(),
@@ -406,7 +426,11 @@ pub fn gc_traces_through_box_slot_test() {
     heap.alloc(
       h,
       ObjectSlot(
-        kind: FunctionObject(func_template: dummy_template(), env: ref_env, home_object: None),
+        kind: FunctionObject(
+          func_template: dummy_template(),
+          env: ref_env,
+          home_object: None,
+        ),
         properties: dict.new(),
         symbol_properties: [],
         elements: elements.new(),

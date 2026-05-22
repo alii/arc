@@ -3,6 +3,7 @@ import arc/engine
 import arc/vm/builtins/console
 import arc/vm/completion.{NormalCompletion}
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
+import gleam/option.{Some}
 
 // ----------------------------------------------------------------------------
 // Serialization — roundtrip
@@ -277,6 +278,20 @@ pub fn define_namespace_creates_object_with_methods_test() {
   assert value == JsNumber(Finite(24.0))
 }
 
+pub fn define_namespace_has_tostringtag_test() {
+  // A namespace built via the facade must carry @@toStringTag, matching every
+  // built-in namespace (Math/JSON/console) — not report "[object Object]".
+  let eng =
+    engine.new()
+    |> engine.define_namespace("widgets", [
+      #("noop", 0, fn(_args, _this, state) { #(state, Ok(JsUndefined)) }),
+    ])
+
+  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+    engine.eval(eng, "Object.prototype.toString.call(widgets)")
+  assert value == JsString("[object widgets]")
+}
+
 pub fn define_global_installs_value_test() {
   let eng =
     engine.new()
@@ -312,6 +327,67 @@ pub fn host_fn_can_throw_test() {
   let assert Ok(#(NormalCompletion(value:, ..), _)) =
     engine.eval(eng, "try { boom() } catch (e) { 'caught:' + e }")
   assert value == JsString("caught:kaboom")
+}
+
+// ----------------------------------------------------------------------------
+// Module evaluation — eval_module / read_export / call
+// ----------------------------------------------------------------------------
+
+/// Single self-contained module — reject every import.
+fn reject_imports(_raw: String, _parent: String) {
+  Error("no imports")
+}
+
+pub fn eval_module_reads_export_test() {
+  let eng = engine.new()
+  let assert Ok(#(evaluated, eng)) =
+    engine.eval_module(
+      eng,
+      "test:mod",
+      "export const answer = 42; export function noop() {}",
+      reject_imports,
+    )
+  let assert Some(ns) = evaluated.namespace
+  assert engine.read_export(eng, ns, "answer") == Some(JsNumber(Finite(42.0)))
+  // Missing exports are None, not an error.
+  assert engine.read_export(eng, ns, "missing") == option.None
+}
+
+pub fn call_export_threads_module_state_test() {
+  // The otters lifecycle: evaluate a module, read a function export, then call
+  // it repeatedly — module-scoped state in the closure must persist across
+  // calls because each call threads the heap forward via the returned engine.
+  let eng = engine.new()
+  let assert Ok(#(evaluated, eng)) =
+    engine.eval_module(
+      eng,
+      "test:counter",
+      "let count = 0;
+       export function bump(n) { count += n; return count; }",
+      reject_imports,
+    )
+  let assert Some(ns) = evaluated.namespace
+  let assert Some(bump) = engine.read_export(eng, ns, "bump")
+
+  let assert Ok(#(NormalCompletion(value:, ..), eng)) =
+    engine.call(eng, bump, JsUndefined, [JsNumber(Finite(5.0))])
+  assert value == JsNumber(Finite(5.0))
+
+  let assert Ok(#(NormalCompletion(value:, ..), _eng)) =
+    engine.call(eng, bump, JsUndefined, [JsNumber(Finite(3.0))])
+  assert value == JsNumber(Finite(8.0))
+}
+
+pub fn eval_module_syntax_error_test() {
+  let assert Error(err) =
+    engine.eval_module(
+      engine.new(),
+      "test:bad",
+      "export const = ;",
+      reject_imports,
+    )
+  // Surfaces a formatted SyntaxError, not a panic.
+  assert engine.eval_error_message(err) != ""
 }
 
 // ----------------------------------------------------------------------------

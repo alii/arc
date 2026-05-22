@@ -18,20 +18,19 @@ import arc/vm/opcode.{
   ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal,
   Call, CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
   CallMethodApply, CallSuper, CallSuperApply, CheckSuperThis, CreateArguments,
-  CreateRestArray, DeclareEvalVar,
-  DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
-  DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
-  DefineMethodField, DefineMethodFieldComputed,
-  DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
-  GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal,
-  GetIterator, GetLocal, GetPrivateField, GetPrivateField2, GetSuperProp,
-  GetSuperProp2, GetSuperPropComputed, GetSuperPropComputed2, InitGlobalLex,
-  InitialYield, IteratorCheckObject, IteratorClose, IteratorCloseThrow,
-  IteratorNext, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  MakeClosure, NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop,
-  PrivateIn, PushConst, PushTry, PutBoxed, PutElem, PutEvalVar, PutField,
-  PutGlobal, PutLocal, PutPrivateField, PutSuperProp, PutSuperPropComputed,
-  Return, SetLine, SetupDerivedClass, Swap, TypeOf,
+  CreateRestArray, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
+  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
+  DefineMethod, DefineMethodComputed, DefineMethodField,
+  DefineMethodFieldComputed, DeleteElem, DeleteField, Dup, ForInNext, ForInStart,
+  GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2,
+  GetGlobal, GetIterator, GetLocal, GetPrivateField, GetPrivateField2,
+  GetSuperProp, GetSuperProp2, GetSuperPropComputed, GetSuperPropComputed2,
+  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
+  IteratorCloseThrow, IteratorNext, IteratorRest, Jump, JumpIfFalse,
+  JumpIfNullish, JumpIfTrue, MakeClosure, NewObject, NewRegExp, ObjectRestCopy,
+  ObjectSpread, Pop, PrivateIn, PushConst, PushTry, PutBoxed, PutElem,
+  PutEvalVar, PutField, PutGlobal, PutLocal, PutPrivateField, PutSuperProp,
+  PutSuperPropComputed, Return, SetLine, SetupDerivedClass, Swap, TypeOf,
   TypeofEvalVar, TypeofGlobal, UnaryOp, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
@@ -312,7 +311,13 @@ pub fn call_root(
   global_object: Ref,
 ) -> Result(#(Completion, State), VmError) {
   init_state(empty_template(), heap, builtins, global_object, False)
-  |> event_loop.call_to_completion(callee, this_val, args, execute_inner, call_native)
+  |> event_loop.call_to_completion(
+    callee,
+    this_val,
+    args,
+    execute_inner,
+    call_native,
+  )
 }
 
 /// Allocate a closure (FunctionObject) for `child_template`, capturing
@@ -2287,7 +2292,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       let key = value.canonical_key(name)
       let this_val = read_this_local(state)
       get_super_value(state, key, fn(method, state) {
-        State(..state, stack: [method, this_val, ..state.stack], pc: state.pc + 1)
+        State(
+          ..state,
+          stack: [method, this_val, ..state.stack],
+          pc: state.pc + 1,
+        )
       })
     }
 
@@ -2944,7 +2953,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // `from_index` onward (the params before the rest are bound positionally).
       let rest_args = list.drop(state.call_args, from_index)
       let #(heap, ref) =
-        common.alloc_array(state.heap, rest_args, state.builtins.array.prototype)
+        common.alloc_array(
+          state.heap,
+          rest_args,
+          state.builtins.array.prototype,
+        )
       Ok(
         State(
           ..state,
@@ -3293,7 +3306,8 @@ fn callee_home_object(state: State) -> Option(Ref) {
   case state.callee_ref {
     Some(fn_ref) ->
       case heap.read(state.heap, fn_ref) {
-        Some(ObjectSlot(kind: FunctionObject(home_object: home, ..), ..)) -> home
+        Some(ObjectSlot(kind: FunctionObject(home_object: home, ..), ..)) ->
+          home
         _ -> None
       }
     None -> None

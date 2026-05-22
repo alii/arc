@@ -8,22 +8,21 @@ import arc/vm/opcode.{
   type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
   IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp,
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
-  IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCreateArguments,
-  IrCreateRestArray, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
-  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDefineMethodComputed, IrDefineMethodField, IrDefineMethodFieldComputed,
-  IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
-  IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField,
-  IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2, IrGetSuperProp,
-  IrGetSuperProp2, IrGetSuperPropComputed, IrGetSuperPropComputed2, IrGetThis,
-  IrCheckSuperThis,
-  IrGosub, IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject,
-  IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext, IrIteratorRest, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
-  IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry,
-  IrPrivateIn, IrPushConst, IrPushTry, IrPutElem, IrPutField, IrPutPrivateField,
-  IrPutSuperProp, IrPutSuperPropComputed, IrRet, IrReturn, IrScopeGetVar,
-  IrScopeInitVar, IrScopePutVar, IrScopeReboxVar,
+  IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCheckSuperThis,
+  IrCreateArguments, IrCreateRestArray, IrDeclareGlobalLex, IrDeclareGlobalVar,
+  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed,
+  IrDefineMethodField, IrDefineMethodFieldComputed, IrDeleteElem, IrDeleteField,
+  IrDup, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2,
+  IrGetField, IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2,
+  IrGetSuperProp, IrGetSuperProp2, IrGetSuperPropComputed,
+  IrGetSuperPropComputed2, IrGetThis, IrGosub, IrInitGlobalLex, IrInitialYield,
+  IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
+  IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
+  IrPop, IrPopTry, IrPrivateIn, IrPushConst, IrPushTry, IrPutElem, IrPutField,
+  IrPutPrivateField, IrPutSuperProp, IrPutSuperPropComputed, IrRet, IrReturn,
+  IrScopeGetVar, IrScopeInitVar, IrScopePutVar, IrScopeReboxVar,
   IrScopeTypeofVar, IrSetLine, IrSetThis, IrSetupDerivedClass, IrSwap, IrThrow,
   IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
 }
@@ -313,7 +312,9 @@ fn emit_module_common(
 /// Convert module items to statements, stripping import/export wrappers.
 /// ExportDefaultDeclaration becomes an assignment to *default* (the binding
 /// is declared separately during module emission).
-fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.StmtWithLine) {
+fn module_items_to_stmts(
+  items: List(ast.ModuleItem),
+) -> List(ast.StmtWithLine) {
   list.filter_map(items, fn(item) {
     case item {
       ast.StatementItem(located) -> Ok(located)
@@ -1334,7 +1335,10 @@ fn split_trailing_rest(
   params: List(ast.Pattern),
 ) -> #(List(ast.Pattern), Option(ast.Pattern)) {
   case list.reverse(params) {
-    [ast.RestElement(inner), ..rev_fixed] -> #(list.reverse(rev_fixed), Some(inner))
+    [ast.RestElement(inner), ..rev_fixed] -> #(
+      list.reverse(rev_fixed),
+      Some(inner),
+    )
     _ -> #(params, None)
   }
 }
@@ -2361,7 +2365,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // stays the current receiver. GetSuperProp2 leaves [method, this, ..],
     // matching the [method, receiver, ..] shape CallMethod expects.
     ast.CallExpression(
-      ast.MemberExpression(ast.SuperExpression, ast.Identifier(method_name), False),
+      ast.MemberExpression(
+        ast.SuperExpression,
+        ast.Identifier(method_name),
+        False,
+      ),
       args,
     ) -> {
       let e = emit_ir(e, IrCheckSuperThis)
@@ -2378,7 +2386,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
     }
     // super[key](args)
-    ast.CallExpression(ast.MemberExpression(ast.SuperExpression, key, True), args) -> {
+    ast.CallExpression(
+      ast.MemberExpression(ast.SuperExpression, key, True),
+      args,
+    ) -> {
       let e = emit_ir(e, IrCheckSuperThis)
       use e <- result.try(emit_expr(e, key))
       let e = emit_ir(e, IrGetSuperPropComputed2)

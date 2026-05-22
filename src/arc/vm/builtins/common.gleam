@@ -254,6 +254,30 @@ pub fn alloc_methods(
   })
 }
 
+/// Allocate N *host* function objects from `(name, arity, impl)` specs,
+/// returning builtin_property entries — the host-closure counterpart to
+/// `alloc_methods`. Shared by `engine.define_namespace` and
+/// `beam.install_globals` so the "fold specs into named function properties"
+/// dance lives in one place.
+pub fn alloc_host_methods(
+  h: Heap(ctx),
+  function_proto: Ref,
+  specs: List(
+    #(
+      String,
+      Int,
+      fn(List(JsValue), JsValue, ctx) -> #(ctx, Result(JsValue, JsValue)),
+    ),
+  ),
+) -> #(Heap(ctx), List(#(String, Property))) {
+  list.fold(specs, #(h, []), fn(acc, spec) {
+    let #(h, props) = acc
+    let #(name, arity, impl) = spec
+    let #(h, fn_ref) = alloc_host_fn(h, function_proto, impl, name, arity)
+    #(h, [#(name, value.builtin_property(JsObject(fn_ref))), ..props])
+  })
+}
+
 /// Allocate N getter function objects from specs, returning get-only
 /// AccessorProperty entries (non-enumerable, configurable). Mirrors alloc_methods.
 pub fn alloc_getters(

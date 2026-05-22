@@ -1467,7 +1467,10 @@ pub fn lexical_global_value(g: LexicalGlobal) -> JsValue {
 
 /// Replace the bound value of a lexical global, preserving let/const-ness.
 /// Used by InitGlobalLex to fill a TDZ slot without losing its const flag.
-pub fn set_lexical_global_value(g: LexicalGlobal, value: JsValue) -> LexicalGlobal {
+pub fn set_lexical_global_value(
+  g: LexicalGlobal,
+  value: JsValue,
+) -> LexicalGlobal {
   case g {
     Let(_) -> Let(value)
     Const(_) -> Const(value)

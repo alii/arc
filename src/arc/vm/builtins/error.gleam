@@ -46,7 +46,10 @@ pub fn init(
       #("captureStackTrace", ErrorNative(value.ErrorCaptureStackTrace), 2),
     ])
   let error_static = [
-    #("stackTraceLimit", value.builtin_property(value.JsNumber(value.Finite(10.0)))),
+    #(
+      "stackTraceLimit",
+      value.builtin_property(value.JsNumber(value.Finite(10.0))),
+    ),
     ..capture_method
   ]
 
@@ -198,7 +201,10 @@ fn alloc_error(
   let #(heap, ref) = common.alloc_pojo(state.heap, proto, props)
   let state = State(..state, heap:)
   let header =
-    state.error_header(error_name(state.heap, proto), option.unwrap(message, ""))
+    state.error_header(
+      error_name(state.heap, proto),
+      option.unwrap(message, ""),
+    )
   let state = state.attach_stack(state, JsObject(ref), header)
   #(state, Ok(JsObject(ref)))
 }

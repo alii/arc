@@ -2616,7 +2616,10 @@ pub fn rest_param_constructor_test() -> Nil {
 }
 
 pub fn rest_param_destructured_test() -> Nil {
-  assert_normal_number("function g(...[x, y]) { return x + y } g(10, 20, 30)", 30.0)
+  assert_normal_number(
+    "function g(...[x, y]) { return x + y } g(10, 20, 30)",
+    30.0,
+  )
 }
 
 pub fn rest_param_arguments_independent_test() -> Nil {
@@ -7593,7 +7596,15 @@ pub fn run_export_namespace_call_test() -> Nil {
   // call: getDrained() == 8.
   let assert Some(get_drained) = module.read_export(h, namespace, "getDrained")
   let assert Ok(NormalCompletion(v3, _)) =
-    entry.run_export(get_drained, JsUndefined, [], h, b, global_object, beam.run)
+    entry.run_export(
+      get_drained,
+      JsUndefined,
+      [],
+      h,
+      b,
+      global_object,
+      beam.run,
+    )
   let assert True = v3 == value.from_int(8)
   Nil
 }
