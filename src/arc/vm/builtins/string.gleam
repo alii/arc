@@ -31,7 +31,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/order
-import gleam/result
 import gleam/string
 
 /// Set up String constructor + String.prototype.
@@ -372,7 +371,7 @@ fn string_includes(
   // Steps 6-9: ToIntegerOrInfinity(position), clamp
   let from = helpers.get_int_arg(args, 1, 0)
   // Steps 10-12: StringIndexOf and return boolean
-  let sub = string.drop_start(s, from)
+  let sub = cp_drop(s, from)
   #(state, Ok(value.JsBool(string.contains(sub, search))))
 }
 
@@ -408,7 +407,7 @@ fn string_starts_with(
   // Steps 7-8: position handling + clamp
   let from = helpers.get_int_arg(args, 1, 0)
   // Steps 10-12: drop prefix, check starts_with
-  let sub = string.drop_start(s, from)
+  let sub = cp_drop(s, from)
   #(state, Ok(value.JsBool(string.starts_with(sub, search))))
 }
 
@@ -454,7 +453,7 @@ fn string_ends_with(
     _ -> len
   }
   // Steps 10-13: take prefix of length end_pos, check ends_with
-  let sub = string.slice(s, 0, end_pos)
+  let sub = cp_slice(s, 0, end_pos)
   #(state, Ok(value.JsBool(string.ends_with(sub, search))))
 }
 
@@ -501,7 +500,7 @@ fn string_slice(
   }
   // Steps 12-13: if from >= to return "", else return substring
   case end > start {
-    True -> #(state, Ok(JsString(string.slice(s, start, end - start))))
+    True -> #(state, Ok(JsString(cp_slice(s, start, end - start))))
     False -> #(state, Ok(JsString("")))
   }
 }
@@ -556,7 +555,7 @@ fn string_substring(
     False -> #(start, end)
   }
   // Step 10: return substring from..to
-  #(state, Ok(JsString(string.slice(s, start, end - start))))
+  #(state, Ok(JsString(cp_slice(s, start, end - start))))
 }
 
 /// ES2024 22.1.3.27 — String.prototype.toLowerCase ( )
@@ -918,7 +917,7 @@ fn string_split_parts(
       // Step 5: R = ToString(separator)
       use sep, state <- coerce.try_to_string(state, sep_val)
       let parts = case sep {
-        "" -> string.to_graphemes(s) |> list.map(JsString)
+        "" -> cp_explode(s) |> list.map(JsString)
         _ -> string.split(s, sep) |> list.map(JsString)
       }
       state.ok_array(state, list.take(parts, lim))
@@ -1155,7 +1154,7 @@ fn string_at(
   }
   // Steps 7-8: bounds check, return char or undefined
   case actual_idx >= 0 && actual_idx < len {
-    True -> #(state, Ok(JsString(string.slice(s, actual_idx, 1))))
+    True -> #(state, Ok(JsString(cp_slice(s, actual_idx, 1))))
     False -> #(state, Ok(JsUndefined))
   }
 }
@@ -1169,10 +1168,13 @@ fn string_at(
 ///   6. Let cp be CodePointAt(S, position).
 ///   7. Return the Number value of cp.[[CodePoint]].
 ///
-/// Note: Gleam strings are UTF-8 internally. We convert to a list of Unicode
-/// codepoints with string.to_utf_codepoints, then index into that list.
-/// This correctly handles supplementary characters (U+10000+) as single
-/// codepoints, matching the JS spec's CodePointAt semantics.
+/// Note: Gleam strings are UTF-8 internally. The FFI walks the UTF-8 binary
+/// directly to position `pos` and returns the integer codepoint — O(pos)
+/// with zero list allocation, vs materializing the whole codepoint list per
+/// call (which made the canonical `for (i=0;i<s.length;) cp=s.codePointAt(i)`
+/// scan O(n^2)). Supplementary characters (U+10000+) are single codepoints,
+/// matching the JS spec's CodePointAt semantics. Steps 4-5's bounds check is
+/// folded into the walk: walking off the end means pos >= size.
 fn string_code_point_at(
   this: JsValue,
   args: List(JsValue),
@@ -1182,21 +1184,18 @@ fn string_code_point_at(
   use s, state <- with_this_string(this, state)
   // Step 3: ToIntegerOrInfinity(pos)
   let pos = helpers.get_int_arg(args, 0, 0)
-  // Step 4: size = length of S (in codepoints)
-  let codepoints = string.to_utf_codepoints(s)
-  let size = list.length(codepoints)
-  // Step 5: out of bounds => undefined
-  case pos >= 0 && pos < size {
-    False -> #(state, Ok(JsUndefined))
-    True ->
-      // Step 6-7: get the codepoint at position and return it
-      list.drop(codepoints, pos)
-      |> list.first
-      |> result.map(fn(cp) { value.from_int(string.utf_codepoint_to_int(cp)) })
-      |> result.unwrap(JsUndefined)
-      |> fn(v) { #(state, Ok(v)) }
+  // Steps 4-7: out of bounds => undefined, else the codepoint at pos
+  case ffi_codepoint_at(s, pos) {
+    Some(cp) -> #(state, Ok(value.from_int(cp)))
+    None -> #(state, Ok(JsUndefined))
   }
 }
+
+/// Integer codepoint at codepoint index `pos`, or None when out of bounds.
+/// Shares the cursor cache with object.string_char_at, so sequential scans
+/// resume from the previous position instead of re-walking from byte 0.
+@external(erlang, "arc_vm_ffi", "string_codepoint_at")
+fn ffi_codepoint_at(s: String, pos: Int) -> option.Option(Int)
 
 /// ES2024 22.1.3.13 — String.prototype.normalize ( [ form ] )
 ///   1. Let O be ? RequireObjectCoercible(this value).
@@ -1546,7 +1545,7 @@ fn string_substr(
   let end = int.min(start + len, size)
   case start >= size || len <= 0 {
     True -> #(state, Ok(JsString("")))
-    False -> #(state, Ok(JsString(string.slice(s, start, end - start))))
+    False -> #(state, Ok(JsString(cp_slice(s, start, end - start))))
   }
 }
 
@@ -1744,3 +1743,20 @@ fn last_index_of_from(s: String, search: String, from: Int) -> Int {
 
 @external(erlang, "arc_vm_ffi", "string_last_index_of")
 fn ffi_last_index_of(haystack: String, needle: String, from: Int) -> Int
+
+/// Codepoint-based substring: `len` codepoints starting at codepoint `start`.
+/// Plain UTF-8 byte walk returning a sub-binary — no per-character
+/// allocation, unlike gleam/string.slice's grapheme clustering (~20x
+/// slower). Same UTF-16 deviation as object.string_char_at.
+@external(erlang, "arc_vm_ffi", "string_cp_slice")
+fn cp_slice(s: String, start: Int, len: Int) -> String
+
+/// Drop the first `n` codepoints (clamps; n <= 0 returns s unchanged).
+/// Sub-binary result, alloc-free walk — replaces gleam/string.drop_start.
+@external(erlang, "arc_vm_ffi", "string_cp_drop")
+fn cp_drop(s: String, n: Int) -> String
+
+/// Split into single-codepoint strings — replaces string.to_graphemes for
+/// String.prototype.split(""), matching the engine's codepoint indexing.
+@external(erlang, "arc_vm_ffi", "string_cp_explode")
+fn cp_explode(s: String) -> List(String)

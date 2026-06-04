@@ -94,7 +94,8 @@ pub fn bind_this(
         False ->
           case this_arg {
             // Step 6a: undefined/null -> globalThis.
-            JsUndefined | JsNull -> #(state.heap, JsObject(state.global_object))
+            JsUndefined | JsNull ->
+              #(state.heap, JsObject(state.ctx.global_object))
             // Step 6b: Objects pass through (ToObject is identity for objects).
             JsObject(_) -> #(state.heap, this_arg)
             _ ->
@@ -1184,13 +1185,13 @@ pub fn call_native(
     // Symbol() constructor -- callable but NOT new-able
     value.Call(value.SymbolConstructor) -> {
       let #(new_descs, sym_val) =
-        builtins_symbol.call_symbol(args, state.symbol_descriptions)
+        builtins_symbol.call_symbol(args, state.ctx.symbol_descriptions)
       Ok(
         State(
           ..state,
           stack: [sym_val, ..rest_stack],
           pc: state.pc + 1,
-          symbol_descriptions: new_descs,
+          ctx: state.RealmCtx(..state.ctx, symbol_descriptions: new_descs),
         ),
       )
     }
@@ -1205,7 +1206,7 @@ pub fn call_native(
         state.rethrow(coerce.js_to_string(state, key_val)),
       )
       // Step 2-4: Look up in GlobalSymbolRegistry, return existing or create new.
-      case dict.get(state.symbol_registry, key_str) {
+      case dict.get(state.ctx.symbol_registry, key_str) {
         Ok(existing_id) ->
           Ok(
             State(
@@ -1216,15 +1217,20 @@ pub fn call_native(
           )
         Error(Nil) -> {
           let id = value.UserSymbol(builtins_symbol.new_symbol_ref())
-          let new_registry = dict.insert(state.symbol_registry, key_str, id)
-          let new_descs = dict.insert(state.symbol_descriptions, id, key_str)
+          let new_registry =
+            dict.insert(state.ctx.symbol_registry, key_str, id)
+          let new_descs =
+            dict.insert(state.ctx.symbol_descriptions, id, key_str)
           Ok(
             State(
               ..state,
               stack: [value.JsSymbol(id), ..rest_stack],
               pc: state.pc + 1,
-              symbol_registry: new_registry,
-              symbol_descriptions: new_descs,
+              ctx: state.RealmCtx(
+                ..state.ctx,
+                symbol_registry: new_registry,
+                symbol_descriptions: new_descs,
+              ),
             ),
           )
         }
@@ -1235,7 +1241,7 @@ pub fn call_native(
       case args {
         [value.JsSymbol(id), ..] -> {
           let result =
-            dict.to_list(state.symbol_registry)
+            dict.to_list(state.ctx.symbol_registry)
             |> list.find(fn(pair) { pair.1 == id })
           let val = case result {
             Ok(#(key, _)) -> value.JsString(key)
@@ -1266,7 +1272,10 @@ pub fn call_native(
           )
         [value.JsSymbol(id), ..] -> {
           let s =
-            builtins_symbol.descriptive_string(id, state.symbol_descriptions)
+            builtins_symbol.descriptive_string(
+              id,
+              state.ctx.symbol_descriptions,
+            )
           Ok(
             State(..state, stack: [JsString(s), ..rest_stack], pc: state.pc + 1),
           )
@@ -1772,6 +1781,33 @@ fn call_array_iterator_next(
             }
           }
         }
+        // String iterators share %ArrayIteratorPrototype%'s next — the
+        // GetIterator fast path allocates them with that prototype.
+        Some(
+          ObjectSlot(kind: value.StringIteratorObject(remaining:), ..) as slot,
+        ) ->
+          case remaining {
+            [] ->
+              push_iter_result(state, rest_stack, state.heap, JsUndefined, True)
+            [cp, ..remaining] -> {
+              let h =
+                heap.write(
+                  state.heap,
+                  iter_ref,
+                  ObjectSlot(
+                    ..slot,
+                    kind: value.StringIteratorObject(remaining:),
+                  ),
+                )
+              push_iter_result(
+                state,
+                rest_stack,
+                h,
+                JsString(string.from_utf_codepoints([cp])),
+                False,
+              )
+            }
+          }
         _ -> iter_incompatible(state, "Array")
       }
     _ -> iter_incompatible(state, "Array")

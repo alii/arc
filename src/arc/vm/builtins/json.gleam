@@ -10,6 +10,7 @@ import arc/vm/value.{
   JsString, JsUndefined, JsonNative, JsonParse, JsonStringify, NaN,
   NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
 }
+import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -78,14 +79,18 @@ fn json_parse(
   }
 
   use json_str, state <- state.try_op(to_string_result)
-  // Step 2: Parse as JSON text
-  let chars = string.to_graphemes(json_str)
-  case parse_value(chars) {
+  // Step 2: Parse as JSON text — walk the UTF-8 bytes directly.
+  // On BEAM a String already is a binary, so this conversion is free, and
+  // byte pattern matching avoids per-character grapheme clustering (which
+  // goes through unicode_util:gc and allocates a cons cell + sub-binary
+  // per character).
+  let bytes = bit_array.from_string(json_str)
+  case parse_value(bytes) {
     Ok(#(val, rest)) -> {
       // After parsing, skip trailing whitespace and ensure nothing else
       let rest = skip_whitespace(rest)
       case rest {
-        [] -> {
+        <<>> -> {
           // Successfully parsed — materialize the value on the heap
           let #(heap, js_val) = materialize(state.heap, state.builtins, val)
           #(State(..state, heap:), Ok(js_val))
@@ -110,138 +115,161 @@ type JsonValue {
   JsonObject(List(#(String, JsonValue)))
 }
 
-/// Skip whitespace characters (space, tab, newline, carriage return).
-fn skip_whitespace(chars: List(String)) -> List(String) {
-  case chars {
-    [" ", ..rest] | ["\t", ..rest] | ["\n", ..rest] | ["\r", ..rest] ->
-      skip_whitespace(rest)
-    _ -> chars
+/// Skip whitespace bytes (space, tab, newline, carriage return).
+fn skip_whitespace(bytes: BitArray) -> BitArray {
+  case bytes {
+    <<0x20, rest:bytes>>
+    | <<0x09, rest:bytes>>
+    | <<0x0A, rest:bytes>>
+    | <<0x0D, rest:bytes>> -> skip_whitespace(rest)
+    _ -> bytes
   }
 }
 
-/// Parse a JSON value from a list of graphemes.
-fn parse_value(
-  chars: List(String),
-) -> Result(#(JsonValue, List(String)), String) {
-  let chars = skip_whitespace(chars)
-  case chars {
-    [] -> Error("Unexpected end of JSON input")
-    ["n", ..rest] -> parse_literal(rest, "ull", JsonNull)
-    ["t", ..rest] -> parse_literal(rest, "rue", JsonBool(True))
-    ["f", ..rest] -> parse_literal(rest, "alse", JsonBool(False))
-    ["\"", ..rest] -> {
-      use #(s, rest) <- result.map(parse_string_content(rest, string_tree.new()))
+/// Parse a JSON value from UTF-8 bytes.
+fn parse_value(bytes: BitArray) -> Result(#(JsonValue, BitArray), String) {
+  let bytes = skip_whitespace(bytes)
+  case bytes {
+    <<>> -> Error("Unexpected end of JSON input")
+    // "null"
+    <<0x6E, 0x75, 0x6C, 0x6C, rest:bytes>> -> Ok(#(JsonNull, rest))
+    // "true"
+    <<0x74, 0x72, 0x75, 0x65, rest:bytes>> -> Ok(#(JsonBool(True), rest))
+    // "false"
+    <<0x66, 0x61, 0x6C, 0x73, 0x65, rest:bytes>> -> Ok(#(JsonBool(False), rest))
+    // '"'
+    <<0x22, rest:bytes>> -> {
+      use #(s, rest) <- result.map(parse_string(rest))
       #(JsonString(s), rest)
     }
-    ["[", ..rest] -> parse_array(rest, [])
-    ["{", ..rest] -> parse_object(rest, [])
-    ["-", ..]
-    | ["0", ..]
-    | ["1", ..]
-    | ["2", ..]
-    | ["3", ..]
-    | ["4", ..]
-    | ["5", ..]
-    | ["6", ..]
-    | ["7", ..]
-    | ["8", ..]
-    | ["9", ..] -> parse_number(chars)
-    [c, ..] -> Error("Unexpected token '" <> c <> "' in JSON")
+    // '['
+    <<0x5B, rest:bytes>> -> parse_array(rest, [])
+    // '{'
+    <<0x7B, rest:bytes>> -> parse_object(rest, [])
+    // '-' or '0'..'9'
+    <<b, _:bytes>> if b == 0x2D || b >= 0x30 && b <= 0x39 -> parse_number(bytes)
+    <<c:utf8_codepoint, _:bytes>> ->
+      Error(
+        "Unexpected token '" <> string.from_utf_codepoints([c]) <> "' in JSON",
+      )
+    _ -> Error("Unexpected token in JSON")
   }
 }
 
-/// Parse a literal keyword (null, true, false) after the first character.
-fn parse_literal(
-  chars: List(String),
-  expected: String,
-  val: JsonValue,
-) -> Result(#(JsonValue, List(String)), String) {
-  let expected_chars = string.to_graphemes(expected)
-  case consume_chars(chars, expected_chars) {
-    Ok(rest) -> Ok(#(val, rest))
-    Error(Nil) -> Error("Unexpected token in JSON")
-  }
+/// Result of scanning a string body for its closing quote or first escape.
+type StringScan {
+  /// Closing quote found after `content_len` bytes; `after` is past the quote.
+  FoundQuote(content_len: Int, after: BitArray)
+  /// Backslash found after `prefix_len` bytes; `after` is past the backslash.
+  FoundEscape(prefix_len: Int, after: BitArray)
+  /// ECMA-404: an unescaped control character (U+0000–U+001F) — invalid JSON.
+  FoundControlChar
+  UnterminatedString
 }
 
-/// Consume expected characters one by one from the input.
-fn consume_chars(
-  chars: List(String),
-  expected: List(String),
-) -> Result(List(String), Nil) {
-  case expected {
-    [] -> Ok(chars)
-    [e, ..erest] ->
-      case chars {
-        [c, ..crest] if c == e -> consume_chars(crest, erest)
-        _ -> Error(Nil)
+/// Scan forward for the closing quote or the first backslash.
+/// Safe on UTF-8: continuation/lead bytes of multi-byte characters are all
+/// >= 0x80, so they can never be mistaken for '"' (0x22) or '\\' (0x5C) —
+/// or misread as a control character (< 0x20).
+fn scan_string(bytes: BitArray, n: Int) -> StringScan {
+  case bytes {
+    <<0x22, rest:bytes>> -> FoundQuote(n, rest)
+    <<0x5C, rest:bytes>> -> FoundEscape(n, rest)
+    <<c, rest:bytes>> ->
+      case c < 0x20 {
+        // ECMA-404: control characters must be written as escape sequences.
+        True -> FoundControlChar
+        False -> scan_string(rest, n + 1)
       }
+    _ -> UnterminatedString
   }
 }
 
 /// Parse the content of a JSON string (after the opening quote).
-fn parse_string_content(
-  chars: List(String),
-  acc: StringTree,
-) -> Result(#(String, List(String)), String) {
-  case chars {
-    [] -> Error("Unterminated string in JSON")
-    ["\"", ..rest] -> Ok(#(string_tree.to_string(acc), rest))
-    ["\\", ..rest] -> {
-      case rest {
-        [] -> Error("Unterminated string escape in JSON")
-        ["\"", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "\""))
-        ["\\", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "\\"))
-        ["/", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "/"))
-        ["b", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "\u{0008}"))
-        ["f", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "\u{000C}"))
-        ["n", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "\n"))
-        ["r", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "\r"))
-        ["t", ..rest2] ->
-          parse_string_content(rest2, string_tree.append(acc, "\t"))
-        ["u", ..rest2] -> {
-          use #(decoded, rest) <- result.try(decode_unicode_escape(rest2))
-          parse_string_content(rest, string_tree.append(acc, decoded))
-        }
-        [c, ..] -> Error("Invalid escape character '\\" <> c <> "' in JSON")
-      }
+/// Fast path: no escapes — the result is an O(1) zero-copy sub-binary of
+/// the input. Only when a backslash is seen do we build an escape buffer.
+fn parse_string(bytes: BitArray) -> Result(#(String, BitArray), String) {
+  case scan_string(bytes, 0) {
+    FoundQuote(n, after) -> {
+      use s <- result.map(take_string(bytes, n))
+      #(s, after)
     }
-    // ECMA-404: unescaped control characters (U+0000–U+001F) are not allowed
-    // in JSON strings; they must be written as escape sequences.
-    [c, ..rest] ->
-      case is_json_control_char(c) {
-        True -> Error("Unexpected control character in JSON string")
-        False -> parse_string_content(rest, string_tree.append(acc, c))
-      }
+    FoundEscape(n, after) -> {
+      use chunk <- result.try(take_string(bytes, n))
+      parse_escape(after, string_tree.from_string(chunk))
+    }
+    FoundControlChar -> Error("Unexpected control character in JSON string")
+    UnterminatedString -> Error("Unterminated string in JSON")
   }
 }
 
-/// True if `c` is a single character in the JSON-forbidden control range
-/// U+0000 through U+001F.
-fn is_json_control_char(c: String) -> Bool {
-  case string.to_utf_codepoints(c) {
-    [cp, ..] -> string.utf_codepoint_to_int(cp) < 0x20
-    [] -> False
+/// Slow path: accumulate decoded string content, appending unescaped spans
+/// as whole chunks (one append per span, not per character).
+fn parse_string_content(
+  bytes: BitArray,
+  acc: StringTree,
+) -> Result(#(String, BitArray), String) {
+  case scan_string(bytes, 0) {
+    FoundQuote(n, after) -> {
+      use chunk <- result.map(take_string(bytes, n))
+      #(string_tree.to_string(string_tree.append(acc, chunk)), after)
+    }
+    FoundEscape(n, after) -> {
+      use chunk <- result.try(take_string(bytes, n))
+      parse_escape(after, string_tree.append(acc, chunk))
+    }
+    FoundControlChar -> Error("Unexpected control character in JSON string")
+    UnterminatedString -> Error("Unterminated string in JSON")
+  }
+}
+
+/// Decode one escape sequence; `bytes` starts just after the backslash.
+fn parse_escape(
+  bytes: BitArray,
+  acc: StringTree,
+) -> Result(#(String, BitArray), String) {
+  case bytes {
+    <<>> -> Error("Unterminated string escape in JSON")
+    <<0x22, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "\""))
+    <<0x5C, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "\\"))
+    <<0x2F, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "/"))
+    <<0x62, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "\u{0008}"))
+    <<0x66, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "\u{000C}"))
+    <<0x6E, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "\n"))
+    <<0x72, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "\r"))
+    <<0x74, rest:bytes>> ->
+      parse_string_content(rest, string_tree.append(acc, "\t"))
+    <<0x75, rest:bytes>> -> {
+      use #(decoded, rest) <- result.try(decode_unicode_escape(rest))
+      parse_string_content(rest, string_tree.append(acc, decoded))
+    }
+    <<c:utf8_codepoint, _:bytes>> ->
+      Error(
+        "Invalid escape character '\\"
+        <> string.from_utf_codepoints([c])
+        <> "' in JSON",
+      )
+    _ -> Error("Unterminated string escape in JSON")
   }
 }
 
 /// Parse a 4-digit hex escape (\uXXXX), returning the integer codepoint value.
-fn parse_unicode_escape(
-  chars: List(String),
-) -> Result(#(Int, List(String)), String) {
-  case chars {
-    [a, b, c, d, ..rest] -> {
-      let hex_str = a <> b <> c <> d
-      case int.base_parse(hex_str, 16) {
+fn parse_unicode_escape(bytes: BitArray) -> Result(#(Int, BitArray), String) {
+  case bytes {
+    <<a, b, c, d, rest:bytes>> -> {
+      let parsed =
+        bit_array.to_string(<<a, b, c, d>>)
+        |> result.try(int.base_parse(_, 16))
+      case parsed {
         Ok(n) -> Ok(#(n, rest))
-        Error(Nil) ->
-          Error("Invalid Unicode escape '\\u" <> hex_str <> "' in JSON")
+        Error(Nil) -> Error("Invalid Unicode escape in JSON")
       }
     }
     _ -> Error("Unexpected end of Unicode escape in JSON")
@@ -249,11 +277,11 @@ fn parse_unicode_escape(
 }
 
 /// Decode a \uXXXX escape (possibly a surrogate pair) into a UTF-8 string.
-/// Returns #(decoded_string, remaining_chars). Lone surrogates become U+FFFD.
+/// Returns #(decoded_string, remaining_bytes). Lone surrogates become U+FFFD.
 fn decode_unicode_escape(
-  chars: List(String),
-) -> Result(#(String, List(String)), String) {
-  use #(high, rest) <- result.try(parse_unicode_escape(chars))
+  bytes: BitArray,
+) -> Result(#(String, BitArray), String) {
+  use #(high, rest) <- result.try(parse_unicode_escape(bytes))
   case high >= 0xD800 && high <= 0xDBFF {
     // High surrogate — look for a trailing \uXXXX low surrogate
     True ->
@@ -271,9 +299,10 @@ fn decode_unicode_escape(
 
 /// Try to consume "\uXXXX" where XXXX is a low surrogate (DC00-DFFF).
 /// Returns None if not present or not a valid low surrogate (caller rewinds).
-fn parse_low_surrogate(chars: List(String)) -> Option(#(Int, List(String))) {
-  case chars {
-    ["\\", "u", ..rest] ->
+fn parse_low_surrogate(bytes: BitArray) -> Option(#(Int, BitArray)) {
+  case bytes {
+    // "\\u"
+    <<0x5C, 0x75, rest:bytes>> ->
       case parse_unicode_escape(rest) {
         Ok(#(low, rest)) if low >= 0xDC00 && low <= 0xDFFF -> Some(#(low, rest))
         _ -> None
@@ -289,52 +318,32 @@ fn codepoint_to_string(codepoint: Int) -> Result(String, String) {
   |> result.replace_error("Invalid Unicode codepoint in JSON string")
 }
 
-/// Parse a JSON number.
-fn parse_number(
-  chars: List(String),
-) -> Result(#(JsonValue, List(String)), String) {
-  // Collect all characters that could be part of a JSON number
-  let #(num_chars, rest) = collect_number_chars(chars, [])
-  let num_str = string.join(num_chars, "")
+/// Parse a JSON number — count the number-byte span, slice it out as a
+/// sub-binary (O(1)), and parse that.
+fn parse_number(bytes: BitArray) -> Result(#(JsonValue, BitArray), String) {
+  let n = count_number_bytes(bytes, 0)
+  use num_str <- result.try(take_string(bytes, n))
+  let rest = drop_bytes(bytes, n)
   case parse_json_number_string(num_str) {
-    Ok(n) -> Ok(#(JsonNumber(n), rest))
+    Ok(f) -> Ok(#(JsonNumber(f), rest))
     Error(Nil) -> Error("Invalid number '" <> num_str <> "' in JSON")
   }
 }
 
-/// Collect characters that could be part of a JSON number.
-fn collect_number_chars(
-  chars: List(String),
-  acc: List(String),
-) -> #(List(String), List(String)) {
-  case chars {
-    [c, ..rest] ->
-      case is_number_char(c) {
-        True -> collect_number_chars(rest, [c, ..acc])
-        False -> #(list.reverse(acc), chars)
-      }
-    [] -> #(list.reverse(acc), [])
-  }
-}
-
-fn is_number_char(c: String) -> Bool {
-  case c {
-    "-"
-    | "+"
-    | "."
-    | "e"
-    | "E"
-    | "0"
-    | "1"
-    | "2"
-    | "3"
-    | "4"
-    | "5"
-    | "6"
-    | "7"
-    | "8"
-    | "9" -> True
-    _ -> False
+/// Count leading bytes that could be part of a JSON number.
+fn count_number_bytes(bytes: BitArray, n: Int) -> Int {
+  case bytes {
+    // '-' '+' '.' 'e' 'E' or '0'..'9'
+    <<b, rest:bytes>>
+      if b == 0x2D
+      || b == 0x2B
+      || b == 0x2E
+      || b == 0x65
+      || b == 0x45
+      || b >= 0x30
+      && b <= 0x39
+    -> count_number_bytes(rest, n + 1)
+    _ -> n
   }
 }
 
@@ -350,25 +359,27 @@ fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
 
 /// Parse a JSON array (after the opening '[').
 fn parse_array(
-  chars: List(String),
+  bytes: BitArray,
   acc: List(JsonValue),
-) -> Result(#(JsonValue, List(String)), String) {
-  let chars = skip_whitespace(chars)
-  case chars {
-    [] -> Error("Unterminated array in JSON")
-    ["]", ..rest] -> Ok(#(JsonArray(list.reverse(acc)), rest))
+) -> Result(#(JsonValue, BitArray), String) {
+  let bytes = skip_whitespace(bytes)
+  case bytes {
+    <<>> -> Error("Unterminated array in JSON")
+    // ']'
+    <<0x5D, rest:bytes>> -> Ok(#(JsonArray(list.reverse(acc)), rest))
     _ -> {
       // If not the first element, expect a comma
-      let chars = case acc {
-        [] -> Ok(chars)
+      let bytes = case acc {
+        [] -> Ok(bytes)
         _ ->
-          case chars {
-            [",", ..rest] -> Ok(skip_whitespace(rest))
+          case bytes {
+            // ','
+            <<0x2C, rest:bytes>> -> Ok(skip_whitespace(rest))
             _ -> Error("Expected ',' or ']' in array")
           }
       }
-      use chars <- result.try(chars)
-      use #(val, rest) <- result.try(parse_value(chars))
+      use bytes <- result.try(bytes)
+      use #(val, rest) <- result.try(parse_value(bytes))
       parse_array(rest, [val, ..acc])
     }
   }
@@ -376,40 +387,60 @@ fn parse_array(
 
 /// Parse a JSON object (after the opening '{').
 fn parse_object(
-  chars: List(String),
+  bytes: BitArray,
   acc: List(#(String, JsonValue)),
-) -> Result(#(JsonValue, List(String)), String) {
-  let chars = skip_whitespace(chars)
-  case chars {
-    [] -> Error("Unterminated object in JSON")
-    ["}", ..rest] -> Ok(#(JsonObject(list.reverse(acc)), rest))
+) -> Result(#(JsonValue, BitArray), String) {
+  let bytes = skip_whitespace(bytes)
+  case bytes {
+    <<>> -> Error("Unterminated object in JSON")
+    // '}'
+    <<0x7D, rest:bytes>> -> Ok(#(JsonObject(list.reverse(acc)), rest))
     _ -> {
       // If not the first entry, expect a comma
-      let chars = case acc {
-        [] -> Ok(chars)
+      let bytes = case acc {
+        [] -> Ok(bytes)
         _ ->
-          case chars {
-            [",", ..rest] -> Ok(skip_whitespace(rest))
+          case bytes {
+            // ','
+            <<0x2C, rest:bytes>> -> Ok(skip_whitespace(rest))
             _ -> Error("Expected ',' or '}' in object")
           }
       }
-      use chars <- result.try(chars)
+      use bytes <- result.try(bytes)
       // Parse key (must be a string)
-      use rest <- result.try(case skip_whitespace(chars) {
-        ["\"", ..rest] -> Ok(rest)
+      use rest <- result.try(case skip_whitespace(bytes) {
+        // '"'
+        <<0x22, rest:bytes>> -> Ok(rest)
         _ -> Error("Expected string key in object")
       })
-      use #(key, rest) <- result.try(parse_string_content(
-        rest,
-        string_tree.new(),
-      ))
+      use #(key, rest) <- result.try(parse_string(rest))
       use rest <- result.try(case skip_whitespace(rest) {
-        [":", ..rest] -> Ok(rest)
+        // ':'
+        <<0x3A, rest:bytes>> -> Ok(rest)
         _ -> Error("Expected ':' after key in object")
       })
       use #(val, rest) <- result.try(parse_value(rest))
       parse_object(rest, [#(key, val), ..acc])
     }
+  }
+}
+
+/// Slice the first `len` bytes off `bytes` as a String.
+/// O(1) on BEAM — the slice is a zero-copy sub-binary of the input.
+fn take_string(bytes: BitArray, len: Int) -> Result(String, String) {
+  case bit_array.slice(bytes, 0, len) {
+    Ok(slice) ->
+      bit_array.to_string(slice)
+      |> result.replace_error("Invalid UTF-8 in JSON input")
+    Error(Nil) -> Error("Unexpected end of JSON input")
+  }
+}
+
+/// Drop the first `n` bytes of `bytes` (O(1) sub-binary).
+fn drop_bytes(bytes: BitArray, n: Int) -> BitArray {
+  case bit_array.slice(bytes, n, bit_array.byte_size(bytes) - n) {
+    Ok(rest) -> rest
+    Error(Nil) -> <<>>
   }
 }
 
@@ -569,8 +600,31 @@ fn stringify_value(
 }
 
 /// Stringify a JS string with proper JSON escaping.
+///
+/// Fast path: byte-scan for characters that need escaping (control chars
+/// < 0x20, '"', '\\'). The overwhelming majority of strings are clean, so
+/// we return the quoted string directly with no intermediate allocations.
+/// Only fall back to the grapheme-walking escape builder when an escapable
+/// byte is found. Safe on UTF-8: all multi-byte sequence bytes are >= 0x80,
+/// so they can never be mistaken for an escapable ASCII byte.
 fn stringify_string(s: String) -> String {
-  "\"" <> escape_string(string.to_graphemes(s), string_tree.new()) <> "\""
+  case needs_json_escape(<<s:utf8>>) {
+    False -> "\"" <> s <> "\""
+    True ->
+      "\"" <> escape_string(string.to_graphemes(s), string_tree.new()) <> "\""
+  }
+}
+
+/// True if the UTF-8 bytes contain any character that must be escaped in a
+/// JSON string: control characters (< 0x20), double quote, or backslash.
+fn needs_json_escape(bytes: BitArray) -> Bool {
+  case bytes {
+    <<b, _:bits>> if b < 0x20 -> True
+    <<0x22, _:bits>> -> True
+    <<0x5c, _:bits>> -> True
+    <<_, rest:bits>> -> needs_json_escape(rest)
+    _ -> False
+  }
 }
 
 fn escape_string(chars: List(String), acc: StringTree) -> String {
@@ -578,6 +632,9 @@ fn escape_string(chars: List(String), acc: StringTree) -> String {
     [] -> string_tree.to_string(acc)
     [c, ..rest] -> {
       let escaped = case c {
+        // CR LF forms a single grapheme cluster (UAX #29 GB3), so it would
+        // miss the single-char clauses below and leak through raw.
+        "\r\n" -> "\\r\\n"
         "\"" -> "\\\""
         "\\" -> "\\\\"
         "\n" -> "\\n"

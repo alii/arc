@@ -806,7 +806,8 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
   #(
     Emitter(
       ..e,
-      functions: list.append(e.functions, [child]),
+      // Prepended for O(1); reversed once in finish().
+      functions: [child, ..e.functions],
       next_func: idx + 1,
       lexical_refs:,
     ),
@@ -901,7 +902,7 @@ fn finish(
     list.reverse(e.code),
     list.reverse(e.constants_list),
     e.constants_map,
-    e.functions,
+    list.reverse(e.functions),
   )
 }
 
@@ -2994,21 +2995,23 @@ fn emit_switch(
     })
   let found_labels = list.reverse(found_labels_rev)
 
+  // Pair each case with its body label and optional found label so the three
+  // emission phases below are single O(c) folds (no per-index list.drop).
+  let labelled_cases = list.zip(cases, list.zip(body_labels, found_labels))
+
   // Phase 1: Emit comparison jumps
   // For each case with a test: Dup discriminant, emit test, StrictEq, JumpIfTrue(found_N)
   let #(e, default_body_label) =
-    list.index_fold(cases, #(e, option.None), fn(acc, c, idx) {
+    list.fold(labelled_cases, #(e, option.None), fn(acc, entry) {
       let #(e, default_lbl) = acc
+      let #(c, #(body_lbl, found_lbl)) = entry
       case c {
         ast.SwitchCase(Some(test_expr), _) -> {
           let e = emit_ir(e, IrDup)
           case emit_expr(e, test_expr) {
             Ok(e) -> {
               let e = emit_ir(e, IrBinOp(opcode.StrictEq))
-              let found_lbl = case list.drop(found_labels, idx) {
-                [Some(l), ..] -> l
-                _ -> end_label
-              }
+              let found_lbl = option.unwrap(found_lbl, end_label)
               let e = emit_ir(e, IrJumpIfTrue(found_lbl))
               #(e, default_lbl)
             }
@@ -3017,11 +3020,7 @@ fn emit_switch(
         }
         ast.SwitchCase(None, _) -> {
           // Default case — record its body label
-          let body_lbl = case list.drop(body_labels, idx) {
-            [l, ..] -> Some(l)
-            [] -> Some(end_label)
-          }
-          #(e, body_lbl)
+          #(e, Some(body_lbl))
         }
       }
     })
@@ -3032,29 +3031,23 @@ fn emit_switch(
 
   // Phase 2: Emit trampolines — each pops discriminant and jumps to body
   let e =
-    list.index_fold(cases, e, fn(e, _c, idx) {
-      case list.drop(found_labels, idx) {
-        [Some(found_lbl), ..] -> {
+    list.fold(labelled_cases, e, fn(e, entry) {
+      let #(_c, #(body_lbl, found_lbl)) = entry
+      case found_lbl {
+        Some(found_lbl) -> {
           let e = emit_ir(e, IrLabel(found_lbl))
           let e = emit_ir(e, IrPop)
-          let body_lbl = case list.drop(body_labels, idx) {
-            [l, ..] -> l
-            [] -> end_label
-          }
           emit_ir(e, IrJump(body_lbl))
         }
-        _ -> e
+        None -> e
       }
     })
 
   // Phase 3: Emit case bodies (fall-through between them)
   let e =
-    list.index_fold(cases, e, fn(e, c, idx) {
-      let label = case list.drop(body_labels, idx) {
-        [l, ..] -> l
-        [] -> end_label
-      }
-      let e = emit_ir(e, IrLabel(label))
+    list.fold(labelled_cases, e, fn(e, entry) {
+      let #(c, #(body_lbl, _found_lbl)) = entry
+      let e = emit_ir(e, IrLabel(body_lbl))
       case c {
         ast.SwitchCase(_, consequent) ->
           emit_stmts(e, consequent) |> result.unwrap(e)
@@ -3228,12 +3221,20 @@ fn emit_object_property(
         method:,
         ..,
       ) -> {
-      use e <- result.map(emit_named_expr(e, value, name))
-      let e = case method {
-        True -> emit_ir(e, IrMakeMethod)
-        False -> e
+      case method {
+        // Concise method `{ m() {} }`: not constructible (`new o.m()` throws)
+        // and records its [[HomeObject]] for `super`. `{ x: function(){} }`
+        // stays a plain (constructible) function value with no home object.
+        True -> {
+          use e <- result.map(emit_method_value(e, value, Some(name)))
+          let e = emit_ir(e, IrMakeMethod)
+          emit_ir(e, IrDefineField(name))
+        }
+        False -> {
+          use e <- result.map(emit_named_expr(e, value, name))
+          emit_ir(e, IrDefineField(name))
+        }
       }
-      emit_ir(e, IrDefineField(name))
     }
 
     // Numeric literal key: {1: "a"} — not computed in the AST, but needs
@@ -3348,7 +3349,7 @@ fn emit_computed_init_property(
       emit_ir(e, IrDefineFieldComputed)
     }
     True -> {
-      use e <- result.try(emit_expr(e, value))
+      use e <- result.try(emit_method_value(e, value, None))
       let e = emit_ir(e, IrMakeMethod)
       use e <- result.map(emit_key(e))
       emit_ir(emit_ir(e, IrSwap), IrDefineFieldComputed)

@@ -104,14 +104,21 @@ fn ffi_receive_settle_only() -> MailboxEvent
 
 @external(erlang, "arc_vm_ffi", "receive_settle_or_subject")
 fn ffi_receive_settle_or_subject(
-  ref_map: dict.Dict(value.ErlangRef, Bool),
+  ref_map: dict.Dict(value.ErlangRef, List(Ref)),
 ) -> MailboxEvent
 
+/// Pending `receiveAsync` tickets, maintained incrementally in the process
+/// dictionary as a pair of maps: subject tag -> FIFO list of settle refs
+/// (multiple `receiveAsync` calls may be outstanding on one subject), and
+/// settle ref -> tag for `ReceiverTimeout` removal.
+type Receivers =
+  #(dict.Dict(value.ErlangRef, List(Ref)), dict.Dict(Ref, value.ErlangRef))
+
 @external(erlang, "arc_beam_ffi", "receivers_get")
-fn receivers_get() -> List(#(Ref, value.ErlangRef))
+fn receivers_get() -> Receivers
 
 @external(erlang, "arc_beam_ffi", "receivers_put")
-fn receivers_put(l: List(#(Ref, value.ErlangRef))) -> Nil
+fn receivers_put(r: Receivers) -> Nil
 
 // -- Macrotask loop ----------------------------------------------------------
 
@@ -126,15 +133,10 @@ pub fn run(s: State) -> State {
     0 -> s
     _ -> {
       let receivers = receivers_get()
-      let event = case receivers {
-        [] -> ffi_receive_settle_only()
-        _ -> {
-          let ref_map =
-            list.fold(receivers, dict.new(), fn(acc, e) {
-              dict.insert(acc, e.1, True)
-            })
-          ffi_receive_settle_or_subject(ref_map)
-        }
+      let #(tag_map, _) = receivers
+      let event = case dict.is_empty(tag_map) {
+        True -> ffi_receive_settle_only()
+        False -> ffi_receive_settle_or_subject(tag_map)
       }
       run(handle_event(s, event, receivers))
     }
@@ -144,8 +146,9 @@ pub fn run(s: State) -> State {
 fn handle_event(
   state: State,
   event: MailboxEvent,
-  receivers: List(#(Ref, value.ErlangRef)),
+  receivers: Receivers,
 ) -> State {
+  let #(tag_map, ref_map) = receivers
   case event {
     SettlePromise(data_ref:, outcome: Ok(pm)) -> {
       let #(heap, val) =
@@ -158,19 +161,32 @@ fn handle_event(
       host.resume(State(..state, heap:), data_ref, Error(reason))
     }
     ReceiverTimeout(data_ref:) ->
-      case list.any(receivers, fn(e) { e.0 == data_ref }) {
+      case dict.get(ref_map, data_ref) {
         // Message already arrived and retired the receiver — timeout is stale.
-        False -> state
-        True -> {
-          receivers_put(list.filter(receivers, fn(e) { e.0 != data_ref }))
+        Error(Nil) -> state
+        Ok(tag) -> {
+          let queue =
+            dict.get(tag_map, tag)
+            |> result.unwrap([])
+            |> list.filter(fn(r) { r != data_ref })
+          let tag_map = case queue {
+            [] -> dict.delete(tag_map, tag)
+            _ -> dict.insert(tag_map, tag, queue)
+          }
+          receivers_put(#(tag_map, dict.delete(ref_map, data_ref)))
           host.resume(state, data_ref, Ok(JsUndefined))
         }
       }
     SubjectMessage(tag:, payload: pm) ->
-      case list.find(receivers, fn(e) { e.1 == tag }) {
-        Error(Nil) -> state
-        Ok(#(data_ref, _)) -> {
-          receivers_put(list.filter(receivers, fn(e) { e.0 != data_ref }))
+      case dict.get(tag_map, tag) |> result.unwrap([]) {
+        [] -> state
+        // FIFO: the earliest-registered receiver gets the message.
+        [data_ref, ..rest] -> {
+          let tag_map = case rest {
+            [] -> dict.delete(tag_map, tag)
+            _ -> dict.insert(tag_map, tag, rest)
+          }
+          receivers_put(#(tag_map, dict.delete(ref_map, data_ref)))
           let #(heap, val) =
             structured_clone.deserialize(state.heap, state.builtins, pm)
           host.resume(State(..state, heap:), data_ref, Ok(val))
@@ -285,10 +301,10 @@ fn make_spawner(
     False -> state.heap
   }
   let builtins = state.builtins
-  let global_object = state.global_object
-  let lexical_globals = state.lexical_globals
-  let symbol_descriptions = state.symbol_descriptions
-  let symbol_registry = state.symbol_registry
+  let global_object = state.ctx.global_object
+  let lexical_globals = state.ctx.lexical_globals
+  let symbol_descriptions = state.ctx.symbol_descriptions
+  let symbol_registry = state.ctx.symbol_registry
   fn() {
     let env_values = heap.read_env(spawn_heap, env_ref) |> option.unwrap([])
     let env_count = list.length(env_values)
@@ -431,7 +447,12 @@ fn subject_receive_async(
       state.type_error(state, "Subject.receiveAsync: this is not a Subject")
     Some(tag) -> {
       let #(state, promise, data_ref) = host.suspend(state)
-      receivers_put(list.append(receivers_get(), [#(data_ref, tag)]))
+      let #(tag_map, ref_map) = receivers_get()
+      let queue = dict.get(tag_map, tag) |> result.unwrap([])
+      receivers_put(#(
+        dict.insert(tag_map, tag, list.append(queue, [data_ref])),
+        dict.insert(ref_map, data_ref, tag),
+      ))
       case args {
         [JsNumber(value.Finite(n)), ..] -> {
           let ms = value.float_to_int(n)

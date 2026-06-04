@@ -208,7 +208,7 @@ fn call_native_to_completion(
       ..state,
       stack: [],
       pc: 0,
-      code: tuple_array.from_list([opcode.Return]),
+      code: return_code_sentinel(),
       call_stack: [],
       try_stack: [],
     )
@@ -247,39 +247,26 @@ fn call_closure(
 ) -> Result(#(completion.Completion, State), VmError) {
   let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
   let #(heap, new_this) = bind_this(state, callee_template, this_val)
-  let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
   // Mirror call.setup_locals: insert the lexical seeds between captures and
   // params when the callee owns those slots (non-arrow). Inlined to avoid an
-  // import cycle through call.gleam.
-  let prefix = case callee_template.is_arrow {
-    True -> env_values
+  // import cycle through call.gleam; the locals tuple is built in one
+  // forward pass via FFI (no list.append/reverse/intermediate accumulator).
+  let seeds = case callee_template.is_arrow {
+    True -> []
     False -> {
-      let seeds =
-        list.filter_map(opcode.all_lexical_refs, fn(ref) {
-          case opcode.lexical_slot(callee_template.lexical, ref) {
-            None -> Error(Nil)
-            Some(_) ->
-              Ok(case ref {
-                opcode.RefThis -> new_this
-                opcode.RefActiveFunc -> JsObject(fn_ref)
-                opcode.RefHomeObject -> home
-                opcode.RefNewTarget -> JsUndefined
-              })
-          }
-        })
-      list.append(env_values, seeds)
+      let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
+      lexical_seeds(callee_template.lexical, new_this, fn_ref, home)
     }
   }
   let locals =
-    build_locals(
-      prefix,
+    setup_locals_tuple(
+      env_values,
+      seeds,
       args,
       callee_template.arity,
       callee_template.local_count,
-      [],
+      JsUndefined,
     )
-    |> list.reverse
-    |> tuple_array.from_list
   let job_state =
     State(
       ..state,
@@ -312,27 +299,49 @@ fn call_closure(
 // Inlined helpers (avoid circular dependency with call.gleam)
 // ============================================================================
 
-fn build_locals(
-  env: List(JsValue),
-  args: List(JsValue),
-  arity: Int,
-  slots_left: Int,
-  acc: List(JsValue),
+/// Seed values for the owned lexical slots, in canonical `all_lexical_refs`
+/// order ([this, active_func, home_object, new_target]), one per Some entry.
+/// Job re-entry never has a new.target, so that seed is always undefined.
+/// Mirrors call.lexical_seeds — duplicated to avoid an import cycle.
+fn lexical_seeds(
+  lexical: opcode.LexicalSlots,
+  this_val: JsValue,
+  fn_ref: Ref,
+  home_object: JsValue,
 ) -> List(JsValue) {
-  case slots_left, env {
-    0, _ -> acc
-    _, [e, ..rest] ->
-      build_locals(rest, args, arity, slots_left - 1, [e, ..acc])
-    _, [] ->
-      case arity, args {
-        0, _ -> build_locals([], [], 0, slots_left - 1, [JsUndefined, ..acc])
-        _, [a, ..rest] ->
-          build_locals([], rest, arity - 1, slots_left - 1, [a, ..acc])
-        _, [] ->
-          build_locals([], [], arity - 1, slots_left - 1, [JsUndefined, ..acc])
-      }
+  let acc = case lexical.new_target {
+    Some(_) -> [JsUndefined]
+    None -> []
+  }
+  let acc = case lexical.home_object {
+    Some(_) -> [home_object, ..acc]
+    None -> acc
+  }
+  let acc = case lexical.active_func {
+    Some(_) -> [JsObject(fn_ref), ..acc]
+    None -> acc
+  }
+  case lexical.this {
+    Some(_) -> [this_val, ..acc]
+    None -> acc
   }
 }
+
+/// FFI: build the locals tuple in one forward pass — see
+/// arc_vm_ffi:setup_locals_tuple/6. Declared here as well as in call.gleam
+/// because importing call.gleam would create an import cycle.
+@external(erlang, "arc_vm_ffi", "setup_locals_tuple")
+fn setup_locals_tuple(
+  env: List(JsValue),
+  seeds: List(JsValue),
+  args: List(JsValue),
+  arity: Int,
+  local_count: Int,
+  undef: JsValue,
+) -> tuple_array.TupleArray(JsValue)
+
+@external(erlang, "arc_vm_ffi", "return_code_sentinel")
+fn return_code_sentinel() -> tuple_array.TupleArray(opcode.Op)
 
 /// Resolve `this` for a function call per ES2024 S10.2.1.2 OrdinaryCallBindThis.
 fn bind_this(
@@ -347,7 +356,10 @@ fn bind_this(
         True -> #(state.heap, this_arg)
         False ->
           case this_arg {
-            JsUndefined | JsNull -> #(state.heap, JsObject(state.global_object))
+            JsUndefined | JsNull -> #(
+              state.heap,
+              JsObject(state.ctx.global_object),
+            )
             JsObject(_) -> #(state.heap, this_arg)
             _ ->
               case common.to_object(state.heap, state.builtins, this_arg) {

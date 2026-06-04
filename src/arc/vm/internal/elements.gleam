@@ -116,6 +116,181 @@ pub fn indices(elements: JsElements) -> List(Int) {
   }
 }
 
+/// True when no element is present at any index. O(k) worst case, O(1) for
+/// the common NoElements case. Used by the array-mutator fast path to verify
+/// prototype-chain objects carry no indexed elements.
+pub fn is_empty(elements: JsElements) -> Bool {
+  case elements {
+    NoElements -> True
+    DenseElements(data) ->
+      tree_array.sparse_fold(fn(_i, _v, _acc) { False }, True, data)
+    SparseElements(data) -> dict.size(data) == 0
+  }
+}
+
+/// Write Some(val) as a present element, None as a hole. Internal helper for
+/// the bulk move/reverse operations below, which must preserve holes.
+fn put_option(
+  elements: JsElements,
+  index: Int,
+  val: Option(JsValue),
+) -> JsElements {
+  case val {
+    Some(v) -> set(elements, index, v)
+    None -> delete(elements, index)
+  }
+}
+
+/// Move elements in [from, len) down by `delta` positions (toward index 0),
+/// preserving holes (a hole source deletes the target slot). Iterates
+/// ascending so the overlapping in-place move is safe (delta > 0). The
+/// vacated trailing slots [len - delta, len) are left untouched — callers
+/// truncate to the new length afterwards. Pure JsElements transformation:
+/// used by the Array.prototype shift/splice fast path so the whole move is
+/// one heap read + one heap write instead of 3-4 heap ops per element.
+pub fn move_down(
+  elements: JsElements,
+  from: Int,
+  len: Int,
+  delta: Int,
+) -> JsElements {
+  case from >= len {
+    True -> elements
+    False ->
+      move_down(
+        put_option(elements, from - delta, get_option(elements, from)),
+        from + 1,
+        len,
+        delta,
+      )
+  }
+}
+
+/// Move elements in [from, len) up by `delta` positions (away from index 0),
+/// preserving holes. Iterates descending so the overlapping in-place move is
+/// safe (delta > 0). Used by the unshift/splice-insert fast path.
+pub fn move_up(
+  elements: JsElements,
+  from: Int,
+  len: Int,
+  delta: Int,
+) -> JsElements {
+  move_up_loop(elements, len - 1, from, delta)
+}
+
+fn move_up_loop(
+  elements: JsElements,
+  idx: Int,
+  from: Int,
+  delta: Int,
+) -> JsElements {
+  case idx < from {
+    True -> elements
+    False ->
+      move_up_loop(
+        put_option(elements, idx + delta, get_option(elements, idx)),
+        idx - 1,
+        from,
+        delta,
+      )
+  }
+}
+
+/// Reverse elements [0, len) in place, holes included.
+pub fn reverse_range(elements: JsElements, len: Int) -> JsElements {
+  reverse_loop(elements, 0, len - 1)
+}
+
+fn reverse_loop(elements: JsElements, lo: Int, hi: Int) -> JsElements {
+  case lo >= hi {
+    True -> elements
+    False -> {
+      let lo_val = get_option(elements, lo)
+      let hi_val = get_option(elements, hi)
+      let elements =
+        put_option(elements, lo, hi_val) |> put_option(hi, lo_val)
+      reverse_loop(elements, lo + 1, hi - 1)
+    }
+  }
+}
+
+/// Set every index in [start, end) to `val` (fills holes with own elements,
+/// matching the spec's per-index Set on the no-overrides fast path).
+pub fn fill_range(
+  elements: JsElements,
+  start: Int,
+  end: Int,
+  val: JsValue,
+) -> JsElements {
+  case start >= end {
+    True -> elements
+    False -> fill_range(set(elements, start, val), start + 1, end, val)
+  }
+}
+
+/// Copy [from, from + count) onto [to, to + count), holes preserved.
+/// Picks the iteration direction so overlapping ranges copy correctly
+/// (same trick as memmove). Used by the copyWithin fast path.
+pub fn copy_within(
+  elements: JsElements,
+  from: Int,
+  to: Int,
+  count: Int,
+) -> JsElements {
+  case from < to {
+    True -> copy_backward(elements, from + count - 1, to + count - 1, count)
+    False -> copy_forward(elements, from, to, count)
+  }
+}
+
+fn copy_forward(
+  elements: JsElements,
+  from: Int,
+  to: Int,
+  remaining: Int,
+) -> JsElements {
+  case remaining <= 0 {
+    True -> elements
+    False ->
+      copy_forward(
+        put_option(elements, to, get_option(elements, from)),
+        from + 1,
+        to + 1,
+        remaining - 1,
+      )
+  }
+}
+
+fn copy_backward(
+  elements: JsElements,
+  from: Int,
+  to: Int,
+  remaining: Int,
+) -> JsElements {
+  case remaining <= 0 {
+    True -> elements
+    False ->
+      copy_backward(
+        put_option(elements, to, get_option(elements, from)),
+        from - 1,
+        to - 1,
+        remaining - 1,
+      )
+  }
+}
+
+/// Write `vals` at consecutive indices starting at `idx`.
+pub fn write_list(
+  elements: JsElements,
+  idx: Int,
+  vals: List(JsValue),
+) -> JsElements {
+  case vals {
+    [] -> elements
+    [v, ..rest] -> write_list(set(elements, idx, v), idx + 1, rest)
+  }
+}
+
 /// Remove all elements at indices >= new_len. O(log n).
 pub fn truncate(elements: JsElements, new_len: Int) -> JsElements {
   case elements {

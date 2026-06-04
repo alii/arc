@@ -4,12 +4,11 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/object
 import arc/vm/state.{
-  type Heap, type State, type StepResult, type VmError, State, StepVmError,
-  Unimplemented,
+  type Heap, type State, type StepResult, type VmError, State,
 }
 import arc/vm/value.{
-  type JsValue, type Ref, ArrayObject, DataProperty, GeneratorObject, JsBool,
-  JsObject, JsUndefined, ObjectSlot,
+  type JsValue, type Ref, ArrayObject, GeneratorObject, JsObject, JsUndefined,
+  ObjectSlot,
 }
 import gleam/dict
 import gleam/list
@@ -21,9 +20,6 @@ import gleam/option.{Some}
 
 pub type ExecuteInnerFn =
   fn(State) -> Result(#(completion.Completion, State), VmError)
-
-pub type UnwindToCatchFn =
-  fn(State, JsValue) -> option.Option(State)
 
 import arc/vm/completion
 
@@ -190,7 +186,6 @@ pub fn spread_into_array(
   target_ref: Ref,
   iterable: JsValue,
   execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case iterable {
     JsObject(src_ref) ->
@@ -204,13 +199,7 @@ pub fn spread_into_array(
         }
         Some(ObjectSlot(kind: GeneratorObject(_), ..)) ->
           // Generators are self-iterators. Drain via repeated .next().
-          drain_generator_to_array(
-            state,
-            src_ref,
-            target_ref,
-            execute_inner,
-            unwind_to_catch,
-          )
+          drain_generator_to_array(state, src_ref, target_ref, execute_inner)
         Some(ObjectSlot(kind: value.ArrayIteratorObject(source:, index:), ..)) -> {
           // Drain remaining elements from the iterator's current position.
           let #(length, elements) =
@@ -226,9 +215,9 @@ pub fn spread_into_array(
             )
           Ok(State(..state, heap:))
         }
-        Some(ObjectSlot(kind: value.SetObject(data:, keys:), ..)) -> {
+        Some(ObjectSlot(kind: value.SetObject(data:, keys_rev:, keys_len:), ..)) -> {
           // Set fast path — push values in insertion order.
-          let values = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+          let values = value.set_live_values(data, keys_rev, keys_len)
           let heap = append_list_to_array(state.heap, target_ref, values)
           Ok(State(..state, heap:))
         }
@@ -308,78 +297,37 @@ pub fn spread_into_array(
   }
 }
 
-/// Repeatedly call generator.next(), pushing each yielded value onto the
-/// target array until done=true. Each .next() re-enters the VM via
-/// call_native_generator_next, so state must be threaded through.
-/// The generator's {value, done} result object is read from the returned
-/// state's stack — call_native_generator_next pushes it there.
+/// Repeatedly resume the generator, pushing each yielded value onto the
+/// target array until done=true. Each resume re-enters the VM via
+/// resume_generator_next, so state must be threaded through. The internal
+/// resume API yields #(done, value, state) directly — no per-element
+/// {value, done} result object is allocated.
 pub fn drain_generator_to_array(
   state: State,
   gen_ref: Ref,
   target_ref: Ref,
   execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  // call_native_generator_next pushes the result object onto rest_stack.
-  // We pass an empty rest_stack so the result is the only thing on the stack.
-  use next_state <- result.try(generators.call_native_generator_next(
+  use #(done, val, next_state) <- result.try(generators.resume_generator_next(
     state,
     JsObject(gen_ref),
-    [],
-    [],
+    JsUndefined,
     execute_inner,
-    unwind_to_catch,
   ))
-  case next_state.stack {
-    [JsObject(result_ref), ..] ->
-      case heap.read(next_state.heap, result_ref) {
-        Some(ObjectSlot(properties: props, ..)) -> {
-          let done = case dict.get(props, value.Named("done")) {
-            Ok(DataProperty(value: JsBool(d), ..)) -> d
-            _ -> False
-          }
-          case done {
-            True ->
-              // Generator exhausted. Restore heap but not stack — the caller
-              // (ArraySpread handler) sets the stack explicitly.
-              Ok(
-                State(
-                  ..state.merge_globals(state, next_state, []),
-                  heap: next_state.heap,
-                ),
-              )
-            False -> {
-              let val = case dict.get(props, value.Named("value")) {
-                Ok(DataProperty(value: v, ..)) -> v
-                _ -> JsUndefined
-              }
-              let heap = push_onto_array(next_state.heap, target_ref, val)
-              // Recurse with the post-next state but cleaned stack.
-              drain_generator_to_array(
-                State(..state.merge_globals(state, next_state, []), heap:),
-                gen_ref,
-                target_ref,
-                execute_inner,
-                unwind_to_catch,
-              )
-            }
-          }
-        }
-        _ ->
-          Error(#(
-            StepVmError(Unimplemented(
-              "ArraySpread: generator .next() returned non-object",
-            )),
-            JsUndefined,
-            next_state,
-          ))
-      }
-    _ ->
-      Error(#(
-        StepVmError(Unimplemented("ArraySpread: generator .next() empty stack")),
-        JsUndefined,
-        next_state,
-      ))
+  // resume_generator_next advances pc past the current op; the ArraySpread
+  // handler does that itself, so restore the caller's pc.
+  let next_state = State(..next_state, pc: state.pc)
+  case done {
+    True -> Ok(next_state)
+    False -> {
+      let heap = push_onto_array(next_state.heap, target_ref, val)
+      drain_generator_to_array(
+        State(..next_state, heap:),
+        gen_ref,
+        target_ref,
+        execute_inner,
+      )
+    }
   }
 }
 

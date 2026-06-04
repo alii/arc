@@ -304,8 +304,8 @@ fn serialize_kind(
       )
       #(PrMap(entries: out, properties: props), ctx)
     }
-    value.SetObject(data:, keys:) -> {
-      let vals = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+    value.SetObject(data:, keys_rev:, keys_len:) -> {
+      let vals = value.set_live_values(data, keys_rev, keys_len)
       use #(out, ctx) <- result.try(serialize_list(heap, vals, mode, ctx, []))
       use #(props, ctx) <- result.map(
         serialize_props(heap, dict.to_list(properties), mode, ctx, []),
@@ -341,11 +341,13 @@ fn serialize_kind(
     value.ModuleNamespace(..) -> uncloneable("Module")
     value.ArgumentsObject(..) -> uncloneable("Arguments")
     value.ArrayIteratorObject(..)
+    | value.StringIteratorObject(..)
     | value.SetIteratorObject(..)
     | value.MapIteratorObject(..)
     | value.IteratorHelperObject(..)
     | value.WrapForValidIteratorObject(..)
-    | value.AsyncFromSyncIteratorObject(..) -> uncloneable("Iterator")
+    | value.AsyncFromSyncIteratorObject(..)
+    | value.IteratorRecordObject(..) -> uncloneable("Iterator")
   }
 }
 
@@ -516,7 +518,7 @@ fn alloc_shell(
     PrSet(..) ->
       common.alloc_wrapper(
         heap,
-        value.SetObject(data: dict.new(), keys: []),
+        value.SetObject(data: dict.new(), keys_rev: [], keys_len: 0),
         builtins.set.prototype,
       )
     PrDate(time_value) ->
@@ -656,12 +658,12 @@ fn fill_record(
       }
     }
     PrSet(entries:, properties:) -> {
-      let #(data, keys) =
-        list.fold(entries, #(dict.new(), []), fn(acc, pv) {
-          let #(data, keys) = acc
+      let #(data, keys_rev, keys_len) =
+        list.fold(entries, #(dict.new(), [], 0), fn(acc, pv) {
+          let #(data, keys, len) = acc
           let v = resolve_value(pv, memo)
           let k = value.js_to_map_key(v)
-          #(dict.insert(data, k, v), [k, ..keys])
+          #(dict.insert(data, k, v), [k, ..keys], len + 1)
         })
       let props = resolve_props(properties, memo)
       use slot <- heap.update(heap, ref)
@@ -669,7 +671,7 @@ fn fill_record(
         ObjectSlot(..) ->
           ObjectSlot(
             ..slot,
-            kind: value.SetObject(data:, keys:),
+            kind: value.SetObject(data:, keys_rev:, keys_len:),
             properties: props,
           )
         other -> other

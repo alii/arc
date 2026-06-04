@@ -46,3 +46,35 @@ pub fn scope_test() {
   assert should_pass("var a; var a;")
   assert should_pass("for(let a;;); let a;")
 }
+
+/// Function boundaries and the for-head must not leak the enclosing
+/// let/const declaration context into params, bodies, or later statements.
+pub fn lexical_decl_boundary_test() {
+  // Same-named function-expression params inside a for body
+  assert should_pass(
+    "for (let i = 0; i < 1; i++) { f(function (x) {}); f(function (x) {}); }",
+  )
+  assert should_pass(
+    "for (let x of [1]) { f(function (x) {}); f(function (x) {}); }",
+  )
+  // Same-named params across initializers of one lexical declaration
+  assert should_pass(
+    "let f = function (x) { return x; }, g = function (x) { return x; };",
+  )
+  assert should_pass("let f = (x) => x, g = (x) => x;")
+  assert should_pass("let o = { m(x) {} }, p = { m(x) {} };")
+  // Arrow params inside destructuring default values
+  assert should_pass("let [a = (x) => x, b = (x) => x] = [];")
+  // Catch params and var in a for body must not collide with the head
+  assert should_pass(
+    "for (let i = 0; i < 1; i++) { try {} catch (e) {} try {} catch (e) {} }",
+  )
+  assert should_pass("for (let i = 0; i < 1; i++) { var a1; var a1; }")
+  // Body block may shadow the for-head binding
+  assert should_pass("for (let i = 0; i < 1; i++) { let i = 1; }")
+
+  // Duplicate detection must survive a function boundary in an initializer
+  assert should_fail("let a = function () {}, a = 2;")
+  assert should_fail("let a = (x) => x, a = 2;")
+  assert should_fail("for (let a = 1, a = 2;;);")
+}

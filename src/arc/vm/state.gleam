@@ -68,6 +68,38 @@ pub type SavedFrame {
   )
 }
 
+/// Per-realm, rarely-mutated execution context, split out of State so the
+/// per-instruction `State(..state, ...)` copy in step() stays small. These
+/// fields change only on rare operations: realm setup, global let/const
+/// declaration, and Symbol.for. Mutations pay one extra small record copy.
+pub type RealmCtx {
+  RealmCtx(
+    /// DeclarativeRecord: let/const at global scope. NOT on globalThis. Checked
+    /// first. Each binding is `Let`/`Const` (const rejects assignment) wrapping
+    /// `JsUninitialized` while in TDZ, then its bound value.
+    lexical_globals: dict.Dict(String, value.LexicalGlobal),
+    /// ObjectRecord: Ref to globalThis heap object. var/function/builtins live here.
+    global_object: Ref,
+    /// Descriptions for user-created symbols (Symbol("desc")).
+    symbol_descriptions: dict.Dict(value.SymbolId, String),
+    /// Global symbol registry for Symbol.for() / Symbol.keyFor().
+    symbol_registry: dict.Dict(String, value.SymbolId),
+    /// Maps RealmSlot refs to their Builtins. Used by $262.evalScript/createRealm
+    /// to resolve realm-specific builtins (stored separately from heap to avoid
+    /// import cycle between value.gleam and builtins/common.gleam).
+    realms: dict.Dict(Ref, Builtins),
+    /// Re-entrant call mechanism — invoke a JS callable with (this, args).
+    /// Returns Ok(result, state) on normal completion, Error(thrown, state) on throw.
+    /// Set by the VM executor (wraps run_handler_with_this).
+    call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
+      Result(#(JsValue, State), #(JsValue, State)),
+    /// Re-entrant construct mechanism — `new target(...args)` from native code.
+    /// 4th arg is newTarget (§10.1.13). Set by the VM executor (wraps do_construct).
+    construct_fn: fn(State, JsValue, List(JsValue), JsValue) ->
+      Result(#(JsValue, State), #(JsValue, State)),
+  )
+}
+
 /// The internal VM executor state. Public so builtins can receive and return it,
 /// giving them full access to the runtime.
 pub type State {
@@ -75,12 +107,6 @@ pub type State {
     stack: List(JsValue),
     locals: TupleArray(JsValue),
     constants: TupleArray(JsValue),
-    /// DeclarativeRecord: let/const at global scope. NOT on globalThis. Checked
-    /// first. Each binding is `Let`/`Const` (const rejects assignment) wrapping
-    /// `JsUninitialized` while in TDZ, then its bound value.
-    lexical_globals: dict.Dict(String, value.LexicalGlobal),
-    /// ObjectRecord: Ref to globalThis heap object. var/function/builtins live here.
-    global_object: Ref,
     func: FuncTemplate,
     code: TupleArray(Op),
     heap: Heap,
@@ -88,6 +114,9 @@ pub type State {
     call_stack: List(SavedFrame),
     try_stack: List(TryFrame),
     builtins: Builtins,
+    /// Per-realm constants and near-constants. Nested so the per-instruction
+    /// State copy doesn't pay for fields that almost never change.
+    ctx: RealmCtx,
     /// §13.3.12 NewTarget for the current frame — `JsObject(ref)` when entered
     /// via `[[Construct]]`, `JsUndefined` for `[[Call]]`. Read by setup_locals
     /// to seed the RefNewTarget lexical slot, and by native ctors directly.
@@ -106,23 +135,6 @@ pub type State {
     /// not yet settled via `host.resume`. Core never blocks on this — it's
     /// the embedder's macrotask loop that reads it to decide when to stop.
     outstanding: Int,
-    /// Descriptions for user-created symbols (Symbol("desc")).
-    symbol_descriptions: dict.Dict(value.SymbolId, String),
-    /// Global symbol registry for Symbol.for() / Symbol.keyFor().
-    symbol_registry: dict.Dict(String, value.SymbolId),
-    /// Maps RealmSlot refs to their Builtins. Used by $262.evalScript/createRealm
-    /// to resolve realm-specific builtins (stored separately from heap to avoid
-    /// import cycle between value.gleam and builtins/common.gleam).
-    realms: dict.Dict(Ref, Builtins),
-    /// Re-entrant call mechanism — invoke a JS callable with (this, args).
-    /// Returns Ok(result, state) on normal completion, Error(thrown, state) on throw.
-    /// Set by the VM executor (narrows the lossless call_to_completion).
-    call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
-      Result(#(JsValue, State), #(JsValue, State)),
-    /// Re-entrant construct mechanism — `new target(...args)` from native code.
-    /// 4th arg is newTarget (§10.1.13). Set by the VM executor (wraps do_construct).
-    construct_fn: fn(State, JsValue, List(JsValue), JsValue) ->
-      Result(#(JsValue, State), #(JsValue, State)),
     /// Current call stack depth. Incremented on function entry, decremented on return.
     /// Throws RangeError when exceeding limits.max_call_depth.
     call_depth: Int,
@@ -149,7 +161,10 @@ pub fn merge_globals(
 ) -> State {
   State(
     ..parent,
-    lexical_globals: child.lexical_globals,
+    ctx: RealmCtx(
+      ..parent.ctx,
+      lexical_globals: child.ctx.lexical_globals,
+    ),
     job_queue: job_queue.append(child.job_queue, extra_jobs),
     outstanding: child.outstanding,
   )
@@ -160,35 +175,35 @@ pub fn outstanding(s: State) -> Int {
   s.outstanding
 }
 
-/// Call state.call_fn (re-entrant JS function call), handling the function field access.
+/// Call ctx.call_fn (re-entrant JS function call), handling the function field access.
 pub fn call(
   state: State,
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  let f = state.call_fn
+  let f = state.ctx.call_fn
   f(state, callee, this_val, args)
 }
 
-/// Call state.construct_fn (re-entrant `new target(...args)`). newTarget = target.
+/// Call ctx.construct_fn (re-entrant `new target(...args)`). newTarget = target.
 pub fn construct(
   state: State,
   target: JsValue,
   args: List(JsValue),
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  let f = state.construct_fn
+  let f = state.ctx.construct_fn
   f(state, target, args, target)
 }
 
-/// Call state.construct_fn with explicit newTarget (Reflect.construct).
+/// Call ctx.construct_fn with explicit newTarget (Reflect.construct).
 pub fn construct_with_target(
   state: State,
   target: JsValue,
   args: List(JsValue),
   new_target: JsValue,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  let f = state.construct_fn
+  let f = state.ctx.construct_fn
   f(state, target, args, new_target)
 }
 

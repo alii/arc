@@ -21,7 +21,6 @@ import arc/vm/value.{
 }
 import gleam/bool
 import gleam/dict
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
@@ -43,6 +42,23 @@ fn ffi_regexp_exec(
   string: String,
   offset: Int,
 ) -> Result(List(#(Int, Int)), Nil)
+
+/// FFI: O(1) sub-binary slice by byte offsets. ffi_regexp_exec returns byte
+/// indices (re:run), so all slicing of the subject string must be byte-based —
+/// grapheme-based string.slice would be both wrong and O(offset+len).
+@external(erlang, "arc_regexp_ffi", "byte_slice")
+fn byte_slice(string: String, start: Int, len: Int) -> String
+
+/// FFI: O(1) suffix of the string from a byte offset.
+@external(erlang, "arc_regexp_ffi", "byte_drop_start")
+fn byte_drop_start(string: String, start: Int) -> String
+
+/// FFI: smallest UTF-8 character boundary strictly after a byte offset
+/// (AdvanceStringIndex). Stepping a byte offset by +1 can land mid-character,
+/// which makes ffi_regexp_exec raise badarg. May return past the end of the
+/// string, which loops use as their termination signal.
+@external(erlang, "arc_regexp_ffi", "next_char_boundary")
+fn next_char_boundary(string: String, position: Int) -> Int
 
 /// Set up RegExp constructor + RegExp.prototype.
 pub fn init(
@@ -402,7 +418,7 @@ fn regexp_exec(
       // Build the result array: [full_match, group1, group2, ...]
       let #(match_strings, match_start) = case captures {
         [#(start, len), ..rest] -> {
-          let full = string.slice(str, start, len)
+          let full = byte_slice(str, start, len)
           let groups = list.map(rest, capture_to_value(str, _))
           #([JsString(full), ..groups], start)
         }
@@ -535,10 +551,11 @@ fn collect_global_matches(
   let last_index = read_last_index(state, ref)
   case ffi_regexp_exec(pattern, flags, str, last_index) {
     Ok([#(start, len), ..]) -> {
-      let matched = string.slice(str, start, len)
-      // Advance lastIndex; handle empty match by stepping +1
+      let matched = byte_slice(str, start, len)
+      // Advance lastIndex; on an empty match step to the next character
+      // boundary (AdvanceStringIndex) — +1 byte can land mid-character.
       let next_index = case len {
-        0 -> start + 1
+        0 -> next_char_boundary(str, start)
         _ -> start + len
       }
       let state = write_last_index(state, ref, next_index)
@@ -586,6 +603,9 @@ fn regexp_symbol_replace(
     _ -> JsUndefined
   }
   let functional_replace = helpers.is_callable(state.heap, replace_value)
+  // Build the replacer once: a string replaceValue is coerced and tokenized a
+  // single time before the match loop (spec step 5), instead of per match.
+  use replacer, state <- with_replacer(state, replace_value, functional_replace)
 
   case string.contains(flags, "g") {
     True -> {
@@ -593,15 +613,7 @@ fn regexp_symbol_replace(
       let #(state, matches) =
         collect_replace_matches(pattern, flags, str, ref, state, [])
       let matches = list.reverse(matches)
-      apply_replacements(
-        str,
-        matches,
-        replace_value,
-        functional_replace,
-        state,
-        0,
-        "",
-      )
+      apply_replacements(str, matches, replacer, state, 0, "")
     }
     False -> {
       let offset = case string.contains(flags, "y") {
@@ -611,18 +623,36 @@ fn regexp_symbol_replace(
       case ffi_regexp_exec(pattern, flags, str, offset) {
         Ok(captures) -> {
           let match_info = extract_match_info(str, captures)
-          apply_replacements(
-            str,
-            [match_info],
-            replace_value,
-            functional_replace,
-            state,
-            0,
-            "",
-          )
+          apply_replacements(str, [match_info], replacer, state, 0, "")
         }
         Error(Nil) -> #(state, Ok(JsString(str)))
       }
+    }
+  }
+}
+
+/// How each match gets replaced: call a function, or expand a pre-tokenized
+/// string template.
+type Replacer {
+  FunctionalReplacer(fun: JsValue)
+  TemplateReplacer(segments: List(ReplaceSegment))
+}
+
+/// Build the Replacer for [@@replace]. Non-functional replaceValue is coerced
+/// to a string and tokenized exactly once here — get_substitution previously
+/// re-segmented the template into graphemes and scanned it twice for every
+/// match.
+fn with_replacer(
+  state: State,
+  replace_value: JsValue,
+  functional_replace: Bool,
+  cont: fn(Replacer, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case functional_replace {
+    True -> cont(FunctionalReplacer(replace_value), state)
+    False -> {
+      use template, state <- coerce.try_to_string(state, replace_value)
+      cont(TemplateReplacer(tokenize_template(template)), state)
     }
   }
 }
@@ -636,7 +666,7 @@ type MatchInfo {
 fn extract_match_info(str: String, captures: List(#(Int, Int))) -> MatchInfo {
   case captures {
     [#(start, len), ..rest] -> {
-      let matched = string.slice(str, start, len)
+      let matched = byte_slice(str, start, len)
       let groups = list.map(rest, capture_to_value(str, _))
       MatchInfo(matched:, position: start, captures: groups)
     }
@@ -657,9 +687,11 @@ fn collect_replace_matches(
   case ffi_regexp_exec(pattern, flags, str, last_index) {
     Ok(captures) -> {
       let info = extract_match_info(str, captures)
-      let match_len = string.length(info.matched)
+      let match_len = string.byte_size(info.matched)
+      // On an empty match step to the next character boundary
+      // (AdvanceStringIndex) — +1 byte can land mid-character.
       let next_index = case match_len {
-        0 -> info.position + 1
+        0 -> next_char_boundary(str, info.position)
         _ -> info.position + match_len
       }
       let state = write_last_index(state, ref, next_index)
@@ -676,8 +708,7 @@ fn collect_replace_matches(
 fn apply_replacements(
   str: String,
   matches: List(MatchInfo),
-  replace_value: JsValue,
-  functional_replace: Bool,
+  replacer: Replacer,
   state: State,
   prev_end: Int,
   acc: String,
@@ -685,16 +716,16 @@ fn apply_replacements(
   case matches {
     [] -> {
       // Append remainder
-      let remainder = string.drop_start(str, prev_end)
+      let remainder = byte_drop_start(str, prev_end)
       #(state, Ok(JsString(acc <> remainder)))
     }
     [match, ..rest] -> {
       // Append text before this match
-      let before = string.slice(str, prev_end, match.position - prev_end)
+      let before = byte_slice(str, prev_end, match.position - prev_end)
       let acc = acc <> before
 
-      case functional_replace {
-        True -> {
+      case replacer {
+        FunctionalReplacer(fun) -> {
           // Build args: matched, ...captures, position, str
           let call_args =
             list.flatten([
@@ -704,32 +735,23 @@ fn apply_replacements(
             ])
           use result, state <- state.try_call(
             state,
-            replace_value,
+            fun,
             JsUndefined,
             call_args,
           )
           use replacement, state <- coerce.try_to_string(state, result)
           let acc = acc <> replacement
-          let prev_end = match.position + string.length(match.matched)
-          apply_replacements(
-            str,
-            rest,
-            replace_value,
-            functional_replace,
-            state,
-            prev_end,
-            acc,
-          )
+          let prev_end = match.position + string.byte_size(match.matched)
+          apply_replacements(str, rest, replacer, state, prev_end, acc)
         }
-        False -> {
-          use template, state <- coerce.try_to_string(state, replace_value)
+        TemplateReplacer(segments) ->
           case
-            get_substitution(
+            substitute_segments(
+              segments,
               match.matched,
               str,
               match.position,
               match.captures,
-              template,
             )
           {
             Error(Nil) -> {
@@ -743,333 +765,191 @@ fn apply_replacements(
             }
             Ok(replacement) -> {
               let acc = acc <> replacement
-              let prev_end = match.position + string.length(match.matched)
-              apply_replacements(
-                str,
-                rest,
-                replace_value,
-                functional_replace,
-                state,
-                prev_end,
-                acc,
-              )
+              let prev_end = match.position + string.byte_size(match.matched)
+              apply_replacements(str, rest, replacer, state, prev_end, acc)
             }
           }
-        }
       }
     }
   }
 }
 
-/// ES2024 §22.1.3.18.1 GetSubstitution — process replacement template.
-/// Returns Error(Nil) if the result would exceed limits.max_string_bytes.
-fn get_substitution(
-  matched: String,
-  str: String,
-  position: Int,
-  captures: List(JsValue),
-  template: String,
-) -> Result(String, Nil) {
-  let chars = string.to_graphemes(template)
-  // Estimate output length upfront — bail immediately if it would exceed the
-  // limit. This avoids building hundreds of MB of string incrementally (the
-  // reason replace-math.js was slow: 32768 * 1MB = 32GB expected output).
-  let estimated =
-    estimate_substitution_length(matched, str, position, captures, chars, 0)
-  case estimated > limits.max_string_bytes {
-    True -> Error(Nil)
-    False -> get_substitution_loop(matched, str, position, captures, chars, "")
+/// One pre-tokenized piece of a replacement template (GetSubstitution,
+/// ES2024 §22.1.3.18.1). The template is tokenized once per replace call so
+/// each match only resolves segments — previously the template was
+/// grapheme-segmented and scanned twice for every match. The common no-dollar
+/// template is a single LiteralSeg.
+type ReplaceSegment {
+  /// Literal text — also covers "$$" → "$" and invalid refs like "$0".
+  LiteralSeg(text: String)
+  /// "$&" — the matched substring.
+  MatchedSeg
+  /// "$`" — the portion of the string before the match.
+  BeforeSeg
+  /// "$'" — the portion of the string after the match.
+  AfterSeg
+  /// "$N" (N in 1-9) — capture group N, or "" if absent/unmatched.
+  CaptureSeg(idx: Int)
+  /// "$NN" (first digit 1-9): capture group NN if it matched; otherwise fall
+  /// back to group `one_idx` ("" if absent/unmatched) followed by the literal
+  /// second digit.
+  TwoDigitSeg(two_idx: Int, one_idx: Int, suffix: String)
+  /// "$0d" (d in 1-9): capture group d if it matched, else the literal "$0d".
+  ZeroDigitSeg(two_idx: Int, literal: String)
+}
+
+/// Tokenize a replacement template into segments. Called once per replace
+/// call; templates without "$" skip grapheme segmentation entirely.
+fn tokenize_template(template: String) -> List(ReplaceSegment) {
+  case string.contains(template, "$") {
+    False -> [LiteralSeg(template)]
+    True -> tokenize_loop(string.to_graphemes(template), "", [])
   }
 }
 
-/// Estimate the output byte length of GetSubstitution without building the
-/// string. Scans the template chars to compute how many bytes each $-reference
-/// would contribute. Used to bail early on pathological inputs (e.g. 32768
-/// backrefs each expanding to 1MB → 32GB expected output).
-fn estimate_substitution_length(
-  matched: String,
-  str: String,
-  position: Int,
-  captures: List(JsValue),
+fn flush_literal(
+  lit: String,
+  segs: List(ReplaceSegment),
+) -> List(ReplaceSegment) {
+  case lit {
+    "" -> segs
+    _ -> [LiteralSeg(lit), ..segs]
+  }
+}
+
+fn tokenize_loop(
   chars: List(String),
-  acc: Int,
-) -> Int {
+  lit: String,
+  segs: List(ReplaceSegment),
+) -> List(ReplaceSegment) {
   case chars {
-    [] -> acc
-    ["$", "$", ..rest] ->
-      estimate_substitution_length(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc + 1,
-      )
+    [] -> list.reverse(flush_literal(lit, segs))
+    ["$", "$", ..rest] -> tokenize_loop(rest, lit <> "$", segs)
     ["$", "&", ..rest] ->
-      estimate_substitution_length(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc + string.byte_size(matched),
-      )
+      tokenize_loop(rest, "", [MatchedSeg, ..flush_literal(lit, segs)])
     ["$", "`", ..rest] ->
-      // $` → everything before the match (position bytes for ASCII)
-      estimate_substitution_length(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc + position,
-      )
-    ["$", "'", ..rest] -> {
-      // $' → everything after the match
-      let after_len =
-        string.byte_size(str) - position - string.byte_size(matched)
-      let after_len = case after_len < 0 {
-        True -> 0
-        False -> after_len
-      }
-      estimate_substitution_length(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc + after_len,
-      )
-    }
+      tokenize_loop(rest, "", [BeforeSeg, ..flush_literal(lit, segs)])
+    ["$", "'", ..rest] ->
+      tokenize_loop(rest, "", [AfterSeg, ..flush_literal(lit, segs)])
     ["$", d1, d2, ..rest] ->
-      case two_digit_capture(captures, d1, d2) {
-        Some(s) ->
-          estimate_substitution_length(
-            matched,
-            str,
-            position,
-            captures,
-            rest,
-            acc + string.byte_size(s),
-          )
-        None ->
-          estimate_single_digit_len(
-            matched,
-            str,
-            position,
-            captures,
-            d1,
-            [d2, ..rest],
-            acc,
-          )
+      case is_digit(d1), is_digit(d2) {
+        True, True -> tokenize_two_digit(d1, d2, rest, lit, segs)
+        // "$N" followed by a non-digit — d2 is rescanned (it may start "$&").
+        True, False -> tokenize_one_digit(d1, [d2, ..rest], lit, segs)
+        // Not a reference — "$" is literal, rescan from d1.
+        False, _ -> tokenize_loop([d1, d2, ..rest], lit <> "$", segs)
       }
     ["$", d1] ->
-      estimate_single_digit_len(matched, str, position, captures, d1, [], acc)
-    [_ch, ..rest] ->
-      estimate_substitution_length(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc + 1,
-      )
+      case is_digit(d1) {
+        True -> tokenize_one_digit(d1, [], lit, segs)
+        False -> tokenize_loop([d1], lit <> "$", segs)
+      }
+    [ch, ..rest] -> tokenize_loop(rest, lit <> ch, segs)
   }
 }
 
-/// Estimate length for a single-digit $N reference (mirrors try_single_digit_ref).
-fn estimate_single_digit_len(
-  matched: String,
-  str: String,
-  position: Int,
-  captures: List(JsValue),
+/// "$N": a CaptureSeg for $1-$9; "$0" stays literal.
+fn tokenize_one_digit(
   d1: String,
   rest: List(String),
-  acc: Int,
-) -> Int {
-  case is_digit(d1) {
-    True ->
-      case int.parse(d1) {
-        Ok(idx) if idx >= 1 ->
-          case helpers.list_at(captures, idx - 1) {
-            Some(JsString(s)) ->
-              estimate_substitution_length(
-                matched,
-                str,
-                position,
-                captures,
-                rest,
-                acc + string.byte_size(s),
-              )
-            _ ->
-              estimate_substitution_length(
-                matched,
-                str,
-                position,
-                captures,
-                rest,
-                acc,
-              )
-          }
-        _ ->
-          // "$" + d1 literal
-          estimate_substitution_length(
-            matched,
-            str,
-            position,
-            captures,
-            rest,
-            acc + 2,
-          )
-      }
-    False ->
-      // Not a digit — "$" literal + reprocess d1
-      estimate_substitution_length(
-        matched,
-        str,
-        position,
-        captures,
-        [d1, ..rest],
-        acc + 1,
-      )
+  lit: String,
+  segs: List(ReplaceSegment),
+) -> List(ReplaceSegment) {
+  case digit_value(d1) {
+    0 -> tokenize_loop(rest, lit <> "$0", segs)
+    idx -> tokenize_loop(rest, "", [CaptureSeg(idx), ..flush_literal(lit, segs)])
   }
 }
 
-fn get_substitution_loop(
-  matched: String,
-  str: String,
-  position: Int,
-  captures: List(JsValue),
-  chars: List(String),
-  acc: String,
-) -> Result(String, Nil) {
-  case chars {
-    [] -> Ok(acc)
-    ["$", "$", ..rest] ->
-      get_substitution_loop(matched, str, position, captures, rest, acc <> "$")
-    ["$", "&", ..rest] ->
-      get_substitution_loop(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc <> matched,
-      )
-    ["$", "`", ..rest] -> {
-      let before = string.slice(str, 0, position)
-      get_substitution_loop(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc <> before,
-      )
-    }
-    ["$", "'", ..rest] -> {
-      let after = string.drop_start(str, position + string.length(matched))
-      get_substitution_loop(
-        matched,
-        str,
-        position,
-        captures,
-        rest,
-        acc <> after,
-      )
-    }
-    ["$", d1, d2, ..rest] ->
-      case two_digit_capture(captures, d1, d2) {
-        Some(s) ->
-          get_substitution_loop(
-            matched,
-            str,
-            position,
-            captures,
-            rest,
-            acc <> s,
-          )
-        None ->
-          try_single_digit_ref(
-            matched,
-            str,
-            position,
-            captures,
-            d1,
-            [d2, ..rest],
-            acc,
-          )
-      }
-    ["$", d1] ->
-      try_single_digit_ref(matched, str, position, captures, d1, [], acc)
-    [ch, ..rest] ->
-      get_substitution_loop(matched, str, position, captures, rest, acc <> ch)
-  }
-}
-
-/// Try to interpret d1 as a single-digit capture reference ($1-$9).
-/// If it's not a digit or out of range, emit literal "$" + d1.
-fn try_single_digit_ref(
-  matched: String,
-  str: String,
-  position: Int,
-  captures: List(JsValue),
-  d1: String,
-  rest: List(String),
-  acc: String,
-) -> Result(String, Nil) {
-  case is_digit(d1) {
-    True ->
-      case int.parse(d1) {
-        Ok(idx) if idx >= 1 ->
-          case helpers.list_at(captures, idx - 1) {
-            Some(JsString(s)) ->
-              get_substitution_loop(
-                matched,
-                str,
-                position,
-                captures,
-                rest,
-                acc <> s,
-              )
-            _ ->
-              get_substitution_loop(matched, str, position, captures, rest, acc)
-          }
-        _ ->
-          get_substitution_loop(
-            matched,
-            str,
-            position,
-            captures,
-            rest,
-            acc <> "$" <> d1,
-          )
-      }
-    False ->
-      // Not a digit at all, emit "$" literally and reprocess d1
-      get_substitution_loop(
-        matched,
-        str,
-        position,
-        captures,
-        [d1, ..rest],
-        acc <> "$",
-      )
-  }
-}
-
-/// Look up a two-digit capture group $NN in the captures list. Returns
-/// Some(captured_string) if d1 and d2 are digits, the index is >= 1, and
-/// captures[idx-1] is a JsString. None → caller falls back to single-digit.
-fn two_digit_capture(
-  captures: List(JsValue),
+/// "$NN": prefer the two-digit group, falling back per match exactly like the
+/// previous scan-time logic (single-digit group + literal second digit, or
+/// the literal "$0d" when the first digit is 0).
+fn tokenize_two_digit(
   d1: String,
   d2: String,
-) -> Option(String) {
-  use <- bool.guard(!is_digit(d1) || !is_digit(d2), None)
-  int.parse(d1 <> d2)
-  |> option.from_result
-  |> option.then(capture_string(captures, _))
+  rest: List(String),
+  lit: String,
+  segs: List(ReplaceSegment),
+) -> List(ReplaceSegment) {
+  let two_idx = digit_value(d1) * 10 + digit_value(d2)
+  case digit_value(d1), two_idx {
+    // "$00" can never resolve to a group — always literal.
+    0, 0 -> tokenize_loop(rest, lit <> "$00", segs)
+    0, _ ->
+      tokenize_loop(rest, "", [
+        ZeroDigitSeg(two_idx, "$0" <> d2),
+        ..flush_literal(lit, segs)
+      ])
+    one_idx, _ ->
+      tokenize_loop(rest, "", [
+        TwoDigitSeg(two_idx, one_idx, d2),
+        ..flush_literal(lit, segs)
+      ])
+  }
+}
+
+/// ES2024 §22.1.3.18.1 GetSubstitution over a pre-tokenized template.
+/// Returns Error(Nil) if the result would exceed limits.max_string_bytes.
+fn substitute_segments(
+  segments: List(ReplaceSegment),
+  matched: String,
+  str: String,
+  position: Int,
+  captures: List(JsValue),
+) -> Result(String, Nil) {
+  let parts =
+    list.map(segments, resolve_segment(_, matched, str, position, captures))
+  // Check the output size before concatenating — bail immediately if it would
+  // exceed the limit. This avoids building hundreds of MB of string
+  // incrementally (the reason replace-math.js was slow: 32768 * 1MB = 32GB
+  // expected output). The parts themselves are O(1) sub-binaries.
+  let total =
+    list.fold(parts, 0, fn(acc, part) { acc + string.byte_size(part) })
+  case total > limits.max_string_bytes {
+    True -> Error(Nil)
+    False -> Ok(string.concat(parts))
+  }
+}
+
+/// Resolve one segment for a specific match. byte_slice/byte_drop_start are
+/// O(1) sub-binaries, so this never copies the subject string.
+fn resolve_segment(
+  segment: ReplaceSegment,
+  matched: String,
+  str: String,
+  position: Int,
+  captures: List(JsValue),
+) -> String {
+  case segment {
+    LiteralSeg(text) -> text
+    MatchedSeg -> matched
+    BeforeSeg -> byte_slice(str, 0, position)
+    AfterSeg -> byte_drop_start(str, position + string.byte_size(matched))
+    CaptureSeg(idx) -> capture_string(captures, idx) |> option.unwrap("")
+    TwoDigitSeg(two_idx, one_idx, suffix) ->
+      case capture_string(captures, two_idx) {
+        Some(s) -> s
+        None ->
+          { capture_string(captures, one_idx) |> option.unwrap("") } <> suffix
+      }
+    ZeroDigitSeg(two_idx, literal) ->
+      capture_string(captures, two_idx) |> option.unwrap(literal)
+  }
+}
+
+fn digit_value(ch: String) -> Int {
+  case ch {
+    "1" -> 1
+    "2" -> 2
+    "3" -> 3
+    "4" -> 4
+    "5" -> 5
+    "6" -> 6
+    "7" -> 7
+    "8" -> 8
+    "9" -> 9
+    _ -> 0
+  }
 }
 
 /// Look up captures[idx-1] as a string. None if out of range, <1, or not a string.
@@ -1091,7 +971,7 @@ fn is_digit(ch: String) -> Bool {
 /// Convert a capture tuple (start, len) to JsString slice or JsUndefined if no-match (start<0).
 fn capture_to_value(str: String, cap: #(Int, Int)) -> JsValue {
   case cap {
-    #(s, l) if s >= 0 -> JsString(string.slice(str, s, l))
+    #(s, l) if s >= 0 -> JsString(byte_slice(str, s, l))
     _ -> JsUndefined
   }
 }
@@ -1120,7 +1000,7 @@ fn regexp_symbol_split(
         _ -> 0
       }
   }
-  case lim, string.length(str) {
+  case lim, string.byte_size(str) {
     // If limit is 0, return empty array
     0, _ -> state.ok_array(state, [])
     // Empty string: if regex matches → [], else → [""]
@@ -1130,13 +1010,14 @@ fn regexp_symbol_split(
         Error(Nil) -> state.ok_array(state, [JsString(str)])
       }
     _, str_len -> {
-      let parts = split_loop(pattern, flags, str, str_len, 0, 0, lim, [])
+      let parts = split_loop(pattern, flags, str, str_len, 0, 0, lim, [], 0)
       state.ok_array(state, parts)
     }
   }
 }
 
 /// Loop for regexp split: search from `search_from`, last split at `prev_end`.
+/// `count` tracks the length of `acc` so limit checks are O(1).
 fn split_loop(
   pattern: String,
   flags: String,
@@ -1146,14 +1027,18 @@ fn split_loop(
   search_from: Int,
   lim: Int,
   acc: List(JsValue),
+  count: Int,
 ) -> List(JsValue) {
-  case search_from > str_len || list.length(acc) >= lim {
+  // Spec loop is `q < size` (§22.2.6.14 step 14): no match attempt at the
+  // end-of-string position, otherwise an empty match there adds a spurious
+  // trailing split.
+  case search_from >= str_len || count >= lim {
     True -> {
       // Append remainder if under limit
-      case list.length(acc) >= lim {
+      case count >= lim {
         True -> list.reverse(acc)
         False -> {
-          let remainder = string.drop_start(str, prev_end)
+          let remainder = byte_drop_start(str, prev_end)
           list.reverse([JsString(remainder), ..acc])
         }
       }
@@ -1162,7 +1047,7 @@ fn split_loop(
       case ffi_regexp_exec(pattern, flags, str, search_from) {
         Error(Nil) -> {
           // No more matches, append remainder
-          let remainder = string.drop_start(str, prev_end)
+          let remainder = byte_drop_start(str, prev_end)
           list.reverse([JsString(remainder), ..acc])
         }
         Ok(captures) -> {
@@ -1183,21 +1068,24 @@ fn split_loop(
                 str,
                 str_len,
                 prev_end,
-                search_from + 1,
+                next_char_boundary(str, search_from),
                 lim,
                 acc,
+                count,
               )
             False -> {
               // Add substring before match
-              let part = string.slice(str, prev_end, match_start - prev_end)
+              let part = byte_slice(str, prev_end, match_start - prev_end)
               let acc = [JsString(part), ..acc]
+              let count = count + 1
               // Check limit
-              case list.length(acc) >= lim {
+              case count >= lim {
                 True -> list.reverse(acc)
                 False -> {
                   // Add capture groups
-                  let acc = add_captures_with_limit(acc, cap_groups, lim)
-                  case list.length(acc) >= lim {
+                  let #(acc, count) =
+                    add_captures_with_limit(acc, count, cap_groups, lim)
+                  case count >= lim {
                     True -> list.reverse(acc)
                     False ->
                       split_loop(
@@ -1209,6 +1097,7 @@ fn split_loop(
                         match_end,
                         lim,
                         acc,
+                        count,
                       )
                   }
                 }
@@ -1221,14 +1110,17 @@ fn split_loop(
 }
 
 /// Add capture groups to accumulator, respecting the limit.
+/// Returns the updated accumulator and its length.
 fn add_captures_with_limit(
   acc: List(JsValue),
+  count: Int,
   captures: List(JsValue),
   lim: Int,
-) -> List(JsValue) {
-  case captures, list.length(acc) >= lim {
-    _, True -> acc
-    [], _ -> acc
-    [cap, ..rest], False -> add_captures_with_limit([cap, ..acc], rest, lim)
+) -> #(List(JsValue), Int) {
+  case captures, count >= lim {
+    _, True -> #(acc, count)
+    [], _ -> #(acc, count)
+    [cap, ..rest], False ->
+      add_captures_with_limit([cap, ..acc], count + 1, rest, lim)
   }
 }

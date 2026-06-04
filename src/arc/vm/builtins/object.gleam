@@ -1193,6 +1193,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.RegExpObject(..) -> "RegExp"
             value.DateObject(_) -> "Date"
             value.ArrayIteratorObject(..) -> "Array Iterator"
+            value.StringIteratorObject(..) -> "String Iterator"
             value.SetIteratorObject(..) -> "Set Iterator"
             value.MapIteratorObject(..) -> "Map Iterator"
             value.AsyncFromSyncIteratorObject(..) -> "Async-from-Sync Iterator"
@@ -1200,6 +1201,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.WrapForValidIteratorObject(..) -> "Iterator"
             // Unreached in practice: @@toStringTag = "Module" wins above.
             value.ModuleNamespace(_) -> "Object"
+            value.IteratorRecordObject(..) -> "Iterator"
             OrdinaryObject -> "Object"
           }
       }

@@ -126,21 +126,35 @@ pub fn get_value(
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
       namespace_get(state, exports, key)
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
-      // Step 1: Let desc be ? O.[[GetOwnProperty]](P).
-      case own_property_of_slot(kind, properties, elements, key) {
-        // Step 3: IsDataDescriptor(desc) → return desc.[[Value]].
-        Some(DataProperty(value: val, ..)) -> Ok(#(val, state))
-        // Steps 5-7: IsAccessorDescriptor → Call(getter, Receiver) or undefined.
-        Some(AccessorProperty(get: Some(getter), ..)) ->
-          state.call(state, getter, receiver, [])
-        Some(AccessorProperty(get: None, ..)) -> Ok(#(value.JsUndefined, state))
-        // Step 2: desc is undefined — walk prototype chain.
-        None ->
-          case prototype {
-            // Step 2c: parent.[[Get]](P, Receiver)
-            Some(proto_ref) -> get_value(state, proto_ref, key, receiver)
-            // Step 2b: parent is null → return undefined.
-            None -> Ok(#(value.JsUndefined, state))
+      case kind, key {
+        // Fast paths for synthesized descriptors: own_property_of_slot would
+        // allocate a fresh Some(DataProperty(..)) box per read just for us to
+        // destructure it below. Return the value directly instead.
+        // --- Array exotic: virtual "length" (§10.4.2) ---
+        ArrayObject(length:), Named("length") ->
+          Ok(#(value.from_int(length), state))
+        // --- Array/Arguments exotic: dense element storage ---
+        // properties dict is authoritative (accessor/attribute overrides set
+        // via defineProperty); elements is the fast-path data-value cache.
+        ArrayObject(_), Index(idx) | value.ArgumentsObject(_), Index(idx) ->
+          case dict.get(properties, key) {
+            // Override at this index wins — full descriptor semantics.
+            Ok(prop) -> property_get_value(state, prop, receiver)
+            Error(Nil) ->
+              case elements.get_option(elements, idx) {
+                Some(val) -> Ok(#(val, state))
+                // Hole — walk prototype chain (step 2).
+                None ->
+                  get_value_from_prototype(state, prototype, key, receiver)
+              }
+          }
+        _, _ ->
+          // Step 1: Let desc be ? O.[[GetOwnProperty]](P).
+          case own_property_of_slot(kind, properties, elements, key) {
+            // Steps 3-7: branch on the descriptor type.
+            Some(prop) -> property_get_value(state, prop, receiver)
+            // Step 2: desc is undefined — walk prototype chain.
+            None -> get_value_from_prototype(state, prototype, key, receiver)
           }
       }
     _ -> Ok(#(value.JsUndefined, state))
@@ -200,6 +214,81 @@ pub fn namespace_tdz_guard(
         }
       })
     _ -> Ok(state)
+  }
+}
+
+/// §10.1.8.1 OrdinaryGet steps 3-7 given a found own descriptor:
+/// data → desc.[[Value]]; accessor → Call(getter, Receiver) or undefined.
+pub fn property_get_value(
+  state: State,
+  prop: Property,
+  receiver: JsValue,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case prop {
+    // Step 3: IsDataDescriptor(desc) → return desc.[[Value]].
+    DataProperty(value: val, ..) -> Ok(#(val, state))
+    // Steps 5-7: IsAccessorDescriptor → Call(getter, Receiver) or undefined.
+    AccessorProperty(get: Some(getter), ..) ->
+      state.call(state, getter, receiver, [])
+    AccessorProperty(get: None, ..) -> Ok(#(value.JsUndefined, state))
+  }
+}
+
+/// §10.1.8.1 OrdinaryGet step 2: desc is undefined — walk prototype chain.
+fn get_value_from_prototype(
+  state: State,
+  prototype: Option(Ref),
+  key: PropertyKey,
+  receiver: JsValue,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case prototype {
+    // Step 2c: parent.[[Get]](P, Receiver)
+    Some(proto_ref) -> get_value(state, proto_ref, key, receiver)
+    // Step 2b: parent is null → return undefined.
+    None -> Ok(#(value.JsUndefined, state))
+  }
+}
+
+/// Result of a fast own-index probe (see `get_own_index`). On the dense
+/// Array/Arguments elements path the value is returned directly instead of
+/// being boxed into a synthesized Some(DataProperty(..)) descriptor.
+pub type OwnIndex {
+  /// Own data value found in dense element storage (no descriptor allocated).
+  OwnIndexValue(JsValue)
+  /// Own property found in the properties dict (override or non-exotic) —
+  /// the dict's existing record, full descriptor semantics apply.
+  OwnIndexProperty(Property)
+  /// No own property at this index. Carries the slot's prototype (already
+  /// read from the heap) so callers can continue the prototype-chain walk
+  /// without re-reading the same slot. None when the receiver has no
+  /// prototype or is not an object slot.
+  OwnIndexAbsent(prototype: Option(Ref))
+}
+
+/// Fast variant of `get_own_property` for integer index keys. Identical
+/// semantics, but on the Array/Arguments dense-elements hit it skips the
+/// Some(DataProperty(..)) descriptor synthesis and returns the value directly.
+pub fn get_own_index(heap: Heap, ref: Ref, idx: Int) -> OwnIndex {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
+      case kind {
+        ArrayObject(_) | value.ArgumentsObject(_) ->
+          case dict.get(properties, Index(idx)) {
+            // accessor/attribute override at this index wins
+            Ok(prop) -> OwnIndexProperty(prop)
+            Error(Nil) ->
+              case elements.get_option(elements, idx) {
+                Some(val) -> OwnIndexValue(val)
+                None -> OwnIndexAbsent(prototype)
+              }
+          }
+        _ ->
+          case own_property_of_slot(kind, properties, elements, Index(idx)) {
+            Some(prop) -> OwnIndexProperty(prop)
+            None -> OwnIndexAbsent(prototype)
+          }
+      }
+    _ -> OwnIndexAbsent(None)
   }
 }
 
@@ -301,6 +390,16 @@ fn namespace_own_property(
 /// **[[GetOwnProperty]](P)** dispatch given an already-read ObjectSlot's
 /// fields. Same algorithm as get_own_property; callers that already hold the
 /// slot use this directly instead of re-reading the heap.
+///
+/// INVARIANT (Array/Arguments index keys): properties dict is checked FIRST
+/// (authoritative for accessor/attribute overrides), then dense elements
+/// storage. This dict-then-elements probe is duplicated in three fast paths
+/// that bypass this function to avoid descriptor boxing:
+///   - `get_value` (Array/Arguments Index fast path)
+///   - `get_own_index`
+///   - `set_value` (Array/Arguments Index write fast path)
+/// Any change to the storage invariant here MUST be mirrored in all of them,
+/// or get/set/getOwnPropertyDescriptor will silently diverge.
 fn own_property_of_slot(
   kind: state.ExoticKind,
   properties: dict.Dict(PropertyKey, Property),
@@ -328,11 +427,13 @@ fn own_property_of_slot(
           case dict_get_option(properties, key) {
             // accessor override at this index wins
             Some(prop) -> Some(prop)
+            // Single traversal: get_option returns None for holes, so this is
+            // equivalent to has+get but does one tree lookup instead of two.
             None ->
-              case elements.has(elements, idx) {
-                True -> Some(value.data_property(elements.get(elements, idx)))
-                False -> None
-              }
+              option.map(
+                elements.get_option(elements, idx),
+                value.data_property,
+              )
           }
         Named(_) -> dict_get_option(properties, key)
       }
@@ -414,44 +515,201 @@ pub fn set_value(
   case heap.read(state.heap, ref) {
     // §10.4.6.9 Module Namespace [[Set]]: always returns false (read-only).
     Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> Ok(#(state, False))
-    Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
-      // §10.1.9.1 step 1: Let ownDesc be ? O.[[GetOwnProperty]](P).
-      // §10.1.9.1 step 2: Return OrdinarySetWithOwnDescriptor(O, P, V, Receiver, ownDesc).
-      case own_property_of_slot(kind, properties, elements, key) {
-        // §10.1.9.2 step 1: If ownDesc is undefined, then
-        //   step 1.a: Let parent be ? O.[[GetPrototypeOf]]().
-        None ->
-          case prototype {
-            // §10.1.9.2 step 1.b: If parent is not null, return ? parent.[[Set]](P, V, Receiver).
-            Some(proto_ref) -> set_value(state, proto_ref, key, val, receiver)
-            // §10.1.9.2 step 1.c: Else, set ownDesc to {[[Value]]: undefined, [[Writable]]: true,
-            //   [[Enumerable]]: true, [[Configurable]]: true}.
-            // (Falls through to set_on_receiver which creates the property.)
-            None -> set_on_receiver(state, receiver, key, val)
+    Some(
+      ObjectSlot(kind:, properties:, elements:, prototype:, extensible:, ..) as slot,
+    ) ->
+      case kind, key {
+        // Write-side fast path mirroring get_value's Array/Arguments Index
+        // fast path: own_property_of_slot would allocate a fresh
+        // Some(DataProperty(..)) box per write just for the descriptor
+        // dispatch below to destructure `writable: True` and discard it.
+        // Probe the dict (authoritative for accessor/attribute overrides)
+        // then dense element presence directly instead.
+        ArrayObject(_), Index(idx) | value.ArgumentsObject(_), Index(idx) ->
+          case dict.get(properties, key) {
+            // Override at this index wins — full descriptor semantics.
+            Ok(prop) ->
+              set_value_with_own_descriptor(
+                state,
+                ref,
+                slot,
+                prototype,
+                Some(prop),
+                key,
+                val,
+                receiver,
+              )
+            Error(Nil) ->
+              case elements.has(elements, idx) {
+                // Present dense element: an own writable/enumerable/
+                // configurable data property by construction — go straight
+                // to the receiver write, no descriptor boxing.
+                True ->
+                  set_on_receiver_with_slot(
+                    state,
+                    receiver,
+                    ref,
+                    slot,
+                    key,
+                    val,
+                  )
+                // Hole — proto chain may hold a setter; spec walk.
+                False ->
+                  set_value_with_own_descriptor(
+                    state,
+                    ref,
+                    slot,
+                    prototype,
+                    None,
+                    key,
+                    val,
+                    receiver,
+                  )
+              }
           }
-        // §10.1.9.2 step 2: If IsDataDescriptor(ownDesc) is true, then
-        //   step 2.a: If ownDesc.[[Writable]] is false, return false.
-        Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
-        // §10.1.9.2 steps 2.b-2.h: ownDesc is writable data — delegate to receiver.
-        // We delegate to set_on_receiver which handles both create and update
-        // via set_property (spec distinguishes step 2.d.ii CreateDataProperty vs
-        // step 2.h OrdinaryDefineOwnProperty but result is same).
-        Some(DataProperty(writable: True, ..)) ->
-          set_on_receiver(state, receiver, key, val)
-        // §10.1.9.2 step 3: Assert: ownDesc is an accessor descriptor.
-        //   step 4: Let setter be ownDesc.[[Set]].
-        //   step 5: If setter is undefined, return false.
-        Some(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
-        // §10.1.9.2 step 6: Perform ? Call(setter, Receiver, « V »).
-        // §10.1.9.2 step 7: Return true.
-        Some(AccessorProperty(set: Some(setter), ..)) -> {
-          use #(_, state) <- result.map(
-            state.call(state, setter, receiver, [val]),
-          )
-          #(state, True)
+        _, _ -> {
+          // §10.1.9.1 step 1: Let ownDesc be ? O.[[GetOwnProperty]](P).
+          let own = own_property_of_slot(kind, properties, elements, key)
+          // Fused-write eligibility: True only when the key's own property
+          // (if any) is guaranteed to live in the properties dict AND a plain
+          // value write routes to set_string_property (the dict update). That
+          // lets the fused branches below reuse the own_property_of_slot
+          // lookup instead of re-doing dict.get inside set_string_property —
+          // one dict.get + one dict.insert per write instead of two + one.
+          //
+          // Exclusions (must keep taking the descriptor-dispatch slow path):
+          //   - Index keys: Array/Arguments store them in elements, and Array
+          //     index writes also bump length (§10.4.2.1 step 2); String
+          //     index writes are guarded (§10.4.3.2 step 2). (Array/Arguments
+          //     Index never reaches here — handled by the fast path above —
+          //     but String/ordinary Index does.)
+          //   - Array "length": virtual property, writes go through
+          //     ArraySetLength (§10.4.2.4).
+          //   - String "length": synthesized non-writable descriptor
+          //     (§10.4.3.4), not present in the dict.
+          let fusable = case key, kind {
+            Index(_), _ -> False
+            Named("length"), ArrayObject(_) -> False
+            Named("length"), value.StringObject(_) -> False
+            Named(_), _ -> True
+          }
+          case fusable, receiver, own, prototype {
+            // Fused update (§10.1.9.2 steps 2.b-2.h with Receiver == O):
+            // the own writable data property we just found in the dict is
+            // exactly the existingDescriptor the receiver half would re-fetch
+            // (§10.1.6.3 step 6.c), so thread its enumerable/configurable
+            // flags straight into dict.insert.
+            True,
+              JsObject(recv_ref),
+              Some(DataProperty(
+                writable: True,
+                enumerable:,
+                configurable:,
+                value: _,
+              )),
+              _
+              if recv_ref == ref
+            -> {
+              let new_props =
+                dict.insert(
+                  properties,
+                  key,
+                  DataProperty(
+                    value: val,
+                    writable: True,
+                    enumerable:,
+                    configurable:,
+                  ),
+                )
+              let h =
+                heap.write(
+                  state.heap,
+                  ref,
+                  ObjectSlot(..slot, properties: new_props),
+                )
+              Ok(#(State(..state, heap: h), True))
+            }
+            // Fused create (§10.1.9.2 step 1.c + §10.1.6.3 steps 2.a-2.e):
+            // own_property_of_slot already proved the key is absent from the
+            // dict, there is no prototype to walk, and extensible came with
+            // the slot — skip set_string_property's redundant dict.get.
+            True, JsObject(recv_ref), None, None if recv_ref == ref ->
+              case extensible {
+                False -> Ok(#(state, False))
+                True -> {
+                  let new_props =
+                    dict.insert(properties, key, value.data_property(val))
+                  let h =
+                    heap.write(
+                      state.heap,
+                      ref,
+                      ObjectSlot(..slot, properties: new_props),
+                    )
+                  Ok(#(State(..state, heap: h), True))
+                }
+              }
+            // §10.1.9.1 step 2: Return OrdinarySetWithOwnDescriptor(O, P, V, Receiver, ownDesc).
+            _, _, _, _ ->
+              set_value_with_own_descriptor(
+                state,
+                ref,
+                slot,
+                prototype,
+                own,
+                key,
+                val,
+                receiver,
+              )
+          }
         }
       }
     _ -> set_on_receiver(state, receiver, key, val)
+  }
+}
+
+/// §10.1.9.2 OrdinarySetWithOwnDescriptor ( O, P, V, Receiver, ownDesc )
+/// given an already-computed ownDesc for `ref`'s already-read slot.
+fn set_value_with_own_descriptor(
+  state: State,
+  ref: Ref,
+  slot: HeapSlot,
+  prototype: Option(Ref),
+  own: Option(Property),
+  key: PropertyKey,
+  val: JsValue,
+  receiver: JsValue,
+) -> Result(#(State, Bool), #(JsValue, State)) {
+  case own {
+    // §10.1.9.2 step 1: If ownDesc is undefined, then
+    //   step 1.a: Let parent be ? O.[[GetPrototypeOf]]().
+    None ->
+      case prototype {
+        // §10.1.9.2 step 1.b: If parent is not null, return ? parent.[[Set]](P, V, Receiver).
+        Some(proto_ref) -> set_value(state, proto_ref, key, val, receiver)
+        // §10.1.9.2 step 1.c: Else, set ownDesc to {[[Value]]: undefined, [[Writable]]: true,
+        //   [[Enumerable]]: true, [[Configurable]]: true}.
+        // (Falls through to set_on_receiver which creates the property.)
+        None -> set_on_receiver_with_slot(state, receiver, ref, slot, key, val)
+      }
+    // §10.1.9.2 step 2: If IsDataDescriptor(ownDesc) is true, then
+    //   step 2.a: If ownDesc.[[Writable]] is false, return false.
+    Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
+    // §10.1.9.2 steps 2.b-2.h: ownDesc is writable data — delegate to receiver.
+    // We delegate to set_on_receiver which handles both create and update
+    // via set_property (spec distinguishes step 2.d.ii CreateDataProperty vs
+    // step 2.h OrdinaryDefineOwnProperty but result is same).
+    Some(DataProperty(writable: True, ..)) ->
+      set_on_receiver_with_slot(state, receiver, ref, slot, key, val)
+    // §10.1.9.2 step 3: Assert: ownDesc is an accessor descriptor.
+    //   step 4: Let setter be ownDesc.[[Set]].
+    //   step 5: If setter is undefined, return false.
+    Some(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
+    // §10.1.9.2 step 6: Perform ? Call(setter, Receiver, « V »).
+    // §10.1.9.2 step 7: Return true.
+    Some(AccessorProperty(set: Some(setter), ..)) -> {
+      use #(_, state) <- result.map(state.call(state, setter, receiver, [val]))
+      #(state, True)
+    }
   }
 }
 
@@ -498,6 +756,31 @@ fn set_on_receiver(
   }
 }
 
+/// Fast path for set_on_receiver when the caller already read `ref`'s slot.
+///
+/// In the overwhelmingly common case (`obj.x = v`, `arr[i] = v`) the receiver
+/// IS the object whose slot set_value just read, and nothing has mutated the
+/// heap since — so re-reading it in set_property is pure waste. When the
+/// receiver is a different object (Reflect.set with explicit receiver, or a
+/// proto-chain frame where ref walked past the original receiver) we fall back
+/// to the slow path that reads the receiver's own slot.
+fn set_on_receiver_with_slot(
+  state: State,
+  receiver: JsValue,
+  ref: Ref,
+  slot: HeapSlot,
+  key: PropertyKey,
+  val: JsValue,
+) -> Result(#(State, Bool), #(JsValue, State)) {
+  case receiver {
+    JsObject(recv_ref) if recv_ref == ref -> {
+      let #(h, ok) = set_property_on_slot(state.heap, ref, slot, key, val)
+      Ok(#(State(..state, heap: h), ok))
+    }
+    _ -> set_on_receiver(state, receiver, key, val)
+  }
+}
+
 /// §10.4.2.1 Array exotic [[DefineOwnProperty]] / OrdinaryDefineOwnProperty (§10.1.6.1).
 ///
 /// Own-property-level write. Does NOT walk the proto chain — use set_value for
@@ -534,7 +817,23 @@ pub fn set_property(
   val: JsValue,
 ) -> #(Heap, Bool) {
   case heap.read(h, ref) {
-    Some(ObjectSlot(kind:, elements:, extensible:, ..) as slot) ->
+    Some(slot) -> set_property_on_slot(h, ref, slot, key, val)
+    None -> #(h, False)
+  }
+}
+
+/// set_property given an already-read slot — skips the heap.read when the
+/// caller (set_on_receiver_with_slot) already holds the slot for `ref`.
+/// The heap must not have been mutated since the slot was read.
+fn set_property_on_slot(
+  h: Heap,
+  ref: Ref,
+  slot: HeapSlot,
+  key: PropertyKey,
+  val: JsValue,
+) -> #(Heap, Bool) {
+  case slot {
+    ObjectSlot(kind:, elements:, extensible:, ..) ->
       case kind {
         // --- §10.4.2.1 Array exotic [[DefineOwnProperty]] ---
         ArrayObject(length:) ->
@@ -984,6 +1283,55 @@ pub fn has_property(heap: Heap, ref: Ref, key: PropertyKey) -> Bool {
           }
       }
     _ -> False
+  }
+}
+
+/// Single prototype-chain walk returning the first descriptor found for
+/// `key`, or None when the property is absent on the entire chain.
+///
+/// Same walk order as has_property (own_property_of_slot at each level), but
+/// keeps the descriptor instead of discarding it. Callers that must
+/// distinguish "absent" from "found" before acting — private field access
+/// (§7.3.31 PrivateGet / §7.3.32 PrivateSet throw on absence) — use this once
+/// instead of has_property + get_value/set_value, which would repeat the
+/// identical chain walk.
+pub fn find_property(
+  heap: Heap,
+  ref: Ref,
+  key: PropertyKey,
+) -> Option(Property) {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
+      case own_property_of_slot(kind, properties, elements, key) {
+        Some(prop) -> Some(prop)
+        None -> option.then(prototype, find_property(heap, _, key))
+      }
+    _ -> None
+  }
+}
+
+/// §10.1.9.2 OrdinarySetWithOwnDescriptor steps 2-7 given an already-found
+/// ownDesc (e.g. from find_property — avoids set_value's second chain walk).
+///
+/// Step 2.a: non-writable data → False. Steps 2.b-2.h: writable data →
+/// create/update own data property on the receiver. Steps 4-5: accessor
+/// without setter → False. Steps 6-7: Call(setter, Receiver, « V ») → True.
+pub fn set_found_value(
+  state: State,
+  receiver: JsValue,
+  prop: Property,
+  key: PropertyKey,
+  val: JsValue,
+) -> Result(#(State, Bool), #(JsValue, State)) {
+  case prop {
+    DataProperty(writable: False, ..) -> Ok(#(state, False))
+    DataProperty(writable: True, ..) ->
+      set_on_receiver(state, receiver, key, val)
+    AccessorProperty(set: None, ..) -> Ok(#(state, False))
+    AccessorProperty(set: Some(setter), ..) -> {
+      use #(_, state) <- result.map(state.call(state, setter, receiver, [val]))
+      #(state, True)
+    }
   }
 }
 
@@ -1653,6 +2001,7 @@ fn inspect_object(
         value.WeakMapObject(_) -> "WeakMap {}"
         value.WeakSetObject(_) -> "WeakSet {}"
         value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
+        value.StringIteratorObject(..) -> "Object [String Iterator] {}"
         value.SetIteratorObject(..) -> "Object [Set Iterator] {}"
         value.MapIteratorObject(..) -> "Object [Map Iterator] {}"
         value.AsyncFromSyncIteratorObject(..) ->
@@ -1675,6 +2024,7 @@ fn inspect_object(
           "[Module: { "
           <> string.join(list.sort(dict.keys(exports), string.compare), ", ")
           <> " }]"
+        value.IteratorRecordObject(..) -> "[Iterator]"
         OrdinaryObject ->
           // Error instances render as "Name: message" (or the full stack, once
           // we capture one); everything else as a plain object.

@@ -18,6 +18,7 @@ import arc/vm/value.{
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 
 // ============================================================================
 // Callback types for VM functions that can't be imported directly
@@ -34,6 +35,7 @@ pub type UnwindToCatchFn =
 // ============================================================================
 
 /// Generator.prototype.next(value) -- resume a suspended generator.
+/// JS-visible entry point: allocates the {value, done} result object.
 pub fn call_native_generator_next(
   state: State,
   this: JsValue,
@@ -43,27 +45,29 @@ pub fn call_native_generator_next(
   _unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   let next_arg = helpers.first_arg_or_undefined(args)
+  resume_generator_next(state, this, next_arg, execute_inner)
+  |> alloc_iter_result(rest_stack)
+}
+
+/// Internal resume API — like `call_native_generator_next` but returns
+/// #(done, value, state) directly instead of allocating a JS {value, done}
+/// result object. Used by for-of (IteratorNext) and array spread, which would
+/// otherwise allocate a result object per iteration only to read it back and
+/// discard it (the heap is never GC'd mid-script, so each one grows the heap
+/// permanently). The returned state has heap/globals merged and pc advanced
+/// past the current op; its stack is the caller's stack, untouched.
+pub fn resume_generator_next(
+  state: State,
+  this: JsValue,
+  next_arg: JsValue,
+  execute_inner: ExecuteInnerFn,
+) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
   case get_generator_data(state.heap, this) {
     Some(gen) ->
       case gen.gen_state {
-        value.Completed -> {
-          // Already done -- return {value: undefined, done: true}
-          let #(h, result) =
-            common.create_iter_result(
-              state.heap,
-              state.builtins,
-              JsUndefined,
-              True,
-            )
-          Ok(
-            State(
-              ..state,
-              heap: h,
-              stack: [result, ..rest_stack],
-              pc: state.pc + 1,
-            ),
-          )
-        }
+        value.Completed ->
+          // Already done -- {value: undefined, done: true} without alloc.
+          Ok(#(True, JsUndefined, State(..state, pc: state.pc + 1)))
         value.Executing -> {
           state.throw_type_error(state, "Generator is already running")
         }
@@ -76,19 +80,24 @@ pub fn call_native_generator_next(
           }
           let gen_exec_state =
             build_resumed_state(state, gen, gen_stack, gen.saved_pc)
-          run_to_completion(
-            gen_exec_state,
-            state,
-            gen,
-            rest_stack,
-            execute_inner,
-          )
+          run_to_completion(gen_exec_state, state, gen, execute_inner)
         }
       }
     None -> {
       state.throw_type_error(state, "not a generator object")
     }
   }
+}
+
+/// Wrap an internal #(done, value, state) resume result into the JS-visible
+/// convention: allocate {value, done} and push it onto rest_stack.
+fn alloc_iter_result(
+  res: Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, State)) {
+  use #(done, val, st) <- result.map(res)
+  let #(h, obj) = common.create_iter_result(st.heap, st.builtins, val, done)
+  State(..st, heap: h, stack: [obj, ..rest_stack])
 }
 
 /// Generator.prototype.return(value) -- complete the generator with a return value.
@@ -245,13 +254,8 @@ pub fn call_native_generator_throw(
               case unwind_to_catch(gen_exec_state, throw_val) {
                 Some(caught_state) ->
                   // The generator caught it -- continue executing
-                  run_to_completion(
-                    caught_state,
-                    state,
-                    gen,
-                    rest_stack,
-                    execute_inner,
-                  )
+                  run_to_completion(caught_state, state, gen, execute_inner)
+                  |> alloc_iter_result(rest_stack)
                 None -> {
                   // No catch handler -- mark completed and propagate the throw
                   let h2 =
@@ -528,20 +532,22 @@ fn resume_after_delegate(
       }
       let resumed =
         build_resumed_state(state, gen, stack_after, gen.saved_pc + 1)
-      run_to_completion(resumed, state, gen, rest_stack, execute_inner)
+      run_to_completion(resumed, state, gen, execute_inner)
+      |> alloc_iter_result(rest_stack)
     }
   }
 }
 
 /// Run a resumed generator to its next suspension/completion and marshal the
-/// result back to the caller. Shared tail for delegate-forward continuations.
+/// result back to the caller as #(done, value, state) — no result-object
+/// allocation. Shared tail for delegate-forward continuations; JS-visible
+/// callers wrap with `alloc_iter_result`.
 fn run_to_completion(
   resumed: State,
   outer: State,
   gen: GenData,
-  rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
   case execute_inner(resumed) {
     Ok(#(YieldCompletion(yv, h), suspended)) -> {
       let st = save_stacks(suspended.try_stack)
@@ -559,27 +565,27 @@ fn run_to_completion(
             saved_try_stack: st,
           ),
         )
-      let #(h, result) = common.create_iter_result(h, outer.builtins, yv, False)
-      Ok(
+      Ok(#(
+        False,
+        yv,
         State(
           ..state.merge_globals(outer, suspended, []),
           heap: h,
-          stack: [result, ..rest_stack],
           pc: outer.pc + 1,
         ),
-      )
+      ))
     }
     Ok(#(NormalCompletion(rv, h), final_state)) -> {
       let h = heap.write(h, gen.data_ref, gen_with_state(gen, value.Completed))
-      let #(h, result) = common.create_iter_result(h, outer.builtins, rv, True)
-      Ok(
+      Ok(#(
+        True,
+        rv,
         State(
           ..state.merge_globals(outer, final_state, []),
           heap: h,
-          stack: [result, ..rest_stack],
           pc: outer.pc + 1,
         ),
-      )
+      ))
     }
     Ok(#(ThrowCompletion(thrown, h), _)) -> {
       let h = heap.write(h, gen.data_ref, gen_with_state(gen, value.Completed))
@@ -653,7 +659,10 @@ fn process_generator_return(
           heap: h,
           stack: [result, ..rest_stack],
           pc: outer_state.pc + 1,
-          lexical_globals: gen_state.lexical_globals,
+          ctx: state.RealmCtx(
+            ..outer_state.ctx,
+            lexical_globals: gen_state.ctx.lexical_globals,
+          ),
           job_queue: gen_state.job_queue,
         ),
       )

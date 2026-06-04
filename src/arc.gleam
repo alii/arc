@@ -139,12 +139,14 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
             value.WeakMapObject(_) -> "WeakMap {}"
             value.WeakSetObject(_) -> "WeakSet {}"
             value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
+            value.StringIteratorObject(..) -> "Object [String Iterator] {}"
             value.SetIteratorObject(..) -> "Object [Set Iterator] {}"
             value.MapIteratorObject(..) -> "Object [Map Iterator] {}"
             value.AsyncFromSyncIteratorObject(..) ->
               "Object [Async-from-Sync Iterator] {}"
             value.IteratorHelperObject(..) -> "Object [Iterator Helper] {}"
             value.WrapForValidIteratorObject(..) -> "Object [Iterator] {}"
+            value.IteratorRecordObject(..) -> "Object [Iterator] {}"
             value.RegExpObject(pattern:, flags:) -> {
               let source = case pattern {
                 "" -> "(?:)"

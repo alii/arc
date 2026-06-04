@@ -328,9 +328,110 @@ fn array_join(
 /// join_elements — implements step 6 of Array.prototype.join (§23.1.3.18).
 /// Iterates k from 0 to len-1, building the result string R.
 ///
-/// Per-index reads via get_index (which uses object.get_value_of — walks
-/// prototype chain and invokes getters).
+/// Plain arrays with no index overrides take join_elements_snapshot (one
+/// heap read for the whole loop); everything else takes the generic
+/// per-element path via get_index (object.get_value_of — walks prototype
+/// chain and invokes getters).
 fn join_elements(
+  state: State,
+  this: JsValue,
+  idx: Int,
+  length: Int,
+  separator: String,
+  acc: List(String),
+) -> #(State, Result(String, JsValue)) {
+  case dense_snapshot(state, this) {
+    Some(#(els, proto)) ->
+      join_elements_snapshot(
+        state,
+        this,
+        els,
+        proto,
+        idx,
+        length,
+        separator,
+        acc,
+      )
+    None -> join_elements_generic(state, this, idx, length, separator, acc)
+  }
+}
+
+/// Fast path for join_elements: read elements from a one-time snapshot of
+/// the array slot. Falls back to the generic path from the current index the
+/// moment user code could run (object ToString, inherited hole property) —
+/// after which the snapshot might be stale.
+fn join_elements_snapshot(
+  state: State,
+  this: JsValue,
+  els: JsElements,
+  proto: Option(Ref),
+  idx: Int,
+  length: Int,
+  separator: String,
+  acc: List(String),
+) -> #(State, Result(String, JsValue)) {
+  case idx >= length {
+    // Step 8: Return R.
+    True -> #(state, Ok(acc |> list.reverse |> string.join(separator)))
+    False ->
+      case elements.get_option(els, idx) {
+        // Step 7c: If element is undefined or null, let next be "".
+        Some(JsUndefined) | Some(JsNull) ->
+          join_elements_snapshot(
+            state,
+            this,
+            els,
+            proto,
+            idx + 1,
+            length,
+            separator,
+            ["", ..acc],
+          )
+        // ToString of an object may invoke valueOf/toString (user code that
+        // can mutate the array) — bail to the generic path from here.
+        Some(JsObject(_)) ->
+          join_elements_generic(state, this, idx, length, separator, acc)
+        // Step 7c (cont.): primitive — ToString runs no user code.
+        Some(val) -> {
+          use str, state <- coerce.try_to_string(state, val)
+          join_elements_snapshot(
+            state,
+            this,
+            els,
+            proto,
+            idx + 1,
+            length,
+            separator,
+            [str, ..acc],
+          )
+        }
+        // Hole: Get walks the prototype chain. If nothing is inherited the
+        // result is undefined → "". An inherited property may be a getter —
+        // bail to the generic path which performs the real Get.
+        None ->
+          case hole_is_inherited(state, proto, idx) {
+            False ->
+              join_elements_snapshot(
+                state,
+                this,
+                els,
+                proto,
+                idx + 1,
+                length,
+                separator,
+                ["", ..acc],
+              )
+            True ->
+              join_elements_generic(state, this, idx, length, separator, acc)
+          }
+      }
+  }
+}
+
+/// Generic per-element path for join_elements: re-reads the heap each
+/// iteration via get_index (handles getters, proxies-on-proto, string
+/// primitives, and arrays mutated mid-join by user code).
+fn join_elements_generic(
   state: State,
   this: JsValue,
   idx: Int,
@@ -347,13 +448,19 @@ fn join_elements(
       case val {
         // Step 7c: If element is undefined or null, let next be "".
         JsUndefined | JsNull ->
-          join_elements(state, this, idx + 1, length, separator, ["", ..acc])
+          join_elements_generic(state, this, idx + 1, length, separator, [
+            "",
+            ..acc
+          ])
         // Step 7c (cont.): Otherwise, let next be ? ToString(element).
         _ -> {
           use str, state <- coerce.try_to_string(state, val)
           // Step 7d: Set R to string-concatenation of R and next.
           // Step 7e: Set k to k + 1.
-          join_elements(state, this, idx + 1, length, separator, [str, ..acc])
+          join_elements_generic(state, this, idx + 1, length, separator, [
+            str,
+            ..acc
+          ])
         }
       }
     }
@@ -375,10 +482,32 @@ fn array_push(
   // Step 4: If len + argCount > 2^53 - 1, throw a TypeError.
   // NOTE: Step 4 (overflow check) is not implemented — we don't guard
   // against len + argCount exceeding MAX_SAFE_INTEGER.
-  // Steps 5-7 delegated to push_generic.
-  use new_length, state <- state.try_op(push_generic(state, ref, length, args))
-  // Step 7: Return 𝔽(len).
-  #(state, Ok(value.from_int(new_length)))
+  // Fast path: append all items with one heap read + one heap write.
+  // Multi-element pushes only — the eligibility check walks the prototype
+  // chain's property dicts, which costs more than one generic write, so a
+  // single-element push is faster through the generic path.
+  let fast = case args {
+    [] | [_] -> None
+    _ -> {
+      use els, len <- try_elements_fast_path(state, ref, length)
+      let new_len = len + list.length(args)
+      #(elements.write_list(els, len, args), new_len, new_len)
+    }
+  }
+  case fast {
+    Some(#(new_length, state)) -> #(state, Ok(value.from_int(new_length)))
+    None -> {
+      // Steps 5-7 delegated to push_generic.
+      use new_length, state <- state.try_op(push_generic(
+        state,
+        ref,
+        length,
+        args,
+      ))
+      // Step 7: Return 𝔽(len).
+      #(state, Ok(value.from_int(new_length)))
+    }
+  }
 }
 
 /// ES2024 §23.1.3.22 steps 5-7 (loop + length update + return).
@@ -414,8 +543,8 @@ const cannot_convert = "Cannot convert undefined or null to object"
 /// Combined ToObject (ES2024 §7.1.18) + LengthOfArrayLike (§7.3.18).
 ///
 /// Captures `length` once, passes `(ref, length, state)` to `cont`. Per-index
-/// reads during iteration go through `get_index`/`has_index` (HasProperty+Get
-/// via object.get_value_of) — no eager snapshot.
+/// reads during iteration go through `get_index`/`get_index_if_present`
+/// (HasProperty+Get via object.get_value_of) — no eager snapshot.
 ///
 /// Per spec (ES2024 §23.1.3), Array.prototype methods are "intentionally
 /// generic" — they work on any object with a `.length` property and indexed
@@ -502,23 +631,9 @@ fn get_index(
   object.get_value_of(state, this, Index(idx))
 }
 
-/// HasProperty (ES2024 §7.3.11) on an array-like by integer index.
-///
-/// For objects: O.[[HasProperty]](! ToString(𝔽(idx))) — walks prototype chain.
-/// For string primitives: true iff 0 ≤ idx < length (per §10.4.3.5 — string
-/// indices are always-present own data properties within range).
-/// For other primitives: false (wrapper object has no indexed own properties).
-fn has_index(heap: Heap, this: JsValue, idx: Int) -> Bool {
-  case this {
-    JsObject(ref) -> object.has_property(heap, ref, Index(idx))
-    JsString(s) -> idx >= 0 && idx < object.string_length(s)
-    _ -> False
-  }
-}
-
 /// Fused HasProperty + Get on an array-like by integer index.
 ///
-/// Replaces the per-element `has_index() then get_index()` pattern used by
+/// Replaces the per-element `HasProperty then get_index()` pattern used by
 /// the SkipHoles iteration loops (forEach/map/filter/reduce/indexOf/...).
 /// The old pattern did two independent `heap.read + own_property_of_slot`
 /// lookups per element; this does ONE for the common case where the element
@@ -529,7 +644,7 @@ fn has_index(heap: Heap, this: JsValue, idx: Int) -> Bool {
 ///   Ok(#(None, state))      — index is absent (hole; SkipHoles would skip)
 ///   Error(#(exc, state))    — accessor getter threw
 ///
-/// Semantics match `has_index() ? get_index() : skip` exactly: own property
+/// Semantics match `HasProperty() ? get_index() : skip` exactly: own property
 /// is checked first via §10.1.5 [[GetOwnProperty]], and only on a miss do we
 /// fall through to the prototype-chain HasProperty/Get (§7.3.11 / §7.3.2).
 fn get_index_if_present(
@@ -540,38 +655,41 @@ fn get_index_if_present(
   let key = Index(idx)
   case this {
     JsObject(ref) ->
-      // Fast path: ONE heap read for own [[GetOwnProperty]].
-      case object.get_own_property(state.heap, ref, key) {
-        // §10.1.8.1 step 3: data descriptor → value. (Hot path: dense arrays.)
-        Some(DataProperty(value: val, ..)) -> Ok(#(Some(val), state))
+      // Fast path: ONE heap read for own [[GetOwnProperty]], with no
+      // synthesized descriptor boxing on the dense-elements hit.
+      case object.get_own_index(state.heap, ref, idx) {
+        // §10.1.8.1 step 3: data value. (Hot path: dense arrays.)
+        object.OwnIndexValue(val) -> Ok(#(Some(val), state))
+        object.OwnIndexProperty(DataProperty(value: val, ..)) ->
+          Ok(#(Some(val), state))
         // §10.1.8.1 steps 5-7: accessor → Call(getter, Receiver) or undefined.
-        Some(AccessorProperty(get: Some(getter), ..)) -> {
+        object.OwnIndexProperty(AccessorProperty(get: Some(getter), ..)) -> {
           use #(val, state) <- result.map(state.call(state, getter, this, []))
           #(Some(val), state)
         }
-        Some(AccessorProperty(get: None, ..)) -> Ok(#(Some(JsUndefined), state))
+        object.OwnIndexProperty(AccessorProperty(get: None, ..)) ->
+          Ok(#(Some(JsUndefined), state))
         // Own property absent — consult prototype chain (cold path: holes).
         // §7.3.11 step 4 / §10.1.8.1 step 2: parent.[[HasProperty]]/[[Get]].
-        None ->
-          case heap.read(state.heap, ref) {
-            Some(ObjectSlot(prototype: Some(proto), ..)) ->
-              case object.has_property(state.heap, proto, key) {
-                False -> Ok(#(None, state))
-                True -> {
-                  use #(val, state) <- result.map(object.get_value(
-                    state,
-                    proto,
-                    key,
-                    this,
-                  ))
-                  #(Some(val), state)
-                }
-              }
-            _ -> Ok(#(None, state))
+        // The prototype was carried out of the slot get_own_index already
+        // read, so the hole path costs one heap read, not two.
+        object.OwnIndexAbsent(prototype: Some(proto)) ->
+          case object.has_property(state.heap, proto, key) {
+            False -> Ok(#(None, state))
+            True -> {
+              use #(val, state) <- result.map(object.get_value(
+                state,
+                proto,
+                key,
+                this,
+              ))
+              #(Some(val), state)
+            }
           }
+        object.OwnIndexAbsent(prototype: None) -> Ok(#(None, state))
       }
     // String primitive: in-range index is an own data property per §10.4.3.5;
-    // out-of-range is absent (matches has_index, which does not walk
+    // out-of-range is absent (matches HasProperty, which does not walk
     // String.prototype for indexed keys).
     JsString(s) ->
       Ok(#(
@@ -581,8 +699,167 @@ fn get_index_if_present(
         },
         state,
       ))
-    // Other primitives: no indexed own properties (matches has_index).
+    // Other primitives: no indexed own properties.
     _ -> Ok(#(None, state))
+  }
+}
+
+/// Snapshot the element storage of a plain Array for bulk iteration.
+///
+/// Returns Some(#(elements, prototype)) only when `this` is an ArrayObject
+/// whose properties dict contains NO integer-indexed entries — i.e. every
+/// in-range index is either a plain data element or a hole, so reading it
+/// cannot invoke user code (no index accessors, no attribute overrides).
+///
+/// On that path nothing can mutate the array between loop iterations, so the
+/// non-callback iteration loops (copy_range, collect_sort_elements,
+/// join_elements) can read this snapshot directly instead of re-reading the
+/// same unchanged heap slot per element via get_index_if_present — one
+/// heap.read total instead of one per element. Callback-based iterators
+/// (forEach/map/filter/reduce) must NOT use this: their callbacks can mutate
+/// the array, so they keep re-reading the live heap.
+fn dense_snapshot(
+  state: State,
+  this: JsValue,
+) -> Option(#(JsElements, Option(Ref))) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: ArrayObject(_),
+          properties:,
+          elements: els,
+          prototype:,
+          ..,
+        )) ->
+          case properties_have_index_keys(properties) {
+            // An index accessor/override could run user code or carry
+            // non-default attributes — use the generic per-element path.
+            True -> None
+            False -> Some(#(els, prototype))
+          }
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// True when the properties dict carries any integer-indexed entry — i.e. a
+/// per-index accessor or attribute override that the elements store can't
+/// represent. Such entries force the spec-faithful generic per-element path.
+fn properties_have_index_keys(
+  properties: dict.Dict(value.PropertyKey, Property),
+) -> Bool {
+  // Plain arrays have an empty properties dict — skip building the key list.
+  !dict.is_empty(properties)
+  && list.any(dict.keys(properties), fn(key) {
+    case key {
+      Index(_) -> True
+      Named(_) -> False
+    }
+  })
+}
+
+/// True when any object on the prototype chain starting at `proto` carries an
+/// integer-indexed property (in its properties dict or elements store). When
+/// False, HasProperty/Get/Set on a missing own index can never observe the
+/// prototype chain — no inherited values, no proto getters/setters — so the
+/// in-place mutator fast path stays spec-equivalent even across holes and
+/// writes to previously-absent indices. The chain is short (usually
+/// Array.prototype → Object.prototype) so this is O(proto dict size), paid
+/// once per mutator call instead of per element.
+fn proto_chain_has_index_keys(heap: Heap, proto: Option(Ref)) -> Bool {
+  case proto {
+    None -> False
+    Some(proto_ref) ->
+      case heap.read(heap, proto_ref) {
+        // String exotic objects (§10.4.3.5) expose own index properties
+        // virtually from [[StringData]] — stored in neither `elements` nor
+        // the properties dict — so a non-empty boxed String anywhere on the
+        // chain makes holes observable through it.
+        Some(ObjectSlot(kind: value.StringObject(value: s), ..)) if s != "" ->
+          True
+        Some(ObjectSlot(properties:, elements: els, prototype:, ..)) ->
+          !elements.is_empty(els)
+          || properties_have_index_keys(properties)
+          || proto_chain_has_index_keys(heap, prototype)
+        // Non-object slot can't carry index properties; stop walking.
+        _ -> False
+      }
+  }
+}
+
+/// Dense bulk-write fast path for the in-place Array.prototype mutators
+/// (pop/push/shift/unshift/reverse/fill/copyWithin/splice/sort write-back).
+///
+/// The generic spec algorithms do HasProperty + Get + Set/Delete PER MOVED
+/// ELEMENT — each a separate heap-dict read-modify-write plus a full
+/// ObjectSlot rebuild, so `while (q.length) q.shift()` is O(n²) heap traffic.
+/// When every per-index step is guaranteed to be a pure own-element data
+/// access, the whole mutation collapses to ONE heap.read, one JsElements
+/// transformation, ONE heap.write.
+///
+/// Eligible iff (checked here, once per call):
+///   - the slot is a real ArrayObject whose recorded length still equals
+///     `expected_len` (sort's comparefn may have resized the array between
+///     snapshot and write-back — fall back if so),
+///   - extensible (writes to absent indices must not be rejected),
+///   - its properties dict has no Index keys (no per-index accessors or
+///     attribute overrides → every present index is plain writable data),
+///   - no prototype-chain object has index-keyed properties (holes and
+///     beyond-length writes can't observe proto getters/setters).
+///
+/// `transform` receives the current #(elements, length) and returns the new
+/// #(elements, new_length, payload). Returns None when ineligible — caller
+/// falls back to the spec-faithful generic loop.
+fn try_elements_fast_path(
+  state: State,
+  ref: Ref,
+  expected_len: Int,
+  transform: fn(JsElements, Int) -> #(JsElements, Int, payload),
+) -> Option(#(payload, State)) {
+  case heap.read(state.heap, ref) {
+    Some(
+      ObjectSlot(
+        kind: ArrayObject(length:),
+        properties:,
+        elements: els,
+        prototype:,
+        extensible: True,
+        ..,
+      ) as slot,
+    ) -> {
+      let eligible =
+        length == expected_len
+        && !properties_have_index_keys(properties)
+        && !proto_chain_has_index_keys(state.heap, prototype)
+      case eligible {
+        False -> None
+        True -> {
+          let #(els, new_length, payload) = transform(els, length)
+          let heap =
+            heap.write(
+              state.heap,
+              ref,
+              ObjectSlot(..slot, kind: ArrayObject(new_length), elements: els),
+            )
+          Some(#(payload, State(..state, heap:)))
+        }
+      }
+    }
+    _ -> None
+  }
+}
+
+/// True when a hole at `idx` is shadowed by an inherited property — reading
+/// it would invoke [[Get]] on the prototype chain (possibly a getter, i.e.
+/// user code that can mutate the array), so snapshot loops must fall back to
+/// the generic per-element path from that index. has_property is pure (no
+/// user code), so a False answer keeps the snapshot valid.
+fn hole_is_inherited(state: State, proto: Option(Ref), idx: Int) -> Bool {
+  case proto {
+    None -> False
+    Some(proto_ref) -> object.has_property(state.heap, proto_ref, Index(idx))
   }
 }
 
@@ -909,13 +1186,28 @@ fn array_pop(
     False -> {
       // Step 4b: newLen = len - 1
       let new_len = length - 1
-      // Step 4d: element = Get(O, ToString(newLen))
-      use val, state <- state.try_op(generic_get(state, ref, new_len))
-      // Step 4e: DeletePropertyOrThrow(O, index)
-      use state <- state.try_state(generic_delete_index(state, ref, new_len))
-      // Step 4f: Set(O, "length", newLen, true)
-      // Step 4g: Return element
-      wrap(generic_set_length(state, ref, new_len), val)
+      // Fast path: Get + Delete + length update fused into one heap
+      // read-modify-write (truncate covers steps 4e-4f).
+      let fast = {
+        use els, len <- try_elements_fast_path(state, ref, length)
+        #(elements.truncate(els, len - 1), len - 1, elements.get(els, len - 1))
+      }
+      case fast {
+        Some(#(val, state)) -> #(state, Ok(val))
+        None -> {
+          // Step 4d: element = Get(O, ToString(newLen))
+          use val, state <- state.try_op(generic_get(state, ref, new_len))
+          // Step 4e: DeletePropertyOrThrow(O, index)
+          use state <- state.try_state(generic_delete_index(
+            state,
+            ref,
+            new_len,
+          ))
+          // Step 4f: Set(O, "length", newLen, true)
+          // Step 4g: Return element
+          wrap(generic_set_length(state, ref, new_len), val)
+        }
+      }
     }
   }
 }
@@ -957,15 +1249,39 @@ fn array_shift(
     // Step 3b: Return undefined
     True -> wrap(generic_set_length(state, ref, 0), JsUndefined)
     False -> {
-      // Step 4: first = Get(O, "0")
-      use val, state <- state.try_op(generic_get(state, ref, 0))
-      // Steps 5-6: shift indices [1..len) down by 1 (see shift_left_generic)
-      use state <- state.try_state(shift_left_generic(state, ref, 1, length))
-      // Step 7: DeletePropertyOrThrow(O, ToString(len - 1))
-      use state <- state.try_state(generic_delete_index(state, ref, length - 1))
-      // Step 8: Set(O, "length", len - 1, true)
-      // Step 9: Return first
-      wrap(generic_set_length(state, ref, length - 1), val)
+      // Fast path: the whole Get + shift-down loop + trailing delete +
+      // length update is one heap read, one elements transform, one heap
+      // write — instead of 3-4 heap ops per element.
+      let fast = {
+        use els, len <- try_elements_fast_path(state, ref, length)
+        let first = elements.get(els, 0)
+        let els =
+          elements.move_down(els, 1, len, 1) |> elements.truncate(len - 1)
+        #(els, len - 1, first)
+      }
+      case fast {
+        Some(#(first, state)) -> #(state, Ok(first))
+        None -> {
+          // Step 4: first = Get(O, "0")
+          use val, state <- state.try_op(generic_get(state, ref, 0))
+          // Steps 5-6: shift indices [1..len) down by 1 (shift_left_generic)
+          use state <- state.try_state(shift_left_generic(
+            state,
+            ref,
+            1,
+            length,
+          ))
+          // Step 7: DeletePropertyOrThrow(O, ToString(len - 1))
+          use state <- state.try_state(generic_delete_index(
+            state,
+            ref,
+            length - 1,
+          ))
+          // Step 8: Set(O, "length", len - 1, true)
+          // Step 9: Return first
+          wrap(generic_set_length(state, ref, length - 1), val)
+        }
+      }
     }
   }
 }
@@ -1057,14 +1373,27 @@ fn array_unshift(
   let new_len = length + arg_count
   // §23.1.3.33 step 4a: If len + argCount > 2^53 - 1, throw TypeError
   use <- state.guard_safe_length(state, new_len)
-  use state <- state.try_state(shift_right_generic(
-    state,
-    ref,
-    length - 1,
-    arg_count,
-  ))
-  use state <- state.try_state(write_list_at(state, ref, 0, args))
-  wrap(generic_set_length(state, ref, new_len), value.from_int(new_len))
+  // Fast path: shift-up loop + item writes + length update fused into one
+  // heap read-modify-write.
+  let fast = {
+    use els, len <- try_elements_fast_path(state, ref, length)
+    let els =
+      elements.move_up(els, 0, len, arg_count) |> elements.write_list(0, args)
+    #(els, len + arg_count, Nil)
+  }
+  case fast {
+    Some(#(Nil, state)) -> #(state, Ok(value.from_int(new_len)))
+    None -> {
+      use state <- state.try_state(shift_right_generic(
+        state,
+        ref,
+        length - 1,
+        arg_count,
+      ))
+      use state <- state.try_state(write_list_at(state, ref, 0, args))
+      wrap(generic_set_length(state, ref, new_len), value.from_int(new_len))
+    }
+  }
 }
 
 /// Implements the shift-up loop from Array.prototype.unshift (§23.1.3.33 steps 4b-4c).
@@ -1194,8 +1523,8 @@ fn wrap(
 ///   - Steps 3-10 are handled by resolve_index (see §7.1.22 / clamp logic).
 ///   - Step 12: we skip ArraySpeciesCreate and always create a plain Array.
 ///     This means @@species is not respected (a known simplification).
-///   - Steps 14b-14c: copy_range uses has_index for HasProperty on the
-///     source, preserving holes (sparse indices are not copied).
+///   - Steps 14b-14c: copy_range uses get_index_if_present for HasProperty+Get
+///     on the source, preserving holes (sparse indices are not copied).
 ///   - Step 15: length is set via ArrayObject(count) in the slot constructor
 ///     rather than a separate Set("length") call.
 fn array_slice(
@@ -1258,7 +1587,90 @@ fn array_slice(
 ///
 /// When kPresent is false (a hole), we skip writing to dst — this preserves
 /// sparse array structure in the result, matching spec behavior.
+///
+/// Plain arrays with no index overrides take copy_range_snapshot (one heap
+/// read for the whole loop); everything else takes the generic per-element
+/// path.
 fn copy_range(
+  state: State,
+  src: JsValue,
+  src_idx: Int,
+  dst_idx: Int,
+  remaining: Int,
+  dst: JsElements,
+) -> Result(#(JsElements, State), #(JsValue, State)) {
+  case dense_snapshot(state, src) {
+    Some(#(els, proto)) ->
+      copy_range_snapshot(
+        state,
+        src,
+        els,
+        proto,
+        src_idx,
+        dst_idx,
+        remaining,
+        dst,
+      )
+    None -> copy_range_generic(state, src, src_idx, dst_idx, remaining, dst)
+  }
+}
+
+/// Fast path for copy_range: read elements from a one-time snapshot of the
+/// array slot. Nothing on this path runs user code, so the snapshot stays
+/// valid for the whole loop. A hole shadowed by an inherited prototype
+/// property may hide a getter — bail to the generic path from that index.
+fn copy_range_snapshot(
+  state: State,
+  src: JsValue,
+  els: JsElements,
+  proto: Option(Ref),
+  src_idx: Int,
+  dst_idx: Int,
+  remaining: Int,
+  dst: JsElements,
+) -> Result(#(JsElements, State), #(JsValue, State)) {
+  case remaining <= 0 {
+    True -> Ok(#(dst, state))
+    False ->
+      case elements.get_option(els, src_idx) {
+        // Step 14c: kPresent is true — copy the element.
+        Some(val) ->
+          copy_range_snapshot(
+            state,
+            src,
+            els,
+            proto,
+            src_idx + 1,
+            dst_idx + 1,
+            remaining - 1,
+            elements.set(dst, dst_idx, val),
+          )
+        None ->
+          case hole_is_inherited(state, proto, src_idx) {
+            // kPresent is false (hole): skip — do not set dst[dst_idx].
+            False ->
+              copy_range_snapshot(
+                state,
+                src,
+                els,
+                proto,
+                src_idx + 1,
+                dst_idx + 1,
+                remaining - 1,
+                dst,
+              )
+            // Inherited property — Get may invoke a getter (user code).
+            True ->
+              copy_range_generic(state, src, src_idx, dst_idx, remaining, dst)
+          }
+      }
+  }
+}
+
+/// Generic per-element path for copy_range: re-reads the heap each iteration
+/// via get_index_if_present (handles index accessors, inherited properties,
+/// string primitives, and arrays mutated mid-copy by getters).
+fn copy_range_generic(
   state: State,
   src: JsValue,
   src_idx: Int,
@@ -1279,7 +1691,7 @@ fn copy_range(
       case maybe_val {
         // Step 14c: kPresent is true — copy the element.
         Some(val) ->
-          copy_range(
+          copy_range_generic(
             state,
             src,
             src_idx + 1,
@@ -1289,7 +1701,14 @@ fn copy_range(
           )
         // kPresent is false (hole): skip — do not set dst[dst_idx].
         None ->
-          copy_range(state, src, src_idx + 1, dst_idx + 1, remaining - 1, dst)
+          copy_range_generic(
+            state,
+            src,
+            src_idx + 1,
+            dst_idx + 1,
+            remaining - 1,
+            dst,
+          )
       }
     }
   }
@@ -1476,9 +1895,17 @@ fn array_reverse(
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use ref, length, state <- require_array(this, state)
-  // Steps 3-5: middle = floor(len/2), lower = 0, loop while lower != middle
-  // Step 6: Return O
-  wrap(reverse_generic(state, ref, 0, length - 1), this)
+  // Fast path: in-place element reversal, one heap read + one heap write.
+  let fast = {
+    use els, len <- try_elements_fast_path(state, ref, length)
+    #(elements.reverse_range(els, len), len, Nil)
+  }
+  case fast {
+    Some(#(Nil, state)) -> #(state, Ok(this))
+    // Steps 3-5: middle = floor(len/2), lower = 0, loop while lower != middle
+    // Step 6: Return O
+    None -> wrap(reverse_generic(state, ref, 0, length - 1), this)
+  }
 }
 
 /// Implements §23.1.3.24 step 5's loop body. lo = lower, hi = upper (len-lower-1).
@@ -1581,9 +2008,17 @@ fn array_fill(
     [_, _, e, ..] -> resolve_index(e, length, length)
     _ -> length
   }
-  // Guard: O(end-start) writes — cap at max_iteration.
-  // Steps 12-13: fill loop, then return O
-  wrap(fill_generic(state, ref, start, end, fill_val), this)
+  // Fast path: bulk fill [start, end), one heap read + one heap write.
+  let fast = {
+    use els, len <- try_elements_fast_path(state, ref, length)
+    #(elements.fill_range(els, start, end, fill_val), len, Nil)
+  }
+  case fast {
+    Some(#(Nil, state)) -> #(state, Ok(this))
+    // Guard: O(end-start) writes — cap at max_iteration.
+    // Steps 12-13: fill loop, then return O
+    None -> wrap(fill_generic(state, ref, start, end, fill_val), this)
+  }
 }
 
 /// Implements §23.1.3.7 step 11: Repeat, while k < final.
@@ -1864,13 +2299,47 @@ fn search_forward(
     // Step 10: return -1 (indexOf) / return false (includes; caller converts)
     True -> Ok(#(-1, state))
     False ->
-      // indexOf step 9a: kPresent = HasProperty(O, k) — skip if absent
-      case skip_holes && !has_index(state.heap, this, idx) {
-        True ->
-          // indexOf step 9c: k = k + 1 (hole skipped)
-          search_forward(state, this, idx + 1, length, search, eq, skip_holes)
+      case skip_holes {
+        True -> {
+          // indexOf step 9a-9b.i: kPresent = HasProperty(O, k); if true,
+          // elementK = Get(O, k) — fused into one heap lookup.
+          use #(maybe_val, state) <- result.try(get_index_if_present(
+            state,
+            this,
+            idx,
+          ))
+          case maybe_val {
+            None ->
+              // indexOf step 9c: k = k + 1 (hole skipped)
+              search_forward(
+                state,
+                this,
+                idx + 1,
+                length,
+                search,
+                eq,
+                skip_holes,
+              )
+            Some(val) ->
+              // indexOf step 9b.ii: comparison
+              case eq(val, search) {
+                True -> Ok(#(idx, state))
+                False ->
+                  // Step 9c: k = k + 1
+                  search_forward(
+                    state,
+                    this,
+                    idx + 1,
+                    length,
+                    search,
+                    eq,
+                    skip_holes,
+                  )
+              }
+          }
+        }
         False -> {
-          // indexOf step 9b.i-ii / includes step 9a-b: Get + compare
+          // includes step 9a-b: Get + compare (holes read as undefined)
           use #(val, state) <- result.try(get_index(state, this, idx))
           case eq(val, search) {
             True -> Ok(#(idx, state))
@@ -1970,7 +2439,7 @@ type HoleMode {
 ///     which extracts internal elements directly rather than going through Get.
 ///   - Step 3 is handled by require_callback (IsCallable check + TypeError).
 ///   - Steps 4-5 are handled by iterate_array with SkipHoles mode, which
-///     implements the HasProperty check (step 5b) via has_index and
+///     implements the HasProperty check (step 5b) via get_index_if_present and
 ///     calls the callback with (kValue, k, O) arguments (step 5c.ii).
 ///   - Step 6: return undefined.
 fn array_for_each(
@@ -2413,7 +2882,109 @@ fn sort_default(
 /// Collect defined elements from the array for sorting.
 /// Returns #(defined_values, undefined_count).
 /// Holes are skipped entirely (not counted). Undefineds are counted separately.
+///
+/// Plain arrays with no index overrides take collect_sort_elements_snapshot
+/// (one heap read for the whole loop); everything else takes the generic
+/// per-element path.
 fn collect_sort_elements(
+  state: State,
+  this: JsValue,
+  length: Int,
+  idx: Int,
+  acc: List(JsValue),
+  undefs: Int,
+) -> Result(#(#(List(JsValue), Int), State), #(JsValue, State)) {
+  case dense_snapshot(state, this) {
+    Some(#(els, proto)) ->
+      collect_sort_elements_snapshot(
+        state,
+        this,
+        els,
+        proto,
+        length,
+        idx,
+        acc,
+        undefs,
+      )
+    None -> collect_sort_elements_generic(state, this, length, idx, acc, undefs)
+  }
+}
+
+/// Fast path for collect_sort_elements: read elements from a one-time
+/// snapshot of the array slot. Nothing on this path runs user code, so the
+/// snapshot stays valid for the whole loop. A hole shadowed by an inherited
+/// prototype property may hide a getter — bail to the generic path from
+/// that index.
+fn collect_sort_elements_snapshot(
+  state: State,
+  this: JsValue,
+  els: JsElements,
+  proto: Option(Ref),
+  length: Int,
+  idx: Int,
+  acc: List(JsValue),
+  undefs: Int,
+) -> Result(#(#(List(JsValue), Int), State), #(JsValue, State)) {
+  case idx >= length {
+    True -> Ok(#(#(list.reverse(acc), undefs), state))
+    False ->
+      case elements.get_option(els, idx) {
+        // Undefined — count but don't include in sort.
+        Some(JsUndefined) ->
+          collect_sort_elements_snapshot(
+            state,
+            this,
+            els,
+            proto,
+            length,
+            idx + 1,
+            acc,
+            undefs + 1,
+          )
+        Some(val) ->
+          collect_sort_elements_snapshot(
+            state,
+            this,
+            els,
+            proto,
+            length,
+            idx + 1,
+            [val, ..acc],
+            undefs,
+          )
+        None ->
+          case hole_is_inherited(state, proto, idx) {
+            // Hole — skip entirely.
+            False ->
+              collect_sort_elements_snapshot(
+                state,
+                this,
+                els,
+                proto,
+                length,
+                idx + 1,
+                acc,
+                undefs,
+              )
+            // Inherited property — Get may invoke a getter (user code).
+            True ->
+              collect_sort_elements_generic(
+                state,
+                this,
+                length,
+                idx,
+                acc,
+                undefs,
+              )
+          }
+      }
+  }
+}
+
+/// Generic per-element path for collect_sort_elements: re-reads the heap
+/// each iteration via get_index_if_present (handles index accessors,
+/// inherited properties, and arrays mutated mid-collect by getters).
+fn collect_sort_elements_generic(
   state: State,
   this: JsValue,
   length: Int,
@@ -2432,12 +3003,19 @@ fn collect_sort_elements(
       case maybe_val {
         None ->
           // Hole — skip entirely.
-          collect_sort_elements(state, this, length, idx + 1, acc, undefs)
+          collect_sort_elements_generic(
+            state,
+            this,
+            length,
+            idx + 1,
+            acc,
+            undefs,
+          )
         Some(val) ->
           case val {
             JsUndefined ->
               // Undefined — count but don't include in sort.
-              collect_sort_elements(
+              collect_sort_elements_generic(
                 state,
                 this,
                 length,
@@ -2446,7 +3024,7 @@ fn collect_sort_elements(
                 undefs + 1,
               )
             _ ->
-              collect_sort_elements(
+              collect_sort_elements_generic(
                 state,
                 this,
                 length,
@@ -2575,6 +3153,13 @@ fn merge_two(
 
 /// Write sorted values back to the array in-place, then delete trailing holes.
 /// Steps 7-8 of the spec: set indices 0..itemCount-1, delete itemCount..len-1.
+///
+/// Fast path: the write-back is a wholesale elements replacement — sorted
+/// values dense at [0, itemCount), holes at [itemCount, len) — done in one
+/// heap read-modify-write. Eligibility is re-checked here (not reused from
+/// collection time) because comparefn is user code that may have added index
+/// overrides, swapped the prototype, or resized the array; the expected_len
+/// check inside try_elements_fast_path catches resizes.
 fn write_sort_result(
   state: State,
   ref: Ref,
@@ -2582,15 +3167,26 @@ fn write_sort_result(
   length: Int,
   idx: Int,
 ) -> Result(State, #(JsValue, State)) {
-  case values {
-    [val, ..rest] -> {
-      // Step 7a: Set(obj, ToString(j), items[j], true).
-      use state <- result.try(generic_set_index(state, ref, idx, val))
-      write_sort_result(state, ref, rest, length, idx + 1)
+  let fast = case idx == 0 {
+    True -> {
+      use _els, len <- try_elements_fast_path(state, ref, length)
+      #(elements.from_list(values), len, Nil)
     }
-    [] ->
-      // Step 8: Delete remaining indices (holes at the end).
-      delete_trailing(state, ref, idx, length)
+    False -> None
+  }
+  case fast {
+    Some(#(Nil, state)) -> Ok(state)
+    None ->
+      case values {
+        [val, ..rest] -> {
+          // Step 7a: Set(obj, ToString(j), items[j], true).
+          use state <- result.try(generic_set_index(state, ref, idx, val))
+          write_sort_result(state, ref, rest, length, idx + 1)
+        }
+        [] ->
+          // Step 8: Delete remaining indices (holes at the end).
+          delete_trailing(state, ref, idx, length)
+      }
   }
 }
 
@@ -2637,7 +3233,7 @@ fn delete_trailing(
 /// The key difference: Pattern A checks HasProperty first (skips holes),
 /// Pattern B always calls Get (holes become undefined). This is controlled
 /// by the `hole_mode` parameter:
-///   - SkipHoles → Pattern A (HasProperty check via has_index)
+///   - SkipHoles → Pattern A (HasProperty check via get_index_if_present)
 ///   - VisitHoles → Pattern B (always visit, holes read as undefined)
 ///
 /// The `stop_on` predicate controls the early-exit condition:
@@ -3020,8 +3616,8 @@ fn array_reduce_right(
 /// For reduceRight (step=-1): step 8b says "Repeat, while kPresent is false and k ≥ 0"
 ///   — scans backward from index len-1.
 ///
-/// Step 8b.ii: Set kPresent to ? HasProperty(O, Pk) — implemented via has_index.
-/// Step 8b.iii.1: Set accumulator to ? Get(O, Pk) — implemented via get_index.
+/// Step 8b.ii-iii.1: kPresent = HasProperty(O, Pk); if true, accumulator =
+/// Get(O, Pk) — fused into one lookup via get_index_if_present.
 /// Step 8b.iv: Set k to k ± 1 — implemented by idx + step.
 ///
 /// Returns Some(#(index, value)) on the first present element found (step 8b.iii),
@@ -3185,20 +3781,46 @@ fn array_splice(
   // §23.1.3.31 step 11: If len + insertCount - actualDeleteCount > 2^53 - 1, throw TypeError
   use <- state.guard_safe_length(state, new_length)
   let shift = item_count - actual_delete_count
-  // If shift > 0: we need to move elements right. If shift < 0: move left.
-  // If shift == 0: no shifting needed.
-  use state <- state.try_state(splice_shift(
-    state,
-    ref,
-    actual_start,
-    actual_delete_count,
-    length,
-    shift,
-  ))
-  // Step 15: Insert items at actualStart.
-  use state <- state.try_state(splice_insert(state, ref, actual_start, items))
-  // Step 17: Set length.
-  wrap(generic_set_length(state, ref, new_length), removed_arr)
+  // Fast path: shift + insert + truncate + length update fused into one heap
+  // read-modify-write. Eligibility is checked here, after copy_range — on
+  // this path copy_range ran no user code, so length is still accurate.
+  let fast = {
+    use els, len <- try_elements_fast_path(state, ref, length)
+    let move_from = actual_start + actual_delete_count
+    let els = case shift > 0, shift < 0 {
+      True, _ -> elements.move_up(els, move_from, len, shift)
+      _, True -> elements.move_down(els, move_from, len, -shift)
+      _, _ -> els
+    }
+    let els =
+      elements.write_list(els, actual_start, items)
+      |> elements.truncate(new_length)
+    #(els, new_length, Nil)
+  }
+  case fast {
+    Some(#(Nil, state)) -> #(state, Ok(removed_arr))
+    None -> {
+      // If shift > 0: move elements right. If shift < 0: move left.
+      // If shift == 0: no shifting needed.
+      use state <- state.try_state(splice_shift(
+        state,
+        ref,
+        actual_start,
+        actual_delete_count,
+        length,
+        shift,
+      ))
+      // Step 15: Insert items at actualStart.
+      use state <- state.try_state(splice_insert(
+        state,
+        ref,
+        actual_start,
+        items,
+      ))
+      // Step 17: Set length.
+      wrap(generic_set_length(state, ref, new_length), removed_arr)
+    }
+  }
 }
 
 /// Shift elements for splice: move elements at [start+deleteCount..len) to
@@ -3590,25 +4212,36 @@ fn array_copy_within(
   let count = int.min(final - from, length - target)
   case count <= 0 {
     True -> #(state, Ok(this))
-    False ->
-      // Steps 13-15: Direction-aware copy
-      case from < target && target < from + count {
-        // Overlapping, copy backwards
-        True ->
-          wrap(
-            copy_within_backward(
-              state,
-              ref,
-              from + count - 1,
-              target + count - 1,
-              count,
-            ),
-            this,
-          )
-        // No overlap issue, copy forwards
-        False ->
-          wrap(copy_within_forward(state, ref, from, target, count), this)
+    False -> {
+      // Fast path: direction-aware bulk copy in one heap read-modify-write
+      // (elements.copy_within picks the safe iteration direction itself).
+      let fast = {
+        use els, len <- try_elements_fast_path(state, ref, length)
+        #(elements.copy_within(els, from, target, count), len, Nil)
       }
+      case fast {
+        Some(#(Nil, state)) -> #(state, Ok(this))
+        None ->
+          // Steps 13-15: Direction-aware copy
+          case from < target && target < from + count {
+            // Overlapping, copy backwards
+            True ->
+              wrap(
+                copy_within_backward(
+                  state,
+                  ref,
+                  from + count - 1,
+                  target + count - 1,
+                  count,
+                ),
+                this,
+              )
+            // No overlap issue, copy forwards
+            False ->
+              wrap(copy_within_forward(state, ref, from, target, count), this)
+          }
+      }
+    }
   }
 }
 

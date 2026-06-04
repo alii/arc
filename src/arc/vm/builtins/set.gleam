@@ -5,8 +5,11 @@
 ///
 /// Stores values in a Dict(MapKey, JsValue) + List(MapKey) for insertion order.
 /// The dict maps normalized MapKey → original JsValue.
-/// The keys list is stored in REVERSE insertion order so add() is O(1) prepend;
-/// iteration points call list.reverse() once to recover forward order.
+/// The keys list is stored in REVERSE insertion order so add() is O(1) prepend.
+/// delete() is a tombstone: the key leaves the dict but stays in the list,
+/// so delete is O(log n) instead of O(n) list.filter. Iteration points call
+/// value.set_live_values to skip tombstones/dupes and recover forward order.
+/// add() compacts the list when it grows past 2× live size, bounding bloat.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/heap
@@ -28,7 +31,6 @@ import gleam/dict
 import gleam/float
 import gleam/list
 import gleam/option.{Some}
-import gleam/result
 
 /// Set up Set.prototype and Set constructor.
 pub fn init(
@@ -172,9 +174,28 @@ fn update_set(
   h: Heap,
   ref: Ref,
   data: dict.Dict(MapKey, JsValue),
-  keys: List(MapKey),
+  keys_rev: List(MapKey),
+  keys_len: Int,
 ) -> Heap {
-  heap.update_kind(h, ref, SetObject(data:, keys:))
+  heap.update_kind(h, ref, SetObject(data:, keys_rev:, keys_len:))
+}
+
+/// Rebuild keys_rev dropping tombstones and duplicates. Walks newest-first
+/// keeping each live key's FIRST (most recent) occurrence, then re-reverses
+/// so the result stays in reversed storage order.
+fn compact_keys(
+  data: dict.Dict(MapKey, JsValue),
+  keys_rev: List(MapKey),
+) -> List(MapKey) {
+  let #(forward, _remaining) =
+    list.fold(keys_rev, #([], data), fn(acc, k) {
+      let #(ks, remaining) = acc
+      case dict.has_key(remaining, k) {
+        True -> #([k, ..ks], dict.delete(remaining, k))
+        False -> acc
+      }
+    })
+  list.reverse(forward)
 }
 
 /// ES2024 §24.2.3.1 Set.prototype.add ( value )
@@ -183,15 +204,22 @@ fn set_add(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, ref, state <- require_set(this, state)
   let val = first_arg_or_undefined(args)
   let key = value.js_to_map_key(val)
   let new_data = dict.insert(data, key, val)
-  let new_keys = case dict.has_key(data, key) {
-    True -> keys
-    False -> [key, ..keys]
+  let #(keys_rev, keys_len) = case dict.has_key(data, key) {
+    True -> #(keys_rev, keys_len)
+    False -> #([key, ..keys_rev], keys_len + 1)
   }
-  let heap = update_set(state.heap, ref, new_data, new_keys)
+  // Compact tombstones/dupes when the list has grown to 2× live entries.
+  // Bounds worst-case list bloat under delete+re-add cycles.
+  let size = dict.size(new_data)
+  let #(keys_rev, keys_len) = case keys_len > size * 2 {
+    True -> #(compact_keys(new_data, keys_rev), size)
+    False -> #(keys_rev, keys_len)
+  }
+  let heap = update_set(state.heap, ref, new_data, keys_rev, keys_len)
   #(State(..state, heap:), Ok(this))
 }
 
@@ -201,26 +229,37 @@ fn set_has(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, _keys, _ref, state <- require_set(this, state)
+  use data, _keys_rev, _keys_len, _ref, state <- require_set(this, state)
   let key = value.js_to_map_key(first_arg_or_undefined(args))
   #(state, Ok(JsBool(dict.has_key(data, key))))
 }
 
 /// ES2024 §24.2.3.3 Set.prototype.delete ( value )
+///
+/// Tombstone delete: remove from the dict only. The key stays in keys_rev
+/// and is skipped at iteration time via dict lookup. Compaction here and in
+/// set_add bounds list growth. Amortized O(log n) instead of O(n) list.filter.
 fn set_delete(
   this: JsValue,
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, ref, state <- require_set(this, state)
   let key = value.js_to_map_key(first_arg_or_undefined(args))
-  let had = dict.has_key(data, key)
-  case had {
+  case dict.has_key(data, key) {
     False -> #(state, Ok(JsBool(False)))
     True -> {
       let new_data = dict.delete(data, key)
-      let new_keys = list.filter(keys, fn(k) { k != key })
-      let heap = update_set(state.heap, ref, new_data, new_keys)
+      // Compact on delete too (same 2× rule as set_add) — otherwise a set
+      // drained by deletes with no later add keeps every tombstone forever:
+      // do_refs_in_slot roots tombstoned keys (deleted objects stay
+      // reachable) and every iteration point walks the dead keys.
+      let size = dict.size(new_data)
+      let #(keys_rev, keys_len) = case keys_len > size * 2 {
+        True -> #(compact_keys(new_data, keys_rev), size)
+        False -> #(keys_rev, keys_len)
+      }
+      let heap = update_set(state.heap, ref, new_data, keys_rev, keys_len)
       #(State(..state, heap:), Ok(JsBool(True)))
     }
   }
@@ -231,14 +270,14 @@ fn set_clear(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _data, _keys, ref, state <- require_set(this, state)
-  let heap = update_set(state.heap, ref, dict.new(), [])
+  use _data, _keys_rev, _keys_len, ref, state <- require_set(this, state)
+  let heap = update_set(state.heap, ref, dict.new(), [], 0)
   #(State(..state, heap:), Ok(JsUndefined))
 }
 
 /// ES2024 §24.2.3.5 get Set.prototype.size
 fn set_size(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
-  use data, _keys, _ref, state <- require_set(this, state)
+  use data, _keys_rev, _keys_len, _ref, state <- require_set(this, state)
   #(state, Ok(value.from_int(dict.size(data))))
 }
 
@@ -248,7 +287,7 @@ fn set_for_each(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
   let callback = first_arg_or_undefined(args)
   let this_arg = case args {
     [_, ta, ..] -> ta
@@ -261,11 +300,7 @@ fn set_for_each(
         "Set.prototype.forEach callback is not a function",
       )
     True -> {
-      let entries =
-        list.reverse(keys)
-        |> list.filter_map(fn(key) {
-          dict.get(data, key) |> result.map(fn(v) { #(key, v) })
-        })
+      let entries = value.set_live_values(data, keys_rev, keys_len)
       for_each_loop(state, entries, callback, this_arg, this)
     }
   }
@@ -274,14 +309,14 @@ fn set_for_each(
 /// Iterate over Set entries, calling callback(value, value, set) for each.
 fn for_each_loop(
   state: State,
-  entries: List(#(MapKey, JsValue)),
+  entries: List(JsValue),
   callback: JsValue,
   this_arg: JsValue,
   set_this: JsValue,
 ) -> #(State, Result(JsValue, JsValue)) {
   case entries {
     [] -> #(state, Ok(JsUndefined))
-    [#(_key, val), ..rest] ->
+    [val, ..rest] ->
       case state.call(state, callback, this_arg, [val, val, set_this]) {
         Ok(#(_result, new_state)) ->
           for_each_loop(new_state, rest, callback, this_arg, set_this)
@@ -296,21 +331,22 @@ fn set_union(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   use other_values, state <- with_drained_keys(state, rec)
   // Keys stored reversed. Iterate other's keys in forward order and prepend
-  // new ones onto this's reversed keys — result stays reversed.
-  let #(result_data, result_keys) =
-    list.fold(other_values, #(data, keys), fn(acc, v) {
-      let #(d, ks) = acc
+  // new ones onto this's reversed keys — result stays reversed. Inherited
+  // tombstones/dupes are fine: iteration skips them, add() compacts.
+  let #(result_data, result_keys, result_len) =
+    list.fold(other_values, #(data, keys_rev, keys_len), fn(acc, v) {
+      let #(d, ks, len) = acc
       let key = value.js_to_map_key(v)
       case dict.has_key(d, key) {
-        True -> #(d, ks)
-        False -> #(dict.insert(d, key, v), [key, ..ks])
+        True -> #(d, ks, len)
+        False -> #(dict.insert(d, key, v), [key, ..ks], len + 1)
       }
     })
-  alloc_new_set(state, result_data, result_keys)
+  alloc_new_set(state, result_data, result_keys, result_len)
 }
 
 /// ES2025 §24.2.3.7 Set.prototype.intersection ( other )
@@ -319,10 +355,10 @@ fn set_intersection(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   // Iterate this's elements in forward order, keep those where other.has(e).
-  let entries = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+  let entries = value.set_live_values(data, keys_rev, keys_len)
   use kept, state <- with_filtered_by_has(state, rec, entries, True)
   alloc_new_set_from_values(state, kept)
 }
@@ -333,10 +369,10 @@ fn set_difference(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   // Iterate this's elements in forward order, keep those where !other.has(e).
-  let entries = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+  let entries = value.set_live_values(data, keys_rev, keys_len)
   use kept, state <- with_filtered_by_has(state, rec, entries, False)
   alloc_new_set_from_values(state, kept)
 }
@@ -352,17 +388,17 @@ fn set_symmetric_difference(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
+  use data, keys_rev, _keys_len, _ref, state <- require_set(this, state)
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   use other_values, state <- with_drained_keys(state, rec)
   let #(result_data, result_keys) =
-    list.fold(other_values, #(data, keys), fn(acc, v) {
+    list.fold(other_values, #(data, keys_rev), fn(acc, v) {
       let #(d, ks) = acc
       let key = value.js_to_map_key(v)
       case dict.has_key(data, key) {
         // In this → remove from result (key may already be gone if other
         // yielded it twice; delete is a no-op then). Leave keys as a
-        // tombstone — alloc_new_set's consumers tolerate tombstones.
+        // tombstone — compact_keys below strips it.
         True -> #(dict.delete(d, key), ks)
         // Not in this → add to result if not already added.
         False ->
@@ -372,9 +408,10 @@ fn set_symmetric_difference(
           }
       }
     })
-  // result_keys may contain tombstones for removed entries — strip them.
-  let result_keys = list.filter(result_keys, dict.has_key(result_data, _))
-  alloc_new_set(state, result_data, result_keys)
+  // result_keys may contain tombstones (removed here or inherited from this)
+  // and dupes — compact so keys_len matches the list length exactly.
+  let result_keys = compact_keys(result_data, result_keys)
+  alloc_new_set(state, result_data, result_keys, dict.size(result_data))
 }
 
 /// ES2025 §24.2.3.9 Set.prototype.isSubsetOf ( other )
@@ -383,13 +420,13 @@ fn set_is_subset_of(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   // §24.2.3.9 step 4: if thisSize > otherRec.size, return false
   case dict.size(data) > rec.size {
     True -> #(state, Ok(JsBool(False)))
     False -> {
-      let entries = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+      let entries = value.set_live_values(data, keys_rev, keys_len)
       all_match_has(state, rec, entries, True)
     }
   }
@@ -401,7 +438,7 @@ fn set_is_superset_of(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, _keys, _ref, state <- require_set(this, state)
+  use data, _keys_rev, _keys_len, _ref, state <- require_set(this, state)
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   // §24.2.3.10 step 4: if thisSize < otherRec.size, return false
   case dict.size(data) < rec.size {
@@ -423,10 +460,10 @@ fn set_is_disjoint_from(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   // every element of this must NOT be in other
-  let entries = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+  let entries = value.set_live_values(data, keys_rev, keys_len)
   all_match_has(state, rec, entries, False)
 }
 
@@ -436,8 +473,8 @@ fn set_values(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
-  let snapshot = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
+  let snapshot = value.set_live_values(data, keys_rev, keys_len)
   alloc_set_iterator(state, snapshot, value.SetIterValues)
 }
 
@@ -446,8 +483,8 @@ fn set_entries(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use data, keys, _ref, state <- require_set(this, state)
-  let snapshot = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+  use data, keys_rev, keys_len, _ref, state <- require_set(this, state)
+  let snapshot = value.set_live_values(data, keys_rev, keys_len)
   alloc_set_iterator(state, snapshot, value.SetIterEntries)
 }
 
@@ -467,15 +504,17 @@ fn alloc_set_iterator(
 }
 
 /// Allocate a new Set object from data + reversed keys.
+/// `keys_len` must equal the length of `keys_rev`.
 fn alloc_new_set(
   state: State,
   data: dict.Dict(MapKey, JsValue),
-  keys: List(MapKey),
+  keys_rev: List(MapKey),
+  keys_len: Int,
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(heap, ref) =
     common.alloc_wrapper(
       state.heap,
-      SetObject(data:, keys:),
+      SetObject(data:, keys_rev:, keys_len:),
       state.builtins.set.prototype,
     )
   #(State(..state, heap:), Ok(JsObject(ref)))
@@ -486,16 +525,16 @@ fn alloc_new_set_from_values(
   state: State,
   values: List(JsValue),
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(data, keys) =
-    list.fold(values, #(dict.new(), []), fn(acc, v) {
-      let #(d, ks) = acc
+  let #(data, keys_rev, keys_len) =
+    list.fold(values, #(dict.new(), [], 0), fn(acc, v) {
+      let #(d, ks, len) = acc
       let key = value.js_to_map_key(v)
       case dict.has_key(d, key) {
-        True -> #(d, ks)
-        False -> #(dict.insert(d, key, v), [key, ..ks])
+        True -> #(d, ks, len)
+        False -> #(dict.insert(d, key, v), [key, ..ks], len + 1)
       }
     })
-  alloc_new_set(state, data, keys)
+  alloc_new_set(state, data, keys_rev, keys_len)
 }
 
 // ---- GetSetRecord + protocol helpers ----
@@ -721,19 +760,20 @@ fn all_match_has(
 // ---- helpers ----
 
 /// Unwrap `this` as a Set or return a TypeError.
-/// CPS-style — call with `use data, keys, ref, state <- require_set(this, state)`.
+/// CPS-style — call with
+/// `use data, keys_rev, keys_len, ref, state <- require_set(this, state)`.
 fn require_set(
   this: JsValue,
   state: State,
-  cont: fn(dict.Dict(MapKey, JsValue), List(MapKey), Ref, State) ->
+  cont: fn(dict.Dict(MapKey, JsValue), List(MapKey), Int, Ref, State) ->
     #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   let err = "Method Set.prototype.* called on incompatible receiver"
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: SetObject(data:, keys:), ..)) ->
-          cont(data, keys, ref, state)
+        Some(ObjectSlot(kind: SetObject(data:, keys_rev:, keys_len:), ..)) ->
+          cont(data, keys_rev, keys_len, ref, state)
         _ -> state.type_error(state, err)
       }
     _ -> state.type_error(state, err)

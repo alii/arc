@@ -190,8 +190,6 @@ pub fn new_state(
     stack: [],
     locals:,
     constants: func.constants,
-    lexical_globals:,
-    global_object:,
     func:,
     code: func.bytecode,
     heap:,
@@ -199,16 +197,20 @@ pub fn new_state(
     call_stack: [],
     try_stack: [],
     builtins:,
+    ctx: state.RealmCtx(
+      lexical_globals:,
+      global_object:,
+      symbol_descriptions:,
+      symbol_registry:,
+      realms: dict.new(),
+      call_fn: call_fn_callback,
+      construct_fn: construct_fn_callback,
+    ),
     new_target: JsUndefined,
     call_args: [],
     job_queue: job_queue.new(),
     unhandled_rejections: [],
     outstanding: 0,
-    symbol_descriptions:,
-    symbol_registry:,
-    realms: dict.new(),
-    call_fn: call_fn_callback,
-    construct_fn: construct_fn_callback,
     call_depth: 0,
     eval_env: None,
     current_line: 0,
@@ -470,9 +472,16 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
             pc: state.pc + 1,
           )
         YieldStar ->
+          // Strip arg; also resolve an internal Iterator Record in the iter
+          // slot (pre-step stack still has it on the FIRST YieldStar after
+          // GetIterator) so gen.return/.throw forwarding off the saved stack
+          // sees the real iterator.
           State(..state, heap:, stack: case state.stack {
-            [_arg, ..rest] -> rest
-            [] -> []
+            [_arg, iter, ..rest] -> [
+              unwrap_iterator_record(state, iter),
+              ..rest
+            ]
+            [_arg] | [] -> []
           })
         AsyncYieldStarResume(next_pc:) ->
           // Pre-step stack is [result_obj, iter, ..]. result_obj was fully
@@ -776,7 +785,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     // ---- Global variable access --------------------------------------
     // §9.1.1.4.4 GetBindingValue — two-phase: declarative then object record
     GetGlobal(name) -> {
-      case dict.get(state.lexical_globals, name) {
+      case dict.get(state.ctx.lexical_globals, name) {
         // Lexical binding exists — check for TDZ
         Ok(value.Let(JsUninitialized)) | Ok(value.Const(JsUninitialized)) ->
           state.throw_reference_error(
@@ -790,12 +799,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         // Not in lexical → try object record (globalThis)
         Error(_) -> {
           let key = Named(name)
-          case object.get_own_property(state.heap, state.global_object, key) {
+          case object.get_own_property(state.heap, state.ctx.global_object, key) {
             Some(DataProperty(value: val, ..)) ->
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
             Some(value.AccessorProperty(get: Some(getter), ..)) ->
               case
-                state.call(state, getter, JsObject(state.global_object), [])
+                state.call(state, getter, JsObject(state.ctx.global_object), [])
               {
                 Ok(#(val, state)) ->
                   Ok(
@@ -817,12 +826,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               )
             None ->
               // Check prototype chain
-              case object.has_property(state.heap, state.global_object, key) {
+              case object.has_property(state.heap, state.ctx.global_object, key) {
                 True ->
                   case
                     object.get_value_of(
                       state,
-                      JsObject(state.global_object),
+                      JsObject(state.ctx.global_object),
                       key,
                     )
                   {
@@ -848,7 +857,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     PutGlobal(name) -> {
       case state.stack {
         [val, ..rest] -> {
-          case dict.get(state.lexical_globals, name) {
+          case dict.get(state.ctx.lexical_globals, name) {
             // const → assignment rejected (even in TDZ, per spec ordering)
             Ok(value.Const(_)) ->
               state.throw_type_error(state, "Assignment to constant variable.")
@@ -864,10 +873,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                 State(
                   ..state,
                   stack: rest,
-                  lexical_globals: dict.insert(
-                    state.lexical_globals,
-                    name,
-                    value.Let(val),
+                  ctx: state.RealmCtx(
+                    ..state.ctx,
+                    lexical_globals: dict.insert(
+                      state.ctx.lexical_globals,
+                      name,
+                      value.Let(val),
+                    ),
                   ),
                   pc: state.pc + 1,
                 ),
@@ -879,7 +891,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                 True ->
                   // Strict mode: must exist on globalThis or throw
                   case
-                    object.has_property(state.heap, state.global_object, key)
+                    object.has_property(
+                      state.heap,
+                      state.ctx.global_object,
+                      key,
+                    )
                   {
                     False ->
                       state.throw_reference_error(
@@ -890,10 +906,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                       case
                         object.set_value(
                           State(..state, stack: rest),
-                          state.global_object,
+                          state.ctx.global_object,
                           key,
                           val,
-                          JsObject(state.global_object),
+                          JsObject(state.ctx.global_object),
                         )
                       {
                         Ok(#(state, True)) ->
@@ -915,10 +931,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                   case
                     object.set_value(
                       State(..state, stack: rest),
-                      state.global_object,
+                      state.ctx.global_object,
                       key,
                       val,
-                      JsObject(state.global_object),
+                      JsObject(state.ctx.global_object),
                     )
                   {
                     Ok(#(state, _)) -> Ok(State(..state, pc: state.pc + 1))
@@ -935,7 +951,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     // §9.1.1.4.17 CreateGlobalVarBinding — create var on globalThis
     DeclareGlobalVar(name) -> {
       let key = Named(name)
-      case object.has_property(state.heap, state.global_object, key) {
+      case object.has_property(state.heap, state.ctx.global_object, key) {
         True ->
           // Already exists — no-op
           Ok(State(..state, pc: state.pc + 1))
@@ -943,7 +959,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           let #(heap, _) =
             object.set_property(
               state.heap,
-              state.global_object,
+              state.ctx.global_object,
               key,
               JsUndefined,
             )
@@ -1033,7 +1049,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       Ok(
         State(
           ..state,
-          lexical_globals: dict.insert(state.lexical_globals, name, binding),
+          ctx: state.RealmCtx(
+            ..state.ctx,
+            lexical_globals: dict.insert(
+              state.ctx.lexical_globals,
+              name,
+              binding,
+            ),
+          ),
           pc: state.pc + 1,
         ),
       )
@@ -1043,7 +1066,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     InitGlobalLex(name) -> {
       case state.stack {
         [val, ..rest] -> {
-          let binding = case dict.get(state.lexical_globals, name) {
+          let binding = case dict.get(state.ctx.lexical_globals, name) {
             Ok(existing) -> value.set_lexical_global_value(existing, val)
             // No prior DeclareGlobalLex — default to let.
             Error(Nil) -> value.Let(val)
@@ -1052,7 +1075,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             State(
               ..state,
               stack: rest,
-              lexical_globals: dict.insert(state.lexical_globals, name, binding),
+              ctx: state.RealmCtx(
+                ..state.ctx,
+                lexical_globals: dict.insert(
+                  state.ctx.lexical_globals,
+                  name,
+                  binding,
+                ),
+              ),
               pc: state.pc + 1,
             ),
           )
@@ -1078,7 +1108,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
 
     // §9.1.1.4: typeof on globals — TDZ throws, undeclared returns "undefined"
     TypeofGlobal(name) -> {
-      case dict.get(state.lexical_globals, name) {
+      case dict.get(state.ctx.lexical_globals, name) {
         // TDZ — typeof on uninitialized lexical still throws per spec
         Ok(value.Let(JsUninitialized)) | Ok(value.Const(JsUninitialized)) ->
           state.throw_reference_error(
@@ -1102,17 +1132,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           // Object record: try globalThis, return "undefined" if not found
           let key = Named(name)
           let val = case
-            object.get_own_property(state.heap, state.global_object, key)
+            object.get_own_property(state.heap, state.ctx.global_object, key)
           {
             Some(DataProperty(value: v, ..)) -> v
             _ ->
-              case object.has_property(state.heap, state.global_object, key) {
+              case object.has_property(state.heap, state.ctx.global_object, key) {
                 True ->
                   // Property exists on proto chain — use get_value_of for correct result
                   case
                     object.get_value_of(
                       state,
-                      JsObject(state.global_object),
+                      JsObject(state.ctx.global_object),
                       key,
                     )
                   {
@@ -1535,14 +1565,16 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       let key = value.from_op_key(op_key)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
-          case object.has_property(state.heap, ref, key) {
-            True -> {
+          // Single chain walk: find the descriptor (brand check), then apply
+          // OrdinaryGet steps 3-7 to it — no second walk via get_value_of.
+          case object.find_property(state.heap, ref, key) {
+            Some(prop) -> {
               use #(val, state) <- result.map(
-                state.rethrow(object.get_value_of(state, receiver, key)),
+                state.rethrow(object.property_get_value(state, prop, receiver)),
               )
               State(..state, stack: [val, ..rest], pc: state.pc + 1)
             }
-            False ->
+            None ->
               state.throw_type_error(
                 state,
                 "Cannot read private member "
@@ -1565,14 +1597,15 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       let key = value.from_op_key(op_key)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
-          case object.has_property(state.heap, ref, key) {
-            True -> {
+          // Single chain walk — see GetPrivateField.
+          case object.find_property(state.heap, ref, key) {
+            Some(prop) -> {
               use #(val, state) <- result.map(
-                state.rethrow(object.get_value_of(state, receiver, key)),
+                state.rethrow(object.property_get_value(state, prop, receiver)),
               )
               State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
             }
-            False ->
+            None ->
               state.throw_type_error(
                 state,
                 "Cannot read private member "
@@ -1595,14 +1628,22 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       let key = value.from_op_key(op_key)
       case state.stack {
         [val, JsObject(ref) as receiver, ..rest] ->
-          case object.has_property(state.heap, ref, key) {
-            True -> {
+          // Single chain walk: find the descriptor (brand check), then apply
+          // OrdinarySetWithOwnDescriptor to it — no second walk via set_value.
+          case object.find_property(state.heap, ref, key) {
+            Some(prop) -> {
               use #(state, _ok) <- result.map(
-                state.rethrow(object.set_value(state, ref, key, val, receiver)),
+                state.rethrow(object.set_found_value(
+                  state,
+                  receiver,
+                  prop,
+                  key,
+                  val,
+                )),
               )
               State(..state, stack: [val, ..rest], pc: state.pc + 1)
             }
-            False ->
+            None ->
               state.throw_type_error(
                 state,
                 "Cannot write private member "
@@ -2596,10 +2637,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               case heap.read(state.heap, ref) {
                 // Iterators are their own iterator — [Symbol.iterator]() on
                 // %IteratorPrototype% returns `this`. Skip the proto walk.
+                // Generator/Array/String iterators are stepped in-VM by
+                // IteratorNext (`.next` is never read), so push them raw.
                 Some(ObjectSlot(kind: GeneratorObject(_), ..))
                 | Some(ObjectSlot(kind: ArrayIteratorObject(..), ..))
-                | Some(ObjectSlot(kind: value.SetIteratorObject(..), ..))
-                | Some(ObjectSlot(kind: value.MapIteratorObject(..), ..)) ->
+                | Some(ObjectSlot(kind: value.StringIteratorObject(..), ..)) ->
                   Ok(
                     State(
                       ..state,
@@ -2607,6 +2649,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                       pc: state.pc + 1,
                     ),
                   )
+                // Set/Map iterators are their own iterator too, but they step
+                // through native %SetIteratorPrototype%.next — build the
+                // Iterator Record so `.next` is fetched once, not per step.
+                Some(ObjectSlot(kind: value.SetIteratorObject(..), ..))
+                | Some(ObjectSlot(kind: value.MapIteratorObject(..), ..)) ->
+                  push_iterator_record(state, ref, rest)
                 // All other objects: look up Symbol.iterator per §7.4.1.
                 // No array fast path — must honor deleted/overridden
                 // Symbol.iterator (test262 destructuring tests rely on this).
@@ -2618,27 +2666,27 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                     object.inspect(iterable, state.heap) <> " is not iterable",
                   )
               }
-            // String primitive: iterate UTF-16 code units
-            JsString(_) ->
-              case common.to_object(state.heap, state.builtins, iterable) {
-                Some(#(h, wrapper_ref)) -> {
-                  let #(h, iter_ref) =
-                    alloc_array_iterator(h, state.builtins, wrapper_ref)
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsObject(iter_ref), ..rest],
-                      heap: h,
-                      pc: state.pc + 1,
-                    ),
-                  )
-                }
-                None ->
-                  state.throw_type_error(
-                    state,
-                    object.inspect(iterable, state.heap) <> " is not iterable",
-                  )
-              }
+            // String primitive: iterate code points — ES §22.1.5.
+            // Snapshot the codepoints up front: O(n) total, O(1) per next,
+            // vs O(n²) for per-index UTF-8 walks through a wrapper object.
+            JsString(s) -> {
+              let #(h, iter_ref) =
+                common.alloc_wrapper(
+                  state.heap,
+                  value.StringIteratorObject(remaining: string.to_utf_codepoints(
+                    s,
+                  )),
+                  state.builtins.array_iterator_proto,
+                )
+              Ok(
+                State(
+                  ..state,
+                  stack: [JsObject(iter_ref), ..rest],
+                  heap: h,
+                  pc: state.pc + 1,
+                ),
+              )
+            }
             _ ->
               state.throw_type_error(
                 state,
@@ -2725,64 +2773,69 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                 }
               }
             }
+            Some(
+              ObjectSlot(kind: value.StringIteratorObject(remaining:), ..) as slot,
+            ) ->
+              case remaining {
+                [] ->
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                [cp, ..remaining] -> {
+                  let val = JsString(string.from_utf_codepoints([cp]))
+                  let heap =
+                    heap.write(
+                      state.heap,
+                      iter_ref,
+                      ObjectSlot(
+                        ..slot,
+                        kind: value.StringIteratorObject(remaining:),
+                      ),
+                    )
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
+                      heap:,
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+              }
             Some(ObjectSlot(kind: GeneratorObject(_), ..)) -> {
-              // Generator iterator: call .next() and extract {value, done}
-              use next_state <- result.try(
-                generators.call_native_generator_next(
+              // Generator iterator: internal resume returning #(done, value)
+              // directly — no {value, done} result object is allocated.
+              use #(done, val, next_state) <- result.map(
+                generators.resume_generator_next(
                   state,
                   JsObject(iter_ref),
-                  [],
-                  [],
+                  JsUndefined,
                   execute_inner,
-                  unwind_to_catch,
                 )
                 |> result.map_error(mark_done(rest)),
               )
-              // next_state.stack has [result_obj, ...], extract value and done
-              case next_state.stack {
-                [JsObject(result_ref), ..] ->
-                  case heap.read(next_state.heap, result_ref) {
-                    Some(ObjectSlot(properties: props, ..)) -> {
-                      let val = case dict.get(props, Named("value")) {
-                        Ok(DataProperty(value: v, ..)) -> v
-                        _ -> JsUndefined
-                      }
-                      let done = case dict.get(props, Named("done")) {
-                        Ok(DataProperty(value: JsBool(d), ..)) -> d
-                        _ -> False
-                      }
-                      let iter_slot = case done {
-                        True -> JsUndefined
-                        False -> JsObject(iter_ref)
-                      }
-                      Ok(
-                        State(
-                          ..state.merge_globals(state, next_state, []),
-                          heap: next_state.heap,
-                          stack: [JsBool(done), val, iter_slot, ..rest],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                    }
-                    _ ->
-                      Error(#(
-                        StepVmError(Unimplemented(
-                          "IteratorNext: generator .next() returned non-object",
-                        )),
-                        JsUndefined,
-                        next_state,
-                      ))
-                  }
-                _ ->
-                  Error(#(
-                    StepVmError(Unimplemented(
-                      "IteratorNext: generator .next() empty stack",
-                    )),
-                    JsUndefined,
-                    next_state,
-                  ))
+              let iter_slot = case done {
+                True -> JsUndefined
+                False -> JsObject(iter_ref)
               }
+              State(
+                ..next_state,
+                stack: [JsBool(done), val, iter_slot, ..rest],
+                pc: state.pc + 1,
+              )
             }
+            // Iterator Record (§7.4.1): `next` was cached at GetIterator —
+            // call it directly, no per-iteration property re-resolution.
+            Some(ObjectSlot(
+              kind: value.IteratorRecordObject(iterated:, next_method:),
+              ..,
+            )) ->
+              step_iterator_record(state, iter_ref, iterated, next_method, rest)
+              |> result.map_error(mark_done(rest))
             // Generic iterator: any object with .next(). Call it, extract {value, done}.
             Some(ObjectSlot(..)) ->
               step_generic_iterator(state, iter_ref, rest)
@@ -2803,6 +2856,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // iter slot is JsUndefined when [[Done]] (set by IteratorNext) → no-op.
       case state.stack {
         [JsObject(_) as iter, ..rest] -> {
+          // Resolve internal Iterator Records so GetMethod(iter, "return")
+          // hits the real iterator object.
+          let iter = unwrap_iterator_record(state, iter)
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case builtins_iterator.iterator_close_normal(state, iter) {
             #(state, Ok(Nil)) -> Ok(state)
@@ -2821,6 +2877,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // [[Done]] (set by IteratorNext on done/abrupt) → skip .return().
       case state.stack {
         [thrown, JsObject(_) as iter, ..rest] -> {
+          let iter = unwrap_iterator_record(state, iter)
           let state = State(..state, stack: rest)
           // Original error wins regardless of what .return() does.
           let #(state, _inner) = builtins_iterator.call_return(state, iter)
@@ -2839,6 +2896,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // without IteratorClose (spec: [[Done]]=true → no close on rest abrupt).
       case state.stack {
         [JsObject(_) as iter, ..rest] -> {
+          let iter = unwrap_iterator_record(state, iter)
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case builtins_iterator.iterator_rest(state, iter) {
             #(state, Ok(arr)) -> Ok(State(..state, stack: [arr, ..rest]))
@@ -2893,14 +2951,43 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // done → push value, pc+1. !done → yield value; execute_inner keeps pc
       // here so next resume re-enters with [resume_val, iter].
       case state.stack {
-        [arg, JsObject(iter_ref) as iter, ..rest] -> {
+        [arg, JsObject(orig_ref), ..rest] -> {
+          // GetIterator may have pushed an internal Iterator Record (cached
+          // `next`). Delegation forwards next/throw/return dynamically off
+          // the saved stack slot, so swap in the real iterator up front.
+          let #(iter_ref, state) = case heap.read(state.heap, orig_ref) {
+            Some(ObjectSlot(
+              kind: value.IteratorRecordObject(iterated: JsObject(real), ..),
+              ..,
+            )) -> #(real, State(..state, stack: [arg, JsObject(real), ..rest]))
+            _ -> #(orig_ref, state)
+          }
+          let iter = JsObject(iter_ref)
           use #(next_fn, state) <- result.try(
             state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
           )
-          use #(res, state) <- result.try(
-            state.rethrow(state.call(state, next_fn, iter, [arg])),
-          )
-          use #(done, val, state) <- result.try(read_iter_result(state, res))
+          use #(done, val, state) <- result.try(case
+            is_native_generator_next(state.heap, next_fn)
+          {
+            // Fast path: unmodified native generator .next — resume the inner
+            // generator directly, skipping the {value, done} result object
+            // that would be allocated and immediately discarded per step.
+            // resume advances pc past YieldStar; restore it so the !done
+            // branch suspends at this op (resume loops back here).
+            True -> {
+              let pc = state.pc
+              use #(done, val, st) <- result.map(
+                generators.resume_generator_next(state, iter, arg, execute_inner),
+              )
+              #(done, val, State(..st, pc:))
+            }
+            False -> {
+              use #(res, state) <- result.try(
+                state.rethrow(state.call(state, next_fn, iter, [arg])),
+              )
+              read_iter_result(state, res)
+            }
+          })
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
             False ->
@@ -3230,19 +3317,13 @@ fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {
   array_ops.push_onto_array(h, ref, val)
 }
 
-/// Thin wrapper: delegates to array_ops.spread_into_array with execute_inner/unwind_to_catch.
+/// Thin wrapper: delegates to array_ops.spread_into_array with execute_inner.
 fn spread_into_array(
   state: State,
   target_ref: Ref,
   iterable: JsValue,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  array_ops.spread_into_array(
-    state,
-    target_ref,
-    iterable,
-    execute_inner,
-    unwind_to_catch,
-  )
+  array_ops.spread_into_array(state, target_ref, iterable, execute_inner)
 }
 
 /// Thin wrapper: delegates to call.extract_array_args.
@@ -3458,16 +3539,21 @@ fn binop_add_with_to_primitive(
   add_primitives(s2, lprim, rprim, rest)
 }
 
-fn alloc_array_iterator(
-  h: Heap,
-  builtins: common.Builtins,
-  source: value.Ref,
-) -> #(Heap, value.Ref) {
-  common.alloc_wrapper(
-    h,
-    ArrayIteratorObject(source:, index: 0),
-    builtins.array_iterator_proto,
-  )
+/// True when `next_fn` is the unmodified native Generator.prototype.next.
+/// Lets yield* resume the inner generator via the internal no-alloc API
+/// instead of a full native call that allocates a discarded result object.
+fn is_native_generator_next(h: Heap, next_fn: JsValue) -> Bool {
+  case next_fn {
+    JsObject(fn_ref) ->
+      case heap.read(h, fn_ref) {
+        Some(ObjectSlot(
+          kind: value.NativeFunction(value.Call(value.GeneratorNext), ..),
+          ..,
+        )) -> True
+        _ -> False
+      }
+    _ -> False
+  }
 }
 
 /// ES IteratorComplete + IteratorValue: read {done, value} from an iterator
@@ -3488,6 +3574,96 @@ fn read_iter_result(
     }
     _ -> state.throw_type_error(state, "Iterator result is not an object")
   }
+}
+
+/// §7.4.1 steps 4-6: finish GetIterator by building the Iterator Record —
+/// `next` is fetched ONCE here so each IteratorNext is just a call, not a
+/// fresh own-property miss + prototype-chain walk per iteration. Only
+/// Generator/Array/String iterators are pushed raw: IteratorNext steps
+/// those in-VM and never reads `.next`, so a record would only add an
+/// alloc. Set/Map iterators step through their native `.next`, so they
+/// get a record like any other iterator.
+fn push_iterator_record(
+  state: State,
+  iter_ref: Ref,
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, State)) {
+  case heap.read(state.heap, iter_ref) {
+    Some(ObjectSlot(kind: GeneratorObject(_), ..))
+    | Some(ObjectSlot(kind: ArrayIteratorObject(..), ..))
+    | Some(ObjectSlot(kind: value.StringIteratorObject(..), ..)) ->
+      Ok(
+        State(
+          ..state,
+          stack: [JsObject(iter_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    _ -> {
+      let iter = JsObject(iter_ref)
+      use #(next_method, state) <- result.map(
+        state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
+      )
+      let #(heap, rec_ref) =
+        heap.alloc(
+          state.heap,
+          ObjectSlot(
+            kind: value.IteratorRecordObject(iterated: iter, next_method:),
+            properties: dict.new(),
+            elements: elements.new(),
+            prototype: None,
+            symbol_properties: [],
+            extensible: False,
+          ),
+        )
+      State(
+        ..state,
+        heap:,
+        stack: [JsObject(rec_ref), ..rest_stack],
+        pc: state.pc + 1,
+      )
+    }
+  }
+}
+
+/// Resolve a GetIterator stack slot to the real iterator object: internal
+/// IteratorRecordObject wrappers (cached `next`) must be transparent to
+/// .return()/.throw() lookups and to yield* delegation.
+fn unwrap_iterator_record(state: State, v: JsValue) -> JsValue {
+  case v {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: value.IteratorRecordObject(iterated:, ..), ..)) ->
+          iterated
+        _ -> v
+      }
+    _ -> v
+  }
+}
+
+/// IteratorNext for an internal Iterator Record: call the `next_method`
+/// cached at GetIterator (§7.4.1) with the real iterator as `this`. Same
+/// stack contract as step_generic_iterator.
+fn step_iterator_record(
+  state: State,
+  rec_ref: Ref,
+  iterated: JsValue,
+  next_method: JsValue,
+  rest: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, State)) {
+  use #(result_obj, state) <- result.try(
+    state.rethrow(state.call(state, next_method, iterated, [])),
+  )
+  use #(done, val, state) <- result.map(read_iter_result(state, result_obj))
+  let iter_slot = case done {
+    True -> JsUndefined
+    False -> JsObject(rec_ref)
+  }
+  State(
+    ..state,
+    stack: [JsBool(done), val, iter_slot, ..rest],
+    pc: state.pc + 1,
+  )
 }
 
 /// IteratorNext fallback for user-defined iterators: call .next(), extract
@@ -3536,13 +3712,7 @@ fn get_iterator_via_symbol(
             Ok(#(iterator, state)) ->
               case iterator {
                 JsObject(iter_ref) ->
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsObject(iter_ref), ..rest_stack],
-                      pc: state.pc + 1,
-                    ),
-                  )
+                  push_iterator_record(state, iter_ref, rest_stack)
                 _ ->
                   state.throw_type_error(
                     state,

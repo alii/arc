@@ -1355,6 +1355,20 @@ fn parse_for_declaration_scoped(
   )
 }
 
+/// Leave the for-head declaration context once its declarator list is fully
+/// parsed, before the in/of right-hand side, condition, update, or body.
+/// Otherwise in_lexical_decl/decl_bound_names leak into the rest of the
+/// statement and unrelated bindings (params, catch params, var) are
+/// dup-checked against the for-head names.
+fn exit_for_decl_context(p: P, outer: P) -> P {
+  P(
+    ..p,
+    in_lexical_decl: outer.in_lexical_decl,
+    decl_bound_names: outer.decl_bound_names,
+    binding_kind: outer.binding_kind,
+  )
+}
+
 fn parse_for_declaration(
   p: P,
   is_await: Bool,
@@ -1389,7 +1403,7 @@ fn parse_for_declaration(
             ast.VariableDeclarator(id: pattern, init: None),
           ]),
         )
-      parse_for_in_rest(p3, decl)
+      parse_for_in_rest(exit_for_decl_context(p3, p), decl)
     }
     Of -> {
       // B.3.4: for-of var bindings must not shadow catch parameters
@@ -1409,7 +1423,7 @@ fn parse_for_declaration(
             ast.VariableDeclarator(id: pattern, init: None),
           ]),
         )
-      parse_for_of_rest(p3, decl, is_await)
+      parse_for_of_rest(exit_for_decl_context(p3, p), decl, is_await)
     }
     Semicolon ->
       case kind {
@@ -1427,7 +1441,10 @@ fn parse_for_declaration(
                     ..rest
                   ]),
                 )
-              parse_for_classic_rest(advance(p4), Some(decl))
+              parse_for_classic_rest(
+                advance(exit_for_decl_context(p4, p)),
+                Some(decl),
+              )
             }
           }
       }
@@ -1448,7 +1465,7 @@ fn parse_for_declaration(
                   ]),
                 )
               use p5 <- result.try(expect(p4, Semicolon))
-              parse_for_classic_rest(p5, Some(decl))
+              parse_for_classic_rest(exit_for_decl_context(p5, p), Some(decl))
             }
           }
       }
@@ -1474,7 +1491,10 @@ fn parse_for_declaration(
                 ..rest
               ]),
             )
-          parse_for_classic_rest(advance(p6), Some(decl))
+          parse_for_classic_rest(
+            advance(exit_for_decl_context(p6, p)),
+            Some(decl),
+          )
         }
         Comma -> {
           let first = ast.VariableDeclarator(id: pattern, init: Some(init_expr))
@@ -1487,7 +1507,7 @@ fn parse_for_declaration(
               ]),
             )
           use p7 <- result.try(expect(p6, Semicolon))
-          parse_for_classic_rest(p7, Some(decl))
+          parse_for_classic_rest(exit_for_decl_context(p7, p), Some(decl))
         }
         _ -> Error(ExpectedForHeadSeparator(pos_of(p5)))
       }
@@ -3147,6 +3167,10 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
               param_bound_names: [],
               has_non_simple_param: False,
               binding_kind: BindingParam,
+              // Params are parsed before the arrow body's function context is
+              // entered, so suspend any enclosing let/const declaration here.
+              in_lexical_decl: False,
+              decl_bound_names: set.new(),
             )
           case parse_formal_parameters(p2_arrow) {
             Ok(#(p3, params)) ->
@@ -3293,6 +3317,10 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
           param_bound_names: [],
           has_non_simple_param: False,
           binding_kind: BindingParam,
+          // Params are parsed before the arrow body's function context is
+          // entered, so suspend any enclosing let/const declaration here.
+          in_lexical_decl: False,
+          decl_bound_names: set.new(),
         )
       case parse_possible_arrow_params(p2_arrow) {
         Ok(#(p3, params)) ->
@@ -5490,6 +5518,10 @@ fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
     allow_new_target: True,
     in_single_stmt_pos: False,
     in_method: False,
+    // A function boundary is never part of an enclosing let/const declaration:
+    // params and body bindings must not collide with outer declarator names.
+    in_lexical_decl: False,
+    decl_bound_names: set.new(),
     // Reset scope for new function body
     scope_lexical: set.new(),
     scope_var: set.new(),
@@ -5523,6 +5555,9 @@ fn enter_method_context(
     allow_new_target: True,
     in_single_stmt_pos: False,
     in_method: True,
+    // Function boundary: not part of an enclosing let/const declaration
+    in_lexical_decl: False,
+    decl_bound_names: set.new(),
     // Reset scope for new method body
     scope_lexical: set.new(),
     scope_var: set.new(),
@@ -5555,6 +5590,9 @@ fn enter_static_block_context(p: P) -> P {
     allow_new_target: True,
     in_single_stmt_pos: False,
     in_method: False,
+    // Function boundary: not part of an enclosing let/const declaration
+    in_lexical_decl: False,
+    decl_bound_names: set.new(),
     scope_lexical: set.new(),
     scope_var: set.new(),
     scope_params: set.new(),
@@ -5594,6 +5632,10 @@ fn restore_outer_context(p: P, outer: P) -> P {
     binding_kind: outer.binding_kind,
     in_block: outer.in_block,
     in_single_stmt_pos: outer.in_single_stmt_pos,
+    // Resume the enclosing let/const declaration (if any) so later
+    // declarators still dup-check: `let a = function () {}, a = 2` errors.
+    in_lexical_decl: outer.in_lexical_decl,
+    decl_bound_names: outer.decl_bound_names,
   )
 }
 

@@ -85,7 +85,7 @@ pub fn eval_script_native(
               symbol_descriptions:,
               symbol_registry:,
             )) ->
-              case dict.get(state.realms, realm_ref) {
+              case dict.get(state.ctx.realms, realm_ref) {
                 Ok(realm_builtins) ->
                   Ok(#(
                     realm_builtins,
@@ -136,7 +136,11 @@ pub fn eval_script_native(
             symbol_registry,
           ),
           job_queue: state.job_queue,
-          realms: state.realms,
+        )
+      let eval_state =
+        State(
+          ..eval_state,
+          ctx: state.RealmCtx(..eval_state.ctx, realms: state.ctx.realms),
         )
       case execute_inner(eval_state) {
         Error(vm_err) ->
@@ -151,9 +155,9 @@ pub fn eval_script_native(
           let updated_realm =
             value.RealmSlot(
               global_object: realm_global,
-              lexical_globals: drained.lexical_globals,
-              symbol_descriptions: drained.symbol_descriptions,
-              symbol_registry: drained.symbol_registry,
+              lexical_globals: drained.ctx.lexical_globals,
+              symbol_descriptions: drained.ctx.symbol_descriptions,
+              symbol_registry: drained.ctx.symbol_registry,
             )
           let h = heap.write(drained.heap, realm_ref, updated_realm)
           // Propagate heap and job queue back to caller
@@ -163,7 +167,7 @@ pub fn eval_script_native(
               heap: h,
               job_queue: drained.job_queue,
               outstanding: drained.outstanding,
-              realms: drained.realms,
+              ctx: state.RealmCtx(..state.ctx, realms: drained.ctx.realms),
             )
           case completion {
             NormalCompletion(val, _) -> #(state, Ok(val))
@@ -215,9 +219,12 @@ pub fn create_realm_native(
     )
 
   // Register the realm's builtins
-  let realms = dict.insert(state.realms, realm_ref, new_builtins)
+  let realms = dict.insert(state.ctx.realms, realm_ref, new_builtins)
 
-  #(State(..state, heap: h, realms:), Ok(JsObject(dollar_262_ref)))
+  #(
+    State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
+    Ok(JsObject(dollar_262_ref)),
+  )
 }
 
 /// Build a $262 object with evalScript, createRealm, gc methods and a global
@@ -334,7 +341,8 @@ fn run_source_in_current_realm(
   )
   // §19.2.1.1 PerformEval: indirect eval runs in global scope,
   // so its `this` is the global object.
-  let locals = seed_top_level_locals(template, JsObject(state.global_object))
+  let locals =
+    seed_top_level_locals(template, JsObject(state.ctx.global_object))
   let eval_state =
     State(
       ..new_state_fn(
@@ -342,26 +350,34 @@ fn run_source_in_current_realm(
         locals,
         state.heap,
         state.builtins,
-        state.global_object,
-        state.lexical_globals,
-        state.symbol_descriptions,
-        state.symbol_registry,
+        state.ctx.global_object,
+        state.ctx.lexical_globals,
+        state.ctx.symbol_descriptions,
+        state.ctx.symbol_registry,
       ),
       job_queue: state.job_queue,
-      realms: state.realms,
+    )
+  let eval_state =
+    State(
+      ..eval_state,
+      ctx: state.RealmCtx(..eval_state.ctx, realms: state.ctx.realms),
     )
   case execute_inner(eval_state) {
     Error(vm_err) ->
       state.type_error(state, "eval: VM error: " <> string.inspect(vm_err))
     Ok(#(completion, final_state)) -> {
       // Thread VM-global state back to caller
+      let merged = state.merge_globals(state, final_state, [])
       let state =
         State(
-          ..state.merge_globals(state, final_state, []),
+          ..merged,
           heap: final_state.heap,
-          symbol_descriptions: final_state.symbol_descriptions,
-          symbol_registry: final_state.symbol_registry,
-          realms: final_state.realms,
+          ctx: state.RealmCtx(
+            ..merged.ctx,
+            symbol_descriptions: final_state.ctx.symbol_descriptions,
+            symbol_registry: final_state.ctx.symbol_registry,
+            realms: final_state.ctx.realms,
+          ),
         )
       case completion {
         NormalCompletion(val, _) -> #(state, Ok(val))
@@ -504,28 +520,36 @@ fn run_direct_eval(
         locals,
         h,
         state.builtins,
-        state.global_object,
-        state.lexical_globals,
-        state.symbol_descriptions,
-        state.symbol_registry,
+        state.ctx.global_object,
+        state.ctx.lexical_globals,
+        state.ctx.symbol_descriptions,
+        state.ctx.symbol_registry,
       ),
       job_queue: state.job_queue,
-      realms: state.realms,
       // Direct eval inherits the caller's `this` (spec §19.2.1.1 step 16.a)
       // via the boxed capture appended to caller_box_refs above.
       eval_env:,
+    )
+  let eval_state =
+    State(
+      ..eval_state,
+      ctx: state.RealmCtx(..eval_state.ctx, realms: state.ctx.realms),
     )
   case execute_inner(eval_state) {
     Error(vm_err) ->
       state.type_error(state, "eval: VM error: " <> string.inspect(vm_err))
     Ok(#(completion, final_state)) -> {
+      let merged = state.merge_globals(state, final_state, [])
       let state =
         State(
-          ..state.merge_globals(state, final_state, []),
+          ..merged,
           heap: final_state.heap,
-          symbol_descriptions: final_state.symbol_descriptions,
-          symbol_registry: final_state.symbol_registry,
-          realms: final_state.realms,
+          ctx: state.RealmCtx(
+            ..merged.ctx,
+            symbol_descriptions: final_state.ctx.symbol_descriptions,
+            symbol_registry: final_state.ctx.symbol_registry,
+            realms: final_state.ctx.realms,
+          ),
           eval_env:,
         )
       case completion {

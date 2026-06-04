@@ -1,6 +1,7 @@
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/opcode.{type Op}
+import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/float
@@ -612,6 +613,42 @@ pub fn from_int(n: Int) -> JsValue {
   JsNumber(Finite(int.to_float(n)))
 }
 
+/// Forward-insertion-order live values of a SetObject.
+///
+/// `keys_rev` is reversed insertion order and may contain tombstones
+/// (deleted keys) and duplicates (re-added-after-delete keys). Walks
+/// newest-first, prepending each live key's value the FIRST time it's seen
+/// (its most recent insertion position) — the shrinking `remaining` dict
+/// doubles as the seen-set. Result is forward insertion order, deduped.
+pub fn set_live_values(
+  data: Dict(MapKey, JsValue),
+  keys_rev: List(MapKey),
+  keys_len: Int,
+) -> List(JsValue) {
+  case keys_len == dict.size(data) {
+    // No tombstones or duplicates possible — every list entry is live and
+    // unique, so skip the shrinking seen-set dict.delete per element.
+    True ->
+      list.fold(keys_rev, [], fn(vs, k) {
+        case dict.get(data, k) {
+          Ok(v) -> [v, ..vs]
+          Error(Nil) -> vs
+        }
+      })
+    False -> {
+      let #(values, _remaining) =
+        list.fold(keys_rev, #([], data), fn(acc, k) {
+          let #(vs, remaining) = acc
+          case dict.get(remaining, k) {
+            Ok(v) -> #([v, ..vs], dict.delete(remaining, k))
+            Error(Nil) -> acc
+          }
+        })
+      values
+    }
+  }
+}
+
 /// Map methods — constructor, prototype methods, size getter.
 pub type MapNativeFn {
   MapConstructor(proto: Ref)
@@ -1059,9 +1096,14 @@ pub type ExoticKind(ctx) {
   )
   /// Set object — ES2024 §24.2 Set Objects.
   /// Stores unique values using SameValueZero equality.
-  /// `keys` is stored in REVERSE insertion order so Set.prototype.add is O(1)
-  /// prepend instead of O(n) append; iteration points reverse once on read.
-  SetObject(data: Dict(MapKey, JsValue), keys: List(MapKey))
+  /// `keys_rev` is insertion order REVERSED so Set.prototype.add is O(1)
+  /// prepend instead of O(n) append; iteration points recover forward order
+  /// via `set_live_values`. Deleted keys stay in the list as tombstones
+  /// (skipped at iteration via dict lookup) — delete is O(log n) dict-only.
+  /// Re-added keys appear twice (newest occurrence wins). `keys_len` tracks
+  /// list length for O(1) compaction checks; when it exceeds 2× dict.size we
+  /// rebuild to drop tombstones/dupes.
+  SetObject(data: Dict(MapKey, JsValue), keys_rev: List(MapKey), keys_len: Int)
   /// WeakMap object — ES2024 §24.3 WeakMap Objects.
   /// Uses object refs as keys. No iteration, no size.
   /// Not truly weak (GC doesn't collect entries) but API-compatible.
@@ -1081,6 +1123,11 @@ pub type ExoticKind(ctx) {
   /// Created by Array.prototype[Symbol.iterator](), values(), keys(), entries().
   /// Lazy — re-reads source length each .next() to handle mutation.
   ArrayIteratorObject(source: Ref, index: Int)
+  /// String iterator — ES2024 §22.1.5 String Iterator Objects.
+  /// Snapshots the string's code points at creation (strings are immutable,
+  /// so unlike arrays there's no mutation to observe). O(1) per .next()
+  /// instead of an O(i) UTF-8 walk per indexed read.
+  StringIteratorObject(remaining: List(UtfCodepoint))
   /// Set iterator — ES2024 §24.2.5. Snapshots forward-order entries at
   /// creation time. Snapshot is simpler than live source+index because Set
   /// stores keys reversed with tombstones; re-deriving order each .next()
@@ -1119,6 +1166,13 @@ pub type ExoticKind(ctx) {
   /// symbol key is @@toStringTag = "Module" (in `symbol_properties`). The
   /// object has a null prototype, is non-extensible, and is read-only.
   ModuleNamespace(exports: Dict(String, Ref))
+  /// Internal Iterator Record — ES2024 §7.4.1 GetIterator builds
+  /// {Iterator, NextMethod, Done} with `next` fetched ONCE. The GetIterator
+  /// opcode wraps user-defined iterators in this so IteratorNext calls the
+  /// cached `next_method` instead of re-walking the prototype chain every
+  /// iteration. Never exposed to JS: IteratorClose/CloseThrow/Rest/YieldStar
+  /// unwrap to `iterated` before any dynamic .return/.throw lookup.
+  IteratorRecordObject(iterated: JsValue, next_method: JsValue)
 }
 
 /// Canonical property key. Per spec, property keys are String | Symbol, but
@@ -1142,11 +1196,21 @@ pub type PropertyKey {
 /// resolve.gleam canonicalizes those once into `opcode.OpKey` and the
 /// dispatch path uses `from_op_key` (O(1) tag match) instead.
 pub fn canonical_key(s: String) -> PropertyKey {
-  case int.parse(s) {
-    Ok(n) if n >= 0 ->
-      case int.to_string(n) == s {
-        True -> Index(n)
-        False -> Named(s)
+  // Cheap leading-byte guard: a canonical array index must start with a digit
+  // ("0".."9" — sign-prefixed strings can never satisfy `n >= 0` round-trip).
+  // gleam's int.parse is binary_to_integer wrapped in try/catch on BEAM, so
+  // without this guard every non-numeric key (the common case) raises and
+  // catches a badarg exception per access. bit_array.from_string is identity
+  // on Erlang, so the guard is a single byte comparison.
+  case bit_array.from_string(s) {
+    <<c, _:bytes>> if c >= 48 && c <= 57 ->
+      case int.parse(s) {
+        Ok(n) if n >= 0 ->
+          case int.to_string(n) == s {
+            True -> Index(n)
+            False -> Named(s)
+          }
+        _ -> Named(s)
       }
     _ -> Named(s)
   }
@@ -1749,7 +1813,8 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
           |> push_value_ref(func, _)
           |> push_value_ref(inner, _)
           |> push_value_ref(inner_next, _)
-        WrapForValidIteratorObject(iterated:, next_method:) ->
+        WrapForValidIteratorObject(iterated:, next_method:)
+        | IteratorRecordObject(iterated:, next_method:) ->
           push_value_ref(next_method, push_value_ref(iterated, acc))
         MapObject(entries:, keys_rev:, keys_len: _) -> {
           let acc =
@@ -1758,8 +1823,14 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
             push_value_ref(map_key_to_js(k), a)
           })
         }
-        SetObject(data:, ..) ->
-          dict.fold(data, acc, fn(a, _k, v) { push_value_ref(v, a) })
+        SetObject(data:, keys_rev:, keys_len: _) -> {
+          let acc = dict.fold(data, acc, fn(a, _k, v) { push_value_ref(v, a) })
+          // Root tombstoned keys too: a stale MapKey ref must keep its object
+          // alive until compaction, or ref reuse could make has_key collide.
+          list.fold(keys_rev, acc, fn(a, k) {
+            push_value_ref(map_key_to_js(k), a)
+          })
+        }
         WeakMapObject(data:) ->
           dict.fold(data, acc, fn(a, k, v) { push_value_ref(v, [k, ..a]) })
         WeakSetObject(data:) -> dict.fold(data, acc, fn(a, k, _v) { [k, ..a] })
@@ -1780,7 +1851,8 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         | SubjectObject(..)
         | TimerObject(..)
         | DateObject(_)
-        | RegExpObject(..) -> acc
+        | RegExpObject(..)
+        | StringIteratorObject(_) -> acc
       }
     }
     EnvSlot(slots:) -> list.fold(slots, acc, fn(a, v) { push_value_ref(v, a) })

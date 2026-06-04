@@ -11,7 +11,7 @@ import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/realm
-import arc/vm/state.{type Heap, type State, type VmError, State}
+import arc/vm/state.{type Heap, type State, type VmError, RealmCtx, State}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref, JsObject}
 import gleam/dict
 import gleam/option.{type Option, None, Some}
@@ -119,31 +119,30 @@ pub fn run_and_drain_repl(
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
   let this_val = JsObject(env.global_object)
   let locals = interpreter.init_top_level_locals(func, this_val)
-  let state =
-    State(
-      ..interpreter.new_state(
-        func,
-        locals,
-        heap,
-        builtins,
-        env.global_object,
-        env.lexical_globals,
-        env.symbol_descriptions,
-        env.symbol_registry,
-      ),
-      realms: env.realms,
+  let base =
+    interpreter.new_state(
+      func,
+      locals,
+      heap,
+      builtins,
+      env.global_object,
+      env.lexical_globals,
+      env.symbol_descriptions,
+      env.symbol_registry,
     )
+  let run_state =
+    State(..base, ctx: RealmCtx(..base.ctx, realms: env.realms))
   use #(settled, drained) <- result.map(settle(
-    interpreter.execute_inner(state),
+    interpreter.execute_inner(run_state),
     event_loop.drain_jobs,
   ))
   let new_env =
     ReplEnv(
-      global_object: drained.global_object,
-      lexical_globals: drained.lexical_globals,
-      symbol_descriptions: drained.symbol_descriptions,
-      symbol_registry: drained.symbol_registry,
-      realms: drained.realms,
+      global_object: drained.ctx.global_object,
+      lexical_globals: drained.ctx.lexical_globals,
+      symbol_descriptions: drained.ctx.symbol_descriptions,
+      symbol_registry: drained.ctx.symbol_registry,
+      realms: drained.ctx.realms,
     )
   #(completion_of(settled, drained.heap), new_env)
 }
