@@ -31,6 +31,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/limits
+import arc/vm/opcode
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/operators
@@ -115,63 +116,70 @@ pub fn call_function(
   state: State,
   fn_ref: value.Ref,
   env_ref: value.Ref,
+  home_object: Option(value.Ref),
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
-  new_callee_ref: option.Option(Ref),
+  new_target: JsValue,
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   let #(heap, this_val) = bind_this(state, callee_template, this_val)
   let state = State(..state, heap:)
+  let locals =
+    setup_locals(
+      state.heap,
+      env_ref,
+      fn_ref,
+      home_object,
+      callee_template,
+      args,
+      this_val,
+      new_target,
+    )
   case callee_template.is_generator, callee_template.is_async {
     True, True ->
       call_async_generator_function(
         state,
-        fn_ref,
         env_ref,
         callee_template,
         args,
         rest_stack,
-        this_val,
+        locals,
         execute_inner,
       )
     True, False ->
       call_generator_function(
         state,
-        fn_ref,
         env_ref,
         callee_template,
         args,
         rest_stack,
-        this_val,
+        locals,
         execute_inner,
       )
     False, True ->
       call_async_function(
         state,
-        fn_ref,
         env_ref,
         callee_template,
         args,
         rest_stack,
-        this_val,
+        locals,
         execute_inner,
         unwind_to_catch,
       )
     False, False ->
       call_regular_function(
         state,
-        fn_ref,
-        env_ref,
         callee_template,
         args,
         rest_stack,
-        this_val,
+        locals,
         constructor_this,
-        new_callee_ref,
+        new_target,
       )
   }
 }
@@ -179,14 +187,12 @@ pub fn call_function(
 /// Regular (non-generator) function call: save frame, enter callee.
 fn call_regular_function(
   state: State,
-  fn_ref: value.Ref,
-  env_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  this_val: JsValue,
+  locals: tuple_array.TupleArray(JsValue),
   constructor_this: option.Option(JsValue),
-  new_callee_ref: option.Option(Ref),
+  new_target: JsValue,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   use <- bool.lazy_guard(state.call_depth >= limits.max_call_depth, fn() {
     state.throw_range_error(state, "Maximum call stack size exceeded")
@@ -200,19 +206,11 @@ fn call_regular_function(
       pc: state.pc + 1,
       try_stack: state.try_stack,
       constructor_this:,
-      callee_ref: state.callee_ref,
+      new_target: state.new_target,
       call_args: state.call_args,
       eval_env: state.eval_env,
       current_line: state.current_line,
     )
-  let locals =
-    setup_locals(state.heap, env_ref, callee_template, args, this_val)
-  // For arguments.callee: constructors already pass new_callee_ref=Some(ctor_ref),
-  // regular calls pass None -- fall back to fn_ref so arguments.callee works.
-  let effective_callee_ref = case new_callee_ref {
-    Some(_) -> new_callee_ref
-    None -> Some(fn_ref)
-  }
   Ok(
     State(
       ..state,
@@ -225,7 +223,7 @@ fn call_regular_function(
       call_stack: [saved, ..state.call_stack],
       call_depth: state.call_depth + 1,
       try_stack: [],
-      callee_ref: effective_callee_ref,
+      new_target:,
       call_args: args,
       eval_env: None,
     ),
@@ -236,16 +234,13 @@ fn call_regular_function(
 /// GeneratorSlot, create GeneratorObject, return it to caller.
 fn call_generator_function(
   state: State,
-  fn_ref: value.Ref,
   env_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  this_val: JsValue,
+  locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  let locals =
-    setup_locals(state.heap, env_ref, callee_template, args, this_val)
   // Set up an isolated execution state for the generator body
   let gen_state =
     State(
@@ -258,7 +253,7 @@ fn call_generator_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      callee_ref: Some(fn_ref),
+      new_target: JsUndefined,
       call_args: args,
     )
   // Execute until InitialYield (which fires immediately at the start)
@@ -277,7 +272,6 @@ fn call_generator_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_callee_ref: suspended.callee_ref,
           ),
         )
       // Create the generator object with Generator.prototype
@@ -311,7 +305,6 @@ fn call_generator_function(
             saved_locals: tuple_array.from_list([]),
             saved_stack: [],
             saved_try_stack: [],
-            saved_callee_ref: None,
           ),
         )
       let #(h, gen_obj_ref) =
@@ -346,16 +339,13 @@ fn call_generator_function(
 /// execute until the first .next() — that's when the driver loop kicks in.
 fn call_async_generator_function(
   state: State,
-  fn_ref: value.Ref,
   env_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  this_val: JsValue,
+  locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  let locals =
-    setup_locals(state.heap, env_ref, callee_template, args, this_val)
   let gen_state =
     State(
       ..state,
@@ -367,7 +357,7 @@ fn call_async_generator_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      callee_ref: Some(fn_ref),
+      new_target: JsUndefined,
       call_args: args,
     )
   case execute_inner(gen_state) {
@@ -385,7 +375,6 @@ fn call_async_generator_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_callee_ref: suspended.callee_ref,
           ),
         )
       let #(h, gen_obj_ref) =
@@ -421,12 +410,11 @@ fn call_async_generator_function(
 /// If the body hits `await`, save state and set up promise callbacks to resume.
 fn call_async_function(
   state: State,
-  fn_ref: value.Ref,
   env_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  this_val: JsValue,
+  locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn,
   _unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
@@ -443,8 +431,7 @@ fn call_async_function(
       promise_ref,
       data_ref,
     )
-  // Set up locals and execute body eagerly
-  let locals = setup_locals(h, env_ref, callee_template, args, this_val)
+  // Execute body eagerly
   let async_state =
     State(
       ..state,
@@ -457,7 +444,7 @@ fn call_async_function(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      callee_ref: Some(fn_ref),
+      new_target: JsUndefined,
       call_args: args,
     )
   case execute_inner(async_state) {
@@ -477,7 +464,6 @@ fn call_async_function(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: saved_try,
-            saved_callee_ref: suspended.callee_ref,
           ),
         )
       let state =
@@ -618,7 +604,6 @@ pub fn call_native_async_resume(
       saved_locals:,
       saved_stack:,
       saved_try_stack:,
-      saved_callee_ref:,
     )) -> {
       // Restore try-stack
       let restored_try = generators.restore_stacks(saved_try_stack)
@@ -638,7 +623,7 @@ pub fn call_native_async_resume(
           pc: saved_pc,
           call_stack: [],
           try_stack: restored_try,
-          callee_ref: saved_callee_ref,
+          new_target: JsUndefined,
           // arguments was created before first await; post-resume never needs call_args
           call_args: [],
         )
@@ -696,7 +681,6 @@ pub fn call_native_async_resume(
                 saved_locals: suspended.locals,
                 saved_stack: suspended.stack,
                 saved_try_stack: saved_try,
-                saved_callee_ref: suspended.callee_ref,
               ),
             )
           let state =
@@ -731,55 +715,81 @@ pub fn call_native_async_resume(
 }
 
 /// Set up locals for a function call:
-/// [env_values, this?, args(padded to arity), undefined×remaining].
-/// Non-arrows own a `this` slot immediately after captures (this_slot ==
-/// len(env_values)); write the bound value there. Arrows inherit `this` via
-/// env_values (their this_slot, if Some, points at a capture) so skip.
+/// [env_values, lexical_seeds, args(padded to arity), undefined×remaining].
+/// Non-arrows own slots for the lexical pseudo-bindings immediately after
+/// captures, in canonical `all_lexical_refs` order; write the seed values
+/// there. Arrows inherit lexicals via env_values (their lexical slots, if
+/// Some, point at captures) so skip.
+///
+/// Hot path: every JS call goes through here. The tuple is built in one
+/// forward pass via FFI (no list.append/reverse/intermediate accumulator).
 pub fn setup_locals(
   h: Heap,
   env_ref: value.Ref,
+  fn_ref: value.Ref,
+  home_object: Option(value.Ref),
   callee_template: FuncTemplate,
   args: List(JsValue),
   this_val: JsValue,
+  new_target: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
   let env_values = heap.read_env(h, env_ref) |> option.unwrap([])
-  // Append the bound `this` to the env-prefix when the callee owns a slot
-  // for it. The emitter guarantees that slot index == len(captures), so
-  // appending here lands it at the right index without an extra set call.
-  let prefix = case callee_template.this_slot, callee_template.is_arrow {
-    Some(_), False -> list.append(env_values, [this_val])
-    _, _ -> env_values
+  let seeds = case callee_template.is_arrow {
+    True -> []
+    False -> {
+      let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
+      lexical_seeds(callee_template.lexical, this_val, fn_ref, home, new_target)
+    }
   }
-  build_locals(
-    prefix,
+  setup_locals_tuple(
+    env_values,
+    seeds,
     args,
     callee_template.arity,
     callee_template.local_count,
-    [],
+    JsUndefined,
   )
-  |> list.reverse
-  |> tuple_array.from_list
 }
 
-fn build_locals(
+/// FFI: build the locals tuple in one forward pass — see
+/// arc_vm_ffi:setup_locals_tuple/6. Body-recursive on the Erlang side so
+/// the result list is built in order (no reverse) then list_to_tuple'd.
+@external(erlang, "arc_vm_ffi", "setup_locals_tuple")
+fn setup_locals_tuple(
   env: List(JsValue),
+  seeds: List(JsValue),
   args: List(JsValue),
   arity: Int,
-  slots_left: Int,
-  acc: List(JsValue),
+  local_count: Int,
+  undef: JsValue,
+) -> tuple_array.TupleArray(JsValue)
+
+/// Seed values for the owned lexical slots, in canonical `all_lexical_refs`
+/// order ([this, active_func, home_object, new_target]), one per Some entry.
+/// The emitter guarantees slot indices start at len(captures) and run
+/// contiguously in this order. ≤4 cons cells, no filter_map/closure allocation.
+pub fn lexical_seeds(
+  lexical: opcode.LexicalSlots,
+  this_val: JsValue,
+  fn_ref: value.Ref,
+  home_object: JsValue,
+  new_target: JsValue,
 ) -> List(JsValue) {
-  case slots_left, env {
-    0, _ -> acc
-    _, [e, ..rest] ->
-      build_locals(rest, args, arity, slots_left - 1, [e, ..acc])
-    _, [] ->
-      case arity, args {
-        0, _ -> build_locals([], [], 0, slots_left - 1, [JsUndefined, ..acc])
-        _, [a, ..rest] ->
-          build_locals([], rest, arity - 1, slots_left - 1, [a, ..acc])
-        _, [] ->
-          build_locals([], [], arity - 1, slots_left - 1, [JsUndefined, ..acc])
-      }
+  let acc = case lexical.new_target {
+    Some(_) -> [new_target]
+    None -> []
+  }
+  let acc = case lexical.home_object {
+    Some(_) -> [home_object, ..acc]
+    None -> acc
+  }
+  let acc = case lexical.active_func {
+    Some(_) -> [JsObject(fn_ref), ..acc]
+    None -> acc
+  }
+  case lexical.this {
+    Some(_) -> [this_val, ..acc]
+    None -> acc
   }
 }
 
@@ -1308,8 +1318,17 @@ pub fn call_native(
 }
 
 /// Shared tail for `new String/Number/Boolean`: allocate the primitive
-/// wrapper exotic, push it, advance pc.
-fn push_wrapper(state: State, rest_stack: List(JsValue), kind, proto: Ref) {
+/// wrapper exotic, push it, advance pc. Prototype is read from newTarget
+/// (§10.1.13.2) so subclass instances get the derived prototype.
+fn push_wrapper(
+  state: State,
+  rest_stack: List(JsValue),
+  kind,
+  new_target_ref: Ref,
+  intrinsic_proto: Ref,
+) {
+  let proto =
+    prototype_from_new_target_or(state, new_target_ref, intrinsic_proto)
   let #(heap, ref) = common.alloc_wrapper(state.heap, kind, proto)
   Ok(
     State(
@@ -1324,15 +1343,33 @@ fn push_wrapper(state: State, rest_stack: List(JsValue), kind, proto: Ref) {
 /// Full constructor invocation -- handles derived constructors, base constructors,
 /// bound functions, and native constructors. Extracted from the CallConstructor
 /// opcode handler so CallConstructorApply (spread path) can share it.
+/// `new_target_ref` is §10.1.13 newTarget — equals `ctor_ref` for plain
+/// `new X()`, the leaf-derived-ctor for `super()`, or argv[2] for
+/// Reflect.construct.
 pub fn do_construct(
   state: State,
   ctor_ref: Ref,
   args: List(JsValue),
   rest_stack: List(JsValue),
+  new_target_ref: Ref,
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
   dispatch_fn: DispatchNativeFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
+  let new_target = JsObject(new_target_ref)
+  // §7.2.4 IsConstructor gate — runs AFTER ArgumentListEvaluation per
+  // §13.3.7.2 step 5, so `super(sideEffect())` with a non-ctor parent still
+  // evaluates args before throwing (call-proto-not-ctor.js).
+  use <- bool.lazy_guard(
+    !object.is_constructor(state.heap, JsObject(ctor_ref)),
+    fn() {
+      state.throw_type_error(
+        state,
+        object.inspect(JsObject(ctor_ref), state.heap)
+          <> " is not a constructor",
+      )
+    },
+  )
   case heap.read(state.heap, ctor_ref) {
     // Functions lacking [[Construct]] — arrows, generators, async functions,
     // and methods/getters/setters — throw when used with `new` (§7.2.4). The
@@ -1347,13 +1384,10 @@ pub fn do_construct(
           <> " is not a constructor",
       )
     Some(ObjectSlot(
-      kind: FunctionObject(func_template:, env: env_ref, ..),
-      properties:,
+      kind: FunctionObject(func_template:, env: env_ref, home_object:),
       ..,
-    )) -> {
-      // Check if this is a derived constructor
-      let is_derived = func_template.is_derived_constructor
-      case is_derived {
+    )) ->
+      case func_template.is_derived_constructor {
         True ->
           // Derived constructor: don't allocate object yet.
           // this = JsUninitialized (TDZ until super() is called).
@@ -1362,21 +1396,20 @@ pub fn do_construct(
             state,
             ctor_ref,
             env_ref,
+            home_object,
             func_template,
             args,
             rest_stack,
             JsUninitialized,
             None,
-            Some(ctor_ref),
+            new_target,
             execute_inner,
             unwind_to_catch,
           )
         False -> {
-          // Base constructor: allocate the new object
-          let proto = case dict.get(properties, Named("prototype")) {
-            Ok(DataProperty(value: JsObject(proto_ref), ..)) -> Some(proto_ref)
-            _ -> Some(state.builtins.object.prototype)
-          }
+          // Base constructor: §10.1.13.1 OrdinaryCreateFromConstructor —
+          // proto comes from newTarget.prototype, NOT ctor.prototype.
+          let proto = prototype_from_new_target(state, new_target_ref)
           let #(heap, new_obj_ref) =
             heap.alloc(
               state.heap,
@@ -1394,22 +1427,21 @@ pub fn do_construct(
             State(..state, heap:),
             ctor_ref,
             env_ref,
+            home_object,
             func_template,
             args,
             rest_stack,
             new_obj,
             Some(new_obj),
-            None,
+            new_target,
             execute_inner,
             unwind_to_catch,
           )
         }
       }
-    }
-    // Bound function used as constructor (§10.4.1.2): prepend the bound args
-    // and recurse on the target through the same construct path, so the
-    // target's [[Construct]] — derived classes, primitive wrappers, and
-    // chained bound functions — is handled uniformly by do_construct itself.
+    // Bound function used as constructor (§10.4.1.2): construct
+    // [[BoundTargetFunction]] with [[BoundArguments]] prepended; if
+    // SameValue(F, newTarget) then newTarget ← target.
     Some(ObjectSlot(
       kind: NativeFunction(
         value.Call(value.BoundFunction(target:, bound_args:, ..)),
@@ -1417,12 +1449,16 @@ pub fn do_construct(
       ),
       ..,
     )) -> {
-      let final_args = list.append(bound_args, args)
+      let nt = case new_target_ref == ctor_ref {
+        True -> target
+        False -> new_target_ref
+      }
       do_construct(
         state,
         target,
-        final_args,
+        list.append(bound_args, args),
         rest_stack,
+        nt,
         execute_inner,
         unwind_to_catch,
         dispatch_fn,
@@ -1432,7 +1468,6 @@ pub fn do_construct(
     // String exotic wrapper with [[StringData]] = s. Unlike String(value),
     // the Symbol→descriptive-string shortcut does NOT apply when NewTarget
     // is defined, so a Symbol arg flows into ToString and throws.
-    // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
       kind: NativeFunction(value.Call(value.StringConstructor), ..),
       ..,
@@ -1448,6 +1483,7 @@ pub fn do_construct(
             state,
             rest_stack,
             value.StringObject(s),
+            new_target_ref,
             state.builtins.string.prototype,
           )
       }
@@ -1455,7 +1491,6 @@ pub fn do_construct(
     // new Number(value) — §21.1.1.1: prim = ToNumeric(value); if prim is a
     // BigInt let n = 𝔽(ℝ(prim)), else n = prim; then return a wrapper object
     // with [[NumberData]] = n.
-    // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
       kind: NativeFunction(
         value.Dispatch(value.NumberNative(value.NumberConstructor)),
@@ -1471,12 +1506,12 @@ pub fn do_construct(
         state,
         rest_stack,
         value.NumberObject(n),
+        new_target_ref,
         state.builtins.number.prototype,
       )
     }
     // new Boolean(value) — §20.3.1.1: b = ToBoolean(value), then return a
     // wrapper object with [[BooleanData]] = b.
-    // TODO(Deviation): ignores NewTarget for prototype (no subclass support).
     Some(ObjectSlot(
       kind: NativeFunction(
         value.Dispatch(value.BooleanNative(value.BooleanConstructor)),
@@ -1492,6 +1527,7 @@ pub fn do_construct(
         state,
         rest_stack,
         value.BooleanObject(b),
+        new_target_ref,
         state.builtins.boolean.prototype,
       )
     }
@@ -1503,9 +1539,15 @@ pub fn do_construct(
     )) -> state.throw_type_error(state, "Symbol is not a constructor")
     Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
       case object.is_constructor(state.heap, JsObject(ctor_ref)) {
-        True ->
-          call_native(
-            state,
+        True -> {
+          // Thread newTarget for the native body and re-prototype the result so
+          // subclassing builtins (`class M extends Map {}`) gets the derived
+          // prototype. Only re-prototype when newTarget actually has its own
+          // .prototype data property — natives that should honour a custom
+          // newTarget themselves (or whose newTarget.prototype is an accessor)
+          // are left untouched so the native's own choice stands.
+          use new_state <- result.try(call_native(
+            State(..state, new_target:),
             native,
             args,
             rest_stack,
@@ -1513,7 +1555,19 @@ pub fn do_construct(
             execute_inner,
             unwind_to_catch,
             dispatch_fn,
-          )
+          ))
+          let new_state = State(..new_state, new_target: state.new_target)
+          let derived_proto = own_data_prototype(new_state.heap, new_target_ref)
+          case new_target_ref == ctor_ref, derived_proto, new_state.stack {
+            // Plain `new Builtin()` — native already chose the right prototype.
+            True, _, _ -> Ok(new_state)
+            False, Some(proto), [JsObject(result_ref), ..] -> {
+              let heap = set_prototype(new_state.heap, result_ref, Some(proto))
+              Ok(State(..new_state, heap:))
+            }
+            False, _, _ -> Ok(new_state)
+          }
+        }
         False ->
           state.throw_type_error(
             state,
@@ -1527,6 +1581,54 @@ pub fn do_construct(
         object.inspect(JsObject(ctor_ref), state.heap)
           <> " is not a constructor",
       )
+  }
+}
+
+/// §10.1.13.2 GetPrototypeFromConstructor: read newTarget.prototype, fall
+/// back to %Object.prototype% if not an object.
+fn prototype_from_new_target(state: State, new_target_ref: Ref) -> Option(Ref) {
+  Some(prototype_from_new_target_or(
+    state,
+    new_target_ref,
+    state.builtins.object.prototype,
+  ))
+}
+
+/// Read newTarget's own `.prototype` only when it's a DataProperty pointing
+/// at an object — accessor prototypes and missing slots return None so the
+/// caller can leave the native ctor's own prototype choice in place.
+fn own_data_prototype(h: Heap, new_target_ref: Ref) -> Option(Ref) {
+  case heap.read(h, new_target_ref) {
+    Some(ObjectSlot(properties:, ..)) ->
+      case dict.get(properties, Named("prototype")) {
+        Ok(DataProperty(value: JsObject(proto_ref), ..)) -> Some(proto_ref)
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// §10.1.13.2 GetPrototypeFromConstructor with explicit intrinsic fallback.
+fn prototype_from_new_target_or(
+  state: State,
+  new_target_ref: Ref,
+  intrinsic_proto: Ref,
+) -> Ref {
+  case heap.read(state.heap, new_target_ref) {
+    Some(ObjectSlot(properties:, ..)) ->
+      case dict.get(properties, Named("prototype")) {
+        Ok(DataProperty(value: JsObject(proto_ref), ..)) -> proto_ref
+        _ -> intrinsic_proto
+      }
+    _ -> intrinsic_proto
+  }
+}
+
+fn set_prototype(h: Heap, ref: Ref, proto: Option(Ref)) -> Heap {
+  case heap.read(h, ref) {
+    Some(ObjectSlot(..) as slot) ->
+      heap.write(h, ref, ObjectSlot(..slot, prototype: proto))
+    _ -> h
   }
 }
 
@@ -1545,19 +1647,20 @@ pub fn call_value(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: FunctionObject(func_template:, env: env_ref, ..),
+          kind: FunctionObject(func_template:, env: env_ref, home_object:),
           ..,
         )) ->
           call_function(
             state,
             ref,
             env_ref,
+            home_object,
             func_template,
             args,
             state.stack,
             this_val,
             None,
-            None,
+            JsUndefined,
             execute_inner,
             unwind_to_catch,
           )

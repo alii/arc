@@ -326,7 +326,7 @@ fn string_last_index_of(
     helpers.first_arg_or_undefined(args),
   )
   // Step 7: len = length of S
-  let len = string.length(s)
+  let len = object.string_length(s)
   // Steps 4-6, 8: ToNumber(position), handle NaN => len, clamp
   let from = case args {
     [_, pos_val, ..] ->
@@ -442,7 +442,7 @@ fn string_ends_with(
     helpers.first_arg_or_undefined(args),
   )
   // Step 6: len = length of S
-  let len = string.length(s)
+  let len = object.string_length(s)
   // Steps 7-8: endPosition handling, clamp to [0, len]
   let end_pos = case args {
     // Step 7: undefined => len
@@ -482,7 +482,7 @@ fn string_slice(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 3: len = length of S
-  let len = string.length(s)
+  let len = object.string_length(s)
   // Steps 4-7: ToIntegerOrInfinity(start), resolve negatives
   let start =
     helpers.first_arg_or_undefined(args)
@@ -538,7 +538,7 @@ fn string_substring(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 3: len = length of S
-  let len = string.length(s)
+  let len = object.string_length(s)
   // Step 4: ToIntegerOrInfinity(start)
   let raw_start = helpers.get_int_arg(args, 0, 0)
   // Step 5: end handling
@@ -1147,7 +1147,7 @@ fn string_at(
   // Step 4: ToIntegerOrInfinity(index)
   let idx = helpers.get_int_arg(args, 0, 0)
   // Step 3: len = length of S
-  let len = string.length(s)
+  let len = object.string_length(s)
   // Steps 5-6: resolve relative index
   let actual_idx = case idx < 0 {
     True -> len + idx
@@ -1530,7 +1530,7 @@ fn string_substr(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use s, state <- with_this_string(this, state)
-  let size = string.length(s)
+  let size = object.string_length(s)
   let start = case helpers.to_number_int(helpers.first_arg_or_undefined(args)) {
     Some(n) if n < 0 -> int.max(size + n, 0)
     Some(n) -> n

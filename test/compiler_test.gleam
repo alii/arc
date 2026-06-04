@@ -180,6 +180,15 @@ fn assert_thrown(source: String) -> Nil {
   }
 }
 
+/// Assert that source fails to parse (early SyntaxError).
+fn assert_parse_error(source: String) -> Nil {
+  case parser.parse(source, parser.Script) {
+    Error(_parse_err) -> Nil
+    Ok(_ast) ->
+      panic as { "expected parse error, parsed successfully: " <> source }
+  }
+}
+
 // ============================================================================
 // Literal tests
 // ============================================================================
@@ -1302,6 +1311,48 @@ pub fn closure_param_mutation_test() -> Nil {
   assert_normal_number(
     "function f(x) { var g = function() { return x; }; x = 99; return g(); } f(1)",
     99.0,
+  )
+}
+
+// Regressions for the build_scope_dict / scope.gleam slot-allocator
+// divergence — second same-named block-let must get the slot scope.gleam
+// allocated, not the first.
+
+pub fn closure_sibling_block_let_shadow_test() -> Nil {
+  // Was returning 1: build_scope_dict mapped both `x` to the first slot.
+  assert_normal_number(
+    "function f(){ {let x=1} {let x=2; return ()=>x} } f()()",
+    2.0,
+  )
+}
+
+pub fn closure_sibling_catch_shadow_test() -> Nil {
+  // Was [1,1]: both catch-param `e` mapped to the first slot.
+  assert_normal(
+    "(function(){ try{throw 1}catch(e){var g=()=>e} try{throw 2}catch(e){var h=()=>e} return g()+','+h() })()",
+    JsString("1,2"),
+  )
+}
+
+pub fn closure_closed_block_no_leak_test() -> Nil {
+  // Was leaking 1: closure created after block closed must NOT see `x`.
+  assert_thrown("function f(){ {let x=1} return ()=>x } f()()")
+}
+
+pub fn closure_block_shadow_offbyone_cascade_test() -> Nil {
+  // Was InternalError "GetBoxed: local is not a box ref": reused slots
+  // pushed `w`'s capture index past the boxed range.
+  assert_normal_number(
+    "function f(){ {let x=1} {let x=2} {let w=7; return ()=>w} } f()()",
+    7.0,
+  )
+}
+
+pub fn closure_nested_block_shadow_test() -> Nil {
+  // Innermost shadow wins through the closure.
+  assert_normal_number(
+    "function f(){ let a=1; {let a=2; {let a=3; return ()=>a}} } f()()",
+    3.0,
   )
 }
 
@@ -2788,6 +2839,91 @@ pub fn class_static_field_derived_test() -> Nil {
     "class A { static x = 1 } class C extends A { static z = 9 } C.z",
     9.0,
   )
+}
+
+pub fn class_static_field_this_is_ctor_test() -> Nil {
+  // §15.7.14: static field initializers run with `this` = the constructor.
+  assert_normal("class C { static x = this }; C.x === C", value.JsBool(True))
+  assert_normal(
+    "class A {}; class B extends A { static x = this }; B.x === B",
+    value.JsBool(True),
+  )
+}
+
+pub fn class_static_field_super_test() -> Nil {
+  // §15.7.14: static field initializer [[HomeObject]] = ctor, so super.x reads
+  // the parent constructor's own property.
+  assert_normal_number(
+    "class A { static x = 1 }; class B extends A { static y = super.x }; B.y",
+    1.0,
+  )
+}
+
+pub fn class_static_block_test() -> Nil {
+  // §15.7.1 ClassStaticBlock: runs at class-definition time with `this` = ctor.
+  assert_normal_number("class C { static { this.y = 7 } }; C.y", 7.0)
+  assert_normal_number("class C { static { C.z = 8 } }; C.z", 8.0)
+}
+
+pub fn class_static_elements_source_order_test() -> Nil {
+  // §15.7.14 step 31: static fields and static blocks interleave in textual
+  // order.
+  assert_normal(
+    "var s=''; class C { static { s+='a' } static x = (s+='b',1); static { s+='c' } }; s",
+    value.JsString("abc"),
+  )
+}
+
+pub fn class_static_block_var_isolated_test() -> Nil {
+  // Each static block has its own var environment (§15.7.1).
+  assert_normal_number(
+    "var f; class C { static { var x=1; f=()=>x } static { var x=2 } }; f()",
+    1.0,
+  )
+}
+
+pub fn class_static_block_early_errors_test() -> Nil {
+  // §15.7.1 ClassStaticBlockBody early errors: [~Yield, +Await, ~Return],
+  // ContainsAwait/ContainsArguments must be false, function-like boundary
+  // for break/continue/labels.
+  assert_parse_error("class C { static { var await } }")
+  assert_parse_error("class C { static { let await } }")
+  assert_parse_error("class C { static { const await = 0 } }")
+  assert_parse_error("class C { static { function await(){} } }")
+  assert_parse_error("class C { static { class await {} } }")
+  assert_parse_error("class C { static { (class await {}) } }")
+  assert_parse_error("class C { static { try{}catch(await){} } }")
+  assert_parse_error("class C { static { (await => 0) } }")
+  assert_parse_error("class C { static { ({await}) } }")
+  assert_parse_error("class C { static { await: 0 } }")
+  assert_parse_error("async function f(){class C{static{await 0}}}")
+  assert_parse_error("class C { static { arguments } }")
+  assert_parse_error("class C { static { (class { [arguments](){} }) } }")
+  assert_parse_error("function f(){class C{static{return}}}")
+  assert_parse_error("function*g(){class C{static{yield}}}")
+  assert_parse_error("l: while(0){class C{static{break}}}")
+  assert_parse_error("l: while(0){class C{static{continue}}}")
+  assert_parse_error("l: while(0){class C{static{continue l}}}")
+}
+
+pub fn class_static_block_nested_function_boundary_test() -> Nil {
+  // §15.7.1: the await/arguments/return restrictions stop at function
+  // boundaries — nested functions get their own context.
+  assert_normal(
+    "class C{static{(function f(){return arguments[0]})(1)}}; 1",
+    JsNumber(Finite(1.0)),
+  )
+  assert_normal(
+    "class C{static{(function await(await){})}}; 1",
+    JsNumber(Finite(1.0)),
+  )
+  assert_normal("class C{static{({await:0})}}; 1", JsNumber(Finite(1.0)))
+  assert_normal(
+    "class C{static{l:for(;;)break l}}; 1",
+    JsNumber(Finite(1.0)),
+  )
+  // BindingIdentifier "await" stops at ANY function boundary (incl. arrows).
+  assert_normal("class C{static{(()=>{var await})}}; 1", JsNumber(Finite(1.0)))
 }
 
 pub fn class_private_in_self_test() -> Nil {
@@ -5889,6 +6025,217 @@ pub fn class_extends_return_override_explicit_ctor_field_test() -> Nil {
      var p = {};
      new C(p);
      p.x",
+    1.0,
+  )
+}
+
+// §13.3.7.1 step 12 InitializeInstanceElements with super() in non-statement
+// position. The synthetic field-init function (active_func.[[Fields]]) is
+// called after every super() emit, regardless of where the call appears.
+pub fn class_extends_field_after_let_super_test() -> Nil {
+  // `let r = super()` is non-statement-position.
+  assert_normal_number(
+    "class B {}
+     class C extends B {
+       x = 1;
+       constructor() { let r = super(); if (this.x !== 1) throw 0 }
+     }
+     new C().x",
+    1.0,
+  )
+}
+
+pub fn class_extends_field_after_comma_super_test() -> Nil {
+  // super() inside a SequenceExpression — `return super(), this`.
+  assert_normal_number(
+    "class B {}
+     class C extends B {
+       x = 1;
+       constructor() { return super(), this }
+     }
+     new C().x",
+    1.0,
+  )
+}
+
+pub fn class_extends_field_after_conditional_super_test() -> Nil {
+  // super() in only one branch of an if.
+  assert_normal_number(
+    "class B {}
+     class C extends B {
+       x = 1;
+       constructor(flag) { if (flag) super(); else super() }
+     }
+     new C(true).x + new C(false).x",
+    2.0,
+  )
+}
+
+pub fn class_extends_field_after_arrow_super_test() -> Nil {
+  // `(() => super())()` — arrow inherits FieldInitMode from the ctor's
+  // emitter, and reads active_func.[[Fields]] via the captured RefActiveFunc
+  // lexical slot.
+  assert_normal_number(
+    "class B {}
+     class C extends B {
+       x = 1;
+       constructor() { (() => super())(); if (this.x !== 1) throw 0 }
+     }
+     new C().x",
+    1.0,
+  )
+}
+
+pub fn class_field_init_new_target_undefined_test() -> Nil {
+  // §15.7.14: field initializers run as a synthetic method-like function
+  // [[Call]]ed with this = the instance, so new.target === undefined inside —
+  // even when reached via an arrow (which inherits the init fn's RefNewTarget
+  // slot, not the constructor's). The direct-eval variant of this
+  // (arrow-body-direct-eval-err-contains-newtarget.js) depends on P11
+  // (eval context inheritance) and is covered by test262.
+  assert_normal_number(
+    "let inField, inCtor;
+     class C {
+       x = (() => new.target)();
+       constructor() { inCtor = new.target }
+     }
+     inField = new C().x;
+     (inField === undefined ? 1 : 0) + (inCtor === C ? 10 : 0)",
+    11.0,
+  )
+}
+
+// ---- LexicalRef family: this / active_func (super) / new.target ----
+
+pub fn new_target_basic_test() -> Nil {
+  // §13.3.12: new.target is the called constructor under [[Construct]],
+  // undefined under [[Call]].
+  assert_normal_number(
+    "let r;
+     function f() { r = new.target }
+     new f(); let a = r === f ? 1 : 0;
+     f(); let b = r === undefined ? 10 : 0;
+     a + b",
+    11.0,
+  )
+}
+
+pub fn new_target_arrow_test() -> Nil {
+  // Arrows inherit lexical new.target from the enclosing non-arrow.
+  assert_normal_number(
+    "function f() { return (() => new.target)() }
+     (new f() === f ? 1 : 0) + (f() === undefined ? 10 : 0)",
+    11.0,
+  )
+}
+
+pub fn new_target_derived_chain_test() -> Nil {
+  // new.target stays the leaf constructor through the super() chain.
+  assert_normal_number(
+    "let hits = 0;
+     class B { constructor() { if (new.target === D) hits++ } }
+     class C extends B { constructor() { super(); if (new.target === D) hits++ } }
+     class D extends C { constructor() { super(); if (new.target === D) hits++ } }
+     new D(); hits",
+    3.0,
+  )
+}
+
+pub fn arrow_super_call_test() -> Nil {
+  // The headline bug: super() inside an arrow inside a derived ctor.
+  assert_normal_number(
+    "class B { constructor() { this.x = 1 } }
+     class D extends B { constructor() { (() => super())(); this.x += 1 } }
+     new D().x",
+    2.0,
+  )
+}
+
+pub fn nested_arrow_super_call_test() -> Nil {
+  assert_normal_number(
+    "class B { constructor() { this.v = 7 } }
+     class D extends B { constructor() { (() => (() => super())())() } }
+     new D().v",
+    7.0,
+  )
+}
+
+pub fn super_prop_method_test() -> Nil {
+  assert_normal_number(
+    "class B { m() { return 1 } }
+     class D extends B { m() { return super.m() + 1 } }
+     new D().m()",
+    2.0,
+  )
+}
+
+pub fn super_prop_arrow_test() -> Nil {
+  assert_normal_number(
+    "class B { m() { return 5 } }
+     class D extends B { m() { return (() => super.m())() + 1 } }
+     new D().m()",
+    6.0,
+  )
+}
+
+pub fn super_prop_receiver_test() -> Nil {
+  // super.prop reads off the prototype but with `this` as receiver.
+  assert_normal_number(
+    "class B { get v() { return this.x } }
+     class D extends B { constructor() { super(); this.x = 9 } read() { return super.v } }
+     new D().read()",
+    9.0,
+  )
+}
+
+pub fn super_prop_put_receiver_test() -> Nil {
+  // super.prop = v writes to the receiver (`this`), not to the prototype.
+  assert_normal_number(
+    "class B {}
+     class D extends B { m() { super.x = 4; return this.x } }
+     let d = new D(); let r = d.m();
+     r + (B.prototype.x === undefined ? 10 : 0)",
+    14.0,
+  )
+}
+
+pub fn arguments_arrow_regression_test() -> Nil {
+  // Regression: arrows still capture `arguments` via the ordinary closure path.
+  assert_normal_number(
+    "function f() { return (() => arguments[0])() }
+     f(42)",
+    42.0,
+  )
+}
+
+pub fn reflect_construct_newtarget_test() -> Nil {
+  // §28.1.2 Reflect.construct: 3rd arg overrides newTarget → instance proto.
+  assert_normal_number(
+    "function A() {}
+     function B() {}
+     let o = Reflect.construct(A, [], B);
+     Object.getPrototypeOf(o) === B.prototype ? 1 : 0",
+    1.0,
+  )
+}
+
+pub fn direct_eval_this_lexical_test() -> Nil {
+  // Direct eval threads all lexical slots; `this` is the first/simplest case.
+  assert_normal_number(
+    "class C { m() { return eval('this.x') } }
+     let c = new C(); c.x = 3; c.m()",
+    3.0,
+  )
+}
+
+// Pending: direct-eval `new.target`/`super` inheritance is wired through
+// compile_eval_direct + run_direct_eval, but the parser still hard-rejects
+// these forms at script top level before SyntaxPerms is consulted. Needs
+// emit_eval_body to thread perms into the parse/emit entry (research §V.3).
+pub fn direct_eval_new_target_pending() -> Nil {
+  assert_normal_number(
+    "function f() { return eval('new.target') }
+     new f() === f ? 1 : 0",
     1.0,
   )
 }

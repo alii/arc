@@ -10,15 +10,18 @@
 /// mutations are visible in both directions (true JS closure semantics).
 import arc/compiler/emit.{
   type BindingKind, type EmitterOp, BlockScope, CaptureBinding, CatchBinding,
-  ConstBinding, DeclareThis, DeclareVar, EnterScope, FunctionScope, Ir,
+  ConstBinding, DeclareLexical, DeclareVar, EnterScope, FunctionScope, Ir,
   LeaveScope, LetBinding, ParamBinding, VarBinding,
 }
 import arc/vm/opcode.{
-  type IrOp, ConstAssignment, IrBoxLocal, IrDeclareEvalVar, IrDeclareGlobalVar,
-  IrGetBoxed, IrGetEvalVar, IrGetGlobal, IrGetLocal, IrGetThis, IrPushConst,
-  IrPutBoxed, IrPutEvalVar, IrPutGlobal, IrPutLocal, IrScopeGetVar,
-  IrScopeInitVar, IrScopePutVar, IrScopeReboxVar, IrScopeTypeofVar, IrSetThis,
-  IrThrowError, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal,
+  type IrOp, type LexicalRef, type LexicalRefs, type LexicalSlots, IrBoxLocal,
+  IrDeclareEvalVar, IrDeclareGlobalVar, IrGetBoxed, IrGetEvalVar, IrGetGlobal,
+  IrGetLexical, IrGetLocal, IrMakeClosure, IrPushConst, IrPutBoxed,
+  IrPutBoxedCheckInit, IrPutEvalVar, IrPutGlobal, IrPutLocal,
+  IrPutLocalCheckInit, IrScopeGetVar, IrScopeInitVar, IrScopePutVar,
+  IrScopeReboxVar, IrScopeTypeofVar, IrSetThis, IrThrowConstAssign, IrTypeOf,
+  IrTypeofEvalVar, IrTypeofGlobal, LexicalSlots, RefActiveFunc, RefHomeObject,
+  RefNewTarget, RefThis,
 }
 import arc/vm/value.{type JsValue, JsUndefined, JsUninitialized}
 import gleam/bool
@@ -70,13 +73,22 @@ type Resolver {
     /// linker owns the cell so it can be shared with importers (incl. cyclic).
     linker_seeded: Set(String),
     fallthrough: GlobalFallthrough,
-    /// Binding for the lexical-`this` slot. Some when DeclareThis has been
-    /// processed (owned slot) or when this body inherits `this` as a capture
-    /// (arrows, direct-eval); None until then.
-    this_binding: Option(Binding),
-    /// True when an inner closure (or direct eval in this subtree) captures
-    /// `this` — DeclareThis will box the slot so writes (super()) propagate.
-    this_is_captured: Bool,
+    /// Bindings for the lexical pseudo-slots (this/active_func/new.target).
+    /// Populated by DeclareLexical (owned slot) or pre-seeded as captures
+    /// (arrows, direct-eval).
+    lexical_bindings: Dict(LexicalRef, Binding),
+    /// Lexical refs that an inner closure (or direct eval in this subtree)
+    /// captures — DeclareLexical will box those slots so writes (super())
+    /// and reads through arrows alias the same cell.
+    lexical_captured: LexicalRefs,
+    /// Snapshot of name→slot visible at each IrMakeClosure(idx). The single
+    /// source of truth for child capture indices — replaces compiler.gleam's
+    /// build_scope_dict, which diverged on block-scoped shadows.
+    closure_scopes: Dict(Int, Dict(String, Int)),
+    /// Every name ever allocated a slot in this body (cumulative, across
+    /// closed block scopes). Used for module-export lookup and direct-eval
+    /// local_names.
+    names: Dict(String, Int),
   )
 }
 
@@ -87,9 +99,13 @@ pub type Resolved {
     local_count: Int,
     constants: List(JsValue),
     constants_map: Dict(JsValue, Int),
-    /// Local slot index where lexical `this` lives in this body — owned
-    /// (DeclareThis) or inherited as a capture. None if `this` is unreferenced.
-    this_slot: Option(Int),
+    /// Local-slot indices for the lexical pseudo-bindings — owned
+    /// (DeclareLexical) or inherited as captures.
+    lexical: LexicalSlots,
+    /// name→slot visible at each `IrMakeClosure(i)` — keyed by func_index.
+    closure_scopes: Dict(Int, Dict(String, Int)),
+    /// All names ever allocated a slot in this body.
+    names: Dict(String, Int),
   )
 }
 
@@ -103,7 +119,7 @@ pub fn resolve(
   constants: List(JsValue),
   constants_map: Dict(JsValue, Int),
   captured_vars: Set(String),
-  this_is_captured: Bool,
+  lexical_captured: LexicalRefs,
   fallthrough: GlobalFallthrough,
 ) -> Resolved {
   resolve_with_captures(
@@ -111,28 +127,28 @@ pub fn resolve(
     constants,
     constants_map,
     [],
-    None,
+    dict.new(),
     captured_vars,
     set.new(),
-    this_is_captured,
+    lexical_captured,
     fallthrough,
   )
 }
 
 /// Resolve scopes with pre-populated capture bindings.
-/// Named captures occupy local slots 0..len-1. When `this_capture_slot` is
-/// Some(idx) (arrows, direct-eval), `this` is a boxed CaptureBinding at idx
-/// — caller must size env_descriptors/seed-locals accordingly. When None,
-/// `this` comes from a `DeclareThis` in `code` (or is unreferenced).
+/// Named captures occupy local slots 0..len-1. `lexical_captures` maps each
+/// inherited lexical binding (arrows, direct-eval) to its capture-slot index;
+/// caller must size env_descriptors/seed-locals to match. Absent refs come
+/// from a `DeclareLexical` in `code` (or are unreferenced).
 pub fn resolve_with_captures(
   code: List(EmitterOp),
   constants: List(JsValue),
   constants_map: Dict(JsValue, Int),
   captures: List(String),
-  this_capture_slot: Option(Int),
+  lexical_captures: Dict(LexicalRef, Int),
   captured_vars: Set(String),
   linker_seeded: Set(String),
-  this_is_captured: Bool,
+  lexical_captured: LexicalRefs,
   fallthrough: GlobalFallthrough,
 ) -> Resolved {
   let capture_bindings =
@@ -140,17 +156,22 @@ pub fn resolve_with_captures(
       #(name, Binding(index: idx, kind: CaptureBinding, is_boxed: True))
     })
     |> dict.from_list()
-  let this_binding =
-    option.map(this_capture_slot, Binding(_, CaptureBinding, True))
-  // Captures occupy slots 0..N-1 (named + this-capture if present).
-  let capture_count = case this_capture_slot {
-    Some(idx) -> int.max(list.length(captures), idx + 1)
-    None -> list.length(captures)
+  let lexical_bindings =
+    dict.map_values(lexical_captures, fn(_ref, idx) {
+      Binding(idx, CaptureBinding, True)
+    })
+  // Captures occupy slots 0..N-1 (named + lexical captures).
+  let max_lex_idx =
+    dict.fold(lexical_captures, list.length(captures) - 1, fn(m, _r, i) {
+      int.max(m, i)
+    })
+  let capture_count = max_lex_idx + 1
+  let scopes = case capture_count {
+    0 -> []
+    _ -> [Scope(kind: FunctionScope, bindings: capture_bindings)]
   }
-  let scopes = case captures, this_capture_slot {
-    [], None -> []
-    _, _ -> [Scope(kind: FunctionScope, bindings: capture_bindings)]
-  }
+  let names =
+    list.index_map(captures, fn(name, idx) { #(name, idx) }) |> dict.from_list
   let r =
     Resolver(
       scopes:,
@@ -163,8 +184,10 @@ pub fn resolve_with_captures(
       captured_vars:,
       linker_seeded:,
       fallthrough:,
-      this_binding:,
-      this_is_captured:,
+      lexical_bindings:,
+      lexical_captured:,
+      closure_scopes: dict.new(),
+      names:,
     )
   let r = resolve_ops(r, code)
   Resolved(
@@ -172,7 +195,23 @@ pub fn resolve_with_captures(
     local_count: r.max_locals,
     constants: r.constants,
     constants_map: r.constants_map,
-    this_slot: option.map(r.this_binding, fn(b) { b.index }),
+    lexical: lexical_slots_from(r.lexical_bindings),
+    closure_scopes: r.closure_scopes,
+    names: r.names,
+  )
+}
+
+fn lexical_slots_from(bindings: Dict(LexicalRef, Binding)) -> LexicalSlots {
+  let idx = fn(ref) {
+    dict.get(bindings, ref)
+    |> option.from_result
+    |> option.map(fn(b) { b.index })
+  }
+  LexicalSlots(
+    this: idx(RefThis),
+    active_func: idx(RefActiveFunc),
+    home_object: idx(RefHomeObject),
+    new_target: idx(RefNewTarget),
   )
 }
 
@@ -204,21 +243,21 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       }
     }
 
-    DeclareThis -> {
-      // Allocate the lexical-`this` slot. Non-arrows emit this first after
-      // EnterScope(FunctionScope) so index == len(captures), matching what
-      // setup_locals expects. Box if any inner closure captures `this` (so
-      // arrow→super() write-backs alias the same cell).
-      use <- on_some(r.this_binding, r)
+    DeclareLexical(ref) -> {
+      // Allocate an owned slot for this lexical binding. Non-arrows emit these
+      // first after EnterScope(FunctionScope) so indices start at len(captures),
+      // matching what setup_locals expects. Box if any inner closure captures
+      // this ref (so arrow→super() write-backs alias the same cell).
+      use <- on_some(dict.get(r.lexical_bindings, ref) |> option.from_result, r)
       let index = r.next_local
-      let boxed = r.this_is_captured
+      let boxed = opcode.lexical_refs_get(r.lexical_captured, ref)
       let binding = Binding(index:, kind: ParamBinding, is_boxed: boxed)
       let r =
         Resolver(
           ..r,
           next_local: index + 1,
           max_locals: int.max(r.max_locals, index + 1),
-          this_binding: Some(binding),
+          lexical_bindings: dict.insert(r.lexical_bindings, ref, binding),
         )
       case boxed {
         True -> emit(r, IrBoxLocal(index))
@@ -226,25 +265,43 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       }
     }
 
-    Ir(IrGetThis) ->
-      case r.this_binding {
-        Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrGetBoxed(index))
-        Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrGetLocal(index))
-        // Unreachable for well-formed input: every body that references `this`
-        // either DeclareThis'd or got a this_capture_slot. Mirror
-        // read_this_local's defensive JsUndefined.
-        None -> {
+    Ir(IrGetLexical(ref)) ->
+      case dict.get(r.lexical_bindings, ref) {
+        Ok(Binding(index:, is_boxed: True, ..)) -> emit(r, IrGetBoxed(index))
+        Ok(Binding(index:, is_boxed: False, ..)) -> emit(r, IrGetLocal(index))
+        // Unreachable for well-formed input: every body that references a
+        // lexical binding either DeclareLexical'd or got a capture slot.
+        // Mirror read_lexical_local's defensive JsUndefined.
+        Error(Nil) -> {
           let #(r, idx) = ensure_constant(r, JsUndefined)
           emit(r, IrPushConst(idx))
         }
       }
 
+    // §9.1.1.3.1 BindThisValue — only emitted in derived ctors after super(),
+    // where the slot was seeded JsUninitialized. CheckInit throws ReferenceError
+    // on double-super().
     Ir(IrSetThis) ->
-      case r.this_binding {
-        Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrPutBoxed(index))
-        Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrPutLocal(index))
-        None -> r
+      case dict.get(r.lexical_bindings, RefThis) {
+        Ok(Binding(index:, is_boxed: True, ..)) ->
+          emit(r, IrPutBoxedCheckInit(index))
+        Ok(Binding(index:, is_boxed: False, ..)) ->
+          emit(r, IrPutLocalCheckInit(index))
+        Error(Nil) -> r
       }
+
+    Ir(IrMakeClosure(idx) as op) ->
+      // Snapshot name→slot visible RIGHT NOW so compile_child captures the
+      // correct slot for block-scoped shadows. children[i] ⟷ IrMakeClosure(i).
+      Resolver(
+        ..r,
+        closure_scopes: dict.insert(
+          r.closure_scopes,
+          idx,
+          flatten_scopes(r.scopes),
+        ),
+      )
+      |> emit(op)
 
     DeclareVar(name, kind) -> {
       // If already declared in the target scope, skip entirely (no new slot,
@@ -263,11 +320,14 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       let linker_seeded = set.contains(r.linker_seeded, name)
       let boxed = linker_seeded || set.contains(r.captured_vars, name)
       let binding = Binding(index:, kind:, is_boxed: boxed)
-      let new_max = case index + 1 > r.max_locals {
-        True -> index + 1
-        False -> r.max_locals
-      }
-      let r = Resolver(..r, next_local: index + 1, max_locals: new_max)
+      let new_max = int.max(r.max_locals, index + 1)
+      let r =
+        Resolver(
+          ..r,
+          next_local: index + 1,
+          max_locals: new_max,
+          names: dict.insert(r.names, name, index),
+        )
 
       // Add binding to the appropriate scope
       let r = case kind {
@@ -329,8 +389,11 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
     // emit a throw. Initialization goes through IrScopeInitVar, never here.
     Ir(IrScopePutVar(name)) -> {
       case lookup(r.scopes, name) {
+        // §9.1.1.1.5 SetMutableBinding step 6 — const bindings are always
+        // strict (§14.3.1.3), so reassignment unconditionally throws TypeError.
+        // RHS is already evaluated (on stack); throw discards it via unwind.
         Some(Binding(kind: ConstBinding, ..)) ->
-          emit(r, IrThrowError(ConstAssignment))
+          emit(r, IrThrowConstAssign(name))
         Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrPutBoxed(index))
         Some(Binding(index:, is_boxed: False, ..)) -> emit(r, IrPutLocal(index))
         None ->
@@ -341,8 +404,9 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       }
     }
 
-    // Initialization of a let/const binding — same lowering as IrScopePutVar
-    // but never const-checked (binding a const for the first time is allowed).
+    // One-time init write that bypasses the const-reassign check above. Used
+    // for `const x = v` / inner-class-name / `<class_fields_init>` — mirrors
+    // QuickJS OP_scope_put_var_init.
     Ir(IrScopeInitVar(name)) -> {
       case lookup(r.scopes, name) {
         Some(Binding(index:, is_boxed: True, ..)) -> emit(r, IrPutBoxed(index))
@@ -448,6 +512,14 @@ fn add_to_func_scope_inner(
         BlockScope -> [scope, ..add_to_func_scope_inner(rest, name, binding)]
       }
   }
+}
+
+/// Flatten the scope chain into name→index. `scopes` is innermost-first;
+/// fold outermost→innermost so the innermost binding for a shadowed name wins.
+fn flatten_scopes(scopes: List(Scope)) -> Dict(String, Int) {
+  use acc, scope <- list.fold(list.reverse(scopes), dict.new())
+  use a, name, b <- dict.fold(scope.bindings, acc)
+  dict.insert(a, name, b.index)
 }
 
 fn lookup(scopes: List(Scope), name: String) -> Option(Binding) {

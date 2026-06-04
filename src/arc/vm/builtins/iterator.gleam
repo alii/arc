@@ -163,7 +163,7 @@ pub fn dispatch(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case native {
-    IteratorConstructor -> construct(this, state)
+    IteratorConstructor -> construct(state)
     IteratorFrom -> from(args, state)
     IteratorPrototypeMap -> lazy_helper(this, args, state, HelperMap, "map")
     IteratorPrototypeFilter ->
@@ -198,21 +198,28 @@ pub fn dispatch(
 // §27.1.1.1 Iterator ( ) — abstract constructor
 // ============================================================================
 
-/// The Iterator constructor throws when called or new'd directly, but
-/// returns `this` when reached via `super()` in a subclass. Arc's CallSuper
-/// passes the freshly-allocated subclass instance as `this`; direct call /
-/// `new Iterator()` both arrive with `this = undefined`.
-fn construct(
-  this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  case this {
-    JsObject(_) -> #(state, Ok(this))
-    _ ->
+/// §27.1.1.1 step 1: throw if NewTarget is undefined or the active function
+/// (i.e., %Iterator% itself); otherwise OrdinaryCreateFromConstructor.
+/// `do_construct` sets `state.new_target` before native dispatch; calling as a
+/// function leaves it `JsUndefined`.
+fn construct(state: State) -> #(State, Result(JsValue, JsValue)) {
+  let self = JsObject(state.builtins.iterator.constructor)
+  let nt = state.new_target
+  case nt == JsUndefined || nt == self {
+    True ->
       state.type_error(
         state,
         "Abstract class Iterator not directly constructable",
       )
+    False -> {
+      let #(h, ref) =
+        common.ordinary_create_from_constructor(
+          state.heap,
+          nt,
+          state.builtins.iterator.prototype,
+        )
+      #(State(..state, heap: h), Ok(JsObject(ref)))
+    }
   }
 }
 

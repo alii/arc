@@ -8,23 +8,23 @@ import arc/vm/opcode.{
   type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
   IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp,
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
-  IrCallMethodApply, IrCallSuper, IrCallSuperApply, IrCheckSuperThis,
-  IrCreateArguments, IrCreateRestArray, IrDeclareGlobalLex, IrDeclareGlobalVar,
+  IrCallMethodApply, IrCreateArguments, IrCreateRestArray, IrDeclareGlobalLex,
+  IrDeclareGlobalVar,
   IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed,
-  IrDefineMethodField, IrDefineMethodFieldComputed, IrDeleteElem, IrDeleteField,
-  IrDup, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem, IrGetElem2,
-  IrGetField, IrGetField2, IrGetIterator, IrGetPrivateField, IrGetPrivateField2,
-  IrGetSuperProp, IrGetSuperProp2, IrGetSuperPropComputed,
-  IrGetSuperPropComputed2, IrGetThis, IrGosub, IrInitGlobalLex, IrInitialYield,
+  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed, IrDeleteElem,
+  IrDeleteField, IrDup, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem,
+  IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetLexical,
+  IrGetPrivateField, IrGetPrivateField2, IrGetPrototypeOf, IrGetSuperValue,
+  IrGetSuperValue2, IrGosub, IrInitGlobalLex, IrInitialYield,
   IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
   IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrMakeClosure, IrNewObject, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
-  IrPop, IrPopTry, IrPrivateIn, IrPushConst, IrPushTry, IrPutElem, IrPutField,
-  IrPutPrivateField, IrPutSuperProp, IrPutSuperPropComputed, IrRet, IrReturn,
+  IrMakeClosure, IrMakeMethod, IrNewObject, IrNewRegExp, IrObjectRestCopy,
+  IrObjectSpread, IrPop, IrPopTry, IrPrivateIn, IrPushConst, IrPushTry,
+  IrPutElem, IrPutField, IrPutPrivateField, IrPutSuperValue, IrRet, IrReturn,
   IrScopeGetVar, IrScopeInitVar, IrScopePutVar, IrScopeReboxVar,
-  IrScopeTypeofVar, IrSetLine, IrSetThis, IrSetupDerivedClass, IrSwap, IrThrow,
-  IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
+  IrScopeTypeofVar, IrSetLine, IrSetProto, IrSetThis, IrSetupDerivedClass,
+  IrSwap, IrThrow,
+  IrThrowError, IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -49,11 +49,12 @@ pub type EmitterOp {
   LeaveScope
   /// Declare a variable in the current scope
   DeclareVar(name: String, kind: BindingKind)
-  /// Declare the lexical-`this` slot for the current function scope.
-  /// Non-arrows (and script/module/eval bodies) emit this as the first
-  /// declaration after EnterScope(FunctionScope) so the slot index equals
-  /// len(captures). Arrows skip it — `IrGetThis` resolves to a capture.
-  DeclareThis
+  /// Declare an owned slot for a lexical pseudo-binding (this / active_func /
+  /// new.target). Non-arrows emit these in `all_lexical_refs` order as the
+  /// first declarations after EnterScope(FunctionScope) so slot indices start
+  /// at len(captures). Script/module/eval bodies emit RefThis only. Arrows
+  /// skip — `IrGetLexical` resolves to a capture.
+  DeclareLexical(ref: opcode.LexicalRef)
 }
 
 pub type ScopeKind {
@@ -104,10 +105,12 @@ pub type CompiledChild {
     /// identifier callee. Such functions get all locals boxed and a
     /// name→index table stored on FuncTemplate so direct eval can see them.
     has_eval_call: Bool,
-    /// True if this body (or any nested arrow) reads/writes lexical `this`.
-    /// For arrows, the parent must capture/box its `this` slot; for
-    /// non-arrows this is informational (they own their slot).
-    references_this: Bool,
+    /// Per-binding "is referenced in this body or a nested arrow" flags.
+    /// For arrows, the parent must capture/box the corresponding slot; for
+    /// non-arrows this is informational (they own their slots).
+    lexical_refs: opcode.LexicalRefs,
+    /// Syntax-legality flags inherited by direct eval.
+    syntax_perms: opcode.SyntaxPerms,
   )
 }
 
@@ -170,13 +173,16 @@ pub opaque type Emitter {
     /// route to the async-delegation path (GetAsyncIterator + await).
     is_async: Bool,
     /// True while emitting an arrow function body. Gates whether
-    /// `DeclareThis` and the `arguments` local are emitted in the prologue.
+    /// `DeclareLexical` and the `arguments` local are emitted in the prologue.
     is_arrow: Bool,
-    /// True once an `IrGetThis`/`IrSetThis` has been emitted in this body,
-    /// or an inner ARROW child propagated its own flag up via
-    /// add_child_function. Mirrors JSC's needsThisRecord — lets the compiler
+    /// Per-binding "has IrGetLexical(ref) been emitted in this body, or
+    /// propagated up from an inner ARROW child via add_child_function".
+    /// Mirrors JSC's InnerArrowFunctionCodeFeatures — lets the compiler
     /// decide capture/box without re-walking the IR.
-    references_this: Bool,
+    lexical_refs: opcode.LexicalRefs,
+    /// Syntax-legality flags for the body being emitted. Arrows inherit the
+    /// parent's verbatim; non-arrows compute from function kind.
+    syntax_perms: opcode.SyntaxPerms,
     /// Where top-level let/const/class go. LexGlobal only for the REPL
     /// program emitter; everything else (scripts, eval, modules, function
     /// bodies) uses LexLocal.
@@ -185,8 +191,30 @@ pub opaque type Emitter {
     /// let/const/class is at the program top level (depth 1) vs inside a
     /// nested block. Only meaningful when top_lex == LexGlobal.
     scope_depth: Int,
+    /// Whether/where to emit the field-initializer call (§13.3.7.1 step 12
+    /// InitializeInstanceElements). Set by compile_derived_class/base_class
+    /// when the class has instance fields; arrows inherit it so `()=>super()`
+    /// can find it.
+    field_init: FieldInitMode,
   )
 }
+
+/// Where the synthetic field-initializer call is emitted.
+pub type FieldInitMode {
+  /// No instance fields (or not in a constructor body).
+  NoFieldInit
+  /// Base-class ctor: call init fn at start of body, after lexical declares.
+  FieldInitAtStart
+  /// Derived-class ctor: call init fn after every `super()`.
+  FieldInitAfterSuper
+}
+
+/// QuickJS JS_ATOM_class_fields_init. Declared as a const in the per-class
+/// block scope (P6) and captured via the ordinary closure path — `<...>` is
+/// outside §12.7 IdentifierName grammar so it can't collide with user code.
+/// P0 per-MakeClosure scope snapshots give each class its own slot, so two
+/// classes in one parent function don't share a box.
+const class_fields_init = "<class_fields_init>"
 
 /// Compile error from the emitter.
 pub type EmitError {
@@ -264,9 +292,9 @@ fn emit_module_common(
 ) {
   let e = Emitter(..new_emitter(), strict: True)
   let e = emit_op(e, EnterScope(FunctionScope))
-  // Module top-level `this === undefined` (§16.2.1.6.4). DeclareThis allocates
-  // slot 0; runtime padding leaves it JsUndefined.
-  let e = emit_op(e, DeclareThis)
+  // Module top-level `this === undefined` (§16.2.1.6.4). DeclareLexical
+  // allocates slot 0; runtime padding leaves it JsUndefined.
+  let e = emit_op(e, DeclareLexical(opcode.RefThis))
 
   // Hoist var declarations
   let hoisted_vars = collect_hoisted_vars(stmts)
@@ -275,9 +303,12 @@ fn emit_module_common(
       emit_op(e, DeclareVar(name, VarBinding))
     })
 
-  // Declare *default* binding if module has a default export
+  // Declare *default* binding if module has a default export. Per §16.2.1.6.2
+  // step 24.b.i this is CreateMutableBinding (not immutable), so LetBinding —
+  // also lets the synthetic `*default* = expr` assignment below pass the
+  // IrScopePutVar const-reassign check.
   let e = case has_default_export {
-    True -> emit_op(e, DeclareVar("*default*", ConstBinding))
+    True -> emit_op(e, DeclareVar("*default*", LetBinding))
     False -> e
   }
 
@@ -367,7 +398,7 @@ fn emit_program_common(
   let e = emit_op(e, EnterScope(FunctionScope))
   // Script/eval top-level owns a `this` slot (slot 0). Runtime entry writes
   // globalThis (or the caller's `this` for direct eval) into it before pc=0.
-  let e = emit_op(e, DeclareThis)
+  let e = emit_op(e, DeclareLexical(opcode.RefThis))
 
   // Hoisting pre-pass: emit DeclareGlobalVar for top-level var declarations.
   // Both script and REPL modes create globalThis properties for hoisted vars.
@@ -427,9 +458,11 @@ fn new_emitter() -> Emitter {
     has_eval_call: False,
     is_async: False,
     is_arrow: False,
-    references_this: False,
+    lexical_refs: opcode.no_lexical_refs,
+    syntax_perms: opcode.script_perms,
     top_lex: LexLocal,
     scope_depth: 0,
+    field_init: NoFieldInit,
   )
 }
 
@@ -494,9 +527,9 @@ fn declare_lex(e: Emitter, name: String, is_const: Bool) -> Emitter {
 }
 
 /// Store the value on top of stack into a let/const binding declared via
-/// declare_lex. Routes to IrInitGlobalLex (global lexical record) or
-/// IrScopeInitVar (local slot). Both are *initialization*, so neither triggers
-/// the const-reassignment check — only IrScopePutVar (true assignment) does.
+/// declare_lex. Routes to IrInitGlobalLex (bypasses TDZ/const checks) or
+/// IrScopeInitVar (resolves to PutLocal/PutBoxed, bypassing the const-reassign
+/// check that IrScopePutVar applies). Mirrors QuickJS OP_scope_put_var_init.
 fn init_lex(e: Emitter, name: String) -> Emitter {
   case at_global_lex(e) {
     True -> emit_ir(e, IrInitGlobalLex(name))
@@ -764,29 +797,100 @@ fn emit_goto_loop_walk(
 
 fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
   let idx = e.next_func
-  // Arrow children inherit lexical `this`, so their reference is the parent's
-  // reference. Non-arrows own their slot — their flag does not propagate.
-  let references_this =
-    e.references_this || { child.is_arrow && child.references_this }
+  // Arrow children inherit lexical bindings, so their references are the
+  // parent's references. Non-arrows own their slots — flags don't propagate.
+  let lexical_refs = case child.is_arrow {
+    True -> opcode.lexical_refs_or(e.lexical_refs, child.lexical_refs)
+    False -> e.lexical_refs
+  }
   #(
     Emitter(
       ..e,
       functions: list.append(e.functions, [child]),
       next_func: idx + 1,
-      references_this:,
+      lexical_refs:,
     ),
     idx,
   )
 }
 
-/// Emit IrGetThis and mark this body as referencing lexical `this`.
+/// Emit IrGetLexical(ref) and mark this body as referencing that binding.
+fn get_lexical(e: Emitter, ref: opcode.LexicalRef) -> Emitter {
+  let lexical_refs = case ref {
+    opcode.RefThis -> opcode.LexicalRefs(..e.lexical_refs, this: True)
+    opcode.RefActiveFunc ->
+      opcode.LexicalRefs(..e.lexical_refs, active_func: True)
+    opcode.RefHomeObject ->
+      opcode.LexicalRefs(..e.lexical_refs, home_object: True)
+    opcode.RefNewTarget ->
+      opcode.LexicalRefs(..e.lexical_refs, new_target: True)
+  }
+  Emitter(..emit_ir(e, IrGetLexical(ref)), lexical_refs:)
+}
+
+/// Emit IrGetLexical(RefThis).
 fn get_this(e: Emitter) -> Emitter {
-  Emitter(..emit_ir(e, IrGetThis), references_this: True)
+  get_lexical(e, opcode.RefThis)
 }
 
 /// Emit IrSetThis and mark this body as referencing lexical `this`.
 fn set_this(e: Emitter) -> Emitter {
-  Emitter(..emit_ir(e, IrSetThis), references_this: True)
+  Emitter(
+    ..emit_ir(e, IrSetThis),
+    lexical_refs: opcode.LexicalRefs(..e.lexical_refs, this: True),
+  )
+}
+
+/// Common prefix for every `super.prop` / `super[k]` form. Stack after:
+/// [home_proto, this, ..]. §9.1.1.3.5 GetSuperBase = lexical home_object's
+/// [[Prototype]]. Marks both lexical refs.
+fn emit_super_base(e: Emitter) -> Emitter {
+  e
+  |> get_this
+  |> get_lexical(opcode.RefHomeObject)
+  |> emit_ir(IrGetPrototypeOf)
+}
+
+/// As emit_super_base but Dup's the receiver so the stack after a following
+/// GetSuperValue is [val, this, ..] — the [fn, recv] shape CallMethod wants.
+fn emit_super_base_keep_recv(e: Emitter) -> Emitter {
+  e
+  |> get_this
+  |> emit_ir(IrDup)
+  |> get_lexical(opcode.RefHomeObject)
+  |> emit_ir(IrGetPrototypeOf)
+}
+
+/// Push the property key for a super reference. Dot form (`super.x`,
+/// computed=False) pushes a literal string; computed form (`super[k]`)
+/// evaluates the expression. Stack after: [key, ..].
+fn emit_super_key(
+  e: Emitter,
+  key: ast.Expression,
+  computed: Bool,
+) -> Result(Emitter, EmitError) {
+  case computed, key {
+    False, ast.Identifier(name) -> Ok(push_const(e, JsString(name)))
+    _, _ -> emit_expr(e, key)
+  }
+}
+
+/// Emit a stack-neutral call to the captured `<class_fields_init>` closure
+/// (§13.3.7.1 step 12 InitializeInstanceElements / §10.2.2 step 6).
+/// Stack: [..] → [..]. Mirrors QuickJS emit_class_field_init: read the const,
+/// skip when undefined (no instance fields), else [[Call]] with `this` = the
+/// instance and no args (so its own RefNewTarget slot is undefined per spec).
+fn emit_field_init_call(e: Emitter) -> Emitter {
+  let #(e, skip) = fresh_label(e)
+  e
+  |> emit_ir(IrScopeGetVar(class_fields_init))
+  |> emit_ir(IrDup)
+  |> emit_ir(IrJumpIfFalse(skip))
+  |> get_this
+  |> emit_ir(IrSwap)
+  |> emit_ir(IrCallMethod("", 0))
+  |> emit_ir(IrLabel(skip))
+  |> emit_ir(IrPop)
 }
 
 /// Extract final results from the emitter.
@@ -1076,6 +1180,8 @@ fn collect_hoisted_funcs(
               is_async,
               // Function declaration: a constructor unless gen/async.
               !is_gen && !is_async,
+              opcode.fn_perms,
+              NoFieldInit,
             )
           let #(e, idx) = add_child_function(e, child)
           #(e, [#(name, idx), ..funcs])
@@ -1353,6 +1459,8 @@ fn compile_function_body(
   is_generator: Bool,
   is_async: Bool,
   is_constructor: Bool,
+  perms: opcode.SyntaxPerms,
+  field_init: FieldInitMode,
 ) -> CompiledChild {
   let stmts = case body {
     ast.BlockStatement(s) -> s
@@ -1363,6 +1471,20 @@ fn compile_function_body(
   // (Classes force strict at the call site by passing a strict parent emitter.)
   let child_strict = parent.strict || has_use_strict_directive(stmts)
 
+  // SyntaxPerms (mirrors quickjs.c:36052-36076). Arrows inherit the parent
+  // emitter's perms verbatim — `perms` is ignored. Non-arrows use `perms` as
+  // passed by the caller (fn_perms / method_perms / derived_ctor_perms).
+  let syntax_perms = case is_arrow {
+    True -> parent.syntax_perms
+    False -> perms
+  }
+  // Like SyntaxPerms, arrows inherit FieldInitMode so `()=>super()` inside a
+  // derived ctor can emit the init call; non-arrows take the caller's value
+  // (only ctors get a non-NoFieldInit).
+  let field_init = case is_arrow {
+    True -> parent.field_init
+    False -> field_init
+  }
   // Use a fresh emitter inheriting nothing from parent (except label counter
   // for uniqueness, and strictness).
   let e =
@@ -1372,17 +1494,22 @@ fn compile_function_body(
       strict: child_strict,
       is_async:,
       is_arrow:,
+      syntax_perms:,
+      field_init:,
     )
 
   let e = emit_op(e, EnterScope(FunctionScope))
 
-  // Non-arrows own `this` as the first local (slot = len(captures)). Runtime
-  // setup_locals writes the bound value (or JsUninitialized for derived ctors)
-  // before pc=0. Arrows skip — their `IrGetThis` resolves to a capture from
-  // the enclosing non-arrow.
+  // Non-arrows own all four lexical slots starting at len(captures), in
+  // canonical order. Runtime setup_locals writes [this, active_func,
+  // home_object, new_target] there before pc=0. Arrows skip — their
+  // IrGetLexical resolves to captures from the enclosing non-arrow.
   let e = case is_arrow {
     True -> e
-    False -> emit_op(e, DeclareThis)
+    False ->
+      list.fold(opcode.all_lexical_refs, e, fn(e, ref) {
+        emit_op(e, DeclareLexical(ref))
+      })
   }
 
   // A trailing rest parameter (`...rest`) is bound separately from the fixed
@@ -1492,6 +1619,15 @@ fn compile_function_body(
     False -> e
   }
 
+  // Base-class ctor with instance fields: §10.2.2 [[Construct]] step 6 calls
+  // InitializeInstanceElements before evaluating the body. Constructors can't
+  // be generators/async, so this is always after the lexical declares with
+  // `this` already bound by the caller.
+  let e = case field_init {
+    FieldInitAtStart -> emit_field_init_call(e)
+    NoFieldInit | FieldInitAfterSuper -> e
+  }
+
   // Emit body statements (for MVP, compilation errors in function bodies are ignored)
   let e = emit_stmts(e, stmts) |> result.unwrap(e)
 
@@ -1516,7 +1652,8 @@ fn compile_function_body(
     is_async:,
     is_constructor:,
     has_eval_call: e.has_eval_call,
-    references_this: e.references_this,
+    lexical_refs: e.lexical_refs,
+    syntax_perms:,
   )
 }
 
@@ -1930,7 +2067,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
         Some(n) -> {
           // Class names are block-scoped (like let)
           let e = declare_lex(e, n, False)
-          use e <- result.map(compile_class(e, name, super_class, body))
+          use e <- result.map(compile_class(e, name, name, super_class, body))
           // compile_class leaves [ctor] on stack; init pops it
           init_lex(e, n)
         }
@@ -2053,6 +2190,23 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // delete expression — uses unwrap_parens because delete (x) === delete x.
     ast.UnaryExpression(ast.Delete, _, arg) ->
       case unwrap_parens(arg) {
+        // §13.5.1.2 step 5.b — delete on a super reference is an
+        // unconditional ReferenceError. Evaluate `this` (TDZ check) and the
+        // computed key for side effects per §13.3.7 ordering, then throw.
+        ast.MemberExpression(ast.SuperExpression, key, computed) -> {
+          let e = get_this(e) |> emit_ir(IrPop)
+          use e <- result.map(case computed {
+            True -> result.map(emit_expr(e, key), emit_ir(_, IrPop))
+            False -> Ok(e)
+          })
+          emit_ir(
+            e,
+            IrThrowError(
+              opcode.ReferenceErrorKind,
+              "Unsupported reference to 'super'",
+            ),
+          )
+        }
         ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
           // delete obj.prop → emit obj, DeleteField(prop)
           use e <- result.map(emit_expr(e, obj))
@@ -2111,6 +2265,32 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           let e = emit_ir(e, IrScopePutVar(name))
           Ok(e)
         }
+      }
+    }
+    // ++super.x / super[k]++ — GetSuperValue2 reads while keeping
+    // [pk, base, this] underneath so PutSuperValue can write back without
+    // re-evaluating GetSuperBase or ToPropertyKey (both observably stateful).
+    // Postfix undoes ±1 after the store, same as the generic member arm.
+    ast.UpdateExpression(
+      op,
+      prefix,
+      ast.MemberExpression(ast.SuperExpression, key, computed),
+    ) -> {
+      let one = JsNumber(Finite(1.0))
+      let #(bin_kind, undo) = case op {
+        ast.Increment -> #(opcode.Add, opcode.Sub)
+        ast.Decrement -> #(opcode.Sub, opcode.Add)
+      }
+      let e = emit_super_base(e)
+      use e <- result.map(emit_super_key(e, key, computed))
+      let e =
+        emit_ir(e, IrGetSuperValue2)
+        |> push_const(one)
+        |> emit_ir(IrBinOp(bin_kind))
+        |> emit_ir(IrPutSuperValue)
+      case prefix {
+        True -> e
+        False -> push_const(e, one) |> emit_ir(IrBinOp(undo))
       }
     }
     // obj.prop++ / obj[key]++ — emit as prefix (clean stack protocol via
@@ -2204,67 +2384,50 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
     }
 
-    // Assignment to dot member expression (obj.prop = val)
-    // super.prop = val
+    // super.prop = val — §13.15.2 + §13.3.7.3 PutValue with super reference.
     ast.AssignmentExpression(
       ast.Assign,
       ast.MemberExpression(ast.SuperExpression, ast.Identifier(prop), False),
       right,
     ) -> {
-      let e = emit_ir(e, IrCheckSuperThis)
+      let e = emit_super_base(e) |> push_const(JsString(prop))
       use e <- result.map(emit_expr(e, right))
-      emit_ir(e, IrPutSuperProp(prop))
+      emit_ir(e, IrPutSuperValue)
     }
 
-    // super.prop op= val
-    ast.AssignmentExpression(
-      op,
-      ast.MemberExpression(ast.SuperExpression, ast.Identifier(prop), False),
-      right,
-    ) ->
-      case compound_to_binop(op) {
-        Ok(bin_kind) -> {
-          let e = emit_ir(e, IrCheckSuperThis)
-          let e = emit_ir(e, IrGetSuperProp(prop))
-          use e <- result.map(emit_expr(e, right))
-          let e = emit_ir(e, IrBinOp(bin_kind))
-          emit_ir(e, IrPutSuperProp(prop))
-        }
-        Error(_) -> Error(Unsupported("assignment op"))
-      }
-
-    // super[key] = val
+    // super[k] = val
     ast.AssignmentExpression(
       ast.Assign,
       ast.MemberExpression(ast.SuperExpression, key, True),
       right,
     ) -> {
-      let e = emit_ir(e, IrCheckSuperThis)
+      let e = emit_super_base(e)
       use e <- result.try(emit_expr(e, key))
       use e <- result.map(emit_expr(e, right))
-      // Stack: [val, key, ..] — matches PutSuperPropComputed.
-      emit_ir(e, IrPutSuperPropComputed)
+      emit_ir(e, IrPutSuperValue)
     }
 
-    // super[key] op= val
+    // super.x op= v / super[k] op= v — §13.15.2 compound assignment.
+    // GetSuperValue2 reads while keeping [pk, base, this] under the value so
+    // GetSuperBase and ToPropertyKey are evaluated exactly once (both are
+    // observable: setPrototypeOf-in-toString test262 cases).
     ast.AssignmentExpression(
       op,
-      ast.MemberExpression(ast.SuperExpression, key, True),
+      ast.MemberExpression(ast.SuperExpression, key, computed),
       right,
     ) ->
       case compound_to_binop(op) {
         Ok(bin_kind) -> {
-          let e = emit_ir(e, IrCheckSuperThis)
-          use e <- result.try(emit_expr(e, key))
-          let e = emit_ir(e, IrDup)
-          let e = emit_ir(e, IrGetSuperPropComputed)
+          let e = emit_super_base(e)
+          use e <- result.try(emit_super_key(e, key, computed))
+          let e = emit_ir(e, IrGetSuperValue2)
           use e <- result.map(emit_expr(e, right))
-          let e = emit_ir(e, IrBinOp(bin_kind))
-          emit_ir(e, IrPutSuperPropComputed)
+          emit_ir(e, IrBinOp(bin_kind)) |> emit_ir(IrPutSuperValue)
         }
-        Error(_) -> Error(Unsupported("assignment op"))
+        Error(Nil) -> Error(Unsupported("assignment op"))
       }
 
+    // Assignment to dot member expression (obj.prop = val)
     ast.AssignmentExpression(
       ast.Assign,
       ast.MemberExpression(obj, ast.Identifier(prop), False),
@@ -2335,49 +2498,53 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_destructuring_assign(e, lhs)
     }
 
-    // super(args) — call parent constructor. After CallSuper binds `this`
-    // (§13.3.7.1 step 8), Dup the result and write it into the lexical-`this`
-    // slot so arrows that captured it (boxed, by reference) see the post-super
-    // value instead of the TDZ JsUninitialized seeded at prologue.
-    ast.CallExpression(ast.SuperExpression, args) ->
-      case has_spread_arg(args) {
+    // super(args) — §13.3.7.1 SuperCall, fully decomposed (QuickJS shape):
+    //   GetLexical(active_func); GetPrototypeOf;        → parent ctor
+    //   GetLexical(new_target);                         → lexical newTarget
+    //   <args>; CallConstructor(n);                     → ordinary [[Construct]]
+    //   Dup; SetThis;                                   → step 8 BindThisValue
+    //   <field-init call if class has instance fields>  → step 12 InitializeInstanceElements
+    // Works inside arrows because all reads go through lexical slots, and
+    // arrows inherit field_init from the enclosing ctor's emitter.
+    ast.CallExpression(ast.SuperExpression, args) -> {
+      let e =
+        e
+        |> get_lexical(opcode.RefActiveFunc)
+        |> emit_ir(IrGetPrototypeOf)
+        |> get_lexical(opcode.RefNewTarget)
+      use e <- result.map(case has_spread_arg(args) {
         True -> {
-          // super(...spread): collect args into a runtime array (same as
-          // the other *Apply call paths) then CallSuperApply.
           use e <- result.map(emit_args_array_with_spread(e, args))
-          e
-          |> emit_ir(IrCallSuperApply)
-          |> emit_ir(IrDup)
-          |> set_this
+          emit_ir(e, IrCallConstructorApply)
         }
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
-          e
-          |> emit_ir(IrCallSuper(list.length(args)))
-          |> emit_ir(IrDup)
-          |> set_this
+          emit_ir(e, IrCallConstructor(list.length(args)))
         }
+      })
+      let e = e |> emit_ir(IrDup) |> set_this
+      case e.field_init {
+        FieldInitAfterSuper -> emit_field_init_call(e)
+        NoFieldInit | FieldInitAtStart -> e
       }
+    }
 
-    // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding.
-    // Spread path: build args array after GetField2, then IrCallMethodApply.
-    // super.method(args) — the method is looked up on the super base but `this`
-    // stays the current receiver. GetSuperProp2 leaves [method, this, ..],
-    // matching the [method, receiver, ..] shape CallMethod expects.
+    // super.method(args) — §13.3.7.3 + §13.3.6.2: read super property with
+    // receiver=this, then call with this as receiver.
     ast.CallExpression(
-      ast.MemberExpression(
-        ast.SuperExpression,
-        ast.Identifier(method_name),
-        False,
-      ),
+      ast.MemberExpression(ast.SuperExpression, ast.Identifier(method), False),
       args,
     ) -> {
-      let e = emit_ir(e, IrCheckSuperThis)
-      let e = emit_ir(e, IrGetSuperProp2(method_name))
+      let e =
+        emit_super_base_keep_recv(e)
+        |> push_const(JsString(method))
+        |> emit_ir(IrGetSuperValue)
+      // Stack: [fn, this, ..]. Reuse CallMethodApply/CallMethod's [fn, recv]
+      // shape — `this` is the receiver.
       case has_spread_arg(args) {
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
-          emit_ir(e, IrCallMethod(method_name, list.length(args)))
+          emit_ir(e, IrCallMethod(method, list.length(args)))
         }
         True -> {
           use e <- result.map(emit_args_array_with_spread(e, args))
@@ -2385,18 +2552,19 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
       }
     }
-    // super[key](args)
+
+    // super[k](args)
     ast.CallExpression(
       ast.MemberExpression(ast.SuperExpression, key, True),
       args,
     ) -> {
-      let e = emit_ir(e, IrCheckSuperThis)
+      let e = emit_super_base_keep_recv(e)
       use e <- result.try(emit_expr(e, key))
-      let e = emit_ir(e, IrGetSuperPropComputed2)
+      let e = emit_ir(e, IrGetSuperValue)
       case has_spread_arg(args) {
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
-          emit_ir(e, IrCallMethod("[computed]", list.length(args)))
+          emit_ir(e, IrCallMethod("<super>", list.length(args)))
         }
         True -> {
           use e <- result.map(emit_args_array_with_spread(e, args))
@@ -2405,6 +2573,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
     }
 
+    // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding.
+    // Spread path: build args array after GetField2, then IrCallMethodApply.
     ast.CallExpression(
       ast.MemberExpression(obj, ast.Identifier(method_name), False),
       args,
@@ -2505,18 +2675,19 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       list.try_fold(properties, e, emit_object_property)
     }
 
-    // super.prop — resolved against the home object's prototype, not a value
-    // on the stack, so it does not go through emit_expr(object).
-    ast.MemberExpression(ast.SuperExpression, ast.Identifier(prop), False) -> {
-      let e = emit_ir(e, IrCheckSuperThis)
-      Ok(emit_ir(e, IrGetSuperProp(prop)))
-    }
+    // §13.3.7.3 super.prop — read via [[HomeObject]].[[Prototype]] with
+    // receiver = lexical this. Must precede the generic MemberExpression arm.
+    ast.MemberExpression(ast.SuperExpression, ast.Identifier(name), False) ->
+      Ok(
+        emit_super_base(e)
+        |> push_const(JsString(name))
+        |> emit_ir(IrGetSuperValue),
+      )
 
-    // super[key] — the `this` check precedes key evaluation (§13.3.7.2).
-    ast.MemberExpression(ast.SuperExpression, property, True) -> {
-      let e = emit_ir(e, IrCheckSuperThis)
-      use e <- result.map(emit_expr(e, property))
-      emit_ir(e, IrGetSuperPropComputed)
+    ast.MemberExpression(ast.SuperExpression, key, True) -> {
+      let e = emit_super_base(e)
+      use e <- result.map(emit_expr(e, key))
+      emit_ir(e, IrGetSuperValue)
     }
 
     // Member expression (dot access)
@@ -2617,6 +2788,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           is_async,
           // Normal function expression: a constructor unless gen/async.
           !is_gen && !is_async,
+          opcode.fn_perms,
+          NoFieldInit,
         )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
@@ -2641,6 +2814,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           False,
           is_async,
           False,
+          opcode.fn_perms,
+          NoFieldInit,
         )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
@@ -2650,9 +2825,14 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // the nearest enclosing non-arrow.
     ast.ThisExpression -> Ok(get_this(e))
 
-    // New expression: new Foo(args)
+    // §13.3.12 new.target — reads the lexical [[NewTarget]] slot.
+    ast.MetaProperty("new", "target") -> Ok(get_lexical(e, opcode.RefNewTarget))
+
+    // New expression: new Foo(args). CallConstructor's stack contract is
+    // [args, new_target, ctor] — for plain `new`, newTarget == ctor, so Dup.
     ast.NewExpression(callee, args) -> {
       use e <- result.try(emit_expr(e, callee))
+      let e = emit_ir(e, IrDup)
       case has_spread_arg(args) {
         False -> {
           use e <- result.map(list.try_fold(args, e, emit_expr))
@@ -2672,7 +2852,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Class expression
     ast.ClassExpression(name, super_class, body) ->
-      compile_class(e, name, super_class, body)
+      compile_class(e, name, name, super_class, body)
 
     // Yield expression (inside generator functions)
     ast.YieldExpression(argument, is_delegate) -> {
@@ -2925,6 +3105,8 @@ fn emit_named_expr(
           is_async,
           // Named function expression: a constructor unless gen/async.
           !is_gen && !is_async,
+          opcode.fn_perms,
+          NoFieldInit,
         )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
@@ -2949,13 +3131,16 @@ fn emit_named_expr(
           is_async,
           // Arrow function — not a constructor.
           False,
+          opcode.fn_perms,
+          NoFieldInit,
         )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }
-    // Anonymous class expression → bake name
+    // Anonymous class expression → bake `.name` only; NO inner binding
+    // (§8.4 NamedEvaluation step 2 — classBinding is undefined).
     ast.ClassExpression(None, super_class, body) ->
-      compile_class(e, Some(name), super_class, body)
+      compile_class(e, None, Some(name), super_class, body)
     // Not anonymous → emit normally (named fn keeps its own name)
     _ -> emit_expr(e, expr)
   }
@@ -2985,6 +3170,8 @@ fn emit_method_value(
           is_async,
           // method / getter / setter — not a constructor
           False,
+          opcode.method_perms,
+          NoFieldInit,
         )
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
@@ -2998,8 +3185,33 @@ fn emit_object_property(
   prop: ast.Property,
 ) -> Result(Emitter, EmitError) {
   case prop {
-    // Static key: {name: value} or {"name": value}
-    // → IrDefineField(name) — pops value, keeps obj.
+    // Annex B §B.3.1 — `{__proto__: v}` / `{"__proto__": v}` sets [[Prototype]]
+    // instead of defining an own property. Only when non-computed, non-shorthand,
+    // non-method. Shorthand `{__proto__}` and computed `{["__proto__"]: v}` fall
+    // through to ordinary DefineField.
+    ast.Property(
+      key: ast.Identifier("__proto__"),
+      value:,
+      kind: ast.Init,
+      computed: False,
+      shorthand: False,
+      method: False,
+    )
+    | ast.Property(
+        key: ast.StringExpression("__proto__"),
+        value:,
+        kind: ast.Init,
+        computed: False,
+        shorthand: False,
+        method: False,
+      ) -> {
+      use e <- result.map(emit_expr(e, value))
+      emit_ir(e, IrSetProto)
+    }
+
+    // Static key: {name: value}, {"name": value}, or shorthand method {name(){}}
+    // → IrDefineField(name) — pops value, keeps obj. Shorthand methods get
+    // [[HomeObject]] (§15.4.4) so super.x works inside them; `{m: fn}` does not.
     ast.Property(
       key: ast.Identifier(name),
       value:,
@@ -3016,19 +3228,12 @@ fn emit_object_property(
         method:,
         ..,
       ) -> {
-      // `{ m() {} }` is a method (not a constructor); `{ x: v }` is data.
-      // Methods get a [[HomeObject]] (for `super`) via IrDefineMethodField;
-      // a plain function value `{ x: function(){} }` does not.
-      case method {
-        True -> {
-          use e <- result.map(emit_method_value(e, value, Some(name)))
-          emit_ir(e, IrDefineMethodField(name))
-        }
-        False -> {
-          use e <- result.map(emit_named_expr(e, value, name))
-          emit_ir(e, IrDefineField(name))
-        }
+      use e <- result.map(emit_named_expr(e, value, name))
+      let e = case method {
+        True -> emit_ir(e, IrMakeMethod)
+        False -> e
       }
+      emit_ir(e, IrDefineField(name))
     }
 
     // Numeric literal key: {1: "a"} — not computed in the AST, but needs
@@ -3041,36 +3246,19 @@ fn emit_object_property(
       computed: False,
       method:,
       ..,
-    ) -> {
-      let e = push_const(e, JsNumber(Finite(n)))
-      case method {
-        True -> {
-          use e <- result.map(emit_method_value(e, value, None))
-          emit_ir(e, IrDefineMethodFieldComputed)
-        }
-        False -> {
-          use e <- result.map(emit_expr(e, value))
-          emit_ir(e, IrDefineFieldComputed)
-        }
-      }
-    }
+    ) ->
+      emit_computed_init_property(
+        e,
+        fn(e) { Ok(push_const(e, JsNumber(Finite(n)))) },
+        value,
+        method,
+      )
 
-    // Computed key: {[expr]: value}
+    // Computed key: {[expr]: value} or {[expr](){}}
     // Emit key, emit value, IrDefineFieldComputed — pops both, keeps obj.
     // The VM handles ToPropertyKey (Symbol preserved, else ToString).
-    ast.Property(key:, value:, kind: ast.Init, computed: True, method:, ..) -> {
-      use e <- result.try(emit_expr(e, key))
-      case method {
-        True -> {
-          use e <- result.map(emit_method_value(e, value, None))
-          emit_ir(e, IrDefineMethodFieldComputed)
-        }
-        False -> {
-          use e <- result.map(emit_expr(e, value))
-          emit_ir(e, IrDefineFieldComputed)
-        }
-      }
-    }
+    ast.Property(key:, value:, kind: ast.Init, computed: True, method:, ..) ->
+      emit_computed_init_property(e, emit_expr(_, key), value, method)
 
     // Spread: {...source}
     // IrObjectSpread pops source, copies own enumerable props, keeps obj.
@@ -3135,10 +3323,35 @@ fn emit_object_property(
     // Remaining case: non-computed Init with an exotic key expression
     // (shouldn't happen — parser only produces Identifier/StringExpression/
     // NumberLiteral for non-computed keys). Route through computed path anyway.
-    ast.Property(key:, value:, kind: ast.Init, computed: False, ..) -> {
-      use e <- result.try(emit_expr(e, key))
+    ast.Property(key:, value:, kind: ast.Init, computed: False, method:, ..) ->
+      emit_computed_init_property(e, emit_expr(_, key), value, method)
+  }
+}
+
+/// Shared emit for `kind: Init` properties that go through DefineFieldComputed
+/// (computed key, numeric key, or exotic-key fallthrough). When `method` is
+/// True (`{[k](){}}`), the closure is emitted first so MakeMethod sees [obj, fn]
+/// directly, then the key, then Swap to restore [obj, key, fn] for
+/// DefineFieldComputed. Closure creation is unobservable so this doesn't change
+/// §13.2.5.5 evaluation order — key side-effects still run before any property
+/// is defined.
+fn emit_computed_init_property(
+  e: Emitter,
+  emit_key: fn(Emitter) -> Result(Emitter, EmitError),
+  value: ast.Expression,
+  method: Bool,
+) -> Result(Emitter, EmitError) {
+  case method {
+    False -> {
+      use e <- result.try(emit_key(e))
       use e <- result.map(emit_expr(e, value))
       emit_ir(e, IrDefineFieldComputed)
+    }
+    True -> {
+      use e <- result.try(emit_expr(e, value))
+      let e = emit_ir(e, IrMakeMethod)
+      use e <- result.map(emit_key(e))
+      emit_ir(emit_ir(e, IrSwap), IrDefineFieldComputed)
     }
   }
 }
@@ -4376,7 +4589,8 @@ fn compound_to_binop(op: ast.AssignmentOp) -> Result(opcode.BinOpKind, Nil) {
 ///   5. Define static methods on ctor (non-enumerable)
 fn compile_class(
   e: Emitter,
-  name: Option(String),
+  binding_name: Option(String),
+  display_name: Option(String),
   super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
 ) -> Result(Emitter, EmitError) {
@@ -4386,10 +4600,32 @@ fn compile_class(
   // exit so a sloppy-mode caller isn't polluted.
   let saved_strict = e.strict
   let e = Emitter(..e, strict: True)
-  use e <- result.map(case super_class {
-    Some(parent_expr) -> compile_derived_class(e, name, parent_expr, body)
-    None -> compile_base_class(e, name, body)
+  // §15.7.14 step 4/5: per-class block scope holding the immutable inner
+  // class-name binding (and later P8's <class_fields_init> const). Declare
+  // BEFORE heritage emit so `class C extends C{}` TDZs on the inner C, and so
+  // ctor/method MakeClosure snapshots (P0) see the slot for capture.
+  let e = emit_op(e, EnterScope(BlockScope))
+  let e = case binding_name {
+    Some(n) -> emit_op(e, DeclareVar(n, ConstBinding))
+    None -> e
+  }
+  // §15.7.14 step 28.f [[Fields]] — declared here (not in compile_*_class) so
+  // both ctor and field-init-fn IrMakeClosure snapshots see the slot. Init to
+  // the closure (or undefined) by emit_attach_field_init.
+  let e = emit_op(e, DeclareVar(class_fields_init, ConstBinding))
+  use #(e, static_init_idx) <- result.map(case super_class {
+    Some(parent_expr) ->
+      compile_derived_class(e, display_name, parent_expr, body)
+    None -> compile_base_class(e, display_name, body)
   })
+  // [ctor]. §15.7.14 step 26: bind inner name to F BEFORE static element
+  // evaluation (step 31) so `class C { static x = C }` sees the constructor.
+  let e = case binding_name {
+    Some(n) -> e |> emit_ir(IrDup) |> emit_ir(IrScopeInitVar(n))
+    None -> e
+  }
+  let e = emit_call_static_init(e, static_init_idx)
+  let e = emit_op(e, LeaveScope)
   Emitter(..e, strict: saved_strict)
 }
 
@@ -4398,13 +4634,13 @@ fn compile_derived_class(
   name: Option(String),
   parent_expr: ast.Expression,
   body: List(ast.ClassElement),
-) -> Result(Emitter, EmitError) {
+) -> Result(#(Emitter, Option(Int)), EmitError) {
   let #(
     ctor_method,
     instance_methods,
     static_methods,
     instance_fields,
-    static_fields,
+    static_elements,
   ) = classify_class_body(body)
 
   // Build constructor: if none provided, synthesize the spec default derived
@@ -4432,27 +4668,27 @@ fn compile_derived_class(
     )
   }
 
-  // §13.3.7.1 SuperCall step 12: InitializeInstanceElements runs immediately
-  // after super() returns, on the bound `this`. Splice ClassFieldInit stmts
-  // after the first top-level super() call (covers explicit and synthesized
-  // ctors). TODO: super() in non-statement position (let x=super(), return
-  // super(), conditional super()) needs emission at the IrCallSuper site —
-  // see QuickJS emit_class_field_init.
-  let ctor_body_with_fields =
-    inject_field_inits_after_super(instance_fields, ctor_body)
-
-  // Constructors cannot be generators or async (spec forbids it)
+  // §13.3.7.1 SuperCall step 12 / §15.7.14 step 28: instance fields are
+  // compiled into one synthetic initializer function (QuickJS class_fields_init
+  // / spec [[Fields]]), bound to the <class_fields_init> const and called via
+  // emit_field_init_call after every `super()`. Constructors cannot be
+  // generators or async (spec forbids it).
+  let #(e, init_idx) =
+    compile_class_init_fn(e, field_init_stmts(instance_fields))
   let child =
     compile_function_body(
       e,
       name,
       ctor_params,
-      ctor_body_with_fields,
+      ctor_body,
       False,
       False,
       False,
       // Class constructor — IS a constructor.
       True,
+      opcode.derived_ctor_perms,
+      option.map(init_idx, fn(_) { FieldInitAfterSuper })
+        |> option.unwrap(NoFieldInit),
     )
   // Mark as derived constructor
   let child = CompiledChild(..child, is_derived_constructor: True)
@@ -4477,11 +4713,71 @@ fn compile_derived_class(
   // Step 5: Define static methods on ctor
   use e <- result.try(emit_class_methods(e, static_methods, on_prototype: False))
 
-  // Step 6: Define static fields on ctor
-  use e <- result.try(emit_static_fields(e, static_fields))
+  // Step 6: Attach the field-initializer closure to ctor as [[Fields]]
+  // (§15.7.14 step 25). After methods so the init fn's [[HomeObject]] = proto
+  // sees them via super.method(). Stack: [ctor] → [ctor]. Static elements are
+  // emitted by compile_class AFTER inner-name binding (step 26 < step 31).
+  let e = emit_attach_field_init(e, init_idx)
+  let #(e, static_init_idx) =
+    compile_class_init_fn(e, static_init_stmts(static_elements))
 
   // Stack: [ctor]
-  Ok(e)
+  Ok(#(e, static_init_idx))
+}
+
+/// Compile a list of statements into a synthetic non-arrow initializer
+/// function with field_init_perms — a method-like body (§15.7.14: "the
+/// function created for [[Initializer]] is never directly accessible to
+/// ECMAScript code"). Shared by instance-field init (this = instance,
+/// [[HomeObject]] = ctor.prototype) and static-element init (this = ctor,
+/// [[HomeObject]] = ctor). Returns Some(child_idx) when stmts is non-empty.
+fn compile_class_init_fn(
+  e: Emitter,
+  stmts: List(ast.StmtWithLine),
+) -> #(Emitter, Option(Int)) {
+  case stmts {
+    [] -> #(e, None)
+    _ -> {
+      let child =
+        compile_function_body(
+          e,
+          None,
+          [],
+          ast.BlockStatement(stmts),
+          False,
+          False,
+          False,
+          // Synthetic field initializer — never directly constructible.
+          False,
+          opcode.field_init_perms,
+          NoFieldInit,
+        )
+      let #(e, idx) = add_child_function(e, child)
+      #(e, Some(idx))
+    }
+  }
+}
+
+/// Stack: [ctor, ..] → [ctor, ..]. Initialize the `<class_fields_init>` const
+/// in the per-class block scope. With instance fields:
+///   Dup; GetField("prototype")     → [proto, ctor]
+///   MakeClosure(idx); MakeMethod   → [init_fn, proto, ctor], init.[[HomeObject]] = proto
+///   Swap; Pop; ScopeInitVar        → [ctor], <class_fields_init> = init_fn
+/// Without: write `undefined` so emit_field_init_call's JumpIfFalse skips and
+/// the const slot isn't TDZ. Mirrors QuickJS OP_scope_put_var_init.
+fn emit_attach_field_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
+  case init_idx {
+    None -> push_const(e, JsUndefined)
+    Some(idx) ->
+      e
+      |> emit_ir(IrDup)
+      |> emit_ir(IrGetField("prototype"))
+      |> emit_ir(IrMakeClosure(idx))
+      |> emit_ir(IrMakeMethod)
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrPop)
+  }
+  |> emit_ir(IrScopeInitVar(class_fields_init))
 }
 
 /// Define a list of class methods on the constructor (`on_prototype: False`)
@@ -4539,6 +4835,8 @@ fn emit_class_methods(
           is_async,
           // Class method / getter / setter — not a constructor.
           False,
+          opcode.method_perms,
+          NoFieldInit,
         )
       let #(e, idx) = add_child_function(e, child)
       let e = emit_ir(e, IrMakeClosure(idx))
@@ -4600,6 +4898,8 @@ fn emit_computed_class_method(
       is_async,
       // Computed class method / getter / setter — not a constructor.
       False,
+      opcode.method_perms,
+      NoFieldInit,
     )
   let #(e, idx) = add_child_function(e, child)
   let e = emit_ir(e, IrMakeClosure(idx))
@@ -4614,95 +4914,37 @@ fn emit_computed_class_method(
   Ok(emit_ir(e, IrPop))
 }
 
-/// Define static class fields directly on the constructor.
-/// Stack: [ctor] → [ctor]. §15.7.14 step 31: static field initializers run at
-/// class-definition time. First-pass limitation: initializers run in the
-/// enclosing lexical scope, so `this`/`arguments` inside are NOT yet rebound
-/// to the constructor (spec wraps each in a synthetic function — QuickJS
-/// emit_class_init_start/end). Correct for `static x = 5` / `static #y = 7`.
-/// IrDefineField/IrDefineFieldComputed both consume the value (and key) and
-/// leave the target on TOS, so no Dup/Pop is needed per field.
-fn emit_static_fields(
-  e: Emitter,
-  fields: List(ast.ClassElement),
-) -> Result(Emitter, EmitError) {
-  use e, field <- list.try_fold(fields, e)
-  case field {
-    ast.ClassField(key:, value:, computed:, is_static: True) -> {
-      let init = option.unwrap(value, ast.UndefinedExpression)
-      case key, computed {
-        ast.Identifier(name), False | ast.StringExpression(name), False -> {
-          use e <- result.map(emit_expr(e, init))
-          emit_ir(e, IrDefineField(name))
-        }
-        ast.NumberLiteral(n), False -> {
-          let e = push_const(e, JsNumber(Finite(n)))
-          use e <- result.map(emit_expr(e, init))
-          emit_ir(e, IrDefineFieldComputed)
-        }
-        _, _ -> {
-          use e <- result.try(emit_expr(e, key))
-          use e <- result.map(emit_expr(e, init))
-          emit_ir(e, IrDefineFieldComputed)
-        }
-      }
-    }
-    _ -> Ok(e)
+/// Stack: [ctor] → [ctor]. §15.7.14 step 31: build the static-init closure
+/// with [[HomeObject]] = ctor and immediately [[Call]] it with `this` = ctor.
+/// No-op when the class has no static elements.
+fn emit_call_static_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
+  case init_idx {
+    None -> e
+    Some(idx) ->
+      e
+      |> emit_ir(IrDup)
+      |> emit_ir(IrMakeClosure(idx))
+      |> emit_ir(IrMakeMethod)
+      |> emit_ir(IrCallMethod("", 0))
+      |> emit_ir(IrPop)
   }
 }
 
 /// Splice field-init statements immediately after the first top-level
 /// `super(...)` ExpressionStatement. If none found (super() nested or absent),
 /// append at end — runtime TDZ on the `this` slot will still enforce ordering.
-fn inject_field_inits_after_super(
-  fields: List(ast.ClassElement),
-  body: ast.Statement,
-) -> ast.Statement {
-  case fields {
-    [] -> body
-    _ -> {
-      let init_stmts = field_init_stmts(fields)
-      let body_stmts = case body {
-        ast.BlockStatement(stmts) -> stmts
-        other -> [ast.StmtWithLine(0, other)]
-      }
-      ast.BlockStatement(splice_after_super(body_stmts, init_stmts))
-    }
-  }
-}
-
-fn splice_after_super(
-  stmts: List(ast.StmtWithLine),
-  inits: List(ast.StmtWithLine),
-) -> List(ast.StmtWithLine) {
-  case stmts {
-    [] -> inits
-    [
-      ast.StmtWithLine(
-        statement: ast.ExpressionStatement(
-          expression: ast.CallExpression(ast.SuperExpression, _),
-          ..,
-        ),
-        ..,
-      ) as s,
-      ..rest
-    ] -> [s, ..list.append(inits, rest)]
-    [s, ..rest] -> [s, ..splice_after_super(rest, inits)]
-  }
-}
-
 fn compile_base_class(
   e: Emitter,
   name: Option(String),
   body: List(ast.ClassElement),
-) -> Result(Emitter, EmitError) {
+) -> Result(#(Emitter, Option(Int)), EmitError) {
   // Separate class elements into categories
   let #(
     ctor_method,
     instance_methods,
     static_methods,
     instance_fields,
-    static_fields,
+    static_elements,
   ) = classify_class_body(body)
 
   // Build the constructor body statement, injecting field initializers at the top
@@ -4714,25 +4956,43 @@ fn compile_base_class(
     _ -> #([], ast.BlockStatement([]))
   }
 
-  // Compile constructor: wrap the body with field initializer preamble
-  // Constructors cannot be generators or async (spec forbids it)
-  let ctor_body_with_fields = inject_field_inits(instance_fields, ctor_body)
+  // Instance fields → synthetic init fn (compiled as a sibling of the ctor in
+  // this enclosing scope). FieldInitAtStart tells the ctor body to call it
+  // before user code runs (§10.2.2 [[Construct]] step 6).
+  let #(e, init_idx) =
+    compile_class_init_fn(e, field_init_stmts(instance_fields))
   let child =
     compile_function_body(
       e,
       name,
       ctor_params,
-      ctor_body_with_fields,
+      ctor_body,
       False,
       False,
       False,
       // Class constructor — IS a constructor.
       True,
+      opcode.method_perms,
+      option.map(init_idx, fn(_) { FieldInitAtStart })
+        |> option.unwrap(NoFieldInit),
     )
   let #(e, ctor_idx) = add_child_function(e, child)
 
   // Step 1: MakeClosure for the constructor (creates .prototype + .prototype.constructor)
   let e = emit_ir(e, IrMakeClosure(ctor_idx))
+  // Stack: [ctor]
+
+  // §15.7.14 step 12: ctor.[[HomeObject]] = ctor.prototype, so `super.x` in a
+  // base ctor body resolves through ctor.prototype.__proto__ (Object.prototype).
+  // Derived ctors get this from the SetupDerivedClass handler instead.
+  let e =
+    e
+    |> emit_ir(IrDup)
+    |> emit_ir(IrGetField("prototype"))
+    |> emit_ir(IrSwap)
+    |> emit_ir(IrMakeMethod)
+    |> emit_ir(IrSwap)
+    |> emit_ir(IrPop)
   // Stack: [ctor]
 
   // Step 2: Define instance methods on ctor.prototype
@@ -4745,12 +5005,19 @@ fn compile_base_class(
   // Step 3: Define static methods on ctor
   use e <- result.try(emit_class_methods(e, static_methods, on_prototype: False))
 
-  // Step 4: Define static fields on ctor — Stack: [ctor] → [ctor]
-  emit_static_fields(e, static_fields)
+  // Step 4: Attach the field-initializer closure to ctor as [[Fields]]
+  // (§15.7.14 step 25). Stack: [ctor] → [ctor]. Static elements are emitted by
+  // compile_class AFTER inner-name binding (step 26 < step 31).
+  let e = emit_attach_field_init(e, init_idx)
+  let #(e, static_init_idx) =
+    compile_class_init_fn(e, static_init_stmts(static_elements))
+  Ok(#(e, static_init_idx))
 }
 
-/// Classify class body elements into constructor, instance methods,
-/// static methods, instance fields, and static fields.
+/// Classify class body elements into constructor, instance methods, static
+/// methods, instance fields, and static elements (static fields + static
+/// blocks, interleaved in source order — §15.7.14 step 31 requires textual
+/// order).
 fn classify_class_body(
   body: List(ast.ClassElement),
 ) -> #(
@@ -4760,14 +5027,14 @@ fn classify_class_body(
   List(ast.ClassElement),
   List(ast.ClassElement),
 ) {
-  let #(ctor, im_rev, sm_rev, if_rev, sf_rev) =
+  let #(ctor, im_rev, sm_rev, if_rev, se_rev) =
     list.fold(body, #(None, [], [], [], []), fn(acc, elem) {
       let #(
         ctor,
         instance_methods,
         static_methods,
         instance_fields,
-        static_fields,
+        static_elements,
       ) = acc
       case elem {
         // Constructor
@@ -4776,7 +5043,7 @@ fn classify_class_body(
           instance_methods,
           static_methods,
           instance_fields,
-          static_fields,
+          static_elements,
         )
         // Instance method (non-static, non-constructor)
         ast.ClassMethod(is_static: False, kind: ast.MethodMethod, ..) -> #(
@@ -4784,7 +5051,7 @@ fn classify_class_body(
           [elem, ..instance_methods],
           static_methods,
           instance_fields,
-          static_fields,
+          static_elements,
         )
         // Static method
         ast.ClassMethod(is_static: True, ..) -> #(
@@ -4792,7 +5059,7 @@ fn classify_class_body(
           instance_methods,
           [elem, ..static_methods],
           instance_fields,
-          static_fields,
+          static_elements,
         )
         // Instance field (non-static)
         ast.ClassField(is_static: False, ..) -> #(
@@ -4800,7 +5067,7 @@ fn classify_class_body(
           instance_methods,
           static_methods,
           [elem, ..instance_fields],
-          static_fields,
+          static_elements,
         )
         // Getter/setter on instance
         ast.ClassMethod(is_static: False, ..) -> #(
@@ -4808,18 +5075,17 @@ fn classify_class_body(
           [elem, ..instance_methods],
           static_methods,
           instance_fields,
-          static_fields,
+          static_elements,
         )
-        // Static field — defined on the constructor at class-definition time
-        ast.ClassField(is_static: True, ..) -> #(
+        // Static field / static block — both run at class-definition time in
+        // source order via the static-init wrapper.
+        ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) -> #(
           ctor,
           instance_methods,
           static_methods,
           instance_fields,
-          [elem, ..static_fields],
+          [elem, ..static_elements],
         )
-        // TODO: static initializer blocks (separate unit)
-        ast.StaticBlock(..) -> acc
       }
     })
   #(
@@ -4827,28 +5093,8 @@ fn classify_class_body(
     list.reverse(im_rev),
     list.reverse(sm_rev),
     list.reverse(if_rev),
-    list.reverse(sf_rev),
+    list.reverse(se_rev),
   )
-}
-
-/// Inject field initializer code at the start of a constructor body.
-/// Each instance field becomes a ClassFieldInit statement (§7.3.32 DefineField
-/// → CreateDataPropertyOrThrow), prepended to the body.
-fn inject_field_inits(
-  fields: List(ast.ClassElement),
-  body: ast.Statement,
-) -> ast.Statement {
-  case fields {
-    [] -> body
-    _ -> {
-      let init_stmts = field_init_stmts(fields)
-      let body_stmts = case body {
-        ast.BlockStatement(stmts) -> stmts
-        other -> [ast.StmtWithLine(0, other)]
-      }
-      ast.BlockStatement(list.append(init_stmts, body_stmts))
-    }
-  }
 }
 
 /// Map every instance ClassField → ClassFieldInit statement.
@@ -4860,6 +5106,37 @@ fn field_init_stmts(fields: List(ast.ClassElement)) -> List(ast.StmtWithLine) {
   case field {
     ast.ClassField(key:, value:, computed:, is_static: False) ->
       Ok(ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:)))
+    _ -> Error(Nil)
+  }
+}
+
+/// Map static elements → statements for the static-init wrapper body.
+/// `static x = v` → ClassFieldInit (emit_stmt defines on `this` = ctor).
+/// `static { ... }` → arrow IIFE so the block gets its own var environment
+/// (§15.7.1 ClassStaticBlockBody) while inheriting `this`/home_object from
+/// the wrapper. Mirrors QuickJS emit_class_init_start/end.
+fn static_init_stmts(
+  elements: List(ast.ClassElement),
+) -> List(ast.StmtWithLine) {
+  use elem <- list.filter_map(elements)
+  case elem {
+    ast.ClassField(key:, value:, computed:, is_static: True) ->
+      Ok(ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:)))
+    ast.StaticBlock(body:) ->
+      Ok(ast.StmtWithLine(
+        0,
+        ast.ExpressionStatement(
+          ast.CallExpression(
+            ast.ArrowFunctionExpression(
+              [],
+              ast.ArrowBodyBlock(ast.BlockStatement(body)),
+              False,
+            ),
+            [],
+          ),
+          directive: None,
+        ),
+      ))
     _ -> Error(Nil)
   }
 }

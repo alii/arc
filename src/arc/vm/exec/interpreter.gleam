@@ -17,21 +17,21 @@ import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
   ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal,
   Call, CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
-  CallMethodApply, CallSuper, CallSuperApply, CheckSuperThis, CreateArguments,
-  CreateRestArray, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
-  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
-  DefineMethod, DefineMethodComputed, DefineMethodField,
-  DefineMethodFieldComputed, DeleteElem, DeleteField, Dup, ForInNext, ForInStart,
-  GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2,
-  GetGlobal, GetIterator, GetLocal, GetPrivateField, GetPrivateField2,
-  GetSuperProp, GetSuperProp2, GetSuperPropComputed, GetSuperPropComputed2,
-  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
-  IteratorCloseThrow, IteratorNext, IteratorRest, Jump, JumpIfFalse,
-  JumpIfNullish, JumpIfTrue, MakeClosure, NewObject, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pop, PrivateIn, PushConst, PushTry, PutBoxed, PutElem,
-  PutEvalVar, PutField, PutGlobal, PutLocal, PutPrivateField, PutSuperProp,
-  PutSuperPropComputed, Return, SetLine, SetupDerivedClass, Swap, TypeOf,
-  TypeofEvalVar, TypeofGlobal, UnaryOp, Yield, YieldStar,
+  CallMethodApply, CreateArguments, CreateRestArray, DeclareEvalVar,
+  DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
+  DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
+  DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
+  GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal,
+  GetIterator, GetLocal, GetPrivateField, GetPrivateField2, GetPrototypeOf,
+  GetSuperValue, GetSuperValue2, InitGlobalLex, InitialYield,
+  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
+  IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure,
+  MakeMethod, NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop,
+  PrivateIn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem,
+  PutEvalVar, PutField, PutGlobal, PutLocal, PutLocalCheckInit,
+  PutPrivateField, PutSuperValue, Return, SetLine, SetProto,
+  SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield,
+  YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -106,12 +106,13 @@ fn construct_fn_callback(
   state: State,
   target: JsValue,
   args: List(JsValue),
+  new_target: JsValue,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  case target {
-    JsObject(ref) -> {
-      // Sentinel frame: do_construct saves pc+1 into the SavedFrame (or advances
-      // pc+1 for native constructors), so the returning constructor resumes at
-      // index 1 — hence a Return there; index 0 is never dispatched.
+  case target, new_target {
+    JsObject(ref), JsObject(nt_ref) -> {
+      // Sentinel bytecode: do_construct saves pc+1 into the SavedFrame (or
+      // advances pc+1 for native constructors), so we need Return at index 1.
+      // Index 0 is never dispatched but present for belt-and-braces.
       let sentinel =
         value.FuncTemplate(
           ..empty_template(),
@@ -133,7 +134,7 @@ fn construct_fn_callback(
       //  - runs synchronously and leaves the result on stack at pc+1
       //    (native constructor path).
       // Either way, execute_inner drives to completion.
-      case do_construct(isolated, ref, args, []) {
+      case do_construct(isolated, ref, args, [], nt_ref) {
         Ok(entered) ->
           case execute_inner(entered) {
             Ok(#(NormalCompletion(val, h), final_state)) ->
@@ -164,7 +165,7 @@ fn construct_fn_callback(
           }
       }
     }
-    _ ->
+    _, _ ->
       coerce.thrown_type_error(
         state,
         object.inspect(target, state.heap) <> " is not a constructor",
@@ -198,7 +199,7 @@ pub fn new_state(
     call_stack: [],
     try_stack: [],
     builtins:,
-    callee_ref: None,
+    new_target: JsUndefined,
     call_args: [],
     job_queue: job_queue.new(),
     unhandled_rejections: [],
@@ -250,7 +251,7 @@ pub fn init_top_level_locals(
   this_val: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
   let locals = tuple_array.repeat(JsUndefined, func.local_count)
-  case func.this_slot {
+  case func.lexical.this {
     Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
     None -> locals
   }
@@ -292,7 +293,8 @@ fn empty_template() -> FuncTemplate {
     is_async: False,
     is_constructor: False,
     local_names: None,
-    this_slot: None,
+    lexical: opcode.no_lexical_slots,
+    syntax_perms: opcode.script_perms,
   )
 }
 
@@ -407,22 +409,27 @@ pub fn make_closure(
   #(heap, closure_ref)
 }
 
-/// Read the current frame's lexical `this`. Unboxes when the slot is boxed
-/// (captured by an inner arrow, or the frame IS an arrow reading its capture).
-/// Returns JsUndefined when this_slot is None (defensive — `this` unreferenced).
-pub fn read_this_local(state: State) -> JsValue {
-  case state.func.this_slot {
+/// Read one of the current frame's lexical pseudo-bindings. Unboxes when the
+/// slot is boxed (captured by an inner arrow, or the frame IS an arrow reading
+/// its capture). Returns JsUndefined when the slot is None.
+pub fn read_lexical_local(state: State, ref: opcode.LexicalRef) -> JsValue {
+  case opcode.lexical_slot(state.func.lexical, ref) {
     None -> JsUndefined
     Some(idx) ->
       case tuple_array.unsafe_get(idx, state.locals) {
-        JsObject(ref) as raw ->
-          case heap.read_box(state.heap, ref) {
+        JsObject(r) as raw ->
+          case heap.read_box(state.heap, r) {
             Some(boxed) -> boxed
             None -> raw
           }
         raw -> raw
       }
   }
+}
+
+/// Shorthand for `read_lexical_local(state, RefThis)`.
+pub fn read_this_local(state: State) -> JsValue {
+  read_lexical_local(state, opcode.RefThis)
 }
 
 // ============================================================================
@@ -533,7 +540,7 @@ fn unwind_to_catch(state: State, thrown_value: JsValue) -> Option(State) {
             stack:,
             pc:,
             try_stack:,
-            callee_ref:,
+            new_target:,
             call_args:,
             eval_env:,
             current_line:,
@@ -551,7 +558,7 @@ fn unwind_to_catch(state: State, thrown_value: JsValue) -> Option(State) {
               stack:,
               pc:,
               try_stack:,
-              callee_ref:,
+              new_target:,
               call_args:,
               eval_env:,
               current_line:,
@@ -660,6 +667,24 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
+    // §9.1.1.3.1 BindThisValue — derived ctor `this` may be bound exactly once.
+    PutLocalCheckInit(index) ->
+      case state.stack {
+        [value, ..rest] ->
+          case tuple_array.unsafe_get(index, state.locals) {
+            JsUninitialized -> {
+              let locals = tuple_array.set_unchecked(index, value, state.locals)
+              Ok(State(..state, stack: rest, locals:, pc: state.pc + 1))
+            }
+            _ ->
+              state.throw_reference_error(
+                state,
+                "'this' is already initialized",
+              )
+          }
+        [] -> underflow(state, "PutLocalCheckInit")
+      }
+
     BoxLocal(index) -> {
       let current_value = tuple_array.unsafe_get(index, state.locals)
       let #(heap, box_ref) =
@@ -716,6 +741,37 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         [] -> underflow(state, "PutBoxed")
       }
     }
+
+    // BindThisValue when `this` is captured by an arrow inside the ctor.
+    PutBoxedCheckInit(index) ->
+      case state.stack {
+        [new_value, ..rest_stack] ->
+          case tuple_array.unsafe_get(index, state.locals) {
+            JsObject(box_ref) ->
+              case heap.read_box(state.heap, box_ref) {
+                Some(JsUninitialized) -> {
+                  let heap =
+                    heap.write(state.heap, box_ref, value.BoxSlot(new_value))
+                  Ok(State(..state, heap:, stack: rest_stack, pc: state.pc + 1))
+                }
+                _ ->
+                  state.throw_reference_error(
+                    state,
+                    "'this' is already initialized",
+                  )
+              }
+            other ->
+              Error(#(
+                StepVmError(Unimplemented(
+                  "PutBoxedCheckInit: local is not a box ref: "
+                  <> string.inspect(other),
+                )),
+                JsUndefined,
+                state,
+              ))
+          }
+        [] -> underflow(state, "PutBoxedCheckInit")
+      }
 
     // ---- Global variable access --------------------------------------
     // §9.1.1.4.4 GetBindingValue — two-phase: declarative then object record
@@ -1197,7 +1253,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             pc:,
             try_stack:,
             constructor_this:,
-            callee_ref: saved_callee_ref,
+            new_target: saved_new_target,
             call_args: saved_call_args,
             eval_env: saved_eval_env,
             current_line: saved_current_line,
@@ -1213,8 +1269,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             Some(constructed_obj) -> {
               // Base constructor: use the constructed object unless the
               // function explicitly returned an object.
-              // §13.3.7.1 SuperCall step 8 BindThisValue(result) is now handled
-              // at the call site: emit's `CallSuper; Dup; IrSetThis` writes
+              // §13.3.7.1 SuperCall step 8 BindThisValue(result) is handled at
+              // the call site: emit's `CallConstructor; Dup; IrSetThis` writes
               // effective_return into the caller's lexical-`this` slot.
               let effective_return = case return_value {
                 JsObject(_) -> return_value
@@ -1232,7 +1288,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                   call_stack: rest_frames,
                   call_depth: state.call_depth - 1,
                   try_stack:,
-                  callee_ref: saved_callee_ref,
+                  new_target: saved_new_target,
                   call_args: saved_call_args,
                   eval_env: saved_eval_env,
                 ),
@@ -1255,7 +1311,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                           call_stack: rest_frames,
                           call_depth: state.call_depth - 1,
                           try_stack:,
-                          callee_ref: saved_callee_ref,
+                          new_target: saved_new_target,
                           call_args: saved_call_args,
                           eval_env: saved_eval_env,
                         ),
@@ -1281,7 +1337,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                               call_stack: rest_frames,
                               call_depth: state.call_depth - 1,
                               try_stack:,
-                              callee_ref: saved_callee_ref,
+                              new_target: saved_new_target,
                               call_args: saved_call_args,
                               eval_env: saved_eval_env,
                             ),
@@ -1309,7 +1365,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                       call_stack: rest_frames,
                       call_depth: state.call_depth - 1,
                       try_stack:,
-                      callee_ref: saved_callee_ref,
+                      new_target: saved_new_target,
                       eval_env: saved_eval_env,
                     ),
                   )
@@ -1381,10 +1437,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    // Compiler-proven throw (resolved during scope resolution). Const-assignment
-    // mirrors PutGlobal's const branch for global lexicals.
-    opcode.ThrowError(opcode.ConstAssignment) ->
+    opcode.ThrowConstAssign(_name) ->
       state.throw_type_error(state, "Assignment to constant variable.")
+
+    opcode.ThrowError(kind, msg) ->
+      case kind {
+        opcode.ReferenceErrorKind -> state.throw_reference_error(state, msg)
+        opcode.TypeErrorKind -> state.throw_type_error(state, msg)
+      }
 
     // ---- Object property access --------------------------------------
     NewObject -> {
@@ -1404,8 +1464,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       )
     }
 
-    GetField(name) -> {
-      let key = value.canonical_key(name)
+    GetField(op_key) -> {
+      let key = value.from_op_key(op_key)
       case state.stack {
         [JsNull as v, ..] | [JsUndefined as v, ..] ->
           state.throw_type_error(
@@ -1413,7 +1473,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> name
+              <> opcode.key_name(op_key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -1426,10 +1486,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    GetField2(name) -> {
+    GetField2(op_key) -> {
       // Like GetField but keeps the object on the stack for CallMethod.
       // Stack: [obj, ..rest] → [prop_value, obj, ..rest]
-      let key = value.canonical_key(name)
+      let key = value.from_op_key(op_key)
       case state.stack {
         [JsNull as v, ..] | [JsUndefined as v, ..] ->
           state.throw_type_error(
@@ -1437,7 +1497,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> name
+              <> opcode.key_name(op_key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -1450,10 +1510,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    PutField(name) -> {
+    PutField(op_key) -> {
       // Consumes [value, obj] and pushes value back (assignment is an expression).
       // Consistent with PutElem which also leaves the value on the stack.
-      let key = value.canonical_key(name)
+      let key = value.from_op_key(op_key)
       case state.stack {
         [value, JsObject(ref) as receiver, ..rest] -> {
           // set_value walks proto chain, calls setters, handles non-writable.
@@ -1471,8 +1531,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    GetPrivateField(name) -> {
-      let key = value.canonical_key(name)
+    GetPrivateField(op_key) -> {
+      let key = value.from_op_key(op_key)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           case object.has_property(state.heap, ref, key) {
@@ -1486,21 +1546,23 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               state.throw_type_error(
                 state,
                 "Cannot read private member "
-                  <> name
+                  <> opcode.key_name(op_key)
                   <> " from an object whose class did not declare it",
               )
           }
         [_, ..] ->
           state.throw_type_error(
             state,
-            "Cannot read private member " <> name <> " on non-object",
+            "Cannot read private member "
+              <> opcode.key_name(op_key)
+              <> " on non-object",
           )
         [] -> underflow(state, "GetPrivateField")
       }
     }
 
-    GetPrivateField2(name) -> {
-      let key = value.canonical_key(name)
+    GetPrivateField2(op_key) -> {
+      let key = value.from_op_key(op_key)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           case object.has_property(state.heap, ref, key) {
@@ -1514,21 +1576,23 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               state.throw_type_error(
                 state,
                 "Cannot read private member "
-                  <> name
+                  <> opcode.key_name(op_key)
                   <> " from an object whose class did not declare it",
               )
           }
         [_, ..] ->
           state.throw_type_error(
             state,
-            "Cannot read private member " <> name <> " on non-object",
+            "Cannot read private member "
+              <> opcode.key_name(op_key)
+              <> " on non-object",
           )
         [] -> underflow(state, "GetPrivateField2")
       }
     }
 
-    PutPrivateField(name) -> {
-      let key = value.canonical_key(name)
+    PutPrivateField(op_key) -> {
+      let key = value.from_op_key(op_key)
       case state.stack {
         [val, JsObject(ref) as receiver, ..rest] ->
           case object.has_property(state.heap, ref, key) {
@@ -1542,21 +1606,23 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               state.throw_type_error(
                 state,
                 "Cannot write private member "
-                  <> name
+                  <> opcode.key_name(op_key)
                   <> " to an object whose class did not declare it",
               )
           }
         [_, _, ..] ->
           state.throw_type_error(
             state,
-            "Cannot write private member " <> name <> " on non-object",
+            "Cannot write private member "
+              <> opcode.key_name(op_key)
+              <> " on non-object",
           )
         _ -> underflow(state, "PutPrivateField")
       }
     }
 
-    PrivateIn(name) -> {
-      let key = value.canonical_key(name)
+    PrivateIn(op_key) -> {
+      let key = value.from_op_key(op_key)
       case state.stack {
         [JsObject(ref), ..rest] ->
           Ok(
@@ -1570,16 +1636,16 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           state.throw_type_error(
             state,
             "Cannot use 'in' operator to search for private name "
-              <> name
+              <> opcode.key_name(op_key)
               <> " in non-object",
           )
         [] -> underflow(state, "PrivateIn")
       }
     }
 
-    DefineField(name) -> {
+    DefineField(op_key) -> {
       // Like PutField but keeps the object on the stack (for object literal construction)
-      let key = value.canonical_key(name)
+      let key = value.from_op_key(op_key)
       case state.stack {
         [value, JsObject(ref) as obj, ..rest] -> {
           let #(heap, _) = object.set_property(state.heap, ref, key, value)
@@ -1593,13 +1659,15 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    DefineMethod(name) -> {
-      // Like DefineField but creates a non-enumerable property (for class methods)
-      let key = value.canonical_key(name)
+    DefineMethod(op_key) -> {
+      // Like DefineField but creates a non-enumerable property (for class
+      // methods). §15.4.4 MakeMethod: also set [[HomeObject]] = target on the
+      // function so super.prop inside it finds the right base.
+      let key = value.from_op_key(op_key)
       case state.stack {
-        [value, JsObject(ref) as obj, ..rest] -> {
-          let heap = set_home_object(state.heap, value, ref)
-          let heap = object.define_method_property(heap, ref, key, value)
+        [v, JsObject(ref) as obj, ..rest] -> {
+          let heap = make_method(state.heap, v, ref)
+          let heap = object.define_method_property(heap, ref, key, v)
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
         [_, _, ..] -> Ok(State(..state, pc: state.pc + 1))
@@ -1613,7 +1681,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // Non-enumerable data property (writable, configurable).
       case state.stack {
         [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
-          let heap = set_home_object(state.heap, func, ref)
+          let heap = make_method(state.heap, func, ref)
           let heap =
             object.define_symbol_property(
               heap,
@@ -1627,7 +1695,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           use #(pk, state) <- result.map(
             state.rethrow(property.to_property_key(state, key)),
           )
-          let heap = set_home_object(state.heap, func, ref)
+          let heap = make_method(state.heap, func, ref)
           let heap = object.define_method_property(heap, ref, pk, func)
           State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
         }
@@ -1636,14 +1704,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    DefineAccessor(name, kind) -> {
+    DefineAccessor(op_key, kind) -> {
       // Object literal getter/setter: { get x() {}, set x(v) {} }
       // Stack: [fn, obj, ...] → [obj, ...]
       // Defines or updates an AccessorProperty on the object.
-      let key = value.canonical_key(name)
+      let key = value.from_op_key(op_key)
       case state.stack {
         [func, JsObject(ref) as obj, ..rest] -> {
-          let heap = set_home_object(state.heap, func, ref)
+          let heap = make_method(state.heap, func, ref)
           let heap = object.define_accessor(heap, ref, key, func, kind)
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
@@ -1657,7 +1725,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // Stack: [fn, key, obj, ...] → [obj, ...]
       case state.stack {
         [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
-          let heap = set_home_object(state.heap, func, ref)
+          let heap = make_method(state.heap, func, ref)
           let heap = object.define_symbol_accessor(heap, ref, sym, func, kind)
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
@@ -1665,7 +1733,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           use #(pk, state) <- result.map(
             state.rethrow(property.to_property_key(state, key)),
           )
-          let heap = set_home_object(state.heap, func, ref)
+          let heap = make_method(state.heap, func, ref)
           let heap = object.define_accessor(heap, ref, pk, func, kind)
           State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
         }
@@ -1673,6 +1741,18 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         _ -> underflow(state, "DefineAccessorComputed")
       }
     }
+
+    MakeMethod ->
+      // §15.4.4 — set top-of-stack closure's [[HomeObject]] to the object
+      // directly beneath it. Stack-neutral; DefineField/Computed follows.
+      case state.stack {
+        [func, JsObject(ref), ..] -> {
+          let heap = make_method(state.heap, func, ref)
+          Ok(State(..state, heap:, pc: state.pc + 1))
+        }
+        [_, _, ..] -> Ok(State(..state, pc: state.pc + 1))
+        _ -> underflow(state, "MakeMethod")
+      }
 
     DefineFieldComputed -> {
       // Object literal computed key: {[key]: value}
@@ -1694,40 +1774,23 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    DefineMethodField(name) -> {
-      // Object-literal concise method: enumerable data property (like
-      // DefineField) but records the method's [[HomeObject]] for `super`.
-      let key = value.canonical_key(name)
+    // Annex B §B.3.1 — `{__proto__: v}` literal sets [[Prototype]].
+    // Stack: [val, obj, ...] → [obj, ...]. If val is Object or null, set
+    // obj.[[Prototype]]; else no-op (no error). The target is a fresh literal
+    // so always extensible & cycle-free — direct slot write is spec-equivalent.
+    SetProto ->
       case state.stack {
-        [value, JsObject(ref) as obj, ..rest] -> {
-          let heap = set_home_object(state.heap, value, ref)
-          let #(heap, _) = object.set_property(heap, ref, key, value)
+        [val, JsObject(ref) as obj, ..rest] -> {
+          let heap = case val {
+            JsObject(proto_ref) ->
+              set_slot_prototype(state.heap, ref, Some(proto_ref))
+            JsNull -> set_slot_prototype(state.heap, ref, None)
+            _ -> state.heap
+          }
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
-        [_, _, ..] -> Ok(State(..state, pc: state.pc + 1))
-        _ -> underflow(state, "DefineMethodField")
+        _ -> underflow(state, "SetProto")
       }
-    }
-
-    DefineMethodFieldComputed -> {
-      // Object-literal concise method with a numeric/computed key.
-      case state.stack {
-        [val, key, JsObject(ref) as obj, ..rest] -> {
-          let heap = set_home_object(state.heap, val, ref)
-          use state <- result.map(
-            state.rethrow(property.put_elem_value(
-              State(..state, heap:),
-              ref,
-              key,
-              val,
-            )),
-          )
-          State(..state, stack: [obj, ..rest], pc: state.pc + 1)
-        }
-        [_, _, _, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-        _ -> underflow(state, "DefineMethodFieldComputed")
-      }
-    }
 
     ObjectSpread -> {
       // Object spread: {...source}
@@ -1805,8 +1868,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
 
     // -- Delete operator --
-    DeleteField(name) -> {
-      let key = value.canonical_key(name)
+    DeleteField(op_key) -> {
+      let key = value.from_op_key(op_key)
       case state.stack {
         [obj, ..rest] ->
           case obj {
@@ -1879,22 +1942,33 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // Wire ctor.prototype.__proto__ = parent.prototype
       // Wire ctor.__proto__ = parent (for static inheritance)
       case state.stack {
-        [JsObject(ctor_ref), JsObject(parent_ref), ..rest] -> {
-          case heap.read(state.heap, parent_ref) {
-            Some(ObjectSlot(kind: FunctionObject(..), ..))
-            | Some(ObjectSlot(kind: NativeFunction(..), ..)) -> {
+        [JsObject(ctor_ref) as ctor, JsObject(parent_ref) as parent, ..rest] ->
+          // §15.7.14 step 5.f — IsConstructor BEFORE Get(superclass,"prototype")
+          // so an arrow/generator/async heritage throws without touching its
+          // (possibly trapped) .prototype.
+          case object.is_constructor(state.heap, parent) {
+            False ->
+              state.throw_type_error(
+                state,
+                "Class extends value is not a constructor or null",
+              )
+            True -> {
+              let ctor_proto = get_field_ref(state.heap, ctor_ref, "prototype")
+              // §15.7.14 step 12: ctor.[[HomeObject]] = ctor.prototype
+              let heap =
+                option.map(ctor_proto, make_method(state.heap, ctor, _))
+                |> option.unwrap(state.heap)
               let parent_proto =
-                get_field_ref(state.heap, parent_ref, "prototype")
+                get_field_ref(heap, parent_ref, "prototype")
                 |> option.unwrap(state.builtins.object.prototype)
               // Set ctor.prototype.__proto__ = parent.prototype
               let heap =
-                get_field_ref(state.heap, ctor_ref, "prototype")
-                |> option.map(set_slot_prototype(
-                  state.heap,
+                option.map(ctor_proto, set_slot_prototype(
+                  heap,
                   _,
                   Some(parent_proto),
                 ))
-                |> option.unwrap(state.heap)
+                |> option.unwrap(heap)
               // Set ctor.__proto__ = parent (for static inheritance)
               let heap = set_slot_prototype(heap, ctor_ref, Some(parent_ref))
               Ok(
@@ -1906,22 +1980,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                 ),
               )
             }
-            _ ->
-              Ok(
-                State(
-                  ..state,
-                  stack: [JsObject(ctor_ref), ..rest],
-                  pc: state.pc + 1,
-                ),
-              )
           }
-        }
-        [JsObject(ctor_ref), JsNull, ..rest] -> {
-          // extends null — ctor.prototype.__proto__ = null
+        [JsObject(ctor_ref) as ctor, JsNull, ..rest] -> {
+          // extends null — ctor.prototype.__proto__ = null,
+          // ctor.[[HomeObject]] = ctor.prototype
+          let ctor_proto = get_field_ref(state.heap, ctor_ref, "prototype")
           let heap =
-            get_field_ref(state.heap, ctor_ref, "prototype")
-            |> option.map(set_slot_prototype(state.heap, _, None))
+            option.map(ctor_proto, make_method(state.heap, ctor, _))
             |> option.unwrap(state.heap)
+          let heap =
+            option.map(ctor_proto, set_slot_prototype(heap, _, None))
+            |> option.unwrap(heap)
           Ok(
             State(
               ..state,
@@ -2151,19 +2220,24 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             [JsObject(obj_ref), ..rest_stack] -> {
               case heap.read(state.heap, obj_ref) {
                 Some(ObjectSlot(
-                  kind: FunctionObject(func_template:, env: env_ref, ..),
+                  kind: FunctionObject(
+                    func_template:,
+                    env: env_ref,
+                    home_object:,
+                  ),
                   ..,
                 )) ->
                   call_function(
                     state,
                     obj_ref,
                     env_ref,
+                    home_object,
                     func_template,
                     args,
                     rest_stack,
                     JsUndefined,
                     None,
-                    None,
+                    JsUndefined,
                   )
                 Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
                   call_native(state, native, args, rest_stack, JsUndefined)
@@ -2196,20 +2270,25 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             [JsObject(method_ref), receiver, ..rest_stack] -> {
               case heap.read(state.heap, method_ref) {
                 Some(ObjectSlot(
-                  kind: FunctionObject(func_template:, env: env_ref, ..),
+                  kind: FunctionObject(
+                    func_template:,
+                    env: env_ref,
+                    home_object:,
+                  ),
                   ..,
                 )) ->
                   call_function(
                     state,
                     method_ref,
                     env_ref,
+                    home_object,
                     func_template,
                     args,
                     rest_stack,
                     // Method call: this = receiver
                     receiver,
                     None,
-                    None,
+                    JsUndefined,
                   )
                 Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
                   call_native(state, native, args, rest_stack, receiver)
@@ -2233,131 +2312,18 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    CallConstructor(arity) -> {
-      // Stack: [arg_n, ..., arg_1, constructor, ...rest]
+    CallConstructor(arity) ->
+      // Stack: [arg_n, ..., arg_1, new_target, ctor, ...rest]
       case pop_n(state.stack, arity) {
-        Some(#(args, [JsObject(ctor_ref), ..rest_stack])) ->
-          do_construct(state, ctor_ref, args, rest_stack)
-        Some(#(_, [non_func, ..])) -> {
+        Some(#(args, [JsObject(nt_ref), JsObject(ctor_ref), ..rest_stack])) ->
+          do_construct(state, ctor_ref, args, rest_stack, nt_ref)
+        Some(#(_, [_, non_func, ..])) ->
           state.throw_type_error(
             state,
             object.inspect(non_func, state.heap) <> " is not a constructor",
           )
-        }
-        Some(#(_, [])) -> underflow(state, "CallConstructor")
+        Some(#(_, _)) -> underflow(state, "CallConstructor")
         None -> underflow(state, "CallConstructor: not enough args")
-      }
-    }
-
-    CallSuper(arity) ->
-      // Stack: [arg_n, ..., arg_1, ..rest] → [new_obj, ..rest]
-      case pop_n(state.stack, arity) {
-        Some(#(args, rest_stack)) -> do_call_super(state, args, rest_stack)
-        None -> underflow(state, "CallSuper: not enough args")
-      }
-
-    CallSuperApply ->
-      // Stack: [args_array, ..rest] → [new_obj, ..rest]
-      // Spread-super path: args were collected into a runtime array.
-      case state.stack {
-        [JsObject(args_ref), ..rest] -> {
-          let args = extract_array_args(state.heap, args_ref)
-          do_call_super(state, args, rest)
-        }
-        _ -> underflow(state, "CallSuperApply")
-      }
-
-    // -- Super property access (§13.3.7) --
-    CheckSuperThis ->
-      // §13.3.7.2: GetThisBinding throws when `this` is uninitialized.
-      case read_this_local(state) {
-        JsUninitialized ->
-          state.throw_reference_error(
-            state,
-            "Must call super constructor in derived class before accessing 'super' or a member of 'this'",
-          )
-        _ -> Ok(State(..state, pc: state.pc + 1))
-      }
-
-    GetSuperProp(name) -> {
-      let key = value.canonical_key(name)
-      get_super_value(state, key, fn(val, state) {
-        State(..state, stack: [val, ..state.stack], pc: state.pc + 1)
-      })
-    }
-
-    GetSuperProp2(name) -> {
-      // Method call: leave [method, this, ..] for CallMethod (this is the
-      // receiver, NOT the super base — §13.3.7.3 passes actualThis through).
-      let key = value.canonical_key(name)
-      let this_val = read_this_local(state)
-      get_super_value(state, key, fn(method, state) {
-        State(
-          ..state,
-          stack: [method, this_val, ..state.stack],
-          pc: state.pc + 1,
-        )
-      })
-    }
-
-    GetSuperPropComputed ->
-      case state.stack {
-        [key_val, ..rest] -> {
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(
-              State(..state, stack: rest),
-              key_val,
-            )),
-          )
-          get_super_value(state, pk, fn(val, state) {
-            State(..state, stack: [val, ..state.stack], pc: state.pc + 1)
-          })
-        }
-        [] -> underflow(state, "GetSuperPropComputed")
-      }
-
-    GetSuperPropComputed2 ->
-      case state.stack {
-        [key_val, ..rest] -> {
-          let this_val = read_this_local(state)
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(
-              State(..state, stack: rest),
-              key_val,
-            )),
-          )
-          get_super_value(state, pk, fn(method, state) {
-            State(
-              ..state,
-              stack: [method, this_val, ..state.stack],
-              pc: state.pc + 1,
-            )
-          })
-        }
-        [] -> underflow(state, "GetSuperPropComputed2")
-      }
-
-    PutSuperProp(name) ->
-      case state.stack {
-        [val, ..rest] -> {
-          let key = value.canonical_key(name)
-          put_super_value(State(..state, stack: rest), key, val, rest)
-        }
-        [] -> underflow(state, "PutSuperProp")
-      }
-
-    PutSuperPropComputed ->
-      case state.stack {
-        [val, key_val, ..rest] -> {
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(
-              State(..state, stack: rest),
-              key_val,
-            )),
-          )
-          put_super_value(state, pk, val, rest)
-        }
-        _ -> underflow(state, "PutSuperPropComputed")
       }
 
     CallApply -> {
@@ -2388,22 +2354,118 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    CallConstructorApply -> {
-      // [args_array, ctor] → [new instance]. Spread-new path.
+    CallConstructorApply ->
+      // [args_array, new_target, ctor] → [new instance]. Spread-new path.
       case state.stack {
-        [JsObject(args_ref), JsObject(ctor_ref), ..rest] -> {
+        [JsObject(args_ref), JsObject(nt_ref), JsObject(ctor_ref), ..rest] -> {
           let args = extract_array_args(state.heap, args_ref)
-          do_construct(state, ctor_ref, args, rest)
+          do_construct(state, ctor_ref, args, rest, nt_ref)
         }
-        [_, non_ctor, ..] -> {
+        [_, _, non_ctor, ..] ->
           state.throw_type_error(
             state,
             object.inspect(non_ctor, state.heap) <> " is not a constructor",
           )
-        }
         _ -> underflow(state, "CallConstructorApply")
       }
-    }
+
+    // Generic [[GetPrototypeOf]]: [obj] → [proto|null]. Used as the second
+    // hop for both `super.x` (home_object → proto) and `super()` (active_func
+    // → parent ctor) — QuickJS OP_get_super.
+    GetPrototypeOf ->
+      case state.stack {
+        [JsObject(ref), ..rest] -> {
+          let proto = case heap.read(state.heap, ref) {
+            Some(ObjectSlot(prototype: Some(p), ..)) -> JsObject(p)
+            _ -> JsNull
+          }
+          Ok(State(..state, stack: [proto, ..rest], pc: state.pc + 1))
+        }
+        [_, ..rest] ->
+          Ok(State(..state, stack: [JsNull, ..rest], pc: state.pc + 1))
+        _ -> underflow(state, "GetPrototypeOf")
+      }
+
+    GetSuperValue ->
+      // [key, base, this, ..] → [val, ..]. OrdinaryGet on base, receiver=this.
+      case state.stack {
+        [key, JsObject(base_ref), this_val, ..rest] -> {
+          use #(pk, state) <- result.try(
+            state.rethrow(property.to_property_key(state, key)),
+          )
+          use #(val, state) <- result.map(
+            state.rethrow(object.get_value(state, base_ref, pk, this_val)),
+          )
+          State(..state, stack: [val, ..rest], pc: state.pc + 1)
+        }
+        // §12.3.5.3 step 5 RequireObjectCoercible — base is null when
+        // home_object's prototype is null (e.g. `class C extends null`).
+        [_key, _base, _this, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot read super property when prototype is null",
+          )
+        _ -> underflow(state, "GetSuperValue")
+      }
+
+    GetSuperValue2 ->
+      // [key, base, this, ..] → [val, pk, base, this, ..]. Read-under for
+      // compound/update super: ToPropertyKey ONCE (so e.g. key.toString runs
+      // once per §13.15.2), Get with receiver=this, leave coerced key + base
+      // + this for the trailing PutSuperValue.
+      case state.stack {
+        [key, JsObject(base_ref), this_val, ..rest] -> {
+          use #(pk, state) <- result.try(
+            state.rethrow(property.to_property_key(state, key)),
+          )
+          use #(val, state) <- result.map(
+            state.rethrow(object.get_value(state, base_ref, pk, this_val)),
+          )
+          // Write coerced key back as a primitive JsValue so PutSuperValue's
+          // own to_property_key fast-paths with no observable side effects.
+          let pk_val = JsString(value.key_to_string(pk))
+          State(
+            ..state,
+            stack: [val, pk_val, JsObject(base_ref), this_val, ..rest],
+            pc: state.pc + 1,
+          )
+        }
+        [_key, _base, _this, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot read super property when prototype is null",
+          )
+        _ -> underflow(state, "GetSuperValue2")
+      }
+
+    PutSuperValue ->
+      // [val, key, base, this, ..] → [val, ..]. OrdinarySet, receiver=this.
+      case state.stack {
+        [val, key, JsObject(base_ref), this_val, ..rest] -> {
+          use #(pk, state) <- result.try(
+            state.rethrow(property.to_property_key(state, key)),
+          )
+          use #(state, ok) <- result.try(
+            state.rethrow(object.set_value(state, base_ref, pk, val, this_val)),
+          )
+          // §6.2.5.6 PutValue step 5.c — gate on caller strictness so sloppy
+          // object-literal methods stay non-throwing (QuickJS JS_PROP_THROW_STRICT).
+          case ok, state.func.is_strict {
+            False, True ->
+              state.throw_type_error(
+                state,
+                "Cannot assign to read-only super property",
+              )
+            _, _ -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+          }
+        }
+        [_val, _key, _base, _this, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot write super property when prototype is null",
+          )
+        _ -> underflow(state, "PutSuperValue")
+      }
 
     MakeClosure(func_index) -> {
       // Compiler-generated index into the function table — always in bounds.
@@ -2429,12 +2491,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           child_template,
           captured_values,
         )
-      // Arrows have no own [[HomeObject]]; they reference `super` through the
-      // enclosing method's home object (§13.3.7), mirroring lexical `this`.
-      let heap = case child_template.is_arrow, callee_home_object(state) {
-        True, Some(home) -> set_home_object(heap, JsObject(closure_ref), home)
-        _, _ -> heap
-      }
       Ok(
         State(
           ..state,
@@ -2900,8 +2956,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // Allocate an unmapped arguments object from state.call_args.
       let args = state.call_args
       let length = list.length(args)
-      let callee =
-        state.callee_ref |> option.map(JsObject) |> option.unwrap(JsUndefined)
+      let callee = read_lexical_local(state, opcode.RefActiveFunc)
       let props =
         dict.from_list([
           #(
@@ -3047,23 +3102,25 @@ fn call_function(
   state: State,
   fn_ref: value.Ref,
   env_ref: value.Ref,
+  home_object: option.Option(value.Ref),
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
-  new_callee_ref: option.Option(Ref),
+  new_target: JsValue,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   call.call_function(
     state,
     fn_ref,
     env_ref,
+    home_object,
     callee_template,
     args,
     rest_stack,
     this_val,
     constructor_this,
-    new_callee_ref,
+    new_target,
     execute_inner,
     unwind_to_catch,
   )
@@ -3089,161 +3146,23 @@ fn call_native(
   )
 }
 
-/// ES2024 §13.3.7.1 SuperCall — `super(args)` inside a derived constructor.
-///
-/// Find the parent constructor via callee_ref.[[Prototype]], invoke it with
-/// the supplied args, and bind the result as `this`. Shared between CallSuper
-/// (fixed arity, args on stack) and CallSuperApply (spread, args from array).
-fn do_call_super(
-  state: State,
-  args: List(JsValue),
-  rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
-  case state.callee_ref {
-    None ->
-      state.throw_reference_error(state, "'super' keyword unexpected here")
-    Some(my_ctor_ref) ->
-      case heap.read(state.heap, my_ctor_ref) {
-        Some(ObjectSlot(prototype: Some(parent_ref), properties: my_props, ..)) -> {
-          // Compute newTarget.prototype — the [[Prototype]] for the new
-          // instance. First super() in a chain reads my_ctor.prototype;
-          // intermediate super() reuses the existing this's proto (which is
-          // already the leaf subclass's prototype).
-          let derived_proto = case read_this_local(state) {
-            JsUninitialized ->
-              case dict.get(my_props, Named("prototype")) {
-                Ok(DataProperty(value: JsObject(dp_ref), ..)) -> Some(dp_ref)
-                _ -> Some(state.builtins.object.prototype)
-              }
-            JsObject(existing_ref) ->
-              case heap.read(state.heap, existing_ref) {
-                Some(ObjectSlot(prototype: p, ..)) -> p
-                _ -> Some(state.builtins.object.prototype)
-              }
-            _ -> Some(state.builtins.object.prototype)
-          }
-          do_call_super_dispatch(
-            state,
-            parent_ref,
-            derived_proto,
-            args,
-            rest_stack,
-          )
-        }
-        _ ->
-          state.throw_type_error(
-            state,
-            "Super constructor is not a constructor",
-          )
-      }
-  }
-}
-
-/// SuperCall step 5: Construct(func, argList, newTarget). Dispatches on the
-/// resolved parent constructor kind. Split out so a bound-function parent can
-/// recurse on its [[BoundTargetFunction]] with prepended args.
-fn do_call_super_dispatch(
-  state: State,
-  parent_ref: Ref,
-  derived_proto: Option(Ref),
-  args: List(JsValue),
-  rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
-  case heap.read(state.heap, parent_ref) {
-    Some(ObjectSlot(kind: FunctionObject(func_template:, env: env_ref, ..), ..)) -> {
-      // JS-defined parent: allocate (or reuse) an OrdinaryObject as `this` and
-      // enter the parent body. parent_ref becomes the new callee_ref so further
-      // super() in the chain finds *its* parent.
-      let #(heap, this_val) = case read_this_local(state) {
-        JsUninitialized -> {
-          let #(h, ref) =
-            heap.alloc(
-              state.heap,
-              ObjectSlot(
-                kind: OrdinaryObject,
-                properties: dict.new(),
-                elements: elements.new(),
-                prototype: derived_proto,
-                symbol_properties: [],
-                extensible: True,
-              ),
-            )
-          #(h, JsObject(ref))
-        }
-        existing -> #(state.heap, existing)
-      }
-      call_function(
-        State(..state, heap:),
-        parent_ref,
-        env_ref,
-        func_template,
-        args,
-        rest_stack,
-        this_val,
-        Some(this_val),
-        Some(parent_ref),
-      )
-    }
-    // Bound function as superclass (§10.4.1.2): construct the
-    // [[BoundTargetFunction]] with [[BoundArguments]] prepended; bound `this`
-    // is ignored under [[Construct]].
-    Some(ObjectSlot(
-      kind: NativeFunction(
-        value.Call(value.BoundFunction(target:, bound_args:, ..)),
-        ..,
-      ),
-      ..,
-    )) ->
-      do_call_super_dispatch(
-        state,
-        target,
-        derived_proto,
-        list.append(bound_args, args),
-        rest_stack,
-      )
-    // §20.4.1: Symbol has no [[Construct]]; super() into Symbol must throw.
-    Some(ObjectSlot(
-      kind: NativeFunction(value.Call(value.SymbolConstructor), ..),
-      ..,
-    )) -> state.throw_type_error(state, "Symbol is not a constructor")
-    Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) -> {
-      // Built-in parent (Array, Map, Error, …): per spec the result of
-      // Construct(func, args, newTarget) becomes `this`. Arc's native ctors
-      // don't thread newTarget, so pre-allocate the derived instance and pass
-      // it as `this`. Natives that return `this` (abstract Iterator) keep it;
-      // natives that allocate their own exotic object (Map, Array, …) ignore
-      // it and we re-prototype the result below.
-      let #(heap, this_ref) =
-        heap.alloc(
-          state.heap,
+/// §15.4.4 MakeMethod(F, homeObject): if `func` is a JS closure, set its
+/// [[HomeObject]] = `target` so `super.x` inside it resolves via the
+/// home object's prototype. No-op for non-closures (native, bound, etc.).
+fn make_method(h: Heap, func: JsValue, target: Ref) -> Heap {
+  case func {
+    JsObject(fn_ref) -> {
+      use slot <- heap.update(h, fn_ref)
+      case slot {
+        ObjectSlot(kind: FunctionObject(..) as fo, ..) ->
           ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: derived_proto,
-            symbol_properties: [],
-            extensible: True,
-          ),
-        )
-      let this_obj = JsObject(this_ref)
-      use new_state <- result.try(call_native(
-        State(..state, heap:),
-        native,
-        args,
-        rest_stack,
-        this_obj,
-      ))
-      case new_state.stack {
-        [JsObject(result_ref), ..] -> {
-          let heap =
-            set_slot_prototype(new_state.heap, result_ref, derived_proto)
-          Ok(State(..new_state, heap:))
-        }
-        [_, ..tail] -> Ok(State(..new_state, stack: [this_obj, ..tail]))
-        [] -> underflow(new_state, "CallSuper: native returned nothing")
+            ..slot,
+            kind: FunctionObject(..fo, home_object: Some(target)),
+          )
+        _ -> slot
       }
     }
-    _ -> state.throw_type_error(state, "Super constructor is not a constructor")
+    _ -> h
   }
 }
 
@@ -3253,12 +3172,14 @@ fn do_construct(
   ctor_ref: Ref,
   args: List(JsValue),
   rest_stack: List(JsValue),
+  new_target_ref: Ref,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   call.do_construct(
     state,
     ctor_ref,
     args,
     rest_stack,
+    new_target_ref,
     execute_inner,
     unwind_to_catch,
     dispatch_native,
@@ -3299,100 +3220,10 @@ fn grow_array_length(h: Heap, ref: Ref) -> Heap {
   array_ops.grow_array_length(h, ref)
 }
 
-/// The [[HomeObject]] of the running function, if any. Arrows carry the home
-/// object copied from their enclosing method (set at MakeClosure), so `super`
-/// works inside an arrow nested in a method.
-fn callee_home_object(state: State) -> Option(Ref) {
-  case state.callee_ref {
-    Some(fn_ref) ->
-      case heap.read(state.heap, fn_ref) {
-        Some(ObjectSlot(kind: FunctionObject(home_object: home, ..), ..)) ->
-          home
-        _ -> None
-      }
-    None -> None
-  }
-}
 
-/// §13.3.7.3 GetSuperBase: the [[Prototype]] of the running method's
-/// [[HomeObject]]. None when there is no home object (plain function — `super`
-/// is then a syntax error and never reached) or the home's prototype is null.
-fn super_base_ref(state: State) -> Option(Ref) {
-  case callee_home_object(state) {
-    Some(home) ->
-      case heap.read(state.heap, home) {
-        Some(ObjectSlot(prototype: proto, ..)) -> proto
-        _ -> None
-      }
-    None -> None
-  }
-}
 
-/// Read `super.<key>` and hand the value + threaded state to `build`. The
-/// lookup walks from the super base but uses the current `this` as the [[Get]]
-/// receiver (so inherited getters see the right `this`). A null base yields
-/// undefined.
-fn get_super_value(
-  state: State,
-  key: value.PropertyKey,
-  build: fn(JsValue, State) -> State,
-) -> Result(State, #(StepResult, JsValue, State)) {
-  let this_val = read_this_local(state)
-  case super_base_ref(state) {
-    Some(base) -> {
-      use #(val, state) <- result.map(
-        state.rethrow(object.get_value(state, base, key, this_val)),
-      )
-      build(val, state)
-    }
-    None -> Ok(build(JsUndefined, state))
-  }
-}
 
-/// Write `super.<key> = val`. [[Set]] starts at the super base but the receiver
-/// is the current `this`, so own data lands on `this` while parent setters
-/// still fire (§13.3.7). Leaves `val` on the stack (assignment is an expr).
-fn put_super_value(
-  state: State,
-  key: value.PropertyKey,
-  val: JsValue,
-  rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
-  let this_val = read_this_local(state)
-  case super_base_ref(state) {
-    Some(base) -> {
-      use #(state, _ok) <- result.map(
-        state.rethrow(object.set_value(state, base, key, val, this_val)),
-      )
-      State(..state, stack: [val, ..rest], pc: state.pc + 1)
-    }
-    None ->
-      state.throw_type_error(
-        state,
-        "Cannot set super property of null prototype",
-      )
-  }
-}
 
-/// Record the [[HomeObject]] of a method/accessor as it is installed, so that
-/// `super` inside its body resolves against `home`'s [[Prototype]] (§13.3.7).
-/// `home` is the class prototype for instance members, the constructor for
-/// statics, or the object for object-literal methods. No-op for non-functions.
-fn set_home_object(h: Heap, fn_val: JsValue, home: Ref) -> Heap {
-  case fn_val {
-    JsObject(fn_ref) ->
-      case heap.read(h, fn_ref) {
-        Some(ObjectSlot(kind: FunctionObject(func_template:, env:, ..), ..)) ->
-          heap.update_kind(
-            h,
-            fn_ref,
-            FunctionObject(func_template:, env:, home_object: Some(home)),
-          )
-        _ -> h
-      }
-    _ -> h
-  }
-}
 
 /// Thin wrapper: delegates to array_ops.push_onto_array.
 fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {

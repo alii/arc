@@ -35,6 +35,8 @@ pub type ParseError {
   YieldInGenerator(pos: Int)
   AwaitInModule(pos: Int)
   AwaitInAsyncFunction(pos: Int)
+  AwaitInStaticBlock(pos: Int)
+  ArgumentsInStaticBlock(pos: Int)
   EnumReservedWord(pos: Int)
   EscapedReservedWord(name: String, pos: Int)
   DuplicateParameterName(name: String, pos: Int)
@@ -161,6 +163,9 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     AwaitInModule(_) -> "'await' cannot be used as identifier in module"
     AwaitInAsyncFunction(_) ->
       "'await' cannot be used as identifier in async function"
+    AwaitInStaticBlock(_) -> "'await' is not allowed in class static block"
+    ArgumentsInStaticBlock(_) ->
+      "'arguments' is not allowed in class static block"
     EnumReservedWord(_) -> "'enum' is a reserved word"
     EscapedReservedWord(name:, ..) ->
       "Keyword '" <> name <> "' must not contain escape sequences"
@@ -332,6 +337,8 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | YieldInGenerator(pos:)
     | AwaitInModule(pos:)
     | AwaitInAsyncFunction(pos:)
+    | AwaitInStaticBlock(pos:)
+    | ArgumentsInStaticBlock(pos:)
     | EnumReservedWord(pos:)
     | DuplicateParameterName(pos:, ..)
     | DuplicateBindingLexical(pos:, ..)

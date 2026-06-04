@@ -8,6 +8,7 @@ import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
+import arc/vm/opcode
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type VmError, State}
@@ -35,7 +36,7 @@ fn seed_top_level_locals(
   this_val: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
   let locals = tuple_array.repeat(JsUndefined, template.local_count)
-  case template.this_slot {
+  case template.lexical.this {
     Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
     None -> locals
   }
@@ -117,6 +118,7 @@ pub fn eval_script_native(
         state,
         realm_builtins,
         source_str,
+        parser.parse(_, parser.Script),
         compiler.compile_eval,
       )
       // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
@@ -286,13 +288,17 @@ pub fn build_262(
 // eval() and Function() constructor — runtime code evaluation
 // ============================================================================
 
-/// Parse `source` as a Script and run `compile` on it. On parse or compile
-/// failure, allocate a SyntaxError using `builtins` and return it as a thrown
+/// Run `parse` then `compile` on `source`. On parse or compile failure,
+/// allocate a SyntaxError using `builtins` and return it as a thrown
 /// completion. CPS so callers write `use template <- compile_or_throw(...)`.
+/// `parse` is injected so direct-eval can seed parser context (new.target
+/// permission today; full SyntaxPerms in P11) while indirect-eval / Function
+/// constructor stay context-free.
 fn compile_or_throw(
   state: State,
   builtins: Builtins,
   source: String,
+  parse: fn(String) -> Result(ast.Program, parser.ParseError),
   compile: fn(ast.Program) -> Result(FuncTemplate, compiler.CompileError),
   cont: fn(FuncTemplate) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
@@ -300,7 +306,7 @@ fn compile_or_throw(
     let #(heap, err) = common.make_syntax_error(state.heap, builtins, msg)
     #(State(..state, heap:), Error(err))
   }
-  case parser.parse(source, parser.Script) {
+  case parse(source) {
     Error(err) -> throw_syntax(parser.parse_error_to_string(err))
     Ok(program) ->
       case compile(program) {
@@ -323,6 +329,7 @@ fn run_source_in_current_realm(
     state,
     state.builtins,
     source,
+    parser.parse(_, parser.Script),
     compiler.compile_eval,
   )
   // §19.2.1.1 PerformEval: indirect eval runs in global scope,
@@ -440,29 +447,40 @@ fn run_direct_eval(
   // lexical `this` (if any) is threaded as one extra capture after the
   // named ones, so eval('this') aliases the caller's slot.
   let parent_names = list.map(name_table, fn(pair) { pair.0 })
-  let inherits_this = option.is_some(state.func.this_slot)
+  let parent_slots = state.func.lexical
+  let perms = state.func.syntax_perms
   let caller_strict = state.func.is_strict
   use template <- compile_or_throw(
     state,
     state.builtins,
     source,
-    compiler.compile_eval_direct(_, parent_names, inherits_this, caller_strict),
+    parser.parse_direct_eval(_, allow_new_target: perms.new_target_allowed),
+    compiler.compile_eval_direct(
+      _,
+      parent_names,
+      parent_slots,
+      perms,
+      caller_strict,
+    ),
   )
-  // Seed locals[0..N-1] with the caller's box refs (pulled from
-  // caller's locals at the indices in name_table), then the caller's
-  // `this` box ref. Remaining slots default to undefined.
+  // Seed locals[0..N-1] with the caller's box refs (pulled from caller's
+  // locals at the indices in name_table), then the caller's lexical box refs
+  // in canonical order (one per Some entry in parent_slots — same order
+  // compile_eval_direct allocates capture slots). Remaining slots default to
+  // undefined.
   let caller_box_refs =
     list.map(name_table, fn(pair) {
       tuple_array.get(pair.1, state.locals)
       |> option.unwrap(JsUndefined)
     })
-  let caller_box_refs = case state.func.this_slot {
-    Some(idx) ->
-      list.append(caller_box_refs, [
-        tuple_array.get(idx, state.locals) |> option.unwrap(JsUndefined),
-      ])
-    None -> caller_box_refs
-  }
+  let lexical_box_refs =
+    list.filter_map(opcode.all_lexical_refs, fn(ref) {
+      use idx <- result.map(
+        opcode.lexical_slot(parent_slots, ref) |> option.to_result(Nil),
+      )
+      tuple_array.get(idx, state.locals) |> option.unwrap(JsUndefined)
+    })
+  let caller_box_refs = list.append(caller_box_refs, lexical_box_refs)
   let remaining = template.local_count - list.length(caller_box_refs)
   let locals =
     list.append(caller_box_refs, list.repeat(JsUndefined, remaining))

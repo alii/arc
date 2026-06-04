@@ -144,6 +144,30 @@ pub fn alloc_pojo(
   )
 }
 
+/// §10.1.13 OrdinaryCreateFromConstructor — read newTarget.prototype, fall
+/// back to `intrinsic_proto` if not an object, then allocate an OrdinaryObject
+/// with that prototype. Native constructors that support subclassing call
+/// this with `state.new_target` (set by `do_construct` before native dispatch).
+pub fn ordinary_create_from_constructor(
+  h: Heap(ctx),
+  new_target: JsValue,
+  intrinsic_proto: Ref,
+) -> #(Heap(ctx), Ref) {
+  let proto = case new_target {
+    JsObject(nt_ref) ->
+      case heap.read(h, nt_ref) {
+        Some(ObjectSlot(properties:, ..)) ->
+          case dict.get(properties, Named("prototype")) {
+            Ok(value.DataProperty(value: JsObject(proto_ref), ..)) -> proto_ref
+            _ -> intrinsic_proto
+          }
+        _ -> intrinsic_proto
+      }
+    _ -> intrinsic_proto
+  }
+  alloc_pojo(h, proto, [])
+}
+
 /// CreateIterResultObject(value, done) — §7.4.11. Allocates `{value, done}`.
 pub fn create_iter_result(
   h: Heap(ctx),

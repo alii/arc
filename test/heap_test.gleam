@@ -1,6 +1,7 @@
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
+import arc/vm/opcode
 import arc/vm/value.{
   type FuncTemplate, ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FuncTemplate,
   FunctionObject, JsBigInt, JsNull, JsNumber, JsObject, JsString, JsSymbol,
@@ -26,7 +27,8 @@ fn dummy_template() -> FuncTemplate {
     is_async: False,
     is_constructor: False,
     local_names: None,
-    this_slot: None,
+    lexical: opcode.no_lexical_slots,
+    syntax_perms: opcode.script_perms,
   )
 }
 

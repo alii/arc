@@ -8,14 +8,14 @@ import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArrayNativeFn, type JsElements, type JsValue, type Property, type Ref,
-  ArrayConstructor, ArrayFrom, ArrayIsArray, ArrayNative, ArrayObject, ArrayOf,
-  ArrayPrototypeAt, ArrayPrototypeConcat, ArrayPrototypeCopyWithin,
-  ArrayPrototypeEvery, ArrayPrototypeFill, ArrayPrototypeFilter,
-  ArrayPrototypeFind, ArrayPrototypeFindIndex, ArrayPrototypeFindLast,
-  ArrayPrototypeFindLastIndex, ArrayPrototypeFlat, ArrayPrototypeFlatMap,
-  ArrayPrototypeForEach, ArrayPrototypeIncludes, ArrayPrototypeIndexOf,
-  ArrayPrototypeJoin, ArrayPrototypeLastIndexOf, ArrayPrototypeMap,
-  ArrayPrototypePop, ArrayPrototypePush, ArrayPrototypeReduce,
+  AccessorProperty, ArrayConstructor, ArrayFrom, ArrayIsArray, ArrayNative,
+  ArrayObject, ArrayOf, ArrayPrototypeAt, ArrayPrototypeConcat,
+  ArrayPrototypeCopyWithin, ArrayPrototypeEvery, ArrayPrototypeFill,
+  ArrayPrototypeFilter, ArrayPrototypeFind, ArrayPrototypeFindIndex,
+  ArrayPrototypeFindLast, ArrayPrototypeFindLastIndex, ArrayPrototypeFlat,
+  ArrayPrototypeFlatMap, ArrayPrototypeForEach, ArrayPrototypeIncludes,
+  ArrayPrototypeIndexOf, ArrayPrototypeJoin, ArrayPrototypeLastIndexOf,
+  ArrayPrototypeMap, ArrayPrototypePop, ArrayPrototypePush, ArrayPrototypeReduce,
   ArrayPrototypeReduceRight, ArrayPrototypeReverse, ArrayPrototypeShift,
   ArrayPrototypeSlice, ArrayPrototypeSome, ArrayPrototypeSort,
   ArrayPrototypeSplice, ArrayPrototypeToReversed, ArrayPrototypeToSorted,
@@ -464,7 +464,7 @@ fn require_array(
           cont(ref, length, state)
         // §7.1.18 String row / §10.4.3: String exotic object.
         Some(ObjectSlot(kind: value.StringObject(value: s), ..)) ->
-          cont(ref, string.length(s), state)
+          cont(ref, object.string_length(s), state)
         // Generic object: LengthOfArrayLike (§7.3.18) — Get(obj, "length"),
         // then ToLength (§7.1.17).
         Some(ObjectSlot(properties:, ..)) ->
@@ -479,7 +479,7 @@ fn require_array(
     // which handles string primitives via StringGetOwnProperty semantics.
     // Mutating methods will fail via generic_set on heap.sentinel_ref (no-op), which
     // is correct since string indices are non-writable (§10.4.3.5 step 11).
-    JsString(s) -> cont(heap.sentinel_ref, string.length(s), state)
+    JsString(s) -> cont(heap.sentinel_ref, object.string_length(s), state)
     // §7.1.18 Boolean/Number/Symbol/BigInt rows: ToObject creates a wrapper
     // object with no own `.length` property → LengthOfArrayLike returns 0.
     _ -> cont(heap.sentinel_ref, 0, state)
@@ -511,8 +511,78 @@ fn get_index(
 fn has_index(heap: Heap, this: JsValue, idx: Int) -> Bool {
   case this {
     JsObject(ref) -> object.has_property(heap, ref, Index(idx))
-    JsString(s) -> idx >= 0 && idx < string.length(s)
+    JsString(s) -> idx >= 0 && idx < object.string_length(s)
     _ -> False
+  }
+}
+
+/// Fused HasProperty + Get on an array-like by integer index.
+///
+/// Replaces the per-element `has_index() then get_index()` pattern used by
+/// the SkipHoles iteration loops (forEach/map/filter/reduce/indexOf/...).
+/// The old pattern did two independent `heap.read + own_property_of_slot`
+/// lookups per element; this does ONE for the common case where the element
+/// is an own property (dense arrays — the overwhelming majority).
+///
+/// Returns:
+///   Ok(#(Some(val), state)) — index is present (own or inherited)
+///   Ok(#(None, state))      — index is absent (hole; SkipHoles would skip)
+///   Error(#(exc, state))    — accessor getter threw
+///
+/// Semantics match `has_index() ? get_index() : skip` exactly: own property
+/// is checked first via §10.1.5 [[GetOwnProperty]], and only on a miss do we
+/// fall through to the prototype-chain HasProperty/Get (§7.3.11 / §7.3.2).
+fn get_index_if_present(
+  state: State,
+  this: JsValue,
+  idx: Int,
+) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
+  let key = Index(idx)
+  case this {
+    JsObject(ref) ->
+      // Fast path: ONE heap read for own [[GetOwnProperty]].
+      case object.get_own_property(state.heap, ref, key) {
+        // §10.1.8.1 step 3: data descriptor → value. (Hot path: dense arrays.)
+        Some(DataProperty(value: val, ..)) -> Ok(#(Some(val), state))
+        // §10.1.8.1 steps 5-7: accessor → Call(getter, Receiver) or undefined.
+        Some(AccessorProperty(get: Some(getter), ..)) -> {
+          use #(val, state) <- result.map(state.call(state, getter, this, []))
+          #(Some(val), state)
+        }
+        Some(AccessorProperty(get: None, ..)) -> Ok(#(Some(JsUndefined), state))
+        // Own property absent — consult prototype chain (cold path: holes).
+        // §7.3.11 step 4 / §10.1.8.1 step 2: parent.[[HasProperty]]/[[Get]].
+        None ->
+          case heap.read(state.heap, ref) {
+            Some(ObjectSlot(prototype: Some(proto), ..)) ->
+              case object.has_property(state.heap, proto, key) {
+                False -> Ok(#(None, state))
+                True -> {
+                  use #(val, state) <- result.map(object.get_value(
+                    state,
+                    proto,
+                    key,
+                    this,
+                  ))
+                  #(Some(val), state)
+                }
+              }
+            _ -> Ok(#(None, state))
+          }
+      }
+    // String primitive: in-range index is an own data property per §10.4.3.5;
+    // out-of-range is absent (matches has_index, which does not walk
+    // String.prototype for indexed keys).
+    JsString(s) ->
+      Ok(#(
+        case idx >= 0 {
+          True -> object.string_char_at(s, idx) |> option.map(JsString)
+          False -> None
+        },
+        state,
+      ))
+    // Other primitives: no indexed own properties (matches has_index).
+    _ -> Ok(#(None, state))
   }
 }
 
@@ -650,10 +720,13 @@ fn resolve_index(arg: JsValue, len: Int, default: Int) -> Int {
 /// object.set_value implements the [[Set]] internal method (§10.1.9) which
 /// walks the prototype chain, invokes setters, and returns a Bool indicating
 /// success. The receiver is JsObject(ref) — i.e. the object itself.
+///
+/// Takes a canonical PropertyKey directly so per-element loops avoid the
+/// int → string → canonical_key → Index(int) roundtrip.
 fn generic_set(
   state: State,
   ref: Ref,
-  key: String,
+  key: value.PropertyKey,
   val: JsValue,
 ) -> Result(State, #(JsValue, State)) {
   // §7.3.4 step 1: Let success be ? O.[[Set]](P, V, O).
@@ -661,7 +734,7 @@ fn generic_set(
     use #(state, success) <- result.try(object.set_value(
       state,
       ref,
-      value.canonical_key(key),
+      key,
       val,
       JsObject(ref),
     ))
@@ -672,7 +745,9 @@ fn generic_set(
       False ->
         coerce.thrown_type_error(
           state,
-          "Cannot assign to read only property '" <> key <> "' of object",
+          "Cannot assign to read only property '"
+            <> value.key_to_string(key)
+            <> "' of object",
         )
     }
   }
@@ -684,14 +759,14 @@ fn generic_set(
 /// ToString(𝔽(k)), e.g. §23.1.3.22 Array.prototype.push step 5:
 ///   "Perform ? Set(O, ! ToString(𝔽(len)), E, true)."
 ///
-/// We stringify the index and delegate to generic_set (§7.3.4).
+/// Passes Index(idx) directly — no string allocation on the hot path.
 fn generic_set_index(
   state: State,
   ref: Ref,
   idx: Int,
   val: JsValue,
 ) -> Result(State, #(JsValue, State)) {
-  generic_set(state, ref, int.to_string(idx), val)
+  generic_set(state, ref, Index(idx), val)
 }
 
 /// Convenience: Set(O, "length", 𝔽(len), true).
@@ -706,7 +781,7 @@ fn generic_set_length(
   ref: Ref,
   len: Int,
 ) -> Result(State, #(JsValue, State)) {
-  generic_set(state, ref, "length", value.from_int(len))
+  generic_set(state, ref, Named("length"), value.from_int(len))
 }
 
 /// DeletePropertyOrThrow (ES2024 §7.3.9).
@@ -728,11 +803,10 @@ fn generic_set_length(
 fn generic_delete(
   state: State,
   ref: Ref,
-  key: String,
+  key: value.PropertyKey,
 ) -> Result(State, #(JsValue, State)) {
   // §7.3.9 step 1: Let success be ? O.[[Delete]](P).
-  let #(h, ok) =
-    object.delete_property(state.heap, ref, value.canonical_key(key))
+  let #(h, ok) = object.delete_property(state.heap, ref, key)
   let state = State(..state, heap: h)
   case ok {
     // success = true → return normally.
@@ -741,9 +815,18 @@ fn generic_delete(
     False ->
       coerce.thrown_type_error(
         state,
-        "Cannot delete property '" <> key <> "' of object",
+        "Cannot delete property '" <> value.key_to_string(key) <> "' of object",
       )
   }
+}
+
+/// Convenience: DeletePropertyOrThrow(O, ! ToString(𝔽(index))).
+fn generic_delete_index(
+  state: State,
+  ref: Ref,
+  idx: Int,
+) -> Result(State, #(JsValue, State)) {
+  generic_delete(state, ref, Index(idx))
 }
 
 /// HasProperty (ES2024 §7.3.11).
@@ -829,11 +912,7 @@ fn array_pop(
       // Step 4d: element = Get(O, ToString(newLen))
       use val, state <- state.try_op(generic_get(state, ref, new_len))
       // Step 4e: DeletePropertyOrThrow(O, index)
-      use state <- state.try_state(generic_delete(
-        state,
-        ref,
-        int.to_string(new_len),
-      ))
+      use state <- state.try_state(generic_delete_index(state, ref, new_len))
       // Step 4f: Set(O, "length", newLen, true)
       // Step 4g: Return element
       wrap(generic_set_length(state, ref, new_len), val)
@@ -883,11 +962,7 @@ fn array_shift(
       // Steps 5-6: shift indices [1..len) down by 1 (see shift_left_generic)
       use state <- state.try_state(shift_left_generic(state, ref, 1, length))
       // Step 7: DeletePropertyOrThrow(O, ToString(len - 1))
-      use state <- state.try_state(generic_delete(
-        state,
-        ref,
-        int.to_string(length - 1),
-      ))
+      use state <- state.try_state(generic_delete_index(state, ref, length - 1))
       // Step 8: Set(O, "length", len - 1, true)
       // Step 9: Return first
       wrap(generic_set_length(state, ref, length - 1), val)
@@ -923,20 +998,20 @@ fn shift_left_generic(
     True -> Ok(state)
     False -> {
       // Step 6b: to = ToString(k - 1)
-      let to = int.to_string(k - 1)
+      let to = k - 1
       // Step 6c: fromPresent = HasProperty(O, from)
       case generic_has(state.heap, ref, k) {
         True -> {
           // Step 6d.i: fromVal = Get(O, from)
           use #(val, state) <- result.try(generic_get(state, ref, k))
           // Step 6d.ii: Set(O, to, fromVal, true)
-          use state <- result.try(generic_set(state, ref, to, val))
+          use state <- result.try(generic_set_index(state, ref, to, val))
           // Step 6f: k = k + 1
           shift_left_generic(state, ref, k + 1, len)
         }
         False -> {
           // Step 6e.i: DeletePropertyOrThrow(O, to)
-          use state <- result.try(generic_delete(state, ref, to))
+          use state <- result.try(generic_delete_index(state, ref, to))
           // Step 6f: k = k + 1
           shift_left_generic(state, ref, k + 1, len)
         }
@@ -1023,20 +1098,20 @@ fn shift_right_generic(
     False -> {
       // Step 4c.ii: to = ToString(k + argCount)
       // (spec says k + argCount - 1, but our k = spec's k - 1, so k + delta)
-      let to = int.to_string(k + delta)
+      let to = k + delta
       // Step 4c.iii: fromPresent = HasProperty(O, from)
       case generic_has(state.heap, ref, k) {
         True -> {
           // Step 4c.iv.1: fromValue = Get(O, from)
           use #(val, state) <- result.try(generic_get(state, ref, k))
           // Step 4c.iv.2: Set(O, to, fromValue, true)
-          use state <- result.try(generic_set(state, ref, to, val))
+          use state <- result.try(generic_set_index(state, ref, to, val))
           // Step 4c.vi: k = k - 1
           shift_right_generic(state, ref, k - 1, delta)
         }
         False -> {
           // Step 4c.v.1: DeletePropertyOrThrow(O, to)
-          use state <- result.try(generic_delete(state, ref, to))
+          use state <- result.try(generic_delete_index(state, ref, to))
           // Step 4c.vi: k = k - 1
           shift_right_generic(state, ref, k - 1, delta)
         }
@@ -1193,12 +1268,17 @@ fn copy_range(
 ) -> Result(#(JsElements, State), #(JsValue, State)) {
   case remaining <= 0 {
     True -> Ok(#(dst, state))
-    False ->
-      // Step 14b: kPresent = HasProperty(O, Pk).
-      case has_index(state.heap, src, src_idx) {
+    False -> {
+      // Step 14b-c: kPresent = HasProperty(O, Pk); if true, kValue = Get(O, Pk)
+      // — fused into one heap lookup.
+      use #(maybe_val, state) <- result.try(get_index_if_present(
+        state,
+        src,
+        src_idx,
+      ))
+      case maybe_val {
         // Step 14c: kPresent is true — copy the element.
-        True -> {
-          use #(val, state) <- result.try(get_index(state, src, src_idx))
+        Some(val) ->
           copy_range(
             state,
             src,
@@ -1207,11 +1287,11 @@ fn copy_range(
             remaining - 1,
             elements.set(dst, dst_idx, val),
           )
-        }
         // kPresent is false (hole): skip — do not set dst[dst_idx].
-        False ->
+        None ->
           copy_range(state, src, src_idx + 1, dst_idx + 1, remaining - 1, dst)
       }
+    }
   }
 }
 
@@ -1418,9 +1498,6 @@ fn reverse_generic(
       let has_lo = generic_has(state.heap, ref, lo)
       // Step 5f: Let upperExists be ? HasProperty(O, upperP)
       let has_hi = generic_has(state.heap, ref, hi)
-      // Steps 5b-c: lowerP = ToString(lower), upperP = ToString(upper)
-      let lo_key = int.to_string(lo)
-      let hi_key = int.to_string(hi)
       case has_lo, has_hi {
         // Step 5h: lowerExists AND upperExists — swap
         True, True -> {
@@ -1429,9 +1506,9 @@ fn reverse_generic(
           // Step 5g: upperValue = Get(O, upperP)
           use #(hi_val, state) <- result.try(generic_get(state, ref, hi))
           // Step 5h.i: Set(O, lowerP, upperValue, true)
-          use state <- result.try(generic_set(state, ref, lo_key, hi_val))
+          use state <- result.try(generic_set_index(state, ref, lo, hi_val))
           // Step 5h.ii: Set(O, upperP, lowerValue, true)
-          use state <- result.try(generic_set(state, ref, hi_key, lo_val))
+          use state <- result.try(generic_set_index(state, ref, hi, lo_val))
           // Step 5l: lower = lower + 1
           reverse_generic(state, ref, lo + 1, hi - 1)
         }
@@ -1440,9 +1517,9 @@ fn reverse_generic(
           // Step 5g: upperValue = Get(O, upperP)
           use #(hi_val, state) <- result.try(generic_get(state, ref, hi))
           // Step 5i.i: Set(O, lowerP, upperValue, true)
-          use state <- result.try(generic_set(state, ref, lo_key, hi_val))
+          use state <- result.try(generic_set_index(state, ref, lo, hi_val))
           // Step 5i.ii: DeletePropertyOrThrow(O, upperP)
-          use state <- result.try(generic_delete(state, ref, hi_key))
+          use state <- result.try(generic_delete_index(state, ref, hi))
           reverse_generic(state, ref, lo + 1, hi - 1)
         }
         // Step 5j: lowerExists AND NOT upperExists — delete lower, move lower to upper
@@ -1450,9 +1527,9 @@ fn reverse_generic(
           // Step 5e: lowerValue = Get(O, lowerP)
           use #(lo_val, state) <- result.try(generic_get(state, ref, lo))
           // Step 5j.i: DeletePropertyOrThrow(O, lowerP)
-          use state <- result.try(generic_delete(state, ref, lo_key))
+          use state <- result.try(generic_delete_index(state, ref, lo))
           // Step 5j.ii: Set(O, upperP, lowerValue, true)
-          use state <- result.try(generic_set(state, ref, hi_key, lo_val))
+          use state <- result.try(generic_set_index(state, ref, hi, lo_val))
           reverse_generic(state, ref, lo + 1, hi - 1)
         }
         // Step 5k: Neither exists — no action
@@ -1836,23 +1913,28 @@ fn search_backward(
   case idx < 0 {
     // Step 10: return -1
     True -> Ok(#(-1, state))
-    False ->
-      // Step 9a: kPresent = HasProperty(O, k) — skip holes
-      case has_index(state.heap, this, idx) {
-        False ->
+    False -> {
+      // Step 9a-9b.i: kPresent = HasProperty(O, k); if true,
+      // elementK = Get(O, k) — fused into one heap lookup.
+      use #(maybe_val, state) <- result.try(get_index_if_present(
+        state,
+        this,
+        idx,
+      ))
+      case maybe_val {
+        None ->
           // Step 9c: k = k - 1 (hole skipped)
           search_backward(state, this, idx - 1, search)
-        True -> {
-          // Step 9b.i-ii: elementK = Get(O, k), IsStrictlyEqual check
-          use #(val, state) <- result.try(get_index(state, this, idx))
+        Some(val) ->
+          // Step 9b.ii: IsStrictlyEqual check
           case value.strict_equal(val, search) {
             True -> Ok(#(idx, state))
             False ->
               // Step 9c: k = k - 1
               search_backward(state, this, idx - 1, search)
           }
-        }
       }
+    }
   }
 }
 
@@ -2341,13 +2423,17 @@ fn collect_sort_elements(
 ) -> Result(#(#(List(JsValue), Int), State), #(JsValue, State)) {
   case idx >= length {
     True -> Ok(#(#(list.reverse(acc), undefs), state))
-    False ->
-      case has_index(state.heap, this, idx) {
-        False ->
+    False -> {
+      use #(maybe_val, state) <- result.try(get_index_if_present(
+        state,
+        this,
+        idx,
+      ))
+      case maybe_val {
+        None ->
           // Hole — skip entirely.
           collect_sort_elements(state, this, length, idx + 1, acc, undefs)
-        True -> {
-          use #(val, state) <- result.try(get_index(state, this, idx))
+        Some(val) ->
           case val {
             JsUndefined ->
               // Undefined — count but don't include in sort.
@@ -2369,8 +2455,8 @@ fn collect_sort_elements(
                 undefs,
               )
           }
-        }
       }
+    }
   }
 }
 
@@ -2499,7 +2585,7 @@ fn write_sort_result(
   case values {
     [val, ..rest] -> {
       // Step 7a: Set(obj, ToString(j), items[j], true).
-      use state <- result.try(generic_set(state, ref, int.to_string(idx), val))
+      use state <- result.try(generic_set_index(state, ref, idx, val))
       write_sort_result(state, ref, rest, length, idx + 1)
     }
     [] ->
@@ -2519,7 +2605,7 @@ fn delete_trailing(
   case idx >= length {
     True -> Ok(state)
     False -> {
-      use state <- result.try(generic_delete(state, ref, int.to_string(idx)))
+      use state <- result.try(generic_delete_index(state, ref, idx))
       delete_trailing(state, ref, idx + 1, length)
     }
   }
@@ -2631,15 +2717,22 @@ fn iterate_loop(
   case idx == end {
     True -> cont(JsUndefined, end, state)
     False -> {
-      // Pattern A step 5b: kPresent = HasProperty(O, Pk).
-      // Pattern B: no HasProperty check, always visits.
-      let should_visit = case hole_mode {
-        VisitHoles -> True
-        SkipHoles -> has_index(state.heap, arr, idx)
+      // Pattern A step 5b-5c.i: kPresent = HasProperty(O, Pk); if true,
+      //   kValue = Get(O, Pk) — fused into one heap lookup.
+      // Pattern B step 4b: kValue = Get(O, Pk) — holes yield undefined.
+      use maybe_elem, state <- state.try_op(get_index_if_present(
+        state,
+        arr,
+        idx,
+      ))
+      let maybe_elem = case hole_mode {
+        // Pattern B: visit holes as undefined (Get returns undefined for absent).
+        VisitHoles -> Some(option.unwrap(maybe_elem, JsUndefined))
+        SkipHoles -> maybe_elem
       }
-      case should_visit {
+      case maybe_elem {
         // Pattern A step 5b-c: kPresent is false → skip, advance k.
-        False ->
+        None ->
           iterate_loop(
             state,
             arr,
@@ -2652,10 +2745,7 @@ fn iterate_loop(
             stop_on,
             cont,
           )
-        True -> {
-          // Pattern A step 5c.i / Pattern B step 4b: kValue = Get(O, Pk).
-          // For holes with VisitHoles, get_index returns JsUndefined.
-          use elem, state <- state.try_op(get_index(state, arr, idx))
+        Some(elem) -> {
           // Pattern A step 5c.ii / Pattern B step 4c:
           // testResult = ToBoolean(Call(callbackfn, thisArg, « kValue, 𝔽(k), O »)).
           use result, state <- state.try_call(state, cb, this_arg, [
@@ -2739,15 +2829,19 @@ fn fold_loop(
   // Step 6 loop condition: k < len
   case idx >= length {
     True -> #(state, Ok(acc))
-    False ->
-      // Step 6b: kPresent = HasProperty(O, Pk)
-      case has_index(state.heap, arr, idx) {
+    False -> {
+      // Step 6b-6c.i: kPresent = HasProperty(O, Pk); if true, kValue = Get(O, Pk)
+      // — fused into one heap lookup.
+      use maybe_elem, state <- state.try_op(get_index_if_present(
+        state,
+        arr,
+        idx,
+      ))
+      case maybe_elem {
         // kPresent is false → skip (step 6d: k = k + 1)
-        False ->
+        None ->
           fold_loop(state, arr, idx + 1, length, cb, this_arg, acc, combine)
-        True -> {
-          // Step 6c.i: kValue = Get(O, Pk)
-          use elem, state <- state.try_op(get_index(state, arr, idx))
+        Some(elem) -> {
           // Step 6c.ii: result = Call(callbackfn, thisArg, « kValue, 𝔽(k), O »)
           use result, state <- state.try_call(state, cb, this_arg, [
             elem,
@@ -2760,6 +2854,7 @@ fn fold_loop(
           fold_loop(state, arr, idx + 1, length, cb, this_arg, acc, combine)
         }
       }
+    }
   }
 }
 
@@ -2942,17 +3037,21 @@ fn find_present(
   case idx == end {
     // Step 8c: kPresent is false after exhausting all indices
     True -> Ok(#(None, state))
-    False ->
-      // Step 8b.ii: Set kPresent to ? HasProperty(O, Pk)
-      case has_index(state.heap, this, idx) {
-        // Step 8b.iii: kPresent is true — set accumulator to Get(O, Pk)
-        True -> {
-          use #(val, state) <- result.map(get_index(state, this, idx))
-          #(Some(#(idx, val)), state)
-        }
+    False -> {
+      // Step 8b.ii-iii: kPresent = HasProperty(O, Pk); if true,
+      // accumulator = Get(O, Pk) — fused into one heap lookup.
+      use #(maybe_val, state) <- result.try(get_index_if_present(
+        state,
+        this,
+        idx,
+      ))
+      case maybe_val {
+        // Step 8b.iii: kPresent is true
+        Some(val) -> Ok(#(Some(#(idx, val)), state))
         // Step 8b.iv: Set k to k + 1 (or k - 1 for reduceRight)
-        False -> find_present(state, this, idx + step, end, step)
+        None -> find_present(state, this, idx + step, end, step)
       }
+    }
   }
 }
 
@@ -2981,16 +3080,20 @@ fn reduce_loop(
   case idx == end {
     // Step 10: Return accumulator.
     True -> #(state, Ok(acc))
-    False ->
-      // Step 9b: Let kPresent be ? HasProperty(O, Pk).
-      case has_index(state.heap, arr, idx) {
+    False -> {
+      // Step 9b-9c.i: kPresent = HasProperty(O, Pk); if true, kValue = Get(O, Pk)
+      // — fused into one heap lookup.
+      use maybe_elem, state <- state.try_op(get_index_if_present(
+        state,
+        arr,
+        idx,
+      ))
+      case maybe_elem {
         // kPresent is false — skip this index (hole).
         // Step 9d: Set k to k + 1 (or k - 1 for reduceRight).
-        False -> reduce_loop(state, arr, idx + step, end, cb, acc, step)
+        None -> reduce_loop(state, arr, idx + step, end, cb, acc, step)
         // Step 9c: If kPresent is true, then
-        True -> {
-          // Step 9c.i: Let kValue be ? Get(O, Pk).
-          use elem, state <- state.try_op(get_index(state, arr, idx))
+        Some(elem) -> {
           // Step 9c.ii: Set accumulator to ? Call(callbackfn, undefined, « accumulator, kValue, 𝔽(k), O »).
           // Note: thisArg is always undefined for reduce/reduceRight (no thisArg parameter).
           use result, state <- state.try_call(state, cb, JsUndefined, [
@@ -3003,6 +3106,7 @@ fn reduce_loop(
           reduce_loop(state, arr, idx + step, end, cb, result, step)
         }
       }
+    }
   }
 }
 
@@ -3152,7 +3256,7 @@ fn splice_shift_right(
           splice_shift_right(state, ref, k - 1, from_start, shift)
         }
         False -> {
-          use state <- result.try(generic_delete(state, ref, int.to_string(to)))
+          use state <- result.try(generic_delete_index(state, ref, to))
           splice_shift_right(state, ref, k - 1, from_start, shift)
         }
       }
@@ -3179,7 +3283,7 @@ fn shift_left_from(
           shift_left_from(state, ref, from + 1, length, shift)
         }
         False -> {
-          use state <- result.try(generic_delete(state, ref, int.to_string(to)))
+          use state <- result.try(generic_delete_index(state, ref, to))
           shift_left_from(state, ref, from + 1, length, shift)
         }
       }
@@ -3301,13 +3405,17 @@ fn flatten_into_loop(
 ) -> #(State, Result(List(JsValue), JsValue)) {
   case idx >= length {
     True -> #(state, Ok(acc))
-    False ->
-      case has_index(state.heap, src, idx) {
-        False ->
+    False -> {
+      use maybe_elem, state <- state.try_op(get_index_if_present(
+        state,
+        src,
+        idx,
+      ))
+      case maybe_elem {
+        None ->
           // Hole: skip
           flatten_into_loop(state, src, idx + 1, length, depth, acc)
-        True -> {
-          use elem, state <- state.try_op(get_index(state, src, idx))
+        Some(elem) ->
           // If depth > 0 and element is an array, recursively flatten
           case depth > 0 {
             True ->
@@ -3341,8 +3449,8 @@ fn flatten_into_loop(
                 ..acc
               ])
           }
-        }
       }
+    }
   }
 }
 
@@ -3397,11 +3505,15 @@ fn flat_map_loop(
 ) -> #(State, Result(List(JsValue), JsValue)) {
   case idx >= length {
     True -> #(state, Ok(acc))
-    False ->
-      case has_index(state.heap, arr, idx) {
-        False -> flat_map_loop(state, arr, idx + 1, length, cb, this_arg, acc)
-        True -> {
-          use elem, state <- state.try_op(get_index(state, arr, idx))
+    False -> {
+      use maybe_elem, state <- state.try_op(get_index_if_present(
+        state,
+        arr,
+        idx,
+      ))
+      case maybe_elem {
+        None -> flat_map_loop(state, arr, idx + 1, length, cb, this_arg, acc)
+        Some(elem) -> {
           use mapped, state <- state.try_call(state, cb, this_arg, [
             elem,
             value.from_int(idx),
@@ -3431,6 +3543,7 @@ fn flat_map_loop(
           }
         }
       }
+    }
   }
 }
 
@@ -3517,7 +3630,7 @@ fn copy_within_forward(
           copy_within_forward(state, ref, from + 1, to + 1, remaining - 1)
         }
         False -> {
-          use state <- result.try(generic_delete(state, ref, int.to_string(to)))
+          use state <- result.try(generic_delete_index(state, ref, to))
           copy_within_forward(state, ref, from + 1, to + 1, remaining - 1)
         }
       }
@@ -3542,7 +3655,7 @@ fn copy_within_backward(
           copy_within_backward(state, ref, from - 1, to - 1, remaining - 1)
         }
         False -> {
-          use state <- result.try(generic_delete(state, ref, int.to_string(to)))
+          use state <- result.try(generic_delete_index(state, ref, to))
           copy_within_backward(state, ref, from - 1, to - 1, remaining - 1)
         }
       }

@@ -218,9 +218,11 @@ pub fn fulfill_promise(
       is_handled:,
       ..,
     )) -> {
-      // Step 7: TriggerPromiseReactions(reactions, value) — build job list
+      // Step 7: TriggerPromiseReactions(reactions, value) — build job list.
+      // Reactions are stored newest-first (see perform_promise_then), so
+      // reverse once here to enqueue jobs in attachment order per spec.
       let jobs =
-        list.map(reactions, fn(r) {
+        list.map(list.reverse(reactions), fn(r) {
           value.PromiseReactionJob(
             handler: r.handler,
             arg: result_value,
@@ -279,9 +281,11 @@ pub fn reject_promise(
       is_handled:,
       ..,
     )) -> {
-      // Step 8: TriggerPromiseReactions(reactions, reason) — build job list
+      // Step 8: TriggerPromiseReactions(reactions, reason) — build job list.
+      // Reactions are stored newest-first (see perform_promise_then), so
+      // reverse once here to enqueue jobs in attachment order per spec.
       let jobs =
-        list.map(reactions, fn(r) {
+        list.map(list.reverse(reactions), fn(r) {
           value.PromiseReactionJob(
             handler: r.handler,
             arg: reason,
@@ -388,16 +392,17 @@ pub fn perform_promise_then(
       let reject_reaction =
         PromiseReaction(child_resolve:, child_reject:, handler: reject_handler)
       // Step 6a-b: Append reactions to lists; Step 9: set [[PromiseIsHandled]]
+      // Perf: reactions are stored newest-first (O(1) prepend) and reversed
+      // once at settle time in fulfill_promise/reject_promise to preserve
+      // spec ordering — avoids O(n²) for n .then() on a pending promise.
       let h =
         heap.write(
           h,
           data_ref,
           PromiseSlot(
             state: value.PromisePending,
-            fulfill_reactions: list.append(fulfill_reactions, [
-              fulfill_reaction,
-            ]),
-            reject_reactions: list.append(reject_reactions, [reject_reaction]),
+            fulfill_reactions: [fulfill_reaction, ..fulfill_reactions],
+            reject_reactions: [reject_reaction, ..reject_reactions],
             is_handled: True,
           ),
         )

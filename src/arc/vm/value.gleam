@@ -113,13 +113,17 @@ pub type FuncTemplate {
     /// Maps variable name → local slot index. All such locals are boxed
     /// (BoxSlot refs), so direct eval can read/write them by index.
     local_names: Option(List(#(String, Int))),
-    /// Local-slot index where lexical `this` lives. For non-arrows (and
-    /// script/module/eval bodies) it's an owned slot at len(env_descriptors)
-    /// that setup_locals writes the bound `this` into. For arrows that
-    /// reference `this` it points at the env_descriptors capture slot
-    /// (setup_locals does NOT write — is_arrow guards that). None when
-    /// `this` is unreferenced.
-    this_slot: Option(Int),
+    /// Local-slot indices for the §9.1.1.3 FunctionEnvironmentRecord quartet
+    /// (`this` / `[[FunctionObject]]` / `[[HomeObject]]` / `[[NewTarget]]`).
+    /// Non-arrows own all four (setup_locals writes them at frame entry);
+    /// arrows that reference a given binding hold the env_descriptors capture
+    /// index for it instead (setup_locals does NOT write — is_arrow guards
+    /// that). None means unallocated/unreferenced.
+    lexical: opcode.LexicalSlots,
+    /// What syntax is allowed in *this* body's direct eval / nested arrow
+    /// scope (§19.2.1.1 PerformEval step 6). Mirrors QuickJS's
+    /// JSFunctionBytecode.{new_target,super,super_call,arguments}_allowed.
+    syntax_perms: opcode.SyntaxPerms,
   )
 }
 
@@ -1132,6 +1136,11 @@ pub type PropertyKey {
 /// Canonicalize a string key. Implements CanonicalNumericIndexString (§7.1.21)
 /// combined with the array-index range check: if `s` parses to a non-negative
 /// int and `int.to_string(n) == s`, it's `Index(n)`; otherwise `Named(s)`.
+///
+/// HOT-PATH NOTE: this does an int.parse + int.to_string + string-compare.
+/// The interpreter must NOT call it for compile-time-constant property names —
+/// resolve.gleam canonicalizes those once into `opcode.OpKey` and the
+/// dispatch path uses `from_op_key` (O(1) tag match) instead.
 pub fn canonical_key(s: String) -> PropertyKey {
   case int.parse(s) {
     Ok(n) if n >= 0 ->
@@ -1140,6 +1149,17 @@ pub fn canonical_key(s: String) -> PropertyKey {
         False -> Named(s)
       }
     _ -> Named(s)
+  }
+}
+
+/// Convert a compile-time-canonicalized opcode.OpKey to a runtime PropertyKey.
+/// O(1) tag match — the canonicalization (int.parse) already happened in
+/// resolve.gleam via opcode.make_key. The mirror type exists only to break the
+/// value↔opcode import cycle (value imports opcode for FuncTemplate.bytecode).
+pub fn from_op_key(k: opcode.OpKey) -> PropertyKey {
+  case k {
+    opcode.OpIndex(n) -> Index(n)
+    opcode.OpNamed(s) -> Named(s)
   }
 }
 
@@ -1405,7 +1425,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_callee_ref: Option(Ref),
   )
   /// Engine-internal async function suspended state.
   /// Saves the full execution context so await can resume.
@@ -1419,7 +1438,6 @@ pub type HeapSlot(ctx) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_callee_ref: Option(Ref),
   )
   /// Engine-internal async generator state. The ObjectSlot has
   /// `kind: AsyncGeneratorObject(generator_data: Ref)` pointing here.
@@ -1428,14 +1446,19 @@ pub type HeapSlot(ctx) {
   /// without settling.
   AsyncGeneratorSlot(
     gen_state: AsyncGeneratorState,
-    queue: List(AsyncGenRequest),
+    /// Two-list FIFO (Okasaki) encoded as `[]` (empty) or `[front, back]`:
+    /// front in dequeue order, back reversed (newest first). Enqueue prepends
+    /// to back (O(1)); dequeue pops front, reversing back→front when front
+    /// empties — O(1) amortized vs the old `list.append` O(n) per enqueue.
+    /// Kept List-of-List (not a record/tuple) so the `queue: []` init in
+    /// call.gleam needs no separate empty constructor.
+    queue: List(List(AsyncGenRequest)),
     func_template: FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
-    saved_callee_ref: Option(Ref),
   )
   /// Stores realm context for $262 methods.
   /// evalScript and createRealm read this to know which realm to operate in.
@@ -1593,7 +1616,6 @@ fn push_saved_frame_refs(
   env_ref: Ref,
   saved_locals: TupleArray(JsValue),
   saved_stack: List(JsValue),
-  saved_callee_ref: Option(Ref),
   acc: List(Ref),
 ) -> List(Ref) {
   let acc = [env_ref, ..acc]
@@ -1601,8 +1623,7 @@ fn push_saved_frame_refs(
     list.fold(tuple_array.to_list(saved_locals), acc, fn(a, v) {
       push_value_ref(v, a)
     })
-  let acc = list.fold(saved_stack, acc, fn(a, v) { push_value_ref(v, a) })
-  push_option_ref(saved_callee_ref, acc)
+  list.fold(saved_stack, acc, fn(a, v) { push_value_ref(v, a) })
 }
 
 /// Prepend all refs reachable from a heap slot onto `acc`. 
@@ -1784,14 +1805,8 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
-    GeneratorSlot(env_ref:, saved_locals:, saved_stack:, saved_callee_ref:, ..) ->
-      push_saved_frame_refs(
-        env_ref,
-        saved_locals,
-        saved_stack,
-        saved_callee_ref,
-        acc,
-      )
+    GeneratorSlot(env_ref:, saved_locals:, saved_stack:, ..) ->
+      push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
     AsyncFunctionSlot(
       promise_data_ref:,
       resolve:,
@@ -1799,43 +1814,23 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
       env_ref:,
       saved_locals:,
       saved_stack:,
-      saved_callee_ref:,
       ..,
     ) -> {
       let acc =
         [promise_data_ref, ..acc]
         |> push_value_ref(resolve, _)
         |> push_value_ref(reject, _)
-      push_saved_frame_refs(
-        env_ref,
-        saved_locals,
-        saved_stack,
-        saved_callee_ref,
-        acc,
-      )
+      push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
     }
-    AsyncGeneratorSlot(
-      queue:,
-      env_ref:,
-      saved_locals:,
-      saved_stack:,
-      saved_callee_ref:,
-      ..,
-    ) -> {
+    AsyncGeneratorSlot(queue:, env_ref:, saved_locals:, saved_stack:, ..) -> {
       let acc =
-        list.fold(queue, acc, fn(a, r) {
+        list.fold(list.flatten(queue), acc, fn(a, r) {
           a
           |> push_value_ref(r.value, _)
           |> push_value_ref(r.resolve, _)
           |> push_value_ref(r.reject, _)
         })
-      push_saved_frame_refs(
-        env_ref,
-        saved_locals,
-        saved_stack,
-        saved_callee_ref,
-        acc,
-      )
+      push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
     }
     RealmSlot(
       global_object:,

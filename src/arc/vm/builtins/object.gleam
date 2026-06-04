@@ -20,6 +20,7 @@ import arc/vm/value.{
   ObjectPrototypeValueOf, ObjectSeal, ObjectSetPrototypeOf, ObjectSlot,
   ObjectValues, OrdinaryObject, PromiseObject,
 }
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -1992,6 +1993,11 @@ fn set_prototype_of(
             "Cannot set prototype of a non-extensible object",
           )
         Error(Cyclic) -> state.type_error(state, "Cyclic __proto__ value")
+        Error(Immutable) ->
+          state.type_error(
+            state,
+            "Immutable prototype object cannot have its prototype set",
+          )
       }
     // §20.1.2.21 step 3: If O is not an Object, return O.
     _, Ok(_) -> #(state, Ok(target))
@@ -2001,9 +2007,11 @@ fn set_prototype_of(
 pub type SetProtoFail {
   NotExtensible
   Cyclic
+  Immutable
 }
 
 /// OrdinarySetPrototypeOf — ES2024 §10.1.2.1
+/// (with §10.4.7 SetImmutablePrototype check for Object.prototype)
 ///
 /// Shared core for Object.setPrototypeOf (§20.1.2.21, throws on fail)
 /// and Reflect.setPrototypeOf (§28.1.13, returns Bool on fail).
@@ -2015,7 +2023,15 @@ pub fn ordinary_set_prototype_of(
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(prototype: current, extensible:, ..))
       if new_proto != current
-    ->
+    -> {
+      // §10.4.7.2 SetImmutablePrototype — Object.prototype is an Immutable
+      // Prototype Exotic Object (§20.1.3): [[SetPrototypeOf]](V) returns
+      // false unless SameValue(V, current). The same-value case already
+      // fell through above, so any change here is rejected.
+      use <- bool.guard(
+        ref == state.builtins.object.prototype,
+        Error(Immutable),
+      )
       case extensible {
         False -> Error(NotExtensible)
         True ->
@@ -2033,6 +2049,7 @@ pub fn ordinary_set_prototype_of(
             }
           }
       }
+    }
     // Same proto already, or ref isn't an ObjectSlot (unreachable) — no-op success.
     _ -> Ok(state)
   }

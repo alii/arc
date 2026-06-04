@@ -52,9 +52,10 @@ pub type SavedFrame {
     /// For constructor calls: the newly created object to return if the
     /// constructor doesn't explicitly return an object.
     constructor_this: Option(JsValue),
-    /// The heap ref of the currently-executing function (needed by CallSuper
-    /// to find the parent constructor via callee_ref.__proto__).
-    callee_ref: Option(Ref),
+    /// §13.3.12 NewTarget — `JsObject(ref)` for `[[Construct]]` calls,
+    /// `JsUndefined` for `[[Call]]`. Seeded into the RefNewTarget lexical
+    /// slot at frame entry. Saved/restored across calls.
+    new_target: JsValue,
     /// Original args passed to this frame's call (for arguments object creation).
     call_args: List(JsValue),
     /// Caller's eval_env ref (sloppy direct-eval var-injection dict).
@@ -87,9 +88,10 @@ pub type State {
     call_stack: List(SavedFrame),
     try_stack: List(TryFrame),
     builtins: Builtins,
-    /// The heap ref of the currently-executing function (for derived constructors
-    /// and arguments.callee).
-    callee_ref: Option(Ref),
+    /// §13.3.12 NewTarget for the current frame — `JsObject(ref)` when entered
+    /// via `[[Construct]]`, `JsUndefined` for `[[Call]]`. Read by setup_locals
+    /// to seed the RefNewTarget lexical slot, and by native ctors directly.
+    new_target: JsValue,
     /// Original arguments passed to the current function call. Consumed by
     /// CreateArguments opcode to build the arguments object.
     call_args: List(JsValue),
@@ -118,8 +120,8 @@ pub type State {
     call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
       Result(#(JsValue, State), #(JsValue, State)),
     /// Re-entrant construct mechanism — `new target(...args)` from native code.
-    /// Same shape as call_fn. Set by the VM executor (wraps do_construct).
-    construct_fn: fn(State, JsValue, List(JsValue)) ->
+    /// 4th arg is newTarget (§10.1.13). Set by the VM executor (wraps do_construct).
+    construct_fn: fn(State, JsValue, List(JsValue), JsValue) ->
       Result(#(JsValue, State), #(JsValue, State)),
     /// Current call stack depth. Incremented on function entry, decremented on return.
     /// Throws RangeError when exceeding limits.max_call_depth.
@@ -169,14 +171,25 @@ pub fn call(
   f(state, callee, this_val, args)
 }
 
-/// Call state.construct_fn (re-entrant `new target(...args)`).
+/// Call state.construct_fn (re-entrant `new target(...args)`). newTarget = target.
 pub fn construct(
   state: State,
   target: JsValue,
   args: List(JsValue),
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   let f = state.construct_fn
-  f(state, target, args)
+  f(state, target, args, target)
+}
+
+/// Call state.construct_fn with explicit newTarget (Reflect.construct).
+pub fn construct_with_target(
+  state: State,
+  target: JsValue,
+  args: List(JsValue),
+  new_target: JsValue,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  let f = state.construct_fn
+  f(state, target, args, new_target)
 }
 
 /// Call a function or propagate thrown error. Use with `use` syntax:

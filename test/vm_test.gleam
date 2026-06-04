@@ -9,9 +9,9 @@ import arc/vm/internal/tuple_array
 import arc/vm/opcode.{
   type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq,
   Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue, LogicalNot,
-  Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry,
-  PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
-  Swap, UShiftRight, UnaryOp, Void,
+  Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, OpNamed, Pop, Pos, PushConst,
+  PushTry, PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq,
+  StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void,
 }
 import arc/vm/ops/object
 import arc/vm/state
@@ -63,7 +63,8 @@ fn make_func(
     is_async: False,
     is_constructor: True,
     local_names: None,
-    this_slot: None,
+    lexical: opcode.no_lexical_slots,
+    syntax_perms: opcode.script_perms,
   )
 }
 
@@ -705,9 +706,15 @@ pub fn define_and_get_field_test() {
   //  2: DefineField("x")  -- obj.x = 42, keep obj on stack
   //  3: GetField("x")     -- pop obj, push obj.x
   let assert Ok(JsNumber(Finite(42.0))) =
-    run_simple([NewObject, PushConst(0), DefineField("x"), GetField("x")], [
-      JsNumber(Finite(42.0)),
-    ])
+    run_simple(
+      [
+        NewObject,
+        PushConst(0),
+        DefineField(OpNamed("x")),
+        GetField(OpNamed("x")),
+      ],
+      [JsNumber(Finite(42.0))],
+    )
 }
 
 pub fn put_and_get_field_test() {
@@ -720,7 +727,14 @@ pub fn put_and_get_field_test() {
   //  5: GetField("y")     -- pop obj (the Dup'd copy), push obj.y
   let assert Ok(JsString("hello")) =
     run_simple(
-      [NewObject, Dup, PushConst(0), PutField("y"), Pop, GetField("y")],
+      [
+        NewObject,
+        Dup,
+        PushConst(0),
+        PutField(OpNamed("y")),
+        Pop,
+        GetField(OpNamed("y")),
+      ],
       [JsString("hello")],
     )
 }
@@ -728,12 +742,12 @@ pub fn put_and_get_field_test() {
 pub fn get_field_nonexistent_returns_undefined_test() {
   // {}.doesNotExist => undefined
   let assert Ok(JsUndefined) =
-    run_simple([NewObject, GetField("doesNotExist")], [])
+    run_simple([NewObject, GetField(OpNamed("doesNotExist"))], [])
 }
 
 pub fn get_field_on_null_throws_type_error_test() {
   // null.x => TypeError
-  let func = make_func([PushConst(0), GetField("x")], [JsNull], 0)
+  let func = make_func([PushConst(0), GetField(OpNamed("x"))], [JsNull], 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
@@ -744,7 +758,7 @@ pub fn get_field_on_null_throws_type_error_test() {
 
 pub fn get_field_on_undefined_throws_type_error_test() {
   // undefined.x => TypeError
-  let func = make_func([PushConst(0), GetField("x")], [JsUndefined], 0)
+  let func = make_func([PushConst(0), GetField(OpNamed("x"))], [JsUndefined], 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)

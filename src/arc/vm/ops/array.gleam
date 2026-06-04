@@ -95,6 +95,47 @@ pub fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {
   }
 }
 
+/// Batch-append to target array with ONE heap read + ONE heap write for
+/// `target_ref`, regardless of how many elements `fold` appends. Caller's
+/// fold receives (heap, elements, length) and returns the same — the heap
+/// param lets it do side allocations (e.g. entry-pair arrays for Map/Set
+/// spreads) which never touch `target_ref`, so capturing the target slot
+/// once up-front is safe. Replaces the old per-element push_onto_array
+/// pattern which did n × (dict.get + dict.insert + ObjectSlot alloc).
+fn batch_append(
+  h: Heap,
+  target_ref: Ref,
+  fold: fn(Heap, value.JsElements, Int) -> #(Heap, value.JsElements, Int),
+) -> Heap {
+  case heap.read(h, target_ref) {
+    Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..) as slot) -> {
+      let #(h, elements, length) = fold(h, elements, length)
+      heap.write(
+        h,
+        target_ref,
+        ObjectSlot(..slot, kind: ArrayObject(length:), elements:),
+      )
+    }
+    _ -> h
+  }
+}
+
+/// Append a list of values onto the target array — one heap read, one
+/// heap write. Use this instead of `list.fold(.., push_onto_array)`.
+pub fn append_list_to_array(
+  h: Heap,
+  target_ref: Ref,
+  values: List(JsValue),
+) -> Heap {
+  use h, els, len <- batch_append(h, target_ref)
+  let #(els, len) =
+    list.fold(values, #(els, len), fn(acc, v) {
+      let #(els, len) = acc
+      #(elements.set(els, len, v), len + 1)
+    })
+  #(h, els, len)
+}
+
 /// Bulk-append a range [idx, end) from source elements onto the target array.
 /// Used for the array fast-path in ArraySpread — avoids creating an
 /// ArrayIteratorObject when the source is a plain array.
@@ -105,14 +146,30 @@ pub fn append_range_to_array(
   idx: Int,
   end: Int,
 ) -> Heap {
+  use h, els, len <- batch_append(h, target_ref)
+  // elements.get returns JsUndefined for holes — matches the spec's
+  // array iterator behavior (CreateIterResultObject(Get(array, idx), false)).
+  let #(els, len) = copy_range(src_elements, idx, end, els, len)
+  #(h, els, len)
+}
+
+fn copy_range(
+  src: value.JsElements,
+  idx: Int,
+  end: Int,
+  dst: value.JsElements,
+  dst_len: Int,
+) -> #(value.JsElements, Int) {
   case idx >= end {
-    True -> h
-    False -> {
-      // elements.get returns JsUndefined for holes — matches the spec's
-      // array iterator behavior (CreateIterResultObject(Get(array, idx), false)).
-      let h = push_onto_array(h, target_ref, elements.get(src_elements, idx))
-      append_range_to_array(h, target_ref, src_elements, idx + 1, end)
-    }
+    True -> #(dst, dst_len)
+    False ->
+      copy_range(
+        src,
+        idx + 1,
+        end,
+        elements.set(dst, dst_len, elements.get(src, idx)),
+        dst_len + 1,
+      )
   }
 }
 
@@ -171,68 +228,65 @@ pub fn spread_into_array(
         }
         Some(ObjectSlot(kind: value.SetObject(data:, keys:), ..)) -> {
           // Set fast path — push values in insertion order.
-          let heap =
-            list.reverse(keys)
-            |> list.filter_map(dict.get(data, _))
-            |> list.fold(state.heap, fn(h, v) {
-              push_onto_array(h, target_ref, v)
-            })
+          let values = list.reverse(keys) |> list.filter_map(dict.get(data, _))
+          let heap = append_list_to_array(state.heap, target_ref, values)
           Ok(State(..state, heap:))
         }
         Some(ObjectSlot(kind: value.SetIteratorObject(remaining:, kind:), ..)) -> {
-          let heap = case kind {
-            value.SetIterValues ->
-              list.fold(remaining, state.heap, fn(h, v) {
-                push_onto_array(h, target_ref, v)
-              })
-            value.SetIterEntries ->
-              list.fold(remaining, state.heap, fn(h, v) {
-                let #(h, pair) =
-                  common.alloc_array(h, [v, v], state.builtins.array.prototype)
-                push_onto_array(h, target_ref, JsObject(pair))
-              })
+          let proto = state.builtins.array.prototype
+          let heap = {
+            use h, els, len <- batch_append(state.heap, target_ref)
+            list.fold(remaining, #(h, els, len), fn(acc, v) {
+              let #(h, els, len) = acc
+              case kind {
+                value.SetIterValues -> #(h, elements.set(els, len, v), len + 1)
+                value.SetIterEntries -> {
+                  let #(h, pair) = common.alloc_array(h, [v, v], proto)
+                  #(h, elements.set(els, len, JsObject(pair)), len + 1)
+                }
+              }
+            })
           }
           Ok(State(..state, heap:))
         }
         Some(ObjectSlot(kind: value.MapObject(entries:, keys_rev:, ..), ..)) -> {
           // Map fast path — push [k,v] pairs in insertion order. keys_rev is
           // reversed with tombstones; flip + filter live entries.
-          let heap =
+          let proto = state.builtins.array.prototype
+          let heap = {
+            use h, els, len <- batch_append(state.heap, target_ref)
             list.reverse(keys_rev)
-            |> list.fold(state.heap, fn(h, k) {
+            |> list.fold(#(h, els, len), fn(acc, k) {
               case dict.get(entries, k) {
-                Error(Nil) -> h
+                Error(Nil) -> acc
                 Ok(v) -> {
+                  let #(h, els, len) = acc
                   let #(h, pair) =
-                    common.alloc_array(
-                      h,
-                      [value.map_key_to_js(k), v],
-                      state.builtins.array.prototype,
-                    )
-                  push_onto_array(h, target_ref, JsObject(pair))
+                    common.alloc_array(h, [value.map_key_to_js(k), v], proto)
+                  #(h, elements.set(els, len, JsObject(pair)), len + 1)
                 }
               }
             })
+          }
           Ok(State(..state, heap:))
         }
         Some(ObjectSlot(kind: value.MapIteratorObject(remaining:, kind:), ..)) -> {
-          let heap =
-            list.fold(remaining, state.heap, fn(h, pair) {
+          let proto = state.builtins.array.prototype
+          let heap = {
+            use h, els, len <- batch_append(state.heap, target_ref)
+            list.fold(remaining, #(h, els, len), fn(acc, pair) {
+              let #(h, els, len) = acc
               let #(k, v) = pair
               case kind {
-                value.MapIterKeys -> push_onto_array(h, target_ref, k)
-                value.MapIterValues -> push_onto_array(h, target_ref, v)
+                value.MapIterKeys -> #(h, elements.set(els, len, k), len + 1)
+                value.MapIterValues -> #(h, elements.set(els, len, v), len + 1)
                 value.MapIterEntries -> {
-                  let #(h, arr) =
-                    common.alloc_array(
-                      h,
-                      [k, v],
-                      state.builtins.array.prototype,
-                    )
-                  push_onto_array(h, target_ref, JsObject(arr))
+                  let #(h, arr) = common.alloc_array(h, [k, v], proto)
+                  #(h, elements.set(els, len, JsObject(arr)), len + 1)
                 }
               }
             })
+          }
           Ok(State(..state, heap:))
         }
         _ -> {

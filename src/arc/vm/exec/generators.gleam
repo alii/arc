@@ -298,7 +298,6 @@ type GenData {
     saved_locals: tuple_array.TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
-    saved_callee_ref: option.Option(Ref),
   )
 }
 
@@ -316,7 +315,6 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
               saved_locals:,
               saved_stack:,
               saved_try_stack:,
-              saved_callee_ref:,
             )) ->
               Some(GenData(
                 data_ref:,
@@ -327,7 +325,6 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
                 saved_locals:,
                 saved_stack:,
                 saved_try_stack:,
-                saved_callee_ref:,
               ))
             _ -> None
           }
@@ -347,7 +344,6 @@ fn gen_with_state(gen: GenData, new_state: value.GeneratorState) -> HeapSlot {
     saved_locals: gen.saved_locals,
     saved_stack: gen.saved_stack,
     saved_try_stack: gen.saved_try_stack,
-    saved_callee_ref: gen.saved_callee_ref,
   )
 }
 
@@ -373,7 +369,7 @@ fn build_resumed_state(
     pc:,
     call_stack: [],
     try_stack: restored_try,
-    callee_ref: gen.saved_callee_ref,
+    new_target: JsUndefined,
     call_args: [],
   )
 }
@@ -561,7 +557,6 @@ fn run_to_completion(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: st,
-            saved_callee_ref: suspended.callee_ref,
           ),
         )
       let #(h, result) = common.create_iter_result(h, outer.builtins, yv, False)
@@ -713,7 +708,6 @@ fn process_generator_return(
                 saved_locals: suspended.locals,
                 saved_stack: suspended.stack,
                 saved_try_stack: saved_try2,
-                saved_callee_ref: suspended.callee_ref,
               ),
             )
           let #(h3, result) =

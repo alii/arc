@@ -14,6 +14,7 @@
 -export([string_char_at/2, string_codepoint_length/1, replacement_codepoint/0]).
 -export([string_index_of/3, string_last_index_of/3]).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1]).
+-export([setup_locals_tuple/6]).
 read_line(Prompt) ->
     case io:get_line(Prompt) of
         eof -> {error, nil};
@@ -49,6 +50,37 @@ array_repeat(Value, Count) when Count =< ?MAX_DENSE_ELEMENTS ->
     erlang:make_tuple(Count, Value);
 array_repeat(_Value, _Count) ->
     erlang:error(array_too_large).
+
+%% Build the locals tuple for a JS function call in one forward pass:
+%%   [Env..., Seeds..., Args(padded/truncated to Arity)..., Undef × rest]
+%% Replaces the Gleam-side list.append + accumulator + list.reverse +
+%% list_to_tuple chain (≈4 traversals, 3 intermediate lists) with a single
+%% body-recursive forward build + list_to_tuple. local_count is bounded by
+%% the compiler so non-tail recursion is fine here.
+setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
+    list_to_tuple(locals_env(Env, Seeds, Args, Arity, LocalCount, Undef)).
+
+locals_env(_, _, _, _, 0, _) -> [];
+locals_env([E | Env], Seeds, Args, Arity, N, Undef) ->
+    [E | locals_env(Env, Seeds, Args, Arity, N - 1, Undef)];
+locals_env([], Seeds, Args, Arity, N, Undef) ->
+    locals_seeds(Seeds, Args, Arity, N, Undef).
+
+locals_seeds(_, _, _, 0, _) -> [];
+locals_seeds([S | Seeds], Args, Arity, N, Undef) ->
+    [S | locals_seeds(Seeds, Args, Arity, N - 1, Undef)];
+locals_seeds([], Args, Arity, N, Undef) ->
+    locals_args(Args, Arity, N, Undef).
+
+locals_args(_, _, 0, _) -> [];
+locals_args(_, 0, N, Undef) -> locals_pad(N, Undef);
+locals_args([A | Args], Arity, N, Undef) ->
+    [A | locals_args(Args, Arity - 1, N - 1, Undef)];
+locals_args([], Arity, N, Undef) ->
+    [Undef | locals_args([], Arity - 1, N - 1, Undef)].
+
+locals_pad(0, _) -> [];
+locals_pad(N, Undef) -> [Undef | locals_pad(N - 1, Undef)].
 
 %% Erlang's array module — O(log n) functional array for JS elements.
 %% Default is the caller-provided JsUndefined so unset slots and to_list

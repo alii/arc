@@ -98,9 +98,13 @@ pub fn call_native_method(
     }
     Some(gen) -> {
       let req = AsyncGenRequest(completion:, value: arg, resolve:, reject:)
-      let new_queue = list.append(gen.queue, [req])
+      // O(1) prepend to back; see AsyncGeneratorSlot.queue doc in value.gleam.
       let h =
-        heap.write(state.heap, gen.data_ref, slot_with_queue(gen, new_queue))
+        heap.write(
+          state.heap,
+          gen.data_ref,
+          slot_with(gen, gen.gen_state, gen.queue_front, [req, ..gen.queue_back]),
+        )
       let state = State(..state, heap: h)
       let state = case gen.gen_state {
         AGExecuting | AGAwaitingReturn -> state
@@ -122,8 +126,9 @@ fn resume_next(
 ) -> State {
   case read_slot(state.heap, data_ref) {
     None -> state
-    Some(gen) ->
-      case gen.queue {
+    Some(gen) -> {
+      let gen = normalize_queue(gen)
+      case gen.queue_front {
         [] -> state
         [req, ..rest_queue] -> {
           let run =
@@ -142,13 +147,13 @@ fn resume_next(
               case req.completion {
                 AGNext -> {
                   // Resolve {undefined, done:true}, dequeue, loop
-                  let state = settle_head(state, data_ref, rest_queue)
+                  let state = settle_head(state, data_ref, gen, rest_queue)
                   let state =
                     fulfill_iter(state, req.resolve, JsUndefined, True)
                   resume_next(state, data_ref, execute_inner, unwind_to_catch)
                 }
                 AGThrow -> {
-                  let state = settle_head(state, data_ref, rest_queue)
+                  let state = settle_head(state, data_ref, gen, rest_queue)
                   let state = reject_with(state, req.reject, req.value)
                   resume_next(state, data_ref, execute_inner, unwind_to_catch)
                 }
@@ -194,6 +199,7 @@ fn resume_next(
           }
         }
       }
+    }
   }
 }
 
@@ -259,7 +265,7 @@ fn build_exec_state(
     constants: gen.func_template.constants,
     call_stack: [],
     try_stack: restored_try,
-    callee_ref: gen.saved_callee_ref,
+    new_target: JsUndefined,
     call_args: [],
   )
 }
@@ -454,7 +460,12 @@ fn resume_after_delegate(
             heap.write(
               state.heap,
               run.data_ref,
-              slot_with(run.gen, AGSuspendedYield, run.rest_queue),
+              slot_with(
+                run.gen,
+                AGSuspendedYield,
+                run.rest_queue,
+                run.gen.queue_back,
+              ),
             )
           let state = State(..state, heap: h)
           let state = fulfill_iter(state, run.req.resolve, val, False)
@@ -591,8 +602,9 @@ pub fn call_native_resume(
         JsUndefined,
         state,
       ))
-    Some(gen) ->
-      case gen.queue {
+    Some(gen) -> {
+      let gen = normalize_queue(gen)
+      case gen.queue_front {
         [] -> ret(state)
         [req, ..rest_queue] -> {
           let run =
@@ -611,7 +623,7 @@ pub fn call_native_resume(
                 heap.write(
                   state.heap,
                   data_ref,
-                  slot_with(gen, AGCompleted, rest_queue),
+                  slot_with(gen, AGCompleted, rest_queue, gen.queue_back),
                 )
               let state = State(..state, heap: h)
               let state = case is_reject {
@@ -640,6 +652,7 @@ pub fn call_native_resume(
           ret(state)
         }
       }
+    }
   }
 }
 
@@ -715,14 +728,15 @@ type AsyncGenData {
   AsyncGenData(
     data_ref: Ref,
     gen_state: value.AsyncGeneratorState,
-    queue: List(AsyncGenRequest),
+    /// Decoded two-list FIFO — see AsyncGeneratorSlot.queue in value.gleam.
+    queue_front: List(AsyncGenRequest),
+    queue_back: List(AsyncGenRequest),
     func_template: value.FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
     saved_locals: tuple_array.TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
-    saved_callee_ref: Option(Ref),
   )
 }
 
@@ -749,21 +763,50 @@ fn read_slot(h: Heap, data_ref: Ref) -> Option(AsyncGenData) {
       saved_locals:,
       saved_stack:,
       saved_try_stack:,
-      saved_callee_ref:,
-    )) ->
+    )) -> {
+      let #(queue_front, queue_back) = case queue {
+        [front, back, ..] -> #(front, back)
+        [front] -> #(front, [])
+        [] -> #([], [])
+      }
       Some(AsyncGenData(
         data_ref:,
         gen_state:,
-        queue:,
+        queue_front:,
+        queue_back:,
         func_template:,
         env_ref:,
         saved_pc:,
         saved_locals:,
         saved_stack:,
         saved_try_stack:,
-        saved_callee_ref:,
       ))
+    }
     _ -> None
+  }
+}
+
+/// If front is empty, reverse back into front. Called at dequeue sites so the
+/// head pattern-match `[req, ..rest]` always sees the oldest request.
+fn normalize_queue(gen: AsyncGenData) -> AsyncGenData {
+  case gen.queue_front, gen.queue_back {
+    [], [_, ..] ->
+      AsyncGenData(
+        ..gen,
+        queue_front: list.reverse(gen.queue_back),
+        queue_back: [],
+      )
+    _, _ -> gen
+  }
+}
+
+fn encode_queue(
+  front: List(AsyncGenRequest),
+  back: List(AsyncGenRequest),
+) -> List(List(AsyncGenRequest)) {
+  case front, back {
+    [], [] -> []
+    _, _ -> [front, back]
   }
 }
 
@@ -771,28 +814,24 @@ fn slot_with_state(
   gen: AsyncGenData,
   s: value.AsyncGeneratorState,
 ) -> HeapSlot {
-  slot_with(gen, s, gen.queue)
-}
-
-fn slot_with_queue(gen: AsyncGenData, q: List(AsyncGenRequest)) -> HeapSlot {
-  slot_with(gen, gen.gen_state, q)
+  slot_with(gen, s, gen.queue_front, gen.queue_back)
 }
 
 fn slot_with(
   gen: AsyncGenData,
   s: value.AsyncGeneratorState,
-  q: List(AsyncGenRequest),
+  front: List(AsyncGenRequest),
+  back: List(AsyncGenRequest),
 ) -> HeapSlot {
   AsyncGeneratorSlot(
     gen_state: s,
-    queue: q,
+    queue: encode_queue(front, back),
     func_template: gen.func_template,
     env_ref: gen.env_ref,
     saved_pc: gen.saved_pc,
     saved_locals: gen.saved_locals,
     saved_stack: gen.saved_stack,
     saved_try_stack: gen.saved_try_stack,
-    saved_callee_ref: gen.saved_callee_ref,
   )
 }
 
@@ -802,7 +841,7 @@ fn save_suspended(
   gen: AsyncGenData,
   suspended: State,
   new_state: value.AsyncGeneratorState,
-  queue: List(AsyncGenRequest),
+  queue_front: List(AsyncGenRequest),
 ) -> State {
   let saved_try = generators.save_stacks(suspended.try_stack)
   let h =
@@ -811,14 +850,13 @@ fn save_suspended(
       data_ref,
       AsyncGeneratorSlot(
         gen_state: new_state,
-        queue:,
+        queue: encode_queue(queue_front, gen.queue_back),
         func_template: gen.func_template,
         env_ref: gen.env_ref,
         saved_pc: suspended.pc,
         saved_locals: suspended.locals,
         saved_stack: suspended.stack,
         saved_try_stack: saved_try,
-        saved_callee_ref: suspended.callee_ref,
       ),
     )
   State(..state, heap: h)
@@ -828,24 +866,30 @@ fn complete(
   state: State,
   data_ref: Ref,
   gen: AsyncGenData,
-  queue: List(AsyncGenRequest),
+  queue_front: List(AsyncGenRequest),
 ) -> State {
-  let h = heap.write(state.heap, data_ref, slot_with(gen, AGCompleted, queue))
+  let h =
+    heap.write(
+      state.heap,
+      data_ref,
+      slot_with(gen, AGCompleted, queue_front, gen.queue_back),
+    )
   State(..state, heap: h)
 }
 
 fn settle_head(
   state: State,
   data_ref: Ref,
+  gen: AsyncGenData,
   rest_queue: List(AsyncGenRequest),
 ) -> State {
-  case read_slot(state.heap, data_ref) {
-    Some(gen) -> {
-      let h = heap.write(state.heap, data_ref, slot_with_queue(gen, rest_queue))
-      State(..state, heap: h)
-    }
-    None -> state
-  }
+  let h =
+    heap.write(
+      state.heap,
+      data_ref,
+      slot_with(gen, gen.gen_state, rest_queue, gen.queue_back),
+    )
+  State(..state, heap: h)
 }
 
 // ============================================================================

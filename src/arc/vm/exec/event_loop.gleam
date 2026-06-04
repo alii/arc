@@ -25,7 +25,7 @@ import arc/vm/value.{
 }
 import gleam/io
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 pub type ExecuteInnerFn =
   fn(State) -> Result(#(completion.Completion, State), VmError)
@@ -165,13 +165,14 @@ pub fn call_to_completion(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: FunctionObject(func_template:, env: env_ref, ..),
+          kind: FunctionObject(func_template:, env: env_ref, home_object:),
           ..,
         )) ->
           call_closure(
             state,
             ref,
             env_ref,
+            home_object,
             func_template,
             args,
             this_val,
@@ -238,6 +239,7 @@ fn call_closure(
   state: State,
   fn_ref: Ref,
   env_ref: Ref,
+  home_object: Option(Ref),
   callee_template: FuncTemplate,
   args: List(JsValue),
   this_val: JsValue,
@@ -245,11 +247,28 @@ fn call_closure(
 ) -> Result(#(completion.Completion, State), VmError) {
   let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
   let #(heap, new_this) = bind_this(state, callee_template, this_val)
-  // Mirror call.setup_locals: insert the bound `this` between captures and
-  // params when the callee owns the slot (non-arrow).
-  let prefix = case callee_template.this_slot, callee_template.is_arrow {
-    Some(_), False -> list.append(env_values, [new_this])
-    _, _ -> env_values
+  let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
+  // Mirror call.setup_locals: insert the lexical seeds between captures and
+  // params when the callee owns those slots (non-arrow). Inlined to avoid an
+  // import cycle through call.gleam.
+  let prefix = case callee_template.is_arrow {
+    True -> env_values
+    False -> {
+      let seeds =
+        list.filter_map(opcode.all_lexical_refs, fn(ref) {
+          case opcode.lexical_slot(callee_template.lexical, ref) {
+            None -> Error(Nil)
+            Some(_) ->
+              Ok(case ref {
+                opcode.RefThis -> new_this
+                opcode.RefActiveFunc -> JsObject(fn_ref)
+                opcode.RefHomeObject -> home
+                opcode.RefNewTarget -> JsUndefined
+              })
+          }
+        })
+      list.append(env_values, seeds)
+    }
   }
   let locals =
     build_locals(
@@ -273,7 +292,7 @@ fn call_closure(
       pc: 0,
       call_stack: [],
       try_stack: [],
-      callee_ref: Some(fn_ref),
+      new_target: JsUndefined,
       call_args: args,
     )
   case execute_inner(job_state) {

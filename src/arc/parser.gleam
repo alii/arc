@@ -15,8 +15,9 @@
 /// here since Gleam doesn't support cross-module recursion.
 import arc/parser/ast
 import arc/parser/error.{
-  AwaitInAsyncFunction, AwaitInModule, BreakOutsideLoopOrSwitch,
-  ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
+  ArgumentsInStaticBlock, AwaitInAsyncFunction, AwaitInModule, AwaitInStaticBlock,
+  BreakOutsideLoopOrSwitch, ClassConstructorAsync, ClassConstructorGenerator,
+  ClassConstructorNotGetter,
   ClassConstructorNotSetter, ClassDuplicateConstructor, ContinueOutsideLoop,
   DeletePrivateName, DeleteUnqualifiedStrictMode,
   DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,
@@ -141,12 +142,20 @@ type P {
     switch_depth: Int,
     in_generator: Bool,
     in_async: Bool,
+    // §15.7.1 ClassStaticBlock: [+Await] but ContainsAwait/ContainsArguments
+    // must be false. Distinct from in_async because `await expr` is also
+    // forbidden (not just await-as-identifier). Cleared at function boundaries.
+    in_static_block: Bool,
     strict: Bool,
     label_set: List(#(String, Bool)),
     // super() is only allowed in constructors of derived classes
     allow_super_call: Bool,
     // super.x is allowed in any method (class or object literal)
     allow_super_property: Bool,
+    // new.target is allowed in any function/method body (arrows inherit from
+    // enclosing). Distinct from function_depth>0 because arrows increment
+    // function_depth but must NOT enable new.target on their own.
+    allow_new_target: Bool,
     // Whether the last parsed expression is a valid assignment/update target
     // (identifier, member expression). Set by expression parsers, checked by
     // assignment operators and ++/--.
@@ -273,11 +282,13 @@ fn statement_to_default_export_expr(stmt: ast.Statement) -> ast.Expression {
 
 // ---- Public API ----
 
-/// Parse JavaScript source code into an AST.
-/// Returns Ok(ast.Program) on valid parse, Error on parse failure.
-pub fn parse(
+/// Tokenize `source` and build the initial parser state. CPS so callers
+/// write `use p <- init_parser(source, mode)` and get the lexer-error →
+/// ParseError mapping for free.
+fn init_parser(
   source: String,
   mode: ParseMode,
+  cont: fn(P) -> Result(ast.Program, ParseError),
 ) -> Result(ast.Program, ParseError) {
   let tokenize_fn = case mode {
     Module -> lexer.tokenize_module
@@ -286,58 +297,82 @@ pub fn parse(
   case tokenize_fn(source) {
     Error(e) ->
       Error(LexerError(lexer.lex_error_to_string(e), lexer.lex_error_pos(e)))
-    Ok(tokens) -> {
-      let p =
-        P(
-          tokens: tokens,
-          mode: mode,
-          prev_line: 1,
-          allow_in: True,
-          source: source,
-          bytes: bit_array.from_string(source),
-          function_depth: 0,
-          loop_depth: 0,
-          switch_depth: 0,
-          in_generator: False,
-          in_async: False,
-          strict: mode == Module,
-          label_set: [],
-          allow_super_call: False,
-          allow_super_property: False,
-          last_expr_assignable: False,
-          last_expr_is_assignment: False,
-          in_lexical_decl: False,
-          decl_bound_names: set.new(),
-          has_cover_initializer: False,
-          in_formal_params: False,
-          in_arrow_params: False,
-          in_method: False,
-          has_non_simple_param: False,
-          param_bound_names: [],
-          in_single_stmt_pos: False,
-          has_invalid_pattern: False,
-          export_names: set.new(),
-          export_local_refs: [],
-          import_bindings: set.new(),
-          in_export_decl: False,
-          last_expr_name: None,
-          has_eval_args_target: False,
-          pending_strict_name: None,
-          scope_lexical: set.new(),
-          scope_var: set.new(),
-          scope_params: set.new(),
-          scope_funcs: set.new(),
-          outer_lexical: set.new(),
-          binding_kind: BindingNone,
-          in_block: False,
-          module_top_level: False,
-        )
-      case mode {
-        Script -> parse_script(p)
-        Module -> parse_module(p)
-      }
-    }
+    Ok(tokens) ->
+      cont(P(
+        tokens: tokens,
+        mode: mode,
+        prev_line: 1,
+        allow_in: True,
+        source: source,
+        bytes: bit_array.from_string(source),
+        function_depth: 0,
+        loop_depth: 0,
+        switch_depth: 0,
+        in_generator: False,
+        in_async: False,
+        in_static_block: False,
+        strict: mode == Module,
+        label_set: [],
+        allow_super_call: False,
+        allow_super_property: False,
+        allow_new_target: False,
+        last_expr_assignable: False,
+        last_expr_is_assignment: False,
+        in_lexical_decl: False,
+        decl_bound_names: set.new(),
+        has_cover_initializer: False,
+        in_formal_params: False,
+        in_arrow_params: False,
+        in_method: False,
+        has_non_simple_param: False,
+        param_bound_names: [],
+        in_single_stmt_pos: False,
+        has_invalid_pattern: False,
+        export_names: set.new(),
+        export_local_refs: [],
+        import_bindings: set.new(),
+        in_export_decl: False,
+        last_expr_name: None,
+        has_eval_args_target: False,
+        pending_strict_name: None,
+        scope_lexical: set.new(),
+        scope_var: set.new(),
+        scope_params: set.new(),
+        scope_funcs: set.new(),
+        outer_lexical: set.new(),
+        binding_kind: BindingNone,
+        in_block: False,
+        module_top_level: False,
+      ))
   }
+}
+
+/// Parse JavaScript source code into an AST.
+/// Returns Ok(ast.Program) on valid parse, Error on parse failure.
+pub fn parse(
+  source: String,
+  mode: ParseMode,
+) -> Result(ast.Program, ParseError) {
+  use p <- init_parser(source, mode)
+  case mode {
+    Script -> parse_script(p)
+    Module -> parse_module(p)
+  }
+}
+
+/// Parse a direct-eval Script with `allow_new_target` inherited from the
+/// caller's syntax permissions (§19.2.1.1 PerformEval step 9: when the eval
+/// call is inside a function, `new.target` is not an early error). P11 will
+/// extend this to the remaining `SyntaxPerms` flags; for now only
+/// `new_target` is threaded so the P2 `function_depth>0` → `allow_new_target`
+/// migration doesn't regress field-init eval tests that previously parsed by
+/// accident.
+pub fn parse_direct_eval(
+  source: String,
+  allow_new_target allow_new_target: Bool,
+) -> Result(ast.Program, ParseError) {
+  use p <- init_parser(source, Script)
+  parse_script(P(..p, allow_new_target:))
 }
 
 // ---- Script / Module entry points ----
@@ -2497,6 +2532,26 @@ fn parse_class_element(
     True -> advance(p)
     False -> p
   }
+  // §15.7.1 ClassStaticBlock: `static { ... }`. Distinct from a method named
+  // `static` (handled by the LeftParen guard above) and from a computed-key
+  // static method `static [k](){}` (LeftBracket).
+  use <- bool.lazy_guard(is_static && peek(p2) == LeftBrace, fn() {
+    let p_body = enter_static_block_context(p2)
+    use #(p3, block) <- result.map(parse_block_statement(p_body))
+    // restore_outer_context threads function_depth/loops/labels/generator/
+    // async/static_block/scope; allow_super_* are not threaded — restore here.
+    let p3 =
+      P(
+        ..restore_outer_context(p3, p2),
+        allow_super_property: p2.allow_super_property,
+        allow_super_call: p2.allow_super_call,
+      )
+    let body = case block {
+      ast.BlockStatement(body:) -> body
+      _ -> []
+    }
+    #(p3, False, ast.StaticBlock(body:))
+  })
   // Skip async keyword — track if method is async
   let is_method_async = case peek(p2) {
     Async ->
@@ -2698,9 +2753,23 @@ fn parse_class_element_body(
       ))
     }
     Equal -> {
-      // Field with initializer
-      let p7 = advance(p6)
+      // Field with initializer — runs as a method-like body, so super.x and
+      // new.target are allowed; super() is not.
+      let p7 =
+        P(
+          ..advance(p6),
+          allow_super_property: True,
+          allow_super_call: False,
+          allow_new_target: True,
+        )
       use #(p8, init_expr) <- result.try(parse_assignment_expression(p7))
+      let p8 =
+        P(
+          ..p8,
+          allow_super_property: outer_p.allow_super_property,
+          allow_super_call: outer_p.allow_super_call,
+          allow_new_target: outer_p.allow_new_target,
+        )
       use p9 <- result.try(eat_semicolon(p8))
       Ok(#(
         p9,
@@ -3104,6 +3173,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                           let param_scope = p4.scope_params
                           let saved_super_call = p4.allow_super_call
                           let saved_super_property = p4.allow_super_property
+                          let saved_new_target = p4.allow_new_target
                           let p5 =
                             enter_function_context(advance(p4), False, True)
                           let p5 =
@@ -3112,6 +3182,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                               scope_params: param_scope,
                               allow_super_call: saved_super_call,
                               allow_super_property: saved_super_property,
+                              allow_new_target: saved_new_target,
                             )
                           wrap_arrow(parse_arrow_body(p5), p, True, params)
                         }
@@ -3145,6 +3216,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                     let p3 = P(..p3, param_bound_names: [name])
                     let saved_super_call = p3.allow_super_call
                     let saved_super_property = p3.allow_super_property
+                    let saved_new_target = p3.allow_new_target
                     let p3 = enter_function_context(p3, False, True)
                     let p3 =
                       P(
@@ -3152,6 +3224,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                         scope_params: set.from_list([name]),
                         allow_super_call: saved_super_call,
                         allow_super_property: saved_super_property,
+                        allow_new_target: saved_new_target,
                       )
                     wrap_arrow(parse_arrow_body(p3), p, True, [
                       ast.IdentifierPattern(name: name),
@@ -3183,6 +3256,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                 let p3 = P(..p3, param_bound_names: [name])
                 let saved_super_call = p3.allow_super_call
                 let saved_super_property = p3.allow_super_property
+                let saved_new_target = p3.allow_new_target
                 let p3 = enter_function_context(p3, False, False)
                 let p3 =
                   P(
@@ -3190,6 +3264,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                     scope_params: set.from_list([name]),
                     allow_super_call: saved_super_call,
                     allow_super_property: saved_super_property,
+                    allow_new_target: saved_new_target,
                   )
                 wrap_arrow(parse_arrow_body(p3), p, False, [
                   ast.IdentifierPattern(name: name),
@@ -3244,6 +3319,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                       let param_scope = p4.scope_params
                       let saved_super_call = p4.allow_super_call
                       let saved_super_property = p4.allow_super_property
+                      let saved_new_target = p4.allow_new_target
                       let p5 = enter_function_context(advance(p4), False, False)
                       let p5 =
                         P(
@@ -3251,6 +3327,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                           scope_params: param_scope,
                           allow_super_call: saved_super_call,
                           allow_super_property: saved_super_property,
+                          allow_new_target: saved_new_target,
                         )
                       wrap_arrow(parse_arrow_body(p5), p, False, params)
                     }
@@ -3466,6 +3543,8 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       }
     }
     Await -> {
+      // §15.7.1: ContainsAwait of ClassStaticBlockBody must be false.
+      use <- bool.guard(p.in_static_block, Error(AwaitInStaticBlock(pos_of(p))))
       let p2 = advance(p)
       use #(p3, arg) <- result.try(parse_unary_expression(p2))
       Ok(#(
@@ -3569,7 +3648,7 @@ fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
             // new.target must be spelled literally — unicode escapes forbidden
             "target", True -> Error(UnicodeEscapeInMetaProperty(pos_of(p3)))
             "target", False ->
-              case p.function_depth > 0 {
+              case p.allow_new_target {
                 True -> {
                   let meta = ast.MetaProperty(meta: "new", property: "target")
                   parse_call_chain(advance(p3), meta)
@@ -3960,6 +4039,11 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           // names and member accesses use other paths, so they still allow
           // escaped reserved words.
           use Nil <- result.try(check_not_escaped_reserved_word(p, val))
+          // §15.7.1: ContainsArguments of ClassStaticBlockBody must be false.
+          use <- bool.guard(
+            p.in_static_block && val == "arguments",
+            Error(ArgumentsInStaticBlock(pos_of(p))),
+          )
           let eval_args_target = case p.strict, val {
             True, "eval" | True, "arguments" -> True
             _, _ -> p.has_eval_args_target
@@ -4561,6 +4645,16 @@ fn parse_object_property_value(
             pos_of(p5),
           ))
         True -> {
+          // §15.7.1: shorthand `{await}` / `{arguments}` are IdentifierReference
+          // — forbidden directly inside a class static block.
+          use <- bool.guard(
+            p.in_static_block && prop_name_value == "await",
+            Error(AwaitInStaticBlock(pos_of(p))),
+          )
+          use <- bool.guard(
+            p.in_static_block && prop_name_value == "arguments",
+            Error(ArgumentsInStaticBlock(pos_of(p))),
+          )
           // In strict mode, eval/arguments as shorthand property marks
           // a potential invalid destructuring target
           let p5 = case p.strict, prop_name_value {
@@ -5390,8 +5484,10 @@ fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
     label_set: [],
     in_generator: is_generator,
     in_async: is_async,
+    in_static_block: False,
     allow_super_call: False,
     allow_super_property: False,
+    allow_new_target: True,
     in_single_stmt_pos: False,
     in_method: False,
     // Reset scope for new function body
@@ -5421,11 +5517,44 @@ fn enter_method_context(
     label_set: [],
     in_generator: is_generator,
     in_async: is_async,
+    in_static_block: False,
     allow_super_call: is_constructor && has_super_class,
     allow_super_property: True,
+    allow_new_target: True,
     in_single_stmt_pos: False,
     in_method: True,
     // Reset scope for new method body
+    scope_lexical: set.new(),
+    scope_var: set.new(),
+    scope_params: set.new(),
+    scope_funcs: set.new(),
+    outer_lexical: set.new(),
+    binding_kind: BindingNone,
+    in_block: False,
+    module_top_level: False,
+  )
+}
+
+/// §15.7.1 ClassStaticBlock — function-like boundary: resets loop/switch/
+/// labels (break/continue can't cross it), forbids `return` (function_depth=0),
+/// `[~Yield, +Await, ~Return]` parsing context. `in_async: True` reserves
+/// `await` as identifier via existing checks; `in_static_block: True` rejects
+/// AwaitExpression and `arguments` reference.
+fn enter_static_block_context(p: P) -> P {
+  P(
+    ..p,
+    function_depth: 0,
+    loop_depth: 0,
+    switch_depth: 0,
+    label_set: [],
+    in_generator: False,
+    in_async: True,
+    in_static_block: True,
+    allow_super_call: False,
+    allow_super_property: True,
+    allow_new_target: True,
+    in_single_stmt_pos: False,
+    in_method: False,
     scope_lexical: set.new(),
     scope_var: set.new(),
     scope_params: set.new(),
@@ -5454,7 +5583,9 @@ fn restore_outer_context(p: P, outer: P) -> P {
     label_set: outer.label_set,
     in_generator: outer.in_generator,
     in_async: outer.in_async,
+    in_static_block: outer.in_static_block,
     in_method: outer.in_method,
+    allow_new_target: outer.allow_new_target,
     scope_lexical: outer.scope_lexical,
     scope_var: outer.scope_var,
     scope_params: outer.scope_params,

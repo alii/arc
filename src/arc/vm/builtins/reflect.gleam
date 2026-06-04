@@ -159,39 +159,29 @@ fn reflect_apply(
 ///   3. Else if IsConstructor(newTarget) is false, throw a TypeError exception.
 ///   4. Let args be ? CreateListFromArrayLike(argumentsList).
 ///   5. Return ? Construct(target, args, newTarget).
-///
-/// TODO: newTarget (third arg) not yet fully wired — needs separate plumbing
-/// through do_construct to override the prototype source. The IsConstructor
-/// check for newTarget IS implemented.
 fn reflect_construct(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let #(target, args_list, new_target) = case args {
-    [t, a, nt, ..] -> #(t, a, Some(nt))
-    [t, a] -> #(t, a, None)
-    [t] -> #(t, JsUndefined, None)
-    [] -> #(JsUndefined, JsUndefined, None)
+    [t, a, nt, ..] -> #(t, a, nt)
+    [t, a] -> #(t, a, t)
+    [t] -> #(t, JsUndefined, t)
+    [] -> #(JsUndefined, JsUndefined, JsUndefined)
   }
-  // Step 1: If IsConstructor(target) is false, throw a TypeError exception.
-  use <- bool.lazy_guard(!object.is_constructor(state.heap, target), fn() {
-    state.type_error(state, "target is not a constructor")
-  })
-  // Step 3: If newTarget is present and IsConstructor(newTarget) is false,
-  // throw a TypeError exception.
-  let new_target_valid = case new_target {
-    Some(nt) -> object.is_constructor(state.heap, nt)
-    None -> True
-  }
-  use <- bool.lazy_guard(!new_target_valid, fn() {
-    state.type_error(state, "newTarget is not a constructor")
-  })
   // Step 4: Let args be ? CreateListFromArrayLike(argumentsList).
   use ctor_args, state <- require_array_like(state, args_list)
-  // Step 5: Return ? Construct(target, args, newTarget).
-  use result, state <- state.try_op(state.construct(state, target, ctor_args))
+  // Steps 1, 3, 5: state.construct_with_target validates target/newTarget are
+  // objects and runs [[Construct]]. Non-constructors throw in do_construct.
+  use result, state <- state.try_op(state.construct_with_target(
+    state,
+    target,
+    ctor_args,
+    new_target,
+  ))
   #(state, Ok(result))
 }
+
 
 /// CreateListFromArrayLike per §7.3.19 — throws TypeError on non-object.
 fn require_array_like(
@@ -531,10 +521,9 @@ fn reflect_set_prototype_of(
     Ok(new_proto) ->
       case builtins_object.ordinary_set_prototype_of(state, ref, new_proto) {
         Ok(state) -> #(state, Ok(JsBool(True)))
-        Error(builtins_object.NotExtensible) | Error(builtins_object.Cyclic) -> #(
-          state,
-          Ok(JsBool(False)),
-        )
+        Error(builtins_object.NotExtensible)
+        | Error(builtins_object.Cyclic)
+        | Error(builtins_object.Immutable) -> #(state, Ok(JsBool(False)))
       }
   }
 }
