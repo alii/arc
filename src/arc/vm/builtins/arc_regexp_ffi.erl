@@ -127,6 +127,14 @@ translate_pattern(Pattern) ->
 -define(WORD, "[0-9A-Za-z_]").
 -define(NWORD, "[^0-9A-Za-z_]").
 
+%% JS \s per §22.2.2.9: WhiteSpace + LineTerminator productions — ASCII
+%% whitespace plus NBSP, Ogham space, the U+2000 block, LS/PS, NNBSP, MMSP,
+%% ideographic space, and BOM. PCRE's \s is ASCII-only, and `ucp` \s both
+%% over- and under-shoots (includes U+0085 NEL, excludes U+FEFF BOM).
+-define(JSS_CHARS,
+        "\\t\\n\\x0B\\f\\r \\x{A0}\\x{1680}\\x{2000}-\\x{200A}"
+        "\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}\\x{FEFF}").
+
 %% Second argument tracks whether we are inside a [...] character class, where
 %% \w/\b are not the same productions (\b is backspace) and must be left alone.
 translate_pat([], _InClass) -> [];
@@ -142,6 +150,15 @@ translate_pat([$\\, $u, A, B, C, D | Rest], InClass) ->
         true -> [$\\, $x, ${, A, B, C, D, $} | translate_pat(Rest, InClass)];
         false -> [$\\, $u | translate_pat([A, B, C, D | Rest], InClass)]
     end;
+%% \s, \S -> explicit JS whitespace class (see ?JSS_CHARS). Inside a
+%% character class the set's contents are spliced in directly; a negated \S
+%% cannot be spliced into a class, so it keeps PCRE semantics there.
+translate_pat([$\\, $s | Rest], false) ->
+    "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false);
+translate_pat([$\\, $S | Rest], false) ->
+    "[^" ?JSS_CHARS "]" ++ translate_pat(Rest, false);
+translate_pat([$\\, $s | Rest], true) ->
+    ?JSS_CHARS ++ translate_pat(Rest, true);
 %% \w, \W, \b, \B outside a character class -> explicit JS forms so caseless
 %% folding includes long-s / Kelvin (matching the JS word-char case closure).
 translate_pat([$\\, $w | Rest], false) -> ?WORD ++ translate_pat(Rest, false);
@@ -184,6 +201,9 @@ is_hex(C) ->
 %% match).
 regexp_exec(_Pattern, _Flags, String, Offset) when Offset > byte_size(String) ->
     {error, nil};
+%% ToLength clamps a negative lastIndex to 0 (§7.1.20); re:run raises badarg.
+regexp_exec(Pattern, Flags, String, Offset) when Offset < 0 ->
+    regexp_exec(Pattern, Flags, String, 0);
 regexp_exec(Pattern, Flags, String, Offset) ->
     Opts = [{offset, Offset}, {capture, all, index}],
     case safe_run(String, Pattern, Flags, Opts) of

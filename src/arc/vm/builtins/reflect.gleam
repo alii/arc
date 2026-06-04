@@ -169,10 +169,18 @@ fn reflect_construct(
     [t] -> #(t, JsUndefined, t)
     [] -> #(JsUndefined, JsUndefined, JsUndefined)
   }
+  // Step 1: If IsConstructor(target) is false, throw a TypeError exception.
+  use <- bool.lazy_guard(!object.is_constructor(state.heap, target), fn() {
+    state.type_error(state, "Reflect.construct: target is not a constructor")
+  })
+  // Step 3: If newTarget is not a constructor, throw a TypeError exception.
+  // (When absent, new_target defaults to target — already validated above.)
+  use <- bool.lazy_guard(!object.is_constructor(state.heap, new_target), fn() {
+    state.type_error(state, "Reflect.construct: newTarget is not a constructor")
+  })
   // Step 4: Let args be ? CreateListFromArrayLike(argumentsList).
   use ctor_args, state <- require_array_like(state, args_list)
-  // Steps 1, 3, 5: state.construct_with_target validates target/newTarget are
-  // objects and runs [[Construct]]. Non-constructors throw in do_construct.
+  // Step 5: state.construct_with_target runs [[Construct]] with newTarget.
   use result, state <- state.try_op(state.construct_with_target(
     state,
     target,

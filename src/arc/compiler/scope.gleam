@@ -317,17 +317,26 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
       let index = r.next_local
       // Linker-seeded module exports are always boxed: the linker pre-allocates
       // the cell and seeds it into this slot, so no init/box op is emitted.
-      let linker_seeded = set.contains(r.linker_seeded, name)
+      // Only module TOP-LEVEL declarations are linker cells — a same-named
+      // binding inside a block scope (e.g. a class's inner-name const) is an
+      // ordinary local and must get its normal init/boxing.
+      let at_top_level =
+        list.all(r.scopes, fn(s) { s.kind == emit.FunctionScope })
+      let linker_seeded = at_top_level && set.contains(r.linker_seeded, name)
       let boxed = linker_seeded || set.contains(r.captured_vars, name)
       let binding = Binding(index:, kind:, is_boxed: boxed)
       let new_max = int.max(r.max_locals, index + 1)
+      // Record name→slot for module-export lookup and direct-eval
+      // local_names. First declaration wins: top-level let/const/class
+      // DeclareVars are hoisted ahead of body emission, so a later same-named
+      // binding in a block scope (e.g. a class's inner-name const) must not
+      // steal the export's slot mapping.
+      let names = case dict.has_key(r.names, name) {
+        True -> r.names
+        False -> dict.insert(r.names, name, index)
+      }
       let r =
-        Resolver(
-          ..r,
-          next_local: index + 1,
-          max_locals: new_max,
-          names: dict.insert(r.names, name, index),
-        )
+        Resolver(..r, next_local: index + 1, max_locals: new_max, names:)
 
       // Add binding to the appropriate scope
       let r = case kind {
