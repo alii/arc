@@ -30383,7 +30383,6 @@ staging/sm/Date/toISOString-01.js
 staging/sm/Date/toISOString.js
 staging/sm/Date/toPrimitive.js
 staging/sm/Date/two-digit-years.js
-staging/sm/Error/prototype.js
 staging/sm/Exceptions/error-expando-reconfigure.js
 staging/sm/Function/Function-with-eval.js
 staging/sm/Function/arguments-extra-property.js
