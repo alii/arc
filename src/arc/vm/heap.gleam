@@ -1,4 +1,3 @@
-import arc/internal/erlang
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
 import gleam/list
@@ -25,16 +24,6 @@ pub opaque type Heap(ctx) {
 /// Create an empty heap.
 pub fn new() -> Heap(ctx) {
   Heap(data: dict.new(), free: [], next: 0, roots: set.new())
-}
-
-pub fn serialize(heap: Heap(ctx)) -> BitArray {
-  erlang.term_to_binary(heap)
-}
-
-/// "dangerously" because this doesn't validate
-/// that the passed data is actually a heap
-pub fn dangerously_deserialize(heap: BitArray) -> Heap(ctx) {
-  erlang.binary_to_term(heap)
 }
 
 /// Allocate a slot. Prefers recycled indices from the free list,

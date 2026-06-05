@@ -7,16 +7,14 @@
 // Erlang-mailbox version, built on `host.suspend`/`host.resume`.
 // ============================================================================
 
-import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
+import arc/vm/exec/frame
 import arc/vm/heap
 import arc/vm/internal/job_queue
-import arc/vm/internal/tuple_array
-import arc/vm/opcode
 import arc/vm/ops/object
 import arc/vm/state.{
-  type Heap, type NativeFnSlot, type State, type StepResult, type VmError, State,
+  type NativeFnSlot, type State, type StepResult, type VmError, State,
   StepVmError, Thrown,
 }
 import arc/vm/value.{
@@ -208,7 +206,7 @@ fn call_native_to_completion(
       ..state,
       stack: [],
       pc: 0,
-      code: return_code_sentinel(),
+      code: frame.return_code_sentinel(),
       call_stack: [],
       try_stack: [],
     )
@@ -245,26 +243,17 @@ fn call_closure(
   this_val: JsValue,
   execute_inner: ExecuteInnerFn,
 ) -> Result(#(completion.Completion, State), VmError) {
-  let env_values = heap.read_env(state.heap, env_ref) |> option.unwrap([])
-  let #(heap, new_this) = bind_this(state, callee_template, this_val)
-  // Mirror call.setup_locals: insert the lexical seeds between captures and
-  // params when the callee owns those slots (non-arrow). Inlined to avoid an
-  // import cycle through call.gleam; the locals tuple is built in one
-  // forward pass via FFI (no list.append/reverse/intermediate accumulator).
-  let seeds = case callee_template.is_arrow {
-    True -> []
-    False -> {
-      let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
-      lexical_seeds(callee_template.lexical, new_this, fn_ref, home)
-    }
-  }
+  let #(heap, new_this) = frame.bind_this(state, callee_template, this_val)
+  // Job re-entry never has a new.target, so seed it with undefined.
   let locals =
-    setup_locals_tuple(
-      env_values,
-      seeds,
+    frame.setup_locals(
+      heap,
+      env_ref,
+      fn_ref,
+      home_object,
+      callee_template,
       args,
-      callee_template.arity,
-      callee_template.local_count,
+      new_this,
       JsUndefined,
     )
   let job_state =
@@ -292,81 +281,5 @@ fn call_closure(
         ),
       ))
     Error(vm_err) -> Error(vm_err)
-  }
-}
-
-// ============================================================================
-// Inlined helpers (avoid circular dependency with call.gleam)
-// ============================================================================
-
-/// Seed values for the owned lexical slots, in canonical `all_lexical_refs`
-/// order ([this, active_func, home_object, new_target]), one per Some entry.
-/// Job re-entry never has a new.target, so that seed is always undefined.
-/// Mirrors call.lexical_seeds — duplicated to avoid an import cycle.
-fn lexical_seeds(
-  lexical: opcode.LexicalSlots,
-  this_val: JsValue,
-  fn_ref: Ref,
-  home_object: JsValue,
-) -> List(JsValue) {
-  let acc = case lexical.new_target {
-    Some(_) -> [JsUndefined]
-    None -> []
-  }
-  let acc = case lexical.home_object {
-    Some(_) -> [home_object, ..acc]
-    None -> acc
-  }
-  let acc = case lexical.active_func {
-    Some(_) -> [JsObject(fn_ref), ..acc]
-    None -> acc
-  }
-  case lexical.this {
-    Some(_) -> [this_val, ..acc]
-    None -> acc
-  }
-}
-
-/// FFI: build the locals tuple in one forward pass — see
-/// arc_vm_ffi:setup_locals_tuple/6. Declared here as well as in call.gleam
-/// because importing call.gleam would create an import cycle.
-@external(erlang, "arc_vm_ffi", "setup_locals_tuple")
-fn setup_locals_tuple(
-  env: List(JsValue),
-  seeds: List(JsValue),
-  args: List(JsValue),
-  arity: Int,
-  local_count: Int,
-  undef: JsValue,
-) -> tuple_array.TupleArray(JsValue)
-
-@external(erlang, "arc_vm_ffi", "return_code_sentinel")
-fn return_code_sentinel() -> tuple_array.TupleArray(opcode.Op)
-
-/// Resolve `this` for a function call per ES2024 S10.2.1.2 OrdinaryCallBindThis.
-fn bind_this(
-  state: State,
-  callee: FuncTemplate,
-  this_arg: JsValue,
-) -> #(Heap, JsValue) {
-  case callee.is_arrow {
-    True -> #(state.heap, JsUndefined)
-    False ->
-      case callee.is_strict {
-        True -> #(state.heap, this_arg)
-        False ->
-          case this_arg {
-            JsUndefined | JsNull -> #(
-              state.heap,
-              JsObject(state.ctx.global_object),
-            )
-            JsObject(_) -> #(state.heap, this_arg)
-            _ ->
-              case common.to_object(state.heap, state.builtins, this_arg) {
-                Some(#(heap, ref)) -> #(heap, JsObject(ref))
-                None -> #(state.heap, this_arg)
-              }
-          }
-      }
   }
 }

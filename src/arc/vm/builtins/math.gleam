@@ -13,7 +13,6 @@ import arc/vm/value.{
 import gleam/float
 import gleam/int
 import gleam/list
-import gleam/result
 
 /// Set up the Math global object.
 /// Math is NOT a constructor — it's a plain object with static methods.
@@ -171,22 +170,9 @@ fn math_max(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let result =
-    list.fold(args, NegInfinity, fn(acc, arg) {
-      case acc, to_number(arg) {
-        NaN, _ | _, NaN -> NaN
-        Finite(a), Finite(b) if a >=. b ->
-          // Per spec: Math.max(+0, -0) → +0
-          case a <=. b && is_neg_zero(a) {
-            True -> Finite(b)
-            False -> Finite(a)
-          }
-        Finite(_), Finite(b) -> Finite(b)
-        Infinity, _ | _, Infinity -> Infinity
-        NegInfinity, other | other, NegInfinity -> other
-      }
-    })
-  #(state, Ok(JsNumber(result)))
+  // Per spec: Math.max(+0, -0) → +0, so a -0 accumulator loses ties.
+  use a, b <- math_extremum(args, state, seed: NegInfinity, dominant: Infinity)
+  a >=. b && { a >. b || !is_neg_zero(a) }
 }
 
 /// Math.min(a, b, ...) — returns +Infinity for no args.
@@ -194,19 +180,31 @@ fn math_min(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
+  // Per spec: Math.min(+0, -0) → -0, so a -0 argument wins ties.
+  use a, b <- math_extremum(args, state, seed: Infinity, dominant: NegInfinity)
+  a <=. b && { a <. b || !is_neg_zero(b) }
+}
+
+/// Math.max/min fold: `seed` loses to all, `dominant` beats all, `keep_acc` decides finites.
+fn math_extremum(
+  args: List(JsValue),
+  state: State,
+  seed seed: value.JsNum,
+  dominant dominant: value.JsNum,
+  keep_acc keep_acc: fn(Float, Float) -> Bool,
+) -> #(State, Result(JsValue, JsValue)) {
   let result =
-    list.fold(args, Infinity, fn(acc, arg) {
+    list.fold(args, seed, fn(acc, arg) {
       case acc, to_number(arg) {
         NaN, _ | _, NaN -> NaN
-        Finite(a), Finite(b) if a <=. b ->
-          // Per spec: Math.min(+0, -0) → -0
-          case a >=. b && is_neg_zero(b) {
-            True -> Finite(b)
-            False -> Finite(a)
+        Finite(a), Finite(b) ->
+          case keep_acc(a, b) {
+            True -> acc
+            False -> Finite(b)
           }
-        Finite(_), Finite(b) -> Finite(b)
-        NegInfinity, _ | _, NegInfinity -> NegInfinity
-        Infinity, other | other, Infinity -> other
+        a, num if a == seed -> num
+        _, b if b == seed -> acc
+        _, _ -> dominant
       }
     })
   #(state, Ok(JsNumber(result)))
@@ -566,7 +564,8 @@ fn domain_unit(
   }
 }
 
-/// Simplified ToNumber for Math operations.
+/// Simplified ToNumber for Math operations: like value.to_number but
+/// non-coercible values (Symbol, BigInt) become NaN instead of erroring.
 pub fn to_number(val: JsValue) -> value.JsNum {
   case val {
     JsNumber(n) -> n
@@ -574,14 +573,7 @@ pub fn to_number(val: JsValue) -> value.JsNum {
     value.JsNull -> Finite(0.0)
     value.JsBool(True) -> Finite(1.0)
     value.JsBool(False) -> Finite(0.0)
-    JsString("") -> Finite(0.0)
-    JsString("Infinity") -> Infinity
-    JsString("-Infinity") -> NegInfinity
-    JsString(s) ->
-      float.parse(s)
-      |> result.try_recover(fn(_) { int.parse(s) |> result.map(int.to_float) })
-      |> result.map(Finite)
-      |> result.unwrap(NaN)
+    JsString(s) -> value.string_to_number(s)
     _ -> NaN
   }
 }

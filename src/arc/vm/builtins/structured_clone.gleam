@@ -287,7 +287,7 @@ fn serialize_kind(
       )
       use #(syms, ctx) <- result.map(case mode {
         SpecClone -> Ok(#([], ctx))
-        ArcClone -> serialize_sym_props(heap, symbol_properties, mode, ctx, [])
+        ArcClone -> serialize_props(heap, symbol_properties, mode, ctx, [])
       })
       #(PrObject(properties: props, symbol_properties: syms), ctx)
     }
@@ -411,16 +411,17 @@ fn serialize_pairs(
   }
 }
 
-/// Serialize string/index-keyed own properties. Per HTML §2.7.3 step 26.1,
-/// accessor and non-enumerable data properties are silently SKIPPED in both
-/// modes (only enumerable own data properties are copied).
+/// Serialize own properties, generic over the key type (string/index keys or
+/// symbol ids). Per HTML §2.7.3 step 26.1, accessor and non-enumerable data
+/// properties are silently SKIPPED in both modes (only enumerable own data
+/// properties are copied).
 fn serialize_props(
   heap: Heap,
-  entries: List(#(value.PropertyKey, value.Property)),
+  entries: List(#(k, value.Property)),
   mode: CloneMode,
   ctx: SerCtx,
-  acc: List(#(value.PropertyKey, value.PortableValue)),
-) -> Result(#(List(#(value.PropertyKey, value.PortableValue)), SerCtx), String) {
+  acc: List(#(k, value.PortableValue)),
+) -> Result(#(List(#(k, value.PortableValue)), SerCtx), String) {
   case entries {
     [] -> Ok(#(list.reverse(acc), ctx))
     [#(key, DataProperty(value: v, enumerable: True, ..)), ..rest] -> {
@@ -430,27 +431,6 @@ fn serialize_props(
     [#(_, DataProperty(enumerable: False, ..)), ..rest]
     | [#(_, AccessorProperty(..)), ..rest] ->
       serialize_props(heap, rest, mode, ctx, acc)
-  }
-}
-
-/// Serialize symbol-keyed own properties — ArcClone only. Same skip rules
-/// as `serialize_props`.
-fn serialize_sym_props(
-  heap: Heap,
-  entries: List(#(value.SymbolId, value.Property)),
-  mode: CloneMode,
-  ctx: SerCtx,
-  acc: List(#(value.SymbolId, value.PortableValue)),
-) -> Result(#(List(#(value.SymbolId, value.PortableValue)), SerCtx), String) {
-  case entries {
-    [] -> Ok(#(list.reverse(acc), ctx))
-    [#(id, DataProperty(value: v, enumerable: True, ..)), ..rest] -> {
-      use #(pv, ctx) <- result.try(serialize_value(heap, v, mode, ctx))
-      serialize_sym_props(heap, rest, mode, ctx, [#(id, pv), ..acc])
-    }
-    [#(_, DataProperty(enumerable: False, ..)), ..rest]
-    | [#(_, AccessorProperty(..)), ..rest] ->
-      serialize_sym_props(heap, rest, mode, ctx, acc)
   }
 }
 

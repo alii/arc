@@ -8,7 +8,6 @@
 ///
 /// Based on ECMAScript §16.2 and QuickJS's module implementation.
 import arc/compiler
-import arc/internal/erlang
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/exec/entry
@@ -713,20 +712,6 @@ fn eval_module_body(
       }
     }
   }
-}
-
-// =============================================================================
-// Serialization
-// =============================================================================
-
-/// Serialize a ModuleBundle to a binary (Erlang term_to_binary).
-pub fn serialize_bundle(bundle: ModuleBundle) -> BitArray {
-  erlang.term_to_binary(bundle)
-}
-
-/// Deserialize a ModuleBundle from a binary (Erlang binary_to_term).
-pub fn deserialize_bundle(data: BitArray) -> ModuleBundle {
-  erlang.binary_to_term(data)
 }
 
 // =============================================================================

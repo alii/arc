@@ -4917,6 +4917,8 @@ built-ins/Number/S15.7.5_A1_T06.js
 built-ins/Number/S15.7.5_A1_T07.js
 built-ins/Number/S9.3.1_A1.js
 built-ins/Number/S9.3.1_A10.js
+built-ins/Number/S9.3.1_A11.js
+built-ins/Number/S9.3.1_A12.js
 built-ins/Number/S9.3.1_A13.js
 built-ins/Number/S9.3.1_A14.js
 built-ins/Number/S9.3.1_A15.js
@@ -4924,8 +4926,13 @@ built-ins/Number/S9.3.1_A2_U180E.js
 built-ins/Number/S9.3.1_A32.js
 built-ins/Number/S9.3.1_A3_T1_U180E.js
 built-ins/Number/S9.3.1_A3_T2_U180E.js
+built-ins/Number/S9.3.1_A4_T1.js
+built-ins/Number/S9.3.1_A4_T2.js
+built-ins/Number/S9.3.1_A5_T1.js
 built-ins/Number/S9.3.1_A5_T2.js
+built-ins/Number/S9.3.1_A5_T3.js
 built-ins/Number/S9.3.1_A7.js
+built-ins/Number/S9.3.1_A8.js
 built-ins/Number/S9.3.1_A9.js
 built-ins/Number/S9.3_A1_T1.js
 built-ins/Number/S9.3_A2_T1.js
@@ -9908,6 +9915,7 @@ built-ins/String/prototype/indexOf/S15.5.4.7_A9.js
 built-ins/String/prototype/indexOf/name.js
 built-ins/String/prototype/indexOf/not-a-constructor.js
 built-ins/String/prototype/indexOf/position-tointeger-wrapped-values.js
+built-ins/String/prototype/indexOf/position-tointeger.js
 built-ins/String/prototype/indexOf/searchstring-tostring-bigint.js
 built-ins/String/prototype/indexOf/searchstring-tostring-wrapped-values.js
 built-ins/String/prototype/indexOf/searchstring-tostring.js
@@ -17781,6 +17789,7 @@ language/expressions/does-not-equals/S11.9.2_A4.1_T2.js
 language/expressions/does-not-equals/S11.9.2_A4.2.js
 language/expressions/does-not-equals/S11.9.2_A4.3.js
 language/expressions/does-not-equals/S11.9.2_A5.1.js
+language/expressions/does-not-equals/S11.9.2_A5.3.js
 language/expressions/does-not-equals/S11.9.2_A6.1.js
 language/expressions/does-not-equals/S11.9.2_A6.2_T1.js
 language/expressions/does-not-equals/S11.9.2_A6.2_T2.js
@@ -18244,6 +18253,7 @@ language/expressions/equals/S11.9.1_A4.1_T2.js
 language/expressions/equals/S11.9.1_A4.2.js
 language/expressions/equals/S11.9.1_A4.3.js
 language/expressions/equals/S11.9.1_A5.1.js
+language/expressions/equals/S11.9.1_A5.3.js
 language/expressions/equals/S11.9.1_A6.1.js
 language/expressions/equals/S11.9.1_A6.2_T1.js
 language/expressions/equals/S11.9.1_A6.2_T2.js
@@ -18801,7 +18811,6 @@ language/expressions/greater-than-or-equal/S11.8.4_A4.2.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.4.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.6.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.7.js
-language/expressions/greater-than-or-equal/bigint-and-incomparable-string.js
 language/expressions/greater-than-or-equal/bigint-and-non-finite.js
 language/expressions/greater-than/11.8.2-1.js
 language/expressions/greater-than/11.8.2-2.js
@@ -18839,7 +18848,6 @@ language/expressions/greater-than/S11.8.2_A4.2.js
 language/expressions/greater-than/S11.8.2_A4.3.js
 language/expressions/greater-than/S11.8.2_A4.6.js
 language/expressions/greater-than/S11.8.2_A4.7.js
-language/expressions/greater-than/bigint-and-incomparable-string.js
 language/expressions/greater-than/bigint-and-non-finite.js
 language/expressions/greater-than/bigint-and-symbol.js
 language/expressions/grouping/S11.1.6_A1.js
@@ -18993,7 +19001,6 @@ language/expressions/less-than-or-equal/S11.8.3_A4.12_T2.js
 language/expressions/less-than-or-equal/S11.8.3_A4.2.js
 language/expressions/less-than-or-equal/S11.8.3_A4.5.js
 language/expressions/less-than-or-equal/S11.8.3_A4.8.js
-language/expressions/less-than-or-equal/bigint-and-incomparable-string.js
 language/expressions/less-than-or-equal/bigint-and-non-finite.js
 language/expressions/less-than/S11.8.1_A1.js
 language/expressions/less-than/S11.8.1_A2.1_T1.js
@@ -19028,7 +19035,6 @@ language/expressions/less-than/S11.8.1_A4.3.js
 language/expressions/less-than/S11.8.1_A4.4.js
 language/expressions/less-than/S11.8.1_A4.5.js
 language/expressions/less-than/S11.8.1_A4.8.js
-language/expressions/less-than/bigint-and-incomparable-string.js
 language/expressions/less-than/bigint-and-non-finite.js
 language/expressions/less-than/bigint-and-symbol.js
 language/expressions/logical-and/S11.11.1_A1.js

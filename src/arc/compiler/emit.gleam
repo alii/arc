@@ -190,7 +190,7 @@ pub opaque type Emitter {
     /// nested block. Only meaningful when top_lex == LexGlobal.
     scope_depth: Int,
     /// Whether/where to emit the field-initializer call (§13.3.7.1 step 12
-    /// InitializeInstanceElements). Set by compile_derived_class/base_class
+    /// InitializeInstanceElements). Set by compile_class_body
     /// when the class has instance fields; arrows inherit it so `()=>super()`
     /// can find it.
     field_init: FieldInitMode,
@@ -638,10 +638,22 @@ fn push_loop_iter(
   )
 }
 
-/// Barrier frame for try/catch bodies — never a target, only crossed.
-/// Makes break/continue/return that jump out of the try emit the right
-/// number of PopTry ops to keep try_stack balanced.
-fn push_barrier(e: Emitter, pop_try: Int) -> Emitter {
+/// Barrier frame for try/catch/finally bodies — never a target, only crossed.
+/// Makes break/continue/return that jump out emit the right cleanup:
+/// - `pop_try`: PopTry ops to keep try_stack balanced (QuickJS:
+///   push_break_entry, quickjs.c:28826-28828).
+/// - `label_finally`: if Some, emit_goto_loop / ReturnStatement walk emits
+///   `push undef; Gosub(fin_label); Pop` after the PopTrys (quickjs.c:28889).
+/// - `drop`: value-stack slots to drop when crossing a finally body itself —
+///   the [slot, gosub_retpc] pair pushed by caller+Gosub — so the abrupt
+///   completion inside finally replaces the saved one (never reaches IrRet).
+///   QuickJS: push_break_entry(..., -1, -1, 2) at quickjs.c:28934-28935.
+fn push_barrier(
+  e: Emitter,
+  pop_try pop_try: Int,
+  label_finally label_finally: Option(Int),
+  drop drop: Int,
+) -> Emitter {
   Emitter(..e, loop_stack: [
     LoopContext(
       break_label: -1,
@@ -650,47 +662,7 @@ fn push_barrier(e: Emitter, pop_try: Int) -> Emitter {
       is_regular: False,
       cross_pop_try: pop_try,
       has_iterator: False,
-      label_finally: None,
-      drop_count: 0,
-    ),
-    ..e.loop_stack
-  ])
-}
-
-/// Barrier for a try-body or catch-body that has a `finally`. When crossed,
-/// emit_goto_loop / ReturnStatement walk will: PopTry×pop_try, then
-/// `push undef; Gosub(fin_label); Pop`. QuickJS: push_break_entry then
-/// `block_env.label_finally = label_finally` (quickjs.c:28826-28828, 28889).
-fn push_barrier_finally(e: Emitter, pop_try: Int, fin_label: Int) -> Emitter {
-  Emitter(..e, loop_stack: [
-    LoopContext(
-      break_label: -1,
-      continue_label: -1,
-      label: None,
-      is_regular: False,
-      cross_pop_try: pop_try,
-      has_iterator: False,
-      label_finally: Some(fin_label),
-      drop_count: 0,
-    ),
-    ..e.loop_stack
-  ])
-}
-
-/// Barrier for the finally body itself. Crossing it drops `drop` value-stack
-/// slots — the [slot, gosub_retpc] pair pushed by the caller+Gosub — so the
-/// abrupt completion inside finally replaces the saved one (never reaches
-/// IrRet). QuickJS: push_break_entry(..., -1, -1, 2) at quickjs.c:28934-28935.
-fn push_barrier_drop(e: Emitter, drop: Int) -> Emitter {
-  Emitter(..e, loop_stack: [
-    LoopContext(
-      break_label: -1,
-      continue_label: -1,
-      label: None,
-      is_regular: False,
-      cross_pop_try: 0,
-      has_iterator: False,
-      label_finally: None,
+      label_finally:,
       drop_count: drop,
     ),
     ..e.loop_stack
@@ -1894,7 +1866,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           let #(e, end_label) = fresh_label(e)
 
           let e = emit_ir(e, IrPushTry(catch_label))
-          let e = push_barrier(e, 1)
+          let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
           use e <- result.try(emit_stmt(e, block))
           let e = pop_loop(e)
           let e = emit_ir(e, IrPopTry)
@@ -1924,7 +1896,8 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
 
           // -- try body --------------------------------------------------
           let e = emit_ir(e, IrPushTry(throw_label))
-          let e = push_barrier_finally(e, 1, fin_label)
+          let e =
+            push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_stmt(e, block))
           let e = pop_loop(e)
           let e = emit_ir(e, IrPopTry)
@@ -1940,7 +1913,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           // -- finally subroutine ----------------------------------------
           // Entry stack: [retpc, slot, ..base] for ALL callers.
           let e = emit_ir(e, IrLabel(fin_label))
-          let e = push_barrier_drop(e, 2)
+          let e = push_barrier(e, pop_try: 0, label_finally: None, drop: 2)
           use e <- result.try(emit_stmt(e, finally_body))
           let e = pop_loop(e)
           let e = emit_ir(e, IrRet)
@@ -1964,7 +1937,8 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           let e = emit_ir(e, IrPushTry(throw_label))
           // Inner: catches throws from try body → catch handler.
           let e = emit_ir(e, IrPushTry(catch_label))
-          let e = push_barrier_finally(e, 2, fin_label)
+          let e =
+            push_barrier(e, pop_try: 2, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_stmt(e, block))
           let e = pop_loop(e)
           let e = emit_ir(e, IrPopTry)
@@ -1983,7 +1957,8 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
               |> result.unwrap(e)
             None -> emit_ir(e, IrPop)
           }
-          let e = push_barrier_finally(e, 1, fin_label)
+          let e =
+            push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_stmt(e, catch_body))
           let e = pop_loop(e)
           let e = emit_op(e, LeaveScope)
@@ -1999,7 +1974,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
 
           // -- finally subroutine ----------------------------------------
           let e = emit_ir(e, IrLabel(fin_label))
-          let e = push_barrier_drop(e, 2)
+          let e = push_barrier(e, pop_try: 0, label_finally: None, drop: 2)
           use e <- result.try(emit_stmt(e, finally_body))
           let e = pop_loop(e)
           let e = emit_ir(e, IrRet)
@@ -2097,6 +2072,27 @@ fn unwrap_parens(expr: ast.Expression) -> ast.Expression {
     ast.ParenthesizedExpression(inner) -> unwrap_parens(inner)
     _ -> expr
   }
+}
+
+/// Shared scaffold for optional chaining (`?.`): emit the base expression,
+/// dup it, and if nullish pop it and push undefined; otherwise run `middle`
+/// (the member access / call) on the duped value.
+fn emit_optional_scaffold(
+  e: Emitter,
+  base: ast.Expression,
+  middle: fn(Emitter) -> Result(Emitter, EmitError),
+) -> Result(Emitter, EmitError) {
+  let #(e, nullish_label) = fresh_label(e)
+  let #(e, end_label) = fresh_label(e)
+  use e <- result.try(emit_expr(e, base))
+  let e = emit_ir(e, IrDup)
+  let e = emit_ir(e, IrJumpIfNullish(nullish_label))
+  use e <- result.map(middle(e))
+  let e = emit_ir(e, IrJump(end_label))
+  let e = emit_ir(e, IrLabel(nullish_label))
+  let e = emit_ir(e, IrPop)
+  let e = push_const(e, JsUndefined)
+  emit_ir(e, IrLabel(end_label))
 }
 
 fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
@@ -2704,45 +2700,21 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Optional member expression (obj?.prop)
     ast.OptionalMemberExpression(object, ast.Identifier(prop), False) -> {
-      let #(e, nullish_label) = fresh_label(e)
-      let #(e, end_label) = fresh_label(e)
-      use e <- result.try(emit_expr(e, object))
-      let e = emit_ir(e, IrDup)
-      let e = emit_ir(e, IrJumpIfNullish(nullish_label))
-      let e = emit_ir(e, get_field_op(prop))
-      let e = emit_ir(e, IrJump(end_label))
-      let e = emit_ir(e, IrLabel(nullish_label))
-      let e = emit_ir(e, IrPop)
-      let e = push_const(e, JsUndefined)
-      let e = emit_ir(e, IrLabel(end_label))
-      Ok(e)
+      use e <- emit_optional_scaffold(e, object)
+      Ok(emit_ir(e, get_field_op(prop)))
     }
 
     // Optional computed member expression (obj?.[key])
     ast.OptionalMemberExpression(object, property, True) -> {
-      let #(e, nullish_label) = fresh_label(e)
-      let #(e, end_label) = fresh_label(e)
-      use e <- result.try(emit_expr(e, object))
-      let e = emit_ir(e, IrDup)
-      let e = emit_ir(e, IrJumpIfNullish(nullish_label))
-      use e <- result.try(emit_expr(e, property))
-      let e = emit_ir(e, IrGetElem)
-      let e = emit_ir(e, IrJump(end_label))
-      let e = emit_ir(e, IrLabel(nullish_label))
-      let e = emit_ir(e, IrPop)
-      let e = push_const(e, JsUndefined)
-      let e = emit_ir(e, IrLabel(end_label))
-      Ok(e)
+      use e <- emit_optional_scaffold(e, object)
+      use e <- result.map(emit_expr(e, property))
+      emit_ir(e, IrGetElem)
     }
 
     // Optional call expression (fn?.())
     ast.OptionalCallExpression(callee, args) -> {
-      let #(e, nullish_label) = fresh_label(e)
-      let #(e, end_label) = fresh_label(e)
-      use e <- result.try(emit_expr(e, callee))
-      let e = emit_ir(e, IrDup)
-      let e = emit_ir(e, IrJumpIfNullish(nullish_label))
-      use e <- result.try(case has_spread_arg(args) {
+      use e <- emit_optional_scaffold(e, callee)
+      case has_spread_arg(args) {
         False -> {
           let arity = list.length(args)
           use e <- result.map(list.try_fold(args, e, emit_expr))
@@ -2752,13 +2724,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           use e <- result.map(emit_args_array_with_spread(e, args))
           emit_ir(e, IrCallApply)
         }
-      })
-      let e = emit_ir(e, IrJump(end_label))
-      let e = emit_ir(e, IrLabel(nullish_label))
-      let e = emit_ir(e, IrPop)
-      let e = push_const(e, JsUndefined)
-      let e = emit_ir(e, IrLabel(end_label))
-      Ok(e)
+      }
     }
 
     // Array literal
@@ -2775,50 +2741,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
 
     // Function expression
-    ast.FunctionExpression(name, params, body, is_gen, is_async) -> {
-      let child =
-        compile_function_body(
-          e,
-          name,
-          params,
-          body,
-          False,
-          is_gen,
-          is_async,
-          // Normal function expression: a constructor unless gen/async.
-          !is_gen && !is_async,
-          opcode.fn_perms,
-          NoFieldInit,
-        )
-      let #(e, idx) = add_child_function(e, child)
-      Ok(emit_ir(e, IrMakeClosure(idx)))
-    }
+    ast.FunctionExpression(name, params, body, is_gen, is_async) ->
+      emit_function_closure(e, name, params, body, is_gen, is_async)
 
     // Arrow function expression
-    ast.ArrowFunctionExpression(params, body, is_async) -> {
-      let body_stmt = case body {
-        ast.ArrowBodyExpression(expr) ->
-          ast.BlockStatement([
-            ast.StmtWithLine(0, ast.ReturnStatement(Some(expr))),
-          ])
-        ast.ArrowBodyBlock(stmt) -> stmt
-      }
-      let child =
-        compile_function_body(
-          e,
-          None,
-          params,
-          body_stmt,
-          True,
-          False,
-          is_async,
-          False,
-          opcode.fn_perms,
-          NoFieldInit,
-        )
-      let #(e, idx) = add_child_function(e, child)
-      Ok(emit_ir(e, IrMakeClosure(idx)))
-    }
+    ast.ArrowFunctionExpression(params, body, is_async) ->
+      emit_arrow_closure(e, None, params, body, is_async)
 
     // `this` — non-arrows own the slot; arrows resolve it as a capture from
     // the nearest enclosing non-arrow.
@@ -3084,50 +3012,11 @@ fn emit_named_expr(
     // (ES spec §13.2.1.2), so (function(){}) is still anonymous.
     ast.ParenthesizedExpression(inner) -> emit_named_expr(e, inner, name)
     // Anonymous function expression → bake name
-    ast.FunctionExpression(None, params, body, is_gen, is_async) -> {
-      let child =
-        compile_function_body(
-          e,
-          Some(name),
-          params,
-          body,
-          False,
-          is_gen,
-          is_async,
-          // Named function expression: a constructor unless gen/async.
-          !is_gen && !is_async,
-          opcode.fn_perms,
-          NoFieldInit,
-        )
-      let #(e, idx) = add_child_function(e, child)
-      Ok(emit_ir(e, IrMakeClosure(idx)))
-    }
+    ast.FunctionExpression(None, params, body, is_gen, is_async) ->
+      emit_function_closure(e, Some(name), params, body, is_gen, is_async)
     // Arrow function → bake name
-    ast.ArrowFunctionExpression(params, body, is_async) -> {
-      let body_stmt = case body {
-        ast.ArrowBodyExpression(expr_inner) ->
-          ast.BlockStatement([
-            ast.StmtWithLine(0, ast.ReturnStatement(Some(expr_inner))),
-          ])
-        ast.ArrowBodyBlock(stmt) -> stmt
-      }
-      let child =
-        compile_function_body(
-          e,
-          Some(name),
-          params,
-          body_stmt,
-          True,
-          False,
-          is_async,
-          // Arrow function — not a constructor.
-          False,
-          opcode.fn_perms,
-          NoFieldInit,
-        )
-      let #(e, idx) = add_child_function(e, child)
-      Ok(emit_ir(e, IrMakeClosure(idx)))
-    }
+    ast.ArrowFunctionExpression(params, body, is_async) ->
+      emit_arrow_closure(e, Some(name), params, body, is_async)
     // Anonymous class expression → bake `.name` only; NO inner binding
     // (§8.4 NamedEvaluation step 2 — classBinding is undefined).
     ast.ClassExpression(None, super_class, body) ->
@@ -3135,6 +3024,93 @@ fn emit_named_expr(
     // Not anonymous → emit normally (named fn keeps its own name)
     _ -> emit_expr(e, expr)
   }
+}
+
+/// Compile a method / getter / setter body into a child function, register
+/// it, and emit IrMakeClosure for it. Never a constructor (methods/accessors
+/// have no [[Construct]], so `new o.m()` must throw); always method_perms.
+fn make_method_closure(
+  e: Emitter,
+  name: Option(String),
+  params: List(ast.Pattern),
+  body: ast.Statement,
+  is_gen: Bool,
+  is_async: Bool,
+) -> Emitter {
+  let child =
+    compile_function_body(
+      e,
+      name,
+      params,
+      body,
+      False,
+      is_gen,
+      is_async,
+      False,
+      opcode.method_perms,
+      NoFieldInit,
+    )
+  let #(e, idx) = add_child_function(e, child)
+  emit_ir(e, IrMakeClosure(idx))
+}
+
+/// Compile a function expression body into a child function and emit the
+/// closure. A constructor unless generator/async.
+fn emit_function_closure(
+  e: Emitter,
+  name: Option(String),
+  params: List(ast.Pattern),
+  body: ast.Statement,
+  is_gen: Bool,
+  is_async: Bool,
+) -> Result(Emitter, EmitError) {
+  let child =
+    compile_function_body(
+      e,
+      name,
+      params,
+      body,
+      False,
+      is_gen,
+      is_async,
+      !is_gen && !is_async,
+      opcode.fn_perms,
+      NoFieldInit,
+    )
+  let #(e, idx) = add_child_function(e, child)
+  Ok(emit_ir(e, IrMakeClosure(idx)))
+}
+
+/// Compile an arrow function body into a child function and emit the
+/// closure. Expression bodies are normalized to `{ return expr; }`.
+/// Arrows are never constructors.
+fn emit_arrow_closure(
+  e: Emitter,
+  name: Option(String),
+  params: List(ast.Pattern),
+  body: ast.ArrowBody,
+  is_async: Bool,
+) -> Result(Emitter, EmitError) {
+  let body_stmt = case body {
+    ast.ArrowBodyExpression(expr) ->
+      ast.BlockStatement([ast.StmtWithLine(0, ast.ReturnStatement(Some(expr)))])
+    ast.ArrowBodyBlock(stmt) -> stmt
+  }
+  let child =
+    compile_function_body(
+      e,
+      name,
+      params,
+      body_stmt,
+      True,
+      False,
+      is_async,
+      False,
+      opcode.fn_perms,
+      NoFieldInit,
+    )
+  let #(e, idx) = add_child_function(e, child)
+  Ok(emit_ir(e, IrMakeClosure(idx)))
 }
 
 /// Emit one property in an object literal. Object is already on the stack.
@@ -3149,24 +3125,8 @@ fn emit_method_value(
   name: Option(String),
 ) -> Result(Emitter, EmitError) {
   case value {
-    ast.FunctionExpression(_, params, body, is_gen, is_async) -> {
-      let child =
-        compile_function_body(
-          e,
-          name,
-          params,
-          body,
-          False,
-          is_gen,
-          is_async,
-          // method / getter / setter — not a constructor
-          False,
-          opcode.method_perms,
-          NoFieldInit,
-        )
-      let #(e, idx) = add_child_function(e, child)
-      Ok(emit_ir(e, IrMakeClosure(idx)))
-    }
+    ast.FunctionExpression(_, params, body, is_gen, is_async) ->
+      Ok(make_method_closure(e, name, params, body, is_gen, is_async))
     _ -> emit_expr(e, value)
   }
 }
@@ -4155,32 +4115,8 @@ fn emit_destructuring_assign(
     }
 
     ast.ArrayExpression(elements) -> {
-      let #(e, close_throw) = fresh_label(e)
-      let #(e, done_label) = fresh_label(e)
-      // [source] → [iter]. PushTry immediately after so the recorded
-      // stack_depth has iter on top — unwind_to_catch will leave
-      // [thrown, iter, ..] for IteratorCloseThrow.
-      let e = emit_ir(e, IrGetIterator)
-      let e = emit_ir(e, IrPushTry(close_throw))
-      use #(e, rested) <- result.map(emit_array_assign_elements(e, elements))
-      let e = case rested {
-        // Rest path already PopTry'd, drained iter, assigned. Stack at base.
-        True -> emit_ir(e, IrJump(done_label))
-        // §13.15.5.2: if [[Done]] is false, IteratorClose. We don't track
-        // [[Done]] yet (IteratorNext doesn't undef the slot), so this also
-        // fires on exhausted iterators — a no-op for builtins, observable
-        // only on user iters with .return.
-        False ->
-          e
-          |> emit_ir(IrPopTry)
-          |> emit_ir(IrIteratorClose)
-          |> emit_ir(IrJump(done_label))
-      }
-      // Abrupt: [thrown, iter, ..]. CloseThrow swallows .return()
-      // result/error and rethrows the original (§7.4.11 step 5).
-      let e = emit_ir(e, IrLabel(close_throw))
-      let e = emit_ir(e, IrIteratorCloseThrow)
-      emit_ir(e, IrLabel(done_label))
+      use e <- with_iterator_scaffold(e)
+      emit_array_assign_elements(e, elements)
     }
 
     ast.ObjectExpression(properties) -> {
@@ -4441,13 +4377,28 @@ fn emit_array_destructure(
   elements: List(Option(ast.Pattern)),
   binding_kind: BindingKind,
 ) -> Result(Emitter, EmitError) {
+  use e <- with_iterator_scaffold(e)
+  emit_array_elements(e, elements, binding_kind)
+}
+
+/// Iterator scaffold shared by array binding patterns (§8.6.2) and array
+/// assignment patterns (§13.15.5.2): GetIterator the source, run
+/// emit_elements under a close-on-throw guard, IteratorClose on normal
+/// completion unless a rest element already drained the iterator.
+/// Stack on entry: [source, ...] — source is consumed.
+/// emit_elements: [iter, ...] → #(e, False) leaves [iter, ...] (closed here);
+/// #(e, True) → rest drained, F_body popped, stack at base.
+fn with_iterator_scaffold(
+  e: Emitter,
+  emit_elements: fn(Emitter) -> Result(#(Emitter, Bool), EmitError),
+) -> Result(Emitter, EmitError) {
   let #(e, close_throw) = fresh_label(e)
   let #(e, done_label) = fresh_label(e)
   // [source] → [iter]. PushTry immediately after so the recorded stack_depth
   // has iter on top — unwind_to_catch will leave [thrown, iter, ..].
   let e = emit_ir(e, IrGetIterator)
   let e = emit_ir(e, IrPushTry(close_throw))
-  use #(e, rested) <- result.map(emit_array_elements(e, elements, binding_kind))
+  use #(e, rested) <- result.map(emit_elements(e))
   let e = case rested {
     // Rest path already PopTry'd, drained iter, bound it. Stack at base.
     // [[Done]]=true after rest → no close on any completion. (Throws from
@@ -4455,8 +4406,8 @@ fn emit_array_destructure(
     // active, so the catch target below is still reachable for those.)
     True -> emit_ir(e, IrJump(done_label))
     False ->
-      // §8.6.2: if [[Done]] is false, IteratorClose. We don't track [[Done]]
-      // yet (IteratorNext doesn't undef the slot), so this also fires on
+      // If [[Done]] is false, IteratorClose. We don't track [[Done]] yet
+      // (IteratorNext doesn't undef the slot), so this also fires on
       // exhausted iterators — a no-op for builtins, observable only on user
       // iters with .return.
       e
@@ -4612,11 +4563,12 @@ fn compile_class(
   // both ctor and field-init-fn IrMakeClosure snapshots see the slot. Init to
   // the closure (or undefined) by emit_attach_field_init.
   let e = emit_op(e, DeclareVar(class_fields_init, ConstBinding))
-  use #(e, static_init_idx) <- result.map(case super_class {
-    Some(parent_expr) ->
-      compile_derived_class(e, display_name, parent_expr, body)
-    None -> compile_base_class(e, display_name, body)
-  })
+  use #(e, static_init_idx) <- result.map(compile_class_body(
+    e,
+    display_name,
+    super_class,
+    body,
+  ))
   // [ctor]. §15.7.14 step 26: bind inner name to F BEFORE static element
   // evaluation (step 31) so `class C { static x = C }` sees the constructor.
   let e = case binding_name {
@@ -4628,10 +4580,15 @@ fn compile_class(
   Emitter(..e, strict: saved_strict)
 }
 
-fn compile_derived_class(
+/// Compile a class body (base or derived, selected by `super_class`): the
+/// constructor child fn, instance-field init fn, heritage wiring, instance and
+/// static methods, and the static-init fn. Stack on exit: [ctor]. Returns the
+/// static-init child idx — static elements are emitted by compile_class AFTER
+/// inner-name binding (§15.7.14 step 26 < step 31).
+fn compile_class_body(
   e: Emitter,
   name: Option(String),
-  parent_expr: ast.Expression,
+  super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
 ) -> Result(#(Emitter, Option(Int)), EmitError) {
   let #(
@@ -4642,38 +4599,32 @@ fn compile_derived_class(
     static_elements,
   ) = classify_class_body(body)
 
-  // Build constructor: if none provided, synthesize the spec default derived
-  // constructor (§15.7.14 step 14): constructor(...args) { super(...args); }.
-  // Arc doesn't support rest parameters yet, so spread `arguments` instead —
-  // observably equivalent here since the synthetic body never re-reads it.
+  // Build constructor: if none provided, synthesize the spec default. For a
+  // derived class that's (§15.7.14 step 14): constructor(...args) {
+  // super(...args); }. Arc doesn't support rest parameters yet, so spread
+  // `arguments` instead — observably equivalent here since the synthetic body
+  // never re-reads it. For a base class it's an empty body.
   let #(ctor_params, ctor_body) = case ctor_method {
     Some(ast.ClassMethod(value: ast.FunctionExpression(_, params, body, ..), ..)) -> #(
       params,
       body,
     )
-    _ -> #(
-      [],
-      ast.BlockStatement([
-        ast.StmtWithLine(
-          0,
-          ast.ExpressionStatement(
-            expression: ast.CallExpression(ast.SuperExpression, [
-              ast.SpreadElement(ast.Identifier("arguments")),
-            ]),
-            directive: None,
-          ),
-        ),
-      ]),
-    )
+    _ -> #([], default_ctor_body(super_class))
   }
 
   // §13.3.7.1 SuperCall step 12 / §15.7.14 step 28: instance fields are
   // compiled into one synthetic initializer function (QuickJS class_fields_init
-  // / spec [[Fields]]), bound to the <class_fields_init> const and called via
-  // emit_field_init_call after every `super()`. Constructors cannot be
+  // / spec [[Fields]]), bound to the <class_fields_init> const. Derived ctors
+  // call it via emit_field_init_call after every `super()`
+  // (FieldInitAfterSuper); base ctors call it before user code runs
+  // (FieldInitAtStart, §10.2.2 [[Construct]] step 6). Constructors cannot be
   // generators or async (spec forbids it).
   let #(e, init_idx) =
     compile_class_init_fn(e, field_init_stmts(instance_fields))
+  let #(ctor_perms, field_init) = case super_class {
+    Some(_) -> #(opcode.derived_ctor_perms, FieldInitAfterSuper)
+    None -> #(opcode.method_perms, FieldInitAtStart)
+  }
   let child =
     compile_function_body(
       e,
@@ -4685,43 +4636,77 @@ fn compile_derived_class(
       False,
       // Class constructor — IS a constructor.
       True,
-      opcode.derived_ctor_perms,
-      option.map(init_idx, fn(_) { FieldInitAfterSuper })
+      ctor_perms,
+      option.map(init_idx, fn(_) { field_init })
         |> option.unwrap(NoFieldInit),
     )
-  // Mark as derived constructor
-  let child = CompiledChild(..child, is_derived_constructor: True)
+  let child =
+    CompiledChild(..child, is_derived_constructor: option.is_some(super_class))
   let #(e, ctor_idx) = add_child_function(e, child)
 
-  // Step 1: Emit parent expression → [parent]
-  use e <- result.try(emit_expr(e, parent_expr))
+  use e <- result.try(case super_class {
+    Some(parent_expr) -> {
+      // Emit parent expression → [parent]; MakeClosure → [parent, ctor];
+      // SetupDerivedClass → [ctor] (wires prototype chain + [[HomeObject]]).
+      use e <- result.map(emit_expr(e, parent_expr))
+      e
+      |> emit_ir(IrMakeClosure(ctor_idx))
+      |> emit_ir(IrSetupDerivedClass)
+    }
+    None ->
+      // MakeClosure (creates .prototype + .prototype.constructor) → [ctor].
+      // §15.7.14 step 12: ctor.[[HomeObject]] = ctor.prototype, so `super.x`
+      // in a base ctor body resolves through ctor.prototype.__proto__
+      // (Object.prototype).
+      Ok(
+        e
+        |> emit_ir(IrMakeClosure(ctor_idx))
+        |> emit_ir(IrDup)
+        |> emit_ir(IrGetField("prototype"))
+        |> emit_ir(IrSwap)
+        |> emit_ir(IrMakeMethod)
+        |> emit_ir(IrSwap)
+        |> emit_ir(IrPop),
+      )
+  })
 
-  // Step 2: MakeClosure for the derived constructor → [parent, ctor]
-  let e = emit_ir(e, IrMakeClosure(ctor_idx))
-
-  // Step 3: SetupDerivedClass → [ctor] (wires prototype chain)
-  let e = emit_ir(e, IrSetupDerivedClass)
-
-  // Step 4: Define instance methods on ctor.prototype (same as base class)
+  // Define instance methods on ctor.prototype, then static methods on ctor.
   use e <- result.try(emit_class_methods(
     e,
     instance_methods,
     on_prototype: True,
   ))
-
-  // Step 5: Define static methods on ctor
   use e <- result.try(emit_class_methods(e, static_methods, on_prototype: False))
 
-  // Step 6: Attach the field-initializer closure to ctor as [[Fields]]
-  // (§15.7.14 step 25). After methods so the init fn's [[HomeObject]] = proto
-  // sees them via super.method(). Stack: [ctor] → [ctor]. Static elements are
-  // emitted by compile_class AFTER inner-name binding (step 26 < step 31).
+  // Attach the field-initializer closure to ctor as [[Fields]] (§15.7.14
+  // step 25). After methods so the init fn's [[HomeObject]] = proto sees them
+  // via super.method(). Stack: [ctor] → [ctor].
   let e = emit_attach_field_init(e, init_idx)
   let #(e, static_init_idx) =
     compile_class_init_fn(e, static_init_stmts(static_elements))
 
   // Stack: [ctor]
   Ok(#(e, static_init_idx))
+}
+
+/// Spec default constructor body: `super(...arguments)` for derived classes,
+/// empty for base classes.
+fn default_ctor_body(super_class: Option(ast.Expression)) -> ast.Statement {
+  case super_class {
+    None -> ast.BlockStatement([])
+    Some(_) ->
+      ast.BlockStatement([
+        ast.StmtWithLine(
+          0,
+          ast.ExpressionStatement(
+            expression: ast.CallExpression(ast.SuperExpression, [
+              ast.SpreadElement(ast.Identifier("arguments")),
+            ]),
+            directive: None,
+          ),
+        ),
+      ])
+  }
 }
 
 /// Compile a list of statements into a synthetic non-arrow initializer
@@ -4823,22 +4808,8 @@ fn emit_class_methods(
         True -> emit_ir(e, IrGetField("prototype"))
         False -> e
       }
-      let child =
-        compile_function_body(
-          e,
-          Some(fn_name),
-          params,
-          body,
-          False,
-          is_gen,
-          is_async,
-          // Class method / getter / setter — not a constructor.
-          False,
-          opcode.method_perms,
-          NoFieldInit,
-        )
-      let #(e, idx) = add_child_function(e, child)
-      let e = emit_ir(e, IrMakeClosure(idx))
+      let e =
+        make_method_closure(e, Some(fn_name), params, body, is_gen, is_async)
       let e = emit_ir(e, define_op)
       Ok(emit_ir(e, IrPop))
     }
@@ -4886,22 +4857,7 @@ fn emit_computed_class_method(
     False -> e
   }
   use e <- result.try(emit_expr(e, key))
-  let child =
-    compile_function_body(
-      e,
-      None,
-      params,
-      body,
-      False,
-      is_gen,
-      is_async,
-      // Computed class method / getter / setter — not a constructor.
-      False,
-      opcode.method_perms,
-      NoFieldInit,
-    )
-  let #(e, idx) = add_child_function(e, child)
-  let e = emit_ir(e, IrMakeClosure(idx))
+  let e = make_method_closure(e, None, params, body, is_gen, is_async)
   let e = case kind {
     ast.MethodMethod -> emit_ir(e, IrDefineMethodComputed)
     ast.MethodGet -> emit_ir(e, IrDefineAccessorComputed(opcode.Getter))
@@ -4927,90 +4883,6 @@ fn emit_call_static_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
       |> emit_ir(IrCallMethod("", 0))
       |> emit_ir(IrPop)
   }
-}
-
-/// Splice field-init statements immediately after the first top-level
-/// `super(...)` ExpressionStatement. If none found (super() nested or absent),
-/// append at end — runtime TDZ on the `this` slot will still enforce ordering.
-fn compile_base_class(
-  e: Emitter,
-  name: Option(String),
-  body: List(ast.ClassElement),
-) -> Result(#(Emitter, Option(Int)), EmitError) {
-  // Separate class elements into categories
-  let #(
-    ctor_method,
-    instance_methods,
-    static_methods,
-    instance_fields,
-    static_elements,
-  ) = classify_class_body(body)
-
-  // Build the constructor body statement, injecting field initializers at the top
-  let #(ctor_params, ctor_body) = case ctor_method {
-    Some(ast.ClassMethod(value: ast.FunctionExpression(_, params, body, ..), ..)) -> #(
-      params,
-      body,
-    )
-    _ -> #([], ast.BlockStatement([]))
-  }
-
-  // Instance fields → synthetic init fn (compiled as a sibling of the ctor in
-  // this enclosing scope). FieldInitAtStart tells the ctor body to call it
-  // before user code runs (§10.2.2 [[Construct]] step 6).
-  let #(e, init_idx) =
-    compile_class_init_fn(e, field_init_stmts(instance_fields))
-  let child =
-    compile_function_body(
-      e,
-      name,
-      ctor_params,
-      ctor_body,
-      False,
-      False,
-      False,
-      // Class constructor — IS a constructor.
-      True,
-      opcode.method_perms,
-      option.map(init_idx, fn(_) { FieldInitAtStart })
-        |> option.unwrap(NoFieldInit),
-    )
-  let #(e, ctor_idx) = add_child_function(e, child)
-
-  // Step 1: MakeClosure for the constructor (creates .prototype + .prototype.constructor)
-  let e = emit_ir(e, IrMakeClosure(ctor_idx))
-  // Stack: [ctor]
-
-  // §15.7.14 step 12: ctor.[[HomeObject]] = ctor.prototype, so `super.x` in a
-  // base ctor body resolves through ctor.prototype.__proto__ (Object.prototype).
-  // Derived ctors get this from the SetupDerivedClass handler instead.
-  let e =
-    e
-    |> emit_ir(IrDup)
-    |> emit_ir(IrGetField("prototype"))
-    |> emit_ir(IrSwap)
-    |> emit_ir(IrMakeMethod)
-    |> emit_ir(IrSwap)
-    |> emit_ir(IrPop)
-  // Stack: [ctor]
-
-  // Step 2: Define instance methods on ctor.prototype
-  use e <- result.try(emit_class_methods(
-    e,
-    instance_methods,
-    on_prototype: True,
-  ))
-
-  // Step 3: Define static methods on ctor
-  use e <- result.try(emit_class_methods(e, static_methods, on_prototype: False))
-
-  // Step 4: Attach the field-initializer closure to ctor as [[Fields]]
-  // (§15.7.14 step 25). Stack: [ctor] → [ctor]. Static elements are emitted by
-  // compile_class AFTER inner-name binding (step 26 < step 31).
-  let e = emit_attach_field_init(e, init_idx)
-  let #(e, static_init_idx) =
-    compile_class_init_fn(e, static_init_stmts(static_elements))
-  Ok(#(e, static_init_idx))
 }
 
 /// Classify class body elements into constructor, instance methods, static

@@ -93,6 +93,25 @@ pub fn delete(elements: JsElements, index: Int) -> JsElements {
   }
 }
 
+/// Read elements 0..length into a list. Holes/missing slots become
+/// JsUndefined (via `get`), so the result always has exactly `length` items.
+pub fn to_list_padded(elements: JsElements, length: Int) -> List(JsValue) {
+  to_list_padded_loop(elements, 0, length, [])
+}
+
+fn to_list_padded_loop(
+  elements: JsElements,
+  idx: Int,
+  length: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
+  case idx >= length {
+    True -> list.reverse(acc)
+    False ->
+      to_list_padded_loop(elements, idx + 1, length, [get(elements, idx), ..acc])
+  }
+}
+
 /// Get all values as a list (for GC ref tracing).
 pub fn values(elements: JsElements) -> List(JsValue) {
   case elements {

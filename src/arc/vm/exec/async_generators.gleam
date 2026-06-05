@@ -33,7 +33,7 @@ import arc/vm/value.{
   AGResumeAwaitingReturn, AGResumeBody, AGResumeDelegate, AGResumeDelegateClose,
   AGReturn, AGSuspendedStart, AGSuspendedYield, AGThrow, AsyncGenRequest,
   AsyncGeneratorObject, AsyncGeneratorSlot, JsNull, JsObject, JsUndefined, Named,
-  NativeFunction, ObjectSlot,
+  ObjectSlot,
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -73,7 +73,7 @@ pub fn call_native_method(
 ) -> Result(State, #(StepResult, JsValue, State)) {
   let arg = helpers.first_arg_or_undefined(args)
   let #(h, promise_ref, _data_ref, resolve, reject) =
-    new_promise_capability(state.heap, state.builtins)
+    builtins_promise.new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
   let ret = fn(state: State) {
     Ok(
@@ -657,7 +657,7 @@ pub fn call_native_resume(
 }
 
 // ============================================================================
-// Await wiring — mirrors call.gleam's async_setup_await but with
+// Await wiring — shared scaffold in promises.setup_await, with
 // AsyncGeneratorResume callbacks instead of AsyncResume.
 // ============================================================================
 
@@ -667,57 +667,8 @@ fn setup_await(
   awaited: JsValue,
   kind: AGResumeKind,
 ) -> State {
-  let h = state.heap
-  let b = state.builtins
-  let existing = case awaited {
-    JsObject(ref) -> heap.read_promise_data_ref(h, ref)
-    _ -> None
-  }
-  let #(h, promise_data) = case existing {
-    Some(dr) -> #(h, dr)
-    None -> {
-      let #(h, _, dr) = promises.create_resolved_promise(h, b, awaited)
-      #(h, dr)
-    }
-  }
-  let #(h, on_fulfill) =
-    alloc_resume(h, b.function.prototype, data_ref, False, kind)
-  let #(h, on_reject) =
-    alloc_resume(h, b.function.prototype, data_ref, True, kind)
-  let #(h, child_ref, child_data) =
-    builtins_promise.create_promise(h, b.promise.prototype)
-  let #(h, child_resolve, child_reject) =
-    builtins_promise.create_resolving_functions(
-      h,
-      b.function.prototype,
-      child_ref,
-      child_data,
-    )
-  builtins_promise.perform_promise_then(
-    State(..state, heap: h),
-    promise_data,
-    JsObject(on_fulfill),
-    JsObject(on_reject),
-    child_resolve,
-    child_reject,
-  )
-}
-
-fn alloc_resume(
-  h: Heap,
-  function_proto: Ref,
-  data_ref: Ref,
-  is_reject: Bool,
-  kind: AGResumeKind,
-) -> #(Heap, Ref) {
-  common.alloc_wrapper(
-    h,
-    NativeFunction(
-      value.Call(value.AsyncGeneratorResume(data_ref:, is_reject:, kind:)),
-      constructible: False,
-    ),
-    function_proto,
-  )
+  use is_reject <- promises.setup_await(state, awaited)
+  value.AsyncGeneratorResume(data_ref:, is_reject:, kind:)
 }
 
 // ============================================================================
@@ -895,22 +846,6 @@ fn settle_head(
 // ============================================================================
 // Promise helpers
 // ============================================================================
-
-fn new_promise_capability(
-  h: Heap,
-  b: common.Builtins,
-) -> #(Heap, Ref, Ref, JsValue, JsValue) {
-  let #(h, promise_ref, data_ref) =
-    builtins_promise.create_promise(h, b.promise.prototype)
-  let #(h, resolve, reject) =
-    builtins_promise.create_resolving_functions(
-      h,
-      b.function.prototype,
-      promise_ref,
-      data_ref,
-    )
-  #(h, promise_ref, data_ref, resolve, reject)
-}
 
 /// Call resolve({value, done}) via state.call.
 fn fulfill_iter(

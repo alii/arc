@@ -352,6 +352,20 @@ pub fn error_header(name: String, msg: String) -> String {
   }
 }
 
+/// Core error allocator: allocate a JS error via `make`, attach a stack
+/// trace headed by `name: msg`, and return the updated state plus the
+/// error value. All error helpers below are thin shells over this.
+fn alloc_error(
+  state: State,
+  make: fn(Heap, Builtins, String) -> #(Heap, JsValue),
+  name: String,
+  msg: String,
+) -> #(State, JsValue) {
+  let #(heap, err) = make(state.heap, state.builtins, msg)
+  let state = attach_stack(State(..state, heap:), err, error_header(name, msg))
+  #(state, err)
+}
+
 /// Convenience wrapper: allocate a TypeError on the heap and return it as
 /// an Error result. Shared by all builtin modules to avoid boilerplate
 /// around common.make_type_error + state threading.
@@ -359,9 +373,8 @@ pub fn type_error(
   state: State,
   msg: String,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  let state =
-    attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  let #(state, err) =
+    alloc_error(state, common.make_type_error, "TypeError", msg)
   #(state, Error(err))
 }
 
@@ -369,9 +382,8 @@ pub fn range_error(
   state: State,
   msg: String,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  let state =
-    attach_stack(State(..state, heap:), err, error_header("RangeError", msg))
+  let #(state, err) =
+    alloc_error(state, common.make_range_error, "RangeError", msg)
   #(state, Error(err))
 }
 
@@ -379,14 +391,8 @@ pub fn range_error(
 /// used by ops-level results `Result(_, #(JsValue, State))` (e.g. get_value's
 /// error arm). Used for module-namespace TDZ access (§10.4.6 [[Get]]).
 pub fn reference_error_value(state: State, msg: String) -> #(JsValue, State) {
-  let #(heap, err) =
-    common.make_reference_error(state.heap, state.builtins, msg)
-  let state =
-    attach_stack(
-      State(..state, heap:),
-      err,
-      error_header("ReferenceError", msg),
-    )
+  let #(state, err) =
+    alloc_error(state, common.make_reference_error, "ReferenceError", msg)
   #(err, state)
 }
 
@@ -395,14 +401,8 @@ pub fn reference_error(
   state: State,
   msg: String,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let #(heap, err) =
-    common.make_reference_error(state.heap, state.builtins, msg)
-  let state =
-    attach_stack(
-      State(..state, heap:),
-      err,
-      error_header("ReferenceError", msg),
-    )
+  let #(state, err) =
+    alloc_error(state, common.make_reference_error, "ReferenceError", msg)
   #(state, Error(err))
 }
 
@@ -464,9 +464,8 @@ pub fn throw_type_error(
   state: State,
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State)) {
-  let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  let state =
-    attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  let #(state, err) =
+    alloc_error(state, common.make_type_error, "TypeError", msg)
   Error(#(Thrown, err, state))
 }
 
@@ -475,9 +474,8 @@ pub fn throw_range_error(
   state: State,
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State)) {
-  let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  let state =
-    attach_stack(State(..state, heap:), err, error_header("RangeError", msg))
+  let #(state, err) =
+    alloc_error(state, common.make_range_error, "RangeError", msg)
   Error(#(Thrown, err, state))
 }
 
@@ -486,14 +484,8 @@ pub fn throw_reference_error(
   state: State,
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State)) {
-  let #(heap, err) =
-    common.make_reference_error(state.heap, state.builtins, msg)
-  let state =
-    attach_stack(
-      State(..state, heap:),
-      err,
-      error_header("ReferenceError", msg),
-    )
+  let #(state, err) =
+    alloc_error(state, common.make_reference_error, "ReferenceError", msg)
   Error(#(Thrown, err, state))
 }
 

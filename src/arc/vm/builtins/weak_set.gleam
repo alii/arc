@@ -4,17 +4,19 @@
 /// (values for which CanBeHeldWeakly is true).
 /// In this implementation, values are stored by Ref (object identity).
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
+///
+/// All operations delegate to the shared weak-collection core in `weak_map`
+/// (a WeakSet is a WeakMap whose stored values are all `True`).
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers.{first_arg_or_undefined}
-import arc/vm/heap
+import arc/vm/builtins/weak_map.{WeakKind}
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsObject,
-  ObjectSlot, WeakSetConstructor, WeakSetNative, WeakSetObject,
-  WeakSetPrototypeAdd, WeakSetPrototypeDelete, WeakSetPrototypeHas,
+  type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsObject,
+  WeakSetConstructor, WeakSetNative, WeakSetObject, WeakSetPrototypeAdd,
+  WeakSetPrototypeDelete, WeakSetPrototypeHas,
 }
 import gleam/dict
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 
 /// Set up WeakSet.prototype and WeakSet constructor.
 pub fn init(
@@ -53,9 +55,11 @@ pub fn dispatch(
 ) -> #(State, Result(JsValue, JsValue)) {
   case native {
     WeakSetConstructor(proto:) -> construct(proto, args, state)
-    WeakSetPrototypeAdd -> weak_set_add(this, args, state)
-    WeakSetPrototypeHas -> weak_set_has(this, args, state)
-    WeakSetPrototypeDelete -> weak_set_delete(this, args, state)
+    WeakSetPrototypeAdd ->
+      weak_map.weak_insert(this, args, True, state, set_kind())
+    WeakSetPrototypeHas -> weak_map.weak_has(this, args, state, set_kind())
+    WeakSetPrototypeDelete ->
+      weak_map.weak_delete(this, args, state, set_kind())
   }
 }
 
@@ -71,77 +75,18 @@ fn construct(
   #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
-/// ES2024 §24.4.3.1 WeakSet.prototype.add ( value )
-fn weak_set_add(
-  this: JsValue,
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use data, ref, state <- require_weak_set(this, state)
-  case first_arg_or_undefined(args) {
-    JsObject(val_ref) -> {
-      let new_data = dict.insert(data, val_ref, True)
-      let heap = update_weak_set(state.heap, ref, new_data)
-      #(State(..state, heap:), Ok(this))
-    }
-    _ -> state.type_error(state, "Invalid value used in weak set")
-  }
-}
-
-/// ES2024 §24.4.3.3 WeakSet.prototype.has ( value )
-fn weak_set_has(
-  this: JsValue,
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use data, _ref, state <- require_weak_set(this, state)
-  case first_arg_or_undefined(args) {
-    JsObject(val_ref) -> #(state, Ok(JsBool(dict.has_key(data, val_ref))))
-    _ -> #(state, Ok(JsBool(False)))
-  }
-}
-
-/// ES2024 §24.4.3.2 WeakSet.prototype.delete ( value )
-fn weak_set_delete(
-  this: JsValue,
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  use data, ref, state <- require_weak_set(this, state)
-  case first_arg_or_undefined(args) {
-    JsObject(val_ref) -> {
-      let had = dict.has_key(data, val_ref)
-      let new_data = dict.delete(data, val_ref)
-      let heap = update_weak_set(state.heap, ref, new_data)
-      #(State(..state, heap:), Ok(JsBool(had)))
-    }
-    _ -> #(state, Ok(JsBool(False)))
-  }
-}
-
-// ---- helpers ----
-
-/// Unwrap `this` as a WeakSet or return a TypeError.
-/// CPS-style — call with `use data, ref, state <- require_weak_set(this, state)`.
-fn require_weak_set(
-  this: JsValue,
-  state: State,
-  cont: fn(dict.Dict(Ref, Bool), Ref, State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  let err = "Method WeakSet.prototype.* called on incompatible receiver"
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: WeakSetObject(data:), ..)) ->
-          cont(data, ref, state)
-        _ -> state.type_error(state, err)
+/// The WeakSet instantiation of the shared weak-collection core
+/// (membership dict: present Refs map to True).
+fn set_kind() -> weak_map.WeakKind(Bool) {
+  WeakKind(
+    receiver_err: "Method WeakSet.prototype.* called on incompatible receiver",
+    key_err: "Invalid value used in weak set",
+    extract: fn(kind) {
+      case kind {
+        WeakSetObject(data:) -> Some(data)
+        _ -> None
       }
-    _ -> state.type_error(state, err)
-  }
-}
-
-/// Helper to update a WeakSetObject's data on the heap.
-fn update_weak_set(h: Heap, ref: Ref, data: dict.Dict(Ref, Bool)) -> Heap {
-  heap.update_kind(h, ref, WeakSetObject(data:))
+    },
+    rebuild: WeakSetObject,
+  )
 }

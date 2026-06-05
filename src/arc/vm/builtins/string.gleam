@@ -361,18 +361,28 @@ fn string_includes(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Steps 1-2: RequireObjectCoercible + ToString
+  string_search_bool(this, args, state, string.contains)
+}
+
+/// Shared body for includes/startsWith: coerce this + searchString to
+/// strings, clamp position, drop the prefix, apply the predicate.
+fn string_search_bool(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+  predicate: fn(String, String) -> Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  // RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
-  // Step 5: ToString(searchString)
+  // ToString(searchString)
   use search, state <- coerce.try_to_string(
     state,
     helpers.first_arg_or_undefined(args),
   )
-  // Steps 6-9: ToIntegerOrInfinity(position), clamp
+  // ToIntegerOrInfinity(position), clamp, then test from that offset
   let from = helpers.get_int_arg(args, 1, 0)
-  // Steps 10-12: StringIndexOf and return boolean
   let sub = cp_drop(s, from)
-  #(state, Ok(value.JsBool(string.contains(sub, search))))
+  #(state, Ok(value.JsBool(predicate(sub, search))))
 }
 
 /// ES2024 22.1.3.22 — String.prototype.startsWith ( searchString [ , position ] )
@@ -397,18 +407,7 @@ fn string_starts_with(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Steps 1-2: RequireObjectCoercible + ToString
-  use s, state <- with_this_string(this, state)
-  // Step 5: ToString(searchString)
-  use search, state <- coerce.try_to_string(
-    state,
-    helpers.first_arg_or_undefined(args),
-  )
-  // Steps 7-8: position handling + clamp
-  let from = helpers.get_int_arg(args, 1, 0)
-  // Steps 10-12: drop prefix, check starts_with
-  let sub = cp_drop(s, from)
-  #(state, Ok(value.JsBool(string.starts_with(sub, search))))
+  string_search_bool(this, args, state, string.starts_with)
 }
 
 /// ES2024 22.1.3.7 — String.prototype.endsWith ( searchString [ , endPosition ] )

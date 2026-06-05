@@ -988,9 +988,30 @@ fn read_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   case char_at(bytes, start) {
     "0" ->
       case char_at(bytes, start + 1) {
-        "x" | "X" -> read_hex_number(bytes, start + 2, start)
-        "o" | "O" -> read_octal_number(bytes, start + 2, start)
-        "b" | "B" -> read_binary_number(bytes, start + 2, start)
+        "x" | "X" ->
+          read_radix_number(
+            bytes,
+            start + 2,
+            start,
+            skip_hex_digits,
+            ExpectedHexDigits,
+          )
+        "o" | "O" ->
+          read_radix_number(
+            bytes,
+            start + 2,
+            start,
+            skip_octal_digits,
+            ExpectedOctalDigits,
+          )
+        "b" | "B" ->
+          read_radix_number(
+            bytes,
+            start + 2,
+            start,
+            skip_binary_digits,
+            ExpectedBinaryDigits,
+          )
         _ -> read_decimal_number(bytes, start)
       }
     "." -> read_decimal_after_dot(bytes, start + 1, start)
@@ -1072,56 +1093,16 @@ fn read_exponent(
   }
 }
 
-fn read_hex_number(
+fn read_radix_number(
   bytes: BitArray,
   pos: Int,
   start: Int,
+  skip_fn: fn(BitArray, Int) -> Result(Int, LexError),
+  err: fn(Int) -> LexError,
 ) -> Result(Token, LexError) {
-  use end <- result.try(skip_hex_digits(bytes, pos))
+  use end <- result.try(skip_fn(bytes, pos))
   case end == pos {
-    True -> Error(ExpectedHexDigits(start))
-    False ->
-      case char_at(bytes, end) {
-        "n" -> {
-          let bigint_end = end + 1
-          use Nil <- result.try(check_after_numeric(bytes, bigint_end))
-          let len = bigint_end - start
-          Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-        }
-        _ -> finish_number(bytes, start, end)
-      }
-  }
-}
-
-fn read_octal_number(
-  bytes: BitArray,
-  pos: Int,
-  start: Int,
-) -> Result(Token, LexError) {
-  use end <- result.try(skip_octal_digits(bytes, pos))
-  case end == pos {
-    True -> Error(ExpectedOctalDigits(start))
-    False ->
-      case char_at(bytes, end) {
-        "n" -> {
-          let bigint_end = end + 1
-          use Nil <- result.try(check_after_numeric(bytes, bigint_end))
-          let len = bigint_end - start
-          Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-        }
-        _ -> finish_number(bytes, start, end)
-      }
-  }
-}
-
-fn read_binary_number(
-  bytes: BitArray,
-  pos: Int,
-  start: Int,
-) -> Result(Token, LexError) {
-  use end <- result.try(skip_binary_digits(bytes, pos))
-  case end == pos {
-    True -> Error(ExpectedBinaryDigits(start))
+    True -> Error(err(start))
     False ->
       case char_at(bytes, end) {
         "n" -> {
@@ -1168,145 +1149,72 @@ fn finish_number(
 /// Skip decimal digits with numeric separator validation.
 /// Returns Ok(end_pos) or Error if separator rules violated.
 fn skip_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False)
+  skip_digits_loop(bytes, pos, pos, False, is_decimal_digit)
 }
 
+/// Skip hex digits with numeric separator validation.
+fn skip_hex_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
+  skip_digits_loop(bytes, pos, pos, False, is_hex_digit)
+}
+
+/// Skip octal digits with numeric separator validation.
+fn skip_octal_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
+  skip_digits_loop(bytes, pos, pos, False, is_octal_digit)
+}
+
+/// Skip binary digits with numeric separator validation.
+fn skip_binary_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
+  skip_digits_loop(bytes, pos, pos, False, is_binary_digit)
+}
+
+fn is_decimal_digit(ch: String) -> Bool {
+  case ch {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
+    _ -> False
+  }
+}
+
+fn is_octal_digit(ch: String) -> Bool {
+  case ch {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
+    _ -> False
+  }
+}
+
+fn is_binary_digit(ch: String) -> Bool {
+  ch == "0" || ch == "1"
+}
+
+/// Shared scan loop: consume digits accepted by `is_digit`, validating
+/// numeric separator rules (no leading, trailing, or consecutive `_`).
 fn skip_digits_loop(
   bytes: BitArray,
   pos: Int,
   start: Int,
   prev_was_sep: Bool,
+  is_digit: fn(String) -> Bool,
 ) -> Result(Int, LexError) {
-  case char_at(bytes, pos) {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-      skip_digits_loop(bytes, pos + 1, start, False)
-    "_" ->
-      case prev_was_sep {
-        // Consecutive separators
-        True -> Error(ConsecutiveNumericSeparator(pos))
-        False ->
-          case pos == start {
-            // Leading separator
-            True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_digits_loop(bytes, pos + 1, start, True)
+  let ch = char_at(bytes, pos)
+  case is_digit(ch) {
+    True -> skip_digits_loop(bytes, pos + 1, start, False, is_digit)
+    False ->
+      case ch {
+        "_" ->
+          case prev_was_sep {
+            // Consecutive separators
+            True -> Error(ConsecutiveNumericSeparator(pos))
+            False ->
+              case pos == start {
+                // Leading separator
+                True -> Error(LeadingNumericSeparator(pos))
+                False -> skip_digits_loop(bytes, pos + 1, start, True, is_digit)
+              }
           }
-      }
-    _ ->
-      case prev_was_sep {
-        True -> Error(TrailingNumericSeparator(pos - 1))
-        False -> Ok(pos)
-      }
-  }
-}
-
-/// Skip hex digits with numeric separator validation.
-fn skip_hex_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_hex_digits_loop(bytes, pos, pos, False)
-}
-
-fn skip_hex_digits_loop(
-  bytes: BitArray,
-  pos: Int,
-  start: Int,
-  prev_was_sep: Bool,
-) -> Result(Int, LexError) {
-  case char_at(bytes, pos) {
-    "0"
-    | "1"
-    | "2"
-    | "3"
-    | "4"
-    | "5"
-    | "6"
-    | "7"
-    | "8"
-    | "9"
-    | "a"
-    | "b"
-    | "c"
-    | "d"
-    | "e"
-    | "f"
-    | "A"
-    | "B"
-    | "C"
-    | "D"
-    | "E"
-    | "F" -> skip_hex_digits_loop(bytes, pos + 1, start, False)
-    "_" ->
-      case prev_was_sep {
-        True -> Error(ConsecutiveNumericSeparator(pos))
-        False ->
-          case pos == start {
-            True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_hex_digits_loop(bytes, pos + 1, start, True)
+        _ ->
+          case prev_was_sep {
+            True -> Error(TrailingNumericSeparator(pos - 1))
+            False -> Ok(pos)
           }
-      }
-    _ ->
-      case prev_was_sep {
-        True -> Error(TrailingNumericSeparator(pos - 1))
-        False -> Ok(pos)
-      }
-  }
-}
-
-/// Skip octal digits with numeric separator validation.
-fn skip_octal_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_octal_digits_loop(bytes, pos, pos, False)
-}
-
-fn skip_octal_digits_loop(
-  bytes: BitArray,
-  pos: Int,
-  start: Int,
-  prev_was_sep: Bool,
-) -> Result(Int, LexError) {
-  case char_at(bytes, pos) {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" ->
-      skip_octal_digits_loop(bytes, pos + 1, start, False)
-    "_" ->
-      case prev_was_sep {
-        True -> Error(ConsecutiveNumericSeparator(pos))
-        False ->
-          case pos == start {
-            True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_octal_digits_loop(bytes, pos + 1, start, True)
-          }
-      }
-    _ ->
-      case prev_was_sep {
-        True -> Error(TrailingNumericSeparator(pos - 1))
-        False -> Ok(pos)
-      }
-  }
-}
-
-/// Skip binary digits with numeric separator validation.
-fn skip_binary_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_binary_digits_loop(bytes, pos, pos, False)
-}
-
-fn skip_binary_digits_loop(
-  bytes: BitArray,
-  pos: Int,
-  start: Int,
-  prev_was_sep: Bool,
-) -> Result(Int, LexError) {
-  case char_at(bytes, pos) {
-    "0" | "1" -> skip_binary_digits_loop(bytes, pos + 1, start, False)
-    "_" ->
-      case prev_was_sep {
-        True -> Error(ConsecutiveNumericSeparator(pos))
-        False ->
-          case pos == start {
-            True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_binary_digits_loop(bytes, pos + 1, start, True)
-          }
-      }
-    _ ->
-      case prev_was_sep {
-        True -> Error(TrailingNumericSeparator(pos - 1))
-        False -> Ok(pos)
       }
   }
 }
@@ -1636,76 +1544,8 @@ fn skip_ident_unicode(rest: BitArray, n: Int) -> IdScan {
 
 fn is_identifier_start(ch: String) -> Bool {
   case ch {
-    "a"
-    | "b"
-    | "c"
-    | "d"
-    | "e"
-    | "f"
-    | "g"
-    | "h"
-    | "i"
-    | "j"
-    | "k"
-    | "l"
-    | "m"
-    | "n"
-    | "o"
-    | "p"
-    | "q"
-    | "r"
-    | "s"
-    | "t"
-    | "u"
-    | "v"
-    | "w"
-    | "x"
-    | "y"
-    | "z" -> True
-    "A"
-    | "B"
-    | "C"
-    | "D"
-    | "E"
-    | "F"
-    | "G"
-    | "H"
-    | "I"
-    | "J"
-    | "K"
-    | "L"
-    | "M"
-    | "N"
-    | "O"
-    | "P"
-    | "Q"
-    | "R"
-    | "S"
-    | "T"
-    | "U"
-    | "V"
-    | "W"
-    | "X"
-    | "Y"
-    | "Z" -> True
-    "_" | "$" -> True
-    "\\" -> True
-    "#" -> True
-    _ -> {
-      // Handle multi-codepoint grapheme clusters (e.g., T + ZWJ)
-      let cps = string.to_utf_codepoints(ch)
-      case cps {
-        [] -> False
-        [single] -> {
-          let cp = string.utf_codepoint_to_int(single)
-          cp > 127 && is_unicode_id_start(cp)
-        }
-        [first, ..rest] -> {
-          let cp = string.utf_codepoint_to_int(first)
-          { cp <= 127 || is_unicode_id_start(cp) } && all_id_continue_cps(rest)
-        }
-      }
-    }
+    "\\" | "#" -> True
+    _ -> is_identifier_start_simple(ch)
   }
 }
 

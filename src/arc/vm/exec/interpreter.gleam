@@ -612,6 +612,48 @@ fn conditional_jump(
   }
 }
 
+/// Shared body of GetSuperValue / GetSuperValue2: [key, base, this, ..] →
+/// ToPropertyKey, then OrdinaryGet on base with receiver=this. When
+/// `keep_base` is True the coerced key + base + this stay under the value
+/// for the trailing PutSuperValue; the coerced key is written back as a
+/// primitive JsValue so PutSuperValue's own to_property_key fast-paths
+/// with no observable side effects.
+fn get_super_value(
+  state: State,
+  keep_base: Bool,
+  op: String,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  case state.stack {
+    [key, JsObject(base_ref), this_val, ..rest] -> {
+      use #(pk, state) <- result.try(
+        state.rethrow(property.to_property_key(state, key)),
+      )
+      use #(val, state) <- result.map(
+        state.rethrow(object.get_value(state, base_ref, pk, this_val)),
+      )
+      let stack = case keep_base {
+        True -> [
+          val,
+          JsString(value.key_to_string(pk)),
+          JsObject(base_ref),
+          this_val,
+          ..rest
+        ]
+        False -> [val, ..rest]
+      }
+      State(..state, stack:, pc: state.pc + 1)
+    }
+    // §12.3.5.3 step 5 RequireObjectCoercible — base is null when
+    // home_object's prototype is null (e.g. `class C extends null`).
+    [_key, _base, _this, ..] ->
+      state.throw_type_error(
+        state,
+        "Cannot read super property when prototype is null",
+      )
+    _ -> underflow(state, op)
+  }
+}
+
 // ============================================================================
 // Step — single instruction dispatch
 // ============================================================================
@@ -1299,22 +1341,55 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           // (they all spread `..state`), so a throw in the remainder of the
           // caller's statement reports the caller's line, not the callee's.
           let state = State(..state, current_line: saved_current_line)
-          // Constructor return semantics
-          case constructor_this {
-            Some(constructed_obj) -> {
+          // Constructor return semantics: resolve the value to push onto the
+          // caller's stack. Error(..) carries an already-thrown completion.
+          let resolved = case constructor_this {
+            Some(constructed_obj) ->
               // Base constructor: use the constructed object unless the
               // function explicitly returned an object.
               // §13.3.7.1 SuperCall step 8 BindThisValue(result) is handled at
               // the call site: emit's `CallConstructor; Dup; IrSetThis` writes
               // effective_return into the caller's lexical-`this` slot.
-              let effective_return = case return_value {
-                JsObject(_) -> return_value
-                _ -> constructed_obj
+              case return_value {
+                JsObject(_) -> Ok(return_value)
+                _ -> Ok(constructed_obj)
               }
+            None ->
+              case state.func.is_derived_constructor {
+                True ->
+                  case return_value {
+                    JsObject(_) -> Ok(return_value)
+                    JsUndefined ->
+                      case read_this_local(state) {
+                        JsUninitialized ->
+                          Error(state.throw_reference_error(
+                            state,
+                            "Must call super constructor in derived class before returning from derived constructor",
+                          ))
+                        this_val -> Ok(this_val)
+                      }
+                    _ ->
+                      Error(state.throw_type_error(
+                        state,
+                        "Derived constructors may only return object or undefined",
+                      ))
+                  }
+                False ->
+                  // Regular function return
+                  Ok(return_value)
+              }
+          }
+          case resolved {
+            Error(thrown) -> thrown
+            Ok(pushed) ->
+              // Restore the caller's frame. This includes call_args: the
+              // caller may still need its own args after this call returns
+              // (e.g. IrCreateRestArray runs after default-value expressions,
+              // which can themselves contain calls).
               Ok(
                 State(
                   ..state,
-                  stack: [effective_return, ..stack],
+                  stack: [pushed, ..stack],
                   locals:,
                   func:,
                   code: func.bytecode,
@@ -1328,83 +1403,6 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                   eval_env: saved_eval_env,
                 ),
               )
-            }
-            None ->
-              case state.func.is_derived_constructor {
-                True -> {
-                  case return_value {
-                    JsObject(_) ->
-                      Ok(
-                        State(
-                          ..state,
-                          stack: [return_value, ..stack],
-                          locals:,
-                          func:,
-                          code: func.bytecode,
-                          constants: func.constants,
-                          pc:,
-                          call_stack: rest_frames,
-                          call_depth: state.call_depth - 1,
-                          try_stack:,
-                          new_target: saved_new_target,
-                          call_args: saved_call_args,
-                          eval_env: saved_eval_env,
-                        ),
-                      )
-                    JsUndefined ->
-                      case read_this_local(state) {
-                        JsUninitialized -> {
-                          state.throw_reference_error(
-                            state,
-                            "Must call super constructor in derived class before returning from derived constructor",
-                          )
-                        }
-                        this_val ->
-                          Ok(
-                            State(
-                              ..state,
-                              stack: [this_val, ..stack],
-                              locals:,
-                              func:,
-                              code: func.bytecode,
-                              constants: func.constants,
-                              pc:,
-                              call_stack: rest_frames,
-                              call_depth: state.call_depth - 1,
-                              try_stack:,
-                              new_target: saved_new_target,
-                              call_args: saved_call_args,
-                              eval_env: saved_eval_env,
-                            ),
-                          )
-                      }
-                    _ -> {
-                      state.throw_type_error(
-                        state,
-                        "Derived constructors may only return object or undefined",
-                      )
-                    }
-                  }
-                }
-                False ->
-                  // Regular function return
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [return_value, ..stack],
-                      locals:,
-                      func:,
-                      code: func.bytecode,
-                      constants: func.constants,
-                      pc:,
-                      call_stack: rest_frames,
-                      call_depth: state.call_depth - 1,
-                      try_stack:,
-                      new_target: saved_new_target,
-                      eval_env: saved_eval_env,
-                    ),
-                  )
-              }
           }
         }
       }
@@ -2095,7 +2093,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       case pop_n(state.stack, value_count) {
         Some(#(values, rest)) -> {
           // values are in order [first_non_hole, ..., last_non_hole]
-          let indexed = assign_non_hole_indices(values, holes, 0, [])
+          let indexed = array_ops.assign_non_hole_indices(values, holes, 0, [])
           let #(heap, ref) =
             heap.alloc(
               state.heap,
@@ -2187,7 +2185,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // [val, arr] → [arr]; arr[arr.length] = val, length++.
       case state.stack {
         [val, JsObject(ref) as arr, ..rest] -> {
-          let heap = push_onto_array(state.heap, ref, val)
+          let heap = array_ops.push_onto_array(state.heap, ref, val)
           Ok(State(..state, heap:, stack: [arr, ..rest], pc: state.pc + 1))
         }
         _ -> underflow(state, "ArrayPush")
@@ -2198,7 +2196,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // [arr] → [arr]; length++ WITHOUT setting any element.
       case state.stack {
         [JsObject(ref) as arr, ..rest] -> {
-          let heap = grow_array_length(state.heap, ref)
+          let heap = array_ops.grow_array_length(state.heap, ref)
           Ok(State(..state, heap:, stack: [arr, ..rest], pc: state.pc + 1))
         }
         _ -> underflow(state, "ArrayPushHole")
@@ -2376,7 +2374,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // [args_array, callee] → [result]; this=undefined.
       case state.stack {
         [JsObject(args_ref), callee, ..rest] -> {
-          let args = extract_array_args(state.heap, args_ref)
+          let args = call.extract_array_args(state.heap, args_ref)
           call_value(State(..state, stack: rest), callee, args, JsUndefined)
         }
         [_, callee, ..] -> {
@@ -2393,7 +2391,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // [args_array, method, receiver] → [result]; this=receiver.
       case state.stack {
         [JsObject(args_ref), method, receiver, ..rest] -> {
-          let args = extract_array_args(state.heap, args_ref)
+          let args = call.extract_array_args(state.heap, args_ref)
           call_value(State(..state, stack: rest), method, args, receiver)
         }
         _ -> underflow(state, "CallMethodApply")
@@ -2404,7 +2402,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // [args_array, new_target, ctor] → [new instance]. Spread-new path.
       case state.stack {
         [JsObject(args_ref), JsObject(nt_ref), JsObject(ctor_ref), ..rest] -> {
-          let args = extract_array_args(state.heap, args_ref)
+          let args = call.extract_array_args(state.heap, args_ref)
           do_construct(state, ctor_ref, args, rest, nt_ref)
         }
         [_, _, non_ctor, ..] ->
@@ -2432,57 +2430,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         _ -> underflow(state, "GetPrototypeOf")
       }
 
-    GetSuperValue ->
-      // [key, base, this, ..] → [val, ..]. OrdinaryGet on base, receiver=this.
-      case state.stack {
-        [key, JsObject(base_ref), this_val, ..rest] -> {
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
-          )
-          use #(val, state) <- result.map(
-            state.rethrow(object.get_value(state, base_ref, pk, this_val)),
-          )
-          State(..state, stack: [val, ..rest], pc: state.pc + 1)
-        }
-        // §12.3.5.3 step 5 RequireObjectCoercible — base is null when
-        // home_object's prototype is null (e.g. `class C extends null`).
-        [_key, _base, _this, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot read super property when prototype is null",
-          )
-        _ -> underflow(state, "GetSuperValue")
-      }
+    // [key, base, this, ..] → [val, ..]. OrdinaryGet on base, receiver=this.
+    GetSuperValue -> get_super_value(state, False, "GetSuperValue")
 
-    GetSuperValue2 ->
-      // [key, base, this, ..] → [val, pk, base, this, ..]. Read-under for
-      // compound/update super: ToPropertyKey ONCE (so e.g. key.toString runs
-      // once per §13.15.2), Get with receiver=this, leave coerced key + base
-      // + this for the trailing PutSuperValue.
-      case state.stack {
-        [key, JsObject(base_ref), this_val, ..rest] -> {
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
-          )
-          use #(val, state) <- result.map(
-            state.rethrow(object.get_value(state, base_ref, pk, this_val)),
-          )
-          // Write coerced key back as a primitive JsValue so PutSuperValue's
-          // own to_property_key fast-paths with no observable side effects.
-          let pk_val = JsString(value.key_to_string(pk))
-          State(
-            ..state,
-            stack: [val, pk_val, JsObject(base_ref), this_val, ..rest],
-            pc: state.pc + 1,
-          )
-        }
-        [_key, _base, _this, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot read super property when prototype is null",
-          )
-        _ -> underflow(state, "GetSuperValue2")
-      }
+    // [key, base, this, ..] → [val, pk, base, this, ..]. Read-under for
+    // compound/update super: ToPropertyKey ONCE (so e.g. key.toString runs
+    // once per §13.15.2), Get with receiver=this, leave coerced key + base
+    // + this for the trailing PutSuperValue.
+    GetSuperValue2 -> get_super_value(state, True, "GetSuperValue2")
 
     PutSuperValue ->
       // [val, key, base, this, ..] → [val, ..]. OrdinarySet, receiver=this.
@@ -3301,27 +3256,6 @@ fn call_value(
   )
 }
 
-/// reverse; caller doesn't care about order since result feeds a dict.
-/// Thin wrapper: delegates to array_ops.assign_non_hole_indices.
-fn assign_non_hole_indices(
-  values: List(JsValue),
-  holes: List(Int),
-  index: Int,
-  acc: List(#(Int, JsValue)),
-) -> List(#(Int, JsValue)) {
-  array_ops.assign_non_hole_indices(values, holes, index, acc)
-}
-
-/// Thin wrapper: delegates to array_ops.grow_array_length.
-fn grow_array_length(h: Heap, ref: Ref) -> Heap {
-  array_ops.grow_array_length(h, ref)
-}
-
-/// Thin wrapper: delegates to array_ops.push_onto_array.
-fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {
-  array_ops.push_onto_array(h, ref, val)
-}
-
 /// Thin wrapper: delegates to array_ops.spread_into_array with execute_inner.
 fn spread_into_array(
   state: State,
@@ -3329,11 +3263,6 @@ fn spread_into_array(
   iterable: JsValue,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   array_ops.spread_into_array(state, target_ref, iterable, execute_inner)
-}
-
-/// Thin wrapper: delegates to call.extract_array_args.
-fn extract_array_args(h: Heap, ref: Ref) -> List(JsValue) {
-  call.extract_array_args(h, ref)
 }
 
 fn dispatch_native(

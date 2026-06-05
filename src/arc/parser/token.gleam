@@ -79,53 +79,7 @@ pub fn is_identifier_or_keyword(kind: TokenKind) -> Bool {
 }
 
 pub fn is_keyword_as_identifier(kind: TokenKind) -> Bool {
-  case kind {
-    Let
-    | Const
-    | Var
-    | Function
-    | Return
-    | If
-    | Else
-    | While
-    | Do
-    | For
-    | Break
-    | Continue
-    | Switch
-    | Case
-    | Default
-    | Throw
-    | Try
-    | Catch
-    | Finally
-    | New
-    | Delete
-    | Typeof
-    | Void
-    | In
-    | Instanceof
-    | This
-    | Class
-    | Extends
-    | Super
-    | Import
-    | Export
-    | From
-    | As
-    | Of
-    | Async
-    | Await
-    | Yield
-    | Null
-    | Undefined
-    | KTrue
-    | KFalse
-    | Debugger
-    | With
-    | Static -> True
-    _ -> False
-  }
+  is_reserved_word_kind(kind) || is_contextual_keyword(kind)
 }
 
 pub fn is_assignment_operator(kind: TokenKind) -> Bool {

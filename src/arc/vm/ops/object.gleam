@@ -1,3 +1,4 @@
+import arc/vm/builtins/process_objects
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/opcode
@@ -1833,42 +1834,13 @@ pub fn set_symbol_value(
             Some(proto_ref) ->
               set_symbol_value(state, proto_ref, key, val, receiver)
             // Step 1.c + 2.d: End of chain — create own data property on receiver.
-            None -> {
-              case receiver {
-                JsObject(recv_ref) -> {
-                  let h =
-                    define_symbol_property(
-                      state.heap,
-                      recv_ref,
-                      key,
-                      value.data_property(val),
-                    )
-                  Ok(#(State(..state, heap: h), True))
-                }
-                // Step 2.b: Receiver is not an Object → return false.
-                _ -> Ok(#(state, False))
-              }
-            }
+            None -> define_symbol_data_on_receiver(state, receiver, key, val)
           }
         // Step 2.a: ownDesc.[[Writable]] is false → return false.
         Ok(DataProperty(writable: False, ..)) -> Ok(#(state, False))
         // Step 2.d-e: Writable data property → create/update own on receiver.
-        Ok(DataProperty(writable: True, ..)) -> {
-          case receiver {
-            JsObject(recv_ref) -> {
-              let h =
-                define_symbol_property(
-                  state.heap,
-                  recv_ref,
-                  key,
-                  value.data_property(val),
-                )
-              Ok(#(State(..state, heap: h), True))
-            }
-            // Step 2.b: Receiver is not an Object → return false.
-            _ -> Ok(#(state, False))
-          }
-        }
+        Ok(DataProperty(writable: True, ..)) ->
+          define_symbol_data_on_receiver(state, receiver, key, val)
         // Step 6-7: Accessor with setter → Call(setter, Receiver, << V >>), return true.
         Ok(AccessorProperty(set: Some(setter), ..)) -> {
           use #(_, state) <- result.map(
@@ -1879,6 +1851,30 @@ pub fn set_symbol_value(
         // Step 5: setter is undefined → return false.
         Ok(AccessorProperty(set: None, ..)) -> Ok(#(state, False))
       }
+    _ -> Ok(#(state, False))
+  }
+}
+
+/// OrdinarySetWithOwnDescriptor steps 2.b-2.e: create an own data property
+/// on the receiver, or return false when the receiver is not an object.
+fn define_symbol_data_on_receiver(
+  state: State,
+  receiver: JsValue,
+  key: SymbolId,
+  val: JsValue,
+) -> Result(#(State, Bool), #(JsValue, State)) {
+  case receiver {
+    JsObject(recv_ref) -> {
+      let h =
+        define_symbol_property(
+          state.heap,
+          recv_ref,
+          key,
+          value.data_property(val),
+        )
+      Ok(#(State(..state, heap: h), True))
+    }
+    // Step 2.b: Receiver is not an Object → return false.
     _ -> Ok(#(state, False))
   }
 }
@@ -1933,21 +1929,28 @@ fn inspect_inner(
     value.JsNumber(value.NaN) -> "NaN"
     value.JsNumber(value.Infinity) -> "Infinity"
     value.JsNumber(value.NegInfinity) -> "-Infinity"
-    value.JsString(s) -> "'" <> s <> "'"
+    value.JsString(s) -> "'" <> escape_string(s) <> "'"
     value.JsSymbol(id) ->
-      value.well_known_symbol_description(id) |> option.unwrap("Symbol()")
+      value.well_known_symbol_description(id)
+      |> option.map(fn(desc) { "Symbol(" <> desc <> ")" })
+      |> option.unwrap("Symbol()")
     value.JsBigInt(value.BigInt(n)) -> int.to_string(n) <> "n"
     value.JsUninitialized -> "<uninitialized>"
     value.JsObject(value.Ref(id:) as ref) ->
       case set.contains(visited, id) {
         True -> "[Circular]"
-        False ->
-          case depth > 2 {
-            True -> "[Object]"
-            False -> inspect_object(heap, ref, depth, set.insert(visited, id))
-          }
+        False -> inspect_object(heap, ref, depth, set.insert(visited, id))
       }
   }
+}
+
+fn escape_string(s: String) -> String {
+  s
+  |> string.replace("\\", "\\\\")
+  |> string.replace("'", "\\'")
+  |> string.replace("\n", "\\n")
+  |> string.replace("\r", "\\r")
+  |> string.replace("\t", "\\t")
 }
 
 fn inspect_object(
@@ -1957,23 +1960,19 @@ fn inspect_object(
   visited: set.Set(Int),
 ) -> String {
   case heap.read(heap, ref) {
-    Some(ObjectSlot(kind:, properties:, elements:, ..)) ->
+    Some(ObjectSlot(kind:, properties:, elements:, symbol_properties:, ..)) ->
       case kind {
         ArrayObject(length:) ->
           inspect_array(heap, elements, length, depth, visited)
-        FunctionObject(..) -> {
+        FunctionObject(..) | NativeFunction(..) -> {
           let name = case dict.get(properties, Named("name")) {
             Ok(DataProperty(value: JsString(n), ..)) -> n
-            _ -> "anonymous"
+            _ -> ""
           }
-          "[Function: " <> name <> "]"
-        }
-        NativeFunction(..) -> {
-          let name = case dict.get(properties, Named("name")) {
-            Ok(DataProperty(value: JsString(n), ..)) -> n
-            _ -> "native"
+          case name {
+            "" -> "[Function (anonymous)]"
+            n -> "[Function: " <> n <> "]"
           }
-          "[Function: " <> name <> "]"
         }
         PromiseObject(_) -> "Promise {}"
         GeneratorObject(_) -> "Object [Generator] {}"
@@ -1981,7 +1980,7 @@ fn inspect_object(
         value.ArgumentsObject(length:) ->
           "[Arguments] "
           <> inspect_array(heap, elements, length, depth, visited)
-        value.StringObject(value: s) -> "[String: '" <> s <> "']"
+        value.StringObject(value: s) -> "[String: '" <> escape_string(s) <> "']"
         value.NumberObject(value: n) ->
           "[Number: " <> inspect_inner(JsNumber(n), heap, depth, visited) <> "]"
         value.BooleanObject(value: True) -> "[Boolean: true]"
@@ -1990,8 +1989,9 @@ fn inspect_object(
           "[Symbol: "
           <> inspect_inner(value.JsSymbol(sym), heap, depth, visited)
           <> "]"
-        value.PidObject(_) -> "Pid {}"
-        value.SubjectObject(..) -> "Subject {}"
+        value.PidObject(pid:) -> "Pid" <> process_objects.ffi_pid_to_string(pid)
+        value.SubjectObject(pid:, ..) ->
+          "Subject" <> process_objects.ffi_pid_to_string(pid)
         value.SelectorObject(..) -> "Selector {}"
         value.TimerObject(..) -> "Timer {}"
         value.MapObject(entries:, ..) ->
@@ -2025,13 +2025,24 @@ fn inspect_object(
           <> string.join(list.sort(dict.keys(exports), string.compare), ", ")
           <> " }]"
         value.IteratorRecordObject(..) -> "[Iterator]"
-        OrdinaryObject ->
+        OrdinaryObject -> {
           // Error instances render as "Name: message" (or the full stack, once
-          // we capture one); everything else as a plain object.
+          // we capture one); everything else as a plain object, prefixed with
+          // its Symbol.toStringTag when one is set.
           case error_display(heap, ref) {
             Some(s) -> s
-            None -> inspect_plain_object(heap, properties, depth, visited)
+            None -> {
+              let body = inspect_plain_object(heap, properties, depth, visited)
+              case
+                list.key_find(symbol_properties, value.symbol_to_string_tag)
+              {
+                Ok(DataProperty(value: JsString(t), ..)) ->
+                  "Object [" <> t <> "] " <> body
+                _ -> body
+              }
+            }
           }
+        }
       }
     _ -> "[Object]"
   }
@@ -2044,8 +2055,14 @@ fn inspect_array(
   depth: Int,
   visited: set.Set(Int),
 ) -> String {
-  let items = inspect_array_loop(heap, elements, 0, length, depth, visited, [])
-  "[ " <> string.join(items, ", ") <> " ]"
+  case depth > 2 {
+    True -> "[Array]"
+    False -> {
+      let items =
+        inspect_array_loop(heap, elements, 0, length, depth, visited, [])
+      "[ " <> string.join(items, ", ") <> " ]"
+    }
+  }
 }
 
 fn inspect_array_loop(
@@ -2078,23 +2095,28 @@ fn inspect_plain_object(
   depth: Int,
   visited: set.Set(Int),
 ) -> String {
-  let entries =
-    dict.to_list(properties)
-    |> list.filter_map(fn(pair) {
-      let #(key, prop) = pair
-      case prop {
-        DataProperty(enumerable: True, value: val, ..) ->
-          Ok(
-            value.key_to_string(key)
-            <> ": "
-            <> inspect_inner(val, heap, depth + 1, visited),
-          )
-        _ -> Error(Nil)
+  case depth > 2 {
+    True -> "[Object]"
+    False -> {
+      let entries =
+        dict.to_list(properties)
+        |> list.filter_map(fn(pair) {
+          let #(key, prop) = pair
+          case prop {
+            DataProperty(enumerable: True, value: val, ..) ->
+              Ok(
+                value.key_to_string(key)
+                <> ": "
+                <> inspect_inner(val, heap, depth + 1, visited),
+              )
+            _ -> Error(Nil)
+          }
+        })
+      case entries {
+        [] -> "{}"
+        _ -> "{ " <> string.join(entries, ", ") <> " }"
       }
-    })
-  case entries {
-    [] -> "{}"
-    _ -> "{ " <> string.join(entries, ", ") <> " }"
+    }
   }
 }
 

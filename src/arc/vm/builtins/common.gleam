@@ -1,10 +1,10 @@
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
 import arc/vm/value.{
-  type CallNativeFn, type ExoticKind, type JsValue, type NativeFn,
-  type NativeFnSlot, type Property, type PropertyKey, type Ref, AccessorProperty,
-  ArrayObject, Call, Dispatch, JsBool, JsObject, JsString, Named, NativeFunction,
-  ObjectSlot, OrdinaryObject,
+  type CallNativeFn, type ExoticKind, type JsElements, type JsValue,
+  type NativeFn, type NativeFnSlot, type Property, type PropertyKey, type Ref,
+  AccessorProperty, ArrayObject, Call, Dispatch, JsBool, JsObject, JsString,
+  Named, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -215,26 +215,69 @@ fn alloc_native_fn_slot(
   name: String,
   arity: Int,
 ) -> #(Heap(ctx), Ref) {
+  // Ordinary built-ins (methods, standalone functions, host fns) are
+  // not constructors. The constructor intrinsics take a separate path
+  // (init_type / init_type_on), and bind copies its target's bit.
   let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        // Ordinary built-ins (methods, standalone functions, host fns) are
-        // not constructors. The constructor intrinsics take a separate path
-        // (init_type / init_type_on), and bind copies its target's bit.
-        kind: NativeFunction(slot, constructible: False),
-        properties: named_props([
-          #("name", fn_name_property(name)),
-          #("length", fn_length_property(arity)),
-        ]),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: Some(function_proto),
-        extensible: True,
-      ),
-    )
+    alloc_fn_slot(h, function_proto, slot, False, [
+      #("name", fn_name_property(name)),
+      #("length", fn_length_property(arity)),
+    ])
   let h = heap.root(h, ref)
   #(h, ref)
+}
+
+/// Allocate a Call-dispatched NativeFunction object with standard name/length
+/// properties, WITHOUT rooting it. For transient function objects (promise
+/// resolving functions, reaction closures) whose lifetime is governed by
+/// normal GC reachability — rooting them would leak.
+pub fn alloc_call_fn(
+  h: Heap(ctx),
+  function_proto: Ref,
+  native: CallNativeFn,
+  name: String,
+  arity: Int,
+  constructible constructible: Bool,
+) -> #(Heap(ctx), Ref) {
+  alloc_fn_slot(h, function_proto, Call(native), constructible, [
+    #("name", fn_name_property(name)),
+    #("length", fn_length_property(arity)),
+  ])
+}
+
+/// Like alloc_call_fn, but with a caller-supplied named property list — for
+/// function objects whose properties aren't just name+length (the Symbol
+/// constructor's well-known symbols, bound functions' name-only set).
+/// Non-rooting; callers that need rooting do it themselves.
+pub fn alloc_call_fn_props(
+  h: Heap(ctx),
+  function_proto: Ref,
+  native: CallNativeFn,
+  constructible constructible: Bool,
+  props props: List(#(String, Property)),
+) -> #(Heap(ctx), Ref) {
+  alloc_fn_slot(h, function_proto, Call(native), constructible, props)
+}
+
+/// Shared core: allocate a NativeFunction ObjectSlot (non-rooting).
+fn alloc_fn_slot(
+  h: Heap(ctx),
+  function_proto: Ref,
+  slot: NativeFnSlot(ctx),
+  constructible: Bool,
+  props: List(#(String, Property)),
+) -> #(Heap(ctx), Ref) {
+  heap.alloc(
+    h,
+    ObjectSlot(
+      kind: NativeFunction(slot, constructible:),
+      properties: named_props(props),
+      symbol_properties: [],
+      elements: elements.new(),
+      prototype: Some(function_proto),
+      extensible: True,
+    ),
+  )
 }
 
 /// Allocate a host-provided native function. Same heap shape as built-in
@@ -493,6 +536,43 @@ pub fn init_type(
     )
 
   #(h, BuiltinType(prototype: proto_ref, constructor: ctor_ref))
+}
+
+/// Shared init scaffold for keyed collections (Map/Set): allocates the
+/// prototype methods, one iterator function installed under its own name plus
+/// any `iter_aliases` AND [@@iterator] (all the SAME function object —
+/// test262 asserts strict equality), a `size` getter, then runs the standard
+/// init_type + @@toStringTag wiring.
+pub fn init_keyed_collection(
+  h: Heap(ctx),
+  object_proto: Ref,
+  function_proto: Ref,
+  methods: List(#(String, NativeFn, Int)),
+  iter_name: String,
+  iter_native: NativeFn,
+  iter_aliases: List(String),
+  size_getter: NativeFn,
+  ctor_fn: fn(Ref) -> NativeFnSlot(ctx),
+  tag: String,
+) -> #(Heap(ctx), BuiltinType) {
+  let #(h, proto_methods) = alloc_methods(h, function_proto, methods)
+  // Iterator fn allocated separately so all its property names (and
+  // [@@iterator]) alias the SAME function object.
+  let #(h, iter_ref) =
+    alloc_native_fn(h, function_proto, iter_native, iter_name, 0)
+  let iter_prop = value.builtin_property(JsObject(iter_ref))
+  let iter_props =
+    list.map([iter_name, ..iter_aliases], fn(n) { #(n, iter_prop) })
+  // size accessor property (getter, no setter)
+  let #(h, getters) = alloc_getters(h, function_proto, [#("size", size_getter)])
+  let proto_props = list.flatten([getters, iter_props, proto_methods])
+  let #(h, bt) =
+    init_type(h, object_proto, function_proto, proto_props, ctor_fn, tag, 0, [])
+  // @@toStringTag = tag { writable: false, enumerable: false, configurable: true }
+  let h = add_to_string_tag(h, bt.prototype, tag)
+  // [@@iterator] — same function object as the named iterator method
+  let h = add_symbol_property(h, bt.prototype, value.symbol_iterator, iter_prop)
+  #(h, bt)
 }
 
 /// Add a symbol-keyed property to an existing object (typically a prototype).
@@ -789,17 +869,32 @@ pub fn alloc_array(
   values: List(JsValue),
   array_proto: Ref,
 ) -> #(Heap(ctx), Ref) {
-  // Step 1: length = number of values
-  let count = list.length(values)
-  // Steps 4-8: create array exotic object
+  // Step 1: length = number of values; steps 4-8 in alloc_array_from_elements
+  alloc_array_from_elements(
+    h,
+    elements.from_list(values),
+    list.length(values),
+    array_proto,
+  )
+}
+
+/// Allocate a JS array exotic object from pre-built elements with an explicit
+/// length. Like alloc_array (ArrayCreate, §10.4.2.2) but takes JsElements
+/// directly, so the length may exceed the stored element count (holes).
+pub fn alloc_array_from_elements(
+  h: Heap(ctx),
+  els: JsElements,
+  length: Int,
+  array_proto: Ref,
+) -> #(Heap(ctx), Ref) {
   heap.alloc(
     h,
     ObjectSlot(
       // Step 6: exotic [[DefineOwnProperty]] via ArrayObject kind
-      // Step 7: length stored in ArrayObject(count)
-      kind: ArrayObject(count),
+      // Step 7: length stored in ArrayObject(length)
+      kind: ArrayObject(length),
       properties: dict.new(),
-      elements: elements.from_list(values),
+      elements: els,
       // Step 5: [[Prototype]] = proto
       prototype: Some(array_proto),
       symbol_properties: [],

@@ -302,25 +302,8 @@ fn lazy_helper(
   kind: IteratorHelperKind,
   name: String,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _this_ref <- require_object_of(
-    this,
-    state,
-    "Iterator.prototype." <> name <> " called on non-object",
-  )
-  // §27.1.4.5 step 3: validate callback BEFORE GetIteratorDirect. On failure,
-  // close `this` (without having read `.next`) then throw.
-  let func = first_arg_or_undefined(args)
-  case is_callable(state.heap, func) {
-    False -> close_throw_type(state, this, name <> " argument is not callable")
-    True -> {
-      use next, state <- state.try_op(object.get_value_of(
-        state,
-        this,
-        Named("next"),
-      ))
-      alloc_helper(state, kind, this, next, func, 0)
-    }
-  }
+  use this, next, func, state <- consumer_with_callback(this, args, state, name)
+  alloc_helper(state, kind, this, next, func, 0)
 }
 
 // ============================================================================
@@ -982,9 +965,11 @@ fn get_iterator_direct(
   cont(this, next, state)
 }
 
-/// Shared prologue for forEach/reduce/some/every/find: validate `this` is
-/// Object, validate callback (closing `this` on failure WITHOUT having read
-/// `.next`), then GetIteratorDirect.
+/// Shared prologue for forEach/reduce/some/every/find and the lazy helpers
+/// (map/filter/flatMap): validate `this` is Object, validate callback
+/// (closing `this` on failure WITHOUT having read `.next` — §27.1.4.5 step 3
+/// requires callback validation BEFORE GetIteratorDirect), then
+/// GetIteratorDirect.
 fn consumer_with_callback(
   this: JsValue,
   args: List(JsValue),

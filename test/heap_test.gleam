@@ -32,6 +32,24 @@ fn dummy_template() -> FuncTemplate {
   )
 }
 
+fn alloc_closure(h, env) {
+  heap.alloc(
+    h,
+    ObjectSlot(
+      kind: FunctionObject(
+        func_template: dummy_template(),
+        env:,
+        home_object: None,
+      ),
+      properties: dict.new(),
+      symbol_properties: [],
+      elements: elements.new(),
+      prototype: None,
+      extensible: True,
+    ),
+  )
+}
+
 fn ordinary(props: dict.Dict(String, value.JsValue)) {
   let keyed =
     dict.fold(props, dict.new(), fn(acc, k, v) {
@@ -239,22 +257,7 @@ pub fn gc_traces_through_closure_slot_test() {
   let h = heap.new()
   let #(h, ref_captured) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: [JsObject(ref_captured)]))
-  let #(h, ref_closure) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: FunctionObject(
-          func_template: dummy_template(),
-          env: ref_env,
-          home_object: None,
-        ),
-        properties: dict.new(),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: None,
-        extensible: True,
-      ),
-    )
+  let #(h, ref_closure) = alloc_closure(h, ref_env)
   let h = heap.root(h, ref_closure)
   let h = heap.collect(h)
   assert heap.size(h) == 3
@@ -294,22 +297,7 @@ pub fn mixed_live_dead_partition_test() {
   let #(h, live_parent) =
     heap.alloc(h, ordinary(dict.from_list([#("child", JsObject(live_leaf))])))
   let #(h, live_env) = heap.alloc(h, EnvSlot(slots: [JsString("hi")]))
-  let #(h, live_solo) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: FunctionObject(
-          func_template: dummy_template(),
-          env: live_env,
-          home_object: None,
-        ),
-        properties: dict.new(),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: None,
-        extensible: True,
-      ),
-    )
+  let #(h, live_solo) = alloc_closure(h, live_env)
   let h = heap.root(h, live_parent)
   let h = heap.root(h, live_solo)
   let h = heap.collect(h)
@@ -344,22 +332,7 @@ pub fn gc_traces_through_function_object_test() {
   // JsObject(Ref) pointing to a FunctionObject should be traced through properties
   let h = heap.new()
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: []))
-  let #(h, ref_closure) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: FunctionObject(
-          func_template: dummy_template(),
-          env: ref_env,
-          home_object: None,
-        ),
-        properties: dict.new(),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: None,
-        extensible: True,
-      ),
-    )
+  let #(h, ref_closure) = alloc_closure(h, ref_env)
   let #(h, ref_obj) =
     heap.alloc(
       h,
@@ -376,38 +349,8 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
   // Two closures share the same EnvSlot — rooting either keeps the env alive
   let h = heap.new()
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: [JsNumber(Finite(0.0))]))
-  let #(h, ref_inc) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: FunctionObject(
-          func_template: dummy_template(),
-          env: ref_env,
-          home_object: None,
-        ),
-        properties: dict.new(),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: None,
-        extensible: True,
-      ),
-    )
-  let #(h, ref_get) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: FunctionObject(
-          func_template: dummy_template(),
-          env: ref_env,
-          home_object: None,
-        ),
-        properties: dict.new(),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: None,
-        extensible: True,
-      ),
-    )
+  let #(h, ref_inc) = alloc_closure(h, ref_env)
+  let #(h, ref_get) = alloc_closure(h, ref_env)
   // Root only ref_inc — env should still survive (reachable from ref_inc)
   let h = heap.root(h, ref_inc)
   let h = heap.collect(h)
@@ -424,22 +367,7 @@ pub fn gc_traces_through_box_slot_test() {
   let #(h, ref_obj) = heap.alloc(h, ordinary(dict.new()))
   let #(h, ref_box) = heap.alloc(h, BoxSlot(value: JsObject(ref_obj)))
   let #(h, ref_env) = heap.alloc(h, EnvSlot(slots: [JsObject(ref_box)]))
-  let #(h, ref_closure) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: FunctionObject(
-          func_template: dummy_template(),
-          env: ref_env,
-          home_object: None,
-        ),
-        properties: dict.new(),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: None,
-        extensible: True,
-      ),
-    )
+  let #(h, ref_closure) = alloc_closure(h, ref_env)
   let h = heap.root(h, ref_closure)
   let h = heap.collect(h)
   assert heap.size(h) == 4

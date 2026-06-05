@@ -2013,18 +2013,80 @@ pub fn to_number(val: JsValue) -> Result(JsNum, String) {
     JsNull -> Ok(Finite(0.0))
     JsBool(True) -> Ok(Finite(1.0))
     JsBool(False) -> Ok(Finite(0.0))
-    JsString("") -> Ok(Finite(0.0))
-    JsString(s) ->
-      float.parse(s)
-      |> result.or(int.parse(s) |> result.map(int.to_float))
-      |> result.map(Finite)
-      |> result.unwrap(NaN)
-      |> Ok
+    JsString(s) -> Ok(string_to_number(s))
     JsBigInt(_) -> Error("Cannot convert BigInt to number")
     JsSymbol(_) -> Error("Cannot convert Symbol to number")
     JsObject(_) -> Ok(NaN)
     JsUninitialized -> Error("Cannot access before initialization")
   }
+}
+
+/// ES2024 §7.1.4.1.1 StringToNumber: trims whitespace, accepts leading + or -,
+/// Infinity, scientific notation, leading/trailing decimal point.
+/// Hex/oct/bin prefixes not handled here.
+pub fn string_to_number(s: String) -> JsNum {
+  let s = string.trim(s)
+  case s {
+    "" -> Finite(0.0)
+    "Infinity" | "+Infinity" -> Infinity
+    "-Infinity" -> NegInfinity
+    _ -> {
+      let #(neg, rest) = case s {
+        "-" <> r -> #(True, r)
+        "+" <> r -> #(False, r)
+        _ -> #(False, s)
+      }
+      // A second sign after the one already stripped (e.g. "--5") is NaN.
+      let n = case rest {
+        "+" <> _ | "-" <> _ -> Error(Nil)
+        _ ->
+          float.parse(rest)
+          |> result.try_recover(fn(_: Nil) {
+            // "200." → "200.0"; ".5" → "0.5"; "2e3" → "2.0e3" — Gleam's
+            // float.parse needs both sides of the decimal point.
+            float.parse(normalize_float_literal(rest))
+          })
+          |> result.try_recover(fn(_: Nil) {
+            int.parse(rest) |> result.map(int.to_float)
+          })
+      }
+      case n {
+        Ok(f) ->
+          case neg {
+            True -> Finite(float.negate(f))
+            False -> Finite(f)
+          }
+        Error(Nil) -> NaN
+      }
+    }
+  }
+}
+
+/// Best-effort fixup so Erlang float parsing accepts JS-style literals like
+/// "2e3", "200.", ".5", "200.000E-02".
+fn normalize_float_literal(s: String) -> String {
+  // Split at 'e' or 'E'
+  let #(mant, exp) = case string.split_once(s, "e") {
+    Ok(#(m, e)) -> #(m, "e" <> e)
+    Error(Nil) ->
+      case string.split_once(s, "E") {
+        Ok(#(m, e)) -> #(m, "e" <> e)
+        Error(Nil) -> #(s, "")
+      }
+  }
+  let mant = case string.contains(mant, ".") {
+    True ->
+      case string.ends_with(mant, ".") {
+        True -> mant <> "0"
+        False ->
+          case string.starts_with(mant, ".") {
+            True -> "0" <> mant
+            False -> mant
+          }
+      }
+    False -> mant <> ".0"
+  }
+  mant <> exp
 }
 
 /// JS SameValueZero: https://tc39.es/ecma262/#sec-samevaluezero

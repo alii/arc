@@ -25,25 +25,26 @@ import arc/vm/completion.{
   YieldCompletion,
 }
 import arc/vm/exec/async_generators
+import arc/vm/exec/frame
 import arc/vm/exec/generators
 import arc/vm/exec/promises
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/limits
-import arc/vm/opcode
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/realm
 import arc/vm/state.{
-  type Heap, type NativeFnSlot, type State, type StepResult, type VmError,
-  SavedFrame, State, StepVmError, Thrown, Unimplemented,
+  type ExoticKind, type Heap, type HeapSlot, type NativeFnSlot, type State,
+  type StepResult, type VmError, SavedFrame, State, StepVmError, Thrown,
+  Unimplemented,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot,
   AsyncGeneratorObject, AsyncGeneratorSlot, DataProperty, FunctionObject,
-  GeneratorObject, GeneratorSlot, JsNull, JsObject, JsString, JsUndefined,
+  GeneratorObject, GeneratorSlot, JsObject, JsString, JsUndefined,
   JsUninitialized, Named, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/bool
@@ -71,47 +72,6 @@ pub type DispatchNativeFn =
 // Function calling infrastructure
 // ============================================================================
 
-/// Resolve `this` for a function call per ES2024 §10.2.1.2 OrdinaryCallBindThis.
-/// Computes the value to write into the callee's lexical-`this` slot
-/// (FuncTemplate.this_slot). Arrows don't own a slot — the value returned
-/// for them is unused; they read `this` via a capture from the enclosing
-/// non-arrow.
-pub fn bind_this(
-  state: State,
-  callee: FuncTemplate,
-  this_arg: JsValue,
-) -> #(Heap, JsValue) {
-  case callee.is_arrow {
-    // Step 2: thisMode is LEXICAL → arrows have no own `this` binding.
-    // Their `this` reads resolve to a capture from the enclosing non-arrow,
-    // so the value computed here is never written anywhere.
-    True -> #(state.heap, JsUndefined)
-    False ->
-      case callee.is_strict {
-        // Step 5: thisMode is STRICT -> thisValue = thisArgument (no coercion).
-        True -> #(state.heap, this_arg)
-        // Step 6: Sloppy mode coercion.
-        False ->
-          case this_arg {
-            // Step 6a: undefined/null -> globalThis.
-            JsUndefined | JsNull -> #(
-              state.heap,
-              JsObject(state.ctx.global_object),
-            )
-            // Step 6b: Objects pass through (ToObject is identity for objects).
-            JsObject(_) -> #(state.heap, this_arg)
-            _ ->
-              // Step 6b: Primitives -> ToObject wrapper (boxing).
-              // to_object only errors on null/undefined which we handled above.
-              case common.to_object(state.heap, state.builtins, this_arg) {
-                Some(#(heap, ref)) -> #(heap, JsObject(ref))
-                None -> #(state.heap, this_arg)
-              }
-          }
-      }
-  }
-}
-
 /// Shared logic for Call, CallMethod, and CallConstructor.
 /// Looks up the callee template, saves the caller frame, sets up locals,
 /// and transitions to the callee's code.
@@ -129,10 +89,10 @@ pub fn call_function(
   execute_inner: ExecuteInnerFn,
   unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  let #(heap, this_val) = bind_this(state, callee_template, this_val)
+  let #(heap, this_val) = frame.bind_this(state, callee_template, this_val)
   let state = State(..state, heap:)
   let locals =
-    setup_locals(
+    frame.setup_locals(
       state.heap,
       env_ref,
       fn_ref,
@@ -233,6 +193,52 @@ fn call_regular_function(
   )
 }
 
+/// Set up an isolated execution state for a (sync or async) generator body.
+fn generator_initial_state(
+  state: State,
+  callee_template: FuncTemplate,
+  args: List(JsValue),
+  locals: tuple_array.TupleArray(JsValue),
+) -> State {
+  State(
+    ..state,
+    stack: [],
+    locals:,
+    func: callee_template,
+    code: callee_template.bytecode,
+    constants: callee_template.constants,
+    pc: 0,
+    call_stack: [],
+    try_stack: [],
+    new_target: JsUndefined,
+    call_args: args,
+  )
+}
+
+/// Allocate the suspended-at-InitialYield slot and wrap it in a generator
+/// object, returning to the caller with the object on the stack. Shared by
+/// the sync and async generator call paths.
+fn alloc_suspended_generator(
+  state: State,
+  suspended: State,
+  rest_stack: List(JsValue),
+  slot: HeapSlot,
+  make_kind: fn(value.Ref) -> ExoticKind,
+  prototype: value.Ref,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  let #(h, data_ref) = heap.alloc(suspended.heap, slot)
+  let #(h, gen_obj_ref) =
+    common.alloc_wrapper(h, make_kind(data_ref), prototype)
+  Ok(
+    State(
+      ..state.merge_globals(state, suspended, []),
+      heap: h,
+      stack: [JsObject(gen_obj_ref), ..rest_stack],
+      pc: state.pc + 1,
+    ),
+  )
+}
+
 /// Generator function call: execute until InitialYield, save state to
 /// GeneratorSlot, create GeneratorObject, return it to caller.
 fn call_generator_function(
@@ -244,56 +250,27 @@ fn call_generator_function(
   locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  // Set up an isolated execution state for the generator body
-  let gen_state =
-    State(
-      ..state,
-      stack: [],
-      locals:,
-      func: callee_template,
-      code: callee_template.bytecode,
-      constants: callee_template.constants,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      new_target: JsUndefined,
-      call_args: args,
-    )
   // Execute until InitialYield (which fires immediately at the start)
-  case execute_inner(gen_state) {
-    Ok(#(YieldCompletion(_, _), suspended)) -> {
-      // Save the suspended state into a GeneratorSlot on the heap
-      let saved_try = generators.save_stacks(suspended.try_stack)
-      let #(h, data_ref) =
-        heap.alloc(
-          suspended.heap,
-          GeneratorSlot(
-            gen_state: value.SuspendedStart,
-            func_template: callee_template,
-            env_ref:,
-            saved_pc: suspended.pc,
-            saved_locals: suspended.locals,
-            saved_stack: suspended.stack,
-            saved_try_stack: saved_try,
-          ),
-        )
-      // Create the generator object with Generator.prototype
-      let #(h, gen_obj_ref) =
-        common.alloc_wrapper(
-          h,
-          GeneratorObject(generator_data: data_ref),
-          state.builtins.generator.prototype,
-        )
-      // Return to caller with the generator object on the stack
-      Ok(
-        State(
-          ..state.merge_globals(state, suspended, []),
-          heap: h,
-          stack: [JsObject(gen_obj_ref), ..rest_stack],
-          pc: state.pc + 1,
+  case
+    execute_inner(generator_initial_state(state, callee_template, args, locals))
+  {
+    Ok(#(YieldCompletion(_, _), suspended)) ->
+      alloc_suspended_generator(
+        state,
+        suspended,
+        rest_stack,
+        GeneratorSlot(
+          gen_state: value.SuspendedStart,
+          func_template: callee_template,
+          env_ref:,
+          saved_pc: suspended.pc,
+          saved_locals: suspended.locals,
+          saved_stack: suspended.stack,
+          saved_try_stack: generators.save_stacks(suspended.try_stack),
         ),
+        GeneratorObject,
+        state.builtins.generator.prototype,
       )
-    }
     Ok(#(NormalCompletion(_, h), _)) -> {
       // Generator returned without yielding -- shouldn't happen with InitialYield
       // but handle gracefully: create a completed generator
@@ -349,52 +326,27 @@ fn call_async_generator_function(
   locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  let gen_state =
-    State(
-      ..state,
-      stack: [],
-      locals:,
-      func: callee_template,
-      code: callee_template.bytecode,
-      constants: callee_template.constants,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      new_target: JsUndefined,
-      call_args: args,
-    )
-  case execute_inner(gen_state) {
-    Ok(#(YieldCompletion(_, _), suspended)) -> {
-      let saved_try = generators.save_stacks(suspended.try_stack)
-      let #(h, data_ref) =
-        heap.alloc(
-          suspended.heap,
-          AsyncGeneratorSlot(
-            gen_state: value.AGSuspendedStart,
-            queue: [],
-            func_template: callee_template,
-            env_ref:,
-            saved_pc: suspended.pc,
-            saved_locals: suspended.locals,
-            saved_stack: suspended.stack,
-            saved_try_stack: saved_try,
-          ),
-        )
-      let #(h, gen_obj_ref) =
-        common.alloc_wrapper(
-          h,
-          AsyncGeneratorObject(generator_data: data_ref),
-          state.builtins.async_generator.prototype,
-        )
-      Ok(
-        State(
-          ..state.merge_globals(state, suspended, []),
-          heap: h,
-          stack: [JsObject(gen_obj_ref), ..rest_stack],
-          pc: state.pc + 1,
+  case
+    execute_inner(generator_initial_state(state, callee_template, args, locals))
+  {
+    Ok(#(YieldCompletion(_, _), suspended)) ->
+      alloc_suspended_generator(
+        state,
+        suspended,
+        rest_stack,
+        AsyncGeneratorSlot(
+          gen_state: value.AGSuspendedStart,
+          queue: [],
+          func_template: callee_template,
+          env_ref:,
+          saved_pc: suspended.pc,
+          saved_locals: suspended.locals,
+          saved_stack: suspended.stack,
+          saved_try_stack: generators.save_stacks(suspended.try_stack),
         ),
+        AsyncGeneratorObject,
+        state.builtins.async_generator.prototype,
       )
-    }
     Ok(#(ThrowCompletion(thrown, h), _)) ->
       Error(#(Thrown, thrown, State(..state, heap: h)))
     Ok(#(NormalCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
@@ -450,67 +402,87 @@ fn call_async_function(
       new_target: JsUndefined,
       call_args: args,
     )
-  case execute_inner(async_state) {
+  finish_async_execution(
+    state,
+    execute_inner(async_state),
+    data_ref,
+    resolve_fn,
+    reject_fn,
+    callee_template,
+    env_ref,
+    None,
+    JsObject(promise_ref),
+    rest_stack,
+  )
+}
+
+/// Shared completion handling for an async function body execution.
+/// Resolves/rejects the outer promise on completion, or saves the suspension
+/// state and attaches resume callbacks on `await`. `existing_slot_ref` is
+/// `Some` to overwrite an existing AsyncFunctionSlot on re-suspension, `None`
+/// to allocate a fresh slot on first await.
+fn finish_async_execution(
+  state: State,
+  exec_result: Result(#(Completion, State), VmError),
+  promise_data_ref: Ref,
+  resolve: JsValue,
+  reject: JsValue,
+  func_template: FuncTemplate,
+  env_ref: Ref,
+  existing_slot_ref: Option(Ref),
+  result_value: JsValue,
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, State)) {
+  case exec_result {
     Ok(#(AwaitCompletion(awaited_value, h2), suspended)) -> {
       // Body hit `await` -- save state, set up promise resolution
       let saved_try = generators.save_stacks(suspended.try_stack)
-      let #(h2, async_data_ref) =
-        heap.alloc(
-          h2,
-          AsyncFunctionSlot(
-            promise_data_ref: data_ref,
-            resolve: resolve_fn,
-            reject: reject_fn,
-            func_template: callee_template,
-            env_ref:,
-            saved_pc: suspended.pc,
-            saved_locals: suspended.locals,
-            saved_stack: suspended.stack,
-            saved_try_stack: saved_try,
-          ),
+      let slot =
+        AsyncFunctionSlot(
+          promise_data_ref:,
+          resolve:,
+          reject:,
+          func_template:,
+          env_ref:,
+          saved_pc: suspended.pc,
+          saved_locals: suspended.locals,
+          saved_stack: suspended.stack,
+          saved_try_stack: saved_try,
         )
+      let #(h2, async_data_ref) = case existing_slot_ref {
+        Some(slot_ref) -> #(heap.write(h2, slot_ref, slot), slot_ref)
+        None -> heap.alloc(h2, slot)
+      }
       let state =
         async_setup_await(
           State(..state.merge_globals(state, suspended, []), heap: h2),
           async_data_ref,
           awaited_value,
         )
-      Ok(
-        State(
-          ..state,
-          stack: [JsObject(promise_ref), ..rest_stack],
-          pc: state.pc + 1,
-        ),
-      )
+      Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
     Ok(#(NormalCompletion(return_value, h2), final_state)) -> {
-      // Async function completed without awaiting -- resolve the promise
+      // Async function completed -- resolve the outer promise
       let #(h2, jobs) =
-        builtins_promise.fulfill_promise(h2, data_ref, return_value)
+        builtins_promise.fulfill_promise(h2, promise_data_ref, return_value)
       Ok(
         State(
           ..state.merge_globals(state, final_state, jobs),
           heap: h2,
-          stack: [JsObject(promise_ref), ..rest_stack],
+          stack: [result_value, ..rest_stack],
           pc: state.pc + 1,
         ),
       )
     }
     Ok(#(ThrowCompletion(thrown, h2), final_state)) -> {
-      // Async function threw without awaiting -- reject the promise
+      // Async function threw -- reject the outer promise
       let state =
         builtins_promise.reject_promise(
           State(..state.merge_globals(state, final_state, []), heap: h2),
-          data_ref,
+          promise_data_ref,
           thrown,
         )
-      Ok(
-        State(
-          ..state,
-          stack: [JsObject(promise_ref), ..rest_stack],
-          pc: state.pc + 1,
-        ),
-      )
+      Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
     Ok(#(YieldCompletion(_, _), _)) ->
       Error(#(
@@ -530,58 +502,8 @@ fn async_setup_await(
   async_data_ref: Ref,
   awaited_value: JsValue,
 ) -> State {
-  let h = state.heap
-  let builtins = state.builtins
-  // Wrap awaited_value in Promise.resolve() if not already a promise
-  let existing_data_ref = case awaited_value {
-    JsObject(ref) -> heap.read_promise_data_ref(h, ref)
-    _ -> None
-  }
-  let #(h, promise_data_ref) = case existing_data_ref {
-    Some(dr) -> #(h, dr)
-    None -> {
-      let #(h, _, dr) =
-        promises.create_resolved_promise(h, builtins, awaited_value)
-      #(h, dr)
-    }
-  }
-  // Create NativeAsyncResume callbacks
-  let #(h, fulfill_resume_ref) =
-    common.alloc_wrapper(
-      h,
-      NativeFunction(
-        value.Call(value.AsyncResume(async_data_ref:, is_reject: False)),
-        constructible: False,
-      ),
-      builtins.function.prototype,
-    )
-  let #(h, reject_resume_ref) =
-    common.alloc_wrapper(
-      h,
-      NativeFunction(
-        value.Call(value.AsyncResume(async_data_ref:, is_reject: True)),
-        constructible: False,
-      ),
-      builtins.function.prototype,
-    )
-  // Attach .then(fulfillResume, rejectResume) to the awaited promise
-  let #(h, child_ref, child_data_ref) =
-    builtins_promise.create_promise(h, builtins.promise.prototype)
-  let #(h, child_resolve, child_reject) =
-    builtins_promise.create_resolving_functions(
-      h,
-      builtins.function.prototype,
-      child_ref,
-      child_data_ref,
-    )
-  builtins_promise.perform_promise_then(
-    State(..state, heap: h),
-    promise_data_ref,
-    JsObject(fulfill_resume_ref),
-    JsObject(reject_resume_ref),
-    child_resolve,
-    child_reject,
-  )
+  use is_reject <- promises.setup_await(state, awaited_value)
+  value.AsyncResume(async_data_ref:, is_reject:)
 }
 
 /// NativeAsyncResume handler: called when an awaited promise settles.
@@ -641,69 +563,18 @@ pub fn call_native_async_resume(
           }
         }
       }
-      case exec_result {
-        Ok(#(NormalCompletion(return_value, h2), final_state)) -> {
-          // Async function completed -- resolve the outer promise
-          let #(h2, jobs) =
-            builtins_promise.fulfill_promise(h2, promise_data_ref, return_value)
-          Ok(
-            State(
-              ..state.merge_globals(state, final_state, jobs),
-              heap: h2,
-              stack: [JsUndefined, ..rest_stack],
-              pc: state.pc + 1,
-            ),
-          )
-        }
-        Ok(#(ThrowCompletion(thrown, h2), final_state)) -> {
-          // Async function threw -- reject the outer promise
-          let state =
-            builtins_promise.reject_promise(
-              State(..state.merge_globals(state, final_state, []), heap: h2),
-              promise_data_ref,
-              thrown,
-            )
-          Ok(
-            State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
-          )
-        }
-        Ok(#(AwaitCompletion(awaited_value, h2), suspended)) -> {
-          // Hit another `await` -- save state and set up promise resolution
-          let saved_try = generators.save_stacks(suspended.try_stack)
-          let h2 =
-            heap.write(
-              h2,
-              async_data_ref,
-              AsyncFunctionSlot(
-                promise_data_ref:,
-                resolve: slot_resolve,
-                reject: slot_reject,
-                func_template:,
-                env_ref: slot_env_ref,
-                saved_pc: suspended.pc,
-                saved_locals: suspended.locals,
-                saved_stack: suspended.stack,
-                saved_try_stack: saved_try,
-              ),
-            )
-          let state =
-            async_setup_await(
-              State(..state.merge_globals(state, suspended, []), heap: h2),
-              async_data_ref,
-              awaited_value,
-            )
-          Ok(
-            State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1),
-          )
-        }
-        Ok(#(YieldCompletion(_, _), _)) ->
-          Error(#(
-            StepVmError(Unimplemented("yield in non-generator async function")),
-            JsUndefined,
-            state,
-          ))
-        Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
-      }
+      finish_async_execution(
+        state,
+        exec_result,
+        promise_data_ref,
+        slot_resolve,
+        slot_reject,
+        func_template,
+        slot_env_ref,
+        Some(async_data_ref),
+        JsUndefined,
+        rest_stack,
+      )
     }
     _ ->
       Error(#(
@@ -714,85 +585,6 @@ pub fn call_native_async_resume(
         JsUndefined,
         state,
       ))
-  }
-}
-
-/// Set up locals for a function call:
-/// [env_values, lexical_seeds, args(padded to arity), undefined×remaining].
-/// Non-arrows own slots for the lexical pseudo-bindings immediately after
-/// captures, in canonical `all_lexical_refs` order; write the seed values
-/// there. Arrows inherit lexicals via env_values (their lexical slots, if
-/// Some, point at captures) so skip.
-///
-/// Hot path: every JS call goes through here. The tuple is built in one
-/// forward pass via FFI (no list.append/reverse/intermediate accumulator).
-pub fn setup_locals(
-  h: Heap,
-  env_ref: value.Ref,
-  fn_ref: value.Ref,
-  home_object: Option(value.Ref),
-  callee_template: FuncTemplate,
-  args: List(JsValue),
-  this_val: JsValue,
-  new_target: JsValue,
-) -> tuple_array.TupleArray(JsValue) {
-  let env_values = heap.read_env(h, env_ref) |> option.unwrap([])
-  let seeds = case callee_template.is_arrow {
-    True -> []
-    False -> {
-      let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
-      lexical_seeds(callee_template.lexical, this_val, fn_ref, home, new_target)
-    }
-  }
-  setup_locals_tuple(
-    env_values,
-    seeds,
-    args,
-    callee_template.arity,
-    callee_template.local_count,
-    JsUndefined,
-  )
-}
-
-/// FFI: build the locals tuple in one forward pass — see
-/// arc_vm_ffi:setup_locals_tuple/6. Body-recursive on the Erlang side so
-/// the result list is built in order (no reverse) then list_to_tuple'd.
-@external(erlang, "arc_vm_ffi", "setup_locals_tuple")
-fn setup_locals_tuple(
-  env: List(JsValue),
-  seeds: List(JsValue),
-  args: List(JsValue),
-  arity: Int,
-  local_count: Int,
-  undef: JsValue,
-) -> tuple_array.TupleArray(JsValue)
-
-/// Seed values for the owned lexical slots, in canonical `all_lexical_refs`
-/// order ([this, active_func, home_object, new_target]), one per Some entry.
-/// The emitter guarantees slot indices start at len(captures) and run
-/// contiguously in this order. ≤4 cons cells, no filter_map/closure allocation.
-pub fn lexical_seeds(
-  lexical: opcode.LexicalSlots,
-  this_val: JsValue,
-  fn_ref: value.Ref,
-  home_object: JsValue,
-  new_target: JsValue,
-) -> List(JsValue) {
-  let acc = case lexical.new_target {
-    Some(_) -> [new_target]
-    None -> []
-  }
-  let acc = case lexical.home_object {
-    Some(_) -> [home_object, ..acc]
-    None -> acc
-  }
-  let acc = case lexical.active_func {
-    Some(_) -> [JsObject(fn_ref), ..acc]
-    None -> acc
-  }
-  case lexical.this {
-    Some(_) -> [this_val, ..acc]
-    None -> acc
   }
 }
 
@@ -868,30 +660,21 @@ pub fn call_native(
             _ -> "bound "
           }
           let #(h, bound_ref) =
-            heap.alloc(
+            common.alloc_call_fn_props(
               state.heap,
-              ObjectSlot(
-                kind: NativeFunction(
-                  value.Call(value.BoundFunction(
-                    target: target_ref,
-                    bound_this: this_arg,
-                    bound_args:,
-                  )),
-                  // §10.4.1.3 step 6: the bound function has [[Construct]] iff
-                  // its target does. Copy the target's bit at bind time.
-                  constructible: object.is_constructor(
-                    state.heap,
-                    JsObject(target_ref),
-                  ),
-                ),
-                properties: dict.from_list([
-                  #(Named("name"), common.fn_name_property(name)),
-                ]),
-                elements: elements.new(),
-                prototype: Some(state.builtins.function.prototype),
-                symbol_properties: [],
-                extensible: True,
+              state.builtins.function.prototype,
+              value.BoundFunction(
+                target: target_ref,
+                bound_this: this_arg,
+                bound_args:,
               ),
+              // §10.4.1.3 step 6: the bound function has [[Construct]] iff
+              // its target does. Copy the target's bit at bind time.
+              constructible: object.is_constructor(
+                state.heap,
+                JsObject(target_ref),
+              ),
+              props: [#("name", common.fn_name_property(name))],
             )
           Ok(
             State(
@@ -1008,7 +791,7 @@ pub fn call_native(
       already_called_ref:,
       resolve:,
     )) ->
-      promises.call_native_promise_all_settled_resolve_element(
+      promises.call_native_promise_all_settled_element(
         state,
         args,
         rest_stack,
@@ -1017,6 +800,7 @@ pub fn call_native(
         values_ref,
         already_called_ref,
         resolve,
+        #("fulfilled", "value"),
       )
     // Promise.allSettled per-element reject handler
     value.Call(value.PromiseAllSettledRejectElement(
@@ -1026,7 +810,7 @@ pub fn call_native(
       already_called_ref:,
       resolve:,
     )) ->
-      promises.call_native_promise_all_settled_reject_element(
+      promises.call_native_promise_all_settled_element(
         state,
         args,
         rest_stack,
@@ -1035,6 +819,7 @@ pub fn call_native(
         values_ref,
         already_called_ref,
         resolve,
+        #("rejected", "reason"),
       )
     // Promise.any per-element reject handler
     value.Call(value.PromiseAnyRejectElement(
@@ -1200,10 +985,7 @@ pub fn call_native(
     // Symbol.for(key) -- global symbol registry
     value.Call(value.SymbolFor) -> {
       // Step 1: Let stringKey be ? ToString(key).
-      let key_val = case args {
-        [k, ..] -> k
-        [] -> value.JsUndefined
-      }
+      let key_val = helpers.first_arg_or_undefined(args)
       use #(key_str, state) <- result.try(
         state.rethrow(coerce.js_to_string(state, key_val)),
       )
@@ -1703,23 +1485,8 @@ pub fn call_value(
 /// Used by Function.prototype.apply to unpack the args tuple_array.
 pub fn extract_array_args(h: Heap, ref: Ref) -> List(JsValue) {
   heap.read_array_like(h, ref)
-  |> option.map(fn(p) { extract_elements_loop(p.1, 0, p.0, []) })
+  |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
   |> option.unwrap([])
-}
-
-fn extract_elements_loop(
-  elements: value.JsElements,
-  idx: Int,
-  length: Int,
-  acc: List(JsValue),
-) -> List(JsValue) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False -> {
-      let val = elements.get(elements, idx)
-      extract_elements_loop(elements, idx + 1, length, [val, ..acc])
-    }
-  }
 }
 
 /// Allocate a {value, done} iterator-result object, push it, advance pc.
@@ -1815,6 +1582,13 @@ fn call_array_iterator_next(
   }
 }
 
+/// Allocate the [a, b] pair array yielded by "entries" iterators.
+fn alloc_entry_pair(state: State, a: JsValue, b: JsValue) -> #(Heap, JsValue) {
+  let #(h, pair_ref) =
+    common.alloc_array(state.heap, [a, b], state.builtins.array.prototype)
+  #(h, JsObject(pair_ref))
+}
+
 /// ES §24.2.5.2.1 %SetIteratorPrototype%.next()
 fn call_set_iterator_next(
   state: State,
@@ -1834,15 +1608,7 @@ fn call_set_iterator_next(
               // For "entries" yield [v, v]; for "values"/"keys" yield v.
               let #(h, yielded) = case kind {
                 value.SetIterValues -> #(state.heap, v)
-                value.SetIterEntries -> {
-                  let #(h, pair_ref) =
-                    common.alloc_array(
-                      state.heap,
-                      [v, v],
-                      state.builtins.array.prototype,
-                    )
-                  #(h, JsObject(pair_ref))
-                }
+                value.SetIterEntries -> alloc_entry_pair(state, v, v)
               }
               let h =
                 heap.write(
@@ -1881,15 +1647,7 @@ fn call_map_iterator_next(
               let #(h, yielded) = case kind {
                 value.MapIterKeys -> #(state.heap, k)
                 value.MapIterValues -> #(state.heap, v)
-                value.MapIterEntries -> {
-                  let #(h, pair_ref) =
-                    common.alloc_array(
-                      state.heap,
-                      [k, v],
-                      state.builtins.array.prototype,
-                    )
-                  #(h, JsObject(pair_ref))
-                }
+                value.MapIterEntries -> alloc_entry_pair(state, k, v)
               }
               let h =
                 heap.write(
@@ -2003,55 +1761,32 @@ pub fn dispatch_native(
     // Global functions: eval, URI encoding/decoding
     value.VmNative(value.Eval) ->
       realm.eval_native(args, state, execute_inner, new_state_fn)
-    value.VmNative(value.DecodeURI) -> {
-      let arg = case args {
-        [s, ..] -> s
-        [] -> value.JsUndefined
-      }
-      use str, state <- coerce.try_to_string(state, arg)
-      #(state, Ok(value.JsString(operators.uri_decode(str))))
-    }
-    value.VmNative(value.EncodeURI) -> {
-      let arg = case args {
-        [s, ..] -> s
-        [] -> value.JsUndefined
-      }
-      use str, state <- coerce.try_to_string(state, arg)
-      #(state, Ok(value.JsString(operators.uri_encode(str, True))))
-    }
-    value.VmNative(value.DecodeURIComponent) -> {
-      let arg = case args {
-        [s, ..] -> s
-        [] -> value.JsUndefined
-      }
-      use str, state <- coerce.try_to_string(state, arg)
-      #(state, Ok(value.JsString(operators.uri_decode(str))))
-    }
-    value.VmNative(value.EncodeURIComponent) -> {
-      let arg = case args {
-        [s, ..] -> s
-        [] -> value.JsUndefined
-      }
-      use str, state <- coerce.try_to_string(state, arg)
-      #(state, Ok(value.JsString(operators.uri_encode(str, False))))
-    }
+    value.VmNative(value.DecodeURI) ->
+      string_global(args, state, operators.uri_decode)
+    value.VmNative(value.EncodeURI) ->
+      string_global(args, state, operators.uri_encode(_, True))
+    value.VmNative(value.DecodeURIComponent) ->
+      string_global(args, state, operators.uri_decode)
+    value.VmNative(value.EncodeURIComponent) ->
+      string_global(args, state, operators.uri_encode(_, False))
     // AnnexB B.2.1.1 escape ( string )
-    value.VmNative(value.Escape) -> {
-      let arg = case args {
-        [s, ..] -> s
-        [] -> value.JsUndefined
-      }
-      use str, state <- coerce.try_to_string(state, arg)
-      #(state, Ok(value.JsString(operators.js_escape(str))))
-    }
+    value.VmNative(value.Escape) ->
+      string_global(args, state, operators.js_escape)
     // AnnexB B.2.1.2 unescape ( string )
-    value.VmNative(value.Unescape) -> {
-      let arg = case args {
-        [s, ..] -> s
-        [] -> value.JsUndefined
-      }
-      use str, state <- coerce.try_to_string(state, arg)
-      #(state, Ok(value.JsString(operators.js_unescape(str))))
-    }
+    value.VmNative(value.Unescape) ->
+      string_global(args, state, operators.js_unescape)
   }
+}
+
+/// Shared shape of the global String->String functions
+/// (decodeURI, encodeURI, escape, ...): coerce the first arg to a string,
+/// apply `f`, return the result as a JsString.
+fn string_global(
+  args: List(JsValue),
+  state: State,
+  f: fn(String) -> String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let arg = helpers.first_arg_or_undefined(args)
+  use str, state <- coerce.try_to_string(state, arg)
+  #(state, Ok(JsString(f(str))))
 }

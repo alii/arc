@@ -21,6 +21,7 @@ import arc/vm/value.{
 }
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 
 /// Test helper: read a data property walking the prototype chain.
 fn get_data(
@@ -73,17 +74,12 @@ fn run_simple(
   bytecode: List(Op),
   constants: List(value.JsValue),
 ) -> Result(value.JsValue, state.VmError) {
-  let func = make_func(bytecode, constants, 0)
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  case entry.run(func, h, b, global_object) {
-    Ok(NormalCompletion(val, _heap)) -> Ok(val)
-    Ok(ThrowCompletion(_, _)) -> panic as "unexpected ThrowCompletion"
-    Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
-    Ok(completion.AwaitCompletion(_, _)) ->
-      panic as "unexpected AwaitCompletion"
-    Error(e) -> Error(e)
+  use comp <- result.map(run_func(make_func(bytecode, constants, 0)))
+  case comp {
+    NormalCompletion(val, _heap) -> val
+    ThrowCompletion(_, _) -> panic as "unexpected ThrowCompletion"
+    YieldCompletion(_, _) -> panic as "unexpected YieldCompletion"
+    completion.AwaitCompletion(_, _) -> panic as "unexpected AwaitCompletion"
   }
 }
 
@@ -92,18 +88,13 @@ fn run_throwing(
   bytecode: List(Op),
   constants: List(value.JsValue),
 ) -> Result(value.JsValue, state.VmError) {
-  let func = make_func(bytecode, constants, 0)
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  case entry.run(func, h, b, global_object) {
-    Ok(ThrowCompletion(val, _heap)) -> Ok(val)
-    Ok(NormalCompletion(_, _)) ->
+  use comp <- result.map(run_func(make_func(bytecode, constants, 0)))
+  case comp {
+    ThrowCompletion(val, _heap) -> val
+    NormalCompletion(_, _) ->
       panic as "expected ThrowCompletion, got NormalCompletion"
-    Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
-    Ok(completion.AwaitCompletion(_, _)) ->
-      panic as "unexpected AwaitCompletion"
-    Error(e) -> Error(e)
+    YieldCompletion(_, _) -> panic as "unexpected YieldCompletion"
+    completion.AwaitCompletion(_, _) -> panic as "unexpected AwaitCompletion"
   }
 }
 
@@ -113,6 +104,15 @@ fn run_func(func: FuncTemplate) -> Result(Completion, state.VmError) {
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
   entry.run(func, h, b, global_object)
+}
+
+/// Helper: run func expecting a ThrowCompletion of an error object whose
+/// "name" property (own or inherited) matches the given name.
+fn expect_throw_named(func: FuncTemplate, name: String) -> Nil {
+  let assert Ok(ThrowCompletion(JsObject(ref), heap)) = run_func(func)
+  let assert Ok(JsString(thrown_name)) = get_data(heap, ref, "name")
+  assert thrown_name == name
+  Nil
 }
 
 // ============================================================================
@@ -665,13 +665,7 @@ pub fn tdz_throws_reference_error_test() {
       [value.JsUninitialized],
       1,
     )
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    entry.run(func, h, b, global_object)
-  // Check it's a ReferenceError via prototype chain
-  let assert Ok(JsString("ReferenceError")) = get_data(heap, ref, "name")
+  expect_throw_named(func, "ReferenceError")
 }
 
 pub fn type_error_thrown_for_symbol_conversion_test() {
@@ -682,12 +676,7 @@ pub fn type_error_thrown_for_symbol_conversion_test() {
       [value.JsSymbol(value.WellKnownSymbol(1))],
       0,
     )
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    entry.run(func, h, b, global_object)
-  let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
+  expect_throw_named(func, "TypeError")
 }
 
 // ============================================================================
@@ -748,23 +737,13 @@ pub fn get_field_nonexistent_returns_undefined_test() {
 pub fn get_field_on_null_throws_type_error_test() {
   // null.x => TypeError
   let func = make_func([PushConst(0), GetField(OpNamed("x"))], [JsNull], 0)
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    entry.run(func, h, b, global_object)
-  let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
+  expect_throw_named(func, "TypeError")
 }
 
 pub fn get_field_on_undefined_throws_type_error_test() {
   // undefined.x => TypeError
   let func = make_func([PushConst(0), GetField(OpNamed("x"))], [JsUndefined], 0)
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  let assert Ok(ThrowCompletion(JsObject(ref), heap)) =
-    entry.run(func, h, b, global_object)
-  let assert Ok(JsString("TypeError")) = get_data(heap, ref, "name")
+  expect_throw_named(func, "TypeError")
 }
 
 // ============================================================================

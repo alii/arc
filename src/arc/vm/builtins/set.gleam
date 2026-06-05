@@ -38,11 +38,13 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, BuiltinType) {
-  // Allocate prototype methods (values handled separately so it can alias
-  // keys and [Symbol.iterator] to the SAME function object — test262
-  // built-ins/Set/prototype/keys/keys.js asserts strict equality).
-  let #(h, proto_methods) =
-    common.alloc_methods(h, function_proto, [
+  // §24.2.3.12 Set.prototype.values doubles as §24.2.3.11 keys and
+  // §24.2.3.13 [@@iterator]; §24.2.3.16 [@@toStringTag] = "Set".
+  common.init_keyed_collection(
+    h,
+    object_proto,
+    function_proto,
+    [
       #("add", SetNative(SetPrototypeAdd), 1),
       #("has", SetNative(SetPrototypeHas), 1),
       #("delete", SetNative(SetPrototypeDelete), 1),
@@ -56,54 +58,14 @@ pub fn init(
       #("isSupersetOf", SetNative(SetPrototypeIsSupersetOf), 1),
       #("isDisjointFrom", SetNative(SetPrototypeIsDisjointFrom), 1),
       #("entries", SetNative(SetPrototypeEntries), 0),
-    ])
-
-  // §24.2.3.11 Set.prototype.keys === §24.2.3.12 values === §24.2.3.13 [@@iterator]
-  let #(h, values_fn) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      SetNative(SetPrototypeValues),
-      "values",
-      0,
-    )
-  let values_prop = value.builtin_property(JsObject(values_fn))
-
-  // size accessor property (getter, no setter)
-  let #(h, getters) =
-    common.alloc_getters(h, function_proto, [
-      #("size", SetNative(SetPrototypeGetSize)),
-    ])
-  let proto_props =
-    list.append(getters, [
-      #("values", values_prop),
-      #("keys", values_prop),
-      ..proto_methods
-    ])
-
-  let #(h, bt) =
-    common.init_type(
-      h,
-      object_proto,
-      function_proto,
-      proto_props,
-      fn(proto) { Dispatch(SetNative(SetConstructor(proto:))) },
-      "Set",
-      0,
-      [],
-    )
-  // §24.2.3.16 Set.prototype [ @@toStringTag ] = "Set"
-  // { writable: false, enumerable: false, configurable: true }
-  let h = common.add_to_string_tag(h, bt.prototype, "Set")
-  // §24.2.3.13 Set.prototype [ @@iterator ] — same function object as .values
-  let h =
-    common.add_symbol_property(
-      h,
-      bt.prototype,
-      value.symbol_iterator,
-      values_prop,
-    )
-  #(h, bt)
+    ],
+    "values",
+    SetNative(SetPrototypeValues),
+    ["keys"],
+    SetNative(SetPrototypeGetSize),
+    fn(proto) { Dispatch(SetNative(SetConstructor(proto:))) },
+    "Set",
+  )
 }
 
 /// Per-module dispatch for Set native functions.
@@ -146,27 +108,11 @@ fn construct(
     [JsNull, ..] -> []
     [JsObject(ref), ..] ->
       heap.read_array(state.heap, ref)
-      |> option.map(fn(p) { read_array_elements(p.1, 0, p.0, []) })
+      |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
       |> option.unwrap([])
     _ -> []
   }
   alloc_new_set_from_values(state, initial_values)
-}
-
-/// Read elements from array into a list.
-fn read_array_elements(
-  elements: value.JsElements,
-  idx: Int,
-  length: Int,
-  acc: List(JsValue),
-) -> List(JsValue) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False -> {
-      let val = elements.get(elements, idx)
-      read_array_elements(elements, idx + 1, length, [val, ..acc])
-    }
-  }
 }
 
 /// Helper to update a SetObject's data on the heap.

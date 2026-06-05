@@ -1,28 +1,20 @@
 import arc/beam
 import arc/compiler
 import arc/engine
+import arc/internal/path
 import arc/parser
 import arc/repl/examples
 import arc/vm/builtins/common.{type Builtins}
-import arc/vm/builtins/process_objects
 import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
-import arc/vm/value.{
-  type JsValue, type Ref, ArrayObject, DataProperty, FunctionObject,
-  GeneratorObject, NativeFunction, ObjectSlot, OrdinaryObject, PidObject,
-  PromiseObject,
-}
-import gleam/dict
+import arc/vm/value.{type JsValue}
 import gleam/int
 import gleam/io
-import gleam/list
 import gleam/option.{None, Some}
-import gleam/set
 import gleam/string
 
 // -- FFI: read a line from stdin ---------------------------------------------
@@ -34,226 +26,6 @@ fn read_line(prompt: String) -> Result(String, Nil)
 
 type ReplState {
   ReplState(heap: Heap, builtins: Builtins, env: entry.ReplEnv)
-}
-
-// -- Inspect -----------------------------------------------------------------
-
-/// Console-style inspect for REPL output (like Chrome DevTools, not toString).
-fn inspect(h: Heap, val: JsValue) -> String {
-  inspect_inner(h, val, 0, set.new())
-}
-
-/// REPL/debug value inspector (not a spec operation). Recursively renders
-/// a JsValue as a human-readable string similar to Chrome DevTools output.
-/// Tracks `seen` refs for cycle detection ([Circular]).
-fn inspect_inner(
-  h: Heap,
-  val: JsValue,
-  depth: Int,
-  seen: set.Set(Int),
-) -> String {
-  case val {
-    value.JsUndefined -> "undefined"
-    value.JsNull -> "null"
-    value.JsBool(True) -> "true"
-    value.JsBool(False) -> "false"
-    value.JsNumber(value.Finite(n)) -> value.js_format_number(n)
-    value.JsNumber(value.NaN) -> "NaN"
-    value.JsNumber(value.Infinity) -> "Infinity"
-    value.JsNumber(value.NegInfinity) -> "-Infinity"
-    value.JsString(s) -> "'" <> escape_string(s) <> "'"
-    value.JsSymbol(sym_id) ->
-      value.well_known_symbol_description(sym_id)
-      |> option.map(fn(desc) { "Symbol(" <> desc <> ")" })
-      |> option.unwrap("Symbol()")
-    value.JsBigInt(value.BigInt(n)) -> int.to_string(n) <> "n"
-    value.JsUninitialized -> "undefined"
-    value.JsObject(ref) -> inspect_object(h, ref, depth, seen)
-  }
-}
-
-fn escape_string(s: String) -> String {
-  s
-  |> string.replace("\\", "\\\\")
-  |> string.replace("'", "\\'")
-  |> string.replace("\n", "\\n")
-  |> string.replace("\r", "\\r")
-  |> string.replace("\t", "\\t")
-}
-
-/// REPL/debug helper: render an object (array, function, or plain object)
-/// as a human-readable string. Dispatches on ObjectKind for format selection.
-fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
-  // Cycle detection
-  case set.contains(seen, ref.id) {
-    True -> "[Circular]"
-    False -> {
-      let seen = set.insert(seen, ref.id)
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind:, properties:, elements:, symbol_properties:, ..)) ->
-          case kind {
-            ArrayObject(length:) ->
-              inspect_array(h, elements, length, depth, seen)
-            FunctionObject(..) -> inspect_function(properties)
-            NativeFunction(..) -> inspect_function(properties)
-            OrdinaryObject ->
-              inspect_tagged_object(
-                h,
-                properties,
-                symbol_properties,
-                depth,
-                seen,
-              )
-            PromiseObject(_) -> "Promise {}"
-            GeneratorObject(_) | value.AsyncGeneratorObject(_) ->
-              inspect_tagged_object(
-                h,
-                properties,
-                symbol_properties,
-                depth,
-                seen,
-              )
-            value.ArgumentsObject(length:) ->
-              "[Arguments] " <> inspect_array(h, elements, length, depth, seen)
-            value.StringObject(value: s) ->
-              "[String: '" <> escape_string(s) <> "']"
-            value.NumberObject(value: n) ->
-              "[Number: "
-              <> inspect_inner(h, value.JsNumber(n), depth, seen)
-              <> "]"
-            value.BooleanObject(value: True) -> "[Boolean: true]"
-            value.BooleanObject(value: False) -> "[Boolean: false]"
-            value.SymbolObject(value: sym) ->
-              "[Symbol: "
-              <> inspect_inner(h, value.JsSymbol(sym), depth, seen)
-              <> "]"
-            PidObject(pid:) -> "Pid" <> process_objects.ffi_pid_to_string(pid)
-            value.SubjectObject(pid:, ..) ->
-              "Subject" <> process_objects.ffi_pid_to_string(pid)
-            value.SelectorObject(..) -> "Selector {}"
-            value.TimerObject(..) -> "Timer {}"
-            value.MapObject(entries:, ..) ->
-              "Map(" <> int.to_string(dict.size(entries)) <> ")"
-            value.SetObject(data:, ..) ->
-              "Set(" <> int.to_string(dict.size(data)) <> ")"
-            value.WeakMapObject(_) -> "WeakMap {}"
-            value.WeakSetObject(_) -> "WeakSet {}"
-            value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
-            value.StringIteratorObject(..) -> "Object [String Iterator] {}"
-            value.SetIteratorObject(..) -> "Object [Set Iterator] {}"
-            value.MapIteratorObject(..) -> "Object [Map Iterator] {}"
-            value.AsyncFromSyncIteratorObject(..) ->
-              "Object [Async-from-Sync Iterator] {}"
-            value.IteratorHelperObject(..) -> "Object [Iterator Helper] {}"
-            value.WrapForValidIteratorObject(..) -> "Object [Iterator] {}"
-            value.IteratorRecordObject(..) -> "Object [Iterator] {}"
-            value.RegExpObject(pattern:, flags:) -> {
-              let source = case pattern {
-                "" -> "(?:)"
-                p -> p
-              }
-              "/" <> source <> "/" <> flags
-            }
-            value.DateObject(time_value:) ->
-              case time_value {
-                value.Finite(f) -> "Date(" <> value.js_format_number(f) <> ")"
-                _ -> "Invalid Date"
-              }
-            value.ModuleNamespace(exports:) ->
-              "[Module: { "
-              <> string.join(
-                list.sort(dict.keys(exports), string.compare),
-                ", ",
-              )
-              <> " }]"
-          }
-        _ -> "[Object]"
-      }
-    }
-  }
-}
-
-fn inspect_array(
-  h: Heap,
-  elements: value.JsElements,
-  length: Int,
-  depth: Int,
-  seen: set.Set(Int),
-) -> String {
-  case depth > 2 {
-    True -> "[Array]"
-    False -> {
-      let items =
-        int.range(from: 0, to: length, with: [], run: fn(acc, i) {
-          let s =
-            elements.get_option(elements, i)
-            |> option.map(inspect_inner(h, _, depth + 1, seen))
-            |> option.unwrap("<empty>")
-          list.append(acc, [s])
-        })
-      "[ " <> string.join(items, ", ") <> " ]"
-    }
-  }
-}
-
-fn inspect_function(
-  properties: dict.Dict(value.PropertyKey, value.Property),
-) -> String {
-  let name = case dict.get(properties, value.Named("name")) {
-    Ok(DataProperty(value: value.JsString(n), ..)) -> n
-    _ -> ""
-  }
-  case name {
-    "" -> "[Function (anonymous)]"
-    n -> "[Function: " <> n <> "]"
-  }
-}
-
-/// Inspect an object, checking for Symbol.toStringTag to add a tag prefix.
-fn inspect_tagged_object(
-  h: Heap,
-  properties: dict.Dict(value.PropertyKey, value.Property),
-  symbol_properties: List(#(value.SymbolId, value.Property)),
-  depth: Int,
-  seen: set.Set(Int),
-) -> String {
-  let body = inspect_plain_object(h, properties, depth, seen)
-  case list.key_find(symbol_properties, value.symbol_to_string_tag) {
-    Ok(DataProperty(value: value.JsString(t), ..)) ->
-      "Object [" <> t <> "] " <> body
-    _ -> body
-  }
-}
-
-fn inspect_plain_object(
-  h: Heap,
-  properties: dict.Dict(value.PropertyKey, value.Property),
-  depth: Int,
-  seen: set.Set(Int),
-) -> String {
-  case depth > 2 {
-    True -> "[Object]"
-    False -> {
-      let entries =
-        dict.to_list(properties)
-        |> list.filter_map(fn(pair) {
-          let #(key, prop) = pair
-          case prop {
-            DataProperty(value: v, ..) ->
-              Ok(
-                value.key_to_string(key)
-                <> ": "
-                <> inspect_inner(h, v, depth + 1, seen),
-              )
-            _ -> Error(Nil)
-          }
-        })
-      case entries {
-        [] -> "{}"
-        _ -> "{ " <> string.join(entries, ", ") <> " }"
-      }
-    }
-  }
 }
 
 // -- VM error formatting -----------------------------------------------------
@@ -422,7 +194,7 @@ fn handle_repl_line(
     _ -> {
       let #(new_state, result) = eval(state, source)
       case result {
-        Ok(val) -> io.println(inspect(new_state.heap, val))
+        Ok(val) -> io.println(object.inspect(val, new_state.heap))
         Error(err) -> io.println(err)
       }
       Some(new_state)
@@ -491,7 +263,7 @@ fn resolve_and_load_dep(
   raw_specifier: String,
   parent_specifier: String,
 ) -> Result(#(String, String), String) {
-  let resolved = resolve_specifier(raw_specifier, parent_specifier)
+  let resolved = path.resolve_specifier(raw_specifier, parent_specifier)
   case read_file(resolved) {
     Ok(source) -> Ok(#(resolved, source))
     Error(err) ->
@@ -499,56 +271,6 @@ fn resolve_and_load_dep(
         "file not found: " <> resolved <> " (" <> string.inspect(err) <> ")",
       )
   }
-}
-
-/// Resolve a module specifier relative to the parent module's path.
-/// - Absolute paths are returned as-is
-/// - Relative paths (./foo, ../bar) are resolved against the parent's directory
-/// - Bare specifiers (no ./ or ../ prefix) are returned as-is (builtin/package)
-fn resolve_specifier(raw: String, parent: String) -> String {
-  case string.starts_with(raw, "./"), string.starts_with(raw, "../") {
-    True, _ | _, True -> {
-      let parent_dir = dirname(parent)
-      normalize_path(parent_dir <> "/" <> raw)
-    }
-    _, _ -> raw
-  }
-}
-
-/// Get the directory portion of a path (everything before the last /).
-fn dirname(path: String) -> String {
-  let parts = string.split(path, "/")
-  case list.reverse(parts) {
-    [_, ..rest] ->
-      case list.reverse(rest) {
-        [] -> "."
-        dir_parts -> string.join(dir_parts, "/")
-      }
-    [] -> "."
-  }
-}
-
-/// Normalize a path by resolving . and .. components.
-fn normalize_path(path: String) -> String {
-  let parts = string.split(path, "/")
-  let resolved =
-    list.fold(parts, [], fn(acc, part) {
-      case part {
-        "." -> acc
-        ".." ->
-          case acc {
-            [_, ..rest] -> rest
-            [] -> [".."]
-          }
-        "" ->
-          case acc {
-            [] -> [""]
-            _ -> acc
-          }
-        _ -> [part, ..acc]
-      }
-    })
-  list.reverse(resolved) |> string.join("/")
 }
 
 /// Run a file as a script (only for .cjs files).
@@ -570,13 +292,7 @@ fn new_repl_state() -> ReplState {
   ReplState(
     heap: engine.heap(eng),
     builtins: engine.builtins(eng),
-    env: entry.ReplEnv(
-      global_object: engine.global(eng),
-      lexical_globals: dict.new(),
-      symbol_descriptions: dict.new(),
-      symbol_registry: dict.new(),
-      realms: dict.new(),
-    ),
+    env: entry.new_repl_env(engine.global(eng)),
   )
 }
 

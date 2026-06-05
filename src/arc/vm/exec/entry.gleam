@@ -41,6 +41,17 @@ pub type ReplEnv {
   )
 }
 
+/// Fresh REPL environment with empty registries.
+pub fn new_repl_env(global_object: Ref) -> ReplEnv {
+  ReplEnv(
+    global_object:,
+    lexical_globals: dict.new(),
+    symbol_descriptions: dict.new(),
+    symbol_registry: dict.new(),
+    realms: dict.new(),
+  )
+}
+
 // ============================================================================
 // Public functions
 // ============================================================================

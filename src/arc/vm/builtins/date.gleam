@@ -14,7 +14,6 @@
 /// `now_ms` and `tz_offset_minutes` go through FFI.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/builtins/math as builtins_math
 import arc/vm/heap
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
@@ -557,7 +556,7 @@ fn single_arg_time_value(
         Error(#(e, st)) -> #(st, Error(e))
         Ok(#(JsString(s), st)) -> #(st, Ok(parse_date_string(s)))
         Ok(#(prim, st)) ->
-          case to_number_state(st, prim) {
+          case coerce.js_to_number(st, prim) {
             Error(#(e, st)) -> #(st, Error(e))
             Ok(#(n, st)) -> #(st, Ok(time_clip(n)))
           }
@@ -681,7 +680,7 @@ fn date_set_time(
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, _ <- require_time_value(state, this, "setTime")
   let arg = helpers.first_arg_or_undefined(args)
-  use n, st <- state.try_op(to_number_state(state, arg))
+  use n, st <- state.try_op(coerce.js_to_number(state, arg))
   let tv = time_clip(n)
   let st = set_this_time_value(st, ref, tv)
   #(st, Ok(JsNumber(tv)))
@@ -1138,103 +1137,6 @@ fn jsnum_add_minutes(n: JsNum, minutes: Int) -> JsNum {
   }
 }
 
-// ============================================================================
-// ToNumber with VM re-entry (state-threading)
-// ============================================================================
-
-/// ES2024 §7.1.4 ToNumber with full ToPrimitive(number) re-entry so object
-/// arguments observe their valueOf being called and abrupt completions
-/// propagate. Symbols → TypeError, BigInt → TypeError per spec.
-fn to_number_state(
-  state: State,
-  val: JsValue,
-) -> Result(#(JsNum, State), #(JsValue, State)) {
-  case val {
-    JsObject(_) -> {
-      use #(prim, st) <- result.try(coerce.to_primitive(
-        state,
-        val,
-        coerce.NumberHint,
-      ))
-      to_number_state(st, prim)
-    }
-    value.JsSymbol(_) ->
-      coerce.thrown_type_error(
-        state,
-        "Cannot convert a Symbol value to a number",
-      )
-    value.JsBigInt(_) ->
-      coerce.thrown_type_error(state, "Cannot convert a BigInt to a number")
-    JsString(s) -> Ok(#(string_to_number(s), state))
-    other -> Ok(#(builtins_math.to_number(other), state))
-  }
-}
-
-/// ES2024 §7.1.4.1.1 StringToNumber — fuller than builtins_math.to_number's
-/// version: trims whitespace, accepts leading + or -, scientific notation,
-/// leading/trailing decimal point. Hex/oct/bin prefixes not handled here.
-fn string_to_number(s: String) -> JsNum {
-  let s = string.trim(s)
-  case s {
-    "" -> Finite(0.0)
-    "Infinity" | "+Infinity" -> value.Infinity
-    "-Infinity" -> value.NegInfinity
-    _ -> {
-      let #(neg, rest) = case s {
-        "-" <> r -> #(True, r)
-        "+" <> r -> #(False, r)
-        _ -> #(False, s)
-      }
-      let n =
-        float.parse(rest)
-        |> result.try_recover(fn(_: Nil) {
-          // "200." → "200.0"; ".5" → "0.5"; "2e3" → "2.0e3" — Gleam's
-          // float.parse needs both sides of the decimal point.
-          float.parse(normalize_float_literal(rest))
-        })
-        |> result.try_recover(fn(_: Nil) {
-          int.parse(rest) |> result.map(int.to_float)
-        })
-      case n {
-        Ok(f) ->
-          case neg {
-            True -> Finite(float.negate(f))
-            False -> Finite(f)
-          }
-        Error(Nil) -> NaN
-      }
-    }
-  }
-}
-
-/// Best-effort fixup so Erlang float parsing accepts JS-style literals like
-/// "2e3", "200.", ".5", "200.000E-02".
-fn normalize_float_literal(s: String) -> String {
-  // Split at 'e' or 'E'
-  let #(mant, exp) = case string.split_once(s, "e") {
-    Ok(#(m, e)) -> #(m, "e" <> e)
-    Error(Nil) ->
-      case string.split_once(s, "E") {
-        Ok(#(m, e)) -> #(m, "e" <> e)
-        Error(Nil) -> #(s, "")
-      }
-  }
-  let mant = case string.contains(mant, ".") {
-    True ->
-      case string.ends_with(mant, ".") {
-        True -> mant <> "0"
-        False ->
-          case string.starts_with(mant, ".") {
-            True -> "0" <> mant
-            False -> mant
-          }
-      }
-    False -> mant <> ".0"
-  }
-  // strip leading zeros so "+00200.000" parses
-  mant <> exp
-}
-
 /// Coerce a list of args to JsNum, threading state and propagating throws.
 /// Used by the constructor multi-arg path, Date.UTC and the setters.
 fn args_to_nums(
@@ -1243,7 +1145,7 @@ fn args_to_nums(
 ) -> Result(#(List(JsNum), State), #(JsValue, State)) {
   list.fold(args, Ok(#([], state)), fn(acc, arg) {
     use #(nums, st) <- result.try(acc)
-    use #(n, st) <- result.map(to_number_state(st, arg))
+    use #(n, st) <- result.map(coerce.js_to_number(st, arg))
     #([n, ..nums], st)
   })
   |> result.map(fn(p) { #(list.reverse(p.0), p.1) })
@@ -1277,7 +1179,7 @@ fn date_set_year(
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, tv <- require_time_value(state, this, "setYear")
   let arg = helpers.first_arg_or_undefined(args)
-  use n, st <- state.try_op(to_number_state(state, arg))
+  use n, st <- state.try_op(coerce.js_to_number(state, arg))
   case n {
     Finite(yf) -> {
       let yi = value.float_to_int(yf)

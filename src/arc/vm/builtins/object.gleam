@@ -25,6 +25,7 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/pair
 import gleam/result
 import gleam/string
 
@@ -1264,7 +1265,12 @@ fn values(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject + EnumerableOwnProperties(obj, value)
-  use vals, state <- own_values_impl(args, state)
+  use vals, state <- own_enumerable_impl(
+    args,
+    state,
+    fn(ch, _idx) { JsString(ch) },
+    fn(_key, val) { val },
+  )
   // Step 3: CreateArrayFromList(nameList)
   state.ok_array(state, vals)
 }
@@ -1284,7 +1290,12 @@ fn entries(
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject + EnumerableOwnProperties(obj, key+value)
-  use pairs, state <- own_entries_impl(args, state)
+  use pairs, state <- own_enumerable_impl(
+    args,
+    state,
+    fn(ch, idx) { #(int.to_string(idx), JsString(ch)) },
+    pair.new,
+  )
   // Step 3: Build the result — each entry is CreateArrayFromList(« key, value »)
   let #(heap, refs) =
     list.fold(pairs, #(state.heap, []), fn(acc, kv) {
@@ -1298,8 +1309,9 @@ fn entries(
   state.ok_array(State(..state, heap:), list.reverse(refs))
 }
 
-/// Shared driver implementing steps 1-2 of Object.values / the value-collection
-/// portion of EnumerableOwnProperties ( O, value ) — §7.3.23:
+/// Shared driver implementing steps 1-2 of Object.entries / Object.values —
+/// the entry-collection portion of EnumerableOwnProperties ( O, kind )
+/// — §7.3.23:
 ///
 ///   1. Let ownKeys be ? O.[[OwnPropertyKeys]]().
 ///   2. Let properties be a new empty List.
@@ -1308,134 +1320,55 @@ fn entries(
 ///         i. Let desc be ? O.[[GetOwnProperty]](key).
 ///         ii. If desc is not undefined and desc.[[Enumerable]] is true, then
 ///             1. Let value be ? Get(O, key).
-///             2. Append value to properties.
+///             2. Append value (kind=value) or « key, value » (kind=key+value)
+///                to properties.
 ///   4. Return properties.
 ///
-/// The ToObject step (§20.1.2.22 step 1) is inlined: null/undefined throw,
-/// primitives short-circuit to empty (wrapper objects not yet implemented).
-///
-fn own_values_impl(
+/// The kind is expressed by two callbacks so Object.values never allocates
+/// key strings or #(key, value) tuples it would immediately discard:
+/// `from_char(ch, idx)` builds a result item for a string-primitive's indexed
+/// character, `combine(key, value)` builds one for an object's own property.
+fn own_enumerable_impl(
   args: List(JsValue),
   state: State,
-  cont: fn(List(JsValue), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  case first_arg_or_undefined(args) {
-    JsObject(ref) as receiver -> {
-      // §7.3.23 step 1: Let ownKeys be ? O.[[OwnPropertyKeys]]()
-      // (filtered to enumerable-only string keys)
-      let ks = collect_own_keys(state.heap, ref, True)
-      // §7.3.23 step 3: For each key, Get(O, key) and collect
-      use vals, state <- state.try_op(
-        collect_values(state, ref, receiver, ks, []),
-      )
-      cont(list.reverse(vals), state)
-    }
-    // ToObject: null/undefined → TypeError
-    JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // String primitives: enumerable own properties are the index characters.
-    // §7.1.18: ToObject(String) creates a String exotic object; the indexed
-    // character properties (enumerable, 0..len-1) come from §10.4.3 String exotics.
-    JsString(s) -> {
-      let chars = string.to_graphemes(s)
-      cont(list.map(chars, JsString), state)
-    }
-    // Number/boolean/symbol wrappers have no own enumerable string keys.
-    _ -> cont([], state)
-  }
-}
-
-/// Collect values for Object.values — implements §7.3.23 steps 3.a.ii.2.a–b:
-///   "Let value be ? Get(O, key)."
-///   "Append value to results."
-///
-/// Uses object.get_value which is the [[Get]] internal method (§10.1.8),
-/// properly invoking getter accessors and walking the prototype chain.
-/// Accumulates in reverse order (caller reverses).
-fn collect_values(
-  state: State,
-  ref: Ref,
-  receiver: JsValue,
-  keys: List(String),
-  acc: List(JsValue),
-) -> Result(#(List(JsValue), State), #(JsValue, State)) {
-  case keys {
-    [] -> Ok(#(acc, state))
-    [k, ..rest] -> {
-      // §7.3.23 step 3.a.ii.2.a: Let value be ? Get(O, key)
-      use #(val, state) <- result.try(object.get_value(
-        state,
-        ref,
-        value.canonical_key(k),
-        receiver,
-      ))
-      collect_values(state, ref, receiver, rest, [val, ..acc])
-    }
-  }
-}
-
-/// Shared driver implementing steps 1-2 of Object.entries / the entry-collection
-/// portion of EnumerableOwnProperties ( O, key+value ) — §7.3.23:
-///
-///   1. Let ownKeys be ? O.[[OwnPropertyKeys]]().
-///   2. Let properties be a new empty List.
-///   3. For each element key of ownKeys, do
-///      a. If key is a String, then
-///         i. Let desc be ? O.[[GetOwnProperty]](key).
-///         ii. If desc is not undefined and desc.[[Enumerable]] is true, then
-///             1. Let value be ? Get(O, key).
-///             2. Let entry be CreateArrayFromList(« key, value »).
-///             3. Append entry to properties.
-///   4. Return properties.
-///
-fn own_entries_impl(
-  args: List(JsValue),
-  state: State,
-  cont: fn(List(#(String, JsValue)), State) ->
-    #(State, Result(JsValue, JsValue)),
+  from_char: fn(String, Int) -> a,
+  combine: fn(String, JsValue) -> a,
+  cont: fn(List(a), State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   case first_arg_or_undefined(args) {
     JsObject(ref) as receiver -> {
       // §7.3.23 steps 1 + 3.a/3.a.ii: own keys, pre-filtered here to enumerable string keys
       let ks = collect_own_keys(state.heap, ref, True)
-      // §7.3.23 step 3: collect key+value pairs
-      use pairs, state <- state.try_op(
-        collect_entries(state, ref, receiver, ks, []),
+      // §7.3.23 step 3: collect the per-property items
+      use items, state <- state.try_op(
+        collect_enumerable(state, ref, receiver, ks, combine, []),
       )
-      cont(list.reverse(pairs), state)
+      cont(list.reverse(items), state)
     }
     // ToObject: null/undefined → TypeError
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: enumerable own properties are the index characters.
     // §7.1.18: ToObject(String) creates a String exotic object; the indexed
     // character properties (enumerable, 0..len-1) come from §10.4.3 String exotics.
-    JsString(s) -> {
-      let chars = string.to_graphemes(s)
-      let pairs =
-        list.index_map(chars, fn(ch, idx) {
-          #(int.to_string(idx), JsString(ch))
-        })
-      cont(pairs, state)
-    }
+    JsString(s) ->
+      cont(list.index_map(string.to_graphemes(s), from_char), state)
     // Number/boolean/symbol wrappers have no own enumerable string keys.
     _ -> cont([], state)
   }
 }
 
-/// Collect entries for Object.entries — implements §7.3.23 step 3.a.ii.2 (kind=key+value):
+/// Collect own enumerable properties — implements §7.3.23 step 3.a.ii.2:
 ///   3.a.ii.2.a: "Let value be ? Get(O, key)."
-///   3.a.ii.2.c.ii: "Let entry be CreateArrayFromList(« key, value »)."
-///   3.a.ii.2.c.iii: "Append entry to results."
-///
-/// Returns #(key, value) tuples; the caller (entries/own_entries_impl) wraps
-/// each tuple into a [key, value] array via CreateArrayFromList.
+///   then appends combine(key, value) to the accumulator.
 /// Accumulates in reverse order (caller reverses).
-fn collect_entries(
+fn collect_enumerable(
   state: State,
   ref: Ref,
   receiver: JsValue,
   keys: List(String),
-  acc: List(#(String, JsValue)),
-) -> Result(#(List(#(String, JsValue)), State), #(JsValue, State)) {
+  combine: fn(String, JsValue) -> a,
+  acc: List(a),
+) -> Result(#(List(a), State), #(JsValue, State)) {
   case keys {
     [] -> Ok(#(acc, state))
     [k, ..rest] -> {
@@ -1446,7 +1379,10 @@ fn collect_entries(
         value.canonical_key(k),
         receiver,
       ))
-      collect_entries(state, ref, receiver, rest, [#(k, val), ..acc])
+      collect_enumerable(state, ref, receiver, rest, combine, [
+        combine(k, val),
+        ..acc
+      ])
     }
   }
 }
@@ -1685,7 +1621,9 @@ fn assign_source(
     JsObject(src_ref) as receiver -> {
       // Step 3.a.ii: Let keys be ? from.[[OwnPropertyKeys]]().
       // String keys first:
-      let ks = collect_own_keys(state.heap, src_ref, True)
+      let ks =
+        collect_own_keys(state.heap, src_ref, True)
+        |> list.map(value.canonical_key)
       // Step 3.a.iii: For each string key, copy it.
       use state <- result.try(assign_keys(
         state,
@@ -1693,10 +1631,20 @@ fn assign_source(
         src_ref,
         receiver,
         ks,
+        object.get_value,
+        object.set_value,
       ))
       // Symbol keys next (also enumerable-only):
       let sym_ks = collect_own_symbol_keys(state.heap, src_ref, True)
-      assign_symbol_keys(state, target_ref, src_ref, receiver, sym_ks)
+      assign_keys(
+        state,
+        target_ref,
+        src_ref,
+        receiver,
+        sym_ks,
+        object.get_symbol_value,
+        object.set_symbol_value,
+      )
     }
     // String sources: each character is an enumerable own property.
     // "length" is own but non-enumerable, so it's excluded.
@@ -1737,37 +1685,36 @@ fn assign_string_chars(
 }
 
 /// Key-copy loop for Object.assign. The [[GetOwnProperty]] + enumerable check
-/// is pre-filtered by collect_own_keys (enumerable_only=True), so we only
-/// iterate keys that are already known to be own + enumerable. Uses
-/// object.get_value ([[Get]]) which invokes getters, and object.set_value
-/// ([[Set]]) which invokes setters.
+/// is pre-filtered by collect_own_keys / collect_own_symbol_keys
+/// (enumerable_only=True), so we only iterate keys that are already known to
+/// be own + enumerable. Generic over the key type: callers pass the matching
+/// [[Get]] (invokes getters) and [[Set]] (invokes setters) — string-keyed
+/// object.get_value/set_value or symbol-keyed get_symbol_value/set_symbol_value.
 fn assign_keys(
   state: State,
   target_ref: Ref,
   src_ref: Ref,
   receiver: JsValue,
-  keys: List(String),
+  keys: List(k),
+  get: fn(State, Ref, k, JsValue) ->
+    Result(#(JsValue, State), #(JsValue, State)),
+  set: fn(State, Ref, k, JsValue, JsValue) ->
+    Result(#(State, Bool), #(JsValue, State)),
 ) -> Result(State, #(JsValue, State)) {
   case keys {
     [] -> Ok(state)
     [k, ..rest] -> {
-      let pk = value.canonical_key(k)
       // Step 2.a: Let propValue be ? Get(from, nextKey).
-      use #(val, state) <- result.try(object.get_value(
-        state,
-        src_ref,
-        pk,
-        receiver,
-      ))
+      use #(val, state) <- result.try(get(state, src_ref, k, receiver))
       // Step 2.b: Perform ? Set(to, nextKey, propValue, true).
-      use #(state, _) <- result.try(object.set_value(
+      use #(state, _ok) <- result.try(set(
         state,
         target_ref,
-        pk,
+        k,
         val,
         JsObject(target_ref),
       ))
-      assign_keys(state, target_ref, src_ref, receiver, rest)
+      assign_keys(state, target_ref, src_ref, receiver, rest, get, set)
     }
   }
 }
@@ -1796,36 +1743,6 @@ pub fn collect_own_symbol_keys(
         }
       })
     _ -> []
-  }
-}
-
-/// Symbol-key-copy loop for Object.assign — copies enumerable own symbol
-/// properties from source to target.
-fn assign_symbol_keys(
-  state: State,
-  target_ref: Ref,
-  src_ref: Ref,
-  receiver: JsValue,
-  keys: List(value.SymbolId),
-) -> Result(State, #(JsValue, State)) {
-  case keys {
-    [] -> Ok(state)
-    [sym, ..rest] -> {
-      use #(val, state) <- result.try(object.get_symbol_value(
-        state,
-        src_ref,
-        sym,
-        receiver,
-      ))
-      use #(state, _ok) <- result.try(object.set_symbol_value(
-        state,
-        target_ref,
-        sym,
-        val,
-        JsObject(target_ref),
-      ))
-      assign_symbol_keys(state, target_ref, src_ref, receiver, rest)
-    }
   }
 }
 

@@ -5,13 +5,12 @@
 /// are exposed as static properties on the Symbol function object.
 import arc/vm/builtins/common
 import arc/vm/heap.{type Heap}
-import arc/vm/internal/elements
 import arc/vm/value.{
-  type JsValue, type Ref, Call, JsObject, JsString, JsSymbol, NativeFunction,
-  ObjectSlot, SymbolConstructor, SymbolFor, SymbolKeyFor,
+  type JsValue, type Ref, JsObject, JsString, JsSymbol, SymbolConstructor,
+  SymbolFor, SymbolKeyFor,
 }
 import gleam/dict
-import gleam/option.{Some}
+import gleam/option
 import gleam/result
 
 /// Set up Symbol constructor function with well-known symbol properties.
@@ -23,75 +22,59 @@ pub fn init(
 ) -> #(Heap(ctx), Ref) {
   // Allocate Symbol.for and Symbol.keyFor static method function objects
   let #(h, for_ref) =
-    heap.alloc(
+    common.alloc_call_fn(
       h,
-      ObjectSlot(
-        kind: NativeFunction(Call(SymbolFor), constructible: False),
-        properties: common.named_props([
-          #("name", common.fn_name_property("for")),
-          #("length", common.fn_length_property(1)),
-        ]),
-        elements: elements.new(),
-        prototype: Some(function_proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
+      function_proto,
+      SymbolFor,
+      "for",
+      1,
+      constructible: False,
     )
   let #(h, key_for_ref) =
-    heap.alloc(
+    common.alloc_call_fn(
       h,
-      ObjectSlot(
-        kind: NativeFunction(Call(SymbolKeyFor), constructible: False),
-        properties: common.named_props([
-          #("name", common.fn_name_property("keyFor")),
-          #("length", common.fn_length_property(1)),
-        ]),
-        elements: elements.new(),
-        prototype: Some(function_proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
+      function_proto,
+      SymbolKeyFor,
+      "keyFor",
+      1,
+      constructible: False,
     )
-  // Symbol constructor function object with all properties pre-built
+  // Symbol constructor function object with all properties pre-built.
+  // §20.4.1: Symbol HAS [[Construct]] (it may appear in an `extends`
+  // clause), so IsConstructor(Symbol) is true — but invoking it as a
+  // constructor always throws (do_construct / super() handle that).
   let #(h, ctor_ref) =
-    heap.alloc(
+    common.alloc_call_fn_props(
       h,
-      ObjectSlot(
-        // §20.4.1: Symbol HAS [[Construct]] (it may appear in an `extends`
-        // clause), so IsConstructor(Symbol) is true — but invoking it as a
-        // constructor always throws (do_construct / super() handle that).
-        kind: NativeFunction(Call(SymbolConstructor), constructible: True),
-        properties: common.named_props([
-          #("name", common.fn_name_property("Symbol")),
-          #("length", common.fn_length_property(0)),
-          #("prototype", value.data(JsObject(object_proto))),
-          #("for", value.builtin_property(JsObject(for_ref))),
-          #("keyFor", value.builtin_property(JsObject(key_for_ref))),
-          // Well-known symbol properties
-          #("toStringTag", value.data(JsSymbol(value.symbol_to_string_tag))),
-          #("iterator", value.data(JsSymbol(value.symbol_iterator))),
-          #("hasInstance", value.data(JsSymbol(value.symbol_has_instance))),
-          #(
-            "isConcatSpreadable",
-            value.data(JsSymbol(value.symbol_is_concat_spreadable)),
-          ),
-          #("toPrimitive", value.data(JsSymbol(value.symbol_to_primitive))),
-          #("species", value.data(JsSymbol(value.symbol_species))),
-          #("asyncIterator", value.data(JsSymbol(value.symbol_async_iterator))),
-          #("match", value.data(JsSymbol(value.symbol_match))),
-          #("matchAll", value.data(JsSymbol(value.symbol_match_all))),
-          #("replace", value.data(JsSymbol(value.symbol_replace))),
-          #("search", value.data(JsSymbol(value.symbol_search))),
-          #("split", value.data(JsSymbol(value.symbol_split))),
-          #("unscopables", value.data(JsSymbol(value.symbol_unscopables))),
-          #("dispose", value.data(JsSymbol(value.symbol_dispose))),
-          #("asyncDispose", value.data(JsSymbol(value.symbol_async_dispose))),
-        ]),
-        elements: elements.new(),
-        prototype: Some(function_proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
+      function_proto,
+      SymbolConstructor,
+      constructible: True,
+      props: [
+        #("name", common.fn_name_property("Symbol")),
+        #("length", common.fn_length_property(0)),
+        #("prototype", value.data(JsObject(object_proto))),
+        #("for", value.builtin_property(JsObject(for_ref))),
+        #("keyFor", value.builtin_property(JsObject(key_for_ref))),
+        // Well-known symbol properties
+        #("toStringTag", value.data(JsSymbol(value.symbol_to_string_tag))),
+        #("iterator", value.data(JsSymbol(value.symbol_iterator))),
+        #("hasInstance", value.data(JsSymbol(value.symbol_has_instance))),
+        #(
+          "isConcatSpreadable",
+          value.data(JsSymbol(value.symbol_is_concat_spreadable)),
+        ),
+        #("toPrimitive", value.data(JsSymbol(value.symbol_to_primitive))),
+        #("species", value.data(JsSymbol(value.symbol_species))),
+        #("asyncIterator", value.data(JsSymbol(value.symbol_async_iterator))),
+        #("match", value.data(JsSymbol(value.symbol_match))),
+        #("matchAll", value.data(JsSymbol(value.symbol_match_all))),
+        #("replace", value.data(JsSymbol(value.symbol_replace))),
+        #("search", value.data(JsSymbol(value.symbol_search))),
+        #("split", value.data(JsSymbol(value.symbol_split))),
+        #("unscopables", value.data(JsSymbol(value.symbol_unscopables))),
+        #("dispose", value.data(JsSymbol(value.symbol_dispose))),
+        #("asyncDispose", value.data(JsSymbol(value.symbol_async_dispose))),
+      ],
     )
   let h = heap.root(h, ctor_ref)
 

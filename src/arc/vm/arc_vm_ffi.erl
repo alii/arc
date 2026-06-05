@@ -6,7 +6,7 @@
          tree_array_get/2, tree_array_get_option/2, tree_array_set/3,
          tree_array_size/1, tree_array_resize/2,
          tree_array_reset/2, tree_array_sparse_fold/3]).
--export([send_message/2, receive_message_infinite/0, receive_message_timeout/1, pid_to_string/1]).
+-export([pid_to_string/1]).
 -export([receive_settle_only/0, receive_settle_or_subject/1, send_after/3, cancel_timer/1]).
 -export([get_script_args/0, sleep/1]).
 -export([send_subject_message/3, receive_subject_message/1, receive_subject_message_timeout/2]).
@@ -308,14 +308,6 @@ cp_off(<<C, _, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#F0 ->
 cp_off(<<_, R/binary>>, N, Off) when N >= 1 -> cp_off(R, N - 1, Off + 1);
 cp_off(_, _, Off) -> Off.
 
-%% Process primitives for Arc.send/receive
-send_message(Pid, Msg) -> Pid ! Msg, nil.
-receive_message_infinite() ->
-    receive Msg -> Msg end.
-receive_message_timeout(Timeout) ->
-    receive Msg -> {ok, Msg}
-    after Timeout -> {error, nil}
-    end.
 pid_to_string(Pid) -> list_to_binary(pid_to_list(Pid)).
 get_script_args() -> [list_to_binary(A) || A <- init:get_plain_arguments()].
 sleep(Ms) -> timer:sleep(Ms), nil.

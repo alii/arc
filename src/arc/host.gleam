@@ -1,13 +1,9 @@
 //// Helpers for writing host functions.
 ////
-//// Two flavours, both designed for `use` syntax:
-////
-////   Validators — strict type checks that throw TypeError on mismatch.
-////   Modeled after Node's `internal/validators`. Error format:
-////     The "NAME" argument must be of type EXPECTED. Received type ACTUAL
-////
-////   Coercers — run the spec ToX abstract operations. These re-enter the VM
-////   (ToPrimitive, valueOf/toString calls) and propagate anything thrown.
+//// Validators — strict type checks that throw TypeError on mismatch,
+//// designed for `use` syntax. Modeled after Node's `internal/validators`.
+//// Error format:
+////   The "NAME" argument must be of type EXPECTED. Received type ACTUAL
 ////
 //// Usage:
 ////
@@ -32,7 +28,6 @@ import arc/vm/value.{
 }
 import gleam/int
 import gleam/list
-import gleam/option
 
 // -- Validators --------------------------------------------------------------
 
@@ -79,20 +74,6 @@ pub fn try_call(
   case helpers.is_callable(s.heap, callee) {
     True -> state.try_call(s, callee, this_val, args, cont)
     False -> invalid_arg_type(s, name, "function", callee)
-  }
-}
-
-/// Reject unless `val` is a finite JS number. Unwraps to `Float`.
-/// NaN and ±Infinity are rejected — use `to_number` if you want coercion.
-pub fn validate_number(
-  s: State,
-  val: JsValue,
-  name: String,
-  cont: fn(Float, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  case val {
-    JsNumber(Finite(n)) -> cont(n, s)
-    _ -> invalid_arg_type(s, name, "number", val)
   }
 }
 
@@ -145,33 +126,6 @@ pub fn validate_boolean(
     JsBool(b) -> cont(b, s)
     _ -> invalid_arg_type(s, name, "boolean", val)
   }
-}
-
-/// Reject unless `val` is a JS object (not null/undefined/primitive).
-/// Unwraps to the heap `Ref`.
-pub fn validate_object(
-  s: State,
-  val: JsValue,
-  name: String,
-  cont: fn(Ref, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  case val {
-    JsObject(ref) -> cont(ref, s)
-    _ -> invalid_arg_type(s, name, "object", val)
-  }
-}
-
-// -- Coercers ----------------------------------------------------------------
-
-/// ES ToNumber followed by ToIntegerOrInfinity, clamped to a Gleam `Int`.
-/// NaN/undefined become 0; ±Infinity becomes 0. Does NOT re-enter the VM
-/// (objects are not coerced — they yield 0).
-pub fn to_int(
-  s: State,
-  val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  cont(helpers.to_number_int(val) |> option.unwrap(0), s)
 }
 
 // -- Suspend / resume --------------------------------------------------------

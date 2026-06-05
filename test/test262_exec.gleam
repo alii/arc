@@ -10,6 +10,7 @@
 ///   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
 ///   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
 import arc/compiler
+import arc/internal/path
 import arc/module
 import arc/parser
 import arc/vm/builtins
@@ -357,6 +358,52 @@ fn run_parse_negative_test(
   }
 }
 
+/// Shared scaffold for running a test to completion: handles the
+/// module/script branch, timeout, and async dispatch. Callers supply how to
+/// map run errors, completions, and async completions to outcomes.
+fn run_test_completion(
+  metadata: TestMetadata,
+  source: String,
+  is_module: Bool,
+  path: String,
+  variant: StrictnessVariant,
+  is_async: Bool,
+  on_error: fn(String) -> TestOutcome,
+  completion_outcome: fn(Completion) -> TestOutcome,
+  async_outcome: fn(Completion, value.Ref) -> TestOutcome,
+) -> TestOutcome {
+  case is_module {
+    True ->
+      case
+        test_runner.run_with_timeout(
+          fn() { do_run_module(metadata, source, path) },
+          test_timeout_ms,
+        )
+        |> result.flatten
+      {
+        Ok(completion) -> completion_outcome(completion)
+        Error(reason) -> on_error(reason)
+      }
+    False ->
+      case
+        test_runner.run_with_timeout(
+          fn() {
+            do_run_script_with_harness(metadata, source, variant, is_async)
+          },
+          test_timeout_ms,
+        )
+        |> result.flatten
+      {
+        Error(reason) -> on_error(reason)
+        Ok(#(completion, global_ref)) ->
+          case is_async {
+            False -> completion_outcome(completion)
+            True -> async_outcome(completion, global_ref)
+          }
+      }
+  }
+}
+
 fn run_runtime_negative_test(
   metadata: TestMetadata,
   source: String,
@@ -365,83 +412,59 @@ fn run_runtime_negative_test(
   variant: StrictnessVariant,
   is_async: Bool,
 ) -> TestOutcome {
-  case is_module {
-    True -> {
-      let result = case
-        test_runner.run_with_timeout(
-          fn() { do_run_module(metadata, source, path) },
-          test_timeout_ms,
-        )
-      {
-        Ok(r) -> r
-        Error(reason) -> Error(reason)
-      }
-      case result {
-        Ok(ThrowCompletion(thrown, heap)) ->
-          verify_negative_type(metadata, thrown, heap)
-        Ok(NormalCompletion(_, _)) ->
-          Fail("expected runtime throw but completed normally")
-        Ok(YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
-        Ok(completion.AwaitCompletion(_, _)) ->
-          Fail("unexpected AwaitCompletion")
-        Error(reason) -> Fail("expected runtime throw but got: " <> reason)
-      }
-    }
-    False -> {
-      let result = case
-        test_runner.run_with_timeout(
-          fn() {
-            do_run_script_with_harness(metadata, source, variant, is_async)
-          },
-          test_timeout_ms,
-        )
-      {
-        Ok(r) -> r
-        Error(reason) -> Error(reason)
-      }
-      case result {
-        Error(reason) -> Fail("expected runtime throw but got: " <> reason)
-        Ok(#(completion, global_ref)) ->
-          case is_async {
-            False ->
-              case completion {
-                ThrowCompletion(thrown, heap) ->
-                  verify_negative_type(metadata, thrown, heap)
-                NormalCompletion(_, _) ->
-                  Fail("expected runtime throw but completed normally")
-                YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
-                completion.AwaitCompletion(_, _) ->
-                  Fail("unexpected AwaitCompletion")
-              }
-            True ->
-              // For async negative tests, $DONE reports via print
-              check_async_completion(completion, global_ref)
-              |> result.map_error(fn(msg) {
-                // async negative: we expect failure, so a failure message is a pass
-                // if the error name matches
-                msg
-              })
-              |> fn(r) {
-                case r {
-                  Ok(Nil) ->
-                    // Test completed successfully — but we expected a throw
-                    Fail("expected runtime throw but async test completed")
-                  Error(msg) ->
-                    // Async test reported failure — check if it's the right error
-                    case
-                      string.contains(
-                        msg,
-                        metadata.negative_type |> option.unwrap(""),
-                      )
-                    {
-                      True -> Pass
-                      False -> Fail("wrong async error: " <> msg)
-                    }
-                }
-              }
+  run_test_completion(
+    metadata,
+    source,
+    is_module,
+    path,
+    variant,
+    is_async,
+    fn(reason) { Fail("expected runtime throw but got: " <> reason) },
+    negative_completion_outcome(metadata, _),
+    fn(completion, global_ref) {
+      // For async negative tests, $DONE reports via print
+      case check_async_completion(completion, global_ref) {
+        Ok(Nil) ->
+          // Test completed successfully — but we expected a throw
+          Fail("expected runtime throw but async test completed")
+        Error(msg) ->
+          // Async test reported failure — check if it's the right error
+          case
+            string.contains(msg, metadata.negative_type |> option.unwrap(""))
+          {
+            True -> Pass
+            False -> Fail("wrong async error: " <> msg)
           }
       }
-    }
+    },
+  )
+}
+
+/// Map a completion to the outcome for a runtime-negative test:
+/// only a throw (of the expected error type) passes.
+fn negative_completion_outcome(
+  metadata: TestMetadata,
+  completion: Completion,
+) -> TestOutcome {
+  case completion {
+    ThrowCompletion(thrown, heap) ->
+      verify_negative_type(metadata, thrown, heap)
+    NormalCompletion(_, _) ->
+      Fail("expected runtime throw but completed normally")
+    YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
+    completion.AwaitCompletion(_, _) -> Fail("unexpected AwaitCompletion")
+  }
+}
+
+/// Map a completion to the outcome for a positive test:
+/// only a normal completion passes.
+fn positive_completion_outcome(completion: Completion) -> TestOutcome {
+  case completion {
+    NormalCompletion(_, _) -> Pass
+    ThrowCompletion(thrown, heap) ->
+      Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
+    YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
+    completion.AwaitCompletion(_, _) -> Fail("unexpected AwaitCompletion")
   }
 }
 
@@ -453,57 +476,17 @@ fn run_positive_test(
   variant: StrictnessVariant,
   is_async: Bool,
 ) -> TestOutcome {
-  case is_module {
-    True -> {
-      let result = case
-        test_runner.run_with_timeout(
-          fn() { do_run_module(metadata, source, path) },
-          test_timeout_ms,
-        )
-      {
-        Ok(r) -> r
-        Error(_) -> Error("timeout")
-      }
-      case result {
-        Ok(NormalCompletion(_, _)) -> Pass
-        Ok(ThrowCompletion(thrown, heap)) ->
-          Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
-        Ok(YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
-        Ok(completion.AwaitCompletion(_, _)) ->
-          Fail("unexpected AwaitCompletion")
-        Error(reason) -> Fail(reason)
-      }
-    }
-    False -> {
-      let result = case
-        test_runner.run_with_timeout(
-          fn() {
-            do_run_script_with_harness(metadata, source, variant, is_async)
-          },
-          test_timeout_ms,
-        )
-      {
-        Ok(r) -> r
-        Error(_) -> Error("timeout")
-      }
-      case result {
-        Error(reason) -> Fail(reason)
-        Ok(#(completion, global_ref)) ->
-          case is_async {
-            False ->
-              case completion {
-                NormalCompletion(_, _) -> Pass
-                ThrowCompletion(thrown, heap) ->
-                  Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
-                YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
-                completion.AwaitCompletion(_, _) ->
-                  Fail("unexpected AwaitCompletion")
-              }
-            True -> check_async_positive(completion, global_ref)
-          }
-      }
-    }
-  }
+  run_test_completion(
+    metadata,
+    source,
+    is_module,
+    path,
+    variant,
+    is_async,
+    Fail,
+    positive_completion_outcome,
+    check_async_positive,
+  )
 }
 
 /// Check async test completion for positive tests.
@@ -627,7 +610,7 @@ fn test262_resolve_and_load(
   raw_specifier: String,
   parent_specifier: String,
 ) -> Result(#(String, String), String) {
-  let resolved = resolve_test262_specifier(raw_specifier, parent_specifier)
+  let resolved = path.resolve_specifier(raw_specifier, parent_specifier)
   case simplifile.read(resolved) {
     Ok(source) -> Ok(#(resolved, source))
     Error(err) ->
@@ -635,51 +618,6 @@ fn test262_resolve_and_load(
         "file not found: " <> resolved <> " (" <> string.inspect(err) <> ")",
       )
   }
-}
-
-/// Resolve a module specifier relative to the parent module's path.
-fn resolve_test262_specifier(raw: String, parent: String) -> String {
-  case string.starts_with(raw, "./"), string.starts_with(raw, "../") {
-    True, _ | _, True -> {
-      let parent_dir = test262_dirname(parent)
-      normalize_test262_path(parent_dir <> "/" <> raw)
-    }
-    _, _ -> raw
-  }
-}
-
-fn test262_dirname(path: String) -> String {
-  let parts = string.split(path, "/")
-  case list.reverse(parts) {
-    [_, ..rest] ->
-      case list.reverse(rest) {
-        [] -> "."
-        dir_parts -> string.join(dir_parts, "/")
-      }
-    [] -> "."
-  }
-}
-
-fn normalize_test262_path(path: String) -> String {
-  let parts = string.split(path, "/")
-  let resolved =
-    list.fold(parts, [], fn(acc, part) {
-      case part {
-        "." -> acc
-        ".." ->
-          case acc {
-            [_, ..rest] -> rest
-            [] -> [".."]
-          }
-        "" ->
-          case acc {
-            [] -> [""]
-            _ -> acc
-          }
-        _ -> [part, ..acc]
-      }
-    })
-  list.reverse(resolved) |> string.join("/")
 }
 
 fn do_run_script_with_harness(
@@ -736,15 +674,7 @@ fn eval_harness(
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
     True -> {
-      let env =
-        entry.ReplEnv(
-          global_object:,
-          lexical_globals: dict.new(),
-          symbol_descriptions: dict.new(),
-          symbol_registry: dict.new(),
-          realms: dict.new(),
-        )
-      Ok(#(h, env))
+      Ok(#(h, entry.new_repl_env(global_object)))
     }
     False -> {
       // Install native $262 object on the global

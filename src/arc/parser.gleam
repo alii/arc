@@ -1425,30 +1425,7 @@ fn parse_for_declaration(
         )
       parse_for_of_rest(exit_for_decl_context(p3, p), decl, is_await)
     }
-    Semicolon ->
-      case kind {
-        Const -> Error(MissingConstInitializer(pos_of(p3)))
-        _ ->
-          case is_destr {
-            True -> Error(DestructuringMissingInitializer(pos_of(p3)))
-            False -> {
-              let first = ast.VariableDeclarator(id: pattern, init: None)
-              let #(p4, rest) = parse_remaining_declarators(p3, kind, [])
-              let decl =
-                ast.ForInitDeclaration(
-                  ast.VariableDeclaration(kind: var_kind, declarations: [
-                    first,
-                    ..rest
-                  ]),
-                )
-              parse_for_classic_rest(
-                advance(exit_for_decl_context(p4, p)),
-                Some(decl),
-              )
-            }
-          }
-      }
-    Comma ->
+    Semicolon | Comma ->
       case kind {
         Const -> Error(MissingConstInitializer(pos_of(p3)))
         _ ->
@@ -3134,90 +3111,11 @@ fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
 }
 
 fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
-  let wrap_arrow = fn(
-    body_result: Result(#(P, ast.ArrowBody), ParseError),
-    outer: P,
-    is_async,
-    params: List(ast.Pattern),
-  ) {
-    use #(p_body, body) <- result.try(body_result)
-    let p_restored = restore_outer_context(p_body, outer)
-    Ok(#(
-      p_restored,
-      ast.ArrowFunctionExpression(
-        params: params,
-        body: body,
-        is_async: is_async,
-      ),
-    ))
-  }
   case peek(p) {
     // async (...) => or async ident =>
     Async -> {
       case peek_at(p, 1) {
-        LeftParen -> {
-          let saved = p
-          let p2 = advance(advance(p))
-          // Arrow params always check for duplicate names
-          let p2_arrow =
-            P(
-              ..p2,
-              in_arrow_params: True,
-              in_formal_params: True,
-              param_bound_names: [],
-              has_non_simple_param: False,
-              binding_kind: BindingParam,
-              // Params are parsed before the arrow body's function context is
-              // entered, so suspend any enclosing let/const declaration here.
-              in_lexical_decl: False,
-              decl_bound_names: set.new(),
-            )
-          case parse_formal_parameters(p2_arrow) {
-            Ok(#(p3, params)) ->
-              case
-                expect(
-                  P(
-                    ..p3,
-                    in_arrow_params: False,
-                    in_formal_params: False,
-                    binding_kind: BindingNone,
-                  ),
-                  RightParen,
-                )
-              {
-                Ok(p4) ->
-                  case peek(p4) {
-                    Arrow ->
-                      // Line terminator before => is not allowed
-                      case has_line_break_before(p4) {
-                        True -> Error(NotAnArrowFunction(pos_of(saved)))
-                        False -> {
-                          // Save param scope and super flags before enter_function_context resets them
-                          // Arrow functions inherit super from their enclosing method/constructor
-                          let param_scope = p4.scope_params
-                          let saved_super_call = p4.allow_super_call
-                          let saved_super_property = p4.allow_super_property
-                          let saved_new_target = p4.allow_new_target
-                          let p5 =
-                            enter_function_context(advance(p4), False, True)
-                          let p5 =
-                            P(
-                              ..p5,
-                              scope_params: param_scope,
-                              allow_super_call: saved_super_call,
-                              allow_super_property: saved_super_property,
-                              allow_new_target: saved_new_target,
-                            )
-                          wrap_arrow(parse_arrow_body(p5), p, True, params)
-                        }
-                      }
-                    _ -> Error(NotAnArrowFunction(pos_of(saved)))
-                  }
-                Error(_) -> Error(NotAnArrowFunction(pos_of(saved)))
-              }
-            Error(_) -> Error(NotAnArrowFunction(pos_of(saved)))
-          }
-        }
+        LeftParen -> try_paren_arrow(p, advance(advance(p)), True)
         Identifier -> {
           case peek_at(p, 2) {
             Arrow -> {
@@ -3250,7 +3148,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                         allow_super_property: saved_super_property,
                         allow_new_target: saved_new_target,
                       )
-                    wrap_arrow(parse_arrow_body(p3), p, True, [
+                    finish_arrow(parse_arrow_body(p3), p, True, [
                       ast.IdentifierPattern(name: name),
                     ])
                   }
@@ -3290,7 +3188,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
                     allow_super_property: saved_super_property,
                     allow_new_target: saved_new_target,
                   )
-                wrap_arrow(parse_arrow_body(p3), p, False, [
+                finish_arrow(parse_arrow_body(p3), p, False, [
                   ast.IdentifierPattern(name: name),
                 ])
               }
@@ -3300,86 +3198,93 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
         _ -> Error(NotAnArrowFunction(pos_of(p)))
       }
     }
-    LeftParen -> {
-      // Try to parse as arrow parameter list
-      // This is the hardest case — (a, b) => vs (a, b) as expression
-      // We speculatively parse and backtrack if it's not an arrow
-      let saved = p
-      let p2 = advance(p)
-      // Arrow params always check for duplicate names (even sloppy mode).
-      // We set in_arrow_params to True to enable unconditional dup checking
-      // without enabling all strict-mode restrictions.
-      let p2_arrow =
-        P(
-          ..p2,
-          in_arrow_params: True,
-          in_formal_params: True,
-          param_bound_names: [],
-          has_non_simple_param: False,
-          binding_kind: BindingParam,
-          // Params are parsed before the arrow body's function context is
-          // entered, so suspend any enclosing let/const declaration here.
-          in_lexical_decl: False,
-          decl_bound_names: set.new(),
-        )
-      case parse_possible_arrow_params(p2_arrow) {
-        Ok(#(p3, params)) ->
-          case
-            expect(
-              P(
-                ..p3,
-                in_arrow_params: False,
-                in_formal_params: False,
-                binding_kind: BindingNone,
-              ),
-              RightParen,
-            )
-          {
-            Ok(p4) ->
-              case peek(p4) {
-                Arrow ->
-                  // Line terminator before => is not allowed
-                  case has_line_break_before(p4) {
-                    True -> Error(NotAnArrowFunction(pos_of(saved)))
-                    False -> {
-                      // Save param scope and super flags before enter_function_context resets them
-                      // Arrow functions inherit super from their enclosing method/constructor
-                      let param_scope = p4.scope_params
-                      let saved_super_call = p4.allow_super_call
-                      let saved_super_property = p4.allow_super_property
-                      let saved_new_target = p4.allow_new_target
-                      let p5 = enter_function_context(advance(p4), False, False)
-                      let p5 =
-                        P(
-                          ..p5,
-                          scope_params: param_scope,
-                          allow_super_call: saved_super_call,
-                          allow_super_property: saved_super_property,
-                          allow_new_target: saved_new_target,
-                        )
-                      wrap_arrow(parse_arrow_body(p5), p, False, params)
-                    }
-                  }
-                _ -> Error(NotAnArrowFunction(pos_of(saved)))
-              }
-            Error(_) -> Error(NotAnArrowFunction(pos_of(saved)))
-          }
-        Error(_) -> Error(NotAnArrowFunction(pos_of(saved)))
-      }
-    }
+    // (a, b) => is the hardest case — vs (a, b) as expression.
+    // We speculatively parse and backtrack if it's not an arrow.
+    LeftParen -> try_paren_arrow(p, advance(p), False)
     _ -> Error(NotAnArrowFunction(pos_of(p)))
   }
 }
 
-fn parse_possible_arrow_params(
-  p: P,
-) -> Result(#(P, List(ast.Pattern)), ParseError) {
-  // Parse what could be arrow function parameters
-  // This is the same as formal_parameters essentially
-  case peek(p) {
-    RightParen -> Ok(#(p, []))
-    _ -> parse_formal_parameter_list(p, set.new(), [])
+/// Speculatively parse `(...) =>` (or `async (...) =>` when is_async).
+/// `p_params` is the parser positioned just past the opening paren; `outer`
+/// is the parser at the start of the whole expression, used for error
+/// positions and to restore context after the body.
+fn try_paren_arrow(
+  outer: P,
+  p_params: P,
+  is_async: Bool,
+) -> Result(#(P, ast.Expression), ParseError) {
+  // Arrow params always check for duplicate names (even sloppy mode).
+  // We set in_arrow_params to True to enable unconditional dup checking
+  // without enabling all strict-mode restrictions.
+  let p_arrow =
+    P(
+      ..p_params,
+      in_arrow_params: True,
+      in_formal_params: True,
+      param_bound_names: [],
+      has_non_simple_param: False,
+      binding_kind: BindingParam,
+      // Params are parsed before the arrow body's function context is
+      // entered, so suspend any enclosing let/const declaration here.
+      in_lexical_decl: False,
+      decl_bound_names: set.new(),
+    )
+  case parse_formal_parameters(p_arrow) {
+    Ok(#(p3, params)) ->
+      case
+        expect(
+          P(
+            ..p3,
+            in_arrow_params: False,
+            in_formal_params: False,
+            binding_kind: BindingNone,
+          ),
+          RightParen,
+        )
+      {
+        Ok(p4) ->
+          case peek(p4) {
+            Arrow ->
+              // Line terminator before => is not allowed
+              case has_line_break_before(p4) {
+                True -> Error(NotAnArrowFunction(pos_of(outer)))
+                False -> {
+                  // Save param scope and super flags before enter_function_context resets them
+                  // Arrow functions inherit super from their enclosing method/constructor
+                  let param_scope = p4.scope_params
+                  let saved_super_call = p4.allow_super_call
+                  let saved_super_property = p4.allow_super_property
+                  let saved_new_target = p4.allow_new_target
+                  let p5 = enter_function_context(advance(p4), False, is_async)
+                  let p5 =
+                    P(
+                      ..p5,
+                      scope_params: param_scope,
+                      allow_super_call: saved_super_call,
+                      allow_super_property: saved_super_property,
+                      allow_new_target: saved_new_target,
+                    )
+                  finish_arrow(parse_arrow_body(p5), outer, is_async, params)
+                }
+              }
+            _ -> Error(NotAnArrowFunction(pos_of(outer)))
+          }
+        Error(_) -> Error(NotAnArrowFunction(pos_of(outer)))
+      }
+    Error(_) -> Error(NotAnArrowFunction(pos_of(outer)))
   }
+}
+
+fn finish_arrow(
+  body_result: Result(#(P, ast.ArrowBody), ParseError),
+  outer: P,
+  is_async: Bool,
+  params: List(ast.Pattern),
+) -> Result(#(P, ast.Expression), ParseError) {
+  use #(p_body, body) <- result.try(body_result)
+  let p_restored = restore_outer_context(p_body, outer)
+  Ok(#(p_restored, ast.ArrowFunctionExpression(params:, body:, is_async:)))
 }
 
 fn parse_arrow_body(p: P) -> Result(#(P, ast.ArrowBody), ParseError) {
@@ -4176,11 +4081,11 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     }
     LeftBracket -> parse_array_literal(p) |> set_not_assignable
     LeftBrace -> parse_object_literal(p) |> set_not_assignable
-    Function -> parse_function_expression(p)
+    Function -> parse_function_expression(p, is_async: False)
     Class -> parse_class_expression(p)
     Async -> {
       case peek_at(p, 1) {
-        Function -> parse_async_function_expression(p)
+        Function -> parse_function_expression(p, is_async: True)
         _ -> {
           let val = peek_value(p)
           Ok(#(
@@ -4707,8 +4612,15 @@ fn parse_object_property_value(
   }
 }
 
-fn parse_function_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
-  let p2 = advance(p)
+fn parse_function_expression(
+  p: P,
+  is_async is_async: Bool,
+) -> Result(#(P, ast.Expression), ParseError) {
+  // Skip `function` (plus the leading `async` for async function expressions)
+  let p2 = case is_async {
+    True -> advance(advance(p))
+    False -> advance(p)
+  }
   // Optional generator
   let is_generator = peek(p2) == Star
   let p3 = case is_generator {
@@ -4719,7 +4631,7 @@ fn parse_function_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   // is_generator/is_async), not the outer context. Function expression names
   // are scoped to the expression body, so e.g. `function yield(){}` is valid
   // inside a generator even though `yield` is a keyword there.
-  let p3_for_name = P(..p3, in_generator: is_generator, in_async: False)
+  let p3_for_name = P(..p3, in_generator: is_generator, in_async: is_async)
   let func_name = get_simple_binding_name(p3_for_name)
   use p4 <- result.try(eat_optional_name(p3_for_name))
   // Store function name for retroactive strict mode validation
@@ -4729,7 +4641,7 @@ fn parse_function_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       // Restore the original token state from p4 but use original context
       P(..p4, in_generator: p3.in_generator, in_async: p3.in_async),
       is_generator,
-      False,
+      is_async,
     ))
     |> restore_context_fn(p),
   )
@@ -4744,46 +4656,7 @@ fn parse_function_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       params: params,
       body: body,
       is_generator: is_generator,
-      is_async: False,
-    ),
-  ))
-}
-
-fn parse_async_function_expression(
-  p: P,
-) -> Result(#(P, ast.Expression), ParseError) {
-  let p2 = advance(advance(p))
-  // Optional generator
-  let is_generator = peek(p2) == Star
-  let p3 = case is_generator {
-    True -> advance(p2)
-    False -> p2
-  }
-  // Same as parse_function_expression: validate name against INNER context
-  let p3_for_name = P(..p3, in_generator: is_generator, in_async: True)
-  let func_name = get_simple_binding_name(p3_for_name)
-  use p4 <- result.try(eat_optional_name(p3_for_name))
-  let p4 = P(..p4, pending_strict_name: string.to_option(func_name))
-  use #(p5, params, body) <- result.try(
-    parse_function_params_and_body(enter_function_context(
-      P(..p4, in_generator: p3.in_generator, in_async: p3.in_async),
-      is_generator,
-      True,
-    ))
-    |> restore_context_fn(p),
-  )
-  let name_opt = case func_name {
-    "" -> None
-    n -> Some(n)
-  }
-  Ok(#(
-    p5,
-    ast.FunctionExpression(
-      name: name_opt,
-      params: params,
-      body: body,
-      is_generator: is_generator,
-      is_async: True,
+      is_async: is_async,
     ),
   ))
 }
@@ -4925,7 +4798,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     LeftBrace -> {
       // import { a, b } from "module"
       let p3 = advance(p2)
-      use #(p4, specifiers) <- result.try(parse_import_specifiers(p3, []))
+      use #(p4, specifiers) <- result.try(parse_import_specifiers(p3))
       use #(p5, source) <- result.try(expect_from_module_specifier(p4))
       Ok(#(p5, ast.ImportDeclaration(specifiers:, source:)))
     }
@@ -4961,9 +4834,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
             }
             LeftBrace -> {
               let p5 = advance(p4)
-              use #(p6, named_specs) <- result.try(
-                parse_import_specifiers(p5, []),
-              )
+              use #(p6, named_specs) <- result.try(parse_import_specifiers(p5))
               use #(p7, source) <- result.try(expect_from_module_specifier(p6))
               Ok(#(
                 p7,
@@ -4987,26 +4858,39 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
   }
 }
 
-fn parse_import_specifiers(
+fn parse_specifier_list(
   p: P,
-  acc: List(ast.ImportSpecifier),
-) -> Result(#(P, List(ast.ImportSpecifier)), ParseError) {
+  acc: List(a),
+  parse_one: fn(P) -> Result(#(P, a), ParseError),
+  err: fn(Int) -> ParseError,
+) -> Result(#(P, List(a)), ParseError) {
   case peek(p) {
     RightBrace -> Ok(#(advance(p), list.reverse(acc)))
     _ -> {
-      use #(p2, spec) <- result.try(parse_import_specifier(p))
+      use #(p2, spec) <- result.try(parse_one(p))
       let acc = [spec, ..acc]
       case peek(p2) {
         Comma ->
           case peek_at(p2, 1) {
             RightBrace -> Ok(#(advance(advance(p2)), list.reverse(acc)))
-            _ -> parse_import_specifiers(advance(p2), acc)
+            _ -> parse_specifier_list(advance(p2), acc, parse_one, err)
           }
         RightBrace -> Ok(#(advance(p2), list.reverse(acc)))
-        _ -> Error(ExpectedCommaOrBraceInImport(pos_of(p2)))
+        _ -> Error(err(pos_of(p2)))
       }
     }
   }
+}
+
+fn parse_import_specifiers(
+  p: P,
+) -> Result(#(P, List(ast.ImportSpecifier)), ParseError) {
+  parse_specifier_list(
+    p,
+    [],
+    parse_import_specifier,
+    ExpectedCommaOrBraceInImport,
+  )
 }
 
 fn parse_import_specifier(
@@ -5101,6 +4985,19 @@ fn parse_export_named_function(
   }
 }
 
+/// Wrap a parsed declaration statement as an ExportNamedDeclaration module item.
+fn export_named_decl(parsed: #(P, ast.Statement)) -> #(P, ast.ModuleItem) {
+  let #(p, stmt) = parsed
+  #(
+    p,
+    ast.ExportNamedDeclaration(
+      declaration: Some(stmt),
+      specifiers: [],
+      source: None,
+    ),
+  )
+}
+
 /// Parse "export class name {}".
 /// Extracts the class name and registers it as an export name before parsing.
 fn parse_export_named_class(p: P) -> Result(#(P, ast.Statement), ParseError) {
@@ -5170,54 +5067,18 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
         }
       }
     }
-    Var | Let | Const -> {
-      use #(p3, stmt) <- result.try(parse_variable_declaration(
-        P(..p2, in_export_decl: True),
-      ))
-      Ok(#(
-        p3,
-        ast.ExportNamedDeclaration(
-          declaration: Some(stmt),
-          specifiers: [],
-          source: None,
-        ),
-      ))
-    }
-    Function -> {
-      use #(p3, stmt) <- result.try(parse_export_named_function(p2, False))
-      Ok(#(
-        p3,
-        ast.ExportNamedDeclaration(
-          declaration: Some(stmt),
-          specifiers: [],
-          source: None,
-        ),
-      ))
-    }
-    Class -> {
-      use #(p3, stmt) <- result.try(parse_export_named_class(p2))
-      Ok(#(
-        p3,
-        ast.ExportNamedDeclaration(
-          declaration: Some(stmt),
-          specifiers: [],
-          source: None,
-        ),
-      ))
-    }
+    Var | Let | Const ->
+      result.map(
+        parse_variable_declaration(P(..p2, in_export_decl: True)),
+        export_named_decl,
+      )
+    Function ->
+      result.map(parse_export_named_function(p2, False), export_named_decl)
+    Class -> result.map(parse_export_named_class(p2), export_named_decl)
     Async ->
       case peek_at(p2, 1) {
-        Function -> {
-          use #(p3, stmt) <- result.try(parse_export_named_function(p2, True))
-          Ok(#(
-            p3,
-            ast.ExportNamedDeclaration(
-              declaration: Some(stmt),
-              specifiers: [],
-              source: None,
-            ),
-          ))
-        }
+        Function ->
+          result.map(parse_export_named_function(p2, True), export_named_decl)
         _ -> Error(ExpectedFunctionAfterAsync(pos_of(p2)))
       }
     Star -> {
@@ -5279,7 +5140,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
       let p3 = advance(p2)
       // Save refs so we can revert if this is a re-export (from "module")
       let saved_local_refs = p3.export_local_refs
-      use #(p4, specifiers) <- result.try(parse_export_specifiers(p3, []))
+      use #(p4, specifiers) <- result.try(parse_export_specifiers(p3))
       case peek(p4) {
         From -> {
           // Re-export: local names don't need to be declared in this module
@@ -5320,24 +5181,13 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
 
 fn parse_export_specifiers(
   p: P,
-  acc: List(ast.ExportSpecifier),
 ) -> Result(#(P, List(ast.ExportSpecifier)), ParseError) {
-  case peek(p) {
-    RightBrace -> Ok(#(advance(p), list.reverse(acc)))
-    _ -> {
-      use #(p2, spec) <- result.try(parse_export_specifier(p))
-      let acc = [spec, ..acc]
-      case peek(p2) {
-        Comma ->
-          case peek_at(p2, 1) {
-            RightBrace -> Ok(#(advance(advance(p2)), list.reverse(acc)))
-            _ -> parse_export_specifiers(advance(p2), acc)
-          }
-        RightBrace -> Ok(#(advance(p2), list.reverse(acc)))
-        _ -> Error(ExpectedCommaOrBraceInExport(pos_of(p2)))
-      }
-    }
-  }
+  parse_specifier_list(
+    p,
+    [],
+    parse_export_specifier,
+    ExpectedCommaOrBraceInExport,
+  )
 }
 
 fn parse_export_specifier(
@@ -5542,31 +5392,10 @@ fn enter_method_context(
   has_super_class: Bool,
 ) -> P {
   P(
-    ..p,
-    function_depth: p.function_depth + 1,
-    loop_depth: 0,
-    switch_depth: 0,
-    label_set: [],
-    in_generator: is_generator,
-    in_async: is_async,
-    in_static_block: False,
+    ..enter_function_context(p, is_generator, is_async),
     allow_super_call: is_constructor && has_super_class,
     allow_super_property: True,
-    allow_new_target: True,
-    in_single_stmt_pos: False,
     in_method: True,
-    // Function boundary: not part of an enclosing let/const declaration
-    in_lexical_decl: False,
-    decl_bound_names: set.new(),
-    // Reset scope for new method body
-    scope_lexical: set.new(),
-    scope_var: set.new(),
-    scope_params: set.new(),
-    scope_funcs: set.new(),
-    outer_lexical: set.new(),
-    binding_kind: BindingNone,
-    in_block: False,
-    module_top_level: False,
   )
 }
 
@@ -5577,30 +5406,10 @@ fn enter_method_context(
 /// AwaitExpression and `arguments` reference.
 fn enter_static_block_context(p: P) -> P {
   P(
-    ..p,
+    ..enter_function_context(p, False, True),
     function_depth: 0,
-    loop_depth: 0,
-    switch_depth: 0,
-    label_set: [],
-    in_generator: False,
-    in_async: True,
     in_static_block: True,
-    allow_super_call: False,
     allow_super_property: True,
-    allow_new_target: True,
-    in_single_stmt_pos: False,
-    in_method: False,
-    // Function boundary: not part of an enclosing let/const declaration
-    in_lexical_decl: False,
-    decl_bound_names: set.new(),
-    scope_lexical: set.new(),
-    scope_var: set.new(),
-    scope_params: set.new(),
-    scope_funcs: set.new(),
-    outer_lexical: set.new(),
-    binding_kind: BindingNone,
-    in_block: False,
-    module_top_level: False,
   )
 }
 

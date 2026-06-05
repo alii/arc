@@ -476,6 +476,25 @@ pub fn beam_subject_roundtrip_test() {
 }
 
 // ----------------------------------------------------------------------------
+// Return — caller's call_args restored after a nested call
+// ----------------------------------------------------------------------------
+
+pub fn rest_params_survive_call_in_default_expr_test() {
+  // A function call inside a default-value expression runs before the rest
+  // array is built (IrCreateRestArray reads state.call_args). Returning from
+  // that call must restore the caller's call_args, or the rest param is built
+  // from the callee's args instead.
+  let eng = engine.new()
+  assert assert_eval(
+      eng,
+      "function g() { return 1; }
+       function f(a = g(), ...rest) { return rest.join(','); }
+       f(undefined, 2, 3)",
+    )
+    == JsString("2,3")
+}
+
+// ----------------------------------------------------------------------------
 // RegExp — flags canonical order (ES §22.2.6.4)
 // ----------------------------------------------------------------------------
 

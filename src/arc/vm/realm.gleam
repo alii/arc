@@ -323,32 +323,32 @@ fn compile_or_throw(
   }
 }
 
-/// Parse + compile + execute source in an isolated global-scope state built
-/// from the current realm. Threads heap/globals/job_queue back to caller.
-/// Shared core for eval_native and function_constructor_native.
-fn run_source_in_current_realm(
-  source: String,
+/// Build an eval State from `template`/`locals`/`h`, copy the caller's realm
+/// table in, execute, merge VM-global state back into the caller, and map
+/// the completion to a result. Shared core for indirect and direct eval.
+///
+/// `eval_env` is the sloppy direct-eval var dict the eval executes with —
+/// None for indirect eval and strict direct eval. The caller's final state
+/// gets `option.or(eval_env, state.eval_env)`: indirect eval passes None so
+/// the caller's own eval_env is preserved, while direct eval threads back
+/// the (possibly freshly allocated) env. Strict frames never carry an
+/// eval_env (call setup resets it per frame; only sloppy direct eval
+/// allocates one), so the strict-direct case also resolves to None.
+fn run_eval(
+  template: FuncTemplate,
+  locals: tuple_array.TupleArray(JsValue),
+  h: Heap,
   state: State,
+  eval_env: option.Option(Ref),
   execute_inner: ExecuteInnerFn,
   new_state_fn: NewStateFn,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use template <- compile_or_throw(
-    state,
-    state.builtins,
-    source,
-    parser.parse(_, parser.Script),
-    compiler.compile_eval,
-  )
-  // §19.2.1.1 PerformEval: indirect eval runs in global scope,
-  // so its `this` is the global object.
-  let locals =
-    seed_top_level_locals(template, JsObject(state.ctx.global_object))
   let eval_state =
     State(
       ..new_state_fn(
         template,
         locals,
-        state.heap,
+        h,
         state.builtins,
         state.ctx.global_object,
         state.ctx.lexical_globals,
@@ -356,6 +356,7 @@ fn run_source_in_current_realm(
         state.ctx.symbol_registry,
       ),
       job_queue: state.job_queue,
+      eval_env:,
     )
   let eval_state =
     State(
@@ -378,6 +379,7 @@ fn run_source_in_current_realm(
             symbol_registry: final_state.ctx.symbol_registry,
             realms: final_state.ctx.realms,
           ),
+          eval_env: option.or(eval_env, state.eval_env),
         )
       case completion {
         NormalCompletion(val, _) -> #(state, Ok(val))
@@ -389,6 +391,37 @@ fn run_source_in_current_realm(
       }
     }
   }
+}
+
+/// Parse + compile + execute source in an isolated global-scope state built
+/// from the current realm. Threads heap/globals/job_queue back to caller.
+/// Shared core for eval_native and function_constructor_native.
+fn run_source_in_current_realm(
+  source: String,
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  use template <- compile_or_throw(
+    state,
+    state.builtins,
+    source,
+    parser.parse(_, parser.Script),
+    compiler.compile_eval,
+  )
+  // §19.2.1.1 PerformEval: indirect eval runs in global scope,
+  // so its `this` is the global object.
+  let locals =
+    seed_top_level_locals(template, JsObject(state.ctx.global_object))
+  run_eval(
+    template,
+    locals,
+    state.heap,
+    state,
+    None,
+    execute_inner,
+    new_state_fn,
+  )
 }
 
 /// ES2024 §19.2.1 eval ( x )
@@ -513,55 +546,9 @@ fn run_direct_eval(
       #(h, Some(ref))
     }
   }
-  let eval_state =
-    State(
-      ..new_state_fn(
-        template,
-        locals,
-        h,
-        state.builtins,
-        state.ctx.global_object,
-        state.ctx.lexical_globals,
-        state.ctx.symbol_descriptions,
-        state.ctx.symbol_registry,
-      ),
-      job_queue: state.job_queue,
-      // Direct eval inherits the caller's `this` (spec §19.2.1.1 step 16.a)
-      // via the boxed capture appended to caller_box_refs above.
-      eval_env:,
-    )
-  let eval_state =
-    State(
-      ..eval_state,
-      ctx: state.RealmCtx(..eval_state.ctx, realms: state.ctx.realms),
-    )
-  case execute_inner(eval_state) {
-    Error(vm_err) ->
-      state.type_error(state, "eval: VM error: " <> string.inspect(vm_err))
-    Ok(#(completion, final_state)) -> {
-      let merged = state.merge_globals(state, final_state, [])
-      let state =
-        State(
-          ..merged,
-          heap: final_state.heap,
-          ctx: state.RealmCtx(
-            ..merged.ctx,
-            symbol_descriptions: final_state.ctx.symbol_descriptions,
-            symbol_registry: final_state.ctx.symbol_registry,
-            realms: final_state.ctx.realms,
-          ),
-          eval_env:,
-        )
-      case completion {
-        NormalCompletion(val, _) -> #(state, Ok(val))
-        ThrowCompletion(thrown, _) -> #(state, Error(thrown))
-        YieldCompletion(_, _) ->
-          state.type_error(state, "eval: unexpected yield")
-        completion.AwaitCompletion(_, _) ->
-          state.type_error(state, "eval: unexpected await")
-      }
-    }
-  }
+  // Direct eval inherits the caller's `this` (spec §19.2.1.1 step 16.a)
+  // via the boxed capture appended to caller_box_refs above.
+  run_eval(template, locals, h, state, eval_env, execute_inner, new_state_fn)
 }
 
 /// Coerce a list of JsValues to strings, threading state.

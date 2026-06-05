@@ -1,18 +1,17 @@
-import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/builtins/common.{type BuiltinType, type Builtins}
 import arc/vm/builtins/helpers
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
-  type Job, type JsValue, type Ref, BoxSlot, Call, JsBool, JsObject, Named,
-  NativeFunction, ObjectSlot, PromiseCatch, PromiseConstructor, PromiseFinally,
+  type Job, type JsValue, type PromiseReaction, type Ref, BoxSlot, Call, JsBool,
+  JsObject, Named, PromiseCatch, PromiseConstructor, PromiseFinally,
   PromiseObject, PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
 }
 import gleam/list
-import gleam/option.{type Option, Some}
+import gleam/option.{type Option, None, Some}
 
 /// ES2024 §27.2.4 Properties of the Promise Constructor &
 /// ES2024 §27.2.5 Properties of the Promise Prototype Object
@@ -140,54 +139,42 @@ pub fn create_resolving_functions(
 
   // Steps 2-6: Create the resolve function with [[Promise]] and [[AlreadyResolved]]
   let #(h, resolve_fn_ref) =
-    heap.alloc(
+    common.alloc_call_fn(
       h,
-      ObjectSlot(
-        kind: NativeFunction(
-          Call(PromiseResolveFunction(
-            promise_ref:,
-            data_ref:,
-            already_resolved_ref:,
-          )),
-          constructible: False,
-        ),
-        properties: common.named_props([
-          #("name", common.fn_name_property("")),
-          #("length", common.fn_length_property(1)),
-        ]),
-        elements: elements.new(),
-        prototype: Some(function_proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
+      function_proto,
+      PromiseResolveFunction(promise_ref:, data_ref:, already_resolved_ref:),
+      "",
+      1,
+      constructible: False,
     )
 
   // Steps 7-12: Create the reject function (same [[AlreadyResolved]] record)
   let #(h, reject_fn_ref) =
-    heap.alloc(
+    common.alloc_call_fn(
       h,
-      ObjectSlot(
-        kind: NativeFunction(
-          Call(PromiseRejectFunction(
-            promise_ref:,
-            data_ref:,
-            already_resolved_ref:,
-          )),
-          constructible: False,
-        ),
-        properties: common.named_props([
-          #("name", common.fn_name_property("")),
-          #("length", common.fn_length_property(1)),
-        ]),
-        elements: elements.new(),
-        prototype: Some(function_proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
+      function_proto,
+      PromiseRejectFunction(promise_ref:, data_ref:, already_resolved_ref:),
+      "",
+      1,
+      constructible: False,
     )
 
   // Step 13: Return the Record { [[Resolve]]: resolve, [[Reject]]: reject }.
   #(h, JsObject(resolve_fn_ref), JsObject(reject_fn_ref))
+}
+
+/// ES spec NewPromiseCapability — create a promise and its resolve/reject
+/// functions in one step (create_promise + create_resolving_functions).
+///
+/// Returns #(heap, promise_ref, data_ref, resolve_fn, reject_fn).
+pub fn new_promise_capability(
+  h: Heap,
+  b: Builtins,
+) -> #(Heap, Ref, Ref, JsValue, JsValue) {
+  let #(h, promise_ref, data_ref) = create_promise(h, b.promise.prototype)
+  let #(h, resolve, reject) =
+    create_resolving_functions(h, b.function.prototype, promise_ref, data_ref)
+  #(h, promise_ref, data_ref, resolve, reject)
 }
 
 /// ES2024 §27.2.1.4 FulfillPromise(promise, value)
@@ -211,16 +198,43 @@ pub fn fulfill_promise(
   data_ref: Ref,
   result_value: JsValue,
 ) -> #(Heap, List(Job)) {
+  let #(h, jobs, _is_handled) =
+    settle_promise(
+      h,
+      data_ref,
+      result_value,
+      fn(fulfill, _reject) { fulfill },
+      value.PromiseFulfilled(result_value),
+    )
+  #(h, jobs)
+}
+
+/// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
+/// TriggerPromiseReactions): if the promise is pending, build reaction jobs
+/// from the picked reaction list and write the settled PromiseSlot with
+/// cleared reaction lists.
+///
+/// Returns Some(is_handled) when the transition happened, None when the
+/// promise was already settled (soft no-op for the spec's pending Assert).
+fn settle_promise(
+  h: Heap,
+  data_ref: Ref,
+  result_value: JsValue,
+  pick_reactions: fn(List(PromiseReaction), List(PromiseReaction)) ->
+    List(PromiseReaction),
+  settled_state: value.PromiseState,
+) -> #(Heap, List(Job), Option(Bool)) {
   case heap.read(h, data_ref) {
     Some(PromiseSlot(
       state: value.PromisePending,
-      fulfill_reactions: reactions,
+      fulfill_reactions:,
+      reject_reactions:,
       is_handled:,
-      ..,
     )) -> {
-      // Step 7: TriggerPromiseReactions(reactions, value) — build job list.
+      // TriggerPromiseReactions(reactions, value) — build job list.
       // Reactions are stored newest-first (see perform_promise_then), so
       // reverse once here to enqueue jobs in attachment order per spec.
+      let reactions = pick_reactions(fulfill_reactions, reject_reactions)
       let jobs =
         list.map(list.reverse(reactions), fn(r) {
           value.PromiseReactionJob(
@@ -230,25 +244,22 @@ pub fn fulfill_promise(
             reject: r.child_reject,
           )
         })
-      // Steps 3-6: Transition state to fulfilled, clear reaction lists
+      // Transition state to settled, clear both reaction lists
       let h =
         heap.write(
           h,
           data_ref,
           PromiseSlot(
-            state: value.PromiseFulfilled(result_value),
-            // Steps 3, 6
+            state: settled_state,
             fulfill_reactions: [],
-            // Step 4
             reject_reactions: [],
-            // Step 5
             is_handled:,
           ),
         )
-      #(h, jobs)
+      #(h, jobs, Some(is_handled))
     }
     // Soft assertion: not pending -> no-op (spec says Assert)
-    _ -> #(h, [])
+    _ -> #(h, [], None)
   }
 }
 
@@ -274,37 +285,16 @@ pub fn reject_promise(
   data_ref: Ref,
   reason: JsValue,
 ) -> state.State {
-  case heap.read(state.heap, data_ref) {
-    Some(PromiseSlot(
-      state: value.PromisePending,
-      reject_reactions: reactions,
-      is_handled:,
-      ..,
-    )) -> {
-      // Step 8: TriggerPromiseReactions(reactions, reason) — build job list.
-      // Reactions are stored newest-first (see perform_promise_then), so
-      // reverse once here to enqueue jobs in attachment order per spec.
-      let jobs =
-        list.map(list.reverse(reactions), fn(r) {
-          value.PromiseReactionJob(
-            handler: r.handler,
-            arg: reason,
-            resolve: r.child_resolve,
-            reject: r.child_reject,
-          )
-        })
-      // Steps 3-6: Transition state to rejected, clear reaction lists
-      let h =
-        heap.write(
-          state.heap,
-          data_ref,
-          PromiseSlot(
-            state: value.PromiseRejected(reason),
-            fulfill_reactions: [],
-            reject_reactions: [],
-            is_handled:,
-          ),
-        )
+  let #(h, jobs, settled) =
+    settle_promise(
+      state.heap,
+      data_ref,
+      reason,
+      fn(_fulfill, reject) { reject },
+      value.PromiseRejected(reason),
+    )
+  case settled {
+    Some(is_handled) -> {
       // Step 7: HostPromiseRejectionTracker(promise, "reject")
       let unhandled_rejections = case is_handled {
         False -> [data_ref, ..state.unhandled_rejections]
@@ -318,7 +308,7 @@ pub fn reject_promise(
       )
     }
     // Soft assertion: not pending -> no-op (spec says Assert)
-    _ -> state
+    None -> state
   }
 }
 

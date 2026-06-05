@@ -537,7 +537,7 @@ fn validate_regex_unicode_loop(
             }
           }
         // Quantifiers: *, +, ?
-        "*" | "+" ->
+        "*" | "+" | "?" ->
           case in_class {
             True ->
               validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
@@ -549,32 +549,6 @@ fn validate_regex_unicode_loop(
                   )
                 False -> {
                   // Skip optional ? for lazy quantifier
-                  let next_pos = case char_at_source(bytes, pos + 1) {
-                    "?" -> pos + 2
-                    _ -> pos + 1
-                  }
-                  validate_regex_unicode_loop(
-                    bytes,
-                    next_pos,
-                    end,
-                    in_class,
-                    False,
-                  )
-                }
-              }
-          }
-        "?" ->
-          case in_class {
-            True ->
-              validate_regex_unicode_loop(bytes, pos + 1, end, in_class, False)
-            False ->
-              case after_assertion {
-                True ->
-                  Error(
-                    "Invalid regular expression: quantifier on assertion in Unicode mode",
-                  )
-                False -> {
-                  // ? as quantifier — skip optional ? for lazy
                   let next_pos = case char_at_source(bytes, pos + 1) {
                     "?" -> pos + 2
                     _ -> pos + 1

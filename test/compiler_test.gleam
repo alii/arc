@@ -17,6 +17,7 @@ import arc/vm/value.{
 import gleam/dict
 import gleam/int
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/string
 
 // ============================================================================
@@ -49,44 +50,25 @@ fn run_js(source: String) -> Result(Completion, String) {
   }
 }
 
-/// Like run_js but drains the promise job queue after script completes.
-fn run_js_drain(source: String) -> Result(Completion, String) {
-  case parser.parse(source, parser.Script) {
-    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compiler.compile(program) {
-        Error(compiler.Unsupported(desc)) ->
-          Error("compile error: unsupported " <> desc)
-        Error(compiler.BreakOutsideLoop) ->
-          Error("compile error: break outside loop")
-        Error(compiler.ContinueOutsideLoop) ->
-          Error("compile error: continue outside loop")
-        Ok(template) -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, global_object) = builtins.globals(b, h)
-          let h = beam.install_globals(h, b, global_object, "Arc")
-          case entry.run(template, h, b, global_object) {
-            Ok(completion) -> Ok(completion)
-            Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
-          }
-        }
-      }
-  }
-}
-
-/// Assert that the script returns a promise, drain completes, and the promise
-/// is fulfilled with the expected value.
-fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
-  case run_js_drain(source) {
+/// Assert that the script returns a promise that settles with the expected
+/// value. `label` names the expected settlement ("fulfilled"/"rejected") in
+/// panic messages.
+fn assert_promise_settles(
+  source: String,
+  expected: value.JsValue,
+  label: String,
+) -> Nil {
+  case run_js(source) {
     Ok(NormalCompletion(val, h)) ->
       case entry.promise_result(h, val) {
-        Some(resolved) -> {
-          assert resolved == expected
+        Some(settled) -> {
+          assert settled == expected
         }
         None ->
           panic as {
-            "expected fulfilled promise, got: "
+            "expected "
+            <> label
+            <> " promise, got: "
             <> string.inspect(val)
             <> " for: "
             <> source
@@ -104,35 +86,14 @@ fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
       panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
+}
+
+fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
+  assert_promise_settles(source, expected, "fulfilled")
 }
 
 fn assert_promise_rejects(source: String, expected: value.JsValue) -> Nil {
-  case run_js_drain(source) {
-    Ok(NormalCompletion(val, h)) ->
-      case entry.promise_result(h, val) {
-        Some(rejected) -> {
-          assert rejected == expected
-        }
-        None ->
-          panic as {
-            "expected rejected promise, got: "
-            <> string.inspect(val)
-            <> " for: "
-            <> source
-          }
-      }
-    Ok(ThrowCompletion(val, _)) ->
-      panic as {
-        "expected NormalCompletion, got ThrowCompletion("
-        <> string.inspect(val)
-        <> ") for: "
-        <> source
-      }
-    Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
-    Ok(completion.AwaitCompletion(_, _)) ->
-      panic as "unexpected AwaitCompletion"
-    Error(err) -> panic as { "error for: " <> source <> " — " <> err }
-  }
+  assert_promise_settles(source, expected, "rejected")
 }
 
 fn inspect_vm_error(err: state.VmError) -> String {
@@ -7162,15 +7123,7 @@ fn run_repl_lines(
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
-  let env =
-    entry.ReplEnv(
-      global_object:,
-      lexical_globals: dict.new(),
-      symbol_descriptions: dict.new(),
-      symbol_registry: dict.new(),
-      realms: dict.new(),
-    )
-  run_repl_lines_loop(lines, h, b, env)
+  run_repl_lines_loop(lines, h, b, entry.new_repl_env(global_object))
 }
 
 fn run_repl_lines_loop(
@@ -7183,17 +7136,12 @@ fn run_repl_lines_loop(
     [] -> Error("no lines to evaluate")
     [line] -> {
       // Last line — return its result
-      case eval_repl_line(line, h, b, env) {
-        Ok(#(val, new_h, _new_env)) -> Ok(#(val, new_h))
-        Error(err) -> Error(err)
-      }
+      use #(val, new_h, _new_env) <- result.map(eval_repl_line(line, h, b, env))
+      #(val, new_h)
     }
     [line, ..rest] -> {
-      case eval_repl_line(line, h, b, env) {
-        Ok(#(_val, new_h, new_env)) ->
-          run_repl_lines_loop(rest, new_h, b, new_env)
-        Error(err) -> Error(err)
-      }
+      use #(_val, new_h, new_env) <- result.try(eval_repl_line(line, h, b, env))
+      run_repl_lines_loop(rest, new_h, b, new_env)
     }
   }
 }
@@ -7234,15 +7182,7 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
-  let env =
-    entry.ReplEnv(
-      global_object:,
-      lexical_globals: dict.new(),
-      symbol_descriptions: dict.new(),
-      symbol_registry: dict.new(),
-      realms: dict.new(),
-    )
-  run_repl_throw_loop(lines, h, b, env)
+  run_repl_throw_loop(lines, h, b, entry.new_repl_env(global_object))
 }
 
 fn run_repl_throw_loop(
@@ -7272,11 +7212,8 @@ fn run_repl_throw_loop(
       }
     }
     [line, ..rest] -> {
-      case eval_repl_line(line, h, b, env) {
-        Ok(#(_val, new_h, new_env)) ->
-          run_repl_throw_loop(rest, new_h, b, new_env)
-        Error(err) -> Error(err)
-      }
+      use #(_val, new_h, new_env) <- result.try(eval_repl_line(line, h, b, env))
+      run_repl_throw_loop(rest, new_h, b, new_env)
     }
   }
 }
@@ -7847,14 +7784,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
   let assert Ok(harness_program) = parser.parse(harness_source, parser.Script)
   let assert Ok(harness_template) = compiler.compile_repl(harness_program)
 
-  let env =
-    entry.ReplEnv(
-      global_object:,
-      lexical_globals: dict.new(),
-      symbol_descriptions: dict.new(),
-      symbol_registry: dict.new(),
-      realms: dict.new(),
-    )
+  let env = entry.new_repl_env(global_object)
   let assert Ok(#(harness_completion, env)) =
     entry.run_and_drain_repl(harness_template, h, b, env)
   let assert NormalCompletion(_, h) = harness_completion

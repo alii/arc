@@ -36,6 +36,42 @@ pub type CompileError {
   Unsupported(description: String)
 }
 
+fn map_emit_error(error: emit.EmitError) -> CompileError {
+  case error {
+    emit.BreakOutsideLoop -> BreakOutsideLoop
+    emit.ContinueOutsideLoop -> ContinueOutsideLoop
+    emit.Unsupported(desc) -> Unsupported(desc)
+  }
+}
+
+/// Phase 3 for a top-level body (script, module, or eval): unnamed, zero
+/// arity, no env captures, and not an arrow/constructor/generator/async.
+fn resolve_top_level(
+  resolved: scope.Resolved,
+  child_templates: List(FuncTemplate),
+  is_strict: Bool,
+  perms: SyntaxPerms,
+) -> FuncTemplate {
+  resolve.resolve(
+    resolved.code,
+    resolved.constants,
+    resolved.local_count,
+    child_templates,
+    None,
+    0,
+    [],
+    is_strict,
+    False,
+    False,
+    False,
+    False,
+    False,
+    None,
+    resolved.lexical,
+    perms,
+  )
+}
+
 /// Compile a parsed program into a FuncTemplate the VM can interpreter.
 pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
@@ -156,62 +192,33 @@ fn compile_module_with_scope(
   #(FuncTemplate, Dict(String, Int), List(#(String, Int))),
   CompileError,
 ) {
-  case emit.emit_module(items) {
-    Ok(#(
+  use
+    #(emitter_ops, constants, constants_map, children, is_strict, hoisted_funcs)
+  <- result.map(result.map_error(emit.emit_module(items), map_emit_error))
+  let captured_vars = collect_all_captured_vars(children, emitter_ops)
+  // Exported locals are linker-seeded: the linker pre-allocates each
+  // export's BoxSlot (so it can be shared with importers, including cyclic
+  // ones) and seeds it into the slot before the body runs. Their DeclareVar
+  // reserves the slot + a boxed binding but emits no init/box op.
+  let linker_seeded = set.from_list(forced_box)
+  let lexical_captured = collect_arrow_lexical_refs(children)
+  // Imports occupy boxed capture slots 0..N-1.
+  let resolved =
+    scope.resolve_with_captures(
       emitter_ops,
       constants,
       constants_map,
-      children,
-      is_strict,
-      hoisted_funcs,
-    )) -> {
-      let captured_vars = collect_all_captured_vars(children, emitter_ops)
-      // Exported locals are linker-seeded: the linker pre-allocates each
-      // export's BoxSlot (so it can be shared with importers, including cyclic
-      // ones) and seeds it into the slot before the body runs. Their DeclareVar
-      // reserves the slot + a boxed binding but emits no init/box op.
-      let linker_seeded = set.from_list(forced_box)
-      let lexical_captured = collect_arrow_lexical_refs(children)
-      // Imports occupy boxed capture slots 0..N-1.
-      let resolved =
-        scope.resolve_with_captures(
-          emitter_ops,
-          constants,
-          constants_map,
-          import_locals,
-          dict.new(),
-          captured_vars,
-          linker_seeded,
-          lexical_captured,
-          scope.ToGlobal,
-        )
-      let child_templates = compile_children(children, resolved)
-      let template =
-        resolve.resolve(
-          resolved.code,
-          resolved.constants,
-          resolved.local_count,
-          child_templates,
-          None,
-          0,
-          [],
-          is_strict,
-          False,
-          False,
-          False,
-          False,
-          // Script / module body — not a constructor.
-          False,
-          None,
-          resolved.lexical,
-          opcode.script_perms,
-        )
-      Ok(#(template, resolved.names, hoisted_funcs))
-    }
-    Error(emit.BreakOutsideLoop) -> Error(BreakOutsideLoop)
-    Error(emit.ContinueOutsideLoop) -> Error(ContinueOutsideLoop)
-    Error(emit.Unsupported(desc)) -> Error(Unsupported(desc))
-  }
+      import_locals,
+      dict.new(),
+      captured_vars,
+      linker_seeded,
+      lexical_captured,
+      scope.ToGlobal,
+    )
+  let child_templates = compile_children(children, resolved)
+  let template =
+    resolve_top_level(resolved, child_templates, is_strict, opcode.script_perms)
+  #(template, resolved.names, hoisted_funcs)
 }
 
 /// Compile in REPL mode: top-level let/const/class go to the global lexical
@@ -257,85 +264,64 @@ pub fn compile_eval_direct(
 ) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Module(_) -> Error(Unsupported("modules not supported in eval"))
-    ast.Script(body) ->
-      case emit.emit_program(body, emit.LexLocal) {
-        Error(emit.BreakOutsideLoop) -> Error(BreakOutsideLoop)
-        Error(emit.ContinueOutsideLoop) -> Error(ContinueOutsideLoop)
-        Error(emit.Unsupported(desc)) -> Error(Unsupported(desc))
-        Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
-          let strict = caller_is_strict || is_strict
-          // Strict direct eval gets its own VarEnvironment (spec §19.2.1.1
-          // step 18): rewrite hoisted var declarations from DeclareGlobalVar
-          // to local DeclareVar so they stay scoped to the eval body.
-          // Sloppy keeps DeclareGlobalVar which scope.gleam rewrites to
-          // DeclareEvalVar via ToEvalEnv.
-          // Also drop the body's own DeclareLexical — lexical bindings arrive
-          // via the caller's boxed slots (lexical_captures below) and owned
-          // slots here would shadow them.
-          let emitter_ops =
-            list.filter_map(emitter_ops, fn(op) {
-              case op {
-                emit.DeclareLexical(_) -> Error(Nil)
-                emit.Ir(opcode.IrDeclareGlobalVar(name)) if strict ->
-                  Ok(emit.DeclareVar(name, emit.VarBinding))
-                _ -> Ok(op)
-              }
-            })
-          let captured_vars = collect_all_captured_vars(children, emitter_ops)
-          let lexical_captured = collect_arrow_lexical_refs(children)
-          let fallthrough = case strict {
-            True -> scope.ToGlobal
-            False -> scope.ToEvalEnv
+    ast.Script(body) -> {
+      use #(emitter_ops, constants, constants_map, children, is_strict) <- result.map(
+        result.map_error(emit.emit_program(body, emit.LexLocal), map_emit_error),
+      )
+      let strict = caller_is_strict || is_strict
+      // Strict direct eval gets its own VarEnvironment (spec §19.2.1.1
+      // step 18): rewrite hoisted var declarations from DeclareGlobalVar
+      // to local DeclareVar so they stay scoped to the eval body.
+      // Sloppy keeps DeclareGlobalVar which scope.gleam rewrites to
+      // DeclareEvalVar via ToEvalEnv.
+      // Also drop the body's own DeclareLexical — lexical bindings arrive
+      // via the caller's boxed slots (lexical_captures below) and owned
+      // slots here would shadow them.
+      let emitter_ops =
+        list.filter_map(emitter_ops, fn(op) {
+          case op {
+            emit.DeclareLexical(_) -> Error(Nil)
+            emit.Ir(opcode.IrDeclareGlobalVar(name)) if strict ->
+              Ok(emit.DeclareVar(name, emit.VarBinding))
+            _ -> Ok(op)
           }
-          // Caller's lexical box refs are seeded at slots len(parent_names)+i
-          // by run_direct_eval, in canonical order, one per Some entry in
-          // parent_slots. Treat each as a capture so IrGetLexical → GetBoxed.
-          let #(lexical_captures, _next) =
-            list.fold(
-              opcode.all_lexical_refs,
-              #(dict.new(), list.length(parent_names)),
-              fn(acc, ref) {
-                let #(m, i) = acc
-                case opcode.lexical_slot(parent_slots, ref) {
-                  Some(_) -> #(dict.insert(m, ref, i), i + 1)
-                  None -> acc
-                }
-              },
-            )
-          let resolved =
-            scope.resolve_with_captures(
-              emitter_ops,
-              constants,
-              constants_map,
-              parent_names,
-              lexical_captures,
-              captured_vars,
-              set.new(),
-              lexical_captured,
-              fallthrough,
-            )
-          let child_templates = compile_children(children, resolved)
-          Ok(resolve.resolve(
-            resolved.code,
-            resolved.constants,
-            resolved.local_count,
-            child_templates,
-            None,
-            0,
-            [],
-            is_strict,
-            False,
-            False,
-            False,
-            False,
-            // Eval body — not a constructor.
-            False,
-            None,
-            resolved.lexical,
-            perms,
-          ))
-        }
+        })
+      let captured_vars = collect_all_captured_vars(children, emitter_ops)
+      let lexical_captured = collect_arrow_lexical_refs(children)
+      let fallthrough = case strict {
+        True -> scope.ToGlobal
+        False -> scope.ToEvalEnv
       }
+      // Caller's lexical box refs are seeded at slots len(parent_names)+i
+      // by run_direct_eval, in canonical order, one per Some entry in
+      // parent_slots. Treat each as a capture so IrGetLexical → GetBoxed.
+      let #(lexical_captures, _next) =
+        list.fold(
+          opcode.all_lexical_refs,
+          #(dict.new(), list.length(parent_names)),
+          fn(acc, ref) {
+            let #(m, i) = acc
+            case opcode.lexical_slot(parent_slots, ref) {
+              Some(_) -> #(dict.insert(m, ref, i), i + 1)
+              None -> acc
+            }
+          },
+        )
+      let resolved =
+        scope.resolve_with_captures(
+          emitter_ops,
+          constants,
+          constants_map,
+          parent_names,
+          lexical_captures,
+          captured_vars,
+          set.new(),
+          lexical_captured,
+          fallthrough,
+        )
+      let child_templates = compile_children(children, resolved)
+      resolve_top_level(resolved, child_templates, is_strict, perms)
+    }
   }
 }
 
@@ -466,53 +452,29 @@ fn compile_script(
   top_lex: emit.TopLevelLex,
 ) -> Result(FuncTemplate, CompileError) {
   // Phase 1: Emit IR from AST
-  case emit.emit_program(stmts, top_lex) {
-    Ok(#(emitter_ops, constants, constants_map, children, is_strict)) -> {
-      // Determine which variables are captured by children (need boxing)
-      let captured_vars = collect_all_captured_vars(children, emitter_ops)
-      let lexical_captured = collect_arrow_lexical_refs(children)
+  use #(emitter_ops, constants, constants_map, children, is_strict) <- result.map(
+    result.map_error(emit.emit_program(stmts, top_lex), map_emit_error),
+  )
+  // Determine which variables are captured by children (need boxing)
+  let captured_vars = collect_all_captured_vars(children, emitter_ops)
+  let lexical_captured = collect_arrow_lexical_refs(children)
 
-      // Phase 2: Resolve scopes (names → local indices), with capture info
-      let resolved =
-        scope.resolve(
-          emitter_ops,
-          constants,
-          constants_map,
-          captured_vars,
-          lexical_captured,
-          scope.ToGlobal,
-        )
+  // Phase 2: Resolve scopes (names → local indices), with capture info
+  let resolved =
+    scope.resolve(
+      emitter_ops,
+      constants,
+      constants_map,
+      captured_vars,
+      lexical_captured,
+      scope.ToGlobal,
+    )
 
-      // Process child functions through Phase 2 + Phase 3 recursively
-      let child_templates = compile_children(children, resolved)
+  // Process child functions through Phase 2 + Phase 3 recursively
+  let child_templates = compile_children(children, resolved)
 
-      // Phase 3: Resolve labels (label IDs → PC addresses)
-      let template =
-        resolve.resolve(
-          resolved.code,
-          resolved.constants,
-          resolved.local_count,
-          child_templates,
-          None,
-          0,
-          [],
-          is_strict,
-          False,
-          False,
-          False,
-          False,
-          // Script / module body — not a constructor.
-          False,
-          None,
-          resolved.lexical,
-          opcode.script_perms,
-        )
-      Ok(template)
-    }
-    Error(emit.BreakOutsideLoop) -> Error(BreakOutsideLoop)
-    Error(emit.ContinueOutsideLoop) -> Error(ContinueOutsideLoop)
-    Error(emit.Unsupported(desc)) -> Error(Unsupported(desc))
-  }
+  // Phase 3: Resolve labels (label IDs → PC addresses)
+  resolve_top_level(resolved, child_templates, is_strict, opcode.script_perms)
 }
 
 /// True if this function or any nested function contains a syntactic
