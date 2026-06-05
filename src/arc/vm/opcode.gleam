@@ -385,7 +385,6 @@ pub type Op {
   /// OP_put_super_value.
   PutSuperValue
 
-
   // -- Generator --
   /// Emitted at start of generator body. Suspends immediately (SuspendedStart).
   InitialYield
@@ -444,7 +443,6 @@ pub type AccessorKind {
   Getter
   Setter
 }
-
 
 // ============================================================================
 // Operator Kinds
@@ -618,5 +616,4 @@ pub type IrOp {
   IrDeclareGlobalVar(name: String)
   IrDeclareGlobalLex(name: String, is_const: Bool)
   IrInitGlobalLex(name: String)
-
 }

@@ -857,7 +857,8 @@ fn tokenize_one_digit(
 ) -> List(ReplaceSegment) {
   case digit_value(d1) {
     0 -> tokenize_loop(rest, lit <> "$0", segs)
-    idx -> tokenize_loop(rest, "", [CaptureSeg(idx), ..flush_literal(lit, segs)])
+    idx ->
+      tokenize_loop(rest, "", [CaptureSeg(idx), ..flush_literal(lit, segs)])
   }
 }
 

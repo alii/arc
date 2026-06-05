@@ -26,12 +26,11 @@ import arc/vm/opcode.{
   GetSuperValue, GetSuperValue2, InitGlobalLex, InitialYield,
   IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
   IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure,
-  MakeMethod, NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop,
-  PrivateIn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem,
-  PutEvalVar, PutField, PutGlobal, PutLocal, PutLocalCheckInit,
-  PutPrivateField, PutSuperValue, Return, SetLine, SetProto,
-  SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Yield,
-  YieldStar,
+  MakeMethod, NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop, PrivateIn,
+  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
+  PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateField, PutSuperValue, Return,
+  SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
+  TypeofGlobal, UnaryOp, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -799,7 +798,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         // Not in lexical → try object record (globalThis)
         Error(_) -> {
           let key = Named(name)
-          case object.get_own_property(state.heap, state.ctx.global_object, key) {
+          case
+            object.get_own_property(state.heap, state.ctx.global_object, key)
+          {
             Some(DataProperty(value: val, ..)) ->
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
             Some(value.AccessorProperty(get: Some(getter), ..)) ->
@@ -826,7 +827,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               )
             None ->
               // Check prototype chain
-              case object.has_property(state.heap, state.ctx.global_object, key) {
+              case
+                object.has_property(state.heap, state.ctx.global_object, key)
+              {
                 True ->
                   case
                     object.get_value_of(
@@ -1136,7 +1139,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           {
             Some(DataProperty(value: v, ..)) -> v
             _ ->
-              case object.has_property(state.heap, state.ctx.global_object, key) {
+              case
+                object.has_property(state.heap, state.ctx.global_object, key)
+              {
                 True ->
                   // Property exists on proto chain — use get_value_of for correct result
                   case
@@ -2673,9 +2678,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               let #(h, iter_ref) =
                 common.alloc_wrapper(
                   state.heap,
-                  value.StringIteratorObject(remaining: string.to_utf_codepoints(
-                    s,
-                  )),
+                  value.StringIteratorObject(
+                    remaining: string.to_utf_codepoints(s),
+                  ),
                   state.builtins.array_iterator_proto,
                 )
               Ok(
@@ -2966,28 +2971,33 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           use #(next_fn, state) <- result.try(
             state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
           )
-          use #(done, val, state) <- result.try(case
-            is_native_generator_next(state.heap, next_fn)
-          {
-            // Fast path: unmodified native generator .next — resume the inner
-            // generator directly, skipping the {value, done} result object
-            // that would be allocated and immediately discarded per step.
-            // resume advances pc past YieldStar; restore it so the !done
-            // branch suspends at this op (resume loops back here).
-            True -> {
-              let pc = state.pc
-              use #(done, val, st) <- result.map(
-                generators.resume_generator_next(state, iter, arg, execute_inner),
-              )
-              #(done, val, State(..st, pc:))
-            }
-            False -> {
-              use #(res, state) <- result.try(
-                state.rethrow(state.call(state, next_fn, iter, [arg])),
-              )
-              read_iter_result(state, res)
-            }
-          })
+          use #(done, val, state) <- result.try(
+            case is_native_generator_next(state.heap, next_fn) {
+              // Fast path: unmodified native generator .next — resume the inner
+              // generator directly, skipping the {value, done} result object
+              // that would be allocated and immediately discarded per step.
+              // resume advances pc past YieldStar; restore it so the !done
+              // branch suspends at this op (resume loops back here).
+              True -> {
+                let pc = state.pc
+                use #(done, val, st) <- result.map(
+                  generators.resume_generator_next(
+                    state,
+                    iter,
+                    arg,
+                    execute_inner,
+                  ),
+                )
+                #(done, val, State(..st, pc:))
+              }
+              False -> {
+                use #(res, state) <- result.try(
+                  state.rethrow(state.call(state, next_fn, iter, [arg])),
+                )
+                read_iter_result(state, res)
+              }
+            },
+          )
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
             False ->
@@ -3306,11 +3316,6 @@ fn assign_non_hole_indices(
 fn grow_array_length(h: Heap, ref: Ref) -> Heap {
   array_ops.grow_array_length(h, ref)
 }
-
-
-
-
-
 
 /// Thin wrapper: delegates to array_ops.push_onto_array.
 fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {

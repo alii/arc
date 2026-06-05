@@ -161,10 +161,7 @@ pub fn merge_globals(
 ) -> State {
   State(
     ..parent,
-    ctx: RealmCtx(
-      ..parent.ctx,
-      lexical_globals: child.ctx.lexical_globals,
-    ),
+    ctx: RealmCtx(..parent.ctx, lexical_globals: child.ctx.lexical_globals),
     job_queue: job_queue.append(child.job_queue, extra_jobs),
     outstanding: child.outstanding,
   )

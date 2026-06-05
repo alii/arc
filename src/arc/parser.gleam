@@ -15,9 +15,9 @@
 /// here since Gleam doesn't support cross-module recursion.
 import arc/parser/ast
 import arc/parser/error.{
-  ArgumentsInStaticBlock, AwaitInAsyncFunction, AwaitInModule, AwaitInStaticBlock,
-  BreakOutsideLoopOrSwitch, ClassConstructorAsync, ClassConstructorGenerator,
-  ClassConstructorNotGetter,
+  ArgumentsInStaticBlock, AwaitInAsyncFunction, AwaitInModule,
+  AwaitInStaticBlock, BreakOutsideLoopOrSwitch, ClassConstructorAsync,
+  ClassConstructorGenerator, ClassConstructorNotGetter,
   ClassConstructorNotSetter, ClassDuplicateConstructor, ContinueOutsideLoop,
   DeletePrivateName, DeleteUnqualifiedStrictMode,
   DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,

@@ -9,8 +9,7 @@ import arc/vm/opcode.{
   IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp,
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
   IrCallMethodApply, IrCreateArguments, IrCreateRestArray, IrDeclareGlobalLex,
-  IrDeclareGlobalVar,
-  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDeclareGlobalVar, IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
   IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed, IrDeleteElem,
   IrDeleteField, IrDup, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem,
   IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetLexical,
@@ -23,8 +22,7 @@ import arc/vm/opcode.{
   IrPutElem, IrPutField, IrPutPrivateField, IrPutSuperValue, IrRet, IrReturn,
   IrScopeGetVar, IrScopeInitVar, IrScopePutVar, IrScopeReboxVar,
   IrScopeTypeofVar, IrSetLine, IrSetProto, IrSetThis, IrSetupDerivedClass,
-  IrSwap, IrThrow,
-  IrThrowError, IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
+  IrSwap, IrThrow, IrThrowError, IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,

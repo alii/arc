@@ -2918,10 +2918,7 @@ pub fn class_static_block_nested_function_boundary_test() -> Nil {
     JsNumber(Finite(1.0)),
   )
   assert_normal("class C{static{({await:0})}}; 1", JsNumber(Finite(1.0)))
-  assert_normal(
-    "class C{static{l:for(;;)break l}}; 1",
-    JsNumber(Finite(1.0)),
-  )
+  assert_normal("class C{static{l:for(;;)break l}}; 1", JsNumber(Finite(1.0)))
   // BindingIdentifier "await" stops at ANY function boundary (incl. arrows).
   assert_normal("class C{static{(()=>{var await})}}; 1", JsNumber(Finite(1.0)))
 }

@@ -207,8 +207,7 @@ fn reverse_loop(elements: JsElements, lo: Int, hi: Int) -> JsElements {
     False -> {
       let lo_val = get_option(elements, lo)
       let hi_val = get_option(elements, hi)
-      let elements =
-        put_option(elements, lo, hi_val) |> put_option(hi, lo_val)
+      let elements = put_option(elements, lo, hi_val) |> put_option(hi, lo_val)
       reverse_loop(elements, lo + 1, hi - 1)
     }
   }

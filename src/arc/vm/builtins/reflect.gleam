@@ -190,7 +190,6 @@ fn reflect_construct(
   #(state, Ok(result))
 }
 
-
 /// CreateListFromArrayLike per §7.3.19 — throws TypeError on non-object.
 fn require_array_like(
   state: State,

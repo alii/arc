@@ -94,8 +94,10 @@ pub fn bind_this(
         False ->
           case this_arg {
             // Step 6a: undefined/null -> globalThis.
-            JsUndefined | JsNull ->
-              #(state.heap, JsObject(state.ctx.global_object))
+            JsUndefined | JsNull -> #(
+              state.heap,
+              JsObject(state.ctx.global_object),
+            )
             // Step 6b: Objects pass through (ToObject is identity for objects).
             JsObject(_) -> #(state.heap, this_arg)
             _ ->
@@ -1217,8 +1219,7 @@ pub fn call_native(
           )
         Error(Nil) -> {
           let id = value.UserSymbol(builtins_symbol.new_symbol_ref())
-          let new_registry =
-            dict.insert(state.ctx.symbol_registry, key_str, id)
+          let new_registry = dict.insert(state.ctx.symbol_registry, key_str, id)
           let new_descs =
             dict.insert(state.ctx.symbol_descriptions, id, key_str)
           Ok(

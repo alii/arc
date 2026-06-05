@@ -130,8 +130,7 @@ pub fn run_and_drain_repl(
       env.symbol_descriptions,
       env.symbol_registry,
     )
-  let run_state =
-    State(..base, ctx: RealmCtx(..base.ctx, realms: env.realms))
+  let run_state = State(..base, ctx: RealmCtx(..base.ctx, realms: env.realms))
   use #(settled, drained) <- result.map(settle(
     interpreter.execute_inner(run_state),
     event_loop.drain_jobs,

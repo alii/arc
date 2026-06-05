@@ -1198,11 +1198,7 @@ fn array_pop(
           // Step 4d: element = Get(O, ToString(newLen))
           use val, state <- state.try_op(generic_get(state, ref, new_len))
           // Step 4e: DeletePropertyOrThrow(O, index)
-          use state <- state.try_state(generic_delete_index(
-            state,
-            ref,
-            new_len,
-          ))
+          use state <- state.try_state(generic_delete_index(state, ref, new_len))
           // Step 4f: Set(O, "length", newLen, true)
           // Step 4g: Return element
           wrap(generic_set_length(state, ref, new_len), val)
@@ -1265,12 +1261,7 @@ fn array_shift(
           // Step 4: first = Get(O, "0")
           use val, state <- state.try_op(generic_get(state, ref, 0))
           // Steps 5-6: shift indices [1..len) down by 1 (shift_left_generic)
-          use state <- state.try_state(shift_left_generic(
-            state,
-            ref,
-            1,
-            length,
-          ))
+          use state <- state.try_state(shift_left_generic(state, ref, 1, length))
           // Step 7: DeletePropertyOrThrow(O, ToString(len - 1))
           use state <- state.try_state(generic_delete_index(
             state,

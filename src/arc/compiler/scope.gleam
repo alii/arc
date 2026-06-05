@@ -335,8 +335,7 @@ fn resolve_one(r: Resolver, op: EmitterOp) -> Resolver {
         True -> r.names
         False -> dict.insert(r.names, name, index)
       }
-      let r =
-        Resolver(..r, next_local: index + 1, max_locals: new_max, names:)
+      let r = Resolver(..r, next_local: index + 1, max_locals: new_max, names:)
 
       // Add binding to the appropriate scope
       let r = case kind {
