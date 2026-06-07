@@ -240,7 +240,11 @@ fn with_ta_and_index(
                   shared:,
                 )
               // §25.4.3.2 ValidateAtomicAccess: ToIndex then bounds check.
-              use idx, state <- to_index(state, arg(args, 1))
+              use idx, state <- coerce.to_index_cps(
+                state,
+                arg(args, 1),
+                "Invalid atomic access index",
+              )
               case idx < live {
                 False ->
                   state.range_error(state, "Atomics access index out of range")
@@ -342,35 +346,6 @@ fn revalidate(
 
 fn arg(args: List(JsValue), idx: Int) -> JsValue {
   helpers.list_at(args, idx) |> option.unwrap(JsUndefined)
-}
-
-/// §7.1.22 ToIndex (CPS): undefined → 0; else ToIntegerOrInfinity with a
-/// RangeError outside [0, 2^53-1].
-fn to_index(
-  state: State,
-  val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  case val {
-    JsUndefined -> cont(0, state)
-    _ ->
-      case coerce.js_to_number(state, val) {
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(num, state)) ->
-          case num {
-            Finite(f) -> {
-              let i = value.float_to_int(f)
-              case i < 0 || i > 9_007_199_254_740_991 {
-                True -> state.range_error(state, "Invalid atomic access index")
-                False -> cont(i, state)
-              }
-            }
-            NaN -> cont(0, state)
-            Infinity | NegInfinity ->
-              state.range_error(state, "Invalid atomic access index")
-          }
-      }
-  }
 }
 
 /// §7.1.5 ToIntegerOrInfinity (CPS) — keeps ±∞ distinct (callers decide how
@@ -816,23 +791,27 @@ fn notify(
         list.fold(
           woken,
           State(..state, atomics_waiters: kept),
-          fn(state, waiter) {
-            let #(h, jobs) =
-              builtins_promise.fulfill_promise(
-                state.heap,
-                waiter.promise_data,
-                JsString("ok"),
-              )
-            State(
-              ..state,
-              heap: h,
-              job_queue: job_queue.append(state.job_queue, jobs),
-            )
-          },
+          fn(state, waiter) { settle_waiter(state, waiter, "ok") },
         )
       #(state, Ok(value.from_int(list.length(woken))))
     }
   }
+}
+
+/// Fulfill a waitAsync waiter's promise with the given message ("ok" or
+/// "timed-out"), appending its reaction jobs to the job queue.
+fn settle_waiter(
+  state: State,
+  waiter: value.AtomicsWaiter,
+  msg: String,
+) -> State {
+  let #(h, jobs) =
+    builtins_promise.fulfill_promise(
+      state.heap,
+      waiter.promise_data,
+      JsString(msg),
+    )
+  State(..state, heap: h, job_queue: job_queue.append(state.job_queue, jobs))
 }
 
 /// Notify count: undefined → effectively unbounded; negative → 0.
@@ -876,19 +855,7 @@ pub fn settle_expired_waiters(state: State) -> State {
       list.fold(
         expired,
         State(..state, atomics_waiters: pending),
-        fn(state, waiter) {
-          let #(h, jobs) =
-            builtins_promise.fulfill_promise(
-              state.heap,
-              waiter.promise_data,
-              JsString("timed-out"),
-            )
-          State(
-            ..state,
-            heap: h,
-            job_queue: job_queue.append(state.job_queue, jobs),
-          )
-        },
+        fn(state, waiter) { settle_waiter(state, waiter, "timed-out") },
       )
     }
   }

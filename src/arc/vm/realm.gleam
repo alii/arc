@@ -273,14 +273,34 @@ pub fn build_262(
     )
   let #(h, gc_fn) =
     common.alloc_native_fn(h, func_proto, value.VmNative(value.Gc), "gc", 0)
-  let #(h, is_htmldda_fn) =
-    common.alloc_native_fn(
-      h,
-      func_proto,
-      value.VmNative(value.IsHTMLDDA),
-      "IsHTMLDDA",
-      0,
-    )
+  // $262.IsHTMLDDA — the one [[IsHTMLDDA]] exotic object (Annex B §B.3.6).
+  // Lives at the reserved value.html_dda_ref so typeof / ToBoolean /
+  // IsLooselyEqual identify it by id alone. Filled once and rooted; child
+  // realms (createRealm) share the same object.
+  let is_htmldda_fn = value.html_dda_ref
+  let h = case heap.read(h, is_htmldda_fn) {
+    Some(_) -> h
+    None ->
+      heap.fill(
+        h,
+        is_htmldda_fn,
+        ObjectSlot(
+          kind: value.NativeFunction(
+            value.Dispatch(value.VmNative(value.IsHTMLDDA)),
+            constructible: False,
+          ),
+          properties: dict.from_list([
+            #(Named("name"), common.fn_name_property("IsHTMLDDA")),
+            #(Named("length"), common.fn_length_property(0)),
+          ]),
+          symbol_properties: [],
+          elements: elements.new(),
+          prototype: Some(func_proto),
+          extensible: True,
+        ),
+      )
+      |> heap.root(is_htmldda_fn)
+  }
   let #(h, detach_fn) =
     common.alloc_native_fn(
       h,
@@ -963,19 +983,65 @@ pub fn function_constructor_native(
     [] -> #([], "")
     [b, ..params_rev] -> #(list.reverse(params_rev), b)
   }
-  // §20.2.1.1.1 step 16: "function anonymous(" P "\n) {\n" body "\n}".
+  // §20.2.1.1.1 step 16 assembles "function anonymous(" P "\n) {\n" body
+  // "\n}", but the spec then calls OrdinaryFunctionCreate directly — so
+  // unlike a syntactic named function expression there is NO §13.2.5.5
+  // self-name binding: `anonymous` must not resolve inside the body
+  // (test262: staging/sm/Function/constructor-binding.js). We therefore
+  // compile an ANONYMOUS function expression and apply step 29
+  // SetFunctionName(F, "anonymous") to the result afterwards.
   // The newline before ")" matters: a trailing line comment in the last
   // parameter must not comment out the ")" (test262: Function/prototype/
   // toString/Function.js).
   let source =
     "("
     <> keyword
-    <> " anonymous("
+    <> "("
     <> string.join(param_strs, ",")
     <> "\n) {\n"
     <> body
     <> "\n})"
-  run_source_in_current_realm(source, state, execute_inner, new_state_fn)
+  let #(state, res) =
+    run_source_in_current_realm(source, state, execute_inner, new_state_fn)
+  case res {
+    Ok(JsObject(fn_ref)) -> #(set_function_name_anonymous(state, fn_ref), res)
+    _ -> #(state, res)
+  }
+}
+
+/// §20.2.1.1.1 step 29: SetFunctionName(F, "anonymous") for a freshly
+/// created dynamic function — sets both the own "name" data property
+/// (created as "" at closure allocation) and the template name that
+/// Function.prototype.toString reports.
+fn set_function_name_anonymous(state: State, fn_ref: Ref) -> State {
+  let heap =
+    heap.update(state.heap, fn_ref, fn(slot) {
+      case slot {
+        ObjectSlot(
+          kind: value.FunctionObject(func_template:, env:, home_object:),
+          properties:,
+          ..,
+        ) ->
+          ObjectSlot(
+            ..slot,
+            kind: value.FunctionObject(
+              func_template: value.FuncTemplate(
+                ..func_template,
+                name: Some("anonymous"),
+              ),
+              env:,
+              home_object:,
+            ),
+            properties: dict.insert(
+              properties,
+              Named("name"),
+              common.fn_name_property("anonymous"),
+            ),
+          )
+        other -> other
+      }
+    })
+  State(..state, heap:)
 }
 
 // ============================================================================

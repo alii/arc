@@ -23,6 +23,10 @@ pub opaque type Heap(ctx) {
     /// no-capture closure can point at the same slot. Rooted on first use so
     /// the cached ref can never dangle across GC.
     empty_env: Option(Ref),
+    /// Value of `next` at the most recent compact/collect (0 before any).
+    /// `grown_since_collect` reads the difference so the VM can trigger
+    /// in-run collections only after substantial allocation.
+    last_collect_next: Int,
   )
 }
 
@@ -78,7 +82,14 @@ fn synth_lazy_proto(id: Int) -> HeapSlot(ctx) {
 
 /// Create an empty heap.
 pub fn new() -> Heap(ctx) {
-  Heap(data: dict.new(), free: [], next: 0, roots: set.new(), empty_env: None)
+  Heap(
+    data: dict.new(),
+    free: [],
+    next: 0,
+    roots: set.new(),
+    empty_env: None,
+    last_collect_next: 0,
+  )
 }
 
 /// Allocate a slot. Prefers recycled indices from the free list,
@@ -478,7 +489,13 @@ pub fn compact(heap: Heap(ctx), extra_roots: Set(Int)) -> Heap(ctx) {
   let all_roots = set.union(heap.roots, extra_roots)
   let live = mark_from(heap, all_roots)
   let new_data = dict.filter(heap.data, fn(id, _) { set.contains(live, id) })
-  Heap(..heap, data: new_data, free: [])
+  Heap(..heap, data: new_data, free: [], last_collect_next: heap.next)
+}
+
+/// Slots allocated via fresh ids since the last compact/collect. The VM's
+/// top-level-return GC trigger compares this against its growth threshold.
+pub fn grown_since_collect(heap: Heap(ctx)) -> Int {
+  heap.next - heap.last_collect_next
 }
 
 /// Run mark-and-sweep GC using persistent roots + temporary extra roots
@@ -486,7 +503,7 @@ pub fn compact(heap: Heap(ctx), extra_roots: Set(Int)) -> Heap(ctx) {
 pub fn collect_with_roots(heap: Heap(ctx), extra_roots: Set(Int)) -> Heap(ctx) {
   let all_roots = set.union(heap.roots, extra_roots)
   let live = mark_from(heap, all_roots)
-  sweep(heap, live)
+  Heap(..sweep(heap, live), last_collect_next: heap.next)
 }
 
 /// Mark phase: starting from a root set, return the set of all reachable slot IDs.

@@ -1266,18 +1266,20 @@ fn resolve_locale(
 }
 
 fn u_keywords_of(tag: String) -> List(#(String, String)) {
-  case tags.parse(tag) {
-    Ok(lid) ->
-      lid.extensions
-      |> list.filter_map(fn(ext) {
-        case ext {
-          tags.UExt(keywords:, ..) -> Ok(keywords)
-          _ -> Error(Nil)
-        }
-      })
-      |> list.flatten
-    Error(Nil) -> []
-  }
+  tags.parse(tag)
+  |> result.map(lid_u_keywords)
+  |> result.unwrap([])
+}
+
+fn lid_u_keywords(lid: tags.LocaleId) -> List(#(String, String)) {
+  lid.extensions
+  |> list.filter_map(fn(ext) {
+    case ext {
+      tags.UExt(keywords:, ..) -> Ok(keywords)
+      _ -> Error(Nil)
+    }
+  })
+  |> list.flatten
 }
 
 /// Build the resolved [[Locale]] string: data locale + supported u-keywords.
@@ -2368,6 +2370,18 @@ fn dtf_slots_with_defaults(
   dtf_slots_required(state, locales_v, options_v, default_components, "any")
 }
 
+/// Keep only the pairs whose value is present.
+fn present_pairs(
+  pairs: List(#(String, Option(String))),
+) -> List(#(String, String)) {
+  list.filter_map(pairs, fn(kv) {
+    case kv {
+      #(k, Some(v)) -> Ok(#(k, v))
+      #(_, None) -> Error(Nil)
+    }
+  })
+}
+
 fn dtf_slots_required(
   state: State,
   locales_v: JsValue,
@@ -2625,41 +2639,25 @@ fn dtf_slots_required(
     },
   )
   // Expand styles / apply defaults into the formatting components ("c:" keys).
+  let user_date =
+    present_pairs([
+      #("c:weekday", weekday),
+      #("c:era", era),
+      #("c:year", year),
+      #("c:month", month),
+      #("c:day", day),
+    ])
+  let user_time =
+    present_pairs([
+      #("c:dayPeriod", day_period),
+      #("c:hour", hour),
+      #("c:minute", minute),
+      #("c:second", second),
+      #("c:fractionalSecondDigits", option.map(fractional, int.to_string)),
+      #("c:timeZoneName", tz_name_opt),
+    ])
   let #(c_date, c_time) = case date_style, time_style, required_present {
     None, None, False -> {
-      let user_date =
-        list.filter_map(
-          [
-            #("c:weekday", weekday),
-            #("c:era", era),
-            #("c:year", year),
-            #("c:month", month),
-            #("c:day", day),
-          ],
-          fn(kv) {
-            case kv {
-              #(k, Some(v)) -> Ok(#(k, v))
-              #(_, None) -> Error(Nil)
-            }
-          },
-        )
-      let user_time =
-        list.filter_map(
-          [
-            #("c:dayPeriod", day_period),
-            #("c:hour", hour),
-            #("c:minute", minute),
-            #("c:second", second),
-            #("c:fractionalSecondDigits", option.map(fractional, int.to_string)),
-            #("c:timeZoneName", tz_name_opt),
-          ],
-          fn(kv) {
-            case kv {
-              #(k, Some(v)) -> Ok(#(k, v))
-              #(_, None) -> Error(Nil)
-            }
-          },
-        )
       let merge = fn(
         user: List(#(String, String)),
         defaults: List(#(String, String)),
@@ -2688,39 +2686,7 @@ fn dtf_slots_required(
         ),
       )
     }
-    None, None, True -> #(
-      list.filter_map(
-        [
-          #("c:weekday", weekday),
-          #("c:era", era),
-          #("c:year", year),
-          #("c:month", month),
-          #("c:day", day),
-        ],
-        fn(kv) {
-          case kv {
-            #(k, Some(v)) -> Ok(#(k, v))
-            #(_, None) -> Error(Nil)
-          }
-        },
-      ),
-      list.filter_map(
-        [
-          #("c:dayPeriod", day_period),
-          #("c:hour", hour),
-          #("c:minute", minute),
-          #("c:second", second),
-          #("c:fractionalSecondDigits", option.map(fractional, int.to_string)),
-          #("c:timeZoneName", tz_name_opt),
-        ],
-        fn(kv) {
-          case kv {
-            #(k, Some(v)) -> Ok(#(k, v))
-            #(_, None) -> Error(Nil)
-          }
-        },
-      ),
-    )
+    None, None, True -> #(user_date, user_time)
     ds, ts, _ -> #(date_style_components(ds), time_style_components(ts))
   }
   let has_hour = list.any(c_time, fn(kv) { kv.0 == "c:hour" })
@@ -4279,26 +4245,7 @@ fn dtf_format_parts_number(
   slots: Dict(String, JsValue),
   date_v: JsValue,
 ) -> Result(#(List(fmt.Part), State), Thrown) {
-  use #(tv, state) <- result.try(case date_v {
-    JsUndefined -> Ok(#(value.Finite(now_ms()), state))
-    _ -> coerce.js_to_number(state, date_v)
-  })
-  use tv_f <- result.try(case tv {
-    value.Finite(f) -> {
-      // TimeClip truncates toward zero before the range check.
-      let f = int.to_float(float.truncate(f))
-      case float.absolute_value(f) <=. 8.64e15 {
-        True -> Ok(f)
-        False -> throw_range(state, "Invalid time value")
-      }
-    }
-    _ -> throw_range(state, "Invalid time value")
-  })
-  let offset = case slot_bool(slots, "tzSystem") {
-    Some(True) -> 0 - ffi_tz_offset_minutes(float.truncate(tv_f))
-    _ -> slot_int(slots, "tzOffsetMinutes") |> option.unwrap(0)
-  }
-  let fields = fmt.fields_from_epoch_ms(tv_f, offset)
+  use #(fields, state) <- result.try(dtf_fields_number(state, slots, date_v))
   let parts = build_dtf_parts(slots, fields)
   let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
   Ok(#(apply_numbering_system_dtf(parts, nu), state))
@@ -4707,9 +4654,10 @@ fn dtf_range_parts(
         "Intl.DateTimeFormat range arguments must be of the same type",
       )
   })
-  case dtf_collapsed_range(state, slots, x_v, y_v) {
-    Ok(Some(#(parts, state))) -> Ok(#(parts, state))
-    Ok(None) -> {
+  use collapsed <- result.try(dtf_collapsed_range(state, slots, x_v, y_v))
+  case collapsed {
+    Some(#(parts, state)) -> Ok(#(parts, state))
+    None -> {
       use #(x_parts, state) <- result.try(dtf_format_parts(state, slots, x_v))
       use #(y_parts, state) <- result.try(dtf_format_parts(state, slots, y_v))
       case fmt.parts_to_string(x_parts) == fmt.parts_to_string(y_parts) {
@@ -4725,7 +4673,6 @@ fn dtf_range_parts(
           ))
       }
     }
-    Error(e) -> Error(e)
   }
 }
 
@@ -4831,6 +4778,7 @@ fn dtf_fields_number(
   })
   use tv_f <- result.try(case tv {
     value.Finite(f) -> {
+      // TimeClip truncates toward zero before the range check.
       let f = int.to_float(float.truncate(f))
       case float.absolute_value(f) <=. 8.64e15 {
         True -> Ok(f)
@@ -5375,11 +5323,7 @@ fn host_locale_case(
     JsObject(state.builtins.string.prototype),
   ))
   case helpers.is_callable(state.heap, case_fn) {
-    True ->
-      case state.call(state, case_fn, JsString(pre), []) {
-        Ok(#(v, state)) -> Ok(#(v, state))
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
+    True -> state.call(state, case_fn, JsString(pre), [])
     False ->
       Ok(#(
         JsString(case upper {
@@ -6054,14 +5998,8 @@ fn take_designator(
 }
 
 fn parse_duration_number(s: String) -> Result(Float, Nil) {
-  case float.parse(s) {
-    Ok(v) -> Ok(v)
-    Error(Nil) ->
-      case int.parse(s) {
-        Ok(v) -> Ok(int.to_float(v))
-        Error(Nil) -> Error(Nil)
-      }
-  }
+  float.parse(s)
+  |> result.lazy_or(fn() { int.parse(s) |> result.map(int.to_float) })
 }
 
 /// PartitionDurationFormatPattern — mirrors ECMA-402 Intl.DurationFormat §1.1.7.
@@ -6423,7 +6361,7 @@ fn segments_containing(
     _ -> 0
   }
   let segments = fmt.segment_string(input, granularity)
-  let total = string_utf16_length(input)
+  let total = fmt.utf16_len(input)
   case idx < 0 || idx >= total {
     True -> Ok(#(JsUndefined, state))
     False -> {
@@ -6447,16 +6385,6 @@ fn segments_containing(
   }
 }
 
-fn string_utf16_length(s: String) -> Int {
-  string.to_utf_codepoints(s)
-  |> list.fold(0, fn(n, cp) {
-    case string.utf_codepoint_to_int(cp) > 0xffff {
-      True -> n + 2
-      False -> n + 1
-    }
-  })
-}
-
 fn segment_iterator_next(
   state: State,
   ref: Ref,
@@ -6477,7 +6405,7 @@ fn segment_iterator_next(
       Ok(#(res, state))
     }
     Ok(#(s, start, wl)) -> {
-      let new_pos = start + string_utf16_length(s)
+      let new_pos = start + fmt.utf16_len(s)
       let heap =
         heap.update(state.heap, ref, fn(slot) {
           case slot {
@@ -6521,20 +6449,10 @@ fn locale_lid(slots: Dict(String, JsValue)) -> Option(tags.LocaleId) {
 }
 
 fn locale_u_kw(slots: Dict(String, JsValue), key: String) -> Option(String) {
-  case locale_lid(slots) {
-    Some(lid) ->
-      lid.extensions
-      |> list.filter_map(fn(ext) {
-        case ext {
-          tags.UExt(keywords:, ..) -> Ok(keywords)
-          _ -> Error(Nil)
-        }
-      })
-      |> list.flatten
-      |> list.key_find(key)
-      |> option.from_result
-    None -> None
-  }
+  use lid <- option.then(locale_lid(slots))
+  lid_u_keywords(lid)
+  |> list.key_find(key)
+  |> option.from_result
 }
 
 fn locale_getter(

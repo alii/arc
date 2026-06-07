@@ -1873,20 +1873,14 @@ fn char_at(bytes: BitArray, pos: Int) -> String {
 }
 
 /// Get a substring from the byte array at [start, start+len).
-fn byte_slice(bytes: BitArray, start: Int, len: Int) -> String {
-  case bit_array.slice(bytes, start, len) {
-    Ok(s) ->
-      case bit_array.to_string(s) {
-        Ok(str) -> str
-        Error(_) -> ""
-      }
-    Error(_) -> ""
-  }
-}
+///
+/// The source binary comes from an already-valid Gleam String and every
+/// offset the lexer produces is a char boundary, so the FFI skips the UTF-8
+/// re-validation that bit_array.to_string would perform on every token.
+/// Out-of-range slices return "".
+@external(erlang, "arc_parser_ffi", "unsafe_byte_slice")
+fn byte_slice(bytes: BitArray, start: Int, len: Int) -> String
 
-fn drop_bytes(bytes: BitArray, pos: Int) -> BitArray {
-  case bit_array.slice(bytes, pos, bit_array.byte_size(bytes) - pos) {
-    Ok(rest) -> rest
-    Error(Nil) -> <<>>
-  }
-}
+/// Tail of the byte array from byte offset `pos`. Out-of-range returns <<>>.
+@external(erlang, "arc_parser_ffi", "drop_bytes")
+fn drop_bytes(bytes: BitArray, pos: Int) -> BitArray

@@ -22,7 +22,6 @@
 -export([float_same_term/2]).
 -export([unique_positive_integer/0]).
 -export([run_compile_task/2]).
--export([with_exec_min_heap/1]).
 -export([heap_read/2]).
 
 %% Direct map lookup returning a Gleam Option. Hot path: the VM heap is a
@@ -66,40 +65,13 @@ run_compile_task(SourceBytes, Task) ->
             erlang:exit(Reason)
     end.
 
-%% Run a 0-arity bytecode-execution task with this process's minimum heap
-%% size raised, restoring the previous value afterwards. The interpreter
-%% allocates heavily (every step rebuilds small tuples/maps), so starting
-%% from the default 233-word heap means the generational GC re-copies the
-%% growing live set dozens of times before the heap reaches a workable
-%% size — string-building loops were superlinear purely from that growth
-%% thrash. An 8M-word (64MB on 64-bit) floor skips the ramp-up entirely
-%% while staying cheap enough for the test262 runner's parallel per-test
-%% processes. Same trick as run_compile_task above, but in-process: the
-%% caller needs the result and the heap stays useful after the script ends.
-%%
-%% If the embedder capped the process with max_heap_size (the test runner
-%% kills workers above 10M words), the floor is clamped to a quarter of
-%% that cap: the young and old generations can each sit at the minimum
-%% size, so an uncapped floor would make the post-GC total exceed the cap
-%% and get healthy processes killed.
--define(EXEC_MIN_HEAP_WORDS, 8388608).
-
-with_exec_min_heap(Task) ->
-    Task().
-
-with_exec_min_heap_disabled(Task) ->
-    Floor = case erlang:process_info(self(), max_heap_size) of
-        {max_heap_size, #{size := Cap}} when Cap > 0 ->
-            min(?EXEC_MIN_HEAP_WORDS, Cap div 4);
-        _ ->
-            ?EXEC_MIN_HEAP_WORDS
-    end,
-    Old = erlang:process_flag(min_heap_size, Floor),
-    try
-        Task()
-    after
-        erlang:process_flag(min_heap_size, Old)
-    end.
+%% NOTE: an exec-wide min_heap_size floor (raising this process's minimum
+%% heap for the duration of bytecode execution) was tried twice and reverted
+%% twice: a large floor (8M words) makes the mutator walk a 64MB young heap
+%% and costs 40-60% on tight interpreter loops (arith/call microbenches)
+%% through cache locality, and it interacts badly with embedders that cap
+%% the process with max_heap_size. Keep exec heap flags default; oversized
+%% transient parse/compile heaps are handled by run_compile_task above.
 
 %% Exact term equality for floats (=:=). Distinguishes -0.0 from +0.0
 %% (OTP 27+) — used by SameValue (§7.2.11).
@@ -494,3 +466,4 @@ cancel_timer(TRef) ->
 
 unique_positive_integer() ->
     erlang:unique_integer([positive]).
+

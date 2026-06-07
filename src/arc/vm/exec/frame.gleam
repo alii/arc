@@ -92,7 +92,12 @@ pub fn setup_locals(
         JsUndefined,
       )
     False -> {
-      let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
+      // Plain `case` (not option.map |> option.unwrap) — avoids allocating
+      // a fun for the constructor per call on this hot path.
+      let home = case home_object {
+        Some(ref) -> JsObject(ref)
+        None -> JsUndefined
+      }
       setup_locals_seeded(
         env_values,
         callee_template.lexical,

@@ -82,13 +82,6 @@ pub fn new_repl_env(global_object: Ref) -> ReplEnv {
 // Public functions
 // ============================================================================
 
-/// Run `task` with this process's minimum heap size raised for the duration
-/// of bytecode execution (restored afterwards). Avoids generational-GC
-/// growth thrash while the interpreter's live set ramps up — see
-/// `with_exec_min_heap` in arc_vm_ffi.erl.
-@external(erlang, "arc_vm_ffi", "with_exec_min_heap")
-fn with_exec_min_heap(task: fn() -> a) -> a
-
 /// Run a function template with a globalThis object, then drain microtasks.
 /// No macrotask loop — for that, pass a driver to `run_with`.
 pub fn run(
@@ -112,7 +105,6 @@ pub fn run_with(
   global_object: Ref,
   finish: fn(State) -> State,
 ) -> Result(Completion, VmError) {
-  use <- with_exec_min_heap
   let executed =
     interpreter.init_state(func, heap, builtins, global_object, False)
     |> interpreter.execute_inner()
@@ -133,7 +125,6 @@ pub fn run_module(
   seeds: List(#(Int, JsValue)),
   finish: fn(State) -> State,
 ) -> ModuleResult {
-  use <- with_exec_min_heap
   let locals = interpreter.init_module_locals(func, seeds)
   let state =
     interpreter.new_state(
@@ -298,7 +289,6 @@ pub fn run_and_drain_repl(
   builtins: Builtins,
   env: ReplEnv,
 ) -> Result(#(Completion, ReplEnv), VmError) {
-  use <- with_exec_min_heap
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
   let this_val = JsObject(env.global_object)
   let locals = interpreter.init_top_level_locals(func, this_val)

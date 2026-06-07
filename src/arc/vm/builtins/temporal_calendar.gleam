@@ -483,14 +483,11 @@ fn hebrew_elapsed_days(year: Int) -> Int {
   }
 }
 
-fn hebrew_year_length_correction(year: Int) -> Int {
-  let ny0 = hebrew_elapsed_days(year - 1)
-  let ny1 = hebrew_elapsed_days(year)
-  let ny2 = hebrew_elapsed_days(year + 1)
-  case ny2 - ny1 == 356 {
+fn hebrew_year_length_correction(e0: Int, e1: Int, e2: Int) -> Int {
+  case e2 - e1 == 356 {
     True -> 2
     False ->
-      case ny1 - ny0 == 382 {
+      case e1 - e0 == 382 {
         True -> 1
         False -> 0
       }
@@ -499,17 +496,44 @@ fn hebrew_year_length_correction(year: Int) -> Int {
 
 /// Epoch days of Tishri 1 in the given hebrew year.
 fn hebrew_new_year(year: Int) -> Int {
-  hebrew_epoch + hebrew_elapsed_days(year) + hebrew_year_length_correction(year)
+  let e0 = hebrew_elapsed_days(year - 1)
+  let e1 = hebrew_elapsed_days(year)
+  let e2 = hebrew_elapsed_days(year + 1)
+  hebrew_epoch + e1 + hebrew_year_length_correction(e0, e1, e2)
+}
+
+/// Per-year shape, computed once and threaded through month arithmetic so a
+/// date conversion needs only a handful of hebrew_elapsed_days calls instead
+/// of several per month touched.
+type HebrewYearShape {
+  HebrewYearShape(new_year: Int, length: Int, leap: Bool)
+}
+
+fn hebrew_year_shape(year: Int) -> HebrewYearShape {
+  let e0 = hebrew_elapsed_days(year - 1)
+  let e1 = hebrew_elapsed_days(year)
+  let e2 = hebrew_elapsed_days(year + 1)
+  let e3 = hebrew_elapsed_days(year + 2)
+  let ny = hebrew_epoch + e1 + hebrew_year_length_correction(e0, e1, e2)
+  let ny_next = hebrew_epoch + e2 + hebrew_year_length_correction(e1, e2, e3)
+  HebrewYearShape(
+    new_year: ny,
+    length: ny_next - ny,
+    leap: hebrew_is_leap(year),
+  )
 }
 
 fn hebrew_year_length(year: Int) -> Int {
-  hebrew_new_year(year + 1) - hebrew_new_year(year)
+  hebrew_year_shape(year).length
 }
 
 /// Days in ordinal month (civil order: 1 = Tishri).
 fn hebrew_days_in_month(year: Int, month: Int) -> Int {
-  let leap = hebrew_is_leap(year)
-  let ylen = hebrew_year_length(year)
+  hebrew_shape_days_in_month(hebrew_year_shape(year), month)
+}
+
+fn hebrew_shape_days_in_month(shape: HebrewYearShape, month: Int) -> Int {
+  let HebrewYearShape(length: ylen, leap:, ..) = shape
   case month {
     1 -> 30
     2 ->
@@ -565,16 +589,23 @@ fn hebrew_months_in_year(year: Int) -> Int {
 }
 
 fn hebrew_to_days(year: Int, month: Int, day: Int) -> Int {
-  hebrew_new_year(year) + hebrew_days_before_month(year, month) + day - 1
+  let shape = hebrew_year_shape(year)
+  shape.new_year + hebrew_days_before_month(shape, month) + day - 1
 }
 
-fn hebrew_days_before_month(year: Int, month: Int) -> Int {
-  sum_months(year, 1, month, 0)
+fn hebrew_days_before_month(shape: HebrewYearShape, month: Int) -> Int {
+  sum_months(shape, 1, month, 0)
 }
 
-fn sum_months(year: Int, m: Int, until: Int, acc: Int) -> Int {
+fn sum_months(shape: HebrewYearShape, m: Int, until: Int, acc: Int) -> Int {
   case m < until {
-    True -> sum_months(year, m + 1, until, acc + hebrew_days_in_month(year, m))
+    True ->
+      sum_months(
+        shape,
+        m + 1,
+        until,
+        acc + hebrew_shape_days_in_month(shape, m),
+      )
     False -> acc
   }
 }
@@ -583,10 +614,29 @@ fn hebrew_from_days(date: Int) -> CalDate {
   // Approximate year, then adjust.
   let approx = floor_div(98_496 * { date - hebrew_epoch }, 35_975_351) + 1
   let y = adjust_year(date, approx, hebrew_new_year)
-  let months = hebrew_months_in_year(y)
-  let #(m, d) =
-    scan_months(date, y, 1, months, fn(yy, mm) { hebrew_to_days(yy, mm, 1) })
+  let shape = hebrew_year_shape(y)
+  let months = case shape.leap {
+    True -> 13
+    False -> 12
+  }
+  let #(m, d) = hebrew_scan_months(date, shape, 1, months, shape.new_year)
   CalDate(y, m, d)
+}
+
+/// Find the month containing `date` by walking month starts incrementally;
+/// returns #(month, day).
+fn hebrew_scan_months(
+  date: Int,
+  shape: HebrewYearShape,
+  m: Int,
+  max: Int,
+  start: Int,
+) -> #(Int, Int) {
+  let next = start + hebrew_shape_days_in_month(shape, m)
+  case m < max && date >= next {
+    True -> hebrew_scan_months(date, shape, m + 1, max, next)
+    False -> #(m, date - start + 1)
+  }
 }
 
 // ============================================================================

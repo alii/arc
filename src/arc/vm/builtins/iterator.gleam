@@ -1194,13 +1194,14 @@ fn consumer_with_callback(
   }
 }
 
-/// §7.4.8 IteratorStepValue: call next(obj), require result is Object,
-/// read .done — if truthy return None; else read .value return Some.
-fn iterator_step_value(
+/// Shared §7.4.6/§7.4.8 prefix: call next(obj), require the result is an
+/// Object, read .done; continue with the result object and the done flag.
+fn iterator_step_result(
   state: State,
   obj: JsValue,
   next_method: JsValue,
-) -> #(State, Result(Option(JsValue), JsValue)) {
+  cont: fn(JsValue, Bool, State) -> #(State, Result(a, JsValue)),
+) -> #(State, Result(a, JsValue)) {
   case state.call(state, next_method, obj, []) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(result, state)) ->
@@ -1211,20 +1212,30 @@ fn iterator_step_value(
             result,
             Named("done"),
           ))
-          case value.is_truthy(done) {
-            True -> #(state, Ok(None))
-            False -> {
-              use v, state <- state.try_op(object.get_value_of(
-                state,
-                result,
-                Named("value"),
-              ))
-              #(state, Ok(Some(v)))
-            }
-          }
+          cont(result, value.is_truthy(done), state)
         }
         _ -> type_error_any(state, "Iterator result is not an object")
       }
+  }
+}
+
+/// §7.4.8 IteratorStepValue: if done return None; else read .value.
+fn iterator_step_value(
+  state: State,
+  obj: JsValue,
+  next_method: JsValue,
+) -> #(State, Result(Option(JsValue), JsValue)) {
+  use result, done, state <- iterator_step_result(state, obj, next_method)
+  case done {
+    True -> #(state, Ok(None))
+    False -> {
+      use v, state <- state.try_op(object.get_value_of(
+        state,
+        result,
+        Named("value"),
+      ))
+      #(state, Ok(Some(v)))
+    }
   }
 }
 
@@ -2074,21 +2085,8 @@ fn iterator_step_done(
   obj: JsValue,
   next_method: JsValue,
 ) -> #(State, Result(Bool, JsValue)) {
-  case state.call(state, next_method, obj, []) {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(result, state)) ->
-      case result {
-        JsObject(_) -> {
-          use done, state <- state.try_op(object.get_value_of(
-            state,
-            result,
-            Named("done"),
-          ))
-          #(state, Ok(value.is_truthy(done)))
-        }
-        _ -> type_error_any(state, "Iterator result is not an object")
-      }
-  }
+  use _result, done, state <- iterator_step_result(state, obj, next_method)
+  #(state, Ok(done))
 }
 
 /// Finish a round: persist longest-mode exhaustion transitions, then build

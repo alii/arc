@@ -1,5 +1,8 @@
 -module(arc_parser_ffi).
--export([parse_float/1, decode_string_escapes/1, cook_template_string/1]).
+-export([
+    parse_float/1, decode_string_escapes/1, cook_template_string/1,
+    unsafe_byte_slice/3, drop_bytes/2
+]).
 
 -define(IS_HEX1(C),
     ((C >= $0 andalso C =< $9) orelse
@@ -7,6 +10,25 @@
      (C >= $A andalso C =< $F))).
 -define(IS_HEX4(A, B, C, D),
     (?IS_HEX1(A) andalso ?IS_HEX1(B) andalso ?IS_HEX1(C) andalso ?IS_HEX1(D))).
+
+%% Slice [Start, Start+Len) out of the lexer's source binary and return it as
+%% a Gleam String WITHOUT re-validating UTF-8. The lexer's source binary comes
+%% from an already-valid Gleam String and every offset the lexer produces is a
+%% char boundary, so validation (bit_array:to_string's is_utf8 walk) is pure
+%% overhead. Out-of-range slices return <<>> to match bit_array.slice's
+%% previous checked behavior.
+unsafe_byte_slice(Bin, Start, Len)
+    when Start >= 0, Len >= 0, Start + Len =< byte_size(Bin) ->
+    binary:part(Bin, Start, Len);
+unsafe_byte_slice(_Bin, _Start, _Len) ->
+    <<>>.
+
+%% Tail of the source binary from byte offset Pos. Out-of-range returns <<>>,
+%% matching the previous bit_array.slice-based implementation.
+drop_bytes(Bin, Pos) when Pos >= 0, Pos < byte_size(Bin) ->
+    binary:part(Bin, Pos, byte_size(Bin) - Pos);
+drop_bytes(_Bin, _Pos) ->
+    <<>>.
 
 parse_float(S) ->
     try

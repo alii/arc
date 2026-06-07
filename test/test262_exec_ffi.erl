@@ -4,7 +4,8 @@
          get_stats/0, record_pass_path/1, get_pass_paths/0,
          list_test_files/1,
          init_config/3, get_update_mode/0, get_has_snapshot/0, get_fail_log/0,
-         init_snapshot_set/1, snapshot_contains/1]).
+         init_snapshot_set/1, snapshot_contains/1,
+         cache_get/1, cache_put/2]).
 
 %% ETS-backed atomic counters for pass/fail/skip across parallel tests.
 
@@ -69,3 +70,19 @@ init_snapshot_set(Paths) ->
 
 snapshot_contains(Path) ->
     ets:member(test262_snapshot_set, Path).
+
+%% --- Cross-test cache (booted realm, compiled harness templates) ---
+%%
+%% persistent_term so per-test worker processes get zero-copy reads of the
+%% shared immutable Gleam data. Values are deterministic for a given key, so
+%% a racing duplicate put stores an equal term (no global GC sweep).
+
+cache_get(Key) ->
+    case persistent_term:get({test262_cache, Key}, '$test262_cache_miss') of
+        '$test262_cache_miss' -> none;
+        Value -> {some, Value}
+    end.
+
+cache_put(Key, Value) ->
+    persistent_term:put({test262_cache, Key}, Value),
+    nil.

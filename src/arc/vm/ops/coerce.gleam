@@ -364,6 +364,35 @@ pub fn to_bigint_cps(
   }
 }
 
+/// §7.1.22 ToIndex (CPS): undefined → 0; else ToIntegerOrInfinity with a
+/// RangeError (using `err_msg`) outside [0, 2^53-1].
+pub fn to_index_cps(
+  state: State,
+  val: JsValue,
+  err_msg: String,
+  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case val {
+    JsUndefined -> cont(0, state)
+    _ ->
+      case js_to_number(state, val) {
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+        Ok(#(num, state)) ->
+          case num {
+            Finite(f) -> {
+              let i = value.float_to_int(f)
+              case i < 0 || i > 9_007_199_254_740_991 {
+                True -> state.range_error(state, err_msg)
+                False -> cont(i, state)
+              }
+            }
+            NaN -> cont(0, state)
+            Infinity | NegInfinity -> state.range_error(state, err_msg)
+          }
+      }
+  }
+}
+
 /// §7.1.14 StringToBigInt — decimal (with sign) or 0x/0o/0b prefixed;
 /// empty/whitespace-only → 0; anything else fails.
 pub fn string_to_bigint(s: String) -> Option(Int) {

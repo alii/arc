@@ -309,13 +309,21 @@ pub type OwnIndex {
   /// without re-reading the same slot. None when the receiver has no
   /// prototype or is not an object slot.
   OwnIndexAbsent(prototype: Option(Ref))
+  /// The ref is a Proxy — the own-index probe cannot see through it; the
+  /// caller must run the has/get traps (§10.5.7/§10.5.9). Detected on the
+  /// same heap read as the probe, so per-element callers don't pay a
+  /// separate as_proxy heap lookup.
+  OwnIndexProxy
 }
 
 /// Fast variant of `get_own_property` for integer index keys. Identical
 /// semantics, but on the Array/Arguments dense-elements hit it skips the
 /// Some(DataProperty(..)) descriptor synthesis and returns the value directly.
+/// Proxies report OwnIndexProxy instead of probing (their [[GetOwnProperty]]
+/// is a trap, not a slot read).
 pub fn get_own_index(heap: Heap, ref: Ref, idx: Int) -> OwnIndex {
   case heap.read(heap, ref) {
+    Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> OwnIndexProxy
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       case kind {
         ArrayObject(_) | value.ArgumentsObject(_) ->
@@ -3943,6 +3951,9 @@ fn ta_set_float(
 @external(erlang, "arc_typed_array_ffi", "ta_clamp_uint8")
 fn ta_clamp_uint8(tag: Int, val: Float) -> Int
 
+@external(erlang, "arc_typed_array_ffi", "ta_zeroed")
+fn ta_zeroed(byte_len: Int) -> BitArray
+
 /// Read the backing store of a non-detached ArrayBuffer slot.
 /// None when the ref isn't an ArrayBuffer or the buffer is detached.
 pub fn typed_array_buffer_data(h: Heap, buffer: Ref) -> Option(BitArray) {
@@ -4119,6 +4130,33 @@ fn jsnum_to_store_int(n: value.JsNum) -> Int {
 /// through ToNumber → ToString. Such keys on a TypedArray NEVER reach the
 /// ordinary property table (§10.4.5).
 pub fn is_canonical_numeric_string(s: String) -> Bool {
+  // Fast reject on the first byte: a canonical numeric string is the ToString
+  // of a Number, which always starts with a digit, '-' (negatives/-0/
+  // -Infinity), 'I' (Infinity) or 'N' (NaN). Ordinary property names
+  // ("length", "buffer", "constructor", method names, …) bail out here
+  // without the expensive ToNumber → ToString round-trip. '+' and '.' are
+  // kept conservatively even though ToString never emits them first.
+  case s {
+    "0" <> _
+    | "1" <> _
+    | "2" <> _
+    | "3" <> _
+    | "4" <> _
+    | "5" <> _
+    | "6" <> _
+    | "7" <> _
+    | "8" <> _
+    | "9" <> _
+    | "-" <> _
+    | "+" <> _
+    | "." <> _
+    | "I" <> _
+    | "N" <> _ -> is_canonical_numeric_string_slow(s)
+    _ -> False
+  }
+}
+
+fn is_canonical_numeric_string_slow(s: String) -> Bool {
   case s {
     "-0" -> True
     _ ->
@@ -4454,5 +4492,109 @@ pub fn typed_array_encode_value(
     value.JsBigInt(value.BigInt(n)) -> ta_set_int(data, off, 64, n)
     // Callers always pass converted numerics; anything else encodes as NaN/0.
     _ -> encode_typed_number(data, off, elem_kind, value.NaN)
+  }
+}
+
+/// Encode a run of values into one concatenated element-region binary for a
+/// bulk typed-array store — only when EVERY conversion is pure: primitives
+/// whose ToNumber cannot throw (or, for BigInt views, JsBigInt values).
+/// Returns None when any value needs the observable per-element path
+/// (object coercion may run user code; Symbol/BigInt mismatches throw, and
+/// the per-element loop raises that error at the right index).
+pub fn typed_array_encode_primitives(
+  elem_kind: value.TypedArrayKind,
+  values: List(JsValue),
+) -> Option(BitArray) {
+  let size = value.typed_array_element_size(elem_kind)
+  encode_primitives_loop(
+    elem_kind,
+    size,
+    value.typed_array_is_bigint(elem_kind),
+    values,
+    [],
+  )
+}
+
+fn encode_primitives_loop(
+  elem_kind: value.TypedArrayKind,
+  size: Int,
+  bigint: Bool,
+  values: List(JsValue),
+  acc: List(BitArray),
+) -> Option(BitArray) {
+  case values {
+    [] -> Some(bit_array.concat(list.reverse(acc)))
+    [v, ..rest] -> {
+      let seg = case bigint, v {
+        True, value.JsBigInt(value.BigInt(n)) ->
+          Some(ta_set_int(ta_zeroed(size), 0, 64, n))
+        // Anything else → ToBigInt may throw (or run user code on objects).
+        True, _ -> None
+        False, JsObject(_) -> None
+        False, _ ->
+          case value.to_number(v) {
+            Ok(num) ->
+              Some(encode_typed_number(ta_zeroed(size), 0, elem_kind, num))
+            // Symbol/BigInt → TypeError; decline so the per-element path
+            // raises it at the right index.
+            Error(_to_number_throws) -> None
+          }
+      }
+      case seg {
+        Some(s) ->
+          encode_primitives_loop(elem_kind, size, bigint, rest, [s, ..acc])
+        None -> None
+      }
+    }
+  }
+}
+
+/// Read indices 0..len-1 of `ref` as plain own data values WITHOUT running
+/// any user code: Array/Arguments dense elements (with defineProperty data
+/// overrides honored) and plain-object data properties qualify. Returns None
+/// as soon as an index would need an accessor, a proxy trap, a prototype
+/// walk (hole), or any exotic [[Get]] — callers must then use the observable
+/// per-element path. Excludes object values, so a later ToNumber/ToBigInt of
+/// the extracted values cannot run user code either.
+pub fn plain_indexed_values(
+  h: Heap,
+  ref: Ref,
+  len: Int,
+) -> Option(List(JsValue)) {
+  case heap.read(h, ref) {
+    Some(ObjectSlot(kind:, properties:, elements:, ..)) ->
+      case kind {
+        // Same own-lookup order as the Array/Arguments Index read fast path:
+        // properties-dict override first, dense elements otherwise. Plain
+        // objects keep indexed props in the dict only (elements stays empty),
+        // so the shared loop mirrors their ordinary [[Get]] too.
+        ArrayObject(_) | value.ArgumentsObject(_) | value.OrdinaryObject ->
+          plain_indexed_loop(properties, elements, len - 1, [])
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+fn plain_indexed_loop(
+  properties: dict.Dict(PropertyKey, Property),
+  elements: JsElements,
+  k: Int,
+  acc: List(JsValue),
+) -> Option(List(JsValue)) {
+  case k < 0 {
+    True -> Some(acc)
+    False -> {
+      let v = case dict.get(properties, Index(k)) {
+        Ok(DataProperty(value: v, ..)) -> Some(v)
+        Ok(AccessorProperty(..)) -> None
+        Error(Nil) -> elements.get_option(elements, k)
+      }
+      case v {
+        // Object values are excluded — converting them can run user code.
+        Some(JsObject(_)) | None -> None
+        Some(v) -> plain_indexed_loop(properties, elements, k - 1, [v, ..acc])
+      }
+    }
   }
 }

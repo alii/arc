@@ -10,8 +10,9 @@ import arc/vm/opcode.{
   IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole, IrArraySpread,
   IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp, IrBoxLocal,
   IrCall, IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallEval,
-  IrCallMethod, IrCallMethodApply, IrCreateArguments, IrCreateRestArray,
-  IrDeclareEvalVar, IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
+  IrCallMethod, IrCallMethodApply, IrCmpLocalConstJump, IrCmpLocalLocalJump,
+  IrCreateArguments, IrCreateRestArray, IrDecLocal, IrDeclareEvalVar,
+  IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDefineMethodComputed, IrDefinePrivateAccessor, IrDefinePrivateField,
   IrDefinePrivateMethod, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
@@ -19,7 +20,7 @@ import arc/vm/opcode.{
   IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
   IrGetLexical, IrGetLocal, IrGetPrivateField, IrGetPrivateField2,
   IrGetPrivateFieldDyn, IrGetPrivateFieldDyn2, IrGetPrototypeOf, IrGetSuperValue,
-  IrGetSuperValue2, IrGetTemplateObject, IrGosub, IrInitGlobalLex,
+  IrGetSuperValue2, IrGetTemplateObject, IrGosub, IrIncLocal, IrInitGlobalLex,
   IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
   IrIteratorNext, IrIteratorRecord, IrIteratorRest, IrJump, IrJumpIfFalse,
   IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure, IrMakeMethod,
@@ -41,7 +42,7 @@ import arc/vm/value.{
 }
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 
 /// Resolve a list of IrOps into a FuncTemplate.
 /// The IrOps must have all scope markers already consumed (by Phase 2).
@@ -67,6 +68,8 @@ pub fn resolve(
   lexical: LexicalSlots,
   syntax_perms: SyntaxPerms,
 ) -> FuncTemplate {
+  let const_arr = tuple_array.from_list(constants)
+  let code = peephole(code, const_arr, [])
   let label_map = build_label_map(code, 0, dict.new())
   let ops = resolve_ops(code, label_map, [])
   FuncTemplate(
@@ -75,7 +78,7 @@ pub fn resolve(
     length:,
     local_count:,
     bytecode: tuple_array.from_list(ops),
-    constants: tuple_array.from_list(constants),
+    constants: const_arr,
     functions: tuple_array.from_list(functions),
     env_descriptors:,
     is_strict:,
@@ -89,6 +92,135 @@ pub fn resolve(
     lexical:,
     syntax_perms:,
   )
+}
+
+/// Peephole pass over the IR, run BEFORE label resolution so removing or
+/// fusing ops cannot invalidate jump targets (labels are still symbolic
+/// IrLabel markers; a label inside a candidate window simply prevents the
+/// pattern from matching, so no jump can land mid-fusion).
+///
+/// Rewrites (all semantics-preserving op-for-op):
+///   1. Statement-position postfix update on a plain local
+///      (GetLocal i; UnaryOp Pos; Dup; PushConst 1; BinOp Add|Sub;
+///       PutLocal i; Pop) → IncLocal/DecLocal — the Dup'd old value is
+///      immediately discarded by the trailing Pop.
+///   2. The same shape on a boxed local (or with a non-1 constant): the
+///      dead Dup/Pop pair is dropped, keeping the explicit ops.
+///   3. Dup; PutLocal/PutBoxed; Pop → PutLocal/PutBoxed (prefix updates and
+///      any other store whose expression value is discarded).
+///   4. Loop-condition compare-and-branch (GetLocal; GetLocal|PushConst;
+///      BinOp Lt|LtEq|Gt|GtEq; JumpIfFalse) → CmpLocal*Jump.
+fn peephole(
+  code: List(IrOp),
+  consts: tuple_array.TupleArray(JsValue),
+  acc: List(IrOp),
+) -> List(IrOp) {
+  case code {
+    [] -> list.reverse(acc)
+
+    // -- Pattern 1/2: postfix update statement on a plain local ----------
+    [
+      IrGetLocal(i),
+      IrUnaryOp(opcode.Pos),
+      IrDup,
+      IrPushConst(c),
+      IrBinOp(kind),
+      IrPutLocal(j),
+      IrPop,
+      ..rest
+    ]
+      if i == j
+    -> {
+      let fused = case is_const_one(consts, c), kind {
+        True, opcode.Add -> Some(IrIncLocal(i))
+        True, opcode.Sub -> Some(IrDecLocal(i))
+        _, _ -> None
+      }
+      case fused {
+        Some(op) -> peephole(rest, consts, [op, ..acc])
+        // Non-±1 update: still drop the dead Dup/Pop pair.
+        None ->
+          peephole(rest, consts, [
+            IrPutLocal(j),
+            IrBinOp(kind),
+            IrPushConst(c),
+            IrUnaryOp(opcode.Pos),
+            IrGetLocal(i),
+            ..acc
+          ])
+      }
+    }
+
+    // -- Pattern 2: postfix update statement on a boxed local ------------
+    // Same shape via GetBoxed/PutBoxed: drop the dead Dup/Pop pair.
+    [
+      IrGetBoxed(i),
+      IrUnaryOp(opcode.Pos),
+      IrDup,
+      IrPushConst(c),
+      IrBinOp(kind),
+      IrPutBoxed(j),
+      IrPop,
+      ..rest
+    ]
+      if i == j
+    ->
+      peephole(rest, consts, [
+        IrPutBoxed(j),
+        IrBinOp(kind),
+        IrPushConst(c),
+        IrUnaryOp(opcode.Pos),
+        IrGetBoxed(i),
+        ..acc
+      ])
+
+    // -- Pattern 3: dead Dup under a store whose value is discarded ------
+    // Dup; PutLocal(i); Pop ≡ PutLocal(i) (likewise PutBoxed).
+    [IrDup, IrPutLocal(i), IrPop, ..rest] ->
+      peephole(rest, consts, [IrPutLocal(i), ..acc])
+    [IrDup, IrPutBoxed(i), IrPop, ..rest] ->
+      peephole(rest, consts, [IrPutBoxed(i), ..acc])
+
+    // -- Pattern 4: fused compare-and-branch loop conditions -------------
+    [IrGetLocal(a), IrGetLocal(b), IrBinOp(kind), IrJumpIfFalse(l), ..rest] ->
+      case is_fusable_cmp(kind) {
+        True ->
+          peephole(rest, consts, [IrCmpLocalLocalJump(a, b, kind, l), ..acc])
+        False ->
+          peephole(
+            [IrGetLocal(b), IrBinOp(kind), IrJumpIfFalse(l), ..rest],
+            consts,
+            [IrGetLocal(a), ..acc],
+          )
+      }
+    [IrGetLocal(a), IrPushConst(c), IrBinOp(kind), IrJumpIfFalse(l), ..rest] ->
+      case is_fusable_cmp(kind) {
+        True ->
+          peephole(rest, consts, [IrCmpLocalConstJump(a, c, kind, l), ..acc])
+        False ->
+          peephole(
+            [IrPushConst(c), IrBinOp(kind), IrJumpIfFalse(l), ..rest],
+            consts,
+            [IrGetLocal(a), ..acc],
+          )
+      }
+
+    [op, ..rest] -> peephole(rest, consts, [op, ..acc])
+  }
+}
+
+/// Only the pure relational kinds are fused — their step semantics are
+/// exactly binop_direct / binop_with_to_primitive (no In/InstanceOf heap
+/// access, no Add string-concat split, no loose-eq coercion table).
+fn is_fusable_cmp(kind: opcode.BinOpKind) -> Bool {
+  case kind {
+    opcode.Lt | opcode.LtEq | opcode.Gt | opcode.GtEq -> True
+    _ -> False
+  }
+}
+
+fn is_const_one(consts: tuple_array.TupleArray(JsValue), index: Int) -> Bool {
+  tuple_array.unsafe_get(index, consts) == value.JsNumber(value.Finite(1.0))
 }
 
 /// Pass 1: Walk the IR, counting real ops and recording label positions.
@@ -374,6 +506,26 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.PutBoxed(index), ..acc])
     [IrPutBoxedCheckInit(index), ..rest] ->
       resolve_ops(rest, labels, [opcode.PutBoxedCheckInit(index), ..acc])
+
+    // Fused superinstructions (created by the peephole pass above)
+    [IrIncLocal(index), ..rest] ->
+      resolve_ops(rest, labels, [opcode.IncLocal(index), ..acc])
+    [IrDecLocal(index), ..rest] ->
+      resolve_ops(rest, labels, [opcode.DecLocal(index), ..acc])
+    [IrCmpLocalLocalJump(left, right, kind, label), ..rest] -> {
+      let assert Ok(pc) = dict.get(labels, label)
+      resolve_ops(rest, labels, [
+        opcode.CmpLocalLocalJump(left, right, kind, pc),
+        ..acc
+      ])
+    }
+    [IrCmpLocalConstJump(left, const_index, kind, label), ..rest] -> {
+      let assert Ok(pc) = dict.get(labels, label)
+      resolve_ops(rest, labels, [
+        opcode.CmpLocalConstJump(left, const_index, kind, pc),
+        ..acc
+      ])
+    }
 
     // Operators
     [IrBinOp(kind), ..rest] ->

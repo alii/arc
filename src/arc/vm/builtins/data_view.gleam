@@ -31,9 +31,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// 2^53 - 1, the ToIndex upper bound (§7.1.22).
-const max_safe_integer = 9_007_199_254_740_991
-
 /// Set up DataView.prototype and the DataView constructor.
 pub fn init(
   h: Heap,
@@ -147,9 +144,10 @@ fn construct(
     "First argument to DataView constructor must be an ArrayBuffer",
   )
   // Step 3: offset = ToIndex(byteOffset)
-  use offset, state <- to_index(
+  use offset, state <- coerce.to_index_cps(
     state,
     list_at(args, 1) |> option.unwrap(JsUndefined),
+    "Invalid DataView offset",
   )
   // Step 4: re-check detached — ToIndex may have run user code.
   use #(buf_len, resizable), state <- live_buffer_info(state, buf_ref)
@@ -195,7 +193,11 @@ fn construct(
         True -> resolve(None, state)
       }
     _ -> {
-      use view_len, state <- to_index(state, len_arg)
+      use view_len, state <- coerce.to_index_cps(
+        state,
+        len_arg,
+        "Invalid DataView offset",
+      )
       // Step 9.b: check against the buffer length captured BEFORE
       // ToIndex(byteLength) ran user code (a poisoned valueOf may have grown
       // a resizable buffer). resolve() re-checks the fresh length (step 14).
@@ -249,18 +251,11 @@ fn get_view_value(
   element: ViewElementType,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use view, state <- require_data_view(this, state)
-  use get_index, state <- to_index(state, first_arg_or_undefined(args))
+  use view, get_index, state <- view_and_index(this, args, state)
   let little = value.is_truthy(list_at(args, 1) |> option.unwrap(JsUndefined))
-  use size, state <- view_size(state, view)
   let elem_size = element_size(element)
-  use Nil, state <- range_check(
-    get_index + elem_size <= size,
-    state,
-    "Offset is outside the bounds of the DataView",
-  )
-  use data, state <- buffer_data(state, view.buffer)
-  case bit_array.slice(data, view.byte_offset + get_index, elem_size) {
+  use data, pos, state <- checked_view_bytes(state, view, get_index, elem_size)
+  case bit_array.slice(data, pos, elem_size) {
     Ok(chunk) -> #(state, Ok(decode(element, chunk, little)))
     Error(Nil) ->
       // Unreachable: bounds were validated above against the live buffer.
@@ -278,23 +273,14 @@ fn set_view_value(
   element: ViewElementType,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use view, state <- require_data_view(this, state)
-  // Step 2: getIndex = ToIndex(requestIndex)
-  use get_index, state <- to_index(state, first_arg_or_undefined(args))
-  // Step 3: numberValue = ToBigInt(value) / ToNumber(value)
+  use view, get_index, state <- view_and_index(this, args, state)
+  // Step 3: numberValue = ToBigInt(value) / ToNumber(value) — spec-mandated
+  // BEFORE the bounds check, so it cannot fold into checked_view_bytes.
   let value_arg = list_at(args, 1) |> option.unwrap(JsUndefined)
   use encoded, state <- encode_value(state, element, value_arg)
   let little = value.is_truthy(list_at(args, 2) |> option.unwrap(JsUndefined))
-  // Steps 5-6: out-of-bounds (incl. detached) → TypeError, then RangeError.
-  use size, state <- view_size(state, view)
   let elem_size = element_size(element)
-  use Nil, state <- range_check(
-    get_index + elem_size <= size,
-    state,
-    "Offset is outside the bounds of the DataView",
-  )
-  use data, state <- buffer_data(state, view.buffer)
-  let pos = view.byte_offset + get_index
+  use data, pos, state <- checked_view_bytes(state, view, get_index, elem_size)
   let total = bit_array.byte_size(data)
   let chunk = to_endian(encoded, little, elem_size)
   let written = case
@@ -356,6 +342,43 @@ fn require_data_view(
         "Method called on incompatible receiver: expected a DataView",
       )
   }
+}
+
+/// Shared prologue of Get/SetViewValue (§25.3.1.1-2 steps 1-2): unwrap the
+/// DataView receiver, then getIndex = ToIndex(requestIndex). CPS for `use`.
+fn view_and_index(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+  cont: fn(ViewRecord, Int, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  use view, state <- require_data_view(this, state)
+  use get_index, state <- coerce.to_index_cps(
+    state,
+    first_arg_or_undefined(args),
+    "Invalid DataView offset",
+  )
+  cont(view, get_index, state)
+}
+
+/// Shared epilogue of Get/SetViewValue (steps 5+): out-of-bounds (incl.
+/// detached) → TypeError, then RangeError; yields the live buffer bytes and
+/// the absolute byte position of the element. CPS for `use`.
+fn checked_view_bytes(
+  state: State,
+  view: ViewRecord,
+  get_index: Int,
+  elem_size: Int,
+  cont: fn(BitArray, Int, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  use size, state <- view_size(state, view)
+  use Nil, state <- range_check(
+    get_index + elem_size <= size,
+    state,
+    "Offset is outside the bounds of the DataView",
+  )
+  use data, state <- buffer_data(state, view.buffer)
+  cont(data, view.byte_offset + get_index, state)
 }
 
 /// Read `val` as an ArrayBuffer/SharedArrayBuffer ref ([[ArrayBufferData]]).
@@ -469,39 +492,6 @@ fn range_check(
   case ok {
     True -> cont(Nil, state)
     False -> state.range_error(state, msg)
-  }
-}
-
-// ============================================================================
-// §7.1.22 ToIndex
-// ============================================================================
-
-/// ToIndex(value): undefined → 0; else ToIntegerOrInfinity, RangeError when
-/// negative, infinite, or above 2^53-1. CPS for `use`.
-fn to_index(
-  state: State,
-  val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  case val {
-    JsUndefined -> cont(0, state)
-    _ ->
-      case coerce.js_to_number(state, val) {
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(num, state)) ->
-          case num {
-            Finite(f) -> {
-              let i = value.float_to_int(f)
-              case i < 0 || i > max_safe_integer {
-                True -> state.range_error(state, "Invalid DataView offset")
-                False -> cont(i, state)
-              }
-            }
-            NaN -> cont(0, state)
-            Infinity | NegInfinity ->
-              state.range_error(state, "Invalid DataView offset")
-          }
-      }
   }
 }
 

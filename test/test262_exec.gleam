@@ -70,6 +70,83 @@ pub fn init() -> Nil {
   init_stats()
   init_config(update_mode, has_snapshot, fail_log)
   init_snapshot_set(snapshot |> set.to_list)
+  warm_caches()
+}
+
+// --- Cross-test caches ---
+//
+// The booted base realm (heap + builtins + global object) and compiled
+// harness templates are immutable Gleam data, so they can be computed once
+// and shared across all per-test worker processes via persistent_term
+// (zero-copy reads). Each test starts from the shared snapshot and forks its
+// own heap on mutation, so tests stay fully isolated.
+
+const realm_cache_key = "base_realm"
+
+/// Warm the realm and common-harness caches from the main process before
+/// workers spawn, so parallel first uses don't race on cache_put.
+fn warm_caches() -> Nil {
+  let _ = boot_base_realm()
+  list.each(["assert.js", "sta.js", "doneprintHandle.js"], fn(filename) {
+    case harness_template(filename, fn() { read_harness_file(filename) }) {
+      Ok(_) -> Nil
+      Error(err) -> io.println("Warning: harness cache warm failed: " <> err)
+    }
+  })
+}
+
+/// Boot (or fetch the cached) base realm: heap + builtins + global object.
+fn boot_base_realm() -> #(Heap, common.Builtins, value.Ref) {
+  case realm_cache_get(realm_cache_key) {
+    Some(snapshot) -> snapshot
+    None -> {
+      let h = heap.new()
+      let #(h, b) = builtins.init(h)
+      let #(h, global_object) = builtins.globals(b, h)
+      let snapshot = #(h, b, global_object)
+      realm_cache_put(realm_cache_key, snapshot)
+      snapshot
+    }
+  }
+}
+
+/// Fetch the cached compiled template for a harness script, parsing and
+/// compiling (then caching) on first use. `read_source` is only called on a
+/// cache miss. Failed parses/compiles are not cached; every test that needs
+/// the file reports the same error.
+fn harness_template(
+  key: String,
+  read_source: fn() -> Result(String, String),
+) -> Result(value.FuncTemplate, String) {
+  case template_cache_get(key) {
+    Some(template) -> Ok(template)
+    None -> {
+      use source <- result.try(read_source())
+      use template <- result.map(compile_harness_source(source))
+      template_cache_put(key, template)
+      template
+    }
+  }
+}
+
+fn compile_harness_source(
+  source: String,
+) -> Result(value.FuncTemplate, String) {
+  use program <- result.try(
+    parser.parse(source, parser.Script)
+    |> result.map_error(fn(err) {
+      "harness parse: " <> parser.parse_error_to_string(err)
+    }),
+  )
+  compiler.compile_repl(program)
+  |> result.map_error(fn(err) { "harness compile: " <> string.inspect(err) })
+}
+
+fn read_harness_file(filename: String) -> Result(String, String) {
+  simplifile.read(harness_dir <> "/" <> filename)
+  |> result.map_error(fn(err) {
+    "harness read " <> filename <> ": " <> string.inspect(err)
+  })
 }
 
 /// List all test262 .js files (relative paths).
@@ -592,9 +669,7 @@ fn do_run_module(
   path: String,
   is_async: Bool,
 ) -> Result(#(Completion, value.Ref), String) {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
+  let #(h, b, global_object) = boot_base_realm()
 
   // Evaluate harness files as REPL scripts to populate globals. Async module
   // tests use the same $DONE/print protocol as scripts (doneprintHandle.js).
@@ -672,9 +747,7 @@ fn do_run_script_with_harness(
   variant: StrictnessVariant,
   is_async: Bool,
 ) -> Result(#(Completion, value.Ref), String) {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
+  let #(h, b, global_object) = boot_base_realm()
 
   // Evaluate harness files as REPL scripts to populate globals
   use #(h, env) <- result.try(eval_harness(
@@ -783,44 +856,38 @@ fn eval_harness(
         )
 
       // Evaluate print preamble first (defines print + __print_output__)
-      use #(h, env) <- result.try(eval_harness_script(print_preamble, h, b, env))
+      use preamble <- result.try(
+        harness_template("__print_preamble__", fn() { Ok(print_preamble) }),
+      )
+      use #(h, env) <- result.try(eval_harness_template(preamble, h, b, env))
 
       list.try_fold(harness_files, #(h, env), fn(acc, filename) {
         let #(heap, env) = acc
-        let path = harness_dir <> "/" <> filename
-        case simplifile.read(path) {
-          Error(err) -> Error("harness read: " <> string.inspect(err))
-          Ok(source) -> eval_harness_script(source, heap, b, env)
-        }
+        use template <- result.try(
+          harness_template(filename, fn() { read_harness_file(filename) }),
+        )
+        eval_harness_template(template, heap, b, env)
       })
     }
   }
 }
 
-/// Evaluate a single harness file as a REPL script.
-fn eval_harness_script(
-  source: String,
+/// Evaluate a compiled harness template as a REPL script.
+fn eval_harness_template(
+  template: value.FuncTemplate,
   h: Heap,
   b: common.Builtins,
   env: entry.ReplEnv,
 ) -> Result(#(Heap, entry.ReplEnv), String) {
-  case parser.parse(source, parser.Script) {
-    Error(err) -> Error("harness parse: " <> parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compiler.compile_repl(program) {
-        Error(err) -> Error("harness compile: " <> string.inspect(err))
-        Ok(template) ->
-          case entry.run_and_drain_repl(template, h, b, env) {
-            Error(vm_err) -> Error("harness vm: " <> string.inspect(vm_err))
-            Ok(#(completion, new_env)) ->
-              case completion {
-                NormalCompletion(_, new_heap) -> Ok(#(new_heap, new_env))
-                ThrowCompletion(thrown, new_heap) ->
-                  Error("harness threw: " <> inspect_thrown(thrown, new_heap))
-                YieldCompletion(_, _) -> Error("harness yielded")
-                completion.AwaitCompletion(_, _) -> Error("harness awaited")
-              }
-          }
+  case entry.run_and_drain_repl(template, h, b, env) {
+    Error(vm_err) -> Error("harness vm: " <> string.inspect(vm_err))
+    Ok(#(completion, new_env)) ->
+      case completion {
+        NormalCompletion(_, new_heap) -> Ok(#(new_heap, new_env))
+        ThrowCompletion(thrown, new_heap) ->
+          Error("harness threw: " <> inspect_thrown(thrown, new_heap))
+        YieldCompletion(_, _) -> Error("harness yielded")
+        completion.AwaitCompletion(_, _) -> Error("harness awaited")
       }
   }
 }
@@ -866,6 +933,35 @@ const beam_only_test = "test262 suite is BEAM-only"
 
 @external(erlang, "test262_exec_ffi", "init_stats")
 fn init_stats() -> Nil {
+  panic as beam_only_test
+}
+
+// The realm/template caches share one persistent_term-backed store keyed by
+// string; the two typed views below must use disjoint keys (realm_cache_key
+// vs harness filenames) since FFI bypasses the type checker.
+
+@external(erlang, "test262_exec_ffi", "cache_get")
+fn realm_cache_get(
+  _key: String,
+) -> option.Option(#(Heap, common.Builtins, value.Ref)) {
+  panic as beam_only_test
+}
+
+@external(erlang, "test262_exec_ffi", "cache_put")
+fn realm_cache_put(
+  _key: String,
+  _snapshot: #(Heap, common.Builtins, value.Ref),
+) -> Nil {
+  panic as beam_only_test
+}
+
+@external(erlang, "test262_exec_ffi", "cache_get")
+fn template_cache_get(_key: String) -> option.Option(value.FuncTemplate) {
+  panic as beam_only_test
+}
+
+@external(erlang, "test262_exec_ffi", "cache_put")
+fn template_cache_put(_key: String, _template: value.FuncTemplate) -> Nil {
   panic as beam_only_test
 }
 

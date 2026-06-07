@@ -1,5 +1,5 @@
 -module(arc_regexp_ffi).
--export([regexp_exec/4, regexp_exec_info/5, regexp_test/3, canonical_flags/1,
+-export([regexp_exec_info/5,
          byte_slice/3, byte_drop_start/2, next_char_boundary/2]).
 
 %% O(1) sub-binary slice by byte offsets. re:run returns byte indices, so
@@ -32,10 +32,6 @@ next_boundary(Bin, P, Size) ->
         16#80 -> next_boundary(Bin, P + 1, Size);
         _ -> P
     end.
-
-%% Spec order "dgimsuvy" is ascending ASCII, so byte-sort = canonical order.
-canonical_flags(Flags) ->
-    list_to_binary(lists:sort(binary_to_list(Flags))).
 
 %% Convert JS flags to re:compile options
 flags_to_opts(Flags) ->
@@ -98,14 +94,6 @@ cache_put(Key, MP) ->
             erlang:put(arc_re_mp_count, N + 1)
     end,
     erlang:put(Key, MP).
-
-%% regexp_test(Pattern, Flags, String) -> true | false
-regexp_test(Pattern, Flags, String) ->
-    case safe_run(String, Pattern, Flags, [{capture, none}]) of
-        match -> true;
-        {match, _} -> true;
-        _ -> false
-    end.
 
 %% Run with a per-process cached compiled pattern. re:compile/re:run raise
 %% badarg on a pattern PCRE can't handle (or an out-of-range offset); catch it
@@ -820,31 +808,16 @@ is_surrogate_hex(Hex) ->
 surrogate_sentinel(false) -> "(?!)";
 surrogate_sentinel(true) -> "\\x{FDD0}".
 
-%% regexp_exec(Pattern, Flags, String, Offset) -> {ok, Matches} | {error, nil}
-%% Matches = [{Start, Length}, ...] for full match + captures.
+%% regexp_exec_info(Pattern, Flags, String, Offset, Sticky)
+%%   -> {ok, {Captures, GroupCount, Names}} | {error, nil}
 %%
 %% Offset and the returned Start/Length are BYTE indices into the UTF-8
 %% binary — the Gleam caller slices with byte_slice/byte_drop_start and steps
 %% empty matches with next_char_boundary, so no grapheme conversion happens
 %% on either side. An offset past the end of the string is no-match (re:run
 %% raises badarg for it; JS semantics for lastIndex > length are a failed
-%% match).
-regexp_exec(_Pattern, _Flags, String, Offset) when Offset > byte_size(String) ->
-    {error, nil};
-%% ToLength clamps a negative lastIndex to 0 (§7.1.20); re:run raises badarg.
-regexp_exec(Pattern, Flags, String, Offset) when Offset < 0 ->
-    regexp_exec(Pattern, Flags, String, 0);
-regexp_exec(Pattern, Flags, String, Offset) ->
-    Opts = [{offset, Offset}, {capture, all, index}],
-    case safe_run(String, Pattern, Flags, Opts) of
-        {match, Captured} -> {ok, Captured};
-        _ -> {error, nil}
-    end.
-
-%% regexp_exec_info(Pattern, Flags, String, Offset, Sticky)
-%%   -> {ok, {Captures, GroupCount, Names}} | {error, nil}
-%%
-%% Like regexp_exec/4 but:
+%% match). A negative Offset is clamped to 0 (ToLength, §7.1.20).
+%% Additionally:
 %%   - Sticky=true anchors the match at Offset (JS `y` flag semantics),
 %%   - Captures is padded with {-1, 0} up to GroupCount + 1 entries (PCRE
 %%     omits trailing unset groups; JS exposes them as undefined),

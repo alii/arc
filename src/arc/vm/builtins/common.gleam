@@ -636,7 +636,15 @@ pub fn typeof_value(val: JsValue, heap: Heap(ctx)) -> String {
       case heap.read(heap, ref) {
         // Row 10: Object implements [[Call]] → "function"
         Some(ObjectSlot(kind: value.FunctionObject(..), ..)) -> "function"
-        Some(ObjectSlot(kind: value.NativeFunction(..), ..)) -> "function"
+        // Annex B §B.3.6.3: an object with the [[IsHTMLDDA]] internal slot
+        // (the $262.IsHTMLDDA / document.all emulation, identified by its
+        // reserved heap id) reports "undefined". Checked only on the
+        // native-function arm, so ordinary objects pay nothing.
+        Some(ObjectSlot(kind: value.NativeFunction(..), ..)) ->
+          case ref.id == value.html_dda_id {
+            True -> "undefined"
+            False -> "function"
+          }
         // Proxy: has [[Call]] iff target was callable at creation (§10.5.15);
         // survives revocation (typeof of revoked function proxy = "function").
         Some(ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->

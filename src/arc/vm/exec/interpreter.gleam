@@ -20,22 +20,23 @@ import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
   ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal,
   Call, CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
-  CallMethodApply, CreateArguments, CreateRestArray, DeclareEvalVar,
-  DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
-  DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
-  DefinePrivateAccessor, DefinePrivateField, DefinePrivateMethod, DeleteElem,
-  DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator, GetBoxed, GetElem,
-  GetElem2, GetEvalVar, GetField, GetField2, GetGlobal, GetIterator, GetLocal,
-  GetPrivateField, GetPrivateField2, GetPrivateFieldDyn, GetPrivateFieldDyn2,
-  GetPrototypeOf, GetSuperValue, GetSuperValue2, InitGlobalLex, InitialYield,
-  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
-  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pop, PrivateIn, PrivateInDyn, PushConst, PushTry, PutBoxed,
-  PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
-  PutLocalCheckInit, PutPrivateField, PutPrivateFieldDyn, PutSuperValue, Return,
-  Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
-  TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
+  CallMethodApply, CmpLocalConstJump, CmpLocalLocalJump, CreateArguments,
+  CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
+  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
+  DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
+  DefinePrivateMethod, DeleteElem, DeleteField, Dup, ForInNext, ForInStart,
+  GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2,
+  GetGlobal, GetIterator, GetLocal, GetPrivateField, GetPrivateField2,
+  GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue,
+  GetSuperValue2, IncLocal, InitGlobalLex, InitialYield, IteratorCheckObject,
+  IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
+  Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod,
+  NewObject, NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pop,
+  PrivateIn, PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit,
+  PutElem, PutEvalVar, PutField, PutGlobal, PutLocal, PutLocalCheckInit,
+  PutPrivateField, PutPrivateFieldDyn, PutSuperValue, Return, Rot3, SetLine,
+  SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal,
+  UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -201,23 +202,39 @@ fn frozen_array_slot(
 /// instead of two. Hot: runs once per re-entrant callback (Array.prototype.map
 /// element calls, promise jobs, ...).
 fn merge_back(parent: State, child: State, heap: Heap) -> State {
-  State(
-    ..parent,
-    heap:,
-    ctx: state.RealmCtx(
-      ..parent.ctx,
-      lexical_globals: child.ctx.lexical_globals,
-      template_objects: child.ctx.template_objects,
-      // Realms registered during the re-entrant call (ShadowRealm /
-      // $262.createRealm constructors) must survive the merge.
-      realms: child.ctx.realms,
-    ),
-    job_queue: child.job_queue,
-    outstanding: child.outstanding,
-    atomics_waiters: child.atomics_waiters,
-    timers: child.timers,
-    next_timer_id: child.next_timer_id,
-  )
+  // Fast path: the typical callback (Array.prototype.map element call, ...)
+  // touches none of the shared fields, so the child's terms are the exact
+  // terms the isolated state was built from — `==` hits BEAM's
+  // pointer-equality shortcut and each check is O(1). Skips the RealmCtx
+  // rebuild plus its extra State-field copies per re-entrant call.
+  case
+    child.ctx == parent.ctx
+    && child.job_queue == parent.job_queue
+    && child.outstanding == parent.outstanding
+    && child.atomics_waiters == parent.atomics_waiters
+    && child.timers == parent.timers
+    && child.next_timer_id == parent.next_timer_id
+  {
+    True -> State(..parent, heap:)
+    False ->
+      State(
+        ..parent,
+        heap:,
+        ctx: state.RealmCtx(
+          ..parent.ctx,
+          lexical_globals: child.ctx.lexical_globals,
+          template_objects: child.ctx.template_objects,
+          // Realms registered during the re-entrant call (ShadowRealm /
+          // $262.createRealm constructors) must survive the merge.
+          realms: child.ctx.realms,
+        ),
+        job_queue: child.job_queue,
+        outstanding: child.outstanding,
+        atomics_waiters: child.atomics_waiters,
+        timers: child.timers,
+        next_timer_id: child.next_timer_id,
+      )
+  }
 }
 
 /// The construct_fn callback that gets stored in State.
@@ -601,6 +618,803 @@ pub fn read_this_local(state: State) -> JsValue {
 /// resolve.gleam), so fetch uses unchecked element/2 — no Option box,
 /// no bounds check. Termination flows through the Return handler.
 pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
+  fast_loop(
+    state,
+    state.pc,
+    state.stack,
+    state.locals,
+    state.heap,
+    state.code,
+    state.constants,
+    state.current_line,
+  )
+}
+
+/// Hot inner loop. Carries the per-instruction-mutable hot fields (pc, stack,
+/// locals, heap, current_line) as bare arguments so the common opcodes run
+/// without allocating a fresh 21-field State record plus an Ok Result box on
+/// every bytecode step. code/constants are loop-invariant within a frame and
+/// carried to skip a field load per iteration. Any opcode not handled here —
+/// and every error/throw path of the ones that are — materializes the full
+/// State once via `dispatch_slow` and falls back to the general `step`
+/// dispatcher, which re-executes the instruction from scratch (all fast paths
+/// below are effect-free before bailing, so re-execution is safe).
+fn fast_loop(
+  state: State,
+  pc: Int,
+  stack: List(JsValue),
+  locals: tuple_array.TupleArray(JsValue),
+  hp: Heap,
+  code: tuple_array.TupleArray(Op),
+  constants: tuple_array.TupleArray(JsValue),
+  line: Int,
+) -> Result(#(Completion, State), VmError) {
+  case tuple_array.unsafe_get(pc, code) {
+    SetLine(l) ->
+      fast_loop(state, pc + 1, stack, locals, hp, code, constants, l)
+
+    PushConst(index) -> {
+      let v = tuple_array.unsafe_get(index, constants)
+      fast_loop(state, pc + 1, [v, ..stack], locals, hp, code, constants, line)
+    }
+
+    Pop ->
+      case stack {
+        [_, ..rest] ->
+          fast_loop(state, pc + 1, rest, locals, hp, code, constants, line)
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    Dup ->
+      case stack {
+        [top, ..] ->
+          fast_loop(
+            state,
+            pc + 1,
+            [top, ..stack],
+            locals,
+            hp,
+            code,
+            constants,
+            line,
+          )
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    Swap ->
+      case stack {
+        [a, b, ..rest] ->
+          fast_loop(
+            state,
+            pc + 1,
+            [b, a, ..rest],
+            locals,
+            hp,
+            code,
+            constants,
+            line,
+          )
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    GetLocal(index) ->
+      case tuple_array.unsafe_get(index, locals) {
+        // TDZ — slow path rebuilds State and throws the ReferenceError.
+        JsUninitialized -> dispatch_slow(state, pc, stack, locals, hp, line)
+        v ->
+          fast_loop(
+            state,
+            pc + 1,
+            [v, ..stack],
+            locals,
+            hp,
+            code,
+            constants,
+            line,
+          )
+      }
+
+    PutLocal(index) ->
+      case stack {
+        [v, ..rest] ->
+          fast_loop(
+            state,
+            pc + 1,
+            rest,
+            tuple_array.set_unchecked(index, v, locals),
+            hp,
+            code,
+            constants,
+            line,
+          )
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    GetBoxed(index) ->
+      case tuple_array.unsafe_get(index, locals) {
+        JsObject(box_ref) ->
+          case heap.read_box(hp, box_ref) {
+            // TDZ / corrupt box — slow path throws.
+            Some(JsUninitialized) | None ->
+              dispatch_slow(state, pc, stack, locals, hp, line)
+            Some(val) ->
+              fast_loop(
+                state,
+                pc + 1,
+                [val, ..stack],
+                locals,
+                hp,
+                code,
+                constants,
+                line,
+              )
+          }
+        _not_a_box -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    PutBoxed(index) ->
+      case stack {
+        [new_value, ..rest] ->
+          case tuple_array.unsafe_get(index, locals) {
+            JsObject(box_ref) ->
+              fast_loop(
+                state,
+                pc + 1,
+                rest,
+                locals,
+                heap.write(hp, box_ref, value.BoxSlot(new_value)),
+                code,
+                constants,
+                line,
+              )
+            _not_a_box -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    Jump(target) ->
+      fast_loop(state, target, stack, locals, hp, code, constants, line)
+
+    JumpIfFalse(target) ->
+      case stack {
+        [top, ..rest] ->
+          case value.is_truthy(top) {
+            False ->
+              fast_loop(state, target, rest, locals, hp, code, constants, line)
+            True ->
+              fast_loop(state, pc + 1, rest, locals, hp, code, constants, line)
+          }
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    JumpIfTrue(target) ->
+      case stack {
+        [top, ..rest] ->
+          case value.is_truthy(top) {
+            True ->
+              fast_loop(state, target, rest, locals, hp, code, constants, line)
+            False ->
+              fast_loop(state, pc + 1, rest, locals, hp, code, constants, line)
+          }
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    JumpIfNullish(target) ->
+      case stack {
+        [JsNull, ..rest] | [JsUndefined, ..rest] ->
+          fast_loop(state, target, rest, locals, hp, code, constants, line)
+        [_, ..rest] ->
+          fast_loop(state, pc + 1, rest, locals, hp, code, constants, line)
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    BinOp(kind) ->
+      case stack {
+        [right, left, ..rest] ->
+          case kind {
+            // §13.15.3: objects need ToPrimitive (stateful), string×non-string
+            // needs js_to_string (stateful), BigInt mixes throw — all slow.
+            // string×string and number×number are pure.
+            Add ->
+              case left, right {
+                JsString(a), JsString(b) ->
+                  fast_loop(
+                    state,
+                    pc + 1,
+                    [JsString(a <> b), ..rest],
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+                JsObject(_), _
+                | _, JsObject(_)
+                | JsString(_), _
+                | _, JsString(_)
+                | value.JsBigInt(_), _
+                | _, value.JsBigInt(_)
+                -> dispatch_slow(state, pc, stack, locals, hp, line)
+                _, _ ->
+                  case operators.num_binop(left, right, operators.num_add) {
+                    Ok(result) ->
+                      fast_loop(
+                        state,
+                        pc + 1,
+                        [result, ..rest],
+                        locals,
+                        hp,
+                        code,
+                        constants,
+                        line,
+                      )
+                    // Slow path re-runs the op and throws the same error.
+                    Error(_msg) ->
+                      dispatch_slow(state, pc, stack, locals, hp, line)
+                  }
+              }
+            // Strict equality compares references — never coerces, pure.
+            opcode.StrictEq | opcode.StrictNotEq ->
+              case operators.exec_binop(kind, left, right) {
+                Ok(result) ->
+                  fast_loop(
+                    state,
+                    pc + 1,
+                    [result, ..rest],
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+                // Slow path re-runs the op and throws the same error.
+                Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+              }
+            // instanceof / in need heap + can run user code — always slow.
+            opcode.InstanceOf | opcode.In ->
+              dispatch_slow(state, pc, stack, locals, hp, line)
+            // Remaining numeric/relational/bitwise/loose-eq ops: pure when
+            // neither operand is an object (no ToPrimitive can fire —
+            // mirrors step's is_eq_coercible / object checks).
+            _other_kind ->
+              case left, right {
+                JsObject(_), _ | _, JsObject(_) ->
+                  dispatch_slow(state, pc, stack, locals, hp, line)
+                _, _ ->
+                  case operators.exec_binop(kind, left, right) {
+                    Ok(result) ->
+                      fast_loop(
+                        state,
+                        pc + 1,
+                        [result, ..rest],
+                        locals,
+                        hp,
+                        code,
+                        constants,
+                        line,
+                      )
+                    // Slow path re-runs the op and throws the same error.
+                    Error(_msg) ->
+                      dispatch_slow(state, pc, stack, locals, hp, line)
+                  }
+              }
+          }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    UnaryOp(kind) ->
+      case stack {
+        // Objects may need ToPrimitive (Neg/Pos/BitNot) — slow path decides.
+        [JsObject(_), ..] -> dispatch_slow(state, pc, stack, locals, hp, line)
+        [operand, ..rest] ->
+          case operators.exec_unaryop(kind, operand) {
+            Ok(result) ->
+              fast_loop(
+                state,
+                pc + 1,
+                [result, ..rest],
+                locals,
+                hp,
+                code,
+                constants,
+                line,
+              )
+            // Slow path re-runs the op and throws the same error.
+            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+        [] -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    // -- Fused superinstructions (resolver peephole) ---------------------
+    // Statement-position `i++;` / `i--;` on a numeric local: one locals
+    // write, no stack traffic. UnaryOp(Pos) is the identity on every
+    // JsNumber, so only the Add/Sub needs to run. Non-numbers (objects,
+    // strings, BigInt, TDZ) take the slow path's full coercion chain.
+    IncLocal(index) ->
+      case tuple_array.unsafe_get(index, locals) {
+        value.JsNumber(_) as v ->
+          case operators.num_binop(v, number_one, operators.num_add) {
+            Ok(result) ->
+              fast_loop(
+                state,
+                pc + 1,
+                stack,
+                tuple_array.set_unchecked(index, result, locals),
+                hp,
+                code,
+                constants,
+                line,
+              )
+            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    DecLocal(index) ->
+      case tuple_array.unsafe_get(index, locals) {
+        value.JsNumber(_) as v ->
+          case operators.exec_binop(opcode.Sub, v, number_one) {
+            Ok(result) ->
+              fast_loop(
+                state,
+                pc + 1,
+                stack,
+                tuple_array.set_unchecked(index, result, locals),
+                hp,
+                code,
+                constants,
+                line,
+              )
+            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    // Fused loop-condition compare-and-branch. Mirrors the BinOp fast
+    // path's purity rules: objects (ToPrimitive can run user code) and
+    // TDZ sentinels bail to the slow path.
+    CmpLocalLocalJump(left_idx, right_idx, kind, target) -> {
+      let left = tuple_array.unsafe_get(left_idx, locals)
+      let right = tuple_array.unsafe_get(right_idx, locals)
+      case left, right {
+        JsObject(_), _
+        | _, JsObject(_)
+        | JsUninitialized, _
+        | _, JsUninitialized
+        -> dispatch_slow(state, pc, stack, locals, hp, line)
+        _, _ ->
+          case operators.exec_binop(kind, left, right) {
+            Ok(result) ->
+              case value.is_truthy(result) {
+                True ->
+                  fast_loop(
+                    state,
+                    pc + 1,
+                    stack,
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+                False ->
+                  fast_loop(
+                    state,
+                    target,
+                    stack,
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+              }
+            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+      }
+    }
+
+    CmpLocalConstJump(left_idx, const_index, kind, target) -> {
+      let left = tuple_array.unsafe_get(left_idx, locals)
+      let right = tuple_array.unsafe_get(const_index, constants)
+      case left, right {
+        JsObject(_), _
+        | _, JsObject(_)
+        | JsUninitialized, _
+        | _, JsUninitialized
+        -> dispatch_slow(state, pc, stack, locals, hp, line)
+        _, _ ->
+          case operators.exec_binop(kind, left, right) {
+            Ok(result) ->
+              case value.is_truthy(result) {
+                True ->
+                  fast_loop(
+                    state,
+                    pc + 1,
+                    stack,
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+                False ->
+                  fast_loop(
+                    state,
+                    target,
+                    stack,
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+              }
+            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+      }
+    }
+
+    // -- Dense-array computed access -------------------------------------
+    // `a[i]` reads on Array/Arguments with an integral number key: pure
+    // heap probe, no State materialization. Mirrors to_property_key's
+    // number arm + get_value's ArrayObject/ArgumentsObject Index fast path.
+    // A dict override at the index (defineProperty accessor/attributes) or
+    // a hole (prototype walk) bails to the generic slow path.
+    GetElem ->
+      case stack {
+        [value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] -> {
+          // +. 0.0 normalizes -0.0 → +0.0, same as to_property_key.
+          let n = f +. 0.0
+          let idx = float.truncate(n)
+          case int.to_float(idx) == n && idx >= 0 && idx <= 4_294_967_294 {
+            False -> dispatch_slow(state, pc, stack, locals, hp, line)
+            True ->
+              case heap.read(hp, ref) {
+                Some(ObjectSlot(
+                  kind: ArrayObject(_),
+                  properties:,
+                  elements: els,
+                  ..,
+                ))
+                | Some(ObjectSlot(
+                    kind: value.ArgumentsObject(_),
+                    properties:,
+                    elements: els,
+                    ..,
+                  )) ->
+                  case dict.has_key(properties, value.Index(idx)) {
+                    True -> dispatch_slow(state, pc, stack, locals, hp, line)
+                    False ->
+                      case elements.get_option(els, idx) {
+                        Some(v) ->
+                          fast_loop(
+                            state,
+                            pc + 1,
+                            [v, ..rest],
+                            locals,
+                            hp,
+                            code,
+                            constants,
+                            line,
+                          )
+                        None ->
+                          dispatch_slow(state, pc, stack, locals, hp, line)
+                      }
+                  }
+                _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+              }
+          }
+        }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    // `a[i] = v` on a plain Array with an integral number key. Two shapes:
+    //   - overwrite of a present dense element: an own writable data
+    //     property by construction — write elements in place;
+    //   - hole/append: allowed when the prototype chain has no property at
+    //     the index (a setter or non-writable data prop up the chain would
+    //     hijack the store — §10.1.9.2 step 2) and growth passes the
+    //     §10.4.2.1 step 2.h extensible + writable-length check.
+    // Everything else (dict override, sparse proto, exotic kinds, length
+    // overflow, primitives) bails to the generic set_value chain.
+    PutElem ->
+      case stack {
+        [val, value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] -> {
+          let n = f +. 0.0
+          let idx = float.truncate(n)
+          case int.to_float(idx) == n && idx >= 0 && idx <= 4_294_967_294 {
+            False -> dispatch_slow(state, pc, stack, locals, hp, line)
+            True ->
+              case heap.read(hp, ref) {
+                Some(
+                  ObjectSlot(
+                    kind: ArrayObject(length),
+                    properties:,
+                    elements: els,
+                    prototype:,
+                    extensible:,
+                    ..,
+                  ) as slot,
+                ) ->
+                  case dict.has_key(properties, value.Index(idx)) {
+                    True -> dispatch_slow(state, pc, stack, locals, hp, line)
+                    False ->
+                      case elements.has(els, idx) {
+                        True -> {
+                          let hp =
+                            heap.write(
+                              hp,
+                              ref,
+                              ObjectSlot(
+                                ..slot,
+                                elements: elements.set(els, idx, val),
+                              ),
+                            )
+                          fast_loop(
+                            state,
+                            pc + 1,
+                            [val, ..rest],
+                            locals,
+                            hp,
+                            code,
+                            constants,
+                            line,
+                          )
+                        }
+                        False -> {
+                          let growable =
+                            idx < length
+                            || {
+                              extensible && array_length_writable(properties)
+                            }
+                          case
+                            growable
+                            && proto_chain_index_free(hp, prototype, idx)
+                          {
+                            False ->
+                              dispatch_slow(state, pc, stack, locals, hp, line)
+                            True -> {
+                              let hp =
+                                heap.write(
+                                  hp,
+                                  ref,
+                                  ObjectSlot(
+                                    ..slot,
+                                    kind: ArrayObject(int.max(length, idx + 1)),
+                                    elements: elements.set(els, idx, val),
+                                  ),
+                                )
+                              fast_loop(
+                                state,
+                                pc + 1,
+                                [val, ..rest],
+                                locals,
+                                hp,
+                                code,
+                                constants,
+                                line,
+                              )
+                            }
+                          }
+                        }
+                      }
+                  }
+                _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+              }
+          }
+        }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    // -- Named own data property on plain objects -------------------------
+    // `obj.x` read: own data-property hit on an OrdinaryObject is a pure
+    // dict probe. Misses (proto walk), accessors, and every exotic kind
+    // (Array length, String indices, Proxy, Namespace, ...) bail.
+    GetField(opcode.OpNamed(name)) ->
+      case stack {
+        [JsObject(ref), ..rest] ->
+          case heap.read(hp, ref) {
+            Some(ObjectSlot(kind: OrdinaryObject, properties:, ..)) ->
+              case dict.get(properties, Named(name)) {
+                Ok(DataProperty(value: v, ..)) ->
+                  fast_loop(
+                    state,
+                    pc + 1,
+                    [v, ..rest],
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+                _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+              }
+            _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    // `obj.x = v` overwrite of an existing own writable data property on an
+    // OrdinaryObject — mirrors set_value's fused-update branch (receiver is
+    // the object itself for PutField). Creation (needs the proto-chain
+    // setter walk), non-writable, accessors, and exotic kinds bail.
+    PutField(opcode.OpNamed(name)) ->
+      case stack {
+        [val, JsObject(ref), ..rest] ->
+          case heap.read(hp, ref) {
+            Some(ObjectSlot(kind: OrdinaryObject, properties:, ..) as slot) ->
+              case dict.get(properties, Named(name)) {
+                Ok(DataProperty(
+                  writable: True,
+                  enumerable:,
+                  configurable:,
+                  value: _,
+                )) -> {
+                  let hp =
+                    heap.write(
+                      hp,
+                      ref,
+                      ObjectSlot(
+                        ..slot,
+                        properties: dict.insert(
+                          properties,
+                          Named(name),
+                          DataProperty(
+                            value: val,
+                            writable: True,
+                            enumerable:,
+                            configurable:,
+                          ),
+                        ),
+                      ),
+                    )
+                  fast_loop(
+                    state,
+                    pc + 1,
+                    [val, ..rest],
+                    locals,
+                    hp,
+                    code,
+                    constants,
+                    line,
+                  )
+                }
+                _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+              }
+            _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    // -- Object literal construction ---------------------------------------
+    // `{}` allocation: a pure heap alloc with %Object.prototype% — mirrors
+    // the step arm exactly (state.builtins is set once per realm at startup
+    // and never reassigned, so reading it off the stale State is safe).
+    NewObject -> {
+      let #(hp, ref) =
+        common.alloc_wrapper(
+          hp,
+          OrdinaryObject,
+          state.builtins.object.prototype,
+        )
+      fast_loop(
+        state,
+        pc + 1,
+        [JsObject(ref), ..stack],
+        locals,
+        hp,
+        code,
+        constants,
+        line,
+      )
+    }
+
+    // `{name: v}` static-key property definition — pops the value, keeps the
+    // object. OrdinaryObject + extensible is exactly the step arm's
+    // define_needs_full_semantics == False region, where a raw
+    // object.set_property insert is spec-equivalent (CreateDataProperty on a
+    // fresh literal). Proxies and non-extensible receivers bail to step.
+    DefineField(opcode.OpNamed(name)) ->
+      case stack {
+        [val, JsObject(ref) as obj, ..rest] ->
+          case heap.read(hp, ref) {
+            Some(ObjectSlot(kind: OrdinaryObject, extensible: True, ..)) -> {
+              let #(hp, _) = object.set_property(hp, ref, Named(name), val)
+              fast_loop(
+                state,
+                pc + 1,
+                [obj, ..rest],
+                locals,
+                hp,
+                code,
+                constants,
+                line,
+              )
+            }
+            _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+          }
+        _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+      }
+
+    _other_op -> dispatch_slow(state, pc, stack, locals, hp, line)
+  }
+}
+
+/// Shared 1.0 for the fused IncLocal/DecLocal ops.
+const number_one = value.JsNumber(value.Finite(1.0))
+
+/// §10.4.2.4 step 12 precondition for growing an array via an index store:
+/// the virtual "length" must still be writable (default True; a
+/// defineProperty override in the dict is authoritative). Mirrors
+/// object.set_property_on_slot's length_writable probe.
+fn array_length_writable(
+  properties: dict.Dict(value.PropertyKey, value.Property),
+) -> Bool {
+  case dict.get(properties, Named("length")) {
+    Ok(DataProperty(writable: writable, ..)) -> writable
+    _ -> True
+  }
+}
+
+/// True when no object on the prototype chain has an own property at `idx` —
+/// the precondition for a hole/append element store to go straight to the
+/// receiver (OrdinarySetWithOwnDescriptor §10.1.9.2 step 2 would otherwise
+/// find a setter / non-writable property up the chain). Conservatively bails
+/// (False) on any proto kind whose index lookup is not a pure dict/elements
+/// probe (Proxy traps, TypedArray indices, String chars, ...).
+fn proto_chain_index_free(hp: Heap, proto: Option(Ref), idx: Int) -> Bool {
+  case proto {
+    None -> True
+    Some(ref) ->
+      case heap.read(hp, ref) {
+        Some(ObjectSlot(kind: OrdinaryObject, properties:, prototype:, ..))
+        | Some(ObjectSlot(
+            kind: value.ErrorObject(_),
+            properties:,
+            prototype:,
+            ..,
+          )) ->
+          case dict.has_key(properties, value.Index(idx)) {
+            True -> False
+            False -> proto_chain_index_free(hp, prototype, idx)
+          }
+        Some(ObjectSlot(
+          kind: ArrayObject(_),
+          properties:,
+          elements: els,
+          prototype:,
+          ..,
+        ))
+        | Some(ObjectSlot(
+            kind: value.ArgumentsObject(_),
+            properties:,
+            elements: els,
+            prototype:,
+            ..,
+          )) ->
+          case
+            dict.has_key(properties, value.Index(idx)) || elements.has(els, idx)
+          {
+            True -> False
+            False -> proto_chain_index_free(hp, prototype, idx)
+          }
+        _ -> False
+      }
+  }
+}
+
+/// Materialize the full State from the fast loop's bare arguments and run one
+/// instruction through the general `step` dispatcher.
+fn dispatch_slow(
+  state: State,
+  pc: Int,
+  stack: List(JsValue),
+  locals: tuple_array.TupleArray(JsValue),
+  hp: Heap,
+  line: Int,
+) -> Result(#(Completion, State), VmError) {
+  let state = State(..state, pc:, stack:, locals:, heap: hp, current_line: line)
   let op = tuple_array.unsafe_get(state.pc, state.code)
   case step(state, op) {
     Ok(new_state) -> execute_inner(new_state)
@@ -1976,6 +2790,33 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
+    // ---- Fused superinstructions (resolver peephole) -------------------
+    IncLocal(index) -> fused_update_local(state, index, Add)
+    DecLocal(index) -> fused_update_local(state, index, opcode.Sub)
+
+    CmpLocalLocalJump(left_idx, right_idx, kind, target) ->
+      case tuple_array.unsafe_get(left_idx, state.locals) {
+        JsUninitialized -> tdz_reference_error(state)
+        left ->
+          case tuple_array.unsafe_get(right_idx, state.locals) {
+            JsUninitialized -> tdz_reference_error(state)
+            right -> fused_cmp_jump(state, kind, left, right, target)
+          }
+      }
+
+    CmpLocalConstJump(left_idx, const_index, kind, target) ->
+      case tuple_array.unsafe_get(left_idx, state.locals) {
+        JsUninitialized -> tdz_reference_error(state)
+        left ->
+          fused_cmp_jump(
+            state,
+            kind,
+            left,
+            tuple_array.unsafe_get(const_index, state.constants),
+            target,
+          )
+      }
+
     // ---- Control flow ------------------------------------------------
     Return -> {
       let return_value = case state.stack {
@@ -2050,7 +2891,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               // caller may still need its own args after this call returns
               // (e.g. IrCreateRestArray runs after default-value expressions,
               // which can themselves contain calls).
-              Ok(
+              Ok(maybe_collect_at_toplevel(
                 State(
                   ..state,
                   stack: [pushed, ..stack],
@@ -2066,7 +2907,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                   call_args: saved_call_args,
                   eval_env: saved_eval_env,
                 ),
-              )
+              ))
           }
         }
       }
@@ -5068,6 +5909,171 @@ fn binop_direct(
   case operators.exec_binop(kind, left, right) {
     Ok(result) -> Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
     Error(msg) -> throw_operator_error(state, msg)
+  }
+}
+
+/// In-run heap GC trigger threshold: fresh slot ids allocated since the last
+/// collection. High enough that short programs (unit tests, test262 cases)
+/// never trigger it; long allocation-heavy scripts collect at top-level
+/// returns so dead objects stop inflating the BEAM process's live set (which
+/// every major Erlang GC must copy).
+const gc_growth_threshold = 65_536
+
+/// Mark-and-sweep the JS heap when returning to the outermost frame of an
+/// allocation-heavy script. Gated very conservatively — every VM-global
+/// channel that could hold heap refs outside this State (pending jobs,
+/// timers, atomics waiters, extra realms, in-flight host promises, recorded
+/// unhandled rejections, re-entrant drives) disables collection, so the root
+/// set is exactly: this frame's stack/locals/args + lexical globals + the
+/// persistent root set (builtins, global object, module cells, template
+/// objects — all rooted at creation).
+fn maybe_collect_at_toplevel(state: State) -> State {
+  let eligible =
+    state.call_stack == []
+    // call_depth > 0 here means this is the bottom frame of a re-entrant
+    // drive (callback / generator body), where the SUSPENDED PARENT
+    // interpreter holds heap refs invisible to this State — never collect.
+    && state.call_depth == 0
+    && heap.grown_since_collect(state.heap) > gc_growth_threshold
+    && dict.size(state.ctx.realms) == 0
+    && state.atomics_waiters == []
+    && state.timers == []
+    && state.outstanding == 0
+    && state.unhandled_rejections == []
+    && option.is_none(job_queue.pop(state.job_queue))
+  case eligible {
+    False -> state
+    True ->
+      State(..state, heap: heap.compact(state.heap, state_root_ids(state)))
+  }
+}
+
+/// Heap refs reachable from this State but not in the heap's persistent root
+/// set: operand stack, locals, current args/new.target, the frame's sloppy
+/// direct-eval env, and global let/const bindings. call_stack is empty at the
+/// (gated) call site, so saved frames need no scan.
+fn state_root_ids(state: State) -> set.Set(Int) {
+  let acc = value_root_ids(state.stack, [state.ctx.global_object.id])
+  let acc = value_root_ids(tuple_array.to_list(state.locals), acc)
+  let acc = value_root_ids([state.new_target, ..state.call_args], acc)
+  let acc = case state.eval_env {
+    Some(ref) -> [ref.id, ..acc]
+    None -> acc
+  }
+  let acc =
+    dict.fold(state.ctx.lexical_globals, acc, fn(a, _name, global) {
+      case value.lexical_global_value(global) {
+        JsObject(ref) -> [ref.id, ..a]
+        _ -> a
+      }
+    })
+  set.from_list(acc)
+}
+
+fn value_root_ids(values: List(JsValue), acc: List(Int)) -> List(Int) {
+  case values {
+    [] -> acc
+    [JsObject(ref), ..rest] -> value_root_ids(rest, [ref.id, ..acc])
+    [_, ..rest] -> value_root_ids(rest, acc)
+  }
+}
+
+/// Same ReferenceError the GetLocal step arm throws for a TDZ read — the
+/// fused ops fold a GetLocal, so their TDZ path must be indistinguishable.
+fn tdz_reference_error(
+  state: State,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  state.throw_reference_error(
+    state,
+    "Cannot access variable before initialization (TDZ)",
+  )
+}
+
+/// Unwrap a step-helper result that pushed exactly one value onto the stack
+/// passed to it: return that value and the state with it popped again.
+fn pop_top(
+  r: Result(State, #(StepResult, JsValue, State)),
+  op: String,
+) -> Result(#(JsValue, State), #(StepResult, JsValue, State)) {
+  use state <- result.try(r)
+  case state.stack {
+    [top, ..rest] -> Ok(#(top, State(..state, stack: rest)))
+    [] -> Error(#(StepVmError(StackUnderflow(op)), JsUndefined, state))
+  }
+}
+
+/// Fused statement-position postfix update (IncLocal/DecLocal) — semantics
+/// are exactly the folded sequence GetLocal; UnaryOp(Pos); Dup; PushConst(1);
+/// BinOp(Add|Sub); PutLocal; Pop. Reuses the same coercion helpers as the
+/// unfused ops so every ToPrimitive call and thrown error is identical.
+fn fused_update_local(
+  state: State,
+  index: Int,
+  kind: opcode.BinOpKind,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  let next_pc = state.pc + 1
+  case tuple_array.unsafe_get(index, state.locals) {
+    JsUninitialized -> tdz_reference_error(state)
+    v -> {
+      // UnaryOp(Pos): ToNumber, via ToPrimitive for objects — mirrors the
+      // UnaryOp step arm's operand split.
+      use #(n, state) <- result.try(case v {
+        JsObject(_) ->
+          pop_top(
+            unaryop_with_to_primitive(state, opcode.Pos, v, state.stack),
+            "IncLocal",
+          )
+        _ ->
+          case operators.exec_unaryop(opcode.Pos, v) {
+            Ok(n) -> Ok(#(n, state))
+            Error(msg) -> throw_operator_error(state, msg)
+          }
+      })
+      // BinOp(Add|Sub) with the constant 1 — n is already a primitive, so
+      // Add goes through add_primitives and Sub through binop_direct,
+      // exactly like the BinOp step arm would route them.
+      use #(result, state) <- result.try(case kind {
+        Add ->
+          pop_top(add_primitives(state, n, number_one, state.stack), "IncLocal")
+        _ ->
+          pop_top(
+            binop_direct(state, kind, n, number_one, state.stack),
+            "IncLocal",
+          )
+      })
+      let locals = tuple_array.set_unchecked(index, result, state.locals)
+      Ok(State(..state, locals:, pc: next_pc))
+    }
+  }
+}
+
+/// Fused compare-and-branch (CmpLocal*Jump) — semantics are exactly the
+/// folded sequence GetLocal(s)/PushConst; BinOp(kind); JumpIfFalse(target)
+/// for the pure relational kinds (Lt/LtEq/Gt/GtEq): binop_direct for
+/// primitives, binop_with_to_primitive when an operand is an object.
+fn fused_cmp_jump(
+  state: State,
+  kind: opcode.BinOpKind,
+  left: JsValue,
+  right: JsValue,
+  target: Int,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  let next_pc = state.pc + 1
+  use #(result, state) <- result.try(case left, right {
+    JsObject(_), _ | _, JsObject(_) ->
+      pop_top(
+        binop_with_to_primitive(state, kind, left, right, state.stack),
+        "CmpLocalJump",
+      )
+    _, _ ->
+      pop_top(
+        binop_direct(state, kind, left, right, state.stack),
+        "CmpLocalJump",
+      )
+  })
+  case value.is_truthy(result) {
+    True -> Ok(State(..state, pc: next_pc))
+    False -> Ok(State(..state, pc: target))
   }
 }
 

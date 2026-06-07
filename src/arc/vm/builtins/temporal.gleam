@@ -1463,6 +1463,24 @@ fn get_overflow_option(
   #(option.unwrap(v, "constrain"), st)
 }
 
+/// GetOptionsObject + GetTemporalShowCalendarNameOption: reads the options
+/// argument and its "calendarName" option ("auto" default). Also returns the
+/// options object for callers that read further options from it.
+fn get_calendar_name_option(
+  state: State,
+  options_arg: JsValue,
+) -> Result(#(#(String, Option(Ref)), State), #(JsValue, State)) {
+  use #(opts, state) <- result.try(get_options_object(state, options_arg))
+  use #(cal_name, state) <- result.map(get_string_option(
+    state,
+    opts,
+    "calendarName",
+    ["auto", "always", "never", "critical"],
+    Some("auto"),
+  ))
+  #(#(option.unwrap(cal_name, "auto"), opts), state)
+}
+
 // ============================================================================
 // Calendar handling (iso8601 only)
 // ============================================================================
@@ -2910,6 +2928,198 @@ fn read_date_fields(
   Ok(#(DateFields(day:, era:, era_year:, month:, month_code:, year:), state))
 }
 
+/// Time-of-day fields read from a property bag (all optional).
+type TimeFields {
+  TimeFields(
+    hour: Option(Int),
+    minute: Option(Int),
+    second: Option(Int),
+    ms: Option(Int),
+    us: Option(Int),
+    ns: Option(Int),
+  )
+}
+
+const no_time_fields = TimeFields(None, None, None, None, None, None)
+
+const no_date_fields = DateFields(None, None, None, None, None, None)
+
+/// Fill a TimeRec from optional fields, defaulting each component to `base`.
+fn time_fields_apply(f: TimeFields, base: TimeRec) -> TimeRec {
+  TimeRec(
+    hour: option.unwrap(f.hour, base.hour),
+    minute: option.unwrap(f.minute, base.minute),
+    second: option.unwrap(f.second, base.second),
+    ms: option.unwrap(f.ms, base.ms),
+    us: option.unwrap(f.us, base.us),
+    ns: option.unwrap(f.ns, base.ns),
+  )
+}
+
+/// Read time fields from a bag in spec (alphabetical) order: hour,
+/// microsecond, millisecond, minute, nanosecond, second.
+fn read_time_fields(
+  state: State,
+  ref: Ref,
+) -> Result(#(TimeFields, State), #(JsValue, State)) {
+  use #(hour, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "hour",
+    to_integer_with_truncation,
+  ))
+  use #(us, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "microsecond",
+    to_integer_with_truncation,
+  ))
+  use #(ms, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "millisecond",
+    to_integer_with_truncation,
+  ))
+  use #(minute, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "minute",
+    to_integer_with_truncation,
+  ))
+  use #(ns, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "nanosecond",
+    to_integer_with_truncation,
+  ))
+  use #(second, state) <- result.map(read_bag_int_field(
+    state,
+    ref,
+    "second",
+    to_integer_with_truncation,
+  ))
+  #(TimeFields(hour:, minute:, second:, ms:, us:, ns:), state)
+}
+
+/// Date-time fields read from a property bag (all optional). `tz` is the raw
+/// `timeZone` value (JsUndefined when absent or not requested).
+type DateTimeFields {
+  DateTimeFields(
+    date: DateFields,
+    time: TimeFields,
+    offset: Option(Int),
+    tz: JsValue,
+  )
+}
+
+fn date_time_fields_all_none(f: DateTimeFields) -> Bool {
+  f.date == no_date_fields && f.time == no_time_fields && f.offset == None
+}
+
+/// Read date-time fields from a bag in spec (alphabetical) order: day, era,
+/// eraYear, hour, microsecond, millisecond, minute, month, monthCode,
+/// nanosecond, [offset], second, [timeZone], year. era/eraYear are read only
+/// for calendars with eras; offset and timeZone only when requested.
+fn read_date_time_fields(
+  state: State,
+  ref: Ref,
+  cal: String,
+  read_offset read_offset: Bool,
+  read_tz read_tz: Bool,
+) -> Result(#(DateTimeFields, State), #(JsValue, State)) {
+  use #(day, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "day",
+    to_positive_integer_with_truncation,
+  ))
+  use #(era, state) <- result.try(case tcal.has_eras(cal) {
+    True -> read_bag_era(state, ref)
+    False -> Ok(#(None, state))
+  })
+  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
+    True ->
+      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    False -> Ok(#(None, state))
+  })
+  use #(hour, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "hour",
+    to_integer_with_truncation,
+  ))
+  use #(us, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "microsecond",
+    to_integer_with_truncation,
+  ))
+  use #(ms, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "millisecond",
+    to_integer_with_truncation,
+  ))
+  use #(minute, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "minute",
+    to_integer_with_truncation,
+  ))
+  use #(month, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "month",
+    to_positive_integer_with_truncation,
+  ))
+  use #(month_code, state) <- result.try(read_month_code(state, ref))
+  use #(ns, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "nanosecond",
+    to_integer_with_truncation,
+  ))
+  use #(offset, state) <- result.try(case read_offset {
+    True -> read_bag_offset(state, ref)
+    False -> Ok(#(None, state))
+  })
+  use #(second, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "second",
+    to_integer_with_truncation,
+  ))
+  use #(tz_raw, state) <- result.try(case read_tz {
+    True -> ops_object.get_value(state, ref, Named("timeZone"), JsObject(ref))
+    False -> Ok(#(JsUndefined, state))
+  })
+  use #(year, state) <- result.map(read_bag_int_field(
+    state,
+    ref,
+    "year",
+    to_integer_with_truncation,
+  ))
+  // ToTemporalTimeZoneIdentifier: a ZonedDateTime contributes its time zone.
+  let tz = case tz_raw {
+    JsObject(tz_ref) ->
+      case heap.read(state.heap, tz_ref) {
+        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
+          JsString(time_zone)
+        _ -> tz_raw
+      }
+    _ -> tz_raw
+  }
+  #(
+    DateTimeFields(
+      date: DateFields(day:, era:, era_year:, month:, month_code:, year:),
+      time: TimeFields(hour:, minute:, second:, ms:, us:, ns:),
+      offset:,
+      tz:,
+    ),
+    state,
+  )
+}
+
 /// Resolve the arithmetic year from year/era/eraYear fields. The fields must
 /// contain a year (checked by the caller for TypeError ordering).
 fn resolve_calendar_year(cal: String, f: DateFields) -> Result(Int, TErr) {
@@ -3592,57 +3802,13 @@ fn time_from_bag(
   ref: Ref,
   options: JsValue,
 ) -> Result(#(TimeRec, State), #(JsValue, State)) {
-  use #(hour, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "hour",
-    to_integer_with_truncation,
-  ))
-  use #(us, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "microsecond",
-    to_integer_with_truncation,
-  ))
-  use #(ms, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "millisecond",
-    to_integer_with_truncation,
-  ))
-  use #(minute, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "minute",
-    to_integer_with_truncation,
-  ))
-  use #(ns, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "nanosecond",
-    to_integer_with_truncation,
-  ))
-  use #(second, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "second",
-    to_integer_with_truncation,
-  ))
-  let all = [hour, us, ms, minute, ns, second]
-  case list.all(all, fn(f) { f == None }) {
+  use #(f, state) <- result.try(read_time_fields(state, ref))
+  case f == no_time_fields {
     True ->
       type_error_result(state, "invalid property bag for Temporal.PlainTime")
     False -> {
       use #(overflow, state) <- result.try(validated_overflow(state, options))
-      let t =
-        TimeRec(
-          hour: option.unwrap(hour, 0),
-          minute: option.unwrap(minute, 0),
-          second: option.unwrap(second, 0),
-          ms: option.unwrap(ms, 0),
-          us: option.unwrap(us, 0),
-          ns: option.unwrap(ns, 0),
-        )
+      let t = time_fields_apply(f, midnight)
       case overflow {
         "reject" ->
           case is_valid_time(t) {
@@ -4251,82 +4417,16 @@ fn date_time_from_bag(
   options: JsValue,
 ) -> Result(#(#(IsoDate, TimeRec, String), State), #(JsValue, State)) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
-  use #(day, state) <- result.try(read_bag_int_field(
+  use #(f, state) <- result.try(read_date_time_fields(
     state,
     ref,
-    "day",
-    to_positive_integer_with_truncation,
-  ))
-  use #(era, state) <- result.try(case tcal.has_eras(cal) {
-    True -> read_bag_era(state, ref)
-    False -> Ok(#(None, state))
-  })
-  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
-    True ->
-      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
-    False -> Ok(#(None, state))
-  })
-  use #(hour, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "hour",
-    to_integer_with_truncation,
-  ))
-  use #(us, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "microsecond",
-    to_integer_with_truncation,
-  ))
-  use #(ms, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "millisecond",
-    to_integer_with_truncation,
-  ))
-  use #(minute, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "minute",
-    to_integer_with_truncation,
-  ))
-  use #(month, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "month",
-    to_positive_integer_with_truncation,
-  ))
-  use #(month_code, state) <- result.try(read_month_code(state, ref))
-  use #(ns, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "nanosecond",
-    to_integer_with_truncation,
-  ))
-  use #(second, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "second",
-    to_integer_with_truncation,
-  ))
-  use #(year, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "year",
-    to_integer_with_truncation,
+    cal,
+    read_offset: False,
+    read_tz: False,
   ))
   use #(overflow, state) <- result.try(validated_overflow(state, options))
-  let fields = DateFields(day:, era:, era_year:, month:, month_code:, year:)
-  use date <- terr_r(state, resolve_calendar_date(cal, fields, overflow))
-  let t =
-    TimeRec(
-      hour: option.unwrap(hour, 0),
-      minute: option.unwrap(minute, 0),
-      second: option.unwrap(second, 0),
-      ms: option.unwrap(ms, 0),
-      us: option.unwrap(us, 0),
-      ns: option.unwrap(ns, 0),
-    )
+  use date <- terr_r(state, resolve_calendar_date(cal, f.date, overflow))
+  let t = time_fields_apply(f.time, midnight)
   let t_result = case overflow {
     "reject" ->
       case is_valid_time(t) {
@@ -5114,87 +5214,15 @@ fn zoned_from_bag(
   options: JsValue,
 ) -> Result(#(#(Int, String, String), State), #(JsValue, State)) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
-  use #(day, state) <- result.try(read_bag_int_field(
+  use #(f, state) <- result.try(read_date_time_fields(
     state,
     ref,
-    "day",
-    to_positive_integer_with_truncation,
-  ))
-  use #(era, state) <- result.try(case tcal.has_eras(cal) {
-    True -> read_bag_era(state, ref)
-    False -> Ok(#(None, state))
-  })
-  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
-    True ->
-      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
-    False -> Ok(#(None, state))
-  })
-  use #(hour, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "hour",
-    to_integer_with_truncation,
-  ))
-  use #(us, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "microsecond",
-    to_integer_with_truncation,
-  ))
-  use #(ms, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "millisecond",
-    to_integer_with_truncation,
-  ))
-  use #(minute, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "minute",
-    to_integer_with_truncation,
-  ))
-  use #(month, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "month",
-    to_positive_integer_with_truncation,
-  ))
-  use #(month_code, state) <- result.try(read_month_code(state, ref))
-  use #(ns, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "nanosecond",
-    to_integer_with_truncation,
-  ))
-  use #(bag_off, state) <- result.try(read_bag_offset(state, ref))
-  use #(second, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "second",
-    to_integer_with_truncation,
+    cal,
+    read_offset: True,
+    read_tz: True,
   ))
   // timeZone is required.
-  use #(tz_val, state) <- result.try(
-    ops_object.get_value(state, ref, Named("timeZone"), JsObject(ref))
-    |> result.map(fn(p) { #(p.0, p.1) }),
-  )
-  use #(year, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "year",
-    to_integer_with_truncation,
-  ))
-  // ToTemporalTimeZoneIdentifier: a ZonedDateTime contributes its time zone.
-  let tz_val = case tz_val {
-    JsObject(tz_ref) ->
-      case heap.read(state.heap, tz_ref) {
-        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
-          JsString(time_zone)
-        _ -> tz_val
-      }
-    _ -> tz_val
-  }
-  case tz_val {
+  case f.tz {
     JsUndefined -> type_error_result(state, "timeZone is required")
     JsString(tz_str) ->
       case parse_time_zone_id(tz_str) {
@@ -5204,20 +5232,10 @@ fn zoned_from_bag(
           use #(#(dis, offset_opt, ov), state) <- result.try(
             validated_zdt_options(state, options),
           )
-          let fields =
-            DateFields(day:, era:, era_year:, month:, month_code:, year:)
-          use date <- terr_r(state, resolve_calendar_date(cal, fields, ov))
-          let t0 =
-            TimeRec(
-              hour: option.unwrap(hour, 0),
-              minute: option.unwrap(minute, 0),
-              second: option.unwrap(second, 0),
-              ms: option.unwrap(ms, 0),
-              us: option.unwrap(us, 0),
-              ns: option.unwrap(ns, 0),
-            )
+          use date <- terr_r(state, resolve_calendar_date(cal, f.date, ov))
+          let t0 = time_fields_apply(f.time, midnight)
           use t <- terr_r(state, regulate_time(t0, ov))
-          let behaviour = case bag_off {
+          let behaviour = case f.offset {
             Some(_) -> "option"
             None -> "wall"
           }
@@ -5226,7 +5244,7 @@ fn zoned_from_bag(
               date,
               t,
               behaviour,
-              option.unwrap(bag_off, 0),
+              option.unwrap(f.offset, 0),
               tz,
               dis,
               offset_opt,
@@ -5366,98 +5384,17 @@ fn relative_from_bag(
   ref: Ref,
 ) -> Result(#(RelTo, State), #(JsValue, State)) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
-  use #(day, state) <- result.try(read_bag_int_field(
+  use #(f, state) <- result.try(read_date_time_fields(
     state,
     ref,
-    "day",
-    to_positive_integer_with_truncation,
+    cal,
+    read_offset: True,
+    read_tz: True,
   ))
-  use #(era, state) <- result.try(case tcal.has_eras(cal) {
-    True -> read_bag_era(state, ref)
-    False -> Ok(#(None, state))
-  })
-  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
-    True ->
-      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
-    False -> Ok(#(None, state))
-  })
-  use #(hour, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "hour",
-    to_integer_with_truncation,
-  ))
-  use #(us, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "microsecond",
-    to_integer_with_truncation,
-  ))
-  use #(ms, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "millisecond",
-    to_integer_with_truncation,
-  ))
-  use #(minute, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "minute",
-    to_integer_with_truncation,
-  ))
-  use #(month, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "month",
-    to_positive_integer_with_truncation,
-  ))
-  use #(month_code, state) <- result.try(read_month_code(state, ref))
-  use #(ns, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "nanosecond",
-    to_integer_with_truncation,
-  ))
-  use #(bag_off, state) <- result.try(read_bag_offset(state, ref))
-  use #(second, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "second",
-    to_integer_with_truncation,
-  ))
-  use #(tz_val, state) <- result.try(
-    ops_object.get_value(state, ref, Named("timeZone"), JsObject(ref))
-    |> result.map(fn(p) { #(p.0, p.1) }),
-  )
-  use #(year, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "year",
-    to_integer_with_truncation,
-  ))
-  // ToTemporalTimeZoneIdentifier: a ZonedDateTime contributes its time zone.
-  let tz_val = case tz_val {
-    JsObject(tz_ref) ->
-      case heap.read(state.heap, tz_ref) {
-        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
-          JsString(time_zone)
-        _ -> tz_val
-      }
-    _ -> tz_val
-  }
-  let fields = DateFields(day:, era:, era_year:, month:, month_code:, year:)
-  use date <- terr_r(state, resolve_calendar_date(cal, fields, "constrain"))
-  let t0 =
-    TimeRec(
-      hour: option.unwrap(hour, 0),
-      minute: option.unwrap(minute, 0),
-      second: option.unwrap(second, 0),
-      ms: option.unwrap(ms, 0),
-      us: option.unwrap(us, 0),
-      ns: option.unwrap(ns, 0),
-    )
+  use date <- terr_r(state, resolve_calendar_date(cal, f.date, "constrain"))
+  let t0 = time_fields_apply(f.time, midnight)
   use t <- terr_r(state, regulate_time(t0, "constrain"))
-  case tz_val {
+  case f.tz {
     JsUndefined ->
       case iso_date_within_limits(date) {
         True -> Ok(#(RelPlain(date, cal), state))
@@ -5465,7 +5402,7 @@ fn relative_from_bag(
       }
     JsString(tz_str) -> {
       use tz <- terr_r(state, parse_time_zone_id(tz_str))
-      let behaviour = case bag_off {
+      let behaviour = case f.offset {
         Some(_) -> "option"
         None -> "wall"
       }
@@ -5475,7 +5412,7 @@ fn relative_from_bag(
           date,
           t,
           behaviour,
-          option.unwrap(bag_off, 0),
+          option.unwrap(f.offset, 0),
           tz,
           "compatible",
           "reject",
@@ -6085,29 +6022,16 @@ fn plain_date_method(
     Some(d) -> {
       let cal = this_calendar(state, this)
       case name {
-        "toJSON" -> #(
-          state,
-          Ok(JsString(format_iso_date(d) <> calendar_suffix("auto", cal))),
-        )
-        "toLocaleString" -> #(
+        "toJSON" | "toLocaleString" -> #(
           state,
           Ok(JsString(format_iso_date(d) <> calendar_suffix("auto", cal))),
         )
         "toString" -> {
-          use opts, state <- state.try_op(get_options_object(
+          use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
           ))
-          use cal_name, state <- state.try_op(get_string_option(
-            state,
-            opts,
-            "calendarName",
-            ["auto", "always", "never", "critical"],
-            Some("auto"),
-          ))
-          let s =
-            format_iso_date(d)
-            <> calendar_suffix(option.unwrap(cal_name, "auto"), cal)
+          let s = format_iso_date(d) <> calendar_suffix(cal_name, cal)
           #(state, Ok(JsString(s)))
         }
         "valueOf" ->
@@ -7140,8 +7064,10 @@ fn plain_time_method(
     None -> brand_error(state, "PlainTime", name)
     Some(t) ->
       case name {
-        "toJSON" -> #(state, Ok(JsString(format_iso_time(t, AutoPrec))))
-        "toLocaleString" -> #(state, Ok(JsString(format_iso_time(t, AutoPrec))))
+        "toJSON" | "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_iso_time(t, AutoPrec))),
+        )
         "toString" -> {
           use opts, state <- state.try_op(get_options_object(
             state,
@@ -7191,44 +7117,8 @@ fn plain_time_method(
             state,
             arg_at(args, 0),
           ))
-          use hour, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "hour",
-            to_integer_with_truncation,
-          ))
-          use us, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "microsecond",
-            to_integer_with_truncation,
-          ))
-          use ms, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "millisecond",
-            to_integer_with_truncation,
-          ))
-          use minute, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "minute",
-            to_integer_with_truncation,
-          ))
-          use ns, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "nanosecond",
-            to_integer_with_truncation,
-          ))
-          use second, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "second",
-            to_integer_with_truncation,
-          ))
-          let all = [hour, us, ms, minute, ns, second]
-          case list.all(all, fn(f) { f == None }) {
+          use f, state <- state.try_op(read_time_fields(state, bag))
+          case f == no_time_fields {
             True ->
               state.type_error(state, "with() requires at least one field")
             False -> {
@@ -7236,15 +7126,7 @@ fn plain_time_method(
                 state,
                 arg_at(args, 1),
               ))
-              let t2 =
-                TimeRec(
-                  hour: option.unwrap(hour, t.hour),
-                  minute: option.unwrap(minute, t.minute),
-                  second: option.unwrap(second, t.second),
-                  ms: option.unwrap(ms, t.ms),
-                  us: option.unwrap(us, t.us),
-                  ns: option.unwrap(ns, t.ns),
-                )
+              let t2 = time_fields_apply(f, t)
               case overflow {
                 "reject" ->
                   case is_valid_time(t2) {
@@ -7607,16 +7489,9 @@ fn plain_date_time_method(
           Ok(JsString(format_iso_date(d) <> " " <> format_iso_time(t, AutoPrec))),
         )
         "toString" -> {
-          use opts, state <- state.try_op(get_options_object(
+          use #(cal_name, opts), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
-          ))
-          use cal_name, state <- state.try_op(get_string_option(
-            state,
-            opts,
-            "calendarName",
-            ["auto", "always", "never", "critical"],
-            Some("auto"),
           ))
           use #(prec, su, sinc, mode), state <- state.try_op(
             to_string_time_options(state, opts),
@@ -7633,7 +7508,7 @@ fn plain_date_time_method(
             format_iso_date(d2)
             <> "T"
             <> format_iso_time(t2, prec)
-            <> calendar_suffix(option.unwrap(cal_name, "auto"), cal)
+            <> calendar_suffix(cal_name, cal)
           #(state, Ok(JsString(s)))
         }
         "valueOf" ->
@@ -7703,83 +7578,14 @@ fn plain_date_time_method(
             state,
             arg_at(args, 0),
           ))
-          use day, state <- state.try_op(read_bag_int_field(
+          use f, state <- state.try_op(read_date_time_fields(
             state,
             bag,
-            "day",
-            to_positive_integer_with_truncation,
+            cal,
+            read_offset: False,
+            read_tz: False,
           ))
-          use era, state <- state.try_op(case tcal.has_eras(cal) {
-            True -> read_bag_era(state, bag)
-            False -> Ok(#(None, state))
-          })
-          use era_year, state <- state.try_op(case tcal.has_eras(cal) {
-            True ->
-              read_bag_int_field(
-                state,
-                bag,
-                "eraYear",
-                to_integer_with_truncation,
-              )
-            False -> Ok(#(None, state))
-          })
-          use hour, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "hour",
-            to_integer_with_truncation,
-          ))
-          use us, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "microsecond",
-            to_integer_with_truncation,
-          ))
-          use ms, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "millisecond",
-            to_integer_with_truncation,
-          ))
-          use minute, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "minute",
-            to_integer_with_truncation,
-          ))
-          use month, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "month",
-            to_positive_integer_with_truncation,
-          ))
-          use month_code, state <- state.try_op(read_month_code(state, bag))
-          use ns, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "nanosecond",
-            to_integer_with_truncation,
-          ))
-          use second, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "second",
-            to_integer_with_truncation,
-          ))
-          use year, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "year",
-            to_integer_with_truncation,
-          ))
-          let all = [
-            day, hour, us, ms, minute, month, ns, second, year, era_year,
-          ]
-          case
-            list.all(all, fn(f) { f == None })
-            && month_code == None
-            && era == None
-          {
+          case date_time_fields_all_none(f) {
             True ->
               state.type_error(state, "with() requires at least one field")
             False -> {
@@ -7787,21 +7593,11 @@ fn plain_date_time_method(
                 state,
                 arg_at(args, 1),
               ))
-              let fields =
-                DateFields(day:, era:, era_year:, month:, month_code:, year:)
               use date <- terr(
                 state,
-                calendar_with_fields(cal, d, fields, overflow),
+                calendar_with_fields(cal, d, f.date, overflow),
               )
-              let t2 =
-                TimeRec(
-                  hour: option.unwrap(hour, t.hour),
-                  minute: option.unwrap(minute, t.minute),
-                  second: option.unwrap(second, t.second),
-                  ms: option.unwrap(ms, t.ms),
-                  us: option.unwrap(us, t.us),
-                  ns: option.unwrap(ns, t.ns),
-                )
+              let t2 = time_fields_apply(f.time, t)
               let t2 = case overflow {
                 "reject" -> t2
                 _ ->
@@ -8080,25 +7876,16 @@ fn plain_year_month_method(
     Some(#(y, m, rd)) -> {
       let cal = this_calendar(state, this)
       case name {
-        "toJSON" -> #(state, Ok(JsString(format_ym_cal(y, m, rd, cal, "auto"))))
-        "toLocaleString" -> #(
+        "toJSON" | "toLocaleString" -> #(
           state,
           Ok(JsString(format_ym_cal(y, m, rd, cal, "auto"))),
         )
         "toString" -> {
-          use opts, state <- state.try_op(get_options_object(
+          use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
           ))
-          use cal_name, state <- state.try_op(get_string_option(
-            state,
-            opts,
-            "calendarName",
-            ["auto", "always", "never", "critical"],
-            Some("auto"),
-          ))
-          let mode = option.unwrap(cal_name, "auto")
-          #(state, Ok(JsString(format_ym_cal(y, m, rd, cal, mode))))
+          #(state, Ok(JsString(format_ym_cal(y, m, rd, cal, cal_name))))
         }
         "valueOf" ->
           state.type_error(
@@ -8567,25 +8354,16 @@ fn plain_month_day_method(
     Some(#(m, d, ry)) -> {
       let cal = this_calendar(state, this)
       case name {
-        "toJSON" -> #(state, Ok(JsString(format_md_cal(m, d, ry, cal, "auto"))))
-        "toLocaleString" -> #(
+        "toJSON" | "toLocaleString" -> #(
           state,
           Ok(JsString(format_md_cal(m, d, ry, cal, "auto"))),
         )
         "toString" -> {
-          use opts, state <- state.try_op(get_options_object(
+          use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
           ))
-          use cal_name, state <- state.try_op(get_string_option(
-            state,
-            opts,
-            "calendarName",
-            ["auto", "always", "never", "critical"],
-            Some("auto"),
-          ))
-          let mode = option.unwrap(cal_name, "auto")
-          #(state, Ok(JsString(format_md_cal(m, d, ry, cal, mode))))
+          #(state, Ok(JsString(format_md_cal(m, d, ry, cal, cal_name))))
         }
         "valueOf" ->
           state.type_error(
@@ -8752,8 +8530,10 @@ fn duration_method(
     None -> brand_error(state, "Duration", name)
     Some(d) ->
       case name {
-        "toJSON" -> #(state, Ok(JsString(format_duration(d, AutoPrec))))
-        "toLocaleString" -> #(state, Ok(JsString(format_duration(d, AutoPrec))))
+        "toJSON" | "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_duration(d, AutoPrec))),
+        )
         "toString" -> {
           use opts, state <- state.try_op(get_options_object(
             state,
@@ -9794,8 +9574,10 @@ fn instant_method(
     None -> brand_error(state, "Instant", name)
     Some(ns) ->
       case name {
-        "toJSON" -> #(state, Ok(JsString(format_instant(ns, AutoPrec))))
-        "toLocaleString" -> #(state, Ok(JsString(format_instant(ns, AutoPrec))))
+        "toJSON" | "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_instant(ns, AutoPrec))),
+        )
         "toString" -> {
           use opts, state <- state.try_op(get_options_object(
             state,
@@ -9991,24 +9773,16 @@ fn zoned_date_time_method(
       let off = tz_offset_ns_at(tz, ns)
       let #(d, t) = epoch_ns_to_iso(ns, off)
       case name {
-        "toJSON" -> #(state, Ok(JsString(format_zoned(ns, tz, AutoPrec))))
-        "toLocaleString" -> #(
+        "toJSON" | "toLocaleString" -> #(
           state,
           Ok(JsString(format_zoned(ns, tz, AutoPrec))),
         )
         "toString" -> {
           // Read order: calendarName, fractionalSecondDigits, offset,
           // roundingMode, smallestUnit, timeZoneName; validate after.
-          use opts, state <- state.try_op(get_options_object(
+          use #(cal_name, opts), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
-          ))
-          use cal_name, state <- state.try_op(get_string_option(
-            state,
-            opts,
-            "calendarName",
-            ["auto", "always", "never", "critical"],
-            Some("auto"),
           ))
           use digits, state <- state.try_op(get_fractional_digits(state, opts))
           use offset_mode, state <- state.try_op(get_string_option(
@@ -10054,8 +9828,7 @@ fn zoned_date_time_method(
             "critical" -> with_offset <> "[!" <> tz <> "]"
             _ -> with_offset <> "[" <> tz <> "]"
           }
-          let s =
-            with_tz <> calendar_suffix(option.unwrap(cal_name, "auto"), zcal)
+          let s = with_tz <> calendar_suffix(cal_name, zcal)
           #(state, Ok(JsString(s)))
         }
         "valueOf" ->
@@ -10240,85 +10013,14 @@ fn zoned_date_time_method(
             state,
             arg_at(args, 0),
           ))
-          use day, state <- state.try_op(read_bag_int_field(
+          use f, state <- state.try_op(read_date_time_fields(
             state,
             bag,
-            "day",
-            to_positive_integer_with_truncation,
+            zcal,
+            read_offset: True,
+            read_tz: False,
           ))
-          use era, state <- state.try_op(case tcal.has_eras(zcal) {
-            True -> read_bag_era(state, bag)
-            False -> Ok(#(None, state))
-          })
-          use era_year, state <- state.try_op(case tcal.has_eras(zcal) {
-            True ->
-              read_bag_int_field(
-                state,
-                bag,
-                "eraYear",
-                to_integer_with_truncation,
-              )
-            False -> Ok(#(None, state))
-          })
-          use hour, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "hour",
-            to_integer_with_truncation,
-          ))
-          use us, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "microsecond",
-            to_integer_with_truncation,
-          ))
-          use ms, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "millisecond",
-            to_integer_with_truncation,
-          ))
-          use minute, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "minute",
-            to_integer_with_truncation,
-          ))
-          use month, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "month",
-            to_positive_integer_with_truncation,
-          ))
-          use month_code, state <- state.try_op(read_month_code(state, bag))
-          use ns_f, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "nanosecond",
-            to_integer_with_truncation,
-          ))
-          use bag_off, state <- state.try_op(read_bag_offset(state, bag))
-          use second, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "second",
-            to_integer_with_truncation,
-          ))
-          use year, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "year",
-            to_integer_with_truncation,
-          ))
-          let all = [
-            day, hour, us, ms, minute, month, ns_f, second, year, era_year,
-          ]
-          case
-            list.all(all, fn(f) { f == None })
-            && month_code == None
-            && era == None
-            && bag_off == None
-          {
+          case date_time_fields_all_none(f) {
             True ->
               state.type_error(state, "with() requires at least one field")
             False -> {
@@ -10344,21 +10046,11 @@ fn zoned_date_time_method(
                 state,
                 opts,
               ))
-              let fields =
-                DateFields(day:, era:, era_year:, month:, month_code:, year:)
               use date <- terr(
                 state,
-                calendar_with_fields(zcal, d, fields, overflow),
+                calendar_with_fields(zcal, d, f.date, overflow),
               )
-              let t2 =
-                TimeRec(
-                  hour: option.unwrap(hour, t.hour),
-                  minute: option.unwrap(minute, t.minute),
-                  second: option.unwrap(second, t.second),
-                  ms: option.unwrap(ms, t.ms),
-                  us: option.unwrap(us, t.us),
-                  ns: option.unwrap(ns_f, t.ns),
-                )
+              let t2 = time_fields_apply(f.time, t)
               let t2 = case overflow {
                 "reject" -> t2
                 _ ->
@@ -10380,7 +10072,7 @@ fn zoned_date_time_method(
                       date,
                       t2,
                       "option",
-                      option.unwrap(bag_off, off),
+                      option.unwrap(f.offset, off),
                       tz,
                       option.unwrap(dis_opt, "compatible"),
                       option.unwrap(off_opt, "prefer"),

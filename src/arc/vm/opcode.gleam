@@ -487,6 +487,24 @@ pub type Op {
   TypeOf
   TypeofGlobal(name: String)
 
+  // -- Fused superinstructions (resolver peephole, see resolve.peephole) --
+  /// Statement-position postfix `i++;` on a plain local. Folds
+  /// GetLocal(i); UnaryOp(Pos); Dup; PushConst(1); BinOp(Add); PutLocal(i);
+  /// Pop — the Dup'd old value was immediately discarded, so the whole
+  /// 7-op sequence is one dispatch. Semantics are identical to the sequence:
+  /// TDZ check, ToNumber (ToPrimitive for objects), numeric add, store.
+  IncLocal(index: Int)
+  /// Statement-position postfix `i--;` — same as IncLocal with Sub.
+  DecLocal(index: Int)
+  /// Fused loop-condition compare-and-branch:
+  /// GetLocal(left); GetLocal(right); BinOp(kind); JumpIfFalse(target).
+  /// Only emitted for the pure relational kinds (Lt/LtEq/Gt/GtEq), whose
+  /// step semantics are binop_direct / binop_with_to_primitive.
+  CmpLocalLocalJump(left: Int, right: Int, kind: BinOpKind, target: Int)
+  /// Same with a constant right operand:
+  /// GetLocal(left); PushConst(const_index); BinOp(kind); JumpIfFalse(target).
+  CmpLocalConstJump(left: Int, const_index: Int, kind: BinOpKind, target: Int)
+
   // -- Iteration --
   ForInStart
   ForInNext
@@ -828,6 +846,13 @@ pub type IrOp {
   IrBinOp(kind: BinOpKind)
   IrUnaryOp(kind: UnaryOpKind)
   IrTypeOf
+
+  // -- Fused superinstructions (produced by the resolver peephole; never
+  // emitted directly by Phase 1/2). See the matching final Ops.
+  IrIncLocal(index: Int)
+  IrDecLocal(index: Int)
+  IrCmpLocalLocalJump(left: Int, right: Int, kind: BinOpKind, label: Int)
+  IrCmpLocalConstJump(left: Int, const_index: Int, kind: BinOpKind, label: Int)
   IrForInStart
   IrForInNext
   IrGetIterator

@@ -1750,7 +1750,7 @@ fn segment_graphemes(s: String) -> List(#(String, Int, Bool)) {
   |> fn(acc) { list.reverse(acc.0) }
 }
 
-fn utf16_len(s: String) -> Int {
+pub fn utf16_len(s: String) -> Int {
   string.to_utf_codepoints(s)
   |> list.fold(0, fn(n, cp) {
     case string.utf_codepoint_to_int(cp) > 0xffff {

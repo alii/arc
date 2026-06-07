@@ -485,7 +485,23 @@ fn ta_from(
           this,
           list.length(values),
         ))
-        from_store_loop(state, target, target_ref, values, 0, mapping, this_arg)
+        let bulk = case mapping {
+          None -> try_bulk_store(state, target, 0, values)
+          Some(_) -> None
+        }
+        case bulk {
+          Some(state) -> Ok(#(target, state))
+          None ->
+            from_store_loop(
+              state,
+              target,
+              target_ref,
+              values,
+              0,
+              mapping,
+              this_arg,
+            )
+        }
       })
     False ->
       wrap({
@@ -501,16 +517,26 @@ fn ta_from(
           this,
           len,
         ))
-        from_array_like_loop(
-          state,
-          target,
-          target_ref,
-          source,
-          0,
-          len,
-          mapping,
-          this_arg,
-        )
+        let bulk = case mapping, source {
+          None, JsObject(src_ref) ->
+            object.plain_indexed_values(state.heap, src_ref, len)
+            |> option.then(try_bulk_store(state, target, 0, _))
+          _, _ -> None
+        }
+        case bulk {
+          Some(state) -> Ok(#(target, state))
+          None ->
+            from_array_like_loop(
+              state,
+              target,
+              target_ref,
+              source,
+              0,
+              len,
+              mapping,
+              this_arg,
+            )
+        }
       })
   }
 }
@@ -527,16 +553,14 @@ fn from_store_loop(
   case values {
     [] -> Ok(#(target, state))
     [v, ..rest] -> {
-      use #(mapped, state) <- result.try(case mapping {
-        Some(f) -> state.call(state, f, this_arg, [v, value.from_int(k)])
-        None -> Ok(#(v, state))
-      })
-      use #(state, _) <- result.try(object.set_value(
+      use state <- result.try(map_and_store(
         state,
-        target_ref,
-        value.Index(k),
-        mapped,
         target,
+        target_ref,
+        v,
+        k,
+        mapping,
+        this_arg,
       ))
       from_store_loop(state, target, target_ref, rest, k + 1, mapping, this_arg)
     }
@@ -561,16 +585,14 @@ fn from_array_like_loop(
         source,
         value.Index(k),
       ))
-      use #(mapped, state) <- result.try(case mapping {
-        Some(f) -> state.call(state, f, this_arg, [v, value.from_int(k)])
-        None -> Ok(#(v, state))
-      })
-      use #(state, _) <- result.try(object.set_value(
+      use state <- result.try(map_and_store(
         state,
-        target_ref,
-        value.Index(k),
-        mapped,
         target,
+        target_ref,
+        v,
+        k,
+        mapping,
+        this_arg,
       ))
       from_array_like_loop(
         state,
@@ -584,6 +606,30 @@ fn from_array_like_loop(
       )
     }
   }
+}
+
+/// Shared from() element step: apply the optional mapfn, then store at k.
+fn map_and_store(
+  state: State,
+  target: JsValue,
+  target_ref: Ref,
+  v: JsValue,
+  k: Int,
+  mapping: option.Option(JsValue),
+  this_arg: JsValue,
+) -> Result(State, #(JsValue, State)) {
+  use #(mapped, state) <- result.try(case mapping {
+    Some(f) -> state.call(state, f, this_arg, [v, value.from_int(k)])
+    None -> Ok(#(v, state))
+  })
+  use #(state, _) <- result.map(object.set_value(
+    state,
+    target_ref,
+    value.Index(k),
+    mapped,
+    target,
+  ))
+  state
 }
 
 /// §23.2.2.2 %TypedArray%.of ( ...items )
@@ -601,7 +647,11 @@ fn ta_of(
       this,
       list.length(args),
     ))
-    from_store_loop(state, target, target_ref, args, 0, None, JsUndefined)
+    case try_bulk_store(state, target, 0, args) {
+      Some(state) -> Ok(#(target, state))
+      None ->
+        from_store_loop(state, target, target_ref, args, 0, None, JsUndefined)
+    }
   })
 }
 
@@ -690,11 +740,23 @@ fn alloc_ta_with_length(
   use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
     Error(state.range_error_value(state, "Invalid typed array length"))
   })
+  Ok(alloc_fresh_ta(state, kind, proto, ta_zeroed(byte_len), len))
+}
+
+/// Allocate a fresh non-resizable ArrayBuffer holding `data` plus a fixed
+/// `len`-element view over it from offset 0.
+fn alloc_fresh_ta(
+  state: State,
+  kind: TypedArrayKind,
+  proto: Ref,
+  data: BitArray,
+  len: Int,
+) -> #(JsValue, State) {
   let #(h, buf) =
     common.alloc_wrapper(
       state.heap,
       value.ArrayBufferObject(
-        data: ta_zeroed(byte_len),
+        data:,
         detached: False,
         max_byte_length: None,
         shared: False,
@@ -712,7 +774,7 @@ fn alloc_ta_with_length(
       ),
       proto,
     )
-  Ok(#(JsObject(ta_ref), State(..state, heap: h)))
+  #(JsObject(ta_ref), State(..state, heap: h))
 }
 
 /// §23.2.5.1.3 InitializeTypedArrayFromArrayBuffer.
@@ -898,29 +960,7 @@ fn from_typed_array(
             size,
           )
       }
-      let #(h, buf) =
-        common.alloc_wrapper(
-          state.heap,
-          value.ArrayBufferObject(
-            data: new_data,
-            detached: False,
-            max_byte_length: None,
-            shared: False,
-          ),
-          state.builtins.array_buffer.prototype,
-        )
-      let #(h, ta_ref) =
-        common.alloc_wrapper(
-          h,
-          value.TypedArrayObject(
-            buffer: buf,
-            elem_kind: kind,
-            byte_offset: 0,
-            length: Some(src_len),
-          ),
-          proto,
-        )
-      Ok(#(JsObject(ta_ref), State(..state, heap: h)))
+      Ok(alloc_fresh_ta(state, kind, proto, new_data, src_len))
     }
   }
 }
@@ -1014,7 +1054,10 @@ fn from_object(
         proto,
         list.length(values),
       ))
-      store_list(state, ta_val, values, 0)
+      case try_bulk_store(state, ta_val, 0, values) {
+        Some(state) -> Ok(#(ta_val, state))
+        None -> store_list(state, ta_val, values, 0)
+      }
     }
     False -> {
       // Array-like: len = ToLength(Get(obj, "length")).
@@ -1031,7 +1074,13 @@ fn from_object(
         proto,
         len,
       ))
-      store_array_like(state, ta_val, obj_ref, obj_val, 0, len)
+      let bulk =
+        object.plain_indexed_values(state.heap, obj_ref, len)
+        |> option.then(try_bulk_store(state, ta_val, 0, _))
+      case bulk {
+        Some(state) -> Ok(#(ta_val, state))
+        None -> store_array_like(state, ta_val, obj_ref, obj_val, 0, len)
+      }
     }
   }
 }
@@ -1267,6 +1316,54 @@ fn ta_slot(
         _ -> None
       }
     _ -> None
+  }
+}
+
+/// Bulk element store: when every value converts to the element type without
+/// running user code (no objects, no throwing conversions), encode the whole
+/// run in one pass and rebuild the buffer binary ONCE — instead of one
+/// whole-buffer rebuild + heap write per element, which is O(n²) in the
+/// buffer size. Returns None when any value needs the observable per-element
+/// path. Mirrors do_typed_store's live-buffer rules: detached buffer or an
+/// out-of-bounds view → the stores are silent no-ops; a partial fit writes
+/// only the in-bounds prefix.
+fn try_bulk_store(
+  state: State,
+  ta_val: JsValue,
+  start: Int,
+  values: List(JsValue),
+) -> Option(State) {
+  use #(buffer, kind, byte_offset, length) <- option.then(ta_slot(
+    state.heap,
+    ta_val,
+  ))
+  use region <- option.then(object.typed_array_encode_primitives(kind, values))
+  case object.typed_array_buffer_data(state.heap, buffer) {
+    // Detached → every per-element store is a silent no-op.
+    None -> Some(state)
+    Some(data) -> {
+      let size = value.typed_array_element_size(kind)
+      let byte_size = bit_array.byte_size(data)
+      let len = case length {
+        Some(n) -> n
+        None -> int.max(0, { byte_size - byte_offset } / size)
+      }
+      // Fixed view that no longer fits the (shrunk) buffer → all no-ops.
+      use <- bool.guard(byte_offset + len * size > byte_size, Some(state))
+      let count = int.clamp(len - start, 0, bit_array.byte_size(region) / size)
+      use <- bool.guard(count <= 0, Some(state))
+      let region = case count * size == bit_array.byte_size(region) {
+        True -> region
+        False -> bit_array.slice(region, 0, count * size) |> result.unwrap(<<>>)
+      }
+      let h =
+        write_buffer_data(
+          state.heap,
+          buffer,
+          ta_splice(data, byte_offset + start * size, region),
+        )
+      Some(State(..state, heap: h))
+    }
   }
 }
 
@@ -1755,7 +1852,13 @@ fn set_from_array_like(
   use <- bool.lazy_guard(src_len + offset > len, fn() {
     state.range_error(state, "offset is out of bounds")
   })
-  set_array_like_loop(this, state, offset, src_ref, src, 0, src_len)
+  let bulk =
+    object.plain_indexed_values(state.heap, src_ref, src_len)
+    |> option.then(try_bulk_store(state, this, offset, _))
+  case bulk {
+    Some(state) -> #(state, Ok(JsUndefined))
+    None -> set_array_like_loop(this, state, offset, src_ref, src, 0, src_len)
+  }
 }
 
 fn set_array_like_loop(
@@ -2064,38 +2167,14 @@ fn join_parts(
   }
 }
 
-/// §23.2.3.16/.13 indexOf / includes.
+/// §23.2.3.16/.13 indexOf / includes. See search_loop for how the two
+/// differ on indices past the current (shrunk/detached) length.
 fn proto_index_of(
   this: JsValue,
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _buffer, _kind, _off, len, state <- validate_ta(this, state)
-  use <- bool.guard(len == 0, #(state, Ok(value.from_int(-1))))
-  let search = helpers.first_arg_or_undefined(args)
-  use n, state <- try_state(to_int_or_inf(
-    state,
-    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
-  ))
-  case n {
-    IPosInf -> #(state, Ok(value.from_int(-1)))
-    _ -> {
-      let k = case n {
-        INegInf -> 0
-        IInt(i) ->
-          case i >= 0 {
-            True -> i
-            False -> int.max(len + i, 0)
-          }
-        IPosInf -> 0
-      }
-      // §23.2.3.16 indexOf checks HasProperty before Get: an index past the
-      // CURRENT (possibly shrunk) length is skipped and never matches.
-      let found =
-        search_loop(state.heap, this, len, k, search, value.strict_equal, False)
-      #(state, Ok(value.from_int(found)))
-    }
-  }
+  proto_search(this, args, state, value.strict_equal, False, value.from_int)
 }
 
 fn proto_includes(
@@ -2103,41 +2182,38 @@ fn proto_includes(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
+  use found <- proto_search(this, args, state, value.same_value_zero, True)
+  JsBool(found >= 0)
+}
+
+fn proto_search(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+  eq: fn(JsValue, JsValue) -> Bool,
+  missing_undefined: Bool,
+  done: fn(Int) -> JsValue,
+) -> #(State, Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
-  use <- bool.guard(len == 0, #(state, Ok(JsBool(False))))
+  use <- bool.guard(len == 0, #(state, Ok(done(-1))))
   let search = helpers.first_arg_or_undefined(args)
   use n, state <- try_state(to_int_or_inf(
     state,
     helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
   ))
-  case n {
-    IPosInf -> #(state, Ok(JsBool(False)))
-    _ -> {
-      let k = case n {
-        INegInf -> 0
-        IInt(i) ->
-          case i >= 0 {
-            True -> i
-            False -> int.max(len + i, 0)
-          }
-        IPosInf -> 0
+  let k = case n {
+    INegInf -> 0
+    // A +Infinity start is past every index, so search_loop returns -1.
+    IPosInf -> len
+    IInt(i) ->
+      case i >= 0 {
+        True -> i
+        False -> int.max(len + i, 0)
       }
-      // §23.2.3.13 includes uses a bare Get: an index past the CURRENT
-      // (shrunk/detached) length reads as undefined and CAN match a search
-      // for undefined (SameValueZero).
-      let found =
-        search_loop(
-          state.heap,
-          this,
-          len,
-          k,
-          search,
-          value.same_value_zero,
-          True,
-        )
-      #(state, Ok(JsBool(found >= 0)))
-    }
   }
+  let found =
+    search_loop(state.heap, this, len, k, search, eq, missing_undefined)
+  #(state, Ok(done(found)))
 }
 
 /// Scan [i, len) for `search` with live element reads. `missing_undefined`:
@@ -3000,12 +3076,15 @@ fn encode_region(
   |> bit_array.concat
 }
 
-/// §23.2.3.29 sort ( comparefn ) — comparefn validated FIRST, then
-/// ValidateTypedArray; sorts a snapshot, writes back in place.
-fn proto_sort(
+/// Shared sort/toSorted prologue: comparefn validated FIRST, then
+/// ValidateTypedArray; snapshots the elements and sorts them, passing the
+/// validated view plus the sorted list to `cont`.
+fn sorted_snapshot(
   this: JsValue,
   args: List(JsValue),
   state: State,
+  cont: fn(Ref, TypedArrayKind, Int, Int, List(JsValue), State) ->
+    #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   let cmp = helpers.first_arg_or_undefined(args)
   use <- bool.lazy_guard(
@@ -3020,6 +3099,20 @@ fn proto_sort(
   use buffer, kind, off, len, state <- validate_ta(this, state)
   let items = join_collect(state.heap, this, len, 0, []) |> list.reverse
   use sorted, state <- try_state(sort_values(state, items, comparator_for(cmp)))
+  cont(buffer, kind, off, len, sorted, state)
+}
+
+/// §23.2.3.29 sort ( comparefn ) — sorts a snapshot, writes back in place.
+fn proto_sort(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use buffer, kind, off, len, sorted, state <- sorted_snapshot(
+    this,
+    args,
+    state,
+  )
   case object.typed_array_buffer_data(state.heap, buffer) {
     None -> #(state, Ok(this))
     Some(data) -> {
@@ -3054,19 +3147,11 @@ fn proto_to_sorted(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let cmp = helpers.first_arg_or_undefined(args)
-  use <- bool.lazy_guard(
-    cmp != JsUndefined && !helpers.is_callable(state.heap, cmp),
-    fn() {
-      state.type_error(
-        state,
-        "The comparison function must be either a function or undefined",
-      )
-    },
+  use _buffer, kind, _off, len, sorted, state <- sorted_snapshot(
+    this,
+    args,
+    state,
   )
-  use _buffer, kind, _off, len, state <- validate_ta(this, state)
-  let items = join_collect(state.heap, this, len, 0, []) |> list.reverse
-  use sorted, state <- try_state(sort_values(state, items, comparator_for(cmp)))
   use ta_val, new_buf, state <- try_state3(ta_same_type_create(state, kind, len))
   let size = value.typed_array_element_size(kind)
   // The fresh buffer is exactly len * size bytes, so the concatenated
@@ -3377,6 +3462,30 @@ fn get_string_enum_option(
   }
 }
 
+/// Shared option reads of setFromBase64/fromBase64, in spec order:
+/// GetOptionsObject, then "alphabet", then "lastChunkHandling".
+fn read_b64_options(
+  state: State,
+  opt_arg: JsValue,
+) -> Result(#(String, String, State), #(JsValue, State)) {
+  use #(opts, state) <- result.try(get_opts_object(state, opt_arg))
+  use #(alphabet, state) <- result.try(get_string_enum_option(
+    state,
+    opts,
+    "alphabet",
+    b64_alphabets,
+    "base64",
+  ))
+  use #(handling, state) <- result.map(get_string_enum_option(
+    state,
+    opts,
+    "lastChunkHandling",
+    b64_chunk_handlings,
+    "loose",
+  ))
+  #(alphabet, handling, state)
+}
+
 /// Step 3 of setFromBase64/setFromHex/fromBase64/fromHex: the input must
 /// already be a String — no coercion.
 fn require_string(
@@ -3492,35 +3601,13 @@ fn u8_set_from_base64(
       state,
       helpers.first_arg_or_undefined(args),
     ))
-    use #(opts, state) <- result.try(get_opts_object(
+    use #(alphabet, handling, state) <- result.try(read_b64_options(
       state,
       helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
     ))
-    use #(alphabet, state) <- result.try(get_string_enum_option(
-      state,
-      opts,
-      "alphabet",
-      b64_alphabets,
-      "base64",
-    ))
-    use #(handling, state) <- result.try(get_string_enum_option(
-      state,
-      opts,
-      "lastChunkHandling",
-      b64_chunk_handlings,
-      "loose",
-    ))
     use #(buffer, data, off, len) <- result.try(u8_live_view(state, this))
     let res = from_base64(s, alphabet == "base64url", handling, len)
-    // Per spec, bytes decoded before an error ARE written, THEN the
-    // SyntaxError is thrown ("writes up to error").
-    let state = u8_write_bytes(state, buffer, data, off, res.bytes)
-    case res.ok {
-      False ->
-        Error(syntax_error_value(state, "unable to decode base64 string"))
-      True ->
-        Ok(read_written_result(state, res.read, bit_array.byte_size(res.bytes)))
-    }
+    decode_into_view(state, buffer, data, off, res, "base64")
   })
 }
 
@@ -3538,13 +3625,42 @@ fn u8_set_from_hex(
     ))
     use #(buffer, data, off, len) <- result.try(u8_live_view(state, this))
     let res = from_hex(s, len)
-    let state = u8_write_bytes(state, buffer, data, off, res.bytes)
-    case res.ok {
-      False -> Error(syntax_error_value(state, "unable to decode hex string"))
-      True ->
-        Ok(read_written_result(state, res.read, bit_array.byte_size(res.bytes)))
-    }
+    decode_into_view(state, buffer, data, off, res, "hex")
   })
+}
+
+fn decode_error(state: State, codec: String) -> #(JsValue, State) {
+  syntax_error_value(state, "unable to decode " <> codec <> " string")
+}
+
+/// Shared setFromBase64/setFromHex tail. Per spec, bytes decoded before an
+/// error ARE written, THEN the SyntaxError is thrown ("writes up to error").
+fn decode_into_view(
+  state: State,
+  buffer: Ref,
+  data: BitArray,
+  off: Int,
+  res: DecodeResult,
+  codec: String,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  let state = u8_write_bytes(state, buffer, data, off, res.bytes)
+  case res.ok {
+    False -> Error(decode_error(state, codec))
+    True ->
+      Ok(read_written_result(state, res.read, bit_array.byte_size(res.bytes)))
+  }
+}
+
+/// Shared fromBase64/fromHex tail: allocate a fresh Uint8Array on success.
+fn decode_to_new_u8(
+  state: State,
+  res: DecodeResult,
+  codec: String,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case res.ok {
+    False -> Error(decode_error(state, codec))
+    True -> u8_alloc_from_bytes(state, res.bytes)
+  }
 }
 
 /// Uint8Array.fromBase64 ( string [ , options ] )
@@ -3557,31 +3673,13 @@ fn u8_from_base64(
       state,
       helpers.first_arg_or_undefined(args),
     ))
-    use #(opts, state) <- result.try(get_opts_object(
+    use #(alphabet, handling, state) <- result.try(read_b64_options(
       state,
       helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
     ))
-    use #(alphabet, state) <- result.try(get_string_enum_option(
-      state,
-      opts,
-      "alphabet",
-      b64_alphabets,
-      "base64",
-    ))
-    use #(handling, state) <- result.try(get_string_enum_option(
-      state,
-      opts,
-      "lastChunkHandling",
-      b64_chunk_handlings,
-      "loose",
-    ))
     let res =
       from_base64(s, alphabet == "base64url", handling, max_safe_integer)
-    case res.ok {
-      False ->
-        Error(syntax_error_value(state, "unable to decode base64 string"))
-      True -> u8_alloc_from_bytes(state, res.bytes)
-    }
+    decode_to_new_u8(state, res, "base64")
   })
 }
 
@@ -3596,10 +3694,7 @@ fn u8_from_hex(
       helpers.first_arg_or_undefined(args),
     ))
     let res = from_hex(s, max_safe_integer)
-    case res.ok {
-      False -> Error(syntax_error_value(state, "unable to decode hex string"))
-      True -> u8_alloc_from_bytes(state, res.bytes)
-    }
+    decode_to_new_u8(state, res, "hex")
   })
 }
 

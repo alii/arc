@@ -761,93 +761,128 @@ fn get_index_if_present(
   this: JsValue,
   idx: Int,
 ) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
-  let key = index_key(idx)
-  let is_proxy = case this {
-    JsObject(ref) -> option.is_some(object.as_proxy(state.heap, ref))
-    _ -> False
-  }
-  case this, key {
-    // Proxy: HasProperty/Get MUST run the "has"/"get" traps (observable —
-    // they record calls, can throw, and the own-index fast path can't see
-    // through the proxy at all).
-    JsObject(ref), _ if is_proxy -> {
-      use #(has, state) <- result.try(object.has_property_stateful(
-        state,
-        ref,
-        object.PkString(key),
-      ))
-      case has {
-        False -> Ok(#(None, state))
-        True -> {
-          use #(val, state) <- result.map(object.get_value(
-            state,
-            ref,
-            key,
-            this,
-          ))
-          #(Some(val), state)
-        }
-      }
-    }
-    // Index beyond the array-index cap (>= 2^32-1) canonicalizes to a Named
-    // string key — get_own_index only consults Index keys, so take the
-    // generic HasProperty + Get path (own properties included).
-    JsObject(ref), Named(_) -> inherited_index(state, ref, key, this)
-    JsObject(ref), _ ->
-      // Fast path: ONE heap read for own [[GetOwnProperty]], with no
-      // synthesized descriptor boxing on the dense-elements hit.
-      case object.get_own_index(state.heap, ref, idx) {
-        // §10.1.8.1 step 3: data value. (Hot path: dense arrays.)
-        object.OwnIndexValue(val) -> Ok(#(Some(val), state))
-        object.OwnIndexProperty(DataProperty(value: val, ..)) ->
-          Ok(#(Some(val), state))
-        // §10.1.8.1 steps 5-7: accessor → Call(getter, Receiver) or undefined.
-        object.OwnIndexProperty(AccessorProperty(get: Some(getter), ..)) -> {
-          use #(val, state) <- result.map(state.call(state, getter, this, []))
-          #(Some(val), state)
-        }
-        object.OwnIndexProperty(AccessorProperty(get: None, ..)) ->
-          Ok(#(Some(JsUndefined), state))
-        // Own property absent — consult prototype chain (cold path: holes).
-        // §7.3.11 step 4 / §10.1.8.1 step 2: parent.[[HasProperty]]/[[Get]].
-        // The prototype was carried out of the slot get_own_index already
-        // read, so the hole path costs one heap read, not two.
-        object.OwnIndexAbsent(prototype: Some(proto)) ->
-          case object.has_property(state.heap, proto, key) {
-            False -> Ok(#(None, state))
-            True -> {
-              use #(val, state) <- result.map(object.get_value(
-                state,
-                proto,
-                key,
-                this,
-              ))
+  case this {
+    JsObject(ref) ->
+      case 0 <= idx && idx <= 4_294_967_294 {
+        // Fast path: ONE heap read both detects proxy-ness and performs the
+        // own [[GetOwnProperty]] probe, with no synthesized descriptor boxing
+        // and no PropertyKey construction on the dense-elements hit.
+        True ->
+          case object.get_own_index(state.heap, ref, idx) {
+            // §10.1.8.1 step 3: data value. (Hot path: dense arrays.)
+            object.OwnIndexValue(val) -> Ok(#(Some(val), state))
+            object.OwnIndexProperty(DataProperty(value: val, ..)) ->
+              Ok(#(Some(val), state))
+            // §10.1.8.1 steps 5-7: accessor → Call(getter, Receiver) or
+            // undefined.
+            object.OwnIndexProperty(AccessorProperty(get: Some(getter), ..)) -> {
+              use #(val, state) <- result.map(
+                state.call(state, getter, this, []),
+              )
               #(Some(val), state)
             }
+            object.OwnIndexProperty(AccessorProperty(get: None, ..)) ->
+              Ok(#(Some(JsUndefined), state))
+            // Own property absent — consult prototype chain (cold path:
+            // holes). §7.3.11 step 4 / §10.1.8.1 step 2:
+            // parent.[[HasProperty]]/[[Get]]. The prototype was carried out
+            // of the slot get_own_index already read, so the hole path costs
+            // one heap read, not two.
+            object.OwnIndexAbsent(prototype: Some(proto)) ->
+              case object.has_property(state.heap, proto, Index(idx)) {
+                False -> Ok(#(None, state))
+                True -> {
+                  use #(val, state) <- result.map(object.get_value(
+                    state,
+                    proto,
+                    Index(idx),
+                    this,
+                  ))
+                  #(Some(val), state)
+                }
+              }
+            object.OwnIndexAbsent(prototype: None) -> Ok(#(None, state))
+            // Proxy: HasProperty/Get MUST run the "has"/"get" traps
+            // (observable — they record calls, can throw, and the own-index
+            // probe can't see through the proxy at all).
+            object.OwnIndexProxy -> proxy_index(state, ref, Index(idx), this)
           }
-        object.OwnIndexAbsent(prototype: None) -> Ok(#(None, state))
+        // Index beyond the array-index cap (>= 2^32-1) or negative
+        // canonicalizes to a Named string key — get_own_index only consults
+        // Index keys, so take the generic HasProperty + Get path (own
+        // properties included). Proxies still run their traps.
+        False -> {
+          let key = Named(int.to_string(idx))
+          case object.as_proxy(state.heap, ref) {
+            Some(_) -> proxy_index(state, ref, key, this)
+            None -> inherited_index(state, ref, key, this)
+          }
+        }
       }
     // String primitive: in-range index is an own data property per §10.4.3.5;
     // out-of-range falls through to String.prototype (§7.3.11 walks the
     // wrapper's prototype chain).
-    JsString(s), _ ->
+    JsString(s) ->
       case idx >= 0, object.string_char_at(s, idx) {
         True, Some(ch) -> Ok(#(Some(JsString(ch)), state))
         _, _ ->
-          inherited_index(state, state.builtins.string.prototype, key, this)
+          inherited_index(
+            state,
+            state.builtins.string.prototype,
+            index_key(idx),
+            this,
+          )
       }
     // Boolean/Number/Symbol primitives: ToObject's wrapper has no own index
     // properties, but its prototype chain may (e.g. `Boolean.prototype[0] = 1`)
     // — HasProperty/Get consult it (§7.3.11 / §7.3.2).
-    value.JsBool(_), _ ->
-      inherited_index(state, state.builtins.boolean.prototype, key, this)
-    JsNumber(_), _ ->
-      inherited_index(state, state.builtins.number.prototype, key, this)
-    value.JsSymbol(_), _ ->
-      inherited_index(state, state.builtins.object.prototype, key, this)
+    value.JsBool(_) ->
+      inherited_index(
+        state,
+        state.builtins.boolean.prototype,
+        index_key(idx),
+        this,
+      )
+    JsNumber(_) ->
+      inherited_index(
+        state,
+        state.builtins.number.prototype,
+        index_key(idx),
+        this,
+      )
+    value.JsSymbol(_) ->
+      inherited_index(
+        state,
+        state.builtins.object.prototype,
+        index_key(idx),
+        this,
+      )
     // null/undefined (already rejected by require_array) and other values:
     // no indexed properties.
-    _, _ -> Ok(#(None, state))
+    _ -> Ok(#(None, state))
+  }
+}
+
+/// HasProperty + Get on a Proxy ref: runs the "has" trap (§10.5.7), and on
+/// True the "get" trap (§10.5.8) with `this` as receiver. Both traps are
+/// observable user code and can throw.
+fn proxy_index(
+  state: State,
+  ref: Ref,
+  key: value.PropertyKey,
+  this: JsValue,
+) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
+  use #(has, state) <- result.try(object.has_property_stateful(
+    state,
+    ref,
+    object.PkString(key),
+  ))
+  case has {
+    False -> Ok(#(None, state))
+    True -> {
+      use #(val, state) <- result.map(object.get_value(state, ref, key, this))
+      #(Some(val), state)
+    }
   }
 }
 

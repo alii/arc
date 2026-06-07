@@ -16,6 +16,25 @@ pub type Ref {
   Ref(id: Int)
 }
 
+/// Reserved heap id for the one [[IsHTMLDDA]] exotic object — Annex B §B.3.6,
+/// the `document.all` emulation, exposed to test262 as `$262.IsHTMLDDA`.
+///
+/// The object is identified by its ref id alone, so the three semantic sites
+/// the internal slot changes (ToBoolean → `is_truthy`, IsLooselyEqual →
+/// `abstract_equal`, and the typeof operator) pay only an integer comparison
+/// — no heap read and no extra cost for ordinary objects.
+///
+/// The id is unreachable by normal allocation (`Heap.next` bumps sequentially
+/// from 0 and the free list only recycles previously allocated ids), yet
+/// small enough to stay a BEAM immediate integer (< 2^59). It is distinct
+/// from the sentinel ref (-1) and tagged lazy-proto ids (< -1).
+/// realm.gleam fills + roots the slot when the first `$262` is built; all
+/// realms share the single object.
+pub const html_dda_id = 500_000_000_000_000_000
+
+/// `Ref`-typed form of `html_dda_id`.
+pub const html_dda_ref = Ref(500_000_000_000_000_000)
+
 /// Unique symbol identity. Not heap-allocated — symbols are value types on BEAM.
 /// An opaque Erlang reference. Globally unique across the entire BEAM cluster.
 /// Created via make_ref() FFI — no two calls ever return the same value.
@@ -1744,9 +1763,10 @@ pub type VmNativeFn {
   /// $262.IsHTMLDDA — the test262 [[IsHTMLDDA]] host hook (`document.all`
   /// emulation). Calling it returns null (INTERPRETING.md: "returns null
   /// when called with no arguments or with the single argument ''").
-  /// PARTIAL: the loose-equality / typeof-"undefined" / ToBoolean-false
-  /// exotic behaviors of Annex B §B.3.6 are not implemented — only the
-  /// callable-returning-null part used by GetMethod-shaped tests.
+  /// The exotic Annex B §B.3.6 behaviors — typeof "undefined", ToBoolean
+  /// false, loosely equal to null/undefined — are keyed off the object's
+  /// reserved heap id (`html_dda_id`) in typeof_value / is_truthy /
+  /// abstract_equal.
   IsHTMLDDA
   /// $262.agent.start(script) — run an agent script (cooperative, in-realm).
   AgentStart
@@ -3258,7 +3278,11 @@ pub fn is_truthy(val: JsValue) -> Bool {
     JsNumber(Infinity) | JsNumber(NegInfinity) -> True
     JsString(s) -> s != ""
     JsBigInt(BigInt(n)) -> n != 0
-    JsObject(_) | JsSymbol(_) -> True
+    // Annex B §B.3.6.1: ToBoolean of an object with the [[IsHTMLDDA]]
+    // internal slot is false. The reserved-id comparison keeps the ordinary
+    // object arm a single integer check.
+    JsObject(Ref(id)) -> id != html_dda_id
+    JsSymbol(_) -> True
   }
 }
 
@@ -3332,6 +3356,15 @@ pub fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
     | JsSymbol(_), JsSymbol(_)
     | JsBigInt(_), JsBigInt(_)
     -> strict_equal(left, right)
+    // Annex B §B.3.6.2 IsLooselyEqual steps 3-4: an object with the
+    // [[IsHTMLDDA]] internal slot ($262.IsHTMLDDA / document.all) is loosely
+    // equal to both undefined and null. Reached directly — the interpreter's
+    // is_eq_coercible sends object × nullish here without ToPrimitive.
+    JsObject(Ref(id)), JsNull
+    | JsObject(Ref(id)), JsUndefined
+    | JsNull, JsObject(Ref(id))
+    | JsUndefined, JsObject(Ref(id))
+    -> id == html_dda_id
     // Number vs String — coerce string to number
     JsNumber(_), JsString(s) ->
       to_number(JsString(s))
@@ -3367,88 +3400,297 @@ pub fn to_number(val: JsValue) -> Result(JsNum, String) {
 /// Infinity, scientific notation, leading/trailing decimal point.
 /// Hex/oct/bin prefixes not handled here.
 pub fn string_to_number(s: String) -> JsNum {
-  let s = string.trim(s)
-  case s {
-    "" -> Finite(0.0)
-    "Infinity" | "+Infinity" -> Infinity
-    "-Infinity" -> NegInfinity
+  // Fast path: a plain run of ASCII digits (optional single leading '-').
+  // Such strings have no whitespace to trim and can't be float/hex literals,
+  // so the general path's failed float.parse attempts (caught badargs) and
+  // binary pattern compiles are pure overhead. Very hot via canonical numeric
+  // index conversion of array-like string keys ("0", "1", ...).
+  case parse_plain_digits(s) {
+    Ok(n) -> n
+    Error(Nil) -> string_to_number_slow(s)
+  }
+}
+
+/// Parse a string that is exactly an optional '-' followed by 1..15 ASCII
+/// digits. 15 digits keeps the value exactly representable as a float, so the
+/// result is identical to the general path. Anything else falls through.
+fn parse_plain_digits(s: String) -> Result(JsNum, Nil) {
+  case bit_array.from_string(s) {
+    // '-' prefix: negate via float.negate so "-0" yields -0.0 like the
+    // general path does.
+    <<0x2d, rest:bytes>> -> {
+      use n <- result.map(accumulate_digits(rest, 0, 0))
+      Finite(float.negate(int.to_float(n)))
+    }
+    bytes -> {
+      use n <- result.map(accumulate_digits(bytes, 0, 0))
+      Finite(int.to_float(n))
+    }
+  }
+}
+
+fn accumulate_digits(
+  bytes: BitArray,
+  acc: Int,
+  count: Int,
+) -> Result(Int, Nil) {
+  case bytes {
+    <<>> if count >= 1 && count <= 15 -> Ok(acc)
+    <<d, rest:bytes>> if d >= 0x30 && d <= 0x39 ->
+      accumulate_digits(rest, acc * 10 + d - 0x30, count + 1)
+    _ -> Error(Nil)
+  }
+}
+
+/// Single-pass byte-walk over the string: hand-rolled StrWhiteSpace trim
+/// (no pattern compiles), grammar validated while scanning so float parsing
+/// runs at most once on a known-well-formed literal (no caught badargs).
+fn string_to_number_slow(s: String) -> JsNum {
+  let bytes = trim_string_ws(bit_array.from_string(s))
+  case bytes {
+    <<>> -> Finite(0.0)
     // NonDecimalIntegerLiteral (§7.1.4.1 StringNumericLiteral): hex/octal/
     // binary prefixes. No sign is permitted with these forms.
-    "0x" <> digits | "0X" <> digits -> parse_radix_literal(digits, 16)
-    "0o" <> digits | "0O" <> digits -> parse_radix_literal(digits, 8)
-    "0b" <> digits | "0B" <> digits -> parse_radix_literal(digits, 2)
-    _ -> {
-      let #(neg, rest) = case s {
-        "-" <> r -> #(True, r)
-        "+" <> r -> #(False, r)
-        _ -> #(False, s)
-      }
-      // A second sign after the one already stripped (e.g. "--5") is NaN.
-      let n = case rest {
-        "+" <> _ | "-" <> _ -> Error(Nil)
-        _ ->
-          float.parse(rest)
-          |> result.try_recover(fn(_: Nil) {
-            // "200." → "200.0"; ".5" → "0.5"; "2e3" → "2.0e3" — Gleam's
-            // float.parse needs both sides of the decimal point.
-            float.parse(normalize_float_literal(rest))
-          })
-          |> result.try_recover(fn(_: Nil) {
-            int.parse(rest) |> result.map(int.to_float)
-          })
-      }
-      case n {
-        Ok(f) ->
-          case neg {
-            True -> Finite(float.negate(f))
-            False -> Finite(f)
-          }
+    <<"0x":utf8, digits:bytes>> | <<"0X":utf8, digits:bytes>> ->
+      parse_radix_literal(digits, 16)
+    <<"0o":utf8, digits:bytes>> | <<"0O":utf8, digits:bytes>> ->
+      parse_radix_literal(digits, 8)
+    <<"0b":utf8, digits:bytes>> | <<"0B":utf8, digits:bytes>> ->
+      parse_radix_literal(digits, 2)
+    <<"-":utf8, rest:bytes>> ->
+      case parse_unsigned_literal(rest) {
+        Ok(n) -> negate_js_num(n)
         Error(Nil) -> NaN
+      }
+    <<"+":utf8, rest:bytes>> ->
+      case parse_unsigned_literal(rest) {
+        Ok(n) -> n
+        Error(Nil) -> NaN
+      }
+    _ ->
+      case parse_unsigned_literal(bytes) {
+        Ok(n) -> n
+        Error(Nil) -> NaN
+      }
+  }
+}
+
+fn negate_js_num(n: JsNum) -> JsNum {
+  case n {
+    Finite(f) -> Finite(float.negate(f))
+    Infinity -> NegInfinity
+    NegInfinity -> Infinity
+    NaN -> NaN
+  }
+}
+
+/// Trim StrWhiteSpaceChar (§7.1.4.1: WhiteSpace ∪ LineTerminator) from both
+/// ends. Note this is NOT Unicode White_Space: U+0085 NEL is excluded and
+/// U+FEFF ZWNBSP included, matching the JS spec.
+fn trim_string_ws(bytes: BitArray) -> BitArray {
+  let bytes = drop_leading_string_ws(bytes)
+  let keep = content_length(bytes, 0, 0)
+  case keep == bit_array.byte_size(bytes) {
+    True -> bytes
+    False ->
+      case bit_array.slice(bytes, 0, keep) {
+        Ok(trimmed) -> trimmed
+        // Unreachable: keep is always <= byte_size.
+        Error(Nil) -> bytes
+      }
+  }
+}
+
+fn drop_leading_string_ws(bytes: BitArray) -> BitArray {
+  case bytes {
+    // TAB LF VT FF CR SP
+    <<b, rest:bytes>>
+      if b == 0x09
+      || b == 0x0a
+      || b == 0x0b
+      || b == 0x0c
+      || b == 0x0d
+      || b == 0x20
+    -> drop_leading_string_ws(rest)
+    // U+00A0 NBSP
+    <<0xc2, 0xa0, rest:bytes>> -> drop_leading_string_ws(rest)
+    // U+1680 OGHAM SPACE MARK
+    <<0xe1, 0x9a, 0x80, rest:bytes>> -> drop_leading_string_ws(rest)
+    // U+2000..U+200A spaces, U+2028 LS, U+2029 PS, U+202F NNBSP
+    <<0xe2, 0x80, b, rest:bytes>>
+      if b >= 0x80 && b <= 0x8a || b == 0xa8 || b == 0xa9 || b == 0xaf
+    -> drop_leading_string_ws(rest)
+    // U+205F MMSP
+    <<0xe2, 0x81, 0x9f, rest:bytes>> -> drop_leading_string_ws(rest)
+    // U+3000 IDEOGRAPHIC SPACE
+    <<0xe3, 0x80, 0x80, rest:bytes>> -> drop_leading_string_ws(rest)
+    // U+FEFF ZWNBSP
+    <<0xef, 0xbb, 0xbf, rest:bytes>> -> drop_leading_string_ws(rest)
+    _ -> bytes
+  }
+}
+
+/// Byte length of `bytes` up to and including the last byte that is not part
+/// of a StrWhiteSpaceChar — i.e. the length after trimming trailing JS
+/// whitespace.
+fn content_length(bytes: BitArray, idx: Int, last: Int) -> Int {
+  case bytes {
+    <<>> -> last
+    <<b, rest:bytes>>
+      if b == 0x09
+      || b == 0x0a
+      || b == 0x0b
+      || b == 0x0c
+      || b == 0x0d
+      || b == 0x20
+    -> content_length(rest, idx + 1, last)
+    <<0xc2, 0xa0, rest:bytes>> -> content_length(rest, idx + 2, last)
+    <<0xe1, 0x9a, 0x80, rest:bytes>> -> content_length(rest, idx + 3, last)
+    <<0xe2, 0x80, b, rest:bytes>>
+      if b >= 0x80 && b <= 0x8a || b == 0xa8 || b == 0xa9 || b == 0xaf
+    -> content_length(rest, idx + 3, last)
+    <<0xe2, 0x81, 0x9f, rest:bytes>> -> content_length(rest, idx + 3, last)
+    <<0xe3, 0x80, 0x80, rest:bytes>> -> content_length(rest, idx + 3, last)
+    <<0xef, 0xbb, 0xbf, rest:bytes>> -> content_length(rest, idx + 3, last)
+    <<_, rest:bytes>> -> content_length(rest, idx + 1, idx + 1)
+    // Unreachable: input is a UTF-8 string, always byte-aligned.
+    _ -> last
+  }
+}
+
+/// Parse a StrUnsignedDecimalLiteral (any sign already stripped by the
+/// caller): "Infinity", digits[.digits][exp], .digits[exp] or digits.[exp].
+fn parse_unsigned_literal(bytes: BitArray) -> Result(JsNum, Nil) {
+  case bytes {
+    <<"Infinity":utf8>> -> Ok(Infinity)
+    _ -> {
+      let #(icount, after_int) = scan_ascii_digits(bytes, 0)
+      case after_int {
+        // Entirely digits: an integer literal.
+        <<>> if icount > 0 -> parse_integer_literal(bytes)
+        <<".":utf8, after_dot:bytes>> -> {
+          let #(fcount, after_frac) = scan_ascii_digits(after_dot, 0)
+          case icount > 0 || fcount > 0 {
+            False -> Error(Nil)
+            True -> {
+              use exp <- result.try(scan_exponent_part(after_frac))
+              build_and_parse_float(bytes, icount, fcount, exp)
+            }
+          }
+        }
+        // No dot, trailing bytes after the digits: must be an ExponentPart.
+        _ if icount > 0 -> {
+          use exp <- result.try(scan_exponent_part(after_int))
+          build_and_parse_float(bytes, icount, 0, exp)
+        }
+        _ -> Error(Nil)
       }
     }
   }
 }
 
-/// Parse the digits of a NonDecimalIntegerLiteral ("0x.." / "0o.." / "0b..").
-/// Empty or signed digit sequences are NaN per §7.1.4.1.
-fn parse_radix_literal(digits: String, radix: Int) -> JsNum {
-  let signed =
-    string.starts_with(digits, "-") || string.starts_with(digits, "+")
-  case digits == "" || signed {
-    True -> NaN
-    False ->
-      case int.base_parse(digits, radix) {
-        Ok(n) -> Finite(int.to_float(n))
-        Error(Nil) -> NaN
-      }
+fn scan_ascii_digits(bytes: BitArray, count: Int) -> #(Int, BitArray) {
+  case bytes {
+    <<d, rest:bytes>> if d >= 0x30 && d <= 0x39 ->
+      scan_ascii_digits(rest, count + 1)
+    _ -> #(count, bytes)
   }
 }
 
-/// Best-effort fixup so Erlang float parsing accepts JS-style literals like
-/// "2e3", "200.", ".5", "200.000E-02".
-fn normalize_float_literal(s: String) -> String {
-  // Split at 'e' or 'E'
-  let #(mant, exp) = case string.split_once(s, "e") {
-    Ok(#(m, e)) -> #(m, "e" <> e)
+/// Validate an optional ExponentPart and return it normalised: "" when
+/// absent, otherwise "e" followed by the (possibly signed) digits.
+/// binary_to_float accepts "e+5"/"E5" exponent forms, so the digits are kept
+/// verbatim.
+fn scan_exponent_part(bytes: BitArray) -> Result(String, Nil) {
+  case bytes {
+    <<>> -> Ok("")
+    <<e, digits:bytes>> if e == 0x65 || e == 0x45 -> {
+      let valid = case digits {
+        <<"+":utf8, ds:bytes>> | <<"-":utf8, ds:bytes>> ->
+          nonempty_all_digits(ds)
+        _ -> nonempty_all_digits(digits)
+      }
+      case valid {
+        False -> Error(Nil)
+        True ->
+          bit_array.to_string(digits)
+          |> result.map(fn(d) { "e" <> d })
+      }
+    }
+    _ -> Error(Nil)
+  }
+}
+
+fn nonempty_all_digits(bytes: BitArray) -> Bool {
+  case bytes {
+    <<d>> if d >= 0x30 && d <= 0x39 -> True
+    <<d, rest:bytes>> if d >= 0x30 && d <= 0x39 -> nonempty_all_digits(rest)
+    _ -> False
+  }
+}
+
+/// Build an Erlang-acceptable float literal ("both sides of the dot") from
+/// the validated mantissa bytes and normalised exponent, then parse it.
+/// icount/fcount are the integer/fraction digit counts; the dot (when both
+/// are present) sits between them at offset icount.
+fn build_and_parse_float(
+  bytes: BitArray,
+  icount: Int,
+  fcount: Int,
+  exp: String,
+) -> Result(JsNum, Nil) {
+  use mant <- result.try(case icount > 0, fcount > 0 {
+    True, True ->
+      bit_array.slice(bytes, 0, icount + 1 + fcount)
+      |> result.try(bit_array.to_string)
+    // "5." / "5e3" — fraction digits absent: supply ".0".
+    True, False ->
+      bit_array.slice(bytes, 0, icount)
+      |> result.try(bit_array.to_string)
+      |> result.map(fn(i) { i <> ".0" })
+    // ".5" — integer digits absent: prepend "0".
+    False, True ->
+      bit_array.slice(bytes, 0, 1 + fcount)
+      |> result.try(bit_array.to_string)
+      |> result.map(fn(f) { "0" <> f })
+    False, False -> Error(Nil)
+  })
+  case float.parse(mant <> exp) {
+    Ok(f) -> Ok(Finite(f))
+    // Out-of-double-range literal (e.g. "1e999"): binary_to_float rejects
+    // it. Preserves the previous behaviour (NaN).
+    Error(Nil) -> Ok(NaN)
+  }
+}
+
+/// Parse an all-digits integer literal. Goes through float syntax first;
+/// only literals beyond double range (~1e308, 309+ digits) fall back to
+/// arbitrary-precision integer parsing, exactly like the previous
+/// implementation.
+fn parse_integer_literal(bytes: BitArray) -> Result(JsNum, Nil) {
+  use digits <- result.try(bit_array.to_string(bytes))
+  case float.parse(digits <> ".0") {
+    Ok(f) -> Ok(Finite(f))
     Error(Nil) ->
-      case string.split_once(s, "E") {
-        Ok(#(m, e)) -> #(m, "e" <> e)
-        Error(Nil) -> #(s, "")
-      }
+      int.parse(digits) |> result.map(fn(n) { Finite(int.to_float(n)) })
   }
-  let mant = case string.contains(mant, ".") {
-    True ->
-      case string.ends_with(mant, ".") {
-        True -> mant <> "0"
-        False ->
-          case string.starts_with(mant, ".") {
-            True -> "0" <> mant
-            False -> mant
-          }
+}
+
+/// Parse the digits of a NonDecimalIntegerLiteral ("0x.." / "0o.." / "0b..").
+/// Empty or signed digit sequences are NaN per §7.1.4.1.
+fn parse_radix_literal(digits: BitArray, radix: Int) -> JsNum {
+  case digits {
+    <<>> | <<"-":utf8, _:bytes>> | <<"+":utf8, _:bytes>> -> NaN
+    _ -> {
+      let parsed =
+        bit_array.to_string(digits)
+        |> result.try(int.base_parse(_, radix))
+      case parsed {
+        Ok(n) -> Finite(int.to_float(n))
+        Error(Nil) -> NaN
       }
-    False -> mant <> ".0"
+    }
   }
-  mant <> exp
 }
 
 /// JS SameValueZero: https://tc39.es/ecma262/#sec-samevaluezero
