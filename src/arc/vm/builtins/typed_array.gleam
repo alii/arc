@@ -3780,15 +3780,7 @@ fn b64_padding(
         // second '='
         <<61, rest:bits>> -> {
           let #(rest, index) = b64_skip_ws(rest, index + 1)
-          b64_finish_padding(
-            rest,
-            index,
-            read,
-            acc,
-            chunk,
-            chunk_len,
-            handling,
-          )
+          b64_finish_padding(rest, index, read, acc, chunk, chunk_len, handling)
         }
         _ -> DecodeResult(read, decode_bytes(acc), False)
       }

@@ -26,13 +26,13 @@ import arc/vm/value.{
   Dispatch, Finite, Index, Infinity, JsBool, JsNull, JsNumber, JsObject,
   JsString, JsUndefined, NaN, Named, NativeFunction, NegInfinity, ObjectSlot,
   OrdinaryObject, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags,
-  RegExpGetGlobal,
-  RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline, RegExpGetSource,
-  RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets, RegExpLegacyGetter,
-  RegExpLegacyInputSetter, RegExpNative, RegExpObject, RegExpPrototypeCompile,
-  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
-  RegExpStringIteratorNext, RegExpSymbolMatch, RegExpSymbolMatchAll,
-  RegExpSymbolReplace, RegExpSymbolSearch, RegExpSymbolSplit, WellKnownSymbol,
+  RegExpGetGlobal, RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline,
+  RegExpGetSource, RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets,
+  RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpNative, RegExpObject,
+  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
+  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
+  RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
+  RegExpSymbolSplit, WellKnownSymbol,
 }
 import gleam/bit_array
 import gleam/bool

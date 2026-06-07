@@ -353,7 +353,10 @@ fn shrink_for_handoff(settled: Result(JsValue, JsValue), state: State) -> Heap {
 /// Every slot id the caller of a settled run can still reach from outside
 /// the heap. The persistent root set (builtins, global, realm slots) is
 /// added by `heap.compact` itself.
-fn handoff_roots(settled: Result(JsValue, JsValue), state: State) -> set.Set(Int) {
+fn handoff_roots(
+  settled: Result(JsValue, JsValue),
+  state: State,
+) -> set.Set(Int) {
   let acc =
     set.new()
     |> set.insert(state.ctx.global_object.id)

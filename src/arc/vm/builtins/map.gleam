@@ -226,11 +226,7 @@ fn read_entry_kv(
 ) -> Result(#(JsValue, JsValue, State), #(JsValue, State)) {
   case heap.read_array(state.heap, entry_ref) {
     Some(#(_, entry_elems)) ->
-      Ok(#(
-        elements.get(entry_elems, 0),
-        elements.get(entry_elems, 1),
-        state,
-      ))
+      Ok(#(elements.get(entry_elems, 0), elements.get(entry_elems, 1), state))
     None -> {
       use #(key, state) <- result.try(property.get_elem_value(
         state,

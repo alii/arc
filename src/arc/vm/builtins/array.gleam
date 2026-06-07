@@ -2504,12 +2504,7 @@ fn write_species_elements(
         // Hole — CreateDataPropertyOrThrow is skipped for absent indices.
         None -> write_species_elements(state, target, els, idx + 1, length)
         Some(val) -> {
-          use state <- result.try(write_species_element(
-            state,
-            target,
-            idx,
-            val,
-          ))
+          use state <- result.try(write_species_element(state, target, idx, val))
           write_species_elements(state, target, els, idx + 1, length)
         }
       }
@@ -4762,7 +4757,8 @@ fn reduce_loop(
       case maybe_elem {
         // kPresent is false — skip this index (hole).
         // Step 9d: Set k to k + 1 (or k - 1 for reduceRight).
-        None -> reduce_loop(state, arr, idx + step, end, cb, acc, step, fuel - 1)
+        None ->
+          reduce_loop(state, arr, idx + step, end, cb, acc, step, fuel - 1)
         // Step 9c: If kPresent is true, then
         Some(elem) -> {
           // Step 9c.ii: Set accumulator to ? Call(callbackfn, undefined, « accumulator, kValue, 𝔽(k), O »).
@@ -6022,12 +6018,9 @@ fn array_to_reversed(
   // Step 5: k ascends 0..len, reading from = len-k-1 — i.e. the source is
   // read in DESCENDING index order (observable via getters that mutate the
   // array mid-iteration). Holes become undefined (step 5c Get).
-  use reversed, state <- state.try_op(collect_elements_descending(
-    state,
-    this,
-    length - 1,
-    [],
-  ))
+  use reversed, state <- state.try_op(
+    collect_elements_descending(state, this, length - 1, []),
+  )
   let new_elements = build_elements_from_list(reversed, 0, elements.new())
   let #(heap, ref) =
     common.alloc_array_from_elements(
