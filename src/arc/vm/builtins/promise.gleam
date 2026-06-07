@@ -46,6 +46,9 @@ pub fn init(
       #("race", value.PromiseRaceStatic, 1),
       #("allSettled", value.PromiseAllSettledStatic, 1),
       #("any", value.PromiseAnyStatic, 1),
+      // Await-dictionary proposal: keyed promise combinators.
+      #("allKeyed", value.PromiseAllKeyedStatic, 1),
+      #("allSettledKeyed", value.PromiseAllSettledKeyedStatic, 1),
     ])
   let #(h, bt) =
     common.init_type(

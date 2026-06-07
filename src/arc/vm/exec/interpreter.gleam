@@ -1,13 +1,16 @@
 import arc/vm/builtins/common.{type Builtins}
+import arc/vm/builtins/disposable_stack
+import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iterator as builtins_iterator
+import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/completion.{
   type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
   YieldCompletion,
 }
 import arc/vm/exec/call
-import arc/vm/exec/event_loop
+import arc/vm/exec/dynamic_import
 import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
@@ -20,17 +23,19 @@ import arc/vm/opcode.{
   CallMethodApply, CreateArguments, CreateRestArray, DeclareEvalVar,
   DeclareGlobalLex, DeclareGlobalVar, DefineAccessor, DefineAccessorComputed,
   DefineField, DefineFieldComputed, DefineMethod, DefineMethodComputed,
-  DeleteElem, DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator,
-  GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal,
-  GetIterator, GetLocal, GetPrivateField, GetPrivateField2, GetPrototypeOf,
-  GetSuperValue, GetSuperValue2, InitGlobalLex, InitialYield,
+  DefinePrivateAccessor, DefinePrivateField, DefinePrivateMethod, DeleteElem,
+  DeleteField, Dup, ForInNext, ForInStart, GetAsyncIterator, GetBoxed, GetElem,
+  GetElem2, GetEvalVar, GetField, GetField2, GetGlobal, GetIterator, GetLocal,
+  GetPrivateField, GetPrivateField2, GetPrivateFieldDyn, GetPrivateFieldDyn2,
+  GetPrototypeOf, GetSuperValue, GetSuperValue2, InitGlobalLex, InitialYield,
   IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
-  IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure,
-  MakeMethod, NewObject, NewRegExp, ObjectRestCopy, ObjectSpread, Pop, PrivateIn,
-  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
-  PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateField, PutSuperValue, Return,
-  SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
-  TypeofGlobal, UnaryOp, Yield, YieldStar,
+  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
+  MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
+  ObjectSpread, Pop, PrivateIn, PrivateInDyn, PushConst, PushTry, PutBoxed,
+  PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
+  PutLocalCheckInit, PutPrivateField, PutPrivateFieldDyn, PutSuperValue, Return,
+  Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
+  TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -51,6 +56,7 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/float
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -64,7 +70,7 @@ import gleam/string
 /// The call_fn callback stored in State, backing `state.call` — the re-entrant
 /// JS call made from native code (e.g. Array.prototype.map's callback). The
 /// caller already holds a State, so it drives the lossless
-/// `event_loop.call_to_completion` directly and narrows it to the host-fn
+/// `call_value_to_completion` directly and narrows it to the host-fn
 /// `Ok(value)`/`Error(thrown)` contract; a `VmError` or a stray Yield/Await is an
 /// engine bug here (no channel to surface it through, mid-execution) → panic.
 fn call_fn_callback(
@@ -73,16 +79,7 @@ fn call_fn_callback(
   this_val: JsValue,
   args: List(JsValue),
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  case
-    event_loop.call_to_completion(
-      state,
-      callee,
-      this_val,
-      args,
-      execute_inner,
-      call_native,
-    )
-  {
+  case call_value_to_completion(state, callee, this_val, args) {
     Ok(#(NormalCompletion(val, _), s)) -> Ok(#(val, s))
     Ok(#(ThrowCompletion(thrown, _), s)) -> Error(#(thrown, s))
     Ok(#(YieldCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
@@ -90,6 +87,137 @@ fn call_fn_callback(
     Error(vm_err) ->
       panic as { "VM error in re-entrant call: " <> string.inspect(vm_err) }
   }
+}
+
+/// Drive one function-value call to completion from outside the normal frame
+/// flow (promise jobs, native re-entry, embedder exports). Routes through
+/// `call_value`, so generator / async / async-generator callees get their
+/// proper [[Call]] semantics — a generator object or promise — instead of
+/// having their bodies executed inline. (Inline execution leaked Yield/Await
+/// completions into contexts that cannot resume them; that was the bug in the
+/// old `event_loop.call_to_completion` closure arm.)
+///
+/// A non-callable callee is the legacy pass-through `undefined` (no throw)
+/// that promise reactions and friends rely on.
+fn call_value_to_completion(
+  state: State,
+  callee: JsValue,
+  this_val: JsValue,
+  args: List(JsValue),
+) -> Result(#(Completion, State), VmError) {
+  case helpers.is_callable(state.heap, callee) {
+    False -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
+    True -> {
+      // Sentinel frame, same trick as construct_fn_callback: the call
+      // machinery returns to pc+1 = 1, which is Return, so execute_inner
+      // finishes with the call result on top of the isolated stack.
+      // Pre-built at init (ctx.callback_sentinel) — this path runs once per
+      // element in Array.prototype.map and friends.
+      let sentinel = state.ctx.callback_sentinel
+      let isolated =
+        State(
+          ..state,
+          stack: [],
+          pc: 0,
+          func: sentinel,
+          code: sentinel.bytecode,
+          constants: sentinel.constants,
+          call_stack: [],
+          try_stack: [],
+        )
+      case call_value(isolated, callee, args, this_val) {
+        Ok(entered) ->
+          case execute_inner(entered) {
+            Ok(#(comp, final_state)) ->
+              Ok(#(comp, merge_back(state, final_state, final_state.heap)))
+            Error(vm_err) -> Error(vm_err)
+          }
+        Error(#(Thrown, thrown, post)) ->
+          Ok(#(
+            ThrowCompletion(thrown, post.heap),
+            merge_back(state, post, post.heap),
+          ))
+        Error(#(StepVmError(vm_err), _, _)) -> Error(vm_err)
+        Error(#(step, _, _)) ->
+          Error(Unimplemented(
+            "unexpected step result entering a re-entrant call: "
+            <> string.inspect(step),
+          ))
+      }
+    }
+  }
+}
+
+/// Build the ObjectSlot for a frozen Array used by GetTemplateObject
+/// (§13.2.8.4 steps 6-15): every index property is a dict override
+/// { writable: false, enumerable: true, configurable: false } (dense
+/// elements can't carry attributes), "length" is { writable: false,
+/// enumerable: false, configurable: false }, and the slot is non-extensible
+/// — together exactly SetIntegrityLevel(A, frozen).
+fn frozen_array_slot(
+  values: List(JsValue),
+  count: Int,
+  extra_props: List(#(value.PropertyKey, value.Property)),
+  array_proto: Ref,
+) {
+  let index_props =
+    list.index_map(values, fn(v, i) {
+      #(
+        value.Index(i),
+        DataProperty(
+          value: v,
+          writable: False,
+          enumerable: True,
+          configurable: False,
+        ),
+      )
+    })
+  let length_prop = #(
+    Named("length"),
+    DataProperty(
+      value: value.from_int(count),
+      writable: False,
+      enumerable: False,
+      configurable: False,
+    ),
+  )
+  ObjectSlot(
+    kind: ArrayObject(count),
+    properties: dict.from_list([
+      length_prop,
+      ..list.append(index_props, extra_props)
+    ]),
+    elements: elements.new(),
+    prototype: Some(array_proto),
+    symbol_properties: [],
+    extensible: False,
+  )
+}
+
+/// Single-record-update equivalent of
+/// `State(..state.merge_globals(parent, child, []), heap:)` — thread VM-global
+/// state (lexical globals, job queue, event-loop counters) from a child
+/// execution back to the parent plus the child's heap in ONE State copy
+/// instead of two. Hot: runs once per re-entrant callback (Array.prototype.map
+/// element calls, promise jobs, ...).
+fn merge_back(parent: State, child: State, heap: Heap) -> State {
+  State(
+    ..parent,
+    heap:,
+    ctx: state.RealmCtx(
+      ..parent.ctx,
+      lexical_globals: child.ctx.lexical_globals,
+      template_objects: child.ctx.template_objects,
+      // Realms registered during the re-entrant call (ShadowRealm /
+      // $262.createRealm constructors) must survive the merge.
+      realms: child.ctx.realms,
+    ),
+    job_queue: child.job_queue,
+    outstanding: child.outstanding,
+    atomics_waiters: child.atomics_waiters,
+    timers: child.timers,
+    next_timer_id: child.next_timer_id,
+  )
 }
 
 /// The construct_fn callback that gets stored in State.
@@ -112,11 +240,8 @@ fn construct_fn_callback(
       // Sentinel bytecode: do_construct saves pc+1 into the SavedFrame (or
       // advances pc+1 for native constructors), so we need Return at index 1.
       // Index 0 is never dispatched but present for belt-and-braces.
-      let sentinel =
-        value.FuncTemplate(
-          ..empty_template(),
-          bytecode: tuple_array.from_list([Return, Return]),
-        )
+      // Pre-built at init (ctx.callback_sentinel).
+      let sentinel = state.ctx.callback_sentinel
       let isolated =
         State(
           ..state,
@@ -137,15 +262,9 @@ fn construct_fn_callback(
         Ok(entered) ->
           case execute_inner(entered) {
             Ok(#(NormalCompletion(val, h), final_state)) ->
-              Ok(#(
-                val,
-                State(..state.merge_globals(state, final_state, []), heap: h),
-              ))
+              Ok(#(val, merge_back(state, final_state, h)))
             Ok(#(ThrowCompletion(thrown, h), final_state)) ->
-              Error(#(
-                thrown,
-                State(..state.merge_globals(state, final_state, []), heap: h),
-              ))
+              Error(#(thrown, merge_back(state, final_state, h)))
             Ok(#(YieldCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
               panic as "Yield/Await completion during construct"
             Error(vm_err) ->
@@ -201,14 +320,22 @@ pub fn new_state(
       global_object:,
       symbol_descriptions:,
       symbol_registry:,
+      template_objects: dict.new(),
       realms: dict.new(),
       call_fn: call_fn_callback,
       construct_fn: construct_fn_callback,
+      callback_sentinel: value.FuncTemplate(
+        ..empty_template(),
+        bytecode: tuple_array.from_list([Return, Return]),
+      ),
     ),
     new_target: JsUndefined,
     call_args: [],
     job_queue: job_queue.new(),
     unhandled_rejections: [],
+    atomics_waiters: [],
+    timers: [],
+    next_timer_id: 1,
     outstanding: 0,
     call_depth: 0,
     eval_env: None,
@@ -282,6 +409,7 @@ fn empty_template() -> FuncTemplate {
   value.FuncTemplate(
     name: None,
     arity: 0,
+    length: 0,
     local_count: 0,
     bytecode: tuple_array.from_list([]),
     constants: tuple_array.from_list([]),
@@ -293,6 +421,7 @@ fn empty_template() -> FuncTemplate {
     is_generator: False,
     is_async: False,
     is_constructor: False,
+    is_class_constructor: False,
     local_names: None,
     lexical: opcode.no_lexical_slots,
     syntax_perms: opcode.script_perms,
@@ -313,14 +442,8 @@ pub fn call_root(
   builtins: Builtins,
   global_object: Ref,
 ) -> Result(#(Completion, State), VmError) {
-  init_state(empty_template(), heap, builtins, global_object, False)
-  |> event_loop.call_to_completion(
-    callee,
-    this_val,
-    args,
-    execute_inner,
-    call_native,
-  )
+  let state = init_state(empty_template(), heap, builtins, global_object, False)
+  call_value_to_completion(state, callee, this_val, args)
 }
 
 /// Allocate a closure (FunctionObject) for `child_template`, capturing
@@ -335,41 +458,81 @@ pub fn make_closure(
   child_template: FuncTemplate,
   captured_values: List(JsValue),
 ) -> #(Heap, Ref) {
-  let #(heap, env_ref) = heap.alloc(heap, value.EnvSlot(captured_values))
+  let #(heap, env_ref) = heap.alloc_env(heap, captured_values)
   // For non-arrow functions, pre-populate .prototype with a fresh object so
-  // `Foo.prototype.bar = ...` and `new Foo()` work; .constructor is set after.
+  // `Foo.prototype.bar = ...` and `new Foo()` work.
   let name_prop =
     common.fn_name_property(option.unwrap(child_template.name, ""))
-  let length_prop = common.fn_length_property(child_template.arity)
-  let #(heap, fn_properties, proto_ref) = case child_template.is_arrow {
-    True -> #(
-      heap,
-      dict.from_list([
-        #(value.Named("name"), name_prop),
-        #(value.Named("length"), length_prop),
-      ]),
-      None,
-    )
+  let length_prop = common.fn_length_property(child_template.length)
+  // §10.2.5 MakeConstructor / §27.3.3: only constructible functions and
+  // (async) generators get an own "prototype" property. Arrows, methods,
+  // accessors, and async functions have none (test262:
+  // Function/prototype/Symbol.hasInstance/this-val-poisoned-prototype.js).
+  let has_prototype =
+    child_template.is_constructor || child_template.is_generator
+  let #(heap, fn_properties, proto_ref, closure_ref) = case has_prototype {
     False -> {
+      let #(heap, closure_ref) = heap.reserve(heap)
+      #(
+        heap,
+        dict.from_list([
+          #(value.Named("name"), name_prop),
+          #(value.Named("length"), length_prop),
+        ]),
+        None,
+        closure_ref,
+      )
+    }
+    True -> {
+      // Reserve the closure's ref up front so the prototype's "constructor"
+      // back-pointer (§10.2.5 MakeConstructor) can reference it, then register
+      // the prototype object LAZILY (QuickJS-style autoinit,
+      // JS_AUTOINIT_ID_PROTOTYPE): most closures never have their `.prototype`
+      // object touched, so heap.read synthesises the `{constructor: fn}` slot
+      // on demand and the first write materialises it.
+      // A generator's "prototype" object has no "constructor" (§27.3.3.1).
+      let #(h, closure_ref) = heap.reserve(heap)
+      // §27.3.3/§27.6.3: a generator function's "prototype" object inherits
+      // from %GeneratorPrototype% (resp. %AsyncGeneratorPrototype%), not
+      // Object.prototype.
+      let proto_parent = case
+        child_template.is_generator,
+        child_template.is_async
+      {
+        True, False -> builtins.generator.prototype
+        True, True -> builtins.async_generator.prototype
+        False, _ -> builtins.object.prototype
+      }
       let #(h, proto_obj_ref) =
-        common.alloc_wrapper(heap, OrdinaryObject, builtins.object.prototype)
+        heap.alloc_lazy_proto(
+          h,
+          closure_ref,
+          child_template.is_constructor,
+          proto_parent,
+        )
+      // §15.7.14 ClassDefinitionEvaluation step 16: a class constructor's
+      // "prototype" is non-writable; ordinary functions/generators get the
+      // writable §10.2.5/§27.3.3 form.
+      let proto_prop = case child_template.is_class_constructor {
+        True -> value.data(JsObject(proto_obj_ref))
+        False -> value.data(JsObject(proto_obj_ref)) |> value.writable()
+      }
       #(
         h,
         dict.from_list([
-          #(
-            value.Named("prototype"),
-            value.data(JsObject(proto_obj_ref)) |> value.writable(),
-          ),
+          #(value.Named("prototype"), proto_prop),
           #(value.Named("name"), name_prop),
           #(value.Named("length"), length_prop),
         ]),
         Some(proto_obj_ref),
+        closure_ref,
       )
     }
   }
-  let #(heap, closure_ref) =
-    heap.alloc(
+  let heap =
+    heap.fill(
       heap,
+      closure_ref,
       ObjectSlot(
         // A class constructor's [[HomeObject]] is its own .prototype, so
         // `super.x` inside the constructor resolves against the parent
@@ -383,30 +546,24 @@ pub fn make_closure(
         ),
         properties: fn_properties,
         elements: elements.new(),
-        prototype: Some(builtins.function.prototype),
+        // §27.3.3/§27.4.3/§27.7.3: generator function objects' [[Prototype]]
+        // is %GeneratorFunction.prototype% (resp. %AsyncGeneratorFunction
+        // .prototype%) — so Object.getPrototypeOf(function*(){}).constructor
+        // is the GeneratorFunction dynamic constructor. Async functions
+        // (including async arrows and methods, §15.9.3) likewise get
+        // %AsyncFunction.prototype%.
+        prototype: Some(
+          case child_template.is_generator, child_template.is_async {
+            True, False -> builtins.generator.fn_proto
+            True, True -> builtins.async_generator.fn_proto
+            False, True -> builtins.async_function_proto
+            False, False -> builtins.function.prototype
+          },
+        ),
         symbol_properties: [],
         extensible: True,
       ),
     )
-  // Set .constructor on the prototype pointing back to this function.
-  let heap = case proto_ref {
-    Some(pr) -> {
-      use slot <- heap.update(heap, pr)
-      case slot {
-        ObjectSlot(properties: props, ..) ->
-          ObjectSlot(
-            ..slot,
-            properties: dict.insert(
-              props,
-              value.Named("constructor"),
-              value.builtin_property(JsObject(closure_ref)),
-            ),
-          )
-        _ -> slot
-      }
-    }
-    None -> heap
-  }
   #(heap, closure_ref)
 }
 
@@ -624,6 +781,20 @@ fn get_super_value(
   op: String,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case state.stack {
+    // Symbol keys are valid property keys (§7.1.19 ToPropertyKey step 3) —
+    // e.g. super[Symbol.iterator]. Must come before the generic arm whose
+    // to_property_key would throw on symbols, and the symbol stays on the
+    // stack as-is for the trailing PutSuperValue (no string round-trip).
+    [value.JsSymbol(sym) as key, JsObject(base_ref), this_val, ..rest] -> {
+      use #(val, state) <- result.map(
+        state.rethrow(object.get_symbol_value(state, base_ref, sym, this_val)),
+      )
+      let stack = case keep_base {
+        True -> [val, key, JsObject(base_ref), this_val, ..rest]
+        False -> [val, ..rest]
+      }
+      State(..state, stack:, pc: state.pc + 1)
+    }
     [key, JsObject(base_ref), this_val, ..rest] -> {
       use #(pk, state) <- result.try(
         state.rethrow(property.to_property_key(state, key)),
@@ -691,6 +862,24 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         [a, b, ..rest] ->
           Ok(State(..state, stack: [b, a, ..rest], pc: state.pc + 1))
         _ -> underflow(state, "Swap")
+      }
+    }
+
+    // [a, b, c, ..] → [c, a, b, ..] — bring the 3rd element to the top.
+    Rot3 -> {
+      case state.stack {
+        [a, b, c, ..rest] ->
+          Ok(State(..state, stack: [c, a, b, ..rest], pc: state.pc + 1))
+        _ -> underflow(state, "Rot3")
+      }
+    }
+
+    // [a, b, c, d, ..] → [b, c, d, a, ..] — bury the top under the next three.
+    Unrot4 -> {
+      case state.stack {
+        [a, b, c, d, ..rest] ->
+          Ok(State(..state, stack: [b, c, d, a, ..rest], pc: state.pc + 1))
+        _ -> underflow(state, "Unrot4")
       }
     }
 
@@ -868,11 +1057,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                 ),
               )
             None ->
-              // Check prototype chain
+              // Check prototype chain — stateful: §9.1.1.4.1 HasBinding goes
+              // through [[HasProperty]], so a Proxy on the global's prototype
+              // chain must have its "has" trap run (it can execute user code).
               case
-                object.has_property(state.heap, state.ctx.global_object, key)
+                object.has_property_stateful(
+                  state,
+                  state.ctx.global_object,
+                  object.PkString(key),
+                )
               {
-                True ->
+                Ok(#(True, state)) ->
                   case
                     object.get_value_of(
                       state,
@@ -890,8 +1085,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                       )
                     Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
                   }
-                False ->
+                Ok(#(False, state)) ->
                   state.throw_reference_error(state, name <> " is not defined")
+                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
               }
           }
         }
@@ -934,20 +1130,23 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               let key = Named(name)
               case state.func.is_strict {
                 True ->
-                  // Strict mode: must exist on globalThis or throw
+                  // Strict mode: must exist on globalThis or throw. Stateful
+                  // — a Proxy on the global's prototype chain runs its "has"
+                  // trap here (§9.1.1.4.5 SetMutableBinding → HasBinding).
                   case
-                    object.has_property(
-                      state.heap,
+                    object.has_property_stateful(
+                      state,
                       state.ctx.global_object,
-                      key,
+                      object.PkString(key),
                     )
                   {
-                    False ->
+                    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+                    Ok(#(False, state)) ->
                       state.throw_reference_error(
                         state,
                         name <> " is not defined",
                       )
-                    True ->
+                    Ok(#(True, state)) ->
                       case
                         object.set_value(
                           State(..state, stack: rest),
@@ -996,7 +1195,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     // §9.1.1.4.17 CreateGlobalVarBinding — create var on globalThis
     DeclareGlobalVar(name) -> {
       let key = Named(name)
-      case object.has_property(state.heap, state.ctx.global_object, key) {
+      // §9.1.1.4.17 CreateGlobalVarBinding: hasProperty = ? HasOwnProperty(
+      // globalObject, N) — own properties only, NOT the prototype chain.
+      // A name that only exists as an inherited accessor (e.g. `__proto__`
+      // from Object.prototype) must still get an own data binding, so the
+      // later PutGlobal writes the binding instead of invoking the setter
+      // (test262: language/expressions/object/__proto__-permitted-dup-
+      // shorthand.js via eval'd `var __proto__`).
+      let has_own =
+        object.get_own_property(state.heap, state.ctx.global_object, key)
+        |> option.is_some
+      case has_own {
         True ->
           // Already exists — no-op
           Ok(State(..state, pc: state.pc + 1))
@@ -1084,6 +1293,424 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
+    // §7.1.17 ToString for template literal substitutions: ToPrimitive with
+    // string hint (toString before valueOf), then primitive → string.
+    opcode.ToStringVal -> {
+      case state.stack {
+        [JsString(_), ..] -> Ok(State(..state, pc: state.pc + 1))
+        [val, ..rest] -> {
+          use #(s, state) <- result.try(
+            state.rethrow(coerce.js_to_string(state, val)),
+          )
+          Ok(State(..state, stack: [JsString(s), ..rest], pc: state.pc + 1))
+        }
+        [] -> underflow(state, "ToStringVal")
+      }
+    }
+
+    // §13.2.8.4 GetTemplateObject — push the per-site cached template object
+    // for a tagged template, creating it on first evaluation. The template
+    // object and its .raw array are frozen arrays whose index properties are
+    // { writable: false, enumerable: true, configurable: false }; both are
+    // stored as dict overrides so freeze semantics (writes reject, deletes
+    // reject, isFrozen reports true) hold.
+    opcode.GetTemplateObject(site, cooked, raw) -> {
+      case dict.get(state.ctx.template_objects, site) {
+        Ok(ref) ->
+          Ok(
+            State(
+              ..state,
+              stack: [JsObject(ref), ..state.stack],
+              pc: state.pc + 1,
+            ),
+          )
+        Error(Nil) -> {
+          let count = list.length(raw)
+          // Step 10: raw array — frozen Array of the verbatim quasi strings.
+          let #(heap, raw_ref) =
+            heap.alloc(
+              state.heap,
+              frozen_array_slot(
+                list.map(raw, JsString),
+                count,
+                [],
+                state.builtins.array.prototype,
+              ),
+            )
+          // Steps 6-9, 11-13: template array — frozen Array of the cooked
+          // values (undefined for invalid escapes), with a non-enumerable,
+          // non-writable, non-configurable "raw" property.
+          let cooked_values =
+            list.map(cooked, fn(c) {
+              case c {
+                Some(s) -> JsString(s)
+                None -> JsUndefined
+              }
+            })
+          let raw_prop = #(
+            Named("raw"),
+            DataProperty(
+              value: JsObject(raw_ref),
+              writable: False,
+              enumerable: False,
+              configurable: False,
+            ),
+          )
+          let #(heap, tpl_ref) =
+            heap.alloc(
+              heap,
+              frozen_array_slot(
+                cooked_values,
+                count,
+                [raw_prop],
+                state.builtins.array.prototype,
+              ),
+            )
+          // Root the template object so GC keeps it alive for the cache's
+          // lifetime (the raw array is reachable through its "raw" property).
+          let heap = heap.root(heap, tpl_ref)
+          Ok(
+            State(
+              ..state,
+              heap:,
+              ctx: state.RealmCtx(
+                ..state.ctx,
+                template_objects: dict.insert(
+                  state.ctx.template_objects,
+                  site,
+                  tpl_ref,
+                ),
+              ),
+              stack: [JsObject(tpl_ref), ..state.stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+      }
+    }
+
+    // §7.1.19 ToPropertyKey — class-definition-time coercion of computed
+    // field names (§15.7.14 ClassFieldDefinitionEvaluation step 1).
+    // ToPrimitive(key, string): Symbols pass through unchanged, everything
+    // else is ToString'd. Abrupt completions (throwing @@toPrimitive /
+    // toString / valueOf) propagate at class-evaluation time.
+    opcode.ToPropertyKey -> {
+      case state.stack {
+        [JsString(_), ..] | [value.JsSymbol(_), ..] ->
+          Ok(State(..state, pc: state.pc + 1))
+        [val, ..rest] -> {
+          use #(prim, state) <- result.try(
+            state.rethrow(coerce.to_primitive(state, val, coerce.StringHint)),
+          )
+          case prim {
+            value.JsSymbol(_) ->
+              Ok(State(..state, stack: [prim, ..rest], pc: state.pc + 1))
+            _ -> {
+              use #(s, state) <- result.try(
+                state.rethrow(coerce.js_to_string(state, prim)),
+              )
+              Ok(State(..state, stack: [JsString(s), ..rest], pc: state.pc + 1))
+            }
+          }
+        }
+        [] -> underflow(state, "ToPropertyKey")
+      }
+    }
+
+    // §7.1.18 ToObject for the `with (expr)` head.
+    opcode.ToObject -> {
+      case state.stack {
+        [val, ..rest] ->
+          case common.to_object(state.heap, state.builtins, val) {
+            Some(#(heap, ref)) ->
+              Ok(
+                State(
+                  ..state,
+                  heap:,
+                  stack: [JsObject(ref), ..rest],
+                  pc: state.pc + 1,
+                ),
+              )
+            None ->
+              state.throw_type_error(
+                state,
+                "Cannot convert undefined or null to object",
+              )
+          }
+        [] -> underflow(state, "ToObject")
+      }
+    }
+
+    // §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against a with
+    // object. Found: replace obj with the value and jump. Not found
+    // (or @@unscopables-blocked): pop obj, fall through.
+    opcode.WithGetVar(name, target) -> {
+      case state.stack {
+        [JsObject(ref) as obj, ..rest] -> {
+          use #(bound, state) <- result.try(with_has_binding(state, ref, name))
+          case bound {
+            False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+            True -> {
+              // GetBindingValue re-checks HasProperty: the @@unscopables
+              // getter may have deleted the property. Strict referencing
+              // code (a strict closure resolving through a sloppy with)
+              // throws ReferenceError; sloppy reads undefined.
+              use #(still, state) <- result.try(
+                state.rethrow(object.has_property_stateful(
+                  state,
+                  ref,
+                  object.PkString(Named(name)),
+                )),
+              )
+              case still {
+                False ->
+                  case state.func.is_strict {
+                    True ->
+                      state.throw_reference_error(
+                        state,
+                        name <> " is not defined",
+                      )
+                    False ->
+                      Ok(
+                        State(..state, stack: [JsUndefined, ..rest], pc: target),
+                      )
+                  }
+                True -> {
+                  use #(val, state) <- result.map(
+                    state.rethrow(object.get_value_of(state, obj, Named(name))),
+                  )
+                  State(..state, stack: [val, ..rest], pc: target)
+                }
+              }
+            }
+          }
+        }
+        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+        [] -> underflow(state, "WithGetVar")
+      }
+    }
+
+    // Like WithGetVar, but keeps the with object beneath the value as the
+    // call receiver (§13.3.6.2 EvaluateCall step 1.b.ii — thisValue is the
+    // env record's WithBaseObject). Found: [obj, ..] → [value, obj, ..],
+    // jump. Not found (or @@unscopables-blocked): pop obj, fall through to
+    // the static path (which pushes undefined as receiver).
+    opcode.WithGetVarThis(name, target) -> {
+      case state.stack {
+        [JsObject(ref) as obj, ..rest] -> {
+          use #(bound, state) <- result.try(with_has_binding(state, ref, name))
+          case bound {
+            False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+            True -> {
+              // Same HasProperty re-check as WithGetVar: the @@unscopables
+              // getter may have deleted the property.
+              use #(still, state) <- result.try(
+                state.rethrow(object.has_property_stateful(
+                  state,
+                  ref,
+                  object.PkString(Named(name)),
+                )),
+              )
+              case still {
+                False ->
+                  case state.func.is_strict {
+                    True ->
+                      state.throw_reference_error(
+                        state,
+                        name <> " is not defined",
+                      )
+                    False ->
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [JsUndefined, obj, ..rest],
+                          pc: target,
+                        ),
+                      )
+                  }
+                True -> {
+                  use #(val, state) <- result.map(
+                    state.rethrow(object.get_value_of(state, obj, Named(name))),
+                  )
+                  State(..state, stack: [val, obj, ..rest], pc: target)
+                }
+              }
+            }
+          }
+        }
+        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+        [] -> underflow(state, "WithGetVarThis")
+      }
+    }
+
+    // §9.1.1.2.5 SetMutableBinding against a with object. Stack:
+    // [obj, value, ..]. Found: Set(obj, name, value), pop both, jump.
+    // Not found: pop obj, fall through to the ordinary store.
+    opcode.WithPutVar(name, target) -> {
+      case state.stack {
+        [JsObject(ref) as obj, val, ..rest] -> {
+          use #(bound, state) <- result.try(with_has_binding(state, ref, name))
+          case bound {
+            False -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+            True -> {
+              // SetMutableBinding step 2: re-check HasProperty — the
+              // @@unscopables getter may have deleted the binding. If gone
+              // and the assigning code is strict (a strict closure can
+              // resolve through an enclosing sloppy with), ReferenceError.
+              use #(still, state) <- result.try(
+                state.rethrow(object.has_property_stateful(
+                  state,
+                  ref,
+                  object.PkString(Named(name)),
+                )),
+              )
+              use Nil <- result.try(case still, state.func.is_strict {
+                False, True ->
+                  state.throw_reference_error(state, name <> " is not defined")
+                _, _ -> Ok(Nil)
+              })
+              use #(state, ok) <- result.try(
+                state.rethrow(object.set_value(
+                  state,
+                  ref,
+                  Named(name),
+                  val,
+                  obj,
+                )),
+              )
+              // §13.15.2 PutValue 6.b.iv: failed [[Set]] throws TypeError in
+              // strict code only.
+              case ok, state.func.is_strict {
+                False, True ->
+                  state.throw_type_error(
+                    state,
+                    "Cannot assign to read only property '"
+                      <> name
+                      <> "' of object",
+                  )
+                _, _ -> Ok(State(..state, stack: rest, pc: target))
+              }
+            }
+          }
+        }
+        [_, val, ..rest] ->
+          Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+        _ -> underflow(state, "WithPutVar")
+      }
+    }
+
+    // §9.1.1.2.7 DeleteBinding against a with object. Found: replace obj
+    // with the [[Delete]] result and jump. Not found: pop obj, fall through.
+    opcode.WithDeleteVar(name, target) -> {
+      case state.stack {
+        [JsObject(ref), ..rest] -> {
+          use #(bound, state) <- result.try(with_has_binding(state, ref, name))
+          case bound {
+            False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+            True -> {
+              use #(state, success) <- result.map(
+                state.rethrow(object.delete_property_stateful(
+                  state,
+                  ref,
+                  object.PkString(Named(name)),
+                )),
+              )
+              State(..state, stack: [JsBool(success), ..rest], pc: target)
+            }
+          }
+        }
+        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+        [] -> underflow(state, "WithDeleteVar")
+      }
+    }
+
+    // §9.1.2.1 GetIdentifierReference at a with object — HasBinding only.
+    // Bound: KEEP obj (it becomes the reference base) and jump. Not bound:
+    // pop obj, fall through (next check or the undefined static sentinel).
+    opcode.WithMakeRef(name, target) -> {
+      case state.stack {
+        [JsObject(ref) as obj, ..rest] -> {
+          use #(bound, state) <- result.map(with_has_binding(state, ref, name))
+          case bound {
+            // Keep obj on the stack — it is the reference base.
+            True -> State(..state, stack: [obj, ..rest], pc: target)
+            False -> State(..state, stack: rest, pc: state.pc + 1)
+          }
+        }
+        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+        [] -> underflow(state, "WithMakeRef")
+      }
+    }
+
+    // §9.1.1.2.6 GetBindingValue on a made reference base. Object base:
+    // HasProperty re-check (binding may have vanished) then Get; undefined
+    // sentinel: pop, fall through to the static read.
+    opcode.WithGetRefValue(name, target) -> {
+      case state.stack {
+        [JsObject(ref) as obj, ..rest] -> {
+          use #(still, state) <- result.try(
+            state.rethrow(object.has_property_stateful(
+              state,
+              ref,
+              object.PkString(Named(name)),
+            )),
+          )
+          case still, state.func.is_strict {
+            False, True ->
+              state.throw_reference_error(state, name <> " is not defined")
+            False, False ->
+              Ok(State(..state, stack: [JsUndefined, ..rest], pc: target))
+            True, _ -> {
+              use #(val, state) <- result.map(
+                state.rethrow(object.get_value_of(state, obj, Named(name))),
+              )
+              State(..state, stack: [val, ..rest], pc: target)
+            }
+          }
+        }
+        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+        [] -> underflow(state, "WithGetRefValue")
+      }
+    }
+
+    // §9.1.1.2.5 SetMutableBinding on a made reference base. Stack:
+    // [base, value, ..]. Object base: stillExists re-check then Set (the
+    // ORIGINAL base — even if the binding was deleted during the RHS, the
+    // store recreates it there, §13.15.2 note). Undefined sentinel: pop,
+    // fall through to the static store.
+    opcode.WithPutRefValue(name, target) -> {
+      case state.stack {
+        [JsObject(ref) as obj, val, ..rest] -> {
+          use #(still, state) <- result.try(
+            state.rethrow(object.has_property_stateful(
+              state,
+              ref,
+              object.PkString(Named(name)),
+            )),
+          )
+          use Nil <- result.try(case still, state.func.is_strict {
+            False, True ->
+              state.throw_reference_error(state, name <> " is not defined")
+            _, _ -> Ok(Nil)
+          })
+          use #(state, ok) <- result.try(
+            state.rethrow(object.set_value(state, ref, Named(name), val, obj)),
+          )
+          case ok, state.func.is_strict {
+            False, True ->
+              state.throw_type_error(
+                state,
+                "Cannot assign to read only property '" <> name <> "' of object",
+              )
+            _, _ -> Ok(State(..state, stack: rest, pc: target))
+          }
+        }
+        [_, val, ..rest] ->
+          Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+        _ -> underflow(state, "WithPutRefValue")
+      }
+    }
+
     // §9.1.1.4.16 CreateGlobalLexBinding — create let/const in lexical record
     DeclareGlobalLex(name, is_const) -> {
       // TDZ slot, tagged const/let so PutGlobal and InitGlobalLex can tell them apart.
@@ -1133,6 +1760,38 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           )
         }
         [] -> underflow(state, "InitGlobalLex")
+      }
+    }
+
+    // `using` / `await using` desugar: CreateDisposableResource(V, hint) —
+    // pop the resource value, push its disposer callable (or undefined for
+    // null/undefined). TypeError for non-disposable values.
+    opcode.GetDisposer(is_async:) -> {
+      case state.stack {
+        [val, ..rest] -> {
+          let state = State(..state, stack: rest, pc: state.pc + 1)
+          case disposable_stack.make_using_disposer(state, val, is_async:) {
+            #(state, Ok(disposer)) ->
+              Ok(State(..state, stack: [disposer, ..state.stack]))
+            #(state, Error(thrown)) -> Error(#(Thrown, thrown, state))
+          }
+        }
+        [] -> underflow(state, "GetDisposer")
+      }
+    }
+
+    // `using` / `await using` desugar: DisposeResources error folding — pop
+    // suppressed, pop error, push new SuppressedError(error, suppressed).
+    opcode.MakeSuppressed -> {
+      case state.stack {
+        [suppressed, err, ..rest] -> {
+          let #(state, suppressed_error) =
+            builtins_error.make_suppressed_error(state, err, suppressed)
+          Ok(
+            State(..state, stack: [suppressed_error, ..rest], pc: state.pc + 1),
+          )
+        }
+        _ -> underflow(state, "MakeSuppressed")
       }
     }
 
@@ -1231,14 +1890,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                 JsObject(ref) -> {
                   use #(result, state) <- result.map(case left {
                     value.JsSymbol(sym) ->
-                      Ok(#(
-                        object.has_symbol_property(state.heap, ref, sym),
+                      state.rethrow(object.has_property_stateful(
                         state,
+                        ref,
+                        object.PkSymbol(sym),
                       ))
                     _ ->
                       case property.to_property_key(state, left) {
                         Ok(#(pk, state)) ->
-                          Ok(#(object.has_property(state.heap, ref, pk), state))
+                          state.rethrow(object.has_property_stateful(
+                            state,
+                            ref,
+                            object.PkString(pk),
+                          ))
                         Error(#(thrown, state)) ->
                           Error(#(Thrown, thrown, state))
                       }
@@ -1305,7 +1969,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               case operators.exec_unaryop(kind, operand) {
                 Ok(result) ->
                   Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-                Error(msg) -> state.throw_type_error(state, msg)
+                Error(msg) -> throw_operator_error(state, msg)
               }
           }
         [] -> underflow(state, "UnaryOp")
@@ -1550,22 +2214,53 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       case state.stack {
         [value, JsObject(ref) as receiver, ..rest] -> {
           // set_value walks proto chain, calls setters, handles non-writable.
-          // Sloppy mode: ignore failure (strict mode TypeError is a TODO).
-          use #(state, _ok) <- result.map(
+          use #(state, ok) <- result.try(
             state.rethrow(object.set_value(state, ref, key, value, receiver)),
           )
-          State(..state, stack: [value, ..rest], pc: state.pc + 1)
+          // §13.15.2 PutValue step 6.b.iv: failed [[Set]] throws TypeError
+          // in strict mode; sloppy mode ignores the failure.
+          case ok, state.func.is_strict {
+            False, True ->
+              state.throw_type_error(
+                state,
+                "Cannot assign to read only property '"
+                  <> opcode.key_name(op_key)
+                  <> "' of object",
+              )
+            _, _ -> Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
+          }
         }
+        // §6.2.5.6 PutValue step 5.a: ToObject(undefined|null) throws
+        // TypeError in BOTH modes — sloppy-ignore only applies to boxed
+        // primitives below.
+        [_, JsUndefined, ..] | [_, JsNull, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot set properties of undefined or null (setting '"
+              <> opcode.key_name(op_key)
+              <> "')",
+          )
         [value, _, ..rest] -> {
-          // PutField on non-object: silently ignore, still return value
-          Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
+          // PutField on non-object base (primitive): §13.15.2 PutValue 6.b.iv —
+          // strict mode throws TypeError, sloppy mode silently ignores.
+          case state.func.is_strict {
+            True ->
+              state.throw_type_error(
+                state,
+                "Cannot create property '"
+                  <> opcode.key_name(op_key)
+                  <> "' on primitive value",
+              )
+            False ->
+              Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
+          }
         }
         _ -> underflow(state, "PutField")
       }
     }
 
     GetPrivateField(op_key) -> {
-      let key = value.from_op_key(op_key)
+      let key = value.private_from_op_key(op_key)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
@@ -1597,7 +2292,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     }
 
     GetPrivateField2(op_key) -> {
-      let key = value.from_op_key(op_key)
+      let key = value.private_from_op_key(op_key)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk — see GetPrivateField.
@@ -1628,14 +2323,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     }
 
     PutPrivateField(op_key) -> {
-      let key = value.from_op_key(op_key)
+      let key = value.private_from_op_key(op_key)
       case state.stack {
         [val, JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
           // OrdinarySetWithOwnDescriptor to it — no second walk via set_value.
           case object.find_property(state.heap, ref, key) {
             Some(prop) -> {
-              use #(state, _ok) <- result.map(
+              use #(state, ok) <- result.try(
                 state.rethrow(object.set_found_value(
                   state,
                   receiver,
@@ -1644,7 +2339,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                   val,
                 )),
               )
-              State(..state, stack: [val, ..rest], pc: state.pc + 1)
+              // §7.3.32 PrivateSet: kind ~method~ or an accessor without a
+              // setter throws TypeError (regardless of strict mode).
+              case ok {
+                True ->
+                  Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+                False ->
+                  state.throw_type_error(
+                    state,
+                    "Cannot write private member "
+                      <> opcode.key_name(op_key)
+                      <> ": it is a method or has no setter",
+                  )
+              }
             }
             None ->
               state.throw_type_error(
@@ -1666,16 +2373,15 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     }
 
     PrivateIn(op_key) -> {
-      let key = value.from_op_key(op_key)
+      let key = value.private_from_op_key(op_key)
       case state.stack {
-        [JsObject(ref), ..rest] ->
-          Ok(
-            State(
-              ..state,
-              stack: [JsBool(object.has_property(state.heap, ref, key)), ..rest],
-              pc: state.pc + 1,
-            ),
-          )
+        [JsObject(ref), ..rest] -> {
+          // Brand check via find_property (chain walk) — has_property hides
+          // private-name keys from ordinary [[HasProperty]], so it can't be
+          // used here.
+          let found = option.is_some(object.find_property(state.heap, ref, key))
+          Ok(State(..state, stack: [JsBool(found), ..rest], pc: state.pc + 1))
+        }
         [_, ..] ->
           state.throw_type_error(
             state,
@@ -1687,14 +2393,273 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    DefineField(op_key) -> {
-      // Like PutField but keeps the object on the stack (for object literal construction)
-      let key = value.from_op_key(op_key)
+    NewPrivateName(name) -> {
+      // §15.7.14 step 5/6: mint a fresh PrivateName for this class
+      // evaluation. The minted storage-key text travels as a JsString.
+      let key_text = value.mint_private_key(name)
+      Ok(
+        State(
+          ..state,
+          stack: [JsString(key_text), ..state.stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+
+    GetPrivateFieldDyn -> {
+      // §7.3.30 PrivateGet. [key, obj, ..] → [val, ..]. Own-only lookup —
+      // spec [[PrivateElements]] never inherit through the prototype chain.
       case state.stack {
-        [value, JsObject(ref) as obj, ..rest] -> {
-          let #(heap, _) = object.set_property(state.heap, ref, key, value)
+        [JsString(key_text), JsObject(ref) as receiver, ..rest] ->
+          case object.get_own_property(state.heap, ref, Named(key_text)) {
+            Some(value.AccessorProperty(get: None, ..)) ->
+              state.throw_type_error(
+                state,
+                "'"
+                  <> value.private_display_name(key_text)
+                  <> "' was defined without a getter",
+              )
+            Some(prop) -> {
+              use #(val, state) <- result.map(
+                state.rethrow(object.property_get_value(state, prop, receiver)),
+              )
+              State(..state, stack: [val, ..rest], pc: state.pc + 1)
+            }
+            None ->
+              state.throw_type_error(
+                state,
+                "Cannot read private member "
+                  <> value.private_display_name(key_text)
+                  <> " from an object whose class did not declare it",
+              )
+          }
+        [JsString(key_text), _, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot read private member "
+              <> value.private_display_name(key_text)
+              <> " on non-object",
+          )
+        [_, _, ..] | [_] | [] -> underflow(state, "GetPrivateFieldDyn")
+      }
+    }
+
+    GetPrivateFieldDyn2 -> {
+      // Like GetPrivateFieldDyn but keeps obj: [key, obj, ..] → [val, obj, ..]
+      case state.stack {
+        [JsString(key_text), JsObject(ref) as receiver, ..rest] ->
+          case object.get_own_property(state.heap, ref, Named(key_text)) {
+            Some(value.AccessorProperty(get: None, ..)) ->
+              state.throw_type_error(
+                state,
+                "'"
+                  <> value.private_display_name(key_text)
+                  <> "' was defined without a getter",
+              )
+            Some(prop) -> {
+              use #(val, state) <- result.map(
+                state.rethrow(object.property_get_value(state, prop, receiver)),
+              )
+              State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
+            }
+            None ->
+              state.throw_type_error(
+                state,
+                "Cannot read private member "
+                  <> value.private_display_name(key_text)
+                  <> " from an object whose class did not declare it",
+              )
+          }
+        [JsString(key_text), _, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot read private member "
+              <> value.private_display_name(key_text)
+              <> " on non-object",
+          )
+        [_, _, ..] | [_] | [] -> underflow(state, "GetPrivateFieldDyn2")
+      }
+    }
+
+    PutPrivateFieldDyn -> {
+      // §7.3.31 PrivateSet. [key, val, obj, ..] → [val, ..]. Own-only.
+      case state.stack {
+        [JsString(key_text), val, JsObject(ref) as receiver, ..rest] -> {
+          let key = Named(key_text)
+          case object.get_own_property(state.heap, ref, key) {
+            Some(prop) -> {
+              use #(state, ok) <- result.try(
+                state.rethrow(object.set_found_value(
+                  state,
+                  receiver,
+                  prop,
+                  key,
+                  val,
+                )),
+              )
+              // kind ~method~ (non-writable data) or an accessor without a
+              // setter throws TypeError regardless of strict mode.
+              case ok {
+                True ->
+                  Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+                False ->
+                  state.throw_type_error(
+                    state,
+                    "Cannot write private member "
+                      <> value.private_display_name(key_text)
+                      <> ": it is a method or has no setter",
+                  )
+              }
+            }
+            None ->
+              state.throw_type_error(
+                state,
+                "Cannot write private member "
+                  <> value.private_display_name(key_text)
+                  <> " to an object whose class did not declare it",
+              )
+          }
+        }
+        [JsString(key_text), _, _, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot write private member "
+              <> value.private_display_name(key_text)
+              <> " on non-object",
+          )
+        [_, _, _, ..] | [_, _] | [_] | [] ->
+          underflow(state, "PutPrivateFieldDyn")
+      }
+    }
+
+    PrivateInDyn -> {
+      // §13.10.1 `#x in obj`. [key, obj, ..] → [bool, ..]. Own-only check.
+      case state.stack {
+        [JsString(key_text), JsObject(ref), ..rest] -> {
+          let found =
+            option.is_some(object.get_own_property(
+              state.heap,
+              ref,
+              Named(key_text),
+            ))
+          Ok(State(..state, stack: [JsBool(found), ..rest], pc: state.pc + 1))
+        }
+        [JsString(key_text), _, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot use 'in' operator to search for private name "
+              <> value.private_display_name(key_text)
+              <> " in non-object",
+          )
+        [_, _, ..] | [_] | [] -> underflow(state, "PrivateInDyn")
+      }
+    }
+
+    DefinePrivateField -> {
+      // §7.3.28 PrivateFieldAdd. [val, key, obj, ..] → [obj, ..].
+      case state.stack {
+        [val, JsString(key_text), JsObject(ref) as obj, ..rest] -> {
+          let key = Named(key_text)
+          use Nil <- result.try(check_private_add(state, ref, key_text))
+          let heap = object.define_private_data(state.heap, ref, key, val, True)
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
+        [_, _, _, ..] | [_, _] | [_] | [] ->
+          underflow(state, "DefinePrivateField")
+      }
+    }
+
+    DefinePrivateMethod -> {
+      // §7.3.29 PrivateMethodOrAccessorAdd (method). [fn, key, obj, ..] →
+      // [obj, ..]. Non-writable so PrivateSet's method check trips.
+      case state.stack {
+        [func, JsString(key_text), JsObject(ref) as obj, ..rest] -> {
+          let key = Named(key_text)
+          use Nil <- result.try(check_private_add(state, ref, key_text))
+          let heap =
+            object.define_private_data(state.heap, ref, key, func, False)
+          Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+        }
+        [_, _, _, ..] | [_, _] | [_] | [] ->
+          underflow(state, "DefinePrivateMethod")
+      }
+    }
+
+    DefinePrivateAccessor(kind) -> {
+      // §7.3.29 for one accessor half. [fn, key, obj, ..] → [obj, ..].
+      // get+set of one class evaluation merge; a half that is already
+      // present means double initialization → TypeError.
+      case state.stack {
+        [func, JsString(key_text), JsObject(ref) as obj, ..rest] -> {
+          let key = Named(key_text)
+          let existing = object.get_own_property(state.heap, ref, key)
+          let half_present = case existing, kind {
+            Some(value.AccessorProperty(get: Some(_), ..)), opcode.Getter ->
+              True
+            Some(value.AccessorProperty(set: Some(_), ..)), opcode.Setter ->
+              True
+            Some(value.DataProperty(..)), _ -> True
+            _, _ -> False
+          }
+          use Nil <- result.try(case existing {
+            None -> check_private_add(state, ref, key_text)
+            Some(_) ->
+              case half_present {
+                True ->
+                  state.throw_type_error(
+                    state,
+                    "Cannot initialize private accessor "
+                      <> value.private_display_name(key_text)
+                      <> " twice on the same object",
+                  )
+                False -> Ok(Nil)
+              }
+          })
+          // Private accessor: enumerability is never observable (private
+          // names don't appear in any enumeration).
+          let heap =
+            object.define_accessor(
+              state.heap,
+              ref,
+              key,
+              func,
+              kind,
+              enumerable: False,
+            )
+          Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+        }
+        [_, _, _, ..] | [_, _] | [_] | [] ->
+          underflow(state, "DefinePrivateAccessor")
+      }
+    }
+
+    DefineField(op_key) -> {
+      // Like PutField but keeps the object on the stack (for object literal
+      // construction). "#"-prefixed static keys come from class private field
+      // syntax and land in the private namespace (value.from_op_key_define).
+      let key = value.from_op_key_define(op_key)
+      case state.stack {
+        [value, JsObject(ref) as obj, ..rest] ->
+          case define_needs_full_semantics(state, ref, key) {
+            // Fast path: ordinary extensible target (fresh object literals,
+            // normal class instances) — a raw insert is spec-equivalent.
+            False -> {
+              let #(heap, _) = object.set_property(state.heap, ref, key, value)
+              Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+            }
+            // §7.3.32 DefineField → CreateDataPropertyOrThrow: a proxy
+            // receiver fires its defineProperty trap; a frozen /
+            // non-extensible receiver throws TypeError.
+            True -> {
+              use state <- result.map(define_field_full(
+                state,
+                ref,
+                JsString(opcode.key_name(op_key)),
+                value,
+              ))
+              State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+            }
+          }
         [_, _, ..] -> {
           // DefineField on non-object: no-op, keep object on stack
           Ok(State(..state, pc: state.pc + 1))
@@ -1706,8 +2671,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     DefineMethod(op_key) -> {
       // Like DefineField but creates a non-enumerable property (for class
       // methods). §15.4.4 MakeMethod: also set [[HomeObject]] = target on the
-      // function so super.prop inside it finds the right base.
-      let key = value.from_op_key(op_key)
+      // function so super.prop inside it finds the right base. "#"-prefixed
+      // static keys (private methods) land in the private namespace.
+      let key = value.from_op_key_define(op_key)
       case state.stack {
         [v, JsObject(ref) as obj, ..rest] -> {
           let heap = make_method(state.heap, v, ref)
@@ -1725,7 +2691,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // Non-enumerable data property (writable, configurable).
       case state.stack {
         [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
-          let heap = make_method(state.heap, func, ref)
+          let heap =
+            set_computed_fn_name(
+              state.heap,
+              func,
+              "",
+              symbol_fn_name(state, sym),
+            )
+          let heap = make_method(heap, func, ref)
           let heap =
             object.define_symbol_property(
               heap,
@@ -1736,10 +2709,16 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
         [func, key, JsObject(ref) as obj, ..rest] -> {
-          use #(pk, state) <- result.map(
+          use #(pk, state) <- result.try(
             state.rethrow(property.to_property_key(state, key)),
           )
-          let heap = make_method(state.heap, func, ref)
+          // DefinePropertyOrThrow (§14.3.9 step 11): redefining an existing
+          // non-configurable own property — e.g. static ['prototype']() on
+          // the constructor — throws TypeError.
+          use Nil <- result.map(check_define_nonconfigurable(state, ref, pk))
+          let heap =
+            set_computed_fn_name(state.heap, func, "", value.key_to_string(pk))
+          let heap = make_method(heap, func, ref)
           let heap = object.define_method_property(heap, ref, pk, func)
           State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
         }
@@ -1748,15 +2727,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    DefineAccessor(op_key, kind) -> {
+    DefineAccessor(op_key, kind, enumerable) -> {
       // Object literal getter/setter: { get x() {}, set x(v) {} }
       // Stack: [fn, obj, ...] → [obj, ...]
-      // Defines or updates an AccessorProperty on the object.
-      let key = value.from_op_key(op_key)
+      // Defines or updates an AccessorProperty on the object. "#"-prefixed
+      // static keys (private accessors) land in the private namespace.
+      let key = value.from_op_key_define(op_key)
       case state.stack {
         [func, JsObject(ref) as obj, ..rest] -> {
           let heap = make_method(state.heap, func, ref)
-          let heap = object.define_accessor(heap, ref, key, func, kind)
+          let heap =
+            object.define_accessor(heap, ref, key, func, kind, enumerable:)
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
         [_, _, ..] -> Ok(State(..state, pc: state.pc + 1))
@@ -1764,21 +2745,48 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
-    DefineAccessorComputed(kind) -> {
+    DefineAccessorComputed(kind, enumerable) -> {
       // Computed getter/setter: { get [expr]() {} }
       // Stack: [fn, key, obj, ...] → [obj, ...]
       case state.stack {
         [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
-          let heap = make_method(state.heap, func, ref)
-          let heap = object.define_symbol_accessor(heap, ref, sym, func, kind)
+          let heap =
+            set_computed_fn_name(
+              state.heap,
+              func,
+              accessor_name_prefix(kind),
+              symbol_fn_name(state, sym),
+            )
+          let heap = make_method(heap, func, ref)
+          let heap =
+            object.define_symbol_accessor(
+              heap,
+              ref,
+              sym,
+              func,
+              kind,
+              enumerable:,
+            )
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
         }
         [func, key, JsObject(ref) as obj, ..rest] -> {
-          use #(pk, state) <- result.map(
+          use #(pk, state) <- result.try(
             state.rethrow(property.to_property_key(state, key)),
           )
-          let heap = make_method(state.heap, func, ref)
-          let heap = object.define_accessor(heap, ref, pk, func, kind)
+          // DefinePropertyOrThrow (§14.3.9): an accessor cannot replace an
+          // existing non-configurable own property (static get/set
+          // ['prototype'] on the constructor) — TypeError.
+          use Nil <- result.map(check_define_nonconfigurable(state, ref, pk))
+          let heap =
+            set_computed_fn_name(
+              state.heap,
+              func,
+              accessor_name_prefix(kind),
+              value.key_to_string(pk),
+            )
+          let heap = make_method(heap, func, ref)
+          let heap =
+            object.define_accessor(heap, ref, pk, func, kind, enumerable:)
           State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
         }
         [_, _, _, ..] -> Ok(State(..state, pc: state.pc + 1))
@@ -1805,11 +2813,70 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // put_elem_value already implements this (symbol → symbol_properties,
       // array index → elements, else → js_to_string → properties).
       case state.stack {
+        // Proxy target (class field init where the constructor returned a
+        // proxy): §7.3.7 CreateDataPropertyOrThrow goes through the proxy's
+        // [[DefineOwnProperty]] (defineProperty trap), NOT [[Set]]. A
+        // deferred module namespace relies on this to trigger evaluation.
         [val, key, JsObject(ref) as obj, ..rest] -> {
-          use state <- result.map(
-            state.rethrow(property.put_elem_value(state, ref, key, val)),
-          )
-          State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+          // Proxies AND frozen/non-extensible targets take the full
+          // [[DefineOwnProperty]] path (trap / TypeError respectively).
+          let needs_full = case object.as_proxy(state.heap, ref) {
+            Some(_) -> True
+            None ->
+              case heap.read(state.heap, ref) {
+                Some(ObjectSlot(extensible:, ..)) -> !extensible
+                _ -> False
+              }
+          }
+          case needs_full {
+            True -> {
+              use state <- result.map(define_field_full(state, ref, key, val))
+              State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+            }
+            False -> {
+              // CreateDataPropertyOrThrow (§7.3.7): defining over an existing
+              // non-configurable own property → TypeError. Reachable via a
+              // static class field with computed name "prototype" (class
+              // field keys are already ToPropertyKey'd primitives here);
+              // fresh object literals have no non-configurable properties.
+              use Nil <- result.try(case key {
+                JsString("prototype") ->
+                  check_define_nonconfigurable(state, ref, Named("prototype"))
+                _ -> Ok(Nil)
+              })
+              // §7.3.7 CreateDataProperty defines an OWN property — it must
+              // NOT walk the prototype chain or invoke inherited setters
+              // (e.g. `{0: v}` with an accessor "0" on Object.prototype),
+              // so use the raw own-define, not [[Set]].
+              case key {
+                value.JsSymbol(sym) -> {
+                  let heap =
+                    object.define_symbol_property(
+                      state.heap,
+                      ref,
+                      sym,
+                      value.data_property(val),
+                    )
+                  Ok(
+                    State(
+                      ..state,
+                      heap:,
+                      stack: [obj, ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                _ -> {
+                  use #(pk, state) <- result.map(
+                    state.rethrow(property.to_property_key(state, key)),
+                  )
+                  let #(heap, _ok) =
+                    object.set_property(state.heap, ref, pk, val)
+                  State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+                }
+              }
+            }
+          }
         }
         [_, _, _, ..rest] ->
           // Non-object target: shouldn't happen for literals, but pop and keep going.
@@ -1844,7 +2911,13 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       case state.stack {
         [source, JsObject(ref) as obj, ..rest] -> {
           use state <- result.map(
-            state.rethrow(object.copy_data_properties(state, ref, source)),
+            state.rethrow(builtins_object.copy_data_properties_stateful(
+              state,
+              ref,
+              source,
+              set.new(),
+              set.new(),
+            )),
           )
           State(..state, stack: [obj, ..rest], pc: state.pc + 1)
         }
@@ -1890,7 +2963,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                     )
                   let state = State(..state, heap:)
                   use state <- result.map(
-                    state.rethrow(object.copy_data_properties_excluding(
+                    state.rethrow(builtins_object.copy_data_properties_stateful(
                       state,
                       ref,
                       source,
@@ -1918,16 +2991,30 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         [obj, ..rest] ->
           case obj {
             JsObject(ref) -> {
-              let #(heap, success) =
-                object.delete_property(state.heap, ref, key)
-              Ok(
-                State(
-                  ..state,
-                  stack: [JsBool(success), ..rest],
-                  heap:,
-                  pc: state.pc + 1,
-                ),
+              use #(state, success) <- result.try(
+                state.rethrow(object.delete_property_stateful(
+                  state,
+                  ref,
+                  object.PkString(key),
+                )),
               )
+              // §13.5.1.2 step 5.b.i: strict-mode delete of a
+              // non-configurable property throws TypeError.
+              case success, state.func.is_strict {
+                False, True ->
+                  state.throw_type_error(
+                    state,
+                    "Cannot delete property '" <> opcode.key_name(op_key) <> "'",
+                  )
+                _, _ ->
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(success), ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+              }
             }
             // delete on non-object returns true
             _ ->
@@ -1946,29 +3033,51 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             JsObject(ref) ->
               case key {
                 value.JsSymbol(sym) -> {
-                  let #(heap, success) =
-                    object.delete_symbol_property(state.heap, ref, sym)
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(success), ..rest],
-                      heap:,
-                      pc: state.pc + 1,
-                    ),
+                  use #(state, success) <- result.try(
+                    state.rethrow(object.delete_property_stateful(
+                      state,
+                      ref,
+                      object.PkSymbol(sym),
+                    )),
                   )
+                  // §13.5.1.2 step 5.b.i: strict delete failure throws.
+                  case success, state.func.is_strict {
+                    False, True ->
+                      state.throw_type_error(state, "Cannot delete property")
+                    _, _ ->
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [JsBool(success), ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                  }
                 }
                 _ -> {
-                  use #(pk, state) <- result.map(
+                  use #(pk, state) <- result.try(
                     state.rethrow(property.to_property_key(state, key)),
                   )
-                  let #(heap, success) =
-                    object.delete_property(state.heap, ref, pk)
-                  State(
-                    ..state,
-                    stack: [JsBool(success), ..rest],
-                    heap:,
-                    pc: state.pc + 1,
+                  use #(state, success) <- result.try(
+                    state.rethrow(object.delete_property_stateful(
+                      state,
+                      ref,
+                      object.PkString(pk),
+                    )),
                   )
+                  // §13.5.1.2 step 5.b.i: strict delete failure throws.
+                  case success, state.func.is_strict {
+                    False, True ->
+                      state.throw_type_error(state, "Cannot delete property")
+                    _, _ ->
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [JsBool(success), ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                  }
                 }
               }
             _ ->
@@ -1997,21 +3106,35 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                 "Class extends value is not a constructor or null",
               )
             True -> {
+              // §15.7.14 step 5.g: protoParent = ? Get(superclass,
+              // "prototype") — observable; neither Object nor null (e.g. a
+              // bound function's missing prototype) → TypeError.
+              use #(parent_proto_val, state) <- result.try(
+                state.rethrow(object.get_value(
+                  state,
+                  parent_ref,
+                  Named("prototype"),
+                  parent,
+                )),
+              )
+              use parent_proto <- result.try(case parent_proto_val {
+                JsObject(p) -> Ok(Some(p))
+                JsNull -> Ok(None)
+                _ ->
+                  state.throw_type_error(
+                    state,
+                    "Class extends value does not have valid prototype property "
+                      <> object.inspect(parent_proto_val, state.heap),
+                  )
+              })
               let ctor_proto = get_field_ref(state.heap, ctor_ref, "prototype")
               // §15.7.14 step 12: ctor.[[HomeObject]] = ctor.prototype
               let heap =
                 option.map(ctor_proto, make_method(state.heap, ctor, _))
                 |> option.unwrap(state.heap)
-              let parent_proto =
-                get_field_ref(heap, parent_ref, "prototype")
-                |> option.unwrap(state.builtins.object.prototype)
-              // Set ctor.prototype.__proto__ = parent.prototype
+              // Set ctor.prototype.__proto__ = protoParent (object or null)
               let heap =
-                option.map(ctor_proto, set_slot_prototype(
-                  heap,
-                  _,
-                  Some(parent_proto),
-                ))
+                option.map(ctor_proto, set_slot_prototype(heap, _, parent_proto))
                 |> option.unwrap(heap)
               // Set ctor.__proto__ = parent (for static inheritance)
               let heap = set_slot_prototype(heap, ctor_ref, Some(parent_ref))
@@ -2146,18 +3269,56 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
 
     GetElem2 -> {
       // Like GetElem but keeps obj+key on stack: [key, obj, ...] -> [value, key, obj, ...]
+      // Used by compound assignment / update on computed members, where the
+      // spec evaluates ToPropertyKey exactly ONCE (§13.15.2 + §13.3.3): the
+      // key left on the stack for the later PutElem is the already-converted
+      // property key, so a stateful toString isn't called a second time.
+      // RequireObjectCoercible on the base comes BEFORE ToPropertyKey
+      // (GetValue → §6.2.5.5), so a nullish base throws TypeError without
+      // touching the key.
       case state.stack {
-        [key, JsObject(ref) as obj, ..rest] -> {
+        [_, JsNull as v, ..] | [_, JsUndefined as v, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot read properties of " <> value.nullish_label(v),
+          )
+        [value.JsSymbol(sym) as key, JsObject(ref) as obj, ..rest] -> {
           use #(val, state) <- result.map(
-            state.rethrow(property.get_elem_value(state, ref, key)),
+            state.rethrow(object.get_symbol_value(state, ref, sym, obj)),
           )
           State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1)
         }
-        [key, receiver, ..rest] -> {
+        [key, JsObject(ref) as obj, ..rest] -> {
+          use #(pk, state) <- result.try(
+            state.rethrow(property.to_property_key(state, key)),
+          )
           use #(val, state) <- result.map(
-            state.rethrow(get_elem_on_primitive(state, receiver, key)),
+            state.rethrow(object.get_value(state, ref, pk, obj)),
+          )
+          State(
+            ..state,
+            stack: [val, property_key_value(pk), obj, ..rest],
+            pc: state.pc + 1,
+          )
+        }
+        [value.JsSymbol(sym) as key, receiver, ..rest] -> {
+          use #(val, state) <- result.map(
+            state.rethrow(object.get_symbol_value_of(state, receiver, sym)),
           )
           State(..state, stack: [val, key, receiver, ..rest], pc: state.pc + 1)
+        }
+        [key, receiver, ..rest] -> {
+          use #(pk, state) <- result.try(
+            state.rethrow(property.to_property_key(state, key)),
+          )
+          use #(val, state) <- result.map(
+            state.rethrow(object.get_value_of(state, receiver, pk)),
+          )
+          State(
+            ..state,
+            stack: [val, property_key_value(pk), receiver, ..rest],
+            pc: state.pc + 1,
+          )
         }
         _ -> underflow(state, "GetElem2")
       }
@@ -2167,14 +3328,40 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // Stack: [value, key, obj, ...rest]
       case state.stack {
         [val, key, JsObject(ref), ..rest] -> {
-          use state <- result.map(
+          use #(state, ok) <- result.try(
             state.rethrow(property.put_elem_value(state, ref, key, val)),
           )
-          State(..state, stack: [val, ..rest], pc: state.pc + 1)
+          // §13.15.2 PutValue step 6.b.iv: failed [[Set]] throws TypeError
+          // in strict mode; sloppy mode ignores the failure.
+          case ok, state.func.is_strict {
+            False, True ->
+              state.throw_type_error(
+                state,
+                "Cannot assign to read only property of object",
+              )
+            _, _ -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+          }
         }
-        [_, _, _, ..rest] -> {
-          // PutElem on non-object: silently ignore (JS sloppy mode)
-          Ok(State(..state, stack: rest, pc: state.pc + 1))
+        // §6.2.5.6 PutValue step 5.a: ToObject(undefined|null) throws
+        // TypeError in BOTH modes — sloppy-ignore only applies to boxed
+        // primitives below.
+        [_, _, JsUndefined, ..] | [_, _, JsNull, ..] ->
+          state.throw_type_error(
+            state,
+            "Cannot set properties of undefined or null",
+          )
+        [val, _, _, ..rest] -> {
+          // PutElem on non-object base (primitive): §13.15.2 PutValue 6.b.iv —
+          // strict mode throws TypeError, sloppy mode silently ignores.
+          // Stack effect must match the object arm: value stays on the stack.
+          case state.func.is_strict {
+            True ->
+              state.throw_type_error(
+                state,
+                "Cannot create property on primitive value",
+              )
+            False -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+          }
         }
         _ -> underflow(state, "PutElem")
       }
@@ -2215,7 +3402,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     }
 
     // ---- Function calls ----------------------------------------------
-    CallEval(arity) -> {
+    CallEval(arity, param_scope_names, with_names, private_names) -> {
       // Syntactic `eval(...)` call. Runtime identity check: if the callee
       // resolves to the intrinsic eval function, do a DIRECT eval (sees
       // caller's locals via state.func.local_names + boxed slots). If eval
@@ -2227,6 +3414,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           let #(new_state, result) =
             realm.direct_eval_native(
               args,
+              param_scope_names,
+              with_names,
+              private_names,
               State(..state, stack: rest_stack),
               execute_inner,
               new_state,
@@ -2270,21 +3460,36 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                     home_object:,
                   ),
                   ..,
-                )) ->
-                  call_function(
-                    state,
-                    obj_ref,
-                    env_ref,
-                    home_object,
-                    func_template,
-                    args,
-                    rest_stack,
-                    JsUndefined,
-                    None,
-                    JsUndefined,
-                  )
+                )) -> {
+                  let result =
+                    call_function(
+                      state,
+                      obj_ref,
+                      env_ref,
+                      home_object,
+                      func_template,
+                      args,
+                      rest_stack,
+                      JsUndefined,
+                      None,
+                      JsUndefined,
+                    )
+                  case is_tail_call(state, func_template) {
+                    True -> elide_tail_frame(result)
+                    False -> result
+                  }
+                }
                 Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
                   call_native(state, native, args, rest_stack, JsUndefined)
+                // Proxy [[Call]] (§10.5.12) — route through call.call_value,
+                // which holds the trap machinery.
+                Some(ObjectSlot(kind: value.ProxyObject(..), ..)) ->
+                  call_value(
+                    State(..state, stack: rest_stack),
+                    JsObject(obj_ref),
+                    args,
+                    JsUndefined,
+                  )
                 _ ->
                   state.throw_type_error(
                     state,
@@ -2320,22 +3525,36 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
                     home_object:,
                   ),
                   ..,
-                )) ->
-                  call_function(
-                    state,
-                    method_ref,
-                    env_ref,
-                    home_object,
-                    func_template,
-                    args,
-                    rest_stack,
-                    // Method call: this = receiver
-                    receiver,
-                    None,
-                    JsUndefined,
-                  )
+                )) -> {
+                  let result =
+                    call_function(
+                      state,
+                      method_ref,
+                      env_ref,
+                      home_object,
+                      func_template,
+                      args,
+                      rest_stack,
+                      // Method call: this = receiver
+                      receiver,
+                      None,
+                      JsUndefined,
+                    )
+                  case is_tail_call(state, func_template) {
+                    True -> elide_tail_frame(result)
+                    False -> result
+                  }
+                }
                 Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
                   call_native(state, native, args, rest_stack, receiver)
+                // Proxy [[Call]] (§10.5.12) — this = receiver.
+                Some(ObjectSlot(kind: value.ProxyObject(..), ..)) ->
+                  call_value(
+                    State(..state, stack: rest_stack),
+                    JsObject(method_ref),
+                    args,
+                    receiver,
+                  )
                 _ ->
                   state.throw_type_error(
                     state,
@@ -2442,6 +3661,26 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     PutSuperValue ->
       // [val, key, base, this, ..] → [val, ..]. OrdinarySet, receiver=this.
       case state.stack {
+        // Symbol-keyed super assignment: super[Symbol.x] = v.
+        [val, value.JsSymbol(sym), JsObject(base_ref), this_val, ..rest] -> {
+          use #(state, ok) <- result.try(
+            state.rethrow(object.set_symbol_value(
+              state,
+              base_ref,
+              sym,
+              val,
+              this_val,
+            )),
+          )
+          case ok, state.func.is_strict {
+            False, True ->
+              state.throw_type_error(
+                state,
+                "Cannot assign to read-only super property",
+              )
+            _, _ -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+          }
+        }
         [val, key, JsObject(base_ref), this_val, ..rest] -> {
           use #(pk, state) <- result.try(
             state.rethrow(property.to_property_key(state, key)),
@@ -2507,13 +3746,21 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       case state.stack {
         [obj, ..rest] -> {
           // Collect enumerable keys from the object (or empty for non-objects)
-          let keys = case obj {
-            JsObject(ref) -> object.enumerate_keys(state.heap, ref)
-            // for-in on null/undefined produces no iterations
-            JsNull | JsUndefined -> []
-            // Primitives: no enumerable properties
-            _ -> []
-          }
+          use #(keys, state) <- result.try(
+            state.rethrow(case obj {
+              JsObject(ref) ->
+                case object.as_proxy(state.heap, ref) {
+                  // Proxy: EnumerateObjectProperties via the ownKeys /
+                  // getOwnPropertyDescriptor / getPrototypeOf traps.
+                  Some(_) -> builtins_object.enumerate_keys_stateful(state, ref)
+                  None -> Ok(#(object.enumerate_keys(state.heap, ref), state))
+                }
+              // for-in on null/undefined produces no iterations
+              JsNull | JsUndefined -> Ok(#([], state))
+              // Primitives: no enumerable properties
+              _ -> Ok(#([], state))
+            }),
+          )
           // EnumerateObjectProperties checks each key via [[GetOwnProperty]], so
           // a TDZ namespace binding throws ReferenceError before iteration.
           let guard = case obj {
@@ -2673,6 +3920,22 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
     }
 
+    // GetIteratorFromMethod step 4 (§7.4.4): cache the iterator's `next` in
+    // an internal Iterator Record. The Get is observable and abrupt
+    // completions propagate. Emitted after GetAsyncIterator for async yield*.
+    IteratorRecord -> {
+      case state.stack {
+        [JsObject(iter_ref), ..rest] ->
+          push_iterator_record(state, iter_ref, rest)
+        [other, ..] ->
+          state.throw_type_error(
+            state,
+            object.inspect(other, state.heap) <> " is not an object",
+          )
+        _ -> underflow(state, "IteratorRecord")
+      }
+    }
+
     IteratorNext -> {
       // [[Done]] tracking (QuickJS-style): on done=true OR .next() abrupt,
       // the iter slot becomes JsUndefined so subsequent IteratorNext
@@ -2695,44 +3958,136 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
           )
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
+            // index < 0 latches exhaustion: once the iterator reported done
+            // it stays done even if the source later grows or its buffer is
+            // resized — no witness re-validation (spec sets
+            // [[IteratedObject]] to undefined, "generator already returned").
+            Some(ObjectSlot(kind: ArrayIteratorObject(index:, ..), ..))
+              if index < 0
+            ->
+              Ok(
+                State(
+                  ..state,
+                  stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
+                  pc: state.pc + 1,
+                ),
+              )
             Some(
-              ObjectSlot(kind: ArrayIteratorObject(source:, index:), ..) as slot,
-            ) -> {
-              // Re-read the source length each time (handles mutations during iteration)
-              let #(length, elements) =
-                heap.read_array_like(state.heap, source)
-                |> option.unwrap(#(0, elements.new()))
-              case index >= length {
-                True ->
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
-                      pc: state.pc + 1,
-                    ),
-                  )
-                False -> {
-                  let val = elements.get(elements, index)
-                  let heap =
-                    heap.write(
+              ObjectSlot(
+                kind: ArrayIteratorObject(source:, index:, iter_kind:),
+                ..,
+              ) as slot,
+            ) ->
+              case heap.read(state.heap, source) {
+                // Typed-array source — §23.1.5.1: re-validate the buffer
+                // witness and re-read the element through the live backing
+                // store each step, so mutation during iteration is observed
+                // and detached/out-of-bounds views throw TypeError.
+                Some(ObjectSlot(
+                  kind: value.TypedArrayObject(
+                    buffer:,
+                    elem_kind:,
+                    byte_offset:,
+                    length:,
+                  ),
+                  ..,
+                )) ->
+                  case
+                    object.typed_array_iter_length(
                       state.heap,
-                      iter_ref,
-                      ObjectSlot(
-                        ..slot,
-                        kind: ArrayIteratorObject(source:, index: index + 1),
-                      ),
+                      buffer,
+                      elem_kind,
+                      byte_offset,
+                      length,
                     )
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
-                      heap:,
-                      pc: state.pc + 1,
-                    ),
+                  {
+                    // The throw comes from `.next()` itself — ForIn/Of body
+                    // evaluation must NOT close the iterator (§14.7.5.6
+                    // step 6.a), so mark the iter slot done.
+                    Error(msg) ->
+                      state.throw_type_error(state, msg)
+                      |> result.map_error(mark_done(rest))
+                    Ok(len) ->
+                      case index >= len {
+                        True -> {
+                          let heap =
+                            advance_array_iter(state.heap, iter_ref, source, -1)
+                          Ok(
+                            State(
+                              ..state,
+                              stack: [
+                                JsBool(True),
+                                JsUndefined,
+                                JsUndefined,
+                                ..rest
+                              ],
+                              heap:,
+                              pc: state.pc + 1,
+                            ),
+                          )
+                        }
+                        False -> {
+                          let elem =
+                            object.typed_array_element(
+                              state.heap,
+                              buffer,
+                              elem_kind,
+                              byte_offset,
+                              len,
+                              index,
+                            )
+                            |> option.unwrap(JsUndefined)
+                          let heap =
+                            heap.write(
+                              state.heap,
+                              iter_ref,
+                              ObjectSlot(
+                                ..slot,
+                                kind: ArrayIteratorObject(
+                                  source:,
+                                  index: index + 1,
+                                  iter_kind:,
+                                ),
+                              ),
+                            )
+                          let #(heap, val) =
+                            array_iter_shape(
+                              heap,
+                              state,
+                              iter_kind,
+                              index,
+                              elem,
+                            )
+                          Ok(
+                            State(
+                              ..state,
+                              stack: [
+                                JsBool(False),
+                                val,
+                                JsObject(iter_ref),
+                                ..rest
+                              ],
+                              heap:,
+                              pc: state.pc + 1,
+                            ),
+                          )
+                        }
+                      }
+                  }
+                // A throw from `.next()` itself (proxy trap / index accessor)
+                // must NOT close the iterator (§14.7.5.6 step 6.a) — mark
+                // the iter slot done so IteratorCloseThrow no-ops.
+                _ ->
+                  step_array_iterator_source(
+                    state,
+                    iter_ref,
+                    source,
+                    index,
+                    iter_kind,
+                    rest,
                   )
-                }
+                  |> result.map_error(mark_done(rest))
               }
-            }
             Some(
               ObjectSlot(kind: value.StringIteratorObject(remaining:), ..) as slot,
             ) ->
@@ -2969,13 +4324,32 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     AsyncYieldStarNext ->
       // [arg, iter, ..rest]. Call iter.next(arg), replace arg with result →
       // [result, iter, ..rest], pc+1. The following Await op suspends on it.
+      // The iter slot is an internal Iterator Record (cached [[NextMethod]],
+      // §7.4.3 IteratorNext) when emitted via IrIteratorRecord; a bare
+      // iterator object otherwise.
       case state.stack {
         [arg, JsObject(iter_ref) as iter, ..rest] -> {
-          use #(next_fn, state) <- result.try(
-            state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
+          use #(next_fn, this, state) <- result.try(
+            case heap.read(state.heap, iter_ref) {
+              Some(ObjectSlot(
+                kind: value.IteratorRecordObject(iterated:, next_method:),
+                ..,
+              )) -> Ok(#(next_method, iterated, state))
+              _ -> {
+                use #(next_fn, state) <- result.map(
+                  state.rethrow(object.get_value(
+                    state,
+                    iter_ref,
+                    Named("next"),
+                    iter,
+                  )),
+                )
+                #(next_fn, iter, state)
+              }
+            },
           )
           use #(res, state) <- result.try(
-            state.rethrow(state.call(state, next_fn, iter, [arg])),
+            state.rethrow(state.call(state, next_fn, this, [arg])),
           )
           Ok(State(..state, stack: [res, iter, ..rest], pc: state.pc + 1))
         }
@@ -3004,11 +4378,40 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
     }
 
     // ---- Special -----------------------------------------------------
-    CreateArguments -> {
+    CreateArguments(simple_params:) -> {
       // Allocate an unmapped arguments object from state.call_args.
       let args = state.call_args
       let length = list.length(args)
       let callee = read_lexical_local(state, opcode.RefActiveFunc)
+      // §10.2.11 step 20: an UNMAPPED arguments object is created when the
+      // function is strict OR its parameter list is non-simple (defaults,
+      // destructuring, rest). §10.4.4.7 CreateUnmappedArgumentsObject step 8:
+      // its "callee" is the %ThrowTypeError% accessor (non-enumerable,
+      // non-configurable) — reuse the restricted accessor's getter installed
+      // on Function.prototype ("arguments"), same function identity
+      // (test262: built-ins/ThrowTypeError/unique-per-realm-non-simple.js).
+      // Sloppy functions with simple parameter lists get the MAPPED form,
+      // whose "callee" is a writable data property holding the function.
+      let callee_prop = case state.func.is_strict || !simple_params {
+        True ->
+          case
+            object.get_own_property(
+              state.heap,
+              state.builtins.function.prototype,
+              Named("arguments"),
+            )
+          {
+            Some(value.AccessorProperty(get:, set:, ..)) ->
+              value.AccessorProperty(
+                get:,
+                set:,
+                enumerable: False,
+                configurable: False,
+              )
+            _ -> value.data(callee) |> value.writable |> value.configurable
+          }
+        False -> value.data(callee) |> value.writable |> value.configurable
+      }
       let props =
         dict.from_list([
           #(
@@ -3017,10 +4420,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               |> value.writable
               |> value.configurable,
           ),
-          #(
-            Named("callee"),
-            value.data(callee) |> value.writable |> value.configurable,
-          ),
+          #(Named("callee"), callee_prop),
         ])
       // §10.4.4.6: [@@iterator] = %Array.prototype.values%
       let sym_props = case
@@ -3098,12 +4498,90 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
         _ -> underflow(state, "NewRegExp")
       }
     }
+
+    // -- Dynamic import (§13.3.10 ImportCall) --
+    opcode.DynamicImport ->
+      case state.stack {
+        [options, specifier, ..rest] ->
+          dynamic_import.evaluate_import_call(state, specifier, options, rest)
+        _ -> underflow(state, "DynamicImport")
+      }
+
+    // import.source(specifier): Source Text Module Records have no source
+    // phase representation, so a coercible specifier rejects with SyntaxError.
+    opcode.DynamicImportSource ->
+      case state.stack {
+        [specifier, ..rest] ->
+          dynamic_import.evaluate_source_import_call(state, specifier, rest)
+        _ -> underflow(state, "DynamicImportSource")
+      }
+
+    // import.defer(specifier): load + link the requested graph without
+    // evaluating it; the promise resolves with the Deferred Module Namespace,
+    // whose first relevant access triggers evaluation.
+    opcode.DynamicImportDefer ->
+      case state.stack {
+        [specifier, ..rest] ->
+          dynamic_import.evaluate_defer_import_call(state, specifier, rest)
+        _ -> underflow(state, "DynamicImportDefer")
+      }
   }
 }
 
 fn lookup_eval_env(state: State, name: String) -> Option(JsValue) {
   option.then(state.eval_env, heap.read_eval_env(state.heap, _))
   |> option.then(fn(vars) { dict.get(vars, name) |> option.from_result })
+}
+
+/// §9.1.1.2.1 Object Environment Record HasBinding(N) for a `with` scope:
+/// HasProperty(obj, N), then — since with-environments always have
+/// [[IsWithEnvironment]] = true — Get(obj, @@unscopables) and treat a truthy
+/// Get(unscopables, N) as "not bound". Both Gets can run user code (getters,
+/// proxy traps); errors propagate as thrown completions.
+fn with_has_binding(
+  state: State,
+  ref: value.Ref,
+  name: String,
+) -> Result(#(Bool, State), #(state.StepResult, JsValue, State)) {
+  use #(found, state) <- result.try(
+    state.rethrow(object.has_property_stateful(
+      state,
+      ref,
+      object.PkString(Named(name)),
+    )),
+  )
+  case found {
+    False -> Ok(#(False, state))
+    True -> {
+      use #(unscopables, state) <- result.try(
+        state.rethrow(object.get_symbol_value_of(
+          state,
+          JsObject(ref),
+          value.symbol_unscopables,
+        )),
+      )
+      case unscopables {
+        JsObject(_) -> {
+          use #(blocked, state) <- result.map(
+            state.rethrow(object.get_value_of(state, unscopables, Named(name))),
+          )
+          #(!value.is_truthy(blocked), state)
+        }
+        _ -> Ok(#(True, state))
+      }
+    }
+  }
+}
+
+/// Re-materialize an already-converted PropertyKey as a JsValue whose
+/// re-conversion through to_property_key is side-effect-free and yields the
+/// same key. GetElem2 leaves this on the stack so the later PutElem does not
+/// re-run a user-observable ToPropertyKey (§13.15.2: ToPropertyKey once).
+fn property_key_value(pk: value.PropertyKey) -> JsValue {
+  case pk {
+    value.Index(n) -> value.from_int(n)
+    value.Named(s) -> JsString(s)
+  }
 }
 
 /// GetElem on a primitive receiver — ToPropertyKey (Symbol → symbol lookup
@@ -3201,6 +4679,120 @@ fn call_native(
 /// §15.4.4 MakeMethod(F, homeObject): if `func` is a JS closure, set its
 /// [[HomeObject]] = `target` so `super.x` inside it resolves via the
 /// home object's prototype. No-op for non-closures (native, bound, etc.).
+/// DefinePropertyOrThrow guard for class element definition: §10.1.6.3
+/// ValidateAndApplyPropertyDescriptor rejects redefining an existing
+/// non-configurable own property (the descriptors class bodies produce
+/// always differ from it — fresh closure values / accessor-vs-data). The
+/// only collision reachable from a class body is the constructor's own
+/// "prototype" via a computed key.
+/// DefineField receivers that need the full [[DefineOwnProperty]] path:
+/// proxies (defineProperty trap, §10.5.6) and non-extensible/frozen objects
+/// (CreateDataPropertyOrThrow → TypeError). Private-namespace keys never go
+/// through traps (§7.3.28 PrivateFieldAdd is not an ordinary define).
+fn define_needs_full_semantics(
+  state: State,
+  ref: value.Ref,
+  key: value.PropertyKey,
+) -> Bool {
+  case value.is_private_name(key) {
+    True -> False
+    False ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> True
+        Some(ObjectSlot(extensible:, ..)) -> !extensible
+        _ -> False
+      }
+  }
+}
+
+/// §7.3.32 DefineField slow path — CreateDataPropertyOrThrow through the
+/// real [[DefineOwnProperty]]: proxy traps fire; a false result (frozen /
+/// non-extensible receiver, trap refusal) throws TypeError.
+fn define_field_full(
+  state: State,
+  ref: value.Ref,
+  key: JsValue,
+  val: JsValue,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  let #(heap, desc_ref) =
+    common.alloc_pojo(state.heap, state.builtins.object.prototype, [
+      #("value", value.data_property(val)),
+      #("writable", value.data_property(value.JsBool(True))),
+      #("enumerable", value.data_property(value.JsBool(True))),
+      #("configurable", value.data_property(value.JsBool(True))),
+    ])
+  let state = State(..state, heap:)
+  use #(state, ok) <- result.try(
+    state.rethrow(builtins_object.define_property_bool(
+      state,
+      ref,
+      key,
+      desc_ref,
+    )),
+  )
+  case ok {
+    True -> Ok(state)
+    False -> {
+      let name = case key {
+        JsString(n) -> n
+        _ -> "[computed]"
+      }
+      state.throw_type_error(state, "Cannot define property " <> name)
+    }
+  }
+}
+
+fn check_define_nonconfigurable(
+  state: State,
+  ref: value.Ref,
+  pk: value.PropertyKey,
+) -> Result(Nil, #(StepResult, JsValue, State)) {
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(properties:, ..)) ->
+      case dict.get(properties, pk) {
+        Ok(value.DataProperty(configurable: False, ..))
+        | Ok(value.AccessorProperty(configurable: False, ..)) ->
+          state.throw_type_error(
+            state,
+            "Cannot redefine property: " <> value.key_to_string(pk),
+          )
+        _ -> Ok(Nil)
+      }
+    _ -> Ok(Nil)
+  }
+}
+
+/// Shared guard for the DefinePrivate* ops (§7.3.28 PrivateFieldAdd /
+/// §7.3.29 PrivateMethodOrAccessorAdd): TypeError if the receiver already
+/// has the private element (return-override double initialization) or is
+/// non-extensible (proposal nonextensible-applies-to-private).
+fn check_private_add(
+  state: State,
+  ref: value.Ref,
+  key_text: String,
+) -> Result(Nil, #(state.StepResult, JsValue, State)) {
+  case object.get_own_property(state.heap, ref, Named(key_text)) {
+    Some(_) ->
+      state.throw_type_error(
+        state,
+        "Cannot initialize "
+          <> value.private_display_name(key_text)
+          <> " twice on the same object",
+      )
+    None ->
+      case object.slot_extensible(state.heap, ref) {
+        False ->
+          state.throw_type_error(
+            state,
+            "Cannot define private member "
+              <> value.private_display_name(key_text)
+              <> " on a non-extensible object",
+          )
+        True -> Ok(Nil)
+      }
+  }
+}
+
 fn make_method(h: Heap, func: JsValue, target: Ref) -> Heap {
   case func {
     JsObject(fn_ref) -> {
@@ -3215,6 +4807,57 @@ fn make_method(h: Heap, func: JsValue, target: Ref) -> Heap {
       }
     }
     _ -> h
+  }
+}
+
+/// §10.2.9 SetFunctionName for runtime-computed method/accessor keys: the
+/// closure was compiled anonymous (key unknown at compile time), so its
+/// "name" is set here from the evaluated propKey, with the accessor
+/// "get "/"set " prefix where applicable.
+fn set_computed_fn_name(
+  h: Heap,
+  func: JsValue,
+  prefix: String,
+  name: String,
+) -> Heap {
+  case func {
+    JsObject(fn_ref) -> {
+      use slot <- heap.update(h, fn_ref)
+      case slot {
+        ObjectSlot(kind: FunctionObject(..), properties:, ..) ->
+          ObjectSlot(
+            ..slot,
+            properties: dict.insert(
+              properties,
+              Named("name"),
+              common.fn_name_property(prefix <> name),
+            ),
+          )
+        _ -> slot
+      }
+    }
+    _ -> h
+  }
+}
+
+/// SetFunctionName step 4: a Symbol key names the function "[description]",
+/// or "" when the symbol has no description.
+fn symbol_fn_name(state: State, sym: value.SymbolId) -> String {
+  let desc = case value.well_known_symbol_description(sym) {
+    Some(d) -> Ok(d)
+    None -> dict.get(state.ctx.symbol_descriptions, sym)
+  }
+  case desc {
+    Ok(d) -> "[" <> d <> "]"
+    Error(Nil) -> ""
+  }
+}
+
+/// The accessor-name prefix for SetFunctionName ("get "/"set ").
+fn accessor_name_prefix(kind: opcode.AccessorKind) -> String {
+  case kind {
+    opcode.Getter -> "get "
+    opcode.Setter -> "set "
   }
 }
 
@@ -3331,6 +4974,65 @@ fn build_exclusion_sets(
   }
 }
 
+/// §15.10 Tail Position Calls (IsInTailPosition). A Call/CallMethod is a
+/// tail call when:
+///   - the very next opcode is Return (the shape `return f(...)` compiles
+///     to; tagged templates lower to CallExpression so they qualify too,
+///     per HasCallInTailPosition §15.10.2),
+///   - the caller is strict code (§15.10.1 step 2),
+///   - no try handlers are active in the caller (HasCallInTailPosition
+///     returns false inside `try` and `finally` blocks; an active handler
+///     means the callee must unwind through this frame),
+///   - the current frame is a plain [[Call]] invocation — constructor
+///     frames (new_target set) carry return-value fixup that reads
+///     state.func/locals of the *returning* function, so they can't be
+///     elided (Return's derived-constructor checks),
+///   - the callee runs on the VM frame stack: generators/async functions
+///     allocate isolated states instead of pushing a frame, so there is
+///     no frame to elide. (Generator/async *caller* bodies execute with
+///     call_stack == [] at body level, so the non-empty-call-stack guard
+///     also implements §15.10.1 steps 5-7 — their returns never elide.)
+fn is_tail_call(state: State, callee: FuncTemplate) -> Bool {
+  let frame_eligible = case state.try_stack, state.call_stack {
+    [], [_, ..] ->
+      state.func.is_strict
+      && !callee.is_generator
+      && !callee.is_async
+      && state.new_target == JsUndefined
+    _, _ -> False
+  }
+  case frame_eligible {
+    False -> False
+    True ->
+      case tuple_array.unsafe_get(state.pc + 1, state.code) {
+        Return -> True
+        _ -> False
+      }
+  }
+}
+
+/// §15.10.3 PrepareForTailCall: pop the running execution context before
+/// the call. call_regular_function has just pushed the caller's SavedFrame;
+/// discard it so the callee's Return goes straight to the caller's caller
+/// and tail recursion runs at constant call depth. Only reached when
+/// is_tail_call held, which guarantees the Ok state came from
+/// call_regular_function (plain function callee), which always pushes
+/// exactly one frame.
+fn elide_tail_frame(
+  result: Result(State, #(StepResult, JsValue, State)),
+) -> Result(State, #(StepResult, JsValue, State)) {
+  use new_state <- result.map(result)
+  case new_state.call_stack {
+    [_caller_frame, ..rest_frames] ->
+      State(
+        ..new_state,
+        call_stack: rest_frames,
+        call_depth: new_state.call_depth - 1,
+      )
+    [] -> new_state
+  }
+}
+
 /// Pop n items from stack. Returns #(popped_items_in_order, remaining_stack).
 fn pop_n(
   stack: List(JsValue),
@@ -3365,7 +5067,20 @@ fn binop_direct(
 ) -> Result(State, #(StepResult, JsValue, State)) {
   case operators.exec_binop(kind, left, right) {
     Ok(result) -> Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-    Error(msg) -> state.throw_type_error(state, msg)
+    Error(msg) -> throw_operator_error(state, msg)
+  }
+}
+
+/// Operator errors are TypeErrors except for the few BigInt cases (division
+/// by zero, negative exponent) that the spec makes RangeErrors — those come
+/// back tagged with operators.range_error_prefix.
+fn throw_operator_error(
+  state: State,
+  msg: String,
+) -> Result(a, #(StepResult, JsValue, State)) {
+  case msg {
+    "RangeError: " <> rest -> state.throw_range_error(state, rest)
+    _ -> state.throw_type_error(state, msg)
   }
 }
 
@@ -3405,7 +5120,7 @@ fn binop_with_to_primitive(
   )
   case operators.exec_binop(kind, lprim, rprim) {
     Ok(result) -> Ok(State(..s2, stack: [result, ..rest], pc: state.pc + 1))
-    Error(msg) -> state.throw_type_error(s2, msg)
+    Error(msg) -> throw_operator_error(s2, msg)
   }
 }
 
@@ -3423,7 +5138,7 @@ fn unaryop_with_to_primitive(
   )
   case operators.exec_unaryop(kind, prim) {
     Ok(result) -> Ok(State(..s1, stack: [result, ..rest], pc: state.pc + 1))
-    Error(msg) -> state.throw_type_error(s1, msg)
+    Error(msg) -> throw_operator_error(s1, msg)
   }
 }
 
@@ -3449,6 +5164,21 @@ fn add_primitives(
       )
       State(..state, stack: [JsString(a <> b), ..rest], pc: state.pc + 1)
     }
+    // §13.15.3 step 3: both operands BigInt → BigInt::add; one BigInt and
+    // one non-string other type → TypeError (§13.15.4 step 7.a).
+    value.JsBigInt(value.BigInt(a)), value.JsBigInt(value.BigInt(b)) ->
+      Ok(
+        State(
+          ..state,
+          stack: [value.JsBigInt(value.BigInt(a + b)), ..rest],
+          pc: state.pc + 1,
+        ),
+      )
+    value.JsBigInt(_), _ | _, value.JsBigInt(_) ->
+      state.throw_type_error(
+        state,
+        "Cannot mix BigInt and other types, use explicit conversions",
+      )
     _, _ ->
       case operators.num_binop(lprim, rprim, operators.num_add) {
         Ok(result) ->
@@ -3505,6 +5235,33 @@ fn read_iter_result(
         state.rethrow(object.get_value(state, rref, Named("value"), res)),
       )
       #(value.is_truthy(done), val, state)
+    }
+    _ -> state.throw_type_error(state, "Iterator result is not an object")
+  }
+}
+
+/// §7.4.8 IteratorStep / §7.4.9 IteratorStepValue: IteratorComplete reads
+/// `done` first; when done is true, `value` is NOT read (observable — the
+/// result object's value getter must not fire). yield* keeps the plain
+/// read_iter_result above because §27.5.3.2 DOES read value when done.
+fn read_iter_step_result(
+  state: State,
+  res: JsValue,
+) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
+  case res {
+    JsObject(rref) -> {
+      use #(done, state) <- result.try(
+        state.rethrow(object.get_value(state, rref, Named("done"), res)),
+      )
+      case value.is_truthy(done) {
+        True -> Ok(#(True, JsUndefined, state))
+        False -> {
+          use #(val, state) <- result.map(
+            state.rethrow(object.get_value(state, rref, Named("value"), res)),
+          )
+          #(False, val, state)
+        }
+      }
     }
     _ -> state.throw_type_error(state, "Iterator result is not an object")
   }
@@ -3578,6 +5335,211 @@ fn unwrap_iterator_record(state: State, v: JsValue) -> JsValue {
 /// IteratorNext for an internal Iterator Record: call the `next_method`
 /// cached at GetIterator (§7.4.1) with the real iterator as `this`. Same
 /// stack contract as step_generic_iterator.
+/// IteratorNext step for an ArrayIteratorObject whose source is a plain
+/// array/arguments object or a Proxy. Pushes [done, value, iter|undef]
+/// like the inline IteratorNext paths.
+fn step_array_iterator_source(
+  state: State,
+  iter_ref: value.Ref,
+  source: value.Ref,
+  index: Int,
+  iter_kind: value.ArrayIterKind,
+  rest: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, State)) {
+  case object.as_proxy(state.heap, source) {
+    // Proxy source — §23.1.5.1 generic path: ? Get(array,
+    // "length") / ? Get(array, ToString(index)) fire get traps.
+    Some(_) -> {
+      use #(len_val, state) <- result.try(
+        state.rethrow(object.get_value(
+          state,
+          source,
+          Named("length"),
+          JsObject(source),
+        )),
+      )
+      let length = case value.to_number(len_val) {
+        Ok(value.Finite(f)) -> int.max(0, value.float_to_int(f))
+        _ -> 0
+      }
+      case index >= length {
+        True -> {
+          let heap = advance_array_iter(state.heap, iter_ref, source, -1)
+          Ok(
+            State(
+              ..state,
+              stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
+              heap:,
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        False -> {
+          // §23.1.5.1 step 8.b.iii: "key" iterators yield the index WITHOUT
+          // Get(array, elementKey) — no get trap fires.
+          use #(val, state) <- result.try(case iter_kind {
+            value.ArrayIterKeys -> Ok(#(value.from_int(index), state))
+            _ -> {
+              use #(elem, state) <- result.try(
+                state.rethrow(object.get_value(
+                  state,
+                  source,
+                  value.Index(index),
+                  JsObject(source),
+                )),
+              )
+              let #(h, out) =
+                array_iter_shape(state.heap, state, iter_kind, index, elem)
+              Ok(#(out, State(..state, heap: h)))
+            }
+          })
+          let heap = advance_array_iter(state.heap, iter_ref, source, index + 1)
+          Ok(
+            State(
+              ..state,
+              stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
+              heap:,
+              pc: state.pc + 1,
+            ),
+          )
+        }
+      }
+    }
+    None -> {
+      // Re-read the source length each time (handles mutations
+      // during iteration)
+      let #(length, elements) =
+        heap.read_array_like(state.heap, source)
+        |> option.unwrap(#(0, elements.new()))
+      case index >= length {
+        True -> {
+          let heap = advance_array_iter(state.heap, iter_ref, source, -1)
+          Ok(
+            State(
+              ..state,
+              stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
+              heap:,
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        False -> {
+          // §23.1.5.1: Let elementValue be ? Get(array, elementKey). The
+          // elements store is only a fast path for plain data values —
+          // defineProperty can install accessor/attribute overrides at an
+          // index (kept in the properties dict), and holes consult the
+          // prototype chain, so fall back to the generic [[Get]] when the
+          // element store has no entry or an override exists. "key"
+          // iterators skip the Get entirely (§23.1.5.1 step 8.b.iii).
+          use #(val, state) <- result.try(case iter_kind {
+            value.ArrayIterKeys -> Ok(#(value.from_int(index), state))
+            _ -> {
+              use #(elem, state) <- result.try(
+                case
+                  array_elem_without_override(
+                    state.heap,
+                    source,
+                    elements,
+                    index,
+                  )
+                {
+                  Some(v) -> Ok(#(v, state))
+                  None ->
+                    state.rethrow(object.get_value(
+                      state,
+                      source,
+                      value.Index(index),
+                      JsObject(source),
+                    ))
+                },
+              )
+              let #(h, out) =
+                array_iter_shape(state.heap, state, iter_kind, index, elem)
+              Ok(#(out, State(..state, heap: h)))
+            }
+          })
+          let heap = advance_array_iter(state.heap, iter_ref, source, index + 1)
+          Ok(
+            State(
+              ..state,
+              stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
+              heap:,
+              pc: state.pc + 1,
+            ),
+          )
+        }
+      }
+    }
+  }
+}
+
+/// §23.1.5.1: shape one iteration result for the iterator's kind — the
+/// index ("key"), the element ("value"), or a fresh [index, element] pair
+/// array ("key+value").
+fn array_iter_shape(
+  h: state.Heap,
+  state: State,
+  iter_kind: value.ArrayIterKind,
+  index: Int,
+  elem: JsValue,
+) -> #(state.Heap, JsValue) {
+  case iter_kind {
+    value.ArrayIterKeys -> #(h, value.from_int(index))
+    value.ArrayIterValues -> #(h, elem)
+    value.ArrayIterEntries -> {
+      let #(h, pair_ref) =
+        common.alloc_array(
+          h,
+          [value.from_int(index), elem],
+          state.builtins.array.prototype,
+        )
+      #(h, JsObject(pair_ref))
+    }
+  }
+}
+
+/// Fast-path element read for the array iterator: Some(value) only when the
+/// index is a plain data value in the element store with no properties-dict
+/// override (defineProperty can install accessor/attribute overrides at an
+/// index). None → caller takes the generic [[Get]] path.
+fn array_elem_without_override(
+  h: state.Heap,
+  source: value.Ref,
+  elems: value.JsElements,
+  index: Int,
+) -> Option(JsValue) {
+  case heap.read(h, source) {
+    Some(ObjectSlot(properties:, ..)) ->
+      case dict.has_key(properties, value.Index(index)) {
+        True -> None
+        False -> elements.get_option(elems, index)
+      }
+    _ -> None
+  }
+}
+
+/// Bump an ArrayIteratorObject's index in place (preserving the iteration
+/// kind). No-op if the ref no longer holds an array-iterator slot.
+fn advance_array_iter(
+  h: state.Heap,
+  iter_ref: value.Ref,
+  source: value.Ref,
+  index: Int,
+) -> state.Heap {
+  case heap.read(h, iter_ref) {
+    Some(ObjectSlot(kind: ArrayIteratorObject(iter_kind:, ..), ..) as slot) ->
+      heap.write(
+        h,
+        iter_ref,
+        ObjectSlot(
+          ..slot,
+          kind: ArrayIteratorObject(source:, index:, iter_kind:),
+        ),
+      )
+    _ -> h
+  }
+}
+
 fn step_iterator_record(
   state: State,
   rec_ref: Ref,
@@ -3588,7 +5550,7 @@ fn step_iterator_record(
   use #(result_obj, state) <- result.try(
     state.rethrow(state.call(state, next_method, iterated, [])),
   )
-  use #(done, val, state) <- result.map(read_iter_result(state, result_obj))
+  use #(done, val, state) <- result.map(read_iter_step_result(state, result_obj))
   let iter_slot = case done {
     True -> JsUndefined
     False -> JsObject(rec_ref)
@@ -3616,7 +5578,7 @@ fn step_generic_iterator(
   use #(result_obj, state) <- result.try(
     state.rethrow(state.call(state, next_fn, iter, [])),
   )
-  use #(done, val, state) <- result.map(read_iter_result(state, result_obj))
+  use #(done, val, state) <- result.map(read_iter_step_result(state, result_obj))
   let iter_slot = case done {
     True -> JsUndefined
     False -> iter
@@ -3661,69 +5623,130 @@ fn get_iterator_via_symbol(
             object.inspect(iterable, state.heap) <> " is not iterable",
           )
       }
-    Error(#(_thrown, state)) ->
-      state.throw_type_error(
-        state,
-        object.inspect(iterable, state.heap) <> " is not iterable",
-      )
+    // §7.3.10 GetMethod step 1: a throwing getter propagates — it must not
+    // be masked by the "not iterable" TypeError (test262 get-abrupt cases).
+    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
   }
 }
 
 /// ES §7.4.3 GetIterator(obj, async). Tries Symbol.asyncIterator, falls back
 /// to Symbol.iterator wrapped via CreateAsyncFromSyncIterator (§27.1.6.1).
+///
+/// Spec-ordered (engine262 GetIterator/GetIteratorFromMethod):
+/// - GetMethod abrupt completions propagate (getter throw, call throw)
+/// - method undefined/null → fall back to @@iterator
+/// - method present but not callable → TypeError (GetMethod step 3)
+/// - call result not an object → TypeError (GetIteratorFromMethod step 2)
 fn get_async_iterator_via_symbol(
   state: State,
   ref: Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  case try_iterator_symbol(state, ref, iterable, value.symbol_async_iterator) {
-    Ok(#(iter, state)) ->
+  // Step 1.a: Let method be ? GetMethod(obj, @@asyncIterator).
+  use #(method, state) <- result.try(
+    state.rethrow(object.get_symbol_value(
+      state,
+      ref,
+      value.symbol_async_iterator,
+      iterable,
+    )),
+  )
+  case method {
+    // Step 1.b: method undefined → sync fallback via @@iterator.
+    JsUndefined | JsNull ->
+      get_async_from_sync_fallback(state, ref, iterable, rest_stack)
+    _ -> {
+      use #(iter, state) <- result.try(call_iterator_method(
+        state,
+        method,
+        iterable,
+      ))
       Ok(State(..state, stack: [iter, ..rest_stack], pc: state.pc + 1))
-    Error(state) ->
-      case try_iterator_symbol(state, ref, iterable, value.symbol_iterator) {
-        Ok(#(JsObject(sync_iter), state)) -> {
-          let #(h, wrapped) =
-            common.alloc_wrapper(
-              state.heap,
-              value.AsyncFromSyncIteratorObject(sync_iter:),
-              state.builtins.async_from_sync_iterator_proto,
-            )
-          Ok(
-            State(
-              ..state,
-              heap: h,
-              stack: [JsObject(wrapped), ..rest_stack],
-              pc: state.pc + 1,
-            ),
-          )
-        }
-        Ok(#(_, state)) | Error(state) ->
-          state.throw_type_error(
-            state,
-            object.inspect(iterable, state.heap) <> " is not async iterable",
-          )
-      }
+    }
   }
 }
 
-fn try_iterator_symbol(
+/// §7.4.3 step 1.b: @@asyncIterator is undefined — GetMethod(obj, @@iterator),
+/// call it, and wrap the sync iterator via CreateAsyncFromSyncIterator.
+fn get_async_from_sync_fallback(
   state: State,
   ref: Ref,
   iterable: JsValue,
-  sym: value.SymbolId,
-) -> Result(#(JsValue, State), State) {
-  case object.get_symbol_value(state, ref, sym, iterable) {
-    Ok(#(method, state)) ->
-      case helpers.is_callable(state.heap, method) {
-        True ->
-          case state.call(state, method, iterable, []) {
-            Ok(#(JsObject(r), state)) -> Ok(#(JsObject(r), state))
-            Ok(#(_, state)) -> Error(state)
-            Error(#(_, state)) -> Error(state)
-          }
-        False -> Error(state)
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, State)) {
+  use #(sync_method, state) <- result.try(
+    state.rethrow(object.get_symbol_value(
+      state,
+      ref,
+      value.symbol_iterator,
+      iterable,
+    )),
+  )
+  case sync_method {
+    JsUndefined | JsNull ->
+      state.throw_type_error(
+        state,
+        object.inspect(iterable, state.heap) <> " is not async iterable",
+      )
+    _ -> {
+      use #(sync_iter_val, state) <- result.try(call_iterator_method(
+        state,
+        sync_method,
+        iterable,
+      ))
+      let assert JsObject(sync_iter) = sync_iter_val
+      // GetIteratorFromMethod step 4: cache the sync iterator record's
+      // [[NextMethod]] now — observable Get, abrupt propagates. The wrapper's
+      // .next() reuses it instead of re-Getting per call (§27.1.6.2.1).
+      use #(sync_next, state) <- result.try(
+        state.rethrow(object.get_value(
+          state,
+          sync_iter,
+          Named("next"),
+          sync_iter_val,
+        )),
+      )
+      let #(h, wrapped) =
+        common.alloc_wrapper(
+          state.heap,
+          value.AsyncFromSyncIteratorObject(sync_iter:, sync_next:),
+          state.builtins.async_from_sync_iterator_proto,
+        )
+      Ok(
+        State(
+          ..state,
+          heap: h,
+          stack: [JsObject(wrapped), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+  }
+}
+
+/// GetMethod step 3 + GetIteratorFromMethod steps 1-2: the looked-up method
+/// must be callable, its call result must be an object; both call abrupt
+/// completions propagate.
+fn call_iterator_method(
+  state: State,
+  method: JsValue,
+  iterable: JsValue,
+) -> Result(#(JsValue, State), #(StepResult, JsValue, State)) {
+  case helpers.is_callable(state.heap, method) {
+    False ->
+      state.throw_type_error(
+        state,
+        object.inspect(method, state.heap) <> " is not a function",
+      )
+    True -> {
+      use #(iter, state) <- result.try(
+        state.rethrow(state.call(state, method, iterable, [])),
+      )
+      case iter {
+        JsObject(_) -> Ok(#(iter, state))
+        _ -> state.throw_type_error(state, "Iterator result is not an object")
       }
-    Error(#(_, state)) -> Error(state)
+    }
   }
 }

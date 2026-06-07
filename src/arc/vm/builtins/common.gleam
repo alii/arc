@@ -15,10 +15,144 @@ pub type BuiltinType {
   BuiltinType(prototype: Ref, constructor: Ref)
 }
 
-/// Generator.prototype ref, used as the prototype for generator objects.
-/// Generators don't have a user-visible constructor.
+/// Generator intrinsics. `prototype` is %GeneratorPrototype% — the prototype
+/// for generator OBJECTS. `fn_proto` is %GeneratorFunction.prototype% — the
+/// [[Prototype]] of generator FUNCTION objects (§27.3.3); its "constructor"
+/// property is the %GeneratorFunction% dynamic constructor.
 pub type GeneratorBuiltin {
-  GeneratorBuiltin(prototype: Ref)
+  GeneratorBuiltin(prototype: Ref, fn_proto: Ref)
+}
+
+/// §27.3/§27.4: build a %GeneratorFunction%-style intrinsic pair — the
+/// dynamic constructor plus the prototype that generator FUNCTION objects use
+/// as [[Prototype]]. Layout (§27.3.2/§27.3.3):
+///   ctor.[[Prototype]] = %Function% (the Function constructor)
+///   ctor.prototype = fn_proto                 { W:F, E:F, C:F }
+///   fn_proto.[[Prototype]] = Function.prototype
+///   fn_proto.constructor = ctor               { W:F, E:F, C:T }
+///   fn_proto.prototype = generator_proto      { W:F, E:F, C:T }
+///   fn_proto[@@toStringTag] = name            { W:F, E:F, C:T }
+/// Returns the fn_proto ref (the ctor is reachable via its "constructor").
+pub fn init_generator_function(
+  h: Heap(ctx),
+  name: String,
+  native: NativeFn,
+  function_proto: Ref,
+  function_ctor: Ref,
+  generator_proto: Ref,
+) -> #(Heap(ctx), Ref) {
+  let #(h, fn_proto_ref) = heap.reserve(h)
+  let h = heap.root(h, fn_proto_ref)
+  let #(h, ctor_ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: NativeFunction(Dispatch(native), constructible: True),
+        properties: named_props([
+          #("name", fn_name_property(name)),
+          #("length", fn_length_property(1)),
+          #("prototype", value.data(JsObject(fn_proto_ref))),
+        ]),
+        elements: elements.new(),
+        prototype: Some(function_ctor),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, ctor_ref)
+  let h =
+    heap.fill(
+      h,
+      fn_proto_ref,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: named_props([
+          #("constructor", value.data(JsObject(ctor_ref)) |> value.configurable),
+          #(
+            "prototype",
+            value.data(JsObject(generator_proto)) |> value.configurable,
+          ),
+        ]),
+        elements: elements.new(),
+        prototype: Some(function_proto),
+        symbol_properties: [to_string_tag(name)],
+        extensible: True,
+      ),
+    )
+  // §27.5.1.1 / §27.6.1.1: Generator.prototype.constructor is the fn_proto
+  // object itself ({ W:F, E:F, C:T }).
+  let h = case heap.read(h, generator_proto) {
+    Some(ObjectSlot(properties:, ..) as slot) ->
+      heap.write(
+        h,
+        generator_proto,
+        ObjectSlot(
+          ..slot,
+          properties: dict.insert(
+            properties,
+            Named("constructor"),
+            value.data(JsObject(fn_proto_ref)) |> value.configurable,
+          ),
+        ),
+      )
+    _ -> h
+  }
+  #(h, fn_proto_ref)
+}
+
+/// §27.7: build the %AsyncFunction% intrinsic pair — the dynamic constructor
+/// plus %AsyncFunction.prototype%, the [[Prototype]] of async FUNCTION
+/// objects. Layout (§27.7.2/§27.7.3):
+///   ctor.[[Prototype]] = %Function% (the Function constructor)
+///   ctor.prototype = fn_proto                 { W:F, E:F, C:F }
+///   fn_proto.[[Prototype]] = Function.prototype
+///   fn_proto.constructor = ctor               { W:F, E:F, C:T }
+///   fn_proto[@@toStringTag] = "AsyncFunction" { W:F, E:F, C:T }
+/// Unlike %GeneratorFunction.prototype%, fn_proto is an ordinary non-callable
+/// object with NO "prototype" property (async functions are not constructors).
+/// Returns the fn_proto ref (the ctor is reachable via its "constructor").
+pub fn init_async_function(
+  h: Heap(ctx),
+  name: String,
+  native: NativeFn,
+  function_proto: Ref,
+  function_ctor: Ref,
+) -> #(Heap(ctx), Ref) {
+  let #(h, fn_proto_ref) = heap.reserve(h)
+  let h = heap.root(h, fn_proto_ref)
+  let #(h, ctor_ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: NativeFunction(Dispatch(native), constructible: True),
+        properties: named_props([
+          #("name", fn_name_property(name)),
+          #("length", fn_length_property(1)),
+          #("prototype", value.data(JsObject(fn_proto_ref))),
+        ]),
+        elements: elements.new(),
+        prototype: Some(function_ctor),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, ctor_ref)
+  let h =
+    heap.fill(
+      h,
+      fn_proto_ref,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: named_props([
+          #("constructor", value.data(JsObject(ctor_ref)) |> value.configurable),
+        ]),
+        elements: elements.new(),
+        prototype: Some(function_proto),
+        symbol_properties: [to_string_tag(name)],
+        extensible: True,
+      ),
+    )
+  #(h, fn_proto_ref)
 }
 
 /// Pre-allocated prototype objects and constructor functions for JS built-ins.
@@ -28,6 +162,8 @@ pub type Builtins {
     object: BuiltinType,
     function: BuiltinType,
     array: BuiltinType,
+    /// The Proxy constructor function object (§28.2). No prototype property.
+    proxy: Ref,
     error: BuiltinType,
     type_error: BuiltinType,
     reference_error: BuiltinType,
@@ -36,6 +172,7 @@ pub type Builtins {
     eval_error: BuiltinType,
     uri_error: BuiltinType,
     aggregate_error: BuiltinType,
+    suppressed_error: BuiltinType,
     dom_exception: BuiltinType,
     math: Ref,
     string: BuiltinType,
@@ -48,7 +185,15 @@ pub type Builtins {
     promise: BuiltinType,
     generator: GeneratorBuiltin,
     async_generator: GeneratorBuiltin,
+    /// %AsyncFunction.prototype% (§27.7.3) — the [[Prototype]] of async
+    /// function objects. Its "constructor" is the %AsyncFunction% dynamic
+    /// constructor.
+    async_function_proto: Ref,
     symbol: Ref,
+    /// %Symbol.prototype% — dedicated prototype object (toString/valueOf/
+    /// description/@@toPrimitive). Distinct from %Object.prototype% so
+    /// `x instanceof Symbol` walks the right chain.
+    symbol_proto: Ref,
     console: Ref,
     json: Ref,
     reflect: Ref,
@@ -56,6 +201,21 @@ pub type Builtins {
     set: BuiltinType,
     weak_map: BuiltinType,
     weak_set: BuiltinType,
+    finalization_registry: BuiltinType,
+    disposable_stack: BuiltinType,
+    async_disposable_stack: BuiltinType,
+    array_buffer: BuiltinType,
+    shared_array_buffer: BuiltinType,
+    /// %TypedArray% — the abstract intrinsic (Object.getPrototypeOf(Int8Array)).
+    typed_array: BuiltinType,
+    /// The 11 concrete TypedArray constructors, keyed by element kind.
+    typed_arrays: List(#(value.TypedArrayKind, BuiltinType)),
+    /// The BigInt global function (§21.2.1.1). Callable, not constructible.
+    bigint: Ref,
+    /// %BigInt.prototype% (§21.2.3) — primitive BigInt property access
+    /// delegates here (toString/toLocaleString/valueOf).
+    bigint_proto: Ref,
+    data_view: BuiltinType,
     iterator: BuiltinType,
     iterator_helper_proto: Ref,
     wrap_for_valid_iterator_proto: Ref,
@@ -73,6 +233,7 @@ pub type Builtins {
     set_iterator_proto: Ref,
     map_iterator_proto: Ref,
     async_from_sync_iterator_proto: Ref,
+    intl: Ref,
   )
 }
 
@@ -415,7 +576,10 @@ fn ctor_properties(
   extras: List(#(String, Property)),
 ) -> List(#(String, Property)) {
   [
-    #("prototype", value.builtin_property(JsObject(proto))),
+    // §20.2.3 etc.: a built-in constructor's "prototype" property is
+    // non-writable, non-enumerable, non-configurable (test262:
+    // built-ins/Function/prototype/S15.3.3.1_A1, _A3).
+    #("prototype", value.data(JsObject(proto))),
     #("name", fn_name_property(name)),
     #("length", fn_length_property(arity)),
     ..extras
@@ -473,6 +637,10 @@ pub fn typeof_value(val: JsValue, heap: Heap(ctx)) -> String {
         // Row 10: Object implements [[Call]] → "function"
         Some(ObjectSlot(kind: value.FunctionObject(..), ..)) -> "function"
         Some(ObjectSlot(kind: value.NativeFunction(..), ..)) -> "function"
+        // Proxy: has [[Call]] iff target was callable at creation (§10.5.15);
+        // survives revocation (typeof of revoked function proxy = "function").
+        Some(ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->
+          "function"
         // Row 9: Object does not implement [[Call]] → "object"
         _ -> "object"
       }
@@ -707,7 +875,10 @@ fn alloc_error(
     heap.alloc(
       h,
       ObjectSlot(
-        kind: OrdinaryObject,
+        // [[ErrorData]] internal slot; the stack string is filled in by
+        // state.attach_stack and surfaced via the Error.prototype.stack
+        // accessor (error-stack-accessor proposal) — NOT an own property.
+        kind: value.ErrorObject(stack: ""),
         // Step 3b: CreateNonEnumerableDataPropertyOrThrow(O, "message", msg)
         // Per §20.5.6.3: writable+configurable, NOT enumerable.
         properties: named_props([
@@ -788,8 +959,8 @@ pub fn make_syntax_error(
 ///
 /// TODO(Deviation): SymbolObject uses Object.prototype instead of Symbol.prototype
 ///   (no dedicated Symbol.prototype with toString/valueOf/description yet).
-/// TODO(Deviation): BigInt falls back to OrdinaryObject with Object.prototype (no
-///   BigInt wrapper object kind or BigInt.prototype yet).
+/// TODO(Deviation): BigInt wrappers are OrdinaryObject (no [[BigIntData]]
+///   kind yet), though they inherit from %BigInt.prototype%.
 pub fn to_object(
   h: Heap(ctx),
   b: Builtins,
@@ -810,13 +981,28 @@ pub fn to_object(
     value.JsBool(bv) ->
       Some(alloc_wrapper(h, value.BooleanObject(bv), b.boolean.prototype))
     // Table 15 row 6: Symbol → new Symbol object with [[SymbolData]]
-    // TODO(Deviation): uses Object.prototype (no Symbol.prototype yet)
     value.JsSymbol(sym) ->
-      Some(alloc_wrapper(h, value.SymbolObject(sym), b.object.prototype))
-    // Table 15 row 7: BigInt → new BigInt object with [[BigIntData]]
-    // TODO(Deviation): uses OrdinaryObject kind (no BigIntObject kind yet)
+      Some(alloc_wrapper(h, value.SymbolObject(sym), b.symbol_proto))
+    // Table 15 row 7: BigInt → new BigInt object with [[BigIntData]].
+    // The wrapper is an OrdinaryObject inheriting %BigInt.prototype%; the
+    // [[BigIntData]] slot is a NUL-marker private property (invisible to
+    // reflection) that thisBigIntValue reads back.
     value.JsBigInt(_) ->
-      Some(alloc_wrapper(h, OrdinaryObject, b.object.prototype))
+      Some(heap.alloc(
+        h,
+        ObjectSlot(
+          kind: OrdinaryObject,
+          properties: dict.insert(
+            dict.new(),
+            value.bigint_data_key(),
+            value.data(val),
+          ),
+          elements: elements.new(),
+          symbol_properties: [],
+          prototype: Some(b.bigint_proto),
+          extensible: True,
+        ),
+      ))
     // Internal: TDZ sentinel, not in spec — treat as Undefined (→ TypeError)
     value.JsUninitialized -> None
   }

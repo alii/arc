@@ -3,14 +3,17 @@ import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/object
-import arc/vm/state.{type Heap, type State, type StepResult, type VmError, State}
+import arc/vm/state.{
+  type Heap, type State, type StepResult, type VmError, State, Thrown,
+}
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, GeneratorObject, JsObject, JsUndefined,
   ObjectSlot,
 }
-import gleam/dict
+import gleam/int
 import gleam/list
 import gleam/option.{Some}
+import gleam/string
 
 // ============================================================================
 // Callback types for VM functions that can't be imported directly
@@ -167,6 +170,94 @@ fn copy_range(
   }
 }
 
+/// Collect typed-array elements [from, to) read through the live backing
+/// store (out-of-range reads decode as undefined, matching detached reads).
+fn typed_array_values_range(
+  h: Heap,
+  buffer: Ref,
+  elem_kind: value.TypedArrayKind,
+  byte_offset: Int,
+  length: Int,
+  from: Int,
+  to: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
+  case from >= to {
+    True -> list.reverse(acc)
+    False -> {
+      let v =
+        object.typed_array_element(
+          h,
+          buffer,
+          elem_kind,
+          byte_offset,
+          length,
+          from,
+        )
+        |> option.unwrap(JsUndefined)
+      typed_array_values_range(
+        h,
+        buffer,
+        elem_kind,
+        byte_offset,
+        length,
+        from + 1,
+        to,
+        [v, ..acc],
+      )
+    }
+  }
+}
+
+/// §23.1.5.1: shape a drained run of iteration results for the iterator's
+/// kind — indices ("key"), the elements ("value"), or fresh [index, element]
+/// pair arrays ("key+value"). `start` is the source index of the first value.
+fn shape_iter_values(
+  h: Heap,
+  array_proto: Ref,
+  iter_kind: value.ArrayIterKind,
+  start: Int,
+  values: List(JsValue),
+) -> #(Heap, List(JsValue)) {
+  case iter_kind {
+    value.ArrayIterValues -> #(h, values)
+    value.ArrayIterKeys -> #(
+      h,
+      list.index_map(values, fn(_, i) { value.from_int(start + i) }),
+    )
+    value.ArrayIterEntries -> {
+      let #(h, rev) =
+        list.index_fold(values, #(h, []), fn(acc, el, i) {
+          let #(h, lst) = acc
+          let #(h, pair_ref) =
+            common.alloc_array(h, [value.from_int(start + i), el], array_proto)
+          #(h, [JsObject(pair_ref), ..lst])
+        })
+      #(h, list.reverse(rev))
+    }
+  }
+}
+
+/// Latch an Array Iterator as exhausted (index -1) after a full drain —
+/// further .next() calls answer done, matching the spec's
+/// [[IteratedObject]] = undefined "already returned" state.
+fn latch_array_iter_done(h: Heap, iter_ref: Ref) -> Heap {
+  case heap.read(h, iter_ref) {
+    Some(
+      ObjectSlot(kind: value.ArrayIteratorObject(source:, iter_kind:, ..), ..) as slot,
+    ) ->
+      heap.write(
+        h,
+        iter_ref,
+        ObjectSlot(
+          ..slot,
+          kind: value.ArrayIteratorObject(source:, index: -1, iter_kind:),
+        ),
+      )
+    _ -> h
+  }
+}
+
 /// Drain an iterable into the target array (ArraySpread opcode helper).
 /// Mirrors GetIterator's dispatch: ArrayObject fast-path, GeneratorObject
 /// drain loop, everything else throws "is not iterable".
@@ -188,82 +279,226 @@ pub fn spread_into_array(
   case iterable {
     JsObject(src_ref) ->
       case heap.read(state.heap, src_ref) {
-        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..))
-        | Some(ObjectSlot(kind: value.ArgumentsObject(length:), elements:, ..)) -> {
-          // Fast path: copy all elements at once, no iterator slot.
-          let heap =
-            append_range_to_array(state.heap, target_ref, elements, 0, length)
-          Ok(State(..state, heap:))
-        }
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, properties:, ..))
+        | Some(ObjectSlot(
+            kind: value.ArgumentsObject(length:),
+            elements:,
+            properties:,
+            ..,
+          )) ->
+          case object.has_index_overrides(properties) {
+            False -> {
+              // Fast path: copy all elements at once, no iterator slot.
+              let heap =
+                append_range_to_array(
+                  state.heap,
+                  target_ref,
+                  elements,
+                  0,
+                  length,
+                )
+              Ok(State(..state, heap:))
+            }
+            // defineProperty moved an element into the dict (accessor or
+            // attribute-modified data property) — raw elements would read
+            // the hole as undefined. Per-index Get honors the override.
+            True -> spread_array_generic(state, src_ref, target_ref, 0)
+          }
         Some(ObjectSlot(kind: GeneratorObject(_), ..)) ->
           // Generators are self-iterators. Drain via repeated .next().
           drain_generator_to_array(state, src_ref, target_ref, execute_inner)
-        Some(ObjectSlot(kind: value.ArrayIteratorObject(source:, index:), ..)) -> {
-          // Drain remaining elements from the iterator's current position.
-          let #(length, elements) =
-            heap.read_array_like(state.heap, source)
-            |> option.unwrap(#(0, elements.new()))
-          let heap =
-            append_range_to_array(
-              state.heap,
-              target_ref,
-              elements,
-              index,
-              length,
-            )
-          Ok(State(..state, heap:))
-        }
-        Some(ObjectSlot(kind: value.SetObject(data:, keys_rev:, keys_len:), ..)) -> {
+        Some(ObjectSlot(
+          kind: value.ArrayIteratorObject(source:, index:, iter_kind:),
+          ..,
+        )) ->
+          case heap.read(state.heap, source) {
+            // Typed-array source — §23.1.5.1: validate the buffer witness,
+            // then drain the remaining elements from the live backing store.
+            Some(ObjectSlot(
+              kind: value.TypedArrayObject(
+                buffer:,
+                elem_kind:,
+                byte_offset:,
+                length:,
+              ),
+              ..,
+            )) ->
+              case
+                object.typed_array_iter_length(
+                  state.heap,
+                  buffer,
+                  elem_kind,
+                  byte_offset,
+                  length,
+                )
+              {
+                Error(msg) -> state.throw_type_error(state, msg)
+                Ok(len) -> {
+                  // index < 0 is the exhaustion latch — nothing to drain.
+                  let values = case index < 0 {
+                    True -> []
+                    False ->
+                      typed_array_values_range(
+                        state.heap,
+                        buffer,
+                        elem_kind,
+                        byte_offset,
+                        len,
+                        index,
+                        len,
+                        [],
+                      )
+                  }
+                  let #(heap, values) =
+                    shape_iter_values(
+                      state.heap,
+                      state.builtins.array.prototype,
+                      iter_kind,
+                      int.max(index, 0),
+                      values,
+                    )
+                  let heap = append_list_to_array(heap, target_ref, values)
+                  let heap = latch_array_iter_done(heap, src_ref)
+                  Ok(State(..state, heap:))
+                }
+              }
+            _ -> {
+              // Drain remaining elements from the iterator's current position.
+              let #(length, elems) =
+                heap.read_array_like(state.heap, source)
+                |> option.unwrap(#(0, elements.new()))
+              let from = int.max(index, 0)
+              let heap = case iter_kind, index < 0 {
+                _, True -> state.heap
+                value.ArrayIterValues, False ->
+                  append_range_to_array(
+                    state.heap,
+                    target_ref,
+                    elems,
+                    from,
+                    length,
+                  )
+                _, False -> {
+                  let values = case from >= length {
+                    True -> []
+                    False ->
+                      int.range(from:, to: length, with: [], run: fn(acc, i) {
+                        [
+                          elements.get_option(elems, i)
+                            |> option.unwrap(JsUndefined),
+                          ..acc
+                        ]
+                      })
+                      |> list.reverse
+                  }
+                  let #(heap, values) =
+                    shape_iter_values(
+                      state.heap,
+                      state.builtins.array.prototype,
+                      iter_kind,
+                      from,
+                      values,
+                    )
+                  append_list_to_array(heap, target_ref, values)
+                }
+              }
+              let heap = latch_array_iter_done(heap, src_ref)
+              Ok(State(..state, heap:))
+            }
+          }
+        Some(ObjectSlot(kind: value.SetObject(data:, order:, ..), ..)) -> {
           // Set fast path — push values in insertion order.
-          let values = value.set_live_values(data, keys_rev, keys_len)
+          let values = value.set_live_values(data, order)
           let heap = append_list_to_array(state.heap, target_ref, values)
           Ok(State(..state, heap:))
         }
-        Some(ObjectSlot(kind: value.SetIteratorObject(remaining:, kind:), ..)) -> {
+        Some(
+          ObjectSlot(
+            kind: value.SetIteratorObject(source:, cursor:, done:, kind:),
+            ..,
+          ) as slot,
+        ) -> {
+          // Drain the LIVE iterator: forward insertion order of the source
+          // from the cursor onward, then latch the iterator done.
+          let entries = case done {
+            True -> []
+            False ->
+              case heap.read(state.heap, source) {
+                Some(ObjectSlot(kind: value.SetObject(data:, order:, ..), ..)) ->
+                  value.live_entries_from(data, order, cursor)
+                _ -> []
+              }
+          }
           let proto = state.builtins.array.prototype
           let heap = {
             use h, els, len <- batch_append(state.heap, target_ref)
-            list.fold(remaining, #(h, els, len), fn(acc, v) {
+            list.fold(entries, #(h, els, len), fn(acc, e) {
               let #(h, els, len) = acc
               case kind {
-                value.SetIterValues -> #(h, elements.set(els, len, v), len + 1)
+                value.SetIterValues -> #(
+                  h,
+                  elements.set(els, len, e.1),
+                  len + 1,
+                )
                 value.SetIterEntries -> {
-                  let #(h, pair) = common.alloc_array(h, [v, v], proto)
+                  let #(h, pair) = common.alloc_array(h, [e.1, e.1], proto)
                   #(h, elements.set(els, len, JsObject(pair)), len + 1)
                 }
               }
             })
           }
+          let heap =
+            heap.write(
+              heap,
+              src_ref,
+              ObjectSlot(
+                ..slot,
+                kind: value.SetIteratorObject(
+                  source:,
+                  cursor:,
+                  done: True,
+                  kind:,
+                ),
+              ),
+            )
           Ok(State(..state, heap:))
         }
-        Some(ObjectSlot(kind: value.MapObject(entries:, keys_rev:, ..), ..)) -> {
-          // Map fast path — push [k,v] pairs in insertion order. keys_rev is
-          // reversed with tombstones; flip + filter live entries.
+        Some(ObjectSlot(kind: value.MapObject(entries:, order:, ..), ..)) -> {
+          // Map fast path — push [k,v] pairs in insertion order.
           let proto = state.builtins.array.prototype
           let heap = {
             use h, els, len <- batch_append(state.heap, target_ref)
-            list.reverse(keys_rev)
-            |> list.fold(#(h, els, len), fn(acc, k) {
-              case dict.get(entries, k) {
-                Error(Nil) -> acc
-                Ok(v) -> {
-                  let #(h, els, len) = acc
-                  let #(h, pair) =
-                    common.alloc_array(h, [value.map_key_to_js(k), v], proto)
-                  #(h, elements.set(els, len, JsObject(pair)), len + 1)
-                }
-              }
-            })
-          }
-          Ok(State(..state, heap:))
-        }
-        Some(ObjectSlot(kind: value.MapIteratorObject(remaining:, kind:), ..)) -> {
-          let proto = state.builtins.array.prototype
-          let heap = {
-            use h, els, len <- batch_append(state.heap, target_ref)
-            list.fold(remaining, #(h, els, len), fn(acc, pair) {
+            value.live_entries(entries, order)
+            |> list.fold(#(h, els, len), fn(acc, e) {
               let #(h, els, len) = acc
-              let #(k, v) = pair
+              let #(h, pair) =
+                common.alloc_array(h, [value.map_key_to_js(e.0), e.1], proto)
+              #(h, elements.set(els, len, JsObject(pair)), len + 1)
+            })
+          }
+          Ok(State(..state, heap:))
+        }
+        Some(
+          ObjectSlot(
+            kind: value.MapIteratorObject(source:, cursor:, done:, kind:),
+            ..,
+          ) as slot,
+        ) -> {
+          let entries = case done {
+            True -> []
+            False ->
+              case heap.read(state.heap, source) {
+                Some(ObjectSlot(kind: value.MapObject(entries:, order:, ..), ..)) ->
+                  value.live_entries_from(entries, order, cursor)
+                _ -> []
+              }
+          }
+          let proto = state.builtins.array.prototype
+          let heap = {
+            use h, els, len <- batch_append(state.heap, target_ref)
+            list.fold(entries, #(h, els, len), fn(acc, e) {
+              let #(h, els, len) = acc
+              let #(k, v) = #(value.map_key_to_js(e.0), e.1)
               case kind {
                 value.MapIterKeys -> #(h, elements.set(els, len, k), len + 1)
                 value.MapIterValues -> #(h, elements.set(els, len, v), len + 1)
@@ -274,6 +509,20 @@ pub fn spread_into_array(
               }
             })
           }
+          let heap =
+            heap.write(
+              heap,
+              src_ref,
+              ObjectSlot(
+                ..slot,
+                kind: value.MapIteratorObject(
+                  source:,
+                  cursor:,
+                  done: True,
+                  kind:,
+                ),
+              ),
+            )
           Ok(State(..state, heap:))
         }
         _ -> {
@@ -283,15 +532,55 @@ pub fn spread_into_array(
           )
         }
       }
-    // null/undefined/primitives: not iterable.
-    // (Strings are iterable per spec but GetIterator doesn't handle them yet;
-    //  will be fixed when Symbol.iterator is wired for string wrappers.)
+    // String primitive: spread iterates code points (ES §22.1.5), matching
+    // the GetIterator string fast path used by for-of.
+    value.JsString(s) -> {
+      let values =
+        string.to_utf_codepoints(s)
+        |> list.map(fn(cp) { value.JsString(string.from_utf_codepoints([cp])) })
+      let heap = append_list_to_array(state.heap, target_ref, values)
+      Ok(State(..state, heap:))
+    }
+    // null/undefined/other primitives: not iterable.
     _ -> {
       state.throw_type_error(
         state,
         object.inspect(iterable, state.heap) <> " is not iterable",
       )
     }
+  }
+}
+
+/// Slow path for spreading an array/arguments object whose indexed
+/// properties have dict overrides (e.g. an accessor installed via
+/// Object.defineProperty). Mirrors the spec array iterator (§23.1.5.1):
+/// re-read length each step — a getter can grow or shrink the array
+/// mid-iteration — then Get(arr, idx), append, repeat.
+fn spread_array_generic(
+  state: State,
+  src_ref: Ref,
+  target_ref: Ref,
+  idx: Int,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  let length =
+    heap.read_array_like(state.heap, src_ref)
+    |> option.map(fn(p) { p.0 })
+    |> option.unwrap(0)
+  case idx >= length {
+    True -> Ok(state)
+    False ->
+      case object.get_value_of(state, JsObject(src_ref), value.Index(idx)) {
+        Ok(#(v, state)) -> {
+          let heap = push_onto_array(state.heap, target_ref, v)
+          spread_array_generic(
+            State(..state, heap:),
+            src_ref,
+            target_ref,
+            idx + 1,
+          )
+        }
+        Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+      }
   }
 }
 

@@ -1,5 +1,12 @@
 -module(arc_parser_ffi).
--export([parse_float/1, decode_string_escapes/1]).
+-export([parse_float/1, decode_string_escapes/1, cook_template_string/1]).
+
+-define(IS_HEX1(C),
+    ((C >= $0 andalso C =< $9) orelse
+     (C >= $a andalso C =< $f) orelse
+     (C >= $A andalso C =< $F))).
+-define(IS_HEX4(A, B, C, D),
+    (?IS_HEX1(A) andalso ?IS_HEX1(B) andalso ?IS_HEX1(C) andalso ?IS_HEX1(D))).
 
 parse_float(S) ->
     try
@@ -157,6 +164,130 @@ classify_low_surrogate(Low, Rest) when Low >= 16#DC00, Low =< 16#DFFF ->
     {ok, Low, Rest};
 classify_low_surrogate(_, _) ->
     error.
+
+%% Compute a template quasi's Template Value (TV) per ES2024 §12.9.6.
+%% Input: the RAW quasi text (line endings already normalized to LF).
+%% Output: {ok, Cooked} or {error, nil} when the quasi contains an escape
+%% sequence that is invalid in templates (\1-\7, \8, \9, \0<digit>, bad \x,
+%% bad \u). Tagged templates map the error to an undefined cooked entry;
+%% untagged templates turn it into a SyntaxError.
+cook_template_string(S) when is_binary(S) ->
+    try
+        {ok, iolist_to_binary(cook_loop(S, []))}
+    catch
+        throw:invalid_template_escape -> {error, nil}
+    end.
+
+cook_loop(<<>>, Acc) ->
+    lists:reverse(Acc);
+cook_loop(<<"\\", Rest/binary>>, Acc) ->
+    case Rest of
+        <<>> -> throw(invalid_template_escape);
+        <<"b", T/binary>> -> cook_loop(T, [<<8>> | Acc]);
+        <<"t", T/binary>> -> cook_loop(T, [<<9>> | Acc]);
+        <<"n", T/binary>> -> cook_loop(T, [<<10>> | Acc]);
+        <<"v", T/binary>> -> cook_loop(T, [<<11>> | Acc]);
+        <<"f", T/binary>> -> cook_loop(T, [<<12>> | Acc]);
+        <<"r", T/binary>> -> cook_loop(T, [<<13>> | Acc]);
+        <<"\"", T/binary>> -> cook_loop(T, [<<34>> | Acc]);
+        <<"'", T/binary>> -> cook_loop(T, [<<39>> | Acc]);
+        <<"`", T/binary>> -> cook_loop(T, [<<"`">> | Acc]);
+        <<"$", T/binary>> -> cook_loop(T, [<<"$">> | Acc]);
+        <<"\\", T/binary>> -> cook_loop(T, [<<"\\">> | Acc]);
+        %% Line continuation (raw text is LF-normalized, but accept CR forms)
+        <<"\r\n", T/binary>> -> cook_loop(T, Acc);
+        <<"\r", T/binary>> -> cook_loop(T, Acc);
+        <<"\n", T/binary>> -> cook_loop(T, Acc);
+        %% U+2028 (LS) and U+2029 (PS) line continuations
+        <<16#E2, 16#80, 16#A8, T/binary>> -> cook_loop(T, Acc);
+        <<16#E2, 16#80, 16#A9, T/binary>> -> cook_loop(T, Acc);
+        %% \xHH — exactly 2 hex digits required
+        <<"x", H1, H2, T/binary>> ->
+            case is_hex(H1) andalso is_hex(H2) of
+                true ->
+                    CP = list_to_integer([H1, H2], 16),
+                    cook_loop(T, [encode_codepoint(CP) | Acc]);
+                false -> throw(invalid_template_escape)
+            end;
+        <<"x", _/binary>> -> throw(invalid_template_escape);
+        %% \u{...} — 1+ hex digits, value =< 0x10FFFF, closing brace required
+        <<"u{", T/binary>> ->
+            case cook_read_braced_hex(T, []) of
+                {ok, CU, Rest1} -> cook_unicode_escape(CU, Rest1, Acc);
+                error -> throw(invalid_template_escape)
+            end;
+        %% \uHHHH — exactly 4 hex digits required
+        <<"u", H1, H2, H3, H4, T/binary>> when ?IS_HEX4(H1, H2, H3, H4) ->
+            CU = list_to_integer([H1, H2, H3, H4], 16),
+            cook_unicode_escape(CU, T, Acc);
+        <<"u", _/binary>> -> throw(invalid_template_escape);
+        %% \0 not followed by a decimal digit → NUL; otherwise invalid
+        <<"0", T/binary>> ->
+            case T of
+                <<D, _/binary>> when D >= $0, D =< $9 ->
+                    throw(invalid_template_escape);
+                _ -> cook_loop(T, [<<0>> | Acc])
+            end;
+        %% Octal and non-octal decimal escapes are never legal in templates
+        <<D, _/binary>> when D >= $1, D =< $9 ->
+            throw(invalid_template_escape);
+        %% NonEscapeCharacter: \g → "g" etc.
+        <<C/utf8, T/binary>> ->
+            cook_loop(T, [<<C/utf8>> | Acc]);
+        <<B, T/binary>> ->
+            cook_loop(T, [<<B>> | Acc])
+    end;
+cook_loop(<<C/utf8, Rest/binary>>, Acc) ->
+    cook_loop(Rest, [<<C/utf8>> | Acc]);
+cook_loop(<<B, Rest/binary>>, Acc) ->
+    cook_loop(Rest, [<<B>> | Acc]).
+
+%% Read hex digits up to a closing brace for \u{...}. Requires at least one
+%% hex digit, only hex digits before the brace, and value =< 0x10FFFF.
+cook_read_braced_hex(<<"}", _/binary>>, []) ->
+    error;
+cook_read_braced_hex(<<"}", Rest/binary>>, Acc) ->
+    CU = list_to_integer(lists:reverse(Acc), 16),
+    case CU =< 16#10FFFF of
+        true -> {ok, CU, Rest};
+        false -> error
+    end;
+cook_read_braced_hex(<<C, Rest/binary>>, Acc) ->
+    case is_hex(C) of
+        true -> cook_read_braced_hex(Rest, [C | Acc]);
+        false -> error
+    end;
+cook_read_braced_hex(<<>>, _Acc) ->
+    error.
+
+%% Surrogate pairing for template \u escapes, mirroring handle_unicode_escape
+%% but feeding cook_loop (and validating the low-surrogate escape's syntax).
+cook_unicode_escape(CU, Rest, Acc) when CU >= 16#D800, CU =< 16#DBFF ->
+    case cook_read_low_surrogate(Rest) of
+        {ok, Low, Rest1} ->
+            CP = 16#10000 + (CU - 16#D800) * 16#400 + (Low - 16#DC00),
+            cook_loop(Rest1, [encode_codepoint(CP) | Acc]);
+        error ->
+            cook_loop(Rest, [encode_codepoint(CU) | Acc])
+    end;
+cook_unicode_escape(CU, Rest, Acc) ->
+    cook_loop(Rest, [encode_codepoint(CU) | Acc]).
+
+cook_read_low_surrogate(<<"\\u{", T/binary>>) ->
+    case cook_read_braced_hex(T, []) of
+        {ok, CU, Rest} -> classify_low_surrogate(CU, Rest);
+        error -> error
+    end;
+cook_read_low_surrogate(<<"\\u", H1, H2, H3, H4, T/binary>>)
+    when ?IS_HEX4(H1, H2, H3, H4) ->
+    classify_low_surrogate(list_to_integer([H1, H2, H3, H4], 16), T);
+cook_read_low_surrogate(_) ->
+    error.
+
+is_hex(C) when C >= $0, C =< $9 -> true;
+is_hex(C) when C >= $a, C =< $f -> true;
+is_hex(C) when C >= $A, C =< $F -> true;
+is_hex(_) -> false.
 
 encode_codepoint(CP) when CP =< 16#7F ->
     <<CP>>;

@@ -107,6 +107,15 @@ fn ffi_receive_settle_or_subject(
   ref_map: dict.Dict(value.ErlangRef, List(Ref)),
 ) -> MailboxEvent
 
+@external(erlang, "arc_vm_ffi", "receive_settle_only_timeout")
+fn ffi_receive_settle_only_timeout(timeout: Int) -> Result(MailboxEvent, Nil)
+
+@external(erlang, "arc_vm_ffi", "receive_settle_or_subject_timeout")
+fn ffi_receive_settle_or_subject_timeout(
+  ref_map: dict.Dict(value.ErlangRef, List(Ref)),
+  timeout: Int,
+) -> Result(MailboxEvent, Nil)
+
 /// Pending `receiveAsync` tickets, maintained incrementally in the process
 /// dictionary as a pair of maps: subject tag -> FIFO list of settle refs
 /// (multiple `receiveAsync` calls may be outstanding on one subject), and
@@ -128,17 +137,36 @@ fn receivers_put(r: Receivers) -> Nil
 ///
 /// Pass to `engine.eval_with` / `entry.run_with` as the `finish` driver.
 pub fn run(s: State) -> State {
-  let s = event_loop.drain_jobs(s)
+  let s = event_loop.drain_jobs_yielding(s)
   case state.outstanding(s) {
     0 -> s
     _ -> {
       let receivers = receivers_get()
       let #(tag_map, _) = receivers
-      let event = case dict.is_empty(tag_map) {
-        True -> ffi_receive_settle_only()
-        False -> ffi_receive_settle_or_subject(tag_map)
+      // With host-timer / Atomics.waitAsync deadlines pending,
+      // drain_jobs_yielding returns instead of sleeping (it would starve
+      // the mailbox); bound the receive by the earliest deadline so
+      // mailbox messages and host timers interleave. A timeout just means
+      // a deadline is due — loop so the drain fires it.
+      case event_loop.next_deadline_timeout(s) {
+        None -> {
+          let event = case dict.is_empty(tag_map) {
+            True -> ffi_receive_settle_only()
+            False -> ffi_receive_settle_or_subject(tag_map)
+          }
+          run(handle_event(s, event, receivers))
+        }
+        Some(timeout) -> {
+          let event = case dict.is_empty(tag_map) {
+            True -> ffi_receive_settle_only_timeout(timeout)
+            False -> ffi_receive_settle_or_subject_timeout(tag_map, timeout)
+          }
+          case event {
+            Ok(event) -> run(handle_event(s, event, receivers))
+            Error(Nil) -> run(s)
+          }
+        }
       }
-      run(handle_event(s, event, receivers))
     }
   }
 }

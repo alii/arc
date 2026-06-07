@@ -72,22 +72,41 @@ pub fn setup_locals(
   this_val: JsValue,
   new_target: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
-  let env_values = heap.read_env(h, env_ref) |> option.unwrap([])
-  let seeds = case callee_template.is_arrow {
-    True -> []
+  // Capture-less templates always point at an empty EnvSlot — skip the
+  // heap dict lookup entirely (the common case for top-level functions
+  // and tiny callbacks).
+  let env_values = case callee_template.env_descriptors {
+    [] -> []
+    _has_captures -> heap.read_env(h, env_ref) |> option.unwrap([])
+  }
+  case callee_template.is_arrow {
+    // Arrows own no lexical slots — their `this`/`new.target` reads resolve
+    // to captures, so there are no seeds to write.
+    True ->
+      setup_locals_tuple(
+        env_values,
+        [],
+        args,
+        callee_template.arity,
+        callee_template.local_count,
+        JsUndefined,
+      )
     False -> {
       let home = option.map(home_object, JsObject) |> option.unwrap(JsUndefined)
-      lexical_seeds(callee_template.lexical, this_val, fn_ref, home, new_target)
+      setup_locals_seeded(
+        env_values,
+        callee_template.lexical,
+        this_val,
+        JsObject(fn_ref),
+        home,
+        new_target,
+        args,
+        callee_template.arity,
+        callee_template.local_count,
+        JsUndefined,
+      )
     }
   }
-  setup_locals_tuple(
-    env_values,
-    seeds,
-    args,
-    callee_template.arity,
-    callee_template.local_count,
-    JsUndefined,
-  )
 }
 
 /// FFI: build the locals tuple in one forward pass — see
@@ -103,34 +122,26 @@ fn setup_locals_tuple(
   undef: JsValue,
 ) -> tuple_array.TupleArray(JsValue)
 
-/// Seed values for the owned lexical slots, in canonical `all_lexical_refs`
-/// order ([this, active_func, home_object, new_target]), one per Some entry.
-/// The emitter guarantees slot indices start at len(captures) and run
-/// contiguously in this order. ≤4 cons cells, no filter_map/closure allocation.
-fn lexical_seeds(
+/// FFI: non-arrow locals build — see arc_vm_ffi:setup_locals_seeded/10.
+/// Seed values for the owned lexical slots are written in canonical
+/// `all_lexical_refs` order ([this, active_func, home_object, new_target]),
+/// one per Some entry in `lexical`. The emitter guarantees slot indices
+/// start at len(captures) and run contiguously in this order. Passing the
+/// LexicalSlots record plus the four values lets the FFI write the common
+/// all-four-owned case inline with no intermediate seeds list.
+@external(erlang, "arc_vm_ffi", "setup_locals_seeded")
+fn setup_locals_seeded(
+  env: List(JsValue),
   lexical: opcode.LexicalSlots,
   this_val: JsValue,
-  fn_ref: value.Ref,
-  home_object: JsValue,
+  fn_obj: JsValue,
+  home: JsValue,
   new_target: JsValue,
-) -> List(JsValue) {
-  let acc = case lexical.new_target {
-    Some(_) -> [new_target]
-    None -> []
-  }
-  let acc = case lexical.home_object {
-    Some(_) -> [home_object, ..acc]
-    None -> acc
-  }
-  let acc = case lexical.active_func {
-    Some(_) -> [JsObject(fn_ref), ..acc]
-    None -> acc
-  }
-  case lexical.this {
-    Some(_) -> [this_val, ..acc]
-    None -> acc
-  }
-}
+  args: List(JsValue),
+  arity: Int,
+  local_count: Int,
+  undef: JsValue,
+) -> tuple_array.TupleArray(JsValue)
 
 /// FFI: a one-instruction `Return` code array used as a sentinel frame for
 /// natives driven outside the interpreter loop — see

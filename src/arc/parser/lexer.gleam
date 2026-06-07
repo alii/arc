@@ -2,8 +2,10 @@
 /// Converts source text into a stream of tokens.
 /// Operates on raw bytes (UTF-8) for O(1) character access.
 import gleam/bit_array
+import gleam/bool
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -159,6 +161,7 @@ pub type LexError {
   LeadingNumericSeparator(pos: Int)
   TrailingNumericSeparator(pos: Int)
   IdentifierAfterNumericLiteral(pos: Int)
+  InvalidBigIntLiteral(pos: Int)
   HtmlCommentInModule(pos: Int)
 }
 
@@ -183,6 +186,8 @@ pub fn lex_error_to_string(error: LexError) -> String {
     TrailingNumericSeparator(_) -> "Trailing numeric separator"
     IdentifierAfterNumericLiteral(_) ->
       "Identifier starts immediately after numeric literal"
+    InvalidBigIntLiteral(_) ->
+      "Invalid BigInt literal: legacy octal and leading-zero literals cannot be BigInts"
     HtmlCommentInModule(_) -> "HTML comments are not allowed in module code"
   }
 }
@@ -205,6 +210,7 @@ pub fn lex_error_pos(error: LexError) -> Int {
     LeadingNumericSeparator(pos:) -> pos
     TrailingNumericSeparator(pos:) -> pos
     IdentifierAfterNumericLiteral(pos:) -> pos
+    InvalidBigIntLiteral(pos:) -> pos
     HtmlCommentInModule(pos:) -> pos
   }
 }
@@ -232,29 +238,61 @@ fn do_tokenize(
   acc: List(Token),
   mode: LexMode,
 ) -> Result(List(Token), LexError) {
-  use #(new_pos, ws_newlines) <- result.try(skip_whitespace_and_comments(
+  use #(new_pos, ws_newlines, rest) <- result.try(skip_whitespace_and_comments(
     bytes,
     pos,
     mode,
   ))
   let token_line = line + ws_newlines
-  case char_at(bytes, new_pos) {
-    "" ->
-      Ok(list.reverse([Token(Eof, "", new_pos, token_line, 0, False), ..acc]))
-    _ -> {
-      use token <- result.try(read_token(bytes, new_pos))
-      let token = Token(..token, line: token_line)
-      let end_pos = token.pos + token.raw_len
-      let end_line = case token.kind {
-        // Only these token kinds can span multiple lines
-        KString | TemplateLiteral -> {
-          let raw_value = byte_slice(bytes, token.pos, token.raw_len)
-          token_line + count_newlines_in(raw_value)
-        }
-        _ -> token_line
-      }
-      do_tokenize(bytes, end_pos, end_line, [token, ..acc], mode)
+  // Single-byte punctuation fast path: match the remaining binary directly,
+  // skipping the two char_at calls (each two bit_array slices + a UTF-8
+  // validation) that the generic path pays per token. These tokens are
+  // single-line and escape-free, so the multi-line bookkeeping below is
+  // statically known too.
+  case read_fast_punct(rest) {
+    Some(#(kind, value)) -> {
+      let token = Token(kind, value, new_pos, token_line, 1, False)
+      do_tokenize(bytes, new_pos + 1, token_line, [token, ..acc], mode)
     }
+    None ->
+      case char_at(bytes, new_pos) {
+        "" ->
+          Ok(
+            list.reverse([Token(Eof, "", new_pos, token_line, 0, False), ..acc]),
+          )
+        _ -> {
+          use token <- result.try(read_token(bytes, new_pos))
+          let token = Token(..token, line: token_line)
+          let end_pos = token.pos + token.raw_len
+          let end_line = case token.kind {
+            // Only these token kinds can span multiple lines
+            KString | TemplateLiteral -> {
+              let raw_value = byte_slice(bytes, token.pos, token.raw_len)
+              token_line + count_newlines_in(raw_value)
+            }
+            _ -> token_line
+          }
+          do_tokenize(bytes, end_pos, end_line, [token, ..acc], mode)
+        }
+      }
+  }
+}
+
+/// Tokens recognizable from their first byte alone, with no multi-char
+/// variants. Mirrors the single-char punctuation arm of read_token.
+fn read_fast_punct(rest: BitArray) -> Option(#(TokenKind, String)) {
+  case rest {
+    <<0x28, _:bytes>> -> Some(#(LeftParen, "("))
+    <<0x29, _:bytes>> -> Some(#(RightParen, ")"))
+    <<0x7B, _:bytes>> -> Some(#(LeftBrace, "{"))
+    <<0x7D, _:bytes>> -> Some(#(RightBrace, "}"))
+    <<0x5B, _:bytes>> -> Some(#(LeftBracket, "["))
+    <<0x5D, _:bytes>> -> Some(#(RightBracket, "]"))
+    <<0x3B, _:bytes>> -> Some(#(Semicolon, ";"))
+    <<0x2C, _:bytes>> -> Some(#(Comma, ","))
+    <<0x7E, _:bytes>> -> Some(#(Tilde, "~"))
+    <<0x3A, _:bytes>> -> Some(#(Colon, ":"))
+    _ -> None
   }
 }
 
@@ -276,7 +314,7 @@ fn skip_whitespace_and_comments(
   bytes: BitArray,
   pos: Int,
   mode: LexMode,
-) -> Result(#(Int, Int), LexError) {
+) -> Result(#(Int, Int, BitArray), LexError) {
   // line_start: True when at start of input (-->  is valid comment there)
   skip_ws(bytes, pos, 0, pos == 0, mode)
 }
@@ -287,7 +325,7 @@ fn skip_ws(
   newlines: Int,
   line_start: Bool,
   mode: LexMode,
-) -> Result(#(Int, Int), LexError) {
+) -> Result(#(Int, Int, BitArray), LexError) {
   // Shebang only at byte 0 of the file
   let #(pos, newlines, line_start) = case pos {
     0 ->
@@ -301,14 +339,14 @@ fn skip_ws(
     _ -> #(pos, newlines, line_start)
   }
   case skip_ws_inner(drop_bytes(bytes, pos), 0, newlines, line_start, mode) {
-    WsEnd(n, nl) -> Ok(#(pos + n, nl))
+    WsEnd(n, nl, rest) -> Ok(#(pos + n, nl, rest))
     WsBlockUnterminated(n) -> Error(UnterminatedBlockComment(pos + n))
     WsHtmlInModule(n) -> Error(HtmlCommentInModule(pos + n))
   }
 }
 
 type WsScan {
-  WsEnd(consumed: Int, newlines: Int)
+  WsEnd(consumed: Int, newlines: Int, rest: BitArray)
   WsBlockUnterminated(at: Int)
   WsHtmlInModule(at: Int)
 }
@@ -374,7 +412,7 @@ fn skip_ws_inner(
     <<0xE2, 0x81, 0x9F, tail:bytes>> -> skip_ws_inner(tail, n + 3, nl, ls, mode)
     // U+3000
     <<0xE3, 0x80, 0x80, tail:bytes>> -> skip_ws_inner(tail, n + 3, nl, ls, mode)
-    _ -> WsEnd(n, nl)
+    other -> WsEnd(n, nl, other)
   }
 }
 
@@ -472,7 +510,7 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
 
     // Numbers
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-      read_number(bytes, pos)
+      read_number_lenient(bytes, pos)
 
     // Identifiers and keywords
     "\\" ->
@@ -507,16 +545,12 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
         True -> read_identifier(bytes, pos)
         False -> {
           let width = char_width_at(bytes, pos)
-          // A non-ASCII character that starts no token is still legal inside a
-          // regex literal (e.g. the Cf format-control U+180E), which the parser
-          // re-scans from source — emit an Illegal token so the lex doesn't
-          // fail outright. ASCII non-token chars (@, #, …) remain hard errors,
-          // matching prior behavior. A stray Illegal token reached outside a
-          // regex is rejected by the parser, still a SyntaxError.
-          case width > 1 {
-            True -> Ok(tokn(Illegal, ch, pos, width))
-            False -> Error(UnexpectedCharacter(ch, pos))
-          }
+          // A character that starts no token is still legal inside a regex
+          // literal (e.g. `/@/`, `/#/`, or the Cf format-control U+180E),
+          // which the parser re-scans from source — emit an Illegal token so
+          // the lex doesn't fail outright. A stray Illegal token reached
+          // outside a regex is rejected by the parser, still a SyntaxError.
+          Ok(tokn(Illegal, ch, pos, width))
         }
       }
   }
@@ -532,7 +566,7 @@ fn read_dot(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
         _ -> Ok(tokn(Dot, ".", pos, 1))
       }
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-      read_number(bytes, pos)
+      read_number_lenient(bytes, pos)
     _ -> Ok(tokn(Dot, ".", pos, 1))
   }
 }
@@ -885,15 +919,23 @@ fn read_string_body(
     StrEscape(n) -> {
       let at = pos + n
       case char_at(bytes, at + 1) {
-        "" -> Error(UnterminatedStringLiteral(start))
+        "" -> Ok(unterminated_quote_token(bytes, start))
         _ -> {
           use skip <- result.try(validate_escape(bytes, at + 1, at, False))
           read_string_body(bytes, at + skip, start, quote)
         }
       }
     }
-    StrUnterminated -> Error(UnterminatedStringLiteral(start))
+    // An unterminated string is legal inside a regex literal (`/'/`), which
+    // the parser re-scans from source — emit an Illegal token spanning just
+    // the quote so the rest of the input still lexes. A stray Illegal token
+    // outside a regex is rejected by the parser, still a SyntaxError.
+    StrUnterminated -> Ok(unterminated_quote_token(bytes, start))
   }
+}
+
+fn unterminated_quote_token(bytes: BitArray, start: Int) -> Token {
+  tokn(Illegal, byte_slice(bytes, start, 1), start, 1)
 }
 
 type StrScan {
@@ -937,15 +979,38 @@ fn read_template_body(
 ) -> Result(Token, LexError) {
   let ch = char_at(bytes, pos)
   case ch {
-    "" -> Error(UnterminatedTemplateLiteral(start))
+    // An unterminated template is legal inside a regex literal (`` /`/ ``),
+    // which the parser re-scans from source — emit an Illegal token spanning
+    // just the backtick so the rest of the input still lexes. A stray
+    // Illegal token outside a regex is rejected by the parser.
+    "" -> Ok(unterminated_quote_token(bytes, start))
     "\\" -> {
       let next = char_at(bytes, pos + 1)
       case next {
-        "" -> Error(UnterminatedTemplateLiteral(start))
-        _ -> {
-          use skip <- result.try(validate_escape(bytes, pos + 1, pos, True))
-          read_template_body(bytes, pos + skip, start, brace_depth)
-        }
+        "" -> Ok(unterminated_quote_token(bytes, start))
+        _ ->
+          case validate_escape(bytes, pos + 1, pos, True) {
+            Ok(skip) ->
+              read_template_body(bytes, pos + skip, start, brace_depth)
+            // Invalid escape sequences are LEGAL in tagged templates (the
+            // cooked value becomes undefined, §12.9.6); the lexer can't know
+            // whether this template is tagged, so it tolerates them and the
+            // parser raises the SyntaxError for untagged templates when
+            // cooking the quasi. Skip the backslash plus the escape lead-in
+            // ("\u{" as a unit so a dangling "{" doesn't skew brace_depth).
+            Error(_invalid_escape) ->
+              case char_at(bytes, pos + 1), char_at(bytes, pos + 2) {
+                "u", "{" ->
+                  read_template_body(bytes, pos + 3, start, brace_depth)
+                _, _ ->
+                  read_template_body(
+                    bytes,
+                    pos + 1 + char_width_at(bytes, pos + 1),
+                    start,
+                    brace_depth,
+                  )
+              }
+          }
       }
     }
     "$" ->
@@ -984,6 +1049,32 @@ fn read_template_body(
 
 // --- Number reader ---
 
+/// Lex a numeric literal, but degrade invalid numeric literals into an
+/// Illegal token instead of a hard lex error. Sequences like `9A` or `9_$`
+/// are legal inside regex bodies (e.g. `/[0-9A-Z]/`, `/[a-z0-9_$]/`), which
+/// the parser re-scans from source and skips the pre-lexed tokens over. An
+/// Illegal token that the parser actually reaches outside a regex is still
+/// rejected as a SyntaxError.
+///
+/// The Illegal token spans from the literal start up to (excluding) the
+/// error position, but always at least one character, so lexing makes
+/// progress and never slices into a multi-byte codepoint (every numeric
+/// lex error is positioned at an ASCII char or a codepoint boundary).
+fn read_number_lenient(bytes: BitArray, start: Int) -> Result(Token, LexError) {
+  case read_number(bytes, start) {
+    Ok(token) -> Ok(token)
+    Error(err) -> {
+      let end = int.max(lex_error_pos(err), start + 1)
+      Ok(tokn(
+        Illegal,
+        byte_slice(bytes, start, end - start),
+        start,
+        end - start,
+      ))
+    }
+  }
+}
+
 fn read_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   case char_at(bytes, start) {
     "0" ->
@@ -1021,11 +1112,19 @@ fn read_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
 
 fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   use pos <- result.try(skip_digits(bytes, start))
+  // 0-prefixed integer: LegacyOctalIntegerLiteral (01, 07) or
+  // NonOctalDecimalIntegerLiteral (08, 09). Neither allows numeric
+  // separators, and neither can be a BigInt.
+  let has_leading_zero = char_at(bytes, start) == "0" && pos - start > 1
+  use Nil <- result.try(
+    case has_leading_zero && has_separator(bytes, start, pos) {
+      True -> Error(LeadingNumericSeparator(start))
+      False -> Ok(Nil)
+    },
+  )
   // Check for legacy octal (0-prefixed like 01, 07) — don't consume dot
   let is_legacy_octal =
-    char_at(bytes, start) == "0"
-    && pos - start > 1
-    && !has_non_octal(bytes, start + 1, pos)
+    has_leading_zero && !has_non_octal(bytes, start + 1, pos)
   case char_at(bytes, pos) {
     "." ->
       case is_legacy_octal {
@@ -1040,15 +1139,34 @@ fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
             }
           }
       }
-    "e" | "E" -> read_exponent(bytes, start, pos)
+    // LegacyOctalIntegerLiteral takes no ExponentPart, so `01e2` is the
+    // number `01` followed by IdentifierStart `e` — an Illegal token,
+    // matching V8/QuickJS. NonOctalDecimalIntegerLiteral (08, 09) does
+    // allow an exponent, and is_legacy_octal is False for those.
+    "e" | "E" ->
+      case is_legacy_octal {
+        True -> finish_number(bytes, start, pos)
+        False -> read_exponent(bytes, start, pos)
+      }
     "n" -> {
-      // BigInt
-      let end = pos + 1
-      use Nil <- result.try(check_after_numeric(bytes, end))
-      let len = end - start
-      Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
+      // BigInt — only `0n` or a literal without a leading zero is valid:
+      // 00n, 01n, 08n etc. are syntax errors.
+      use <- bool.guard(has_leading_zero, Error(InvalidBigIntLiteral(start)))
+      Ok(number_token(bytes, start, pos + 1))
     }
     _ -> finish_number(bytes, start, pos)
+  }
+}
+
+/// True if the source span [pos, end) contains a numeric separator `_`.
+fn has_separator(bytes: BitArray, pos: Int, end: Int) -> Bool {
+  case pos >= end {
+    True -> False
+    False ->
+      case char_at(bytes, pos) {
+        "_" -> True
+        _ -> has_separator(bytes, pos + 1, end)
+      }
   }
 }
 
@@ -1105,29 +1223,46 @@ fn read_radix_number(
     True -> Error(err(start))
     False ->
       case char_at(bytes, end) {
-        "n" -> {
-          let bigint_end = end + 1
-          use Nil <- result.try(check_after_numeric(bytes, bigint_end))
-          let len = bigint_end - start
-          Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-        }
+        "n" -> Ok(number_token(bytes, start, end + 1))
         _ -> finish_number(bytes, start, end)
       }
   }
 }
 
-/// Check that a numeric literal is not immediately followed by an identifier
-/// start character or decimal digit. Per the spec, NumericLiteral must not be
-/// immediately followed by IdentifierStart or DecimalDigit.
-fn check_after_numeric(bytes: BitArray, end: Int) -> Result(Nil, LexError) {
+/// Build the token for a numeric literal spanning [start, end). Per the spec,
+/// NumericLiteral must not be immediately followed by IdentifierStart or
+/// DecimalDigit — but inside a regex literal (`/1a/`) the sequence is legal
+/// and re-scanned from source by the parser, so emit an Illegal token
+/// spanning the number plus the trailing identifier characters instead of
+/// failing the whole lex. The parser rejects a stray Illegal token anywhere
+/// outside a regex body, which is still a SyntaxError.
+fn number_token(bytes: BitArray, start: Int, end: Int) -> Token {
   let next = char_at(bytes, end)
-  case next {
-    "" -> Ok(Nil)
-    _ ->
-      case is_identifier_start(next) {
-        True -> Error(IdentifierAfterNumericLiteral(end))
-        False -> Ok(Nil)
+  // A backslash only begins an identifier when it is a valid unicode escape
+  // decoding to ID_Start. Sequences like a digit followed by an escape for an
+  // ID_Continue-only codepoint occur inside regex literal bodies — those are
+  // not IdentifierStart, so the number token ends cleanly before them.
+  let id_follows = case next {
+    "" -> False
+    "\\" -> result.is_ok(validate_identifier_escape(bytes, end, True))
+    _ -> is_identifier_start(next)
+  }
+  case id_follows {
+    True -> {
+      let id_end = case skip_ident_inner(drop_bytes(bytes, end), 0) {
+        IdEnd(n) -> end + n
+        IdEscape(n) -> end + n
       }
+      // A `\` or `#` directly after the digits consumes no identifier chars
+      // above — still span at least one character so the lex makes progress.
+      let id_end = int.max(id_end, end + 1)
+      let len = id_end - start
+      tokn(Illegal, byte_slice(bytes, start, len), start, len)
+    }
+    False -> {
+      let len = end - start
+      tokn(Number, byte_slice(bytes, start, len), start, len)
+    }
   }
 }
 
@@ -1136,12 +1271,8 @@ fn finish_number(
   start: Int,
   end: Int,
 ) -> Result(Token, LexError) {
-  let len = end - start
-  case len > 0 {
-    True -> {
-      use Nil <- result.try(check_after_numeric(bytes, end))
-      Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-    }
+  case end - start > 0 {
+    True -> Ok(number_token(bytes, start, end))
     False -> Error(InvalidNumber(start))
   }
 }
@@ -1340,7 +1471,10 @@ fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
               ))
               Ok(make_identifier_token(bytes, start, end))
             }
-            False -> Error(UnexpectedCharacter("#", start))
+            // A lone `#` is legal inside a regex literal (`/#/`), which the
+            // parser re-scans from source. Emit an Illegal token — the parser
+            // rejects it anywhere outside a regex body, still a SyntaxError.
+            False -> Ok(tokn(Illegal, "#", start, 1))
           }
         }
       }

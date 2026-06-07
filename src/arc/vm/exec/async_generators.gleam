@@ -219,7 +219,14 @@ fn run_body(state: State, run: Run, push_arg: Bool) -> State {
     _, _ -> None
   }
   case delegated {
-    Some(iter_ref) -> forward_async_delegate(state, run, iter_ref)
+    // The saved slot may be an internal Iterator Record (cached next) —
+    // .return/.throw must be looked up and called on the real iterator.
+    Some(iter_ref) ->
+      forward_async_delegate(
+        state,
+        run,
+        unwrap_record_ref(state.heap, iter_ref),
+      )
     None -> {
       let gen_stack = case push_arg, req.completion {
         True, AGNext -> [req.value, ..gen.saved_stack]
@@ -287,6 +294,19 @@ fn async_delegate_iterator(gen: AsyncGenData) -> Option(Ref) {
   }
 }
 
+/// The yield* iter slot may hold an internal Iterator Record wrapper
+/// (cached `next` from GetIteratorFromMethod) — resolve it to the real
+/// iterator for .return/.throw lookups.
+fn unwrap_record_ref(h: heap.Heap(State), ref: Ref) -> Ref {
+  case heap.read(h, ref) {
+    Some(ObjectSlot(
+      kind: value.IteratorRecordObject(iterated: JsObject(real), ..),
+      ..,
+    )) -> real
+    _ -> ref
+  }
+}
+
 /// Forward a .return/.throw to the delegated async iterator.
 /// Per spec: GetMethod(iter, name) → if missing handle specially; if present
 /// call it, then AWAIT the result (unlike sync). The await suspends via
@@ -325,17 +345,22 @@ fn forward_async_delegate(state: State, run: Run, iter_ref: Ref) -> State {
 fn delegate_method_missing(state: State, run: Run, iter_ref: Ref) -> State {
   case run.req.completion {
     AGThrow ->
-      // §7.b.iii.1-4: AsyncIteratorClose(iter, NormalCompletion(unused)),
-      // then throw TypeError into body. Close calls iter.return() and AWAITS
-      // it; result/error are discarded (outer abrupt completion wins).
+      // §7.b.iii.1-4: AsyncIteratorClose(iter, NormalCompletion(empty)),
+      // then throw TypeError into body. closeCompletion is NORMAL here, so
+      // per AsyncIteratorClose steps 4-6 an error from GetMethod(iter,
+      // "return") / Call(return) / the awaited close result PROPAGATES as
+      // the yield* completion, replacing the missing-throw TypeError.
       case close_async_iterator(state, iter_ref) {
-        #(state, Some(close_result)) ->
-          // Await the close. Gen stays AGExecuting; settle via
-          // AGResumeDelegateClose which throws the TypeError into the body.
+        Ok(#(state, Some(close_result))) ->
+          // Await the close. Gen stays AGExecuting; settlement is handled
+          // in the AGResumeDelegateClose branch of call_native_resume.
           setup_await(state, run.data_ref, close_result, AGResumeDelegateClose)
-        #(state, None) ->
-          // No .return on iter (or its lookup threw) — skip the await.
+        Ok(#(state, None)) ->
+          // No .return on iter — skip the await, straight to the TypeError.
           throw_missing_throw_type_error(state, run)
+        Error(#(thrown, state)) ->
+          // GetMethod/Call threw — propagate into the body (steps 4 & 6).
+          throw_into_gen_body(state, run, thrown)
       }
     AGReturn | AGNext -> {
       // §7.c.ii.1-3: no .return → Await(received), then ReturnCompletion out.
@@ -384,23 +409,31 @@ fn throw_into_gen_body(state: State, run: Run, thrown: JsValue) -> State {
   handle_exec_result(state, run, exec_result)
 }
 
-/// AsyncIteratorClose step 1-4: GetMethod(iter, "return"); if present, call it
-/// with no args. Returns Some(result) for the caller to await per ES §7.4.12
-/// step 5. Errors from GetMethod/Call are swallowed (caller already has an
-/// abrupt completion that takes precedence). None if no .return present.
+/// AsyncIteratorClose steps 1-4 with a NORMAL closeCompletion (the yield*
+/// missing-`throw` path): GetMethod(iter, "return"); if present, call it with
+/// no args. Ok(Some(result)) → caller must Await it (steps 5-7 happen at
+/// settlement). Ok(None) → no .return present. Error → GetMethod/Call threw;
+/// per steps 4 & 6 this propagates as the yield* completion (closeCompletion
+/// is normal, so nothing takes precedence over innerResult).
 fn close_async_iterator(
   state: State,
   iter_ref: Ref,
-) -> #(State, Option(JsValue)) {
+) -> Result(#(State, Option(JsValue)), #(JsValue, State)) {
   let iter = JsObject(iter_ref)
-  case object_ops.get_value(state, iter_ref, Named("return"), iter) {
-    Ok(#(JsUndefined, state)) | Ok(#(JsNull, state)) -> #(state, None)
-    Ok(#(ret_fn, state)) ->
-      case state.call(state, ret_fn, iter, []) {
-        Ok(#(result, state)) -> #(state, Some(result))
-        Error(#(_thrown, state)) -> #(state, None)
-      }
-    Error(#(_thrown, state)) -> #(state, None)
+  use #(ret_fn, state) <- result.try(object_ops.get_value(
+    state,
+    iter_ref,
+    Named("return"),
+    iter,
+  ))
+  case ret_fn {
+    JsUndefined | JsNull -> Ok(#(state, None))
+    _ -> {
+      use #(close_result, state) <- result.map(
+        state.call(state, ret_fn, iter, []),
+      )
+      #(state, Some(close_result))
+    }
   }
 }
 
@@ -645,9 +678,23 @@ pub fn call_native_resume(
             AGResumeDelegate(method) ->
               resume_after_delegate(state, run, method, is_reject, settled)
             AGResumeDelegateClose ->
-              // AsyncIteratorClose await settled — discard settled/is_reject
-              // (outer abrupt completion wins), throw the missing-throw TypeError.
-              throw_missing_throw_type_error(state, run)
+              // AsyncIteratorClose await settled (closeCompletion was
+              // normal): rejection propagates (step 6), non-object fulfilment
+              // is its own TypeError (step 7), otherwise fall through to the
+              // yield* missing-throw TypeError.
+              case is_reject, settled {
+                True, _ -> throw_into_gen_body(state, run, settled)
+                False, JsObject(_) -> throw_missing_throw_type_error(state, run)
+                False, _non_obj -> {
+                  let #(h, err) =
+                    common.make_type_error(
+                      state.heap,
+                      state.builtins,
+                      "Iterator result is not an object",
+                    )
+                  throw_into_gen_body(State(..state, heap: h), run, err)
+                }
+              }
           }
           ret(state)
         }

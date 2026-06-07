@@ -8,7 +8,7 @@ import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type ReflectNativeFn, JsBool, JsNull, JsObject,
-  JsString, JsSymbol, JsUndefined, ObjectSlot, ReflectApply, ReflectConstruct,
+  JsString, JsSymbol, JsUndefined, ReflectApply, ReflectConstruct,
   ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
   ReflectGetOwnPropertyDescriptor, ReflectGetPrototypeOf, ReflectHas,
   ReflectIsExtensible, ReflectNative, ReflectOwnKeys, ReflectPreventExtensions,
@@ -223,11 +223,11 @@ fn reflect_define_property(
   case desc_val {
     JsObject(desc_ref) ->
       // Steps 2-4: ToPropertyKey + ToPropertyDescriptor + [[DefineOwnProperty]].
-      // apply_descriptor throws on failure; we catch and return false.
-      case builtins_object.apply_descriptor(state, ref, key_val, desc_ref) {
-        Ok(state) -> #(state, Ok(JsBool(True)))
-        // Validation failure → return false instead of re-throwing.
-        Error(#(_thrown, state)) -> #(state, Ok(JsBool(False)))
+      // define_property_bool returns the raw [[DefineOwnProperty]] boolean;
+      // proxy trap exceptions propagate, ordinary validation failures → false.
+      case builtins_object.define_property_bool(state, ref, key_val, desc_ref) {
+        Ok(#(state, ok)) -> #(state, Ok(JsBool(ok)))
+        Error(#(thrown, state)) -> #(state, Error(thrown))
       }
     _ -> state.type_error(state, "Property description must be an object")
   }
@@ -245,36 +245,22 @@ fn reflect_delete_property(
   use ref, rest, state <- require_object(args, state, "deleteProperty")
   let key_val = helpers.first_arg_or_undefined(rest)
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
+  // Step 3: Return ? target.[[Delete]](key) — trap-aware for proxies.
   case key_val {
-    JsSymbol(sym) -> {
-      // Symbol keys: delete from symbol_properties directly.
-      let #(heap, ok) = delete_symbol_prop(state.heap, ref, sym)
-      #(State(..state, heap:), Ok(JsBool(ok)))
-    }
+    JsSymbol(sym) ->
+      unwrap_set(object.delete_property_stateful(
+        state,
+        ref,
+        object.PkSymbol(sym),
+      ))
     _ -> {
       use pk, state <- state.try_op(property.to_property_key(state, key_val))
-      // Step 3: Return ? target.[[Delete]](key).
-      let #(heap, ok) = object.delete_property(state.heap, ref, pk)
-      #(State(..state, heap:), Ok(JsBool(ok)))
+      unwrap_set(object.delete_property_stateful(
+        state,
+        ref,
+        object.PkString(pk),
+      ))
     }
-  }
-}
-
-/// Delete a symbol-keyed own property. Returns #(heap, success).
-/// Success is False only for non-configurable properties (per §10.1.10.1).
-fn delete_symbol_prop(h: Heap, ref: Ref, sym: value.SymbolId) -> #(Heap, Bool) {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(symbol_properties:, ..) as slot) ->
-      case list.key_pop(symbol_properties, sym) {
-        Ok(#(value.DataProperty(configurable: True, ..), rest))
-        | Ok(#(value.AccessorProperty(configurable: True, ..), rest)) -> #(
-          heap.write(h, ref, ObjectSlot(..slot, symbol_properties: rest)),
-          True,
-        )
-        Ok(_) -> #(h, False)
-        Error(Nil) -> #(h, True)
-      }
-    _ -> #(h, True)
   }
 }
 
@@ -331,24 +317,23 @@ fn reflect_get_own_property_descriptor(
   )
   let key_val = helpers.first_arg_or_undefined(rest)
   let object_proto = state.builtins.object.prototype
-  // Step 2: Let key be ? ToPropertyKey(propertyKey).
-  use own_prop, state <- state.try_op(case key_val {
-    JsSymbol(sym) ->
-      Ok(#(
-        case heap.read(state.heap, ref) {
-          Some(ObjectSlot(symbol_properties:, ..)) ->
-            list.key_find(symbol_properties, sym) |> option.from_result
-          _ -> None
-        },
-        state,
-      ))
+  // Step 2: Let key be ? ToPropertyKey(propertyKey). A "#x" string is an
+  // ordinary property key here — private elements live in their own keyspace
+  // and are filtered on the ordinary lookup path (never for proxy traps).
+  use key_norm, state <- state.try_op(case key_val {
+    JsSymbol(_) -> Ok(#(key_val, state))
     _ ->
       case property.to_property_key(state, key_val) {
-        Ok(#(pk, state)) ->
-          Ok(#(object.get_own_property(state.heap, ref, pk), state))
+        Ok(#(pk, state)) -> Ok(#(JsString(value.key_to_string(pk)), state))
         Error(#(thrown, state)) -> Error(#(thrown, state))
       }
   })
+  // Step 3: Let desc be ? target.[[GetOwnProperty]](key) — trap-aware.
+  use own_prop, state <- state.try_op(builtins_object.get_own_property_stateful(
+    state,
+    ref,
+    key_norm,
+  ))
   // Steps 3-4: [[GetOwnProperty]] + FromPropertyDescriptor.
   case own_prop {
     Some(prop) -> {
@@ -369,10 +354,8 @@ fn reflect_get_prototype_of(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "getPrototypeOf")
-  let proto = case heap.read(state.heap, ref) {
-    Some(ObjectSlot(prototype: Some(p), ..)) -> JsObject(p)
-    _ -> JsNull
-  }
+  // Step 2: trap-aware [[GetPrototypeOf]].
+  use proto, state <- state.try_op(object.get_prototype_of_stateful(state, ref))
   #(state, Ok(proto))
 }
 
@@ -388,15 +371,24 @@ fn reflect_has(
   use ref, rest, state <- require_object(args, state, "has")
   let key_val = helpers.first_arg_or_undefined(rest)
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
+  // Step 3: Return ? target.[[HasProperty]](key) — trap-aware.
   case key_val {
-    JsSymbol(sym) -> #(
-      state,
-      Ok(JsBool(object.has_symbol_property(state.heap, ref, sym))),
-    )
+    JsSymbol(sym) -> {
+      use found, state <- state.try_op(object.has_property_stateful(
+        state,
+        ref,
+        object.PkSymbol(sym),
+      ))
+      #(state, Ok(JsBool(found)))
+    }
     _ -> {
       use pk, state <- state.try_op(property.to_property_key(state, key_val))
-      // Step 3: Return ? target.[[HasProperty]](key).
-      #(state, Ok(JsBool(object.has_property(state.heap, ref, pk))))
+      use found, state <- state.try_op(object.has_property_stateful(
+        state,
+        ref,
+        object.PkString(pk),
+      ))
+      #(state, Ok(JsBool(found)))
     }
   }
 }
@@ -410,10 +402,8 @@ fn reflect_is_extensible(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "isExtensible")
-  let ext = case heap.read(state.heap, ref) {
-    Some(ObjectSlot(extensible:, ..)) -> extensible
-    _ -> False
-  }
+  // Step 2: trap-aware [[IsExtensible]].
+  use ext, state <- state.try_op(object.is_extensible_stateful(state, ref))
   #(state, Ok(JsBool(ext)))
 }
 
@@ -430,15 +420,12 @@ fn reflect_own_keys(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "ownKeys")
-  // String keys: indices first (ascending), then named keys.
-  let string_keys =
-    builtins_object.collect_own_keys(state.heap, ref, False)
-    |> list.map(JsString)
-  // Symbol keys after all string keys.
-  let symbol_keys =
-    builtins_object.collect_own_symbol_keys(state.heap, ref, False)
-    |> list.map(JsSymbol)
-  let all_keys = list.append(string_keys, symbol_keys)
+  // Step 2: trap-aware [[OwnPropertyKeys]] — indices ascending, then named
+  // keys, then symbols (or the proxy trap's order).
+  use all_keys, state <- state.try_op(builtins_object.own_keys_stateful(
+    state,
+    ref,
+  ))
   state.ok_array(state, all_keys)
 }
 
@@ -453,14 +440,8 @@ fn reflect_prevent_extensions(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "preventExtensions")
-  let heap = {
-    use slot <- heap.update(state.heap, ref)
-    case slot {
-      ObjectSlot(..) -> ObjectSlot(..slot, extensible: False)
-      _ -> slot
-    }
-  }
-  #(State(..state, heap:), Ok(JsBool(True)))
+  // Step 2: trap-aware [[PreventExtensions]].
+  unwrap_set(object.prevent_extensions_stateful(state, ref))
 }
 
 /// Reflect.set ( target, propertyKey, V [ , receiver ] ) — ES2024 §28.1.12
@@ -523,14 +504,28 @@ fn reflect_set_prototype_of(
     _ -> Error(Nil)
   }
   case new_proto {
-    Error(_) ->
+    Error(Nil) ->
       state.type_error(state, "Object prototype may only be an Object or null")
     Ok(new_proto) ->
-      case builtins_object.ordinary_set_prototype_of(state, ref, new_proto) {
-        Ok(state) -> #(state, Ok(JsBool(True)))
-        Error(builtins_object.NotExtensible)
-        | Error(builtins_object.Cyclic)
-        | Error(builtins_object.Immutable) -> #(state, Ok(JsBool(False)))
+      // §10.5.2: proxies trap [[SetPrototypeOf]]; ordinary objects use the
+      // cycle/extensibility-checking ordinary algorithm.
+      case object.as_proxy(state.heap, ref) {
+        Some(#(target, handler)) ->
+          unwrap_set(builtins_object.proxy_set_proto(
+            state,
+            target,
+            handler,
+            new_proto,
+          ))
+        None ->
+          case
+            builtins_object.ordinary_set_prototype_of(state, ref, new_proto)
+          {
+            Ok(state) -> #(state, Ok(JsBool(True)))
+            Error(builtins_object.NotExtensible)
+            | Error(builtins_object.Cyclic)
+            | Error(builtins_object.Immutable) -> #(state, Ok(JsBool(False)))
+          }
       }
   }
 }

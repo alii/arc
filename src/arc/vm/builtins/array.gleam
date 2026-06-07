@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/object as object_builtin
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/limits
@@ -84,6 +85,13 @@ pub fn init(
       #("from", ArrayNative(ArrayFrom), 1),
       #("of", ArrayNative(ArrayOf), 0),
     ])
+  // §23.1.2.1 Array.fromAsync — a Call-level native (returns a promise, needs
+  // VM re-entry), unlike the Dispatch-level statics above.
+  let #(h, async_static_methods) =
+    common.alloc_call_methods(h, function_proto, [
+      #("fromAsync", value.ArrayFromAsync, 1),
+    ])
+  let static_methods = list.append(static_methods, async_static_methods)
   let #(h, bt) =
     common.init_type(
       h,
@@ -96,22 +104,71 @@ pub fn init(
       static_methods,
     )
 
-  // §23.1.3.37 Array.prototype [ @@iterator ] ( )
+  // §23.1.3 "The Array prototype object … is an Array exotic object" with
+  // a "length" property whose initial value is +0 (test262: prototype/length.js,
+  // prototype/exotic-array.js).
+  let h =
+    heap.update(h, bt.prototype, fn(slot) {
+      case slot {
+        ObjectSlot(..) as slot -> ObjectSlot(..slot, kind: ArrayObject(0))
+        other -> other
+      }
+    })
+
+  // §23.1.3.40 Array.prototype [ @@iterator ] ( )
   // "The initial value of the @@iterator property is %Array.prototype.values%"
-  let #(h, values_fn_ref) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      ArrayNative(value.ArrayPrototypeValues),
-      "values",
-      0,
-    )
+  // — the SAME function object as Array.prototype.values, not a fresh one
+  // (test262: built-ins/Array/prototype/Symbol.iterator.js).
+  let assert Ok(#(_, DataProperty(value: values_fn, ..))) =
+    list.find(proto_methods, fn(entry) { entry.0 == "values" })
   let h =
     common.add_symbol_property(
       h,
       bt.prototype,
       value.symbol_iterator,
-      value.builtin_property(JsObject(values_fn_ref)),
+      value.builtin_property(values_fn),
+    )
+
+  // §23.1.3.41 Array.prototype [ @@unscopables ]: a null-prototype object
+  // whose true-valued properties hide the listed methods from `with`
+  // statement scoping. Property attrs: each entry {W:T, E:T, C:T}; the
+  // @@unscopables property itself {W:F, E:F, C:T}.
+  let unscopable_names = [
+    "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast",
+    "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed",
+    "toSorted", "toSpliced", "values",
+  ]
+  let unscopable_props =
+    list.fold(unscopable_names, dict.new(), fn(props, name) {
+      dict.insert(
+        props,
+        Named(name),
+        DataProperty(
+          value: JsBool(True),
+          writable: True,
+          enumerable: True,
+          configurable: True,
+        ),
+      )
+    })
+  let #(h, unscopables_ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: value.OrdinaryObject,
+        properties: unscopable_props,
+        elements: elements.new(),
+        prototype: None,
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  let h =
+    common.add_symbol_property(
+      h,
+      bt.prototype,
+      value.symbol_unscopables,
+      value.data(JsObject(unscopables_ref)) |> value.configurable(),
     )
 
   #(h, bt)
@@ -163,7 +220,8 @@ pub fn dispatch(
     ArrayFrom -> array_from(args, state)
     ArrayOf -> array_of(args, state)
     value.ArrayPrototypeToString -> array_to_string(this, state)
-    value.ArrayPrototypeToLocaleString -> array_to_locale_string(this, state)
+    value.ArrayPrototypeToLocaleString ->
+      array_to_locale_string(this, args, state)
     value.ArrayPrototypeKeys -> array_keys(this, state)
     value.ArrayPrototypeValues -> array_values(this, state)
     value.ArrayPrototypeEntries -> array_entries(this, state)
@@ -186,14 +244,26 @@ fn construct(
 }
 
 /// Array.isArray(value) — check if a value is an array.
-/// Wrapper that threads State around native_is_array.
-/// §23.1.2.1 Array.isArray ( arg )
+/// §23.1.2.1 Array.isArray ( arg ): Return ? IsArray(arg).
+///
+/// IsArray (§7.2.2) pierces Proxy exotic objects to their [[ProxyTarget]]
+/// (step 3) and throws TypeError on a revoked proxy (step 3.a).
 fn is_array(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let heap = state.heap
-  #(State(..state, heap:), Ok(native_is_array(args, heap)))
+  let arg = case args {
+    [a, ..] -> a
+    [] -> JsUndefined
+  }
+  case object.is_array(state.heap, arg) {
+    Ok(b) -> #(state, Ok(JsBool(b)))
+    Error(Nil) ->
+      state.type_error(
+        state,
+        "Cannot perform 'IsArray' on a proxy that has been revoked",
+      )
+  }
 }
 
 /// Array ( ...values ) — §23.1.1.1
@@ -264,30 +334,6 @@ fn alloc_array(
   #(heap, Ok(JsObject(ref)))
 }
 
-/// Array.isArray ( arg ) — §23.1.2.1
-/// Delegates to the abstract operation IsArray (§7.2.2):
-///   1. If arg is not an Object, return false.
-///   2. If arg is an Array exotic object, return true.
-///   3. If arg is a Proxy exotic object, follow [[ProxyHandler]].
-///   4. Return false.
-///
-/// TODO(Deviation): Step 3 (Proxy exotic object) — needs Proxy implementation.
-fn native_is_array(args: List(JsValue), heap: Heap) -> JsValue {
-  case args {
-    // Step 1: If arg is not an Object, return false.
-    // (non-object JsValues fall through to the _ branch → false)
-    [JsObject(ref), ..] ->
-      case heap.read(heap, ref) {
-        // Step 2: If arg is an Array exotic object, return true.
-        Some(ObjectSlot(kind: ArrayObject(_), ..)) -> JsBool(True)
-        // Step 4: Return false.
-        _ -> JsBool(False)
-      }
-    // Step 1: arg is not an Object → false.
-    _ -> JsBool(False)
-  }
-}
-
 /// Array.prototype.join ( separator )
 /// ES2024 §23.1.3.18
 fn array_join(
@@ -298,7 +344,7 @@ fn array_join(
   // Steps 1-2: Let O be ? ToObject(this value).
   //            Let len be ? LengthOfArrayLike(O).
   // (handled by require_array — converts this to object, reads .length)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Steps 3-4: If separator is undefined, let sep be ",".
   //            Else, let sep be ? ToString(separator).
   let sep_val = case args {
@@ -306,7 +352,11 @@ fn array_join(
     [v, ..] -> v
   }
   use separator, state <- coerce.try_to_string(state, sep_val)
-  // Guard: O(length) string materialization — cap at max_iteration.
+  // Pragmatic bound: O(length) string materialization with no early exit —
+  // cap at max_iteration (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
   // Steps 5-8: Build result string R by iterating k from 0 to len-1,
   //            joining elements with sep. Return R.
   case join_elements(state, this, 0, length, separator, []) {
@@ -467,22 +517,25 @@ fn array_push(
   // Steps 1-2: Let O be ? ToObject(this value).
   //            Let len be ? LengthOfArrayLike(O).
   // (require_array handles ToObject + length extraction as a fast path.)
-  use ref, length, state <- require_array(this, state)
+  use _this, ref, length, state <- require_array(this, state)
   // Step 3: Let argCount be the number of elements in items.
   // Step 4: If len + argCount > 2^53 - 1, throw a TypeError.
-  // NOTE: Step 4 (overflow check) is not implemented — we don't guard
-  // against len + argCount exceeding MAX_SAFE_INTEGER.
+  use <- state.guard_safe_length(state, length + list.length(args))
   // Fast path: append all items with one heap read + one heap write.
-  // Multi-element pushes only — the eligibility check walks the prototype
-  // chain's property dicts, which costs more than one generic write, so a
-  // single-element push is faster through the generic path.
+  // Even a single-element push wins here: the generic path performs TWO full
+  // OrdinarySet operations (element write + length write), each with its own
+  // heap reads and receiver walk. Eligibility is O(argCount) map lookups —
+  // see try_push_fast_path — not a scan over every proto-chain property dict.
   let fast = case args {
-    [] | [_] -> None
-    _ -> {
-      use els, len <- try_elements_fast_path(state, ref, length)
-      let new_len = len + list.length(args)
-      #(elements.write_list(els, len, args), new_len, new_len)
-    }
+    [] -> None
+    // Indices ≥ 2^32-1 are NOT array indices (§6.1.7) — they live in the
+    // dict as named properties and must not land in element storage, and
+    // the final length Set throws RangeError (§10.4.2.4). Generic path only.
+    _ ->
+      case length + list.length(args) > 4_294_967_295 {
+        True -> None
+        False -> try_push_fast_path(state, ref, length, args)
+      }
   }
   case fast {
     Some(#(new_length, state)) -> #(state, Ok(value.from_int(new_length)))
@@ -509,6 +562,18 @@ fn push_generic(
 ) -> Result(#(Int, State), #(JsValue, State)) {
   case args {
     [] -> {
+      // §10.4.2.4 ArraySetLength step 3: a real Array's length is a uint32 —
+      // ToUint32(len) ≠ len for len ≥ 2^32, so Set(O, "length", 𝔽(len))
+      // throws RangeError. The element Sets already landed (indices ≥ 2^32-1
+      // are ordinary named properties that don't bump [[ArrayLength]]).
+      let is_real_array = case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: ArrayObject(..), ..)) -> True
+        _ -> False
+      }
+      let exceeds_uint32 = is_real_array && length > 4_294_967_295
+      use <- bool.lazy_guard(exceeds_uint32, fn() {
+        range_error_op(state, "Invalid array length")
+      })
       // Step 6: Perform ? Set(O, "length", 𝔽(len), true).
       use state <- result.try(generic_set_length(state, ref, length))
       // Step 7: Return 𝔽(len).
@@ -557,51 +622,105 @@ const cannot_convert = "Cannot convert undefined or null to object"
 fn require_array(
   this: JsValue,
   state: State,
-  cont: fn(Ref, Int, State) -> #(State, Result(JsValue, JsValue)),
+  cont: fn(JsValue, Ref, Int, State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
-  // Bound length at the single choke point so every array method is guarded
-  // against pathological sparse arrays. `Array(2**31).forEach(f)` would
-  // otherwise recurse 2**31 times through iterate_loop. QuickJS doesn't guard
-  // this (lets it spin), but we do since BEAM recursion is heavier than a C
-  // for-loop. Trade-off: push/pop on 10M+ sparse arrays throw RangeError
-  // instead of working — acceptable for now, revisit with sparse iteration.
-  let cont = fn(ref, length, state) {
-    case length > limits.max_iteration {
-      True -> state.range_error(state, "Invalid array length")
-      False -> cont(ref, length, state)
-    }
-  }
   case this {
     // §7.1.18: Object → return argument unchanged.
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         // Real array — length from [[ArrayLength]].
         Some(ObjectSlot(kind: ArrayObject(length:), ..)) ->
-          cont(ref, length, state)
-        // Arguments exotic object (§10.4.4): length stored in kind.
-        Some(ObjectSlot(kind: value.ArgumentsObject(length:), ..)) ->
-          cont(ref, length, state)
+          cont(this, ref, length, state)
+        // NOTE: Arguments objects deliberately take the generic path below —
+        // their "length" is an ordinary writable/configurable data property
+        // in the dict (§10.4.4.6), so overrides via defineProperty/assignment
+        // must be honored (the slot kind's length only drives element-key
+        // enumeration).
         // §7.1.18 String row / §10.4.3: String exotic object.
         Some(ObjectSlot(kind: value.StringObject(value: s), ..)) ->
-          cont(ref, object.string_length(s), state)
+          cont(this, ref, object.string_length(s), state)
         // Generic object: LengthOfArrayLike (§7.3.18) — Get(obj, "length"),
-        // then ToLength (§7.1.17).
+        // then ToLength (§7.1.17). The Get may invoke a getter (user code)
+        // and the ToLength may invoke valueOf — both can throw, and their
+        // side effects must be kept (state is threaded through).
         Some(ObjectSlot(properties:, ..)) ->
-          cont(ref, to_length_from_properties(state, ref, properties), state)
+          case length_of_properties(state, ref, properties) {
+            Ok(#(length, state)) -> cont(this, ref, length, state)
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
         // Non-object heap slot under a ref shouldn't happen, but fall through.
-        _ -> cont(ref, 0, state)
+        _ -> cont(this, ref, 0, state)
       }
     // §7.1.18: Undefined / Null → throw a TypeError exception.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // §7.1.18 String row: ToObject creates a String exotic object (§10.4.3).
-    // We don't actually allocate the wrapper — iteration uses get_value_of
-    // which handles string primitives via StringGetOwnProperty semantics.
-    // Mutating methods will fail via generic_set on heap.sentinel_ref (no-op), which
-    // is correct since string indices are non-writable (§10.4.3.5 step 11).
-    JsString(s) -> cont(heap.sentinel_ref, object.string_length(s), state)
+    // A real wrapper is allocated and handed back as the normalized `this`
+    // (the spec's O) so observable uses — the callback's third argument
+    // (`obj instanceof String`), concat's E — see the wrapper. Index reads go
+    // through StringGetOwnProperty (§10.4.3.5) on the wrapper slot; mutators
+    // throw TypeError via [[Set]] on the non-writable length/indices, which
+    // matches the spec's `Set(O, ..., true)` on a String exotic object.
+    JsString(s) -> {
+      let #(h, wrapper_ref) =
+        common.alloc_wrapper(
+          state.heap,
+          value.StringObject(s),
+          state.builtins.string.prototype,
+        )
+      cont(
+        JsObject(wrapper_ref),
+        wrapper_ref,
+        object.string_length(s),
+        State(..state, heap: h),
+      )
+    }
     // §7.1.18 Boolean/Number/Symbol/BigInt rows: ToObject creates a wrapper
-    // object with no own `.length` property → LengthOfArrayLike returns 0.
-    _ -> cont(heap.sentinel_ref, 0, state)
+    // object whose prototype chain (e.g. Boolean.prototype) may carry a
+    // "length" property — Get(O, "length") must consult it. get_value_of
+    // delegates primitives to their prototype without allocating a wrapper.
+    // A real wrapper IS allocated and handed back as the normalized `this`
+    // (the spec's O), so observable uses of O — the callback's third argument
+    // (`obj instanceof Boolean`), concat's E, fill/copyWithin's return value —
+    // see the wrapper object, and mutators succeed unobservably (e.g.
+    // `pop.call(true)` Sets length on the wrapper and returns undefined)
+    // instead of throwing on a sentinel.
+    _ ->
+      case object.get_value_of(state, this, Named("length")) {
+        Ok(#(len_val, state)) ->
+          case to_length_value(state, len_val) {
+            Ok(#(length, state)) ->
+              // §7.1.18 ToObject — common.to_object covers every primitive
+              // row (Boolean/Number/Symbol/BigInt) so `instanceof` on the
+              // normalized O sees the right wrapper kind and prototype
+              // (e.g. `[].sort.call(Symbol()) instanceof Symbol`).
+              case common.to_object(state.heap, state.builtins, this) {
+                Some(#(h, wrapper_ref)) ->
+                  cont(
+                    JsObject(wrapper_ref),
+                    wrapper_ref,
+                    length,
+                    State(..state, heap: h),
+                  )
+                None -> state.type_error(state, cannot_convert)
+              }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
+  }
+}
+
+/// Canonical PropertyKey for an integer index, matching value.canonical_key:
+/// array indices (§6.1.7) are integers in [0, 2^32-2], stored as Index(n);
+/// anything outside that range is stored under its ToString form as Named.
+/// Array.prototype methods are generic over array-likes whose length can
+/// reach 2^53-1, so per-element keys derived from such lengths MUST go
+/// through this — a raw Index(idx) for idx >= 2^32-1 can never match how the
+/// property was stored.
+fn index_key(idx: Int) -> value.PropertyKey {
+  case 0 <= idx && idx <= 4_294_967_294 {
+    True -> Index(idx)
+    False -> Named(int.to_string(idx))
   }
 }
 
@@ -618,7 +737,7 @@ fn get_index(
   this: JsValue,
   idx: Int,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
-  object.get_value_of(state, this, Index(idx))
+  object.get_value_of(state, this, index_key(idx))
 }
 
 /// Fused HasProperty + Get on an array-like by integer index.
@@ -642,9 +761,39 @@ fn get_index_if_present(
   this: JsValue,
   idx: Int,
 ) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
-  let key = Index(idx)
-  case this {
-    JsObject(ref) ->
+  let key = index_key(idx)
+  let is_proxy = case this {
+    JsObject(ref) -> option.is_some(object.as_proxy(state.heap, ref))
+    _ -> False
+  }
+  case this, key {
+    // Proxy: HasProperty/Get MUST run the "has"/"get" traps (observable —
+    // they record calls, can throw, and the own-index fast path can't see
+    // through the proxy at all).
+    JsObject(ref), _ if is_proxy -> {
+      use #(has, state) <- result.try(object.has_property_stateful(
+        state,
+        ref,
+        object.PkString(key),
+      ))
+      case has {
+        False -> Ok(#(None, state))
+        True -> {
+          use #(val, state) <- result.map(object.get_value(
+            state,
+            ref,
+            key,
+            this,
+          ))
+          #(Some(val), state)
+        }
+      }
+    }
+    // Index beyond the array-index cap (>= 2^32-1) canonicalizes to a Named
+    // string key — get_own_index only consults Index keys, so take the
+    // generic HasProperty + Get path (own properties included).
+    JsObject(ref), Named(_) -> inherited_index(state, ref, key, this)
+    JsObject(ref), _ ->
       // Fast path: ONE heap read for own [[GetOwnProperty]], with no
       // synthesized descriptor boxing on the dense-elements hit.
       case object.get_own_index(state.heap, ref, idx) {
@@ -679,18 +828,45 @@ fn get_index_if_present(
         object.OwnIndexAbsent(prototype: None) -> Ok(#(None, state))
       }
     // String primitive: in-range index is an own data property per §10.4.3.5;
-    // out-of-range is absent (matches HasProperty, which does not walk
-    // String.prototype for indexed keys).
-    JsString(s) ->
-      Ok(#(
-        case idx >= 0 {
-          True -> object.string_char_at(s, idx) |> option.map(JsString)
-          False -> None
-        },
-        state,
-      ))
-    // Other primitives: no indexed own properties.
-    _ -> Ok(#(None, state))
+    // out-of-range falls through to String.prototype (§7.3.11 walks the
+    // wrapper's prototype chain).
+    JsString(s), _ ->
+      case idx >= 0, object.string_char_at(s, idx) {
+        True, Some(ch) -> Ok(#(Some(JsString(ch)), state))
+        _, _ ->
+          inherited_index(state, state.builtins.string.prototype, key, this)
+      }
+    // Boolean/Number/Symbol primitives: ToObject's wrapper has no own index
+    // properties, but its prototype chain may (e.g. `Boolean.prototype[0] = 1`)
+    // — HasProperty/Get consult it (§7.3.11 / §7.3.2).
+    value.JsBool(_), _ ->
+      inherited_index(state, state.builtins.boolean.prototype, key, this)
+    JsNumber(_), _ ->
+      inherited_index(state, state.builtins.number.prototype, key, this)
+    value.JsSymbol(_), _ ->
+      inherited_index(state, state.builtins.object.prototype, key, this)
+    // null/undefined (already rejected by require_array) and other values:
+    // no indexed properties.
+    _, _ -> Ok(#(None, state))
+  }
+}
+
+/// HasProperty + Get against a start object with an explicit receiver. Used
+/// for a primitive's wrapper prototype chain (the primitive as receiver, so
+/// getters see the right `this`) and for Named-canonicalized huge indices on
+/// the object itself.
+fn inherited_index(
+  state: State,
+  proto: Ref,
+  key: value.PropertyKey,
+  this: JsValue,
+) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
+  case object.has_property(state.heap, proto, key) {
+    False -> Ok(#(None, state))
+    True -> {
+      use #(val, state) <- result.map(object.get_value(state, proto, key, this))
+      #(Some(val), state)
+    }
   }
 }
 
@@ -796,6 +972,9 @@ fn proto_chain_has_index_keys(heap: Heap, proto: Option(Ref)) -> Bool {
 ///   - extensible (writes to absent indices must not be rejected),
 ///   - its properties dict has no Index keys (no per-index accessors or
 ///     attribute overrides → every present index is plain writable data),
+///   - "length" has no non-writable dict override (a frozen length must
+///     reject mutators through the generic Set(O, "length", ..., true) path —
+///     the fast path writes ArrayObject(new_length) unconditionally),
 ///   - no prototype-chain object has index-keyed properties (holes and
 ///     beyond-length writes can't observe proto getters/setters).
 ///
@@ -819,8 +998,16 @@ fn try_elements_fast_path(
         ..,
       ) as slot,
     ) -> {
+      // Object.defineProperty(a, "length", {writable: false}) stores a
+      // Named("length") dict override; mutators must then fail through the
+      // generic path (Set throws TypeError) instead of writing the length.
+      let length_writable = case dict.get(properties, Named("length")) {
+        Ok(DataProperty(writable:, ..)) -> writable
+        _ -> True
+      }
       let eligible =
         length == expected_len
+        && length_writable
         && !properties_have_index_keys(properties)
         && !proto_chain_has_index_keys(state.heap, prototype)
       case eligible {
@@ -841,6 +1028,153 @@ fn try_elements_fast_path(
   }
 }
 
+/// Dense append fast path for Array.prototype.push.
+///
+/// Unlike try_elements_fast_path — which must rule out index keys ANYWHERE
+/// (pop/shift/splice read, move, and delete arbitrary indices, so any hole
+/// can observe the prototype chain) — push only CREATES the previously-absent
+/// own indices [len, len + argCount). Set on such an index can only observe:
+///   - a receiver dict override at that exact index (accessor / attributes),
+///   - a prototype-chain own property at that exact index (setter / getter),
+///   - a non-writable or dict-overridden "length",
+///   - a non-extensible receiver.
+/// Checking exactly those is O(argCount) map lookups instead of a scan over
+/// every prototype-chain property dict, so it wins even for a single-element
+/// push (the generic path does two full OrdinarySet operations: element write
+/// + length write).
+fn try_push_fast_path(
+  state: State,
+  ref: Ref,
+  expected_len: Int,
+  args: List(JsValue),
+) -> Option(#(Int, State)) {
+  case heap.read(state.heap, ref) {
+    Some(
+      ObjectSlot(
+        kind: ArrayObject(length:),
+        properties:,
+        elements: els,
+        prototype:,
+        extensible: True,
+        ..,
+      ) as slot,
+    ) -> {
+      let arg_count = list.length(args)
+      // Object.defineProperty(a, "length", {writable: false}) stores a
+      // Named("length") dict override; push must then fail through the
+      // generic Set(O, "length", ...) path (TypeError) instead of writing
+      // ArrayObject(new_length) unconditionally.
+      let length_writable = case dict.get(properties, Named("length")) {
+        Ok(DataProperty(writable:, ..)) -> writable
+        _ -> True
+      }
+      let eligible =
+        length == expected_len
+        && length_writable
+        && !dict_has_index_in_range(properties, length, arg_count)
+        && !proto_chain_has_index_in_range(
+          state.heap,
+          prototype,
+          length,
+          arg_count,
+        )
+      case eligible {
+        False -> None
+        True -> {
+          let new_length = length + arg_count
+          let heap =
+            heap.write(
+              state.heap,
+              ref,
+              ObjectSlot(
+                ..slot,
+                kind: ArrayObject(new_length),
+                elements: elements.write_list(els, length, args),
+              ),
+            )
+          Some(#(new_length, State(..state, heap:)))
+        }
+      }
+    }
+    _ -> None
+  }
+}
+
+/// True when the properties dict carries an Index key in
+/// [start, start + count). Per-index dict.get instead of scanning the whole
+/// key set — Array.prototype/Object.prototype hold dozens of Named keys.
+fn dict_has_index_in_range(
+  properties: dict.Dict(value.PropertyKey, Property),
+  start: Int,
+  count: Int,
+) -> Bool {
+  // Plain arrays/objects have an empty properties dict — skip the lookups.
+  !dict.is_empty(properties)
+  && dict_index_in_range_loop(properties, start, start + count)
+}
+
+fn dict_index_in_range_loop(
+  properties: dict.Dict(value.PropertyKey, Property),
+  idx: Int,
+  end: Int,
+) -> Bool {
+  case idx >= end {
+    True -> False
+    False ->
+      case dict.get(properties, Index(idx)) {
+        Ok(_) -> True
+        Error(Nil) -> dict_index_in_range_loop(properties, idx + 1, end)
+      }
+  }
+}
+
+/// Range-restricted variant of proto_chain_has_index_keys: True when any
+/// object on the chain carries an own index property in
+/// [start, start + count) — the only indices a push can observe. Mirrors the
+/// clause structure of proto_chain_has_index_keys exactly (non-empty boxed
+/// String → conservative True; non-object slot stops the walk).
+fn proto_chain_has_index_in_range(
+  heap: Heap,
+  proto: Option(Ref),
+  start: Int,
+  count: Int,
+) -> Bool {
+  case proto {
+    None -> False
+    Some(proto_ref) ->
+      case heap.read(heap, proto_ref) {
+        // String exotic objects (§10.4.3.5) expose own index properties
+        // virtually from [[StringData]] — conservatively bail like
+        // proto_chain_has_index_keys does.
+        Some(ObjectSlot(kind: value.StringObject(value: s), ..)) if s != "" ->
+          True
+        Some(ObjectSlot(properties:, elements: proto_els, prototype:, ..)) ->
+          elements_has_in_range(proto_els, start, count)
+          || dict_has_index_in_range(properties, start, count)
+          || proto_chain_has_index_in_range(heap, prototype, start, count)
+        // Non-object slot can't carry index properties; stop walking.
+        _ -> False
+      }
+  }
+}
+
+/// True when the elements store holds a value at any index in
+/// [start, start + count).
+fn elements_has_in_range(els: JsElements, start: Int, count: Int) -> Bool {
+  !elements.is_empty(els) && elements_in_range_loop(els, start, start + count)
+}
+
+fn elements_in_range_loop(els: JsElements, idx: Int, end: Int) -> Bool {
+  case idx >= end {
+    True -> False
+    False ->
+      case elements.has(els, idx) {
+        True -> True
+        False -> elements_in_range_loop(els, idx + 1, end)
+      }
+  }
+}
+
 /// True when a hole at `idx` is shadowed by an inherited property — reading
 /// it would invoke [[Get]] on the prototype chain (possibly a getter, i.e.
 /// user code that can mutate the array), so snapshot loops must fall back to
@@ -849,7 +1183,8 @@ fn try_elements_fast_path(
 fn hole_is_inherited(state: State, proto: Option(Ref), idx: Int) -> Bool {
   case proto {
     None -> False
-    Some(proto_ref) -> object.has_property(state.heap, proto_ref, Index(idx))
+    Some(proto_ref) ->
+      object.has_property(state.heap, proto_ref, index_key(idx))
   }
 }
 
@@ -865,29 +1200,119 @@ fn hole_is_inherited(state: State, proto: Option(Ref), idx: Int) -> Bool {
 ///   1. Let len be ? ToIntegerOrInfinity(argument).
 ///   2. If len ≤ 0, return +0𝔽.
 ///   3. Return 𝔽(min(len, 2^53 - 1)).
-fn to_length_from_properties(
+/// LengthOfArrayLike (§7.3.18) for an arbitrary object ref — dispatches on
+/// the slot kind the same way require_array does, without the ToObject /
+/// TypeError prologue. Used by concat's spread path, where the spread target
+/// is an argument rather than the receiver.
+fn object_length(
+  state: State,
+  ref: value.Ref,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind: ArrayObject(length:), ..)) -> Ok(#(length, state))
+    // Arguments objects take the generic path: "length" is an ordinary
+    // writable/configurable dict property (§10.4.4.6) and overrides must be
+    // honored (e.g. concat spreading after defineProperty length).
+    Some(ObjectSlot(kind: value.StringObject(value: s), ..)) ->
+      Ok(#(object.string_length(s), state))
+    Some(ObjectSlot(properties:, ..)) ->
+      length_of_properties(state, ref, properties)
+    _ -> Ok(#(0, state))
+  }
+}
+
+fn length_of_properties(
   state: State,
   ref: value.Ref,
   properties: dict.Dict(value.PropertyKey, Property),
-) -> Int {
-  // Fast path: own data property
+) -> Result(#(Int, State), #(JsValue, State)) {
+  // Fast path: own data property — no user code can run on the Get itself,
+  // but ToLength may still call valueOf on an object-valued length.
   case dict.get(properties, Named("length")) {
-    Ok(DataProperty(value: len_val, ..)) ->
-      to_length(coerce.unwrap_primitive_wrapper(state.heap, len_val))
-    // Accessor or missing: use full [[Get]] which handles getters + prototype chain
-    _ ->
-      case object.get_value(state, ref, Named("length"), JsObject(ref)) {
-        Ok(#(len_val, _state)) ->
-          to_length(coerce.unwrap_primitive_wrapper(state.heap, len_val))
-        Error(_) -> 0
-      }
+    Ok(DataProperty(value: len_val, ..)) -> to_length_value(state, len_val)
+    // Accessor or missing: full [[Get]] (getters + prototype chain). Getter
+    // exceptions propagate; getter side effects are kept via the threaded
+    // state (§7.3.18 LengthOfArrayLike step order matters for test262).
+    _ -> {
+      use #(len_val, state) <- result.try(object.get_value(
+        state,
+        ref,
+        Named("length"),
+        JsObject(ref),
+      ))
+      to_length_value(state, len_val)
+    }
   }
 }
+
+/// ES2024 §7.1.17 ToLength(argument) with full ToNumber coercion —
+/// may invoke valueOf/toString on objects (user code), so it threads state
+/// and can throw.
+///
+///   1. Let len be ? ToIntegerOrInfinity(argument).
+///   2. If len ≤ 0, return +0𝔽.
+///   3. Return 𝔽(min(len, 2^53 - 1)).
+fn to_length_value(
+  state: State,
+  val: JsValue,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case val {
+    // String lengths go through StringToNumber's full grammar (hex/octal/
+    // binary prefixes) — helpers.to_number_int implements it.
+    JsString(_) -> Ok(#(to_length(val), state))
+    _ -> {
+      use #(num, state) <- result.map(coerce.js_to_number(state, val))
+      let len = case num {
+        value.Finite(f) ->
+          int.max(0, int.min(value.float_to_int(f), limits.max_safe_integer))
+        // §7.1.5 step 3: +∞ → §7.1.17 step 3 clamps to 2^53 - 1.
+        value.Infinity -> limits.max_safe_integer
+        // NaN / -∞ / anything non-positive → +0.
+        _ -> 0
+      }
+      #(len, state)
+    }
+  }
+}
+
+/// Allocate a RangeError in the op-result shape `Result(a, #(JsValue, State))`
+/// used by the generic per-index loops.
+fn range_error_op(state: State, msg: String) -> Result(a, #(JsValue, State)) {
+  let #(state, res) = state.range_error(state, msg)
+  case res {
+    Error(err) -> Error(#(err, state))
+    // state.range_error always returns Error; this arm is unreachable but
+    // keeps the case exhaustive without an assert.
+    Ok(val) -> Error(#(val, state))
+  }
+}
+
+/// Pragmatic iteration bound for the generic per-index loops. ToLength allows
+/// lengths up to 2^53-1; spec-conformant programs over huge array-likes
+/// terminate early (element found / falsy callback / start near the end) long
+/// before this budget. Anything that would actually perform >max_iteration
+/// generic heap operations gets a RangeError instead of hanging the BEAM.
+/// QuickJS lets such loops spin; we don't, since BEAM recursion is heavier
+/// than a C for-loop.
+const iteration_budget_msg = "Invalid array length"
 
 /// ES2024 §7.1.17 ToLength(argument)
 fn to_length(val: JsValue) -> Int {
   case helpers.to_number_int(val) {
     Some(n) if n > 0 -> int.min(n, limits.max_safe_integer)
+    // helpers.to_number_int collapses NaN and ±Infinity to None. §7.1.4.1.1
+    // StringNumericLiteral parses "Infinity"/"+Infinity" to +∞, which §7.1.17
+    // step 3 clamps to 2^53-1 — distinguish it from the NaN/-∞ → 0 bucket.
+    None ->
+      case val {
+        JsNumber(value.Infinity) -> limits.max_safe_integer
+        JsString(s) ->
+          case string.trim(s) {
+            "Infinity" | "+Infinity" -> limits.max_safe_integer
+            _ -> 0
+          }
+        _ -> 0
+      }
     _ -> 0
   }
 }
@@ -952,24 +1377,87 @@ fn require_callback(
 ///   len     — the array length (for relative-to-end computation)
 ///   default — value to use when arg is undefined (spec says different defaults
 ///             for different methods: 0 for start, len for end, etc.)
-fn resolve_index(arg: JsValue, len: Int, default: Int) -> Int {
-  // §7.1.5 ToIntegerOrInfinity(arg)
-  let raw = case helpers.to_number_int(arg) {
-    Some(n) -> n
-    // §7.1.5 step 2: NaN → 0. But undefined args use the caller-specified default
-    // (e.g. slice(start) with no end → end defaults to len, not 0).
-    None ->
-      case arg {
-        JsUndefined -> default
-        _ -> 0
+fn try_resolve_index(
+  state: State,
+  arg: JsValue,
+  len: Int,
+  default: Int,
+  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case arg {
+    // Undefined args use the caller-specified default (e.g. slice(start)
+    // with no end → end defaults to len, not 0). ToNumber(undefined) has no
+    // observable steps, so skipping the coercion is spec-equivalent.
+    JsUndefined -> cont(default, state)
+    _ -> {
+      // §7.1.5 ToIntegerOrInfinity(arg) — observable: ToPrimitive may run
+      // user valueOf/toString/@@toPrimitive or throw (Symbol/BigInt).
+      use raw, state <- try_integer_or_infinity(state, arg)
+      // Relative index clamping (common pattern across §23.1.3.*):
+      //   If relativeIndex < 0, let k = max(len + relativeIndex, 0).
+      //   Else, let k = min(relativeIndex, len).
+      let k = case raw < 0 {
+        True -> int.max(len + raw, 0)
+        False -> int.min(raw, len)
       }
+      cont(k, state)
+    }
   }
-  // Relative index clamping (common pattern across §23.1.3.*):
-  //   If relativeIndex < 0, let k = max(len + relativeIndex, 0).
-  //   Else, let k = min(relativeIndex, len).
-  case raw < 0 {
-    True -> int.max(len + raw, 0)
-    False -> int.min(raw, len)
+}
+
+/// CPS ToIntegerOrInfinity (ES2024 §7.1.5): full ToNumber — including
+/// ToPrimitive (valueOf/toString/@@toPrimitive) on objects, which can run
+/// user code or throw, and TypeError on Symbol/BigInt — then truncate, with
+/// ±∞ saturated to ±(2^53 - 1) so downstream clamps behave like the spec's
+/// explicit ±∞ branches (array lengths never exceed 2^53 - 1).
+fn try_integer_or_infinity(
+  state: State,
+  arg: JsValue,
+  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  use num, state <- coerce.try_to_number(state, arg)
+  let raw = case num {
+    // §7.1.5 step 5: truncate(number)
+    Finite(f) -> value.float_to_int(f)
+    // §7.1.5 step 2: NaN → +0
+    value.NaN -> 0
+    // §7.1.5 steps 3-4: ±∞, saturated for Int arithmetic
+    value.Infinity -> limits.max_safe_integer
+    value.NegInfinity -> -limits.max_safe_integer
+  }
+  cont(raw, state)
+}
+
+/// args[n], or undefined when absent — for optional trailing arguments.
+fn arg_or_undefined(args: List(JsValue), n: Int) -> JsValue {
+  case list.drop(args, n) {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+}
+
+/// Shared steps 7-10 of splice (§23.1.3.29) / step 7 of toSpliced
+/// (§23.1.3.35): actualDeleteCount/actualSkipCount + trailing items,
+/// determined by argument COUNT:
+///   - 0 args: deleteCount = 0, items = []
+///   - 1 arg (start only): deleteCount = len - actualStart
+///   - 2+ args: clamp(ToIntegerOrInfinity(deleteCount), 0, len - actualStart),
+///     items = remaining args. The coercion is observable (can run user code
+///     or throw on Symbol/BigInt).
+fn try_delete_count(
+  state: State,
+  args: List(JsValue),
+  length: Int,
+  actual_start: Int,
+  cont: fn(#(Int, List(JsValue)), State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case args {
+    [] -> cont(#(0, []), state)
+    [_] -> cont(#(length - actual_start, []), state)
+    [_, dc_val, ..rest] -> {
+      use dc, state <- try_integer_or_infinity(state, dc_val)
+      cont(#(int.clamp(dc, 0, length - actual_start), rest), state)
+    }
   }
 }
 
@@ -1033,7 +1521,7 @@ fn generic_set_index(
   idx: Int,
   val: JsValue,
 ) -> Result(State, #(JsValue, State)) {
-  generic_set(state, ref, Index(idx), val)
+  generic_set(state, ref, index_key(idx), val)
 }
 
 /// Convenience: Set(O, "length", 𝔽(len), true).
@@ -1072,9 +1560,13 @@ fn generic_delete(
   ref: Ref,
   key: value.PropertyKey,
 ) -> Result(State, #(JsValue, State)) {
-  // §7.3.9 step 1: Let success be ? O.[[Delete]](P).
-  let #(h, ok) = object.delete_property(state.heap, ref, key)
-  let state = State(..state, heap: h)
+  // §7.3.9 step 1: Let success be ? O.[[Delete]](P) — trap-aware so a Proxy
+  // "deleteProperty" trap runs (it can record the call and throw).
+  use #(state, ok) <- result.try(object.delete_property_stateful(
+    state,
+    ref,
+    object.PkString(key),
+  ))
   case ok {
     // success = true → return normally.
     True -> Ok(state)
@@ -1093,27 +1585,19 @@ fn generic_delete_index(
   ref: Ref,
   idx: Int,
 ) -> Result(State, #(JsValue, State)) {
-  generic_delete(state, ref, Index(idx))
+  generic_delete(state, ref, index_key(idx))
 }
 
-/// HasProperty (ES2024 §7.3.11).
-///
-/// §7.3.11 HasProperty ( O, P ):
-///   1. Return ? O.[[HasProperty]](P).
-///
-/// [[HasProperty]] (§10.1.7 OrdinaryHasProperty):
-///   1. Let hasOwn be ? O.[[GetOwnProperty]](P).
-///   2. If hasOwn is not undefined, return true.
-///   3. Let parent be ? O.[[GetPrototypeOf]]().
-///   4. If parent is not null, return ? parent.[[HasProperty]](P).
-///   5. Return false.
-///
-/// Used by iteration methods to distinguish holes from present-but-undefined
-/// elements, e.g. §23.1.3.13 Array.prototype.forEach step 6.c:
-///   "Let kPresent be ? HasProperty(O, Pk)."
-fn generic_has(heap: Heap, ref: Ref, idx: Int) -> Bool {
-  // §7.3.11 step 1: O.[[HasProperty]](! ToString(𝔽(idx)))
-  object.has_property(heap, ref, Index(idx))
+/// HasProperty (§7.3.11) by integer index, trap-aware: routes Proxy "has"
+/// traps (which run user code and can throw) via has_property_stateful.
+/// The mutating generic loops (reverse/shift/unshift/splice) use this so a
+/// proxied array-like observes its [[HasProperty]] calls in spec order.
+fn generic_has_op(
+  state: State,
+  ref: Ref,
+  idx: Int,
+) -> Result(#(Bool, State), #(JsValue, State)) {
+  object.has_property_stateful(state, ref, object.PkString(index_key(idx)))
 }
 
 /// Get (ES2024 §7.3.2).
@@ -1134,7 +1618,7 @@ fn generic_get(
   idx: Int,
 ) -> Result(#(JsValue, State), #(JsValue, State)) {
   // §7.3.2 step 1: O.[[Get]](! ToString(𝔽(idx)), O)
-  object.get_value(state, ref, Index(idx), JsObject(ref))
+  object.get_value(state, ref, index_key(idx), JsObject(ref))
 }
 
 // ============================================================================
@@ -1166,7 +1650,7 @@ fn array_pop(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use ref, length, state <- require_array(this, state)
+  use _this, ref, length, state <- require_array(this, state)
   case length == 0 {
     // Step 3: len = 0
     // Step 3a: Set(O, "length", +0𝔽, true)
@@ -1228,7 +1712,7 @@ fn array_shift(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use ref, length, state <- require_array(this, state)
+  use _this, ref, length, state <- require_array(this, state)
   case length == 0 {
     // Step 3: len = 0
     // Step 3a: Set(O, "length", +0𝔽, true)
@@ -1251,7 +1735,15 @@ fn array_shift(
           // Step 4: first = Get(O, "0")
           use val, state <- state.try_op(generic_get(state, ref, 0))
           // Steps 5-6: shift indices [1..len) down by 1
-          use state <- state.try_state(move_range(state, ref, 1, length, 1, -1))
+          use state <- state.try_state(move_range(
+            state,
+            ref,
+            1,
+            length,
+            1,
+            -1,
+            limits.max_iteration,
+          ))
           // Step 7: DeletePropertyOrThrow(O, ToString(len - 1))
           use state <- state.try_state(generic_delete_index(
             state,
@@ -1282,6 +1774,7 @@ fn move_range(
   stop: Int,
   step: Int,
   delta: Int,
+  fuel: Int,
 ) -> Result(State, #(JsValue, State)) {
   let done = case step > 0 {
     True -> k >= stop
@@ -1290,16 +1783,23 @@ fn move_range(
   case done {
     True -> Ok(state)
     False -> {
+      // Pragmatic per-step budget (see iteration_budget_msg): a getter or
+      // proxy trap on a huge array-like throws within its first few steps,
+      // so only loops doing real unbounded work hit the RangeError.
+      use <- bool.lazy_guard(fuel <= 0, fn() {
+        range_error_op(state, iteration_budget_msg)
+      })
       let to = k + delta
-      case generic_has(state.heap, ref, k) {
+      use #(has_k, state) <- result.try(generic_has_op(state, ref, k))
+      case has_k {
         True -> {
           use #(val, state) <- result.try(generic_get(state, ref, k))
           use state <- result.try(generic_set_index(state, ref, to, val))
-          move_range(state, ref, k + step, stop, step, delta)
+          move_range(state, ref, k + step, stop, step, delta, fuel - 1)
         }
         False -> {
           use state <- result.try(generic_delete_index(state, ref, to))
-          move_range(state, ref, k + step, stop, step, delta)
+          move_range(state, ref, k + step, stop, step, delta, fuel - 1)
         }
       }
     }
@@ -1337,10 +1837,20 @@ fn array_unshift(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use ref, length, state <- require_array(this, state)
+  use this, ref, length, state <- require_array(this, state)
   let arg_count = list.length(args)
-  use <- bool.guard(arg_count == 0, #(state, Ok(value.from_int(length))))
   let new_len = length + arg_count
+  // §23.1.3.33 step 5 runs even when argCount = 0: Set(O, "length", 𝔽(len))
+  // is observable (length clamped by ToLength on array-likes; TypeError on a
+  // non-writable length such as a String exotic's). For other primitives the
+  // Set lands on a throwaway wrapper and succeeds unobservably — skip it.
+  use <- bool.lazy_guard(arg_count == 0, fn() {
+    case this {
+      JsObject(_) | JsString(_) ->
+        wrap(generic_set_length(state, ref, new_len), value.from_int(new_len))
+      _ -> #(state, Ok(value.from_int(new_len)))
+    }
+  })
   // §23.1.3.33 step 4a: If len + argCount > 2^53 - 1, throw TypeError
   use <- state.guard_safe_length(state, new_len)
   // Fast path: shift-up loop + item writes + length update fused into one
@@ -1362,6 +1872,7 @@ fn array_unshift(
         0,
         -1,
         arg_count,
+        limits.max_iteration,
       ))
       use state <- state.try_state(write_list_at(state, ref, 0, args))
       wrap(generic_set_length(state, ref, new_len), value.from_int(new_len))
@@ -1454,20 +1965,26 @@ fn array_slice(
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O).
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Steps 3-6: relativeStart → k (clamped). Default 0 if no arg.
-  let start = case args {
-    [s, ..] -> resolve_index(s, length, 0)
-    [] -> 0
-  }
+  use start, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 0),
+    length,
+    0,
+  )
   // Steps 7-10: relativeEnd → final (clamped). Default len if no end arg.
-  let end = case args {
-    [_, e, ..] -> resolve_index(e, length, length)
-    _ -> length
-  }
+  use end, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 1),
+    length,
+    length,
+  )
   // Step 11: count = max(final - k, 0).
   let count = int.max(end - start, 0)
-  // Steps 12-14: Create result array A, copy elements [k..final) into it.
+  // Step 12: A = ArraySpeciesCreate(O, count) — before the copy loop.
+  use species, state <- state.try_op(array_species_create(state, this, count))
+  // Steps 13-14: copy elements [k..final) into the result.
   // Holes (kPresent = false) are preserved by copy_range skipping them.
   use copied, state <- state.try_op(copy_range(
     state,
@@ -1477,10 +1994,20 @@ fn array_slice(
     count,
     elements.new(),
   ))
-  let #(heap, ref) =
-    common.alloc_array_from_elements(state.heap, copied, count, array_proto)
-  // Step 16: Return A.
-  #(State(..state, heap:), Ok(JsObject(ref)))
+  case species {
+    None -> {
+      let #(heap, ref) =
+        common.alloc_array_from_elements(state.heap, copied, count, array_proto)
+      // Step 16: Return A.
+      #(State(..state, heap:), Ok(JsObject(ref)))
+    }
+    Some(target) ->
+      // Step 15: Perform ? Set(A, "length", 𝔽(n), true).
+      case write_species_result(state, target, copied, count, Some(count)) {
+        Ok(state) -> #(state, Ok(JsObject(target)))
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
+  }
 }
 
 /// Internal helper implementing the element-copying loop shared by
@@ -1501,6 +2028,38 @@ fn array_slice(
 /// Plain arrays with no index overrides take copy_range_snapshot (one heap
 /// read for the whole loop); everything else takes the generic per-element
 /// path.
+/// Copy a range via unconditional Get — holes read as undefined (through
+/// the prototype chain) and every destination index gets a value, so the
+/// result is DENSE. Used by the change-array-by-copy methods (§23.1.3.35
+/// toSpliced step 15.b.ii / §23.1.3.39 with step 9.c: fromValue =
+/// ? Get(O, Pk) with no HasProperty gate — holes are NOT preserved).
+fn copy_range_dense(
+  state: State,
+  src: JsValue,
+  src_idx: Int,
+  dst_idx: Int,
+  remaining: Int,
+  dst: JsElements,
+) -> Result(#(JsElements, State), #(JsValue, State)) {
+  use <- bool.lazy_guard(remaining > limits.max_iteration, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
+  case remaining <= 0 {
+    True -> Ok(#(dst, state))
+    False -> {
+      use #(val, state) <- result.try(get_index(state, src, src_idx))
+      copy_range_dense(
+        state,
+        src,
+        src_idx + 1,
+        dst_idx + 1,
+        remaining - 1,
+        elements.set(dst, dst_idx, val),
+      )
+    }
+  }
+}
+
 fn copy_range(
   state: State,
   src: JsValue,
@@ -1509,6 +2068,33 @@ fn copy_range(
   remaining: Int,
   dst: JsElements,
 ) -> Result(#(JsElements, State), #(JsValue, State)) {
+  // Pragmatic step budget (see iteration_budget_msg): per-step fuel rather
+  // than an up-front bound so an abrupt completion from a poisoned getter at
+  // a low index surfaces before the budget RangeError, matching the spec's
+  // evaluation order on huge spreadable array-likes.
+  copy_range_fueled(
+    state,
+    src,
+    src_idx,
+    dst_idx,
+    remaining,
+    dst,
+    limits.max_iteration,
+  )
+}
+
+fn copy_range_fueled(
+  state: State,
+  src: JsValue,
+  src_idx: Int,
+  dst_idx: Int,
+  remaining: Int,
+  dst: JsElements,
+  fuel: Int,
+) -> Result(#(JsElements, State), #(JsValue, State)) {
+  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
   case dense_snapshot(state, src) {
     Some(#(els, proto)) ->
       copy_range_snapshot(
@@ -1520,8 +2106,10 @@ fn copy_range(
         dst_idx,
         remaining,
         dst,
+        fuel,
       )
-    None -> copy_range_generic(state, src, src_idx, dst_idx, remaining, dst)
+    None ->
+      copy_range_generic(state, src, src_idx, dst_idx, remaining, dst, fuel)
   }
 }
 
@@ -1538,7 +2126,11 @@ fn copy_range_snapshot(
   dst_idx: Int,
   remaining: Int,
   dst: JsElements,
+  fuel: Int,
 ) -> Result(#(JsElements, State), #(JsValue, State)) {
+  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
   case remaining <= 0 {
     True -> Ok(#(dst, state))
     False ->
@@ -1554,6 +2146,7 @@ fn copy_range_snapshot(
             dst_idx + 1,
             remaining - 1,
             elements.set(dst, dst_idx, val),
+            fuel - 1,
           )
         None ->
           case hole_is_inherited(state, proto, src_idx) {
@@ -1568,10 +2161,19 @@ fn copy_range_snapshot(
                 dst_idx + 1,
                 remaining - 1,
                 dst,
+                fuel - 1,
               )
             // Inherited property — Get may invoke a getter (user code).
             True ->
-              copy_range_generic(state, src, src_idx, dst_idx, remaining, dst)
+              copy_range_generic(
+                state,
+                src,
+                src_idx,
+                dst_idx,
+                remaining,
+                dst,
+                fuel,
+              )
           }
       }
   }
@@ -1587,7 +2189,11 @@ fn copy_range_generic(
   dst_idx: Int,
   remaining: Int,
   dst: JsElements,
+  fuel: Int,
 ) -> Result(#(JsElements, State), #(JsValue, State)) {
+  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
   case remaining <= 0 {
     True -> Ok(#(dst, state))
     False -> {
@@ -1608,6 +2214,7 @@ fn copy_range_generic(
             dst_idx + 1,
             remaining - 1,
             elements.set(dst, dst_idx, val),
+            fuel - 1,
           )
         // kPresent is false (hole): skip — do not set dst[dst_idx].
         None ->
@@ -1618,6 +2225,7 @@ fn copy_range_generic(
             dst_idx + 1,
             remaining - 1,
             dst,
+            fuel - 1,
           )
       }
     }
@@ -1670,23 +2278,53 @@ fn array_concat(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
-  // Step 1: Let O be ? ToObject(this value).
-  case this {
-    JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    _ -> {
+  // Step 1: Let O be ? ToObject(this value) — primitives get a real wrapper
+  // so the non-spreadable O lands in the result as its wrapper object
+  // (concat/call-with-boolean: result[0] instanceof Boolean).
+  case common.to_object(state.heap, state.builtins, this) {
+    None -> state.type_error(state, cannot_convert)
+    Some(#(heap, this_ref)) -> {
+      let state = State(..state, heap:)
+      let this = JsObject(this_ref)
+      // Step 2: A = ArraySpeciesCreate(O, 0) — before the item loop.
+      use species, state <- state.try_op(array_species_create(state, this, 0))
       // Step 4: Prepend O to items.
       let all_items = [this, ..args]
-      // Steps 3, 5: n = 0, then iterate each element E of items.
-      use #(elems, total), state <- state.try_op(concat_items(
-        state,
-        all_items,
-        elements.new(),
-        0,
-      ))
-      // Steps 2, 6-7: Create result array A with final length n, return A.
-      let #(heap, ref) =
-        common.alloc_array_from_elements(state.heap, elems, total, array_proto)
-      #(State(..state, heap:), Ok(JsObject(ref)))
+      case species {
+        // Steps 3, 5-7: collect into a plain elements store, then create
+        // result array A with final length n, return A.
+        None -> {
+          use #(elems, total), state <- state.try_op(concat_items(
+            state,
+            all_items,
+            elements.new(),
+            0,
+          ))
+          let #(heap, ref) =
+            common.alloc_array_from_elements(
+              state.heap,
+              elems,
+              total,
+              array_proto,
+            )
+          #(State(..state, heap:), Ok(JsObject(ref)))
+        }
+        Some(target) -> {
+          // Steps 3, 5-6 (species path): CreateDataPropertyOrThrow
+          // interleaved with the per-element reads (step 5.b.iv), then
+          // Set(A, "length", 𝔽(n), true).
+          use total, state <- state.try_op(concat_items_species(
+            state,
+            all_items,
+            target,
+            0,
+          ))
+          case generic_set_length(state, target, total) {
+            Ok(state) -> #(state, Ok(JsObject(target)))
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        }
+      }
     }
   }
 }
@@ -1719,44 +2357,438 @@ fn concat_items(
 ///   b. If spreadable is true, spread E's elements via copy_range.
 ///   c. Else, append E as a single element.
 ///
-/// IsConcatSpreadable (§7.2.18) full algorithm:
+/// ArraySpeciesCreate (ES2024 §9.4.2.3).
+///
+///   2. Let isArray be ? IsArray(originalArray); if false → ArrayCreate(length).
+///   3. Let C be ? Get(originalArray, "constructor").
+///   4. (cross-realm Array check — single realm, skipped)
+///   5. If C is an Object: set C to ? Get(C, @@species); if C is null → undefined.
+///   6. If C is undefined → ArrayCreate(length).
+///   7. If IsConstructor(C) is false, throw a TypeError exception.
+///   8. Return ? Construct(C, « 𝔽(length) »).
+///
+/// Returns None when the caller should allocate a plain Array (steps 2/6, or
+/// C is the intrinsic Array constructor — observably identical and far
+/// cheaper), Some(target_ref) when a custom species constructor was invoked.
+///
+/// Deviation: with a custom target, the callback-driven callers (slice, map,
+/// filter, flat/flatMap) collect results first and write them after iteration
+/// (write_species_result) instead of interleaving CreateDataPropertyOrThrow
+/// with callback calls. splice and concat interleave per spec
+/// (copy_range_to_species) so abrupt completions from the target's
+/// [[DefineOwnProperty]] terminate huge-length copy loops early.
+fn array_species_create(
+  state: State,
+  original: JsValue,
+  length: Int,
+) -> Result(#(Option(Ref), State), #(JsValue, State)) {
+  case original {
+    JsObject(_) ->
+      // Step 1: isArray = ? IsArray(originalArray) — pierces proxies
+      // (IsArray of a proxy is IsArray of its target, §7.2.2), so an
+      // array-backed proxy DOES take the constructor/@@species path
+      // (test262: slice/map/filter/concat create-proxy.js).
+      case object.is_array(state.heap, original) {
+        Error(Nil) ->
+          coerce.thrown_type_error(
+            state,
+            "Cannot perform 'IsArray' on a proxy that has been revoked",
+          )
+        // Step 2: not an array → ArrayCreate(length).
+        Ok(False) -> Ok(#(None, state))
+        Ok(True) -> {
+          // Step 3: C = Get(originalArray, "constructor") — may hit a getter.
+          use #(ctor, state) <- result.try(object.get_value_of(
+            state,
+            original,
+            Named("constructor"),
+          ))
+          // Step 4a: C is the Array constructor of ANOTHER realm → set C to
+          // undefined, skipping the @@species read entirely (test262:
+          // create-proto-from-ctor-realm-array.js expects no species access).
+          let ctor = case ctor {
+            JsObject(ctor_ref) ->
+              case
+                ctor_ref != state.builtins.array.constructor
+                && list.any(dict.values(state.ctx.realms), fn(b) {
+                  b.array.constructor == ctor_ref
+                })
+              {
+                True -> JsUndefined
+                False -> ctor
+              }
+            _ -> ctor
+          }
+          // Step 5: object C → C = Get(C, @@species); null → undefined.
+          use #(ctor, state) <- result.try(case ctor {
+            JsObject(_) -> {
+              use #(species, state) <- result.map(object.get_symbol_value_of(
+                state,
+                ctor,
+                value.symbol_species,
+              ))
+              case species {
+                JsNull -> #(JsUndefined, state)
+                _ -> #(species, state)
+              }
+            }
+            _ -> Ok(#(ctor, state))
+          })
+          case ctor {
+            // Step 6: undefined → ArrayCreate(length).
+            JsUndefined -> Ok(#(None, state))
+            // Intrinsic Array constructor → Construct(%Array%, «len») yields
+            // a plain array — take the cheap path.
+            JsObject(ctor_ref)
+              if ctor_ref == state.builtins.array.constructor
+            -> Ok(#(None, state))
+            _ ->
+              case object.is_constructor(state.heap, ctor) {
+                // Step 7: not a constructor → TypeError.
+                False ->
+                  coerce.thrown_type_error(
+                    state,
+                    "Species constructor is not a constructor",
+                  )
+                // Step 8: Construct(C, « 𝔽(length) »).
+                True -> {
+                  use #(created, state) <- result.try(
+                    state.construct(state, ctor, [value.from_int(length)]),
+                  )
+                  case created {
+                    JsObject(created_ref) -> Ok(#(Some(created_ref), state))
+                    // Constructors return objects; a non-object means the
+                    // construct machinery already deviated — fall back.
+                    _ -> Ok(#(None, state))
+                  }
+                }
+              }
+          }
+        }
+      }
+    _ -> Ok(#(None, state))
+  }
+}
+
+/// Write collected results into a custom species target:
+/// CreateDataPropertyOrThrow(A, ! ToString(𝔽(k)), v) for each present index
+/// in [0, length), then optionally Set(A, "length", 𝔽(n), true).
+fn write_species_result(
+  state: State,
+  target: Ref,
+  els: JsElements,
+  length: Int,
+  set_length: Option(Int),
+) -> Result(State, #(JsValue, State)) {
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
+  use state <- result.try(write_species_elements(state, target, els, 0, length))
+  case set_length {
+    None -> Ok(state)
+    Some(n) -> generic_set_length(state, target, n)
+  }
+}
+
+fn write_species_elements(
+  state: State,
+  target: Ref,
+  els: JsElements,
+  idx: Int,
+  length: Int,
+) -> Result(State, #(JsValue, State)) {
+  case idx >= length {
+    True -> Ok(state)
+    False ->
+      case elements.get_option(els, idx) {
+        // Hole — CreateDataPropertyOrThrow is skipped for absent indices.
+        None -> write_species_elements(state, target, els, idx + 1, length)
+        Some(val) -> {
+          use state <- result.try(write_species_element(
+            state,
+            target,
+            idx,
+            val,
+          ))
+          write_species_elements(state, target, els, idx + 1, length)
+        }
+      }
+  }
+}
+
+/// CreateDataPropertyOrThrow(A, ! ToString(𝔽(idx)), val) on a species target
+/// (§7.3.6).
+fn write_species_element(
+  state: State,
+  target: Ref,
+  idx: Int,
+  val: JsValue,
+) -> Result(State, #(JsValue, State)) {
+  // Proxy target: CreateDataPropertyOrThrow goes through the real
+  // [[DefineOwnProperty]] so the "defineProperty" trap fires per
+  // element (splice/property-traps-order-with-species).
+  use <- bool.lazy_guard(
+    option.is_some(object.as_proxy(state.heap, target)),
+    fn() {
+      let #(heap, desc_ref) =
+        common.alloc_pojo(state.heap, state.builtins.object.prototype, [
+          #("value", value.data_property(val)),
+          #("writable", value.data_property(JsBool(True))),
+          #("enumerable", value.data_property(JsBool(True))),
+          #("configurable", value.data_property(JsBool(True))),
+        ])
+      let state = State(..state, heap:)
+      use #(state, ok) <- result.try(object_builtin.define_property_bool(
+        state,
+        target,
+        JsString(int.to_string(idx)),
+        desc_ref,
+      ))
+      case ok {
+        False ->
+          coerce.thrown_type_error(
+            state,
+            "Cannot define property " <> int.to_string(idx) <> " on proxy",
+          )
+        True -> Ok(state)
+      }
+    },
+  )
+  // CreateDataPropertyOrThrow (§7.3.6): [[DefineOwnProperty]] with
+  // {value, W:T, E:T, C:T}. An existing CONFIGURABLE property is
+  // redefined regardless of its [[Writable]] — the result has plain
+  // default attributes, i.e. exactly an element-store entry, so drop
+  // any dict override first. A non-configurable existing property
+  // (or non-extensible target) rejects → TypeError.
+  let #(state, redefinable) =
+    drop_configurable_index_override(state, target, idx)
+  use <- bool.lazy_guard(!redefinable, fn() {
+    coerce.thrown_type_error(
+      state,
+      "Cannot define property " <> int.to_string(idx) <> " on object",
+    )
+  })
+  let #(h, ok) = object.set_property(state.heap, target, index_key(idx), val)
+  let state = State(..state, heap: h)
+  case ok {
+    False ->
+      coerce.thrown_type_error(
+        state,
+        "Cannot define property " <> int.to_string(idx) <> " on object",
+      )
+    True -> Ok(state)
+  }
+}
+
+/// Species-target copy loop: HasProperty → Get → CreateDataPropertyOrThrow
+/// interleaved per index (§23.1.3.31 steps 12-13, §23.1.3.1 step 5.b.iv).
+/// Unlike copy_range-then-write_species_result, an abrupt completion from the
+/// target's [[DefineOwnProperty]] (e.g. a throwing proxy "defineProperty"
+/// trap) terminates huge-length loops at the failing index instead of
+/// draining the whole source range first — required by test262's
+/// create-species-length-exceeding-integer-limit tests, where the read loop
+/// alone would burn the full iteration budget.
+fn copy_range_to_species(
+  state: State,
+  src: JsValue,
+  src_idx: Int,
+  target: Ref,
+  dst_idx: Int,
+  remaining: Int,
+  fuel: Int,
+) -> Result(State, #(JsValue, State)) {
+  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
+  case remaining <= 0 {
+    True -> Ok(state)
+    False -> {
+      // kPresent = HasProperty(O, Pk); if true, kValue = Get(O, Pk).
+      use #(maybe_val, state) <- result.try(get_index_if_present(
+        state,
+        src,
+        src_idx,
+      ))
+      use state <- result.try(case maybe_val {
+        // Hole — CreateDataPropertyOrThrow is skipped for absent indices.
+        None -> Ok(state)
+        Some(val) -> write_species_element(state, target, dst_idx, val)
+      })
+      copy_range_to_species(
+        state,
+        src,
+        src_idx + 1,
+        target,
+        dst_idx + 1,
+        remaining - 1,
+        fuel - 1,
+      )
+    }
+  }
+}
+
+/// CreateDataProperty redefinition prep: if `target` carries a dict override
+/// for Index(idx) (created by Object.defineProperty with non-default
+/// attributes), remove it when it is configurable — the subsequent
+/// set_property then writes a plain default-attribute element, which is what
+/// [[DefineOwnProperty]] with {W:T, E:T, C:T} produces. Returns
+/// #(state, False) when the override is non-configurable (redefinition must
+/// reject per §10.1.6.3 ValidateAndApplyPropertyDescriptor step 4).
+fn drop_configurable_index_override(
+  state: State,
+  target: Ref,
+  idx: Int,
+) -> #(State, Bool) {
+  case heap.read(state.heap, target) {
+    Some(ObjectSlot(properties:, ..) as slot) ->
+      case dict.get(properties, index_key(idx)) {
+        Error(Nil) -> #(state, True)
+        Ok(prop) ->
+          case value.prop_configurable(prop) {
+            False -> #(state, False)
+            True -> {
+              let h =
+                heap.write(
+                  state.heap,
+                  target,
+                  ObjectSlot(
+                    ..slot,
+                    properties: dict.delete(properties, index_key(idx)),
+                  ),
+                )
+              #(State(..state, heap: h), True)
+            }
+          }
+      }
+    _ -> #(state, True)
+  }
+}
+
+/// IsConcatSpreadable (§7.2.18):
 ///   1. If E is not an Object, return false.
 ///   2. Let spreadable be ? Get(E, @@isConcatSpreadable).
 ///   3. If spreadable is not undefined, return ToBoolean(spreadable).
 ///   4. Return ? IsArray(E).
-///
-/// Simplification: we skip step 2 (@@isConcatSpreadable symbol lookup) and
-/// go straight to step 4 — only ArrayObject kinds are treated as spreadable.
-/// This means objects with @@isConcatSpreadable=true won't be spread, and
-/// arrays with @@isConcatSpreadable=false will still be spread.
+fn is_concat_spreadable(
+  state: State,
+  item: JsValue,
+) -> Result(#(Bool, State), #(JsValue, State)) {
+  case item {
+    JsObject(_) -> {
+      // Step 2: Get(E, @@isConcatSpreadable) — may invoke a getter.
+      use #(flag, state) <- result.try(object.get_symbol_value_of(
+        state,
+        item,
+        value.symbol_is_concat_spreadable,
+      ))
+      case flag {
+        // Step 4: Return ? IsArray(E) — pierces proxies to their target
+        // (§7.2.2) and throws TypeError on a revoked proxy.
+        JsUndefined ->
+          case object.is_array(state.heap, item) {
+            Ok(spreadable) -> Ok(#(spreadable, state))
+            Error(Nil) ->
+              coerce.thrown_type_error(
+                state,
+                "Cannot perform 'IsArray' on a proxy that has been revoked",
+              )
+          }
+        // Step 3: spreadable is not undefined → ToBoolean(spreadable).
+        _ -> Ok(#(value.is_truthy(flag), state))
+      }
+    }
+    // Step 1: E is not an Object → false.
+    _ -> Ok(#(False, state))
+  }
+}
+
 fn concat_item(
   state: State,
   elems: JsElements,
   pos: Int,
   item: JsValue,
 ) -> Result(#(#(JsElements, Int), State), #(JsValue, State)) {
-  case item {
-    JsObject(ref) ->
-      case heap.read_array(state.heap, ref) {
-        // Step 5b: spreadable = true (IsArray(E) = true) — spread elements.
-        // Step 5b.i: len = LengthOfArrayLike(E).
-        // Step 5b.iv: copy elements [0..len) into result at position n.
-        Some(#(length, _src)) -> {
-          use #(copied, state) <- result.map(copy_range(
+  // Step 5a: Let spreadable be ? IsConcatSpreadable(E).
+  use #(spreadable, state) <- result.try(is_concat_spreadable(state, item))
+  case spreadable, item {
+    // Step 5b: spreadable — spread E's elements.
+    // Step 5b.i: len = LengthOfArrayLike(E) — works on any object
+    // (arrays, arguments, array-likes with @@isConcatSpreadable = true).
+    True, JsObject(ref) -> {
+      use #(length, state) <- result.try(object_length(state, ref))
+      // Step 5b.iii: If n + len > 2^53 - 1, throw a TypeError exception.
+      use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
+        coerce.thrown_type_error(
+          state,
+          "Array length exceeds maximum safe integer",
+        )
+      })
+      // Step 5b.iv: copy elements [0..len) into result at position n.
+      use #(copied, state) <- result.map(copy_range(
+        state,
+        item,
+        0,
+        pos,
+        length,
+        elems,
+      ))
+      #(#(copied, pos + length), state)
+    }
+    // Step 5c: not spreadable — append E as a single element.
+    _, _ -> Ok(#(#(elements.set(elems, pos, item), pos + 1), state))
+  }
+}
+
+/// concat_items for a custom species target (§23.1.3.1 step 5): spreadable
+/// items are copied via the interleaved HasProperty → Get →
+/// CreateDataPropertyOrThrow loop; non-spreadable items are defined directly
+/// (step 5.c.iii). Returns the final n.
+fn concat_items_species(
+  state: State,
+  items: List(JsValue),
+  target: Ref,
+  pos: Int,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case items {
+    [] -> Ok(#(pos, state))
+    [item, ..rest] -> {
+      // Step 5a: Let spreadable be ? IsConcatSpreadable(E).
+      use #(spreadable, state) <- result.try(is_concat_spreadable(state, item))
+      case spreadable, item {
+        True, JsObject(ref) -> {
+          // Step 5b.i: len = LengthOfArrayLike(E).
+          use #(length, state) <- result.try(object_length(state, ref))
+          // Step 5b.ii: If n + len > 2^53 - 1, throw a TypeError exception.
+          use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
+            coerce.thrown_type_error(
+              state,
+              "Array length exceeds maximum safe integer",
+            )
+          })
+          // Step 5b.iv: per-k HasProperty → Get → CreateDataPropertyOrThrow.
+          use state <- result.try(copy_range_to_species(
             state,
             item,
             0,
+            target,
             pos,
             length,
-            elems,
+            limits.max_iteration,
           ))
-          #(#(copied, pos + length), state)
+          concat_items_species(state, rest, target, pos + length)
         }
-        // Step 5c: spreadable = false (non-array object) — append as single item.
-        None -> Ok(#(#(elements.set(elems, pos, item), pos + 1), state))
+        // Step 5c: CreateDataPropertyOrThrow(A, ! ToString(𝔽(n)), E).
+        _, _ -> {
+          use state <- result.try(write_species_element(
+            state,
+            target,
+            pos,
+            item,
+          ))
+          concat_items_species(state, rest, target, pos + 1)
+        }
       }
-    // Step 5c: E is not an object (primitive) — append as single item.
-    _ -> Ok(#(#(elements.set(elems, pos, item), pos + 1), state))
+    }
   }
 }
 
@@ -1794,7 +2826,7 @@ fn array_reverse(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use ref, length, state <- require_array(this, state)
+  use this, ref, length, state <- require_array(this, state)
   // Fast path: in-place element reversal, one heap read + one heap write.
   let fast = {
     use els, len <- try_elements_fast_path(state, ref, length)
@@ -1804,65 +2836,91 @@ fn array_reverse(
     Some(#(Nil, state)) -> #(state, Ok(this))
     // Steps 3-5: middle = floor(len/2), lower = 0, loop while lower != middle
     // Step 6: Return O
-    None -> wrap(reverse_generic(state, ref, 0, length - 1), this)
+    None ->
+      wrap(
+        reverse_generic(state, ref, 0, length - 1, limits.max_iteration),
+        this,
+      )
   }
 }
 
 /// Implements §23.1.3.24 step 5's loop body. lo = lower, hi = upper (len-lower-1).
 /// The spec iterates lower from 0 to middle; here we converge lo/hi toward
 /// each other which is equivalent.
+///
+/// `fuel` is the pragmatic per-step budget (see iteration_budget_msg) — a
+/// proxy/getter on a huge array-like throws within its first few accesses,
+/// so the budget only fires on loops doing real unbounded work.
 fn reverse_generic(
   state: State,
   ref: Ref,
   lo: Int,
   hi: Int,
+  fuel: Int,
 ) -> Result(State, #(JsValue, State)) {
   // Step 5: Repeat, while lower != middle (lo < hi is equivalent)
   case lo >= hi {
     True -> Ok(state)
     False -> {
+      use <- bool.lazy_guard(fuel <= 0, fn() {
+        range_error_op(state, iteration_budget_msg)
+      })
       // Step 5d: Let lowerExists be ? HasProperty(O, lowerP)
-      let has_lo = generic_has(state.heap, ref, lo)
+      use #(has_lo, state) <- result.try(generic_has_op(state, ref, lo))
+      // Step 5e: If lowerExists, lowerValue = ? Get(O, lowerP) — BEFORE the
+      // upper HasProperty: the lower getter may delete the upper element
+      // (get_if_present_with_delete in test262).
+      use #(lo_val, state) <- result.try(get_index_if(state, ref, lo, has_lo))
       // Step 5f: Let upperExists be ? HasProperty(O, upperP)
-      let has_hi = generic_has(state.heap, ref, hi)
-      case has_lo, has_hi {
+      use #(has_hi, state) <- result.try(generic_has_op(state, ref, hi))
+      // Step 5g: If upperExists, upperValue = ? Get(O, upperP)
+      use #(hi_val, state) <- result.try(get_index_if(state, ref, hi, has_hi))
+      use state <- result.try(case lo_val, hi_val {
         // Step 5h: lowerExists AND upperExists — swap
-        True, True -> {
-          // Step 5e: lowerValue = Get(O, lowerP)
-          use #(lo_val, state) <- result.try(generic_get(state, ref, lo))
-          // Step 5g: upperValue = Get(O, upperP)
-          use #(hi_val, state) <- result.try(generic_get(state, ref, hi))
+        Some(lo_val), Some(hi_val) -> {
           // Step 5h.i: Set(O, lowerP, upperValue, true)
           use state <- result.try(generic_set_index(state, ref, lo, hi_val))
           // Step 5h.ii: Set(O, upperP, lowerValue, true)
-          use state <- result.try(generic_set_index(state, ref, hi, lo_val))
-          // Step 5l: lower = lower + 1
-          reverse_generic(state, ref, lo + 1, hi - 1)
+          generic_set_index(state, ref, hi, lo_val)
         }
         // Step 5i: NOT lowerExists AND upperExists — move upper to lower, delete upper
-        False, True -> {
-          // Step 5g: upperValue = Get(O, upperP)
-          use #(hi_val, state) <- result.try(generic_get(state, ref, hi))
+        None, Some(hi_val) -> {
           // Step 5i.i: Set(O, lowerP, upperValue, true)
           use state <- result.try(generic_set_index(state, ref, lo, hi_val))
           // Step 5i.ii: DeletePropertyOrThrow(O, upperP)
-          use state <- result.try(generic_delete_index(state, ref, hi))
-          reverse_generic(state, ref, lo + 1, hi - 1)
+          generic_delete_index(state, ref, hi)
         }
         // Step 5j: lowerExists AND NOT upperExists — delete lower, move lower to upper
-        True, False -> {
-          // Step 5e: lowerValue = Get(O, lowerP)
-          use #(lo_val, state) <- result.try(generic_get(state, ref, lo))
+        Some(lo_val), None -> {
           // Step 5j.i: DeletePropertyOrThrow(O, lowerP)
           use state <- result.try(generic_delete_index(state, ref, lo))
           // Step 5j.ii: Set(O, upperP, lowerValue, true)
-          use state <- result.try(generic_set_index(state, ref, hi, lo_val))
-          reverse_generic(state, ref, lo + 1, hi - 1)
+          generic_set_index(state, ref, hi, lo_val)
         }
         // Step 5k: Neither exists — no action
-        False, False -> reverse_generic(state, ref, lo + 1, hi - 1)
-      }
+        None, None -> Ok(state)
+      })
+      // Step 5l: lower = lower + 1
+      reverse_generic(state, ref, lo + 1, hi - 1, fuel - 1)
     }
+  }
+}
+
+/// Conditional Get(O, ! ToString(𝔽(idx))) — Some(value) when `present`
+/// (the preceding HasProperty result), None for a hole. Keeps the spec's
+/// "HasProperty then Get" pairs in their observable order.
+fn get_index_if(
+  state: State,
+  ref: Ref,
+  idx: Int,
+  present: Bool,
+) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
+  case present {
+    True -> {
+      use #(val, state) <- result.map(generic_get(state, ref, idx))
+      #(Some(val), state)
+    }
+    False -> Ok(#(None, state))
   }
 }
 
@@ -1892,22 +2950,31 @@ fn array_fill(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use ref, length, state <- require_array(this, state)
+  use this, ref, length, state <- require_array(this, state)
   // Step 12 uses value; if not provided, defaults to undefined
   let fill_val = helpers.first_arg_or_undefined(args)
   // Steps 3-6: relativeStart → k (clamped index)
-  // resolve_index handles ToIntegerOrInfinity + clamping; default 0 when absent
-  let start = case args {
-    [_, s, ..] -> resolve_index(s, length, 0)
-    _ -> 0
-  }
-  // Steps 7-11: relativeEnd → final (clamped index)
-  // resolve_index handles ToIntegerOrInfinity + clamping; default len when absent
+  // try_resolve_index handles ToIntegerOrInfinity + clamping; default 0 when
+  // absent. The coercion can run user code or throw.
+  use start, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 1),
+    length,
+    0,
+  )
+  // Steps 7-11: relativeEnd → final (clamped index); default len when absent
   // (step 7: if end is undefined, relativeEnd = len)
-  let end = case args {
-    [_, _, e, ..] -> resolve_index(e, length, length)
-    _ -> length
-  }
+  use end, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 2),
+    length,
+    length,
+  )
+  // Pragmatic bound: O(end-start) writes with no early exit — fail fast on
+  // ranges that would hang (see iteration_budget_msg).
+  use <- bool.lazy_guard(end - start > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
   // Fast path: bulk fill [start, end), one heap read + one heap write.
   let fast = {
     use els, len <- try_elements_fast_path(state, ref, length)
@@ -1915,7 +2982,6 @@ fn array_fill(
   }
   case fast {
     Some(#(Nil, state)) -> #(state, Ok(this))
-    // Guard: O(end-start) writes — cap at max_iteration.
     // Steps 12-13: fill loop, then return O
     None -> wrap(fill_generic(state, ref, start, end, fill_val), this)
   }
@@ -1958,12 +3024,10 @@ fn array_at(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
-  // Step 3: relativeIndex = ToIntegerOrInfinity(index)
-  let raw = case args {
-    [v, ..] -> helpers.to_number_int(v) |> option.unwrap(0)
-    [] -> 0
-  }
+  use this, _ref, length, state <- require_array(this, state)
+  // Step 3: relativeIndex = ToIntegerOrInfinity(index) — observable
+  // coercion: valueOf/toString run, Symbol/BigInt throw TypeError.
+  use raw, state <- try_integer_or_infinity(state, arg_or_undefined(args, 0))
   // Steps 4-5: resolve negative index
   let idx = case raw < 0 {
     True -> length + raw
@@ -2034,39 +3098,33 @@ fn forward_search_driver(
   wrap: fn(Int) -> JsValue,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Step 3: If len = 0, return miss
   use <- bool.guard(length == 0, #(state, Ok(wrap(-1))))
   let search = helpers.first_arg_or_undefined(args)
-  // Steps 4-6: n = ToIntegerOrInfinity(fromIndex), handle ±Infinity
-  case args {
-    // Step 5: If n = +∞, return miss (no index >= +∞)
-    [_, JsNumber(value.Infinity), ..] -> #(state, Ok(wrap(-1)))
-    _ -> {
-      let from = case args {
-        // Step 6: If n = -∞, set n to 0
-        [_, JsNumber(value.NegInfinity), ..] -> 0
-        [_, f, ..] -> helpers.to_number_int(f) |> option.unwrap(0)
-        _ -> 0
-      }
-      // Steps 7-8: resolve start index (negative → max(len + n, 0))
-      let start = case from < 0 {
-        True -> int.max(length + from, 0)
-        False -> from
-      }
-      // Steps 9-10: forward search
-      use found, state <- state.try_op(search_forward(
-        state,
-        this,
-        start,
-        length,
-        search,
-        eq,
-        skip_holes,
-      ))
-      #(state, Ok(wrap(found)))
-    }
+  // Step 4: n = ToIntegerOrInfinity(fromIndex) — observable coercion (runs
+  // after the len=0 early exit per spec order). ±∞ comes back saturated to
+  // ±(2^53 - 1), so:
+  //   Step 5 (n = +∞ → miss): start >= length, search loop exits with -1.
+  //   Step 6 (n = -∞ → 0): max(length + n, 0) = 0.
+  use from, state <- try_integer_or_infinity(state, arg_or_undefined(args, 1))
+  // Steps 7-8: resolve start index (negative → max(len + n, 0))
+  let start = case from < 0 {
+    True -> int.max(length + from, 0)
+    False -> from
   }
+  // Steps 9-10: forward search
+  use found, state <- state.try_op(search_forward(
+    state,
+    this,
+    start,
+    length,
+    search,
+    eq,
+    skip_holes,
+    limits.max_iteration,
+  ))
+  #(state, Ok(wrap(found)))
 }
 
 /// Array.prototype.lastIndexOf ( searchElement [ , fromIndex ] )
@@ -2098,38 +3156,40 @@ fn array_last_index_of(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Step 3: If len = 0, return -1
   use <- bool.guard(length == 0, #(state, Ok(value.from_int(-1))))
   let search = helpers.first_arg_or_undefined(args)
-  // Steps 4-6: fromIndex present → ToIntegerOrInfinity; absent → len - 1
-  // Checked by arg COUNT, not value (see MEMORY.md lastIndexOf gotcha).
-  case args {
-    // Step 6: If n = -∞, return -1
-    [_, JsNumber(value.NegInfinity), ..] -> #(state, Ok(value.from_int(-1)))
-    _ -> {
-      let from = case args {
-        // +∞ → clamp to len - 1 via step 7
-        [_, JsNumber(value.Infinity), ..] -> length - 1
-        [_, f, ..] -> helpers.to_number_int(f) |> option.unwrap(0)
-        _ -> length - 1
-      }
-      // Steps 7-8: resolve start index
-      let start = case from < 0 {
-        // Step 8: k = len + n
-        True -> length + from
-        // Step 7: k = min(n, len - 1)
-        False -> int.min(from, length - 1)
-      }
-      // Steps 9-10: backward search with IsStrictlyEqual, skipping holes
-      use found, state <- state.try_op(search_backward(
-        state,
-        this,
-        start,
-        search,
-      ))
-      #(state, Ok(value.from_int(found)))
+  // Steps 4-5: fromIndex present → ToIntegerOrInfinity (observable coercion);
+  // absent → len - 1. Checked by arg COUNT, not value (explicitly passing
+  // undefined yields ToIntegerOrInfinity(undefined) = 0, see MEMORY.md
+  // lastIndexOf gotcha). ±∞ comes back saturated to ±(2^53 - 1), so:
+  //   Step 6 (n = -∞ → -1): start = len + n < 0, search_backward returns -1.
+  //   Step 7 (n = +∞): min(n, len - 1) = len - 1.
+  let proceed = fn(from: Int, state: State) {
+    // Steps 7-8: resolve start index
+    let start = case from < 0 {
+      // Step 8: k = len + n
+      True -> length + from
+      // Step 7: k = min(n, len - 1)
+      False -> int.min(from, length - 1)
     }
+    // Steps 9-10: backward search with IsStrictlyEqual, skipping holes
+    use found, state <- state.try_op(search_backward(
+      state,
+      this,
+      start,
+      search,
+      limits.max_iteration,
+    ))
+    #(state, Ok(value.from_int(found)))
+  }
+  case args {
+    [_, f, ..] -> {
+      use from, state <- try_integer_or_infinity(state, f)
+      proceed(from, state)
+    }
+    _ -> proceed(length - 1, state)
   }
 }
 
@@ -2190,7 +3250,12 @@ fn search_forward(
   search: JsValue,
   eq: fn(JsValue, JsValue) -> Bool,
   skip_holes: Bool,
+  fuel: Int,
 ) -> Result(#(Int, State), #(JsValue, State)) {
+  // Pragmatic step budget — see iteration_budget_msg.
+  use <- bool.lazy_guard(fuel <= 0 && idx < length, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
   // Loop condition: k < len (both specs)
   case idx >= length {
     // Step 10: return -1 (indexOf) / return false (includes; caller converts)
@@ -2216,6 +3281,7 @@ fn search_forward(
                 search,
                 eq,
                 skip_holes,
+                fuel - 1,
               )
             Some(val) ->
               // indexOf step 9b.ii: comparison
@@ -2231,6 +3297,7 @@ fn search_forward(
                     search,
                     eq,
                     skip_holes,
+                    fuel - 1,
                   )
               }
           }
@@ -2250,6 +3317,7 @@ fn search_forward(
                 search,
                 eq,
                 skip_holes,
+                fuel - 1,
               )
           }
         }
@@ -2274,7 +3342,12 @@ fn search_backward(
   this: JsValue,
   idx: Int,
   search: JsValue,
+  fuel: Int,
 ) -> Result(#(Int, State), #(JsValue, State)) {
+  // Pragmatic step budget — see iteration_budget_msg.
+  use <- bool.lazy_guard(fuel <= 0 && idx >= 0, fn() {
+    range_error_op(state, iteration_budget_msg)
+  })
   // Loop condition: k >= 0
   case idx < 0 {
     // Step 10: return -1
@@ -2290,14 +3363,14 @@ fn search_backward(
       case maybe_val {
         None ->
           // Step 9c: k = k - 1 (hole skipped)
-          search_backward(state, this, idx - 1, search)
+          search_backward(state, this, idx - 1, search, fuel - 1)
         Some(val) ->
           // Step 9b.ii: IsStrictlyEqual check
           case value.strict_equal(val, search) {
             True -> Ok(#(idx, state))
             False ->
               // Step 9c: k = k - 1
-              search_backward(state, this, idx - 1, search)
+              search_backward(state, this, idx - 1, search, fuel - 1)
           }
       }
     }
@@ -2345,7 +3418,7 @@ fn array_for_each(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: O = ToObject(this), len = LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Step 3: If IsCallable(callbackfn) is false, throw TypeError
   use cb, this_arg, state <- require_callback(args, state)
   // Steps 4-5: k = 0; Repeat while k < len (iterate_array handles the loop,
@@ -2400,24 +3473,41 @@ fn array_map(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: O = ToObject(this), len = LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Step 3: If IsCallable(callbackfn) is false, throw TypeError
   use cb, this_arg, state <- require_callback(args, state)
+  // Step 4: A = ArraySpeciesCreate(O, len) — before the iteration loop, so a
+  // custom species constructor runs (exactly once) before any callback.
+  use species, state <- state.try_op(array_species_create(state, this, length))
   // Steps 5-6: iterate, collecting mappedValue at each present index.
   // Step 6c.iii: CreateDataPropertyOrThrow(A, Pk, mappedValue) — done via
   // elements.set on the accumulator (preserves holes: absent source indices
   // are never written to the output).
-  fold_array(
-    state,
-    this,
-    length,
-    cb,
-    this_arg,
-    elements.new(),
-    fn(_state, acc, result, _elem, idx) { elements.set(acc, idx, result) },
-  )
-  // Steps 4+7: ArraySpeciesCreate(O, len), return A
-  |> finish_array(length)
+  let folded =
+    fold_array(
+      state,
+      this,
+      length,
+      cb,
+      this_arg,
+      elements.new(),
+      fn(_state, acc, result, _elem, idx) { elements.set(acc, idx, result) },
+    )
+  case species {
+    // Step 7: Return A (plain array path).
+    None -> finish_array(folded, length)
+    Some(target) -> {
+      let #(state, outcome) = folded
+      case outcome {
+        Error(thrown) -> #(state, Error(thrown))
+        Ok(els) ->
+          case write_species_result(state, target, els, length, None) {
+            Ok(state) -> #(state, Ok(JsObject(target)))
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+      }
+    }
+  }
 }
 
 /// Allocates a result array from collected elements — corresponds to
@@ -2504,29 +3594,50 @@ fn array_filter(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: O = ToObject(this), len = LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Step 3: If IsCallable(callbackfn) is false, throw TypeError
   use cb, this_arg, state <- require_callback(args, state)
+  // Step 4: A = ArraySpeciesCreate(O, 0) — before the iteration loop.
+  use species, state <- state.try_op(array_species_create(state, this, 0))
   // Steps 5-7: iterate, keeping kValue when selected is true.
   // Step 7c.ii: selected = ToBoolean(result) — done via value.is_truthy.
   // Step 7c.iii: If selected, prepend kValue (the "to" index is implicit via
   // list prepend; reversed on return so final index equals insertion order).
-  fold_array(
-    state,
-    this,
-    length,
-    cb,
-    this_arg,
-    [],
-    fn(_state, acc, result, elem, _idx) {
-      case value.is_truthy(result) {
-        True -> [elem, ..acc]
-        False -> acc
+  let folded =
+    fold_array(
+      state,
+      this,
+      length,
+      cb,
+      this_arg,
+      [],
+      fn(_state, acc, result, elem, _idx) {
+        case value.is_truthy(result) {
+          True -> [elem, ..acc]
+          False -> acc
+        }
+      },
+    )
+  case species {
+    // Step 8: Return A (plain array path).
+    None -> finish_list(folded)
+    Some(target) -> {
+      let #(state, outcome) = folded
+      case outcome {
+        Error(thrown) -> #(state, Error(thrown))
+        Ok(kept) -> {
+          let vals = list.reverse(kept)
+          let els = build_elements_from_list(vals, 0, elements.new())
+          case
+            write_species_result(state, target, els, list.length(vals), None)
+          {
+            Ok(state) -> #(state, Ok(JsObject(target)))
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        }
       }
-    },
-  )
-  // Steps 4+8: ArraySpeciesCreate(O, 0), return A (allocate from kept values)
-  |> finish_list
+    }
+  }
 }
 
 /// Array.prototype.every (ES2024 §23.1.3.5)
@@ -2566,7 +3677,7 @@ fn every_some(
   state: State,
   match_on match_on: Bool,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   use cb, this_arg, state <- require_callback(args, state)
   use _elem, idx, state <- iterate_array(
     state,
@@ -2636,7 +3747,7 @@ fn find_via_predicate(
   reverse: Bool,
   cont: fn(JsValue, Int, Int, State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   use cb, this_arg, state <- require_callback(args, state)
   let iter = case reverse {
     True -> iterate_array_rev
@@ -2712,7 +3823,12 @@ fn array_sort(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use comparefn, state <- with_comparefn(args, state)
-  use ref, length, state <- require_array(this, state)
+  use this, ref, length, state <- require_array(this, state)
+  // Pragmatic bound: SortIndexedProperties reads all len indices with no
+  // early exit (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
   case comparefn {
     None -> sort_default(state, ref, length, this)
     Some(cmp) -> sort_with_comparefn(state, ref, length, cmp, this)
@@ -2757,6 +3873,7 @@ fn sort_default(
     0,
     [],
     0,
+    False,
   ))
   // Convert each defined element to string for comparison via ToString.
   use pairs, state <- state.try_op(stringify_elements(state, defined, []))
@@ -2775,6 +3892,10 @@ fn sort_default(
 /// Plain arrays with no index overrides take collect_sort_elements_snapshot
 /// (one heap read for the whole loop); everything else takes the generic
 /// per-element path.
+/// `holes_as_undefined` selects the spec's hole treatment: sort() uses
+/// SKIP-HOLES (§23.1.3.30 — holes are neither sorted nor counted, they stay
+/// holes at the tail), toSorted() uses READ-THROUGH-HOLES (§23.1.3.34 —
+/// holes read as undefined and the result array is dense).
 fn collect_sort_elements(
   state: State,
   this: JsValue,
@@ -2782,6 +3903,7 @@ fn collect_sort_elements(
   idx: Int,
   acc: List(JsValue),
   undefs: Int,
+  holes_as_undefined: Bool,
 ) -> Result(#(#(List(JsValue), Int), State), #(JsValue, State)) {
   case dense_snapshot(state, this) {
     Some(#(els, proto)) ->
@@ -2794,8 +3916,18 @@ fn collect_sort_elements(
         idx,
         acc,
         undefs,
+        holes_as_undefined,
       )
-    None -> collect_sort_elements_generic(state, this, length, idx, acc, undefs)
+    None ->
+      collect_sort_elements_generic(
+        state,
+        this,
+        length,
+        idx,
+        acc,
+        undefs,
+        holes_as_undefined,
+      )
   }
 }
 
@@ -2813,6 +3945,7 @@ fn collect_sort_elements_snapshot(
   idx: Int,
   acc: List(JsValue),
   undefs: Int,
+  holes_as_undefined: Bool,
 ) -> Result(#(#(List(JsValue), Int), State), #(JsValue, State)) {
   case idx >= length {
     True -> Ok(#(#(list.reverse(acc), undefs), state))
@@ -2829,6 +3962,7 @@ fn collect_sort_elements_snapshot(
             idx + 1,
             acc,
             undefs + 1,
+            holes_as_undefined,
           )
         Some(val) ->
           collect_sort_elements_snapshot(
@@ -2840,10 +3974,12 @@ fn collect_sort_elements_snapshot(
             idx + 1,
             [val, ..acc],
             undefs,
+            holes_as_undefined,
           )
         None ->
           case hole_is_inherited(state, proto, idx) {
-            // Hole — skip entirely.
+            // Hole — SKIP-HOLES drops it; READ-THROUGH-HOLES counts it as
+            // one more trailing undefined.
             False ->
               collect_sort_elements_snapshot(
                 state,
@@ -2853,7 +3989,11 @@ fn collect_sort_elements_snapshot(
                 length,
                 idx + 1,
                 acc,
-                undefs,
+                case holes_as_undefined {
+                  True -> undefs + 1
+                  False -> undefs
+                },
+                holes_as_undefined,
               )
             // Inherited property — Get may invoke a getter (user code).
             True ->
@@ -2864,6 +4004,7 @@ fn collect_sort_elements_snapshot(
                 idx,
                 acc,
                 undefs,
+                holes_as_undefined,
               )
           }
       }
@@ -2880,6 +4021,7 @@ fn collect_sort_elements_generic(
   idx: Int,
   acc: List(JsValue),
   undefs: Int,
+  holes_as_undefined: Bool,
 ) -> Result(#(#(List(JsValue), Int), State), #(JsValue, State)) {
   case idx >= length {
     True -> Ok(#(#(list.reverse(acc), undefs), state))
@@ -2891,14 +4033,19 @@ fn collect_sort_elements_generic(
       ))
       case maybe_val {
         None ->
-          // Hole — skip entirely.
+          // Hole — SKIP-HOLES drops it; READ-THROUGH-HOLES counts it as one
+          // more trailing undefined.
           collect_sort_elements_generic(
             state,
             this,
             length,
             idx + 1,
             acc,
-            undefs,
+            case holes_as_undefined {
+              True -> undefs + 1
+              False -> undefs
+            },
+            holes_as_undefined,
           )
         Some(val) ->
           case val {
@@ -2911,6 +4058,7 @@ fn collect_sort_elements_generic(
                 idx + 1,
                 acc,
                 undefs + 1,
+                holes_as_undefined,
               )
             _ ->
               collect_sort_elements_generic(
@@ -2920,6 +4068,7 @@ fn collect_sort_elements_generic(
                 idx + 1,
                 [val, ..acc],
                 undefs,
+                holes_as_undefined,
               )
           }
       }
@@ -2961,6 +4110,7 @@ fn sort_with_comparefn(
     0,
     [],
     0,
+    False,
   ))
   use sorted, state <- state.try_op(merge_sort(state, defined, comparefn))
   let all_values = list.append(sorted, list.repeat(JsUndefined, undefs))
@@ -3144,7 +4294,19 @@ fn iterate_array(
   cont: fn(JsValue, Int, State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   // Step 4 (Pattern A/B): k = 0, begin loop ascending.
-  iterate_loop(state, arr, 0, length, 1, cb, this_arg, hole_mode, stop_on, cont)
+  iterate_loop(
+    state,
+    arr,
+    0,
+    length,
+    1,
+    limits.max_iteration,
+    cb,
+    this_arg,
+    hole_mode,
+    stop_on,
+    cont,
+  )
 }
 
 /// Like iterate_array but iterates [len-1..0] descending — for findLast /
@@ -3171,6 +4333,7 @@ fn iterate_array_rev(
     length - 1,
     -1,
     -1,
+    limits.max_iteration,
     cb,
     this_arg,
     hole_mode,
@@ -3185,18 +4348,26 @@ fn iterate_array_rev(
 ///
 /// Bidirectional: `step` is +1 (ascending) or -1 (descending), and `end` is
 /// the exclusive terminal index (`length` for ascending, `-1` for descending).
+///
+/// `fuel` is the pragmatic step budget (see iteration_budget_msg) — methods
+/// with early exits (every/some/find) on huge array-likes stop long before
+/// it runs out; a loop that actually exceeds it throws RangeError.
 fn iterate_loop(
   state: State,
   arr: JsValue,
   idx: Int,
   end: Int,
   step: Int,
+  fuel: Int,
   cb: JsValue,
   this_arg: JsValue,
   hole_mode: HoleMode,
   stop_on: fn(JsValue) -> Bool,
   cont: fn(JsValue, Int, State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
+  use <- bool.lazy_guard(fuel <= 0 && idx != end, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
   // Loop termination: k == end → completed without early exit.
   // Pattern A step 6 / Pattern B step 5.
   case idx == end {
@@ -3224,6 +4395,7 @@ fn iterate_loop(
             idx + step,
             end,
             step,
+            fuel - 1,
             cb,
             this_arg,
             hole_mode,
@@ -3250,6 +4422,7 @@ fn iterate_loop(
                 idx + step,
                 end,
                 step,
+                fuel - 1,
                 cb,
                 this_arg,
                 hole_mode,
@@ -3295,6 +4468,15 @@ fn fold_array(
   initial: acc,
   combine: fn(State, acc, JsValue, JsValue, Int) -> acc,
 ) -> #(State, Result(acc, JsValue)) {
+  // Pragmatic bound: this loop has no early exit, so the step count equals
+  // len — fail fast on lengths that would hang (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    let #(err, state) = case state.range_error(state, iteration_budget_msg) {
+      #(state, Error(err)) -> #(err, state)
+      #(state, Ok(val)) -> #(val, state)
+    }
+    #(state, Error(err))
+  })
   fold_loop(state, arr, 0, length, cb, this_arg, initial, combine)
 }
 
@@ -3431,7 +4613,7 @@ fn reduce_impl(
   step: Int,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: Let O be ? ToObject(this value). Let len be ? LengthOfArrayLike(O).
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Step 3 setup: extract callbackfn argument
   let cb = helpers.first_arg_or_undefined(args)
   // Step 3: If IsCallable(callbackfn) is false, throw a TypeError exception.
@@ -3455,7 +4637,8 @@ fn reduce_impl(
   }
   case has_init {
     // Steps 5, 7a, 9: accumulator=initialValue, enter main loop
-    True -> reduce_loop(state, this, start, end, cb, init, step)
+    True ->
+      reduce_loop(state, this, start, end, cb, init, step, limits.max_iteration)
     False -> {
       // Steps 8a-8c: Find first present element (in iteration order) as
       // initial accumulator. find_present implements step 8b's loop.
@@ -3465,6 +4648,7 @@ fn reduce_impl(
         start,
         end,
         step,
+        limits.max_iteration,
       ))
       case found {
         // Step 4/8c: If len=0 or no present element found, throw TypeError.
@@ -3473,7 +4657,16 @@ fn reduce_impl(
         // Step 8b.iii: Set accumulator to Get(O, Pk), then k = k ± 1.
         // Step 9: Enter main loop starting at first_idx + step.
         Some(#(first_idx, first_val)) ->
-          reduce_loop(state, this, first_idx + step, end, cb, first_val, step)
+          reduce_loop(
+            state,
+            this,
+            first_idx + step,
+            end,
+            cb,
+            first_val,
+            step,
+            limits.max_iteration,
+          )
       }
     }
   }
@@ -3500,12 +4693,17 @@ fn find_present(
   idx: Int,
   end: Int,
   step: Int,
+  fuel: Int,
 ) -> Result(#(Option(#(Int, JsValue)), State), #(JsValue, State)) {
   // Loop termination: k < len (forward) or k ≥ 0 (backward)
   case idx == end {
     // Step 8c: kPresent is false after exhausting all indices
     True -> Ok(#(None, state))
     False -> {
+      // Pragmatic per-step budget — see iteration_budget_msg.
+      use <- bool.lazy_guard(fuel <= 0, fn() {
+        range_error_op(state, iteration_budget_msg)
+      })
       // Step 8b.ii-iii: kPresent = HasProperty(O, Pk); if true,
       // accumulator = Get(O, Pk) — fused into one heap lookup.
       use #(maybe_val, state) <- result.try(get_index_if_present(
@@ -3517,7 +4715,7 @@ fn find_present(
         // Step 8b.iii: kPresent is true
         Some(val) -> Ok(#(Some(#(idx, val)), state))
         // Step 8b.iv: Set k to k + 1 (or k - 1 for reduceRight)
-        None -> find_present(state, this, idx + step, end, step)
+        None -> find_present(state, this, idx + step, end, step, fuel - 1)
       }
     }
   }
@@ -3543,12 +4741,17 @@ fn reduce_loop(
   cb: JsValue,
   acc: JsValue,
   step: Int,
+  fuel: Int,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Step 9 loop condition: k < len (forward) or k ≥ 0 (backward)
   case idx == end {
     // Step 10: Return accumulator.
     True -> #(state, Ok(acc))
     False -> {
+      // Pragmatic per-step budget — see iteration_budget_msg.
+      use <- bool.lazy_guard(fuel <= 0, fn() {
+        state.range_error(state, iteration_budget_msg)
+      })
       // Step 9b-9c.i: kPresent = HasProperty(O, Pk); if true, kValue = Get(O, Pk)
       // — fused into one heap lookup.
       use maybe_elem, state <- state.try_op(get_index_if_present(
@@ -3559,7 +4762,7 @@ fn reduce_loop(
       case maybe_elem {
         // kPresent is false — skip this index (hole).
         // Step 9d: Set k to k + 1 (or k - 1 for reduceRight).
-        None -> reduce_loop(state, arr, idx + step, end, cb, acc, step)
+        None -> reduce_loop(state, arr, idx + step, end, cb, acc, step, fuel - 1)
         // Step 9c: If kPresent is true, then
         Some(elem) -> {
           // Step 9c.ii: Set accumulator to ? Call(callbackfn, undefined, « accumulator, kValue, 𝔽(k), O »).
@@ -3571,7 +4774,7 @@ fn reduce_loop(
             arr,
           ])
           // Step 9d: Set k to k + 1 (or k - 1 for reduceRight).
-          reduce_loop(state, arr, idx + step, end, cb, result, step)
+          reduce_loop(state, arr, idx + step, end, cb, result, step, fuel - 1)
         }
       }
     }
@@ -3603,45 +4806,71 @@ fn array_splice(
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use ref, length, state <- require_array(this, state)
+  use this, ref, length, state <- require_array(this, state)
   // Steps 3-6: actualStart
-  let actual_start = case args {
-    [s, ..] -> resolve_index(s, length, 0)
-    [] -> 0
-  }
-  // Steps 7-10: actualDeleteCount
-  let #(actual_delete_count, items) = case args {
-    // No args: spec says actualDeleteCount = 0, items = empty
-    [] -> #(0, [])
-    // Only start: deleteCount = len - actualStart (delete everything from start)
-    [_] -> #(length - actual_start, [])
-    // start + deleteCount [+ items]
-    [_, dc_val, ..rest] -> {
-      let dc = case helpers.to_number_int(dc_val) {
-        Some(n) -> int.max(n, 0)
-        None -> 0
-      }
-      #(int.min(dc, length - actual_start), rest)
-    }
-  }
-  // Step 11: Build the removed array A from [actualStart..actualStart+actualDeleteCount)
-  use removed_elements, state <- state.try_op(copy_range(
+  use actual_start, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 0),
+    length,
+    0,
+  )
+  // Steps 7-10: actualDeleteCount (observable ToIntegerOrInfinity)
+  use #(actual_delete_count, items), state <- try_delete_count(
+    state,
+    args,
+    length,
+    actual_start,
+  )
+  // Step 11 prologue: A = ArraySpeciesCreate(O, actualDeleteCount) — the
+  // species constructor (if any) runs before the removal copy loop.
+  use species, state <- state.try_op(array_species_create(
     state,
     this,
-    actual_start,
-    0,
     actual_delete_count,
-    elements.new(),
   ))
-  let #(heap, removed_ref) =
-    common.alloc_array_from_elements(
-      state.heap,
-      removed_elements,
-      actual_delete_count,
-      array_proto,
-    )
-  let state = State(..state, heap:)
-  let removed_arr = JsObject(removed_ref)
+  // Steps 12-13: Build the removed array A from
+  // [actualStart..actualStart+actualDeleteCount)
+  use removed_arr, state <- state.try_op(case species {
+    None -> {
+      use #(removed_elements, state) <- result.try(copy_range(
+        state,
+        this,
+        actual_start,
+        0,
+        actual_delete_count,
+        elements.new(),
+      ))
+      let #(heap, removed_ref) =
+        common.alloc_array_from_elements(
+          state.heap,
+          removed_elements,
+          actual_delete_count,
+          array_proto,
+        )
+      Ok(#(JsObject(removed_ref), State(..state, heap:)))
+    }
+    Some(target) -> {
+      // Steps 12-13 (species path): HasProperty → Get →
+      // CreateDataPropertyOrThrow interleaved per k, so an abrupt completion
+      // from the target's [[DefineOwnProperty]] ends huge-deleteCount loops
+      // early; then Set(A, "length", 𝔽(actualDeleteCount), true).
+      use state <- result.try(copy_range_to_species(
+        state,
+        this,
+        actual_start,
+        target,
+        0,
+        actual_delete_count,
+        limits.max_iteration,
+      ))
+      use state <- result.map(generic_set_length(
+        state,
+        target,
+        actual_delete_count,
+      ))
+      #(JsObject(target), state)
+    }
+  })
   // Steps 12-17: Shift elements and insert items.
   let item_count = list.length(items)
   let new_length = length - actual_delete_count + item_count
@@ -3704,7 +4933,16 @@ fn splice_shift(
   let from_start = start + delete_count
   case shift > 0 {
     // Moving right: iterate from end to avoid overwriting
-    True -> move_range(state, ref, length - 1, from_start, -1, shift)
+    True ->
+      move_range(
+        state,
+        ref,
+        length - 1,
+        from_start,
+        -1,
+        shift,
+        limits.max_iteration,
+      )
     False ->
       case shift < 0 {
         // Moving left: iterate from start
@@ -3716,6 +4954,7 @@ fn splice_shift(
             length,
             1,
             shift,
+            limits.max_iteration,
           ))
           // Delete trailing elements that are now beyond the new length
           delete_trailing(state, ref, length + shift, length)
@@ -3798,22 +5037,59 @@ fn array_flat(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject + LengthOfArrayLike
-  use _ref, length, state <- require_array(this, state)
-  // Steps 3-5: depth (default 1)
-  let depth = case args {
-    [d, ..] ->
-      case d {
-        JsUndefined -> 1
-        _ ->
-          helpers.to_number_int(d)
-          |> option.map(int.max(_, 0))
-          |> option.unwrap(0)
-      }
-    [] -> 1
+  use this, _ref, length, state <- require_array(this, state)
+  // Steps 3-5: depth (default 1; observable ToIntegerOrInfinity otherwise)
+  let proceed = fn(depth: Int, state: State) {
+    // Step 6: A = ArraySpeciesCreate(O, 0) — the species constructor (if
+    // any) runs before the flatten loop.
+    use species, state <- state.try_op(array_species_create(state, this, 0))
+    // Step 7: FlattenIntoArray(A, O, sourceLen, 0, depthNum)
+    let flattened = flatten_into(state, this, length, depth, [])
+    finish_species_list(flattened, species)
   }
-  // Steps 6-8: FlattenIntoArray, ArraySpeciesCreate, return A
-  flatten_into(state, this, length, depth, [])
-  |> finish_list
+  case helpers.first_arg_or_undefined(args) {
+    JsUndefined -> proceed(1, state)
+    d -> {
+      use raw, state <- try_integer_or_infinity(state, d)
+      proceed(int.max(raw, 0), state)
+    }
+  }
+}
+
+/// Step 8 "Return A" shared by flat/flatMap: reverse the accumulated list,
+/// then either allocate a plain array (no custom species) or write into the
+/// species-constructed target via CreateDataPropertyOrThrow (which throws on
+/// a non-extensible / non-configurable-property target). Neither method sets
+/// "length" on the species target (FlattenIntoArray has no final Set).
+fn finish_species_list(
+  result: #(State, Result(List(JsValue), JsValue)),
+  species: Option(Ref),
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(state, outcome) = result
+  case outcome {
+    Error(thrown) -> #(state, Error(thrown))
+    Ok(kept) -> {
+      let kept = list.reverse(kept)
+      case species {
+        None -> state.ok_array(state, kept)
+        Some(target) -> {
+          let count = list.length(kept)
+          case
+            write_species_result(
+              state,
+              target,
+              elements.from_list(kept),
+              count,
+              None,
+            )
+          {
+            Ok(state) -> #(state, Ok(JsObject(target)))
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+        }
+      }
+    }
+  }
 }
 
 /// FlattenIntoArray (ES2024 §23.1.3.13.1)
@@ -3827,6 +5103,15 @@ fn flatten_into(
   depth: Int,
   acc: List(JsValue),
 ) -> #(State, Result(List(JsValue), JsValue)) {
+  // Pragmatic bound: visits all length indices with no early exit
+  // (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    let #(state, res) = state.range_error(state, iteration_budget_msg)
+    case res {
+      Error(err) -> #(state, Error(err))
+      Ok(val) -> #(state, Error(val))
+    }
+  })
   flatten_into_loop(state, src, 0, length, depth, acc)
 }
 
@@ -3854,8 +5139,29 @@ fn flatten_into_loop(
           // If depth > 0 and element is an array, recursively flatten
           case depth > 0 {
             True ->
-              case is_array_value(elem, state.heap) {
-                Some(sub_len) -> {
+              // Step 3.c.ii: shouldFlatten = ? IsArray(element) — pierces
+              // proxies to their target (§7.2.2; revoked → TypeError).
+              case elem, object.is_array(state.heap, elem) {
+                JsObject(_), Error(Nil) ->
+                  case
+                    coerce.thrown_type_error(
+                      state,
+                      "Cannot perform 'IsArray' on a proxy that has been revoked",
+                    )
+                  {
+                    Error(#(thrown, state)) -> #(state, Error(thrown))
+                    // thrown_type_error always returns Error; keeps the case
+                    // exhaustive without an assert.
+                    Ok(_) -> #(state, Ok(acc))
+                  }
+                JsObject(sub_ref), Ok(True) -> {
+                  // Step 3.c.iii.1: elementLen = ? LengthOfArrayLike(element)
+                  // — an observable Get(element, "length") on proxies and
+                  // array-likes with length accessors.
+                  use sub_len, state <- state.try_op(object_length(
+                    state,
+                    sub_ref,
+                  ))
                   // Recurse with depth - 1
                   case flatten_into(state, elem, sub_len, depth - 1, acc) {
                     #(state, Ok(new_acc)) ->
@@ -3870,7 +5176,7 @@ fn flatten_into_loop(
                     #(state, Error(thrown)) -> #(state, Error(thrown))
                   }
                 }
-                None ->
+                _, _ ->
                   // Not an array, just append
                   flatten_into_loop(state, src, idx + 1, length, depth, [
                     elem,
@@ -3889,18 +5195,6 @@ fn flatten_into_loop(
   }
 }
 
-/// Check if a JsValue is an array, returning its length if so.
-fn is_array_value(val: JsValue, h: Heap) -> Option(Int) {
-  case val {
-    JsObject(ref) ->
-      case heap.read_array(h, ref) {
-        Some(#(length, _elems)) -> Some(length)
-        None -> None
-      }
-    _ -> None
-  }
-}
-
 /// Array.prototype.flatMap ( mapperFunction [ , thisArg ] )
 /// ES2024 §23.1.3.14
 ///
@@ -3916,16 +5210,24 @@ fn array_flat_map(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject + LengthOfArrayLike
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Step 3: IsCallable check
   use cb, this_arg, state <- require_callback(args, state)
+  // Pragmatic bound: visits all sourceLen indices with no early exit
+  // (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
+  // Step 4: A = ArraySpeciesCreate(O, 0) — the species constructor (if any)
+  // runs before the mapping loop.
+  use species, state <- state.try_op(array_species_create(state, this, 0))
   // Step 5: FlattenIntoArray with mapperFunction — call mapper on each present
   // element, then flatten the result one level deep via flatten_into at depth 0
   // (which just collects present elements). If the mapped value is not an array,
   // prepend directly.
-  flat_map_loop(state, this, 0, length, cb, this_arg, [])
-  // Steps 4+6: ArraySpeciesCreate(O, 0), return A
-  |> finish_list
+  let flattened = flat_map_loop(state, this, 0, length, cb, this_arg, [])
+  // Step 6: Return A.
+  finish_species_list(flattened, species)
 }
 
 /// Per-element loop for flatMap: call mapper, then flatten result one level.
@@ -3954,8 +5256,25 @@ fn flat_map_loop(
             value.from_int(idx),
             arr,
           ])
-          case is_array_value(mapped, state.heap) {
-            Some(sub_len) ->
+          // Step 3.c.ii (FlattenIntoArray with mapper): shouldFlatten =
+          // ? IsArray(mapped) — pierces proxies (§7.2.2; revoked → TypeError).
+          case mapped, object.is_array(state.heap, mapped) {
+            JsObject(_), Error(Nil) ->
+              case
+                coerce.thrown_type_error(
+                  state,
+                  "Cannot perform 'IsArray' on a proxy that has been revoked",
+                )
+              {
+                Error(#(thrown, state)) -> #(state, Error(thrown))
+                // thrown_type_error always returns Error; keeps the case
+                // exhaustive without an assert.
+                Ok(_) -> #(state, Ok(acc))
+              }
+            JsObject(sub_ref), Ok(True) -> {
+              // elementLen = ? LengthOfArrayLike(mapped) — observable Get
+              // of "length" on proxies / length accessors.
+              use sub_len, state <- state.try_op(object_length(state, sub_ref))
               // Flatten one level: collect sub-array's present elements.
               case flatten_into(state, mapped, sub_len, 0, acc) {
                 #(state, Ok(new_acc)) ->
@@ -3970,7 +5289,8 @@ fn flat_map_loop(
                   )
                 #(state, Error(thrown)) -> #(state, Error(thrown))
               }
-            None ->
+            }
+            _, _ ->
               flat_map_loop(state, arr, idx + 1, length, cb, this_arg, [
                 mapped,
                 ..acc
@@ -4005,24 +5325,34 @@ fn array_copy_within(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use ref, length, state <- require_array(this, state)
-  // Steps 3-5: target
-  let target = case args {
-    [t, ..] -> resolve_index(t, length, 0)
-    [] -> 0
-  }
+  use this, ref, length, state <- require_array(this, state)
+  // Steps 3-5: target (observable ToIntegerOrInfinity, in argument order)
+  use target, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 0),
+    length,
+    0,
+  )
   // Steps 6-8: start (from)
-  let from = case args {
-    [_, s, ..] -> resolve_index(s, length, 0)
-    _ -> 0
-  }
+  use from, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 1),
+    length,
+    0,
+  )
   // Steps 9-11: end (final)
-  let final = case args {
-    [_, _, e, ..] -> resolve_index(e, length, length)
-    _ -> length
-  }
+  use final, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 2),
+    length,
+    length,
+  )
   // Step 12: count = min(final - from, len - to)
   let count = int.min(final - from, length - target)
+  // Pragmatic bound: count moves with no early exit (see iteration_budget_msg).
+  use <- bool.lazy_guard(count > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
   case count <= 0 {
     True -> #(state, Ok(this))
     False -> {
@@ -4072,7 +5402,10 @@ fn copy_within_step(
   case remaining <= 0 {
     True -> Ok(state)
     False -> {
-      use state <- result.try(case generic_has(state.heap, ref, from) {
+      // §23.1.3.4 step 17c: fromPresent = ? HasProperty(O, fromKey) —
+      // trap-aware (a proxy "has" trap can throw; return-abrupt-from-has-*).
+      use #(has_from, state) <- result.try(generic_has_op(state, ref, from))
+      use state <- result.try(case has_from {
         True -> {
           use #(val, state) <- result.try(generic_get(state, ref, from))
           generic_set_index(state, ref, to, val)
@@ -4158,22 +5491,151 @@ fn array_from_array_like(
         "Cannot create array from " <> common.typeof_value(items, state.heap),
       )
     _ -> {
-      // LengthOfArrayLike: read "length" via get_value_of, then ToLength.
-      let length = case object.get_value_of(state, items, Named("length")) {
-        Ok(#(len_val, _state)) -> to_length(len_val)
-        Error(_) -> 0
+      // §23.1.2.1 step 4: usingIterator = ? GetMethod(items, @@iterator).
+      // Iterables (generators, Maps, Sets, custom iterators, proxies of
+      // arrays) take the iterator path; everything else is array-like.
+      use iter_method, state <- state.try_op(case items {
+        JsObject(_) ->
+          object.get_symbol_value_of(state, items, value.symbol_iterator)
+        _ -> Ok(#(JsUndefined, state))
+      })
+      case iter_method {
+        // GetMethod step 3: undefined or null → no iterator; array-like path.
+        JsUndefined | JsNull -> {
+          // Step 8: len = ? LengthOfArrayLike(arrayLike) — a throwing
+          // "length" getter propagates, the getter's heap side effects are
+          // kept via the threaded state, and ToLength's ToNumber coercion
+          // (valueOf on an object-valued length) is observable.
+          use len_val, state <- state.try_op(object.get_value_of(
+            state,
+            items,
+            Named("length"),
+          ))
+          use length, state <- state.try_op(to_length_value(state, len_val))
+          array_from_loop(
+            state,
+            items,
+            0,
+            length,
+            map_fn,
+            this_arg,
+            array_proto,
+            [],
+          )
+        }
+        m ->
+          case helpers.is_callable(state.heap, m) {
+            True ->
+              array_from_iterator(
+                state,
+                items,
+                iter_method,
+                map_fn,
+                this_arg,
+                array_proto,
+              )
+            // GetMethod step 4 (§7.3.10): present but not callable → TypeError.
+            False ->
+              state.type_error(
+                state,
+                common.typeof_value(m, state.heap) <> " is not a function",
+              )
+          }
       }
-      array_from_loop(
+    }
+  }
+}
+
+/// §23.1.2.1 steps 5.e-5.g: drain the iterator, applying mapFn per element.
+fn array_from_iterator(
+  state: State,
+  items: JsValue,
+  iter_method: JsValue,
+  map_fn: Option(JsValue),
+  this_arg: JsValue,
+  array_proto: Ref,
+) -> #(State, Result(JsValue, JsValue)) {
+  // GetIteratorFromMethod: iterator = ? Call(method, items).
+  use iter, state <- state.try_call(state, iter_method, items, [])
+  case iter {
+    JsObject(_) -> {
+      // GetIterator step: nextMethod fetched ONCE (§7.4.3).
+      use next_method, state <- state.try_op(object.get_value_of(
         state,
-        items,
-        0,
-        length,
+        iter,
+        Named("next"),
+      ))
+      array_from_iterator_loop(
+        state,
+        iter,
+        next_method,
         map_fn,
         this_arg,
         array_proto,
+        0,
         [],
       )
     }
+    _ ->
+      state.type_error(
+        state,
+        "Result of the Symbol.iterator method is not an object",
+      )
+  }
+}
+
+fn array_from_iterator_loop(
+  state: State,
+  iter: JsValue,
+  next_method: JsValue,
+  map_fn: Option(JsValue),
+  this_arg: JsValue,
+  array_proto: Ref,
+  k: Int,
+  acc: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  use res, state <- state.try_call(state, next_method, iter, [])
+  case res {
+    JsObject(_) -> {
+      use done_val, state <- state.try_op(object.get_value_of(
+        state,
+        res,
+        Named("done"),
+      ))
+      case value.is_truthy(done_val) {
+        True -> {
+          let #(heap, ref) =
+            common.alloc_array(state.heap, list.reverse(acc), array_proto)
+          #(State(..state, heap:), Ok(JsObject(ref)))
+        }
+        False -> {
+          use item, state <- state.try_op(object.get_value_of(
+            state,
+            res,
+            Named("value"),
+          ))
+          use mapped, state <- state.try_op(case map_fn {
+            Some(mf) ->
+              case state.call(state, mf, this_arg, [item, value.from_int(k)]) {
+                Ok(#(v, state)) -> Ok(#(v, state))
+                Error(e) -> Error(e)
+              }
+            None -> Ok(#(item, state))
+          })
+          array_from_iterator_loop(
+            state,
+            iter,
+            next_method,
+            map_fn,
+            this_arg,
+            array_proto,
+            k + 1,
+            [mapped, ..acc],
+          )
+        }
+      }
+    }
+    _ -> state.type_error(state, "Iterator result is not an object")
   }
 }
 
@@ -4287,33 +5749,29 @@ fn array_to_spliced(
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
   // Steps 3-6: actualStart
-  let actual_start = case args {
-    [s, ..] -> resolve_index(s, length, 0)
-    [] -> 0
-  }
-  // Step 7: insertCount and actualSkipCount
-  let #(actual_skip_count, items) = case args {
-    // No args: skipCount=0, items=[]
-    [] -> #(0, [])
-    // Only start: skipCount = len - actualStart
-    [_] -> #(length - actual_start, [])
-    // start + skipCount [+ items]
-    [_, dc_val, ..rest] -> {
-      let dc = case helpers.to_number_int(dc_val) {
-        Some(n) -> int.max(n, 0)
-        None -> 0
-      }
-      #(int.min(dc, length - actual_start), rest)
-    }
-  }
+  use actual_start, state <- try_resolve_index(
+    state,
+    arg_or_undefined(args, 0),
+    length,
+    0,
+  )
+  // Step 7: insertCount and actualSkipCount (observable ToIntegerOrInfinity)
+  use #(actual_skip_count, items), state <- try_delete_count(
+    state,
+    args,
+    length,
+    actual_start,
+  )
   // Step 8: newLen = len + insertCount - actualSkipCount
   let item_count = list.length(items)
   let new_len = length + item_count - actual_skip_count
+  // Step 9: If newLen > 2^53 - 1, throw a TypeError.
+  use <- state.guard_safe_length(state, new_len)
   // Steps 10-14: Build the new array
-  // Copy [0, actualStart) from source
-  use new_elements, state <- state.try_op(copy_range(
+  // Copy [0, actualStart) from source via Get (holes -> undefined).
+  use new_elements, state <- state.try_op(copy_range_dense(
     state,
     this,
     0,
@@ -4327,7 +5785,7 @@ fn array_to_spliced(
   let src_from = actual_start + actual_skip_count
   let dst_from = actual_start + item_count
   let remaining = length - src_from
-  use new_elements, state <- state.try_op(copy_range(
+  use new_elements, state <- state.try_op(copy_range_dense(
     state,
     this,
     src_from,
@@ -4383,18 +5841,20 @@ fn array_with(
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
-  use _ref, length, state <- require_array(this, state)
-  // Step 3: relativeIndex = ToIntegerOrInfinity(index)
-  let raw = case args {
-    [v, ..] -> helpers.to_number_int(v) |> option.unwrap(0)
-    [] -> 0
-  }
+  use this, _ref, length, state <- require_array(this, state)
+  // Step 3: relativeIndex = ToIntegerOrInfinity(index) — observable coercion
+  use raw, state <- try_integer_or_infinity(state, arg_or_undefined(args, 0))
   // Steps 4-5: resolve relative index (without clamping — out of bounds throws)
   let actual_index = case raw < 0 {
     True -> length + raw
     False -> raw
   }
   // Step 6: bounds check — throw RangeError if out of bounds
+  // Step 7: ArrayCreate(len) throws RangeError when len > 2^32 - 1, before
+  // any element Get (test262: with/length-exceeding-array-length-limit).
+  use <- bool.lazy_guard(length > 4_294_967_295, fn() {
+    state.range_error(state, "Invalid array length")
+  })
   case actual_index < 0 || actual_index >= length {
     True -> state.range_error(state, "Invalid index")
     False -> {
@@ -4403,16 +5863,26 @@ fn array_with(
         [_, r, ..] -> r
         _ -> JsUndefined
       }
-      // Steps 7-11: Copy all elements, replacing actualIndex with value
-      use new_elements, state <- state.try_op(copy_range(
+      // Steps 7-11: Copy elements via Get (holes -> undefined, result dense).
+      // Step 5b: k = actualIndex takes `value` WITHOUT a Get(O, Pk) — the
+      // replaced position must not be read (with/no-get-replaced-index).
+      use new_elements, state <- state.try_op(copy_range_dense(
         state,
         this,
         0,
         0,
-        length,
+        actual_index,
         elements.new(),
       ))
       let new_elements = elements.set(new_elements, actual_index, replacement)
+      use new_elements, state <- state.try_op(copy_range_dense(
+        state,
+        this,
+        actual_index + 1,
+        actual_index + 1,
+        length - actual_index - 1,
+        new_elements,
+      ))
       // Step 12: Return A
       let #(heap, ref) =
         common.alloc_array_from_elements(
@@ -4446,7 +5916,12 @@ fn array_to_sorted(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use comparefn, state <- with_comparefn(args, state)
-  use _ref, length, state <- require_array(this, state)
+  use this, _ref, length, state <- require_array(this, state)
+  // Pragmatic bound: visits all length indices with no early exit
+  // (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
   case comparefn {
     None -> to_sorted_impl(state, length, this, sort_values_default)
     Some(cmp) -> {
@@ -4466,6 +5941,8 @@ fn to_sorted_impl(
     Result(#(List(JsValue), State), #(JsValue, State)),
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
+  // READ-THROUGH-HOLES (§23.1.3.34): holes become trailing undefineds and
+  // the result is dense.
   use #(defined, undefs), state <- state.try_op(collect_sort_elements(
     state,
     this,
@@ -4473,6 +5950,7 @@ fn to_sorted_impl(
     0,
     [],
     0,
+    True,
   ))
   use sorted, state <- state.try_op(sort(state, defined))
   let all_values = list.append(sorted, list.repeat(JsUndefined, undefs))
@@ -4535,13 +6013,21 @@ fn array_to_reversed(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
-  use _ref, length, state <- require_array(this, state)
-  // Collect all elements; holes become undefined (spec step 5c: Get returns undefined for holes).
-  use all_values, state <- state.try_op(
-    collect_all_elements(state, this, length, 0, []),
-  )
-  // Reverse the collected list.
-  let reversed = list.reverse(all_values)
+  use this, _ref, length, state <- require_array(this, state)
+  // Pragmatic bound: visits all length indices with no early exit
+  // (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
+  // Step 5: k ascends 0..len, reading from = len-k-1 — i.e. the source is
+  // read in DESCENDING index order (observable via getters that mutate the
+  // array mid-iteration). Holes become undefined (step 5c Get).
+  use reversed, state <- state.try_op(collect_elements_descending(
+    state,
+    this,
+    length - 1,
+    [],
+  ))
   let new_elements = build_elements_from_list(reversed, 0, elements.new())
   let #(heap, ref) =
     common.alloc_array_from_elements(
@@ -4553,43 +6039,91 @@ fn array_to_reversed(
   #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
-/// Collect all elements at indices [0, length), reading holes as JsUndefined.
-/// Per §23.1.3.33 step 5c: Get(O, from) — holes are treated as undefined.
-fn collect_all_elements(
+/// Collect elements reading indices DESCENDING from `idx` to 0 (toReversed's
+/// observable Get order, §23.1.3.33 step 5). Returns the values in read
+/// order: [Get(len-1), Get(len-2), ..., Get(0)].
+fn collect_elements_descending(
   state: State,
   this: JsValue,
-  length: Int,
   idx: Int,
   acc: List(JsValue),
 ) -> Result(#(List(JsValue), State), #(JsValue, State)) {
-  case idx >= length {
+  case idx < 0 {
     True -> Ok(#(list.reverse(acc), state))
     False -> {
       use #(val, state) <- result.try(get_index(state, this, idx))
-      collect_all_elements(state, this, length, idx + 1, [val, ..acc])
+      collect_elements_descending(state, this, idx - 1, [val, ..acc])
     }
   }
 }
 
-/// ES2024 §23.1.3.31 Array.prototype.toString ( )
-/// Calls this.join() — equivalent to Array.prototype.join().
+/// ES2024 §23.1.3.36 Array.prototype.toString ( )
+///
+/// 1. Let array be ? ToObject(this value).
+/// 2. Let func be ? Get(array, "join").
+/// 3. If IsCallable(func) is false, set func to %Object.prototype.toString%.
+/// 4. Return ? Call(func, array).
 fn array_to_string(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  // §23.1.3.31: "Let func be ? Get(array, "join")." then call it.
-  // Simplified: delegate directly to array_join (which uses require_array).
-  array_join(this, [], state)
+  // Step 1: ToObject(this value) — undefined/null throw.
+  case common.to_object(state.heap, state.builtins, this) {
+    None -> state.type_error(state, cannot_convert)
+    Some(#(heap, ref)) -> {
+      let state = State(..state, heap:)
+      let array = JsObject(ref)
+      // Step 2: func = ? Get(array, "join") — observable (proxy get traps,
+      // getters).
+      use func, state <- state.try_op(object.get_value(
+        state,
+        ref,
+        Named("join"),
+        array,
+      ))
+      case helpers.is_callable(state.heap, func) {
+        // Step 4: Return ? Call(func, array).
+        True -> {
+          use val, state <- state.try_call(state, func, array, [])
+          #(state, Ok(val))
+        }
+        // Step 3: non-callable join → the %Object.prototype.toString%
+        // INTRINSIC (not a lookup — it applies even after
+        // `delete Object.prototype.toString`).
+        False ->
+          object_builtin.dispatch(
+            value.ObjectPrototypeToString,
+            [],
+            array,
+            state,
+          )
+      }
+    }
+  }
 }
 
 /// ES2024 §23.1.3.30 Array.prototype.toLocaleString ( )
 /// Calls toLocaleString() on each element and joins with ",".
 fn array_to_locale_string(
   this: JsValue,
+  args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _ref, length, state <- require_array(this, state)
-  to_locale_string_loop(state, this, 0, length, [])
+  use this, _ref, length, state <- require_array(this, state)
+  // Pragmatic bound: visits all length indices with no early exit
+  // (see iteration_budget_msg).
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
+  to_locale_string_loop(
+    state,
+    this,
+    0,
+    length,
+    helpers.first_arg_or_undefined(args),
+    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+    [],
+  )
 }
 
 fn to_locale_string_loop(
@@ -4597,6 +6131,8 @@ fn to_locale_string_loop(
   this: JsValue,
   idx: Int,
   length: Int,
+  locales_v: JsValue,
+  options_v: JsValue,
   acc: List(String),
 ) -> #(State, Result(JsValue, JsValue)) {
   case idx >= length {
@@ -4607,11 +6143,48 @@ fn to_locale_string_loop(
     False -> {
       use elem, state <- state.try_op(get_index(state, this, idx))
       case elem {
+        // §23.1.3.32 step 4c: undefined/null elements contribute "".
         JsUndefined | JsNull ->
-          to_locale_string_loop(state, this, idx + 1, length, ["", ..acc])
+          to_locale_string_loop(
+            state,
+            this,
+            idx + 1,
+            length,
+            locales_v,
+            options_v,
+            ["", ..acc],
+          )
         _ -> {
-          use s, state <- coerce.try_to_string(state, elem)
-          to_locale_string_loop(state, this, idx + 1, length, [s, ..acc])
+          // §23.1.3.32 step 4c.i: R = ? ToString(? Invoke(element,
+          // "toLocaleString")) — the element's own method, NOT plain ToString
+          // (test262: invoke-element-tolocalestring.js).
+          use method, state <- state.try_op(object.get_value_of(
+            state,
+            elem,
+            Named("toLocaleString"),
+          ))
+          use <- bool.lazy_guard(!helpers.is_callable(state.heap, method), fn() {
+            state.type_error(
+              state,
+              common.typeof_value(method, state.heap) <> " is not a function",
+            )
+          })
+          // ECMA-402 §18.4.1: Invoke(element, "toLocaleString",
+          // « locales, options ») — both are always passed.
+          use locale_val, state <- state.try_call(state, method, elem, [
+            locales_v,
+            options_v,
+          ])
+          use s, state <- coerce.try_to_string(state, locale_val)
+          to_locale_string_loop(
+            state,
+            this,
+            idx + 1,
+            length,
+            locales_v,
+            options_v,
+            [s, ..acc],
+          )
         }
       }
     }
@@ -4619,51 +6192,30 @@ fn to_locale_string_loop(
 }
 
 /// ES2024 §23.1.3.16 Array.prototype.keys ( )
-/// Returns an array of indices (simplified — no iterator protocol).
+/// CreateArrayIterator(O, key) — LAZY: each .next() re-reads the live
+/// source, so mid-iteration mutation (push, length change, a resizable
+/// buffer resize for typed-array receivers) is observed per spec.
 fn array_keys(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _ref, length, state <- require_array(this, state)
-  let keys = build_index_list(0, length, [])
-  state.ok_array(state, keys)
-}
-
-fn build_entry_pairs(
-  state: State,
-  this: JsValue,
-  idx: Int,
-  length: Int,
-  array_proto: Ref,
-  acc: List(JsValue),
-) -> Result(#(List(JsValue), State), #(JsValue, State)) {
-  case idx >= length {
-    True -> Ok(#(list.reverse(acc), state))
-    False -> {
-      use #(val, state) <- result.try(get_index(state, this, idx))
-      let #(heap, pair_ref) =
-        common.alloc_array(state.heap, [value.from_int(idx), val], array_proto)
-      build_entry_pairs(
-        State(..state, heap:),
-        this,
-        idx + 1,
-        length,
-        array_proto,
-        [JsObject(pair_ref), ..acc],
-      )
-    }
-  }
-}
-
-fn build_index_list(
-  idx: Int,
-  length: Int,
-  acc: List(JsValue),
-) -> List(JsValue) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False -> build_index_list(idx + 1, length, [value.from_int(idx), ..acc])
-  }
+  use _this, ref, length, state <- require_array(this, state)
+  // Pragmatic bound: consuming the iterator visits all length indices
+  // (see iteration_budget_msg); fail at creation like the other guards.
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
+  let #(heap, iter_ref) =
+    common.alloc_wrapper(
+      state.heap,
+      value.ArrayIteratorObject(
+        source: ref,
+        index: 0,
+        iter_kind: value.ArrayIterKeys,
+      ),
+      state.builtins.array_iterator_proto,
+    )
+  #(State(..state, heap:), Ok(JsObject(iter_ref)))
 }
 
 /// ES2024 §23.1.3.37 Array.prototype.values ( )
@@ -4672,26 +6224,47 @@ fn array_values(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use ref, _length, state <- require_array(this, state)
+  use _this, ref, length, state <- require_array(this, state)
+  // Pragmatic bound: consuming the iterator visits all length indices
+  // (see iteration_budget_msg); fail at creation like the other guards.
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
   let #(heap, iter_ref) =
     common.alloc_wrapper(
       state.heap,
-      value.ArrayIteratorObject(source: ref, index: 0),
+      value.ArrayIteratorObject(
+        source: ref,
+        index: 0,
+        iter_kind: value.ArrayIterValues,
+      ),
       state.builtins.array_iterator_proto,
     )
   #(State(..state, heap:), Ok(JsObject(iter_ref)))
 }
 
 /// ES2024 §23.1.3.4 Array.prototype.entries ( )
-/// Returns an array of [index, value] pairs (simplified — no iterator protocol).
+/// CreateArrayIterator(O, key+value) — LAZY, like array_keys: each .next()
+/// re-reads the live source and allocates a fresh [index, value] pair.
 fn array_entries(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  let proto = state.builtins.array.prototype
-  use _ref, length, state <- require_array(this, state)
-  use pairs, state <- state.try_op(
-    build_entry_pairs(state, this, 0, length, proto, []),
-  )
-  state.ok_array(state, pairs)
+  use _this, ref, length, state <- require_array(this, state)
+  // Pragmatic bound: consuming the iterator visits all length indices
+  // (see iteration_budget_msg); fail at creation like the other guards.
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
+  let #(heap, iter_ref) =
+    common.alloc_wrapper(
+      state.heap,
+      value.ArrayIteratorObject(
+        source: ref,
+        index: 0,
+        iter_kind: value.ArrayIterEntries,
+      ),
+      state.builtins.array_iterator_proto,
+    )
+  #(State(..state, heap:), Ok(JsObject(iter_ref)))
 }

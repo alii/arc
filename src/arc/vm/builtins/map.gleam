@@ -9,17 +9,19 @@
 /// that, on average, provide access times that are sublinear on the number of
 /// elements in the collection.
 ///
-/// Storage: `Dict(MapKey, JsValue)` for O(log n) get/set/has/delete, plus a
-/// reversed `List(MapKey)` for insertion-order iteration. Keys are stored
-/// reversed so set() is O(1) prepend; iteration points reverse once on read.
-/// Deleted keys remain as tombstones in the list (skipped via dict lookup at
-/// iteration time). Original JS keys are reconstructed via `map_key_to_js` —
-/// the MapKey encoding is lossless modulo -0→+0 normalization, which the spec
-/// requires anyway (§24.1.3.9 step 4).
+/// Storage: `Dict(MapKey, JsValue)` for O(log n) get/set/has/delete, plus the
+/// spec's append-only [[MapData]] order modelled with monotonically
+/// increasing sequence numbers (`seqs`: key → seq, `order`: seq → key,
+/// `next_seq`). delete() removes the record; the seq gap is the spec's
+/// emptied record, so a deleted-then-re-added key gets a fresh seq and is
+/// revisited by in-flight iterators per §24.1.5. Original JS keys are
+/// reconstructed via `map_key_to_js` — the MapKey encoding is lossless modulo
+/// -0→+0 normalization, which the spec requires anyway (§24.1.3.9 step 4).
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, Dispatch, JsBool,
@@ -30,10 +32,8 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/int
-import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
-import gleam/set
 import gleam/string
 
 // ============================================================================
@@ -138,12 +138,21 @@ fn map_constructor(
   // Step 4: If iterable is undefined or null, return empty map.
   case args {
     [] | [JsUndefined, ..] | [value.JsNull, ..] -> {
-      let #(heap, ref) = alloc_map(state.heap, proto, dict.new(), [], 0)
+      let #(heap, ref) =
+        alloc_map(state.heap, proto, dict.new(), dict.new(), dict.new(), 0)
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
     [iterable, ..] ->
       // Step 7: AddEntriesFromIterable (simplified — only array of arrays)
-      add_entries_from_iterable(state, proto, iterable, dict.new(), [], 0)
+      add_entries_from_iterable(
+        state,
+        proto,
+        iterable,
+        dict.new(),
+        dict.new(),
+        dict.new(),
+        0,
+      )
   }
 }
 
@@ -152,10 +161,15 @@ fn alloc_map(
   heap: Heap,
   proto: Ref,
   entries: dict.Dict(MapKey, JsValue),
-  keys_rev: List(MapKey),
-  keys_len: Int,
+  seqs: dict.Dict(MapKey, Int),
+  order: dict.Dict(Int, MapKey),
+  next_seq: Int,
 ) -> #(Heap, Ref) {
-  common.alloc_wrapper(heap, MapObject(entries:, keys_rev:, keys_len:), proto)
+  common.alloc_wrapper(
+    heap,
+    MapObject(entries:, seqs:, order:, next_seq:),
+    proto,
+  )
 }
 
 /// Simplified AddEntriesFromIterable — handles array of [key, value] pairs.
@@ -176,8 +190,9 @@ fn add_entries_from_iterable(
   proto: Ref,
   iterable: JsValue,
   entries: dict.Dict(MapKey, JsValue),
-  keys_rev: List(MapKey),
-  keys_len: Int,
+  seqs: dict.Dict(MapKey, Int),
+  order: dict.Dict(Int, MapKey),
+  next_seq: Int,
 ) -> #(State, Result(JsValue, JsValue)) {
   case iterable {
     JsObject(iter_ref) ->
@@ -191,13 +206,44 @@ fn add_entries_from_iterable(
             0,
             length,
             entries,
-            keys_rev,
-            keys_len,
+            seqs,
+            order,
+            next_seq,
           )
         None ->
           state.type_error(state, "Iterator value is not an entry-like object")
       }
     _ -> state.type_error(state, string.inspect(iterable) <> " is not iterable")
+  }
+}
+
+/// §24.1.1.2 steps 4.e-f: read an entry's [key, value]. Arrays use the fast
+/// element store; any other object goes through real [[Get]]s of "0"/"1"
+/// (which may run getters/proxy traps and therefore throw).
+fn read_entry_kv(
+  state: State,
+  entry_ref: Ref,
+) -> Result(#(JsValue, JsValue, State), #(JsValue, State)) {
+  case heap.read_array(state.heap, entry_ref) {
+    Some(#(_, entry_elems)) ->
+      Ok(#(
+        elements.get(entry_elems, 0),
+        elements.get(entry_elems, 1),
+        state,
+      ))
+    None -> {
+      use #(key, state) <- result.try(property.get_elem_value(
+        state,
+        entry_ref,
+        value.JsString("0"),
+      ))
+      use #(val, state) <- result.map(property.get_elem_value(
+        state,
+        entry_ref,
+        value.JsString("1"),
+      ))
+      #(key, val, state)
+    }
   }
 }
 
@@ -209,31 +255,38 @@ fn add_entries_loop(
   idx: Int,
   length: Int,
   entries: dict.Dict(MapKey, JsValue),
-  keys_rev: List(MapKey),
-  keys_len: Int,
+  seqs: dict.Dict(MapKey, Int),
+  order: dict.Dict(Int, MapKey),
+  next_seq: Int,
 ) -> #(State, Result(JsValue, JsValue)) {
   case idx >= length {
     True -> {
-      // Done — allocate the map with all entries. keys_rev already reversed.
+      // Done — allocate the map with all entries.
       let #(heap, ref) =
-        alloc_map(state.heap, proto, entries, keys_rev, keys_len)
+        alloc_map(state.heap, proto, entries, seqs, order, next_seq)
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
     False -> {
       let entry = elements.get(elements, idx)
-      // Each entry must be an array-like [key, value]
+      // §24.1.1.2 AddEntriesFromIterable steps 4.c-f: any OBJECT is
+      // entry-like — k/v come from Get(entry, "0") / Get(entry, "1").
       case entry {
         JsObject(entry_ref) ->
-          case heap.read_array(state.heap, entry_ref) {
-            Some(#(_, entry_elems)) -> {
-              let key = elements.get(entry_elems, 0)
-              let val = elements.get(entry_elems, 1)
+          case read_entry_kv(state, entry_ref) {
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+            Ok(#(key, val, state)) -> {
               let map_key = value.js_to_map_key(key)
               // If key already exists, update value only (keep first-occurrence
               // insertion position per spec)
-              let #(keys_rev, keys_len) = case dict.has_key(entries, map_key) {
-                True -> #(keys_rev, keys_len)
-                False -> #([map_key, ..keys_rev], keys_len + 1)
+              let #(seqs, order, next_seq) = case
+                dict.has_key(entries, map_key)
+              {
+                True -> #(seqs, order, next_seq)
+                False -> #(
+                  dict.insert(seqs, map_key, next_seq),
+                  dict.insert(order, next_seq, map_key),
+                  next_seq + 1,
+                )
               }
               let entries = dict.insert(entries, map_key, val)
               add_entries_loop(
@@ -243,17 +296,11 @@ fn add_entries_loop(
                 idx + 1,
                 length,
                 entries,
-                keys_rev,
-                keys_len,
+                seqs,
+                order,
+                next_seq,
               )
             }
-            None ->
-              state.type_error(
-                state,
-                "Iterator value "
-                  <> int.to_string(idx)
-                  <> " is not an entry-like object",
-              )
           }
         _ ->
           state.type_error(
@@ -286,7 +333,7 @@ fn map_get(
 ) -> #(State, Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
-  use entries, _keys_rev, _keys_len, _ref, state <- require_map(this, state)
+  use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
   // Steps 3-4: Look up key
   let map_key = value.js_to_map_key(key_arg)
   let result = case dict.get(entries, map_key) {
@@ -325,27 +372,25 @@ fn map_set(
     [] -> #(JsUndefined, JsUndefined)
   }
   // Steps 1-2: RequireInternalSlot
-  use entries, keys_rev, keys_len, ref, state <- require_map(this, state)
+  use entries, seqs, order, next_seq, ref, state <- require_map(this, state)
 
   // Step 4 (-0 → +0) happens inside js_to_map_key
   let map_key = value.js_to_map_key(key_arg)
-  // Step 3: Check if key already exists
-  let #(keys_rev, keys_len) = case dict.has_key(entries, map_key) {
-    True -> #(keys_rev, keys_len)
-    False -> #([map_key, ..keys_rev], keys_len + 1)
+  // Step 3: existing key keeps its insertion position (seq); a new key —
+  // including a deleted-then-re-added one — appends at next_seq, past every
+  // live iterator's cursor.
+  let #(seqs, order, next_seq) = case dict.has_key(entries, map_key) {
+    True -> #(seqs, order, next_seq)
+    False -> #(
+      dict.insert(seqs, map_key, next_seq),
+      dict.insert(order, next_seq, map_key),
+      next_seq + 1,
+    )
   }
   let entries = dict.insert(entries, map_key, val_arg)
 
-  // Compact tombstones/dupes when the list has grown to 2× live entries.
-  // Bounds worst-case list bloat under delete+re-add cycles.
-  let size = dict.size(entries)
-  let #(keys_rev, keys_len) = case keys_len > size * 2 {
-    True -> #(compact_keys(keys_rev, entries), size)
-    False -> #(keys_rev, keys_len)
-  }
-
   // Write updated MapObject back to heap
-  let heap = update_map_data(state.heap, ref, entries, keys_rev, keys_len)
+  let heap = update_map_data(state.heap, ref, entries, seqs, order, next_seq)
 
   // Step 7: Return M
   #(State(..state, heap:), Ok(this))
@@ -369,7 +414,7 @@ fn map_has(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use entries, _keys_rev, _keys_len, _ref, state <- require_map(this, state)
+  use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
   #(state, Ok(JsBool(dict.has_key(entries, map_key))))
 }
@@ -389,23 +434,24 @@ fn map_has(
 ///         iii. Return true.
 ///   4. Return false.
 ///
-/// Tombstone delete: remove from entries dict only. The key stays in keys_rev
-/// and is skipped at iteration time via dict lookup. Compaction in map_set
-/// bounds list growth.
+/// Removes the record entirely; the seq gap left in `order` is the spec's
+/// emptied record (skipped by iterator cursors in O(1)).
 fn map_delete(
   this: JsValue,
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use entries, keys_rev, keys_len, ref, state <- require_map(this, state)
+  use entries, seqs, order, next_seq, ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
-  case dict.has_key(entries, map_key) {
-    False -> #(state, Ok(JsBool(False)))
-    True -> {
+  case dict.get(seqs, map_key) {
+    Error(Nil) -> #(state, Ok(JsBool(False)))
+    Ok(seq) -> {
       let entries = dict.delete(entries, map_key)
-      // Leave keys_rev untouched — tombstone skipped at iteration time.
-      let heap = update_map_data(state.heap, ref, entries, keys_rev, keys_len)
+      let seqs = dict.delete(seqs, map_key)
+      let order = dict.delete(order, seq)
+      let heap =
+        update_map_data(state.heap, ref, entries, seqs, order, next_seq)
       #(State(..state, heap:), Ok(JsBool(True)))
     }
   }
@@ -427,8 +473,18 @@ fn map_clear(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _entries, _keys_rev, _keys_len, ref, state <- require_map(this, state)
-  let heap = update_map_data(state.heap, ref, dict.new(), [], 0)
+  use _entries, _seqs, _order, next_seq, ref, state <- require_map(this, state)
+  // next_seq is preserved: clear() empties the spec's records but appends
+  // still land past in-flight iterator cursors, so they remain visited.
+  let heap =
+    update_map_data(
+      state.heap,
+      ref,
+      dict.new(),
+      dict.new(),
+      dict.new(),
+      next_seq,
+    )
   #(State(..state, heap:), Ok(JsUndefined))
 }
 
@@ -469,45 +525,48 @@ fn map_for_each(
       )
     True -> {
       // Steps 1-2: RequireInternalSlot
-      use entries, keys_rev, _keys_len, _ref, state <- require_map(this, state)
-      // Steps 4-5: Iterate in insertion order. keys_rev is reversed and may
-      // contain tombstones + duplicates from delete+re-add cycles. Dedup by
-      // folding newest-first with a seen-set and prepending — result is
-      // forward-ordered with each key at its LATEST insertion position.
-      let ordered = iteration_order(keys_rev, entries)
-      for_each_loop(state, entries, ordered, cb, this_arg, this)
+      use _entries, _seqs, _order, _next_seq, ref, state <- require_map(
+        this,
+        state,
+      )
+      // Steps 4-5: LIVE iteration by seq cursor — the source is re-read from
+      // the heap each step, so entries the callback deletes before being
+      // reached are skipped and entries it adds (including delete + re-add)
+      // are visited, per the spec's index-based [[MapData]] walk.
+      for_each_loop(state, ref, 0, cb, this_arg, this)
     }
   }
 }
 
-/// Inner loop for Map.prototype.forEach — iterates keys in insertion order.
+/// Inner loop for Map.prototype.forEach — advances a seq cursor over the
+/// source Map's live records, re-reading the source each step.
 fn for_each_loop(
   state: State,
-  entries: dict.Dict(MapKey, JsValue),
-  keys: List(MapKey),
+  ref: Ref,
+  cursor: Int,
   cb: JsValue,
   this_arg: JsValue,
   map_this: JsValue,
 ) -> #(State, Result(JsValue, JsValue)) {
-  case keys {
-    [] -> #(state, Ok(JsUndefined))
-    [map_key, ..rest] ->
-      case dict.get(entries, map_key) {
-        Error(Nil) ->
-          for_each_loop(state, entries, rest, cb, this_arg, map_this)
-        Ok(val) -> {
-          // Reconstruct original JS key. map_key_to_js is lossless (-0 already
-          // normalized to +0 per spec §24.1.3.9 step 4).
-          let original_key = value.map_key_to_js(map_key)
-          // Step 5a.i: Call(callbackfn, thisArg, « e.[[Value]], e.[[Key]], M »)
-          use _result, state <- state.try_call(state, cb, this_arg, [
-            val,
-            original_key,
-            map_this,
-          ])
-          for_each_loop(state, entries, rest, cb, this_arg, map_this)
-        }
-      }
+  let next = case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind: MapObject(entries:, order:, next_seq:, ..), ..)) ->
+      value.entry_from_seq(entries, order, cursor, next_seq)
+    _ -> None
+  }
+  case next {
+    None -> #(state, Ok(JsUndefined))
+    Some(#(seq, map_key, val)) -> {
+      // Reconstruct original JS key. map_key_to_js is lossless (-0 already
+      // normalized to +0 per spec §24.1.3.9 step 4).
+      let original_key = value.map_key_to_js(map_key)
+      // Step 5a.i: Call(callbackfn, thisArg, « e.[[Value]], e.[[Key]], M »)
+      use _result, state <- state.try_call(state, cb, this_arg, [
+        val,
+        original_key,
+        map_this,
+      ])
+      for_each_loop(state, ref, seq + 1, cb, this_arg, map_this)
+    }
   }
 }
 
@@ -527,7 +586,7 @@ fn map_get_size(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use entries, _keys_rev, _keys_len, _ref, state <- require_map(this, state)
+  use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
   let size = dict.size(entries)
   #(state, Ok(value.from_int(size)))
 }
@@ -536,27 +595,22 @@ fn map_get_size(
 // Map.prototype.keys() / values() / entries() — ES2024 §24.1.3.8/11/4
 // ============================================================================
 
-/// CreateMapIterator (§24.1.5.1) — snapshot forward-order (key,value) pairs
-/// and wrap in a MapIteratorObject. The iterator's `kind` controls what
-/// .next() yields (key only / value only / [key,value] array).
+/// CreateMapIterator (§24.1.5.1) — a LIVE iterator over the source Map.
+/// The iterator's `kind` controls what .next() yields (key only / value
+/// only / [key,value] array); entries added during iteration are visited.
 fn map_iterator(
   this: JsValue,
   state: State,
   kind: value.MapIterKind,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use entries, keys_rev, _len, _ref, state <- require_map(this, state)
-  let snapshot =
-    iteration_order(keys_rev, entries)
-    |> list.filter_map(fn(k) {
-      dict.get(entries, k) |> result.map(fn(v) { #(value.map_key_to_js(k), v) })
-    })
-  let #(heap, ref) =
+  use _entries, _seqs, _order, _next_seq, ref, state <- require_map(this, state)
+  let #(heap, iter_ref) =
     common.alloc_wrapper(
       state.heap,
-      value.MapIteratorObject(remaining: snapshot, kind:),
+      value.MapIteratorObject(source: ref, cursor: 0, done: False, kind:),
       state.builtins.map_iterator_proto,
     )
-  #(State(..state, heap:), Ok(JsObject(ref)))
+  #(State(..state, heap:), Ok(JsObject(iter_ref)))
 }
 
 // ============================================================================
@@ -566,19 +620,25 @@ fn map_iterator(
 /// RequireInternalSlot(M, [[MapData]]) — validates that `this` is a Map object
 /// and extracts its internal data.
 ///
-/// Calls `cont` with the entries dict, reversed keys list, tracked length,
-/// heap ref, and state. Returns TypeError if `this` is not a Map.
+/// Calls `cont` with the entries dict, the seqs/order dicts, the next seq
+/// number, heap ref, and state. Returns TypeError if `this` is not a Map.
 fn require_map(
   this: JsValue,
   state: State,
-  cont: fn(dict.Dict(MapKey, JsValue), List(MapKey), Int, Ref, State) ->
-    #(State, Result(JsValue, JsValue)),
+  cont: fn(
+    dict.Dict(MapKey, JsValue),
+    dict.Dict(MapKey, Int),
+    dict.Dict(Int, MapKey),
+    Int,
+    Ref,
+    State,
+  ) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: MapObject(entries:, keys_rev:, keys_len:), ..)) ->
-          cont(entries, keys_rev, keys_len, ref, state)
+        Some(ObjectSlot(kind: MapObject(entries:, seqs:, order:, next_seq:), ..)) ->
+          cont(entries, seqs, order, next_seq, ref, state)
         _ ->
           state.type_error(
             state,
@@ -598,42 +658,9 @@ fn update_map_data(
   h: Heap,
   ref: Ref,
   entries: dict.Dict(MapKey, JsValue),
-  keys_rev: List(MapKey),
-  keys_len: Int,
+  seqs: dict.Dict(MapKey, Int),
+  order: dict.Dict(Int, MapKey),
+  next_seq: Int,
 ) -> Heap {
-  heap.update_kind(h, ref, MapObject(entries:, keys_rev:, keys_len:))
-}
-
-/// Derive forward iteration order from a reversed, possibly-dirty key list.
-/// Walks keys_rev newest-first, prepending live unseen keys to the accumulator.
-/// Result is forward-ordered with each key at its most recent insertion
-/// position (re-added-after-delete keys appear at their new position, not the
-/// stale tombstone position).
-fn iteration_order(
-  keys_rev: List(MapKey),
-  entries: dict.Dict(MapKey, JsValue),
-) -> List(MapKey) {
-  let #(ordered, _seen) =
-    list.fold(keys_rev, #([], set.new()), fn(acc, k) {
-      let #(ks, seen) = acc
-      case set.contains(seen, k) {
-        True -> acc
-        False ->
-          case dict.has_key(entries, k) {
-            False -> acc
-            True -> #([k, ..ks], set.insert(seen, k))
-          }
-      }
-    })
-  ordered
-}
-
-/// Rebuild keys_rev dropping tombstones and duplicates. Same dedup walk as
-/// iteration_order but re-reverses the result so it stays in reversed storage
-/// order. Called when keys_len exceeds 2× live size.
-fn compact_keys(
-  keys_rev: List(MapKey),
-  entries: dict.Dict(MapKey, JsValue),
-) -> List(MapKey) {
-  iteration_order(keys_rev, entries) |> list.reverse
+  heap.update_kind(h, ref, MapObject(entries:, seqs:, order:, next_seq:))
 }

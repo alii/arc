@@ -30,7 +30,10 @@ pub type ModuleItem {
 
 pub type ImportSpecifier {
   ImportDefaultSpecifier(local: String)
-  ImportNamespaceSpecifier(local: String)
+  /// `import * as local` (deferred: False) or `import defer * as local`
+  /// (deferred: True, the defer-import-eval proposal — evaluation of the
+  /// imported module is deferred until its namespace is first accessed).
+  ImportNamespaceSpecifier(local: String, deferred: Bool)
   ImportNamedSpecifier(imported: String, local: String)
 }
 
@@ -149,6 +152,13 @@ pub type VariableKind {
   Let
   Const
   Var
+  /// `using x = expr` — Explicit Resource Management. Const-like binding
+  /// whose resource is disposed ([Symbol.dispose]) when the containing
+  /// block/loop/function body completes. Desugared by the compiler before
+  /// op emission — emit never sees this kind in a compiled declaration.
+  Using
+  /// `await using x = expr` — async variant ([Symbol.asyncDispose], awaited).
+  AwaitUsing
 }
 
 pub type VariableDeclarator {
@@ -158,6 +168,8 @@ pub type VariableDeclarator {
 pub type Expression {
   Identifier(name: String)
   NumberLiteral(value: Float)
+  /// BigInt literal (`7n`, `0xFFn`). Value is exact — BEAM ints are bignums.
+  BigIntLiteral(value: Int)
   StringExpression(value: String)
   BooleanLiteral(value: Bool)
   NullLiteral
@@ -211,14 +223,57 @@ pub type Expression {
   SequenceExpression(expressions: List(Expression))
   SpreadElement(argument: Expression)
   TemplateLiteral(quasis: List(String), expressions: List(Expression))
-  TaggedTemplateExpression(tag: Expression, quasi: Expression)
+  /// Tagged template: tag`raw0 ${e0} raw1`. `cooked` holds the decoded
+  /// template values (None when a quasi contains an invalid escape sequence —
+  /// legal in tagged templates, the cooked entry becomes undefined). `raw`
+  /// holds the verbatim source text of each quasi (line endings normalized
+  /// to LF per the spec's TRV definition).
+  TaggedTemplateExpression(
+    tag: Expression,
+    cooked: List(Option(String)),
+    raw: List(String),
+    expressions: List(Expression),
+  )
   MetaProperty(meta: String, property: String)
-  ImportExpression(source: Expression, options: Option(Expression))
+  ImportExpression(
+    source: Expression,
+    options: Option(Expression),
+    phase: ImportPhase,
+  )
   RegExpLiteral(pattern: String, flags: String)
   /// Preserves parenthesization so the compiler can distinguish `x` from `(x)`.
   /// Needed for ES spec §13.15.2: IsIdentifierRef returns false for
   /// CoverParenthesizedExpressionAndArrowParameterList.
   ParenthesizedExpression(expression: Expression)
+  /// Internal-only — never produced by the parser. Synthesized by the
+  /// using-declaration desugar: CreateDisposableResource(argument, hint).
+  /// Evaluates to a 0-arity disposer callable (calls the captured
+  /// [Symbol.dispose]/[Symbol.asyncDispose] method with the resource as
+  /// `this`), or undefined when argument is null/undefined. Throws
+  /// TypeError when the value is not disposable.
+  IntrinsicGetDisposer(argument: Expression, is_async: Bool)
+  /// Internal-only — never produced by the parser. Synthesized by the
+  /// using-declaration desugar: DisposeResources step 3.e.iii — a new
+  /// SuppressedError with .error = error and .suppressed = suppressed.
+  IntrinsicMakeSuppressed(error: Expression, suppressed: Expression)
+  /// Internal-only — never produced by the parser. Synthesized by the
+  /// compiler when lowering TaggedTemplateExpression: evaluates to the
+  /// per-site cached template object (GetTemplateObject, §13.2.8.4).
+  /// `site` is a globally unique call-site id baked in at compile time.
+  IntrinsicTemplateObject(
+    site: Int,
+    cooked: List(Option(String)),
+    raw: List(String),
+  )
+}
+
+/// §13.3.10 ImportCall phase: `import(x)` (evaluation), `import.source(x)`
+/// (source-phase-imports proposal), `import.defer(x)` (defer-import-eval
+/// proposal).
+pub type ImportPhase {
+  PhaseEvaluation
+  PhaseSource
+  PhaseDefer
 }
 
 pub type ArrowBody {

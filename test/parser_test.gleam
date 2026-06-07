@@ -15,6 +15,11 @@ const outdated_fail_tests = [
   // is valid syntax now, but test262-parser-tests predates this spec addition.
   "98204d734f8c72b3.js",
   "ef81b93cf9bdb4ec.js",
+  // `func() = 4` — Annex B AssignmentTargetType ~web-compat~: a CallExpression
+  // assignment target parses in sloppy mode and throws ReferenceError at
+  // runtime. test262 annexB/language/expressions/assignmenttargettype/*
+  // requires parse success; this fixture predates the Annex B addition.
+  "a8beb1480f385441.js",
 ]
 
 /// Determine parse mode from filename — files with ".module." parse as module.

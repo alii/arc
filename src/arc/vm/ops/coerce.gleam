@@ -9,8 +9,9 @@ import arc/vm/value.{
   NaN, NativeFunction, NegInfinity, ObjectSlot,
 }
 import gleam/int
-import gleam/option.{Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 
 // ============================================================================
 // ToPrimitive / ToString with VM re-entry (ES2024 §7.1.1, §7.1.12)
@@ -50,8 +51,9 @@ pub fn to_primitive(
         val,
       ))
       case exotic_fn {
-        // @@toPrimitive not found → fall through to OrdinaryToPrimitive
-        JsUndefined -> ordinary_to_primitive(state, val, ref, hint)
+        // @@toPrimitive not found (GetMethod treats undefined and null the
+        // same) → fall through to OrdinaryToPrimitive
+        JsUndefined | JsNull -> ordinary_to_primitive(state, val, ref, hint)
         _ ->
           case helpers.is_callable(state.heap, exotic_fn) {
             True -> {
@@ -225,34 +227,13 @@ pub fn js_instanceof(
     // Step 1: target must be an Object.
     JsObject(ctor_ref) ->
       case heap.read(state.heap, ctor_ref) {
-        // Step 4: IsCallable(target) — we check for function slot kinds.
+        // Step 4: IsCallable(target) — we check for function slot kinds
+        // (including callable proxies, §10.5.15).
         Some(ObjectSlot(kind: FunctionObject(..), ..))
-        | Some(ObjectSlot(kind: NativeFunction(..), ..)) -> {
-          // Step 5: OrdinaryHasInstance(target, V) — inlined below.
-          // OrdinaryHasInstance step 4: Let P be ? Get(C, "prototype").
-          use #(proto_val, state) <- result.try(object.get_value(
-            state,
-            ctor_ref,
-            value.Named("prototype"),
-            constructor,
-          ))
-          case proto_val {
-            JsObject(proto_ref) ->
-              // OrdinaryHasInstance step 3: If O is not an Object, return false.
-              case left {
-                JsObject(obj_ref) ->
-                  // OrdinaryHasInstance step 6: prototype chain walk.
-                  Ok(#(instanceof_walk(state.heap, obj_ref, proto_ref), state))
-                _ -> Ok(#(False, state))
-              }
-            _ ->
-              // OrdinaryHasInstance step 5: If P is not an Object, throw TypeError.
-              thrown_type_error(
-                state,
-                "Function has non-object prototype in instanceof check",
-              )
-          }
-        }
+        | Some(ObjectSlot(kind: NativeFunction(..), ..))
+        | Some(ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->
+          // Step 5: OrdinaryHasInstance(target, V).
+          ordinary_has_instance(state, ctor_ref, left)
         // Step 4: Not callable → TypeError.
         _ ->
           thrown_type_error(
@@ -266,23 +247,73 @@ pub fn js_instanceof(
   }
 }
 
-/// ES2024 §7.3.22 OrdinaryHasInstance ( C, O ) — step 6 (prototype chain walk)
+/// ES2024 §7.3.22 OrdinaryHasInstance ( C, O ), steps 2-7. The caller has
+/// already verified that `ctor_ref` is callable (step 1).
+pub fn ordinary_has_instance(
+  state: State,
+  ctor_ref: value.Ref,
+  left: JsValue,
+) -> Result(#(Bool, State), #(JsValue, State)) {
+  case heap.read(state.heap, ctor_ref) {
+    // Step 2: C has a [[BoundTargetFunction]] internal slot →
+    // return InstanceofOperator(O, BC).
+    Some(ObjectSlot(
+      kind: NativeFunction(value.Call(value.BoundFunction(target:, ..)), ..),
+      ..,
+    )) -> js_instanceof(state, left, JsObject(target))
+    _ ->
+      // Step 3: If O is not an Object, return false (before the Get —
+      // a throwing "prototype" getter must NOT fire for primitives).
+      case left {
+        JsObject(obj_ref) -> {
+          // Step 4: Let P be ? Get(C, "prototype").
+          use #(proto_val, state) <- result.try(object.get_value(
+            state,
+            ctor_ref,
+            value.Named("prototype"),
+            JsObject(ctor_ref),
+          ))
+          case proto_val {
+            JsObject(proto_ref) ->
+              // Step 7: prototype chain walk — stateful so a proxy on
+              // the chain fires its getPrototypeOf trap (§10.5.1).
+              instanceof_walk(state, obj_ref, proto_ref)
+            _ ->
+              // Step 5: If P is not an Object, throw TypeError.
+              thrown_type_error(
+                state,
+                "Function has non-object prototype in instanceof check",
+              )
+          }
+        }
+        _ -> Ok(#(False, state))
+      }
+  }
+}
+
+/// ES2024 §7.3.22 OrdinaryHasInstance ( C, O ) — step 7 (prototype chain
+/// walk). Stateful: each level goes through [[GetPrototypeOf]], which traps
+/// (and may throw) for proxies on the chain.
 fn instanceof_walk(
-  heap: Heap,
+  state: State,
   obj_ref: value.Ref,
   target_proto: value.Ref,
-) -> Bool {
-  // Step 6a: Get [[Prototype]] of current object.
-  case heap.read(heap, obj_ref) {
-    Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
+) -> Result(#(Bool, State), #(JsValue, State)) {
+  // Step 6a: Let O be ? O.[[GetPrototypeOf]]().
+  use #(proto_val, state) <- result.try(object.get_prototype_of_stateful(
+    state,
+    obj_ref,
+  ))
+  case proto_val {
+    JsObject(proto_ref) ->
       // Step 6c: SameValue(P, O) — compare by ref identity.
       case proto_ref.id == target_proto.id {
-        True -> True
+        True -> Ok(#(True, state))
         // Step 6: Repeat — walk up the chain.
-        False -> instanceof_walk(heap, proto_ref, target_proto)
+        False -> instanceof_walk(state, proto_ref, target_proto)
       }
     // Step 6b: O is null (no prototype) → return false.
-    _ -> False
+    _ -> Ok(#(False, state))
   }
 }
 
@@ -294,4 +325,64 @@ pub fn thrown_type_error(
 ) -> Result(a, #(JsValue, State)) {
   let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
   Error(#(err, State(..state, heap: h)))
+}
+
+/// §7.1.13 ToBigInt (CPS): ToPrimitive(number hint), then BigInt/Boolean/
+/// String per the conversion table; Number/Symbol/null/undefined → TypeError.
+pub fn to_bigint_cps(
+  state: State,
+  val: JsValue,
+  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case to_primitive(state, val, NumberHint) {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(prim, state)) ->
+      case prim {
+        JsBigInt(BigInt(n)) -> cont(n, state)
+        JsBool(True) -> cont(1, state)
+        JsBool(False) -> cont(0, state)
+        JsString(s) ->
+          case string_to_bigint(s) {
+            Some(n) -> cont(n, state)
+            None -> {
+              let #(heap, err) =
+                common.make_syntax_error(
+                  state.heap,
+                  state.builtins,
+                  "Cannot convert " <> s <> " to a BigInt",
+                )
+              #(State(..state, heap:), Error(err))
+            }
+          }
+        JsNumber(_) ->
+          state.type_error(state, "Cannot convert a Number to a BigInt")
+        JsSymbol(_) ->
+          state.type_error(state, "Cannot convert a Symbol to a BigInt")
+        JsNull -> state.type_error(state, "Cannot convert null to a BigInt")
+        _ -> state.type_error(state, "Cannot convert undefined to a BigInt")
+      }
+  }
+}
+
+/// §7.1.14 StringToBigInt — decimal (with sign) or 0x/0o/0b prefixed;
+/// empty/whitespace-only → 0; anything else fails.
+pub fn string_to_bigint(s: String) -> Option(Int) {
+  let s = string.trim(s)
+  case s {
+    "" -> Some(0)
+    "0x" <> rest | "0X" <> rest -> parse_radix_digits(rest, 16)
+    "0o" <> rest | "0O" <> rest -> parse_radix_digits(rest, 8)
+    "0b" <> rest | "0B" <> rest -> parse_radix_digits(rest, 2)
+    _ -> int.parse(s) |> option.from_result
+  }
+}
+
+/// Parse the digits after a 0x/0o/0b prefix. The grammar (§7.1.14
+/// NonDecimalIntegerLiteral) has no SignedInteger, so a sign here is a
+/// syntax error even though int.base_parse would accept it.
+fn parse_radix_digits(digits: String, base: Int) -> Option(Int) {
+  case digits {
+    "-" <> _ | "+" <> _ -> None
+    _ -> int.base_parse(digits, base) |> option.from_result
+  }
 }

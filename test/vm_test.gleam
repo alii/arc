@@ -52,6 +52,7 @@ fn make_func(
   FuncTemplate(
     name: None,
     arity: 0,
+    length: 0,
     local_count:,
     bytecode: tuple_array.from_list(bytecode),
     constants: tuple_array.from_list(constants),
@@ -63,6 +64,7 @@ fn make_func(
     is_generator: False,
     is_async: False,
     is_constructor: True,
+    is_class_constructor: False,
     local_names: None,
     lexical: opcode.no_lexical_slots,
     syntax_perms: opcode.script_perms,

@@ -8,6 +8,7 @@
          tree_array_reset/2, tree_array_sparse_fold/3]).
 -export([pid_to_string/1]).
 -export([receive_settle_only/0, receive_settle_or_subject/1, send_after/3, cancel_timer/1]).
+-export([receive_settle_only_timeout/1, receive_settle_or_subject_timeout/2]).
 -export([get_script_args/0, sleep/1]).
 -export([send_subject_message/3, receive_subject_message/1, receive_subject_message_timeout/2]).
 -export([select_message/1, select_message_timeout/2]).
@@ -16,8 +17,93 @@
 -export([string_index_of/3, string_last_index_of/3]).
 -export([string_cp_slice/3, string_cp_drop/2, string_cp_explode/1]).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1]).
--export([setup_locals_tuple/6]).
+-export([setup_locals_tuple/6, setup_locals_seeded/10]).
 -export([return_code_sentinel/0]).
+-export([float_same_term/2]).
+-export([unique_positive_integer/0]).
+-export([run_compile_task/2]).
+-export([with_exec_min_heap/1]).
+-export([heap_read/2]).
+
+%% Direct map lookup returning a Gleam Option. Hot path: the VM heap is a
+%% Gleam Dict (a bare Erlang map on this target) and read/2 is called for
+%% every property access.
+heap_read(Map, Key) ->
+    case Map of
+        #{Key := V} -> {some, V};
+        _ -> none
+    end.
+
+%% Run a 0-arity parse/compile task. For big sources the task runs in a
+%% short-lived process whose initial heap is sized to the source, for two
+%% reasons: parsing allocates large transient structures (token list, AST,
+%% IR) that the generational copying GC would otherwise re-copy many times
+%% as the live set grows (a 4MB-source eval spent ~3x longer in GC than in
+%% actual work), and process death frees everything at once with no sweep.
+%% Small sources (the overwhelmingly common case) stay in-process — a spawn
+%% plus result copy would cost more than it saves.
+-define(COMPILE_TASK_THRESHOLD, 262144).         %% bytes
+-define(COMPILE_HEAP_WORDS_PER_BYTE, 16).
+-define(COMPILE_HEAP_MAX_WORDS, 134217728).      %% 128M words (~1GB)
+
+run_compile_task(SourceBytes, Task) when SourceBytes < ?COMPILE_TASK_THRESHOLD ->
+    Task();
+run_compile_task(SourceBytes, Task) ->
+    Heap = min(SourceBytes * ?COMPILE_HEAP_WORDS_PER_BYTE,
+               ?COMPILE_HEAP_MAX_WORDS),
+    Self = self(),
+    Ref = make_ref(),
+    {Pid, MRef} = spawn_opt(
+        fun() -> Self ! {Ref, Task()} end,
+        [monitor, {min_heap_size, Heap}]),
+    receive
+        {Ref, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Pid, Reason} ->
+            %% The task crashed (it shouldn't — parse/compile return errors
+            %% as values). Propagate the same crash to the caller.
+            erlang:exit(Reason)
+    end.
+
+%% Run a 0-arity bytecode-execution task with this process's minimum heap
+%% size raised, restoring the previous value afterwards. The interpreter
+%% allocates heavily (every step rebuilds small tuples/maps), so starting
+%% from the default 233-word heap means the generational GC re-copies the
+%% growing live set dozens of times before the heap reaches a workable
+%% size — string-building loops were superlinear purely from that growth
+%% thrash. An 8M-word (64MB on 64-bit) floor skips the ramp-up entirely
+%% while staying cheap enough for the test262 runner's parallel per-test
+%% processes. Same trick as run_compile_task above, but in-process: the
+%% caller needs the result and the heap stays useful after the script ends.
+%%
+%% If the embedder capped the process with max_heap_size (the test runner
+%% kills workers above 10M words), the floor is clamped to a quarter of
+%% that cap: the young and old generations can each sit at the minimum
+%% size, so an uncapped floor would make the post-GC total exceed the cap
+%% and get healthy processes killed.
+-define(EXEC_MIN_HEAP_WORDS, 8388608).
+
+with_exec_min_heap(Task) ->
+    Task().
+
+with_exec_min_heap_disabled(Task) ->
+    Floor = case erlang:process_info(self(), max_heap_size) of
+        {max_heap_size, #{size := Cap}} when Cap > 0 ->
+            min(?EXEC_MIN_HEAP_WORDS, Cap div 4);
+        _ ->
+            ?EXEC_MIN_HEAP_WORDS
+    end,
+    Old = erlang:process_flag(min_heap_size, Floor),
+    try
+        Task()
+    after
+        erlang:process_flag(min_heap_size, Old)
+    end.
+
+%% Exact term equality for floats (=:=). Distinguishes -0.0 from +0.0
+%% (OTP 27+) — used by SameValue (§7.2.11).
+float_same_term(A, B) -> A =:= B.
 read_line(Prompt) ->
     case io:get_line(Prompt) of
         eof -> {error, nil};
@@ -62,6 +148,38 @@ array_repeat(_Value, _Count) ->
 %% the compiler so non-tail recursion is fine here.
 setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
     list_to_tuple(locals_env(Env, Seeds, Args, Arity, LocalCount, Undef)).
+
+%% Non-arrow locals build: the emitter allocates owned lexical slots
+%% contiguously after the captures in canonical order
+%% [this, active_func, home_object, new_target]. Ordinary functions own all
+%% four, so the hot clause writes the seed values inline — no intermediate
+%% seeds list. Script/eval/module bodies own a subset (e.g. RefThis only);
+%% they fall through to the generic per-Some path. LexicalSlots arrives as
+%% the Gleam record {lexical_slots, This, ActiveFunc, HomeObject, NewTarget}
+%% with {some, SlotIdx} | none fields.
+setup_locals_seeded(Env, {lexical_slots, {some, _}, {some, _}, {some, _}, {some, _}},
+                    This, FnObj, Home, NT, Args, Arity, LocalCount, Undef)
+        when LocalCount >= 4 ->
+    list_to_tuple(locals_env4(Env, This, FnObj, Home, NT, Args, Arity, LocalCount, Undef));
+setup_locals_seeded(Env, {lexical_slots, LT, LA, LH, LN},
+                    This, FnObj, Home, NT, Args, Arity, LocalCount, Undef) ->
+    S0 = seed(LN, NT, []),
+    S1 = seed(LH, Home, S0),
+    S2 = seed(LA, FnObj, S1),
+    Seeds = seed(LT, This, S2),
+    list_to_tuple(locals_env(Env, Seeds, Args, Arity, LocalCount, Undef)).
+
+seed(none, _Value, Acc) -> Acc;
+seed({some, _Idx}, Value, Acc) -> [Value | Acc].
+
+locals_env4([E | Env], This, FnObj, Home, NT, Args, Arity, N, Undef) when N > 4 ->
+    [E | locals_env4(Env, This, FnObj, Home, NT, Args, Arity, N - 1, Undef)];
+locals_env4([], This, FnObj, Home, NT, Args, Arity, N, Undef) when N >= 4 ->
+    [This, FnObj, Home, NT | locals_args(Args, Arity, N - 4, Undef)];
+locals_env4(Env, This, FnObj, Home, NT, Args, Arity, N, Undef) ->
+    %% Defensive: local_count exhausted mid-env (compiler bounds local_count,
+    %% so unreachable in practice) — match the generic truncation semantics.
+    locals_env(Env, [This, FnObj, Home, NT], Args, Arity, N, Undef).
 
 locals_env(_, _, _, _, 0, _) -> [];
 locals_env([E | Env], Seeds, Args, Arity, N, Undef) ->
@@ -326,6 +444,22 @@ receive_settle_or_subject(RefMap) ->
         {Ref, Pm} when is_map_key(Ref, RefMap) -> {subject_message, Ref, Pm}
     end.
 
+%% Timeout variants for embedder loops with pending host-timer / atomics
+%% deadlines: {error, nil} on timeout means a deadline is due — re-drain.
+receive_settle_only_timeout(Timeout) ->
+    receive
+        {settle_promise, _, _} = E -> {ok, E};
+        {receiver_timeout, _} = E -> {ok, E}
+    after Timeout -> {error, nil}
+    end.
+receive_settle_or_subject_timeout(RefMap, Timeout) ->
+    receive
+        {settle_promise, _, _} = E -> {ok, E};
+        {receiver_timeout, _} = E -> {ok, E};
+        {Ref, Pm} when is_map_key(Ref, RefMap) -> {ok, {subject_message, Ref, Pm}}
+    after Timeout -> {error, nil}
+    end.
+
 %% Subject-based selective receive. Messages are {Ref, PortableMessage} tuples
 %% where Ref is the subject's unique erlang:make_ref() tag.
 %% The BEAM optimizes receive on a bound ref by skipping older messages.
@@ -357,3 +491,6 @@ cancel_timer(TRef) ->
         false -> false;
         _TimeLeft -> true
     end.
+
+unique_positive_integer() ->
+    erlang:unique_integer([positive]).

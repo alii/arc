@@ -3,6 +3,7 @@
 /// Walks the AST and produces a list of EmitterOps — symbolic IR instructions
 /// mixed with scope markers. Variable references use string names (IrScopeGetVar),
 /// jump targets use integer label IDs (IrJump). These are resolved in Phase 2 and 3.
+import arc/compiler/using_desugar
 import arc/parser/ast
 import arc/vm/opcode.{
   type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
@@ -10,28 +11,39 @@ import arc/vm/opcode.{
   IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallMethod,
   IrCallMethodApply, IrCreateArguments, IrCreateRestArray, IrDeclareGlobalLex,
   IrDeclareGlobalVar, IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed, IrDeleteElem,
-  IrDeleteField, IrDup, IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetElem,
-  IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetLexical,
-  IrGetPrivateField, IrGetPrivateField2, IrGetPrototypeOf, IrGetSuperValue,
-  IrGetSuperValue2, IrGosub, IrInitGlobalLex, IrInitialYield,
-  IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
-  IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrMakeClosure, IrMakeMethod, IrNewObject, IrNewRegExp, IrObjectRestCopy,
-  IrObjectSpread, IrPop, IrPopTry, IrPrivateIn, IrPushConst, IrPushTry,
-  IrPutElem, IrPutField, IrPutPrivateField, IrPutSuperValue, IrRet, IrReturn,
-  IrScopeGetVar, IrScopeInitVar, IrScopePutVar, IrScopeReboxVar,
+  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed,
+  IrDefinePrivateAccessor, IrDefinePrivateField, IrDefinePrivateMethod,
+  IrDeleteElem, IrDeleteField, IrDup, IrForInNext, IrForInStart,
+  IrGetAsyncIterator, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
+  IrGetIterator, IrGetLexical, IrGetPrivateFieldDyn, IrGetPrivateFieldDyn2,
+  IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2, IrGosub, IrInitGlobalLex,
+  IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
+  IrIteratorNext, IrIteratorRecord, IrIteratorRest, IrJump, IrJumpIfFalse,
+  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure, IrMakeMethod,
+  IrNewObject, IrNewPrivateName, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
+  IrPop, IrPopTry, IrPrivateInDyn, IrPushConst, IrPushTry, IrPutElem, IrPutField,
+  IrPutPrivateFieldDyn, IrPutSuperValue, IrRet, IrReturn, IrScopeGetVar,
+  IrScopeGetVarThis, IrScopeInitVar, IrScopePutVar, IrScopeReboxVar,
   IrScopeTypeofVar, IrSetLine, IrSetProto, IrSetThis, IrSetupDerivedClass,
   IrSwap, IrThrow, IrThrowError, IrTypeOf, IrUnaryOp, IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
 }
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set.{type Set}
+
+/// Globally unique id for a tagged-template call site (GetTemplateObject
+/// cache key). Baked into bytecode at compile time so re-executing the same
+/// compiled site reuses its template object while each fresh compilation
+/// (repeated eval / new Function) gets distinct sites.
+@external(erlang, "arc_vm_ffi", "unique_positive_integer")
+fn unique_positive_integer() -> Int
 
 // ============================================================================
 // Types
@@ -53,6 +65,25 @@ pub type EmitterOp {
   /// at len(captures). Script/module/eval bodies emit RefThis only. Arrows
   /// skip — `IrGetLexical` resolves to a capture.
   DeclareLexical(ref: opcode.LexicalRef)
+  /// Annex B §B.3.2.3/.3.6 web-compat: hoist a sloppy-mode function-in-block
+  /// name as a var binding (undefined) at program/eval top level. Resolves to
+  /// IrDeclareGlobalVar (ToGlobal) or IrDeclareEvalVar (ToEvalEnv); dropped by
+  /// compile_eval_direct when the eval turns out strict (strict caller).
+  DeclareAnnexBVar(name: String)
+  /// Annex B §B.3.2.6 web-compat: when a FunctionDeclaration in a block is
+  /// evaluated in sloppy mode, copy the block-scoped function binding into
+  /// the enclosing VariableEnvironment binding of the same name (skipping
+  /// intermediate block scopes). Resolved by scope.gleam, which also skips
+  /// the copy entirely if an intermediate lexical binding shadows the name.
+  AnnexBPromote(name: String)
+  /// §14.11 `with`: mark the start of an object-environment scope. `name` is
+  /// the synthetic local holding the (ToObject'd) with object — declared in
+  /// the enclosing block scope just before this marker. Phase 2 routes any
+  /// name resolution that crosses this marker through IrWithGetVar /
+  /// IrWithPutVar / IrWithDeleteVar checks against that slot.
+  EnterWith(name: String)
+  /// Close the innermost EnterWith marker.
+  LeaveWith
 }
 
 pub type ScopeKind {
@@ -67,6 +98,12 @@ pub type BindingKind {
   ParamBinding
   CatchBinding
   CaptureBinding
+  /// §13.2.5.5 InstantiateOrdinaryFunctionExpression: the self-name binding
+  /// of a NAMED function expression — an immutable binding holding the
+  /// closure itself. Unlike ConstBinding, assignment only throws in strict
+  /// mode code; sloppy-mode writes are silently dropped (§9.1.1.1.5
+  /// SetMutableBinding on an immutable binding with S = false).
+  FnNameBinding
 }
 
 /// Where top-level let/const/class declarations land. Decided once per
@@ -86,6 +123,10 @@ pub type CompiledChild {
   CompiledChild(
     name: Option(String),
     arity: Int,
+    /// §15.1.5 ExpectedArgumentCount — value for the `length` property:
+    /// formal params before the first one with a default initializer
+    /// (rest param excluded). `arity` still counts all fixed params.
+    length: Int,
     code: List(EmitterOp),
     constants: List(JsValue),
     constants_map: Dict(JsValue, Int),
@@ -99,6 +140,9 @@ pub type CompiledChild {
     /// constructors; False for arrows, generators, async, and methods /
     /// getters / setters. (cf. QuickJS `is_constructor` / JSC `ConstructAbility`.)
     is_constructor: Bool,
+    /// §10.2.1 [[IsClassConstructor]]: true only for class constructors
+    /// (base and derived) — plain calls must throw TypeError.
+    is_class_constructor: Bool,
     /// True if this function contains a syntactic `eval(...)` call with
     /// identifier callee. Such functions get all locals boxed and a
     /// name→index table stored on FuncTemplate so direct eval can see them.
@@ -109,6 +153,11 @@ pub type CompiledChild {
     lexical_refs: opcode.LexicalRefs,
     /// Syntax-legality flags inherited by direct eval.
     syntax_perms: opcode.SyntaxPerms,
+    /// Synthetic with-object local names (innermost first) active in the
+    /// ENCLOSING scope chain at this closure's creation site. The child's
+    /// free-name resolution must check these objects (captured from the
+    /// parent) before falling through to outer bindings / globals.
+    with_stack: List(String),
   )
 }
 
@@ -194,6 +243,51 @@ pub opaque type Emitter {
     /// when the class has instance fields; arrows inherit it so `()=>super()`
     /// can find it.
     field_init: FieldInitMode,
+    /// True while emitting statements that sit directly in a Block (or switch
+    /// CaseBlock) — i.e. positions where a FunctionDeclaration is block-scoped
+    /// and a candidate for Annex B var promotion. False at function/program
+    /// top level (those declarations are var-scoped already).
+    in_block: Bool,
+    /// Lexical names declared by enclosing scope levels within the current
+    /// var-scope body (top-level let/const/class, enclosing blocks' lexical
+    /// names incl. their function declarations, destructured catch params,
+    /// for-head let/const). A block function declaration whose name is in
+    /// this set must NOT get the Annex B var promotion (§B.3.2: replacing it
+    /// with a VariableStatement would produce an early error).
+    annexb_blocked: Set(String),
+    /// Function declaration names of the CURRENT block level. They are
+    /// lexical names for any NESTED scope (folded into annexb_blocked when
+    /// descending) but must not block their own promotion at this level.
+    annexb_level_fns: Set(String),
+    /// Non-empty only while emitting formal-parameter initializers (default
+    /// values / destructuring defaults): the parameter-scope binding names
+    /// (parameters + implicit `arguments` for non-arrows). Attached to any
+    /// IrCallEval emitted in that region so EvalDeclarationInstantiation
+    /// (§19.2.1.1 step 3.d) can throw a SyntaxError when a sloppy direct
+    /// eval var-declares a name already bound in the parameter scope.
+    /// Reset to [] before the function body is emitted; nested functions
+    /// and arrows start from a fresh emitter so it never leaks into them.
+    param_scope_names: List(String),
+    /// Synthetic with-object local names (innermost first) for the `with`
+    /// statements lexically enclosing the current emission point — including
+    /// withs inherited from enclosing functions (child emitters copy the
+    /// parent's stack). Recorded on CompiledChild at closure creation so
+    /// nested functions route free names through the with objects.
+    with_stack: List(String),
+    /// Private names ("#x") visible at the current emission point — the
+    /// running [[PrivateEnvironment]] chain. compile_class prepends its
+    /// class's declared private names for the duration of the class body;
+    /// child function emitters inherit the parent's list. Stamped onto
+    /// IrCallEval so direct eval parses with the caller's private
+    /// environment (§19.2.1.1 PerformEval step 5).
+    private_env: List(String),
+    /// §14 completion values: Some(name) while emitting a loop / labeled /
+    /// switch statement in tail position (the eval/program completion value).
+    /// `name` is a synthetic block-scoped binding that tracks the spec's V:
+    /// expression statements store into it instead of popping; loops, if and
+    /// switch reset it to undefined on entry (UpdateEmpty with undefined).
+    /// Never inherited by child function emitters (fresh new_emitter()).
+    completion_var: Option(String),
   )
 }
 
@@ -259,9 +353,16 @@ pub fn emit_module(
   ),
   EmitError,
 ) {
+  // Only ANONYMOUS defaults need the synthetic *default* binding —
+  // `export default function fn() {}` / `class fn {}` declare `fn` itself
+  // (§16.2.3.7 BoundNames) and are lowered to ordinary declarations below.
   let has_default_export =
     list.any(items, fn(item) {
       case item {
+        ast.ExportDefaultDeclaration(ast.FunctionExpression(name: Some(_), ..)) ->
+          False
+        ast.ExportDefaultDeclaration(ast.ClassExpression(name: Some(_), ..)) ->
+          False
         ast.ExportDefaultDeclaration(_) -> True
         _ -> False
       }
@@ -288,25 +389,47 @@ fn emit_module_common(
   ),
   EmitError,
 ) {
-  let e = Emitter(..new_emitter(), strict: True)
+  // Module-top-level using declarations: lowered into prelude/body/dispose
+  // pieces. Exported bindings must stay module-scoped, so no AST try block —
+  // emit_module_using_top installs a scope-free try frame instead so the
+  // dispose sequence also runs on abrupt module-body completion (spec:
+  // Module Evaluation calls DisposeResources with the completion, normal OR
+  // throw). The flattened pieces feed the hoisting scans below — they
+  // contain every declaration of the original body exactly once.
+  let module_top = using_desugar.desugar_module_top(stmts)
+  let stmts = case module_top {
+    None -> stmts
+    Some(top) -> list.flatten([top.prelude, top.body, top.dispose])
+  }
+  let e =
+    Emitter(
+      ..new_emitter(),
+      strict: True,
+      annexb_blocked: top_lex_name_set(stmts),
+    )
   let e = emit_op(e, EnterScope(FunctionScope))
   // Module top-level `this === undefined` (§16.2.1.6.4). DeclareLexical
   // allocates slot 0; runtime padding leaves it JsUndefined.
   let e = emit_op(e, DeclareLexical(opcode.RefThis))
 
-  // Hoist var declarations
-  let hoisted_vars = collect_hoisted_vars(stmts)
+  // Hoist var declarations (top-level function names are var-scoped too)
+  let hoisted_vars =
+    list.append(collect_hoisted_vars(stmts), direct_fn_names(stmts))
+    |> list.unique
   let e =
     list.fold(hoisted_vars, e, fn(e, name) {
       emit_op(e, DeclareVar(name, VarBinding))
     })
 
   // Declare *default* binding if module has a default export. Per §16.2.1.6.2
-  // step 24.b.i this is CreateMutableBinding (not immutable), so LetBinding —
-  // also lets the synthetic `*default* = expr` assignment below pass the
-  // IrScopePutVar const-reassign check.
+  // step 24.b.i this is CreateMutableBinding (not immutable). VarBinding so
+  // the synthetic `*default* = expr` assignment below is a plain store: it
+  // passes the IrScopePutVar const-reassign check AND skips the let-store
+  // TDZ check (the binding is internal — user code can never reference
+  // `*default*` in its TDZ window; cyclic-import READS of the seeded export
+  // cell still TDZ-check in GetBoxed).
   let e = case has_default_export {
-    True -> emit_op(e, DeclareVar("*default*", LetBinding))
+    True -> emit_op(e, DeclareVar("*default*", VarBinding))
     False -> e
   }
 
@@ -331,11 +454,62 @@ fn emit_module_common(
       e
     })
 
-  use e <- result.try(emit_stmts_tail(e, stmts))
+  use e <- result.try(case module_top {
+    None -> emit_stmts_tail(e, stmts)
+    Some(top) -> emit_module_using_top(e, top)
+  })
 
   let e = emit_op(e, LeaveScope)
   let #(code, constants, constants_map, children) = finish(e)
   Ok(#(code, constants, constants_map, children, True, hoisted_funcs))
+}
+
+/// Module body containing top-level using declarations: emit the desugared
+/// pieces around a scope-free try frame. The body statements run at module
+/// scope (so exported const bindings stay module-scoped), while an abrupt
+/// completion is caught, folded into the completion state, and the
+/// DisposeResources sequence runs on both paths — its trailing
+/// `if (hasErr) throw err` rethrows the (possibly suppressed-error-folded)
+/// completion. Layout mirrors the try/catch (no finally) lowering in
+/// emit_stmt, minus the block scope around the protected statements.
+fn emit_module_using_top(
+  e: Emitter,
+  top: using_desugar.ModuleTop,
+) -> Result(Emitter, EmitError) {
+  let using_desugar.ModuleTop(
+    prelude:,
+    body:,
+    catch_param:,
+    catch_body:,
+    dispose:,
+  ) = top
+  use e <- result.try(emit_stmts(e, prelude))
+
+  let #(e, catch_label) = fresh_label(e)
+  let #(e, dispose_label) = fresh_label(e)
+
+  let e = emit_ir(e, IrPushTry(catch_label))
+  let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
+  use e <- result.try(emit_stmts(e, body))
+  let e = pop_loop(e)
+  let e = emit_ir(e, IrPopTry)
+  let e = emit_ir(e, IrJump(dispose_label))
+
+  // Handler: unwind_to_catch leaves stack = [thrown, ..base]. Bind the
+  // thrown value in a throwaway block scope and fold it into the
+  // module-scoped completion state declared by the prelude.
+  let e = emit_ir(e, IrLabel(catch_label))
+  let e = emit_op(e, EnterScope(BlockScope))
+  use e <- result.try(emit_destructuring_bind(
+    e,
+    ast.IdentifierPattern(catch_param),
+    CatchBinding,
+  ))
+  use e <- result.try(emit_stmts(e, catch_body))
+  let e = emit_op(e, LeaveScope)
+
+  let e = emit_ir(e, IrLabel(dispose_label))
+  emit_stmts_tail(e, dispose)
 }
 
 /// Convert module items to statements, stripping import/export wrappers.
@@ -349,6 +523,33 @@ fn module_items_to_stmts(
       ast.StatementItem(located) -> Ok(located)
       ast.ExportNamedDeclaration(option.Some(decl), _, _) ->
         Ok(ast.StmtWithLine(0, decl))
+      // §16.2.3.7: a NAMED default function/class declares its own binding
+      // (BoundNames = the name) — lower to the ordinary declaration so the
+      // function is hoisted and the name is a mutable module-level binding
+      // shared with the `default` export cell.
+      ast.ExportDefaultDeclaration(ast.FunctionExpression(
+        name: option.Some(_) as name,
+        params:,
+        body:,
+        is_generator:,
+        is_async:,
+      )) ->
+        Ok(ast.StmtWithLine(
+          0,
+          ast.FunctionDeclaration(
+            name:,
+            params:,
+            body:,
+            is_generator:,
+            is_async:,
+          ),
+        ))
+      ast.ExportDefaultDeclaration(ast.ClassExpression(
+        name: option.Some(_) as name,
+        super_class:,
+        body:,
+      )) ->
+        Ok(ast.StmtWithLine(0, ast.ClassDeclaration(name:, super_class:, body:)))
       ast.ExportDefaultDeclaration(expr) ->
         // Emit as: *default* = expr;
         // The *default* local is declared during module hoisting.
@@ -390,7 +591,13 @@ fn emit_program_common(
   // Detect top-level strict directive so child functions inherit.
   // Modules are always strict regardless of directives.
   let script_strict = force_strict || has_use_strict_directive(stmts)
-  let e = Emitter(..new_emitter(), strict: script_strict, top_lex:)
+  let e =
+    Emitter(
+      ..new_emitter(),
+      strict: script_strict,
+      top_lex:,
+      annexb_blocked: top_lex_name_set(stmts),
+    )
 
   // Wrap in function scope
   let e = emit_op(e, EnterScope(FunctionScope))
@@ -406,6 +613,28 @@ fn emit_program_common(
       emit_ir(e, IrDeclareGlobalVar(name))
     })
 
+  // Top-level function declaration names are var-scoped too.
+  let e =
+    list.fold(direct_fn_names(stmts), e, fn(e, name) {
+      emit_ir(e, IrDeclareGlobalVar(name))
+    })
+
+  // Annex B §B.3.2.2/.2.6: sloppy-mode function-in-block names get a var
+  // binding (undefined) before the body runs, unless blocked by a lexical
+  // declaration. DeclareAnnexBVar (not a plain declare) so compile_eval_direct
+  // can drop these when a direct eval turns out strict via its caller.
+  let e = case script_strict {
+    True -> e
+    False ->
+      // e.annexb_blocked is still the top_lex_name_set(stmts) computed at
+      // emitter construction — reuse it instead of rescanning all stmts.
+      list.fold(
+        collect_annexb_candidates_with(stmts, e.annexb_blocked),
+        e,
+        fn(e, name) { emit_op(e, DeclareAnnexBVar(name)) },
+      )
+  }
+
   // Hoist top-level let/const/class slots before hoisted-func MakeClosure so
   // closures capture the boxed slot, not a stale pre-box value. LexGlobal
   // skips this — those names live in the global lexical record and child
@@ -416,7 +645,16 @@ fn emit_program_common(
         let #(name, kind) = lex
         emit_op(e, DeclareVar(name, kind))
       })
-    LexGlobal -> e
+    // §16.1.7 GlobalDeclarationInstantiation: lexical declarations are
+    // instantiated (uninitialized — TDZ) before the script body runs, so a
+    // closure called before the `let` statement executes sees the TDZ
+    // binding (`(function() { x = 1; })(); let x;` → ReferenceError) instead
+    // of falling through to a global-object property write.
+    LexGlobal ->
+      list.fold(collect_top_lex_names(stmts), e, fn(e, lex) {
+        let #(name, kind) = lex
+        emit_ir(e, IrDeclareGlobalLex(name, kind == ConstBinding))
+      })
   }
 
   // Collect and emit hoisted function declarations
@@ -461,6 +699,13 @@ fn new_emitter() -> Emitter {
     top_lex: LexLocal,
     scope_depth: 0,
     field_init: NoFieldInit,
+    in_block: False,
+    annexb_blocked: set.new(),
+    annexb_level_fns: set.new(),
+    param_scope_names: [],
+    with_stack: [],
+    private_env: [],
+    completion_var: None,
   )
 }
 
@@ -564,24 +809,43 @@ fn push_const(e: Emitter, val: JsValue) -> Emitter {
 /// Private names lex as Identifier tokens with the "#" prefix included
 /// (lexer.gleam). Route them through the brand-checked private opcodes;
 /// everything else uses ordinary [[Get]]/[[Set]].
-fn get_field_op(name: String) -> IrOp {
+///
+/// Private access reads the per-class-evaluation PrivateName (a unique key
+/// string minted by NewPrivateName at class-definition time) from the
+/// class-scope const named after the source text ("#m") — the spec
+/// PrivateEnvironment chain mapped onto ordinary lexical scoping — then uses
+/// the Dyn opcode that takes the key from the stack.
+///
+/// Stack: [obj, ..] → [val, ..]
+fn emit_get_field(e: Emitter, name: String) -> Emitter {
   case name {
-    "#" <> _ -> IrGetPrivateField(name)
-    _ -> IrGetField(name)
+    "#" <> _ ->
+      e
+      |> emit_ir(IrScopeGetVar(name))
+      |> emit_ir(IrGetPrivateFieldDyn)
+    _ -> emit_ir(e, IrGetField(name))
   }
 }
 
-fn get_field2_op(name: String) -> IrOp {
+/// Stack: [obj, ..] → [val, obj, ..]
+fn emit_get_field2(e: Emitter, name: String) -> Emitter {
   case name {
-    "#" <> _ -> IrGetPrivateField2(name)
-    _ -> IrGetField2(name)
+    "#" <> _ ->
+      e
+      |> emit_ir(IrScopeGetVar(name))
+      |> emit_ir(IrGetPrivateFieldDyn2)
+    _ -> emit_ir(e, IrGetField2(name))
   }
 }
 
-fn put_field_op(name: String) -> IrOp {
+/// Stack: [val, obj, ..] → [val, ..]
+fn emit_put_field(e: Emitter, name: String) -> Emitter {
   case name {
-    "#" <> _ -> IrPutPrivateField(name)
-    _ -> IrPutField(name)
+    "#" <> _ ->
+      e
+      |> emit_ir(IrScopeGetVar(name))
+      |> emit_ir(IrPutPrivateFieldDyn)
+    _ -> emit_ir(e, IrPutField(name))
   }
 }
 
@@ -889,29 +1153,32 @@ fn emit_stmt_tail(
       // Tail position: keep value on stack (no IrPop)
       emit_expr(e, expr)
 
-    ast.BlockStatement(body) -> {
-      let e = emit_op(e, EnterScope(BlockScope))
-      use e <- result.map(emit_stmts_tail(e, body))
-      emit_op(e, LeaveScope)
-    }
+    ast.BlockStatement(body) -> emit_block(e, body, tail: True)
 
     ast.IfStatement(condition, consequent, alternate) -> {
       let #(e, else_label) = fresh_label(e)
       let #(e, end_label) = fresh_label(e)
       use e <- result.try(emit_expr(e, condition))
       let e = emit_ir(e, IrJumpIfFalse(else_label))
-      use e <- result.try(emit_stmt_tail(e, consequent))
+      use e <- result.try(emit_stmt_tail(e, block_wrap_fn_decl(consequent)))
       let e = emit_ir(e, IrJump(end_label))
       let e = emit_ir(e, IrLabel(else_label))
       let e = case alternate {
-        Some(alt) -> emit_stmt_tail(e, alt) |> result.unwrap(e)
+        Some(alt) ->
+          emit_stmt_tail(e, block_wrap_fn_decl(alt)) |> result.unwrap(e)
         None -> push_const(e, JsUndefined)
       }
       let e = emit_ir(e, IrLabel(end_label))
       Ok(e)
     }
 
-    ast.TryStatement(block, handler, _finalizer) -> {
+    // try with a finally: delegate to the full statement emitter (which
+    // runs the finalizer via Gosub), tracking the completion value in a
+    // synthetic binding (the finalizer body is excluded — §14.15.3: a
+    // normally-completing Finally never supplies the completion value).
+    ast.TryStatement(_, _, Some(_)) -> emit_stmt_tail_completion(e, stmt)
+
+    ast.TryStatement(block, handler, None) -> {
       case handler {
         Some(ast.CatchClause(param, catch_body)) -> {
           let #(e, catch_label) = fresh_label(e)
@@ -932,7 +1199,10 @@ fn emit_stmt_tail(
             None -> emit_ir(e, IrPop)
           }
 
+          let saved = e
+          let e = catch_annexb_ctx(e, param)
           use e <- result.try(emit_stmt_tail(e, catch_body))
+          let e = restore_annexb_ctx(e, saved)
           let e = emit_op(e, LeaveScope)
           let e = emit_ir(e, IrLabel(end_label))
           Ok(e)
@@ -940,6 +1210,21 @@ fn emit_stmt_tail(
         None -> emit_stmt_tail(e, block)
       }
     }
+
+    ast.WithStatement(object, body) -> emit_with(e, object, body, tail: True)
+
+    // §14.7/§14.12/§14.13 loops, labels and switch produce a completion
+    // value (the spec's V — last non-empty body statement value, kept across
+    // break/continue per UpdateEmpty). Track V in a synthetic block-scoped
+    // binding: expression statements in the subtree store into it instead of
+    // popping; nested loops/if/switch reset it to undefined on entry.
+    ast.WhileStatement(..)
+    | ast.DoWhileStatement(..)
+    | ast.ForStatement(..)
+    | ast.ForInStatement(..)
+    | ast.ForOfStatement(..)
+    | ast.LabeledStatement(..)
+    | ast.SwitchStatement(..) -> emit_stmt_tail_completion(e, stmt)
 
     // All other statements: delegate to regular emit_stmt, then push undefined
     // as the completion value
@@ -950,18 +1235,220 @@ fn emit_stmt_tail(
   }
 }
 
+/// Tail-position emission via the completion-value mechanism: declare a
+/// synthetic block-scoped binding initialized to undefined, emit the
+/// statement with Emitter.completion_var set (expression statements in the
+/// subtree store into it; loops/if/switch/try reset it on entry), then read
+/// the binding back as the statement's completion value.
+fn emit_stmt_tail_completion(
+  e: Emitter,
+  stmt: ast.Statement,
+) -> Result(Emitter, EmitError) {
+  let #(e, uniq) = fresh_label(e)
+  let name = "<cptn" <> int.to_string(uniq) <> ">"
+  let saved_var = e.completion_var
+  let e = emit_op(e, EnterScope(BlockScope))
+  let e = emit_op(e, DeclareVar(name, LetBinding))
+  let e = push_const(e, JsUndefined)
+  let e = emit_ir(e, IrScopeInitVar(name))
+  let e = Emitter(..e, completion_var: Some(name))
+  use e <- result.map(emit_stmt(e, stmt))
+  let e = Emitter(..e, completion_var: saved_var)
+  let e = emit_ir(e, IrScopeGetVar(name))
+  emit_op(e, LeaveScope)
+}
+
 /// Emit an IrSetLine for the statement's source line (so `Error.stack` can
 /// report it), unless the line is 0 — the sentinel for synthetic statements
 /// the parser never produced (class field inits, desugared arrow bodies).
 fn set_line(e: Emitter, line: Int) -> Emitter {
   case line {
     0 -> e
-    _ -> emit_ir(e, IrSetLine(line))
+    _ ->
+      case e.code {
+        // An immediately preceding SetLine is dead — no op executes between
+        // the two — so replace it instead of stacking markers. Statements
+        // that compile to nothing (e.g. elided empty blocks) would otherwise
+        // emit one IrSetLine each.
+        [Ir(IrSetLine(prev)), ..rest] ->
+          case prev == line {
+            True -> e
+            False -> Emitter(..e, code: [Ir(IrSetLine(line)), ..rest])
+          }
+        _ -> emit_ir(e, IrSetLine(line))
+      }
   }
+}
+
+/// Emit a Block statement: enter scope, perform BlockDeclarationInstantiation
+/// (§14.2.3 — block-scoped let/const slots + function declarations
+/// instantiated at block entry), emit body, leave scope. Threads the Annex B
+/// promotion context (see Emitter.annexb_blocked) for nested declarations.
+fn emit_block(
+  e: Emitter,
+  body: List(ast.StmtWithLine),
+  tail tail: Bool,
+) -> Result(Emitter, EmitError) {
+  // Lower any direct using/await-using declarations BEFORE the lexical-name
+  // and Annex B scans below — the desugar moves the block's statements into
+  // a try block and rewrites using → const.
+  let body = using_desugar.desugar_list(body)
+  // Scope elision (V8/SpiderMonkey do the same): a block that declares
+  // nothing block-scoped creates no bindings, so the scope — and all the
+  // Annex B context bookkeeping, whose effect would be a no-op fold of
+  // empty sets — is skipped entirely. Keeps `{}`-heavy code (e.g. the 2^21
+  // empty blocks of staging/sm/regress/regress-610026.js) out of
+  // EnterScope/LeaveScope and runtime env churn.
+  use <- bool.lazy_guard(!block_has_declarations(body), fn() {
+    case tail {
+      True -> emit_stmts_tail(e, body)
+      False -> emit_stmts(e, body)
+    }
+  })
+  let saved = e
+  let e = emit_op(e, EnterScope(BlockScope))
+  let e =
+    Emitter(
+      ..e,
+      in_block: True,
+      annexb_blocked: set.union(
+        set.union(e.annexb_blocked, e.annexb_level_fns),
+        top_lex_name_set(body),
+      ),
+      annexb_level_fns: set.from_list(direct_fn_names(body)),
+    )
+  let e = emit_block_declarations(e, body)
+  use e <- result.map(case tail {
+    True -> emit_stmts_tail(e, body)
+    False -> emit_stmts(e, body)
+  })
+  let e = restore_annexb_ctx(e, saved)
+  emit_op(e, LeaveScope)
+}
+
+/// §14.2.3 BlockDeclarationInstantiation: hoist the block's let/const/class
+/// slots (so closures capture boxed cells, and TDZ holds from block entry),
+/// then create + initialize the block-scoped bindings for the block's
+/// function declarations. Two passes over the declarations so mutually
+/// recursive block functions see each other's slots at MakeClosure time.
+fn emit_block_declarations(
+  e: Emitter,
+  body: List(ast.StmtWithLine),
+) -> Emitter {
+  let e =
+    list.fold(collect_top_lex_names(body), e, fn(e, lex) {
+      let #(name, kind) = lex
+      emit_op(e, DeclareVar(name, kind))
+    })
+  let #(e, funcs) = collect_hoisted_funcs(e, body)
+  let e =
+    list.fold(funcs, e, fn(e, hf) {
+      let #(name, _idx) = hf
+      emit_op(e, DeclareVar(name, LetBinding))
+    })
+  list.fold(funcs, e, fn(e, hf) {
+    let #(name, idx) = hf
+    let e = emit_ir(e, IrMakeClosure(idx))
+    emit_ir(e, IrScopeInitVar(name))
+  })
+}
+
+/// Annex B §B.3.1: a bare FunctionDeclaration as an if/else clause behaves
+/// as if wrapped in a Block. Wrapping makes the normal block path handle
+/// both the block-scoped binding and the sloppy-mode var promotion.
+fn block_wrap_fn_decl(stmt: ast.Statement) -> ast.Statement {
+  case stmt {
+    ast.FunctionDeclaration(..) ->
+      ast.BlockStatement([ast.StmtWithLine(0, stmt)])
+    _ -> stmt
+  }
+}
+
+/// Annex B blocking context for a catch clause body: destructured catch
+/// params block var promotion of same-named block fns inside the catch body
+/// (§B.3.4 exempts only simple identifier params).
+fn catch_annexb_ctx(e: Emitter, param: Option(ast.Pattern)) -> Emitter {
+  case param {
+    Some(ast.IdentifierPattern(_)) | None -> e
+    Some(pattern) ->
+      Emitter(
+        ..e,
+        in_block: False,
+        annexb_blocked: set.union(
+          set.union(e.annexb_blocked, e.annexb_level_fns),
+          set.from_list(collect_pattern_names(pattern)),
+        ),
+        annexb_level_fns: set.new(),
+      )
+  }
+}
+
+/// Annex B blocking context for an intermediate lexical scope introduced by
+/// a for/for-in/for-of head let/const declaration.
+fn annexb_head_ctx(e: Emitter, head_names: List(String)) -> Emitter {
+  case head_names {
+    [] -> e
+    _ ->
+      Emitter(
+        ..e,
+        in_block: False,
+        annexb_blocked: set.union(
+          set.union(e.annexb_blocked, e.annexb_level_fns),
+          set.from_list(head_names),
+        ),
+        annexb_level_fns: set.new(),
+      )
+  }
+}
+
+/// Restore the Annex B promotion context saved before entering a scope.
+fn restore_annexb_ctx(e: Emitter, saved: Emitter) -> Emitter {
+  Emitter(
+    ..e,
+    in_block: saved.in_block,
+    annexb_blocked: saved.annexb_blocked,
+    annexb_level_fns: saved.annexb_level_fns,
+  )
 }
 
 /// Like emit_stmts but the last statement is emitted in tail position.
 fn emit_stmts_tail(
+  e: Emitter,
+  stmts: List(ast.StmtWithLine),
+) -> Result(Emitter, EmitError) {
+  // §14 UpdateEmpty: declarations, empty and debugger statements have an
+  // EMPTY completion — the completion value of a statement list is that of
+  // the last VALUE-PRODUCING statement (eval('1; class C {}') === 1).
+  // Trailing vacuous statements still execute, after the value is on stack;
+  // emit_stmt is stack-neutral so the value rides below them.
+  let #(vacuous_rev, before_rev) =
+    list.reverse(stmts)
+    |> list.split_while(fn(s) { has_empty_completion(s.statement) })
+  case vacuous_rev {
+    [] -> emit_stmts_tail_value(e, stmts)
+    _ -> {
+      use e <- result.try(emit_stmts_tail_value(e, list.reverse(before_rev)))
+      list.try_fold(list.reverse(vacuous_rev), e, fn(e, s) {
+        emit_stmt(set_line(e, s.line), s.statement)
+      })
+    }
+  }
+}
+
+/// §14: statements whose completion is EMPTY — skipped over (backwards) when
+/// picking the statement that supplies the eval/program completion value.
+fn has_empty_completion(stmt: ast.Statement) -> Bool {
+  case stmt {
+    ast.VariableDeclaration(..)
+    | ast.FunctionDeclaration(..)
+    | ast.ClassDeclaration(..)
+    | ast.EmptyStatement
+    | ast.DebuggerStatement -> True
+    _ -> False
+  }
+}
+
+fn emit_stmts_tail_value(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
@@ -970,7 +1457,7 @@ fn emit_stmts_tail(
     [only] -> emit_stmt_tail(set_line(e, only.line), only.statement)
     [first, ..rest] -> {
       use e <- result.try(emit_stmt(set_line(e, first.line), first.statement))
-      emit_stmts_tail(e, rest)
+      emit_stmts_tail_value(e, rest)
     }
   }
 }
@@ -1087,6 +1574,7 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
       list.append(left_vars, collect_vars_stmt(body))
     }
     ast.LabeledStatement(_, body) -> collect_vars_stmt(body)
+    ast.WithStatement(_, body) -> collect_vars_stmt(body)
     ast.SwitchStatement(_, cases) ->
       list.flat_map(cases, fn(c) {
         case c {
@@ -1094,10 +1582,12 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
             list.flat_map(consequent, collect_vars_located)
         }
       })
-    // Function declarations: include the name for hoisting (DeclareVar)
-    // but don't recurse into the body (nested scope).
-    ast.FunctionDeclaration(Some(name), ..) -> [name]
-    ast.FunctionDeclaration(None, ..) -> []
+    // Function declarations are NOT VarDeclaredNames: at the body top level
+    // their names are declared alongside collect_hoisted_funcs, and inside
+    // blocks they are block-scoped lexical bindings (§14.2.3). Sloppy-mode
+    // Annex B var promotion is handled separately by
+    // collect_annexb_candidates.
+    ast.FunctionDeclaration(..) -> []
     _ -> []
   }
 }
@@ -1129,6 +1619,226 @@ fn collect_top_lex_names(
   })
 }
 
+/// True when a block body declares anything block-scoped: let/const/class or
+/// a (possibly labeled) function/generator/async declaration. Blocks without
+/// such declarations create no bindings and emit_block elides their scope.
+fn block_has_declarations(body: List(ast.StmtWithLine)) -> Bool {
+  list.any(body, fn(located) {
+    case peel_labels(located.statement) {
+      ast.VariableDeclaration(ast.Let, _) -> True
+      ast.VariableDeclaration(ast.Const, _) -> True
+      ast.ClassDeclaration(..) -> True
+      ast.FunctionDeclaration(..) -> True
+      _ -> False
+    }
+  })
+}
+
+/// FunctionDeclarations may sit under labels (`l: function f() {}`, sloppy
+/// mode only); labels are transparent for declaration instantiation.
+fn peel_labels(stmt: ast.Statement) -> ast.Statement {
+  case stmt {
+    ast.LabeledStatement(_, body) -> peel_labels(body)
+    _ -> stmt
+  }
+}
+
+/// Names of FunctionDeclarations sitting directly in a statement list.
+fn direct_fn_names(stmts: List(ast.StmtWithLine)) -> List(String) {
+  list.filter_map(stmts, fn(located) {
+    case peel_labels(located.statement) {
+      ast.FunctionDeclaration(Some(name), ..) -> Ok(name)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+/// let/const/class names declared directly in a statement list, as a set.
+fn top_lex_name_set(stmts: List(ast.StmtWithLine)) -> Set(String) {
+  collect_top_lex_names(stmts)
+  |> list.map(fn(lex) { lex.0 })
+  |> set.from_list
+}
+
+/// let/const names bound by a for/for-in/for-of head declaration (these form
+/// a lexical scope enclosing the loop body for Annex B blocking purposes).
+fn for_head_lex_names(decl: ast.Statement) -> List(String) {
+  case decl {
+    ast.VariableDeclaration(ast.Let, ds)
+    | ast.VariableDeclaration(ast.Const, ds) ->
+      list.flat_map(ds, fn(d) {
+        let ast.VariableDeclarator(p, _) = d
+        collect_pattern_names(p)
+      })
+    _ -> []
+  }
+}
+
+// ============================================================================
+// Annex B §B.3.2 — sloppy-mode function-in-block var promotion candidates
+// ============================================================================
+//
+// A FunctionDeclaration in a block gets, in addition to its block-scoped
+// binding, a function/script/eval-level var binding (initialized undefined
+// before the body runs, updated when the declaration is evaluated) — UNLESS
+// replacing the declaration with `var F` would produce an early error:
+//   - a let/const/class named F in any enclosing scope within the body
+//   - a function declaration named F in an enclosing BLOCK (block fn decls
+//     are lexical in their block)
+//   - a destructured CatchParameter binding F (§B.3.4 exempts only simple
+//     identifier catch params)
+//   - a for/for-in/for-of head let/const binding F enclosing the block
+// Mirrors the "would not produce any Early Errors for body" condition of
+// §B.3.2.3 (functions), §B.3.2.2 (global) and §B.3.2.6 (eval).
+
+/// Collect candidate names for Annex B var promotion in a sloppy body.
+pub fn collect_annexb_candidates(
+  stmts: List(ast.StmtWithLine),
+) -> List(String) {
+  collect_annexb_candidates_with(stmts, top_lex_name_set(stmts))
+}
+
+/// Like collect_annexb_candidates but takes the body's already-computed
+/// top-level lexical name set, so callers that have one don't rescan.
+fn collect_annexb_candidates_with(
+  stmts: List(ast.StmtWithLine),
+  top_lex: Set(String),
+) -> List(String) {
+  annexb_walk(stmts, top_lex, False)
+  |> list.unique
+}
+
+/// Walk one statement list. `blocked` holds lexical names of enclosing scope
+/// levels (including this level's let/const/class). `in_block` is True when
+/// this list is a Block or switch CaseBlock body (fn decls here are
+/// candidates); False at the var-scope top level (fn decls there are plain
+/// vars, handled by the normal hoisting path).
+fn annexb_walk(
+  stmts: List(ast.StmtWithLine),
+  blocked: Set(String),
+  in_block: Bool,
+) -> List(String) {
+  case stmts {
+    // Empty statement list: no candidates — skip the set bookkeeping.
+    [] -> []
+    _ -> {
+      // This level's fn names are lexical for any NESTED scope, but don't
+      // block their own (or a sibling's) promotion at this level.
+      let child_blocked = case in_block {
+        True -> set.union(blocked, set.from_list(direct_fn_names(stmts)))
+        False -> blocked
+      }
+      list.flat_map(stmts, fn(located) {
+        annexb_stmt(located.statement, blocked, child_blocked, in_block)
+      })
+    }
+  }
+}
+
+/// `blocked` applies to fn decls AT this level; `child_blocked` (= blocked +
+/// this level's fn names) seeds any nested scope.
+fn annexb_stmt(
+  stmt: ast.Statement,
+  blocked: Set(String),
+  child_blocked: Set(String),
+  in_block: Bool,
+) -> List(String) {
+  case stmt {
+    // §B.3.2/§B.3.3 web-compat promotion applies ONLY to plain function
+    // declarations — never generators, async functions, or async generators
+    // (matching V8/SpiderMonkey/JSC).
+    ast.FunctionDeclaration(
+      name: Some(name),
+      is_generator: False,
+      is_async: False,
+      ..,
+    ) ->
+      case in_block && !set.contains(blocked, name) {
+        True -> [name]
+        False -> []
+      }
+    ast.FunctionDeclaration(..) -> []
+    // Empty block fast path: avoid building the merged blocked-set only for
+    // annexb_walk to discard it.
+    ast.BlockStatement([]) -> []
+    ast.BlockStatement(body) ->
+      annexb_walk(body, set.union(child_blocked, top_lex_name_set(body)), True)
+    ast.IfStatement(_, consequent, alternate) ->
+      list.append(
+        annexb_sub_stmt(consequent, child_blocked),
+        alternate
+          |> option.map(annexb_sub_stmt(_, child_blocked))
+          |> option.unwrap([]),
+      )
+    ast.WhileStatement(_, body) | ast.DoWhileStatement(_, body) ->
+      annexb_sub_stmt(body, child_blocked)
+    ast.WithStatement(_, body) -> annexb_sub_stmt(body, child_blocked)
+    ast.ForStatement(init, _, _, body) -> {
+      let head = case init {
+        Some(ast.ForInitDeclaration(decl)) -> for_head_lex_names(decl)
+        _ -> []
+      }
+      annexb_sub_stmt(body, set.union(child_blocked, set.from_list(head)))
+    }
+    ast.ForInStatement(left, _, body) | ast.ForOfStatement(left, _, body, ..) -> {
+      let head = case left {
+        ast.ForInitDeclaration(decl) -> for_head_lex_names(decl)
+        _ -> []
+      }
+      annexb_sub_stmt(body, set.union(child_blocked, set.from_list(head)))
+    }
+    ast.SwitchStatement(_, cases) -> {
+      let case_stmts =
+        list.flat_map(cases, fn(c) {
+          let ast.SwitchCase(_, consequent) = c
+          consequent
+        })
+      annexb_walk(
+        case_stmts,
+        set.union(child_blocked, top_lex_name_set(case_stmts)),
+        True,
+      )
+    }
+    ast.TryStatement(block, handler, finalizer) -> {
+      let from_block = annexb_sub_stmt(block, child_blocked)
+      let from_catch = case handler {
+        Some(ast.CatchClause(param, catch_body)) -> {
+          // §B.3.4: a SIMPLE identifier catch param does not block `var F`
+          // in the catch block; a destructured param does.
+          let param_block = case param {
+            Some(ast.IdentifierPattern(_)) | None -> []
+            Some(pattern) -> collect_pattern_names(pattern)
+          }
+          annexb_sub_stmt(
+            catch_body,
+            set.union(child_blocked, set.from_list(param_block)),
+          )
+        }
+        None -> []
+      }
+      let from_finally =
+        finalizer
+        |> option.map(annexb_sub_stmt(_, child_blocked))
+        |> option.unwrap([])
+      list.flatten([from_block, from_catch, from_finally])
+    }
+    ast.LabeledStatement(_, body) ->
+      annexb_stmt(body, blocked, child_blocked, in_block)
+    _ -> []
+  }
+}
+
+/// A statement in sub-statement position (if/loop body, try sub-block):
+/// a bare FunctionDeclaration there is Annex B "function in IfStatement
+/// clause" — semantically a synthetic block containing just the declaration.
+fn annexb_sub_stmt(stmt: ast.Statement, blocked: Set(String)) -> List(String) {
+  case stmt {
+    ast.FunctionDeclaration(..) ->
+      annexb_walk([ast.StmtWithLine(0, stmt)], blocked, True)
+    _ -> annexb_stmt(stmt, blocked, blocked, False)
+  }
+}
+
 /// Collect and compile hoisted function declarations.
 /// Returns updated emitter + list of (name, func_index) pairs.
 fn collect_hoisted_funcs(
@@ -1138,12 +1848,13 @@ fn collect_hoisted_funcs(
   let #(e, funcs_rev) =
     list.fold(stmts, #(e, []), fn(acc, located) {
       let #(e, funcs) = acc
-      case located.statement {
+      case peel_labels(located.statement) {
         ast.FunctionDeclaration(Some(name), params, body, is_gen, is_async) -> {
           let child =
             compile_function_body(
               e,
               Some(name),
+              None,
               params,
               body,
               False,
@@ -1262,6 +1973,7 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
     ast.Identifier(_) -> False
 
     ast.NumberLiteral(_)
+    | ast.BigIntLiteral(_)
     | ast.StringExpression(_)
     | ast.BooleanLiteral(_)
     | ast.NullLiteral
@@ -1279,7 +1991,7 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
     | ast.AwaitExpression(arg)
     | ast.SpreadElement(arg) -> expr_references_arguments(arg)
 
-    ast.ImportExpression(source, options) ->
+    ast.ImportExpression(source, options, _) ->
       expr_references_arguments(source)
       || opt_expr_references_arguments(options)
 
@@ -1320,8 +2032,11 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
 
     ast.TemplateLiteral(_, exprs) -> list.any(exprs, expr_references_arguments)
 
-    ast.TaggedTemplateExpression(tag, quasi) ->
-      expr_references_arguments(tag) || expr_references_arguments(quasi)
+    ast.TaggedTemplateExpression(tag:, expressions:, ..) ->
+      expr_references_arguments(tag)
+      || list.any(expressions, expr_references_arguments)
+
+    ast.IntrinsicTemplateObject(..) -> False
 
     // Non-arrow function expression: has its own `arguments`, skip entirely.
     ast.FunctionExpression(_, _, _, _, _) -> False
@@ -1341,6 +2056,11 @@ fn expr_references_arguments(expr: ast.Expression) -> Bool {
       || class_body_references_arguments(body)
 
     ast.ParenthesizedExpression(inner) -> expr_references_arguments(inner)
+
+    ast.IntrinsicGetDisposer(argument:, ..) ->
+      expr_references_arguments(argument)
+    ast.IntrinsicMakeSuppressed(error:, suppressed:) ->
+      expr_references_arguments(error) || expr_references_arguments(suppressed)
   }
 }
 
@@ -1424,6 +2144,7 @@ fn split_trailing_rest(
 fn compile_function_body(
   parent: Emitter,
   name: Option(String),
+  self_name: Option(String),
   params: List(ast.Pattern),
   body: ast.Statement,
   is_arrow: Bool,
@@ -1437,6 +2158,11 @@ fn compile_function_body(
     ast.BlockStatement(s) -> s
     other -> [ast.StmtWithLine(0, other)]
   }
+  // Lower any direct using/await-using declarations before the directive,
+  // lexical-name, and hoisting scans (directives stay ahead of the desugar's
+  // prelude, and var/function hoisting descends into the generated try
+  // block, so the scans see the same names either way).
+  let stmts = using_desugar.desugar_list(stmts)
 
   // Strictness: inherit from parent, upgrade if body prologue has "use strict".
   // (Classes force strict at the call site by passing a strict parent emitter.)
@@ -1451,11 +2177,23 @@ fn compile_function_body(
   }
   // Like SyntaxPerms, arrows inherit FieldInitMode so `()=>super()` inside a
   // derived ctor can emit the init call; non-arrows take the caller's value
-  // (only ctors get a non-NoFieldInit).
-  let field_init = case is_arrow {
-    True -> parent.field_init
-    False -> field_init
+  // (only ctors get a non-NoFieldInit). Only FieldInitAfterSuper is
+  // inherited — it fires on the `super()` call itself. FieldInitAtStart must
+  // NOT leak into arrows: it fires at body entry, so an arrow inside a
+  // base-class ctor would re-run the initializer on every arrow call
+  // (observable as a double private-element add → TypeError).
+  let field_init = case is_arrow, parent.field_init {
+    True, FieldInitAfterSuper -> FieldInitAfterSuper
+    True, FieldInitAtStart | True, NoFieldInit -> NoFieldInit
+    False, _ -> field_init
   }
+  // Annex B promotion of a block-level function declaration is skipped when
+  // its name collides with a formal parameter (B.3.3.1: "F is not an element
+  // of BoundNames of argumentsList"), so parameter bound names join the
+  // blocked set. This is function-code-only — B.3.3.2/B.3.3.3 (script/eval)
+  // have no parameter condition.
+  let param_names = set.from_list(list.flat_map(params, collect_pattern_names))
+
   // Use a fresh emitter inheriting nothing from parent (except label counter
   // for uniqueness, and strictness).
   let e =
@@ -1467,6 +2205,13 @@ fn compile_function_body(
       is_arrow:,
       syntax_perms:,
       field_init:,
+      annexb_blocked: set.union(top_lex_name_set(stmts), param_names),
+      // Enclosing `with` scopes stay visible to nested functions — their
+      // free names must check the with objects (captured from the parent).
+      with_stack: parent.with_stack,
+      // A function's [[PrivateEnvironment]] is fixed at its definition
+      // site — nested functions see the enclosing classes' private names.
+      private_env: parent.private_env,
     )
 
   let e = emit_op(e, EnterScope(FunctionScope))
@@ -1490,17 +2235,44 @@ fn compile_function_body(
   // which also gives the correct `fn.length` (§15.1.5).
   let #(fixed_params, rest_param) = split_trailing_rest(params)
   let arity = list.length(fixed_params)
+  // §15.1.5 ExpectedArgumentCount (the `length` property): leading params
+  // before the first one with a default initializer. Destructuring patterns
+  // WITHOUT a default still count; the trailing rest is already split off.
+  let expected_length =
+    fixed_params
+    |> list.take_while(fn(p) {
+      case p {
+        ast.AssignmentPattern(..) -> False
+        _ -> True
+      }
+    })
+    |> list.length
 
-  // Phase 1: Declare parameters (identifier or synthetic for destructuring)
+  // §10.2.11: a parameter list containing a default or a destructuring
+  // pattern is non-simple. Its bindings are created uninitialized (TDZ) and
+  // then initialized strictly left to right, so a default initializer that
+  // reads its own or a later parameter throws a ReferenceError. Simple lists
+  // keep the fast positional path (args land directly in the named slots).
+  let non_simple_fixed =
+    list.any(fixed_params, fn(p) {
+      case p {
+        ast.IdentifierPattern(_) -> False
+        _ -> True
+      }
+    })
+
+  // Phase 1: Declare parameters. Simple lists bind identifiers positionally;
+  // non-simple lists route EVERY fixed param through a synthetic positional
+  // slot so the real names can be TDZ-declared and initialized in order.
   let #(e, destructured_params_rev) =
     list.index_fold(fixed_params, #(e, []), fn(acc, param, idx) {
       let #(e, destr) = acc
-      case param {
-        ast.IdentifierPattern(pname) -> #(
+      case non_simple_fixed, param {
+        False, ast.IdentifierPattern(pname) -> #(
           emit_op(e, DeclareVar(pname, ParamBinding)),
           destr,
         )
-        _ -> {
+        _, _ -> {
           let synthetic = "$param_" <> int.to_string(idx)
           let e = emit_op(e, DeclareVar(synthetic, ParamBinding))
           #(e, [#(synthetic, param), ..destr])
@@ -1527,14 +2299,72 @@ fn compile_function_body(
   // destructuring so default-value expressions can use `arguments`.
   let e = case uses_args {
     True -> {
+      let simple_params = !non_simple_fixed && rest_param == None
       let e = emit_op(e, DeclareVar("arguments", VarBinding))
-      let e = emit_ir(e, IrCreateArguments)
+      let e = emit_ir(e, IrCreateArguments(simple_params:))
       emit_ir(e, IrScopePutVar("arguments"))
     }
     False -> e
   }
 
-  // Phase 2: Emit destructuring for non-identifier params
+  // §13.2.5.5 InstantiateOrdinaryFunctionExpression: a named function
+  // expression binds its own name in a scope wrapped around the function
+  // (funcEnv), holding the closure itself, immutably. Our flat scope model
+  // has no separate funcEnv, so shadowing by inner environments (params,
+  // `arguments`, body vars, hoisted/Annex-B functions, top-level lexicals)
+  // is represented by skipping the binding entirely — reads then resolve
+  // to the shadowing binding exactly as the spec's environment chain would.
+  // Declared before parameter destructuring so default initializers can
+  // reference the name (`function f(x = f) {…}`).
+  let e = case self_name {
+    Some(fname) -> {
+      let annexb_shadow =
+        !child_strict && list.contains(collect_annexb_candidates(stmts), fname)
+      let shadowed =
+        set.contains(param_names, fname)
+        || { uses_args && fname == "arguments" }
+        || list.contains(collect_hoisted_vars(stmts), fname)
+        || list.contains(direct_fn_names(stmts), fname)
+        || list.any(collect_top_lex_names(stmts), fn(lex) { lex.0 == fname })
+        || annexb_shadow
+      case shadowed {
+        True -> e
+        False -> {
+          let e = emit_op(e, DeclareVar(fname, FnNameBinding))
+          let e = get_lexical(e, opcode.RefActiveFunc)
+          emit_ir(e, IrScopeInitVar(fname))
+        }
+      }
+    }
+    None -> e
+  }
+
+  // Phase 2: Emit destructuring for non-identifier params.
+  // While emitting parameter initializers, record the parameter-scope
+  // binding names (parameters + implicit `arguments` for non-arrows) so a
+  // direct eval inside a default expression can perform the
+  // EvalDeclarationInstantiation §19.2.1.1 step 3.d conflict check: sloppy
+  // direct eval in a parameter initializer throws a SyntaxError when it
+  // var-declares a name already bound in the parameter scope. Arrows have
+  // no own `arguments` binding (argumentsObjectNeeded is false), so only
+  // their parameter names participate.
+  let declared_param_names = list.flat_map(params, collect_pattern_names)
+  let param_scope_names = case is_arrow {
+    True -> declared_param_names
+    False -> ["arguments", ..declared_param_names]
+  }
+  let e = Emitter(..e, param_scope_names:)
+  // §10.2.11 step 21: non-simple lists create every parameter name as an
+  // uninitialized (TDZ) binding up front; the fold below then initializes
+  // them left to right, so `(x = x)` / `(x = y, y)` defaults throw a
+  // ReferenceError when they read a not-yet-initialized parameter.
+  let e = case non_simple_fixed {
+    True ->
+      list.fold(declared_param_names, e, fn(e, pname) {
+        emit_op(e, DeclareVar(pname, LetBinding))
+      })
+    False -> e
+  }
   let e =
     list.fold(destructured_params, e, fn(e, dp) {
       let #(synthetic, pattern) = dp
@@ -1549,12 +2379,39 @@ fn compile_function_body(
     None -> e
     Some(rest_target) -> {
       let e = emit_ir(e, IrCreateRestArray(arity))
-      emit_destructuring_bind(e, rest_target, ParamBinding) |> result.unwrap(e)
+      // Non-simple lists pre-declared the rest name(s) as TDZ lets above, so
+      // bind via LetBinding (declare no-ops, init initializes). Simple-with-
+      // rest lists keep the original ParamBinding path.
+      let rest_kind = case non_simple_fixed {
+        True -> LetBinding
+        False -> ParamBinding
+      }
+      emit_destructuring_bind(e, rest_target, rest_kind) |> result.unwrap(e)
     }
   }
 
-  // Hoisting for the function body
-  let hoisted_vars = collect_hoisted_vars(stmts)
+  // Parameter initialization is done — evals in the body proper run with
+  // the body's VariableEnvironment, so the param-scope conflict check no
+  // longer applies.
+  let e = Emitter(..e, param_scope_names: [])
+
+  // Hoisting for the function body. Function declaration names at body top
+  // level are var-scoped; in sloppy mode, Annex B function-in-block names
+  // also get a var binding (initialized undefined) unless blocked by a
+  // lexical declaration on the path to their block.
+  let annexb_names = case child_strict {
+    True -> []
+    False ->
+      collect_annexb_candidates(stmts)
+      |> list.filter(fn(n) { !set.contains(param_names, n) })
+  }
+  let hoisted_vars =
+    list.flatten([
+      collect_hoisted_vars(stmts),
+      direct_fn_names(stmts),
+      annexb_names,
+    ])
+    |> list.unique
   let lex_names = collect_top_lex_names(stmts)
   let #(e, hoisted_funcs) = collect_hoisted_funcs(e, stmts)
 
@@ -1612,6 +2469,7 @@ fn compile_function_body(
   CompiledChild(
     name:,
     arity:,
+    length: expected_length,
     code:,
     constants:,
     constants_map:,
@@ -1622,12 +2480,17 @@ fn compile_function_body(
     is_generator:,
     is_async:,
     is_constructor:,
+    is_class_constructor: False,
     has_eval_call: e.has_eval_call,
     lexical_refs: e.lexical_refs,
     syntax_perms:,
+    with_stack: parent.with_stack,
   )
 }
 
+/// §13.2.5.5: Some(n) only for a NAMED function expression — binds `n` in
+/// the function's own scope to the closure itself (immutable). None for
+/// declarations, methods, arrows, and NamedEvaluation-baked names.
 // ============================================================================
 // Statement emission
 // ============================================================================
@@ -1643,6 +2506,48 @@ fn emit_stmts(
 
 fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
   case stmt {
+    // Empty block: compiles to nothing (scope elision, see emit_block) —
+    // skip the desugar probe and dispatch entirely.
+    ast.BlockStatement([]) -> Ok(e)
+    // for / for-of statements whose head declares using bindings are
+    // rewritten into block + using-declaration form first (they may sit in
+    // statement lists or single-statement positions, possibly under labels).
+    _ ->
+      case using_desugar.rewrite_for_using(stmt) {
+        option.Some(rewritten) -> emit_stmt(e, rewritten)
+        option.None -> emit_stmt_inner(e, stmt)
+      }
+  }
+}
+
+fn emit_stmt_inner(
+  e: Emitter,
+  stmt: ast.Statement,
+) -> Result(Emitter, EmitError) {
+  // Completion-value mode (see Emitter.completion_var): loops return their
+  // own V (starting undefined) and if/switch UpdateEmpty with undefined, so
+  // these statements reset the tracked V on entry. Statements with EMPTY
+  // completions (declarations, empty, debugger, break/continue) leave it.
+  let e = case e.completion_var {
+    Some(v) ->
+      case stmt {
+        ast.WhileStatement(..)
+        | ast.DoWhileStatement(..)
+        | ast.ForStatement(..)
+        | ast.ForInStatement(..)
+        | ast.ForOfStatement(..)
+        | ast.IfStatement(..)
+        | ast.SwitchStatement(..)
+        | ast.TryStatement(..)
+        | ast.WithStatement(..) -> {
+          let e = push_const(e, JsUndefined)
+          emit_ir(e, IrScopePutVar(v))
+        }
+        _ -> e
+      }
+    None -> e
+  }
+  case stmt {
     ast.EmptyStatement | ast.DebuggerStatement -> Ok(e)
 
     // §7.3.32 DefineField — synthesized by inject_field_inits for class
@@ -1654,8 +2559,37 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       // §15.7.14: if Initializer is absent, initValue = undefined.
       let init = option.unwrap(value, ast.UndefinedExpression)
       use e <- result.map(case key, computed {
+        // Class private element. The PrivateName key is read from the
+        // class-scope const "#m" (see compile_class). A NUL-prefixed
+        // identifier value is the synthetic install of an instance private
+        // method/accessor (see private_method_init_stmts); anything else is
+        // a field initializer (§7.3.28 PrivateFieldAdd).
+        ast.Identifier("#" <> rest), False -> {
+          let name = "#" <> rest
+          let e = emit_ir(e, IrScopeGetVar(name))
+          case init {
+            ast.Identifier("\u{0}pg:" <> _ as hidden) -> {
+              let e = emit_ir(e, IrScopeGetVar(hidden))
+              Ok(emit_ir(e, IrDefinePrivateAccessor(opcode.Getter)))
+            }
+            ast.Identifier("\u{0}ps:" <> _ as hidden) -> {
+              let e = emit_ir(e, IrScopeGetVar(hidden))
+              Ok(emit_ir(e, IrDefinePrivateAccessor(opcode.Setter)))
+            }
+            ast.Identifier("\u{0}pm:" <> _ as hidden) -> {
+              let e = emit_ir(e, IrScopeGetVar(hidden))
+              Ok(emit_ir(e, IrDefinePrivateMethod))
+            }
+            _ -> {
+              use e <- result.map(emit_named_expr(e, init, name))
+              emit_ir(e, IrDefinePrivateField)
+            }
+          }
+        }
         ast.Identifier(name), False | ast.StringExpression(name), False -> {
-          use e <- result.map(emit_expr(e, init))
+          // §7.3.33 DefineField step 7: anonymous function initializers get
+          // the field name (NamedEvaluation).
+          use e <- result.map(emit_named_expr(e, init, name))
           emit_ir(e, IrDefineField(name))
         }
         ast.NumberLiteral(n), False -> {
@@ -1663,10 +2597,18 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           use e <- result.map(emit_expr(e, init))
           emit_ir(e, IrDefineFieldComputed)
         }
+        // Computed field name, already evaluated + ToPropertyKey'd at
+        // class-definition time into a hidden class-scope const (see
+        // compile_class / stash_computed_element_keys). Read the stashed key —
+        // never re-evaluate the name expression (§15.7.14 step 27).
+        ast.Identifier("\u{0}ck:" <> _ as hidden), _ -> {
+          let e = emit_ir(e, IrScopeGetVar(hidden))
+          use e <- result.map(emit_expr(e, init))
+          emit_ir(e, IrDefineFieldComputed)
+        }
         _, _ -> {
-          // computed: True (or exotic non-computed key) — evaluate key at
-          // construct time. Spec stashes computed keys at class-definition
-          // time; this first-pass approximation is correct for stable keys.
+          // Exotic non-computed key (shouldn't occur: computed keys are
+          // rewritten to stash-const reads above) — evaluate inline.
           use e <- result.try(emit_expr(e, key))
           use e <- result.map(emit_expr(e, init))
           emit_ir(e, IrDefineFieldComputed)
@@ -1677,20 +2619,24 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
 
     ast.ExpressionStatement(expression: expr, ..) -> {
       use e <- result.map(emit_expr(e, expr))
-      emit_ir(e, IrPop)
+      // Completion-value mode: the statement's value becomes the tracked V
+      // (IrScopePutVar pops, so stack balance matches the IrPop path).
+      case e.completion_var {
+        Some(v) -> emit_ir(e, IrScopePutVar(v))
+        None -> emit_ir(e, IrPop)
+      }
     }
 
-    ast.BlockStatement(body) -> {
-      let e = emit_op(e, EnterScope(BlockScope))
-      use e <- result.map(emit_stmts(e, body))
-      emit_op(e, LeaveScope)
-    }
+    ast.BlockStatement(body) -> emit_block(e, body, tail: False)
 
     ast.VariableDeclaration(kind, declarators) -> {
+      // Using/AwaitUsing never reach here — the using desugar (run on every
+      // statement list before emission) lowers them to Const. The arms below
+      // treat them as Const defensively.
       let binding_kind = case kind {
         ast.Var -> VarBinding
         ast.Let -> LetBinding
-        ast.Const -> ConstBinding
+        ast.Const | ast.Using | ast.AwaitUsing -> ConstBinding
       }
       list.try_fold(declarators, e, fn(e, decl) {
         case decl {
@@ -1698,7 +2644,8 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
             // For let/const, emit declaration marker (var already hoisted)
             let e = case kind {
               ast.Let -> declare_lex(e, name, False)
-              ast.Const -> declare_lex(e, name, True)
+              ast.Const | ast.Using | ast.AwaitUsing ->
+                declare_lex(e, name, True)
               ast.Var -> e
             }
             case init {
@@ -1706,7 +2653,8 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
                 use e <- result.map(emit_named_expr(e, init_expr, name))
                 case kind {
                   ast.Var -> emit_ir(e, IrScopePutVar(name))
-                  ast.Let | ast.Const -> init_lex(e, name)
+                  ast.Let | ast.Const | ast.Using | ast.AwaitUsing ->
+                    init_lex(e, name)
                 }
               }
               // `let x;` (no initializer) initializes the binding to undefined
@@ -1738,11 +2686,11 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       let #(e, end_label) = fresh_label(e)
       use e <- result.try(emit_expr(e, condition))
       let e = emit_ir(e, IrJumpIfFalse(else_label))
-      use e <- result.try(emit_stmt(e, consequent))
+      use e <- result.try(emit_stmt(e, block_wrap_fn_decl(consequent)))
       let e = emit_ir(e, IrJump(end_label))
       let e = emit_ir(e, IrLabel(else_label))
       let e = case alternate {
-        Some(alt) -> emit_stmt(e, alt) |> result.unwrap(e)
+        Some(alt) -> emit_stmt(e, block_wrap_fn_decl(alt)) |> result.unwrap(e)
         None -> e
       }
       let e = emit_ir(e, IrLabel(end_label))
@@ -1799,6 +2747,15 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
         _ -> #(e, [])
       }
 
+      // for-head let/const names form a lexical scope around the body —
+      // they block Annex B promotion of same-named block fns inside it.
+      let saved_annexb = e
+      let e = case init {
+        Some(ast.ForInitDeclaration(decl)) ->
+          annexb_head_ctx(e, for_head_lex_names(decl))
+        _ -> e
+      }
+
       let e = push_loop(e, loop_end, loop_continue)
       let e = emit_ir(e, IrLabel(loop_start))
 
@@ -1825,6 +2782,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       let e = emit_ir(e, IrJump(loop_start))
       let e = emit_ir(e, IrLabel(loop_end))
       let e = pop_loop(e)
+      let e = restore_annexb_ctx(e, saved_annexb)
       let e = emit_op(e, LeaveScope)
       Ok(e)
     }
@@ -1881,7 +2839,10 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
             None -> emit_ir(e, IrPop)
           }
 
+          let saved = e
+          let e = catch_annexb_ctx(e, param)
           use e <- result.try(emit_stmt(e, catch_body))
+          let e = restore_annexb_ctx(e, saved)
           let e = emit_op(e, LeaveScope)
           let e = emit_ir(e, IrLabel(end_label))
           Ok(e)
@@ -1914,7 +2875,12 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           // Entry stack: [retpc, slot, ..base] for ALL callers.
           let e = emit_ir(e, IrLabel(fin_label))
           let e = push_barrier(e, pop_try: 0, label_finally: None, drop: 2)
+          // §14.15.3: a normally-completing Finally never supplies the
+          // completion value — keep it out of completion-value mode.
+          let saved_cv = e.completion_var
+          let e = Emitter(..e, completion_var: None)
           use e <- result.try(emit_stmt(e, finally_body))
+          let e = Emitter(..e, completion_var: saved_cv)
           let e = pop_loop(e)
           let e = emit_ir(e, IrRet)
 
@@ -1957,10 +2923,13 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
               |> result.unwrap(e)
             None -> emit_ir(e, IrPop)
           }
+          let saved = e
+          let e = catch_annexb_ctx(e, param)
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_stmt(e, catch_body))
           let e = pop_loop(e)
+          let e = restore_annexb_ctx(e, saved)
           let e = emit_op(e, LeaveScope)
           let e = emit_ir(e, IrPopTry)
           let e = emit_gosub_normal(e, fin_label)
@@ -1975,7 +2944,12 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           // -- finally subroutine ----------------------------------------
           let e = emit_ir(e, IrLabel(fin_label))
           let e = push_barrier(e, pop_try: 0, label_finally: None, drop: 2)
+          // §14.15.3: a normally-completing Finally never supplies the
+          // completion value — keep it out of completion-value mode.
+          let saved_cv = e.completion_var
+          let e = Emitter(..e, completion_var: None)
           use e <- result.try(emit_stmt(e, finally_body))
+          let e = Emitter(..e, completion_var: saved_cv)
           let e = pop_loop(e)
           let e = emit_ir(e, IrRet)
 
@@ -2031,9 +3005,30 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       }
     }
 
-    ast.FunctionDeclaration(..) -> {
-      // Already hoisted — nothing to emit here
-      Ok(e)
+    ast.FunctionDeclaration(name, _, _, is_generator, is_async) -> {
+      // The closure itself was instantiated during hoisting (function/program
+      // top level) or BlockDeclarationInstantiation (block level). The only
+      // runtime effect at the statement's position is Annex B §B.3.2.6:
+      // in sloppy mode, evaluating a block-level FunctionDeclaration copies
+      // the block binding into the enclosing var-scope binding — unless an
+      // intermediate lexical declaration makes the name unpromotable.
+      // §B.3.2/§B.3.3 cover plain functions only — generators, async
+      // functions, and async generators are never promoted.
+      case name {
+        Some(fname) -> {
+          let promote =
+            e.in_block
+            && !e.strict
+            && !is_generator
+            && !is_async
+            && !set.contains(e.annexb_blocked, fname)
+          case promote {
+            True -> Ok(emit_op(e, AnnexBPromote(fname)))
+            False -> Ok(e)
+          }
+        }
+        None -> Ok(e)
+      }
     }
 
     ast.ClassDeclaration(name, super_class, body) -> {
@@ -2057,8 +3052,52 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
         True -> emit_for_await_of(e, left, right, body)
       }
 
-    _ -> Error(Unsupported("statement: " <> string_inspect_stmt_kind(stmt)))
+    ast.WithStatement(object, body) -> emit_with(e, object, body, tail: False)
   }
+}
+
+/// §14.11 WithStatement (sloppy mode only — the parser rejects `with` in
+/// strict code). The ToObject'd head expression is stored in a synthetic
+/// block-scoped local; EnterWith/LeaveWith mark the region whose name
+/// resolutions must check that object first (Phase 2 emits the checks).
+/// The synthetic name uses `<` so it can never collide with user code.
+/// It carries BOTH the current with-depth (unique along any lexical chain —
+/// ancestor withs are visible to nested functions and depth strictly grows
+/// down the chain) and a per-body serial (unique across SIBLING withs in the
+/// same function, whose depth is equal). Sibling uniqueness matters for the
+/// direct-eval name table (Resolved.names is name-keyed, first declaration
+/// wins): two same-named siblings would make eval inside the second with
+/// read the first with's object.
+fn emit_with(
+  e: Emitter,
+  object: ast.Expression,
+  body: ast.Statement,
+  tail tail: Bool,
+) -> Result(Emitter, EmitError) {
+  use e <- result.try(emit_expr(e, object))
+  let e = emit_ir(e, opcode.IrToObject)
+  let #(e, uid) = fresh_label(e)
+  let synth =
+    "<with"
+    <> int.to_string(list.length(e.with_stack))
+    <> "_"
+    <> int.to_string(uid)
+    <> ">"
+  let e = emit_op(e, EnterScope(BlockScope))
+  let e = emit_op(e, DeclareVar(synth, LetBinding))
+  let e = emit_ir(e, IrScopeInitVar(synth))
+  let e = emit_op(e, EnterWith(synth))
+  let e = Emitter(..e, with_stack: [synth, ..e.with_stack])
+  use e <- result.map(case tail {
+    True -> emit_stmt_tail(e, body)
+    False -> emit_stmt(e, body)
+  })
+  let e = case e.with_stack {
+    [_, ..rest] -> Emitter(..e, with_stack: rest)
+    [] -> e
+  }
+  let e = emit_op(e, LeaveWith)
+  emit_op(e, LeaveScope)
 }
 
 // ============================================================================
@@ -2074,31 +3113,188 @@ fn unwrap_parens(expr: ast.Expression) -> ast.Expression {
   }
 }
 
-/// Shared scaffold for optional chaining (`?.`): emit the base expression,
-/// dup it, and if nullish pop it and push undefined; otherwise run `middle`
-/// (the member access / call) on the duped value.
-fn emit_optional_scaffold(
+/// §13.3.9 OptionalExpression: does this member/call chain contain a `?.`
+/// link? Recursion stops at any non-chain node — in particular a
+/// ParenthesizedExpression is a chain BOUNDARY: `(a?.b).c` must NOT
+/// short-circuit the outer `.c`.
+fn chain_has_optional(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.OptionalMemberExpression(..) | ast.OptionalCallExpression(..) -> True
+    ast.MemberExpression(object:, ..) -> chain_has_optional(object)
+    ast.CallExpression(callee:, ..) -> chain_has_optional(callee)
+    _ -> False
+  }
+}
+
+/// Compile a whole optional chain with ONE shared short-circuit exit
+/// (§13.3.9.1: a nullish base at any `?.` link makes the ENTIRE chain —
+/// including later non-optional links and call arguments — evaluate to
+/// undefined). Two cleanup blocks because the jump sites leave different
+/// stack shapes: `l1` sites have just the nullish base on top; `l2` sites
+/// (optional CALL of a method reference) have [f, receiver].
+fn emit_chain_root(
   e: Emitter,
-  base: ast.Expression,
-  middle: fn(Emitter) -> Result(Emitter, EmitError),
+  expr: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  let #(e, nullish_label) = fresh_label(e)
+  let #(e, l1) = fresh_label(e)
+  let #(e, l2) = fresh_label(e)
   let #(e, end_label) = fresh_label(e)
-  use e <- result.try(emit_expr(e, base))
-  let e = emit_ir(e, IrDup)
-  let e = emit_ir(e, IrJumpIfNullish(nullish_label))
-  use e <- result.map(middle(e))
+  use e <- result.map(emit_chain(e, expr, l1, l2))
   let e = emit_ir(e, IrJump(end_label))
-  let e = emit_ir(e, IrLabel(nullish_label))
+  // Depth-1 cleanup: [nullish] → [undefined]
+  let e = emit_ir(e, IrLabel(l1))
+  let e = emit_ir(e, IrPop)
+  let e = push_const(e, JsUndefined)
+  let e = emit_ir(e, IrJump(end_label))
+  // Depth-2 cleanup: [f, receiver] → [undefined]
+  let e = emit_ir(e, IrLabel(l2))
+  let e = emit_ir(e, IrPop)
   let e = emit_ir(e, IrPop)
   let e = push_const(e, JsUndefined)
   emit_ir(e, IrLabel(end_label))
+}
+
+/// Emit one link of an optional chain. `l1`/`l2` are the shared cleanup
+/// labels from emit_chain_root. Sub-expressions without any `?.` link fall
+/// back to ordinary emission (covering all the special-cased forms — super,
+/// direct eval, `with` callee handling).
+fn emit_chain(
+  e: Emitter,
+  expr: ast.Expression,
+  l1: Int,
+  l2: Int,
+) -> Result(Emitter, EmitError) {
+  use <- bool.lazy_guard(!chain_has_optional(expr), fn() { emit_expr(e, expr) })
+  case expr {
+    ast.OptionalMemberExpression(object, ast.Identifier(prop), False) -> {
+      use e <- result.map(emit_chain(e, object, l1, l2))
+      e
+      |> emit_ir(IrDup)
+      |> emit_ir(IrJumpIfNullish(l1))
+      |> emit_get_field(prop)
+    }
+    ast.OptionalMemberExpression(object, property, True) -> {
+      use e <- result.try(emit_chain(e, object, l1, l2))
+      let e = e |> emit_ir(IrDup) |> emit_ir(IrJumpIfNullish(l1))
+      use e <- result.map(emit_expr(e, property))
+      emit_ir(e, IrGetElem)
+    }
+    ast.MemberExpression(object, ast.Identifier(prop), False) -> {
+      use e <- result.map(emit_chain(e, object, l1, l2))
+      emit_get_field(e, prop)
+    }
+    ast.MemberExpression(object, property, True) -> {
+      use e <- result.try(emit_chain(e, object, l1, l2))
+      use e <- result.map(emit_expr(e, property))
+      emit_ir(e, IrGetElem)
+    }
+    // Non-optional call AFTER an optional link, e.g. `a?.b.m(x)` /
+    // `a?.b(x)` — `this` binding follows the method-reference shape.
+    ast.CallExpression(callee, args) -> {
+      use #(e, is_method) <- result.try(emit_chain_callee(e, callee, l1, l2))
+      emit_chain_call_args(e, args, is_method)
+    }
+    // Optional call `f?.(x)`: additionally check the function value itself.
+    ast.OptionalCallExpression(callee, args) -> {
+      use #(e, is_method) <- result.try(emit_chain_callee(e, callee, l1, l2))
+      let e = emit_ir(e, IrDup)
+      let e = case is_method {
+        True -> emit_ir(e, IrJumpIfNullish(l2))
+        False -> emit_ir(e, IrJumpIfNullish(l1))
+      }
+      emit_chain_call_args(e, args, is_method)
+    }
+    // Unreachable: chain_has_optional only returns True for the arms above.
+    other -> emit_expr(e, other)
+  }
+}
+
+/// Emit a chain call's callee. Returns is_method: True when the stack is
+/// left as [f, receiver] (CallMethod shape, `this` = receiver), False when
+/// it's [f] (plain Call, `this` = undefined).
+fn emit_chain_callee(
+  e: Emitter,
+  callee: ast.Expression,
+  l1: Int,
+  l2: Int,
+) -> Result(#(Emitter, Bool), EmitError) {
+  case callee {
+    // super.m?.() — §13.3.7.3 super reference with lexical-this receiver.
+    ast.MemberExpression(ast.SuperExpression, ast.Identifier(m), False) -> {
+      let e =
+        emit_super_base_keep_recv(e)
+        |> push_const(JsString(m))
+        |> emit_ir(IrGetSuperValue)
+      Ok(#(e, True))
+    }
+    ast.MemberExpression(ast.SuperExpression, key, True) -> {
+      let e = emit_super_base_keep_recv(e)
+      use e <- result.map(emit_expr(e, key))
+      #(emit_ir(e, IrGetSuperValue), True)
+    }
+    ast.MemberExpression(obj, ast.Identifier(m), False) -> {
+      use e <- result.map(emit_chain(e, obj, l1, l2))
+      #(emit_get_field2(e, m), True)
+    }
+    ast.MemberExpression(obj, key, True) -> {
+      use e <- result.try(emit_chain(e, obj, l1, l2))
+      use e <- result.map(emit_expr(e, key))
+      // [f, key, receiver] → [f, receiver]
+      let e = e |> emit_ir(IrGetElem2) |> emit_ir(IrSwap) |> emit_ir(IrPop)
+      #(e, True)
+    }
+    ast.OptionalMemberExpression(obj, ast.Identifier(m), False) -> {
+      use e <- result.map(emit_chain(e, obj, l1, l2))
+      let e = e |> emit_ir(IrDup) |> emit_ir(IrJumpIfNullish(l1))
+      #(emit_get_field2(e, m), True)
+    }
+    ast.OptionalMemberExpression(obj, key, True) -> {
+      use e <- result.try(emit_chain(e, obj, l1, l2))
+      let e = e |> emit_ir(IrDup) |> emit_ir(IrJumpIfNullish(l1))
+      use e <- result.map(emit_expr(e, key))
+      let e = e |> emit_ir(IrGetElem2) |> emit_ir(IrSwap) |> emit_ir(IrPop)
+      #(e, True)
+    }
+    other -> {
+      use e <- result.map(emit_chain(e, other, l1, l2))
+      #(e, False)
+    }
+  }
+}
+
+/// Emit a chain call's arguments + the call op for the callee shape left by
+/// emit_chain_callee.
+fn emit_chain_call_args(
+  e: Emitter,
+  args: List(ast.Expression),
+  is_method: Bool,
+) -> Result(Emitter, EmitError) {
+  case has_spread_arg(args), is_method {
+    False, True -> {
+      use e <- result.map(list.try_fold(args, e, emit_expr))
+      emit_ir(e, IrCallMethod("[chain]", list.length(args)))
+    }
+    False, False -> {
+      use e <- result.map(list.try_fold(args, e, emit_expr))
+      emit_ir(e, opcode.IrCall(list.length(args)))
+    }
+    True, True -> {
+      use e <- result.map(emit_args_array_with_spread(e, args))
+      emit_ir(e, IrCallMethodApply)
+    }
+    True, False -> {
+      use e <- result.map(emit_args_array_with_spread(e, args))
+      emit_ir(e, IrCallApply)
+    }
+  }
 }
 
 fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
   case expr {
     // Literals
     ast.NumberLiteral(value) -> Ok(push_const(e, JsNumber(Finite(value))))
+    ast.BigIntLiteral(value: n) ->
+      Ok(push_const(e, value.JsBigInt(value.BigInt(n))))
     ast.StringExpression(value) -> Ok(push_const(e, JsString(value)))
     ast.BooleanLiteral(value) -> Ok(push_const(e, JsBool(value)))
     ast.NullLiteral -> Ok(push_const(e, JsNull))
@@ -2119,7 +3315,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Stack: [obj] → [bool].
     ast.BinaryExpression(ast.In, ast.Identifier("#" <> rest), right) -> {
       use e <- result.map(emit_expr(e, right))
-      emit_ir(e, IrPrivateIn("#" <> rest))
+      e
+      |> emit_ir(IrScopeGetVar("#" <> rest))
+      |> emit_ir(IrPrivateInDyn)
     }
     ast.BinaryExpression(op, left, right) -> {
       use e <- result.try(emit_expr(e, left))
@@ -2213,9 +3411,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           use e <- result.map(emit_expr(e, key_expr))
           emit_ir(e, IrDeleteElem)
         }
-        ast.Identifier(_) -> {
-          // delete x → always true in sloppy mode (can't delete plain vars)
-          Ok(push_const(e, JsBool(True)))
+        ast.Identifier(name) -> {
+          // delete x — Phase 2 emits enclosing-with object checks (§9.1.1.2.7
+          // DeleteBinding deletes the property off the with object) and falls
+          // back to `true` (can't delete plain vars; legacy behavior).
+          Ok(emit_ir(e, opcode.IrScopeDeleteVar(name)))
         }
         _ -> {
           // delete <other expr> → evaluate for side effects, discard, push true
@@ -2233,6 +3433,19 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Update expressions (++/--) — unwrap parens because (x)++ === x++.
     ast.UpdateExpression(op, prefix, ast.ParenthesizedExpression(inner)) ->
       emit_expr(e, ast.UpdateExpression(op, prefix, unwrap_parens(inner)))
+    // Annex B web-compat: `++f()` / `f()--` parse in sloppy mode, evaluate
+    // the call, then throw ReferenceError (before ToNumeric).
+    ast.UpdateExpression(_, _, ast.CallExpression(callee, args)) -> {
+      use e <- result.map(emit_expr(e, ast.CallExpression(callee, args)))
+      let e = emit_ir(e, IrPop)
+      emit_ir(
+        e,
+        IrThrowError(
+          opcode.ReferenceErrorKind,
+          "Invalid left-hand side expression in update operation",
+        ),
+      )
+    }
     ast.UpdateExpression(op, prefix, ast.Identifier(name)) -> {
       let one = JsNumber(Finite(1.0))
       let bin_kind = case op {
@@ -2241,23 +3454,25 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
       case prefix {
         True -> {
-          // ++x: get, add 1, dup (keep result), store
-          let e = emit_ir(e, IrScopeGetVar(name))
+          // ++x: make ref, get, add 1, dup (keep result), store to ref
+          let e = emit_ir(e, opcode.IrScopeMakeRef(name))
+          let e = emit_ir(e, opcode.IrScopeGetRef(name))
           let e = push_const(e, one)
           let e = emit_ir(e, IrBinOp(bin_kind))
           let e = emit_ir(e, IrDup)
-          let e = emit_ir(e, IrScopePutVar(name))
+          let e = emit_ir(e, opcode.IrScopePutRef(name))
           Ok(e)
         }
         False -> {
-          // x++: get, ToNumeric (§13.4.2.1 step 3), dup (old value stays as
-          // result), add 1, store. Unary `+` is the ToNumber coercion.
-          let e = emit_ir(e, IrScopeGetVar(name))
+          // x++: make ref, get, ToNumeric (§13.4.2.1 step 3), dup (old value
+          // stays as result), add 1, store to ref. Unary `+` is ToNumber.
+          let e = emit_ir(e, opcode.IrScopeMakeRef(name))
+          let e = emit_ir(e, opcode.IrScopeGetRef(name))
           let e = emit_ir(e, IrUnaryOp(opcode.Pos))
           let e = emit_ir(e, IrDup)
           let e = push_const(e, one)
           let e = emit_ir(e, IrBinOp(bin_kind))
-          let e = emit_ir(e, IrScopePutVar(name))
+          let e = emit_ir(e, opcode.IrScopePutRef(name))
           Ok(e)
         }
       }
@@ -2302,10 +3517,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         ast.Decrement -> #(opcode.Sub, opcode.Add)
       }
       use e <- result.map(emit_expr(e, obj))
-      let e = emit_ir(e, get_field2_op(prop))
+      let e = emit_get_field2(e, prop)
       let e = push_const(e, one)
       let e = emit_ir(e, IrBinOp(bin_kind))
-      let e = emit_ir(e, put_field_op(prop))
+      let e = emit_put_field(e, prop)
       case prefix {
         True -> e
         False -> {
@@ -2345,35 +3560,66 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       ast.ParenthesizedExpression(ast.Identifier(name)),
       right,
     ) -> {
+      let e = emit_ir(e, opcode.IrScopeMakeRef(name))
       use e <- result.map(emit_expr(e, right))
       let e = emit_ir(e, IrDup)
-      emit_ir(e, IrScopePutVar(name))
+      emit_ir(e, opcode.IrScopePutRef(name))
     }
     // Non-simple-assign parenthesized LHS — safe to unwrap (no name inference
     // for compound assignment anyway).
     ast.AssignmentExpression(op, ast.ParenthesizedExpression(inner), right) ->
       emit_expr(e, ast.AssignmentExpression(op, inner, right))
 
-    // Assignment to identifier
+    // Annex B web-compat AssignmentTargetType: `f() = v` / `f() += v` parse
+    // in sloppy mode, evaluate the call, then throw ReferenceError BEFORE
+    // evaluating the RHS (the parser only lets CallExpression targets
+    // through when !strict). Must precede the logical-assign and
+    // destructuring branches.
+    ast.AssignmentExpression(_, ast.CallExpression(callee, args), _) -> {
+      use e <- result.map(emit_expr(e, ast.CallExpression(callee, args)))
+      let e = emit_ir(e, IrPop)
+      emit_ir(
+        e,
+        IrThrowError(
+          opcode.ReferenceErrorKind,
+          "Invalid left-hand side in assignment",
+        ),
+      )
+    }
+
+    // §13.15.2 logical assignment: x &&= v, x ||= v, x ??= v. Must precede
+    // the generic compound-assignment branches (compound_to_binop has no
+    // BinOpKind for these — they short-circuit instead).
+    ast.AssignmentExpression(ast.LogicalAndAssign as op, lhs, right)
+    | ast.AssignmentExpression(ast.LogicalOrAssign as op, lhs, right)
+    | ast.AssignmentExpression(ast.NullishCoalesceAssign as op, lhs, right) ->
+      emit_logical_assign(e, op, lhs, right)
+
+    // Assignment to identifier. §13.15.2 step 1.a: the reference is
+    // resolved BEFORE the RHS runs (observable through `with` Proxy traps
+    // and binding deletion during RHS evaluation) — MakeRef pins the base.
     ast.AssignmentExpression(ast.Assign, ast.Identifier(name), right) -> {
       let inferred_name = case name {
         "*default*" -> "default"
         _ -> name
       }
+      let e = emit_ir(e, opcode.IrScopeMakeRef(name))
       use e <- result.map(emit_named_expr(e, right, inferred_name))
       let e = emit_ir(e, IrDup)
-      emit_ir(e, IrScopePutVar(name))
+      emit_ir(e, opcode.IrScopePutRef(name))
     }
 
-    // Compound assignment to identifier
+    // Compound assignment to identifier. The reference is resolved once
+    // (before get and RHS); the store reuses that base (§13.15.2).
     ast.AssignmentExpression(op, ast.Identifier(name), right) -> {
       case compound_to_binop(op) {
         Ok(bin_kind) -> {
-          let e = emit_ir(e, IrScopeGetVar(name))
+          let e = emit_ir(e, opcode.IrScopeMakeRef(name))
+          let e = emit_ir(e, opcode.IrScopeGetRef(name))
           use e <- result.map(emit_expr(e, right))
           let e = emit_ir(e, IrBinOp(bin_kind))
           let e = emit_ir(e, IrDup)
-          emit_ir(e, IrScopePutVar(name))
+          emit_ir(e, opcode.IrScopePutRef(name))
         }
         Error(_) -> Error(Unsupported("assignment op"))
       }
@@ -2431,7 +3677,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.map(emit_expr(e, right))
       // Stack: [val, obj, ...] — PutField pops both, leaves val
-      emit_ir(e, put_field_op(prop))
+      emit_put_field(e, prop)
     }
 
     // Compound assignment to dot member (obj.prop += val)
@@ -2443,10 +3689,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       case compound_to_binop(op) {
         Ok(bin_kind) -> {
           use e <- result.try(emit_expr(e, obj))
-          let e = emit_ir(e, get_field2_op(prop))
+          let e = emit_get_field2(e, prop)
           use e <- result.map(emit_expr(e, right))
           let e = emit_ir(e, IrBinOp(bin_kind))
-          emit_ir(e, put_field_op(prop))
+          emit_put_field(e, prop)
         }
         Error(_) -> Error(Unsupported("assignment op"))
       }
@@ -2573,45 +3819,55 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.CallExpression(
       ast.MemberExpression(obj, ast.Identifier(method_name), False),
       args,
-    ) -> {
-      use e <- result.try(emit_expr(e, obj))
-      let e = emit_ir(e, get_field2_op(method_name))
-      case has_spread_arg(args) {
+    ) ->
+      case chain_has_optional(obj) {
+        // `a?.b.m(x)` — the receiver chain short-circuits the call too.
+        True -> emit_chain_root(e, expr)
         False -> {
-          use e <- result.map(list.try_fold(args, e, emit_expr))
-          emit_ir(e, IrCallMethod(method_name, list.length(args)))
-        }
-        True -> {
-          // Stack after GetField2: [method, receiver, ...]
-          // Build args array on top, then CallMethodApply pops [args, method, receiver].
-          use e <- result.map(emit_args_array_with_spread(e, args))
-          emit_ir(e, IrCallMethodApply)
+          use e <- result.try(emit_expr(e, obj))
+          let e = emit_get_field2(e, method_name)
+          case has_spread_arg(args) {
+            False -> {
+              use e <- result.map(list.try_fold(args, e, emit_expr))
+              emit_ir(e, IrCallMethod(method_name, list.length(args)))
+            }
+            True -> {
+              // Stack after GetField2: [method, receiver, ...]
+              // Build args array on top, then CallMethodApply pops [args, method, receiver].
+              use e <- result.map(emit_args_array_with_spread(e, args))
+              emit_ir(e, IrCallMethodApply)
+            }
+          }
         }
       }
-    }
     // Computed method call: obj[key](args) — must bind `this` to obj.
     // GetElem2 leaves [method, key, receiver]; we shuffle to [method, receiver]
     // via Swap+Pop so CallMethod sees the same shape as the dot-access path.
-    ast.CallExpression(ast.MemberExpression(obj, key, True), args) -> {
-      use e <- result.try(emit_expr(e, obj))
-      use e <- result.try(emit_expr(e, key))
-      let e = emit_ir(e, IrGetElem2)
-      // [method, key, receiver] → Swap → [key, method, receiver] → Pop → [method, receiver]
-      let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPop)
-      case has_spread_arg(args) {
+    ast.CallExpression(ast.MemberExpression(obj, key, True), args) ->
+      case chain_has_optional(obj) {
+        // `a?.b[k](x)` — the receiver chain short-circuits the call too.
+        True -> emit_chain_root(e, expr)
         False -> {
-          use e <- result.map(list.try_fold(args, e, emit_expr))
-          // Static name unknown for computed access; CallMethod ignores name
-          // at runtime anyway — it's informational only.
-          emit_ir(e, IrCallMethod("[computed]", list.length(args)))
-        }
-        True -> {
-          use e <- result.map(emit_args_array_with_spread(e, args))
-          emit_ir(e, IrCallMethodApply)
+          use e <- result.try(emit_expr(e, obj))
+          use e <- result.try(emit_expr(e, key))
+          let e = emit_ir(e, IrGetElem2)
+          // [method, key, receiver] → Swap → [key, method, receiver] → Pop → [method, receiver]
+          let e = emit_ir(e, IrSwap)
+          let e = emit_ir(e, IrPop)
+          case has_spread_arg(args) {
+            False -> {
+              use e <- result.map(list.try_fold(args, e, emit_expr))
+              // Static name unknown for computed access; CallMethod ignores name
+              // at runtime anyway — it's informational only.
+              emit_ir(e, IrCallMethod("[computed]", list.length(args)))
+            }
+            True -> {
+              use e <- result.map(emit_args_array_with_spread(e, args))
+              emit_ir(e, IrCallMethodApply)
+            }
+          }
         }
       }
-    }
     // Direct eval candidate: `eval(args)` with identifier callee.
     // Emits IrCallEval so the VM can do a runtime identity check against
     // the intrinsic eval. If it matches → direct eval (sees caller's locals).
@@ -2623,7 +3879,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> {
           let e = emit_ir(e, IrScopeGetVar("eval"))
           use e <- result.map(list.try_fold(args, e, emit_expr))
-          let e = emit_ir(e, opcode.IrCallEval(list.length(args)))
+          let e =
+            emit_ir(
+              e,
+              opcode.IrCallEval(
+                list.length(args),
+                e.param_scope_names,
+                e.with_stack,
+                e.private_env,
+              ),
+            )
           Emitter(..e, has_eval_call: True)
         }
         True -> {
@@ -2633,17 +3898,46 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
       }
 
-    // Regular call expression
+    // Regular call expression. §13.3.6.2 EvaluateCall step 1.b.ii: when the
+    // callee is an identifier inside a `with` body, its resolution may cross
+    // a with marker — then thisValue must be the with object (the env
+    // record's WithBaseObject), not undefined. Emit the receiver+value pair
+    // (IrScopeGetVarThis) and dispatch via the method-call path; Phase 2
+    // pushes undefined as receiver when the binding is static. Outside with
+    // bodies the plain IrCall path is unchanged. Mirrors QuickJS
+    // OP_with_get_ref + OP_call_method.
     ast.CallExpression(callee, args) -> {
-      use e <- result.try(emit_expr(e, callee))
-      case has_spread_arg(args) {
-        False -> {
-          use e <- result.map(list.try_fold(args, e, emit_expr))
-          emit_ir(e, opcode.IrCall(list.length(args)))
+      // `a?.()(x)` etc. — optional link inside the callee chain
+      // short-circuits this call too.
+      use <- bool.lazy_guard(chain_has_optional(callee), fn() {
+        emit_chain_root(e, expr)
+      })
+      case unwrap_parens(callee), e.with_stack {
+        ast.Identifier(name), [_, ..] -> {
+          let e = emit_ir(e, IrScopeGetVarThis(name))
+          case has_spread_arg(args) {
+            False -> {
+              use e <- result.map(list.try_fold(args, e, emit_expr))
+              emit_ir(e, IrCallMethod(name, list.length(args)))
+            }
+            True -> {
+              use e <- result.map(emit_args_array_with_spread(e, args))
+              emit_ir(e, IrCallMethodApply)
+            }
+          }
         }
-        True -> {
-          use e <- result.map(emit_args_array_with_spread(e, args))
-          emit_ir(e, IrCallApply)
+        _, _ -> {
+          use e <- result.try(emit_expr(e, callee))
+          case has_spread_arg(args) {
+            False -> {
+              use e <- result.map(list.try_fold(args, e, emit_expr))
+              emit_ir(e, opcode.IrCall(list.length(args)))
+            }
+            True -> {
+              use e <- result.map(emit_args_array_with_spread(e, args))
+              emit_ir(e, IrCallApply)
+            }
+          }
         }
       }
     }
@@ -2685,47 +3979,32 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_ir(e, IrGetSuperValue)
     }
 
-    // Member expression (dot access)
-    ast.MemberExpression(object, ast.Identifier(prop), False) -> {
-      use e <- result.map(emit_expr(e, object))
-      emit_ir(e, get_field_op(prop))
-    }
-
-    // Computed member expression (obj[key])
-    ast.MemberExpression(object, property, True) -> {
-      use e <- result.try(emit_expr(e, object))
-      use e <- result.map(emit_expr(e, property))
-      emit_ir(e, IrGetElem)
-    }
-
-    // Optional member expression (obj?.prop)
-    ast.OptionalMemberExpression(object, ast.Identifier(prop), False) -> {
-      use e <- emit_optional_scaffold(e, object)
-      Ok(emit_ir(e, get_field_op(prop)))
-    }
-
-    // Optional computed member expression (obj?.[key])
-    ast.OptionalMemberExpression(object, property, True) -> {
-      use e <- emit_optional_scaffold(e, object)
-      use e <- result.map(emit_expr(e, property))
-      emit_ir(e, IrGetElem)
-    }
-
-    // Optional call expression (fn?.())
-    ast.OptionalCallExpression(callee, args) -> {
-      use e <- emit_optional_scaffold(e, callee)
-      case has_spread_arg(args) {
+    // Member expression (dot access). A `?.` link anywhere in the object
+    // chain routes the WHOLE expression through the shared-short-circuit
+    // chain compiler (§13.3.9.1).
+    ast.MemberExpression(object, ast.Identifier(prop), False) ->
+      case chain_has_optional(object) {
+        True -> emit_chain_root(e, expr)
         False -> {
-          let arity = list.length(args)
-          use e <- result.map(list.try_fold(args, e, emit_expr))
-          emit_ir(e, opcode.IrCall(arity))
-        }
-        True -> {
-          use e <- result.map(emit_args_array_with_spread(e, args))
-          emit_ir(e, IrCallApply)
+          use e <- result.map(emit_expr(e, object))
+          emit_get_field(e, prop)
         }
       }
-    }
+
+    // Computed member expression (obj[key])
+    ast.MemberExpression(object, property, True) ->
+      case chain_has_optional(object) {
+        True -> emit_chain_root(e, expr)
+        False -> {
+          use e <- result.try(emit_expr(e, object))
+          use e <- result.map(emit_expr(e, property))
+          emit_ir(e, IrGetElem)
+        }
+      }
+
+    // Optional member / call expressions — always chain roots.
+    ast.OptionalMemberExpression(..) | ast.OptionalCallExpression(..) ->
+      emit_chain_root(e, expr)
 
     // Array literal
     // Fast path (no spread, no holes): push N elements, IrArrayFrom(N).
@@ -2742,7 +4021,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Function expression
     ast.FunctionExpression(name, params, body, is_gen, is_async) ->
-      emit_function_closure(e, name, params, body, is_gen, is_async)
+      emit_function_closure(e, name, params, body, is_gen, is_async, True)
 
     // Arrow function expression
     ast.ArrowFunctionExpression(params, body, is_async) ->
@@ -2789,7 +4068,15 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
       use e <- result.try(e)
       case is_delegate {
-        False -> Ok(emit_ir(e, IrYield))
+        // Plain yield. In async generators the operand is awaited first:
+        // YieldExpression evaluation does AsyncGeneratorYield(? Await(value))
+        // (tc39/ecma262#2819), so yielding a rejected promise throws at the
+        // yield point. Sync generators yield the value as-is.
+        False ->
+          case e.is_async {
+            True -> Ok(emit_ir(emit_ir(e, IrAwait), IrYield))
+            False -> Ok(emit_ir(e, IrYield))
+          }
         True ->
           case e.is_async {
             True -> {
@@ -2799,6 +4086,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               // Resume checks done / yields and jumps back to Next via label.
               // Leaves final result.value on stack.
               let e = emit_ir(e, IrGetAsyncIterator)
+              // Cache [[NextMethod]] once (GetIteratorFromMethod §7.4.4) so
+              // the loop doesn't re-Get `next` per step.
+              let e = emit_ir(e, IrIteratorRecord)
               let e = push_const(e, JsUndefined)
               let #(e, next_label) = fresh_label(e)
               let e = emit_ir(e, IrLabel(next_label))
@@ -2825,12 +4115,61 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Parenthesized expression — transparent for evaluation, just unwrap
     ast.ParenthesizedExpression(inner) -> emit_expr(e, inner)
 
+    // using-declaration desugar intrinsics (internal-only AST nodes)
+    ast.IntrinsicGetDisposer(argument:, is_async:) -> {
+      use e <- result.map(emit_expr(e, argument))
+      emit_ir(e, opcode.IrGetDisposer(is_async))
+    }
+    ast.IntrinsicMakeSuppressed(error:, suppressed:) -> {
+      use e <- result.try(emit_expr(e, error))
+      use e <- result.map(emit_expr(e, suppressed))
+      emit_ir(e, opcode.IrMakeSuppressed)
+    }
+
     // RegExp literal — push pattern and flags, then NewRegExp opcode
     ast.RegExpLiteral(pattern, flags) -> {
       let e = push_const(e, JsString(pattern))
       let e = push_const(e, JsString(flags))
       Ok(emit_ir(e, IrNewRegExp))
     }
+
+    // §13.3.10 ImportCall: import(specifier) / import(specifier, options).
+    // Push specifier, push options (undefined when absent), then the
+    // DynamicImport opcode performs the EvaluateImportCall runtime steps.
+    ast.ImportExpression(source, options, phase) -> {
+      use e <- result.try(emit_expr(e, source))
+      case phase {
+        ast.PhaseEvaluation -> {
+          use e <- result.map(case options {
+            Some(opts) -> emit_expr(e, opts)
+            None -> Ok(push_const(e, JsUndefined))
+          })
+          emit_ir(e, opcode.IrDynamicImport)
+        }
+        // Phase forms (import.source/import.defer) take a single
+        // AssignmentExpression — no options argument to push.
+        ast.PhaseSource -> Ok(emit_ir(e, opcode.IrDynamicImportSource))
+        ast.PhaseDefer -> Ok(emit_ir(e, opcode.IrDynamicImportDefer))
+      }
+    }
+
+    // Tagged template (§13.3.11): lower to a call of the tag function with
+    // the per-site template object as the first argument, reusing the
+    // regular CallExpression paths so this-binding works (obj.tag`x` calls
+    // tag with this = obj, §13.3.6.2 EvaluateCall).
+    ast.TaggedTemplateExpression(tag:, cooked:, raw:, expressions:) -> {
+      let site = unique_positive_integer()
+      let template = ast.IntrinsicTemplateObject(site:, cooked:, raw:)
+      // §13.3.11.1 step 1 note: a tagged template is never a direct eval —
+      // wrap a bare `eval` tag in parens to dodge the IrCallEval path.
+      let tag = case tag {
+        ast.Identifier("eval") -> ast.ParenthesizedExpression(tag)
+        _ -> tag
+      }
+      emit_expr(e, ast.CallExpression(tag, [template, ..expressions]))
+    }
+    ast.IntrinsicTemplateObject(site:, cooked:, raw:) ->
+      Ok(emit_ir(e, opcode.IrGetTemplateObject(site, cooked, raw)))
 
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
@@ -2861,8 +4200,10 @@ fn emit_template_parts(
 ) -> Result(Emitter, EmitError) {
   case expressions, quasis {
     [expr, ..rest_exprs], [quasi, ..rest_quasis] -> {
-      // Emit expression, concat with accumulator
+      // Emit expression, ToString it (§13.2.8.5 — string hint, NOT the Add
+      // operator's default-hint ToPrimitive), then concat with accumulator.
       use e <- result.try(emit_expr(e, expr))
+      let e = emit_ir(e, opcode.IrToStringVal)
       let e = emit_ir(e, IrBinOp(opcode.Add))
       // Emit next quasi string, concat
       let e = push_const(e, JsString(quasi))
@@ -2872,6 +4213,7 @@ fn emit_template_parts(
     // If there are trailing expressions without quasis (shouldn't happen but safe)
     [expr, ..rest_exprs], [] -> {
       use e <- result.try(emit_expr(e, expr))
+      let e = emit_ir(e, opcode.IrToStringVal)
       let e = emit_ir(e, IrBinOp(opcode.Add))
       emit_template_parts(e, rest_exprs, [])
     }
@@ -2891,8 +4233,31 @@ fn emit_switch(
   // continue target — emit_goto_loop walks past it to the enclosing loop.
   let e = push_loop(e, end_label, -1)
 
-  // Emit discriminant — stays on stack through comparison phase
+  // Emit discriminant — stays on stack through comparison phase.
+  // Evaluated OUTSIDE the CaseBlock scope (§14.12.4 step 1).
   use e <- result.try(emit_expr(e, discriminant))
+
+  // The CaseBlock is a single block scope (§14.12.4 step 3-5): case tests and
+  // bodies run inside it, with its let/const/class + function declarations
+  // instantiated up front (BlockDeclarationInstantiation).
+  let case_stmts =
+    list.flat_map(cases, fn(c) {
+      let ast.SwitchCase(_, consequent) = c
+      consequent
+    })
+  let saved_annexb = e
+  let e = emit_op(e, EnterScope(BlockScope))
+  let e =
+    Emitter(
+      ..e,
+      in_block: True,
+      annexb_blocked: set.union(
+        set.union(e.annexb_blocked, e.annexb_level_fns),
+        top_lex_name_set(case_stmts),
+      ),
+      annexb_level_fns: set.from_list(direct_fn_names(case_stmts)),
+    )
+  let e = emit_block_declarations(e, case_stmts)
 
   // Allocate labels: each non-default case gets a "found" trampoline label
   // and a "body" label. Default cases only get a "body" label.
@@ -2981,6 +4346,8 @@ fn emit_switch(
     })
 
   let e = emit_ir(e, IrLabel(end_label))
+  let e = restore_annexb_ctx(e, saved_annexb)
+  let e = emit_op(e, LeaveScope)
   let e = pop_loop(e)
   Ok(e)
 }
@@ -3011,9 +4378,18 @@ fn emit_named_expr(
     // IsAnonymousFunctionDefinition looks through ParenthesizedExpression
     // (ES spec §13.2.1.2), so (function(){}) is still anonymous.
     ast.ParenthesizedExpression(inner) -> emit_named_expr(e, inner, name)
-    // Anonymous function expression → bake name
+    // Anonymous function expression → bake name (no self-name binding —
+    // §8.4 NamedEvaluation does not create one)
     ast.FunctionExpression(None, params, body, is_gen, is_async) ->
-      emit_function_closure(e, Some(name), params, body, is_gen, is_async)
+      emit_function_closure(
+        e,
+        Some(name),
+        params,
+        body,
+        is_gen,
+        is_async,
+        False,
+      )
     // Arrow function → bake name
     ast.ArrowFunctionExpression(params, body, is_async) ->
       emit_arrow_closure(e, Some(name), params, body, is_async)
@@ -3041,6 +4417,7 @@ fn make_method_closure(
     compile_function_body(
       e,
       name,
+      None,
       params,
       body,
       False,
@@ -3063,11 +4440,20 @@ fn emit_function_closure(
   body: ast.Statement,
   is_gen: Bool,
   is_async: Bool,
+  // True only for a SYNTACTICALLY named function expression — creates the
+  // §13.2.5.5 self-name binding. False for NamedEvaluation-baked names
+  // (`var f = function () {}` has no inner `f` binding).
+  bind_self: Bool,
 ) -> Result(Emitter, EmitError) {
+  let self_name = case bind_self {
+    True -> name
+    False -> None
+  }
   let child =
     compile_function_body(
       e,
       name,
+      self_name,
       params,
       body,
       False,
@@ -3100,6 +4486,7 @@ fn emit_arrow_closure(
     compile_function_body(
       e,
       name,
+      None,
       params,
       body_stmt,
       True,
@@ -3244,7 +4631,7 @@ fn emit_object_property(
         ..,
       ) -> {
       use e <- result.map(emit_method_value(e, value, Some("get " <> name)))
-      emit_ir(e, IrDefineAccessor(name, opcode.Getter))
+      emit_ir(e, IrDefineAccessor(name, opcode.Getter, True))
     }
 
     // Setter: { set name(v) { ... } }
@@ -3263,7 +4650,7 @@ fn emit_object_property(
         ..,
       ) -> {
       use e <- result.map(emit_method_value(e, value, Some("set " <> name)))
-      emit_ir(e, IrDefineAccessor(name, opcode.Setter))
+      emit_ir(e, IrDefineAccessor(name, opcode.Setter, True))
     }
 
     // Computed or exotic-key getter/setter: { get [expr]() {} }
@@ -3271,12 +4658,12 @@ fn emit_object_property(
     ast.Property(key:, value:, kind: ast.Get, ..) -> {
       use e <- result.try(emit_expr(e, key))
       use e <- result.map(emit_method_value(e, value, None))
-      emit_ir(e, IrDefineAccessorComputed(opcode.Getter))
+      emit_ir(e, IrDefineAccessorComputed(opcode.Getter, True))
     }
     ast.Property(key:, value:, kind: ast.Set, ..) -> {
       use e <- result.try(emit_expr(e, key))
       use e <- result.map(emit_method_value(e, value, None))
-      emit_ir(e, IrDefineAccessorComputed(opcode.Setter))
+      emit_ir(e, IrDefineAccessorComputed(opcode.Setter, True))
     }
 
     // Remaining case: non-computed Init with an exotic key expression
@@ -3520,8 +4907,9 @@ fn emit_for_in(
   // Block scope for let/const
   let e = emit_op(e, EnterScope(BlockScope))
 
-  // Evaluate the right-hand side (object to iterate)
-  use e <- result.try(emit_expr(e, right))
+  // Evaluate the right-hand side (object to iterate) — bound names of a
+  // let/const ForDeclaration are in TDZ during this evaluation (§14.7.5.5).
+  use e <- result.try(emit_for_head_expr(e, left, right))
   // ForInStart: pops object, pushes iterator ref
   let e = emit_ir(e, IrForInStart)
 
@@ -3536,8 +4924,11 @@ fn emit_for_in(
   // Bind the key to the left-hand side variable
   use e <- result.try(emit_for_lhs_bind(e, left))
 
-  // Body
+  // Body — head let/const names block Annex B promotion inside it
+  let saved_annexb = e
+  let e = annexb_head_ctx(e, for_init_lex_names(left))
   use e <- result.try(emit_stmt(e, body))
+  let e = restore_annexb_ctx(e, saved_annexb)
 
   // Continue point
   let e = emit_ir(e, IrLabel(loop_continue))
@@ -3554,6 +4945,36 @@ fn emit_for_in(
   let e = pop_loop(e)
   let e = emit_op(e, LeaveScope)
   Ok(e)
+}
+
+/// Head let/const names of a for-in/for-of left-hand side.
+fn for_init_lex_names(left: ast.ForInit) -> List(String) {
+  case left {
+    ast.ForInitDeclaration(decl) -> for_head_lex_names(decl)
+    _ -> []
+  }
+}
+
+/// §14.7.5.5 ForIn/OfHeadEvaluation steps 2-5: when the head is a let/const
+/// ForDeclaration, the AssignmentExpression is evaluated inside a fresh
+/// declarative environment whose bound names exist but are UNINITIALIZED
+/// (TDZ) — `for (let x of [x])` throws ReferenceError, and closures created
+/// in the head capture that env forever (scope-head-lex-open/close). The env
+/// is left before GetIterator runs (step 5 restores oldEnv).
+fn emit_for_head_expr(
+  e: Emitter,
+  left: ast.ForInit,
+  right: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case for_init_lex_names(left) {
+    [] -> emit_expr(e, right)
+    names -> {
+      let e = emit_op(e, EnterScope(BlockScope))
+      let e = list.fold(names, e, fn(e, name) { declare_lex(e, name, False) })
+      use e <- result.map(emit_expr(e, right))
+      emit_op(e, LeaveScope)
+    }
+  }
 }
 
 /// Emit a for-of loop: `for (lhs of rhs) body`
@@ -3586,7 +5007,7 @@ fn emit_for_of(
   let e = emit_op(e, EnterScope(BlockScope))
 
   // Evaluate the iterable, get its sync iterator → stack: [iter, ..base]
-  use e <- result.try(emit_expr(e, right))
+  use e <- result.try(emit_for_head_expr(e, left, right))
   let e = emit_ir(e, IrGetIterator)
 
   // F_body: catches throws from IteratorNext, the LHS bind, and the body.
@@ -3609,7 +5030,10 @@ fn emit_for_of(
 
   // stack: [value, iter, ..base] — bind consumes the value → [iter, ..base]
   use e <- result.try(emit_for_lhs_bind(e, left))
+  let saved_annexb = e
+  let e = annexb_head_ctx(e, for_init_lex_names(left))
   use e <- result.try(emit_stmt(e, body))
+  let e = restore_annexb_ctx(e, saved_annexb)
 
   let e = emit_ir(e, IrLabel(loop_continue))
   let e = emit_ir(e, IrJump(loop_start))
@@ -3682,7 +5106,7 @@ fn emit_for_await_of(
 
   let e = emit_op(e, EnterScope(BlockScope))
 
-  use e <- result.try(emit_expr(e, right))
+  use e <- result.try(emit_for_head_expr(e, left, right))
   let e = emit_ir(e, IrGetAsyncIterator)
   // stack: [iter, ..base]. F_body recorded depth captures iter on top.
   let e = emit_ir(e, IrPushTry(catch_body))
@@ -3810,7 +5234,9 @@ fn emit_for_lhs_bind(
       let binding_kind = case kind {
         ast.Var -> VarBinding
         ast.Let -> LetBinding
-        ast.Const -> ConstBinding
+        // Using/AwaitUsing heads are rewritten before emission (see the
+        // using desugar) — Const defensively.
+        ast.Const | ast.Using | ast.AwaitUsing -> ConstBinding
       }
       case declarators {
         [ast.VariableDeclarator(pattern, _)] ->
@@ -3847,12 +5273,17 @@ fn emit_destructuring_bind(
         ConstBinding -> declare_lex(e, name, True)
         ParamBinding | CatchBinding ->
           emit_op(e, DeclareVar(name, binding_kind))
-        VarBinding | CaptureBinding -> e
+        // FnNameBinding never reaches destructuring — it is declared
+        // directly in compile_function_body, never via a pattern.
+        VarBinding | CaptureBinding | FnNameBinding -> e
       }
       case binding_kind {
         LetBinding | ConstBinding -> Ok(init_lex(e, name))
-        VarBinding | ParamBinding | CatchBinding | CaptureBinding ->
-          Ok(emit_ir(e, IrScopePutVar(name)))
+        VarBinding
+        | ParamBinding
+        | CatchBinding
+        | CaptureBinding
+        | FnNameBinding -> Ok(emit_ir(e, IrScopePutVar(name)))
       }
     }
 
@@ -3899,6 +5330,13 @@ fn emit_object_destructure(
   properties: List(ast.PatternProperty),
   binding_kind: BindingKind,
 ) -> Result(Emitter, EmitError) {
+  // §8.6.2 BindingInitialization ObjectBindingPattern step 1:
+  // RequireObjectCoercible(value) BEFORE any property keys are evaluated —
+  // `({} = null)` and `function f({}) {}; f(null)` must throw TypeError even
+  // with an empty pattern. ToObject throws on exactly null/undefined; the
+  // wrapper it creates for other primitives is observably equivalent for
+  // the property reads that follow.
+  let e = emit_ir(e, opcode.IrToObject)
   let has_rest =
     list.any(properties, fn(p) {
       case p {
@@ -4072,7 +5510,7 @@ fn emit_destructuring_assign(
     ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
       use e <- result.map(emit_expr(e, obj))
       let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, put_field_op(prop))
+      let e = emit_put_field(e, prop)
       emit_ir(e, IrPop)
     }
 
@@ -4115,11 +5553,15 @@ fn emit_destructuring_assign(
     }
 
     ast.ArrayExpression(elements) -> {
-      use e <- with_iterator_scaffold(e)
-      emit_array_assign_elements(e, elements)
+      use e, close_throw <- with_iterator_scaffold(e)
+      emit_array_assign_elements(e, elements, close_throw)
     }
 
     ast.ObjectExpression(properties) -> {
+      // §13.15.5.2 step 1: RequireObjectCoercible BEFORE evaluating any
+      // property keys — `({} = null)` throws TypeError. See
+      // emit_object_destructure for the ToObject rationale.
+      let e = emit_ir(e, opcode.IrToObject)
       let has_rest =
         list.any(properties, fn(p) {
           case p {
@@ -4139,6 +5581,24 @@ fn emit_destructuring_assign(
       }
     }
 
+    // Annex B web-compat for-in/of LHS: `for (f() of [1])` — evaluate the
+    // call each iteration, then throw ReferenceError before assigning.
+    // Entry stack is [val]; the trailing IrPop is unreachable but keeps the
+    // consumed-value invariant for static bookkeeping.
+    ast.CallExpression(callee, args) -> {
+      use e <- result.map(emit_expr(e, ast.CallExpression(callee, args)))
+      let e = emit_ir(e, IrPop)
+      let e =
+        emit_ir(
+          e,
+          IrThrowError(
+            opcode.ReferenceErrorKind,
+            "Invalid left-hand side in assignment",
+          ),
+        )
+      emit_ir(e, IrPop)
+    }
+
     other ->
       Error(Unsupported(
         "destructuring assignment target: " <> string_inspect_expr_kind(other),
@@ -4153,6 +5613,7 @@ fn emit_destructuring_assign(
 fn emit_array_assign_elements(
   e: Emitter,
   elements: List(Option(ast.Expression)),
+  close_throw: Int,
 ) -> Result(#(Emitter, Bool), EmitError) {
   case elements {
     [] -> Ok(#(e, False))
@@ -4161,24 +5622,156 @@ fn emit_array_assign_elements(
       let e = emit_ir(e, IrIteratorNext)
       let e = emit_ir(e, IrPop)
       let e = emit_ir(e, IrPop)
-      emit_array_assign_elements(e, rest)
+      emit_array_assign_elements(e, rest, close_throw)
     }
-    // Rest: [[Done]] becomes true the moment we start draining → no close on
-    // ANY subsequent throw. Pop F_body first so those throws skip the guard.
-    [Some(ast.SpreadElement(argument:)), ..] -> {
-      // [iter], try=[F_body,..] → PopTry → IteratorRest → [arr]
-      let e = emit_ir(e, IrPopTry)
-      let e = emit_ir(e, IrIteratorRest)
-      use e <- result.map(emit_destructuring_assign(e, argument))
-      #(e, True)
-    }
+    [Some(ast.SpreadElement(argument:)), ..] ->
+      emit_array_assign_rest(e, strip_parens(argument), close_throw)
     [Some(target), ..rest] -> {
+      use e <- result.try(emit_array_assign_element(e, strip_parens(target)))
+      emit_array_assign_elements(e, rest, close_throw)
+    }
+  }
+}
+
+/// One non-rest AssignmentElement (§13.15.5.3). Stack: [iter, ..] → [iter, ..].
+///
+/// For MemberExpression targets the lref (base obj + computed key) is
+/// evaluated BEFORE IteratorStep — `[ {}[thrower()] ] = iterable` must throw
+/// without calling .next(), and the still-armed close guard then
+/// IteratorCloses ([[Done]] is false). After the step, Rot3/Unrot4 park iter
+/// back at the guard's recorded depth so a PutValue throw closes the
+/// iterator, not a stale operand.
+fn emit_array_assign_element(
+  e: Emitter,
+  target: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case target {
+    // obj.prop — [iter] → obj → [obj,iter] → Swap → [iter,obj]
+    // → IteratorNext → [done,value,iter,obj] → Pop → [value,iter,obj]
+    // → Rot3 → [obj,value,iter] → Swap → [value,obj,iter]
+    // → PutField → [value,iter] → Pop → [iter].
+    ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
+      use e <- result.map(emit_expr(e, obj))
+      e
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrIteratorNext)
+      |> emit_ir(IrPop)
+      |> emit_ir(opcode.IrRot3)
+      |> emit_ir(IrSwap)
+      |> emit_put_field(prop)
+      |> emit_ir(IrPop)
+    }
+    ast.MemberExpression(obj, ast.StringExpression(prop), False) -> {
+      use e <- result.map(emit_expr(e, obj))
+      e
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrIteratorNext)
+      |> emit_ir(IrPop)
+      |> emit_ir(opcode.IrRot3)
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrPutField(prop))
+      |> emit_ir(IrPop)
+    }
+    // obj[key] — the key's ToPropertyKey stays deferred to PutElem
+    // (§13.15.5.6: PutValue runs after the iterator step). [iter] → obj
+    // → key → [key,obj,iter] → Rot3 → [iter,key,obj] → IteratorNext → Pop
+    // → [value,iter,key,obj] → Swap → [iter,value,key,obj] → Unrot4
+    // → [value,key,obj,iter] → PutElem → [value,iter] → Pop → [iter].
+    ast.MemberExpression(obj, key, True) -> {
+      use e <- result.try(emit_expr(e, obj))
+      use e <- result.map(emit_expr(e, key))
+      e
+      |> emit_ir(opcode.IrRot3)
+      |> emit_ir(IrIteratorNext)
+      |> emit_ir(IrPop)
+      |> emit_ir(IrSwap)
+      |> emit_ir(opcode.IrUnrot4)
+      |> emit_ir(IrPutElem)
+      |> emit_ir(IrPop)
+    }
+    // Identifiers, nested patterns, defaults: step first, then assign.
+    _ -> {
       let e = emit_ir(e, IrIteratorNext)
       // [done, value, iter] — discard done, assign value.
       let e = emit_ir(e, IrPop)
-      use e <- result.try(emit_destructuring_assign(e, target))
-      emit_array_assign_elements(e, rest)
+      emit_destructuring_assign(e, target)
     }
+  }
+}
+
+/// AssignmentRestElement (§13.15.5.5) — `[...target] = rhs`.
+///
+/// Spec order: when the rest target is NOT a nested array/object pattern its
+/// Reference is evaluated BEFORE the iterator is drained — and a throw there
+/// (e.g. `[...obj[throwingKey()]] = it`) must IteratorClose the still-open
+/// iterator ([[Done]] is false). Draining first hangs forever on infinite
+/// iterators (staging/sm/destructuring/array-iterator-close.js).
+///
+/// [[Done]] becomes true the moment draining starts → no close on any throw
+/// after that (.next() errors or PutValue), so F_body is popped right before
+/// IteratorRest.
+fn emit_array_assign_rest(
+  e: Emitter,
+  target: ast.Expression,
+  close_throw: Int,
+) -> Result(#(Emitter, Bool), EmitError) {
+  case target {
+    // obj.prop — evaluate obj (under the F_body guard, above iter so a throw
+    // unwinds to [thrown, iter, ..]), then drain, then PutField.
+    // [iter] → [obj,iter] → Swap → [iter,obj] → PopTry → IteratorRest
+    // → [arr,obj] → PutField → [arr] → Pop.
+    ast.MemberExpression(obj, ast.Identifier(prop), False) -> {
+      use e <- result.map(emit_expr(e, obj))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPopTry)
+      let e = emit_ir(e, IrIteratorRest)
+      let e = emit_put_field(e, prop)
+      #(emit_ir(e, IrPop), True)
+    }
+    ast.MemberExpression(obj, ast.StringExpression(prop), False) -> {
+      use e <- result.map(emit_expr(e, obj))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPopTry)
+      let e = emit_ir(e, IrIteratorRest)
+      let e = emit_ir(e, IrPutField(prop))
+      #(emit_ir(e, IrPop), True)
+    }
+    // obj[key] — obj AND key evaluate before draining. The key may throw, so
+    // after tucking obj beneath iter the original F_body frame's recorded
+    // depth no longer matches — re-arm the close guard with iter back on top.
+    // [iter] → [obj,iter] → PopTry → Swap → [iter,obj] → PushTry(close_throw)
+    // → emit key → [key,iter,obj] → Swap → [iter,key,obj] → PopTry
+    // → IteratorRest → [arr,key,obj] → PutElem → [arr] → Pop.
+    ast.MemberExpression(obj, key, True) -> {
+      use e <- result.try(emit_expr(e, obj))
+      let e = emit_ir(e, IrPopTry)
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPushTry(close_throw))
+      use e <- result.map(emit_expr(e, key))
+      let e = emit_ir(e, IrSwap)
+      let e = emit_ir(e, IrPopTry)
+      let e = emit_ir(e, IrIteratorRest)
+      let e = emit_ir(e, IrPutElem)
+      #(emit_ir(e, IrPop), True)
+    }
+    // Identifier targets (no observable Reference side effects) and nested
+    // array/object patterns (spec drains into A first, §13.15.5.5 step 4):
+    // drain, then bind/destructure.
+    other -> {
+      // [iter], try=[F_body,..] → PopTry → IteratorRest → [arr]
+      let e = emit_ir(e, IrPopTry)
+      let e = emit_ir(e, IrIteratorRest)
+      use e <- result.map(emit_destructuring_assign(e, other))
+      #(e, True)
+    }
+  }
+}
+
+/// Unwrap `ast.ParenthesizedExpression` layers: `[...((a.b))] = x` → a.b.
+fn strip_parens(expr: ast.Expression) -> ast.Expression {
+  case expr {
+    ast.ParenthesizedExpression(inner) -> strip_parens(inner)
+    other -> other
   }
 }
 
@@ -4252,6 +5845,10 @@ fn emit_single_object_assign_prop(
     ) -> {
       let e = emit_ir(e, IrDup)
       use e <- result.try(emit_expr(e, key))
+      // §13.2.5.4 ComputedPropertyName: ToPropertyKey fires eagerly at
+      // PropertyName evaluation — observably BEFORE the target reference
+      // is evaluated (keyed-destructuring evaluation-order tests).
+      let e = emit_ir(e, opcode.IrToPropertyKey)
       emit_elem_key_assign(e, value, has_rest, n_excl)
     }
 
@@ -4295,7 +5892,7 @@ fn emit_keyed_destructure_assign(
       e
       |> emit_ir(IrSwap)
       |> emit_ir(IrGetField(name))
-      |> emit_ir(put_field_op(prop))
+      |> emit_put_field(prop)
       |> emit_ir(IrPop)
     }
     ast.MemberExpression(obj, ast.StringExpression(prop), False) -> {
@@ -4344,8 +5941,7 @@ fn emit_elem_key_assign(
 ) -> Result(#(Emitter, Int), EmitError) {
   case has_rest {
     False -> {
-      let e = emit_ir(e, IrGetElem)
-      use e <- result.map(emit_destructuring_assign(e, value))
+      use e <- result.map(emit_elem_keyed_target(e, unwrap_parens(value)))
       #(e, n_excl)
     }
     True -> {
@@ -4356,6 +5952,133 @@ fn emit_elem_key_assign(
       #(emit_ir(e, IrSwap), n_excl + 1)
     }
   }
+}
+
+/// `{[srcKey]: target}` body after the key is on the stack —
+/// §13.15.5.6 KeyedDestructuringAssignmentEvaluation: for non-pattern
+/// targets the lref (base obj + computed key) is evaluated (step 1a)
+/// BEFORE GetV(src, srcKey) (step 2); a default initializer runs after the
+/// get; the target key's ToPropertyKey stays deferred to PutValue.
+/// Entry stack: [key, src, src] (src already Dup'd). Exit: [src].
+/// unrot3 (= Rot3 twice) tucks a just-pushed target operand beneath the
+/// pending [key, src] pair so GetElem still sees them adjacent.
+fn emit_elem_keyed_target(
+  e: Emitter,
+  target: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case target {
+    // [key,srcd,src] → tobj → [tobj,key,srcd,src] → unrot3
+    // → [key,srcd,tobj,src] → GetElem → [v,tobj,src]
+    // → PutField → [v,src] → Pop → [src].
+    ast.MemberExpression(tobj, ast.Identifier(prop), False) -> {
+      use e <- result.map(emit_expr(e, tobj))
+      e
+      |> emit_unrot3
+      |> emit_ir(IrGetElem)
+      |> emit_put_field(prop)
+      |> emit_ir(IrPop)
+    }
+    ast.MemberExpression(tobj, ast.StringExpression(prop), False) -> {
+      use e <- result.map(emit_expr(e, tobj))
+      e
+      |> emit_unrot3
+      |> emit_ir(IrGetElem)
+      |> emit_ir(IrPutField(prop))
+      |> emit_ir(IrPop)
+    }
+    // [key,srcd,src] → tobj → unrot3 → [key,srcd,tobj,src] → tkey → unrot3
+    // → [key,srcd,tkey,tobj,src] → GetElem → [v,tkey,tobj,src]
+    // → PutElem → [v,src] → Pop → [src].
+    ast.MemberExpression(tobj, tkey, True) -> {
+      use e <- result.try(emit_expr(e, tobj))
+      let e = emit_unrot3(e)
+      use e <- result.map(emit_expr(e, tkey))
+      e
+      |> emit_unrot3
+      |> emit_ir(IrGetElem)
+      |> emit_ir(IrPutElem)
+      |> emit_ir(IrPop)
+    }
+    // target = default with a member target: lref first, get, then the
+    // default check, then PutValue.
+    ast.AssignmentExpression(ast.Assign, left, default_expr) ->
+      case unwrap_parens(left) {
+        ast.MemberExpression(_, _, _) as member -> {
+          use e <- result.try(emit_elem_keyed_member_default(
+            e,
+            member,
+            default_expr,
+          ))
+          Ok(e)
+        }
+        _ -> {
+          let e = emit_ir(e, IrGetElem)
+          emit_destructuring_assign(
+            e,
+            ast.AssignmentExpression(ast.Assign, left, default_expr),
+          )
+        }
+      }
+    // Identifiers and nested patterns: get first (patterns skip step 1a;
+    // identifier lrefs have no observable evaluation).
+    other -> {
+      let e = emit_ir(e, IrGetElem)
+      emit_destructuring_assign(e, other)
+    }
+  }
+}
+
+/// `{[srcKey]: member = default}` — member lref, GetElem, default check,
+/// PutValue. Entry: [key, src, src]; exit: [src].
+fn emit_elem_keyed_member_default(
+  e: Emitter,
+  member: ast.Expression,
+  default_expr: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  // Evaluate the member lref and the source get, leaving [v, ..put operands].
+  use #(e, computed) <- result.try(case member {
+    ast.MemberExpression(tobj, ast.Identifier(_), False)
+    | ast.MemberExpression(tobj, ast.StringExpression(_), False) -> {
+      use e <- result.map(emit_expr(e, tobj))
+      let e = emit_unrot3(e)
+      #(emit_ir(e, IrGetElem), False)
+    }
+    ast.MemberExpression(tobj, tkey, True) -> {
+      use e <- result.try(emit_expr(e, tobj))
+      let e = emit_unrot3(e)
+      use e <- result.map(emit_expr(e, tkey))
+      let e = emit_unrot3(e)
+      #(emit_ir(e, IrGetElem), True)
+    }
+    _ -> Error(Unsupported("keyed member default target"))
+  })
+  // Default check: if v === undefined, replace with default.
+  let #(e, has_val) = fresh_label(e)
+  let e = emit_ir(e, IrDup)
+  let e = push_const(e, JsUndefined)
+  let e = emit_ir(e, IrBinOp(opcode.StrictEq))
+  let e = emit_ir(e, IrJumpIfFalse(has_val))
+  let e = emit_ir(e, IrPop)
+  use e <- result.map(emit_expr(e, default_expr))
+  let e = emit_ir(e, IrLabel(has_val))
+  let e = case computed, member {
+    True, _ -> emit_ir(e, IrPutElem)
+    False, ast.MemberExpression(_, ast.StringExpression(prop), False) ->
+      emit_ir(e, IrPutField(prop))
+    False, ast.MemberExpression(_, ast.Identifier(prop), False) ->
+      emit_put_field(e, prop)
+    _, _ -> e
+  }
+  emit_ir(e, IrPop)
+}
+
+/// [a, b, c, ..] → [b, c, a, ..] — send the top element down two (Rot3
+/// applied twice). Tucks a freshly-evaluated operand beneath two pending
+/// stack slots.
+fn emit_unrot3(e: Emitter) -> Emitter {
+  e
+  |> emit_ir(opcode.IrRot3)
+  |> emit_ir(opcode.IrRot3)
 }
 
 /// Static property-key → string for non-computed object pattern keys.
@@ -4377,7 +6100,7 @@ fn emit_array_destructure(
   elements: List(Option(ast.Pattern)),
   binding_kind: BindingKind,
 ) -> Result(Emitter, EmitError) {
-  use e <- with_iterator_scaffold(e)
+  use e, _close_throw <- with_iterator_scaffold(e)
   emit_array_elements(e, elements, binding_kind)
 }
 
@@ -4388,9 +6111,12 @@ fn emit_array_destructure(
 /// Stack on entry: [source, ...] — source is consumed.
 /// emit_elements: [iter, ...] → #(e, False) leaves [iter, ...] (closed here);
 /// #(e, True) → rest drained, F_body popped, stack at base.
+/// The close_throw label is passed to emit_elements so a rest element that
+/// must evaluate a throwing member-target reference mid-pattern can re-arm
+/// the close-on-throw guard (see emit_array_assign_rest).
 fn with_iterator_scaffold(
   e: Emitter,
-  emit_elements: fn(Emitter) -> Result(#(Emitter, Bool), EmitError),
+  emit_elements: fn(Emitter, Int) -> Result(#(Emitter, Bool), EmitError),
 ) -> Result(Emitter, EmitError) {
   let #(e, close_throw) = fresh_label(e)
   let #(e, done_label) = fresh_label(e)
@@ -4398,7 +6124,7 @@ fn with_iterator_scaffold(
   // has iter on top — unwind_to_catch will leave [thrown, iter, ..].
   let e = emit_ir(e, IrGetIterator)
   let e = emit_ir(e, IrPushTry(close_throw))
-  use #(e, rested) <- result.map(emit_elements(e))
+  use #(e, rested) <- result.map(emit_elements(e, close_throw))
   let e = case rested {
     // Rest path already PopTry'd, drained iter, bound it. Stack at base.
     // [[Done]]=true after rest → no close on any completion. (Throws from
@@ -4525,6 +6251,115 @@ fn compound_to_binop(op: ast.AssignmentOp) -> Result(opcode.BinOpKind, Nil) {
   }
 }
 
+/// §13.15.2 AssignmentExpression : LHS &&= / ||= / ??= AssignmentExpression.
+/// The reference is evaluated once and read once; when the short-circuit test
+/// fails the RHS is never evaluated and no write happens — the old value is
+/// the expression result. Identifier targets get NamedEvaluation (anonymous
+/// fn/class RHS is named after the variable), same as plain `=`.
+fn emit_logical_assign(
+  e: Emitter,
+  op: ast.AssignmentOp,
+  lhs: ast.Expression,
+  right: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case lhs {
+    ast.Identifier(name) -> {
+      let #(e, end_label) = fresh_label(e)
+      // §13.15.2: the reference is resolved once, before the old-value read;
+      // the (conditional) store reuses that base.
+      let e = emit_ir(e, opcode.IrScopeMakeRef(name))
+      let e = emit_ir(e, opcode.IrScopeGetRef(name))
+      use e <- result.try(emit_logical_assign_test(e, op, end_label))
+      // Test passed: drop the old value, evaluate RHS, write, leave RHS.
+      let e = emit_ir(e, IrPop)
+      use e <- result.map(emit_named_expr(e, right, name))
+      e
+      |> emit_ir(IrDup)
+      |> emit_ir(opcode.IrScopePutRef(name))
+      |> emit_ir(IrLabel(end_label))
+    }
+    // super.x &&= v — needs GetSuperValue2/PutSuperValue stack juggling on
+    // the short-circuit path; keep the pre-existing unsupported error.
+    ast.MemberExpression(ast.SuperExpression, _, _) ->
+      Error(Unsupported("assignment op"))
+    ast.MemberExpression(obj, ast.Identifier(prop), False)
+    | ast.MemberExpression(obj, ast.StringExpression(prop), False) -> {
+      let #(e, short_label) = fresh_label(e)
+      let #(e, end_label) = fresh_label(e)
+      use e <- result.try(emit_expr(e, obj))
+      // GetField2 keeps the base under the value: [old, obj].
+      let e = emit_get_field2(e, prop)
+      use e <- result.try(emit_logical_assign_test(e, op, short_label))
+      // [old, obj] → [obj] → [rval, obj] → PutField → [rval].
+      let e = emit_ir(e, IrPop)
+      use e <- result.map(emit_expr(e, right))
+      e
+      |> emit_put_field(prop)
+      |> emit_ir(IrJump(end_label))
+      // Short-circuit: [old, obj] → [old].
+      |> emit_ir(IrLabel(short_label))
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrPop)
+      |> emit_ir(IrLabel(end_label))
+    }
+    ast.MemberExpression(obj, key, True) -> {
+      let #(e, short_label) = fresh_label(e)
+      let #(e, end_label) = fresh_label(e)
+      use e <- result.try(emit_expr(e, obj))
+      use e <- result.try(emit_expr(e, key))
+      // GetElem2 keeps base+key under the value: [old, key, obj].
+      let e = emit_ir(e, IrGetElem2)
+      use e <- result.try(emit_logical_assign_test(e, op, short_label))
+      // [old, key, obj] → [key, obj] → [rval, key, obj] → PutElem → [rval].
+      let e = emit_ir(e, IrPop)
+      use e <- result.map(emit_expr(e, right))
+      e
+      |> emit_ir(IrPutElem)
+      |> emit_ir(IrJump(end_label))
+      // Short-circuit: [old, key, obj] → [old].
+      |> emit_ir(IrLabel(short_label))
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrPop)
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrPop)
+      |> emit_ir(IrLabel(end_label))
+    }
+    _ -> Error(Unsupported("assignment op"))
+  }
+}
+
+/// Emit the short-circuit test for a logical assignment. On entry the old
+/// value is on top of the stack. Jumps to `short_label` with the old value
+/// still on top when the assignment must NOT happen; falls through with the
+/// old value still on top when it must (caller pops it).
+fn emit_logical_assign_test(
+  e: Emitter,
+  op: ast.AssignmentOp,
+  short_label: Int,
+) -> Result(Emitter, EmitError) {
+  case op {
+    // x &&= v assigns only when the old value is truthy.
+    ast.LogicalAndAssign ->
+      Ok(e |> emit_ir(IrDup) |> emit_ir(IrJumpIfFalse(short_label)))
+    // x ||= v assigns only when the old value is falsy.
+    ast.LogicalOrAssign ->
+      Ok(e |> emit_ir(IrDup) |> emit_ir(IrJumpIfTrue(short_label)))
+    // x ??= v assigns only when the old value is nullish. There is no
+    // jump-if-not-nullish op, so hop over an unconditional short jump.
+    ast.NullishCoalesceAssign -> {
+      let #(e, assign_label) = fresh_label(e)
+      Ok(
+        e
+        |> emit_ir(IrDup)
+        |> emit_ir(IrJumpIfNullish(assign_label))
+        |> emit_ir(IrJump(short_label))
+        |> emit_ir(IrLabel(assign_label)),
+      )
+    }
+    _ -> Error(Unsupported("assignment op"))
+  }
+}
+
 // ============================================================================
 // Class compilation
 // ============================================================================
@@ -4549,7 +6384,17 @@ fn compile_class(
   // calls for methods/constructor inherit it. Restore enclosing strictness on
   // exit so a sloppy-mode caller isn't polluted.
   let saved_strict = e.strict
-  let e = Emitter(..e, strict: True)
+  // §15.7.14 step 6.b/c: extend the running PrivateEnvironment with this
+  // class's declared private names for the duration of the class body —
+  // methods/initializers (and any direct eval inside them) parse with them
+  // in scope. Restored alongside strictness on exit.
+  let saved_private_env = e.private_env
+  let e =
+    Emitter(
+      ..e,
+      strict: True,
+      private_env: list.append(class_private_names(body), e.private_env),
+    )
   // §15.7.14 step 4/5: per-class block scope holding the immutable inner
   // class-name binding (and later P8's <class_fields_init> const). Declare
   // BEFORE heritage emit so `class C extends C{}` TDZs on the inner C, and so
@@ -4563,33 +6408,69 @@ fn compile_class(
   // both ctor and field-init-fn IrMakeClosure snapshots see the slot. Init to
   // the closure (or undefined) by emit_attach_field_init.
   let e = emit_op(e, DeclareVar(class_fields_init, ConstBinding))
+  // §15.7.14 steps 5/6: the class's PrivateEnvironment. Each private element
+  // name ("#m") becomes a class-scope const bound to a freshly minted
+  // PrivateName key (NewPrivateName) — so each class *evaluation* gets
+  // distinct names, nested classes shadow, and methods/eval capture them
+  // through ordinary lexical scoping. Instance private methods additionally
+  // get a hidden const (private_fn_const) holding the closure built once at
+  // class-definition time and installed per-instance by the field-init fn.
+  let e =
+    list.fold(class_private_names(body), e, fn(e, pname) {
+      let e = emit_op(e, DeclareVar(pname, ConstBinding))
+      let e = emit_ir(e, IrNewPrivateName(pname))
+      emit_ir(e, IrScopeInitVar(pname))
+    })
+  let e =
+    list.fold(instance_private_fn_consts(body), e, fn(e, hidden) {
+      emit_op(e, DeclareVar(hidden, ConstBinding))
+    })
+  // §15.7.14 ClassElementEvaluation: computed element names (fields AND
+  // methods) are evaluated ONCE at class-definition time, in source order.
+  // Declare a hidden class-scope const per computed key (BEFORE the init-fn
+  // closures are built so their scope snapshots see the slots); the keys
+  // themselves are evaluated inside compile_class_body — after heritage and
+  // before the inner-name binding is initialized below, since element
+  // evaluation precedes InitializeBinding(classBinding, F), so
+  // `class C { [C] = 1 }` throws a TDZ ReferenceError.
+  let element_keys = computed_element_keys(body)
+  let e =
+    list.fold(element_keys, e, fn(e, pair) {
+      let #(idx, _key) = pair
+      emit_op(e, DeclareVar(computed_field_const(idx), ConstBinding))
+    })
+  let body = stash_computed_element_keys(body)
   use #(e, static_init_idx) <- result.map(compile_class_body(
     e,
     display_name,
     super_class,
     body,
+    element_keys,
   ))
-  // [ctor]. §15.7.14 step 26: bind inner name to F BEFORE static element
-  // evaluation (step 31) so `class C { static x = C }` sees the constructor.
+  // [ctor]. §15.7.14: bind inner name to F AFTER all element evaluation
+  // (computed keys above can't see it) but BEFORE static element evaluation,
+  // so `class C { static x = C }` sees the constructor.
   let e = case binding_name {
     Some(n) -> e |> emit_ir(IrDup) |> emit_ir(IrScopeInitVar(n))
     None -> e
   }
   let e = emit_call_static_init(e, static_init_idx)
   let e = emit_op(e, LeaveScope)
-  Emitter(..e, strict: saved_strict)
+  Emitter(..e, strict: saved_strict, private_env: saved_private_env)
 }
 
 /// Compile a class body (base or derived, selected by `super_class`): the
 /// constructor child fn, instance-field init fn, heritage wiring, instance and
 /// static methods, and the static-init fn. Stack on exit: [ctor]. Returns the
 /// static-init child idx — static elements are emitted by compile_class AFTER
-/// inner-name binding (§15.7.14 step 26 < step 31).
+/// inner-name binding (§15.7.14: InitializeBinding(classBinding, F) precedes
+/// static element evaluation).
 fn compile_class_body(
   e: Emitter,
   name: Option(String),
   super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
+  computed_keys: List(#(Int, ast.Expression)),
 ) -> Result(#(Emitter, Option(Int)), EmitError) {
   let #(
     ctor_method,
@@ -4620,7 +6501,13 @@ fn compile_class_body(
   // (FieldInitAtStart, §10.2.2 [[Construct]] step 6). Constructors cannot be
   // generators or async (spec forbids it).
   let #(e, init_idx) =
-    compile_class_init_fn(e, field_init_stmts(instance_fields))
+    compile_class_init_fn(
+      e,
+      list.append(
+        private_method_init_stmts(instance_methods),
+        field_init_stmts(instance_fields),
+      ),
+    )
   let #(ctor_perms, field_init) = case super_class {
     Some(_) -> #(opcode.derived_ctor_perms, FieldInitAfterSuper)
     None -> #(opcode.method_perms, FieldInitAtStart)
@@ -4629,6 +6516,7 @@ fn compile_class_body(
     compile_function_body(
       e,
       name,
+      None,
       ctor_params,
       ctor_body,
       False,
@@ -4641,7 +6529,11 @@ fn compile_class_body(
         |> option.unwrap(NoFieldInit),
     )
   let child =
-    CompiledChild(..child, is_derived_constructor: option.is_some(super_class))
+    CompiledChild(
+      ..child,
+      is_derived_constructor: option.is_some(super_class),
+      is_class_constructor: True,
+    )
   let #(e, ctor_idx) = add_child_function(e, child)
 
   use e <- result.try(case super_class {
@@ -4669,6 +6561,23 @@ fn compile_class_body(
         |> emit_ir(IrPop),
       )
   })
+
+  // Evaluate + ToPropertyKey each computed element name (fields AND methods,
+  // instance AND static) in one source-order pass, into its stash const —
+  // §15.7.14 evaluates each ClassElementName strictly in source order. Runs
+  // after heritage, before the method definitions below read the stashed
+  // keys, and before compile_class initializes the inner class-name binding.
+  // Abrupt completions (throwing getters, ToPrimitive errors) surface here,
+  // at class evaluation. Stack-neutral: [ctor] → [ctor].
+  use e <- result.try(
+    list.try_fold(computed_keys, e, fn(e, pair) {
+      let #(idx, key) = pair
+      use e <- result.map(emit_expr(e, key))
+      e
+      |> emit_ir(opcode.IrToPropertyKey)
+      |> emit_ir(IrScopeInitVar(computed_field_const(idx)))
+    }),
+  )
 
   // Define instance methods on ctor.prototype, then static methods on ctor.
   use e <- result.try(emit_class_methods(
@@ -4726,6 +6635,7 @@ fn compile_class_init_fn(
         compile_function_body(
           e,
           None,
+          None,
           [],
           ast.BlockStatement(stmts),
           False,
@@ -4773,6 +6683,66 @@ fn emit_class_methods(
 ) -> Result(Emitter, EmitError) {
   use e, method <- list.try_fold(methods, e)
   case method {
+    // Private method/accessor (#m() {}, get #m() {}, set #m(v) {}).
+    // Instance: build the closure once here (class-definition time) with
+    // [[HomeObject]] = ctor.prototype and stash it in the hidden class-scope
+    // const — the field-init fn installs it on each instance per §7.3.29
+    // PrivateMethodOrAccessorAdd (so it appears only after super() returns,
+    // and double initialization via return-override throws).
+    // Static: install on the constructor right now as an own private element.
+    ast.ClassMethod(
+      key: ast.Identifier("#" <> rest),
+      value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+      kind:,
+      ..,
+    ) -> {
+      let name = "#" <> rest
+      let fn_name = case kind {
+        ast.MethodGet -> "get " <> name
+        ast.MethodSet -> "set " <> name
+        ast.MethodMethod | ast.MethodConstructor -> name
+      }
+      case on_prototype {
+        True -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let e =
+            make_method_closure(
+              e,
+              Some(fn_name),
+              params,
+              body,
+              is_gen,
+              is_async,
+            )
+          let e = emit_ir(e, IrMakeMethod)
+          let e = emit_ir(e, IrScopeInitVar(private_fn_const(kind, name)))
+          Ok(emit_ir(e, IrPop))
+        }
+        False -> {
+          let e = emit_ir(e, IrDup)
+          let e =
+            make_method_closure(
+              e,
+              Some(fn_name),
+              params,
+              body,
+              is_gen,
+              is_async,
+            )
+          let e = emit_ir(e, IrMakeMethod)
+          let e = emit_ir(e, IrScopeGetVar(name))
+          let e = emit_ir(e, IrSwap)
+          let define = case kind {
+            ast.MethodGet -> IrDefinePrivateAccessor(opcode.Getter)
+            ast.MethodSet -> IrDefinePrivateAccessor(opcode.Setter)
+            ast.MethodMethod | ast.MethodConstructor -> IrDefinePrivateMethod
+          }
+          let e = emit_ir(e, define)
+          Ok(emit_ir(e, IrPop))
+        }
+      }
+    }
     // Static-string key: name() {}, "name"() {}, get name() {}, set name(v) {}
     ast.ClassMethod(
       key: ast.Identifier(name),
@@ -4791,11 +6761,11 @@ fn emit_class_methods(
       let #(fn_name, define_op) = case kind {
         ast.MethodGet -> #(
           "get " <> name,
-          IrDefineAccessor(name, opcode.Getter),
+          IrDefineAccessor(name, opcode.Getter, False),
         )
         ast.MethodSet -> #(
           "set " <> name,
-          IrDefineAccessor(name, opcode.Setter),
+          IrDefineAccessor(name, opcode.Setter, False),
         )
         // MethodConstructor is stripped by classify_class_body; treat as method.
         ast.MethodMethod | ast.MethodConstructor -> #(
@@ -4860,8 +6830,8 @@ fn emit_computed_class_method(
   let e = make_method_closure(e, None, params, body, is_gen, is_async)
   let e = case kind {
     ast.MethodMethod -> emit_ir(e, IrDefineMethodComputed)
-    ast.MethodGet -> emit_ir(e, IrDefineAccessorComputed(opcode.Getter))
-    ast.MethodSet -> emit_ir(e, IrDefineAccessorComputed(opcode.Setter))
+    ast.MethodGet -> emit_ir(e, IrDefineAccessorComputed(opcode.Getter, False))
+    ast.MethodSet -> emit_ir(e, IrDefineAccessorComputed(opcode.Setter, False))
     // MethodConstructor is filtered out by classify_class_body before we get
     // here; treat as a plain method defensively rather than crashing.
     ast.MethodConstructor -> emit_ir(e, IrDefineMethodComputed)
@@ -4968,6 +6938,145 @@ fn classify_class_body(
   )
 }
 
+/// All private element names ("#m") declared by a class body, deduped
+/// (get/set pairs share one PrivateName), in source order. These become
+/// class-scope consts bound to freshly minted PrivateName keys — the spec
+/// PrivateEnvironment (§15.7.14 steps 5/6) mapped onto lexical scoping.
+fn class_private_names(body: List(ast.ClassElement)) -> List(String) {
+  list.fold(body, [], fn(acc, elem) {
+    let name = case elem {
+      ast.ClassMethod(key: ast.Identifier("#" <> rest), ..)
+      | ast.ClassField(key: ast.Identifier("#" <> rest), ..) ->
+        Some("#" <> rest)
+      _ -> None
+    }
+    case name {
+      Some(n) ->
+        case list.contains(acc, n) {
+          True -> acc
+          False -> [n, ..acc]
+        }
+      None -> acc
+    }
+  })
+  |> list.reverse
+}
+
+/// Hidden class-scope const name holding the closure of an instance private
+/// method/accessor half. NUL-prefixed so source code can never name it.
+fn private_fn_const(kind: ast.MethodKind, name: String) -> String {
+  case kind {
+    ast.MethodGet -> "\u{0}pg:" <> name
+    ast.MethodSet -> "\u{0}ps:" <> name
+    ast.MethodMethod | ast.MethodConstructor -> "\u{0}pm:" <> name
+  }
+}
+
+/// Hidden class-scope const holding the stashed property key of the Nth
+/// class element's computed name (field or method). §15.7.14: each
+/// ClassElementName is evaluated ONCE at class-definition time, in source
+/// order; method definitions and the instance/static init fns read the
+/// captured key, never re-evaluate the expression. NUL-prefixed so source
+/// code can never name it.
+fn computed_field_const(idx: Int) -> String {
+  "\u{0}ck:" <> int.to_string(idx)
+}
+
+/// All computed element names — fields AND methods, instance AND static, in
+/// source order — paired with their body index. This is the order keys are
+/// evaluated in at class definition time: §15.7.14 evaluates each
+/// ClassElementName in one source-order pass over the class body, so
+/// intercalated method/field and static/non-static keys all share one pass.
+fn computed_element_keys(
+  body: List(ast.ClassElement),
+) -> List(#(Int, ast.Expression)) {
+  list.index_map(body, fn(elem, idx) { #(idx, elem) })
+  |> list.filter_map(fn(pair) {
+    let #(idx, elem) = pair
+    case elem {
+      ast.ClassField(key:, computed: True, ..) -> Ok(#(idx, key))
+      ast.ClassMethod(key:, computed: True, ..) -> Ok(#(idx, key))
+      _ -> Error(Nil)
+    }
+  })
+}
+
+/// Rewrite each computed element's key to a read of its hidden stash const so
+/// downstream emission loads the already-coerced key instead of re-evaluating
+/// the name expression: field init fns run per-instantiation / at static-init
+/// time, and method definitions run after ALL keys were evaluated in source
+/// order (see compile_class_body).
+fn stash_computed_element_keys(
+  body: List(ast.ClassElement),
+) -> List(ast.ClassElement) {
+  list.index_map(body, fn(elem, idx) {
+    case elem {
+      ast.ClassField(value:, is_static:, computed: True, ..) ->
+        ast.ClassField(
+          key: ast.Identifier(computed_field_const(idx)),
+          value:,
+          is_static:,
+          computed: True,
+        )
+      ast.ClassMethod(value:, kind:, is_static:, computed: True, ..) ->
+        ast.ClassMethod(
+          key: ast.Identifier(computed_field_const(idx)),
+          value:,
+          kind:,
+          is_static:,
+          computed: True,
+        )
+      _ -> elem
+    }
+  })
+}
+
+/// Hidden const names for every instance private method/accessor half in the
+/// class body (declared up front in compile_class so child-fn closure
+/// snapshots see the slots).
+fn instance_private_fn_consts(body: List(ast.ClassElement)) -> List(String) {
+  use elem <- list.filter_map(body)
+  case elem {
+    ast.ClassMethod(
+      key: ast.Identifier("#" <> rest),
+      kind:,
+      is_static: False,
+      ..,
+    ) -> Ok(private_fn_const(kind, "#" <> rest))
+    _ -> Error(Nil)
+  }
+}
+
+/// §7.3.29 PrivateMethodOrAccessorAdd: synthesize the per-instance install
+/// statements for instance private methods/accessors. Encoded as
+/// ClassFieldInit with the hidden const (see private_fn_const) as the value
+/// expression — emit_stmt's ClassFieldInit branch decodes the NUL-prefixed
+/// identifier and emits IrDefinePrivateMethod/Accessor instead of a field
+/// add. Spec order: all private methods install BEFORE field initializers
+/// run (InitializeInstanceElements steps 5 then 6).
+fn private_method_init_stmts(
+  methods: List(ast.ClassElement),
+) -> List(ast.StmtWithLine) {
+  use m <- list.filter_map(methods)
+  case m {
+    ast.ClassMethod(
+      key: ast.Identifier("#" <> rest),
+      kind:,
+      is_static: False,
+      ..,
+    ) ->
+      Ok(ast.StmtWithLine(
+        0,
+        ast.ClassFieldInit(
+          key: ast.Identifier("#" <> rest),
+          value: Some(ast.Identifier(private_fn_const(kind, "#" <> rest))),
+          computed: False,
+        ),
+      ))
+    _ -> Error(Nil)
+  }
+}
+
 /// Map every instance ClassField → ClassFieldInit statement.
 /// Per §15.7.14 ClassFieldDefinitionEvaluation, value:None becomes undefined
 /// (handled in emit_stmt). Static fields are filtered out upstream by
@@ -5016,37 +7125,11 @@ fn static_init_stmts(
 // Debug helpers
 // ============================================================================
 
-fn string_inspect_stmt_kind(stmt: ast.Statement) -> String {
-  case stmt {
-    ast.EmptyStatement -> "EmptyStatement"
-    ast.ExpressionStatement(..) -> "ExpressionStatement"
-    ast.BlockStatement(_) -> "BlockStatement"
-    ast.VariableDeclaration(..) -> "VariableDeclaration"
-    ast.ReturnStatement(_) -> "ReturnStatement"
-    ast.IfStatement(..) -> "IfStatement"
-    ast.ThrowStatement(_) -> "ThrowStatement"
-    ast.WhileStatement(..) -> "WhileStatement"
-    ast.DoWhileStatement(..) -> "DoWhileStatement"
-    ast.ForStatement(..) -> "ForStatement"
-    ast.ForInStatement(..) -> "ForInStatement"
-    ast.ForOfStatement(..) -> "ForOfStatement"
-    ast.SwitchStatement(..) -> "SwitchStatement"
-    ast.TryStatement(..) -> "TryStatement"
-    ast.BreakStatement(_) -> "BreakStatement"
-    ast.ContinueStatement(_) -> "ContinueStatement"
-    ast.DebuggerStatement -> "DebuggerStatement"
-    ast.LabeledStatement(..) -> "LabeledStatement"
-    ast.WithStatement(..) -> "WithStatement"
-    ast.FunctionDeclaration(..) -> "FunctionDeclaration"
-    ast.ClassDeclaration(..) -> "ClassDeclaration"
-    ast.ClassFieldInit(..) -> "ClassFieldInit"
-  }
-}
-
 fn string_inspect_expr_kind(expr: ast.Expression) -> String {
   case expr {
     ast.Identifier(_) -> "Identifier"
     ast.NumberLiteral(_) -> "NumberLiteral"
+    ast.BigIntLiteral(_) -> "BigIntLiteral"
     ast.StringExpression(_) -> "StringExpression"
     ast.BooleanLiteral(_) -> "BooleanLiteral"
     ast.NullLiteral -> "NullLiteral"
@@ -5079,5 +7162,8 @@ fn string_inspect_expr_kind(expr: ast.Expression) -> String {
     ast.ImportExpression(..) -> "ImportExpression"
     ast.RegExpLiteral(..) -> "RegExpLiteral"
     ast.ParenthesizedExpression(..) -> "ParenthesizedExpression"
+    ast.IntrinsicGetDisposer(..) -> "IntrinsicGetDisposer"
+    ast.IntrinsicMakeSuppressed(..) -> "IntrinsicMakeSuppressed"
+    ast.IntrinsicTemplateObject(..) -> "IntrinsicTemplateObject"
   }
 }

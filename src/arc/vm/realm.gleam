@@ -2,7 +2,10 @@ import arc/compiler
 import arc/parser
 import arc/parser/ast
 import arc/vm/builtins
+import arc/vm/builtins/atomics as builtins_atomics
 import arc/vm/builtins/common.{type Builtins}
+import arc/vm/builtins/object as builtins_object
+import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
 import arc/vm/exec/event_loop
 import arc/vm/heap
@@ -17,6 +20,9 @@ import arc/vm/value.{
   JsUndefined, Named, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
+import gleam/float
+import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -140,7 +146,13 @@ pub fn eval_script_native(
       let eval_state =
         State(
           ..eval_state,
-          ctx: state.RealmCtx(..eval_state.ctx, realms: state.ctx.realms),
+          ctx: state.RealmCtx(
+            ..eval_state.ctx,
+            realms: state.ctx.realms,
+            // Tagged-template cache is keyed by globally unique site ids, so
+            // it is shared across realms; thread it in and back out.
+            template_objects: state.ctx.template_objects,
+          ),
         )
       case execute_inner(eval_state) {
         Error(vm_err) ->
@@ -167,7 +179,11 @@ pub fn eval_script_native(
               heap: h,
               job_queue: drained.job_queue,
               outstanding: drained.outstanding,
-              ctx: state.RealmCtx(..state.ctx, realms: drained.ctx.realms),
+              ctx: state.RealmCtx(
+                ..state.ctx,
+                realms: drained.ctx.realms,
+                template_objects: drained.ctx.template_objects,
+              ),
             )
           case completion {
             NormalCompletion(val, _) -> #(state, Ok(val))
@@ -257,6 +273,23 @@ pub fn build_262(
     )
   let #(h, gc_fn) =
     common.alloc_native_fn(h, func_proto, value.VmNative(value.Gc), "gc", 0)
+  let #(h, is_htmldda_fn) =
+    common.alloc_native_fn(
+      h,
+      func_proto,
+      value.VmNative(value.IsHTMLDDA),
+      "IsHTMLDDA",
+      0,
+    )
+  let #(h, detach_fn) =
+    common.alloc_native_fn(
+      h,
+      func_proto,
+      value.ArrayBufferNative(value.DetachArrayBuffer262),
+      "detachArrayBuffer",
+      1,
+    )
+  let #(h, agent_ref) = build_agent(h, b)
 
   // Build the $262 object
   let #(h, ref) =
@@ -275,6 +308,12 @@ pub fn build_262(
             value.builtin_property(JsObject(create_realm_fn)),
           ),
           #(Named("gc"), value.builtin_property(JsObject(gc_fn))),
+          #(Named("IsHTMLDDA"), value.builtin_property(JsObject(is_htmldda_fn))),
+          #(
+            Named("detachArrayBuffer"),
+            value.builtin_property(JsObject(detach_fn)),
+          ),
+          #(Named("agent"), value.builtin_property(JsObject(agent_ref))),
           // __realm__ is non-enumerable internal property
           #(
             Named("__realm__"),
@@ -289,6 +328,282 @@ pub fn build_262(
     )
   let h = heap.root(h, ref)
   #(h, ref)
+}
+
+// ============================================================================
+// $262.agent — cooperative test262 agent cluster
+//
+// Arc is single-threaded on one BEAM process, so test262 "agents" run
+// COOPERATIVELY in the main realm and main heap: `start` executes the agent
+// script immediately (wrapped in an IIFE so its top-level bindings are
+// function-scoped, not realm globals — several tests start N agents with
+// identical scripts), `receiveBroadcast` registers the callback, and
+// `broadcast` invokes every registered callback synchronously with the
+// SharedArrayBuffer. Because the heap is shared, the buffer the callbacks
+// see is GENUINELY the same buffer the main script holds — Atomics writes
+// in an agent are immediately visible to the main script and vice versa.
+//
+// The one thing this model cannot do is run an agent and the main script
+// at the same time: a sync Atomics.wait inside an agent callback can never
+// be notified (it can only time out), exactly like the main agent's own
+// sync waits.
+// ============================================================================
+
+/// Allocate the $262.agent object: methods plus two hidden array-backed
+/// queues — __reports__ (strings posted by $262.agent.report, consumed by
+/// getReport) and __agents__ (callbacks registered by receiveBroadcast,
+/// invoked by broadcast).
+fn build_agent(h: Heap, b: Builtins) -> #(Heap, Ref) {
+  let func_proto = b.function.prototype
+  let #(h, reports_ref) = common.alloc_array(h, [], b.array.prototype)
+  let #(h, agents_ref) = common.alloc_array(h, [], b.array.prototype)
+  let methods = [
+    #("start", value.AgentStart, 1),
+    #("broadcast", value.AgentBroadcast, 2),
+    #("getReport", value.AgentGetReport, 0),
+    #("sleep", value.AgentSleep, 1),
+    #("monotonicNow", value.AgentMonotonicNow, 0),
+    #("report", value.AgentReport, 1),
+    #("leaving", value.AgentLeaving, 0),
+    #("receiveBroadcast", value.AgentReceiveBroadcast, 1),
+  ]
+  let #(h, method_props) =
+    list.fold(methods, #(h, []), fn(acc, method) {
+      let #(h, props) = acc
+      let #(name, native, arity) = method
+      let #(h, fn_ref) =
+        common.alloc_native_fn(
+          h,
+          func_proto,
+          value.VmNative(native),
+          name,
+          arity,
+        )
+      #(h, [#(Named(name), value.builtin_property(JsObject(fn_ref))), ..props])
+    })
+  let hidden = [
+    #(
+      Named("__reports__"),
+      value.data(JsObject(reports_ref)) |> value.configurable(),
+    ),
+    #(
+      Named("__agents__"),
+      value.data(JsObject(agents_ref)) |> value.configurable(),
+    ),
+  ]
+  let #(h, ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: dict.from_list(list.append(method_props, hidden)),
+        symbol_properties: [],
+        elements: elements.new(),
+        prototype: Some(b.object.prototype),
+        extensible: True,
+      ),
+    )
+  #(h, ref)
+}
+
+/// Read a hidden JsObject-valued own property off the agent object.
+fn agent_hidden_ref(
+  state: State,
+  this: JsValue,
+  name: String,
+) -> Result(Ref, Nil) {
+  case this {
+    JsObject(this_ref) ->
+      case object.get_own_property(state.heap, this_ref, Named(name)) {
+        Some(DataProperty(value: JsObject(ref), ..)) -> Ok(ref)
+        _ -> Error(Nil)
+      }
+    _ -> Error(Nil)
+  }
+}
+
+/// Read an agent queue array as #(values, ref). Empty list if missing.
+fn agent_queue(
+  state: State,
+  this: JsValue,
+  name: String,
+) -> Result(#(Ref, List(JsValue)), Nil) {
+  use arr_ref <- result.try(agent_hidden_ref(state, this, name))
+  case heap.read(state.heap, arr_ref) {
+    Some(ObjectSlot(kind: value.ArrayObject(length), elements: els, ..)) ->
+      Ok(#(arr_ref, elements.to_list_padded(els, length)))
+    _ -> Error(Nil)
+  }
+}
+
+/// Overwrite an agent queue array's contents in place.
+fn agent_queue_write(
+  state: State,
+  arr_ref: Ref,
+  values: List(JsValue),
+) -> State {
+  let heap = case heap.read(state.heap, arr_ref) {
+    Some(ObjectSlot(kind: value.ArrayObject(_), ..) as slot) ->
+      heap.write(
+        state.heap,
+        arr_ref,
+        ObjectSlot(
+          ..slot,
+          kind: value.ArrayObject(list.length(values)),
+          elements: elements.from_list(values),
+        ),
+      )
+    _ -> state.heap
+  }
+  State(..state, heap:)
+}
+
+/// $262.agent.start(script) — run the agent script now, in the main realm,
+/// wrapped in an IIFE so its top-level declarations are private to it.
+pub fn agent_start_native(
+  args: List(JsValue),
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  let source = case args {
+    [s, ..] -> s
+    [] -> JsUndefined
+  }
+  use source_str, state <- coerce.try_to_string(state, source)
+  let wrapped = "(function () {\n" <> source_str <> "\n})();"
+  let #(state, result) =
+    run_source_in_current_realm(wrapped, state, execute_inner, new_state_fn)
+  case result {
+    Ok(_) -> #(state, Ok(JsUndefined))
+    Error(thrown) -> #(state, Error(thrown))
+  }
+}
+
+/// $262.agent.receiveBroadcast(callback) — register for the next broadcast.
+pub fn agent_receive_broadcast_native(
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let cb = case args {
+    [f, ..] -> f
+    [] -> JsUndefined
+  }
+  case agent_queue(state, this, "__agents__") {
+    Ok(#(arr_ref, callbacks)) -> {
+      let state =
+        agent_queue_write(state, arr_ref, list.append(callbacks, [cb]))
+      #(state, Ok(JsUndefined))
+    }
+    Error(Nil) ->
+      state.type_error(state, "receiveBroadcast: $262.agent state missing")
+  }
+}
+
+/// $262.agent.broadcast(sab) — synchronously invoke every registered
+/// receiveBroadcast callback with the buffer. The heap is shared, so the
+/// callbacks operate on the very same SharedArrayBuffer object.
+pub fn agent_broadcast_native(
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let sab = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  case agent_queue(state, this, "__agents__") {
+    Ok(#(_arr_ref, callbacks)) -> {
+      let Nil = builtins_atomics.set_agent_callback_mode(True)
+      let state =
+        list.fold(callbacks, state, fn(state, cb) {
+          case state.call(state, cb, JsUndefined, [sab]) {
+            Ok(#(_, state)) -> state
+            Error(#(thrown, state)) -> {
+              io.println_error(
+                "$262.agent.broadcast: callback threw: "
+                <> object.format_error(thrown, state.heap),
+              )
+              state
+            }
+          }
+        })
+      let Nil = builtins_atomics.set_agent_callback_mode(False)
+      #(state, Ok(JsUndefined))
+    }
+    Error(Nil) -> state.type_error(state, "broadcast: $262.agent state missing")
+  }
+}
+
+/// $262.agent.report(value) — push ToString(value) onto the report queue.
+pub fn agent_report_native(
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let val = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  use str, state <- coerce.try_to_string(state, val)
+  case agent_queue(state, this, "__reports__") {
+    Ok(#(arr_ref, reports)) -> {
+      let state =
+        agent_queue_write(state, arr_ref, list.append(reports, [JsString(str)]))
+      #(state, Ok(JsUndefined))
+    }
+    Error(Nil) -> state.type_error(state, "report: $262.agent state missing")
+  }
+}
+
+/// $262.agent.getReport() — dequeue the oldest report, or null when empty.
+pub fn agent_get_report_native(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case agent_queue(state, this, "__reports__") {
+    Ok(#(arr_ref, reports)) ->
+      case reports {
+        [] -> #(state, Ok(value.JsNull))
+        [head, ..rest] -> {
+          let state = agent_queue_write(state, arr_ref, rest)
+          #(state, Ok(head))
+        }
+      }
+    Error(Nil) -> state.type_error(state, "getReport: $262.agent state missing")
+  }
+}
+
+/// $262.agent.sleep(ms) — block the (single) BEAM scheduler thread running
+/// this VM for ms milliseconds.
+pub fn agent_sleep_native(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let val = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  case coerce.js_to_number(state, val) {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(num, state)) -> {
+      let ms = case num {
+        value.Finite(f) -> value.float_to_int(f)
+        _ -> 0
+      }
+      let Nil = builtins_atomics.sleep_ms(ms)
+      #(state, Ok(JsUndefined))
+    }
+  }
+}
+
+/// $262.agent.monotonicNow() — monotonic milliseconds (same clock as the
+/// waitAsync deadline bookkeeping).
+pub fn agent_monotonic_now_native(
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  #(state, Ok(value.from_int(builtins_atomics.monotonic_now())))
 }
 
 // ============================================================================
@@ -313,15 +628,32 @@ fn compile_or_throw(
     let #(heap, err) = common.make_syntax_error(state.heap, builtins, msg)
     #(State(..state, heap:), Error(err))
   }
-  case parse(source) {
-    Error(err) -> throw_syntax(parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compile(program) {
-        Error(err) -> throw_syntax(string.inspect(err))
-        Ok(template) -> cont(template)
+  // Big sources parse+compile in a heap-sized scratch process (see
+  // arc_vm_ffi:run_compile_task/2): the token list / AST / IR are large
+  // transients the copying GC would otherwise re-copy many times, and only
+  // the compact FuncTemplate (or error string) crosses back. Small sources
+  // run inline.
+  let compiled =
+    ffi_run_compile_task(string.byte_size(source), fn() {
+      case parse(source) {
+        Error(err) -> Error(parser.parse_error_to_string(err))
+        Ok(program) ->
+          case compile(program) {
+            Error(err) -> Error(string.inspect(err))
+            Ok(template) -> Ok(template)
+          }
       }
+    })
+  case compiled {
+    Error(msg) -> throw_syntax(msg)
+    Ok(template) -> cont(template)
   }
 }
+
+/// See arc_vm_ffi:run_compile_task/2 — runs `task` in a short-lived,
+/// heap-pre-sized process when `source_bytes` is large, inline otherwise.
+@external(erlang, "arc_vm_ffi", "run_compile_task")
+fn ffi_run_compile_task(source_bytes: Int, task: fn() -> a) -> a
 
 /// Build an eval State from `template`/`locals`/`h`, copy the caller's realm
 /// table in, execute, merge VM-global state back into the caller, and map
@@ -356,12 +688,27 @@ fn run_eval(
         state.ctx.symbol_registry,
       ),
       job_queue: state.job_queue,
+      // Seed event-loop state from the caller: merge_globals threads
+      // timers/next_timer_id/outstanding/atomics_waiters back after
+      // execution, so starting from new_state's empty defaults would drop
+      // the caller's pending timers and waiters, reset the timer-id
+      // counter, and zero the outstanding host.suspend count.
+      timers: state.timers,
+      next_timer_id: state.next_timer_id,
+      outstanding: state.outstanding,
+      atomics_waiters: state.atomics_waiters,
       eval_env:,
     )
   let eval_state =
     State(
       ..eval_state,
-      ctx: state.RealmCtx(..eval_state.ctx, realms: state.ctx.realms),
+      ctx: state.RealmCtx(
+        ..eval_state.ctx,
+        realms: state.ctx.realms,
+        // Thread the tagged-template cache in (new_state_fn starts empty);
+        // merge_globals threads it back out after execution.
+        template_objects: state.ctx.template_objects,
+      ),
     )
   case execute_inner(eval_state) {
     Error(vm_err) ->
@@ -453,6 +800,9 @@ pub fn eval_native(
 /// eval call is at top-level or the compiler couldn't build the table).
 pub fn direct_eval_native(
   args: List(JsValue),
+  param_scope_names: List(String),
+  with_names: List(String),
+  private_names: List(String),
   state: State,
   execute_inner: ExecuteInnerFn,
   new_state_fn: NewStateFn,
@@ -473,6 +823,9 @@ pub fn direct_eval_native(
           run_direct_eval(
             source,
             name_table,
+            param_scope_names,
+            with_names,
+            private_names,
             state,
             execute_inner,
             new_state_fn,
@@ -487,10 +840,23 @@ pub fn direct_eval_native(
 fn run_direct_eval(
   source: String,
   name_table: List(#(String, Int)),
+  param_scope_names: List(String),
+  with_names: List(String),
+  private_names: List(String),
   state: State,
   execute_inner: ExecuteInnerFn,
   new_state_fn: NewStateFn,
 ) -> #(State, Result(JsValue, JsValue)) {
+  // A sentinel head entry marks the caller frame's VariableEnvironment as
+  // the GLOBAL environment (script/REPL top level) — sloppy eval'd `var`
+  // declarations then target the global object, not an eval_env dict.
+  let #(caller_is_global, name_table) = case name_table {
+    [#(sentinel, -1), ..rest] if sentinel == compiler.global_frame_sentinel -> #(
+      True,
+      rest,
+    )
+    _ -> #(False, name_table)
+  }
   // Compile with caller's local names as pre-boxed captures. The eval'd
   // code's slot i corresponds to name_table[i]'s variable. The caller's
   // lexical `this` (if any) is threaded as one extra capture after the
@@ -503,13 +869,24 @@ fn run_direct_eval(
     state,
     state.builtins,
     source,
-    parser.parse_direct_eval(_, allow_new_target: perms.new_target_allowed),
+    parser.parse_direct_eval(
+      _,
+      allow_new_target: perms.new_target_allowed,
+      allow_super_property: perms.super_prop_allowed,
+      allow_super_call: perms.super_call_allowed,
+      allow_arguments: perms.arguments_allowed,
+      outer_private_names: private_names,
+    ),
     compiler.compile_eval_direct(
       _,
       parent_names,
       parent_slots,
       perms,
       caller_strict,
+      caller_is_global,
+      param_scope_names,
+      with_names,
+      private_names,
     ),
   )
   // Seed locals[0..N-1] with the caller's box refs (pulled from caller's
@@ -537,8 +914,9 @@ fn run_direct_eval(
   // Sloppy: `var` declarations land in the caller's eval_env dict.
   // Allocate lazily so subsequent evals in the same frame share it.
   // Strict: compile_eval_direct rewrites those vars to locals in the
-  // eval body, so no eval_env needed.
-  let #(h, eval_env) = case caller_strict, state.eval_env {
+  // eval body, so no eval_env needed. Global caller: vars go straight to
+  // the global object (fallthrough ToGlobal), so no eval_env either.
+  let #(h, eval_env) = case caller_strict || caller_is_global, state.eval_env {
     True, _ -> #(state.heap, None)
     False, Some(ref) -> #(state.heap, Some(ref))
     False, None -> {
@@ -566,12 +944,16 @@ fn coerce_all_to_string(
   }
 }
 
-/// ES2024 §20.2.1.1 Function ( ...parameterArgs, bodyArg )
+/// ES2024 §20.2.1.1 Function ( ...parameterArgs, bodyArg ) and its
+/// CreateDynamicFunction (§20.2.1.1.1) siblings — `keyword` selects the
+/// flavor: "function", "function*" (GeneratorFunction, §27.3.1.1) or
+/// "async function*" (AsyncGeneratorFunction, §27.4.1.1).
 /// Last arg is the body, preceding args are parameter names.
 /// Builds a function expression source string and evaluates it.
-/// Same behavior for `Function(...)` and `new Function(...)`.
+/// Same behavior for `Ctor(...)` and `new Ctor(...)`.
 pub fn function_constructor_native(
   args: List(JsValue),
+  keyword: String,
   state: State,
   execute_inner: ExecuteInnerFn,
   new_state_fn: NewStateFn,
@@ -581,11 +963,830 @@ pub fn function_constructor_native(
     [] -> #([], "")
     [b, ..params_rev] -> #(list.reverse(params_rev), b)
   }
+  // §20.2.1.1.1 step 16: "function anonymous(" P "\n) {\n" body "\n}".
+  // The newline before ")" matters: a trailing line comment in the last
+  // parameter must not comment out the ")" (test262: Function/prototype/
+  // toString/Function.js).
   let source =
-    "(function anonymous("
+    "("
+    <> keyword
+    <> " anonymous("
     <> string.join(param_strs, ",")
-    <> ") {\n"
+    <> "\n) {\n"
     <> body
     <> "\n})"
   run_source_in_current_realm(source, state, execute_inner, new_state_fn)
+}
+
+// ============================================================================
+// ShadowRealm (proposal-shadowrealm)
+//
+// A ShadowRealm instance owns a fresh realm: its own Builtins, global object
+// and RealmSlot (the same realm machinery $262.createRealm uses).
+// `evaluate` runs a script in that realm and returns the completion value
+// through GetWrappedValue: primitives cross the boundary as-is, callables
+// cross as wrapped function exotic objects, anything else is a TypeError.
+// ============================================================================
+
+/// Per-realm data resolved from a RealmSlot ref + the ctx.realms table.
+type RealmRecord {
+  RealmRecord(
+    builtins: Builtins,
+    global: Ref,
+    lexical_globals: dict.Dict(String, value.LexicalGlobal),
+    symbol_descriptions: dict.Dict(value.SymbolId, String),
+    symbol_registry: dict.Dict(String, value.SymbolId),
+  )
+}
+
+/// Route ShadowRealm natives. Called from dispatch_native.
+pub fn shadow_realm_dispatch(
+  native: value.ShadowRealmNativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  case native {
+    value.ShadowRealmConstructor(proto:) ->
+      shadow_realm_constructor(proto, state)
+    value.ShadowRealmEvaluate(fn_proto:) ->
+      shadow_realm_evaluate(
+        args,
+        this,
+        fn_proto,
+        state,
+        execute_inner,
+        new_state_fn,
+      )
+    value.ShadowRealmImportValue(fn_proto:) ->
+      shadow_realm_import_value(args, this, fn_proto, state)
+    value.WrappedFunctionCall(target:, caller_realm:, target_realm:) ->
+      wrapped_function_call(
+        target,
+        caller_realm,
+        target_realm,
+        args,
+        this,
+        state,
+      )
+  }
+}
+
+/// ShadowRealm ( ) — proposal §3.1.1. Creates the instance and its realm.
+fn shadow_realm_constructor(
+  proto: Ref,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Step 1: If NewTarget is undefined, throw a TypeError.
+  case state.new_target {
+    JsUndefined ->
+      state.type_error(state, "Constructor ShadowRealm requires 'new'")
+    new_target -> {
+      // Step 2: OrdinaryCreateFromConstructor(NewTarget, %ShadowRealm.prototype%).
+      use proto_ref, state <- object.proto_from_new_target(
+        state,
+        new_target,
+        proto,
+      )
+      // Steps 3-12: CreateRealm + SetRealmGlobalObject + SetDefaultGlobalBindings.
+      let #(h, new_builtins) = builtins.init(state.heap)
+      let #(h, new_global) = builtins.globals(new_builtins, h)
+      let #(h, realm_ref) =
+        heap.alloc(
+          h,
+          value.RealmSlot(
+            global_object: new_global,
+            lexical_globals: dict.new(),
+            symbol_descriptions: dict.new(),
+            symbol_registry: dict.new(),
+          ),
+        )
+      let h = heap.root(h, realm_ref)
+      let #(h, instance_ref) =
+        common.alloc_wrapper(h, value.ShadowRealmObject(realm_ref:), proto_ref)
+      let realms = dict.insert(state.ctx.realms, realm_ref, new_builtins)
+      #(
+        State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
+        Ok(JsObject(instance_ref)),
+      )
+    }
+  }
+}
+
+/// Brand check: read the [[ShadowRealm]] slot off `this`.
+fn shadow_realm_of(state: State, this: JsValue) -> Result(Ref, Nil) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: value.ShadowRealmObject(realm_ref:), ..)) ->
+          Ok(realm_ref)
+        _ -> Error(Nil)
+      }
+    _ -> Error(Nil)
+  }
+}
+
+/// Resolve a realm ref into its record (RealmSlot fields + Builtins).
+fn read_realm(state: State, realm_ref: Ref) -> Result(RealmRecord, Nil) {
+  case heap.read(state.heap, realm_ref) {
+    Some(value.RealmSlot(
+      global_object:,
+      lexical_globals:,
+      symbol_descriptions:,
+      symbol_registry:,
+    )) ->
+      case dict.get(state.ctx.realms, realm_ref) {
+        Ok(b) ->
+          Ok(RealmRecord(
+            builtins: b,
+            global: global_object,
+            lexical_globals:,
+            symbol_descriptions:,
+            symbol_registry:,
+          ))
+        Error(Nil) -> Error(Nil)
+      }
+    _ -> Error(Nil)
+  }
+}
+
+/// Build a RealmSlot snapshot of the realm the state is currently running in.
+fn current_realm_slot(state: State) -> state.HeapSlot {
+  value.RealmSlot(
+    global_object: state.ctx.global_object,
+    lexical_globals: state.ctx.lexical_globals,
+    symbol_descriptions: state.ctx.symbol_descriptions,
+    symbol_registry: state.ctx.symbol_registry,
+  )
+}
+
+/// Persist the current ctx into `realm_ref`'s RealmSlot.
+fn sync_realm_slot(state: State, realm_ref: Ref) -> State {
+  State(
+    ..state,
+    heap: heap.write(state.heap, realm_ref, current_realm_slot(state)),
+  )
+}
+
+/// Find the RealmSlot whose global object is `global`.
+fn find_realm_by_global(state: State, global: Ref) -> option.Option(Ref) {
+  list.find(dict.keys(state.ctx.realms), fn(rref) {
+    case heap.read(state.heap, rref) {
+      Some(value.RealmSlot(global_object: g, ..)) -> g == global
+      _ -> False
+    }
+  })
+  |> option.from_result
+}
+
+/// Return a RealmSlot ref for the realm the state is currently executing in,
+/// allocating + registering one if this realm was never reified (e.g. the
+/// top-level realm outside the test262 harness). Always syncs the slot with
+/// the live ctx so cross-realm re-entry sees fresh lexical globals.
+fn ensure_current_realm(state: State) -> #(State, Ref) {
+  case find_realm_by_global(state, state.ctx.global_object) {
+    Some(rref) -> #(sync_realm_slot(state, rref), rref)
+    None -> {
+      let #(h, rref) = heap.alloc(state.heap, current_realm_slot(state))
+      let h = heap.root(h, rref)
+      let realms = dict.insert(state.ctx.realms, rref, state.builtins)
+      #(
+        State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
+        rref,
+      )
+    }
+  }
+}
+
+/// Resolve the realm a ShadowRealm method belongs to from the
+/// %Function.prototype% ref its native token carries (unique per Builtins).
+/// Per spec, built-in methods run in their own realm — its intrinsics brand
+/// every error and wrapper evaluate/importValue produce. Falls back to the
+/// running realm when the marker realm was never reified.
+fn realm_of_function_proto(
+  state: State,
+  fn_proto: Ref,
+) -> #(State, Ref, Builtins) {
+  case state.builtins.function.prototype == fn_proto {
+    True -> {
+      let #(state, rref) = ensure_current_realm(state)
+      #(state, rref, state.builtins)
+    }
+    False -> {
+      let found =
+        dict.fold(state.ctx.realms, None, fn(acc, rref, b) {
+          case acc {
+            Some(_) -> acc
+            None ->
+              case b.function.prototype == fn_proto {
+                True -> Some(#(rref, b))
+                False -> None
+              }
+          }
+        })
+      case found {
+        Some(#(rref, b)) -> #(state, rref, b)
+        None -> {
+          let #(state, rref) = ensure_current_realm(state)
+          #(state, rref, state.builtins)
+        }
+      }
+    }
+  }
+}
+
+/// Allocate a TypeError whose prototype comes from an explicit realm's
+/// builtins (cross-realm errors must be branded for the right realm).
+fn type_error_in(
+  state: State,
+  b: Builtins,
+  msg: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, err) = common.make_type_error(state.heap, b, msg)
+  let state =
+    state.attach_stack(
+      State(..state, heap:),
+      err,
+      state.error_header("TypeError", msg),
+    )
+  #(state, Error(err))
+}
+
+/// Run `f` with the VM's realm context switched to `realm_ref` (builtins,
+/// global object, lexical globals, symbol tables), then restore the original
+/// realm. Mutations on either side are persisted through the RealmSlot heap
+/// cells, so nested cross-realm calls observe each other's changes.
+fn with_realm(
+  state: State,
+  realm_ref: Ref,
+  f: fn(State) -> #(State, Result(a, JsValue)),
+) -> #(State, Result(a, JsValue)) {
+  case read_realm(state, realm_ref) {
+    Error(Nil) -> {
+      let #(err, state) =
+        state.type_error_value(
+          state,
+          "ShadowRealm: realm record missing for cross-realm call",
+        )
+      #(state, Error(err))
+    }
+    Ok(target) ->
+      case target.global == state.ctx.global_object {
+        True -> f(state)
+        False -> {
+          let #(state, origin_ref) = ensure_current_realm(state)
+          let origin_builtins = state.builtins
+          // Symbol registry/descriptions are agent-wide — enter with the
+          // union so registered symbols keep their identity across realms.
+          let entered =
+            State(
+              ..state,
+              builtins: target.builtins,
+              ctx: state.RealmCtx(
+                ..state.ctx,
+                global_object: target.global,
+                lexical_globals: target.lexical_globals,
+                symbol_descriptions: dict.merge(
+                  state.ctx.symbol_descriptions,
+                  target.symbol_descriptions,
+                ),
+                symbol_registry: dict.merge(
+                  state.ctx.symbol_registry,
+                  target.symbol_registry,
+                ),
+              ),
+            )
+          let #(after, res) = f(entered)
+          // Persist the target realm's (possibly mutated) globals.
+          let after = sync_realm_slot(after, realm_ref)
+          // Restore the origin realm, re-reading its slot — nested calls
+          // back into the origin may have mutated it. Symbol tables adopt
+          // the after-state's union.
+          let restored = case heap.read(after.heap, origin_ref) {
+            Some(value.RealmSlot(
+              global_object:,
+              lexical_globals:,
+              symbol_descriptions:,
+              symbol_registry:,
+            )) ->
+              State(
+                ..after,
+                builtins: origin_builtins,
+                ctx: state.RealmCtx(
+                  ..after.ctx,
+                  global_object:,
+                  lexical_globals:,
+                  symbol_descriptions: dict.merge(
+                    symbol_descriptions,
+                    after.ctx.symbol_descriptions,
+                  ),
+                  symbol_registry: dict.merge(
+                    symbol_registry,
+                    after.ctx.symbol_registry,
+                  ),
+                ),
+              )
+            _ -> State(..after, builtins: origin_builtins)
+          }
+          #(restored, res)
+        }
+      }
+  }
+}
+
+/// GetWrappedValue ( realm, value ) — proposal §3.1.4. `dest_realm` is the
+/// realm the value is being passed INTO (the new wrapper's [[Realm]]),
+/// `src_realm` is the realm the value comes from. TypeErrors use
+/// `err_builtins` — the running caller context's realm per spec.
+fn get_wrapped_value(
+  state: State,
+  dest_realm: Ref,
+  dest_builtins: Builtins,
+  err_builtins: Builtins,
+  src_realm: Ref,
+  val: JsValue,
+) -> #(State, Result(JsValue, JsValue)) {
+  case val {
+    JsObject(_) ->
+      case object.value_is_callable(state.heap, val) {
+        True ->
+          wrapped_function_create(
+            state,
+            val,
+            src_realm,
+            dest_realm,
+            dest_builtins,
+            err_builtins,
+          )
+        False ->
+          type_error_in(
+            state,
+            err_builtins,
+            "value crossing the ShadowRealm boundary must be callable or primitive",
+          )
+      }
+    _ -> #(state, Ok(val))
+  }
+}
+
+/// WrappedFunctionCreate ( callerRealm, Target ) — proposal §2.1.1, including
+/// CopyNameAndLength (§2.2). Any abrupt completion from the observable Gets
+/// on Target becomes a TypeError in `err_builtins`' realm.
+fn wrapped_function_create(
+  state: State,
+  target: JsValue,
+  src_realm: Ref,
+  dest_realm: Ref,
+  dest_builtins: Builtins,
+  err_builtins: Builtins,
+) -> #(State, Result(JsValue, JsValue)) {
+  // The name/length Gets are observable (accessors run) — execute them in
+  // the target's own realm so getter code resolves globals there.
+  let #(state, copied) =
+    with_realm(state, src_realm, fn(state) {
+      copy_name_and_length(state, target)
+    })
+  case copied {
+    Error(_thrown) ->
+      type_error_in(
+        state,
+        err_builtins,
+        "wrapped function could not copy target name and length",
+      )
+    Ok(#(name, len)) -> {
+      let #(h, ref) =
+        heap.alloc(
+          state.heap,
+          ObjectSlot(
+            kind: value.NativeFunction(
+              value.Dispatch(
+                value.ShadowRealmNative(value.WrappedFunctionCall(
+                  target:,
+                  caller_realm: dest_realm,
+                  target_realm: src_realm,
+                )),
+              ),
+              constructible: False,
+            ),
+            properties: dict.from_list([
+              #(Named("name"), common.fn_name_property(name)),
+              #(
+                Named("length"),
+                value.data(value.JsNumber(len)) |> value.configurable(),
+              ),
+            ]),
+            symbol_properties: [],
+            elements: elements.new(),
+            prototype: Some(dest_builtins.function.prototype),
+            extensible: True,
+          ),
+        )
+      #(State(..state, heap: h), Ok(JsObject(ref)))
+    }
+  }
+}
+
+/// CopyNameAndLength ( F, Target ) — proposal §2.2, steps 2-7 (the reads).
+/// Returns the name string and the length JsNum to define on the wrapper.
+fn copy_name_and_length(
+  state: State,
+  target: JsValue,
+) -> #(State, Result(#(String, value.JsNum), JsValue)) {
+  case target {
+    JsObject(tref) -> {
+      // Step 3: targetHasLength = ? HasOwnProperty(Target, "length") —
+      // via [[GetOwnProperty]] so proxy getOwnPropertyDescriptor traps
+      // (and revoked proxies) are observable.
+      use len_desc, state <- state.try_op(
+        builtins_object.get_own_property_stateful(
+          state,
+          tref,
+          JsString("length"),
+        ),
+      )
+      let has_len = option.is_some(len_desc)
+      // Step 4: if present, targetLen = ? Get(Target, "length").
+      use len_val, state <- state.try_op(case has_len {
+        True -> object.get_value(state, tref, Named("length"), target)
+        False -> Ok(#(JsUndefined, state))
+      })
+      let len = case len_val {
+        value.JsNumber(value.Infinity) -> value.Infinity
+        value.JsNumber(value.NegInfinity) -> value.Finite(0.0)
+        value.JsNumber(value.Finite(f)) -> {
+          // ToIntegerOrInfinity then max(L, 0).
+          let l = int.max(float.truncate(f), 0)
+          value.Finite(int.to_float(l))
+        }
+        _ -> value.Finite(0.0)
+      }
+      // Step 6: targetName = ? Get(Target, "name"); non-strings become "".
+      use name_val, state <- state.try_op(object.get_value(
+        state,
+        tref,
+        Named("name"),
+        target,
+      ))
+      let name = case name_val {
+        JsString(s) -> s
+        _ -> ""
+      }
+      #(state, Ok(#(name, len)))
+    }
+    _ -> #(state, Ok(#("", value.Finite(0.0))))
+  }
+}
+
+/// ShadowRealm.prototype.evaluate ( sourceText ) — proposal §3.3.1.
+fn shadow_realm_evaluate(
+  args: List(JsValue),
+  this: JsValue,
+  fn_proto: Ref,
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  // The method's own realm is the spec's callerRealm: it brands every error
+  // and wrapper this call produces (a built-in runs in its own realm even
+  // when invoked from another one).
+  let #(state, caller_realm_ref, caller_builtins) =
+    realm_of_function_proto(state, fn_proto)
+  case shadow_realm_of(state, this) {
+    Error(Nil) ->
+      type_error_in(
+        state,
+        caller_builtins,
+        "ShadowRealm.prototype.evaluate called on incompatible receiver",
+      )
+    Ok(realm_ref) ->
+      // Step 3: If sourceText is not a String, throw a TypeError (no coercion).
+      case args {
+        [JsString(source), ..] ->
+          do_shadow_realm_evaluate(
+            source,
+            realm_ref,
+            caller_realm_ref,
+            caller_builtins,
+            state,
+            execute_inner,
+            new_state_fn,
+          )
+        _ ->
+          type_error_in(
+            state,
+            caller_builtins,
+            "ShadowRealm.prototype.evaluate expects a string",
+          )
+      }
+  }
+}
+
+/// PerformShadowRealmEval — proposal §3.1.2. Parse in the caller context
+/// (SyntaxErrors surface as the caller realm's SyntaxError), execute in the
+/// shadow realm, wrap the completion value for the caller.
+fn do_shadow_realm_evaluate(
+  source: String,
+  realm_ref: Ref,
+  caller_realm_ref: Ref,
+  caller_builtins: Builtins,
+  state: State,
+  execute_inner: ExecuteInnerFn,
+  new_state_fn: NewStateFn,
+) -> #(State, Result(JsValue, JsValue)) {
+  case read_realm(state, realm_ref) {
+    Error(Nil) ->
+      type_error_in(
+        state,
+        caller_builtins,
+        "ShadowRealm: realm record missing for evaluate",
+      )
+    Ok(realm) -> {
+      use template <- compile_or_throw(
+        state,
+        caller_builtins,
+        source,
+        parser.parse(_, parser.Script),
+        compiler.compile_eval,
+      )
+      // Sync the running realm's slot so re-entrant calls from the shadow
+      // realm see fresh lexical globals.
+      let #(state, _running_realm_ref) = ensure_current_realm(state)
+      // Script `this` is the shadow realm's global object (§16.1.6).
+      let locals = seed_top_level_locals(template, JsObject(realm.global))
+      // The Symbol registry (§20.4.2.2 Symbol.for) and descriptions are
+      // agent-wide, not per-realm — seed the shadow realm with the union so
+      // symbols round-trip across the boundary with identity and description.
+      let merged_descriptions =
+        dict.merge(state.ctx.symbol_descriptions, realm.symbol_descriptions)
+      let merged_registry =
+        dict.merge(state.ctx.symbol_registry, realm.symbol_registry)
+      let eval_state =
+        State(
+          ..new_state_fn(
+            template,
+            locals,
+            state.heap,
+            realm.builtins,
+            realm.global,
+            realm.lexical_globals,
+            merged_descriptions,
+            merged_registry,
+          ),
+          job_queue: state.job_queue,
+        )
+      let eval_state =
+        State(
+          ..eval_state,
+          ctx: state.RealmCtx(
+            ..eval_state.ctx,
+            realms: state.ctx.realms,
+            // Tagged-template cache is keyed by globally unique site ids, so
+            // it is shared across realms; thread it in and back out.
+            template_objects: state.ctx.template_objects,
+          ),
+        )
+      case execute_inner(eval_state) {
+        Error(vm_err) ->
+          state.type_error(
+            state,
+            "ShadowRealm.prototype.evaluate: VM error: "
+              <> string.inspect(vm_err),
+          )
+        Ok(#(completion, final_eval_state)) -> {
+          // Drain microtasks in the shadow realm.
+          let drained = event_loop.drain_jobs(final_eval_state)
+          let updated_realm =
+            value.RealmSlot(
+              global_object: realm.global,
+              lexical_globals: drained.ctx.lexical_globals,
+              symbol_descriptions: drained.ctx.symbol_descriptions,
+              symbol_registry: drained.ctx.symbol_registry,
+            )
+          let h = heap.write(drained.heap, realm_ref, updated_realm)
+          // The drained symbol tables are a superset of the caller's (the
+          // eval was seeded with the union) — adopt them agent-wide.
+          let state =
+            State(
+              ..state,
+              heap: h,
+              job_queue: drained.job_queue,
+              outstanding: drained.outstanding,
+              ctx: state.RealmCtx(
+                ..state.ctx,
+                realms: drained.ctx.realms,
+                symbol_descriptions: drained.ctx.symbol_descriptions,
+                symbol_registry: drained.ctx.symbol_registry,
+                template_objects: drained.ctx.template_objects,
+              ),
+            )
+          case completion {
+            // Step 26: GetWrappedValue(callerRealm, result).
+            NormalCompletion(val, _) ->
+              get_wrapped_value(
+                state,
+                caller_realm_ref,
+                caller_builtins,
+                caller_builtins,
+                realm_ref,
+                val,
+              )
+            // Step 25: abrupt completions become the caller realm's TypeError.
+            ThrowCompletion(thrown, _) ->
+              type_error_in(
+                state,
+                caller_builtins,
+                "ShadowRealm.prototype.evaluate threw: "
+                  <> object.format_error(thrown, state.heap),
+              )
+            YieldCompletion(_, _) ->
+              state.type_error(state, "evaluate: unexpected yield")
+            completion.AwaitCompletion(_, _) ->
+              state.type_error(state, "evaluate: unexpected await")
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Wrapped function exotic object [[Call]] — proposal §2.1.
+fn wrapped_function_call(
+  target: JsValue,
+  caller_realm: Ref,
+  target_realm: Ref,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Every TypeError thrown here belongs to F.[[Realm]] (the caller realm).
+  let caller_builtins = case dict.get(state.ctx.realms, caller_realm) {
+    Ok(b) -> b
+    Error(Nil) -> state.builtins
+  }
+  let target_builtins = case dict.get(state.ctx.realms, target_realm) {
+    Ok(b) -> b
+    Error(Nil) -> state.builtins
+  }
+  // Steps 6-7: wrap thisArgument and every argument into the target realm.
+  let #(state, wrapped_this_res) =
+    get_wrapped_value(
+      state,
+      target_realm,
+      target_builtins,
+      caller_builtins,
+      caller_realm,
+      this,
+    )
+  case wrapped_this_res {
+    Error(thrown) -> #(state, Error(thrown))
+    Ok(wrapped_this) -> {
+      let #(state, wrapped_args_res) =
+        wrap_all(
+          state,
+          target_realm,
+          target_builtins,
+          caller_builtins,
+          caller_realm,
+          args,
+          [],
+        )
+      case wrapped_args_res {
+        Error(thrown) -> #(state, Error(thrown))
+        Ok(wrapped_args) -> {
+          // Step 8: Call(target, wrappedThisArgument, wrappedArgs) in the
+          // target function's realm.
+          let #(state, call_res) =
+            with_realm(state, target_realm, fn(state) {
+              case state.call(state, target, wrapped_this, wrapped_args) {
+                Ok(#(v, state)) -> #(state, Ok(v))
+                Error(#(thrown, state)) -> #(state, Error(thrown))
+              }
+            })
+          case call_res {
+            // Step 9: GetWrappedValue(callerRealm, result).
+            Ok(result_val) ->
+              get_wrapped_value(
+                state,
+                caller_realm,
+                caller_builtins,
+                caller_builtins,
+                target_realm,
+                result_val,
+              )
+            // Step 10: any abrupt completion becomes the caller realm's
+            // TypeError (the original error must not cross the boundary).
+            Error(thrown) ->
+              type_error_in(
+                state,
+                caller_builtins,
+                "wrapped function threw: "
+                  <> object.format_error(thrown, state.heap),
+              )
+          }
+        }
+      }
+    }
+  }
+}
+
+/// GetWrappedValue over a list, short-circuiting on the first error.
+fn wrap_all(
+  state: State,
+  dest_realm: Ref,
+  dest_builtins: Builtins,
+  err_builtins: Builtins,
+  src_realm: Ref,
+  vals: List(JsValue),
+  acc: List(JsValue),
+) -> #(State, Result(List(JsValue), JsValue)) {
+  case vals {
+    [] -> #(state, Ok(list.reverse(acc)))
+    [v, ..rest] -> {
+      let #(state, res) =
+        get_wrapped_value(
+          state,
+          dest_realm,
+          dest_builtins,
+          err_builtins,
+          src_realm,
+          v,
+        )
+      case res {
+        Ok(w) ->
+          wrap_all(
+            state,
+            dest_realm,
+            dest_builtins,
+            err_builtins,
+            src_realm,
+            rest,
+            [w, ..acc],
+          )
+        Error(thrown) -> #(state, Error(thrown))
+      }
+    }
+  }
+}
+
+/// ShadowRealm.prototype.importValue ( specifier, exportName ) — §3.3.2.
+/// Validation is fully implemented; the actual module load rejects, as a
+/// host without a ShadowRealm module loader does (HostLoadImportedModule is
+/// allowed to fail — the returned promise rejects with a TypeError).
+fn shadow_realm_import_value(
+  args: List(JsValue),
+  this: JsValue,
+  fn_proto: Ref,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // As in evaluate: the method's own realm brands errors and the promise.
+  let #(state, _caller_realm_ref, caller_builtins) =
+    realm_of_function_proto(state, fn_proto)
+  case shadow_realm_of(state, this) {
+    Error(Nil) ->
+      type_error_in(
+        state,
+        caller_builtins,
+        "ShadowRealm.prototype.importValue called on incompatible receiver",
+      )
+    Ok(_realm_ref) -> {
+      let specifier = case args {
+        [s, ..] -> s
+        [] -> JsUndefined
+      }
+      let export_name = case args {
+        [_, e, ..] -> e
+        _ -> JsUndefined
+      }
+      // Step 3: ToString(specifier) — abrupt completions propagate as-is.
+      use _specifier_str, state <- coerce.try_to_string(state, specifier)
+      // Step 4: exportName must already be a String (no coercion).
+      case export_name {
+        JsString(_) -> {
+          let #(heap, err) =
+            common.make_type_error(
+              state.heap,
+              caller_builtins,
+              "ShadowRealm.prototype.importValue: module loading is not "
+                <> "available in this host",
+            )
+          let #(h, promise_ref, data_ref) =
+            builtins_promise.create_promise(
+              heap,
+              caller_builtins.promise.prototype,
+            )
+          let state = State(..state, heap: h)
+          let state = builtins_promise.reject_promise(state, data_ref, err)
+          #(state, Ok(JsObject(promise_ref)))
+        }
+        _ ->
+          type_error_in(
+            state,
+            caller_builtins,
+            "ShadowRealm.prototype.importValue: exportName must be a string",
+          )
+      }
+    }
+  }
 }

@@ -63,8 +63,55 @@ pub fn parse_js_number(raw: String) -> Float {
   }
 }
 
+const two52 = 4_503_599_627_370_496
+
+const two53 = 9_007_199_254_740_992
+
+/// Integer → Float with correct rounding (round-to-nearest, ties-to-even).
+/// Erlang's float/1 mis-rounds integers wider than 53 bits, so reduce to a
+/// 53-bit mantissa ourselves and convert the (exactly representable) result.
 fn int_to_float(i: Int) -> Float {
-  int.to_float(i)
+  let a = int.absolute_value(i)
+  case a < two53 {
+    True -> int.to_float(i)
+    False -> {
+      let s = bit_length(a, 0) - 53
+      let q0 = int.bitwise_shift_right(a, s)
+      let r = a - int.bitwise_shift_left(q0, s)
+      let half = int.bitwise_shift_left(1, s - 1)
+      let q = case r > half || { r == half && q0 % 2 == 1 } {
+        True -> q0 + 1
+        False -> q0
+      }
+      let #(q, s) = case q == two53 {
+        True -> #(two52, s + 1)
+        False -> #(q, s)
+      }
+      case 53 + s > 1024 {
+        // Beyond the double range; BEAM floats cannot express infinity, so
+        // clamp (erlang float conversion would crash outright).
+        True ->
+          case i < 0 {
+            True -> -1.7976931348623157e308
+            False -> 1.7976931348623157e308
+          }
+        False -> {
+          let f = int.to_float(int.bitwise_shift_left(q, s))
+          case i < 0 {
+            True -> 0.0 -. f
+            False -> f
+          }
+        }
+      }
+    }
+  }
+}
+
+fn bit_length(n: Int, acc: Int) -> Int {
+  case n == 0 {
+    True -> acc
+    False -> bit_length(int.bitwise_shift_right(n, 1), acc + 1)
+  }
 }
 
 fn gleam_float_parse(s: String) -> Result(Float, Nil) {
@@ -156,4 +203,24 @@ fn gleam_int_parse(s: String) -> Result(Int, Nil) {
       result
     }
   }
+}
+
+/// Parse a BigInt literal's raw text (INCLUDING the trailing "n") to its
+/// exact integer value. Handles 0x/0o/0b prefixes and numeric separators.
+/// The lexer guarantees well-formedness, so parse failures map to 0.
+pub fn parse_js_bigint(raw: String) -> Int {
+  let digits =
+    raw
+    |> string.drop_end(1)
+    |> string.replace("_", "")
+  let parsed = case digits {
+    "0x" <> hex -> parse_int_radix(hex, 16)
+    "0X" <> hex -> parse_int_radix(hex, 16)
+    "0o" <> oct -> parse_int_radix(oct, 8)
+    "0O" <> oct -> parse_int_radix(oct, 8)
+    "0b" <> bin -> parse_int_radix(bin, 2)
+    "0B" <> bin -> parse_int_radix(bin, 2)
+    _ -> gleam_int_parse(digits)
+  }
+  result.unwrap(parsed, 0)
 }

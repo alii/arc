@@ -125,12 +125,12 @@ format_prec_pos(X, Precision) ->
                 true ->
                     %% Use fixed notation
                     DecimalDigits = Precision - E - 1,
-                    S = float_to_list(X, [{decimals, DecimalDigits}]),
+                    S = decimals_exact(X, DecimalDigits),
                     list_to_binary(S);
                 false when E < 0 andalso E >= -(4) ->
                     %% Small numbers: use fixed notation
                     DecimalDigits = Precision - E - 1,
-                    S = float_to_list(X, [{decimals, DecimalDigits}]),
+                    S = decimals_exact(X, DecimalDigits),
                     list_to_binary(S);
                 false ->
                     %% Use exponential notation
@@ -142,3 +142,25 @@ format_prec_pos(X, Precision) ->
 is_neg_zero(X) ->
     <<Sign:1, _:63>> = <<X/float>>,
     Sign =:= 1.
+
+%% float_to_list with {decimals, D} rounds from the float's shortest decimal
+%% representation, double-rounding values like 1.3548387096774195 at 15
+%% decimals ("…420" instead of the correct "…419"). Format with 30 guard
+%% digits of the exact expansion and round once, half away from zero
+%% (matching the spec's "pick the larger n").
+decimals_exact(X, D) ->
+    Wide = float_to_list(X, [{decimals, min(253, D + 30)}]),
+    [IntPart, Frac] = string:split(Wide, "."),
+    Keep = lists:sublist(Frac, D),
+    Rest = lists:nthtail(D, Frac),
+    RoundUp = case Rest of [C | _] when C >= $5 -> true; _ -> false end,
+    Num0 = list_to_integer(IntPart ++ Keep),
+    Num = case RoundUp of true -> Num0 + 1; false -> Num0 end,
+    S = integer_to_list(Num),
+    case D of
+        0 -> S;
+        _ ->
+            Padded = lists:duplicate(max(0, D + 1 - length(S)), $0) ++ S,
+            {I2, F2} = lists:split(length(Padded) - D, Padded),
+            I2 ++ "." ++ F2
+    end.

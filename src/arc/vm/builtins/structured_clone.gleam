@@ -281,7 +281,8 @@ fn serialize_kind(
       )
       #(PrArray(items:, length:, properties: props), ctx)
     }
-    OrdinaryObject -> {
+    // Errors serialize like plain objects (name/message/etc. as props).
+    OrdinaryObject | value.ErrorObject(_) -> {
       use #(props, ctx) <- result.try(
         serialize_props(heap, dict.to_list(properties), mode, ctx, []),
       )
@@ -291,21 +292,18 @@ fn serialize_kind(
       })
       #(PrObject(properties: props, symbol_properties: syms), ctx)
     }
-    value.MapObject(entries:, keys_rev:, ..) -> {
+    value.MapObject(entries:, order:, ..) -> {
       let pairs =
-        list.reverse(keys_rev)
-        |> list.filter_map(fn(k) {
-          dict.get(entries, k)
-          |> result.map(fn(v) { #(value.map_key_to_js(k), v) })
-        })
+        value.live_entries(entries, order)
+        |> list.map(fn(e) { #(value.map_key_to_js(e.0), e.1) })
       use #(out, ctx) <- result.try(serialize_pairs(heap, pairs, mode, ctx, []))
       use #(props, ctx) <- result.map(
         serialize_props(heap, dict.to_list(properties), mode, ctx, []),
       )
       #(PrMap(entries: out, properties: props), ctx)
     }
-    value.SetObject(data:, keys_rev:, keys_len:) -> {
-      let vals = value.set_live_values(data, keys_rev, keys_len)
+    value.SetObject(data:, order:, ..) -> {
+      let vals = value.set_live_values(data, order)
       use #(out, ctx) <- result.try(serialize_list(heap, vals, mode, ctx, []))
       use #(props, ctx) <- result.map(
         serialize_props(heap, dict.to_list(properties), mode, ctx, []),
@@ -331,23 +329,45 @@ fn serialize_kind(
     value.FunctionObject(..) | value.NativeFunction(..) ->
       uncloneable("Function")
     value.PromiseObject(..) -> uncloneable("Promise")
+    value.DataViewObject(..) -> uncloneable("DataView")
+    // TODO(Deviation): HTML treats ArrayBuffer/TypedArray as serializable;
+    // we don't support cloning them yet.
+    value.ArrayBufferObject(..) -> uncloneable("ArrayBuffer")
+    value.TypedArrayObject(..) -> uncloneable("TypedArray")
+    value.IntlObject(..) -> uncloneable("Intl")
     value.GeneratorObject(..) -> uncloneable("Generator")
     value.AsyncGeneratorObject(..) -> uncloneable("AsyncGenerator")
     value.WeakMapObject(..) -> uncloneable("WeakMap")
     value.WeakSetObject(..) -> uncloneable("WeakSet")
+    value.FinalizationRegistryObject(..) -> uncloneable("FinalizationRegistry")
     SelectorObject(..) -> uncloneable("Selector")
     value.TimerObject(..) -> uncloneable("Timer")
     value.SymbolObject(..) -> uncloneable("Symbol")
     value.ModuleNamespace(..) -> uncloneable("Module")
     value.ArgumentsObject(..) -> uncloneable("Arguments")
+    // HTML StructuredSerializeInternal step 12: proxies are not serializable.
+    value.ProxyObject(..) -> uncloneable("Proxy")
+    // Temporal objects are not on the HTML serializable-types list.
+    value.TemporalDateSlot(..)
+    | value.TemporalTimeSlot(..)
+    | value.TemporalDateTimeSlot(..)
+    | value.TemporalYearMonthSlot(..)
+    | value.TemporalMonthDaySlot(..)
+    | value.TemporalDurationSlot(..)
+    | value.TemporalInstantSlot(..)
+    | value.TemporalZonedDateTimeSlot(..) -> uncloneable("Temporal")
     value.ArrayIteratorObject(..)
     | value.StringIteratorObject(..)
     | value.SetIteratorObject(..)
     | value.MapIteratorObject(..)
     | value.IteratorHelperObject(..)
+    | value.IteratorZipObject(..)
+    | value.IteratorConcatObject(..)
     | value.WrapForValidIteratorObject(..)
     | value.AsyncFromSyncIteratorObject(..)
     | value.IteratorRecordObject(..) -> uncloneable("Iterator")
+    value.DisposableStackObject(..) -> uncloneable("DisposableStack")
+    value.ShadowRealmObject(..) -> uncloneable("ShadowRealm")
   }
 }
 
@@ -492,13 +512,23 @@ fn alloc_shell(
     PrMap(..) ->
       common.alloc_wrapper(
         heap,
-        value.MapObject(entries: dict.new(), keys_rev: [], keys_len: 0),
+        value.MapObject(
+          entries: dict.new(),
+          seqs: dict.new(),
+          order: dict.new(),
+          next_seq: 0,
+        ),
         builtins.map.prototype,
       )
     PrSet(..) ->
       common.alloc_wrapper(
         heap,
-        value.SetObject(data: dict.new(), keys_rev: [], keys_len: 0),
+        value.SetObject(
+          data: dict.new(),
+          seqs: dict.new(),
+          order: dict.new(),
+          next_seq: 0,
+        ),
         builtins.set.prototype,
       )
     PrDate(time_value) ->
@@ -618,12 +648,17 @@ fn fill_record(
       }
     }
     PrMap(entries:, properties:) -> {
-      let #(data, keys_rev, keys_len) =
-        list.fold(entries, #(dict.new(), [], 0), fn(acc, e) {
-          let #(data, keys_rev, n) = acc
+      let #(data, seqs, order, next_seq) =
+        list.fold(entries, #(dict.new(), dict.new(), dict.new(), 0), fn(acc, e) {
+          let #(data, seqs, order, n) = acc
           let k = value.js_to_map_key(resolve_value(e.0, memo))
           let v = resolve_value(e.1, memo)
-          #(dict.insert(data, k, v), [k, ..keys_rev], n + 1)
+          #(
+            dict.insert(data, k, v),
+            dict.insert(seqs, k, n),
+            dict.insert(order, n, k),
+            n + 1,
+          )
         })
       let props = resolve_props(properties, memo)
       use slot <- heap.update(heap, ref)
@@ -631,27 +666,36 @@ fn fill_record(
         ObjectSlot(..) ->
           ObjectSlot(
             ..slot,
-            kind: value.MapObject(entries: data, keys_rev:, keys_len:),
+            kind: value.MapObject(entries: data, seqs:, order:, next_seq:),
             properties: props,
           )
         other -> other
       }
     }
     PrSet(entries:, properties:) -> {
-      let #(data, keys_rev, keys_len) =
-        list.fold(entries, #(dict.new(), [], 0), fn(acc, pv) {
-          let #(data, keys, len) = acc
-          let v = resolve_value(pv, memo)
-          let k = value.js_to_map_key(v)
-          #(dict.insert(data, k, v), [k, ..keys], len + 1)
-        })
+      let #(data, seqs, order, next_seq) =
+        list.fold(
+          entries,
+          #(dict.new(), dict.new(), dict.new(), 0),
+          fn(acc, pv) {
+            let #(data, seqs, order, n) = acc
+            let v = resolve_value(pv, memo)
+            let k = value.js_to_map_key(v)
+            #(
+              dict.insert(data, k, v),
+              dict.insert(seqs, k, n),
+              dict.insert(order, n, k),
+              n + 1,
+            )
+          },
+        )
       let props = resolve_props(properties, memo)
       use slot <- heap.update(heap, ref)
       case slot {
         ObjectSlot(..) ->
           ObjectSlot(
             ..slot,
-            kind: value.SetObject(data:, keys_rev:, keys_len:),
+            kind: value.SetObject(data:, seqs:, order:, next_seq:),
             properties: props,
           )
         other -> other

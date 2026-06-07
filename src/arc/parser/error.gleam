@@ -30,6 +30,9 @@ pub type ParseError {
   WithNotAllowedStrictMode(pos: Int)
   DeleteUnqualifiedStrictMode(pos: Int)
   DeletePrivateName(pos: Int)
+  UndeclaredPrivateName(name: String, pos: Int)
+  SuperPrivateName(pos: Int)
+  PrivateNameAsPropertyKey(pos: Int)
   OctalEscapeStrictMode(pos: Int)
   OctalLiteralStrictMode(pos: Int)
   YieldInGenerator(pos: Int)
@@ -37,6 +40,10 @@ pub type ParseError {
   AwaitInAsyncFunction(pos: Int)
   AwaitInStaticBlock(pos: Int)
   ArgumentsInStaticBlock(pos: Int)
+  ArgumentsInClassFieldInit(pos: Int)
+  PrivateNameConstructor(pos: Int)
+  FieldNamedConstructor(pos: Int)
+  DuplicatePrivateName(name: String, pos: Int)
   EnumReservedWord(pos: Int)
   EscapedReservedWord(name: String, pos: Int)
   DuplicateParameterName(name: String, pos: Int)
@@ -123,6 +130,20 @@ pub type ParseError {
   ImportNotTopLevel(pos: Int)
   ExportNotTopLevel(pos: Int)
   UnicodeEscapeInMetaProperty(pos: Int)
+  /// `using`/`await using` at the top level of a Script (or eval) — early
+  /// error: a UsingDeclaration with goal Script must be contained within a
+  /// Block, ForStatement, ForInOfStatement, FunctionBody, etc.
+  UsingAtScriptTopLevel(pos: Int)
+  /// `using`/`await using` directly within a CaseClause/DefaultClause
+  /// statement list.
+  UsingInCaseClause(pos: Int)
+  /// `using x;` — using declarations require an initializer.
+  UsingMissingInitializer(pos: Int)
+  /// `for (using x in obj)` — using declarations are not allowed in for-in.
+  UsingInForIn(pos: Int)
+  /// `using [a] = …` / `using {a} = …` — using declarations may only bind
+  /// identifiers, never destructuring patterns.
+  UsingPatternBinding(pos: Int)
 }
 
 pub fn parse_error_to_string(error: ParseError) -> String {
@@ -156,6 +177,11 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     DeleteUnqualifiedStrictMode(_) ->
       "Cannot delete unqualified identifier in strict mode"
     DeletePrivateName(_) -> "Private fields cannot be deleted"
+    UndeclaredPrivateName(name, _) ->
+      "Private field '" <> name <> "' must be declared in an enclosing class"
+    SuperPrivateName(_) ->
+      "Unexpected private field: private members are not accessible on super"
+    PrivateNameAsPropertyKey(_) -> "Private names are not valid property keys"
     OctalEscapeStrictMode(_) ->
       "Octal escape sequences are not allowed in strict mode"
     OctalLiteralStrictMode(_) -> "Octal literals are not allowed in strict mode"
@@ -166,6 +192,13 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     AwaitInStaticBlock(_) -> "'await' is not allowed in class static block"
     ArgumentsInStaticBlock(_) ->
       "'arguments' is not allowed in class static block"
+    ArgumentsInClassFieldInit(_) ->
+      "'arguments' is not allowed in class field initializer"
+    PrivateNameConstructor(_) ->
+      "Class may not have a private element named '#constructor'"
+    FieldNamedConstructor(_) ->
+      "Classes may not have a field named 'constructor'"
+    DuplicatePrivateName(name:, ..) -> "Duplicate private name '" <> name <> "'"
     EnumReservedWord(_) -> "'enum' is a reserved word"
     EscapedReservedWord(name:, ..) ->
       "Keyword '" <> name <> "' must not contain escape sequences"
@@ -301,6 +334,15 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "'export' declarations may only appear at top level of a module"
     UnicodeEscapeInMetaProperty(_) ->
       "'target' in new.target must not contain unicode escape sequences"
+    UsingAtScriptTopLevel(_) ->
+      "'using' declarations are not allowed at the top level of a script"
+    UsingInCaseClause(_) ->
+      "'using' declarations are not allowed directly within a case or default clause"
+    UsingMissingInitializer(_) -> "Missing initializer in using declaration"
+    UsingInForIn(_) ->
+      "'using' declarations are not allowed in for-in statements"
+    UsingPatternBinding(_) ->
+      "'using' declarations may only declare identifier bindings"
   }
 }
 
@@ -332,6 +374,9 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | WithNotAllowedStrictMode(pos:)
     | DeleteUnqualifiedStrictMode(pos:)
     | DeletePrivateName(pos:)
+    | UndeclaredPrivateName(pos:, ..)
+    | SuperPrivateName(pos:)
+    | PrivateNameAsPropertyKey(pos:)
     | OctalEscapeStrictMode(pos:)
     | OctalLiteralStrictMode(pos:)
     | YieldInGenerator(pos:)
@@ -339,6 +384,10 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | AwaitInAsyncFunction(pos:)
     | AwaitInStaticBlock(pos:)
     | ArgumentsInStaticBlock(pos:)
+    | ArgumentsInClassFieldInit(pos:)
+    | PrivateNameConstructor(pos:)
+    | FieldNamedConstructor(pos:)
+    | DuplicatePrivateName(pos:, ..)
     | EnumReservedWord(pos:)
     | DuplicateParameterName(pos:, ..)
     | DuplicateBindingLexical(pos:, ..)
@@ -378,6 +427,11 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | ClassConstructorAsync(pos:)
     | ClassDuplicateConstructor(pos:)
     | StaticPrototype(pos:)
+    | UsingAtScriptTopLevel(pos:)
+    | UsingInCaseClause(pos:)
+    | UsingMissingInitializer(pos:)
+    | UsingInForIn(pos:)
+    | UsingPatternBinding(pos:)
     | LexicalDeclInLabel(pos:)
     | GeneratorDeclLabeled(pos:)
     | InvalidDestructuringTarget(pos:)

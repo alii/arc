@@ -14,6 +14,7 @@ pub fn init(
   h: Heap(ctx),
   async_iterator_proto: Ref,
   function_proto: Ref,
+  function_ctor: Ref,
 ) -> #(Heap(ctx), GeneratorBuiltin) {
   let #(h, methods) =
     common.alloc_call_methods(h, function_proto, [
@@ -24,5 +25,16 @@ pub fn init(
 
   let #(h, proto) =
     common.init_namespace(h, async_iterator_proto, "AsyncGenerator", methods)
-  #(h, GeneratorBuiltin(prototype: proto))
+  // §27.4: %AsyncGeneratorFunction% + its .prototype (the [[Prototype]] of
+  // async generator function objects).
+  let #(h, fn_proto) =
+    common.init_generator_function(
+      h,
+      "AsyncGeneratorFunction",
+      value.VmNative(value.AsyncGeneratorFunctionConstructor),
+      function_proto,
+      function_ctor,
+      proto,
+    )
+  #(h, GeneratorBuiltin(prototype: proto, fn_proto:))
 }

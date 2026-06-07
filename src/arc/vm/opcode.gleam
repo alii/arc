@@ -141,7 +141,10 @@ pub type OpKey {
 /// Called once per opcode in resolve.gleam, never at runtime.
 pub fn make_key(s: String) -> OpKey {
   case int.parse(s) {
-    Ok(n) if n >= 0 ->
+    // Same [0, 2^32-1) array-index range cap as value.canonical_key — keep
+    // the two canonicalizers in lockstep or compile-time and runtime keys
+    // for the same string would land in different dict slots.
+    Ok(n) if n >= 0 && n <= 4_294_967_294 ->
       case int.to_string(n) == s {
         True -> OpIndex(n)
         False -> OpNamed(s)
@@ -185,6 +188,14 @@ pub type Op {
   Pop
   Dup
   Swap
+  /// [a, b, c, ..] → [c, a, b, ..] — bring the 3rd element to the top.
+  /// QuickJS OP_rot3l. Used for destructuring-assignment stack choreography
+  /// where a member target's base+key are evaluated before the iterator step.
+  Rot3
+  /// [a, b, c, d, ..] → [b, c, d, a, ..] — bury the top element under the
+  /// next three. QuickJS OP_insert4 inverse-ish; pairs with Rot3 to restore
+  /// the [iter, ..] loop invariant after PutElem operands are arranged.
+  Unrot4
 
   // -- Variable Access (resolved) --
   GetLocal(index: Int)
@@ -207,6 +218,63 @@ pub type Op {
   DeclareEvalVar(name: String)
   /// `typeof name` — check eval_env first, fall through to TypeofGlobal.
   TypeofEvalVar(name: String)
+
+  // -- `with` statement (§14.11) object-environment access --
+  /// §7.1.18 ToObject on the stack top. TypeError on null/undefined.
+  /// Emitted for the `with (expr)` head.
+  ToObject
+  /// §7.1.17 ToString on the stack top (ToPrimitive with string hint, so
+  /// toString is tried before valueOf). Emitted for template literal
+  /// substitutions (§13.2.8.5), which must not use the Add operator's
+  /// default-hint coercion.
+  ToStringVal
+  /// §13.2.8.4 GetTemplateObject — push the cached template object for this
+  /// tagged-template call site, creating + caching it on first evaluation.
+  /// `site` is a globally unique id baked in at compile time, so each parse
+  /// of the same source (e.g. repeated eval) gets distinct template objects
+  /// while re-execution of the same compiled site reuses one. `cooked` holds
+  /// the template values (None → undefined for invalid escape sequences),
+  /// `raw` the verbatim quasi text.
+  GetTemplateObject(site: Int, cooked: List(Option(String)), raw: List(String))
+  /// §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against the with
+  /// object. Stack: [obj, ..] — if obj has `name` (and it is not blocked by
+  /// @@unscopables), replace obj with Get(obj, name) and jump to `target`;
+  /// otherwise pop obj and fall through. Mirrors QuickJS OP_with_get_var.
+  WithGetVar(name: String, target: Int)
+  /// Like WithGetVar, but KEEPS the with object beneath the value:
+  /// [obj, ..] → [value, obj, ..] on hit. Used for `f()` where the callee
+  /// identifier resolves through a with object — §13.3.6.2 EvaluateCall
+  /// step 1.b.ii: thisValue is the env record's WithBaseObject(), i.e. the
+  /// with object itself. The pair feeds CallMethod (this = receiver).
+  /// Mirrors QuickJS OP_with_get_ref.
+  WithGetVarThis(name: String, target: Int)
+  /// §9.1.1.2.5 SetMutableBinding against the with object. Stack:
+  /// [obj, value, ..] — if obj has `name` (unscopables-checked), perform
+  /// Set(obj, name, value, false), pop both, jump to `target`; otherwise pop
+  /// obj only and fall through. Mirrors QuickJS OP_with_put_var.
+  WithPutVar(name: String, target: Int)
+  /// §9.1.1.2.7 DeleteBinding against the with object. Stack: [obj, ..] — if
+  /// obj has `name` (unscopables-checked), replace obj with the boolean
+  /// result of [[Delete]] and jump to `target`; otherwise pop obj and fall
+  /// through. Mirrors QuickJS OP_with_delete_var.
+  WithDeleteVar(name: String, target: Int)
+  /// §9.1.2.1 GetIdentifierReference at a with object: HasBinding
+  /// (unscopables-checked). Stack: [obj, ..] — if bound, KEEP obj (it
+  /// becomes the reference base) and jump to `target`; otherwise pop obj
+  /// and fall through. Mirrors QuickJS OP_with_make_ref.
+  WithMakeRef(name: String, target: Int)
+  /// §9.1.1.2.6 GetBindingValue on a previously made reference base.
+  /// Stack: [base, ..] — if base is an object, replace it with Get(base,
+  /// name) (HasProperty re-check; sloppy reads undefined, strict throws
+  /// ReferenceError when gone) and jump to `target`. If base is the
+  /// undefined sentinel ("static binding"), pop it and fall through.
+  WithGetRefValue(name: String, target: Int)
+  /// §9.1.1.2.5 SetMutableBinding on a previously made reference base.
+  /// Stack: [base, value, ..] — if base is an object, Set(base, name,
+  /// value) (stillExists re-check, strict ReferenceError when gone), pop
+  /// both, jump to `target`. If base is the undefined sentinel, pop it and
+  /// fall through to the static store.
+  WithPutRefValue(name: String, target: Int)
 
   // -- Property Access --
   GetField(key: OpKey)
@@ -233,14 +301,65 @@ pub type Op {
   /// on the stack — unlike BinOp(In) which pops two operands.
   PrivateIn(key: OpKey)
 
+  // -- Spec-shaped PrivateName ops (per-class-evaluation unique names) --
+  /// §15.7.14 ClassDefinitionEvaluation step 5/6: mint a fresh PrivateName for
+  /// `name` ("#m"). Pushes a JsString carrying the unique storage-key text
+  /// ("\u{0}#m\u{0}<uid>" — see value.mint_private_key). The emitter binds it
+  /// to a class-scope const named after the source text ("#m"), so nested
+  /// classes shadow and closures capture exactly like the spec's
+  /// PrivateEnvironment chain.
+  NewPrivateName(name: String)
+  /// §7.3.30 PrivateGet with the PrivateName on the stack.
+  /// Stack: [key, obj, ..] → [val, ..]. TypeError if obj is not a JsObject,
+  /// lacks the OWN private element (no prototype walk — spec
+  /// [[PrivateElements]] are own-only), or the element is an accessor
+  /// without a getter.
+  GetPrivateFieldDyn
+  /// Like GetPrivateFieldDyn but keeps obj: [key, obj, ..] → [val, obj, ..].
+  /// Used for `obj.#m(args)` method calls (mirrors GetField2).
+  GetPrivateFieldDyn2
+  /// §7.3.31 PrivateSet with the PrivateName on the stack.
+  /// Stack: [key, val, obj, ..] → [val, ..]. TypeError if obj is not a
+  /// JsObject, lacks the own element, the element is a method
+  /// (non-writable), or an accessor without a setter.
+  PutPrivateFieldDyn
+  /// §13.10.1 `#x in obj` with the PrivateName on the stack.
+  /// Stack: [key, obj, ..] → [JsBool, ..]. Own-only check.
+  PrivateInDyn
+  /// §7.3.28 PrivateFieldAdd. Stack: [val, key, obj, ..] → [obj, ..].
+  /// TypeError if obj is non-extensible (proposal
+  /// nonextensible-applies-to-private) or already has the element
+  /// (return-override double initialization).
+  DefinePrivateField
+  /// §7.3.29 PrivateMethodOrAccessorAdd for a method.
+  /// Stack: [fn, key, obj, ..] → [obj, ..]. Same TypeErrors as
+  /// DefinePrivateField. Does NOT touch fn.[[HomeObject]] — private method
+  /// closures are created once at class-definition time with
+  /// [[HomeObject]] = ctor.prototype (or ctor for statics).
+  DefinePrivateMethod
+  /// §7.3.29 for one accessor half. Stack: [fn, key, obj, ..] → [obj, ..].
+  /// Merges into an existing own accessor entry only if that half is absent
+  /// (get+set pair from one class evaluation); TypeError if the half is
+  /// already present (double initialization) or obj is non-extensible.
+  DefinePrivateAccessor(kind: AccessorKind)
+
   // -- Object/Array Construction --
   NewObject
   DefineField(key: OpKey)
   DefineFieldComputed
+  /// §7.1.19 ToPropertyKey. Stack: [key, ..] → [key', ..]. Runs
+  /// ToPrimitive(key, string); Symbols pass through, everything else is
+  /// ToString'd. Emitted at class-definition time for computed field names
+  /// (§15.7.14 ClassFieldDefinitionEvaluation step 1) so name side effects
+  /// and abrupt completions happen ONCE, not per instantiation.
+  ToPropertyKey
   DefineMethod(key: OpKey)
   DefineMethodComputed
-  DefineAccessor(key: OpKey, kind: AccessorKind)
-  DefineAccessorComputed(kind: AccessorKind)
+  /// `enumerable`: True for object-literal accessors (§13.2.5.5
+  /// PropertyDefinitionEvaluation passes enumerable=true), False for class
+  /// methods (§15.4.5 MethodDefinitionEvaluation passes enumerable=false).
+  DefineAccessor(key: OpKey, kind: AccessorKind, enumerable: Bool)
+  DefineAccessorComputed(kind: AccessorKind, enumerable: Bool)
   /// §15.4.4 MakeMethod — peek [fn, obj, ...], set fn.[[HomeObject]] = obj.
   /// Stack-neutral. Emitted for object-literal shorthand methods so super.x
   /// works; not for `{m: fn}` (no HomeObject per spec).
@@ -279,7 +398,35 @@ pub type Op {
   /// named "eval"). At runtime, if the callee resolves to the intrinsic eval
   /// function, performs a DIRECT eval (sees caller's local scope via boxed
   /// locals + FuncTemplate.local_names). Otherwise behaves identically to Call.
-  CallEval(arity: Int)
+  ///
+  /// `param_scope_names` is non-empty only when this eval call site sits
+  /// inside a formal-parameter initializer: it lists the parameter-scope
+  /// binding names (parameters, plus the implicit `arguments` for
+  /// non-arrows). §19.2.1.1/§9.3.4 EvalDeclarationInstantiation step 3.d:
+  /// sloppy direct eval must throw a SyntaxError when a var-declared name
+  /// in the eval code collides with a binding in any environment between
+  /// the eval's LexicalEnvironment and its VariableEnvironment — for a
+  /// parameter initializer that is exactly the parameter scope.
+  ///
+  /// `with_names` lists the synthetic with-object locals (innermost first)
+  /// for the `with` statements lexically enclosing this eval call site —
+  /// including withs inherited from enclosing functions. Direct eval
+  /// compiles its code with these as object-environment markers so free
+  /// names in the eval'd source check the with objects first (§9.1.2.1
+  /// GetIdentifierReference walks the caller's LexicalEnvironment).
+  ///
+  /// `private_names` lists the private names ("#x") visible at this eval
+  /// call site — the caller's [[PrivateEnvironment]] chain. §19.2.1.1
+  /// PerformEval step 5: direct eval code is parsed with the caller's
+  /// private environment, so `this.#x` in the eval'd source is a
+  /// SyntaxError unless "#x" is in this list (or declared by a class in
+  /// the eval source itself).
+  CallEval(
+    arity: Int,
+    param_scope_names: List(String),
+    with_names: List(String),
+    private_names: List(String),
+  )
   CallMethod(name: String, arity: Int)
   /// `new ctor(args)` and `super(args)`. Stack:
   /// [arg_n, ..., arg_1, new_target, ctor, ..] → [instance, ..].
@@ -345,6 +492,11 @@ pub type Op {
   ForInNext
   GetIterator
   GetAsyncIterator
+  /// GetIteratorFromMethod step 4 (§7.4.4): pop an iterator object, Get its
+  /// `next` (observable, abrupt propagates), push an internal Iterator Record
+  /// caching it. Emitted after GetAsyncIterator for async yield* so the loop
+  /// reuses [[NextMethod]] instead of re-Getting `next` each step.
+  IteratorRecord
   IteratorNext
   /// §7.4.11 normal-completion close. Stack: [iter, ..] → [..]. Get .return;
   /// undef/null → no-op; call it; throw → propagate; non-object → TypeError.
@@ -419,7 +571,11 @@ pub type Op {
   // -- Arguments object --
   /// Create an arguments object from the current call's original args.
   /// Reads state.call_args, allocates ArgumentsObject, pushes ref onto stack.
-  CreateArguments
+  /// `simple_params` is §10.2.11 step 20's "simpleParameterList": False when
+  /// the function has a default, destructuring pattern, or rest parameter —
+  /// such functions get an UNMAPPED arguments object whose "callee" is the
+  /// %ThrowTypeError% accessor even in sloppy mode (§10.4.4.6).
+  CreateArguments(simple_params: Bool)
 
   /// Create a rest-parameter array from the current call's args, taking those
   /// at index `from_index` and beyond. Reads state.call_args, allocates a plain
@@ -430,6 +586,20 @@ pub type Op {
   /// Pop flags string, pop pattern string -> push new RegExp object.
   NewRegExp
 
+  // -- Dynamic import --
+  /// §13.3.10 ImportCall: pop options, pop specifier -> push a new promise.
+  /// ToString/options failures reject the promise (IfAbruptRejectPromise);
+  /// loading is delegated to the host import hook on the global object.
+  DynamicImport
+  /// `import.source(specifier)`: pop specifier -> push a new promise.
+  /// Source Text Module Records have no source phase representation
+  /// (GetModuleSource throws), so a coercible specifier rejects with
+  /// SyntaxError.
+  DynamicImportSource
+  /// `import.defer(specifier)`: pop specifier -> push a new promise.
+  /// Evaluation deferral is not implemented — behaves as `import(specifier)`.
+  DynamicImportDefer
+
   // -- Global Environment Record --
   /// §9.1.1.4.17: Create writable/enumerable/configurable property on globalThis (if not already there).
   DeclareGlobalVar(name: String)
@@ -437,6 +607,16 @@ pub type Op {
   DeclareGlobalLex(name: String, is_const: Bool)
   /// Pop value from stack, initialize lexical binding (TDZ → value).
   InitGlobalLex(name: String)
+
+  // -- Explicit Resource Management (using / await using desugar) --
+  /// CreateDisposableResource(V, hint): pop the resource value; push a
+  /// 0-arity disposer callable (calls the captured @@dispose/@@asyncDispose
+  /// method with the resource as `this`), or undefined when the value is
+  /// null/undefined. Throws TypeError for non-disposable values.
+  GetDisposer(is_async: Bool)
+  /// DisposeResources error folding: pop suppressed, pop error; push a new
+  /// SuppressedError with .error = error and .suppressed = suppressed.
+  MakeSuppressed
 }
 
 pub type AccessorKind {
@@ -496,6 +676,12 @@ pub type UnaryOpKind {
 pub type IrOp {
   // -- Scope-aware variable access (resolved in Phase 2) --
   IrScopeGetVar(name: String)
+  /// Like IrScopeGetVar but ALSO pushes the call receiver beneath the value:
+  /// [value, this, ..]. `this` is the matched with object when the name
+  /// resolves through a `with` marker (§13.3.6.2 EvaluateCall step 1.b.ii),
+  /// undefined otherwise. Emitted for `f(args)` callee identifiers inside
+  /// `with` bodies; the pair feeds IrCallMethod.
+  IrScopeGetVarThis(name: String)
   IrScopePutVar(name: String)
   /// Initialization of a let/const binding (not reassignment). Lowers like
   /// IrScopePutVar but is never const-checked. Mirrors QuickJS
@@ -503,6 +689,23 @@ pub type IrOp {
   IrScopeInitVar(name: String)
   IrScopeTypeofVar(name: String)
   IrScopeReboxVar(name: String)
+  /// `delete Identifier` (sloppy mode only). Phase 2 emits the enclosing
+  /// `with`-object checks (IrWithDeleteVar chain) and a `true` fallback.
+  IrScopeDeleteVar(name: String)
+  /// §13.15.2 step 1a / §13.4: ResolveBinding for an assignment / update /
+  /// compound-assignment target, BEFORE the RHS runs. When the resolution
+  /// crosses `with` markers, Phase 2 emits a WithMakeRef chain that stores
+  /// the matched with object (or undefined = "static binding") in a scratch
+  /// local; the paired IrScopeGetRef/IrScopePutRef then use that base so
+  /// PutValue targets the ORIGINAL reference even if the with object's
+  /// property set changed in between. No-op when no with is crossed.
+  /// Mirrors QuickJS OP_scope_make_ref / OP_with_make_ref.
+  IrScopeMakeRef(name: String)
+  /// GetValue on the reference made by the innermost active IrScopeMakeRef.
+  IrScopeGetRef(name: String)
+  /// PutValue on the reference made by the innermost active IrScopeMakeRef.
+  /// Pops the value; closes the ref (frees the scratch local).
+  IrScopePutRef(name: String)
   /// Read a lexical pseudo-binding (this/active_func/new.target). Phase 2
   /// lowers to GetLocal/GetBoxed against the slot allocated by
   /// `DeclareLexical(ref)` (owned) or the capture slot threaded in for
@@ -533,6 +736,25 @@ pub type IrOp {
   IrDeclareEvalVar(name: String)
   IrTypeofEvalVar(name: String)
 
+  // -- `with` statement ops (object check emitted by Phase 2; labels
+  // resolved in Phase 3) --
+  IrToObject
+  /// Lowers 1:1 to ToStringVal (template literal substitutions).
+  IrToStringVal
+  /// Lowers 1:1 to GetTemplateObject (tagged templates, §13.2.8.4).
+  IrGetTemplateObject(
+    site: Int,
+    cooked: List(Option(String)),
+    raw: List(String),
+  )
+  IrWithGetVar(name: String, label: Int)
+  IrWithGetVarThis(name: String, label: Int)
+  IrWithPutVar(name: String, label: Int)
+  IrWithDeleteVar(name: String, label: Int)
+  IrWithMakeRef(name: String, label: Int)
+  IrWithGetRefValue(name: String, label: Int)
+  IrWithPutRefValue(name: String, label: Int)
+
   // -- Everything else is the same as final Op --
   /// Lowers 1:1 to SetLine. See Op.SetLine.
   IrSetLine(line: Int)
@@ -540,6 +762,10 @@ pub type IrOp {
   IrPop
   IrDup
   IrSwap
+  /// Lowers 1:1 to Rot3. See Op.Rot3.
+  IrRot3
+  /// Lowers 1:1 to Unrot4. See Op.Unrot4.
+  IrUnrot4
   IrGetField(name: String)
   IrGetField2(name: String)
   IrPutField(name: String)
@@ -552,13 +778,22 @@ pub type IrOp {
   IrGetPrivateField2(name: String)
   IrPutPrivateField(name: String)
   IrPrivateIn(name: String)
+  IrNewPrivateName(name: String)
+  IrGetPrivateFieldDyn
+  IrGetPrivateFieldDyn2
+  IrPutPrivateFieldDyn
+  IrPrivateInDyn
+  IrDefinePrivateField
+  IrDefinePrivateMethod
+  IrDefinePrivateAccessor(kind: AccessorKind)
   IrNewObject
   IrDefineField(name: String)
   IrDefineFieldComputed
+  IrToPropertyKey
   IrDefineMethod(name: String)
   IrDefineMethodComputed
-  IrDefineAccessor(name: String, kind: AccessorKind)
-  IrDefineAccessorComputed(kind: AccessorKind)
+  IrDefineAccessor(name: String, kind: AccessorKind, enumerable: Bool)
+  IrDefineAccessorComputed(kind: AccessorKind, enumerable: Bool)
   IrMakeMethod
   IrSetProto
   IrObjectSpread
@@ -569,7 +804,12 @@ pub type IrOp {
   IrArrayPushHole
   IrArraySpread
   IrCall(arity: Int)
-  IrCallEval(arity: Int)
+  IrCallEval(
+    arity: Int,
+    param_scope_names: List(String),
+    with_names: List(String),
+    private_names: List(String),
+  )
   IrCallMethod(name: String, arity: Int)
   IrCallConstructor(arity: Int)
   IrCallApply
@@ -592,6 +832,7 @@ pub type IrOp {
   IrForInNext
   IrGetIterator
   IrGetAsyncIterator
+  IrIteratorRecord
   IrIteratorNext
   IrIteratorClose
   IrIteratorCloseThrow
@@ -608,12 +849,19 @@ pub type IrOp {
   IrAsyncYieldStarNext
   IrAsyncYieldStarResume(next_label: Int)
   IrAwait
-  IrCreateArguments
+  IrCreateArguments(simple_params: Bool)
   IrCreateRestArray(from_index: Int)
   IrNewRegExp
+  IrDynamicImport
+  IrDynamicImportSource
+  IrDynamicImportDefer
 
   // -- Global Environment Record --
   IrDeclareGlobalVar(name: String)
   IrDeclareGlobalLex(name: String, is_const: Bool)
   IrInitGlobalLex(name: String)
+
+  // -- Explicit Resource Management (using / await using desugar) --
+  IrGetDisposer(is_async: Bool)
+  IrMakeSuppressed
 }

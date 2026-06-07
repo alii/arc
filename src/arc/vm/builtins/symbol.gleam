@@ -5,21 +5,30 @@
 /// are exposed as static properties on the Symbol function object.
 import arc/vm/builtins/common
 import arc/vm/heap.{type Heap}
+import arc/vm/internal/elements
 import arc/vm/value.{
-  type JsValue, type Ref, JsObject, JsString, JsSymbol, SymbolConstructor,
-  SymbolFor, SymbolKeyFor,
+  type JsValue, type Ref, JsObject, JsString, JsSymbol, ObjectSlot,
+  SymbolConstructor, SymbolDescriptionGetter, SymbolFor, SymbolKeyFor,
+  SymbolPrototypeToPrimitive, SymbolPrototypeToString, SymbolPrototypeValueOf,
 }
 import gleam/dict
-import gleam/option
+import gleam/option.{None, Some}
 import gleam/result
 
-/// Set up Symbol constructor function with well-known symbol properties.
-/// Returns #(heap, constructor_ref).
+/// Set up the Symbol constructor (with well-known symbol properties) and a
+/// dedicated %Symbol.prototype% (§20.4.3) carrying toString/valueOf, the
+/// `description` getter, @@toPrimitive and @@toStringTag.
+/// Returns #(heap, constructor_ref, prototype_ref).
 pub fn init(
   h: Heap(ctx),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap(ctx), Ref) {
+) -> #(Heap(ctx), Ref, Ref) {
+  // Reserve the prototype ref first: the constructor's `prototype` property
+  // and the prototype's `constructor` property point at each other.
+  let #(h, proto_ref) = heap.reserve(h)
+  let h = heap.root(h, proto_ref)
+
   // Allocate Symbol.for and Symbol.keyFor static method function objects
   let #(h, for_ref) =
     common.alloc_call_fn(
@@ -52,7 +61,7 @@ pub fn init(
       props: [
         #("name", common.fn_name_property("Symbol")),
         #("length", common.fn_length_property(0)),
-        #("prototype", value.data(JsObject(object_proto))),
+        #("prototype", value.data(JsObject(proto_ref))),
         #("for", value.builtin_property(JsObject(for_ref))),
         #("keyFor", value.builtin_property(JsObject(key_for_ref))),
         // Well-known symbol properties
@@ -78,7 +87,80 @@ pub fn init(
     )
   let h = heap.root(h, ctor_ref)
 
-  #(h, ctor_ref)
+  // %Symbol.prototype% methods (§20.4.3).
+  let #(h, to_string_ref) =
+    common.alloc_call_fn(
+      h,
+      function_proto,
+      SymbolPrototypeToString,
+      "toString",
+      0,
+      constructible: False,
+    )
+  let #(h, value_of_ref) =
+    common.alloc_call_fn(
+      h,
+      function_proto,
+      SymbolPrototypeValueOf,
+      "valueOf",
+      0,
+      constructible: False,
+    )
+  // §20.4.3.5: @@toPrimitive { writable: false, enumerable: false,
+  // configurable: true }, name "[Symbol.toPrimitive]", length 1.
+  let #(h, to_primitive_ref) =
+    common.alloc_call_fn(
+      h,
+      function_proto,
+      SymbolPrototypeToPrimitive,
+      "[Symbol.toPrimitive]",
+      1,
+      constructible: False,
+    )
+  // §20.4.3.2: get-only accessor `description`.
+  let #(h, description_get_ref) =
+    common.alloc_call_fn(
+      h,
+      function_proto,
+      SymbolDescriptionGetter,
+      "get description",
+      0,
+      constructible: False,
+    )
+  let h =
+    heap.fill(
+      h,
+      proto_ref,
+      ObjectSlot(
+        kind: value.OrdinaryObject,
+        properties: common.named_props([
+          #("constructor", value.builtin_property(JsObject(ctor_ref))),
+          #("toString", value.builtin_property(JsObject(to_string_ref))),
+          #("valueOf", value.builtin_property(JsObject(value_of_ref))),
+          #(
+            "description",
+            value.AccessorProperty(
+              get: Some(JsObject(description_get_ref)),
+              set: None,
+              enumerable: False,
+              configurable: True,
+            ),
+          ),
+        ]),
+        elements: elements.new(),
+        prototype: Some(object_proto),
+        symbol_properties: [
+          common.to_string_tag("Symbol"),
+          #(
+            value.symbol_to_primitive,
+            value.data(JsObject(to_primitive_ref)) |> value.configurable(),
+          ),
+        ],
+        extensible: True,
+      ),
+    )
+
+  #(h, ctor_ref, proto_ref)
 }
 
 @external(erlang, "erlang", "make_ref")

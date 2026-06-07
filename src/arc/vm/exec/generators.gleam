@@ -6,7 +6,7 @@ import arc/vm/completion.{
 }
 import arc/vm/heap
 import arc/vm/internal/tuple_array
-import arc/vm/opcode.{type Op, Gosub, YieldStar}
+import arc/vm/opcode.{type Op, Gosub, IteratorCloseThrow, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
   type Heap, type HeapSlot, type State, type StepResult, type TryFrame, State,
@@ -107,6 +107,7 @@ pub fn call_native_generator_return(
   args: List(JsValue),
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
+  unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   let return_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
@@ -154,6 +155,7 @@ pub fn call_native_generator_return(
                     return_val,
                     rest_stack,
                     execute_inner,
+                    unwind_to_catch,
                   )
                 },
               )
@@ -164,6 +166,7 @@ pub fn call_native_generator_return(
                 return_val,
                 rest_stack,
                 execute_inner,
+                unwind_to_catch,
               )
           }
       }
@@ -181,6 +184,7 @@ fn do_return_resume(
   return_val: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
+  unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
   let gen_exec_state =
     build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
@@ -191,6 +195,7 @@ fn do_return_resume(
     return_val,
     rest_stack,
     execute_inner,
+    unwind_to_catch,
   )
 }
 
@@ -609,22 +614,37 @@ fn run_to_completion(
   }
 }
 
-/// Walk the try_stack, skipping catch-only / for-of entries, looking for the
-/// first try/finally handler. Since the gosub/ret rewrite (wave 3) the throw
-/// entry of a try/finally is `Gosub(fin_label); Throw`, so a finally-owning
-/// frame is identified by `Gosub` at its catch_target. Returns
-/// Some(#(fin_label, stack_depth, remaining_try_stack)) or None.
-fn find_next_finally(
+/// A try frame that a return completion must run code for while unwinding:
+/// either a try/finally body, or an iterator-guarding frame (for-of loop /
+/// array-destructuring scaffold) whose iterator must be closed (§7.4.9).
+type ReturnHandler {
+  /// try/finally: enter the finally subroutine at `fin_label`.
+  FinallyHandler(fin_label: Int, stack_depth: Int, rest: List(TryFrame))
+  /// for-of / array-destructuring close guard: the value at the recorded
+  /// stack depth is the live iterator — call its `return` method.
+  IterCloseHandler(stack_depth: Int, rest: List(TryFrame))
+}
+
+/// Walk the try_stack, skipping catch-only entries, looking for the first
+/// frame a return completion must visit. Since the gosub/ret rewrite (wave 3)
+/// the throw entry of a try/finally is `Gosub(fin_label); Throw`, so a
+/// finally-owning frame is identified by `Gosub` at its catch_target.
+/// For-of loops and array-destructuring scaffolds place `IteratorCloseThrow`
+/// at their catch target with the iterator at the recorded stack depth —
+/// §27.5.3.4 GeneratorResumeAbrupt: a return completion propagating out of a
+/// yield must IteratorClose those iterators too, not only run finallys.
+fn find_next_return_handler(
   code: tuple_array.TupleArray(Op),
   try_stack: List(TryFrame),
-) -> Option(#(Int, Int, List(TryFrame))) {
+) -> Option(ReturnHandler) {
   case try_stack {
     [] -> None
     [TryFrame(catch_target:, stack_depth:), ..rest] ->
       // catch_target is a compiler-resolved label PC — always in bounds.
       case tuple_array.unsafe_get(catch_target, code) {
-        Gosub(fin_label) -> Some(#(fin_label, stack_depth, rest))
-        _ -> find_next_finally(code, rest)
+        Gosub(fin_label) -> Some(FinallyHandler(fin_label, stack_depth, rest))
+        IteratorCloseThrow -> Some(IterCloseHandler(stack_depth, rest))
+        _ -> find_next_return_handler(code, rest)
       }
   }
 }
@@ -641,8 +661,9 @@ fn process_generator_return(
   return_val: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn,
+  unwind_to_catch: UnwindToCatchFn,
 ) -> Result(State, #(StepResult, JsValue, State)) {
-  case find_next_finally(gen_state.code, gen_state.try_stack) {
+  case find_next_return_handler(gen_state.code, gen_state.try_stack) {
     None -> {
       // No more finally blocks. Mark completed and return {value, done: true}.
       let h =
@@ -667,7 +688,75 @@ fn process_generator_return(
         ),
       )
     }
-    Some(#(fin_label, stack_depth, remaining_try)) -> {
+    // §7.4.9 IteratorClose with a return completion: a for-of loop or
+    // array-destructuring scaffold suspended at a yield has its live
+    // iterator at the frame's recorded stack depth. Call its `return`
+    // method, then keep unwinding. Errors raised by the close (getter
+    // throw, call throw, non-object result) replace the return completion
+    // with a throw completion that unwinds through the REMAINING frames
+    // (catchable by the generator's own try/catch).
+    Some(IterCloseHandler(stack_depth, remaining_try)) -> {
+      let restored_stack = truncate_stack(gen_state.stack, stack_depth)
+      case restored_stack {
+        [JsObject(slot_ref), ..base] -> {
+          let st = State(..gen_state, try_stack: remaining_try, stack: base)
+          // GetIterator slots may hold an internal IteratorRecordObject
+          // wrapper (cached `next`) — close the REAL iterator behind it.
+          let iter = case heap.read(st.heap, slot_ref) {
+            Some(ObjectSlot(kind: value.IteratorRecordObject(iterated:, ..), ..)) ->
+              iterated
+            _ -> JsObject(slot_ref)
+          }
+          case iter {
+            JsObject(iter_ref) ->
+              close_for_return(
+                st,
+                iter_ref,
+                outer_state,
+                gen,
+                return_val,
+                rest_stack,
+                execute_inner,
+                unwind_to_catch,
+              )
+            // Not an object (defensive) — nothing to close.
+            _ ->
+              process_generator_return(
+                st,
+                outer_state,
+                gen,
+                return_val,
+                rest_stack,
+                execute_inner,
+                unwind_to_catch,
+              )
+          }
+        }
+        // Slot is not a live iterator (for-of's [[Done]] sentinel writes
+        // undefined into it) — nothing to close, keep unwinding.
+        [_, ..base] ->
+          process_generator_return(
+            State(..gen_state, try_stack: remaining_try, stack: base),
+            outer_state,
+            gen,
+            return_val,
+            rest_stack,
+            execute_inner,
+            unwind_to_catch,
+          )
+        [] ->
+          process_generator_return(
+            State(..gen_state, try_stack: remaining_try, stack: []),
+            outer_state,
+            gen,
+            return_val,
+            rest_stack,
+            execute_inner,
+            unwind_to_catch,
+          )
+      }
+    }
+    Some(FinallyHandler(fin_label, stack_depth, remaining_try)) -> {
       // Found a finally handler. Enter the finally subroutine directly with
       // the gosub calling convention: stack = [retpc, slot, ..base]. The slot
       // is the return value; retpc = -1 is a sentinel that Ret recognises as
@@ -699,6 +788,7 @@ fn process_generator_return(
             return_val,
             rest_stack,
             execute_inner,
+            unwind_to_catch,
           )
         }
         Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
@@ -761,6 +851,97 @@ fn process_generator_return(
           ))
         }
       }
+    }
+  }
+}
+
+/// §7.4.9 IteratorClose with a return completion: look up the iterator's
+/// `return` method and call it. undefined/null method → keep unwinding the
+/// return; a throw from the getter or the call, or a non-object call result,
+/// replaces the return completion with a throw completion.
+fn close_for_return(
+  st: State,
+  iter_ref: Ref,
+  outer_state: State,
+  gen: GenData,
+  return_val: JsValue,
+  rest_stack: List(JsValue),
+  execute_inner: ExecuteInnerFn,
+  unwind_to_catch: UnwindToCatchFn,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  let iter = JsObject(iter_ref)
+  let continue_return = fn(st: State) {
+    process_generator_return(
+      st,
+      outer_state,
+      gen,
+      return_val,
+      rest_stack,
+      execute_inner,
+      unwind_to_catch,
+    )
+  }
+  let continue_throw = fn(st: State, thrown: JsValue) {
+    process_return_close_throw(
+      st,
+      outer_state,
+      gen,
+      thrown,
+      rest_stack,
+      execute_inner,
+      unwind_to_catch,
+    )
+  }
+  case object_ops.get_value(st, iter_ref, Named("return"), iter) {
+    Ok(#(JsUndefined, st)) | Ok(#(value.JsNull, st)) -> continue_return(st)
+    Ok(#(ret_fn, st)) ->
+      case state.call(st, ret_fn, iter, []) {
+        // §7.4.9 step 9: a non-object result from `return()` is a
+        // TypeError (the return completion is replaced by a throw).
+        Ok(#(JsObject(_), st)) -> continue_return(st)
+        Ok(#(_non_object, st)) -> {
+          let #(err, st) =
+            state.type_error_value(st, "Iterator result is not an object")
+          continue_throw(st, err)
+        }
+        Error(#(thrown, st)) -> continue_throw(st, thrown)
+      }
+    Error(#(thrown, st)) -> continue_throw(st, thrown)
+  }
+}
+
+/// An iterator close ran during return-unwinding and threw (or produced a
+/// non-object result): the return completion is replaced by a throw
+/// completion (§7.4.9 steps 8-9), which unwinds through the generator's
+/// REMAINING try frames — so an enclosing try/catch (or another iterator
+/// close guard) inside the generator can observe it. If nothing catches,
+/// the generator completes and the error propagates to the .return() caller.
+fn process_return_close_throw(
+  gen_state: State,
+  outer_state: State,
+  gen: GenData,
+  thrown: JsValue,
+  rest_stack: List(JsValue),
+  execute_inner: ExecuteInnerFn,
+  unwind_to_catch: UnwindToCatchFn,
+) -> Result(State, #(StepResult, JsValue, State)) {
+  // unwind_to_catch expects the throw site's stack; gen_state.stack is
+  // already truncated to the frame base and try_stack holds the remaining
+  // frames, so the unwind lands on the next handler in spec order.
+  case unwind_to_catch(gen_state, thrown) {
+    Some(caught_state) ->
+      // The generator caught it — continue executing from the handler.
+      run_to_completion(caught_state, outer_state, gen, execute_inner)
+      |> alloc_iter_result(rest_stack)
+    None -> {
+      // No catch handler — mark completed and propagate the throw.
+      let h2 =
+        heap.write(
+          gen_state.heap,
+          gen.data_ref,
+          gen_with_state(gen, value.Completed),
+        )
+      Error(#(Thrown, thrown, State(..outer_state, heap: h2)))
     }
   }
 }

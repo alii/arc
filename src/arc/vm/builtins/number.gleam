@@ -49,6 +49,10 @@ pub fn init(
       value.data(JsNumber(Finite(-9_007_199_254_740_991.0))),
     ),
     #("EPSILON", value.data(JsNumber(Finite(2.220446049250313e-16)))),
+    // §21.1.2.6 Number.MAX_VALUE: largest finite IEEE 754 double.
+    #("MAX_VALUE", value.data(JsNumber(Finite(1.7976931348623157e308)))),
+    // §21.1.2.9 Number.MIN_VALUE: smallest positive denormal double.
+    #("MIN_VALUE", value.data(JsNumber(Finite(5.0e-324)))),
   ]
 
   // Global utility functions (separate refs — these are standalone globals)
@@ -160,12 +164,30 @@ fn call_as_function(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Step 1: If no arguments, n = +0
-  // Step 2: Else, n = ToNumber(value)
-  let result = case args {
-    [] -> JsNumber(Finite(0.0))
-    [val, ..] -> JsNumber(builtins_math.to_number(val))
+  // Step 2: Else, n = ToNumeric(value): ToPrimitive first, and a BigInt
+  // primitive becomes 𝔽(ℝ(prim)) (NumberConstructor step 1.a) — unlike
+  // ToNumber, which throws for BigInt.
+  case args {
+    [] -> #(state, Ok(JsNumber(Finite(0.0))))
+    [val, ..] ->
+      case coerce.to_primitive(state, val, coerce.NumberHint) {
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+        Ok(#(value.JsBigInt(value.BigInt(n)), state)) -> #(
+          state,
+          Ok(JsNumber(bigint_to_float(n))),
+        )
+        Ok(#(prim, state)) ->
+          case coerce.js_to_number(state, prim) {
+            Ok(#(n, state)) -> #(state, Ok(JsNumber(n)))
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
+      }
   }
-  #(state, Ok(result))
+}
+
+/// 𝔽(ℝ(bigint)) — correctly rounded, with ±Infinity beyond the double range.
+fn bigint_to_float(n: Int) -> JsNum {
+  value.num_from_int(n)
 }
 
 /// parseInt(string, radix) — ES2024 §19.2.5

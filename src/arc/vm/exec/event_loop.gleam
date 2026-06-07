@@ -1,17 +1,22 @@
 // ============================================================================
 // Promise microtask queue draining + handler execution.
 //
-// Core knows nothing about macrotasks. `drain_jobs` flushes the Promise
-// reaction queue to empty and that's it. Embedders that need timers / IO /
-// process messages run their own loop on top — see `arc/beam.run` for the
-// Erlang-mailbox version, built on `host.suspend`/`host.resume`.
+// The only macrotasks core knows about are host timers (the global
+// setTimeout) and Atomics.waitAsync deadlines. `drain_jobs` flushes the
+// Promise reaction queue, fires due timers between flushes, and sleeps
+// until the earliest pending deadline before exiting. Embedders that need
+// IO / process messages run their own loop on top — see `arc/beam.run` for
+// the Erlang-mailbox version, built on `host.suspend`/`host.resume`.
 // ============================================================================
 
+import arc/vm/builtins/atomics as builtins_atomics
+import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/frame
 import arc/vm/heap
 import arc/vm/internal/job_queue
+import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{
   type NativeFnSlot, type State, type StepResult, type VmError, State,
@@ -21,6 +26,7 @@ import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, FunctionObject, JsNull, JsObject,
   JsUndefined, NativeFunction, ObjectSlot,
 }
+import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -55,16 +61,210 @@ fn report_unhandled_rejections(state: State) -> Nil {
 /// Drain all jobs in the job queue, processing any new jobs that get enqueued
 /// during execution. Loops until the queue is empty. When empty, reports any
 /// unhandled promise rejections (like Node.js checking after each microtask flush).
+///
+/// The core loop honors two kinds of deadlines: Atomics.waitAsync timeouts
+/// (each pass settles waiters whose deadline already passed) and host timers
+/// from the global setTimeout (fired one at a time when the microtask queue
+/// is empty). When the queue runs dry with deadlines still pending, the loop
+/// sleeps until the earliest one instead of exiting.
 pub fn drain_jobs(state: State) -> State {
+  do_drain_jobs(state, False)
+}
+
+/// `drain_jobs` for embedder macrotask loops that own a mailbox receive
+/// (arc/beam.run): when host.suspend promises are outstanding and only
+/// future deadlines remain, return instead of sleeping — sleeping here
+/// would starve the embedder's mailbox (IO, process messages) until the
+/// deadline. The embedder bounds its blocking receive with
+/// `next_deadline_timeout` so host timers and mailbox events interleave.
+pub fn drain_jobs_yielding(state: State) -> State {
+  do_drain_jobs(state, True)
+}
+
+fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
+  let state = case state.atomics_waiters {
+    [] -> state
+    _ -> builtins_atomics.settle_expired_waiters(state)
+  }
   case job_queue.pop(state.job_queue) {
-    None -> {
-      report_unhandled_rejections(state)
-      State(..state, unhandled_rejections: [])
-    }
+    None ->
+      case pop_due_timer(state) {
+        Some(#(state, timer)) ->
+          do_drain_jobs(fire_timer(state, timer), yield_to_embedder)
+        None ->
+          case earliest_deadline(state) {
+            Some(_) if yield_to_embedder && state.outstanding > 0 -> state
+            Some(deadline) -> {
+              let wait_ms =
+                int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1
+              let Nil = builtins_atomics.sleep_ms(wait_ms)
+              do_drain_jobs(
+                builtins_atomics.settle_expired_waiters(state),
+                yield_to_embedder,
+              )
+            }
+            None -> {
+              report_unhandled_rejections(state)
+              State(..state, unhandled_rejections: [])
+            }
+          }
+      }
     Some(#(job, rest)) -> {
       let state = State(..state, job_queue: rest)
       let state = execute_job(state, job)
-      drain_jobs(state)
+      do_drain_jobs(state, yield_to_embedder)
+    }
+  }
+}
+
+// ============================================================================
+// Host timers — the global setTimeout/clearTimeout (HTML §8.6).
+//
+// Timers are macrotasks: drain_jobs fires a due timer only when the
+// microtask queue is empty, then fully drains the jobs it enqueued before
+// firing the next one. When nothing is runnable, the loop sleeps until the
+// earliest pending deadline (timer or Atomics.waitAsync waiter).
+// ============================================================================
+
+/// Earliest pending deadline across Atomics.waitAsync waiters and host
+/// timers, if any.
+fn earliest_deadline(state: State) -> Option(Int) {
+  let timer_min =
+    list.fold(state.timers, None, fn(acc, t: value.HostTimer) {
+      case acc {
+        None -> Some(t.deadline)
+        Some(a) -> Some(int.min(a, t.deadline))
+      }
+    })
+  case builtins_atomics.earliest_waiter_deadline(state), timer_min {
+    None, t -> t
+    w, None -> w
+    Some(w), Some(t) -> Some(int.min(w, t))
+  }
+}
+
+/// Milliseconds until the earliest pending macrotask deadline (host timer
+/// or Atomics.waitAsync waiter), if any. Embedder macrotask loops that own
+/// the mailbox receive (arc/beam.run) use this as their receive timeout so
+/// host timers and mailbox IO interleave correctly.
+pub fn next_deadline_timeout(state: State) -> Option(Int) {
+  case earliest_deadline(state) {
+    Some(deadline) ->
+      Some(int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1)
+    None -> None
+  }
+}
+
+/// Remove and return the host timer with the earliest deadline, provided the
+/// clock has already passed it. Ties resolve to the earliest-scheduled timer
+/// (list is insertion-ordered; HTML fires same-deadline timers FIFO).
+fn pop_due_timer(state: State) -> Option(#(State, value.HostTimer)) {
+  let due =
+    list.fold(
+      state.timers,
+      None,
+      fn(acc: Option(value.HostTimer), t: value.HostTimer) {
+        case acc {
+          None -> Some(t)
+          Some(best) ->
+            case t.deadline < best.deadline {
+              True -> Some(t)
+              False -> acc
+            }
+        }
+      },
+    )
+  case due {
+    None -> None
+    Some(timer) ->
+      case timer.deadline <= builtins_atomics.monotonic_now() {
+        False -> None
+        True -> {
+          let timers = list.filter(state.timers, fn(t) { t.id != timer.id })
+          Some(#(State(..state, timers:), timer))
+        }
+      }
+  }
+}
+
+/// Fire one host timer: call its callback with `this` = undefined. A throw
+/// from the callback is reported (like an uncaught error) and the loop
+/// continues — matching browser/Node timer semantics.
+fn fire_timer(state: State, timer: value.HostTimer) -> State {
+  case state.call(state, timer.callback, JsUndefined, timer.args) {
+    Ok(#(_, new_state)) -> new_state
+    Error(#(thrown, new_state)) -> {
+      io.println_error(
+        "Uncaught (in setTimeout callback) "
+        <> object.format_error(thrown, new_state.heap),
+      )
+      new_state
+    }
+  }
+}
+
+/// Host setTimeout(callback, delay, ...args) — HTML §8.6 timer
+/// initialisation steps (QuickJS-libc shape): the callback must be callable
+/// (TypeError otherwise), delay is coerced to a number with NaN / negative /
+/// non-finite clamped to 0, and the numeric timer id is returned.
+pub fn set_timeout_native(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(callback, delay, extra) = case args {
+    [] -> #(JsUndefined, JsUndefined, [])
+    [cb] -> #(cb, JsUndefined, [])
+    [cb, d, ..rest] -> #(cb, d, rest)
+  }
+  case helpers.is_callable(state.heap, callback) {
+    False -> state.type_error(state, "setTimeout: callback is not a function")
+    True ->
+      case coerce.js_to_number(state, delay) {
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+        Ok(#(num, state)) -> {
+          let ms = case num {
+            value.Finite(f) -> int.max(value.float_to_int(f), 0)
+            _ -> 0
+          }
+          let deadline = builtins_atomics.monotonic_now() + ms
+          let id = state.next_timer_id
+          let timer = value.HostTimer(id:, deadline:, callback:, args: extra)
+          let state =
+            State(
+              ..state,
+              timers: list.append(state.timers, [timer]),
+              next_timer_id: id + 1,
+            )
+          #(state, Ok(value.from_int(id)))
+        }
+      }
+  }
+}
+
+/// Host clearTimeout(id) — cancel a pending setTimeout timer. Unknown,
+/// already-fired, or non-numeric ids are ignored (HTML §8.6).
+pub fn clear_timeout_native(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let id_val = case args {
+    [v, ..] -> v
+    [] -> JsUndefined
+  }
+  case coerce.js_to_number(state, id_val) {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(num, state)) -> {
+      let state = case num {
+        value.Finite(f) -> {
+          let id = value.float_to_int(f)
+          State(
+            ..state,
+            timers: list.filter(state.timers, fn(t) { t.id != id }),
+          )
+        }
+        _ -> state
+      }
+      #(state, Ok(JsUndefined))
     }
   }
 }
@@ -184,6 +384,44 @@ pub fn call_to_completion(
             this_val,
             call_native_fn,
           )
+        // §10.5.12 Proxy [[Call]] — run the apply trap (or forward to the
+        // target) and recurse, so re-entrant native calls can invoke proxies.
+        Some(ObjectSlot(
+          kind: value.ProxyObject(target:, handler:, callable: True, ..),
+          ..,
+        )) ->
+          case object.proxy_trap(state, target, handler, "apply") {
+            Error(#(thrown, state)) ->
+              Ok(#(ThrowCompletion(thrown, state.heap), state))
+            Ok(#(t, h, trap, state)) ->
+              case trap {
+                None ->
+                  call_to_completion(
+                    state,
+                    JsObject(t),
+                    this_val,
+                    args,
+                    execute_inner,
+                    call_native_fn,
+                  )
+                Some(trap_fn) -> {
+                  let #(heap, args_arr) =
+                    common.alloc_array(
+                      state.heap,
+                      args,
+                      state.builtins.array.prototype,
+                    )
+                  call_to_completion(
+                    State(..state, heap:),
+                    trap_fn,
+                    JsObject(h),
+                    [JsObject(t), this_val, JsObject(args_arr)],
+                    execute_inner,
+                    call_native_fn,
+                  )
+                }
+              }
+          }
         // Not callable: preserve the legacy pass-through (undefined, no throw)
         // that promise reactions and friends rely on.
         _ -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))

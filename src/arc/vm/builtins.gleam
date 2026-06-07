@@ -1,13 +1,19 @@
 import arc/vm/builtins/array as builtins_array
+import arc/vm/builtins/array_buffer as builtins_array_buffer
 import arc/vm/builtins/async_generator as builtins_async_generator
+import arc/vm/builtins/atomics as builtins_atomics
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins, Builtins}
 import arc/vm/builtins/console as builtins_console
+import arc/vm/builtins/data_view as builtins_data_view
 import arc/vm/builtins/date as builtins_date
+import arc/vm/builtins/disposable_stack as builtins_disposable_stack
 import arc/vm/builtins/dom_exception as builtins_dom_exception
 import arc/vm/builtins/error as builtins_error
+import arc/vm/builtins/finalization_registry as builtins_finalization_registry
 import arc/vm/builtins/function as builtins_function
 import arc/vm/builtins/generator as builtins_generator
+import arc/vm/builtins/intl as builtins_intl
 import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/builtins/json as builtins_json
 import arc/vm/builtins/map as builtins_map
@@ -20,6 +26,8 @@ import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
+import arc/vm/builtins/temporal as builtins_temporal
+import arc/vm/builtins/typed_array as builtins_typed_array
 import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/heap
@@ -144,7 +152,12 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // Generator.prototype → %IteratorPrototype% → Object.prototype
   let #(h, generator) =
-    builtins_generator.init(h, iterator_proto, function.prototype)
+    builtins_generator.init(
+      h,
+      iterator_proto,
+      function.prototype,
+      function.constructor,
+    )
 
   // %AsyncIteratorPrototype% — shared base for async iterators
   // Has [Symbol.asyncIterator]() { return this; } so async iterators are async-iterable
@@ -198,10 +211,28 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // AsyncGenerator.prototype → %AsyncIteratorPrototype% → Object.prototype
   let #(h, async_generator) =
-    builtins_async_generator.init(h, async_iterator_proto, function.prototype)
+    builtins_async_generator.init(
+      h,
+      async_iterator_proto,
+      function.prototype,
+      function.constructor,
+    )
 
-  // Symbol constructor (callable, not new-able)
-  let #(h, symbol) = builtins_symbol.init(h, object_proto, function.prototype)
+  // §27.7: %AsyncFunction% + %AsyncFunction.prototype% (the [[Prototype]] of
+  // async function objects). Not a global — reachable only via
+  // (async function(){}).constructor.
+  let #(h, async_function_proto) =
+    common.init_async_function(
+      h,
+      "AsyncFunction",
+      value.VmNative(value.AsyncFunctionConstructor),
+      function.prototype,
+      function.constructor,
+    )
+
+  // Symbol constructor (callable, not new-able) + %Symbol.prototype%
+  let #(h, symbol, symbol_proto) =
+    builtins_symbol.init(h, object_proto, function.prototype)
 
   // console global — log/warn/error/info/debug
   let #(h, console) = builtins_console.init(h, object_proto, function.prototype)
@@ -211,6 +242,31 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 
   // Reflect global object
   let #(h, reflect) = builtins_reflect.init(h, object_proto, function.prototype)
+
+  // Proxy constructor — §28.2. New-able only; has NO `prototype` property
+  // (§28.2.2 "the Proxy constructor does not have a prototype property").
+  let #(h, proxy_revocable) =
+    common.alloc_call_fn(
+      h,
+      function.prototype,
+      value.ProxyRevocable,
+      "revocable",
+      2,
+      constructible: False,
+    )
+  let #(h, proxy) =
+    common.alloc_call_fn_props(
+      h,
+      function.prototype,
+      value.ProxyConstructor,
+      constructible: True,
+      props: [
+        #("name", common.fn_name_property("Proxy")),
+        #("length", common.fn_length_property(2)),
+        #("revocable", value.builtin_property(JsObject(proxy_revocable))),
+      ],
+    )
+  let h = heap.root(h, proxy)
 
   // Map constructor + prototype
   let #(h, map) = builtins_map.init(h, object_proto, function.prototype)
@@ -225,6 +281,69 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // WeakSet constructor + prototype
   let #(h, weak_set) =
     builtins_weak_set.init(h, object_proto, function.prototype)
+
+  // FinalizationRegistry constructor + prototype
+  let #(h, finalization_registry) =
+    builtins_finalization_registry.init(h, object_proto, function.prototype)
+
+  // DisposableStack constructor + prototype
+  let #(h, disposable_stack) =
+    builtins_disposable_stack.init(h, object_proto, function.prototype)
+
+  // AsyncDisposableStack constructor + prototype
+  let #(h, async_disposable_stack) =
+    builtins_disposable_stack.init_async(h, object_proto, function.prototype)
+
+  // ArrayBuffer + SharedArrayBuffer constructors + prototypes
+  let #(h, array_buffer, shared_array_buffer) =
+    builtins_array_buffer.init(h, object_proto, function.prototype)
+
+  // DataView constructor + prototype
+  let #(h, data_view) =
+    builtins_data_view.init(h, object_proto, function.prototype)
+
+  // %TypedArray% + the 11 concrete TypedArray constructors
+  let #(h, typed_array, typed_arrays) =
+    builtins_typed_array.init(h, object_proto, function.prototype)
+
+  // BigInt global function (§21.2.1.1) — callable, not constructible
+  let #(h, bigint) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.VmNative(value.BigIntGlobal),
+      "BigInt",
+      1,
+    )
+  // %BigInt.prototype% (§21.2.3): toString/toLocaleString/valueOf +
+  // @@toStringTag "BigInt". Primitive BigInt property access delegates here.
+  let #(h, bigint_proto_methods) =
+    common.alloc_methods(h, function.prototype, [
+      #("toString", value.VmNative(value.BigIntPrototypeToString), 0),
+      #("toLocaleString", value.VmNative(value.BigIntPrototypeToString), 0),
+      #("valueOf", value.VmNative(value.BigIntPrototypeValueOf), 0),
+    ])
+  let #(h, bigint_proto) =
+    common.init_namespace(h, object_proto, "BigInt", [
+      #("constructor", value.builtin_property(JsObject(bigint))),
+      ..bigint_proto_methods
+    ])
+  // BigInt.prototype = %BigInt.prototype% { W:F, E:F, C:F } (§21.2.2.3).
+  let h =
+    heap.update(h, bigint, fn(slot) {
+      case slot {
+        value.ObjectSlot(properties:, ..) ->
+          value.ObjectSlot(
+            ..slot,
+            properties: dict.insert(
+              properties,
+              value.Named("prototype"),
+              value.data(JsObject(bigint_proto)),
+            ),
+          )
+        other -> other
+      }
+    })
 
   // Global utility functions: eval, URI functions
   let #(h, eval) =
@@ -292,12 +411,24 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       1,
     )
 
+  // Intl namespace + service constructors (ECMA-402)
+  let #(h, intl_builtin) =
+    builtins_intl.init(
+      h,
+      object_proto,
+      function.prototype,
+      number.prototype,
+      string.prototype,
+      date.prototype,
+    )
+
   #(
     h,
     Builtins(
       object:,
       function:,
       array:,
+      proxy:,
       error: errors.error,
       type_error: errors.type_error,
       reference_error: errors.reference_error,
@@ -306,6 +437,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       eval_error: errors.eval_error,
       uri_error: errors.uri_error,
       aggregate_error: errors.aggregate_error,
+      suppressed_error: errors.suppressed_error,
       dom_exception:,
       math:,
       string:,
@@ -320,7 +452,9 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       promise:,
       generator:,
       async_generator:,
+      async_function_proto:,
       symbol:,
+      symbol_proto:,
       console:,
       json:,
       reflect:,
@@ -328,6 +462,16 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       set:,
       weak_map:,
       weak_set:,
+      finalization_registry:,
+      disposable_stack:,
+      async_disposable_stack:,
+      array_buffer:,
+      shared_array_buffer:,
+      data_view:,
+      typed_array:,
+      typed_arrays:,
+      bigint:,
+      bigint_proto:,
       iterator:,
       iterator_helper_proto:,
       wrap_for_valid_iterator_proto:,
@@ -343,6 +487,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       set_iterator_proto:,
       map_iterator_proto:,
       async_from_sync_iterator_proto:,
+      intl: intl_builtin.namespace,
     ),
   )
 }
@@ -379,6 +524,69 @@ fn global_entry_to_property(entry: GlobalEntry) -> #(String, value.Property) {
 /// Returns updated heap + Ref to the globalThis heap object.
 /// The globalThis object IS the ObjectRecord of the Global Environment Record.
 pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
+  // Temporal namespace — built per-realm (its prototypes carry refs inside
+  // native-fn tokens, so it needs no slot in the Builtins record).
+  let #(h, temporal_ns) =
+    builtins_temporal.init(h, b.object.prototype, b.function.prototype)
+  // Atomics namespace — plain object like Math, no Builtins slot needed.
+  let #(h, atomics_ns) =
+    builtins_atomics.init(h, b.object.prototype, b.function.prototype)
+  // ShadowRealm constructor + prototype (proposal-shadowrealm). Built
+  // per-realm like Temporal — instances carry their RealmSlot ref in the
+  // ExoticKind, so no Builtins slot is needed.
+  let #(h, shadow_realm_methods) =
+    common.alloc_methods(h, b.function.prototype, [
+      #(
+        "evaluate",
+        value.ShadowRealmNative(value.ShadowRealmEvaluate(
+          fn_proto: b.function.prototype,
+        )),
+        1,
+      ),
+      #(
+        "importValue",
+        value.ShadowRealmNative(value.ShadowRealmImportValue(
+          fn_proto: b.function.prototype,
+        )),
+        2,
+      ),
+    ])
+  let #(h, shadow_realm) =
+    common.init_type(
+      h,
+      b.object.prototype,
+      b.function.prototype,
+      shadow_realm_methods,
+      fn(proto) {
+        value.Dispatch(
+          value.ShadowRealmNative(value.ShadowRealmConstructor(proto:)),
+        )
+      },
+      "ShadowRealm",
+      0,
+      [],
+    )
+  let h = common.add_to_string_tag(h, shadow_realm.prototype, "ShadowRealm")
+  // Host timers (HTML §8.6) — fired by the core event loop between microtask
+  // flushes. Provided as globals like every JS shell/runtime (d8, qjs, Node);
+  // test262's atomicsHelper.js otherwise installs a busy-spin promise-chain
+  // setTimeout polyfill that allocates unboundedly.
+  let #(h, set_timeout_fn) =
+    common.alloc_native_fn(
+      h,
+      b.function.prototype,
+      value.VmNative(value.SetTimeout),
+      "setTimeout",
+      1,
+    )
+  let #(h, clear_timeout_fn) =
+    common.alloc_native_fn(
+      h,
+      b.function.prototype,
+      value.VmNative(value.ClearTimeout),
+      "clearTimeout",
+      1,
+    )
   let entries = [
     // §19.1: these are {writable: false, enumerable: false, configurable: false}
     Immutable("NaN", value.JsNumber(value.NaN)),
@@ -396,6 +604,7 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("EvalError", JsObject(b.eval_error.constructor)),
     Builtin("URIError", JsObject(b.uri_error.constructor)),
     Builtin("AggregateError", JsObject(b.aggregate_error.constructor)),
+    Builtin("SuppressedError", JsObject(b.suppressed_error.constructor)),
     Builtin("DOMException", JsObject(b.dom_exception.constructor)),
     Builtin("Math", JsObject(b.math)),
     Builtin("String", JsObject(b.string.constructor)),
@@ -403,6 +612,9 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("Boolean", JsObject(b.boolean.constructor)),
     Builtin("RegExp", JsObject(b.regexp.constructor)),
     Builtin("Date", JsObject(b.date.constructor)),
+    Builtin("Temporal", JsObject(temporal_ns)),
+    Builtin("Atomics", JsObject(atomics_ns)),
+    Builtin("ShadowRealm", JsObject(shadow_realm.constructor)),
     Builtin("parseInt", JsObject(b.parse_int)),
     Builtin("parseFloat", JsObject(b.parse_float)),
     Builtin("isNaN", JsObject(b.is_nan)),
@@ -412,10 +624,24 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("console", JsObject(b.console)),
     Builtin("JSON", JsObject(b.json)),
     Builtin("Reflect", JsObject(b.reflect)),
+    Builtin("Proxy", JsObject(b.proxy)),
     Builtin("Map", JsObject(b.map.constructor)),
     Builtin("Set", JsObject(b.set.constructor)),
     Builtin("WeakMap", JsObject(b.weak_map.constructor)),
     Builtin("WeakSet", JsObject(b.weak_set.constructor)),
+    Builtin(
+      "FinalizationRegistry",
+      JsObject(b.finalization_registry.constructor),
+    ),
+    Builtin("DisposableStack", JsObject(b.disposable_stack.constructor)),
+    Builtin(
+      "AsyncDisposableStack",
+      JsObject(b.async_disposable_stack.constructor),
+    ),
+    Builtin("ArrayBuffer", JsObject(b.array_buffer.constructor)),
+    Builtin("SharedArrayBuffer", JsObject(b.shared_array_buffer.constructor)),
+    Builtin("DataView", JsObject(b.data_view.constructor)),
+    Builtin("BigInt", JsObject(b.bigint)),
     Builtin("Iterator", JsObject(b.iterator.constructor)),
     Builtin("eval", JsObject(b.eval)),
     Builtin("decodeURI", JsObject(b.decode_uri)),
@@ -425,7 +651,19 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("escape", JsObject(b.escape)),
     Builtin("unescape", JsObject(b.unescape)),
     Builtin("structuredClone", JsObject(b.structured_clone)),
+    Builtin("setTimeout", JsObject(set_timeout_fn)),
+    Builtin("clearTimeout", JsObject(clear_timeout_fn)),
+    Builtin("Intl", JsObject(b.intl)),
   ]
+  // The 11 TypedArray constructors (Int8Array .. BigUint64Array).
+  let entries =
+    list.append(
+      entries,
+      list.map(b.typed_arrays, fn(entry) {
+        let #(kind, bt) = entry
+        Builtin(value.typed_array_name(kind), JsObject(bt.constructor))
+      }),
+    )
 
   // globalThis heap object — property descriptors for JS-visible reflection
   let properties =

@@ -15,6 +15,7 @@ fn dummy_template() -> FuncTemplate {
   FuncTemplate(
     name: None,
     arity: 0,
+    length: 0,
     local_count: 0,
     bytecode: tuple_array.from_list([]),
     constants: tuple_array.from_list([]),
@@ -26,6 +27,7 @@ fn dummy_template() -> FuncTemplate {
     is_generator: False,
     is_async: False,
     is_constructor: False,
+    is_class_constructor: False,
     local_names: None,
     lexical: opcode.no_lexical_slots,
     syntax_perms: opcode.script_perms,

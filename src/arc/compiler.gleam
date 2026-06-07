@@ -15,7 +15,7 @@ import arc/vm/value.{
 }
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 
@@ -25,8 +25,10 @@ pub type ImportBinding {
   NamedImport(imported: String, local: String)
   /// import foo from 'mod'
   DefaultImport(local: String)
-  /// import * as ns from 'mod'
-  NamespaceImport(local: String)
+  /// import * as ns from 'mod' (deferred: False) or
+  /// import defer * as ns from 'mod' (deferred: True — the module's
+  /// evaluation is deferred until the namespace is first accessed).
+  NamespaceImport(local: String, deferred: Bool)
 }
 
 /// Compilation errors.
@@ -44,6 +46,13 @@ fn map_emit_error(error: emit.EmitError) -> CompileError {
   }
 }
 
+/// Sentinel head entry in FuncTemplate.local_names marking a frame whose
+/// VariableEnvironment is the GLOBAL environment (script/REPL top level).
+/// Sloppy direct eval in such a frame sends `var` declarations to the global
+/// object instead of a function-frame eval_env dict. The `<` prefix can never
+/// collide with a user binding name; run_direct_eval strips it before use.
+pub const global_frame_sentinel = "<global>"
+
 /// Phase 3 for a top-level body (script, module, or eval): unnamed, zero
 /// arity, no env captures, and not an arrow/constructor/generator/async.
 fn resolve_top_level(
@@ -51,6 +60,7 @@ fn resolve_top_level(
   child_templates: List(FuncTemplate),
   is_strict: Bool,
   perms: SyntaxPerms,
+  local_names: Option(List(#(String, Int))),
 ) -> FuncTemplate {
   resolve.resolve(
     resolved.code,
@@ -59,6 +69,7 @@ fn resolve_top_level(
     child_templates,
     None,
     0,
+    0,
     [],
     is_strict,
     False,
@@ -66,7 +77,8 @@ fn resolve_top_level(
     False,
     False,
     False,
-    None,
+    False,
+    local_names,
     resolved.lexical,
     perms,
   )
@@ -121,7 +133,7 @@ pub fn import_local_names(
       case binding {
         NamedImport(local:, ..) -> local
         DefaultImport(local:) -> local
-        NamespaceImport(local:) -> local
+        NamespaceImport(local:, ..) -> local
       }
     })
   })
@@ -170,8 +182,8 @@ fn collect_undef_export_names(
     ast.ExportNamedDeclaration(declaration: Some(d), ..) -> Some(d)
     _ -> None
   }
-  case declaration {
-    Some(ast.VariableDeclaration(kind: ast.Var, declarations:)) ->
+  case declaration, item {
+    Some(ast.VariableDeclaration(kind: ast.Var, declarations:)), _ ->
       list.fold(declarations, acc, fn(a, decl) {
         case decl {
           ast.VariableDeclarator(id: ast.IdentifierPattern(name:), ..) ->
@@ -179,8 +191,14 @@ fn collect_undef_export_names(
           _ -> a
         }
       })
-    Some(ast.FunctionDeclaration(name: Some(name), ..)) -> set.insert(acc, name)
-    _ -> acc
+    Some(ast.FunctionDeclaration(name: Some(name), ..)), _ ->
+      set.insert(acc, name)
+    // `export default function fn() {}` — hoisted like any top-level
+    // function declaration, so its binding seeds `undefined` (not TDZ).
+    _,
+      ast.ExportDefaultDeclaration(ast.FunctionExpression(name: Some(name), ..))
+    -> set.insert(acc, name)
+    _, _ -> acc
   }
 }
 
@@ -210,14 +228,24 @@ fn compile_module_with_scope(
       constants_map,
       import_locals,
       dict.new(),
+      set.new(),
+      set.new(),
       captured_vars,
       linker_seeded,
       lexical_captured,
       scope.ToGlobal,
+      [],
+      is_strict,
     )
   let child_templates = compile_children(children, resolved)
   let template =
-    resolve_top_level(resolved, child_templates, is_strict, opcode.script_perms)
+    resolve_top_level(
+      resolved,
+      child_templates,
+      is_strict,
+      opcode.script_perms,
+      None,
+    )
   #(template, resolved.names, hoisted_funcs)
 }
 
@@ -261,14 +289,93 @@ pub fn compile_eval_direct(
   parent_slots: LexicalSlots,
   perms: SyntaxPerms,
   caller_is_strict: Bool,
+  caller_is_global: Bool,
+  param_scope_names: List(String),
+  with_names: List(String),
+  outer_private_names: List(String),
 ) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Module(_) -> Error(Unsupported("modules not supported in eval"))
     ast.Script(body) -> {
-      use #(emitter_ops, constants, constants_map, children, is_strict) <- result.map(
+      use #(emitter_ops, constants, constants_map, children, is_strict) <- result.try(
         result.map_error(emit.emit_program(body, emit.LexLocal), map_emit_error),
       )
       let strict = caller_is_strict || is_strict
+      // §19.2.1.1 PerformEval → EvalDeclarationInstantiation step 3.d:
+      // when this direct eval happens inside a formal-parameter initializer
+      // (param_scope_names non-empty), sloppy eval code must not var-declare
+      // a name already bound in the parameter scope (parameters + the
+      // implicit `arguments` binding). The spec walks the environment chain
+      // from the eval's LexicalEnvironment to its VariableEnvironment and
+      // throws a SyntaxError on any HasBinding hit — for a parameter
+      // initializer the only environment in between is the parameter scope.
+      // Strict eval gets its own VariableEnvironment, so no check applies.
+      use Nil <- result.try(case strict {
+        True -> Ok(Nil)
+        False -> check_param_scope_var_conflict(emitter_ops, param_scope_names)
+      })
+      // Step 3.d applies transitively to direct evals nested in this eval's
+      // source: sloppy eval shares the caller's VariableEnvironment, so a
+      // nested eval's lexEnv chain still passes through the same parameter
+      // scope. The source was emitted fresh (param_scope_names starts empty
+      // in the emitter), so thread the outer call site's names into the
+      // top-level IrCallEval ops. Functions/arrows declared in the eval body
+      // are children with their own VariableEnvironment — their eval sites
+      // keep the names from their own parameter scopes.
+      let emitter_ops = case strict, param_scope_names {
+        False, [_, ..] ->
+          list.map(emitter_ops, fn(op) {
+            case op {
+              emit.Ir(opcode.IrCallEval(arity, [], eval_with_names, eval_privs)) ->
+                emit.Ir(opcode.IrCallEval(
+                  arity,
+                  param_scope_names,
+                  eval_with_names,
+                  eval_privs,
+                ))
+              _ -> op
+            }
+          })
+        _, _ -> emitter_ops
+      }
+      // §19.2.1.1 step 5: the caller's PrivateEnvironment carries into the
+      // eval code — a nested direct eval at this eval's top level parses
+      // with the same private names (plus any classes the eval source
+      // itself wraps around the nested site, already in the op's list).
+      let emitter_ops = case outer_private_names {
+        [] -> emitter_ops
+        _ ->
+          list.map(emitter_ops, fn(op) {
+            case op {
+              emit.Ir(opcode.IrCallEval(arity, psn, eval_with_names, eval_privs)) ->
+                emit.Ir(opcode.IrCallEval(
+                  arity,
+                  psn,
+                  eval_with_names,
+                  list.append(eval_privs, outer_private_names),
+                ))
+              _ -> op
+            }
+          })
+      }
+      // §14.11.1 early error: `with` is illegal in strict code. The eval
+      // source is parsed sloppy (no directive), so when the CALLER's
+      // strictness upgrades this eval to strict, reject any with statement
+      // post-parse (anywhere in the body — strict eval makes all nested
+      // code strict). A "use strict" directive in the source itself is
+      // already rejected by the parser.
+      use Nil <- result.try(
+        case
+          strict
+          && {
+            ops_contain_with(emitter_ops)
+            || list.any(children, child_contains_with)
+          }
+        {
+          True -> Error(Unsupported("'with' not allowed in strict mode"))
+          False -> Ok(Nil)
+        },
+      )
       // Strict direct eval gets its own VarEnvironment (spec §19.2.1.1
       // step 18): rewrite hoisted var declarations from DeclareGlobalVar
       // to local DeclareVar so they stay scoped to the eval body.
@@ -283,12 +390,39 @@ pub fn compile_eval_direct(
             emit.DeclareLexical(_) -> Error(Nil)
             emit.Ir(opcode.IrDeclareGlobalVar(name)) if strict ->
               Ok(emit.DeclareVar(name, emit.VarBinding))
+            // Annex B function-in-block extensions never apply to strict
+            // eval code — drop them when the caller's strictness upgraded
+            // a sloppy-parsed body.
+            emit.DeclareAnnexBVar(_) if strict -> Error(Nil)
+            emit.AnnexBPromote(_) if strict -> Error(Nil)
             _ -> Ok(op)
           }
         })
+      // A direct eval at this eval body's top level runs in THIS eval's
+      // frame and reaches its locals through the template's local_names
+      // table (same mechanism the original caller used). The nested source
+      // is opaque to free-var analysis, so apply the same capture-all rule
+      // as compile_child: box every local declared in the eval body so the
+      // nested eval's slot aliasing always sees box refs.
+      let has_nested_eval =
+        list.any(emitter_ops, fn(op) {
+          case op {
+            emit.Ir(opcode.IrCallEval(..)) -> True
+            _ -> False
+          }
+        })
       let captured_vars = collect_all_captured_vars(children, emitter_ops)
+      let captured_vars = case has_nested_eval {
+        True -> set.union(captured_vars, collect_declared_names(emitter_ops))
+        False -> captured_vars
+      }
       let lexical_captured = collect_arrow_lexical_refs(children)
-      let fallthrough = case strict {
+      // Sloppy direct eval shares the caller's VariableEnvironment. For a
+      // function caller that is approximated by the frame's eval_env dict;
+      // for a GLOBAL caller (script/REPL top level) the VariableEnvironment
+      // IS the global environment, so `var` declarations and unresolved
+      // names go straight to the global object — no eval_env in play.
+      let fallthrough = case strict || caller_is_global {
         True -> scope.ToGlobal
         False -> scope.ToEvalEnv
       }
@@ -314,13 +448,77 @@ pub fn compile_eval_direct(
           constants_map,
           parent_names,
           lexical_captures,
+          set.new(),
+          set.new(),
           captured_vars,
           set.new(),
           lexical_captured,
           fallthrough,
+          // The caller's enclosing with objects (synthetic locals, threaded
+          // through CallEval.with_names) — free names in the eval'd source
+          // must check them before outer bindings/globals.
+          with_names,
+          strict,
         )
       let child_templates = compile_children(children, resolved)
-      resolve_top_level(resolved, child_templates, is_strict, perms)
+      // Expose the name table only when a nested top-level eval needs it —
+      // run_direct_eval consults state.func.local_names to decide between
+      // direct (aliasing) and indirect fallback semantics. A global caller's
+      // VariableEnvironment propagates: a nested eval in this body shares it,
+      // so keep the sentinel (see compile_script).
+      let local_names = case has_nested_eval, caller_is_global {
+        True, True ->
+          Some([#(global_frame_sentinel, -1), ..dict.to_list(resolved.names)])
+        True, False -> Some(dict.to_list(resolved.names))
+        False, _ -> None
+      }
+      // The template's strictness must reflect how the body was COMPILED
+      // (caller strictness upgrades the body — vars were rewritten to
+      // locals, Annex B dropped), not just the body's own directive, so a
+      // nested eval inherits the effective strictness at runtime.
+      Ok(resolve_top_level(
+        resolved,
+        child_templates,
+        strict,
+        perms,
+        local_names,
+      ))
+    }
+  }
+}
+
+/// EvalDeclarationInstantiation step 3.d conflict check for direct eval in a
+/// formal-parameter initializer. The eval body's var-declared names (vars
+/// hoisted from anywhere in the body plus top-level function declarations)
+/// appear as IrDeclareGlobalVar ops in the freshly emitted program prologue;
+/// any of them colliding with a parameter-scope binding is a SyntaxError.
+fn check_param_scope_var_conflict(
+  emitter_ops: List(emit.EmitterOp),
+  param_scope_names: List(String),
+) -> Result(Nil, CompileError) {
+  case param_scope_names {
+    [] -> Ok(Nil)
+    _ -> {
+      let conflict =
+        list.find_map(emitter_ops, fn(op) {
+          case op {
+            emit.Ir(opcode.IrDeclareGlobalVar(name)) ->
+              case list.contains(param_scope_names, name) {
+                True -> Ok(name)
+                False -> Error(Nil)
+              }
+            _ -> Error(Nil)
+          }
+        })
+      case conflict {
+        Ok(name) ->
+          Error(Unsupported(
+            "SyntaxError: variable '"
+            <> name
+            <> "' declared by direct eval conflicts with a parameter-scope binding",
+          ))
+        Error(Nil) -> Ok(Nil)
+      }
     }
   }
 }
@@ -343,8 +541,8 @@ pub fn extract_module_imports(
                   ast.ImportNamedSpecifier(imported:, local:) ->
                     NamedImport(imported:, local:)
                   ast.ImportDefaultSpecifier(local:) -> DefaultImport(local:)
-                  ast.ImportNamespaceSpecifier(local:) ->
-                    NamespaceImport(local:)
+                  ast.ImportNamespaceSpecifier(local:, deferred:) ->
+                    NamespaceImport(local:, deferred:)
                 }
               })
             Ok(#(source, bindings))
@@ -378,6 +576,16 @@ pub fn extract_module_exports(program: ast.Program) -> List(ExportEntry) {
         case item {
           ast.ExportNamedDeclaration(declaration:, specifiers:, source: None) ->
             extract_named_exports(declaration, specifiers)
+          // §16.2.3.7: `export default function fn() {}` / `class fn {}` bind
+          // the NAME (BoundNames = « fn »); only anonymous defaults use the
+          // synthetic *default* binding.
+          ast.ExportDefaultDeclaration(ast.FunctionExpression(
+            name: Some(name),
+            ..,
+          )) -> [LocalExport(export_name: "default", local_name: name)]
+          ast.ExportDefaultDeclaration(ast.ClassExpression(name: Some(name), ..)) -> [
+            LocalExport(export_name: "default", local_name: name),
+          ]
           ast.ExportDefaultDeclaration(_) -> [
             LocalExport(export_name: "default", local_name: "*default*"),
           ]
@@ -455,9 +663,33 @@ fn compile_script(
   use #(emitter_ops, constants, constants_map, children, is_strict) <- result.map(
     result.map_error(emit.emit_program(stmts, top_lex), map_emit_error),
   )
+  // A direct eval at script top level runs in the script's frame and
+  // reaches its locals (e.g. the synthetic `with` object slots) through the
+  // template's local_names table — same mechanism as function-level eval
+  // (compile_eval_direct). Without the table, direct_eval_native falls back
+  // to indirect semantics and `with (o) { eval('x') }` at top level never
+  // sees `o`. Box every declared local so the eval's slot aliasing always
+  // sees box refs.
+  let has_top_level_eval =
+    list.any(emitter_ops, fn(op) {
+      case op {
+        emit.Ir(opcode.IrCallEval(..)) -> True
+        _ -> False
+      }
+    })
+
   // Determine which variables are captured by children (need boxing)
   let captured_vars = collect_all_captured_vars(children, emitter_ops)
-  let lexical_captured = collect_arrow_lexical_refs(children)
+  let captured_vars = case has_top_level_eval {
+    True -> set.union(captured_vars, collect_declared_names(emitter_ops))
+    False -> captured_vars
+  }
+  // Box the script's lexical `this` slot too, so run_direct_eval can thread
+  // it to the eval body as a boxed capture (eval('this') === globalThis).
+  let lexical_captured = case has_top_level_eval {
+    True -> opcode.LexicalRefs(True, True, True, True)
+    False -> collect_arrow_lexical_refs(children)
+  }
 
   // Phase 2: Resolve scopes (names → local indices), with capture info
   let resolved =
@@ -468,13 +700,31 @@ fn compile_script(
       captured_vars,
       lexical_captured,
       scope.ToGlobal,
+      is_strict,
     )
 
   // Process child functions through Phase 2 + Phase 3 recursively
   let child_templates = compile_children(children, resolved)
 
+  // Expose the name table only when a top-level direct eval needs it —
+  // run_direct_eval consults state.func.local_names to decide between
+  // direct (aliasing) and indirect fallback semantics. The sentinel head
+  // entry marks this frame's VariableEnvironment as the GLOBAL environment:
+  // sloppy direct eval here must send `var` declarations to the global
+  // object (not a function-frame eval_env dict).
+  let local_names = case has_top_level_eval {
+    True -> Some([#(global_frame_sentinel, -1), ..dict.to_list(resolved.names)])
+    False -> None
+  }
+
   // Phase 3: Resolve labels (label IDs → PC addresses)
-  resolve_top_level(resolved, child_templates, is_strict, opcode.script_perms)
+  resolve_top_level(
+    resolved,
+    child_templates,
+    is_strict,
+    opcode.script_perms,
+    local_names,
+  )
 }
 
 /// True if this function or any nested function contains a syntactic
@@ -483,9 +733,27 @@ fn any_descendant_has_eval(child: emit.CompiledChild) -> Bool {
   child.has_eval_call || list.any(child.functions, any_descendant_has_eval)
 }
 
+/// True if the op list contains a `with` scope marker. Used by
+/// compile_eval_direct to reject `with` when a strict caller upgrades the
+/// (sloppy-parsed) eval body to strict code.
+fn ops_contain_with(ops: List(emit.EmitterOp)) -> Bool {
+  list.any(ops, fn(op) {
+    case op {
+      emit.EnterWith(_) -> True
+      _ -> False
+    }
+  })
+}
+
+fn child_contains_with(child: emit.CompiledChild) -> Bool {
+  ops_contain_with(child.code) || list.any(child.functions, child_contains_with)
+}
+
 fn compile_child(
   child: emit.CompiledChild,
   parent_scope: Dict(String, Int),
+  parent_consts: set.Set(String),
+  parent_fn_names: set.Set(String),
   parent_lexical: LexicalSlots,
 ) -> FuncTemplate {
   // If this function OR any descendant contains a direct eval call, ALL of
@@ -509,6 +777,15 @@ fn compile_child(
       |> set.to_list
     True -> dict.keys(parent_scope)
   }
+  // Captures whose origin binding is const (class inner-name binding etc.) —
+  // the child's resolver rejects writes through them with TypeError.
+  let const_captures =
+    set.filter(parent_consts, fn(n) { list.contains(captures, n) })
+  // Captures whose origin binding is a named-function-expression self name —
+  // the child's resolver makes writes through them throw in strict code and
+  // silently drop in sloppy code.
+  let fn_name_captures =
+    set.filter(parent_fn_names, fn(n) { list.contains(captures, n) })
 
   // Arrows that (transitively) reference a lexical binding capture the
   // enclosing non-arrow's slot. Non-arrows DeclareLexical their own. With
@@ -581,10 +858,16 @@ fn compile_child(
       child.constants_map,
       captures,
       lexical_captures,
+      const_captures,
+      fn_name_captures,
       vars_to_box,
       set.new(),
       lexical_captured,
       fallthrough,
+      // Enclosing with objects (captured parent locals) sit between this
+      // body's scopes and the other captures — free names check them first.
+      child.with_stack,
+      child.is_strict,
     )
 
   // For direct eval: record name→index so the runtime can map variable
@@ -609,6 +892,7 @@ fn compile_child(
     grandchild_templates,
     child.name,
     child.arity,
+    child.length,
     env_descriptors,
     child.is_strict,
     child.is_arrow,
@@ -616,6 +900,7 @@ fn compile_child(
     child.is_generator,
     child.is_async,
     child.is_constructor,
+    child.is_class_constructor,
     local_names,
     resolved.lexical,
     child.syntax_perms,
@@ -648,11 +933,22 @@ fn collect_all_captured_vars(
   // Collect all names declared in the parent
   let parent_declared = collect_declared_names(parent_ops)
 
-  // For each child, collect free vars and intersect with parent declarations
+  // For each child, collect free vars and intersect with parent declarations.
+  // A child with a direct eval anywhere in its subtree captures EVERY parent
+  // binding (the eval source is opaque to free-var analysis — see the
+  // capture-all rule in compile_child), so all parent declares must be boxed
+  // for it. Without this, a binding referenced only from inside an eval
+  // string (e.g. `let q; f(){ eval("q") }` at script top level, or a class
+  // private-name const read by eval'd `this.#m`) is captured unboxed →
+  // "GetBoxed: local is not a box ref".
   list.fold(children, set.new(), fn(acc, child) {
-    collect_free_vars(child)
-    |> set.intersection(parent_declared)
-    |> set.union(acc)
+    case any_descendant_has_eval(child) {
+      True -> set.union(acc, parent_declared)
+      False ->
+        collect_free_vars(child)
+        |> set.intersection(parent_declared)
+        |> set.union(acc)
+    }
   })
 }
 
@@ -673,36 +969,110 @@ fn collect_declared_names(ops: List(emit.EmitterOp)) -> set.Set(String) {
 /// Collect variable names that are used but not declared in a child's EmitterOps.
 /// Recurses into grandchildren so that a variable referenced only by a nested
 /// closure is still captured through the intermediate scope (transitive capture).
+///
+/// SCOPE-AWARE: a use is free unless a declaration is in scope AT THE USE
+/// SITE. Function-scoped declares (var/param/capture) satisfy uses anywhere
+/// in the body; lexical declares (let/const/catch — including class
+/// private-name consts) satisfy only uses inside their block. A name
+/// declared solely in a nested or sibling block (e.g. a nested class
+/// redeclaring the same `#name`) must NOT hide an outer use — the old
+/// whole-function `used − declared` scan got that wrong and silently
+/// resolved the outer use to a global. Emit hoists lexical declares to
+/// block entry (BlockDeclarationInstantiation), so a declare always
+/// precedes its in-scope uses in IR order. Grandchild free names are
+/// resolved against the scope state at their IrMakeClosure site.
 fn collect_free_vars(child: emit.CompiledChild) -> set.Set(String) {
-  let #(used, declared) = scan_ops(child.code, set.new(), set.new())
-  let grandchild_free =
-    list.fold(child.functions, set.new(), fn(acc, gc) {
-      set.union(acc, collect_free_vars(gc))
+  let gc_free =
+    list.index_map(child.functions, fn(gc, i) { #(i, collect_free_vars(gc)) })
+    |> dict.from_list
+  // Function-scoped declares are position-independent (hoisting), so collect
+  // them up front; lexical declares are tracked by the block stack below.
+  let fun_scope =
+    list.fold(child.code, set.new(), fn(acc, op) {
+      case op {
+        emit.DeclareVar(name, emit.VarBinding)
+        | emit.DeclareVar(name, emit.ParamBinding)
+        | emit.DeclareVar(name, emit.CaptureBinding) -> set.insert(acc, name)
+        _ -> acc
+      }
     })
-  set.union(used, grandchild_free) |> set.difference(declared)
+  let free = scan_free(child.code, gc_free, fun_scope, [], set.new())
+  // Enclosing with-object synthetics count as used: the child's free names
+  // must check those objects at runtime, so the slots have to be captured
+  // (and boxed) through the closure chain like any referenced parent local.
+  // Synthetics declared by this child's own `with` statements are subtracted
+  // (they're block-scoped synthetics; whole-body name match is safe since
+  // each synthetic name is unique per `with` statement).
+  let own_declared =
+    list.fold(child.code, set.new(), fn(acc, op) {
+      case op {
+        emit.DeclareVar(name, _) -> set.insert(acc, name)
+        _ -> acc
+      }
+    })
+  let with_names = set.from_list(child.with_stack)
+  set.union(free, set.difference(with_names, own_declared))
 }
 
-/// Scan EmitterOps to find used variable names and declared names.
-fn scan_ops(
+/// Walk EmitterOps with a live lexical block stack, accumulating names used
+/// while no enclosing declaration is in scope. `blocks` is the stack of
+/// lexical scopes (innermost first).
+fn scan_free(
   ops: List(emit.EmitterOp),
-  used: set.Set(String),
-  declared: set.Set(String),
-) -> #(set.Set(String), set.Set(String)) {
+  gc_free: Dict(Int, set.Set(String)),
+  fun_scope: set.Set(String),
+  blocks: List(set.Set(String)),
+  free: set.Set(String),
+) -> set.Set(String) {
   case ops {
-    [] -> #(used, declared)
+    [] -> free
     [op, ..rest] -> {
-      let #(used, declared) = case op {
-        emit.Ir(emit_ir) ->
-          case emit_ir {
-            opcode.IrScopeGetVar(name) -> #(set.insert(used, name), declared)
-            opcode.IrScopePutVar(name) -> #(set.insert(used, name), declared)
-            opcode.IrScopeTypeofVar(name) -> #(set.insert(used, name), declared)
-            _ -> #(used, declared)
-          }
-        emit.DeclareVar(name, _) -> #(used, set.insert(declared, name))
-        _ -> #(used, declared)
+      let in_scope = fn(name) {
+        set.contains(fun_scope, name) || list.any(blocks, set.contains(_, name))
       }
-      scan_ops(rest, used, declared)
+      let use_name = fn(free, name) {
+        case in_scope(name) {
+          True -> free
+          False -> set.insert(free, name)
+        }
+      }
+      case op {
+        emit.EnterScope(_) ->
+          scan_free(rest, gc_free, fun_scope, [set.new(), ..blocks], free)
+        emit.LeaveScope ->
+          case blocks {
+            [_, ..outer] -> scan_free(rest, gc_free, fun_scope, outer, free)
+            [] -> scan_free(rest, gc_free, fun_scope, [], free)
+          }
+        // Lexical declare — joins the innermost block (function-scoped kinds
+        // were pre-collected into fun_scope).
+        emit.DeclareVar(name, emit.LetBinding)
+        | emit.DeclareVar(name, emit.ConstBinding)
+        | emit.DeclareVar(name, emit.CatchBinding) -> {
+          let blocks = case blocks {
+            [top, ..outer] -> [set.insert(top, name), ..outer]
+            [] -> [set.insert(set.new(), name)]
+          }
+          scan_free(rest, gc_free, fun_scope, blocks, free)
+        }
+        // Grandchild closure creation: its free names are resolved against
+        // the scope state right here.
+        emit.Ir(opcode.IrMakeClosure(i)) -> {
+          let free = case dict.get(gc_free, i) {
+            Ok(names) -> set.fold(names, free, use_name)
+            Error(Nil) -> free
+          }
+          scan_free(rest, gc_free, fun_scope, blocks, free)
+        }
+        emit.Ir(opcode.IrScopeGetVar(name))
+        | emit.Ir(opcode.IrScopePutVar(name))
+        | emit.Ir(opcode.IrScopeTypeofVar(name))
+        | emit.Ir(opcode.IrScopeMakeRef(name))
+        | emit.Ir(opcode.IrScopeGetRef(name))
+        | emit.Ir(opcode.IrScopePutRef(name)) ->
+          scan_free(rest, gc_free, fun_scope, blocks, use_name(free, name))
+        _ -> scan_free(rest, gc_free, fun_scope, blocks, free)
+      }
     }
   }
 }
@@ -717,5 +1087,15 @@ fn compile_children(
   use child, i <- list.index_map(children)
   let parent_scope =
     dict.get(resolved.closure_scopes, i) |> result.unwrap(resolved.names)
-  compile_child(child, parent_scope, resolved.lexical)
+  let parent_consts =
+    dict.get(resolved.closure_consts, i) |> result.unwrap(set.new())
+  let parent_fn_names =
+    dict.get(resolved.closure_fn_names, i) |> result.unwrap(set.new())
+  compile_child(
+    child,
+    parent_scope,
+    parent_consts,
+    parent_fn_names,
+    resolved.lexical,
+  )
 }

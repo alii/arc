@@ -12,6 +12,7 @@
 import arc/compiler
 import arc/internal/path
 import arc/module
+import arc/module_host
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common
@@ -376,19 +377,29 @@ fn run_test_completion(
     True ->
       case
         test_runner.run_with_timeout(
-          fn() { do_run_module(metadata, source, path) },
+          fn() { do_run_module(metadata, source, path, is_async) },
           test_timeout_ms,
         )
         |> result.flatten
       {
-        Ok(completion) -> completion_outcome(completion)
+        Ok(#(completion, global_ref)) ->
+          case is_async {
+            False -> completion_outcome(completion)
+            True -> async_outcome(completion, global_ref)
+          }
         Error(reason) -> on_error(reason)
       }
     False ->
       case
         test_runner.run_with_timeout(
           fn() {
-            do_run_script_with_harness(metadata, source, variant, is_async)
+            do_run_script_with_harness(
+              metadata,
+              source,
+              path,
+              variant,
+              is_async,
+            )
           },
           test_timeout_ms,
         )
@@ -579,28 +590,62 @@ fn do_run_module(
   metadata: TestMetadata,
   source: String,
   path: String,
-) -> Result(Completion, String) {
+  is_async: Bool,
+) -> Result(#(Completion, value.Ref), String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
 
-  // Evaluate harness files as REPL scripts to populate globals
-  // Modules don't use the async test protocol via print
-  use #(h, env) <- result.try(eval_harness(metadata, h, b, global_object, False))
+  // Evaluate harness files as REPL scripts to populate globals. Async module
+  // tests use the same $DONE/print protocol as scripts (doneprintHandle.js).
+  use #(h, env) <- result.try(eval_harness(
+    metadata,
+    h,
+    b,
+    global_object,
+    path,
+    is_async,
+  ))
   let global_object = env.global_object
 
   case module.compile_bundle(path, source, test262_resolve_and_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
-    Ok(bundle) ->
-      case
-        module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
-      {
-        Ok(module.EvaluatedBundle(value: val, heap: new_heap, ..)) ->
-          Ok(NormalCompletion(val, new_heap))
-        Error(module.EvaluationError(value: val, heap: new_heap)) ->
-          Ok(ThrowCompletion(val, new_heap))
+    Ok(bundle) -> {
+      // Evaluate through the realm-wide module registry so a dynamic
+      // import() of any module in this static graph (including the test file
+      // itself) resolves to the same module record instead of re-evaluating
+      // it (§16.2.1.8).
+      // Top-level driver drains (event_loop.finish), so leftover jobs are
+      // always empty here.
+      let #(new_heap, _jobs, result) =
+        module_host.evaluate_bundle_with_registry(
+          h,
+          b,
+          global_object,
+          bundle,
+          event_loop.finish,
+        )
+      case result {
+        Ok(module.EvaluatedBundle(value: val, ..)) ->
+          Ok(#(NormalCompletion(val, new_heap), global_object))
+        Error(module.EvaluationError(value: val, heap: _)) ->
+          Ok(#(ThrowCompletion(val, new_heap), global_object))
+        // Entry module still parked on top-level await after a full drain:
+        // an awaited promise can never settle. Same outcome as the
+        // pre-EvaluationPending behavior (a host-level throw).
+        Error(module.EvaluationPending(promise_data_ref: _, heap: _)) ->
+          Ok(#(
+            ThrowCompletion(
+              value.JsString(
+                "module evaluation never completed: top-level await promise never settled",
+              ),
+              new_heap,
+            ),
+            global_object,
+          ))
         Error(err) -> Error("module: " <> string.inspect(err))
       }
+    }
   }
 }
 
@@ -623,6 +668,7 @@ fn test262_resolve_and_load(
 fn do_run_script_with_harness(
   metadata: TestMetadata,
   source: String,
+  path: String,
   variant: StrictnessVariant,
   is_async: Bool,
 ) -> Result(#(Completion, value.Ref), String) {
@@ -636,6 +682,7 @@ fn do_run_script_with_harness(
     h,
     b,
     global_object,
+    path,
     is_async,
   ))
 
@@ -669,6 +716,7 @@ fn eval_harness(
   h: Heap,
   b: common.Builtins,
   global_object: value.Ref,
+  path: String,
   is_async: Bool,
 ) -> Result(#(Heap, entry.ReplEnv), String) {
   let is_raw = list.contains(metadata.flags, "raw")
@@ -677,6 +725,16 @@ fn eval_harness(
       Ok(#(h, entry.new_repl_env(global_object)))
     }
     False -> {
+      // Install the dynamic-import host hook: import() resolves specifiers
+      // relative to the test file and loads fixtures from disk.
+      let h =
+        module_host.install_import_hook(
+          h,
+          b,
+          global_object,
+          path,
+          test262_resolve_and_load,
+        )
       // Install native $262 object on the global
       let #(h, realm_ref) =
         heap.alloc(

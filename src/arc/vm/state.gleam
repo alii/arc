@@ -84,6 +84,12 @@ pub type RealmCtx {
     symbol_descriptions: dict.Dict(value.SymbolId, String),
     /// Global symbol registry for Symbol.for() / Symbol.keyFor().
     symbol_registry: dict.Dict(String, value.SymbolId),
+    /// §13.2.8.4 GetTemplateObject cache: tagged-template call-site id →
+    /// template object ref. Site ids are globally unique (baked in at
+    /// compile time), so one dict serves all realms. Entries are rooted in
+    /// the heap and live for the VM's lifetime, matching the spec's
+    /// per-Parse-Node template object identity.
+    template_objects: dict.Dict(Int, Ref),
     /// Maps RealmSlot refs to their Builtins. Used by $262.evalScript/createRealm
     /// to resolve realm-specific builtins (stored separately from heap to avoid
     /// import cycle between value.gleam and builtins/common.gleam).
@@ -97,6 +103,12 @@ pub type RealmCtx {
     /// 4th arg is newTarget (§10.1.13). Set by the VM executor (wraps do_construct).
     construct_fn: fn(State, JsValue, List(JsValue), JsValue) ->
       Result(#(JsValue, State), #(JsValue, State)),
+    /// Pre-built sentinel frame template (bytecode = [Return, Return]) used by
+    /// the re-entrant call/construct callbacks to drive a callee to completion
+    /// on an isolated stack. Built once at state init — these callbacks run
+    /// per element in hot paths (Array.prototype.map etc.), so rebuilding the
+    /// template each call is measurable.
+    callback_sentinel: FuncTemplate,
   )
 }
 
@@ -131,6 +143,16 @@ pub type State {
     /// [[PromiseIsHandled]] was false. Removed when a handler is later attached.
     /// Any remaining after job draining are reported as unhandled rejections.
     unhandled_rejections: List(Ref),
+    /// §25.4.3.10 AddWaiter: pending Atomics.waitAsync waiters in FIFO order
+    /// (oldest first). Atomics.notify settles matching entries with "ok".
+    atomics_waiters: List(value.AtomicsWaiter),
+    /// Pending host timers scheduled by the global setTimeout, in insertion
+    /// order. The event loop fires due timers (earliest deadline first) when
+    /// the microtask queue is empty, and sleeps until the earliest deadline
+    /// instead of exiting while timers are pending.
+    timers: List(value.HostTimer),
+    /// Next id handed out by setTimeout (monotonically increasing from 1).
+    next_timer_id: Int,
     /// Count of in-flight external promises created via `host.suspend` and
     /// not yet settled via `host.resume`. Core never blocks on this — it's
     /// the embedder's macrotask loop that reads it to decide when to stop.
@@ -161,9 +183,19 @@ pub fn merge_globals(
 ) -> State {
   State(
     ..parent,
-    ctx: RealmCtx(..parent.ctx, lexical_globals: child.ctx.lexical_globals),
+    ctx: RealmCtx(
+      ..parent.ctx,
+      lexical_globals: child.ctx.lexical_globals,
+      template_objects: child.ctx.template_objects,
+      // Realms registered during the child execution (ShadowRealm /
+      // $262.createRealm constructors) must survive the merge.
+      realms: child.ctx.realms,
+    ),
     job_queue: job_queue.append(child.job_queue, extra_jobs),
     outstanding: child.outstanding,
+    atomics_waiters: child.atomics_waiters,
+    timers: child.timers,
+    next_timer_id: child.next_timer_id,
   )
 }
 
@@ -314,10 +346,13 @@ fn stack_trace_limit(state: State) -> Int {
   }
 }
 
-/// Build a stack trace from the current call chain and set it as a
-/// non-enumerable own `stack` data property on `err` (matching V8/QuickJS,
-/// where `stack` is writable + configurable but not enumerable). No-op when
-/// `err` is not an object.
+/// Build a stack trace from the current call chain and store it on `err`.
+///
+/// Error instances (kind ErrorObject, the [[ErrorData]] internal slot) keep
+/// the trace IN the slot — surfaced by the `Error.prototype.stack` accessor
+/// (error-stack-accessor proposal), so instances have no own `stack` property.
+/// Non-error objects (Error.captureStackTrace targets) get a non-enumerable
+/// own `stack` data property, matching V8. No-op when `err` is not an object.
 pub fn attach_stack(state: State, err: JsValue, header: String) -> State {
   case err {
     value.JsObject(ref) -> {
@@ -325,6 +360,8 @@ pub fn attach_stack(state: State, err: JsValue, header: String) -> State {
       let heap =
         heap.update(state.heap, ref, fn(slot) {
           case slot {
+            value.ObjectSlot(kind: value.ErrorObject(_), ..) ->
+              value.ObjectSlot(..slot, kind: value.ErrorObject(stack: trace))
             value.ObjectSlot(properties:, ..) ->
               value.ObjectSlot(
                 ..slot,
@@ -385,6 +422,37 @@ pub fn range_error(
   let #(state, err) =
     alloc_error(state, common.make_range_error, "RangeError", msg)
   #(state, Error(err))
+}
+
+/// Like type_error, but allocates the TypeError from the given realm's
+/// builtins instead of the current realm's. Cross-realm-aware natives
+/// (e.g. set Error.prototype.stack) must throw the %TypeError% of the
+/// realm the native function belongs to, not the calling realm's.
+pub fn type_error_with_builtins(
+  state: State,
+  builtins: Builtins,
+  msg: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let #(heap, err) = common.make_type_error(state.heap, builtins, msg)
+  let state =
+    attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  #(state, Error(err))
+}
+
+/// Allocate a TypeError as the bare #(thrown, state) tuple used by ops-level
+/// results `Result(_, #(JsValue, State))` (e.g. set_value's error arm).
+pub fn type_error_value(state: State, msg: String) -> #(JsValue, State) {
+  let #(state, err) =
+    alloc_error(state, common.make_type_error, "TypeError", msg)
+  #(err, state)
+}
+
+/// Allocate a RangeError as the bare #(thrown, state) tuple used by ops-level
+/// results `Result(_, #(JsValue, State))`.
+pub fn range_error_value(state: State, msg: String) -> #(JsValue, State) {
+  let #(state, err) =
+    alloc_error(state, common.make_range_error, "RangeError", msg)
+  #(err, state)
 }
 
 /// Allocate a ReferenceError and return it as the bare #(thrown, state) tuple

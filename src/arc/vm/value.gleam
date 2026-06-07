@@ -93,6 +93,11 @@ pub type FuncTemplate {
   FuncTemplate(
     name: Option(String),
     arity: Int,
+    /// §15.1.5 ExpectedArgumentCount — the value of the function's `length`
+    /// property: formal parameters before the first one with a default
+    /// initializer (rest params excluded). Distinct from `arity`, which
+    /// counts ALL fixed params for positional local-slot binding.
+    length: Int,
     local_count: Int,
     bytecode: TupleArray(Op),
     constants: TupleArray(JsValue),
@@ -110,6 +115,9 @@ pub type FuncTemplate {
     /// compile time from the function's syntactic kind (cf. QuickJS
     /// `is_constructor` / JSC `ConstructAbility`).
     is_constructor: Bool,
+    /// §10.2.1 [[Call]] step 2 [[IsClassConstructor]]: class constructors
+    /// (base AND derived) throw TypeError when invoked without `new`.
+    is_class_constructor: Bool,
     /// Present only for functions that contain a direct eval call.
     /// Maps variable name → local slot index. All such locals are boxed
     /// (BoxSlot refs), so direct eval can read/write them by index.
@@ -367,6 +375,8 @@ pub type NumberNativeFn {
 
 /// String.prototype methods.
 pub type StringNativeFn {
+  /// §22.1.3.36 String.prototype [ @@iterator ] ( )
+  StringPrototypeSymbolIterator
   StringPrototypeCharAt
   StringPrototypeCharCodeAt
   StringPrototypeIndexOf
@@ -425,10 +435,25 @@ pub type StringNativeFn {
 /// Error constructor — carries proto Ref.
 pub type ErrorNativeFn {
   ErrorConstructor(proto: Ref)
+  /// SuppressedError ( error, suppressed, message ) — Explicit Resource
+  /// Management proposal. Different argument order from NativeError.
+  SuppressedErrorConstructor(proto: Ref)
   ErrorPrototypeToString
   /// V8 extension Error.captureStackTrace(target [, constructorOpt]) — sets a
   /// `stack` property on `target` from the current call stack.
   ErrorCaptureStackTrace
+  /// get Error.prototype.stack — error-stack-accessor proposal. Returns the
+  /// [[ErrorData]] stack string, undefined for non-error objects.
+  ErrorStackGetter
+  /// set Error.prototype.stack — error-stack-accessor proposal.
+  /// SetterThatIgnoresPrototypeProperties(this, %Error.prototype%, "stack", v).
+  /// Carries its own realm's %Error.prototype% as `proto` — using the current
+  /// realm's intrinsic instead breaks cross-realm calls (and step 5's Set()
+  /// would re-enter this setter forever).
+  ErrorStackSetter(proto: Ref)
+  /// Error.isError ( arg ) — Error.isError proposal: true iff arg is an
+  /// Object with an [[ErrorData]] internal slot.
+  ErrorIsError
   DomExceptionConstructor(proto: Ref)
   DomExceptionGetCode
 }
@@ -511,6 +536,18 @@ pub type ObjectNativeFn {
   ObjectPrototypeIsPrototypeOf
   ObjectPrototypeToLocaleString
   ObjectGroupBy
+  /// Annex B §B.2.2.2 Object.prototype.__defineGetter__
+  ObjectPrototypeDefineGetter
+  /// Annex B §B.2.2.3 Object.prototype.__defineSetter__
+  ObjectPrototypeDefineSetter
+  /// Annex B §B.2.2.4 Object.prototype.__lookupGetter__
+  ObjectPrototypeLookupGetter
+  /// Annex B §B.2.2.5 Object.prototype.__lookupSetter__
+  ObjectPrototypeLookupSetter
+  /// Annex B §B.2.2.1.1 get Object.prototype.__proto__
+  ObjectPrototypeProtoGetter
+  /// Annex B §B.2.2.1.2 set Object.prototype.__proto__
+  ObjectPrototypeProtoSetter
 }
 
 /// Arc methods — non-standard engine-specific utilities.
@@ -546,6 +583,144 @@ pub type ReflectNativeFn {
   ReflectPreventExtensions
   ReflectSet
   ReflectSetPrototypeOf
+}
+
+/// [[ArrayIterationKind]] of an Array Iterator — ES2024 §23.1.5.1
+/// CreateArrayIterator. Decides what each .next() yields: the index ("key"),
+/// the element ("value"), or a fresh two-element array ("key+value").
+pub type ArrayIterKind {
+  ArrayIterKeys
+  ArrayIterValues
+  ArrayIterEntries
+}
+
+/// Element type of a TypedArray — ES2024 §23.2 Table 69.
+pub type TypedArrayKind {
+  Int8Kind
+  Uint8Kind
+  Uint8ClampedKind
+  Int16Kind
+  Uint16Kind
+  Int32Kind
+  Uint32Kind
+  Float32Kind
+  Float64Kind
+  BigInt64Kind
+  BigUint64Kind
+}
+
+/// All TypedArray kinds, in the order the global constructors are installed.
+pub const all_typed_array_kinds = [
+  Int8Kind,
+  Uint8Kind,
+  Uint8ClampedKind,
+  Int16Kind,
+  Uint16Kind,
+  Int32Kind,
+  Uint32Kind,
+  Float32Kind,
+  Float64Kind,
+  BigInt64Kind,
+  BigUint64Kind,
+]
+
+/// Element size in bytes — §23.2 Table 69.
+pub fn typed_array_element_size(kind: TypedArrayKind) -> Int {
+  case kind {
+    Int8Kind | Uint8Kind | Uint8ClampedKind -> 1
+    Int16Kind | Uint16Kind -> 2
+    Int32Kind | Uint32Kind | Float32Kind -> 4
+    Float64Kind | BigInt64Kind | BigUint64Kind -> 8
+  }
+}
+
+/// [[TypedArrayName]] — the constructor's global name.
+pub fn typed_array_name(kind: TypedArrayKind) -> String {
+  case kind {
+    Int8Kind -> "Int8Array"
+    Uint8Kind -> "Uint8Array"
+    Uint8ClampedKind -> "Uint8ClampedArray"
+    Int16Kind -> "Int16Array"
+    Uint16Kind -> "Uint16Array"
+    Int32Kind -> "Int32Array"
+    Uint32Kind -> "Uint32Array"
+    Float32Kind -> "Float32Array"
+    Float64Kind -> "Float64Array"
+    BigInt64Kind -> "BigInt64Array"
+    BigUint64Kind -> "BigUint64Array"
+  }
+}
+
+/// Whether the kind's content type is BigInt (§23.2: ContentType).
+pub fn typed_array_is_bigint(kind: TypedArrayKind) -> Bool {
+  case kind {
+    BigInt64Kind | BigUint64Kind -> True
+    _ -> False
+  }
+}
+
+/// TypedArray natives — %TypedArray% intrinsic, the 11 concrete constructors,
+/// and %TypedArray%.prototype accessors/methods.
+pub type TypedArrayNativeFn {
+  /// %TypedArray% — the abstract intrinsic. Constructing or calling throws.
+  TypedArrayIntrinsicConstructor
+  /// One of the 11 concrete constructors (Int8Array .. BigUint64Array).
+  TypedArrayConstructor(kind: TypedArrayKind, proto: Ref)
+  TypedArrayGetBuffer
+  TypedArrayGetByteLength
+  TypedArrayGetByteOffset
+  TypedArrayGetLength
+  /// get %TypedArray%.prototype[@@toStringTag] — the [[TypedArrayName]].
+  TypedArrayGetToStringTag
+  /// get %TypedArray%[Symbol.species] — returns `this`.
+  TypedArrayGetSpecies
+  TypedArrayPrototypeFill
+  TypedArrayPrototypeSet
+  TypedArrayPrototypeSubarray
+  TypedArrayPrototypeSlice
+  TypedArrayPrototypeJoin
+  TypedArrayPrototypeIndexOf
+  TypedArrayPrototypeIncludes
+  TypedArrayPrototypeKeys
+  TypedArrayPrototypeValues
+  TypedArrayPrototypeEntries
+  TypedArrayPrototypeAt
+  TypedArrayPrototypeToString
+  TypedArrayPrototypeCopyWithin
+  TypedArrayPrototypeEvery
+  TypedArrayPrototypeSome
+  TypedArrayPrototypeForEach
+  TypedArrayPrototypeMap
+  TypedArrayPrototypeFilter
+  TypedArrayPrototypeFind
+  TypedArrayPrototypeFindIndex
+  TypedArrayPrototypeFindLast
+  TypedArrayPrototypeFindLastIndex
+  TypedArrayPrototypeLastIndexOf
+  TypedArrayPrototypeReduce
+  TypedArrayPrototypeReduceRight
+  TypedArrayPrototypeReverse
+  TypedArrayPrototypeToReversed
+  TypedArrayPrototypeSort
+  TypedArrayPrototypeToSorted
+  TypedArrayPrototypeToLocaleString
+  TypedArrayPrototypeWith
+  /// %TypedArray%.from ( source [ , mapfn [ , thisArg ] ] ) — §23.2.2.1
+  TypedArrayFrom
+  /// %TypedArray%.of ( ...items ) — §23.2.2.2
+  TypedArrayOf
+  /// Uint8Array.prototype.toBase64 — proposal-arraybuffer-base64
+  Uint8ArrayPrototypeToBase64
+  /// Uint8Array.prototype.toHex — proposal-arraybuffer-base64
+  Uint8ArrayPrototypeToHex
+  /// Uint8Array.prototype.setFromBase64 — proposal-arraybuffer-base64
+  Uint8ArrayPrototypeSetFromBase64
+  /// Uint8Array.prototype.setFromHex — proposal-arraybuffer-base64
+  Uint8ArrayPrototypeSetFromHex
+  /// Uint8Array.fromBase64 — static on the Uint8Array constructor
+  Uint8ArrayFromBase64
+  /// Uint8Array.fromHex — static on the Uint8Array constructor
+  Uint8ArrayFromHex
 }
 
 /// Map key type — normalizes JS values for use as Dict keys.
@@ -610,42 +785,116 @@ pub fn map_key_to_js(key: MapKey) -> JsValue {
 }
 
 pub fn from_int(n: Int) -> JsValue {
-  JsNumber(Finite(int.to_float(n)))
+  JsNumber(num_from_int(n))
 }
 
-/// Forward-insertion-order live values of a SetObject.
-///
-/// `keys_rev` is reversed insertion order and may contain tombstones
-/// (deleted keys) and duplicates (re-added-after-delete keys). Walks
-/// newest-first, prepending each live key's value the FIRST time it's seen
-/// (its most recent insertion position) — the shrinking `remaining` dict
-/// doubles as the seen-set. Result is forward insertion order, deduped.
+const nf_two52 = 4_503_599_627_370_496
+
+const nf_two53 = 9_007_199_254_740_992
+
+/// Integer → Number with correct rounding (round-to-nearest, ties-to-even).
+/// Erlang's float/1 mis-rounds integers wider than 53 bits, so reduce to a
+/// 53-bit mantissa ourselves and convert the (exactly representable) result.
+pub fn num_from_int(n: Int) -> JsNum {
+  let a = int.absolute_value(n)
+  case a < nf_two53 {
+    True -> Finite(int.to_float(n))
+    False -> {
+      let s = nf_bit_length(a, 0) - 53
+      let q0 = int.bitwise_shift_right(a, s)
+      let r = a - int.bitwise_shift_left(q0, s)
+      let half = int.bitwise_shift_left(1, s - 1)
+      let q = case r > half || { r == half && q0 % 2 == 1 } {
+        True -> q0 + 1
+        False -> q0
+      }
+      let #(q, s) = case q == nf_two53 {
+        True -> #(nf_two52, s + 1)
+        False -> #(q, s)
+      }
+      case 53 + s > 1024 {
+        True ->
+          case n < 0 {
+            True -> NegInfinity
+            False -> Infinity
+          }
+        False -> {
+          let f = int.to_float(int.bitwise_shift_left(q, s))
+          case n < 0 {
+            True -> Finite(0.0 -. f)
+            False -> Finite(f)
+          }
+        }
+      }
+    }
+  }
+}
+
+fn nf_bit_length(n: Int, acc: Int) -> Int {
+  case n == 0 {
+    True -> acc
+    False -> nf_bit_length(int.bitwise_shift_right(n, 1), acc + 1)
+  }
+}
+
+/// Forward-insertion-order live values of a SetObject: the live seqs in
+/// `order`, ascending, resolved through the data dict.
 pub fn set_live_values(
   data: Dict(MapKey, JsValue),
-  keys_rev: List(MapKey),
-  keys_len: Int,
+  order: Dict(Int, MapKey),
 ) -> List(JsValue) {
-  case keys_len == dict.size(data) {
-    // No tombstones or duplicates possible — every list entry is live and
-    // unique, so skip the shrinking seen-set dict.delete per element.
-    True ->
-      list.fold(keys_rev, [], fn(vs, k) {
-        case dict.get(data, k) {
-          Ok(v) -> [v, ..vs]
-          Error(Nil) -> vs
-        }
-      })
-    False -> {
-      let #(values, _remaining) =
-        list.fold(keys_rev, #([], data), fn(acc, k) {
-          let #(vs, remaining) = acc
-          case dict.get(remaining, k) {
-            Ok(v) -> #([v, ..vs], dict.delete(remaining, k))
-            Error(Nil) -> acc
+  live_entries(data, order) |> list.map(fn(e) { e.1 })
+}
+
+/// Forward-insertion-order live (key, value) entries of a Map/Set backing
+/// store. `order` maps insertion sequence number → live key (deleted entries
+/// are removed, leaving a gap); sorting the seqs recovers insertion order.
+pub fn live_entries(
+  data: Dict(MapKey, JsValue),
+  order: Dict(Int, MapKey),
+) -> List(#(MapKey, JsValue)) {
+  live_entries_from(data, order, 0)
+}
+
+/// Live (key, value) entries whose insertion sequence number is >= cursor,
+/// ascending. Used to drain a partially-consumed Map/Set iterator.
+pub fn live_entries_from(
+  data: Dict(MapKey, JsValue),
+  order: Dict(Int, MapKey),
+  cursor: Int,
+) -> List(#(MapKey, JsValue)) {
+  dict.to_list(order)
+  |> list.filter(fn(p) { p.0 >= cursor })
+  |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
+  |> list.filter_map(fn(p) {
+    dict.get(data, p.1) |> result.map(fn(v) { #(p.1, v) })
+  })
+}
+
+/// First live Map/Set entry at sequence number >= cursor, scanning past the
+/// gaps that deleted entries leave behind (the spec's "empty" records).
+/// Returns #(seq, key, value); the iterator resumes at seq + 1. Each seq
+/// value is scanned at most once over an iterator's lifetime, so a full
+/// iteration is O(total insertions), amortized O(1) per .next().
+pub fn entry_from_seq(
+  data: Dict(MapKey, JsValue),
+  order: Dict(Int, MapKey),
+  cursor: Int,
+  next_seq: Int,
+) -> option.Option(#(Int, MapKey, JsValue)) {
+  case cursor >= next_seq {
+    True -> option.None
+    False ->
+      case dict.get(order, cursor) {
+        Ok(k) ->
+          case dict.get(data, k) {
+            Ok(v) -> option.Some(#(cursor, k, v))
+            // order/data are kept in lockstep; a missing key would mean a
+            // stale order entry — skip it rather than yield a dead record.
+            Error(Nil) -> entry_from_seq(data, order, cursor + 1, next_seq)
           }
-        })
-      values
-    }
+        Error(Nil) -> entry_from_seq(data, order, cursor + 1, next_seq)
+      }
   }
 }
 
@@ -698,13 +947,16 @@ pub type MapIterKind {
   MapIterEntries
 }
 
-/// WeakMap methods — constructor, get, set, has, delete.
+/// WeakMap methods — constructor, get, set, has, delete, getOrInsert,
+/// getOrInsertComputed.
 pub type WeakMapNativeFn {
   WeakMapConstructor(proto: Ref)
   WeakMapPrototypeGet
   WeakMapPrototypeSet
   WeakMapPrototypeHas
   WeakMapPrototypeDelete
+  WeakMapPrototypeGetOrInsert
+  WeakMapPrototypeGetOrInsertComputed
 }
 
 /// WeakSet methods — constructor, add, has, delete.
@@ -713,6 +965,230 @@ pub type WeakSetNativeFn {
   WeakSetPrototypeAdd
   WeakSetPrototypeHas
   WeakSetPrototypeDelete
+}
+
+/// FinalizationRegistry methods — ES2021 §26.2.
+pub type FinalizationRegistryNativeFn {
+  FinalizationRegistryConstructor(proto: Ref)
+  FinalizationRegistryPrototypeRegister
+  FinalizationRegistryPrototypeUnregister
+}
+
+/// One [[Cells]] record of a FinalizationRegistry — §26.2.1.1.
+/// `target` is [[WeakRefTarget]] (object or non-registered symbol),
+/// `held` is [[HeldValue]], `token` is [[UnregisterToken]] (None = ~empty~).
+pub type FinRegCell {
+  FinRegCell(target: JsValue, held: JsValue, token: Option(JsValue))
+}
+
+/// DisposableStack methods — Explicit Resource Management proposal §12.3.
+pub type DisposableStackNativeFn {
+  /// §12.3.1.1 DisposableStack ( )
+  DisposableStackConstructor(proto: Ref)
+  /// §12.3.3.3 DisposableStack.prototype.dispose ( )
+  DisposableStackPrototypeDispose
+  /// §12.3.3.6 DisposableStack.prototype.use ( value )
+  DisposableStackPrototypeUse
+  /// §12.3.3.1 DisposableStack.prototype.adopt ( value, onDispose )
+  DisposableStackPrototypeAdopt
+  /// §12.3.3.2 DisposableStack.prototype.defer ( onDispose )
+  DisposableStackPrototypeDefer
+  /// §12.3.3.5 DisposableStack.prototype.move ( ) — proto is the intrinsic
+  /// %DisposableStack.prototype% (the new stack is NOT created from new.target).
+  DisposableStackPrototypeMove(proto: Ref)
+  /// §12.3.3.4 get DisposableStack.prototype.disposed
+  DisposableStackDisposedGetter
+  /// §12.4.1.1 AsyncDisposableStack ( )
+  AsyncDisposableStackConstructor(proto: Ref)
+  /// §12.4.3.3 AsyncDisposableStack.prototype.disposeAsync ( )
+  AsyncDisposableStackPrototypeDisposeAsync
+  /// §12.4.3.6 AsyncDisposableStack.prototype.use ( value )
+  AsyncDisposableStackPrototypeUse
+  /// §12.4.3.1 AsyncDisposableStack.prototype.adopt ( value, onDisposeAsync )
+  AsyncDisposableStackPrototypeAdopt
+  /// §12.4.3.2 AsyncDisposableStack.prototype.defer ( onDisposeAsync )
+  AsyncDisposableStackPrototypeDefer
+  /// §12.4.3.5 AsyncDisposableStack.prototype.move ( ) — proto is the
+  /// intrinsic %AsyncDisposableStack.prototype%.
+  AsyncDisposableStackPrototypeMove(proto: Ref)
+  /// §12.4.3.4 get AsyncDisposableStack.prototype.disposed
+  AsyncDisposableStackDisposedGetter
+  /// Await continuation for the disposeAsync resource loop: invoked when an
+  /// awaited dispose result settles. Carries the not-yet-disposed tail of the
+  /// resource stack, the pending throw completion (DisposeResources'
+  /// `completion`), and the disposeAsync promise capability to settle at the
+  /// end. `is_reject` distinguishes the fulfill/reject reaction handler.
+  AsyncDisposeContinue(
+    remaining: List(DisposeResource),
+    pending: option.Option(JsValue),
+    resolve: JsValue,
+    reject: JsValue,
+    is_reject: Bool,
+  )
+  /// `using`/`await using` desugar: the disposer produced by the GetDisposer
+  /// opcode (CreateDisposableResource). Calling it performs
+  /// Call(method, value). When `discard` is true (async hint falling back to
+  /// a sync @@dispose method — GetDisposeMethod step 1.b.ii's closure), the
+  /// call result is dropped and undefined returned, so the desugared `await`
+  /// awaits undefined rather than the sync method's result.
+  UsingDisposer(method: JsValue, value: JsValue, discard: Bool)
+}
+
+/// One entry of a [[DisposableResourceStack]] — a DisposableResource Record
+/// (Explicit Resource Management proposal §3.1).
+pub type DisposeResource {
+  /// From use(): [[ResourceValue]] = value, [[DisposeMethod]] = method.
+  /// Dispose calls `method` with `value` as this and no arguments.
+  /// On an async stack the call result is awaited.
+  SyncDispose(value: JsValue, method: JsValue)
+  /// From adopt()/defer(): the spec wraps the user callback in a built-in
+  /// closure with [[ResourceValue]] = undefined. We store the callback and
+  /// its argument list directly (the closure is not observable from JS).
+  /// Dispose calls `callback` with undefined this and `args`, DISCARDS the
+  /// result (the spec closure returns undefined); an async stack then awaits
+  /// undefined.
+  DisposeCallback(callback: JsValue, args: List(JsValue))
+  /// Async use() fallback when only @@dispose exists (GetDisposeMethod's
+  /// wrapper closure): call `method` with `value` as this, DISCARD the
+  /// result, then await undefined.
+  AsyncFallbackDispose(value: JsValue, method: JsValue)
+  /// Async use(null/undefined): [[ResourceValue]] and [[DisposeMethod]] are
+  /// both undefined. Nothing is called; DisposeResources sets needsAwait.
+  NullDispose
+}
+
+/// ArrayBuffer / SharedArrayBuffer methods — ES2024 §25.1/§25.2.
+/// One dispatch family covers both: the same internal slot layout
+/// (ArrayBufferObject exotic kind) backs both, distinguished by `shared`.
+pub type ArrayBufferNativeFn {
+  /// §25.1.4.1 ArrayBuffer ( length [ , options ] )
+  ArrayBufferConstructor(proto: Ref)
+  /// §25.1.5.1 ArrayBuffer.isView ( arg )
+  ArrayBufferIsView
+  /// §25.1.5.3 get ArrayBuffer [ @@species ]
+  ArrayBufferGetSpecies
+  /// §25.1.6.2 get ArrayBuffer.prototype.byteLength
+  ArrayBufferGetByteLength
+  /// §25.1.6.3 get ArrayBuffer.prototype.detached
+  ArrayBufferGetDetached
+  /// §25.1.6.4 get ArrayBuffer.prototype.maxByteLength
+  ArrayBufferGetMaxByteLength
+  /// §25.1.6.5 get ArrayBuffer.prototype.resizable
+  ArrayBufferGetResizable
+  /// §25.1.6.6 ArrayBuffer.prototype.resize ( newLength )
+  ArrayBufferResize
+  /// §25.1.6.7 ArrayBuffer.prototype.slice ( start, end )
+  ArrayBufferSlice
+  /// §25.1.6.8 ArrayBuffer.prototype.transfer ( [ newLength ] )
+  ArrayBufferTransfer
+  /// §25.1.6.9 ArrayBuffer.prototype.transferToFixedLength ( [ newLength ] )
+  ArrayBufferTransferToFixedLength
+  /// §25.2.3.1 SharedArrayBuffer ( length [ , options ] )
+  SharedArrayBufferConstructor(proto: Ref)
+  /// §25.2.4.2 get SharedArrayBuffer [ @@species ]
+  SharedArrayBufferGetSpecies
+  /// §25.2.5.2 get SharedArrayBuffer.prototype.byteLength
+  SharedArrayBufferGetByteLength
+  /// §25.2.5.3 SharedArrayBuffer.prototype.grow ( newLength )
+  SharedArrayBufferGrow
+  /// §25.2.5.4 get SharedArrayBuffer.prototype.growable
+  SharedArrayBufferGetGrowable
+  /// §25.2.5.5 get SharedArrayBuffer.prototype.maxByteLength
+  SharedArrayBufferGetMaxByteLength
+  /// §25.2.5.6 SharedArrayBuffer.prototype.slice ( start, end )
+  SharedArrayBufferSlice
+  /// test262 host hook: $262.detachArrayBuffer ( buffer )
+  DetachArrayBuffer262
+}
+
+/// Atomics namespace functions — ES2024 §25.4.
+pub type AtomicsNativeFn {
+  /// §25.4.5 Atomics.add ( typedArray, index, value )
+  AtomicsAdd
+  /// §25.4.6 Atomics.and ( typedArray, index, value )
+  AtomicsAnd
+  /// §25.4.7 Atomics.compareExchange ( typedArray, index, expected, replacement )
+  AtomicsCompareExchange
+  /// §25.4.8 Atomics.exchange ( typedArray, index, value )
+  AtomicsExchange
+  /// §25.4.9 Atomics.isLockFree ( size )
+  AtomicsIsLockFree
+  /// §25.4.10 Atomics.load ( typedArray, index )
+  AtomicsLoad
+  /// §25.4.11 Atomics.or ( typedArray, index, value )
+  AtomicsOr
+  /// §25.4.12 Atomics.store ( typedArray, index, value )
+  AtomicsStore
+  /// §25.4.13 Atomics.sub ( typedArray, index, value )
+  AtomicsSub
+  /// §25.4.14 Atomics.wait ( typedArray, index, value, timeout )
+  AtomicsWait
+  /// §25.4.15 Atomics.waitAsync ( typedArray, index, value, timeout )
+  AtomicsWaitAsync
+  /// §25.4.16 Atomics.notify ( typedArray, index, count )
+  AtomicsNotify
+  /// Atomics.pause ( [ iterationNumber ] ) — microwait proposal.
+  AtomicsPause
+  /// §25.4.17 Atomics.xor ( typedArray, index, value )
+  AtomicsXor
+}
+
+/// A pending Atomics.waitAsync waiter: a promise to resolve with "ok" when
+/// Atomics.notify hits the same (buffer, byte offset) waiter-list slot.
+/// `promise_data` is the PromiseSlot ref (for settling); `promise` is the
+/// visible Promise object ref (kept rooted while the waiter is pending).
+/// `deadline` is the absolute monotonic-clock millisecond at which the waiter
+/// times out and must be settled with "timed-out" (§25.4.3.14 DoWait,
+/// EnqueueAtomicsWaitAsyncTimeoutJob) — None for an infinite timeout.
+pub type AtomicsWaiter {
+  AtomicsWaiter(
+    buffer: Ref,
+    byte_offset: Int,
+    promise_data: Ref,
+    promise: Ref,
+    deadline: option.Option(Int),
+  )
+}
+
+/// A pending host timer scheduled by the global `setTimeout`: the event loop
+/// calls `callback(..args)` once the monotonic clock passes `deadline`
+/// (absolute milliseconds, same clock as Atomics.waitAsync deadlines).
+/// `id` is the numeric handle returned to JS and accepted by `clearTimeout`.
+pub type HostTimer {
+  HostTimer(id: Int, deadline: Int, callback: JsValue, args: List(JsValue))
+}
+
+/// Element type read/written by DataView.prototype get*/set* methods.
+/// Table "The TypedArray Constructors" element sizes apply (1/2/4/8 bytes).
+pub type ViewElementType {
+  VInt8
+  VUint8
+  VInt16
+  VUint16
+  VInt32
+  VUint32
+  VFloat16
+  VFloat32
+  VFloat64
+  VBigInt64
+  VBigUint64
+}
+
+/// DataView methods — ES2024 Section 25.3. Constructor, accessor getters,
+/// and the get/set methods parametrized by element type.
+pub type DataViewNativeFn {
+  /// Section 25.3.2.1 DataView ( buffer [ , byteOffset [ , byteLength ] ] )
+  DataViewConstructor(proto: Ref)
+  /// Section 25.3.4.1 get DataView.prototype.buffer
+  DataViewGetBuffer
+  /// Section 25.3.4.2 get DataView.prototype.byteLength
+  DataViewGetByteLength
+  /// Section 25.3.4.3 get DataView.prototype.byteOffset
+  DataViewGetByteOffset
+  /// DataView.prototype.get<Type> ( byteOffset [ , littleEndian ] )
+  DataViewGet(element: ViewElementType)
+  /// DataView.prototype.set<Type> ( byteOffset, value [ , littleEndian ] )
+  DataViewSet(element: ViewElementType)
 }
 
 /// Iterator Helper kind — ES2025 §27.1.3. Which lazy combinator created
@@ -725,11 +1201,33 @@ pub type IteratorHelperKind {
   HelperFlatMap
 }
 
+/// Iterator.zip / Iterator.zipKeyed mode — tc39 joint-iteration proposal.
+pub type ZipMode {
+  ZipShortest
+  ZipLongest
+  ZipStrict
+}
+
+/// Per-input state for an Iterator.zip/zipKeyed helper. Index-aligned with
+/// the helper's padding list (and keys list for zipKeyed).
+pub type ZipMember {
+  /// Live iterator record: iterator object + cached next method.
+  ZipOpen(iter: JsValue, next_method: JsValue)
+  /// Exhausted in "longest" mode — yields its padding value from now on.
+  /// (Removed from the spec's openIters list; iters[i] set to null.)
+  ZipExhausted
+}
+
 /// Iterator methods — ES2025 §27.1. Iterator constructor, Iterator.from,
 /// Iterator.prototype helper methods, and the per-helper next/return.
 pub type IteratorNativeFn {
   IteratorConstructor
   IteratorFrom
+  // Iterator.zip / Iterator.zipKeyed — tc39 joint-iteration proposal
+  IteratorZip
+  IteratorZipKeyed
+  // Iterator.concat — tc39 iterator-sequencing proposal
+  IteratorConcat
   // Iterator.prototype eager consumers
   IteratorPrototypeToArray
   IteratorPrototypeForEach
@@ -758,10 +1256,19 @@ pub type IteratorNativeFn {
 
 /// RegExp methods — constructor, prototype methods, accessor getters.
 pub type RegExpNativeFn {
-  RegExpConstructor
+  /// `legacy` holds the tc39 legacy-regexp proposal's internal slots
+  /// ([[RegExpInput]], [[RegExpLastMatch]], [[RegExpParen1]], …) keyed by
+  /// slot id. Living inside the constructor's NativeFunction kind keeps the
+  /// state per-realm (each realm has its own %RegExp% object) while staying
+  /// invisible to OrdinaryOwnPropertyKeys — internal slots must never show
+  /// up in Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
+  /// Unwritten slots read as "" (InitializeLegacyRegExpStaticProperties).
+  RegExpConstructor(legacy: Dict(Int, String))
   RegExpPrototypeTest
   RegExpPrototypeExec
   RegExpPrototypeToString
+  /// Annex B §B.2.4.1 RegExp.prototype.compile
+  RegExpPrototypeCompile
   RegExpGetSource
   RegExpGetFlags
   RegExpGetGlobal
@@ -770,11 +1277,23 @@ pub type RegExpNativeFn {
   RegExpGetDotAll
   RegExpGetSticky
   RegExpGetUnicode
+  RegExpGetUnicodeSets
   RegExpGetHasIndices
   RegExpSymbolMatch
+  RegExpSymbolMatchAll
   RegExpSymbolReplace
   RegExpSymbolSearch
   RegExpSymbolSplit
+  /// %RegExpStringIteratorPrototype%.next() — ES2024 §22.2.9.2.1
+  RegExpStringIteratorNext
+  /// Legacy static accessor getter (tc39 proposal-regexp-legacy-features):
+  /// RegExp.input/$_, lastMatch/$&, lastParen/$+, leftContext/$`,
+  /// rightContext/$', $1-$9. `ctor` is the owning realm's %RegExp%
+  /// (GetLegacyRegExpStaticProperty's SameValue receiver check); `slot` is
+  /// the key in the RegExpConstructor kind's `legacy` state dict.
+  RegExpLegacyGetter(ctor: Ref, slot: Int)
+  /// Legacy static accessor setter — only RegExp.input/$_ has one.
+  RegExpLegacyInputSetter(ctor: Ref)
 }
 
 /// Date methods — constructor, static, prototype getters/setters/stringifiers.
@@ -831,6 +1350,52 @@ pub type DateNativeFn {
   DatePrototypeSymbolToPrimitive
 }
 
+/// Refs to all eight Temporal type prototypes, captured inside each Temporal
+/// native-function token at init time so methods can allocate instances of
+/// sibling types (e.g. PlainDate.prototype.toPlainDateTime needs the
+/// PlainDateTime prototype). All refs are rooted at builtin init.
+pub type TemporalProtos {
+  TemporalProtos(
+    plain_date: Ref,
+    plain_time: Ref,
+    plain_date_time: Ref,
+    plain_year_month: Ref,
+    plain_month_day: Ref,
+    duration: Ref,
+    instant: Ref,
+    zoned_date_time: Ref,
+  )
+}
+
+/// Which Temporal type a native function belongs to.
+pub type TemporalKind {
+  TemporalPlainDateKind
+  TemporalPlainTimeKind
+  TemporalPlainDateTimeKind
+  TemporalPlainYearMonthKind
+  TemporalPlainMonthDayKind
+  TemporalDurationKind
+  TemporalInstantKind
+  TemporalZonedDateTimeKind
+}
+
+/// Temporal natives — dispatched by (kind, method-name) pairs rather than one
+/// enum variant per method (Temporal has ~200 methods; string dispatch keeps
+/// this type small). Names are fixed at builtin-init time, so an unknown name
+/// is unreachable.
+pub type TemporalNativeFn {
+  /// `new Temporal.<Type>(...)`
+  TemporalCtor(kind: TemporalKind, protos: TemporalProtos)
+  /// Static method, e.g. Temporal.PlainDate.from / .compare
+  TemporalStatic(kind: TemporalKind, name: String, protos: TemporalProtos)
+  /// Prototype getter, e.g. get Temporal.PlainDate.prototype.year
+  TemporalGetterFn(kind: TemporalKind, name: String, protos: TemporalProtos)
+  /// Prototype method, e.g. Temporal.PlainDate.prototype.add
+  TemporalMethod(kind: TemporalKind, name: String, protos: TemporalProtos)
+  /// Temporal.Now.* functions
+  TemporalNowFn(name: String, protos: TemporalProtos)
+}
+
 /// What's stored in NativeFunction — either a dispatch-level or call-level native.
 /// Dispatch-level natives are handled by dispatch_native (simple return value).
 /// Call-level natives are handled by call_native (need stack manipulation, VM re-entry).
@@ -863,11 +1428,90 @@ pub type NativeFn {
   SetNative(SetNativeFn)
   WeakMapNative(WeakMapNativeFn)
   WeakSetNative(WeakSetNativeFn)
+  FinalizationRegistryNative(FinalizationRegistryNativeFn)
+  DisposableStackNative(DisposableStackNativeFn)
   IteratorNative(IteratorNativeFn)
   RegExpNative(RegExpNativeFn)
   DateNative(DateNativeFn)
+  IntlNative(IntlNativeFn)
+  ArrayBufferNative(ArrayBufferNativeFn)
+  AtomicsNative(AtomicsNativeFn)
+  TypedArrayNative(TypedArrayNativeFn)
+  DataViewNative(DataViewNativeFn)
+  TemporalNative(TemporalNativeFn)
+  ShadowRealmNative(ShadowRealmNativeFn)
   /// VM-level natives handled in dispatch_native — don't need stack manipulation.
   VmNative(VmNativeFn)
+}
+
+/// ShadowRealm natives (proposal-shadowrealm).
+pub type ShadowRealmNativeFn {
+  /// ShadowRealm ( ) — the constructor. Creates a fresh realm.
+  ShadowRealmConstructor(proto: Ref)
+  /// ShadowRealm.prototype.evaluate ( sourceText ). `fn_proto` is the
+  /// %Function.prototype% of the realm this method object belongs to —
+  /// a unique per-realm marker used to recover the method's own realm
+  /// (the spec's callerRealm for wrapping/errors) at dispatch time.
+  ShadowRealmEvaluate(fn_proto: Ref)
+  /// ShadowRealm.prototype.importValue ( specifier, exportName ). `fn_proto`
+  /// as in ShadowRealmEvaluate.
+  ShadowRealmImportValue(fn_proto: Ref)
+  /// Wrapped function exotic object [[Call]] (proposal §2.1).
+  /// `target` is [[WrappedTargetFunction]], `caller_realm` is the wrapped
+  /// function's [[Realm]] (a RealmSlot ref — the realm the wrapper lives in),
+  /// `target_realm` is the realm the target function belongs to.
+  WrappedFunctionCall(target: JsValue, caller_realm: Ref, target_realm: Ref)
+}
+
+/// Which Intl service an Intl instance object (or native fn) belongs to.
+/// Used both as the brand for [[InitializedX]] internal-slot checks and to
+/// route shared method implementations (resolvedOptions, supportedLocalesOf).
+pub type IntlService {
+  IntlLocale
+  IntlCollator
+  IntlNumberFormat
+  IntlDateTimeFormat
+  IntlPluralRules
+  IntlListFormat
+  IntlRelativeTimeFormat
+  IntlSegmenter
+  IntlDisplayNames
+  IntlDurationFormat
+  /// %SegmentsPrototype% instances returned by Segmenter.prototype.segment.
+  IntlSegments
+  /// %SegmentIteratorPrototype% instances.
+  IntlSegmentIterator
+}
+
+/// Identifies an Intl native function (ECMA-402).
+pub type IntlNativeFn {
+  /// Intl.getCanonicalLocales(locales)
+  IntlGetCanonicalLocales
+  /// Intl.supportedValuesOf(key)
+  IntlSupportedValuesOf
+  /// new Intl.<Service>(locales, options) — proto is the intrinsic prototype.
+  IntlConstructor(service: IntlService, proto: Ref)
+  /// Intl.<Service>.supportedLocalesOf(locales, options)
+  IntlSupportedLocalesOf(service: IntlService)
+  /// Intl.<Service>.prototype.resolvedOptions()
+  IntlResolvedOptions(service: IntlService)
+  /// Accessor getter for NumberFormat/DateTimeFormat .format and
+  /// Collator .compare — returns (and caches) a bound method.
+  IntlBoundGetter(service: IntlService)
+  /// The bound method produced by IntlBoundGetter — target is the instance.
+  IntlBoundMethod(service: IntlService, target: Ref)
+  /// Named prototype method (format/formatToParts/select/of/segment/…).
+  /// The method name discriminates inside the intl builtins module.
+  IntlMethod(service: IntlService, method: String)
+  /// Segmenter.prototype.segment — needs the %SegmentsPrototype% ref.
+  IntlSegmenterSegment(segments_proto: Ref)
+  /// %SegmentsPrototype%[Symbol.iterator] — needs %SegmentIteratorPrototype%.
+  IntlSegmentsIterator(iter_proto: Ref)
+  /// Intl.Locale.prototype getter (language/script/region/baseName/…).
+  IntlLocaleGetter(name: String)
+  /// Intl.Locale.prototype method needing the Locale prototype to allocate
+  /// result Locale objects (maximize/minimize) or plain (toString).
+  IntlLocaleMethod(method: String, proto: Ref)
 }
 
 /// Native functions handled in call_native — need stack manipulation,
@@ -927,6 +1571,28 @@ pub type CallNativeFn {
     resolve: JsValue,
     reject: JsValue,
   )
+  /// Promise.allKeyed(promises) — await-dictionary proposal.
+  PromiseAllKeyedStatic
+  /// Promise.allSettledKeyed(promises) — await-dictionary proposal.
+  PromiseAllSettledKeyedStatic
+  /// Per-element handler for Promise.allKeyed / Promise.allSettledKeyed
+  /// (PerformPromiseAllKeyed fulfilled/rejected element closures).
+  /// `status_field` is None for the allKeyed fulfill handler (stores the raw
+  /// value); Some(#("fulfilled", "value")) / Some(#("rejected", "reason"))
+  /// for the allSettledKeyed handlers (stores a status wrapper object).
+  PromiseKeyedElement(
+    index: Int,
+    remaining_ref: Ref,
+    keys_ref: Ref,
+    values_ref: Ref,
+    already_called_ref: Ref,
+    resolve: JsValue,
+    status_field: Option(#(String, String)),
+  )
+  /// GetCapabilitiesExecutor (§27.2.1.5.1) for NewPromiseCapability with a
+  /// custom constructor — the boxes receive the resolve/reject functions the
+  /// constructor passes to its executor.
+  PromiseCapabilityExecutor(resolve_box: Ref, reject_box: Ref)
   /// Internal resolve function created by CreateResolvingFunctions.
   PromiseResolveFunction(
     promise_ref: Ref,
@@ -976,17 +1642,85 @@ pub type CallNativeFn {
   /// onRejected closure for AsyncFromSyncIteratorContinuation: closes the
   /// underlying sync iterator then rethrows the rejection reason.
   AsyncFromSyncClose(sync_iter: Ref)
+  /// Array.fromAsync(asyncItems [, mapfn [, thisArg]]) — §23.1.2.1.
+  ArrayFromAsync
+  /// fromAsync iterator path: onFulfilled for the awaited next() result.
+  ArrayFromAsyncOnNext(ctx: FromAsyncCtx)
+  /// fromAsync iterator path: onFulfilled for the awaited mapfn result.
+  ArrayFromAsyncOnMapped(ctx: FromAsyncCtx)
+  /// fromAsync iterator path: onRejected that performs AsyncIteratorClose
+  /// on `iter` and then rejects with the rejection reason.
+  ArrayFromAsyncCloseReject(iter: JsValue, reject: JsValue)
+  /// fromAsync: rejects with the captured original error regardless of its
+  /// argument — used after awaiting AsyncIteratorClose's return() result.
+  ArrayFromAsyncRejectWith(error: JsValue, reject: JsValue)
+  /// fromAsync array-like path: onFulfilled for the awaited element value.
+  ArrayFromAsyncLikeOnValue(ctx: FromAsyncLikeCtx)
+  /// fromAsync array-like path: onFulfilled for the awaited mapfn result.
+  ArrayFromAsyncLikeOnMapped(ctx: FromAsyncLikeCtx)
   /// Symbol() constructor — callable but NOT new-able.
   SymbolConstructor
+  /// Proxy(target, handler) constructor — new-able but NOT callable (§28.2.1).
+  ProxyConstructor
+  /// Proxy.revocable(target, handler) — §28.2.2.1.
+  ProxyRevocable
+  /// The revoke closure returned by Proxy.revocable. Carries the proxy's Ref;
+  /// invoking it nulls the proxy's [[ProxyTarget]]/[[ProxyHandler]].
+  ProxyRevoke(proxy: Ref)
   /// Symbol.for(key) — global symbol registry lookup/insert.
   SymbolFor
   /// Symbol.keyFor(sym) — reverse lookup in global symbol registry.
   SymbolKeyFor
+  /// §20.4.3.3 Symbol.prototype.toString — SymbolDescriptiveString(thisSymbolValue).
+  SymbolPrototypeToString
+  /// §20.4.3.4 Symbol.prototype.valueOf — thisSymbolValue.
+  SymbolPrototypeValueOf
+  /// §20.4.3.2 get Symbol.prototype.description — [[Description]] or undefined.
+  SymbolDescriptionGetter
+  /// §20.4.3.5 Symbol.prototype[Symbol.toPrimitive] — thisSymbolValue (hint ignored).
+  SymbolPrototypeToPrimitive
+}
+
+/// Captured state for Array.fromAsync's async-iterator loop continuations.
+/// `map_fn` is JsUndefined when no mapping function was supplied.
+pub type FromAsyncCtx {
+  FromAsyncCtx(
+    iter: JsValue,
+    next_method: JsValue,
+    map_fn: JsValue,
+    this_arg: JsValue,
+    target: JsValue,
+    k: Int,
+    resolve: JsValue,
+    reject: JsValue,
+  )
+}
+
+/// Captured state for Array.fromAsync's array-like loop continuations.
+pub type FromAsyncLikeCtx {
+  FromAsyncLikeCtx(
+    items: JsValue,
+    map_fn: JsValue,
+    this_arg: JsValue,
+    target: JsValue,
+    k: Int,
+    len: Int,
+    resolve: JsValue,
+    reject: JsValue,
+  )
 }
 
 /// VM-level natives handled in dispatch_native — don't need stack manipulation.
 pub type VmNativeFn {
   FunctionConstructor
+  /// §27.3.1.1 GeneratorFunction ( ...parameterArgs, bodyArg ) — like
+  /// Function but builds `function* anonymous(...)`.
+  GeneratorFunctionConstructor
+  /// §27.4.1.1 AsyncGeneratorFunction ( ...parameterArgs, bodyArg ).
+  AsyncGeneratorFunctionConstructor
+  /// §27.7.1.1 AsyncFunction ( ...parameterArgs, bodyArg ) — like Function
+  /// but builds `async function anonymous(...)`.
+  AsyncFunctionConstructor
   FunctionToString
   /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
   IteratorSymbolIterator
@@ -1007,13 +1741,64 @@ pub type VmNativeFn {
   CreateRealm
   /// $262.gc() — no-op garbage collection hint.
   Gc
+  /// $262.IsHTMLDDA — the test262 [[IsHTMLDDA]] host hook (`document.all`
+  /// emulation). Calling it returns null (INTERPRETING.md: "returns null
+  /// when called with no arguments or with the single argument ''").
+  /// PARTIAL: the loose-equality / typeof-"undefined" / ToBoolean-false
+  /// exotic behaviors of Annex B §B.3.6 are not implemented — only the
+  /// callable-returning-null part used by GetMethod-shaped tests.
+  IsHTMLDDA
+  /// $262.agent.start(script) — run an agent script (cooperative, in-realm).
+  AgentStart
+  /// $262.agent.broadcast(sab [, id]) — invoke every registered
+  /// receiveBroadcast callback with the (genuinely shared) buffer.
+  AgentBroadcast
+  /// $262.agent.getReport() — dequeue the oldest report string, or null.
+  AgentGetReport
+  /// $262.agent.sleep(ms) — block the current agent for ms milliseconds.
+  AgentSleep
+  /// $262.agent.monotonicNow() — monotonic clock reading in milliseconds.
+  AgentMonotonicNow
+  /// $262.agent.report(value) — enqueue ToString(value) for the main agent.
+  AgentReport
+  /// $262.agent.leaving() — agent termination hint (no-op cooperatively).
+  AgentLeaving
+  /// $262.agent.receiveBroadcast(callback) — register a broadcast callback.
+  AgentReceiveBroadcast
+  /// Host setTimeout(callback, delay, ...args) — schedule a host timer; the
+  /// event loop calls `callback(...args)` once `delay` ms elapse. Returns
+  /// the numeric timer id (HTML §8.6 timer initialisation steps).
+  SetTimeout
+  /// Host clearTimeout(id) — cancel a pending setTimeout timer. Unknown or
+  /// already-fired ids are ignored (HTML §8.6).
+  ClearTimeout
+  /// BigInt ( value ) — §21.2.1.1. Callable only (new BigInt throws).
+  BigIntGlobal
+  /// BigInt.prototype.toString ( [ radix ] ) — §21.2.3.3.
+  BigIntPrototypeToString
+  /// BigInt.prototype.valueOf ( ) — §21.2.3.4.
+  BigIntPrototypeValueOf
+  /// %ThrowTypeError% (§10.2.4.1) — the poison-pill accessor installed for
+  /// Function.prototype's restricted "caller"/"arguments" properties.
+  ThrowTypeErrorFn
+  /// Function.prototype [ @@hasInstance ] ( V ) — §20.2.3.6
+  /// OrdinaryHasInstance(this, V).
+  FunctionHasInstance
+  /// §20.2.3 "Function.prototype … accepts any arguments and returns
+  /// undefined when invoked" — the [[Call]] of %Function.prototype% itself.
+  FunctionPrototypeCall
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
 /// Generic over `ctx` because NativeFunction carries a NativeFnSlot(ctx).
 pub type ExoticKind(ctx) {
-  /// Plain JS object: `{}`, `new Object()`, error instances, prototypes, etc.
+  /// Plain JS object: `{}`, `new Object()`, prototypes, etc.
   OrdinaryObject
+  /// Error instance — has the [[ErrorData]] internal slot (ES2024 §20.5.4).
+  /// Otherwise an ordinary object. `stack` is the captured stack-trace string
+  /// surfaced by the `Error.prototype.stack` accessor (error-stack-accessor
+  /// proposal); instances carry NO own "stack" data property.
+  ErrorObject(stack: String)
   /// JS array: `[]`, `new Array()`. `length` is tracked explicitly.
   ArrayObject(length: Int)
   /// Arguments object — `arguments` inside a non-arrow function. Structurally
@@ -1065,6 +1850,10 @@ pub type ExoticKind(ctx) {
   /// Boxed Symbol (`Object(sym)` only; `new Symbol()` is a TypeError).
   /// Has [[SymbolData]]. Ordinary object aside from the internal slot.
   SymbolObject(value: SymbolId)
+  /// ShadowRealm instance (proposal-shadowrealm). `realm_ref` is the
+  /// [[ShadowRealm]] internal slot — a RealmSlot ref on the heap whose
+  /// builtins are registered in state.ctx.realms.
+  ShadowRealmObject(realm_ref: Ref)
   /// Erlang PID wrapper for Arc.spawn/self. Contains an opaque BEAM process
   /// identifier that can be used with Arc.send.
   PidObject(pid: ErlangPid)
@@ -1084,33 +1873,85 @@ pub type ExoticKind(ctx) {
   /// `entries` maps normalized MapKey → value. Original JS keys are
   /// reconstructed via `map_key_to_js` (lossless inverse modulo -0→+0, which
   /// §24.1.3.9 step 4 mandates anyway), so no second dict is needed.
-  /// `keys_rev` is insertion order REVERSED so set() is O(1) prepend instead
-  /// of O(n) append; iteration points reverse once on read. Deleted keys stay
-  /// in the list as tombstones (skipped at iteration via dict lookup) — delete
-  /// is O(log n) dict-only. `keys_len` tracks list length for O(1) compaction
-  /// checks; when it exceeds 2× dict.size we rebuild to drop tombstones/dupes.
+  /// Insertion order is the spec's append-only [[MapData]] list, modelled
+  /// with monotonically increasing sequence numbers: `seqs` maps live key →
+  /// its seq, `order` maps seq → live key, `next_seq` is the next seq to
+  /// assign (never reset — clear() keeps it so in-flight iterators, which
+  /// hold seq cursors, still see entries added after the clear). delete()
+  /// removes the record entirely; the seq gap is the spec's emptied record,
+  /// and a re-added key gets a fresh seq past every live iterator's cursor,
+  /// so it is revisited per §24.1.5.
   MapObject(
     entries: Dict(MapKey, JsValue),
-    keys_rev: List(MapKey),
-    keys_len: Int,
+    seqs: Dict(MapKey, Int),
+    order: Dict(Int, MapKey),
+    next_seq: Int,
   )
   /// Set object — ES2024 §24.2 Set Objects.
   /// Stores unique values using SameValueZero equality.
-  /// `keys_rev` is insertion order REVERSED so Set.prototype.add is O(1)
-  /// prepend instead of O(n) append; iteration points recover forward order
-  /// via `set_live_values`. Deleted keys stay in the list as tombstones
-  /// (skipped at iteration via dict lookup) — delete is O(log n) dict-only.
-  /// Re-added keys appear twice (newest occurrence wins). `keys_len` tracks
-  /// list length for O(1) compaction checks; when it exceeds 2× dict.size we
-  /// rebuild to drop tombstones/dupes.
-  SetObject(data: Dict(MapKey, JsValue), keys_rev: List(MapKey), keys_len: Int)
+  /// `data` maps normalized MapKey → original JsValue. Insertion order uses
+  /// the same seq-number model as MapObject (see above): `seqs`/`order` track
+  /// live records, `next_seq` is monotonic, delete leaves a gap and re-add
+  /// appends past every live iterator's cursor.
+  SetObject(
+    data: Dict(MapKey, JsValue),
+    seqs: Dict(MapKey, Int),
+    order: Dict(Int, MapKey),
+    next_seq: Int,
+  )
   /// WeakMap object — ES2024 §24.3 WeakMap Objects.
-  /// Uses object refs as keys. No iteration, no size.
+  /// Keys are canonical JsValues for which CanBeHeldWeakly is true:
+  /// `JsObject(ref)` (identity) or `JsSymbol(id)` (non-registered symbols).
+  /// No iteration, no size.
   /// Not truly weak (GC doesn't collect entries) but API-compatible.
-  WeakMapObject(data: Dict(Ref, JsValue))
+  WeakMapObject(data: Dict(JsValue, JsValue))
   /// WeakSet object — ES2024 §24.4 WeakSet Objects.
   /// Holds objects or non-registered Symbols (CanBeHeldWeakly). No iteration, no size.
   WeakSetObject(data: Dict(Ref, Bool))
+  /// FinalizationRegistry object — ES2021 §26.2 FinalizationRegistry Objects.
+  /// `cells` is [[Cells]] (each cell holds [[WeakRefTarget]], [[HeldValue]],
+  /// [[UnregisterToken]]); `callback` is [[CleanupCallback]].
+  /// GC never empties cells in this implementation (objects are not collected
+  /// while reachable from a registry), so cleanup callbacks never fire — but
+  /// register/unregister bookkeeping is fully implemented.
+  FinalizationRegistryObject(cells: List(FinRegCell), callback: JsValue)
+  /// DisposableStack / AsyncDisposableStack object — Explicit Resource
+  /// Management proposal §12.3 / §12.4. `async` distinguishes the two brands
+  /// ([[DisposableState]] vs [[AsyncDisposableState]] internal slots).
+  /// `disposed` is the state (True = disposed). `resources` is the
+  /// [[DisposableResourceStack]] stored NEWEST-FIRST (O(1) prepend on add);
+  /// dispose() walks it head-first, which is the spec's reverse list order.
+  DisposableStackObject(
+    async: Bool,
+    disposed: Bool,
+    resources: List(DisposeResource),
+  )
+  /// ArrayBuffer / SharedArrayBuffer — ES2024 §25.1/§25.2.
+  /// [[ArrayBufferData]] is `data` (a BEAM binary); [[ArrayBufferByteLength]]
+  /// is derived (`bit_array.byte_size(data)`). `detached` models
+  /// [[ArrayBufferData]] = null (data is reset to <<>> on detach).
+  /// `max_byte_length` is Some for resizable (AB) / growable (SAB) buffers.
+  /// `shared` distinguishes SharedArrayBuffer (never detachable).
+  ArrayBufferObject(
+    data: BitArray,
+    detached: Bool,
+    max_byte_length: option.Option(Int),
+    shared: Bool,
+  )
+  /// Integer-Indexed (TypedArray) exotic object — ES2024 §10.4.5 / §23.2.
+  /// [[ViewedArrayBuffer]] is `buffer` (an ArrayBufferObject slot),
+  /// [[TypedArrayName]]/[[ContentType]] derive from `elem_kind`,
+  /// [[ByteOffset]] is `byte_offset`, [[ArrayLength]] is `length` (elements,
+  /// not bytes). `length: None` is [[ArrayLength]] = AUTO — a length-tracking
+  /// view over a resizable buffer whose element count follows the buffer's
+  /// live byte length (§10.4.5.13 TypedArrayLength). Element reads/writes go
+  /// through the buffer's BitArray.
+  TypedArrayObject(
+    buffer: Ref,
+    elem_kind: TypedArrayKind,
+    byte_offset: Int,
+    length: option.Option(Int),
+  )
   /// RegExp object — ES2024 §22.2 RegExp Objects.
   /// Stores the source pattern and flags strings. Actual matching
   /// is delegated to Erlang's `re` module (PCRE) via FFI.
@@ -1119,27 +1960,93 @@ pub type ExoticKind(ctx) {
   /// time value (ms since epoch) as a JsNum. NaN represents an invalid date.
   /// After TimeClip only Finite or NaN are possible, but the type stays JsNum.
   DateObject(time_value: JsNum)
+  /// Intl service instance (ECMA-402) — Intl.Locale, Intl.NumberFormat, etc.
+  /// `slots` holds the resolved internal slots ([[Locale]], [[Style]], …)
+  /// keyed by slot name; values are primitives except cached bound methods.
+  IntlObject(service: IntlService, slots: Dict(String, JsValue))
+  /// DataView object -- ES2024 Section 25.3. [[ViewedArrayBuffer]] is `buffer`,
+  /// [[ByteOffset]] is `byte_offset`. `byte_length: None` means byte-length
+  /// auto-tracking (view over a resizable buffer with no explicit length).
+  DataViewObject(buffer: Ref, byte_offset: Int, byte_length: option.Option(Int))
+  /// Temporal.PlainDate — ISO calendar date plus calendar identifier.
+  /// year/month/day are always the ISO 8601 date; `calendar` is the
+  /// canonical calendar id (e.g. "iso8601", "gregory", "hebrew").
+  TemporalDateSlot(year: Int, month: Int, day: Int, calendar: String)
+  /// Temporal.PlainTime — wall-clock time, nanosecond precision.
+  TemporalTimeSlot(
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int,
+  )
+  /// Temporal.PlainDateTime — combined ISO date + wall-clock time.
+  TemporalDateTimeSlot(
+    year: Int,
+    month: Int,
+    day: Int,
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int,
+    calendar: String,
+  )
+  /// Temporal.PlainYearMonth. `year`/`month`/`day` are the ISO date of the
+  /// reference day; `calendar` is the canonical calendar id.
+  TemporalYearMonthSlot(year: Int, month: Int, day: Int, calendar: String)
+  /// Temporal.PlainMonthDay. `month`/`day`/`ref_year` are the ISO date of
+  /// the reference day; `calendar` is the canonical calendar id.
+  TemporalMonthDaySlot(month: Int, day: Int, ref_year: Int, calendar: String)
+  /// Temporal.Duration — ten integral fields, all the same sign.
+  TemporalDurationSlot(
+    years: Int,
+    months: Int,
+    weeks: Int,
+    days: Int,
+    hours: Int,
+    minutes: Int,
+    seconds: Int,
+    milliseconds: Int,
+    microseconds: Int,
+    nanoseconds: Int,
+  )
+  /// Temporal.Instant — exact time as nanoseconds since the epoch
+  /// (BEAM Ints are arbitrary precision, so the full ±8.64e21 range fits).
+  TemporalInstantSlot(epoch_ns: Int)
+  /// Temporal.ZonedDateTime — exact time + time zone identifier. Only "UTC"
+  /// and fixed-offset zones (canonical "±HH:MM" form) are supported.
+  TemporalZonedDateTimeSlot(epoch_ns: Int, time_zone: String, calendar: String)
   /// Array iterator — ES2024 §23.1.5 Array Iterator Objects.
-  /// Created by Array.prototype[Symbol.iterator](), values(), keys(), entries().
+  /// Created by Array.prototype[Symbol.iterator](), values(), keys(), entries()
+  /// (and the %TypedArray%.prototype counterparts).
   /// Lazy — re-reads source length each .next() to handle mutation.
-  ArrayIteratorObject(source: Ref, index: Int)
+  /// `iter_kind` is the [[ArrayIterationKind]] internal slot: what each
+  /// .next() yields (index, element, or a fresh [index, element] pair).
+  ArrayIteratorObject(source: Ref, index: Int, iter_kind: ArrayIterKind)
   /// String iterator — ES2024 §22.1.5 String Iterator Objects.
   /// Snapshots the string's code points at creation (strings are immutable,
   /// so unlike arrays there's no mutation to observe). O(1) per .next()
   /// instead of an O(i) UTF-8 walk per indexed read.
   StringIteratorObject(remaining: List(UtfCodepoint))
-  /// Set iterator — ES2024 §24.2.5. Snapshots forward-order entries at
-  /// creation time. Snapshot is simpler than live source+index because Set
-  /// stores keys reversed with tombstones; re-deriving order each .next()
-  /// would be O(n²). Only mutation-during-iteration tests observe the diff.
-  SetIteratorObject(remaining: List(JsValue), kind: SetIterKind)
-  /// Map iterator — ES2024 §24.1.5. Snapshots forward-order (key, value)
-  /// pairs at creation time. Same snapshot rationale as SetIteratorObject.
-  MapIteratorObject(remaining: List(#(JsValue, JsValue)), kind: MapIterKind)
+  /// Set iterator — ES2024 §24.2.5. `cursor` is the iterator's index into
+  /// the source Set's insertion-sequence space: .next() yields the first
+  /// live entry with seq >= cursor and resumes at seq + 1 (amortized O(1)).
+  /// Entries added during iteration — including delete + re-add, which
+  /// assigns a fresh seq — are visited; entries deleted before being reached
+  /// leave a gap that is skipped. `done` latches the spec's "generator
+  /// returned" state so later additions never revive an exhausted iterator.
+  SetIteratorObject(source: Ref, cursor: Int, done: Bool, kind: SetIterKind)
+  /// Map iterator — ES2024 §24.1.5. Same cursor design as SetIteratorObject.
+  MapIteratorObject(source: Ref, cursor: Int, done: Bool, kind: MapIterKind)
   /// Async-from-Sync Iterator — ES2024 §27.1.4. Created by GetIterator(async)
   /// when the source has only Symbol.iterator. next/return/throw await the
   /// sync result's `.value` and close the sync iterator on rejection.
-  AsyncFromSyncIteratorObject(sync_iter: Ref)
+  /// `sync_next` is the sync iterator record's [[NextMethod]], cached by
+  /// GetIteratorFromMethod (§7.4.4) — .next() must NOT re-Get it per call.
+  AsyncFromSyncIteratorObject(sync_iter: Ref, sync_next: JsValue)
   /// Iterator Helper — ES2025 §27.1.3.2. Created by
   /// Iterator.prototype.{map,filter,take,drop,flatMap}.
   /// `next_method` is cached once per GetIteratorDirect (spec §7.4.9) so
@@ -1159,6 +2066,37 @@ pub type ExoticKind(ctx) {
   /// Wrap For Valid Iterator — ES2025 §27.1.2.1.2. Created by Iterator.from
   /// when the source isn't already an instance of %Iterator.prototype%.
   WrapForValidIteratorObject(iterated: JsValue, next_method: JsValue)
+  /// Iterator.zip / Iterator.zipKeyed result — tc39 joint-iteration
+  /// proposal's IteratorZip generator, modelled as a data-driven helper on
+  /// %IteratorHelperPrototype%. `members` is the spec's iters list (a
+  /// ZipExhausted member is the spec's null entry); `keys` is None for
+  /// Iterator.zip (array results) and Some(property keys, as
+  /// JsString/JsSymbol values) for Iterator.zipKeyed (null-proto object
+  /// results). `padding` is index-aligned with `members`.
+  /// `running` is the generator "executing" state (reentrant next/return
+  /// throws TypeError); `started` distinguishes suspended-start from
+  /// suspended-yield for .return() semantics.
+  IteratorZipObject(
+    members: List(ZipMember),
+    mode: ZipMode,
+    padding: List(JsValue),
+    keys: Option(List(JsValue)),
+    done: Bool,
+    running: Bool,
+    started: Bool,
+  )
+  /// Iterator.concat result — tc39 iterator-sequencing proposal, modelled as
+  /// a data-driven helper on %IteratorHelperPrototype%. `remaining` holds the
+  /// not-yet-opened (openMethod, iterable) records; `inner` is the currently
+  /// open iterator record (iterator, cached next method).
+  /// `running` is the generator "executing" state (reentrant next/return
+  /// throws TypeError).
+  IteratorConcatObject(
+    remaining: List(#(JsValue, JsValue)),
+    inner: Option(#(JsValue, JsValue)),
+    done: Bool,
+    running: Bool,
+  )
   /// Module Namespace Exotic Object — ES2024 §10.4.6. `exports` maps each
   /// exported name to the BoxSlot ref holding the binding's live value, so
   /// [[Get]] re-reads the cell (and throws ReferenceError on a TDZ binding).
@@ -1166,6 +2104,19 @@ pub type ExoticKind(ctx) {
   /// symbol key is @@toStringTag = "Module" (in `symbol_properties`). The
   /// object has a null prototype, is non-extensible, and is read-only.
   ModuleNamespace(exports: Dict(String, Ref))
+  /// Proxy exotic object — ES2024 §10.5. `target`/`handler` are the
+  /// [[ProxyTarget]]/[[ProxyHandler]] internal slots; both become None when
+  /// the proxy is revoked (Proxy.revocable's revoke function). `callable` and
+  /// `constructable` record whether the proxy has [[Call]]/[[Construct]] —
+  /// fixed at creation time from the target (§10.5.15 ProxyCreate steps 4-7)
+  /// and still meaningful after revocation (typeof of a revoked function
+  /// proxy stays "function").
+  ProxyObject(
+    target: Option(Ref),
+    handler: Option(Ref),
+    callable: Bool,
+    constructable: Bool,
+  )
   /// Internal Iterator Record — ES2024 §7.4.1 GetIterator builds
   /// {Iterator, NextMethod, Done} with `next` fetched ONCE. The GetIterator
   /// opcode wraps user-defined iterators in this so IteratorNext calls the
@@ -1205,7 +2156,13 @@ pub fn canonical_key(s: String) -> PropertyKey {
   case bit_array.from_string(s) {
     <<c, _:bytes>> if c >= 48 && c <= 57 ->
       case int.parse(s) {
-        Ok(n) if n >= 0 ->
+        // Array-index range check (§6.1.7): an array index is an integer in
+        // [0, 2^32-1). BEAM ints are arbitrary precision, so without the cap
+        // "1000000000000000000000" would round-trip and wrongly become an
+        // Index — but per spec it is a plain string key (its ToNumber →
+        // ToString form is "1e+21", so it isn't even a canonical numeric
+        // index string).
+        Ok(n) if n >= 0 && n <= 4_294_967_294 ->
           case int.to_string(n) == s {
             True -> Index(n)
             False -> Named(s)
@@ -1232,7 +2189,94 @@ pub fn from_op_key(k: opcode.OpKey) -> PropertyKey {
 pub fn key_to_string(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
+    // Private-element keys render as their source text ("#x"), without the
+    // internal NUL marker or the per-evaluation uid suffix (see private_key
+    // and mint_private_key).
+    Named("\u{0}" <> s) ->
+      case string.split_once(s, "\u{0}") {
+        Ok(#(name, _uid)) -> name
+        Error(Nil) -> s
+      }
     Named(s) -> s
+  }
+}
+
+/// Build the storage key for a class private element ("#x"). Arc stores
+/// private fields/methods in the ordinary property table, but the spec keeps
+/// private elements in a separate [[PrivateElements]] list invisible to ALL
+/// ordinary property reflection (hasOwnProperty, ownKeys, for-in, `in`,
+/// spread, JSON, freeze, ...) — AND a plain string property named "#x"
+/// (created via o["#x"], computed keys, defineProperty, JSON.parse, ...) is a
+/// perfectly ordinary, fully reflectable property. So privates are keyed with
+/// a NUL-byte marker prefix ("\u{0}#x") that string-to-key conversion of
+/// source-level identifiers/literals never produces, keeping the two
+/// namespaces apart.
+pub fn private_key(name: String) -> PropertyKey {
+  Named("\u{0}" <> name)
+}
+
+@external(erlang, "arc_vm_ffi", "unique_positive_integer")
+fn unique_positive_integer() -> Int
+
+/// §15.7.14 ClassDefinitionEvaluation step 5/6: mint the storage-key text for
+/// a fresh per-class-evaluation PrivateName. Format:
+/// "\u{0}" <> source_text <> "\u{0}" <> uid — the NUL marker keeps it in the
+/// hidden private namespace (see private_key), the uid makes each class
+/// evaluation's names distinct (spec PrivateName identity). The text is
+/// carried at runtime as a JsString bound to a class-scope const named after
+/// the source text ("#m"); access ops wrap it in Named(_) directly.
+pub fn mint_private_key(name: String) -> String {
+  "\u{0}" <> name <> "\u{0}" <> int.to_string(unique_positive_integer())
+}
+
+/// Source-text name ("#m") from a minted private storage-key text, for error
+/// messages.
+pub fn private_display_name(key_text: String) -> String {
+  case key_text {
+    "\u{0}" <> rest ->
+      case string.split_once(rest, "\u{0}") {
+        Ok(#(name, _uid)) -> name
+        Error(Nil) -> rest
+      }
+    _ -> key_text
+  }
+}
+
+/// Convert an OpKey from one of the four private-element opcodes
+/// (GetPrivateField/GetPrivateField2/PutPrivateField/PrivateIn) — these are
+/// only emitted for PrivateIdentifier syntax, so the key always lands in the
+/// private namespace. See private_key.
+pub fn private_from_op_key(k: opcode.OpKey) -> PropertyKey {
+  case k {
+    opcode.OpNamed(s) -> private_key(s)
+    // Unreachable: private names are never integer-like.
+    opcode.OpIndex(n) -> Index(n)
+  }
+}
+
+/// Convert an OpKey at a static *definition* site (DefineField/DefineMethod/
+/// DefineAccessor). Class private elements no longer flow through these
+/// opcodes (they use the DefinePrivate* ops with per-evaluation minted keys),
+/// so "#"-prefixed string keys here are ordinary public properties
+/// (e.g. {"#x": 1}).
+pub fn from_op_key_define(k: opcode.OpKey) -> PropertyKey {
+  from_op_key(k)
+}
+
+/// Storage key for a BigInt wrapper object's [[BigIntData]] internal slot
+/// (§21.2.4). Wrappers are OrdinaryObjects (no dedicated ExoticKind), so the
+/// primitive is stashed under a NUL-marker key — invisible to all ordinary
+/// property reflection, exactly like class private elements.
+pub fn bigint_data_key() -> PropertyKey {
+  private_key("[[BigIntData]]")
+}
+
+/// Whether a PropertyKey is a class private element (NUL-marker-prefixed —
+/// see private_key). Reflection sites call this to skip private keys.
+pub fn is_private_name(key: PropertyKey) -> Bool {
+  case key {
+    Named("\u{0}" <> _) -> True
+    _ -> False
   }
 }
 
@@ -1676,6 +2720,33 @@ fn push_option_ref(r: Option(Ref), acc: List(Ref)) -> List(Ref) {
   }
 }
 
+fn push_option_value(v: Option(JsValue), acc: List(Ref)) -> List(Ref) {
+  case v {
+    Some(val) -> push_value_ref(val, acc)
+    None -> acc
+  }
+}
+
+/// GC root tracing for a [[DisposableResourceStack]]: every resource value,
+/// dispose method, callback, and callback argument it holds.
+fn push_dispose_resources(
+  resources: List(DisposeResource),
+  acc: List(Ref),
+) -> List(Ref) {
+  list.fold(resources, acc, fn(a, r) {
+    case r {
+      SyncDispose(value: v, method: m)
+      | AsyncFallbackDispose(value: v, method: m) ->
+        push_value_ref(m, push_value_ref(v, a))
+      DisposeCallback(callback:, args:) ->
+        list.fold(args, push_value_ref(callback, a), fn(a2, v) {
+          push_value_ref(v, a2)
+        })
+      NullDispose -> a
+    }
+  })
+}
+
 fn push_saved_frame_refs(
   env_ref: Ref,
   saved_locals: TupleArray(JsValue),
@@ -1730,6 +2801,14 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
           push_option_ref(home, [env_ref, ..acc])
         NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref))), ..)
         | NativeFunction(
+            Dispatch(ErrorNative(SuppressedErrorConstructor(proto: ref))),
+            ..,
+          )
+        | NativeFunction(
+            Dispatch(ErrorNative(ErrorStackSetter(proto: ref))),
+            ..,
+          )
+        | NativeFunction(
             Dispatch(ErrorNative(DomExceptionConstructor(proto: ref))),
             ..,
           )
@@ -1743,7 +2822,36 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         | NativeFunction(
             Dispatch(WeakSetNative(WeakSetConstructor(proto: ref))),
             ..,
+          )
+        | NativeFunction(
+            Dispatch(FinalizationRegistryNative(FinalizationRegistryConstructor(
+              proto: ref,
+            ))),
+            ..,
+          )
+        | NativeFunction(
+            Dispatch(RegExpNative(RegExpLegacyGetter(ctor: ref, slot: _))),
+            ..,
+          )
+        | NativeFunction(
+            Dispatch(RegExpNative(RegExpLegacyInputSetter(ctor: ref))),
+            ..,
+          )
+        | NativeFunction(
+            Dispatch(ShadowRealmNative(ShadowRealmConstructor(proto: ref))),
+            ..,
           ) -> [ref, ..acc]
+        // ShadowRealm instances keep their realm record alive.
+        ShadowRealmObject(realm_ref:) -> [realm_ref, ..acc]
+        // Wrapped functions keep their target and both realm records alive.
+        NativeFunction(
+          Dispatch(ShadowRealmNative(WrappedFunctionCall(
+            target:,
+            caller_realm:,
+            target_realm:,
+          ))),
+          ..,
+        ) -> push_value_ref(target, [caller_realm, target_realm, ..acc])
         NativeFunction(
           Call(BoundFunction(target:, bound_this:, bound_args:)),
           ..,
@@ -1772,6 +2880,94 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         NativeFunction(Call(PromiseFinallyFulfill(on_finally:)), ..)
         | NativeFunction(Call(PromiseFinallyReject(on_finally:)), ..) ->
           push_value_ref(on_finally, acc)
+        NativeFunction(
+          Call(PromiseCapabilityExecutor(resolve_box:, reject_box:)),
+          ..,
+        ) -> [resolve_box, reject_box, ..acc]
+        NativeFunction(
+          Call(PromiseAllResolveElement(
+            remaining_ref:,
+            values_ref:,
+            already_called_ref:,
+            resolve:,
+            reject:,
+            ..,
+          )),
+          ..,
+        ) ->
+          push_value_ref(
+            reject,
+            push_value_ref(resolve, [
+              remaining_ref,
+              values_ref,
+              already_called_ref,
+              ..acc
+            ]),
+          )
+        NativeFunction(
+          Call(PromiseAllSettledResolveElement(
+            remaining_ref:,
+            values_ref:,
+            already_called_ref:,
+            resolve:,
+            ..,
+          )),
+          ..,
+        )
+        | NativeFunction(
+            Call(PromiseAllSettledRejectElement(
+              remaining_ref:,
+              values_ref:,
+              already_called_ref:,
+              resolve:,
+              ..,
+            )),
+            ..,
+          ) ->
+          push_value_ref(resolve, [
+            remaining_ref,
+            values_ref,
+            already_called_ref,
+            ..acc
+          ])
+        NativeFunction(
+          Call(PromiseAnyRejectElement(
+            remaining_ref:,
+            errors_ref:,
+            already_called_ref:,
+            resolve:,
+            reject:,
+            ..,
+          )),
+          ..,
+        ) ->
+          push_value_ref(
+            reject,
+            push_value_ref(resolve, [
+              remaining_ref,
+              errors_ref,
+              already_called_ref,
+              ..acc
+            ]),
+          )
+        NativeFunction(
+          Call(PromiseKeyedElement(
+            remaining_ref:,
+            keys_ref:,
+            values_ref:,
+            already_called_ref:,
+            resolve:,
+            ..,
+          )),
+          ..,
+        ) ->
+          push_value_ref(resolve, [
+            remaining_ref,
+            keys_ref,
+            values_ref,
+            already_called_ref,
+            ..acc
+          ])
         NativeFunction(Call(PromiseFinallyValueThunk(value:)), ..) ->
           push_value_ref(value, acc)
         NativeFunction(Call(PromiseFinallyThrower(reason:)), ..) ->
@@ -1788,17 +2984,46 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
           sync_iter,
           ..acc
         ]
+        NativeFunction(Call(ArrayFromAsyncOnNext(ctx:)), ..)
+        | NativeFunction(Call(ArrayFromAsyncOnMapped(ctx:)), ..) ->
+          acc
+          |> push_value_ref(ctx.iter, _)
+          |> push_value_ref(ctx.next_method, _)
+          |> push_value_ref(ctx.map_fn, _)
+          |> push_value_ref(ctx.this_arg, _)
+          |> push_value_ref(ctx.target, _)
+          |> push_value_ref(ctx.resolve, _)
+          |> push_value_ref(ctx.reject, _)
+        NativeFunction(Call(ArrayFromAsyncLikeOnValue(ctx:)), ..)
+        | NativeFunction(Call(ArrayFromAsyncLikeOnMapped(ctx:)), ..) ->
+          acc
+          |> push_value_ref(ctx.items, _)
+          |> push_value_ref(ctx.map_fn, _)
+          |> push_value_ref(ctx.this_arg, _)
+          |> push_value_ref(ctx.target, _)
+          |> push_value_ref(ctx.resolve, _)
+          |> push_value_ref(ctx.reject, _)
+        NativeFunction(Call(ArrayFromAsyncCloseReject(iter:, reject:)), ..) ->
+          acc
+          |> push_value_ref(iter, _)
+          |> push_value_ref(reject, _)
+        NativeFunction(Call(ArrayFromAsyncRejectWith(error:, reject:)), ..) ->
+          acc
+          |> push_value_ref(error, _)
+          |> push_value_ref(reject, _)
+        NativeFunction(Call(ProxyRevoke(proxy:)), ..) -> [proxy, ..acc]
+        ProxyObject(target:, handler:, ..) ->
+          push_option_ref(target, push_option_ref(handler, acc))
         PromiseObject(promise_data:) -> [promise_data, ..acc]
         GeneratorObject(generator_data:) -> [generator_data, ..acc]
         AsyncGeneratorObject(generator_data:) -> [generator_data, ..acc]
         ArrayIteratorObject(source:, ..) -> [source, ..acc]
-        SetIteratorObject(remaining:, ..) ->
-          list.fold(remaining, acc, fn(a, v) { push_value_ref(v, a) })
-        MapIteratorObject(remaining:, ..) ->
-          list.fold(remaining, acc, fn(a, p) {
-            push_value_ref(p.1, push_value_ref(p.0, a))
-          })
-        AsyncFromSyncIteratorObject(sync_iter:) -> [sync_iter, ..acc]
+        SetIteratorObject(source:, ..) | MapIteratorObject(source:, ..) -> [
+          source,
+          ..acc
+        ]
+        AsyncFromSyncIteratorObject(sync_iter:, sync_next:) ->
+          push_value_ref(sync_next, [sync_iter, ..acc])
         IteratorHelperObject(
           underlying:,
           next_method:,
@@ -1816,30 +3041,119 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         WrapForValidIteratorObject(iterated:, next_method:)
         | IteratorRecordObject(iterated:, next_method:) ->
           push_value_ref(next_method, push_value_ref(iterated, acc))
-        MapObject(entries:, keys_rev:, keys_len: _) -> {
+        IteratorZipObject(members:, padding:, keys:, ..) -> {
           let acc =
-            dict.fold(entries, acc, fn(a, _k, v) { push_value_ref(v, a) })
-          list.fold(keys_rev, acc, fn(a, k) {
-            push_value_ref(map_key_to_js(k), a)
-          })
+            list.fold(members, acc, fn(a, m) {
+              case m {
+                ZipOpen(iter:, next_method:) ->
+                  push_value_ref(next_method, push_value_ref(iter, a))
+                ZipExhausted -> a
+              }
+            })
+          let acc = list.fold(padding, acc, fn(a, v) { push_value_ref(v, a) })
+          case keys {
+            Some(ks) -> list.fold(ks, acc, fn(a, k) { push_value_ref(k, a) })
+            None -> acc
+          }
         }
-        SetObject(data:, keys_rev:, keys_len: _) -> {
-          let acc = dict.fold(data, acc, fn(a, _k, v) { push_value_ref(v, a) })
-          // Root tombstoned keys too: a stale MapKey ref must keep its object
-          // alive until compaction, or ref reuse could make has_key collide.
-          list.fold(keys_rev, acc, fn(a, k) {
-            push_value_ref(map_key_to_js(k), a)
-          })
+        IteratorConcatObject(remaining:, inner:, ..) -> {
+          let acc =
+            list.fold(remaining, acc, fn(a, rec) {
+              let #(method, iterable) = rec
+              push_value_ref(iterable, push_value_ref(method, a))
+            })
+          case inner {
+            Some(#(iter, next_method)) ->
+              push_value_ref(next_method, push_value_ref(iter, acc))
+            None -> acc
+          }
         }
+        MapObject(entries:, ..) ->
+          dict.fold(entries, acc, fn(a, k, v) {
+            push_value_ref(v, push_value_ref(map_key_to_js(k), a))
+          })
+        SetObject(data:, ..) ->
+          dict.fold(data, acc, fn(a, k, v) {
+            push_value_ref(v, push_value_ref(map_key_to_js(k), a))
+          })
         WeakMapObject(data:) ->
-          dict.fold(data, acc, fn(a, k, v) { push_value_ref(v, [k, ..a]) })
+          dict.fold(data, acc, fn(a, k, v) {
+            push_value_ref(v, push_value_ref(k, a))
+          })
         WeakSetObject(data:) -> dict.fold(data, acc, fn(a, k, _v) { [k, ..a] })
+        FinalizationRegistryObject(cells:, callback:) ->
+          list.fold(cells, push_value_ref(callback, acc), fn(a, cell) {
+            let FinRegCell(target:, held:, token:) = cell
+            let a = push_value_ref(held, push_value_ref(target, a))
+            case token {
+              Some(t) -> push_value_ref(t, a)
+              None -> a
+            }
+          })
+        DisposableStackObject(resources:, ..) ->
+          push_dispose_resources(resources, acc)
+        // disposeAsync continuation handlers keep the remaining resources,
+        // pending error, and the capability's resolve/reject alive.
+        NativeFunction(
+          Dispatch(DisposableStackNative(AsyncDisposeContinue(
+            remaining:,
+            pending:,
+            resolve:,
+            reject:,
+            is_reject: _,
+          ))),
+          ..,
+        ) ->
+          push_dispose_resources(
+            remaining,
+            push_value_ref(
+              resolve,
+              push_value_ref(reject, push_option_value(pending, acc)),
+            ),
+          )
+        // using-declaration disposers keep their method and resource alive.
+        NativeFunction(
+          Dispatch(DisposableStackNative(UsingDisposer(method:, value:, ..))),
+          ..,
+        ) -> push_value_ref(method, push_value_ref(value, acc))
         SelectorObject(entries:) ->
           list.fold(entries, acc, fn(a, e) { push_value_ref(e.1, a) })
         // The namespace's live bindings are BoxSlot refs reachable via exports.
         ModuleNamespace(exports:) ->
           dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
+        // Intl instances may cache bound method function objects in slots.
+        IntlObject(slots:, ..) ->
+          dict.fold(slots, acc, fn(a, _k, v) { push_value_ref(v, a) })
+        // Bound Intl methods keep their target instance alive.
+        NativeFunction(Dispatch(IntlNative(IntlBoundMethod(target:, ..))), ..) -> [
+          target,
+          ..acc
+        ]
+        // Scan proto refs embedded in Intl dispatch payloads, for parity with
+        // the MapConstructor/SetConstructor arms above. %SegmentsPrototype%
+        // and %SegmentIteratorPrototype% have no other object-graph edge
+        // (ECMA-402 exposes no path to them besides these payloads); today
+        // they survive GC only because alloc_proto/init_namespace mark them
+        // as persistent roots, so scanning here keeps the mark phase honest
+        // rather than relying on that rooting policy.
+        NativeFunction(
+          Dispatch(IntlNative(IntlSegmenterSegment(segments_proto:))),
+          ..,
+        ) -> [segments_proto, ..acc]
+        NativeFunction(
+          Dispatch(IntlNative(IntlSegmentsIterator(iter_proto:))),
+          ..,
+        ) -> [iter_proto, ..acc]
+        NativeFunction(Dispatch(IntlNative(IntlConstructor(proto:, ..))), ..) -> [
+          proto,
+          ..acc
+        ]
+        NativeFunction(Dispatch(IntlNative(IntlLocaleMethod(proto:, ..))), ..) -> [
+          proto,
+          ..acc
+        ]
         OrdinaryObject
+        | ErrorObject(_)
         | ArrayObject(_)
         | ArgumentsObject(_)
         | NativeFunction(..)
@@ -1851,8 +3165,20 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         | SubjectObject(..)
         | TimerObject(..)
         | DateObject(_)
+        | TemporalDateSlot(..)
+        | TemporalTimeSlot(..)
+        | TemporalDateTimeSlot(..)
+        | TemporalYearMonthSlot(..)
+        | TemporalMonthDaySlot(..)
+        | TemporalDurationSlot(..)
+        | TemporalInstantSlot(..)
+        | TemporalZonedDateTimeSlot(..)
         | RegExpObject(..)
+        | ArrayBufferObject(..)
         | StringIteratorObject(_) -> acc
+        // DataView keeps its viewed ArrayBuffer alive.
+        DataViewObject(buffer:, ..) -> [buffer, ..acc]
+        TypedArrayObject(buffer:, ..) -> [buffer, ..acc]
       }
     }
     EnvSlot(slots:) -> list.fold(slots, acc, fn(a, v) { push_value_ref(v, a) })
@@ -1975,6 +3301,22 @@ pub fn strict_equal(left: JsValue, right: JsValue) -> Bool {
   }
 }
 
+/// ES2024 §7.2.11 SameValue. Like ===, except NaN equals NaN and +0 does NOT
+/// equal -0. Used by Proxy invariant checks.
+pub fn same_value(left: JsValue, right: JsValue) -> Bool {
+  case left, right {
+    JsNumber(NaN), JsNumber(NaN) -> True
+    // Erlang term equality (=:=) distinguishes -0.0 from +0.0 (OTP 27+) and
+    // compares floats exactly — precisely SameValue's number semantics.
+    JsNumber(Finite(a)), JsNumber(Finite(b)) -> float_same_term(a, b)
+    _, _ -> strict_equal(left, right)
+  }
+}
+
+/// Erlang =:= on floats: exact term equality, distinguishes -0.0 from +0.0.
+@external(erlang, "arc_vm_ffi", "float_same_term")
+fn float_same_term(a: Float, b: Float) -> Bool
+
 pub fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
   case left, right {
     // Same type — use strict equality
@@ -2030,6 +3372,11 @@ pub fn string_to_number(s: String) -> JsNum {
     "" -> Finite(0.0)
     "Infinity" | "+Infinity" -> Infinity
     "-Infinity" -> NegInfinity
+    // NonDecimalIntegerLiteral (§7.1.4.1 StringNumericLiteral): hex/octal/
+    // binary prefixes. No sign is permitted with these forms.
+    "0x" <> digits | "0X" <> digits -> parse_radix_literal(digits, 16)
+    "0o" <> digits | "0O" <> digits -> parse_radix_literal(digits, 8)
+    "0b" <> digits | "0B" <> digits -> parse_radix_literal(digits, 2)
     _ -> {
       let #(neg, rest) = case s {
         "-" <> r -> #(True, r)
@@ -2059,6 +3406,21 @@ pub fn string_to_number(s: String) -> JsNum {
         Error(Nil) -> NaN
       }
     }
+  }
+}
+
+/// Parse the digits of a NonDecimalIntegerLiteral ("0x.." / "0o.." / "0b..").
+/// Empty or signed digit sequences are NaN per §7.1.4.1.
+fn parse_radix_literal(digits: String, radix: Int) -> JsNum {
+  let signed =
+    string.starts_with(digits, "-") || string.starts_with(digits, "+")
+  case digits == "" || signed {
+    True -> NaN
+    False ->
+      case int.base_parse(digits, radix) {
+        Ok(n) -> Finite(int.to_float(n))
+        Error(Nil) -> NaN
+      }
   }
 }
 

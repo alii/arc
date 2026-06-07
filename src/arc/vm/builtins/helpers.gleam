@@ -25,6 +25,8 @@ pub fn is_callable(h: Heap(ctx), val: JsValue) -> Bool {
         // Step 2: If argument has a [[Call]] internal method, return true.
         Some(ObjectSlot(kind: value.FunctionObject(..), ..)) -> True
         Some(ObjectSlot(kind: value.NativeFunction(..), ..)) -> True
+        // Proxy: callable iff target was callable at creation (§10.5.15).
+        Some(ObjectSlot(kind: value.ProxyObject(callable:, ..), ..)) -> callable
         // Step 3: Return false.
         _ -> False
       }
@@ -33,7 +35,7 @@ pub fn is_callable(h: Heap(ctx), val: JsValue) -> Bool {
 }
 
 /// Get element at index from a list (0-based). O(n).
-/// Non-spec utility — used by get_int_arg/get_num_arg for argument access.
+/// Non-spec utility — used by get_num_arg for argument access.
 pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
   case idx, lst {
     0, [x, ..] -> Some(x)
@@ -131,15 +133,6 @@ fn parse_js_float(s: String) -> Result(Float, Nil) {
           }
         False -> Error(Nil)
       }
-  }
-}
-
-/// Non-spec utility: get an integer argument at position `idx`, with a default
-/// if missing or not numeric. Uses to_number_int (ToIntegerOrInfinity) internally.
-pub fn get_int_arg(args: List(JsValue), idx: Int, default: Int) -> Int {
-  case list_at(args, idx) {
-    Some(v) -> to_number_int(v) |> option.unwrap(default)
-    None -> default
   }
 }
 

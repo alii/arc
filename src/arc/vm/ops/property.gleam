@@ -26,7 +26,10 @@ pub fn to_property_key(
       // +. 0.0 normalizes -0.0 → +0.0 (BEAM =:= distinguishes them)
       let n = n +. 0.0
       let i = float.truncate(n)
-      case int.to_float(i) == n && i >= 0 {
+      // Same [0, 2^32-1) array-index cap as value.canonical_key — numbers
+      // beyond it (e.g. 4294967296) must stringify to Named so the numeric
+      // and string forms of the same key land in the same dict slot.
+      case int.to_float(i) == n && i >= 0 && i <= 4_294_967_294 {
         // Valid array index — skip stringification entirely.
         True -> Ok(#(Index(i), state))
         // Non-index number — stringify (e.g. 1.5 → "1.5", -1 → "-1").
@@ -65,34 +68,21 @@ pub fn get_elem_value(
 /// [[Set]] with a JsValue key — ToPropertyKey (§7.1.19) then delegate to
 /// the single [[Set]] implementation. set_value handles setter invocation,
 /// proto-walk, and element storage for Index keys on arrays.
+/// Returns the [[Set]] success flag so strict-mode callers can throw
+/// TypeError on failure (§13.15.2 PutValue step 6.b.iv).
 pub fn put_elem_value(
   state: State,
   ref: value.Ref,
   key: JsValue,
   val: JsValue,
-) -> Result(State, #(JsValue, State)) {
+) -> Result(#(State, Bool), #(JsValue, State)) {
   let receiver = JsObject(ref)
   case key {
-    value.JsSymbol(sym_id) -> {
-      use #(state, _) <- result.map(object.set_symbol_value(
-        state,
-        ref,
-        sym_id,
-        val,
-        receiver,
-      ))
-      state
-    }
+    value.JsSymbol(sym_id) ->
+      object.set_symbol_value(state, ref, sym_id, val, receiver)
     _ -> {
       use #(pk, state) <- result.try(to_property_key(state, key))
-      use #(state, _) <- result.map(object.set_value(
-        state,
-        ref,
-        pk,
-        val,
-        receiver,
-      ))
-      state
+      object.set_value(state, ref, pk, val, receiver)
     }
   }
 }

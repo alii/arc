@@ -1,17 +1,19 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
+import arc/vm/builtins/object as object_builtins
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/coerce
+import arc/vm/ops/object as objops
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type JsonNativeFn, type Property, type Ref, ArrayObject,
-  DataProperty, Finite, FunctionObject, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsUndefined, JsonNative, JsonParse, JsonStringify, NaN,
-  NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
+  type JsValue, type JsonNativeFn, type Property, type Ref, DataProperty, Finite,
+  JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonNative,
+  JsonParse, JsonStringify, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 import gleam/bit_array
 import gleam/dict
+import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -30,8 +32,8 @@ import gleam/string_tree.{type StringTree}
 pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
-      #("parse", JsonNative(JsonParse), 1),
-      #("stringify", JsonNative(JsonStringify), 1),
+      #("parse", JsonNative(JsonParse), 2),
+      #("stringify", JsonNative(JsonStringify), 3),
     ])
 
   common.init_namespace(h, object_proto, "JSON", methods)
@@ -516,86 +518,522 @@ fn materialize_object_entries(
 // JSON.stringify(value)
 // ============================================================================
 
-/// ES2024 S25.5.2 JSON.stringify ( value [ , replacer [ , space ] ] )
+/// ES2024 §25.5.2 JSON.stringify ( value [ , replacer [ , space ] ] )
 ///
-/// Simplified: replacer and space parameters are not yet implemented.
-///
-/// After setup (stack, indent, gap, ReplacerFunction, wrapper), the final step
-/// returns ? SerializeJSONProperty(state, "", wrapper) — or undefined if the
+/// Steps 1-3: state setup (stack, indent, ReplacerFunction, PropertyList).
+/// Steps 4: replacer processing (function or array of property names).
+/// Steps 5-8: space → gap.
+/// Steps 9-11: wrapper holder { "": value }.
+/// Step 12: ? SerializeJSONProperty(state, "", wrapper) — undefined when the
 /// value is not serializable.
 fn json_stringify(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
+  let replacer = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let space = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
 
-  case stringify_value(state.heap, val, set.new()) {
-    Ok(Some(s)) -> #(state, Ok(JsString(s)))
-    Ok(None) -> #(state, Ok(JsUndefined))
-    Error(err_msg) -> {
-      let #(heap, err) =
-        common.make_type_error(state.heap, state.builtins, err_msg)
-      #(State(..state, heap:), Error(err))
+  let result = {
+    // Step 4: ReplacerFunction / PropertyList.
+    use #(#(replacer_fn, property_list), state) <- result.try(build_replacer(
+      state,
+      replacer,
+    ))
+    // Steps 5-8: gap.
+    use #(gap, state) <- result.try(compute_gap(state, space))
+    // Steps 9-11: wrapper = OrdinaryObjectCreate(%Object.prototype%) with
+    // CreateDataPropertyOrThrow(wrapper, "", value).
+    let #(heap, wrapper) =
+      heap.alloc(
+        state.heap,
+        ObjectSlot(
+          kind: OrdinaryObject,
+          properties: dict.from_list([
+            #(value.canonical_key(""), value.data_property(val)),
+          ]),
+          elements: elements.new(),
+          prototype: Some(state.builtins.object.prototype),
+          symbol_properties: [],
+          extensible: True,
+        ),
+      )
+    let state = State(..state, heap:)
+    let ctx = StringifyCtx(replacer_fn:, property_list:, gap:)
+    // Step 12.
+    serialize_property(state, ctx, [], "", "", wrapper)
+  }
+  case result {
+    Ok(#(Some(s), state)) -> #(state, Ok(JsString(s)))
+    Ok(#(None, state)) -> #(state, Ok(JsUndefined))
+    Error(#(err, state)) -> #(state, Error(err))
+  }
+}
+
+/// Immutable parts of the spec's JSON Serialization Record: ReplacerFunction,
+/// PropertyList and Gap. (Stack and Indent are threaded as parameters.)
+type StringifyCtx {
+  StringifyCtx(
+    replacer_fn: Option(JsValue),
+    property_list: Option(List(String)),
+    gap: String,
+  )
+}
+
+const circular_msg = "Converting circular structure to JSON"
+
+const revoked_proxy_msg = "Cannot perform 'IsArray' on a proxy that has been revoked"
+
+/// §25.5.2 step 4: derive ReplacerFunction (callable replacer) or
+/// PropertyList (array replacer) from the second argument.
+fn build_replacer(
+  state: State,
+  replacer: JsValue,
+) -> Result(
+  #(#(Option(JsValue), Option(List(String))), State),
+  #(JsValue, State),
+) {
+  case replacer {
+    JsObject(ref) ->
+      case helpers.is_callable(state.heap, replacer) {
+        // Step 4.a: IsCallable → ReplacerFunction.
+        True -> Ok(#(#(Some(replacer), None), state))
+        False ->
+          // Step 4.b.i: isArray = ? IsArray(replacer) — a revoked proxy
+          // makes IsArray throw a TypeError.
+          case objops.is_array_ref(state.heap, ref) {
+            Error(Nil) -> coerce.thrown_type_error(state, revoked_proxy_msg)
+            Ok(False) -> Ok(#(#(None, None), state))
+            // Step 4.b.iii: build PropertyList from the array elements.
+            Ok(True) -> {
+              use #(len, state) <- result.try(length_of_array_like(state, ref))
+              use #(items, state) <- result.map(
+                collect_property_list(state, ref, 0, len, set.new(), []),
+              )
+              #(#(None, Some(items)), state)
+            }
+          }
+      }
+    _ -> Ok(#(#(None, None), state))
+  }
+}
+
+/// §25.5.2 step 4.b.iii.5: for each index k of the replacer array, Get the
+/// element and convert it to a property-name string (String/Number primitives
+/// and String/Number wrapper objects only), deduplicating.
+fn collect_property_list(
+  state: State,
+  ref: Ref,
+  k: Int,
+  len: Int,
+  seen: Set(String),
+  acc: List(String),
+) -> Result(#(List(String), State), #(JsValue, State)) {
+  case k >= len {
+    True -> Ok(#(list.reverse(acc), state))
+    False -> {
+      use #(v, state) <- result.try(objops.get_value(
+        state,
+        ref,
+        value.canonical_key(int.to_string(k)),
+        JsObject(ref),
+      ))
+      use #(item, state) <- result.try(replacer_item(state, v))
+      case item {
+        Some(s) ->
+          case set.contains(seen, s) {
+            True -> collect_property_list(state, ref, k + 1, len, seen, acc)
+            False ->
+              collect_property_list(
+                state,
+                ref,
+                k + 1,
+                len,
+                set.insert(seen, s),
+                [s, ..acc],
+              )
+          }
+        None -> collect_property_list(state, ref, k + 1, len, seen, acc)
+      }
     }
   }
 }
 
-/// Stringify a JsValue. Returns:
-///   Ok(Some(json_string)) — successfully serialized
-///   Ok(None) — value should be omitted (undefined, function, symbol)
-///   Error(msg) — circular reference or other TypeError
-fn stringify_value(
-  h: Heap,
-  val: JsValue,
-  seen: Set(Int),
-) -> Result(Option(String), String) {
-  case val {
-    JsNull -> Ok(Some("null"))
-    JsBool(True) -> Ok(Some("true"))
-    JsBool(False) -> Ok(Some("false"))
-    JsNumber(Finite(n)) -> Ok(Some(value.js_format_number(n)))
-    JsNumber(NaN) | JsNumber(value.Infinity) | JsNumber(NegInfinity) ->
-      Ok(Some("null"))
-    JsString(s) -> Ok(Some(stringify_string(s)))
-    // undefined, functions, and symbols return None (omitted)
-    JsUndefined | value.JsSymbol(_) | value.JsUninitialized -> Ok(None)
-    value.JsBigInt(_) -> Error("Do not know how to serialize a BigInt")
-    JsObject(ref) -> {
-      case set.contains(seen, ref.id) {
-        True -> Error("Converting circular structure to JSON")
-        False -> {
-          let seen = set.insert(seen, ref.id)
-          case heap.read(h, ref) {
-            Some(ObjectSlot(kind: FunctionObject(..), ..))
-            | Some(ObjectSlot(kind: NativeFunction(..), ..)) ->
-              // Functions are omitted at top level (return undefined)
-              Ok(None)
-            Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) ->
-              stringify_array(h, elements, length, 0, seen, [])
-            Some(ObjectSlot(kind: OrdinaryObject, properties:, ..)) ->
-              stringify_object(h, dict.to_list(properties), seen, [])
-            Some(ObjectSlot(kind: value.StringObject(s), ..)) ->
-              // Boxed string — unwrap and stringify as string
-              Ok(Some(stringify_string(s)))
-            Some(ObjectSlot(kind: value.NumberObject(n), ..)) ->
-              // Boxed number — unwrap and stringify as number
-              case n {
-                Finite(f) -> Ok(Some(value.js_format_number(f)))
-                _ -> Ok(Some("null"))
-              }
-            Some(ObjectSlot(kind: value.BooleanObject(b), ..)) ->
-              // Boxed boolean — unwrap
-              case b {
-                True -> Ok(Some("true"))
-                False -> Ok(Some("false"))
-              }
-            _ ->
-              // Other exotic objects (promises, generators, etc.) — treat as empty object
-              Ok(Some("{}"))
-          }
+/// One PropertyList item (§25.5.2 step 4.b.iii.5.b-f): String stays, Number
+/// is formatted, String/Number wrapper objects go through ToString (which can
+/// re-enter user toString/valueOf and throw); everything else is skipped.
+fn replacer_item(
+  state: State,
+  v: JsValue,
+) -> Result(#(Option(String), State), #(JsValue, State)) {
+  case v {
+    JsString(s) -> Ok(#(Some(s), state))
+    JsNumber(_) -> {
+      use #(s, state) <- result.map(coerce.js_to_string(state, v))
+      #(Some(s), state)
+    }
+    JsObject(vref) ->
+      case heap.read(state.heap, vref) {
+        Some(ObjectSlot(kind: value.StringObject(_), ..))
+        | Some(ObjectSlot(kind: value.NumberObject(_), ..)) -> {
+          use #(s, state) <- result.map(coerce.js_to_string(state, v))
+          #(Some(s), state)
         }
+        _ -> Ok(#(None, state))
+      }
+    _ -> Ok(#(None, state))
+  }
+}
+
+/// §25.5.2 steps 5-8: compute the gap string from the space argument.
+/// Number/String wrapper objects are unwrapped via full ToNumber/ToString
+/// (observable valueOf/toString calls — abrupt completions propagate).
+fn compute_gap(
+  state: State,
+  space: JsValue,
+) -> Result(#(String, State), #(JsValue, State)) {
+  // Step 5: unwrap Number/String wrapper objects.
+  use #(space, state) <- result.try(case space {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: value.NumberObject(_), ..)) -> {
+          use #(n, state) <- result.map(coerce.js_to_number(state, space))
+          #(JsNumber(n), state)
+        }
+        Some(ObjectSlot(kind: value.StringObject(_), ..)) -> {
+          use #(s, state) <- result.map(coerce.js_to_string(state, space))
+          #(JsString(s), state)
+        }
+        _ -> Ok(#(space, state))
+      }
+    _ -> Ok(#(space, state))
+  })
+  let gap = case space {
+    // Step 6: Number → min(10, ToIntegerOrInfinity(space)) spaces.
+    JsNumber(n) -> {
+      let mv = int.min(10, space_to_integer(n))
+      case mv < 1 {
+        True -> ""
+        False -> string.repeat(" ", mv)
       }
     }
+    // Step 7: String → first 10 code units.
+    JsString(s) ->
+      case string.length(s) <= 10 {
+        True -> s
+        False -> string.slice(s, 0, 10)
+      }
+    // Step 8: otherwise no gap.
+    _ -> ""
+  }
+  Ok(#(gap, state))
+}
+
+/// ToIntegerOrInfinity (§7.1.5) restricted to what the gap computation needs:
+/// NaN/-∞ → 0 (both produce an empty gap), +∞ → 10 (the min-10 clamp).
+fn space_to_integer(n: value.JsNum) -> Int {
+  case n {
+    Finite(f) -> float.truncate(f)
+    value.Infinity -> 10
+    NaN | NegInfinity -> 0
+  }
+}
+
+/// 2^53 - 1, the ToLength (§7.1.17) upper clamp.
+const max_safe_length = 9_007_199_254_740_991
+
+/// LengthOfArrayLike (§7.3.18): ToLength(? Get(obj, "length")). The Get goes
+/// through full [[Get]] (proxy traps, getters), ToNumber can re-enter valueOf.
+fn length_of_array_like(
+  state: State,
+  ref: Ref,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  use #(len_val, state) <- result.try(objops.get_value(
+    state,
+    ref,
+    value.canonical_key("length"),
+    JsObject(ref),
+  ))
+  use #(n, state) <- result.map(coerce.js_to_number(state, len_val))
+  let len = case n {
+    Finite(f) -> int.clamp(float.truncate(f), 0, max_safe_length)
+    value.Infinity -> max_safe_length
+    NaN | NegInfinity -> 0
+  }
+  #(len, state)
+}
+
+/// SerializeJSONProperty (§25.5.2.1).
+///
+/// `stack` is the list of heap ids of objects currently being serialized
+/// (circular detection); `indent` is the current indentation. Returns
+/// Some(json) or None when the value must be omitted (undefined / callable /
+/// symbol).
+fn serialize_property(
+  state: State,
+  ctx: StringifyCtx,
+  stack: List(Int),
+  indent: String,
+  key: String,
+  holder: Ref,
+) -> Result(#(Option(String), State), #(JsValue, State)) {
+  // Step 1: value = ? Get(holder, key).
+  use #(val, state) <- result.try(objops.get_value(
+    state,
+    holder,
+    value.canonical_key(key),
+    JsObject(holder),
+  ))
+  // Step 2: toJSON — looked up for Objects AND BigInt primitives (GetV).
+  use #(val, state) <- result.try(case val {
+    JsObject(_) | value.JsBigInt(_) -> {
+      use #(to_json, state) <- result.try(objops.get_value_of(
+        state,
+        val,
+        value.canonical_key("toJSON"),
+      ))
+      case helpers.is_callable(state.heap, to_json) {
+        True -> state.call(state, to_json, val, [JsString(key)])
+        False -> Ok(#(val, state))
+      }
+    }
+    _ -> Ok(#(val, state))
+  })
+  // Step 3: ReplacerFunction — called with the holder as `this`.
+  use #(val, state) <- result.try(case ctx.replacer_fn {
+    Some(rf) -> state.call(state, rf, JsObject(holder), [JsString(key), val])
+    None -> Ok(#(val, state))
+  })
+  // Step 4: unwrap Number/String/Boolean/BigInt wrapper objects.
+  use #(val, state) <- result.try(case val {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        // Step 4.a: [[NumberData]] → ToNumber(value) (observable valueOf).
+        Some(ObjectSlot(kind: value.NumberObject(_), ..)) -> {
+          use #(n, state) <- result.map(coerce.js_to_number(state, val))
+          #(JsNumber(n), state)
+        }
+        // Step 4.b: [[StringData]] → ToString(value) (observable toString).
+        Some(ObjectSlot(kind: value.StringObject(_), ..)) -> {
+          use #(s, state) <- result.map(coerce.js_to_string(state, val))
+          #(JsString(s), state)
+        }
+        // Step 4.c: [[BooleanData]] → the wrapped boolean directly.
+        Some(ObjectSlot(kind: value.BooleanObject(b), ..)) ->
+          Ok(#(JsBool(b), state))
+        // Step 4.d: [[BigIntData]] → the wrapped BigInt (then step 10 throws).
+        // BigInt wrappers are OrdinaryObjects with a private-key slot.
+        Some(ObjectSlot(kind: OrdinaryObject, properties:, ..)) ->
+          case dict.get(properties, value.bigint_data_key()) {
+            Ok(DataProperty(value: value.JsBigInt(bi), ..)) ->
+              Ok(#(value.JsBigInt(bi), state))
+            _ -> Ok(#(val, state))
+          }
+        _ -> Ok(#(val, state))
+      }
+    _ -> Ok(#(val, state))
+  })
+  // Steps 5-12: dispatch on the (possibly unwrapped) value.
+  case val {
+    JsNull -> Ok(#(Some("null"), state))
+    JsBool(True) -> Ok(#(Some("true"), state))
+    JsBool(False) -> Ok(#(Some("false"), state))
+    JsString(s) -> Ok(#(Some(stringify_string(s)), state))
+    JsNumber(Finite(n)) -> Ok(#(Some(value.js_format_number(n)), state))
+    // Step 9: non-finite numbers serialize as "null".
+    JsNumber(NaN) | JsNumber(value.Infinity) | JsNumber(NegInfinity) ->
+      Ok(#(Some("null"), state))
+    // Step 10: BigInt → TypeError.
+    value.JsBigInt(_) ->
+      coerce.thrown_type_error(state, "Do not know how to serialize a BigInt")
+    // Step 11: non-callable objects recurse; callables are omitted (step 12).
+    JsObject(ref) ->
+      case helpers.is_callable(state.heap, val) {
+        True -> Ok(#(None, state))
+        False ->
+          case objops.is_array_ref(state.heap, ref) {
+            Error(Nil) -> coerce.thrown_type_error(state, revoked_proxy_msg)
+            Ok(True) -> {
+              use #(s, state) <- result.map(serialize_array(
+                state,
+                ctx,
+                stack,
+                indent,
+                ref,
+              ))
+              #(Some(s), state)
+            }
+            Ok(False) -> {
+              use #(s, state) <- result.map(serialize_object(
+                state,
+                ctx,
+                stack,
+                indent,
+                ref,
+              ))
+              #(Some(s), state)
+            }
+          }
+      }
+    // Step 12: undefined / symbol → omitted.
+    JsUndefined | value.JsSymbol(_) | value.JsUninitialized ->
+      Ok(#(None, state))
+  }
+}
+
+/// SerializeJSONObject (§25.5.2.4): keys from PropertyList (if present) or
+/// EnumerableOwnPropertyNames(value, key) (proxy ownKeys-trap aware).
+fn serialize_object(
+  state: State,
+  ctx: StringifyCtx,
+  stack: List(Int),
+  indent: String,
+  ref: Ref,
+) -> Result(#(String, State), #(JsValue, State)) {
+  // Steps 1-2: circular detection on the serialization stack.
+  case list.contains(stack, ref.id) {
+    True -> coerce.thrown_type_error(state, circular_msg)
+    False -> {
+      let stack = [ref.id, ..stack]
+      let step_indent = indent <> ctx.gap
+      // Steps 5-6: K = PropertyList or EnumerableOwnPropertyNames(value, key).
+      use #(keys, state) <- result.try(case ctx.property_list {
+        Some(pl) -> Ok(#(pl, state))
+        None -> object_builtins.enumerable_string_keys_stateful(state, ref)
+      })
+      // Step 8: partial = members serialized in order.
+      use #(partial, state) <- result.map(
+        serialize_members(state, ctx, stack, step_indent, ref, keys, []),
+      )
+      #(
+        finalize_brackets(partial, ctx.gap, step_indent, indent, "{", "}"),
+        state,
+      )
+    }
+  }
+}
+
+/// §25.5.2.4 step 8: serialize each key; omitted (undefined) members are
+/// skipped, present members render as quoted-key ":" [space] value.
+fn serialize_members(
+  state: State,
+  ctx: StringifyCtx,
+  stack: List(Int),
+  step_indent: String,
+  ref: Ref,
+  keys: List(String),
+  acc: List(String),
+) -> Result(#(List(String), State), #(JsValue, State)) {
+  case keys {
+    [] -> Ok(#(list.reverse(acc), state))
+    [k, ..rest] -> {
+      use #(str_p, state) <- result.try(serialize_property(
+        state,
+        ctx,
+        stack,
+        step_indent,
+        k,
+        ref,
+      ))
+      case str_p {
+        Some(s) -> {
+          let sep = case ctx.gap {
+            "" -> ":"
+            _ -> ": "
+          }
+          serialize_members(state, ctx, stack, step_indent, ref, rest, [
+            stringify_string(k) <> sep <> s,
+            ..acc
+          ])
+        }
+        None ->
+          serialize_members(state, ctx, stack, step_indent, ref, rest, acc)
+      }
+    }
+  }
+}
+
+/// SerializeJSONArray (§25.5.2.5): LengthOfArrayLike + per-index Get
+/// (proxy-trap aware); omitted elements serialize as "null".
+fn serialize_array(
+  state: State,
+  ctx: StringifyCtx,
+  stack: List(Int),
+  indent: String,
+  ref: Ref,
+) -> Result(#(String, State), #(JsValue, State)) {
+  // Steps 1-2: circular detection.
+  case list.contains(stack, ref.id) {
+    True -> coerce.thrown_type_error(state, circular_msg)
+    False -> {
+      let stack = [ref.id, ..stack]
+      let step_indent = indent <> ctx.gap
+      // Step 6: len = ? LengthOfArrayLike(value).
+      use #(len, state) <- result.try(length_of_array_like(state, ref))
+      use #(partial, state) <- result.map(
+        serialize_elements(state, ctx, stack, step_indent, ref, 0, len, []),
+      )
+      #(
+        finalize_brackets(partial, ctx.gap, step_indent, indent, "[", "]"),
+        state,
+      )
+    }
+  }
+}
+
+/// §25.5.2.5 step 8: serialize indices 0..len-1 in order.
+fn serialize_elements(
+  state: State,
+  ctx: StringifyCtx,
+  stack: List(Int),
+  step_indent: String,
+  ref: Ref,
+  i: Int,
+  len: Int,
+  acc: List(String),
+) -> Result(#(List(String), State), #(JsValue, State)) {
+  case i >= len {
+    True -> Ok(#(list.reverse(acc), state))
+    False -> {
+      use #(str_p, state) <- result.try(serialize_property(
+        state,
+        ctx,
+        stack,
+        step_indent,
+        int.to_string(i),
+        ref,
+      ))
+      // Step 8.b: undefined → "null".
+      let s = option.unwrap(str_p, "null")
+      serialize_elements(state, ctx, stack, step_indent, ref, i + 1, len, [
+        s,
+        ..acc
+      ])
+    }
+  }
+}
+
+/// Shared tail of SerializeJSONObject/Array: wrap the member strings in
+/// brackets, with newline + indent layout when gap is non-empty.
+fn finalize_brackets(
+  partial: List(String),
+  gap: String,
+  step_indent: String,
+  stepback: String,
+  open: String,
+  close: String,
+) -> String {
+  case partial, gap {
+    [], _ -> open <> close
+    _, "" -> open <> string.join(partial, ",") <> close
+    _, _ ->
+      open
+      <> "\n"
+      <> step_indent
+      <> string.join(partial, ",\n" <> step_indent)
+      <> "\n"
+      <> stepback
+      <> close
   }
 }
 
@@ -661,66 +1099,15 @@ fn escape_string(chars: List(String), acc: StringTree) -> String {
   }
 }
 
-/// Format a codepoint as \uXXXX.
+/// Format a codepoint as \uXXXX — four LOWERCASE hex digits, per
+/// QuoteJSONString's UnicodeEscape (§25.5.2.3).
 fn unicode_escape(code: Int) -> String {
-  let hex = int.to_base_string(code, 16) |> result.unwrap("0")
+  let hex =
+    int.to_base_string(code, 16)
+    |> result.unwrap("0")
+    |> string.lowercase
   let padded = string.pad_start(hex, to: 4, with: "0")
   "\\u" <> padded
-}
-
-/// Stringify a JSON array.
-fn stringify_array(
-  h: Heap,
-  elements: value.JsElements,
-  length: Int,
-  idx: Int,
-  seen: Set(Int),
-  acc: List(String),
-) -> Result(Option(String), String) {
-  case idx >= length {
-    True -> Ok(Some("[" <> string.join(list.reverse(acc), ",") <> "]"))
-    False -> {
-      let elem = elements.get(elements, idx)
-      case stringify_value(h, elem, seen) {
-        Ok(Some(s)) ->
-          stringify_array(h, elements, length, idx + 1, seen, [s, ..acc])
-        Ok(None) ->
-          // undefined/function/symbol in arrays become "null"
-          stringify_array(h, elements, length, idx + 1, seen, ["null", ..acc])
-        Error(msg) -> Error(msg)
-      }
-    }
-  }
-}
-
-/// Stringify a JSON object.
-fn stringify_object(
-  h: Heap,
-  entries: List(#(value.PropertyKey, Property)),
-  seen: Set(Int),
-  acc: List(String),
-) -> Result(Option(String), String) {
-  case entries {
-    [] -> Ok(Some("{" <> string.join(list.reverse(acc), ",") <> "}"))
-    [#(key, DataProperty(value: val, enumerable: True, ..)), ..rest] -> {
-      case stringify_value(h, val, seen) {
-        Ok(Some(s)) -> {
-          let entry = stringify_string(value.key_to_string(key)) <> ":" <> s
-          stringify_object(h, rest, seen, [entry, ..acc])
-        }
-        Ok(None) ->
-          // undefined/function/symbol values are omitted from objects
-          stringify_object(h, rest, seen, acc)
-        Error(msg) -> Error(msg)
-      }
-    }
-    [#(_key, DataProperty(enumerable: False, ..)), ..rest] ->
-      // Non-enumerable properties are skipped
-      stringify_object(h, rest, seen, acc)
-    [#(_key, value.AccessorProperty(..)), ..rest] ->
-      // Accessor properties are skipped (would need evaluation)
-      stringify_object(h, rest, seen, acc)
-  }
 }
 
 // ============================================================================

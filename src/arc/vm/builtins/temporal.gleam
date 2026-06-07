@@ -1,0 +1,10571 @@
+/// Temporal (ECMAScript Temporal proposal, ES2026 draft §21.x / test262
+/// feature "Temporal").
+///
+/// Design notes:
+/// - Only the iso8601 calendar is supported. Other calendar identifiers
+///   throw RangeError (matching an implementation without 402 calendars).
+/// - Time zones: "UTC" plus fixed-offset identifiers ("±HH:MM"). Named IANA
+///   zones other than UTC throw RangeError. Offset zones have no DST, so all
+///   ZonedDateTime arithmetic is exact.
+/// - All numeric internals are BEAM Ints (arbitrary precision), so epoch
+///   nanoseconds (±8.64e21) and duration totals (≤2^53·1e9) are exact.
+///
+/// Prior art: tc39/proposal-temporal spec text + reference polyfill;
+/// QuickJS has no Temporal, engine262's implementation was consulted for
+/// abstract-operation semantics (ToIntegerWithTruncation, RegulateISODate,
+/// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
+import arc/vm/builtins/common
+import arc/vm/builtins/helpers
+import arc/vm/builtins/temporal_calendar as tcal
+import arc/vm/builtins/temporal_tz
+import arc/vm/heap
+import arc/vm/internal/elements
+import arc/vm/ops/coerce
+import arc/vm/ops/object as ops_object
+import arc/vm/state.{type Heap, type State, State}
+import arc/vm/value.{
+  type JsValue, type Ref, type TemporalKind, type TemporalNativeFn,
+  type TemporalProtos, Dispatch, Finite, JsBigInt, JsBool, JsNull, JsNumber,
+  JsObject, JsString, JsUndefined, Named, NativeFunction, ObjectSlot,
+  OrdinaryObject, TemporalCtor, TemporalDateSlot, TemporalDateTimeSlot,
+  TemporalDurationKind, TemporalDurationSlot, TemporalGetterFn,
+  TemporalInstantKind, TemporalInstantSlot, TemporalMethod, TemporalMonthDaySlot,
+  TemporalNative, TemporalNowFn, TemporalPlainDateKind,
+  TemporalPlainDateTimeKind, TemporalPlainMonthDayKind, TemporalPlainTimeKind,
+  TemporalPlainYearMonthKind, TemporalProtos, TemporalStatic, TemporalTimeSlot,
+  TemporalYearMonthSlot, TemporalZonedDateTimeKind, TemporalZonedDateTimeSlot,
+}
+import gleam/float
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
+import gleam/string
+
+@external(erlang, "arc_date_ffi", "now_ms")
+fn ffi_now_ms() -> Int
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+const ns_per_day = 86_400_000_000_000
+
+const ns_per_hour = 3_600_000_000_000
+
+const ns_per_minute = 60_000_000_000
+
+const ns_per_second = 1_000_000_000
+
+const ns_per_ms = 1_000_000
+
+const ns_per_us = 1000
+
+/// nsMaxInstant = 8.64e21 (±100,000,000 days from epoch).
+const ns_max_instant = 8_640_000_000_000_000_000_000
+
+/// Maximum time duration in ns: 2^53 seconds − 1 ns.
+const max_time_duration_ns = 9_007_199_254_740_991_999_999_999
+
+/// ISODateWithinLimits bounds expressed in epoch days.
+const min_epoch_days = -100_000_001
+
+const max_epoch_days = 100_000_000
+
+// ============================================================================
+// Internal records
+// ============================================================================
+
+type IsoDate {
+  IsoDate(year: Int, month: Int, day: Int)
+}
+
+type TimeRec {
+  TimeRec(hour: Int, minute: Int, second: Int, ms: Int, us: Int, ns: Int)
+}
+
+type DurRec {
+  DurRec(
+    years: Int,
+    months: Int,
+    weeks: Int,
+    days: Int,
+    hours: Int,
+    minutes: Int,
+    seconds: Int,
+    ms: Int,
+    us: Int,
+    ns: Int,
+  )
+}
+
+const midnight = TimeRec(0, 0, 0, 0, 0, 0)
+
+const zero_dur = DurRec(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+/// Internal error kind for pure helpers — converted to JS errors at the
+/// dispatch boundary.
+type TErr {
+  RangeE(String)
+  TypeE(String)
+}
+
+// ============================================================================
+// Init — Temporal namespace, 8 types, Temporal.Now
+// ============================================================================
+
+/// Build the whole Temporal global. Returns the namespace object ref.
+pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+  // Reserve all eight prototypes up front so each native-fn token can carry
+  // refs to every sibling prototype.
+  let #(h, pd_proto) = reserve_rooted(h)
+  let #(h, pt_proto) = reserve_rooted(h)
+  let #(h, pdt_proto) = reserve_rooted(h)
+  let #(h, pym_proto) = reserve_rooted(h)
+  let #(h, pmd_proto) = reserve_rooted(h)
+  let #(h, dur_proto) = reserve_rooted(h)
+  let #(h, ins_proto) = reserve_rooted(h)
+  let #(h, zdt_proto) = reserve_rooted(h)
+  let protos =
+    TemporalProtos(
+      plain_date: pd_proto,
+      plain_time: pt_proto,
+      plain_date_time: pdt_proto,
+      plain_year_month: pym_proto,
+      plain_month_day: pmd_proto,
+      duration: dur_proto,
+      instant: ins_proto,
+      zoned_date_time: zdt_proto,
+    )
+
+  let #(h, pd_ctor) =
+    init_temporal_type(
+      h,
+      TemporalPlainDateKind,
+      protos,
+      "PlainDate",
+      3,
+      pd_proto,
+      [#("from", 1), #("compare", 2)],
+      [
+        "calendarId", "era", "eraYear", "year", "month", "monthCode", "day",
+        "dayOfWeek", "dayOfYear", "weekOfYear", "yearOfWeek", "daysInWeek",
+        "daysInMonth", "daysInYear", "monthsInYear", "inLeapYear",
+      ],
+      [
+        #("toPlainYearMonth", 0),
+        #("toPlainMonthDay", 0),
+        #("toPlainDateTime", 0),
+        #("toZonedDateTime", 1),
+        #("add", 1),
+        #("subtract", 1),
+        #("with", 1),
+        #("withCalendar", 1),
+        #("until", 1),
+        #("since", 1),
+        #("equals", 1),
+        #("toString", 0),
+        #("toLocaleString", 0),
+        #("toJSON", 0),
+        #("valueOf", 0),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  let #(h, pt_ctor) =
+    init_temporal_type(
+      h,
+      TemporalPlainTimeKind,
+      protos,
+      "PlainTime",
+      0,
+      pt_proto,
+      [#("from", 1), #("compare", 2)],
+      ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"],
+      [
+        #("add", 1),
+        #("subtract", 1),
+        #("with", 1),
+        #("until", 1),
+        #("since", 1),
+        #("round", 1),
+        #("equals", 1),
+        #("toString", 0),
+        #("toLocaleString", 0),
+        #("toJSON", 0),
+        #("valueOf", 0),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  let #(h, pdt_ctor) =
+    init_temporal_type(
+      h,
+      TemporalPlainDateTimeKind,
+      protos,
+      "PlainDateTime",
+      3,
+      pdt_proto,
+      [#("from", 1), #("compare", 2)],
+      [
+        "calendarId", "era", "eraYear", "year", "month", "monthCode", "day",
+        "hour", "minute", "second", "millisecond", "microsecond", "nanosecond",
+        "dayOfWeek", "dayOfYear", "weekOfYear", "yearOfWeek", "daysInWeek",
+        "daysInMonth", "daysInYear", "monthsInYear", "inLeapYear",
+      ],
+      [
+        #("with", 1),
+        #("withPlainTime", 0),
+        #("withCalendar", 1),
+        #("add", 1),
+        #("subtract", 1),
+        #("until", 1),
+        #("since", 1),
+        #("round", 1),
+        #("equals", 1),
+        #("toString", 0),
+        #("toLocaleString", 0),
+        #("toJSON", 0),
+        #("valueOf", 0),
+        #("toPlainDate", 0),
+        #("toPlainTime", 0),
+        #("toZonedDateTime", 1),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  let #(h, pym_ctor) =
+    init_temporal_type(
+      h,
+      TemporalPlainYearMonthKind,
+      protos,
+      "PlainYearMonth",
+      2,
+      pym_proto,
+      [#("from", 1), #("compare", 2)],
+      [
+        "calendarId", "era", "eraYear", "year", "month", "monthCode",
+        "daysInYear", "daysInMonth", "monthsInYear", "inLeapYear",
+      ],
+      [
+        #("with", 1),
+        #("add", 1),
+        #("subtract", 1),
+        #("until", 1),
+        #("since", 1),
+        #("equals", 1),
+        #("toString", 0),
+        #("toLocaleString", 0),
+        #("toJSON", 0),
+        #("valueOf", 0),
+        #("toPlainDate", 1),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  let #(h, pmd_ctor) =
+    init_temporal_type(
+      h,
+      TemporalPlainMonthDayKind,
+      protos,
+      "PlainMonthDay",
+      2,
+      pmd_proto,
+      [#("from", 1)],
+      ["calendarId", "monthCode", "day"],
+      [
+        #("with", 1),
+        #("equals", 1),
+        #("toString", 0),
+        #("toLocaleString", 0),
+        #("toJSON", 0),
+        #("valueOf", 0),
+        #("toPlainDate", 1),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  let #(h, dur_ctor) =
+    init_temporal_type(
+      h,
+      TemporalDurationKind,
+      protos,
+      "Duration",
+      0,
+      dur_proto,
+      [#("from", 1), #("compare", 2)],
+      [
+        "years", "months", "weeks", "days", "hours", "minutes", "seconds",
+        "milliseconds", "microseconds", "nanoseconds", "sign", "blank",
+      ],
+      [
+        #("with", 1),
+        #("negated", 0),
+        #("abs", 0),
+        #("add", 1),
+        #("subtract", 1),
+        #("round", 1),
+        #("total", 1),
+        #("toString", 0),
+        #("toJSON", 0),
+        #("toLocaleString", 0),
+        #("valueOf", 0),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  let #(h, ins_ctor) =
+    init_temporal_type(
+      h,
+      TemporalInstantKind,
+      protos,
+      "Instant",
+      1,
+      ins_proto,
+      [
+        #("from", 1),
+        #("fromEpochMilliseconds", 1),
+        #("fromEpochNanoseconds", 1),
+        #("compare", 2),
+      ],
+      ["epochMilliseconds", "epochNanoseconds"],
+      [
+        #("add", 1),
+        #("subtract", 1),
+        #("until", 1),
+        #("since", 1),
+        #("round", 1),
+        #("equals", 1),
+        #("toString", 0),
+        #("toLocaleString", 0),
+        #("toJSON", 0),
+        #("valueOf", 0),
+        #("toZonedDateTimeISO", 1),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  let #(h, zdt_ctor) =
+    init_temporal_type(
+      h,
+      TemporalZonedDateTimeKind,
+      protos,
+      "ZonedDateTime",
+      2,
+      zdt_proto,
+      [#("from", 1), #("compare", 2)],
+      [
+        "calendarId", "timeZoneId", "era", "eraYear", "year", "month",
+        "monthCode", "day", "hour", "minute", "second", "millisecond",
+        "microsecond", "nanosecond", "epochMilliseconds", "epochNanoseconds",
+        "dayOfWeek", "dayOfYear", "weekOfYear", "yearOfWeek", "hoursInDay",
+        "daysInWeek", "daysInMonth", "daysInYear", "monthsInYear", "inLeapYear",
+        "offsetNanoseconds", "offset",
+      ],
+      [
+        #("withTimeZone", 1),
+        #("withCalendar", 1),
+        #("withPlainTime", 0),
+        #("with", 1),
+        #("add", 1),
+        #("subtract", 1),
+        #("until", 1),
+        #("since", 1),
+        #("round", 1),
+        #("equals", 1),
+        #("toString", 0),
+        #("toLocaleString", 0),
+        #("toJSON", 0),
+        #("valueOf", 0),
+        #("startOfDay", 0),
+        #("getTimeZoneTransition", 1),
+        #("toInstant", 0),
+        #("toPlainDate", 0),
+        #("toPlainTime", 0),
+        #("toPlainDateTime", 0),
+      ],
+      object_proto,
+      function_proto,
+    )
+
+  // Temporal.Now namespace
+  let #(h, now_props) =
+    common.alloc_methods(
+      h,
+      function_proto,
+      list.map(
+        [
+          #("instant", 0),
+          #("timeZoneId", 0),
+          #("plainDateISO", 0),
+          #("plainDateTimeISO", 0),
+          #("plainTimeISO", 0),
+          #("zonedDateTimeISO", 0),
+        ],
+        fn(spec) {
+          #(spec.0, TemporalNative(TemporalNowFn(spec.0, protos)), spec.1)
+        },
+      ),
+    )
+  let #(h, now_ref) =
+    common.init_namespace(h, object_proto, "Temporal.Now", now_props)
+
+  // Temporal namespace itself
+  let #(h, ns_ref) =
+    common.init_namespace(h, object_proto, "Temporal", [
+      #("PlainDate", value.builtin_property(JsObject(pd_ctor))),
+      #("PlainTime", value.builtin_property(JsObject(pt_ctor))),
+      #("PlainDateTime", value.builtin_property(JsObject(pdt_ctor))),
+      #("PlainYearMonth", value.builtin_property(JsObject(pym_ctor))),
+      #("PlainMonthDay", value.builtin_property(JsObject(pmd_ctor))),
+      #("Duration", value.builtin_property(JsObject(dur_ctor))),
+      #("Instant", value.builtin_property(JsObject(ins_ctor))),
+      #("ZonedDateTime", value.builtin_property(JsObject(zdt_ctor))),
+      #("Now", value.builtin_property(JsObject(now_ref))),
+    ])
+  #(h, ns_ref)
+}
+
+fn reserve_rooted(h: Heap) -> #(Heap, Ref) {
+  let #(h, r) = heap.reserve(h)
+  #(heap.root(h, r), r)
+}
+
+/// Build one Temporal type: constructor (with statics) + filled prototype
+/// (getters, methods, @@toStringTag, constructor backlink).
+fn init_temporal_type(
+  h: Heap,
+  kind: TemporalKind,
+  protos: TemporalProtos,
+  name: String,
+  arity: Int,
+  proto_ref: Ref,
+  statics: List(#(String, Int)),
+  getters: List(String),
+  methods: List(#(String, Int)),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap, Ref) {
+  let #(h, static_props) =
+    common.alloc_methods(
+      h,
+      function_proto,
+      list.map(statics, fn(s) {
+        #(s.0, TemporalNative(TemporalStatic(kind, s.0, protos)), s.1)
+      }),
+    )
+  let #(h, getter_props) =
+    common.alloc_getters(
+      h,
+      function_proto,
+      list.map(getters, fn(g) {
+        #(g, TemporalNative(TemporalGetterFn(kind, g, protos)))
+      }),
+    )
+  let #(h, method_props) =
+    common.alloc_methods(
+      h,
+      function_proto,
+      list.map(methods, fn(m) {
+        #(m.0, TemporalNative(TemporalMethod(kind, m.0, protos)), m.1)
+      }),
+    )
+  let #(h, ctor_ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: NativeFunction(
+          Dispatch(TemporalNative(TemporalCtor(kind, protos))),
+          constructible: True,
+        ),
+        properties: common.named_props([
+          // §x: constructor "prototype" is non-writable, non-configurable.
+          #("prototype", value.data(JsObject(proto_ref))),
+          #("name", common.fn_name_property(name)),
+          #("length", common.fn_length_property(arity)),
+          ..static_props
+        ]),
+        elements: elements.new(),
+        prototype: Some(function_proto),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  let h = heap.root(h, ctor_ref)
+  let h =
+    heap.fill(
+      h,
+      proto_ref,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: common.named_props([
+          #("constructor", value.builtin_property(JsObject(ctor_ref))),
+          ..list.append(getter_props, method_props)
+        ]),
+        elements: elements.new(),
+        prototype: Some(object_proto),
+        symbol_properties: [common.to_string_tag("Temporal." <> name)],
+        extensible: True,
+      ),
+    )
+  #(h, ctor_ref)
+}
+
+// ============================================================================
+// Dispatch
+// ============================================================================
+
+pub fn dispatch(
+  native: TemporalNativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case native {
+    TemporalCtor(kind:, protos:) -> ctor_dispatch(kind, protos, args, state)
+    TemporalStatic(kind:, name:, protos:) ->
+      static_dispatch(kind, name, protos, args, state)
+    TemporalGetterFn(kind:, name:, protos:) ->
+      getter_dispatch(kind, name, protos, this, state)
+    TemporalMethod(kind:, name:, protos:) ->
+      method_dispatch(kind, name, protos, this, args, state)
+    TemporalNowFn(name:, protos:) -> now_dispatch(name, protos, args, state)
+  }
+}
+
+fn ctor_dispatch(
+  kind: TemporalKind,
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // All Temporal constructors throw TypeError when called without `new`
+  // (NewTarget undefined). do_construct sets state.new_target for natives.
+  case state.new_target {
+    JsUndefined -> state.type_error(state, "Temporal constructor requires new")
+    nt -> {
+      let #(state, res) = case kind {
+        TemporalPlainDateKind -> plain_date_ctor(protos, args, state)
+        TemporalPlainTimeKind -> plain_time_ctor(protos, args, state)
+        TemporalPlainDateTimeKind -> plain_date_time_ctor(protos, args, state)
+        TemporalPlainYearMonthKind -> plain_year_month_ctor(protos, args, state)
+        TemporalPlainMonthDayKind -> plain_month_day_ctor(protos, args, state)
+        TemporalDurationKind -> duration_ctor(protos, args, state)
+        TemporalInstantKind -> instant_ctor(protos, args, state)
+        TemporalZonedDateTimeKind -> zoned_date_time_ctor(protos, args, state)
+      }
+      case res {
+        Error(e) -> #(state, Error(e))
+        Ok(v) -> apply_new_target_proto(state, nt, v)
+      }
+    }
+  }
+}
+
+/// GetPrototypeFromConstructor (via OrdinaryCreateFromConstructor): read
+/// newTarget.prototype — an observable Get that may throw — and re-point the
+/// created object at it when it is an object. The intrinsic default proto
+/// stays when newTarget.prototype is not an object.
+fn apply_new_target_proto(
+  state: State,
+  nt: JsValue,
+  v: JsValue,
+) -> #(State, Result(JsValue, JsValue)) {
+  case nt, v {
+    JsObject(nt_ref), JsObject(obj_ref) ->
+      case ops_object.get_value(state, nt_ref, Named("prototype"), nt) {
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+        Ok(#(proto_v, state)) -> {
+          let state = case proto_v {
+            JsObject(proto_ref) ->
+              case heap.read(state.heap, obj_ref) {
+                Some(ObjectSlot(..) as slot) ->
+                  State(
+                    ..state,
+                    heap: heap.write(
+                      state.heap,
+                      obj_ref,
+                      ObjectSlot(..slot, prototype: Some(proto_ref)),
+                    ),
+                  )
+                _ -> state
+              }
+            _ -> state
+          }
+          #(state, Ok(v))
+        }
+      }
+    _, _ -> #(state, Ok(v))
+  }
+}
+
+// ============================================================================
+// Pure calendar math (ISO 8601 proleptic Gregorian)
+// ============================================================================
+
+fn floor_div(a: Int, b: Int) -> Int {
+  int.floor_divide(a, b) |> result.unwrap(0)
+}
+
+fn math_mod(a: Int, b: Int) -> Int {
+  int.modulo(a, b) |> result.unwrap(0)
+}
+
+fn is_leap_year(y: Int) -> Bool {
+  math_mod(y, 4) == 0 && { math_mod(y, 100) != 0 || math_mod(y, 400) == 0 }
+}
+
+fn days_in_iso_year(y: Int) -> Int {
+  case is_leap_year(y) {
+    True -> 366
+    False -> 365
+  }
+}
+
+/// Days in 1-based month `m` of year `y`.
+fn days_in_month(y: Int, m: Int) -> Int {
+  case m {
+    2 ->
+      case is_leap_year(y) {
+        True -> 29
+        False -> 28
+      }
+    4 | 6 | 9 | 11 -> 30
+    _ -> 31
+  }
+}
+
+/// Days since epoch to Jan 1 of year y.
+fn days_from_year(y: Int) -> Int {
+  365
+  * { y - 1970 }
+  + floor_div(y - 1969, 4)
+  - floor_div(y - 1901, 100)
+  + floor_div(y - 1601, 400)
+}
+
+fn days_before_month(y: Int, m: Int) -> Int {
+  sum_months(y, 1, m, 0)
+}
+
+fn sum_months(y: Int, i: Int, until: Int, acc: Int) -> Int {
+  case i >= until {
+    True -> acc
+    False -> sum_months(y, i + 1, until, acc + days_in_month(y, i))
+  }
+}
+
+fn epoch_days(d: IsoDate) -> Int {
+  days_from_year(d.year) + days_before_month(d.year, d.month) + d.day - 1
+}
+
+fn year_from_days(days: Int) -> #(Int, Int) {
+  let y = floor_div(days * 10_000, 3_652_425) + 1970
+  year_from_days_loop(y, days)
+}
+
+fn year_from_days_loop(y: Int, days: Int) -> #(Int, Int) {
+  let d = days - days_from_year(y)
+  case d < 0 {
+    True -> year_from_days_loop(y - 1, days)
+    False ->
+      case d >= days_in_iso_year(y) {
+        True -> year_from_days_loop(y + 1, days)
+        False -> #(y, d)
+      }
+  }
+}
+
+fn iso_date_from_epoch_days(days: Int) -> IsoDate {
+  let #(year, day_in_year) = year_from_days(days)
+  let #(month, day) = month_day_from_doy(year, day_in_year, 1)
+  IsoDate(year:, month:, day:)
+}
+
+fn month_day_from_doy(y: Int, d: Int, m: Int) -> #(Int, Int) {
+  let md = days_in_month(y, m)
+  case d < md {
+    True -> #(m, d + 1)
+    False -> month_day_from_doy(y, d - md, m + 1)
+  }
+}
+
+/// ISO day of week: Monday = 1 .. Sunday = 7. Epoch day 0 = Thursday.
+fn day_of_week(d: IsoDate) -> Int {
+  math_mod(epoch_days(d) + 3, 7) + 1
+}
+
+fn day_of_year(d: IsoDate) -> Int {
+  days_before_month(d.year, d.month) + d.day
+}
+
+/// ISO 8601 week number + week-calendar year.
+fn week_of_year(d: IsoDate) -> #(Int, Int) {
+  let doy = day_of_year(d)
+  let dow = day_of_week(d)
+  let week = { doy - dow + 10 } / 7
+  case week < 1 {
+    True -> {
+      // Belongs to the last week of the previous year.
+      let py = d.year - 1
+      let pdoy = doy + days_in_iso_year(py)
+      #({ pdoy - dow + 10 } / 7, py)
+    }
+    False -> {
+      let weeks_in_year = case { days_in_iso_year(d.year) - doy < 4 - dow } {
+        True -> {
+          // Might belong to week 1 of next year.
+          let nyd = doy - days_in_iso_year(d.year)
+          let nweek = { nyd - dow + 10 } / 7
+          case nweek >= 1 {
+            True -> -1
+            False -> week
+          }
+        }
+        False -> week
+      }
+      case weeks_in_year == -1 {
+        True -> #(1, d.year + 1)
+        False -> #(week, d.year)
+      }
+    }
+  }
+}
+
+fn is_valid_iso_date(y: Int, m: Int, d: Int) -> Bool {
+  m >= 1 && m <= 12 && d >= 1 && d <= days_in_month(y, m)
+}
+
+fn iso_date_within_limits(d: IsoDate) -> Bool {
+  let ed = epoch_days(d)
+  ed >= min_epoch_days && ed <= max_epoch_days
+}
+
+fn iso_datetime_within_limits(d: IsoDate, t: TimeRec) -> Bool {
+  let ns = epoch_days(d) * ns_per_day + time_to_ns(t)
+  ns > { 0 - ns_max_instant } - ns_per_day && ns < ns_max_instant + ns_per_day
+}
+
+fn iso_year_month_within_limits(y: Int, m: Int) -> Bool {
+  case y {
+    -271_821 -> m >= 4
+    275_760 -> m <= 9
+    _ -> y > -271_821 && y < 275_760
+  }
+}
+
+fn time_to_ns(t: TimeRec) -> Int {
+  t.hour
+  * ns_per_hour
+  + t.minute
+  * ns_per_minute
+  + t.second
+  * ns_per_second
+  + t.ms
+  * ns_per_ms
+  + t.us
+  * ns_per_us
+  + t.ns
+}
+
+/// Decompose non-negative day-local nanoseconds into a TimeRec.
+fn ns_to_time(total: Int) -> TimeRec {
+  let hour = total / ns_per_hour
+  let rem = total - hour * ns_per_hour
+  let minute = rem / ns_per_minute
+  let rem = rem - minute * ns_per_minute
+  let second = rem / ns_per_second
+  let rem = rem - second * ns_per_second
+  let ms = rem / ns_per_ms
+  let rem = rem - ms * ns_per_ms
+  let us = rem / ns_per_us
+  let ns = rem - us * ns_per_us
+  TimeRec(hour:, minute:, second:, ms:, us:, ns:)
+}
+
+fn is_valid_time(t: TimeRec) -> Bool {
+  t.hour >= 0
+  && t.hour <= 23
+  && t.minute >= 0
+  && t.minute <= 59
+  && t.second >= 0
+  && t.second <= 59
+  && t.ms >= 0
+  && t.ms <= 999
+  && t.us >= 0
+  && t.us <= 999
+  && t.ns >= 0
+  && t.ns <= 999
+}
+
+/// RegulateISODate — overflow is "constrain" or "reject". Month must already
+/// be ≥ 1 when called from property bags (ToPositiveIntegerWithTruncation).
+fn regulate_iso_date(
+  y: Int,
+  m: Int,
+  d: Int,
+  overflow: String,
+) -> Result(IsoDate, TErr) {
+  case overflow {
+    "reject" ->
+      case is_valid_iso_date(y, m, d) {
+        True -> Ok(IsoDate(y, m, d))
+        False -> Error(RangeE("invalid ISO date"))
+      }
+    _ -> {
+      let m = int.clamp(m, 1, 12)
+      let d = int.clamp(d, 1, days_in_month(y, m))
+      Ok(IsoDate(y, m, d))
+    }
+  }
+}
+
+fn check_date_limits(d: IsoDate) -> Result(IsoDate, TErr) {
+  case iso_date_within_limits(d) {
+    True -> Ok(d)
+    False -> Error(RangeE("date outside of supported range"))
+  }
+}
+
+/// Epoch nanoseconds for an ISO date+time interpreted as UTC.
+fn utc_epoch_ns(d: IsoDate, t: TimeRec) -> Int {
+  epoch_days(d) * ns_per_day + time_to_ns(t)
+}
+
+/// Split epoch nanoseconds (+ offset) into date and time.
+fn epoch_ns_to_iso(epoch_ns: Int, offset_ns: Int) -> #(IsoDate, TimeRec) {
+  let local = epoch_ns + offset_ns
+  let days = floor_div(local, ns_per_day)
+  let rem = local - days * ns_per_day
+  #(iso_date_from_epoch_days(days), ns_to_time(rem))
+}
+
+// ============================================================================
+// Formatting
+// ============================================================================
+
+fn pad2(n: Int) -> String {
+  int.to_string(int.absolute_value(n)) |> string.pad_start(2, "0")
+}
+
+fn format_iso_year(y: Int) -> String {
+  case y >= 0 && y <= 9999 {
+    True -> int.to_string(y) |> string.pad_start(4, "0")
+    False -> {
+      let sign = case y < 0 {
+        True -> "-"
+        False -> "+"
+      }
+      sign
+      <> { int.to_string(int.absolute_value(y)) |> string.pad_start(6, "0") }
+    }
+  }
+}
+
+fn format_iso_date(d: IsoDate) -> String {
+  format_iso_year(d.year) <> "-" <> pad2(d.month) <> "-" <> pad2(d.day)
+}
+
+/// Format sub-second part per `precision`: "auto" trims trailing zeros,
+/// an Int 0..9 forces that many digits. Returns "" or ".ddd...".
+fn format_fraction(sub_ns: Int, precision: Precision) -> String {
+  let digits9 = int.to_string(sub_ns) |> string.pad_start(9, "0")
+  case precision {
+    AutoPrec ->
+      case sub_ns == 0 {
+        True -> ""
+        False -> "." <> trim_trailing_zeros(digits9)
+      }
+    FixedPrec(0) -> ""
+    FixedPrec(n) -> "." <> string.slice(digits9, 0, n)
+    MinutePrec -> ""
+  }
+}
+
+fn trim_trailing_zeros(s: String) -> String {
+  case string.ends_with(s, "0") {
+    True -> trim_trailing_zeros(string.drop_end(s, 1))
+    False -> s
+  }
+}
+
+type Precision {
+  AutoPrec
+  FixedPrec(Int)
+  MinutePrec
+}
+
+fn format_iso_time(t: TimeRec, precision: Precision) -> String {
+  let sub = t.ms * ns_per_ms + t.us * ns_per_us + t.ns
+  let base = pad2(t.hour) <> ":" <> pad2(t.minute)
+  case precision {
+    MinutePrec -> base
+    _ -> base <> ":" <> pad2(t.second) <> format_fraction(sub, precision)
+  }
+}
+
+/// Format a UTC offset from nanoseconds, minute precision ("+05:30").
+fn format_offset_minutes(offset_ns: Int) -> String {
+  let sign = case offset_ns < 0 {
+    True -> "-"
+    False -> "+"
+  }
+  let a = int.absolute_value(offset_ns)
+  let total_minutes = a / ns_per_minute
+  sign <> pad2(total_minutes / 60) <> ":" <> pad2(total_minutes % 60)
+}
+
+// ============================================================================
+// Branding helpers — extract internal slots from `this`
+// ============================================================================
+
+fn read_kind(state: State, this: JsValue) -> Option(value.ExoticKind(State)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind:, ..)) -> Some(kind)
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+fn this_date(state: State, this: JsValue) -> Option(IsoDate) {
+  case read_kind(state, this) {
+    Some(TemporalDateSlot(year:, month:, day:, calendar: _)) ->
+      Some(IsoDate(year:, month:, day:))
+    _ -> None
+  }
+}
+
+/// Calendar slot of any calendared Temporal object (PlainDate,
+/// PlainDateTime, PlainYearMonth, PlainMonthDay, ZonedDateTime).
+fn this_calendar(state: State, this: JsValue) -> String {
+  case read_kind(state, this) {
+    Some(TemporalDateSlot(calendar:, ..)) -> calendar
+    Some(TemporalDateTimeSlot(calendar:, ..)) -> calendar
+    Some(TemporalYearMonthSlot(calendar:, ..)) -> calendar
+    Some(TemporalMonthDaySlot(calendar:, ..)) -> calendar
+    Some(TemporalZonedDateTimeSlot(calendar:, ..)) -> calendar
+    _ -> "iso8601"
+  }
+}
+
+fn this_time(state: State, this: JsValue) -> Option(TimeRec) {
+  case read_kind(state, this) {
+    Some(TemporalTimeSlot(
+      hour:,
+      minute:,
+      second:,
+      millisecond:,
+      microsecond:,
+      nanosecond:,
+    )) ->
+      Some(TimeRec(hour, minute, second, millisecond, microsecond, nanosecond))
+    _ -> None
+  }
+}
+
+fn this_date_time(state: State, this: JsValue) -> Option(#(IsoDate, TimeRec)) {
+  case read_kind(state, this) {
+    Some(TemporalDateTimeSlot(
+      year:,
+      month:,
+      day:,
+      hour:,
+      minute:,
+      second:,
+      millisecond:,
+      microsecond:,
+      nanosecond:,
+      calendar: _,
+    )) ->
+      Some(#(
+        IsoDate(year, month, day),
+        TimeRec(hour, minute, second, millisecond, microsecond, nanosecond),
+      ))
+    _ -> None
+  }
+}
+
+fn this_year_month(state: State, this: JsValue) -> Option(#(Int, Int, Int)) {
+  case read_kind(state, this) {
+    Some(TemporalYearMonthSlot(year:, month:, day:, calendar: _)) ->
+      Some(#(year, month, day))
+    _ -> None
+  }
+}
+
+fn this_month_day(state: State, this: JsValue) -> Option(#(Int, Int, Int)) {
+  case read_kind(state, this) {
+    Some(TemporalMonthDaySlot(month:, day:, ref_year:, calendar: _)) ->
+      Some(#(month, day, ref_year))
+    _ -> None
+  }
+}
+
+fn this_duration(state: State, this: JsValue) -> Option(DurRec) {
+  case read_kind(state, this) {
+    Some(TemporalDurationSlot(
+      years:,
+      months:,
+      weeks:,
+      days:,
+      hours:,
+      minutes:,
+      seconds:,
+      milliseconds:,
+      microseconds:,
+      nanoseconds:,
+    )) ->
+      Some(DurRec(
+        years,
+        months,
+        weeks,
+        days,
+        hours,
+        minutes,
+        seconds,
+        milliseconds,
+        microseconds,
+        nanoseconds,
+      ))
+    _ -> None
+  }
+}
+
+fn this_instant(state: State, this: JsValue) -> Option(Int) {
+  case read_kind(state, this) {
+    Some(TemporalInstantSlot(epoch_ns:)) -> Some(epoch_ns)
+    _ -> None
+  }
+}
+
+fn this_zoned(state: State, this: JsValue) -> Option(#(Int, String, String)) {
+  case read_kind(state, this) {
+    Some(TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:)) ->
+      Some(#(epoch_ns, time_zone, calendar))
+    _ -> None
+  }
+}
+
+fn brand_error(
+  state: State,
+  type_name: String,
+  name: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  state.type_error(
+    state,
+    "Temporal."
+      <> type_name
+      <> ".prototype."
+      <> name
+      <> " called on incompatible receiver",
+  )
+}
+
+// ============================================================================
+// Allocation helpers
+// ============================================================================
+
+fn alloc_value(
+  state: State,
+  kind: value.ExoticKind(State),
+  proto: Ref,
+) -> #(State, JsValue) {
+  let #(h, ref) = common.alloc_wrapper(state.heap, kind, proto)
+  #(State(..state, heap: h), JsObject(ref))
+}
+
+fn make_date(
+  state: State,
+  protos: TemporalProtos,
+  d: IsoDate,
+) -> #(State, JsValue) {
+  make_date_cal(state, protos, d, "iso8601")
+}
+
+fn make_date_cal(
+  state: State,
+  protos: TemporalProtos,
+  d: IsoDate,
+  cal: String,
+) -> #(State, JsValue) {
+  alloc_value(
+    state,
+    TemporalDateSlot(year: d.year, month: d.month, day: d.day, calendar: cal),
+    protos.plain_date,
+  )
+}
+
+fn make_time(
+  state: State,
+  protos: TemporalProtos,
+  t: TimeRec,
+) -> #(State, JsValue) {
+  alloc_value(
+    state,
+    TemporalTimeSlot(
+      hour: t.hour,
+      minute: t.minute,
+      second: t.second,
+      millisecond: t.ms,
+      microsecond: t.us,
+      nanosecond: t.ns,
+    ),
+    protos.plain_time,
+  )
+}
+
+fn make_date_time(
+  state: State,
+  protos: TemporalProtos,
+  d: IsoDate,
+  t: TimeRec,
+) -> #(State, JsValue) {
+  make_date_time_cal(state, protos, d, t, "iso8601")
+}
+
+fn make_date_time_cal(
+  state: State,
+  protos: TemporalProtos,
+  d: IsoDate,
+  t: TimeRec,
+  cal: String,
+) -> #(State, JsValue) {
+  alloc_value(
+    state,
+    TemporalDateTimeSlot(
+      year: d.year,
+      month: d.month,
+      day: d.day,
+      hour: t.hour,
+      minute: t.minute,
+      second: t.second,
+      millisecond: t.ms,
+      microsecond: t.us,
+      nanosecond: t.ns,
+      calendar: cal,
+    ),
+    protos.plain_date_time,
+  )
+}
+
+fn make_year_month(
+  state: State,
+  protos: TemporalProtos,
+  y: Int,
+  m: Int,
+  ref_day: Int,
+) -> #(State, JsValue) {
+  make_year_month_cal(state, protos, y, m, ref_day, "iso8601")
+}
+
+fn make_year_month_cal(
+  state: State,
+  protos: TemporalProtos,
+  y: Int,
+  m: Int,
+  ref_day: Int,
+  cal: String,
+) -> #(State, JsValue) {
+  alloc_value(
+    state,
+    TemporalYearMonthSlot(year: y, month: m, day: ref_day, calendar: cal),
+    protos.plain_year_month,
+  )
+}
+
+fn make_month_day_cal(
+  state: State,
+  protos: TemporalProtos,
+  m: Int,
+  d: Int,
+  ref_year: Int,
+  cal: String,
+) -> #(State, JsValue) {
+  alloc_value(
+    state,
+    TemporalMonthDaySlot(month: m, day: d, ref_year: ref_year, calendar: cal),
+    protos.plain_month_day,
+  )
+}
+
+/// Each Duration field is a float64 Number in the spec (CreateTemporalDuration
+/// stores ℝ(𝔽(v))), so huge components lose precision on construction.
+/// Rounded in integer space via scale_ratio (ties-to-even) because erlang's
+/// float/1 mis-rounds integers wider than 53 bits.
+fn f64_int(n: Int) -> Int {
+  case int.absolute_value(n) < two53 {
+    True -> n
+    False -> {
+      let #(m, s) = scale_ratio(int.absolute_value(n), 1, 0)
+      let v = int.bitwise_shift_left(m, s)
+      case n < 0 {
+        True -> 0 - v
+        False -> v
+      }
+    }
+  }
+}
+
+fn make_duration(
+  state: State,
+  protos: TemporalProtos,
+  dur: DurRec,
+) -> #(State, JsValue) {
+  alloc_value(
+    state,
+    TemporalDurationSlot(
+      years: f64_int(dur.years),
+      months: f64_int(dur.months),
+      weeks: f64_int(dur.weeks),
+      days: f64_int(dur.days),
+      hours: f64_int(dur.hours),
+      minutes: f64_int(dur.minutes),
+      seconds: f64_int(dur.seconds),
+      milliseconds: f64_int(dur.ms),
+      microseconds: f64_int(dur.us),
+      nanoseconds: f64_int(dur.ns),
+    ),
+    protos.duration,
+  )
+}
+
+fn make_instant(
+  state: State,
+  protos: TemporalProtos,
+  ns: Int,
+) -> #(State, JsValue) {
+  alloc_value(state, TemporalInstantSlot(epoch_ns: ns), protos.instant)
+}
+
+fn make_zoned(
+  state: State,
+  protos: TemporalProtos,
+  ns: Int,
+  tz: String,
+) -> #(State, JsValue) {
+  make_zoned_cal(state, protos, ns, tz, "iso8601")
+}
+
+fn make_zoned_cal(
+  state: State,
+  protos: TemporalProtos,
+  ns: Int,
+  tz: String,
+  cal: String,
+) -> #(State, JsValue) {
+  alloc_value(
+    state,
+    TemporalZonedDateTimeSlot(epoch_ns: ns, time_zone: tz, calendar: cal),
+    protos.zoned_date_time,
+  )
+}
+
+// ============================================================================
+// Coercion helpers
+// ============================================================================
+
+fn throw_terr(state: State, e: TErr) -> #(State, Result(JsValue, JsValue)) {
+  case e {
+    RangeE(m) -> state.range_error(state, m)
+    TypeE(m) -> state.type_error(state, m)
+  }
+}
+
+/// CPS adapter: run a pure Result(a, TErr) op, throwing on Error.
+fn terr(
+  state: State,
+  r: Result(a, TErr),
+  k: fn(a) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case r {
+    Ok(v) -> k(v)
+    Error(e) -> throw_terr(state, e)
+  }
+}
+
+/// ToIntegerWithTruncation: ToNumber, RangeError on NaN/±∞, truncate.
+fn to_integer_with_truncation(
+  state: State,
+  v: JsValue,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  use num <- result.try(coerce.js_to_number(state, v))
+  case num {
+    #(Finite(f), st) -> Ok(#(value.float_to_int(f), st))
+    #(_, st) -> range_error_result(st, "not a finite number")
+  }
+}
+
+/// ToPositiveIntegerWithTruncation: like above but must be > 0.
+fn to_positive_integer_with_truncation(
+  state: State,
+  v: JsValue,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  use #(n, st) <- result.try(to_integer_with_truncation(state, v))
+  case n > 0 {
+    True -> Ok(#(n, st))
+    False -> range_error_result(st, "expected a positive integer")
+  }
+}
+
+/// ToIntegerIfIntegral: ToNumber, RangeError unless an integral Number.
+fn to_integer_if_integral(
+  state: State,
+  v: JsValue,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  use num <- result.try(coerce.js_to_number(state, v))
+  case num {
+    #(Finite(f), st) -> {
+      let i = value.float_to_int(f)
+      let fi = int.to_float(i)
+      // Arithmetic comparison: `==` is term equality, where -0.0 ≠ 0.0.
+      case f >=. fi && f <=. fi {
+        True -> Ok(#(i, st))
+        False -> range_error_result(st, "expected an integral number")
+      }
+    }
+    #(_, st) -> range_error_result(st, "expected an integral number")
+  }
+}
+
+fn range_error_result(
+  st: State,
+  msg: String,
+) -> Result(#(a, State), #(JsValue, State)) {
+  let #(st, r) = st |> state.range_error(msg)
+  case r {
+    Error(err) -> Error(#(err, st))
+    Ok(_) -> Error(#(JsUndefined, st))
+  }
+}
+
+fn type_error_result(
+  st: State,
+  msg: String,
+) -> Result(#(a, State), #(JsValue, State)) {
+  let #(st, r) = st |> state.type_error(msg)
+  case r {
+    Error(err) -> Error(#(err, st))
+    Ok(_) -> Error(#(JsUndefined, st))
+  }
+}
+
+/// Minimal ToBigInt for Temporal entry points (Instant/ZonedDateTime ctors).
+/// Numbers throw TypeError per spec; strings must parse as an integer.
+fn to_bigint(
+  state: State,
+  v: JsValue,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case v {
+    JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
+    JsBool(True) -> Ok(#(1, state))
+    JsBool(False) -> Ok(#(0, state))
+    JsString(s) ->
+      case parse_bigint_string(s) {
+        Some(n) -> Ok(#(n, state))
+        None -> type_error_result(state, "Cannot convert string to a BigInt")
+      }
+    JsObject(_) -> {
+      use #(prim, st) <- result.try(coerce.to_primitive(
+        state,
+        v,
+        coerce.NumberHint,
+      ))
+      case prim {
+        JsObject(_) -> type_error_result(st, "Cannot convert to BigInt")
+        _ -> to_bigint(st, prim)
+      }
+    }
+    _ -> type_error_result(state, "Cannot convert value to a BigInt")
+  }
+}
+
+fn parse_bigint_string(s: String) -> Option(Int) {
+  let s = string.trim(s)
+  case s {
+    "" -> Some(0)
+    _ -> int.parse(s) |> option.from_result
+  }
+}
+
+// ============================================================================
+// Options handling
+// ============================================================================
+
+/// GetOptionsObject: undefined → None, object → Some(ref), else TypeError.
+fn get_options_object(
+  state: State,
+  v: JsValue,
+) -> Result(#(Option(Ref), State), #(JsValue, State)) {
+  case v {
+    JsUndefined -> Ok(#(None, state))
+    JsObject(ref) -> Ok(#(Some(ref), state))
+    _ -> type_error_result(state, "options must be an object or undefined")
+  }
+}
+
+/// GetOption for string-valued options.
+fn get_string_option(
+  state: State,
+  opts: Option(Ref),
+  key: String,
+  allowed: List(String),
+  default: Option(String),
+) -> Result(#(Option(String), State), #(JsValue, State)) {
+  case opts {
+    None -> Ok(#(default, state))
+    Some(ref) -> {
+      use got <- result.try(ops_object.get_value(
+        state,
+        ref,
+        Named(key),
+        JsObject(ref),
+      ))
+      case got {
+        #(JsUndefined, st) -> Ok(#(default, st))
+        #(v, st) -> {
+          use #(s, st) <- result.try(coerce.js_to_string(st, v))
+          case list.contains(allowed, s) {
+            True -> Ok(#(Some(s), st))
+            False ->
+              range_error_result(
+                st,
+                s <> " is not a valid value for option " <> key,
+              )
+          }
+        }
+      }
+    }
+  }
+}
+
+/// GetTemporalOverflowOption: "constrain" (default) or "reject".
+fn get_overflow_option(
+  state: State,
+  opts: Option(Ref),
+) -> Result(#(String, State), #(JsValue, State)) {
+  use #(v, st) <- result.map(get_string_option(
+    state,
+    opts,
+    "overflow",
+    ["constrain", "reject"],
+    Some("constrain"),
+  ))
+  #(option.unwrap(v, "constrain"), st)
+}
+
+// ============================================================================
+// Calendar handling (iso8601 only)
+// ============================================================================
+
+fn canonicalize_calendar(id: String) -> Result(String, TErr) {
+  case tcal.canonicalize(id) {
+    Ok(c) -> Ok(c)
+    Error(Nil) -> Error(RangeE("calendar " <> id <> " is not supported"))
+  }
+}
+
+/// ToTemporalCalendarIdentifier for string inputs: either a bare calendar id,
+/// or an ISO date/date-time/year-month/month-day/time string whose [u-ca=]
+/// annotation (default iso8601) supplies the calendar.
+fn calendar_from_string(s: String) -> Result(String, TErr) {
+  case canonicalize_calendar(s) {
+    Ok(c) -> Ok(c)
+    Error(e) ->
+      case extract_calendar_annotation(s) {
+        Some(cal) -> canonicalize_calendar(cal)
+        None -> Error(e)
+      }
+  }
+}
+
+/// If `s` parses as some ISO 8601 Temporal string, return its calendar
+/// annotation value (or "iso8601" when absent). None when not parseable.
+fn extract_calendar_annotation(s: String) -> Option(String) {
+  case parse_iso_datetime_string(s) {
+    Some(p) -> Some(option.unwrap(p.calendar, "iso8601"))
+    None -> {
+      // Try time-only / year-month / month-day forms.
+      let body = case s {
+        "T" <> r | "t" <> r -> r
+        _ -> s
+      }
+      case parse_time_part(body) {
+        Some(#(_, rest)) -> {
+          let rest = case parse_offset_part(rest) {
+            Some(#(False, _, _, r)) -> r
+            _ -> rest
+          }
+          case parse_annotations(rest, None, None, False) {
+            Some(#(_, cal, "")) -> Some(option.unwrap(cal, "iso8601"))
+            _ -> try_ym_md_calendar(s)
+          }
+        }
+        None -> try_ym_md_calendar(s)
+      }
+    }
+  }
+}
+
+fn try_ym_md_calendar(s: String) -> Option(String) {
+  case parse_year_month_string(s) {
+    Ok(_) -> Some("iso8601")
+    Error(_) ->
+      case parse_month_day_string(s) {
+        Ok(_) -> Some("iso8601")
+        Error(_) -> None
+      }
+  }
+}
+
+/// Calendar argument of constructors: undefined → iso8601; string → must be
+/// supported; anything else → TypeError.
+fn to_calendar_arg(v: JsValue) -> Result(String, TErr) {
+  case v {
+    JsUndefined -> Ok("iso8601")
+    JsString(s) -> canonicalize_calendar(s)
+    _ -> Error(TypeE("calendar must be a string"))
+  }
+}
+
+// ============================================================================
+// ISO 8601 string parsing
+// ============================================================================
+
+type ParsedIso {
+  ParsedIso(
+    date: Option(IsoDate),
+    time: Option(TimeRec),
+    /// UTC designator present (Z)
+    z: Bool,
+    /// explicit numeric offset, in nanoseconds
+    offset_ns: Option(Int),
+    /// the explicit offset spelled a seconds component (sub-minute syntax)
+    offset_sub_minute: Bool,
+    /// time zone annotation [Etc/UTC] / [+01:00]
+    tz: Option(String),
+    /// calendar annotation value
+    calendar: Option(String),
+  )
+}
+
+fn digit(c: String) -> Option(Int) {
+  case c {
+    "0" -> Some(0)
+    "1" -> Some(1)
+    "2" -> Some(2)
+    "3" -> Some(3)
+    "4" -> Some(4)
+    "5" -> Some(5)
+    "6" -> Some(6)
+    "7" -> Some(7)
+    "8" -> Some(8)
+    "9" -> Some(9)
+    _ -> None
+  }
+}
+
+fn take_digits(s: String, n: Int) -> Option(#(Int, String)) {
+  take_digits_loop(s, n, 0)
+}
+
+fn take_digits_loop(s: String, n: Int, acc: Int) -> Option(#(Int, String)) {
+  case n {
+    0 -> Some(#(acc, s))
+    _ ->
+      case string.pop_grapheme(s) {
+        Ok(#(c, rest)) ->
+          case digit(c) {
+            Some(d) -> take_digits_loop(rest, n - 1, acc * 10 + d)
+            None -> None
+          }
+        Error(Nil) -> None
+      }
+  }
+}
+
+/// Take up to `max` digits (at least 1), returning value, count, rest.
+fn take_some_digits(s: String, max: Int) -> Option(#(Int, Int, String)) {
+  take_some_digits_loop(s, max, 0, 0)
+}
+
+fn take_some_digits_loop(
+  s: String,
+  max: Int,
+  acc: Int,
+  count: Int,
+) -> Option(#(Int, Int, String)) {
+  case max == 0 {
+    True -> Some(#(acc, count, s))
+    False ->
+      case string.pop_grapheme(s) {
+        Ok(#(c, rest)) ->
+          case digit(c) {
+            Some(d) ->
+              take_some_digits_loop(rest, max - 1, acc * 10 + d, count + 1)
+            None ->
+              case count > 0 {
+                True -> Some(#(acc, count, s))
+                False -> None
+              }
+          }
+        Error(Nil) ->
+          case count > 0 {
+            True -> Some(#(acc, count, s))
+            False -> None
+          }
+      }
+  }
+}
+
+/// Parse the date part: ±YYYYYY-MM-DD / ±YYYYYYMMDD / YYYY-MM-DD / YYYYMMDD.
+/// Returns y/m/d unvalidated (range-checked by caller) + rest.
+fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
+  use #(year, rest) <- option.then(parse_year_part(s))
+  case rest {
+    "-" <> r1 -> {
+      use #(m, r2) <- option.then(take_digits(r1, 2))
+      case r2 {
+        "-" <> r3 -> {
+          use #(d, r4) <- option.then(take_digits(r3, 2))
+          Some(#(year, m, d, r4))
+        }
+        _ -> None
+      }
+    }
+    _ -> {
+      use #(m, r2) <- option.then(take_digits(rest, 2))
+      use #(d, r3) <- option.then(take_digits(r2, 2))
+      Some(#(year, m, d, r3))
+    }
+  }
+}
+
+/// Year: 4 digits, or sign + 6 digits. "-000000" is rejected.
+fn parse_year_part(s: String) -> Option(#(Int, String)) {
+  case s {
+    "+" <> rest -> take_digits(rest, 6) |> option.map(fn(p) { #(p.0, p.1) })
+    "-" <> rest ->
+      case take_digits(rest, 6) {
+        Some(#(0, _)) -> None
+        Some(#(y, r)) -> Some(#(0 - y, r))
+        None -> None
+      }
+    // U+2212 MINUS SIGN is NOT valid in ISO 8601 strings (only ASCII hyphen).
+    _ -> take_digits(s, 4)
+  }
+}
+
+/// Time: HH[:MM[:SS[.fffffffff]]] or HH[MM[SS[.fffffffff]]].
+fn parse_time_part(s: String) -> Option(#(TimeRec, String)) {
+  use #(h, rest) <- option.then(take_digits(s, 2))
+  let #(mi, sec, frac_ns, rest) = case rest {
+    ":" <> r1 ->
+      case take_digits(r1, 2) {
+        Some(#(mi, r2)) ->
+          case r2 {
+            ":" <> r3 ->
+              case take_digits(r3, 2) {
+                Some(#(sec, r4)) -> {
+                  let #(f, r5) = parse_fraction(r4)
+                  #(mi, sec, f, r5)
+                }
+                None -> #(mi, 0, 0, r2)
+              }
+            _ -> #(mi, 0, 0, r2)
+          }
+        None -> #(0, 0, 0, rest)
+      }
+    _ ->
+      case take_digits(rest, 2) {
+        Some(#(mi, r2)) ->
+          case take_digits(r2, 2) {
+            Some(#(sec, r3)) -> {
+              let #(f, r4) = parse_fraction(r3)
+              #(mi, sec, f, r4)
+            }
+            None -> #(mi, 0, 0, r2)
+          }
+        None -> #(0, 0, 0, rest)
+      }
+  }
+  // Leap second: 60 → 59 per spec.
+  let sec = int.min(sec, 59)
+  let t =
+    TimeRec(
+      hour: h,
+      minute: mi,
+      second: sec,
+      ms: frac_ns / ns_per_ms,
+      us: { frac_ns % ns_per_ms } / ns_per_us,
+      ns: frac_ns % ns_per_us,
+    )
+  case h <= 23 && mi <= 59 {
+    True -> Some(#(t, rest))
+    False -> None
+  }
+}
+
+/// Fraction after '.' or ',' — 1..9 digits → nanoseconds.
+fn parse_fraction(s: String) -> #(Int, String) {
+  case s {
+    "." <> r | "," <> r ->
+      case take_some_digits(r, 9) {
+        Some(#(v, count, rest)) -> #(v * pow10(9 - count), rest)
+        None -> #(0, s)
+      }
+    _ -> #(0, s)
+  }
+}
+
+fn pow10(n: Int) -> Int {
+  case n {
+    0 -> 1
+    _ -> 10 * pow10(n - 1)
+  }
+}
+
+/// UTC offset: Z / z / ±HH[:MM[:SS[.fff]]] / ±HH[MM[SS]].
+/// Returns #(is_z, offset_ns, rest).
+/// Returns #(is_z, offset_ns, sub_minute_syntax, rest). `sub_minute_syntax`
+/// is True when the offset spelled out a seconds component (even ":00"),
+/// which disqualifies it from use as a time zone identifier.
+fn parse_offset_part(s: String) -> Option(#(Bool, Option(Int), Bool, String)) {
+  case s {
+    "Z" <> rest | "z" <> rest -> Some(#(True, None, False, rest))
+    "+" <> rest -> parse_offset_value(rest, 1)
+    "-" <> rest -> parse_offset_value(rest, -1)
+    _ -> None
+  }
+}
+
+fn parse_offset_value(
+  s: String,
+  sign: Int,
+) -> Option(#(Bool, Option(Int), Bool, String)) {
+  use #(h, rest) <- option.then(take_digits(s, 2))
+  let #(mi, sec, frac, sub_minute, rest) = case rest {
+    ":" <> r1 ->
+      case take_digits(r1, 2) {
+        Some(#(mi, r2)) ->
+          case r2 {
+            ":" <> r3 ->
+              case take_digits(r3, 2) {
+                Some(#(sec, r4)) -> {
+                  let #(f, r5) = parse_fraction(r4)
+                  #(mi, sec, f, True, r5)
+                }
+                None -> #(mi, 0, 0, False, r2)
+              }
+            _ -> #(mi, 0, 0, False, r2)
+          }
+        None -> #(0, 0, 0, False, rest)
+      }
+    _ ->
+      case take_digits(rest, 2) {
+        Some(#(mi, r2)) ->
+          case take_digits(r2, 2) {
+            Some(#(sec, r3)) -> {
+              let #(f, r4) = parse_fraction(r3)
+              #(mi, sec, f, True, r4)
+            }
+            None -> #(mi, 0, 0, False, r2)
+          }
+        None -> #(0, 0, 0, False, rest)
+      }
+  }
+  case h <= 23 && mi <= 59 && sec <= 59 {
+    True -> {
+      let ns =
+        { h * ns_per_hour + mi * ns_per_minute + sec * ns_per_second + frac }
+        * sign
+      Some(#(False, Some(ns), sub_minute, rest))
+    }
+    False -> None
+  }
+}
+
+/// Annotations: time zone bracket first (no '='), then key=value pairs.
+/// Returns #(tz, calendar, rest) or None on syntax/critical errors.
+fn parse_annotations(
+  s: String,
+  tz: Option(String),
+  cal: Option(String),
+  cal_critical: Bool,
+) -> Option(#(Option(String), Option(String), String)) {
+  case s {
+    "[" <> r -> {
+      let #(critical, r) = case r {
+        "!" <> rr -> #(True, rr)
+        _ -> #(False, r)
+      }
+      use #(body, rest) <- option.then(split_bracket(r, ""))
+      case string.split_once(body, "=") {
+        Ok(#(key, val)) ->
+          case is_annotation_key(key) && val != "" {
+            False -> None
+            True ->
+              case key {
+                "u-ca" ->
+                  case cal {
+                    // Duplicate calendar annotations are a RangeError when
+                    // ANY of them is critical; otherwise first one wins.
+                    Some(_) ->
+                      case critical || cal_critical {
+                        True -> None
+                        False -> parse_annotations(rest, tz, cal, cal_critical)
+                      }
+                    None -> parse_annotations(rest, tz, Some(val), critical)
+                  }
+                _ ->
+                  case critical {
+                    True -> None
+                    False -> parse_annotations(rest, tz, cal, cal_critical)
+                  }
+              }
+          }
+        Error(Nil) ->
+          // Time-zone annotation — only valid as the first bracket.
+          case tz, cal, is_tz_annotation(body) {
+            None, None, True ->
+              parse_annotations(rest, Some(body), cal, cal_critical)
+            _, _, _ -> None
+          }
+      }
+    }
+    _ -> Some(#(tz, cal, s))
+  }
+}
+
+fn split_bracket(s: String, acc: String) -> Option(#(String, String)) {
+  case string.pop_grapheme(s) {
+    Ok(#("]", rest)) ->
+      case acc {
+        "" -> None
+        _ -> Some(#(acc, rest))
+      }
+    Ok(#(c, rest)) -> split_bracket(rest, acc <> c)
+    Error(Nil) -> None
+  }
+}
+
+fn is_annotation_key(s: String) -> Bool {
+  s != ""
+  && list.all(string.to_graphemes(s), fn(c) {
+    is_lower_alpha(c) || c == "-" || c == "_" || digit(c) != None
+  })
+}
+
+fn is_lower_alpha(c: String) -> Bool {
+  string.contains("abcdefghijklmnopqrstuvwxyz", c) && c != ""
+}
+
+fn is_tz_annotation(s: String) -> Bool {
+  case s {
+    "+" <> _ | "-" <> _ -> True
+    _ ->
+      s != ""
+      && list.all(string.split(s, "/"), fn(part) {
+        // TimeZoneIANANameComponent: TZLeadingChar TZChar* — a leading
+        // digit is not a name (so date-time strings fall through to the
+        // ISO-string time zone extraction).
+        case string.pop_grapheme(part) {
+          Error(Nil) -> False
+          Ok(#(first, rest)) ->
+            is_tz_leading_char(first)
+            && list.all(string.to_graphemes(rest), is_tz_char)
+        }
+      })
+  }
+}
+
+fn is_tz_leading_char(c: String) -> Bool {
+  is_lower_alpha(c)
+  || string.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", c)
+  || c == "."
+  || c == "_"
+}
+
+fn is_tz_char(c: String) -> Bool {
+  is_tz_leading_char(c) || digit(c) != None || c == "-" || c == "+"
+}
+
+/// Parse a full Temporal date-time string:
+///   date [T time [offset]] [annotations]
+fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
+  use #(y, m, d, rest) <- option.then(parse_date_part(s))
+  case is_valid_iso_date(y, m, d) {
+    False -> None
+    True -> {
+      let date = IsoDate(y, m, d)
+      let #(time, z, offset_ns, offset_sub_minute, rest) = case rest {
+        "T" <> tr | "t" <> tr | " " <> tr ->
+          case parse_time_part(tr) {
+            Some(#(t, r2)) ->
+              case parse_offset_part(r2) {
+                Some(#(z, off, sub, r3)) -> #(Some(t), z, off, sub, r3)
+                None -> #(Some(t), False, None, False, r2)
+              }
+            None -> #(None, False, None, False, rest)
+          }
+        _ -> #(None, False, None, False, rest)
+      }
+      // If a "T" was present but the time failed to parse, reject.
+      case time == None && is_time_prefix(rest) {
+        True -> None
+        False -> {
+          use #(tz, cal, rest2) <- option.then(parse_annotations(
+            rest,
+            None,
+            None,
+            False,
+          ))
+          case rest2 {
+            "" ->
+              Some(ParsedIso(
+                date: Some(date),
+                time:,
+                z:,
+                offset_ns:,
+                offset_sub_minute:,
+                tz:,
+                calendar: cal,
+              ))
+            _ -> None
+          }
+        }
+      }
+    }
+  }
+}
+
+fn is_time_prefix(s: String) -> Bool {
+  case s {
+    "T" <> _ | "t" <> _ | " " <> _ -> True
+    _ -> False
+  }
+}
+
+/// Validate the calendar annotation (if any) is iso8601. RangeError otherwise.
+fn check_parsed_calendar(p: ParsedIso) -> Result(Nil, TErr) {
+  case p.calendar {
+    None -> Ok(Nil)
+    Some(c) -> {
+      use _ <- result.map(canonicalize_calendar(c))
+      Nil
+    }
+  }
+}
+
+/// Parse a string for ToTemporalDate/DateTime — Z designator is rejected.
+fn parse_plain_datetime_string(s: String) -> Result(ParsedIso, TErr) {
+  case parse_iso_datetime_string(s) {
+    None -> Error(RangeE("invalid ISO 8601 string: " <> s))
+    Some(p) ->
+      case p.z {
+        True ->
+          Error(RangeE("Z designator not supported for plain Temporal types"))
+        False -> {
+          use Nil <- result.map(check_parsed_calendar(p))
+          p
+        }
+      }
+  }
+}
+
+// ============================================================================
+// Time zone handling — "UTC" plus fixed offsets
+// ============================================================================
+
+/// Parse + canonicalize a time zone identifier. Returns the canonical id.
+/// Accepts bare identifiers ("UTC", "+05:30") and ISO date-time strings that
+/// carry a [TimeZone] annotation, a Z designator, or a numeric offset
+/// (ParseTemporalTimeZoneString).
+fn parse_time_zone_id(id: String) -> Result(String, TErr) {
+  case parse_time_zone_id_strict(id) {
+    Ok(tz) -> Ok(tz)
+    Error(StrictUnknown) -> tz_from_datetime_string(id)
+    Error(StrictInvalid(e)) -> Error(e)
+  }
+}
+
+type StrictTzError {
+  /// Not a bare identifier; an ISO string fallback may still apply.
+  StrictUnknown
+  StrictInvalid(TErr)
+}
+
+/// ParseTimeZoneIdentifier: bare identifiers only (UTC, offsets, IANA names);
+/// ISO date-time strings are not identifiers (the constructor rejects them).
+fn parse_time_zone_id_strict(id: String) -> Result(String, StrictTzError) {
+  case string.uppercase(id) == "UTC" {
+    True -> Ok("UTC")
+    False ->
+      case parse_offset_tz_id(id) {
+        Some(canonical) -> Ok(canonical)
+        None ->
+          case temporal_tz.lookup(id) {
+            Ok(proper) -> Ok(proper)
+            Error(Nil) ->
+              case is_tz_annotation(id) {
+                True ->
+                  Error(
+                    StrictInvalid(RangeE(
+                      "time zone " <> id <> " is not supported",
+                    )),
+                  )
+                False -> Error(StrictUnknown)
+              }
+          }
+      }
+  }
+}
+
+/// Extract a time zone from an ISO date-time string: annotation wins, then
+/// the Z designator (-> "UTC"), then a minute-precision numeric offset.
+fn tz_from_datetime_string(s: String) -> Result(String, TErr) {
+  case parse_iso_datetime_string(s) {
+    None -> Error(RangeE("invalid time zone: " <> s))
+    Some(p) ->
+      case p.tz {
+        Some(tz_str) ->
+          case string.uppercase(tz_str) == "UTC" {
+            True -> Ok("UTC")
+            False ->
+              case parse_offset_tz_id(tz_str) {
+                Some(canonical) -> Ok(canonical)
+                None ->
+                  case temporal_tz.lookup(tz_str) {
+                    Ok(proper) -> Ok(proper)
+                    Error(Nil) ->
+                      Error(RangeE(
+                        "time zone " <> tz_str <> " is not supported",
+                      ))
+                  }
+              }
+          }
+        None ->
+          case p.z {
+            True -> Ok("UTC")
+            False ->
+              case p.offset_ns {
+                Some(off) ->
+                  // The offset must be syntactically minute-precision: a
+                  // seconds component (even ":00") is not a valid zone.
+                  case !p.offset_sub_minute && off % ns_per_minute == 0 {
+                    True -> Ok(format_offset_minutes(off))
+                    False ->
+                      Error(RangeE("sub-minute offset not valid as a time zone"))
+                  }
+                None -> Error(RangeE("no time zone found in string: " <> s))
+              }
+          }
+      }
+  }
+}
+
+/// Offset time zone identifier: ±HH[:MM] (minute precision only).
+/// Canonical form is ±HH:MM.
+fn parse_offset_tz_id(id: String) -> Option(String) {
+  let sign = case id {
+    "+" <> _ -> 1
+    "-" <> _ -> -1
+    _ -> 0
+  }
+  case sign == 0 {
+    True -> None
+    False ->
+      case parse_offset_part(id) {
+        // A seconds component (sub-minute syntax) is not allowed in an
+        // offset time zone identifier, even when it is ":00".
+        Some(#(False, Some(ns), False, "")) ->
+          case ns % ns_per_minute == 0 && int.absolute_value(ns) < ns_per_day {
+            True -> Some(format_offset_minutes(ns))
+            False -> None
+          }
+        _ -> None
+      }
+  }
+}
+
+/// Zone id classification: "UTC", fixed offset, or named IANA zone.
+type TzKind {
+  UtcZone
+  OffsetZone(Int)
+  NamedZone
+}
+
+fn tz_kind(tz: String) -> TzKind {
+  case tz {
+    "UTC" -> UtcZone
+    "+" <> _ | "-" <> _ ->
+      case parse_offset_part(tz) {
+        Some(#(False, Some(ns), _, "")) -> OffsetZone(ns)
+        _ -> NamedZone
+      }
+    _ -> NamedZone
+  }
+}
+
+/// GetOffsetNanosecondsFor — UTC offset of `tz` at an exact instant.
+fn tz_offset_ns_at(tz: String, epoch_ns: Int) -> Int {
+  case tz_kind(tz) {
+    UtcZone -> 0
+    OffsetZone(off) -> off
+    NamedZone -> temporal_tz.offset_ns_at(tz, epoch_ns)
+  }
+}
+
+fn validate_epoch_ns(ns: Int) -> Result(Int, TErr) {
+  case int.absolute_value(ns) <= ns_max_instant {
+    True -> Ok(ns)
+    False -> Error(RangeE("instant outside valid range"))
+  }
+}
+
+/// CheckISODaysRange — the wall-clock date must be within ±10^8 days.
+fn check_iso_days_range(d: IsoDate) -> Result(Nil, TErr) {
+  case int.absolute_value(epoch_days(d)) <= 100_000_000 {
+    True -> Ok(Nil)
+    False -> Error(RangeE("date outside of supported range"))
+  }
+}
+
+/// GetPossibleEpochNanoseconds — ascending epoch instants whose local time
+/// in `tz` reads as the given wall-clock date-time. Empty for times skipped
+/// by an offset transition; two entries for repeated times.
+/// RangeError when the (offset-shifted) date is outside the supported range.
+fn get_possible_epoch_ns(
+  tz: String,
+  d: IsoDate,
+  t: TimeRec,
+) -> Result(List(Int), TErr) {
+  let utc = utc_epoch_ns(d, t)
+  case tz_kind(tz) {
+    UtcZone -> {
+      use Nil <- result.try(check_iso_days_range(d))
+      use ns <- result.map(validate_epoch_ns(utc))
+      [ns]
+    }
+    OffsetZone(off) -> {
+      let shifted_day = floor_div(utc - off, ns_per_day)
+      use Nil <- result.try(
+        check_iso_days_range(iso_date_from_epoch_days(shifted_day)),
+      )
+      use ns <- result.map(validate_epoch_ns(utc - off))
+      [ns]
+    }
+    NamedZone -> {
+      use Nil <- result.try(check_iso_days_range(d))
+      let before = temporal_tz.offset_ns_at(tz, utc - ns_per_day)
+      let after = temporal_tz.offset_ns_at(tz, utc + ns_per_day)
+      let candidates = case before == after {
+        True -> [before]
+        False -> [before, after]
+      }
+      Ok(
+        list.filter_map(candidates, fn(off) {
+          let ens = utc - off
+          case temporal_tz.offset_ns_at(tz, ens) == off {
+            True -> Ok(ens)
+            False -> Error(Nil)
+          }
+        }),
+      )
+    }
+  }
+}
+
+/// DisambiguatePossibleEpochNanoseconds.
+fn disambiguate_epoch_ns(
+  possible: List(Int),
+  tz: String,
+  d: IsoDate,
+  t: TimeRec,
+  dis: String,
+) -> Result(Int, TErr) {
+  case possible {
+    [one] -> validate_epoch_ns(one)
+    [first, ..rest] ->
+      case dis {
+        "compatible" | "earlier" -> validate_epoch_ns(first)
+        "later" ->
+          case list.last(rest) {
+            Ok(l) -> validate_epoch_ns(l)
+            Error(Nil) -> validate_epoch_ns(first)
+          }
+        _ -> Error(RangeE("ambiguous wall-clock time"))
+      }
+    [] ->
+      case dis {
+        "reject" -> Error(RangeE("no such wall-clock time"))
+        _ -> {
+          // Skipped (gap) time: shift by the size of the gap and retry.
+          let utc = utc_epoch_ns(d, t)
+          let before = tz_offset_ns_at(tz, utc - ns_per_day)
+          let after = tz_offset_ns_at(tz, utc + ns_per_day)
+          let gap = after - before
+          let shifted = case dis {
+            "earlier" -> utc - gap
+            _ -> utc + gap
+          }
+          let #(d2, t2) = epoch_ns_to_iso(shifted, 0)
+          use possible2 <- result.try(get_possible_epoch_ns(tz, d2, t2))
+          case dis, possible2 {
+            _, [] -> Error(RangeE("no such wall-clock time"))
+            "earlier", [f, ..] -> validate_epoch_ns(f)
+            _, [f, ..rest2] ->
+              case list.last(rest2) {
+                Ok(la) -> validate_epoch_ns(la)
+                Error(Nil) -> validate_epoch_ns(f)
+              }
+          }
+        }
+      }
+  }
+}
+
+/// GetEpochNanosecondsFor.
+fn get_epoch_ns_for(
+  tz: String,
+  d: IsoDate,
+  t: TimeRec,
+  dis: String,
+) -> Result(Int, TErr) {
+  use possible <- result.try(get_possible_epoch_ns(tz, d, t))
+  disambiguate_epoch_ns(possible, tz, d, t, dis)
+}
+
+/// GetStartOfDay.
+fn start_of_day_ns(tz: String, d: IsoDate) -> Result(Int, TErr) {
+  use possible <- result.try(get_possible_epoch_ns(tz, d, midnight))
+  case possible {
+    [first, ..] -> validate_epoch_ns(first)
+    [] -> {
+      // Midnight lies in a DST gap; only named zones can reach here. The day
+      // starts at the instant the gap ends: the next transition after a
+      // point guaranteed to be before it (one day earlier).
+      use day_before <- result.try(validate_epoch_ns(
+        utc_epoch_ns(d, midnight) - ns_per_day,
+      ))
+      case temporal_tz.next_transition_ns(tz, day_before) {
+        Ok(transition) -> validate_epoch_ns(transition)
+        Error(Nil) -> Error(RangeE("no start of day for skipped midnight"))
+      }
+    }
+  }
+}
+
+/// InterpretISODateTimeOffset. `behaviour` is "wall" | "exact" | "option";
+/// `offset_opt` is "prefer" | "use" | "ignore" | "reject"; `match_minutes`
+/// allows minute-truncated offsets (ISO strings).
+fn interpret_offset(
+  d: IsoDate,
+  t: TimeRec,
+  behaviour: String,
+  offset_ns: Int,
+  tz: String,
+  dis: String,
+  offset_opt: String,
+  match_minutes: Bool,
+) -> Result(Int, TErr) {
+  case behaviour == "wall" || offset_opt == "ignore" {
+    True -> get_epoch_ns_for(tz, d, t, dis)
+    False ->
+      case behaviour == "exact" || offset_opt == "use" {
+        True -> {
+          let ns = utc_epoch_ns(d, t) - offset_ns
+          use Nil <- result.try(
+            check_iso_days_range(
+              iso_date_from_epoch_days(floor_div(ns, ns_per_day)),
+            ),
+          )
+          validate_epoch_ns(ns)
+        }
+        False -> {
+          let utc = utc_epoch_ns(d, t)
+          use Nil <- result.try(check_iso_days_range(d))
+          use possible <- result.try(get_possible_epoch_ns(tz, d, t))
+          let matched =
+            list.find(possible, fn(candidate) {
+              let cand_off = utc - candidate
+              let rounded =
+                round_to_increment(cand_off, ns_per_minute, "halfExpand")
+              cand_off == offset_ns || { match_minutes && rounded == offset_ns }
+            })
+          case matched {
+            Ok(c) -> validate_epoch_ns(c)
+            Error(Nil) ->
+              case offset_opt == "reject" {
+                True -> Error(RangeE("offset does not match time zone"))
+                False -> disambiguate_epoch_ns(possible, tz, d, t, dis)
+              }
+          }
+        }
+      }
+  }
+}
+
+/// Full-precision offset string: ±HH:MM[:SS] (for the `offset` getter;
+/// some zones historically had sub-minute offsets).
+fn format_offset_full(offset_ns: Int) -> String {
+  let sign = case offset_ns < 0 {
+    True -> "-"
+    False -> "+"
+  }
+  let total_sec = int.absolute_value(offset_ns) / ns_per_second
+  let base =
+    sign <> pad2(total_sec / 3600) <> ":" <> pad2({ total_sec / 60 } % 60)
+  case total_sec % 60 {
+    0 -> base
+    s -> base <> ":" <> pad2(s)
+  }
+}
+
+/// Offset rounded to the nearest minute, for ISO string display
+/// (FormatDateTimeUTCOffsetRounded).
+fn format_offset_rounded(offset_ns: Int) -> String {
+  format_offset_minutes(round_to_increment(
+    offset_ns,
+    ns_per_minute,
+    "halfExpand",
+  ))
+}
+
+/// TimeZoneEquals — identical ids, or named ids resolving to the same
+/// canonical zone (links like Asia/Calcutta -> Asia/Kolkata).
+fn time_zone_equals(a: String, b: String) -> Bool {
+  a == b
+  || case tz_kind(a), tz_kind(b) {
+    OffsetZone(_), _ | _, OffsetZone(_) -> False
+    _, _ -> temporal_tz.canonical(a) == temporal_tz.canonical(b)
+  }
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn arg_at(args: List(JsValue), idx: Int) -> JsValue {
+  helpers.list_at(args, idx) |> option.unwrap(JsUndefined)
+}
+
+/// new Temporal.PlainDate(year, month, day [, calendar])
+fn plain_date_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use y, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 0),
+  ))
+  use m, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 1),
+  ))
+  use d, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 2),
+  ))
+  use cal <- terr(state, to_calendar_arg(arg_at(args, 3)))
+  case is_valid_iso_date(y, m, d) {
+    False -> state.range_error(state, "invalid ISO date")
+    True -> {
+      let date = IsoDate(y, m, d)
+      case iso_date_within_limits(date) {
+        False -> state.range_error(state, "date outside of supported range")
+        True -> {
+          let #(state, v) = make_date_cal(state, protos, date, cal)
+          #(state, Ok(v))
+        }
+      }
+    }
+  }
+}
+
+/// new Temporal.PlainTime(h, mi, s, ms, us, ns) — all optional, default 0.
+fn plain_time_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use h, state <- state.try_op(opt_int_arg(state, args, 0))
+  use mi, state <- state.try_op(opt_int_arg(state, args, 1))
+  use s, state <- state.try_op(opt_int_arg(state, args, 2))
+  use ms, state <- state.try_op(opt_int_arg(state, args, 3))
+  use us, state <- state.try_op(opt_int_arg(state, args, 4))
+  use ns, state <- state.try_op(opt_int_arg(state, args, 5))
+  let t = TimeRec(h, mi, s, ms, us, ns)
+  case is_valid_time(t) {
+    False -> state.range_error(state, "invalid time")
+    True -> {
+      let #(state, v) = make_time(state, protos, t)
+      #(state, Ok(v))
+    }
+  }
+}
+
+/// Optional integer argument: undefined → 0, else ToIntegerWithTruncation.
+fn opt_int_arg(
+  state: State,
+  args: List(JsValue),
+  idx: Int,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case arg_at(args, idx) {
+    JsUndefined -> Ok(#(0, state))
+    v -> to_integer_with_truncation(state, v)
+  }
+}
+
+/// new Temporal.PlainDateTime(y, mo, d, h, mi, s, ms, us, ns [, calendar])
+fn plain_date_time_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use y, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 0),
+  ))
+  use mo, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 1),
+  ))
+  use d, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 2),
+  ))
+  use h, state <- state.try_op(opt_int_arg(state, args, 3))
+  use mi, state <- state.try_op(opt_int_arg(state, args, 4))
+  use s, state <- state.try_op(opt_int_arg(state, args, 5))
+  use ms, state <- state.try_op(opt_int_arg(state, args, 6))
+  use us, state <- state.try_op(opt_int_arg(state, args, 7))
+  use ns, state <- state.try_op(opt_int_arg(state, args, 8))
+  use cal <- terr(state, to_calendar_arg(arg_at(args, 9)))
+  let t = TimeRec(h, mi, s, ms, us, ns)
+  case is_valid_iso_date(y, mo, d) && is_valid_time(t) {
+    False -> state.range_error(state, "invalid ISO date-time")
+    True -> {
+      let date = IsoDate(y, mo, d)
+      case iso_datetime_within_limits(date, t) {
+        False ->
+          state.range_error(state, "date-time outside of supported range")
+        True -> {
+          let #(state, v) = make_date_time_cal(state, protos, date, t, cal)
+          #(state, Ok(v))
+        }
+      }
+    }
+  }
+}
+
+/// new Temporal.PlainYearMonth(year, month [, calendar [, referenceISODay]])
+fn plain_year_month_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use y, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 0),
+  ))
+  use m, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 1),
+  ))
+  use cal <- terr(state, to_calendar_arg(arg_at(args, 2)))
+  use d, state <- state.try_op(case arg_at(args, 3) {
+    JsUndefined -> Ok(#(1, state))
+    v -> to_integer_with_truncation(state, v)
+  })
+  case is_valid_iso_date(y, m, d) {
+    False -> state.range_error(state, "invalid ISO year-month")
+    True ->
+      case iso_year_month_within_limits(y, m) {
+        False ->
+          state.range_error(state, "year-month outside of supported range")
+        True -> {
+          let #(state, v) = make_year_month_cal(state, protos, y, m, d, cal)
+          #(state, Ok(v))
+        }
+      }
+  }
+}
+
+/// new Temporal.PlainMonthDay(month, day [, calendar [, referenceISOYear]])
+fn plain_month_day_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use m, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 0),
+  ))
+  use d, state <- state.try_op(to_integer_with_truncation(
+    state,
+    arg_at(args, 1),
+  ))
+  use cal <- terr(state, to_calendar_arg(arg_at(args, 2)))
+  use y, state <- state.try_op(case arg_at(args, 3) {
+    JsUndefined -> Ok(#(1972, state))
+    v -> to_integer_with_truncation(state, v)
+  })
+  case is_valid_iso_date(y, m, d) {
+    False -> state.range_error(state, "invalid ISO month-day")
+    True -> {
+      let #(state, v) = make_month_day_cal(state, protos, m, d, y, cal)
+      #(state, Ok(v))
+    }
+  }
+}
+
+/// new Temporal.Duration(y, mo, w, d, h, mi, s, ms, us, ns) — all optional.
+fn duration_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use y, state <- state.try_op(opt_integral_arg(state, args, 0))
+  use mo, state <- state.try_op(opt_integral_arg(state, args, 1))
+  use w, state <- state.try_op(opt_integral_arg(state, args, 2))
+  use d, state <- state.try_op(opt_integral_arg(state, args, 3))
+  use h, state <- state.try_op(opt_integral_arg(state, args, 4))
+  use mi, state <- state.try_op(opt_integral_arg(state, args, 5))
+  use s, state <- state.try_op(opt_integral_arg(state, args, 6))
+  use ms, state <- state.try_op(opt_integral_arg(state, args, 7))
+  use us, state <- state.try_op(opt_integral_arg(state, args, 8))
+  use ns, state <- state.try_op(opt_integral_arg(state, args, 9))
+  let dur = DurRec(y, mo, w, d, h, mi, s, ms, us, ns)
+  case is_valid_duration(dur) {
+    False -> state.range_error(state, "invalid duration")
+    True -> {
+      let #(state, v) = make_duration(state, protos, dur)
+      #(state, Ok(v))
+    }
+  }
+}
+
+fn opt_integral_arg(
+  state: State,
+  args: List(JsValue),
+  idx: Int,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case arg_at(args, idx) {
+    JsUndefined -> Ok(#(0, state))
+    v -> to_integer_if_integral(state, v)
+  }
+}
+
+fn duration_sign(d: DurRec) -> Int {
+  let fields = [
+    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms,
+    d.us, d.ns,
+  ]
+  list.fold(fields, 0, fn(acc, f) {
+    case acc != 0 {
+      True -> acc
+      False ->
+        case f > 0 {
+          True -> 1
+          False ->
+            case f < 0 {
+              True -> -1
+              False -> 0
+            }
+        }
+    }
+  })
+}
+
+fn is_valid_duration(d: DurRec) -> Bool {
+  let sign = duration_sign(d)
+  // Components are observed as Numbers, so validity is determined on the
+  // float-rounded values ℝ(𝔽(x)) — rounding a large component up can push
+  // the total over the limit (CreateTemporalDuration → IsValidDuration).
+  let fr = f64_int
+  let d =
+    DurRec(
+      years: fr(d.years),
+      months: fr(d.months),
+      weeks: fr(d.weeks),
+      days: fr(d.days),
+      hours: fr(d.hours),
+      minutes: fr(d.minutes),
+      seconds: fr(d.seconds),
+      ms: fr(d.ms),
+      us: fr(d.us),
+      ns: fr(d.ns),
+    )
+  let fields = [
+    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms,
+    d.us, d.ns,
+  ]
+  let consistent =
+    list.all(fields, fn(f) {
+      { f >= 0 || sign <= 0 } && { f <= 0 || sign >= 0 }
+    })
+  let two32 = 4_294_967_296
+  let cal_ok =
+    int.absolute_value(d.years) < two32
+    && int.absolute_value(d.months) < two32
+    && int.absolute_value(d.weeks) < two32
+  let total = time_duration_ns(d)
+  consistent && cal_ok && int.absolute_value(total) <= max_time_duration_ns
+}
+
+/// Total nanoseconds of the day+time portion (days..nanoseconds).
+fn time_duration_ns(d: DurRec) -> Int {
+  d.days
+  * ns_per_day
+  + d.hours
+  * ns_per_hour
+  + d.minutes
+  * ns_per_minute
+  + d.seconds
+  * ns_per_second
+  + d.ms
+  * ns_per_ms
+  + d.us
+  * ns_per_us
+  + d.ns
+}
+
+/// new Temporal.Instant(epochNanoseconds: BigInt)
+fn instant_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
+  case int.absolute_value(ns) <= ns_max_instant {
+    False -> state.range_error(state, "epoch nanoseconds out of range")
+    True -> {
+      let #(state, v) = make_instant(state, protos, ns)
+      #(state, Ok(v))
+    }
+  }
+}
+
+/// new Temporal.ZonedDateTime(epochNanoseconds: BigInt, timeZone [, calendar])
+fn zoned_date_time_ctor(
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
+  case arg_at(args, 1) {
+    JsString(tz_str) -> {
+      use tz <- terr(state, case parse_time_zone_id_strict(tz_str) {
+        Ok(tz) -> Ok(tz)
+        Error(StrictUnknown) ->
+          Error(RangeE("invalid time zone identifier: " <> tz_str))
+        Error(StrictInvalid(e)) -> Error(e)
+      })
+      use cal <- terr(state, to_calendar_arg(arg_at(args, 2)))
+      case int.absolute_value(ns) <= ns_max_instant {
+        False -> state.range_error(state, "epoch nanoseconds out of range")
+        True -> {
+          let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
+          #(state, Ok(v))
+        }
+      }
+    }
+    _ -> state.type_error(state, "time zone must be a string")
+  }
+}
+
+// ============================================================================
+// ToTemporalX conversions
+// ============================================================================
+
+/// Read a field from a property bag, converting with `conv`. Missing fields
+/// yield None.
+fn read_bag_int_field(
+  state: State,
+  ref: Ref,
+  key: String,
+  conv: fn(State, JsValue) -> Result(#(Int, State), #(JsValue, State)),
+) -> Result(#(Option(Int), State), #(JsValue, State)) {
+  use got <- result.try(ops_object.get_value(
+    state,
+    ref,
+    Named(key),
+    JsObject(ref),
+  ))
+  case got {
+    #(JsUndefined, st) -> Ok(#(None, st))
+    #(v, st) -> {
+      use #(n, st) <- result.map(conv(st, v))
+      #(Some(n), st)
+    }
+  }
+}
+
+/// Read the "monthCode" field: must be a String primitive "M01".."M13"
+/// optionally with an "L" suffix (leap month). Returns #(number, is_leap).
+fn read_month_code(
+  state: State,
+  ref: Ref,
+) -> Result(#(Option(#(Int, Bool)), State), #(JsValue, State)) {
+  use got <- result.try(ops_object.get_value(
+    state,
+    ref,
+    Named("monthCode"),
+    JsObject(ref),
+  ))
+  case got {
+    #(JsUndefined, st) -> Ok(#(None, st))
+    #(v, st) -> {
+      // ToPrimitive(string) then require a String type.
+      use prim <- result.try(coerce.to_primitive(st, v, coerce.StringHint))
+      case prim {
+        #(JsString(s), st) ->
+          // Only the ToMonthCode GRAMMAR is checked at read time; whether
+          // the code suits the calendar is validated in ResolveFields,
+          // after the required-field TypeError checks.
+          case parse_month_code_grammar(s) {
+            Ok(mc) -> Ok(#(Some(mc), st))
+            Error(Nil) -> range_error_result(st, "invalid monthCode: " <> s)
+          }
+        #(_, st) -> type_error_result(st, "monthCode must be a string")
+      }
+    }
+  }
+}
+
+/// ToMonthCode grammar: "M" + two digits + optional "L"; "M00" needs "L".
+fn parse_month_code_grammar(s: String) -> Result(#(Int, Bool), Nil) {
+  case s {
+    "M" <> rest -> {
+      let #(digits, leap) = case string.ends_with(rest, "L") {
+        True -> #(string.drop_end(rest, 1), True)
+        False -> #(rest, False)
+      }
+      case string.length(digits) == 2, int.parse(digits) {
+        True, Ok(n) ->
+          case n >= 1 || leap {
+            True -> Ok(#(n, leap))
+            False -> Error(Nil)
+          }
+        _, _ -> Error(Nil)
+      }
+    }
+    _ -> Error(Nil)
+  }
+}
+
+fn month_code_str(m: Int) -> String {
+  "M" <> pad2(m)
+}
+
+/// Read the "era" field: must be a String when present.
+fn read_bag_era(
+  state: State,
+  ref: Ref,
+) -> Result(#(Option(String), State), #(JsValue, State)) {
+  use got <- result.try(ops_object.get_value(
+    state,
+    ref,
+    Named("era"),
+    JsObject(ref),
+  ))
+  case got {
+    #(JsUndefined, st) -> Ok(#(None, st))
+    #(v, st) -> {
+      use prim <- result.try(coerce.to_primitive(st, v, coerce.StringHint))
+      case prim {
+        #(JsString(s), st) -> Ok(#(Some(s), st))
+        #(_, st) -> type_error_result(st, "era must be a string")
+      }
+    }
+  }
+}
+
+/// Read a property bag's "calendar" field; returns the canonical calendar
+/// id ("iso8601" when absent).
+fn read_bag_calendar(
+  state: State,
+  ref: Ref,
+) -> Result(#(String, State), #(JsValue, State)) {
+  use got <- result.try(ops_object.get_value(
+    state,
+    ref,
+    Named("calendar"),
+    JsObject(ref),
+  ))
+  case got {
+    #(JsUndefined, st) -> Ok(#("iso8601", st))
+    #(JsString(s), st) ->
+      case calendar_from_string(s) {
+        Ok(c) -> Ok(#(c, st))
+        Error(RangeE(m)) -> range_error_result(st, m)
+        Error(TypeE(m)) -> type_error_result(st, m)
+      }
+    #(JsObject(oref), st) ->
+      // A Temporal object with a calendar slot acts as its calendar.
+      case heap.read(st.heap, oref) {
+        Some(ObjectSlot(kind: TemporalDateSlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalDateTimeSlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalYearMonthSlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalMonthDaySlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(calendar:, ..), ..)) ->
+          Ok(#(calendar, st))
+        _ -> type_error_result(st, "invalid calendar")
+      }
+    #(_, st) -> type_error_result(st, "invalid calendar")
+  }
+}
+
+/// ToTemporalCalendarIdentifier(calendarLike) — string ids, ISO strings with
+/// annotations, and Temporal objects carrying a calendar slot.
+fn to_temporal_calendar_identifier(
+  state: State,
+  v: JsValue,
+) -> Result(#(String, State), #(JsValue, State)) {
+  case v {
+    JsString(s) ->
+      case calendar_from_string(s) {
+        Ok(c) -> Ok(#(c, state))
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+      }
+    JsObject(oref) ->
+      case heap.read(state.heap, oref) {
+        Some(ObjectSlot(kind: TemporalDateSlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalDateTimeSlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalYearMonthSlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalMonthDaySlot(calendar:, ..), ..))
+        | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(calendar:, ..), ..)) ->
+          Ok(#(calendar, state))
+        _ -> type_error_result(state, "not a valid calendar")
+      }
+    _ -> type_error_result(state, "not a valid calendar")
+  }
+}
+
+// ============================================================================
+// Calendar-aware field resolution (CalendarResolveFields + CalendarDateToISO)
+// ============================================================================
+
+/// Calendar date fields read from a property bag (all optional here;
+/// requiredness is checked in resolve_calendar_date).
+type DateFields {
+  DateFields(
+    day: Option(Int),
+    era: Option(String),
+    era_year: Option(Int),
+    month: Option(Int),
+    month_code: Option(#(Int, Bool)),
+    year: Option(Int),
+  )
+}
+
+/// Read date fields from a bag in spec (alphabetical) order:
+/// day, era, eraYear, month, monthCode, year. era/eraYear are only read for
+/// calendars with eras.
+fn read_date_fields(
+  state: State,
+  ref: Ref,
+  cal: String,
+) -> Result(#(DateFields, State), #(JsValue, State)) {
+  use #(day, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "day",
+    to_positive_integer_with_truncation,
+  ))
+  use #(era, state) <- result.try(case tcal.has_eras(cal) {
+    True -> read_bag_era(state, ref)
+    False -> Ok(#(None, state))
+  })
+  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
+    True ->
+      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    False -> Ok(#(None, state))
+  })
+  use #(month, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "month",
+    to_positive_integer_with_truncation,
+  ))
+  use #(month_code, state) <- result.try(read_month_code(state, ref))
+  use #(year, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "year",
+    to_integer_with_truncation,
+  ))
+  Ok(#(DateFields(day:, era:, era_year:, month:, month_code:, year:), state))
+}
+
+/// Resolve the arithmetic year from year/era/eraYear fields. The fields must
+/// contain a year (checked by the caller for TypeError ordering).
+fn resolve_calendar_year(cal: String, f: DateFields) -> Result(Int, TErr) {
+  // era and eraYear must come as a pair.
+  use Nil <- result.try(case f.era, f.era_year {
+    Some(_), None | None, Some(_) ->
+      Error(TypeE("era and eraYear must both be provided"))
+    _, _ -> Ok(Nil)
+  })
+  case f.year, f.era, f.era_year {
+    _, Some(era), Some(ey) ->
+      case tcal.year_for_era(cal, era, ey) {
+        Error(Nil) ->
+          Error(RangeE(era <> " is not a valid era for calendar " <> cal))
+        Ok(y2) ->
+          case f.year {
+            Some(y) if y != y2 ->
+              Error(RangeE("era/eraYear inconsistent with year"))
+            _ -> Ok(y2)
+          }
+      }
+    Some(y), _, _ -> Ok(y)
+    None, _, _ -> Error(TypeE("year is required"))
+  }
+}
+
+/// Resolve the ordinal month within `year` from month/monthCode fields.
+fn resolve_calendar_month(
+  cal: String,
+  year: Int,
+  f: DateFields,
+  overflow: String,
+) -> Result(Int, TErr) {
+  case f.month_code {
+    Some(#(num, leap)) -> {
+      use ordinal <- result.try(case tcal.month_for_code(cal, year, num, leap) {
+        Ok(o) -> Ok(o)
+        Error(tcal.NeverValid) ->
+          Error(RangeE("monthCode is not valid for calendar " <> cal))
+        Error(tcal.NotInThisYear(skip_to)) ->
+          case overflow {
+            "reject" -> Error(RangeE("monthCode not present in year"))
+            _ -> Ok(skip_to)
+          }
+      })
+      case f.month {
+        Some(m) if m != ordinal ->
+          Error(RangeE("month and monthCode must agree"))
+        _ -> Ok(ordinal)
+      }
+    }
+    None ->
+      case f.month {
+        None -> Error(TypeE("month or monthCode is required"))
+        Some(m) -> {
+          let max = tcal.months_in_year(cal, year)
+          case m > max {
+            True ->
+              case overflow {
+                "reject" -> Error(RangeE("month out of range"))
+                _ -> Ok(max)
+              }
+            False -> Ok(m)
+          }
+        }
+      }
+  }
+}
+
+/// Full date resolution: fields -> ISO date (CalendarDateToISO).
+fn resolve_calendar_date(
+  cal: String,
+  f: DateFields,
+  overflow: String,
+) -> Result(IsoDate, TErr) {
+  // Required-field (TypeError) checks come before all RangeError checks.
+  use Nil <- result.try(case f.year, f.era, f.era_year {
+    None, None, None -> Error(TypeE("year is required"))
+    _, _, _ -> Ok(Nil)
+  })
+  use Nil <- result.try(case f.month, f.month_code {
+    None, None -> Error(TypeE("month or monthCode is required"))
+    _, _ -> Ok(Nil)
+  })
+  use day <- result.try(case f.day {
+    None -> Error(TypeE("day is required"))
+    Some(d) -> Ok(d)
+  })
+  use y <- result.try(resolve_calendar_year(cal, f))
+  case cal {
+    "iso8601" -> {
+      use m <- result.try(resolve_iso_month(f))
+      regulate_iso_date(y, m, day, overflow)
+    }
+    _ -> {
+      use m <- result.try(resolve_calendar_month(cal, y, f, overflow))
+      use d <- result.try(regulate_calendar_day(cal, y, m, day, overflow))
+      Ok(iso_date_from_epoch_days(tcal.date_to_epoch_days(cal, y, m, d)))
+    }
+  }
+}
+
+/// month/monthCode resolution for iso8601 (codes are plain ordinals).
+fn resolve_iso_month(f: DateFields) -> Result(Int, TErr) {
+  case f.month_code {
+    Some(#(num, leap)) ->
+      case leap || num > 12 {
+        True -> Error(RangeE("monthCode is not valid for calendar iso8601"))
+        False ->
+          case f.month {
+            Some(m) if m != num ->
+              Error(RangeE("month and monthCode must agree"))
+            _ -> Ok(num)
+          }
+      }
+    None ->
+      case f.month {
+        None -> Error(TypeE("month or monthCode is required"))
+        Some(m) -> Ok(m)
+      }
+  }
+}
+
+fn regulate_calendar_day(
+  cal: String,
+  year: Int,
+  month: Int,
+  day: Int,
+  overflow: String,
+) -> Result(Int, TErr) {
+  let max = tcal.days_in_month(cal, year, month)
+  case day >= 1 && day <= max {
+    True -> Ok(day)
+    False ->
+      case overflow {
+        "reject" -> Error(RangeE("day out of range"))
+        _ -> Ok(int.clamp(day, 1, max))
+      }
+  }
+}
+
+/// CalendarDateAdd: add a duration's years/months/weeks/days to an ISO date
+/// interpreted in `cal`.
+fn calendar_date_add(
+  cal: String,
+  d: IsoDate,
+  dur: DurRec,
+  overflow: String,
+) -> Result(IsoDate, TErr) {
+  case cal {
+    "iso8601" -> add_duration_to_date(d, dur, overflow)
+    _ -> {
+      let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+      // Add years keeping the month code (leap months constrain forward).
+      let y1 = cd.year + dur.years
+      use m1 <- result.try(case dur.years == 0 {
+        True -> Ok(cd.month)
+        False -> {
+          let code = tcal.month_code(cal, cd.year, cd.month)
+          let assert Ok(#(num, leap)) = tcal.parse_month_code(code)
+          case tcal.month_for_code(cal, y1, num, leap) {
+            Ok(o) -> Ok(o)
+            Error(tcal.NeverValid) -> Error(RangeE("invalid month"))
+            Error(tcal.NotInThisYear(skip_to)) ->
+              case overflow {
+                "reject" -> Error(RangeE("month not present in year"))
+                _ -> Ok(skip_to)
+              }
+          }
+        }
+      })
+      // Add months ordinally, balancing across variable-length years.
+      let #(y2, m2) = balance_calendar_month(cal, y1, m1 + dur.months)
+      // Regulate the day, convert back to ISO, then add weeks/days.
+      use d2 <- result.try(regulate_calendar_day(cal, y2, m2, cd.day, overflow))
+      let days = tcal.date_to_epoch_days(cal, y2, m2, d2)
+      let extra =
+        dur.weeks * 7 + dur.days + truncate_div(time_only_ns(dur), ns_per_day)
+      let final = iso_date_from_epoch_days(days + extra)
+      check_date_limits(final)
+    }
+  }
+}
+
+fn balance_calendar_month(cal: String, year: Int, month: Int) -> #(Int, Int) {
+  case month < 1 {
+    True ->
+      balance_calendar_month(
+        cal,
+        year - 1,
+        month + tcal.months_in_year(cal, year - 1),
+      )
+    False -> {
+      let max = tcal.months_in_year(cal, year)
+      case month > max {
+        True -> balance_calendar_month(cal, year + 1, month - max)
+        False -> #(year, month)
+      }
+    }
+  }
+}
+
+/// CalendarDateUntil for years/months in calendar space. Returns
+/// #(years, months, day_remainder) — weeks/days handled by the caller from
+/// the day remainder.
+fn calendar_date_until(
+  cal: String,
+  from: IsoDate,
+  to: IsoDate,
+  largest_unit: String,
+) -> #(Int, Int, Int) {
+  let from_days = epoch_days(from)
+  let to_days = epoch_days(to)
+  let sign = case to_days >= from_days {
+    True -> 1
+    False -> -1
+  }
+  let cd1 = tcal.date_from_epoch_days(cal, from_days)
+  let cd2 = tcal.date_from_epoch_days(cal, to_days)
+  // Count whole years (only when largestUnit is years).
+  let years = case largest_unit {
+    "years" -> count_calendar_years(cal, cd1, cd2, cd2.year - cd1.year, sign)
+    _ -> 0
+  }
+  let after_years = add_calendar_years_constrain(cal, cd1, years)
+  // Count whole months. Comparisons use the receiver's original (possibly
+  // unconstrained) day — a month only counts once the same day-of-month is
+  // reached, per DifferenceISODate / CalendarDateUntil.
+  let months = count_calendar_months(cal, after_years, cd1.day, cd2, sign, 0)
+  let #(ym, mm) =
+    balance_calendar_month(cal, after_years.year, after_years.month + months)
+  let dmax = tcal.days_in_month(cal, ym, mm)
+  // Constrain the receiver's ORIGINAL day into the final month — the day
+  // constrain happens once from the original fields, not cascaded through
+  // the intermediate year step (30th Esfand minus 60 years lands on the
+  // 30th of the target month, even when the stepped year's Esfand has 29).
+  let dd = int.min(cd1.day, dmax)
+  let intermediate = tcal.date_to_epoch_days(cal, ym, mm, dd)
+  #(years, months, to_days - intermediate)
+}
+
+/// Lexicographic comparison of two (year-ish, month-ish, day) triples.
+fn compare_triple(a: #(Int, Int, Int), b: #(Int, Int, Int)) -> Int {
+  let #(a1, a2, a3) = a
+  let #(b1, b2, b3) = b
+  case a1 == b1, a2 == b2 {
+    False, _ -> int_sign(a1 - b1)
+    True, False -> int_sign(a2 - b2)
+    True, True -> int_sign(a3 - b3)
+  }
+}
+
+/// Sort position of a month within a year that is comparable across years
+/// of the same calendar: a leap month sorts between its base month and the
+/// next one (M05 < M05L < M06).
+fn month_code_pos(cal: String, year: Int, month: Int) -> Int {
+  let assert Ok(#(num, leap)) =
+    tcal.parse_month_code(tcal.month_code(cal, year, month))
+  case leap {
+    True -> num * 2 + 1
+    False -> num * 2
+  }
+}
+
+/// Add years to a calendar date keeping month code (constrain semantics).
+fn add_calendar_years_constrain(
+  cal: String,
+  cd: tcal.CalDate,
+  years: Int,
+) -> tcal.CalDate {
+  let y = cd.year + years
+  let code = tcal.month_code(cal, cd.year, cd.month)
+  let assert Ok(#(num, leap)) = tcal.parse_month_code(code)
+  let m = case tcal.month_for_code(cal, y, num, leap) {
+    Ok(o) -> o
+    Error(tcal.NotInThisYear(skip_to)) -> skip_to
+    Error(tcal.NeverValid) -> int.min(cd.month, tcal.months_in_year(cal, y))
+  }
+  let d = int.min(cd.day, tcal.days_in_month(cal, y, m))
+  tcal.CalDate(y, m, d)
+}
+
+/// Count whole years from cd1 toward cd2. A year only counts when the
+/// stepped (year, monthCode position, day) triple does not surpass the
+/// target — the day is compared WITHOUT constraining into the stepped year
+/// (e.g. Iyyar 30 of an islamic leap year to Iyyar 29 a year later is
+/// 11 months and days, not one year), while a leap month code missing from
+/// the stepped year constrains in the direction of travel.
+fn count_calendar_years(
+  cal: String,
+  cd1: tcal.CalDate,
+  cd2: tcal.CalDate,
+  candidate: Int,
+  sign: Int,
+) -> Int {
+  case candidate * sign < 0 {
+    True -> 0
+    False -> {
+      let pos1 = stepped_month_pos(cal, cd1, cd1.year + candidate, sign)
+      let pos2 = month_code_pos(cal, cd2.year, cd2.month)
+      let cmp =
+        compare_triple(#(cd1.year + candidate, pos1, cd1.day), #(
+          cd2.year,
+          pos2,
+          cd2.day,
+        ))
+      case cmp * sign > 0 {
+        True -> count_calendar_years(cal, cd1, cd2, candidate - sign, sign)
+        False -> candidate
+      }
+    }
+  }
+}
+
+/// Month position of cd1's month code carried into `target_year`. When a
+/// leap month (e.g. hebrew M05L) does not exist in the stepped year, it
+/// constrains in the direction of travel: forward to the following month
+/// (skip-forward), backward to the preceding base month.
+fn stepped_month_pos(
+  cal: String,
+  cd1: tcal.CalDate,
+  target_year: Int,
+  sign: Int,
+) -> Int {
+  let assert Ok(#(num, leap)) =
+    tcal.parse_month_code(tcal.month_code(cal, cd1.year, cd1.month))
+  case leap {
+    False -> num * 2
+    True ->
+      case tcal.month_for_code(cal, target_year, num, leap) {
+        Ok(_) -> num * 2 + 1
+        Error(tcal.NotInThisYear(_)) | Error(tcal.NeverValid) ->
+          case sign > 0 {
+            True -> num * 2 + 2
+            False -> num * 2
+          }
+      }
+  }
+}
+
+/// Count whole months from cd toward cd2; `day_cmp` is the original
+/// (unconstrained) day-of-month used for the surpass comparison.
+/// Carries the current (year, month) position through the walk so each
+/// step is O(1) — re-balancing `acc` months from cd on every iteration
+/// made large spans accidentally quadratic.
+fn count_calendar_months(
+  cal: String,
+  cd: tcal.CalDate,
+  day_cmp: Int,
+  cd2: tcal.CalDate,
+  sign: Int,
+  acc: Int,
+) -> Int {
+  let #(y, m) = balance_calendar_month(cal, cd.year, cd.month + acc)
+  count_calendar_months_loop(cal, y, m, day_cmp, cd2, sign, acc)
+}
+
+fn count_calendar_months_loop(
+  cal: String,
+  y: Int,
+  m: Int,
+  day_cmp: Int,
+  cd2: tcal.CalDate,
+  sign: Int,
+  acc: Int,
+) -> Int {
+  let #(ny, nm) = step_calendar_month(cal, y, m, sign)
+  let cmp = compare_triple(#(ny, nm, day_cmp), #(cd2.year, cd2.month, cd2.day))
+  case cmp * sign <= 0 {
+    True ->
+      count_calendar_months_loop(cal, ny, nm, day_cmp, cd2, sign, acc + sign)
+    False -> acc
+  }
+}
+
+/// Step a valid (year, month) pair by exactly one month in `sign` direction,
+/// wrapping across variable-length years.
+fn step_calendar_month(cal: String, y: Int, m: Int, sign: Int) -> #(Int, Int) {
+  case sign > 0 {
+    True ->
+      case m >= tcal.months_in_year(cal, y) {
+        True -> #(y + 1, 1)
+        False -> #(y, m + 1)
+      }
+    False ->
+      case m <= 1 {
+        True -> #(y - 1, tcal.months_in_year(cal, y - 1))
+        False -> #(y, m - 1)
+      }
+  }
+}
+
+/// ToTemporalDate(item [, options]) — returns the ISO date + calendar.
+/// Reads + validates options AFTER item conversion, per spec order.
+fn to_temporal_date(
+  state: State,
+  item: JsValue,
+  options: JsValue,
+) -> Result(#(#(IsoDate, String), State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: TemporalDateSlot(year:, month:, day:, calendar:),
+          ..,
+        )) -> {
+          use #(_opts, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(IsoDate(year, month, day), calendar), st))
+        }
+        Some(ObjectSlot(
+          kind: TemporalDateTimeSlot(year:, month:, day:, calendar:, ..),
+          ..,
+        )) -> {
+          use #(_opts, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(IsoDate(year, month, day), calendar), st))
+        }
+        Some(ObjectSlot(
+          kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:),
+          ..,
+        )) -> {
+          use #(_opts, st) <- result.try(validated_overflow(state, options))
+          let #(d, _) =
+            epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
+          Ok(#(#(d, calendar), st))
+        }
+        _ -> date_from_bag(state, ref, options)
+      }
+    JsString(s) -> {
+      case parse_plain_datetime_string(s) {
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+        Ok(p) ->
+          case p.date {
+            Some(d) -> {
+              use cal <- terr_r(state, parsed_calendar_id(p))
+              use #(_opts, st) <- result.try(validated_overflow(state, options))
+              case iso_date_within_limits(d) {
+                True -> Ok(#(#(d, cal), st))
+                False ->
+                  range_error_result(st, "date outside of supported range")
+              }
+            }
+            None -> range_error_result(state, "invalid date string")
+          }
+      }
+    }
+    _ -> type_error_result(state, "cannot convert to a Temporal.PlainDate")
+  }
+}
+
+/// Canonical calendar id from a parsed ISO string's annotation.
+fn parsed_calendar_id(p: ParsedIso) -> Result(String, TErr) {
+  case p.calendar {
+    None -> Ok("iso8601")
+    Some(c) -> canonicalize_calendar(c)
+  }
+}
+
+/// `use`-style adapter: Result(a, TErr) -> Result(#(b, State), ...).
+fn terr_r(
+  state: State,
+  r: Result(a, TErr),
+  k: fn(a) -> Result(#(b, State), #(JsValue, State)),
+) -> Result(#(b, State), #(JsValue, State)) {
+  case r {
+    Ok(v) -> k(v)
+    Error(RangeE(m)) -> range_error_result(state, m)
+    Error(TypeE(m)) -> type_error_result(state, m)
+  }
+}
+
+/// Helper: validate options object + read overflow (result often unused for
+/// instance copies, but the validation is observable).
+fn validated_overflow(
+  state: State,
+  options: JsValue,
+) -> Result(#(String, State), #(JsValue, State)) {
+  use #(opts, st) <- result.try(get_options_object(state, options))
+  get_overflow_option(st, opts)
+}
+
+/// Property-bag → ISO date + calendar. Field read order: calendar, then
+/// alphabetical (day, era, eraYear, month, monthCode, year).
+fn date_from_bag(
+  state: State,
+  ref: Ref,
+  options: JsValue,
+) -> Result(#(#(IsoDate, String), State), #(JsValue, State)) {
+  use #(cal, state) <- result.try(read_bag_calendar(state, ref))
+  use #(fields, state) <- result.try(read_date_fields(state, ref, cal))
+  use #(overflow, state) <- result.try(validated_overflow(state, options))
+  use date <- terr_r(state, resolve_calendar_date(cal, fields, overflow))
+  case iso_date_within_limits(date) {
+    True -> Ok(#(#(date, cal), state))
+    False -> range_error_result(state, "date outside of supported range")
+  }
+}
+
+/// ToTemporalTime(item [, options]).
+fn to_temporal_time(
+  state: State,
+  item: JsValue,
+  options: JsValue,
+) -> Result(#(TimeRec, State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: TemporalTimeSlot(
+            hour:,
+            minute:,
+            second:,
+            millisecond:,
+            microsecond:,
+            nanosecond:,
+          ),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(
+            TimeRec(hour, minute, second, millisecond, microsecond, nanosecond),
+            st,
+          ))
+        }
+        Some(ObjectSlot(
+          kind: TemporalDateTimeSlot(
+            hour:,
+            minute:,
+            second:,
+            millisecond:,
+            microsecond:,
+            nanosecond:,
+            ..,
+          ),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(
+            TimeRec(hour, minute, second, millisecond, microsecond, nanosecond),
+            st,
+          ))
+        }
+        Some(ObjectSlot(
+          kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar: _),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          let #(_, t) =
+            epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
+          Ok(#(t, st))
+        }
+        _ -> time_from_bag(state, ref, options)
+      }
+    JsString(s) ->
+      case parse_time_string(s) {
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+        Ok(t) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(t, st))
+        }
+      }
+    _ -> type_error_result(state, "cannot convert to a Temporal.PlainTime")
+  }
+}
+
+/// TemporalTimeString — time-only (optional T prefix) or full date-time.
+fn parse_time_string(s: String) -> Result(TimeRec, TErr) {
+  // Try a full date-time string first.
+  case parse_iso_datetime_string(s) {
+    Some(p) ->
+      case p.z {
+        True -> Error(RangeE("Z designator not valid for PlainTime"))
+        False ->
+          case p.time {
+            Some(t) -> {
+              use Nil <- result.map(check_parsed_calendar(p))
+              t
+            }
+            None -> Error(RangeE("no time in string"))
+          }
+      }
+    None -> {
+      let #(body, explicit_t) = case s {
+        "T" <> r | "t" <> r -> #(r, True)
+        _ -> #(s, False)
+      }
+      case parse_time_with_annotations(body) {
+        Some(t) ->
+          case !explicit_t && time_string_is_ambiguous(body) {
+            True -> Error(RangeE("ambiguous time string"))
+            False -> Ok(t)
+          }
+        None -> Error(RangeE("invalid time string: " <> s))
+      }
+    }
+  }
+}
+
+fn parse_time_with_annotations(s: String) -> Option(TimeRec) {
+  use #(t, rest) <- option.then(parse_time_part(s))
+  // Optional offset (not Z).
+  let rest = case parse_offset_part(rest) {
+    Some(#(True, _, _, _)) -> "###invalid###"
+    Some(#(False, _, _, r)) -> r
+    None -> rest
+  }
+  use #(_, _cal, rest2) <- option.then(parse_annotations(
+    rest,
+    None,
+    None,
+    False,
+  ))
+  // The calendar annotation value is not validated for time-only strings
+  // (ToTemporalTime ignores it entirely).
+  case rest2 {
+    "" -> Some(t)
+    _ -> None
+  }
+}
+
+/// A time-only string that also matches YYYY-MM / MMDD / MM-DD date syntax is
+/// ambiguous and must be rejected (spec: ParseISODateTime ambiguity rules).
+fn time_string_is_ambiguous(s: String) -> Bool {
+  // Strip annotations for the check.
+  let base = case string.split_once(s, "[") {
+    Ok(#(b, _)) -> b
+    Error(Nil) -> s
+  }
+  is_year_month_like(base) || is_month_day_like(base)
+}
+
+fn is_year_month_like(s: String) -> Bool {
+  case take_digits(s, 4) {
+    Some(#(_, "")) -> False
+    Some(#(_, rest)) ->
+      case rest {
+        "-" <> r ->
+          case take_digits(r, 2) {
+            Some(#(m, "")) -> m >= 1 && m <= 12
+            _ -> False
+          }
+        _ ->
+          case take_digits(rest, 2) {
+            Some(#(m, "")) -> m >= 1 && m <= 12
+            _ -> False
+          }
+      }
+    None -> False
+  }
+}
+
+fn is_month_day_like(s: String) -> Bool {
+  let s = case s {
+    "--" <> r -> r
+    _ -> s
+  }
+  case take_digits(s, 2) {
+    Some(#(m, rest)) -> {
+      let rest = case rest {
+        "-" <> r -> r
+        _ -> rest
+      }
+      case take_digits(rest, 2) {
+        // Reference year 1972 (leap) — "0229" is a possible month-day but
+        // "0230" is not, so the latter is unambiguously a time.
+        Some(#(d, "")) ->
+          m >= 1 && m <= 12 && d >= 1 && d <= days_in_month(1972, m)
+        _ -> False
+      }
+    }
+    None -> False
+  }
+}
+
+/// Property bag → TimeRec. Alphabetical: hour, microsecond, millisecond,
+/// minute, nanosecond, second. At least one required.
+fn time_from_bag(
+  state: State,
+  ref: Ref,
+  options: JsValue,
+) -> Result(#(TimeRec, State), #(JsValue, State)) {
+  use #(hour, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "hour",
+    to_integer_with_truncation,
+  ))
+  use #(us, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "microsecond",
+    to_integer_with_truncation,
+  ))
+  use #(ms, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "millisecond",
+    to_integer_with_truncation,
+  ))
+  use #(minute, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "minute",
+    to_integer_with_truncation,
+  ))
+  use #(ns, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "nanosecond",
+    to_integer_with_truncation,
+  ))
+  use #(second, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "second",
+    to_integer_with_truncation,
+  ))
+  let all = [hour, us, ms, minute, ns, second]
+  case list.all(all, fn(f) { f == None }) {
+    True ->
+      type_error_result(state, "invalid property bag for Temporal.PlainTime")
+    False -> {
+      use #(overflow, state) <- result.try(validated_overflow(state, options))
+      let t =
+        TimeRec(
+          hour: option.unwrap(hour, 0),
+          minute: option.unwrap(minute, 0),
+          second: option.unwrap(second, 0),
+          ms: option.unwrap(ms, 0),
+          us: option.unwrap(us, 0),
+          ns: option.unwrap(ns, 0),
+        )
+      case overflow {
+        "reject" ->
+          case is_valid_time(t) {
+            True -> Ok(#(t, state))
+            False -> range_error_result(state, "invalid time")
+          }
+        _ ->
+          Ok(#(
+            TimeRec(
+              hour: int.clamp(t.hour, 0, 23),
+              minute: int.clamp(t.minute, 0, 59),
+              second: int.clamp(t.second, 0, 59),
+              ms: int.clamp(t.ms, 0, 999),
+              us: int.clamp(t.us, 0, 999),
+              ns: int.clamp(t.ns, 0, 999),
+            ),
+            state,
+          ))
+      }
+    }
+  }
+}
+
+/// ToTemporalDuration(item).
+fn to_temporal_duration(
+  state: State,
+  item: JsValue,
+) -> Result(#(DurRec, State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: TemporalDurationSlot(..), ..)) -> {
+          let assert Some(d) = this_duration(state, item)
+          Ok(#(d, state))
+        }
+        _ -> duration_from_bag(state, ref)
+      }
+    JsString(s) ->
+      case parse_duration_string(s) {
+        Some(d) ->
+          case is_valid_duration(d) {
+            True -> Ok(#(d, state))
+            False -> range_error_result(state, "invalid duration")
+          }
+        None -> range_error_result(state, "invalid duration string: " <> s)
+      }
+    _ -> type_error_result(state, "cannot convert to a Temporal.Duration")
+  }
+}
+
+/// Duration property bag — alphabetical field order; at least one required.
+fn duration_from_bag(
+  state: State,
+  ref: Ref,
+) -> Result(#(DurRec, State), #(JsValue, State)) {
+  use #(days, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "days",
+    to_integer_if_integral,
+  ))
+  use #(hours, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "hours",
+    to_integer_if_integral,
+  ))
+  use #(us, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "microseconds",
+    to_integer_if_integral,
+  ))
+  use #(ms, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "milliseconds",
+    to_integer_if_integral,
+  ))
+  use #(minutes, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "minutes",
+    to_integer_if_integral,
+  ))
+  use #(months, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "months",
+    to_integer_if_integral,
+  ))
+  use #(ns, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "nanoseconds",
+    to_integer_if_integral,
+  ))
+  use #(seconds, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "seconds",
+    to_integer_if_integral,
+  ))
+  use #(weeks, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "weeks",
+    to_integer_if_integral,
+  ))
+  use #(years, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "years",
+    to_integer_if_integral,
+  ))
+  let all = [days, hours, us, ms, minutes, months, ns, seconds, weeks, years]
+  case list.all(all, fn(f) { f == None }) {
+    True ->
+      type_error_result(state, "invalid property bag for Temporal.Duration")
+    False -> {
+      let d =
+        DurRec(
+          years: option.unwrap(years, 0),
+          months: option.unwrap(months, 0),
+          weeks: option.unwrap(weeks, 0),
+          days: option.unwrap(days, 0),
+          hours: option.unwrap(hours, 0),
+          minutes: option.unwrap(minutes, 0),
+          seconds: option.unwrap(seconds, 0),
+          ms: option.unwrap(ms, 0),
+          us: option.unwrap(us, 0),
+          ns: option.unwrap(ns, 0),
+        )
+      case is_valid_duration(d) {
+        True -> Ok(#(d, state))
+        False -> range_error_result(state, "invalid duration")
+      }
+    }
+  }
+}
+
+/// ISO 8601 duration string: [+-]P[nY][nM][nW][nD][T[nH][nM][nS]] with an
+/// optional fraction on the smallest present time unit.
+fn parse_duration_string(s: String) -> Option(DurRec) {
+  let #(sign, rest) = case s {
+    "+" <> r -> #(1, r)
+    "-" <> r -> #(-1, r)
+    _ -> #(1, s)
+  }
+  case rest {
+    "P" <> r | "p" <> r -> parse_duration_date_units(r, sign)
+    _ -> None
+  }
+}
+
+fn parse_duration_date_units(s: String, sign: Int) -> Option(DurRec) {
+  let #(years, s) = parse_dur_unit(s, ["Y", "y"])
+  let #(months, s) = parse_dur_unit(s, ["M", "m"])
+  let #(weeks, s) = parse_dur_unit(s, ["W", "w"])
+  let #(days, s) = parse_dur_unit(s, ["D", "d"])
+  case s {
+    "" ->
+      case years == None && months == None && weeks == None && days == None {
+        True -> None
+        False ->
+          Some(apply_dur_sign(
+            DurRec(
+              years: option.unwrap(years, 0),
+              months: option.unwrap(months, 0),
+              weeks: option.unwrap(weeks, 0),
+              days: option.unwrap(days, 0),
+              hours: 0,
+              minutes: 0,
+              seconds: 0,
+              ms: 0,
+              us: 0,
+              ns: 0,
+            ),
+            sign,
+          ))
+      }
+    "T" <> r | "t" <> r -> {
+      use #(h, mi, sec, sub_ns) <- option.then(parse_duration_time_units(r))
+      Some(apply_dur_sign(
+        DurRec(
+          years: option.unwrap(years, 0),
+          months: option.unwrap(months, 0),
+          weeks: option.unwrap(weeks, 0),
+          days: option.unwrap(days, 0),
+          hours: h,
+          minutes: mi,
+          seconds: sec,
+          ms: sub_ns / ns_per_ms,
+          us: { sub_ns % ns_per_ms } / ns_per_us,
+          ns: sub_ns % ns_per_us,
+        ),
+        sign,
+      ))
+    }
+    _ -> None
+  }
+}
+
+/// Integer (no fraction) date unit: returns the value if `s` starts with
+/// digits followed by one of `designators`.
+fn parse_dur_unit(
+  s: String,
+  designators: List(String),
+) -> #(Option(Int), String) {
+  case take_some_digits(s, 16) {
+    Some(#(v, _, rest)) -> {
+      case list.find(designators, fn(d) { string.starts_with(rest, d) }) {
+        Ok(d) -> #(Some(v), string.drop_start(rest, string.length(d)))
+        Error(Nil) -> #(None, s)
+      }
+    }
+    None -> #(None, s)
+  }
+}
+
+/// Time units: hours/minutes/seconds; fraction allowed only on the last unit
+/// present. Returns total #(hours, minutes, seconds, sub_second_ns).
+fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
+  use #(h, h_frac, s1) <- option.then(parse_dur_time_unit(s, ["H", "h"]))
+  case h_frac {
+    Some(f) ->
+      // Fractional hours: nothing may follow; convert to mi/s/ns exactly.
+      case s1 {
+        "" -> {
+          let total_ns = f * 3600 / 1
+          let mi = total_ns / ns_per_minute
+          let rem = total_ns - mi * ns_per_minute
+          let sec = rem / ns_per_second
+          Some(#(option.unwrap(h, 0), mi, sec, rem - sec * ns_per_second))
+        }
+        _ -> None
+      }
+    None -> {
+      use #(mi, mi_frac, s2) <- option.then(parse_dur_time_unit(s1, ["M", "m"]))
+      case mi_frac {
+        Some(f) ->
+          case s2 {
+            "" -> {
+              let total_ns = f * 60
+              let sec = total_ns / ns_per_second
+              Some(#(
+                option.unwrap(h, 0),
+                option.unwrap(mi, 0),
+                sec,
+                total_ns - sec * ns_per_second,
+              ))
+            }
+            _ -> None
+          }
+        None -> {
+          use #(sec, s_frac, s3) <- option.then(
+            parse_dur_time_unit(s2, ["S", "s"]),
+          )
+          case s3 {
+            "" ->
+              case h == None && mi == None && sec == None {
+                True -> None
+                False ->
+                  Some(#(
+                    option.unwrap(h, 0),
+                    option.unwrap(mi, 0),
+                    option.unwrap(sec, 0),
+                    option.unwrap(s_frac, 0),
+                  ))
+              }
+            _ -> None
+          }
+        }
+      }
+    }
+  }
+}
+
+/// One time unit with optional fraction → #(value, fraction_ns, rest).
+fn parse_dur_time_unit(
+  s: String,
+  designators: List(String),
+) -> Option(#(Option(Int), Option(Int), String)) {
+  case take_some_digits(s, 16) {
+    None -> Some(#(None, None, s))
+    Some(#(v, _, rest)) -> {
+      let #(frac_ns, rest2, had_frac) = case rest {
+        "." <> r | "," <> r ->
+          case take_some_digits(r, 9) {
+            Some(#(f, count, rr)) -> #(f * pow10(9 - count), rr, True)
+            None -> #(0, rest, False)
+          }
+        _ -> #(0, rest, False)
+      }
+      case list.find(designators, fn(d) { string.starts_with(rest2, d) }) {
+        Ok(d) ->
+          case had_frac {
+            True ->
+              Some(#(
+                Some(v),
+                Some(frac_ns),
+                string.drop_start(rest2, string.length(d)),
+              ))
+            False ->
+              Some(#(Some(v), None, string.drop_start(rest2, string.length(d))))
+          }
+        Error(Nil) ->
+          // Designator mismatch → backtrack so the caller can try the next
+          // unit (e.g. "0.5S" probed by the hours parser). The "fraction must
+          // be on the last unit" rule is enforced by the caller: any
+          // non-empty remainder after a fractional unit is rejected.
+          Some(#(None, None, s))
+      }
+    }
+  }
+}
+
+fn apply_dur_sign(d: DurRec, sign: Int) -> DurRec {
+  case sign < 0 {
+    False -> d
+    True ->
+      DurRec(
+        years: 0 - d.years,
+        months: 0 - d.months,
+        weeks: 0 - d.weeks,
+        days: 0 - d.days,
+        hours: 0 - d.hours,
+        minutes: 0 - d.minutes,
+        seconds: 0 - d.seconds,
+        ms: 0 - d.ms,
+        us: 0 - d.us,
+        ns: 0 - d.ns,
+      )
+  }
+}
+
+// ============================================================================
+// Static methods
+// ============================================================================
+
+fn static_dispatch(
+  kind: TemporalKind,
+  name: String,
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case kind, name {
+    TemporalPlainDateKind, "from" -> {
+      use #(d, cal), state <- state.try_op(to_temporal_date(
+        state,
+        arg_at(args, 0),
+        arg_at(args, 1),
+      ))
+      let #(state, v) = make_date_cal(state, protos, d, cal)
+      #(state, Ok(v))
+    }
+    TemporalPlainDateKind, "compare" -> {
+      use #(a, _), state <- state.try_op(to_temporal_date(
+        state,
+        arg_at(args, 0),
+        JsUndefined,
+      ))
+      use #(b, _), state <- state.try_op(to_temporal_date(
+        state,
+        arg_at(args, 1),
+        JsUndefined,
+      ))
+      #(state, Ok(value.from_int(compare_iso_date(a, b))))
+    }
+    TemporalPlainTimeKind, "from" -> {
+      use t, state <- state.try_op(to_temporal_time(
+        state,
+        arg_at(args, 0),
+        arg_at(args, 1),
+      ))
+      let #(state, v) = make_time(state, protos, t)
+      #(state, Ok(v))
+    }
+    TemporalPlainTimeKind, "compare" -> {
+      use a, state <- state.try_op(to_temporal_time(
+        state,
+        arg_at(args, 0),
+        JsUndefined,
+      ))
+      use b, state <- state.try_op(to_temporal_time(
+        state,
+        arg_at(args, 1),
+        JsUndefined,
+      ))
+      #(state, Ok(value.from_int(int_sign(time_to_ns(a) - time_to_ns(b)))))
+    }
+    TemporalPlainDateTimeKind, "from" -> {
+      use #(d, t, cal), state <- state.try_op(to_temporal_date_time(
+        state,
+        arg_at(args, 0),
+        arg_at(args, 1),
+      ))
+      let #(state, v) = make_date_time_cal(state, protos, d, t, cal)
+      #(state, Ok(v))
+    }
+    TemporalPlainDateTimeKind, "compare" -> {
+      use #(ad, at, _), state <- state.try_op(to_temporal_date_time(
+        state,
+        arg_at(args, 0),
+        JsUndefined,
+      ))
+      use #(bd, bt, _), state <- state.try_op(to_temporal_date_time(
+        state,
+        arg_at(args, 1),
+        JsUndefined,
+      ))
+      #(state, Ok(value.from_int(compare_iso_date_time(#(ad, at), #(bd, bt)))))
+    }
+    TemporalPlainYearMonthKind, "from" -> {
+      use #(y, m, rd, cal), state <- state.try_op(to_temporal_year_month(
+        state,
+        arg_at(args, 0),
+        arg_at(args, 1),
+      ))
+      let #(state, v) = make_year_month_cal(state, protos, y, m, rd, cal)
+      #(state, Ok(v))
+    }
+    TemporalPlainYearMonthKind, "compare" -> {
+      use a, state <- state.try_op(to_temporal_year_month(
+        state,
+        arg_at(args, 0),
+        JsUndefined,
+      ))
+      use b, state <- state.try_op(to_temporal_year_month(
+        state,
+        arg_at(args, 1),
+        JsUndefined,
+      ))
+      // CompareISODate including the reference day.
+      let n = compare_iso_date(IsoDate(a.0, a.1, a.2), IsoDate(b.0, b.1, b.2))
+      #(state, Ok(value.from_int(n)))
+    }
+    TemporalPlainMonthDayKind, "from" -> {
+      use #(m, d, ry, cal), state <- state.try_op(to_temporal_month_day(
+        state,
+        arg_at(args, 0),
+        arg_at(args, 1),
+      ))
+      let #(state, v) = make_month_day_cal(state, protos, m, d, ry, cal)
+      #(state, Ok(v))
+    }
+    TemporalDurationKind, "from" -> {
+      use d, state <- state.try_op(to_temporal_duration(state, arg_at(args, 0)))
+      let #(state, v) = make_duration(state, protos, d)
+      #(state, Ok(v))
+    }
+    TemporalDurationKind, "compare" -> duration_compare(args, state)
+    TemporalInstantKind, "from" -> {
+      use ns, state <- state.try_op(to_temporal_instant(state, arg_at(args, 0)))
+      let #(state, v) = make_instant(state, protos, ns)
+      #(state, Ok(v))
+    }
+    TemporalInstantKind, "fromEpochMilliseconds" -> {
+      use n, state <- state.try_op(coerce.js_to_number(state, arg_at(args, 0)))
+      case n {
+        Finite(f) -> {
+          let i = value.float_to_int(f)
+          case int.to_float(i) == f {
+            False -> state.range_error(state, "not an integral number")
+            True -> {
+              let ns = i * ns_per_ms
+              case int.absolute_value(ns) <= ns_max_instant {
+                False ->
+                  state.range_error(state, "epoch milliseconds out of range")
+                True -> {
+                  let #(state, v) = make_instant(state, protos, ns)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        _ -> state.range_error(state, "not a finite number")
+      }
+    }
+    TemporalInstantKind, "fromEpochNanoseconds" -> {
+      use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
+      case int.absolute_value(ns) <= ns_max_instant {
+        False -> state.range_error(state, "epoch nanoseconds out of range")
+        True -> {
+          let #(state, v) = make_instant(state, protos, ns)
+          #(state, Ok(v))
+        }
+      }
+    }
+    TemporalInstantKind, "compare" -> {
+      use a, state <- state.try_op(to_temporal_instant(state, arg_at(args, 0)))
+      use b, state <- state.try_op(to_temporal_instant(state, arg_at(args, 1)))
+      #(state, Ok(value.from_int(int_sign(a - b))))
+    }
+    TemporalZonedDateTimeKind, "from" -> {
+      use #(ns, tz, cal), state <- state.try_op(to_temporal_zoned(
+        state,
+        arg_at(args, 0),
+        arg_at(args, 1),
+      ))
+      let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
+      #(state, Ok(v))
+    }
+    TemporalZonedDateTimeKind, "compare" -> {
+      use #(a, _, _), state <- state.try_op(to_temporal_zoned(
+        state,
+        arg_at(args, 0),
+        JsUndefined,
+      ))
+      use #(b, _, _), state <- state.try_op(to_temporal_zoned(
+        state,
+        arg_at(args, 1),
+        JsUndefined,
+      ))
+      #(state, Ok(value.from_int(int_sign(a - b))))
+    }
+    _, _ -> state.type_error(state, "unknown Temporal static method")
+  }
+}
+
+fn int_sign(n: Int) -> Int {
+  case n > 0 {
+    True -> 1
+    False ->
+      case n < 0 {
+        True -> -1
+        False -> 0
+      }
+  }
+}
+
+fn compare_iso_date(a: IsoDate, b: IsoDate) -> Int {
+  int_sign(epoch_days(a) - epoch_days(b))
+}
+
+fn compare_iso_date_time(
+  a: #(IsoDate, TimeRec),
+  b: #(IsoDate, TimeRec),
+) -> Int {
+  int_sign(utc_epoch_ns(a.0, a.1) - utc_epoch_ns(b.0, b.1))
+}
+
+/// ToTemporalDateTime(item [, options]).
+fn to_temporal_date_time(
+  state: State,
+  item: JsValue,
+  options: JsValue,
+) -> Result(#(#(IsoDate, TimeRec, String), State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: TemporalDateTimeSlot(calendar:, ..), ..)) -> {
+          let assert Some(#(d, t)) = this_date_time(state, item)
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(d, t, calendar), st))
+        }
+        Some(ObjectSlot(
+          kind: TemporalDateSlot(year:, month:, day:, calendar:),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(IsoDate(year, month, day), midnight, calendar), st))
+        }
+        Some(ObjectSlot(
+          kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          let #(d, t) =
+            epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
+          Ok(#(#(d, t, calendar), st))
+        }
+        _ -> date_time_from_bag(state, ref, options)
+      }
+    JsString(s) ->
+      case parse_plain_datetime_string(s) {
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+        Ok(p) ->
+          case p.date {
+            Some(d) -> {
+              let t = option.unwrap(p.time, midnight)
+              use cal <- terr_r(state, parsed_calendar_id(p))
+              use #(_o, st) <- result.try(validated_overflow(state, options))
+              case iso_datetime_within_limits(d, t) {
+                True -> Ok(#(#(d, t, cal), st))
+                False ->
+                  range_error_result(st, "date-time outside supported range")
+              }
+            }
+            None -> range_error_result(state, "invalid date-time string")
+          }
+      }
+    _ -> type_error_result(state, "cannot convert to a Temporal.PlainDateTime")
+  }
+}
+
+/// Property bag → date-time. Fields: calendar, then alphabetical (day, era,
+/// eraYear, hour, microsecond, millisecond, minute, month, monthCode,
+/// nanosecond, second, year).
+fn date_time_from_bag(
+  state: State,
+  ref: Ref,
+  options: JsValue,
+) -> Result(#(#(IsoDate, TimeRec, String), State), #(JsValue, State)) {
+  use #(cal, state) <- result.try(read_bag_calendar(state, ref))
+  use #(day, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "day",
+    to_positive_integer_with_truncation,
+  ))
+  use #(era, state) <- result.try(case tcal.has_eras(cal) {
+    True -> read_bag_era(state, ref)
+    False -> Ok(#(None, state))
+  })
+  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
+    True ->
+      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    False -> Ok(#(None, state))
+  })
+  use #(hour, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "hour",
+    to_integer_with_truncation,
+  ))
+  use #(us, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "microsecond",
+    to_integer_with_truncation,
+  ))
+  use #(ms, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "millisecond",
+    to_integer_with_truncation,
+  ))
+  use #(minute, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "minute",
+    to_integer_with_truncation,
+  ))
+  use #(month, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "month",
+    to_positive_integer_with_truncation,
+  ))
+  use #(month_code, state) <- result.try(read_month_code(state, ref))
+  use #(ns, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "nanosecond",
+    to_integer_with_truncation,
+  ))
+  use #(second, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "second",
+    to_integer_with_truncation,
+  ))
+  use #(year, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "year",
+    to_integer_with_truncation,
+  ))
+  use #(overflow, state) <- result.try(validated_overflow(state, options))
+  let fields = DateFields(day:, era:, era_year:, month:, month_code:, year:)
+  use date <- terr_r(state, resolve_calendar_date(cal, fields, overflow))
+  let t =
+    TimeRec(
+      hour: option.unwrap(hour, 0),
+      minute: option.unwrap(minute, 0),
+      second: option.unwrap(second, 0),
+      ms: option.unwrap(ms, 0),
+      us: option.unwrap(us, 0),
+      ns: option.unwrap(ns, 0),
+    )
+  let t_result = case overflow {
+    "reject" ->
+      case is_valid_time(t) {
+        True -> Ok(t)
+        False -> Error(RangeE("invalid time"))
+      }
+    _ ->
+      Ok(TimeRec(
+        hour: int.clamp(t.hour, 0, 23),
+        minute: int.clamp(t.minute, 0, 59),
+        second: int.clamp(t.second, 0, 59),
+        ms: int.clamp(t.ms, 0, 999),
+        us: int.clamp(t.us, 0, 999),
+        ns: int.clamp(t.ns, 0, 999),
+      ))
+  }
+  use t <- terr_r(state, t_result)
+  case iso_datetime_within_limits(date, t) {
+    True -> Ok(#(#(date, t, cal), state))
+    False -> range_error_result(state, "date-time outside supported range")
+  }
+}
+
+/// ToTemporalYearMonth(item [, options]).
+fn to_temporal_year_month(
+  state: State,
+  item: JsValue,
+  options: JsValue,
+) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: TemporalYearMonthSlot(year:, month:, day:, calendar:),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(year, month, day, calendar), st))
+        }
+        _ -> year_month_from_bag(state, ref, options)
+      }
+    JsString(s) ->
+      case parse_year_month_string(s) {
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+        Ok(#(y, m, rd, cal)) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(y, m, rd, cal), st))
+        }
+      }
+    _ -> type_error_result(state, "cannot convert to a Temporal.PlainYearMonth")
+  }
+}
+
+fn parse_year_month_string(
+  s: String,
+) -> Result(#(Int, Int, Int, String), TErr) {
+  // YYYY-MM or YYYYMM (+ annotations), or any full date-time string.
+  let ym = case parse_year_part(s) {
+    Some(#(y, rest)) -> {
+      let mm = case rest {
+        "-" <> r -> take_digits(r, 2)
+        _ -> take_digits(rest, 2)
+      }
+      case mm {
+        Some(#(m, rest2)) ->
+          case parse_annotations(rest2, None, None, False) {
+            Some(#(_, cal, "")) -> Some(#(y, m, cal))
+            _ -> None
+          }
+        None -> None
+      }
+    }
+    None -> None
+  }
+  case ym {
+    Some(#(y, m, cal)) ->
+      case m >= 1 && m <= 12 {
+        False -> Error(RangeE("invalid year-month string"))
+        True ->
+          case cal {
+            None -> check_ym_limits(y, m, 1, "iso8601")
+            Some(c) -> {
+              use canon <- result.try(canonicalize_calendar(c))
+              // Year-month-only strings are only valid for iso8601.
+              case canon {
+                "iso8601" -> check_ym_limits(y, m, 1, "iso8601")
+                _ ->
+                  Error(RangeE(
+                    "year-month string requires a day for non-ISO calendars",
+                  ))
+              }
+            }
+          }
+      }
+    None -> {
+      use p <- result.try(parse_plain_datetime_string(s))
+      case p.date {
+        Some(d) -> {
+          use cal_id <- result.try(parsed_calendar_id(p))
+          case cal_id {
+            "iso8601" -> check_ym_limits(d.year, d.month, d.day, "iso8601")
+            cal -> {
+              // Reference day: first day of the calendar month
+              // containing the parsed date.
+              let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+              let first =
+                iso_date_from_epoch_days(tcal.date_to_epoch_days(
+                  cal,
+                  cd.year,
+                  cd.month,
+                  1,
+                ))
+              check_ym_limits(first.year, first.month, first.day, cal)
+            }
+          }
+        }
+        None -> Error(RangeE("invalid year-month string"))
+      }
+    }
+  }
+}
+
+fn check_ym_limits(
+  y: Int,
+  m: Int,
+  rd: Int,
+  cal: String,
+) -> Result(#(Int, Int, Int, String), TErr) {
+  case iso_year_month_within_limits(y, m) {
+    True -> Ok(#(y, m, rd, cal))
+    False -> Error(RangeE("year-month outside of supported range"))
+  }
+}
+
+/// Property bag → year-month. Fields: calendar, then era, eraYear, month,
+/// monthCode, year. Returns the ISO date of the calendar month's first day.
+fn year_month_from_bag(
+  state: State,
+  ref: Ref,
+  options: JsValue,
+) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+  use #(cal, state) <- result.try(read_bag_calendar(state, ref))
+  use #(era, state) <- result.try(case tcal.has_eras(cal) {
+    True -> read_bag_era(state, ref)
+    False -> Ok(#(None, state))
+  })
+  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
+    True ->
+      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    False -> Ok(#(None, state))
+  })
+  use #(month, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "month",
+    to_positive_integer_with_truncation,
+  ))
+  use #(month_code, state) <- result.try(read_month_code(state, ref))
+  use #(year, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "year",
+    to_integer_with_truncation,
+  ))
+  use #(overflow, state) <- result.try(validated_overflow(state, options))
+  let fields =
+    DateFields(day: None, era:, era_year:, month:, month_code:, year:)
+  use ym <- terr_r(state, resolve_calendar_year_month(cal, fields, overflow))
+  Ok(#(ym, state))
+}
+
+/// Resolve year-month fields to the ISO date of the calendar month's first
+/// day (day 1 for iso8601).
+fn resolve_calendar_year_month(
+  cal: String,
+  f: DateFields,
+  overflow: String,
+) -> Result(#(Int, Int, Int, String), TErr) {
+  use Nil <- result.try(case f.year, f.era, f.era_year {
+    None, None, None -> Error(TypeE("year is required"))
+    _, _, _ -> Ok(Nil)
+  })
+  use Nil <- result.try(case f.month, f.month_code {
+    None, None -> Error(TypeE("month or monthCode is required"))
+    _, _ -> Ok(Nil)
+  })
+  use y <- result.try(resolve_calendar_year(cal, f))
+  case cal {
+    "iso8601" -> {
+      use m <- result.try(resolve_iso_month(f))
+      use m <- result.try(case m >= 1 && m <= 12 {
+        True -> Ok(m)
+        False ->
+          case overflow {
+            "reject" -> Error(RangeE("invalid month"))
+            _ -> Ok(int.clamp(m, 1, 12))
+          }
+      })
+      check_ym_limits(y, m, 1, cal)
+    }
+    _ -> {
+      use m <- result.try(resolve_calendar_month(cal, y, f, overflow))
+      let first =
+        iso_date_from_epoch_days(tcal.date_to_epoch_days(cal, y, m, 1))
+      check_ym_limits(first.year, first.month, first.day, cal)
+    }
+  }
+}
+
+/// ToTemporalMonthDay(item [, options]).
+fn to_temporal_month_day(
+  state: State,
+  item: JsValue,
+  options: JsValue,
+) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: TemporalMonthDaySlot(month:, day:, ref_year:, calendar:),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(month, day, ref_year, calendar), st))
+        }
+        _ -> month_day_from_bag(state, ref, options)
+      }
+    JsString(s) ->
+      case parse_month_day_string(s) {
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+        Ok(#(m, d, ry, cal)) -> {
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          Ok(#(#(m, d, ry, cal), st))
+        }
+      }
+    _ -> type_error_result(state, "cannot convert to a Temporal.PlainMonthDay")
+  }
+}
+
+fn parse_month_day_string(s: String) -> Result(#(Int, Int, Int, String), TErr) {
+  // --MM-DD / --MMDD / MM-DD / MMDD (+ annotations), or full date-time.
+  let body = case s {
+    "--" <> r -> Some(r)
+    _ -> Some(s)
+  }
+  let md = case body {
+    Some(b) ->
+      case take_digits(b, 2) {
+        Some(#(m, rest)) -> {
+          let dd = case rest {
+            "-" <> r -> take_digits(r, 2)
+            _ -> take_digits(rest, 2)
+          }
+          case dd {
+            Some(#(d, rest2)) ->
+              case parse_annotations(rest2, None, None, False) {
+                Some(#(_, cal, "")) -> Some(#(m, d, cal))
+                _ -> None
+              }
+            None -> None
+          }
+        }
+        None -> None
+      }
+    None -> None
+  }
+  case md {
+    Some(#(m, d, cal)) ->
+      // Use a leap reference year so Feb 29 is valid.
+      case is_valid_iso_date(1972, m, d) {
+        False -> try_month_day_as_datetime(s)
+        True ->
+          case cal {
+            None -> Ok(#(m, d, 1972, "iso8601"))
+            Some(c) -> {
+              use canon <- result.try(canonicalize_calendar(c))
+              // Month-day-only strings are only valid for iso8601.
+              case canon {
+                "iso8601" -> Ok(#(m, d, 1972, "iso8601"))
+                _ ->
+                  Error(RangeE(
+                    "month-day string requires a year for non-ISO calendars",
+                  ))
+              }
+            }
+          }
+      }
+    None -> try_month_day_as_datetime(s)
+  }
+}
+
+fn try_month_day_as_datetime(
+  s: String,
+) -> Result(#(Int, Int, Int, String), TErr) {
+  use p <- result.try(parse_plain_datetime_string(s))
+  case p.date {
+    Some(d) -> {
+      use cal_id <- result.try(parsed_calendar_id(p))
+      case cal_id {
+        "iso8601" -> Ok(#(d.month, d.day, 1972, "iso8601"))
+        cal -> {
+          // ISODateWithinLimits before converting to calendar space:
+          // e.g. -999999-01-01[u-ca=gregory] must throw RangeError.
+          use Nil <- result.try(case iso_date_within_limits(d) {
+            False -> Error(RangeE("date outside of supported range"))
+            True -> Ok(Nil)
+          })
+          let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+          let code = tcal.month_code(cal, cd.year, cd.month)
+          let assert Ok(#(num, leap)) = tcal.parse_month_code(code)
+          use iso <- result.try(month_day_reference_iso(
+            cal,
+            num,
+            leap,
+            cd.day,
+            "constrain",
+          ))
+          Ok(#(iso.month, iso.day, iso.year, cal))
+        }
+      }
+    }
+    None -> Error(RangeE("invalid month-day string"))
+  }
+}
+
+/// ISO epoch days of 1972-12-31 — the month-day reference-year boundary.
+const md_reference_boundary = 1095
+
+/// Find the ISO date of the latest calendar month-day on or before
+/// 1972-12-31 with the given month code and day.
+fn month_day_reference_iso(
+  cal: String,
+  num: Int,
+  leap: Bool,
+  day: Int,
+  overflow: String,
+) -> Result(IsoDate, TErr) {
+  let boundary_cd = tcal.date_from_epoch_days(cal, md_reference_boundary)
+  case md_search(cal, num, leap, day, boundary_cd.year, 300) {
+    Ok(iso) -> Ok(iso)
+    Error(Nil) -> {
+      // No year in the window has this exact day. Constrain clamps to the
+      // largest day the month ever has; reject throws.
+      case overflow {
+        "reject" -> Error(RangeE("day out of range for month"))
+        _ -> {
+          let dmax = md_max_day(cal, num, leap, boundary_cd.year, 300, 0)
+          case dmax > 0 {
+            True ->
+              case md_search(cal, num, leap, dmax, boundary_cd.year, 300) {
+                Ok(iso) -> Ok(iso)
+                Error(Nil) -> Error(RangeE("invalid month-day"))
+              }
+            False -> Error(RangeE("invalid month-day"))
+          }
+        }
+      }
+    }
+  }
+}
+
+fn md_search(
+  cal: String,
+  num: Int,
+  leap: Bool,
+  day: Int,
+  year: Int,
+  tries: Int,
+) -> Result(IsoDate, Nil) {
+  case tries <= 0 {
+    True -> Error(Nil)
+    False ->
+      case tcal.month_for_code(cal, year, num, leap) {
+        Error(_) -> md_search(cal, num, leap, day, year - 1, tries - 1)
+        Ok(m) ->
+          case day <= tcal.days_in_month(cal, year, m) {
+            False -> md_search(cal, num, leap, day, year - 1, tries - 1)
+            True -> {
+              let days = tcal.date_to_epoch_days(cal, year, m, day)
+              case days <= md_reference_boundary {
+                True -> Ok(iso_date_from_epoch_days(days))
+                False -> md_search(cal, num, leap, day, year - 1, tries - 1)
+              }
+            }
+          }
+      }
+  }
+}
+
+/// Largest day the month with this code reaches in the search window.
+fn md_max_day(
+  cal: String,
+  num: Int,
+  leap: Bool,
+  year: Int,
+  tries: Int,
+  best: Int,
+) -> Int {
+  case tries <= 0 {
+    True -> best
+    False -> {
+      let best2 = case tcal.month_for_code(cal, year, num, leap) {
+        Error(_) -> best
+        Ok(m) -> int.max(best, tcal.days_in_month(cal, year, m))
+      }
+      md_max_day(cal, num, leap, year - 1, tries - 1, best2)
+    }
+  }
+}
+
+/// Property bag → month-day. Fields: calendar, then day, era, eraYear,
+/// month, monthCode, year.
+fn month_day_from_bag(
+  state: State,
+  ref: Ref,
+  options: JsValue,
+) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+  use #(cal, state) <- result.try(read_bag_calendar(state, ref))
+  use #(fields, state) <- result.try(read_date_fields(state, ref, cal))
+  use #(overflow, state) <- result.try(validated_overflow(state, options))
+  use md <- terr_r(state, resolve_calendar_month_day(cal, fields, overflow))
+  Ok(#(md, state))
+}
+
+/// Resolve month-day fields to #(iso_month, iso_day, iso_ref_year, calendar).
+fn resolve_calendar_month_day(
+  cal: String,
+  f: DateFields,
+  overflow: String,
+) -> Result(#(Int, Int, Int, String), TErr) {
+  // Required fields (TypeError) first.
+  use day <- result.try(case f.day {
+    None -> Error(TypeE("day is required"))
+    Some(d) -> Ok(d)
+  })
+  use Nil <- result.try(case f.month, f.month_code {
+    None, None -> Error(TypeE("month or monthCode is required"))
+    _, _ -> Ok(Nil)
+  })
+  let has_year = f.year != None || { f.era != None && f.era_year != None }
+  // Month without year is only ambiguous for non-ISO calendars; for iso8601
+  // the month maps directly to a month code (reference year 1972).
+  use Nil <- result.try(
+    case cal != "iso8601" && f.month_code == None && !has_year {
+      True -> Error(TypeE("either year or monthCode required with month"))
+      False -> Ok(Nil)
+    },
+  )
+  case cal {
+    "iso8601" -> {
+      use m <- result.try(resolve_iso_month(f))
+      let ref_year = case f.month_code {
+        Some(_) -> 1972
+        None -> option.unwrap(f.year, 1972)
+      }
+      use date <- result.try(regulate_iso_date(ref_year, m, day, overflow))
+      // Clamp day to the leap reference year's month length.
+      let d2 = int.min(date.day, days_in_month(1972, date.month))
+      Ok(#(date.month, d2, 1972, cal))
+    }
+    _ -> {
+      // Determine the month code (and day) to anchor the reference search.
+      use #(num, leap, day) <- result.try(case has_year {
+        True -> {
+          use y <- result.try(resolve_calendar_year(cal, f))
+          // Bail out before any month-info computation when no date in the
+          // calendar year is within the representable ISO range.
+          let year_first = tcal.date_to_epoch_days(cal, y, 1, 1)
+          let year_last = tcal.date_to_epoch_days(cal, y + 1, 1, 1) - 1
+          use Nil <- result.try(
+            case year_first > max_epoch_days || year_last < min_epoch_days {
+              True -> Error(RangeE("year outside of supported range"))
+              False -> Ok(Nil)
+            },
+          )
+          use m <- result.try(resolve_calendar_month(cal, y, f, overflow))
+          use d <- result.try(regulate_calendar_day(cal, y, m, day, overflow))
+          let assert Ok(#(num, leap)) =
+            tcal.parse_month_code(tcal.month_code(cal, y, m))
+          Ok(#(num, leap, d))
+        }
+        False -> {
+          let assert Some(#(num, leap)) = f.month_code
+          // Validate the code can ever occur in this calendar.
+          use Nil <- result.try(
+            case tcal.month_for_code(cal, md_probe_year(cal, leap), num, leap) {
+              Error(tcal.NeverValid) ->
+                Error(RangeE("monthCode is not valid for calendar " <> cal))
+              _ -> Ok(Nil)
+            },
+          )
+          case f.month {
+            Some(_) -> Error(TypeE("year is required when month is present"))
+            None -> Ok(#(num, leap, day))
+          }
+        }
+      })
+      // chinese/dangi leap month-day pairs with no ISO reference year in the
+      // spec's reference-year table throw under reject; constrain falls back
+      // to the non-leap month (keeping the day).
+      use #(num, leap) <- result.try(
+        case
+          { cal == "chinese" || cal == "dangi" }
+          && leap
+          && chinese_ref_year_missing(num, day)
+        {
+          True ->
+            case overflow {
+              "reject" ->
+                Error(RangeE("no reference year for monthCode and day"))
+              _ -> Ok(#(num, False))
+            }
+          False -> Ok(#(num, leap))
+        },
+      )
+      use iso <- result.try(month_day_reference_iso(
+        cal,
+        num,
+        leap,
+        day,
+        overflow,
+      ))
+      Ok(#(iso.month, iso.day, iso.year, cal))
+    }
+  }
+}
+
+/// chinese/dangi leap-month + day combinations that have no ISO reference
+/// year (the "—" cells of the spec's chinese/dangi reference-year table):
+/// such dates are not known to occur between ISO years 1900 and 2035.
+fn chinese_ref_year_missing(num: Int, day: Int) -> Bool {
+  case num {
+    1 | 12 -> True
+    2 | 8 | 9 | 10 | 11 -> day == 30
+    _ -> False
+  }
+}
+
+/// A year in which a leap/normal month code can plausibly occur, used only
+/// for NeverValid validation of bare month codes.
+fn md_probe_year(cal: String, leap: Bool) -> Int {
+  case cal == "hebrew" && leap {
+    True -> 5779
+    False -> {
+      let cd = tcal.date_from_epoch_days(cal, md_reference_boundary)
+      cd.year
+    }
+  }
+}
+
+/// ToTemporalInstant(item) → epoch ns.
+fn to_temporal_instant(
+  state: State,
+  item: JsValue,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: TemporalInstantSlot(epoch_ns:), ..)) ->
+          Ok(#(epoch_ns, state))
+        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(epoch_ns:, ..), ..)) ->
+          Ok(#(epoch_ns, state))
+        _ -> {
+          use prim <- result.try(coerce.to_primitive(
+            state,
+            item,
+            coerce.StringHint,
+          ))
+          case prim {
+            #(JsString(s), st) -> parse_instant_to_ns(st, s)
+            #(_, st) ->
+              type_error_result(st, "cannot convert to a Temporal.Instant")
+          }
+        }
+      }
+    JsString(s) -> parse_instant_to_ns(state, s)
+    _ -> type_error_result(state, "cannot convert to a Temporal.Instant")
+  }
+}
+
+fn parse_instant_to_ns(
+  state: State,
+  s: String,
+) -> Result(#(Int, State), #(JsValue, State)) {
+  // Per ParseTemporalInstantString, a [u-ca=...] annotation is only
+  // syntax-checked (done by parse_iso_datetime_string); its value is
+  // IGNORED for Instant, so unknown calendars must not throw here.
+  case parse_iso_datetime_string(s) {
+    None -> range_error_result(state, "invalid instant string: " <> s)
+    Some(p) ->
+      case p.date, p.time {
+        Some(d), Some(t) -> {
+          let offset = case p.z, p.offset_ns {
+            True, _ -> Some(0)
+            False, Some(o) -> Some(o)
+            False, None -> None
+          }
+          case offset {
+            None ->
+              range_error_result(state, "instant string requires a UTC offset")
+            Some(off) -> {
+              let ns = utc_epoch_ns(d, t) - off
+              case int.absolute_value(ns) <= ns_max_instant {
+                True -> Ok(#(ns, state))
+                False ->
+                  range_error_result(state, "instant outside valid range")
+              }
+            }
+          }
+        }
+        _, _ ->
+          range_error_result(state, "instant string requires date and time")
+      }
+  }
+}
+
+/// ToTemporalZonedDateTime(item [, options]) → #(epoch_ns, tz, calendar).
+fn to_temporal_zoned(
+  state: State,
+  item: JsValue,
+  options: JsValue,
+) -> Result(#(#(Int, String, String), State), #(JsValue, State)) {
+  case item {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:),
+          ..,
+        )) -> {
+          use #(_o, st) <- result.try(validated_zdt_options(state, options))
+          Ok(#(#(epoch_ns, time_zone, calendar), st))
+        }
+        _ -> zoned_from_bag(state, ref, options)
+      }
+    JsString(s) ->
+      case parse_zoned_string(s) {
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+        Ok(#(d, t_opt, z, off_opt, off_sub, tz)) -> {
+          use cal <- terr_r(state, case extract_calendar_annotation(s) {
+            Some(c) -> canonicalize_calendar(c)
+            None -> Ok("iso8601")
+          })
+          use #(#(dis, offset_opt, _ov), st) <- result.try(
+            validated_zdt_options(state, options),
+          )
+          case
+            zoned_string_epoch_ns(
+              d,
+              t_opt,
+              z,
+              off_opt,
+              off_sub,
+              tz,
+              dis,
+              offset_opt,
+            )
+          {
+            Ok(ns) -> Ok(#(#(ns, tz, cal), st))
+            Error(RangeE(m)) -> range_error_result(st, m)
+            Error(TypeE(m)) -> type_error_result(st, m)
+          }
+        }
+      }
+    _ -> type_error_result(state, "cannot convert to a Temporal.ZonedDateTime")
+  }
+}
+
+/// ZonedDateTime options: disambiguation, offset, overflow (alphabetical).
+fn validated_zdt_options(
+  state: State,
+  options: JsValue,
+) -> Result(#(#(String, String, String), State), #(JsValue, State)) {
+  use #(opts, state) <- result.try(get_options_object(state, options))
+  use #(d, state) <- result.try(get_string_option(
+    state,
+    opts,
+    "disambiguation",
+    ["compatible", "earlier", "later", "reject"],
+    Some("compatible"),
+  ))
+  use #(of, state) <- result.try(get_string_option(
+    state,
+    opts,
+    "offset",
+    ["prefer", "use", "ignore", "reject"],
+    Some("reject"),
+  ))
+  use #(ov, state) <- result.try(get_overflow_option(state, opts))
+  Ok(#(
+    #(option.unwrap(d, "compatible"), option.unwrap(of, "reject"), ov),
+    state,
+  ))
+}
+
+fn parse_zoned_string(
+  s: String,
+) -> Result(#(IsoDate, Option(TimeRec), Bool, Option(Int), Bool, String), TErr) {
+  case parse_iso_datetime_string(s) {
+    None -> Error(RangeE("invalid ZonedDateTime string: " <> s))
+    Some(p) -> {
+      use Nil <- result.try(check_parsed_calendar(p))
+      case p.tz {
+        None -> Error(RangeE("ZonedDateTime string requires a [TimeZone]"))
+        Some(tz_str) -> {
+          use tz <- result.try(parse_time_zone_id(tz_str))
+          case p.date {
+            None -> Error(RangeE("missing date"))
+            Some(d) ->
+              Ok(#(d, p.time, p.z, p.offset_ns, p.offset_sub_minute, tz))
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Epoch ns for a parsed ZonedDateTime string: Z → exact instant; explicit
+/// offset → interpreted per the offset option (match-minutes); no time →
+/// start of day; otherwise wall-clock with disambiguation.
+fn zoned_string_epoch_ns(
+  d: IsoDate,
+  t_opt: Option(TimeRec),
+  z: Bool,
+  off_opt: Option(Int),
+  off_sub_minute: Bool,
+  tz: String,
+  dis: String,
+  offset_opt: String,
+) -> Result(Int, TErr) {
+  case t_opt, z, off_opt {
+    None, False, None -> start_of_day_ns(tz, d)
+    _, _, _ -> {
+      let t = option.unwrap(t_opt, midnight)
+      // Match-minutes only when the offset lacks a seconds component.
+      let match_minutes = !off_sub_minute
+      case z, off_opt {
+        True, _ -> validate_epoch_ns(utc_epoch_ns(d, t))
+        False, Some(off) ->
+          interpret_offset(
+            d,
+            t,
+            "option",
+            off,
+            tz,
+            dis,
+            offset_opt,
+            match_minutes,
+          )
+        False, None ->
+          interpret_offset(d, t, "wall", 0, tz, dis, offset_opt, True)
+      }
+    }
+  }
+}
+
+/// RegulateTime: constrain clamps each component; reject errors.
+fn regulate_time(t: TimeRec, overflow: String) -> Result(TimeRec, TErr) {
+  case overflow {
+    "reject" ->
+      case is_valid_time(t) {
+        True -> Ok(t)
+        False -> Error(RangeE("time out of range"))
+      }
+    _ ->
+      Ok(TimeRec(
+        hour: int.clamp(t.hour, 0, 23),
+        minute: int.clamp(t.minute, 0, 59),
+        second: int.clamp(t.second, 0, 59),
+        ms: int.clamp(t.ms, 0, 999),
+        us: int.clamp(t.us, 0, 999),
+        ns: int.clamp(t.ns, 0, 999),
+      ))
+  }
+}
+
+/// ZonedDateTime property bag: calendar, day, era, eraYear, hour,
+/// microsecond, millisecond, minute, month, monthCode, nanosecond, offset,
+/// second, timeZone, year.
+fn zoned_from_bag(
+  state: State,
+  ref: Ref,
+  options: JsValue,
+) -> Result(#(#(Int, String, String), State), #(JsValue, State)) {
+  use #(cal, state) <- result.try(read_bag_calendar(state, ref))
+  use #(day, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "day",
+    to_positive_integer_with_truncation,
+  ))
+  use #(era, state) <- result.try(case tcal.has_eras(cal) {
+    True -> read_bag_era(state, ref)
+    False -> Ok(#(None, state))
+  })
+  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
+    True ->
+      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    False -> Ok(#(None, state))
+  })
+  use #(hour, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "hour",
+    to_integer_with_truncation,
+  ))
+  use #(us, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "microsecond",
+    to_integer_with_truncation,
+  ))
+  use #(ms, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "millisecond",
+    to_integer_with_truncation,
+  ))
+  use #(minute, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "minute",
+    to_integer_with_truncation,
+  ))
+  use #(month, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "month",
+    to_positive_integer_with_truncation,
+  ))
+  use #(month_code, state) <- result.try(read_month_code(state, ref))
+  use #(ns, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "nanosecond",
+    to_integer_with_truncation,
+  ))
+  use #(bag_off, state) <- result.try(read_bag_offset(state, ref))
+  use #(second, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "second",
+    to_integer_with_truncation,
+  ))
+  // timeZone is required.
+  use #(tz_val, state) <- result.try(
+    ops_object.get_value(state, ref, Named("timeZone"), JsObject(ref))
+    |> result.map(fn(p) { #(p.0, p.1) }),
+  )
+  use #(year, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "year",
+    to_integer_with_truncation,
+  ))
+  // ToTemporalTimeZoneIdentifier: a ZonedDateTime contributes its time zone.
+  let tz_val = case tz_val {
+    JsObject(tz_ref) ->
+      case heap.read(state.heap, tz_ref) {
+        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
+          JsString(time_zone)
+        _ -> tz_val
+      }
+    _ -> tz_val
+  }
+  case tz_val {
+    JsUndefined -> type_error_result(state, "timeZone is required")
+    JsString(tz_str) ->
+      case parse_time_zone_id(tz_str) {
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+        Ok(tz) -> {
+          use #(#(dis, offset_opt, ov), state) <- result.try(
+            validated_zdt_options(state, options),
+          )
+          let fields =
+            DateFields(day:, era:, era_year:, month:, month_code:, year:)
+          use date <- terr_r(state, resolve_calendar_date(cal, fields, ov))
+          let t0 =
+            TimeRec(
+              hour: option.unwrap(hour, 0),
+              minute: option.unwrap(minute, 0),
+              second: option.unwrap(second, 0),
+              ms: option.unwrap(ms, 0),
+              us: option.unwrap(us, 0),
+              ns: option.unwrap(ns, 0),
+            )
+          use t <- terr_r(state, regulate_time(t0, ov))
+          let behaviour = case bag_off {
+            Some(_) -> "option"
+            None -> "wall"
+          }
+          case
+            interpret_offset(
+              date,
+              t,
+              behaviour,
+              option.unwrap(bag_off, 0),
+              tz,
+              dis,
+              offset_opt,
+              False,
+            )
+          {
+            Ok(ens) -> Ok(#(#(ens, tz, cal), state))
+            Error(RangeE(m)) -> range_error_result(state, m)
+            Error(TypeE(m)) -> type_error_result(state, m)
+          }
+        }
+      }
+    _ -> type_error_result(state, "timeZone must be a string")
+  }
+}
+
+/// Read + validate an `offset` field from a property bag (ToOffsetString):
+/// ToPrimitive with string hint, require a String, then parse.
+fn read_bag_offset(
+  state: State,
+  ref: Ref,
+) -> Result(#(Option(Int), State), #(JsValue, State)) {
+  use #(v, state) <- result.try(
+    ops_object.get_value(state, ref, Named("offset"), JsObject(ref))
+    |> result.map(fn(p) { #(p.0, p.1) }),
+  )
+  case v {
+    JsUndefined -> Ok(#(None, state))
+    _ -> {
+      use #(prim, state) <- result.try(coerce.to_primitive(
+        state,
+        v,
+        coerce.StringHint,
+      ))
+      case prim {
+        JsString(s) ->
+          case parse_offset_part(s) {
+            Some(#(False, Some(off), _, "")) -> Ok(#(Some(off), state))
+            _ -> range_error_result(state, "invalid offset string: " <> s)
+          }
+        _ -> type_error_result(state, "offset must be a string")
+      }
+    }
+  }
+}
+
+/// GetTemporalRelativeToOption's result: nothing, a plain date, or an exact
+/// zoned instant.
+type RelTo {
+  RelNone
+  RelPlain(date: IsoDate, cal: String)
+  RelZoned(epoch_ns: Int, tz: String, cal: String)
+}
+
+/// GetTemporalRelativeToOption, after the `relativeTo` value itself has been
+/// read from the options bag.
+fn convert_relative_to(
+  state: State,
+  v: JsValue,
+) -> Result(#(RelTo, State), #(JsValue, State)) {
+  case v {
+    JsUndefined -> Ok(#(RelNone, state))
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:),
+          ..,
+        )) -> Ok(#(RelZoned(epoch_ns, time_zone, calendar), state))
+        Some(ObjectSlot(
+          kind: TemporalDateSlot(year:, month:, day:, calendar:),
+          ..,
+        )) -> Ok(#(RelPlain(IsoDate(year, month, day), calendar), state))
+        Some(ObjectSlot(
+          kind: TemporalDateTimeSlot(year:, month:, day:, calendar:, ..),
+          ..,
+        )) -> Ok(#(RelPlain(IsoDate(year, month, day), calendar), state))
+        _ -> relative_from_bag(state, ref)
+      }
+    JsString(s) ->
+      case parse_iso_datetime_string(s) {
+        None -> range_error_result(state, "invalid ISO 8601 string: " <> s)
+        Some(p) -> {
+          use Nil <- terr_r(state, check_parsed_calendar(p))
+          use cal <- terr_r(state, parsed_calendar_id(p))
+          case p.date {
+            None ->
+              range_error_result(state, "relativeTo string requires a date")
+            Some(d) ->
+              case p.tz {
+                Some(tz_str) -> {
+                  use tz <- terr_r(state, parse_time_zone_id(tz_str))
+                  use ens <- terr_r(
+                    state,
+                    zoned_string_epoch_ns(
+                      d,
+                      p.time,
+                      p.z,
+                      p.offset_ns,
+                      p.offset_sub_minute,
+                      tz,
+                      "compatible",
+                      "reject",
+                    ),
+                  )
+                  Ok(#(RelZoned(ens, tz, cal), state))
+                }
+                None ->
+                  case p.z {
+                    True ->
+                      range_error_result(
+                        state,
+                        "Z designator requires a bracketed time zone in relativeTo",
+                      )
+                    False ->
+                      case iso_date_within_limits(d) {
+                        True -> Ok(#(RelPlain(d, cal), state))
+                        False ->
+                          range_error_result(
+                            state,
+                            "date outside of supported range",
+                          )
+                      }
+                  }
+              }
+          }
+        }
+      }
+    _ -> type_error_result(state, "relativeTo must be a string or an object")
+  }
+}
+
+/// ToRelativeTemporalObject's property-bag path: like zoned_from_bag but
+/// timeZone is optional (absent → plain date) and the options are fixed
+/// (overflow constrain, disambiguation compatible, offset reject).
+fn relative_from_bag(
+  state: State,
+  ref: Ref,
+) -> Result(#(RelTo, State), #(JsValue, State)) {
+  use #(cal, state) <- result.try(read_bag_calendar(state, ref))
+  use #(day, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "day",
+    to_positive_integer_with_truncation,
+  ))
+  use #(era, state) <- result.try(case tcal.has_eras(cal) {
+    True -> read_bag_era(state, ref)
+    False -> Ok(#(None, state))
+  })
+  use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
+    True ->
+      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    False -> Ok(#(None, state))
+  })
+  use #(hour, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "hour",
+    to_integer_with_truncation,
+  ))
+  use #(us, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "microsecond",
+    to_integer_with_truncation,
+  ))
+  use #(ms, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "millisecond",
+    to_integer_with_truncation,
+  ))
+  use #(minute, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "minute",
+    to_integer_with_truncation,
+  ))
+  use #(month, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "month",
+    to_positive_integer_with_truncation,
+  ))
+  use #(month_code, state) <- result.try(read_month_code(state, ref))
+  use #(ns, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "nanosecond",
+    to_integer_with_truncation,
+  ))
+  use #(bag_off, state) <- result.try(read_bag_offset(state, ref))
+  use #(second, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "second",
+    to_integer_with_truncation,
+  ))
+  use #(tz_val, state) <- result.try(
+    ops_object.get_value(state, ref, Named("timeZone"), JsObject(ref))
+    |> result.map(fn(p) { #(p.0, p.1) }),
+  )
+  use #(year, state) <- result.try(read_bag_int_field(
+    state,
+    ref,
+    "year",
+    to_integer_with_truncation,
+  ))
+  // ToTemporalTimeZoneIdentifier: a ZonedDateTime contributes its time zone.
+  let tz_val = case tz_val {
+    JsObject(tz_ref) ->
+      case heap.read(state.heap, tz_ref) {
+        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
+          JsString(time_zone)
+        _ -> tz_val
+      }
+    _ -> tz_val
+  }
+  let fields = DateFields(day:, era:, era_year:, month:, month_code:, year:)
+  use date <- terr_r(state, resolve_calendar_date(cal, fields, "constrain"))
+  let t0 =
+    TimeRec(
+      hour: option.unwrap(hour, 0),
+      minute: option.unwrap(minute, 0),
+      second: option.unwrap(second, 0),
+      ms: option.unwrap(ms, 0),
+      us: option.unwrap(us, 0),
+      ns: option.unwrap(ns, 0),
+    )
+  use t <- terr_r(state, regulate_time(t0, "constrain"))
+  case tz_val {
+    JsUndefined ->
+      case iso_date_within_limits(date) {
+        True -> Ok(#(RelPlain(date, cal), state))
+        False -> range_error_result(state, "date outside of supported range")
+      }
+    JsString(tz_str) -> {
+      use tz <- terr_r(state, parse_time_zone_id(tz_str))
+      let behaviour = case bag_off {
+        Some(_) -> "option"
+        None -> "wall"
+      }
+      use ens <- terr_r(
+        state,
+        interpret_offset(
+          date,
+          t,
+          behaviour,
+          option.unwrap(bag_off, 0),
+          tz,
+          "compatible",
+          "reject",
+          False,
+        ),
+      )
+      Ok(#(RelZoned(ens, tz, cal), state))
+    }
+    _ -> type_error_result(state, "timeZone must be a string")
+  }
+}
+
+/// AddZonedDateTime: calendar part added in wall-clock space, time part
+/// added exactly to the epoch instant.
+fn add_zoned_ns(
+  ns: Int,
+  tz: String,
+  cal: String,
+  dur: DurRec,
+) -> Result(Int, TErr) {
+  use base <- result.try(
+    case dur.years == 0 && dur.months == 0 && dur.weeks == 0 && dur.days == 0 {
+      True -> Ok(ns)
+      False -> {
+        let #(d0, t0) = epoch_ns_to_iso(ns, tz_offset_ns_at(tz, ns))
+        let date_dur =
+          DurRec(
+            ..zero_dur,
+            years: dur.years,
+            months: dur.months,
+            weeks: dur.weeks,
+            days: dur.days,
+          )
+        use d2 <- result.try(calendar_date_add(cal, d0, date_dur, "constrain"))
+        get_epoch_ns_for(tz, d2, t0, "compatible")
+      }
+    },
+  )
+  validate_epoch_ns(base + time_only_ns(dur))
+}
+
+/// Add24HourDaysToTimeDuration's range check: a time duration must not
+/// exceed maxTimeDuration.
+fn check_time_duration_range(ns: Int) -> Result(Nil, TErr) {
+  case int.absolute_value(ns) <= max_time_duration_ns {
+    True -> Ok(Nil)
+    False -> Error(RangeE("time duration out of range"))
+  }
+}
+
+/// DateDurationDays: a date duration's length in days anchored at a plain
+/// date (years/months/weeks resolved through the calendar).
+fn date_duration_days(
+  dur: DurRec,
+  rel: IsoDate,
+  cal: String,
+) -> Result(Int, TErr) {
+  case dur.years == 0 && dur.months == 0 && dur.weeks == 0 {
+    True -> Ok(dur.days)
+    False -> {
+      let ymw =
+        DurRec(
+          ..zero_dur,
+          years: dur.years,
+          months: dur.months,
+          weeks: dur.weeks,
+        )
+      use later <- result.map(calendar_date_add(cal, rel, ymw, "constrain"))
+      epoch_days(later) - epoch_days(rel) + dur.days
+    }
+  }
+}
+
+/// Temporal.Duration.compare(one, two [, options]).
+fn duration_compare(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use a, state <- state.try_op(to_temporal_duration(state, arg_at(args, 0)))
+  use b, state <- state.try_op(to_temporal_duration(state, arg_at(args, 1)))
+  use opts, state <- state.try_op(get_options_object(state, arg_at(args, 2)))
+  use relative_to, state <- state.try_op(case opts {
+    None -> Ok(#(JsUndefined, state))
+    Some(oref) ->
+      ops_object.get_value(state, oref, Named("relativeTo"), JsObject(oref))
+  })
+  use rel, state <- state.try_op(convert_relative_to(state, relative_to))
+  let has_cal_units =
+    a.years != 0
+    || a.months != 0
+    || a.weeks != 0
+    || b.years != 0
+    || b.months != 0
+    || b.weeks != 0
+  let time_compare = fn(state) {
+    #(
+      state,
+      Ok(value.from_int(int_sign(time_duration_ns(a) - time_duration_ns(b)))),
+    )
+  }
+  case a == b {
+    // Identical field values compare equal without consulting relativeTo.
+    True -> #(state, Ok(value.from_int(0)))
+    False ->
+      case rel {
+        RelZoned(ns, tz, cal) ->
+          case has_cal_units || a.days != 0 || b.days != 0 {
+            True -> {
+              use na <- terr(state, add_zoned_ns(ns, tz, cal, a))
+              use nb <- terr(state, add_zoned_ns(ns, tz, cal, b))
+              #(state, Ok(value.from_int(int_sign(na - nb))))
+            }
+            False -> time_compare(state)
+          }
+        RelPlain(rel_date, rel_cal) ->
+          case has_cal_units {
+            True -> {
+              use da <- terr(state, date_duration_days(a, rel_date, rel_cal))
+              let na = da * ns_per_day + time_only_ns(a)
+              use Nil <- terr(state, check_time_duration_range(na))
+              use db <- terr(state, date_duration_days(b, rel_date, rel_cal))
+              let nb = db * ns_per_day + time_only_ns(b)
+              use Nil <- terr(state, check_time_duration_range(nb))
+              #(state, Ok(value.from_int(int_sign(na - nb))))
+            }
+            False -> time_compare(state)
+          }
+        RelNone ->
+          case has_cal_units {
+            True ->
+              state.range_error(
+                state,
+                "relativeTo is required for duration comparison with calendar units",
+              )
+            False -> time_compare(state)
+          }
+      }
+  }
+}
+
+/// Nanoseconds of the pure time portion (hours and below).
+fn time_only_ns(d: DurRec) -> Int {
+  d.hours
+  * ns_per_hour
+  + d.minutes
+  * ns_per_minute
+  + d.seconds
+  * ns_per_second
+  + d.ms
+  * ns_per_ms
+  + d.us
+  * ns_per_us
+  + d.ns
+}
+
+// ============================================================================
+// Date arithmetic
+// ============================================================================
+
+/// Balance year-month after adding months (1-based months).
+fn balance_year_month(y: Int, m: Int) -> #(Int, Int) {
+  let total = y * 12 + m - 1
+  #(floor_div(total, 12), math_mod(total, 12) + 1)
+}
+
+/// ISODateAdd: add a duration to an ISO date (calendar part y/m regulated
+/// by overflow, then weeks/days/time-as-days exact).
+fn add_duration_to_date(
+  d: IsoDate,
+  dur: DurRec,
+  overflow: String,
+) -> Result(IsoDate, TErr) {
+  let #(y2, m2) = balance_year_month(d.year + dur.years, d.month + dur.months)
+  use intermediate <- result.try(regulate_iso_date(y2, m2, d.day, overflow))
+  let extra_days =
+    dur.weeks * 7 + dur.days + truncate_div(time_only_ns(dur), ns_per_day)
+  let final_days = epoch_days(intermediate) + extra_days
+  let final = iso_date_from_epoch_days(final_days)
+  check_date_limits(final)
+}
+
+/// Integer division truncating toward zero.
+fn truncate_div(a: Int, b: Int) -> Int {
+  a / b
+}
+
+/// Add a duration's time portion to a wall-clock time. Returns
+/// #(day_carry, new_time).
+fn add_time(t: TimeRec, add_ns: Int) -> #(Int, TimeRec) {
+  let total = time_to_ns(t) + add_ns
+  let days = floor_div(total, ns_per_day)
+  let rem = total - days * ns_per_day
+  #(days, ns_to_time(rem))
+}
+
+fn negate_dur(d: DurRec) -> DurRec {
+  apply_dur_sign(d, -1)
+}
+
+// ============================================================================
+// Getter dispatch
+// ============================================================================
+
+fn getter_dispatch(
+  kind: TemporalKind,
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let _ = protos
+  case kind {
+    TemporalPlainDateKind ->
+      case this_date(state, this) {
+        Some(d) -> #(
+          state,
+          Ok(date_field_cal(this_calendar(state, this), d, name)),
+        )
+        None -> brand_error(state, "PlainDate", name)
+      }
+    TemporalPlainTimeKind ->
+      case this_time(state, this) {
+        Some(t) -> #(state, Ok(time_field(t, name)))
+        None -> brand_error(state, "PlainTime", name)
+      }
+    TemporalPlainDateTimeKind ->
+      case this_date_time(state, this) {
+        Some(#(d, t)) ->
+          case is_time_field(name) {
+            True -> #(state, Ok(time_field(t, name)))
+            False -> #(
+              state,
+              Ok(date_field_cal(this_calendar(state, this), d, name)),
+            )
+          }
+        None -> brand_error(state, "PlainDateTime", name)
+      }
+    TemporalPlainYearMonthKind ->
+      case this_year_month(state, this) {
+        Some(#(y, m, rd)) -> #(
+          state,
+          Ok(year_month_field_cal(this_calendar(state, this), y, m, rd, name)),
+        )
+        None -> brand_error(state, "PlainYearMonth", name)
+      }
+    TemporalPlainMonthDayKind ->
+      case this_month_day(state, this) {
+        Some(#(m, d, ry)) -> {
+          let cal = this_calendar(state, this)
+          case name {
+            "calendarId" -> #(state, Ok(JsString(cal)))
+            "monthCode" ->
+              case cal {
+                "iso8601" -> #(state, Ok(JsString(month_code_str(m))))
+                _ -> {
+                  let cd =
+                    tcal.date_from_epoch_days(
+                      cal,
+                      epoch_days(IsoDate(ry, m, d)),
+                    )
+                  #(
+                    state,
+                    Ok(JsString(tcal.month_code(cal, cd.year, cd.month))),
+                  )
+                }
+              }
+            "day" ->
+              case cal {
+                "iso8601" -> #(state, Ok(value.from_int(d)))
+                _ -> {
+                  let cd =
+                    tcal.date_from_epoch_days(
+                      cal,
+                      epoch_days(IsoDate(ry, m, d)),
+                    )
+                  #(state, Ok(value.from_int(cd.day)))
+                }
+              }
+            _ -> brand_error(state, "PlainMonthDay", name)
+          }
+        }
+        None -> brand_error(state, "PlainMonthDay", name)
+      }
+    TemporalDurationKind ->
+      case this_duration(state, this) {
+        Some(d) -> #(state, Ok(duration_field(d, name)))
+        None -> brand_error(state, "Duration", name)
+      }
+    TemporalInstantKind ->
+      case this_instant(state, this) {
+        Some(ns) ->
+          case name {
+            "epochMilliseconds" -> #(
+              state,
+              Ok(value.from_int(floor_div(ns, ns_per_ms))),
+            )
+            "epochNanoseconds" -> #(state, Ok(JsBigInt(value.BigInt(ns))))
+            _ -> brand_error(state, "Instant", name)
+          }
+        None -> brand_error(state, "Instant", name)
+      }
+    TemporalZonedDateTimeKind ->
+      case this_zoned(state, this) {
+        Some(#(ns, tz, zcal)) -> zoned_field(state, ns, tz, zcal, name)
+        None -> brand_error(state, "ZonedDateTime", name)
+      }
+  }
+}
+
+fn is_time_field(name: String) -> Bool {
+  case name {
+    "hour"
+    | "minute"
+    | "second"
+    | "millisecond"
+    | "microsecond"
+    | "nanosecond" -> True
+    _ -> False
+  }
+}
+
+fn date_field(d: IsoDate, name: String) -> JsValue {
+  case name {
+    "calendarId" -> JsString("iso8601")
+    "era" -> JsUndefined
+    "eraYear" -> JsUndefined
+    "year" -> value.from_int(d.year)
+    "month" -> value.from_int(d.month)
+    "monthCode" -> JsString(month_code_str(d.month))
+    "day" -> value.from_int(d.day)
+    "dayOfWeek" -> value.from_int(day_of_week(d))
+    "dayOfYear" -> value.from_int(day_of_year(d))
+    "weekOfYear" -> value.from_int(week_of_year(d).0)
+    "yearOfWeek" -> value.from_int(week_of_year(d).1)
+    "daysInWeek" -> value.from_int(7)
+    "daysInMonth" -> value.from_int(days_in_month(d.year, d.month))
+    "daysInYear" -> value.from_int(days_in_iso_year(d.year))
+    "monthsInYear" -> value.from_int(12)
+    "inLeapYear" -> JsBool(is_leap_year(d.year))
+    _ -> JsUndefined
+  }
+}
+
+/// Calendar-aware date field getter (ISO dates fall through to date_field).
+fn date_field_cal(cal: String, d: IsoDate, name: String) -> JsValue {
+  case cal {
+    "iso8601" -> date_field(d, name)
+    _ -> {
+      let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+      case name {
+        "calendarId" -> JsString(cal)
+        "era" | "eraYear" -> {
+          let #(era, era_year) = tcal.era_for(cal, cd.year, cd.month, cd.day)
+          case name {
+            "era" -> era |> option.map(JsString) |> option.unwrap(JsUndefined)
+            _ ->
+              era_year
+              |> option.map(value.from_int)
+              |> option.unwrap(JsUndefined)
+          }
+        }
+        "year" -> value.from_int(cd.year)
+        "month" -> value.from_int(cd.month)
+        "monthCode" -> JsString(tcal.month_code(cal, cd.year, cd.month))
+        "day" -> value.from_int(cd.day)
+        "dayOfWeek" -> value.from_int(day_of_week(d))
+        "dayOfYear" ->
+          value.from_int(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
+        // weekOfYear/yearOfWeek are undefined for non-ISO calendars.
+        "weekOfYear" -> JsUndefined
+        "yearOfWeek" -> JsUndefined
+        "daysInWeek" -> value.from_int(7)
+        "daysInMonth" ->
+          value.from_int(tcal.days_in_month(cal, cd.year, cd.month))
+        "daysInYear" -> value.from_int(tcal.days_in_year(cal, cd.year))
+        "monthsInYear" -> value.from_int(tcal.months_in_year(cal, cd.year))
+        "inLeapYear" -> JsBool(tcal.in_leap_year(cal, cd.year))
+        _ -> JsUndefined
+      }
+    }
+  }
+}
+
+fn time_field(t: TimeRec, name: String) -> JsValue {
+  case name {
+    "hour" -> value.from_int(t.hour)
+    "minute" -> value.from_int(t.minute)
+    "second" -> value.from_int(t.second)
+    "millisecond" -> value.from_int(t.ms)
+    "microsecond" -> value.from_int(t.us)
+    "nanosecond" -> value.from_int(t.ns)
+    _ -> JsUndefined
+  }
+}
+
+fn year_month_field(y: Int, m: Int, name: String) -> JsValue {
+  case name {
+    "calendarId" -> JsString("iso8601")
+    "era" -> JsUndefined
+    "eraYear" -> JsUndefined
+    "year" -> value.from_int(y)
+    "month" -> value.from_int(m)
+    "monthCode" -> JsString(month_code_str(m))
+    "daysInYear" -> value.from_int(days_in_iso_year(y))
+    "daysInMonth" -> value.from_int(days_in_month(y, m))
+    "monthsInYear" -> value.from_int(12)
+    "inLeapYear" -> JsBool(is_leap_year(y))
+    _ -> JsUndefined
+  }
+}
+
+/// Calendar-aware year-month field getter. y/m/rd are the slot's ISO date.
+fn year_month_field_cal(
+  cal: String,
+  y: Int,
+  m: Int,
+  rd: Int,
+  name: String,
+) -> JsValue {
+  case cal {
+    "iso8601" -> year_month_field(y, m, name)
+    _ -> {
+      let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+      case name {
+        "calendarId" -> JsString(cal)
+        "era" | "eraYear" -> {
+          let #(era, era_year) = tcal.era_for(cal, cd.year, cd.month, cd.day)
+          case name {
+            "era" -> era |> option.map(JsString) |> option.unwrap(JsUndefined)
+            _ ->
+              era_year
+              |> option.map(value.from_int)
+              |> option.unwrap(JsUndefined)
+          }
+        }
+        "year" -> value.from_int(cd.year)
+        "month" -> value.from_int(cd.month)
+        "monthCode" -> JsString(tcal.month_code(cal, cd.year, cd.month))
+        "daysInYear" -> value.from_int(tcal.days_in_year(cal, cd.year))
+        "daysInMonth" ->
+          value.from_int(tcal.days_in_month(cal, cd.year, cd.month))
+        "monthsInYear" -> value.from_int(tcal.months_in_year(cal, cd.year))
+        "inLeapYear" -> JsBool(tcal.in_leap_year(cal, cd.year))
+        _ -> JsUndefined
+      }
+    }
+  }
+}
+
+fn duration_field(d: DurRec, name: String) -> JsValue {
+  case name {
+    "years" -> value.from_int(d.years)
+    "months" -> value.from_int(d.months)
+    "weeks" -> value.from_int(d.weeks)
+    "days" -> value.from_int(d.days)
+    "hours" -> value.from_int(d.hours)
+    "minutes" -> value.from_int(d.minutes)
+    "seconds" -> value.from_int(d.seconds)
+    "milliseconds" -> value.from_int(d.ms)
+    "microseconds" -> value.from_int(d.us)
+    "nanoseconds" -> value.from_int(d.ns)
+    "sign" -> value.from_int(duration_sign(d))
+    "blank" -> JsBool(duration_sign(d) == 0)
+    _ -> JsUndefined
+  }
+}
+
+fn zoned_field(
+  state: State,
+  ns: Int,
+  tz: String,
+  zcal: String,
+  name: String,
+) -> #(State, Result(JsValue, JsValue)) {
+  let offset = tz_offset_ns_at(tz, ns)
+  let #(d, t) = epoch_ns_to_iso(ns, offset)
+  case name {
+    "timeZoneId" -> #(state, Ok(JsString(tz)))
+    "epochMilliseconds" -> #(
+      state,
+      Ok(value.from_int(floor_div(ns, ns_per_ms))),
+    )
+    "epochNanoseconds" -> #(state, Ok(JsBigInt(value.BigInt(ns))))
+    "offsetNanoseconds" -> #(state, Ok(value.from_int(offset)))
+    "offset" -> #(state, Ok(JsString(format_offset_full(offset))))
+    "hoursInDay" -> {
+      let tomorrow = iso_date_from_epoch_days(epoch_days(d) + 1)
+      use s1 <- terr(state, start_of_day_ns(tz, d))
+      use s2 <- terr(state, start_of_day_ns(tz, tomorrow))
+      #(state, Ok(JsNumber(Finite(ns_div_float(s2 - s1, ns_per_hour)))))
+    }
+    _ ->
+      case is_time_field(name) {
+        True -> #(state, Ok(time_field(t, name)))
+        False -> #(state, Ok(date_field_cal(zcal, d, name)))
+      }
+  }
+}
+
+// ============================================================================
+// Temporal.Now
+// ============================================================================
+
+fn now_epoch_ns() -> Int {
+  ffi_now_ms() * ns_per_ms
+}
+
+fn now_dispatch(
+  name: String,
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case name {
+    "instant" -> {
+      let #(state, v) = make_instant(state, protos, now_epoch_ns())
+      #(state, Ok(v))
+    }
+    "timeZoneId" -> #(state, Ok(JsString("UTC")))
+    "plainDateISO" -> {
+      use tz, state <- state.try_op(now_tz_arg(state, args))
+      let nns = now_epoch_ns()
+      let #(d, _) = epoch_ns_to_iso(nns, tz_offset_ns_at(tz, nns))
+      let #(state, v) = make_date(state, protos, d)
+      #(state, Ok(v))
+    }
+    "plainDateTimeISO" -> {
+      use tz, state <- state.try_op(now_tz_arg(state, args))
+      let nns = now_epoch_ns()
+      let #(d, t) = epoch_ns_to_iso(nns, tz_offset_ns_at(tz, nns))
+      let #(state, v) = make_date_time(state, protos, d, t)
+      #(state, Ok(v))
+    }
+    "plainTimeISO" -> {
+      use tz, state <- state.try_op(now_tz_arg(state, args))
+      let nns = now_epoch_ns()
+      let #(_, t) = epoch_ns_to_iso(nns, tz_offset_ns_at(tz, nns))
+      let #(state, v) = make_time(state, protos, t)
+      #(state, Ok(v))
+    }
+    "zonedDateTimeISO" -> {
+      use tz, state <- state.try_op(now_tz_arg(state, args))
+      let #(state, v) = make_zoned(state, protos, now_epoch_ns(), tz)
+      #(state, Ok(v))
+    }
+    _ -> state.type_error(state, "unknown Temporal.Now function")
+  }
+}
+
+fn now_tz_arg(
+  state: State,
+  args: List(JsValue),
+) -> Result(#(String, State), #(JsValue, State)) {
+  case arg_at(args, 0) {
+    JsUndefined -> Ok(#("UTC", state))
+    JsString(s) ->
+      case parse_time_zone_id(s) {
+        Ok(tz) -> Ok(#(tz, state))
+        Error(RangeE(m)) -> range_error_result(state, m)
+        Error(TypeE(m)) -> type_error_result(state, m)
+      }
+    _ -> type_error_result(state, "time zone must be a string")
+  }
+}
+
+// ============================================================================
+// Method dispatch
+// ============================================================================
+
+fn method_dispatch(
+  kind: TemporalKind,
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case kind {
+    TemporalPlainDateKind -> plain_date_method(name, protos, this, args, state)
+    TemporalPlainTimeKind -> plain_time_method(name, protos, this, args, state)
+    TemporalPlainDateTimeKind ->
+      plain_date_time_method(name, protos, this, args, state)
+    TemporalPlainYearMonthKind ->
+      plain_year_month_method(name, protos, this, args, state)
+    TemporalPlainMonthDayKind ->
+      plain_month_day_method(name, protos, this, args, state)
+    TemporalDurationKind -> duration_method(name, protos, this, args, state)
+    TemporalInstantKind -> instant_method(name, protos, this, args, state)
+    TemporalZonedDateTimeKind ->
+      zoned_date_time_method(name, protos, this, args, state)
+  }
+}
+
+// ----------------------------------------------------------------------------
+// PlainDate methods
+// ----------------------------------------------------------------------------
+
+fn plain_date_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_date(state, this) {
+    None -> brand_error(state, "PlainDate", name)
+    Some(d) -> {
+      let cal = this_calendar(state, this)
+      case name {
+        "toJSON" -> #(
+          state,
+          Ok(JsString(format_iso_date(d) <> calendar_suffix("auto", cal))),
+        )
+        "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_iso_date(d) <> calendar_suffix("auto", cal))),
+        )
+        "toString" -> {
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          use cal_name, state <- state.try_op(get_string_option(
+            state,
+            opts,
+            "calendarName",
+            ["auto", "always", "never", "critical"],
+            Some("auto"),
+          ))
+          let s =
+            format_iso_date(d)
+            <> calendar_suffix(option.unwrap(cal_name, "auto"), cal)
+          #(state, Ok(JsString(s)))
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.PlainDate cannot be converted with valueOf; use compare() or equals()",
+          )
+        "equals" -> {
+          use #(other, other_cal), state <- state.try_op(to_temporal_date(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          #(state, Ok(JsBool(d == other && cal == other_cal)))
+        }
+        "add" | "subtract" -> {
+          use dur, state <- state.try_op(to_temporal_duration(
+            state,
+            arg_at(args, 0),
+          ))
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            arg_at(args, 1),
+          ))
+          let dur = case name {
+            "subtract" -> negate_dur(dur)
+            _ -> dur
+          }
+          use d2 <- terr(state, calendar_date_add(cal, d, dur, overflow))
+          let #(state, v) = make_date_cal(state, protos, d2, cal)
+          #(state, Ok(v))
+        }
+        "with" -> {
+          use bag, state <- state.try_op(require_partial_bag(
+            state,
+            arg_at(args, 0),
+          ))
+          use fields, state <- state.try_op(read_date_fields(state, bag, cal))
+          case fields == DateFields(None, None, None, None, None, None) {
+            True ->
+              state.type_error(state, "with() requires at least one field")
+            False -> {
+              use overflow, state <- state.try_op(validated_overflow(
+                state,
+                arg_at(args, 1),
+              ))
+              use date <- terr(
+                state,
+                calendar_with_fields(cal, d, fields, overflow),
+              )
+              use date <- terr(state, check_date_limits(date))
+              let #(state, v) = make_date_cal(state, protos, date, cal)
+              #(state, Ok(v))
+            }
+          }
+        }
+        "withCalendar" -> {
+          use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
+            state,
+            arg_at(args, 0),
+          ))
+          let #(state, v) = make_date_cal(state, protos, d, new_cal)
+          #(state, Ok(v))
+        }
+        "toPlainDateTime" -> {
+          use t, state <- state.try_op(case arg_at(args, 0) {
+            JsUndefined -> Ok(#(midnight, state))
+            v -> to_temporal_time(state, v, JsUndefined)
+          })
+          let #(state, v) = make_date_time_cal(state, protos, d, t, cal)
+          #(state, Ok(v))
+        }
+        "toPlainYearMonth" -> {
+          let #(ymy, ymm, ymd) = case cal {
+            "iso8601" -> #(d.year, d.month, 1)
+            _ -> {
+              let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+              let first =
+                iso_date_from_epoch_days(tcal.date_to_epoch_days(
+                  cal,
+                  cd.year,
+                  cd.month,
+                  1,
+                ))
+              #(first.year, first.month, first.day)
+            }
+          }
+          let #(state, v) =
+            make_year_month_cal(state, protos, ymy, ymm, ymd, cal)
+          #(state, Ok(v))
+        }
+        "toPlainMonthDay" -> {
+          case cal {
+            "iso8601" -> {
+              let #(state, v) =
+                make_month_day_cal(state, protos, d.month, d.day, 1972, cal)
+              #(state, Ok(v))
+            }
+            _ -> {
+              let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+              let code = tcal.month_code(cal, cd.year, cd.month)
+              let assert Ok(#(num, leap)) = tcal.parse_month_code(code)
+              use iso <- terr(
+                state,
+                month_day_reference_iso(cal, num, leap, cd.day, "constrain"),
+              )
+              let #(state, v) =
+                make_month_day_cal(
+                  state,
+                  protos,
+                  iso.month,
+                  iso.day,
+                  iso.year,
+                  cal,
+                )
+              #(state, Ok(v))
+            }
+          }
+        }
+        "toZonedDateTime" -> {
+          // Argument: a time zone string, or an object with a timeZone
+          // property (plus optional plainTime).
+          case arg_at(args, 0) {
+            JsString(tz_str) -> {
+              use tz <- terr(state, parse_time_zone_id(tz_str))
+              use ns <- terr(state, start_of_day_ns(tz, d))
+              let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
+              #(state, Ok(v))
+            }
+            JsObject(oref) -> {
+              use tz_val, state <- state.try_op(ops_object.get_value(
+                state,
+                oref,
+                Named("timeZone"),
+                JsObject(oref),
+              ))
+              case tz_val {
+                JsUndefined -> state.type_error(state, "time zone is required")
+                JsString(tz_str) -> {
+                  use tz <- terr(state, parse_time_zone_id(tz_str))
+                  use pt_val, state <- state.try_op(ops_object.get_value(
+                    state,
+                    oref,
+                    Named("plainTime"),
+                    JsObject(oref),
+                  ))
+                  use t, state <- state.try_op(case pt_val {
+                    JsUndefined -> Ok(#(midnight, state))
+                    v -> to_temporal_time(state, v, JsUndefined)
+                  })
+                  use ns <- terr(
+                    state,
+                    get_epoch_ns_for(tz, d, t, "compatible"),
+                  )
+                  let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
+                  #(state, Ok(v))
+                }
+                _ -> state.type_error(state, "time zone must be a string")
+              }
+            }
+            _ -> state.type_error(state, "time zone must be a string")
+          }
+        }
+        "until" | "since" -> {
+          use #(other, other_cal), state <- state.try_op(to_temporal_date(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          case other_cal == cal {
+            False ->
+              state.range_error(
+                state,
+                "cannot compute difference between dates of different calendars",
+              )
+            True ->
+              date_until_since(
+                state,
+                protos,
+                cal,
+                d,
+                other,
+                args,
+                name == "since",
+              )
+          }
+        }
+        _ -> state.type_error(state, "unknown method")
+      }
+    }
+  }
+}
+
+fn calendar_suffix(mode: String, cal: String) -> String {
+  case mode {
+    "never" -> ""
+    "always" -> "[u-ca=" <> cal <> "]"
+    "critical" -> "[!u-ca=" <> cal <> "]"
+    _ ->
+      case cal {
+        "iso8601" -> ""
+        _ -> "[u-ca=" <> cal <> "]"
+      }
+  }
+}
+
+/// Merge `with()` fields onto an existing calendar date and resolve.
+/// Existing date contributes year, monthCode (not ordinal month), day —
+/// matching CalendarMergeFields/ISODateToFields.
+fn calendar_with_fields(
+  cal: String,
+  d: IsoDate,
+  f: DateFields,
+  overflow: String,
+) -> Result(IsoDate, TErr) {
+  let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+  let has_year = f.year != None || f.era != None || f.era_year != None
+  let f = case has_year {
+    True -> f
+    False -> DateFields(..f, year: Some(cd.year))
+  }
+  let f = case f.month != None || f.month_code != None {
+    True -> f
+    False -> {
+      let assert Ok(code) =
+        tcal.parse_month_code(tcal.month_code(cal, cd.year, cd.month))
+      DateFields(..f, month_code: Some(code))
+    }
+  }
+  let f = case f.day {
+    Some(_) -> f
+    None -> DateFields(..f, day: Some(cd.day))
+  }
+  resolve_calendar_date(cal, f, overflow)
+}
+
+/// `with()` argument: must be an object with no calendar/timeZone properties
+/// and not a Temporal instance.
+fn require_partial_bag(
+  state: State,
+  v: JsValue,
+) -> Result(#(Ref, State), #(JsValue, State)) {
+  case v {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: TemporalDateSlot(..), ..))
+        | Some(ObjectSlot(kind: TemporalTimeSlot(..), ..))
+        | Some(ObjectSlot(kind: TemporalDateTimeSlot(..), ..))
+        | Some(ObjectSlot(kind: TemporalYearMonthSlot(..), ..))
+        | Some(ObjectSlot(kind: TemporalMonthDaySlot(..), ..))
+        | Some(ObjectSlot(kind: TemporalDurationSlot(..), ..))
+        | Some(ObjectSlot(kind: TemporalInstantSlot(..), ..))
+        | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(..), ..)) ->
+          type_error_result(
+            state,
+            "with() argument must be a plain object, not a Temporal instance",
+          )
+        _ -> {
+          use #(cal, state) <- result.try(ops_object.get_value(
+            state,
+            ref,
+            Named("calendar"),
+            v,
+          ))
+          case cal {
+            JsUndefined -> {
+              use #(tz, state) <- result.try(ops_object.get_value(
+                state,
+                ref,
+                Named("timeZone"),
+                v,
+              ))
+              case tz {
+                JsUndefined -> Ok(#(ref, state))
+                _ ->
+                  type_error_result(
+                    state,
+                    "with() argument must not have a timeZone property",
+                  )
+              }
+            }
+            _ ->
+              type_error_result(
+                state,
+                "with() argument must not have a calendar property",
+              )
+          }
+        }
+      }
+    _ -> type_error_result(state, "with() argument must be an object")
+  }
+}
+
+// ----------------------------------------------------------------------------
+// until/since — units & rounding
+// ----------------------------------------------------------------------------
+
+/// Unit metadata: name → #(singular, category) where category 0=date 1=time.
+fn singular_unit(u: String) -> Option(String) {
+  case u {
+    "year" | "years" -> Some("year")
+    "month" | "months" -> Some("month")
+    "week" | "weeks" -> Some("week")
+    "day" | "days" -> Some("day")
+    "hour" | "hours" -> Some("hour")
+    "minute" | "minutes" -> Some("minute")
+    "second" | "seconds" -> Some("second")
+    "millisecond" | "milliseconds" -> Some("millisecond")
+    "microsecond" | "microseconds" -> Some("microsecond")
+    "nanosecond" | "nanoseconds" -> Some("nanosecond")
+    _ -> None
+  }
+}
+
+fn unit_rank(u: String) -> Int {
+  case u {
+    "year" -> 9
+    "month" -> 8
+    "week" -> 7
+    "day" -> 6
+    "hour" -> 5
+    "minute" -> 4
+    "second" -> 3
+    "millisecond" -> 2
+    "microsecond" -> 1
+    _ -> 0
+  }
+}
+
+fn unit_ns(u: String) -> Int {
+  case u {
+    "day" -> ns_per_day
+    "hour" -> ns_per_hour
+    "minute" -> ns_per_minute
+    "second" -> ns_per_second
+    "millisecond" -> ns_per_ms
+    "microsecond" -> ns_per_us
+    _ -> 1
+  }
+}
+
+/// Read a unit-valued option ("largestUnit"/"smallestUnit").
+fn get_unit_option(
+  state: State,
+  opts: Option(Ref),
+  key: String,
+  extra: List(String),
+) -> Result(#(Option(String), State), #(JsValue, State)) {
+  get_unit_option_impl(state, opts, key, extra, keep_extra: False)
+}
+
+/// Like get_unit_option, but a matched `extra` value (e.g. "auto") is
+/// reported as Some(value) instead of collapsing to None, so callers can
+/// distinguish an explicit "auto" from an absent option.
+fn get_unit_option_keep(
+  state: State,
+  opts: Option(Ref),
+  key: String,
+  extra: List(String),
+) -> Result(#(Option(String), State), #(JsValue, State)) {
+  get_unit_option_impl(state, opts, key, extra, keep_extra: True)
+}
+
+fn get_unit_option_impl(
+  state: State,
+  opts: Option(Ref),
+  key: String,
+  extra: List(String),
+  keep_extra keep_extra: Bool,
+) -> Result(#(Option(String), State), #(JsValue, State)) {
+  case opts {
+    None -> Ok(#(None, state))
+    Some(ref) -> {
+      use got <- result.try(ops_object.get_value(
+        state,
+        ref,
+        Named(key),
+        JsObject(ref),
+      ))
+      case got {
+        #(JsUndefined, st) -> Ok(#(None, st))
+        #(v, st) -> {
+          use #(s, st) <- result.try(coerce.js_to_string(st, v))
+          case list.contains(extra, s), singular_unit(s) {
+            True, _ ->
+              case keep_extra {
+                True -> Ok(#(Some(s), st))
+                False -> Ok(#(None, st))
+              }
+            False, Some(u) -> Ok(#(Some(u), st))
+            False, None ->
+              range_error_result(st, s <> " is not a valid value for " <> key)
+          }
+        }
+      }
+    }
+  }
+}
+
+fn get_rounding_mode_option(
+  state: State,
+  opts: Option(Ref),
+) -> Result(#(String, State), #(JsValue, State)) {
+  use #(m, st) <- result.try(get_string_option(
+    state,
+    opts,
+    "roundingMode",
+    [
+      "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand",
+      "halfTrunc", "halfEven",
+    ],
+    Some("trunc"),
+  ))
+  Ok(#(option.unwrap(m, "trunc"), st))
+}
+
+fn get_rounding_increment_option(
+  state: State,
+  opts: Option(Ref),
+) -> Result(#(Int, State), #(JsValue, State)) {
+  case opts {
+    None -> Ok(#(1, state))
+    Some(ref) -> {
+      use got <- result.try(ops_object.get_value(
+        state,
+        ref,
+        Named("roundingIncrement"),
+        JsObject(ref),
+      ))
+      case got {
+        #(JsUndefined, st) -> Ok(#(1, st))
+        #(v, st) -> {
+          use num <- result.try(coerce.js_to_number(st, v))
+          case num {
+            #(Finite(f), st) -> {
+              // ToIntegerWithTruncation: truncate, then bounds-check 1..1e9.
+              let i = value.float_to_int(f)
+              case i >= 1 && i <= 1_000_000_000 {
+                True -> Ok(#(i, st))
+                False -> range_error_result(st, "invalid roundingIncrement")
+              }
+            }
+            #(_, st) -> range_error_result(st, "invalid roundingIncrement")
+          }
+        }
+      }
+    }
+  }
+}
+
+/// RoundNumberToIncrementAsIfPositive — rounding modes act as if the value
+/// were positive (floor-family on the number line). Used for instants.
+fn as_if_positive_mode(mode: String) -> String {
+  case mode {
+    "trunc" -> "floor"
+    "expand" -> "ceil"
+    "halfTrunc" -> "halfFloor"
+    "halfExpand" -> "halfCeil"
+    m -> m
+  }
+}
+
+/// RoundNumberToIncrement on integers: round `x` to a multiple of `inc`.
+fn round_to_increment(x: Int, inc: Int, mode: String) -> Int {
+  let q = floor_div(x, inc)
+  let r = x - q * inc
+  case r == 0 {
+    True -> x
+    False -> {
+      let lower = q * inc
+      let upper = lower + inc
+      let twice = 2 * r
+      let pick_upper = case mode {
+        "ceil" -> True
+        "floor" -> False
+        "expand" -> x > 0
+        "trunc" -> x < 0
+        "halfCeil" -> twice >= inc
+        "halfFloor" -> twice > inc
+        "halfExpand" ->
+          case x > 0 {
+            True -> twice >= inc
+            False -> twice > inc
+          }
+        "halfTrunc" ->
+          case x > 0 {
+            True -> twice > inc
+            False -> twice >= inc
+          }
+        "halfEven" ->
+          case twice == inc {
+            True -> math_mod(q, 2) != 0
+            False -> twice > inc
+          }
+        _ -> x < 0
+      }
+      case pick_upper {
+        True -> upper
+        False -> lower
+      }
+    }
+  }
+}
+
+/// Shared until/since options prologue: largestUnit, roundingIncrement,
+/// roundingMode, smallestUnit (read alphabetically — observable order).
+/// Continues with #(largest_opt, smallest_opt, inc, mode); callers apply
+/// their own per-type defaults and validation.
+fn get_difference_settings(
+  state: State,
+  args: List(JsValue),
+  cont: fn(Option(String), Option(String), Int, String, State) ->
+    #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  use opts, state <- state.try_op(get_options_object(state, arg_at(args, 1)))
+  use largest, state <- state.try_op(
+    get_unit_option(state, opts, "largestUnit", ["auto"]),
+  )
+  use inc, state <- state.try_op(get_rounding_increment_option(state, opts))
+  use mode, state <- state.try_op(get_rounding_mode_option(state, opts))
+  use smallest, state <- state.try_op(
+    get_unit_option(state, opts, "smallestUnit", []),
+  )
+  cont(largest, smallest, inc, mode, state)
+}
+
+/// since: negate the rounding mode per spec (difference computed two→one).
+fn apply_since_mode(mode: String, is_since: Bool) -> String {
+  case is_since {
+    True -> negate_rounding_mode(mode)
+    False -> mode
+  }
+}
+
+/// since: negate the resulting duration per spec.
+fn apply_since_dur(dur: DurRec, is_since: Bool) -> DurRec {
+  case is_since {
+    True -> negate_dur(dur)
+    False -> dur
+  }
+}
+
+/// since: negate a rounded ns total per spec.
+fn apply_since_ns(ns: Int, is_since: Bool) -> Int {
+  case is_since {
+    True -> 0 - ns
+    False -> ns
+  }
+}
+
+/// PlainDate.prototype.until/since.
+fn date_until_since(
+  state: State,
+  protos: TemporalProtos,
+  cal: String,
+  d1: IsoDate,
+  d2: IsoDate,
+  args: List(JsValue),
+  is_since: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  use largest, smallest, inc, mode, state <- get_difference_settings(
+    state,
+    args,
+  )
+  let smallest = option.unwrap(smallest, "day")
+  let largest = option.unwrap(largest, max_unit(smallest, "day"))
+  case unit_rank(smallest) < unit_rank("day") {
+    True ->
+      state.range_error(state, "smallestUnit must be a date unit for PlainDate")
+    False ->
+      case unit_rank(largest) < unit_rank(smallest) {
+        True ->
+          state.range_error(
+            state,
+            "largestUnit must not be smaller than smallestUnit",
+          )
+        False -> {
+          let mode = apply_since_mode(mode, is_since)
+          use dur <- terr(
+            state,
+            difference_calendar_date(cal, d1, d2, largest, smallest, inc, mode),
+          )
+          let dur = apply_since_dur(dur, is_since)
+          let #(state, v) = make_duration(state, protos, dur)
+          #(state, Ok(v))
+        }
+      }
+  }
+}
+
+fn max_unit(a: String, b: String) -> String {
+  case unit_rank(a) >= unit_rank(b) {
+    True -> a
+    False -> b
+  }
+}
+
+fn negate_rounding_mode(mode: String) -> String {
+  case mode {
+    "ceil" -> "floor"
+    "floor" -> "ceil"
+    "halfCeil" -> "halfFloor"
+    "halfFloor" -> "halfCeil"
+    _ -> mode
+  }
+}
+
+/// DifferenceDate in a specific calendar + date-unit rounding.
+fn difference_calendar_date(
+  cal: String,
+  d1: IsoDate,
+  d2: IsoDate,
+  largest: String,
+  smallest: String,
+  inc: Int,
+  mode: String,
+) -> Result(DurRec, TErr) {
+  let sign = compare_iso_date(d2, d1)
+  case sign == 0 {
+    True -> Ok(zero_dur)
+    False -> {
+      // Compute exact difference at `largest` granularity.
+      let #(years, months, weeks, days) = case cal {
+        "iso8601" -> diff_date_parts(d1, d2, largest)
+        _ ->
+          case largest {
+            "year" | "month" -> {
+              let lu = case largest {
+                "year" -> "years"
+                _ -> "months"
+              }
+              let #(y, m, rem_days) = calendar_date_until(cal, d1, d2, lu)
+              #(y, m, 0, rem_days)
+            }
+            _ -> diff_date_parts(d1, d2, largest)
+          }
+      }
+      // Round to smallest/increment if needed.
+      case smallest == "day" && inc == 1 {
+        True -> Ok(DurRec(..zero_dur, years:, months:, weeks:, days:))
+        False ->
+          round_relative_date_duration(
+            #(years, months, weeks, days),
+            #(d1, midnight),
+            epoch_days(d2) * ns_per_day,
+            largest,
+            smallest,
+            inc,
+            mode,
+            False,
+          )
+      }
+    }
+  }
+}
+
+/// Exact calendar difference decomposed per largestUnit.
+fn diff_date_parts(
+  d1: IsoDate,
+  d2: IsoDate,
+  largest: String,
+) -> #(Int, Int, Int, Int) {
+  case largest {
+    "year" | "month" -> {
+      let sign = compare_iso_date(d2, d1)
+      // months difference counting whole months.
+      let total_months = count_months_between(d1, d2, sign)
+      let #(years, months) = case largest {
+        "year" -> #(
+          truncate_div(total_months, 12),
+          math_mod_signed(total_months, 12),
+        )
+        _ -> #(0, total_months)
+      }
+      // Remaining days after adding years+months to d1.
+      let intermediate = add_months_constrained(d1, years * 12 + months)
+      let days = epoch_days(d2) - epoch_days(intermediate)
+      #(years, months, 0, days)
+    }
+    "week" -> {
+      let days = epoch_days(d2) - epoch_days(d1)
+      #(0, 0, truncate_div(days, 7), math_mod_signed(days, 7))
+    }
+    _ -> #(0, 0, 0, epoch_days(d2) - epoch_days(d1))
+  }
+}
+
+/// Modulo with the sign of the dividend (truncated division remainder).
+fn math_mod_signed(a: Int, b: Int) -> Int {
+  a - truncate_div(a, b) * b
+}
+
+/// Count whole months from d1 toward d2 (sign = direction).
+fn count_months_between(d1: IsoDate, d2: IsoDate, sign: Int) -> Int {
+  let approx = { d2.year - d1.year } * 12 + d2.month - d1.month
+  // Adjust: stepping by whole months must not surpass d2.
+  adjust_months(d1, d2, approx, sign)
+}
+
+fn adjust_months(d1: IsoDate, d2: IsoDate, candidate: Int, sign: Int) -> Int {
+  // ISODateSurpasses: the stepped date keeps the original day-of-month
+  // (unconstrained) — Jan 29th + 1 month counts as "Feb 29th" for the
+  // comparison, so until(Jan 29, Feb 28) is 30 days, not one month.
+  let #(y, m) = balance_year_month(d1.year, d1.month + candidate)
+  let cmp = compare_triple(#(y, m, d1.day), #(d2.year, d2.month, d2.day))
+  case cmp * sign > 0 {
+    True -> adjust_months(d1, d2, candidate - sign, sign)
+    False -> candidate
+  }
+}
+
+fn add_months_constrained(d: IsoDate, months: Int) -> IsoDate {
+  let #(y, m) = balance_year_month(d.year, d.month + months)
+  let day = int.min(d.day, days_in_month(y, m))
+  IsoDate(y, m, day)
+}
+
+/// Local timeline nanoseconds for a date-time (days since epoch * 86400e9 +
+/// time of day). Differences in this space equal epoch-ns differences for any
+/// fixed-offset time zone.
+fn local_ns(d: IsoDate, t: TimeRec) -> Int {
+  epoch_days(d) * ns_per_day + time_to_ns(t)
+}
+
+/// ISO CalendarDateAdd: years+months with day constrained, then weeks/days.
+/// RangeError when the result is outside the ISO date limits.
+fn cal_date_add_checked(d: IsoDate, dur: DurRec) -> Result(IsoDate, TErr) {
+  let md = add_months_constrained(d, dur.years * 12 + dur.months)
+  let r = iso_date_from_epoch_days(epoch_days(md) + dur.weeks * 7 + dur.days)
+  case iso_date_within_limits(r) {
+    True -> Ok(r)
+    False -> Error(RangeE("date outside of supported range"))
+  }
+}
+
+/// GetUnsignedRoundingMode — collapse a signed rounding mode for a value of
+/// known sign into "zero"/"infinity"/"half-zero"/"half-infinity"/"half-even".
+fn unsigned_rounding_mode(mode: String, positive: Bool) -> String {
+  case mode {
+    "ceil" ->
+      case positive {
+        True -> "infinity"
+        False -> "zero"
+      }
+    "floor" ->
+      case positive {
+        True -> "zero"
+        False -> "infinity"
+      }
+    "expand" -> "infinity"
+    "trunc" -> "zero"
+    "halfCeil" ->
+      case positive {
+        True -> "half-infinity"
+        False -> "half-zero"
+      }
+    "halfFloor" ->
+      case positive {
+        True -> "half-zero"
+        False -> "half-infinity"
+      }
+    "halfExpand" -> "half-infinity"
+    "halfTrunc" -> "half-zero"
+    _ -> "half-even"
+  }
+}
+
+/// ApplyUnsignedRoundingMode for a value strictly between r1 and r2.
+/// `cmp` is the sign of (2*|numerator| - |denominator|).
+fn apply_unsigned_rounding(
+  r1: Int,
+  r2: Int,
+  cmp: Int,
+  even: Bool,
+  umode: String,
+) -> Int {
+  case umode {
+    "zero" -> r1
+    "infinity" -> r2
+    _ ->
+      case int_sign(cmp) {
+        -1 -> r1
+        1 -> r2
+        _ ->
+          case umode {
+            "half-zero" -> r1
+            "half-infinity" -> r2
+            _ ->
+              case even {
+                True -> r1
+                False -> r2
+              }
+          }
+      }
+  }
+}
+
+/// ComputeNudgeWindow: bounding durations/instants for rounding `unit`.
+/// Returns #(r1, r2, start_dur, end_dur, start_ns, end_ns).
+fn nudge_window(
+  sign: Int,
+  ymwd: #(Int, Int, Int, Int),
+  origin: #(IsoDate, TimeRec),
+  unit: String,
+  inc: Int,
+  shift: Bool,
+  zoned: Bool,
+) -> Result(#(Int, Int, DurRec, DurRec, Int, Int), TErr) {
+  let #(years, months, weeks, days) = ymwd
+  let #(whole, mk) = case unit {
+    "year" -> #(years, fn(r) { DurRec(..zero_dur, years: r) })
+    "month" -> #(months, fn(r) { DurRec(..zero_dur, years:, months: r) })
+    "week" -> #(weeks + truncate_div(days, 7), fn(r) {
+      DurRec(..zero_dur, years:, months:, weeks: r)
+    })
+    _ -> #(days, fn(r) { DurRec(..zero_dur, years:, months:, weeks:, days: r) })
+  }
+  let base = truncate_div(whole, inc) * inc
+  let r1 = case shift {
+    True -> base + inc * sign
+    False -> base
+  }
+  let r2 = r1 + inc * sign
+  let start_dur = mk(r1)
+  let end_dur = mk(r2)
+  use start_date <- result.try(cal_date_add_checked(origin.0, start_dur))
+  use end_date <- result.try(cal_date_add_checked(origin.0, end_dur))
+  // Zoned bounds go through GetEpochNanosecondsFor, whose CheckISODaysRange
+  // is stricter (plain/exact ±1e8 days) than the noon-based date limits.
+  use Nil <- result.try(case zoned {
+    True -> {
+      use Nil <- result.try(check_iso_days_range(start_date))
+      check_iso_days_range(end_date)
+    }
+    False -> Ok(Nil)
+  })
+  let start_ns = case start_dur == zero_dur {
+    True -> local_ns(origin.0, origin.1)
+    False -> local_ns(start_date, origin.1)
+  }
+  let end_ns = local_ns(end_date, origin.1)
+  Ok(#(r1, r2, start_dur, end_dur, start_ns, end_ns))
+}
+
+/// NudgeToCalendarUnit: round the calendar `unit` of a date duration by
+/// bounding it between whole-unit instants on the local timeline.
+/// Returns #(rounded date duration, did_expand, nudged_ns).
+fn nudge_calendar_unit(
+  sign: Int,
+  ymwd: #(Int, Int, Int, Int),
+  origin: #(IsoDate, TimeRec),
+  dest_ns: Int,
+  unit: String,
+  inc: Int,
+  mode: String,
+  zoned: Bool,
+) -> Result(#(DurRec, Bool, Int), TErr) {
+  use w0 <- result.try(nudge_window(sign, ymwd, origin, unit, inc, False, zoned))
+  let in_bounds = fn(w: #(Int, Int, DurRec, DurRec, Int, Int)) {
+    case sign > 0 {
+      True -> w.4 <= dest_ns && dest_ns <= w.5
+      False -> w.5 <= dest_ns && dest_ns <= w.4
+    }
+  }
+  // Retry one increment further when end-of-month clamping made the first
+  // window not contain the destination.
+  use #(w, pre_expanded) <- result.try(case in_bounds(w0) {
+    True -> Ok(#(w0, False))
+    False -> {
+      use w1 <- result.map(nudge_window(
+        sign,
+        ymwd,
+        origin,
+        unit,
+        inc,
+        True,
+        zoned,
+      ))
+      #(w1, True)
+    }
+  })
+  let #(r1, r2, start_dur, end_dur, start_ns, end_ns) = w
+  let num = dest_ns - start_ns
+  let den = end_ns - start_ns
+  let abs_r1 = int.absolute_value(r1)
+  let abs_r2 = int.absolute_value(r2)
+  let rounded_abs = case num == 0, num == den {
+    True, _ -> abs_r1
+    _, True -> abs_r2
+    _, _ -> {
+      let cmp = int_sign(2 * int.absolute_value(num) - int.absolute_value(den))
+      let even = math_mod(abs_r1 / inc, 2) == 0
+      apply_unsigned_rounding(
+        abs_r1,
+        abs_r2,
+        cmp,
+        even,
+        unsigned_rounding_mode(mode, sign > 0),
+      )
+    }
+  }
+  let expanded_here = rounded_abs == abs_r2
+  let did_expand = pre_expanded || expanded_here
+  let chosen = case expanded_here {
+    True -> end_dur
+    False -> start_dur
+  }
+  // nudged must correspond to `chosen`: bubble_date_duration compares it
+  // against the larger-unit boundary, so passing the ns of a duration one
+  // increment beyond the chosen one could wrongly bubble (e.g. 1 year
+  // instead of 12 months) when the window was pre-shifted by end-of-month
+  // clamping. did_expand (pre_expanded || expanded_here) still triggers
+  // the bubble check.
+  let nudged = case expanded_here {
+    True -> end_ns
+    False -> start_ns
+  }
+  Ok(#(chosen, did_expand, nudged))
+}
+
+/// BubbleRelativeDuration: carry a nudged duration into larger units while
+/// the nudged instant sits exactly on (or beyond) the larger-unit boundary.
+fn bubble_date_duration(
+  sign: Int,
+  dur: DurRec,
+  nudged_ns: Int,
+  origin: #(IsoDate, TimeRec),
+  largest: String,
+  start_unit: String,
+) -> DurRec {
+  let candidates =
+    case start_unit {
+      "day" -> ["week", "month", "year"]
+      "week" -> ["month", "year"]
+      "month" -> ["year"]
+      _ -> []
+    }
+    |> list.filter(fn(u) {
+      unit_rank(u) <= unit_rank(largest) && { u != "week" || largest == "week" }
+    })
+  bubble_loop(sign, dur, nudged_ns, origin, candidates)
+}
+
+fn bubble_loop(
+  sign: Int,
+  dur: DurRec,
+  nudged_ns: Int,
+  origin: #(IsoDate, TimeRec),
+  candidates: List(String),
+) -> DurRec {
+  case candidates {
+    [] -> dur
+    [u, ..rest] -> {
+      let end_dur = case u {
+        "year" -> DurRec(..zero_dur, years: dur.years + sign)
+        "month" ->
+          DurRec(..zero_dur, years: dur.years, months: dur.months + sign)
+        _ ->
+          DurRec(
+            ..zero_dur,
+            years: dur.years,
+            months: dur.months,
+            weeks: dur.weeks + sign,
+          )
+      }
+      let end_date =
+        add_months_constrained(origin.0, end_dur.years * 12 + end_dur.months)
+      let end_date =
+        iso_date_from_epoch_days(epoch_days(end_date) + end_dur.weeks * 7)
+      let end_ns = local_ns(end_date, origin.1)
+      case int_sign(nudged_ns - end_ns) != 0 - sign {
+        True -> bubble_loop(sign, end_dur, nudged_ns, origin, rest)
+        False -> dur
+      }
+    }
+  }
+}
+
+/// RoundRelativeDuration for a date-unit smallestUnit: nudge then bubble.
+fn round_relative_date_duration(
+  ymwd: #(Int, Int, Int, Int),
+  origin: #(IsoDate, TimeRec),
+  dest_ns: Int,
+  largest: String,
+  smallest: String,
+  inc: Int,
+  mode: String,
+  zoned: Bool,
+) -> Result(DurRec, TErr) {
+  let sign = case int_sign(dest_ns - local_ns(origin.0, origin.1)) {
+    -1 -> -1
+    _ -> 1
+  }
+  use #(dur, did_expand, nudged) <- result.map(nudge_calendar_unit(
+    sign,
+    ymwd,
+    origin,
+    dest_ns,
+    smallest,
+    inc,
+    mode,
+    zoned,
+  ))
+  case did_expand && smallest != "week" {
+    True ->
+      bubble_date_duration(
+        sign,
+        dur,
+        nudged,
+        origin,
+        largest,
+        max_unit(smallest, "day"),
+      )
+    False -> dur
+  }
+}
+
+// ----------------------------------------------------------------------------
+// PlainTime methods
+// ----------------------------------------------------------------------------
+
+fn plain_time_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_time(state, this) {
+    None -> brand_error(state, "PlainTime", name)
+    Some(t) ->
+      case name {
+        "toJSON" -> #(state, Ok(JsString(format_iso_time(t, AutoPrec))))
+        "toLocaleString" -> #(state, Ok(JsString(format_iso_time(t, AutoPrec))))
+        "toString" -> {
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          use #(prec, su, sinc, mode), state <- state.try_op(
+            to_string_time_options(state, opts),
+          )
+          let t2 = case su {
+            None -> t
+            Some(u) -> {
+              let rounded =
+                round_to_increment(time_to_ns(t), sinc * unit_ns(u), mode)
+              ns_to_time(math_mod(rounded, ns_per_day))
+            }
+          }
+          #(state, Ok(JsString(format_iso_time(t2, prec))))
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.PlainTime cannot be converted with valueOf",
+          )
+        "equals" -> {
+          use other, state <- state.try_op(to_temporal_time(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          #(state, Ok(JsBool(t == other)))
+        }
+        "add" | "subtract" -> {
+          use dur, state <- state.try_op(to_temporal_duration(
+            state,
+            arg_at(args, 0),
+          ))
+          let dur = case name {
+            "subtract" -> negate_dur(dur)
+            _ -> dur
+          }
+          let #(_, t2) = add_time(t, time_only_ns(dur))
+          let #(state, v) = make_time(state, protos, t2)
+          #(state, Ok(v))
+        }
+        "with" -> {
+          use bag, state <- state.try_op(require_partial_bag(
+            state,
+            arg_at(args, 0),
+          ))
+          use hour, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "hour",
+            to_integer_with_truncation,
+          ))
+          use us, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "microsecond",
+            to_integer_with_truncation,
+          ))
+          use ms, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "millisecond",
+            to_integer_with_truncation,
+          ))
+          use minute, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "minute",
+            to_integer_with_truncation,
+          ))
+          use ns, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "nanosecond",
+            to_integer_with_truncation,
+          ))
+          use second, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "second",
+            to_integer_with_truncation,
+          ))
+          let all = [hour, us, ms, minute, ns, second]
+          case list.all(all, fn(f) { f == None }) {
+            True ->
+              state.type_error(state, "with() requires at least one field")
+            False -> {
+              use overflow, state <- state.try_op(validated_overflow(
+                state,
+                arg_at(args, 1),
+              ))
+              let t2 =
+                TimeRec(
+                  hour: option.unwrap(hour, t.hour),
+                  minute: option.unwrap(minute, t.minute),
+                  second: option.unwrap(second, t.second),
+                  ms: option.unwrap(ms, t.ms),
+                  us: option.unwrap(us, t.us),
+                  ns: option.unwrap(ns, t.ns),
+                )
+              case overflow {
+                "reject" ->
+                  case is_valid_time(t2) {
+                    True -> {
+                      let #(state, v) = make_time(state, protos, t2)
+                      #(state, Ok(v))
+                    }
+                    False -> state.range_error(state, "invalid time")
+                  }
+                _ -> {
+                  let t3 =
+                    TimeRec(
+                      hour: int.clamp(t2.hour, 0, 23),
+                      minute: int.clamp(t2.minute, 0, 59),
+                      second: int.clamp(t2.second, 0, 59),
+                      ms: int.clamp(t2.ms, 0, 999),
+                      us: int.clamp(t2.us, 0, 999),
+                      ns: int.clamp(t2.ns, 0, 999),
+                    )
+                  let #(state, v) = make_time(state, protos, t3)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        "round" -> {
+          use #(su, inc, mode), state <- state.try_op(round_options(
+            state,
+            arg_at(args, 0),
+            "hour",
+            False,
+          ))
+          let u_ns = unit_ns(su)
+          let max = ns_per_day / u_ns
+          case valid_time_increment(inc, max) {
+            False -> state.range_error(state, "invalid roundingIncrement")
+            True -> {
+              let rounded = round_to_increment(time_to_ns(t), inc * u_ns, mode)
+              let t2 = ns_to_time(math_mod(rounded, ns_per_day))
+              let #(state, v) = make_time(state, protos, t2)
+              #(state, Ok(v))
+            }
+          }
+        }
+        "until" | "since" -> {
+          use other, state <- state.try_op(to_temporal_time(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          time_until_since(state, protos, t, other, args, name == "since")
+        }
+        _ -> state.type_error(state, "unknown method")
+      }
+  }
+}
+
+/// PlainTime/Instant toString options: fractionalSecondDigits,
+/// roundingMode, smallestUnit (alphabetical).
+/// Returns #(precision, rounding unit, rounding increment, mode) — the
+/// increment scales the unit (ToSecondsStringPrecisionRecord).
+fn to_string_time_options(
+  state: State,
+  opts: Option(Ref),
+) -> Result(
+  #(#(Precision, Option(String), Int, String), State),
+  #(JsValue, State),
+) {
+  use #(digits, state) <- result.try(get_fractional_digits(state, opts))
+  use #(mode, state) <- result.try(get_rounding_mode_option(state, opts))
+  use #(su, state) <- result.try(
+    get_unit_option(state, opts, "smallestUnit", []),
+  )
+  case seconds_string_precision(digits, su, mode) {
+    Ok(r) -> Ok(#(r, state))
+    Error(RangeE(m)) -> range_error_result(state, m)
+    Error(TypeE(m)) -> type_error_result(state, m)
+  }
+}
+
+/// ToSecondsStringPrecisionRecord (pure part).
+fn seconds_string_precision(
+  digits: Precision,
+  su: Option(String),
+  mode: String,
+) -> Result(#(Precision, Option(String), Int, String), TErr) {
+  case su {
+    Some("hour") | Some("day") | Some("week") | Some("month") | Some("year") ->
+      Error(RangeE("smallestUnit must be a time unit"))
+    Some("minute") -> Ok(#(MinutePrec, Some("minute"), 1, mode))
+    Some("second") -> Ok(#(FixedPrec(0), Some("second"), 1, mode))
+    Some("millisecond") -> Ok(#(FixedPrec(3), Some("millisecond"), 1, mode))
+    Some("microsecond") -> Ok(#(FixedPrec(6), Some("microsecond"), 1, mode))
+    Some("nanosecond") -> Ok(#(FixedPrec(9), Some("nanosecond"), 1, mode))
+    Some(_) | None ->
+      case digits {
+        AutoPrec -> Ok(#(AutoPrec, None, 1, mode))
+        FixedPrec(0) -> Ok(#(FixedPrec(0), Some("second"), 1, mode))
+        FixedPrec(n) ->
+          Ok(#(FixedPrec(n), Some("nanosecond"), pow10(9 - n), mode))
+        MinutePrec -> Ok(#(AutoPrec, None, 1, mode))
+      }
+  }
+}
+
+fn get_fractional_digits(
+  state: State,
+  opts: Option(Ref),
+) -> Result(#(Precision, State), #(JsValue, State)) {
+  case opts {
+    None -> Ok(#(AutoPrec, state))
+    Some(ref) -> {
+      use got <- result.try(ops_object.get_value(
+        state,
+        ref,
+        Named("fractionalSecondDigits"),
+        JsObject(ref),
+      ))
+      case got {
+        #(JsUndefined, st) -> Ok(#(AutoPrec, st))
+        #(JsNumber(Finite(f)), st) -> {
+          // floor, then 0..9 bounds (GetTemporalFractionalSecondDigitsOption).
+          let i = value.float_to_int(float.floor(f))
+          case i >= 0 && i <= 9 {
+            True -> Ok(#(FixedPrec(i), st))
+            False -> range_error_result(st, "invalid fractionalSecondDigits")
+          }
+        }
+        #(JsNumber(_), st) ->
+          range_error_result(st, "invalid fractionalSecondDigits")
+        // Non-number: ToString it; only "auto" is accepted. Symbols raise
+        // TypeError from the string coercion.
+        #(v, st) -> {
+          use str <- result.try(coerce.js_to_string(st, v))
+          case str {
+            #("auto", st) -> Ok(#(AutoPrec, st))
+            #(_, st) -> range_error_result(st, "invalid fractionalSecondDigits")
+          }
+        }
+      }
+    }
+  }
+}
+
+/// round() options: positional string shorthand or object with smallestUnit
+/// (required), roundingIncrement, roundingMode.
+fn round_options(
+  state: State,
+  arg: JsValue,
+  _max_unit: String,
+  allow_day: Bool,
+) -> Result(#(#(String, Int, String), State), #(JsValue, State)) {
+  case arg {
+    JsUndefined -> type_error_result(state, "options parameter is required")
+    JsString(s) ->
+      case singular_unit(s) {
+        Some(u) ->
+          case unit_ok_for_round(u, allow_day) {
+            True -> Ok(#(#(u, 1, "halfExpand"), state))
+            False -> range_error_result(state, "invalid smallestUnit")
+          }
+        None -> range_error_result(state, "invalid smallestUnit")
+      }
+    JsObject(ref) -> {
+      use #(inc, state) <- result.try(get_rounding_increment_option(
+        state,
+        Some(ref),
+      ))
+      use #(mode, state) <- result.try(get_string_option(
+        state,
+        Some(ref),
+        "roundingMode",
+        [
+          "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor",
+          "halfExpand", "halfTrunc", "halfEven",
+        ],
+        Some("halfExpand"),
+      ))
+      use #(su, state) <- result.try(
+        get_unit_option(state, Some(ref), "smallestUnit", []),
+      )
+      case su {
+        None -> range_error_result(state, "smallestUnit is required")
+        Some(u) ->
+          case unit_ok_for_round(u, allow_day) {
+            True -> Ok(#(#(u, inc, option.unwrap(mode, "halfExpand")), state))
+            False -> range_error_result(state, "invalid smallestUnit")
+          }
+      }
+    }
+    _ -> type_error_result(state, "invalid options")
+  }
+}
+
+fn unit_ok_for_round(u: String, allow_day: Bool) -> Bool {
+  case u {
+    "day" -> allow_day
+    "hour"
+    | "minute"
+    | "second"
+    | "millisecond"
+    | "microsecond"
+    | "nanosecond" -> True
+    _ -> False
+  }
+}
+
+/// Increment must evenly divide the unit's span (and be < span).
+fn valid_time_increment(inc: Int, max: Int) -> Bool {
+  inc >= 1
+  && inc <= max
+  && { inc == max || max % inc == 0 }
+  && inc != max
+  || inc == 1
+}
+
+/// GetDifferenceSettings tail: largest must not be smaller than smallest, and
+/// for a time-unit smallest the increment must divide the unit's maximum.
+fn check_diff_setup(
+  state: State,
+  largest: String,
+  smallest: String,
+  inc: Int,
+) -> Result(#(Nil, State), #(JsValue, State)) {
+  case unit_rank(largest) < unit_rank(smallest) {
+    True ->
+      range_error_result(
+        state,
+        "largestUnit must not be smaller than smallestUnit",
+      )
+    False -> {
+      let ok = case smallest {
+        "hour" -> valid_time_increment(inc, 24)
+        "minute" | "second" -> valid_time_increment(inc, 60)
+        "millisecond" | "microsecond" | "nanosecond" ->
+          valid_time_increment(inc, 1000)
+        _ -> True
+      }
+      case ok {
+        True -> Ok(#(Nil, state))
+        False -> range_error_result(state, "invalid roundingIncrement")
+      }
+    }
+  }
+}
+
+fn time_until_since(
+  state: State,
+  protos: TemporalProtos,
+  t1: TimeRec,
+  t2: TimeRec,
+  args: List(JsValue),
+  is_since: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  use largest, smallest, inc, mode, state <- get_difference_settings(
+    state,
+    args,
+  )
+  let smallest = option.unwrap(smallest, "nanosecond")
+  let largest = option.unwrap(largest, max_unit(smallest, "hour"))
+  case
+    unit_rank(smallest) > unit_rank("hour")
+    || unit_rank(largest) > unit_rank("hour")
+  {
+    True -> state.range_error(state, "units must be time units for PlainTime")
+    False ->
+      case unit_rank(largest) < unit_rank(smallest) {
+        True ->
+          state.range_error(
+            state,
+            "largestUnit must not be smaller than smallestUnit",
+          )
+        False -> {
+          let mode2 = apply_since_mode(mode, is_since)
+          let diff = time_to_ns(t2) - time_to_ns(t1)
+          let rounded = round_to_increment(diff, inc * unit_ns(smallest), mode2)
+          let rounded = apply_since_ns(rounded, is_since)
+          let dur = balance_time_ns(rounded, largest)
+          let #(state, v) = make_duration(state, protos, dur)
+          #(state, Ok(v))
+        }
+      }
+  }
+}
+
+/// Balance a signed ns total into a Duration up to `largest` (time unit).
+fn balance_time_ns(total: Int, largest: String) -> DurRec {
+  let sign = int_sign(total)
+  let a = int.absolute_value(total)
+  let lr = unit_rank(largest)
+  let #(days, a) = case lr >= unit_rank("day") {
+    True -> #(a / ns_per_day, a % ns_per_day)
+    False -> #(0, a)
+  }
+  let #(hours, a) = case lr >= unit_rank("hour") {
+    True -> #(a / ns_per_hour, a % ns_per_hour)
+    False -> #(0, a)
+  }
+  let #(minutes, a) = case lr >= unit_rank("minute") {
+    True -> #(a / ns_per_minute, a % ns_per_minute)
+    False -> #(0, a)
+  }
+  let #(seconds, a) = case lr >= unit_rank("second") {
+    True -> #(a / ns_per_second, a % ns_per_second)
+    False -> #(0, a)
+  }
+  let #(ms, a) = case lr >= unit_rank("millisecond") {
+    True -> #(a / ns_per_ms, a % ns_per_ms)
+    False -> #(0, a)
+  }
+  let #(us, a) = case lr >= unit_rank("microsecond") {
+    True -> #(a / ns_per_us, a % ns_per_us)
+    False -> #(0, a)
+  }
+  apply_dur_sign(
+    DurRec(
+      years: 0,
+      months: 0,
+      weeks: 0,
+      days:,
+      hours:,
+      minutes:,
+      seconds:,
+      ms:,
+      us:,
+      ns: a,
+    ),
+    sign,
+  )
+}
+
+// ----------------------------------------------------------------------------
+// PlainDateTime methods
+// ----------------------------------------------------------------------------
+
+fn plain_date_time_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_date_time(state, this) {
+    None -> brand_error(state, "PlainDateTime", name)
+    Some(#(d, t)) -> {
+      let cal = this_calendar(state, this)
+      case name {
+        "toJSON" -> #(
+          state,
+          Ok(JsString(
+            format_iso_date(d)
+            <> "T"
+            <> format_iso_time(t, AutoPrec)
+            <> calendar_suffix("auto", cal),
+          )),
+        )
+        "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_iso_date(d) <> " " <> format_iso_time(t, AutoPrec))),
+        )
+        "toString" -> {
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          use cal_name, state <- state.try_op(get_string_option(
+            state,
+            opts,
+            "calendarName",
+            ["auto", "always", "never", "critical"],
+            Some("auto"),
+          ))
+          use #(prec, su, sinc, mode), state <- state.try_op(
+            to_string_time_options(state, opts),
+          )
+          let #(d2, t2) = case su {
+            None -> #(d, t)
+            Some(u) -> {
+              let total = epoch_days(d) * ns_per_day + time_to_ns(t)
+              let rounded = round_to_increment(total, sinc * unit_ns(u), mode)
+              epoch_ns_to_iso(rounded, 0)
+            }
+          }
+          let s =
+            format_iso_date(d2)
+            <> "T"
+            <> format_iso_time(t2, prec)
+            <> calendar_suffix(option.unwrap(cal_name, "auto"), cal)
+          #(state, Ok(JsString(s)))
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.PlainDateTime cannot be converted with valueOf",
+          )
+        "equals" -> {
+          use #(od, ot, ocal), state <- state.try_op(to_temporal_date_time(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          #(state, Ok(JsBool(#(d, t) == #(od, ot) && cal == ocal)))
+        }
+        "add" | "subtract" -> {
+          use dur, state <- state.try_op(to_temporal_duration(
+            state,
+            arg_at(args, 0),
+          ))
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            arg_at(args, 1),
+          ))
+          let dur = case name {
+            "subtract" -> negate_dur(dur)
+            _ -> dur
+          }
+          // Time first, carry days into the date addition.
+          let #(carry, t2) = add_time(t, time_only_ns(dur))
+          let date_dur =
+            DurRec(
+              ..zero_dur,
+              years: dur.years,
+              months: dur.months,
+              weeks: dur.weeks,
+              days: dur.days + carry,
+            )
+          use d2 <- terr(state, calendar_date_add(cal, d, date_dur, overflow))
+          case iso_datetime_within_limits(d2, t2) {
+            False ->
+              state.range_error(state, "date-time outside supported range")
+            True -> {
+              let #(state, v) = make_date_time_cal(state, protos, d2, t2, cal)
+              #(state, Ok(v))
+            }
+          }
+        }
+        "withPlainTime" -> {
+          use t2, state <- state.try_op(case arg_at(args, 0) {
+            JsUndefined -> Ok(#(midnight, state))
+            v -> to_temporal_time(state, v, JsUndefined)
+          })
+          let #(state, v) = make_date_time_cal(state, protos, d, t2, cal)
+          #(state, Ok(v))
+        }
+        "withCalendar" -> {
+          use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
+            state,
+            arg_at(args, 0),
+          ))
+          let #(state, v) = make_date_time_cal(state, protos, d, t, new_cal)
+          #(state, Ok(v))
+        }
+        "with" -> {
+          use bag, state <- state.try_op(require_partial_bag(
+            state,
+            arg_at(args, 0),
+          ))
+          use day, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "day",
+            to_positive_integer_with_truncation,
+          ))
+          use era, state <- state.try_op(case tcal.has_eras(cal) {
+            True -> read_bag_era(state, bag)
+            False -> Ok(#(None, state))
+          })
+          use era_year, state <- state.try_op(case tcal.has_eras(cal) {
+            True ->
+              read_bag_int_field(
+                state,
+                bag,
+                "eraYear",
+                to_integer_with_truncation,
+              )
+            False -> Ok(#(None, state))
+          })
+          use hour, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "hour",
+            to_integer_with_truncation,
+          ))
+          use us, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "microsecond",
+            to_integer_with_truncation,
+          ))
+          use ms, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "millisecond",
+            to_integer_with_truncation,
+          ))
+          use minute, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "minute",
+            to_integer_with_truncation,
+          ))
+          use month, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "month",
+            to_positive_integer_with_truncation,
+          ))
+          use month_code, state <- state.try_op(read_month_code(state, bag))
+          use ns, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "nanosecond",
+            to_integer_with_truncation,
+          ))
+          use second, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "second",
+            to_integer_with_truncation,
+          ))
+          use year, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "year",
+            to_integer_with_truncation,
+          ))
+          let all = [
+            day, hour, us, ms, minute, month, ns, second, year, era_year,
+          ]
+          case
+            list.all(all, fn(f) { f == None })
+            && month_code == None
+            && era == None
+          {
+            True ->
+              state.type_error(state, "with() requires at least one field")
+            False -> {
+              use overflow, state <- state.try_op(validated_overflow(
+                state,
+                arg_at(args, 1),
+              ))
+              let fields =
+                DateFields(day:, era:, era_year:, month:, month_code:, year:)
+              use date <- terr(
+                state,
+                calendar_with_fields(cal, d, fields, overflow),
+              )
+              let t2 =
+                TimeRec(
+                  hour: option.unwrap(hour, t.hour),
+                  minute: option.unwrap(minute, t.minute),
+                  second: option.unwrap(second, t.second),
+                  ms: option.unwrap(ms, t.ms),
+                  us: option.unwrap(us, t.us),
+                  ns: option.unwrap(ns, t.ns),
+                )
+              let t2 = case overflow {
+                "reject" -> t2
+                _ ->
+                  TimeRec(
+                    hour: int.clamp(t2.hour, 0, 23),
+                    minute: int.clamp(t2.minute, 0, 59),
+                    second: int.clamp(t2.second, 0, 59),
+                    ms: int.clamp(t2.ms, 0, 999),
+                    us: int.clamp(t2.us, 0, 999),
+                    ns: int.clamp(t2.ns, 0, 999),
+                  )
+              }
+              case is_valid_time(t2) {
+                False -> state.range_error(state, "invalid time")
+                True ->
+                  case iso_datetime_within_limits(date, t2) {
+                    False ->
+                      state.range_error(
+                        state,
+                        "date-time outside supported range",
+                      )
+                    True -> {
+                      let #(state, v) =
+                        make_date_time_cal(state, protos, date, t2, cal)
+                      #(state, Ok(v))
+                    }
+                  }
+              }
+            }
+          }
+        }
+        "round" -> {
+          use #(su, inc, mode), state <- state.try_op(round_options(
+            state,
+            arg_at(args, 0),
+            "day",
+            True,
+          ))
+          let u_ns = unit_ns(su)
+          let max = case su {
+            "day" -> 1
+            _ -> ns_per_day / u_ns
+          }
+          case valid_time_increment(inc, max) {
+            False -> state.range_error(state, "invalid roundingIncrement")
+            True -> {
+              let total = epoch_days(d) * ns_per_day + time_to_ns(t)
+              let rounded = round_to_increment(total, inc * u_ns, mode)
+              let #(d2, t2) = epoch_ns_to_iso(rounded, 0)
+              case iso_datetime_within_limits(d2, t2) {
+                False ->
+                  state.range_error(state, "date-time outside supported range")
+                True -> {
+                  let #(state, v) =
+                    make_date_time_cal(state, protos, d2, t2, cal)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        "toPlainDate" -> {
+          let #(state, v) = make_date_cal(state, protos, d, cal)
+          #(state, Ok(v))
+        }
+        "toPlainTime" -> {
+          let #(state, v) = make_time(state, protos, t)
+          #(state, Ok(v))
+        }
+        "toZonedDateTime" -> {
+          case arg_at(args, 0) {
+            JsString(tz_str) -> {
+              use tz <- terr(state, parse_time_zone_id(tz_str))
+              use opts, state <- state.try_op(get_options_object(
+                state,
+                arg_at(args, 1),
+              ))
+              use dis2, state <- state.try_op(get_string_option(
+                state,
+                opts,
+                "disambiguation",
+                ["compatible", "earlier", "later", "reject"],
+                Some("compatible"),
+              ))
+              use ns <- terr(
+                state,
+                get_epoch_ns_for(tz, d, t, option.unwrap(dis2, "compatible")),
+              )
+              case int.absolute_value(ns) <= ns_max_instant {
+                False -> state.range_error(state, "instant outside valid range")
+                True -> {
+                  let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
+                  #(state, Ok(v))
+                }
+              }
+            }
+            JsUndefined -> state.type_error(state, "time zone is required")
+            _ -> state.type_error(state, "time zone must be a string")
+          }
+        }
+        "until" | "since" -> {
+          use #(od, ot, ocal), state <- state.try_op(to_temporal_date_time(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          case ocal == cal {
+            False ->
+              state.range_error(
+                state,
+                "cannot compute difference between dates of different calendars",
+              )
+            True ->
+              date_time_until_since(
+                state,
+                protos,
+                cal,
+                #(d, t),
+                #(od, ot),
+                args,
+                name == "since",
+              )
+          }
+        }
+        _ -> state.type_error(state, "unknown method")
+      }
+    }
+  }
+}
+
+fn date_time_until_since(
+  state: State,
+  protos: TemporalProtos,
+  cal: String,
+  a: #(IsoDate, TimeRec),
+  b: #(IsoDate, TimeRec),
+  args: List(JsValue),
+  is_since: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  use largest, smallest, inc, mode, state <- get_difference_settings(
+    state,
+    args,
+  )
+  let smallest = option.unwrap(smallest, "nanosecond")
+  let largest = option.unwrap(largest, max_unit(smallest, "day"))
+  use Nil, state <- state.try_op(check_diff_setup(state, largest, smallest, inc))
+  let mode2 = apply_since_mode(mode, is_since)
+  use final <- terr(
+    state,
+    diff_date_time_core(cal, a, b, largest, smallest, inc, mode2, False),
+  )
+  let final = apply_since_dur(final, is_since)
+  let #(state, v) = make_duration(state, protos, final)
+  #(state, Ok(v))
+}
+
+/// Difference between two ISO date-times decomposed per largest/smallest
+/// units with rounding. Shared by PlainDateTime and ZonedDateTime until/since.
+fn diff_date_time_core(
+  cal: String,
+  a: #(IsoDate, TimeRec),
+  b: #(IsoDate, TimeRec),
+  largest: String,
+  smallest: String,
+  inc: Int,
+  mode2: String,
+  zoned: Bool,
+) -> Result(DurRec, TErr) {
+  // Time difference first; borrow a day if signs conflict.
+  let date_sign = compare_iso_date(b.0, a.0)
+  let time_diff = time_to_ns(b.1) - time_to_ns(a.1)
+  let #(b_date, time_diff) = case
+    date_sign > 0 && time_diff < 0,
+    date_sign < 0 && time_diff > 0
+  {
+    True, _ -> #(
+      iso_date_from_epoch_days(epoch_days(b.0) - 1),
+      time_diff + ns_per_day,
+    )
+    _, True -> #(
+      iso_date_from_epoch_days(epoch_days(b.0) + 1),
+      time_diff - ns_per_day,
+    )
+    _, _ -> #(b.0, time_diff)
+  }
+  case unit_rank(largest) >= unit_rank("day") {
+    True -> {
+      let #(years, months, weeks, days) = case cal {
+        "iso8601" -> diff_date_parts(a.0, b_date, largest)
+        _ ->
+          case largest {
+            "year" | "month" -> {
+              let lu = case largest {
+                "year" -> "years"
+                _ -> "months"
+              }
+              let #(y, m, rem_days) = calendar_date_until(cal, a.0, b_date, lu)
+              #(y, m, 0, rem_days)
+            }
+            _ -> diff_date_parts(a.0, b_date, largest)
+          }
+      }
+      case
+        unit_rank(smallest) > unit_rank("day") || { zoned && smallest == "day" }
+      {
+        // Calendar-unit smallestUnit (or day with a time zone, whose length
+        // varies): epoch-ns bounding (NudgeToCalendarUnit). A plain `day` is
+        // uniform 24 hours and is rounded numerically below.
+        True ->
+          round_relative_date_duration(
+            #(years, months, weeks, days),
+            a,
+            local_ns(b.0, b.1),
+            largest,
+            smallest,
+            inc,
+            mode2,
+            zoned,
+          )
+        False -> {
+          // Time-unit smallestUnit: round days+time in ns (NudgeToDayOrTime).
+          let time_total = days * ns_per_day + time_diff
+          let rounded = case smallest == "nanosecond" && inc == 1 {
+            True -> time_total
+            False ->
+              round_to_increment(time_total, inc * unit_ns(smallest), mode2)
+          }
+          let whole_days = truncate_div(time_total, ns_per_day)
+          let rounded_whole = truncate_div(rounded, ns_per_day)
+          let rem_ns = rounded - rounded_whole * ns_per_day
+          let time_part = balance_time_ns(rem_ns, "hour")
+          let base =
+            DurRec(..time_part, years:, months:, weeks:, days: rounded_whole)
+          let did_expand =
+            int_sign(rounded_whole - whole_days) == int_sign(time_total)
+          case did_expand {
+            False -> Ok(base)
+            True -> {
+              let dest_ns = local_ns(b.0, b.1)
+              let nudged = dest_ns + rounded - time_total
+              let dsign = case int_sign(dest_ns - local_ns(a.0, a.1)) {
+                -1 -> -1
+                _ -> 1
+              }
+              Ok(bubble_date_duration(dsign, base, nudged, a, largest, "day"))
+            }
+          }
+        }
+      }
+    }
+    False -> {
+      // Pure time-based difference.
+      let total =
+        { epoch_days(b.0) - epoch_days(a.0) }
+        * ns_per_day
+        + { time_to_ns(b.1) - time_to_ns(a.1) }
+      let rounded = round_to_increment(total, inc * unit_ns(smallest), mode2)
+      Ok(balance_time_ns(rounded, largest))
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// PlainYearMonth methods
+// ----------------------------------------------------------------------------
+
+fn plain_year_month_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_year_month(state, this) {
+    None -> brand_error(state, "PlainYearMonth", name)
+    Some(#(y, m, rd)) -> {
+      let cal = this_calendar(state, this)
+      case name {
+        "toJSON" -> #(state, Ok(JsString(format_ym_cal(y, m, rd, cal, "auto"))))
+        "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_ym_cal(y, m, rd, cal, "auto"))),
+        )
+        "toString" -> {
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          use cal_name, state <- state.try_op(get_string_option(
+            state,
+            opts,
+            "calendarName",
+            ["auto", "always", "never", "critical"],
+            Some("auto"),
+          ))
+          let mode = option.unwrap(cal_name, "auto")
+          #(state, Ok(JsString(format_ym_cal(y, m, rd, cal, mode))))
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.PlainYearMonth cannot be converted with valueOf",
+          )
+        "equals" -> {
+          use other, state <- state.try_op(to_temporal_year_month(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          #(state, Ok(JsBool(#(y, m, rd, cal) == other)))
+        }
+        "add" | "subtract" -> {
+          use dur, state <- state.try_op(to_temporal_duration(
+            state,
+            arg_at(args, 0),
+          ))
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            arg_at(args, 1),
+          ))
+          let dur = case name {
+            "subtract" -> negate_dur(dur)
+            _ -> dur
+          }
+          // AddDurationToYearMonth: only years and months are allowed
+          // (weeks/days/time throw RangeError); the calculation always
+          // starts from day 1 of the calendar month, so day overflow never
+          // occurs — `overflow` only affects month-code resolution (e.g.
+          // hebrew M05L in a non-leap year).
+          let has_lower_units =
+            dur.weeks != 0
+            || dur.days != 0
+            || dur.hours != 0
+            || dur.minutes != 0
+            || dur.seconds != 0
+            || dur.ms != 0
+            || dur.us != 0
+            || dur.ns != 0
+          use Nil <- terr(state, case has_lower_units {
+            True ->
+              Error(RangeE(
+                "only years and months can be added to Temporal.PlainYearMonth",
+              ))
+            False -> Ok(Nil)
+          })
+          case cal {
+            "iso8601" -> {
+              // AddDurationToYearMonth steps 8-9: the intermediate date is
+              // day 1 of the receiver's month and goes through
+              // CalendarDateFromFields, which throws when it is outside the
+              // ISO date limits (e.g. -271821-04-01, before the minimum
+              // date -271821-04-19) — even for a zero duration.
+              use _day1 <- terr(state, check_date_limits(IsoDate(y, m, 1)))
+              let #(y2, m2) = balance_year_month(y + dur.years, m + dur.months)
+              case iso_year_month_within_limits(y2, m2) {
+                False ->
+                  state.range_error(state, "year-month outside supported range")
+                True -> {
+                  let #(state, v) = make_year_month(state, protos, y2, m2, 1)
+                  #(state, Ok(v))
+                }
+              }
+            }
+            _ -> {
+              let cd =
+                tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+              let start =
+                iso_date_from_epoch_days(tcal.date_to_epoch_days(
+                  cal,
+                  cd.year,
+                  cd.month,
+                  1,
+                ))
+              // CalendarDateFromFields on the day-1 intermediate date also
+              // enforces the ISO date limits for non-ISO calendars.
+              use start <- terr(state, check_date_limits(start))
+              use d2 <- terr(
+                state,
+                calendar_date_add(cal, start, dur, overflow),
+              )
+              let cd2 = tcal.date_from_epoch_days(cal, epoch_days(d2))
+              let first =
+                iso_date_from_epoch_days(tcal.date_to_epoch_days(
+                  cal,
+                  cd2.year,
+                  cd2.month,
+                  1,
+                ))
+              case iso_year_month_within_limits(first.year, first.month) {
+                False ->
+                  state.range_error(state, "year-month outside supported range")
+                True -> {
+                  let #(state, v) =
+                    make_year_month_cal(
+                      state,
+                      protos,
+                      first.year,
+                      first.month,
+                      first.day,
+                      cal,
+                    )
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        "with" -> {
+          use bag, state <- state.try_op(require_partial_bag(
+            state,
+            arg_at(args, 0),
+          ))
+          use era, state <- state.try_op(case tcal.has_eras(cal) {
+            True -> read_bag_era(state, bag)
+            False -> Ok(#(None, state))
+          })
+          use era_year, state <- state.try_op(case tcal.has_eras(cal) {
+            True ->
+              read_bag_int_field(
+                state,
+                bag,
+                "eraYear",
+                to_integer_with_truncation,
+              )
+            False -> Ok(#(None, state))
+          })
+          use month, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "month",
+            to_positive_integer_with_truncation,
+          ))
+          use month_code, state <- state.try_op(read_month_code(state, bag))
+          use year, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "year",
+            to_integer_with_truncation,
+          ))
+          case
+            month == None
+            && month_code == None
+            && year == None
+            && era == None
+            && era_year == None
+          {
+            True ->
+              state.type_error(state, "with() requires at least one field")
+            False -> {
+              use overflow, state <- state.try_op(validated_overflow(
+                state,
+                arg_at(args, 1),
+              ))
+              // Merge with existing calendar year/monthCode.
+              let cd =
+                tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+              let f =
+                DateFields(
+                  day: None,
+                  era:,
+                  era_year:,
+                  month:,
+                  month_code:,
+                  year:,
+                )
+              let has_year = year != None || era != None || era_year != None
+              let f = case has_year {
+                True -> f
+                False -> DateFields(..f, year: Some(cd.year))
+              }
+              let f = case month != None || month_code != None {
+                True -> f
+                False -> {
+                  let assert Ok(code) =
+                    tcal.parse_month_code(tcal.month_code(
+                      cal,
+                      cd.year,
+                      cd.month,
+                    ))
+                  DateFields(..f, month_code: Some(code))
+                }
+              }
+              use #(y2, m2, rd2, _) <- terr(
+                state,
+                resolve_calendar_year_month(cal, f, overflow),
+              )
+              let #(state, v) =
+                make_year_month_cal(state, protos, y2, m2, rd2, cal)
+              #(state, Ok(v))
+            }
+          }
+        }
+        "toPlainDate" -> {
+          case arg_at(args, 0) {
+            JsObject(ref) -> {
+              use day, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "day",
+                to_positive_integer_with_truncation,
+              ))
+              case day {
+                Some(dd) -> {
+                  case cal {
+                    "iso8601" -> {
+                      use date <- terr(
+                        state,
+                        regulate_iso_date(y, m, dd, "constrain"),
+                      )
+                      use date <- terr(state, check_date_limits(date))
+                      let #(state, v) = make_date_cal(state, protos, date, cal)
+                      #(state, Ok(v))
+                    }
+                    _ -> {
+                      let cd =
+                        tcal.date_from_epoch_days(
+                          cal,
+                          epoch_days(IsoDate(y, m, rd)),
+                        )
+                      use d2 <- terr(
+                        state,
+                        regulate_calendar_day(
+                          cal,
+                          cd.year,
+                          cd.month,
+                          dd,
+                          "constrain",
+                        ),
+                      )
+                      let date =
+                        iso_date_from_epoch_days(tcal.date_to_epoch_days(
+                          cal,
+                          cd.year,
+                          cd.month,
+                          d2,
+                        ))
+                      use date <- terr(state, check_date_limits(date))
+                      let #(state, v) = make_date_cal(state, protos, date, cal)
+                      #(state, Ok(v))
+                    }
+                  }
+                }
+                None -> state.type_error(state, "day is required")
+              }
+            }
+            _ -> state.type_error(state, "argument must be an object")
+          }
+        }
+        "until" | "since" -> {
+          use other, state <- state.try_op(to_temporal_year_month(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          case other.3 == cal {
+            False ->
+              state.range_error(
+                state,
+                "cannot compute difference between dates of different calendars",
+              )
+            True ->
+              year_month_until_since(
+                state,
+                protos,
+                cal,
+                #(y, m, rd),
+                #(other.0, other.1, other.2),
+                args,
+                name == "since",
+              )
+          }
+        }
+        _ -> state.type_error(state, "unknown method")
+      }
+    }
+  }
+}
+
+/// Format a PlainYearMonth: non-ISO calendars always include the reference
+/// day and the calendar annotation.
+fn format_ym_cal(y: Int, m: Int, rd: Int, cal: String, mode: String) -> String {
+  case cal {
+    "iso8601" ->
+      case mode {
+        "always" | "critical" ->
+          format_iso_date(IsoDate(y, m, rd)) <> calendar_suffix(mode, cal)
+        _ -> format_ym(y, m)
+      }
+    _ ->
+      case mode {
+        "never" -> format_iso_date(IsoDate(y, m, rd))
+        _ -> format_iso_date(IsoDate(y, m, rd)) <> calendar_suffix(mode, cal)
+      }
+  }
+}
+
+fn format_ym(y: Int, m: Int) -> String {
+  format_iso_year(y) <> "-" <> pad2(m)
+}
+
+fn year_month_until_since(
+  state: State,
+  protos: TemporalProtos,
+  cal: String,
+  a: #(Int, Int, Int),
+  b: #(Int, Int, Int),
+  args: List(JsValue),
+  is_since: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  use largest, smallest, inc, mode, state <- get_difference_settings(
+    state,
+    args,
+  )
+  let smallest = option.unwrap(smallest, "month")
+  let largest = option.unwrap(largest, max_unit(smallest, "year"))
+  case unit_rank(smallest) < unit_rank("month") {
+    True -> state.range_error(state, "smallestUnit must be year or month")
+    False ->
+      case unit_rank(largest) < unit_rank(smallest) {
+        True ->
+          state.range_error(
+            state,
+            "largestUnit must not be smaller than smallestUnit",
+          )
+        False -> {
+          let mode2 = apply_since_mode(mode, is_since)
+          let total_months = case cal {
+            "iso8601" -> { b.0 - a.0 } * 12 + b.1 - a.1
+            _ -> {
+              // Count whole calendar months between the two month-firsts.
+              let ia = IsoDate(a.0, a.1, a.2)
+              let ib = IsoDate(b.0, b.1, b.2)
+              let #(_, months, _) = calendar_date_until(cal, ia, ib, "months")
+              months
+            }
+          }
+          let rounded = case smallest {
+            "year" -> round_to_increment(total_months, inc * 12, mode2) / 12
+            _ -> round_to_increment(total_months, inc, mode2)
+          }
+          use dur <- terr(state, case cal {
+            "iso8601" ->
+              Ok(case smallest, largest {
+                "year", _ -> DurRec(..zero_dur, years: rounded)
+                _, "year" ->
+                  DurRec(
+                    ..zero_dur,
+                    years: truncate_div(rounded, 12),
+                    months: math_mod_signed(rounded, 12),
+                  )
+                _, _ -> DurRec(..zero_dur, months: rounded)
+              })
+            _ -> {
+              // Calendar-space years/months decomposition. RoundRelativeDuration
+              // is calendar-agnostic, so roundingMode/roundingIncrement apply
+              // here too: years are nudged against real calendar-year
+              // boundaries, and a rounded month total is re-decomposed by
+              // stepping calendar years (not recomputed unrounded).
+              let ia = IsoDate(a.0, a.1, a.2)
+              let ib = IsoDate(b.0, b.1, b.2)
+              case smallest, largest {
+                "year", _ -> {
+                  use yrs <- result.map(round_calendar_year_total(
+                    cal,
+                    ia,
+                    ib,
+                    inc,
+                    mode2,
+                  ))
+                  DurRec(..zero_dur, years: yrs)
+                }
+                _, "year" -> {
+                  use mid <- result.map(calendar_date_add(
+                    cal,
+                    ia,
+                    DurRec(..zero_dur, months: rounded),
+                    "constrain",
+                  ))
+                  let #(yrs, mos, _) =
+                    calendar_date_until(cal, ia, mid, "years")
+                  DurRec(..zero_dur, years: yrs, months: mos)
+                }
+                _, _ -> Ok(DurRec(..zero_dur, months: rounded))
+              }
+            }
+          })
+          let dur = apply_since_dur(dur, is_since)
+          let #(state, v) = make_duration(state, protos, dur)
+          #(state, Ok(v))
+        }
+      }
+  }
+}
+
+/// NudgeToCalendarUnit for a PlainYearMonth difference in a non-ISO
+/// calendar: round the whole-year count of ib − ia (both ISO dates of
+/// calendar day 1) to `inc`-year multiples per `mode`. The fractional year
+/// is measured as day progress between the bounding calendar-year marks
+/// (start = ia + r1 years, end = ia + r2 years), like the spec's
+/// epoch-nanosecond progress.
+fn round_calendar_year_total(
+  cal: String,
+  ia: IsoDate,
+  ib: IsoDate,
+  inc: Int,
+  mode: String,
+) -> Result(Int, TErr) {
+  let dest = epoch_days(ib)
+  let sign = case dest < epoch_days(ia) {
+    True -> -1
+    False -> 1
+  }
+  let #(yrs, _, _) = calendar_date_until(cal, ia, ib, "years")
+  let r1 = truncate_div(yrs, inc) * inc
+  let r2 = r1 + inc * sign
+  use start <- result.try(calendar_date_add(
+    cal,
+    ia,
+    DurRec(..zero_dur, years: r1),
+    "constrain",
+  ))
+  use end_date <- result.map(calendar_date_add(
+    cal,
+    ia,
+    DurRec(..zero_dur, years: r2),
+    "constrain",
+  ))
+  let num = dest - epoch_days(start)
+  let den = epoch_days(end_date) - epoch_days(start)
+  let abs_r1 = int.absolute_value(r1)
+  let abs_r2 = int.absolute_value(r2)
+  let rounded_abs = case num == 0, num == den {
+    True, _ -> abs_r1
+    _, True -> abs_r2
+    _, _ -> {
+      let cmp = int_sign(2 * int.absolute_value(num) - int.absolute_value(den))
+      let even = math_mod(abs_r1 / inc, 2) == 0
+      apply_unsigned_rounding(
+        abs_r1,
+        abs_r2,
+        cmp,
+        even,
+        unsigned_rounding_mode(mode, sign > 0),
+      )
+    }
+  }
+  rounded_abs * sign
+}
+
+// ----------------------------------------------------------------------------
+// PlainMonthDay methods
+// ----------------------------------------------------------------------------
+
+fn plain_month_day_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_month_day(state, this) {
+    None -> brand_error(state, "PlainMonthDay", name)
+    Some(#(m, d, ry)) -> {
+      let cal = this_calendar(state, this)
+      case name {
+        "toJSON" -> #(state, Ok(JsString(format_md_cal(m, d, ry, cal, "auto"))))
+        "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_md_cal(m, d, ry, cal, "auto"))),
+        )
+        "toString" -> {
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          use cal_name, state <- state.try_op(get_string_option(
+            state,
+            opts,
+            "calendarName",
+            ["auto", "always", "never", "critical"],
+            Some("auto"),
+          ))
+          let mode = option.unwrap(cal_name, "auto")
+          #(state, Ok(JsString(format_md_cal(m, d, ry, cal, mode))))
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.PlainMonthDay cannot be converted with valueOf",
+          )
+        "equals" -> {
+          use other, state <- state.try_op(to_temporal_month_day(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          #(state, Ok(JsBool(#(m, d, ry, cal) == other)))
+        }
+        "with" -> {
+          use bag, state <- state.try_op(require_partial_bag(
+            state,
+            arg_at(args, 0),
+          ))
+          use fields, state <- state.try_op(read_date_fields(state, bag, cal))
+          case fields == DateFields(None, None, None, None, None, None) {
+            True ->
+              state.type_error(state, "with() requires at least one field")
+            False -> {
+              use overflow, state <- state.try_op(validated_overflow(
+                state,
+                arg_at(args, 1),
+              ))
+              // Merge with the existing month-day's calendar fields.
+              let cd =
+                tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
+              let f = fields
+              let f = case f.month != None || f.month_code != None {
+                True -> f
+                False -> {
+                  let assert Ok(code) =
+                    tcal.parse_month_code(tcal.month_code(
+                      cal,
+                      cd.year,
+                      cd.month,
+                    ))
+                  DateFields(..f, month_code: Some(code))
+                }
+              }
+              let f = case f.day {
+                Some(_) -> f
+                None -> DateFields(..f, day: Some(cd.day))
+              }
+              use md <- terr(
+                state,
+                resolve_calendar_month_day(cal, f, overflow),
+              )
+              let #(state, v) =
+                make_month_day_cal(state, protos, md.0, md.1, md.2, md.3)
+              #(state, Ok(v))
+            }
+          }
+        }
+        "toPlainDate" -> {
+          case arg_at(args, 0) {
+            JsObject(ref) -> {
+              use era, state <- state.try_op(case tcal.has_eras(cal) {
+                True -> read_bag_era(state, ref)
+                False -> Ok(#(None, state))
+              })
+              use era_year, state <- state.try_op(case tcal.has_eras(cal) {
+                True ->
+                  read_bag_int_field(
+                    state,
+                    ref,
+                    "eraYear",
+                    to_integer_with_truncation,
+                  )
+                False -> Ok(#(None, state))
+              })
+              use year, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "year",
+                to_integer_with_truncation,
+              ))
+              case year != None || { era != None && era_year != None } {
+                True -> {
+                  case cal {
+                    "iso8601" -> {
+                      let assert Some(y) = year
+                      use date <- terr(
+                        state,
+                        regulate_iso_date(y, m, d, "constrain"),
+                      )
+                      use date <- terr(state, check_date_limits(date))
+                      let #(state, v) = make_date_cal(state, protos, date, cal)
+                      #(state, Ok(v))
+                    }
+                    _ -> {
+                      let cd =
+                        tcal.date_from_epoch_days(
+                          cal,
+                          epoch_days(IsoDate(ry, m, d)),
+                        )
+                      let code = tcal.month_code(cal, cd.year, cd.month)
+                      let assert Ok(#(num, leap)) = tcal.parse_month_code(code)
+                      let f =
+                        DateFields(
+                          day: Some(cd.day),
+                          era:,
+                          era_year:,
+                          month: None,
+                          month_code: Some(#(num, leap)),
+                          year:,
+                        )
+                      use date <- terr(
+                        state,
+                        resolve_calendar_date(cal, f, "constrain"),
+                      )
+                      use date <- terr(state, check_date_limits(date))
+                      let #(state, v) = make_date_cal(state, protos, date, cal)
+                      #(state, Ok(v))
+                    }
+                  }
+                }
+                False -> state.type_error(state, "year is required")
+              }
+            }
+            _ -> state.type_error(state, "argument must be an object")
+          }
+        }
+        _ -> state.type_error(state, "unknown method")
+      }
+    }
+  }
+}
+
+/// Format a PlainMonthDay: non-ISO calendars always include the reference
+/// year and the calendar annotation.
+fn format_md_cal(m: Int, d: Int, ry: Int, cal: String, mode: String) -> String {
+  case cal {
+    "iso8601" ->
+      case mode {
+        "always" | "critical" ->
+          format_iso_date(IsoDate(ry, m, d)) <> calendar_suffix(mode, cal)
+        _ -> pad2(m) <> "-" <> pad2(d)
+      }
+    _ ->
+      case mode {
+        "never" -> format_iso_date(IsoDate(ry, m, d))
+        _ -> format_iso_date(IsoDate(ry, m, d)) <> calendar_suffix(mode, cal)
+      }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Duration methods
+// ----------------------------------------------------------------------------
+
+fn duration_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_duration(state, this) {
+    None -> brand_error(state, "Duration", name)
+    Some(d) ->
+      case name {
+        "toJSON" -> #(state, Ok(JsString(format_duration(d, AutoPrec))))
+        "toLocaleString" -> #(state, Ok(JsString(format_duration(d, AutoPrec))))
+        "toString" -> {
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          use digits, state <- state.try_op(get_fractional_digits(state, opts))
+          use mode, state <- state.try_op(get_rounding_mode_option(state, opts))
+          use su, state <- state.try_op(
+            get_unit_option(state, opts, "smallestUnit", []),
+          )
+          use #(prec, runit, rinc) <- terr(
+            state,
+            duration_string_precision(digits, su),
+          )
+          use d2 <- terr(state, case runit == "nanosecond" && rinc == 1 {
+            True -> Ok(d)
+            False -> round_duration_for_string(d, rinc, runit, mode)
+          })
+          #(state, Ok(JsString(format_duration(d2, prec))))
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.Duration cannot be converted with valueOf",
+          )
+        "negated" -> {
+          let #(state, v) = make_duration(state, protos, negate_dur(d))
+          #(state, Ok(v))
+        }
+        "abs" -> {
+          let abs_d = case duration_sign(d) < 0 {
+            True -> negate_dur(d)
+            False -> d
+          }
+          let #(state, v) = make_duration(state, protos, abs_d)
+          #(state, Ok(v))
+        }
+        "with" -> {
+          case arg_at(args, 0) {
+            JsObject(ref) -> {
+              use days, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "days",
+                to_integer_if_integral,
+              ))
+              use hours, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "hours",
+                to_integer_if_integral,
+              ))
+              use us, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "microseconds",
+                to_integer_if_integral,
+              ))
+              use ms, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "milliseconds",
+                to_integer_if_integral,
+              ))
+              use minutes, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "minutes",
+                to_integer_if_integral,
+              ))
+              use months, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "months",
+                to_integer_if_integral,
+              ))
+              use ns, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "nanoseconds",
+                to_integer_if_integral,
+              ))
+              use seconds, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "seconds",
+                to_integer_if_integral,
+              ))
+              use weeks, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "weeks",
+                to_integer_if_integral,
+              ))
+              use years, state <- state.try_op(read_bag_int_field(
+                state,
+                ref,
+                "years",
+                to_integer_if_integral,
+              ))
+              let all = [
+                days, hours, us, ms, minutes, months, ns, seconds, weeks, years,
+              ]
+              case list.all(all, fn(f) { f == None }) {
+                True ->
+                  state.type_error(state, "with() requires at least one field")
+                False -> {
+                  let d2 =
+                    DurRec(
+                      years: option.unwrap(years, d.years),
+                      months: option.unwrap(months, d.months),
+                      weeks: option.unwrap(weeks, d.weeks),
+                      days: option.unwrap(days, d.days),
+                      hours: option.unwrap(hours, d.hours),
+                      minutes: option.unwrap(minutes, d.minutes),
+                      seconds: option.unwrap(seconds, d.seconds),
+                      ms: option.unwrap(ms, d.ms),
+                      us: option.unwrap(us, d.us),
+                      ns: option.unwrap(ns, d.ns),
+                    )
+                  case is_valid_duration(d2) {
+                    False -> state.range_error(state, "invalid duration")
+                    True -> {
+                      let #(state, v) = make_duration(state, protos, d2)
+                      #(state, Ok(v))
+                    }
+                  }
+                }
+              }
+            }
+            _ -> state.type_error(state, "argument must be an object")
+          }
+        }
+        "add" | "subtract" -> {
+          use other, state <- state.try_op(to_temporal_duration(
+            state,
+            arg_at(args, 0),
+          ))
+          let other = case name {
+            "subtract" -> negate_dur(other)
+            _ -> other
+          }
+          let has_cal =
+            d.years != 0
+            || d.months != 0
+            || d.weeks != 0
+            || other.years != 0
+            || other.months != 0
+            || other.weeks != 0
+          case has_cal {
+            True ->
+              state.range_error(
+                state,
+                "duration add/subtract requires non-calendar durations",
+              )
+            False -> {
+              let total = time_duration_ns(d) + time_duration_ns(other)
+              let largest = larger_time_unit(d, other)
+              let sum = balance_time_ns(total, largest)
+              case is_valid_duration(sum) {
+                False -> state.range_error(state, "invalid duration")
+                True -> {
+                  let #(state, v) = make_duration(state, protos, sum)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        "round" -> duration_round(state, protos, d, args)
+        "total" -> duration_total(state, d, args)
+        _ -> state.type_error(state, "unknown method")
+      }
+  }
+}
+
+fn larger_time_unit(a: DurRec, b: DurRec) -> String {
+  let unit_of = fn(d: DurRec) {
+    case d.days != 0 {
+      True -> "day"
+      False ->
+        case d.hours != 0 {
+          True -> "hour"
+          False ->
+            case d.minutes != 0 {
+              True -> "minute"
+              False ->
+                case d.seconds != 0 {
+                  True -> "second"
+                  False ->
+                    case d.ms != 0 {
+                      True -> "millisecond"
+                      False ->
+                        case d.us != 0 {
+                          True -> "microsecond"
+                          False -> "nanosecond"
+                        }
+                    }
+                }
+            }
+        }
+    }
+  }
+  max_unit(unit_of(a), unit_of(b))
+}
+
+/// The largest unit with a nonzero field (DefaultTemporalLargestUnit).
+fn default_largest_unit(d: DurRec) -> String {
+  case d.years != 0 {
+    True -> "year"
+    False ->
+      case d.months != 0 {
+        True -> "month"
+        False ->
+          case d.weeks != 0 {
+            True -> "week"
+            False -> larger_time_unit(d, zero_dur)
+          }
+      }
+  }
+}
+
+/// Temporal.Duration.prototype.round ( roundTo )
+fn duration_round(
+  state: State,
+  protos: TemporalProtos,
+  d: DurRec,
+  args: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  case arg_at(args, 0) {
+    JsUndefined -> state.type_error(state, "options parameter is required")
+    JsString(su_str) ->
+      case singular_unit(su_str) {
+        Some(su) ->
+          duration_round_with(
+            state,
+            protos,
+            d,
+            "auto",
+            su,
+            1,
+            "halfExpand",
+            RelNone,
+          )
+        None -> state.range_error(state, "invalid smallestUnit")
+      }
+    JsObject(oref) -> {
+      use largest, state <- state.try_op(
+        get_unit_option_keep(state, Some(oref), "largestUnit", ["auto"]),
+      )
+      use rel_v, state <- state.try_op(ops_object.get_value(
+        state,
+        oref,
+        Named("relativeTo"),
+        JsObject(oref),
+      ))
+      use rel, state <- state.try_op(convert_relative_to(state, rel_v))
+      use inc, state <- state.try_op(get_rounding_increment_option(
+        state,
+        Some(oref),
+      ))
+      use mode, state <- state.try_op(get_string_option(
+        state,
+        Some(oref),
+        "roundingMode",
+        [
+          "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor",
+          "halfExpand", "halfTrunc", "halfEven",
+        ],
+        Some("halfExpand"),
+      ))
+      use smallest, state <- state.try_op(
+        get_unit_option(state, Some(oref), "smallestUnit", []),
+      )
+      case smallest == None && largest == None {
+        True ->
+          state.range_error(
+            state,
+            "at least one of smallestUnit or largestUnit is required",
+          )
+        False -> {
+          let su = option.unwrap(smallest, "nanosecond")
+          let lu = case largest {
+            Some(u) -> u
+            None -> "auto"
+          }
+          duration_round_with(
+            state,
+            protos,
+            d,
+            lu,
+            su,
+            inc,
+            option.unwrap(mode, "halfExpand"),
+            rel,
+          )
+        }
+      }
+    }
+    _ -> state.type_error(state, "invalid options")
+  }
+}
+
+fn duration_round_with(
+  state: State,
+  protos: TemporalProtos,
+  d: DurRec,
+  largest: String,
+  smallest: String,
+  inc: Int,
+  mode: String,
+  rel: RelTo,
+) -> #(State, Result(JsValue, JsValue)) {
+  let largest = case largest {
+    "auto" -> max_unit(default_largest_unit(d), smallest)
+    u -> u
+  }
+  let max_inc = case smallest {
+    "hour" -> Some(24)
+    "minute" | "second" -> Some(60)
+    "millisecond" | "microsecond" | "nanosecond" -> Some(1000)
+    _ -> None
+  }
+  let inc_invalid = case max_inc {
+    Some(max) -> !valid_time_increment(inc, max)
+    None -> False
+  }
+  let date_inc_invalid =
+    inc > 1 && unit_rank(smallest) >= unit_rank("day") && largest != smallest
+  case
+    unit_rank(largest) < unit_rank(smallest),
+    inc_invalid || date_inc_invalid
+  {
+    True, _ ->
+      state.range_error(
+        state,
+        "largestUnit must not be smaller than smallestUnit",
+      )
+    _, True -> state.range_error(state, "invalid roundingIncrement")
+    False, False ->
+      case rel {
+        RelNone -> {
+          let needs_rel =
+            d.years != 0
+            || d.months != 0
+            || d.weeks != 0
+            || unit_rank(largest) > unit_rank("day")
+            || unit_rank(smallest) > unit_rank("day")
+          case needs_rel {
+            True ->
+              state.range_error(
+                state,
+                "relativeTo is required for calendar-unit rounding",
+              )
+            False -> {
+              let total = time_duration_ns(d)
+              let rounded =
+                round_to_increment(total, inc * unit_ns(smallest), mode)
+              let result = balance_time_ns(rounded, largest)
+              case is_valid_duration(result) {
+                False -> state.range_error(state, "invalid duration")
+                True -> {
+                  let #(state, v) = make_duration(state, protos, result)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        RelZoned(rel_ns, tz, cal) -> {
+          // DifferenceZonedDateTimeWithRounding between the anchor and
+          // anchor + duration.
+          use target_ns <- terr(state, add_zoned_ns(rel_ns, tz, cal, d))
+          case unit_rank(largest) <= unit_rank("hour") {
+            True -> {
+              let diff = target_ns - rel_ns
+              let rounded =
+                round_to_increment(diff, inc * unit_ns(smallest), mode)
+              let result = balance_time_ns(rounded, largest)
+              case is_valid_duration(result) {
+                False -> state.range_error(state, "invalid duration")
+                True -> {
+                  let #(state, v) = make_duration(state, protos, result)
+                  #(state, Ok(v))
+                }
+              }
+            }
+            False -> {
+              use result <- terr(
+                state,
+                case unit_rank(smallest) >= unit_rank("day") {
+                  // Calendar-unit (or zoned day) smallestUnit: wall-clock
+                  // diff with calendar nudging.
+                  True -> {
+                    let a_dt =
+                      epoch_ns_to_iso(rel_ns, tz_offset_ns_at(tz, rel_ns))
+                    let b_dt =
+                      epoch_ns_to_iso(target_ns, tz_offset_ns_at(tz, target_ns))
+                    diff_date_time_core(
+                      cal,
+                      a_dt,
+                      b_dt,
+                      largest,
+                      smallest,
+                      inc,
+                      mode,
+                      True,
+                    )
+                  }
+                  // Time-unit smallestUnit: days are bounded by real instants
+                  // and the time part is rounded within the day
+                  // (NudgeToZonedTime).
+                  False ->
+                    zoned_diff_round_time(
+                      cal,
+                      tz,
+                      rel_ns,
+                      target_ns,
+                      largest,
+                      smallest,
+                      inc,
+                      mode,
+                    )
+                },
+              )
+              case is_valid_duration(result) {
+                False -> state.range_error(state, "invalid duration")
+                True -> {
+                  let #(state, v) = make_duration(state, protos, result)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        RelPlain(rel_date, rel_cal) -> {
+          // A zero duration rounds to zero before the relativeTo date-time
+          // is range-checked.
+          let out_of_range =
+            duration_sign(d) != 0
+            && !iso_datetime_within_limits(rel_date, midnight)
+          case out_of_range {
+            True ->
+              state.range_error(
+                state,
+                "relativeTo is outside the representable range after conversion to DateTime",
+              )
+            False -> {
+              use target <- terr(state, duration_target_datetime(rel_date, d))
+              use result <- terr(
+                state,
+                diff_date_time_core(
+                  rel_cal,
+                  #(rel_date, midnight),
+                  target,
+                  largest,
+                  smallest,
+                  inc,
+                  mode,
+                  False,
+                ),
+              )
+              case is_valid_duration(result) {
+                False -> state.range_error(state, "invalid duration")
+                True -> {
+                  let #(state, v) = make_duration(state, protos, result)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+      }
+  }
+}
+
+/// DifferenceZonedDateTime + NudgeToZonedTime: difference between two zoned
+/// instants, rounded at a time unit. Days are measured between wall-clock
+/// instants (variable length); the time remainder is rounded within the
+/// final day and carries into it when it overflows.
+fn zoned_diff_round_time(
+  cal: String,
+  tz: String,
+  a_ns: Int,
+  b_ns: Int,
+  largest: String,
+  smallest: String,
+  inc: Int,
+  mode: String,
+) -> Result(DurRec, TErr) {
+  // Note: a zero difference still computes the next-day boundary, which can
+  // throw when the anchor sits at the edge of the representable range
+  // (NudgeToZonedTime always materialises both day bounds).
+  {
+    {
+      let #(a_d, a_t) = epoch_ns_to_iso(a_ns, tz_offset_ns_at(tz, a_ns))
+      let #(b_d, b_t) = epoch_ns_to_iso(b_ns, tz_offset_ns_at(tz, b_ns))
+      let sign = case b_ns < a_ns {
+        True -> -1
+        False -> 1
+      }
+      // Wall-clock date difference with a time borrow.
+      let tb = time_to_ns(b_t) - time_to_ns(a_t)
+      let b_date = case sign > 0 && tb < 0, sign < 0 && tb > 0 {
+        True, _ -> iso_date_from_epoch_days(epoch_days(b_d) - 1)
+        _, True -> iso_date_from_epoch_days(epoch_days(b_d) + 1)
+        _, _ -> b_d
+      }
+      let #(years, months, weeks, days) = case cal {
+        "iso8601" -> diff_date_parts(a_d, b_date, largest)
+        _ ->
+          case largest {
+            "year" | "month" -> {
+              let lu = case largest {
+                "year" -> "years"
+                _ -> "months"
+              }
+              let #(y, m, rem_days) = calendar_date_until(cal, a_d, b_date, lu)
+              #(y, m, 0, rem_days)
+            }
+            _ -> diff_date_parts(a_d, b_date, largest)
+          }
+      }
+      let date_dur = DurRec(..zero_dur, years:, months:, weeks:, days:)
+      use start_date <- result.try(calendar_date_add(
+        cal,
+        a_d,
+        date_dur,
+        "constrain",
+      ))
+      use start_ns <- result.try(get_epoch_ns_for(
+        tz,
+        start_date,
+        a_t,
+        "compatible",
+      ))
+      let time_rem = b_ns - start_ns
+      case smallest == "nanosecond" && inc == 1 {
+        // Rounding is a noop: balance only, without materialising the
+        // next-day boundary (which can be out of range at the edges).
+        True -> {
+          let time_part = balance_time_ns(time_rem, "hour")
+          Ok(DurRec(..time_part, years:, months:, weeks:, days:))
+        }
+        False ->
+          zoned_nudge_time(
+            tz,
+            #(a_d, a_t),
+            start_date,
+            start_ns,
+            time_rem,
+            #(years, months, weeks, days),
+            sign,
+            largest,
+            smallest,
+            inc,
+            mode,
+          )
+      }
+    }
+  }
+}
+
+/// NudgeToZonedTime: round the time remainder within the (variable-length)
+/// final day, carrying into it on overflow and bubbling into larger units.
+fn zoned_nudge_time(
+  tz: String,
+  a_dt: #(IsoDate, TimeRec),
+  start_date: IsoDate,
+  start_ns: Int,
+  time_rem: Int,
+  ymwd: #(Int, Int, Int, Int),
+  sign: Int,
+  largest: String,
+  smallest: String,
+  inc: Int,
+  mode: String,
+) -> Result(DurRec, TErr) {
+  let #(a_d, a_t) = a_dt
+  let #(years, months, weeks, days) = ymwd
+  let end_date = iso_date_from_epoch_days(epoch_days(start_date) + sign)
+  use end_ns <- result.try(get_epoch_ns_for(tz, end_date, a_t, "compatible"))
+  let day_span = end_ns - start_ns
+  let rounded_t = round_to_increment(time_rem, inc * unit_ns(smallest), mode)
+  let beyond = rounded_t - day_span
+  case int_sign(beyond) != 0 - sign {
+    // Rounded time fills (or exceeds) the whole day: carry one day and
+    // round the remainder beyond it, then bubble into larger units.
+    True -> {
+      let rounded_t2 =
+        round_to_increment(time_rem - day_span, inc * unit_ns(smallest), mode)
+      let time_part = balance_time_ns(rounded_t2, "hour")
+      let base = DurRec(..time_part, years:, months:, weeks:, days: days + sign)
+      let nudged_inst = end_ns + rounded_t2
+      let #(n_d, n_t) =
+        epoch_ns_to_iso(nudged_inst, tz_offset_ns_at(tz, nudged_inst))
+      Ok(bubble_date_duration(
+        sign,
+        base,
+        local_ns(n_d, n_t),
+        #(a_d, a_t),
+        largest,
+        "day",
+      ))
+    }
+    False -> {
+      let time_part = balance_time_ns(rounded_t, "hour")
+      Ok(DurRec(..time_part, years:, months:, weeks:, days:))
+    }
+  }
+}
+
+/// rel + duration as an exact (date, time) pair.
+fn duration_target_datetime(
+  rel: IsoDate,
+  d: DurRec,
+) -> Result(#(IsoDate, TimeRec), TErr) {
+  let date_only =
+    DurRec(
+      ..zero_dur,
+      years: d.years,
+      months: d.months,
+      weeks: d.weeks,
+      days: d.days,
+    )
+  use base <- result.try(add_duration_to_date(rel, date_only, "constrain"))
+  let time_ns = time_only_ns(d)
+  let extra_days = floor_div(time_ns, ns_per_day)
+  let rem = time_ns - extra_days * ns_per_day
+  let final = iso_date_from_epoch_days(epoch_days(base) + extra_days)
+  case iso_date_within_limits(final) {
+    True -> Ok(#(final, ns_to_time(rem)))
+    False -> Error(RangeE("date outside of supported range"))
+  }
+}
+
+/// Temporal.Duration.prototype.total ( totalOf )
+fn duration_total(
+  state: State,
+  d: DurRec,
+  args: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  case arg_at(args, 0) {
+    JsUndefined -> state.type_error(state, "totalOf is required")
+    JsString(u_str) ->
+      case singular_unit(u_str) {
+        Some(u) -> duration_total_with(state, d, u, RelNone)
+        None -> state.range_error(state, "invalid unit")
+      }
+    JsObject(oref) -> {
+      use rel_v, state <- state.try_op(ops_object.get_value(
+        state,
+        oref,
+        Named("relativeTo"),
+        JsObject(oref),
+      ))
+      use rel, state <- state.try_op(convert_relative_to(state, rel_v))
+      use unit_o, state <- state.try_op(
+        get_unit_option(state, Some(oref), "unit", []),
+      )
+      case unit_o {
+        None -> state.range_error(state, "unit is required")
+        Some(u) -> duration_total_with(state, d, u, rel)
+      }
+    }
+    _ -> state.type_error(state, "invalid totalOf")
+  }
+}
+
+fn duration_total_with(
+  state: State,
+  d: DurRec,
+  unit: String,
+  rel: RelTo,
+) -> #(State, Result(JsValue, JsValue)) {
+  case rel {
+    RelNone -> {
+      let needs_rel =
+        d.years != 0
+        || d.months != 0
+        || d.weeks != 0
+        || unit_rank(unit) > unit_rank("day")
+      case needs_rel {
+        True ->
+          state.range_error(
+            state,
+            "relativeTo is required to total calendar units",
+          )
+        False -> {
+          let total = time_duration_ns(d)
+          #(state, Ok(JsNumber(Finite(ns_div_float(total, unit_ns(unit))))))
+        }
+      }
+    }
+    RelZoned(anchor_ns, tz, cal) -> {
+      use target_ns <- terr(state, add_zoned_ns(anchor_ns, tz, cal, d))
+      case unit_rank(unit) <= unit_rank("hour") {
+        True -> {
+          let diff = target_ns - anchor_ns
+          #(state, Ok(JsNumber(Finite(ns_div_float(diff, unit_ns(unit))))))
+        }
+        False -> {
+          // Whole calendar units in wall-clock space + fractional progress
+          // between the bounding instants (NudgeToCalendarUnit, zoned).
+          let #(a_d, a_t) =
+            epoch_ns_to_iso(anchor_ns, tz_offset_ns_at(tz, anchor_ns))
+          let #(b_d, b_t) =
+            epoch_ns_to_iso(target_ns, tz_offset_ns_at(tz, target_ns))
+          let sign = case target_ns < anchor_ns {
+            True -> -1
+            False -> 1
+          }
+          let tb = time_to_ns(b_t) - time_to_ns(a_t)
+          let b_date = case sign > 0 && tb < 0, sign < 0 && tb > 0 {
+            True, _ -> iso_date_from_epoch_days(epoch_days(b_d) - 1)
+            _, True -> iso_date_from_epoch_days(epoch_days(b_d) + 1)
+            _, _ -> b_d
+          }
+          let whole0 = case unit {
+            "year" -> diff_date_parts(a_d, b_date, "year").0
+            "month" -> diff_date_parts(a_d, b_date, "month").1
+            "week" -> truncate_div(epoch_days(b_date) - epoch_days(a_d), 7)
+            _ -> epoch_days(b_date) - epoch_days(a_d)
+          }
+          let bound = fn(w: Int) {
+            let date = case unit {
+              "day" -> iso_date_from_epoch_days(epoch_days(a_d) + w)
+              _ -> add_calendar_units(a_d, unit, w)
+            }
+            get_epoch_ns_for(tz, date, a_t, "compatible")
+          }
+          use start0_ns <- terr(state, bound(whole0))
+          use end0_ns <- terr(state, bound(whole0 + sign))
+          let in_window = case sign > 0 {
+            True -> start0_ns <= target_ns && target_ns <= end0_ns
+            False -> end0_ns <= target_ns && target_ns <= start0_ns
+          }
+          let finish = fn(state: State, whole: Int, start_ns: Int, end_ns: Int) {
+            let num = target_ns - start_ns
+            let den = end_ns - start_ns
+            // Single correctly-rounded division of the exact rational
+            // whole + sign·num/den (NudgeToCalendarUnit's total).
+            let total = case den == 0 {
+              True -> int.to_float(whole)
+              False -> ns_div_float(whole * den + sign * num, den)
+            }
+            #(state, Ok(JsNumber(Finite(total))))
+          }
+          case in_window {
+            True -> finish(state, whole0, start0_ns, end0_ns)
+            False -> {
+              use e2 <- terr(state, bound(whole0 + 2 * sign))
+              finish(state, whole0 + sign, end0_ns, e2)
+            }
+          }
+        }
+      }
+    }
+    RelPlain(rel_date, _rel_cal) -> {
+      // A zero duration totals to zero before the relativeTo date-time is
+      // range-checked.
+      use Nil <- terr(
+        state,
+        case
+          duration_sign(d) != 0
+          && !iso_datetime_within_limits(rel_date, midnight)
+        {
+          True ->
+            Error(RangeE(
+              "relativeTo is outside the representable range after conversion to DateTime",
+            ))
+          False -> Ok(Nil)
+        },
+      )
+      use target <- terr(state, duration_target_datetime(rel_date, d))
+      let rel_ns = epoch_days(rel_date) * ns_per_day
+      let target_ns = epoch_days(target.0) * ns_per_day + time_to_ns(target.1)
+      case unit_rank(unit) <= unit_rank("day") {
+        True -> {
+          let diff = target_ns - rel_ns
+          #(state, Ok(JsNumber(Finite(ns_div_float(diff, unit_ns(unit))))))
+        }
+        False -> {
+          // Whole calendar units + fractional progress between bounds
+          // (NudgeToCalendarUnit). Per ComputeNudgeWindow, when the target
+          // falls outside the first window the window is recomputed shifted
+          // by one unit. That happens when day-of-month clamping makes the
+          // date diff undercount (e.g. 2020-01-31 + 1 month lands on
+          // 2020-02-29, which diffs back as 0 months).
+          let sign = case target_ns < rel_ns {
+            True -> -1
+            False -> 1
+          }
+          let target_floor_days = floor_div(target_ns, ns_per_day)
+          let target_date = iso_date_from_epoch_days(target_floor_days)
+          let whole0 = case unit {
+            "year" -> diff_date_parts(rel_date, target_date, "year").0
+            "month" -> diff_date_parts(rel_date, target_date, "month").1
+            _ -> truncate_div(epoch_days(target_date) - epoch_days(rel_date), 7)
+          }
+          // Window bounds come from CalendarDateAdd, which range-checks its
+          // result (NudgeToCalendarUnit).
+          let bound_ns = fn(w: Int) {
+            use d2 <- result.map(
+              check_date_limits(add_calendar_units(rel_date, unit, w)),
+            )
+            epoch_days(d2) * ns_per_day
+          }
+          use start0_ns <- terr(state, bound_ns(whole0))
+          use end0_ns <- terr(state, bound_ns(whole0 + sign))
+          let in_window = case sign > 0 {
+            True -> start0_ns <= target_ns && target_ns <= end0_ns
+            False -> end0_ns <= target_ns && target_ns <= start0_ns
+          }
+          use #(whole, start_ns, end_ns) <- terr(state, case in_window {
+            True -> Ok(#(whole0, start0_ns, end0_ns))
+            False -> {
+              use e2 <- result.map(bound_ns(whole0 + 2 * sign))
+              #(whole0 + sign, end0_ns, e2)
+            }
+          })
+          let num = target_ns - start_ns
+          let den = end_ns - start_ns
+          // Single correctly-rounded division of the exact rational
+          // whole + sign·num/den (NudgeToCalendarUnit's total).
+          let total = case den == 0 {
+            True -> int.to_float(whole)
+            False -> ns_div_float(whole * den + sign * num, den)
+          }
+          #(state, Ok(JsNumber(Finite(total))))
+        }
+      }
+    }
+  }
+}
+
+fn add_calendar_units(d: IsoDate, unit: String, n: Int) -> IsoDate {
+  case unit {
+    "year" -> add_months_constrained(d, n * 12)
+    "month" -> add_months_constrained(d, n)
+    _ -> iso_date_from_epoch_days(epoch_days(d) + n * 7)
+  }
+}
+
+/// Correctly-rounded integer ratio → double (round-to-nearest, ties-to-even).
+/// Computing `q + r/b` in floats double-rounds near representability
+/// boundaries; this scales the exact rational into [2^52, 2^53) and rounds
+/// once (DivideTimeDuration operates on exact mathematical values).
+fn ns_div_float(a: Int, b: Int) -> Float {
+  case b < 0 {
+    True -> ns_div_float(0 - a, 0 - b)
+    False ->
+      case a == 0 {
+        True -> 0.0
+        False -> {
+          let neg = a < 0
+          let #(q, s) = scale_ratio(int.absolute_value(a), b, 0)
+          let f = case s >= 0 {
+            True -> int.to_float(int.bitwise_shift_left(q, s))
+            False ->
+              int.to_float(q) /. int.to_float(int.bitwise_shift_left(1, 0 - s))
+          }
+          case neg {
+            True -> 0.0 -. f
+            False -> f
+          }
+        }
+      }
+  }
+}
+
+const two52 = 4_503_599_627_370_496
+
+const two53 = 9_007_199_254_740_992
+
+/// Scale a/b (both positive) by a power of two so the rounded quotient lands
+/// in [2^52, 2^53), then round to nearest (ties to even).
+/// Returns #(mantissa, exponent) with a/b ≈ mantissa × 2^exponent.
+fn scale_ratio(a: Int, b: Int, s: Int) -> #(Int, Int) {
+  case a >= b * two53 {
+    True -> scale_ratio(a, b * 2, s + 1)
+    False ->
+      case a < b * two52 {
+        True -> scale_ratio(a * 2, b, s - 1)
+        False -> {
+          let q0 = a / b
+          let r = a - q0 * b
+          let round_up = case int_sign(2 * r - b) {
+            1 -> True
+            -1 -> False
+            _ -> q0 % 2 == 1
+          }
+          let q = case round_up {
+            True -> q0 + 1
+            False -> q0
+          }
+          case q == two53 {
+            True -> #(two52, s + 1)
+            False -> #(q, s)
+          }
+        }
+      }
+  }
+}
+
+/// ToSecondsStringPrecisionRecord for Duration.toString: only sub-minute
+/// smallestUnit values are allowed. Returns #(precision, unit, increment).
+fn duration_string_precision(
+  digits: Precision,
+  su: Option(String),
+) -> Result(#(Precision, String, Int), TErr) {
+  case su {
+    Some("second") -> Ok(#(FixedPrec(0), "second", 1))
+    Some("millisecond") -> Ok(#(FixedPrec(3), "millisecond", 1))
+    Some("microsecond") -> Ok(#(FixedPrec(6), "microsecond", 1))
+    Some("nanosecond") -> Ok(#(FixedPrec(9), "nanosecond", 1))
+    Some(u) ->
+      Error(RangeE(u <> " is not a valid smallestUnit for Duration.toString"))
+    None ->
+      case digits {
+        AutoPrec -> Ok(#(AutoPrec, "nanosecond", 1))
+        FixedPrec(0) -> Ok(#(FixedPrec(0), "second", 1))
+        FixedPrec(n) -> Ok(#(FixedPrec(n), "nanosecond", pow10(9 - n)))
+        MinutePrec -> Ok(#(AutoPrec, "nanosecond", 1))
+      }
+  }
+}
+
+/// RoundTimeDuration + TemporalDurationFromInternal for Duration.toString:
+/// round the time portion (hours and below) and rebalance, carrying into
+/// days only when the duration's default largest unit is a date unit.
+fn round_duration_for_string(
+  d: DurRec,
+  inc: Int,
+  unit: String,
+  mode: String,
+) -> Result(DurRec, TErr) {
+  let time_ns = time_only_ns(d)
+  let rounded = round_to_increment(time_ns, inc * unit_ns(unit), mode)
+  let largest = max_unit(default_largest_unit(d), "second")
+  let result = case unit_rank(largest) >= unit_rank("day") {
+    True -> {
+      let extra_days = truncate_div(rounded, ns_per_day)
+      let rem = rounded - extra_days * ns_per_day
+      let t = balance_time_ns(rem, "hour")
+      DurRec(
+        ..t,
+        years: d.years,
+        months: d.months,
+        weeks: d.weeks,
+        days: d.days + extra_days,
+      )
+    }
+    False -> balance_time_ns(rounded, largest)
+  }
+  case is_valid_duration(result) {
+    True -> Ok(result)
+    False -> Error(RangeE("rounded duration is out of range"))
+  }
+}
+
+/// ISO 8601 duration serialization.
+fn format_duration(d: DurRec, prec: Precision) -> String {
+  let sign = duration_sign(d)
+  let prefix = case sign < 0 {
+    True -> "-"
+    False -> ""
+  }
+  let abs_part = fn(n: Int) { int.absolute_value(n) }
+  let date_part =
+    join_unit(abs_part(d.years), "Y")
+    <> join_unit(abs_part(d.months), "M")
+    <> join_unit(abs_part(d.weeks), "W")
+    <> join_unit(abs_part(d.days), "D")
+  // Sub-second components may exceed their unit (e.g. 1.8e16 microseconds);
+  // carry whole seconds out of the combined sub-second total.
+  let sub_total =
+    abs_part(d.ms) * ns_per_ms + abs_part(d.us) * ns_per_us + abs_part(d.ns)
+  let extra_seconds = sub_total / ns_per_second
+  let sub = sub_total % ns_per_second
+  let seconds_str = case
+    d.seconds != 0
+    || sub_total != 0
+    || { date_part == "" && d.hours == 0 && d.minutes == 0 }
+    || show_fixed_seconds(prec)
+  {
+    True -> {
+      let frac = case prec {
+        AutoPrec -> format_fraction(sub, AutoPrec)
+        FixedPrec(0) -> ""
+        FixedPrec(n) -> {
+          let digits9 = int.to_string(sub) |> string.pad_start(9, "0")
+          "." <> string.slice(digits9, 0, n)
+        }
+        MinutePrec -> ""
+      }
+      int.to_string(abs_part(d.seconds) + extra_seconds) <> frac <> "S"
+    }
+    False -> ""
+  }
+  let time_part =
+    join_unit(abs_part(d.hours), "H")
+    <> join_unit(abs_part(d.minutes), "M")
+    <> seconds_str
+  let t = case time_part {
+    "" -> ""
+    _ -> "T" <> time_part
+  }
+  prefix <> "P" <> date_part <> t
+}
+
+fn show_fixed_seconds(p: Precision) -> Bool {
+  case p {
+    FixedPrec(_) -> True
+    _ -> False
+  }
+}
+
+fn join_unit(n: Int, designator: String) -> String {
+  case n == 0 {
+    True -> ""
+    False -> int.to_string(n) <> designator
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Instant methods
+// ----------------------------------------------------------------------------
+
+fn instant_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_instant(state, this) {
+    None -> brand_error(state, "Instant", name)
+    Some(ns) ->
+      case name {
+        "toJSON" -> #(state, Ok(JsString(format_instant(ns, AutoPrec))))
+        "toLocaleString" -> #(state, Ok(JsString(format_instant(ns, AutoPrec))))
+        "toString" -> {
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          // Read options: fractionalSecondDigits, roundingMode, smallestUnit,
+          // timeZone (alphabetical).
+          use #(prec, su, sinc, mode), state <- state.try_op(
+            to_string_time_options(state, opts),
+          )
+          use tz_opt, state <- state.try_op(case opts {
+            None -> Ok(#(JsUndefined, state))
+            Some(oref) ->
+              ops_object.get_value(
+                state,
+                oref,
+                Named("timeZone"),
+                JsObject(oref),
+              )
+          })
+          let rounded = case su {
+            None -> ns
+            Some(u) ->
+              round_to_increment(
+                ns,
+                sinc * unit_ns(u),
+                as_if_positive_mode(mode),
+              )
+          }
+          case tz_opt {
+            JsUndefined -> #(state, Ok(JsString(format_instant(rounded, prec))))
+            JsString(tz_str) -> {
+              use tz <- terr(state, parse_time_zone_id(tz_str))
+              let off = tz_offset_ns_at(tz, rounded)
+              let #(d, t) = epoch_ns_to_iso(rounded, off)
+              let s =
+                format_iso_date(d)
+                <> "T"
+                <> format_iso_time(t, prec)
+                <> format_offset_rounded(off)
+              #(state, Ok(JsString(s)))
+            }
+            _ -> state.type_error(state, "timeZone must be a string")
+          }
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.Instant cannot be converted with valueOf",
+          )
+        "equals" -> {
+          use other, state <- state.try_op(to_temporal_instant(
+            state,
+            arg_at(args, 0),
+          ))
+          #(state, Ok(JsBool(ns == other)))
+        }
+        "add" | "subtract" -> {
+          use dur, state <- state.try_op(to_temporal_duration(
+            state,
+            arg_at(args, 0),
+          ))
+          case
+            dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0
+          {
+            True ->
+              state.range_error(
+                state,
+                "Instant arithmetic does not support date units",
+              )
+            False -> {
+              let delta = case name {
+                "subtract" -> 0 - time_only_ns(dur)
+                _ -> time_only_ns(dur)
+              }
+              let ns2 = ns + delta
+              case int.absolute_value(ns2) <= ns_max_instant {
+                False -> state.range_error(state, "instant outside valid range")
+                True -> {
+                  let #(state, v) = make_instant(state, protos, ns2)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        "round" -> {
+          use #(su, inc, mode), state <- state.try_op(round_options(
+            state,
+            arg_at(args, 0),
+            "hour",
+            False,
+          ))
+          let u_ns = unit_ns(su)
+          // For Instant: increment*unit must divide 24h.
+          let max = ns_per_day / u_ns
+          case inc >= 1 && inc <= max && max % inc == 0 {
+            False -> state.range_error(state, "invalid roundingIncrement")
+            True -> {
+              let rounded = round_to_increment(ns, inc * u_ns, mode)
+              case int.absolute_value(rounded) <= ns_max_instant {
+                False -> state.range_error(state, "instant outside valid range")
+                True -> {
+                  let #(state, v) = make_instant(state, protos, rounded)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        "until" | "since" -> {
+          use other, state <- state.try_op(to_temporal_instant(
+            state,
+            arg_at(args, 0),
+          ))
+          instant_until_since(state, protos, ns, other, args, name == "since")
+        }
+        "toZonedDateTimeISO" -> {
+          case arg_at(args, 0) {
+            JsString(tz_str) -> {
+              use tz <- terr(state, parse_time_zone_id(tz_str))
+              let #(state, v) = make_zoned(state, protos, ns, tz)
+              #(state, Ok(v))
+            }
+            JsUndefined -> state.type_error(state, "time zone is required")
+            _ -> state.type_error(state, "time zone must be a string")
+          }
+        }
+        _ -> state.type_error(state, "unknown method")
+      }
+  }
+}
+
+fn format_instant(ns: Int, prec: Precision) -> String {
+  let #(d, t) = epoch_ns_to_iso(ns, 0)
+  format_iso_date(d) <> "T" <> format_iso_time(t, prec) <> "Z"
+}
+
+fn instant_until_since(
+  state: State,
+  protos: TemporalProtos,
+  a: Int,
+  b: Int,
+  args: List(JsValue),
+  is_since: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  use largest, smallest, inc, mode, state <- get_difference_settings(
+    state,
+    args,
+  )
+  let smallest = option.unwrap(smallest, "nanosecond")
+  let largest = option.unwrap(largest, max_unit(smallest, "second"))
+  case
+    unit_rank(smallest) > unit_rank("hour")
+    || unit_rank(largest) > unit_rank("hour")
+  {
+    True -> state.range_error(state, "units must be time units for Instant")
+    False ->
+      case unit_rank(largest) < unit_rank(smallest) {
+        True ->
+          state.range_error(
+            state,
+            "largestUnit must not be smaller than smallestUnit",
+          )
+        False -> {
+          let mode2 = apply_since_mode(mode, is_since)
+          let diff = b - a
+          let rounded = round_to_increment(diff, inc * unit_ns(smallest), mode2)
+          let rounded = apply_since_ns(rounded, is_since)
+          let dur = balance_time_ns(rounded, largest)
+          let #(state, v) = make_duration(state, protos, dur)
+          #(state, Ok(v))
+        }
+      }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// ZonedDateTime methods
+// ----------------------------------------------------------------------------
+
+fn zoned_date_time_method(
+  name: String,
+  protos: TemporalProtos,
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case this_zoned(state, this) {
+    None -> brand_error(state, "ZonedDateTime", name)
+    Some(#(ns, tz, zcal)) -> {
+      let _ = zcal
+      let off = tz_offset_ns_at(tz, ns)
+      let #(d, t) = epoch_ns_to_iso(ns, off)
+      case name {
+        "toJSON" -> #(state, Ok(JsString(format_zoned(ns, tz, AutoPrec))))
+        "toLocaleString" -> #(
+          state,
+          Ok(JsString(format_zoned(ns, tz, AutoPrec))),
+        )
+        "toString" -> {
+          // Read order: calendarName, fractionalSecondDigits, offset,
+          // roundingMode, smallestUnit, timeZoneName; validate after.
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            arg_at(args, 0),
+          ))
+          use cal_name, state <- state.try_op(get_string_option(
+            state,
+            opts,
+            "calendarName",
+            ["auto", "always", "never", "critical"],
+            Some("auto"),
+          ))
+          use digits, state <- state.try_op(get_fractional_digits(state, opts))
+          use offset_mode, state <- state.try_op(get_string_option(
+            state,
+            opts,
+            "offset",
+            ["auto", "never"],
+            Some("auto"),
+          ))
+          use mode, state <- state.try_op(get_rounding_mode_option(state, opts))
+          use su_opt, state <- state.try_op(
+            get_unit_option(state, opts, "smallestUnit", []),
+          )
+          use tz_mode, state <- state.try_op(get_string_option(
+            state,
+            opts,
+            "timeZoneName",
+            ["auto", "never", "critical"],
+            Some("auto"),
+          ))
+          use #(prec, su, sinc, mode) <- terr(
+            state,
+            seconds_string_precision(digits, su_opt, mode),
+          )
+          let rounded = case su {
+            None -> ns
+            Some(u) ->
+              round_to_increment(
+                ns,
+                sinc * unit_ns(u),
+                as_if_positive_mode(mode),
+              )
+          }
+          let off2 = tz_offset_ns_at(tz, rounded)
+          let #(d2, t2) = epoch_ns_to_iso(rounded, off2)
+          let base = format_iso_date(d2) <> "T" <> format_iso_time(t2, prec)
+          let with_offset = case option.unwrap(offset_mode, "auto") {
+            "never" -> base
+            _ -> base <> format_offset_rounded(off2)
+          }
+          let with_tz = case option.unwrap(tz_mode, "auto") {
+            "never" -> with_offset
+            "critical" -> with_offset <> "[!" <> tz <> "]"
+            _ -> with_offset <> "[" <> tz <> "]"
+          }
+          let s =
+            with_tz <> calendar_suffix(option.unwrap(cal_name, "auto"), zcal)
+          #(state, Ok(JsString(s)))
+        }
+        "valueOf" ->
+          state.type_error(
+            state,
+            "Temporal.ZonedDateTime cannot be converted with valueOf",
+          )
+        "equals" -> {
+          use #(ons, otz, ocal), state <- state.try_op(to_temporal_zoned(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          #(
+            state,
+            Ok(JsBool(ns == ons && time_zone_equals(tz, otz) && zcal == ocal)),
+          )
+        }
+        "add" | "subtract" -> {
+          use dur, state <- state.try_op(to_temporal_duration(
+            state,
+            arg_at(args, 0),
+          ))
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            arg_at(args, 1),
+          ))
+          let dur = case name {
+            "subtract" -> negate_dur(dur)
+            _ -> dur
+          }
+          // Add date part in local wall-clock space, then exact time. Pure
+          // time-unit durations add directly to the epoch (AddZonedDateTime).
+          let date_dur =
+            DurRec(
+              ..zero_dur,
+              years: dur.years,
+              months: dur.months,
+              weeks: dur.weeks,
+              days: dur.days,
+            )
+          use base_ns <- terr(
+            state,
+            case
+              dur.years == 0
+              && dur.months == 0
+              && dur.weeks == 0
+              && dur.days == 0
+            {
+              True -> Ok(ns)
+              False -> {
+                use d2 <- result.try(calendar_date_add(
+                  zcal,
+                  d,
+                  date_dur,
+                  overflow,
+                ))
+                get_epoch_ns_for(tz, d2, t, "compatible")
+              }
+            },
+          )
+          let ns2 = base_ns + time_only_ns(dur)
+          case int.absolute_value(ns2) <= ns_max_instant {
+            False -> state.range_error(state, "instant outside valid range")
+            True -> {
+              let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
+              #(state, Ok(v))
+            }
+          }
+        }
+        "withTimeZone" -> {
+          case arg_at(args, 0) {
+            JsString(tz_str) -> {
+              use tz2 <- terr(state, parse_time_zone_id(tz_str))
+              let #(state, v) = make_zoned_cal(state, protos, ns, tz2, zcal)
+              #(state, Ok(v))
+            }
+            _ -> state.type_error(state, "time zone must be a string")
+          }
+        }
+        "until" | "since" -> {
+          use #(ons, otz, ocal), state <- state.try_op(to_temporal_zoned(
+            state,
+            arg_at(args, 0),
+            JsUndefined,
+          ))
+          case ocal == zcal {
+            False ->
+              state.range_error(
+                state,
+                "cannot compute difference between dates of different calendars",
+              )
+            True ->
+              zoned_until_since(
+                state,
+                protos,
+                zcal,
+                ns,
+                tz,
+                ons,
+                otz,
+                args,
+                name == "since",
+              )
+          }
+        }
+        "round" -> {
+          use #(su, inc, mode), state <- state.try_op(round_options(
+            state,
+            arg_at(args, 0),
+            "day",
+            True,
+          ))
+          let u_ns = unit_ns(su)
+          let max = case su {
+            "day" -> 1
+            "hour" -> 24
+            "minute" | "second" -> 60
+            _ -> 1000
+          }
+          case valid_time_increment(inc, max) {
+            False -> state.range_error(state, "invalid roundingIncrement")
+            True -> {
+              let local = ns + off
+              let day_part = floor_div(local, ns_per_day)
+              let local_date = iso_date_from_epoch_days(day_part)
+              case su == "day" {
+                // Round within the day bounded by start-of-day instants;
+                // both bounds must be representable.
+                True -> {
+                  use day_start <- terr(state, start_of_day_ns(tz, local_date))
+                  use day_end <- terr(
+                    state,
+                    start_of_day_ns(tz, iso_date_from_epoch_days(day_part + 1)),
+                  )
+                  let ns2 =
+                    day_start
+                    + round_to_increment(
+                      ns - day_start,
+                      day_end - day_start,
+                      mode,
+                    )
+                  let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
+                  #(state, Ok(v))
+                }
+                False -> {
+                  // Round the wall-clock time of day (RoundISODateTime),
+                  // then reinterpret preferring the current offset.
+                  let tod = local - day_part * ns_per_day
+                  let rounded_tod = round_to_increment(tod, inc * u_ns, mode)
+                  let #(rd, rt) =
+                    epoch_ns_to_iso(day_part * ns_per_day + rounded_tod, 0)
+                  use ns2 <- terr(
+                    state,
+                    interpret_offset(
+                      rd,
+                      rt,
+                      "option",
+                      off,
+                      tz,
+                      "compatible",
+                      "prefer",
+                      False,
+                    ),
+                  )
+                  case int.absolute_value(ns2) <= ns_max_instant {
+                    False ->
+                      state.range_error(state, "instant outside valid range")
+                    True -> {
+                      let #(state, v) =
+                        make_zoned_cal(state, protos, ns2, tz, zcal)
+                      #(state, Ok(v))
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        "with" -> {
+          use bag, state <- state.try_op(require_partial_bag(
+            state,
+            arg_at(args, 0),
+          ))
+          use day, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "day",
+            to_positive_integer_with_truncation,
+          ))
+          use era, state <- state.try_op(case tcal.has_eras(zcal) {
+            True -> read_bag_era(state, bag)
+            False -> Ok(#(None, state))
+          })
+          use era_year, state <- state.try_op(case tcal.has_eras(zcal) {
+            True ->
+              read_bag_int_field(
+                state,
+                bag,
+                "eraYear",
+                to_integer_with_truncation,
+              )
+            False -> Ok(#(None, state))
+          })
+          use hour, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "hour",
+            to_integer_with_truncation,
+          ))
+          use us, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "microsecond",
+            to_integer_with_truncation,
+          ))
+          use ms, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "millisecond",
+            to_integer_with_truncation,
+          ))
+          use minute, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "minute",
+            to_integer_with_truncation,
+          ))
+          use month, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "month",
+            to_positive_integer_with_truncation,
+          ))
+          use month_code, state <- state.try_op(read_month_code(state, bag))
+          use ns_f, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "nanosecond",
+            to_integer_with_truncation,
+          ))
+          use bag_off, state <- state.try_op(read_bag_offset(state, bag))
+          use second, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "second",
+            to_integer_with_truncation,
+          ))
+          use year, state <- state.try_op(read_bag_int_field(
+            state,
+            bag,
+            "year",
+            to_integer_with_truncation,
+          ))
+          let all = [
+            day, hour, us, ms, minute, month, ns_f, second, year, era_year,
+          ]
+          case
+            list.all(all, fn(f) { f == None })
+            && month_code == None
+            && era == None
+            && bag_off == None
+          {
+            True ->
+              state.type_error(state, "with() requires at least one field")
+            False -> {
+              use opts, state <- state.try_op(get_options_object(
+                state,
+                arg_at(args, 1),
+              ))
+              use dis_opt, state <- state.try_op(get_string_option(
+                state,
+                opts,
+                "disambiguation",
+                ["compatible", "earlier", "later", "reject"],
+                Some("compatible"),
+              ))
+              use off_opt, state <- state.try_op(get_string_option(
+                state,
+                opts,
+                "offset",
+                ["prefer", "use", "ignore", "reject"],
+                Some("prefer"),
+              ))
+              use overflow, state <- state.try_op(get_overflow_option(
+                state,
+                opts,
+              ))
+              let fields =
+                DateFields(day:, era:, era_year:, month:, month_code:, year:)
+              use date <- terr(
+                state,
+                calendar_with_fields(zcal, d, fields, overflow),
+              )
+              let t2 =
+                TimeRec(
+                  hour: option.unwrap(hour, t.hour),
+                  minute: option.unwrap(minute, t.minute),
+                  second: option.unwrap(second, t.second),
+                  ms: option.unwrap(ms, t.ms),
+                  us: option.unwrap(us, t.us),
+                  ns: option.unwrap(ns_f, t.ns),
+                )
+              let t2 = case overflow {
+                "reject" -> t2
+                _ ->
+                  TimeRec(
+                    hour: int.clamp(t2.hour, 0, 23),
+                    minute: int.clamp(t2.minute, 0, 59),
+                    second: int.clamp(t2.second, 0, 59),
+                    ms: int.clamp(t2.ms, 0, 999),
+                    us: int.clamp(t2.us, 0, 999),
+                    ns: int.clamp(t2.ns, 0, 999),
+                  )
+              }
+              case is_valid_time(t2) {
+                False -> state.range_error(state, "invalid time")
+                True -> {
+                  use ns2 <- terr(
+                    state,
+                    interpret_offset(
+                      date,
+                      t2,
+                      "option",
+                      option.unwrap(bag_off, off),
+                      tz,
+                      option.unwrap(dis_opt, "compatible"),
+                      option.unwrap(off_opt, "prefer"),
+                      False,
+                    ),
+                  )
+                  let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
+                  #(state, Ok(v))
+                }
+              }
+            }
+          }
+        }
+        "withCalendar" -> {
+          use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
+            state,
+            arg_at(args, 0),
+          ))
+          let #(state, v) = make_zoned_cal(state, protos, ns, tz, new_cal)
+          #(state, Ok(v))
+        }
+        "withPlainTime" -> {
+          // Undefined → GetStartOfDay; an explicit time (even midnight) uses
+          // compatible disambiguation. These differ when midnight is skipped.
+          case arg_at(args, 0) {
+            JsUndefined -> {
+              use ns2 <- terr(state, start_of_day_ns(tz, d))
+              let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
+              #(state, Ok(v))
+            }
+            arg -> {
+              use t2, state <- state.try_op(to_temporal_time(
+                state,
+                arg,
+                JsUndefined,
+              ))
+              use ns2 <- terr(state, get_epoch_ns_for(tz, d, t2, "compatible"))
+              let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
+              #(state, Ok(v))
+            }
+          }
+        }
+        "startOfDay" -> {
+          use ns2 <- terr(state, start_of_day_ns(tz, d))
+          let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
+          #(state, Ok(v))
+        }
+        "getTimeZoneTransition" -> {
+          use dir, state <- state.try_op(case arg_at(args, 0) {
+            JsUndefined ->
+              type_error_result(state, "direction parameter is required")
+            JsString("next") -> Ok(#("next", state))
+            JsString("previous") -> Ok(#("previous", state))
+            JsString(_) ->
+              range_error_result(state, "direction must be next or previous")
+            JsObject(oref) -> {
+              use #(dir, st) <- result.try(get_string_option(
+                state,
+                Some(oref),
+                "direction",
+                ["next", "previous"],
+                None,
+              ))
+              case dir {
+                Some(d2) -> Ok(#(d2, st))
+                None -> range_error_result(st, "direction is required")
+              }
+            }
+            _ -> type_error_result(state, "invalid direction")
+          })
+          // UTC and offset zones have no transitions.
+          case tz_kind(tz) {
+            NamedZone -> {
+              let found = case dir {
+                "next" -> temporal_tz.next_transition_ns(tz, ns)
+                _ -> temporal_tz.prev_transition_ns(tz, ns)
+              }
+              case found {
+                Ok(t_ns) ->
+                  case int.absolute_value(t_ns) <= ns_max_instant {
+                    True -> {
+                      let #(state, v) =
+                        make_zoned_cal(state, protos, t_ns, tz, zcal)
+                      #(state, Ok(v))
+                    }
+                    False -> #(state, Ok(JsNull))
+                  }
+                Error(Nil) -> #(state, Ok(JsNull))
+              }
+            }
+            _ -> #(state, Ok(JsNull))
+          }
+        }
+        "toInstant" -> {
+          let #(state, v) = make_instant(state, protos, ns)
+          #(state, Ok(v))
+        }
+        "toPlainDate" -> {
+          let #(state, v) = make_date_cal(state, protos, d, zcal)
+          #(state, Ok(v))
+        }
+        "toPlainTime" -> {
+          let #(state, v) = make_time(state, protos, t)
+          #(state, Ok(v))
+        }
+        "toPlainDateTime" -> {
+          let #(state, v) = make_date_time_cal(state, protos, d, t, zcal)
+          #(state, Ok(v))
+        }
+        _ -> state.type_error(state, "unknown method")
+      }
+    }
+  }
+}
+
+fn zoned_until_since(
+  state: State,
+  protos: TemporalProtos,
+  cal: String,
+  a_ns: Int,
+  a_tz: String,
+  b_ns: Int,
+  b_tz: String,
+  args: List(JsValue),
+  is_since: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  use largest, smallest, inc, mode, state <- get_difference_settings(
+    state,
+    args,
+  )
+  let smallest = option.unwrap(smallest, "nanosecond")
+  let largest = option.unwrap(largest, max_unit(smallest, "hour"))
+  use Nil, state <- state.try_op(check_diff_setup(state, largest, smallest, inc))
+  let mode2 = apply_since_mode(mode, is_since)
+  case unit_rank(largest) <= unit_rank("hour") {
+    True -> {
+      // Exact-time difference, like Instant.
+      let diff = b_ns - a_ns
+      let rounded = round_to_increment(diff, inc * unit_ns(smallest), mode2)
+      let rounded = apply_since_ns(rounded, is_since)
+      let dur = balance_time_ns(rounded, largest)
+      let #(state, v) = make_duration(state, protos, dur)
+      #(state, Ok(v))
+    }
+    False ->
+      // Calendar-unit difference requires equal time zones (§ spec:
+      // TimeZoneEquals, RangeError otherwise).
+      case time_zone_equals(a_tz, b_tz) {
+        False ->
+          state.range_error(
+            state,
+            "time zones must be equal for calendar-unit differences",
+          )
+        True -> {
+          let a_dt = epoch_ns_to_iso(a_ns, tz_offset_ns_at(a_tz, a_ns))
+          let b_dt = epoch_ns_to_iso(b_ns, tz_offset_ns_at(a_tz, b_ns))
+          use final <- terr(
+            state,
+            diff_date_time_core(
+              cal,
+              a_dt,
+              b_dt,
+              largest,
+              smallest,
+              inc,
+              mode2,
+              True,
+            ),
+          )
+          let final = apply_since_dur(final, is_since)
+          let #(state, v) = make_duration(state, protos, final)
+          #(state, Ok(v))
+        }
+      }
+  }
+}
+
+fn format_zoned(ns: Int, tz: String, prec: Precision) -> String {
+  let off = tz_offset_ns_at(tz, ns)
+  let #(d, t) = epoch_ns_to_iso(ns, off)
+  format_iso_date(d)
+  <> "T"
+  <> format_iso_time(t, prec)
+  <> format_offset_rounded(off)
+  <> "["
+  <> tz
+  <> "]"
+}

@@ -4,11 +4,26 @@
 import gleam/list
 import gleam/string
 
-/// Split template inner text (without backticks) into quasi strings and
+/// Split template inner text (without backticks) into RAW quasi strings and
 /// expression source strings. Tracks brace depth for nested `{}`.
+///
+/// Quasis are returned verbatim (escape sequences NOT decoded) so the caller
+/// can build both the raw strings (tagged templates' `.raw`) and the cooked
+/// values (via the parser's cook_template_string FFI). Line endings are
+/// normalized to LF per the spec's TRV definition (§12.9.6: <CR><LF> and
+/// <CR> → <LF>).
 pub fn split_template_parts(inner: String) -> #(List(String), List(String)) {
   let graphemes = string.to_graphemes(inner)
   do_split_template(graphemes, "", [], [], 0, False)
+}
+
+/// Normalize a single grapheme's line ending per TRV: CRLF / CR → LF.
+/// (CRLF is a single grapheme cluster, so it arrives as one list element.)
+fn normalize_line_ending(ch: String) -> String {
+  case ch {
+    "\r\n" | "\r" -> "\n"
+    _ -> ch
+  }
 }
 
 fn do_split_template(
@@ -30,10 +45,12 @@ fn do_split_template(
       #(list.reverse([current_quasi, ..quasis]), list.reverse(expr_sources))
     // In quasi mode: look for ${ to start an expression
     ["\\", next, ..rest], False ->
-      // Escaped character in quasi — include both chars, process escape
+      // Escaped character in quasi — keep verbatim (raw), so `\${` and
+      // `\\` don't confuse the `${` scan. Line continuations keep the
+      // backslash; the cook step drops them.
       do_split_template(
         rest,
-        current_quasi <> process_template_escape(next),
+        current_quasi <> "\\" <> normalize_line_ending(next),
         quasis,
         expr_sources,
         brace_depth,
@@ -52,7 +69,7 @@ fn do_split_template(
     [ch, ..rest], False ->
       do_split_template(
         rest,
-        current_quasi <> ch,
+        current_quasi <> normalize_line_ending(ch),
         quasis,
         expr_sources,
         brace_depth,
@@ -138,20 +155,6 @@ fn collect_string_in_expr(
       collect_string_in_expr(rest, quote, acc <> "\\" <> next)
     [ch, ..rest] if ch == quote -> #(acc <> ch, rest)
     [ch, ..rest] -> collect_string_in_expr(rest, quote, acc <> ch)
-  }
-}
-
-/// Process a single escape sequence in a template quasi.
-fn process_template_escape(ch: String) -> String {
-  case ch {
-    "n" -> "\n"
-    "t" -> "\t"
-    "r" -> "\r"
-    "\\" -> "\\"
-    "`" -> "`"
-    "$" -> "$"
-    "0" -> "\u{0000}"
-    _ -> ch
   }
 }
 

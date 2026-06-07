@@ -364,6 +364,10 @@ fn module_error_message(err: module.ModuleError) -> String {
     module.LinkError(m) -> "LinkError: " <> m
     module.EvaluationError(val, heap) ->
       "Uncaught " <> object.format_error(val, heap)
+    // Only reachable with a non-draining finish driver; static entry points
+    // convert pending to EvaluationError inside module.evaluate_linked.
+    module.EvaluationPending(promise_data_ref: _, heap: _) ->
+      "module evaluation never completed: top-level await promise never settled"
   }
 }
 

@@ -5,25 +5,29 @@
 /// Prior art: QuickJS quickjs.c js_iterator_* (bellard/quickjs).
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
+import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
+import arc/vm/internal/elements
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type IteratorHelperKind, type IteratorNativeFn, type JsValue, type Ref,
-  Dispatch, Finite, HelperDrop, HelperFilter, HelperFlatMap, HelperMap,
-  HelperTake, Infinity, IteratorConstructor, IteratorFrom, IteratorHelperNext,
+  type ZipMember, type ZipMode, Dispatch, Finite, HelperDrop, HelperFilter,
+  HelperFlatMap, HelperMap, HelperTake, Infinity, IteratorConcat,
+  IteratorConcatObject, IteratorConstructor, IteratorFrom, IteratorHelperNext,
   IteratorHelperObject, IteratorHelperReturn, IteratorNative,
   IteratorProtoGetConstructor, IteratorProtoGetToStringTag,
   IteratorProtoSetConstructor, IteratorProtoSetToStringTag,
   IteratorPrototypeDrop, IteratorPrototypeEvery, IteratorPrototypeFilter,
   IteratorPrototypeFind, IteratorPrototypeFlatMap, IteratorPrototypeForEach,
   IteratorPrototypeMap, IteratorPrototypeReduce, IteratorPrototypeSome,
-  IteratorPrototypeTake, IteratorPrototypeToArray, JsBool, JsNull, JsObject,
-  JsString, JsUndefined, NaN, Named, NegInfinity, ObjectSlot,
-  WrapForValidIteratorNext, WrapForValidIteratorObject,
-  WrapForValidIteratorReturn,
+  IteratorPrototypeTake, IteratorPrototypeToArray, IteratorZip, IteratorZipKeyed,
+  IteratorZipObject, JsBool, JsNull, JsObject, JsString, JsSymbol, JsUndefined,
+  NaN, Named, NegInfinity, ObjectSlot, OrdinaryObject, WrapForValidIteratorNext,
+  WrapForValidIteratorObject, WrapForValidIteratorReturn, ZipExhausted,
+  ZipLongest, ZipOpen, ZipShortest, ZipStrict,
 }
 import gleam/dict
 import gleam/list
@@ -59,10 +63,14 @@ pub fn init(
       #("find", IteratorNative(IteratorPrototypeFind), 1),
     ])
 
-  // Iterator.from static method.
+  // Iterator.from / Iterator.concat / Iterator.zip / Iterator.zipKeyed
+  // static methods.
   let #(h, ctor_props) =
     common.alloc_methods(h, function_proto, [
       #("from", IteratorNative(IteratorFrom), 1),
+      #("concat", IteratorNative(IteratorConcat), 0),
+      #("zip", IteratorNative(IteratorZip), 1),
+      #("zipKeyed", IteratorNative(IteratorZipKeyed), 1),
     ])
 
   // Allocate constructor + merge proto methods onto the existing iterator_proto.
@@ -165,6 +173,9 @@ pub fn dispatch(
   case native {
     IteratorConstructor -> construct(state)
     IteratorFrom -> from(args, state)
+    IteratorZip -> zip(args, state)
+    IteratorZipKeyed -> zip_keyed(args, state)
+    IteratorConcat -> concat(args, state)
     IteratorPrototypeMap -> lazy_helper(this, args, state, HelperMap, "map")
     IteratorPrototypeFilter ->
       lazy_helper(this, args, state, HelperFilter, "filter")
@@ -398,14 +409,135 @@ fn alloc_helper(
 // %IteratorHelperPrototype%.next / .return
 // ============================================================================
 
+const helper_receiver_err = "Iterator Helper method called on incompatible receiver"
+
 fn helper_next(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use ref, kind, underlying, next, func, inner, inner_next, count, done <- require_helper(
-    this,
-    state,
-  )
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: IteratorHelperObject(
+            kind:,
+            underlying:,
+            next_method:,
+            func:,
+            inner:,
+            inner_next:,
+            count:,
+            done:,
+          ),
+          ..,
+        )) ->
+          classic_helper_next(
+            state,
+            ref,
+            kind,
+            underlying,
+            next_method,
+            func,
+            inner,
+            inner_next,
+            count,
+            done,
+          )
+        Some(ObjectSlot(
+          kind: IteratorZipObject(
+            members:,
+            mode:,
+            padding:,
+            keys:,
+            done:,
+            running:,
+            started: _,
+          ),
+          ..,
+        )) ->
+          case running {
+            // GeneratorValidate: "executing" → TypeError.
+            True -> state.type_error(state, helper_running_err)
+            False -> {
+              // GeneratorResume: state becomes "executing" (and the
+              // generator is no longer suspended-start).
+              let state = zip_set_flags(state, ref, True, True)
+              let #(state, res) =
+                zip_next(state, ref, members, mode, padding, keys, done)
+              #(zip_set_flags(state, ref, False, False), res)
+            }
+          }
+        Some(ObjectSlot(
+          kind: IteratorConcatObject(remaining:, inner:, done:, running:),
+          ..,
+        )) ->
+          case running {
+            True -> state.type_error(state, helper_running_err)
+            False -> {
+              let state = concat_set_running(state, ref, True)
+              let #(state, res) =
+                concat_next(state, ref, remaining, inner, done)
+              #(concat_set_running(state, ref, False), res)
+            }
+          }
+        _ -> state.type_error(state, helper_receiver_err)
+      }
+    _ -> state.type_error(state, helper_receiver_err)
+  }
+}
+
+const helper_running_err = "Iterator Helper is currently being iterated"
+
+/// Set the zip helper's "executing" flag; `started` latches True once set.
+fn zip_set_flags(
+  state: State,
+  ref: Ref,
+  running: Bool,
+  set_started: Bool,
+) -> State {
+  let heap =
+    heap.update(state.heap, ref, fn(slot) {
+      case slot {
+        ObjectSlot(kind: IteratorZipObject(started:, ..) as kind, ..) ->
+          ObjectSlot(
+            ..slot,
+            kind: IteratorZipObject(
+              ..kind,
+              running:,
+              started: started || set_started,
+            ),
+          )
+        other -> other
+      }
+    })
+  State(..state, heap:)
+}
+
+/// Set the concat helper's "executing" flag.
+fn concat_set_running(state: State, ref: Ref, running: Bool) -> State {
+  let heap =
+    heap.update(state.heap, ref, fn(slot) {
+      case slot {
+        ObjectSlot(kind: IteratorConcatObject(..) as kind, ..) ->
+          ObjectSlot(..slot, kind: IteratorConcatObject(..kind, running:))
+        other -> other
+      }
+    })
+  State(..state, heap:)
+}
+
+fn classic_helper_next(
+  state: State,
+  ref: Ref,
+  kind: IteratorHelperKind,
+  underlying: JsValue,
+  next: JsValue,
+  func: JsValue,
+  inner: JsValue,
+  inner_next: JsValue,
+  count: Int,
+  done: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False ->
@@ -433,10 +565,64 @@ fn helper_return(
   this: JsValue,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use ref, kind, underlying, _next, _func, inner, _inner_next, _count, done <- require_helper(
-    this,
-    state,
-  )
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: IteratorHelperObject(kind:, underlying:, inner:, done:, ..),
+          ..,
+        )) -> classic_helper_return(state, ref, kind, underlying, inner, done)
+        Some(ObjectSlot(
+          kind: IteratorZipObject(members:, done:, running:, started:, ..),
+          ..,
+        )) ->
+          case running, done, started {
+            // GeneratorValidate: "executing" → TypeError.
+            True, _, _ -> state.type_error(state, helper_running_err)
+            False, True, _ -> create_iter_result(state, JsUndefined, True)
+            // Suspended-start: state goes straight to completed, THEN the
+            // underlying iterators are closed — a reentrant next/return
+            // during the closes sees "completed", not "executing".
+            False, False, False -> zip_return(state, ref, members, False)
+            // Suspended-yield: the generator resumes ("executing") to run
+            // IteratorCloseAll — reentrant next/return throws.
+            False, False, True -> {
+              let state = zip_set_flags(state, ref, True, True)
+              let #(state, res) = zip_return(state, ref, members, False)
+              #(zip_set_flags(state, ref, False, False), res)
+            }
+          }
+        Some(ObjectSlot(
+          kind: IteratorConcatObject(inner:, done:, running:, ..),
+          ..,
+        )) ->
+          case running, done, inner {
+            True, _, _ -> state.type_error(state, helper_running_err)
+            False, True, _ -> create_iter_result(state, JsUndefined, True)
+            // Suspended-start / between iterables: nothing to close.
+            False, False, None -> concat_return(state, ref, None, False)
+            // Suspended-yield: closing the inner iterator runs user code
+            // while "executing".
+            False, False, Some(rec) -> {
+              let state = concat_set_running(state, ref, True)
+              let #(state, res) = concat_return(state, ref, Some(rec), False)
+              #(concat_set_running(state, ref, False), res)
+            }
+          }
+        _ -> state.type_error(state, helper_receiver_err)
+      }
+    _ -> state.type_error(state, helper_receiver_err)
+  }
+}
+
+fn classic_helper_return(
+  state: State,
+  ref: Ref,
+  kind: IteratorHelperKind,
+  underlying: JsValue,
+  inner: JsValue,
+  done: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False -> {
@@ -604,7 +790,13 @@ fn step_flat_map(
               close_throw(mark_done(state, ref), underlying, thrown)
             Ok(#(mapped, state)) ->
               // GetIteratorFlattenable(mapped, reject-strings) — must be Object
-              case open_inner(state, mapped) {
+              case
+                get_iterator_flattenable(
+                  state,
+                  mapped,
+                  "flatMap callback result",
+                )
+              {
                 #(state, Error(thrown)) ->
                   close_throw(mark_done(state, ref), underlying, thrown)
                 #(state, Ok(#(inner, inner_next))) -> {
@@ -628,21 +820,26 @@ fn step_flat_map(
   }
 }
 
-/// GetIteratorFlattenable(obj, reject-strings) for flatMap inner values.
-fn open_inner(
+/// §7.4.13 GetIteratorFlattenable(obj, reject-primitives): obj must be an
+/// Object; if it has an @@iterator method, call it (result must be an
+/// Object), otherwise treat obj itself as the iterator. Caches the next
+/// method (GetIteratorDirect). Used by flatMap inner values and
+/// Iterator.zip/zipKeyed inputs.
+fn get_iterator_flattenable(
   state: State,
-  mapped: JsValue,
+  obj: JsValue,
+  what: String,
 ) -> #(State, Result(#(JsValue, JsValue), JsValue)) {
-  case mapped {
+  case obj {
     JsObject(_) -> {
       use method, state <- state.try_op(object.get_symbol_value_of(
         state,
-        mapped,
+        obj,
         value.symbol_iterator,
       ))
       let iter_result = case method {
-        JsUndefined | JsNull -> Ok(#(mapped, state))
-        _ -> state.call(state, method, mapped, [])
+        JsUndefined | JsNull -> Ok(#(obj, state))
+        _ -> state.call(state, method, obj, [])
       }
       use iter, state <- state.try_op(iter_result)
       case iter {
@@ -654,10 +851,10 @@ fn open_inner(
           ))
           #(state, Ok(#(iter, inner_next)))
         }
-        _ -> type_error_any(state, "flatMap callback result is not iterable")
+        _ -> type_error_any(state, what <> " is not iterable")
       }
     }
-    _ -> type_error_any(state, "flatMap callback returned a non-object")
+    _ -> type_error_any(state, what <> " is not an object")
   }
 }
 
@@ -1092,10 +1289,17 @@ pub fn call_return(
   ))
   case ret_fn {
     JsUndefined | JsNull -> #(state, Ok(JsUndefined))
-    _ -> {
-      use result, state <- state.try_call(state, ret_fn, obj, [])
-      #(state, Ok(result))
-    }
+    _ ->
+      // §7.3.10 GetMethod step 3: a non-callable `return` property is a
+      // TypeError. The re-entrant call path silently passes non-callables
+      // through (legacy promise-reaction behavior), so check here.
+      case is_callable(state.heap, ret_fn) {
+        False -> type_error_any(state, "iterator.return is not a function")
+        True -> {
+          use result, state <- state.try_call(state, ret_fn, obj, [])
+          #(state, Ok(result))
+        }
+      }
   }
 }
 
@@ -1155,56 +1359,6 @@ fn require_object_of(
   case this {
     JsObject(ref) -> cont(ref)
     _ -> state.type_error(state, msg)
-  }
-}
-
-/// Unwrap `this` as an IteratorHelperObject. CPS-style.
-fn require_helper(
-  this: JsValue,
-  state: State,
-  cont: fn(
-    Ref,
-    IteratorHelperKind,
-    JsValue,
-    JsValue,
-    JsValue,
-    JsValue,
-    JsValue,
-    Int,
-    Bool,
-  ) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
-  let err = "Iterator Helper method called on incompatible receiver"
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(
-          kind: IteratorHelperObject(
-            kind:,
-            underlying:,
-            next_method:,
-            func:,
-            inner:,
-            inner_next:,
-            count:,
-            done:,
-          ),
-          ..,
-        )) ->
-          cont(
-            ref,
-            kind,
-            underlying,
-            next_method,
-            func,
-            inner,
-            inner_next,
-            count,
-            done,
-          )
-        _ -> state.type_error(state, err)
-      }
-    _ -> state.type_error(state, err)
   }
 }
 
@@ -1330,6 +1484,974 @@ fn update_helper(
               count: option.unwrap(new_count, count),
               done: done || set_done,
             ),
+          )
+        other -> other
+      }
+    })
+  State(..state, heap:)
+}
+
+// ============================================================================
+// Iterator.zip / Iterator.zipKeyed — tc39 joint-iteration proposal (stage 4)
+// ============================================================================
+
+/// Iterator.zip ( iterables [ , options ] )
+fn zip(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let iterables = first_arg_or_undefined(args)
+  // Step 1: If iterables is not an Object, throw a TypeError.
+  use _ref <- require_object_of(
+    iterables,
+    state,
+    "Iterator.zip iterables argument is not an object",
+  )
+  // Steps 2-7: GetOptionsObject + mode + paddingOption.
+  use #(mode, padding_option), state <- after(zip_options(state, args, "zip"))
+  // Step 10: GetIterator(iterables, sync).
+  use #(input_iter, input_next), state <- after(
+    map_thrown(get_iterator_sync(state, iterables)),
+  )
+  // Step 12: drain the input iterator, flattening each value to an iterator.
+  use iters, state <- after(zip_collect(state, input_iter, input_next, []))
+  // Steps 13-14: resolve the padding list ("longest" mode only).
+  use padding, state <- after(case mode {
+    ZipLongest -> zip_padding_iterated(state, padding_option, iters)
+    _ -> Ok(#([], state))
+  })
+  // Steps 15-16: finishResults = CreateArrayFromList — keys: None.
+  alloc_zip(state, iters, mode, padding, None)
+}
+
+/// Iterator.zipKeyed ( iterables [ , options ] )
+fn zip_keyed(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let iterables = first_arg_or_undefined(args)
+  use iterables_ref <- require_object_of(
+    iterables,
+    state,
+    "Iterator.zipKeyed iterables argument is not an object",
+  )
+  use #(mode, padding_option), state <- after(zip_options(
+    state,
+    args,
+    "zipKeyed",
+  ))
+  // Step 10: allKeys = iterables.[[OwnPropertyKeys]]().
+  use all_keys, state <- after(
+    map_thrown(builtins_object.own_keys_stateful(state, iterables_ref)),
+  )
+  // Steps 11-12: filter to enumerable, non-undefined-valued properties.
+  use #(keys, iters), state <- after(
+    zip_keyed_collect(state, iterables, iterables_ref, all_keys, [], []),
+  )
+  // Step 14: padding read per key from the padding object.
+  use padding, state <- after(case mode {
+    ZipLongest -> zip_keyed_padding(state, padding_option, keys, iters)
+    _ -> Ok(#([], state))
+  })
+  // Steps 15-16: finishResults = null-proto object keyed by `keys`.
+  alloc_zip(state, iters, mode, padding, Some(keys))
+}
+
+/// Steps 2-7 shared by zip/zipKeyed: GetOptionsObject(options), Get "mode",
+/// validate it, and Get "padding" when mode is "longest". Returns the parsed
+/// mode plus the raw paddingOption (undefined or an Object).
+fn zip_options(
+  state: State,
+  args: List(JsValue),
+  name: String,
+) -> Result(#(#(ZipMode, JsValue), State), #(State, Result(JsValue, JsValue))) {
+  let options = case args {
+    [_, opts, ..] -> opts
+    _ -> JsUndefined
+  }
+  case options {
+    // GetOptionsObject: undefined → OrdinaryObjectCreate(null), whose Gets
+    // all yield undefined — mode is "shortest" and padding is never read.
+    JsUndefined -> Ok(#(#(ZipShortest, JsUndefined), state))
+    JsObject(_) -> {
+      use #(mode_val, state) <- result.try(
+        map_thrown(object.get_value_of(state, options, Named("mode"))),
+      )
+      // Step 5: no ToString coercion — only undefined or the exact strings.
+      use #(mode, state) <- result.try(case mode_val {
+        JsUndefined | JsString("shortest") -> Ok(#(ZipShortest, state))
+        JsString("longest") -> Ok(#(ZipLongest, state))
+        JsString("strict") -> Ok(#(ZipStrict, state))
+        _ ->
+          err_type(
+            state,
+            "Iterator."
+              <> name
+              <> " mode must be \"shortest\", \"longest\", or \"strict\"",
+          )
+      })
+      case mode {
+        ZipLongest -> {
+          use #(padding, state) <- result.try(
+            map_thrown(object.get_value_of(state, options, Named("padding"))),
+          )
+          case padding {
+            JsUndefined | JsObject(_) -> Ok(#(#(mode, padding), state))
+            _ ->
+              err_type(
+                state,
+                "Iterator." <> name <> " padding is not an object",
+              )
+          }
+        }
+        _ -> Ok(#(#(mode, JsUndefined), state))
+      }
+    }
+    _ -> err_type(state, "Iterator." <> name <> " options is not an object")
+  }
+}
+
+/// Adapt an ops-style Result (Error carries #(thrown, state)) into the
+/// dispatch-shaped Error consumed by `after`.
+fn map_thrown(
+  r: Result(#(a, State), #(JsValue, State)),
+) -> Result(#(a, State), #(State, Result(JsValue, JsValue))) {
+  case r {
+    Ok(v) -> Ok(v)
+    Error(#(thrown, state)) -> Error(#(state, Error(thrown)))
+  }
+}
+
+/// §7.4.3 GetIterator(obj, sync): the @@iterator method must be callable and
+/// its result must be an Object; caches the next method (GetIteratorDirect).
+fn get_iterator_sync(
+  state: State,
+  obj: JsValue,
+) -> Result(#(#(JsValue, JsValue), State), #(JsValue, State)) {
+  use #(method, state) <- result.try(object.get_symbol_value_of(
+    state,
+    obj,
+    value.symbol_iterator,
+  ))
+  case is_callable(state.heap, method) {
+    False ->
+      Error(state.type_error_value(
+        state,
+        object.inspect(obj, state.heap) <> " is not iterable",
+      ))
+    True -> {
+      use #(iter, state) <- result.try(state.call(state, method, obj, []))
+      case iter {
+        JsObject(_) -> {
+          use #(next, state) <- result.map(object.get_value_of(
+            state,
+            iter,
+            Named("next"),
+          ))
+          #(#(iter, next), state)
+        }
+        _ ->
+          Error(state.type_error_value(
+            state,
+            "Result of the Symbol.iterator method is not an object",
+          ))
+      }
+    }
+  }
+}
+
+/// Iterator.zip step 12: drain the iterables iterator, converting each value
+/// via GetIteratorFlattenable(·, reject-primitives). On abrupt completions,
+/// already-collected iterators are closed per IfAbruptCloseIterators.
+fn zip_collect(
+  state: State,
+  input_iter: JsValue,
+  input_next: JsValue,
+  acc: List(#(JsValue, JsValue)),
+) -> Result(
+  #(List(#(JsValue, JsValue)), State),
+  #(State, Result(JsValue, JsValue)),
+) {
+  let #(state, step) = iterator_step_value(state, input_iter, input_next)
+  case step {
+    // IfAbruptCloseIterators(next, iters) — the input iterator is broken,
+    // close only the collected iterators (in reverse order).
+    Error(thrown) -> Error(close_all_throw(state, collected_iters(acc), thrown))
+    Ok(None) -> Ok(#(list.reverse(acc), state))
+    Ok(Some(v)) ->
+      case get_iterator_flattenable(state, v, "Iterator.zip input") {
+        // IfAbruptCloseIterators(iter, « inputIter » + iters): reverse order
+        // closes the collected iterators first, then the input iterator.
+        #(state, Error(thrown)) ->
+          Error(close_all_throw(
+            state,
+            [input_iter, ..collected_iters(acc)],
+            thrown,
+          ))
+        #(state, Ok(rec)) ->
+          zip_collect(state, input_iter, input_next, [rec, ..acc])
+      }
+  }
+}
+
+/// Iterator-object list (spec order) from a reversed (iter, next) accumulator.
+fn collected_iters(acc: List(#(JsValue, JsValue))) -> List(JsValue) {
+  list.reverse(acc) |> list.map(fn(rec) { rec.0 })
+}
+
+/// Iterator.zip step 14: the "longest" padding list comes from ITERATING the
+/// padding object (unlike zipKeyed, which Gets per key).
+fn zip_padding_iterated(
+  state: State,
+  padding_option: JsValue,
+  iters: List(#(JsValue, JsValue)),
+) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+  let iter_count = list.length(iters)
+  case padding_option {
+    JsUndefined -> Ok(#(list.repeat(JsUndefined, iter_count), state))
+    _ -> {
+      let opened = list.map(iters, fn(rec) { rec.0 })
+      case get_iterator_sync(state, padding_option) {
+        Error(#(thrown, state)) -> Error(close_all_throw(state, opened, thrown))
+        Ok(#(#(pad_iter, pad_next), state)) ->
+          zip_padding_loop(state, pad_iter, pad_next, opened, iter_count, [])
+      }
+    }
+  }
+}
+
+fn zip_padding_loop(
+  state: State,
+  pad_iter: JsValue,
+  pad_next: JsValue,
+  opened: List(JsValue),
+  remaining: Int,
+  acc: List(JsValue),
+) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+  case remaining <= 0 {
+    True -> {
+      // usingIterator is still true — IteratorClose(paddingIter, normal).
+      let #(state, close_res) = iterator_close_normal(state, pad_iter)
+      case close_res {
+        Error(thrown) -> Error(close_all_throw(state, opened, thrown))
+        Ok(Nil) -> Ok(#(list.reverse(acc), state))
+      }
+    }
+    False -> {
+      let #(state, step) = iterator_step_value(state, pad_iter, pad_next)
+      case step {
+        Error(thrown) -> Error(close_all_throw(state, opened, thrown))
+        // Padding iterator exhausted: fill the rest with undefined; the
+        // padding iterator is NOT closed (usingIterator becomes false).
+        Ok(None) ->
+          Ok(#(
+            list.append(list.reverse(acc), list.repeat(JsUndefined, remaining)),
+            state,
+          ))
+        Ok(Some(v)) ->
+          zip_padding_loop(state, pad_iter, pad_next, opened, remaining - 1, [
+            v,
+            ..acc
+          ])
+      }
+    }
+  }
+}
+
+/// Iterator.zipKeyed step 12: walk allKeys, keeping enumerable own properties
+/// whose value is not undefined; flatten each value to an iterator record.
+fn zip_keyed_collect(
+  state: State,
+  iterables: JsValue,
+  iterables_ref: Ref,
+  keys_left: List(JsValue),
+  keys_acc: List(JsValue),
+  iters_acc: List(#(JsValue, JsValue)),
+) -> Result(
+  #(#(List(JsValue), List(#(JsValue, JsValue))), State),
+  #(State, Result(JsValue, JsValue)),
+) {
+  case keys_left {
+    [] -> Ok(#(#(list.reverse(keys_acc), list.reverse(iters_acc)), state))
+    [key, ..rest] ->
+      case
+        builtins_object.get_own_property_stateful(state, iterables_ref, key)
+      {
+        Error(#(thrown, state)) ->
+          Error(close_all_throw(state, collected_iters(iters_acc), thrown))
+        Ok(#(desc, state)) -> {
+          let enumerable =
+            option.map(desc, value.prop_enumerable) |> option.unwrap(False)
+          case enumerable {
+            False ->
+              zip_keyed_collect(
+                state,
+                iterables,
+                iterables_ref,
+                rest,
+                keys_acc,
+                iters_acc,
+              )
+            True ->
+              case get_keyed(state, iterables, key) {
+                Error(#(thrown, state)) ->
+                  Error(close_all_throw(
+                    state,
+                    collected_iters(iters_acc),
+                    thrown,
+                  ))
+                Ok(#(JsUndefined, state)) ->
+                  zip_keyed_collect(
+                    state,
+                    iterables,
+                    iterables_ref,
+                    rest,
+                    keys_acc,
+                    iters_acc,
+                  )
+                Ok(#(v, state)) ->
+                  case
+                    get_iterator_flattenable(
+                      state,
+                      v,
+                      "Iterator.zipKeyed input",
+                    )
+                  {
+                    #(state, Error(thrown)) ->
+                      Error(close_all_throw(
+                        state,
+                        collected_iters(iters_acc),
+                        thrown,
+                      ))
+                    #(state, Ok(rec)) ->
+                      zip_keyed_collect(
+                        state,
+                        iterables,
+                        iterables_ref,
+                        rest,
+                        [key, ..keys_acc],
+                        [rec, ..iters_acc],
+                      )
+                  }
+              }
+          }
+        }
+      }
+  }
+}
+
+/// [[Get]] keyed by a property-key JsValue (JsString or JsSymbol — the only
+/// shapes [[OwnPropertyKeys]] yields).
+fn get_keyed(
+  state: State,
+  obj: JsValue,
+  key: JsValue,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case key {
+    JsSymbol(sym) -> object.get_symbol_value_of(state, obj, sym)
+    JsString(s) -> object.get_value_of(state, obj, value.canonical_key(s))
+    // Unreachable: own_keys_stateful only yields strings and symbols.
+    _ -> Ok(#(JsUndefined, state))
+  }
+}
+
+/// Iterator.zipKeyed step 14: the "longest" padding values are read per key
+/// from the padding object.
+fn zip_keyed_padding(
+  state: State,
+  padding_option: JsValue,
+  keys: List(JsValue),
+  iters: List(#(JsValue, JsValue)),
+) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+  case padding_option {
+    JsUndefined -> Ok(#(list.repeat(JsUndefined, list.length(iters)), state))
+    _ -> {
+      let opened = list.map(iters, fn(rec) { rec.0 })
+      zip_keyed_padding_loop(state, padding_option, opened, keys, [])
+    }
+  }
+}
+
+fn zip_keyed_padding_loop(
+  state: State,
+  padding_option: JsValue,
+  opened: List(JsValue),
+  keys_left: List(JsValue),
+  acc: List(JsValue),
+) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+  case keys_left {
+    [] -> Ok(#(list.reverse(acc), state))
+    [key, ..rest] ->
+      case get_keyed(state, padding_option, key) {
+        Error(#(thrown, state)) -> Error(close_all_throw(state, opened, thrown))
+        Ok(#(v, state)) ->
+          zip_keyed_padding_loop(state, padding_option, opened, rest, [v, ..acc])
+      }
+  }
+}
+
+/// Allocate the IteratorZip helper object on %IteratorHelperPrototype%.
+fn alloc_zip(
+  state: State,
+  iters: List(#(JsValue, JsValue)),
+  mode: ZipMode,
+  padding: List(JsValue),
+  keys: Option(List(JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  let members =
+    list.map(iters, fn(rec) { ZipOpen(iter: rec.0, next_method: rec.1) })
+  let #(heap, ref) =
+    common.alloc_wrapper(
+      state.heap,
+      IteratorZipObject(
+        members:,
+        mode:,
+        padding:,
+        keys:,
+        done: False,
+        running: False,
+        started: False,
+      ),
+      state.builtins.iterator_helper_proto,
+    )
+  #(State(..state, heap:), Ok(JsObject(ref)))
+}
+
+// ============================================================================
+// IteratorZip stepping — %IteratorHelperPrototype%.next/.return for zip
+// ============================================================================
+
+fn zip_next(
+  state: State,
+  ref: Ref,
+  members: List(ZipMember),
+  mode: ZipMode,
+  padding: List(JsValue),
+  keys: Option(List(JsValue)),
+  done: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  case done, members {
+    True, _ -> create_iter_result(state, JsUndefined, True)
+    // IteratorZip closure step 1: iterCount = 0 → done forever.
+    False, [] -> finish_zip(state, ref)
+    False, _ -> zip_round(state, ref, mode, keys, [], members, padding, [])
+  }
+}
+
+/// One result-tuple round: step every member in order, applying the
+/// mode-specific termination rules from the IteratorZip abstract operation.
+/// `prev` (reversed) holds processed members; `rest`/`pad_rest` are the
+/// unprocessed members and their index-aligned padding values.
+fn zip_round(
+  state: State,
+  ref: Ref,
+  mode: ZipMode,
+  keys: Option(List(JsValue)),
+  prev: List(ZipMember),
+  rest: List(ZipMember),
+  pad_rest: List(JsValue),
+  results: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  case rest {
+    [] -> zip_emit(state, ref, keys, list.reverse(prev), list.reverse(results))
+    [member, ..tail] -> {
+      let #(pad_here, pad_tail) = case pad_rest {
+        [p, ..ps] -> #(p, ps)
+        [] -> #(JsUndefined, [])
+      }
+      case member {
+        // Spec: iters[i] is null → result = padding[i].
+        ZipExhausted ->
+          zip_round(state, ref, mode, keys, [member, ..prev], tail, pad_tail, [
+            pad_here,
+            ..results
+          ])
+        ZipOpen(iter:, next_method:) -> {
+          let #(state, step) = iterator_step_value(state, iter, next_method)
+          case step {
+            Error(thrown) -> {
+              let state = zip_mark_done(state, ref)
+              close_all_throw(state, open_others(prev, tail), thrown)
+            }
+            Ok(Some(v)) ->
+              zip_round(
+                state,
+                ref,
+                mode,
+                keys,
+                [member, ..prev],
+                tail,
+                pad_tail,
+                [v, ..results],
+              )
+            Ok(None) ->
+              case mode {
+                ZipShortest -> {
+                  let state = zip_mark_done(state, ref)
+                  let #(state, close_res) =
+                    close_all_normal(state, open_others(prev, tail))
+                  case close_res {
+                    Error(e) -> #(state, Error(e))
+                    Ok(Nil) -> create_iter_result(state, JsUndefined, True)
+                  }
+                }
+                ZipStrict ->
+                  case prev {
+                    // i = 0: every other iterator must be done too.
+                    [] -> zip_strict_check(state, ref, tail)
+                    _ -> zip_strict_throw(state, ref, open_others(prev, tail))
+                  }
+                ZipLongest ->
+                  case open_others(prev, tail) {
+                    // openIters is empty — the generator just completes.
+                    [] -> finish_zip(state, ref)
+                    _ ->
+                      zip_round(
+                        state,
+                        ref,
+                        mode,
+                        keys,
+                        [ZipExhausted, ..prev],
+                        tail,
+                        pad_tail,
+                        [pad_here, ..results],
+                      )
+                  }
+              }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// IteratorZip "strict" mode, first iterator done: IteratorStep each
+/// remaining iterator — all must be done, or TypeError.
+fn zip_strict_check(
+  state: State,
+  ref: Ref,
+  rest: List(ZipMember),
+) -> #(State, Result(JsValue, JsValue)) {
+  case rest {
+    [] -> finish_zip(state, ref)
+    // Unreachable: "strict" mode never exhausts members in place.
+    [ZipExhausted, ..tail] -> zip_strict_check(state, ref, tail)
+    [ZipOpen(iter:, next_method:), ..tail] -> {
+      let #(state, step) = iterator_step_done(state, iter, next_method)
+      case step {
+        Error(thrown) -> {
+          let state = zip_mark_done(state, ref)
+          close_all_throw(state, open_members(tail), thrown)
+        }
+        Ok(True) -> zip_strict_check(state, ref, tail)
+        // Not done — this iterator is still in openIters and is closed too.
+        Ok(False) -> zip_strict_throw(state, ref, [iter, ..open_members(tail)])
+      }
+    }
+  }
+}
+
+/// IteratorCloseAll(openIters, ThrowCompletion(TypeError)) for strict-mode
+/// length mismatches.
+fn zip_strict_throw(
+  state: State,
+  ref: Ref,
+  open: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  let state = zip_mark_done(state, ref)
+  let #(heap, terr) =
+    common.make_type_error(
+      state.heap,
+      state.builtins,
+      "Iterator.zip strict mode: iterators have different lengths",
+    )
+  close_all_throw(State(..state, heap:), open, terr)
+}
+
+/// §7.4.6 IteratorStep: call next() and read only `done` (never `value`).
+fn iterator_step_done(
+  state: State,
+  obj: JsValue,
+  next_method: JsValue,
+) -> #(State, Result(Bool, JsValue)) {
+  case state.call(state, next_method, obj, []) {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(result, state)) ->
+      case result {
+        JsObject(_) -> {
+          use done, state <- state.try_op(object.get_value_of(
+            state,
+            result,
+            Named("done"),
+          ))
+          #(state, Ok(value.is_truthy(done)))
+        }
+        _ -> type_error_any(state, "Iterator result is not an object")
+      }
+  }
+}
+
+/// Finish a round: persist longest-mode exhaustion transitions, then build
+/// the finishResults value (array for zip, null-proto object for zipKeyed).
+fn zip_emit(
+  state: State,
+  ref: Ref,
+  keys: Option(List(JsValue)),
+  members: List(ZipMember),
+  results: List(JsValue),
+) -> #(State, Result(JsValue, JsValue)) {
+  let state = zip_write_members(state, ref, members)
+  case keys {
+    None -> {
+      let #(heap, arr) =
+        common.alloc_array(state.heap, results, state.builtins.array.prototype)
+      create_iter_result(State(..state, heap:), JsObject(arr), False)
+    }
+    Some(ks) -> {
+      let #(heap, obj) = alloc_zip_keyed_result(state.heap, ks, results)
+      create_iter_result(State(..state, heap:), JsObject(obj), False)
+    }
+  }
+}
+
+/// zipKeyed finishResults: OrdinaryObjectCreate(null) +
+/// CreateDataPropertyOrThrow(obj, keys[i], results[i]) for each column.
+fn alloc_zip_keyed_result(
+  h: Heap,
+  keys: List(JsValue),
+  results: List(JsValue),
+) -> #(Heap, Ref) {
+  let #(props, sym_props) =
+    list.zip(keys, results)
+    |> list.fold(#(dict.new(), []), fn(acc, pair) {
+      let #(props, syms) = acc
+      let #(key, v) = pair
+      case key {
+        JsSymbol(sym) -> #(
+          props,
+          list.key_set(syms, sym, value.data_property(v)),
+        )
+        JsString(s) -> #(
+          dict.insert(props, value.canonical_key(s), value.data_property(v)),
+          syms,
+        )
+        // Unreachable: keys are only ever strings or symbols.
+        _ -> acc
+      }
+    })
+  heap.alloc(
+    h,
+    ObjectSlot(
+      kind: OrdinaryObject,
+      properties: props,
+      elements: elements.new(),
+      prototype: None,
+      symbol_properties: sym_props,
+      extensible: True,
+    ),
+  )
+}
+
+/// %IteratorHelperPrototype%.return for zip helpers: close every still-open
+/// underlying iterator (IteratorCloseAll, reverse order).
+fn zip_return(
+  state: State,
+  ref: Ref,
+  members: List(ZipMember),
+  done: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  case done {
+    True -> create_iter_result(state, JsUndefined, True)
+    False -> {
+      let state = zip_mark_done(state, ref)
+      let #(state, close_res) = close_all_normal(state, open_members(members))
+      case close_res {
+        Error(e) -> #(state, Error(e))
+        Ok(Nil) -> create_iter_result(state, JsUndefined, True)
+      }
+    }
+  }
+}
+
+/// Open iterator objects (spec's openIters) in order, given the reversed
+/// processed prefix and the unprocessed tail — excluding the current member.
+fn open_others(prev: List(ZipMember), tail: List(ZipMember)) -> List(JsValue) {
+  list.append(open_members(list.reverse(prev)), open_members(tail))
+}
+
+fn open_members(members: List(ZipMember)) -> List(JsValue) {
+  list.filter_map(members, fn(m) {
+    case m {
+      ZipOpen(iter:, ..) -> Ok(iter)
+      ZipExhausted -> Error(Nil)
+    }
+  })
+}
+
+/// IteratorCloseAll (joint-iteration proposal) with a pending throw: close
+/// every iterator in REVERSE list order — errors from .return are swallowed
+/// (the original error wins) — then rethrow the original.
+fn close_all_throw(
+  state: State,
+  iters: List(JsValue),
+  original: JsValue,
+) -> #(State, Result(JsValue, JsValue)) {
+  let state =
+    list.fold(list.reverse(iters), state, fn(state, it) {
+      // IteratorClose with a throw completion swallows .return errors.
+      let #(state, _superseded_by_original) = call_return(state, it)
+      state
+    })
+  #(state, Error(original))
+}
+
+/// IteratorCloseAll with a normal/return completion: close in reverse list
+/// order; the first abrupt close result wins and the remaining iterators are
+/// closed with their errors swallowed.
+fn close_all_normal(
+  state: State,
+  iters: List(JsValue),
+) -> #(State, Result(Nil, JsValue)) {
+  list.fold(list.reverse(iters), #(state, Ok(Nil)), fn(acc, it) {
+    let #(state, completion) = acc
+    case completion {
+      Ok(Nil) -> iterator_close_normal(state, it)
+      Error(e) -> {
+        let #(state, _superseded_by_first_error) = call_return(state, it)
+        #(state, Error(e))
+      }
+    }
+  })
+}
+
+fn finish_zip(state: State, ref: Ref) -> #(State, Result(JsValue, JsValue)) {
+  create_iter_result(zip_mark_done(state, ref), JsUndefined, True)
+}
+
+fn zip_mark_done(state: State, ref: Ref) -> State {
+  let heap =
+    heap.update(state.heap, ref, fn(slot) {
+      case slot {
+        ObjectSlot(kind: IteratorZipObject(..) as kind, ..) ->
+          ObjectSlot(..slot, kind: IteratorZipObject(..kind, done: True))
+        other -> other
+      }
+    })
+  State(..state, heap:)
+}
+
+fn zip_write_members(
+  state: State,
+  ref: Ref,
+  members: List(ZipMember),
+) -> State {
+  let heap =
+    heap.update(state.heap, ref, fn(slot) {
+      case slot {
+        ObjectSlot(kind: IteratorZipObject(..) as kind, ..) ->
+          ObjectSlot(..slot, kind: IteratorZipObject(..kind, members:))
+        other -> other
+      }
+    })
+  State(..state, heap:)
+}
+
+// ============================================================================
+// Iterator.concat — tc39 iterator-sequencing proposal (stage 4)
+// ============================================================================
+
+/// Iterator.concat ( ...items )
+fn concat(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  concat_validate(state, args, [])
+}
+
+/// Step 2: every item must be an Object with a callable @@iterator method;
+/// collect the (openMethod, iterable) records in order.
+fn concat_validate(
+  state: State,
+  items: List(JsValue),
+  acc: List(#(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case items {
+    [] -> {
+      let #(heap, ref) =
+        common.alloc_wrapper(
+          state.heap,
+          IteratorConcatObject(
+            remaining: list.reverse(acc),
+            inner: None,
+            done: False,
+            running: False,
+          ),
+          state.builtins.iterator_helper_proto,
+        )
+      #(State(..state, heap:), Ok(JsObject(ref)))
+    }
+    [item, ..rest] ->
+      case item {
+        JsObject(_) -> {
+          // GetMethod(item, @@iterator): undefined/null → TypeError,
+          // non-callable → TypeError.
+          use method, state <- state.try_op(object.get_symbol_value_of(
+            state,
+            item,
+            value.symbol_iterator,
+          ))
+          case method {
+            JsUndefined | JsNull ->
+              state.type_error(
+                state,
+                "Iterator.concat argument is not iterable",
+              )
+            _ ->
+              case is_callable(state.heap, method) {
+                True -> concat_validate(state, rest, [#(method, item), ..acc])
+                False ->
+                  state.type_error(
+                    state,
+                    "Iterator.concat argument [Symbol.iterator] is not callable",
+                  )
+              }
+          }
+        }
+        _ ->
+          state.type_error(state, "Iterator.concat argument is not an object")
+      }
+  }
+}
+
+/// %IteratorHelperPrototype%.next for concat helpers: pull from the current
+/// inner iterator, opening the next iterable as each one is exhausted.
+fn concat_next(
+  state: State,
+  ref: Ref,
+  remaining: List(#(JsValue, JsValue)),
+  inner: Option(#(JsValue, JsValue)),
+  done: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  case done {
+    True -> create_iter_result(state, JsUndefined, True)
+    False ->
+      case inner {
+        Some(#(iter, next_method)) -> {
+          let #(state, step) = iterator_step_value(state, iter, next_method)
+          case step {
+            // Abrupt completion from the closure completes the generator.
+            Error(thrown) -> #(concat_mark_done(state, ref), Error(thrown))
+            Ok(Some(v)) -> create_iter_result(state, v, False)
+            Ok(None) -> {
+              let state = concat_write(state, ref, remaining, None)
+              concat_open_next(state, ref, remaining)
+            }
+          }
+        }
+        None -> concat_open_next(state, ref, remaining)
+      }
+  }
+}
+
+/// Open the next iterable's iterator: iter = Call(openMethod, iterable),
+/// require an Object, GetIteratorDirect, then pull its first value.
+fn concat_open_next(
+  state: State,
+  ref: Ref,
+  remaining: List(#(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case remaining {
+    [] -> create_iter_result(concat_mark_done(state, ref), JsUndefined, True)
+    [#(method, iterable), ..rest] ->
+      case state.call(state, method, iterable, []) {
+        Error(#(thrown, state)) -> #(
+          concat_mark_done(state, ref),
+          Error(thrown),
+        )
+        Ok(#(iter, state)) ->
+          case iter {
+            JsObject(_) ->
+              case object.get_value_of(state, iter, Named("next")) {
+                Error(#(thrown, state)) -> #(
+                  concat_mark_done(state, ref),
+                  Error(thrown),
+                )
+                Ok(#(next_method, state)) -> {
+                  let state =
+                    concat_write(state, ref, rest, Some(#(iter, next_method)))
+                  concat_next(
+                    state,
+                    ref,
+                    rest,
+                    Some(#(iter, next_method)),
+                    False,
+                  )
+                }
+              }
+            _ ->
+              state.type_error(
+                concat_mark_done(state, ref),
+                "Result of the Symbol.iterator method is not an object",
+              )
+          }
+      }
+  }
+}
+
+/// %IteratorHelperPrototype%.return for concat helpers: close the currently
+/// open inner iterator (if any).
+fn concat_return(
+  state: State,
+  ref: Ref,
+  inner: Option(#(JsValue, JsValue)),
+  done: Bool,
+) -> #(State, Result(JsValue, JsValue)) {
+  case done {
+    True -> create_iter_result(state, JsUndefined, True)
+    False -> {
+      let state = concat_mark_done(state, ref)
+      case inner {
+        Some(#(iter, _next_method)) -> {
+          let #(state, close_res) = iterator_close_normal(state, iter)
+          case close_res {
+            Error(e) -> #(state, Error(e))
+            Ok(Nil) -> create_iter_result(state, JsUndefined, True)
+          }
+        }
+        None -> create_iter_result(state, JsUndefined, True)
+      }
+    }
+  }
+}
+
+fn concat_mark_done(state: State, ref: Ref) -> State {
+  let heap =
+    heap.update(state.heap, ref, fn(slot) {
+      case slot {
+        ObjectSlot(kind: IteratorConcatObject(..) as kind, ..) ->
+          ObjectSlot(
+            ..slot,
+            kind: IteratorConcatObject(..kind, inner: None, done: True),
+          )
+        other -> other
+      }
+    })
+  State(..state, heap:)
+}
+
+fn concat_write(
+  state: State,
+  ref: Ref,
+  remaining: List(#(JsValue, JsValue)),
+  inner: Option(#(JsValue, JsValue)),
+) -> State {
+  let heap =
+    heap.update(state.heap, ref, fn(slot) {
+      case slot {
+        ObjectSlot(kind: IteratorConcatObject(..) as kind, ..) ->
+          ObjectSlot(
+            ..slot,
+            kind: IteratorConcatObject(..kind, remaining:, inner:),
           )
         other -> other
       }
