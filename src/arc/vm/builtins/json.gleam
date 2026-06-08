@@ -469,7 +469,9 @@ fn materialize(
           h,
           ObjectSlot(
             kind: OrdinaryObject,
-            properties: dict.from_list(props),
+            // Not dict.from_list: duplicate JSON keys must keep the FIRST
+            // occurrence's position with the LAST occurrence's value.
+            properties: value.props_dict_from_pairs(props),
             elements: elements.new(),
             prototype: Some(b.object.prototype),
             symbol_properties: [],

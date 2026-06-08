@@ -2301,37 +2301,86 @@ pub fn is_private_name(key: PropertyKey) -> Bool {
 }
 
 /// Property descriptor — writable/enumerable/configurable flags per property.
-/// Following QuickJS: bit-flags on every property. No accessor properties yet.
+/// Following QuickJS: bit-flags on every property.
+///
+/// `seq` is the property-creation sequence number implementing §10.1.11
+/// OrdinaryOwnPropertyKeys step 3: own string keys that are NOT array indices
+/// enumerate in ascending chronological order of property creation. Stamped
+/// from a runtime-global monotonic counter when the property record is built
+/// (next_prop_seq); only relative order within one object matters.
+/// INVARIANT: redefining/updating an EXISTING key must KEEP the old seq (the
+/// key keeps its enumeration position); delete + re-add gets a fresh seq (the
+/// key moves to the end). Index keys and symbol keys ignore seq — indices
+/// sort numerically, symbols live in the creation-ordered symbol_properties
+/// list.
 pub type Property {
   DataProperty(
     value: JsValue,
     writable: Bool,
     enumerable: Bool,
     configurable: Bool,
+    seq: Int,
   )
   AccessorProperty(
     get: Option(JsValue),
     set: Option(JsValue),
     enumerable: Bool,
     configurable: Bool,
+    seq: Int,
   )
 }
 
-/// Base builder: DataProperty with all flags False.
+/// Fresh property-creation sequence number — see Property.seq.
+@external(erlang, "arc_vm_ffi", "next_prop_seq")
+pub fn next_prop_seq() -> Int
+
+/// Creation-order sequence number of a property — see Property.seq.
+pub fn prop_seq(prop: Property) -> Int {
+  case prop {
+    DataProperty(seq:, ..) | AccessorProperty(seq:, ..) -> seq
+  }
+}
+
+/// Carry an existing property's seq onto a replacement descriptor — used by
+/// update/redefine paths, which must keep the key's enumeration position.
+pub fn with_seq_of(prop: Property, old: Property) -> Property {
+  let seq = prop_seq(old)
+  case prop {
+    DataProperty(value:, writable:, enumerable:, configurable:, ..) ->
+      DataProperty(value:, writable:, enumerable:, configurable:, seq:)
+    AccessorProperty(get:, set:, enumerable:, configurable:, ..) ->
+      AccessorProperty(get:, set:, enumerable:, configurable:, seq:)
+  }
+}
+
+/// Base builder: DataProperty with all flags False. Stamps a fresh creation
+/// seq — builders are called at property-creation time, so build order
+/// matches creation order.
 pub fn data(val: JsValue) -> Property {
   DataProperty(
     value: val,
     writable: False,
     enumerable: False,
     configurable: False,
+    seq: next_prop_seq(),
   )
+}
+
+/// AccessorProperty builder with a fresh creation seq.
+pub fn accessor(
+  get get: Option(JsValue),
+  set set: Option(JsValue),
+  enumerable enumerable: Bool,
+  configurable configurable: Bool,
+) -> Property {
+  AccessorProperty(get:, set:, enumerable:, configurable:, seq: next_prop_seq())
 }
 
 /// Set writable to True (data properties only).
 pub fn writable(prop: Property) -> Property {
   case prop {
-    DataProperty(value:, enumerable:, configurable:, ..) ->
-      DataProperty(value:, writable: True, enumerable:, configurable:)
+    DataProperty(value:, enumerable:, configurable:, seq:, ..) ->
+      DataProperty(value:, writable: True, enumerable:, configurable:, seq:)
 
     AccessorProperty(..) -> panic as "Accessor property cannot be made writable"
   }
@@ -2340,22 +2389,22 @@ pub fn writable(prop: Property) -> Property {
 /// Set enumerable to True.
 pub fn enumerable(prop: Property) -> Property {
   case prop {
-    DataProperty(value:, writable:, configurable:, ..) ->
-      DataProperty(value:, writable:, enumerable: True, configurable:)
+    DataProperty(value:, writable:, configurable:, seq:, ..) ->
+      DataProperty(value:, writable:, enumerable: True, configurable:, seq:)
 
-    AccessorProperty(get:, set:, configurable:, ..) ->
-      AccessorProperty(get:, set:, enumerable: True, configurable:)
+    AccessorProperty(get:, set:, configurable:, seq:, ..) ->
+      AccessorProperty(get:, set:, enumerable: True, configurable:, seq:)
   }
 }
 
 /// Set configurable to True.
 pub fn configurable(prop: Property) -> Property {
   case prop {
-    DataProperty(value:, writable:, enumerable:, ..) ->
-      DataProperty(value:, writable:, enumerable:, configurable: True)
+    DataProperty(value:, writable:, enumerable:, seq:, ..) ->
+      DataProperty(value:, writable:, enumerable:, configurable: True, seq:)
 
-    AccessorProperty(get:, set:, enumerable:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable: True)
+    AccessorProperty(get:, set:, enumerable:, seq:, ..) ->
+      AccessorProperty(get:, set:, enumerable:, configurable: True, seq:)
   }
 }
 
@@ -2372,15 +2421,76 @@ pub fn prop_configurable(prop: Property) -> Bool {
   }
 }
 
+/// A properties dict's entries in §10.1.11 OrdinaryOwnPropertyKeys order:
+/// array-index keys ascending numerically, then other string keys in
+/// ascending property-creation order (Property.seq). Private names ("#x")
+/// are INCLUDED (sorted by seq with the named keys) — callers doing JS-level
+/// reflection must filter them with is_private_name; heap-level copy paths
+/// (structured clone) must keep them.
+///
+/// Dict entries only — objects with an elements fast store (Array/Arguments)
+/// have their element indices merged in by ops/object.own_string_keys_flagged,
+/// the key-enumeration funnel.
+pub fn ordered_property_pairs(
+  properties: Dict(PropertyKey, Property),
+) -> List(#(PropertyKey, Property)) {
+  let #(idx, named) =
+    dict.fold(properties, #([], []), fn(acc, key, prop) {
+      let #(idx, named) = acc
+      case key {
+        Index(i) -> #([#(i, prop), ..idx], named)
+        Named(_) -> #(idx, [#(key, prop), ..named])
+      }
+    })
+  let idx =
+    list.sort(idx, fn(a, b) { int.compare(a.0, b.0) })
+    |> list.map(fn(pair) { #(Index(pair.0), pair.1) })
+  let named =
+    list.sort(named, fn(a, b) { int.compare(prop_seq(a.1), prop_seq(b.1)) })
+  list.append(idx, named)
+}
+
+/// Build a properties dict from key/prop pairs, giving a key that appears
+/// multiple times the FIRST occurrence's creation seq and the LAST
+/// occurrence's descriptor — [[DefineOwnProperty]] redefinition semantics
+/// (§10.1.11: a redefined key keeps its enumeration position). Use instead of
+/// dict.from_list when the pair list may contain duplicate keys (e.g.
+/// JSON.parse input).
+pub fn props_dict_from_pairs(
+  pairs: List(#(PropertyKey, Property)),
+) -> Dict(PropertyKey, Property) {
+  list.fold(pairs, dict.new(), fn(d, pair) {
+    let #(key, prop) = pair
+    case dict.get(d, key) {
+      Ok(old) -> dict.insert(d, key, with_seq_of(prop, old))
+      Error(Nil) -> dict.insert(d, key, prop)
+    }
+  })
+}
+
 /// Normal assignment: all flags true (obj.x = val, object literals, etc.)
 pub fn data_property(val: JsValue) -> Property {
-  data(val) |> writable() |> enumerable() |> configurable()
+  // Direct construction (not the builder chain) — this is the hottest
+  // property-creation path (object literals, element promotion, copies).
+  DataProperty(
+    value: val,
+    writable: True,
+    enumerable: True,
+    configurable: True,
+    seq: next_prop_seq(),
+  )
 }
 
 /// Built-in methods/prototype props: writable+configurable, NOT enumerable.
 /// This matches QuickJS and the spec for built-in function properties.
 pub fn builtin_property(val: JsValue) -> Property {
-  data(val) |> writable() |> configurable()
+  DataProperty(
+    value: val,
+    writable: True,
+    enumerable: False,
+    configurable: True,
+    seq: next_prop_seq(),
+  )
 }
 
 /// GC root tracing: prepend heap refs reachable from a Property onto `acc`.
@@ -2641,14 +2751,14 @@ fn indent(lines: List(List(String)), indent: Int) -> String {
 
 fn property_debug_lines(property: Property) -> List(List(String)) {
   case property {
-    DataProperty(value:, writable:, enumerable:, configurable:) -> [
+    DataProperty(value:, writable:, enumerable:, configurable:, ..) -> [
       [],
       ["value:", string.inspect(value)],
       ["writable:", bool.to_string(writable)],
       ["enumerable:", bool.to_string(enumerable)],
       ["configurable:", bool.to_string(configurable)],
     ]
-    AccessorProperty(get:, set:, enumerable:, configurable:) -> [
+    AccessorProperty(get:, set:, enumerable:, configurable:, ..) -> [
       [],
       ["get:", string.inspect(get)],
       ["set:", string.inspect(set)],

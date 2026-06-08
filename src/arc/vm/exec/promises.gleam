@@ -1459,19 +1459,10 @@ fn get_keyed_value(
 /// CreateKeyedPromiseCombinatorResultObject(keys, values): a null-prototype
 /// ordinary object with one enumerable data property per collected key.
 ///
-/// TODO(Deviation): the spec requires the result object's own keys to come
-/// back in keys-list (property-creation) order, but string properties land in
-/// the Dict-backed ObjectSlot.properties store, and [[OwnPropertyKeys]]
-/// (collect_own_keys in builtins/object.gleam) emits Erlang map term order —
-/// effectively lexicographic. This is the engine-wide unordered-property-store
-/// deviation already documented on collect_own_keys; fixing it here would mean
-/// insertion-order tracking on ObjectSlot itself, not a local change.
-/// Known-fail because of this:
-///   test262/built-ins/Promise/allSettledKeyed/resolved-all-mixed.js
-///     (expects [first..sixth] in creation order, gets lexicographic order)
-/// Note: allKeyed/key-order-preserved.js passes only coincidentally — its
-/// keys ("first"/"second"/"third") happen to sort into creation order.
-/// Keyed combinator suite status: 60/61, the remainder is the test above.
+/// The spec requires the result object's own keys to come back in keys-list
+/// (property-creation) order; [[OwnPropertyKeys]] sorts named keys by their
+/// creation seq (Property.seq), and the properties are built below in
+/// keys-list order, so each gets an ascending seq and the order round-trips.
 fn create_keyed_result(
   h: Heap,
   keys_ref: Ref,

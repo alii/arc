@@ -18,7 +18,7 @@ import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type TypedArrayKind, type TypedArrayNativeFn,
-  AccessorProperty, Dispatch, Finite, JsBool, JsNumber, JsObject, JsString,
+  Dispatch, Finite, JsBool, JsNumber, JsObject, JsString,
   JsUndefined, Named, ObjectSlot, TypedArrayConstructor, TypedArrayGetBuffer,
   TypedArrayGetByteLength, TypedArrayGetByteOffset, TypedArrayGetLength,
   TypedArrayGetSpecies, TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor,
@@ -155,7 +155,7 @@ pub fn init(
       h,
       ta.prototype,
       value.symbol_to_string_tag,
-      AccessorProperty(
+      value.accessor(
         get: Some(JsObject(tag_get)),
         set: None,
         enumerable: False,
@@ -176,7 +176,7 @@ pub fn init(
       h,
       ta.constructor,
       value.symbol_species,
-      AccessorProperty(
+      value.accessor(
         get: Some(JsObject(species_get)),
         set: None,
         enumerable: False,

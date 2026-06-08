@@ -2,7 +2,7 @@ import arc/vm/builtins/common.{type BuiltinType, alloc_proto}
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
 import arc/vm/value.{
-  type Ref, AccessorProperty, Dispatch, FunctionApply, FunctionBind,
+  type Ref, Dispatch, FunctionApply, FunctionBind,
   FunctionCall, FunctionConstructor, FunctionHasInstance, FunctionToString,
   JsObject, ThrowTypeErrorFn, VmNative,
 }
@@ -60,7 +60,7 @@ pub fn init(h: Heap(ctx), object_proto: Ref) -> #(Heap(ctx), BuiltinType) {
     )
   let h = heap.root(h, thrower_ref)
   let restricted =
-    AccessorProperty(
+    value.accessor(
       get: Some(JsObject(thrower_ref)),
       set: Some(JsObject(thrower_ref)),
       enumerable: False,

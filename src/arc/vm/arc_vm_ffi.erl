@@ -21,6 +21,9 @@
 -export([return_code_sentinel/0]).
 -export([float_same_term/2]).
 -export([unique_positive_integer/0]).
+-export([next_prop_seq/0]).
+-export([put_existing_writable_data/3]).
+-export([define_own_data_property/3]).
 -export([run_compile_task/2]).
 -export([heap_read/2]).
 
@@ -466,4 +469,42 @@ cancel_timer(TRef) ->
 
 unique_positive_integer() ->
     erlang:unique_integer([positive]).
+
+%% Property-creation sequence number (ES §10.1.11 OrdinaryOwnPropertyKeys:
+%% non-index string keys enumerate in ascending chronological order of
+%% property creation). Strictly increasing across the runtime, so relative
+%% order within any one object's property table follows creation order.
+next_prop_seq() ->
+    erlang:unique_integer([monotonic, positive]).
+
+%% Hot-path `obj.x = v` overwrite: update an EXISTING writable data
+%% property's value in one map traversal, preserving its flags and creation
+%% seq (ES §10.1.11 — an updated key keeps its enumeration position).
+%% Mirrors the Gleam representation: a properties Dict is a bare Erlang map
+%% and value.DataProperty is {data_property, Value, Writable, Enumerable,
+%% Configurable, Seq}. Returns {ok, NewProps}, or {error, nil} when the key
+%% is absent, non-writable, or an accessor — callers fall back to the full
+%% [[Set]] path.
+put_existing_writable_data(Props, Key, Val) ->
+    case Props of
+        #{Key := {data_property, _, true, E, C, S}} ->
+            {ok, Props#{Key := {data_property, Val, true, E, C, S}}};
+        _ ->
+            {error, nil}
+    end.
+
+%% §7.3.5 CreateDataProperty on an ordinary property table: insert a
+%% {W:T, E:T, C:T} data property in one map traversal. A brand-new key is
+%% stamped with a fresh creation seq; an existing key keeps its old seq
+%% (§10.1.11 — redefinition keeps the enumeration position; both Property
+%% variants carry seq as their last element). Hot path: object literals.
+define_own_data_property(Props, Key, Val) ->
+    case Props of
+        #{Key := Old} ->
+            Props#{Key := {data_property, Val, true, true, true,
+                           element(tuple_size(Old), Old)}};
+        _ ->
+            Props#{Key => {data_property, Val, true, true, true,
+                           erlang:unique_integer([monotonic, positive])}}
+    end.
 

@@ -261,8 +261,8 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       value.ProxyConstructor,
       constructible: True,
       props: [
-        #("name", common.fn_name_property("Proxy")),
         #("length", common.fn_length_property(2)),
+        #("name", common.fn_name_property("Proxy")),
         #("revocable", value.builtin_property(JsObject(proxy_revocable))),
       ],
     )

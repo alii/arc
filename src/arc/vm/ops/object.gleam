@@ -503,12 +503,16 @@ fn own_property_of_slot(
         // non-writable; the value always tracks ArrayObject(length).
         Named("length") ->
           case dict_get_option(properties, key) {
+            // seq: 0 on virtual descriptors: array "length" never enumerates
+            // through the seq-ordered named-key path (it is emitted as a
+            // special case), so no fresh creation seq is needed.
             Some(DataProperty(writable:, enumerable:, configurable:, ..)) ->
               Some(DataProperty(
                 value: value.from_int(length),
                 writable:,
                 enumerable:,
                 configurable:,
+                seq: 0,
               ))
             _ ->
               Some(DataProperty(
@@ -516,6 +520,7 @@ fn own_property_of_slot(
                 writable: True,
                 enumerable: False,
                 configurable: False,
+                seq: 0,
               ))
           }
         Index(idx) ->
@@ -554,22 +559,28 @@ fn own_property_of_slot(
         // §10.4.3.4 StringCreate: "length" is an ordinary own data
         // property {value: len, W:F, E:F, C:F}; returned at §10.4.3.1 step 1.
         Named("length") ->
+          // seq: 0 — synthesized virtual descriptor, never stored or
+          // enumerated through the seq-ordered named-key path.
           Some(DataProperty(
             value: value.from_int(string_length(s)),
             writable: False,
             enumerable: False,
             configurable: False,
+            seq: 0,
           ))
         // §10.4.3.5 steps 2-4: CanonicalNumericIndexString → integer index
         Index(idx) ->
           case string_char_at(s, idx) {
             // §10.4.3.5 step 10: return {value: char, W:F, E:T, C:F}
             Some(ch) ->
+              // seq: 0 — synthesized Index-key descriptor; index keys
+              // enumerate in numeric order, never by seq.
               Some(DataProperty(
                 value: JsString(ch),
                 writable: False,
                 enumerable: True,
                 configurable: False,
+                seq: 0,
               ))
             // §10.4.3.5 step 8: index >= len → undefined, fall to ordinary
             None -> dict_get_option(properties, key)
@@ -794,6 +805,7 @@ pub fn set_value(
                 writable: True,
                 enumerable:,
                 configurable:,
+                seq:,
                 value: _,
               )),
               _
@@ -803,11 +815,14 @@ pub fn set_value(
                 dict.insert(
                   properties,
                   key,
+                  // Updating an existing key keeps its creation seq
+                  // (§10.1.11 — the key keeps its enumeration position).
                   DataProperty(
                     value: val,
                     writable: True,
                     enumerable:,
                     configurable:,
+                    seq:,
                   ),
                 )
               let h =
@@ -1100,6 +1115,7 @@ fn proxy_receiver_get_own(
                   configurable: read("configurable")
                     |> option.map(value.is_truthy)
                     |> option.unwrap(False),
+                  seq: value.next_prop_seq(),
                 )),
                 state,
               ))
@@ -1114,6 +1130,7 @@ fn proxy_receiver_get_own(
                   configurable: read("configurable")
                     |> option.map(value.is_truthy)
                     |> option.unwrap(False),
+                  seq: value.next_prop_seq(),
                 )),
                 state,
               ))
@@ -1289,6 +1306,7 @@ fn set_property_on_slot(
                   writable: True,
                   enumerable:,
                   configurable:,
+                  seq:,
                   value: _,
                 )) -> #(
                   heap.write(
@@ -1304,6 +1322,7 @@ fn set_property_on_slot(
                           writable: True,
                           enumerable:,
                           configurable:,
+                          seq:,
                         ),
                       ),
                     ),
@@ -1357,6 +1376,7 @@ fn set_property_on_slot(
                   writable: True,
                   enumerable:,
                   configurable:,
+                  seq:,
                   value: _,
                 )) -> #(
                   heap.write(
@@ -1372,6 +1392,7 @@ fn set_property_on_slot(
                           writable: True,
                           enumerable:,
                           configurable:,
+                          seq:,
                         ),
                       ),
                     ),
@@ -1607,7 +1628,9 @@ fn set_string_property(
       // §10.1.6.1 step 1: Let current be ? O.[[GetOwnProperty]](P).
       case dict.get(properties, key) {
         // §10.1.6.3 step 6.c: current exists and is writable data — update [[Value]].
-        Ok(DataProperty(writable: True, enumerable:, configurable:, ..)) -> {
+        // Keeps the existing creation seq: an updated key keeps its
+        // enumeration position (§10.1.11).
+        Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) -> {
           let new_props =
             dict.insert(
               properties,
@@ -1617,6 +1640,7 @@ fn set_string_property(
                 writable: True,
                 enumerable:,
                 configurable:,
+                seq:,
               ),
             )
           #(heap.write(h, ref, ObjectSlot(..slot, properties: new_props)), True)
@@ -1682,13 +1706,27 @@ fn define_own_property(
 ) -> Heap {
   use slot <- heap.update(heap, ref)
   case slot {
-    ObjectSlot(properties:, ..) -> {
-      let new_props = dict.insert(properties, key, value.data_property(val))
-      ObjectSlot(..slot, properties: new_props)
-    }
+    ObjectSlot(properties:, ..) ->
+      // Single-traversal FFI upsert: a brand-new key gets a fresh creation
+      // seq, a re-defined key keeps its old one (§10.1.11 — e.g. duplicate
+      // keys in an object literal keep the first key's position).
+      ObjectSlot(
+        ..slot,
+        properties: ffi_define_own_data_property(properties, key, val),
+      )
     _ -> slot
   }
 }
+
+/// §7.3.5 CreateDataProperty upsert in one map traversal — see
+/// define_own_data_property in arc_vm_ffi.erl. New keys get a fresh
+/// creation seq; existing keys keep theirs (§10.1.11).
+@external(erlang, "arc_vm_ffi", "define_own_data_property")
+fn ffi_define_own_data_property(
+  properties: dict.Dict(PropertyKey, Property),
+  key: PropertyKey,
+  val: JsValue,
+) -> dict.Dict(PropertyKey, Property)
 
 /// §7.3.6 CreateMethodProperty ( O, P, V ) — ES2022 numbering; removed in
 /// ES2024 with call sites migrated to the pre-existing
@@ -1718,6 +1756,11 @@ pub fn define_method_property(
   use slot <- heap.update(heap, ref)
   case slot {
     ObjectSlot(properties:, ..) -> {
+      // Re-defining an existing key keeps its creation seq (§10.1.11).
+      let prop = case dict.get(properties, key) {
+        Ok(old) -> value.with_seq_of(prop, old)
+        Error(Nil) -> prop
+      }
       let new_props = dict.insert(properties, key, prop)
       ObjectSlot(..slot, properties: new_props)
     }
@@ -1772,11 +1815,29 @@ fn merge_accessor(
     Ok(AccessorProperty(get:, set:, ..)) -> #(get, set)
     Ok(DataProperty(..)) | Error(Nil) -> #(None, None)
   }
+  // Merging into an existing key keeps its creation seq (§10.1.11) — e.g.
+  // `{ get x() {}, a: 1, set x(v) {} }` keeps "x" before "a".
+  let seq = case existing {
+    Ok(old) -> value.prop_seq(old)
+    Error(Nil) -> value.next_prop_seq()
+  }
   case kind {
     opcode.Getter ->
-      AccessorProperty(get: Some(func), set:, enumerable:, configurable: True)
+      AccessorProperty(
+        get: Some(func),
+        set:,
+        enumerable:,
+        configurable: True,
+        seq:,
+      )
     opcode.Setter ->
-      AccessorProperty(get:, set: Some(func), enumerable:, configurable: True)
+      AccessorProperty(
+        get:,
+        set: Some(func),
+        enumerable:,
+        configurable: True,
+        seq:,
+      )
   }
 }
 
@@ -2228,12 +2289,112 @@ fn delete_string_property(
 /// it with prototype walking here because for-in needs it, matching
 /// EnumerateObjectProperties behavior. Symbol keys are excluded per
 /// step 3.a (only String keys).
+/// Own string-keyed properties of an object in §10.1.11 OrdinaryOwnPropertyKeys
+/// order, each paired with its [[Enumerable]] flag:
+///   1. array-index keys (elements fast store merged with dict overrides) in
+///      ascending numeric order;
+///   2. the virtual "length" of Array/String exotics (non-enumerable, created
+///      at object birth — before any user-added named key);
+///   3. other string keys in ascending property-creation order (Property.seq).
+/// Module namespaces emit their exports sorted by code-unit order (§10.4.6.11).
+/// Private names are excluded. Symbol keys are not included — they live in
+/// symbol_properties, which is already a creation-ordered list.
+///
+/// This is THE single funnel for own string-key enumeration order: for-in
+/// (enumerate_keys), Object.keys/values/entries/assign, getOwnPropertyNames,
+/// Reflect.ownKeys, JSON.stringify and spread/rest all route through it
+/// (directly or via collect_own_keys in builtins/object).
+pub fn own_string_keys_flagged(heap: Heap, ref: Ref) -> List(#(String, Bool)) {
+  case heap.read(heap, ref) {
+    // §10.4.6.11 Module Namespace [[OwnPropertyKeys]]: the exported names,
+    // sorted by code-unit order. All are enumerable.
+    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
+      list.sort(dict.keys(exports), string.compare)
+      |> list.map(fn(name) { #(name, True) })
+    Some(ObjectSlot(kind:, properties:, elements:, ..)) -> {
+      let is_array = case kind {
+        ArrayObject(_) -> True
+        _ -> False
+      }
+      // Element-store indices (Array/Arguments fast storage) — always
+      // enumerable data properties. String exotic synthesizes one index per
+      // code point (§10.4.3.3 step 3); TypedArray its live indices
+      // (§10.4.5.7 step 2.a).
+      let elem_indices = case kind {
+        ArrayObject(length:) | value.ArgumentsObject(length:) ->
+          elements.indices(elements)
+          |> list.filter(fn(idx) { idx < length })
+        value.StringObject(value: s) ->
+          int.range(from: string_length(s) - 1, to: -1, with: [], run: fn(
+            acc,
+            i,
+          ) {
+            [i, ..acc]
+          })
+        value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) -> {
+          let n =
+            typed_array_live_length(
+              heap,
+              buffer,
+              elem_kind,
+              byte_offset,
+              typed_array_view_length(heap, buffer, elem_kind, byte_offset, length),
+            )
+          int.range(from: n - 1, to: -1, with: [], run: fn(acc, i) { [i, ..acc] })
+        }
+        _ -> []
+      }
+      // Split dict entries; the Named("length") dict entry on arrays only
+      // tracks frozen-length attributes — the visible key is emitted as the
+      // virtual length_key below.
+      let #(dict_indices, named) =
+        dict.fold(properties, #([], []), fn(acc, key, prop) {
+          let #(idx, named) = acc
+          case key {
+            Index(i) -> #([#(i, value.prop_enumerable(prop)), ..idx], named)
+            // Private names ("#x") never appear in [[OwnPropertyKeys]].
+            Named("\u{0}" <> _) -> acc
+            Named("length") if is_array -> acc
+            Named(n) -> #(idx, [
+              #(value.prop_seq(prop), n, value.prop_enumerable(prop)),
+              ..named
+            ])
+          }
+        })
+      // Step 1: array-index keys in ascending numeric order. An index lives
+      // in exactly one store (elements or dict override), so no dedup needed.
+      let index_keys =
+        list.fold(elem_indices, dict_indices, fn(acc, i) { [#(i, True), ..acc] })
+        |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
+        |> list.map(fn(pair) { #(int.to_string(pair.0), pair.1) })
+      // Array exotic: "length" is a non-enumerable own property (§10.4.2);
+      // String exotic likewise (§10.4.3.4 StringCreate). Both exist from
+      // object birth, so they precede all user-created named keys.
+      let length_key = case kind {
+        ArrayObject(_) | value.StringObject(_) -> [#("length", False)]
+        _ -> []
+      }
+      // Step 2: other string keys in property-creation order.
+      let named_keys =
+        list.sort(named, fn(a, b) { int.compare(a.0, b.0) })
+        |> list.map(fn(entry) { #(entry.1, entry.2) })
+      list.flatten([index_keys, length_key, named_keys])
+    }
+    _ -> []
+  }
+}
+
 pub fn enumerate_keys(heap: Heap, ref: Ref) -> List(String) {
   enumerate_keys_loop(heap, Some(ref), set.new(), [])
 }
 
 /// Helper for enumerate_keys — walks the prototype chain collecting
 /// enumerable string keys, skipping shadowed keys via the seen set.
+///
+/// Per object, keys come from own_string_keys_flagged in §10.1.11
+/// [[OwnPropertyKeys]] order (indices ascending, then named keys in creation
+/// order). Non-enumerable own keys are added to seen (they shadow enumerable
+/// prototype keys — §14.7.5.9 EnumerateObjectProperties) but not emitted.
 fn enumerate_keys_loop(
   heap: Heap,
   current: Option(Ref),
@@ -2241,124 +2402,34 @@ fn enumerate_keys_loop(
   acc: List(String),
 ) -> List(String) {
   case current {
-    // Step 4: No more objects in chain → return collected results.
+    // No more objects in chain → return collected results.
     None -> list.reverse(acc)
-    Some(ref) ->
-      case heap.read(heap, ref) {
-        // Module namespace: enumerable keys are the sorted export names; the
-        // null prototype ends the walk. (TDZ throws are handled by the caller.)
-        Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
-          list.sort(dict.keys(exports), string.compare)
-          |> list.fold(acc, fn(a, name) {
-            case set.contains(seen, name) {
-              True -> a
-              False -> [name, ..a]
+    Some(ref) -> {
+      let #(acc, seen) =
+        list.fold(
+          own_string_keys_flagged(heap, ref),
+          #(acc, seen),
+          fn(state, pair) {
+            let #(a, s) = state
+            let #(k, enumerable) = pair
+            case set.contains(s, k) {
+              True -> state
+              False ->
+                case enumerable {
+                  True -> #([k, ..a], set.insert(s, k))
+                  // Non-enumerable: mark seen but don't include.
+                  False -> #(a, set.insert(s, k))
+                }
             }
-          })
-          |> list.reverse
-        Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) -> {
-          // Step 1 (partial): Collect element keys first (array index portion
-          // of [[OwnPropertyKeys]], which returns indices in ascending order).
-          let #(elem_acc, elem_seen) = case kind {
-            ArrayObject(length:) | value.ArgumentsObject(length:) ->
-              collect_element_keys(elements, length, seen, acc)
-            // TypedArray: indices 0..length-1 are own enumerable properties
-            // (none when the backing buffer is detached; clamped to the live
-            // buffer when a resizable buffer has shrunk below the view).
-            value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) -> {
-              let n =
-                typed_array_live_length(
-                  heap,
-                  buffer,
-                  elem_kind,
-                  byte_offset,
-                  typed_array_view_length(
-                    heap,
-                    buffer,
-                    elem_kind,
-                    byte_offset,
-                    length,
-                  ),
-                )
-              use st, idx <- int.range(from: 0, to: n, with: #(acc, seen))
-              let #(a, s) = st
-              let k = int.to_string(idx)
-              case set.contains(s, k) {
-                True -> st
-                False -> #([k, ..a], set.insert(s, k))
-              }
-            }
-            // §10.4.3.3 String exotic: one own enumerable index property per
-            // code point — keeps for-in consistent with Object.keys on a
-            // String wrapper.
-            value.StringObject(value: str) -> {
-              let n = string_length(str)
-              use st, idx <- int.range(from: 0, to: n, with: #(acc, seen))
-              let #(a, s) = st
-              let k = int.to_string(idx)
-              case set.contains(s, k) {
-                True -> st
-                False -> #([k, ..a], set.insert(s, k))
-              }
-            }
-            _ -> #(acc, seen)
-          }
-          // Step 3: For each string key, check desc.[[Enumerable]].
-          // Non-enumerable keys are added to seen (for shadowing) but not to results.
-          let #(final_acc, final_seen) =
-            dict.fold(properties, #(elem_acc, elem_seen), fn(state, key, prop) {
-              let #(a, s) = state
-              // Private names ("#x") never appear in for-in (spec keeps them
-              // outside the ordinary property table).
-              use <- bool.guard(value.is_private_name(key), state)
-              let k = value.key_to_string(key)
-              case set.contains(s, k) {
-                True -> #(a, s)
-                False ->
-                  case prop {
-                    // Step 3.a.ii: desc.[[Enumerable]] is true → append key.
-                    DataProperty(enumerable: True, ..)
-                    | AccessorProperty(enumerable: True, ..) -> #(
-                      [k, ..a],
-                      set.insert(s, k),
-                    )
-                    // Non-enumerable: mark seen but don't include.
-                    _ -> #(a, set.insert(s, k))
-                  }
-              }
-            })
-          // Walk prototype chain (for-in extension).
-          enumerate_keys_loop(heap, prototype, final_seen, final_acc)
-        }
-        _ -> list.reverse(acc)
+          },
+        )
+      // Walk prototype chain (for-in extension). Module namespaces have a
+      // null prototype, ending the walk.
+      let prototype = case heap.read(heap, ref) {
+        Some(ObjectSlot(prototype:, ..)) -> prototype
+        _ -> None
       }
-  }
-}
-
-/// Helper: collect element indices [0, length) as string keys in ascending
-/// order. Skips holes and already-seen keys. This corresponds to the array
-/// index portion of §10.1.11.1 OrdinaryOwnPropertyKeys step 2: "For each
-/// own property key P of O that is an array index, in ascending numeric
-/// index order, append P to keys."
-///
-/// Iterates elements.indices() (O(k)) instead of probing 0..length (O(length))
-/// so sparse arrays with huge length but few entries don't degenerate.
-fn collect_element_keys(
-  elements: JsElements,
-  length: Int,
-  seen: set.Set(String),
-  acc: List(String),
-) -> #(List(String), set.Set(String)) {
-  use state, idx <- list.fold(elements.indices(elements), #(acc, seen))
-  case idx < length {
-    False -> state
-    True -> {
-      let #(a, s) = state
-      let key = int.to_string(idx)
-      case set.contains(s, key) {
-        True -> state
-        False -> #([key, ..a], set.insert(s, key))
-      }
+      enumerate_keys_loop(heap, prototype, seen, acc)
     }
   }
 }
@@ -2470,8 +2541,10 @@ pub fn copy_data_properties_excluding(
           let state = State(..state, heap:)
           // Step 4 (string keys): Filter to enumerable + not-excluded, then
           // Get + CreateDataProperty.
+          // §7.3.25 CopyDataProperties step 4 iterates from.[[OwnPropertyKeys]]
+          // — §10.1.11 order, so the target's fresh creation seqs follow it.
           let keys =
-            dict.to_list(properties)
+            value.ordered_property_pairs(properties)
             |> list.filter_map(fn(pair) {
               let #(k, prop) = pair
               // Private names ("#x") are not ordinary own keys — never copied
@@ -2773,7 +2846,13 @@ fn define_symbol_data_on_receiver(
       case existing {
         Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
         Some(AccessorProperty(..)) -> Ok(#(state, False))
-        Some(DataProperty(writable: True, enumerable:, configurable:, value: _)) -> {
+        Some(DataProperty(
+          writable: True,
+          enumerable:,
+          configurable:,
+          seq:,
+          value: _,
+        )) -> {
           let h =
             define_symbol_property(
               state.heap,
@@ -2784,6 +2863,7 @@ fn define_symbol_data_on_receiver(
                 writable: True,
                 enumerable:,
                 configurable:,
+                seq:,
               ),
             )
           Ok(#(State(..state, heap: h), True))
@@ -3075,7 +3155,7 @@ fn inspect_plain_object(
     True -> "[Object]"
     False -> {
       let entries =
-        dict.to_list(properties)
+        value.ordered_property_pairs(properties)
         |> list.filter_map(fn(pair) {
           let #(key, prop) = pair
           case prop {

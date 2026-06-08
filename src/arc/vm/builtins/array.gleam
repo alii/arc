@@ -143,12 +143,9 @@ pub fn init(
       dict.insert(
         props,
         Named(name),
-        DataProperty(
-          value: JsBool(True),
-          writable: True,
-          enumerable: True,
-          configurable: True,
-        ),
+        // Built in list order, so creation seqs follow unscopable_names
+        // (§10.1.11 creation-order enumeration).
+        value.data_property(JsBool(True)),
       )
     })
   let #(h, unscopables_ref) =

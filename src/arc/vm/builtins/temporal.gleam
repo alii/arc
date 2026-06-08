@@ -488,8 +488,8 @@ fn init_temporal_type(
         properties: common.named_props([
           // §x: constructor "prototype" is non-writable, non-configurable.
           #("prototype", value.data(JsObject(proto_ref))),
-          #("name", common.fn_name_property(name)),
           #("length", common.fn_length_property(arity)),
+          #("name", common.fn_name_property(name)),
           ..static_props
         ]),
         elements: elements.new(),

@@ -290,8 +290,8 @@ pub fn build_262(
             constructible: False,
           ),
           properties: dict.from_list([
-            #(Named("name"), common.fn_name_property("IsHTMLDDA")),
             #(Named("length"), common.fn_length_property(0)),
+            #(Named("name"), common.fn_name_property("IsHTMLDDA")),
           ]),
           symbol_properties: [],
           elements: elements.new(),
@@ -1035,7 +1035,13 @@ fn set_function_name_anonymous(state: State, fn_ref: Ref) -> State {
             properties: dict.insert(
               properties,
               Named("name"),
-              common.fn_name_property("anonymous"),
+              // Redefining an existing "name" keeps its creation seq
+              // (§10.1.11 — the key keeps its enumeration position).
+              case dict.get(properties, Named("name")) {
+                Ok(old) ->
+                  value.with_seq_of(common.fn_name_property("anonymous"), old)
+                Error(Nil) -> common.fn_name_property("anonymous")
+              },
             ),
           )
         other -> other
@@ -1437,11 +1443,19 @@ fn wrapped_function_create(
               constructible: False,
             ),
             properties: dict.from_list([
-              #(Named("name"), common.fn_name_property(name)),
               #(
                 Named("length"),
-                value.data(value.JsNumber(len)) |> value.configurable(),
+                // seq: 0 — birth-time "length", pairs with fn_name_property's
+                // constant seq 1 (see common.fn_name_property).
+                value.DataProperty(
+                  value: value.JsNumber(len),
+                  writable: False,
+                  enumerable: False,
+                  configurable: True,
+                  seq: 0,
+                ),
               ),
+              #(Named("name"), common.fn_name_property(name)),
             ]),
             symbol_properties: [],
             elements: elements.new(),

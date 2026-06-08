@@ -22,8 +22,7 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, type RegExpNativeFn, AccessorProperty, DataProperty,
-  Dispatch, Finite, Index, Infinity, JsBool, JsNull, JsNumber, JsObject,
+  type JsValue, type Ref, type RegExpNativeFn, DataProperty, Dispatch, Finite, Index, Infinity, JsBool, JsNull, JsNumber, JsObject,
   JsString, JsUndefined, NaN, Named, NativeFunction, NegInfinity, ObjectSlot,
   OrdinaryObject, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags,
   RegExpGetGlobal, RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline,
@@ -273,7 +272,7 @@ fn install_legacy_accessors(h: Heap, function_proto: Ref, ctor: Ref) -> Heap {
           1,
         )
       let prop =
-        AccessorProperty(
+        value.accessor(
           get: Some(JsObject(get_ref)),
           set: Some(JsObject(set_ref)),
           enumerable: False,
@@ -294,7 +293,7 @@ fn install_legacy_accessors(h: Heap, function_proto: Ref, ctor: Ref) -> Heap {
           0,
         )
       let prop =
-        AccessorProperty(
+        value.accessor(
           get: Some(JsObject(get_ref)),
           set: None,
           enumerable: False,
@@ -668,12 +667,7 @@ pub fn alloc_regexp(
       properties: common.named_props([
         #(
           "lastIndex",
-          DataProperty(
-            value: JsNumber(Finite(0.0)),
-            writable: True,
-            enumerable: False,
-            configurable: False,
-          ),
+          value.data(JsNumber(Finite(0.0))) |> value.writable(),
         ),
       ]),
       elements: elements.new(),

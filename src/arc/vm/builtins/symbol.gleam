@@ -59,8 +59,8 @@ pub fn init(
       SymbolConstructor,
       constructible: True,
       props: [
-        #("name", common.fn_name_property("Symbol")),
         #("length", common.fn_length_property(0)),
+        #("name", common.fn_name_property("Symbol")),
         #("prototype", value.data(JsObject(proto_ref))),
         #("for", value.builtin_property(JsObject(for_ref))),
         #("keyFor", value.builtin_property(JsObject(key_for_ref))),
@@ -139,7 +139,7 @@ pub fn init(
           #("valueOf", value.builtin_property(JsObject(value_of_ref))),
           #(
             "description",
-            value.AccessorProperty(
+            value.accessor(
               get: Some(JsObject(description_get_ref)),
               set: None,
               enumerable: False,

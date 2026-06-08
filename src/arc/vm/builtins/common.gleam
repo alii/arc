@@ -3,7 +3,7 @@ import arc/vm/internal/elements
 import arc/vm/value.{
   type CallNativeFn, type ExoticKind, type JsElements, type JsValue,
   type NativeFn, type NativeFnSlot, type Property, type PropertyKey, type Ref,
-  AccessorProperty, ArrayObject, Call, Dispatch, JsBool, JsObject, JsString,
+  ArrayObject, Call, Dispatch, JsBool, JsObject, JsString,
   Named, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict.{type Dict}
@@ -49,8 +49,8 @@ pub fn init_generator_function(
       ObjectSlot(
         kind: NativeFunction(Dispatch(native), constructible: True),
         properties: named_props([
-          #("name", fn_name_property(name)),
           #("length", fn_length_property(1)),
+          #("name", fn_name_property(name)),
           #("prototype", value.data(JsObject(fn_proto_ref))),
         ]),
         elements: elements.new(),
@@ -126,8 +126,8 @@ pub fn init_async_function(
       ObjectSlot(
         kind: NativeFunction(Dispatch(native), constructible: True),
         properties: named_props([
-          #("name", fn_name_property(name)),
           #("length", fn_length_property(1)),
+          #("name", fn_name_property(name)),
           #("prototype", value.data(JsObject(fn_proto_ref))),
         ]),
         elements: elements.new(),
@@ -381,8 +381,8 @@ fn alloc_native_fn_slot(
   // (init_type / init_type_on), and bind copies its target's bit.
   let #(h, ref) =
     alloc_fn_slot(h, function_proto, slot, False, [
-      #("name", fn_name_property(name)),
       #("length", fn_length_property(arity)),
+      #("name", fn_name_property(name)),
     ])
   let h = heap.root(h, ref)
   #(h, ref)
@@ -401,8 +401,8 @@ pub fn alloc_call_fn(
   constructible constructible: Bool,
 ) -> #(Heap(ctx), Ref) {
   alloc_fn_slot(h, function_proto, Call(native), constructible, [
-    #("name", fn_name_property(name)),
     #("length", fn_length_property(arity)),
+    #("name", fn_name_property(name)),
   ])
 }
 
@@ -455,13 +455,34 @@ pub fn alloc_host_fn(
 }
 
 /// ES2024 §20.2.2: Function name property — non-writable, non-enumerable, configurable.
+///
+/// seq: 1 (constant) — "length" and "name" exist from function-object birth,
+/// before any other named key can be created, so the constant pair 0 ("length")
+/// < 1 ("name") < any next_prop_seq() value gives the spec §10.1.11 order
+/// (SetFunctionLength runs before SetFunctionName) without paying two global
+/// counter reads per function allocation (hot: every closure creation).
+/// Redefinition paths preserve an existing key's seq, so a later
+/// delete + re-add still moves the key to the end via a real counter value.
 pub fn fn_name_property(name: String) -> Property {
-  value.data(JsString(name)) |> value.configurable()
+  value.DataProperty(
+    value: JsString(name),
+    writable: False,
+    enumerable: False,
+    configurable: True,
+    seq: 1,
+  )
 }
 
 /// ES2024 §20.2.2: Function length property — non-writable, non-enumerable, configurable.
+/// seq: 0 (constant) — see fn_name_property.
 pub fn fn_length_property(arity: Int) -> Property {
-  value.data(value.from_int(arity)) |> value.configurable()
+  value.DataProperty(
+    value: value.from_int(arity),
+    writable: False,
+    enumerable: False,
+    configurable: True,
+    seq: 0,
+  )
 }
 
 /// Allocate N native function objects from specs, returning builtin_property
@@ -519,7 +540,7 @@ pub fn alloc_getters(
     let #(h, fn_ref) =
       alloc_native_fn(h, function_proto, native, "get " <> name, 0)
     let prop =
-      AccessorProperty(
+      value.accessor(
         get: Some(JsObject(fn_ref)),
         set: None,
         enumerable: False,
@@ -543,7 +564,7 @@ pub fn alloc_get_set_accessor(
   let #(h, set_ref) = alloc_native_fn(h, function_proto, set, "set " <> name, 1)
   #(
     h,
-    AccessorProperty(
+    value.accessor(
       get: Some(JsObject(get_ref)),
       set: Some(JsObject(set_ref)),
       enumerable: False,
@@ -580,8 +601,8 @@ fn ctor_properties(
     // non-writable, non-enumerable, non-configurable (test262:
     // built-ins/Function/prototype/S15.3.3.1_A1, _A3).
     #("prototype", value.data(JsObject(proto))),
-    #("name", fn_name_property(name)),
     #("length", fn_length_property(arity)),
+    #("name", fn_name_property(name)),
     ..extras
   ]
 }

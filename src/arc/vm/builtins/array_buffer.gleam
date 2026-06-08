@@ -17,8 +17,7 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type ArrayBufferNativeFn, type JsValue, type Ref, AccessorProperty,
-  ArrayBufferConstructor, ArrayBufferGetByteLength, ArrayBufferGetDetached,
+  type ArrayBufferNativeFn, type JsValue, type Ref, ArrayBufferConstructor, ArrayBufferGetByteLength, ArrayBufferGetDetached,
   ArrayBufferGetMaxByteLength, ArrayBufferGetResizable, ArrayBufferGetSpecies,
   ArrayBufferIsView, ArrayBufferNative, ArrayBufferObject, ArrayBufferResize,
   ArrayBufferSlice, ArrayBufferTransfer, ArrayBufferTransferToFixedLength,
@@ -173,7 +172,7 @@ fn alloc_species_getter(
     )
   #(
     h,
-    AccessorProperty(
+    value.accessor(
       get: Some(JsObject(get_ref)),
       set: None,
       enumerable: False,

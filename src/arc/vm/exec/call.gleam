@@ -749,7 +749,18 @@ pub fn call_native(
                 JsObject(target_ref),
               ),
               props: [
-                #("length", value.data(length_js) |> value.configurable()),
+                // seq: 0 — birth-time "length", pairs with fn_name_property's
+                // constant seq 1 (see common.fn_name_property).
+                #(
+                  "length",
+                  value.DataProperty(
+                    value: length_js,
+                    writable: False,
+                    enumerable: False,
+                    configurable: True,
+                    seq: 0,
+                  ),
+                ),
                 #("name", common.fn_name_property(name)),
               ],
             )

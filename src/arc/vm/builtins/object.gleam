@@ -325,11 +325,14 @@ fn get_own_property_descriptor(
       case key_str == "length" {
         True -> {
           let prop =
+            // seq: 0 — synthesized descriptor, only rendered by
+            // make_descriptor_object, never stored in a property table.
             DataProperty(
               value: value.from_int(len),
               writable: False,
               enumerable: False,
               configurable: False,
+              seq: 0,
             )
           let #(heap, desc_ref) =
             make_descriptor_object(state.heap, prop, object_proto)
@@ -340,11 +343,13 @@ fn get_own_property_descriptor(
             Ok(i) if i >= 0 && i < len -> {
               let ch = string.slice(s, i, 1)
               let prop =
+                // seq: 0 — synthesized descriptor, never stored.
                 DataProperty(
                   value: JsString(ch),
                   writable: False,
                   enumerable: True,
                   configurable: False,
+                  seq: 0,
                 )
               let #(heap, desc_ref) =
                 make_descriptor_object(state.heap, prop, object_proto)
@@ -384,7 +389,7 @@ pub fn make_descriptor_object(
 ) -> #(Heap, Ref) {
   case prop {
     // Step 3: IsDataDescriptor — create "value" and "writable" properties.
-    DataProperty(value: val, writable:, enumerable:, configurable:) ->
+    DataProperty(value: val, writable:, enumerable:, configurable:, ..) ->
       common.alloc_pojo(heap, object_proto, [
         // Step 3a: "value"
         #("value", value.data_property(val)),
@@ -396,7 +401,7 @@ pub fn make_descriptor_object(
         #("configurable", value.data_property(JsBool(configurable))),
       ])
     // Step 4: IsAccessorDescriptor — create "get" and "set" properties.
-    AccessorProperty(get:, set:, enumerable:, configurable:) -> {
+    AccessorProperty(get:, set:, enumerable:, configurable:, ..) -> {
       // Spec: Desc.[[Get]] / Desc.[[Set]] are stored as-is. If absent
       // internally (None), we emit undefined per convention.
       let get_val = option.unwrap(get, JsUndefined)
@@ -957,6 +962,8 @@ fn write_array_length(
 ) -> State {
   case heap.read(state.heap, target_ref) {
     Some(ObjectSlot(properties:, ..) as slot) -> {
+      // seq: 0 / seq passthrough — array "length" never enumerates through
+      // the seq-ordered named-key path (emitted as a special case).
       let properties = case freeze, dict.get(properties, Named("length")) {
         True, _ ->
           dict.insert(
@@ -967,9 +974,10 @@ fn write_array_length(
               writable: False,
               enumerable: False,
               configurable: False,
+              seq: 0,
             ),
           )
-        False, Ok(DataProperty(writable:, enumerable:, configurable:, ..)) ->
+        False, Ok(DataProperty(writable:, enumerable:, configurable:, seq:, ..)) ->
           dict.insert(
             properties,
             Named("length"),
@@ -978,6 +986,7 @@ fn write_array_length(
               writable:,
               enumerable:,
               configurable:,
+              seq:,
             ),
           )
         False, _ -> properties
@@ -1099,11 +1108,14 @@ fn ordinary_define(
             Error(Nil) ->
               case elements.get_option(elements, idx) {
                 Some(v) ->
+                  // seq: 0 — synthesized from the elements store; Index keys
+                  // enumerate numerically, never by seq.
                   Ok(DataProperty(
                     value: v,
                     writable: True,
                     enumerable: True,
                     configurable: True,
+                    seq: 0,
                   ))
                 None -> Error(Nil)
               }
@@ -1236,6 +1248,12 @@ fn ordinary_define(
           |> result.map(value.prop_configurable)
           |> result.unwrap(False)
         })
+      // §10.1.11: redefining an existing key keeps its creation seq (and so
+      // its enumeration position); a brand-new key gets a fresh one.
+      let seq = case existing {
+        Ok(old) -> value.prop_seq(old)
+        Error(Nil) -> value.next_prop_seq()
+      }
       let new_prop = case is_accessor, has_data {
         // Generic descriptor (§10.1.6.3): neither data nor accessor fields
         // present — keep the existing property's kind and fields, updating
@@ -1244,15 +1262,22 @@ fn ordinary_define(
         False, False ->
           case existing {
             Ok(DataProperty(value: v, writable: w, ..)) ->
-              DataProperty(value: v, writable: w, enumerable:, configurable:)
+              DataProperty(
+                value: v,
+                writable: w,
+                enumerable:,
+                configurable:,
+                seq:,
+              )
             Ok(AccessorProperty(get: g, set: s, ..)) ->
-              AccessorProperty(get: g, set: s, enumerable:, configurable:)
+              AccessorProperty(get: g, set: s, enumerable:, configurable:, seq:)
             Error(Nil) ->
               DataProperty(
                 value: JsUndefined,
                 writable: False,
                 enumerable:,
                 configurable:,
+                seq:,
               )
           }
         True, _ -> {
@@ -1277,7 +1302,13 @@ fn ordinary_define(
               }
             Some(s) -> Some(s)
           }
-          AccessorProperty(get: getter, set: setter, enumerable:, configurable:)
+          AccessorProperty(
+            get: getter,
+            set: setter,
+            enumerable:,
+            configurable:,
+            seq:,
+          )
         }
         False, True -> {
           // Data descriptor: merge value/writable with existing data property.
@@ -1304,6 +1335,7 @@ fn ordinary_define(
             writable: final_writable,
             enumerable:,
             configurable:,
+            seq:,
           )
         }
       }
@@ -1320,6 +1352,7 @@ fn ordinary_define(
               writable: True,
               enumerable: True,
               configurable: True,
+              ..
             ) -> #(
               dict.delete(properties, Index(idx)),
               symbol_properties,
@@ -1585,118 +1618,29 @@ fn own_keys_impl(
 ///         ii. If desc is not undefined and desc.[[Enumerable]] is true, then
 ///             — Append key to properties.
 ///
-/// TODO(Deviation): Symbol keys are excluded here because they are stored
-/// separately in symbol_properties. The spec's step 3 (symbols) would need
-/// to be interleaved with string keys in property creation order.
+/// Symbol keys are not included here — they are stored separately in
+/// symbol_properties (a creation-ordered list) and per spec step 3 ALL
+/// symbol keys come after ALL string keys, so callers simply append them.
 ///
-/// TODO(Deviation): dict.to_list does not guarantee insertion-order for string
-/// keys. Gleam dicts are unordered, so property creation order is not preserved.
-/// The spec requires chronological order for non-index string keys (step 2).
+/// Ordering (including step-2 creation order for non-index string keys via
+/// Property.seq) comes from object.own_string_keys_flagged — the single
+/// engine-wide funnel for own string-key enumeration order.
 pub fn collect_own_keys(
   heap: Heap,
   ref: Ref,
   enumerable_only: Bool,
 ) -> List(String) {
-  case heap.read(heap, ref) {
-    // §10.4.6.11 Module Namespace [[OwnPropertyKeys]]: the exported names,
-    // sorted by code-unit order. All are enumerable, so the filter is a no-op.
-    Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
-      list.sort(dict.keys(exports), string.compare)
-    Some(ObjectSlot(kind:, properties:, elements:, ..)) -> {
-      let is_array = case kind {
-        ArrayObject(_) -> True
-        _ -> False
-      }
-      // Element-store indices (Array/Arguments fast storage). String exotic
-      // synthesizes one index per code point (§10.4.3.3 step 3).
-      let elem_indices = case kind {
-        ArrayObject(length:) -> collect_element_indices(elements, length)
-        value.ArgumentsObject(length:) ->
-          collect_element_indices(elements, length)
-        value.StringObject(value: s) ->
-          ascending_indices(0, object.string_length(s))
-        // §10.4.5.7 TypedArray [[OwnPropertyKeys]] step 2.a: integer indices
-        // 0..length-1 in ascending order (none when the buffer is detached or
-        // a resizable buffer has shrunk below the view).
-        value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) ->
-          ascending_indices(
-            0,
-            object.typed_array_live_length(
-              heap,
-              buffer,
-              elem_kind,
-              byte_offset,
-              object.typed_array_view_length(
-                heap,
-                buffer,
-                elem_kind,
-                byte_offset,
-                length,
-              ),
-            ),
-          )
-        _ -> []
-      }
-      // Split dict keys into index keys (merged with elem_indices below, per
-      // §10.1.11.1 step 2 ascending order) and named keys, applying the
-      // enumerable filter (§7.3.23 step 3.a.ii) to both. The Named("length")
-      // dict entry on arrays only tracks frozen-length attributes — the
-      // visible key is emitted separately below.
-      let #(dict_indices, named_keys) =
-        dict.fold(properties, #([], []), fn(acc, key, prop) {
-          let #(idxs, named) = acc
-          // Private names ("#x") never appear in [[OwnPropertyKeys]].
-          use <- bool.guard(value.is_private_name(key), acc)
-          let include = case enumerable_only {
-            True -> value.prop_enumerable(prop)
-            False -> True
-          }
-          case include, key {
-            False, _ -> acc
-            True, Index(i) -> #([i, ..idxs], named)
-            True, Named("length") if is_array -> acc
-            True, Named(n) -> #(idxs, [n, ..named])
-          }
-        })
-      // dict.fold prepends — reverse to restore the dict's iteration order.
-      let named_keys = list.reverse(named_keys)
-      // Step 1: Array index keys in ascending numeric order.
-      let index_keys =
-        list.append(elem_indices, dict_indices)
-        |> list.sort(int.compare)
-        |> list.map(int.to_string)
-      // Array exotic: "length" is a non-enumerable own property (§10.4.2);
-      // String exotic likewise (§10.4.3.4 StringCreate).
-      // Include in getOwnPropertyNames but not Object.keys
-      let length_key = case kind {
-        ArrayObject(_) | value.StringObject(_) ->
-          case enumerable_only {
-            True -> []
-            False -> ["length"]
-          }
-        _ -> []
-      }
-      list.flatten([index_keys, length_key, named_keys])
-    }
-    _ -> []
+  let flagged = object.own_string_keys_flagged(heap, ref)
+  case enumerable_only {
+    True ->
+      list.filter_map(flagged, fn(pair) {
+        case pair {
+          #(k, True) -> Ok(k)
+          #(_, False) -> Error(Nil)
+        }
+      })
+    False -> list.map(flagged, fn(pair) { pair.0 })
   }
-}
-
-/// Collect array indices that exist in the elements store.
-/// Implements part of the array-index portion of OrdinaryOwnPropertyKeys
-/// (§10.1.11.1 step 2) — dict-stored index overrides are merged in by the
-/// caller before sorting.
-///
-/// Only includes indices where the element actually exists (not holes).
-/// This correctly handles sparse arrays: [1,,3] has indices 0 and 2 but
-/// not 1, matching the spec behavior where holes are not own properties.
-///
-/// Iterates elements.indices() (O(k)) instead of probing 0..length — a sparse
-/// array with length=1e9 and one entry now completes instantly instead of
-/// hitting the max_iteration RangeError workaround.
-fn collect_element_indices(elements: JsElements, length: Int) -> List(Int) {
-  elements.indices(elements)
-  |> list.filter(fn(idx) { idx < length })
 }
 
 /// [[HasProperty]] — §7.3.11. Walks the prototype chain looking for a string key.
@@ -3247,11 +3191,18 @@ fn would_create_cycle(
 fn freeze_prop(prop: value.Property) -> value.Property {
   case prop {
     // §7.3.16 step 6.a: DataDescriptor → writable=false, configurable=false.
-    DataProperty(value:, enumerable:, ..) ->
-      DataProperty(value:, writable: False, enumerable:, configurable: False)
+    // seq is preserved: freezing does not move keys (§10.1.11).
+    DataProperty(value:, enumerable:, seq:, ..) ->
+      DataProperty(
+        value:,
+        writable: False,
+        enumerable:,
+        configurable: False,
+        seq:,
+      )
     // §7.3.16 step 6.b: AccessorDescriptor → configurable=false only.
-    AccessorProperty(get:, set:, enumerable:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable: False)
+    AccessorProperty(get:, set:, enumerable:, seq:, ..) ->
+      AccessorProperty(get:, set:, enumerable:, configurable: False, seq:)
   }
 }
 
@@ -3304,11 +3255,14 @@ fn set_integrity_level(
                     dict.insert(
                       properties,
                       Named("length"),
+                      // seq: 0 — array "length" never enumerates through the
+                      // seq-ordered named-key path.
                       transform(DataProperty(
                         value: value.from_int(length),
                         writable: True,
                         enumerable: False,
                         configurable: False,
+                        seq: 0,
                       )),
                     )
                 }
@@ -3508,10 +3462,11 @@ fn seal(
 /// Helper for seal — make property non-configurable (but keep writable as-is).
 fn seal_prop(prop: value.Property) -> value.Property {
   case prop {
-    DataProperty(value:, writable:, enumerable:, ..) ->
-      DataProperty(value:, writable:, enumerable:, configurable: False)
-    AccessorProperty(get:, set:, enumerable:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable: False)
+    // seq is preserved: sealing does not move keys (§10.1.11).
+    DataProperty(value:, writable:, enumerable:, seq:, ..) ->
+      DataProperty(value:, writable:, enumerable:, configurable: False, seq:)
+    AccessorProperty(get:, set:, enumerable:, seq:, ..) ->
+      AccessorProperty(get:, set:, enumerable:, configurable: False, seq:)
   }
 }
 
@@ -3666,17 +3621,29 @@ fn get_own_property_descriptors(
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(properties:, ..)) -> {
           // Build descriptor objects for each own property
+          // Iterate in §10.1.11 [[OwnPropertyKeys]] order so the result
+          // object's properties are created (seq-stamped) in the same order.
           let #(heap, desc_props) =
-            dict.fold(properties, #(state.heap, dict.new()), fn(acc, key, prop) {
-              let #(h, descs) = acc
-              // Private names ("#x") are invisible to reflection.
-              use <- bool.guard(value.is_private_name(key), acc)
-              let #(h, desc_ref) = make_descriptor_object(h, prop, object_proto)
-              #(
-                h,
-                dict.insert(descs, key, value.data_property(JsObject(desc_ref))),
-              )
-            })
+            list.fold(
+              value.ordered_property_pairs(properties),
+              #(state.heap, dict.new()),
+              fn(acc, pair) {
+                let #(h, descs) = acc
+                let #(key, prop) = pair
+                // Private names ("#x") are invisible to reflection.
+                use <- bool.guard(value.is_private_name(key), acc)
+                let #(h, desc_ref) =
+                  make_descriptor_object(h, prop, object_proto)
+                #(
+                  h,
+                  dict.insert(
+                    descs,
+                    key,
+                    value.data_property(JsObject(desc_ref)),
+                  ),
+                )
+              },
+            )
           let #(heap, result_ref) =
             heap.alloc(
               heap,
@@ -3990,6 +3957,7 @@ fn complete_descriptor(parsed: ParsedDesc) -> value.Property {
         },
         enumerable: option.unwrap(parsed.enumerable, False),
         configurable: option.unwrap(parsed.configurable, False),
+        seq: value.next_prop_seq(),
       )
     False ->
       DataProperty(
@@ -3997,6 +3965,7 @@ fn complete_descriptor(parsed: ParsedDesc) -> value.Property {
         writable: option.unwrap(parsed.writable, False),
         enumerable: option.unwrap(parsed.enumerable, False),
         configurable: option.unwrap(parsed.configurable, False),
+        seq: value.next_prop_seq(),
       )
   }
 }
@@ -4258,7 +4227,13 @@ fn proxy_get_own_property(
           // Step 15: IsCompatiblePropertyDescriptor against the COMPLETED
           // descriptor (CompletePropertyDescriptor ran at step 14).
           let completed_parsed = case completed {
-            DataProperty(value: v, writable: w, enumerable: e, configurable: c) ->
+            DataProperty(
+              value: v,
+              writable: w,
+              enumerable: e,
+              configurable: c,
+              ..
+            ) ->
               ParsedDesc(
                 get: None,
                 set: None,
@@ -4267,7 +4242,13 @@ fn proxy_get_own_property(
                 enumerable: Some(e),
                 configurable: Some(c),
               )
-            AccessorProperty(get: g, set: s, enumerable: e, configurable: c) ->
+            AccessorProperty(
+              get: g,
+              set: s,
+              enumerable: e,
+              configurable: c,
+              ..
+            ) ->
               ParsedDesc(
                 get: Some(option.unwrap(g, JsUndefined)),
                 set: Some(option.unwrap(s, JsUndefined)),
@@ -4885,10 +4866,3 @@ fn enumerate_chain(
   }
 }
 
-/// [0, 1, …, len-1] — synthesized index keys for String exotic objects.
-fn ascending_indices(i: Int, len: Int) -> List(Int) {
-  case i >= len {
-    True -> []
-    False -> [i, ..ascending_indices(i + 1, len)]
-  }
-}

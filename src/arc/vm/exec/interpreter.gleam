@@ -64,6 +64,18 @@ import gleam/result
 import gleam/set
 import gleam/string
 
+/// Single-traversal `obj.x = v` overwrite of an existing own writable data
+/// property, preserving its attribute flags and creation seq (§10.1.11 —
+/// the key keeps its enumeration position). Error(Nil) when the key is
+/// absent, non-writable, or an accessor — callers take the full [[Set]]
+/// path. FFI mirrors the DataProperty tuple layout; see arc_vm_ffi.erl.
+@external(erlang, "arc_vm_ffi", "put_existing_writable_data")
+fn put_existing_writable_data(
+  properties: dict.Dict(value.PropertyKey, value.Property),
+  key: value.PropertyKey,
+  val: JsValue,
+) -> Result(dict.Dict(value.PropertyKey, value.Property), Nil)
+
 // ============================================================================
 // Internal state (types defined in state.gleam for cross-module access)
 // ============================================================================
@@ -165,21 +177,26 @@ fn frozen_array_slot(
     list.index_map(values, fn(v, i) {
       #(
         value.Index(i),
+        // seq: 0 — Index keys enumerate numerically, never by seq.
         DataProperty(
           value: v,
           writable: False,
           enumerable: True,
           configurable: False,
+          seq: 0,
         ),
       )
     })
   let length_prop = #(
     Named("length"),
+    // seq: 0 — array "length" never enumerates through the seq-ordered
+    // named-key path.
     DataProperty(
       value: value.from_int(count),
       writable: False,
       enumerable: False,
       configurable: False,
+      seq: 0,
     ),
   )
   ObjectSlot(
@@ -478,9 +495,12 @@ pub fn make_closure(
   let #(heap, env_ref) = heap.alloc_env(heap, captured_values)
   // For non-arrow functions, pre-populate .prototype with a fresh object so
   // `Foo.prototype.bar = ...` and `new Foo()` work.
+  // Build "length" BEFORE "name": §10.2.9 SetFunctionLength runs before
+  // §10.2.10 SetFunctionName, and [[OwnPropertyKeys]] orders named keys by
+  // creation seq (test262: built-ins/*/property-order.js).
+  let length_prop = common.fn_length_property(child_template.length)
   let name_prop =
     common.fn_name_property(option.unwrap(child_template.name, ""))
-  let length_prop = common.fn_length_property(child_template.length)
   // §10.2.5 MakeConstructor / §27.3.3: only constructible functions and
   // (async) generators get an own "prototype" property. Arrows, methods,
   // accessors, and async functions have none (test262:
@@ -530,9 +550,26 @@ pub fn make_closure(
       // §15.7.14 ClassDefinitionEvaluation step 16: a class constructor's
       // "prototype" is non-writable; ordinary functions/generators get the
       // writable §10.2.5/§27.3.3 form.
+      // seq: 2 — birth-time "prototype", after the constant-seq "length" (0)
+      // and "name" (1), before any later next_prop_seq() value (see
+      // common.fn_name_property). Avoids a global counter read per closure.
       let proto_prop = case child_template.is_class_constructor {
-        True -> value.data(JsObject(proto_obj_ref))
-        False -> value.data(JsObject(proto_obj_ref)) |> value.writable()
+        True ->
+          value.DataProperty(
+            value: JsObject(proto_obj_ref),
+            writable: False,
+            enumerable: False,
+            configurable: False,
+            seq: 2,
+          )
+        False ->
+          value.DataProperty(
+            value: JsObject(proto_obj_ref),
+            writable: True,
+            enumerable: False,
+            configurable: False,
+            seq: 2,
+          )
       }
       #(
         h,
@@ -1237,38 +1274,20 @@ fn fast_loop(
 
     // `obj.x = v` overwrite of an existing own writable data property on an
     // OrdinaryObject — mirrors set_value's fused-update branch (receiver is
-    // the object itself for PutField). Creation (needs the proto-chain
-    // setter walk), non-writable, accessors, and exotic kinds bail.
+    // the object itself for PutField). The FFI updates the property's value
+    // in one map traversal, preserving its flags and creation seq (§10.1.11
+    // — the key keeps its enumeration position). Creation (needs the
+    // proto-chain setter walk), non-writable, accessors, and exotic kinds
+    // bail to the slow path.
     PutField(opcode.OpNamed(name)) ->
       case stack {
         [val, JsObject(ref), ..rest] ->
           case heap.read(hp, ref) {
             Some(ObjectSlot(kind: OrdinaryObject, properties:, ..) as slot) ->
-              case dict.get(properties, Named(name)) {
-                Ok(DataProperty(
-                  writable: True,
-                  enumerable:,
-                  configurable:,
-                  value: _,
-                )) -> {
+              case put_existing_writable_data(properties, Named(name), val) {
+                Ok(new_props) -> {
                   let hp =
-                    heap.write(
-                      hp,
-                      ref,
-                      ObjectSlot(
-                        ..slot,
-                        properties: dict.insert(
-                          properties,
-                          Named(name),
-                          DataProperty(
-                            value: val,
-                            writable: True,
-                            enumerable:,
-                            configurable:,
-                          ),
-                        ),
-                      ),
-                    )
+                    heap.write(hp, ref, ObjectSlot(..slot, properties: new_props))
                   fast_loop(
                     state,
                     pc + 1,
@@ -1280,7 +1299,7 @@ fn fast_loop(
                     line,
                   )
                 }
-                _ -> dispatch_slow(state, pc, stack, locals, hp, line)
+                Error(Nil) -> dispatch_slow(state, pc, stack, locals, hp, line)
               }
             _ -> dispatch_slow(state, pc, stack, locals, hp, line)
           }
@@ -2168,6 +2187,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
               writable: False,
               enumerable: False,
               configurable: False,
+              seq: value.next_prop_seq(),
             ),
           )
           let #(heap, tpl_ref) =
@@ -5233,6 +5253,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // (test262: built-ins/ThrowTypeError/unique-per-realm-non-simple.js).
       // Sloppy functions with simple parameter lists get the MAPPED form,
       // whose "callee" is a writable data property holding the function.
+      // Build "length" BEFORE "callee": §10.4.4.6/§10.4.4.7 define length
+      // first, and [[OwnPropertyKeys]] orders named keys by creation seq.
+      let length_prop =
+        value.data(value.from_int(length))
+        |> value.writable
+        |> value.configurable
       let callee_prop = case state.func.is_strict || !simple_params {
         True ->
           case
@@ -5243,7 +5269,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             )
           {
             Some(value.AccessorProperty(get:, set:, ..)) ->
-              value.AccessorProperty(
+              value.accessor(
                 get:,
                 set:,
                 enumerable: False,
@@ -5255,12 +5281,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       }
       let props =
         dict.from_list([
-          #(
-            Named("length"),
-            value.data(value.from_int(length))
-              |> value.writable
-              |> value.configurable,
-          ),
+          #(Named("length"), length_prop),
           #(Named("callee"), callee_prop),
         ])
       // §10.4.4.6: [@@iterator] = %Array.prototype.values%
@@ -5671,7 +5692,13 @@ fn set_computed_fn_name(
             properties: dict.insert(
               properties,
               Named("name"),
-              common.fn_name_property(prefix <> name),
+              // Redefining an existing "name" keeps its creation seq
+              // (§10.1.11 — the key keeps its enumeration position).
+              case dict.get(properties, Named("name")) {
+                Ok(old) ->
+                  value.with_seq_of(common.fn_name_property(prefix <> name), old)
+                Error(Nil) -> common.fn_name_property(prefix <> name)
+              },
             ),
           )
         _ -> slot
