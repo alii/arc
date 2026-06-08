@@ -277,14 +277,26 @@ fn serialize_kind(
         serialize_indexed(heap, els, length, 0, mode, ctx, []),
       )
       use #(props, ctx) <- result.map(
-        serialize_props(heap, value.ordered_property_pairs(properties), mode, ctx, []),
+        serialize_props(
+          heap,
+          value.ordered_property_pairs(properties),
+          mode,
+          ctx,
+          [],
+        ),
       )
       #(PrArray(items:, length:, properties: props), ctx)
     }
     // Errors serialize like plain objects (name/message/etc. as props).
     OrdinaryObject | value.ErrorObject(_) -> {
       use #(props, ctx) <- result.try(
-        serialize_props(heap, value.ordered_property_pairs(properties), mode, ctx, []),
+        serialize_props(
+          heap,
+          value.ordered_property_pairs(properties),
+          mode,
+          ctx,
+          [],
+        ),
       )
       use #(syms, ctx) <- result.map(case mode {
         SpecClone -> Ok(#([], ctx))
@@ -298,7 +310,13 @@ fn serialize_kind(
         |> list.map(fn(e) { #(value.map_key_to_js(e.0), e.1) })
       use #(out, ctx) <- result.try(serialize_pairs(heap, pairs, mode, ctx, []))
       use #(props, ctx) <- result.map(
-        serialize_props(heap, value.ordered_property_pairs(properties), mode, ctx, []),
+        serialize_props(
+          heap,
+          value.ordered_property_pairs(properties),
+          mode,
+          ctx,
+          [],
+        ),
       )
       #(PrMap(entries: out, properties: props), ctx)
     }
@@ -306,7 +324,13 @@ fn serialize_kind(
       let vals = value.set_live_values(data, order)
       use #(out, ctx) <- result.try(serialize_list(heap, vals, mode, ctx, []))
       use #(props, ctx) <- result.map(
-        serialize_props(heap, value.ordered_property_pairs(properties), mode, ctx, []),
+        serialize_props(
+          heap,
+          value.ordered_property_pairs(properties),
+          mode,
+          ctx,
+          [],
+        ),
       )
       #(PrSet(entries: out, properties: props), ctx)
     }

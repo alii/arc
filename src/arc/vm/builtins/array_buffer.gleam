@@ -17,12 +17,13 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type ArrayBufferNativeFn, type JsValue, type Ref, ArrayBufferConstructor, ArrayBufferGetByteLength, ArrayBufferGetDetached,
-  ArrayBufferGetMaxByteLength, ArrayBufferGetResizable, ArrayBufferGetSpecies,
-  ArrayBufferIsView, ArrayBufferNative, ArrayBufferObject, ArrayBufferResize,
-  ArrayBufferSlice, ArrayBufferTransfer, ArrayBufferTransferToFixedLength,
-  DetachArrayBuffer262, Dispatch, JsBool, JsNull, JsObject, JsUndefined, Named,
-  ObjectSlot, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
+  type ArrayBufferNativeFn, type JsValue, type Ref, ArrayBufferConstructor,
+  ArrayBufferGetByteLength, ArrayBufferGetDetached, ArrayBufferGetMaxByteLength,
+  ArrayBufferGetResizable, ArrayBufferGetSpecies, ArrayBufferIsView,
+  ArrayBufferNative, ArrayBufferObject, ArrayBufferResize, ArrayBufferSlice,
+  ArrayBufferTransfer, ArrayBufferTransferToFixedLength, DetachArrayBuffer262,
+  Dispatch, JsBool, JsNull, JsObject, JsUndefined, Named, ObjectSlot,
+  SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
   SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
   SharedArrayBufferGetSpecies, SharedArrayBufferGrow, SharedArrayBufferSlice,
 }

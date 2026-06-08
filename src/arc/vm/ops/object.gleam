@@ -2325,12 +2325,12 @@ pub fn own_string_keys_flagged(heap: Heap, ref: Ref) -> List(#(String, Bool)) {
           elements.indices(elements)
           |> list.filter(fn(idx) { idx < length })
         value.StringObject(value: s) ->
-          int.range(from: string_length(s) - 1, to: -1, with: [], run: fn(
-            acc,
-            i,
-          ) {
-            [i, ..acc]
-          })
+          int.range(
+            from: string_length(s) - 1,
+            to: -1,
+            with: [],
+            run: fn(acc, i) { [i, ..acc] },
+          )
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) -> {
           let n =
             typed_array_live_length(
@@ -2338,9 +2338,17 @@ pub fn own_string_keys_flagged(heap: Heap, ref: Ref) -> List(#(String, Bool)) {
               buffer,
               elem_kind,
               byte_offset,
-              typed_array_view_length(heap, buffer, elem_kind, byte_offset, length),
+              typed_array_view_length(
+                heap,
+                buffer,
+                elem_kind,
+                byte_offset,
+                length,
+              ),
             )
-          int.range(from: n - 1, to: -1, with: [], run: fn(acc, i) { [i, ..acc] })
+          int.range(from: n - 1, to: -1, with: [], run: fn(acc, i) {
+            [i, ..acc]
+          })
         }
         _ -> []
       }

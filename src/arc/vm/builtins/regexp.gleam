@@ -22,16 +22,16 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, type RegExpNativeFn, DataProperty, Dispatch, Finite, Index, Infinity, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsUndefined, NaN, Named, NativeFunction, NegInfinity, ObjectSlot,
-  OrdinaryObject, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags,
-  RegExpGetGlobal, RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline,
-  RegExpGetSource, RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets,
-  RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpNative, RegExpObject,
-  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
-  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
-  RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
-  RegExpSymbolSplit, WellKnownSymbol,
+  type JsValue, type Ref, type RegExpNativeFn, DataProperty, Dispatch, Finite,
+  Index, Infinity, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
+  NaN, Named, NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
+  RegExpConstructor, RegExpGetDotAll, RegExpGetFlags, RegExpGetGlobal,
+  RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline, RegExpGetSource,
+  RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets, RegExpLegacyGetter,
+  RegExpLegacyInputSetter, RegExpNative, RegExpObject, RegExpPrototypeCompile,
+  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
+  RegExpStringIteratorNext, RegExpSymbolMatch, RegExpSymbolMatchAll,
+  RegExpSymbolReplace, RegExpSymbolSearch, RegExpSymbolSplit, WellKnownSymbol,
 }
 import gleam/bit_array
 import gleam/bool
@@ -665,10 +665,7 @@ pub fn alloc_regexp(
     ObjectSlot(
       kind: RegExpObject(pattern:, flags:),
       properties: common.named_props([
-        #(
-          "lastIndex",
-          value.data(JsNumber(Finite(0.0))) |> value.writable(),
-        ),
+        #("lastIndex", value.data(JsNumber(Finite(0.0))) |> value.writable()),
       ]),
       elements: elements.new(),
       prototype: Some(regexp_proto),

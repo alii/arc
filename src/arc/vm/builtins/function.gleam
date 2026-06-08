@@ -2,9 +2,9 @@ import arc/vm/builtins/common.{type BuiltinType, alloc_proto}
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
 import arc/vm/value.{
-  type Ref, Dispatch, FunctionApply, FunctionBind,
-  FunctionCall, FunctionConstructor, FunctionHasInstance, FunctionToString,
-  JsObject, ThrowTypeErrorFn, VmNative,
+  type Ref, Dispatch, FunctionApply, FunctionBind, FunctionCall,
+  FunctionConstructor, FunctionHasInstance, FunctionToString, JsObject,
+  ThrowTypeErrorFn, VmNative,
 }
 import gleam/dict
 import gleam/list

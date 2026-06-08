@@ -977,7 +977,8 @@ fn write_array_length(
               seq: 0,
             ),
           )
-        False, Ok(DataProperty(writable:, enumerable:, configurable:, seq:, ..)) ->
+        False, Ok(DataProperty(writable:, enumerable:, configurable:, seq:, ..))
+        ->
           dict.insert(
             properties,
             Named("length"),
@@ -1352,7 +1353,7 @@ fn ordinary_define(
               writable: True,
               enumerable: True,
               configurable: True,
-              ..
+              ..,
             ) -> #(
               dict.delete(properties, Index(idx)),
               symbol_properties,
@@ -4232,7 +4233,7 @@ fn proxy_get_own_property(
               writable: w,
               enumerable: e,
               configurable: c,
-              ..
+              ..,
             ) ->
               ParsedDesc(
                 get: None,
@@ -4242,13 +4243,7 @@ fn proxy_get_own_property(
                 enumerable: Some(e),
                 configurable: Some(c),
               )
-            AccessorProperty(
-              get: g,
-              set: s,
-              enumerable: e,
-              configurable: c,
-              ..
-            ) ->
+            AccessorProperty(get: g, set: s, enumerable: e, configurable: c, ..) ->
               ParsedDesc(
                 get: Some(option.unwrap(g, JsUndefined)),
                 set: Some(option.unwrap(s, JsUndefined)),
@@ -4865,4 +4860,3 @@ fn enumerate_chain(
     _ -> Ok(#(acc_rev, seen, state))
   }
 }
-

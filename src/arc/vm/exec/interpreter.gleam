@@ -1287,7 +1287,11 @@ fn fast_loop(
               case put_existing_writable_data(properties, Named(name), val) {
                 Ok(new_props) -> {
                   let hp =
-                    heap.write(hp, ref, ObjectSlot(..slot, properties: new_props))
+                    heap.write(
+                      hp,
+                      ref,
+                      ObjectSlot(..slot, properties: new_props),
+                    )
                   fast_loop(
                     state,
                     pc + 1,
@@ -5269,12 +5273,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
             )
           {
             Some(value.AccessorProperty(get:, set:, ..)) ->
-              value.accessor(
-                get:,
-                set:,
-                enumerable: False,
-                configurable: False,
-              )
+              value.accessor(get:, set:, enumerable: False, configurable: False)
             _ -> value.data(callee) |> value.writable |> value.configurable
           }
         False -> value.data(callee) |> value.writable |> value.configurable
@@ -5696,7 +5695,10 @@ fn set_computed_fn_name(
               // (§10.1.11 — the key keeps its enumeration position).
               case dict.get(properties, Named("name")) {
                 Ok(old) ->
-                  value.with_seq_of(common.fn_name_property(prefix <> name), old)
+                  value.with_seq_of(
+                    common.fn_name_property(prefix <> name),
+                    old,
+                  )
                 Error(Nil) -> common.fn_name_property(prefix <> name)
               },
             ),

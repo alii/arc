@@ -17,12 +17,12 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, type TypedArrayKind, type TypedArrayNativeFn,
-  Dispatch, Finite, JsBool, JsNumber, JsObject, JsString,
-  JsUndefined, Named, ObjectSlot, TypedArrayConstructor, TypedArrayGetBuffer,
-  TypedArrayGetByteLength, TypedArrayGetByteOffset, TypedArrayGetLength,
-  TypedArrayGetSpecies, TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor,
-  TypedArrayNative, TypedArrayPrototypeAt, TypedArrayPrototypeCopyWithin,
+  type JsValue, type Ref, type TypedArrayKind, type TypedArrayNativeFn, Dispatch,
+  Finite, JsBool, JsNumber, JsObject, JsString, JsUndefined, Named, ObjectSlot,
+  TypedArrayConstructor, TypedArrayGetBuffer, TypedArrayGetByteLength,
+  TypedArrayGetByteOffset, TypedArrayGetLength, TypedArrayGetSpecies,
+  TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor, TypedArrayNative,
+  TypedArrayPrototypeAt, TypedArrayPrototypeCopyWithin,
   TypedArrayPrototypeEntries, TypedArrayPrototypeEvery, TypedArrayPrototypeFill,
   TypedArrayPrototypeFilter, TypedArrayPrototypeFind,
   TypedArrayPrototypeFindIndex, TypedArrayPrototypeFindLast,
