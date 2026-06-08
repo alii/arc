@@ -2,7 +2,6 @@ import arc/compiler
 import arc/parser
 import arc/parser/ast
 import arc/vm/builtins
-import arc/vm/builtins/atomics as builtins_atomics
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
@@ -22,7 +21,6 @@ import arc/vm/value.{
 import gleam/dict
 import gleam/float
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -309,8 +307,6 @@ pub fn build_262(
       "detachArrayBuffer",
       1,
     )
-  let #(h, agent_ref) = build_agent(h, b)
-
   // Build the $262 object
   let #(h, ref) =
     heap.alloc(
@@ -333,7 +329,6 @@ pub fn build_262(
             Named("detachArrayBuffer"),
             value.builtin_property(JsObject(detach_fn)),
           ),
-          #(Named("agent"), value.builtin_property(JsObject(agent_ref))),
           // __realm__ is non-enumerable internal property
           #(
             Named("__realm__"),
@@ -347,284 +342,48 @@ pub fn build_262(
       ),
     )
   let h = heap.root(h, ref)
+  // Apply the embedder's $262 extension hook (if registered) — this is how
+  // the test262 harness installs its host-side `agent` object on the
+  // initial $262, every $262.createRealm() child, and every realm a
+  // spawned agent process boots.
+  let h = case get_extend_262() {
+    Ok(extend) -> extend(h, b, ref)
+    Error(Nil) -> h
+  }
   #(h, ref)
 }
 
 // ============================================================================
-// $262.agent — cooperative test262 agent cluster
+// $262 extension hook — embedder-injected extras on every $262 object.
 //
-// Arc is single-threaded on one BEAM process, so test262 "agents" run
-// COOPERATIVELY in the main realm and main heap: `start` executes the agent
-// script immediately (wrapped in an IIFE so its top-level bindings are
-// function-scoped, not realm globals — several tests start N agents with
-// identical scripts), `receiveBroadcast` registers the callback, and
-// `broadcast` invokes every registered callback synchronously with the
-// SharedArrayBuffer. Because the heap is shared, the buffer the callbacks
-// see is GENUINELY the same buffer the main script holds — Atomics writes
-// in an agent are immediately visible to the main script and vice versa.
-//
-// The one thing this model cannot do is run an agent and the main script
-// at the same time: a sync Atomics.wait inside an agent callback can never
-// be notified (it can only time out), exactly like the main agent's own
-// sync waits.
+// test262's $262.agent.* API is HOST machinery (INTERPRETING.md), not VM
+// core: real agent processes block on their mailboxes for broadcasts and
+// wake messages, which is embedder territory (the same boundary as the
+// Atomics host capabilities — see arc/host.gleam). The test262 harness
+// registers a hook here (process-local, like the CanBlock flag read at
+// realm boot — see arc_atomics_ffi.erl) and build_262 applies it to EVERY
+// $262 it builds: the initial one, each $262.createRealm() child, and the
+// $262 of each realm a spawned agent process boots (the harness re-registers
+// the hook inside the agent child's process body). Embedders that register
+// nothing get a plain $262 without `agent`.
 // ============================================================================
 
-/// Allocate the $262.agent object: methods plus two hidden array-backed
-/// queues — __reports__ (strings posted by $262.agent.report, consumed by
-/// getReport) and __agents__ (callbacks registered by receiveBroadcast,
-/// invoked by broadcast).
-fn build_agent(h: Heap, b: Builtins) -> #(Heap, Ref) {
-  let func_proto = b.function.prototype
-  let #(h, reports_ref) = common.alloc_array(h, [], b.array.prototype)
-  let #(h, agents_ref) = common.alloc_array(h, [], b.array.prototype)
-  let methods = [
-    #("start", value.AgentStart, 1),
-    #("broadcast", value.AgentBroadcast, 2),
-    #("getReport", value.AgentGetReport, 0),
-    #("sleep", value.AgentSleep, 1),
-    #("monotonicNow", value.AgentMonotonicNow, 0),
-    #("report", value.AgentReport, 1),
-    #("leaving", value.AgentLeaving, 0),
-    #("receiveBroadcast", value.AgentReceiveBroadcast, 1),
-  ]
-  let #(h, method_props) =
-    list.fold(methods, #(h, []), fn(acc, method) {
-      let #(h, props) = acc
-      let #(name, native, arity) = method
-      let #(h, fn_ref) =
-        common.alloc_native_fn(
-          h,
-          func_proto,
-          value.VmNative(native),
-          name,
-          arity,
-        )
-      #(h, [#(Named(name), value.builtin_property(JsObject(fn_ref))), ..props])
-    })
-  let hidden = [
-    #(
-      Named("__reports__"),
-      value.data(JsObject(reports_ref)) |> value.configurable(),
-    ),
-    #(
-      Named("__agents__"),
-      value.data(JsObject(agents_ref)) |> value.configurable(),
-    ),
-  ]
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: dict.from_list(list.append(method_props, hidden)),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: Some(b.object.prototype),
-        extensible: True,
-      ),
-    )
-  #(h, ref)
-}
+/// Embedder extension applied to a freshly built (and rooted) $262 object:
+/// receives the heap, the realm's builtins and the $262 ref, and returns
+/// the heap with any extra properties installed.
+pub type Extend262 =
+  fn(Heap, Builtins, Ref) -> Heap
 
-/// Read a hidden JsObject-valued own property off the agent object.
-fn agent_hidden_ref(
-  state: State,
-  this: JsValue,
-  name: String,
-) -> Result(Ref, Nil) {
-  case this {
-    JsObject(this_ref) ->
-      case object.get_own_property(state.heap, this_ref, Named(name)) {
-        Some(DataProperty(value: JsObject(ref), ..)) -> Ok(ref)
-        _ -> Error(Nil)
-      }
-    _ -> Error(Nil)
-  }
-}
+/// Register the process-local $262 extension hook (a data-only process-
+/// dictionary write — see arc_realm_ffi.erl). Freshly spawned processes
+/// start with no hook; per-process embedder setup (the harness's per-test
+/// worker, an agent child body) must register it before booting a realm.
+@external(erlang, "arc_realm_ffi", "set_extend_262")
+pub fn set_extend_262(hook: Extend262) -> Nil
 
-/// Read an agent queue array as #(values, ref). Empty list if missing.
-fn agent_queue(
-  state: State,
-  this: JsValue,
-  name: String,
-) -> Result(#(Ref, List(JsValue)), Nil) {
-  use arr_ref <- result.try(agent_hidden_ref(state, this, name))
-  case heap.read(state.heap, arr_ref) {
-    Some(ObjectSlot(kind: value.ArrayObject(length), elements: els, ..)) ->
-      Ok(#(arr_ref, elements.to_list_padded(els, length)))
-    _ -> Error(Nil)
-  }
-}
-
-/// Overwrite an agent queue array's contents in place.
-fn agent_queue_write(
-  state: State,
-  arr_ref: Ref,
-  values: List(JsValue),
-) -> State {
-  let heap = case heap.read(state.heap, arr_ref) {
-    Some(ObjectSlot(kind: value.ArrayObject(_), ..) as slot) ->
-      heap.write(
-        state.heap,
-        arr_ref,
-        ObjectSlot(
-          ..slot,
-          kind: value.ArrayObject(list.length(values)),
-          elements: elements.from_list(values),
-        ),
-      )
-    _ -> state.heap
-  }
-  State(..state, heap:)
-}
-
-/// $262.agent.start(script) — run the agent script now, in the main realm,
-/// wrapped in an IIFE so its top-level declarations are private to it.
-pub fn agent_start_native(
-  args: List(JsValue),
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
-  let source = case args {
-    [s, ..] -> s
-    [] -> JsUndefined
-  }
-  use source_str, state <- coerce.try_to_string(state, source)
-  let wrapped = "(function () {\n" <> source_str <> "\n})();"
-  let #(state, result) =
-    run_source_in_current_realm(wrapped, state, execute_inner, new_state_fn)
-  case result {
-    Ok(_) -> #(state, Ok(JsUndefined))
-    Error(thrown) -> #(state, Error(thrown))
-  }
-}
-
-/// $262.agent.receiveBroadcast(callback) — register for the next broadcast.
-pub fn agent_receive_broadcast_native(
-  args: List(JsValue),
-  this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let cb = case args {
-    [f, ..] -> f
-    [] -> JsUndefined
-  }
-  case agent_queue(state, this, "__agents__") {
-    Ok(#(arr_ref, callbacks)) -> {
-      let state =
-        agent_queue_write(state, arr_ref, list.append(callbacks, [cb]))
-      #(state, Ok(JsUndefined))
-    }
-    Error(Nil) ->
-      state.type_error(state, "receiveBroadcast: $262.agent state missing")
-  }
-}
-
-/// $262.agent.broadcast(sab) — synchronously invoke every registered
-/// receiveBroadcast callback with the buffer. The heap is shared, so the
-/// callbacks operate on the very same SharedArrayBuffer object.
-pub fn agent_broadcast_native(
-  args: List(JsValue),
-  this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let sab = case args {
-    [v, ..] -> v
-    [] -> JsUndefined
-  }
-  case agent_queue(state, this, "__agents__") {
-    Ok(#(_arr_ref, callbacks)) -> {
-      let Nil = builtins_atomics.set_agent_callback_mode(True)
-      let state =
-        list.fold(callbacks, state, fn(state, cb) {
-          case state.call(state, cb, JsUndefined, [sab]) {
-            Ok(#(_, state)) -> state
-            Error(#(thrown, state)) -> {
-              io.println_error(
-                "$262.agent.broadcast: callback threw: "
-                <> object.format_error(thrown, state.heap),
-              )
-              state
-            }
-          }
-        })
-      let Nil = builtins_atomics.set_agent_callback_mode(False)
-      #(state, Ok(JsUndefined))
-    }
-    Error(Nil) -> state.type_error(state, "broadcast: $262.agent state missing")
-  }
-}
-
-/// $262.agent.report(value) — push ToString(value) onto the report queue.
-pub fn agent_report_native(
-  args: List(JsValue),
-  this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let val = case args {
-    [v, ..] -> v
-    [] -> JsUndefined
-  }
-  use str, state <- coerce.try_to_string(state, val)
-  case agent_queue(state, this, "__reports__") {
-    Ok(#(arr_ref, reports)) -> {
-      let state =
-        agent_queue_write(state, arr_ref, list.append(reports, [JsString(str)]))
-      #(state, Ok(JsUndefined))
-    }
-    Error(Nil) -> state.type_error(state, "report: $262.agent state missing")
-  }
-}
-
-/// $262.agent.getReport() — dequeue the oldest report, or null when empty.
-pub fn agent_get_report_native(
-  this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  case agent_queue(state, this, "__reports__") {
-    Ok(#(arr_ref, reports)) ->
-      case reports {
-        [] -> #(state, Ok(value.JsNull))
-        [head, ..rest] -> {
-          let state = agent_queue_write(state, arr_ref, rest)
-          #(state, Ok(head))
-        }
-      }
-    Error(Nil) -> state.type_error(state, "getReport: $262.agent state missing")
-  }
-}
-
-/// $262.agent.sleep(ms) — block the (single) BEAM scheduler thread running
-/// this VM for ms milliseconds.
-pub fn agent_sleep_native(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let val = case args {
-    [v, ..] -> v
-    [] -> JsUndefined
-  }
-  case coerce.js_to_number(state, val) {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(num, state)) -> {
-      let ms = case num {
-        value.Finite(f) -> value.float_to_int(f)
-        _ -> 0
-      }
-      let Nil = builtins_atomics.sleep_ms(ms)
-      #(state, Ok(JsUndefined))
-    }
-  }
-}
-
-/// $262.agent.monotonicNow() — monotonic milliseconds (same clock as the
-/// waitAsync deadline bookkeeping).
-pub fn agent_monotonic_now_native(
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  #(state, Ok(value.from_int(builtins_atomics.monotonic_now())))
-}
+/// The registered hook, or Error(Nil) when this process never set one.
+@external(erlang, "arc_realm_ffi", "get_extend_262")
+fn get_extend_262() -> Result(Extend262, Nil)
 
 // ============================================================================
 // eval() and Function() constructor — runtime code evaluation

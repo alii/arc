@@ -814,6 +814,7 @@ pub fn evaluate_linked(
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
+  prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> Result(EvaluatedBundle, ModuleError) {
   let #(_evaluated, _jobs, result) =
@@ -822,6 +823,7 @@ pub fn evaluate_linked(
       heap,
       builtins,
       global_object,
+      prepare,
       finish,
       set.new(),
     )
@@ -851,6 +853,7 @@ pub fn evaluate_linked_tracking(
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
+  prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
   already_evaluated: Set(String),
 ) -> #(Set(String), List(value.Job), Result(EvaluatedBundle, ModuleError)) {
@@ -871,6 +874,7 @@ pub fn evaluate_linked_tracking(
       bundle.entry,
       builtins,
       global_object,
+      prepare,
       finish,
     )
   // Surface the entry namespace alongside the completion value (post-eval,
@@ -950,12 +954,36 @@ pub fn evaluate_bundle(
   global_object: Ref,
   finish: fn(state.State) -> state.State,
 ) -> Result(EvaluatedBundle, ModuleError) {
+  evaluate_bundle_prepared(
+    bundle,
+    heap,
+    builtins,
+    global_object,
+    fn(s) { s },
+    finish,
+  )
+}
+
+/// `evaluate_bundle` with an embedder `prepare` hook applied to each module
+/// body's freshly booted State before it executes (bodies get fresh States,
+/// so this is per-body) — the injection point for the host Atomics
+/// capabilities when an embedder macrotask loop (e.g. `arc/beam.run`)
+/// drives evaluation: a module's top level may hit a blocking
+/// `Atomics.wait` before any host function has run.
+pub fn evaluate_bundle_prepared(
+  bundle: ModuleBundle,
+  heap: Heap,
+  builtins: Builtins,
+  global_object: Ref,
+  prepare: fn(state.State) -> state.State,
+  finish: fn(state.State) -> state.State,
+) -> Result(EvaluatedBundle, ModuleError) {
   use #(heap, linked_bundle) <- result.try(link_for_evaluation(
     bundle,
     heap,
     builtins,
   ))
-  evaluate_linked(linked_bundle, heap, builtins, global_object, finish)
+  evaluate_linked(linked_bundle, heap, builtins, global_object, prepare, finish)
 }
 
 /// The entry module's Module Namespace Exotic Object, read out of the rooted
@@ -1009,6 +1037,7 @@ fn eval_module_inner(
   specifier: String,
   builtins: Builtins,
   global_object: Ref,
+  prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
   // Already evaluated successfully — either in this DFS or recorded in the
@@ -1055,6 +1084,7 @@ fn eval_module_inner(
                     compiled,
                     builtins,
                     global_object,
+                    prepare,
                     finish,
                   )
               }
@@ -1072,6 +1102,7 @@ fn eval_module_body(
   compiled: CompiledModule,
   builtins: Builtins,
   global_object: Ref,
+  prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
   // Mark as evaluating
@@ -1119,6 +1150,7 @@ fn eval_module_body(
                     dep,
                     builtins,
                     global_object,
+                    prepare,
                     finish,
                   )
                 case result {
@@ -1182,6 +1214,7 @@ fn eval_module_body(
           builtins,
           global_object,
           seeds,
+          prepare,
           finish,
         )
       {
@@ -1262,6 +1295,7 @@ fn run_module_with_referrer(
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
+  prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> entry.ModuleResult {
   let key = value.Named(dynamic_import.referrer_property)
@@ -1275,7 +1309,15 @@ fn run_module_with_referrer(
     object.define_method_property(h, global_object, key, previous)
   }
   case
-    entry.run_module(template, heap, builtins, global_object, seeds, finish)
+    entry.run_module(
+      template,
+      heap,
+      builtins,
+      global_object,
+      seeds,
+      prepare,
+      finish,
+    )
   {
     entry.ModuleOk(value:, heap:, locals:, jobs:) ->
       entry.ModuleOk(value:, heap: restore(heap), locals:, jobs:)
@@ -1539,6 +1581,7 @@ pub fn evaluate_async_transitive_deps(
               dep,
               builtins,
               global_object,
+              fn(s) { s },
               finish,
             )
           case dep_result {
@@ -1994,9 +2037,16 @@ fn evaluate_deferred_subgraph(
   let st =
     EvalState(heap: state.heap, evaluated:, errors:, evaluating:, jobs: [])
   let #(st, result) =
-    eval_module_inner(bundle, linked, st, spec, builtins, global_object, fn(s) {
-      s
-    })
+    eval_module_inner(
+      bundle,
+      linked,
+      st,
+      spec,
+      builtins,
+      global_object,
+      fn(s) { s },
+      fn(s) { s },
+    )
   let state =
     State(
       ..state,

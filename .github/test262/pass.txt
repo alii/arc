@@ -1381,6 +1381,7 @@ built-ins/Array/prototype/constructor.js
 built-ins/Array/prototype/copyWithin/call-with-boolean.js
 built-ins/Array/prototype/copyWithin/coerced-values-end.js
 built-ins/Array/prototype/copyWithin/coerced-values-start-change-start.js
+built-ins/Array/prototype/copyWithin/coerced-values-start-change-target.js
 built-ins/Array/prototype/copyWithin/coerced-values-start.js
 built-ins/Array/prototype/copyWithin/coerced-values-target.js
 built-ins/Array/prototype/copyWithin/fill-holes.js
@@ -4164,6 +4165,11 @@ built-ins/ArrayBuffer/prototype/detached/this-has-no-arraybufferdata-internal.js
 built-ins/ArrayBuffer/prototype/detached/this-is-not-object.js
 built-ins/ArrayBuffer/prototype/detached/this-is-sharedarraybuffer-resizable.js
 built-ins/ArrayBuffer/prototype/detached/this-is-sharedarraybuffer.js
+built-ins/ArrayBuffer/prototype/immutable/prop-desc.js
+built-ins/ArrayBuffer/prototype/immutable/return-immutable.js
+built-ins/ArrayBuffer/prototype/immutable/this-has-no-arraybufferdata-internal.js
+built-ins/ArrayBuffer/prototype/immutable/this-is-not-object.js
+built-ins/ArrayBuffer/prototype/immutable/this-is-sharedarraybuffer.js
 built-ins/ArrayBuffer/prototype/maxByteLength/detached-buffer.js
 built-ins/ArrayBuffer/prototype/maxByteLength/invoked-as-accessor.js
 built-ins/ArrayBuffer/prototype/maxByteLength/invoked-as-func.js
@@ -4202,6 +4208,7 @@ built-ins/ArrayBuffer/prototype/resize/resize-shrink-zero-explicit.js
 built-ins/ArrayBuffer/prototype/resize/resize-shrink-zero-implicit.js
 built-ins/ArrayBuffer/prototype/resize/resize-shrink.js
 built-ins/ArrayBuffer/prototype/resize/this-is-detached.js
+built-ins/ArrayBuffer/prototype/resize/this-is-immutable-arraybuffer-object.js
 built-ins/ArrayBuffer/prototype/resize/this-is-not-arraybuffer-object.js
 built-ins/ArrayBuffer/prototype/resize/this-is-not-object.js
 built-ins/ArrayBuffer/prototype/resize/this-is-not-resizable-arraybuffer-object.js
@@ -4239,7 +4246,17 @@ built-ins/ArrayBuffer/prototype/slice/start-exceeds-length.js
 built-ins/ArrayBuffer/prototype/slice/this-is-sharedarraybuffer.js
 built-ins/ArrayBuffer/prototype/slice/tointeger-conversion-end.js
 built-ins/ArrayBuffer/prototype/slice/tointeger-conversion-start.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/argument-coercion.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/modify-source-after-return.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/not-a-constructor.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/prop-desc.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/this-becomes-detached.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/this-grows.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/this-has-no-arraybufferdata-internal.js
 built-ins/ArrayBuffer/prototype/sliceToImmutable/this-is-not-detached.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/this-is-not-object.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/this-is-sharedarraybuffer.js
+built-ins/ArrayBuffer/prototype/sliceToImmutable/this-shrinks.js
 built-ins/ArrayBuffer/prototype/transfer/descriptor.js
 built-ins/ArrayBuffer/prototype/transfer/extensible.js
 built-ins/ArrayBuffer/prototype/transfer/from-fixed-to-larger-no-resizable.js
@@ -4260,6 +4277,7 @@ built-ins/ArrayBuffer/prototype/transfer/new-length-excessive.js
 built-ins/ArrayBuffer/prototype/transfer/new-length-non-number.js
 built-ins/ArrayBuffer/prototype/transfer/nonconstructor.js
 built-ins/ArrayBuffer/prototype/transfer/this-is-detached.js
+built-ins/ArrayBuffer/prototype/transfer/this-is-immutable-arraybuffer.js
 built-ins/ArrayBuffer/prototype/transfer/this-is-not-arraybuffer-object.js
 built-ins/ArrayBuffer/prototype/transfer/this-is-not-object.js
 built-ins/ArrayBuffer/prototype/transfer/this-is-sharedarraybuffer.js
@@ -4283,9 +4301,19 @@ built-ins/ArrayBuffer/prototype/transferToFixedLength/new-length-excessive.js
 built-ins/ArrayBuffer/prototype/transferToFixedLength/new-length-non-number.js
 built-ins/ArrayBuffer/prototype/transferToFixedLength/nonconstructor.js
 built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-detached.js
+built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-immutable-arraybuffer.js
 built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-not-arraybuffer-object.js
 built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-not-object.js
 built-ins/ArrayBuffer/prototype/transferToFixedLength/this-is-sharedarraybuffer.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/new-length-coercion.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/not-a-constructor.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/prop-desc.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/this-has-no-arraybufferdata-internal.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/this-is-not-detachable.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/this-is-not-object.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/this-is-sharedarraybuffer.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/to-larger.js
+built-ins/ArrayBuffer/prototype/transferToImmutable/to-same-or-smaller.js
 built-ins/ArrayBuffer/return-abrupt-from-length-symbol.js
 built-ins/ArrayBuffer/return-abrupt-from-length.js
 built-ins/ArrayBuffer/toindex-length.js
@@ -4540,6 +4568,7 @@ built-ins/Atomics/add/bigint/non-shared-bufferdata.js
 built-ins/Atomics/add/descriptor.js
 built-ins/Atomics/add/expected-return-value.js
 built-ins/Atomics/add/good-views.js
+built-ins/Atomics/add/immutable-buffer.js
 built-ins/Atomics/add/length.js
 built-ins/Atomics/add/name.js
 built-ins/Atomics/add/non-shared-bufferdata.js
@@ -4555,6 +4584,7 @@ built-ins/Atomics/and/bigint/non-shared-bufferdata.js
 built-ins/Atomics/and/descriptor.js
 built-ins/Atomics/and/expected-return-value.js
 built-ins/Atomics/and/good-views.js
+built-ins/Atomics/and/immutable-buffer.js
 built-ins/Atomics/and/length.js
 built-ins/Atomics/and/name.js
 built-ins/Atomics/and/non-shared-bufferdata.js
@@ -4570,6 +4600,7 @@ built-ins/Atomics/compareExchange/bigint/non-shared-bufferdata.js
 built-ins/Atomics/compareExchange/descriptor.js
 built-ins/Atomics/compareExchange/expected-return-value.js
 built-ins/Atomics/compareExchange/good-views.js
+built-ins/Atomics/compareExchange/immutable-buffer.js
 built-ins/Atomics/compareExchange/length.js
 built-ins/Atomics/compareExchange/name.js
 built-ins/Atomics/compareExchange/non-shared-bufferdata.js
@@ -4586,6 +4617,7 @@ built-ins/Atomics/exchange/bigint/non-shared-bufferdata.js
 built-ins/Atomics/exchange/descriptor.js
 built-ins/Atomics/exchange/expected-return-value.js
 built-ins/Atomics/exchange/good-views.js
+built-ins/Atomics/exchange/immutable-buffer.js
 built-ins/Atomics/exchange/length.js
 built-ins/Atomics/exchange/name.js
 built-ins/Atomics/exchange/non-shared-bufferdata.js
@@ -4622,12 +4654,16 @@ built-ins/Atomics/notify/bigint/non-shared-bufferdata-count-evaluation-throws.js
 built-ins/Atomics/notify/bigint/non-shared-bufferdata-index-evaluation-throws.js
 built-ins/Atomics/notify/bigint/non-shared-bufferdata-non-shared-int-views-throws.js
 built-ins/Atomics/notify/bigint/non-shared-bufferdata-returns-0.js
+built-ins/Atomics/notify/bigint/notify-all-on-loc.js
 built-ins/Atomics/notify/bigint/null-bufferdata-throws.js
 built-ins/Atomics/notify/count-boundary-cases.js
+built-ins/Atomics/notify/count-defaults-to-infinity-missing.js
+built-ins/Atomics/notify/count-defaults-to-infinity-undefined.js
 built-ins/Atomics/notify/count-from-nans.js
 built-ins/Atomics/notify/count-symbol-throws.js
 built-ins/Atomics/notify/count-tointeger-throws-then-wake-throws.js
 built-ins/Atomics/notify/descriptor.js
+built-ins/Atomics/notify/immutable-buffer-returns-0.js
 built-ins/Atomics/notify/length.js
 built-ins/Atomics/notify/name.js
 built-ins/Atomics/notify/negative-count.js
@@ -4642,7 +4678,14 @@ built-ins/Atomics/notify/non-views.js
 built-ins/Atomics/notify/not-a-constructor.js
 built-ins/Atomics/notify/not-a-typedarray-throws.js
 built-ins/Atomics/notify/not-an-object-throws.js
+built-ins/Atomics/notify/notify-all-on-loc.js
+built-ins/Atomics/notify/notify-all.js
+built-ins/Atomics/notify/notify-in-order-one-time.js
+built-ins/Atomics/notify/notify-in-order.js
 built-ins/Atomics/notify/notify-nan.js
+built-ins/Atomics/notify/notify-one.js
+built-ins/Atomics/notify/notify-renotify-noop.js
+built-ins/Atomics/notify/notify-two.js
 built-ins/Atomics/notify/notify-with-no-agents-waiting.js
 built-ins/Atomics/notify/notify-with-no-matching-agents-waiting.js
 built-ins/Atomics/notify/notify-zero.js
@@ -4653,6 +4696,7 @@ built-ins/Atomics/notify/retrieve-length-before-index-coercion-non-shared-resize
 built-ins/Atomics/notify/retrieve-length-before-index-coercion-non-shared.js
 built-ins/Atomics/notify/retrieve-length-before-index-coercion.js
 built-ins/Atomics/notify/symbol-for-index-throws.js
+built-ins/Atomics/notify/undefined-index-defaults-to-zero.js
 built-ins/Atomics/notify/validate-arraytype-before-count-coercion.js
 built-ins/Atomics/notify/validate-arraytype-before-index-coercion.js
 built-ins/Atomics/or/bad-range.js
@@ -4662,6 +4706,7 @@ built-ins/Atomics/or/bigint/non-shared-bufferdata.js
 built-ins/Atomics/or/descriptor.js
 built-ins/Atomics/or/expected-return-value.js
 built-ins/Atomics/or/good-views.js
+built-ins/Atomics/or/immutable-buffer.js
 built-ins/Atomics/or/length.js
 built-ins/Atomics/or/name.js
 built-ins/Atomics/or/non-shared-bufferdata.js
@@ -4686,6 +4731,7 @@ built-ins/Atomics/store/descriptor.js
 built-ins/Atomics/store/expected-return-value-negative-zero.js
 built-ins/Atomics/store/expected-return-value.js
 built-ins/Atomics/store/good-views.js
+built-ins/Atomics/store/immutable-buffer.js
 built-ins/Atomics/store/length.js
 built-ins/Atomics/store/name.js
 built-ins/Atomics/store/non-shared-bufferdata.js
@@ -4701,6 +4747,7 @@ built-ins/Atomics/sub/bigint/non-shared-bufferdata.js
 built-ins/Atomics/sub/descriptor.js
 built-ins/Atomics/sub/expected-return-value.js
 built-ins/Atomics/sub/good-views.js
+built-ins/Atomics/sub/immutable-buffer.js
 built-ins/Atomics/sub/length.js
 built-ins/Atomics/sub/name.js
 built-ins/Atomics/sub/non-shared-bufferdata.js
@@ -4711,8 +4758,10 @@ built-ins/Atomics/sub/validate-arraytype-before-index-coercion.js
 built-ins/Atomics/sub/validate-arraytype-before-value-coercion.js
 built-ins/Atomics/wait/bad-range.js
 built-ins/Atomics/wait/bigint/bad-range.js
+built-ins/Atomics/wait/bigint/cannot-suspend-throws.js
 built-ins/Atomics/wait/bigint/false-for-timeout-agent.js
 built-ins/Atomics/wait/bigint/false-for-timeout.js
+built-ins/Atomics/wait/bigint/nan-for-timeout.js
 built-ins/Atomics/wait/bigint/negative-index-throws.js
 built-ins/Atomics/wait/bigint/negative-timeout-agent.js
 built-ins/Atomics/wait/bigint/negative-timeout.js
@@ -4730,12 +4779,17 @@ built-ins/Atomics/wait/bigint/non-shared-bufferdata-throws.js
 built-ins/Atomics/wait/bigint/null-bufferdata-throws.js
 built-ins/Atomics/wait/bigint/out-of-range-index-throws.js
 built-ins/Atomics/wait/bigint/value-not-equal.js
+built-ins/Atomics/wait/bigint/waiterlist-block-indexedposition-wake.js
+built-ins/Atomics/wait/bigint/waiterlist-order-of-operations-is-fifo.js
+built-ins/Atomics/wait/bigint/was-woken-before-timeout.js
+built-ins/Atomics/wait/cannot-suspend-throws.js
 built-ins/Atomics/wait/descriptor.js
 built-ins/Atomics/wait/false-for-timeout-agent.js
 built-ins/Atomics/wait/false-for-timeout.js
 built-ins/Atomics/wait/good-views.js
 built-ins/Atomics/wait/length.js
 built-ins/Atomics/wait/name.js
+built-ins/Atomics/wait/nan-for-timeout.js
 built-ins/Atomics/wait/negative-index-throws.js
 built-ins/Atomics/wait/negative-timeout-agent.js
 built-ins/Atomics/wait/negative-timeout.js
@@ -4769,11 +4823,16 @@ built-ins/Atomics/wait/symbol-for-value-throws-agent.js
 built-ins/Atomics/wait/symbol-for-value-throws.js
 built-ins/Atomics/wait/true-for-timeout-agent.js
 built-ins/Atomics/wait/true-for-timeout.js
+built-ins/Atomics/wait/undefined-for-timeout.js
+built-ins/Atomics/wait/undefined-index-defaults-to-zero.js
 built-ins/Atomics/wait/validate-arraytype-before-index-coercion.js
 built-ins/Atomics/wait/validate-arraytype-before-timeout-coercion.js
 built-ins/Atomics/wait/validate-arraytype-before-value-coercion.js
 built-ins/Atomics/wait/value-not-equal.js
 built-ins/Atomics/wait/wait-index-value-not-equal.js
+built-ins/Atomics/wait/waiterlist-block-indexedposition-wake.js
+built-ins/Atomics/wait/waiterlist-order-of-operations-is-fifo.js
+built-ins/Atomics/wait/was-woken-before-timeout.js
 built-ins/Atomics/waitAsync/bad-range.js
 built-ins/Atomics/waitAsync/bigint/bad-range.js
 built-ins/Atomics/waitAsync/bigint/false-for-timeout-agent.js
@@ -4882,6 +4941,7 @@ built-ins/Atomics/xor/bigint/non-shared-bufferdata.js
 built-ins/Atomics/xor/descriptor.js
 built-ins/Atomics/xor/expected-return-value.js
 built-ins/Atomics/xor/good-views.js
+built-ins/Atomics/xor/immutable-buffer.js
 built-ins/Atomics/xor/length.js
 built-ins/Atomics/xor/name.js
 built-ins/Atomics/xor/non-shared-bufferdata.js
@@ -5287,6 +5347,7 @@ built-ins/DataView/prototype/setBigInt64/detached-buffer-after-bigint-value.js
 built-ins/DataView/prototype/setBigInt64/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setBigInt64/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setBigInt64/detached-buffer.js
+built-ins/DataView/prototype/setBigInt64/immutable-buffer.js
 built-ins/DataView/prototype/setBigInt64/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setBigInt64/index-is-out-of-range.js
 built-ins/DataView/prototype/setBigInt64/length.js
@@ -5306,12 +5367,14 @@ built-ins/DataView/prototype/setBigInt64/this-has-no-dataview-internal.js
 built-ins/DataView/prototype/setBigInt64/this-is-not-object.js
 built-ins/DataView/prototype/setBigInt64/to-boolean-littleendian.js
 built-ins/DataView/prototype/setBigInt64/toindex-byteoffset.js
+built-ins/DataView/prototype/setBigUint64/immutable-buffer.js
 built-ins/DataView/prototype/setBigUint64/not-a-constructor.js
 built-ins/DataView/prototype/setBigUint64/resizable-buffer.js
 built-ins/DataView/prototype/setFloat16/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setFloat16/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setFloat16/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setFloat16/detached-buffer.js
+built-ins/DataView/prototype/setFloat16/immutable-buffer.js
 built-ins/DataView/prototype/setFloat16/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setFloat16/index-is-out-of-range.js
 built-ins/DataView/prototype/setFloat16/length.js
@@ -5335,6 +5398,7 @@ built-ins/DataView/prototype/setFloat32/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setFloat32/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setFloat32/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setFloat32/detached-buffer.js
+built-ins/DataView/prototype/setFloat32/immutable-buffer.js
 built-ins/DataView/prototype/setFloat32/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setFloat32/index-is-out-of-range.js
 built-ins/DataView/prototype/setFloat32/length.js
@@ -5358,6 +5422,7 @@ built-ins/DataView/prototype/setFloat64/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setFloat64/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setFloat64/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setFloat64/detached-buffer.js
+built-ins/DataView/prototype/setFloat64/immutable-buffer.js
 built-ins/DataView/prototype/setFloat64/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setFloat64/index-is-out-of-range.js
 built-ins/DataView/prototype/setFloat64/length.js
@@ -5381,6 +5446,7 @@ built-ins/DataView/prototype/setInt16/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setInt16/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setInt16/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setInt16/detached-buffer.js
+built-ins/DataView/prototype/setInt16/immutable-buffer.js
 built-ins/DataView/prototype/setInt16/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setInt16/index-is-out-of-range.js
 built-ins/DataView/prototype/setInt16/length.js
@@ -5404,6 +5470,7 @@ built-ins/DataView/prototype/setInt32/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setInt32/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setInt32/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setInt32/detached-buffer.js
+built-ins/DataView/prototype/setInt32/immutable-buffer.js
 built-ins/DataView/prototype/setInt32/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setInt32/index-is-out-of-range.js
 built-ins/DataView/prototype/setInt32/length.js
@@ -5427,6 +5494,7 @@ built-ins/DataView/prototype/setInt8/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setInt8/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setInt8/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setInt8/detached-buffer.js
+built-ins/DataView/prototype/setInt8/immutable-buffer.js
 built-ins/DataView/prototype/setInt8/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setInt8/index-is-out-of-range.js
 built-ins/DataView/prototype/setInt8/length.js
@@ -5448,6 +5516,7 @@ built-ins/DataView/prototype/setUint16/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setUint16/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setUint16/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setUint16/detached-buffer.js
+built-ins/DataView/prototype/setUint16/immutable-buffer.js
 built-ins/DataView/prototype/setUint16/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setUint16/index-is-out-of-range.js
 built-ins/DataView/prototype/setUint16/length.js
@@ -5471,6 +5540,7 @@ built-ins/DataView/prototype/setUint32/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setUint32/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setUint32/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setUint32/detached-buffer.js
+built-ins/DataView/prototype/setUint32/immutable-buffer.js
 built-ins/DataView/prototype/setUint32/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setUint32/index-is-out-of-range.js
 built-ins/DataView/prototype/setUint32/length.js
@@ -5494,6 +5564,7 @@ built-ins/DataView/prototype/setUint8/detached-buffer-after-number-value.js
 built-ins/DataView/prototype/setUint8/detached-buffer-after-toindex-byteoffset.js
 built-ins/DataView/prototype/setUint8/detached-buffer-before-outofrange-byteoffset.js
 built-ins/DataView/prototype/setUint8/detached-buffer.js
+built-ins/DataView/prototype/setUint8/immutable-buffer.js
 built-ins/DataView/prototype/setUint8/index-check-before-value-conversion.js
 built-ins/DataView/prototype/setUint8/index-is-out-of-range.js
 built-ins/DataView/prototype/setUint8/length.js
@@ -8455,6 +8526,7 @@ built-ins/Object/assign/source-own-prop-error.js
 built-ins/Object/assign/source-own-prop-keys-error.js
 built-ins/Object/assign/strings-and-symbol-order-proxy.js
 built-ins/Object/assign/strings-and-symbol-order.js
+built-ins/Object/assign/target-Array.js
 built-ins/Object/assign/target-is-frozen-accessor-property-set-succeeds.js
 built-ins/Object/assign/target-is-non-extensible-existing-accessor-property.js
 built-ins/Object/assign/target-is-non-extensible-existing-data-property.js
@@ -21154,11 +21226,15 @@ built-ins/TypedArray/prototype/copyWithin/bit-precision.js
 built-ins/TypedArray/prototype/copyWithin/byteoffset.js
 built-ins/TypedArray/prototype/copyWithin/coerced-target-start-end-shrink.js
 built-ins/TypedArray/prototype/copyWithin/coerced-target-start-grow.js
+built-ins/TypedArray/prototype/copyWithin/coerced-values-end-detached-prototype.js
+built-ins/TypedArray/prototype/copyWithin/coerced-values-end-detached.js
 built-ins/TypedArray/prototype/copyWithin/coerced-values-end.js
+built-ins/TypedArray/prototype/copyWithin/coerced-values-start-detached.js
 built-ins/TypedArray/prototype/copyWithin/coerced-values-start.js
 built-ins/TypedArray/prototype/copyWithin/coerced-values-target.js
 built-ins/TypedArray/prototype/copyWithin/detached-buffer.js
 built-ins/TypedArray/prototype/copyWithin/get-length-ignores-length-prop.js
+built-ins/TypedArray/prototype/copyWithin/immutable-buffer.js
 built-ins/TypedArray/prototype/copyWithin/invoked-as-func.js
 built-ins/TypedArray/prototype/copyWithin/invoked-as-method.js
 built-ins/TypedArray/prototype/copyWithin/length.js
@@ -21283,6 +21359,7 @@ built-ins/TypedArray/prototype/fill/fill-values-relative-start.js
 built-ins/TypedArray/prototype/fill/fill-values-symbol-throws.js
 built-ins/TypedArray/prototype/fill/fill-values.js
 built-ins/TypedArray/prototype/fill/get-length-ignores-length-prop.js
+built-ins/TypedArray/prototype/fill/immutable-buffer.js
 built-ins/TypedArray/prototype/fill/invoked-as-func.js
 built-ins/TypedArray/prototype/fill/invoked-as-method.js
 built-ins/TypedArray/prototype/fill/length.js
@@ -21362,6 +21439,7 @@ built-ins/TypedArray/prototype/filter/result-does-not-share-buffer.js
 built-ins/TypedArray/prototype/filter/result-empty-callbackfn-returns-false.js
 built-ins/TypedArray/prototype/filter/result-full-callbackfn-returns-true.js
 built-ins/TypedArray/prototype/filter/return-abrupt-from-this-out-of-bounds.js
+built-ins/TypedArray/prototype/filter/speciesctor-destination-backed-by-immutable-buffer.js
 built-ins/TypedArray/prototype/filter/speciesctor-destination-resizable.js
 built-ins/TypedArray/prototype/filter/speciesctor-get-ctor-abrupt.js
 built-ins/TypedArray/prototype/filter/speciesctor-get-ctor-inherited.js
@@ -21836,6 +21914,7 @@ built-ins/TypedArray/prototype/map/return-new-typedarray-conversion-operation-co
 built-ins/TypedArray/prototype/map/return-new-typedarray-conversion-operation.js
 built-ins/TypedArray/prototype/map/return-new-typedarray-from-empty-length.js
 built-ins/TypedArray/prototype/map/return-new-typedarray-from-positive-length.js
+built-ins/TypedArray/prototype/map/speciesctor-destination-backed-by-immutable-buffer.js
 built-ins/TypedArray/prototype/map/speciesctor-destination-resizable.js
 built-ins/TypedArray/prototype/map/speciesctor-get-ctor-abrupt.js
 built-ins/TypedArray/prototype/map/speciesctor-get-ctor-inherited.js
@@ -21964,6 +22043,7 @@ built-ins/TypedArray/prototype/reverse/BigInt/returns-original-object.js
 built-ins/TypedArray/prototype/reverse/BigInt/reverts.js
 built-ins/TypedArray/prototype/reverse/detached-buffer.js
 built-ins/TypedArray/prototype/reverse/get-length-uses-internal-arraylength.js
+built-ins/TypedArray/prototype/reverse/immutable-buffer.js
 built-ins/TypedArray/prototype/reverse/invoked-as-func.js
 built-ins/TypedArray/prototype/reverse/invoked-as-method.js
 built-ins/TypedArray/prototype/reverse/length.js
@@ -22049,6 +22129,7 @@ built-ins/TypedArray/prototype/set/array-arg-targetbuffer-detached-on-tointeger-
 built-ins/TypedArray/prototype/set/array-arg-targetbuffer-detached-throws.js
 built-ins/TypedArray/prototype/set/array-arg-value-conversion-resizes-array-buffer.js
 built-ins/TypedArray/prototype/set/bit-precision.js
+built-ins/TypedArray/prototype/set/immutable-buffer.js
 built-ins/TypedArray/prototype/set/invoked-as-func.js
 built-ins/TypedArray/prototype/set/invoked-as-method.js
 built-ins/TypedArray/prototype/set/length.js
@@ -22155,6 +22236,7 @@ built-ins/TypedArray/prototype/slice/return-abrupt-from-start-symbol.js
 built-ins/TypedArray/prototype/slice/return-abrupt-from-start.js
 built-ins/TypedArray/prototype/slice/return-abrupt-from-this-out-of-bounds.js
 built-ins/TypedArray/prototype/slice/set-values-from-different-ctor-type.js
+built-ins/TypedArray/prototype/slice/speciesctor-destination-backed-by-immutable-buffer.js
 built-ins/TypedArray/prototype/slice/speciesctor-destination-resizable.js
 built-ins/TypedArray/prototype/slice/speciesctor-get-ctor-abrupt.js
 built-ins/TypedArray/prototype/slice/speciesctor-get-ctor-inherited.js
@@ -22239,6 +22321,7 @@ built-ins/TypedArray/prototype/sort/comparefn-nonfunction-call-throws.js
 built-ins/TypedArray/prototype/sort/comparefn-resizable-buffer.js
 built-ins/TypedArray/prototype/sort/comparefn-shrink.js
 built-ins/TypedArray/prototype/sort/detached-buffer.js
+built-ins/TypedArray/prototype/sort/immutable-buffer.js
 built-ins/TypedArray/prototype/sort/invoked-as-func.js
 built-ins/TypedArray/prototype/sort/invoked-as-method.js
 built-ins/TypedArray/prototype/sort/length.js
@@ -22787,6 +22870,7 @@ built-ins/TypedArrayConstructors/from/BigInt/this-is-not-constructor.js
 built-ins/TypedArrayConstructors/from/arylk-get-length-error.js
 built-ins/TypedArrayConstructors/from/arylk-to-length-error.js
 built-ins/TypedArrayConstructors/from/custom-ctor-does-not-instantiate-ta-throws.js
+built-ins/TypedArrayConstructors/from/custom-ctor-returns-immutable-arraybuffer.js
 built-ins/TypedArrayConstructors/from/custom-ctor-returns-other-instance.js
 built-ins/TypedArrayConstructors/from/custom-ctor-returns-smaller-instance-throws.js
 built-ins/TypedArrayConstructors/from/custom-ctor.js
@@ -23069,6 +23153,7 @@ built-ins/TypedArrayConstructors/of/BigInt/this-is-not-constructor.js
 built-ins/TypedArrayConstructors/of/argument-is-symbol-throws.js
 built-ins/TypedArrayConstructors/of/argument-number-value-throws.js
 built-ins/TypedArrayConstructors/of/custom-ctor-does-not-instantiate-ta-throws.js
+built-ins/TypedArrayConstructors/of/custom-ctor-returns-immutable-arraybuffer.js
 built-ins/TypedArrayConstructors/of/custom-ctor-returns-other-instance.js
 built-ins/TypedArrayConstructors/of/custom-ctor-returns-smaller-instance-throws.js
 built-ins/TypedArrayConstructors/of/custom-ctor.js
@@ -23175,6 +23260,7 @@ built-ins/Uint8Array/prototype/setFromBase64/results.js
 built-ins/Uint8Array/prototype/setFromBase64/string-coercion.js
 built-ins/Uint8Array/prototype/setFromBase64/subarray.js
 built-ins/Uint8Array/prototype/setFromBase64/target-size.js
+built-ins/Uint8Array/prototype/setFromBase64/throws-when-target-is-backed-by-immutable-arraybuffer.js
 built-ins/Uint8Array/prototype/setFromBase64/trailing-garbage-empty.js
 built-ins/Uint8Array/prototype/setFromBase64/trailing-garbage.js
 built-ins/Uint8Array/prototype/setFromBase64/whitespace.js
@@ -23190,6 +23276,7 @@ built-ins/Uint8Array/prototype/setFromHex/string-coercion.js
 built-ins/Uint8Array/prototype/setFromHex/subarray.js
 built-ins/Uint8Array/prototype/setFromHex/target-size.js
 built-ins/Uint8Array/prototype/setFromHex/throws-when-string-length-is-odd.js
+built-ins/Uint8Array/prototype/setFromHex/throws-when-target-is-backed-by-immutable-arraybuffer.js
 built-ins/Uint8Array/prototype/setFromHex/writes-up-to-error.js
 built-ins/Uint8Array/prototype/toBase64/alphabet.js
 built-ins/Uint8Array/prototype/toBase64/descriptor.js
@@ -26355,6 +26442,7 @@ intl402/Temporal/ZonedDateTime/legacy-non-iana.js
 intl402/Temporal/ZonedDateTime/links-backward.js
 intl402/Temporal/ZonedDateTime/links-backzone.js
 intl402/Temporal/ZonedDateTime/links-etcetera.js
+intl402/Temporal/ZonedDateTime/links.js
 intl402/Temporal/ZonedDateTime/non-canonical-utc.js
 intl402/Temporal/ZonedDateTime/prototype/add/basic-buddhist.js
 intl402/Temporal/ZonedDateTime/prototype/add/basic-chinese.js

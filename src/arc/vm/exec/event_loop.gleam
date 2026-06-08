@@ -72,13 +72,33 @@ pub fn drain_jobs(state: State) -> State {
 }
 
 /// `drain_jobs` for embedder macrotask loops that own a mailbox receive
-/// (arc/beam.run): when host.suspend promises are outstanding and only
-/// future deadlines remain, return instead of sleeping — sleeping here
-/// would starve the embedder's mailbox (IO, process messages) until the
-/// deadline. The embedder bounds its blocking receive with
-/// `next_deadline_timeout` so host timers and mailbox events interleave.
+/// (arc/beam.run): when an embedder-visible wake source is pending —
+/// outstanding `host.suspend` promises, or pending Atomics.waitAsync
+/// waiters whose cross-process notify wakes arrive in the EMBEDDER's
+/// mailbox — and only future deadlines remain, return instead of
+/// sleeping. Sleeping here would starve the embedder's mailbox (IO,
+/// process messages, arc_notify wakes) until the deadline. The embedder
+/// bounds its blocking receive with `next_deadline_timeout`, injects
+/// notify wakes via `inject_notify`, and re-drains so host timers and
+/// mailbox events interleave.
 pub fn drain_jobs_yielding(state: State) -> State {
   do_drain_jobs(state, True)
+}
+
+/// Wake injection — the embedder side of a cross-process Atomics.notify
+/// (host contract clause 3, arc/host.gleam). When an
+/// `{arc_notify, Ref, Key, ByteIndex}` message lands in the EMBEDDER's
+/// mailbox (core owns no receive), the embedder hands the wake to core
+/// here: settles this agent's first pending waitAsync waiter on
+/// (key, byte index) with "ok"; a stale wake — the waiter already expired
+/// or was cancelled — settles nothing. Re-drain afterwards
+/// (`drain_jobs` / `drain_jobs_yielding`) so the reaction jobs run.
+pub fn inject_notify(
+  state: State,
+  key: builtins_atomics.WaiterKey,
+  byte_index: Int,
+) -> State {
+  builtins_atomics.settle_notified_waiter(state, key, byte_index)
 }
 
 fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
@@ -91,12 +111,33 @@ fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
       case pop_due_timer(state) {
         Some(#(state, timer)) ->
           do_drain_jobs(fire_timer(state, timer), yield_to_embedder)
-        None ->
+        None -> {
+          // Embedder-visible wake sources: `host.suspend` promises settle
+          // from the embedder's mailbox, and pending waitAsync waiters can
+          // be woken by a cross-process Atomics.notify whose wake message
+          // also lands in the embedder's mailbox (inject_notify). Core
+          // owns no receive, so a yielding drain must hand control back
+          // whenever either is pending.
+          let embedder_wake_pending =
+            state.outstanding > 0 || state.atomics_waiters != []
           case earliest_deadline(state) {
-            Some(_) if yield_to_embedder && state.outstanding > 0 -> state
+            Some(_) if yield_to_embedder && embedder_wake_pending -> state
             Some(deadline) -> {
               let wait_ms =
                 int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1
+              // Plain bounded sleep until the earliest deadline — never a
+              // mailbox receive in core. A cross-process notify that lands
+              // during the sleep sits in the owning embedder's mailbox
+              // until its loop consumes it (embedder loops use the
+              // yielding drain, so they don't reach this arm with waiters
+              // pending). CAVEAT: a NON-yielding drain reaching this arm
+              // sleeps through any such wake — pending waiters settle
+              // "timed-out" at their deadline and infinite waiters exit
+              // the drain unsettled. That is only correct when the driver
+              // guarantees no cross-process wake source exists; a driver
+              // that exposes agent spawning (e.g. Arc.spawn) MUST use a
+              // notify-consuming embedder loop (beam.run / the yielding
+              // drain + wait_for_notify + inject_notify), not this one.
               let Nil = builtins_atomics.sleep_ms(wait_ms)
               do_drain_jobs(
                 builtins_atomics.settle_expired_waiters(state),
@@ -108,6 +149,7 @@ fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
               State(..state, unhandled_rejections: [])
             }
           }
+        }
       }
     Some(#(job, rest)) -> {
       let state = State(..state, job_queue: rest)

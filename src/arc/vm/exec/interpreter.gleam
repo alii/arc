@@ -374,8 +374,25 @@ pub fn new_state(
     call_depth: 0,
     eval_env: None,
     current_line: 0,
+    // Agent [[CanBlock]]: read once at state init from the process-local
+    // flag (defaults to True). The test262 runner clears the flag in the
+    // test's worker process before booting a realm for CanBlockIsFalse
+    // tests; fresh agent processes start with it unset, i.e. True.
+    can_block: host_can_block(),
+    // Host Atomics capabilities (blocking wait / wake delivery) start
+    // absent; embedders (arc/beam.run setup, the test262 harness worker)
+    // install them via host.install_atomics_capabilities. Absent sync
+    // wait == cannot-block (DoWait step 10 TypeError).
+    host_sync_wait: None,
+    host_deliver_wake: None,
   )
 }
+
+/// Agent Record [[CanBlock]] for the booting agent — process-local, default
+/// True. See arc_atomics_ffi.erl; cleared by the test262 runner for tests
+/// flagged CanBlockIsFalse.
+@external(erlang, "arc_atomics_ffi", "can_block")
+fn host_can_block() -> Bool
 
 pub fn init_state(
   func: FuncTemplate,

@@ -2693,20 +2693,6 @@ pub fn dispatch_native(
     // $262.IsHTMLDDA() — returns null when called (Annex B §B.3.6 / test262
     // INTERPRETING.md). The exotic typeof/equality behaviors are not modeled.
     value.VmNative(value.IsHTMLDDA) -> #(state, Ok(value.JsNull))
-    value.VmNative(value.AgentStart) ->
-      realm.agent_start_native(args, state, execute_inner, new_state_fn)
-    value.VmNative(value.AgentBroadcast) ->
-      realm.agent_broadcast_native(args, this, state)
-    value.VmNative(value.AgentGetReport) ->
-      realm.agent_get_report_native(this, state)
-    value.VmNative(value.AgentSleep) -> realm.agent_sleep_native(args, state)
-    value.VmNative(value.AgentMonotonicNow) ->
-      realm.agent_monotonic_now_native(state)
-    value.VmNative(value.AgentReport) ->
-      realm.agent_report_native(args, this, state)
-    value.VmNative(value.AgentLeaving) -> #(state, Ok(JsUndefined))
-    value.VmNative(value.AgentReceiveBroadcast) ->
-      realm.agent_receive_broadcast_native(args, this, state)
     // Host timers (HTML §8.6): global setTimeout / clearTimeout
     value.VmNative(value.SetTimeout) ->
       event_loop.set_timeout_native(args, state)

@@ -112,6 +112,83 @@ pub type RealmCtx {
   )
 }
 
+// ============================================================================
+// Host Atomics capabilities — the blocking-wait / wake-delivery contract.
+//
+// Core never blocks on the BEAM mailbox and never sends wake messages
+// itself. Both event-driven sides of Atomics.wait/notify are inverted into
+// embedder-installed capability functions carried on State (the same
+// inversion as `host.suspend`/`host.resume` for promises). The types live
+// here (not in arc/host.gleam, which re-exports them) because State's
+// fields reference them and host.gleam imports state.
+//
+// The opaque terms (WaiterKey, WaiterHandle, ClaimedWaiter) are produced
+// exclusively by the data-only ETS registry arc_waiter_ffi.erl and are
+// safe to send between processes. See arc/host.gleam for the full written
+// contract, including the FFI module-layout rules and the wake-injection
+// entry point.
+// ============================================================================
+
+/// Opaque cross-process identity of a buffer's WaiterList (an Erlang term:
+/// the SAB's atomics ref for shared storage, a pid-scoped heap id
+/// otherwise — see arc_waiter_ffi:shared_buffer_key/local_buffer_key).
+/// Compared structurally; safe to send between processes.
+pub type WaiterKey
+
+/// Opaque handle to one registered waiterlist entry (its ETS key plus the
+/// unique message ref a notifier will address). Produced by
+/// arc_waiter_ffi:insert_waiter; consumed by the embedder's blocking wait.
+pub type WaiterHandle
+
+/// A remote waiter atomically claimed by Atomics.notify's waiterlist take
+/// (opaque Erlang term: the waiter's pid, message ref, WaiterKey and byte
+/// index). Claiming is what counts the waiter as woken; DELIVERING the
+/// wake message is the embedder's job via `host_deliver_wake`.
+pub type ClaimedWaiter
+
+/// One blocking sync Atomics.wait, handed to the embedder's `SyncWaitFn`
+/// after core has registered the waiterlist entry and re-read the cell
+/// (so no wakeup can be lost — see arc_waiter_ffi.erl's module doc for
+/// the lock-free insert/re-read/block ordering).
+pub type WaitRequest {
+  WaitRequest(
+    /// The waiterlist entry to block on. The embedder resolves the
+    /// notify-vs-timeout race by ets:take of this entry on timeout
+    /// (took it ourselves = TimedOut; gone = a notifier claimed us and
+    /// its message is in flight = Ok).
+    handle: WaiterHandle,
+    /// WaiterList identity, for diagnostics and embedder-side policy.
+    key: WaiterKey,
+    /// Byte offset within the buffer (matches the notify side).
+    byte_index: Int,
+    /// Milliseconds to block; `None` = infinite (the embedder may clamp —
+    /// e.g. the BEAM `receive after` 2^32-1 ms ceiling).
+    timeout_ms: Option(Int),
+  )
+}
+
+/// Result of an embedder blocking wait: woken by a notify, or deadline
+/// elapsed with no claim. Maps 1:1 to the JS "ok"/"timed-out" strings
+/// ("not-equal" is decided by core before the capability is called).
+pub type WaitOutcome {
+  WaitOk
+  WaitTimedOut
+}
+
+/// Embedder capability: block the calling agent until the waiterlist entry
+/// in the request is notified or the timeout elapses. The BLOCKING happens
+/// in the embedder (BEAM selective receive in arc/beam, the harness's
+/// worker mailbox in test262) — never in core.
+pub type SyncWaitFn =
+  fn(WaitRequest) -> WaitOutcome
+
+/// Embedder capability: deliver wake messages to remote waiters claimed by
+/// Atomics.notify. Core claims atomically (data-only ETS take) and counts;
+/// the embedder owns the actual `Pid ! {arc_notify, Ref, Key, ByteIndex}`
+/// sends.
+pub type DeliverWakeFn =
+  fn(List(ClaimedWaiter)) -> Nil
+
 /// The internal VM executor state. Public so builtins can receive and return it,
 /// giving them full access to the runtime.
 pub type State {
@@ -170,6 +247,28 @@ pub type State {
     /// SetLine opcode. Captured (per active frame) when an Error object is
     /// constructed to build `Error.prototype.stack`. 0 before any SetLine.
     current_line: Int,
+    /// Agent Record [[CanBlock]] (§9.7): whether this agent may block
+    /// (suspend) in a sync Atomics.wait. True for the main agent and spawned
+    /// agent children; the test262 runner sets it False for tests flagged
+    /// CanBlockIsFalse. Read by DoWait step 10 (§25.4.3.14): sync mode
+    /// throws a TypeError when AgentCanSuspend() is false.
+    can_block: Bool,
+    /// Embedder-installed blocking-wait capability for sync Atomics.wait
+    /// (§25.4.3.14 DoWait steps 11-27). Core registers the waiterlist
+    /// entry and re-reads the cell, then calls this to block. `None` =
+    /// this host cannot suspend the agent: sync wait is treated exactly
+    /// like `can_block == False` (DoWait step 10 TypeError) — there is no
+    /// bounded fallback, because a wait that silently can't be woken is
+    /// worse than an eager error. Installed by arc/beam (BEAM mailbox
+    /// receive) and the test262 harness; default None.
+    host_sync_wait: Option(SyncWaitFn),
+    /// Embedder-installed wake delivery for Atomics.notify. Core's
+    /// waiterlist take CLAIMS remote waiters atomically (so they count as
+    /// woken, §25.4.11 step 10) and hands them here for actual message
+    /// delivery. `None` = claimed remote wakes are dropped undelivered
+    /// (only headless states lack the capability; every shipped embedder
+    /// installs it alongside host_sync_wait); default None.
+    host_deliver_wake: Option(DeliverWakeFn),
   )
 }
 

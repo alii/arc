@@ -469,7 +469,9 @@ fn own_property_of_slot(
     //   in-bounds → { value, W:T, E:T, C:T }; out-of-bounds/detached →
     //   undefined WITHOUT consulting the ordinary table. Non-integral
     //   canonical numeric strings ("1.5", "-0", "NaN", …) are never valid
-    //   indices, so they also yield undefined.
+    //   indices, so they also yield undefined. Immutable ArrayBuffer
+    //   proposal (sec-typedarray-getownproperty): over an immutable buffer
+    //   the element descriptor is { value, W:F, E:T, C:F }.
     value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) ->
       case key {
         Index(idx) -> {
@@ -482,7 +484,19 @@ fn own_property_of_slot(
               length,
             )
           typed_array_element(heap, buffer, elem_kind, byte_offset, length, idx)
-          |> option.map(value.data_property)
+          |> option.map(fn(v) {
+            case buffer_is_immutable(heap, buffer) {
+              True ->
+                DataProperty(
+                  value: v,
+                  writable: False,
+                  enumerable: True,
+                  configurable: False,
+                  seq: 0,
+                )
+              False -> value.data_property(v)
+            }
+          })
         }
         Named(s) ->
           case is_canonical_numeric_string(s) {
@@ -3038,11 +3052,11 @@ fn inspect_object(
         value.DataViewObject(..) -> "DataView {}"
         value.ArrayBufferObject(data:, shared: False, ..) ->
           "ArrayBuffer { byteLength: "
-          <> int.to_string(bit_array.byte_size(data))
+          <> int.to_string(value.buffer_byte_size(data))
           <> " }"
         value.ArrayBufferObject(data:, shared: True, ..) ->
           "SharedArrayBuffer { byteLength: "
-          <> int.to_string(bit_array.byte_size(data))
+          <> int.to_string(value.buffer_byte_size(data))
           <> " }"
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) ->
           value.typed_array_name(elem_kind)
@@ -4042,14 +4056,16 @@ fn ta_clamp_uint8(tag: Int, val: Float) -> Int
 @external(erlang, "arc_typed_array_ffi", "ta_zeroed")
 fn ta_zeroed(byte_len: Int) -> BitArray
 
-/// Read the backing store of a non-detached ArrayBuffer slot.
+/// Read a snapshot of the backing store of a non-detached ArrayBuffer slot.
 /// None when the ref isn't an ArrayBuffer or the buffer is detached.
+/// For shared (atomics-backed) buffers this copies the live bytes out of the
+/// shared cells; for plain buffers it is the backing binary itself.
 pub fn typed_array_buffer_data(h: Heap, buffer: Ref) -> Option(BitArray) {
   case heap.read(h, buffer) {
     Some(ObjectSlot(
       kind: value.ArrayBufferObject(data:, detached: False, ..),
       ..,
-    )) -> Some(data)
+    )) -> Some(value.buffer_bits(data))
     _ -> None
   }
 }
@@ -4259,8 +4275,11 @@ fn is_canonical_numeric_string_slow(s: String) -> Bool {
 
 /// §10.4.5.16 IntegerIndexedElementSet: convert the value first (observable —
 /// valueOf / toString / @@toPrimitive may run user code), then store it if
-/// `idx` is Some(valid index) and the buffer is live. Always returns True
-/// (out-of-bounds typed-array writes are silent no-ops).
+/// `idx` is Some(valid index) and the buffer is live. Returns True for
+/// out-of-bounds/detached writes (silent no-ops), but False — BEFORE any
+/// value coercion — when the viewed buffer is immutable (Immutable
+/// ArrayBuffer proposal, sec-typedarray-set), so strict-mode assignment
+/// throws and valueOf/toString side effects never run.
 pub fn typed_array_store(
   state: State,
   buffer: Ref,
@@ -4270,6 +4289,17 @@ pub fn typed_array_store(
   idx: Option(Int),
   val: JsValue,
 ) -> Result(#(State, Bool), #(JsValue, State)) {
+  // Immutable ArrayBuffer proposal, [[Set]] (sec-typedarray-set): "If
+  // IsImmutableBuffer(O.[[ViewedArrayBuffer]]) is true, return false" sits
+  // BEFORE TypedArraySetElement, so the ToNumber/ToBigInt conversion (and
+  // any user code it would run) must not happen. Per the proposal NOTE,
+  // immutable is the one case where assignment failure for a canonical
+  // numeric string property IS reported — unlike detached/out-of-bounds,
+  // which stay silent successes.
+  use <- bool.guard(
+    buffer_is_immutable(state.heap, buffer),
+    Ok(#(state, False)),
+  )
   case value.typed_array_is_bigint(elem_kind) {
     True -> {
       use #(n, state) <- result.try(ta_to_bigint(state, val))
@@ -4302,6 +4332,16 @@ pub fn typed_array_store(
   }
 }
 
+/// Immutable ArrayBuffer proposal: True when `buffer` is a live
+/// ArrayBufferObject whose [[ArrayBufferData]] is immutable.
+fn buffer_is_immutable(h: Heap, buffer: Ref) -> Bool {
+  case heap.read(h, buffer) {
+    Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
+      immutable
+    _ -> False
+  }
+}
+
 /// Shared store tail: bounds/detach check, then rebuild the buffer binary.
 fn do_typed_store(
   state: State,
@@ -4322,12 +4362,13 @@ fn do_typed_store(
               detached: False,
               max_byte_length:,
               shared:,
+              immutable:,
             ),
             ..,
           ) as slot,
         ) -> {
           let size = value.typed_array_element_size(elem_kind)
-          let byte_size = bit_array.byte_size(data)
+          let byte_size = value.buffer_byte_size(data)
           // §10.4.5.14 IsValidIntegerIndex against the LIVE buffer, resolved
           // HERE (not at [[Set]] entry): the ToNumber/ToBigInt conversion
           // above may have run user code that resized the buffer. A
@@ -4341,24 +4382,40 @@ fn do_typed_store(
           let off = byte_offset + i * size
           case i < len && byte_offset + len * size <= byte_size {
             False -> #(state, True)
-            True -> {
-              let new_data = write(data, off)
-              let h =
-                heap.write(
-                  state.heap,
-                  buffer,
-                  ObjectSlot(
-                    ..slot,
-                    kind: value.ArrayBufferObject(
-                      data: new_data,
-                      detached: False,
-                      max_byte_length:,
-                      shared:,
-                    ),
-                  ),
-                )
-              #(State(..state, heap: h), True)
-            }
+            True ->
+              case immutable {
+                // Immutable ArrayBuffer proposal: typed_array_store already
+                // reported [[Set]] failure (False) before value coercion, and
+                // a live buffer ref can never become immutable in place
+                // (transferToImmutable detaches the source and allocates a
+                // fresh ref), so this arm is unreachable. Kept as a defensive
+                // failure — immutable writes report False, never a silent
+                // success like detached/out-of-bounds.
+                True -> #(state, False)
+                False -> {
+                  let new_bits = write(value.buffer_bits(data), off)
+                  // Shared storage: persist only the element's bytes — other
+                  // regions may be concurrently written by other agents.
+                  let new_data =
+                    value.buffer_store_region(data, new_bits, off, size)
+                  let h =
+                    heap.write(
+                      state.heap,
+                      buffer,
+                      ObjectSlot(
+                        ..slot,
+                        kind: value.ArrayBufferObject(
+                          data: new_data,
+                          detached: False,
+                          max_byte_length:,
+                          shared:,
+                          immutable: False,
+                        ),
+                      ),
+                    )
+                  #(State(..state, heap: h), True)
+                }
+              }
           }
         }
         // Detached (or not a buffer): silent no-op per §10.4.5.16 step 2.

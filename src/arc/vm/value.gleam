@@ -1102,6 +1102,14 @@ pub type ArrayBufferNativeFn {
   ArrayBufferTransfer
   /// §25.1.6.9 ArrayBuffer.prototype.transferToFixedLength ( [ newLength ] )
   ArrayBufferTransferToFixedLength
+  /// Immutable ArrayBuffer proposal: get ArrayBuffer.prototype.immutable
+  ArrayBufferGetImmutable
+  /// Immutable ArrayBuffer proposal:
+  /// ArrayBuffer.prototype.sliceToImmutable ( start, end )
+  ArrayBufferSliceToImmutable
+  /// Immutable ArrayBuffer proposal:
+  /// ArrayBuffer.prototype.transferToImmutable ( [ newLength ] )
+  ArrayBufferTransferToImmutable
   /// §25.2.3.1 SharedArrayBuffer ( length [ , options ] )
   SharedArrayBufferConstructor(proto: Ref)
   /// §25.2.4.2 get SharedArrayBuffer [ @@species ]
@@ -1768,23 +1776,6 @@ pub type VmNativeFn {
   /// reserved heap id (`html_dda_id`) in typeof_value / is_truthy /
   /// abstract_equal.
   IsHTMLDDA
-  /// $262.agent.start(script) — run an agent script (cooperative, in-realm).
-  AgentStart
-  /// $262.agent.broadcast(sab [, id]) — invoke every registered
-  /// receiveBroadcast callback with the (genuinely shared) buffer.
-  AgentBroadcast
-  /// $262.agent.getReport() — dequeue the oldest report string, or null.
-  AgentGetReport
-  /// $262.agent.sleep(ms) — block the current agent for ms milliseconds.
-  AgentSleep
-  /// $262.agent.monotonicNow() — monotonic clock reading in milliseconds.
-  AgentMonotonicNow
-  /// $262.agent.report(value) — enqueue ToString(value) for the main agent.
-  AgentReport
-  /// $262.agent.leaving() — agent termination hint (no-op cooperatively).
-  AgentLeaving
-  /// $262.agent.receiveBroadcast(callback) — register a broadcast callback.
-  AgentReceiveBroadcast
   /// Host setTimeout(callback, delay, ...args) — schedule a host timer; the
   /// event loop calls `callback(...args)` once `delay` ms elapse. Returns
   /// the numeric timer id (HTML §8.6 timer initialisation steps).
@@ -1807,6 +1798,100 @@ pub type VmNativeFn {
   /// §20.2.3 "Function.prototype … accepts any arguments and returns
   /// undefined when invoked" — the [[Call]] of %Function.prototype% itself.
   FunctionPrototypeCall
+}
+
+/// Opaque handle to an Erlang `atomics` array (see arc_sab_ffi.erl). Atomics
+/// refs pass between BEAM processes by reference, so every process sharing
+/// the ref reads and writes the SAME mutable cells — exactly the semantics a
+/// SharedArrayBuffer needs across real agent processes.
+pub type AtomicsRef
+
+/// Backing storage of an ArrayBuffer/SharedArrayBuffer ([[ArrayBufferData]]).
+///
+/// Non-shared ArrayBuffers keep the original immutable-BitArray
+/// representation (`BufBytes`) — the fast path is a single one-constructor
+/// unwrap. SharedArrayBuffers live in an Erlang `atomics` array
+/// (`BufShared`): one unsigned 64-bit cell per 8 bytes, little-endian within
+/// the cell, sub-word writes via a compare_exchange retry loop (the cell
+/// mapping is documented in arc_sab_ffi.erl). Growable SABs pre-allocate
+/// max_byte_length cells up front; `byte_length` is the CURRENT length
+/// (grow only bumps this number in the local heap slot).
+pub type BufferData {
+  BufBytes(bytes: BitArray)
+  BufShared(ref: AtomicsRef, byte_length: Int)
+}
+
+/// Allocate a fresh zero-filled shared storage of `max_byte_length` capacity
+/// (atomics cells are zero-initialized by the VM).
+@external(erlang, "arc_sab_ffi", "new")
+pub fn sab_new(max_byte_length: Int) -> AtomicsRef
+
+/// Read `count` bytes starting at `byte_offset` out of shared storage.
+@external(erlang, "arc_sab_ffi", "read_bytes")
+pub fn sab_read_bytes(ref: AtomicsRef, byte_offset: Int, count: Int) -> BitArray
+
+/// Write `bytes` into shared storage at `byte_offset`. Whole-cell spans use
+/// atomics:put; partial cells merge via a CAS loop so concurrent writers of
+/// neighbouring bytes in the same cell are never clobbered.
+@external(erlang, "arc_sab_ffi", "write_bytes")
+pub fn sab_write_bytes(
+  ref: AtomicsRef,
+  byte_offset: Int,
+  bytes: BitArray,
+) -> Nil
+
+/// [[ArrayBufferByteLength]] of a storage value.
+pub fn buffer_byte_size(data: BufferData) -> Int {
+  case data {
+    BufBytes(bytes:) -> bit_array.byte_size(bytes)
+    BufShared(ref: _, byte_length:) -> byte_length
+  }
+}
+
+/// Snapshot the live buffer contents as a BitArray. For `BufBytes` this is
+/// the (immutable) backing binary itself — zero cost. For `BufShared` it
+/// copies the current bytes out of the atomics cells.
+pub fn buffer_bits(data: BufferData) -> BitArray {
+  case data {
+    BufBytes(bytes:) -> bytes
+    BufShared(ref:, byte_length:) -> sab_read_bytes(ref, 0, byte_length)
+  }
+}
+
+/// Persist a full-buffer image `new_bits` into the storage. `BufBytes`
+/// simply becomes the new binary; `BufShared` writes the bytes into the
+/// shared cells in place (same ref, length unchanged).
+pub fn buffer_store_bits(data: BufferData, new_bits: BitArray) -> BufferData {
+  case data {
+    BufBytes(bytes: _) -> BufBytes(bytes: new_bits)
+    BufShared(ref:, byte_length:) -> {
+      let Nil = sab_write_bytes(ref, 0, new_bits)
+      BufShared(ref:, byte_length:)
+    }
+  }
+}
+
+/// Persist a full-buffer image `new_bits`, but for SHARED storage write back
+/// only the bytes in [byte_offset, byte_offset+count) — the region the
+/// caller actually modified. Other regions of a shared buffer may be
+/// concurrently mutated by other agent processes; writing the whole snapshot
+/// back would clobber their updates.
+pub fn buffer_store_region(
+  data: BufferData,
+  new_bits: BitArray,
+  byte_offset: Int,
+  count: Int,
+) -> BufferData {
+  case data {
+    BufBytes(bytes: _) -> BufBytes(bytes: new_bits)
+    BufShared(ref:, byte_length:) -> {
+      let Nil = case bit_array.slice(new_bits, byte_offset, count) {
+        Ok(region) -> sab_write_bytes(ref, byte_offset, region)
+        Error(Nil) -> Nil
+      }
+      BufShared(ref:, byte_length:)
+    }
+  }
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -1947,16 +2032,23 @@ pub type ExoticKind(ctx) {
     resources: List(DisposeResource),
   )
   /// ArrayBuffer / SharedArrayBuffer — ES2024 §25.1/§25.2.
-  /// [[ArrayBufferData]] is `data` (a BEAM binary); [[ArrayBufferByteLength]]
-  /// is derived (`bit_array.byte_size(data)`). `detached` models
-  /// [[ArrayBufferData]] = null (data is reset to <<>> on detach).
+  /// [[ArrayBufferData]] is `data` — `BufBytes` (an immutable BEAM binary)
+  /// for non-shared buffers, `BufShared` (an Erlang `atomics` array shared
+  /// across BEAM processes) for SharedArrayBuffers. [[ArrayBufferByteLength]]
+  /// is derived (`buffer_byte_size(data)`). `detached` models
+  /// [[ArrayBufferData]] = null (data is reset to BufBytes(<<>>) on detach).
   /// `max_byte_length` is Some for resizable (AB) / growable (SAB) buffers.
   /// `shared` distinguishes SharedArrayBuffer (never detachable).
+  /// `immutable` is the TC39 Immutable ArrayBuffer proposal's
+  /// IsImmutableBuffer state (transferToImmutable / sliceToImmutable
+  /// results): always BufBytes, never shared, never detachable, never
+  /// resizable; every write path (Atomics, TypedArray stores) rejects it.
   ArrayBufferObject(
-    data: BitArray,
+    data: BufferData,
     detached: Bool,
     max_byte_length: option.Option(Int),
     shared: Bool,
+    immutable: Bool,
   )
   /// Integer-Indexed (TypedArray) exotic object — ES2024 §10.4.5 / §23.2.
   /// [[ViewedArrayBuffer]] is `buffer` (an ArrayBufferObject slot),

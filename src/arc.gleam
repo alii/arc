@@ -226,16 +226,25 @@ fn read_file(path: String) -> Result(String, FileError)
 
 type FileError
 
-/// Run a JS source file and print the result (or error).
-fn run_file(path: String, finish: fn(state.State) -> state.State) -> Nil {
+/// Run a JS source file and print the result (or error). `prepare` is
+/// applied to each freshly booted State before its top level executes —
+/// the beam-driven (`--event-loop`) path installs the Atomics host
+/// capabilities here so a top-level blocking `Atomics.wait` works without
+/// any prior `Arc.*` call (`beam.run` only takes over after the script
+/// returns).
+fn run_file(
+  path: String,
+  prepare: fn(state.State) -> state.State,
+  finish: fn(state.State) -> state.State,
+) -> Nil {
   case read_file(path) {
     Error(err) ->
       io.println("Error reading " <> path <> ": " <> string.inspect(err))
     Ok(source) -> {
       let is_module = !string.ends_with(path, ".cjs")
       case is_module {
-        True -> run_module_file(path, source, finish)
-        False -> run_script_file(source, finish)
+        True -> run_module_file(path, source, prepare, finish)
+        False -> run_script_file(source, prepare, finish)
       }
     }
   }
@@ -245,11 +254,19 @@ fn run_file(path: String, finish: fn(state.State) -> state.State) -> Nil {
 fn run_module_file(
   path: String,
   source: String,
+  prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> Nil {
   let eng = engine.new() |> beam.install("Arc")
   case
-    engine.eval_module_with(eng, path, source, resolve_and_load_dep, finish)
+    engine.eval_module_prepared_with(
+      eng,
+      path,
+      source,
+      resolve_and_load_dep,
+      prepare,
+      finish,
+    )
   {
     Ok(_) -> Nil
     Error(err) -> io.println(engine.eval_error_message(err))
@@ -276,10 +293,11 @@ fn resolve_and_load_dep(
 /// Run a file as a script (only for .cjs files).
 fn run_script_file(
   source: String,
+  prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> Nil {
   let eng = engine.new() |> beam.install("Arc")
-  case engine.eval_with(eng, source, finish) {
+  case engine.eval_prepared_with(eng, source, prepare, finish) {
     Ok(#(ThrowCompletion(val, new_heap), _)) ->
       io.println("Uncaught " <> object.format_error(val, new_heap))
     Ok(_) -> Nil
@@ -304,8 +322,9 @@ pub fn main() -> Nil {
       Nil
     }
 
-    ["--event-loop", path, ..] -> run_file(path, beam.run)
-    [path, ..] -> run_file(path, event_loop.finish)
+    ["--event-loop", path, ..] ->
+      run_file(path, beam.install_atomics_capabilities, beam.run)
+    [path, ..] -> run_file(path, fn(s) { s }, event_loop.finish)
 
     [] -> {
       banner()

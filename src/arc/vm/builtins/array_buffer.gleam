@@ -1,9 +1,12 @@
 //// ES2024 §25.1 ArrayBuffer Objects + §25.2 SharedArrayBuffer Objects
 ////
 //// Both share one exotic kind — value.ArrayBufferObject — whose `shared`
-//// flag distinguishes them. [[ArrayBufferData]] is a BEAM binary (BitArray);
-//// [[ArrayBufferByteLength]] is derived via bit_array.byte_size. Detached
-//// buffers ([[ArrayBufferData]] = null) carry `detached: True` with `<<>>`
+//// flag distinguishes them. [[ArrayBufferData]] is a value.BufferData:
+//// BufBytes (an immutable BEAM binary) for plain ArrayBuffers, BufShared
+//// (an Erlang `atomics` array, genuinely shared across BEAM processes —
+//// see arc_sab_ffi.erl) for SharedArrayBuffers. [[ArrayBufferByteLength]]
+//// is derived via value.buffer_byte_size. Detached buffers
+//// ([[ArrayBufferData]] = null) carry `detached: True` with BufBytes(<<>>)
 //// data. Resizable/growable buffers carry `max_byte_length: Some(n)`.
 ////
 //// Spec algorithms follow tc39.es/ecma262 §25.1.3 (abstract operations) and
@@ -18,12 +21,13 @@ import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArrayBufferNativeFn, type JsValue, type Ref, ArrayBufferConstructor,
-  ArrayBufferGetByteLength, ArrayBufferGetDetached, ArrayBufferGetMaxByteLength,
-  ArrayBufferGetResizable, ArrayBufferGetSpecies, ArrayBufferIsView,
-  ArrayBufferNative, ArrayBufferObject, ArrayBufferResize, ArrayBufferSlice,
-  ArrayBufferTransfer, ArrayBufferTransferToFixedLength, DetachArrayBuffer262,
-  Dispatch, JsBool, JsNull, JsObject, JsUndefined, Named, ObjectSlot,
-  SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
+  ArrayBufferGetByteLength, ArrayBufferGetDetached, ArrayBufferGetImmutable,
+  ArrayBufferGetMaxByteLength, ArrayBufferGetResizable, ArrayBufferGetSpecies,
+  ArrayBufferIsView, ArrayBufferNative, ArrayBufferObject, ArrayBufferResize,
+  ArrayBufferSlice, ArrayBufferSliceToImmutable, ArrayBufferTransfer,
+  ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable,
+  DetachArrayBuffer262, Dispatch, JsBool, JsNull, JsObject, JsUndefined, Named,
+  ObjectSlot, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
   SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
   SharedArrayBufferGetSpecies, SharedArrayBufferGrow, SharedArrayBufferSlice,
 }
@@ -54,10 +58,16 @@ pub fn init(
     common.alloc_methods(h, function_proto, [
       #("resize", ArrayBufferNative(ArrayBufferResize), 1),
       #("slice", ArrayBufferNative(ArrayBufferSlice), 2),
+      #("sliceToImmutable", ArrayBufferNative(ArrayBufferSliceToImmutable), 2),
       #("transfer", ArrayBufferNative(ArrayBufferTransfer), 0),
       #(
         "transferToFixedLength",
         ArrayBufferNative(ArrayBufferTransferToFixedLength),
+        0,
+      ),
+      #(
+        "transferToImmutable",
+        ArrayBufferNative(ArrayBufferTransferToImmutable),
         0,
       ),
     ])
@@ -65,6 +75,7 @@ pub fn init(
     common.alloc_getters(h, function_proto, [
       #("byteLength", ArrayBufferNative(ArrayBufferGetByteLength)),
       #("detached", ArrayBufferNative(ArrayBufferGetDetached)),
+      #("immutable", ArrayBufferNative(ArrayBufferGetImmutable)),
       #("maxByteLength", ArrayBufferNative(ArrayBufferGetMaxByteLength)),
       #("resizable", ArrayBufferNative(ArrayBufferGetResizable)),
     ])
@@ -202,13 +213,18 @@ pub fn dispatch(
     ArrayBufferGetSpecies | SharedArrayBufferGetSpecies -> #(state, Ok(this))
     ArrayBufferGetByteLength -> ab_get_byte_length(this, state)
     ArrayBufferGetDetached -> ab_get_detached(this, state)
+    ArrayBufferGetImmutable -> ab_get_immutable(this, state)
     ArrayBufferGetMaxByteLength -> ab_get_max_byte_length(this, state)
     ArrayBufferGetResizable -> ab_get_resizable(this, state)
     ArrayBufferResize -> ab_resize(this, args, state)
     ArrayBufferSlice -> buffer_slice(this, args, state, shared: False)
-    ArrayBufferTransfer -> ab_transfer(this, args, state, preserve: True)
+    ArrayBufferSliceToImmutable -> slice_to_immutable(this, args, state)
+    ArrayBufferTransfer ->
+      ab_transfer(this, args, state, preserve: True, immutable: False)
     ArrayBufferTransferToFixedLength ->
-      ab_transfer(this, args, state, preserve: False)
+      ab_transfer(this, args, state, preserve: False, immutable: False)
+    ArrayBufferTransferToImmutable ->
+      ab_transfer(this, args, state, preserve: False, immutable: True)
     SharedArrayBufferGetByteLength -> sab_get_byte_length(this, state)
     SharedArrayBufferGetGrowable -> sab_get_growable(this, state)
     SharedArrayBufferGetMaxByteLength -> sab_get_max_byte_length(this, state)
@@ -295,14 +311,30 @@ fn allocate(
       case byte_length <= max_buffer_byte_length && max_ok {
         False -> state.range_error(state, "Array buffer allocation failed")
         True -> {
+          // §6.2.9.2 CreateByteDataBlock / CreateSharedByteDataBlock:
+          // non-shared buffers are an immutable BEAM binary; shared buffers
+          // live in an Erlang `atomics` array (zero-initialized). Growable
+          // SABs pre-allocate max_byte_length cells so the ref never needs
+          // reallocating (grow only bumps the length in the heap slot).
+          let data = case shared {
+            False -> value.BufBytes(zero_block(byte_length))
+            True -> {
+              let capacity = option.unwrap(max, byte_length)
+              value.BufShared(
+                ref: value.sab_new(capacity),
+                byte_length: byte_length,
+              )
+            }
+          }
           let #(heap, ref) =
             common.alloc_wrapper(
               state.heap,
               ArrayBufferObject(
-                data: zero_block(byte_length),
+                data:,
                 detached: False,
                 max_byte_length: max,
                 shared:,
+                immutable: False,
               ),
               proto,
             )
@@ -378,7 +410,7 @@ fn ab_get_byte_length(
 ) -> #(State, Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "byteLength")
   use buf, state <- require_unshared(buf, state, "byteLength")
-  #(state, Ok(value.from_int(bit_array.byte_size(buf.data))))
+  #(state, Ok(value.from_int(value.buffer_byte_size(buf.data))))
 }
 
 /// §25.1.6.3 get ArrayBuffer.prototype.detached
@@ -389,6 +421,19 @@ fn ab_get_detached(
   use buf, state <- require_buffer(this, state, "detached")
   use buf, state <- require_unshared(buf, state, "detached")
   #(state, Ok(JsBool(buf.detached)))
+}
+
+/// Immutable ArrayBuffer proposal: get ArrayBuffer.prototype.immutable
+///   1. RequireInternalSlot(O, [[ArrayBufferData]]).
+///   2. If IsSharedArrayBuffer(O) is true, throw a TypeError exception.
+///   3. Return IsImmutableBuffer(O).
+fn ab_get_immutable(
+  this: JsValue,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use buf, state <- require_buffer(this, state, "immutable")
+  use buf, state <- require_unshared(buf, state, "immutable")
+  #(state, Ok(JsBool(buf.immutable)))
 }
 
 /// §25.1.6.4 get ArrayBuffer.prototype.maxByteLength
@@ -403,7 +448,7 @@ fn ab_get_max_byte_length(
   let result = case buf.detached, buf.max {
     True, _ -> 0
     False, Some(max) -> max
-    False, None -> bit_array.byte_size(buf.data)
+    False, None -> value.buffer_byte_size(buf.data)
   }
   #(state, Ok(value.from_int(result)))
 }
@@ -466,8 +511,10 @@ fn ab_resize(
                 "ArrayBuffer.prototype.resize: new length exceeds maxByteLength",
               )
             False -> {
-              // Step 6
-              let data = resize_data(buf.data, new_len)
+              // Step 6 — resize only exists on non-shared buffers, which
+              // always carry BufBytes storage.
+              let data =
+                value.BufBytes(resize_data(value.buffer_bits(buf.data), new_len))
               let heap =
                 heap.update_kind(
                   state.heap,
@@ -500,7 +547,7 @@ fn buffer_slice(
   // Step 4 (AB only): detached → TypeError
   use buf, state <- require_not_detached(buf, state, "slice")
   // Step 5
-  let len = bit_array.byte_size(buf.data)
+  let len = value.buffer_byte_size(buf.data)
   // Steps 6-7: relativeStart
   use first, state <- try_relative_index(
     state,
@@ -533,6 +580,9 @@ fn buffer_slice(
   use new_buf, state <- require_buffer(new_val, state, "slice")
   use new_buf, state <- require_family(new_buf, state, "slice", shared)
   use new_buf, state <- require_not_detached(new_buf, state, "slice")
+  // Immutable ArrayBuffer proposal: a species constructor returning an
+  // immutable buffer is a TypeError — slice must write into the result.
+  use new_buf, state <- require_not_immutable(new_buf, state, "slice")
   // Step 16: SameValue(new, O) → TypeError
   case new_buf.ref == buf.ref {
     True ->
@@ -542,7 +592,7 @@ fn buffer_slice(
       )
     False ->
       // Step 17
-      case bit_array.byte_size(new_buf.data) < new_len {
+      case value.buffer_byte_size(new_buf.data) < new_len {
         True ->
           state.type_error(
             state,
@@ -552,16 +602,26 @@ fn buffer_slice(
           // Steps 18-19: species ctor may have detached O — re-read.
           use buf, state <- require_buffer(JsObject(buf.ref), state, "slice")
           use buf, state <- require_not_detached(buf, state, "slice")
-          let current_len = bit_array.byte_size(buf.data)
+          let current_len = value.buffer_byte_size(buf.data)
           // Copy min(newLen, currentLen - first) bytes from offset `first`.
           let heap = case first < current_len {
             True -> {
               let count = int.min(new_len, current_len - first)
-              let copied = copy_into(buf.data, first, count, new_buf.data)
+              let copied =
+                copy_into(
+                  value.buffer_bits(buf.data),
+                  first,
+                  count,
+                  value.buffer_bits(new_buf.data),
+                )
               heap.update_kind(
                 state.heap,
                 new_buf.ref,
-                kind_with(new_buf, copied, detached: False),
+                kind_with(
+                  new_buf,
+                  value.buffer_store_bits(new_buf.data, copied),
+                  detached: False,
+                ),
               )
             }
             False -> state.heap
@@ -569,6 +629,86 @@ fn buffer_slice(
           #(State(..state, heap:), Ok(new_val))
         }
       }
+  }
+}
+
+// ============================================================================
+// Immutable ArrayBuffer proposal: ArrayBuffer.prototype.sliceToImmutable
+// ============================================================================
+
+/// ArrayBuffer.prototype.sliceToImmutable ( start, end )
+///
+///   1. Let O be the this value.
+///   2. Perform ? RequireInternalSlot(O, [[ArrayBufferData]]).
+///   3. If IsSharedArrayBuffer(O) is true, throw a TypeError exception.
+///   4. If IsDetachedBuffer(O) is true, throw a TypeError exception.
+///   5. Let len be O.[[ArrayBufferByteLength]].
+///   6. Let bounds be ? ResolveBounds(len, start, end)  (may run user code).
+///   9. Let newLen be max(final - first, 0).
+///  11. If IsDetachedBuffer(O) is true, throw a TypeError exception
+///      (the coercions may have detached O).
+///  14. If currentLen < final, throw a RangeError exception (O shrank).
+///  15. Return AllocateImmutableArrayBuffer(%ArrayBuffer%, newLen, copy).
+///
+/// No species lookup — the result is always a plain immutable %ArrayBuffer%.
+fn slice_to_immutable(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  // Steps 2-4
+  use buf, state <- require_buffer(this, state, "sliceToImmutable")
+  use buf, state <- require_unshared(buf, state, "sliceToImmutable")
+  use buf, state <- require_not_detached(buf, state, "sliceToImmutable")
+  // Step 5
+  let len = value.buffer_byte_size(buf.data)
+  // Steps 6-8: ResolveBounds — ToIntegerOrInfinity may run user code.
+  use first, state <- try_relative_index(
+    state,
+    helpers.first_arg_or_undefined(args),
+    len,
+    0,
+  )
+  use final, state <- try_relative_index(
+    state,
+    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+    len,
+    len,
+  )
+  // Step 9
+  let new_len = int.max(final - first, 0)
+  // Steps 11-14: re-read O — the coercions may have detached or resized it.
+  use buf, state <- require_buffer(JsObject(buf.ref), state, "sliceToImmutable")
+  use buf, state <- require_not_detached(buf, state, "sliceToImmutable")
+  let current_len = value.buffer_byte_size(buf.data)
+  case current_len < final {
+    True ->
+      state.range_error(
+        state,
+        "ArrayBuffer.prototype.sliceToImmutable: source was resized below the requested range",
+      )
+    False -> {
+      // Step 15: AllocateImmutableArrayBuffer — copy [first, first+newLen).
+      let data = case
+        bit_array.slice(value.buffer_bits(buf.data), first, new_len)
+      {
+        Ok(part) -> part
+        Error(Nil) -> zero_block(new_len)
+      }
+      let #(heap, new_ref) =
+        common.alloc_wrapper(
+          state.heap,
+          ArrayBufferObject(
+            data: value.BufBytes(data),
+            detached: False,
+            max_byte_length: None,
+            shared: False,
+            immutable: True,
+          ),
+          state.builtins.array_buffer.prototype,
+        )
+      #(State(..state, heap:), Ok(JsObject(new_ref)))
+    }
   }
 }
 
@@ -591,6 +731,7 @@ fn ab_transfer(
   args: List(JsValue),
   state: State,
   preserve preserve: Bool,
+  immutable to_immutable: Bool,
 ) -> #(State, Result(JsValue, JsValue)) {
   // Steps 1-2
   use buf, state <- require_buffer(this, state, "transfer")
@@ -602,6 +743,10 @@ fn ab_transfer(
   use buf, state <- require_buffer(JsObject(buf.ref), state, "transfer")
   // Step 4
   use buf, state <- require_not_detached(buf, state, "transfer")
+  // Step 6 (immutable-arraybuffer proposal): IsImmutableBuffer(O) →
+  // TypeError. Immutable buffers cannot be detached, so no transfer flavour
+  // (transfer / transferToFixedLength / transferToImmutable) accepts one.
+  use buf, state <- require_not_immutable(buf, state, "transfer")
   // Step 5
   let new_max = case preserve {
     True -> buf.max
@@ -616,9 +761,10 @@ fn ab_transfer(
     False -> state.range_error(state, "Array buffer allocation failed")
     True -> {
       // Step 8: copy then zero-extend
-      let old_len = bit_array.byte_size(buf.data)
+      let old_bits = value.buffer_bits(buf.data)
+      let old_len = bit_array.byte_size(old_bits)
       let copy_len = int.min(new_len, old_len)
-      let data = case bit_array.slice(buf.data, 0, copy_len) {
+      let data = case bit_array.slice(old_bits, 0, copy_len) {
         Ok(part) -> bit_array.append(part, zero_block(new_len - copy_len))
         Error(Nil) -> zero_block(new_len)
       }
@@ -626,17 +772,22 @@ fn ab_transfer(
         common.alloc_wrapper(
           state.heap,
           ArrayBufferObject(
-            data:,
+            data: value.BufBytes(data),
             detached: False,
             max_byte_length: new_max,
             shared: False,
+            immutable: to_immutable,
           ),
           state.builtins.array_buffer.prototype,
         )
       // Step 9: DetachArrayBuffer(O) — data → null, byteLength → 0.
       // [[ArrayBufferMaxByteLength]] survives (resizable getter stays true).
       let heap =
-        heap.update_kind(heap, buf.ref, kind_with(buf, <<>>, detached: True))
+        heap.update_kind(
+          heap,
+          buf.ref,
+          kind_with(buf, value.BufBytes(<<>>), detached: True),
+        )
       #(State(..state, heap:), Ok(JsObject(new_ref)))
     }
   }
@@ -650,7 +801,7 @@ fn try_transfer_length(
   cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
   case len_arg {
-    JsUndefined -> cont(bit_array.byte_size(buf.data), state)
+    JsUndefined -> cont(value.buffer_byte_size(buf.data), state)
     _ -> try_to_index(state, len_arg, cont)
   }
 }
@@ -666,7 +817,7 @@ fn sab_get_byte_length(
 ) -> #(State, Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "byteLength")
   use buf, state <- require_shared(buf, state, "byteLength")
-  #(state, Ok(value.from_int(bit_array.byte_size(buf.data))))
+  #(state, Ok(value.from_int(value.buffer_byte_size(buf.data))))
 }
 
 /// §25.2.5.4 get SharedArrayBuffer.prototype.growable
@@ -688,7 +839,7 @@ fn sab_get_max_byte_length(
   use buf, state <- require_shared(buf, state, "maxByteLength")
   let result = case buf.max {
     Some(max) -> max
-    None -> bit_array.byte_size(buf.data)
+    None -> value.buffer_byte_size(buf.data)
   }
   #(state, Ok(value.from_int(result)))
 }
@@ -720,7 +871,7 @@ fn sab_grow(
       )
       // ToIndex may run user code — re-read.
       use buf, state <- require_buffer(JsObject(buf.ref), state, "grow")
-      let current = bit_array.byte_size(buf.data)
+      let current = value.buffer_byte_size(buf.data)
       case new_len < current || new_len > max {
         True ->
           state.range_error(
@@ -728,7 +879,17 @@ fn sab_grow(
             "SharedArrayBuffer.prototype.grow: invalid length",
           )
         False -> {
-          let data = bit_array.append(buf.data, zero_block(new_len - current))
+          // Shared storage pre-allocated max_byte_length cells (already
+          // zero-filled), so growth only bumps the live byte length.
+          let data = case buf.data {
+            value.BufShared(ref:, byte_length: _) ->
+              value.BufShared(ref:, byte_length: new_len)
+            value.BufBytes(bytes) ->
+              value.BufBytes(bit_array.append(
+                bytes,
+                zero_block(new_len - current),
+              ))
+          }
           let heap =
             heap.update_kind(
               state.heap,
@@ -755,8 +916,15 @@ fn detach_262(
   let arg = helpers.first_arg_or_undefined(args)
   use buf, state <- require_buffer(arg, state, "detachArrayBuffer")
   use buf, state <- require_unshared(buf, state, "detachArrayBuffer")
+  // Immutable ArrayBuffer proposal: DetachArrayBuffer throws on an
+  // immutable buffer — they can never be detached.
+  use buf, state <- require_not_immutable(buf, state, "detachArrayBuffer")
   let heap =
-    heap.update_kind(state.heap, buf.ref, kind_with(buf, <<>>, detached: True))
+    heap.update_kind(
+      state.heap,
+      buf.ref,
+      kind_with(buf, value.BufBytes(<<>>), detached: True),
+    )
   #(State(..state, heap:), Ok(JsUndefined))
 }
 
@@ -766,7 +934,14 @@ fn detach_262(
 
 /// Internal view of an ArrayBufferObject heap slot.
 type Buf {
-  Buf(ref: Ref, data: BitArray, detached: Bool, max: Option(Int), shared: Bool)
+  Buf(
+    ref: Ref,
+    data: value.BufferData,
+    detached: Bool,
+    max: Option(Int),
+    shared: Bool,
+    immutable: Bool,
+  )
 }
 
 fn ctor_name(shared: Bool) -> String {
@@ -779,7 +954,7 @@ fn ctor_name(shared: Bool) -> String {
 /// Rebuild the ExoticKind from a Buf with new data (and detached flag).
 fn kind_with(
   buf: Buf,
-  data: BitArray,
+  data: value.BufferData,
   detached detached: Bool,
 ) -> state.ExoticKind {
   ArrayBufferObject(
@@ -787,6 +962,7 @@ fn kind_with(
     detached:,
     max_byte_length: buf.max,
     shared: buf.shared,
+    immutable: buf.immutable,
   )
 }
 
@@ -802,11 +978,24 @@ fn require_buffer(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: ArrayBufferObject(data:, detached:, max_byte_length:, shared:),
+          kind: ArrayBufferObject(
+            data:,
+            detached:,
+            max_byte_length:,
+            shared:,
+            immutable:,
+          ),
           ..,
         )) ->
           cont(
-            Buf(ref:, data:, detached:, max: max_byte_length, shared:),
+            Buf(
+              ref:,
+              data:,
+              detached:,
+              max: max_byte_length,
+              shared:,
+              immutable:,
+            ),
             state,
           )
         _ -> incompatible(state, method)
@@ -871,6 +1060,26 @@ fn require_not_detached(
         "ArrayBuffer.prototype."
           <> method
           <> " called on a detached ArrayBuffer",
+      )
+    False -> cont(buf, state)
+  }
+}
+
+/// Immutable ArrayBuffer proposal: IsImmutableBuffer(O) must be false,
+/// else TypeError (ArrayBufferCopyAndDetach step 6, DetachArrayBuffer).
+fn require_not_immutable(
+  buf: Buf,
+  state: State,
+  method: String,
+  cont: fn(Buf, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case buf.immutable {
+    True ->
+      state.type_error(
+        state,
+        "ArrayBuffer.prototype."
+          <> method
+          <> " called on an immutable ArrayBuffer",
       )
     False -> cont(buf, state)
   }

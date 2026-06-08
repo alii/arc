@@ -273,6 +273,11 @@ fn set_view_value(
   element: ViewElementType,
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
+  // SetViewValue step 3 (immutable-arraybuffer proposal): an immutable
+  // viewed buffer is a TypeError BEFORE the ToIndex/ToNumber coercions run
+  // any user code (observable; test262 checks it).
+  use view0, state <- require_data_view(this, state)
+  use Nil, state <- require_mutable_buffer(state, view0.buffer)
   use view, get_index, state <- view_and_index(this, args, state)
   // Step 3: numberValue = ToBigInt(value) / ToNumber(value) — spec-mandated
   // BEFORE the bounds check, so it cannot fold into checked_view_bytes.
@@ -295,8 +300,16 @@ fn set_view_value(
       let heap =
         heap.update(state.heap, view.buffer, fn(slot) {
           case slot {
-            ObjectSlot(kind: ArrayBufferObject(..) as k, ..) ->
-              ObjectSlot(..slot, kind: ArrayBufferObject(..k, data: new_data))
+            ObjectSlot(kind: ArrayBufferObject(data: old, ..) as k, ..) ->
+              // Shared storage: persist only the element's bytes — other
+              // regions may be concurrently written by other agents.
+              ObjectSlot(
+                ..slot,
+                kind: ArrayBufferObject(
+                  ..k,
+                  data: value.buffer_store_region(old, new_data, pos, elem_size),
+                ),
+              )
             other -> other
           }
         })
@@ -341,6 +354,23 @@ fn require_data_view(
         state,
         "Method called on incompatible receiver: expected a DataView",
       )
+  }
+}
+
+/// Immutable ArrayBuffer proposal — SetViewValue step 3: writes through a
+/// DataView over an immutable buffer throw TypeError.
+fn require_mutable_buffer(
+  state: State,
+  buffer: Ref,
+  cont: fn(Nil, State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case heap.read(state.heap, buffer) {
+    Some(ObjectSlot(kind: ArrayBufferObject(immutable: True, ..), ..)) ->
+      state.type_error(
+        state,
+        "Cannot modify a DataView backed by an immutable ArrayBuffer",
+      )
+    _ -> cont(Nil, state)
   }
 }
 
@@ -413,7 +443,7 @@ fn live_buffer_info(
           )
         False ->
           cont(
-            #(bit_array.byte_size(data), option.is_some(max_byte_length)),
+            #(value.buffer_byte_size(data), option.is_some(max_byte_length)),
             state,
           )
       }
@@ -429,7 +459,7 @@ fn buffer_data(
 ) -> #(State, Result(JsValue, JsValue)) {
   case heap.read(state.heap, buf_ref) {
     Some(ObjectSlot(kind: ArrayBufferObject(data:, detached: False, ..), ..)) ->
-      cont(data, state)
+      cont(value.buffer_bits(data), state)
     _ ->
       state.type_error(
         state,

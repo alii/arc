@@ -21,6 +21,7 @@
 
 import arc/engine.{type Engine}
 import arc/host
+import arc/vm/builtins/atomics as builtins_atomics
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/console
 import arc/vm/builtins/process_objects
@@ -48,7 +49,7 @@ import gleam/set
 // -- Mailbox event protocol --------------------------------------------------
 
 /// Envelope for every message this loop's selective receive accepts. The
-/// Erlang side (`arc_vm_ffi.erl`) constructs these as bare tagged tuples,
+/// Erlang side (`arc_beam_ffi.erl`) constructs these as bare tagged tuples,
 /// so the variant names here must stay snake_case-compatible.
 pub type MailboxEvent {
   /// `setTimeout` / external worker completed: settle the suspended promise.
@@ -62,6 +63,15 @@ pub type MailboxEvent {
   /// A subject message matched by selective receive while a `receiveAsync`
   /// is pending on that tag.
   SubjectMessage(tag: value.ErlangRef, payload: PortableMessage)
+  /// A cross-process Atomics.notify claimed one of this process's waiters
+  /// and delivered its wake here (`{arc_notify, Ref, Key, ByteIndex}` in
+  /// the raw mailbox, retagged by the FFI receive). Injected into core via
+  /// `event_loop.inject_notify`, which settles this agent's first pending
+  /// waitAsync waiter at that (key, byte index). Wakes for cancelled sync
+  /// entries never reach this loop: core's "not-equal" cancel arm flushes
+  /// a claimed entry's in-flight wake through a zero-timeout
+  /// `host_sync_wait` call before returning (see `atomics_sync_wait`).
+  AtomicsNotify(key: state.WaiterKey, byte_index: Int)
 }
 
 // -- FFI ---------------------------------------------------------------------
@@ -72,45 +82,45 @@ fn erlang_spawn(fun: fn() -> Nil) -> value.ErlangPid
 @external(erlang, "erlang", "self")
 fn ffi_self() -> value.ErlangPid
 
-@external(erlang, "arc_vm_ffi", "sleep")
+@external(erlang, "arc_beam_ffi", "sleep")
 fn ffi_sleep(ms: Int) -> Nil
 
-@external(erlang, "arc_vm_ffi", "send_after")
+@external(erlang, "arc_beam_ffi", "send_after")
 fn ffi_send_after(
   ms: Int,
   pid: value.ErlangPid,
   msg: MailboxEvent,
 ) -> value.ErlangTimerRef
 
-@external(erlang, "arc_vm_ffi", "cancel_timer")
+@external(erlang, "arc_beam_ffi", "cancel_timer")
 fn ffi_cancel_timer(tref: value.ErlangTimerRef) -> Bool
 
 @external(erlang, "erlang", "make_ref")
 fn ffi_make_ref() -> value.ErlangRef
 
-@external(erlang, "arc_vm_ffi", "select_message")
+@external(erlang, "arc_beam_ffi", "select_message")
 fn ffi_select(
   ref_map: dict.Dict(value.ErlangRef, Bool),
 ) -> #(value.ErlangRef, PortableMessage)
 
-@external(erlang, "arc_vm_ffi", "select_message_timeout")
+@external(erlang, "arc_beam_ffi", "select_message_timeout")
 fn ffi_select_timeout(
   ref_map: dict.Dict(value.ErlangRef, Bool),
   timeout: Int,
 ) -> Result(#(value.ErlangRef, PortableMessage), Nil)
 
-@external(erlang, "arc_vm_ffi", "receive_settle_only")
+@external(erlang, "arc_beam_ffi", "receive_settle_only")
 fn ffi_receive_settle_only() -> MailboxEvent
 
-@external(erlang, "arc_vm_ffi", "receive_settle_or_subject")
+@external(erlang, "arc_beam_ffi", "receive_settle_or_subject")
 fn ffi_receive_settle_or_subject(
   ref_map: dict.Dict(value.ErlangRef, List(Ref)),
 ) -> MailboxEvent
 
-@external(erlang, "arc_vm_ffi", "receive_settle_only_timeout")
+@external(erlang, "arc_beam_ffi", "receive_settle_only_timeout")
 fn ffi_receive_settle_only_timeout(timeout: Int) -> Result(MailboxEvent, Nil)
 
-@external(erlang, "arc_vm_ffi", "receive_settle_or_subject_timeout")
+@external(erlang, "arc_beam_ffi", "receive_settle_or_subject_timeout")
 fn ffi_receive_settle_or_subject_timeout(
   ref_map: dict.Dict(value.ErlangRef, List(Ref)),
   timeout: Int,
@@ -131,30 +141,46 @@ fn receivers_put(r: Receivers) -> Nil
 
 // -- Macrotask loop ----------------------------------------------------------
 
-/// The BEAM-mailbox macrotask loop. Drain microtasks; if any `host.suspend`
-/// promises are still outstanding, block on the Erlang mailbox for the next
-/// `MailboxEvent`, `host.resume` the matching promise, and repeat.
+/// The BEAM-mailbox macrotask loop. Installs this module's Atomics host
+/// capabilities (blocking sync wait + wake delivery — contract clause 5,
+/// arc/host.gleam; a no-op when the embedder already installed them at
+/// boot, which beam-driven runs must do — see `namespace`), drains
+/// microtasks, and — while `host.suspend` promises are outstanding or core
+/// deadlines (host timers, waitAsync timeouts) are pending — blocks on the
+/// Erlang mailbox for the next `MailboxEvent`, settles it, and repeats.
+/// Cross-process Atomics wakes (`arc_notify`) are injected into core via
+/// `event_loop.inject_notify`.
 ///
-/// Pass to `engine.eval_with` / `entry.run_with` as the `finish` driver.
+/// Pass to `engine.eval_prepared_with` / `entry.run_prepared` as the
+/// `finish` driver, with `install_atomics_capabilities` as `prepare`.
 pub fn run(s: State) -> State {
+  run_loop(install_atomics_capabilities(s))
+}
+
+fn run_loop(s: State) -> State {
   let s = event_loop.drain_jobs_yielding(s)
-  case state.outstanding(s) {
-    0 -> s
-    _ -> {
+  let deadline = event_loop.next_deadline_timeout(s)
+  case state.outstanding(s) > 0, deadline {
+    // Nothing the mailbox could wake: done. (Pending deadline-free
+    // waitAsync waiters alone don't hold the loop open — matching the
+    // pre-capability dry-queue semantics.)
+    False, None -> s
+    _, _ -> {
       let receivers = receivers_get()
       let #(tag_map, _) = receivers
       // With host-timer / Atomics.waitAsync deadlines pending,
       // drain_jobs_yielding returns instead of sleeping (it would starve
       // the mailbox); bound the receive by the earliest deadline so
-      // mailbox messages and host timers interleave. A timeout just means
-      // a deadline is due — loop so the drain fires it.
-      case event_loop.next_deadline_timeout(s) {
+      // mailbox messages, host timers, and waitAsync deadlines interleave.
+      // A receive timeout just means a deadline is due — loop so the
+      // drain fires it.
+      case deadline {
         None -> {
           let event = case dict.is_empty(tag_map) {
             True -> ffi_receive_settle_only()
             False -> ffi_receive_settle_or_subject(tag_map)
           }
-          run(handle_event(s, event, receivers))
+          run_loop(handle_event(s, event, receivers))
         }
         Some(timeout) -> {
           let event = case dict.is_empty(tag_map) {
@@ -162,8 +188,8 @@ pub fn run(s: State) -> State {
             False -> ffi_receive_settle_or_subject_timeout(tag_map, timeout)
           }
           case event {
-            Ok(event) -> run(handle_event(s, event, receivers))
-            Error(Nil) -> run(s)
+            Ok(event) -> run_loop(handle_event(s, event, receivers))
+            Error(Nil) -> run_loop(s)
           }
         }
       }
@@ -220,6 +246,124 @@ fn handle_event(
           host.resume(State(..state, heap:), data_ref, Ok(val))
         }
       }
+    AtomicsNotify(key:, byte_index:) ->
+      event_loop.inject_notify(state, key, byte_index)
+  }
+}
+
+// -- Atomics host capabilities (the BEAM-mailbox implementations) -------------
+//
+// The embedder side of the host capability contract in arc/host.gleam:
+// clause 1 (blocking sync wait) and clause 2 (wake delivery) as
+// State-installed capability functions, clause 5 (installation) below.
+// Core registers waiterlist entries and claims waiters as pure ETS data
+// (arc_waiter_ffi); every receive of — and every send into — the
+// `{arc_notify, Ref, Key, ByteIndex}` wake protocol happens HERE, via
+// arc_beam_ffi.erl.
+
+/// Clause 1's blocking receive, relocated from the old in-core
+/// arc_waiter_ffi:await_notify: selective receive for the entry's wake,
+/// with the notify-vs-timeout race resolved by ets:take of our own entry
+/// (negative timeout = infinity). Returns the JS "ok" / "timed-out".
+@external(erlang, "arc_beam_ffi", "await_notify")
+fn ffi_await_notify(handle: state.WaiterHandle, timeout_ms: Int) -> String
+
+/// BEAM implementation of the blocking-wait capability
+/// (`State.host_sync_wait`, contract clause 1): suspend this process in a
+/// selective receive until the registered waiterlist entry is woken or
+/// the timeout elapses. `timeout_ms: None` = wait forever (the FFI clamps
+/// to the BEAM receive ceiling).
+///
+/// A `Some(0)` timeout doubles as contract clause 4's cancel flush: core's
+/// sync_block "not-equal" arm calls this with a zero timeout when its
+/// data-only cancel found the entry already claimed by a notifier — the
+/// FFI's claimed path (ets:take of our own entry finds nothing) then
+/// performs the bounded flush receive, consuming the in-flight wake so it
+/// cannot pollute a later receive or spuriously settle a future waitAsync
+/// waiter at the same (key, byte index).
+pub fn atomics_sync_wait(req: state.WaitRequest) -> state.WaitOutcome {
+  let state.WaitRequest(handle:, timeout_ms:, key: _, byte_index: _) = req
+  case ffi_await_notify(handle, option.unwrap(timeout_ms, -1)) {
+    "timed-out" -> state.WaitTimedOut
+    _ -> state.WaitOk
+  }
+}
+
+/// BEAM implementation of the wake-delivery capability
+/// (`State.host_deliver_wake`, contract clause 2): send
+/// `{arc_notify, Ref, Key, ByteIndex}` to each remote waiter claimed by
+/// Atomics.notify's waiterlist take. Claiming already counted them as
+/// woken; this delivery is what a blocked sync wait (or a peer's embedder
+/// loop, for waitAsync) actually receives.
+@external(erlang, "arc_beam_ffi", "deliver_wakes")
+pub fn atomics_deliver_wake(claimed: List(state.ClaimedWaiter)) -> Nil
+
+/// Install the BEAM-mailbox Atomics capabilities on a State — both
+/// together, per contract clause 5 (a host that can block but not deliver
+/// wakes, or vice versa, deadlocks its peers). `run` installs them at loop
+/// entry and `spawn` children at boot; embedders that stand up their own
+/// State in a BEAM process and drive the event loop directly (the test262
+/// harness workers) call this during setup. Leaves `State.can_block`
+/// untouched — that is per-agent spec policy, not capability presence.
+pub fn install_atomics_capabilities(s: State) -> State {
+  host.install_atomics_capabilities(
+    s,
+    sync_wait: atomics_sync_wait,
+    deliver_wake: atomics_deliver_wake,
+  )
+}
+
+// -- Atomics wake settling (reusable embedder helper) -------------------------
+//
+// Contract clause 4 (arc/host): the bounded dry-queue receive for
+// arc_notify messages is embedder FFI, not core FFI.
+@external(erlang, "arc_beam_ffi", "wait_for_notify")
+fn ffi_wait_for_notify(ms: Int) -> Option(#(state.WaiterKey, Int))
+
+// Contract clause 3 of the Atomics host-capability contract (arc/host):
+// cross-process Atomics.notify wakes arrive as `{arc_notify, Ref, Key,
+// ByteIndex}` messages in the EMBEDDER's mailbox, never in core. These two
+// helpers are the canonical 'bounded mailbox wait, settle wakes, re-drain'
+// loop. They live here — not in event_loop — because they receive; the
+// test262 harness (which drives event_loop directly instead of beam.run)
+// calls the same helpers from its per-test worker process.
+
+/// One bounded wait-settle-drain step: block at most `timeout_ms` for a
+/// cross-process `arc_notify` message; if one arrives, settle this agent's
+/// first matching waitAsync waiter with "ok" and re-drain microtasks.
+/// Returns the updated state and `True` if a wake was consumed (`False` =
+/// the timeout elapsed, i.e. a deadline is due — the caller's next drain
+/// fires it). Bound `timeout_ms` with `event_loop.next_deadline_timeout`
+/// so waitAsync timeouts and host timers still fire on time.
+pub fn wait_settle_step(s: State, timeout_ms: Int) -> #(State, Bool) {
+  case ffi_wait_for_notify(timeout_ms) {
+    Some(#(key, byte_index)) -> {
+      let s = builtins_atomics.settle_notified_waiter(s, key, byte_index)
+      #(event_loop.drain_jobs_yielding(s), True)
+    }
+    None -> #(s, False)
+  }
+}
+
+/// Drive pending Atomics.waitAsync waiters to settlement: drain, then loop
+/// `wait_settle_step` bounded by the earliest pending deadline until no
+/// settleable deadline remains. Mirrors event_loop.drain_jobs' dry-queue
+/// semantics: when only deadline-free (infinite) waiters remain and no
+/// wake arrives, the loop returns — a mailbox loop cannot distinguish a
+/// never-notified infinite waiter from quiescence, and parking forever
+/// here would hang the embedder.
+pub fn settle_pending_wakes(s: State) -> State {
+  let s = event_loop.drain_jobs_yielding(s)
+  case s.atomics_waiters {
+    [] -> s
+    _ ->
+      case event_loop.next_deadline_timeout(s) {
+        None -> s
+        Some(timeout) -> {
+          let #(s, _woke) = wait_settle_step(s, timeout)
+          settle_pending_wakes(s)
+        }
+      }
   }
 }
 
@@ -248,18 +392,45 @@ pub fn install_globals(
 
 /// Method specs for `engine.define_namespace`. Exposed so embedders can
 /// concat their own functions onto the same namespace.
+///
+/// Every method ensures the Atomics host capabilities are installed on the
+/// State it runs against (clause 5 at `install` level): `run` only takes
+/// over AFTER the top-level script returns, but a script can hit a
+/// blocking `Atomics.wait` or a cross-process `Atomics.notify` mid-script.
+/// Any CROSS-PROCESS scenario necessarily goes through one of these host
+/// functions first (`spawn` is the only way to get a second process), so
+/// those are covered — but a single-process top-level sync `Atomics.wait`
+/// (e.g. a timed wait used as a sleep) calls no `Arc.*` function and is
+/// NOT: beam-driven runs must install the capabilities at boot, before
+/// the top-level script executes, by passing `install_atomics_capabilities`
+/// as the eval `prepare` hook (`engine.eval_prepared_with` /
+/// `entry.run_prepared`; arc's `--event-loop` runner and the test262
+/// harness both do this). This wrapper remains as defense in depth for
+/// embedders that compose `namespace()` without a prepared boot.
 pub fn namespace() -> List(#(String, Int, HostFn)) {
   [
-    #("spawn", 1, spawn),
-    #("self", 0, self),
-    #("sleep", 1, sleep),
-    #("subject", 0, subject),
-    #("select", 0, select),
-    #("peek", 1, peek),
-    #("setTimeout", 2, set_timeout),
-    #("clearTimeout", 1, clear_timeout),
-    #("log", 1, log),
+    #("spawn", 1, with_atomics_capabilities(spawn)),
+    #("self", 0, with_atomics_capabilities(self)),
+    #("sleep", 1, with_atomics_capabilities(sleep)),
+    #("subject", 0, with_atomics_capabilities(subject)),
+    #("select", 0, with_atomics_capabilities(select)),
+    #("peek", 1, with_atomics_capabilities(peek)),
+    #("setTimeout", 2, with_atomics_capabilities(set_timeout)),
+    #("clearTimeout", 1, with_atomics_capabilities(clear_timeout)),
+    #("log", 1, with_atomics_capabilities(log)),
   ]
+}
+
+/// Wrap a HostFn so the BEAM Atomics capabilities are present on its State
+/// (no-op when already installed — one Option check on the hot path).
+fn with_atomics_capabilities(f: HostFn) -> HostFn {
+  fn(args, this, s: State) {
+    let s = case s.host_sync_wait {
+      Some(_) -> s
+      None -> install_atomics_capabilities(s)
+    }
+    f(args, this, s)
+  }
 }
 
 // -- spawn -------------------------------------------------------------------
@@ -344,6 +515,9 @@ fn make_spawner(
         list.repeat(JsUndefined, remaining),
       ])
       |> tuple_array.from_list
+    // Atomics capabilities go in BEFORE the script runs — a child may hit
+    // a blocking Atomics.wait at its top level, not just in `run`'s
+    // macrotask phase.
     let child =
       interpreter.new_state(
         template,
@@ -355,6 +529,7 @@ fn make_spawner(
         symbol_descriptions,
         symbol_registry,
       )
+      |> install_atomics_capabilities
     case interpreter.execute_inner(child) {
       Ok(#(_, final)) -> {
         let _ = run(final)

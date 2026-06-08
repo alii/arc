@@ -28,6 +28,7 @@ import arc/vm/value.{
 }
 import gleam/int
 import gleam/list
+import gleam/option
 
 // -- Validators --------------------------------------------------------------
 
@@ -181,6 +182,141 @@ pub fn resume(
     Error(reason) -> builtins_promise.reject_promise(s, ticket, reason)
   }
   state.State(..s, outstanding: s.outstanding - 1)
+}
+
+// -- Atomics host capabilities -----------------------------------------------
+//
+// The blocking-wait / wake-delivery contract for Atomics.wait, waitAsync
+// and notify. Same inversion of control as suspend/resume above: core owns
+// the data (the ETS waiterlist registry, the SAB cells, State's FIFO of
+// waitAsync waiters), the EMBEDDER owns every mailbox interaction. Core
+// never executes a `receive` and never sends a wake message; instead it
+// calls capability functions the embedder installed on State.
+//
+// The concrete types live in arc/vm/state (State's fields reference them);
+// they are re-exported here as aliases so embedders can build against
+// arc/host alone. Mirrors V8's split between the engine and the
+// v8::Platform/d8 layer: d8 implements the actual futex park/unpark, the
+// engine only asks for it.
+//
+// THE CONTRACT (five clauses; the numbered units of the Atomics refactor
+// implement against exactly these):
+//
+// 1. Sync wait (Atomics.wait, DoWait steps 11-27). Core registers the
+//    waiterlist entry (data-only ETS insert via arc_waiter_ffi), re-reads
+//    the cell ("not-equal" short-circuits, cancelling the entry), then
+//    calls `State.host_sync_wait` with a `WaitRequest`. The capability
+//    blocks IN THE EMBEDDER until notified or timed out and returns
+//    `WaitOk` / `WaitTimedOut` (JS "ok" / "timed-out"). The CanBlock
+//    TypeError check (DoWait step 10) stays first and unchanged; a missing
+//    capability is treated identically to `can_block == False`.
+//    The notify-vs-timeout race is resolved by the embedder exactly as the
+//    old arc_waiter_ffi:await_notify did: on timeout, ets:take your own
+//    entry — got it = nobody claimed you = TimedOut; gone = a notifier
+//    claimed you and its message is in flight = bounded flush-receive,
+//    then Ok.
+//
+// 2. Wake delivery (Atomics.notify). Core's waiterlist take
+//    (arc_waiter_ffi:take_waiters) atomically CLAIMS up to `count` waiters
+//    FIFO and RETURNS the claimed remote waiters instead of messaging
+//    them. Claiming is the spec's "woken" count; delivery is
+//    `State.host_deliver_wake(claimed)`, which sends
+//    `Pid ! {arc_notify, Ref, Key, ByteIndex}` per claimed waiter.
+//    Same-process waitAsync settles stay in core (pure data, no message).
+//
+// 3. Wake injection. When an `{arc_notify, Ref, Key, ByteIndex}` message
+//    lands in an EMBEDDER's mailbox, the embedder injects it into core via
+//    the public entry point in arc/vm/exec/event_loop:
+//
+//        event_loop.inject_notify(state: State, key: WaiterKey,
+//                                 byte_index: Int) -> State
+//
+//    which wraps builtins_atomics.settle_notified_waiter (settles this
+//    agent's first matching State waitAsync waiter with "ok"; a wake whose
+//    waiter already expired finds no match and settles nothing). Wakes for
+//    cancelled SYNC entries never get here — clause 1's zero-timeout flush
+//    consumes them — leaving only the documented accepted race in
+//    arc_waiter_ffi's module doc (async timeout vs. cross-process claim).
+//    Embedder receive loops bound their blocking
+//    receive with `event_loop.next_deadline_timeout` so host timers and
+//    waitAsync deadlines still fire on time, and re-drain after injecting
+//    (see `beam.wait_settle_step` / `beam.settle_pending_wakes`, the
+//    reusable helper the test262 harness also drives).
+//
+// 4. FFI module layout. arc_waiter_ffi.erl (under src/arc/vm/) is
+//    DATA-ONLY: insert_waiter, take_waiters (returning claims — no send),
+//    remove_async_token, local_buffer_key/shared_buffer_key, cancel_waiter
+//    (ETS delete only) and the table-owner sync-join handshake. Zero
+//    event-driven receives. The receive-based operations live in embedder
+//    FFI — src/arc/arc_beam_ffi.erl for the beam embedder, mirrored in
+//    test/test262_exec_ffi.erl for the harness:
+//
+//        await_notify(Handle, TimeoutMs) -> <<"ok">> | <<"timed-out">>
+//            (blocking receive + the timeout-race resolution of clause 1;
+//             TimeoutMs < 0 = infinity, clamped to the BEAM receive cap.
+//             TimeoutMs = 0 doubles as the post-cancel flush: core's
+//             "not-equal" arm calls host_sync_wait with a zero timeout
+//             when its data-only cancel found the entry already claimed,
+//             and the claimed branch consumes the in-flight wake — bounded
+//             by a safety timeout — so it can't pollute a later receive)
+//        deliver_wakes(Claimed) -> nil
+//            (clause 2's sends, one per claimed remote waiter)
+//        wait_for_notify(Ms) -> {some, {Key, ByteIndex}} | none
+//            (bounded dry-queue receive for embedder loops; feeds
+//             clause 3's inject_notify)
+//
+// 5. Installation. Embedders call `install_atomics_capabilities` below
+//    once per booted State (beam: at run/install setup; harness: per-test
+//    worker setup) — both capabilities together, since a host that can
+//    block but not deliver wakes (or vice versa) deadlocks its peers.
+//    `State.can_block` remains separate per-agent embedder config: it is
+//    spec policy ([[CanBlock]]), not capability presence.
+
+/// Re-export: one blocking sync Atomics.wait handed to the embedder.
+/// See arc/vm/state.WaitRequest for field semantics.
+pub type WaitRequest =
+  state.WaitRequest
+
+/// Re-export: result of an embedder blocking wait — `WaitOk` (notified)
+/// or `WaitTimedOut`.
+pub type WaitOutcome =
+  state.WaitOutcome
+
+/// Re-export: the blocking-wait capability, `fn(WaitRequest) -> WaitOutcome`.
+pub type SyncWaitFn =
+  state.SyncWaitFn
+
+/// Re-export: the wake-delivery capability for claimed remote waiters.
+pub type DeliverWakeFn =
+  state.DeliverWakeFn
+
+/// Re-export: opaque claimed-waiter term (pid + ref + key + byte index).
+pub type ClaimedWaiter =
+  state.ClaimedWaiter
+
+/// Re-export: opaque cross-process WaiterList identity.
+pub type WaiterKey =
+  state.WaiterKey
+
+/// Re-export: opaque handle to one registered waiterlist entry.
+pub type WaiterHandle =
+  state.WaiterHandle
+
+/// Install the Atomics blocking-wait and wake-delivery capabilities on a
+/// State (contract clause 5). Both together, always: a host that blocks
+/// but cannot deliver wakes (or vice versa) deadlocks its peer agents.
+/// Leaves `State.can_block` untouched — that is per-agent spec policy,
+/// not capability presence.
+pub fn install_atomics_capabilities(
+  s: State,
+  sync_wait sync_wait: state.SyncWaitFn,
+  deliver_wake deliver_wake: state.DeliverWakeFn,
+) -> State {
+  state.State(
+    ..s,
+    host_sync_wait: option.Some(sync_wait),
+    host_deliver_wake: option.Some(deliver_wake),
+  )
 }
 
 // -- Constructors ------------------------------------------------------------

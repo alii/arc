@@ -744,6 +744,7 @@ pub fn evaluate_bundle_with_registry(
           h,
           b,
           global_object,
+          fn(s) { s },
           finish,
           already_evaluated,
         )

@@ -166,6 +166,24 @@ pub fn eval_with(
   source: String,
   finish: fn(state.State) -> state.State,
 ) -> Result(#(Completion, Engine), EvalError) {
+  eval_prepared_with(engine, source, fn(s) { s }, finish)
+}
+
+/// Like `eval_with` but with an embedder `prepare` hook applied to the
+/// freshly booted State BEFORE the top-level script executes. Embedders
+/// whose `finish` driver installs host capabilities (e.g. `beam.run`'s
+/// Atomics blocking-wait/wake-delivery) must install them here too —
+/// `finish` only takes over after the script returns, and a top-level
+/// blocking `Atomics.wait` needs them mid-script:
+///
+///     engine.eval_prepared_with(
+///       eng, src, beam.install_atomics_capabilities, beam.run)
+pub fn eval_prepared_with(
+  engine: Engine,
+  source: String,
+  prepare: fn(state.State) -> state.State,
+  finish: fn(state.State) -> state.State,
+) -> Result(#(Completion, Engine), EvalError) {
   use program <- result.try(
     parser.parse(source, parser.Script)
     |> result.map_error(ParseError),
@@ -175,11 +193,12 @@ pub fn eval_with(
     |> result.map_error(CompileError),
   )
   use completion <- result.map(
-    entry.run_with(
+    entry.run_prepared(
       template,
       engine.heap,
       engine.builtins,
       engine.global,
+      prepare,
       finish,
     )
     |> result.map_error(VmError),
@@ -217,16 +236,39 @@ pub fn eval_module_with(
   resolve: fn(String, String) -> Result(#(String, String), String),
   finish: fn(state.State) -> state.State,
 ) -> Result(#(EvaluatedModule, Engine), EvalError) {
+  eval_module_prepared_with(
+    engine,
+    specifier,
+    source,
+    resolve,
+    fn(s) { s },
+    finish,
+  )
+}
+
+/// Like `eval_module_with` but with an embedder `prepare` hook applied to
+/// each module body's freshly booted State before it executes — the module
+/// counterpart of `eval_prepared_with` (a module's top level may hit a
+/// blocking `Atomics.wait` before any host function has run).
+pub fn eval_module_prepared_with(
+  engine: Engine,
+  specifier: String,
+  source: String,
+  resolve: fn(String, String) -> Result(#(String, String), String),
+  prepare: fn(state.State) -> state.State,
+  finish: fn(state.State) -> state.State,
+) -> Result(#(EvaluatedModule, Engine), EvalError) {
   use bundle <- result.try(
     module.compile_bundle(specifier, source, resolve)
     |> result.map_error(ModuleError),
   )
   use evaluated <- result.map(
-    module.evaluate_bundle(
+    module.evaluate_bundle_prepared(
       bundle,
       engine.heap,
       engine.builtins,
       engine.global,
+      prepare,
       finish,
     )
     |> result.map_error(ModuleError),

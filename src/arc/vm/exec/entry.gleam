@@ -105,8 +105,26 @@ pub fn run_with(
   global_object: Ref,
   finish: fn(State) -> State,
 ) -> Result(Completion, VmError) {
+  run_prepared(func, heap, builtins, global_object, fn(s) { s }, finish)
+}
+
+/// `run_with` with an embedder `prepare` hook applied to the freshly booted
+/// State BEFORE the top-level script executes — the injection point for the
+/// host Atomics capabilities (`host.install_atomics_capabilities`), which
+/// must be present mid-script for a top-level blocking `Atomics.wait`, not
+/// only once the post-script `finish` driver takes over. Mirrors
+/// `run_and_drain_repl_with`'s `prepare`.
+pub fn run_prepared(
+  func: FuncTemplate,
+  heap: Heap,
+  builtins: Builtins,
+  global_object: Ref,
+  prepare: fn(State) -> State,
+  finish: fn(State) -> State,
+) -> Result(Completion, VmError) {
   let executed =
     interpreter.init_state(func, heap, builtins, global_object, False)
+    |> prepare
     |> interpreter.execute_inner()
   use #(settled, drained) <- result.map(settle(executed, finish))
   completion_of(settled, drained.heap)
@@ -117,12 +135,18 @@ pub fn run_with(
 /// slots 0..N-1 (each the exporting module's live cell) plus this module's own
 /// export cells in their declared slots — ES live bindings (§16.2). Reads/writes
 /// go through GetBoxed/PutBoxed. Module `this` is undefined per ES §16.2.1.5.2.
+///
+/// `prepare` transforms the freshly booted State before the body executes —
+/// the per-module-body injection point for the host Atomics capabilities
+/// (each body gets a fresh State, so capabilities installed during a
+/// previous body do not carry over). Pass `fn(s) { s }` for none.
 pub fn run_module(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
+  prepare: fn(State) -> State,
   finish: fn(State) -> State,
 ) -> ModuleResult {
   let locals = interpreter.init_module_locals(func, seeds)
@@ -137,7 +161,7 @@ pub fn run_module(
       dict.new(),
       dict.new(),
     )
-  case interpreter.execute_inner(state) {
+  case interpreter.execute_inner(prepare(state)) {
     Error(vm_err) -> ModuleError(error: vm_err)
     Ok(#(AwaitCompletion(awaited_value, h), suspended)) ->
       drive_top_level_await(func, awaited_value, h, suspended, finish)
@@ -289,6 +313,31 @@ pub fn run_and_drain_repl(
   builtins: Builtins,
   env: ReplEnv,
 ) -> Result(#(Completion, ReplEnv), VmError) {
+  run_and_drain_repl_with(
+    func,
+    heap,
+    builtins,
+    env,
+    fn(s) { s },
+    event_loop.drain_jobs,
+  )
+}
+
+/// `run_and_drain_repl` with embedder hooks: `prepare` transforms the
+/// freshly booted State before execution (the injection point for the host
+/// Atomics capabilities — `host.install_atomics_capabilities` — which are
+/// per-State, not process-global), and `finish` is the post-script driver
+/// (e.g. a notify-consuming embedder loop like `beam.settle_pending_wakes`
+/// instead of the default microtask drain). Used by the test262 harness,
+/// whose per-test worker processes drive the event loop directly.
+pub fn run_and_drain_repl_with(
+  func: FuncTemplate,
+  heap: Heap,
+  builtins: Builtins,
+  env: ReplEnv,
+  prepare: fn(State) -> State,
+  finish: fn(State) -> State,
+) -> Result(#(Completion, ReplEnv), VmError) {
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
   let this_val = JsObject(env.global_object)
   let locals = interpreter.init_top_level_locals(func, this_val)
@@ -305,8 +354,8 @@ pub fn run_and_drain_repl(
     )
   let run_state = State(..base, ctx: RealmCtx(..base.ctx, realms: env.realms))
   use #(settled, drained) <- result.map(settle(
-    interpreter.execute_inner(run_state),
-    event_loop.drain_jobs,
+    interpreter.execute_inner(prepare(run_state)),
+    finish,
   ))
   let new_env =
     ReplEnv(

@@ -26,18 +26,32 @@ import gleam/result
 import gleam/string
 
 // -- FFI declarations --------------------------------------------------------
+//
+// Boundary decision (mailbox-coupling refactor): Subject `.send`/`.receive`
+// are the beam embedder's IPC primitives, not a JS-spec feature. The mailbox
+// operations they need (a `!` send and a blocking selective receive on the
+// subject's tag) live in the embedder FFI module `arc_beam_ffi.erl`
+// (src/arc/, OUTSIDE src/arc/vm/) — no `receive` primitive exists under
+// src/arc/vm/ for this feature. These declarations are thin capability
+// stubs: Subject objects can only come into existence via the beam embedder
+// (beam.spawn allocates them; PrSubject records only arrive inside ArcClone
+// IPC messages sent between beam-spawned processes), so these calls are
+// reachable only when the beam embedder is the host. Embedders that never
+// create Subjects (e.g. the test262 harness) never reach this code. The
+// natives themselves stay in this module because they are mutually
+// recursive with serialize/deserialize (see module doc).
 
-@external(erlang, "arc_vm_ffi", "send_subject_message")
+@external(erlang, "arc_beam_ffi", "send_subject_message")
 fn ffi_send_subject(
   pid: value.ErlangPid,
   tag: value.ErlangRef,
   msg: PortableMessage,
 ) -> Nil
 
-@external(erlang, "arc_vm_ffi", "receive_subject_message")
+@external(erlang, "arc_beam_ffi", "receive_subject_message")
 fn ffi_receive_subject(tag: value.ErlangRef) -> PortableMessage
 
-@external(erlang, "arc_vm_ffi", "receive_subject_message_timeout")
+@external(erlang, "arc_beam_ffi", "receive_subject_message_timeout")
 fn ffi_receive_subject_timeout(
   tag: value.ErlangRef,
   timeout: Int,

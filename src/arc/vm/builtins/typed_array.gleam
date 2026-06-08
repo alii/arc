@@ -367,12 +367,30 @@ pub fn dispatch(
 
 /// TypedArrayCreate (§23.2.4.2): Construct(ctor, [len]), then require the
 /// result to be a TypedArray of at least `len` elements.
+/// Every caller of this «len» form (of/from/slice/map/filter) WRITES into
+/// the result, so per the immutable-arraybuffer proposal's
+/// TypedArrayCreateFromConstructor(.., ~write~) an instance backed by an
+/// immutable buffer is a TypeError. (subarray — the only read-mode species
+/// creator — uses ta_create_with_args directly and skips this check.)
 fn ta_create(
   state: State,
   ctor: JsValue,
   len: Int,
 ) -> Result(#(JsValue, Ref, State), #(JsValue, State)) {
-  ta_create_with_args(state, ctor, [value.from_int(len)], Some(len))
+  use #(obj, obj_ref, state) <- result.try(ta_create_with_args(
+    state,
+    ctor,
+    [value.from_int(len)],
+    Some(len),
+  ))
+  case ta_buffer_immutable(state.heap, obj_ref) {
+    True ->
+      Error(state.type_error_value(
+        state,
+        "Constructor returned a TypedArray backed by an immutable ArrayBuffer",
+      ))
+    False -> Ok(#(obj, obj_ref, state))
+  }
 }
 
 /// TypedArrayCreateFromConstructor (§23.2.4.2) with an arbitrary argument
@@ -756,10 +774,11 @@ fn alloc_fresh_ta(
     common.alloc_wrapper(
       state.heap,
       value.ArrayBufferObject(
-        data:,
+        data: value.BufBytes(data),
         detached: False,
         max_byte_length: None,
         shared: False,
+        immutable: False,
       ),
       state.builtins.array_buffer.prototype,
     )
@@ -1361,6 +1380,8 @@ fn try_bulk_store(
           state.heap,
           buffer,
           ta_splice(data, byte_offset + start * size, region),
+          byte_offset + start * size,
+          count * size,
         )
       Some(State(..state, heap: h))
     }
@@ -1424,6 +1445,37 @@ fn validate_ta(
         False -> cont(buffer, kind, off, len, state)
       }
     }
+  }
+}
+
+/// Immutable ArrayBuffer proposal — ValidateTypedArray step 4: accessMode
+/// ~write~ on a view over an immutable buffer is a TypeError, raised BEFORE
+/// any argument coercion (observable; test262 checks it).
+fn require_mutable(
+  state: State,
+  buffer: Ref,
+  cont: fn(State) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case heap.read(state.heap, buffer) {
+    Some(ObjectSlot(kind: value.ArrayBufferObject(immutable: True, ..), ..)) ->
+      state.type_error(
+        state,
+        "Cannot modify a TypedArray backed by an immutable ArrayBuffer",
+      )
+    _ -> cont(state)
+  }
+}
+
+/// True when a TypedArray heap ref views an immutable ArrayBuffer.
+fn ta_buffer_immutable(h: Heap, ta_ref: Ref) -> Bool {
+  case heap.read(h, ta_ref) {
+    Some(ObjectSlot(kind: value.TypedArrayObject(buffer:, ..), ..)) ->
+      case heap.read(h, buffer) {
+        Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
+          immutable
+        _ -> False
+      }
+    _ -> False
   }
 }
 
@@ -1546,6 +1598,7 @@ fn proto_fill(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
+  use state <- require_mutable(state, buffer)
   let value_arg = helpers.first_arg_or_undefined(args)
   let start_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   let end_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
@@ -1578,7 +1631,14 @@ fn proto_fill(
       let elem =
         object.typed_array_encode_value(ta_zeroed(size), 0, kind, converted)
       let new_data = ta_fill_region(data, off + start * size, end - start, elem)
-      let h = write_buffer_data(state.heap, buffer, new_data)
+      let h =
+        write_buffer_data(
+          state.heap,
+          buffer,
+          new_data,
+          off + start * size,
+          int.max(end - start, 0) * size,
+        )
       #(State(..state, heap: h), Ok(this))
     }
   }
@@ -1664,7 +1724,10 @@ fn proto_set(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
-  use _buffer, _kind, _off, _len, state <- require_ta(this, state)
+  use buffer, _kind, _off, _len, state <- require_ta(this, state)
+  // Immutable ArrayBuffer proposal: set() has accessMode ~write~ — checked
+  // before the offset/source coercions run any user code.
+  use state <- require_mutable(state, buffer)
   let src = helpers.first_arg_or_undefined(args)
   let off_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   use off_i, state <- try_state(to_int_or_inf(state, off_arg))
@@ -1825,6 +1888,8 @@ fn set_from_typed_array(
               state.heap,
               dst_buf,
               ta_splice(data, start, region),
+              start,
+              avail,
             )
           #(State(..state, heap: h), Ok(JsUndefined))
         }
@@ -2057,6 +2122,8 @@ fn proto_slice(
                       state.heap,
                       target_buf,
                       ta_splice(tdata, target_off, region),
+                      target_off,
+                      avail,
                     )
                   #(State(..state, heap: h), Ok(target))
                 }
@@ -2702,6 +2769,7 @@ fn proto_copy_within(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
+  use state <- require_mutable(state, buffer)
   let target_arg = helpers.first_arg_or_undefined(args)
   let start_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   let end_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
@@ -2743,7 +2811,13 @@ fn proto_copy_within(
           #(
             State(
               ..state,
-              heap: write_buffer_data(state.heap, buffer, new_data),
+              heap: write_buffer_data(
+                state.heap,
+                buffer,
+                new_data,
+                off + to * size,
+                count * size,
+              ),
             ),
             Ok(this),
           )
@@ -2785,6 +2859,7 @@ fn proto_reverse(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
+  use state <- require_mutable(state, buffer)
   case object.typed_array_buffer_data(state.heap, buffer) {
     None -> #(state, Ok(this))
     Some(data) -> {
@@ -2792,7 +2867,10 @@ fn proto_reverse(
       let region = reversed_bytes(data, off, len, size)
       let new_data = ta_splice(data, off, region)
       #(
-        State(..state, heap: write_buffer_data(state.heap, buffer, new_data)),
+        State(
+          ..state,
+          heap: write_buffer_data(state.heap, buffer, new_data, off, len * size),
+        ),
         Ok(this),
       )
     }
@@ -2841,8 +2919,18 @@ fn proto_to_reversed(
   use ta_val, new_buf, state <- try_state3(ta_same_type_create(state, kind, len))
   let src = copy_region(state.heap, buffer, off, len * size)
   let new_data = reversed_bytes(src, 0, len, size)
+  // Fresh buffer — this caller owns every byte.
   #(
-    State(..state, heap: write_buffer_data(state.heap, new_buf, new_data)),
+    State(
+      ..state,
+      heap: write_buffer_data(
+        state.heap,
+        new_buf,
+        new_data,
+        0,
+        bit_array.byte_size(new_data),
+      ),
+    ),
     Ok(ta_val),
   )
 }
@@ -2886,8 +2974,18 @@ fn proto_with(
       object.typed_array_encode_value(data, actual * size, kind, converted)
     False -> data
   }
+  // Fresh buffer — this caller owns every byte.
   #(
-    State(..state, heap: write_buffer_data(state.heap, new_buf, new_data)),
+    State(
+      ..state,
+      heap: write_buffer_data(
+        state.heap,
+        new_buf,
+        new_data,
+        0,
+        bit_array.byte_size(new_data),
+      ),
+    ),
     Ok(ta_val),
   )
 }
@@ -3108,6 +3206,12 @@ fn proto_sort(
   args: List(JsValue),
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
+  // Immutable ArrayBuffer proposal: sort() has accessMode ~write~ — the
+  // comparator must never run against an immutable-backed receiver. (The
+  // spec checks comparator callability first, but both failures are
+  // TypeErrors, so the order is unobservable.)
+  use buffer_w, _kind_w, _off_w, _len_w, state <- require_ta(this, state)
+  use state <- require_mutable(state, buffer_w)
   use buffer, kind, off, len, sorted, state <- sorted_snapshot(
     this,
     args,
@@ -3132,7 +3236,13 @@ fn proto_sort(
       case avail > 0 {
         True -> {
           let h =
-            write_buffer_data(state.heap, buffer, ta_splice(data, off, region))
+            write_buffer_data(
+              state.heap,
+              buffer,
+              ta_splice(data, off, region),
+              off,
+              avail,
+            )
           #(State(..state, heap: h), Ok(this))
         }
         False -> #(state, Ok(this))
@@ -3160,8 +3270,18 @@ fn proto_to_sorted(
     Some(_fresh) -> encode_region(kind, size, sorted)
     None -> ta_zeroed(len * size)
   }
+  // Fresh buffer — this caller owns every byte.
   #(
-    State(..state, heap: write_buffer_data(state.heap, new_buf, new_data)),
+    State(
+      ..state,
+      heap: write_buffer_data(
+        state.heap,
+        new_buf,
+        new_data,
+        0,
+        bit_array.byte_size(new_data),
+      ),
+    ),
     Ok(ta_val),
   )
 }
@@ -3369,6 +3489,32 @@ fn validate_u8(
   }
 }
 
+/// Immutable ArrayBuffer proposal: the write direction of ValidateUint8Array
+/// — setFromBase64/setFromHex reject an immutable-backed target BEFORE any
+/// option getter runs (observable; toBase64/toHex stay read-only).
+fn u8_require_mutable(
+  state: State,
+  this: JsValue,
+) -> Result(Nil, #(JsValue, State)) {
+  let immutable = case ta_slot(state.heap, this) {
+    Some(#(buffer, _, _, _)) ->
+      case heap.read(state.heap, buffer) {
+        Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
+          immutable
+        _ -> False
+      }
+    None -> False
+  }
+  case immutable {
+    True ->
+      Error(state.type_error_value(
+        state,
+        "Cannot modify a Uint8Array backed by an immutable ArrayBuffer",
+      ))
+    False -> Ok(Nil)
+  }
+}
+
 /// MakeTypedArrayWithBufferWitnessRecord + IsTypedArrayOutOfBounds: resolve
 /// the LIVE view right now (option getters may have detached/shrunk the
 /// buffer). Returns (buffer ref, buffer data, byte offset, element length).
@@ -3536,7 +3682,13 @@ fn u8_write_bytes(
     _ ->
       State(
         ..state,
-        heap: write_buffer_data(state.heap, buffer, ta_splice(data, off, bytes)),
+        heap: write_buffer_data(
+          state.heap,
+          buffer,
+          ta_splice(data, off, bytes),
+          off,
+          bit_array.byte_size(bytes),
+        ),
       )
   }
 }
@@ -3597,6 +3749,7 @@ fn u8_set_from_base64(
 ) -> #(State, Result(JsValue, JsValue)) {
   wrap({
     use state <- result.try(validate_u8(this, state))
+    use Nil <- result.try(u8_require_mutable(state, this))
     use #(s, state) <- result.try(require_string(
       state,
       helpers.first_arg_or_undefined(args),
@@ -3619,6 +3772,7 @@ fn u8_set_from_hex(
 ) -> #(State, Result(JsValue, JsValue)) {
   wrap({
     use state <- result.try(validate_u8(this, state))
+    use Nil <- result.try(u8_require_mutable(state, this))
     use #(s, state) <- result.try(require_string(
       state,
       helpers.first_arg_or_undefined(args),
@@ -3710,10 +3864,11 @@ fn u8_alloc_from_bytes(
     default_proto_for(state, value.Uint8Kind),
     len,
   ))
+  // Fresh buffer — this caller owns every byte.
   case ta_slot(state.heap, ta) {
     Some(#(buffer, _, _, _)) -> #(
       ta,
-      State(..state, heap: write_buffer_data(state.heap, buffer, bytes)),
+      State(..state, heap: write_buffer_data(state.heap, buffer, bytes, 0, len)),
     )
     None -> #(ta, state)
   }
@@ -4000,26 +4155,50 @@ fn default_proto_for(state: State, kind: TypedArrayKind) -> Ref {
   |> result.unwrap(state.builtins.typed_array.prototype)
 }
 
-/// Replace a buffer slot's backing bytes, preserving its other fields.
-fn write_buffer_data(h: Heap, buffer: Ref, new_data: BitArray) -> Heap {
+/// Replace a buffer slot's backing bytes with a full-buffer image,
+/// preserving its other fields. `byte_offset`/`count` delimit the byte range
+/// the caller actually modified: shared (atomics-backed) storage writes ONLY
+/// those bytes into the shared cells — other regions may be concurrently
+/// mutated by other agent processes, and writing the whole snapshot back
+/// would clobber their updates. (Non-shared storage just swaps in the full
+/// image.) Callers that own the whole buffer — a freshly allocated result —
+/// pass the full range.
+/// Immutable buffers (immutable-arraybuffer proposal) are never modified —
+/// the write is dropped, mirroring the detached-buffer no-op treatment.
+fn write_buffer_data(
+  h: Heap,
+  buffer: Ref,
+  new_data: BitArray,
+  byte_offset: Int,
+  count: Int,
+) -> Heap {
   heap.update(h, buffer, fn(slot) {
     case slot {
+      ObjectSlot(kind: value.ArrayBufferObject(immutable: True, ..), ..) as s ->
+        s
       ObjectSlot(
         kind: value.ArrayBufferObject(
           detached:,
           max_byte_length:,
           shared:,
-          data: _,
+          immutable:,
+          data: old_data,
         ),
         ..,
       ) as s ->
         ObjectSlot(
           ..s,
           kind: value.ArrayBufferObject(
-            data: new_data,
+            data: value.buffer_store_region(
+              old_data,
+              new_data,
+              byte_offset,
+              count,
+            ),
             detached:,
             max_byte_length:,
             shared:,
+            immutable:,
           ),
         )
       other -> other

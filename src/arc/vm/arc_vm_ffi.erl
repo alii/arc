@@ -7,11 +7,7 @@
          tree_array_size/1, tree_array_resize/2,
          tree_array_reset/2, tree_array_sparse_fold/3]).
 -export([pid_to_string/1]).
--export([receive_settle_only/0, receive_settle_or_subject/1, send_after/3, cancel_timer/1]).
--export([receive_settle_only_timeout/1, receive_settle_or_subject_timeout/2]).
--export([get_script_args/0, sleep/1]).
--export([send_subject_message/3, receive_subject_message/1, receive_subject_message_timeout/2]).
--export([select_message/1, select_message_timeout/2]).
+-export([get_script_args/0]).
 -export([string_char_at/2, string_codepoint_at/2, string_codepoint_length/1,
          replacement_codepoint/0]).
 -export([string_index_of/3, string_last_index_of/3]).
@@ -36,6 +32,15 @@ heap_read(Map, Key) ->
         _ -> none
     end.
 
+%% BOUNDARY NOTE: run_compile_task below contains the ONLY `receive` in this
+%% module, and it is a sanctioned synchronous spawn-compute-join: the caller
+%% spawns a worker, blocks until that same worker replies (or dies), and
+%% nothing else can match the monitored ref. It is a structured fork/join
+%% barrier, not event-driven mailbox coupling — no external process, timer,
+%% or event can ever be observed through it. All event-driven mailbox
+%% functions (selective receives, subject messaging, timers) live in the
+%% embedder layer (src/arc/arc_beam_ffi.erl), not under src/arc/vm/.
+%%
 %% Run a 0-arity parse/compile task. For big sources the task runs in a
 %% short-lived process whose initial heap is sized to the source, for two
 %% reasons: parsing allocates large transient structures (token list, AST,
@@ -403,69 +408,6 @@ cp_off(_, _, Off) -> Off.
 
 pid_to_string(Pid) -> list_to_binary(pid_to_list(Pid)).
 get_script_args() -> [list_to_binary(A) || A <- init:get_plain_arguments()].
-sleep(Ms) -> timer:sleep(Ms), nil.
-
-%% Event loop selective receive. Accepts SettlePromise, ReceiverTimeout,
-%% and optionally subject messages whose ref is in RefMap.
-receive_settle_only() ->
-    receive
-        {settle_promise, _, _} = E -> E;
-        {receiver_timeout, _} = E -> E
-    end.
-receive_settle_or_subject(RefMap) ->
-    receive
-        {settle_promise, _, _} = E -> E;
-        {receiver_timeout, _} = E -> E;
-        {Ref, Pm} when is_map_key(Ref, RefMap) -> {subject_message, Ref, Pm}
-    end.
-
-%% Timeout variants for embedder loops with pending host-timer / atomics
-%% deadlines: {error, nil} on timeout means a deadline is due — re-drain.
-receive_settle_only_timeout(Timeout) ->
-    receive
-        {settle_promise, _, _} = E -> {ok, E};
-        {receiver_timeout, _} = E -> {ok, E}
-    after Timeout -> {error, nil}
-    end.
-receive_settle_or_subject_timeout(RefMap, Timeout) ->
-    receive
-        {settle_promise, _, _} = E -> {ok, E};
-        {receiver_timeout, _} = E -> {ok, E};
-        {Ref, Pm} when is_map_key(Ref, RefMap) -> {ok, {subject_message, Ref, Pm}}
-    after Timeout -> {error, nil}
-    end.
-
-%% Subject-based selective receive. Messages are {Ref, PortableMessage} tuples
-%% where Ref is the subject's unique erlang:make_ref() tag.
-%% The BEAM optimizes receive on a bound ref by skipping older messages.
-send_subject_message(Pid, Ref, Msg) ->
-    Pid ! {Ref, Msg}, nil.
-receive_subject_message(Ref) ->
-    receive {Ref, Pm} -> Pm end.
-receive_subject_message_timeout(Ref, Timeout) ->
-    receive {Ref, Pm} -> {ok, Pm}
-    after Timeout -> {error, nil}
-    end.
-
-%% Multi-subject select: RefMap is #{Ref1 => true, Ref2 => true, ...}.
-%% Uses is_map_key/2 guard BIF for dynamic selective receive.
-select_message(RefMap) ->
-    receive {Ref, _} = Msg when is_map_key(Ref, RefMap) -> Msg end.
-select_message_timeout(RefMap, Timeout) ->
-    receive {Ref, _} = Msg when is_map_key(Ref, RefMap) -> {ok, Msg}
-    after Timeout -> {error, nil}
-    end.
-
-send_after(Ms, Pid, Msg) ->
-    erlang:send_after(Ms, Pid, Msg).
-
-%% Returns true if the timer was still active (cancelled successfully),
-%% false if it had already fired.
-cancel_timer(TRef) ->
-    case erlang:cancel_timer(TRef) of
-        false -> false;
-        _TimeLeft -> true
-    end.
 
 unique_positive_integer() ->
     erlang:unique_integer([positive]).
