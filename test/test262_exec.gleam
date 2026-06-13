@@ -704,7 +704,7 @@ fn do_run_module(
   ))
   let global_object = env.global_object
 
-  case module.compile_bundle(path, source, test262_resolve_and_load) {
+  case module.compile_bundle(path, source, test262_resolve, test262_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
     Ok(bundle) -> {
       // Evaluate through the realm-wide module registry so a dynamic
@@ -747,15 +747,18 @@ fn do_run_module(
   }
 }
 
-/// Resolve and load a dependency module for test262 tests.
-/// Resolves relative paths against the parent module's directory.
-fn test262_resolve_and_load(
+/// Resolve a test262 dependency specifier relative to its parent's directory.
+fn test262_resolve(
   raw_specifier: String,
   parent_specifier: String,
-) -> Result(#(String, String), String) {
-  let resolved = path.resolve_specifier(raw_specifier, parent_specifier)
+) -> Result(String, String) {
+  Ok(path.resolve_specifier(raw_specifier, parent_specifier))
+}
+
+/// Read a resolved test262 module from disk.
+fn test262_load(resolved: String) -> Result(String, String) {
   case simplifile.read(resolved) {
-    Ok(source) -> Ok(#(resolved, source))
+    Ok(source) -> Ok(source)
     Error(err) ->
       Error(
         "file not found: " <> resolved <> " (" <> string.inspect(err) <> ")",
@@ -843,7 +846,8 @@ fn eval_harness(
           b,
           global_object,
           path,
-          test262_resolve_and_load,
+          test262_resolve,
+          test262_load,
         )
       // Install native $262 object on the global
       let #(h, realm_ref) =

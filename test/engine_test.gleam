@@ -338,6 +338,10 @@ fn reject_imports(_raw: String, _parent: String) {
   Error("no imports")
 }
 
+fn reject_loads(_resolved: String) {
+  Error("no imports")
+}
+
 pub fn eval_module_reads_export_test() {
   let eng = engine.new()
   let assert Ok(#(evaluated, eng)) =
@@ -346,6 +350,7 @@ pub fn eval_module_reads_export_test() {
       "test:mod",
       "export const answer = 42; export function noop() {}",
       reject_imports,
+      reject_loads,
     )
   let assert Some(ns) = evaluated.namespace
   assert engine.read_export(eng, ns, "answer") == Some(JsNumber(Finite(42.0)))
@@ -365,6 +370,7 @@ pub fn call_export_threads_module_state_test() {
       "let count = 0;
        export function bump(n) { count += n; return count; }",
       reject_imports,
+      reject_loads,
     )
   let assert Some(ns) = evaluated.namespace
   let assert Some(bump) = engine.read_export(eng, ns, "bump")
@@ -385,6 +391,7 @@ pub fn eval_module_syntax_error_test() {
       "test:bad",
       "export const = ;",
       reject_imports,
+      reject_loads,
     )
   // Surfaces a formatted SyntaxError, not a panic.
   assert engine.eval_error_message(err) != ""

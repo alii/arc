@@ -53,30 +53,39 @@ const deferred_cache_property = "__arc_module_deferred__"
 /// [[TopLevelCapability]]); cleared when evaluation settles.
 const pending_cache_property = "__arc_module_pending__"
 
-/// A loader callback: (raw_specifier, referrer) → (resolved_specifier, source).
+/// Resolve a raw specifier against its referrer to the module's canonical
+/// specifier — specifier math and existence probing, no source reading.
+pub type ResolveFn =
+  fn(String, String) -> Result(String, String)
+
+/// Read the source of a resolved specifier.
 pub type LoadFn =
-  fn(String, String) -> Result(#(String, String), String)
+  fn(String) -> Result(String, String)
 
 /// Install the dynamic-import host hook on `global_object`. `referrer` is the
 /// path of the entry script/module (relative specifiers resolve against it
-/// when no module body is active); `load` resolves and reads module sources.
-/// After installation, `import(specifier)` works in any code evaluated
-/// against this global. The VM passes the active module's resolved specifier
-/// as a second argument when one was executing at the ImportCall site, which
-/// takes precedence over the install-time referrer (§16.2.1.8's
+/// when no module body is active); `resolve` maps specifiers to module
+/// identities and `load` reads their sources — a cached import never calls
+/// `load` at all. After installation, `import(specifier)` works in any code
+/// evaluated against this global. The VM passes the active module's resolved
+/// specifier as a second argument when one was executing at the ImportCall
+/// site, which takes precedence over the install-time referrer (§16.2.1.8's
 /// referencingScriptOrModule).
 pub fn install_import_hook(
   h: Heap,
   b: Builtins,
   global_object: Ref,
   referrer: String,
+  resolve: ResolveFn,
   load: LoadFn,
 ) -> Heap {
   let #(h, hook_ref) =
     common.alloc_host_fn(
       h,
       b.function.prototype,
-      fn(args, this, state) { import_module(args, this, state, referrer, load) },
+      fn(args, this, state) {
+        import_module(args, this, state, referrer, resolve, load)
+      },
       "%DynamicImportHook%",
       1,
     )
@@ -95,6 +104,7 @@ fn import_module(
   _this: JsValue,
   state: State,
   entry_referrer: String,
+  resolve: ResolveFn,
   load: LoadFn,
 ) -> #(State, Result(JsValue, JsValue)) {
   let specifier = case args {
@@ -120,16 +130,16 @@ fn import_module(
     [_, _, _, resolve_fn, reject_fn, ..] -> Some(#(resolve_fn, reject_fn))
     _ -> None
   }
-  case load(specifier, referrer) {
+  case resolve(specifier, referrer) {
     Error(reason) ->
-      // Resolution/IO failure → TypeError (host resolution error).
+      // Resolution failure → TypeError (host resolution error).
       state.type_error(
         state,
         "Cannot find module '" <> specifier <> "': " <> reason,
       )
-    Ok(#(resolved, source)) if is_defer ->
-      defer_import_module(state, resolved, source, load, capability)
-    Ok(#(resolved, source)) ->
+    Ok(resolved) if is_defer ->
+      defer_import_module(state, resolved, resolve, load, capability)
+    Ok(resolved) ->
       // A previous import of this module settled (or is mid-evaluation) —
       // repeat the same result. The error cache wins: a namespace entry is
       // pre-published before evaluation and may be stale after a throw. The
@@ -161,7 +171,7 @@ fn import_module(
                   state,
                   Ok(namespace),
                 )
-                _, _ -> evaluate_module(state, resolved, source, load)
+                _, _ -> evaluate_module(state, resolved, resolve, load)
               }
             }
           }
@@ -172,10 +182,11 @@ fn import_module(
 fn evaluate_module(
   state: State,
   resolved: String,
-  source: String,
+  resolve: ResolveFn,
   load: LoadFn,
 ) -> #(State, Result(JsValue, JsValue)) {
-  case module.compile_bundle(resolved, source, load) {
+  use source <- with_loaded_source(state, resolved, load)
+  case module.compile_bundle(resolved, source, resolve, load) {
     Error(module.ParseError(msg)) -> syntax_error(state, msg)
     Error(module.CompileError(msg)) -> syntax_error(state, msg)
     Error(module.ResolutionError(msg)) -> state.type_error(state, msg)
@@ -253,7 +264,7 @@ fn evaluate_module(
 fn defer_import_module(
   state: State,
   resolved: String,
-  source: String,
+  resolve: ResolveFn,
   load: LoadFn,
   capability: option.Option(#(JsValue, JsValue)),
 ) -> #(State, Result(JsValue, JsValue)) {
@@ -264,8 +275,9 @@ fn defer_import_module(
     None ->
       case read_cached(state, deferred_cache_property, resolved) {
         Some(JsObject(_) as deferred_ns) -> #(state, Ok(deferred_ns))
-        Some(_) | None ->
-          case module.compile_bundle(resolved, source, load) {
+        Some(_) | None -> {
+          use source <- with_loaded_source(state, resolved, load)
+          case module.compile_bundle(resolved, source, resolve, load) {
             Error(module.ParseError(msg)) -> syntax_error(state, msg)
             Error(module.CompileError(msg)) -> syntax_error(state, msg)
             Error(module.ResolutionError(msg)) -> state.type_error(state, msg)
@@ -338,7 +350,26 @@ fn defer_import_module(
                 }
               }
           }
+        }
       }
+  }
+}
+
+/// Read `resolved`'s source for compilation, or reject the import with a
+/// TypeError (host load error). Cached imports never get here.
+fn with_loaded_source(
+  state: State,
+  resolved: String,
+  load: LoadFn,
+  then: fn(String) -> #(State, Result(JsValue, JsValue)),
+) -> #(State, Result(JsValue, JsValue)) {
+  case load(resolved) {
+    Error(reason) ->
+      state.type_error(
+        state,
+        "Cannot load module '" <> resolved <> "': " <> reason,
+      )
+    Ok(source) -> then(source)
   }
 }
 

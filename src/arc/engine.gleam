@@ -211,9 +211,10 @@ pub fn eval_prepared_with(
 // ----------------------------------------------------------------------------
 
 /// Compile and evaluate an ES module bundle, draining microtasks afterwards.
-/// `resolve` provides source for imported specifiers
-/// (`fn(raw, parent) -> Result(#(resolved, source), error)`). Returns the entry
-/// module's value + namespace, plus a new engine carrying the updated heap.
+/// `resolve` maps (raw, referrer) to the dependency's canonical specifier and
+/// `load` reads a resolved specifier's source (called once per unique
+/// module). Returns the entry module's value + namespace, plus a new engine
+/// carrying the updated heap.
 ///
 /// A module that throws at top level surfaces as `Error(ModuleError(...))`
 /// (mirroring `module.evaluate_bundle`), not a `ThrowCompletion` — read its
@@ -222,9 +223,10 @@ pub fn eval_module(
   engine: Engine,
   specifier: String,
   source: String,
-  resolve: fn(String, String) -> Result(#(String, String), String),
+  resolve: fn(String, String) -> Result(String, String),
+  load: fn(String) -> Result(String, String),
 ) -> Result(#(EvaluatedModule, Engine), EvalError) {
-  eval_module_with(engine, specifier, source, resolve, event_loop.finish)
+  eval_module_with(engine, specifier, source, resolve, load, event_loop.finish)
 }
 
 /// Like `eval_module` but the caller supplies the post-evaluation driver
@@ -233,7 +235,8 @@ pub fn eval_module_with(
   engine: Engine,
   specifier: String,
   source: String,
-  resolve: fn(String, String) -> Result(#(String, String), String),
+  resolve: fn(String, String) -> Result(String, String),
+  load: fn(String) -> Result(String, String),
   finish: fn(state.State) -> state.State,
 ) -> Result(#(EvaluatedModule, Engine), EvalError) {
   eval_module_prepared_with(
@@ -241,6 +244,7 @@ pub fn eval_module_with(
     specifier,
     source,
     resolve,
+    load,
     fn(s) { s },
     finish,
   )
@@ -254,12 +258,13 @@ pub fn eval_module_prepared_with(
   engine: Engine,
   specifier: String,
   source: String,
-  resolve: fn(String, String) -> Result(#(String, String), String),
+  resolve: fn(String, String) -> Result(String, String),
+  load: fn(String) -> Result(String, String),
   prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> Result(#(EvaluatedModule, Engine), EvalError) {
   use bundle <- result.try(
-    module.compile_bundle(specifier, source, resolve)
+    module.compile_bundle(specifier, source, resolve, load)
     |> result.map_error(ModuleError),
   )
   use evaluated <- result.map(

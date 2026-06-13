@@ -113,8 +113,9 @@ pub type EvaluatedBundle {
 // =============================================================================
 
 /// Compile a module and all its dependencies into a self-contained ModuleBundle.
-/// The resolve_and_load callback provides source code for dependencies:
-///   fn(raw_specifier, parent_specifier) -> Result(#(resolved_path, source), error)
+/// `resolve` maps (raw_specifier, referrer) to the dependency's canonical
+/// specifier; `load` reads a resolved specifier's source — called once per
+/// unique module.
 ///
 /// Composes `graph.load` (resolve/parse/analyze the whole graph) with a
 /// per-module bytecode compile. Source-level consumers (bundlers, dev tools)
@@ -123,19 +124,16 @@ pub type EvaluatedBundle {
 pub fn compile_bundle(
   entry_specifier: String,
   entry_source: String,
-  resolve_and_load: fn(String, String) -> Result(#(String, String), String),
+  resolve: fn(String, String) -> Result(String, String),
+  load: fn(String) -> Result(String, String),
 ) -> Result(ModuleBundle, ModuleError) {
-  // Adapt the runtime's simple text-loading callback to the graph layer's
-  // richer resolver (which can also accept host-prepared modules).
-  let resolve = fn(request: esm.ModuleRequest, referrer) {
-    use #(resolved, source) <- result.map(resolve_and_load(
-      request.specifier,
-      referrer,
-    ))
-    graph.Source(specifier: resolved, source:)
+  // Adapt the runtime's raw-specifier resolver to the graph layer's
+  // request-taking one.
+  let resolve_request = fn(request: esm.ModuleRequest, referrer) {
+    resolve(request.specifier, referrer)
   }
   use source_graph <- result.try(
-    graph.load(entry_specifier, entry_source, resolve)
+    graph.load(entry_specifier, entry_source, resolve_request, load)
     |> result.map_error(graph_error),
   )
   use modules <- result.map(
@@ -166,6 +164,8 @@ fn graph_error(error: graph.GraphError) -> ModuleError {
         <> "': "
         <> message,
       )
+    graph.LoadFailed(specifier, message) ->
+      ResolutionError("Cannot load module '" <> specifier <> "': " <> message)
     // Spec-wise a link-time SyntaxError: GetModuleSource for a Source Text
     // Module Record always throws (§16.2.1.7.2), and this host has no other
     // module kinds. LinkError surfaces to JS as a SyntaxError rejection.

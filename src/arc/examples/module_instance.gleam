@@ -30,7 +30,13 @@ pub fn main() -> Nil {
      }"
 
   let assert Ok(#(evaluated, eng)) =
-    engine.eval_module(eng, "demo:greeter", source, reject_imports)
+    engine.eval_module(
+      eng,
+      "demo:greeter",
+      source,
+      reject_imports,
+      reject_loads,
+    )
   let assert Some(namespace) = evaluated.namespace
   let assert Some(receive) = engine.read_export(eng, namespace, "receive")
 
@@ -66,5 +72,9 @@ fn emit(args, _this, s) {
 
 /// Self-contained demo module — reject every import.
 fn reject_imports(_raw: String, _parent: String) {
+  Error("this demo module imports nothing")
+}
+
+fn reject_loads(_specifier: String) {
   Error("this demo module imports nothing")
 }

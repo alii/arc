@@ -263,7 +263,8 @@ fn run_module_file(
       eng,
       path,
       source,
-      resolve_and_load_dep,
+      resolve_dep,
+      load_dep,
       prepare,
       finish,
     )
@@ -273,16 +274,19 @@ fn run_module_file(
   }
 }
 
-/// Resolve and load source for a dependency module.
-/// Takes (raw_specifier, parent_specifier) and returns (resolved_path, source).
-/// Resolves relative paths (./foo, ../bar) against the parent module's directory.
-fn resolve_and_load_dep(
+/// Resolve a dependency specifier: relative paths (./foo, ../bar) against
+/// the parent module's directory.
+fn resolve_dep(
   raw_specifier: String,
   parent_specifier: String,
-) -> Result(#(String, String), String) {
-  let resolved = path.resolve_specifier(raw_specifier, parent_specifier)
+) -> Result(String, String) {
+  Ok(path.resolve_specifier(raw_specifier, parent_specifier))
+}
+
+/// Read a resolved dependency's source from disk.
+fn load_dep(resolved: String) -> Result(String, String) {
   case read_file(resolved) {
-    Ok(source) -> Ok(#(resolved, source))
+    Ok(source) -> Ok(source)
     Error(err) ->
       Error(
         "file not found: " <> resolved <> " (" <> string.inspect(err) <> ")",

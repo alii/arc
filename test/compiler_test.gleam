@@ -7655,9 +7655,12 @@ fn run_module(source: String) -> Result(Completion, String) {
   let specifier = "<test>"
 
   case
-    module.compile_bundle(specifier, source, fn(_dep, _parent) {
-      Error("no module loader in tests")
-    })
+    module.compile_bundle(
+      specifier,
+      source,
+      fn(_dep, _parent) { Error("no module loader in tests") },
+      fn(_resolved) { Error("no module loader in tests") },
+    )
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
@@ -7745,18 +7748,29 @@ fn counter(key: String, next: fn(fn() -> Int, fn() -> Nil) -> Nil) {
 /// re-parsed + re-compiled on the C branch (O(2^depth) for deep diamonds).
 pub fn module_diamond_deps_compiled_once_test() -> Nil {
   use read, bump <- counter("resolve")
+  use read_loads, bump_load <- counter("load")
   let resolve = fn(raw: String, _parent: String) {
     bump()
     case raw {
-      "./b.js" -> Ok(#("/b.js", "import './d.js';"))
-      "./c.js" -> Ok(#("/c.js", "import './d.js';"))
-      "./d.js" -> Ok(#("/d.js", "import './e.js';"))
-      "./e.js" -> Ok(#("/e.js", "export const e = 1;"))
+      "./b.js" -> Ok("/b.js")
+      "./c.js" -> Ok("/c.js")
+      "./d.js" -> Ok("/d.js")
+      "./e.js" -> Ok("/e.js")
+      other -> Error("unknown: " <> other)
+    }
+  }
+  let load = fn(resolved: String) {
+    bump_load()
+    case resolved {
+      "/b.js" -> Ok("import './d.js';")
+      "/c.js" -> Ok("import './d.js';")
+      "/d.js" -> Ok("import './e.js';")
+      "/e.js" -> Ok("export const e = 1;")
       other -> Error("unknown: " <> other)
     }
   }
   let entry = "import './b.js'; import './c.js';"
-  let assert Ok(bundle) = module.compile_bundle("/a.js", entry, resolve)
+  let assert Ok(bundle) = module.compile_bundle("/a.js", entry, resolve, load)
 
   // 5 unique modules in the bundle: a, b, c, d, e
   let assert 5 = dict.size(bundle.modules)
@@ -7767,6 +7781,9 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
   // With the old bug: C→D misses the visited check, recompiles D,
   // recurses into D→E → 6 calls.
   let assert 5 = read()
+  // The loader runs once per unique dependency, however many edges hit it:
+  // b, c, d, e — the duplicate C→D edge never reads source again.
+  let assert 4 = read_loads()
   Nil
 }
 
@@ -7797,9 +7814,12 @@ pub fn module_repl_harness_globals_test() -> Nil {
   let module_source = "greetFromHarness()"
   let specifier = "<test-module>"
   let assert Ok(bundle) =
-    module.compile_bundle(specifier, module_source, fn(_dep, _parent) {
-      Error("no module loader")
-    })
+    module.compile_bundle(
+      specifier,
+      module_source,
+      fn(_dep, _parent) { Error("no module loader") },
+      fn(_resolved) { Error("no module loader") },
+    )
 
   // Evaluate the module, passing in REPL globals
   case module.evaluate_bundle(bundle, h, b, env.global_object, beam.run) {
@@ -7830,9 +7850,12 @@ pub fn run_export_namespace_call_test() -> Nil {
      }
      export function getDrained() { return drained; }"
   let assert Ok(bundle) =
-    module.compile_bundle("<run_export-test>", source, fn(_d, _p) {
-      Error("no module loader")
-    })
+    module.compile_bundle(
+      "<run_export-test>",
+      source,
+      fn(_d, _p) { Error("no module loader") },
+      fn(_resolved) { Error("no module loader") },
+    )
   let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(namespace), ..)) =
     module.evaluate_bundle(bundle, h, b, global_object, beam.run)
 
