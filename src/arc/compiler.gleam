@@ -8,6 +8,7 @@
 import arc/compiler/emit
 import arc/compiler/resolve
 import arc/compiler/scope
+import arc/esm
 import arc/parser/ast
 import arc/vm/opcode.{type LexicalRefs, type LexicalSlots, type SyntaxPerms}
 import arc/vm/value.{
@@ -18,18 +19,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-
-/// A single import binding from an import declaration.
-pub type ImportBinding {
-  /// import { foo } from 'mod'  or  import { foo as bar } from 'mod'
-  NamedImport(imported: String, local: String)
-  /// import foo from 'mod'
-  DefaultImport(local: String)
-  /// import * as ns from 'mod' (deferred: False) or
-  /// import defer * as ns from 'mod' (deferred: True — the module's
-  /// evaluation is deferred until the namespace is first accessed).
-  NamespaceImport(local: String, deferred: Bool)
-}
 
 /// Compilation errors.
 pub type CompileError {
@@ -91,6 +80,7 @@ pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
     ast.Module(_) -> {
       use #(template, _scope_dict, _hoisted) <- result.map(compile_module(
         program,
+        esm.analyze(program),
       ))
       template
     }
@@ -108,6 +98,7 @@ pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
 /// can be shared with importers. Mirrors QuickJS's JSVarRef aliasing.
 pub fn compile_module(
   program: ast.Program,
+  summary: esm.ModuleSummary,
 ) -> Result(
   #(FuncTemplate, Dict(String, Int), List(#(String, Int))),
   CompileError,
@@ -115,8 +106,8 @@ pub fn compile_module(
   case program {
     ast.Script(_) -> Error(Unsupported("compile_module called on Script"))
     ast.Module(body) -> {
-      let import_locals = import_local_names(extract_module_imports(program))
-      let forced_box = local_export_names(extract_module_exports(program))
+      let import_locals = import_local_names(summary.imports)
+      let forced_box = local_export_names(summary.exports)
       compile_module_with_scope(body, import_locals, forced_box)
     }
   }
@@ -126,14 +117,14 @@ pub fn compile_module(
 /// declaration order. This is the canonical order of capture slots 0..N-1;
 /// link-time import seeding must produce box refs in exactly this order.
 pub fn import_local_names(
-  import_bindings: List(#(String, List(ImportBinding))),
+  import_bindings: List(#(String, List(esm.ImportBinding))),
 ) -> List(String) {
   list.flat_map(import_bindings, fn(entry) {
     list.map(entry.1, fn(binding) {
       case binding {
-        NamedImport(local:, ..) -> local
-        DefaultImport(local:) -> local
-        NamespaceImport(local:, ..) -> local
+        esm.NamedImport(local:, ..) -> local
+        esm.DefaultImport(local:) -> local
+        esm.NamespaceImport(local:, ..) -> local
       }
     })
   })
@@ -141,10 +132,10 @@ pub fn import_local_names(
 
 /// Local binding names that a module exports (LocalExport only). These must be
 /// force-boxed so the exported cell is a heap BoxSlot shareable with importers.
-fn local_export_names(exports: List(ExportEntry)) -> List(String) {
+fn local_export_names(exports: List(esm.ExportEntry)) -> List(String) {
   list.filter_map(exports, fn(entry) {
     case entry {
-      LocalExport(local_name:, ..) -> Ok(local_name)
+      esm.LocalExport(local_name:, ..) -> Ok(local_name)
       _ -> Error(Nil)
     }
   })
@@ -154,12 +145,15 @@ fn local_export_names(exports: List(ExportEntry)) -> List(String) {
 /// module body runs (§16.2 instantiation): `undefined` for var and function
 /// declarations (hoisted, never TDZ), `uninitialized` for let/const/class and
 /// the default export (TDZ until the body initializes them).
-pub fn module_export_seeds(program: ast.Program) -> Dict(String, JsValue) {
+pub fn module_export_seeds(
+  program: ast.Program,
+  summary: esm.ModuleSummary,
+) -> Dict(String, JsValue) {
   case program {
     ast.Script(_) -> dict.new()
     ast.Module(items) -> {
       let undef = list.fold(items, set.new(), collect_undef_export_names)
-      local_export_names(extract_module_exports(program))
+      local_export_names(summary.exports)
       |> list.fold(dict.new(), fn(acc, name) {
         let seed = case set.contains(undef, name) {
           True -> JsUndefined
@@ -521,138 +515,6 @@ fn check_param_scope_var_conflict(
       }
     }
   }
-}
-
-/// Extract import bindings from a module AST.
-/// Returns a list of (specifier, [(imported_name, local_name)]) pairs.
-/// Used by the host to resolve imports before execution.
-pub fn extract_module_imports(
-  program: ast.Program,
-) -> List(#(String, List(ImportBinding))) {
-  case program {
-    ast.Script(_) -> []
-    ast.Module(body) ->
-      list.filter_map(body, fn(item) {
-        case item {
-          ast.ImportDeclaration(specifiers, ast.StringLit(source)) -> {
-            let bindings =
-              list.map(specifiers, fn(spec) {
-                case spec {
-                  ast.ImportNamedSpecifier(imported:, local:) ->
-                    NamedImport(imported:, local:)
-                  ast.ImportDefaultSpecifier(local:) -> DefaultImport(local:)
-                  ast.ImportNamespaceSpecifier(local:, deferred:) ->
-                    NamespaceImport(local:, deferred:)
-                }
-              })
-            Ok(#(source, bindings))
-          }
-          _ -> Error(Nil)
-        }
-      })
-  }
-}
-
-/// An export entry maps an exported name to how to find its value.
-pub type ExportEntry {
-  /// Export a local variable: `export let x = 42` or `export { x }`
-  /// For default exports, export_name is "default" and local_name is "*default*".
-  LocalExport(export_name: String, local_name: String)
-  /// Re-export a named binding: `export { x } from 'mod'` or `export { x as y } from 'mod'`
-  ReExport(export_name: String, imported_name: String, source_specifier: String)
-  /// Re-export everything: `export * from 'mod'`
-  ReExportAll(source_specifier: String)
-  /// Re-export everything under a namespace: `export * as ns from 'mod'`
-  ReExportNamespace(export_name: String, source_specifier: String)
-}
-
-/// Extract export entries from a module AST.
-/// Returns a list of ExportEntry describing what the module exports.
-pub fn extract_module_exports(program: ast.Program) -> List(ExportEntry) {
-  case program {
-    ast.Script(_) -> []
-    ast.Module(body) ->
-      list.flat_map(body, fn(item) {
-        case item {
-          ast.ExportNamedDeclaration(declaration:, specifiers:, source: None) ->
-            extract_named_exports(declaration, specifiers)
-          // §16.2.3.7: `export default function fn() {}` / `class fn {}` bind
-          // the NAME (BoundNames = « fn »); only anonymous defaults use the
-          // synthetic *default* binding.
-          ast.ExportDefaultDeclaration(ast.FunctionExpression(
-            name: Some(name),
-            ..,
-          )) -> [LocalExport(export_name: "default", local_name: name)]
-          ast.ExportDefaultDeclaration(ast.ClassExpression(name: Some(name), ..)) -> [
-            LocalExport(export_name: "default", local_name: name),
-          ]
-          ast.ExportDefaultDeclaration(_) -> [
-            LocalExport(export_name: "default", local_name: "*default*"),
-          ]
-          // Re-exports from other modules
-          ast.ExportNamedDeclaration(
-            declaration: _,
-            specifiers:,
-            source: option.Some(ast.StringLit(source)),
-          ) ->
-            list.map(specifiers, fn(spec) {
-              case spec {
-                ast.ExportSpecifier(local:, exported:) ->
-                  ReExport(
-                    export_name: exported,
-                    imported_name: local,
-                    source_specifier: source,
-                  )
-              }
-            })
-          ast.ExportAllDeclaration(
-            exported: option.Some(name),
-            source: ast.StringLit(source),
-          ) -> [ReExportNamespace(export_name: name, source_specifier: source)]
-          ast.ExportAllDeclaration(
-            exported: None,
-            source: ast.StringLit(source),
-          ) -> [ReExportAll(source_specifier: source)]
-          _ -> []
-        }
-      })
-  }
-}
-
-/// Extract exported names from a named export declaration.
-fn extract_named_exports(
-  declaration: option.Option(ast.Statement),
-  specifiers: List(ast.ExportSpecifier),
-) -> List(ExportEntry) {
-  // From specifiers: `export { a, b as c }`
-  let spec_exports =
-    list.map(specifiers, fn(spec) {
-      case spec {
-        ast.ExportSpecifier(local:, exported:) ->
-          LocalExport(export_name: exported, local_name: local)
-      }
-    })
-
-  // From declaration: `export let x = 42`, `export function f() {}`
-  let decl_exports = case declaration {
-    option.Some(ast.VariableDeclaration(declarations:, ..)) ->
-      list.filter_map(declarations, fn(decl) {
-        case decl {
-          ast.VariableDeclarator(id: ast.IdentifierPattern(name:), ..) ->
-            Ok(LocalExport(export_name: name, local_name: name))
-          _ -> Error(Nil)
-        }
-      })
-    option.Some(ast.FunctionDeclaration(name: option.Some(name), ..)) -> [
-      LocalExport(export_name: name, local_name: name),
-    ]
-    option.Some(ast.ClassDeclaration(name: option.Some(name), ..)) -> [
-      LocalExport(export_name: name, local_name: name),
-    ]
-    _ -> []
-  }
-
-  list.append(spec_exports, decl_exports)
 }
 
 fn compile_script(

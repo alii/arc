@@ -5788,10 +5788,9 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     Ok(#(
       p6,
       ast.ImportDeclaration(
-        specifiers: [
-          ast.ImportNamespaceSpecifier(local: binding_name, deferred: True),
-        ],
+        specifiers: [ast.ImportNamespaceSpecifier(local: binding_name)],
         source:,
+        phase: ast.PhaseDefer,
       ),
     ))
   })
@@ -5802,7 +5801,11 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
       use p3 <- result.try(eat_semicolon(advance(p2)))
       Ok(#(
         p3,
-        ast.ImportDeclaration(specifiers: [], source: ast.StringLit(value:)),
+        ast.ImportDeclaration(
+          specifiers: [],
+          source: ast.StringLit(value:),
+          phase: ast.PhaseEvaluation,
+        ),
       ))
     }
     Star -> {
@@ -5816,10 +5819,9 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
       Ok(#(
         p6,
         ast.ImportDeclaration(
-          specifiers: [
-            ast.ImportNamespaceSpecifier(local: binding_name, deferred: False),
-          ],
+          specifiers: [ast.ImportNamespaceSpecifier(local: binding_name)],
           source:,
+          phase: ast.PhaseEvaluation,
         ),
       ))
     }
@@ -5828,7 +5830,10 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
       let p3 = advance(p2)
       use #(p4, specifiers) <- result.try(parse_import_specifiers(p3))
       use #(p5, source) <- result.try(expect_from_module_specifier(p4))
-      Ok(#(p5, ast.ImportDeclaration(specifiers:, source:)))
+      Ok(#(
+        p5,
+        ast.ImportDeclaration(specifiers:, source:, phase: ast.PhaseEvaluation),
+      ))
     }
     other_kind -> {
       // import defaultExport from "module"
@@ -5867,12 +5872,10 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
                 ast.ImportDeclaration(
                   specifiers: [
                     default_spec,
-                    ast.ImportNamespaceSpecifier(
-                      local: ns_name,
-                      deferred: False,
-                    ),
+                    ast.ImportNamespaceSpecifier(local: ns_name),
                   ],
                   source:,
+                  phase: ast.PhaseEvaluation,
                 ),
               ))
             }
@@ -5885,6 +5888,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
                 ast.ImportDeclaration(
                   specifiers: [default_spec, ..named_specs],
                   source:,
+                  phase: ast.PhaseEvaluation,
                 ),
               ))
             }
@@ -5893,7 +5897,14 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
         }
         From -> {
           use #(p4, source) <- result.try(expect_from_module_specifier(p3))
-          Ok(#(p4, ast.ImportDeclaration(specifiers: [default_spec], source:)))
+          Ok(#(
+            p4,
+            ast.ImportDeclaration(
+              specifiers: [default_spec],
+              source:,
+              phase: ast.PhaseEvaluation,
+            ),
+          ))
         }
         _ -> Error(ExpectedFromOrComma(pos_of(p3)))
       }
@@ -5918,7 +5929,10 @@ fn parse_source_phase_import(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
   ))
   use p3 <- result.try(check_duplicate_import_binding(p2, binding_name))
   use #(p4, source) <- result.try(expect_from_module_specifier(advance(p3)))
-  Ok(#(p4, ast.ImportDeclaration(specifiers: [], source:)))
+  Ok(#(
+    p4,
+    ast.ImportDeclaration(specifiers: [], source:, phase: ast.PhaseSource),
+  ))
 }
 
 fn parse_specifier_list(

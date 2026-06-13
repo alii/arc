@@ -2488,9 +2488,9 @@ fn compile_function_body(
   )
 }
 
-/// §13.2.5.5: Some(n) only for a NAMED function expression — binds `n` in
-/// the function's own scope to the closure itself (immutable). None for
-/// declarations, methods, arrows, and NamedEvaluation-baked names.
+// §13.2.5.5: Some(n) only for a NAMED function expression — binds `n` in
+// the function's own scope to the closure itself (immutable). None for
+// declarations, methods, arrows, and NamedEvaluation-baked names.
 // ============================================================================
 // Statement emission
 // ============================================================================

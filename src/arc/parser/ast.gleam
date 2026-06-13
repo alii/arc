@@ -18,7 +18,15 @@ pub type StmtWithLine {
 
 pub type ModuleItem {
   StatementItem(StmtWithLine)
-  ImportDeclaration(specifiers: List(ImportSpecifier), source: StringLiteral)
+  /// `phase` is per-declaration because the grammar can't mix phases:
+  /// `import defer` only takes the namespace form (PhaseDefer) and
+  /// `import source` only a single binding (PhaseSource); everything else
+  /// is PhaseEvaluation. Mirrors ESTree's ImportDeclaration.phase.
+  ImportDeclaration(
+    specifiers: List(ImportSpecifier),
+    source: StringLiteral,
+    phase: ImportPhase,
+  )
   ExportNamedDeclaration(
     declaration: Option(Statement),
     specifiers: List(ExportSpecifier),
@@ -30,10 +38,9 @@ pub type ModuleItem {
 
 pub type ImportSpecifier {
   ImportDefaultSpecifier(local: String)
-  /// `import * as local` (deferred: False) or `import defer * as local`
-  /// (deferred: True, the defer-import-eval proposal — evaluation of the
-  /// imported module is deferred until its namespace is first accessed).
-  ImportNamespaceSpecifier(local: String, deferred: Bool)
+  /// `import * as local` / `import defer * as local` — eager vs deferred is
+  /// the enclosing declaration's `phase`.
+  ImportNamespaceSpecifier(local: String)
   ImportNamedSpecifier(imported: String, local: String)
 }
 
@@ -267,9 +274,11 @@ pub type Expression {
   )
 }
 
-/// §13.3.10 ImportCall phase: `import(x)` (evaluation), `import.source(x)`
-/// (source-phase-imports proposal), `import.defer(x)` (defer-import-eval
-/// proposal).
+/// Module request phase, shared by static ImportDeclarations and dynamic
+/// ImportCalls (§13.3.10): evaluation (`import x from "m"` / `import(x)`),
+/// source (`import source x from "m"` / `import.source(x)`, the
+/// source-phase-imports proposal), defer (`import defer * as x from "m"` /
+/// `import.defer(x)`, the defer-import-eval proposal).
 pub type ImportPhase {
   PhaseEvaluation
   PhaseSource

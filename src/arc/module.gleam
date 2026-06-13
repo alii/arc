@@ -8,6 +8,8 @@
 ///
 /// Based on ECMAScript §16.2 and QuickJS's module implementation.
 import arc/compiler
+import arc/esm
+import arc/module/graph
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/reflect
@@ -42,8 +44,8 @@ pub type CompiledModule {
   CompiledModule(
     specifier: String,
     template: value.FuncTemplate,
-    import_bindings: List(#(String, List(compiler.ImportBinding))),
-    export_entries: List(compiler.ExportEntry),
+    import_bindings: List(#(String, List(esm.ImportBinding))),
+    export_entries: List(esm.ExportEntry),
     scope_dict: Dict(String, Int),
     specifier_map: Dict(String, String),
     requested_modules: List(String),
@@ -113,82 +115,83 @@ pub type EvaluatedBundle {
 /// Compile a module and all its dependencies into a self-contained ModuleBundle.
 /// The resolve_and_load callback provides source code for dependencies:
 ///   fn(raw_specifier, parent_specifier) -> Result(#(resolved_path, source), error)
+///
+/// Composes `graph.load` (resolve/parse/analyze the whole graph) with a
+/// per-module bytecode compile. Source-level consumers (bundlers, dev tools)
+/// can call `graph.load` themselves and skip the compile entirely — both
+/// paths share one graph walk with identical resolution semantics.
 pub fn compile_bundle(
   entry_specifier: String,
   entry_source: String,
   resolve_and_load: fn(String, String) -> Result(#(String, String), String),
 ) -> Result(ModuleBundle, ModuleError) {
-  use entry_compiled <- result.try(compile_single(entry_specifier, entry_source))
-  let modules = dict.from_list([#(entry_specifier, entry_compiled)])
-  use modules <- result.map(resolve_and_compile_deps(
-    entry_specifier,
-    entry_compiled.requested_modules,
-    resolve_and_load,
-    modules,
-  ))
+  // Adapt the runtime's simple text-loading callback to the graph layer's
+  // richer resolver (which can also accept host-prepared modules).
+  let resolve = fn(request: esm.ModuleRequest, referrer) {
+    use #(resolved, source) <- result.map(resolve_and_load(
+      request.specifier,
+      referrer,
+    ))
+    graph.Source(specifier: resolved, source:)
+  }
+  use source_graph <- result.try(
+    graph.load(entry_specifier, entry_source, resolve)
+    |> result.map_error(graph_error),
+  )
+  use modules <- result.map(
+    dict.fold(source_graph.modules, Ok(dict.new()), fn(acc, specifier, node) {
+      use modules <- result.try(acc)
+      use compiled <- result.map(compile_source_module(node))
+      dict.insert(modules, specifier, compiled)
+    }),
+  )
   ModuleBundle(entry: entry_specifier, modules:)
 }
 
-/// Parse and compile a single module from source.
-fn compile_single(
-  specifier: String,
-  source: String,
-) -> Result(CompiledModule, ModuleError) {
-  use program <- result.try(
-    parser.parse(source, parser.Module)
-    |> result.map_error(fn(err) {
+fn graph_error(error: graph.GraphError) -> ModuleError {
+  case error {
+    graph.ParseFailed(specifier, parse_error) ->
       ParseError(
         "SyntaxError in '"
         <> specifier
         <> "': "
-        <> parser.parse_error_to_string(err),
+        <> parser.parse_error_to_string(parse_error),
       )
-    }),
-  )
+    graph.ResolveFailed(raw, referrer, message) ->
+      ResolutionError(
+        "Cannot resolve module '"
+        <> raw
+        <> "' from '"
+        <> referrer
+        <> "': "
+        <> message,
+      )
+    // Spec-wise a link-time SyntaxError: GetModuleSource for a Source Text
+    // Module Record always throws (§16.2.1.7.2), and this host has no other
+    // module kinds. LinkError surfaces to JS as a SyntaxError rejection.
+    graph.SourcePhaseUnsupported(specifier) ->
+      LinkError(
+        "'"
+        <> specifier
+        <> "': source phase imports ('import source') are not supported",
+      )
+  }
+}
 
-  let import_bindings = compiler.extract_module_imports(program)
-  let import_specifiers = list.map(import_bindings, fn(entry) { entry.0 })
-  let export_entries = compiler.extract_module_exports(program)
-
-  let reexport_specifiers =
-    list.filter_map(export_entries, fn(entry) {
-      case entry {
-        compiler.ReExport(source_specifier:, ..) -> Ok(source_specifier)
-        compiler.ReExportAll(source_specifier:) -> Ok(source_specifier)
-        compiler.ReExportNamespace(source_specifier:, ..) ->
-          Ok(source_specifier)
-        compiler.LocalExport(..) -> Error(Nil)
-      }
-    })
-  let requested_modules =
-    list.unique(list.append(import_specifiers, reexport_specifiers))
-  // A request is eager (~evaluation~ phase) when ANY of its declarations is a
-  // bare import (`import "m"`, bindings == []), a named/default import, or an
-  // eager namespace import. Declarations that are only `import defer * as ns`
-  // stay deferred. Re-exports are always eager requests.
-  let eager_import_specifiers =
-    list.filter_map(import_bindings, fn(entry) {
-      let #(spec, bindings) = entry
-      let eager = case bindings {
-        [] -> True
-        _ ->
-          list.any(bindings, fn(binding) {
-            case binding {
-              compiler.NamespaceImport(deferred: True, ..) -> False
-              _ -> True
-            }
-          })
-      }
-      case eager {
-        True -> Ok(spec)
-        False -> Error(Nil)
-      }
-    })
-  let eager_requests =
-    list.unique(list.append(eager_import_specifiers, reexport_specifiers))
-
+/// Compile one loaded module from the source graph — the import/export
+/// analysis is already done (`node.summary`); this adds the bytecode stage.
+fn compile_source_module(
+  node: graph.SourceModule,
+) -> Result(CompiledModule, ModuleError) {
+  let graph.SourceModule(
+    specifier:,
+    source: _,
+    program:,
+    summary:,
+    specifier_map:,
+  ) = node
   use #(template, scope_dict, hoisted_funcs) <- result.map(
-    compiler.compile_module(program)
+    compiler.compile_module(program, summary)
     |> result.map_error(fn(err) {
       case err {
         compiler.Unsupported(desc) ->
@@ -201,15 +204,27 @@ fn compile_single(
     }),
   )
 
+  // The bundle format keeps flat specifier lists; both project out of the
+  // summary's merged ModuleRequests.
+  let requested_modules =
+    list.map(summary.requested, fn(request) { request.specifier })
+  let eager_requests =
+    list.filter_map(summary.requested, fn(request) {
+      case request.phase {
+        esm.Default -> Ok(request.specifier)
+        esm.Deferred -> Error(Nil)
+      }
+    })
+
   CompiledModule(
     specifier:,
     template:,
-    import_bindings:,
-    export_entries:,
+    import_bindings: summary.imports,
+    export_entries: summary.exports,
     scope_dict:,
-    specifier_map: dict.new(),
+    specifier_map:,
     requested_modules:,
-    export_seeds: compiler.module_export_seeds(program),
+    export_seeds: compiler.module_export_seeds(program, summary),
     hoisted_funcs:,
     eager_requests:,
     has_tla: module_has_tla(template),
@@ -222,73 +237,6 @@ fn compile_single(
 fn module_has_tla(template: value.FuncTemplate) -> Bool {
   tuple_array.to_list(template.bytecode)
   |> list.any(fn(op) { op == opcode.Await })
-}
-
-/// Recursively resolve and compile all dependencies of a parent module.
-fn resolve_and_compile_deps(
-  parent_specifier: String,
-  requested_modules: List(String),
-  resolve_and_load: fn(String, String) -> Result(#(String, String), String),
-  modules: Dict(String, CompiledModule),
-) -> Result(Dict(String, CompiledModule), ModuleError) {
-  list.try_fold(requested_modules, modules, fn(modules, raw_dep) {
-    case resolve_and_load(raw_dep, parent_specifier) {
-      Error(err) ->
-        Error(ResolutionError(
-          "Cannot resolve module '"
-          <> raw_dep
-          <> "' from '"
-          <> parent_specifier
-          <> "': "
-          <> err,
-        ))
-      Ok(#(resolved_path, source)) -> {
-        // Record raw→resolved mapping in the parent module
-        let modules =
-          update_compiled_specifier_map(
-            modules,
-            parent_specifier,
-            raw_dep,
-            resolved_path,
-          )
-        // Skip if already compiled (handles cycles + shared deps)
-        case dict.has_key(modules, resolved_path) {
-          True -> Ok(modules)
-          False -> {
-            use dep_compiled <- result.try(compile_single(resolved_path, source))
-            let modules = dict.insert(modules, resolved_path, dep_compiled)
-            resolve_and_compile_deps(
-              resolved_path,
-              dep_compiled.requested_modules,
-              resolve_and_load,
-              modules,
-            )
-          }
-        }
-      }
-    }
-  })
-}
-
-/// Update a compiled module's specifier_map in the modules dict.
-fn update_compiled_specifier_map(
-  modules: Dict(String, CompiledModule),
-  parent: String,
-  raw: String,
-  resolved: String,
-) -> Dict(String, CompiledModule) {
-  case dict.get(modules, parent) {
-    Ok(m) ->
-      dict.insert(
-        modules,
-        parent,
-        CompiledModule(
-          ..m,
-          specifier_map: dict.insert(m.specifier_map, raw, resolved),
-        ),
-      )
-    Error(Nil) -> modules
-  }
 }
 
 // =============================================================================
@@ -348,17 +296,15 @@ fn resolve_export_in(
   let direct =
     list.find_map(m.export_entries, fn(e) {
       case e {
-        compiler.LocalExport(export_name:, local_name:)
-          if export_name == name
-        ->
+        esm.LocalExport(export_name:, local_name:) if export_name == name ->
           Ok(resolve_local_export(bundle, m, specifier, local_name, resolve_set))
-        compiler.ReExport(export_name:, imported_name:, source_specifier:)
+        esm.ReExport(export_name:, imported_name:, source_specifier:)
           if export_name == name
         -> {
           let src = resolved_specifier(m, source_specifier)
           Ok(resolve_export(bundle, src, imported_name, resolve_set))
         }
-        compiler.ReExportNamespace(export_name:, source_specifier:)
+        esm.ReExportNamespace(export_name:, source_specifier:)
           if export_name == name
         -> Ok(ResolvedNamespace(resolved_specifier(m, source_specifier)))
         _ -> Error(Nil)
@@ -392,11 +338,11 @@ fn resolve_local_export(
       let #(raw_dep, bindings) = entry
       list.find_map(bindings, fn(binding) {
         case binding {
-          compiler.NamedImport(local:, ..) if local == local_name ->
+          esm.NamedImport(local:, ..) if local == local_name ->
             Ok(#(raw_dep, binding))
-          compiler.DefaultImport(local:) if local == local_name ->
+          esm.DefaultImport(local:) if local == local_name ->
             Ok(#(raw_dep, binding))
-          compiler.NamespaceImport(local:, ..) if local == local_name ->
+          esm.NamespaceImport(local:, ..) if local == local_name ->
             Ok(#(raw_dep, binding))
           _ -> Error(Nil)
         }
@@ -407,13 +353,13 @@ fn resolve_local_export(
     Ok(#(raw_dep, binding)) -> {
       let dep = resolved_specifier(m, raw_dep)
       case binding {
-        compiler.NamedImport(imported:, ..) ->
+        esm.NamedImport(imported:, ..) ->
           resolve_export(bundle, dep, imported, resolve_set)
-        compiler.DefaultImport(..) ->
+        esm.DefaultImport(..) ->
           resolve_export(bundle, dep, "default", resolve_set)
-        compiler.NamespaceImport(deferred: False, ..) -> ResolvedNamespace(dep)
-        compiler.NamespaceImport(deferred: True, ..) ->
+        esm.NamespaceImport(phase: esm.Deferred, ..) ->
           ResolvedDeferredNamespace(dep)
+        esm.NamespaceImport(phase: esm.Default, ..) -> ResolvedNamespace(dep)
       }
     }
   }
@@ -429,7 +375,7 @@ fn resolve_star_exports(
   let star_sources =
     list.filter_map(m.export_entries, fn(e) {
       case e {
-        compiler.ReExportAll(source_specifier:) ->
+        esm.ReExportAll(source_specifier:) ->
           Ok(resolved_specifier(m, source_specifier))
         _ -> Error(Nil)
       }
@@ -487,11 +433,10 @@ fn check_imports(
     list.try_each(bindings, fn(binding) {
       case binding {
         // `import * as ns` always resolves (the namespace gathers names).
-        compiler.NamespaceImport(..) -> Ok(Nil)
-        compiler.NamedImport(imported:, ..) ->
+        esm.NamespaceImport(..) -> Ok(Nil)
+        esm.NamedImport(imported:, ..) ->
           check_resolves(bundle, dep, imported, raw_dep)
-        compiler.DefaultImport(..) ->
-          check_resolves(bundle, dep, "default", raw_dep)
+        esm.DefaultImport(..) -> check_resolves(bundle, dep, "default", raw_dep)
       }
     })
   })
@@ -506,7 +451,7 @@ fn check_indirect_exports(
     case e {
       // `export { x } from 'mod'` — resolve THIS module's export name, which
       // recurses into the source (§16.2.1.6.4 step 1).
-      compiler.ReExport(export_name:, source_specifier:, ..) ->
+      esm.ReExport(export_name:, source_specifier:, ..) ->
         check_resolves(bundle, specifier, export_name, source_specifier)
       _ -> Ok(Nil)
     }
@@ -1469,7 +1414,7 @@ fn ordered_requests(compiled: CompiledModule) -> List(#(String, Bool)) {
         _ ->
           list.any(bindings, fn(binding) {
             case binding {
-              compiler.NamespaceImport(deferred: True, ..) -> False
+              esm.NamespaceImport(phase: esm.Deferred, ..) -> False
               _ -> True
             }
           })
@@ -1479,12 +1424,11 @@ fn ordered_requests(compiled: CompiledModule) -> List(#(String, Bool)) {
   let reexport_requests =
     list.filter_map(compiled.export_entries, fn(entry) {
       case entry {
-        compiler.ReExport(source_specifier:, ..) ->
+        esm.ReExport(source_specifier:, ..) -> Ok(#(source_specifier, True))
+        esm.ReExportAll(source_specifier:) -> Ok(#(source_specifier, True))
+        esm.ReExportNamespace(source_specifier:, ..) ->
           Ok(#(source_specifier, True))
-        compiler.ReExportAll(source_specifier:) -> Ok(#(source_specifier, True))
-        compiler.ReExportNamespace(source_specifier:, ..) ->
-          Ok(#(source_specifier, True))
-        compiler.LocalExport(..) -> Error(Nil)
+        esm.LocalExport(..) -> Error(Nil)
       }
     })
   list.append(import_requests, reexport_requests)
@@ -1636,7 +1580,7 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
       let is_deferred =
         list.any(bindings, fn(binding) {
           case binding {
-            compiler.NamespaceImport(deferred: True, ..) -> True
+            esm.NamespaceImport(phase: esm.Deferred, ..) -> True
             _ -> False
           }
         })
@@ -1717,7 +1661,7 @@ fn preallocate_local_boxes(
         let boxes =
           list.fold(m.export_entries, dict.new(), fn(boxes, e) {
             case e {
-              compiler.LocalExport(export_name:, local_name:) ->
+              esm.LocalExport(export_name:, local_name:) ->
                 case dict.get(existing_exports, export_name) {
                   Ok(box) -> dict.insert(boxes, local_name, box)
                   Error(Nil) -> boxes
@@ -2082,16 +2026,16 @@ fn get_exported_names(
       let direct =
         list.filter_map(m.export_entries, fn(e) {
           case e {
-            compiler.LocalExport(export_name:, ..) -> Ok(export_name)
-            compiler.ReExport(export_name:, ..) -> Ok(export_name)
-            compiler.ReExportNamespace(export_name:, ..) -> Ok(export_name)
-            compiler.ReExportAll(..) -> Error(Nil)
+            esm.LocalExport(export_name:, ..) -> Ok(export_name)
+            esm.ReExport(export_name:, ..) -> Ok(export_name)
+            esm.ReExportNamespace(export_name:, ..) -> Ok(export_name)
+            esm.ReExportAll(..) -> Error(Nil)
           }
         })
       let star =
         list.flat_map(m.export_entries, fn(e) {
           case e {
-            compiler.ReExportAll(source_specifier:) ->
+            esm.ReExportAll(source_specifier:) ->
               get_exported_names(
                 bundle,
                 resolved_specifier(m, source_specifier),
@@ -2116,7 +2060,7 @@ fn get_exported_names(
 fn import_seeds(
   linked: Linked,
   specifier_map: Dict(String, String),
-  import_bindings: List(#(String, List(compiler.ImportBinding))),
+  import_bindings: List(#(String, List(esm.ImportBinding))),
 ) -> List(#(Int, JsValue)) {
   list.flat_map(import_bindings, fn(entry) {
     let #(raw_dep, bindings) = entry
@@ -2124,16 +2068,15 @@ fn import_seeds(
     let dep_exports = dict.get(linked.exports, dep) |> result.unwrap(dict.new())
     list.map(bindings, fn(binding) {
       case binding {
-        compiler.NamedImport(imported:, ..) ->
-          forward_box(dep_exports, imported)
-        compiler.DefaultImport(..) -> forward_box(dep_exports, "default")
-        compiler.NamespaceImport(deferred: False, ..) ->
-          case dict.get(linked.namespace_boxes, dep) {
+        esm.NamedImport(imported:, ..) -> forward_box(dep_exports, imported)
+        esm.DefaultImport(..) -> forward_box(dep_exports, "default")
+        esm.NamespaceImport(phase: esm.Deferred, ..) ->
+          case dict.get(linked.deferred_boxes, dep) {
             Ok(box) -> JsObject(box)
             Error(Nil) -> JsUndefined
           }
-        compiler.NamespaceImport(deferred: True, ..) ->
-          case dict.get(linked.deferred_boxes, dep) {
+        esm.NamespaceImport(phase: esm.Default, ..) ->
+          case dict.get(linked.namespace_boxes, dep) {
             Ok(box) -> JsObject(box)
             Error(Nil) -> JsUndefined
           }
