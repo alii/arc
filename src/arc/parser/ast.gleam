@@ -7,6 +7,14 @@ pub type Program {
   Module(body: List(ModuleItem))
 }
 
+/// A half-open `[start, end)` range of UTF-8 byte offsets into the original
+/// source text. Slicing the source by these offsets must reproduce the exact
+/// original text of the node. Byte offsets (not UTF-16 columns) are stored so
+/// the conversion to Source Map v3 columns happens once, at map-emit time.
+pub type Span {
+  Span(start: Int, end: Int)
+}
+
 /// A statement paired with the 1-based source line where it begins. Statement
 /// *lists* (block bodies, program bodies, switch-case bodies) hold `Stmt` so the
 /// compiler can emit `SetLine` ops and build line numbers for `Error.stack`.
@@ -26,26 +34,36 @@ pub type ModuleItem {
     specifiers: List(ImportSpecifier),
     source: StringLiteral,
     phase: ImportPhase,
+    span: Span,
   )
   ExportNamedDeclaration(
     declaration: Option(Statement),
     specifiers: List(ExportSpecifier),
     source: Option(StringLiteral),
+    span: Span,
   )
-  ExportDefaultDeclaration(declaration: Expression)
-  ExportAllDeclaration(exported: Option(String), source: StringLiteral)
+  ExportDefaultDeclaration(declaration: Expression, span: Span)
+  ExportAllDeclaration(
+    exported: Option(String),
+    source: StringLiteral,
+    span: Span,
+  )
 }
 
 pub type ImportSpecifier {
-  ImportDefaultSpecifier(local: String)
+  ImportDefaultSpecifier(local: String, local_span: Span)
   /// `import * as local` / `import defer * as local` — eager vs deferred is
-  /// the enclosing declaration's `phase`.
-  ImportNamespaceSpecifier(local: String)
-  ImportNamedSpecifier(imported: String, local: String)
+  /// the enclosing declaration's `phase`. `local_span` covers the `local`
+  /// binding identifier only (not the `* as` prefix).
+  ImportNamespaceSpecifier(local: String, local_span: Span)
+  ImportNamedSpecifier(imported: String, local: String, local_span: Span)
 }
 
+/// `local_span` is the byte span of the local-binding identifier — the name
+/// before `as` in `export { local as exported }`, or the whole identifier in
+/// `export { local }`. It is a reference to a module-local binding.
 pub type ExportSpecifier {
-  ExportSpecifier(local: String, exported: String)
+  ExportSpecifier(local: String, exported: String, local_span: Span)
 }
 
 pub type StringLiteral {

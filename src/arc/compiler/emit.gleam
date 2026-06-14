@@ -359,11 +359,15 @@ pub fn emit_module(
   let has_default_export =
     list.any(items, fn(item) {
       case item {
-        ast.ExportDefaultDeclaration(ast.FunctionExpression(name: Some(_), ..)) ->
-          False
-        ast.ExportDefaultDeclaration(ast.ClassExpression(name: Some(_), ..)) ->
-          False
-        ast.ExportDefaultDeclaration(_) -> True
+        ast.ExportDefaultDeclaration(
+          declaration: ast.FunctionExpression(name: Some(_), ..),
+          ..,
+        ) -> False
+        ast.ExportDefaultDeclaration(
+          declaration: ast.ClassExpression(name: Some(_), ..),
+          ..,
+        ) -> False
+        ast.ExportDefaultDeclaration(..) -> True
         _ -> False
       }
     })
@@ -521,19 +525,22 @@ fn module_items_to_stmts(
   list.filter_map(items, fn(item) {
     case item {
       ast.StatementItem(located) -> Ok(located)
-      ast.ExportNamedDeclaration(option.Some(decl), _, _) ->
+      ast.ExportNamedDeclaration(declaration: option.Some(decl), ..) ->
         Ok(ast.StmtWithLine(0, decl))
       // §16.2.3.7: a NAMED default function/class declares its own binding
       // (BoundNames = the name) — lower to the ordinary declaration so the
       // function is hoisted and the name is a mutable module-level binding
       // shared with the `default` export cell.
-      ast.ExportDefaultDeclaration(ast.FunctionExpression(
-        name: option.Some(_) as name,
-        params:,
-        body:,
-        is_generator:,
-        is_async:,
-      )) ->
+      ast.ExportDefaultDeclaration(
+        declaration: ast.FunctionExpression(
+          name: option.Some(_) as name,
+          params:,
+          body:,
+          is_generator:,
+          is_async:,
+        ),
+        ..,
+      ) ->
         Ok(ast.StmtWithLine(
           0,
           ast.FunctionDeclaration(
@@ -544,13 +551,16 @@ fn module_items_to_stmts(
             is_async:,
           ),
         ))
-      ast.ExportDefaultDeclaration(ast.ClassExpression(
-        name: option.Some(_) as name,
-        super_class:,
-        body:,
-      )) ->
+      ast.ExportDefaultDeclaration(
+        declaration: ast.ClassExpression(
+          name: option.Some(_) as name,
+          super_class:,
+          body:,
+        ),
+        ..,
+      ) ->
         Ok(ast.StmtWithLine(0, ast.ClassDeclaration(name:, super_class:, body:)))
-      ast.ExportDefaultDeclaration(expr) ->
+      ast.ExportDefaultDeclaration(declaration: expr, ..) ->
         // Emit as: *default* = expr;
         // The *default* local is declared during module hoisting.
         Ok(ast.StmtWithLine(
@@ -565,7 +575,7 @@ fn module_items_to_stmts(
           ),
         ))
       ast.ImportDeclaration(..) -> Error(Nil)
-      ast.ExportNamedDeclaration(None, _, _) -> Error(Nil)
+      ast.ExportNamedDeclaration(declaration: None, ..) -> Error(Nil)
       ast.ExportAllDeclaration(..) -> Error(Nil)
     }
   })

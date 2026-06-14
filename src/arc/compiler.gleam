@@ -190,7 +190,10 @@ fn collect_undef_export_names(
     // `export default function fn() {}` — hoisted like any top-level
     // function declaration, so its binding seeds `undefined` (not TDZ).
     _,
-      ast.ExportDefaultDeclaration(ast.FunctionExpression(name: Some(name), ..))
+      ast.ExportDefaultDeclaration(
+        declaration: ast.FunctionExpression(name: Some(name), ..),
+        ..,
+      )
     -> set.insert(acc, name)
     _, _ -> acc
   }

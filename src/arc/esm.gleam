@@ -129,7 +129,7 @@ pub fn analyze(program: ast.Program) -> ModuleSummary {
 /// One top-level item into the accumulator. Lists are built reversed.
 fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
   case item {
-    ast.ImportDeclaration(specifiers:, source: ast.StringLit(source), phase:) -> {
+    ast.ImportDeclaration(specifiers:, source: ast.StringLit(source), phase:, ..) -> {
       // The request's phase comes straight off the declaration: only
       // `import defer * as ns` defers; bare and binding-carrying forms are
       // eager. (PhaseSource requests are recorded eagerly — the graph walk
@@ -213,6 +213,7 @@ pub fn imports(program: ast.Program) -> List(#(String, List(ImportBinding))) {
             specifiers:,
             source: ast.StringLit(source),
             phase:,
+            ..,
           ) -> Ok(#(source, declaration_bindings(specifiers, phase)))
           _ -> Error(Nil)
         }
@@ -241,10 +242,10 @@ fn declaration_bindings(
   }
   list.map(specifiers, fn(spec) {
     case spec {
-      ast.ImportNamedSpecifier(imported:, local:) ->
+      ast.ImportNamedSpecifier(imported:, local:, ..) ->
         NamedImport(imported:, local:)
-      ast.ImportDefaultSpecifier(local:) -> DefaultImport(local:)
-      ast.ImportNamespaceSpecifier(local:) -> NamespaceImport(local:, phase:)
+      ast.ImportDefaultSpecifier(local:, ..) -> DefaultImport(local:)
+      ast.ImportNamespaceSpecifier(local:, ..) -> NamespaceImport(local:, phase:)
     }
   })
 }
@@ -252,18 +253,20 @@ fn declaration_bindings(
 /// The export entries of one top-level item ([] for non-exports).
 fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
   case item {
-    ast.ExportNamedDeclaration(declaration:, specifiers:, source: None) ->
+    ast.ExportNamedDeclaration(declaration:, specifiers:, source: None, ..) ->
       named_exports(declaration, specifiers)
     // §16.2.3.7: `export default function fn() {}` / `class fn {}` bind
     // the NAME (BoundNames = « fn »); only anonymous defaults use the
     // synthetic *default* binding.
-    ast.ExportDefaultDeclaration(ast.FunctionExpression(name: Some(name), ..)) -> [
-      LocalExport(export_name: "default", local_name: name),
-    ]
-    ast.ExportDefaultDeclaration(ast.ClassExpression(name: Some(name), ..)) -> [
-      LocalExport(export_name: "default", local_name: name),
-    ]
-    ast.ExportDefaultDeclaration(_) -> [
+    ast.ExportDefaultDeclaration(
+      declaration: ast.FunctionExpression(name: Some(name), ..),
+      ..,
+    ) -> [LocalExport(export_name: "default", local_name: name)]
+    ast.ExportDefaultDeclaration(
+      declaration: ast.ClassExpression(name: Some(name), ..),
+      ..,
+    ) -> [LocalExport(export_name: "default", local_name: name)]
+    ast.ExportDefaultDeclaration(..) -> [
       LocalExport(export_name: "default", local_name: "*default*"),
     ]
     // Re-exports from other modules
@@ -271,10 +274,11 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
       declaration: _,
       specifiers:,
       source: Some(ast.StringLit(source)),
+      ..,
     ) ->
       list.map(specifiers, fn(spec) {
         case spec {
-          ast.ExportSpecifier(local:, exported:) ->
+          ast.ExportSpecifier(local:, exported:, ..) ->
             ReExport(
               export_name: exported,
               imported_name: local,
@@ -285,10 +289,15 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
     ast.ExportAllDeclaration(
       exported: Some(name),
       source: ast.StringLit(source),
+      ..,
     ) -> [
       ReExportNamespace(export_name: name, source_specifier: source),
     ]
-    ast.ExportAllDeclaration(exported: None, source: ast.StringLit(source)) -> [
+    ast.ExportAllDeclaration(
+      exported: None,
+      source: ast.StringLit(source),
+      ..,
+    ) -> [
       ReExportAll(source_specifier: source),
     ]
     _ -> []
@@ -304,7 +313,7 @@ fn named_exports(
   let spec_exports =
     list.map(specifiers, fn(spec) {
       case spec {
-        ast.ExportSpecifier(local:, exported:) ->
+        ast.ExportSpecifier(local:, exported:, ..) ->
           LocalExport(export_name: exported, local_name: local)
       }
     })

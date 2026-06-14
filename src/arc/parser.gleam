@@ -145,6 +145,10 @@ type P {
     tokens: List(Token),
     mode: ParseMode,
     prev_line: Int,
+    // Byte offset just past the last token consumed by `advance`
+    // (pos + raw_len). Used to close a `Span` whose start was captured
+    // before parsing, in O(1) without re-measuring the token stream.
+    prev_end: Int,
     allow_in: Bool,
     source: String,
     bytes: BitArray,
@@ -340,6 +344,7 @@ fn init_parser(
         tokens: tokens,
         mode: mode,
         prev_line: 1,
+        prev_end: 0,
         allow_in: True,
         source: source,
         bytes: bit_array.from_string(source),
@@ -5725,16 +5730,20 @@ fn skip_tokens_past(p: P, target_pos: Int) -> Result(P, ParseError) {
 
 /// Helper: expect 'from' keyword followed by a string module specifier, then eat semicolon.
 /// Returns the parser state and the parsed StringLiteral source.
+/// Parse `from "module"` and return the specifier plus the byte offset just
+/// past the module-specifier string token (its `pos + raw_len`). The end offset
+/// is the half-open end of the enclosing import declaration's span.
 fn expect_from_module_specifier(
   p: P,
-) -> Result(#(P, ast.StringLiteral), ParseError) {
+) -> Result(#(P, ast.StringLiteral, Int), ParseError) {
   use p2 <- result.try(expect(p, From))
   case peek(p2) {
     KString -> {
       let value = decode_string_escapes(peek_value(p2))
+      let spec_end = pos_of(p2) + peek_raw_len(p2)
       use p3 <- result.try(skip_import_attributes(advance(p2)))
       use p4 <- result.try(eat_semicolon(p3))
-      Ok(#(p4, ast.StringLit(value:)))
+      Ok(#(p4, ast.StringLit(value:), spec_end))
     }
     _ -> Error(ExpectedModuleSpecifier(pos_of(p2)))
   }
@@ -5757,6 +5766,8 @@ fn skip_import_attributes(p: P) -> Result(P, ParseError) {
 }
 
 fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
+  // `p` is positioned on the `import` keyword; the span starts at its offset.
+  let span_start = pos_of(p)
   let p2 = advance(p)
   // Source-phase imports proposal: `import source ImportedBinding FromClause ;`
   // Only when `source` is followed by a binding and then `from` — otherwise
@@ -5766,7 +5777,9 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     && peek_value(p2) == "source"
     && is_identifier_or_keyword(peek_at(p2, 1))
     && peek_at(p2, 2) == From
-  use <- bool.lazy_guard(is_source_phase, fn() { parse_source_phase_import(p2) })
+  use <- bool.lazy_guard(is_source_phase, fn() {
+    parse_source_phase_import(p2, span_start)
+  })
   // Defer-import-eval proposal: `import defer NameSpaceImport FromClause ;`
   // Only when `defer` is followed by `*` — otherwise `import defer from "m"`
   // is a default import whose binding is `defer`. `defer` is a grammar
@@ -5782,15 +5795,22 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     let p3 = advance(advance(p2))
     use p4 <- result.try(expect(p3, As))
     let binding_name = peek_value(p4)
+    let binding_span = span_of(p4)
     use p5 <- result.try(expect_identifier(p4))
     use p5b <- result.try(check_duplicate_import_binding(p5, binding_name))
-    use #(p6, source) <- result.try(expect_from_module_specifier(p5b))
+    use #(p6, source, span_end) <- result.try(expect_from_module_specifier(p5b))
     Ok(#(
       p6,
       ast.ImportDeclaration(
-        specifiers: [ast.ImportNamespaceSpecifier(local: binding_name)],
+        specifiers: [
+          ast.ImportNamespaceSpecifier(
+            local: binding_name,
+            local_span: binding_span,
+          ),
+        ],
         source:,
         phase: ast.PhaseDefer,
+        span: ast.Span(start: span_start, end: span_end),
       ),
     ))
   })
@@ -5798,6 +5818,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     KString -> {
       // import "module"
       let value = decode_string_escapes(peek_value(p2))
+      let span_end = pos_of(p2) + peek_raw_len(p2)
       use p3 <- result.try(eat_semicolon(advance(p2)))
       Ok(#(
         p3,
@@ -5805,6 +5826,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           specifiers: [],
           source: ast.StringLit(value:),
           phase: ast.PhaseEvaluation,
+          span: ast.Span(start: span_start, end: span_end),
         ),
       ))
     }
@@ -5813,15 +5835,24 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
       let p3 = advance(p2)
       use p4 <- result.try(expect(p3, As))
       let binding_name = peek_value(p4)
+      let binding_span = span_of(p4)
       use p5 <- result.try(expect_identifier(p4))
       use p5b <- result.try(check_duplicate_import_binding(p5, binding_name))
-      use #(p6, source) <- result.try(expect_from_module_specifier(p5b))
+      use #(p6, source, span_end) <- result.try(expect_from_module_specifier(
+        p5b,
+      ))
       Ok(#(
         p6,
         ast.ImportDeclaration(
-          specifiers: [ast.ImportNamespaceSpecifier(local: binding_name)],
+          specifiers: [
+            ast.ImportNamespaceSpecifier(
+              local: binding_name,
+              local_span: binding_span,
+            ),
+          ],
           source:,
           phase: ast.PhaseEvaluation,
+          span: ast.Span(start: span_start, end: span_end),
         ),
       ))
     }
@@ -5829,10 +5860,15 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
       // import { a, b } from "module"
       let p3 = advance(p2)
       use #(p4, specifiers) <- result.try(parse_import_specifiers(p3))
-      use #(p5, source) <- result.try(expect_from_module_specifier(p4))
+      use #(p5, source, span_end) <- result.try(expect_from_module_specifier(p4))
       Ok(#(
         p5,
-        ast.ImportDeclaration(specifiers:, source:, phase: ast.PhaseEvaluation),
+        ast.ImportDeclaration(
+          specifiers:,
+          source:,
+          phase: ast.PhaseEvaluation,
+          span: ast.Span(start: span_start, end: span_end),
+        ),
       ))
     }
     other_kind -> {
@@ -5854,7 +5890,8 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
         other_kind,
       ))
       use p2b <- result.try(check_duplicate_import_binding(p2, default_name))
-      let default_spec = ast.ImportDefaultSpecifier(local: default_name)
+      let default_spec =
+        ast.ImportDefaultSpecifier(local: default_name, local_span: span_of(p2))
       let p3 = advance(p2b)
       case peek(p3) {
         Comma -> {
@@ -5864,31 +5901,41 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
               let p5 = advance(p4)
               use p6 <- result.try(expect(p5, As))
               let ns_name = peek_value(p6)
+              let ns_span = span_of(p6)
               use p7 <- result.try(expect_identifier(p6))
               use p7b <- result.try(check_duplicate_import_binding(p7, ns_name))
-              use #(p8, source) <- result.try(expect_from_module_specifier(p7b))
+              use #(p8, source, span_end) <- result.try(
+                expect_from_module_specifier(p7b),
+              )
               Ok(#(
                 p8,
                 ast.ImportDeclaration(
                   specifiers: [
                     default_spec,
-                    ast.ImportNamespaceSpecifier(local: ns_name),
+                    ast.ImportNamespaceSpecifier(
+                      local: ns_name,
+                      local_span: ns_span,
+                    ),
                   ],
                   source:,
                   phase: ast.PhaseEvaluation,
+                  span: ast.Span(start: span_start, end: span_end),
                 ),
               ))
             }
             LeftBrace -> {
               let p5 = advance(p4)
               use #(p6, named_specs) <- result.try(parse_import_specifiers(p5))
-              use #(p7, source) <- result.try(expect_from_module_specifier(p6))
+              use #(p7, source, span_end) <- result.try(
+                expect_from_module_specifier(p6),
+              )
               Ok(#(
                 p7,
                 ast.ImportDeclaration(
                   specifiers: [default_spec, ..named_specs],
                   source:,
                   phase: ast.PhaseEvaluation,
+                  span: ast.Span(start: span_start, end: span_end),
                 ),
               ))
             }
@@ -5896,13 +5943,16 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           }
         }
         From -> {
-          use #(p4, source) <- result.try(expect_from_module_specifier(p3))
+          use #(p4, source, span_end) <- result.try(
+            expect_from_module_specifier(p3),
+          )
           Ok(#(
             p4,
             ast.ImportDeclaration(
               specifiers: [default_spec],
               source:,
               phase: ast.PhaseEvaluation,
+              span: ast.Span(start: span_start, end: span_end),
             ),
           ))
         }
@@ -5917,7 +5967,10 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
 /// modeled in the AST yet (GetModuleSource always throws for source text
 /// modules anyway, §16.2.1.7.2); the declaration still records the module
 /// request so resolution/linking of the specifier behaves per spec.
-fn parse_source_phase_import(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
+fn parse_source_phase_import(
+  p: P,
+  span_start: Int,
+) -> Result(#(P, ast.ModuleItem), ParseError) {
   // Past `source`, onto the ImportedBinding.
   let p2 = advance(p)
   let binding_name = peek_value(p2)
@@ -5928,10 +5981,17 @@ fn parse_source_phase_import(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     binding_kind,
   ))
   use p3 <- result.try(check_duplicate_import_binding(p2, binding_name))
-  use #(p4, source) <- result.try(expect_from_module_specifier(advance(p3)))
+  use #(p4, source, span_end) <- result.try(expect_from_module_specifier(
+    advance(p3),
+  ))
   Ok(#(
     p4,
-    ast.ImportDeclaration(specifiers: [], source:, phase: ast.PhaseSource),
+    ast.ImportDeclaration(
+      specifiers: [],
+      source:,
+      phase: ast.PhaseSource,
+      span: ast.Span(start: span_start, end: span_end),
+    ),
   ))
 }
 
@@ -5992,6 +6052,7 @@ fn parse_import_specifier(
           // The alias is the local binding name — must be a valid binding identifier
           let binding_name = peek_value(p3)
           let binding_kind = peek(p3)
+          let binding_span = span_of(p3)
           use Nil <- result.try(check_import_binding_name(
             p3,
             binding_name,
@@ -6004,11 +6065,13 @@ fn parse_import_specifier(
             ast.ImportNamedSpecifier(
               imported: imported_name,
               local: binding_name,
+              local_span: binding_span,
             ),
           ))
         }
         _ -> {
           // No alias: the original name is the local binding — must be valid
+          let binding_span = span_of(p)
           use Nil <- result.try(check_import_binding_name(
             p,
             original_name,
@@ -6020,6 +6083,7 @@ fn parse_import_specifier(
             ast.ImportNamedSpecifier(
               imported: imported_name,
               local: original_name,
+              local_span: binding_span,
             ),
           ))
         }
@@ -6063,7 +6127,12 @@ fn parse_export_named_function(
 }
 
 /// Wrap a parsed declaration statement as an ExportNamedDeclaration module item.
-fn export_named_decl(parsed: #(P, ast.Statement)) -> #(P, ast.ModuleItem) {
+/// `before` is the parser state positioned at the `export` keyword, so the span
+/// starts there and ends just past the last token the declaration consumed.
+fn export_named_decl(
+  before: P,
+  parsed: #(P, ast.Statement),
+) -> #(P, ast.ModuleItem) {
   let #(p, stmt) = parsed
   #(
     p,
@@ -6071,6 +6140,7 @@ fn export_named_decl(parsed: #(P, ast.Statement)) -> #(P, ast.ModuleItem) {
       declaration: Some(stmt),
       specifiers: [],
       source: None,
+      span: ast.Span(start: pos_of(before), end: consumed_end(before, p)),
     ),
   )
 }
@@ -6090,6 +6160,8 @@ fn parse_export_named_class(p: P) -> Result(#(P, ast.Statement), ParseError) {
 }
 
 fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
+  // Span starts at the `export` keyword (p, before it is advanced to p2).
+  let span_start = pos_of(p)
   let p2 = advance(p)
   case peek(p2) {
     Default -> {
@@ -6104,6 +6176,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
             p4,
             ast.ExportDefaultDeclaration(
               declaration: statement_to_default_export_expr(stmt),
+              span: ast.Span(start: span_start, end: consumed_end(p, p4)),
             ),
           ))
         }
@@ -6115,6 +6188,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
             p4,
             ast.ExportDefaultDeclaration(
               declaration: statement_to_default_export_expr(stmt),
+              span: ast.Span(start: span_start, end: consumed_end(p, p4)),
             ),
           ))
         }
@@ -6128,38 +6202,56 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
                 p4,
                 ast.ExportDefaultDeclaration(
                   declaration: statement_to_default_export_expr(stmt),
+                  span: ast.Span(start: span_start, end: consumed_end(p, p4)),
                 ),
               ))
             }
             _ -> {
               use #(p4, expr) <- result.try(parse_assignment_expression(p3))
               use p5 <- result.try(eat_semicolon(p4))
-              Ok(#(p5, ast.ExportDefaultDeclaration(declaration: expr)))
+              Ok(#(
+                p5,
+                ast.ExportDefaultDeclaration(
+                  declaration: expr,
+                  span: ast.Span(start: span_start, end: consumed_end(p, p5)),
+                ),
+              ))
             }
           }
         _ -> {
           use #(p4, expr) <- result.try(parse_assignment_expression(p3))
           use p5 <- result.try(eat_semicolon(p4))
-          Ok(#(p5, ast.ExportDefaultDeclaration(declaration: expr)))
+          Ok(#(
+            p5,
+            ast.ExportDefaultDeclaration(
+              declaration: expr,
+              span: ast.Span(start: span_start, end: consumed_end(p, p5)),
+            ),
+          ))
         }
       }
     }
     Var | Let | Const ->
       result.map(
         parse_variable_declaration(P(..p2, in_export_decl: True)),
-        export_named_decl,
+        export_named_decl(p, _),
       )
     Function ->
-      result.map(parse_export_named_function(p2, False), export_named_decl)
-    Class -> result.map(parse_export_named_class(p2), export_named_decl)
+      result.map(parse_export_named_function(p2, False), export_named_decl(p, _))
+    Class -> result.map(parse_export_named_class(p2), export_named_decl(p, _))
     Async ->
       case peek_at(p2, 1) {
         Function ->
-          result.map(parse_export_named_function(p2, True), export_named_decl)
+          result.map(
+            parse_export_named_function(p2, True),
+            export_named_decl(p, _),
+          )
         _ -> Error(ExpectedFunctionAfterAsync(pos_of(p2)))
       }
     Star -> {
       // export * from "module"
+      // Span starts at the `export` keyword (p, before it was advanced to p2).
+      let span_start = pos_of(p)
       let p3 = advance(p2)
       case peek(p3) {
         As -> {
@@ -6180,12 +6272,15 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           case peek(p6) {
             KString -> {
               let value = peek_value(p6)
+              // Span ends at the end of the module-specifier string token.
+              let span_end = pos_of(p6) + peek_raw_len(p6)
               use p7 <- result.try(eat_semicolon(advance(p6)))
               Ok(#(
                 p7,
                 ast.ExportAllDeclaration(
                   exported: Some(exported_value),
                   source: ast.StringLit(value:),
+                  span: ast.Span(start: span_start, end: span_end),
                 ),
               ))
             }
@@ -6197,12 +6292,15 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           case peek(p4) {
             KString -> {
               let value = peek_value(p4)
+              // Span ends at the end of the module-specifier string token.
+              let span_end = pos_of(p4) + peek_raw_len(p4)
               use p5 <- result.try(eat_semicolon(advance(p4)))
               Ok(#(
                 p5,
                 ast.ExportAllDeclaration(
                   exported: None,
                   source: ast.StringLit(value:),
+                  span: ast.Span(start: span_start, end: span_end),
                 ),
               ))
             }
@@ -6233,6 +6331,10 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
                   declaration: None,
                   specifiers:,
                   source: Some(ast.StringLit(value:)),
+                  span: ast.Span(
+                    start: pos_of(p),
+                    end: consumed_end(p, p6),
+                  ),
                 ),
               ))
             }
@@ -6247,6 +6349,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
               declaration: None,
               specifiers:,
               source: None,
+              span: ast.Span(start: pos_of(p), end: consumed_end(p, p5)),
             ),
           ))
         }
@@ -6278,6 +6381,9 @@ fn parse_export_specifier(
     False -> Error(ExpectedExportSpecifierName(pos_of(p)))
     True -> {
       let local_value = peek_value(p)
+      // The local-binding identifier is the current token (the name before
+      // `as`, or the whole identifier when there is no alias).
+      let local_span = span_of(p)
       let p2 = advance(p)
       case peek(p2) {
         As -> {
@@ -6302,6 +6408,7 @@ fn parse_export_specifier(
                 ast.ExportSpecifier(
                   local: local_value,
                   exported: exported_value,
+                  local_span: local_span,
                 ),
               ))
             }
@@ -6317,7 +6424,11 @@ fn parse_export_specifier(
               #(local_value, pos_of(p)),
               ..p2b.export_local_refs
             ]),
-            ast.ExportSpecifier(local: local_value, exported: local_value),
+            ast.ExportSpecifier(
+              local: local_value,
+              exported: local_value,
+              local_span: local_span,
+            ),
           ))
         }
       }
@@ -6707,6 +6818,34 @@ fn pos_of(p: P) -> Int {
   }
 }
 
+/// Half-open byte span [pos, pos + raw_len) of the current token. Used to
+/// attach source spans to import/export local-binding identifiers so the
+/// bundler can map them back to the original source. Slicing the source by
+/// this span returns the identifier's exact original text.
+fn span_of(p: P) -> ast.Span {
+  case p.tokens {
+    [lexer.Token(pos: pos, raw_len: raw_len, ..), ..] ->
+      ast.Span(start: pos, end: pos + raw_len)
+    [] -> ast.Span(start: 0, end: 0)
+  }
+}
+
+/// Byte offset just past the last token consumed between `before` and `after`.
+/// Used to close a `Span` whose start was captured before parsing: the parser
+/// state carries no end position, so we recover it from the consumed-token
+/// delta. Falls back to the next token's start (or 0) when nothing was consumed.
+fn consumed_end(before: P, after: P) -> Int {
+  // `advance` records each consumed token's end (pos + raw_len) in
+  // `prev_end`, so the end of the last token consumed between `before` and
+  // `after` is simply `after.prev_end` — O(1), no token-stream traversal.
+  // Token positions strictly increase, so an unchanged `prev_end` means no
+  // token was consumed; fall back to the next token's start in that case.
+  case after.prev_end == before.prev_end {
+    True -> pos_of(after)
+    False -> after.prev_end
+  }
+}
+
 /// 1-based source line of the current token, used to tag parsed statements
 /// for stack traces. Falls back to the previous token's line at EOF.
 fn line_of(p: P) -> Int {
@@ -6718,8 +6857,8 @@ fn line_of(p: P) -> Int {
 
 fn advance(p: P) -> P {
   case p.tokens {
-    [lexer.Token(line: line, ..), ..rest] ->
-      P(..p, tokens: rest, prev_line: line)
+    [lexer.Token(line: line, pos: pos, raw_len: rl, ..), ..rest] ->
+      P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
     [] -> p
   }
 }

@@ -337,6 +337,13 @@ is_slow_test(Name) ->
         <<"decodeURI/S15.1.3.1_A2.">>,
         <<"decodeURIComponent/S15.1.3.2_A2.">>,
         <<"encodeURI/S15.1.3.3_A2.">>,
-        <<"encodeURIComponent/S15.1.3.4_A2.">>
+        <<"encodeURIComponent/S15.1.3.4_A2.">>,
+        %% DST-cache thrash: ~9-16s locally, 2-core CI needs the 90s budget
+        <<"Date/dst-offset-caching-">>,
+        %% detach-mid-coercion copyWithin: heavy element loops, ~15-25s on CI
+        <<"TypedArray/prototype/copyWithin/coerced-values-end-detached">>,
+        <<"TypedArray/prototype/copyWithin/coerced-values-start-detached">>,
+        <<"TypedArray/element-setting-converts-using-ToNumber">>,
+        <<"TypedArray/sort_large_countingsort">>
     ],
     lists:any(fun(P) -> binary:match(Name, P) =/= nomatch end, Slow).
