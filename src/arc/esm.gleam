@@ -129,7 +129,12 @@ pub fn analyze(program: ast.Program) -> ModuleSummary {
 /// One top-level item into the accumulator. Lists are built reversed.
 fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
   case item {
-    ast.ImportDeclaration(specifiers:, source: ast.StringLit(source), phase:, ..) -> {
+    ast.ImportDeclaration(
+      specifiers:,
+      source: ast.StringLit(source),
+      phase:,
+      ..,
+    ) -> {
       // The request's phase comes straight off the declaration: only
       // `import defer * as ns` defers; bare and binding-carrying forms are
       // eager. (PhaseSource requests are recorded eagerly — the graph walk
@@ -245,7 +250,8 @@ fn declaration_bindings(
       ast.ImportNamedSpecifier(imported:, local:, ..) ->
         NamedImport(imported:, local:)
       ast.ImportDefaultSpecifier(local:, ..) -> DefaultImport(local:)
-      ast.ImportNamespaceSpecifier(local:, ..) -> NamespaceImport(local:, phase:)
+      ast.ImportNamespaceSpecifier(local:, ..) ->
+        NamespaceImport(local:, phase:)
     }
   })
 }
@@ -293,11 +299,7 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
     ) -> [
       ReExportNamespace(export_name: name, source_specifier: source),
     ]
-    ast.ExportAllDeclaration(
-      exported: None,
-      source: ast.StringLit(source),
-      ..,
-    ) -> [
+    ast.ExportAllDeclaration(exported: None, source: ast.StringLit(source), ..) -> [
       ReExportAll(source_specifier: source),
     ]
     _ -> []

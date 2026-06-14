@@ -95,14 +95,8 @@ pub fn import_declaration_span_round_trip_test() {
     #("import a from \"mod\";", "import a from \"mod\""),
     #("import * as ns from \"mod\";", "import * as ns from \"mod\""),
     #("import { a, b } from \"mod\";", "import { a, b } from \"mod\""),
-    #(
-      "import a, { b } from \"mod\";",
-      "import a, { b } from \"mod\"",
-    ),
-    #(
-      "import a, * as ns from \"mod\";",
-      "import a, * as ns from \"mod\"",
-    ),
+    #("import a, { b } from \"mod\";", "import a, { b } from \"mod\""),
+    #("import a, * as ns from \"mod\";", "import a, * as ns from \"mod\""),
     #("import defer * as ns from \"mod\";", "import defer * as ns from \"mod\""),
     // Non-ASCII before the import exercises byte-offset (not char) spans.
     #("const π = 1;\nimport \"m\";", "import \"m\""),
@@ -112,8 +106,7 @@ pub fn import_declaration_span_round_trip_test() {
       let #(src, expected) = c
       case import_decl_span_text(src) {
         Ok(text) if text == expected -> Error(Nil)
-        Ok(text) ->
-          Ok(src <> " -> got " <> string.inspect(text))
+        Ok(text) -> Ok(src <> " -> got " <> string.inspect(text))
         Error(reason) -> Ok(src <> " -> " <> reason)
       }
     })
@@ -121,7 +114,9 @@ pub fn import_declaration_span_round_trip_test() {
     [] -> Nil
     _ -> {
       list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
-      panic as { int.to_string(list.length(errors)) <> " span round-trips failed" }
+      panic as {
+        int.to_string(list.length(errors)) <> " span round-trips failed"
+      }
     }
   }
 }
@@ -133,17 +128,16 @@ fn import_decl_span_text(src: String) -> Result(String, String) {
     parser.parse(src, parser.Module)
     |> result.map_error(parser.parse_error_to_string),
   )
-  let span =
-    case program {
-      ast.Module(body) ->
-        list.find_map(body, fn(item) {
-          case item {
-            ast.ImportDeclaration(span:, ..) -> Ok(span)
-            _ -> Error(Nil)
-          }
-        })
-      ast.Script(_) -> Error(Nil)
-    }
+  let span = case program {
+    ast.Module(body) ->
+      list.find_map(body, fn(item) {
+        case item {
+          ast.ImportDeclaration(span:, ..) -> Ok(span)
+          _ -> Error(Nil)
+        }
+      })
+    ast.Script(_) -> Error(Nil)
+  }
   use span <- result.try(
     span |> result.replace_error("no ImportDeclaration found"),
   )
@@ -228,11 +222,11 @@ pub fn binding_span_round_trip_test() {
     #("import * as ns from \"mod\";", "import", [#("ns", "ns")]),
     #("import { a } from \"mod\";", "import", [#("a", "a")]),
     #("import { a as b } from \"mod\";", "import", [#("b", "b")]),
-    #(
-      "import x, { a, b as c } from \"mod\";",
-      "import",
-      [#("x", "x"), #("a", "a"), #("c", "c")],
-    ),
+    #("import x, { a, b as c } from \"mod\";", "import", [
+      #("x", "x"),
+      #("a", "a"),
+      #("c", "c"),
+    ]),
     // Non-ASCII binding exercises byte-offset (not char) spans.
     #("import { π } from \"mod\";", "import", [#("π", "π")]),
     #("const a = 1;\nexport { a };", "export", [#("a", "a")]),

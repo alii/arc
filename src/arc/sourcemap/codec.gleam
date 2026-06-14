@@ -171,9 +171,7 @@ pub fn to_json(map: SourceMap) -> String {
     [
       Some("\"version\":" <> int.to_string(map.version)),
       option.map(map.file, fn(f) { "\"file\":" <> json_string(f) }),
-      option.map(map.source_root, fn(r) {
-        "\"sourceRoot\":" <> json_string(r)
-      }),
+      option.map(map.source_root, fn(r) { "\"sourceRoot\":" <> json_string(r) }),
       Some("\"sources\":" <> json_array(list.map(map.sources, json_string))),
       Some(
         "\"sourcesContent\":"

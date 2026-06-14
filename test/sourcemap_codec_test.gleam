@@ -26,7 +26,9 @@ pub fn generate_mappings_empty_test() {
 /// A single segment at the very start of the output maps to source 0,
 /// line 0, col 0: all four deltas are zero -> "AAAA".
 pub fn generate_mappings_single_segment_test() {
-  let segs = [Segment(gen_line: 0, gen_col: 0, source_idx: 0, orig_line: 0, orig_col: 0)]
+  let segs = [
+    Segment(gen_line: 0, gen_col: 0, source_idx: 0, orig_line: 0, orig_col: 0),
+  ]
   assert codec.generate_mappings(segs) == "AAAA"
 }
 

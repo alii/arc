@@ -80,7 +80,8 @@ pub fn span_slice_roundtrip_test() {
 
 fn slice_span(source: String, span: ast.Span) -> String {
   let bytes = bit_array.from_string(source)
-  let assert Ok(slice) = bit_array.slice(bytes, span.start, span.end - span.start)
+  let assert Ok(slice) =
+    bit_array.slice(bytes, span.start, span.end - span.start)
   let assert Ok(text) = bit_array.to_string(slice)
   text
 }
@@ -143,8 +144,7 @@ fn decode_vlq_loop(
       let value = acc + int_shl(int_band(digit, 31), shift)
       case continued {
         True -> decode_vlq_loop(rest, value, shift + 5, out)
-        False ->
-          decode_vlq_loop(rest, 0, 0, [unsign_vlq(value), ..out])
+        False -> decode_vlq_loop(rest, 0, 0, [unsign_vlq(value), ..out])
       }
     }
   }

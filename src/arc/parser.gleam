@@ -5981,9 +5981,9 @@ fn parse_source_phase_import(
     binding_kind,
   ))
   use p3 <- result.try(check_duplicate_import_binding(p2, binding_name))
-  use #(p4, source, span_end) <- result.try(expect_from_module_specifier(
-    advance(p3),
-  ))
+  use #(p4, source, span_end) <- result.try(
+    expect_from_module_specifier(advance(p3)),
+  )
   Ok(#(
     p4,
     ast.ImportDeclaration(
@@ -6242,10 +6242,10 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     Async ->
       case peek_at(p2, 1) {
         Function ->
-          result.map(
-            parse_export_named_function(p2, True),
-            export_named_decl(p, _),
-          )
+          result.map(parse_export_named_function(p2, True), export_named_decl(
+            p,
+            _,
+          ))
         _ -> Error(ExpectedFunctionAfterAsync(pos_of(p2)))
       }
     Star -> {
@@ -6331,10 +6331,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
                   declaration: None,
                   specifiers:,
                   source: Some(ast.StringLit(value:)),
-                  span: ast.Span(
-                    start: pos_of(p),
-                    end: consumed_end(p, p6),
-                  ),
+                  span: ast.Span(start: pos_of(p), end: consumed_end(p, p6)),
                 ),
               ))
             }
