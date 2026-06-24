@@ -149,8 +149,7 @@ fn set_global(engine: Engine, h: Heap, name: String, val: JsValue) -> Engine {
 ///
 /// Drains the microtask queue only — there is no macrotask loop in core.
 /// If your host functions use `host.suspend`, drive your own loop via
-/// `eval_with` (e.g. `eval_with(eng, src, beam.run)` for the Erlang
-/// mailbox loop).
+/// `eval_with`, passing an embedder-supplied `finish` driver.
 pub fn eval(
   engine: Engine,
   source: String,
@@ -171,13 +170,10 @@ pub fn eval_with(
 
 /// Like `eval_with` but with an embedder `prepare` hook applied to the
 /// freshly booted State BEFORE the top-level script executes. Embedders
-/// whose `finish` driver installs host capabilities (e.g. `beam.run`'s
-/// Atomics blocking-wait/wake-delivery) must install them here too —
-/// `finish` only takes over after the script returns, and a top-level
-/// blocking `Atomics.wait` needs them mid-script:
-///
-///     engine.eval_prepared_with(
-///       eng, src, beam.install_atomics_capabilities, beam.run)
+/// whose `finish` driver installs host capabilities (e.g. the Atomics
+/// blocking-wait/wake-delivery contract in `arc/host`) must install them
+/// here too — `finish` only takes over after the script returns, and a
+/// top-level blocking `Atomics.wait` needs them mid-script.
 pub fn eval_prepared_with(
   engine: Engine,
   source: String,
@@ -230,7 +226,7 @@ pub fn eval_module(
 }
 
 /// Like `eval_module` but the caller supplies the post-evaluation driver
-/// (e.g. `beam.run` for a macrotask loop).
+/// (an embedder macrotask loop, or `event_loop.finish` for microtasks only).
 pub fn eval_module_with(
   engine: Engine,
   specifier: String,

@@ -316,38 +316,6 @@ pub fn read_eval_env(
   }
 }
 
-/// Read a PidObject's Erlang pid.
-pub fn read_pid(h: Heap(ctx), ref: Ref) -> Option(value.ErlangPid) {
-  case read(h, ref) {
-    Some(value.ObjectSlot(kind: value.PidObject(pid:), ..)) -> Some(pid)
-    _ -> None
-  }
-}
-
-/// Read a SubjectObject's pid and tag.
-pub fn read_subject(
-  h: Heap(ctx),
-  ref: Ref,
-) -> Option(#(value.ErlangPid, value.ErlangRef)) {
-  case read(h, ref) {
-    Some(value.ObjectSlot(kind: value.SubjectObject(pid:, tag:), ..)) ->
-      Some(#(pid, tag))
-    _ -> None
-  }
-}
-
-/// Read a SelectorObject's (tag, handler) entries.
-pub fn read_selector(
-  h: Heap(ctx),
-  ref: Ref,
-) -> Option(List(#(value.ErlangRef, value.JsValue))) {
-  case read(h, ref) {
-    Some(value.ObjectSlot(kind: value.SelectorObject(entries:), ..)) ->
-      Some(entries)
-    _ -> None
-  }
-}
-
 /// Read a RegExpObject, returning #(pattern, flags).
 pub fn read_regexp(h: Heap(ctx), ref: Ref) -> Option(#(String, String)) {
   case read(h, ref) {

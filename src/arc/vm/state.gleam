@@ -223,13 +223,6 @@ pub type State {
     /// §25.4.3.10 AddWaiter: pending Atomics.waitAsync waiters in FIFO order
     /// (oldest first). Atomics.notify settles matching entries with "ok".
     atomics_waiters: List(value.AtomicsWaiter),
-    /// Pending host timers scheduled by the global setTimeout, in insertion
-    /// order. The event loop fires due timers (earliest deadline first) when
-    /// the microtask queue is empty, and sleeps until the earliest deadline
-    /// instead of exiting while timers are pending.
-    timers: List(value.HostTimer),
-    /// Next id handed out by setTimeout (monotonically increasing from 1).
-    next_timer_id: Int,
     /// Count of in-flight external promises created via `host.suspend` and
     /// not yet settled via `host.resume`. Core never blocks on this — it's
     /// the embedder's macrotask loop that reads it to decide when to stop.
@@ -293,8 +286,6 @@ pub fn merge_globals(
     job_queue: job_queue.append(child.job_queue, extra_jobs),
     outstanding: child.outstanding,
     atomics_waiters: child.atomics_waiters,
-    timers: child.timers,
-    next_timer_id: child.next_timer_id,
   )
 }
 

@@ -468,12 +468,9 @@ fn run_eval(
       ),
       job_queue: state.job_queue,
       // Seed event-loop state from the caller: merge_globals threads
-      // timers/next_timer_id/outstanding/atomics_waiters back after
-      // execution, so starting from new_state's empty defaults would drop
-      // the caller's pending timers and waiters, reset the timer-id
-      // counter, and zero the outstanding host.suspend count.
-      timers: state.timers,
-      next_timer_id: state.next_timer_id,
+      // outstanding/atomics_waiters back after execution, so starting from
+      // new_state's empty defaults would drop the caller's pending waiters
+      // and zero the outstanding host.suspend count.
       outstanding: state.outstanding,
       atomics_waiters: state.atomics_waiters,
       eval_env:,

@@ -1,4 +1,3 @@
-import arc/beam
 import arc/compiler
 import arc/module
 import arc/parser
@@ -8,6 +7,7 @@ import arc/vm/completion.{
   type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
 }
 import arc/vm/exec/entry
+import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state
@@ -40,7 +40,6 @@ fn run_js(source: String) -> Result(Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          let h = beam.install_globals(h, b, global_object, "Arc")
           case entry.run(template, h, b, global_object) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
@@ -6423,142 +6422,6 @@ pub fn promise_finally_non_callable_test() -> Nil {
 }
 
 // ============================================================================
-// Arc global
-// ============================================================================
-
-pub fn arc_global_exists_test() -> Nil {
-  assert_normal("typeof Arc", JsString("object"))
-}
-
-pub fn arc_peek_exists_test() -> Nil {
-  assert_normal("typeof Arc.peek", JsString("function"))
-}
-
-pub fn arc_peek_resolved_type_test() -> Nil {
-  assert_normal("Arc.peek(Promise.resolve(42)).type", JsString("resolved"))
-}
-
-pub fn arc_peek_resolved_value_test() -> Nil {
-  assert_normal("Arc.peek(Promise.resolve(42)).value", JsNumber(Finite(42.0)))
-}
-
-pub fn arc_peek_rejected_type_test() -> Nil {
-  assert_normal(
-    "var r = Arc.peek(Promise.reject('oops')); r.type",
-    JsString("rejected"),
-  )
-}
-
-pub fn arc_peek_rejected_reason_test() -> Nil {
-  assert_normal(
-    "var r = Arc.peek(Promise.reject('oops')); r.reason",
-    JsString("oops"),
-  )
-}
-
-pub fn arc_peek_pending_type_test() -> Nil {
-  assert_normal(
-    "Arc.peek(new Promise(function() {})).type",
-    JsString("pending"),
-  )
-}
-
-pub fn arc_peek_pending_no_value_test() -> Nil {
-  // pending result has no value field
-  assert_normal("Arc.peek(new Promise(function() {})).value", JsUndefined)
-}
-
-pub fn arc_peek_not_promise_throws_test() -> Nil {
-  assert_thrown("Arc.peek(42)")
-}
-
-pub fn arc_peek_no_arg_throws_test() -> Nil {
-  assert_thrown("Arc.peek()")
-}
-
-pub fn arc_peek_object_throws_test() -> Nil {
-  // plain object is not a promise
-  assert_thrown("Arc.peek({})")
-}
-
-pub fn arc_peek_after_microtask_test() -> Nil {
-  // A promise that resolves via .then is pending until microtasks drain.
-  // Since Arc.peek is synchronous, peeking the outer .then() promise
-  // immediately should show pending (microtasks haven't run yet).
-  assert_normal(
-    "var p = Promise.resolve(1).then(function(x) { return x + 1; });
-     Arc.peek(p).type",
-    JsString("pending"),
-  )
-}
-
-pub fn arc_select_returns_selector_test() -> Nil {
-  assert_normal("typeof Arc.select().receive", JsString("function"))
-}
-
-pub fn arc_select_receive_identity_test() -> Nil {
-  assert_normal(
-    "var s = Arc.subject();
-     s.send(42);
-     Arc.select().on(s).receive()",
-    JsNumber(Finite(42.0)),
-  )
-}
-
-pub fn arc_select_receive_mapper_test() -> Nil {
-  assert_normal(
-    "var s = Arc.subject();
-     s.send(21);
-     Arc.select().on(s, function(m) { return m * 2 }).receive()",
-    JsNumber(Finite(42.0)),
-  )
-}
-
-pub fn arc_select_receive_timeout_test() -> Nil {
-  assert_normal(
-    "var s = Arc.subject();
-     Arc.select().on(s).receive(0)",
-    JsUndefined,
-  )
-}
-
-pub fn arc_select_receive_reusable_test() -> Nil {
-  assert_normal(
-    "var s = Arc.subject();
-     s.send(1); s.send(2);
-     var sel = Arc.select().on(s);
-     sel.receive() + sel.receive()",
-    JsNumber(Finite(3.0)),
-  )
-}
-
-pub fn arc_select_immutable_test() -> Nil {
-  assert_normal(
-    "var a = Arc.subject(); var b = Arc.subject();
-     b.send('b');
-     var base = Arc.select().on(a);
-     var withB = base.on(b);
-     withB.receive(); base.receive(0)",
-    JsUndefined,
-  )
-}
-
-pub fn arc_select_empty_receive_throws_test() -> Nil {
-  assert_thrown("Arc.select().receive()")
-}
-
-pub fn arc_select_on_non_subject_throws_test() -> Nil {
-  assert_thrown("Arc.select().on({})")
-}
-
-pub fn arc_select_tostring_tag_test() -> Nil {
-  assert_normal(
-    "Object.prototype.toString.call(Arc.select())",
-    JsString("[object Selector]"),
-  )
-}
-
-// ============================================================================
 // Generators
 // ============================================================================
 
@@ -7664,7 +7527,9 @@ fn run_module(source: String) -> Result(Completion, String) {
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
-      case module.evaluate_bundle(bundle, h, b, global_object, beam.run) {
+      case
+        module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
+      {
         Ok(module.EvaluatedBundle(value: val, heap: new_heap, ..)) ->
           Ok(NormalCompletion(val, new_heap))
         Error(module.EvaluationError(value: val, heap: new_heap)) ->
@@ -7822,7 +7687,9 @@ pub fn module_repl_harness_globals_test() -> Nil {
     )
 
   // Evaluate the module, passing in REPL globals
-  case module.evaluate_bundle(bundle, h, b, env.global_object, beam.run) {
+  case
+    module.evaluate_bundle(bundle, h, b, env.global_object, event_loop.finish)
+  {
     Ok(module.EvaluatedBundle(value: val, ..)) -> {
       let assert True = val == JsString("hello from harness")
       Nil
@@ -7857,7 +7724,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       fn(_resolved) { Error("no module loader") },
     )
   let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(namespace), ..)) =
-    module.evaluate_bundle(bundle, h, b, global_object, beam.run)
+    module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
 
   // Read `receive` off the namespace — no VM State needed.
   let assert Some(receive) = module.read_export(h, namespace, "receive")
@@ -7872,7 +7739,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
-      beam.run,
+      event_loop.finish,
     )
   let assert True = v1 == value.from_int(5)
 
@@ -7885,7 +7752,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
-      beam.run,
+      event_loop.finish,
     )
   let assert True = v2 == value.from_int(8)
 
@@ -7900,7 +7767,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
-      beam.run,
+      event_loop.finish,
     )
   let assert True = v3 == value.from_int(8)
   Nil
@@ -8093,182 +7960,6 @@ pub fn direct_eval_var_survives_throw_test() -> Nil {
   )
 }
 
-// ============================================================================
-// structuredClone (HTML §2.7.3 StructuredSerializeInternal)
-// ============================================================================
-
-pub fn structured_clone_exists_test() -> Nil {
-  assert_normal("typeof structuredClone", JsString("function"))
-}
-
-pub fn structured_clone_primitives_test() -> Nil {
-  assert_normal("structuredClone(undefined)", JsUndefined)
-  assert_normal("structuredClone(null)", JsNull)
-  assert_normal("structuredClone(true)", JsBool(True))
-  assert_normal("structuredClone(42)", JsNumber(Finite(42.0)))
-  assert_normal("structuredClone('hi')", JsString("hi"))
-}
-
-// NOTE: BigInt round-trip is implemented in serialize/deserialize
-// (arc.gleam PvBigInt), but Arc currently has no user-reachable BigInt
-// constructor — `123n` lexes but compiles to NumberLiteral(Float), and there
-// is no global BigInt(). So a JS-snippet test isn't possible yet.
-
-pub fn structured_clone_cycle_test() -> Nil {
-  assert_normal(
-    "var a = {}; a.self = a;
-     var b = structuredClone(a);
-     b.self === b && b !== a",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_shared_identity_test() -> Nil {
-  assert_normal(
-    "var x = {}; var arr = [x, x];
-     var c = structuredClone(arr);
-     c[0] === c[1] && c[0] !== x",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_map_test() -> Nil {
-  assert_normal(
-    "var m = new Map(); m.set('k', 7);
-     var c = structuredClone(m);
-     c instanceof Map && c !== m && c.get('k') === 7 && c.size === 1",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_set_test() -> Nil {
-  assert_normal(
-    "var s = new Set(); s.add(1); s.add(2);
-     var c = structuredClone(s);
-     c instanceof Set && c !== s && c.has(1) && c.has(2) && c.size === 2",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_date_test() -> Nil {
-  assert_normal(
-    "var d = new Date(1000);
-     var c = structuredClone(d);
-     c instanceof Date && c !== d && c.getTime() === 1000",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_regexp_test() -> Nil {
-  assert_normal(
-    "var r = /abc/gi;
-     var c = structuredClone(r);
-     c instanceof RegExp && c !== r && c.source === 'abc' && c.flags === 'gi'",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_boolean_wrapper_test() -> Nil {
-  assert_normal(
-    "var b = new Boolean(true);
-     var c = structuredClone(b);
-     Object.getPrototypeOf(c) === Boolean.prototype
-       && typeof c === 'object' && c.valueOf() === true && c !== b",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_number_wrapper_test() -> Nil {
-  assert_normal(
-    "var n = new Number(5);
-     var c = structuredClone(n);
-     Object.getPrototypeOf(c) === Number.prototype
-       && typeof c === 'object' && c.valueOf() === 5 && c !== n",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_string_wrapper_test() -> Nil {
-  assert_normal(
-    "var s = new String('ab');
-     var c = structuredClone(s);
-     Object.getPrototypeOf(c) === String.prototype
-       && typeof c === 'object' && c.valueOf() === 'ab' && c !== s",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_array_own_props_test() -> Nil {
-  assert_normal(
-    "var a = [1, 2]; a.foo = 'bar';
-     var c = structuredClone(a);
-     c.foo === 'bar' && c.length === 2 && c[0] === 1 && c !== a",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_map_own_props_test() -> Nil {
-  assert_normal(
-    "var m = new Map([['k', 1]]); m.foo = 'bar';
-     var c = structuredClone(m);
-     c.foo === 'bar' && c.get('k') === 1 && c instanceof Map && c !== m",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_set_own_props_test() -> Nil {
-  assert_normal(
-    "var s = new Set([1, 2]); s.foo = 'bar';
-     var c = structuredClone(s);
-     c.foo === 'bar' && c.has(1) && c.size === 2 && c instanceof Set && c !== s",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_symbol_throws_test() -> Nil {
-  assert_normal(
-    "try { structuredClone(Symbol()) }
-     catch (e) {
-       e instanceof DOMException && e.name === 'DataCloneError'
-         && e.code === 25
-     }",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_function_throws_test() -> Nil {
-  assert_normal(
-    "try { structuredClone(function(){}) }
-     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_promise_throws_test() -> Nil {
-  assert_normal(
-    "try { structuredClone(Promise.resolve(1)) }
-     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_weakmap_throws_test() -> Nil {
-  assert_normal(
-    "try { structuredClone(new WeakMap()) }
-     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
-    JsBool(True),
-  )
-}
-
-pub fn structured_clone_pid_throws_test() -> Nil {
-  // SpecClone rejects Arc platform objects.
-  assert_normal(
-    "try { structuredClone(Arc.self()) }
-     catch (e) { e instanceof DOMException && e.name === 'DataCloneError' }",
-    JsBool(True),
-  )
-}
-
 // ----------------------------------------------------------------------------
 // DOMException (WebIDL §2.8.1)
 // ----------------------------------------------------------------------------
@@ -8332,101 +8023,5 @@ pub fn dom_exception_to_string_tag_test() -> Nil {
   assert_normal(
     "Object.prototype.toString.call(new DOMException())",
     JsString("[object DOMException]"),
-  )
-}
-
-pub fn structured_clone_skips_accessor_test() -> Nil {
-  assert_normal(
-    "var o = {};
-     Object.defineProperty(o, 'x', { get: function(){ return 1 },
-                                     enumerable: true, configurable: true });
-     var c = structuredClone(o);
-     'x' in c",
-    JsBool(False),
-  )
-}
-
-pub fn structured_clone_skips_non_enumerable_test() -> Nil {
-  assert_normal(
-    "var o = {};
-     Object.defineProperty(o, 'x', { value: 1, enumerable: false });
-     var c = structuredClone(o);
-     'x' in c",
-    JsBool(False),
-  )
-}
-
-pub fn structured_clone_skips_symbol_keys_test() -> Nil {
-  assert_normal(
-    "var o = {}; o[Symbol.iterator] = 1; o.a = 2;
-     var c = structuredClone(o);
-     c.a === 2 && c[Symbol.iterator] === undefined",
-    JsBool(True),
-  )
-}
-
-// ============================================================================
-// Arc IPC clone (subject.send → ArcClone serialize/deserialize)
-// ============================================================================
-
-pub fn arc_send_symbol_and_pid_roundtrip_test() -> Nil {
-  // ArcClone permits well-known Symbol values + Pid objects, unlike SpecClone.
-  assert_normal(
-    "var s = Arc.subject();
-     var pid = Arc.self();
-     var msg = { sym: Symbol.iterator, p: pid, n: 7 };
-     s.send(msg);
-     var r = s.receive();
-     r.sym === Symbol.iterator
-       && Object.prototype.toString.call(r.p) === '[object Pid]'
-       && String(r.p) === String(pid)
-       && r.n === 7",
-    JsBool(True),
-  )
-}
-
-pub fn arc_send_symbol_key_roundtrip_test() -> Nil {
-  // ArcClone preserves well-known-symbol-keyed own properties.
-  assert_normal(
-    "var s = Arc.subject();
-     var msg = {}; msg[Symbol.toStringTag] = 'Tag';
-     s.send(msg);
-     var r = s.receive();
-     r[Symbol.toStringTag]",
-    JsString("Tag"),
-  )
-}
-
-pub fn arc_send_cycle_roundtrip_test() -> Nil {
-  assert_normal(
-    "var s = Arc.subject();
-     var a = {}; a.self = a;
-     s.send(a);
-     var r = s.receive();
-     r.self === r",
-    JsBool(True),
-  )
-}
-
-pub fn arc_send_function_throws_test() -> Nil {
-  // ArcClone still rejects functions.
-  assert_normal(
-    "var s = Arc.subject();
-     try { s.send(function(){}) } catch (e) { e instanceof TypeError }",
-    JsBool(True),
-  )
-}
-
-pub fn arc_send_skips_non_enumerable_test() -> Nil {
-  // Behavior change: ArcClone now silently SKIPS non-enumerable own props
-  // (previously errored).
-  assert_normal(
-    "var s = Arc.subject();
-     var o = { keep: 1 };
-     Object.defineProperty(o, 'hidden', { value: 2, enumerable: false });
-     s.send(o);
-     var r = s.receive();
-     r.keep === 1 && !('hidden' in r)",
-    JsBool(True),
   )
 }

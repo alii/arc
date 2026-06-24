@@ -229,8 +229,6 @@ fn merge_back(parent: State, child: State, heap: Heap) -> State {
     && child.job_queue == parent.job_queue
     && child.outstanding == parent.outstanding
     && child.atomics_waiters == parent.atomics_waiters
-    && child.timers == parent.timers
-    && child.next_timer_id == parent.next_timer_id
   {
     True -> State(..parent, heap:)
     False ->
@@ -248,8 +246,6 @@ fn merge_back(parent: State, child: State, heap: Heap) -> State {
         job_queue: child.job_queue,
         outstanding: child.outstanding,
         atomics_waiters: child.atomics_waiters,
-        timers: child.timers,
-        next_timer_id: child.next_timer_id,
       )
   }
 }
@@ -368,8 +364,6 @@ pub fn new_state(
     job_queue: job_queue.new(),
     unhandled_rejections: [],
     atomics_waiters: [],
-    timers: [],
-    next_timer_id: 1,
     outstanding: 0,
     call_depth: 0,
     eval_env: None,
@@ -5983,7 +5977,6 @@ fn maybe_collect_at_toplevel(state: State) -> State {
     && heap.grown_since_collect(state.heap) > gc_growth_threshold
     && dict.size(state.ctx.realms) == 0
     && state.atomics_waiters == []
-    && state.timers == []
     && state.outstanding == 0
     && state.unhandled_rejections == []
     && option.is_none(job_queue.pop(state.job_queue))

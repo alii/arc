@@ -1,4 +1,3 @@
-import arc/beam
 import arc/engine
 import arc/vm/builtins/console
 import arc/vm/completion.{NormalCompletion}
@@ -454,32 +453,12 @@ pub fn console_format_edge_cases_test() {
 }
 
 // ----------------------------------------------------------------------------
-// arc/beam — opt-in BEAM primitives as host fns
+// No host/process model in core — `Arc` is never defined.
 // ----------------------------------------------------------------------------
 
-pub fn beam_not_installed_by_default_test() {
+pub fn no_arc_global_by_default_test() {
   let eng = engine.new()
   assert assert_eval(eng, "typeof Arc") == JsString("undefined")
-}
-
-pub fn beam_install_test() {
-  let eng = engine.new() |> beam.install("Arc")
-  assert assert_eval(eng, "typeof Arc.spawn") == JsString("function")
-  assert assert_eval(eng, "typeof Arc.subject") == JsString("function")
-  assert assert_eval(eng, "Arc.peek(Promise.resolve(1)).type")
-    == JsString("resolved")
-}
-
-pub fn beam_install_custom_name_test() {
-  let eng = engine.new() |> beam.install("proc")
-  assert assert_eval(eng, "typeof proc.self") == JsString("function")
-  assert assert_eval(eng, "typeof Arc") == JsString("undefined")
-}
-
-pub fn beam_subject_roundtrip_test() {
-  let eng = engine.new() |> beam.install("Arc")
-  assert assert_eval(eng, "var s = Arc.subject(); s.send(42); s.receive()")
-    == JsNumber(Finite(42.0))
 }
 
 // ----------------------------------------------------------------------------

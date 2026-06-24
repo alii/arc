@@ -164,12 +164,6 @@ pub type EnvCapture {
   CaptureEnv(parent_env_index: Int)
 }
 
-/// An opaque Erlang process identifier. Only created/consumed via FFI.
-pub type ErlangPid
-
-/// Opaque Erlang timer reference (from erlang:send_after).
-pub type ErlangTimerRef
-
 /// A serializable message that can be sent between BEAM processes.
 /// Materializes heap-allocated structures (objects, arrays) into
 /// self-contained values that don't reference any specific VM heap.
@@ -227,10 +221,6 @@ pub type PortableRecord {
   PrBooleanObject(Bool)
   PrNumberObject(JsNum)
   PrStringObject(String)
-  /// Arc extension.
-  PrPid(ErlangPid)
-  /// Arc extension.
-  PrSubject(pid: ErlangPid, tag: ErlangRef)
 }
 
 /// JS number representation. BEAM floats can't represent NaN or Infinity,
@@ -1177,14 +1167,6 @@ pub type AtomicsWaiter {
   )
 }
 
-/// A pending host timer scheduled by the global `setTimeout`: the event loop
-/// calls `callback(..args)` once the monotonic clock passes `deadline`
-/// (absolute milliseconds, same clock as Atomics.waitAsync deadlines).
-/// `id` is the numeric handle returned to JS and accepted by `clearTimeout`.
-pub type HostTimer {
-  HostTimer(id: Int, deadline: Int, callback: JsValue, args: List(JsValue))
-}
-
 /// Element type read/written by DataView.prototype get*/set* methods.
 /// Table "The TypedArray Constructors" element sizes apply (1/2/4/8 bytes).
 pub type ViewElementType {
@@ -1751,8 +1733,6 @@ pub type VmNativeFn {
   FunctionToString
   /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
   IteratorSymbolIterator
-  /// HTML structuredClone(value) — serialize + deserialize on the same heap.
-  StructuredClone
   // Global functions
   Eval
   DecodeURI
@@ -1776,13 +1756,6 @@ pub type VmNativeFn {
   /// reserved heap id (`html_dda_id`) in typeof_value / is_truthy /
   /// abstract_equal.
   IsHTMLDDA
-  /// Host setTimeout(callback, delay, ...args) — schedule a host timer; the
-  /// event loop calls `callback(...args)` once `delay` ms elapse. Returns
-  /// the numeric timer id (HTML §8.6 timer initialisation steps).
-  SetTimeout
-  /// Host clearTimeout(id) — cancel a pending setTimeout timer. Unknown or
-  /// already-fired ids are ignored (HTML §8.6).
-  ClearTimeout
   /// BigInt ( value ) — §21.2.1.1. Callable only (new BigInt throws).
   BigIntGlobal
   /// BigInt.prototype.toString ( [ radix ] ) — §21.2.3.3.
@@ -1959,20 +1932,6 @@ pub type ExoticKind(ctx) {
   /// [[ShadowRealm]] internal slot — a RealmSlot ref on the heap whose
   /// builtins are registered in state.ctx.realms.
   ShadowRealmObject(realm_ref: Ref)
-  /// Erlang PID wrapper for Arc.spawn/self. Contains an opaque BEAM process
-  /// identifier that can be used with Arc.send.
-  PidObject(pid: ErlangPid)
-  /// Subject — a typed channel bound to a process. Wraps a PID (the owner)
-  /// and a unique ref (the tag). Messages sent to a subject are enveloped as
-  /// `{tag, PortableMessage}` in the BEAM mailbox, enabling efficient selective
-  /// receive via `is_map_key` guards. Maps to Gleam's `process.Subject`.
-  SubjectObject(pid: ErlangPid, tag: ErlangRef)
-  /// Selector — built by Arc.select(). Holds the (tag → handler) entries from
-  /// the builder so `.receive()` can be called repeatedly without rebuilding.
-  SelectorObject(entries: List(#(ErlangRef, JsValue)))
-  /// Timer handle returned by Arc.setTimeout — wraps the Erlang timer ref
-  /// and the promise data_ref so clearTimeout can cancel cleanly.
-  TimerObject(timer_ref: ErlangTimerRef, data_ref: Ref)
   /// Map object — ES2024 §24.1 Map Objects.
   /// Stores key-value pairs using SameValueZero equality.
   /// `entries` maps normalized MapKey → value. Original JS keys are
@@ -3338,8 +3297,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
           Dispatch(DisposableStackNative(UsingDisposer(method:, value:, ..))),
           ..,
         ) -> push_value_ref(method, push_value_ref(value, acc))
-        SelectorObject(entries:) ->
-          list.fold(entries, acc, fn(a, e) { push_value_ref(e.1, a) })
         // The namespace's live bindings are BoxSlot refs reachable via exports.
         ModuleNamespace(exports:) ->
           dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
@@ -3383,9 +3340,6 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
         | NumberObject(_)
         | BooleanObject(_)
         | SymbolObject(_)
-        | PidObject(_)
-        | SubjectObject(..)
-        | TimerObject(..)
         | DateObject(_)
         | TemporalDateSlot(..)
         | TemporalTimeSlot(..)

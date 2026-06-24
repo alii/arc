@@ -1,5 +1,4 @@
 import arc/vm/builtins/common
-import arc/vm/builtins/process_objects
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/opcode
@@ -3019,11 +3018,6 @@ fn inspect_object(
           "[Symbol: "
           <> inspect_inner(value.JsSymbol(sym), heap, depth, visited)
           <> "]"
-        value.PidObject(pid:) -> "Pid" <> process_objects.ffi_pid_to_string(pid)
-        value.SubjectObject(pid:, ..) ->
-          "Subject" <> process_objects.ffi_pid_to_string(pid)
-        value.SelectorObject(..) -> "Selector {}"
-        value.TimerObject(..) -> "Timer {}"
         value.MapObject(entries:, ..) ->
           "Map(" <> int.to_string(dict.size(entries)) <> ")"
         value.SetObject(data:, ..) ->

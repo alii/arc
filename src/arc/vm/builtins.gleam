@@ -402,15 +402,6 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       "unescape",
       1,
     )
-  let #(h, structured_clone) =
-    common.alloc_native_fn(
-      h,
-      function.prototype,
-      value.VmNative(value.StructuredClone),
-      "structuredClone",
-      1,
-    )
-
   // Intl namespace + service constructors (ECMA-402)
   let #(h, intl_builtin) =
     builtins_intl.init(
@@ -482,7 +473,6 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       encode_uri_component:,
       escape:,
       unescape:,
-      structured_clone:,
       array_iterator_proto:,
       set_iterator_proto:,
       map_iterator_proto:,
@@ -567,26 +557,6 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
       [],
     )
   let h = common.add_to_string_tag(h, shadow_realm.prototype, "ShadowRealm")
-  // Host timers (HTML §8.6) — fired by the core event loop between microtask
-  // flushes. Provided as globals like every JS shell/runtime (d8, qjs, Node);
-  // test262's atomicsHelper.js otherwise installs a busy-spin promise-chain
-  // setTimeout polyfill that allocates unboundedly.
-  let #(h, set_timeout_fn) =
-    common.alloc_native_fn(
-      h,
-      b.function.prototype,
-      value.VmNative(value.SetTimeout),
-      "setTimeout",
-      1,
-    )
-  let #(h, clear_timeout_fn) =
-    common.alloc_native_fn(
-      h,
-      b.function.prototype,
-      value.VmNative(value.ClearTimeout),
-      "clearTimeout",
-      1,
-    )
   let entries = [
     // §19.1: these are {writable: false, enumerable: false, configurable: false}
     Immutable("NaN", value.JsNumber(value.NaN)),
@@ -650,9 +620,6 @@ pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
     Builtin("encodeURIComponent", JsObject(b.encode_uri_component)),
     Builtin("escape", JsObject(b.escape)),
     Builtin("unescape", JsObject(b.unescape)),
-    Builtin("structuredClone", JsObject(b.structured_clone)),
-    Builtin("setTimeout", JsObject(set_timeout_fn)),
-    Builtin("clearTimeout", JsObject(clear_timeout_fn)),
     Builtin("Intl", JsObject(b.intl)),
   ]
   // The 11 TypedArray constructors (Int8Array .. BigUint64Array).

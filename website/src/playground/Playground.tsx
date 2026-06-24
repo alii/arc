@@ -12,19 +12,18 @@ import { useAtomVM } from './use-atomvm';
 
 const DEFAULT_EXAMPLE = {
 	name: 'playground',
-	code: `const inbox = Arc.subject();
-Arc.log("starting...");
-
-for (let i = 0; i < 3; i++) {
-  Arc.spawn(() => {
-    Arc.sleep(300 * (i + 1));
-    inbox.send("hello from process " + i);
-  });
+	code: `// Real JavaScript, running as WebAssembly via AtomVM.
+function* fib() {
+  let [a, b] = [0, 1];
+  while (true) {
+    yield a;
+    [a, b] = [b, a + b];
+  }
 }
 
-for (let i = 0; i < 3; i++) {
-  Arc.log(inbox.receive());
-}`,
+const take = (it, k) => Array.from({ length: k }, () => it.next().value);
+
+console.log(take(fib(), 10));`,
 };
 
 const examples = [DEFAULT_EXAMPLE, ...gitExamples];

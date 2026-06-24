@@ -427,10 +427,6 @@ fn handoff_roots(
       |> set.insert(w.promise_data.id)
       |> set.insert(w.promise.id)
     })
-  let acc =
-    list.fold(state.timers, acc, fn(a, t: value.HostTimer) {
-      list.fold(t.args, add_value_root(a, t.callback), add_value_root)
-    })
   let acc = case state.eval_env {
     Some(ref) -> set.insert(acc, ref.id)
     None -> acc

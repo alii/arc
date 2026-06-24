@@ -16,7 +16,6 @@ import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/frame
 import arc/vm/heap
 import arc/vm/internal/job_queue
-import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{
   type NativeFnSlot, type State, type StepResult, type VmError, State,
@@ -107,50 +106,45 @@ fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
     _ -> builtins_atomics.settle_expired_waiters(state)
   }
   case job_queue.pop(state.job_queue) {
-    None ->
-      case pop_due_timer(state) {
-        Some(#(state, timer)) ->
-          do_drain_jobs(fire_timer(state, timer), yield_to_embedder)
+    None -> {
+      // Embedder-visible wake sources: `host.suspend` promises settle
+      // from the embedder's mailbox, and pending waitAsync waiters can
+      // be woken by a cross-process Atomics.notify whose wake message
+      // also lands in the embedder's mailbox (inject_notify). Core
+      // owns no receive, so a yielding drain must hand control back
+      // whenever either is pending.
+      let embedder_wake_pending =
+        state.outstanding > 0 || state.atomics_waiters != []
+      case earliest_deadline(state) {
+        Some(_) if yield_to_embedder && embedder_wake_pending -> state
+        Some(deadline) -> {
+          let wait_ms =
+            int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1
+          // Plain bounded sleep until the earliest deadline — never a
+          // mailbox receive in core. A cross-process notify that lands
+          // during the sleep sits in the owning embedder's mailbox
+          // until its loop consumes it (embedder loops use the
+          // yielding drain, so they don't reach this arm with waiters
+          // pending). CAVEAT: a NON-yielding drain reaching this arm
+          // sleeps through any such wake — pending waiters settle
+          // "timed-out" at their deadline and infinite waiters exit
+          // the drain unsettled. That is only correct when the driver
+          // guarantees no cross-process wake source exists; a driver
+          // that exposes agent spawning (e.g. Arc.spawn) MUST use a
+          // notify-consuming embedder loop (beam.run / the yielding
+          // drain + wait_for_notify + inject_notify), not this one.
+          let Nil = builtins_atomics.sleep_ms(wait_ms)
+          do_drain_jobs(
+            builtins_atomics.settle_expired_waiters(state),
+            yield_to_embedder,
+          )
+        }
         None -> {
-          // Embedder-visible wake sources: `host.suspend` promises settle
-          // from the embedder's mailbox, and pending waitAsync waiters can
-          // be woken by a cross-process Atomics.notify whose wake message
-          // also lands in the embedder's mailbox (inject_notify). Core
-          // owns no receive, so a yielding drain must hand control back
-          // whenever either is pending.
-          let embedder_wake_pending =
-            state.outstanding > 0 || state.atomics_waiters != []
-          case earliest_deadline(state) {
-            Some(_) if yield_to_embedder && embedder_wake_pending -> state
-            Some(deadline) -> {
-              let wait_ms =
-                int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1
-              // Plain bounded sleep until the earliest deadline — never a
-              // mailbox receive in core. A cross-process notify that lands
-              // during the sleep sits in the owning embedder's mailbox
-              // until its loop consumes it (embedder loops use the
-              // yielding drain, so they don't reach this arm with waiters
-              // pending). CAVEAT: a NON-yielding drain reaching this arm
-              // sleeps through any such wake — pending waiters settle
-              // "timed-out" at their deadline and infinite waiters exit
-              // the drain unsettled. That is only correct when the driver
-              // guarantees no cross-process wake source exists; a driver
-              // that exposes agent spawning (e.g. Arc.spawn) MUST use a
-              // notify-consuming embedder loop (beam.run / the yielding
-              // drain + wait_for_notify + inject_notify), not this one.
-              let Nil = builtins_atomics.sleep_ms(wait_ms)
-              do_drain_jobs(
-                builtins_atomics.settle_expired_waiters(state),
-                yield_to_embedder,
-              )
-            }
-            None -> {
-              report_unhandled_rejections(state)
-              State(..state, unhandled_rejections: [])
-            }
-          }
+          report_unhandled_rejections(state)
+          State(..state, unhandled_rejections: [])
         }
       }
+    }
     Some(#(job, rest)) -> {
       let state = State(..state, job_queue: rest)
       let state = execute_job(state, job)
@@ -159,155 +153,19 @@ fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
   }
 }
 
-// ============================================================================
-// Host timers — the global setTimeout/clearTimeout (HTML §8.6).
-//
-// Timers are macrotasks: drain_jobs fires a due timer only when the
-// microtask queue is empty, then fully drains the jobs it enqueued before
-// firing the next one. When nothing is runnable, the loop sleeps until the
-// earliest pending deadline (timer or Atomics.waitAsync waiter).
-// ============================================================================
-
-/// Earliest pending deadline across Atomics.waitAsync waiters and host
-/// timers, if any.
+/// Earliest pending Atomics.waitAsync waiter deadline, if any.
 fn earliest_deadline(state: State) -> Option(Int) {
-  let timer_min =
-    list.fold(state.timers, None, fn(acc, t: value.HostTimer) {
-      case acc {
-        None -> Some(t.deadline)
-        Some(a) -> Some(int.min(a, t.deadline))
-      }
-    })
-  case builtins_atomics.earliest_waiter_deadline(state), timer_min {
-    None, t -> t
-    w, None -> w
-    Some(w), Some(t) -> Some(int.min(w, t))
-  }
+  builtins_atomics.earliest_waiter_deadline(state)
 }
 
-/// Milliseconds until the earliest pending macrotask deadline (host timer
-/// or Atomics.waitAsync waiter), if any. Embedder macrotask loops that own
-/// the mailbox receive (arc/beam.run) use this as their receive timeout so
-/// host timers and mailbox IO interleave correctly.
+/// Milliseconds until the earliest pending Atomics.waitAsync deadline, if any.
+/// Embedder macrotask loops that own a mailbox receive use this as their
+/// receive timeout so waitAsync deadlines and mailbox IO interleave correctly.
 pub fn next_deadline_timeout(state: State) -> Option(Int) {
   case earliest_deadline(state) {
     Some(deadline) ->
       Some(int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1)
     None -> None
-  }
-}
-
-/// Remove and return the host timer with the earliest deadline, provided the
-/// clock has already passed it. Ties resolve to the earliest-scheduled timer
-/// (list is insertion-ordered; HTML fires same-deadline timers FIFO).
-fn pop_due_timer(state: State) -> Option(#(State, value.HostTimer)) {
-  let due =
-    list.fold(
-      state.timers,
-      None,
-      fn(acc: Option(value.HostTimer), t: value.HostTimer) {
-        case acc {
-          None -> Some(t)
-          Some(best) ->
-            case t.deadline < best.deadline {
-              True -> Some(t)
-              False -> acc
-            }
-        }
-      },
-    )
-  case due {
-    None -> None
-    Some(timer) ->
-      case timer.deadline <= builtins_atomics.monotonic_now() {
-        False -> None
-        True -> {
-          let timers = list.filter(state.timers, fn(t) { t.id != timer.id })
-          Some(#(State(..state, timers:), timer))
-        }
-      }
-  }
-}
-
-/// Fire one host timer: call its callback with `this` = undefined. A throw
-/// from the callback is reported (like an uncaught error) and the loop
-/// continues — matching browser/Node timer semantics.
-fn fire_timer(state: State, timer: value.HostTimer) -> State {
-  case state.call(state, timer.callback, JsUndefined, timer.args) {
-    Ok(#(_, new_state)) -> new_state
-    Error(#(thrown, new_state)) -> {
-      io.println_error(
-        "Uncaught (in setTimeout callback) "
-        <> object.format_error(thrown, new_state.heap),
-      )
-      new_state
-    }
-  }
-}
-
-/// Host setTimeout(callback, delay, ...args) — HTML §8.6 timer
-/// initialisation steps (QuickJS-libc shape): the callback must be callable
-/// (TypeError otherwise), delay is coerced to a number with NaN / negative /
-/// non-finite clamped to 0, and the numeric timer id is returned.
-pub fn set_timeout_native(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let #(callback, delay, extra) = case args {
-    [] -> #(JsUndefined, JsUndefined, [])
-    [cb] -> #(cb, JsUndefined, [])
-    [cb, d, ..rest] -> #(cb, d, rest)
-  }
-  case helpers.is_callable(state.heap, callback) {
-    False -> state.type_error(state, "setTimeout: callback is not a function")
-    True ->
-      case coerce.js_to_number(state, delay) {
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(num, state)) -> {
-          let ms = case num {
-            value.Finite(f) -> int.max(value.float_to_int(f), 0)
-            _ -> 0
-          }
-          let deadline = builtins_atomics.monotonic_now() + ms
-          let id = state.next_timer_id
-          let timer = value.HostTimer(id:, deadline:, callback:, args: extra)
-          let state =
-            State(
-              ..state,
-              timers: list.append(state.timers, [timer]),
-              next_timer_id: id + 1,
-            )
-          #(state, Ok(value.from_int(id)))
-        }
-      }
-  }
-}
-
-/// Host clearTimeout(id) — cancel a pending setTimeout timer. Unknown,
-/// already-fired, or non-numeric ids are ignored (HTML §8.6).
-pub fn clear_timeout_native(
-  args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
-  let id_val = case args {
-    [v, ..] -> v
-    [] -> JsUndefined
-  }
-  case coerce.js_to_number(state, id_val) {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(num, state)) -> {
-      let state = case num {
-        value.Finite(f) -> {
-          let id = value.float_to_int(f)
-          State(
-            ..state,
-            timers: list.filter(state.timers, fn(t) { t.id != id }),
-          )
-        }
-        _ -> state
-      }
-      #(state, Ok(JsUndefined))
-    }
   }
 }
 

@@ -1,4 +1,3 @@
-import arc/beam
 import arc/compiler
 import arc/parser
 import arc/vm/builtins
@@ -19,7 +18,6 @@ fn run_js(source: String) -> Result(Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
-          let h = beam.install_globals(h, b, global_object, "Arc")
           case entry.run(template, h, b, global_object) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))

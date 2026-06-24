@@ -22,7 +22,6 @@ import arc/vm/builtins/reflect as builtins_reflect
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/builtins/set as builtins_set
 import arc/vm/builtins/string as builtins_string
-import arc/vm/builtins/structured_clone
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/builtins/temporal as builtins_temporal
 import arc/vm/builtins/typed_array as builtins_typed_array
@@ -33,7 +32,6 @@ import arc/vm/completion.{
   YieldCompletion,
 }
 import arc/vm/exec/async_generators
-import arc/vm/exec/event_loop
 import arc/vm/exec/frame
 import arc/vm/exec/generators
 import arc/vm/exec/promises
@@ -2684,8 +2682,6 @@ pub fn dispatch_native(
     value.MathNative(n) -> builtins_math.dispatch(n, args, this, state)
     value.ErrorNative(n) -> builtins_error.dispatch(n, args, this, state)
     value.ConsoleNative(n) -> builtins_console.dispatch(n, args, this, state)
-    value.VmNative(value.StructuredClone) ->
-      structured_clone.structured_clone(args, state)
     value.VmNative(value.EvalScript) ->
       realm.eval_script_native(args, this, state, execute_inner, new_state_fn)
     value.VmNative(value.CreateRealm) -> realm.create_realm_native(this, state)
@@ -2693,11 +2689,6 @@ pub fn dispatch_native(
     // $262.IsHTMLDDA() — returns null when called (Annex B §B.3.6 / test262
     // INTERPRETING.md). The exotic typeof/equality behaviors are not modeled.
     value.VmNative(value.IsHTMLDDA) -> #(state, Ok(value.JsNull))
-    // Host timers (HTML §8.6): global setTimeout / clearTimeout
-    value.VmNative(value.SetTimeout) ->
-      event_loop.set_timeout_native(args, state)
-    value.VmNative(value.ClearTimeout) ->
-      event_loop.clear_timeout_native(args, state)
     value.AtomicsNative(n) -> builtins_atomics.dispatch(n, args, this, state)
     value.JsonNative(n) -> builtins_json.dispatch(n, args, this, state)
     value.ReflectNative(n) -> builtins_reflect.dispatch(n, args, this, state)

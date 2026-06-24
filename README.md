@@ -11,10 +11,10 @@ JavaScript on the BEAM
 </picture>
 <br><br>
 
-Traditionally, JavaScript does concurrency with one event loop and a shared heap. The BEAM does it with isolated processes that share nothing. Arc is an experiment in running the former on the latter.
+Arc is a JavaScript engine written in [Gleam](https://gleam.run) — the whole language, not a subset. It runs wherever the BEAM runs: on Erlang/OTP, and in the browser through [AtomVM](https://www.atomvm.net) compiled to WebAssembly.
 <br><br>
 
-Arc is an entire JavaScript engine written in [Gleam](https://gleam.run). Every `Arc.spawn` is a real Erlang process. You can have millions of them, each with its own heap - no stop-the-world garbage collection, and a crash in one leaves the others untouched. These are guarantees JavaScript has never had.
+It implements the language itself — closures, generators, async/await, classes, proxies, typed arrays, plus Intl and Temporal. The engine is small and host-agnostic: it knows nothing about the world outside ECMAScript. You embed it in a BEAM program and give it the globals and host functions you want — timers, I/O, a concurrency model — instead of inheriting a fixed runtime.
 <br><br>
 
 Tested against [test262](https://github.com/tc39/test262) on every commit:

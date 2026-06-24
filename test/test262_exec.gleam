@@ -9,7 +9,6 @@
 ///   TEST262_EXEC=1 UPDATE_SNAPSHOT=1 gleam test — run and update the snapshot
 ///   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
 ///   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
-import arc/beam
 import arc/compiler
 import arc/internal/path
 import arc/module
@@ -712,7 +711,7 @@ fn do_run_module(
       // itself) resolves to the same module record instead of re-evaluating
       // it (§16.2.1.8).
       // Top-level driver is the notify-consuming embedder loop
-      // (beam.settle_pending_wakes — drains microtasks, then consumes
+      // (event_loop.finish — drains microtasks, then consumes
       // cross-process arc_notify wakes bounded by the earliest pending
       // deadline), so leftover jobs are always empty here.
       let #(new_heap, _jobs, result) =
@@ -721,7 +720,7 @@ fn do_run_module(
           b,
           global_object,
           bundle,
-          beam.settle_pending_wakes,
+          event_loop.finish,
         )
       case result {
         Ok(module.EvaluatedBundle(value: val, ..)) ->
@@ -808,8 +807,8 @@ fn do_run_script_with_harness(
               h,
               b,
               env,
-              beam.install_atomics_capabilities,
-              beam.settle_pending_wakes,
+              fn(s) { s },
+              event_loop.finish,
             )
           {
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
@@ -1211,7 +1210,6 @@ fn run_agent_child(source: String) -> Nil {
         )
       // The agent child is an embedder-driven State of its own: it blocks
       // in sync Atomics.wait and delivers notify wakes from THIS process.
-      let st = beam.install_atomics_capabilities(st)
       case interpreter.execute_inner(st) {
         Error(vm_err) ->
           io.println_error(
@@ -1226,7 +1224,7 @@ fn run_agent_child(source: String) -> Nil {
               )
             _ -> Nil
           }
-          let st = beam.settle_pending_wakes(st)
+          let st = event_loop.finish(st)
           agent_child_loop(st, agent_this)
         }
       }
@@ -1248,7 +1246,7 @@ fn agent_child_loop(st: State, agent_this: value.JsValue) -> Nil {
     AgentWakeParentDown -> Nil
     AgentWakeNotify(key, byte_index) -> {
       let st = event_loop.inject_notify(st, key, byte_index)
-      let st = beam.settle_pending_wakes(st)
+      let st = event_loop.finish(st)
       agent_child_loop(st, agent_this)
     }
     AgentWakeBroadcast(payload) -> {
@@ -1269,7 +1267,7 @@ fn agent_child_loop(st: State, agent_this: value.JsValue) -> Nil {
           })
         Error(Nil) -> st
       }
-      let st = beam.settle_pending_wakes(st)
+      let st = event_loop.finish(st)
       agent_child_loop(st, agent_this)
     }
   }

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { Code } from './components/code';
 import { ExternalLink } from './components/external-link';
 import { Playground } from './playground/Playground';
 
@@ -46,15 +45,17 @@ export default function App() {
 			</motion.div>
 
 			<motion.p variants={item}>
-				Traditionally, JavaScript does concurrency with one event loop and a shared heap. The BEAM does it with isolated
-				processes that share nothing. Arc is an experiment in running the former on the latter.
+				Arc is a JavaScript engine written in <ExternalLink href="https://gleam.run">Gleam</ExternalLink> — the whole
+				language, not a subset. It runs wherever the BEAM runs: on Erlang/OTP, and in the browser through{' '}
+				<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink> compiled to WebAssembly. The playground
+				above is Arc running as WebAssembly.
 			</motion.p>
 
 			<motion.p variants={item}>
-				Arc is an entire JavaScript engine written in <ExternalLink href="https://gleam.run">Gleam</ExternalLink>. Every{' '}
-				<Code>Arc.spawn</Code> is a real Erlang process. You can have millions of them, each with its own heap — no
-				stop-the-world garbage collection, and a crash in one leaves the others untouched. These are guarantees
-				JavaScript has never had.
+				It implements the language itself — closures, generators, async/await, classes, proxies, typed arrays, plus
+				Intl and Temporal. The engine is small and host-agnostic: it knows nothing about the world outside
+				ECMAScript. You embed it in a BEAM program and give it the globals and host functions you want — timers,
+				I/O, a concurrency model — instead of inheriting a fixed runtime.
 			</motion.p>
 
 			<motion.div variants={item}>

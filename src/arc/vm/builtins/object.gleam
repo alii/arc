@@ -1902,11 +1902,6 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
         value.AsyncFromSyncIteratorObject(..) -> "Async-from-Sync Iterator"
         value.WrapForValidIteratorObject(..) -> "Iterator"
         value.IteratorRecordObject(..) -> "Iterator"
-        // Arc-specific host objects (no spec equivalent).
-        value.PidObject(_) -> "Pid"
-        value.SubjectObject(..) -> "Subject"
-        value.SelectorObject(..) -> "Selector"
-        value.TimerObject(..) -> "Timer"
         // Step 14: everything else → "Object". Their display names come from
         // @@toStringTag on their prototypes (Map, Set, WeakMap, WeakSet,
         // Promise, BigInt, Module, the iterator prototypes, the Temporal

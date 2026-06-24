@@ -1,4 +1,3 @@
-import arc/beam
 import arc/compiler
 import arc/engine
 import arc/internal/path
@@ -226,12 +225,9 @@ fn read_file(path: String) -> Result(String, FileError)
 
 type FileError
 
-/// Run a JS source file and print the result (or error). `prepare` is
-/// applied to each freshly booted State before its top level executes —
-/// the beam-driven (`--event-loop`) path installs the Atomics host
-/// capabilities here so a top-level blocking `Atomics.wait` works without
-/// any prior `Arc.*` call (`beam.run` only takes over after the script
-/// returns).
+/// Run a JS source file and print the result (or error). `prepare` is applied
+/// to each freshly booted State before its top level executes; `finish` drains
+/// microtasks (and any embedder macrotask loop) after it returns.
 fn run_file(
   path: String,
   prepare: fn(state.State) -> state.State,
@@ -257,7 +253,7 @@ fn run_module_file(
   prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> Nil {
-  let eng = engine.new() |> beam.install("Arc")
+  let eng = engine.new()
   case
     engine.eval_module_prepared_with(
       eng,
@@ -300,7 +296,7 @@ fn run_script_file(
   prepare: fn(state.State) -> state.State,
   finish: fn(state.State) -> state.State,
 ) -> Nil {
-  let eng = engine.new() |> beam.install("Arc")
+  let eng = engine.new()
   case engine.eval_prepared_with(eng, source, prepare, finish) {
     Ok(#(ThrowCompletion(val, new_heap), _)) ->
       io.println("Uncaught " <> object.format_error(val, new_heap))
@@ -310,7 +306,7 @@ fn run_script_file(
 }
 
 fn new_repl_state() -> ReplState {
-  let eng = engine.new() |> beam.install("Arc")
+  let eng = engine.new()
   ReplState(
     heap: engine.heap(eng),
     builtins: engine.builtins(eng),
@@ -326,8 +322,6 @@ pub fn main() -> Nil {
       Nil
     }
 
-    ["--event-loop", path, ..] ->
-      run_file(path, beam.install_atomics_capabilities, beam.run)
     [path, ..] -> run_file(path, fn(s) { s }, event_loop.finish)
 
     [] -> {
