@@ -3,8 +3,9 @@ import arc/host
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/ops/coerce
 import arc/vm/state
-import arc/vm/value.{Finite, JsNumber, JsString, JsUndefined}
+import arc/vm/value.{Finite, JsNumber, JsObject, JsString, JsUndefined}
 import gleam/int
+import gleam/option
 import gleam/string
 
 fn extract_error_message(eng, source) -> String {
@@ -269,4 +270,43 @@ pub fn to_string_propagates_throw_test() {
     })
   let assert Ok(#(ThrowCompletion(..), _)) =
     engine.eval(eng, "str({ toString() { throw new Error('nope') } })")
+}
+
+// -- Opaque host values (HostObject) -----------------------------------------
+//
+// An embedder defines its OWN typed enum and stores it in the heap via
+// host.alloc_host_object, reading it back with host.read_host — fully typed,
+// no Dynamic, no coerce, exhaustive matching.
+
+type MyHost {
+  Pid(Int)
+  Socket(String)
+}
+
+pub fn host_object_typed_roundtrip_test() {
+  let eng =
+    engine.new()
+    |> engine.define_fn("makePid", 0, fn(_args, _this, s) {
+      let #(s, val) = host.alloc_host_object(s, Pid(42), option.None)
+      #(s, Ok(val))
+    })
+    |> engine.define_fn("readHost", 1, fn(args, _this, s) {
+      case args {
+        [JsObject(ref), ..] ->
+          case host.read_host(s.heap, ref) {
+            // typed, exhaustive — no Dynamic, no decode, no coerce
+            option.Some(Pid(n)) -> #(s, Ok(JsNumber(Finite(int.to_float(n)))))
+            option.Some(Socket(name)) -> #(s, Ok(JsString("socket:" <> name)))
+            option.None -> #(s, Ok(JsString("not-a-host-object")))
+          }
+        _ -> #(s, Ok(JsUndefined))
+      }
+    })
+
+  // round-trips the embedder's typed value through JS and back
+  assert eval_value(eng, "readHost(makePid())") == JsNumber(Finite(42.0))
+  // a plain JS object is not a host object
+  assert eval_value(eng, "readHost({})") == JsString("not-a-host-object")
+  // the host object is a real, identity-comparable JS object
+  assert eval_value(eng, "var p = makePid(); p === p") == value.JsBool(True)
 }

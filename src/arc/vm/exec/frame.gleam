@@ -18,10 +18,10 @@ import gleam/option.{type Option, None, Some}
 /// for them is unused; they read `this` via a capture from the enclosing
 /// non-arrow.
 pub fn bind_this(
-  state: State,
+  state: State(host),
   callee: FuncTemplate,
   this_arg: JsValue,
-) -> #(Heap, JsValue) {
+) -> #(Heap(host), JsValue) {
   case callee.is_arrow {
     // Step 2: thisMode is LEXICAL → arrows have no own `this` binding.
     // Their `this` reads resolve to a capture from the enclosing non-arrow,
@@ -63,7 +63,7 @@ pub fn bind_this(
 /// Hot path: every JS call goes through here. The tuple is built in one
 /// forward pass via FFI (no list.append/reverse/intermediate accumulator).
 pub fn setup_locals(
-  h: Heap,
+  h: Heap(host),
   env_ref: value.Ref,
   fn_ref: value.Ref,
   home_object: Option(value.Ref),

@@ -115,7 +115,11 @@ type TErr {
 // ============================================================================
 
 /// Build the whole Temporal global. Returns the namespace object ref.
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+pub fn init(
+  h: Heap(host),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap(host), Ref) {
   // Reserve all eight prototypes up front so each native-fn token can carry
   // refs to every sibling prototype.
   let #(h, pd_proto) = reserve_rooted(h)
@@ -433,7 +437,7 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
   #(h, ns_ref)
 }
 
-fn reserve_rooted(h: Heap) -> #(Heap, Ref) {
+fn reserve_rooted(h: Heap(host)) -> #(Heap(host), Ref) {
   let #(h, r) = heap.reserve(h)
   #(heap.root(h, r), r)
 }
@@ -441,7 +445,7 @@ fn reserve_rooted(h: Heap) -> #(Heap, Ref) {
 /// Build one Temporal type: constructor (with statics) + filled prototype
 /// (getters, methods, @@toStringTag, constructor backlink).
 fn init_temporal_type(
-  h: Heap,
+  h: Heap(host),
   kind: TemporalKind,
   protos: TemporalProtos,
   name: String,
@@ -452,7 +456,7 @@ fn init_temporal_type(
   methods: List(#(String, Int)),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   let #(h, static_props) =
     common.alloc_methods(
       h,
@@ -526,8 +530,8 @@ pub fn dispatch(
   native: TemporalNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     TemporalCtor(kind:, protos:) -> ctor_dispatch(kind, protos, args, state)
     TemporalStatic(kind:, name:, protos:) ->
@@ -544,8 +548,8 @@ fn ctor_dispatch(
   kind: TemporalKind,
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // All Temporal constructors throw TypeError when called without `new`
   // (NewTarget undefined). do_construct sets state.new_target for natives.
   case state.new_target {
@@ -574,10 +578,10 @@ fn ctor_dispatch(
 /// created object at it when it is an object. The intrinsic default proto
 /// stays when newTarget.prototype is not an object.
 fn apply_new_target_proto(
-  state: State,
+  state: State(host),
   nt: JsValue,
   v: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case nt, v {
     JsObject(nt_ref), JsObject(obj_ref) ->
       case ops_object.get_value(state, nt_ref, Named("prototype"), nt) {
@@ -926,7 +930,10 @@ fn format_offset_minutes(offset_ns: Int) -> String {
 // Branding helpers — extract internal slots from `this`
 // ============================================================================
 
-fn read_kind(state: State, this: JsValue) -> Option(value.ExoticKind(State)) {
+fn read_kind(
+  state: State(host),
+  this: JsValue,
+) -> Option(value.ExoticKind(State(host), host)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -937,7 +944,7 @@ fn read_kind(state: State, this: JsValue) -> Option(value.ExoticKind(State)) {
   }
 }
 
-fn this_date(state: State, this: JsValue) -> Option(IsoDate) {
+fn this_date(state: State(host), this: JsValue) -> Option(IsoDate) {
   case read_kind(state, this) {
     Some(TemporalDateSlot(year:, month:, day:, calendar: _)) ->
       Some(IsoDate(year:, month:, day:))
@@ -947,7 +954,7 @@ fn this_date(state: State, this: JsValue) -> Option(IsoDate) {
 
 /// Calendar slot of any calendared Temporal object (PlainDate,
 /// PlainDateTime, PlainYearMonth, PlainMonthDay, ZonedDateTime).
-fn this_calendar(state: State, this: JsValue) -> String {
+fn this_calendar(state: State(host), this: JsValue) -> String {
   case read_kind(state, this) {
     Some(TemporalDateSlot(calendar:, ..)) -> calendar
     Some(TemporalDateTimeSlot(calendar:, ..)) -> calendar
@@ -958,7 +965,7 @@ fn this_calendar(state: State, this: JsValue) -> String {
   }
 }
 
-fn this_time(state: State, this: JsValue) -> Option(TimeRec) {
+fn this_time(state: State(host), this: JsValue) -> Option(TimeRec) {
   case read_kind(state, this) {
     Some(TemporalTimeSlot(
       hour:,
@@ -973,7 +980,10 @@ fn this_time(state: State, this: JsValue) -> Option(TimeRec) {
   }
 }
 
-fn this_date_time(state: State, this: JsValue) -> Option(#(IsoDate, TimeRec)) {
+fn this_date_time(
+  state: State(host),
+  this: JsValue,
+) -> Option(#(IsoDate, TimeRec)) {
   case read_kind(state, this) {
     Some(TemporalDateTimeSlot(
       year:,
@@ -995,7 +1005,10 @@ fn this_date_time(state: State, this: JsValue) -> Option(#(IsoDate, TimeRec)) {
   }
 }
 
-fn this_year_month(state: State, this: JsValue) -> Option(#(Int, Int, Int)) {
+fn this_year_month(
+  state: State(host),
+  this: JsValue,
+) -> Option(#(Int, Int, Int)) {
   case read_kind(state, this) {
     Some(TemporalYearMonthSlot(year:, month:, day:, calendar: _)) ->
       Some(#(year, month, day))
@@ -1003,7 +1016,10 @@ fn this_year_month(state: State, this: JsValue) -> Option(#(Int, Int, Int)) {
   }
 }
 
-fn this_month_day(state: State, this: JsValue) -> Option(#(Int, Int, Int)) {
+fn this_month_day(
+  state: State(host),
+  this: JsValue,
+) -> Option(#(Int, Int, Int)) {
   case read_kind(state, this) {
     Some(TemporalMonthDaySlot(month:, day:, ref_year:, calendar: _)) ->
       Some(#(month, day, ref_year))
@@ -1011,7 +1027,7 @@ fn this_month_day(state: State, this: JsValue) -> Option(#(Int, Int, Int)) {
   }
 }
 
-fn this_duration(state: State, this: JsValue) -> Option(DurRec) {
+fn this_duration(state: State(host), this: JsValue) -> Option(DurRec) {
   case read_kind(state, this) {
     Some(TemporalDurationSlot(
       years:,
@@ -1041,14 +1057,17 @@ fn this_duration(state: State, this: JsValue) -> Option(DurRec) {
   }
 }
 
-fn this_instant(state: State, this: JsValue) -> Option(Int) {
+fn this_instant(state: State(host), this: JsValue) -> Option(Int) {
   case read_kind(state, this) {
     Some(TemporalInstantSlot(epoch_ns:)) -> Some(epoch_ns)
     _ -> None
   }
 }
 
-fn this_zoned(state: State, this: JsValue) -> Option(#(Int, String, String)) {
+fn this_zoned(
+  state: State(host),
+  this: JsValue,
+) -> Option(#(Int, String, String)) {
   case read_kind(state, this) {
     Some(TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:)) ->
       Some(#(epoch_ns, time_zone, calendar))
@@ -1057,10 +1076,10 @@ fn this_zoned(state: State, this: JsValue) -> Option(#(Int, String, String)) {
 }
 
 fn brand_error(
-  state: State,
+  state: State(host),
   type_name: String,
   name: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   state.type_error(
     state,
     "Temporal."
@@ -1076,28 +1095,28 @@ fn brand_error(
 // ============================================================================
 
 fn alloc_value(
-  state: State,
-  kind: value.ExoticKind(State),
+  state: State(host),
+  kind: value.ExoticKind(State(host), host),
   proto: Ref,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let #(h, ref) = common.alloc_wrapper(state.heap, kind, proto)
   #(State(..state, heap: h), JsObject(ref))
 }
 
 fn make_date(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   d: IsoDate,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   make_date_cal(state, protos, d, "iso8601")
 }
 
 fn make_date_cal(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   d: IsoDate,
   cal: String,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(
     state,
     TemporalDateSlot(year: d.year, month: d.month, day: d.day, calendar: cal),
@@ -1106,10 +1125,10 @@ fn make_date_cal(
 }
 
 fn make_time(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   t: TimeRec,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(
     state,
     TemporalTimeSlot(
@@ -1125,21 +1144,21 @@ fn make_time(
 }
 
 fn make_date_time(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   d: IsoDate,
   t: TimeRec,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   make_date_time_cal(state, protos, d, t, "iso8601")
 }
 
 fn make_date_time_cal(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   d: IsoDate,
   t: TimeRec,
   cal: String,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(
     state,
     TemporalDateTimeSlot(
@@ -1159,23 +1178,23 @@ fn make_date_time_cal(
 }
 
 fn make_year_month(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   y: Int,
   m: Int,
   ref_day: Int,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   make_year_month_cal(state, protos, y, m, ref_day, "iso8601")
 }
 
 fn make_year_month_cal(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   y: Int,
   m: Int,
   ref_day: Int,
   cal: String,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(
     state,
     TemporalYearMonthSlot(year: y, month: m, day: ref_day, calendar: cal),
@@ -1184,13 +1203,13 @@ fn make_year_month_cal(
 }
 
 fn make_month_day_cal(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   m: Int,
   d: Int,
   ref_year: Int,
   cal: String,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(
     state,
     TemporalMonthDaySlot(month: m, day: d, ref_year: ref_year, calendar: cal),
@@ -1217,10 +1236,10 @@ fn f64_int(n: Int) -> Int {
 }
 
 fn make_duration(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   dur: DurRec,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(
     state,
     TemporalDurationSlot(
@@ -1240,29 +1259,29 @@ fn make_duration(
 }
 
 fn make_instant(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   ns: Int,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(state, TemporalInstantSlot(epoch_ns: ns), protos.instant)
 }
 
 fn make_zoned(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   ns: Int,
   tz: String,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   make_zoned_cal(state, protos, ns, tz, "iso8601")
 }
 
 fn make_zoned_cal(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   ns: Int,
   tz: String,
   cal: String,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_value(
     state,
     TemporalZonedDateTimeSlot(epoch_ns: ns, time_zone: tz, calendar: cal),
@@ -1274,7 +1293,10 @@ fn make_zoned_cal(
 // Coercion helpers
 // ============================================================================
 
-fn throw_terr(state: State, e: TErr) -> #(State, Result(JsValue, JsValue)) {
+fn throw_terr(
+  state: State(host),
+  e: TErr,
+) -> #(State(host), Result(JsValue, JsValue)) {
   case e {
     RangeE(m) -> state.range_error(state, m)
     TypeE(m) -> state.type_error(state, m)
@@ -1283,10 +1305,10 @@ fn throw_terr(state: State, e: TErr) -> #(State, Result(JsValue, JsValue)) {
 
 /// CPS adapter: run a pure Result(a, TErr) op, throwing on Error.
 fn terr(
-  state: State,
+  state: State(host),
   r: Result(a, TErr),
-  k: fn(a) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  k: fn(a) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
     Ok(v) -> k(v)
     Error(e) -> throw_terr(state, e)
@@ -1295,9 +1317,9 @@ fn terr(
 
 /// ToIntegerWithTruncation: ToNumber, RangeError on NaN/±∞, truncate.
 fn to_integer_with_truncation(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   use num <- result.try(coerce.js_to_number(state, v))
   case num {
     #(Finite(f), st) -> Ok(#(value.float_to_int(f), st))
@@ -1307,9 +1329,9 @@ fn to_integer_with_truncation(
 
 /// ToPositiveIntegerWithTruncation: like above but must be > 0.
 fn to_positive_integer_with_truncation(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   use #(n, st) <- result.try(to_integer_with_truncation(state, v))
   case n > 0 {
     True -> Ok(#(n, st))
@@ -1319,9 +1341,9 @@ fn to_positive_integer_with_truncation(
 
 /// ToIntegerIfIntegral: ToNumber, RangeError unless an integral Number.
 fn to_integer_if_integral(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   use num <- result.try(coerce.js_to_number(state, v))
   case num {
     #(Finite(f), st) -> {
@@ -1338,9 +1360,9 @@ fn to_integer_if_integral(
 }
 
 fn range_error_result(
-  st: State,
+  st: State(host),
   msg: String,
-) -> Result(#(a, State), #(JsValue, State)) {
+) -> Result(#(a, State(host)), #(JsValue, State(host))) {
   let #(st, r) = st |> state.range_error(msg)
   case r {
     Error(err) -> Error(#(err, st))
@@ -1349,9 +1371,9 @@ fn range_error_result(
 }
 
 fn type_error_result(
-  st: State,
+  st: State(host),
   msg: String,
-) -> Result(#(a, State), #(JsValue, State)) {
+) -> Result(#(a, State(host)), #(JsValue, State(host))) {
   let #(st, r) = st |> state.type_error(msg)
   case r {
     Error(err) -> Error(#(err, st))
@@ -1362,9 +1384,9 @@ fn type_error_result(
 /// Minimal ToBigInt for Temporal entry points (Instant/ZonedDateTime ctors).
 /// Numbers throw TypeError per spec; strings must parse as an integer.
 fn to_bigint(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   case v {
     JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
     JsBool(True) -> Ok(#(1, state))
@@ -1403,9 +1425,9 @@ fn parse_bigint_string(s: String) -> Option(Int) {
 
 /// GetOptionsObject: undefined → None, object → Some(ref), else TypeError.
 fn get_options_object(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Option(Ref), State), #(JsValue, State)) {
+) -> Result(#(Option(Ref), State(host)), #(JsValue, State(host))) {
   case v {
     JsUndefined -> Ok(#(None, state))
     JsObject(ref) -> Ok(#(Some(ref), state))
@@ -1415,12 +1437,12 @@ fn get_options_object(
 
 /// GetOption for string-valued options.
 fn get_string_option(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   key: String,
   allowed: List(String),
   default: Option(String),
-) -> Result(#(Option(String), State), #(JsValue, State)) {
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
   case opts {
     None -> Ok(#(default, state))
     Some(ref) -> {
@@ -1450,9 +1472,9 @@ fn get_string_option(
 
 /// GetTemporalOverflowOption: "constrain" (default) or "reject".
 fn get_overflow_option(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   use #(v, st) <- result.map(get_string_option(
     state,
     opts,
@@ -1467,9 +1489,9 @@ fn get_overflow_option(
 /// argument and its "calendarName" option ("auto" default). Also returns the
 /// options object for callers that read further options from it.
 fn get_calendar_name_option(
-  state: State,
+  state: State(host),
   options_arg: JsValue,
-) -> Result(#(#(String, Option(Ref)), State), #(JsValue, State)) {
+) -> Result(#(#(String, Option(Ref)), State(host)), #(JsValue, State(host))) {
   use #(opts, state) <- result.try(get_options_object(state, options_arg))
   use #(cal_name, state) <- result.map(get_string_option(
     state,
@@ -2381,8 +2403,8 @@ fn arg_at(args: List(JsValue), idx: Int) -> JsValue {
 fn plain_date_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use y, state <- state.try_op(to_integer_with_truncation(
     state,
     arg_at(args, 0),
@@ -2415,8 +2437,8 @@ fn plain_date_ctor(
 fn plain_time_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use h, state <- state.try_op(opt_int_arg(state, args, 0))
   use mi, state <- state.try_op(opt_int_arg(state, args, 1))
   use s, state <- state.try_op(opt_int_arg(state, args, 2))
@@ -2435,10 +2457,10 @@ fn plain_time_ctor(
 
 /// Optional integer argument: undefined → 0, else ToIntegerWithTruncation.
 fn opt_int_arg(
-  state: State,
+  state: State(host),
   args: List(JsValue),
   idx: Int,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   case arg_at(args, idx) {
     JsUndefined -> Ok(#(0, state))
     v -> to_integer_with_truncation(state, v)
@@ -2449,8 +2471,8 @@ fn opt_int_arg(
 fn plain_date_time_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use y, state <- state.try_op(to_integer_with_truncation(
     state,
     arg_at(args, 0),
@@ -2491,8 +2513,8 @@ fn plain_date_time_ctor(
 fn plain_year_month_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use y, state <- state.try_op(to_integer_with_truncation(
     state,
     arg_at(args, 0),
@@ -2524,8 +2546,8 @@ fn plain_year_month_ctor(
 fn plain_month_day_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use m, state <- state.try_op(to_integer_with_truncation(
     state,
     arg_at(args, 0),
@@ -2552,8 +2574,8 @@ fn plain_month_day_ctor(
 fn duration_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use y, state <- state.try_op(opt_integral_arg(state, args, 0))
   use mo, state <- state.try_op(opt_integral_arg(state, args, 1))
   use w, state <- state.try_op(opt_integral_arg(state, args, 2))
@@ -2575,10 +2597,10 @@ fn duration_ctor(
 }
 
 fn opt_integral_arg(
-  state: State,
+  state: State(host),
   args: List(JsValue),
   idx: Int,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   case arg_at(args, idx) {
     JsUndefined -> Ok(#(0, state))
     v -> to_integer_if_integral(state, v)
@@ -2663,8 +2685,8 @@ fn time_duration_ns(d: DurRec) -> Int {
 fn instant_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
   case int.absolute_value(ns) <= ns_max_instant {
     False -> state.range_error(state, "epoch nanoseconds out of range")
@@ -2679,8 +2701,8 @@ fn instant_ctor(
 fn zoned_date_time_ctor(
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
   case arg_at(args, 1) {
     JsString(tz_str) -> {
@@ -2710,11 +2732,12 @@ fn zoned_date_time_ctor(
 /// Read a field from a property bag, converting with `conv`. Missing fields
 /// yield None.
 fn read_bag_int_field(
-  state: State,
+  state: State(host),
   ref: Ref,
   key: String,
-  conv: fn(State, JsValue) -> Result(#(Int, State), #(JsValue, State)),
-) -> Result(#(Option(Int), State), #(JsValue, State)) {
+  conv: fn(State(host), JsValue) ->
+    Result(#(Int, State(host)), #(JsValue, State(host))),
+) -> Result(#(Option(Int), State(host)), #(JsValue, State(host))) {
   use got <- result.try(ops_object.get_value(
     state,
     ref,
@@ -2733,9 +2756,9 @@ fn read_bag_int_field(
 /// Read the "monthCode" field: must be a String primitive "M01".."M13"
 /// optionally with an "L" suffix (leap month). Returns #(number, is_leap).
 fn read_month_code(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(Option(#(Int, Bool)), State), #(JsValue, State)) {
+) -> Result(#(Option(#(Int, Bool)), State(host)), #(JsValue, State(host))) {
   use got <- result.try(ops_object.get_value(
     state,
     ref,
@@ -2789,9 +2812,9 @@ fn month_code_str(m: Int) -> String {
 
 /// Read the "era" field: must be a String when present.
 fn read_bag_era(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(Option(String), State), #(JsValue, State)) {
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
   use got <- result.try(ops_object.get_value(
     state,
     ref,
@@ -2813,9 +2836,9 @@ fn read_bag_era(
 /// Read a property bag's "calendar" field; returns the canonical calendar
 /// id ("iso8601" when absent).
 fn read_bag_calendar(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   use got <- result.try(ops_object.get_value(
     state,
     ref,
@@ -2848,9 +2871,9 @@ fn read_bag_calendar(
 /// ToTemporalCalendarIdentifier(calendarLike) — string ids, ISO strings with
 /// annotations, and Temporal objects carrying a calendar slot.
 fn to_temporal_calendar_identifier(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   case v {
     JsString(s) ->
       case calendar_from_string(s) {
@@ -2893,10 +2916,10 @@ type DateFields {
 /// day, era, eraYear, month, monthCode, year. era/eraYear are only read for
 /// calendars with eras.
 fn read_date_fields(
-  state: State,
+  state: State(host),
   ref: Ref,
   cal: String,
-) -> Result(#(DateFields, State), #(JsValue, State)) {
+) -> Result(#(DateFields, State(host)), #(JsValue, State(host))) {
   use #(day, state) <- result.try(read_bag_int_field(
     state,
     ref,
@@ -2959,9 +2982,9 @@ fn time_fields_apply(f: TimeFields, base: TimeRec) -> TimeRec {
 /// Read time fields from a bag in spec (alphabetical) order: hour,
 /// microsecond, millisecond, minute, nanosecond, second.
 fn read_time_fields(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(TimeFields, State), #(JsValue, State)) {
+) -> Result(#(TimeFields, State(host)), #(JsValue, State(host))) {
   use #(hour, state) <- result.try(read_bag_int_field(
     state,
     ref,
@@ -3021,12 +3044,12 @@ fn date_time_fields_all_none(f: DateTimeFields) -> Bool {
 /// nanosecond, [offset], second, [timeZone], year. era/eraYear are read only
 /// for calendars with eras; offset and timeZone only when requested.
 fn read_date_time_fields(
-  state: State,
+  state: State(host),
   ref: Ref,
   cal: String,
   read_offset read_offset: Bool,
   read_tz read_tz: Bool,
-) -> Result(#(DateTimeFields, State), #(JsValue, State)) {
+) -> Result(#(DateTimeFields, State(host)), #(JsValue, State(host))) {
   use #(day, state) <- result.try(read_bag_int_field(
     state,
     ref,
@@ -3515,10 +3538,10 @@ fn step_calendar_month(cal: String, y: Int, m: Int, sign: Int) -> #(Int, Int) {
 /// ToTemporalDate(item [, options]) — returns the ISO date + calendar.
 /// Reads + validates options AFTER item conversion, per spec order.
 fn to_temporal_date(
-  state: State,
+  state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(IsoDate, String), State), #(JsValue, State)) {
+) -> Result(#(#(IsoDate, String), State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -3580,10 +3603,10 @@ fn parsed_calendar_id(p: ParsedIso) -> Result(String, TErr) {
 
 /// `use`-style adapter: Result(a, TErr) -> Result(#(b, State), ...).
 fn terr_r(
-  state: State,
+  state: State(host),
   r: Result(a, TErr),
-  k: fn(a) -> Result(#(b, State), #(JsValue, State)),
-) -> Result(#(b, State), #(JsValue, State)) {
+  k: fn(a) -> Result(#(b, State(host)), #(JsValue, State(host))),
+) -> Result(#(b, State(host)), #(JsValue, State(host))) {
   case r {
     Ok(v) -> k(v)
     Error(RangeE(m)) -> range_error_result(state, m)
@@ -3594,9 +3617,9 @@ fn terr_r(
 /// Helper: validate options object + read overflow (result often unused for
 /// instance copies, but the validation is observable).
 fn validated_overflow(
-  state: State,
+  state: State(host),
   options: JsValue,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   use #(opts, st) <- result.try(get_options_object(state, options))
   get_overflow_option(st, opts)
 }
@@ -3604,10 +3627,10 @@ fn validated_overflow(
 /// Property-bag → ISO date + calendar. Field read order: calendar, then
 /// alphabetical (day, era, eraYear, month, monthCode, year).
 fn date_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(IsoDate, String), State), #(JsValue, State)) {
+) -> Result(#(#(IsoDate, String), State(host)), #(JsValue, State(host))) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(fields, state) <- result.try(read_date_fields(state, ref, cal))
   use #(overflow, state) <- result.try(validated_overflow(state, options))
@@ -3620,10 +3643,10 @@ fn date_from_bag(
 
 /// ToTemporalTime(item [, options]).
 fn to_temporal_time(
-  state: State,
+  state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(TimeRec, State), #(JsValue, State)) {
+) -> Result(#(TimeRec, State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -3798,10 +3821,10 @@ fn is_month_day_like(s: String) -> Bool {
 /// Property bag → TimeRec. Alphabetical: hour, microsecond, millisecond,
 /// minute, nanosecond, second. At least one required.
 fn time_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(TimeRec, State), #(JsValue, State)) {
+) -> Result(#(TimeRec, State(host)), #(JsValue, State(host))) {
   use #(f, state) <- result.try(read_time_fields(state, ref))
   case f == no_time_fields {
     True ->
@@ -3834,9 +3857,9 @@ fn time_from_bag(
 
 /// ToTemporalDuration(item).
 fn to_temporal_duration(
-  state: State,
+  state: State(host),
   item: JsValue,
-) -> Result(#(DurRec, State), #(JsValue, State)) {
+) -> Result(#(DurRec, State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -3861,9 +3884,9 @@ fn to_temporal_duration(
 
 /// Duration property bag — alphabetical field order; at least one required.
 fn duration_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(DurRec, State), #(JsValue, State)) {
+) -> Result(#(DurRec, State(host)), #(JsValue, State(host))) {
   use #(days, state) <- result.try(read_bag_int_field(
     state,
     ref,
@@ -4154,8 +4177,8 @@ fn static_dispatch(
   name: String,
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case kind, name {
     TemporalPlainDateKind, "from" -> {
       use #(d, cal), state <- state.try_op(to_temporal_date(
@@ -4355,10 +4378,13 @@ fn compare_iso_date_time(
 
 /// ToTemporalDateTime(item [, options]).
 fn to_temporal_date_time(
-  state: State,
+  state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(IsoDate, TimeRec, String), State), #(JsValue, State)) {
+) -> Result(
+  #(#(IsoDate, TimeRec, String), State(host)),
+  #(JsValue, State(host)),
+) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -4412,10 +4438,13 @@ fn to_temporal_date_time(
 /// eraYear, hour, microsecond, millisecond, minute, month, monthCode,
 /// nanosecond, second, year).
 fn date_time_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(IsoDate, TimeRec, String), State), #(JsValue, State)) {
+) -> Result(
+  #(#(IsoDate, TimeRec, String), State(host)),
+  #(JsValue, State(host)),
+) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(f, state) <- result.try(read_date_time_fields(
     state,
@@ -4452,10 +4481,10 @@ fn date_time_from_bag(
 
 /// ToTemporalYearMonth(item [, options]).
 fn to_temporal_year_month(
-  state: State,
+  state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -4565,10 +4594,10 @@ fn check_ym_limits(
 /// Property bag → year-month. Fields: calendar, then era, eraYear, month,
 /// monthCode, year. Returns the ISO date of the calendar month's first day.
 fn year_month_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(era, state) <- result.try(case tcal.has_eras(cal) {
     True -> read_bag_era(state, ref)
@@ -4639,10 +4668,10 @@ fn resolve_calendar_year_month(
 
 /// ToTemporalMonthDay(item [, options]).
 fn to_temporal_month_day(
-  state: State,
+  state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -4842,10 +4871,10 @@ fn md_max_day(
 /// Property bag → month-day. Fields: calendar, then day, era, eraYear,
 /// month, monthCode, year.
 fn month_day_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State), #(JsValue, State)) {
+) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(fields, state) <- result.try(read_date_fields(state, ref, cal))
   use #(overflow, state) <- result.try(validated_overflow(state, options))
@@ -4981,9 +5010,9 @@ fn md_probe_year(cal: String, leap: Bool) -> Int {
 
 /// ToTemporalInstant(item) → epoch ns.
 fn to_temporal_instant(
-  state: State,
+  state: State(host),
   item: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -5010,9 +5039,9 @@ fn to_temporal_instant(
 }
 
 fn parse_instant_to_ns(
-  state: State,
+  state: State(host),
   s: String,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   // Per ParseTemporalInstantString, a [u-ca=...] annotation is only
   // syntax-checked (done by parse_iso_datetime_string); its value is
   // IGNORED for Instant, so unknown calendars must not throw here.
@@ -5047,10 +5076,10 @@ fn parse_instant_to_ns(
 
 /// ToTemporalZonedDateTime(item [, options]) → #(epoch_ns, tz, calendar).
 fn to_temporal_zoned(
-  state: State,
+  state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(Int, String, String), State), #(JsValue, State)) {
+) -> Result(#(#(Int, String, String), State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -5099,9 +5128,9 @@ fn to_temporal_zoned(
 
 /// ZonedDateTime options: disambiguation, offset, overflow (alphabetical).
 fn validated_zdt_options(
-  state: State,
+  state: State(host),
   options: JsValue,
-) -> Result(#(#(String, String, String), State), #(JsValue, State)) {
+) -> Result(#(#(String, String, String), State(host)), #(JsValue, State(host))) {
   use #(opts, state) <- result.try(get_options_object(state, options))
   use #(d, state) <- result.try(get_string_option(
     state,
@@ -5209,10 +5238,10 @@ fn regulate_time(t: TimeRec, overflow: String) -> Result(TimeRec, TErr) {
 /// microsecond, millisecond, minute, month, monthCode, nanosecond, offset,
 /// second, timeZone, year.
 fn zoned_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(Int, String, String), State), #(JsValue, State)) {
+) -> Result(#(#(Int, String, String), State(host)), #(JsValue, State(host))) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(f, state) <- result.try(read_date_time_fields(
     state,
@@ -5264,9 +5293,9 @@ fn zoned_from_bag(
 /// Read + validate an `offset` field from a property bag (ToOffsetString):
 /// ToPrimitive with string hint, require a String, then parse.
 fn read_bag_offset(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(Option(Int), State), #(JsValue, State)) {
+) -> Result(#(Option(Int), State(host)), #(JsValue, State(host))) {
   use #(v, state) <- result.try(
     ops_object.get_value(state, ref, Named("offset"), JsObject(ref))
     |> result.map(fn(p) { #(p.0, p.1) }),
@@ -5302,9 +5331,9 @@ type RelTo {
 /// GetTemporalRelativeToOption, after the `relativeTo` value itself has been
 /// read from the options bag.
 fn convert_relative_to(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(RelTo, State), #(JsValue, State)) {
+) -> Result(#(RelTo, State(host)), #(JsValue, State(host))) {
   case v {
     JsUndefined -> Ok(#(RelNone, state))
     JsObject(ref) ->
@@ -5380,9 +5409,9 @@ fn convert_relative_to(
 /// timeZone is optional (absent → plain date) and the options are fixed
 /// (overflow constrain, disambiguation compatible, offset reject).
 fn relative_from_bag(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(RelTo, State), #(JsValue, State)) {
+) -> Result(#(RelTo, State(host)), #(JsValue, State(host))) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(f, state) <- result.try(read_date_time_fields(
     state,
@@ -5489,8 +5518,8 @@ fn date_duration_days(
 /// Temporal.Duration.compare(one, two [, options]).
 fn duration_compare(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use a, state <- state.try_op(to_temporal_duration(state, arg_at(args, 0)))
   use b, state <- state.try_op(to_temporal_duration(state, arg_at(args, 1)))
   use opts, state <- state.try_op(get_options_object(state, arg_at(args, 2)))
@@ -5621,8 +5650,8 @@ fn getter_dispatch(
   name: String,
   protos: TemporalProtos,
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let _ = protos
   case kind {
     TemporalPlainDateKind ->
@@ -5881,12 +5910,12 @@ fn duration_field(d: DurRec, name: String) -> JsValue {
 }
 
 fn zoned_field(
-  state: State,
+  state: State(host),
   ns: Int,
   tz: String,
   zcal: String,
   name: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let offset = tz_offset_ns_at(tz, ns)
   let #(d, t) = epoch_ns_to_iso(ns, offset)
   case name {
@@ -5924,8 +5953,8 @@ fn now_dispatch(
   name: String,
   protos: TemporalProtos,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case name {
     "instant" -> {
       let #(state, v) = make_instant(state, protos, now_epoch_ns())
@@ -5963,9 +5992,9 @@ fn now_dispatch(
 }
 
 fn now_tz_arg(
-  state: State,
+  state: State(host),
   args: List(JsValue),
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   case arg_at(args, 0) {
     JsUndefined -> Ok(#("UTC", state))
     JsString(s) ->
@@ -5988,8 +6017,8 @@ fn method_dispatch(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case kind {
     TemporalPlainDateKind -> plain_date_method(name, protos, this, args, state)
     TemporalPlainTimeKind -> plain_time_method(name, protos, this, args, state)
@@ -6015,8 +6044,8 @@ fn plain_date_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_date(state, this) {
     None -> brand_error(state, "PlainDate", name)
     Some(d) -> {
@@ -6271,9 +6300,9 @@ fn calendar_with_fields(
 /// `with()` argument: must be an object with no calendar/timeZone properties
 /// and not a Temporal instance.
 fn require_partial_bag(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Ref, State), #(JsValue, State)) {
+) -> Result(#(Ref, State(host)), #(JsValue, State(host))) {
   case v {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -6375,11 +6404,11 @@ fn unit_ns(u: String) -> Int {
 
 /// Read a unit-valued option ("largestUnit"/"smallestUnit").
 fn get_unit_option(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   key: String,
   extra: List(String),
-) -> Result(#(Option(String), State), #(JsValue, State)) {
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
   get_unit_option_impl(state, opts, key, extra, keep_extra: False)
 }
 
@@ -6387,21 +6416,21 @@ fn get_unit_option(
 /// reported as Some(value) instead of collapsing to None, so callers can
 /// distinguish an explicit "auto" from an absent option.
 fn get_unit_option_keep(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   key: String,
   extra: List(String),
-) -> Result(#(Option(String), State), #(JsValue, State)) {
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
   get_unit_option_impl(state, opts, key, extra, keep_extra: True)
 }
 
 fn get_unit_option_impl(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   key: String,
   extra: List(String),
   keep_extra keep_extra: Bool,
-) -> Result(#(Option(String), State), #(JsValue, State)) {
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
   case opts {
     None -> Ok(#(None, state))
     Some(ref) -> {
@@ -6432,9 +6461,9 @@ fn get_unit_option_impl(
 }
 
 fn get_rounding_mode_option(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   use #(m, st) <- result.try(get_string_option(
     state,
     opts,
@@ -6449,9 +6478,9 @@ fn get_rounding_mode_option(
 }
 
 fn get_rounding_increment_option(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   case opts {
     None -> Ok(#(1, state))
     Some(ref) -> {
@@ -6541,11 +6570,11 @@ fn round_to_increment(x: Int, inc: Int, mode: String) -> Int {
 /// Continues with #(largest_opt, smallest_opt, inc, mode); callers apply
 /// their own per-type defaults and validation.
 fn get_difference_settings(
-  state: State,
+  state: State(host),
   args: List(JsValue),
-  cont: fn(Option(String), Option(String), Int, String, State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Option(String), Option(String), Int, String, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use opts, state <- state.try_op(get_options_object(state, arg_at(args, 1)))
   use largest, state <- state.try_op(
     get_unit_option(state, opts, "largestUnit", ["auto"]),
@@ -6584,14 +6613,14 @@ fn apply_since_ns(ns: Int, is_since: Bool) -> Int {
 
 /// PlainDate.prototype.until/since.
 fn date_until_since(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   cal: String,
   d1: IsoDate,
   d2: IsoDate,
   args: List(JsValue),
   is_since: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use largest, smallest, inc, mode, state <- get_difference_settings(
     state,
     args,
@@ -7058,8 +7087,8 @@ fn plain_time_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_time(state, this) {
     None -> brand_error(state, "PlainTime", name)
     Some(t) ->
@@ -7190,11 +7219,11 @@ fn plain_time_method(
 /// Returns #(precision, rounding unit, rounding increment, mode) — the
 /// increment scales the unit (ToSecondsStringPrecisionRecord).
 fn to_string_time_options(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
 ) -> Result(
-  #(#(Precision, Option(String), Int, String), State),
-  #(JsValue, State),
+  #(#(Precision, Option(String), Int, String), State(host)),
+  #(JsValue, State(host)),
 ) {
   use #(digits, state) <- result.try(get_fractional_digits(state, opts))
   use #(mode, state) <- result.try(get_rounding_mode_option(state, opts))
@@ -7234,9 +7263,9 @@ fn seconds_string_precision(
 }
 
 fn get_fractional_digits(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
-) -> Result(#(Precision, State), #(JsValue, State)) {
+) -> Result(#(Precision, State(host)), #(JsValue, State(host))) {
   case opts {
     None -> Ok(#(AutoPrec, state))
     Some(ref) -> {
@@ -7275,11 +7304,11 @@ fn get_fractional_digits(
 /// round() options: positional string shorthand or object with smallestUnit
 /// (required), roundingIncrement, roundingMode.
 fn round_options(
-  state: State,
+  state: State(host),
   arg: JsValue,
   _max_unit: String,
   allow_day: Bool,
-) -> Result(#(#(String, Int, String), State), #(JsValue, State)) {
+) -> Result(#(#(String, Int, String), State(host)), #(JsValue, State(host))) {
   case arg {
     JsUndefined -> type_error_result(state, "options parameter is required")
     JsString(s) ->
@@ -7347,11 +7376,11 @@ fn valid_time_increment(inc: Int, max: Int) -> Bool {
 /// GetDifferenceSettings tail: largest must not be smaller than smallest, and
 /// for a time-unit smallest the increment must divide the unit's maximum.
 fn check_diff_setup(
-  state: State,
+  state: State(host),
   largest: String,
   smallest: String,
   inc: Int,
-) -> Result(#(Nil, State), #(JsValue, State)) {
+) -> Result(#(Nil, State(host)), #(JsValue, State(host))) {
   case unit_rank(largest) < unit_rank(smallest) {
     True ->
       range_error_result(
@@ -7375,13 +7404,13 @@ fn check_diff_setup(
 }
 
 fn time_until_since(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   t1: TimeRec,
   t2: TimeRec,
   args: List(JsValue),
   is_since: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use largest, smallest, inc, mode, state <- get_difference_settings(
     state,
     args,
@@ -7468,8 +7497,8 @@ fn plain_date_time_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_date_time(state, this) {
     None -> brand_error(state, "PlainDateTime", name)
     Some(#(d, t)) -> {
@@ -7729,14 +7758,14 @@ fn plain_date_time_method(
 }
 
 fn date_time_until_since(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   cal: String,
   a: #(IsoDate, TimeRec),
   b: #(IsoDate, TimeRec),
   args: List(JsValue),
   is_since: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use largest, smallest, inc, mode, state <- get_difference_settings(
     state,
     args,
@@ -7869,8 +7898,8 @@ fn plain_year_month_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_year_month(state, this) {
     None -> brand_error(state, "PlainYearMonth", name)
     Some(#(y, m, rd)) -> {
@@ -8190,14 +8219,14 @@ fn format_ym(y: Int, m: Int) -> String {
 }
 
 fn year_month_until_since(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   cal: String,
   a: #(Int, Int, Int),
   b: #(Int, Int, Int),
   args: List(JsValue),
   is_since: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use largest, smallest, inc, mode, state <- get_difference_settings(
     state,
     args,
@@ -8347,8 +8376,8 @@ fn plain_month_day_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_month_day(state, this) {
     None -> brand_error(state, "PlainMonthDay", name)
     Some(#(m, d, ry)) -> {
@@ -8524,8 +8553,8 @@ fn duration_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_duration(state, this) {
     None -> brand_error(state, "Duration", name)
     Some(d) ->
@@ -8758,11 +8787,11 @@ fn default_largest_unit(d: DurRec) -> String {
 
 /// Temporal.Duration.prototype.round ( roundTo )
 fn duration_round(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   d: DurRec,
   args: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case arg_at(args, 0) {
     JsUndefined -> state.type_error(state, "options parameter is required")
     JsString(su_str) ->
@@ -8838,7 +8867,7 @@ fn duration_round(
 }
 
 fn duration_round_with(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   d: DurRec,
   largest: String,
@@ -8846,7 +8875,7 @@ fn duration_round_with(
   inc: Int,
   mode: String,
   rel: RelTo,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let largest = case largest {
     "auto" -> max_unit(default_largest_unit(d), smallest)
     u -> u
@@ -9172,10 +9201,10 @@ fn duration_target_datetime(
 
 /// Temporal.Duration.prototype.total ( totalOf )
 fn duration_total(
-  state: State,
+  state: State(host),
   d: DurRec,
   args: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case arg_at(args, 0) {
     JsUndefined -> state.type_error(state, "totalOf is required")
     JsString(u_str) ->
@@ -9204,11 +9233,11 @@ fn duration_total(
 }
 
 fn duration_total_with(
-  state: State,
+  state: State(host),
   d: DurRec,
   unit: String,
   rel: RelTo,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case rel {
     RelNone -> {
       let needs_rel =
@@ -9271,7 +9300,12 @@ fn duration_total_with(
             True -> start0_ns <= target_ns && target_ns <= end0_ns
             False -> end0_ns <= target_ns && target_ns <= start0_ns
           }
-          let finish = fn(state: State, whole: Int, start_ns: Int, end_ns: Int) {
+          let finish = fn(
+            state: State(host),
+            whole: Int,
+            start_ns: Int,
+            end_ns: Int,
+          ) {
             let num = target_ns - start_ns
             let den = end_ns - start_ns
             // Single correctly-rounded division of the exact rational
@@ -9568,8 +9602,8 @@ fn instant_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_instant(state, this) {
     None -> brand_error(state, "Instant", name)
     Some(ns) ->
@@ -9717,13 +9751,13 @@ fn format_instant(ns: Int, prec: Precision) -> String {
 }
 
 fn instant_until_since(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   a: Int,
   b: Int,
   args: List(JsValue),
   is_since: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use largest, smallest, inc, mode, state <- get_difference_settings(
     state,
     args,
@@ -9764,8 +9798,8 @@ fn zoned_date_time_method(
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_zoned(state, this) {
     None -> brand_error(state, "ZonedDateTime", name)
     Some(#(ns, tz, zcal)) -> {
@@ -10189,7 +10223,7 @@ fn zoned_date_time_method(
 }
 
 fn zoned_until_since(
-  state: State,
+  state: State(host),
   protos: TemporalProtos,
   cal: String,
   a_ns: Int,
@@ -10198,7 +10232,7 @@ fn zoned_until_since(
   b_tz: String,
   args: List(JsValue),
   is_since: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use largest, smallest, inc, mode, state <- get_difference_settings(
     state,
     args,

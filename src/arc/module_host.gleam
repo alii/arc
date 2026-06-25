@@ -72,13 +72,13 @@ pub type LoadFn =
 /// site, which takes precedence over the install-time referrer (§16.2.1.8's
 /// referencingScriptOrModule).
 pub fn install_import_hook(
-  h: Heap,
+  h: Heap(host),
   b: Builtins,
   global_object: Ref,
   referrer: String,
   resolve: ResolveFn,
   load: LoadFn,
-) -> Heap {
+) -> Heap(host) {
   let #(h, hook_ref) =
     common.alloc_host_fn(
       h,
@@ -102,11 +102,11 @@ pub fn install_import_hook(
 fn import_module(
   args: List(JsValue),
   _this: JsValue,
-  state: State,
+  state: State(host),
   entry_referrer: String,
   resolve: ResolveFn,
   load: LoadFn,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let specifier = case args {
     [JsString(s), ..] -> s
     _ -> ""
@@ -180,11 +180,11 @@ fn import_module(
 }
 
 fn evaluate_module(
-  state: State,
+  state: State(host),
   resolved: String,
   resolve: ResolveFn,
   load: LoadFn,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use source <- with_loaded_source(state, resolved, load)
   case module.compile_bundle(resolved, source, resolve, load) {
     Error(module.ParseError(msg)) -> syntax_error(state, msg)
@@ -262,12 +262,12 @@ fn evaluate_module(
 /// or dynamic) of the same module yield the identical object — once those
 /// evaluation promises settle (immediately when there are none).
 fn defer_import_module(
-  state: State,
+  state: State(host),
   resolved: String,
   resolve: ResolveFn,
   load: LoadFn,
   capability: option.Option(#(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // An already-failed module repeats the same rejection; an already
   // registered deferred namespace is returned as-is.
   case read_cached(state, error_cache_property, resolved) {
@@ -358,11 +358,11 @@ fn defer_import_module(
 /// Read `resolved`'s source for compilation, or reject the import with a
 /// TypeError (host load error). Cached imports never get here.
 fn with_loaded_source(
-  state: State,
+  state: State(host),
   resolved: String,
   load: LoadFn,
-  then: fn(String) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  then: fn(String) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case load(resolved) {
     Error(reason) ->
       state.type_error(
@@ -377,12 +377,12 @@ fn with_loaded_source(
 /// asynchronous transitive dependencies; resolve the import promise with the
 /// deferred namespace only after their top-level promises settle.
 fn evaluate_deferred_async_deps(
-  state: State,
+  state: State(host),
   resolved: String,
   ns: JsValue,
   linked_bundle: module.LinkedBundle,
   capability: option.Option(#(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // As in evaluate_module: never drain a nested event loop here — bodies run
   // with an identity driver and any jobs they enqueued (including the parked
   // top-level-await continuations) are appended to the host's queue.
@@ -448,12 +448,12 @@ fn evaluate_deferred_async_deps(
 /// deferred namespace once every one fulfills, rejecting on the first
 /// rejection.
 fn chain_deferred_settlement(
-  state: State,
+  state: State(host),
   ns: JsValue,
   pendings: List(#(String, Ref)),
   resolve_fn: JsValue,
   reject_fn: JsValue,
-) -> State {
+) -> State(host) {
   case pendings {
     [] -> call_import_settle_fn(state, resolve_fn, ns)
     [#(dep_spec, tla_data_ref), ..rest] -> {
@@ -527,10 +527,10 @@ fn chain_deferred_settlement(
 /// Call one of the import promise's resolving functions (§27.2.1.3 — they
 /// return undefined and never throw); log defensively if one somehow does.
 fn call_import_settle_fn(
-  state: State,
+  state: State(host),
   settle_fn: JsValue,
   arg: JsValue,
-) -> State {
+) -> State(host) {
   case state.call(state, settle_fn, JsUndefined, [arg]) {
     Ok(#(_, state)) -> state
     Error(#(thrown, state)) -> {
@@ -547,11 +547,14 @@ fn call_import_settle_fn(
 /// every new module's namespace and deferred namespace so later imports —
 /// eager or deferred, static or dynamic — resolve to the same module records.
 fn link_bundle_with_registry(
-  h: Heap,
+  h: Heap(host),
   b: Builtins,
   global_object: Ref,
   bundle: module.ModuleBundle,
-) -> Result(#(Heap, module.LinkedBundle), #(Heap, module.ModuleError)) {
+) -> Result(
+  #(Heap(host), module.LinkedBundle),
+  #(Heap(host), module.ModuleError(host)),
+) {
   let specs = dict.keys(bundle.modules)
   let preexisting =
     list.fold(specs, dict.new(), fn(acc, spec) {
@@ -619,10 +622,10 @@ fn link_bundle_with_registry(
 /// in-flight evaluation, and hand it to the import machinery — the import
 /// promise adopts it via the standard resolving functions (§27.2.1.3.2).
 fn pending_module_promise(
-  state: State,
+  state: State(host),
   resolved: String,
   tla_data_ref: Ref,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // The namespace was pre-published in the registry before any body ran.
   case read_cached(state, cache_property, resolved) {
     Some(JsObject(_) as namespace) -> {
@@ -734,15 +737,15 @@ fn echo_unexpected_pending_namespace(resolved: String, val: JsValue) -> Nil {
 /// sharing a realm, so `import './a.js'` and `import('./a.js')` yield the
 /// same module record.
 pub fn evaluate_bundle_with_registry(
-  h: Heap,
+  h: Heap(host),
   b: Builtins,
   global_object: Ref,
   bundle: module.ModuleBundle,
-  finish: fn(State) -> State,
+  finish: fn(State(host)) -> State(host),
 ) -> #(
-  Heap,
+  Heap(host),
   List(value.Job),
-  Result(module.EvaluatedBundle, module.ModuleError),
+  Result(module.EvaluatedBundle(host), module.ModuleError(host)),
 ) {
   let specs = dict.keys(bundle.modules)
   let preexisting =
@@ -817,9 +820,9 @@ pub fn evaluate_bundle_with_registry(
 
 /// Allocate a SyntaxError (with stack) and return it as the rejection reason.
 fn syntax_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
   let state =
     state.attach_stack(
@@ -832,7 +835,7 @@ fn syntax_error(
 
 /// Read `key` off the hidden cache object `property` on the global, if both exist.
 fn read_cached(
-  state: State,
+  state: State(host),
   property: String,
   key: String,
 ) -> option.Option(JsValue) {
@@ -840,7 +843,7 @@ fn read_cached(
 }
 
 fn read_cached_heap(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   property: String,
   key: String,
@@ -858,23 +861,23 @@ fn read_cached_heap(
 /// Write `key` → `val` into the hidden cache object `property` on the global,
 /// creating the cache object on first use.
 fn write_cached(
-  state: State,
+  state: State(host),
   property: String,
   key: String,
   val: JsValue,
-) -> State {
+) -> State(host) {
   let h =
     write_cached_heap(state.heap, state.ctx.global_object, property, key, val)
   State(..state, heap: h)
 }
 
 fn write_cached_heap(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   property: String,
   key: String,
   val: JsValue,
-) -> Heap {
+) -> Heap(host) {
   let #(h, cache_ref) = case
     object.get_own_property(h, global_object, Named(property))
   {

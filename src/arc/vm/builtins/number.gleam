@@ -23,10 +23,10 @@ import gleam/string
 /// Set up Number constructor + Number.prototype + global parseInt/parseFloat/isNaN/isFinite.
 /// Returns #(Heap, BuiltinType, parse_int_ref, parse_float_ref, is_nan_ref, is_finite_ref).
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType, Ref, Ref, Ref, Ref) {
+) -> #(Heap(host), BuiltinType, Ref, Ref, Ref, Ref) {
   // Static methods on Number constructor
   let #(h, static_methods) =
     common.alloc_methods(h, function_proto, [
@@ -124,8 +124,8 @@ pub fn dispatch(
   native: NumberNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     NumberConstructor -> call_as_function(args, state)
     NumberIsNaN -> number_is_nan(args, state)
@@ -161,8 +161,8 @@ pub fn dispatch(
 /// in exec/call.gleam's do_construct, which wraps the result in a NumberObject.
 fn call_as_function(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: If no arguments, n = +0
   // Step 2: Else, n = ToNumeric(value): ToPrimitive first, and a BigInt
   // primitive becomes 𝔽(ℝ(prim)) (NumberConstructor step 1.a) — unlike
@@ -216,8 +216,8 @@ fn bigint_to_float(n: Int) -> JsNum {
 ///
 fn parse_int(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Let inputString be ? ToString(string).
   // Step 2: Let S be TrimString(inputString, START).
   let str_result = case args {
@@ -277,8 +277,8 @@ fn parse_int(
 /// this implementation returns NaN.
 fn parse_float(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Let inputString be ? ToString(string).
   // Step 2: Let trimmedString be TrimString(inputString, START).
   let str_result = case args {
@@ -319,8 +319,8 @@ fn parse_decimal_string(str: String) -> JsNum {
 /// Number.isNaN("hello") is false (not a Number type at all).
 fn js_is_nan(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
   // Step 1: Let num be ? ToNumber(number).
   let num = builtins_math.to_number(val)
@@ -342,8 +342,8 @@ fn js_is_nan(
 /// So isFinite("42") is true, but Number.isFinite("42") is false.
 fn js_is_finite(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
   // Step 1: Let num be ? ToNumber(number).
   let num = builtins_math.to_number(val)
@@ -362,8 +362,8 @@ fn js_is_finite(
 ///   3. Otherwise, return false.
 fn number_is_nan(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 1-3: Only true if argument is literally the Number value NaN.
   let result = case args {
     [JsNumber(NaN), ..] -> value.JsBool(True)
@@ -379,8 +379,8 @@ fn number_is_nan(
 ///   3. Otherwise, return true.
 fn number_is_finite(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 1-3: Only true if argument is a Number and is finite.
   let result = case args {
     [JsNumber(Finite(_)), ..] -> value.JsBool(True)
@@ -398,8 +398,8 @@ fn number_is_finite(
 ///   5. Return true.
 fn number_is_integer(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let result = case args {
     // Steps 1-2: Must be a finite Number.
     [JsNumber(Finite(n)), ..] -> {
@@ -422,8 +422,8 @@ fn number_is_integer(
 fn number_value_of(
   this: JsValue,
   _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Return ? thisNumberValue(this value).
   use n, state <- require_number(this, state, "valueOf")
   #(state, Ok(JsNumber(n)))
@@ -449,8 +449,8 @@ fn number_value_of(
 fn number_to_string(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Let x be ? thisNumberValue(this value).
   use n, state <- require_number(this, state, "toString")
   // Steps 2-3: radix defaults to 10; undefined -> 10.
@@ -480,7 +480,7 @@ fn number_to_string(
 /// Used by Number.prototype.valueOf and Number.prototype.toString to
 /// unwrap `this`. Returns None instead of throwing — caller is responsible
 /// for producing the TypeError.
-fn this_number_value(state: State, this: JsValue) -> Option(JsNum) {
+fn this_number_value(state: State(host), this: JsValue) -> Option(JsNum) {
   case this {
     // Step 1: If value is a Number, return value.
     JsNumber(n) -> Some(n)
@@ -494,8 +494,8 @@ fn this_number_value(state: State, this: JsValue) -> Option(JsNum) {
 /// Number.isSafeInteger(number) — ES2024 §21.1.2.5
 fn number_is_safe_integer(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let result = case args {
     [JsNumber(Finite(n)), ..] -> {
       let truncated = int.to_float(float.truncate(n))
@@ -514,8 +514,8 @@ fn number_is_safe_integer(
 fn number_to_fixed(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- require_number(this, state, "toFixed")
   let f = case args {
     [v, ..] -> arg_to_int(v, 0)
@@ -535,8 +535,8 @@ fn number_to_fixed(
 fn number_to_exponential(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- require_number(this, state, "toExponential")
   let f = case args {
     [JsUndefined, ..] | [] -> -1
@@ -559,8 +559,8 @@ fn number_to_exponential(
 fn number_to_precision(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- require_number(this, state, "toPrecision")
   case args {
     // If precision is undefined, behave as toString.
@@ -593,10 +593,10 @@ fn number_to_precision(
 /// CPS-style — call with `use n, state <- require_number(this, state, "method")`.
 fn require_number(
   this: JsValue,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(JsNum, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsNum, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_number_value(state, this) {
     Some(n) -> cont(n, state)
     None ->

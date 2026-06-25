@@ -25,7 +25,7 @@ import gleam/string
 // ============================================================================
 
 /// Parse + compile + run JS source, return the completion value.
-fn run_js(source: String) -> Result(Completion, String) {
+fn run_js(source: String) -> Result(Completion(host), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(program) ->
@@ -6982,7 +6982,7 @@ pub fn promise_ordering_finally_timing_test() -> Nil {
 /// Evaluate multiple REPL lines in sequence, returning the result of the last line.
 fn run_repl_lines(
   lines: List(String),
-) -> Result(#(value.JsValue, state.Heap), String) {
+) -> Result(#(value.JsValue, state.Heap(host)), String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
@@ -6991,10 +6991,10 @@ fn run_repl_lines(
 
 fn run_repl_lines_loop(
   lines: List(String),
-  h: state.Heap,
+  h: state.Heap(host),
   b: common.Builtins,
   env: entry.ReplEnv,
-) -> Result(#(value.JsValue, state.Heap), String) {
+) -> Result(#(value.JsValue, state.Heap(host)), String) {
   case lines {
     [] -> Error("no lines to evaluate")
     [line] -> {
@@ -7011,10 +7011,10 @@ fn run_repl_lines_loop(
 
 fn eval_repl_line(
   source: String,
-  h: state.Heap,
+  h: state.Heap(host),
   b: common.Builtins,
   env: entry.ReplEnv,
-) -> Result(#(value.JsValue, state.Heap, entry.ReplEnv), String) {
+) -> Result(#(value.JsValue, state.Heap(host), entry.ReplEnv), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(program) ->
@@ -7050,7 +7050,7 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
 
 fn run_repl_throw_loop(
   lines: List(String),
-  h: state.Heap,
+  h: state.Heap(host),
   b: common.Builtins,
   env: entry.ReplEnv,
 ) -> Result(Nil, String) {
@@ -7511,7 +7511,7 @@ pub fn strict_reference_error_type_test() -> Nil {
 // ============================================================================
 
 /// Parse + compile + run JS module source via the bundle system.
-fn run_module(source: String) -> Result(Completion, String) {
+fn run_module(source: String) -> Result(Completion(host), String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)

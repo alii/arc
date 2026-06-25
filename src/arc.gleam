@@ -23,8 +23,8 @@ fn read_line(prompt: String) -> Result(String, Nil)
 
 // -- REPL state --------------------------------------------------------------
 
-type ReplState {
-  ReplState(heap: Heap, builtins: Builtins, env: entry.ReplEnv)
+type ReplState(host) {
+  ReplState(heap: Heap(host), builtins: Builtins, env: entry.ReplEnv)
 }
 
 // -- VM error formatting -----------------------------------------------------
@@ -40,9 +40,9 @@ fn inspect_vm_error(vm_err: state.VmError) -> String {
 // -- Eval one line -----------------------------------------------------------
 
 fn eval(
-  state: ReplState,
+  state: ReplState(host),
   source: String,
-) -> #(ReplState, Result(JsValue, String)) {
+) -> #(ReplState(host), Result(JsValue, String)) {
   case parser.parse(source, parser.Script) {
     Error(err) -> #(
       state,
@@ -105,9 +105,9 @@ fn banner() -> Nil {
 }
 
 fn handle_repl_line(
-  state: ReplState,
+  state: ReplState(host),
   line: String,
-) -> option.Option(ReplState) {
+) -> option.Option(ReplState(host)) {
   let source = string.trim(line)
   case source {
     "/clear" -> {
@@ -201,7 +201,7 @@ fn handle_repl_line(
   }
 }
 
-fn repl_loop(state: ReplState) -> Nil {
+fn repl_loop(state: ReplState(host)) -> Nil {
   case read_line("> ") {
     Error(Nil) -> {
       io.println("")
@@ -230,8 +230,8 @@ type FileError
 /// microtasks (and any embedder macrotask loop) after it returns.
 fn run_file(
   path: String,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
 ) -> Nil {
   case read_file(path) {
     Error(err) ->
@@ -250,8 +250,8 @@ fn run_file(
 fn run_module_file(
   path: String,
   source: String,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
 ) -> Nil {
   let eng = engine.new()
   case
@@ -293,8 +293,8 @@ fn load_dep(resolved: String) -> Result(String, String) {
 /// Run a file as a script (only for .cjs files).
 fn run_script_file(
   source: String,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
 ) -> Nil {
   let eng = engine.new()
   case engine.eval_prepared_with(eng, source, prepare, finish) {
@@ -305,7 +305,7 @@ fn run_script_file(
   }
 }
 
-fn new_repl_state() -> ReplState {
+fn new_repl_state() -> ReplState(host) {
   let eng = engine.new()
   ReplState(
     heap: engine.heap(eng),

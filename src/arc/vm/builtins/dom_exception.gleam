@@ -12,10 +12,10 @@ import gleam/int
 /// table that maps to a legacy integer `code`. Prototype chain goes through
 /// Error.prototype so `instanceof Error` holds.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   function_proto: Ref,
   error_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   let #(h, getters) =
     common.alloc_getters(h, function_proto, [
       #("code", ErrorNative(DomExceptionGetCode)),
@@ -42,8 +42,8 @@ pub fn init(
 pub fn construct(
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(msg_arg, name_arg) = case args {
     [m, n, ..] -> #(m, n)
     [m] -> #(m, JsUndefined)
@@ -56,11 +56,11 @@ pub fn construct(
 }
 
 fn arg_string(
-  state: State,
+  state: State(host),
   arg: JsValue,
   default: String,
-  k: fn(String, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  k: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case arg {
     JsUndefined -> k(default, state)
     other -> {
@@ -72,11 +72,11 @@ fn arg_string(
 
 /// Allocate a DOMException instance with own name+message data properties.
 fn alloc(
-  h: Heap,
+  h: Heap(host),
   proto: Ref,
   name: String,
   message: String,
-) -> #(Heap, JsValue) {
+) -> #(Heap(host), JsValue) {
   let #(h, ref) =
     common.alloc_pojo(h, proto, [
       #("message", value.builtin_property(JsString(message))),
@@ -88,11 +88,11 @@ fn alloc(
 /// Allocate a DOMException for engine-internal throws (e.g. structuredClone
 /// rejecting an uncloneable value with name "DataCloneError").
 pub fn make(
-  h: Heap,
+  h: Heap(host),
   builtins: common.Builtins,
   name: String,
   message: String,
-) -> #(Heap, JsValue) {
+) -> #(Heap(host), JsValue) {
   alloc(h, builtins.dom_exception.prototype, name, message)
 }
 
@@ -100,8 +100,8 @@ pub fn make(
 /// the WebIDL legacy code table; unknown names yield 0.
 pub fn get_code(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) -> {
       use name_val, state <- state.try_op(object.get_value(

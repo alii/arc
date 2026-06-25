@@ -16,7 +16,11 @@ import gleam/list
 
 /// Set up the Math global object.
 /// Math is NOT a constructor — it's a plain object with static methods.
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+pub fn init(
+  h: Heap(host),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap(host), Ref) {
   let constants = [
     #("PI", value.data(JsNumber(Finite(3.141592653589793)))),
     #("E", value.data(JsNumber(Finite(2.718281828459045)))),
@@ -80,8 +84,8 @@ pub fn dispatch(
   native: MathNativeFn,
   args: List(JsValue),
   _this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     MathPow -> math_pow(args, state)
     MathAbs -> math_abs(args, state)
@@ -128,8 +132,8 @@ pub fn dispatch(
 /// Math.pow(base, exponent)
 fn math_pow(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let base = helpers.get_num_arg(args, 0, to_number)
   let exponent = helpers.get_num_arg(args, 1, to_number)
   #(state, Ok(JsNumber(num_exp(base, exponent))))
@@ -138,8 +142,8 @@ fn math_pow(
 /// Math.abs(x)
 fn math_abs(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(float.absolute_value(n))
@@ -151,8 +155,8 @@ fn math_abs(
 /// Math.sqrt(x)
 fn math_sqrt(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
@@ -168,8 +172,8 @@ fn math_sqrt(
 /// Math.max(a, b, ...) — returns -Infinity for no args.
 fn math_max(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Per spec: Math.max(+0, -0) → +0, so a -0 accumulator loses ties.
   use a, b <- math_extremum(args, state, seed: NegInfinity, dominant: Infinity)
   a >=. b && { a >. b || !is_neg_zero(a) }
@@ -178,8 +182,8 @@ fn math_max(
 /// Math.min(a, b, ...) — returns +Infinity for no args.
 fn math_min(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Per spec: Math.min(+0, -0) → -0, so a -0 argument wins ties.
   use a, b <- math_extremum(args, state, seed: Infinity, dominant: NegInfinity)
   a <=. b && { a <. b || !is_neg_zero(b) }
@@ -188,11 +192,11 @@ fn math_min(
 /// Math.max/min fold: `seed` loses to all, `dominant` beats all, `keep_acc` decides finites.
 fn math_extremum(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   seed seed: value.JsNum,
   dominant dominant: value.JsNum,
   keep_acc keep_acc: fn(Float, Float) -> Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let result =
     list.fold(args, seed, fn(acc, arg) {
       case acc, to_number(arg) {
@@ -213,8 +217,8 @@ fn math_extremum(
 /// Math.atan(x)
 fn math_atan(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(ffi_math_atan(n))
@@ -227,8 +231,8 @@ fn math_atan(
 /// Math.atan2(y, x)
 fn math_atan2(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let y = helpers.get_num_arg(args, 0, to_number)
   let x = helpers.get_num_arg(args, 1, to_number)
   let result = case y, x {
@@ -257,8 +261,8 @@ fn math_atan2(
 /// Math.exp(x)
 fn math_exp(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(ffi_math_exp(n))
@@ -271,16 +275,16 @@ fn math_exp(
 /// Math.random() — returns a random float in [0, 1)
 fn math_random(
   _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   #(state, Ok(JsNumber(Finite(ffi_rand_uniform()))))
 }
 
 /// Math.sign(x) — returns -1, 0, or 1 (preserving ±0)
 fn math_sign(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) if n >. 0.0 -> Finite(1.0)
@@ -295,8 +299,8 @@ fn math_sign(
 /// Math.cbrt(x) — cube root
 fn math_cbrt(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
@@ -320,8 +324,8 @@ fn math_cbrt(
 /// Math.hypot(a, b, ...) — sqrt(sum of squares). Per spec, ±∞ beats NaN.
 fn math_hypot(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let nums = list.map(args, to_number)
   // Classify in one pass: track presence of ±∞, NaN, and running sum of squares.
   let #(inf, nan, sum_sq) =
@@ -344,8 +348,8 @@ fn math_hypot(
 /// Math.clz32(x) — count leading zeros in 32-bit integer representation
 fn math_clz32(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let x = helpers.get_num_arg(args, 0, to_number)
   let n = case x {
     Finite(f) -> to_uint32(f)
@@ -357,8 +361,8 @@ fn math_clz32(
 /// Math.imul(a, b) — 32-bit integer multiplication
 fn math_imul(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let a = helpers.get_num_arg(args, 0, to_number)
   let b = helpers.get_num_arg(args, 1, to_number)
   let a32 = case a {
@@ -376,8 +380,8 @@ fn math_imul(
 /// Math.expm1(x) — e^x - 1 (more precise for small x)
 fn math_expm1(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
@@ -394,8 +398,8 @@ fn math_expm1(
 /// Math.log1p(x) — log(1 + x) (more precise for small x)
 fn math_log1p(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) if n <. -1.0 -> NaN
@@ -413,8 +417,8 @@ fn math_log1p(
 /// Math.cosh(x)
 fn math_cosh(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(ffi_math_cosh(n))
@@ -426,8 +430,8 @@ fn math_cosh(
 /// Math.tanh(x)
 fn math_tanh(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
@@ -444,8 +448,8 @@ fn math_tanh(
 /// Math.acosh(x) — domain [1, +Infinity), NaN for < 1
 fn math_acosh(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
@@ -461,8 +465,8 @@ fn math_acosh(
 /// Math.atanh(x) — domain (-1, 1), NaN outside, ±Infinity at ±1
 fn math_atanh(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) if n <. -1.0 || n >. 1.0 -> NaN
@@ -484,9 +488,9 @@ fn math_atanh(
 /// Apply a unary JsNum->JsNum function to the first arg.
 fn math_unary(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   apply: fn(value.JsNum) -> value.JsNum,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let x = helpers.get_num_arg(args, 0, to_number)
   #(state, Ok(JsNumber(apply(x))))
 }
@@ -494,9 +498,9 @@ fn math_unary(
 /// Like finite_passthrough but preserves -0.0 (for sinh, asinh, etc.)
 fn neg_zero_preserving(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   f: fn(Float) -> Float,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
@@ -511,9 +515,9 @@ fn neg_zero_preserving(
 /// Unary op where Finite(n) -> Finite(f(n)) and non-finite passes through.
 fn finite_passthrough(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   f: fn(Float) -> Float,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(f(n))
@@ -524,9 +528,9 @@ fn finite_passthrough(
 /// Unary op where Finite(n) -> Finite(f(n)) and anything else is NaN.
 fn finite_or_nan(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   f: fn(Float) -> Float,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) -> Finite(f(n))
@@ -537,9 +541,9 @@ fn finite_or_nan(
 /// Unary log-like op: domain [0, ∞), NaN for <0, -∞ at 0, ∞ passes through.
 fn log_domain(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   f: fn(Float) -> Float,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) if n <. 0.0 -> NaN
@@ -553,9 +557,9 @@ fn log_domain(
 /// Unary op with domain [-1, 1]: NaN outside, Finite(f(n)) inside.
 fn domain_unit(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   f: fn(Float) -> Float,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
     Finite(n) if n <. -1.0 || n >. 1.0 -> NaN

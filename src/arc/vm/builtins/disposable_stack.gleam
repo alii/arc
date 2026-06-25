@@ -35,10 +35,10 @@ import gleam/option.{type Option, None, Some}
 
 /// Set up DisposableStack.prototype and the DisposableStack constructor.
 pub fn init(
-  h: state.Heap,
+  h: state.Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(state.Heap, BuiltinType) {
+) -> #(state.Heap(host), BuiltinType) {
   init_stack_type(
     h,
     object_proto,
@@ -58,10 +58,10 @@ pub fn init(
 
 /// Set up AsyncDisposableStack.prototype and its constructor.
 pub fn init_async(
-  h: state.Heap,
+  h: state.Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(state.Heap, BuiltinType) {
+) -> #(state.Heap(host), BuiltinType) {
   init_stack_type(
     h,
     object_proto,
@@ -84,7 +84,7 @@ pub fn init_async(
 /// symbol (the SAME function object — test262 asserts identity), a
 /// `disposed` getter, @@toStringTag, and the constructor.
 fn init_stack_type(
-  h: state.Heap,
+  h: state.Heap(host),
   object_proto: Ref,
   function_proto: Ref,
   name name: String,
@@ -97,7 +97,7 @@ fn init_stack_type(
   dispose_fn dispose_fn: DisposableStackNativeFn,
   dispose_symbol dispose_symbol: value.SymbolId,
   disposed_fn disposed_fn: DisposableStackNativeFn,
-) -> #(state.Heap, BuiltinType) {
+) -> #(state.Heap(host), BuiltinType) {
   // Reserve the prototype ref first: move() embeds it in its native-fn token
   // (the moved-to stack is always created from the intrinsic prototype,
   // never from new.target).
@@ -182,8 +182,8 @@ pub fn dispatch(
   native: DisposableStackNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     DisposableStackConstructor(proto:) ->
       construct(proto, state, async: False, name: "DisposableStack")
@@ -255,10 +255,10 @@ pub fn dispatch(
 /// hint the desugared finally still performs a coalesced Await(undefined)).
 /// Throws TypeError when V is not an object or has no dispose method.
 pub fn make_using_disposer(
-  state: State,
+  state: State(host),
   val: JsValue,
   is_async is_async: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     // CreateDisposableResource step 1.a: null/undefined → method undefined.
     JsUndefined | JsNull -> #(state, Ok(JsUndefined))
@@ -316,11 +316,11 @@ pub fn make_using_disposer(
 
 /// Allocate the (non-rooted, GC-governed) disposer function object.
 fn alloc_using_disposer(
-  state: State,
+  state: State(host),
   method: JsValue,
   val: JsValue,
   discard discard: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, ref) =
     common.alloc_wrapper(
       state.heap,
@@ -350,10 +350,10 @@ fn alloc_using_disposer(
 ///   5. Return disposableStack.
 fn construct(
   proto: Ref,
-  state: State,
+  state: State(host),
   async async: Bool,
   name name: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: do_construct sets state.new_target before native dispatch;
   // a plain call leaves it JsUndefined.
   case state.new_target {
@@ -383,12 +383,12 @@ fn construct(
 
 /// Allocate a DisposableStackObject with the given brand/state/resources.
 fn alloc_stack(
-  h: state.Heap,
+  h: state.Heap(host),
   proto: Ref,
   async async: Bool,
   disposed disposed: Bool,
   resources resources: List(DisposeResource),
-) -> #(state.Heap, Ref) {
+) -> #(state.Heap(host), Ref) {
   heap.alloc(
     h,
     ObjectSlot(
@@ -407,12 +407,12 @@ fn alloc_stack(
 /// TypeError.
 fn require_stack(
   this: JsValue,
-  state: State,
+  state: State(host),
   async: Bool,
   method: String,
-  cont: fn(Ref, Bool, List(DisposeResource), State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Ref, Bool, List(DisposeResource), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -429,10 +429,10 @@ fn require_stack(
 }
 
 fn incompatible(
-  state: State,
+  state: State(host),
   async: Bool,
   method: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let type_name = case async {
     True -> "AsyncDisposableStack"
     False -> "DisposableStack"
@@ -450,11 +450,11 @@ fn incompatible(
 /// Write back a stack's disposable state / [[DisposableResourceStack]].
 /// The brand (`async`) never changes after allocation.
 fn write_stack(
-  state: State,
+  state: State(host),
   ref: Ref,
   disposed disposed: Bool,
   resources resources: List(DisposeResource),
-) -> State {
+) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -476,9 +476,9 @@ fn write_stack(
 ///   3. If the state is disposed, return true; otherwise return false.
 fn disposed_getter(
   this: JsValue,
-  state: State,
+  state: State(host),
   async async: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _ref, disposed, _resources, state <- require_stack(
     this,
     state,
@@ -496,7 +496,10 @@ fn disposed_getter(
 ///   4. Set disposableStack.[[DisposableState]] to disposed.
 ///   5. Return ? DisposeResources(disposableStack.[[DisposeCapability]],
 ///      NormalCompletion(undefined)).
-fn dispose(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn dispose(
+  this: JsValue,
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposed, resources, state <- require_stack(
     this,
     state,
@@ -532,10 +535,10 @@ fn dispose(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
 ///         ii. Else, set completion to result.
 ///   2. Return ? completion.
 pub fn dispose_resources(
-  state: State,
+  state: State(host),
   resources: List(DisposeResource),
   completion: Result(JsValue, JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case resources {
     [] -> #(state, completion)
     [resource, ..rest] -> {
@@ -584,8 +587,8 @@ pub fn dispose_resources(
 fn use_resource(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposed, resources, state <- require_stack(
     this,
     state,
@@ -638,8 +641,8 @@ fn use_resource(
 fn use_resource_async(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposed, resources, state <- require_stack(this, state, True, "use")
   use Nil, state <- try_not_disposed(state, disposed)
   let val = helpers.first_arg_or_undefined(args)
@@ -712,11 +715,11 @@ fn use_resource_async(
 /// GetMethod(V, @@symbol) — §7.3.10: Get the property; undefined/null →
 /// undefined; non-callable → TypeError; else the function.
 fn try_get_method(
-  state: State,
+  state: State(host),
   val: JsValue,
   symbol: value.SymbolId,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use method, state <- state.try_op(object.get_symbol_value_of(
     state,
     val,
@@ -745,9 +748,9 @@ fn try_get_method(
 fn adopt(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   async async: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposed, resources, state <- require_stack(
     this,
     state,
@@ -781,9 +784,9 @@ fn adopt(
 fn defer(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   async async: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposed, resources, state <- require_stack(
     this,
     state,
@@ -825,9 +828,9 @@ fn defer(
 fn move(
   this: JsValue,
   proto: Ref,
-  state: State,
+  state: State(host),
   async async: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposed, resources, state <- require_stack(
     this,
     state,
@@ -847,10 +850,10 @@ fn move(
 /// Step 3 of use/adopt/defer/move: disposed stacks reject mutation with a
 /// ReferenceError.
 fn try_not_disposed(
-  state: State,
+  state: State(host),
   disposed: Bool,
-  cont: fn(Nil, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case disposed {
     True -> state.reference_error(state, "DisposableStack already disposed")
     False -> cont(Nil, state)
@@ -876,8 +879,8 @@ fn try_not_disposed(
 ///   9. Return promiseCapability.[[Promise]].
 fn dispose_async(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 2: NewPromiseCapability(%Promise%)
   let #(h, promise_ref, _data_ref, resolve, reject) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
@@ -947,14 +950,14 @@ fn dispose_async(
 ///   4. If needsAwait is true and hasAwaited is false, perform ! Await(undefined).
 ///   5. Return completion — here: settle the disposeAsync capability.
 fn async_dispose_loop(
-  state: State,
+  state: State(host),
   resources: List(DisposeResource),
   pending pending: Option(JsValue),
   needs_await needs_await: Bool,
   has_awaited has_awaited: Bool,
   resolve resolve: JsValue,
   reject reject: JsValue,
-) -> State {
+) -> State(host) {
   case resources {
     [] ->
       case needs_await && !has_awaited {
@@ -1046,10 +1049,10 @@ fn async_dispose_loop(
 /// DisposeResources step 1.b error folding: first error becomes the pending
 /// completion; later errors wrap it in SuppressedError(error=new, suppressed=old).
 fn fold_error(
-  state: State,
+  state: State(host),
   pending: Option(JsValue),
   thrown: JsValue,
-) -> #(State, Option(JsValue)) {
+) -> #(State(host), Option(JsValue)) {
   case pending {
     None -> #(state, Some(thrown))
     Some(prev) -> {
@@ -1063,13 +1066,13 @@ fn fold_error(
 /// attach AsyncDisposeContinue fulfill/reject reactions that resume the loop
 /// when it settles.
 fn attach_await(
-  state: State,
+  state: State(host),
   awaited: JsValue,
   rest: List(DisposeResource),
   pending: Option(JsValue),
   resolve: JsValue,
   reject: JsValue,
-) -> State {
+) -> State(host) {
   // PromiseResolve: reuse an existing native promise's data directly.
   let existing = case awaited {
     JsObject(ref) -> heap.read_promise_data_ref(state.heap, ref)
@@ -1141,13 +1144,13 @@ fn attach_await(
 /// promise that DisposeResources then Awaits. The reject reaction folds the
 /// error into the pending completion and resumes with hasAwaited = true.
 fn attach_await_rejected(
-  state: State,
+  state: State(host),
   thrown: JsValue,
   rest: List(DisposeResource),
   pending: Option(JsValue),
   resolve: JsValue,
   reject: JsValue,
-) -> State {
+) -> State(host) {
   let #(h, _promise_ref, data_ref) =
     builtins_promise.create_promise(
       state.heap,
@@ -1161,13 +1164,13 @@ fn attach_await_rejected(
 /// Attach the AsyncDisposeContinue fulfill/reject reactions to a promise's
 /// data slot so the loop resumes when it settles.
 fn attach_reactions(
-  state: State,
+  state: State(host),
   promise_data: Ref,
   rest: List(DisposeResource),
   pending: Option(JsValue),
   resolve: JsValue,
   reject: JsValue,
-) -> State {
+) -> State(host) {
   let b = state.builtins
   let #(h, on_fulfill) =
     alloc_continue(
@@ -1194,14 +1197,14 @@ fn attach_reactions(
 
 /// Allocate an AsyncDisposeContinue reaction handler function object.
 fn alloc_continue(
-  h: state.Heap,
+  h: state.Heap(host),
   b: common.Builtins,
   rest: List(DisposeResource),
   pending: Option(JsValue),
   resolve: JsValue,
   reject: JsValue,
   is_reject is_reject: Bool,
-) -> #(state.Heap, Ref) {
+) -> #(state.Heap(host), Ref) {
   common.alloc_wrapper(
     h,
     value.NativeFunction(
@@ -1225,13 +1228,13 @@ fn alloc_continue(
 /// (DisposeResources step 3.b.iii applied to the Await result).
 fn async_dispose_continue(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   remaining: List(DisposeResource),
   pending: Option(JsValue),
   resolve: JsValue,
   reject: JsValue,
   is_reject: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, pending) = case is_reject {
     True -> fold_error(state, pending, helpers.first_arg_or_undefined(args))
     False -> #(state, pending)
@@ -1253,7 +1256,11 @@ fn async_dispose_continue(
 /// Call the promise capability's resolve/reject function with one argument.
 /// Resolving functions never throw; if one somehow does, fold the state
 /// through and continue (the error has nowhere meaningful to go).
-fn settle_capability(state: State, fun: JsValue, arg: JsValue) -> State {
+fn settle_capability(
+  state: State(host),
+  fun: JsValue,
+  arg: JsValue,
+) -> State(host) {
   case state.call(state, fun, JsUndefined, [arg]) {
     Ok(#(_val, state)) -> state
     Error(#(_thrown, state)) -> state

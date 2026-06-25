@@ -61,10 +61,10 @@ fn ta_zeroed(byte_len: Int) -> BitArray
 // ============================================================================
 
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType, List(#(TypedArrayKind, BuiltinType))) {
+) -> #(Heap(host), BuiltinType, List(#(TypedArrayKind, BuiltinType))) {
   // Accessor getters on %TypedArray%.prototype (§23.2.3.1-3, .18).
   let #(h, getters) =
     common.alloc_getters(h, function_proto, [
@@ -254,10 +254,10 @@ pub fn init(
 
 /// Insert named properties into an existing object slot.
 fn add_named_props(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   props: List(#(String, value.Property)),
-) -> Heap {
+) -> Heap(host) {
   heap.update(h, ref, fn(slot) {
     case slot {
       ObjectSlot(properties:, ..) as s ->
@@ -275,7 +275,7 @@ fn add_named_props(
 
 /// Rewrite a constructor's "prototype" property to the spec attributes for
 /// TypedArray constructors: non-writable, non-enumerable, non-configurable.
-fn freeze_prototype_prop(h: Heap, ctor: Ref, proto: Ref) -> Heap {
+fn freeze_prototype_prop(h: Heap(host), ctor: Ref, proto: Ref) -> Heap(host) {
   heap.update(h, ctor, fn(slot) {
     case slot {
       ObjectSlot(properties:, ..) as s ->
@@ -300,8 +300,8 @@ pub fn dispatch(
   native: TypedArrayNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     // §23.2.1.1 %TypedArray%: always throws.
     TypedArrayIntrinsicConstructor ->
@@ -373,10 +373,10 @@ pub fn dispatch(
 /// immutable buffer is a TypeError. (subarray — the only read-mode species
 /// creator — uses ta_create_with_args directly and skips this check.)
 fn ta_create(
-  state: State,
+  state: State(host),
   ctor: JsValue,
   len: Int,
-) -> Result(#(JsValue, Ref, State), #(JsValue, State)) {
+) -> Result(#(JsValue, Ref, State(host)), #(JsValue, State(host))) {
   use #(obj, obj_ref, state) <- result.try(ta_create_with_args(
     state,
     ctor,
@@ -396,11 +396,11 @@ fn ta_create(
 /// TypedArrayCreateFromConstructor (§23.2.4.2) with an arbitrary argument
 /// list. `min_len` enables the single-Number-argument length check.
 fn ta_create_with_args(
-  state: State,
+  state: State(host),
   ctor: JsValue,
   ctor_args: List(JsValue),
   min_len: Option(Int),
-) -> Result(#(JsValue, Ref, State), #(JsValue, State)) {
+) -> Result(#(JsValue, Ref, State(host)), #(JsValue, State(host))) {
   use #(obj, state) <- result.try(state.construct(state, ctor, ctor_args))
   case obj {
     JsObject(ref) ->
@@ -464,8 +464,8 @@ fn ta_create_with_args(
 fn ta_from(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use <- bool.lazy_guard(!object.is_constructor(state.heap, this), fn() {
     state.type_error(state, "%TypedArray%.from called on non-constructor")
   })
@@ -560,14 +560,14 @@ fn ta_from(
 }
 
 fn from_store_loop(
-  state: State,
+  state: State(host),
   target: JsValue,
   target_ref: Ref,
   values: List(JsValue),
   k: Int,
   mapping: option.Option(JsValue),
   this_arg: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case values {
     [] -> Ok(#(target, state))
     [v, ..rest] -> {
@@ -586,7 +586,7 @@ fn from_store_loop(
 }
 
 fn from_array_like_loop(
-  state: State,
+  state: State(host),
   target: JsValue,
   target_ref: Ref,
   source: JsValue,
@@ -594,7 +594,7 @@ fn from_array_like_loop(
   len: Int,
   mapping: option.Option(JsValue),
   this_arg: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case k >= len {
     True -> Ok(#(target, state))
     False -> {
@@ -628,14 +628,14 @@ fn from_array_like_loop(
 
 /// Shared from() element step: apply the optional mapfn, then store at k.
 fn map_and_store(
-  state: State,
+  state: State(host),
   target: JsValue,
   target_ref: Ref,
   v: JsValue,
   k: Int,
   mapping: option.Option(JsValue),
   this_arg: JsValue,
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   use #(mapped, state) <- result.try(case mapping {
     Some(f) -> state.call(state, f, this_arg, [v, value.from_int(k)])
     None -> Ok(#(v, state))
@@ -654,8 +654,8 @@ fn map_and_store(
 fn ta_of(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use <- bool.lazy_guard(!object.is_constructor(state.heap, this), fn() {
     state.type_error(state, "%TypedArray%.of called on non-constructor")
   })
@@ -675,8 +675,8 @@ fn ta_of(
 
 /// Adapt internal Result style to the builtin dispatch tuple shape.
 fn wrap(
-  r: Result(#(JsValue, State), #(JsValue, State)),
-) -> #(State, Result(JsValue, JsValue)) {
+  r: Result(#(JsValue, State(host)), #(JsValue, State(host))),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
     Ok(#(v, state)) -> #(state, Ok(v))
     Error(#(e, state)) -> #(state, Error(e))
@@ -691,8 +691,8 @@ fn ta_construct(
   kind: TypedArrayKind,
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: If NewTarget is undefined, throw a TypeError.
   use <- bool.lazy_guard(state.new_target == JsUndefined, fn() {
     state.type_error(
@@ -748,11 +748,11 @@ fn ta_construct(
 /// AllocateTypedArray + AllocateTypedArrayBuffer (§23.2.5.1.1/.6): fresh
 /// zeroed buffer of `len` elements viewed from offset 0.
 fn alloc_ta_with_length(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   proto: Ref,
   len: Int,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let size = value.typed_array_element_size(kind)
   let byte_len = len * size
   use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
@@ -764,12 +764,12 @@ fn alloc_ta_with_length(
 /// Allocate a fresh non-resizable ArrayBuffer holding `data` plus a fixed
 /// `len`-element view over it from offset 0.
 fn alloc_fresh_ta(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   proto: Ref,
   data: BitArray,
   len: Int,
-) -> #(JsValue, State) {
+) -> #(JsValue, State(host)) {
   let #(h, buf) =
     common.alloc_wrapper(
       state.heap,
@@ -798,12 +798,12 @@ fn alloc_fresh_ta(
 
 /// §23.2.5.1.3 InitializeTypedArrayFromArrayBuffer.
 fn from_buffer(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   proto: Ref,
   buf_ref: Ref,
   rest: List(JsValue),
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let size = value.typed_array_element_size(kind)
   let offset_arg = helpers.first_arg_or_undefined(rest)
   let len_arg = helpers.list_at(rest, 1) |> option.unwrap(JsUndefined)
@@ -891,13 +891,13 @@ fn from_buffer(
 /// Allocate a TypedArray view over an EXISTING buffer. `len: None` is a
 /// length-tracking view ([[ArrayLength]] = AUTO) over a resizable buffer.
 fn alloc_ta_view(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   proto: Ref,
   buf_ref: Ref,
   byte_offset: Int,
   len: Option(Int),
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let #(h, ta_ref) =
     common.alloc_wrapper(
       state.heap,
@@ -914,14 +914,14 @@ fn alloc_ta_view(
 
 /// §23.2.5.1.2 InitializeTypedArrayFromTypedArray.
 fn from_typed_array(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   proto: Ref,
   src_buf: Ref,
   src_kind: TypedArrayKind,
   src_off: Int,
   src_len: Int,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Step 6.c: BigInt and Number content types never mix.
   use <- bool.lazy_guard(
     value.typed_array_is_bigint(kind) != value.typed_array_is_bigint(src_kind),
@@ -989,7 +989,7 @@ fn from_typed_array(
 /// ONCE at the end (O(n), instead of re-splicing the full-size accumulator
 /// per element, which was O(n²)).
 fn convert_elements(
-  h: Heap,
+  h: Heap(host),
   src_buf: Ref,
   src_kind: TypedArrayKind,
   src_off: Int,
@@ -1011,7 +1011,7 @@ fn convert_elements(
 }
 
 fn convert_elements_loop(
-  h: Heap,
+  h: Heap(host),
   src_buf: Ref,
   src_kind: TypedArrayKind,
   src_off: Int,
@@ -1049,12 +1049,12 @@ fn convert_elements_loop(
 /// §23.2.5.1.4/.5 InitializeTypedArrayFromList / FromArrayLike:
 /// use the @@iterator when callable, else the array-like protocol.
 fn from_object(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   proto: Ref,
   obj_val: JsValue,
   obj_ref: Ref,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   use #(iter_fn, state) <- result.try(object.get_symbol_value_of(
     state,
     obj_val,
@@ -1106,10 +1106,10 @@ fn from_object(
 
 /// Run the source's iterator to completion, collecting yielded values.
 fn iterate_to_list(
-  state: State,
+  state: State(host),
   obj: JsValue,
   iter_fn: JsValue,
-) -> Result(#(List(JsValue), State), #(JsValue, State)) {
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
   use #(iter, state) <- result.try(state.call(state, iter_fn, obj, []))
   case iter {
     JsObject(iter_ref) -> {
@@ -1130,11 +1130,11 @@ fn iterate_to_list(
 }
 
 fn iterate_loop(
-  state: State,
+  state: State(host),
   iter: JsValue,
   next_fn: JsValue,
   acc: List(JsValue),
-) -> Result(#(List(JsValue), State), #(JsValue, State)) {
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
   use #(res, state) <- result.try(state.call(state, next_fn, iter, []))
   case res {
     JsObject(res_ref) -> {
@@ -1165,11 +1165,11 @@ fn iterate_loop(
 /// Store collected values into a fresh typed array via the exotic [[Set]]
 /// path (per-element coercion, may run user code).
 fn store_list(
-  state: State,
+  state: State(host),
   ta_val: JsValue,
   values: List(JsValue),
   idx: Int,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case values {
     [] -> Ok(#(ta_val, state))
     [v, ..rest] ->
@@ -1190,13 +1190,13 @@ fn store_list(
 }
 
 fn store_array_like(
-  state: State,
+  state: State(host),
   ta_val: JsValue,
   obj_ref: Ref,
   obj_val: JsValue,
   k: Int,
   len: Int,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case k >= len {
     True -> Ok(#(ta_val, state))
     False -> {
@@ -1230,9 +1230,9 @@ fn store_array_like(
 /// §7.1.22 ToIndex: ToIntegerOrInfinity clamped to [0, 2^53-1], RangeError
 /// outside.
 fn to_index(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   case val {
     JsUndefined -> Ok(#(0, state))
     _ -> {
@@ -1256,9 +1256,9 @@ fn to_index(
 
 /// §7.1.20 ToLength: ToIntegerOrInfinity clamped to [0, 2^53-1], no throw.
 fn to_length(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   use #(n, state) <- result.map(coerce.js_to_number(state, val))
   let len = case n {
     value.NaN | value.NegInfinity -> 0
@@ -1282,9 +1282,9 @@ type IntOrInf {
 }
 
 fn to_int_or_inf(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(IntOrInf, State), #(JsValue, State)) {
+) -> Result(#(IntOrInf, State(host)), #(JsValue, State(host))) {
   use #(n, state) <- result.map(coerce.js_to_number(state, val))
   let i = case n {
     value.NaN -> IInt(0)
@@ -1317,7 +1317,7 @@ fn relative_index(i: IntOrInf, length: Int) -> Int {
 /// offset, declared length)) when `v` is a TypedArray object, None otherwise.
 /// The declared length is None for length-tracking views (AUTO).
 fn ta_slot(
-  h: Heap,
+  h: Heap(host),
   v: JsValue,
 ) -> Option(#(Ref, TypedArrayKind, Int, Option(Int))) {
   case v {
@@ -1347,11 +1347,11 @@ fn ta_slot(
 /// out-of-bounds view → the stores are silent no-ops; a partial fit writes
 /// only the in-bounds prefix.
 fn try_bulk_store(
-  state: State,
+  state: State(host),
   ta_val: JsValue,
   start: Int,
   values: List(JsValue),
-) -> Option(State) {
+) -> Option(State(host)) {
   use #(buffer, kind, byte_offset, length) <- option.then(ta_slot(
     state.heap,
     ta_val,
@@ -1392,10 +1392,10 @@ fn try_bulk_store(
 /// (buffer ref, element kind, byte offset, length, state).
 fn require_ta(
   this: JsValue,
-  state: State,
-  cont: fn(Ref, TypedArrayKind, Int, Int, State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(Ref, TypedArrayKind, Int, Int, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case ta_slot(state.heap, this) {
     Some(#(buffer, elem_kind, byte_offset, length)) ->
       // Resolve [[ArrayLength]] = AUTO (length-tracking views) to the
@@ -1427,10 +1427,10 @@ fn require_ta(
 /// resizable ArrayBuffer that shrank below the view) throws TypeError.
 fn validate_ta(
   this: JsValue,
-  state: State,
-  cont: fn(Ref, TypedArrayKind, Int, Int, State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(Ref, TypedArrayKind, Int, Int, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- require_ta(this, state)
   case object.typed_array_buffer_data(state.heap, buffer) {
     None ->
@@ -1452,10 +1452,10 @@ fn validate_ta(
 /// ~write~ on a view over an immutable buffer is a TypeError, raised BEFORE
 /// any argument coercion (observable; test262 checks it).
 fn require_mutable(
-  state: State,
+  state: State(host),
   buffer: Ref,
-  cont: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buffer) {
     Some(ObjectSlot(kind: value.ArrayBufferObject(immutable: True, ..), ..)) ->
       state.type_error(
@@ -1467,7 +1467,7 @@ fn require_mutable(
 }
 
 /// True when a TypedArray heap ref views an immutable ArrayBuffer.
-fn ta_buffer_immutable(h: Heap, ta_ref: Ref) -> Bool {
+fn ta_buffer_immutable(h: Heap(host), ta_ref: Ref) -> Bool {
   case heap.read(h, ta_ref) {
     Some(ObjectSlot(kind: value.TypedArrayObject(buffer:, ..), ..)) ->
       case heap.read(h, buffer) {
@@ -1485,8 +1485,8 @@ fn ta_buffer_immutable(h: Heap, ta_ref: Ref) -> Bool {
 
 fn get_buffer(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, _kind, _off, _len, state <- require_ta(this, state)
   #(state, Ok(JsObject(buffer)))
 }
@@ -1495,7 +1495,7 @@ fn get_buffer(
 /// and views past the end of a shrunk resizable buffer are "out of bounds",
 /// and the byteLength/byteOffset/length accessors all answer 0 for them.
 fn view_in_bounds(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   kind: TypedArrayKind,
   off: Int,
@@ -1511,8 +1511,8 @@ fn view_in_bounds(
 
 fn get_byte_length(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- require_ta(this, state)
   let n = case view_in_bounds(state.heap, buffer, kind, off, len) {
     True -> len * value.typed_array_element_size(kind)
@@ -1523,8 +1523,8 @@ fn get_byte_length(
 
 fn get_byte_offset(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- require_ta(this, state)
   let n = case view_in_bounds(state.heap, buffer, kind, off, len) {
     True -> off
@@ -1535,8 +1535,8 @@ fn get_byte_offset(
 
 fn get_length(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- require_ta(this, state)
   let n = case view_in_bounds(state.heap, buffer, kind, off, len) {
     True -> len
@@ -1548,8 +1548,8 @@ fn get_length(
 /// §23.2.3.38: NOT a TypeError on foreign receivers — returns undefined.
 fn get_to_string_tag(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -1571,8 +1571,8 @@ fn get_to_string_tag(
 fn proto_at(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
   let arg = helpers.first_arg_or_undefined(args)
   use rel, state <- try_state(to_int_or_inf(state, arg))
@@ -1595,8 +1595,8 @@ fn proto_at(
 fn proto_fill(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
   use state <- require_mutable(state, buffer)
   let value_arg = helpers.first_arg_or_undefined(args)
@@ -1659,10 +1659,10 @@ fn ta_splice(data: BitArray, byte_off: Int, region: BitArray) -> BitArray
 /// (ToBigInt for BigInt kinds, ToNumber otherwise). Result is a JsNumber or
 /// JsBigInt ready for typed_array_encode_value.
 fn convert_for_kind(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   val: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case value.typed_array_is_bigint(kind) {
     False -> {
       use #(n, state) <- result.map(coerce.js_to_number(state, val))
@@ -1674,9 +1674,9 @@ fn convert_for_kind(
 
 /// §7.1.13 ToBigInt (returns the JsBigInt value).
 fn to_bigint_value(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case val {
     value.JsBigInt(_) -> Ok(#(val, state))
     JsBool(True) -> Ok(#(value.JsBigInt(value.BigInt(1)), state))
@@ -1722,8 +1722,8 @@ fn to_bigint_value(
 fn proto_set(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, _kind, _off, _len, state <- require_ta(this, state)
   // Immutable ArrayBuffer proposal: set() has accessMode ~write~ — checked
   // before the offset/source coercions run any user code.
@@ -1813,10 +1813,10 @@ fn proto_set(
 /// when the view's buffer is detached or the view is out of bounds,
 /// otherwise continues.
 fn lazy_witness_guard(
-  state: State,
+  state: State(host),
   this: JsValue,
-  cont: fn() -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn() -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case ta_witness_error(state.heap, this) {
     Some(msg) -> state.type_error(state, msg)
     None -> cont()
@@ -1825,14 +1825,14 @@ fn lazy_witness_guard(
 
 fn set_from_typed_array(
   this: JsValue,
-  state: State,
+  state: State(host),
   offset: Int,
   len: Int,
   src_buf: Ref,
   src_kind: TypedArrayKind,
   src_off: Int,
   src_len: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use dst_buf, kind, dst_off, _l, state <- require_ta(this, state)
   // §23.2.3.26.1 step 9: source buffer detached/out of bounds → TypeError.
   let src_live = case object.typed_array_buffer_data(state.heap, src_buf) {
@@ -1901,12 +1901,12 @@ fn set_from_typed_array(
 
 fn set_from_array_like(
   this: JsValue,
-  state: State,
+  state: State(host),
   offset: Int,
   len: Int,
   src_ref: Ref,
   src: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use len_val, state <- try_state(object.get_value(
     state,
     src_ref,
@@ -1928,13 +1928,13 @@ fn set_from_array_like(
 
 fn set_array_like_loop(
   this: JsValue,
-  state: State,
+  state: State(host),
   offset: Int,
   src_ref: Ref,
   src: JsValue,
   k: Int,
   src_len: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case k >= src_len {
     True -> #(state, Ok(JsUndefined))
     False -> {
@@ -1966,8 +1966,8 @@ fn set_array_like_loop(
 fn proto_subarray(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // §23.2.3.30 step 2: RequireInternalSlot only — NOT ValidateTypedArray.
   // A detached buffer / out-of-bounds view does not throw here; it just
   // gives srcLength = 0 (the constructor call below may still throw).
@@ -1985,12 +1985,12 @@ fn proto_subarray(
 fn do_subarray(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   buffer: Ref,
   kind: TypedArrayKind,
   off: Int,
   declared: Option(Int),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let b_arg = helpers.first_arg_or_undefined(args)
   let e_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   // Steps 5-7: srcLength = 0 for an out-of-bounds view, else the CURRENT
@@ -2059,8 +2059,8 @@ fn do_subarray(
 fn proto_slice(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
   let s_arg = helpers.first_arg_or_undefined(args)
   let e_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
@@ -2177,7 +2177,12 @@ fn repeat_to(pattern: BitArray, n: Int, acc: BitArray) -> BitArray {
 /// into a fresh binary — ONE slice instead of per-element re-encoding.
 /// Bytes beyond the live buffer (detached, or a resizable buffer that has
 /// shrunk below the view) read as zero.
-fn copy_region(h: Heap, buffer: Ref, byte_off: Int, byte_len: Int) -> BitArray {
+fn copy_region(
+  h: Heap(host),
+  buffer: Ref,
+  byte_off: Int,
+  byte_len: Int,
+) -> BitArray {
   case object.typed_array_buffer_data(h, buffer) {
     None -> ta_zeroed(byte_len)
     Some(data) -> {
@@ -2198,8 +2203,8 @@ fn copy_region(h: Heap, buffer: Ref, byte_off: Int, byte_len: Int) -> BitArray {
 fn proto_join(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   let sep_arg = helpers.first_arg_or_undefined(args)
   use sep, state <- try_state(case sep_arg {
@@ -2213,7 +2218,7 @@ fn proto_join(
 }
 
 fn join_parts(
-  h: Heap,
+  h: Heap(host),
   this: JsValue,
   len: Int,
   i: Int,
@@ -2239,16 +2244,16 @@ fn join_parts(
 fn proto_index_of(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   proto_search(this, args, state, value.strict_equal, False, value.from_int)
 }
 
 fn proto_includes(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use found <- proto_search(this, args, state, value.same_value_zero, True)
   JsBool(found >= 0)
 }
@@ -2256,11 +2261,11 @@ fn proto_includes(
 fn proto_search(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   eq: fn(JsValue, JsValue) -> Bool,
   missing_undefined: Bool,
   done: fn(Int) -> JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   use <- bool.guard(len == 0, #(state, Ok(done(-1))))
   let search = helpers.first_arg_or_undefined(args)
@@ -2287,7 +2292,7 @@ fn proto_search(
 /// True (includes) treats an invalid index as the undefined value Get
 /// returns; False (indexOf) skips it, per the HasProperty step.
 fn search_loop(
-  h: Heap,
+  h: Heap(host),
   this: JsValue,
   len: Int,
   i: Int,
@@ -2323,9 +2328,9 @@ type IterKind {
 
 fn proto_iter(
   this: JsValue,
-  state: State,
+  state: State(host),
   iter_kind: IterKind,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, _len, state <- validate_ta(this, state)
   case this {
     JsObject(ta_ref) -> {
@@ -2357,7 +2362,7 @@ fn proto_iter(
 /// user code runs between validation and collection, so the stop never
 /// triggers there.
 fn join_collect(
-  h: Heap,
+  h: Heap(host),
   this: JsValue,
   len: Int,
   i: Int,
@@ -2381,9 +2386,10 @@ fn join_collect(
 /// callback-taking methods; passes (callback, thisArg) on.
 fn require_cb(
   args: List(JsValue),
-  state: State,
-  cont: fn(JsValue, JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(JsValue, JsValue, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let cb = helpers.first_arg_or_undefined(args)
   let this_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   case helpers.is_callable(state.heap, cb) {
@@ -2397,7 +2403,7 @@ fn require_cb(
 /// (callback / valueOf side effects) is observed. A length-tracking view
 /// follows the CURRENT buffer length; a fixed view that no longer fits is
 /// wholly out of bounds. None = invalid index (like a detached buffer).
-fn ta_read(h: Heap, this: JsValue, k: Int) -> Option(JsValue) {
+fn ta_read(h: Heap(host), this: JsValue, k: Int) -> Option(JsValue) {
   use #(buffer, elem_kind, byte_offset, length) <- option.then(ta_slot(h, this))
   let live_len =
     object.typed_array_view_length(h, buffer, elem_kind, byte_offset, length)
@@ -2406,7 +2412,7 @@ fn ta_read(h: Heap, this: JsValue, k: Int) -> Option(JsValue) {
 
 /// Read element `k` as the spec's Get(O, Pk) does: out-of-bounds (shrunk
 /// resizable buffer / detached mid-iteration) reads as undefined.
-fn ta_get(h: Heap, this: JsValue, k: Int) -> JsValue {
+fn ta_get(h: Heap(host), this: JsValue, k: Int) -> JsValue {
   ta_read(h, this, k) |> option.unwrap(JsUndefined)
 }
 
@@ -2415,7 +2421,7 @@ fn ta_get(h: Heap, this: JsValue, k: Int) -> JsValue {
 /// bounds (a fixed view past the end of a shrunk resizable buffer, or a
 /// length-tracking view whose byte offset is past the end).
 fn view_witness_error(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   kind: TypedArrayKind,
   off: Int,
@@ -2440,7 +2446,7 @@ fn view_witness_error(
 
 /// view_witness_error keyed by the TypedArray value itself (re-reads the
 /// slot so resizes since validation are observed).
-fn ta_witness_error(h: Heap, this: JsValue) -> Option(String) {
+fn ta_witness_error(h: Heap(host), this: JsValue) -> Option(String) {
   case ta_slot(h, this) {
     Some(#(buffer, elem_kind, byte_offset, length)) ->
       view_witness_error(h, buffer, elem_kind, byte_offset, length)
@@ -2451,7 +2457,7 @@ fn ta_witness_error(h: Heap, this: JsValue) -> Option(String) {
 /// CURRENT number of valid indices of the view — 0 for a detached buffer or
 /// an out-of-bounds fixed view; the live tracked length for a
 /// length-tracking view. The §10.4.5.14 IsValidIntegerIndex bound.
-fn ta_live_length(h: Heap, this: JsValue) -> Int {
+fn ta_live_length(h: Heap(host), this: JsValue) -> Int {
   case ta_slot(h, this) {
     Some(#(buffer, elem_kind, byte_offset, length)) ->
       object.typed_array_live_length(
@@ -2475,7 +2481,7 @@ fn ta_live_length(h: Heap, this: JsValue) -> Int {
 /// [0, len), calling cb(element, k, this). `decide` inspects the callback
 /// result and may stop the loop with a final value.
 fn iterate_calls(
-  state: State,
+  state: State(host),
   len: Int,
   k: Int,
   step: Int,
@@ -2483,7 +2489,7 @@ fn iterate_calls(
   cb: JsValue,
   this_arg: JsValue,
   decide: fn(JsValue, JsValue, Int) -> Option(JsValue),
-) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
+) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
   use <- bool.guard(k < 0 || k >= len, Ok(#(None, state)))
   let el = ta_get(state.heap, this, k)
   use #(res, state) <- result.try(
@@ -2500,9 +2506,9 @@ fn iterate_calls(
 fn proto_every_some(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   is_every: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   use cb, this_arg, state <- require_cb(args, state)
   let decide = fn(res, _el, _k) {
@@ -2528,8 +2534,8 @@ fn proto_every_some(
 fn proto_for_each(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   use cb, this_arg, state <- require_cb(args, state)
   use _early, state <- try_state(
@@ -2550,10 +2556,10 @@ type FindMode {
 fn proto_find(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   step: Int,
   mode: FindMode,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   use cb, this_arg, state <- require_cb(args, state)
   let start = case step > 0 {
@@ -2592,8 +2598,8 @@ fn proto_find(
 fn proto_map(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, kind, _off, len, state <- validate_ta(this, state)
   use cb, this_arg, state <- require_cb(args, state)
   use #(target, target_ref), state <- try_state(ta_species_create(
@@ -2616,7 +2622,7 @@ fn proto_map(
 }
 
 fn map_loop(
-  state: State,
+  state: State(host),
   len: Int,
   k: Int,
   this: JsValue,
@@ -2624,7 +2630,7 @@ fn map_loop(
   this_arg: JsValue,
   target: JsValue,
   target_ref: Ref,
-) -> Result(#(Nil, State), #(JsValue, State)) {
+) -> Result(#(Nil, State(host)), #(JsValue, State(host))) {
   use <- bool.guard(k >= len, Ok(#(Nil, state)))
   let el = ta_get(state.heap, this, k)
   use #(mapped, state) <- result.try(
@@ -2645,8 +2651,8 @@ fn map_loop(
 fn proto_filter(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, kind, _off, len, state <- validate_ta(this, state)
   use cb, this_arg, state <- require_cb(args, state)
   use kept_rev, state <- try_state(
@@ -2664,14 +2670,14 @@ fn proto_filter(
 }
 
 fn filter_collect(
-  state: State,
+  state: State(host),
   len: Int,
   k: Int,
   this: JsValue,
   cb: JsValue,
   this_arg: JsValue,
   acc: List(JsValue),
-) -> Result(#(List(JsValue), State), #(JsValue, State)) {
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
   use <- bool.guard(k >= len, Ok(#(acc, state)))
   let el = ta_get(state.heap, this, k)
   use #(res, state) <- result.try(
@@ -2687,12 +2693,12 @@ fn filter_collect(
 /// Write a list of (already numeric) values into a TypedArray via the
 /// ordinary Set path, starting at index `k`.
 fn write_values(
-  state: State,
+  state: State(host),
   target: JsValue,
   target_ref: Ref,
   values: List(JsValue),
   k: Int,
-) -> Result(#(Nil, State), #(JsValue, State)) {
+) -> Result(#(Nil, State(host)), #(JsValue, State(host))) {
   case values {
     [] -> Ok(#(Nil, state))
     [v, ..rest] -> {
@@ -2712,9 +2718,9 @@ fn write_values(
 fn proto_reduce(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   step: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   let cb = helpers.first_arg_or_undefined(args)
   use <- bool.lazy_guard(!helpers.is_callable(state.heap, cb), fn() {
@@ -2739,14 +2745,14 @@ fn proto_reduce(
 }
 
 fn reduce_loop(
-  state: State,
+  state: State(host),
   len: Int,
   k: Int,
   step: Int,
   this: JsValue,
   cb: JsValue,
   acc: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use <- bool.guard(k < 0 || k >= len, #(state, Ok(acc)))
   let el = ta_get(state.heap, this, k)
   use res, state <- state.try_call(state, cb, JsUndefined, [
@@ -2766,8 +2772,8 @@ fn reduce_loop(
 fn proto_copy_within(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
   use state <- require_mutable(state, buffer)
   let target_arg = helpers.first_arg_or_undefined(args)
@@ -2856,8 +2862,8 @@ fn reversed_bytes_loop(
 /// §23.2.3.25 reverse ( ) — in place, returns this.
 fn proto_reverse(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
   use state <- require_mutable(state, buffer)
   case object.typed_array_buffer_data(state.heap, buffer) {
@@ -2878,7 +2884,7 @@ fn proto_reverse(
 }
 
 /// The buffer ref backing a freshly created TypedArray value.
-fn ta_view_buffer(h: Heap, ta_val: JsValue) -> Option(Ref) {
+fn ta_view_buffer(h: Heap(host), ta_val: JsValue) -> Option(Ref) {
   case ta_val {
     JsObject(ref) ->
       case heap.read(h, ref) {
@@ -2893,10 +2899,10 @@ fn ta_view_buffer(h: Heap, ta_val: JsValue) -> Option(Ref) {
 /// TypedArrayCreateSameType (§23.2.4.3) — fresh array of the receiver's own
 /// kind with the intrinsic default prototype (species is NOT consulted).
 fn ta_same_type_create(
-  state: State,
+  state: State(host),
   kind: TypedArrayKind,
   len: Int,
-) -> Result(#(JsValue, Ref, State), #(JsValue, State)) {
+) -> Result(#(JsValue, Ref, State(host)), #(JsValue, State(host))) {
   use #(ta_val, state) <- result.try(alloc_ta_with_length(
     state,
     kind,
@@ -2912,8 +2918,8 @@ fn ta_same_type_create(
 /// §23.2.3.32 toReversed ( ).
 fn proto_to_reversed(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
   let size = value.typed_array_element_size(kind)
   use ta_val, new_buf, state <- try_state3(ta_same_type_create(state, kind, len))
@@ -2939,8 +2945,8 @@ fn proto_to_reversed(
 fn proto_with(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buffer, kind, off, len, state <- validate_ta(this, state)
   let index_arg = helpers.first_arg_or_undefined(args)
   let value_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
@@ -2997,8 +3003,8 @@ fn proto_with(
 fn proto_last_index_of(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   use <- bool.guard(len == 0, #(state, Ok(value.from_int(-1))))
   let search = helpers.first_arg_or_undefined(args)
@@ -3028,7 +3034,7 @@ fn proto_last_index_of(
 
 /// Scan [0, k] downward with live reads; invalid indices (fromIndex valueOf
 /// shrank the buffer) are skipped per the HasProperty step.
-fn search_down(h: Heap, this: JsValue, k: Int, search: JsValue) -> Int {
+fn search_down(h: Heap(host), this: JsValue, k: Int, search: JsValue) -> Int {
   case k < 0 {
     True -> -1
     False ->
@@ -3097,7 +3103,8 @@ fn compare_numbers(a: value.JsNum, b: value.JsNum) -> Int {
 /// arbitrary JS).
 fn comparator_for(
   cmp: JsValue,
-) -> fn(State, JsValue, JsValue) -> Result(#(Int, State), #(JsValue, State)) {
+) -> fn(State(host), JsValue, JsValue) ->
+  Result(#(Int, State(host)), #(JsValue, State(host))) {
   case cmp {
     JsUndefined -> fn(state, x, y) { Ok(#(default_ta_compare(x, y), state)) }
     _ -> fn(state, x, y) {
@@ -3124,10 +3131,11 @@ fn comparator_for(
 /// Stable merge sort over the snapshot list, threading State through the
 /// (possibly effectful) comparator.
 fn sort_values(
-  state: State,
+  state: State(host),
   items: List(JsValue),
-  cmp: fn(State, JsValue, JsValue) -> Result(#(Int, State), #(JsValue, State)),
-) -> Result(#(List(JsValue), State), #(JsValue, State)) {
+  cmp: fn(State(host), JsValue, JsValue) ->
+    Result(#(Int, State(host)), #(JsValue, State(host))),
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
   case items {
     [] | [_] -> Ok(#(items, state))
     _ -> {
@@ -3140,12 +3148,13 @@ fn sort_values(
 }
 
 fn merge_values(
-  state: State,
+  state: State(host),
   left: List(JsValue),
   right: List(JsValue),
-  cmp: fn(State, JsValue, JsValue) -> Result(#(Int, State), #(JsValue, State)),
+  cmp: fn(State(host), JsValue, JsValue) ->
+    Result(#(Int, State(host)), #(JsValue, State(host))),
   acc: List(JsValue),
-) -> Result(#(List(JsValue), State), #(JsValue, State)) {
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
   case left, right {
     [], _ -> Ok(#(list.append(list.reverse(acc), right), state))
     _, [] -> Ok(#(list.append(list.reverse(acc), left), state))
@@ -3180,10 +3189,10 @@ fn encode_region(
 fn sorted_snapshot(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-  cont: fn(Ref, TypedArrayKind, Int, Int, List(JsValue), State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(Ref, TypedArrayKind, Int, Int, List(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let cmp = helpers.first_arg_or_undefined(args)
   use <- bool.lazy_guard(
     cmp != JsUndefined && !helpers.is_callable(state.heap, cmp),
@@ -3204,8 +3213,8 @@ fn sorted_snapshot(
 fn proto_sort(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Immutable ArrayBuffer proposal: sort() has accessMode ~write~ — the
   // comparator must never run against an immutable-backed receiver. (The
   // spec checks comparator callability first, but both failures are
@@ -3255,8 +3264,8 @@ fn proto_sort(
 fn proto_to_sorted(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, kind, _off, len, sorted, state <- sorted_snapshot(
     this,
     args,
@@ -3292,19 +3301,19 @@ fn proto_to_sorted(
 
 fn proto_to_locale_string(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _buffer, _kind, _off, len, state <- validate_ta(this, state)
   locale_loop(state, this, len, 0, [])
 }
 
 fn locale_loop(
-  state: State,
+  state: State(host),
   this: JsValue,
   len: Int,
   k: Int,
   acc: List(String),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use <- bool.guard(k >= len, #(
     state,
     Ok(JsString(string.join(list.reverse(acc), ","))),
@@ -3334,10 +3343,10 @@ fn locale_loop(
 /// the intrinsic default" (also chosen when @@species IS the intrinsic
 /// constructor, which is observably identical and far cheaper).
 fn resolve_species_ctor(
-  state: State,
+  state: State(host),
   exemplar: JsValue,
   kind: TypedArrayKind,
-) -> Result(#(Option(JsValue), State), #(JsValue, State)) {
+) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
   let default_ctor =
     state.builtins.typed_arrays
     |> list.key_find(kind)
@@ -3390,11 +3399,11 @@ fn resolve_species_ctor(
 /// TypedArraySpeciesCreate post-construct check: the result's content type
 /// (number vs bigint) must match the exemplar's.
 fn check_content_type(
-  state: State,
+  state: State(host),
   obj: JsValue,
   obj_ref: Ref,
   kind: TypedArrayKind,
-) -> Result(#(#(JsValue, Ref), State), #(JsValue, State)) {
+) -> Result(#(#(JsValue, Ref), State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, obj_ref) {
     Some(ObjectSlot(
       kind: value.TypedArrayObject(elem_kind: result_kind, ..),
@@ -3422,11 +3431,11 @@ fn check_content_type(
 /// SpeciesConstructor(exemplar, default %Kind%Array%) then
 /// TypedArrayCreateFromConstructor(« len »); content type must match.
 fn ta_species_create(
-  state: State,
+  state: State(host),
   exemplar: JsValue,
   kind: TypedArrayKind,
   len: Int,
-) -> Result(#(#(JsValue, Ref), State), #(JsValue, State)) {
+) -> Result(#(#(JsValue, Ref), State(host)), #(JsValue, State(host))) {
   use #(maybe_ctor, state) <- result.try(resolve_species_ctor(
     state,
     exemplar,
@@ -3454,9 +3463,9 @@ fn ta_species_create(
 
 /// Like try_state but for triple results #(a, b, State).
 fn try_state3(
-  r: Result(#(a, b, State), #(JsValue, State)),
-  cont: fn(a, b, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  r: Result(#(a, b, State(host)), #(JsValue, State(host))),
+  cont: fn(a, b, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
     Ok(#(a, b, state)) -> cont(a, b, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -3477,8 +3486,8 @@ const b64_chunk_handlings = ["loose", "strict", "stop-before-partial"]
 /// later, after option coercion, per GetUint8ArrayBytes ordering).
 fn validate_u8(
   this: JsValue,
-  state: State,
-) -> Result(State, #(JsValue, State)) {
+  state: State(host),
+) -> Result(State(host), #(JsValue, State(host))) {
   case ta_slot(state.heap, this) {
     Some(#(_, value.Uint8Kind, _, _)) -> Ok(state)
     _ ->
@@ -3493,9 +3502,9 @@ fn validate_u8(
 /// — setFromBase64/setFromHex reject an immutable-backed target BEFORE any
 /// option getter runs (observable; toBase64/toHex stay read-only).
 fn u8_require_mutable(
-  state: State,
+  state: State(host),
   this: JsValue,
-) -> Result(Nil, #(JsValue, State)) {
+) -> Result(Nil, #(JsValue, State(host))) {
   let immutable = case ta_slot(state.heap, this) {
     Some(#(buffer, _, _, _)) ->
       case heap.read(state.heap, buffer) {
@@ -3519,9 +3528,9 @@ fn u8_require_mutable(
 /// the LIVE view right now (option getters may have detached/shrunk the
 /// buffer). Returns (buffer ref, buffer data, byte offset, element length).
 fn u8_live_view(
-  state: State,
+  state: State(host),
   this: JsValue,
-) -> Result(#(Ref, BitArray, Int, Int), #(JsValue, State)) {
+) -> Result(#(Ref, BitArray, Int, Int), #(JsValue, State(host))) {
   case ta_slot(state.heap, this) {
     Some(#(buffer, kind, off, decl_len)) -> {
       let len =
@@ -3550,9 +3559,9 @@ fn u8_live_view(
 
 /// GetOptionsObject: undefined → absent, object → Some(ref), else TypeError.
 fn get_opts_object(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Option(Ref), State), #(JsValue, State)) {
+) -> Result(#(Option(Ref), State(host)), #(JsValue, State(host))) {
   case v {
     JsUndefined -> Ok(#(None, state))
     JsObject(ref) -> Ok(#(Some(ref), state))
@@ -3566,10 +3575,10 @@ fn get_opts_object(
 
 /// Get(opts, key) — observable property read on the options object.
 fn get_option_value(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   key: String,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case opts {
     None -> Ok(#(JsUndefined, state))
     Some(ref) -> object.get_value(state, ref, Named(key), JsObject(ref))
@@ -3579,12 +3588,12 @@ fn get_option_value(
 /// String-enum option per the proposal: undefined → default; a non-String
 /// value or a String outside `allowed` → TypeError (NO ToString coercion).
 fn get_string_enum_option(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   key: String,
   allowed: List(String),
   default: String,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   use #(got, state) <- result.try(get_option_value(state, opts, key))
   case got {
     JsUndefined -> Ok(#(default, state))
@@ -3611,9 +3620,9 @@ fn get_string_enum_option(
 /// Shared option reads of setFromBase64/fromBase64, in spec order:
 /// GetOptionsObject, then "alphabet", then "lastChunkHandling".
 fn read_b64_options(
-  state: State,
+  state: State(host),
   opt_arg: JsValue,
-) -> Result(#(String, String, State), #(JsValue, State)) {
+) -> Result(#(String, String, State(host)), #(JsValue, State(host))) {
   use #(opts, state) <- result.try(get_opts_object(state, opt_arg))
   use #(alphabet, state) <- result.try(get_string_enum_option(
     state,
@@ -3635,9 +3644,9 @@ fn read_b64_options(
 /// Step 3 of setFromBase64/setFromHex/fromBase64/fromHex: the input must
 /// already be a String — no coercion.
 fn require_string(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   case v {
     JsString(s) -> Ok(#(s, state))
     other ->
@@ -3649,17 +3658,20 @@ fn require_string(
   }
 }
 
-fn syntax_error_value(state: State, msg: String) -> #(JsValue, State) {
+fn syntax_error_value(
+  state: State(host),
+  msg: String,
+) -> #(JsValue, State(host)) {
   let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
   #(err, State(..state, heap:))
 }
 
 /// Allocate the `{ read, written }` result object of setFromBase64/setFromHex.
 fn read_written_result(
-  state: State,
+  state: State(host),
   read: Int,
   written: Int,
-) -> #(JsValue, State) {
+) -> #(JsValue, State(host)) {
   let #(heap, ref) =
     common.alloc_pojo(state.heap, state.builtins.object.prototype, [
       #("read", value.data_property(value.from_int(read))),
@@ -3671,12 +3683,12 @@ fn read_written_result(
 /// SetUint8ArrayBytes — splice the decoded bytes into the buffer at the
 /// view's byte offset. Decoders never run user code, so `data` is current.
 fn u8_write_bytes(
-  state: State,
+  state: State(host),
   buffer: Ref,
   data: BitArray,
   off: Int,
   bytes: BitArray,
-) -> State {
+) -> State(host) {
   case bit_array.byte_size(bytes) {
     0 -> state
     _ ->
@@ -3697,8 +3709,8 @@ fn u8_write_bytes(
 fn u8_to_base64(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use state <- result.try(validate_u8(this, state))
     use #(opts, state) <- result.try(get_opts_object(
@@ -3731,8 +3743,8 @@ fn u8_to_base64(
 /// Uint8Array.prototype.toHex ( )
 fn u8_to_hex(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use state <- result.try(validate_u8(this, state))
     use #(_buffer, data, off, len) <- result.map(u8_live_view(state, this))
@@ -3745,8 +3757,8 @@ fn u8_to_hex(
 fn u8_set_from_base64(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use state <- result.try(validate_u8(this, state))
     use Nil <- result.try(u8_require_mutable(state, this))
@@ -3768,8 +3780,8 @@ fn u8_set_from_base64(
 fn u8_set_from_hex(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use state <- result.try(validate_u8(this, state))
     use Nil <- result.try(u8_require_mutable(state, this))
@@ -3783,20 +3795,20 @@ fn u8_set_from_hex(
   })
 }
 
-fn decode_error(state: State, codec: String) -> #(JsValue, State) {
+fn decode_error(state: State(host), codec: String) -> #(JsValue, State(host)) {
   syntax_error_value(state, "unable to decode " <> codec <> " string")
 }
 
 /// Shared setFromBase64/setFromHex tail. Per spec, bytes decoded before an
 /// error ARE written, THEN the SyntaxError is thrown ("writes up to error").
 fn decode_into_view(
-  state: State,
+  state: State(host),
   buffer: Ref,
   data: BitArray,
   off: Int,
   res: DecodeResult,
   codec: String,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let state = u8_write_bytes(state, buffer, data, off, res.bytes)
   case res.ok {
     False -> Error(decode_error(state, codec))
@@ -3807,10 +3819,10 @@ fn decode_into_view(
 
 /// Shared fromBase64/fromHex tail: allocate a fresh Uint8Array on success.
 fn decode_to_new_u8(
-  state: State,
+  state: State(host),
   res: DecodeResult,
   codec: String,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case res.ok {
     False -> Error(decode_error(state, codec))
     True -> u8_alloc_from_bytes(state, res.bytes)
@@ -3820,8 +3832,8 @@ fn decode_to_new_u8(
 /// Uint8Array.fromBase64 ( string [ , options ] )
 fn u8_from_base64(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use #(s, state) <- result.try(require_string(
       state,
@@ -3840,8 +3852,8 @@ fn u8_from_base64(
 /// Uint8Array.fromHex ( string )
 fn u8_from_hex(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use #(s, state) <- result.try(require_string(
       state,
@@ -3854,9 +3866,9 @@ fn u8_from_hex(
 
 /// Allocate a fresh Uint8Array holding exactly `bytes`.
 fn u8_alloc_from_bytes(
-  state: State,
+  state: State(host),
   bytes: BitArray,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let len = bit_array.byte_size(bytes)
   use #(ta, state) <- result.map(alloc_ta_with_length(
     state,
@@ -4148,7 +4160,7 @@ fn hex_value(c: Int) -> Option(Int) {
 // ============================================================================
 
 /// The intrinsic default prototype for a concrete TypedArray kind.
-fn default_proto_for(state: State, kind: TypedArrayKind) -> Ref {
+fn default_proto_for(state: State(host), kind: TypedArrayKind) -> Ref {
   state.builtins.typed_arrays
   |> list.key_find(kind)
   |> result.map(fn(bt: BuiltinType) { bt.prototype })
@@ -4166,12 +4178,12 @@ fn default_proto_for(state: State, kind: TypedArrayKind) -> Ref {
 /// Immutable buffers (immutable-arraybuffer proposal) are never modified —
 /// the write is dropped, mirroring the detached-buffer no-op treatment.
 fn write_buffer_data(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   new_data: BitArray,
   byte_offset: Int,
   count: Int,
-) -> Heap {
+) -> Heap(host) {
   heap.update(h, buffer, fn(slot) {
     case slot {
       ObjectSlot(kind: value.ArrayBufferObject(immutable: True, ..), ..) as s ->
@@ -4209,9 +4221,9 @@ fn write_buffer_data(
 /// `use`-style adapter: thread Result(#(a, State), #(thrown, State)) into a
 /// builtin-shaped continuation.
 fn try_state(
-  r: Result(#(a, State), #(JsValue, State)),
-  cont: fn(a, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  r: Result(#(a, State(host)), #(JsValue, State(host))),
+  cont: fn(a, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
     Ok(#(v, state)) -> cont(v, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -4220,9 +4232,9 @@ fn try_state(
 
 /// Like try_state but for ops returning #(State, Bool) pairs (set_value).
 fn try_state_pair(
-  r: Result(#(State, Bool), #(JsValue, State)),
-  cont: fn(#(State, Bool)) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  r: Result(#(State(host), Bool), #(JsValue, State(host))),
+  cont: fn(#(State(host), Bool)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
     Ok(pair) -> cont(pair)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -4236,8 +4248,8 @@ fn try_state_pair(
 
 pub fn bigint_global(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let arg = helpers.first_arg_or_undefined(args)
   wrap({
     // Step 2: prim = ToPrimitive(value, number).
@@ -4279,9 +4291,9 @@ pub fn bigint_global(
 /// object carrying a [[BigIntData]] slot (stored as a NUL-marker private
 /// property by ToObject — see value.bigint_data_key).
 fn this_bigint_value(
-  state: State,
+  state: State(host),
   this: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   let incompatible = fn() {
     Error(state.type_error_value(
       state,
@@ -4308,8 +4320,8 @@ fn this_bigint_value(
 pub fn bigint_proto_to_string(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use #(n, state) <- result.try(this_bigint_value(state, this))
     let radix_arg = helpers.first_arg_or_undefined(args)
@@ -4355,8 +4367,8 @@ pub fn bigint_proto_to_string(
 pub fn bigint_proto_value_of(
   this: JsValue,
   _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use #(n, state) <- result.try(this_bigint_value(state, this))
     Ok(#(value.JsBigInt(value.BigInt(n)), state))

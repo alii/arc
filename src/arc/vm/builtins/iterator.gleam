@@ -43,10 +43,10 @@ import gleam/result
 /// and %WrapForValidIteratorPrototype%. The base %IteratorPrototype% already
 /// exists (allocated in builtins.gleam with [Symbol.iterator]() { return this }).
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   iterator_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType, Ref, Ref) {
+) -> #(Heap(host), BuiltinType, Ref, Ref) {
   // Iterator.prototype methods — eager consumers + lazy producers.
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
@@ -168,8 +168,8 @@ pub fn dispatch(
   native: IteratorNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     IteratorConstructor -> construct(state)
     IteratorFrom -> from(args, state)
@@ -213,7 +213,7 @@ pub fn dispatch(
 /// (i.e., %Iterator% itself); otherwise OrdinaryCreateFromConstructor.
 /// `do_construct` sets `state.new_target` before native dispatch; calling as a
 /// function leaves it `JsUndefined`.
-fn construct(state: State) -> #(State, Result(JsValue, JsValue)) {
+fn construct(state: State(host)) -> #(State(host), Result(JsValue, JsValue)) {
   let self = JsObject(state.builtins.iterator.constructor)
   let nt = state.new_target
   case nt == JsUndefined || nt == self {
@@ -240,8 +240,8 @@ fn construct(state: State) -> #(State, Result(JsValue, JsValue)) {
 
 fn from(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let o = first_arg_or_undefined(args)
   // GetIteratorFlattenable(O, iterate-strings): O must be Object or String.
   use Nil, state <- after(case o {
@@ -290,7 +290,7 @@ fn from(
 }
 
 /// Walk obj's prototype chain looking for target. Includes obj itself.
-fn has_in_proto_chain(h: Heap, obj: Ref, target: Ref) -> Bool {
+fn has_in_proto_chain(h: Heap(host), obj: Ref, target: Ref) -> Bool {
   case obj.id == target.id {
     True -> True
     False ->
@@ -309,10 +309,10 @@ fn has_in_proto_chain(h: Heap, obj: Ref, target: Ref) -> Bool {
 fn lazy_helper(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   kind: IteratorHelperKind,
   name: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use this, next, func, state <- consumer_with_callback(this, args, state, name)
   alloc_helper(state, kind, this, next, func, 0)
 }
@@ -324,10 +324,10 @@ fn lazy_helper(
 fn take_or_drop(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   kind: IteratorHelperKind,
   name: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _this_ref <- require_object_of(
     this,
     state,
@@ -347,11 +347,11 @@ fn take_or_drop(
 /// ES2025 §27.1.3.10/12 step 3-6: ToIntegerOrInfinity(ToNumber(limit)) with
 /// NaN/negative → RangeError. On any abrupt completion, close `this` first.
 fn coerce_limit(
-  state: State,
+  state: State(host),
   this: JsValue,
   args: List(JsValue),
   name: String,
-) -> Result(#(Int, State), #(State, Result(JsValue, JsValue))) {
+) -> Result(#(Int, State(host)), #(State(host), Result(JsValue, JsValue))) {
   let arg = first_arg_or_undefined(args)
   // ToNumber: ToPrimitive(NumberHint) for objects (so valueOf/@@toPrimitive
   // can throw user errors), then primitive → JsNum.
@@ -380,13 +380,13 @@ fn coerce_limit(
 }
 
 fn alloc_helper(
-  state: State,
+  state: State(host),
   kind: IteratorHelperKind,
   underlying: JsValue,
   next_method: JsValue,
   func: JsValue,
   count: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, ref) =
     common.alloc_wrapper(
       state.heap,
@@ -413,8 +413,8 @@ const helper_receiver_err = "Iterator Helper method called on incompatible recei
 
 fn helper_next(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -490,11 +490,11 @@ const helper_running_err = "Iterator Helper is currently being iterated"
 
 /// Set the zip helper's "executing" flag; `started` latches True once set.
 fn zip_set_flags(
-  state: State,
+  state: State(host),
   ref: Ref,
   running: Bool,
   set_started: Bool,
-) -> State {
+) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -514,7 +514,11 @@ fn zip_set_flags(
 }
 
 /// Set the concat helper's "executing" flag.
-fn concat_set_running(state: State, ref: Ref, running: Bool) -> State {
+fn concat_set_running(
+  state: State(host),
+  ref: Ref,
+  running: Bool,
+) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -527,7 +531,7 @@ fn concat_set_running(state: State, ref: Ref, running: Bool) -> State {
 }
 
 fn classic_helper_next(
-  state: State,
+  state: State(host),
   ref: Ref,
   kind: IteratorHelperKind,
   underlying: JsValue,
@@ -537,7 +541,7 @@ fn classic_helper_next(
   inner_next: JsValue,
   count: Int,
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False ->
@@ -563,8 +567,8 @@ fn classic_helper_next(
 
 fn helper_return(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -616,13 +620,13 @@ fn helper_return(
 }
 
 fn classic_helper_return(
-  state: State,
+  state: State(host),
   ref: Ref,
   kind: IteratorHelperKind,
   underlying: JsValue,
   inner: JsValue,
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False -> {
@@ -643,13 +647,13 @@ fn classic_helper_return(
 }
 
 fn step_map(
-  state: State,
+  state: State(host),
   ref: Ref,
   underlying: JsValue,
   next: JsValue,
   func: JsValue,
   count: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use step, state <- after_step(state, ref, underlying, next)
   case step {
     None -> finish(state, ref)
@@ -666,13 +670,13 @@ fn step_map(
 }
 
 fn step_filter(
-  state: State,
+  state: State(host),
   ref: Ref,
   underlying: JsValue,
   next: JsValue,
   func: JsValue,
   count: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use step, state <- after_step(state, ref, underlying, next)
   case step {
     None -> finish(state, ref)
@@ -693,12 +697,12 @@ fn step_filter(
 }
 
 fn step_take(
-  state: State,
+  state: State(host),
   ref: Ref,
   underlying: JsValue,
   next: JsValue,
   remaining: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case remaining <= 0 {
     True -> {
       // §27.1.3.3.11: when remaining is 0, Return ? IteratorClose(iterated,
@@ -724,12 +728,12 @@ fn step_take(
 }
 
 fn step_drop(
-  state: State,
+  state: State(host),
   ref: Ref,
   underlying: JsValue,
   next: JsValue,
   remaining: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use step, state <- after_step(state, ref, underlying, next)
   case step {
     None -> finish(state, ref)
@@ -745,7 +749,7 @@ fn step_drop(
 }
 
 fn step_flat_map(
-  state: State,
+  state: State(host),
   ref: Ref,
   underlying: JsValue,
   next: JsValue,
@@ -753,7 +757,7 @@ fn step_flat_map(
   inner: JsValue,
   inner_next: JsValue,
   count: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case inner {
     // Have an active inner iterator — pull from it.
     JsObject(_) ->
@@ -826,10 +830,10 @@ fn step_flat_map(
 /// method (GetIteratorDirect). Used by flatMap inner values and
 /// Iterator.zip/zipKeyed inputs.
 fn get_iterator_flattenable(
-  state: State,
+  state: State(host),
   obj: JsValue,
   what: String,
-) -> #(State, Result(#(JsValue, JsValue), JsValue)) {
+) -> #(State(host), Result(#(JsValue, JsValue), JsValue)) {
   case obj {
     JsObject(_) -> {
       use method, state <- state.try_op(object.get_symbol_value_of(
@@ -864,8 +868,8 @@ fn get_iterator_flattenable(
 
 fn wrap_next(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use iterated, next_method <- require_wrap(this, state)
   use result, state <- state.try_call(state, next_method, iterated, [])
   #(state, Ok(result))
@@ -873,8 +877,8 @@ fn wrap_next(
 
 fn wrap_return(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use iterated, _next_method <- require_wrap(this, state)
   use ret_fn, state <- state.try_op(object.get_value_of(
     state,
@@ -897,17 +901,20 @@ fn wrap_return(
 // Eager consumers — toArray, forEach, reduce, some, every, find
 // ============================================================================
 
-fn to_array(this: JsValue, state: State) -> #(State, Result(JsValue, JsValue)) {
+fn to_array(
+  this: JsValue,
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use this, next, state <- get_iterator_direct(this, state, "toArray")
   to_array_loop(state, this, next, [])
 }
 
 fn to_array_loop(
-  state: State,
+  state: State(host),
   iter: JsValue,
   next: JsValue,
   acc: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, step) = iterator_step_value(state, iter, next)
   case step {
     Error(thrown) -> #(state, Error(thrown))
@@ -919,8 +926,8 @@ fn to_array_loop(
 fn for_each(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use this, next, func, state <- consumer_with_callback(
     this,
     args,
@@ -931,12 +938,12 @@ fn for_each(
 }
 
 fn for_each_loop(
-  state: State,
+  state: State(host),
   iter: JsValue,
   next: JsValue,
   func: JsValue,
   counter: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, step) = iterator_step_value(state, iter, next)
   case step {
     Error(thrown) -> #(state, Error(thrown))
@@ -955,8 +962,8 @@ fn for_each_loop(
 fn reduce(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use this, next, func, state <- consumer_with_callback(
     this,
     args,
@@ -982,13 +989,13 @@ fn reduce(
 }
 
 fn reduce_loop(
-  state: State,
+  state: State(host),
   iter: JsValue,
   next: JsValue,
   func: JsValue,
   acc: JsValue,
   counter: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, step) = iterator_step_value(state, iter, next)
   case step {
     Error(thrown) -> #(state, Error(thrown))
@@ -1009,10 +1016,10 @@ fn reduce_loop(
 fn bool_consumer(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   match_on: Bool,
   name: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use this, next, func, state <- consumer_with_callback(this, args, state, name)
   let #(state, res) = predicate_loop(state, this, next, func, 0, match_on)
   #(state, result.map(res, fn(m) { JsBool(option.is_some(m) == match_on) }))
@@ -1021,13 +1028,13 @@ fn bool_consumer(
 /// Shared loop for some/every/find: step iterator, call predicate(v, idx),
 /// early-exit (closing iterator) when truthiness == match_on. Some(v) = matched.
 fn predicate_loop(
-  state: State,
+  state: State(host),
   iter: JsValue,
   next: JsValue,
   func: JsValue,
   counter: Int,
   match_on: Bool,
-) -> #(State, Result(Option(JsValue), JsValue)) {
+) -> #(State(host), Result(Option(JsValue), JsValue)) {
   let #(state, step) = iterator_step_value(state, iter, next)
   case step {
     Error(thrown) -> #(state, Error(thrown))
@@ -1056,8 +1063,8 @@ fn predicate_loop(
 fn find(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use this, next, func, state <- consumer_with_callback(
     this,
     args,
@@ -1082,9 +1089,9 @@ type IgnoreSetterKey {
 fn ignore_proto_setter(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   which: IgnoreSetterKey,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let proto = state.builtins.iterator.prototype
   case this {
     JsObject(ref) ->
@@ -1145,10 +1152,11 @@ fn ignore_proto_setter(
 /// once. CPS-style — `use this, next, state <- get_iterator_direct(...)`.
 fn get_iterator_direct(
   this: JsValue,
-  state: State,
+  state: State(host),
   name: String,
-  cont: fn(JsValue, JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, JsValue, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _ref <- require_object_of(
     this,
     state,
@@ -1170,11 +1178,11 @@ fn get_iterator_direct(
 fn consumer_with_callback(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   name: String,
-  cont: fn(JsValue, JsValue, JsValue, State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, JsValue, JsValue, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _ref <- require_object_of(
     this,
     state,
@@ -1197,11 +1205,11 @@ fn consumer_with_callback(
 /// Shared §7.4.6/§7.4.8 prefix: call next(obj), require the result is an
 /// Object, read .done; continue with the result object and the done flag.
 fn iterator_step_result(
-  state: State,
+  state: State(host),
   obj: JsValue,
   next_method: JsValue,
-  cont: fn(JsValue, Bool, State) -> #(State, Result(a, JsValue)),
-) -> #(State, Result(a, JsValue)) {
+  cont: fn(JsValue, Bool, State(host)) -> #(State(host), Result(a, JsValue)),
+) -> #(State(host), Result(a, JsValue)) {
   case state.call(state, next_method, obj, []) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(result, state)) ->
@@ -1221,10 +1229,10 @@ fn iterator_step_result(
 
 /// §7.4.8 IteratorStepValue: if done return None; else read .value.
 fn iterator_step_value(
-  state: State,
+  state: State(host),
   obj: JsValue,
   next_method: JsValue,
-) -> #(State, Result(Option(JsValue), JsValue)) {
+) -> #(State(host), Result(Option(JsValue), JsValue)) {
   use result, done, state <- iterator_step_result(state, obj, next_method)
   case done {
     True -> #(state, Ok(None))
@@ -1242,30 +1250,30 @@ fn iterator_step_value(
 /// §7.4.11 IteratorClose with throw completion: get .return; if callable, call
 /// it (swallowing any throw — original error wins); return original error.
 pub fn close_throw(
-  state: State,
+  state: State(host),
   obj: JsValue,
   original: JsValue,
-) -> #(State, Result(a, JsValue)) {
+) -> #(State(host), Result(a, JsValue)) {
   let #(state, _ignored) = call_return(state, obj)
   #(state, Error(original))
 }
 
 /// IteratorClose with a freshly-allocated TypeError.
 pub fn close_throw_type(
-  state: State,
+  state: State(host),
   obj: JsValue,
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
   close_throw(State(..state, heap:), obj, err)
 }
 
 /// IteratorClose with a freshly-allocated RangeError.
 pub fn close_throw_range(
-  state: State,
+  state: State(host),
   obj: JsValue,
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
   close_throw(State(..state, heap:), obj, err)
 }
@@ -1274,9 +1282,9 @@ pub fn close_throw_range(
 /// Ok; else call it; if call throws → propagate; if result not Object →
 /// TypeError; else Ok.
 pub fn iterator_close_normal(
-  state: State,
+  state: State(host),
   obj: JsValue,
-) -> #(State, Result(Nil, JsValue)) {
+) -> #(State(host), Result(Nil, JsValue)) {
   case call_return(state, obj) {
     #(state, Ok(JsUndefined)) -> #(state, Ok(Nil))
     #(state, Ok(JsObject(_))) -> #(state, Ok(Nil))
@@ -1290,9 +1298,9 @@ pub fn iterator_close_normal(
 /// Ok(JsUndefined) means "no return method" (so the not-an-object check is
 /// skipped). Ok(other) is the return method's result.
 pub fn call_return(
-  state: State,
+  state: State(host),
   obj: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ret_fn, state <- state.try_op(object.get_value_of(
     state,
     obj,
@@ -1320,9 +1328,9 @@ pub fn call_return(
 /// %IteratorPrototype%. .next() throwing propagates without close (caller
 /// has already seated the [[Done]] sentinel).
 pub fn iterator_rest(
-  state: State,
+  state: State(host),
   iter: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use next, state <- state.try_op(object.get_value_of(
     state,
     iter,
@@ -1332,11 +1340,11 @@ pub fn iterator_rest(
 }
 
 fn iterator_rest_loop(
-  state: State,
+  state: State(host),
   iter: JsValue,
   next: JsValue,
   acc: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, step) = iterator_step_value(state, iter, next)
   case step {
     Error(thrown) -> #(state, Error(thrown))
@@ -1351,10 +1359,10 @@ fn iterator_rest_loop(
 
 /// CreateIterResultObject(value, done) — adapts common helper to State result.
 fn create_iter_result(
-  state: State,
+  state: State(host),
   val: JsValue,
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, v) =
     common.create_iter_result(state.heap, state.builtins, val, done)
   #(State(..state, heap:), Ok(v))
@@ -1363,10 +1371,10 @@ fn create_iter_result(
 /// Unwrap `this` as an Object ref or TypeError. CPS — `use ref <- ...`.
 fn require_object_of(
   this: JsValue,
-  state: State,
+  state: State(host),
   msg: String,
-  cont: fn(Ref) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Ref) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) -> cont(ref)
     _ -> state.type_error(state, msg)
@@ -1376,9 +1384,9 @@ fn require_object_of(
 /// Unwrap `this` as a WrapForValidIteratorObject. CPS-style.
 fn require_wrap(
   this: JsValue,
-  state: State,
-  cont: fn(JsValue, JsValue) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(JsValue, JsValue) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let err = "WrapForValidIterator method called on incompatible receiver"
   case this {
     JsObject(ref) ->
@@ -1396,9 +1404,9 @@ fn require_wrap(
 /// Thread a Result whose Error already carries the dispatch-shape tuple.
 /// `use v, state <- after(result)`.
 fn after(
-  result: Result(#(a, State), #(State, Result(JsValue, JsValue))),
-  cont: fn(a, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  result: Result(#(a, State(host)), #(State(host), Result(JsValue, JsValue))),
+  cont: fn(a, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case result {
     Ok(#(v, state)) -> cont(v, state)
     Error(r) -> r
@@ -1406,15 +1414,18 @@ fn after(
 }
 
 fn err_type(
-  state: State,
+  state: State(host),
   msg: String,
-) -> Result(a, #(State, Result(JsValue, JsValue))) {
+) -> Result(a, #(State(host), Result(JsValue, JsValue))) {
   Error(state.type_error(state, msg))
 }
 
 /// state.type_error but polymorphic in the Ok type — for callsites where the
 /// surrounding Result's Ok type isn't JsValue (so state.type_error won't unify).
-fn type_error_any(state: State, msg: String) -> #(State, Result(a, JsValue)) {
+fn type_error_any(
+  state: State(host),
+  msg: String,
+) -> #(State(host), Result(a, JsValue)) {
   let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
   #(State(..state, heap:), Error(err))
 }
@@ -1422,12 +1433,13 @@ fn type_error_any(state: State, msg: String) -> #(State, Result(a, JsValue)) {
 /// Step the underlying iterator. If next() throws, mark the helper done and
 /// propagate WITHOUT calling close (the iterator is already broken).
 fn after_step(
-  state: State,
+  state: State(host),
   ref: Ref,
   obj: JsValue,
   next: JsValue,
-  cont: fn(Option(JsValue), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Option(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, step) = iterator_step_value(state, obj, next)
   case step {
     Ok(v) -> cont(v, state)
@@ -1436,37 +1448,40 @@ fn after_step(
 }
 
 /// Mark a helper done and yield {value: undefined, done: true}.
-fn finish(state: State, ref: Ref) -> #(State, Result(JsValue, JsValue)) {
+fn finish(
+  state: State(host),
+  ref: Ref,
+) -> #(State(host), Result(JsValue, JsValue)) {
   create_iter_result(mark_done(state, ref), JsUndefined, True)
 }
 
-fn mark_done(state: State, ref: Ref) -> State {
+fn mark_done(state: State(host), ref: Ref) -> State(host) {
   update_helper(state, ref, None, None, None, True)
 }
 
-fn write_count(state: State, ref: Ref, count: Int) -> State {
+fn write_count(state: State(host), ref: Ref, count: Int) -> State(host) {
   update_helper(state, ref, Some(count), None, None, False)
 }
 
 fn write_inner(
-  state: State,
+  state: State(host),
   ref: Ref,
   inner: JsValue,
   inner_next: JsValue,
-) -> State {
+) -> State(host) {
   update_helper(state, ref, None, Some(inner), Some(inner_next), False)
 }
 
 /// Rewrite the IteratorHelperObject kind in place. Gleam's record-update
 /// can't narrow an ExoticKind variant, so we re-match and rebuild manually.
 fn update_helper(
-  state: State,
+  state: State(host),
   ref: Ref,
   new_count: Option(Int),
   new_inner: Option(JsValue),
   new_inner_next: Option(JsValue),
   set_done: Bool,
-) -> State {
+) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -1509,8 +1524,8 @@ fn update_helper(
 /// Iterator.zip ( iterables [ , options ] )
 fn zip(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let iterables = first_arg_or_undefined(args)
   // Step 1: If iterables is not an Object, throw a TypeError.
   use _ref <- require_object_of(
@@ -1538,8 +1553,8 @@ fn zip(
 /// Iterator.zipKeyed ( iterables [ , options ] )
 fn zip_keyed(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let iterables = first_arg_or_undefined(args)
   use iterables_ref <- require_object_of(
     iterables,
@@ -1572,10 +1587,13 @@ fn zip_keyed(
 /// validate it, and Get "padding" when mode is "longest". Returns the parsed
 /// mode plus the raw paddingOption (undefined or an Object).
 fn zip_options(
-  state: State,
+  state: State(host),
   args: List(JsValue),
   name: String,
-) -> Result(#(#(ZipMode, JsValue), State), #(State, Result(JsValue, JsValue))) {
+) -> Result(
+  #(#(ZipMode, JsValue), State(host)),
+  #(State(host), Result(JsValue, JsValue)),
+) {
   let options = case args {
     [_, opts, ..] -> opts
     _ -> JsUndefined
@@ -1625,8 +1643,8 @@ fn zip_options(
 /// Adapt an ops-style Result (Error carries #(thrown, state)) into the
 /// dispatch-shaped Error consumed by `after`.
 fn map_thrown(
-  r: Result(#(a, State), #(JsValue, State)),
-) -> Result(#(a, State), #(State, Result(JsValue, JsValue))) {
+  r: Result(#(a, State(host)), #(JsValue, State(host))),
+) -> Result(#(a, State(host)), #(State(host), Result(JsValue, JsValue))) {
   case r {
     Ok(v) -> Ok(v)
     Error(#(thrown, state)) -> Error(#(state, Error(thrown)))
@@ -1636,9 +1654,9 @@ fn map_thrown(
 /// §7.4.3 GetIterator(obj, sync): the @@iterator method must be callable and
 /// its result must be an Object; caches the next method (GetIteratorDirect).
 fn get_iterator_sync(
-  state: State,
+  state: State(host),
   obj: JsValue,
-) -> Result(#(#(JsValue, JsValue), State), #(JsValue, State)) {
+) -> Result(#(#(JsValue, JsValue), State(host)), #(JsValue, State(host))) {
   use #(method, state) <- result.try(object.get_symbol_value_of(
     state,
     obj,
@@ -1675,13 +1693,13 @@ fn get_iterator_sync(
 /// via GetIteratorFlattenable(·, reject-primitives). On abrupt completions,
 /// already-collected iterators are closed per IfAbruptCloseIterators.
 fn zip_collect(
-  state: State,
+  state: State(host),
   input_iter: JsValue,
   input_next: JsValue,
   acc: List(#(JsValue, JsValue)),
 ) -> Result(
-  #(List(#(JsValue, JsValue)), State),
-  #(State, Result(JsValue, JsValue)),
+  #(List(#(JsValue, JsValue)), State(host)),
+  #(State(host), Result(JsValue, JsValue)),
 ) {
   let #(state, step) = iterator_step_value(state, input_iter, input_next)
   case step {
@@ -1713,10 +1731,13 @@ fn collected_iters(acc: List(#(JsValue, JsValue))) -> List(JsValue) {
 /// Iterator.zip step 14: the "longest" padding list comes from ITERATING the
 /// padding object (unlike zipKeyed, which Gets per key).
 fn zip_padding_iterated(
-  state: State,
+  state: State(host),
   padding_option: JsValue,
   iters: List(#(JsValue, JsValue)),
-) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+) -> Result(
+  #(List(JsValue), State(host)),
+  #(State(host), Result(JsValue, JsValue)),
+) {
   let iter_count = list.length(iters)
   case padding_option {
     JsUndefined -> Ok(#(list.repeat(JsUndefined, iter_count), state))
@@ -1732,13 +1753,16 @@ fn zip_padding_iterated(
 }
 
 fn zip_padding_loop(
-  state: State,
+  state: State(host),
   pad_iter: JsValue,
   pad_next: JsValue,
   opened: List(JsValue),
   remaining: Int,
   acc: List(JsValue),
-) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+) -> Result(
+  #(List(JsValue), State(host)),
+  #(State(host), Result(JsValue, JsValue)),
+) {
   case remaining <= 0 {
     True -> {
       // usingIterator is still true — IteratorClose(paddingIter, normal).
@@ -1772,15 +1796,15 @@ fn zip_padding_loop(
 /// Iterator.zipKeyed step 12: walk allKeys, keeping enumerable own properties
 /// whose value is not undefined; flatten each value to an iterator record.
 fn zip_keyed_collect(
-  state: State,
+  state: State(host),
   iterables: JsValue,
   iterables_ref: Ref,
   keys_left: List(JsValue),
   keys_acc: List(JsValue),
   iters_acc: List(#(JsValue, JsValue)),
 ) -> Result(
-  #(#(List(JsValue), List(#(JsValue, JsValue))), State),
-  #(State, Result(JsValue, JsValue)),
+  #(#(List(JsValue), List(#(JsValue, JsValue))), State(host)),
+  #(State(host), Result(JsValue, JsValue)),
 ) {
   case keys_left {
     [] -> Ok(#(#(list.reverse(keys_acc), list.reverse(iters_acc)), state))
@@ -1854,10 +1878,10 @@ fn zip_keyed_collect(
 /// [[Get]] keyed by a property-key JsValue (JsString or JsSymbol — the only
 /// shapes [[OwnPropertyKeys]] yields).
 fn get_keyed(
-  state: State,
+  state: State(host),
   obj: JsValue,
   key: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case key {
     JsSymbol(sym) -> object.get_symbol_value_of(state, obj, sym)
     JsString(s) -> object.get_value_of(state, obj, value.canonical_key(s))
@@ -1869,11 +1893,14 @@ fn get_keyed(
 /// Iterator.zipKeyed step 14: the "longest" padding values are read per key
 /// from the padding object.
 fn zip_keyed_padding(
-  state: State,
+  state: State(host),
   padding_option: JsValue,
   keys: List(JsValue),
   iters: List(#(JsValue, JsValue)),
-) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+) -> Result(
+  #(List(JsValue), State(host)),
+  #(State(host), Result(JsValue, JsValue)),
+) {
   case padding_option {
     JsUndefined -> Ok(#(list.repeat(JsUndefined, list.length(iters)), state))
     _ -> {
@@ -1884,12 +1911,15 @@ fn zip_keyed_padding(
 }
 
 fn zip_keyed_padding_loop(
-  state: State,
+  state: State(host),
   padding_option: JsValue,
   opened: List(JsValue),
   keys_left: List(JsValue),
   acc: List(JsValue),
-) -> Result(#(List(JsValue), State), #(State, Result(JsValue, JsValue))) {
+) -> Result(
+  #(List(JsValue), State(host)),
+  #(State(host), Result(JsValue, JsValue)),
+) {
   case keys_left {
     [] -> Ok(#(list.reverse(acc), state))
     [key, ..rest] ->
@@ -1903,12 +1933,12 @@ fn zip_keyed_padding_loop(
 
 /// Allocate the IteratorZip helper object on %IteratorHelperPrototype%.
 fn alloc_zip(
-  state: State,
+  state: State(host),
   iters: List(#(JsValue, JsValue)),
   mode: ZipMode,
   padding: List(JsValue),
   keys: Option(List(JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let members =
     list.map(iters, fn(rec) { ZipOpen(iter: rec.0, next_method: rec.1) })
   let #(heap, ref) =
@@ -1933,14 +1963,14 @@ fn alloc_zip(
 // ============================================================================
 
 fn zip_next(
-  state: State,
+  state: State(host),
   ref: Ref,
   members: List(ZipMember),
   mode: ZipMode,
   padding: List(JsValue),
   keys: Option(List(JsValue)),
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case done, members {
     True, _ -> create_iter_result(state, JsUndefined, True)
     // IteratorZip closure step 1: iterCount = 0 → done forever.
@@ -1954,7 +1984,7 @@ fn zip_next(
 /// `prev` (reversed) holds processed members; `rest`/`pad_rest` are the
 /// unprocessed members and their index-aligned padding values.
 fn zip_round(
-  state: State,
+  state: State(host),
   ref: Ref,
   mode: ZipMode,
   keys: Option(List(JsValue)),
@@ -1962,7 +1992,7 @@ fn zip_round(
   rest: List(ZipMember),
   pad_rest: List(JsValue),
   results: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case rest {
     [] -> zip_emit(state, ref, keys, list.reverse(prev), list.reverse(results))
     [member, ..tail] -> {
@@ -2039,10 +2069,10 @@ fn zip_round(
 /// IteratorZip "strict" mode, first iterator done: IteratorStep each
 /// remaining iterator — all must be done, or TypeError.
 fn zip_strict_check(
-  state: State,
+  state: State(host),
   ref: Ref,
   rest: List(ZipMember),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case rest {
     [] -> finish_zip(state, ref)
     // Unreachable: "strict" mode never exhausts members in place.
@@ -2065,10 +2095,10 @@ fn zip_strict_check(
 /// IteratorCloseAll(openIters, ThrowCompletion(TypeError)) for strict-mode
 /// length mismatches.
 fn zip_strict_throw(
-  state: State,
+  state: State(host),
   ref: Ref,
   open: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let state = zip_mark_done(state, ref)
   let #(heap, terr) =
     common.make_type_error(
@@ -2081,10 +2111,10 @@ fn zip_strict_throw(
 
 /// §7.4.6 IteratorStep: call next() and read only `done` (never `value`).
 fn iterator_step_done(
-  state: State,
+  state: State(host),
   obj: JsValue,
   next_method: JsValue,
-) -> #(State, Result(Bool, JsValue)) {
+) -> #(State(host), Result(Bool, JsValue)) {
   use _result, done, state <- iterator_step_result(state, obj, next_method)
   #(state, Ok(done))
 }
@@ -2092,12 +2122,12 @@ fn iterator_step_done(
 /// Finish a round: persist longest-mode exhaustion transitions, then build
 /// the finishResults value (array for zip, null-proto object for zipKeyed).
 fn zip_emit(
-  state: State,
+  state: State(host),
   ref: Ref,
   keys: Option(List(JsValue)),
   members: List(ZipMember),
   results: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let state = zip_write_members(state, ref, members)
   case keys {
     None -> {
@@ -2115,10 +2145,10 @@ fn zip_emit(
 /// zipKeyed finishResults: OrdinaryObjectCreate(null) +
 /// CreateDataPropertyOrThrow(obj, keys[i], results[i]) for each column.
 fn alloc_zip_keyed_result(
-  h: Heap,
+  h: Heap(host),
   keys: List(JsValue),
   results: List(JsValue),
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   let #(props, sym_props) =
     list.zip(keys, results)
     |> list.fold(#(dict.new(), []), fn(acc, pair) {
@@ -2153,11 +2183,11 @@ fn alloc_zip_keyed_result(
 /// %IteratorHelperPrototype%.return for zip helpers: close every still-open
 /// underlying iterator (IteratorCloseAll, reverse order).
 fn zip_return(
-  state: State,
+  state: State(host),
   ref: Ref,
   members: List(ZipMember),
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False -> {
@@ -2190,10 +2220,10 @@ fn open_members(members: List(ZipMember)) -> List(JsValue) {
 /// every iterator in REVERSE list order — errors from .return are swallowed
 /// (the original error wins) — then rethrow the original.
 fn close_all_throw(
-  state: State,
+  state: State(host),
   iters: List(JsValue),
   original: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let state =
     list.fold(list.reverse(iters), state, fn(state, it) {
       // IteratorClose with a throw completion swallows .return errors.
@@ -2207,9 +2237,9 @@ fn close_all_throw(
 /// order; the first abrupt close result wins and the remaining iterators are
 /// closed with their errors swallowed.
 fn close_all_normal(
-  state: State,
+  state: State(host),
   iters: List(JsValue),
-) -> #(State, Result(Nil, JsValue)) {
+) -> #(State(host), Result(Nil, JsValue)) {
   list.fold(list.reverse(iters), #(state, Ok(Nil)), fn(acc, it) {
     let #(state, completion) = acc
     case completion {
@@ -2222,11 +2252,14 @@ fn close_all_normal(
   })
 }
 
-fn finish_zip(state: State, ref: Ref) -> #(State, Result(JsValue, JsValue)) {
+fn finish_zip(
+  state: State(host),
+  ref: Ref,
+) -> #(State(host), Result(JsValue, JsValue)) {
   create_iter_result(zip_mark_done(state, ref), JsUndefined, True)
 }
 
-fn zip_mark_done(state: State, ref: Ref) -> State {
+fn zip_mark_done(state: State(host), ref: Ref) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -2239,10 +2272,10 @@ fn zip_mark_done(state: State, ref: Ref) -> State {
 }
 
 fn zip_write_members(
-  state: State,
+  state: State(host),
   ref: Ref,
   members: List(ZipMember),
-) -> State {
+) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -2261,18 +2294,18 @@ fn zip_write_members(
 /// Iterator.concat ( ...items )
 fn concat(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   concat_validate(state, args, [])
 }
 
 /// Step 2: every item must be an Object with a callable @@iterator method;
 /// collect the (openMethod, iterable) records in order.
 fn concat_validate(
-  state: State,
+  state: State(host),
   items: List(JsValue),
   acc: List(#(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case items {
     [] -> {
       let #(heap, ref) =
@@ -2324,12 +2357,12 @@ fn concat_validate(
 /// %IteratorHelperPrototype%.next for concat helpers: pull from the current
 /// inner iterator, opening the next iterable as each one is exhausted.
 fn concat_next(
-  state: State,
+  state: State(host),
   ref: Ref,
   remaining: List(#(JsValue, JsValue)),
   inner: Option(#(JsValue, JsValue)),
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False ->
@@ -2354,10 +2387,10 @@ fn concat_next(
 /// Open the next iterable's iterator: iter = Call(openMethod, iterable),
 /// require an Object, GetIteratorDirect, then pull its first value.
 fn concat_open_next(
-  state: State,
+  state: State(host),
   ref: Ref,
   remaining: List(#(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case remaining {
     [] -> create_iter_result(concat_mark_done(state, ref), JsUndefined, True)
     [#(method, iterable), ..rest] ->
@@ -2399,11 +2432,11 @@ fn concat_open_next(
 /// %IteratorHelperPrototype%.return for concat helpers: close the currently
 /// open inner iterator (if any).
 fn concat_return(
-  state: State,
+  state: State(host),
   ref: Ref,
   inner: Option(#(JsValue, JsValue)),
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False -> {
@@ -2422,7 +2455,7 @@ fn concat_return(
   }
 }
 
-fn concat_mark_done(state: State, ref: Ref) -> State {
+fn concat_mark_done(state: State(host), ref: Ref) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -2438,11 +2471,11 @@ fn concat_mark_done(state: State, ref: Ref) -> State {
 }
 
 fn concat_write(
-  state: State,
+  state: State(host),
   ref: Ref,
   remaining: List(#(JsValue, JsValue)),
   inner: Option(#(JsValue, JsValue)),
-) -> State {
+) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {

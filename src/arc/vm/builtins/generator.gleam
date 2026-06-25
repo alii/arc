@@ -13,11 +13,11 @@ import arc/vm/value.{type Ref, GeneratorNext, GeneratorReturn, GeneratorThrow}
 /// objects, §27.3.3).
 /// Generator.prototype inherits from %IteratorPrototype% (not Object.prototype directly).
 pub fn init(
-  h: Heap(ctx),
+  h: Heap(ctx, host),
   iterator_proto: Ref,
   function_proto: Ref,
   function_ctor: Ref,
-) -> #(Heap(ctx), GeneratorBuiltin) {
+) -> #(Heap(ctx, host), GeneratorBuiltin) {
   let #(h, methods) =
     common.alloc_call_methods(h, function_proto, [
       #("next", GeneratorNext, 1),

@@ -55,10 +55,10 @@ import gleam/string
 ///
 /// Map.prototype.size is an accessor property (getter, no setter).
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   // §24.1.3.4 Map.prototype.entries doubles as §24.1.3.13 [@@iterator];
   // §24.1.3.14 [@@toStringTag] = "Map".
   common.init_keyed_collection(
@@ -93,8 +93,8 @@ pub fn dispatch(
   native: MapNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     MapConstructor(proto:) -> map_constructor(proto, args, state)
     MapPrototypeGet -> map_get(this, args, state)
@@ -133,8 +133,8 @@ pub fn dispatch(
 fn map_constructor(
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 4: If iterable is undefined or null, return empty map.
   case args {
     [] | [JsUndefined, ..] | [value.JsNull, ..] -> {
@@ -158,13 +158,13 @@ fn map_constructor(
 
 /// Allocate a Map object on the heap.
 fn alloc_map(
-  heap: Heap,
+  heap: Heap(host),
   proto: Ref,
   entries: dict.Dict(MapKey, JsValue),
   seqs: dict.Dict(MapKey, Int),
   order: dict.Dict(Int, MapKey),
   next_seq: Int,
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   common.alloc_wrapper(
     heap,
     MapObject(entries:, seqs:, order:, next_seq:),
@@ -186,14 +186,14 @@ fn alloc_map(
 ///
 /// Simplified: only handles Array iterable containing Array pairs.
 fn add_entries_from_iterable(
-  state: State,
+  state: State(host),
   proto: Ref,
   iterable: JsValue,
   entries: dict.Dict(MapKey, JsValue),
   seqs: dict.Dict(MapKey, Int),
   order: dict.Dict(Int, MapKey),
   next_seq: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case iterable {
     JsObject(iter_ref) ->
       case heap.read_array(state.heap, iter_ref) {
@@ -221,9 +221,9 @@ fn add_entries_from_iterable(
 /// element store; any other object goes through real [[Get]]s of "0"/"1"
 /// (which may run getters/proxy traps and therefore throw).
 fn read_entry_kv(
-  state: State,
+  state: State(host),
   entry_ref: Ref,
-) -> Result(#(JsValue, JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, JsValue, State(host)), #(JsValue, State(host))) {
   case heap.read_array(state.heap, entry_ref) {
     Some(#(_, entry_elems)) ->
       Ok(#(elements.get(entry_elems, 0), elements.get(entry_elems, 1), state))
@@ -245,7 +245,7 @@ fn read_entry_kv(
 
 /// Loop over array entries for Map constructor.
 fn add_entries_loop(
-  state: State,
+  state: State(host),
   proto: Ref,
   elements: value.JsElements,
   idx: Int,
@@ -254,7 +254,7 @@ fn add_entries_loop(
   seqs: dict.Dict(MapKey, Int),
   order: dict.Dict(Int, MapKey),
   next_seq: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case idx >= length {
     True -> {
       // Done — allocate the map with all entries.
@@ -325,8 +325,8 @@ fn add_entries_loop(
 fn map_get(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
   use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
@@ -360,8 +360,8 @@ fn map_get(
 fn map_set(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(key_arg, val_arg) = case args {
     [k, v, ..] -> #(k, v)
     [k] -> #(k, JsUndefined)
@@ -407,8 +407,8 @@ fn map_set(
 fn map_has(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
   use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
@@ -435,8 +435,8 @@ fn map_has(
 fn map_delete(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
   use entries, seqs, order, next_seq, ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
@@ -467,8 +467,8 @@ fn map_delete(
 ///   4. Return undefined.
 fn map_clear(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _entries, _seqs, _order, next_seq, ref, state <- require_map(this, state)
   // next_seq is preserved: clear() empties the spec's records but appends
   // still land past in-flight iterator cursors, so they remain visited.
@@ -503,8 +503,8 @@ fn map_clear(
 fn map_for_each(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Extract callbackfn and thisArg
   let #(cb, this_arg) = case args {
     [c, t, ..] -> #(c, t)
@@ -537,13 +537,13 @@ fn map_for_each(
 /// Inner loop for Map.prototype.forEach — advances a seq cursor over the
 /// source Map's live records, re-reading the source each step.
 fn for_each_loop(
-  state: State,
+  state: State(host),
   ref: Ref,
   cursor: Int,
   cb: JsValue,
   this_arg: JsValue,
   map_this: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let next = case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: MapObject(entries:, order:, next_seq:, ..), ..)) ->
       value.entry_from_seq(entries, order, cursor, next_seq)
@@ -580,8 +580,8 @@ fn for_each_loop(
 ///   5. Return 𝔽(count).
 fn map_get_size(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
   let size = dict.size(entries)
   #(state, Ok(value.from_int(size)))
@@ -596,9 +596,9 @@ fn map_get_size(
 /// only / [key,value] array); entries added during iteration are visited.
 fn map_iterator(
   this: JsValue,
-  state: State,
+  state: State(host),
   kind: value.MapIterKind,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _entries, _seqs, _order, _next_seq, ref, state <- require_map(this, state)
   let #(heap, iter_ref) =
     common.alloc_wrapper(
@@ -620,16 +620,16 @@ fn map_iterator(
 /// number, heap ref, and state. Returns TypeError if `this` is not a Map.
 fn require_map(
   this: JsValue,
-  state: State,
+  state: State(host),
   cont: fn(
     dict.Dict(MapKey, JsValue),
     dict.Dict(MapKey, Int),
     dict.Dict(Int, MapKey),
     Int,
     Ref,
-    State,
-  ) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+    State(host),
+  ) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -651,12 +651,12 @@ fn require_map(
 
 /// Update the MapObject data on an existing heap slot.
 fn update_map_data(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   entries: dict.Dict(MapKey, JsValue),
   seqs: dict.Dict(MapKey, Int),
   order: dict.Dict(Int, MapKey),
   next_seq: Int,
-) -> Heap {
+) -> Heap(host) {
   heap.update_kind(h, ref, MapObject(entries:, seqs:, order:, next_seq:))
 }

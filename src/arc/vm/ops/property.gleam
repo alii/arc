@@ -18,9 +18,9 @@ import gleam/result
 /// [[Get]]/[[Set]] don't round-trip through strings: array-index numbers →
 /// Index(n) (skip stringify), strings → canonical_key, else ToString → canonical_key.
 pub fn to_property_key(
-  state: State,
+  state: State(host),
   key: JsValue,
-) -> Result(#(PropertyKey, State), #(JsValue, State)) {
+) -> Result(#(PropertyKey, State(host)), #(JsValue, State(host))) {
   case key {
     JsNumber(Finite(n)) -> {
       // +. 0.0 normalizes -0.0 → +0.0 (BEAM =:= distinguishes them)
@@ -51,10 +51,10 @@ pub fn to_property_key(
 /// the single [[Get]] implementation. The elements/properties storage split
 /// is handled by get_own_property; this layer doesn't know about it.
 pub fn get_elem_value(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   key: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case key {
     value.JsSymbol(sym_id) ->
       object.get_symbol_value(state, ref, sym_id, JsObject(ref))
@@ -71,11 +71,11 @@ pub fn get_elem_value(
 /// Returns the [[Set]] success flag so strict-mode callers can throw
 /// TypeError on failure (§13.15.2 PutValue step 6.b.iv).
 pub fn put_elem_value(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   key: JsValue,
   val: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   let receiver = JsObject(ref)
   case key {
     value.JsSymbol(sym_id) ->

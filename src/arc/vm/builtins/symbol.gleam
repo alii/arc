@@ -20,10 +20,10 @@ import gleam/result
 /// `description` getter, @@toPrimitive and @@toStringTag.
 /// Returns #(heap, constructor_ref, prototype_ref).
 pub fn init(
-  h: Heap(ctx),
+  h: Heap(ctx, host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap(ctx), Ref, Ref) {
+) -> #(Heap(ctx, host), Ref, Ref) {
   // Reserve the prototype ref first: the constructor's `prototype` property
   // and the prototype's `constructor` property point at each other.
   let #(h, proto_ref) = heap.reserve(h)

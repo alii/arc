@@ -19,8 +19,9 @@ import gleam/string
 // Callback types for VM functions that can't be imported directly
 // ============================================================================
 
-pub type ExecuteInnerFn =
-  fn(State) -> Result(#(completion.Completion, State), VmError)
+pub type ExecuteInnerFn(host) =
+  fn(State(host)) ->
+    Result(#(completion.Completion(host), State(host)), VmError)
 
 import arc/vm/completion
 
@@ -67,7 +68,7 @@ pub fn assign_non_hole_indices(
 /// gap between old length and new length is implicitly a hole. Later
 /// ArrayPush appends past the hole leave it intact (tree_array default
 /// slots stay unset). forEach/map correctly skip these per §23.1.3.
-pub fn grow_array_length(h: Heap, ref: Ref) -> Heap {
+pub fn grow_array_length(h: Heap(host), ref: Ref) -> Heap(host) {
   use slot <- heap.update(h, ref)
   case slot {
     ObjectSlot(kind: ArrayObject(length:), ..) ->
@@ -79,7 +80,7 @@ pub fn grow_array_length(h: Heap, ref: Ref) -> Heap {
 /// Append one value to the end of an array (ArrayPush opcode helper).
 /// Reads current length, sets element at that index, increments length.
 /// Non-array refs are a no-op — shouldn't happen for compiler-emitted literals.
-pub fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {
+pub fn push_onto_array(h: Heap(host), ref: Ref, val: JsValue) -> Heap(host) {
   use slot <- heap.update(h, ref)
   case slot {
     ObjectSlot(kind: ArrayObject(length:), elements:, ..) ->
@@ -100,10 +101,11 @@ pub fn push_onto_array(h: Heap, ref: Ref, val: JsValue) -> Heap {
 /// once up-front is safe. Replaces the old per-element push_onto_array
 /// pattern which did n × (dict.get + dict.insert + ObjectSlot alloc).
 fn batch_append(
-  h: Heap,
+  h: Heap(host),
   target_ref: Ref,
-  fold: fn(Heap, value.JsElements, Int) -> #(Heap, value.JsElements, Int),
-) -> Heap {
+  fold: fn(Heap(host), value.JsElements, Int) ->
+    #(Heap(host), value.JsElements, Int),
+) -> Heap(host) {
   case heap.read(h, target_ref) {
     Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..) as slot) -> {
       let #(h, elements, length) = fold(h, elements, length)
@@ -120,10 +122,10 @@ fn batch_append(
 /// Append a list of values onto the target array — one heap read, one
 /// heap write. Use this instead of `list.fold(.., push_onto_array)`.
 pub fn append_list_to_array(
-  h: Heap,
+  h: Heap(host),
   target_ref: Ref,
   values: List(JsValue),
-) -> Heap {
+) -> Heap(host) {
   use h, els, len <- batch_append(h, target_ref)
   let #(els, len) =
     list.fold(values, #(els, len), fn(acc, v) {
@@ -137,12 +139,12 @@ pub fn append_list_to_array(
 /// Used for the array fast-path in ArraySpread — avoids creating an
 /// ArrayIteratorObject when the source is a plain array.
 pub fn append_range_to_array(
-  h: Heap,
+  h: Heap(host),
   target_ref: Ref,
   src_elements: value.JsElements,
   idx: Int,
   end: Int,
-) -> Heap {
+) -> Heap(host) {
   use h, els, len <- batch_append(h, target_ref)
   // elements.get returns JsUndefined for holes — matches the spec's
   // array iterator behavior (CreateIterResultObject(Get(array, idx), false)).
@@ -173,7 +175,7 @@ fn copy_range(
 /// Collect typed-array elements [from, to) read through the live backing
 /// store (out-of-range reads decode as undefined, matching detached reads).
 fn typed_array_values_range(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
@@ -213,12 +215,12 @@ fn typed_array_values_range(
 /// kind — indices ("key"), the elements ("value"), or fresh [index, element]
 /// pair arrays ("key+value"). `start` is the source index of the first value.
 fn shape_iter_values(
-  h: Heap,
+  h: Heap(host),
   array_proto: Ref,
   iter_kind: value.ArrayIterKind,
   start: Int,
   values: List(JsValue),
-) -> #(Heap, List(JsValue)) {
+) -> #(Heap(host), List(JsValue)) {
   case iter_kind {
     value.ArrayIterValues -> #(h, values)
     value.ArrayIterKeys -> #(
@@ -241,7 +243,7 @@ fn shape_iter_values(
 /// Latch an Array Iterator as exhausted (index -1) after a full drain —
 /// further .next() calls answer done, matching the spec's
 /// [[IteratedObject]] = undefined "already returned" state.
-fn latch_array_iter_done(h: Heap, iter_ref: Ref) -> Heap {
+fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
   case heap.read(h, iter_ref) {
     Some(
       ObjectSlot(kind: value.ArrayIteratorObject(source:, iter_kind:, ..), ..) as slot,
@@ -271,11 +273,11 @@ fn latch_array_iter_done(h: Heap, iter_ref: Ref) -> Heap {
 /// iterator reads Get(array, idx) which returns undefined for holes; so does
 /// elements.get. V8 does the same shortcut.
 pub fn spread_into_array(
-  state: State,
+  state: State(host),
   target_ref: Ref,
   iterable: JsValue,
-  execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case iterable {
     JsObject(src_ref) ->
       case heap.read(state.heap, src_ref) {
@@ -557,11 +559,11 @@ pub fn spread_into_array(
 /// re-read length each step — a getter can grow or shrink the array
 /// mid-iteration — then Get(arr, idx), append, repeat.
 fn spread_array_generic(
-  state: State,
+  state: State(host),
   src_ref: Ref,
   target_ref: Ref,
   idx: Int,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let length =
     heap.read_array_like(state.heap, src_ref)
     |> option.map(fn(p) { p.0 })
@@ -590,11 +592,11 @@ fn spread_array_generic(
 /// resume API yields #(done, value, state) directly — no per-element
 /// {value, done} result object is allocated.
 pub fn drain_generator_to_array(
-  state: State,
+  state: State(host),
   gen_ref: Ref,
   target_ref: Ref,
-  execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   use #(done, val, next_state) <- result.try(generators.resume_generator_next(
     state,
     JsObject(gen_ref),

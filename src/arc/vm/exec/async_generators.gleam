@@ -40,21 +40,21 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-pub type ExecuteInnerFn =
-  fn(State) -> Result(#(Completion, State), state.VmError)
+pub type ExecuteInnerFn(host) =
+  fn(State(host)) -> Result(#(Completion(host), State(host)), state.VmError)
 
-pub type UnwindToCatchFn =
-  fn(State, JsValue) -> Option(State)
+pub type UnwindToCatchFn(host) =
+  fn(State(host), JsValue) -> Option(State(host))
 
 /// Bundle of per-request context threaded through the body-execution helpers.
-type Run {
+type Run(host) {
   Run(
     data_ref: Ref,
     gen: AsyncGenData,
     req: AsyncGenRequest,
     rest_queue: List(AsyncGenRequest),
-    execute_inner: ExecuteInnerFn,
-    unwind_to_catch: UnwindToCatchFn,
+    execute_inner: ExecuteInnerFn(host),
+    unwind_to_catch: UnwindToCatchFn(host),
   )
 }
 
@@ -63,19 +63,19 @@ type Run {
 /// (reject on failure, don't throw sync), enqueue request, kick driver
 /// if not already executing, return promise.
 pub fn call_native_method(
-  state: State,
+  state: State(host),
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
   completion: AsyncGenCompletion,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let arg = helpers.first_arg_or_undefined(args)
   let #(h, promise_ref, _data_ref, resolve, reject) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
-  let ret = fn(state: State) {
+  let ret = fn(state: State(host)) {
     Ok(
       State(
         ..state,
@@ -119,11 +119,11 @@ pub fn call_native_method(
 /// Pulls the head request and acts on it based on current state.
 /// Loops until queue is empty or we hit an await (which suspends via microtask).
 fn resume_next(
-  state: State,
+  state: State(host),
   data_ref: Ref,
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> State {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> State(host) {
   case read_slot(state.heap, data_ref) {
     None -> state
     Some(gen) -> {
@@ -206,7 +206,7 @@ fn resume_next(
 /// Resume the generator body from a suspended state. Dispatches on the
 /// request kind to push the arg / throw / inject return, then runs until
 /// the body yields, awaits, returns, or throws.
-fn run_body(state: State, run: Run, push_arg: Bool) -> State {
+fn run_body(state: State(host), run: Run(host), push_arg: Bool) -> State(host) {
   let Run(data_ref:, gen:, req:, ..) = run
   // Mark executing FIRST so concurrent calls enqueue. saved_pc/stack preserved.
   let h = heap.write(state.heap, data_ref, slot_with_state(gen, AGExecuting))
@@ -256,11 +256,11 @@ fn run_body(state: State, run: Run, push_arg: Bool) -> State {
 /// Shared by run_body, call_native_resume, and the yield*-delegate paths.
 /// Does NOT write AGExecuting — caller is responsible for slot state.
 fn build_exec_state(
-  state: State,
+  state: State(host),
   gen: AsyncGenData,
   stack: List(JsValue),
   pc: Int,
-) -> State {
+) -> State(host) {
   let restored_try = generators.restore_stacks(gen.saved_try_stack)
   State(
     ..state,
@@ -297,7 +297,7 @@ fn async_delegate_iterator(gen: AsyncGenData) -> Option(Ref) {
 /// The yield* iter slot may hold an internal Iterator Record wrapper
 /// (cached `next` from GetIteratorFromMethod) — resolve it to the real
 /// iterator for .return/.throw lookups.
-fn unwrap_record_ref(h: heap.Heap(State), ref: Ref) -> Ref {
+fn unwrap_record_ref(h: heap.Heap(State(host), host), ref: Ref) -> Ref {
   case heap.read(h, ref) {
     Some(ObjectSlot(
       kind: value.IteratorRecordObject(iterated: JsObject(real), ..),
@@ -312,7 +312,11 @@ fn unwrap_record_ref(h: heap.Heap(State), ref: Ref) -> Ref {
 /// call it, then AWAIT the result (unlike sync). The await suspends via
 /// setup_await with AGResumeDelegate; settlement is handled in
 /// resume_after_delegate.
-fn forward_async_delegate(state: State, run: Run, iter_ref: Ref) -> State {
+fn forward_async_delegate(
+  state: State(host),
+  run: Run(host),
+  iter_ref: Ref,
+) -> State(host) {
   let iter = JsObject(iter_ref)
   let method_name = case run.req.completion {
     AGThrow -> "throw"
@@ -342,7 +346,11 @@ fn forward_async_delegate(state: State, run: Run, iter_ref: Ref) -> State {
 /// Inner iterator lacks .return/.throw. Per ES §15.5.5:
 ///   - missing throw → AsyncIteratorClose(iter), throw TypeError into body
 ///   - missing return → Await(received), then ReturnCompletion out of body
-fn delegate_method_missing(state: State, run: Run, iter_ref: Ref) -> State {
+fn delegate_method_missing(
+  state: State(host),
+  run: Run(host),
+  iter_ref: Ref,
+) -> State(host) {
   case run.req.completion {
     AGThrow ->
       // §7.b.iii.1-4: AsyncIteratorClose(iter, NormalCompletion(empty)),
@@ -387,7 +395,10 @@ fn delegate_method_missing(state: State, run: Run, iter_ref: Ref) -> State {
 /// Throw a TypeError("does not provide a 'throw' method") into the generator
 /// body. Shared by delegate_method_missing's no-.return-on-iter fast path and
 /// the AGResumeDelegateClose settlement.
-fn throw_missing_throw_type_error(state: State, run: Run) -> State {
+fn throw_missing_throw_type_error(
+  state: State(host),
+  run: Run(host),
+) -> State(host) {
   let #(h, err) =
     common.make_type_error(
       state.heap,
@@ -399,7 +410,11 @@ fn throw_missing_throw_type_error(state: State, run: Run) -> State {
 
 /// Throw a value into the generator body at saved_pc (through its try/catch),
 /// then dispatch via handle_exec_result.
-fn throw_into_gen_body(state: State, run: Run, thrown: JsValue) -> State {
+fn throw_into_gen_body(
+  state: State(host),
+  run: Run(host),
+  thrown: JsValue,
+) -> State(host) {
   let exec_state =
     build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
   let exec_result = case run.unwind_to_catch(exec_state, thrown) {
@@ -416,9 +431,9 @@ fn throw_into_gen_body(state: State, run: Run, thrown: JsValue) -> State {
 /// per steps 4 & 6 this propagates as the yield* completion (closeCompletion
 /// is normal, so nothing takes precedence over innerResult).
 fn close_async_iterator(
-  state: State,
+  state: State(host),
   iter_ref: Ref,
-) -> Result(#(State, Option(JsValue)), #(JsValue, State)) {
+) -> Result(#(State(host), Option(JsValue)), #(JsValue, State(host))) {
   let iter = JsObject(iter_ref)
   use #(ret_fn, state) <- result.try(object_ops.get_value(
     state,
@@ -440,9 +455,9 @@ fn close_async_iterator(
 /// Read {done, value} off an awaited iterator-result object. Returns
 /// Error(#(thrown, state)) for non-object results or property-get throws.
 fn read_iter_result(
-  state: State,
+  state: State(host),
   settled: JsValue,
-) -> Result(#(Bool, JsValue, State), #(JsValue, State)) {
+) -> Result(#(Bool, JsValue, State(host)), #(JsValue, State(host))) {
   case settled {
     JsObject(rref) -> {
       use #(done_v, state) <- result.try(object_ops.get_value(
@@ -474,12 +489,12 @@ fn read_iter_result(
 /// Handle the awaited result of a delegated iter.return()/iter.throw() call.
 /// Called from call_native_resume's AGResumeDelegate branch.
 fn resume_after_delegate(
-  state: State,
-  run: Run,
+  state: State(host),
+  run: Run(host),
   method: AsyncGenCompletion,
   is_reject: Bool,
   settled: JsValue,
-) -> State {
+) -> State(host) {
   // Awaited promise rejected → throw into body.
   case is_reject {
     True -> throw_into_gen_body(state, run, settled)
@@ -519,11 +534,11 @@ fn resume_after_delegate(
 ///           val; resume body at saved_pc+3 (past Next/Await/Resume).
 ///   return → inner returned done — outer gen returns val.
 fn delegate_done(
-  state: State,
-  run: Run,
+  state: State(host),
+  run: Run(host),
   method: AsyncGenCompletion,
   val: JsValue,
-) -> State {
+) -> State(host) {
   let gen = run.gen
   case method {
     AGThrow -> {
@@ -553,10 +568,10 @@ fn delegate_done(
 
 /// Dispatch on the body's completion: yield/await/return/throw.
 fn handle_exec_result(
-  outer: State,
-  run: Run,
-  result: Result(#(Completion, State), state.VmError),
-) -> State {
+  outer: State(host),
+  run: Run(host),
+  result: Result(#(Completion(host), State(host)), state.VmError),
+) -> State(host) {
   let Run(data_ref:, gen:, req:, rest_queue:, execute_inner:, unwind_to_catch:) =
     run
   case result {
@@ -615,17 +630,17 @@ fn handle_exec_result(
 /// `kind` distinguishes: body await, AwaitingReturn microtask, or a yield*
 /// delegated iter.return()/throw() result.
 pub fn call_native_resume(
-  state: State,
+  state: State(host),
   data_ref: Ref,
   is_reject: Bool,
   kind: AGResumeKind,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let settled = helpers.first_arg_or_undefined(args)
-  let ret = fn(state: State) {
+  let ret = fn(state: State(host)) {
     Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
   }
   case read_slot(state.heap, data_ref) {
@@ -709,11 +724,11 @@ pub fn call_native_resume(
 // ============================================================================
 
 fn setup_await(
-  state: State,
+  state: State(host),
   data_ref: Ref,
   awaited: JsValue,
   kind: AGResumeKind,
-) -> State {
+) -> State(host) {
   use is_reject <- promises.setup_await(state, awaited)
   value.AsyncGeneratorResume(data_ref:, is_reject:, kind:)
 }
@@ -738,7 +753,7 @@ type AsyncGenData {
   )
 }
 
-fn get_async_gen_data(h: Heap, this: JsValue) -> Option(AsyncGenData) {
+fn get_async_gen_data(h: Heap(host), this: JsValue) -> Option(AsyncGenData) {
   case this {
     JsObject(ref) ->
       case heap.read(h, ref) {
@@ -750,7 +765,7 @@ fn get_async_gen_data(h: Heap, this: JsValue) -> Option(AsyncGenData) {
   }
 }
 
-fn read_slot(h: Heap, data_ref: Ref) -> Option(AsyncGenData) {
+fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenData) {
   case heap.read(h, data_ref) {
     Some(AsyncGeneratorSlot(
       gen_state:,
@@ -811,7 +826,7 @@ fn encode_queue(
 fn slot_with_state(
   gen: AsyncGenData,
   s: value.AsyncGeneratorState,
-) -> HeapSlot {
+) -> HeapSlot(host) {
   slot_with(gen, s, gen.queue_front, gen.queue_back)
 }
 
@@ -820,7 +835,7 @@ fn slot_with(
   s: value.AsyncGeneratorState,
   front: List(AsyncGenRequest),
   back: List(AsyncGenRequest),
-) -> HeapSlot {
+) -> HeapSlot(host) {
   AsyncGeneratorSlot(
     gen_state: s,
     queue: encode_queue(front, back),
@@ -834,13 +849,13 @@ fn slot_with(
 }
 
 fn save_suspended(
-  state: State,
+  state: State(host),
   data_ref: Ref,
   gen: AsyncGenData,
-  suspended: State,
+  suspended: State(host),
   new_state: value.AsyncGeneratorState,
   queue_front: List(AsyncGenRequest),
-) -> State {
+) -> State(host) {
   let saved_try = generators.save_stacks(suspended.try_stack)
   let h =
     heap.write(
@@ -861,11 +876,11 @@ fn save_suspended(
 }
 
 fn complete(
-  state: State,
+  state: State(host),
   data_ref: Ref,
   gen: AsyncGenData,
   queue_front: List(AsyncGenRequest),
-) -> State {
+) -> State(host) {
   let h =
     heap.write(
       state.heap,
@@ -876,11 +891,11 @@ fn complete(
 }
 
 fn settle_head(
-  state: State,
+  state: State(host),
   data_ref: Ref,
   gen: AsyncGenData,
   rest_queue: List(AsyncGenRequest),
-) -> State {
+) -> State(host) {
   let h =
     heap.write(
       state.heap,
@@ -896,21 +911,25 @@ fn settle_head(
 
 /// Call resolve({value, done}) via state.call.
 fn fulfill_iter(
-  state: State,
+  state: State(host),
   resolve: JsValue,
   val: JsValue,
   done: Bool,
-) -> State {
+) -> State(host) {
   let #(h, result) =
     common.create_iter_result(state.heap, state.builtins, val, done)
   call_fn(State(..state, heap: h), resolve, [result])
 }
 
-fn reject_with(state: State, reject: JsValue, reason: JsValue) -> State {
+fn reject_with(
+  state: State(host),
+  reject: JsValue,
+  reason: JsValue,
+) -> State(host) {
   call_fn(state, reject, [reason])
 }
 
-fn call_fn(state: State, f: JsValue, args: List(JsValue)) -> State {
+fn call_fn(state: State(host), f: JsValue, args: List(JsValue)) -> State(host) {
   case state.call(state, f, JsUndefined, args) {
     Ok(#(_, state)) -> state
     // f is always a resolve/reject fn from CreateResolvingFunctions.

@@ -50,7 +50,7 @@ import gleam/option.{None, Some}
 ///   ReferenceError.prototype → Error.prototype
 ///   RangeError.prototype     → Error.prototype
 ///   SyntaxError.prototype    → Error.prototype
-pub fn init(h: Heap) -> #(Heap, Builtins) {
+pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
   // Object.prototype — the root of all prototype chains
   let #(h, object_proto) = common.alloc_proto(h, None, dict.new())
 
@@ -483,12 +483,12 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
 }
 
 fn alloc_iterator_proto(
-  h: Heap,
+  h: Heap(host),
   function_proto: value.Ref,
   iterator_proto: value.Ref,
   next: value.CallNativeFn,
   tag: String,
-) -> #(Heap, value.Ref) {
+) -> #(Heap(host), value.Ref) {
   let #(h, methods) =
     common.alloc_call_methods(h, function_proto, [#("next", next, 0)])
   common.init_namespace(h, iterator_proto, tag, methods)
@@ -513,7 +513,7 @@ fn global_entry_to_property(entry: GlobalEntry) -> #(String, value.Property) {
 /// Build the globalThis object on the heap with all built-in bindings.
 /// Returns updated heap + Ref to the globalThis heap object.
 /// The globalThis object IS the ObjectRecord of the Global Environment Record.
-pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
+pub fn globals(b: Builtins, h: Heap(host)) -> #(Heap(host), value.Ref) {
   // Temporal namespace — built per-realm (its prototypes carry refs inside
   // native-fn tokens, so it needs no slot in the Builtins record).
   let #(h, temporal_ns) =

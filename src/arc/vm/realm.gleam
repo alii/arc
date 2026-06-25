@@ -30,8 +30,9 @@ import gleam/string
 // Callback types for VM functions that can't be imported directly
 // ============================================================================
 
-pub type ExecuteInnerFn =
-  fn(State) -> Result(#(completion.Completion, State), VmError)
+pub type ExecuteInnerFn(host) =
+  fn(State(host)) ->
+    Result(#(completion.Completion(host), State(host)), VmError)
 
 /// Inline of interpreter.init_top_level_locals (realm.gleam can't import
 /// interpreter — cycle). JsUndefined everywhere, then seed the `this` slot.
@@ -46,17 +47,17 @@ fn seed_top_level_locals(
   }
 }
 
-pub type NewStateFn =
+pub type NewStateFn(host) =
   fn(
     FuncTemplate,
     tuple_array.TupleArray(JsValue),
-    Heap,
+    Heap(host),
     Builtins,
     Ref,
     dict.Dict(String, value.LexicalGlobal),
     dict.Dict(value.SymbolId, String),
     dict.Dict(String, value.SymbolId),
-  ) -> State
+  ) -> State(host)
 
 // ============================================================================
 // $262 — test262 host-defined realm functions
@@ -67,10 +68,10 @@ pub type NewStateFn =
 pub fn eval_script_native(
   args: List(JsValue),
   this: JsValue,
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let source = case args {
     [s, ..] -> s
     [] -> JsUndefined
@@ -200,8 +201,8 @@ pub fn eval_script_native(
 /// $262.createRealm() — create a fresh realm and return its $262 object.
 pub fn create_realm_native(
   _this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Initialize fresh builtins and global object for the new realm
   let #(h, new_builtins) = builtins.init(state.heap)
   let #(h, new_global_ref) = builtins.globals(new_builtins, h)
@@ -245,11 +246,11 @@ pub fn create_realm_native(
 /// property. The realm_ref points to a RealmSlot on the heap.
 /// Public so test262_exec.gleam can use it for initial test setup.
 pub fn build_262(
-  h: Heap,
+  h: Heap(host),
   b: Builtins,
   global_ref: Ref,
   realm_ref: Ref,
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   let func_proto = b.function.prototype
 
   // Allocate method function objects
@@ -371,19 +372,19 @@ pub fn build_262(
 /// Embedder extension applied to a freshly built (and rooted) $262 object:
 /// receives the heap, the realm's builtins and the $262 ref, and returns
 /// the heap with any extra properties installed.
-pub type Extend262 =
-  fn(Heap, Builtins, Ref) -> Heap
+pub type Extend262(host) =
+  fn(Heap(host), Builtins, Ref) -> Heap(host)
 
 /// Register the process-local $262 extension hook (a data-only process-
 /// dictionary write — see arc_realm_ffi.erl). Freshly spawned processes
 /// start with no hook; per-process embedder setup (the harness's per-test
 /// worker, an agent child body) must register it before booting a realm.
 @external(erlang, "arc_realm_ffi", "set_extend_262")
-pub fn set_extend_262(hook: Extend262) -> Nil
+pub fn set_extend_262(hook: Extend262(host)) -> Nil
 
 /// The registered hook, or Error(Nil) when this process never set one.
 @external(erlang, "arc_realm_ffi", "get_extend_262")
-fn get_extend_262() -> Result(Extend262, Nil)
+fn get_extend_262() -> Result(Extend262(host), Nil)
 
 // ============================================================================
 // eval() and Function() constructor — runtime code evaluation
@@ -396,13 +397,13 @@ fn get_extend_262() -> Result(Extend262, Nil)
 /// permission today; full SyntaxPerms in P11) while indirect-eval / Function
 /// constructor stay context-free.
 fn compile_or_throw(
-  state: State,
+  state: State(host),
   builtins: Builtins,
   source: String,
   parse: fn(String) -> Result(ast.Program, parser.ParseError),
   compile: fn(ast.Program) -> Result(FuncTemplate, compiler.CompileError),
-  cont: fn(FuncTemplate) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(FuncTemplate) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let throw_syntax = fn(msg) {
     let #(heap, err) = common.make_syntax_error(state.heap, builtins, msg)
     #(State(..state, heap:), Error(err))
@@ -448,12 +449,12 @@ fn ffi_run_compile_task(source_bytes: Int, task: fn() -> a) -> a
 fn run_eval(
   template: FuncTemplate,
   locals: tuple_array.TupleArray(JsValue),
-  h: Heap,
-  state: State,
+  h: Heap(host),
+  state: State(host),
   eval_env: option.Option(Ref),
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let eval_state =
     State(
       ..new_state_fn(
@@ -521,10 +522,10 @@ fn run_eval(
 /// Shared core for eval_native and function_constructor_native.
 fn run_source_in_current_realm(
   source: String,
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use template <- compile_or_throw(
     state,
     state.builtins,
@@ -552,10 +553,10 @@ fn run_source_in_current_realm(
 /// If x is not a string, returns x unchanged.
 pub fn eval_native(
   args: List(JsValue),
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [JsString(source), ..] ->
       run_source_in_current_realm(source, state, execute_inner, new_state_fn)
@@ -579,10 +580,10 @@ pub fn direct_eval_native(
   param_scope_names: List(String),
   with_names: List(String),
   private_names: List(String),
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [JsString(source), ..] ->
       case state.func.local_names {
@@ -619,10 +620,10 @@ fn run_direct_eval(
   param_scope_names: List(String),
   with_names: List(String),
   private_names: List(String),
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // A sentinel head entry marks the caller frame's VariableEnvironment as
   // the GLOBAL environment (script/REPL top level) — sloppy eval'd `var`
   // declarations then target the global object, not an eval_env dict.
@@ -708,9 +709,9 @@ fn run_direct_eval(
 /// Coerce a list of JsValues to strings, threading state.
 fn coerce_all_to_string(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   acc: List(String),
-) -> Result(#(List(String), State), #(JsValue, State)) {
+) -> Result(#(List(String), State(host)), #(JsValue, State(host))) {
   case args {
     [] -> Ok(#(list.reverse(acc), state))
     [arg, ..rest] -> {
@@ -730,10 +731,10 @@ fn coerce_all_to_string(
 pub fn function_constructor_native(
   args: List(JsValue),
   keyword: String,
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use str_args, state <- state.try_op(coerce_all_to_string(args, state, []))
   let #(param_strs, body) = case list.reverse(str_args) {
     [] -> #([], "")
@@ -769,7 +770,7 @@ pub fn function_constructor_native(
 /// created dynamic function — sets both the own "name" data property
 /// (created as "" at closure allocation) and the template name that
 /// Function.prototype.toString reports.
-fn set_function_name_anonymous(state: State, fn_ref: Ref) -> State {
+fn set_function_name_anonymous(state: State(host), fn_ref: Ref) -> State(host) {
   let heap =
     heap.update(state.heap, fn_ref, fn(slot) {
       case slot {
@@ -832,10 +833,10 @@ pub fn shadow_realm_dispatch(
   native: value.ShadowRealmNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     value.ShadowRealmConstructor(proto:) ->
       shadow_realm_constructor(proto, state)
@@ -865,8 +866,8 @@ pub fn shadow_realm_dispatch(
 /// ShadowRealm ( ) — proposal §3.1.1. Creates the instance and its realm.
 fn shadow_realm_constructor(
   proto: Ref,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: If NewTarget is undefined, throw a TypeError.
   case state.new_target {
     JsUndefined ->
@@ -904,7 +905,7 @@ fn shadow_realm_constructor(
 }
 
 /// Brand check: read the [[ShadowRealm]] slot off `this`.
-fn shadow_realm_of(state: State, this: JsValue) -> Result(Ref, Nil) {
+fn shadow_realm_of(state: State(host), this: JsValue) -> Result(Ref, Nil) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -917,7 +918,7 @@ fn shadow_realm_of(state: State, this: JsValue) -> Result(Ref, Nil) {
 }
 
 /// Resolve a realm ref into its record (RealmSlot fields + Builtins).
-fn read_realm(state: State, realm_ref: Ref) -> Result(RealmRecord, Nil) {
+fn read_realm(state: State(host), realm_ref: Ref) -> Result(RealmRecord, Nil) {
   case heap.read(state.heap, realm_ref) {
     Some(value.RealmSlot(
       global_object:,
@@ -941,7 +942,7 @@ fn read_realm(state: State, realm_ref: Ref) -> Result(RealmRecord, Nil) {
 }
 
 /// Build a RealmSlot snapshot of the realm the state is currently running in.
-fn current_realm_slot(state: State) -> state.HeapSlot {
+fn current_realm_slot(state: State(host)) -> state.HeapSlot(host) {
   value.RealmSlot(
     global_object: state.ctx.global_object,
     lexical_globals: state.ctx.lexical_globals,
@@ -951,7 +952,7 @@ fn current_realm_slot(state: State) -> state.HeapSlot {
 }
 
 /// Persist the current ctx into `realm_ref`'s RealmSlot.
-fn sync_realm_slot(state: State, realm_ref: Ref) -> State {
+fn sync_realm_slot(state: State(host), realm_ref: Ref) -> State(host) {
   State(
     ..state,
     heap: heap.write(state.heap, realm_ref, current_realm_slot(state)),
@@ -959,7 +960,7 @@ fn sync_realm_slot(state: State, realm_ref: Ref) -> State {
 }
 
 /// Find the RealmSlot whose global object is `global`.
-fn find_realm_by_global(state: State, global: Ref) -> option.Option(Ref) {
+fn find_realm_by_global(state: State(host), global: Ref) -> option.Option(Ref) {
   list.find(dict.keys(state.ctx.realms), fn(rref) {
     case heap.read(state.heap, rref) {
       Some(value.RealmSlot(global_object: g, ..)) -> g == global
@@ -973,7 +974,7 @@ fn find_realm_by_global(state: State, global: Ref) -> option.Option(Ref) {
 /// allocating + registering one if this realm was never reified (e.g. the
 /// top-level realm outside the test262 harness). Always syncs the slot with
 /// the live ctx so cross-realm re-entry sees fresh lexical globals.
-fn ensure_current_realm(state: State) -> #(State, Ref) {
+fn ensure_current_realm(state: State(host)) -> #(State(host), Ref) {
   case find_realm_by_global(state, state.ctx.global_object) {
     Some(rref) -> #(sync_realm_slot(state, rref), rref)
     None -> {
@@ -994,9 +995,9 @@ fn ensure_current_realm(state: State) -> #(State, Ref) {
 /// every error and wrapper evaluate/importValue produce. Falls back to the
 /// running realm when the marker realm was never reified.
 fn realm_of_function_proto(
-  state: State,
+  state: State(host),
   fn_proto: Ref,
-) -> #(State, Ref, Builtins) {
+) -> #(State(host), Ref, Builtins) {
   case state.builtins.function.prototype == fn_proto {
     True -> {
       let #(state, rref) = ensure_current_realm(state)
@@ -1028,10 +1029,10 @@ fn realm_of_function_proto(
 /// Allocate a TypeError whose prototype comes from an explicit realm's
 /// builtins (cross-realm errors must be branded for the right realm).
 fn type_error_in(
-  state: State,
+  state: State(host),
   b: Builtins,
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_type_error(state.heap, b, msg)
   let state =
     state.attach_stack(
@@ -1047,10 +1048,10 @@ fn type_error_in(
 /// realm. Mutations on either side are persisted through the RealmSlot heap
 /// cells, so nested cross-realm calls observe each other's changes.
 fn with_realm(
-  state: State,
+  state: State(host),
   realm_ref: Ref,
-  f: fn(State) -> #(State, Result(a, JsValue)),
-) -> #(State, Result(a, JsValue)) {
+  f: fn(State(host)) -> #(State(host), Result(a, JsValue)),
+) -> #(State(host), Result(a, JsValue)) {
   case read_realm(state, realm_ref) {
     Error(Nil) -> {
       let #(err, state) =
@@ -1129,13 +1130,13 @@ fn with_realm(
 /// `src_realm` is the realm the value comes from. TypeErrors use
 /// `err_builtins` — the running caller context's realm per spec.
 fn get_wrapped_value(
-  state: State,
+  state: State(host),
   dest_realm: Ref,
   dest_builtins: Builtins,
   err_builtins: Builtins,
   src_realm: Ref,
   val: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsObject(_) ->
       case object.value_is_callable(state.heap, val) {
@@ -1163,13 +1164,13 @@ fn get_wrapped_value(
 /// CopyNameAndLength (§2.2). Any abrupt completion from the observable Gets
 /// on Target becomes a TypeError in `err_builtins`' realm.
 fn wrapped_function_create(
-  state: State,
+  state: State(host),
   target: JsValue,
   src_realm: Ref,
   dest_realm: Ref,
   dest_builtins: Builtins,
   err_builtins: Builtins,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // The name/length Gets are observable (accessors run) — execute them in
   // the target's own realm so getter code resolves globals there.
   let #(state, copied) =
@@ -1227,9 +1228,9 @@ fn wrapped_function_create(
 /// CopyNameAndLength ( F, Target ) — proposal §2.2, steps 2-7 (the reads).
 /// Returns the name string and the length JsNum to define on the wrapper.
 fn copy_name_and_length(
-  state: State,
+  state: State(host),
   target: JsValue,
-) -> #(State, Result(#(String, value.JsNum), JsValue)) {
+) -> #(State(host), Result(#(String, value.JsNum), JsValue)) {
   case target {
     JsObject(tref) -> {
       // Step 3: targetHasLength = ? HasOwnProperty(Target, "length") —
@@ -1280,10 +1281,10 @@ fn shadow_realm_evaluate(
   args: List(JsValue),
   this: JsValue,
   fn_proto: Ref,
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // The method's own realm is the spec's callerRealm: it brands every error
   // and wrapper this call produces (a built-in runs in its own realm even
   // when invoked from another one).
@@ -1327,10 +1328,10 @@ fn do_shadow_realm_evaluate(
   realm_ref: Ref,
   caller_realm_ref: Ref,
   caller_builtins: Builtins,
-  state: State,
-  execute_inner: ExecuteInnerFn,
-  new_state_fn: NewStateFn,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  execute_inner: ExecuteInnerFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case read_realm(state, realm_ref) {
     Error(Nil) ->
       type_error_in(
@@ -1454,8 +1455,8 @@ fn wrapped_function_call(
   target_realm: Ref,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Every TypeError thrown here belongs to F.[[Realm]] (the caller realm).
   let caller_builtins = case dict.get(state.ctx.realms, caller_realm) {
     Ok(b) -> b
@@ -1529,14 +1530,14 @@ fn wrapped_function_call(
 
 /// GetWrappedValue over a list, short-circuiting on the first error.
 fn wrap_all(
-  state: State,
+  state: State(host),
   dest_realm: Ref,
   dest_builtins: Builtins,
   err_builtins: Builtins,
   src_realm: Ref,
   vals: List(JsValue),
   acc: List(JsValue),
-) -> #(State, Result(List(JsValue), JsValue)) {
+) -> #(State(host), Result(List(JsValue), JsValue)) {
   case vals {
     [] -> #(state, Ok(list.reverse(acc)))
     [v, ..rest] -> {
@@ -1574,8 +1575,8 @@ fn shadow_realm_import_value(
   args: List(JsValue),
   this: JsValue,
   fn_proto: Ref,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // As in evaluate: the method's own realm brands errors and the promise.
   let #(state, _caller_realm_ref, caller_builtins) =
     realm_of_function_proto(state, fn_proto)

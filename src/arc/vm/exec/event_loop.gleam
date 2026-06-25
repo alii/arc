@@ -30,22 +30,23 @@ import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-pub type ExecuteInnerFn =
-  fn(State) -> Result(#(completion.Completion, State), VmError)
+pub type ExecuteInnerFn(host) =
+  fn(State(host)) ->
+    Result(#(completion.Completion(host), State(host)), VmError)
 
-pub type CallNativeFn =
-  fn(State, NativeFnSlot, List(JsValue), List(JsValue), JsValue) ->
-    Result(State, #(StepResult, JsValue, State))
+pub type CallNativeFn(host) =
+  fn(State(host), NativeFnSlot(host), List(JsValue), List(JsValue), JsValue) ->
+    Result(State(host), #(StepResult, JsValue, State(host)))
 
 /// Drain the microtask queue.
-pub fn finish(state: State) -> State {
+pub fn finish(state: State(host)) -> State(host) {
   drain_jobs(state)
 }
 
 /// Print warnings for any promises that were rejected without a handler.
 /// Called after all jobs have been drained (like QuickJS's
 /// js_std_promise_rejection_check).
-fn report_unhandled_rejections(state: State) -> Nil {
+fn report_unhandled_rejections(state: State(host)) -> Nil {
   list.each(state.unhandled_rejections, fn(data_ref) {
     case heap.read_promise_state(state.heap, data_ref) {
       Some(value.PromiseRejected(reason)) ->
@@ -66,7 +67,7 @@ fn report_unhandled_rejections(state: State) -> Nil {
 /// from the global setTimeout (fired one at a time when the microtask queue
 /// is empty). When the queue runs dry with deadlines still pending, the loop
 /// sleeps until the earliest one instead of exiting.
-pub fn drain_jobs(state: State) -> State {
+pub fn drain_jobs(state: State(host)) -> State(host) {
   do_drain_jobs(state, False)
 }
 
@@ -80,7 +81,7 @@ pub fn drain_jobs(state: State) -> State {
 /// bounds its blocking receive with `next_deadline_timeout`, injects
 /// notify wakes via `inject_notify`, and re-drains so host timers and
 /// mailbox events interleave.
-pub fn drain_jobs_yielding(state: State) -> State {
+pub fn drain_jobs_yielding(state: State(host)) -> State(host) {
   do_drain_jobs(state, True)
 }
 
@@ -93,14 +94,14 @@ pub fn drain_jobs_yielding(state: State) -> State {
 /// or was cancelled — settles nothing. Re-drain afterwards
 /// (`drain_jobs` / `drain_jobs_yielding`) so the reaction jobs run.
 pub fn inject_notify(
-  state: State,
+  state: State(host),
   key: builtins_atomics.WaiterKey,
   byte_index: Int,
-) -> State {
+) -> State(host) {
   builtins_atomics.settle_notified_waiter(state, key, byte_index)
 }
 
-fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
+fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
   let state = case state.atomics_waiters {
     [] -> state
     _ -> builtins_atomics.settle_expired_waiters(state)
@@ -154,14 +155,14 @@ fn do_drain_jobs(state: State, yield_to_embedder: Bool) -> State {
 }
 
 /// Earliest pending Atomics.waitAsync waiter deadline, if any.
-fn earliest_deadline(state: State) -> Option(Int) {
+fn earliest_deadline(state: State(host)) -> Option(Int) {
   builtins_atomics.earliest_waiter_deadline(state)
 }
 
 /// Milliseconds until the earliest pending Atomics.waitAsync deadline, if any.
 /// Embedder macrotask loops that own a mailbox receive use this as their
 /// receive timeout so waitAsync deadlines and mailbox IO interleave correctly.
-pub fn next_deadline_timeout(state: State) -> Option(Int) {
+pub fn next_deadline_timeout(state: State(host)) -> Option(Int) {
   case earliest_deadline(state) {
     Some(deadline) ->
       Some(int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1)
@@ -170,7 +171,7 @@ pub fn next_deadline_timeout(state: State) -> Option(Int) {
 }
 
 /// Execute a single job from the promise job queue.
-fn execute_job(state: State, job: value.Job) -> State {
+fn execute_job(state: State(host), job: value.Job) -> State(host) {
   case job {
     value.PromiseReactionJob(handler:, arg:, resolve:, reject:) ->
       execute_reaction_job(state, handler, arg, resolve, reject)
@@ -181,7 +182,11 @@ fn execute_job(state: State, job: value.Job) -> State {
 
 /// Helper: Call a function via state.call during job execution (fire-and-forget).
 /// Used for calling resolve/reject on child promises after a handler runs.
-fn call_for_job(state: State, target: JsValue, args: List(JsValue)) -> State {
+fn call_for_job(
+  state: State(host),
+  target: JsValue,
+  args: List(JsValue),
+) -> State(host) {
   case state.call(state, target, JsUndefined, args) {
     Ok(#(_, new_state)) -> new_state
     Error(#(_, new_state)) -> new_state
@@ -193,12 +198,12 @@ fn call_for_job(state: State, target: JsValue, args: List(JsValue)) -> State {
 /// - If handler is callable: call handler(arg), resolve child with result,
 ///   or reject child if handler throws
 fn execute_reaction_job(
-  state: State,
+  state: State(host),
   handler: JsValue,
   arg: JsValue,
   resolve: JsValue,
   reject: JsValue,
-) -> State {
+) -> State(host) {
   case helpers.is_callable(state.heap, handler) {
     False -> {
       // JsUndefined = fulfill pass-through, JsNull = reject pass-through
@@ -225,12 +230,12 @@ fn execute_reaction_job(
 
 /// Execute a thenable job: call thenable.then(resolve, reject)
 fn execute_thenable_job(
-  state: State,
+  state: State(host),
   thenable: JsValue,
   then_fn: JsValue,
   resolve: JsValue,
   reject: JsValue,
-) -> State {
+) -> State(host) {
   let result = state.call(state, then_fn, thenable, [resolve, reject])
   case result {
     Ok(#(_return_val, new_state)) -> new_state
@@ -252,13 +257,13 @@ fn execute_thenable_job(
 /// Parameterized over `execute_inner`/`call_native_fn` to avoid a cycle with the
 /// interpreter.
 pub fn call_to_completion(
-  state: State,
+  state: State(host),
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  call_native_fn: CallNativeFn,
-) -> Result(#(completion.Completion, State), VmError) {
+  execute_inner: ExecuteInnerFn(host),
+  call_native_fn: CallNativeFn(host),
+) -> Result(#(completion.Completion(host), State(host)), VmError) {
   case callee {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -333,12 +338,12 @@ pub fn call_to_completion(
 /// Native arm of `call_to_completion`: run the native synchronously and wrap its
 /// stack result (or thrown value) as a Completion. A `VmError` propagates.
 fn call_native_to_completion(
-  state: State,
-  native: NativeFnSlot,
+  state: State(host),
+  native: NativeFnSlot(host),
   args: List(JsValue),
   this_val: JsValue,
-  call_native_fn: CallNativeFn,
-) -> Result(#(completion.Completion, State), VmError) {
+  call_native_fn: CallNativeFn(host),
+) -> Result(#(completion.Completion(host), State(host)), VmError) {
   let job_state =
     State(
       ..state,
@@ -372,15 +377,15 @@ fn call_native_to_completion(
 /// Closure arm of `call_to_completion`: set up the callee as the sole frame and
 /// drive it; the completion (and its heap) flow straight through, untouched.
 fn call_closure(
-  state: State,
+  state: State(host),
   fn_ref: Ref,
   env_ref: Ref,
   home_object: Option(Ref),
   callee_template: FuncTemplate,
   args: List(JsValue),
   this_val: JsValue,
-  execute_inner: ExecuteInnerFn,
-) -> Result(#(completion.Completion, State), VmError) {
+  execute_inner: ExecuteInnerFn(host),
+) -> Result(#(completion.Completion(host), State(host)), VmError) {
   let #(heap, new_this) = frame.bind_this(state, callee_template, this_val)
   // Job re-entry never has a new.target, so seed it with undefined.
   let locals =

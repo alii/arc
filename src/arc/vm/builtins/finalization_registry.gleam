@@ -25,10 +25,10 @@ import gleam/option.{None, Some}
 /// Set up FinalizationRegistry.prototype and the FinalizationRegistry
 /// constructor.
 pub fn init(
-  h: state.Heap,
+  h: state.Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(state.Heap, BuiltinType) {
+) -> #(state.Heap(host), BuiltinType) {
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
       #(
@@ -67,8 +67,8 @@ pub fn dispatch(
   native: FinalizationRegistryNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     FinalizationRegistryConstructor(proto:) -> construct(proto, args, state)
     FinalizationRegistryPrototypeRegister -> register(this, args, state)
@@ -88,8 +88,8 @@ pub fn dispatch(
 fn construct(
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: do_construct sets state.new_target before native dispatch;
   // a plain call leaves it JsUndefined.
   case state.new_target {
@@ -141,8 +141,8 @@ fn construct(
 fn register(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use cells, callback, ref, state <- require_registry(this, state, "register")
   let target = helpers.first_arg_or_undefined(args)
   let held = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
@@ -178,14 +178,14 @@ fn register(
 
 /// Steps 6-8 of register — append the cell and return undefined.
 fn do_register(
-  state: State,
+  state: State(host),
   cells: List(value.FinRegCell),
   callback: JsValue,
   ref: Ref,
   target: JsValue,
   held: JsValue,
   token: option.Option(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let cell = FinRegCell(target:, held:, token:)
   // [[Cells]] is append-ordered in the spec; order is unobservable here
   // (no iteration, cleanup never fires), so prepend for O(1).
@@ -204,8 +204,8 @@ fn do_register(
 fn unregister(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use cells, callback, ref, state <- require_registry(this, state, "unregister")
   let token = helpers.first_arg_or_undefined(args)
   case can_be_held_weakly(state, token) {
@@ -229,11 +229,11 @@ fn unregister(
 /// FinalizationRegistry brand, else TypeError. CPS-style.
 fn require_registry(
   this: JsValue,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(List(value.FinRegCell), JsValue, Ref, State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(List(value.FinRegCell), JsValue, Ref, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let found = case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -257,7 +257,7 @@ fn require_registry(
 
 /// §9.13 CanBeHeldWeakly ( v ) — objects, and symbols that are NOT in the
 /// global symbol registry (Symbol.for), can be held weakly.
-fn can_be_held_weakly(state: State, v: JsValue) -> Bool {
+fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
   case v {
     JsObject(_) -> True
     JsSymbol(id) ->

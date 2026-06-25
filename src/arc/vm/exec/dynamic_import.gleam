@@ -69,11 +69,11 @@ pub const settled_marker = "__arc_import_settled__"
 /// Run the DynamicImport opcode: `specifier` and `options` were popped off the
 /// stack by the caller; pushes the import promise onto `rest_stack`.
 pub fn evaluate_import_call(
-  state: State,
+  state: State(host),
   specifier: JsValue,
   options: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   // Step 4: NewPromiseCapability(%Promise%).
   let #(heap, promise_ref, data_ref) =
     builtins_promise.create_promise(
@@ -107,10 +107,10 @@ pub fn evaluate_import_call(
 /// Deferred Module Namespace (whose first relevant access triggers
 /// evaluation).
 pub fn evaluate_defer_import_call(
-  state: State,
+  state: State(host),
   specifier: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let #(heap, promise_ref, data_ref) =
     builtins_promise.create_promise(
       state.heap,
@@ -159,10 +159,10 @@ pub fn evaluate_defer_import_call(
 /// first: it has no module kinds with a source phase representation, so the
 /// outcome for a loadable module is always the same SyntaxError.
 pub fn evaluate_source_import_call(
-  state: State,
+  state: State(host),
   specifier: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let #(heap, promise_ref, data_ref) =
     builtins_promise.create_promise(
       state.heap,
@@ -189,10 +189,10 @@ pub fn evaluate_source_import_call(
 /// Steps 5-8: coerce the specifier and validate options. `Error(reason)`
 /// rejects the import promise with `reason`.
 fn import_request(
-  state: State,
+  state: State(host),
   specifier: JsValue,
   options: JsValue,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   // Steps 5-6: specifierString = ToString(specifier), abrupt → reject.
   use #(specifier_string, state) <- result.try(coerce.js_to_string(
     state,
@@ -206,7 +206,7 @@ fn import_request(
 /// module whose body is currently executing. Captured at ImportCall time (the
 /// spec captures referencingScriptOrModule synchronously) — the import job
 /// may run after the current module body finishes and the marker is restored.
-fn capture_referrer(state: State) -> List(JsValue) {
+fn capture_referrer(state: State(host)) -> List(JsValue) {
   case
     object.get_own_property(
       state.heap,
@@ -223,11 +223,11 @@ fn capture_referrer(state: State) -> List(JsValue) {
 /// module, or producing the phase-specific result) and settles the import
 /// promise with its outcome.
 fn enqueue_import_job(
-  state: State,
+  state: State(host),
   promise_ref: Ref,
   data_ref: Ref,
-  settle: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> State {
+  settle: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> State(host) {
   let #(heap, resolve_fn, reject_fn) =
     builtins_promise.create_resolving_functions(
       state.heap,
@@ -263,11 +263,11 @@ fn enqueue_import_job(
 /// resolving functions into promise reactions and returns `settled_marker`,
 /// and the job then leaves the promise pending for those reactions to settle.
 fn enqueue_settling_import_job(
-  state: State,
+  state: State(host),
   resolve_fn: JsValue,
   reject_fn: JsValue,
-  settle: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> State {
+  settle: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> State(host) {
   let #(heap, job_fn) =
     common.alloc_host_fn(
       state.heap,
@@ -299,7 +299,11 @@ fn enqueue_settling_import_job(
 
 /// Call one of the import promise's resolving functions (§27.2.1.3 — they
 /// return undefined and never throw); log defensively if one somehow does.
-fn call_resolving_fn(state: State, target: JsValue, arg: JsValue) -> State {
+fn call_resolving_fn(
+  state: State(host),
+  target: JsValue,
+  arg: JsValue,
+) -> State(host) {
   case state.call(state, target, JsUndefined, [arg]) {
     Ok(#(_, state)) -> state
     Error(#(thrown, state)) -> {
@@ -317,9 +321,9 @@ fn call_resolving_fn(state: State, target: JsValue, arg: JsValue) -> State {
 /// import attributes, so any attribute entry rejects with a TypeError
 /// (AllImportAttributesSupported returns false for every key).
 fn validate_options(
-  state: State,
+  state: State(host),
   options: JsValue,
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   case options {
     JsUndefined -> Ok(state)
     JsObject(options_ref) -> {
@@ -347,9 +351,9 @@ fn validate_options(
 /// key), so a non-empty attribute list rejects with a TypeError. The value
 /// check runs over ALL entries before the supported check, per spec order.
 fn validate_attributes(
-  state: State,
+  state: State(host),
   attributes_ref: Ref,
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   // Trap-aware EnumerableOwnProperties: a Proxy attributes object's ownKeys /
   // getOwnPropertyDescriptor traps run (and their throws reject the promise).
   use #(keys, state) <- result.try(
@@ -386,9 +390,9 @@ fn validate_attributes(
 }
 
 fn thrown_type_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   let #(state, result) = state.type_error(state, msg)
   case result {
     Error(err) -> Error(#(err, state))
@@ -401,10 +405,10 @@ fn thrown_type_error(
 /// the global object and invoke it with the specifier string and the
 /// captured referrer (when one was active at the ImportCall site).
 fn call_host_hook(
-  state: State,
+  state: State(host),
   specifier_string: String,
   referrer_args: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let hook =
     object.get_own_property(
       state.heap,

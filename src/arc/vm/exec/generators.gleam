@@ -24,11 +24,11 @@ import gleam/result
 // Callback types for VM functions that can't be imported directly
 // ============================================================================
 
-pub type ExecuteInnerFn =
-  fn(State) -> Result(#(Completion, State), state.VmError)
+pub type ExecuteInnerFn(host) =
+  fn(State(host)) -> Result(#(Completion(host), State(host)), state.VmError)
 
-pub type UnwindToCatchFn =
-  fn(State, JsValue) -> Option(State)
+pub type UnwindToCatchFn(host) =
+  fn(State(host), JsValue) -> Option(State(host))
 
 // ============================================================================
 // Generator native function implementations
@@ -37,13 +37,13 @@ pub type UnwindToCatchFn =
 /// Generator.prototype.next(value) -- resume a suspended generator.
 /// JS-visible entry point: allocates the {value, done} result object.
 pub fn call_native_generator_next(
-  state: State,
+  state: State(host),
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  _unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  _unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let next_arg = helpers.first_arg_or_undefined(args)
   resume_generator_next(state, this, next_arg, execute_inner)
   |> alloc_iter_result(rest_stack)
@@ -57,11 +57,11 @@ pub fn call_native_generator_next(
 /// permanently). The returned state has heap/globals merged and pc advanced
 /// past the current op; its stack is the caller's stack, untouched.
 pub fn resume_generator_next(
-  state: State,
+  state: State(host),
   this: JsValue,
   next_arg: JsValue,
-  execute_inner: ExecuteInnerFn,
-) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   case get_generator_data(state.heap, this) {
     Some(gen) ->
       case gen.gen_state {
@@ -92,9 +92,12 @@ pub fn resume_generator_next(
 /// Wrap an internal #(done, value, state) resume result into the JS-visible
 /// convention: allocate {value, done} and push it onto rest_stack.
 fn alloc_iter_result(
-  res: Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)),
+  res: Result(
+    #(Bool, JsValue, State(host)),
+    #(StepResult, JsValue, State(host)),
+  ),
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   use #(done, val, st) <- result.map(res)
   let #(h, obj) = common.create_iter_result(st.heap, st.builtins, val, done)
   State(..st, heap: h, stack: [obj, ..rest_stack])
@@ -102,13 +105,13 @@ fn alloc_iter_result(
 
 /// Generator.prototype.return(value) -- complete the generator with a return value.
 pub fn call_native_generator_return(
-  state: State,
+  state: State(host),
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let return_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
     Some(gen) ->
@@ -179,13 +182,13 @@ pub fn call_native_generator_return(
 /// Resume a suspended generator with a return completion — restore its
 /// execution state and run through any enclosing finally blocks.
 fn do_return_resume(
-  state: State,
+  state: State(host),
   gen: GenData,
   return_val: JsValue,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let gen_exec_state =
     build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
   process_generator_return(
@@ -201,13 +204,13 @@ fn do_return_resume(
 
 /// Generator.prototype.throw(exception) -- throw into the generator.
 pub fn call_native_generator_throw(
-  state: State,
+  state: State(host),
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let throw_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
     Some(gen) ->
@@ -282,7 +285,7 @@ pub fn call_native_generator_throw(
 }
 
 /// Best-effort iterator close — call .return() if present, swallow errors.
-fn close_iterator(state: State, iter_ref: Ref) -> State {
+fn close_iterator(state: State(host), iter_ref: Ref) -> State(host) {
   let iter = JsObject(iter_ref)
   case object_ops.get_value(state, iter_ref, Named("return"), iter) {
     Ok(#(JsUndefined, state)) | Ok(#(value.JsNull, state)) -> state
@@ -310,7 +313,7 @@ type GenData {
   )
 }
 
-fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
+fn get_generator_data(h: Heap(host), this: JsValue) -> Option(GenData) {
   case this {
     JsObject(obj_ref) ->
       case heap.read(h, obj_ref) {
@@ -344,7 +347,10 @@ fn get_generator_data(h: Heap, this: JsValue) -> Option(GenData) {
 }
 
 /// Create a GeneratorSlot with only the gen_state changed.
-fn gen_with_state(gen: GenData, new_state: value.GeneratorState) -> HeapSlot {
+fn gen_with_state(
+  gen: GenData,
+  new_state: value.GeneratorState,
+) -> HeapSlot(host) {
   GeneratorSlot(
     gen_state: new_state,
     func_template: gen.func_template,
@@ -359,11 +365,11 @@ fn gen_with_state(gen: GenData, new_state: value.GeneratorState) -> HeapSlot {
 /// Mark a generator Executing and restore its saved execution context into a
 /// fresh State for resumption. `stack` and `pc` vary per resume mode.
 fn build_resumed_state(
-  outer: State,
+  outer: State(host),
   gen: GenData,
   stack: List(JsValue),
   pc: Int,
-) -> State {
+) -> State(host) {
   let h =
     heap.write(outer.heap, gen.data_ref, gen_with_state(gen, value.Executing))
   let restored_try = restore_stacks(gen.saved_try_stack)
@@ -405,15 +411,16 @@ fn delegate_iterator(gen: GenData) -> Option(Ref) {
 /// If the iterator lacks .throw, per §27.5.3.8 close it and throw TypeError.
 /// If it lacks .return, exit delegation and let the outer return proceed.
 fn forward_delegate(
-  state: State,
+  state: State(host),
   gen: GenData,
   iter_ref: Ref,
   method: String,
   arg: JsValue,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  on_missing: fn(State) -> Result(State, #(StepResult, JsValue, State)),
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  on_missing: fn(State(host)) ->
+    Result(State(host), #(StepResult, JsValue, State(host))),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let iter = JsObject(iter_ref)
   case object_ops.get_value(state, iter_ref, Named(method), iter) {
     Error(#(thrown, state)) -> {
@@ -506,13 +513,13 @@ fn forward_delegate(
 /// body normally past YieldStar with result.value on stack. For .return, the
 /// outer generator must ALSO return — complete it with that value.
 fn resume_after_delegate(
-  state: State,
+  state: State(host),
   gen: GenData,
   val: JsValue,
   method: String,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case method {
     "return" -> {
       // §27.5.3.8 step 7.c.viii: if the inner iterator's return completed,
@@ -548,11 +555,11 @@ fn resume_after_delegate(
 /// allocation. Shared tail for delegate-forward continuations; JS-visible
 /// callers wrap with `alloc_iter_result`.
 fn run_to_completion(
-  resumed: State,
-  outer: State,
+  resumed: State(host),
+  outer: State(host),
   gen: GenData,
-  execute_inner: ExecuteInnerFn,
-) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   case execute_inner(resumed) {
     Ok(#(YieldCompletion(yv, h), suspended)) -> {
       let st = save_stacks(suspended.try_stack)
@@ -655,14 +662,14 @@ fn find_next_return_handler(
 /// - Yield inside finally: save generator state, return {value, done: false}
 /// - Throw inside finally: mark completed, propagate the throw
 fn process_generator_return(
-  gen_state: State,
-  outer_state: State,
+  gen_state: State(host),
+  outer_state: State(host),
   gen: GenData,
   return_val: JsValue,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case find_next_return_handler(gen_state.code, gen_state.try_stack) {
     None -> {
       // No more finally blocks. Mark completed and return {value, done: true}.
@@ -860,17 +867,17 @@ fn process_generator_return(
 /// return; a throw from the getter or the call, or a non-object call result,
 /// replaces the return completion with a throw completion.
 fn close_for_return(
-  st: State,
+  st: State(host),
   iter_ref: Ref,
-  outer_state: State,
+  outer_state: State(host),
   gen: GenData,
   return_val: JsValue,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let iter = JsObject(iter_ref)
-  let continue_return = fn(st: State) {
+  let continue_return = fn(st: State(host)) {
     process_generator_return(
       st,
       outer_state,
@@ -881,7 +888,7 @@ fn close_for_return(
       unwind_to_catch,
     )
   }
-  let continue_throw = fn(st: State, thrown: JsValue) {
+  let continue_throw = fn(st: State(host), thrown: JsValue) {
     process_return_close_throw(
       st,
       outer_state,
@@ -917,14 +924,14 @@ fn close_for_return(
 /// close guard) inside the generator can observe it. If nothing catches,
 /// the generator completes and the error propagates to the .return() caller.
 fn process_return_close_throw(
-  gen_state: State,
-  outer_state: State,
+  gen_state: State(host),
+  outer_state: State(host),
   gen: GenData,
   thrown: JsValue,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn,
-  unwind_to_catch: UnwindToCatchFn,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   // unwind_to_catch expects the throw site's stack; gen_state.stack is
   // already truncated to the frame base and try_stack holds the remaining
   // frames, so the unwind lands on the next handler in spec order.

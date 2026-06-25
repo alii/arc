@@ -38,20 +38,20 @@ import gleam/set
 /// modules inside an already-running event loop and must hand jobs back to
 /// the host queue instead of draining them nested, where host continuations
 /// would run against the wrong lexical context).
-pub type ModuleResult {
+pub type ModuleResult(host) {
   ModuleOk(
     value: JsValue,
-    heap: Heap,
+    heap: Heap(host),
     locals: tuple_array.TupleArray(JsValue),
     jobs: List(value.Job),
   )
-  ModuleThrow(value: JsValue, heap: Heap, jobs: List(value.Job))
+  ModuleThrow(value: JsValue, heap: Heap(host), jobs: List(value.Job))
   ModuleError(error: VmError)
   /// The module body is parked on top-level await and the supplied `finish`
   /// driver did not settle it. `promise_data_ref` is the module's
   /// [[TopLevelCapability]] promise data — Evaluate() step 4: a re-import
   /// must chain onto this same promise rather than re-run the body.
-  ModulePending(promise_data_ref: Ref, heap: Heap, jobs: List(value.Job))
+  ModulePending(promise_data_ref: Ref, heap: Heap(host), jobs: List(value.Job))
 }
 
 /// Persistent REPL environment carried between evaluations.
@@ -86,10 +86,10 @@ pub fn new_repl_env(global_object: Ref) -> ReplEnv {
 /// No macrotask loop — for that, pass a driver to `run_with`.
 pub fn run(
   func: FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-) -> Result(Completion, VmError) {
+) -> Result(Completion(host), VmError) {
   run_with(func, heap, builtins, global_object, event_loop.finish)
 }
 
@@ -100,11 +100,11 @@ pub fn run(
 /// default.
 pub fn run_with(
   func: FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  finish: fn(State) -> State,
-) -> Result(Completion, VmError) {
+  finish: fn(State(host)) -> State(host),
+) -> Result(Completion(host), VmError) {
   run_prepared(func, heap, builtins, global_object, fn(s) { s }, finish)
 }
 
@@ -116,12 +116,12 @@ pub fn run_with(
 /// `run_and_drain_repl_with`'s `prepare`.
 pub fn run_prepared(
   func: FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(State) -> State,
-  finish: fn(State) -> State,
-) -> Result(Completion, VmError) {
+  prepare: fn(State(host)) -> State(host),
+  finish: fn(State(host)) -> State(host),
+) -> Result(Completion(host), VmError) {
   let executed =
     interpreter.init_state(func, heap, builtins, global_object, False)
     |> prepare
@@ -142,13 +142,13 @@ pub fn run_prepared(
 /// previous body do not carry over). Pass `fn(s) { s }` for none.
 pub fn run_module(
   func: FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
-  prepare: fn(State) -> State,
-  finish: fn(State) -> State,
-) -> ModuleResult {
+  prepare: fn(State(host)) -> State(host),
+  finish: fn(State(host)) -> State(host),
+) -> ModuleResult(host) {
   let locals = interpreter.init_module_locals(func, seeds)
   let state =
     interpreter.new_state(
@@ -195,10 +195,10 @@ pub fn run_module(
 fn drive_top_level_await(
   func: FuncTemplate,
   awaited_value: JsValue,
-  h: Heap,
-  suspended: State,
-  finish: fn(State) -> State,
-) -> ModuleResult {
+  h: Heap(host),
+  suspended: State(host),
+  finish: fn(State(host)) -> State(host),
+) -> ModuleResult(host) {
   let #(h, promise_ref, data_ref) =
     builtins_promise.create_promise(h, suspended.builtins.promise.prototype)
   // The host always inspects this capability below — mark it handled so a
@@ -291,7 +291,7 @@ fn drive_top_level_await(
 
 /// Jobs still queued on a state after its `finish` driver ran — what a
 /// non-draining driver leaves behind for the host's own event loop.
-fn remaining_jobs(state: State) -> List(value.Job) {
+fn remaining_jobs(state: State(host)) -> List(value.Job) {
   do_remaining_jobs(state.job_queue, [])
 }
 
@@ -309,10 +309,10 @@ fn do_remaining_jobs(
 /// Used by the REPL so var declarations and function definitions survive.
 pub fn run_and_drain_repl(
   func: FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   env: ReplEnv,
-) -> Result(#(Completion, ReplEnv), VmError) {
+) -> Result(#(Completion(host), ReplEnv), VmError) {
   run_and_drain_repl_with(
     func,
     heap,
@@ -332,12 +332,12 @@ pub fn run_and_drain_repl(
 /// whose per-test worker processes drive the event loop directly.
 pub fn run_and_drain_repl_with(
   func: FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   env: ReplEnv,
-  prepare: fn(State) -> State,
-  finish: fn(State) -> State,
-) -> Result(#(Completion, ReplEnv), VmError) {
+  prepare: fn(State(host)) -> State(host),
+  finish: fn(State(host)) -> State(host),
+) -> Result(#(Completion(host), ReplEnv), VmError) {
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
   let this_val = JsObject(env.global_object)
   let locals = interpreter.init_top_level_locals(func, this_val)
@@ -382,7 +382,10 @@ const handoff_gc_min_slots = 65_536
 /// objects, leftover jobs/timers/waiters, and top-level locals. Only used
 /// after execution has fully settled (empty stack/call stack), so there are
 /// no hidden VM roots. No-op below `handoff_gc_min_slots`.
-fn shrink_for_handoff(settled: Result(JsValue, JsValue), state: State) -> Heap {
+fn shrink_for_handoff(
+  settled: Result(JsValue, JsValue),
+  state: State(host),
+) -> Heap(host) {
   case heap.size(state.heap) >= handoff_gc_min_slots {
     False -> state.heap
     True -> heap.compact(state.heap, handoff_roots(settled, state))
@@ -394,7 +397,7 @@ fn shrink_for_handoff(settled: Result(JsValue, JsValue), state: State) -> Heap {
 /// added by `heap.compact` itself.
 fn handoff_roots(
   settled: Result(JsValue, JsValue),
-  state: State,
+  state: State(host),
 ) -> set.Set(Int) {
   let acc =
     set.new()
@@ -475,11 +478,11 @@ pub fn run_export(
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  finish: fn(State) -> State,
-) -> Result(Completion, VmError) {
+  finish: fn(State(host)) -> State(host),
+) -> Result(Completion(host), VmError) {
   use #(settled, drained) <- result.map(settle(
     interpreter.call_root(callee, this_val, args, heap, builtins, global_object),
     finish,
@@ -494,9 +497,9 @@ pub fn run_export(
 /// Yield/Await reaching here is a compiler bug; this is the single place that
 /// invariant is enforced for the whole `run*` family.
 fn settle(
-  executed: Result(#(Completion, State), VmError),
-  finish: fn(State) -> State,
-) -> Result(#(Result(JsValue, JsValue), State), VmError) {
+  executed: Result(#(Completion(host), State(host)), VmError),
+  finish: fn(State(host)) -> State(host),
+) -> Result(#(Result(JsValue, JsValue), State(host)), VmError) {
   use #(completion, final_state) <- result.try(executed)
   let drained = finish(final_state)
   case completion {
@@ -510,7 +513,10 @@ fn settle(
 }
 
 /// Rebuild a Completion from a settled outcome and the drained heap.
-fn completion_of(settled: Result(JsValue, JsValue), heap: Heap) -> Completion {
+fn completion_of(
+  settled: Result(JsValue, JsValue),
+  heap: Heap(host),
+) -> Completion(host) {
   case settled {
     Ok(val) -> NormalCompletion(val, heap)
     Error(thrown) -> ThrowCompletion(thrown, heap)
@@ -518,7 +524,7 @@ fn completion_of(settled: Result(JsValue, JsValue), heap: Heap) -> Completion {
 }
 
 /// Get the fulfilled value of a promise JsValue, or None if not fulfilled.
-pub fn promise_result(h: Heap, val: JsValue) -> Option(JsValue) {
+pub fn promise_result(h: Heap(host), val: JsValue) -> Option(JsValue) {
   use ref <- option.then(case val {
     JsObject(ref) -> Some(ref)
     _ -> None
@@ -534,10 +540,10 @@ pub fn promise_result(h: Heap, val: JsValue) -> Option(JsValue) {
 /// Build a $262 object with evalScript, createRealm, gc methods and a global
 /// property. Delegates to realm.build_262.
 pub fn build_262(
-  h: Heap,
+  h: Heap(host),
   b: Builtins,
   global_ref: Ref,
   realm_ref: Ref,
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   realm.build_262(h, b, global_ref, realm_ref)
 }

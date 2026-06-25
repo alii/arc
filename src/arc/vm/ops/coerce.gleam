@@ -27,10 +27,10 @@ pub type ToPrimitiveHint {
 /// For primitives, returns as-is. For objects, calls Symbol.toPrimitive
 /// or falls back to OrdinaryToPrimitive.
 pub fn to_primitive(
-  state: State,
+  state: State(host),
   val: JsValue,
   hint: ToPrimitiveHint,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case val {
     // Primitives pass through
     JsUndefined
@@ -84,11 +84,11 @@ pub fn to_primitive(
 /// ES2024 §7.1.1.1 OrdinaryToPrimitive(O, hint)
 /// Tries toString/valueOf (or valueOf/toString for number hint).
 pub fn ordinary_to_primitive(
-  state: State,
+  state: State(host),
   val: JsValue,
   ref: value.Ref,
   hint: ToPrimitiveHint,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let method_names = case hint {
     StringHint -> ["toString", "valueOf"]
     NumberHint | DefaultHint -> ["valueOf", "toString"]
@@ -98,11 +98,11 @@ pub fn ordinary_to_primitive(
 
 /// Try each method name in order; return the first primitive result.
 fn try_to_primitive_methods(
-  state: State,
+  state: State(host),
   val: JsValue,
   ref: value.Ref,
   method_names: List(String),
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case method_names {
     [] -> thrown_type_error(state, "Cannot convert object to primitive value")
     [name, ..rest] -> {
@@ -131,9 +131,9 @@ fn try_to_primitive_methods(
 /// ES2024 §7.1.12 ToString with VM re-entry for ToPrimitive.
 /// For primitives, converts directly. For objects, calls ToPrimitive(string) first.
 pub fn js_to_string(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   case val {
     JsObject(_) -> {
       use #(prim, new_state) <- result.try(to_primitive(state, val, StringHint))
@@ -158,10 +158,10 @@ pub fn js_to_string(
 /// CPS wrapper for js_to_string. Use with `use` syntax:
 ///   use str, state <- coerce.try_to_string(state, val)
 pub fn try_to_string(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(String, State) -> #(State, Result(b, JsValue)),
-) -> #(State, Result(b, JsValue)) {
+  cont: fn(String, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
   case js_to_string(state, val) {
     Ok(#(str, state)) -> cont(str, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -171,9 +171,9 @@ pub fn try_to_string(
 /// ES2024 §7.1.4 ToNumber with VM re-entry for ToPrimitive.
 /// For primitives, converts directly. For objects, calls ToPrimitive(number) first.
 pub fn js_to_number(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(value.JsNum, State), #(JsValue, State)) {
+) -> Result(#(value.JsNum, State(host)), #(JsValue, State(host))) {
   case val {
     JsObject(_) -> {
       use #(prim, state) <- result.try(to_primitive(state, val, NumberHint))
@@ -190,10 +190,10 @@ pub fn js_to_number(
 /// CPS wrapper for js_to_number. Use with `use` syntax:
 ///   use n, state <- coerce.try_to_number(state, val)
 pub fn try_to_number(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(value.JsNum, State) -> #(State, Result(b, JsValue)),
-) -> #(State, Result(b, JsValue)) {
+  cont: fn(value.JsNum, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
   case js_to_number(state, val) {
     Ok(#(n, state)) -> cont(n, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -204,7 +204,7 @@ pub fn try_to_number(
 /// their [[PrimitiveValue]]. Returns `val` unchanged for any other input.
 /// Unlike full ToPrimitive this does NOT honor user-overridden valueOf or
 /// @@toPrimitive — use js_to_number/js_to_string for spec-exact coercion.
-pub fn unwrap_primitive_wrapper(h: Heap, val: JsValue) -> JsValue {
+pub fn unwrap_primitive_wrapper(h: Heap(host), val: JsValue) -> JsValue {
   case val {
     JsObject(ref) ->
       case heap.read(h, ref) {
@@ -219,10 +219,10 @@ pub fn unwrap_primitive_wrapper(h: Heap, val: JsValue) -> JsValue {
 
 /// ES2024 §13.10.2 InstanceofOperator ( V, target )
 pub fn js_instanceof(
-  state: State,
+  state: State(host),
   left: JsValue,
   constructor: JsValue,
-) -> Result(#(Bool, State), #(JsValue, State)) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case constructor {
     // Step 1: target must be an Object.
     JsObject(ctor_ref) ->
@@ -250,10 +250,10 @@ pub fn js_instanceof(
 /// ES2024 §7.3.22 OrdinaryHasInstance ( C, O ), steps 2-7. The caller has
 /// already verified that `ctor_ref` is callable (step 1).
 pub fn ordinary_has_instance(
-  state: State,
+  state: State(host),
   ctor_ref: value.Ref,
   left: JsValue,
-) -> Result(#(Bool, State), #(JsValue, State)) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ctor_ref) {
     // Step 2: C has a [[BoundTargetFunction]] internal slot →
     // return InstanceofOperator(O, BC).
@@ -295,10 +295,10 @@ pub fn ordinary_has_instance(
 /// walk). Stateful: each level goes through [[GetPrototypeOf]], which traps
 /// (and may throw) for proxies on the chain.
 fn instanceof_walk(
-  state: State,
+  state: State(host),
   obj_ref: value.Ref,
   target_proto: value.Ref,
-) -> Result(#(Bool, State), #(JsValue, State)) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   // Step 6a: Let O be ? O.[[GetPrototypeOf]]().
   use #(proto_val, state) <- result.try(object.get_prototype_of_stateful(
     state,
@@ -320,9 +320,9 @@ fn instanceof_walk(
 /// Helper to throw a TypeError in functions that return Result(a, #(JsValue, State)).
 /// Used by toPrimitive, toString, instanceof, etc.
 pub fn thrown_type_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> Result(a, #(JsValue, State)) {
+) -> Result(a, #(JsValue, State(host))) {
   let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
   Error(#(err, State(..state, heap: h)))
 }
@@ -330,10 +330,10 @@ pub fn thrown_type_error(
 /// §7.1.13 ToBigInt (CPS): ToPrimitive(number hint), then BigInt/Boolean/
 /// String per the conversion table; Number/Symbol/null/undefined → TypeError.
 pub fn to_bigint_cps(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case to_primitive(state, val, NumberHint) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(prim, state)) ->
@@ -367,11 +367,11 @@ pub fn to_bigint_cps(
 /// §7.1.22 ToIndex (CPS): undefined → 0; else ToIntegerOrInfinity with a
 /// RangeError (using `err_msg`) outside [0, 2^53-1].
 pub fn to_index_cps(
-  state: State,
+  state: State(host),
   val: JsValue,
   err_msg: String,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsUndefined -> cont(0, state)
     _ ->

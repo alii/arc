@@ -12,9 +12,9 @@ pub type HeapStats {
 /// The heap: an immutable Dict arena with free list and GC roots.
 /// Generic over `ctx` because HeapSlot carries host-function closures typed
 /// against the VM state. Instantiated as `Heap(State)` at the state.gleam layer.
-pub opaque type Heap(ctx) {
+pub opaque type Heap(ctx, host) {
   Heap(
-    data: dict.Dict(Int, HeapSlot(ctx)),
+    data: dict.Dict(Int, HeapSlot(ctx, host)),
     free: List(Int),
     next: Int,
     roots: Set(Int),
@@ -58,7 +58,7 @@ fn decode_lazy_proto(id: Int) -> #(Int, Int, Bool) {
 
 /// Build the ObjectSlot a tagged lazy-proto id stands for — structurally
 /// identical to what eager allocation in make_closure used to produce.
-fn synth_lazy_proto(id: Int) -> HeapSlot(ctx) {
+fn synth_lazy_proto(id: Int) -> HeapSlot(ctx, host) {
   let #(fn_id, object_proto_id, has_constructor) = decode_lazy_proto(id)
   let properties = case has_constructor {
     True ->
@@ -81,7 +81,7 @@ fn synth_lazy_proto(id: Int) -> HeapSlot(ctx) {
 }
 
 /// Create an empty heap.
-pub fn new() -> Heap(ctx) {
+pub fn new() -> Heap(ctx, host) {
   Heap(
     data: dict.new(),
     free: [],
@@ -94,7 +94,10 @@ pub fn new() -> Heap(ctx) {
 
 /// Allocate a slot. Prefers recycled indices from the free list,
 /// falls back to bumping `next`.
-pub fn alloc(heap: Heap(ctx), slot: HeapSlot(ctx)) -> #(Heap(ctx), Ref) {
+pub fn alloc(
+  heap: Heap(ctx, host),
+  slot: HeapSlot(ctx, host),
+) -> #(Heap(ctx, host), Ref) {
   case heap.free {
     [id, ..rest] -> {
       let data = dict.insert(heap.data, id, slot)
@@ -108,7 +111,7 @@ pub fn alloc(heap: Heap(ctx), slot: HeapSlot(ctx)) -> #(Heap(ctx), Ref) {
   }
 }
 
-pub fn info_about_jsvalue(heap: Heap(ctx), value: value.JsValue) {
+pub fn info_about_jsvalue(heap: Heap(ctx, host), value: value.JsValue) {
   use ref <- option.map(case value {
     value.JsObject(ref) -> Some(ref)
     _ -> None
@@ -128,11 +131,11 @@ pub fn info_about_jsvalue(heap: Heap(ctx), value: value.JsValue) {
 /// Falls back to eager allocation in the (practically unreachable) case where
 /// `object_proto.id` doesn't fit the tag encoding.
 pub fn alloc_lazy_proto(
-  heap: Heap(ctx),
+  heap: Heap(ctx, host),
   fn_ref: Ref,
   has_constructor: Bool,
   object_proto: Ref,
-) -> #(Heap(ctx), Ref) {
+) -> #(Heap(ctx, host), Ref) {
   case object_proto.id >= 0 && object_proto.id < lazy_proto_shift {
     True -> {
       let flag = case has_constructor {
@@ -177,9 +180,9 @@ pub fn alloc_lazy_proto(
 /// share one rooted singleton empty EnvSlot — EnvSlots are never mutated
 /// (mutable captures are boxed), so the sharing is unobservable.
 pub fn alloc_env(
-  heap: Heap(ctx),
+  heap: Heap(ctx, host),
   captured_values: List(value.JsValue),
-) -> #(Heap(ctx), Ref) {
+) -> #(Heap(ctx, host), Ref) {
   case captured_values {
     [] ->
       case heap.empty_env {
@@ -203,7 +206,7 @@ pub fn alloc_env(
 /// (consumed from the free list or bumped), but no data exists yet.
 /// Use `write` to fill it in later. This enables forward references
 /// for cyclic structures (e.g. proto ↔ constructor).
-pub fn reserve(heap: Heap(ctx)) -> #(Heap(ctx), Ref) {
+pub fn reserve(heap: Heap(ctx, host)) -> #(Heap(ctx, host), Ref) {
   case heap.free {
     [id, ..rest] -> #(Heap(..heap, free: rest), Ref(id))
     [] -> {
@@ -220,7 +223,7 @@ pub fn reserve(heap: Heap(ctx)) -> #(Heap(ctx), Ref) {
 /// A miss on a tagged lazy-proto id (< -1) synthesises the slot on demand;
 /// `data` always shadows synthesis, so a materialised (written-to) prototype
 /// is never re-synthesised.
-pub fn read(heap: Heap(ctx), ref: Ref) -> Option(HeapSlot(ctx)) {
+pub fn read(heap: Heap(ctx, host), ref: Ref) -> Option(HeapSlot(ctx, host)) {
   case ffi_heap_read(heap.data, ref.id) {
     Some(_) as found -> found
     None ->
@@ -237,9 +240,9 @@ pub fn read(heap: Heap(ctx), ref: Ref) -> Option(HeapSlot(ctx)) {
 /// calls per read.
 @external(erlang, "arc_vm_ffi", "heap_read")
 fn ffi_heap_read(
-  data: dict.Dict(Int, HeapSlot(ctx)),
+  data: dict.Dict(Int, HeapSlot(ctx, host)),
   id: Int,
-) -> Option(HeapSlot(ctx))
+) -> Option(HeapSlot(ctx, host))
 
 // -- Typed reader helpers -----------------------------------------------------
 // These collapse the common `case read(h, ref) { Some(ObjectSlot(kind: X, ..)) -> ... }`
@@ -247,7 +250,10 @@ fn ffi_heap_read(
 // Option — use with option.map/option.then/option.unwrap at callsites.
 
 /// Read an ArrayObject, returning #(length, elements).
-pub fn read_array(h: Heap(ctx), ref: Ref) -> Option(#(Int, value.JsElements)) {
+pub fn read_array(
+  h: Heap(ctx, host),
+  ref: Ref,
+) -> Option(#(Int, value.JsElements)) {
   case read(h, ref) {
     Some(value.ObjectSlot(kind: value.ArrayObject(length:), elements:, ..)) ->
       Some(#(length, elements))
@@ -258,7 +264,7 @@ pub fn read_array(h: Heap(ctx), ref: Ref) -> Option(#(Int, value.JsElements)) {
 /// Read an ArrayObject OR ArgumentsObject, returning #(length, elements).
 /// Both have indexed elements and a tracked length.
 pub fn read_array_like(
-  h: Heap(ctx),
+  h: Heap(ctx, host),
   ref: Ref,
 ) -> Option(#(Int, value.JsElements)) {
   case read(h, ref) {
@@ -270,7 +276,7 @@ pub fn read_array_like(
 }
 
 /// Read a PromiseObject, returning the inner promise_data ref.
-pub fn read_promise_data_ref(h: Heap(ctx), ref: Ref) -> Option(Ref) {
+pub fn read_promise_data_ref(h: Heap(ctx, host), ref: Ref) -> Option(Ref) {
   case read(h, ref) {
     Some(value.ObjectSlot(kind: value.PromiseObject(promise_data:), ..)) ->
       Some(promise_data)
@@ -280,7 +286,7 @@ pub fn read_promise_data_ref(h: Heap(ctx), ref: Ref) -> Option(Ref) {
 
 /// Read a PromiseSlot's state.
 pub fn read_promise_state(
-  h: Heap(ctx),
+  h: Heap(ctx, host),
   ref: Ref,
 ) -> Option(value.PromiseState) {
   case read(h, ref) {
@@ -290,7 +296,7 @@ pub fn read_promise_state(
 }
 
 /// Read an EnvSlot's captured values.
-pub fn read_env(h: Heap(ctx), ref: Ref) -> Option(List(value.JsValue)) {
+pub fn read_env(h: Heap(ctx, host), ref: Ref) -> Option(List(value.JsValue)) {
   case read(h, ref) {
     Some(value.EnvSlot(slots:)) -> Some(slots)
     _ -> None
@@ -298,7 +304,7 @@ pub fn read_env(h: Heap(ctx), ref: Ref) -> Option(List(value.JsValue)) {
 }
 
 /// Read a BoxSlot's inner value.
-pub fn read_box(h: Heap(ctx), ref: Ref) -> Option(value.JsValue) {
+pub fn read_box(h: Heap(ctx, host), ref: Ref) -> Option(value.JsValue) {
   case read(h, ref) {
     Some(value.BoxSlot(value:)) -> Some(value)
     _ -> None
@@ -307,7 +313,7 @@ pub fn read_box(h: Heap(ctx), ref: Ref) -> Option(value.JsValue) {
 
 /// Read an EvalEnvSlot's var dict.
 pub fn read_eval_env(
-  h: Heap(ctx),
+  h: Heap(ctx, host),
   ref: Ref,
 ) -> Option(dict.Dict(String, value.JsValue)) {
   case read(h, ref) {
@@ -317,7 +323,7 @@ pub fn read_eval_env(
 }
 
 /// Read a RegExpObject, returning #(pattern, flags).
-pub fn read_regexp(h: Heap(ctx), ref: Ref) -> Option(#(String, String)) {
+pub fn read_regexp(h: Heap(ctx, host), ref: Ref) -> Option(#(String, String)) {
   case read(h, ref) {
     Some(value.ObjectSlot(kind: value.RegExpObject(pattern:, flags:), ..)) ->
       Some(#(pattern, flags))
@@ -326,7 +332,7 @@ pub fn read_regexp(h: Heap(ctx), ref: Ref) -> Option(#(String, String)) {
 }
 
 /// Read a StringObject's [[StringData]] slot.
-pub fn read_string_object(h: Heap(ctx), ref: Ref) -> Option(String) {
+pub fn read_string_object(h: Heap(ctx, host), ref: Ref) -> Option(String) {
   case read(h, ref) {
     Some(value.ObjectSlot(kind: value.StringObject(value:), ..)) -> Some(value)
     _ -> None
@@ -334,7 +340,7 @@ pub fn read_string_object(h: Heap(ctx), ref: Ref) -> Option(String) {
 }
 
 /// Read a NumberObject's [[NumberData]] slot.
-pub fn read_number_object(h: Heap(ctx), ref: Ref) -> Option(value.JsNum) {
+pub fn read_number_object(h: Heap(ctx, host), ref: Ref) -> Option(value.JsNum) {
   case read(h, ref) {
     Some(value.ObjectSlot(kind: value.NumberObject(value:), ..)) -> Some(value)
     _ -> None
@@ -342,7 +348,7 @@ pub fn read_number_object(h: Heap(ctx), ref: Ref) -> Option(value.JsNum) {
 }
 
 /// Read a BooleanObject's [[BooleanData]] slot.
-pub fn read_boolean_object(h: Heap(ctx), ref: Ref) -> Option(Bool) {
+pub fn read_boolean_object(h: Heap(ctx, host), ref: Ref) -> Option(Bool) {
   case read(h, ref) {
     Some(value.ObjectSlot(kind: value.BooleanObject(value:), ..)) -> Some(value)
     _ -> None
@@ -359,7 +365,11 @@ pub const sentinel_ref = Ref(-1)
 /// Overwrite a slot. No-op on `sentinel_ref`. All other refs are assumed
 /// live — callers obtain them only via alloc/reserve (or a tagged lazy-proto
 /// id, which a write materialises into `data` under its negative id).
-pub fn write(heap: Heap(ctx), ref: Ref, slot: HeapSlot(ctx)) -> Heap(ctx) {
+pub fn write(
+  heap: Heap(ctx, host),
+  ref: Ref,
+  slot: HeapSlot(ctx, host),
+) -> Heap(ctx, host) {
   case ref.id != -1 {
     True -> Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
     False -> heap
@@ -373,10 +383,10 @@ pub fn write(heap: Heap(ctx), ref: Ref, slot: HeapSlot(ctx)) -> Heap(ctx) {
 /// Updating a lazy function prototype materialises it: the transformed slot
 /// lands in `data`, which shadows the lazy entry from then on.
 pub fn update(
-  heap: Heap(ctx),
+  heap: Heap(ctx, host),
   ref: Ref,
-  f: fn(HeapSlot(ctx)) -> HeapSlot(ctx),
-) -> Heap(ctx) {
+  f: fn(HeapSlot(ctx, host)) -> HeapSlot(ctx, host),
+) -> Heap(ctx, host) {
   case dict.get(heap.data, ref.id) {
     Ok(slot) -> Heap(..heap, data: dict.insert(heap.data, ref.id, f(slot)))
     Error(Nil) ->
@@ -393,10 +403,10 @@ pub fn update(
 
 /// Replace the `kind` of an ObjectSlot in place. No-op for non-object slots.
 pub fn update_kind(
-  heap: Heap(ctx),
+  heap: Heap(ctx, host),
   ref: Ref,
-  kind: value.ExoticKind(ctx),
-) -> Heap(ctx) {
+  kind: value.ExoticKind(ctx, host),
+) -> Heap(ctx, host) {
   use slot <- update(heap, ref)
   case slot {
     value.ObjectSlot(..) -> value.ObjectSlot(..slot, kind:)
@@ -406,33 +416,37 @@ pub fn update_kind(
 
 /// Write a slot at a ref unconditionally. Used to fill reserved
 /// (forward-reference) slots that have no data in the heap yet.
-pub fn fill(heap: Heap(ctx), ref: Ref, slot: HeapSlot(ctx)) -> Heap(ctx) {
+pub fn fill(
+  heap: Heap(ctx, host),
+  ref: Ref,
+  slot: HeapSlot(ctx, host),
+) -> Heap(ctx, host) {
   Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
 }
 
 /// Mark a ref as a persistent GC root.
-pub fn root(heap: Heap(ctx), ref: Ref) -> Heap(ctx) {
+pub fn root(heap: Heap(ctx, host), ref: Ref) -> Heap(ctx, host) {
   Heap(..heap, roots: set.insert(heap.roots, ref.id))
 }
 
 /// Remove a ref from the persistent GC root set.
-pub fn unroot(heap: Heap(ctx), ref: Ref) -> Heap(ctx) {
+pub fn unroot(heap: Heap(ctx, host), ref: Ref) -> Heap(ctx, host) {
   Heap(..heap, roots: set.delete(heap.roots, ref.id))
 }
 
 /// The persistent root set (for external use like spawn GC).
-pub fn root_set(heap: Heap(ctx)) -> Set(Int) {
+pub fn root_set(heap: Heap(ctx, host)) -> Set(Int) {
   heap.roots
 }
 
 /// Number of live (allocated) slots. Unmaterialised lazy function prototypes
 /// occupy no heap entry, so they are not counted.
-pub fn size(heap: Heap(ctx)) -> Int {
+pub fn size(heap: Heap(ctx, host)) -> Int {
   dict.size(heap.data)
 }
 
 /// Detailed heap stats for introspection.
-pub fn stats(heap: Heap(ctx)) -> HeapStats {
+pub fn stats(heap: Heap(ctx, host)) -> HeapStats {
   HeapStats(
     live: dict.size(heap.data),
     free: list.length(heap.free),
@@ -442,7 +456,7 @@ pub fn stats(heap: Heap(ctx)) -> HeapStats {
 }
 
 /// Run mark-and-sweep GC using only the persistent root set.
-pub fn collect(heap: Heap(ctx)) -> Heap(ctx) {
+pub fn collect(heap: Heap(ctx, host)) -> Heap(ctx, host) {
   collect_with_roots(heap, set.new())
 }
 
@@ -453,7 +467,10 @@ pub fn collect(heap: Heap(ctx)) -> Heap(ctx) {
 /// free list inside the heap record, defeating the point of collecting.
 /// Discarding them only wastes id space — `alloc` falls back to bumping
 /// `next`, and ids are plain (arbitrary-precision) ints.
-pub fn compact(heap: Heap(ctx), extra_roots: Set(Int)) -> Heap(ctx) {
+pub fn compact(
+  heap: Heap(ctx, host),
+  extra_roots: Set(Int),
+) -> Heap(ctx, host) {
   let all_roots = set.union(heap.roots, extra_roots)
   let live = mark_from(heap, all_roots)
   let new_data = dict.filter(heap.data, fn(id, _) { set.contains(live, id) })
@@ -462,20 +479,23 @@ pub fn compact(heap: Heap(ctx), extra_roots: Set(Int)) -> Heap(ctx) {
 
 /// Slots allocated via fresh ids since the last compact/collect. The VM's
 /// top-level-return GC trigger compares this against its growth threshold.
-pub fn grown_since_collect(heap: Heap(ctx)) -> Int {
+pub fn grown_since_collect(heap: Heap(ctx, host)) -> Int {
   heap.next - heap.last_collect_next
 }
 
 /// Run mark-and-sweep GC using persistent roots + temporary extra roots
 /// (e.g. stack refs the VM passes in).
-pub fn collect_with_roots(heap: Heap(ctx), extra_roots: Set(Int)) -> Heap(ctx) {
+pub fn collect_with_roots(
+  heap: Heap(ctx, host),
+  extra_roots: Set(Int),
+) -> Heap(ctx, host) {
   let all_roots = set.union(heap.roots, extra_roots)
   let live = mark_from(heap, all_roots)
   Heap(..sweep(heap, live), last_collect_next: heap.next)
 }
 
 /// Mark phase: starting from a root set, return the set of all reachable slot IDs.
-fn mark_from(heap: Heap(ctx), roots: Set(Int)) -> Set(Int) {
+fn mark_from(heap: Heap(ctx, host), roots: Set(Int)) -> Set(Int) {
   let frontier = set.to_list(roots)
   mark_loop(heap, frontier, set.new())
 }
@@ -484,7 +504,7 @@ fn mark_from(heap: Heap(ctx), roots: Set(Int)) -> Set(Int) {
 /// Frontier = worklist of IDs to visit. Visited = already-marked set.
 /// Handles cycles (visited check) and dangling refs (dict.get -> Error, skip).
 fn mark_loop(
-  heap: Heap(ctx),
+  heap: Heap(ctx, host),
   frontier: List(Int),
   visited: Set(Int),
 ) -> Set(Int) {
@@ -543,7 +563,7 @@ fn prepend_ref_ids(refs: List(Ref), tail: List(Int)) -> List(Int) {
 
 /// Sweep phase: filter the data dict to keep only live entries,
 /// collect freed indices into the free list.
-fn sweep(heap: Heap(ctx), live: Set(Int)) -> Heap(ctx) {
+fn sweep(heap: Heap(ctx, host), live: Set(Int)) -> Heap(ctx, host) {
   let new_data = dict.filter(heap.data, fn(id, _) { set.contains(live, id) })
   // Collect freed IDs for reuse. Materialised lazy protos live under negative
   // tagged ids that `alloc` must never hand out, so they stay off the free

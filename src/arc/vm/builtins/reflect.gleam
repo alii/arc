@@ -25,7 +25,11 @@ import gleam/option.{None, Some}
 /// Set up the Reflect global object.
 /// Reflect is NOT a constructor — it's a plain object with static methods
 /// (like Math/JSON), per ES2024 §28.1.
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+pub fn init(
+  h: Heap(host),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap(host), Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
       #("apply", ReflectNative(ReflectApply), 3),
@@ -59,8 +63,8 @@ pub fn dispatch(
   native: ReflectNativeFn,
   args: List(JsValue),
   _this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     ReflectApply -> reflect_apply(args, state)
     ReflectConstruct -> reflect_construct(args, state)
@@ -88,10 +92,11 @@ pub fn dispatch(
 /// never coerce and always throw on non-object target.
 fn require_object(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(Ref, List(JsValue), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Ref, List(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [JsObject(ref), ..rest] -> cont(ref, rest, state)
     _ ->
@@ -102,7 +107,7 @@ fn require_object(
 /// CreateListFromArrayLike ( obj ) — ES2024 §7.3.19
 /// Simplified: reads indices 0..length from array/arguments objects.
 /// Holes become undefined. Non-array-like objects produce [].
-fn create_list_from_array_like(h: Heap, ref: Ref) -> List(JsValue) {
+fn create_list_from_array_like(h: Heap(host), ref: Ref) -> List(JsValue) {
   heap.read_array_like(h, ref)
   |> option.map(fn(p) {
     let #(length, elems) = p
@@ -132,8 +137,8 @@ fn gather_elements(
 ///   4. Return ? Call(target, thisArgument, args).
 fn reflect_apply(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(target, this_arg, args_list) = case args {
     [t, th, a, ..] -> #(t, th, a)
     [t, th] -> #(t, th, JsUndefined)
@@ -161,8 +166,8 @@ fn reflect_apply(
 ///   5. Return ? Construct(target, args, newTarget).
 fn reflect_construct(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(target, args_list, new_target) = case args {
     [t, a, nt, ..] -> #(t, a, nt)
     [t, a] -> #(t, a, t)
@@ -192,10 +197,11 @@ fn reflect_construct(
 
 /// CreateListFromArrayLike per §7.3.19 — throws TypeError on non-object.
 fn require_array_like(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(List(JsValue), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(List(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsObject(ref) -> cont(create_list_from_array_like(state.heap, ref), state)
     _ -> state.type_error(state, "CreateListFromArrayLike called on non-object")
@@ -212,8 +218,8 @@ fn require_array_like(
 /// Unlike Object.defineProperty, returns Bool instead of throwing on failure.
 fn reflect_define_property(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(args, state, "defineProperty")
   let #(key_val, desc_val) = case rest {
     [k, d, ..] -> #(k, d)
@@ -240,8 +246,8 @@ fn reflect_define_property(
 ///   3. Return ? target.[[Delete]](key).
 fn reflect_delete_property(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(args, state, "deleteProperty")
   let key_val = helpers.first_arg_or_undefined(rest)
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
@@ -272,8 +278,8 @@ fn reflect_delete_property(
 ///   4. Return ? target.[[Get]](key, receiver).
 fn reflect_get(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(args, state, "get")
   let #(key_val, receiver) = case rest {
     [k, r, ..] -> #(k, r)
@@ -308,8 +314,8 @@ fn reflect_get(
 ///   4. Return FromPropertyDescriptor(desc).
 fn reflect_get_own_property_descriptor(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(
     args,
     state,
@@ -351,8 +357,8 @@ fn reflect_get_own_property_descriptor(
 ///   2. Return ? target.[[GetPrototypeOf]]().
 fn reflect_get_prototype_of(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "getPrototypeOf")
   // Step 2: trap-aware [[GetPrototypeOf]].
   use proto, state <- state.try_op(object.get_prototype_of_stateful(state, ref))
@@ -366,8 +372,8 @@ fn reflect_get_prototype_of(
 ///   3. Return ? target.[[HasProperty]](key).
 fn reflect_has(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(args, state, "has")
   let key_val = helpers.first_arg_or_undefined(rest)
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
@@ -399,8 +405,8 @@ fn reflect_has(
 ///   2. Return ? target.[[IsExtensible]]().
 fn reflect_is_extensible(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "isExtensible")
   // Step 2: trap-aware [[IsExtensible]].
   use ext, state <- state.try_op(object.is_extensible_stateful(state, ref))
@@ -417,8 +423,8 @@ fn reflect_is_extensible(
 /// then string keys (creation order), then symbol keys (creation order).
 fn reflect_own_keys(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "ownKeys")
   // Step 2: trap-aware [[OwnPropertyKeys]] — indices ascending, then named
   // keys, then symbols (or the proxy trap's order).
@@ -437,8 +443,8 @@ fn reflect_own_keys(
 /// OrdinaryPreventExtensions (§10.1.4.1) always returns true.
 fn reflect_prevent_extensions(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "preventExtensions")
   // Step 2: trap-aware [[PreventExtensions]].
   unwrap_set(object.prevent_extensions_stateful(state, ref))
@@ -452,8 +458,8 @@ fn reflect_prevent_extensions(
 ///   4. Return ? target.[[Set]](key, V, receiver).
 fn reflect_set(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(args, state, "set")
   let #(key_val, val, receiver) = case rest {
     [k, v, r, ..] -> #(k, v, r)
@@ -476,8 +482,8 @@ fn reflect_set(
 /// Adapt set_value/set_symbol_value's `Result(#(State, Bool), #(JsValue, State))`
 /// to the dispatch return shape.
 fn unwrap_set(
-  r: Result(#(State, Bool), #(JsValue, State)),
-) -> #(State, Result(JsValue, JsValue)) {
+  r: Result(#(State(host), Bool), #(JsValue, State(host))),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
     Ok(#(state, ok)) -> #(state, Ok(JsBool(ok)))
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -493,8 +499,8 @@ fn unwrap_set(
 /// Unlike Object.setPrototypeOf, returns Bool instead of throwing on failure.
 fn reflect_set_prototype_of(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(args, state, "setPrototypeOf")
   let proto_val = helpers.first_arg_or_undefined(rest)
   // Step 2: If proto is not an Object and proto is not null, throw a TypeError.

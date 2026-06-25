@@ -57,7 +57,11 @@ import gleam/option.{None, Some}
 
 /// Set up the Atomics namespace object. Like Math and JSON it's a plain
 /// object — not callable, not constructable — with @@toStringTag "Atomics".
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+pub fn init(
+  h: Heap(host),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap(host), Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
       #("add", AtomicsNative(AtomicsAdd), 3),
@@ -87,8 +91,8 @@ pub fn dispatch(
   native: AtomicsNativeFn,
   args: List(JsValue),
   _this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     AtomicsAdd -> rmw(args, state, fn(old, v) { old + v })
     AtomicsAnd -> rmw(args, state, int.bitwise_and)
@@ -245,7 +249,7 @@ fn ffi_remove_async_token(key: WaiterKey, byte_index: Int) -> Nil
 /// storage's atomics ref — identical in every process observing the SAB —
 /// or a pid-scoped local key for buffers without process-independent
 /// storage (those can only ever have same-process waiters).
-fn buffer_key(state: State, buffer: Ref) -> WaiterKey {
+fn buffer_key(state: State(host), buffer: Ref) -> WaiterKey {
   case heap.read(state.heap, buffer) {
     Some(ObjectSlot(
       kind: value.ArrayBufferObject(data: value.BufShared(ref:, ..), ..),
@@ -310,13 +314,14 @@ fn kind_bits(
 /// (ValidateTypedArray step 4): a mutating op on a view over an immutable
 /// buffer is a TypeError BEFORE the index is coerced — also observable.
 fn with_ta_and_index(
-  state: State,
+  state: State(host),
   args: List(JsValue),
   waitable waitable: Bool,
   require_shared require_shared: Bool,
   write write: Bool,
-  cont cont: fn(TaInfo, Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont cont: fn(TaInfo, Int, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let ta_val = helpers.first_arg_or_undefined(args)
   case read_typed_array(state, ta_val) {
     None ->
@@ -385,9 +390,9 @@ fn with_ta_and_index(
 /// the condition fails, otherwise continue.
 fn require(
   cond: Bool,
-  alt: fn() -> #(State, Result(JsValue, JsValue)),
-  cont: fn(Nil) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  alt: fn() -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(Nil) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case cond {
     True -> cont(Nil)
     False -> alt()
@@ -396,7 +401,7 @@ fn require(
 
 /// Pull the TypedArray internal slots out of a value, or None.
 fn read_typed_array(
-  state: State,
+  state: State(host),
   val: JsValue,
 ) -> option.Option(#(Ref, TypedArrayKind, Int, Int)) {
   case val {
@@ -433,7 +438,7 @@ fn read_typed_array(
 /// For shared (atomics-backed) buffers the BitArray is a fresh copy of the
 /// live shared cells, so a re-read observes other agents' writes.
 fn read_buffer(
-  state: State,
+  state: State(host),
   buffer: Ref,
 ) -> option.Option(#(BitArray, Bool, Bool, Bool)) {
   case heap.read(state.heap, buffer) {
@@ -450,7 +455,7 @@ fn read_buffer(
 /// FFI's cell-CAS loop (cross-process atomicity) or may use the snapshot
 /// path (single process — trivially atomic).
 fn shared_storage_ref(
-  state: State,
+  state: State(host),
   buffer: Ref,
 ) -> option.Option(value.AtomicsRef) {
   case heap.read(state.heap, buffer) {
@@ -465,11 +470,11 @@ fn shared_storage_ref(
 /// §25.4.3.4 RevalidateAtomicAccess — the value coercion may have run user
 /// code that detached or shrank the buffer. Returns the fresh data on success.
 fn revalidate(
-  state: State,
+  state: State(host),
   info: TaInfo,
   idx: Int,
-  cont: fn(BitArray, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(BitArray, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case read_buffer(state, info.buffer) {
     None -> state.type_error(state, "TypedArray is not attached")
     Some(#(_, True, _, _)) -> state.type_error(state, "ArrayBuffer is detached")
@@ -495,10 +500,10 @@ fn arg(args: List(JsValue), idx: Int) -> JsValue {
 /// §7.1.5 ToIntegerOrInfinity (CPS) — keeps ±∞ distinct (callers decide how
 /// to clamp). NaN/±0 → 0.
 fn to_integer_or_infinity(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(IntOrInf, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(IntOrInf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case coerce.js_to_number(state, val) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(num, state)) ->
@@ -521,11 +526,11 @@ type IntOrInf {
 /// type: ToBigInt for BigInt64/BigUint64, ToIntegerOrInfinity (±∞ → 0 on
 /// store) for the integer kinds.
 fn to_operand(
-  state: State,
+  state: State(host),
   info: TaInfo,
   val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case info.bits {
     64 -> coerce.to_bigint_cps(state, val, cont)
     _ ->
@@ -564,12 +569,12 @@ fn read_element(data: BitArray, info: TaInfo, idx: Int) -> Int {
 /// writes only the element's bytes into the shared cells — other regions
 /// may be concurrently written by other agent processes.
 fn write_element(
-  state: State,
+  state: State(host),
   info: TaInfo,
   data: BitArray,
   idx: Int,
   v: Int,
-) -> State {
+) -> State(host) {
   let off = info.byte_offset + idx * { info.bits / 8 }
   let new_data = ta_set_int(data, off, info.bits, v)
   case heap.read(state.heap, info.buffer) {
@@ -626,9 +631,9 @@ fn element_to_js(info: TaInfo, raw: Int) -> JsValue {
 
 fn rmw(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   op: fn(Int, Int) -> Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use info, idx, state <- with_ta_and_index(
     state,
     args,
@@ -663,8 +668,8 @@ fn rmw(
 // §25.4.7 Atomics.compareExchange ( typedArray, index, expected, replacement )
 fn compare_exchange(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use info, idx, state <- with_ta_and_index(
     state,
     args,
@@ -708,8 +713,8 @@ fn compare_exchange(
 // §25.4.10 Atomics.load ( typedArray, index )
 fn atomic_load(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use info, idx, state <- with_ta_and_index(
     state,
     args,
@@ -726,8 +731,8 @@ fn atomic_load(
 // value (ToIntegerOrInfinity / ToBigInt result), not the stored bit pattern.
 fn atomic_store(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use info, idx, state <- with_ta_and_index(
     state,
     args,
@@ -760,8 +765,8 @@ fn atomic_store(
 // hardware lock-free sizes on every BEAM target are 1/2/4/8.
 fn is_lock_free(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
@@ -778,8 +783,8 @@ fn is_lock_free(
 // pause itself is a no-op (single agent; nothing to spin-wait for).
 fn pause(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case helpers.first_arg_or_undefined(args) {
     JsUndefined -> #(state, Ok(JsUndefined))
     JsNumber(Finite(f)) ->
@@ -800,9 +805,9 @@ fn pause(
 
 fn do_wait(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   sync sync: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use info, idx, state <- with_ta_and_index(
     state,
     args,
@@ -894,12 +899,12 @@ fn do_wait(
 /// entry's wake message arrives or the timeout elapses — resolving the
 /// notify-vs-timeout race exactly as the old in-core receive did.
 fn sync_block(
-  state: State,
+  state: State(host),
   info: TaInfo,
   idx: Int,
   v: Int,
   timeout_ms: option.Option(Int),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let byte_off = info.byte_offset + idx * { info.bits / 8 }
   let key = buffer_key(state, info.buffer)
   let handle = ffi_insert_waiter(key, byte_off, False)
@@ -992,10 +997,10 @@ fn sync_block(
 /// clause 1): treated identically to [[CanBlock]] = false. waitAsync never
 /// blocks, so async mode is exempt.
 fn check_agent_can_suspend(
-  state: State,
+  state: State(host),
   sync: Bool,
-  cont: fn(Nil, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let host_can_suspend = option.is_some(state.host_sync_wait)
   case sync && { !state.can_block || !host_can_suspend } {
     True ->
@@ -1006,11 +1011,11 @@ fn check_agent_can_suspend(
 
 /// DoWait steps 6/7: Int32Array → ToInt32, BigInt64Array → ToBigInt64.
 fn wait_value(
-  state: State,
+  state: State(host),
   info: TaInfo,
   val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case info.bits {
     64 -> {
       use n, state <- coerce.to_bigint_cps(state, val)
@@ -1036,10 +1041,11 @@ fn jsnum_to_int(num: value.JsNum) -> Int {
 
 /// DoWait steps 8/9: timeout in milliseconds. None = +∞.
 fn wait_timeout(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(option.Option(Int), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(option.Option(Int), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case coerce.js_to_number(state, val) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(num, state)) ->
@@ -1058,10 +1064,10 @@ fn wait_timeout(
 /// §25.4.3.13 CreateResultObject for waitAsync: { async, value } on
 /// %Object.prototype%.
 fn wait_result_object(
-  state: State,
+  state: State(host),
   is_async: Bool,
   val: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(h, ref) =
     common.alloc_pojo(state.heap, state.builtins.object.prototype, [
       #("async", value.data(JsBool(is_async))),
@@ -1076,8 +1082,8 @@ fn wait_result_object(
 
 fn notify(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use info, idx, state <- with_ta_and_index(
     state,
     args,
@@ -1124,11 +1130,11 @@ fn notify(
 /// (equal to `n` unless tokens and State momentarily disagree, in which
 /// case the settled count is the truthful one for this agent).
 fn settle_n_matching(
-  state: State,
+  state: State(host),
   buffer: Ref,
   byte_off: Int,
   n: Int,
-) -> #(State, Int) {
+) -> #(State(host), Int) {
   let #(woken, kept, _) =
     list.fold(state.atomics_waiters, #([], [], n), fn(acc, waiter) {
       let #(woken, kept, remaining) = acc
@@ -1151,10 +1157,10 @@ fn settle_n_matching(
 /// Fulfill a waitAsync waiter's promise with the given message ("ok" or
 /// "timed-out"), appending its reaction jobs to the job queue.
 fn settle_waiter(
-  state: State,
+  state: State(host),
   waiter: value.AtomicsWaiter,
   msg: String,
-) -> State {
+) -> State(host) {
   let #(h, jobs) =
     builtins_promise.fulfill_promise(
       state.heap,
@@ -1166,10 +1172,10 @@ fn settle_waiter(
 
 /// Notify count: undefined → effectively unbounded; negative → 0.
 fn notify_count(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsUndefined -> cont(9_007_199_254_740_991, state)
     _ ->
@@ -1190,7 +1196,7 @@ fn notify_count(
 /// Settle every pending waitAsync waiter whose deadline has passed with
 /// "timed-out" (§25.4.3.14 DoWait timeout path). Reaction jobs are appended
 /// to the job queue; the caller's drain loop runs them.
-pub fn settle_expired_waiters(state: State) -> State {
+pub fn settle_expired_waiters(state: State(host)) -> State(host) {
   case state.atomics_waiters {
     [] -> state
     waiters -> {
@@ -1228,10 +1234,10 @@ pub fn settle_expired_waiters(state: State) -> State {
 /// is woken by a cross-process Atomics.notify message. A stale message
 /// (the waiter already expired) settles nothing.
 pub fn settle_notified_waiter(
-  state: State,
+  state: State(host),
   key: WaiterKey,
   byte_index: Int,
-) -> State {
+) -> State(host) {
   case pop_first_matching(state.atomics_waiters, key, byte_index, state, []) {
     None -> state
     Some(#(waiter, rest)) ->
@@ -1245,7 +1251,7 @@ fn pop_first_matching(
   waiters: List(value.AtomicsWaiter),
   key: WaiterKey,
   byte_index: Int,
-  state: State,
+  state: State(host),
   seen: List(value.AtomicsWaiter),
 ) -> option.Option(#(value.AtomicsWaiter, List(value.AtomicsWaiter))) {
   case waiters {
@@ -1260,7 +1266,7 @@ fn pop_first_matching(
 
 /// Earliest finite deadline among pending waitAsync waiters, if any. The
 /// event loop sleeps until this when the microtask queue runs dry.
-pub fn earliest_waiter_deadline(state: State) -> option.Option(Int) {
+pub fn earliest_waiter_deadline(state: State(host)) -> option.Option(Int) {
   list.fold(state.atomics_waiters, None, fn(acc, w) {
     case acc, w.deadline {
       None, d -> d

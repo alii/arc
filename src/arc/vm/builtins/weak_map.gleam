@@ -28,10 +28,10 @@ import gleam/option.{type Option, None, Some}
 
 /// Set up WeakMap.prototype and WeakMap constructor.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
       #("get", WeakMapNative(WeakMapPrototypeGet), 1),
@@ -66,8 +66,8 @@ pub fn dispatch(
   native: WeakMapNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     WeakMapConstructor(proto:) -> construct(proto, args, state)
     WeakMapPrototypeGet -> weak_map_get(this, args, state)
@@ -83,7 +83,7 @@ pub fn dispatch(
 /// §16.1 CanBeHeldWeakly(v) — true for objects and non-registered Symbols
 /// (a symbol minted by `Symbol.for` lives in the global registry and can
 /// never be collected, so it can't be a weak key).
-fn can_be_held_weakly(state: State, v: JsValue) -> Bool {
+fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
   case v {
     JsObject(_) -> True
     JsSymbol(id) -> !list.contains(dict.values(state.ctx.symbol_registry), id)
@@ -95,10 +95,10 @@ fn can_be_held_weakly(state: State, v: JsValue) -> Bool {
 /// `use data, ref, state <- map_require(this, state)`.
 fn map_require(
   this: JsValue,
-  state: State,
-  cont: fn(Dict(JsValue, JsValue), Ref, State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(Dict(JsValue, JsValue), Ref, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let found = case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -121,8 +121,8 @@ fn map_require(
 fn construct(
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, map_ref) =
     common.alloc_wrapper(state.heap, WeakMapObject(data: dict.new()), proto)
   let state = State(..state, heap:)
@@ -150,11 +150,11 @@ fn construct(
 /// iterator protocol: GetIterator, then per entry Get "0"/"1" and call the
 /// adder, closing the iterator on any abrupt completion inside the loop.
 fn add_entries_from_iterable(
-  state: State,
+  state: State(host),
   target: JsValue,
   iterable: JsValue,
   adder: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // §7.4.3 GetIterator(iterable, sync): @@iterator must be callable.
   use method, state <- state.try_op(object.get_symbol_value_of(
     state,
@@ -193,12 +193,12 @@ fn add_entries_from_iterable(
 /// (§7.4.8 marks the iterator done); abrupt completions from the entry
 /// reads or the adder call close the iterator first (§24.1.1.2 step 4).
 fn add_entries_loop(
-  state: State,
+  state: State(host),
   target: JsValue,
   iter: JsValue,
   next: JsValue,
   adder: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use step, state <- state.try_call(state, next, iter, [])
   case step {
     JsObject(_) -> {
@@ -250,10 +250,10 @@ fn add_entries_loop(
 /// Unwrap an op result, or IteratorClose with the thrown error (original
 /// error wins over any error from the close itself — §7.4.11).
 fn or_close(
-  res: Result(#(a, State), #(JsValue, State)),
+  res: Result(#(a, State(host)), #(JsValue, State(host))),
   iter: JsValue,
-  cont: fn(a, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(a, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case res {
     Ok(#(v, state)) -> cont(v, state)
     Error(#(thrown, state)) -> iterator.close_throw(state, iter, thrown)
@@ -264,8 +264,8 @@ fn or_close(
 fn weak_map_get(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, _ref, state <- map_require(this, state)
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
@@ -282,8 +282,8 @@ fn weak_map_get(
 fn weak_map_set(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, ref, state <- map_require(this, state)
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
@@ -300,8 +300,8 @@ fn weak_map_set(
 fn weak_map_has(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, _ref, state <- map_require(this, state)
   let key = first_arg_or_undefined(args)
   #(state, Ok(JsBool(dict.has_key(data, key))))
@@ -311,8 +311,8 @@ fn weak_map_has(
 fn weak_map_delete(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, ref, state <- map_require(this, state)
   let key = first_arg_or_undefined(args)
   case dict.has_key(data, key) {
@@ -328,8 +328,8 @@ fn weak_map_delete(
 fn get_or_insert(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, ref, state <- map_require(this, state)
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
@@ -353,8 +353,8 @@ fn get_or_insert(
 fn get_or_insert_computed(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, _ref, state <- map_require(this, state)
   let key = first_arg_or_undefined(args)
   let callback = list_at(args, 1) |> option.unwrap(JsUndefined)
@@ -390,7 +390,11 @@ fn get_or_insert_computed(
 }
 
 /// Write an updated entry dict back to the WeakMap's heap slot.
-fn write_data(state: State, ref: Ref, data: Dict(JsValue, JsValue)) -> State {
+fn write_data(
+  state: State(host),
+  ref: Ref,
+  data: Dict(JsValue, JsValue),
+) -> State(host) {
   let heap = heap.update_kind(state.heap, ref, WeakMapObject(data:))
   State(..state, heap:)
 }
@@ -399,12 +403,12 @@ fn write_data(state: State, ref: Ref, data: Dict(JsValue, JsValue)) -> State {
 
 /// How a weak collection is stored on the heap: WeakSet membership is
 /// `Dict(Ref, Bool)` keyed by object Ref.
-pub type WeakKind(v) {
+pub type WeakKind(host, v) {
   WeakKind(
     receiver_err: String,
     key_err: String,
-    extract: fn(ExoticKind) -> Option(Dict(Ref, v)),
-    rebuild: fn(Dict(Ref, v)) -> ExoticKind,
+    extract: fn(ExoticKind(host)) -> Option(Dict(Ref, v)),
+    rebuild: fn(Dict(Ref, v)) -> ExoticKind(host),
   )
 }
 
@@ -413,10 +417,11 @@ pub type WeakKind(v) {
 /// `use data, ref, state <- weak_require(this, state, kind)`.
 fn weak_require(
   this: JsValue,
-  state: State,
-  kind: WeakKind(v),
-  cont: fn(Dict(Ref, v), Ref, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  kind: WeakKind(host, v),
+  cont: fn(Dict(Ref, v), Ref, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let found = case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -439,9 +444,9 @@ pub fn weak_insert(
   this: JsValue,
   args: List(JsValue),
   val: v,
-  state: State,
-  kind: WeakKind(v),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  kind: WeakKind(host, v),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, ref, state <- weak_require(this, state, kind)
   case first_arg_or_undefined(args) {
     JsObject(key_ref) -> {
@@ -457,9 +462,9 @@ pub fn weak_insert(
 pub fn weak_has(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-  kind: WeakKind(v),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  kind: WeakKind(host, v),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, _ref, state <- weak_require(this, state, kind)
   case first_arg_or_undefined(args) {
     JsObject(key_ref) -> #(state, Ok(JsBool(dict.has_key(data, key_ref))))
@@ -471,9 +476,9 @@ pub fn weak_has(
 pub fn weak_delete(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-  kind: WeakKind(v),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  kind: WeakKind(host, v),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use data, ref, state <- weak_require(this, state, kind)
   case first_arg_or_undefined(args) {
     JsObject(key_ref) -> {

@@ -37,8 +37,8 @@ import gleam/order
 import gleam/result
 import gleam/string
 
-type Thrown =
-  #(JsValue, State)
+type Thrown(host) =
+  #(JsValue, State(host))
 
 @external(erlang, "arc_date_ffi", "now_ms")
 fn now_ms() -> Float
@@ -56,13 +56,13 @@ pub type IntlBuiltin {
 }
 
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
   number_proto: Ref,
   string_proto: Ref,
   date_proto: Ref,
-) -> #(Heap, IntlBuiltin) {
+) -> #(Heap(host), IntlBuiltin) {
   // --- Intl.Locale ---
   let #(h, locale_getters) =
     common.alloc_getters(
@@ -441,14 +441,14 @@ pub fn init(
 /// Build one formatter service: prototype methods + accessor getters +
 /// resolvedOptions + supportedLocalesOf static + @@toStringTag.
 fn init_service(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
   service: IntlService,
   name: String,
   methods: List(#(String, value.NativeFn, Int)),
   accessors: List(#(String, value.NativeFn)),
-) -> #(Heap, common.BuiltinType) {
+) -> #(Heap(host), common.BuiltinType) {
   let arity = case service {
     IntlDisplayNames -> 2
     _ -> 0
@@ -480,7 +480,7 @@ fn init_service(
 }
 
 /// Intl constructors have non-writable, non-configurable .prototype.
-fn freeze_prototype_prop(h: Heap, ctor: Ref, proto: Ref) -> Heap {
+fn freeze_prototype_prop(h: Heap(host), ctor: Ref, proto: Ref) -> Heap(host) {
   heap.update(h, ctor, fn(slot) {
     case slot {
       ObjectSlot(properties:, ..) ->
@@ -499,10 +499,10 @@ fn freeze_prototype_prop(h: Heap, ctor: Ref, proto: Ref) -> Heap {
 
 /// Insert named builtin properties into an existing object.
 fn add_named_properties(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   props: List(#(String, value.Property)),
-) -> Heap {
+) -> Heap(host) {
   heap.update(h, ref, fn(slot) {
     case slot {
       ObjectSlot(properties:, ..) ->
@@ -525,8 +525,8 @@ pub fn dispatch(
   native: IntlNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     IntlGetCanonicalLocales -> get_canonical_locales(args, state)
     IntlSupportedValuesOf -> supported_values_of(args, state)
@@ -554,15 +554,15 @@ pub fn dispatch(
 // ============================================================================
 
 fn run(
-  r: Result(#(JsValue, State), Thrown),
-) -> #(State, Result(JsValue, JsValue)) {
+  r: Result(#(JsValue, State(host)), Thrown(host)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
     Ok(#(v, state)) -> #(state, Ok(v))
     Error(#(t, state)) -> #(state, Error(t))
   }
 }
 
-fn throw_range(state: State, msg: String) -> Result(a, Thrown) {
+fn throw_range(state: State(host), msg: String) -> Result(a, Thrown(host)) {
   let #(state, res) = state.range_error(state, msg)
   case res {
     Error(e) -> Error(#(e, state))
@@ -570,7 +570,7 @@ fn throw_range(state: State, msg: String) -> Result(a, Thrown) {
   }
 }
 
-fn throw_type(state: State, msg: String) -> Result(a, Thrown) {
+fn throw_type(state: State(host), msg: String) -> Result(a, Thrown(host)) {
   let #(state, res) = state.type_error(state, msg)
   case res {
     Error(e) -> Error(#(e, state))
@@ -580,11 +580,11 @@ fn throw_type(state: State, msg: String) -> Result(a, Thrown) {
 
 /// Read the IntlObject slots for `this`, throwing TypeError on brand mismatch.
 fn branded(
-  state: State,
+  state: State(host),
   this: JsValue,
   service: IntlService,
   method: String,
-) -> Result(#(Ref, Dict(String, JsValue)), Thrown) {
+) -> Result(#(Ref, Dict(String, JsValue)), Thrown(host)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -619,16 +619,19 @@ fn slot_bool(slots: Dict(String, JsValue), key: String) -> Option(Bool) {
   }
 }
 
-fn alloc_array(state: State, values: List(JsValue)) -> #(State, JsValue) {
+fn alloc_array(
+  state: State(host),
+  values: List(JsValue),
+) -> #(State(host), JsValue) {
   let #(heap, ref) =
     common.alloc_array(state.heap, values, state.builtins.array.prototype)
   #(State(..state, heap:), JsObject(ref))
 }
 
 fn alloc_pojo(
-  state: State,
+  state: State(host),
   props: List(#(String, JsValue)),
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let #(heap, ref) =
     common.alloc_pojo(
       state.heap,
@@ -639,7 +642,10 @@ fn alloc_pojo(
 }
 
 /// Parts → JS array of `{ type, value }` objects.
-fn parts_to_js(state: State, parts: List(fmt.Part)) -> #(State, JsValue) {
+fn parts_to_js(
+  state: State(host),
+  parts: List(fmt.Part),
+) -> #(State(host), JsValue) {
   let #(state, objs) =
     list.fold(parts, #(state, []), fn(acc, part) {
       let #(state, objs) = acc
@@ -653,9 +659,9 @@ fn parts_to_js(state: State, parts: List(fmt.Part)) -> #(State, JsValue) {
 
 /// Parts → JS array of `{ type, value, source }` objects (formatRangeToParts).
 fn parts_to_js_sourced(
-  state: State,
+  state: State(host),
   parts: List(#(String, String, String)),
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let #(state, objs) =
     list.fold(parts, #(state, []), fn(acc, part) {
       let #(state, objs) = acc
@@ -674,9 +680,9 @@ fn parts_to_js_sourced(
 /// Parts → JS array of `{ type, value, unit? }` objects (RelativeTimeFormat /
 /// DurationFormat formatToParts). Empty unit string means no unit property.
 fn parts_to_js_with_unit(
-  state: State,
+  state: State(host),
   parts: List(#(String, String, String)),
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let #(state, objs) =
     list.fold(parts, #(state, []), fn(acc, part) {
       let #(state, objs) = acc
@@ -701,9 +707,9 @@ fn parts_to_js_with_unit(
 
 /// CoerceOptionsToObject: undefined → no options; else ToObject.
 fn coerce_options(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Option(Ref), State), Thrown) {
+) -> Result(#(Option(Ref), State(host)), Thrown(host)) {
   case v {
     JsUndefined -> Ok(#(None, state))
     _ ->
@@ -716,9 +722,9 @@ fn coerce_options(
 
 /// GetOptionsObject: undefined → none; Object → it; else TypeError.
 fn strict_options(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Option(Ref), State), Thrown) {
+) -> Result(#(Option(Ref), State(host)), Thrown(host)) {
   case v {
     JsUndefined -> Ok(#(None, state))
     JsObject(ref) -> Ok(#(Some(ref), state))
@@ -727,10 +733,10 @@ fn strict_options(
 }
 
 fn opt_get(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   name: String,
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   case opts {
     None -> Ok(#(JsUndefined, state))
     Some(ref) -> object.get_value(state, ref, Named(name), JsObject(ref))
@@ -739,12 +745,12 @@ fn opt_get(
 
 /// GetOption with type string. Empty `allowed` list = any string allowed.
 fn get_str_opt(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   name: String,
   allowed: List(String),
   default: Option(String),
-) -> Result(#(Option(String), State), Thrown) {
+) -> Result(#(Option(String), State(host)), Thrown(host)) {
   use #(v, state) <- result.try(opt_get(state, opts, name))
   case v {
     JsUndefined -> Ok(#(default, state))
@@ -763,11 +769,11 @@ fn get_str_opt(
 }
 
 fn get_bool_opt(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   name: String,
   default: Option(Bool),
-) -> Result(#(Option(Bool), State), Thrown) {
+) -> Result(#(Option(Bool), State(host)), Thrown(host)) {
   use #(v, state) <- result.try(opt_get(state, opts, name))
   case v {
     JsUndefined -> Ok(#(default, state))
@@ -777,25 +783,25 @@ fn get_bool_opt(
 
 /// GetNumberOption/DefaultNumberOption (§9.2.16/9.2.17).
 fn get_num_opt(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   name: String,
   min: Int,
   max: Int,
   default: Option(Int),
-) -> Result(#(Option(Int), State), Thrown) {
+) -> Result(#(Option(Int), State(host)), Thrown(host)) {
   use #(v, state) <- result.try(opt_get(state, opts, name))
   default_number_option(state, v, min, max, default, name)
 }
 
 fn default_number_option(
-  state: State,
+  state: State(host),
   v: JsValue,
   min: Int,
   max: Int,
   default: Option(Int),
   name: String,
-) -> Result(#(Option(Int), State), Thrown) {
+) -> Result(#(Option(Int), State(host)), Thrown(host)) {
   case v {
     JsUndefined -> Ok(#(default, state))
     _ -> {
@@ -843,9 +849,9 @@ fn is_alnum(s: String) -> Bool {
 // ============================================================================
 
 fn canonicalize_locale_list(
-  state: State,
+  state: State(host),
   locales: JsValue,
-) -> Result(#(List(String), State), Thrown) {
+) -> Result(#(List(String), State(host)), Thrown(host)) {
   case locales {
     JsUndefined -> Ok(#([], state))
     JsString(s) -> {
@@ -871,9 +877,9 @@ fn canonicalize_locale_list(
 }
 
 fn canonical_tag_or_throw(
-  state: State,
+  state: State(host),
   s: String,
-) -> Result(#(String, State), Thrown) {
+) -> Result(#(String, State(host)), Thrown(host)) {
   case tags.canonicalize_tag(s) {
     Ok(tag) -> Ok(#(tag, state))
     Error(Nil) ->
@@ -882,9 +888,9 @@ fn canonical_tag_or_throw(
 }
 
 fn locale_list_from_object(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(List(String), State), Thrown) {
+) -> Result(#(List(String), State(host)), Thrown(host)) {
   use #(len_v, state) <- result.try(object.get_value(
     state,
     ref,
@@ -909,12 +915,12 @@ fn to_length(n: value.JsNum) -> Int {
 }
 
 fn locale_list_loop(
-  state: State,
+  state: State(host),
   ref: Ref,
   k: Int,
   len: Int,
   seen: List(String),
-) -> Result(#(List(String), State), Thrown) {
+) -> Result(#(List(String), State(host)), Thrown(host)) {
   case k >= len {
     True -> Ok(#(list.reverse(seen), state))
     False -> {
@@ -958,8 +964,8 @@ fn locale_list_loop(
 
 fn get_canonical_locales(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let locales = first_arg_or_undefined(args)
   run({
     use #(tag_list, state) <- result.try(canonicalize_locale_list(
@@ -973,8 +979,8 @@ fn get_canonical_locales(
 
 fn supported_values_of(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   run({
     use #(key, state) <- result.try(coerce.js_to_string(
       state,
@@ -1216,8 +1222,8 @@ fn numbering_base(nu: String) -> Option(Int) {
 
 fn supported_locales_of(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let locales = first_arg_or_undefined(args)
   let options_v = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   run({
@@ -1330,8 +1336,8 @@ fn construct_service(
   service: IntlService,
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let callable_without_new = case service {
     IntlCollator | IntlNumberFormat | IntlDateTimeFormat -> True
     _ -> False
@@ -1371,10 +1377,10 @@ fn construct_service(
 // --- Intl.Locale ---
 
 fn locale_slots(
-  state: State,
+  state: State(host),
   tag_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   // Step 7-9: tag must be String or Object; Locale objects pass [[Locale]].
   use #(tag_str, state) <- result.try(case tag_v {
     JsString(s) -> Ok(#(s, state))
@@ -1626,10 +1632,10 @@ fn is_digit_str(s: String) -> Bool {
 }
 
 fn require_type_seq(
-  state: State,
+  state: State(host),
   v: Option(String),
   name: String,
-) -> Result(Nil, Thrown) {
+) -> Result(Nil, Thrown(host)) {
   case v {
     Some(s) ->
       case is_type_sequence(s) {
@@ -1719,9 +1725,9 @@ fn resolve_keyword(
 /// GetOption "localeMatcher" — validated then discarded (we only implement
 /// one matcher), but the read is observable so it must happen in spec order.
 fn read_locale_matcher(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
-) -> Result(State, Thrown) {
+) -> Result(State(host), Thrown(host)) {
   use #(_matcher, state) <- result.map(get_str_opt(
     state,
     opts,
@@ -1736,11 +1742,11 @@ fn read_locale_matcher(
 /// coercion (GetOptionsObject when `strict`, else CoerceOptionsToObject),
 /// then the localeMatcher read.
 fn slots_prologue(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
   strict strict: Bool,
-) -> Result(#(List(String), Option(Ref), State), Thrown) {
+) -> Result(#(List(String), Option(Ref), State(host)), Thrown(host)) {
   use #(requested, state) <- result.try(canonicalize_locale_list(
     state,
     locales_v,
@@ -1756,10 +1762,10 @@ fn slots_prologue(
 /// numberingSystem option read + ResolveLocale with only the "nu" relevant
 /// extension keyword. Returns #(numbering_system, resolved_locale, state).
 fn resolve_nu_locale(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   requested: List(String),
-) -> Result(#(String, String, State), Thrown) {
+) -> Result(#(String, String, State(host)), Thrown(host)) {
   use #(nu_opt, state) <- result.try(get_str_opt(
     state,
     opts,
@@ -1782,10 +1788,10 @@ fn resolve_nu_locale(
 // --- Intl.Collator ---
 
 fn collator_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, state) <- result.try(canonicalize_locale_list(
     state,
     locales_v,
@@ -1900,10 +1906,10 @@ fn collator_slots(
 // --- Intl.NumberFormat ---
 
 fn number_format_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -2093,12 +2099,12 @@ fn number_format_slots(
 
 /// SetNumberFormatDigitOptions (§15.1.6) — returns the digit-related slots.
 fn digit_options(
-  state: State,
+  state: State(host),
   opts: Option(Ref),
   mnfd_default: Int,
   mxfd_default: Int,
   notation: String,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(mnid, state) <- result.try(get_num_opt(
     state,
     opts,
@@ -2350,10 +2356,10 @@ fn digit_options(
 // --- Intl.DateTimeFormat ---
 
 fn date_time_format_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   dtf_slots_with_defaults(state, locales_v, options_v, [
     #("c:year", "numeric"),
     #("c:month", "numeric"),
@@ -2362,11 +2368,11 @@ fn date_time_format_slots(
 }
 
 fn dtf_slots_with_defaults(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
   default_components: List(#(String, String)),
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   dtf_slots_required(state, locales_v, options_v, default_components, "any")
 }
 
@@ -2383,12 +2389,12 @@ fn present_pairs(
 }
 
 fn dtf_slots_required(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
   default_components: List(#(String, String)),
   required: String,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -3090,10 +3096,10 @@ fn iana_zone_offset(s: String) -> Option(Int) {
 // --- Intl.PluralRules ---
 
 fn plural_rules_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -3154,10 +3160,10 @@ fn plural_rules_slots(
 // --- Intl.ListFormat ---
 
 fn list_format_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -3191,10 +3197,10 @@ fn list_format_slots(
 // --- Intl.RelativeTimeFormat ---
 
 fn rtf_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -3233,10 +3239,10 @@ fn rtf_slots(
 // --- Intl.Segmenter ---
 
 fn segmenter_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -3262,10 +3268,10 @@ fn segmenter_slots(
 // --- Intl.DisplayNames ---
 
 fn display_names_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -3330,10 +3336,10 @@ const duration_units = [
 ]
 
 fn duration_format_slots(
-  state: State,
+  state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(slots_prologue(
     state,
     locales_v,
@@ -3501,8 +3507,8 @@ fn duration_format_slots(
 fn resolved_options(
   service: IntlService,
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   run({
     use #(_ref, slots) <- result.try(branded(
       state,
@@ -3595,8 +3601,8 @@ fn resolved_options(
 fn bound_getter(
   service: IntlService,
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(slot_key, arity) = case service {
     IntlCollator -> #("boundCompare", 2)
     _ -> #("boundFormat", 1)
@@ -3644,8 +3650,8 @@ fn bound_method(
   service: IntlService,
   target: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   run({
     use #(_ref, slots) <- result.try(branded(
       state,
@@ -3730,9 +3736,9 @@ fn num_opts_from_slots(slots: Dict(String, JsValue)) -> fmt.NumOpts {
 
 /// ToIntlMathematicalValue, approximated with ToNumber (BigInt allowed).
 fn to_intl_number(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(value.JsNum, State), Thrown) {
+) -> Result(#(value.JsNum, State(host)), Thrown(host)) {
   case v {
     value.JsBigInt(value.BigInt(n)) ->
       Ok(#(value.Finite(int.to_float(n)), state))
@@ -3741,10 +3747,10 @@ fn to_intl_number(
 }
 
 fn nf_format_parts(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   x: JsValue,
-) -> Result(#(List(fmt.Part), State), Thrown) {
+) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
   let opts = num_opts_from_slots(slots)
   let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
   // ToIntlMathematicalValue keeps decimal strings exact.
@@ -3791,12 +3797,12 @@ fn is_plain_decimal(s: String) -> Bool {
 }
 
 fn nf_format_number(
-  state: State,
+  state: State(host),
   _slots: Dict(String, JsValue),
   x: JsValue,
   opts: fmt.NumOpts,
   nu: String,
-) -> Result(#(List(fmt.Part), State), Thrown) {
+) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
   use #(n, state) <- result.try(to_intl_number(state, x))
   let parts = case n {
     value.NaN -> fmt.format_nan_parts(opts)
@@ -3808,11 +3814,11 @@ fn nf_format_number(
 }
 
 fn nf_range_parts(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   x_v: JsValue,
   y_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State), Thrown) {
+) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
   use Nil <- result.try(case x_v, y_v {
     JsUndefined, _ | _, JsUndefined ->
       throw_type(state, "Invalid range arguments")
@@ -3866,7 +3872,10 @@ type TemporalFormattable {
 }
 
 /// IsTemporalObject — recognize Temporal values handed to format methods.
-fn dtf_temporal_value(state: State, v: JsValue) -> Option(TemporalFormattable) {
+fn dtf_temporal_value(
+  state: State(host),
+  v: JsValue,
+) -> Option(TemporalFormattable) {
   case v {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -3993,10 +4002,10 @@ fn tf_component_rules(
 /// (calendar compatibility, suitable format availability) and return slots
 /// whose "c:" component keys are adjusted to the per-type format.
 fn dtf_temporal_slots(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   t: TemporalFormattable,
-) -> Result(#(Dict(String, JsValue), State), Thrown) {
+) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
   case t {
     TfZoned ->
       throw_type(
@@ -4224,10 +4233,10 @@ fn floor_div(a: Int, b: Int) -> Int {
 }
 
 fn dtf_format_parts(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   date_v: JsValue,
-) -> Result(#(List(fmt.Part), State), Thrown) {
+) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
   case dtf_temporal_value(state, date_v) {
     Some(t) -> {
       use #(slots, state) <- result.try(dtf_temporal_slots(state, slots, t))
@@ -4241,10 +4250,10 @@ fn dtf_format_parts(
 }
 
 fn dtf_format_parts_number(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   date_v: JsValue,
-) -> Result(#(List(fmt.Part), State), Thrown) {
+) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
   use #(fields, state) <- result.try(dtf_fields_number(state, slots, date_v))
   let parts = build_dtf_parts(slots, fields)
   let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
@@ -4594,11 +4603,11 @@ fn gmt_offset(offset: Int, long: Bool) -> String {
 }
 
 fn dtf_range_parts(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   x_v: JsValue,
   y_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State), Thrown) {
+) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
   use Nil <- result.try(case x_v, y_v {
     JsUndefined, _ | _, JsUndefined ->
       throw_type(state, "Invalid range arguments")
@@ -4679,11 +4688,14 @@ fn dtf_range_parts(
 /// "Jan 3 – 5, 2019": collapse a named-month date-only range that differs
 /// only in the day.
 fn dtf_collapsed_range(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   x_v: JsValue,
   y_v: JsValue,
-) -> Result(Option(#(List(#(String, String, String)), State)), Thrown) {
+) -> Result(
+  Option(#(List(#(String, String, String)), State(host))),
+  Thrown(host),
+) {
   let month_style = c_slot(slots, "month")
   let named_month = case month_style {
     Some("long") | Some("short") | Some("narrow") -> True
@@ -4757,10 +4769,10 @@ fn dtf_collapsed_range(
 
 /// Compute the civil fields a DTF instance would use for a value.
 fn dtf_fields(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   date_v: JsValue,
-) -> Result(#(fmt.DateFields, State), Thrown) {
+) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
   case dtf_temporal_value(state, date_v) {
     Some(t) -> Ok(#(dtf_temporal_fields(slots, t), state))
     None -> dtf_fields_number(state, slots, date_v)
@@ -4768,10 +4780,10 @@ fn dtf_fields(
 }
 
 fn dtf_fields_number(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   date_v: JsValue,
-) -> Result(#(fmt.DateFields, State), Thrown) {
+) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
   use #(tv, state) <- result.try(case date_v {
     JsUndefined -> Ok(#(value.Finite(now_ms()), state))
     _ -> coerce.js_to_number(state, date_v)
@@ -5062,8 +5074,8 @@ fn run_method(
   method: String,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let arg0 = first_arg_or_undefined(args)
   let arg1 = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   let arg2 = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
@@ -5206,12 +5218,12 @@ fn host_method_guard(
   method: String,
   _args: List(JsValue),
   this: JsValue,
-  state: State,
+  state: State(host),
   arg0: JsValue,
   arg1: JsValue,
   arg2: JsValue,
-  next: fn() -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  next: fn() -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case service, method {
     IntlNumberFormat, "Number#toLocaleString" ->
       run(host_number_to_locale_string(state, this, arg0, arg1))
@@ -5233,11 +5245,11 @@ fn host_method_guard(
 
 /// Number.prototype.toLocaleString (ECMA-402 §18.2.1).
 fn host_number_to_locale_string(
-  state: State,
+  state: State(host),
   this: JsValue,
   locales: JsValue,
   options: JsValue,
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use n <- result.try(case this {
     JsNumber(n) -> Ok(n)
     JsObject(ref) ->
@@ -5262,12 +5274,12 @@ fn host_number_to_locale_string(
 
 /// String.prototype.localeCompare (ECMA-402 §19.1.1).
 fn host_locale_compare(
-  state: State,
+  state: State(host),
   this: JsValue,
   that_v: JsValue,
   locales: JsValue,
   options: JsValue,
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use Nil <- result.try(case this {
     JsUndefined | value.JsNull ->
       throw_type(
@@ -5285,11 +5297,11 @@ fn host_locale_compare(
 /// String.prototype.toLocale{Lower,Upper}Case — locale list is validated,
 /// casing uses the default (root) algorithm.
 fn host_locale_case(
-  state: State,
+  state: State(host),
   this: JsValue,
   locales: JsValue,
   upper: Bool,
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use Nil <- result.try(case this {
     JsUndefined | value.JsNull ->
       throw_type(state, "method called on null or undefined")
@@ -5438,12 +5450,12 @@ fn mark_str(c: Int) -> String {
 /// Date.prototype.toLocale{,Date,Time}String (ECMA-402 §17).
 /// `which`: 1 = date, 2 = time, 3 = both.
 fn host_date_to_locale(
-  state: State,
+  state: State(host),
   this: JsValue,
   locales: JsValue,
   options: JsValue,
   which: Int,
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use tv <- result.try(case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -5526,11 +5538,11 @@ fn plural_select(slots: Dict(String, JsValue), n: value.JsNum) -> String {
 
 /// RelativeTimeFormat format/formatToParts core.
 fn rtf_method_parts(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   value_v: JsValue,
   unit_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State), Thrown) {
+) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
   use #(n, state) <- result.try(coerce.js_to_number(state, value_v))
   use f <- result.try(case n {
     value.Finite(f) -> Ok(f)
@@ -5568,9 +5580,9 @@ fn singular_unit(unit: String) -> Option(String) {
 
 /// StringListFromIterable (§13.5.1) — undefined → empty list.
 fn string_list_from_iterable(
-  state: State,
+  state: State(host),
   iterable: JsValue,
-) -> Result(#(List(String), State), Thrown) {
+) -> Result(#(List(String), State(host)), Thrown(host)) {
   case iterable {
     JsUndefined -> Ok(#([], state))
     // Strings iterate by code points (String.prototype[Symbol.iterator]).
@@ -5607,11 +5619,11 @@ fn string_list_from_iterable(
 }
 
 fn iterate_strings(
-  state: State,
+  state: State(host),
   iter: JsValue,
   next_fn: JsValue,
   acc: List(String),
-) -> Result(#(List(String), State), Thrown) {
+) -> Result(#(List(String), State(host)), Thrown(host)) {
   use #(step, state) <- result.try(state.call(state, next_fn, iter, []))
   use step_ref <- result.try(case step {
     JsObject(r) -> Ok(r)
@@ -5642,10 +5654,10 @@ fn iterate_strings(
 
 /// Intl.DisplayNames.prototype.of(code)
 fn display_names_of(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   code_v: JsValue,
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use #(code, state) <- result.try(coerce.js_to_string(state, code_v))
   let type_ = slot_str(slots, "type") |> option.unwrap("language")
   let fallback = slot_str(slots, "fallback") |> option.unwrap("code")
@@ -5743,10 +5755,10 @@ fn titlecase_ascii(s: String) -> String {
 // ============================================================================
 
 fn duration_parts(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   duration_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State), Thrown) {
+) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
   use #(fields, state) <- result.try(to_duration_record(state, duration_v))
   // DurationSign consistency + IsValidDuration ranges.
   let has_neg = list.any(fields, fn(f) { f.1 <. 0.0 })
@@ -5764,9 +5776,9 @@ fn duration_parts(
 
 /// ToDurationRecord (object) / Temporal duration string parsing.
 fn to_duration_record(
-  state: State,
+  state: State(host),
   duration_v: JsValue,
-) -> Result(#(List(#(String, Float)), State), Thrown) {
+) -> Result(#(List(#(String, Float)), State(host)), Thrown(host)) {
   case duration_v {
     JsString(str) ->
       case parse_iso_duration(str) {
@@ -6275,8 +6287,8 @@ fn segmenter_segment(
   segments_proto: Ref,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   run({
     use #(_ref, slots) <- result.try(branded(
       state,
@@ -6308,8 +6320,8 @@ fn segmenter_segment(
 fn segments_iterator(
   iter_proto: Ref,
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   run({
     use #(_ref, slots) <- result.try(branded(
       state,
@@ -6329,13 +6341,13 @@ fn segments_iterator(
 }
 
 fn make_segment_data(
-  state: State,
+  state: State(host),
   input: String,
   granularity: String,
   segment: String,
   index: Int,
   word_like: Bool,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let base = [
     #("segment", JsString(segment)),
     #("index", value.from_int(index)),
@@ -6349,10 +6361,10 @@ fn make_segment_data(
 }
 
 fn segments_containing(
-  state: State,
+  state: State(host),
   slots: Dict(String, JsValue),
   index_v: JsValue,
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   let input = slot_str(slots, "string") |> option.unwrap("")
   let granularity = slot_str(slots, "granularity") |> option.unwrap("grapheme")
   use #(n, state) <- result.try(coerce.js_to_number(state, index_v))
@@ -6386,10 +6398,10 @@ fn segments_containing(
 }
 
 fn segment_iterator_next(
-  state: State,
+  state: State(host),
   ref: Ref,
   slots: Dict(String, JsValue),
-) -> Result(#(JsValue, State), Thrown) {
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
   let input = slot_str(slots, "string") |> option.unwrap("")
   let granularity = slot_str(slots, "granularity") |> option.unwrap("grapheme")
   let position = slot_int(slots, "position") |> option.unwrap(0)
@@ -6429,7 +6441,11 @@ fn segment_iterator_next(
   }
 }
 
-fn iter_result(state: State, v: JsValue, done: Bool) -> #(State, JsValue) {
+fn iter_result(
+  state: State(host),
+  v: JsValue,
+  done: Bool,
+) -> #(State(host), JsValue) {
   alloc_pojo(state, [#("value", v), #("done", JsBool(done))])
 }
 
@@ -6458,8 +6474,8 @@ fn locale_u_kw(slots: Dict(String, JsValue), key: String) -> Option(String) {
 fn locale_getter(
   name: String,
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   run({
     use #(_ref, slots) <- result.try(branded(
       state,
@@ -6538,8 +6554,8 @@ fn locale_method(
   proto: Ref,
   _args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   run({
     use #(_ref, slots) <- result.try(branded(
       state,

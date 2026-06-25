@@ -71,10 +71,10 @@ fn ffi_tz_offset_minutes(epoch_ms: Int) -> Int
 /// is not a Date instance and does not have a [[DateValue]] internal slot." —
 /// so unlike Boolean/Number we leave the prototype as OrdinaryObject.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   // Static methods on Date constructor
   let #(h, static_methods) =
     common.alloc_methods(h, function_proto, [
@@ -176,8 +176,8 @@ pub fn dispatch(
   native: DateNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     DateConstructor(proto:) -> date_constructor(proto, args, state)
     DateNow -> #(state, Ok(value.from_int(ffi_now_ms())))
@@ -466,7 +466,7 @@ fn nums_to_ints(nums: List(JsNum)) -> Option(List(Int)) {
 
 /// ES2024 §21.4.4 thisTimeValue: extract [[DateValue]] from a Date object,
 /// or None if `this` is not a Date.
-fn this_time_value(state: State, this: JsValue) -> Option(#(Ref, JsNum)) {
+fn this_time_value(state: State(host), this: JsValue) -> Option(#(Ref, JsNum)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -481,11 +481,11 @@ fn this_time_value(state: State, this: JsValue) -> Option(#(Ref, JsNum)) {
 /// Guard that `this` is a Date; on failure produces a TypeError, otherwise
 /// continues into `k` with the ref + time value.
 fn require_time_value(
-  state: State,
+  state: State(host),
   this: JsValue,
   name: String,
-  k: fn(Ref, JsNum) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  k: fn(Ref, JsNum) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this_time_value(state, this) {
     Some(#(ref, tv)) -> k(ref, tv)
     None ->
@@ -497,7 +497,7 @@ fn require_time_value(
 }
 
 /// Write a new [[DateValue]] into the Date object at `ref`.
-fn set_this_time_value(state: State, ref: Ref, tv: JsNum) -> State {
+fn set_this_time_value(state: State(host), ref: Ref, tv: JsNum) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -524,8 +524,8 @@ fn set_this_time_value(state: State, ref: Ref, tv: JsNum) -> State {
 fn date_constructor(
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, tv_result) = case args {
     [] -> #(state, Ok(Finite(int.to_float(ffi_now_ms()))))
     [single] -> single_arg_time_value(state, single)
@@ -544,9 +544,9 @@ fn date_constructor(
 /// Single-argument constructor path: clone a Date, parse a string, or
 /// ToNumber+TimeClip.
 fn single_arg_time_value(
-  state: State,
+  state: State(host),
   arg: JsValue,
-) -> #(State, Result(JsNum, JsValue)) {
+) -> #(State(host), Result(JsNum, JsValue)) {
   // §21.4.2.1 step 4.b: if value is a Date object, copy its [[DateValue]].
   case this_time_value(state, arg) {
     Some(#(_, tv)) -> #(state, Ok(time_clip(tv)))
@@ -567,10 +567,10 @@ fn single_arg_time_value(
 /// Coerce an N-arg list (1..7) to a time value with full ToNumber re-entry.
 /// Missing fields default to month=0, date=1, h/m/s/ms=0. Extra args ignored.
 fn args_to_time_value(
-  state: State,
+  state: State(host),
   args: List(JsValue),
   is_local: Bool,
-) -> #(State, Result(JsNum, JsValue)) {
+) -> #(State(host), Result(JsNum, JsValue)) {
   use nums, st <- state.try_op(args_to_nums(state, list.take(args, 7)))
   #(st, Ok(make_date_checked(pad_fields(nums), is_local)))
 }
@@ -599,8 +599,8 @@ fn pad_fields(nums: List(JsNum)) -> List(JsNum) {
 /// ES2024 §21.4.3.1 Date.parse ( string )
 fn date_parse(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let arg = helpers.first_arg_or_undefined(args)
   use s, st <- state.try_op(coerce.js_to_string(state, arg))
   #(st, Ok(JsNumber(parse_date_string(s))))
@@ -610,8 +610,8 @@ fn date_parse(
 /// 0 args → NaN; 1+ args → fields interpreted as UTC, year-mapping applied.
 fn date_utc(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [] -> #(state, Ok(JsNumber(NaN)))
     many -> {
@@ -627,16 +627,16 @@ fn date_utc(
 
 fn date_get_time(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, "valueOf")
   #(state, Ok(JsNumber(tv)))
 }
 
 fn date_get_tz_offset(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, "getTimezoneOffset")
   case tv {
     Finite(f) -> #(
@@ -654,10 +654,10 @@ fn date_get_tz_offset(
 /// Shared getter: read [[DateValue]], decompose, return one field.
 fn date_get_field(
   this: JsValue,
-  state: State,
+  state: State(host),
   field_index: Int,
   is_local: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, "get")
   case tv {
     Finite(f) -> {
@@ -676,8 +676,8 @@ fn date_get_field(
 fn date_set_time(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, _ <- require_time_value(state, this, "setTime")
   let arg = helpers.first_arg_or_undefined(args)
   use n, st <- state.try_op(coerce.js_to_number(state, arg))
@@ -696,11 +696,11 @@ fn date_set_time(
 fn date_set_field(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   first: Int,
   max_args: Int,
   is_local: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, tv <- require_time_value(state, this, "set")
   // Coerce supplied args (capped at max_args) to JsNum — full ToNumber so
   // valueOf side effects and abrupt completions are observed in order.
@@ -837,10 +837,10 @@ fn pad3(n: Int) -> String {
 /// `part`: bit 1 = date, bit 2 = time, 3 = both.
 fn date_to_string(
   this: JsValue,
-  state: State,
+  state: State(host),
   fmt: DateFmt,
   part: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, "toString")
   case tv {
     Finite(f) -> {
@@ -1140,9 +1140,9 @@ fn jsnum_add_minutes(n: JsNum, minutes: Int) -> JsNum {
 /// Coerce a list of args to JsNum, threading state and propagating throws.
 /// Used by the constructor multi-arg path, Date.UTC and the setters.
 fn args_to_nums(
-  state: State,
+  state: State(host),
   args: List(JsValue),
-) -> Result(#(List(JsNum), State), #(JsValue, State)) {
+) -> Result(#(List(JsNum), State(host)), #(JsValue, State(host))) {
   list.fold(args, Ok(#([], state)), fn(acc, arg) {
     use #(nums, st) <- result.try(acc)
     use #(n, st) <- result.map(coerce.js_to_number(st, arg))
@@ -1158,8 +1158,8 @@ fn args_to_nums(
 /// Annex B §B.2.3.1 Date.prototype.getYear ( ) — returns FullYear - 1900.
 fn date_get_year(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, "getYear")
   case tv {
     Finite(f) -> {
@@ -1175,8 +1175,8 @@ fn date_get_year(
 fn date_set_year(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, tv <- require_time_value(state, this, "setYear")
   let arg = helpers.first_arg_or_undefined(args)
   use n, st <- state.try_op(coerce.js_to_number(state, arg))
@@ -1230,8 +1230,8 @@ fn date_set_year(
 fn date_to_primitive(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) -> {
       let hint_arg = helpers.first_arg_or_undefined(args)
@@ -1252,11 +1252,11 @@ fn date_to_primitive(
 }
 
 fn run_ordinary_to_primitive(
-  state: State,
+  state: State(host),
   val: JsValue,
   ref: Ref,
   hint: coerce.ToPrimitiveHint,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use v, st <- state.try_op(coerce.ordinary_to_primitive(state, val, ref, hint))
   #(st, Ok(v))
 }
@@ -1269,8 +1269,8 @@ fn run_ordinary_to_primitive(
 ///   4. Return ? Invoke(O, "toISOString").
 fn date_to_json(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: ToObject(this value).
   case common.to_object(state.heap, state.builtins, this) {
     None ->
@@ -1298,10 +1298,10 @@ fn date_to_json(
 
 /// Generic Invoke(O, "toISOString") — looks up via prototype chain and calls.
 fn invoke_to_iso_string(
-  state: State,
+  state: State(host),
   obj: JsValue,
   ref: Ref,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let lookup = ops_object.get_value(state, ref, value.Named("toISOString"), obj)
   use method, st <- state.try_op(lookup)
   case helpers.is_callable(st.heap, method) {

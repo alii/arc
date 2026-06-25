@@ -20,10 +20,10 @@ import gleam/option.{None, Some}
 
 /// Set up WeakSet.prototype and WeakSet constructor.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
       #("add", WeakSetNative(WeakSetPrototypeAdd), 1),
@@ -51,8 +51,8 @@ pub fn dispatch(
   native: WeakSetNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     WeakSetConstructor(proto:) -> construct(proto, args, state)
     WeakSetPrototypeAdd ->
@@ -67,8 +67,8 @@ pub fn dispatch(
 fn construct(
   proto: Ref,
   _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // For now, ignore iterable argument
   let #(heap, ref) =
     common.alloc_wrapper(state.heap, WeakSetObject(data: dict.new()), proto)
@@ -77,7 +77,7 @@ fn construct(
 
 /// The WeakSet instantiation of the shared weak-collection core
 /// (membership dict: present Refs map to True).
-fn set_kind() -> weak_map.WeakKind(Bool) {
+fn set_kind() -> weak_map.WeakKind(host, Bool) {
   WeakKind(
     receiver_err: "Method WeakSet.prototype.* called on incompatible receiver",
     key_err: "Invalid value used in weak set",

@@ -9,13 +9,13 @@ import gleam/option.{Some}
 // ----------------------------------------------------------------------------
 
 /// Helper: eval on engine, assert normal completion, return value.
-fn assert_eval(eng: engine.Engine, source: String) -> value.JsValue {
+fn assert_eval(eng: engine.Engine(host), source: String) -> value.JsValue {
   let assert Ok(#(NormalCompletion(value:, ..), _)) = engine.eval(eng, source)
   value
 }
 
 /// Helper: serialize then deserialize an engine.
-fn roundtrip(eng: engine.Engine) -> engine.Engine {
+fn roundtrip(eng: engine.Engine(host)) -> engine.Engine(host) {
   eng |> engine.serialize |> engine.deserialize
 }
 
@@ -402,7 +402,7 @@ pub fn eval_module_syntax_error_test() {
 
 /// Host fn that returns what `console.log(...args)` would print, so the
 /// formatter is assertable from JS without touching stdout.
-fn fmt_engine() -> engine.Engine {
+fn fmt_engine() -> engine.Engine(host) {
   engine.new()
   |> engine.define_fn("fmt", 0, fn(args, _this, s) {
     let #(s, line) = console.format(args, s)

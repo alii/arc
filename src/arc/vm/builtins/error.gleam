@@ -33,10 +33,10 @@ pub type ErrorBuiltins {
 
 /// Set up all error prototypes and constructors as NativeFunctions.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, ErrorBuiltins) {
+) -> #(Heap(host), ErrorBuiltins) {
   // Allocate Error.prototype.toString method
   let #(h, to_string_methods) =
     common.alloc_methods(h, function_proto, [
@@ -159,8 +159,8 @@ pub fn dispatch(
   native: ErrorNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     ErrorConstructor(proto:) -> call_native(proto, args, JsUndefined, state)
     value.SuppressedErrorConstructor(proto:) ->
@@ -186,8 +186,8 @@ pub fn dispatch(
 /// matching V8's `${target.name}: ${target.message}` prefix.
 fn capture_stack_trace(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [JsObject(ref), ..] -> {
       let header = target_header(state.heap, ref)
@@ -205,7 +205,7 @@ fn capture_stack_trace(
 
 /// First line for captureStackTrace: read the target's own `name` and `message`
 /// data properties (if present) and combine, defaulting `name` to "Error".
-fn target_header(h: Heap, ref: Ref) -> String {
+fn target_header(h: Heap(host), ref: Ref) -> String {
   let read = fn(key) {
     case heap.read(h, ref) {
       Some(ObjectSlot(properties:, ..)) ->
@@ -229,8 +229,8 @@ fn call_native(
   proto: Ref,
   args: List(JsValue),
   _this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let options = case args {
     [_, o, ..] -> o
     _ -> JsUndefined
@@ -262,8 +262,8 @@ fn call_native(
 fn suppressed_error_native(
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(err, suppressed, message) = case args {
     [] -> #(JsUndefined, JsUndefined, JsUndefined)
     [e] -> #(e, JsUndefined, JsUndefined)
@@ -288,12 +288,12 @@ fn suppressed_error_native(
 /// Allocate a SuppressedError instance with non-enumerable error/suppressed
 /// (and optional message) data properties, plus a stack trace.
 fn alloc_suppressed(
-  state: State,
+  state: State(host),
   proto: Ref,
   message: Option(String),
   err: JsValue,
   suppressed: JsValue,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let props = [
     #("error", value.builtin_property(err)),
     #("suppressed", value.builtin_property(suppressed)),
@@ -313,10 +313,10 @@ fn alloc_suppressed(
 /// object" with non-enumerable "error" (the new exception) and "suppressed"
 /// (the previously pending exception) properties. Used by DisposableStack.
 pub fn make_suppressed_error(
-  state: State,
+  state: State(host),
   err: JsValue,
   suppressed: JsValue,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   alloc_suppressed(
     state,
     state.builtins.suppressed_error.prototype,
@@ -330,11 +330,11 @@ pub fn make_suppressed_error(
 /// property), attach a `stack` trace captured from the current call stack,
 /// and install a `cause` from the options bag (§20.5.8.1 InstallErrorCause).
 fn alloc_error(
-  state: State,
+  state: State(host),
   proto: Ref,
   message: Option(String),
   options: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let props = case message {
     Some(msg) -> [#("message", value.builtin_property(JsString(msg)))]
     None -> []
@@ -359,10 +359,10 @@ fn alloc_error(
 ///
 /// Returns the error object `ref` on success (callers tail-call this).
 fn install_error_cause(
-  state: State,
+  state: State(host),
   ref: Ref,
   options: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case options {
     JsObject(opts_ref) -> {
       use has, state <- state.try_op(object.has_property_stateful(
@@ -408,10 +408,10 @@ fn install_error_cause(
 /// is ErrorObject — the [[ErrorData]] internal slot (§20.5.4). The stack
 /// string starts empty; state.attach_stack fills it in.
 fn alloc_error_slot(
-  h: Heap,
+  h: Heap(host),
   proto: Ref,
   props: List(#(String, Property)),
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   heap.alloc(
     h,
     ObjectSlot(
@@ -434,8 +434,8 @@ fn alloc_error_slot(
 /// Proxies wrapping errors return false (no [[ErrorData]] of their own).
 fn is_error_native(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let arg = case args {
     [x, ..] -> x
     [] -> JsUndefined
@@ -460,8 +460,8 @@ fn is_error_native(
 ///      trace of E.
 fn stack_getter(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -489,8 +489,8 @@ fn stack_setter(
   proto: Ref,
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let v = case args {
     [x, ..] -> x
     [] -> JsUndefined
@@ -518,11 +518,11 @@ fn stack_setter(
 ///   5. Else, perform ? Set(this, p, v, true).
 ///   6. Return unused.
 fn set_stack_ignoring_prototype(
-  state: State,
+  state: State(host),
   proto: Ref,
   ref: Ref,
   s: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 2: assigning on %Error.prototype% itself emulates assignment to a
   // non-writable data property in strict mode — TypeError. `home` is the
   // setter function's own realm's %Error.prototype% (carried in the native
@@ -604,7 +604,7 @@ fn set_stack_ignoring_prototype(
 
 /// Read the `name` data property off an error prototype (e.g. "TypeError"),
 /// for the first line of the stack trace. Defaults to "Error".
-fn error_name(h: Heap, proto: Ref) -> String {
+fn error_name(h: Heap(host), proto: Ref) -> String {
   case heap.read(h, proto) {
     Some(ObjectSlot(properties:, ..)) ->
       case dict.get(properties, Named("name")) {
@@ -631,8 +631,8 @@ fn error_name(h: Heap, proto: Ref) -> String {
 ///
 fn error_to_string(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsNull | JsUndefined ->
       state.type_error(state, "Error.prototype.toString called on non-object")
@@ -661,11 +661,11 @@ fn error_to_string(
 
 /// Helper: get "message" and produce the final toString string.
 fn error_to_string_msg(
-  state: State,
+  state: State(host),
   ref: Ref,
   this: JsValue,
   name: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 6: Let msg be ? Get(O, "message").
   use msg_val, state <- state.try_op(object.get_value(
     state,
@@ -685,10 +685,10 @@ fn error_to_string_msg(
 
 /// Helper: combine name and msg per §20.5.3.4 steps 7-9.
 fn error_to_string_combine(
-  state: State,
+  state: State(host),
   name: String,
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let result_str = case name, msg {
     "", _ -> msg
     _, "" -> name

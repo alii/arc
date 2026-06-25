@@ -33,10 +33,10 @@ import gleam/option.{type Option, None, Some}
 
 /// Set up DataView.prototype and the DataView constructor.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   let #(h, getters) =
     common.alloc_getters(h, function_proto, [
       #("buffer", DataViewNative(DataViewGetBuffer)),
@@ -106,8 +106,8 @@ pub fn dispatch(
   native: DataViewNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     DataViewConstructor(proto:) -> construct(proto, args, state)
     DataViewGetBuffer -> get_buffer(this, state)
@@ -125,8 +125,8 @@ pub fn dispatch(
 fn construct(
   proto: Ref,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: NewTarget undefined → TypeError. do_construct sets
   // state.new_target before native dispatch; a plain call leaves JsUndefined.
   use Nil, state <- require(
@@ -217,16 +217,16 @@ fn construct(
 
 fn get_buffer(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_data_view(this, state)
   #(state, Ok(JsObject(view.buffer)))
 }
 
 fn get_byte_length(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_data_view(this, state)
   use size, state <- view_size(state, view)
   #(state, Ok(value.from_int(size)))
@@ -234,8 +234,8 @@ fn get_byte_length(
 
 fn get_byte_offset(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_data_view(this, state)
   use _size, state <- view_size(state, view)
   #(state, Ok(value.from_int(view.byte_offset)))
@@ -249,8 +249,8 @@ fn get_view_value(
   this: JsValue,
   args: List(JsValue),
   element: ViewElementType,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use view, get_index, state <- view_and_index(this, args, state)
   let little = value.is_truthy(list_at(args, 1) |> option.unwrap(JsUndefined))
   let elem_size = element_size(element)
@@ -271,8 +271,8 @@ fn set_view_value(
   this: JsValue,
   args: List(JsValue),
   element: ViewElementType,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // SetViewValue step 3 (immutable-arraybuffer proposal): an immutable
   // viewed buffer is a TypeError BEFORE the ToIndex/ToNumber coercions run
   // any user code (observable; test262 checks it).
@@ -333,9 +333,9 @@ type ViewRecord {
 /// Unwrap `this` as a DataView or throw TypeError. CPS for `use`.
 fn require_data_view(
   this: JsValue,
-  state: State,
-  cont: fn(ViewRecord, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(ViewRecord, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let found = case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -360,10 +360,10 @@ fn require_data_view(
 /// Immutable ArrayBuffer proposal — SetViewValue step 3: writes through a
 /// DataView over an immutable buffer throw TypeError.
 fn require_mutable_buffer(
-  state: State,
+  state: State(host),
   buffer: Ref,
-  cont: fn(Nil, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buffer) {
     Some(ObjectSlot(kind: ArrayBufferObject(immutable: True, ..), ..)) ->
       state.type_error(
@@ -379,9 +379,10 @@ fn require_mutable_buffer(
 fn view_and_index(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-  cont: fn(ViewRecord, Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+  cont: fn(ViewRecord, Int, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_data_view(this, state)
   use get_index, state <- coerce.to_index_cps(
     state,
@@ -395,12 +396,13 @@ fn view_and_index(
 /// detached) → TypeError, then RangeError; yields the live buffer bytes and
 /// the absolute byte position of the element. CPS for `use`.
 fn checked_view_bytes(
-  state: State,
+  state: State(host),
   view: ViewRecord,
   get_index: Int,
   elem_size: Int,
-  cont: fn(BitArray, Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(BitArray, Int, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use size, state <- view_size(state, view)
   use Nil, state <- range_check(
     get_index + elem_size <= size,
@@ -412,7 +414,7 @@ fn checked_view_bytes(
 }
 
 /// Read `val` as an ArrayBuffer/SharedArrayBuffer ref ([[ArrayBufferData]]).
-fn as_array_buffer(state: State, val: JsValue) -> Option(Ref) {
+fn as_array_buffer(state: State(host), val: JsValue) -> Option(Ref) {
   case val {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -426,10 +428,11 @@ fn as_array_buffer(state: State, val: JsValue) -> Option(Ref) {
 /// Read the live (non-detached) buffer's #(byte_length, resizable) or throw
 /// TypeError if detached / not a buffer. CPS for `use`.
 fn live_buffer_info(
-  state: State,
+  state: State(host),
   buf_ref: Ref,
-  cont: fn(#(Int, Bool), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(#(Int, Bool), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buf_ref) {
     Some(ObjectSlot(
       kind: ArrayBufferObject(data:, detached:, max_byte_length:, ..),
@@ -453,10 +456,10 @@ fn live_buffer_info(
 
 /// Read the live buffer's data BitArray (TypeError if detached). CPS.
 fn buffer_data(
-  state: State,
+  state: State(host),
   buf_ref: Ref,
-  cont: fn(BitArray, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(BitArray, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buf_ref) {
     Some(ObjectSlot(kind: ArrayBufferObject(data:, detached: False, ..), ..)) ->
       cont(value.buffer_bits(data), state)
@@ -472,10 +475,10 @@ fn buffer_data(
 /// detached or out-of-bounds (resizable buffer shrunk under the view) →
 /// TypeError; otherwise the current view size in bytes. CPS for `use`.
 fn view_size(
-  state: State,
+  state: State(host),
   view: ViewRecord,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use #(buf_len, _resizable), state <- live_buffer_info(state, view.buffer)
   case view.byte_length {
     Some(len) ->
@@ -502,10 +505,10 @@ fn view_size(
 /// Generic Option→TypeError gate. CPS for `use`.
 fn require(
   opt: Option(t),
-  state: State,
+  state: State(host),
   msg: String,
-  cont: fn(t, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(t, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case opt {
     Some(v) -> cont(v, state)
     None -> state.type_error(state, msg)
@@ -515,10 +518,10 @@ fn require(
 /// Bool→RangeError gate. CPS for `use`.
 fn range_check(
   ok: Bool,
-  state: State,
+  state: State(host),
   msg: String,
-  cont: fn(Nil, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case ok {
     True -> cont(Nil, state)
     False -> state.range_error(state, msg)
@@ -651,11 +654,11 @@ fn pow2(e: Int) -> Float {
 /// Coerce + encode the value for SetViewValue. Produces the element's raw
 /// bytes in BIG-endian order (to_endian flips later if needed). CPS.
 fn encode_value(
-  state: State,
+  state: State(host),
   element: ViewElementType,
   val: JsValue,
-  cont: fn(BitArray, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(BitArray, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case element {
     VBigInt64 | VBigUint64 -> {
       use n, state <- coerce.to_bigint_cps(state, val)

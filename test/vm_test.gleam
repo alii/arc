@@ -25,7 +25,7 @@ import gleam/result
 
 /// Test helper: read a data property walking the prototype chain.
 fn get_data(
-  h: state.Heap,
+  h: state.Heap(host),
   ref: value.Ref,
   key: String,
 ) -> Result(value.JsValue, Nil) {
@@ -101,7 +101,7 @@ fn run_throwing(
 }
 
 /// Helper: run func with locals + builtins, return Completion.
-fn run_func(func: FuncTemplate) -> Result(Completion, state.VmError) {
+fn run_func(func: FuncTemplate) -> Result(Completion(host), state.VmError) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)

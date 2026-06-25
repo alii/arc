@@ -15,26 +15,29 @@ import gleam/string
 
 // -- Concrete type aliases ----------------------------------------------------
 // heap.gleam and value.gleam are generic over `ctx` so NativeFnSlot can carry
-// host-function closures typed against State without an import cycle. This is
-// where the recursive knot gets tied — State refers to itself through Heap.
+// host-function closures typed against State without an import cycle, and over
+// `host` for embedder-defined opaque heap values (HostObject). This is where
+// the recursive knot gets tied — State refers to itself through Heap, with
+// `host` threaded alongside. The default embedding uses `host = value.Empty`.
 
-pub type Heap =
-  heap.Heap(State)
+pub type Heap(host) =
+  heap.Heap(State(host), host)
 
-pub type HeapSlot =
-  value.HeapSlot(State)
+pub type HeapSlot(host) =
+  value.HeapSlot(State(host), host)
 
-pub type ExoticKind =
-  value.ExoticKind(State)
+pub type ExoticKind(host) =
+  value.ExoticKind(State(host), host)
 
-pub type NativeFnSlot =
-  value.NativeFnSlot(State)
+pub type NativeFnSlot(host) =
+  value.NativeFnSlot(State(host))
 
 /// Signature for host-provided native functions installed via engine.define_fn
 /// or engine.define_namespace. Receives (args, this, state), returns
 /// (new_state, Ok(return_value) | Error(thrown_value)).
-pub type HostFn =
-  fn(List(JsValue), JsValue, State) -> #(State, Result(JsValue, JsValue))
+pub type HostFn(host) =
+  fn(List(JsValue), JsValue, State(host)) ->
+    #(State(host), Result(JsValue, JsValue))
 
 /// Exception handler frame, pushed by PushTry.
 pub type TryFrame {
@@ -72,7 +75,7 @@ pub type SavedFrame {
 /// per-instruction `State(..state, ...)` copy in step() stays small. These
 /// fields change only on rare operations: realm setup, global let/const
 /// declaration, and Symbol.for. Mutations pay one extra small record copy.
-pub type RealmCtx {
+pub type RealmCtx(host) {
   RealmCtx(
     /// DeclarativeRecord: let/const at global scope. NOT on globalThis. Checked
     /// first. Each binding is `Let`/`Const` (const rejects assignment) wrapping
@@ -97,12 +100,12 @@ pub type RealmCtx {
     /// Re-entrant call mechanism — invoke a JS callable with (this, args).
     /// Returns Ok(result, state) on normal completion, Error(thrown, state) on throw.
     /// Set by the VM executor (wraps run_handler_with_this).
-    call_fn: fn(State, JsValue, JsValue, List(JsValue)) ->
-      Result(#(JsValue, State), #(JsValue, State)),
+    call_fn: fn(State(host), JsValue, JsValue, List(JsValue)) ->
+      Result(#(JsValue, State(host)), #(JsValue, State(host))),
     /// Re-entrant construct mechanism — `new target(...args)` from native code.
     /// 4th arg is newTarget (§10.1.13). Set by the VM executor (wraps do_construct).
-    construct_fn: fn(State, JsValue, List(JsValue), JsValue) ->
-      Result(#(JsValue, State), #(JsValue, State)),
+    construct_fn: fn(State(host), JsValue, List(JsValue), JsValue) ->
+      Result(#(JsValue, State(host)), #(JsValue, State(host))),
     /// Pre-built sentinel frame template (bytecode = [Return, Return]) used by
     /// the re-entrant call/construct callbacks to drive a callee to completion
     /// on an isolated stack. Built once at state init — these callbacks run
@@ -191,21 +194,21 @@ pub type DeliverWakeFn =
 
 /// The internal VM executor state. Public so builtins can receive and return it,
 /// giving them full access to the runtime.
-pub type State {
+pub type State(host) {
   State(
     stack: List(JsValue),
     locals: TupleArray(JsValue),
     constants: TupleArray(JsValue),
     func: FuncTemplate,
     code: TupleArray(Op),
-    heap: Heap,
+    heap: Heap(host),
     pc: Int,
     call_stack: List(SavedFrame),
     try_stack: List(TryFrame),
     builtins: Builtins,
     /// Per-realm constants and near-constants. Nested so the per-instruction
     /// State copy doesn't pay for fields that almost never change.
-    ctx: RealmCtx,
+    ctx: RealmCtx(host),
     /// §13.3.12 NewTarget for the current frame — `JsObject(ref)` when entered
     /// via `[[Construct]]`, `JsUndefined` for `[[Call]]`. Read by setup_locals
     /// to seed the RefNewTarget lexical slot, and by native ctors directly.
@@ -269,10 +272,10 @@ pub type State {
 /// Covers job_queue, event loop state, lexical globals. Does NOT thread
 /// heap (caller handles separately since it's often further mutated).
 pub fn merge_globals(
-  parent: State,
-  child: State,
+  parent: State(host),
+  child: State(host),
   extra_jobs: List(value.Job),
-) -> State {
+) -> State(host) {
   State(
     ..parent,
     ctx: RealmCtx(
@@ -290,38 +293,38 @@ pub fn merge_globals(
 }
 
 /// Count of unsettled `host.suspend` promises. Embedder loops exit at 0.
-pub fn outstanding(s: State) -> Int {
+pub fn outstanding(s: State(host)) -> Int {
   s.outstanding
 }
 
 /// Call ctx.call_fn (re-entrant JS function call), handling the function field access.
 pub fn call(
-  state: State,
+  state: State(host),
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let f = state.ctx.call_fn
   f(state, callee, this_val, args)
 }
 
 /// Call ctx.construct_fn (re-entrant `new target(...args)`). newTarget = target.
 pub fn construct(
-  state: State,
+  state: State(host),
   target: JsValue,
   args: List(JsValue),
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let f = state.ctx.construct_fn
   f(state, target, args, target)
 }
 
 /// Call ctx.construct_fn with explicit newTarget (Reflect.construct).
 pub fn construct_with_target(
-  state: State,
+  state: State(host),
   target: JsValue,
   args: List(JsValue),
   new_target: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let f = state.ctx.construct_fn
   f(state, target, args, new_target)
 }
@@ -329,12 +332,12 @@ pub fn construct_with_target(
 /// Call a function or propagate thrown error. Use with `use` syntax:
 ///   use result, state <- state.try_call(state, callback, this_arg, [element, idx, arr])
 pub fn try_call(
-  state: State,
+  state: State(host),
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-  cont: fn(JsValue, State) -> #(State, Result(b, JsValue)),
-) -> #(State, Result(b, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
   case call(state, callee, this_val, args) {
     Ok(#(result, state)) -> cont(result, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -347,9 +350,9 @@ pub fn try_call(
 /// Polymorphic in both the unwrapped value type and the continuation's result
 /// type, so it works in loops returning non-JsValue results too.
 pub fn try_op(
-  result: Result(#(a, State), #(JsValue, State)),
-  cont: fn(a, State) -> #(State, Result(b, JsValue)),
-) -> #(State, Result(b, JsValue)) {
+  result: Result(#(a, State(host)), #(JsValue, State(host))),
+  cont: fn(a, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
   case result {
     Ok(#(val, state)) -> cont(val, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -360,9 +363,9 @@ pub fn try_op(
 /// (no extra value). Use with `use` syntax:
 ///   use state <- state.try_state(some_operation(state, ...))
 pub fn try_state(
-  result: Result(State, #(JsValue, State)),
-  cont: fn(State) -> #(State, Result(b, JsValue)),
-) -> #(State, Result(b, JsValue)) {
+  result: Result(State(host), #(JsValue, State(host))),
+  cont: fn(State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
   case result {
     Ok(state) -> cont(state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
@@ -391,7 +394,7 @@ const default_stack_limit = 10
 ///       at outer (script:7)
 ///       at script:10
 ///
-pub fn build_stack_trace(state: State, header: String) -> String {
+pub fn build_stack_trace(state: State(host), header: String) -> String {
   let limit = stack_trace_limit(state)
   let frames =
     [
@@ -421,7 +424,7 @@ fn format_frame(frame: #(Option(String), Int)) -> String {
 
 /// Read Error.stackTraceLimit off the Error constructor. Non-numbers fall back
 /// to the default; Infinity means "no limit"; negatives clamp to 0 (no frames).
-fn stack_trace_limit(state: State) -> Int {
+fn stack_trace_limit(state: State(host)) -> Int {
   case heap.read(state.heap, state.builtins.error.constructor) {
     option.Some(value.ObjectSlot(properties:, ..)) ->
       case dict.get(properties, value.Named("stackTraceLimit")) {
@@ -443,7 +446,11 @@ fn stack_trace_limit(state: State) -> Int {
 /// (error-stack-accessor proposal), so instances have no own `stack` property.
 /// Non-error objects (Error.captureStackTrace targets) get a non-enumerable
 /// own `stack` data property, matching V8. No-op when `err` is not an object.
-pub fn attach_stack(state: State, err: JsValue, header: String) -> State {
+pub fn attach_stack(
+  state: State(host),
+  err: JsValue,
+  header: String,
+) -> State(host) {
   case err {
     value.JsObject(ref) -> {
       let trace = build_stack_trace(state, header)
@@ -483,11 +490,11 @@ pub fn error_header(name: String, msg: String) -> String {
 /// trace headed by `name: msg`, and return the updated state plus the
 /// error value. All error helpers below are thin shells over this.
 fn alloc_error(
-  state: State,
-  make: fn(Heap, Builtins, String) -> #(Heap, JsValue),
+  state: State(host),
+  make: fn(Heap(host), Builtins, String) -> #(Heap(host), JsValue),
   name: String,
   msg: String,
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let #(heap, err) = make(state.heap, state.builtins, msg)
   let state = attach_stack(State(..state, heap:), err, error_header(name, msg))
   #(state, err)
@@ -497,18 +504,18 @@ fn alloc_error(
 /// an Error result. Shared by all builtin modules to avoid boilerplate
 /// around common.make_type_error + state threading.
 pub fn type_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, err) =
     alloc_error(state, common.make_type_error, "TypeError", msg)
   #(state, Error(err))
 }
 
 pub fn range_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, err) =
     alloc_error(state, common.make_range_error, "RangeError", msg)
   #(state, Error(err))
@@ -519,10 +526,10 @@ pub fn range_error(
 /// (e.g. set Error.prototype.stack) must throw the %TypeError% of the
 /// realm the native function belongs to, not the calling realm's.
 pub fn type_error_with_builtins(
-  state: State,
+  state: State(host),
   builtins: Builtins,
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_type_error(state.heap, builtins, msg)
   let state =
     attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
@@ -531,7 +538,10 @@ pub fn type_error_with_builtins(
 
 /// Allocate a TypeError as the bare #(thrown, state) tuple used by ops-level
 /// results `Result(_, #(JsValue, State))` (e.g. set_value's error arm).
-pub fn type_error_value(state: State, msg: String) -> #(JsValue, State) {
+pub fn type_error_value(
+  state: State(host),
+  msg: String,
+) -> #(JsValue, State(host)) {
   let #(state, err) =
     alloc_error(state, common.make_type_error, "TypeError", msg)
   #(err, state)
@@ -539,7 +549,10 @@ pub fn type_error_value(state: State, msg: String) -> #(JsValue, State) {
 
 /// Allocate a RangeError as the bare #(thrown, state) tuple used by ops-level
 /// results `Result(_, #(JsValue, State))`.
-pub fn range_error_value(state: State, msg: String) -> #(JsValue, State) {
+pub fn range_error_value(
+  state: State(host),
+  msg: String,
+) -> #(JsValue, State(host)) {
   let #(state, err) =
     alloc_error(state, common.make_range_error, "RangeError", msg)
   #(err, state)
@@ -548,7 +561,10 @@ pub fn range_error_value(state: State, msg: String) -> #(JsValue, State) {
 /// Allocate a ReferenceError and return it as the bare #(thrown, state) tuple
 /// used by ops-level results `Result(_, #(JsValue, State))` (e.g. get_value's
 /// error arm). Used for module-namespace TDZ access (§10.4.6 [[Get]]).
-pub fn reference_error_value(state: State, msg: String) -> #(JsValue, State) {
+pub fn reference_error_value(
+  state: State(host),
+  msg: String,
+) -> #(JsValue, State(host)) {
   let #(state, err) =
     alloc_error(state, common.make_reference_error, "ReferenceError", msg)
   #(err, state)
@@ -556,9 +572,9 @@ pub fn reference_error_value(state: State, msg: String) -> #(JsValue, State) {
 
 /// Allocate a ReferenceError in the builtin-shape `#(State, Result)`.
 pub fn reference_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, err) =
     alloc_error(state, common.make_reference_error, "ReferenceError", msg)
   #(state, Error(err))
@@ -567,9 +583,9 @@ pub fn reference_error(
 /// Allocate a JS Array with the given values and return it as Ok.
 /// Collapses the common alloc_array → State(..state, heap:) → Ok(JsObject) triple.
 pub fn ok_array(
-  state: State,
+  state: State(host),
   values: List(JsValue),
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, ref) =
     common.alloc_array(state.heap, values, state.builtins.array.prototype)
   #(State(..state, heap:), Ok(value.JsObject(ref)))
@@ -578,10 +594,10 @@ pub fn ok_array(
 /// Guard against array length exceeding Number.MAX_SAFE_INTEGER.
 /// Throws TypeError (per spec §23.1.3.23/31/33) if length > 2^53-1.
 pub fn guard_safe_length(
-  state: State,
+  state: State(host),
   length: Int,
-  cont: fn() -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn() -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case length > limits.max_safe_integer {
     True -> type_error(state, "Array length exceeds maximum safe integer")
     False -> cont()
@@ -619,9 +635,9 @@ pub type StepResult {
 
 /// Allocate a JS TypeError and return it as a step-level thrown error.
 pub fn throw_type_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> Result(a, #(StepResult, JsValue, State)) {
+) -> Result(a, #(StepResult, JsValue, State(host))) {
   let #(state, err) =
     alloc_error(state, common.make_type_error, "TypeError", msg)
   Error(#(Thrown, err, state))
@@ -629,9 +645,9 @@ pub fn throw_type_error(
 
 /// Allocate a JS RangeError and return it as a step-level thrown error.
 pub fn throw_range_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> Result(a, #(StepResult, JsValue, State)) {
+) -> Result(a, #(StepResult, JsValue, State(host))) {
   let #(state, err) =
     alloc_error(state, common.make_range_error, "RangeError", msg)
   Error(#(Thrown, err, state))
@@ -639,9 +655,9 @@ pub fn throw_range_error(
 
 /// Allocate a JS ReferenceError and return it as a step-level thrown error.
 pub fn throw_reference_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> Result(a, #(StepResult, JsValue, State)) {
+) -> Result(a, #(StepResult, JsValue, State(host))) {
   let #(state, err) =
     alloc_error(state, common.make_reference_error, "ReferenceError", msg)
   Error(#(Thrown, err, state))
@@ -650,8 +666,8 @@ pub fn throw_reference_error(
 /// Bridge from inner helpers that return Result(a, #(JsValue, State))
 /// to the step function's Result(a, #(StepResult, JsValue, State)).
 pub fn rethrow(
-  res: Result(a, #(JsValue, State)),
-) -> Result(a, #(StepResult, JsValue, State)) {
+  res: Result(a, #(JsValue, State(host))),
+) -> Result(a, #(StepResult, JsValue, State(host))) {
   result.map_error(res, fn(err) {
     let #(thrown, state) = err
     #(Thrown, thrown, state)

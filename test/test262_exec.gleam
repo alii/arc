@@ -101,7 +101,7 @@ fn warm_caches() -> Nil {
 }
 
 /// Boot (or fetch the cached) base realm: heap + builtins + global object.
-fn boot_base_realm() -> #(Heap, common.Builtins, value.Ref) {
+fn boot_base_realm() -> #(Heap(host), common.Builtins, value.Ref) {
   case realm_cache_get(realm_cache_key) {
     Some(snapshot) -> snapshot
     None -> {
@@ -452,8 +452,8 @@ fn run_test_completion(
   variant: StrictnessVariant,
   is_async: Bool,
   on_error: fn(String) -> TestOutcome,
-  completion_outcome: fn(Completion) -> TestOutcome,
-  async_outcome: fn(Completion, value.Ref) -> TestOutcome,
+  completion_outcome: fn(Completion(host)) -> TestOutcome,
+  async_outcome: fn(Completion(host), value.Ref) -> TestOutcome,
 ) -> TestOutcome {
   // test262 CanBlockIsFalse flag: the test must run in an agent whose
   // [[CanBlock]] is false (sync Atomics.wait throws a TypeError). The flag
@@ -552,7 +552,7 @@ fn run_runtime_negative_test(
 /// only a throw (of the expected error type) passes.
 fn negative_completion_outcome(
   metadata: TestMetadata,
-  completion: Completion,
+  completion: Completion(host),
 ) -> TestOutcome {
   case completion {
     ThrowCompletion(thrown, heap) ->
@@ -566,7 +566,7 @@ fn negative_completion_outcome(
 
 /// Map a completion to the outcome for a positive test:
 /// only a normal completion passes.
-fn positive_completion_outcome(completion: Completion) -> TestOutcome {
+fn positive_completion_outcome(completion: Completion(host)) -> TestOutcome {
   case completion {
     NormalCompletion(_, _) -> Pass
     ThrowCompletion(thrown, heap) ->
@@ -600,7 +600,7 @@ fn run_positive_test(
 /// Check async test completion for positive tests.
 /// Reads __print_output__ from the global object to determine pass/fail.
 fn check_async_positive(
-  completion: Completion,
+  completion: Completion(host),
   global_ref: value.Ref,
 ) -> TestOutcome {
   case check_async_completion(completion, global_ref) {
@@ -612,7 +612,7 @@ fn check_async_positive(
 /// Core async completion check. Returns Ok(Nil) for "Test262:AsyncTestComplete",
 /// Error with reason for everything else.
 fn check_async_completion(
-  completion: Completion,
+  completion: Completion(host),
   global_ref: value.Ref,
 ) -> Result(Nil, String) {
   case completion {
@@ -651,7 +651,7 @@ fn check_async_completion(
 fn verify_negative_type(
   metadata: TestMetadata,
   thrown: value.JsValue,
-  heap: Heap,
+  heap: Heap(host),
 ) -> TestOutcome {
   case metadata.negative_type {
     None -> Pass
@@ -688,7 +688,7 @@ fn do_run_module(
   source: String,
   path: String,
   is_async: Bool,
-) -> Result(#(Completion, value.Ref), String) {
+) -> Result(#(Completion(host), value.Ref), String) {
   let #(h, b, global_object) = boot_base_realm()
 
   // Evaluate harness files as REPL scripts to populate globals. Async module
@@ -771,7 +771,7 @@ fn do_run_script_with_harness(
   path: String,
   variant: StrictnessVariant,
   is_async: Bool,
-) -> Result(#(Completion, value.Ref), String) {
+) -> Result(#(Completion(host), value.Ref), String) {
   let #(h, b, global_object) = boot_base_realm()
 
   // Evaluate harness files as REPL scripts to populate globals
@@ -825,12 +825,12 @@ fn do_run_script_with_harness(
 /// available as globals.
 fn eval_harness(
   metadata: TestMetadata,
-  h: Heap,
+  h: Heap(host),
   b: common.Builtins,
   global_object: value.Ref,
   path: String,
   is_async: Bool,
-) -> Result(#(Heap, entry.ReplEnv), String) {
+) -> Result(#(Heap(host), entry.ReplEnv), String) {
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
     True -> {
@@ -915,10 +915,10 @@ fn eval_harness(
 /// Evaluate a compiled harness template as a REPL script.
 fn eval_harness_template(
   template: value.FuncTemplate,
-  h: Heap,
+  h: Heap(host),
   b: common.Builtins,
   env: entry.ReplEnv,
-) -> Result(#(Heap, entry.ReplEnv), String) {
+) -> Result(#(Heap(host), entry.ReplEnv), String) {
   case entry.run_and_drain_repl(template, h, b, env) {
     Error(vm_err) -> Error("harness vm: " <> string.inspect(vm_err))
     Ok(#(completion, new_env)) ->
@@ -933,7 +933,7 @@ fn eval_harness_template(
 }
 
 fn get_data(
-  h: Heap,
+  h: Heap(host),
   ref: value.Ref,
   key: String,
 ) -> Result(value.JsValue, Nil) {
@@ -949,7 +949,7 @@ fn get_data(
   }
 }
 
-fn inspect_thrown(val: value.JsValue, heap: Heap) -> String {
+fn inspect_thrown(val: value.JsValue, heap: Heap(host)) -> String {
   case val {
     value.JsObject(ref) -> {
       case get_data(heap, ref, "message") {
@@ -1013,10 +1013,10 @@ fn install_agent_hook() -> Nil {
 
 /// The hook itself: build the agent object and hang it off the fresh $262.
 fn extend_262_with_agent(
-  h: Heap,
+  h: Heap(host),
   b: common.Builtins,
   dollar_262: value.Ref,
-) -> Heap {
+) -> Heap(host) {
   let #(h, agent_ref) = build_agent(h, b)
   // builtin_property attributes (enumerable:False) — matches how the rest of
   // the $262 surface is defined and keeps "agent" out of Object.keys($262).
@@ -1032,7 +1032,7 @@ fn extend_262_with_agent(
 /// array-backed queues — __reports__ (strings posted by $262.agent.report,
 /// consumed by getReport) and __agents__ (callbacks registered by
 /// receiveBroadcast, invoked by the child's broadcast loop).
-fn build_agent(h: Heap, b: common.Builtins) -> #(Heap, value.Ref) {
+fn build_agent(h: Heap(host), b: common.Builtins) -> #(Heap(host), value.Ref) {
   let func_proto = b.function.prototype
   let #(h, reports_ref) = common.alloc_array(h, [], b.array.prototype)
   let #(h, agents_ref) = common.alloc_array(h, [], b.array.prototype)
@@ -1117,8 +1117,8 @@ type AgentWake {
 fn agent_start_native(
   args: List(value.JsValue),
   _this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   let source = case args {
     [s, ..] -> s
     [] -> value.JsUndefined
@@ -1241,7 +1241,7 @@ fn run_agent_child(source: String) -> Nil {
 /// notify message must be consumed HERE — inject the wake and re-drain so
 /// its reaction jobs (e.g. $262.agent.report) run. Ends — and the child
 /// process exits — when the parent process goes away.
-fn agent_child_loop(st: State, agent_this: value.JsValue) -> Nil {
+fn agent_child_loop(st: State(host), agent_this: value.JsValue) -> Nil {
   case ffi_await_broadcast_or_notify() {
     AgentWakeParentDown -> Nil
     AgentWakeNotify(key, byte_index) -> {
@@ -1277,9 +1277,9 @@ fn agent_child_loop(st: State, agent_this: value.JsValue) -> Nil {
 /// `BufShared` payload aliases the parent's atomics cells — this IS the
 /// shared memory, not a copy.
 fn payload_to_value(
-  st: State,
+  st: State(host),
   payload: AgentPayload,
-) -> #(State, value.JsValue) {
+) -> #(State(host), value.JsValue) {
   case payload {
     AgentValuePayload(v) -> #(st, v)
     AgentSabPayload(data:, max_byte_length:, shared:, immutable:) -> {
@@ -1308,8 +1308,8 @@ fn payload_to_value(
 fn agent_receive_broadcast_native(
   args: List(value.JsValue),
   this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   let cb = case args {
     [f, ..] -> f
     [] -> value.JsUndefined
@@ -1332,8 +1332,8 @@ fn agent_receive_broadcast_native(
 fn agent_broadcast_native(
   args: List(value.JsValue),
   _this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   let sab = case args {
     [v, ..] -> v
     [] -> value.JsUndefined
@@ -1357,7 +1357,7 @@ fn agent_broadcast_native(
 /// backing storage (atomics ref for shared — aliased, not copied);
 /// primitives travel as-is; any other object has no cross-heap meaning.
 fn make_broadcast_payload(
-  st: State,
+  st: State(host),
   v: value.JsValue,
 ) -> Result(AgentPayload, Nil) {
   case v {
@@ -1385,8 +1385,8 @@ fn make_broadcast_payload(
 fn agent_report_native(
   args: List(value.JsValue),
   this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   let val = case args {
     [v, ..] -> v
     [] -> value.JsUndefined
@@ -1419,8 +1419,8 @@ fn agent_report_native(
 fn agent_get_report_native(
   _args: List(value.JsValue),
   this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   case agent_queue(st, this, "__reports__") {
     Ok(#(arr_ref, reports)) ->
       case reports {
@@ -1443,8 +1443,8 @@ fn agent_get_report_native(
 fn agent_sleep_native(
   args: List(value.JsValue),
   _this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   let val = case args {
     [v, ..] -> v
     [] -> value.JsUndefined
@@ -1467,8 +1467,8 @@ fn agent_sleep_native(
 fn agent_monotonic_now_native(
   _args: List(value.JsValue),
   _this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   #(st, Ok(value.from_int(builtins_atomics.monotonic_now())))
 }
 
@@ -1477,14 +1477,14 @@ fn agent_monotonic_now_native(
 fn agent_leaving_native(
   _args: List(value.JsValue),
   _this: value.JsValue,
-  st: State,
-) -> #(State, Result(value.JsValue, value.JsValue)) {
+  st: State(host),
+) -> #(State(host), Result(value.JsValue, value.JsValue)) {
   #(st, Ok(value.JsUndefined))
 }
 
 /// Read a hidden JsObject-valued own property off the agent object.
 fn agent_hidden_ref(
-  st: State,
+  st: State(host),
   this: value.JsValue,
   name: String,
 ) -> Result(value.Ref, Nil) {
@@ -1500,7 +1500,7 @@ fn agent_hidden_ref(
 
 /// Read an agent queue array as #(ref, values). Error(Nil) if missing.
 fn agent_queue(
-  st: State,
+  st: State(host),
   this: value.JsValue,
   name: String,
 ) -> Result(#(value.Ref, List(value.JsValue)), Nil) {
@@ -1514,10 +1514,10 @@ fn agent_queue(
 
 /// Overwrite an agent queue array's contents in place.
 fn agent_queue_write(
-  st: State,
+  st: State(host),
   arr_ref: value.Ref,
   values: List(value.JsValue),
-) -> State {
+) -> State(host) {
   let heap = case heap.read(st.heap, arr_ref) {
     Some(value.ObjectSlot(kind: value.ArrayObject(_), ..) as slot) ->
       heap.write(
@@ -1600,14 +1600,14 @@ fn init_stats() -> Nil {
 @external(erlang, "test262_exec_ffi", "cache_get")
 fn realm_cache_get(
   _key: String,
-) -> option.Option(#(Heap, common.Builtins, value.Ref)) {
+) -> option.Option(#(Heap(host), common.Builtins, value.Ref)) {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "cache_put")
 fn realm_cache_put(
   _key: String,
-  _snapshot: #(Heap, common.Builtins, value.Ref),
+  _snapshot: #(Heap(host), common.Builtins, value.Ref),
 ) -> Nil {
   panic as beam_only_test
 }

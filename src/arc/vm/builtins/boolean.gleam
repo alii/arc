@@ -10,10 +10,10 @@ import gleam/option.{type Option, None, Some}
 
 /// Set up Boolean constructor + Boolean.prototype.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
       #("valueOf", BooleanNative(BooleanPrototypeValueOf), 0),
@@ -43,8 +43,8 @@ pub fn dispatch(
   native: BooleanNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     BooleanConstructor -> call_as_function(args, state)
     BooleanPrototypeValueOf -> boolean_value_of(this, args, state)
@@ -65,8 +65,8 @@ pub fn dispatch(
 /// is provided, value defaults to undefined which is falsy (step 1).
 fn call_as_function(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Let b be ToBoolean(value).
   let result = case args {
     [] -> JsBool(False)
@@ -86,8 +86,8 @@ fn call_as_function(
 fn boolean_value_of(
   this: JsValue,
   _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Return ? thisBooleanValue(this value).
   case this_boolean_value(state, this) {
     Some(b) -> #(state, Ok(JsBool(b)))
@@ -109,8 +109,8 @@ fn boolean_value_of(
 fn boolean_to_string(
   this: JsValue,
   _args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Let b be ? thisBooleanValue(this value).
   case this_boolean_value(state, this) {
     // Step 2: If b is true, return "true"; otherwise return "false".
@@ -140,7 +140,7 @@ fn boolean_to_string(
 ///
 /// Correctly implements spec. Returns Option(Bool) instead of Result to
 /// let callers handle the TypeError with their own message.
-fn this_boolean_value(state: State, this: JsValue) -> Option(Bool) {
+fn this_boolean_value(state: State(host), this: JsValue) -> Option(Bool) {
   case this {
     // Step 1: If value is a Boolean, return value.
     JsBool(b) -> Some(b)

@@ -37,10 +37,10 @@ import gleam/string
 ///   - null/undefined return undefined instead of throwing TypeError (callers
 ///     are expected to guard against this before calling get_value_of).
 pub fn get_value_of(
-  state: State,
+  state: State(host),
   val: JsValue,
   key: PropertyKey,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case val {
     // §7.3.3 step 1: V is already an Object, call O.[[Get]](P, V) directly.
     JsObject(ref) -> get_value(state, ref, key, val)
@@ -76,10 +76,10 @@ pub fn get_value_of(
 /// Symbol-keyed variant of get_value_of — delegates to the primitive's
 /// prototype for symbol lookups (e.g. `"str"[Symbol.iterator]`).
 pub fn get_symbol_value_of(
-  state: State,
+  state: State(host),
   val: JsValue,
   sym: SymbolId,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case val {
     JsObject(ref) -> get_symbol_value(state, ref, sym, val)
     JsString(_) ->
@@ -116,11 +116,11 @@ pub fn get_symbol_value_of(
 /// descriptor type (steps 3-7), with the prototype walk (step 2) in the
 /// None/not-found branch. Semantically equivalent.
 pub fn get_value(
-  state: State,
+  state: State(host),
   ref: Ref,
   key: PropertyKey,
   receiver: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     // §10.4.6.8 Module Namespace [[Get]]: read the live binding cell, throwing
     // ReferenceError if it is still uninitialized (TDZ). Non-export keys fall
@@ -210,10 +210,10 @@ pub fn get_value(
 /// live BoxSlot and returns its value, throwing ReferenceError when the binding
 /// is still uninitialized (TDZ). Unknown keys return undefined.
 fn namespace_get(
-  state: State,
+  state: State(host),
   exports: dict.Dict(String, Ref),
   key: PropertyKey,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let name = case key {
     Named(n) -> n
     Index(i) -> int.to_string(i)
@@ -238,10 +238,10 @@ fn namespace_get(
 /// [[Get]], so even key-only operations (Object.keys, hasOwnProperty, for-in)
 /// surface the TDZ error. A no-op for non-namespace objects.
 pub fn namespace_tdz_guard(
-  state: State,
+  state: State(host),
   ref: Ref,
   names: List(String),
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
       list.try_fold(names, state, fn(state, name) {
@@ -265,10 +265,10 @@ pub fn namespace_tdz_guard(
 /// §10.1.8.1 OrdinaryGet steps 3-7 given a found own descriptor:
 /// data → desc.[[Value]]; accessor → Call(getter, Receiver) or undefined.
 pub fn property_get_value(
-  state: State,
+  state: State(host),
   prop: Property,
   receiver: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case prop {
     // Step 3: IsDataDescriptor(desc) → return desc.[[Value]].
     DataProperty(value: val, ..) -> Ok(#(val, state))
@@ -281,11 +281,11 @@ pub fn property_get_value(
 
 /// §10.1.8.1 OrdinaryGet step 2: desc is undefined — walk prototype chain.
 fn get_value_from_prototype(
-  state: State,
+  state: State(host),
   prototype: Option(Ref),
   key: PropertyKey,
   receiver: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case prototype {
     // Step 2c: parent.[[Get]](P, Receiver)
     Some(proto_ref) -> get_value(state, proto_ref, key, receiver)
@@ -320,7 +320,7 @@ pub type OwnIndex {
 /// Some(DataProperty(..)) descriptor synthesis and returns the value directly.
 /// Proxies report OwnIndexProxy instead of probing (their [[GetOwnProperty]]
 /// is a trap, not a slot read).
-pub fn get_own_index(heap: Heap, ref: Ref, idx: Int) -> OwnIndex {
+pub fn get_own_index(heap: Heap(host), ref: Ref, idx: Int) -> OwnIndex {
   case heap.read(heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> OwnIndexProxy
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
@@ -410,7 +410,7 @@ pub fn string_length(s: String) -> Int
 /// rather than routing through a separate internal slot. The properties dict
 /// lookup for ordinary objects (step 1) is inlined.
 pub fn get_own_property(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
 ) -> Option(Property) {
@@ -429,7 +429,7 @@ pub fn get_own_property(
 /// JsUninitialized — callers that read the value, e.g. getOwnPropertyDescriptor,
 /// must surface the TDZ ReferenceError). Unknown keys → None.
 fn namespace_own_property(
-  heap: Heap,
+  heap: Heap(host),
   exports: dict.Dict(String, Ref),
   key: PropertyKey,
 ) -> Option(Property) {
@@ -456,8 +456,8 @@ fn namespace_own_property(
 /// Any change to the storage invariant here MUST be mirrored in all of them,
 /// or get/set/getOwnPropertyDescriptor will silently diverge.
 fn own_property_of_slot(
-  heap: Heap,
-  kind: state.ExoticKind,
+  heap: Heap(host),
+  kind: state.ExoticKind(host),
   properties: dict.Dict(PropertyKey, Property),
   elements: JsElements,
   key: PropertyKey,
@@ -625,12 +625,12 @@ fn dict_get_option(
 /// Walks the proto chain. Handles accessors (calls setter), non-writable proto
 /// blocking, and creates own data property on receiver when not found.
 pub fn set_value(
-  state: State,
+  state: State(host),
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
   receiver: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     // §10.4.6.9 Module Namespace [[Set]]: always returns false (read-only).
     Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> Ok(#(state, False))
@@ -887,15 +887,15 @@ pub fn set_value(
 /// §10.1.9.2 OrdinarySetWithOwnDescriptor ( O, P, V, Receiver, ownDesc )
 /// given an already-computed ownDesc for `ref`'s already-read slot.
 fn set_value_with_own_descriptor(
-  state: State,
+  state: State(host),
   ref: Ref,
-  slot: HeapSlot,
+  slot: HeapSlot(host),
   prototype: Option(Ref),
   own: Option(Property),
   key: PropertyKey,
   val: JsValue,
   receiver: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case own {
     // §10.1.9.2 step 1: If ownDesc is undefined, then
     //   step 1.a: Let parent be ? O.[[GetPrototypeOf]]().
@@ -942,11 +942,11 @@ fn set_value_with_own_descriptor(
 ///
 /// §10.1.9.2 step 2.b: If receiver is not an Object, return false.
 fn set_on_receiver(
-  state: State,
+  state: State(host),
   receiver: JsValue,
   key: PropertyKey,
   val: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case receiver {
     JsObject(recv_ref) ->
       case heap.read(state.heap, recv_ref) {
@@ -1036,12 +1036,12 @@ fn set_on_receiver(
 /// CPS guard: when `recv_ref` is a proxy, route the receiver write through
 /// the proxy traps instead of the ordinary continuation.
 fn proxy_receiver_guard(
-  state: State,
+  state: State(host),
   recv_ref: Ref,
   pk: ProxyKey,
   val: JsValue,
-  cont: fn() -> Result(#(State, Bool), #(JsValue, State)),
-) -> Result(#(State, Bool), #(JsValue, State)) {
+  cont: fn() -> Result(#(State(host), Bool), #(JsValue, State(host))),
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case as_proxy(state.heap, recv_ref) {
     Some(#(target, handler)) ->
       set_on_proxy_receiver(state, target, handler, pk, val)
@@ -1054,12 +1054,12 @@ fn proxy_receiver_guard(
 /// Receiver.[[DefineOwnProperty]](P, { [[Value]]: V }); if absent,
 /// CreateDataProperty(Receiver, P, V). Both go through the proxy's traps.
 fn set_on_proxy_receiver(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   pk: ProxyKey,
   val: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(existing, state) <- result.try(proxy_receiver_get_own(
     state,
     target,
@@ -1080,11 +1080,11 @@ fn set_on_proxy_receiver(
 /// they are enforced on the read path in builtins/object). Used only by the
 /// OrdinarySet receiver steps above.
 fn proxy_receiver_get_own(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   pk: ProxyKey,
-) -> Result(#(Option(Property), State), #(JsValue, State)) {
+) -> Result(#(Option(Property), State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
     target,
@@ -1159,13 +1159,13 @@ fn proxy_receiver_get_own(
 /// with `{ value: V }` (existing data property) or the full CreateDataProperty
 /// descriptor (absent property). No invariant checks (receiver-write path).
 fn proxy_receiver_define(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   pk: ProxyKey,
   val: JsValue,
   full: Bool,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
     target,
@@ -1225,13 +1225,13 @@ fn proxy_receiver_define(
 /// proto-chain frame where ref walked past the original receiver) we fall back
 /// to the slow path that reads the receiver's own slot.
 fn set_on_receiver_with_slot(
-  state: State,
+  state: State(host),
   receiver: JsValue,
   ref: Ref,
-  slot: HeapSlot,
+  slot: HeapSlot(host),
   key: PropertyKey,
   val: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case receiver {
     JsObject(recv_ref) if recv_ref == ref -> {
       let #(h, ok) = set_property_on_slot(state.heap, ref, slot, key, val)
@@ -1271,11 +1271,11 @@ fn set_on_receiver_with_slot(
 /// Full descriptor merging (attribute changes, data<->accessor conversion)
 /// is needed for complete Object.defineProperty support.
 pub fn set_property(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
-) -> #(Heap, Bool) {
+) -> #(Heap(host), Bool) {
   case heap.read(h, ref) {
     Some(slot) -> set_property_on_slot(h, ref, slot, key, val)
     None -> #(h, False)
@@ -1286,12 +1286,12 @@ pub fn set_property(
 /// caller (set_on_receiver_with_slot) already holds the slot for `ref`.
 /// The heap must not have been mutated since the slot was read.
 fn set_property_on_slot(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
-  slot: HeapSlot,
+  slot: HeapSlot(host),
   key: PropertyKey,
   val: JsValue,
-) -> #(Heap, Bool) {
+) -> #(Heap(host), Bool) {
   case slot {
     ObjectSlot(kind:, properties:, elements:, extensible:, ..) ->
       case kind {
@@ -1482,12 +1482,12 @@ fn set_property_on_slot(
 /// per-index descriptors, so all are implicitly configurable. Needs
 /// per-element property descriptors to handle non-configurable indices.
 fn array_set_length(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   val: JsValue,
-  slot: HeapSlot,
+  slot: HeapSlot(host),
   old_length: Int,
-) -> #(Heap, Bool) {
+) -> #(Heap(host), Bool) {
   // §10.4.2.4 steps 3-5: Coerce value to valid uint32 length.
   case coerce_length(h, val) {
     // Step 5: Would be RangeError; we return False.
@@ -1562,7 +1562,7 @@ fn array_set_length(
 /// Fractional, negative, NaN, Infinity, and non-numeric values return None
 /// (caller treats as failure). This covers both internal Set(O,"length",n,true)
 /// calls from Array.prototype mutators and user-level `arr.length = 3.5`.
-fn coerce_length(h: Heap, val: JsValue) -> Option(Int) {
+fn coerce_length(h: Heap(host), val: JsValue) -> Option(Int) {
   case length_to_number(h, val) {
     Some(Finite(f)) -> {
       let n = value.float_to_int(f)
@@ -1581,7 +1581,7 @@ fn coerce_length(h: Heap, val: JsValue) -> Option(Int) {
 /// intact). Other objects return None.
 ///
 /// TODO(Deviation): spec ToPrimitive may run user valueOf/toString here.
-fn length_to_number(h: Heap, val: JsValue) -> Option(value.JsNum) {
+fn length_to_number(h: Heap(host), val: JsValue) -> Option(value.JsNum) {
   case val {
     JsNumber(n) -> Some(n)
     JsString(s) -> Some(value.string_to_number(s))
@@ -1630,12 +1630,12 @@ fn truncate_elements(
 /// the [[Value]] update case. Full descriptor support needed for
 /// Object.defineProperty.
 fn set_string_property(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
-  slot: HeapSlot,
-) -> #(Heap, Bool) {
+  slot: HeapSlot(host),
+) -> #(Heap(host), Bool) {
   case slot {
     ObjectSlot(properties:, extensible:, ..) ->
       // §10.1.6.1 step 1: Let current be ? O.[[GetOwnProperty]](P).
@@ -1703,20 +1703,20 @@ fn set_string_property(
 /// Public entry for trap-aware copy paths (object spread / rest with a proxy
 /// source) that must CreateDataProperty on the freshly allocated target.
 pub fn create_data_property(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
-) -> Heap {
+) -> Heap(host) {
   define_own_property(heap, ref, key, val)
 }
 
 fn define_own_property(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
-) -> Heap {
+) -> Heap(host) {
   use slot <- heap.update(heap, ref)
   case slot {
     ObjectSlot(properties:, ..) ->
@@ -1753,11 +1753,11 @@ fn ffi_define_own_data_property(
 /// must not fail — callers guarantee O is extensible and P doesn't already
 /// exist as a non-configurable property.
 pub fn define_method_property(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
-) -> Heap {
+) -> Heap(host) {
   // §7.3.32 PrivateSet: writing to a private METHOD throws TypeError. Arc
   // stores private methods as marker-keyed properties (value.private_key), so
   // mark them non-writable — set_found_value then reports failure and
@@ -1785,7 +1785,7 @@ pub fn define_method_property(
 /// Used by the DefinePrivate* ops: proposal nonextensible-applies-to-private
 /// makes PrivateFieldAdd / PrivateMethodOrAccessorAdd throw on non-extensible
 /// receivers.
-pub fn slot_extensible(heap: Heap, ref: Ref) -> Bool {
+pub fn slot_extensible(heap: Heap(host), ref: Ref) -> Bool {
   case heap.read(heap, ref) {
     Some(ObjectSlot(extensible:, ..)) -> extensible
     _ -> True
@@ -1798,12 +1798,12 @@ pub fn slot_extensible(heap: Heap, ref: Ref) -> Bool {
 /// invisible to integrity levels, and the caller has already performed the
 /// extensibility + double-initialization checks.
 pub fn define_private_data(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
   writable writable: Bool,
-) -> Heap {
+) -> Heap(host) {
   let prop = case writable {
     True -> value.data(val) |> value.writable() |> value.configurable()
     False -> value.data(val) |> value.configurable()
@@ -1870,13 +1870,13 @@ fn merge_accessor(
 ///
 /// Used by object literal `{ get x() {}, set x(v) {} }` syntax.
 pub fn define_accessor(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
   func: JsValue,
   kind: opcode.AccessorKind,
   enumerable enumerable: Bool,
-) -> Heap {
+) -> Heap(host) {
   use slot <- heap.update(heap, ref)
   case slot {
     ObjectSlot(properties:, ..) -> {
@@ -1891,13 +1891,13 @@ pub fn define_accessor(
 /// Symbol-keyed variant of define_accessor — used by DefineAccessorComputed
 /// when the computed key is a Symbol (e.g. `{ get [Symbol.iterator]() {} }`).
 pub fn define_symbol_accessor(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   sym: SymbolId,
   func: JsValue,
   kind: opcode.AccessorKind,
   enumerable enumerable: Bool,
-) -> Heap {
+) -> Heap(host) {
   use slot <- heap.update(heap, ref)
   case slot {
     ObjectSlot(symbol_properties:, ..) -> {
@@ -1920,7 +1920,7 @@ pub fn define_symbol_accessor(
 /// §10.1.5.1 OrdinaryGetOwnProperty ( O, P ) — symbol-keyed variant.
 /// Returns the own property descriptor for a symbol key, or None.
 pub fn get_own_symbol_property(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   sym: SymbolId,
 ) -> Option(Property) {
@@ -1933,7 +1933,7 @@ pub fn get_own_symbol_property(
 
 /// §10.1.7.1 OrdinaryHasProperty ( O, P ) — symbol-keyed variant.
 /// Walks the prototype chain looking for a symbol key.
-pub fn has_symbol_property(heap: Heap, ref: Ref, sym: SymbolId) -> Bool {
+pub fn has_symbol_property(heap: Heap(host), ref: Ref, sym: SymbolId) -> Bool {
   case heap.read(heap, ref) {
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
       case list.key_find(symbol_properties, sym) {
@@ -1961,7 +1961,7 @@ pub fn has_symbol_property(heap: Heap, ref: Ref, sym: SymbolId) -> Bool {
 ///
 /// Pure (no Result) — our GetOwnProperty and GetPrototypeOf cannot throw
 /// (no Proxy traps), so steps 1/3 never produce abrupt completions.
-pub fn has_property(heap: Heap, ref: Ref, key: PropertyKey) -> Bool {
+pub fn has_property(heap: Heap(host), ref: Ref, key: PropertyKey) -> Bool {
   // Private-name keys ("#x") are invisible to ordinary [[HasProperty]] —
   // spec privates live in [[PrivateElements]], not the property table. The
   // brand check for `#x in obj` uses find_property (PrivateIn opcode), not
@@ -2016,7 +2016,10 @@ pub fn has_index_overrides(
 /// True when `key` is a canonical numeric index string on a TypedArray —
 /// such keys are fully resolved by the integer-indexed exotic behaviour
 /// (§10.4.5) and must never fall through to the prototype chain.
-fn typed_array_numeric_key(kind: state.ExoticKind, key: PropertyKey) -> Bool {
+fn typed_array_numeric_key(
+  kind: state.ExoticKind(host),
+  key: PropertyKey,
+) -> Bool {
   case kind, key {
     value.TypedArrayObject(..), Index(_) -> True
     value.TypedArrayObject(..), Named(s) -> is_canonical_numeric_string(s)
@@ -2034,7 +2037,7 @@ fn typed_array_numeric_key(kind: state.ExoticKind, key: PropertyKey) -> Bool {
 /// instead of has_property + get_value/set_value, which would repeat the
 /// identical chain walk.
 pub fn find_property(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
 ) -> Option(Property) {
@@ -2055,12 +2058,12 @@ pub fn find_property(
 /// create/update own data property on the receiver. Steps 4-5: accessor
 /// without setter → False. Steps 6-7: Call(setter, Receiver, « V ») → True.
 pub fn set_found_value(
-  state: State,
+  state: State(host),
   receiver: JsValue,
   prop: Property,
   key: PropertyKey,
   val: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case prop {
     DataProperty(writable: False, ..) -> Ok(#(state, False))
     DataProperty(writable: True, ..) ->
@@ -2088,10 +2091,10 @@ pub fn set_found_value(
 /// element deletion always succeeds. Needs per-element property descriptors
 /// to reject deletion of non-configurable index properties per spec.
 pub fn delete_symbol_property(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   sym: value.SymbolId,
-) -> #(Heap, Bool) {
+) -> #(Heap(host), Bool) {
   case heap.read(h, ref) {
     Some(ObjectSlot(symbol_properties:, ..) as slot) ->
       case list.key_pop(symbol_properties, sym) {
@@ -2112,7 +2115,7 @@ pub fn delete_symbol_property(
 
 /// Read a dict property out of an already-matched ObjectSlot (delete path).
 fn dict_get_option_for_delete(
-  slot: HeapSlot,
+  slot: HeapSlot(host),
   key: PropertyKey,
 ) -> Option(Property) {
   case slot {
@@ -2123,7 +2126,7 @@ fn dict_get_option_for_delete(
 
 /// Remove a key from an already-matched ObjectSlot's properties dict.
 fn delete_prop_key(
-  slot: HeapSlot,
+  slot: HeapSlot(host),
   key: PropertyKey,
 ) -> dict.Dict(PropertyKey, Property) {
   case slot {
@@ -2132,7 +2135,11 @@ fn delete_prop_key(
   }
 }
 
-pub fn delete_property(h: Heap, ref: Ref, key: PropertyKey) -> #(Heap, Bool) {
+pub fn delete_property(
+  h: Heap(host),
+  ref: Ref,
+  key: PropertyKey,
+) -> #(Heap(host), Bool) {
   case heap.read(h, ref) {
     // §10.4.6.10 Module Namespace [[Delete]]: deleting an exported name fails
     // (non-configurable); a non-export "succeeds" vacuously.
@@ -2252,11 +2259,11 @@ pub fn delete_property(h: Heap, ref: Ref, key: PropertyKey) -> #(Heap, Bool) {
 /// Step 3: If desc.[[Configurable]] is true, remove and return true.
 /// Step 4: Return false.
 fn delete_string_property(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   key: PropertyKey,
-  slot: HeapSlot,
-) -> #(Heap, Bool) {
+  slot: HeapSlot(host),
+) -> #(Heap(host), Bool) {
   case slot {
     ObjectSlot(properties:, ..) ->
       case dict.get(properties, key) {
@@ -2317,7 +2324,10 @@ fn delete_string_property(
 /// (enumerate_keys), Object.keys/values/entries/assign, getOwnPropertyNames,
 /// Reflect.ownKeys, JSON.stringify and spread/rest all route through it
 /// (directly or via collect_own_keys in builtins/object).
-pub fn own_string_keys_flagged(heap: Heap, ref: Ref) -> List(#(String, Bool)) {
+pub fn own_string_keys_flagged(
+  heap: Heap(host),
+  ref: Ref,
+) -> List(#(String, Bool)) {
   case heap.read(heap, ref) {
     // §10.4.6.11 Module Namespace [[OwnPropertyKeys]]: the exported names,
     // sorted by code-unit order. All are enumerable.
@@ -2405,7 +2415,7 @@ pub fn own_string_keys_flagged(heap: Heap, ref: Ref) -> List(#(String, Bool)) {
   }
 }
 
-pub fn enumerate_keys(heap: Heap, ref: Ref) -> List(String) {
+pub fn enumerate_keys(heap: Heap(host), ref: Ref) -> List(String) {
   enumerate_keys_loop(heap, Some(ref), set.new(), [])
 }
 
@@ -2417,7 +2427,7 @@ pub fn enumerate_keys(heap: Heap, ref: Ref) -> List(String) {
 /// order). Non-enumerable own keys are added to seen (they shadow enumerable
 /// prototype keys — §14.7.5.9 EnumerateObjectProperties) but not emitted.
 fn enumerate_keys_loop(
-  heap: Heap,
+  heap: Heap(host),
   current: Option(Ref),
   seen: set.Set(String),
   acc: List(String),
@@ -2463,11 +2473,11 @@ fn enumerate_keys_loop(
 /// (test262 prototype-from-newtarget-abrupt.js). Non-object results fall
 /// back to the intrinsic prototype.
 pub fn proto_from_new_target(
-  state: State,
+  state: State(host),
   new_target: JsValue,
   intrinsic_proto: Ref,
-  cont: fn(Ref, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Ref, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case new_target {
     JsObject(nt_ref) -> {
       use proto_val, state <- state.try_op(get_value(
@@ -2514,12 +2524,12 @@ pub fn proto_from_new_target(
 /// TODO(Deviation): symbol-keyed accessor getters are not invoked — the
 /// descriptor is copied directly.
 pub fn copy_data_properties_excluding(
-  state: State,
+  state: State(host),
   target_ref: Ref,
   source: JsValue,
   excluded_keys: set.Set(PropertyKey),
   excluded_syms: set.Set(SymbolId),
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   case source {
     // Step 2: source is already an object (from is source).
     JsObject(src_ref) ->
@@ -2621,12 +2631,12 @@ pub fn copy_data_properties_excluding(
 /// Calls getters via get_value (which invokes accessor [[Get]]), then writes
 /// to target via define_own_property (CreateDataProperty).
 fn copy_keys_to_target(
-  state: State,
+  state: State(host),
   src_ref: Ref,
   target_ref: Ref,
   keys: List(PropertyKey),
-  cont: fn(State) -> Result(State, #(JsValue, State)),
-) -> Result(State, #(JsValue, State)) {
+  cont: fn(State(host)) -> Result(State(host), #(JsValue, State(host))),
+) -> Result(State(host), #(JsValue, State(host))) {
   case keys {
     [] -> cont(state)
     [k, ..rest] -> {
@@ -2664,14 +2674,14 @@ fn copy_keys_to_target(
 /// §7.3.25 CopyDataProperties — TypedArray index-key portion: copy elements
 /// 0..live_length-1 from the backing buffer as data properties.
 fn copy_typed_element_range(
-  heap: Heap,
+  heap: Heap(host),
   target_ref: Ref,
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
   length: Option(Int),
   excluded_keys: set.Set(PropertyKey),
-) -> Heap {
+) -> Heap(host) {
   let length =
     typed_array_view_length(heap, buffer, elem_kind, byte_offset, length)
   let n = typed_array_live_length(heap, buffer, elem_kind, byte_offset, length)
@@ -2689,11 +2699,11 @@ fn copy_typed_element_range(
 /// §7.3.25 CopyDataProperties — String exotic index-key portion: one
 /// single-char data property per code point (§10.4.3.5).
 fn copy_string_element_range(
-  heap: Heap,
+  heap: Heap(host),
   target_ref: Ref,
   s: String,
   excluded_keys: set.Set(PropertyKey),
-) -> Heap {
+) -> Heap(host) {
   use h, idx <- int.range(from: 0, to: string_length(s), with: heap)
   case set.contains(excluded_keys, Index(idx)) {
     True -> h
@@ -2706,12 +2716,12 @@ fn copy_string_element_range(
 }
 
 fn copy_element_range(
-  heap: Heap,
+  heap: Heap(host),
   target_ref: Ref,
   elements: JsElements,
   end: Int,
   excluded_keys: set.Set(PropertyKey),
-) -> Heap {
+) -> Heap(host) {
   use h, idx <- list.fold(elements.indices(elements), heap)
   // Step 4.c: skip excluded indices (rest-pattern `{0: a, ...r} = arr`).
   case idx < end && !set.contains(excluded_keys, Index(idx)) {
@@ -2745,11 +2755,11 @@ fn copy_element_range(
 /// Step 6: If getter is undefined, return undefined.
 /// Step 7: Return ? Call(getter, Receiver).
 pub fn get_symbol_value(
-  state: State,
+  state: State(host),
   ref: Ref,
   key: SymbolId,
   receiver: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     // §10.5.8 Proxy [[Get]] — symbol-keyed.
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
@@ -2802,12 +2812,12 @@ pub fn get_symbol_value(
 /// Step 6: Perform ? Call(setter, Receiver, << V >>).
 /// Step 7: Return true.
 pub fn set_symbol_value(
-  state: State,
+  state: State(host),
   ref: Ref,
   key: SymbolId,
   val: JsValue,
   receiver: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     // §10.4.6.9 Module Namespace [[Set]]: always returns false (read-only),
     // including for symbol keys — never falls through to the receiver write.
@@ -2849,11 +2859,11 @@ pub fn set_symbol_value(
 /// OrdinarySetWithOwnDescriptor steps 2.b-2.e: create an own data property
 /// on the receiver, or return false when the receiver is not an object.
 fn define_symbol_data_on_receiver(
-  state: State,
+  state: State(host),
   receiver: JsValue,
   key: SymbolId,
   val: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case receiver {
     JsObject(recv_ref) -> {
       // Proxy receiver: the GetOwnProperty/DefineOwnProperty pair must go
@@ -2916,11 +2926,11 @@ fn define_symbol_data_on_receiver(
 /// existing property compatibility). Full descriptor validation needed for
 /// Object.defineProperty with symbol keys.
 pub fn define_symbol_property(
-  heap: Heap,
+  heap: Heap(host),
   ref: Ref,
   key: SymbolId,
   prop: Property,
-) -> Heap {
+) -> Heap(host) {
   use slot <- heap.update(heap, ref)
   case slot {
     ObjectSlot(symbol_properties:, ..) -> {
@@ -2937,13 +2947,13 @@ pub fn define_symbol_property(
 
 /// Produce a human-readable representation of a JS value (for REPL / console.log).
 /// Read-only — does NOT call toString/valueOf or any JS code.
-pub fn inspect(val: value.JsValue, heap: Heap) -> String {
+pub fn inspect(val: value.JsValue, heap: Heap(host)) -> String {
   inspect_inner(val, heap, 0, set.new())
 }
 
 fn inspect_inner(
   val: value.JsValue,
-  heap: Heap,
+  heap: Heap(host),
   depth: Int,
   visited: set.Set(Int),
 ) -> String {
@@ -2981,7 +2991,7 @@ fn escape_string(s: String) -> String {
 }
 
 fn inspect_object(
-  heap: Heap,
+  heap: Heap(host),
   ref: value.Ref,
   depth: Int,
   visited: set.Set(Int),
@@ -3097,7 +3107,10 @@ fn inspect_object(
           }
         value.DisposableStackObject(..) -> "DisposableStack {}"
         value.ShadowRealmObject(..) -> "ShadowRealm {}"
-        OrdinaryObject | value.ErrorObject(_) -> {
+        // Host objects have no own properties; they render via their
+        // prototype's Symbol.toStringTag (e.g. `Pid {}`), exactly like a
+        // tagged ordinary object.
+        OrdinaryObject | value.ErrorObject(_) | value.HostObject(_) -> {
           // Error instances render as "Name: message" (or the full stack, once
           // we capture one); everything else as a plain object, prefixed with
           // its Symbol.toStringTag when one is set.
@@ -3121,7 +3134,7 @@ fn inspect_object(
 }
 
 fn inspect_array(
-  heap: Heap,
+  heap: Heap(host),
   elements: JsElements,
   length: Int,
   depth: Int,
@@ -3138,7 +3151,7 @@ fn inspect_array(
 }
 
 fn inspect_array_loop(
-  heap: Heap,
+  heap: Heap(host),
   elements: JsElements,
   idx: Int,
   length: Int,
@@ -3162,7 +3175,7 @@ fn inspect_array_loop(
 }
 
 fn inspect_plain_object(
-  heap: Heap,
+  heap: Heap(host),
   properties: dict.Dict(PropertyKey, value.Property),
   depth: Int,
   visited: set.Set(Int),
@@ -3196,7 +3209,7 @@ fn inspect_plain_object(
 /// Error instances become "Name: message" (or their `stack`, once we capture
 /// one); thrown strings are shown raw (browser-style "Uncaught boom"); anything
 /// else falls back to `inspect`. Read-only — never invokes JS.
-pub fn format_error(val: value.JsValue, heap: Heap) -> String {
+pub fn format_error(val: value.JsValue, heap: Heap(host)) -> String {
   case val {
     JsString(s) -> s
     JsObject(ref) ->
@@ -3212,7 +3225,7 @@ pub fn format_error(val: value.JsValue, heap: Heap) -> String {
 /// `name` and `message` per `Error.prototype.toString` (§20.5.3.4). The trace
 /// lives in the [[ErrorData]] slot (ErrorObject kind); an own `stack` data
 /// property (Error.captureStackTrace targets) is honored as a fallback.
-fn error_display(heap: Heap, ref: value.Ref) -> Option(String) {
+fn error_display(heap: Heap(host), ref: value.Ref) -> Option(String) {
   use <- bool.guard(!is_error(heap, ref), None)
   let slot_stack = case heap.read(heap, ref) {
     Some(ObjectSlot(kind: value.ErrorObject(stack:), ..)) if stack != "" ->
@@ -3239,7 +3252,7 @@ fn error_display(heap: Heap, ref: value.Ref) -> Option(String) {
 /// property (the marker carried by `Error.prototype`). Checking the prototype
 /// chain (not the instance's own properties) correctly excludes plain objects
 /// like `{ message: "x" }`.
-fn is_error(heap: Heap, ref: value.Ref) -> Bool {
+fn is_error(heap: Heap(host), ref: value.Ref) -> Bool {
   case heap.read(heap, ref) {
     Some(ObjectSlot(kind: value.ErrorObject(_), ..)) -> True
     Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
@@ -3248,7 +3261,7 @@ fn is_error(heap: Heap, ref: value.Ref) -> Bool {
   }
 }
 
-fn prototype_owns_message(heap: Heap, ref: value.Ref, fuel: Int) -> Bool {
+fn prototype_owns_message(heap: Heap(host), ref: value.Ref, fuel: Int) -> Bool {
   use <- bool.guard(fuel <= 0, False)
   case heap.read(heap, ref) {
     Some(ObjectSlot(properties:, prototype:, ..)) ->
@@ -3266,7 +3279,11 @@ fn prototype_owns_message(heap: Heap, ref: value.Ref, fuel: Int) -> Bool {
 
 /// Read a string-valued data property by walking the prototype chain (own
 /// shadows inherited, like [[Get]]). Returns None when absent or non-string.
-fn error_property(heap: Heap, ref: value.Ref, key: String) -> Option(String) {
+fn error_property(
+  heap: Heap(host),
+  ref: value.Ref,
+  key: String,
+) -> Option(String) {
   case heap.read(heap, ref) {
     Some(ObjectSlot(properties:, prototype:, ..)) ->
       case dict.get(properties, Named(key)) {
@@ -3286,7 +3303,7 @@ fn error_property(heap: Heap, ref: value.Ref, key: String) -> Option(String) {
 /// object with a [[Construct]] internal method. Single source of truth for
 /// constructibility, shared by the `new` / construct path (exec/call) and
 /// `Reflect.construct` (builtins/reflect).
-pub fn is_constructor(heap: Heap, value: JsValue) -> Bool {
+pub fn is_constructor(heap: Heap(host), value: JsValue) -> Bool {
   case value {
     JsObject(ref) ->
       case heap.read(heap, ref) {
@@ -3342,7 +3359,7 @@ fn pk_label(pk: ProxyKey) -> String {
 }
 
 /// Allocate a TypeError in the ops-level #(thrown, state) error shape.
-fn proxy_error(state: State, msg: String) -> #(JsValue, State) {
+fn proxy_error(state: State(host), msg: String) -> #(JsValue, State(host)) {
   let #(state, res) = state.type_error(state, msg)
   case res {
     Error(err) -> #(err, state)
@@ -3353,7 +3370,7 @@ fn proxy_error(state: State, msg: String) -> #(JsValue, State) {
 
 /// §7.2.3 IsCallable, including proxies (callable iff target was callable at
 /// creation — §10.5.15 step 7.a).
-pub fn value_is_callable(h: Heap, val: JsValue) -> Bool {
+pub fn value_is_callable(h: Heap(host), val: JsValue) -> Bool {
   case val {
     JsObject(ref) ->
       case heap.read(h, ref) {
@@ -3369,7 +3386,7 @@ pub fn value_is_callable(h: Heap, val: JsValue) -> Bool {
 /// §7.2.2 IsArray ( argument ). Pierces proxies to their target (step 3);
 /// Error(Nil) signals a revoked proxy was encountered — the caller must
 /// throw a TypeError.
-pub fn is_array(h: Heap, val: JsValue) -> Result(Bool, Nil) {
+pub fn is_array(h: Heap(host), val: JsValue) -> Result(Bool, Nil) {
   case val {
     // Steps 2-4 for objects.
     JsObject(ref) -> is_array_ref(h, ref)
@@ -3380,7 +3397,7 @@ pub fn is_array(h: Heap, val: JsValue) -> Result(Bool, Nil) {
 
 /// IsArray (§7.2.2) on an object ref — step 2 (Array exotic object) and
 /// step 3 (Proxy: validate non-revoked, then recurse on [[ProxyTarget]]).
-pub fn is_array_ref(h: Heap, ref: Ref) -> Result(Bool, Nil) {
+pub fn is_array_ref(h: Heap(host), ref: Ref) -> Result(Bool, Nil) {
   case heap.read(h, ref) {
     // Step 2: If argument is an Array exotic object, return true.
     Some(ObjectSlot(kind: ArrayObject(_), ..)) -> Ok(True)
@@ -3398,7 +3415,10 @@ pub fn is_array_ref(h: Heap, ref: Ref) -> Result(Bool, Nil) {
 }
 
 /// Read a ref's ProxyObject parts, or None when it isn't a proxy.
-pub fn as_proxy(h: Heap, ref: Ref) -> Option(#(Option(Ref), Option(Ref))) {
+pub fn as_proxy(
+  h: Heap(host),
+  ref: Ref,
+) -> Option(#(Option(Ref), Option(Ref))) {
   case heap.read(h, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
       Some(#(target, handler))
@@ -3410,11 +3430,11 @@ pub fn as_proxy(h: Heap, ref: Ref) -> Option(#(Option(Ref), Option(Ref))) {
 /// Returns the live target/handler refs and the trap function (None when the
 /// handler doesn't define it). TypeError on revoked proxy or non-callable trap.
 pub fn proxy_trap(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   name: String,
-) -> Result(#(Ref, Ref, Option(JsValue), State), #(JsValue, State)) {
+) -> Result(#(Ref, Ref, Option(JsValue), State(host)), #(JsValue, State(host))) {
   case target, handler {
     Some(t), Some(h) -> {
       // GetMethod step 1: Let func be ? GetV(V, P).
@@ -3450,7 +3470,11 @@ pub fn proxy_trap(
 /// target.[[GetOwnProperty]](P) for either key kind. Non-trapping read used
 /// by the invariant checks (a nested-proxy target reports no own properties
 /// here, which only makes the invariant checks more permissive).
-fn target_own_property(h: Heap, t: Ref, pk: ProxyKey) -> Option(Property) {
+fn target_own_property(
+  h: Heap(host),
+  t: Ref,
+  pk: ProxyKey,
+) -> Option(Property) {
   case pk {
     PkString(key) -> get_own_property(h, t, key)
     PkSymbol(sym) -> get_own_symbol_property(h, t, sym)
@@ -3459,12 +3483,12 @@ fn target_own_property(h: Heap, t: Ref, pk: ProxyKey) -> Option(Property) {
 
 /// §10.5.8 Proxy [[Get]] ( P, Receiver ).
 pub fn proxy_get(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   pk: ProxyKey,
   receiver: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Steps 1-5: revocation check + GetMethod(handler, "get").
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
@@ -3520,13 +3544,13 @@ pub fn proxy_get(
 
 /// §10.5.9 Proxy [[Set]] ( P, V, Receiver ).
 pub fn proxy_set(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   pk: ProxyKey,
   val: JsValue,
   receiver: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
     target,
@@ -3590,10 +3614,10 @@ pub fn proxy_set(
 /// trap-aware [[HasProperty]] used by the `in` operator and Reflect.has.
 /// Recurses through prototype chains so a proxy anywhere on the chain traps.
 pub fn has_property_stateful(
-  state: State,
+  state: State(host),
   ref: Ref,
   pk: ProxyKey,
-) -> Result(#(Bool, State), #(JsValue, State)) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
       proxy_has(state, target, handler, pk)
@@ -3662,11 +3686,11 @@ pub fn has_property_stateful(
 
 /// §10.5.7 Proxy [[HasProperty]] ( P ).
 pub fn proxy_has(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   pk: ProxyKey,
-) -> Result(#(Bool, State), #(JsValue, State)) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
     target,
@@ -3724,10 +3748,10 @@ pub fn proxy_has(
 /// Trap-aware [[Delete]] used by the `delete` operator and
 /// Reflect.deleteProperty. Falls through to the pure delete for non-proxies.
 pub fn delete_property_stateful(
-  state: State,
+  state: State(host),
   ref: Ref,
   pk: ProxyKey,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
       proxy_delete(state, target, handler, pk)
@@ -3747,11 +3771,11 @@ pub fn delete_property_stateful(
 
 /// §10.5.10 Proxy [[Delete]] ( P ).
 pub fn proxy_delete(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   pk: ProxyKey,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
     target,
@@ -3804,9 +3828,9 @@ pub fn proxy_delete(
 
 /// Trap-aware [[GetPrototypeOf]] — returns JsObject(proto) or JsNull.
 pub fn get_prototype_of_stateful(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
       proxy_get_prototype_of(state, target, handler)
@@ -3817,10 +3841,10 @@ pub fn get_prototype_of_stateful(
 
 /// §10.5.1 Proxy [[GetPrototypeOf]] ( ).
 fn proxy_get_prototype_of(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
     target,
@@ -3870,11 +3894,11 @@ fn proxy_get_prototype_of(
 /// path (cycle detection etc.) lives in builtins/object and calls back in
 /// for proxy refs. `proto_val` is JsObject(p) or JsNull.
 pub fn proxy_set_prototype_of(
-  state: State,
+  state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
   proto_val: JsValue,
-) -> Result(#(State, Option(Ref), Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Option(Ref), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
     target,
@@ -3919,9 +3943,9 @@ pub fn proxy_set_prototype_of(
 
 /// Trap-aware §7.2.5 IsExtensible / §10.5.3 Proxy [[IsExtensible]].
 pub fn is_extensible_stateful(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(Bool, State), #(JsValue, State)) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) -> {
       use #(t, h, trap, state) <- result.try(proxy_trap(
@@ -3962,9 +3986,9 @@ pub fn is_extensible_stateful(
 
 /// Trap-aware [[PreventExtensions]] / §10.5.4 Proxy [[PreventExtensions]].
 pub fn prevent_extensions_stateful(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) -> {
       use #(t, h, trap, state) <- result.try(proxy_trap(
@@ -4054,7 +4078,7 @@ fn ta_zeroed(byte_len: Int) -> BitArray
 /// None when the ref isn't an ArrayBuffer or the buffer is detached.
 /// For shared (atomics-backed) buffers this copies the live bytes out of the
 /// shared cells; for plain buffers it is the backing binary itself.
-pub fn typed_array_buffer_data(h: Heap, buffer: Ref) -> Option(BitArray) {
+pub fn typed_array_buffer_data(h: Heap(host), buffer: Ref) -> Option(BitArray) {
   case heap.read(h, buffer) {
     Some(ObjectSlot(
       kind: value.ArrayBufferObject(data:, detached: False, ..),
@@ -4073,7 +4097,7 @@ pub fn typed_array_buffer_data(h: Heap, buffer: Ref) -> Option(BitArray) {
 /// (with len = 0 that reduces to `byte_offset > byte_size`, which is exactly
 /// the §10.4.5.14 IsTypedArrayOutOfBounds condition for AUTO views).
 pub fn typed_array_view_length(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
@@ -4095,7 +4119,7 @@ pub fn typed_array_view_length(
 /// §10.4.5.15 IntegerIndexedElementGet — element at `idx`, or None when the
 /// index is invalid (negative, >= length, or the buffer is detached).
 pub fn typed_array_element(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
@@ -4128,7 +4152,7 @@ pub fn typed_array_element(
 /// throws TypeError on a detached buffer or an out-of-bounds view (a
 /// resizable buffer that shrank below the view). Ok(length) otherwise.
 pub fn typed_array_iter_length(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
@@ -4154,7 +4178,7 @@ pub fn typed_array_iter_length(
 /// view): per §10.4.5.14 an out-of-bounds view has NO valid indices, even
 /// for elements whose bytes still exist.
 pub fn typed_array_live_length(
-  h: Heap,
+  h: Heap(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
@@ -4275,14 +4299,14 @@ fn is_canonical_numeric_string_slow(s: String) -> Bool {
 /// ArrayBuffer proposal, sec-typedarray-set), so strict-mode assignment
 /// throws and valueOf/toString side effects never run.
 pub fn typed_array_store(
-  state: State,
+  state: State(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
   length: Option(Int),
   idx: Option(Int),
   val: JsValue,
-) -> Result(#(State, Bool), #(JsValue, State)) {
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   // Immutable ArrayBuffer proposal, [[Set]] (sec-typedarray-set): "If
   // IsImmutableBuffer(O.[[ViewedArrayBuffer]]) is true, return false" sits
   // BEFORE TypedArraySetElement, so the ToNumber/ToBigInt conversion (and
@@ -4328,7 +4352,7 @@ pub fn typed_array_store(
 
 /// Immutable ArrayBuffer proposal: True when `buffer` is a live
 /// ArrayBufferObject whose [[ArrayBufferData]] is immutable.
-fn buffer_is_immutable(h: Heap, buffer: Ref) -> Bool {
+fn buffer_is_immutable(h: Heap(host), buffer: Ref) -> Bool {
   case heap.read(h, buffer) {
     Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
       immutable
@@ -4338,14 +4362,14 @@ fn buffer_is_immutable(h: Heap, buffer: Ref) -> Bool {
 
 /// Shared store tail: bounds/detach check, then rebuild the buffer binary.
 fn do_typed_store(
-  state: State,
+  state: State(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
   length: Option(Int),
   idx: Option(Int),
   write: fn(BitArray, Int) -> BitArray,
-) -> #(State, Bool) {
+) -> #(State(host), Bool) {
   case idx {
     Some(i) if i >= 0 ->
       case heap.read(state.heap, buffer) {
@@ -4454,7 +4478,7 @@ fn encode_typed_number(
 }
 
 /// Minimal IsCallable for the local ToPrimitive walk.
-fn ta_is_callable(h: Heap, val: JsValue) -> Bool {
+fn ta_is_callable(h: Heap(host), val: JsValue) -> Bool {
   case val {
     JsObject(ref) ->
       case heap.read(h, ref) {
@@ -4469,9 +4493,9 @@ fn ta_is_callable(h: Heap, val: JsValue) -> Bool {
 /// ToNumber for typed-array element stores. Objects go through a number-hint
 /// ToPrimitive (@@toPrimitive, then valueOf, then toString).
 fn ta_to_number(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(value.JsNum, State), #(JsValue, State)) {
+) -> Result(#(value.JsNum, State(host)), #(JsValue, State(host))) {
   case val {
     JsObject(_) -> {
       use #(prim, state) <- result.try(ta_to_primitive_number(state, val))
@@ -4482,9 +4506,9 @@ fn ta_to_number(
 }
 
 fn ta_number_of_primitive(
-  state: State,
+  state: State(host),
   prim: JsValue,
-) -> Result(#(value.JsNum, State), #(JsValue, State)) {
+) -> Result(#(value.JsNum, State(host)), #(JsValue, State(host))) {
   case value.to_number(prim) {
     Ok(n) -> Ok(#(n, state))
     Error(msg) -> Error(state.type_error_value(state, msg))
@@ -4494,9 +4518,9 @@ fn ta_number_of_primitive(
 /// §7.1.1 ToPrimitive(input, number) for objects, local to typed-array
 /// stores: @@toPrimitive("number") → OrdinaryToPrimitive(valueOf, toString).
 fn ta_to_primitive_number(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case val {
     JsObject(ref) -> {
       use #(exotic, state) <- result.try(get_symbol_value(
@@ -4528,11 +4552,11 @@ fn ta_to_primitive_number(
 
 /// §7.1.1.1 OrdinaryToPrimitive with hint number: valueOf, then toString.
 fn ta_ordinary_to_primitive(
-  state: State,
+  state: State(host),
   val: JsValue,
   ref: Ref,
   method: String,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   use #(f, state) <- result.try(get_value(state, ref, Named(method), val))
   let fallthrough = fn(state) {
     case method {
@@ -4559,9 +4583,9 @@ fn ta_ordinary_to_primitive(
 /// §7.1.13 ToBigInt for typed-array element stores. Numbers throw TypeError
 /// (BigInt and Number content types never mix).
 fn ta_to_bigint(
-  state: State,
+  state: State(host),
   val: JsValue,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   case val {
     value.JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
     value.JsBool(True) -> Ok(#(1, state))
@@ -4696,7 +4720,7 @@ fn encode_primitives_loop(
 /// per-element path. Excludes object values, so a later ToNumber/ToBigInt of
 /// the extracted values cannot run user code either.
 pub fn plain_indexed_values(
-  h: Heap,
+  h: Heap(host),
   ref: Ref,
   len: Int,
 ) -> Option(List(JsValue)) {

@@ -35,6 +35,13 @@ pub const html_dda_id = 500_000_000_000_000_000
 /// `Ref`-typed form of `html_dda_id`.
 pub const html_dda_ref = Ref(500_000_000_000_000_000)
 
+/// The uninhabited type (no constructors) — Gleam's `Never`. Used as the
+/// default `host` type parameter for engines that mint no opaque host values:
+/// `HostObject(Empty)` is unconstructable, so a default engine provably has
+/// none, at zero cost. An embedder that wants host values instantiates `host`
+/// with its own type instead.
+pub type Empty
+
 /// Unique symbol identity. Not heap-allocated — symbols are value types on BEAM.
 /// An opaque Erlang reference. Globally unique across the entire BEAM cluster.
 /// Created via make_ref() FFI — no two calls ever return the same value.
@@ -1869,7 +1876,7 @@ pub fn buffer_store_region(
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
 /// Generic over `ctx` because NativeFunction carries a NativeFnSlot(ctx).
-pub type ExoticKind(ctx) {
+pub type ExoticKind(ctx, host) {
   /// Plain JS object: `{}`, `new Object()`, prototypes, etc.
   OrdinaryObject
   /// Error instance — has the [[ErrorData]] internal slot (ES2024 §20.5.4).
@@ -1932,6 +1939,15 @@ pub type ExoticKind(ctx) {
   /// [[ShadowRealm]] internal slot — a RealmSlot ref on the heap whose
   /// builtins are registered in state.ctx.realms.
   ShadowRealmObject(realm_ref: Ref)
+  /// Opaque, embedder-owned host value. `value` is the embedder's own typed
+  /// type (`host`) — the engine never inspects it, only ferries it and renders
+  /// it via the prototype's `@@toStringTag`. Minted with `host.alloc_host_object`
+  /// (typically a null prototype + no own properties) and read back typed via
+  /// `host.read_host` — no `Dynamic`, no coerce. Any heap refs the value needs
+  /// live in the object's properties (traced for free), not in the payload.
+  /// The default `host = Empty` is uninhabited, so this is unconstructable in a
+  /// default engine.
+  HostObject(value: host)
   /// Map object — ES2024 §24.1 Map Objects.
   /// Stores key-value pairs using SameValueZero equality.
   /// `entries` maps normalized MapKey → value. Original JS keys are
@@ -2660,10 +2676,10 @@ pub type AsyncGenRequest {
 
 /// What lives in a heap slot.
 /// Generic over `ctx` because ObjectSlot.kind carries an ExoticKind(ctx).
-pub type HeapSlot(ctx) {
+pub type HeapSlot(ctx, host) {
   /// Unified object slot — covers ordinary objects, arrays, and functions.
   ObjectSlot(
-    kind: ExoticKind(ctx),
+    kind: ExoticKind(ctx, host),
     properties: Dict(PropertyKey, Property),
     elements: JsElements,
     prototype: Option(Ref),
@@ -2820,7 +2836,7 @@ fn property_debug_lines(property: Property) -> List(List(String)) {
 }
 
 // will probably get rid of this function or move it and remake it.s
-pub fn heap_slot_to_string(slot: HeapSlot(ctx)) -> String {
+pub fn heap_slot_to_string(slot: HeapSlot(ctx, host)) -> String {
   case slot {
     ObjectSlot(
       kind:,
@@ -2943,11 +2959,11 @@ fn push_saved_frame_refs(
 }
 
 /// Prepend all refs reachable from a heap slot onto `acc`. 
-pub fn refs_in_slot(slot: HeapSlot(ctx)) -> List(Ref) {
+pub fn refs_in_slot(slot: HeapSlot(ctx, host)) -> List(Ref) {
   do_refs_in_slot(slot, [])
 }
 
-fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
+fn do_refs_in_slot(slot: HeapSlot(ctx, host), acc: List(Ref)) -> List(Ref) {
   case slot {
     ObjectSlot(
       kind:,
@@ -3331,7 +3347,11 @@ fn do_refs_in_slot(slot: HeapSlot(ctx), acc: List(Ref)) -> List(Ref) {
           proto,
           ..acc
         ]
+        // HostObject's payload is an opaque embedder term with no engine refs
+        // (any refs the value needs live in the object's own properties, which
+        // are traced above) — so it contributes nothing here.
         OrdinaryObject
+        | HostObject(_)
         | ErrorObject(_)
         | ArrayObject(_)
         | ArgumentsObject(_)

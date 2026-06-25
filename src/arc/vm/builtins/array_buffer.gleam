@@ -49,10 +49,10 @@ const max_buffer_byte_length = 2_147_483_647
 /// Set up ArrayBuffer + SharedArrayBuffer constructors and prototypes.
 /// Returns #(heap, ArrayBuffer BuiltinType, SharedArrayBuffer BuiltinType).
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType, BuiltinType) {
+) -> #(Heap(host), BuiltinType, BuiltinType) {
   // --- ArrayBuffer ---
   let #(h, ab_methods) =
     common.alloc_methods(h, function_proto, [
@@ -151,7 +151,7 @@ pub fn init(
 
 /// Overwrite ctor.prototype's descriptor with the spec-mandated
 /// non-writable / non-enumerable / non-configurable data property.
-fn freeze_prototype_prop(h: Heap, bt: BuiltinType) -> Heap {
+fn freeze_prototype_prop(h: Heap(host), bt: BuiltinType) -> Heap(host) {
   heap.update(h, bt.constructor, fn(slot) {
     case slot {
       ObjectSlot(properties:, ..) ->
@@ -170,10 +170,10 @@ fn freeze_prototype_prop(h: Heap, bt: BuiltinType) -> Heap {
 
 /// Allocate a `get [Symbol.species]` accessor (getter only, configurable).
 fn alloc_species_getter(
-  h: Heap,
+  h: Heap(host),
   function_proto: Ref,
   native: ArrayBufferNativeFn,
-) -> #(Heap, value.Property) {
+) -> #(Heap(host), value.Property) {
   let #(h, get_ref) =
     common.alloc_native_fn(
       h,
@@ -202,8 +202,8 @@ pub fn dispatch(
   native: ArrayBufferNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     ArrayBufferConstructor(proto:) ->
       constructor(proto, args, state, shared: False)
@@ -247,9 +247,9 @@ pub fn dispatch(
 fn constructor(
   proto: Ref,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   shared shared: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let name = ctor_name(shared)
   // Step 1: do_construct sets state.new_target before native dispatch;
   // a plain call leaves it JsUndefined.
@@ -281,13 +281,13 @@ fn constructor(
 ///       run a getter (test262 data-allocation-after-object-creation.js).
 ///   5.  CreateByteDataBlock(byteLength) — RangeError if impossible.
 fn allocate(
-  state: State,
+  state: State(host),
   new_target: JsValue,
   intrinsic_proto: Ref,
   byte_length: Int,
   max: Option(Int),
   shared: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 3a
   case max {
     Some(m) if byte_length > m ->
@@ -352,10 +352,10 @@ fn allocate(
 ///   3. If maxByteLength is undefined, return empty.
 ///   4. Return ? ToIndex(maxByteLength).
 fn try_max_byte_length_option(
-  state: State,
+  state: State(host),
   options: JsValue,
-  cont: fn(Option(Int), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Option(Int), State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case options {
     JsObject(opt_ref) -> {
       use max_val, state <- state.try_op(ops_object.get_value(
@@ -384,8 +384,8 @@ fn try_max_byte_length_option(
 /// (TypedArray or DataView instances).
 fn is_view(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let result = case helpers.first_arg_or_undefined(args) {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -406,8 +406,8 @@ fn is_view(
 ///   shared → TypeError; detached → +0; else [[ArrayBufferByteLength]].
 fn ab_get_byte_length(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "byteLength")
   use buf, state <- require_unshared(buf, state, "byteLength")
   #(state, Ok(value.from_int(value.buffer_byte_size(buf.data))))
@@ -416,8 +416,8 @@ fn ab_get_byte_length(
 /// §25.1.6.3 get ArrayBuffer.prototype.detached
 fn ab_get_detached(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "detached")
   use buf, state <- require_unshared(buf, state, "detached")
   #(state, Ok(JsBool(buf.detached)))
@@ -429,8 +429,8 @@ fn ab_get_detached(
 ///   3. Return IsImmutableBuffer(O).
 fn ab_get_immutable(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "immutable")
   use buf, state <- require_unshared(buf, state, "immutable")
   #(state, Ok(JsBool(buf.immutable)))
@@ -441,8 +441,8 @@ fn ab_get_immutable(
 ///   else [[ArrayBufferMaxByteLength]].
 fn ab_get_max_byte_length(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "maxByteLength")
   use buf, state <- require_unshared(buf, state, "maxByteLength")
   let result = case buf.detached, buf.max {
@@ -456,8 +456,8 @@ fn ab_get_max_byte_length(
 /// §25.1.6.5 get ArrayBuffer.prototype.resizable
 fn ab_get_resizable(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "resizable")
   use buf, state <- require_unshared(buf, state, "resizable")
   #(state, Ok(JsBool(buf.max != None)))
@@ -476,8 +476,8 @@ fn ab_get_resizable(
 fn ab_resize(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "resize")
   // Step 1: fixed-length buffers lack [[ArrayBufferMaxByteLength]]
   case buf.max {
@@ -538,9 +538,9 @@ fn ab_resize(
 fn buffer_slice(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   shared shared: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 2-3: RequireInternalSlot + shared/unshared gate
   use buf, state <- require_buffer(this, state, "slice")
   use buf, state <- require_family(buf, state, "slice", shared)
@@ -654,8 +654,8 @@ fn buffer_slice(
 fn slice_to_immutable(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 2-4
   use buf, state <- require_buffer(this, state, "sliceToImmutable")
   use buf, state <- require_unshared(buf, state, "sliceToImmutable")
@@ -729,10 +729,10 @@ fn slice_to_immutable(
 fn ab_transfer(
   this: JsValue,
   args: List(JsValue),
-  state: State,
+  state: State(host),
   preserve preserve: Bool,
   immutable to_immutable: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 1-2
   use buf, state <- require_buffer(this, state, "transfer")
   use buf, state <- require_unshared(buf, state, "transfer")
@@ -795,11 +795,11 @@ fn ab_transfer(
 
 /// Step 3 of ArrayBufferCopyAndDetach: undefined → current length, else ToIndex.
 fn try_transfer_length(
-  state: State,
+  state: State(host),
   len_arg: JsValue,
   buf: Buf,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case len_arg {
     JsUndefined -> cont(value.buffer_byte_size(buf.data), state)
     _ -> try_to_index(state, len_arg, cont)
@@ -813,8 +813,8 @@ fn try_transfer_length(
 /// §25.2.5.2 get SharedArrayBuffer.prototype.byteLength
 fn sab_get_byte_length(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "byteLength")
   use buf, state <- require_shared(buf, state, "byteLength")
   #(state, Ok(value.from_int(value.buffer_byte_size(buf.data))))
@@ -823,8 +823,8 @@ fn sab_get_byte_length(
 /// §25.2.5.4 get SharedArrayBuffer.prototype.growable
 fn sab_get_growable(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "growable")
   use buf, state <- require_shared(buf, state, "growable")
   #(state, Ok(JsBool(buf.max != None)))
@@ -833,8 +833,8 @@ fn sab_get_growable(
 /// §25.2.5.5 get SharedArrayBuffer.prototype.maxByteLength
 fn sab_get_max_byte_length(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "maxByteLength")
   use buf, state <- require_shared(buf, state, "maxByteLength")
   let result = case buf.max {
@@ -854,8 +854,8 @@ fn sab_get_max_byte_length(
 fn sab_grow(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use buf, state <- require_buffer(this, state, "grow")
   case buf.max {
     None ->
@@ -911,8 +911,8 @@ fn sab_grow(
 /// non-buffers are a TypeError.
 fn detach_262(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let arg = helpers.first_arg_or_undefined(args)
   use buf, state <- require_buffer(arg, state, "detachArrayBuffer")
   use buf, state <- require_unshared(buf, state, "detachArrayBuffer")
@@ -956,7 +956,7 @@ fn kind_with(
   buf: Buf,
   data: value.BufferData,
   detached detached: Bool,
-) -> state.ExoticKind {
+) -> state.ExoticKind(host) {
   ArrayBufferObject(
     data:,
     detached:,
@@ -970,10 +970,10 @@ fn kind_with(
 /// ArrayBuffer or SharedArrayBuffer object.
 fn require_buffer(
   this: JsValue,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(Buf, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -1007,10 +1007,10 @@ fn require_buffer(
 /// IsSharedArrayBuffer(O) must be false, else TypeError.
 fn require_unshared(
   buf: Buf,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(Buf, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case buf.shared {
     True -> incompatible(state, method)
     False -> cont(buf, state)
@@ -1020,10 +1020,10 @@ fn require_unshared(
 /// IsSharedArrayBuffer(O) must be true, else TypeError.
 fn require_shared(
   buf: Buf,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(Buf, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case buf.shared {
     True -> cont(buf, state)
     False -> incompatible(state, method)
@@ -1034,11 +1034,11 @@ fn require_shared(
 /// SharedArrayBuffer, shared=False requires a plain ArrayBuffer.
 fn require_family(
   buf: Buf,
-  state: State,
+  state: State(host),
   method: String,
   shared: Bool,
-  cont: fn(Buf, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case shared {
     True -> require_shared(buf, state, method, cont)
     False -> require_unshared(buf, state, method, cont)
@@ -1049,10 +1049,10 @@ fn require_family(
 /// never detached, so this is a no-op for them.)
 fn require_not_detached(
   buf: Buf,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(Buf, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case buf.detached {
     True ->
       state.type_error(
@@ -1069,10 +1069,10 @@ fn require_not_detached(
 /// else TypeError (ArrayBufferCopyAndDetach step 6, DetachArrayBuffer).
 fn require_not_immutable(
   buf: Buf,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(Buf, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case buf.immutable {
     True ->
       state.type_error(
@@ -1086,9 +1086,9 @@ fn require_not_immutable(
 }
 
 fn incompatible(
-  state: State,
+  state: State(host),
   method: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   state.type_error(
     state,
     "Method " <> method <> " called on incompatible receiver",
@@ -1101,10 +1101,10 @@ fn incompatible(
 ///   2. If integer is not in the inclusive interval from 0 to 2^53 - 1,
 ///      throw a RangeError exception.
 fn try_to_index(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- coerce.try_to_number(state, val)
   case n {
     value.NaN -> cont(0, state)
@@ -1124,12 +1124,12 @@ fn try_to_index(
 /// rule: negative values count back from len. `default` is used when the
 /// argument is undefined (start → 0, end → len).
 fn try_relative_index(
-  state: State,
+  state: State(host),
   val: JsValue,
   len: Int,
   default: Int,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsUndefined -> cont(default, state)
     _ -> {
@@ -1161,12 +1161,12 @@ fn try_relative_index(
 ///   6. If IsConstructor(S) is true, return S.
 ///   7. Throw a TypeError exception.
 fn try_species_constructor(
-  state: State,
+  state: State(host),
   o_ref: Ref,
   o_val: JsValue,
   default_ctor: Ref,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use c, state <- state.try_op(ops_object.get_value(
     state,
     o_ref,

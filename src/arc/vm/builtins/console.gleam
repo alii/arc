@@ -14,7 +14,11 @@ import gleam/option.{type Option, None, Some}
 import gleam/string
 
 /// Build the `console` global per WHATWG Console.
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+pub fn init(
+  h: Heap(host),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap(host), Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
       #("log", ConsoleNative(ConsoleLog), 0),
@@ -31,8 +35,8 @@ pub fn dispatch(
   native: ConsoleNativeFn,
   args: List(JsValue),
   _this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     ConsoleLog -> print(args, state, io.println)
     ConsoleLogError -> print(args, state, io.println_error)
@@ -43,9 +47,9 @@ pub fn dispatch(
 /// (`io.println` for log/info/debug, `io.println_error` for warn/error).
 pub fn print(
   args: List(JsValue),
-  state: State,
+  state: State(host),
   write: fn(String) -> Nil,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, line) = format(args, state)
   write(line)
   #(state, Ok(JsUndefined))
@@ -53,7 +57,10 @@ pub fn print(
 
 /// Format `args` to the string a console method would print, without the
 /// I/O. Public so tests can assert formatting independent of stdout/stderr.
-pub fn format(args: List(JsValue), state: State) -> #(State, String) {
+pub fn format(
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), String) {
   case args {
     // §2.1 step 4: only run Formatter if first is a string AND there are more
     // args. `console.log("100%")` must print `100%`, not consume the `%`.
@@ -67,11 +74,11 @@ pub fn format(args: List(JsValue), state: State) -> #(State, String) {
 /// `%s %d %i %f %o %O %c %%`; unknown `%x` is left literal (matches
 /// Node/Chrome, spec says skip).
 fn formatter(
-  state: State,
+  state: State(host),
   fmt: String,
   args: List(JsValue),
   acc: String,
-) -> #(State, String) {
+) -> #(State(host), String) {
   case string.pop_grapheme(fmt) {
     Error(Nil) -> {
       // §2.2 step 5: leftover args are Printer'd after the formatted string.
@@ -99,10 +106,10 @@ fn formatter(
 /// CSS styling — meaningless on a terminal, so it consumes its arg and
 /// emits nothing, like Node.
 fn spec(
-  state: State,
+  state: State(host),
   sp: String,
   args: List(JsValue),
-) -> Option(#(State, String, List(JsValue))) {
+) -> Option(#(State(host), String, List(JsValue))) {
   case sp, args {
     "%", _ -> Some(#(state, "%", args))
     // §2.2.1 step 2: out of args → leave the specifier literal.
@@ -151,7 +158,7 @@ fn spec(
 /// raw (no quotes — `console.log("a")` prints `a`); everything else uses the
 /// REPL inspector so objects/arrays read as `{ a: 1 }` / `[1, 2]` instead of
 /// `[object Object]`.
-fn display(h: Heap, val: JsValue) -> String {
+fn display(h: Heap(host), val: JsValue) -> String {
   case val {
     JsString(s) -> s
     _ -> object.inspect(val, h)

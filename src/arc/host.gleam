@@ -21,24 +21,28 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/heap
+import arc/vm/internal/elements
 import arc/vm/internal/job_queue
-import arc/vm/state.{type State}
+import arc/vm/state.{type Heap, type HostFn, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, Finite, JsBool, JsNumber, JsObject, JsString,
+  type JsValue, type Ref, Finite, HostObject, JsBool, JsNumber, JsObject,
+  JsString, ObjectSlot,
 }
+import gleam/dict
 import gleam/int
 import gleam/list
-import gleam/option
+import gleam/option.{type Option}
 
 // -- Validators --------------------------------------------------------------
 
 /// Reject unless `val` is a JS string. Unwraps to the Gleam `String`.
 pub fn validate_string(
-  s: State,
+  s: State(host),
   val: JsValue,
   name: String,
-  cont: fn(String, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsString(str) -> cont(str, s)
     _ -> invalid_arg_type(s, name, "string", val)
@@ -50,11 +54,11 @@ pub fn validate_string(
 /// more than once (validate once, call many). For one-shot calls, `try_call`
 /// does both in one step.
 pub fn validate_function(
-  s: State,
+  s: State(host),
   val: JsValue,
   name: String,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case helpers.is_callable(s.heap, val) {
     True -> cont(val, s)
     False -> invalid_arg_type(s, name, "function", val)
@@ -65,13 +69,13 @@ pub fn validate_function(
 /// and `state.try_call`. If `callee` isn't callable, throws TypeError with
 /// the arg name; otherwise calls it and propagates the result or any throw.
 pub fn try_call(
-  s: State,
+  s: State(host),
   callee: JsValue,
   name: String,
   this_val: JsValue,
   args: List(JsValue),
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case helpers.is_callable(s.heap, callee) {
     True -> state.try_call(s, callee, this_val, args, cont)
     False -> invalid_arg_type(s, name, "function", callee)
@@ -82,13 +86,13 @@ pub fn try_call(
 /// Unwraps to `Int`. Throws RangeError if out of bounds, TypeError if not
 /// a number.
 pub fn validate_integer(
-  s: State,
+  s: State(host),
   val: JsValue,
   name: String,
   min: Int,
   max: Int,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsNumber(Finite(n)) -> {
       let i = value.float_to_int(n)
@@ -118,11 +122,11 @@ pub fn validate_integer(
 
 /// Reject unless `val` is a JS boolean. Unwraps to `Bool`.
 pub fn validate_boolean(
-  s: State,
+  s: State(host),
   val: JsValue,
   name: String,
-  cont: fn(Bool, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Bool, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsBool(b) -> cont(b, s)
     _ -> invalid_arg_type(s, name, "boolean", val)
@@ -156,7 +160,7 @@ pub fn validate_boolean(
 /// Create a pending Promise and bump `outstanding`. Return the JsValue from
 /// your host function so JS can `await` it; keep the `Ref` to pass to
 /// `resume` once your external work completes.
-pub fn suspend(s: State) -> #(State, JsValue, Ref) {
+pub fn suspend(s: State(host)) -> #(State(host), JsValue, Ref) {
   let #(heap, obj_ref, data_ref) =
     builtins_promise.create_promise(s.heap, s.builtins.promise.prototype)
   #(
@@ -170,10 +174,10 @@ pub fn suspend(s: State) -> #(State, JsValue, Ref) {
 /// `Error`, decrements `outstanding`, and enqueues the reaction microtasks.
 /// Call from your event-loop driver, then re-drain.
 pub fn resume(
-  s: State,
+  s: State(host),
   ticket: Ref,
   outcome: Result(JsValue, JsValue),
-) -> State {
+) -> State(host) {
   let s = case outcome {
     Ok(v) -> {
       let #(heap, jobs) = builtins_promise.fulfill_promise(s.heap, ticket, v)
@@ -308,10 +312,10 @@ pub type WaiterHandle =
 /// Leaves `State.can_block` untouched — that is per-agent spec policy,
 /// not capability presence.
 pub fn install_atomics_capabilities(
-  s: State,
+  s: State(host),
   sync_wait sync_wait: state.SyncWaitFn,
   deliver_wake deliver_wake: state.DeliverWakeFn,
-) -> State {
+) -> State(host) {
   state.State(
     ..s,
     host_sync_wait: option.Some(sync_wait),
@@ -322,28 +326,92 @@ pub fn install_atomics_capabilities(
 // -- Constructors ------------------------------------------------------------
 
 /// Allocate a JS array from Gleam values. Uses the correct Array.prototype.
-pub fn array(s: State, values: List(JsValue)) -> #(State, JsValue) {
+pub fn array(s: State(host), values: List(JsValue)) -> #(State(host), JsValue) {
   let #(heap, ref) =
     common.alloc_array(s.heap, values, s.builtins.array.prototype)
   #(state.State(..s, heap:), JsObject(ref))
 }
 
 /// Allocate a plain JS object from a property list. Uses Object.prototype.
-pub fn object(s: State, props: List(#(String, JsValue))) -> #(State, JsValue) {
+pub fn object(
+  s: State(host),
+  props: List(#(String, JsValue)),
+) -> #(State(host), JsValue) {
   let prop_list = list.map(props, fn(p) { #(p.0, value.data_property(p.1)) })
   let #(heap, ref) =
     common.alloc_pojo(s.heap, s.builtins.object.prototype, prop_list)
   #(state.State(..s, heap:), JsObject(ref))
 }
 
+// -- Opaque host values ------------------------------------------------------
+
+/// Allocate an opaque, embedder-owned heap object wrapping `value` (the
+/// embedder's own type). The engine never inspects `value` — it only ferries
+/// it and renders the object via the prototype's `@@toStringTag`. The object
+/// has no own properties; pass `Some(proto)` to give it methods/a tag, or
+/// `None` for a maximally-opaque, null-prototype value. Read it back, typed
+/// and coerce-free, with `read_host`.
+///
+/// Any engine heap `Ref`s the value needs should live in the object's
+/// properties (GC traces those), not in `value` itself.
+pub fn alloc_host_object(
+  s: State(host),
+  value: host,
+  prototype: Option(Ref),
+) -> #(State(host), JsValue) {
+  let #(heap, ref) =
+    heap.alloc(
+      s.heap,
+      ObjectSlot(
+        kind: HostObject(value:),
+        properties: dict.new(),
+        elements: elements.new(),
+        prototype:,
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  #(State(..s, heap:), JsObject(ref))
+}
+
+/// Read the embedder value out of a host object — fully typed, no `Dynamic`,
+/// no coerce, no decode. `None` if `ref` is not a `HostObject`. The embedder
+/// `case`-matches the returned `host` with full exhaustiveness checking.
+pub fn read_host(h: Heap(host), ref: Ref) -> Option(host) {
+  case heap.read(h, ref) {
+    option.Some(ObjectSlot(kind: HostObject(value:), ..)) -> option.Some(value)
+    _ -> option.None
+  }
+}
+
+/// Mint a standalone native function as a `JsValue` — for building methods or
+/// returning callables. `impl` is an arbitrary closure, so it can capture any
+/// typed host data.
+pub fn function(
+  s: State(host),
+  name: String,
+  arity: Int,
+  impl: HostFn(host),
+) -> #(State(host), JsValue) {
+  let #(heap, ref) =
+    common.alloc_host_fn(
+      s.heap,
+      s.builtins.function.prototype,
+      impl,
+      name,
+      arity,
+    )
+  #(State(..s, heap:), JsObject(ref))
+}
+
 // -- Internal ----------------------------------------------------------------
 
 fn invalid_arg_type(
-  s: State,
+  s: State(host),
   name: String,
   expected: String,
   received: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   state.type_error(
     s,
     "The \""

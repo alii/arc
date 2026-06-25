@@ -37,18 +37,18 @@ import gleam/string
 /// advance an engine via `eval`/`eval_module`/`call`, which thread the heap
 /// forward and hand back a new `Engine`. Read-only access to the parts is via
 /// the `heap`/`builtins`/`global` accessors.
-pub opaque type Engine {
-  Engine(heap: Heap, builtins: Builtins, global: Ref)
+pub opaque type Engine(host) {
+  Engine(heap: Heap(host), builtins: Builtins, global: Ref)
 }
 
 /// Errors from the parse → compile → run pipeline, across both the script
 /// (`eval`) and module (`eval_module`) paths. `call` only ever surfaces
 /// `VmError`.
-pub type EvalError {
+pub type EvalError(host) {
   ParseError(parser.ParseError)
   CompileError(compiler.CompileError)
   VmError(state.VmError)
-  ModuleError(module.ModuleError)
+  ModuleError(module.ModuleError(host))
 }
 
 /// The result of evaluating an ES module: the entry module's completion value
@@ -65,7 +65,7 @@ pub type EvaluatedModule {
 
 /// Create a fresh engine with a new heap and all builtins installed. The single
 /// bootstrap site — every other entry point threads an existing engine.
-pub fn new() -> Engine {
+pub fn new() -> Engine(host) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global) = builtins.globals(b, h)
@@ -81,11 +81,11 @@ pub fn new() -> Engine {
 /// The function becomes callable from JS as `name(...)`. `arity` is the
 /// reported `.length` property; the impl still receives all passed args.
 pub fn define_fn(
-  engine: Engine,
+  engine: Engine(host),
   name: String,
   arity: Int,
-  impl: HostFn,
-) -> Engine {
+  impl: HostFn(host),
+) -> Engine(host) {
   let #(h, fn_ref) =
     common.alloc_host_fn(
       engine.heap,
@@ -105,10 +105,10 @@ pub fn define_fn(
 /// (`Object.prototype.toString.call(ns)` → `"[object name]"`), matching every
 /// built-in namespace.
 pub fn define_namespace(
-  engine: Engine,
+  engine: Engine(host),
   name: String,
-  methods: List(#(String, Int, HostFn)),
-) -> Engine {
+  methods: List(#(String, Int, HostFn(host))),
+) -> Engine(host) {
   let #(h, props) =
     common.alloc_host_methods(
       engine.heap,
@@ -125,14 +125,23 @@ pub fn define_namespace(
 /// For constants or pre-built objects that don't fit `define_fn` or
 /// `define_namespace`. The value is installed as a writable, configurable,
 /// non-enumerable data property on `globalThis`.
-pub fn define_global(engine: Engine, name: String, val: JsValue) -> Engine {
+pub fn define_global(
+  engine: Engine(host),
+  name: String,
+  val: JsValue,
+) -> Engine(host) {
   set_global(engine, engine.heap, name, val)
 }
 
 /// Install `val` as a builtin property `name` on the engine's global object,
 /// returning the engine with the updated heap. The one place global bindings
 /// are written — reuses the canonical `object.define_method_property` primitive.
-fn set_global(engine: Engine, h: Heap, name: String, val: JsValue) -> Engine {
+fn set_global(
+  engine: Engine(host),
+  h: Heap(host),
+  name: String,
+  val: JsValue,
+) -> Engine(host) {
   Engine(
     ..engine,
     heap: object.define_method_property(h, engine.global, Named(name), val),
@@ -151,9 +160,9 @@ fn set_global(engine: Engine, h: Heap, name: String, val: JsValue) -> Engine {
 /// If your host functions use `host.suspend`, drive your own loop via
 /// `eval_with`, passing an embedder-supplied `finish` driver.
 pub fn eval(
-  engine: Engine,
+  engine: Engine(host),
   source: String,
-) -> Result(#(Completion, Engine), EvalError) {
+) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
   eval_with(engine, source, event_loop.finish)
 }
 
@@ -161,10 +170,10 @@ pub fn eval(
 /// is handed the State after the top-level script returns and must drain
 /// microtasks plus whatever macrotask loop the embedder owns.
 pub fn eval_with(
-  engine: Engine,
+  engine: Engine(host),
   source: String,
-  finish: fn(state.State) -> state.State,
-) -> Result(#(Completion, Engine), EvalError) {
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
   eval_prepared_with(engine, source, fn(s) { s }, finish)
 }
 
@@ -175,11 +184,11 @@ pub fn eval_with(
 /// here too — `finish` only takes over after the script returns, and a
 /// top-level blocking `Atomics.wait` needs them mid-script.
 pub fn eval_prepared_with(
-  engine: Engine,
+  engine: Engine(host),
   source: String,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
-) -> Result(#(Completion, Engine), EvalError) {
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
   use program <- result.try(
     parser.parse(source, parser.Script)
     |> result.map_error(ParseError),
@@ -216,25 +225,25 @@ pub fn eval_prepared_with(
 /// (mirroring `module.evaluate_bundle`), not a `ThrowCompletion` — read its
 /// thrown value via `eval_error_message`.
 pub fn eval_module(
-  engine: Engine,
+  engine: Engine(host),
   specifier: String,
   source: String,
   resolve: fn(String, String) -> Result(String, String),
   load: fn(String) -> Result(String, String),
-) -> Result(#(EvaluatedModule, Engine), EvalError) {
+) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   eval_module_with(engine, specifier, source, resolve, load, event_loop.finish)
 }
 
 /// Like `eval_module` but the caller supplies the post-evaluation driver
 /// (an embedder macrotask loop, or `event_loop.finish` for microtasks only).
 pub fn eval_module_with(
-  engine: Engine,
+  engine: Engine(host),
   specifier: String,
   source: String,
   resolve: fn(String, String) -> Result(String, String),
   load: fn(String) -> Result(String, String),
-  finish: fn(state.State) -> state.State,
-) -> Result(#(EvaluatedModule, Engine), EvalError) {
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   eval_module_prepared_with(
     engine,
     specifier,
@@ -251,14 +260,14 @@ pub fn eval_module_with(
 /// counterpart of `eval_prepared_with` (a module's top level may hit a
 /// blocking `Atomics.wait` before any host function has run).
 pub fn eval_module_prepared_with(
-  engine: Engine,
+  engine: Engine(host),
   specifier: String,
   source: String,
   resolve: fn(String, String) -> Result(String, String),
   load: fn(String) -> Result(String, String),
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
-) -> Result(#(EvaluatedModule, Engine), EvalError) {
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
     module.compile_bundle(specifier, source, resolve, load)
     |> result.map_error(ModuleError),
@@ -282,7 +291,7 @@ pub fn eval_module_prepared_with(
 /// `eval_module`). `None` if the namespace isn't a module namespace, has no
 /// such export, or the binding is still uninitialized (TDZ).
 pub fn read_export(
-  engine: Engine,
+  engine: Engine(host),
   namespace: JsValue,
   name: String,
 ) -> Option(JsValue) {
@@ -299,22 +308,22 @@ pub fn read_export(
 /// call threading the heap forward via the returned engine. A thrown value is a
 /// `ThrowCompletion`; an engine `VmError` is `Error(VmError(..))`.
 pub fn call(
-  engine: Engine,
+  engine: Engine(host),
   callee: JsValue,
   this: JsValue,
   args: List(JsValue),
-) -> Result(#(Completion, Engine), EvalError) {
+) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
   call_with(engine, callee, this, args, event_loop.finish)
 }
 
 /// Like `call` but the caller supplies the post-call driver.
 pub fn call_with(
-  engine: Engine,
+  engine: Engine(host),
   callee: JsValue,
   this: JsValue,
   args: List(JsValue),
-  finish: fn(state.State) -> state.State,
-) -> Result(#(Completion, Engine), EvalError) {
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
   use completion <- result.map(
     entry.run_export(
       callee,
@@ -339,12 +348,12 @@ pub fn call_with(
 /// Host function closures stored in the heap will NOT survive — their Ref
 /// slots persist but the Erlang closure data is lost. Embedders must
 /// re-register host functions after `deserialize`.
-pub fn serialize(engine: Engine) -> BitArray {
+pub fn serialize(engine: Engine(host)) -> BitArray {
   erlang.term_to_binary(#(engine.heap, engine.builtins, engine.global))
 }
 
 /// Restore an engine from a binary produced by `serialize`.
-pub fn deserialize(data: BitArray) -> Engine {
+pub fn deserialize(data: BitArray) -> Engine(host) {
   let #(heap, builtins, global) = erlang.binary_to_term(data)
   Engine(heap:, builtins:, global:)
 }
@@ -355,18 +364,18 @@ pub fn deserialize(data: BitArray) -> Engine {
 
 /// Peek at the engine's heap. Useful for inspecting returned JsValues
 /// (since most are heap refs).
-pub fn heap(engine: Engine) -> Heap {
+pub fn heap(engine: Engine(host)) -> Heap(host) {
   engine.heap
 }
 
 /// The engine's builtins registry (prototypes + constructors). Needed by
 /// callers that drop to the lower `entry`/`module` layers with the raw triple.
-pub fn builtins(engine: Engine) -> Builtins {
+pub fn builtins(engine: Engine(host)) -> Builtins {
   engine.builtins
 }
 
 /// The engine's global object ref (`globalThis`).
-pub fn global(engine: Engine) -> Ref {
+pub fn global(engine: Engine(host)) -> Ref {
   engine.global
 }
 
@@ -374,7 +383,7 @@ pub fn global(engine: Engine) -> Ref {
 // Helpers
 // ----------------------------------------------------------------------------
 
-fn completion_heap(c: Completion) -> Heap {
+fn completion_heap(c: Completion(host)) -> Heap(host) {
   case c {
     completion.NormalCompletion(_, h) -> h
     completion.ThrowCompletion(_, h) -> h
@@ -399,7 +408,7 @@ fn vm_error_message(err: state.VmError) -> String {
   }
 }
 
-fn module_error_message(err: module.ModuleError) -> String {
+fn module_error_message(err: module.ModuleError(host)) -> String {
   case err {
     module.ParseError(m) -> "SyntaxError: " <> m
     module.CompileError(m) -> "CompileError: " <> m
@@ -414,7 +423,7 @@ fn module_error_message(err: module.ModuleError) -> String {
   }
 }
 
-pub fn eval_error_message(err: EvalError) -> String {
+pub fn eval_error_message(err: EvalError(host)) -> String {
   case err {
     ParseError(e) -> parser.parse_error_to_string(e)
     CompileError(e) -> compile_error_message(e)

@@ -87,11 +87,11 @@ fn put_existing_writable_data(
 /// `Ok(value)`/`Error(thrown)` contract; a `VmError` or a stray Yield/Await is an
 /// engine bug here (no channel to surface it through, mid-execution) → panic.
 fn call_fn_callback(
-  state: State,
+  state: State(host),
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case call_value_to_completion(state, callee, this_val, args) {
     Ok(#(NormalCompletion(val, _), s)) -> Ok(#(val, s))
     Ok(#(ThrowCompletion(thrown, _), s)) -> Error(#(thrown, s))
@@ -113,11 +113,11 @@ fn call_fn_callback(
 /// A non-callable callee is the legacy pass-through `undefined` (no throw)
 /// that promise reactions and friends rely on.
 fn call_value_to_completion(
-  state: State,
+  state: State(host),
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-) -> Result(#(Completion, State), VmError) {
+) -> Result(#(Completion(host), State(host)), VmError) {
   case helpers.is_callable(state.heap, callee) {
     False -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
     True -> {
@@ -218,7 +218,11 @@ fn frozen_array_slot(
 /// execution back to the parent plus the child's heap in ONE State copy
 /// instead of two. Hot: runs once per re-entrant callback (Array.prototype.map
 /// element calls, promise jobs, ...).
-fn merge_back(parent: State, child: State, heap: Heap) -> State {
+fn merge_back(
+  parent: State(host),
+  child: State(host),
+  heap: Heap(host),
+) -> State(host) {
   // Fast path: the typical callback (Array.prototype.map element call, ...)
   // touches none of the shared fields, so the child's terms are the exact
   // terms the isolated state was built from — `==` hits BEAM's
@@ -260,11 +264,11 @@ fn merge_back(parent: State, child: State, heap: Heap) -> State {
 /// func is required because Return restores `code` from SavedFrame.func.bytecode,
 /// not from the state's code field directly.
 fn construct_fn_callback(
-  state: State,
+  state: State(host),
   target: JsValue,
   args: List(JsValue),
   new_target: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case target, new_target {
     JsObject(ref), JsObject(nt_ref) -> {
       // Sentinel bytecode: do_construct saves pc+1 into the SavedFrame (or
@@ -327,13 +331,13 @@ fn construct_fn_callback(
 pub fn new_state(
   func: FuncTemplate,
   locals: tuple_array.TupleArray(JsValue),
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
   lexical_globals: dict.Dict(String, value.LexicalGlobal),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
-) -> State {
+) -> State(host) {
   State(
     stack: [],
     locals:,
@@ -390,11 +394,11 @@ fn host_can_block() -> Bool
 
 pub fn init_state(
   func: FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
   is_module: Bool,
-) -> State {
+) -> State(host) {
   // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
   // ES §16.1.6 ScriptEvaluation: the script's this is the global object,
   // regardless of strict mode. (Strict only affects function-body this.)
@@ -483,10 +487,10 @@ pub fn call_root(
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-) -> Result(#(Completion, State), VmError) {
+) -> Result(#(Completion(host), State(host)), VmError) {
   let state = init_state(empty_template(), heap, builtins, global_object, False)
   call_value_to_completion(state, callee, this_val, args)
 }
@@ -498,11 +502,11 @@ pub fn call_root(
 /// op and module link-time hoisting (so cyclic function exports are callable
 /// before bodies run).
 pub fn make_closure(
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   child_template: FuncTemplate,
   captured_values: List(JsValue),
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   let #(heap, env_ref) = heap.alloc_env(heap, captured_values)
   // For non-arrow functions, pre-populate .prototype with a fresh object so
   // `Foo.prototype.bar = ...` and `new Foo()` work.
@@ -635,7 +639,10 @@ pub fn make_closure(
 /// Read one of the current frame's lexical pseudo-bindings. Unboxes when the
 /// slot is boxed (captured by an inner arrow, or the frame IS an arrow reading
 /// its capture). Returns JsUndefined when the slot is None.
-pub fn read_lexical_local(state: State, ref: opcode.LexicalRef) -> JsValue {
+pub fn read_lexical_local(
+  state: State(host),
+  ref: opcode.LexicalRef,
+) -> JsValue {
   case opcode.lexical_slot(state.func.lexical, ref) {
     None -> JsUndefined
     Some(idx) ->
@@ -651,7 +658,7 @@ pub fn read_lexical_local(state: State, ref: opcode.LexicalRef) -> JsValue {
 }
 
 /// Shorthand for `read_lexical_local(state, RefThis)`.
-pub fn read_this_local(state: State) -> JsValue {
+pub fn read_this_local(state: State(host)) -> JsValue {
   read_lexical_local(state, opcode.RefThis)
 }
 
@@ -665,7 +672,9 @@ pub fn read_this_local(state: State) -> JsValue {
 /// Every bytecode stream ends with a sentinel Return (appended by
 /// resolve.gleam), so fetch uses unchecked element/2 — no Option box,
 /// no bounds check. Termination flows through the Return handler.
-pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
+pub fn execute_inner(
+  state: State(host),
+) -> Result(#(Completion(host), State(host)), VmError) {
   fast_loop(
     state,
     state.pc,
@@ -688,15 +697,15 @@ pub fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
 /// dispatcher, which re-executes the instruction from scratch (all fast paths
 /// below are effect-free before bailing, so re-execution is safe).
 fn fast_loop(
-  state: State,
+  state: State(host),
   pc: Int,
   stack: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
-  hp: Heap,
+  hp: Heap(host),
   code: tuple_array.TupleArray(Op),
   constants: tuple_array.TupleArray(JsValue),
   line: Int,
-) -> Result(#(Completion, State), VmError) {
+) -> Result(#(Completion(host), State(host)), VmError) {
   case tuple_array.unsafe_get(pc, code) {
     SetLine(l) ->
       fast_loop(state, pc + 1, stack, locals, hp, code, constants, l)
@@ -1397,7 +1406,11 @@ fn array_length_writable(
 /// find a setter / non-writable property up the chain). Conservatively bails
 /// (False) on any proto kind whose index lookup is not a pure dict/elements
 /// probe (Proxy traps, TypedArray indices, String chars, ...).
-fn proto_chain_index_free(hp: Heap, proto: Option(Ref), idx: Int) -> Bool {
+fn proto_chain_index_free(
+  hp: Heap(host),
+  proto: Option(Ref),
+  idx: Int,
+) -> Bool {
   case proto {
     None -> True
     Some(ref) ->
@@ -1441,13 +1454,13 @@ fn proto_chain_index_free(hp: Heap, proto: Option(Ref), idx: Int) -> Bool {
 /// Materialize the full State from the fast loop's bare arguments and run one
 /// instruction through the general `step` dispatcher.
 fn dispatch_slow(
-  state: State,
+  state: State(host),
   pc: Int,
   stack: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
-  hp: Heap,
+  hp: Heap(host),
   line: Int,
-) -> Result(#(Completion, State), VmError) {
+) -> Result(#(Completion(host), State(host)), VmError) {
   let state = State(..state, pc:, stack:, locals:, heap: hp, current_line: line)
   let op = tuple_array.unsafe_get(state.pc, state.code)
   case step(state, op) {
@@ -1530,7 +1543,10 @@ fn dispatch_slow(
 /// Try to find a catch handler for a thrown value. Walks up call_stack when
 /// the current frame's try_stack is exhausted, so throws from a callee can be
 /// caught by a try/catch in the caller.
-fn unwind_to_catch(state: State, thrown_value: JsValue) -> Option(State) {
+fn unwind_to_catch(
+  state: State(host),
+  thrown_value: JsValue,
+) -> Option(State(host)) {
   case state.try_stack {
     [TryFrame(catch_target:, stack_depth:), ..rest_try] -> {
       let restored_stack = truncate_stack(state.stack, stack_depth)
@@ -1594,19 +1610,19 @@ fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
 }
 
 fn underflow(
-  state: State,
+  state: State(host),
   op: String,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   Error(#(StepVmError(StackUnderflow(op)), JsUndefined, state))
 }
 
 /// Pop top of stack and jump to `target` if `condition(value)` is true,
 /// otherwise advance to next instruction.
 fn conditional_jump(
-  state: State,
+  state: State(host),
   target: Int,
   condition: fn(JsValue) -> Bool,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case state.stack {
     [top, ..rest] ->
       case condition(top) {
@@ -1624,10 +1640,10 @@ fn conditional_jump(
 /// primitive JsValue so PutSuperValue's own to_property_key fast-paths
 /// with no observable side effects.
 fn get_super_value(
-  state: State,
+  state: State(host),
   keep_base: Bool,
   op: String,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case state.stack {
     // Symbol keys are valid property keys (§7.1.19 ToPropertyKey step 3) —
     // e.g. super[Symbol.iterator]. Must come before the generic arm whose
@@ -1679,7 +1695,10 @@ fn get_super_value(
 
 /// Execute a single instruction. Returns Ok(new_state) to continue,
 /// or Error(#(signal, value, heap)) to stop.
-fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
+fn step(
+  state: State(host),
+  op: Op,
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case op {
     // ---- Source mapping ----------------------------------------------
     SetLine(line) -> Ok(State(..state, current_line: line, pc: state.pc + 1))
@@ -4817,7 +4836,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
       // the iter slot becomes JsUndefined so subsequent IteratorNext
       // short-circuits and IteratorClose/CloseThrow no-op (§7.4.11/.6).
       let mark_done = fn(rest) {
-        fn(e: #(StepResult, JsValue, State)) {
+        fn(e: #(StepResult, JsValue, State(host))) {
           let #(r, v, s) = e
           #(r, v, State(..s, stack: [JsUndefined, ..rest]))
         }
@@ -5400,7 +5419,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, State)) {
   }
 }
 
-fn lookup_eval_env(state: State, name: String) -> Option(JsValue) {
+fn lookup_eval_env(state: State(host), name: String) -> Option(JsValue) {
   option.then(state.eval_env, heap.read_eval_env(state.heap, _))
   |> option.then(fn(vars) { dict.get(vars, name) |> option.from_result })
 }
@@ -5411,10 +5430,10 @@ fn lookup_eval_env(state: State, name: String) -> Option(JsValue) {
 /// Get(unscopables, N) as "not bound". Both Gets can run user code (getters,
 /// proxy traps); errors propagate as thrown completions.
 fn with_has_binding(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   name: String,
-) -> Result(#(Bool, State), #(state.StepResult, JsValue, State)) {
+) -> Result(#(Bool, State(host)), #(state.StepResult, JsValue, State(host))) {
   use #(found, state) <- result.try(
     state.rethrow(object.has_property_stateful(
       state,
@@ -5459,10 +5478,10 @@ fn property_key_value(pk: value.PropertyKey) -> JsValue {
 /// GetElem on a primitive receiver — ToPropertyKey (Symbol → symbol lookup
 /// on prototype, else ToString → string lookup) then delegate to get_value_of.
 fn get_elem_on_primitive(
-  state: State,
+  state: State(host),
   receiver: JsValue,
   key: JsValue,
-) -> Result(#(JsValue, State), #(JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case key {
     value.JsSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
     _ -> {
@@ -5501,7 +5520,7 @@ fn get_elem_on_primitive(
 /// [[ThisMode]] = LEXICAL, capturing the enclosing frame's `this` slot.
 /// Thin wrapper: delegates to call.call_function with execute_inner/unwind_to_catch.
 fn call_function(
-  state: State,
+  state: State(host),
   fn_ref: value.Ref,
   env_ref: value.Ref,
   home_object: option.Option(value.Ref),
@@ -5511,7 +5530,7 @@ fn call_function(
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
   new_target: JsValue,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   call.call_function(
     state,
     fn_ref,
@@ -5530,12 +5549,12 @@ fn call_function(
 
 /// Thin wrapper: delegates to call.call_native with execute_inner/unwind_to_catch/dispatch_native.
 fn call_native(
-  state: State,
-  native: NativeFnSlot,
+  state: State(host),
+  native: NativeFnSlot(host),
   args: List(JsValue),
   rest_stack: List(JsValue),
   this: JsValue,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   call.call_native(
     state,
     native,
@@ -5562,7 +5581,7 @@ fn call_native(
 /// (CreateDataPropertyOrThrow → TypeError). Private-namespace keys never go
 /// through traps (§7.3.28 PrivateFieldAdd is not an ordinary define).
 fn define_needs_full_semantics(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   key: value.PropertyKey,
 ) -> Bool {
@@ -5581,11 +5600,11 @@ fn define_needs_full_semantics(
 /// real [[DefineOwnProperty]]: proxy traps fire; a false result (frozen /
 /// non-extensible receiver, trap refusal) throws TypeError.
 fn define_field_full(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   key: JsValue,
   val: JsValue,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let #(heap, desc_ref) =
     common.alloc_pojo(state.heap, state.builtins.object.prototype, [
       #("value", value.data_property(val)),
@@ -5615,10 +5634,10 @@ fn define_field_full(
 }
 
 fn check_define_nonconfigurable(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   pk: value.PropertyKey,
-) -> Result(Nil, #(StepResult, JsValue, State)) {
+) -> Result(Nil, #(StepResult, JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(properties:, ..)) ->
       case dict.get(properties, pk) {
@@ -5639,10 +5658,10 @@ fn check_define_nonconfigurable(
 /// has the private element (return-override double initialization) or is
 /// non-extensible (proposal nonextensible-applies-to-private).
 fn check_private_add(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   key_text: String,
-) -> Result(Nil, #(state.StepResult, JsValue, State)) {
+) -> Result(Nil, #(state.StepResult, JsValue, State(host))) {
   case object.get_own_property(state.heap, ref, Named(key_text)) {
     Some(_) ->
       state.throw_type_error(
@@ -5665,7 +5684,7 @@ fn check_private_add(
   }
 }
 
-fn make_method(h: Heap, func: JsValue, target: Ref) -> Heap {
+fn make_method(h: Heap(host), func: JsValue, target: Ref) -> Heap(host) {
   case func {
     JsObject(fn_ref) -> {
       use slot <- heap.update(h, fn_ref)
@@ -5687,11 +5706,11 @@ fn make_method(h: Heap, func: JsValue, target: Ref) -> Heap {
 /// "name" is set here from the evaluated propKey, with the accessor
 /// "get "/"set " prefix where applicable.
 fn set_computed_fn_name(
-  h: Heap,
+  h: Heap(host),
   func: JsValue,
   prefix: String,
   name: String,
-) -> Heap {
+) -> Heap(host) {
   case func {
     JsObject(fn_ref) -> {
       use slot <- heap.update(h, fn_ref)
@@ -5723,7 +5742,7 @@ fn set_computed_fn_name(
 
 /// SetFunctionName step 4: a Symbol key names the function "[description]",
 /// or "" when the symbol has no description.
-fn symbol_fn_name(state: State, sym: value.SymbolId) -> String {
+fn symbol_fn_name(state: State(host), sym: value.SymbolId) -> String {
   let desc = case value.well_known_symbol_description(sym) {
     Some(d) -> Ok(d)
     None -> dict.get(state.ctx.symbol_descriptions, sym)
@@ -5744,12 +5763,12 @@ fn accessor_name_prefix(kind: opcode.AccessorKind) -> String {
 
 /// Thin wrapper: delegates to call.do_construct with execute_inner/unwind_to_catch/dispatch_native.
 fn do_construct(
-  state: State,
+  state: State(host),
   ctor_ref: Ref,
   args: List(JsValue),
   rest_stack: List(JsValue),
   new_target_ref: Ref,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   call.do_construct(
     state,
     ctor_ref,
@@ -5764,11 +5783,11 @@ fn do_construct(
 
 /// Thin wrapper: delegates to call.call_value with execute_inner/unwind_to_catch/dispatch_native.
 fn call_value(
-  state: State,
+  state: State(host),
   callee: JsValue,
   args: List(JsValue),
   this_val: JsValue,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   call.call_value(
     state,
     callee,
@@ -5782,10 +5801,10 @@ fn call_value(
 
 /// Thin wrapper: delegates to array_ops.spread_into_array with execute_inner.
 fn spread_into_array(
-  state: State,
+  state: State(host),
   target_ref: Ref,
   iterable: JsValue,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   array_ops.spread_into_array(state, target_ref, iterable, execute_inner)
 }
 
@@ -5793,8 +5812,8 @@ fn dispatch_native(
   native: value.NativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   call.dispatch_native(native, args, this, state, execute_inner, new_state)
 }
 
@@ -5802,7 +5821,7 @@ fn dispatch_native(
 /// Returns Error(Nil) if the object doesn't exist, the property is missing,
 /// or the property value is not a JsObject.
 fn get_field_ref(
-  h: Heap,
+  h: Heap(host),
   obj_ref: value.Ref,
   name: String,
 ) -> Option(value.Ref) {
@@ -5820,10 +5839,10 @@ fn get_field_ref(
 /// Update the prototype of a heap object in-place, returning the new heap.
 /// If the ref doesn't point to an ObjectSlot, returns the heap unchanged.
 fn set_slot_prototype(
-  h: Heap,
+  h: Heap(host),
   ref: value.Ref,
   new_proto: option.Option(value.Ref),
-) -> Heap {
+) -> Heap(host) {
   use slot <- heap.update(h, ref)
   case slot {
     ObjectSlot(..) -> ObjectSlot(..slot, prototype: new_proto)
@@ -5835,11 +5854,11 @@ fn set_slot_prototype(
 /// (string/index) and SymbolId sets for CopyDataProperties exclusion.
 /// Non-symbol keys go through ToPropertyKey (§7.1.19) for canonical form.
 fn build_exclusion_sets(
-  state: State,
+  state: State(host),
   keys: List(JsValue),
 ) -> Result(
-  #(set.Set(value.PropertyKey), set.Set(value.SymbolId), State),
-  #(JsValue, State),
+  #(set.Set(value.PropertyKey), set.Set(value.SymbolId), State(host)),
+  #(JsValue, State(host)),
 ) {
   use #(pks, syms, state), key <- list.try_fold(keys, #(
     set.new(),
@@ -5873,7 +5892,7 @@ fn build_exclusion_sets(
 ///     no frame to elide. (Generator/async *caller* bodies execute with
 ///     call_stack == [] at body level, so the non-empty-call-stack guard
 ///     also implements §15.10.1 steps 5-7 — their returns never elide.)
-fn is_tail_call(state: State, callee: FuncTemplate) -> Bool {
+fn is_tail_call(state: State(host), callee: FuncTemplate) -> Bool {
   let frame_eligible = case state.try_stack, state.call_stack {
     [], [_, ..] ->
       state.func.is_strict
@@ -5900,8 +5919,8 @@ fn is_tail_call(state: State, callee: FuncTemplate) -> Bool {
 /// call_regular_function (plain function callee), which always pushes
 /// exactly one frame.
 fn elide_tail_frame(
-  result: Result(State, #(StepResult, JsValue, State)),
-) -> Result(State, #(StepResult, JsValue, State)) {
+  result: Result(State(host), #(StepResult, JsValue, State(host))),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   use new_state <- result.map(result)
   case new_state.call_stack {
     [_caller_frame, ..rest_frames] ->
@@ -5940,12 +5959,12 @@ fn pop_n_loop(
 /// BinOp Add with ToPrimitive for object operands.
 /// ES2024 §13.15.3: ToPrimitive(default) both sides, then string-concat or numeric-add.
 fn binop_direct(
-  state: State,
+  state: State(host),
   kind: opcode.BinOpKind,
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case operators.exec_binop(kind, left, right) {
     Ok(result) -> Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
     Error(msg) -> throw_operator_error(state, msg)
@@ -5967,7 +5986,7 @@ const gc_growth_threshold = 65_536
 /// set is exactly: this frame's stack/locals/args + lexical globals + the
 /// persistent root set (builtins, global object, module cells, template
 /// objects — all rooted at creation).
-fn maybe_collect_at_toplevel(state: State) -> State {
+fn maybe_collect_at_toplevel(state: State(host)) -> State(host) {
   let eligible =
     state.call_stack == []
     // call_depth > 0 here means this is the bottom frame of a re-entrant
@@ -5991,7 +6010,7 @@ fn maybe_collect_at_toplevel(state: State) -> State {
 /// set: operand stack, locals, current args/new.target, the frame's sloppy
 /// direct-eval env, and global let/const bindings. call_stack is empty at the
 /// (gated) call site, so saved frames need no scan.
-fn state_root_ids(state: State) -> set.Set(Int) {
+fn state_root_ids(state: State(host)) -> set.Set(Int) {
   let acc = value_root_ids(state.stack, [state.ctx.global_object.id])
   let acc = value_root_ids(tuple_array.to_list(state.locals), acc)
   let acc = value_root_ids([state.new_target, ..state.call_args], acc)
@@ -6020,8 +6039,8 @@ fn value_root_ids(values: List(JsValue), acc: List(Int)) -> List(Int) {
 /// Same ReferenceError the GetLocal step arm throws for a TDZ read — the
 /// fused ops fold a GetLocal, so their TDZ path must be indistinguishable.
 fn tdz_reference_error(
-  state: State,
-) -> Result(State, #(StepResult, JsValue, State)) {
+  state: State(host),
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   state.throw_reference_error(
     state,
     "Cannot access variable before initialization (TDZ)",
@@ -6031,9 +6050,9 @@ fn tdz_reference_error(
 /// Unwrap a step-helper result that pushed exactly one value onto the stack
 /// passed to it: return that value and the state with it popped again.
 fn pop_top(
-  r: Result(State, #(StepResult, JsValue, State)),
+  r: Result(State(host), #(StepResult, JsValue, State(host))),
   op: String,
-) -> Result(#(JsValue, State), #(StepResult, JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   use state <- result.try(r)
   case state.stack {
     [top, ..rest] -> Ok(#(top, State(..state, stack: rest)))
@@ -6046,10 +6065,10 @@ fn pop_top(
 /// BinOp(Add|Sub); PutLocal; Pop. Reuses the same coercion helpers as the
 /// unfused ops so every ToPrimitive call and thrown error is identical.
 fn fused_update_local(
-  state: State,
+  state: State(host),
   index: Int,
   kind: opcode.BinOpKind,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let next_pc = state.pc + 1
   case tuple_array.unsafe_get(index, state.locals) {
     JsUninitialized -> tdz_reference_error(state)
@@ -6091,12 +6110,12 @@ fn fused_update_local(
 /// for the pure relational kinds (Lt/LtEq/Gt/GtEq): binop_direct for
 /// primitives, binop_with_to_primitive when an operand is an object.
 fn fused_cmp_jump(
-  state: State,
+  state: State(host),
   kind: opcode.BinOpKind,
   left: JsValue,
   right: JsValue,
   target: Int,
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let next_pc = state.pc + 1
   use #(result, state) <- result.try(case left, right {
     JsObject(_), _ | _, JsObject(_) ->
@@ -6120,9 +6139,9 @@ fn fused_cmp_jump(
 /// by zero, negative exponent) that the spec makes RangeErrors — those come
 /// back tagged with operators.range_error_prefix.
 fn throw_operator_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> Result(a, #(StepResult, JsValue, State)) {
+) -> Result(a, #(StepResult, JsValue, State(host))) {
   case msg {
     "RangeError: " <> rest -> state.throw_range_error(state, rest)
     _ -> state.throw_type_error(state, msg)
@@ -6147,12 +6166,12 @@ fn is_eq_coercible(left: JsValue, right: JsValue) -> Bool {
 /// primitive×primitive. Relational/numeric ops use number hint; loose
 /// equality uses default hint (matters for Date @@toPrimitive).
 fn binop_with_to_primitive(
-  state: State,
+  state: State(host),
   kind: opcode.BinOpKind,
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let hint = case kind {
     opcode.Eq | opcode.NotEq -> coerce.DefaultHint
     _ -> coerce.NumberHint
@@ -6173,11 +6192,11 @@ fn binop_with_to_primitive(
 /// object operands. LogicalNot/Void are handled in the fast path (they do
 /// not coerce).
 fn unaryop_with_to_primitive(
-  state: State,
+  state: State(host),
   kind: opcode.UnaryOpKind,
   operand: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   use #(prim, s1) <- result.try(
     state.rethrow(coerce.to_primitive(state, operand, coerce.NumberHint)),
   )
@@ -6189,11 +6208,11 @@ fn unaryop_with_to_primitive(
 
 /// ES2024 §13.15.4 step 2–7: apply `+` to two already-primitive operands.
 fn add_primitives(
-  state: State,
+  state: State(host),
   lprim: JsValue,
   rprim: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case lprim, rprim {
     JsString(a), JsString(b) ->
       Ok(State(..state, stack: [JsString(a <> b), ..rest], pc: state.pc + 1))
@@ -6234,11 +6253,11 @@ fn add_primitives(
 }
 
 fn binop_add_with_to_primitive(
-  state: State,
+  state: State(host),
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   use #(lprim, s1) <- result.try(
     state.rethrow(coerce.to_primitive(state, left, coerce.DefaultHint)),
   )
@@ -6251,7 +6270,7 @@ fn binop_add_with_to_primitive(
 /// True when `next_fn` is the unmodified native Generator.prototype.next.
 /// Lets yield* resume the inner generator via the internal no-alloc API
 /// instead of a full native call that allocates a discarded result object.
-fn is_native_generator_next(h: Heap, next_fn: JsValue) -> Bool {
+fn is_native_generator_next(h: Heap(host), next_fn: JsValue) -> Bool {
   case next_fn {
     JsObject(fn_ref) ->
       case heap.read(h, fn_ref) {
@@ -6268,9 +6287,9 @@ fn is_native_generator_next(h: Heap, next_fn: JsValue) -> Bool {
 /// ES IteratorComplete + IteratorValue: read {done, value} from an iterator
 /// result; TypeError if not an object.
 fn read_iter_result(
-  state: State,
+  state: State(host),
   res: JsValue,
-) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
+) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   case res {
     JsObject(rref) -> {
       use #(done, state) <- result.try(
@@ -6290,9 +6309,9 @@ fn read_iter_result(
 /// result object's value getter must not fire). yield* keeps the plain
 /// read_iter_result above because §27.5.3.2 DOES read value when done.
 fn read_iter_step_result(
-  state: State,
+  state: State(host),
   res: JsValue,
-) -> Result(#(Bool, JsValue, State), #(StepResult, JsValue, State)) {
+) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   case res {
     JsObject(rref) -> {
       use #(done, state) <- result.try(
@@ -6320,10 +6339,10 @@ fn read_iter_step_result(
 /// alloc. Set/Map iterators step through their native `.next`, so they
 /// get a record like any other iterator.
 fn push_iterator_record(
-  state: State,
+  state: State(host),
   iter_ref: Ref,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case heap.read(state.heap, iter_ref) {
     Some(ObjectSlot(kind: GeneratorObject(_), ..))
     | Some(ObjectSlot(kind: ArrayIteratorObject(..), ..))
@@ -6365,7 +6384,7 @@ fn push_iterator_record(
 /// Resolve a GetIterator stack slot to the real iterator object: internal
 /// IteratorRecordObject wrappers (cached `next`) must be transparent to
 /// .return()/.throw() lookups and to yield* delegation.
-fn unwrap_iterator_record(state: State, v: JsValue) -> JsValue {
+fn unwrap_iterator_record(state: State(host), v: JsValue) -> JsValue {
   case v {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -6384,13 +6403,13 @@ fn unwrap_iterator_record(state: State, v: JsValue) -> JsValue {
 /// array/arguments object or a Proxy. Pushes [done, value, iter|undef]
 /// like the inline IteratorNext paths.
 fn step_array_iterator_source(
-  state: State,
+  state: State(host),
   iter_ref: value.Ref,
   source: value.Ref,
   index: Int,
   iter_kind: value.ArrayIterKind,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case object.as_proxy(state.heap, source) {
     // Proxy source — §23.1.5.1 generic path: ? Get(array,
     // "length") / ? Get(array, ToString(index)) fire get traps.
@@ -6522,12 +6541,12 @@ fn step_array_iterator_source(
 /// index ("key"), the element ("value"), or a fresh [index, element] pair
 /// array ("key+value").
 fn array_iter_shape(
-  h: state.Heap,
-  state: State,
+  h: state.Heap(host),
+  state: State(host),
   iter_kind: value.ArrayIterKind,
   index: Int,
   elem: JsValue,
-) -> #(state.Heap, JsValue) {
+) -> #(state.Heap(host), JsValue) {
   case iter_kind {
     value.ArrayIterKeys -> #(h, value.from_int(index))
     value.ArrayIterValues -> #(h, elem)
@@ -6548,7 +6567,7 @@ fn array_iter_shape(
 /// override (defineProperty can install accessor/attribute overrides at an
 /// index). None → caller takes the generic [[Get]] path.
 fn array_elem_without_override(
-  h: state.Heap,
+  h: state.Heap(host),
   source: value.Ref,
   elems: value.JsElements,
   index: Int,
@@ -6566,11 +6585,11 @@ fn array_elem_without_override(
 /// Bump an ArrayIteratorObject's index in place (preserving the iteration
 /// kind). No-op if the ref no longer holds an array-iterator slot.
 fn advance_array_iter(
-  h: state.Heap,
+  h: state.Heap(host),
   iter_ref: value.Ref,
   source: value.Ref,
   index: Int,
-) -> state.Heap {
+) -> state.Heap(host) {
   case heap.read(h, iter_ref) {
     Some(ObjectSlot(kind: ArrayIteratorObject(iter_kind:, ..), ..) as slot) ->
       heap.write(
@@ -6586,12 +6605,12 @@ fn advance_array_iter(
 }
 
 fn step_iterator_record(
-  state: State,
+  state: State(host),
   rec_ref: Ref,
   iterated: JsValue,
   next_method: JsValue,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   use #(result_obj, state) <- result.try(
     state.rethrow(state.call(state, next_method, iterated, [])),
   )
@@ -6612,10 +6631,10 @@ fn step_iterator_record(
 /// slot becomes JsUndefined ([[Done]] tracking — see IteratorNext); abrupt
 /// completion is undef'd by the caller's mark_done wrapper.
 fn step_generic_iterator(
-  state: State,
+  state: State(host),
   iter_ref: Ref,
   rest: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let iter = JsObject(iter_ref)
   use #(next_fn, state) <- result.try(
     state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
@@ -6638,11 +6657,11 @@ fn step_generic_iterator(
 /// ES2024 §7.4.1 GetIterator(obj, kind) — look up Symbol.iterator and call it.
 /// Used when the fast path (ArrayObject without overridden Symbol.iterator) doesn't apply.
 fn get_iterator_via_symbol(
-  state: State,
+  state: State(host),
   ref: value.Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   // Step 1: Let method be ? GetMethod(obj, @@iterator)
   case object.get_symbol_value(state, ref, value.symbol_iterator, iterable) {
     Ok(#(method, state)) ->
@@ -6683,11 +6702,11 @@ fn get_iterator_via_symbol(
 /// - method present but not callable → TypeError (GetMethod step 3)
 /// - call result not an object → TypeError (GetIteratorFromMethod step 2)
 fn get_async_iterator_via_symbol(
-  state: State,
+  state: State(host),
   ref: Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   // Step 1.a: Let method be ? GetMethod(obj, @@asyncIterator).
   use #(method, state) <- result.try(
     state.rethrow(object.get_symbol_value(
@@ -6715,11 +6734,11 @@ fn get_async_iterator_via_symbol(
 /// §7.4.3 step 1.b: @@asyncIterator is undefined — GetMethod(obj, @@iterator),
 /// call it, and wrap the sync iterator via CreateAsyncFromSyncIterator.
 fn get_async_from_sync_fallback(
-  state: State,
+  state: State(host),
   ref: Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State, #(StepResult, JsValue, State)) {
+) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   use #(sync_method, state) <- result.try(
     state.rethrow(object.get_symbol_value(
       state,
@@ -6774,10 +6793,10 @@ fn get_async_from_sync_fallback(
 /// must be callable, its call result must be an object; both call abrupt
 /// completions propagate.
 fn call_iterator_method(
-  state: State,
+  state: State(host),
   method: JsValue,
   iterable: JsValue,
-) -> Result(#(JsValue, State), #(StepResult, JsValue, State)) {
+) -> Result(#(JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   case helpers.is_callable(state.heap, method) {
     False ->
       state.throw_type_error(

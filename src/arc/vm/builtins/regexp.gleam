@@ -111,10 +111,10 @@ const legacy_slot_paren_base = 9114
 
 /// Set up RegExp constructor + RegExp.prototype.
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   // Allocate prototype methods
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
@@ -233,7 +233,11 @@ pub fn init(
 /// lastParen/$+, leftContext/$`, rightContext/$', $1-$9 as accessor
 /// properties on the constructor ({enumerable: false, configurable: true};
 /// only input/$_ has a setter).
-fn install_legacy_accessors(h: Heap, function_proto: Ref, ctor: Ref) -> Heap {
+fn install_legacy_accessors(
+  h: Heap(host),
+  function_proto: Ref,
+  ctor: Ref,
+) -> Heap(host) {
   let getter_only =
     [
       #("lastMatch", legacy_slot_last_match),
@@ -321,8 +325,8 @@ pub fn dispatch(
   native: RegExpNativeFn,
   args: List(JsValue),
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     RegExpConstructor(legacy: _) -> regexp_constructor(args, state)
     RegExpPrototypeTest -> regexp_test(this, args, state)
@@ -363,8 +367,8 @@ fn legacy_static_get(
   this: JsValue,
   ctor: Ref,
   slot: Int,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this == JsObject(ctor) {
     False ->
       state.type_error(
@@ -381,8 +385,8 @@ fn legacy_static_set_input(
   this: JsValue,
   args: List(JsValue),
   ctor: Ref,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this == JsObject(ctor) {
     False ->
       state.type_error(
@@ -399,7 +403,7 @@ fn legacy_static_set_input(
 }
 
 /// Read one legacy slot off the constructor ("" when never written).
-fn read_legacy_slot(state: State, ctor: Ref, slot: Int) -> String {
+fn read_legacy_slot(state: State(host), ctor: Ref, slot: Int) -> String {
   case heap.read(state.heap, ctor) {
     Some(ObjectSlot(
       kind: NativeFunction(
@@ -416,10 +420,10 @@ fn read_legacy_slot(state: State, ctor: Ref, slot: Int) -> String {
 /// internal slots, deliberately NOT properties, so they never appear in
 /// Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
 fn write_legacy_slots(
-  h: Heap,
+  h: Heap(host),
   ctor: Ref,
   values: List(#(Int, String)),
-) -> Heap {
+) -> Heap(host) {
   heap.update(h, ctor, fn(slot) {
     case slot {
       ObjectSlot(
@@ -453,10 +457,10 @@ fn write_legacy_slots(
 /// a successful RegExpBuiltinExec. `captures` is the raw byte-offset capture
 /// list (whole match first, unset groups as start -1).
 fn update_legacy_statics(
-  state: State,
+  state: State(host),
   s: String,
   captures: List(#(Int, Int)),
-) -> State {
+) -> State(host) {
   let #(match_start, match_len) = case captures {
     [first, ..] -> first
     [] -> #(0, 0)
@@ -504,8 +508,8 @@ fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
 /// ES2024 §22.2.4.1 RegExp(pattern, flags)
 fn regexp_constructor(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let pattern = helpers.first_arg_or_undefined(args)
   let flags_arg = case args {
     [_, f, ..] -> f
@@ -547,10 +551,10 @@ fn regexp_constructor(
 /// §22.2.3.4 RegExpInitialize steps: coerce pattern/flags (undefined → ""),
 /// validate flags, allocate.
 fn regexp_initialize(
-  state: State,
+  state: State(host),
   p_val: JsValue,
   f_val: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
@@ -588,10 +592,10 @@ fn validate_flags_and_pattern(
 
 /// ToString, except undefined → "" (RegExpInitialize steps 1-2).
 fn to_string_or_empty(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(String, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsUndefined -> cont("", state)
     _ -> coerce.try_to_string(state, val, cont)
@@ -600,10 +604,10 @@ fn to_string_or_empty(
 
 /// §7.2.6 IsRegExp ( argument )
 fn try_is_regexp(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(Bool, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Bool, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsObject(ref) -> {
       use matcher, state <- state.try_op(ops_object.get_symbol_value(
@@ -621,7 +625,7 @@ fn try_is_regexp(
   }
 }
 
-fn has_regexp_slot(state: State, ref: Ref) -> Bool {
+fn has_regexp_slot(state: State(host), ref: Ref) -> Bool {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: RegExpObject(..), ..)) -> True
     _ -> False
@@ -646,20 +650,20 @@ fn validate_flag(
 }
 
 fn regexp_syntax_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
   #(State(..state, heap:), Error(err))
 }
 
 /// Allocate a RegExp object on the heap.
 pub fn alloc_regexp(
-  h: Heap,
+  h: Heap(host),
   regexp_proto: Ref,
   pattern: String,
   flags: String,
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   heap.alloc(
     h,
     ObjectSlot(
@@ -682,10 +686,10 @@ pub fn alloc_regexp(
 /// Require `this` to be an Object; pass its ref. TypeError otherwise.
 fn require_object(
   this: JsValue,
-  state: State,
+  state: State(host),
   method: String,
-  cont: fn(Ref, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Ref, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) -> cont(ref, state)
     _ ->
@@ -698,11 +702,11 @@ fn require_object(
 
 /// ? Get(O, name) through the full observable protocol (getters, proxies).
 fn try_get(
-  state: State,
+  state: State(host),
   ref: Ref,
   name: String,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   state.try_op(
     ops_object.get_value(state, ref, Named(name), JsObject(ref)),
     cont,
@@ -711,23 +715,23 @@ fn try_get(
 
 /// ? Get(O, key) on an arbitrary JsValue receiver (match-result objects).
 fn try_get_of(
-  state: State,
+  state: State(host),
   val: JsValue,
   key: value.PropertyKey,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   state.try_op(ops_object.get_value_of(state, val, key), cont)
 }
 
 /// ? Set(O, name, V, true) — throws TypeError when [[Set]] returns false
 /// (e.g. non-writable lastIndex).
 fn try_set_throw(
-  state: State,
+  state: State(host),
   ref: Ref,
   name: String,
   val: JsValue,
-  cont: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case ops_object.set_value(state, ref, Named(name), val, JsObject(ref)) {
     Ok(#(state, True)) -> cont(state)
     Ok(#(state, False)) ->
@@ -742,10 +746,10 @@ fn try_set_throw(
 /// §7.1.17 ToLength — full observable ToNumber (valueOf may run), clamped to
 /// [0, 2^53-1].
 fn try_to_length(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- coerce.try_to_number(state, val)
   let len = case n {
     Finite(f) -> int.clamp(value.float_to_int(f), 0, limits.max_safe_integer)
@@ -758,12 +762,12 @@ fn try_to_length(
 
 /// §7.1.5 ToIntegerOrInfinity followed by a clamp to [low, high].
 fn try_to_integer_clamp(
-  state: State,
+  state: State(host),
   val: JsValue,
   low: Int,
   high: Int,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- coerce.try_to_number(state, val)
   let i = case n {
     Finite(f) -> int.clamp(value.float_to_int(f), low, high)
@@ -776,10 +780,10 @@ fn try_to_integer_clamp(
 
 /// §7.1.7 ToUint32.
 fn try_to_uint32(
-  state: State,
+  state: State(host),
   val: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- coerce.try_to_number(state, val)
   let u = case n {
     Finite(f) -> {
@@ -798,11 +802,11 @@ fn try_to_uint32(
 /// return is Object or null), else falls back to RegExpBuiltinExec for real
 /// RegExp objects.
 fn try_regexp_exec(
-  state: State,
+  state: State(host),
   rx: JsValue,
   s: String,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case rx {
     JsObject(ref) -> {
       use exec_fn, state <- try_get(state, ref, "exec")
@@ -849,13 +853,13 @@ fn try_regexp_exec(
 /// §22.2.7.2 RegExpBuiltinExec ( R, S ) — returns the match-result array or
 /// null. lastIndex is read/written through the observable Get/Set protocol.
 fn try_builtin_exec(
-  state: State,
+  state: State(host),
   ref: Ref,
   pattern: String,
   flags: String,
   s: String,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let length = string.byte_size(s)
   // Step 2: lastIndex = ? ToLength(? Get(R, "lastIndex")) — always read.
   use li_val, state <- try_get(state, ref, "lastIndex")
@@ -908,12 +912,12 @@ fn try_builtin_exec(
 }
 
 fn maybe_write_last_index(
-  state: State,
+  state: State(host),
   ref: Ref,
   write: Bool,
   e: Int,
-  cont: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case write {
     True -> try_set_throw(state, ref, "lastIndex", value.from_int(e), cont)
     False -> cont(state)
@@ -923,14 +927,14 @@ fn maybe_write_last_index(
 /// Steps 17-34: build the match-result array with index/input/groups (and
 /// indices when the `d` flag is set).
 fn build_exec_result(
-  state: State,
+  state: State(host),
   s: String,
   captures: List(#(Int, Int)),
   names: List(#(String, Int)),
   match_start: Int,
   has_indices: Bool,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let match_values = case captures {
     [#(start, len), ..rest] -> [
       JsString(byte_slice(s, start, len)),
@@ -997,10 +1001,10 @@ fn build_exec_result(
 
 /// §22.2.7.8 MakeMatchIndicesIndexPairArray (byte-offset approximation).
 fn make_indices(
-  state: State,
+  state: State(host),
   captures: List(#(Int, Int)),
   names: List(#(String, Int)),
-) -> #(State, JsValue) {
+) -> #(State(host), JsValue) {
   let #(state, pair_values) =
     list.fold(captures, #(state, []), fn(acc, cap) {
       let #(state, vals) = acc
@@ -1073,9 +1077,9 @@ fn dedupe_group_values(
 
 /// OrdinaryObjectCreate(null) with named data properties.
 fn alloc_null_proto_object(
-  h: Heap,
+  h: Heap(host),
   props: List(#(String, value.Property)),
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   heap.alloc(
     h,
     ObjectSlot(
@@ -1107,8 +1111,8 @@ fn capture_to_value(str: String, cap: #(Int, Int)) -> JsValue {
 fn regexp_test(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use _ref, state <- require_object(this, state, ".test")
   let arg = helpers.first_arg_or_undefined(args)
   use str, state <- coerce.try_to_string(state, arg)
@@ -1120,8 +1124,8 @@ fn regexp_test(
 fn regexp_exec(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -1138,9 +1142,9 @@ fn regexp_exec(
 }
 
 fn not_regexp(
-  state: State,
+  state: State(host),
   method: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   state.type_error(
     state,
     "RegExp.prototype." <> method <> " requires that 'this' be a RegExp",
@@ -1152,8 +1156,8 @@ fn not_regexp(
 fn regexp_compile(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case compile_receiver_ok(state, ref) {
@@ -1192,7 +1196,7 @@ fn regexp_compile(
 /// the legacy-regexp proposal makes compile throw TypeError on subclass
 /// instances ([[LegacyFeaturesEnabled]] is false for them). Prototype
 /// identity is our approximation of that internal slot.
-fn compile_receiver_ok(state: State, ref: Ref) -> Bool {
+fn compile_receiver_ok(state: State(host), ref: Ref) -> Bool {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: RegExpObject(..), prototype: Some(proto), ..)) ->
       proto == state.builtins.regexp.prototype
@@ -1204,11 +1208,11 @@ fn compile_receiver_ok(state: State, ref: Ref) -> Bool {
 /// validate, swap [[OriginalSource]]/[[OriginalFlags]] in place, then
 /// Set(obj, "lastIndex", +0, true).
 fn do_compile(
-  state: State,
+  state: State(host),
   ref: Ref,
   p_val: JsValue,
   f_val: JsValue,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
@@ -1233,8 +1237,8 @@ fn do_compile(
 /// and `flags` through Get.
 fn regexp_to_string(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, ".toString")
   use src_val, state <- try_get(state, ref, "source")
   use src, state <- coerce.try_to_string(state, src_val)
@@ -1247,8 +1251,8 @@ fn regexp_to_string(
 /// "(?:)" special case for %RegExp.prototype% itself.
 fn regexp_get_source(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -1270,8 +1274,8 @@ fn regexp_get_source(
 /// through Get on any object and concatenates the canonical letters.
 fn regexp_get_flags(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, ".flags")
   build_flags(
     state,
@@ -1291,11 +1295,11 @@ fn regexp_get_flags(
 }
 
 fn build_flags(
-  state: State,
+  state: State(host),
   ref: Ref,
   pairs: List(#(String, String)),
   acc: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case pairs {
     [] -> #(state, Ok(JsString(acc)))
     [#(prop, ch), ..rest] -> {
@@ -1314,8 +1318,8 @@ fn build_flags(
 fn regexp_flag_getter(
   this: JsValue,
   flag: String,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -1390,8 +1394,8 @@ fn escape_terminator(ch: String) -> String {
 fn regexp_symbol_match(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, "[Symbol.match]")
   let arg = helpers.first_arg_or_undefined(args)
   use s, state <- coerce.try_to_string(state, arg)
@@ -1408,13 +1412,13 @@ fn regexp_symbol_match(
 }
 
 fn match_global_loop(
-  state: State,
+  state: State(host),
   rx: JsValue,
   ref: Ref,
   s: String,
   acc: List(JsValue),
   n: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   use result, state <- try_regexp_exec(state, rx, s)
   case result {
     JsNull ->
@@ -1434,12 +1438,12 @@ fn match_global_loop(
 /// On an empty match: lastIndex = AdvanceStringIndex(S, ToLength(Get(R,
 /// "lastIndex"))) via the observable protocol (§22.2.6.8 step 6.d.iv).
 fn advance_if_empty(
-  state: State,
+  state: State(host),
   ref: Ref,
   s: String,
   match_str: String,
-  cont: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case match_str {
     "" -> {
       use li_val, state <- try_get(state, ref, "lastIndex")
@@ -1459,8 +1463,8 @@ fn advance_if_empty(
 fn regexp_symbol_search(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, "[Symbol.search]")
   let arg = helpers.first_arg_or_undefined(args)
   use s, state <- coerce.try_to_string(state, arg)
@@ -1486,12 +1490,12 @@ fn regexp_symbol_search(
 /// If SameValue(current, target) is false, perform ? Set(R, "lastIndex",
 /// target, true) (§22.2.6.12 steps 4 and 8).
 fn set_unless_same_value(
-  state: State,
+  state: State(host),
   ref: Ref,
   current: JsValue,
   target: JsValue,
-  cont: fn(State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case value.same_value(current, target) {
     True -> cont(state)
     False -> try_set_throw(state, ref, "lastIndex", target, cont)
@@ -1506,8 +1510,8 @@ fn set_unless_same_value(
 fn regexp_symbol_replace(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, "[Symbol.replace]")
   let arg = helpers.first_arg_or_undefined(args)
   use s, state <- coerce.try_to_string(state, arg)
@@ -1544,13 +1548,14 @@ fn regexp_symbol_replace(
 /// Step 11: repeat RegExpExec, collecting non-null results; on an empty
 /// matched string advance lastIndex (observable).
 fn collect_replace_results(
-  state: State,
+  state: State(host),
   rx: JsValue,
   ref: Ref,
   s: String,
   acc: List(JsValue),
-  cont: fn(List(JsValue), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(List(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use result, state <- try_regexp_exec(state, rx, s)
   case result {
     JsNull -> cont(list.reverse(acc), state)
@@ -1565,14 +1570,14 @@ fn collect_replace_results(
 
 /// Step 14: process each match result in order, accumulating the output.
 fn process_replace_results(
-  state: State,
+  state: State(host),
   results: List(JsValue),
   s: String,
   length_s: Int,
   replacer: Replacer,
   next_pos: Int,
   acc: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case results {
     [] -> #(state, Ok(JsString(acc <> byte_drop_start(s, next_pos))))
     [result, ..rest] -> {
@@ -1637,13 +1642,14 @@ fn process_replace_results(
 
 /// 14.g: capN = Get(result, n); if not undefined, capN = ToString(capN).
 fn collect_coerced_captures(
-  state: State,
+  state: State(host),
   result: JsValue,
   n: Int,
   n_captures: Int,
   acc: List(JsValue),
-  cont: fn(List(JsValue), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(List(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case n > n_captures {
     True -> cont(list.reverse(acc), state)
     False -> {
@@ -1677,7 +1683,7 @@ fn collect_coerced_captures(
 /// 14.i-j: functional replace via Call, else GetSubstitution on the
 /// pre-tokenized template.
 fn compute_replacement(
-  state: State,
+  state: State(host),
   matched: String,
   s: String,
   position: Int,
@@ -1685,8 +1691,8 @@ fn compute_replacement(
   n_captures: Int,
   named_captures: JsValue,
   replacer: Replacer,
-  cont: fn(String, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case replacer {
     FunctionalReplacer(fun) -> {
       let base =
@@ -1726,10 +1732,11 @@ fn compute_replacement(
 }
 
 fn to_named_captures_object(
-  state: State,
+  state: State(host),
   named_captures: JsValue,
-  cont: fn(Option(JsValue), State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Option(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case named_captures {
     JsUndefined -> cont(None, state)
     JsNull -> state.type_error(state, "Cannot convert null to object")
@@ -1754,11 +1761,11 @@ type Replacer {
 /// Build the Replacer for [@@replace]. Non-functional replaceValue is coerced
 /// to a string and tokenized exactly once here.
 fn with_replacer(
-  state: State,
+  state: State(host),
   replace_value: JsValue,
   functional_replace: Bool,
-  cont: fn(Replacer, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Replacer, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case functional_replace {
     True -> cont(FunctionalReplacer(replace_value), state)
     False -> {
@@ -1938,7 +1945,7 @@ fn tokenize_two_digit(
 /// §22.1.3.19.1 GetSubstitution over a pre-tokenized template, CPS because
 /// "$<name>" performs an observable Get + ToString per occurrence.
 fn resolve_segments(
-  state: State,
+  state: State(host),
   segments: List(ReplaceSegment),
   matched: String,
   s: String,
@@ -1947,8 +1954,8 @@ fn resolve_segments(
   m: Int,
   named: Option(JsValue),
   acc: List(String),
-  cont: fn(String, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case segments {
     [] -> {
       let parts = list.reverse(acc)
@@ -1960,7 +1967,7 @@ fn resolve_segments(
       }
     }
     [seg, ..rest] -> {
-      let plain = fn(text: String, state: State) {
+      let plain = fn(text: String, state: State(host)) {
         resolve_segments(
           state,
           rest,
@@ -2056,8 +2063,8 @@ fn is_digit(ch: String) -> Bool {
 fn regexp_symbol_split(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, "[Symbol.split]")
   let arg = helpers.first_arg_or_undefined(args)
   use s, state <- coerce.try_to_string(state, arg)
@@ -2103,10 +2110,10 @@ fn regexp_symbol_split(
 }
 
 fn split_limit(
-  state: State,
+  state: State(host),
   limit_arg: JsValue,
-  cont: fn(Int, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case limit_arg {
     JsUndefined -> cont(4_294_967_295, state)
     _ -> try_to_uint32(state, limit_arg, cont)
@@ -2118,7 +2125,7 @@ fn split_limit(
 /// AdvanceStringIndex is next_char_boundary (a full UTF-8 character step,
 /// covering both unicode and non-unicode modes in the byte domain).
 fn split_loop(
-  state: State,
+  state: State(host),
   splitter: JsValue,
   sp_ref: Ref,
   s: String,
@@ -2128,7 +2135,7 @@ fn split_loop(
   q: Int,
   acc: List(JsValue),
   count: Int,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   case q >= size {
     // Step 18-19: append the remainder S[p..size] and return.
     True ->
@@ -2220,16 +2227,16 @@ fn split_loop(
 /// 17.d.iv.7-10: append captures Get(z, i) for i in 1..numberOfCaptures,
 /// stopping when the limit is reached.
 fn split_captures(
-  state: State,
+  state: State(host),
   z: JsValue,
   i: Int,
   n_caps: Int,
   acc: List(JsValue),
   count: Int,
   lim: Int,
-  cont: fn(#(List(JsValue), Int, Bool), State) ->
-    #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(#(List(JsValue), Int, Bool), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case i > n_caps {
     True -> cont(#(acc, count, False), state)
     False -> {
@@ -2246,10 +2253,10 @@ fn split_captures(
 
 /// §7.3.22 SpeciesConstructor ( O, %RegExp% )
 fn try_species_constructor(
-  state: State,
+  state: State(host),
   ref: Ref,
-  cont: fn(JsValue, State) -> #(State, Result(JsValue, JsValue)),
-) -> #(State, Result(JsValue, JsValue)) {
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let default_ctor = JsObject(state.builtins.regexp.constructor)
   use c, state <- try_get(state, ref, "constructor")
   case c {
@@ -2286,8 +2293,8 @@ fn try_species_constructor(
 fn regexp_symbol_match_all(
   this: JsValue,
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, "[Symbol.matchAll]")
   let arg = helpers.first_arg_or_undefined(args)
   use s, state <- coerce.try_to_string(state, arg)
@@ -2323,12 +2330,12 @@ fn regexp_symbol_match_all(
 /// %Iterator.prototype% and carries an own `next` method; its internal state
 /// lives in reserved symbol slots.
 fn create_regexp_string_iterator(
-  state: State,
+  state: State(host),
   matcher: JsValue,
   s: String,
   global: Bool,
   full_unicode: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, next_fn) =
     common.alloc_native_fn(
       state.heap,
@@ -2365,7 +2372,7 @@ type IterState {
   IterState(matcher: JsValue, string: String, global: Bool, done: Bool)
 }
 
-fn read_iter_state(state: State, ref: Ref) -> Option(IterState) {
+fn read_iter_state(state: State(host), ref: Ref) -> Option(IterState) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(symbol_properties: sp, ..)) -> {
       let find = fn(key) {
@@ -2392,7 +2399,7 @@ fn read_iter_state(state: State, ref: Ref) -> Option(IterState) {
   }
 }
 
-fn mark_iter_done(state: State, ref: Ref) -> State {
+fn mark_iter_done(state: State(host), ref: Ref) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
@@ -2414,8 +2421,8 @@ fn mark_iter_done(state: State, ref: Ref) -> State {
 /// §22.2.9.2.1 %RegExpStringIteratorPrototype%.next ( )
 fn regexp_string_iterator_next(
   this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case read_iter_state(state, ref) {
@@ -2462,10 +2469,10 @@ fn regexp_string_iterator_next(
 }
 
 fn iter_result(
-  state: State,
+  state: State(host),
   val: JsValue,
   done: Bool,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, result) =
     common.create_iter_result(state.heap, state.builtins, val, done)
   #(State(..state, heap:), Ok(result))

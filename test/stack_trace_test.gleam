@@ -8,7 +8,7 @@ import arc/vm/value.{JsString}
 import gleam/string
 
 /// Parse + compile + run JS source, return the completion value.
-fn run_js(source: String) -> Result(Completion, String) {
+fn run_js(source: String) -> Result(Completion(host), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(program) ->

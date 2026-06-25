@@ -29,7 +29,11 @@ import gleam/string_tree.{type StringTree}
 /// Set up the JSON global object.
 /// JSON is NOT a constructor — it's a plain object with static methods
 /// (like Math), per ES2024 S25.5.
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+pub fn init(
+  h: Heap(host),
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap(host), Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
       #("parse", JsonNative(JsonParse), 2),
@@ -48,8 +52,8 @@ pub fn dispatch(
   native: JsonNativeFn,
   args: List(JsValue),
   _this: JsValue,
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     JsonParse -> json_parse(args, state)
     JsonStringify -> json_stringify(args, state)
@@ -71,8 +75,8 @@ pub fn dispatch(
 ///   4. Return the parsed value.
 fn json_parse(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: ToString(text)
   let to_string_result = case args {
     [JsString(s), ..] -> Ok(#(s, state))
@@ -448,10 +452,10 @@ fn drop_bytes(bytes: BitArray, n: Int) -> BitArray {
 
 /// Materialize a parsed JsonValue into a JsValue, allocating objects on the heap.
 fn materialize(
-  h: Heap,
+  h: Heap(host),
   b: common.Builtins,
   val: JsonValue,
-) -> #(Heap, JsValue) {
+) -> #(Heap(host), JsValue) {
   case val {
     JsonNull -> #(h, JsNull)
     JsonBool(b_val) -> #(h, JsBool(b_val))
@@ -484,11 +488,11 @@ fn materialize(
 }
 
 fn materialize_list(
-  h: Heap,
+  h: Heap(host),
   b: common.Builtins,
   items: List(JsonValue),
   acc: List(JsValue),
-) -> #(Heap, List(JsValue)) {
+) -> #(Heap(host), List(JsValue)) {
   case items {
     [] -> #(h, list.reverse(acc))
     [item, ..rest] -> {
@@ -499,11 +503,11 @@ fn materialize_list(
 }
 
 fn materialize_object_entries(
-  h: Heap,
+  h: Heap(host),
   b: common.Builtins,
   entries: List(#(String, JsonValue)),
   acc: List(#(value.PropertyKey, Property)),
-) -> #(Heap, List(#(value.PropertyKey, Property))) {
+) -> #(Heap(host), List(#(value.PropertyKey, Property))) {
   case entries {
     [] -> #(h, list.reverse(acc))
     [#(key, val), ..rest] -> {
@@ -530,8 +534,8 @@ fn materialize_object_entries(
 /// value is not serializable.
 fn json_stringify(
   args: List(JsValue),
-  state: State,
-) -> #(State, Result(JsValue, JsValue)) {
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
   let replacer = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   let space = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
@@ -589,11 +593,11 @@ const revoked_proxy_msg = "Cannot perform 'IsArray' on a proxy that has been rev
 /// §25.5.2 step 4: derive ReplacerFunction (callable replacer) or
 /// PropertyList (array replacer) from the second argument.
 fn build_replacer(
-  state: State,
+  state: State(host),
   replacer: JsValue,
 ) -> Result(
-  #(#(Option(JsValue), Option(List(String))), State),
-  #(JsValue, State),
+  #(#(Option(JsValue), Option(List(String))), State(host)),
+  #(JsValue, State(host)),
 ) {
   case replacer {
     JsObject(ref) ->
@@ -624,13 +628,13 @@ fn build_replacer(
 /// element and convert it to a property-name string (String/Number primitives
 /// and String/Number wrapper objects only), deduplicating.
 fn collect_property_list(
-  state: State,
+  state: State(host),
   ref: Ref,
   k: Int,
   len: Int,
   seen: Set(String),
   acc: List(String),
-) -> Result(#(List(String), State), #(JsValue, State)) {
+) -> Result(#(List(String), State(host)), #(JsValue, State(host))) {
   case k >= len {
     True -> Ok(#(list.reverse(acc), state))
     False -> {
@@ -665,9 +669,9 @@ fn collect_property_list(
 /// is formatted, String/Number wrapper objects go through ToString (which can
 /// re-enter user toString/valueOf and throw); everything else is skipped.
 fn replacer_item(
-  state: State,
+  state: State(host),
   v: JsValue,
-) -> Result(#(Option(String), State), #(JsValue, State)) {
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
   case v {
     JsString(s) -> Ok(#(Some(s), state))
     JsNumber(_) -> {
@@ -691,9 +695,9 @@ fn replacer_item(
 /// Number/String wrapper objects are unwrapped via full ToNumber/ToString
 /// (observable valueOf/toString calls — abrupt completions propagate).
 fn compute_gap(
-  state: State,
+  state: State(host),
   space: JsValue,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   // Step 5: unwrap Number/String wrapper objects.
   use #(space, state) <- result.try(case space {
     JsObject(ref) ->
@@ -747,9 +751,9 @@ const max_safe_length = 9_007_199_254_740_991
 /// LengthOfArrayLike (§7.3.18): ToLength(? Get(obj, "length")). The Get goes
 /// through full [[Get]] (proxy traps, getters), ToNumber can re-enter valueOf.
 fn length_of_array_like(
-  state: State,
+  state: State(host),
   ref: Ref,
-) -> Result(#(Int, State), #(JsValue, State)) {
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   use #(len_val, state) <- result.try(objops.get_value(
     state,
     ref,
@@ -772,13 +776,13 @@ fn length_of_array_like(
 /// Some(json) or None when the value must be omitted (undefined / callable /
 /// symbol).
 fn serialize_property(
-  state: State,
+  state: State(host),
   ctx: StringifyCtx,
   stack: List(Int),
   indent: String,
   key: String,
   holder: Ref,
-) -> Result(#(Option(String), State), #(JsValue, State)) {
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
   // Step 1: value = ? Get(holder, key).
   use #(val, state) <- result.try(objops.get_value(
     state,
@@ -886,12 +890,12 @@ fn serialize_property(
 /// SerializeJSONObject (§25.5.2.4): keys from PropertyList (if present) or
 /// EnumerableOwnPropertyNames(value, key) (proxy ownKeys-trap aware).
 fn serialize_object(
-  state: State,
+  state: State(host),
   ctx: StringifyCtx,
   stack: List(Int),
   indent: String,
   ref: Ref,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   // Steps 1-2: circular detection on the serialization stack.
   case list.contains(stack, ref.id) {
     True -> coerce.thrown_type_error(state, circular_msg)
@@ -918,14 +922,14 @@ fn serialize_object(
 /// §25.5.2.4 step 8: serialize each key; omitted (undefined) members are
 /// skipped, present members render as quoted-key ":" [space] value.
 fn serialize_members(
-  state: State,
+  state: State(host),
   ctx: StringifyCtx,
   stack: List(Int),
   step_indent: String,
   ref: Ref,
   keys: List(String),
   acc: List(String),
-) -> Result(#(List(String), State), #(JsValue, State)) {
+) -> Result(#(List(String), State(host)), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(#(list.reverse(acc), state))
     [k, ..rest] -> {
@@ -958,12 +962,12 @@ fn serialize_members(
 /// SerializeJSONArray (§25.5.2.5): LengthOfArrayLike + per-index Get
 /// (proxy-trap aware); omitted elements serialize as "null".
 fn serialize_array(
-  state: State,
+  state: State(host),
   ctx: StringifyCtx,
   stack: List(Int),
   indent: String,
   ref: Ref,
-) -> Result(#(String, State), #(JsValue, State)) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   // Steps 1-2: circular detection.
   case list.contains(stack, ref.id) {
     True -> coerce.thrown_type_error(state, circular_msg)
@@ -985,7 +989,7 @@ fn serialize_array(
 
 /// §25.5.2.5 step 8: serialize indices 0..len-1 in order.
 fn serialize_elements(
-  state: State,
+  state: State(host),
   ctx: StringifyCtx,
   stack: List(Int),
   step_indent: String,
@@ -993,7 +997,7 @@ fn serialize_elements(
   i: Int,
   len: Int,
   acc: List(String),
-) -> Result(#(List(String), State), #(JsValue, State)) {
+) -> Result(#(List(String), State(host)), #(JsValue, State(host))) {
   case i >= len {
     True -> Ok(#(list.reverse(acc), state))
     False -> {
@@ -1118,9 +1122,9 @@ fn unicode_escape(code: Int) -> String {
 
 /// Create a SyntaxError and return it as an Error result.
 fn syntax_error(
-  state: State,
+  state: State(host),
   msg: String,
-) -> #(State, Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
   #(State(..state, heap:), Error(err))
 }

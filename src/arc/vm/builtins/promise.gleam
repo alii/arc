@@ -19,10 +19,10 @@ import gleam/option.{type Option, None, Some}
 /// Sets up Promise.prototype with instance methods (then, catch, finally)
 /// and the Promise constructor with static methods (resolve, reject).
 pub fn init(
-  h: Heap,
+  h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap, BuiltinType) {
+) -> #(Heap(host), BuiltinType) {
   // §27.2.5.4 Promise.prototype.then(onFulfilled, onRejected)
   // §27.2.5.1 Promise.prototype.catch(onRejected)
   // §27.2.5.3 Promise.prototype.finally(onFinally)
@@ -83,7 +83,10 @@ pub fn init(
 /// heap entry (data_ref) pointed to by the ObjectSlot's PromiseObject kind.
 ///
 /// Returns (heap, object_ref, data_ref).
-pub fn create_promise(h: Heap, promise_proto: Ref) -> #(Heap, Ref, Ref) {
+pub fn create_promise(
+  h: Heap(host),
+  promise_proto: Ref,
+) -> #(Heap(host), Ref, Ref) {
   // Steps 4-7: Initialize internal slots
   let #(h, data_ref) =
     heap.alloc(
@@ -132,11 +135,11 @@ pub fn create_promise(h: Heap, promise_proto: Ref) -> #(Heap, Ref, Ref) {
 ///
 /// Returns (heap, resolve_value, reject_value).
 pub fn create_resolving_functions(
-  h: Heap,
+  h: Heap(host),
   function_proto: Ref,
   promise_ref: Ref,
   data_ref: Ref,
-) -> #(Heap, JsValue, JsValue) {
+) -> #(Heap(host), JsValue, JsValue) {
   // Step 1: Let alreadyResolved be the Record { [[Value]]: false }.
   let #(h, already_resolved_ref) = heap.alloc(h, BoxSlot(value: JsBool(False)))
 
@@ -171,9 +174,9 @@ pub fn create_resolving_functions(
 ///
 /// Returns #(heap, promise_ref, data_ref, resolve_fn, reject_fn).
 pub fn new_promise_capability(
-  h: Heap,
+  h: Heap(host),
   b: Builtins,
-) -> #(Heap, Ref, Ref, JsValue, JsValue) {
+) -> #(Heap(host), Ref, Ref, JsValue, JsValue) {
   let #(h, promise_ref, data_ref) = create_promise(h, b.promise.prototype)
   let #(h, resolve, reject) =
     create_resolving_functions(h, b.function.prototype, promise_ref, data_ref)
@@ -197,10 +200,10 @@ pub fn new_promise_capability(
 /// TriggerPromiseReactions directly, we return the jobs as a list for the
 /// VM's job queue to drain.
 pub fn fulfill_promise(
-  h: Heap,
+  h: Heap(host),
   data_ref: Ref,
   result_value: JsValue,
-) -> #(Heap, List(Job)) {
+) -> #(Heap(host), List(Job)) {
   let #(h, jobs, _is_handled) =
     settle_promise(
       h,
@@ -220,13 +223,13 @@ pub fn fulfill_promise(
 /// Returns Some(is_handled) when the transition happened, None when the
 /// promise was already settled (soft no-op for the spec's pending Assert).
 fn settle_promise(
-  h: Heap,
+  h: Heap(host),
   data_ref: Ref,
   result_value: JsValue,
   pick_reactions: fn(List(PromiseReaction), List(PromiseReaction)) ->
     List(PromiseReaction),
   settled_state: value.PromiseState,
-) -> #(Heap, List(Job), Option(Bool)) {
+) -> #(Heap(host), List(Job), Option(Bool)) {
   case heap.read(h, data_ref) {
     Some(PromiseSlot(
       state: value.PromisePending,
@@ -284,10 +287,10 @@ fn settle_promise(
 /// Step 7: HostPromiseRejectionTracker — tracks unhandled rejections on State.
 /// Step 8 jobs are appended to state.job_queue.
 pub fn reject_promise(
-  state: state.State,
+  state: state.State(host),
   data_ref: Ref,
   reason: JsValue,
-) -> state.State {
+) -> state.State(host) {
   let #(h, jobs, settled) =
     settle_promise(
       state.heap,
@@ -353,13 +356,13 @@ pub fn reject_promise(
 /// Step 11c: HostPromiseRejectionTracker — untracks previously-unhandled
 /// rejections on State when a handler is attached.
 pub fn perform_promise_then(
-  state: state.State,
+  state: state.State(host),
   data_ref: Ref,
   on_fulfilled: JsValue,
   on_rejected: JsValue,
   child_resolve: JsValue,
   child_reject: JsValue,
-) -> state.State {
+) -> state.State(host) {
   let h = state.heap
   // §27.2.5.4 steps 3-4: If IsCallable(onFulfilled/onRejected) is false,
   // set to undefined. We use sentinel values instead of the spec's "empty".
@@ -460,7 +463,7 @@ pub fn perform_promise_then(
 /// We check for PromiseObject kind on the ObjectSlot rather than a
 /// [[PromiseState]] slot directly, since our representation stores promise
 /// state in a separate PromiseSlot referenced by the PromiseObject kind tag.
-pub fn is_promise(h: Heap, val: JsValue) -> Bool {
+pub fn is_promise(h: Heap(host), val: JsValue) -> Bool {
   case val {
     // Step 1: If x is not an Object, return false.
     // Step 2-3: Check for [[PromiseState]] via PromiseObject kind tag.
@@ -472,7 +475,7 @@ pub fn is_promise(h: Heap, val: JsValue) -> Bool {
 /// Non-spec utility: extract the internal PromiseSlot data ref from a promise
 /// object ref. Used to access [[PromiseState]]/[[PromiseResult]] etc.
 /// Returns None if the ref is not a promise object.
-pub fn get_data_ref(h: Heap, promise_ref: Ref) -> Option(Ref) {
+pub fn get_data_ref(h: Heap(host), promise_ref: Ref) -> Option(Ref) {
   heap.read_promise_data_ref(h, promise_ref)
 }
 
@@ -503,9 +506,12 @@ pub fn get_data_ref(h: Heap, promise_ref: Ref) -> Option(Ref) {
 ///   Error(#(None, state)) — not an object (step 8) or then not callable (step 12)
 ///   Error(#(Some(thrown), state)) — Get(resolution, "then") threw (step 10)
 pub fn get_thenable_then(
-  state: state.State,
+  state: state.State(host),
   val: JsValue,
-) -> Result(#(JsValue, state.State), #(option.Option(JsValue), state.State)) {
+) -> Result(
+  #(JsValue, state.State(host)),
+  #(option.Option(JsValue), state.State(host)),
+) {
   case val {
     // Step 8: If resolution is not an Object -> Error(None) (caller fulfills)
     JsObject(ref) ->
@@ -527,7 +533,7 @@ pub fn get_thenable_then(
 /// Non-spec utility: set [[PromiseIsHandled]] to true on a PromiseSlot.
 /// Corresponds to §27.2.5.4.1 step 12 and §27.2.1.7 step 7 context.
 /// Used for unhandled rejection tracking.
-fn mark_handled(h: Heap, data_ref: Ref) -> Heap {
+fn mark_handled(h: Heap(host), data_ref: Ref) -> Heap(host) {
   use slot <- heap.update(h, data_ref)
   case slot {
     PromiseSlot(..) -> PromiseSlot(..slot, is_handled: True)

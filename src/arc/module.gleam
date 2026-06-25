@@ -80,7 +80,7 @@ pub type ModuleBundle {
 // Errors
 // =============================================================================
 
-pub type ModuleError {
+pub type ModuleError(host) {
   ParseError(String)
   CompileError(String)
   ResolutionError(String)
@@ -88,14 +88,14 @@ pub type ModuleError {
   /// A module threw during evaluation. Carries both the thrown value and the
   /// heap it was allocated in — the value is a Ref into this heap, so callers
   /// must use it (not a pre-evaluation heap) to inspect the thrown object.
-  EvaluationError(value: JsValue, heap: Heap)
+  EvaluationError(value: JsValue, heap: Heap(host))
   /// Evaluation is parked on top-level await and the supplied `finish`
   /// driver did not settle it (only reachable with a non-draining driver —
   /// the dynamic-import path). `promise_data_ref` is the entry module's
   /// [[TopLevelCapability]] promise data: per Evaluate() step 4 the host
   /// must chain onto this promise (and hand any returned jobs to its own
   /// event loop) rather than treat the module as failed.
-  EvaluationPending(promise_data_ref: Ref, heap: Heap)
+  EvaluationPending(promise_data_ref: Ref, heap: Heap(host))
 }
 
 /// The successful result of `evaluate_bundle`: the entry module's completion
@@ -104,8 +104,8 @@ pub type ModuleError {
 /// live, TDZ-throwing, write-protected view of the export bindings. This is the
 /// embedder's `GetModuleNamespace` handle (cf. V8 `Module::GetModuleNamespace`,
 /// QuickJS `JS_GetModuleNamespace`).
-pub type EvaluatedBundle {
-  EvaluatedBundle(value: JsValue, heap: Heap, namespace: Option(JsValue))
+pub type EvaluatedBundle(host) {
+  EvaluatedBundle(value: JsValue, heap: Heap(host), namespace: Option(JsValue))
 }
 
 // =============================================================================
@@ -126,7 +126,7 @@ pub fn compile_bundle(
   entry_source: String,
   resolve: fn(String, String) -> Result(String, String),
   load: fn(String) -> Result(String, String),
-) -> Result(ModuleBundle, ModuleError) {
+) -> Result(ModuleBundle, ModuleError(host)) {
   // Adapt the runtime's raw-specifier resolver to the graph layer's
   // request-taking one.
   let resolve_request = fn(request: esm.ModuleRequest, referrer) {
@@ -146,7 +146,7 @@ pub fn compile_bundle(
   ModuleBundle(entry: entry_specifier, modules:)
 }
 
-fn graph_error(error: graph.GraphError) -> ModuleError {
+fn graph_error(error: graph.GraphError) -> ModuleError(host) {
   case error {
     graph.ParseFailed(specifier, parse_error) ->
       ParseError(
@@ -182,7 +182,7 @@ fn graph_error(error: graph.GraphError) -> ModuleError {
 /// analysis is already done (`node.summary`); this adds the bytecode stage.
 fn compile_source_module(
   node: graph.SourceModule,
-) -> Result(CompiledModule, ModuleError) {
+) -> Result(CompiledModule, ModuleError(host)) {
   let graph.SourceModule(
     specifier:,
     source: _,
@@ -512,7 +512,7 @@ const status_evaluating = "evaluating"
 const status_evaluated = "evaluated"
 
 fn read_hidden_cache(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   property: String,
   key: String,
@@ -528,12 +528,12 @@ fn read_hidden_cache(
 }
 
 fn write_hidden_cache(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   property: String,
   key: String,
   val: JsValue,
-) -> Heap {
+) -> Heap(host) {
   let #(h, cache_ref) = case
     object.get_own_property(h, global_object, value.Named(property))
   {
@@ -569,7 +569,7 @@ fn write_hidden_cache(
 /// Some("evaluated") once its body completed, Some("evaluating") while it
 /// runs (or is parked on top-level await), None when it has not started.
 pub fn evaluation_status(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
 ) -> Option(String) {
@@ -577,7 +577,7 @@ pub fn evaluation_status(
 }
 
 fn read_module_status(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
 ) -> Option(String) {
@@ -588,20 +588,24 @@ fn read_module_status(
 }
 
 fn write_module_status(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
   status: String,
-) -> Heap {
+) -> Heap(host) {
   write_hidden_cache(h, global_object, status_property, spec, JsString(status))
 }
 
-fn clear_module_status(h: Heap, global_object: Ref, spec: String) -> Heap {
+fn clear_module_status(
+  h: Heap(host),
+  global_object: Ref,
+  spec: String,
+) -> Heap(host) {
   write_hidden_cache(h, global_object, status_property, spec, JsUndefined)
 }
 
 fn read_module_error(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
 ) -> Option(JsValue) {
@@ -612,11 +616,11 @@ fn read_module_error(
 }
 
 fn write_module_error(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
   err: JsValue,
-) -> Heap {
+) -> Heap(host) {
   write_hidden_cache(h, global_object, error_cache_property, spec, err)
 }
 
@@ -648,9 +652,9 @@ pub type Linked {
 }
 
 /// Internal evaluation state threaded through the DFS.
-type EvalState {
+type EvalState(host) {
   EvalState(
-    heap: Heap,
+    heap: Heap(host),
     /// Specifiers whose body has finished successfully.
     evaluated: Set(String),
     /// Specifier → cached error for modules that threw during evaluation.
@@ -680,9 +684,9 @@ pub type LinkedBundle {
 /// namespace object and instantiates exported hoisted function declarations.
 pub fn link_for_evaluation(
   bundle: ModuleBundle,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
-) -> Result(#(Heap, LinkedBundle), ModuleError) {
+) -> Result(#(Heap(host), LinkedBundle), ModuleError(host)) {
   link_for_evaluation_reusing(bundle, heap, builtins, dict.new(), dict.new())
 }
 
@@ -695,11 +699,11 @@ pub fn link_for_evaluation(
 /// bodies never re-run.
 pub fn link_for_evaluation_reusing(
   bundle: ModuleBundle,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   preexisting: Dict(String, Ref),
   preexisting_deferred: Dict(String, Ref),
-) -> Result(#(Heap, LinkedBundle), ModuleError) {
+) -> Result(#(Heap(host), LinkedBundle), ModuleError(host)) {
   case link_bundle(bundle) {
     Error(message) -> {
       let #(heap, err) = common.make_syntax_error(heap, builtins, message)
@@ -756,12 +760,12 @@ pub fn link_for_evaluation_reusing(
 /// value and post-evaluation namespace.
 pub fn evaluate_linked(
   linked_bundle: LinkedBundle,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
-) -> Result(EvaluatedBundle, ModuleError) {
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(EvaluatedBundle(host), ModuleError(host)) {
   let #(_evaluated, _jobs, result) =
     evaluate_linked_tracking(
       linked_bundle,
@@ -795,13 +799,17 @@ pub fn evaluate_linked(
 /// (even when a later module's evaluation threw).
 pub fn evaluate_linked_tracking(
   linked_bundle: LinkedBundle,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
   already_evaluated: Set(String),
-) -> #(Set(String), List(value.Job), Result(EvaluatedBundle, ModuleError)) {
+) -> #(
+  Set(String),
+  List(value.Job),
+  Result(EvaluatedBundle(host), ModuleError(host)),
+) {
   let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
   let state =
     EvalState(
@@ -840,7 +848,7 @@ pub fn evaluate_linked_tracking(
 /// graph module (entry or dependency) reuses the same record (§16.2.1.8).
 pub fn linked_namespaces(
   linked_bundle: LinkedBundle,
-  heap: Heap,
+  heap: Heap(host),
 ) -> List(#(String, JsValue)) {
   dict.fold(linked_bundle.linked.namespace_boxes, [], fn(acc, spec, box) {
     case heap.read_box(heap, box) {
@@ -855,7 +863,7 @@ pub fn linked_namespaces(
 /// identical object ([[DeferredNamespace]] is per module record).
 pub fn linked_deferred_namespaces(
   linked_bundle: LinkedBundle,
-  heap: Heap,
+  heap: Heap(host),
 ) -> List(#(String, JsValue)) {
   dict.fold(linked_bundle.linked.deferred_boxes, [], fn(acc, spec, box) {
     case heap.read_box(heap, box) {
@@ -868,11 +876,11 @@ pub fn linked_deferred_namespaces(
 /// The Deferred Module Namespace for `spec`, creating one if no importer in
 /// the bundle deferred it statically (the dynamic `import.defer()` path).
 pub fn get_or_create_deferred_namespace(
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   linked_bundle: LinkedBundle,
   spec: String,
-) -> #(Heap, Option(JsValue)) {
+) -> #(Heap(host), Option(JsValue)) {
   let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
   use <- bool.lazy_guard(dict.has_key(bundle.modules, spec) == False, fn() {
     #(heap, None)
@@ -894,11 +902,11 @@ pub fn get_or_create_deferred_namespace(
 /// (dependencies first). Returns the entry module's completion value.
 pub fn evaluate_bundle(
   bundle: ModuleBundle,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  finish: fn(state.State) -> state.State,
-) -> Result(EvaluatedBundle, ModuleError) {
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(EvaluatedBundle(host), ModuleError(host)) {
   evaluate_bundle_prepared(
     bundle,
     heap,
@@ -917,12 +925,12 @@ pub fn evaluate_bundle(
 /// `Atomics.wait` before any host function has run.
 pub fn evaluate_bundle_prepared(
   bundle: ModuleBundle,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
-) -> Result(EvaluatedBundle, ModuleError) {
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> Result(EvaluatedBundle(host), ModuleError(host)) {
   use #(heap, linked_bundle) <- result.try(link_for_evaluation(
     bundle,
     heap,
@@ -938,7 +946,7 @@ pub fn evaluate_bundle_prepared(
 fn entry_namespace(
   linked: Linked,
   entry: String,
-  heap: Heap,
+  heap: Heap(host),
 ) -> Option(JsValue) {
   case dict.get(linked.namespace_boxes, entry) {
     Ok(box) -> heap.read_box(heap, box)
@@ -955,7 +963,7 @@ fn entry_namespace(
 /// ReferenceError — there is no JS context to throw into here, and after a
 /// completed `evaluate_bundle` an entry export is always initialized anyway.
 pub fn read_export(
-  heap: Heap,
+  heap: Heap(host),
   namespace: JsValue,
   name: String,
 ) -> Option(JsValue) {
@@ -978,13 +986,13 @@ pub fn read_export(
 fn eval_module_inner(
   bundle: ModuleBundle,
   linked: Linked,
-  state: EvalState,
+  state: EvalState(host),
   specifier: String,
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
-) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // Already evaluated successfully — either in this DFS or recorded in the
   // realm's heap-resident status registry (a deferred-namespace trigger may
   // have evaluated it mid-DFS, re-entrantly).
@@ -1042,14 +1050,14 @@ fn eval_module_inner(
 fn eval_module_body(
   bundle: ModuleBundle,
   linked: Linked,
-  state: EvalState,
+  state: EvalState(host),
   specifier: String,
   compiled: CompiledModule,
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
-) -> #(EvalState, Result(#(JsValue, Heap), ModuleError)) {
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // Mark as evaluating
   let state =
     EvalState(..state, evaluating: set.insert(state.evaluating, specifier))
@@ -1236,13 +1244,13 @@ fn eval_module_body(
 fn run_module_with_referrer(
   specifier: String,
   template: value.FuncTemplate,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
-  prepare: fn(state.State) -> state.State,
-  finish: fn(state.State) -> state.State,
-) -> entry.ModuleResult {
+  prepare: fn(state.State(host)) -> state.State(host),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> entry.ModuleResult(host) {
   let key = value.Named(dynamic_import.referrer_property)
   let previous = case object.get_own_property(heap, global_object, key) {
     Some(value.DataProperty(value: v, ..)) -> v
@@ -1277,7 +1285,7 @@ fn run_module_with_referrer(
 /// Allocate a GC-rooted BoxSlot holding `val`. Module binding cells are rooted
 /// so they survive collection between a dependency being linked and its
 /// importer's body running (they live for the duration of the module graph).
-fn alloc_box(heap: Heap, val: JsValue) -> #(Heap, Ref) {
+fn alloc_box(heap: Heap(host), val: JsValue) -> #(Heap(host), Ref) {
   let #(heap, ref) = heap.alloc(heap, BoxSlot(val))
   #(heap.root(heap, ref), ref)
 }
@@ -1295,10 +1303,10 @@ fn alloc_box(heap: Heap, val: JsValue) -> #(Heap, Ref) {
 /// bindings are shared across bundles.
 fn build_linked(
   bundle: ModuleBundle,
-  heap: Heap,
+  heap: Heap(host),
   preexisting: Dict(String, #(Ref, Dict(String, Ref))),
   preexisting_deferred: Dict(String, Ref),
-) -> #(Heap, Linked, List(#(String, Ref))) {
+) -> #(Heap(host), Linked, List(#(String, Ref))) {
   let #(heap, local_boxes) = preallocate_local_boxes(bundle, heap, preexisting)
   let specs = dict.keys(bundle.modules)
   // Reserve a namespace object ref per module, then a rooted box wrapping it,
@@ -1442,7 +1450,7 @@ fn ordered_requests(compiled: CompiledModule) -> List(#(String, Bool)) {
 /// needs to run an async body. Returns (modules in discovery order, seen).
 fn gather_async_transitive_deps(
   bundle: ModuleBundle,
-  state: EvalState,
+  state: EvalState(host),
   global_object: Ref,
   spec: String,
   seen: Set(String),
@@ -1489,11 +1497,15 @@ fn gather_async_transitive_deps(
 /// `Error`.
 pub fn evaluate_async_transitive_deps(
   linked_bundle: LinkedBundle,
-  heap: Heap,
+  heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  finish: fn(state.State) -> state.State,
-) -> #(Heap, List(value.Job), Result(List(#(String, Ref)), ModuleError)) {
+  finish: fn(state.State(host)) -> state.State(host),
+) -> #(
+  Heap(host),
+  List(value.Job),
+  Result(List(#(String, Ref)), ModuleError(host)),
+) {
   let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
   let eval_state =
     EvalState(
@@ -1552,10 +1564,10 @@ pub fn evaluate_async_transitive_deps(
 /// later deferred-namespace trigger sees ~evaluated~ instead of a stuck
 /// ~evaluating~.
 pub fn record_module_evaluated(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
-) -> Heap {
+) -> Heap(host) {
   write_module_status(h, global_object, spec, status_evaluated)
 }
 
@@ -1563,11 +1575,11 @@ pub fn record_module_evaluated(
 /// registry (AsyncModuleExecutionRejected) — later imports and
 /// deferred-namespace triggers rethrow the same error.
 pub fn record_module_error(
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
   err: JsValue,
-) -> Heap {
+) -> Heap(host) {
   write_module_error(h, global_object, spec, err)
 }
 
@@ -1603,9 +1615,9 @@ fn instantiate_hoisted_functions(
   bundle: ModuleBundle,
   linked: Linked,
   builtins: Builtins,
-  heap: Heap,
+  heap: Heap(host),
   already_evaluated: Set(String),
-) -> Heap {
+) -> Heap(host) {
   dict.fold(bundle.modules, heap, fn(heap, spec, compiled) {
     // A preexisting module's export cells hold their final values — don't
     // overwrite them with link-time placeholder closures.
@@ -1651,9 +1663,9 @@ fn instantiate_hoisted_functions(
 /// entries, so re-exports from other bundles resolve to the original cells.
 fn preallocate_local_boxes(
   bundle: ModuleBundle,
-  heap: Heap,
+  heap: Heap(host),
   preexisting: Dict(String, #(Ref, Dict(String, Ref))),
-) -> #(Heap, Dict(String, Dict(String, Ref))) {
+) -> #(Heap(host), Dict(String, Dict(String, Ref))) {
   dict.fold(bundle.modules, #(heap, dict.new()), fn(acc, spec, m) {
     let #(heap, all) = acc
     case dict.get(preexisting, spec) {
@@ -1688,7 +1700,7 @@ fn preallocate_local_boxes(
 /// the export name → BoxSlot-ref map (so [[Get]] re-reads the live cell and
 /// throws on TDZ), null prototype, non-extensible, with @@toStringTag = "Module"
 /// (§28.3.1, the all-false attributes of value.data).
-fn namespace_slot(exports: Dict(String, Ref)) -> state.HeapSlot {
+fn namespace_slot(exports: Dict(String, Ref)) -> state.HeapSlot(host) {
   namespace_slot_tagged(exports, "Module")
 }
 
@@ -1697,7 +1709,7 @@ fn namespace_slot(exports: Dict(String, Ref)) -> state.HeapSlot {
 fn namespace_slot_tagged(
   exports: Dict(String, Ref),
   tag: String,
-) -> state.HeapSlot {
+) -> state.HeapSlot(host) {
   ObjectSlot(
     kind: value.ModuleNamespace(exports:),
     properties: dict.new(),
@@ -1730,13 +1742,13 @@ fn namespace_slot_tagged(
 
 /// Write the reserved `proxy_ref` as a Deferred Module Namespace for `spec`.
 fn fill_deferred_namespace(
-  h: Heap,
+  h: Heap(host),
   builtins: Builtins,
   bundle: ModuleBundle,
   linked: Linked,
   spec: String,
   proxy_ref: Ref,
-) -> Heap {
+) -> Heap(host) {
   let exports = dict.get(linked.exports, spec) |> result.unwrap(dict.new())
   let #(h, target_ref) =
     heap.alloc(h, namespace_slot_tagged(exports, "Deferred Module"))
@@ -1808,7 +1820,7 @@ fn fill_deferred_namespace(
 /// when the key is a string other than "then" — IsSymbolLikeNamespaceKey),
 /// then forward to the target via the corresponding Reflect builtin.
 fn alloc_deferred_trap(
-  h: Heap,
+  h: Heap(host),
   builtins: Builtins,
   name: String,
   arity: Int,
@@ -1817,7 +1829,7 @@ fn alloc_deferred_trap(
   bundle: ModuleBundle,
   linked: Linked,
   spec: String,
-) -> #(Heap, Ref) {
+) -> #(Heap(host), Ref) {
   common.alloc_host_fn(
     h,
     builtins.function.prototype,
@@ -1868,12 +1880,12 @@ fn alloc_deferred_trap(
 /// unevaluated subgraph), throw a TypeError; otherwise EvaluateSync — run the
 /// deferred subgraph's bodies right now, on the current VM state.
 fn ensure_deferred_evaluated(
-  state: State,
+  state: State(host),
   bundle: ModuleBundle,
   linked: Linked,
   spec: String,
   builtins: Builtins,
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   let global_object = state.ctx.global_object
   case read_module_status(state.heap, global_object, spec) {
     Some("evaluated") -> Ok(state)
@@ -1910,7 +1922,7 @@ fn ensure_deferred_evaluated(
 /// is neither mid-evaluation nor a top-level-await module.
 fn ready_for_sync_execution(
   bundle: ModuleBundle,
-  h: Heap,
+  h: Heap(host),
   global_object: Ref,
   spec: String,
   seen: Set(String),
@@ -1954,12 +1966,12 @@ fn ready_for_sync_execution(
 /// earlier trigger) are not re-run. Jobs enqueued by the bodies are handed to
 /// the currently running VM's job queue — never drained re-entrantly.
 fn evaluate_deferred_subgraph(
-  state: State,
+  state: State(host),
   bundle: ModuleBundle,
   linked: Linked,
   spec: String,
   builtins: Builtins,
-) -> Result(State, #(JsValue, State)) {
+) -> Result(State(host), #(JsValue, State(host))) {
   let global_object = state.ctx.global_object
   let specs = dict.keys(bundle.modules)
   let #(evaluated, evaluating) =

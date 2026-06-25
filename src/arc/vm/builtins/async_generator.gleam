@@ -11,11 +11,11 @@ import arc/vm/value.{
 /// Set up AsyncGenerator.prototype with .next/.return/.throw.
 /// Inherits from %AsyncIteratorPrototype%.
 pub fn init(
-  h: Heap(ctx),
+  h: Heap(ctx, host),
   async_iterator_proto: Ref,
   function_proto: Ref,
   function_ctor: Ref,
-) -> #(Heap(ctx), GeneratorBuiltin) {
+) -> #(Heap(ctx, host), GeneratorBuiltin) {
   let #(h, methods) =
     common.alloc_call_methods(h, function_proto, [
       #("next", AsyncGeneratorNext, 1),
