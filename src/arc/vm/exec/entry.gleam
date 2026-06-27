@@ -84,6 +84,8 @@ pub fn new_repl_env(global_object: Ref) -> ReplEnv {
 
 /// Run a function template with a globalThis object, then drain microtasks.
 /// No macrotask loop — for that, pass a driver to `run_with`.
+/// Boots with `state.default_host_hooks()` (no host capabilities); embedders
+/// that need them use `run_with_hooks`.
 pub fn run(
   func: FuncTemplate,
   heap: Heap(host),
@@ -97,7 +99,7 @@ pub fn run(
 /// receives the State after the top-level script returns and is expected
 /// to drain microtasks plus whatever macrotask loop the embedder owns
 /// (e.g. `arc/beam.run`). Core's `event_loop.finish` is the no-macrotask
-/// default.
+/// default. Boots with `state.default_host_hooks()`.
 pub fn run_with(
   func: FuncTemplate,
   heap: Heap(host),
@@ -105,26 +107,40 @@ pub fn run_with(
   global_object: Ref,
   finish: fn(State(host)) -> State(host),
 ) -> Result(Completion(host), VmError) {
-  run_prepared(func, heap, builtins, global_object, fn(s) { s }, finish)
+  run_with_hooks(
+    func,
+    heap,
+    builtins,
+    global_object,
+    state.default_host_hooks(),
+    finish,
+  )
 }
 
-/// `run_with` with an embedder `prepare` hook applied to the freshly booted
-/// State BEFORE the top-level script executes — the injection point for the
-/// host Atomics capabilities (`host.install_atomics_capabilities`), which
-/// must be present mid-script for a top-level blocking `Atomics.wait`, not
-/// only once the post-script `finish` driver takes over. Mirrors
-/// `run_and_drain_repl_with`'s `prepare`.
-pub fn run_prepared(
+/// `run_with` with the embedder's `state.HostHooks` (host capabilities such
+/// as the Atomics blocking wait / wake delivery). The hooks are supplied
+/// once, at State construction, and carried on the realm context
+/// (`RealmCtx.host_hooks`), so every derived State — child realms, eval and
+/// Function realms, module bodies — inherits them; there is no per-call-site
+/// install step to forget. `run`/`run_with` pass `state.default_host_hooks()`
+/// (no capabilities — a blocking `Atomics.wait` then throws per DoWait).
+pub fn run_with_hooks(
   func: FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(State(host)) -> State(host),
+  host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> Result(Completion(host), VmError) {
   let executed =
-    interpreter.init_state(func, heap, builtins, global_object, False)
-    |> prepare
+    interpreter.init_state(
+      func,
+      heap,
+      builtins,
+      global_object,
+      False,
+      host_hooks,
+    )
     |> interpreter.execute_inner()
   use #(settled, drained) <- result.map(settle(executed, finish))
   completion_of(settled, drained.heap)
@@ -136,17 +152,18 @@ pub fn run_prepared(
 /// export cells in their declared slots — ES live bindings (§16.2). Reads/writes
 /// go through GetBoxed/PutBoxed. Module `this` is undefined per ES §16.2.1.5.2.
 ///
-/// `prepare` transforms the freshly booted State before the body executes —
-/// the per-module-body injection point for the host Atomics capabilities
-/// (each body gets a fresh State, so capabilities installed during a
-/// previous body do not carry over). Pass `fn(s) { s }` for none.
+/// `host_hooks` are the embedder's host capabilities (Atomics blocking
+/// wait / wake delivery), supplied at State construction and carried on the
+/// realm context. Each module body boots a fresh State, so the hooks must be
+/// threaded here rather than installed after the fact; pass
+/// `state.default_host_hooks()` for none.
 pub fn run_module(
   func: FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
-  prepare: fn(State(host)) -> State(host),
+  host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> ModuleResult(host) {
   let locals = interpreter.init_module_locals(func, seeds)
@@ -160,8 +177,9 @@ pub fn run_module(
       dict.new(),
       dict.new(),
       dict.new(),
+      host_hooks,
     )
-  case interpreter.execute_inner(prepare(state)) {
+  case interpreter.execute_inner(state) {
     Error(vm_err) -> ModuleError(error: vm_err)
     Ok(#(AwaitCompletion(awaited_value, h), suspended)) ->
       drive_top_level_await(func, awaited_value, h, suspended, finish)
@@ -307,6 +325,8 @@ fn do_remaining_jobs(
 
 /// Like run, but persists globals across calls.
 /// Used by the REPL so var declarations and function definitions survive.
+/// Boots with `state.default_host_hooks()`; embedders that need host
+/// capabilities use `run_and_drain_repl_with`.
 pub fn run_and_drain_repl(
   func: FuncTemplate,
   heap: Heap(host),
@@ -318,24 +338,25 @@ pub fn run_and_drain_repl(
     heap,
     builtins,
     env,
-    fn(s) { s },
+    state.default_host_hooks(),
     event_loop.drain_jobs,
   )
 }
 
-/// `run_and_drain_repl` with embedder hooks: `prepare` transforms the
-/// freshly booted State before execution (the injection point for the host
-/// Atomics capabilities — `host.install_atomics_capabilities` — which are
-/// per-State, not process-global), and `finish` is the post-script driver
-/// (e.g. a notify-consuming embedder loop like `beam.settle_pending_wakes`
-/// instead of the default microtask drain). Used by the test262 harness,
-/// whose per-test worker processes drive the event loop directly.
+/// `run_and_drain_repl` with embedder hooks: `host_hooks` carries the host
+/// capabilities (Atomics blocking wait / wake delivery) into the freshly
+/// booted State's realm context — supplied once at construction and
+/// inherited by every derived State (child realms, eval realms, module
+/// bodies) — and `finish` is the post-script driver (e.g. a
+/// notify-consuming embedder loop like `beam.settle_pending_wakes` instead
+/// of the default microtask drain). Used by the test262 harness, whose
+/// per-test worker processes drive the event loop directly.
 pub fn run_and_drain_repl_with(
   func: FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   env: ReplEnv,
-  prepare: fn(State(host)) -> State(host),
+  host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Completion(host), ReplEnv), VmError) {
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
@@ -351,10 +372,11 @@ pub fn run_and_drain_repl_with(
       env.lexical_globals,
       env.symbol_descriptions,
       env.symbol_registry,
+      host_hooks,
     )
   let run_state = State(..base, ctx: RealmCtx(..base.ctx, realms: env.realms))
   use #(settled, drained) <- result.map(settle(
-    interpreter.execute_inner(prepare(run_state)),
+    interpreter.execute_inner(run_state),
     finish,
   ))
   let new_env =
@@ -474,6 +496,9 @@ fn add_job_roots(acc: set.Set(Int), job: value.Job) -> set.Set(Int) {
 /// `run`/`run_with`: a thrown value is a `ThrowCompletion`, an engine `VmError`
 /// surfaces as `Error` (not a panic — the embedder is outside the VM and can
 /// handle it). Draining happens once, at this outermost call.
+///
+/// `host_hooks` carries the embedder's host capabilities into the fresh root
+/// State (pass `state.default_host_hooks()` for none).
 pub fn run_export(
   callee: JsValue,
   this_val: JsValue,
@@ -481,10 +506,19 @@ pub fn run_export(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
+  host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> Result(Completion(host), VmError) {
   use #(settled, drained) <- result.map(settle(
-    interpreter.call_root(callee, this_val, args, heap, builtins, global_object),
+    interpreter.call_root(
+      callee,
+      this_val,
+      args,
+      heap,
+      builtins,
+      global_object,
+      host_hooks,
+    ),
     finish,
   ))
   completion_of(settled, drained.heap)

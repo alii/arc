@@ -9,6 +9,7 @@
 /// Based on ECMAScript §16.2 and QuickJS's module implementation.
 import arc/compiler
 import arc/esm
+import arc/link
 import arc/module/graph
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
@@ -187,11 +188,12 @@ fn compile_source_module(
     specifier:,
     source: _,
     program:,
+    sb:,
     summary:,
     specifier_map:,
   ) = node
   use #(template, scope_dict, hoisted_funcs) <- result.map(
-    compiler.compile_module(program, summary)
+    compiler.compile_module(program, sb, summary)
     |> result.map_error(fn(err) {
       case err {
         compiler.Unsupported(desc) ->
@@ -232,7 +234,7 @@ fn compile_source_module(
 }
 
 /// [[HasTLA]]: whether the module body contains a top-level `await`. `await`
-/// inside nested functions compiles into CHILD templates, so an Await opcode
+/// inside nested functions compiles into child templates, so an Await opcode
 /// in the module's own bytecode is exactly a top-level await.
 fn module_has_tla(template: value.FuncTemplate) -> Bool {
   tuple_array.to_list(template.bytecode)
@@ -242,248 +244,30 @@ fn module_has_tla(template: value.FuncTemplate) -> Bool {
 // =============================================================================
 // Linking — ResolveExport (§16.2.1.6.3) + import/re-export checks (§16.2.1.6.4)
 // =============================================================================
+//
+// The resolve algorithm and the SyntaxError-producing import/re-export checks
+// live in `arc/link`, operating on a minimal `link.LinkableGraph` view. The VM
+// projects a bundle into that view (`linkable_of_bundle`) and calls
+// `link.validate` / `link.resolve_export` / `link.exported_names`.
 
-/// Result of resolving an export name through a module graph.
-type ExportResolution {
-  /// Resolves to a concrete binding `binding` owned by module `module`.
-  ResolvedTo(module: String, binding: String)
-  /// Resolves to a module namespace object (`export * as ns from`, or
-  /// `export { ns }` of an `import * as ns` binding).
-  ResolvedNamespace(module: String)
-  /// Resolves to a DEFERRED module namespace (`export { ns }` of an
-  /// `import defer * as ns` binding) — importers receive the deferred proxy.
-  ResolvedDeferredNamespace(module: String)
-  /// No export of this name exists (or only via a circular path).
-  Unresolvable
-  /// Two distinct `export *` sources provide the name — ambiguous.
-  Ambiguous
-}
-
-/// §16.2.1.6.3 ResolveExport. `resolve_set` guards circular re-exports.
-fn resolve_export(
-  bundle: ModuleBundle,
-  specifier: String,
-  name: String,
-  resolve_set: Set(#(String, String)),
-) -> ExportResolution {
-  case set.contains(resolve_set, #(specifier, name)) {
-    // Already resolving this exact export → circular request, not resolvable.
-    True -> Unresolvable
-    False ->
-      case dict.get(bundle.modules, specifier) {
-        Error(Nil) -> Unresolvable
-        Ok(m) ->
-          resolve_export_in(
-            bundle,
-            m,
-            specifier,
-            name,
-            set.insert(resolve_set, #(specifier, name)),
-          )
-      }
-  }
-}
-
-fn resolve_export_in(
-  bundle: ModuleBundle,
-  m: CompiledModule,
-  specifier: String,
-  name: String,
-  resolve_set: Set(#(String, String)),
-) -> ExportResolution {
-  // Direct local export, then named/namespace re-export, take priority over
-  // `export *` (§16.2.1.6.3 steps 4–6 before step 7).
-  let direct =
-    list.find_map(m.export_entries, fn(e) {
-      case e {
-        esm.LocalExport(export_name:, local_name:) if export_name == name ->
-          Ok(resolve_local_export(bundle, m, specifier, local_name, resolve_set))
-        esm.ReExport(export_name:, imported_name:, source_specifier:)
-          if export_name == name
-        -> {
-          let src = resolved_specifier(m, source_specifier)
-          Ok(resolve_export(bundle, src, imported_name, resolve_set))
-        }
-        esm.ReExportNamespace(export_name:, source_specifier:)
-          if export_name == name
-        -> Ok(ResolvedNamespace(resolved_specifier(m, source_specifier)))
-        _ -> Error(Nil)
-      }
-    })
-  case direct {
-    Ok(resolution) -> resolution
-    // `default` is never provided by `export *` (step 6).
-    Error(Nil) ->
-      case name {
-        "default" -> Unresolvable
-        _ -> resolve_star_exports(bundle, m, name, resolve_set)
-      }
-  }
-}
-
-/// A LocalExport (`export { x }` / `export let x`) whose local name is an
-/// IMPORT binding is really a re-export: `import { a } from "m"; export { a }`
-/// resolves through "m" (§16.2.1.6.3 — the binding is the imported one), and
-/// `import [defer] * as ns from "m"; export { ns }` resolves to "m"'s
-/// (deferred) namespace. Genuine local bindings resolve to their own cell.
-fn resolve_local_export(
-  bundle: ModuleBundle,
-  m: CompiledModule,
-  specifier: String,
-  local_name: String,
-  resolve_set: Set(#(String, String)),
-) -> ExportResolution {
-  let import_binding =
-    list.find_map(m.import_bindings, fn(entry) {
-      let #(raw_dep, bindings) = entry
-      list.find_map(bindings, fn(binding) {
-        case binding {
-          esm.NamedImport(local:, ..) if local == local_name ->
-            Ok(#(raw_dep, binding))
-          esm.DefaultImport(local:) if local == local_name ->
-            Ok(#(raw_dep, binding))
-          esm.NamespaceImport(local:, ..) if local == local_name ->
-            Ok(#(raw_dep, binding))
-          _ -> Error(Nil)
-        }
-      })
-    })
-  case import_binding {
-    Error(Nil) -> ResolvedTo(specifier, local_name)
-    Ok(#(raw_dep, binding)) -> {
-      let dep = resolved_specifier(m, raw_dep)
-      case binding {
-        esm.NamedImport(imported:, ..) ->
-          resolve_export(bundle, dep, imported, resolve_set)
-        esm.DefaultImport(..) ->
-          resolve_export(bundle, dep, "default", resolve_set)
-        esm.NamespaceImport(phase: esm.Deferred, ..) ->
-          ResolvedDeferredNamespace(dep)
-        esm.NamespaceImport(phase: esm.Default, ..) -> ResolvedNamespace(dep)
-      }
-    }
-  }
-}
-
-/// §16.2.1.6.3 step 7: gather across `export *` sources, flagging ambiguity.
-fn resolve_star_exports(
-  bundle: ModuleBundle,
-  m: CompiledModule,
-  name: String,
-  resolve_set: Set(#(String, String)),
-) -> ExportResolution {
-  let star_sources =
-    list.filter_map(m.export_entries, fn(e) {
-      case e {
-        esm.ReExportAll(source_specifier:) ->
-          Ok(resolved_specifier(m, source_specifier))
-        _ -> Error(Nil)
-      }
-    })
-  list.fold(star_sources, Unresolvable, fn(acc, src) {
-    case acc {
-      Ambiguous -> Ambiguous
-      _ ->
-        case resolve_export(bundle, src, name, resolve_set), acc {
-          Ambiguous, _ -> Ambiguous
-          Unresolvable, _ -> acc
-          found, Unresolvable -> found
-          ResolvedTo(m1, b1), ResolvedTo(m2, b2) ->
-            case m1 == m2 && b1 == b2 {
-              True -> acc
-              False -> Ambiguous
-            }
-          ResolvedNamespace(m1), ResolvedNamespace(m2) ->
-            case m1 == m2 {
-              True -> acc
-              False -> Ambiguous
-            }
-          ResolvedDeferredNamespace(m1), ResolvedDeferredNamespace(m2) ->
-            case m1 == m2 {
-              True -> acc
-              False -> Ambiguous
-            }
-          _, _ -> Ambiguous
-        }
-    }
+/// Project a compiled bundle onto the shared `link.LinkableGraph` view: a
+/// trivial per-module field copy of the three string-level fields the resolver
+/// reads.
+fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
+  dict.map_values(bundle.modules, fn(specifier, m) {
+    link.LinkableModule(
+      specifier:,
+      import_bindings: m.import_bindings,
+      export_entries: m.export_entries,
+      specifier_map: m.specifier_map,
+    )
   })
 }
 
+/// The resolved specifier a raw specifier maps to within module `m` (VM-side;
+/// reads the per-module specifier_map, not the bundle).
 fn resolved_specifier(m: CompiledModule, raw: String) -> String {
   dict.get(m.specifier_map, raw) |> result.unwrap(raw)
-}
-
-/// Verify every import and indirect re-export in the graph resolves to a
-/// unique binding. Returns the SyntaxError message for the first failure.
-fn link_bundle(bundle: ModuleBundle) -> Result(Nil, String) {
-  list.try_each(dict.to_list(bundle.modules), fn(entry) {
-    let #(specifier, m) = entry
-    use _ <- result.try(check_imports(bundle, m))
-    check_indirect_exports(bundle, specifier, m)
-  })
-}
-
-fn check_imports(
-  bundle: ModuleBundle,
-  m: CompiledModule,
-) -> Result(Nil, String) {
-  list.try_each(m.import_bindings, fn(entry) {
-    let #(raw_dep, bindings) = entry
-    let dep = resolved_specifier(m, raw_dep)
-    list.try_each(bindings, fn(binding) {
-      case binding {
-        // `import * as ns` always resolves (the namespace gathers names).
-        esm.NamespaceImport(..) -> Ok(Nil)
-        esm.NamedImport(imported:, ..) ->
-          check_resolves(bundle, dep, imported, raw_dep)
-        esm.DefaultImport(..) -> check_resolves(bundle, dep, "default", raw_dep)
-      }
-    })
-  })
-}
-
-fn check_indirect_exports(
-  bundle: ModuleBundle,
-  specifier: String,
-  m: CompiledModule,
-) -> Result(Nil, String) {
-  list.try_each(m.export_entries, fn(e) {
-    case e {
-      // `export { x } from 'mod'` — resolve THIS module's export name, which
-      // recurses into the source (§16.2.1.6.4 step 1).
-      esm.ReExport(export_name:, source_specifier:, ..) ->
-        check_resolves(bundle, specifier, export_name, source_specifier)
-      _ -> Ok(Nil)
-    }
-  })
-}
-
-fn check_resolves(
-  bundle: ModuleBundle,
-  specifier: String,
-  name: String,
-  raw_dep: String,
-) -> Result(Nil, String) {
-  case resolve_export(bundle, specifier, name, set.new()) {
-    ResolvedTo(..) | ResolvedNamespace(..) | ResolvedDeferredNamespace(..) ->
-      Ok(Nil)
-    Unresolvable ->
-      Error(
-        "The requested module '"
-        <> raw_dep
-        <> "' does not provide an export named '"
-        <> name
-        <> "'",
-      )
-    Ambiguous ->
-      Error(
-        "The requested module '"
-        <> raw_dep
-        <> "' provides an ambiguous export named '"
-        <> name
-        <> "'",
-      )
-  }
 }
 
 // =============================================================================
@@ -667,6 +451,21 @@ type EvalState(host) {
   )
 }
 
+/// Fold `items` while threading `state`, short-circuiting on the first Error.
+/// `f` receives the running state, the accumulated Ok-value, and the item.
+fn try_fold_state(
+  items: List(i),
+  state: s,
+  initial: a,
+  f: fn(s, a, i) -> #(s, Result(a, e)),
+) -> #(s, Result(a, e)) {
+  use acc, item <- list.fold(items, #(state, Ok(initial)))
+  case acc {
+    #(_, Error(_)) -> acc
+    #(state, Ok(value)) -> f(state, value, item)
+  }
+}
+
 /// A linked-but-not-yet-evaluated bundle: every binding cell and namespace
 /// object pre-allocated (§16.2 instantiation), exported hoisted functions
 /// instantiated. `namespace` is the entry module's Module Namespace Exotic
@@ -704,7 +503,7 @@ pub fn link_for_evaluation_reusing(
   preexisting: Dict(String, Ref),
   preexisting_deferred: Dict(String, Ref),
 ) -> Result(#(Heap(host), LinkedBundle), ModuleError(host)) {
-  case link_bundle(bundle) {
+  case link.validate(linkable_of_bundle(bundle)) {
     Error(message) -> {
       let #(heap, err) = common.make_syntax_error(heap, builtins, message)
       Error(EvaluationError(err, heap))
@@ -763,7 +562,7 @@ pub fn evaluate_linked(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State(host)) -> state.State(host),
+  host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(EvaluatedBundle(host), ModuleError(host)) {
   let #(_evaluated, _jobs, result) =
@@ -772,7 +571,7 @@ pub fn evaluate_linked(
       heap,
       builtins,
       global_object,
-      prepare,
+      host_hooks,
       finish,
       set.new(),
     )
@@ -802,7 +601,7 @@ pub fn evaluate_linked_tracking(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State(host)) -> state.State(host),
+  host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
   already_evaluated: Set(String),
 ) -> #(
@@ -827,7 +626,7 @@ pub fn evaluate_linked_tracking(
       bundle.entry,
       builtins,
       global_object,
-      prepare,
+      host_hooks,
       finish,
     )
   // Surface the entry namespace alongside the completion value (post-eval,
@@ -843,6 +642,17 @@ pub fn evaluate_linked_tracking(
   #(state.evaluated, state.jobs, result)
 }
 
+fn read_box_dict(
+  boxes: Dict(String, Ref),
+  heap: Heap(host),
+) -> List(#(String, JsValue)) {
+  use acc, spec, box <- dict.fold(boxes, [])
+  case heap.read_box(heap, box) {
+    Some(ns) -> [#(spec, ns), ..acc]
+    None -> acc
+  }
+}
+
 /// Every module in a linked bundle paired with its Module Namespace Exotic
 /// Object — what a registry-keeping host records so a later import of any
 /// graph module (entry or dependency) reuses the same record (§16.2.1.8).
@@ -850,12 +660,7 @@ pub fn linked_namespaces(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
 ) -> List(#(String, JsValue)) {
-  dict.fold(linked_bundle.linked.namespace_boxes, [], fn(acc, spec, box) {
-    case heap.read_box(heap, box) {
-      Some(ns) -> [#(spec, ns), ..acc]
-      None -> acc
-    }
-  })
+  read_box_dict(linked_bundle.linked.namespace_boxes, heap)
 }
 
 /// Every Deferred Module Namespace in a linked bundle, for the registry: a
@@ -865,12 +670,7 @@ pub fn linked_deferred_namespaces(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
 ) -> List(#(String, JsValue)) {
-  dict.fold(linked_bundle.linked.deferred_boxes, [], fn(acc, spec, box) {
-    case heap.read_box(heap, box) {
-      Some(ns) -> [#(spec, ns), ..acc]
-      None -> acc
-    }
-  })
+  read_box_dict(linked_bundle.linked.deferred_boxes, heap)
 }
 
 /// The Deferred Module Namespace for `spec`, creating one if no importer in
@@ -900,6 +700,10 @@ pub fn get_or_create_deferred_namespace(
 /// Evaluate a compiled module bundle. Links the whole graph (pre-allocating
 /// every binding cell), then executes module bodies in DFS post-order
 /// (dependencies first). Returns the entry module's completion value.
+///
+/// Module bodies boot with `state.default_host_hooks()` (no embedder host
+/// capabilities); embedders that supply Atomics capabilities use
+/// `evaluate_bundle_with_hooks`.
 pub fn evaluate_bundle(
   bundle: ModuleBundle,
   heap: Heap(host),
@@ -907,28 +711,28 @@ pub fn evaluate_bundle(
   global_object: Ref,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(EvaluatedBundle(host), ModuleError(host)) {
-  evaluate_bundle_prepared(
+  evaluate_bundle_with_hooks(
     bundle,
     heap,
     builtins,
     global_object,
-    fn(s) { s },
+    state.default_host_hooks(),
     finish,
   )
 }
 
-/// `evaluate_bundle` with an embedder `prepare` hook applied to each module
-/// body's freshly booted State before it executes (bodies get fresh States,
-/// so this is per-body) — the injection point for the host Atomics
-/// capabilities when an embedder macrotask loop (e.g. `arc/beam.run`)
-/// drives evaluation: a module's top level may hit a blocking
-/// `Atomics.wait` before any host function has run.
-pub fn evaluate_bundle_prepared(
+/// `evaluate_bundle` with the embedder's `state.HostHooks` (host
+/// capabilities such as the Atomics blocking wait / wake delivery). Each
+/// module body boots a FRESH State, so the hooks are threaded into every
+/// body's `RealmCtx` at construction rather than installed after the fact —
+/// a module's top level may hit a blocking `Atomics.wait` before any host
+/// function has run.
+pub fn evaluate_bundle_with_hooks(
   bundle: ModuleBundle,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State(host)) -> state.State(host),
+  host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(EvaluatedBundle(host), ModuleError(host)) {
   use #(heap, linked_bundle) <- result.try(link_for_evaluation(
@@ -936,7 +740,14 @@ pub fn evaluate_bundle_prepared(
     heap,
     builtins,
   ))
-  evaluate_linked(linked_bundle, heap, builtins, global_object, prepare, finish)
+  evaluate_linked(
+    linked_bundle,
+    heap,
+    builtins,
+    global_object,
+    host_hooks,
+    finish,
+  )
 }
 
 /// The entry module's Module Namespace Exotic Object, read out of the rooted
@@ -990,7 +801,7 @@ fn eval_module_inner(
   specifier: String,
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State(host)) -> state.State(host),
+  host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // Already evaluated successfully — either in this DFS or recorded in the
@@ -1037,7 +848,7 @@ fn eval_module_inner(
                     compiled,
                     builtins,
                     global_object,
-                    prepare,
+                    host_hooks,
                     finish,
                   )
               }
@@ -1055,7 +866,7 @@ fn eval_module_body(
   compiled: CompiledModule,
   builtins: Builtins,
   global_object: Ref,
-  prepare: fn(state.State(host)) -> state.State(host),
+  host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // Mark as evaluating
@@ -1069,53 +880,36 @@ fn eval_module_body(
   // ASYNCHRONOUS transitive dependencies (its synchronous evaluation is
   // triggered later, by first access on the deferred namespace).
   let requests = ordered_requests(compiled)
-  let #(state, dep_result) =
-    list.fold(requests, #(state, Ok(Nil)), fn(acc, request) {
-      let #(state, prev) = acc
-      let #(raw_dep, eager) = request
-      case prev {
-        Error(_) -> acc
-        Ok(Nil) -> {
-          let dep_specifier =
-            dict.get(compiled.specifier_map, raw_dep)
-            |> result.unwrap(raw_dep)
-          let to_evaluate = case eager {
-            True -> [dep_specifier]
-            False ->
-              gather_async_transitive_deps(
-                bundle,
-                state,
-                global_object,
-                dep_specifier,
-                set.new(),
-              ).0
-          }
-          list.fold(to_evaluate, #(state, Ok(Nil)), fn(acc, dep) {
-            let #(state, prev) = acc
-            case prev {
-              Error(_) -> acc
-              Ok(Nil) -> {
-                let #(state, result) =
-                  eval_module_inner(
-                    bundle,
-                    linked,
-                    state,
-                    dep,
-                    builtins,
-                    global_object,
-                    prepare,
-                    finish,
-                  )
-                case result {
-                  Ok(_) -> #(state, Ok(Nil))
-                  Error(err) -> #(state, Error(err))
-                }
-              }
-            }
-          })
-        }
-      }
-    })
+  let #(state, dep_result) = {
+    use state, Nil, #(raw_dep, eager) <- try_fold_state(requests, state, Nil)
+    let dep_specifier =
+      dict.get(compiled.specifier_map, raw_dep)
+      |> result.unwrap(raw_dep)
+    let to_evaluate = case eager {
+      True -> [dep_specifier]
+      False ->
+        gather_async_transitive_deps(
+          bundle,
+          state,
+          global_object,
+          dep_specifier,
+          set.new(),
+        ).0
+    }
+    use state, Nil, dep <- try_fold_state(to_evaluate, state, Nil)
+    let #(state, r) =
+      eval_module_inner(
+        bundle,
+        linked,
+        state,
+        dep,
+        builtins,
+        global_object,
+        host_hooks,
+        finish,
+      )
+    #(state, result.replace(r, Nil))
+  }
 
   case dep_result {
     // A dependency parked on top-level await is not a failure — propagate
@@ -1167,7 +961,7 @@ fn eval_module_body(
           builtins,
           global_object,
           seeds,
-          prepare,
+          host_hooks,
           finish,
         )
       {
@@ -1248,7 +1042,7 @@ fn run_module_with_referrer(
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
-  prepare: fn(state.State(host)) -> state.State(host),
+  host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> entry.ModuleResult(host) {
   let key = value.Named(dynamic_import.referrer_property)
@@ -1268,7 +1062,7 @@ fn run_module_with_referrer(
       builtins,
       global_object,
       seeds,
-      prepare,
+      host_hooks,
       finish,
     )
   {
@@ -1288,6 +1082,30 @@ fn run_module_with_referrer(
 fn alloc_box(heap: Heap(host), val: JsValue) -> #(Heap(host), Ref) {
   let #(heap, ref) = heap.alloc(heap, BoxSlot(val))
   #(heap.root(heap, ref), ref)
+}
+
+/// For each spec: allocate a rooted namespace box. If `preexisting` yields a
+/// ref the box wraps it; otherwise reserve+root a fresh object ref, box it,
+/// and record `#(spec, obj)` in the returned fill-list for the caller to
+/// write once the object's contents are known.
+fn reserve_ns_boxes(
+  heap: Heap(host),
+  specs: List(String),
+  preexisting: fn(String) -> Result(Ref, Nil),
+) -> #(Heap(host), Dict(String, Ref), List(#(String, Ref))) {
+  use #(heap, boxes, fresh), spec <- list.fold(specs, #(heap, dict.new(), []))
+  case preexisting(spec) {
+    Ok(existing) -> {
+      let #(heap, box) = alloc_box(heap, JsObject(existing))
+      #(heap, dict.insert(boxes, spec, box), fresh)
+    }
+    Error(Nil) -> {
+      let #(heap, obj) = heap.reserve(heap)
+      let heap = heap.root(heap, obj)
+      let #(heap, box) = alloc_box(heap, JsObject(obj))
+      #(heap, dict.insert(boxes, spec, box), [#(spec, obj), ..fresh])
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1312,21 +1130,9 @@ fn build_linked(
   // Reserve a namespace object ref per module, then a rooted box wrapping it,
   // up front so cyclic / star-reached namespace re-exports resolve to a ref.
   // Preexisting modules reuse their registered namespace object instead.
-  let #(heap, ns_obj, namespace_boxes) =
-    list.fold(specs, #(heap, dict.new(), dict.new()), fn(acc, spec) {
-      let #(heap, objs, boxes) = acc
-      case dict.get(preexisting, spec) {
-        Ok(#(existing_obj, _)) -> {
-          let #(heap, box) = alloc_box(heap, JsObject(existing_obj))
-          #(heap, objs, dict.insert(boxes, spec, box))
-        }
-        Error(Nil) -> {
-          let #(heap, obj) = heap.reserve(heap)
-          let heap = heap.root(heap, obj)
-          let #(heap, box) = alloc_box(heap, JsObject(obj))
-          #(heap, dict.insert(objs, spec, obj), dict.insert(boxes, spec, box))
-        }
-      }
+  let #(heap, namespace_boxes, ns_to_fill) =
+    reserve_ns_boxes(heap, specs, fn(spec) {
+      dict.get(preexisting, spec) |> result.map(fn(p) { p.0 })
     })
   // Deferred namespaces (`import defer * as ns`): reserve a rooted proxy ref
   // per deferred-imported module. Realm-registered deferred namespaces are
@@ -1334,58 +1140,35 @@ fn build_linked(
   // module record); fresh ones are written by the caller once the complete
   // Linked record exists (their traps capture it).
   let #(heap, deferred_boxes, deferred_to_fill) =
-    list.fold(
-      needed_deferred_specs(bundle),
-      #(heap, dict.new(), []),
-      fn(acc, spec) {
-        let #(heap, boxes, fill) = acc
-        case dict.get(preexisting_deferred, spec) {
-          Ok(existing) -> {
-            let #(heap, box) = alloc_box(heap, JsObject(existing))
-            #(heap, dict.insert(boxes, spec, box), fill)
-          }
-          Error(Nil) -> {
-            let #(heap, obj) = heap.reserve(heap)
-            let heap = heap.root(heap, obj)
-            let #(heap, box) = alloc_box(heap, JsObject(obj))
-            #(heap, dict.insert(boxes, spec, box), [#(spec, obj), ..fill])
-          }
-        }
-      },
-    )
+    reserve_ns_boxes(heap, needed_deferred_specs(bundle), dict.get(
+      preexisting_deferred,
+      _,
+    ))
   // Resolve every exported name to a cell: a local binding's box (ResolvedTo)
   // or the target's namespace box (ResolvedNamespace — `export * as ns`,
   // including names reached transitively through `export *`). A preexisting
   // module's export map is already final — use it directly.
+  let lg = linkable_of_bundle(bundle)
   let exports =
     list.fold(specs, dict.new(), fn(all, spec) {
       case dict.get(preexisting, spec) {
         Ok(#(_, existing_exports)) -> dict.insert(all, spec, existing_exports)
         Error(Nil) -> {
           let map =
-            get_exported_names(bundle, spec, set.new())
+            link.exported_names(lg, spec)
             |> list.fold(dict.new(), fn(map, name) {
-              case resolve_export(bundle, spec, name, set.new()) {
-                ResolvedTo(owner, binding) ->
-                  case
-                    dict.get(local_boxes, owner)
-                    |> result.try(dict.get(_, binding))
-                  {
-                    Ok(box) -> dict.insert(map, name, box)
-                    Error(Nil) -> map
-                  }
-                ResolvedNamespace(target) ->
-                  case dict.get(namespace_boxes, target) {
-                    Ok(box) -> dict.insert(map, name, box)
-                    Error(Nil) -> map
-                  }
-                ResolvedDeferredNamespace(target) ->
-                  case dict.get(deferred_boxes, target) {
-                    Ok(box) -> dict.insert(map, name, box)
-                    Error(Nil) -> map
-                  }
-                Unresolvable | Ambiguous -> map
+              let found = case link.resolve_export(lg, spec, name) {
+                link.ResolvedTo(owner, binding) ->
+                  dict.get(local_boxes, owner)
+                  |> result.try(dict.get(_, binding))
+                link.ResolvedNamespace(target) ->
+                  dict.get(namespace_boxes, target)
+                link.ResolvedDeferredNamespace(target) ->
+                  dict.get(deferred_boxes, target)
+                link.Unresolvable | link.Ambiguous -> Error(Nil)
               }
+              result.map(found, dict.insert(map, name, _))
+              |> result.unwrap(map)
             })
           dict.insert(all, spec, map)
         }
@@ -1394,12 +1177,10 @@ fn build_linked(
   // Write each reserved namespace object now that its export map is complete
   // (preexisting modules were never reserved — their objects are untouched).
   let heap =
-    list.fold(specs, heap, fn(heap, spec) {
+    list.fold(ns_to_fill, heap, fn(heap, entry) {
+      let #(spec, obj) = entry
       let exp = dict.get(exports, spec) |> result.unwrap(dict.new())
-      case dict.get(ns_obj, spec) {
-        Ok(obj) -> heap.write(heap, obj, namespace_slot(exp))
-        Error(Nil) -> heap
-      }
+      heap.write(heap, obj, namespace_slot(exp))
     })
   #(
     heap,
@@ -1408,39 +1189,16 @@ fn build_linked(
   )
 }
 
-/// A module's requests in declaration order as (raw specifier, eager) pairs,
-/// deduplicated by (specifier, phase) — the spec's [[RequestedModules]] list.
-/// A bare/named/default/eager-namespace import declaration is an
-/// ~evaluation~-phase request; a lone `import defer * as ns` declaration is a
-/// ~defer~-phase request; re-exports are ~evaluation~-phase requests.
+/// A module's [[RequestedModules]] in declaration order as
+/// (raw specifier, eager?) pairs. Both halves were computed by esm.analyze's
+/// merge_requests at compile time: `requested_modules` is the unique
+/// specifiers in source order, `eager_requests` is the subset whose merged
+/// phase is ~evaluation~ (a specifier is Deferred only if EVERY reference
+/// is `import defer * as ns`).
 fn ordered_requests(compiled: CompiledModule) -> List(#(String, Bool)) {
-  let import_requests =
-    list.map(compiled.import_bindings, fn(entry) {
-      let #(raw_dep, bindings) = entry
-      let eager = case bindings {
-        [] -> True
-        _ ->
-          list.any(bindings, fn(binding) {
-            case binding {
-              esm.NamespaceImport(phase: esm.Deferred, ..) -> False
-              _ -> True
-            }
-          })
-      }
-      #(raw_dep, eager)
-    })
-  let reexport_requests =
-    list.filter_map(compiled.export_entries, fn(entry) {
-      case entry {
-        esm.ReExport(source_specifier:, ..) -> Ok(#(source_specifier, True))
-        esm.ReExportAll(source_specifier:) -> Ok(#(source_specifier, True))
-        esm.ReExportNamespace(source_specifier:, ..) ->
-          Ok(#(source_specifier, True))
-        esm.LocalExport(..) -> Error(Nil)
-      }
-    })
-  list.append(import_requests, reexport_requests)
-  |> list.unique
+  let eager = set.from_list(compiled.eager_requests)
+  use specifier <- list.map(compiled.requested_modules)
+  #(specifier, set.contains(eager, specifier))
 }
 
 /// GatherAsynchronousTransitiveDependencies ( module ): the modules in
@@ -1500,6 +1258,7 @@ pub fn evaluate_async_transitive_deps(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
+  host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(
   Heap(host),
@@ -1523,37 +1282,31 @@ pub fn evaluate_async_transitive_deps(
       bundle.entry,
       set.new(),
     )
-  let #(eval_state, result) =
-    list.fold(to_evaluate, #(eval_state, Ok([])), fn(acc, dep) {
-      let #(eval_state, prev) = acc
-      case prev {
-        Error(_) -> acc
-        Ok(pendings) -> {
-          let #(eval_state, dep_result) =
-            eval_module_inner(
-              bundle,
-              linked,
-              eval_state,
-              dep,
-              builtins,
-              global_object,
-              fn(s) { s },
-              finish,
-            )
-          case dep_result {
-            Ok(_) -> #(eval_state, Ok(pendings))
-            // Parked on top-level await: record the capability and keep
-            // going — the spec Evaluate()s every gathered module before
-            // waiting on all their promises.
-            Error(EvaluationPending(promise_data_ref:, heap: _)) -> #(
-              eval_state,
-              Ok([#(dep, promise_data_ref), ..pendings]),
-            )
-            Error(err) -> #(eval_state, Error(err))
-          }
-        }
-      }
-    })
+  let #(eval_state, result) = {
+    use eval_state, pendings, dep <- try_fold_state(to_evaluate, eval_state, [])
+    let #(eval_state, dep_result) =
+      eval_module_inner(
+        bundle,
+        linked,
+        eval_state,
+        dep,
+        builtins,
+        global_object,
+        host_hooks,
+        finish,
+      )
+    case dep_result {
+      Ok(_) -> #(eval_state, Ok(pendings))
+      // Parked on top-level await: record the capability and keep
+      // going — the spec Evaluate()s every gathered module before
+      // waiting on all their promises.
+      Error(EvaluationPending(promise_data_ref:, heap: _)) -> #(
+        eval_state,
+        Ok([#(dep, promise_data_ref), ..pendings]),
+      )
+      Error(err) -> #(eval_state, Error(err))
+    }
+  }
   let result = result.map(result, list.reverse)
   #(eval_state.heap, eval_state.jobs, result)
 }
@@ -1753,43 +1506,25 @@ fn fill_deferred_namespace(
   let #(h, target_ref) =
     heap.alloc(h, namespace_slot_tagged(exports, "Deferred Module"))
   let h = heap.root(h, target_ref)
-  let trap = fn(h, name, arity, native, always_triggers) {
-    alloc_deferred_trap(
-      h,
-      builtins,
-      name,
-      arity,
-      native,
-      always_triggers,
-      bundle,
-      linked,
-      spec,
-    )
-  }
-  let #(h, get_ref) = trap(h, "get", 3, value.ReflectGet, False)
-  let #(h, has_ref) = trap(h, "has", 2, value.ReflectHas, False)
-  let #(h, delete_ref) =
-    trap(h, "deleteProperty", 2, value.ReflectDeleteProperty, False)
-  let #(h, define_ref) =
-    trap(h, "defineProperty", 3, value.ReflectDefineProperty, False)
-  let #(h, gopd_ref) =
-    trap(
-      h,
-      "getOwnPropertyDescriptor",
-      2,
-      value.ReflectGetOwnPropertyDescriptor,
-      False,
-    )
-  let #(h, own_keys_ref) = trap(h, "ownKeys", 1, value.ReflectOwnKeys, True)
-  let #(h, handler_ref) =
-    common.alloc_pojo(h, builtins.object.prototype, [
-      #("get", value.data_property(JsObject(get_ref))),
-      #("has", value.data_property(JsObject(has_ref))),
-      #("deleteProperty", value.data_property(JsObject(delete_ref))),
-      #("defineProperty", value.data_property(JsObject(define_ref))),
-      #("getOwnPropertyDescriptor", value.data_property(JsObject(gopd_ref))),
-      #("ownKeys", value.data_property(JsObject(own_keys_ref))),
-    ])
+  let #(h, traps) =
+    [
+      #("get", 3, value.ReflectGet, False),
+      #("has", 2, value.ReflectHas, False),
+      #("deleteProperty", 2, value.ReflectDeleteProperty, False),
+      #("defineProperty", 3, value.ReflectDefineProperty, False),
+      #(
+        "getOwnPropertyDescriptor",
+        2,
+        value.ReflectGetOwnPropertyDescriptor,
+        False,
+      ),
+      #("ownKeys", 1, value.ReflectOwnKeys, True),
+    ]
+    |> list.map_fold(h, fn(h, t) {
+      let #(h, ref) = alloc_deferred_trap(h, builtins, t, bundle, linked, spec)
+      #(h, #(t.0, value.data_property(JsObject(ref))))
+    })
+  let #(h, handler_ref) = common.alloc_pojo(h, builtins.object.prototype, traps)
   let h = heap.root(h, handler_ref)
   heap.write(
     h,
@@ -1822,14 +1557,12 @@ fn fill_deferred_namespace(
 fn alloc_deferred_trap(
   h: Heap(host),
   builtins: Builtins,
-  name: String,
-  arity: Int,
-  native: value.ReflectNativeFn,
-  always_triggers: Bool,
+  trap: #(String, Int, value.ReflectNativeFn, Bool),
   bundle: ModuleBundle,
   linked: Linked,
   spec: String,
 ) -> #(Heap(host), Ref) {
+  let #(name, arity, native, always_triggers) = trap
   common.alloc_host_fn(
     h,
     builtins.function.prototype,
@@ -2000,7 +1733,7 @@ fn evaluate_deferred_subgraph(
       spec,
       builtins,
       global_object,
-      fn(s) { s },
+      state.ctx.host_hooks,
       fn(s) { s },
     )
   let state =
@@ -2021,44 +1754,6 @@ fn evaluate_deferred_subgraph(
           <> "': "
           <> string.inspect(other),
       ))
-  }
-}
-
-/// §16.2.1.6.2 GetExportedNames — local + indirect names, plus `export *` names
-/// (excluding `default`), de-duplicated. `star_set` guards `export *` cycles.
-fn get_exported_names(
-  bundle: ModuleBundle,
-  spec: String,
-  star_set: Set(String),
-) -> List(String) {
-  case set.contains(star_set, spec), dict.get(bundle.modules, spec) {
-    True, _ | _, Error(Nil) -> []
-    False, Ok(m) -> {
-      let star_set = set.insert(star_set, spec)
-      let direct =
-        list.filter_map(m.export_entries, fn(e) {
-          case e {
-            esm.LocalExport(export_name:, ..) -> Ok(export_name)
-            esm.ReExport(export_name:, ..) -> Ok(export_name)
-            esm.ReExportNamespace(export_name:, ..) -> Ok(export_name)
-            esm.ReExportAll(..) -> Error(Nil)
-          }
-        })
-      let star =
-        list.flat_map(m.export_entries, fn(e) {
-          case e {
-            esm.ReExportAll(source_specifier:) ->
-              get_exported_names(
-                bundle,
-                resolved_specifier(m, source_specifier),
-                star_set,
-              )
-              |> list.filter(fn(n) { n != "default" })
-            _ -> []
-          }
-        })
-      list.append(direct, star) |> list.unique
-    }
   }
 }
 

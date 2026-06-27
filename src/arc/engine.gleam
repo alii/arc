@@ -31,14 +31,25 @@ import gleam/string
 // Engine type
 // ----------------------------------------------------------------------------
 
-/// An initialized JS engine — heap, builtins, global object.
+/// An initialized JS engine — heap, builtins, global object, host hooks.
 ///
 /// Opaque so callers can't reach inside and mutate pieces independently;
 /// advance an engine via `eval`/`eval_module`/`call`, which thread the heap
 /// forward and hand back a new `Engine`. Read-only access to the parts is via
 /// the `heap`/`builtins`/`global` accessors.
+///
+/// `host_hooks` carries the embedder's host capabilities (e.g. the Atomics
+/// blocking-wait / wake-delivery contract). Supplied once via
+/// `with_host_hooks` at construction time, it is threaded into every State the
+/// engine boots — scripts, module bodies (static and dynamic imports), calls
+/// into held values — and inherited by every derived realm.
 pub opaque type Engine(host) {
-  Engine(heap: Heap(host), builtins: Builtins, global: Ref)
+  Engine(
+    heap: Heap(host),
+    builtins: Builtins,
+    global: Ref,
+    host_hooks: state.HostHooks,
+  )
 }
 
 /// Errors from the parse → compile → run pipeline, across both the script
@@ -65,11 +76,30 @@ pub type EvaluatedModule {
 
 /// Create a fresh engine with a new heap and all builtins installed. The single
 /// bootstrap site — every other entry point threads an existing engine.
+///
+/// The engine starts with `state.default_host_hooks()` (no capabilities — an
+/// agent that cannot block). Embedders that need to grant host capabilities
+/// (e.g. a real blocking `Atomics.wait`) compose `with_host_hooks` on top.
 pub fn new() -> Engine(host) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global) = builtins.globals(b, h)
-  Engine(heap: h, builtins: b, global:)
+  Engine(heap: h, builtins: b, global:, host_hooks: state.default_host_hooks())
+}
+
+/// Install the embedder's host capabilities on the engine.
+///
+/// This is the single injection point for `state.HostHooks` — set them once
+/// here, before running any JS, and every State the engine subsequently boots
+/// (scripts via `eval`, module bodies via `eval_module` including dynamic
+/// `import()`, calls via `call`, plus all derived realms: `eval`/`Function`
+/// realms, `$262.createRealm` children, agents, ShadowRealms) inherits them.
+/// There is no per-call install to forget.
+pub fn with_host_hooks(
+  engine: Engine(host),
+  hooks: state.HostHooks,
+) -> Engine(host) {
+  Engine(..engine, host_hooks: hooks)
 }
 
 // ----------------------------------------------------------------------------
@@ -169,41 +199,32 @@ pub fn eval(
 /// Like `eval` but the caller supplies the post-script driver. `finish`
 /// is handed the State after the top-level script returns and must drain
 /// microtasks plus whatever macrotask loop the embedder owns.
+///
+/// The freshly booted State carries the engine's `host_hooks`, so host
+/// capabilities (e.g. the Atomics blocking-wait/wake-delivery contract in
+/// `arc/host`) are present from the first instruction — a top-level blocking
+/// `Atomics.wait` works without any per-call install. Set them once with
+/// `with_host_hooks`.
 pub fn eval_with(
   engine: Engine(host),
   source: String,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
-  eval_prepared_with(engine, source, fn(s) { s }, finish)
-}
-
-/// Like `eval_with` but with an embedder `prepare` hook applied to the
-/// freshly booted State BEFORE the top-level script executes. Embedders
-/// whose `finish` driver installs host capabilities (e.g. the Atomics
-/// blocking-wait/wake-delivery contract in `arc/host`) must install them
-/// here too — `finish` only takes over after the script returns, and a
-/// top-level blocking `Atomics.wait` needs them mid-script.
-pub fn eval_prepared_with(
-  engine: Engine(host),
-  source: String,
-  prepare: fn(state.State(host)) -> state.State(host),
-  finish: fn(state.State(host)) -> state.State(host),
-) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
-  use program <- result.try(
+  use #(program, sb) <- result.try(
     parser.parse(source, parser.Script)
     |> result.map_error(ParseError),
   )
   use template <- result.try(
-    compiler.compile(program)
+    compiler.compile(program, sb)
     |> result.map_error(CompileError),
   )
   use completion <- result.map(
-    entry.run_prepared(
+    entry.run_with_hooks(
       template,
       engine.heap,
       engine.builtins,
       engine.global,
-      prepare,
+      engine.host_hooks,
       finish,
     )
     |> result.map_error(VmError),
@@ -236,6 +257,11 @@ pub fn eval_module(
 
 /// Like `eval_module` but the caller supplies the post-evaluation driver
 /// (an embedder macrotask loop, or `event_loop.finish` for microtasks only).
+///
+/// Every module body in the bundle — including ones reached via dynamic
+/// `import()` — boots with the engine's `host_hooks`, so a module's top level
+/// may hit a blocking `Atomics.wait` before any host function has run. Set the
+/// hooks once with `with_host_hooks`.
 pub fn eval_module_with(
   engine: Engine(host),
   specifier: String,
@@ -244,41 +270,17 @@ pub fn eval_module_with(
   load: fn(String) -> Result(String, String),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
-  eval_module_prepared_with(
-    engine,
-    specifier,
-    source,
-    resolve,
-    load,
-    fn(s) { s },
-    finish,
-  )
-}
-
-/// Like `eval_module_with` but with an embedder `prepare` hook applied to
-/// each module body's freshly booted State before it executes — the module
-/// counterpart of `eval_prepared_with` (a module's top level may hit a
-/// blocking `Atomics.wait` before any host function has run).
-pub fn eval_module_prepared_with(
-  engine: Engine(host),
-  specifier: String,
-  source: String,
-  resolve: fn(String, String) -> Result(String, String),
-  load: fn(String) -> Result(String, String),
-  prepare: fn(state.State(host)) -> state.State(host),
-  finish: fn(state.State(host)) -> state.State(host),
-) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
     module.compile_bundle(specifier, source, resolve, load)
     |> result.map_error(ModuleError),
   )
   use evaluated <- result.map(
-    module.evaluate_bundle_prepared(
+    module.evaluate_bundle_with_hooks(
       bundle,
       engine.heap,
       engine.builtins,
       engine.global,
-      prepare,
+      engine.host_hooks,
       finish,
     )
     |> result.map_error(ModuleError),
@@ -332,6 +334,7 @@ pub fn call_with(
       engine.heap,
       engine.builtins,
       engine.global,
+      engine.host_hooks,
       finish,
     )
     |> result.map_error(VmError),
@@ -347,15 +350,20 @@ pub fn call_with(
 ///
 /// Host function closures stored in the heap will NOT survive — their Ref
 /// slots persist but the Erlang closure data is lost. Embedders must
-/// re-register host functions after `deserialize`.
+/// re-register host functions after `deserialize`. `host_hooks` are closures
+/// too and are deliberately NOT serialized.
 pub fn serialize(engine: Engine(host)) -> BitArray {
   erlang.term_to_binary(#(engine.heap, engine.builtins, engine.global))
 }
 
 /// Restore an engine from a binary produced by `serialize`.
+///
+/// The restored engine carries `state.default_host_hooks()` — host hooks are
+/// embedder closures and cannot round-trip through `serialize`. Re-install
+/// them with `with_host_hooks`, alongside re-registering host functions.
 pub fn deserialize(data: BitArray) -> Engine(host) {
   let #(heap, builtins, global) = erlang.binary_to_term(data)
-  Engine(heap:, builtins:, global:)
+  Engine(heap:, builtins:, global:, host_hooks: state.default_host_hooks())
 }
 
 // ----------------------------------------------------------------------------
@@ -377,6 +385,13 @@ pub fn builtins(engine: Engine(host)) -> Builtins {
 /// The engine's global object ref (`globalThis`).
 pub fn global(engine: Engine(host)) -> Ref {
   engine.global
+}
+
+/// The engine's host hooks (whatever `with_host_hooks` installed, or
+/// `state.default_host_hooks()`). Needed by callers that drop to the lower
+/// `entry`/`module` layers and must thread the hooks themselves.
+pub fn host_hooks(engine: Engine(host)) -> state.HostHooks {
+  engine.host_hooks
 }
 
 // ----------------------------------------------------------------------------

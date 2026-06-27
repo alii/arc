@@ -48,8 +48,8 @@ fn eval(
       state,
       Error("SyntaxError: " <> parser.parse_error_to_string(err)),
     )
-    Ok(program) ->
-      case compiler.compile_repl(program) {
+    Ok(#(program, sb)) ->
+      case compiler.compile_repl(program, sb) {
         Error(compiler.Unsupported(desc)) -> #(
           state,
           Error("compile error: unsupported " <> desc),
@@ -225,12 +225,11 @@ fn read_file(path: String) -> Result(String, FileError)
 
 type FileError
 
-/// Run a JS source file and print the result (or error). `prepare` is applied
-/// to each freshly booted State before its top level executes; `finish` drains
-/// microtasks (and any embedder macrotask loop) after it returns.
+/// Run a JS source file and print the result (or error). The engine boots with
+/// its default host hooks (`engine.new()`); `finish` drains microtasks (and any
+/// embedder macrotask loop) after the top level returns.
 fn run_file(
   path: String,
-  prepare: fn(state.State(host)) -> state.State(host),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Nil {
   case read_file(path) {
@@ -239,8 +238,8 @@ fn run_file(
     Ok(source) -> {
       let is_module = !string.ends_with(path, ".cjs")
       case is_module {
-        True -> run_module_file(path, source, prepare, finish)
-        False -> run_script_file(source, prepare, finish)
+        True -> run_module_file(path, source, finish)
+        False -> run_script_file(source, finish)
       }
     }
   }
@@ -250,20 +249,10 @@ fn run_file(
 fn run_module_file(
   path: String,
   source: String,
-  prepare: fn(state.State(host)) -> state.State(host),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Nil {
   let eng = engine.new()
-  case
-    engine.eval_module_prepared_with(
-      eng,
-      path,
-      source,
-      resolve_dep,
-      load_dep,
-      prepare,
-      finish,
-    )
+  case engine.eval_module_with(eng, path, source, resolve_dep, load_dep, finish)
   {
     Ok(_) -> Nil
     Error(err) -> io.println(engine.eval_error_message(err))
@@ -293,11 +282,10 @@ fn load_dep(resolved: String) -> Result(String, String) {
 /// Run a file as a script (only for .cjs files).
 fn run_script_file(
   source: String,
-  prepare: fn(state.State(host)) -> state.State(host),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Nil {
   let eng = engine.new()
-  case engine.eval_prepared_with(eng, source, prepare, finish) {
+  case engine.eval_with(eng, source, finish) {
     Ok(#(ThrowCompletion(val, new_heap), _)) ->
       io.println("Uncaught " <> object.format_error(val, new_heap))
     Ok(_) -> Nil
@@ -322,7 +310,7 @@ pub fn main() -> Nil {
       Nil
     }
 
-    [path, ..] -> run_file(path, fn(s) { s }, event_loop.finish)
+    [path, ..] -> run_file(path, event_loop.finish)
 
     [] -> {
       banner()

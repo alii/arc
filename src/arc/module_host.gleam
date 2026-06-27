@@ -208,12 +208,17 @@ fn evaluate_module(
       // context. Any jobs the module bodies enqueued are appended to the
       // host's queue instead, and a body parked on top-level await surfaces
       // as EvaluationPending rather than blocking.
+      // The importing realm's host hooks are threaded into every module
+      // body's freshly booted State, so a dynamically imported module gets
+      // the same embedder capabilities (e.g. a blocking `Atomics.wait`) as
+      // the importer.
       let #(h, jobs, result) =
         evaluate_bundle_with_registry(
           state.heap,
           state.builtins,
           state.ctx.global_object,
           bundle,
+          state.ctx.host_hooks,
           fn(module_state) { module_state },
         )
       let state =
@@ -392,6 +397,7 @@ fn evaluate_deferred_async_deps(
       state.heap,
       state.builtins,
       state.ctx.global_object,
+      state.ctx.host_hooks,
       fn(module_state) { module_state },
     )
   let state =
@@ -736,11 +742,17 @@ fn echo_unexpected_pending_namespace(resolved: String, val: JsValue) -> Nil {
 /// Used by both the dynamic-import hook and static module entry points
 /// sharing a realm, so `import './a.js'` and `import('./a.js')` yield the
 /// same module record.
+///
+/// `host_hooks` are the embedder's host capabilities (Atomics blocking
+/// wait / wake delivery). Every module body boots a FRESH State, so the
+/// hooks must be threaded into each body's `RealmCtx` here — the
+/// dynamic-import hook passes the importing realm's `state.ctx.host_hooks`.
 pub fn evaluate_bundle_with_registry(
   h: Heap(host),
   b: Builtins,
   global_object: Ref,
   bundle: module.ModuleBundle,
+  host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> #(
   Heap(host),
@@ -778,7 +790,7 @@ pub fn evaluate_bundle_with_registry(
           h,
           b,
           global_object,
-          fn(s) { s },
+          host_hooks,
           finish,
           already_evaluated,
         )

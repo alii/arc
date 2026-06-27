@@ -14,7 +14,7 @@ import gleam/option.{type Option, None}
 // function object at call-setup (FunctionObject.home_object) and cached here
 // per-frame so super-reference reads are pure local/capture loads.
 
-/// Which lexical pseudo-binding an IrGetLexical/DeclareLexical refers to.
+/// Which lexical pseudo-binding a get_lexical / DeclareLexical refers to.
 pub type LexicalRef {
   RefThis
   RefActiveFunc
@@ -458,9 +458,9 @@ pub type Op {
   Throw
   /// §9.1.1.1.5 step 6 — assignment to an immutable (const) local binding.
   /// Always throws TypeError (const bindings are strict per §14.3.1.3
-  /// CreateImmutableBinding(dn, true)). Emitted by scope.gleam in place of
-  /// PutLocal/PutBoxed when IrScopePutVar resolves to a ConstBinding. Mirrors
-  /// QuickJS OP_throw_error/JS_THROW_VAR_RO.
+  /// CreateImmutableBinding(dn, true)). Emitted in place of PutLocal/PutBoxed
+  /// when a name-store resolves to a ConstBinding. Mirrors QuickJS
+  /// OP_throw_error/JS_THROW_VAR_RO.
   ThrowConstAssign(name: String)
   /// Compile-time-determined runtime error — throw the given native error
   /// kind with a static message. Used for forms the spec defines as
@@ -686,52 +686,13 @@ pub type UnaryOpKind {
 }
 
 // ============================================================================
-// IR Opcodes — symbolic, emitted by compiler Phase 1
+// IR Opcodes — emitted by the AST emitter, consumed by label resolution
 // ============================================================================
 
-/// Symbolic IR instruction. Variable references use names (resolved in Phase 2),
-/// jump targets use label IDs (resolved in Phase 3).
+/// Symbolic IR instruction. Variable references are emitted as concrete
+/// slot ops (GetLocal/GetBoxed/GetGlobal/IrWith*) by the emitter consulting
+/// the AST-level scope tree; jump targets use label IDs (resolved in Phase 3).
 pub type IrOp {
-  // -- Scope-aware variable access (resolved in Phase 2) --
-  IrScopeGetVar(name: String)
-  /// Like IrScopeGetVar but ALSO pushes the call receiver beneath the value:
-  /// [value, this, ..]. `this` is the matched with object when the name
-  /// resolves through a `with` marker (§13.3.6.2 EvaluateCall step 1.b.ii),
-  /// undefined otherwise. Emitted for `f(args)` callee identifiers inside
-  /// `with` bodies; the pair feeds IrCallMethod.
-  IrScopeGetVarThis(name: String)
-  IrScopePutVar(name: String)
-  /// Initialization of a let/const binding (not reassignment). Lowers like
-  /// IrScopePutVar but is never const-checked. Mirrors QuickJS
-  /// `OP_scope_put_var_init` vs `OP_scope_put_var`.
-  IrScopeInitVar(name: String)
-  IrScopeTypeofVar(name: String)
-  IrScopeReboxVar(name: String)
-  /// `delete Identifier` (sloppy mode only). Phase 2 emits the enclosing
-  /// `with`-object checks (IrWithDeleteVar chain) and a `true` fallback.
-  IrScopeDeleteVar(name: String)
-  /// §13.15.2 step 1a / §13.4: ResolveBinding for an assignment / update /
-  /// compound-assignment target, BEFORE the RHS runs. When the resolution
-  /// crosses `with` markers, Phase 2 emits a WithMakeRef chain that stores
-  /// the matched with object (or undefined = "static binding") in a scratch
-  /// local; the paired IrScopeGetRef/IrScopePutRef then use that base so
-  /// PutValue targets the ORIGINAL reference even if the with object's
-  /// property set changed in between. No-op when no with is crossed.
-  /// Mirrors QuickJS OP_scope_make_ref / OP_with_make_ref.
-  IrScopeMakeRef(name: String)
-  /// GetValue on the reference made by the innermost active IrScopeMakeRef.
-  IrScopeGetRef(name: String)
-  /// PutValue on the reference made by the innermost active IrScopeMakeRef.
-  /// Pops the value; closes the ref (frees the scratch local).
-  IrScopePutRef(name: String)
-  /// Read a lexical pseudo-binding (this/active_func/new.target). Phase 2
-  /// lowers to GetLocal/GetBoxed against the slot allocated by
-  /// `DeclareLexical(ref)` (owned) or the capture slot threaded in for
-  /// arrows/direct-eval.
-  IrGetLexical(ref: LexicalRef)
-  /// Write the lexical-`this` slot (super() result). Only `this` is mutable.
-  IrSetThis
-
   // -- Labels and jumps (resolved in Phase 3) --
   IrLabel(id: Int)
   IrJump(label: Int)
@@ -742,7 +703,7 @@ pub type IrOp {
   IrGosub(label: Int)
   IrRet
 
-  // -- Resolved variable access (emitted by Phase 2) --
+  // -- Resolved variable access (emitted directly from the scope tree) --
   IrGetLocal(index: Int)
   IrPutLocal(index: Int)
   IrPutLocalCheckInit(index: Int)
@@ -754,8 +715,8 @@ pub type IrOp {
   IrDeclareEvalVar(name: String)
   IrTypeofEvalVar(name: String)
 
-  // -- `with` statement ops (object check emitted by Phase 2; labels
-  // resolved in Phase 3) --
+  // -- `with` statement ops (object check emitted from the scope tree's
+  // with-chain; labels resolved in Phase 3) --
   IrToObject
   /// Lowers 1:1 to ToStringVal (template literal substitutions).
   IrToStringVal
@@ -848,7 +809,7 @@ pub type IrOp {
   IrTypeOf
 
   // -- Fused superinstructions (produced by the resolver peephole; never
-  // emitted directly by Phase 1/2). See the matching final Ops.
+  // emitted directly by the AST emitter). See the matching final Ops.
   IrIncLocal(index: Int)
   IrDecLocal(index: Int)
   IrCmpLocalLocalJump(left: Int, right: Int, kind: BinOpKind, label: Int)

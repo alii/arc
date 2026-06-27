@@ -186,22 +186,36 @@ fn request_of_entry(entry: ExportEntry) -> Result(ModuleRequest, Nil) {
   }
 }
 
-/// Deduplicate requests by specifier, keeping source order. Eager wins:
-/// a specifier is Deferred only if every request for it is Deferred.
+/// Deduplicate requests by specifier, keeping source order. Eager wins the
+/// PHASE (a specifier is Deferred only if EVERY request for it is
+/// `import defer * as ns`) — and the first eager request also wins the
+/// POSITION: §16.2.1.5.3.1 InnerModuleEvaluation walks the spec's
+/// per-(specifier, phase) request list in order, SKIPPING ~defer~ entries,
+/// so a module imported `defer` first and eagerly later evaluates at the
+/// LATER, eager position (test262 import-defer/evaluation-sync/
+/// module-imported-defer-and-eager.js). The bundle's flat per-specifier
+/// lists cannot carry two entries for one specifier, so the merged entry
+/// takes the first eager occurrence's slot. Residual (unobservable without
+/// top-level await in the deferred subgraph): such a module's async
+/// transitive dependencies are gathered at the eager position instead of
+/// the earlier defer position.
 fn merge_requests(requests: List(ModuleRequest)) -> List(ModuleRequest) {
   let merged: List(ModuleRequest) = []
   list.fold(requests, merged, fn(merged, request) {
     let seen =
       list.find(merged, fn(existing) { existing.specifier == request.specifier })
-    case seen {
-      Error(Nil) -> list.append(merged, [request])
-      Ok(_) ->
-        list.map(merged, fn(existing) {
-          case existing.specifier == request.specifier, request.phase {
-            True, Default -> ModuleRequest(..existing, phase: Default)
-            _, _ -> existing
-          }
-        })
+    case seen, request.phase {
+      Error(Nil), _ -> list.append(merged, [request])
+      // Already eager: the earliest eager occurrence keeps the slot.
+      Ok(ModuleRequest(phase: Default, ..)), _ -> merged
+      // Deferred so far, another deferred request: nothing changes.
+      Ok(ModuleRequest(phase: Deferred, ..)), Deferred -> merged
+      // Deferred so far, FIRST eager request: eager phase + this position.
+      Ok(ModuleRequest(phase: Deferred, ..)), Default ->
+        list.append(
+          list.filter(merged, fn(e) { e.specifier != request.specifier }),
+          [request],
+        )
     }
   })
 }
@@ -325,7 +339,7 @@ fn named_exports(
     Some(ast.VariableDeclaration(declarations:, ..)) ->
       list.filter_map(declarations, fn(decl) {
         case decl {
-          ast.VariableDeclarator(id: ast.IdentifierPattern(name:), ..) ->
+          ast.VariableDeclarator(id: ast.IdentifierPattern(name:, ..), ..) ->
             Ok(LocalExport(export_name: name, local_name: name))
           _ -> Error(Nil)
         }

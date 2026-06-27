@@ -13,6 +13,7 @@
 //// `prepare` is the per-module parse+analyze step exposed directly, for
 //// single-file tooling that doesn't need a graph.
 
+import arc/compiler/scope
 import arc/esm
 import arc/parser
 import arc/parser/ast
@@ -44,6 +45,10 @@ pub type SourceModule {
     specifier: String,
     source: String,
     program: ast.Program,
+    /// Scope tree the parser accumulated alongside the AST, ready for
+    /// `scope.finalize`. Stored here so compile can run without re-walking
+    /// the AST.
+    sb: scope.ScopeBuilder,
     summary: esm.ModuleSummary,
     /// raw specifier as written in source → resolved specifier.
     specifier_map: Dict(String, String),
@@ -84,7 +89,7 @@ pub fn prepare(
   specifier: String,
   source: String,
 ) -> Result(SourceModule, GraphError) {
-  use program <- result.map(
+  use #(program, sb) <- result.map(
     parser.parse(source, parser.Module)
     |> result.map_error(ParseFailed(specifier, _)),
   )
@@ -92,6 +97,7 @@ pub fn prepare(
     specifier:,
     source:,
     program:,
+    sb:,
     summary: esm.analyze(program),
     specifier_map: dict.new(),
   )

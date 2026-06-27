@@ -124,7 +124,7 @@ pub fn import_declaration_span_round_trip_test() {
 /// Parse `src` as a module, find the first ImportDeclaration, and return the
 /// source text its span points at.
 fn import_decl_span_text(src: String) -> Result(String, String) {
-  use program <- result.try(
+  use #(program, _sb) <- result.try(
     parser.parse(src, parser.Module)
     |> result.map_error(parser.parse_error_to_string),
   )
@@ -190,7 +190,7 @@ pub fn export_default_span_round_trip_test() {
 /// Parse `src` as a module, find the first ExportDefaultDeclaration, and return
 /// the source text its span points at.
 fn export_default_span_text(src: String) -> Result(String, String) {
-  use program <- result.try(
+  use #(program, _sb) <- result.try(
     parser.parse(src, parser.Module)
     |> result.map_error(parser.parse_error_to_string),
   )
@@ -260,7 +260,7 @@ fn binding_span_texts(
   src: String,
   kind: String,
 ) -> Result(List(#(String, String)), String) {
-  use program <- result.try(
+  use #(program, _sb) <- result.try(
     parser.parse(src, parser.Module)
     |> result.map_error(parser.parse_error_to_string),
   )

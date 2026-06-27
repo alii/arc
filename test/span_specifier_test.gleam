@@ -19,7 +19,7 @@ fn slice_span(source: String, span: ast.Span) -> String {
 
 /// The single import declaration's specifier list.
 fn import_specifiers(source: String) -> List(ast.ImportSpecifier) {
-  let assert Ok(ast.Module(items)) = parser.parse(source, parser.Module)
+  let assert Ok(#(ast.Module(items), _sb)) = parser.parse(source, parser.Module)
   let assert Ok(specs) =
     list.find_map(items, fn(item) {
       case item {
@@ -32,7 +32,7 @@ fn import_specifiers(source: String) -> List(ast.ImportSpecifier) {
 
 /// The single export-named declaration's specifier list.
 fn export_specifiers(source: String) -> List(ast.ExportSpecifier) {
-  let assert Ok(ast.Module(items)) = parser.parse(source, parser.Module)
+  let assert Ok(#(ast.Module(items), _sb)) = parser.parse(source, parser.Module)
   let assert Ok(specs) =
     list.find_map(items, fn(item) {
       case item {

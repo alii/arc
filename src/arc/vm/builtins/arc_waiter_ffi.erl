@@ -7,9 +7,9 @@
 %% wake messages and never sends one. The blocking wait (the old
 %% await_notify), the bounded dry-queue receive (the old wait_for_notify)
 %% and the actual `Pid ! {arc_notify, Ref, Key, ByteIndex}` wake sends all
-%% live in EMBEDDER FFI (arc_beam_ffi.erl for the beam embedder, the
-%% test262 harness FFI for the test runner), driven through the
-%% State-installed host_sync_wait / host_deliver_wake capabilities.
+%% live in EMBEDDER FFI (test/test262_exec_ffi.erl for the test262
+%% harness, the in-tree reference embedder), driven through the sync_wait /
+%% deliver_wake capabilities of the realm's HostHooks record.
 %%
 %% Registry: a public named ETS ordered_set, keyed {SabKey, ByteIndex, Seq}
 %% where Seq = erlang:unique_integer([monotonic]) — ordered_set iteration
@@ -23,7 +23,7 @@
 %%     the {arc_notify, Ref, SabKey, ByteIndex} message sent for it. take
 %%     is atomic, so an entry is claimed at most once. take_waiters RETURNS
 %%     the claimed remote waiters; the claimer's embedder performs the
-%%     sends (host_deliver_wake).
+%%     sends (deliver_wake).
 %%   * A blocked sync waiter that times out tries to ets:take its OWN key
 %%     (in the embedder's await_notify). If the take succeeds nobody
 %%     claimed it -> "timed-out". If the take finds nothing, a notifier
@@ -92,7 +92,7 @@ insert_waiter(SabKey, ByteIndex, IsAsync) ->
 %% the NEXT waiter this agent registers at the same (key, byte index)
 %% (embedder loops match wakes by key+index, not ref). Returns `true` when
 %% the entry was already claimed — core then delegates the bounded flush
-%% receive to the embedder's host_sync_wait capability (whose await_notify
+%% receive to the embedder's sync_wait capability (whose await_notify
 %% selectively receives on the exact Ref) — and `false` when we removed
 %% the entry ourselves and no wake can be in flight.
 cancel_waiter({Key, _Ref}) ->
@@ -105,7 +105,7 @@ cancel_waiter({Key, _Ref}) ->
 %% (SabKey, ByteIndex) in FIFO order. Returns {Claimed, SelfAsyncTaken}:
 %% Claimed is the list of claimed REMOTE waiters as opaque
 %% {Pid, Ref, SabKey, ByteIndex} terms — the caller routes them to the
-%% embedder's host_deliver_wake capability, which owns the message sends —
+%% embedder's deliver_wake capability, which owns the message sends —
 %% and SelfAsyncTaken counts our own waitAsync tokens, which the caller
 %% settles directly on State.
 take_waiters(SabKey, ByteIndex, Count) ->
@@ -137,7 +137,7 @@ take_loop(Key, S, B, N, Self, Claimed, SelfAsync) ->
             case is_process_alive(Pid) of
                 true ->
                     %% Claimed: counts as woken. Delivery is the embedder's
-                    %% (host_deliver_wake) — no send here.
+                    %% (deliver_wake) — no send here.
                     take_loop(Next, S, B, N - 1, Self,
                               [{Pid, Ref, S, B} | Claimed], SelfAsync);
                 false ->

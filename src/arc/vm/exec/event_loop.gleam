@@ -120,7 +120,7 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
         Some(_) if yield_to_embedder && embedder_wake_pending -> state
         Some(deadline) -> {
           let wait_ms =
-            int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1
+            int.max(deadline - state.ctx.host_hooks.monotonic_now(), 0) + 1
           // Plain bounded sleep until the earliest deadline — never a
           // mailbox receive in core. A cross-process notify that lands
           // during the sleep sits in the owning embedder's mailbox
@@ -134,7 +134,7 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
           // that exposes agent spawning (e.g. Arc.spawn) MUST use a
           // notify-consuming embedder loop (beam.run / the yielding
           // drain + wait_for_notify + inject_notify), not this one.
-          let Nil = builtins_atomics.sleep_ms(wait_ms)
+          let Nil = state.ctx.host_hooks.sleep_ms(wait_ms)
           do_drain_jobs(
             builtins_atomics.settle_expired_waiters(state),
             yield_to_embedder,
@@ -165,7 +165,7 @@ fn earliest_deadline(state: State(host)) -> Option(Int) {
 pub fn next_deadline_timeout(state: State(host)) -> Option(Int) {
   case earliest_deadline(state) {
     Some(deadline) ->
-      Some(int.max(deadline - builtins_atomics.monotonic_now(), 0) + 1)
+      Some(int.max(deadline - state.ctx.host_hooks.monotonic_now(), 0) + 1)
     None -> None
   }
 }

@@ -10,10 +10,10 @@
 //// path remains trivially atomic there. The spec's WaiterList lives
 //// in a shared, DATA-ONLY ETS table (arc_waiter_ffi): a blocking
 //// `Atomics.wait` registers itself there, then delegates the actual
-//// blocking to the embedder-installed `State.host_sync_wait` capability —
+//// blocking to the embedder's `state.ctx.host_hooks.sync_wait` capability —
 //// core never executes a mailbox receive. `Atomics.notify` atomically
 //// CLAIMS waiters from the table (the claim is the spec's "woken" count)
-//// and hands remote ones to `State.host_deliver_wake` for message
+//// and hands remote ones to `state.ctx.host_hooks.deliver_wake` for message
 //// delivery — core never sends wake messages either. See arc/host.gleam
 //// for the full capability contract. `Atomics.waitAsync` waiters are
 //// kept on State (FIFO, where the promise lives) plus an interchangeable
@@ -160,12 +160,18 @@ fn sab_cas_element(
 @external(erlang, "arc_atomics_ffi", "sleep")
 fn ffi_sleep(ms: Int) -> Nil
 
-/// Monotonic clock in milliseconds. Public: the event loop and the $262
-/// agent natives use the same clock as waitAsync deadline bookkeeping.
+/// Raw BEAM monotonic clock in milliseconds. The VM itself reads the clock
+/// through `state.ctx.host_hooks.monotonic_now` (waitAsync deadline
+/// bookkeeping, the event loop's deadline arithmetic) so an embedder can
+/// virtualise time; this external is the real clock behind the DEFAULT hook
+/// and stays public for embedder natives (e.g. the $262 agent helpers) that
+/// want the same wall clock outside any State.
 @external(erlang, "arc_atomics_ffi", "monotonic_now")
 pub fn monotonic_now() -> Int
 
-/// Blocking sleep, public for the event loop's waitAsync-timeout wait.
+/// Raw blocking sleep (`timer:sleep/1`, no-op for ms <= 0). The event loop
+/// sleeps via `state.ctx.host_hooks.sleep_ms`; this is the real sleep behind
+/// the DEFAULT hook, public for embedder natives ($262 agent `sleep`).
 pub fn sleep_ms(ms: Int) -> Nil {
   ffi_sleep(ms)
 }
@@ -233,7 +239,7 @@ fn ffi_cancel_waiter(handle: WaiterHandle) -> Bool
 
 /// Atomically claim up to `count` waiters FIFO (data-only ets:take loop).
 /// Returns the CLAIMED remote waiters — delivery of their wake messages is
-/// the embedder's job via State.host_deliver_wake — plus the count of our
+/// the embedder's job via state.ctx.host_hooks.deliver_wake — plus the count of our
 /// own waitAsync tokens taken (settled directly on State by the caller).
 @external(erlang, "arc_waiter_ffi", "take_waiters")
 fn ffi_take_waiters(
@@ -854,7 +860,7 @@ fn do_wait(
       // §25.4.3.14 step 21: a finite timeout arms a timeout job that settles
       // the waiter with "timed-out"; the event loop fires it at `deadline`.
       let deadline = case timeout_ms {
-        Some(ms) -> Some(monotonic_now() + ms)
+        Some(ms) -> Some(state.ctx.host_hooks.monotonic_now() + ms)
         None -> None
       }
       let byte_off = info.byte_offset + idx * size
@@ -894,7 +900,7 @@ fn do_wait(
 /// ets take) before returning.
 ///
 /// The BLOCKING itself is not core's: the registered entry is handed to
-/// the embedder-installed `State.host_sync_wait` capability (contract
+/// the embedder's `state.ctx.host_hooks.sync_wait` capability (contract
 /// clause 1, arc/host.gleam), which suspends in ITS mailbox until the
 /// entry's wake message arrives or the timeout elapses — resolving the
 /// notify-vs-timeout race exactly as the old in-core receive did.
@@ -918,14 +924,15 @@ fn sync_block(
       // embedder loops match wakes by (key, byte index) — not ref — so a
       // stale wake would spuriously settle the next waitAsync waiter this
       // agent registers at the same address. Delegate the flush to the
-      // embedder's host_sync_wait capability: its await_notify selectively
+      // embedder's `state.ctx.host_hooks.sync_wait` capability: its
+      // await_notify selectively
       // receives on the entry's exact ref, and on the claimed path
       // (ets:take of our own key finds nothing) performs the same
       // safety-bounded flush receive the old in-core cancel did. Core
       // still performs no receive of its own.
       case ffi_cancel_waiter(handle) {
         True ->
-          case state.host_sync_wait {
+          case state.ctx.host_hooks.sync_wait {
             Some(wait) -> {
               let _flushed: state.WaitOutcome =
                 wait(state.WaitRequest(
@@ -959,7 +966,7 @@ fn sync_block(
             False -> None
           }
       }
-      case state.host_sync_wait {
+      case state.ctx.host_hooks.sync_wait {
         Some(wait) -> {
           let outcome =
             wait(state.WaitRequest(
@@ -992,16 +999,16 @@ fn sync_block(
 /// agent's [[CanBlock]] is false — throw a TypeError. arc's main agent and
 /// spawned agent children can always block; the flag is only False when the
 /// host opted out (test262's CanBlockIsFalse), threaded in via
-/// State.can_block at realm boot. A host that installed no
-/// `host_sync_wait` capability cannot suspend the agent either (contract
-/// clause 1): treated identically to [[CanBlock]] = false. waitAsync never
-/// blocks, so async mode is exempt.
+/// State.can_block at realm boot. A host that supplied no
+/// `state.ctx.host_hooks.sync_wait` capability cannot suspend the agent
+/// either (contract clause 1): treated identically to [[CanBlock]] = false.
+/// waitAsync never blocks, so async mode is exempt.
 fn check_agent_can_suspend(
   state: State(host),
   sync: Bool,
   cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let host_can_suspend = option.is_some(state.host_sync_wait)
+  let host_can_suspend = option.is_some(state.ctx.host_hooks.sync_wait)
   case sync && { !state.can_block || !host_can_suspend } {
     True ->
       state.type_error(state, "Atomics.wait cannot be called in this agent")
@@ -1104,17 +1111,18 @@ fn notify(
       // "woken" accounting (§25.4.3.11 NotifyWaiter): remote waiters
       // (blocked sync waits and other agents' waitAsync tokens) come back
       // as claims whose wake-message DELIVERY is the embedder's, via the
-      // host_deliver_wake capability; our own waitAsync tokens come back
-      // as a count to settle on State right here (pure data, no message).
+      // `state.ctx.host_hooks.deliver_wake` capability; our own waitAsync
+      // tokens come back as a count to settle on State right here (pure
+      // data, no message).
       let #(claimed, self_async) =
         ffi_take_waiters(buffer_key(state, info.buffer), byte_off, count)
-      let Nil = case claimed, state.host_deliver_wake {
+      let Nil = case claimed, state.ctx.host_hooks.deliver_wake {
         [], _ -> Nil
         _, Some(deliver) -> deliver(claimed)
         // No embedder capability: claims still count as woken, but with no
-        // capability installed nothing remote can be blocked on us anyway
-        // (sync wait requires host_sync_wait; cross-process waitAsync
-        // requires a multi-agent embedder).
+        // capability supplied nothing remote can be blocked on us anyway
+        // (sync wait requires state.ctx.host_hooks.sync_wait; cross-process
+        // waitAsync requires a multi-agent embedder).
         _, None -> Nil
       }
       let remote_woken = list.length(claimed)
@@ -1200,7 +1208,7 @@ pub fn settle_expired_waiters(state: State(host)) -> State(host) {
   case state.atomics_waiters {
     [] -> state
     waiters -> {
-      let now = monotonic_now()
+      let now = state.ctx.host_hooks.monotonic_now()
       let #(expired, pending) =
         list.partition(waiters, fn(w) {
           case w.deadline {

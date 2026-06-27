@@ -195,13 +195,14 @@ pub fn resume(
 // the data (the ETS waiterlist registry, the SAB cells, State's FIFO of
 // waitAsync waiters), the EMBEDDER owns every mailbox interaction. Core
 // never executes a `receive` and never sends a wake message; instead it
-// calls capability functions the embedder installed on State.
+// calls the capability functions the embedder supplied once at engine/
+// realm construction in the realm's `HostHooks` record.
 //
-// The concrete types live in arc/vm/state (State's fields reference them);
-// they are re-exported here as aliases so embedders can build against
-// arc/host alone. Mirrors V8's split between the engine and the
-// v8::Platform/d8 layer: d8 implements the actual futex park/unpark, the
-// engine only asks for it.
+// The concrete types live in arc/vm/state (RealmCtx's `host_hooks` record
+// references them); they are re-exported here as aliases so embedders can
+// build against arc/host alone. Mirrors V8's split between the engine and
+// the v8::Platform/d8 layer: d8 implements the actual futex park/unpark,
+// the engine only asks for it.
 //
 // THE CONTRACT (five clauses; the numbered units of the Atomics refactor
 // implement against exactly these):
@@ -209,8 +210,8 @@ pub fn resume(
 // 1. Sync wait (Atomics.wait, DoWait steps 11-27). Core registers the
 //    waiterlist entry (data-only ETS insert via arc_waiter_ffi), re-reads
 //    the cell ("not-equal" short-circuits, cancelling the entry), then
-//    calls `State.host_sync_wait` with a `WaitRequest`. The capability
-//    blocks IN THE EMBEDDER until notified or timed out and returns
+//    calls the realm's `host_hooks.sync_wait` with a `WaitRequest`. The
+//    capability blocks IN THE EMBEDDER until notified or timed out and returns
 //    `WaitOk` / `WaitTimedOut` (JS "ok" / "timed-out"). The CanBlock
 //    TypeError check (DoWait step 10) stays first and unchanged; a missing
 //    capability is treated identically to `can_block == False`.
@@ -223,8 +224,8 @@ pub fn resume(
 // 2. Wake delivery (Atomics.notify). Core's waiterlist take
 //    (arc_waiter_ffi:take_waiters) atomically CLAIMS up to `count` waiters
 //    FIFO and RETURNS the claimed remote waiters instead of messaging
-//    them. Claiming is the spec's "woken" count; delivery is
-//    `State.host_deliver_wake(claimed)`, which sends
+//    them. Claiming is the spec's "woken" count; delivery is the realm's
+//    `host_hooks.deliver_wake(claimed)`, which sends
 //    `Pid ! {arc_notify, Ref, Key, ByteIndex}` per claimed waiter.
 //    Same-process waitAsync settles stay in core (pure data, no message).
 //
@@ -244,22 +245,22 @@ pub fn resume(
 //    Embedder receive loops bound their blocking
 //    receive with `event_loop.next_deadline_timeout` so host timers and
 //    waitAsync deadlines still fire on time, and re-drain after injecting
-//    (see `beam.wait_settle_step` / `beam.settle_pending_wakes`, the
-//    reusable helper the test262 harness also drives).
+//    (see `wait_settle_step` / `settle_pending_wakes` in the test262
+//    harness, the canonical bounded wait-settle-drain loop).
 //
 // 4. FFI module layout. arc_waiter_ffi.erl (under src/arc/vm/) is
 //    DATA-ONLY: insert_waiter, take_waiters (returning claims — no send),
 //    remove_async_token, local_buffer_key/shared_buffer_key, cancel_waiter
 //    (ETS delete only) and the table-owner sync-join handshake. Zero
 //    event-driven receives. The receive-based operations live in embedder
-//    FFI — src/arc/arc_beam_ffi.erl for the beam embedder, mirrored in
-//    test/test262_exec_ffi.erl for the harness:
+//    FFI — test/test262_exec_ffi.erl for the test262 harness, the in-tree
+//    reference embedder:
 //
 //        await_notify(Handle, TimeoutMs) -> <<"ok">> | <<"timed-out">>
 //            (blocking receive + the timeout-race resolution of clause 1;
 //             TimeoutMs < 0 = infinity, clamped to the BEAM receive cap.
 //             TimeoutMs = 0 doubles as the post-cancel flush: core's
-//             "not-equal" arm calls host_sync_wait with a zero timeout
+//             "not-equal" arm calls the sync_wait capability with a zero timeout
 //             when its data-only cancel found the entry already claimed,
 //             and the claimed branch consumes the in-flight wake — bounded
 //             by a safety timeout — so it can't pollute a later receive)
@@ -269,12 +270,22 @@ pub fn resume(
 //            (bounded dry-queue receive for embedder loops; feeds
 //             clause 3's inject_notify)
 //
-// 5. Installation. Embedders call `install_atomics_capabilities` below
-//    once per booted State (beam: at run/install setup; harness: per-test
-//    worker setup) — both capabilities together, since a host that can
-//    block but not deliver wakes (or vice versa) deadlocks its peers.
-//    `State.can_block` remains separate per-agent embedder config: it is
-//    spec policy ([[CanBlock]]), not capability presence.
+// 5. Construction. Both capabilities live in ONE `HostHooks` record
+//    (re-exported below) carried on the per-realm `RealmCtx`. Embedders
+//    build it ONCE with `atomics_capabilities` below and hand it to the
+//    engine/realm constructor (the `host_hooks` argument of the entry/
+//    module/engine boot APIs) — never to an already-running State. Every
+//    State derived from that realm — eval/Function realms,
+//    $262.createRealm and $262.agent children, ShadowRealms, module
+//    bodies including dynamic import — inherits the record, so a
+//    forgotten install site is a COMPILE error, not a silent "cannot
+//    block". Both capabilities come together, since a host that can
+//    block but not deliver wakes (or vice versa) deadlocks its peers; a
+//    host with neither passes `state.default_host_hooks()` (the default
+//    the convenience entry points already use), which means "cannot
+//    block". `State.can_block` remains separate per-agent embedder
+//    config OUTSIDE the record: it is spec policy ([[CanBlock]]), not
+//    capability presence.
 
 /// Re-export: one blocking sync Atomics.wait handed to the embedder.
 /// See arc/vm/state.WaitRequest for field semantics.
@@ -306,20 +317,31 @@ pub type WaiterKey =
 pub type WaiterHandle =
   state.WaiterHandle
 
-/// Install the Atomics blocking-wait and wake-delivery capabilities on a
-/// State (contract clause 5). Both together, always: a host that blocks
-/// but cannot deliver wakes (or vice versa) deadlocks its peer agents.
-/// Leaves `State.can_block` untouched — that is per-agent spec policy,
-/// not capability presence.
-pub fn install_atomics_capabilities(
-  s: State(host),
+/// Re-export: the embedder host-capability record carried on every realm's
+/// `RealmCtx`. Build one with `atomics_capabilities` below (or
+/// `state.default_host_hooks()` for "no capabilities") and hand it to the
+/// engine/realm constructor; every derived State inherits it.
+pub type HostHooks =
+  state.HostHooks
+
+/// Build the Atomics blocking-wait + wake-delivery capability record
+/// (contract clause 5). Both together, always: a host that blocks but
+/// cannot deliver wakes (or vice versa) deadlocks its peer agents.
+///
+/// Hand the result to the engine/realm constructor ONCE — it is a value,
+/// not a State mutation — and every State derived from that realm
+/// (eval/Function realms, $262.createRealm / $262.agent children,
+/// ShadowRealms, module bodies including dynamic import) inherits it.
+/// Says nothing about `State.can_block` — that stays per-agent spec
+/// policy ([[CanBlock]]), not capability presence.
+pub fn atomics_capabilities(
   sync_wait sync_wait: state.SyncWaitFn,
   deliver_wake deliver_wake: state.DeliverWakeFn,
-) -> State(host) {
-  state.State(
-    ..s,
-    host_sync_wait: option.Some(sync_wait),
-    host_deliver_wake: option.Some(deliver_wake),
+) -> HostHooks {
+  state.HostHooks(
+    ..state.default_host_hooks(),
+    sync_wait: option.Some(sync_wait),
+    deliver_wake: option.Some(deliver_wake),
   )
 }
 

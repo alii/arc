@@ -337,6 +337,7 @@ pub fn new_state(
   lexical_globals: dict.Dict(String, value.LexicalGlobal),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
+  hooks: state.HostHooks,
 ) -> State(host) {
   State(
     stack: [],
@@ -362,6 +363,10 @@ pub fn new_state(
         ..empty_template(),
         bytecode: tuple_array.from_list([Return, Return]),
       ),
+      // Embedder host capabilities (Atomics blocking wait / wake delivery),
+      // supplied exactly once at engine/realm construction and inherited by
+      // every derived State via `..ctx` spreads.
+      host_hooks: hooks,
     ),
     new_target: JsUndefined,
     call_args: [],
@@ -377,12 +382,6 @@ pub fn new_state(
     // test's worker process before booting a realm for CanBlockIsFalse
     // tests; fresh agent processes start with it unset, i.e. True.
     can_block: host_can_block(),
-    // Host Atomics capabilities (blocking wait / wake delivery) start
-    // absent; embedders (arc/beam.run setup, the test262 harness worker)
-    // install them via host.install_atomics_capabilities. Absent sync
-    // wait == cannot-block (DoWait step 10 TypeError).
-    host_sync_wait: None,
-    host_deliver_wake: None,
   )
 }
 
@@ -398,6 +397,7 @@ pub fn init_state(
   builtins: Builtins,
   global_object: Ref,
   is_module: Bool,
+  hooks: state.HostHooks,
 ) -> State(host) {
   // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
   // ES §16.1.6 ScriptEvaluation: the script's this is the global object,
@@ -416,6 +416,7 @@ pub fn init_state(
     dict.new(),
     dict.new(),
     dict.new(),
+    hooks,
   )
 }
 
@@ -490,8 +491,10 @@ pub fn call_root(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
+  hooks: state.HostHooks,
 ) -> Result(#(Completion(host), State(host)), VmError) {
-  let state = init_state(empty_template(), heap, builtins, global_object, False)
+  let state =
+    init_state(empty_template(), heap, builtins, global_object, False, hooks)
   call_value_to_completion(state, callee, this_val, args)
 }
 
@@ -2907,7 +2910,7 @@ fn step(
               // Base constructor: use the constructed object unless the
               // function explicitly returned an object.
               // §13.3.7.1 SuperCall step 8 BindThisValue(result) is handled at
-              // the call site: emit's `CallConstructor; Dup; IrSetThis` writes
+              // the call site: emit's `CallConstructor; Dup; set_this` writes
               // effective_return into the caller's lexical-`this` slot.
               case return_value {
                 JsObject(_) -> Ok(return_value)

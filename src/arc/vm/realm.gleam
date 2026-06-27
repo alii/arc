@@ -1,4 +1,5 @@
 import arc/compiler
+import arc/compiler/scope
 import arc/parser
 import arc/parser/ast
 import arc/vm/builtins
@@ -57,6 +58,7 @@ pub type NewStateFn(host) =
     dict.Dict(String, value.LexicalGlobal),
     dict.Dict(value.SymbolId, String),
     dict.Dict(String, value.SymbolId),
+    state.HostHooks,
   ) -> State(host)
 
 // ============================================================================
@@ -139,6 +141,8 @@ pub fn eval_script_native(
             lexical_globals,
             symbol_descriptions,
             symbol_registry,
+            // Child realm inherits the parent's embedder host capabilities.
+            state.ctx.host_hooks,
           ),
           job_queue: state.job_queue,
         )
@@ -400,8 +404,10 @@ fn compile_or_throw(
   state: State(host),
   builtins: Builtins,
   source: String,
-  parse: fn(String) -> Result(ast.Program, parser.ParseError),
-  compile: fn(ast.Program) -> Result(FuncTemplate, compiler.CompileError),
+  parse: fn(String) ->
+    Result(#(ast.Program, scope.ScopeBuilder), parser.ParseError),
+  compile: fn(ast.Program, scope.ScopeBuilder) ->
+    Result(FuncTemplate, compiler.CompileError),
   cont: fn(FuncTemplate) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let throw_syntax = fn(msg) {
@@ -417,8 +423,8 @@ fn compile_or_throw(
     ffi_run_compile_task(string.byte_size(source), fn() {
       case parse(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
-        Ok(program) ->
-          case compile(program) {
+        Ok(#(program, sb)) ->
+          case compile(program, sb) {
             Error(err) -> Error(string.inspect(err))
             Ok(template) -> Ok(template)
           }
@@ -466,6 +472,8 @@ fn run_eval(
         state.ctx.lexical_globals,
         state.ctx.symbol_descriptions,
         state.ctx.symbol_registry,
+        // The eval realm inherits the caller's embedder host capabilities.
+        state.ctx.host_hooks,
       ),
       job_queue: state.job_queue,
       // Seed event-loop state from the caller: merge_globals threads
@@ -654,17 +662,20 @@ fn run_direct_eval(
       allow_arguments: perms.arguments_allowed,
       outer_private_names: private_names,
     ),
-    compiler.compile_eval_direct(
-      _,
-      parent_names,
-      parent_slots,
-      perms,
-      caller_strict,
-      caller_is_global,
-      param_scope_names,
-      with_names,
-      private_names,
-    ),
+    fn(program, sb) {
+      compiler.compile_eval_direct(
+        program,
+        sb,
+        parent_names,
+        parent_slots,
+        perms,
+        caller_strict,
+        caller_is_global,
+        param_scope_names,
+        with_names,
+        private_names,
+      )
+    },
   )
   // Seed locals[0..N-1] with the caller's box refs (pulled from caller's
   // locals at the indices in name_table), then the caller's lexical box refs
@@ -1370,6 +1381,9 @@ fn do_shadow_realm_evaluate(
             realm.lexical_globals,
             merged_descriptions,
             merged_registry,
+            // The shadow realm inherits the caller's embedder host
+            // capabilities.
+            state.ctx.host_hooks,
           ),
           job_queue: state.job_queue,
         )

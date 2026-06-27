@@ -116,15 +116,23 @@ pub type Statement {
   DebuggerStatement
   LabeledStatement(label: String, body: Statement)
   WithStatement(object: Expression, body: Statement)
+  /// `name_span` is the byte span of the declaration's name identifier (the
+  /// binding introduced by `function f`), or `None` when the declaration is
+  /// anonymous (only possible for `export default function`). Slicing the
+  /// source by this span returns the exact name text.
   FunctionDeclaration(
     name: Option(String),
+    name_span: Option(Span),
     params: List(Pattern),
     body: Statement,
     is_generator: Bool,
     is_async: Bool,
   )
+  /// `name_span` is the byte span of the class name identifier, or `None` for
+  /// an anonymous class (`export default class`).
   ClassDeclaration(
     name: Option(String),
+    name_span: Option(Span),
     super_class: Option(Expression),
     body: List(ClassElement),
   )
@@ -190,106 +198,168 @@ pub type VariableDeclarator {
   VariableDeclarator(id: Pattern, init: Option(Expression))
 }
 
+/// Every variant carries `span: Span` as its FIRST field — the half-open
+/// `[start, end)` UTF-8 byte range of the WHOLE expression in the original
+/// source, including delimiters: `(x)` spans both parens, `f(a)` runs from
+/// `f` to `)`, `a + b` from start of `a` to end of `b`. Span is positionally
+/// first (not last) because Gleam's shared-field accessor requires the field
+/// at the same name, type AND position across every variant; first is the
+/// only position common to all 36 constructors. This enables the universal
+/// accessor `expr.span` for any `Expression` value. Construction sites should
+/// use labelled arguments (`Identifier(name:, span:)`) so field order is
+/// irrelevant; pattern-match sites that bind other fields positionally must
+/// lead with `_,` for the span or use labelled `..` patterns.
 pub type Expression {
-  Identifier(name: String)
-  NumberLiteral(value: Float)
+  /// A reference to a binding by name. `span` is the half-open byte range of
+  /// the identifier token in the source, so a bundler can locate and rewrite
+  /// each occurrence (e.g. an imported reference `x` → member access `mod.x`).
+  Identifier(span: Span, name: String)
+  NumberLiteral(span: Span, value: Float)
   /// BigInt literal (`7n`, `0xFFn`). Value is exact — BEAM ints are bignums.
-  BigIntLiteral(value: Int)
-  StringExpression(value: String)
-  BooleanLiteral(value: Bool)
-  NullLiteral
-  UndefinedExpression
-  BinaryExpression(operator: BinaryOp, left: Expression, right: Expression)
-  LogicalExpression(operator: BinaryOp, left: Expression, right: Expression)
-  UnaryExpression(operator: UnaryOp, prefix: Bool, argument: Expression)
-  UpdateExpression(operator: UpdateOp, prefix: Bool, argument: Expression)
+  BigIntLiteral(span: Span, value: Int)
+  StringExpression(span: Span, value: String)
+  BooleanLiteral(span: Span, value: Bool)
+  NullLiteral(span: Span)
+  UndefinedExpression(span: Span)
+  BinaryExpression(
+    span: Span,
+    operator: BinaryOp,
+    left: Expression,
+    right: Expression,
+  )
+  LogicalExpression(
+    span: Span,
+    operator: BinaryOp,
+    left: Expression,
+    right: Expression,
+  )
+  UnaryExpression(
+    span: Span,
+    operator: UnaryOp,
+    prefix: Bool,
+    argument: Expression,
+  )
+  UpdateExpression(
+    span: Span,
+    operator: UpdateOp,
+    prefix: Bool,
+    argument: Expression,
+  )
   AssignmentExpression(
+    span: Span,
     operator: AssignmentOp,
     left: Expression,
     right: Expression,
   )
-  CallExpression(callee: Expression, arguments: List(Expression))
-  MemberExpression(object: Expression, property: Expression, computed: Bool)
-  OptionalMemberExpression(
+  CallExpression(span: Span, callee: Expression, arguments: List(Expression))
+  MemberExpression(
+    span: Span,
     object: Expression,
     property: Expression,
     computed: Bool,
   )
-  OptionalCallExpression(callee: Expression, arguments: List(Expression))
+  OptionalMemberExpression(
+    span: Span,
+    object: Expression,
+    property: Expression,
+    computed: Bool,
+  )
+  OptionalCallExpression(
+    span: Span,
+    callee: Expression,
+    arguments: List(Expression),
+  )
   ConditionalExpression(
+    span: Span,
     condition: Expression,
     consequent: Expression,
     alternate: Expression,
   )
-  NewExpression(callee: Expression, arguments: List(Expression))
-  ThisExpression
-  SuperExpression
-  ArrayExpression(elements: List(Option(Expression)))
-  ObjectExpression(properties: List(Property))
+  NewExpression(span: Span, callee: Expression, arguments: List(Expression))
+  ThisExpression(span: Span)
+  SuperExpression(span: Span)
+  ArrayExpression(span: Span, elements: List(Option(Expression)))
+  ObjectExpression(span: Span, properties: List(Property))
+  /// `name_span` is the byte span of the optional self-name identifier in a
+  /// named function expression (`const f = function g() {}` -> span of `g`),
+  /// or `None` for an anonymous function expression. The self-name binding is
+  /// visible only inside the expression body (§13.2.5.5).
   FunctionExpression(
+    span: Span,
     name: Option(String),
+    name_span: Option(Span),
     params: List(Pattern),
     body: Statement,
     is_generator: Bool,
     is_async: Bool,
   )
   ArrowFunctionExpression(
+    span: Span,
     params: List(Pattern),
     body: ArrowBody,
     is_async: Bool,
   )
+  /// `name_span` is the byte span of the optional class-expression name
+  /// (`const C = class D {}` -> span of `D`), or `None` when anonymous. The
+  /// name binding is visible only inside the class body.
   ClassExpression(
+    span: Span,
     name: Option(String),
+    name_span: Option(Span),
     super_class: Option(Expression),
     body: List(ClassElement),
   )
-  YieldExpression(argument: Option(Expression), is_delegate: Bool)
-  AwaitExpression(argument: Expression)
-  SequenceExpression(expressions: List(Expression))
-  SpreadElement(argument: Expression)
-  TemplateLiteral(quasis: List(String), expressions: List(Expression))
+  YieldExpression(span: Span, argument: Option(Expression), is_delegate: Bool)
+  AwaitExpression(span: Span, argument: Expression)
+  SequenceExpression(span: Span, expressions: List(Expression))
+  SpreadElement(span: Span, argument: Expression)
+  TemplateLiteral(
+    span: Span,
+    quasis: List(String),
+    expressions: List(Expression),
+  )
   /// Tagged template: tag`raw0 ${e0} raw1`. `cooked` holds the decoded
   /// template values (None when a quasi contains an invalid escape sequence —
   /// legal in tagged templates, the cooked entry becomes undefined). `raw`
   /// holds the verbatim source text of each quasi (line endings normalized
   /// to LF per the spec's TRV definition).
   TaggedTemplateExpression(
+    span: Span,
     tag: Expression,
     cooked: List(Option(String)),
     raw: List(String),
     expressions: List(Expression),
   )
-  MetaProperty(meta: String, property: String)
+  MetaProperty(span: Span, meta: String, property: String)
   ImportExpression(
+    span: Span,
     source: Expression,
     options: Option(Expression),
     phase: ImportPhase,
   )
-  RegExpLiteral(pattern: String, flags: String)
+  RegExpLiteral(span: Span, pattern: String, flags: String)
   /// Preserves parenthesization so the compiler can distinguish `x` from `(x)`.
   /// Needed for ES spec §13.15.2: IsIdentifierRef returns false for
   /// CoverParenthesizedExpressionAndArrowParameterList.
-  ParenthesizedExpression(expression: Expression)
-  /// Internal-only — never produced by the parser. Synthesized by the
-  /// using-declaration desugar: CreateDisposableResource(argument, hint).
-  /// Evaluates to a 0-arity disposer callable (calls the captured
-  /// [Symbol.dispose]/[Symbol.asyncDispose] method with the resource as
-  /// `this`), or undefined when argument is null/undefined. Throws
-  /// TypeError when the value is not disposable.
-  IntrinsicGetDisposer(argument: Expression, is_async: Bool)
-  /// Internal-only — never produced by the parser. Synthesized by the
-  /// using-declaration desugar: DisposeResources step 3.e.iii — a new
-  /// SuppressedError with .error = error and .suppressed = suppressed.
-  IntrinsicMakeSuppressed(error: Expression, suppressed: Expression)
+  ParenthesizedExpression(span: Span, expression: Expression)
   /// Internal-only — never produced by the parser. Synthesized by the
   /// compiler when lowering TaggedTemplateExpression: evaluates to the
   /// per-site cached template object (GetTemplateObject, §13.2.8.4).
   /// `site` is a globally unique call-site id baked in at compile time.
   IntrinsicTemplateObject(
+    span: Span,
     site: Int,
     cooked: List(Option(String)),
     raw: List(String),
   )
+}
+
+/// Universal accessor for the source span of any `Expression`. Equivalent to
+/// `e.span` (which works because every variant carries `span: Span` at the
+/// same first position) — kept as a named function for use as a first-class
+/// value in `list.map` and similar.
+pub fn expression_span(e: Expression) -> Span {
+  e.span
 }
 
 /// Module request phase, shared by static ImportDeclarations and dynamic
@@ -332,7 +402,7 @@ pub type UpdateOp {
 }
 
 pub type Pattern {
-  IdentifierPattern(name: String)
+  IdentifierPattern(name: String, span: Span)
   ArrayPattern(elements: List(Option(Pattern)))
   ObjectPattern(properties: List(PatternProperty))
   AssignmentPattern(left: Pattern, right: Expression)

@@ -10,6 +10,7 @@
 ///   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
 ///   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
 import arc/compiler
+import arc/host
 import arc/internal/path
 import arc/module
 import arc/module_host
@@ -34,7 +35,7 @@ import gleam/dict
 import gleam/int
 import gleam/io
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 import gleam/string
@@ -137,13 +138,13 @@ fn harness_template(
 fn compile_harness_source(
   source: String,
 ) -> Result(value.FuncTemplate, String) {
-  use program <- result.try(
+  use #(program, sb) <- result.try(
     parser.parse(source, parser.Script)
     |> result.map_error(fn(err) {
       "harness parse: " <> parser.parse_error_to_string(err)
     }),
   )
-  compiler.compile_repl(program)
+  compiler.compile_repl(program, sb)
   |> result.map_error(fn(err) { "harness compile: " <> string.inspect(err) })
 }
 
@@ -711,7 +712,7 @@ fn do_run_module(
       // itself) resolves to the same module record instead of re-evaluating
       // it (§16.2.1.8).
       // Top-level driver is the notify-consuming embedder loop
-      // (event_loop.finish — drains microtasks, then consumes
+      // (settle_pending_wakes — drains microtasks, then consumes
       // cross-process arc_notify wakes bounded by the earliest pending
       // deadline), so leftover jobs are always empty here.
       let #(new_heap, _jobs, result) =
@@ -720,7 +721,8 @@ fn do_run_module(
           b,
           global_object,
           bundle,
-          event_loop.finish,
+          harness_host_hooks(),
+          settle_pending_wakes,
         )
       case result {
         Ok(module.EvaluatedBundle(value: val, ..)) ->
@@ -792,23 +794,24 @@ fn do_run_script_with_harness(
 
   case parser.parse(test_source, parser.Script) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compiler.compile_repl(program) {
+    Ok(#(program, sb)) ->
+      case compiler.compile_repl(program, sb) {
         Error(err) -> Error("compile: " <> string.inspect(err))
         Ok(template) ->
           // The test source runs with the harness's host capabilities
-          // installed (sync Atomics.wait blocking / notify wake delivery —
-          // contract in arc/host.gleam) and the notify-consuming embedder
-          // loop as its post-script driver, so cross-agent waitAsync wakes
-          // landing in this worker's mailbox settle before their deadline.
+          // supplied at State construction (sync Atomics.wait blocking /
+          // notify wake delivery — contract in arc/host.gleam) and the
+          // notify-consuming embedder loop as its post-script driver, so
+          // cross-agent waitAsync wakes landing in this worker's mailbox
+          // settle before their deadline.
           case
             entry.run_and_drain_repl_with(
               template,
               h,
               b,
               env,
-              fn(s) { s },
-              event_loop.finish,
+              harness_host_hooks(),
+              settle_pending_wakes,
             )
           {
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
@@ -1174,8 +1177,8 @@ fn run_agent_child(source: String) -> Nil {
     ffi_run_compile_task(string.byte_size(source), fn() {
       case parser.parse(source, parser.Script) {
         Error(err) -> Error(parser.parse_error_to_string(err))
-        Ok(program) ->
-          case compiler.compile_eval(program) {
+        Ok(#(program, sb)) ->
+          case compiler.compile_eval(program, sb) {
             Error(err) -> Error(string.inspect(err))
             Ok(template) -> Ok(template)
           }
@@ -1189,6 +1192,9 @@ fn run_agent_child(source: String) -> Nil {
     Ok(template) -> {
       let locals =
         interpreter.init_top_level_locals(template, value.JsObject(global_ref))
+      // The agent child is an embedder-driven State of its own: it blocks
+      // in sync Atomics.wait and delivers notify wakes from THIS process,
+      // so its realm is constructed with the harness host capabilities.
       let st =
         interpreter.new_state(
           template,
@@ -1199,6 +1205,7 @@ fn run_agent_child(source: String) -> Nil {
           dict.new(),
           dict.new(),
           dict.new(),
+          harness_host_hooks(),
         )
       let st =
         State(
@@ -1208,8 +1215,6 @@ fn run_agent_child(source: String) -> Nil {
             realms: dict.insert(st.ctx.realms, realm_ref, b),
           ),
         )
-      // The agent child is an embedder-driven State of its own: it blocks
-      // in sync Atomics.wait and delivers notify wakes from THIS process.
       case interpreter.execute_inner(st) {
         Error(vm_err) ->
           io.println_error(
@@ -1224,7 +1229,7 @@ fn run_agent_child(source: String) -> Nil {
               )
             _ -> Nil
           }
-          let st = event_loop.finish(st)
+          let st = settle_pending_wakes(st)
           agent_child_loop(st, agent_this)
         }
       }
@@ -1235,18 +1240,21 @@ fn run_agent_child(source: String) -> Nil {
 /// Child broadcast loop: block until the parent broadcasts (the receipt ack
 /// is sent by await_broadcast_or_notify BEFORE we run any JS), materialize
 /// the payload in the child heap, invoke every registered receiveBroadcast
-/// callback, drain the event loop, repeat. A cross-process Atomics.notify
-/// can also wake the loop: an infinite-timeout waitAsync waiter has no
-/// deadline, so the post-script drain returns with it still pending and the
-/// notify message must be consumed HERE — inject the wake and re-drain so
-/// its reaction jobs (e.g. $262.agent.report) run. Ends — and the child
-/// process exits — when the parent process goes away.
+/// callback, drive the embedder loop (`settle_pending_wakes` — drain, then
+/// consume `arc_notify` wakes bounded by the earliest pending deadline, so a
+/// finite-timeout waitAsync settles "ok" instead of sleeping blindly to its
+/// deadline), repeat. A cross-process Atomics.notify can also wake the loop:
+/// an infinite-timeout waitAsync waiter has no deadline, so the drive
+/// returns with it still pending and the notify message must be consumed
+/// HERE — inject the wake and re-drive so its reaction jobs (e.g.
+/// $262.agent.report) run. Ends — and the child process exits — when the
+/// parent process goes away.
 fn agent_child_loop(st: State(host), agent_this: value.JsValue) -> Nil {
   case ffi_await_broadcast_or_notify() {
     AgentWakeParentDown -> Nil
     AgentWakeNotify(key, byte_index) -> {
       let st = event_loop.inject_notify(st, key, byte_index)
-      let st = event_loop.finish(st)
+      let st = settle_pending_wakes(st)
       agent_child_loop(st, agent_this)
     }
     AgentWakeBroadcast(payload) -> {
@@ -1267,7 +1275,7 @@ fn agent_child_loop(st: State(host), agent_this: value.JsValue) -> Nil {
           })
         Error(Nil) -> st
       }
-      let st = event_loop.finish(st)
+      let st = settle_pending_wakes(st)
       agent_child_loop(st, agent_this)
     }
   }
@@ -1574,6 +1582,105 @@ fn ffi_send_report(_parent: AgentPid, _report: String) -> Nil {
 @external(erlang, "test262_exec_ffi", "take_report")
 fn ffi_take_report() -> Result(String, Nil) {
   panic as beam_only_test
+}
+
+// -- Atomics host capabilities (harness as embedder) --
+//
+// The embedder side of the host capability contract in arc/host.gleam:
+// clause 1 (blocking sync wait) and clause 2 (wake delivery) supplied as the
+// HostHooks value every State the harness boots is constructed with,
+// clauses 3-4 (the bounded mailbox receive
+// that feeds event_loop.inject_notify) as the post-script driver. Core
+// registers waiterlist entries and claims waiters as pure ETS data
+// (arc_waiter_ffi); every receive of — and every send into — the
+// `{arc_notify, Ref, Key, ByteIndex}` wake protocol happens HERE, via
+// test262_exec_ffi.erl. This is test262 HOST machinery (INTERPRETING.md):
+// agents and blocking waits are the host's job, the same engine/platform
+// split as V8 vs d8.
+
+/// Clause 1's blocking receive: selective receive for the entry's wake,
+/// with the notify-vs-timeout race resolved by ets:take of our own entry
+/// (negative timeout = infinity). Returns the JS "ok" / "timed-out".
+@external(erlang, "test262_exec_ffi", "await_notify")
+fn ffi_await_notify(_handle: state.WaiterHandle, _timeout_ms: Int) -> String {
+  panic as beam_only_test
+}
+
+/// Clause 2's wake delivery: send `{arc_notify, Ref, Key, ByteIndex}` to
+/// each remote waiter claimed by Atomics.notify's waiterlist take.
+@external(erlang, "test262_exec_ffi", "deliver_wakes")
+fn ffi_deliver_wakes(_claimed: List(state.ClaimedWaiter)) -> Nil {
+  panic as beam_only_test
+}
+
+/// Clause 4's bounded dry-queue receive for arc_notify messages.
+@external(erlang, "test262_exec_ffi", "wait_for_notify")
+fn ffi_wait_for_notify(_ms: Int) -> Option(#(state.WaiterKey, Int)) {
+  panic as beam_only_test
+}
+
+/// Blocking-wait capability (`HostHooks.sync_wait`, contract clause 1):
+/// suspend this worker process in a selective receive until the registered
+/// waiterlist entry is woken or the timeout elapses. `timeout_ms: None` =
+/// wait forever (the FFI clamps to the BEAM receive ceiling). A `Some(0)`
+/// timeout doubles as the cancel flush — see await_notify's doc.
+fn atomics_sync_wait(req: state.WaitRequest) -> state.WaitOutcome {
+  let state.WaitRequest(handle:, timeout_ms:, key: _, byte_index: _) = req
+  case ffi_await_notify(handle, option.unwrap(timeout_ms, -1)) {
+    "timed-out" -> state.WaitTimedOut
+    _ -> state.WaitOk
+  }
+}
+
+/// The harness's host capabilities — both Atomics capabilities together,
+/// per contract clause 5 (a host that can block but not deliver wakes, or
+/// vice versa, deadlocks its peers). Supplied ONCE wherever the harness
+/// boots a realm (entry/module/agent State construction); every derived
+/// State — eval/Function realms, $262.createRealm children, $262.agent
+/// children, module bodies including dynamic import() — inherits them.
+/// Leaves `State.can_block` untouched — that is per-agent spec policy (the
+/// CanBlockIsFalse flag), not capability presence.
+fn harness_host_hooks() -> host.HostHooks {
+  host.atomics_capabilities(
+    sync_wait: atomics_sync_wait,
+    deliver_wake: ffi_deliver_wakes,
+  )
+}
+
+/// One bounded wait-settle-drain step (contract clause 3): block at most
+/// `timeout_ms` for a cross-process `arc_notify` message; if one arrives,
+/// settle this agent's first matching waitAsync waiter with "ok" and
+/// re-drain microtasks. `False` = the timeout elapsed, i.e. a deadline is
+/// due — the caller's next drain fires it.
+fn wait_settle_step(s: State(host), timeout_ms: Int) -> #(State(host), Bool) {
+  case ffi_wait_for_notify(timeout_ms) {
+    Some(#(key, byte_index)) -> {
+      let s = event_loop.inject_notify(s, key, byte_index)
+      #(event_loop.drain_jobs_yielding(s), True)
+    }
+    None -> #(s, False)
+  }
+}
+
+/// The harness's post-script driver: drain, then loop `wait_settle_step`
+/// bounded by the earliest pending deadline until no settleable deadline
+/// remains. Mirrors event_loop.drain_jobs' dry-queue semantics: when only
+/// deadline-free (infinite) waiters remain and no wake arrives, the loop
+/// returns — a mailbox loop cannot distinguish a never-notified infinite
+/// waiter from quiescence, and parking forever here would hang the worker.
+fn settle_pending_wakes(s: State(host)) -> State(host) {
+  let s = event_loop.drain_jobs_yielding(s)
+  case s.atomics_waiters {
+    [] -> s
+    _ ->
+      case event_loop.next_deadline_timeout(s) {
+        None -> s
+        Some(timeout) -> {
+          let #(s, _woke) = wait_settle_step(s, timeout)
+          settle_pending_wakes(s)
+        }
+      }
+  }
 }
 
 /// See arc_vm_ffi:run_compile_task/2 — runs the compile in a short-lived,

@@ -8,7 +8,8 @@
          cache_get/1, cache_put/2,
          spawn_agent/1, agent_children/0, agent_parent/0,
          send_broadcast/2, await_acks/1, await_broadcast_or_notify/0,
-         send_report/2, take_report/0]).
+         send_report/2, take_report/0,
+         await_notify/2, deliver_wakes/1, wait_for_notify/1]).
 
 %% ETS-backed atomic counters for pass/fail/skip across parallel tests.
 
@@ -218,4 +219,95 @@ take_report() ->
         {arc_agent_report, Report} -> {ok, Report}
     after 0 ->
         {error, nil}
+    end.
+
+%% -- Atomics host capabilities (contract: arc/host.gleam, clauses 1-4) ------
+%%
+%% The harness IS an embedder, so the blocking-receive / wake-send half of
+%% the Atomics contract lives here, in test FFI. The waiterlist registry
+%% itself (the named public ETS table) is DATA-ONLY core, owned by
+%% src/arc/vm/builtins/arc_waiter_ffi.erl. Every event-driven receive/send
+%% of its {arc_notify, Ref, Key, ByteIndex} wake protocol happens HERE.
+%% Waiter handles are the {EtsKey, MsgRef} pairs produced by
+%% arc_waiter_ffi:insert_waiter.
+
+%% The waiterlist table (created and owned by arc_waiter_ffi:ensure_table;
+%% by the time any function below runs, insert_waiter has created it).
+-define(WAITER_TAB, arc_atomics_waiterlist).
+%% Safety valve for the "a notifier claimed our entry but its message never
+%% arrived" case (the notifying process died between take and send).
+-define(FLUSH_SAFETY_MS, 1000).
+%% erlang `receive ... after` rejects timeouts >= 2^32; clamp (49 days).
+-define(MAX_RECV_MS, 4294967294).
+
+%% Contract clause 1: block the calling agent until its waiterlist entry is
+%% notified, or TimeoutMs elapses (negative -> infinity). Returns the JS
+%% result strings <<"ok">> | <<"timed-out">>. The notify-vs-timeout race is
+%% resolved lock-free via ets:take of our OWN entry on timeout: we removed
+%% it ourselves -> nobody claimed us -> "timed-out"; it is gone -> a
+%% notifier claimed (and counted) us and its wake message is in flight ->
+%% bounded flush-receive, then "ok".
+%%
+%% TimeoutMs = 0 doubles as contract clause 4's cancel flush: core's
+%% sync_block "not-equal" path calls the sync_wait capability with a
+%% zero timeout exactly when its data-only cancel found the entry already
+%% claimed by a notifier, so the claimed branch below consumes the
+%% in-flight wake (safety-bounded) and it cannot pollute a later receive.
+await_notify({Key, Ref}, TimeoutMs) ->
+    Timeout =
+        if
+            TimeoutMs < 0 -> infinity;
+            TimeoutMs > ?MAX_RECV_MS -> ?MAX_RECV_MS;
+            true -> TimeoutMs
+        end,
+    receive
+        {arc_notify, Ref, _, _} -> <<"ok">>
+    after Timeout ->
+        case ets:take(?WAITER_TAB, Key) of
+            [_] ->
+                %% We removed our own entry: no notifier claimed us.
+                <<"timed-out">>;
+            [] ->
+                %% Timeout raced a notifier that already took our entry —
+                %% its message is (about to be) in our mailbox. Per spec
+                %% the notifier counted us as woken, so report "ok".
+                receive
+                    {arc_notify, Ref, _, _} -> <<"ok">>
+                after ?FLUSH_SAFETY_MS ->
+                    <<"timed-out">>
+                end
+        end
+    end.
+
+%% Contract clause 2: deliver one wake message per remote waiter claimed by
+%% Atomics.notify's waiterlist take. Claiming (the atomic ets:take in
+%% arc_waiter_ffi:take_waiters) already counted the waiter as woken; only
+%% the claimer may message it, so each entry is delivered at most once.
+%% Claimed terms are {Pid, Ref, Key, ByteIndex} (opaque state.ClaimedWaiter
+%% on the Gleam side).
+deliver_wakes(Claimed) ->
+    lists:foreach(
+        fun({Pid, Ref, Key, ByteIndex}) ->
+            Pid ! {arc_notify, Ref, Key, ByteIndex}
+        end,
+        Claimed),
+    nil.
+
+%% Contract clause 4: the bounded dry-queue receive for cross-process
+%% Atomics.notify wakes. Blocks at most Ms (negative -> poll, clamped to
+%% the BEAM receive cap) for an {arc_notify, Ref, Key, ByteIndex} message
+%% sent by a notifier's wake delivery; returns {some, {Key, ByteIndex}} |
+%% none (gleam Option) for injection into core via
+%% event_loop.inject_notify.
+wait_for_notify(Ms) ->
+    Timeout =
+        if
+            Ms < 0 -> 0;
+            Ms > ?MAX_RECV_MS -> ?MAX_RECV_MS;
+            true -> Ms
+        end,
+    receive
+        {arc_notify, _Ref, SabKey, ByteIndex} -> {some, {SabKey, ByteIndex}}
+    after Timeout ->
+        none
     end.

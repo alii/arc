@@ -11,8 +11,8 @@ import gleam/string
 fn run_js(source: String) -> Result(Completion(host), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compiler.compile(program) {
+    Ok(#(program, sb)) ->
+      case compiler.compile(program, sb) {
         Error(e) -> Error("compile error: " <> string.inspect(e))
         Ok(template) -> {
           let h = heap.new()

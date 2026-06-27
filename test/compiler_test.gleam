@@ -28,8 +28,8 @@ import gleam/string
 fn run_js(source: String) -> Result(Completion(host), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compiler.compile(program) {
+    Ok(#(program, sb)) ->
+      case compiler.compile(program, sb) {
         Error(compiler.Unsupported(desc)) ->
           Error("compile error: unsupported " <> desc)
         Error(compiler.BreakOutsideLoop) ->
@@ -144,7 +144,7 @@ fn assert_thrown(source: String) -> Nil {
 fn assert_parse_error(source: String) -> Nil {
   case parser.parse(source, parser.Script) {
     Error(_parse_err) -> Nil
-    Ok(_ast) ->
+    Ok(#(_ast, _sb)) ->
       panic as { "expected parse error, parsed successfully: " <> source }
   }
 }
@@ -7017,8 +7017,8 @@ fn eval_repl_line(
 ) -> Result(#(value.JsValue, state.Heap(host), entry.ReplEnv), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(program) ->
-      case compiler.compile_repl(program) {
+    Ok(#(program, sb)) ->
+      case compiler.compile_repl(program, sb) {
         Error(compiler.Unsupported(desc)) ->
           Error("compile error: unsupported " <> desc)
         Error(compiler.BreakOutsideLoop) ->
@@ -7061,8 +7061,8 @@ fn run_repl_throw_loop(
       case parser.parse(line, parser.Script) {
         Error(err) ->
           Error("parse error: " <> parser.parse_error_to_string(err))
-        Ok(program) ->
-          case compiler.compile_repl(program) {
+        Ok(#(program, sb)) ->
+          case compiler.compile_repl(program, sb) {
             Error(_) -> Error("compile error on last line")
             Ok(template) ->
               case entry.run_and_drain_repl(template, h, b, env) {
@@ -7663,8 +7663,10 @@ pub fn module_repl_harness_globals_test() -> Nil {
   // Step 1: Compile and run harness script in REPL mode
   let harness_source =
     "function greetFromHarness() { return 'hello from harness'; }"
-  let assert Ok(harness_program) = parser.parse(harness_source, parser.Script)
-  let assert Ok(harness_template) = compiler.compile_repl(harness_program)
+  let assert Ok(#(harness_program, harness_sb)) =
+    parser.parse(harness_source, parser.Script)
+  let assert Ok(harness_template) =
+    compiler.compile_repl(harness_program, harness_sb)
 
   let env = entry.new_repl_env(global_object)
   let assert Ok(#(harness_completion, env)) =
@@ -7739,6 +7741,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
+      state.default_host_hooks(),
       event_loop.finish,
     )
   let assert True = v1 == value.from_int(5)
@@ -7752,6 +7755,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
+      state.default_host_hooks(),
       event_loop.finish,
     )
   let assert True = v2 == value.from_int(8)
@@ -7767,6 +7771,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
+      state.default_host_hooks(),
       event_loop.finish,
     )
   let assert True = v3 == value.from_int(8)

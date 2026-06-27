@@ -17,25 +17,23 @@ import arc/vm/opcode.{
   IrDefineMethodComputed, IrDefinePrivateAccessor, IrDefinePrivateField,
   IrDefinePrivateMethod, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
-  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
-  IrGetLexical, IrGetLocal, IrGetPrivateField, IrGetPrivateField2,
-  IrGetPrivateFieldDyn, IrGetPrivateFieldDyn2, IrGetPrototypeOf, IrGetSuperValue,
-  IrGetSuperValue2, IrGetTemplateObject, IrGosub, IrIncLocal, IrInitGlobalLex,
-  IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
-  IrIteratorNext, IrIteratorRecord, IrIteratorRest, IrJump, IrJumpIfFalse,
-  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure, IrMakeMethod,
-  IrNewObject, IrNewPrivateName, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
-  IrPop, IrPopTry, IrPrivateIn, IrPrivateInDyn, IrPushConst, IrPushTry,
-  IrPutBoxed, IrPutBoxedCheckInit, IrPutElem, IrPutEvalVar, IrPutField,
-  IrPutGlobal, IrPutLocal, IrPutLocalCheckInit, IrPutPrivateField,
-  IrPutPrivateFieldDyn, IrPutSuperValue, IrRet, IrReturn, IrRot3,
-  IrScopeDeleteVar, IrScopeGetRef, IrScopeGetVar, IrScopeGetVarThis,
-  IrScopeInitVar, IrScopeMakeRef, IrScopePutRef, IrScopePutVar, IrScopeReboxVar,
-  IrScopeTypeofVar, IrSetLine, IrSetProto, IrSetThis, IrSetupDerivedClass,
-  IrSwap, IrThrow, IrThrowConstAssign, IrThrowError, IrToObject, IrToPropertyKey,
-  IrToStringVal, IrTypeOf, IrTypeofEvalVar, IrTypeofGlobal, IrUnaryOp, IrUnrot4,
-  IrWithDeleteVar, IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis,
-  IrWithMakeRef, IrWithPutRefValue, IrWithPutVar, IrYield, IrYieldStar,
+  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
+  IrGetPrivateField, IrGetPrivateField2, IrGetPrivateFieldDyn,
+  IrGetPrivateFieldDyn2, IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2,
+  IrGetTemplateObject, IrGosub, IrIncLocal, IrInitGlobalLex, IrInitialYield,
+  IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
+  IrIteratorRecord, IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrMakeClosure, IrMakeMethod, IrNewObject,
+  IrNewPrivateName, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop,
+  IrPopTry, IrPrivateIn, IrPrivateInDyn, IrPushConst, IrPushTry, IrPutBoxed,
+  IrPutBoxedCheckInit, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal,
+  IrPutLocal, IrPutLocalCheckInit, IrPutPrivateField, IrPutPrivateFieldDyn,
+  IrPutSuperValue, IrRet, IrReturn, IrRot3, IrSetLine, IrSetProto,
+  IrSetupDerivedClass, IrSwap, IrThrow, IrThrowConstAssign, IrThrowError,
+  IrToObject, IrToPropertyKey, IrToStringVal, IrTypeOf, IrTypeofEvalVar,
+  IrTypeofGlobal, IrUnaryOp, IrUnrot4, IrWithDeleteVar, IrWithGetRefValue,
+  IrWithGetVar, IrWithGetVarThis, IrWithMakeRef, IrWithPutRefValue, IrWithPutVar,
+  IrYield, IrYieldStar,
 }
 import arc/vm/value.{
   type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
@@ -45,8 +43,9 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 
 /// Resolve a list of IrOps into a FuncTemplate.
-/// The IrOps must have all scope markers already consumed (by Phase 2).
-/// Only IrLabel/IrJump/IrJumpIfFalse/IrJumpIfTrue/IrJumpIfNullish/IrPushTry
+/// Variable access is already concrete (the emitter consults the scope tree
+/// and emits GetLocal/GetBoxed/GetGlobal/IrWith* directly); only
+/// IrLabel/IrJump/IrJumpIfFalse/IrJumpIfTrue/IrJumpIfNullish/IrPushTry
 /// still need label→PC resolution.
 pub fn resolve(
   code: List(IrOp),
@@ -240,6 +239,12 @@ fn build_label_map(
   }
 }
 
+/// Resolve a label id to its PC; crashes if the emitter forgot to place it.
+fn label_pc(labels: Dict(Int, Int), label: Int) -> Int {
+  let assert Ok(pc) = dict.get(labels, label) as "unbound label"
+  pc
+}
+
 /// Pass 2: Walk the IR, resolve labels to PCs, translate IrOp → Op.
 /// Appends a sentinel Return at the end so the interpreter's fetch loop
 /// can use unchecked element/2 — termination happens via normal Return
@@ -256,58 +261,48 @@ fn resolve_ops(
     [IrLabel(_), ..rest] -> resolve_ops(rest, labels, acc)
 
     // Jump ops: resolve label → PC
-    [IrJump(label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
-      resolve_ops(rest, labels, [opcode.Jump(pc), ..acc])
-    }
-    [IrJumpIfFalse(label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
-      resolve_ops(rest, labels, [opcode.JumpIfFalse(pc), ..acc])
-    }
-    [IrJumpIfTrue(label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
-      resolve_ops(rest, labels, [opcode.JumpIfTrue(pc), ..acc])
-    }
-    [IrJumpIfNullish(label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrJump(l), ..rest] ->
+      resolve_ops(rest, labels, [opcode.Jump(label_pc(labels, l)), ..acc])
+    [IrJumpIfFalse(l), ..rest] ->
+      resolve_ops(rest, labels, [opcode.JumpIfFalse(label_pc(labels, l)), ..acc])
+    [IrJumpIfTrue(l), ..rest] ->
+      resolve_ops(rest, labels, [opcode.JumpIfTrue(label_pc(labels, l)), ..acc])
+    [IrJumpIfNullish(l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.JumpIfNullish(pc), ..acc])
     }
-    [IrPushTry(catch_label), ..rest] -> {
-      let assert Ok(catch_pc) = dict.get(labels, catch_label)
-      resolve_ops(rest, labels, [opcode.PushTry(catch_pc), ..acc])
-    }
-    [IrGosub(label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
-      resolve_ops(rest, labels, [opcode.Gosub(pc), ..acc])
-    }
+    [IrPushTry(l), ..rest] ->
+      resolve_ops(rest, labels, [opcode.PushTry(label_pc(labels, l)), ..acc])
+    [IrGosub(l), ..rest] ->
+      resolve_ops(rest, labels, [opcode.Gosub(label_pc(labels, l)), ..acc])
 
     // `with`-object access: label-carrying, resolved like jumps
-    [IrWithGetVar(name, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrWithGetVar(name, l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.WithGetVar(name, pc), ..acc])
     }
-    [IrWithGetVarThis(name, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrWithGetVarThis(name, l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.WithGetVarThis(name, pc), ..acc])
     }
-    [IrWithPutVar(name, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrWithPutVar(name, l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.WithPutVar(name, pc), ..acc])
     }
-    [IrWithDeleteVar(name, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrWithDeleteVar(name, l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.WithDeleteVar(name, pc), ..acc])
     }
-    [IrWithMakeRef(name, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrWithMakeRef(name, l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.WithMakeRef(name, pc), ..acc])
     }
-    [IrWithGetRefValue(name, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrWithGetRefValue(name, l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.WithGetRefValue(name, pc), ..acc])
     }
-    [IrWithPutRefValue(name, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrWithPutRefValue(name, l), ..rest] -> {
+      let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.WithPutRefValue(name, pc), ..acc])
     }
     [IrToObject, ..rest] -> resolve_ops(rest, labels, [opcode.ToObject, ..acc])
@@ -319,22 +314,7 @@ fn resolve_ops(
         ..acc
       ])
 
-    // Scope-aware ops should NOT appear here (consumed by Phase 2)
-    [IrScopeGetVar(_), ..]
-    | [IrScopeGetVarThis(_), ..]
-    | [IrScopePutVar(_), ..]
-    | [IrScopeInitVar(_), ..]
-    | [IrScopeTypeofVar(_), ..]
-    | [IrScopeReboxVar(_), ..]
-    | [IrScopeDeleteVar(_), ..]
-    | [IrScopeMakeRef(_), ..]
-    | [IrScopeGetRef(_), ..]
-    | [IrScopePutRef(_), ..]
-    | [IrGetLexical(_), ..]
-    | [IrSetThis, ..] ->
-      panic as "resolve: scope ops should be consumed by Phase 2"
-
-    // Resolved variable access (emitted by Phase 2)
+    // Resolved variable access (emitted directly from the scope tree)
     [IrGetLocal(index), ..rest] ->
       resolve_ops(rest, labels, [opcode.GetLocal(index), ..acc])
     [IrPutLocal(index), ..rest] ->
@@ -512,20 +492,16 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.IncLocal(index), ..acc])
     [IrDecLocal(index), ..rest] ->
       resolve_ops(rest, labels, [opcode.DecLocal(index), ..acc])
-    [IrCmpLocalLocalJump(left, right, kind, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrCmpLocalLocalJump(a, b, kind, l), ..rest] ->
       resolve_ops(rest, labels, [
-        opcode.CmpLocalLocalJump(left, right, kind, pc),
+        opcode.CmpLocalLocalJump(a, b, kind, label_pc(labels, l)),
         ..acc
       ])
-    }
-    [IrCmpLocalConstJump(left, const_index, kind, label), ..rest] -> {
-      let assert Ok(pc) = dict.get(labels, label)
+    [IrCmpLocalConstJump(a, c, kind, l), ..rest] ->
       resolve_ops(rest, labels, [
-        opcode.CmpLocalConstJump(left, const_index, kind, pc),
+        opcode.CmpLocalConstJump(a, c, kind, label_pc(labels, l)),
         ..acc
       ])
-    }
 
     // Operators
     [IrBinOp(kind), ..rest] ->
@@ -576,9 +552,9 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.YieldStar, ..acc])
     [IrAsyncYieldStarNext, ..rest] ->
       resolve_ops(rest, labels, [opcode.AsyncYieldStarNext, ..acc])
-    [IrAsyncYieldStarResume(next_label), ..rest] -> {
-      let assert Ok(next_pc) = dict.get(labels, next_label)
-      resolve_ops(rest, labels, [opcode.AsyncYieldStarResume(next_pc), ..acc])
+    [IrAsyncYieldStarResume(l), ..rest] -> {
+      let pc = label_pc(labels, l)
+      resolve_ops(rest, labels, [opcode.AsyncYieldStarResume(pc), ..acc])
     }
 
     // Async
