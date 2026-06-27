@@ -276,34 +276,6 @@ pub fn build_262(
     )
   let #(h, gc_fn) =
     common.alloc_native_fn(h, func_proto, value.VmNative(value.Gc), "gc", 0)
-  // $262.IsHTMLDDA — the one [[IsHTMLDDA]] exotic object (Annex B §B.3.6).
-  // Lives at the reserved value.html_dda_ref so typeof / ToBoolean /
-  // IsLooselyEqual identify it by id alone. Filled once and rooted; child
-  // realms (createRealm) share the same object.
-  let is_htmldda_fn = value.html_dda_ref
-  let h = case heap.read(h, is_htmldda_fn) {
-    Some(_) -> h
-    None ->
-      heap.fill(
-        h,
-        is_htmldda_fn,
-        ObjectSlot(
-          kind: value.NativeFunction(
-            value.Dispatch(value.VmNative(value.IsHTMLDDA)),
-            constructible: False,
-          ),
-          properties: dict.from_list([
-            #(Named("length"), common.fn_length_property(0)),
-            #(Named("name"), common.fn_name_property("IsHTMLDDA")),
-          ]),
-          symbol_properties: [],
-          elements: elements.new(),
-          prototype: Some(func_proto),
-          extensible: True,
-        ),
-      )
-      |> heap.root(is_htmldda_fn)
-  }
   let #(h, detach_fn) =
     common.alloc_native_fn(
       h,
@@ -329,7 +301,6 @@ pub fn build_262(
             value.builtin_property(JsObject(create_realm_fn)),
           ),
           #(Named("gc"), value.builtin_property(JsObject(gc_fn))),
-          #(Named("IsHTMLDDA"), value.builtin_property(JsObject(is_htmldda_fn))),
           #(
             Named("detachArrayBuffer"),
             value.builtin_property(JsObject(detach_fn)),

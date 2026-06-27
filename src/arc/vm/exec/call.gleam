@@ -2693,9 +2693,6 @@ pub fn dispatch_native(
       realm.eval_script_native(args, this, state, execute_inner, new_state_fn)
     value.VmNative(value.CreateRealm) -> realm.create_realm_native(this, state)
     value.VmNative(value.Gc) -> #(state, Ok(JsUndefined))
-    // $262.IsHTMLDDA() — returns null when called (Annex B §B.3.6 / test262
-    // INTERPRETING.md). The exotic typeof/equality behaviors are not modeled.
-    value.VmNative(value.IsHTMLDDA) -> #(state, Ok(value.JsNull))
     value.AtomicsNative(n) -> builtins_atomics.dispatch(n, args, this, state)
     value.JsonNative(n) -> builtins_json.dispatch(n, args, this, state)
     value.ReflectNative(n) -> builtins_reflect.dispatch(n, args, this, state)

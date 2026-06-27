@@ -16,25 +16,6 @@ pub type Ref {
   Ref(id: Int)
 }
 
-/// Reserved heap id for the one [[IsHTMLDDA]] exotic object — Annex B §B.3.6,
-/// the `document.all` emulation, exposed to test262 as `$262.IsHTMLDDA`.
-///
-/// The object is identified by its ref id alone, so the three semantic sites
-/// the internal slot changes (ToBoolean → `is_truthy`, IsLooselyEqual →
-/// `abstract_equal`, and the typeof operator) pay only an integer comparison
-/// — no heap read and no extra cost for ordinary objects.
-///
-/// The id is unreachable by normal allocation (`Heap.next` bumps sequentially
-/// from 0 and the free list only recycles previously allocated ids), yet
-/// small enough to stay a BEAM immediate integer (< 2^59). It is distinct
-/// from the sentinel ref (-1) and tagged lazy-proto ids (< -1).
-/// realm.gleam fills + roots the slot when the first `$262` is built; all
-/// realms share the single object.
-pub const html_dda_id = 500_000_000_000_000_000
-
-/// `Ref`-typed form of `html_dda_id`.
-pub const html_dda_ref = Ref(500_000_000_000_000_000)
-
 /// The uninhabited type (no constructors) — Gleam's `Never`. Used as the
 /// default `host` type parameter for engines that mint no opaque host values:
 /// `HostObject(Empty)` is unconstructable, so a default engine provably has
@@ -1755,14 +1736,6 @@ pub type VmNativeFn {
   CreateRealm
   /// $262.gc() — no-op garbage collection hint.
   Gc
-  /// $262.IsHTMLDDA — the test262 [[IsHTMLDDA]] host hook (`document.all`
-  /// emulation). Calling it returns null (INTERPRETING.md: "returns null
-  /// when called with no arguments or with the single argument ''").
-  /// The exotic Annex B §B.3.6 behaviors — typeof "undefined", ToBoolean
-  /// false, loosely equal to null/undefined — are keyed off the object's
-  /// reserved heap id (`html_dda_id`) in typeof_value / is_truthy /
-  /// abstract_equal.
-  IsHTMLDDA
   /// BigInt ( value ) — §21.2.1.1. Callable only (new BigInt throws).
   BigIntGlobal
   /// BigInt.prototype.toString ( [ radix ] ) — §21.2.3.3.
@@ -3461,10 +3434,7 @@ pub fn is_truthy(val: JsValue) -> Bool {
     JsNumber(Infinity) | JsNumber(NegInfinity) -> True
     JsString(s) -> s != ""
     JsBigInt(BigInt(n)) -> n != 0
-    // Annex B §B.3.6.1: ToBoolean of an object with the [[IsHTMLDDA]]
-    // internal slot is false. The reserved-id comparison keeps the ordinary
-    // object arm a single integer check.
-    JsObject(Ref(id)) -> id != html_dda_id
+    JsObject(_) -> True
     JsSymbol(_) -> True
   }
 }
@@ -3539,15 +3509,6 @@ pub fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
     | JsSymbol(_), JsSymbol(_)
     | JsBigInt(_), JsBigInt(_)
     -> strict_equal(left, right)
-    // Annex B §B.3.6.2 IsLooselyEqual steps 3-4: an object with the
-    // [[IsHTMLDDA]] internal slot ($262.IsHTMLDDA / document.all) is loosely
-    // equal to both undefined and null. Reached directly — the interpreter's
-    // is_eq_coercible sends object × nullish here without ToPrimitive.
-    JsObject(Ref(id)), JsNull
-    | JsObject(Ref(id)), JsUndefined
-    | JsNull, JsObject(Ref(id))
-    | JsUndefined, JsObject(Ref(id))
-    -> id == html_dda_id
     // Number vs String — coerce string to number
     JsNumber(_), JsString(s) ->
       to_number(JsString(s))
