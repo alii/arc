@@ -80,8 +80,22 @@ pub type EvaluatedModule {
 /// The engine starts with `state.default_host_hooks()` (no capabilities — an
 /// agent that cannot block). Embedders that need to grant host capabilities
 /// (e.g. a real blocking `Atomics.wait`) compose `with_host_hooks` on top.
+///
+/// Host values are assumed to hold no engine refs; use `new_with_host_refs`
+/// if your `HostObject` payloads point back into the JS heap.
 pub fn new() -> Engine(host) {
-  let h = heap.new()
+  new_from_heap(heap.new())
+}
+
+/// Like `new`, but installs the GC hook that reports the engine refs reachable
+/// from a host value. Use this when your `HostObject` payloads point back into
+/// the JS heap, so GC traces them explicitly instead of relying on a "refs go
+/// in properties" convention.
+pub fn new_with_host_refs(host_refs: fn(host) -> List(Ref)) -> Engine(host) {
+  new_from_heap(heap.new_with_host_refs(host_refs))
+}
+
+fn new_from_heap(h: state.Heap(host)) -> Engine(host) {
   let #(h, b) = builtins.init(h)
   let #(h, global) = builtins.globals(b, h)
   Engine(heap: h, builtins: b, global:, host_hooks: state.default_host_hooks())

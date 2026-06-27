@@ -2959,11 +2959,18 @@ fn push_saved_frame_refs(
 }
 
 /// Prepend all refs reachable from a heap slot onto `acc`. 
-pub fn refs_in_slot(slot: HeapSlot(ctx, host)) -> List(Ref) {
-  do_refs_in_slot(slot, [])
+pub fn refs_in_slot(
+  slot: HeapSlot(ctx, host),
+  host_refs: fn(host) -> List(Ref),
+) -> List(Ref) {
+  do_refs_in_slot(slot, host_refs, [])
 }
 
-fn do_refs_in_slot(slot: HeapSlot(ctx, host), acc: List(Ref)) -> List(Ref) {
+fn do_refs_in_slot(
+  slot: HeapSlot(ctx, host),
+  host_refs: fn(host) -> List(Ref),
+  acc: List(Ref),
+) -> List(Ref) {
   case slot {
     ObjectSlot(
       kind:,
@@ -3347,11 +3354,11 @@ fn do_refs_in_slot(slot: HeapSlot(ctx, host), acc: List(Ref)) -> List(Ref) {
           proto,
           ..acc
         ]
-        // HostObject's payload is an opaque embedder term with no engine refs
-        // (any refs the value needs live in the object's own properties, which
-        // are traced above) — so it contributes nothing here.
+        // Ask the embedder for any engine refs reachable from the opaque
+        // host value, so GC traces host objects that point back into the JS
+        // heap. Pure host terms (pids, fds) return [] — the default hook.
+        HostObject(value: h) -> list.append(host_refs(h), acc)
         OrdinaryObject
-        | HostObject(_)
         | ErrorObject(_)
         | ArrayObject(_)
         | ArgumentsObject(_)

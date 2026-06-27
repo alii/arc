@@ -3,9 +3,9 @@ import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/opcode
 import arc/vm/value.{
-  type FuncTemplate, ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FuncTemplate,
-  FunctionObject, JsBigInt, JsNull, JsNumber, JsObject, JsString, JsSymbol,
-  ObjectSlot, OrdinaryObject, Ref, WellKnownSymbol,
+  type FuncTemplate, type Ref, ArrayObject, BigInt, BoxSlot, EnvSlot, Finite,
+  FuncTemplate, FunctionObject, HostObject, JsBigInt, JsNull, JsNumber, JsObject,
+  JsString, JsSymbol, ObjectSlot, OrdinaryObject, Ref, WellKnownSymbol,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -405,4 +405,75 @@ pub fn non_ref_values_dont_prevent_gc_test() {
   // Not rooted — should be collected despite having values in it
   let h = heap.collect(h)
   assert heap.size(h) == 0
+}
+
+// -- host_refs GC hook -------------------------------------------------------
+//
+// A HostObject whose opaque payload holds a JS heap Ref must keep that target
+// alive across GC — but ONLY because the embedder's host_refs hook reports it
+// (the engine can't see inside the opaque payload). This proves GC asks the
+// embedder explicitly rather than relying on an unchecked convention.
+
+type HeldRef {
+  HeldRef(Ref)
+}
+
+fn plain_object() -> value.HeapSlot(ctx, host) {
+  ObjectSlot(
+    kind: OrdinaryObject,
+    properties: dict.new(),
+    elements: elements.new(),
+    prototype: None,
+    symbol_properties: [],
+    extensible: True,
+  )
+}
+
+pub fn host_refs_hook_keeps_held_ref_alive_test() {
+  // host_refs reports the Ref held inside the opaque payload.
+  let h =
+    heap.new_with_host_refs(fn(hv) {
+      case hv {
+        HeldRef(r) -> [r]
+      }
+    })
+  let #(h, target) = heap.alloc(h, plain_object())
+  let #(h, holder) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: HostObject(HeldRef(target)),
+        properties: dict.new(),
+        elements: elements.new(),
+        prototype: None,
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  // Root only the holder. `target` is reachable ONLY through the host payload.
+  let h = heap.collect_with_roots(h, set.from_list([holder.id]))
+  assert heap.read(h, holder) != None
+  assert heap.read(h, target) != None
+}
+
+pub fn host_refs_default_collects_unheld_target_test() {
+  // With the default hook (fn(_) { [] }), a target reachable only through a
+  // host payload is NOT traced — confirming the hook is what keeps it alive.
+  let h = heap.new()
+  let #(h, target) = heap.alloc(h, plain_object())
+  let #(h, holder) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: HostObject(HeldRef(target)),
+        properties: dict.new(),
+        elements: elements.new(),
+        prototype: None,
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  let h = heap.collect_with_roots(h, set.from_list([holder.id]))
+  assert heap.read(h, holder) != None
+  assert heap.read(h, target) == None
 }

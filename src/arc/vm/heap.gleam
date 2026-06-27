@@ -11,13 +11,23 @@ pub type HeapStats {
 
 /// The heap: an immutable Dict arena with free list and GC roots.
 /// Generic over `ctx` because HeapSlot carries host-function closures typed
-/// against the VM state. Instantiated as `Heap(State)` at the state.gleam layer.
+/// against the VM state, and over `host` because HostObject slots carry the
+/// embedder's opaque value. Instantiated as `Heap(State(host), host)` at the
+/// state.gleam layer.
 pub opaque type Heap(ctx, host) {
   Heap(
     data: dict.Dict(Int, HeapSlot(ctx, host)),
     free: List(Int),
     next: Int,
     roots: Set(Int),
+    /// GC hook: the engine heap `Ref`s reachable from a `HostObject`'s opaque
+    /// value, so the mark phase can trace into host values that point back
+    /// into the JS heap. `fn(_) { [] }` by default — correct for the common
+    /// case where host values are pure host terms (pids, fds, sockets) with no
+    /// engine refs. An embedder whose host values DO hold refs installs its
+    /// own via `new_with_host_refs` so GC asks it explicitly, rather than
+    /// relying on an unchecked "put refs in properties" convention.
+    host_refs: fn(host) -> List(Ref),
     /// Shared singleton EnvSlot for closures that capture nothing. EnvSlots
     /// are immutable after creation (mutable captures are boxed), so every
     /// no-capture closure can point at the same slot. Rooted on first use so
@@ -80,13 +90,23 @@ fn synth_lazy_proto(id: Int) -> HeapSlot(ctx, host) {
   )
 }
 
-/// Create an empty heap.
+/// Create an empty heap. Host values are assumed to hold no engine refs
+/// (`host_refs = fn(_) { [] }`) — correct for the default engine and for
+/// embedders whose host values are pure host terms. Embedders whose host
+/// values point back into the JS heap use `new_with_host_refs`.
 pub fn new() -> Heap(ctx, host) {
+  new_with_host_refs(fn(_) { [] })
+}
+
+/// Create an empty heap, supplying the GC hook that reports the engine refs
+/// reachable from a host value (see the `host_refs` field).
+pub fn new_with_host_refs(host_refs: fn(host) -> List(Ref)) -> Heap(ctx, host) {
   Heap(
     data: dict.new(),
     free: [],
     next: 0,
     roots: set.new(),
+    host_refs:,
     empty_env: None,
     last_collect_next: 0,
   )
@@ -531,7 +551,7 @@ fn mark_loop(
             Ok(slot) -> {
               // Prepend child ref IDs directly onto frontier — avoids
               // intermediate list from list.map + the O(n) list.append.
-              let child_refs = value.refs_in_slot(slot)
+              let child_refs = value.refs_in_slot(slot, heap.host_refs)
               let frontier = prepend_ref_ids(child_refs, rest)
               // A materialised lazy proto (tagged id) additionally pins its
               // owning fn id: if the fn were collected and its id recycled, a
