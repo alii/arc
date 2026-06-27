@@ -7197,6 +7197,7 @@ fn parse_template_parts(
   let #(raw_quasis, expr_sources) = split_template_parts(inner)
   // Save outer cursor-ish state we are about to overwrite per substitution.
   let outer_tokens = p.tokens
+  let outer_bytes = p.bytes
   let outer_assignable = p.last_expr_assignable
   let outer_is_assignment = p.last_expr_is_assignment
   // Parse each expression source, threading P through so accumulated
@@ -7208,10 +7209,14 @@ fn parse_template_parts(
         Error(e) ->
           Error(LexerError(lexer.lex_error_to_string(e), lexer.lex_error_pos(e)))
         Ok(tokens) -> {
+          // parse_regex_literal re-scans regex bodies from `bytes` using
+          // token-relative byte offsets, so `bytes` must match the source
+          // these tokens were lexed from.
           let sub_p =
             P(
               ..p,
               tokens: tokens,
+              bytes: bit_array.from_string(src),
               last_expr_assignable: False,
               last_expr_is_assignment: False,
             )
@@ -7225,6 +7230,7 @@ fn parse_template_parts(
     P(
       ..p,
       tokens: outer_tokens,
+      bytes: outer_bytes,
       last_expr_assignable: outer_assignable,
       last_expr_is_assignment: outer_is_assignment,
     )
