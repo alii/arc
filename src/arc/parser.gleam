@@ -1112,11 +1112,18 @@ fn validate_and_register_binding_no_advance(
   Ok(#(p, ast.IdentifierPattern(name: val, span: span_of(check_p))))
 }
 
-/// Accumulate a binding name in param_bound_names when inside formal params,
-/// arrow params, or methods. Checks for duplicate param names across all
-/// params including those inside destructured patterns.
+/// Accumulate a binding name in param_bound_names when inside formal params or
+/// arrow params. Checks for duplicate param names across all params including
+/// those inside destructured patterns.
+///
+/// NOT gated on `in_method`: that flag stays true through the whole method
+/// *body* (it is only restored on method exit, see `restore_outer_context`), so
+/// gating accumulation on it here would wrongly treat ordinary body bindings —
+/// e.g. two sibling `for (const id of …)` loops — as duplicate *parameters*.
+/// Method params are already covered by `in_formal_params`; `in_method` still
+/// tightens the strict-mode dup check below.
 fn accumulate_param_name(p: P, name: String) -> Result(P, ParseError) {
-  case p.in_formal_params || p.in_arrow_params || p.in_method {
+  case p.in_formal_params || p.in_arrow_params {
     True ->
       case list.contains(p.param_bound_names, name) {
         True ->
@@ -2887,7 +2894,10 @@ fn parse_getter_params_and_body(
       // body's `arguments` is its OWN arguments object, not a free name.
       // Mirrors `parse_function_params_and_body`'s implicit declare.
       let p3 =
-        P(..p3, sb: scope.sb_declare(p3.sb, "arguments", scope.VarBinding, None))
+        P(
+          ..p3,
+          sb: scope.sb_declare(p3.sb, "arguments", scope.VarBinding, None),
+        )
       use #(p4, body) <- result.try(parse_function_body_block(p3))
       Ok(#(p4, [], body))
     }
@@ -2947,10 +2957,9 @@ fn parse_setter_params_and_body(
               ..p5,
               sb: scope.sb_declare(p5.sb, "arguments", scope.VarBinding, None),
             )
-          use #(p6, body) <- result.try(parse_fn_body_maybe_var_boundary(
-            p5,
-            [final_pat],
-          ))
+          use #(p6, body) <- result.try(
+            parse_fn_body_maybe_var_boundary(p5, [final_pat]),
+          )
           Ok(#(p6, [final_pat], body))
         }
         Comma -> Error(SetterExactlyOneParam(pos_of(p4)))

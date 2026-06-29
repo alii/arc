@@ -337,3 +337,70 @@ fn run_file_tests(
     }
   }
 }
+
+/// Regression: bindings inside a method *body* are not formal parameters.
+/// `in_method` stays true through the whole method body, so the param-dup
+/// accumulator must gate on `in_formal_params` only — two sibling
+/// `for (const id of …)` loops in a method are distinct block-scoped bindings,
+/// not duplicate params. Before the fix the second `id` was wrongly rejected as
+/// a duplicate parameter (this is what broke booting a class service whose
+/// method reused a loop variable).
+pub fn method_body_bindings_are_not_params_test() {
+  let results = [
+    // The regression: sibling for-of-const in a method / function body parse.
+    expect_parses(
+      "class C { reset() { for (const id of [1]) { id; } for (const id of [2]) { id; } } }",
+      parser.Script,
+    ),
+    expect_parses(
+      "function f() { for (const id of [1]) {} for (const id of [2]) {} }",
+      parser.Script,
+    ),
+    // Genuine duplicate *params* are still rejected — in methods (always) and
+    // strict-mode functions — so the fix didn't loosen real dup detection.
+    expect_dup_param("class C { m(id, id) {} }", parser.Script),
+    expect_dup_param("function f(id, id) { return id; }", parser.Module),
+  ]
+  let errors =
+    list.filter_map(results, fn(r) {
+      case r {
+        Ok(Nil) -> Error(Nil)
+        Error(reason) -> Ok(reason)
+      }
+    })
+  case errors {
+    [] -> Nil
+    _ -> {
+      list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
+      panic as {
+        int.to_string(list.length(errors))
+        <> " method-body-binding cases failed"
+      }
+    }
+  }
+}
+
+/// Parsing `src` must succeed; returns the failure reason otherwise.
+fn expect_parses(src: String, mode: parser.ParseMode) -> Result(Nil, String) {
+  case parser.parse(src, mode) {
+    Ok(_) -> Ok(Nil)
+    Error(err) -> Error(src <> " -> " <> parser.parse_error_to_string(err))
+  }
+}
+
+/// Parsing `src` must fail with a duplicate-parameter error.
+fn expect_dup_param(
+  src: String,
+  mode: parser.ParseMode,
+) -> Result(Nil, String) {
+  case parser.parse(src, mode) {
+    Ok(_) -> Error(src <> " -> parsed; expected a duplicate-param error")
+    Error(err) -> {
+      let msg = parser.parse_error_to_string(err)
+      case string.contains(msg, "Duplicate parameter") {
+        True -> Ok(Nil)
+        False -> Error(src <> " -> wrong error: " <> msg)
+      }
+    }
+  }
+}
