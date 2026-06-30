@@ -71,10 +71,26 @@ pub type CompiledModule {
   )
 }
 
+/// A host (synthetic) module: a module identified by a specifier whose named
+/// exports are embedder-provided `JsValue`s (host-defined class constructors,
+/// host functions) rather than compiled from JS source. Modelled on the TC39
+/// Synthetic Module Record — no dependencies, eager/ready exports, a no-op
+/// `[[Evaluate]]`. `import { x } from "<specifier>"` binds straight to the
+/// supplied value.
+pub type HostModule {
+  HostModule(specifier: String, exports: List(#(String, JsValue)))
+}
+
 /// A complete compiled module graph — the output of AOT compilation.
-/// Pure Erlang term, serializable via term_to_binary.
+/// Pure Erlang term, serializable via term_to_binary. `host_modules` are
+/// embedder-provided native modules (see `HostModule`); they carry no source
+/// and live alongside the compiled source `modules`.
 pub type ModuleBundle {
-  ModuleBundle(entry: String, modules: Dict(String, CompiledModule))
+  ModuleBundle(
+    entry: String,
+    modules: Dict(String, CompiledModule),
+    host_modules: Dict(String, HostModule),
+  )
 }
 
 // =============================================================================
@@ -128,13 +144,35 @@ pub fn compile_bundle(
   resolve: fn(String, String) -> Result(String, String),
   load: fn(String) -> Result(String, String),
 ) -> Result(ModuleBundle, ModuleError(host)) {
+  compile_bundle_with_hosts(
+    entry_specifier,
+    entry_source,
+    resolve,
+    load,
+    dict.new(),
+  )
+}
+
+/// `compile_bundle` plus embedder-provided host (synthetic) modules. A request
+/// whose resolved specifier is a key of `host_modules` is treated as a leaf in
+/// the graph walk — resolved but never source-loaded — and carried through to
+/// the bundle so the linker can bind its imports to the host values.
+pub fn compile_bundle_with_hosts(
+  entry_specifier: String,
+  entry_source: String,
+  resolve: fn(String, String) -> Result(String, String),
+  load: fn(String) -> Result(String, String),
+  host_modules: Dict(String, HostModule),
+) -> Result(ModuleBundle, ModuleError(host)) {
   // Adapt the runtime's raw-specifier resolver to the graph layer's
   // request-taking one.
   let resolve_request = fn(request: esm.ModuleRequest, referrer) {
     resolve(request.specifier, referrer)
   }
   use source_graph <- result.try(
-    graph.load(entry_specifier, entry_source, resolve_request, load)
+    graph.load(entry_specifier, entry_source, resolve_request, load, fn(spec) {
+      dict.has_key(host_modules, spec)
+    })
     |> result.map_error(graph_error),
   )
   use modules <- result.map(
@@ -144,7 +182,7 @@ pub fn compile_bundle(
       dict.insert(modules, specifier, compiled)
     }),
   )
-  ModuleBundle(entry: entry_specifier, modules:)
+  ModuleBundle(entry: entry_specifier, modules:, host_modules:)
 }
 
 fn graph_error(error: graph.GraphError) -> ModuleError(host) {
@@ -254,14 +292,31 @@ fn module_has_tla(template: value.FuncTemplate) -> Bool {
 /// trivial per-module field copy of the three string-level fields the resolver
 /// reads.
 fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
-  dict.map_values(bundle.modules, fn(specifier, m) {
+  let source =
+    dict.map_values(bundle.modules, fn(specifier, m) {
+      link.LinkableModule(
+        specifier:,
+        import_bindings: m.import_bindings,
+        export_entries: m.export_entries,
+        specifier_map: m.specifier_map,
+      )
+    })
+  // A host module projects as a module with no imports and a LocalExport per
+  // supplied name (its cells are pre-seeded with the host values at link time),
+  // so the resolver's import/re-export checks and `exported_names` see it.
+  use acc, specifier, hm <- dict.fold(bundle.host_modules, source)
+  dict.insert(
+    acc,
+    specifier,
     link.LinkableModule(
       specifier:,
-      import_bindings: m.import_bindings,
-      export_entries: m.export_entries,
-      specifier_map: m.specifier_map,
-    )
-  })
+      import_bindings: [],
+      export_entries: list.map(hm.exports, fn(e) {
+        esm.LocalExport(export_name: e.0, local_name: e.0)
+      }),
+      specifier_map: dict.new(),
+    ),
+  )
 }
 
 /// The resolved specifier a raw specifier maps to within module `m` (VM-side;
@@ -806,9 +861,11 @@ fn eval_module_inner(
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // Already evaluated successfully — either in this DFS or recorded in the
   // realm's heap-resident status registry (a deferred-namespace trigger may
-  // have evaluated it mid-DFS, re-entrantly).
+  // have evaluated it mid-DFS, re-entrantly). A host (synthetic) module has no
+  // body and ready exports, so its `[[Evaluate]]` is a no-op — always "done".
   let already_evaluated =
-    set.contains(state.evaluated, specifier)
+    dict.has_key(bundle.host_modules, specifier)
+    || set.contains(state.evaluated, specifier)
     || read_module_status(state.heap, global_object, specifier)
     == Some(status_evaluated)
   case already_evaluated {
@@ -1126,7 +1183,11 @@ fn build_linked(
   preexisting_deferred: Dict(String, Ref),
 ) -> #(Heap(host), Linked, List(#(String, Ref))) {
   let #(heap, local_boxes) = preallocate_local_boxes(bundle, heap, preexisting)
-  let specs = dict.keys(bundle.modules)
+  // Host (synthetic) modules join the source modules: they need namespace
+  // objects (for `import * as ns`) and export maps built below, exactly like a
+  // source module whose cells are already initialized.
+  let specs =
+    list.append(dict.keys(bundle.modules), dict.keys(bundle.host_modules))
   // Reserve a namespace object ref per module, then a rooted box wrapping it,
   // up front so cyclic / star-reached namespace re-exports resolve to a ref.
   // Preexisting modules reuse their registered namespace object instead.
@@ -1419,7 +1480,21 @@ fn preallocate_local_boxes(
   heap: Heap(host),
   preexisting: Dict(String, #(Ref, Dict(String, Ref))),
 ) -> #(Heap(host), Dict(String, Dict(String, Ref))) {
-  dict.fold(bundle.modules, #(heap, dict.new()), fn(acc, spec, m) {
+  // Host modules first: one box per export, seeded with the host value itself
+  // (no body ever runs to fill it — the seed IS the final binding).
+  let #(heap, with_hosts) =
+    dict.fold(bundle.host_modules, #(heap, dict.new()), fn(acc, spec, hm) {
+      let #(heap, all) = acc
+      let #(heap, boxes) =
+        list.fold(hm.exports, #(heap, dict.new()), fn(a, export) {
+          let #(heap, boxes) = a
+          let #(name, val) = export
+          let #(heap, box) = alloc_box(heap, val)
+          #(heap, dict.insert(boxes, name, box))
+        })
+      #(heap, dict.insert(all, spec, boxes))
+    })
+  dict.fold(bundle.modules, #(heap, with_hosts), fn(acc, spec, m) {
     let #(heap, all) = acc
     case dict.get(preexisting, spec) {
       Ok(#(_, existing_exports)) -> {

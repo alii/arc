@@ -252,7 +252,8 @@ fn run_module_file(
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Nil {
   let eng = engine.new()
-  case engine.eval_module_with(eng, path, source, resolve_dep, load_dep, finish)
+  case
+    engine.eval_module_with(eng, path, source, resolve_dep, load_dep, finish)
   {
     Ok(_) -> Nil
     Error(err) -> io.println(engine.eval_error_message(err))

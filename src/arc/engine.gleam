@@ -19,10 +19,13 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/completion.{type Completion}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
+import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type HostFn}
 import arc/vm/value.{type JsValue, type Ref, JsObject, Named}
+import gleam/dict.{type Dict}
+import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
@@ -49,6 +52,11 @@ pub opaque type Engine(host) {
     builtins: Builtins,
     global: Ref,
     host_hooks: state.HostHooks,
+    /// Embedder-provided native (synthetic) modules, keyed by specifier. An
+    /// `import … from "<specifier>"` in any module evaluated through this engine
+    /// resolves here instead of being loaded as source. Set via
+    /// `register_host_module`; see `module.HostModule`.
+    host_modules: Dict(String, module.HostModule),
   )
 }
 
@@ -98,7 +106,13 @@ pub fn new_with_host_refs(host_refs: fn(host) -> List(Ref)) -> Engine(host) {
 fn new_from_heap(h: state.Heap(host)) -> Engine(host) {
   let #(h, b) = builtins.init(h)
   let #(h, global) = builtins.globals(b, h)
-  Engine(heap: h, builtins: b, global:, host_hooks: state.default_host_hooks())
+  Engine(
+    heap: h,
+    builtins: b,
+    global:,
+    host_hooks: state.default_host_hooks(),
+    host_modules: dict.new(),
+  )
 }
 
 /// Install the embedder's host capabilities on the engine.
@@ -189,6 +203,133 @@ fn set_global(
   Engine(
     ..engine,
     heap: object.define_method_property(h, engine.global, Named(name), val),
+  )
+}
+
+/// Mint a host-provided native function ref into the engine's heap and hand back
+/// its value — WITHOUT installing it as a global. The "return me the ref" twin of
+/// `define_fn`, for building values to place elsewhere (e.g. as host-module
+/// exports via `register_host_module`, or methods on a `define_class`). The ref
+/// is GC-rooted by `alloc_host_fn`.
+pub fn host_fn(
+  engine: Engine(host),
+  name: String,
+  arity: Int,
+  impl: HostFn(host),
+) -> #(Engine(host), JsValue) {
+  let #(h, fn_ref) =
+    common.alloc_host_fn(
+      engine.heap,
+      engine.builtins.function.prototype,
+      impl,
+      name,
+      arity,
+    )
+  #(Engine(..engine, heap: h), JsObject(fn_ref))
+}
+
+/// Build a host-defined, **constructible** JS class — a base class that embedder
+/// JS can `extends` — and hand back its constructor value.
+///
+/// `constructor` is the class's `[[Construct]]` body. Like any host fn it
+/// receives `(args, this, state)`; it reads `state.new_target` to learn the leaf
+/// subclass (for `class Sub extends This {}`, `new_target` is `Sub`), allocates
+/// and returns the `this` object (e.g. via
+/// `common.ordinary_create_from_constructor(heap, new_target, proto)`), and the
+/// engine re-prototypes the result to the subclass's `prototype`. `methods` are
+/// installed on the class prototype; `statics` on the constructor itself (and so
+/// inherited by subclasses — a static can read `this.name`).
+///
+/// Unlike `define_fn`/`define_namespace`, this does NOT install a global: it
+/// returns the constructor so the caller places it (e.g. a `register_host_module`
+/// export). The constructor and its prototype are GC-rooted by `init_type`.
+pub fn define_class(
+  engine: Engine(host),
+  name: String,
+  arity: Int,
+  constructor: HostFn(host),
+  methods: List(#(String, Int, HostFn(host))),
+  statics: List(#(String, Int, HostFn(host))),
+) -> #(Engine(host), JsValue) {
+  let #(h, proto_props) =
+    common.alloc_host_methods(
+      engine.heap,
+      engine.builtins.function.prototype,
+      methods,
+    )
+  let #(h, static_props) =
+    common.alloc_host_methods(h, engine.builtins.function.prototype, statics)
+  let #(h, bt) =
+    common.init_type(
+      h,
+      engine.builtins.object.prototype,
+      engine.builtins.function.prototype,
+      proto_props,
+      fn(_proto) { value.Host(constructor) },
+      name,
+      arity,
+      static_props,
+    )
+  #(Engine(..engine, heap: h), JsObject(bt.constructor))
+}
+
+/// Run host-side `body` against a live `State` — the escape hatch for an
+/// embedder that needs to allocate JS values, invoke held functions via
+/// `state.call`/`state.construct`, and marshal data in/out, all of which require
+/// a `State` the public API otherwise only exposes inside a host fn.
+///
+/// Stands up a fresh root frame (via `interpreter.root_state`), runs `body`,
+/// drains the microtask queue, then folds the resulting heap back into the
+/// engine and returns `body`'s value directly. Replaces the older
+/// "install a one-shot global shim and call it, smuggling the result out through
+/// a side channel" idiom — no global is touched.
+pub fn with_state(
+  engine: Engine(host),
+  body: fn(state.State(host)) -> #(state.State(host), a),
+) -> #(Engine(host), a) {
+  let s =
+    interpreter.root_state(
+      engine.heap,
+      engine.builtins,
+      engine.global,
+      engine.host_hooks,
+    )
+  let #(s, result) = body(s)
+  let s = event_loop.finish(s)
+  #(Engine(..engine, heap: s.heap), result)
+}
+
+/// Register an embedder-provided native (synthetic) module under `specifier`.
+///
+/// `exports` are `(name, value)` pairs — typically `define_class` constructors
+/// and `host_fn` values. Afterwards, any module evaluated through this engine
+/// that does `import { name } from "<specifier>"` (or `import * as ns from
+/// "<specifier>"`) binds straight to these values, with NO source loaded for
+/// `specifier`. The export refs are GC-rooted here: they are held only on the
+/// engine (Gleam-side), which the heap collector does not otherwise trace.
+///
+/// First cut: static imports only. A dynamic `import("<specifier>")` is not
+/// resolved to a host module.
+pub fn register_host_module(
+  engine: Engine(host),
+  specifier: String,
+  exports: List(#(String, JsValue)),
+) -> Engine(host) {
+  let heap =
+    list.fold(exports, engine.heap, fn(h, export) {
+      case export.1 {
+        JsObject(ref) -> heap.root(h, ref)
+        _ -> h
+      }
+    })
+  Engine(
+    ..engine,
+    heap:,
+    host_modules: dict.insert(
+      engine.host_modules,
+      specifier,
+      module.HostModule(specifier:, exports:),
+    ),
   )
 }
 
@@ -285,7 +426,13 @@ pub fn eval_module_with(
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
-    module.compile_bundle(specifier, source, resolve, load)
+    module.compile_bundle_with_hosts(
+      specifier,
+      source,
+      resolve,
+      load,
+      engine.host_modules,
+    )
     |> result.map_error(ModuleError),
   )
   use evaluated <- result.map(
@@ -372,12 +519,19 @@ pub fn serialize(engine: Engine(host)) -> BitArray {
 
 /// Restore an engine from a binary produced by `serialize`.
 ///
-/// The restored engine carries `state.default_host_hooks()` — host hooks are
-/// embedder closures and cannot round-trip through `serialize`. Re-install
-/// them with `with_host_hooks`, alongside re-registering host functions.
+/// The restored engine carries `state.default_host_hooks()` and no host modules
+/// — both hold embedder closures that cannot round-trip through `serialize`.
+/// Re-install hooks with `with_host_hooks` and host modules with
+/// `register_host_module`, alongside re-registering host functions.
 pub fn deserialize(data: BitArray) -> Engine(host) {
   let #(heap, builtins, global) = erlang.binary_to_term(data)
-  Engine(heap:, builtins:, global:, host_hooks: state.default_host_hooks())
+  Engine(
+    heap:,
+    builtins:,
+    global:,
+    host_hooks: state.default_host_hooks(),
+    host_modules: dict.new(),
+  )
 }
 
 // ----------------------------------------------------------------------------

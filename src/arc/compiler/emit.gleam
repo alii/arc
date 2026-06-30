@@ -5340,8 +5340,9 @@ fn for_head_lex_names(left: ast.ForInit) -> List(String) {
           })
         ast.Var -> []
       }
-    ast.ForInitDeclaration(_) | ast.ForInitPattern(_) | ast.ForInitExpression(_) ->
-      []
+    ast.ForInitDeclaration(_)
+    | ast.ForInitPattern(_)
+    | ast.ForInitExpression(_) -> []
   }
 }
 

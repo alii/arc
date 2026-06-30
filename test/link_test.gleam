@@ -34,7 +34,8 @@ fn graph_of(
       Error(Nil) -> Error("no such module: " <> specifier)
     }
   }
-  let assert Ok(g) = graph.load(entry, entry_source, resolve, load)
+  let assert Ok(g) =
+    graph.load(entry, entry_source, resolve, load, fn(_) { False })
   g
 }
 

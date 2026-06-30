@@ -17,6 +17,7 @@ import arc/compiler/scope
 import arc/esm
 import arc/parser
 import arc/parser/ast
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/result
@@ -108,17 +109,24 @@ type Walk {
 }
 
 /// Load the full module graph reachable from an already-loaded entry module.
+///
+/// `is_host` marks specifiers provided natively by the embedder (host /
+/// synthetic modules): they are resolved (so the referrer's specifier_map
+/// records the mapping) but their source is never loaded, parsed, or recursed —
+/// they are leaves, injected into the bundle separately by the linker.
 pub fn load(
   entry_specifier: String,
   entry_source: String,
   resolve: Resolve,
   load_source: Load,
+  is_host: fn(String) -> Bool,
 ) -> Result(SourceGraph, GraphError) {
   use entry <- result.try(prepare(entry_specifier, entry_source))
   use walk <- result.map(visit(
     entry,
     resolve,
     load_source,
+    is_host,
     Walk(modules: dict.new(), order: []),
   ))
   SourceGraph(
@@ -132,6 +140,7 @@ fn visit(
   node: SourceModule,
   resolve: Resolve,
   load_source: Load,
+  is_host: fn(String) -> Bool,
   walk: Walk,
 ) -> Result(Walk, GraphError) {
   let specifier = node.specifier
@@ -145,6 +154,9 @@ fn visit(
         |> result.map_error(ResolveFailed(raw, specifier, _)),
       )
       let walk = record_resolution(walk, specifier, raw, resolved)
+      // A host module is a leaf: resolution is recorded above, but there is no
+      // source to load or dependencies to walk.
+      use <- bool.guard(is_host(resolved), Ok(walk))
       case dict.has_key(walk.modules, resolved) {
         True -> Ok(walk)
         False -> {
@@ -152,7 +164,7 @@ fn visit(
             load_source(resolved) |> result.map_error(LoadFailed(resolved, _)),
           )
           use dep <- result.try(prepare(resolved, source))
-          visit(dep, resolve, load_source, walk)
+          visit(dep, resolve, load_source, is_host, walk)
         }
       }
     }),

@@ -498,6 +498,22 @@ pub fn call_root(
   call_value_to_completion(state, callee, this_val, args)
 }
 
+/// Stand up a fresh root State (no enclosing frame, no loaded code) on the given
+/// heap/builtins/global, for an embedder that wants to run host-side work against
+/// a live State — allocate JS values, invoke held functions via `state.call`,
+/// marshal data in and out — WITHOUT installing and calling a global shim.
+/// The engine half of `engine.with_state`; it carries the same empty top-level
+/// frame `call_root` uses, so `state.call`/`state.construct` (which push their
+/// own frames) work against it.
+pub fn root_state(
+  heap: Heap(host),
+  builtins: Builtins,
+  global_object: Ref,
+  hooks: state.HostHooks,
+) -> State(host) {
+  init_state(empty_template(), heap, builtins, global_object, False, hooks)
+}
+
 /// Allocate a closure (FunctionObject) for `child_template`, capturing
 /// `captured_values` (gathered per the template's env_descriptors). Builds the
 /// env, the `name`/`length` props, the `.prototype` object (+ `.constructor`)
