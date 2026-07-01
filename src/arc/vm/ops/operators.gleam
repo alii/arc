@@ -10,7 +10,6 @@ import arc/vm/value.{
 }
 import gleam/float
 import gleam/int
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/result
@@ -645,108 +644,5 @@ pub fn num_to_int32(n: JsNum) -> Int {
         False -> wrapped
       }
     }
-  }
-}
-
-// ============================================================================
-// URI encoding/decoding FFI
-// ============================================================================
-
-@external(erlang, "arc_uri_ffi", "encode")
-pub fn uri_encode(str: String, preserve_uri_chars: Bool) -> String
-
-@external(erlang, "arc_uri_ffi", "decode")
-pub fn uri_decode(str: String) -> String
-
-// ============================================================================
-// AnnexB escape / unescape (B.2.1.1 / B.2.1.2)
-// ============================================================================
-
-/// Characters that escape() preserves as-is (unreserved set).
-/// Per B.2.1.1: A-Z, a-z, 0-9, @, *, _, +, -, ., /
-fn is_escape_safe(cp: Int) -> Bool {
-  // A-Z
-  { cp >= 65 && cp <= 90 }
-  // a-z
-  || { cp >= 97 && cp <= 122 }
-  // 0-9
-  || { cp >= 48 && cp <= 57 }
-  // @
-  || cp == 64
-  // *
-  || cp == 42
-  // _
-  || cp == 95
-  // +
-  || cp == 43
-  // -
-  || cp == 45
-  // .
-  || cp == 46
-  // /
-  || cp == 47
-}
-
-/// Format an integer as uppercase hex with at least `width` digits.
-fn to_hex_upper(n: Int, width: Int) -> String {
-  let hex =
-    int.to_base_string(n, 16) |> result.unwrap("0") |> string.uppercase()
-  let pad = width - string.length(hex)
-  case pad > 0 {
-    True -> string.repeat("0", pad) <> hex
-    False -> hex
-  }
-}
-
-/// ES AnnexB B.2.1.1 escape ( string )
-pub fn js_escape(input: String) -> String {
-  string.to_utf_codepoints(input)
-  |> list.map(fn(cp) {
-    let code = string.utf_codepoint_to_int(cp)
-    case is_escape_safe(code) {
-      True -> string.from_utf_codepoints([cp])
-      False ->
-        case code < 256 {
-          True -> "%" <> to_hex_upper(code, 2)
-          False -> "%u" <> to_hex_upper(code, 4)
-        }
-    }
-  })
-  |> string.join("")
-}
-
-/// ES AnnexB B.2.1.2 unescape ( string )
-pub fn js_unescape(input: String) -> String {
-  js_unescape_loop(string.to_graphemes(input), "")
-}
-
-fn js_unescape_loop(chars: List(String), acc: String) -> String {
-  case chars {
-    [] -> acc
-    ["%", "u", a, b, c, d, ..rest] -> {
-      let hex = a <> b <> c <> d
-      case int.base_parse(hex, 16) {
-        Ok(code) ->
-          case string.utf_codepoint(code) {
-            Ok(cp) ->
-              js_unescape_loop(rest, acc <> string.from_utf_codepoints([cp]))
-            Error(Nil) -> js_unescape_loop(rest, acc <> "%u" <> hex)
-          }
-        Error(Nil) -> js_unescape_loop([a, b, c, d, ..rest], acc <> "%u")
-      }
-    }
-    ["%", a, b, ..rest] -> {
-      let hex = a <> b
-      case int.base_parse(hex, 16) {
-        Ok(code) ->
-          case string.utf_codepoint(code) {
-            Ok(cp) ->
-              js_unescape_loop(rest, acc <> string.from_utf_codepoints([cp]))
-            Error(Nil) -> js_unescape_loop(rest, acc <> "%" <> hex)
-          }
-        Error(Nil) -> js_unescape_loop([a, b, ..rest], acc <> "%")
-      }
-    }
-    [c, ..rest] -> js_unescape_loop(rest, acc <> c)
   }
 }

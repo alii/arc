@@ -25,6 +25,7 @@ import arc/vm/builtins/string as builtins_string
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/builtins/temporal as builtins_temporal
 import arc/vm/builtins/typed_array as builtins_typed_array
+import arc/vm/builtins/uri as builtins_uri
 import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/completion.{
@@ -41,7 +42,6 @@ import arc/vm/internal/tuple_array
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
-import arc/vm/ops/operators
 import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
@@ -2718,20 +2718,22 @@ pub fn dispatch_native(
     // Global functions: eval, URI encoding/decoding
     value.VmNative(value.Eval) ->
       realm.eval_native(args, state, execute_inner, new_state_fn)
+    // §19.2.6.2 decodeURI ( encodedURI ) — reserved escapes are preserved.
     value.VmNative(value.DecodeURI) ->
-      string_global(args, state, operators.uri_decode)
+      uri_decode_global(args, state, preserve_reserved: True)
     value.VmNative(value.EncodeURI) ->
-      string_global(args, state, operators.uri_encode(_, True))
+      string_global(args, state, builtins_uri.uri_encode(_, True))
+    // §19.2.6.3 decodeURIComponent ( encodedURIComponent )
     value.VmNative(value.DecodeURIComponent) ->
-      string_global(args, state, operators.uri_decode)
+      uri_decode_global(args, state, preserve_reserved: False)
     value.VmNative(value.EncodeURIComponent) ->
-      string_global(args, state, operators.uri_encode(_, False))
+      string_global(args, state, builtins_uri.uri_encode(_, False))
     // AnnexB B.2.1.1 escape ( string )
     value.VmNative(value.Escape) ->
-      string_global(args, state, operators.js_escape)
+      string_global(args, state, builtins_uri.js_escape)
     // AnnexB B.2.1.2 unescape ( string )
     value.VmNative(value.Unescape) ->
-      string_global(args, state, operators.js_unescape)
+      string_global(args, state, builtins_uri.js_unescape)
     // §21.2.1.1 BigInt ( value )
     value.VmNative(value.BigIntGlobal) ->
       builtins_typed_array.bigint_global(args, state)
@@ -2744,9 +2746,9 @@ pub fn dispatch_native(
   }
 }
 
-/// Shared shape of the global String->String functions
-/// (decodeURI, encodeURI, escape, ...): coerce the first arg to a string,
-/// apply `f`, return the result as a JsString.
+/// Shared shape of the infallible global String->String functions
+/// (encodeURI, escape, ...): coerce the first arg to a string, apply `f`,
+/// return the result as a JsString.
 fn string_global(
   args: List(JsValue),
   state: State(host),
@@ -2755,6 +2757,48 @@ fn string_global(
   let arg = helpers.first_arg_or_undefined(args)
   use str, state <- coerce.try_to_string(state, arg)
   #(state, Ok(JsString(f(str))))
+}
+
+/// §19.2.6.2/.3 decodeURI / decodeURIComponent: coerce the argument to a
+/// string, decode it, and throw a URIError for a malformed escape sequence
+/// ("Throw a URIError exception" in the Decode abstract operation).
+fn uri_decode_global(
+  args: List(JsValue),
+  state: State(host),
+  preserve_reserved preserve_reserved: Bool,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let arg = helpers.first_arg_or_undefined(args)
+  use str, state <- coerce.try_to_string(state, arg)
+  case builtins_uri.uri_decode(str, preserve_reserved) {
+    Ok(decoded) -> #(state, Ok(JsString(decoded)))
+    Error(builtins_uri.Malformed(offset:)) ->
+      throw_uri_error(
+        state,
+        "URI malformed at position " <> int.to_string(offset),
+      )
+  }
+}
+
+/// Allocate a URIError and return it as a thrown completion. decodeURI /
+/// decodeURIComponent are the only URIError producers in the engine, so
+/// this goes through the %URIError% constructor dispatch (which also
+/// attaches the stack trace) rather than a dedicated `state.ErrorKind`.
+fn throw_uri_error(
+  state: State(host),
+  msg: String,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let #(state, created) =
+    builtins_error.dispatch(
+      value.ErrorConstructor(proto: state.builtins.uri_error.prototype),
+      [JsString(msg)],
+      JsUndefined,
+      state,
+    )
+  // Constructing the error cannot itself fail here (a plain string message),
+  // but if it ever did, the thrown value is still the right completion.
+  case created {
+    Ok(err) | Error(err) -> #(state, Error(err))
+  }
 }
 
 /// §20.4.3 thisSymbolValue(value): a Symbol primitive, or a Symbol wrapper
