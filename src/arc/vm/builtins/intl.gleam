@@ -16,19 +16,33 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type IntlNativeFn, type IntlService, type JsValue, type Ref, Dispatch,
-  IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
-  IntlDateTimeFormat, IntlDisplayNames, IntlDurationFormat,
+  type CollatorState, type DateTimeFormatState, type DisplayNamesState,
+  type DtfComponents, type DurationFormatState, type DurationUnitOptions,
+  type IntlData, type IntlDigitOptions, type IntlNativeFn, type IntlService,
+  type ListFormatState, type LocaleState, type NumberFormatState,
+  type PluralRulesState, type Ref, type RelativeTimeFormatState,
+  type SegmentIteratorState, type SegmenterState, type SegmentsState,
+  CollatorData, CollatorState,
+  DateTimeFormatData, DateTimeFormatState, Dispatch, DisplayNamesData,
+  DisplayNamesState, DtfComponents, DurationFormatData, DurationFormatState,
+  DurationUnitOptions, GroupingMode, GroupingNever, IntlBoundGetter,
+  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
+  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
   IntlGetCanonicalLocales, IntlListFormat, IntlLocale, IntlLocaleGetter,
   IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat, IntlObject,
   IntlPluralRules, IntlRelativeTimeFormat, IntlResolvedOptions,
   IntlSegmentIterator, IntlSegmenter, IntlSegmenterSegment, IntlSegments,
-  IntlSegmentsIterator, IntlSupportedLocalesOf, IntlSupportedValuesOf, JsBool,
-  JsNumber, JsObject, JsString, JsUndefined, Named, ObjectSlot, TemporalDateSlot,
-  TemporalDateTimeSlot, TemporalInstantSlot, TemporalMonthDaySlot,
-  TemporalTimeSlot, TemporalYearMonthSlot, TemporalZonedDateTimeSlot,
+  IntlSegmentsIterator, IntlSupportedLocalesOf, IntlSupportedValuesOf,
+  ListFormatData, ListFormatState, LocaleData, LocaleState, NumberFormatData,
+  NumberFormatState, PluralRulesData, PluralRulesState, RelativeTimeFormatData,
+  RelativeTimeFormatState, SegmentIteratorData, SegmentIteratorState,
+  SegmenterData, SegmenterState, SegmentsData, SegmentsState, type JsValue,
+  JsBool, JsNumber, JsObject, JsString, JsUndefined, Named, ObjectSlot,
+  TemporalDateSlot, TemporalDateTimeSlot, TemporalInstantSlot,
+  TemporalMonthDaySlot, TemporalTimeSlot, TemporalYearMonthSlot,
+  TemporalZonedDateTimeSlot,
 }
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
@@ -578,45 +592,114 @@ fn throw_type(state: State(host), msg: String) -> Result(a, Thrown(host)) {
   }
 }
 
-/// Read the IntlObject slots for `this`, throwing TypeError on brand mismatch.
+/// Read the IntlObject state for `this`, throwing TypeError on brand mismatch.
 fn branded(
   state: State(host),
   this: JsValue,
   service: IntlService,
   method: String,
-) -> Result(#(Ref, Dict(String, JsValue)), Thrown(host)) {
+) -> Result(#(Ref, IntlData), Thrown(host)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(service: s, slots:), ..))
+        Some(ObjectSlot(kind: IntlObject(service: s, data:), ..))
           if s == service
-        -> Ok(#(ref, slots))
+        -> Ok(#(ref, data))
         _ -> throw_type(state, method <> " called on incompatible receiver")
       }
     _ -> throw_type(state, method <> " called on incompatible receiver")
   }
 }
 
-fn slot_str(slots: Dict(String, JsValue), key: String) -> Option(String) {
-  case dict.get(slots, key) {
-    Ok(JsString(s)) -> Some(s)
-    Ok(_) -> None
-    Error(Nil) -> None
+/// `branded` narrowed to Intl.Locale instances.
+fn branded_locale(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> Result(#(Ref, LocaleState), Thrown(host)) {
+  use #(ref, data) <- result.try(branded(state, this, IntlLocale, method))
+  case data {
+    LocaleData(l) -> Ok(#(ref, l))
+    _ -> throw_type(state, method <> " called on incompatible receiver")
   }
 }
 
-fn slot_int(slots: Dict(String, JsValue), key: String) -> Option(Int) {
-  case dict.get(slots, key) {
-    Ok(JsNumber(value.Finite(f))) -> Some(float.truncate(f))
+/// Replace an Intl instance's per-service state in the heap, keeping every
+/// other object attribute. The service tag is re-derived from the new data
+/// so the two can never disagree.
+fn write_intl_data(h: Heap(host), ref: Ref, data: IntlData) -> Heap(host) {
+  heap.update(h, ref, fn(slot) {
+    case slot {
+      ObjectSlot(kind: IntlObject(..), ..) ->
+        ObjectSlot(
+          ..slot,
+          kind: IntlObject(service: value.intl_service(data), data:),
+        )
+      other -> other
+    }
+  })
+}
+
+/// Look up a DateTimeFormat formatting component by its option name.
+/// The names come from the fixed spec tables (`tf_component_rules`).
+fn component(c: DtfComponents, name: String) -> Option(String) {
+  case name {
+    "weekday" -> c.weekday
+    "era" -> c.era
+    "year" -> c.year
+    "month" -> c.month
+    "day" -> c.day
+    "dayPeriod" -> c.day_period
+    "hour" -> c.hour
+    "minute" -> c.minute
+    "second" -> c.second
+    "fractionalSecondDigits" -> c.fractional_second_digits
+    "timeZoneName" -> c.time_zone_name
     _ -> None
   }
 }
 
-fn slot_bool(slots: Dict(String, JsValue), key: String) -> Option(Bool) {
-  case dict.get(slots, key) {
-    Ok(JsBool(b)) -> Some(b)
-    _ -> None
+/// Set a DateTimeFormat formatting component by its option name. Names
+/// outside the fixed component table are ignored (callers never produce any).
+fn set_component(c: DtfComponents, name: String, v: String) -> DtfComponents {
+  case name {
+    "weekday" -> DtfComponents(..c, weekday: Some(v))
+    "era" -> DtfComponents(..c, era: Some(v))
+    "year" -> DtfComponents(..c, year: Some(v))
+    "month" -> DtfComponents(..c, month: Some(v))
+    "day" -> DtfComponents(..c, day: Some(v))
+    "dayPeriod" -> DtfComponents(..c, day_period: Some(v))
+    "hour" -> DtfComponents(..c, hour: Some(v))
+    "minute" -> DtfComponents(..c, minute: Some(v))
+    "second" -> DtfComponents(..c, second: Some(v))
+    "fractionalSecondDigits" ->
+      DtfComponents(..c, fractional_second_digits: Some(v))
+    "timeZoneName" -> DtfComponents(..c, time_zone_name: Some(v))
+    _ -> c
   }
+}
+
+/// Build a component table from #(name, width) pairs; later pairs win.
+fn components_from_pairs(pairs: List(#(String, String))) -> DtfComponents {
+  list.fold(pairs, value.empty_dtf_components, fn(c, kv) {
+    set_component(c, kv.0, kv.1)
+  })
+}
+
+/// Overlay a formatter's resolved digit options onto a `fmt.NumOpts` base.
+fn with_digits(o: fmt.NumOpts, dg: IntlDigitOptions) -> fmt.NumOpts {
+  fmt.NumOpts(
+    ..o,
+    min_int: dg.minimum_integer_digits,
+    min_frac: dg.minimum_fraction_digits,
+    max_frac: dg.maximum_fraction_digits,
+    min_sig: dg.minimum_significant_digits,
+    max_sig: dg.maximum_significant_digits,
+    rounding_increment: dg.rounding_increment,
+    rounding_mode: dg.rounding_mode,
+    rounding_priority: dg.rounding_priority,
+    trailing_zero_display: dg.trailing_zero_display,
+  )
 }
 
 fn alloc_array(
@@ -860,11 +943,8 @@ fn canonicalize_locale_list(
     }
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(service: IntlLocale, slots:), ..)) ->
-          case slot_str(slots, "locale") {
-            Some(tag) -> Ok(#([tag], state))
-            None -> Ok(#([], state))
-          }
+        Some(ObjectSlot(kind: IntlObject(data: LocaleData(l), ..), ..)) ->
+          Ok(#([l.locale], state))
         _ -> locale_list_from_object(state, ref)
       }
     _ ->
@@ -938,10 +1018,8 @@ fn locale_list_loop(
             JsString(s) -> Ok(#(s, state))
             JsObject(o_ref) ->
               case heap.read(state.heap, o_ref) {
-                Some(ObjectSlot(
-                  kind: IntlObject(service: IntlLocale, slots:),
-                  ..,
-                )) -> Ok(#(option.unwrap(slot_str(slots, "locale"), ""), state))
+                Some(ObjectSlot(kind: IntlObject(data: LocaleData(l), ..), ..)) ->
+                  Ok(#(l.locale, state))
                 _ -> coerce.js_to_string(state, k_value)
               }
             _ -> throw_type(state, "Locales item must be a string or object")
@@ -1352,22 +1430,64 @@ fn construct_service(
       let arg0 = first_arg_or_undefined(args)
       let arg1 = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
       run({
-        use #(slots, state) <- result.try(case service {
-          IntlLocale -> locale_slots(state, arg0, arg1)
-          IntlCollator -> collator_slots(state, arg0, arg1)
-          IntlNumberFormat -> number_format_slots(state, arg0, arg1)
-          IntlDateTimeFormat -> date_time_format_slots(state, arg0, arg1)
-          IntlPluralRules -> plural_rules_slots(state, arg0, arg1)
-          IntlListFormat -> list_format_slots(state, arg0, arg1)
-          IntlRelativeTimeFormat -> rtf_slots(state, arg0, arg1)
-          IntlSegmenter -> segmenter_slots(state, arg0, arg1)
-          IntlDisplayNames -> display_names_slots(state, arg0, arg1)
-          IntlDurationFormat -> duration_format_slots(state, arg0, arg1)
+        use #(data, state) <- result.try(case service {
+          IntlLocale -> {
+            use #(s, state) <- result.map(locale_state(state, arg0, arg1))
+            #(LocaleData(s), state)
+          }
+          IntlCollator -> {
+            use #(s, state) <- result.map(collator_state(state, arg0, arg1))
+            #(CollatorData(s), state)
+          }
+          IntlNumberFormat -> {
+            use #(s, state) <- result.map(number_format_state(state, arg0, arg1))
+            #(NumberFormatData(s), state)
+          }
+          IntlDateTimeFormat -> {
+            use #(s, state) <- result.map(date_time_format_state(
+              state,
+              arg0,
+              arg1,
+            ))
+            #(DateTimeFormatData(s), state)
+          }
+          IntlPluralRules -> {
+            use #(s, state) <- result.map(plural_rules_state(state, arg0, arg1))
+            #(PluralRulesData(s), state)
+          }
+          IntlListFormat -> {
+            use #(s, state) <- result.map(list_format_state(state, arg0, arg1))
+            #(ListFormatData(s), state)
+          }
+          IntlRelativeTimeFormat -> {
+            use #(s, state) <- result.map(rtf_state(state, arg0, arg1))
+            #(RelativeTimeFormatData(s), state)
+          }
+          IntlSegmenter -> {
+            use #(s, state) <- result.map(segmenter_state(state, arg0, arg1))
+            #(SegmenterData(s), state)
+          }
+          IntlDisplayNames -> {
+            use #(s, state) <- result.map(display_names_state(state, arg0, arg1))
+            #(DisplayNamesData(s), state)
+          }
+          IntlDurationFormat -> {
+            use #(s, state) <- result.map(duration_format_state(
+              state,
+              arg0,
+              arg1,
+            ))
+            #(DurationFormatData(s), state)
+          }
           IntlSegments | IntlSegmentIterator ->
             throw_type(state, "Illegal constructor")
         })
         let #(heap, ref) =
-          common.alloc_wrapper(state.heap, IntlObject(service:, slots:), proto)
+          common.alloc_wrapper(
+            state.heap,
+            IntlObject(service: value.intl_service(data), data:),
+            proto,
+          )
         Ok(#(JsObject(ref), State(..state, heap:)))
       })
     }
@@ -1376,18 +1496,18 @@ fn construct_service(
 
 // --- Intl.Locale ---
 
-fn locale_slots(
+fn locale_state(
   state: State(host),
   tag_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
+) -> Result(#(LocaleState, State(host)), Thrown(host)) {
   // Step 7-9: tag must be String or Object; Locale objects pass [[Locale]].
   use #(tag_str, state) <- result.try(case tag_v {
     JsString(s) -> Ok(#(s, state))
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(service: IntlLocale, slots:), ..)) ->
-          Ok(#(option.unwrap(slot_str(slots, "locale"), "und"), state))
+        Some(ObjectSlot(kind: IntlObject(data: LocaleData(l), ..), ..)) ->
+          Ok(#(l.locale, state))
         _ -> coerce.js_to_string(state, tag_v)
       }
     _ -> throw_type(state, "Intl.Locale tag must be a string or object")
@@ -1564,7 +1684,7 @@ fn locale_slots(
     )
   let lid = set_u_keywords(lid, new_kws)
   let canonical = tags.to_string(tags.canonicalize(lid))
-  Ok(#(dict.from_list([#("locale", JsString(canonical))]), state))
+  Ok(#(LocaleState(locale: canonical), state))
 }
 
 /// WeekdayToString (Intl.Locale firstDayOfWeek): "0"-"7" map to day codes;
@@ -1738,10 +1858,10 @@ fn read_locale_matcher(
   state
 }
 
-/// Shared *_slots constructor prologue: CanonicalizeLocaleList, options
+/// Shared *_state constructor prologue: CanonicalizeLocaleList, options
 /// coercion (GetOptionsObject when `strict`, else CoerceOptionsToObject),
 /// then the localeMatcher read.
-fn slots_prologue(
+fn constructor_prologue(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
@@ -1787,11 +1907,11 @@ fn resolve_nu_locale(
 
 // --- Intl.Collator ---
 
-fn collator_slots(
+fn collator_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
+) -> Result(#(CollatorState, State(host)), Thrown(host)) {
   use #(requested, state) <- result.try(canonicalize_locale_list(
     state,
     locales_v,
@@ -1890,27 +2010,29 @@ fn collator_slots(
       },
     )
   let locale = build_resolved_locale(data_locale, ext_used)
-  let slots =
-    dict.from_list([
-      #("locale", JsString(locale)),
-      #("usage", JsString(option.unwrap(usage, "sort"))),
-      #("sensitivity", JsString(sensitivity)),
-      #("ignorePunctuation", JsBool(option.unwrap(ignore_punct, False))),
-      #("collation", JsString(collation)),
-      #("numeric", JsBool(numeric)),
-      #("caseFirst", JsString(case_first)),
-    ])
-  Ok(#(slots, state))
+  Ok(#(
+    CollatorState(
+      locale:,
+      usage: option.unwrap(usage, "sort"),
+      sensitivity:,
+      ignore_punctuation: option.unwrap(ignore_punct, False),
+      collation:,
+      numeric:,
+      case_first:,
+      bound_compare: None,
+    ),
+    state,
+  ))
 }
 
 // --- Intl.NumberFormat ---
 
-fn number_format_slots(
+fn number_format_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(NumberFormatState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -2002,7 +2124,7 @@ fn number_format_slots(
     Some("standard"),
   ))
   let notation = option.unwrap(notation, "standard")
-  use #(digit_slots, state) <- result.try(digit_options(
+  use #(digits, state) <- result.try(digit_options(
     state,
     opts,
     mnfd_default,
@@ -2021,18 +2143,18 @@ fn number_format_slots(
   use #(use_grouping, state) <- result.try(case grouping_v {
     JsUndefined ->
       Ok(#(
-        JsString(case notation {
+        GroupingMode(case notation {
           "compact" -> "min2"
           _ -> "auto"
         }),
         state,
       ))
-    JsBool(False) -> Ok(#(JsBool(False), state))
-    JsBool(True) -> Ok(#(JsString("always"), state))
+    JsBool(False) -> Ok(#(GroupingNever, state))
+    JsBool(True) -> Ok(#(GroupingMode("always"), state))
     _ -> {
       use #(s, state) <- result.try(coerce.js_to_string(state, grouping_v))
       case s {
-        "min2" | "auto" | "always" -> Ok(#(JsString(s), state))
+        "min2" | "auto" | "always" -> Ok(#(GroupingMode(s), state))
         "true" | "false" ->
           // Legacy: any other truthy value behaves per ToBoolean? Spec:
           // strings must be in the allowed set.
@@ -2055,56 +2177,47 @@ fn number_format_slots(
     ["auto", "never", "always", "exceptZero", "negative"],
     Some("auto"),
   ))
-  let base = [
-    #("locale", JsString(locale)),
-    #("numberingSystem", JsString(nu)),
-    #("style", JsString(style)),
-    #("useGrouping", use_grouping),
-    #("notation", JsString(notation)),
-    #("signDisplay", JsString(option.unwrap(sign_display, "auto"))),
-  ]
-  let extras =
-    list.filter_map(
-      [
-        #("currency", option.map(currency, JsString)),
-        #("currencyDisplay", case style {
-          "currency" -> option.map(currency_display, JsString)
-          _ -> None
-        }),
-        #("currencySign", case style {
-          "currency" -> option.map(currency_sign, JsString)
-          _ -> None
-        }),
-        #("unit", option.map(unit, JsString)),
-        #("unitDisplay", case style {
-          "unit" -> option.map(unit_display, JsString)
-          _ -> None
-        }),
-        #("compactDisplay", case notation {
-          "compact" -> option.map(compact_display, JsString)
-          _ -> None
-        }),
-      ],
-      fn(kv) {
-        case kv {
-          #(k, Some(v)) -> Ok(#(k, v))
-          #(_, None) -> Error(Nil)
-        }
+  Ok(#(
+    NumberFormatState(
+      locale:,
+      numbering_system: nu,
+      style:,
+      currency:,
+      currency_display: case style {
+        "currency" -> currency_display
+        _ -> None
       },
-    )
-  let slots =
-    dict.from_list(list.flatten([base, extras, dict.to_list(digit_slots)]))
-  Ok(#(slots, state))
+      currency_sign: case style {
+        "currency" -> currency_sign
+        _ -> None
+      },
+      unit:,
+      unit_display: case style {
+        "unit" -> unit_display
+        _ -> None
+      },
+      digits:,
+      use_grouping:,
+      notation:,
+      compact_display: case notation {
+        "compact" -> compact_display
+        _ -> None
+      },
+      sign_display: option.unwrap(sign_display, "auto"),
+      bound_format: None,
+    ),
+    state,
+  ))
 }
 
-/// SetNumberFormatDigitOptions (§15.1.6) — returns the digit-related slots.
+/// SetNumberFormatDigitOptions (§15.1.6) — resolves the digit-related slots.
 fn digit_options(
   state: State(host),
   opts: Option(Ref),
   mnfd_default: Int,
   mxfd_default: Int,
   notation: String,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
+) -> Result(#(IntlDigitOptions, State(host)), Thrown(host)) {
   use #(mnid, state) <- result.try(get_num_opt(
     state,
     opts,
@@ -2193,8 +2306,9 @@ fn digit_options(
     "auto" -> !{ has_sd || { !has_fd && notation == "compact" } }
     _ -> True
   }
-  use #(sig_slots, state) <- result.try(case need_sd {
-    False -> Ok(#([], state))
+  // sig / fd are #(min, max) when that rounding kind is in effect.
+  use #(sig, state) <- result.try(case need_sd {
+    False -> Ok(#(None, state))
     True ->
       case has_sd {
         True -> {
@@ -2216,26 +2330,13 @@ fn digit_options(
             "maximumSignificantDigits",
           ))
           let mxsd = option.unwrap(mxsd, 21)
-          Ok(#(
-            [
-              #("minimumSignificantDigits", value.from_int(mnsd)),
-              #("maximumSignificantDigits", value.from_int(mxsd)),
-            ],
-            state,
-          ))
+          Ok(#(Some(#(mnsd, mxsd)), state))
         }
-        False ->
-          Ok(#(
-            [
-              #("minimumSignificantDigits", value.from_int(1)),
-              #("maximumSignificantDigits", value.from_int(21)),
-            ],
-            state,
-          ))
+        False -> Ok(#(Some(#(1, 21)), state))
       }
   })
-  use #(fd_slots, state) <- result.try(case need_fd {
-    False -> Ok(#([], state))
+  use #(fd, state) <- result.try(case need_fd {
+    False -> Ok(#(None, state))
     True ->
       case has_fd {
         True -> {
@@ -2269,42 +2370,20 @@ fn digit_options(
             None, Some(mx) -> Ok(#(int.min(mnfd_default, mx), mx))
             None, None -> Ok(#(mnfd_default, mxfd_default))
           })
-          Ok(#(
-            [
-              #("minimumFractionDigits", value.from_int(mnfd)),
-              #("maximumFractionDigits", value.from_int(mxfd)),
-            ],
-            state,
-          ))
+          Ok(#(Some(#(mnfd, mxfd)), state))
         }
         False ->
           Ok(#(
-            [
-              #("minimumFractionDigits", value.from_int(mnfd_default)),
-              #(
-                "maximumFractionDigits",
-                value.from_int(int.max(mxfd_default, mnfd_default)),
-              ),
-            ],
+            Some(#(mnfd_default, int.max(mxfd_default, mnfd_default))),
             state,
           ))
       }
   })
   // Neither kind requested (compact notation default): more-precision
   // rounding with mnfd/mxfd = 0 and mnsd/mxsd = 1..2 (§15.1.6 step 16).
-  let #(sig_slots, fd_slots, rounding_priority) = case sig_slots, fd_slots {
-    [], [] -> #(
-      [
-        #("minimumSignificantDigits", value.from_int(1)),
-        #("maximumSignificantDigits", value.from_int(2)),
-      ],
-      [
-        #("minimumFractionDigits", value.from_int(0)),
-        #("maximumFractionDigits", value.from_int(0)),
-      ],
-      "morePrecision",
-    )
-    _, _ -> #(sig_slots, fd_slots, rounding_priority)
+  let #(sig, fd, rounding_priority) = case sig, fd {
+    None, None -> #(Some(#(1, 2)), Some(#(0, 0)), "morePrecision")
+    _, _ -> #(sig, fd, rounding_priority)
   }
   // roundingIncrement constraints (§15.1.6 steps 24-26).
   use Nil <- result.try(case rounding_increment != 1 {
@@ -2317,12 +2396,10 @@ fn digit_options(
             "roundingIncrement requires fractionDigits rounding type",
           )
         False ->
-          case
-            list.key_find(fd_slots, "minimumFractionDigits")
-            == list.key_find(fd_slots, "maximumFractionDigits")
-          {
-            True -> Ok(Nil)
-            False ->
+          case fd {
+            None -> Ok(Nil)
+            Some(#(mn, mx)) if mn == mx -> Ok(Nil)
+            Some(_) ->
               throw_range(
                 state,
                 "roundingIncrement requires minimumFractionDigits equal to maximumFractionDigits",
@@ -2330,56 +2407,40 @@ fn digit_options(
           }
       }
   })
-  let slots =
-    dict.from_list(
-      list.flatten([
-        [
-          #("minimumIntegerDigits", value.from_int(option.unwrap(mnid, 1))),
-          #("roundingIncrement", value.from_int(rounding_increment)),
-          #(
-            "roundingMode",
-            JsString(option.unwrap(rounding_mode, "halfExpand")),
-          ),
-          #("roundingPriority", JsString(rounding_priority)),
-          #(
-            "trailingZeroDisplay",
-            JsString(option.unwrap(trailing_zero, "auto")),
-          ),
-        ],
-        sig_slots,
-        fd_slots,
-      ]),
-    )
-  Ok(#(slots, state))
+  Ok(#(
+    IntlDigitOptions(
+      minimum_integer_digits: option.unwrap(mnid, 1),
+      minimum_fraction_digits: option.map(fd, fn(p) { p.0 }),
+      maximum_fraction_digits: option.map(fd, fn(p) { p.1 }),
+      minimum_significant_digits: option.map(sig, fn(p) { p.0 }),
+      maximum_significant_digits: option.map(sig, fn(p) { p.1 }),
+      rounding_increment:,
+      rounding_mode: option.unwrap(rounding_mode, "halfExpand"),
+      rounding_priority:,
+      trailing_zero_display: option.unwrap(trailing_zero, "auto"),
+    ),
+    state,
+  ))
 }
 
 // --- Intl.DateTimeFormat ---
 
-fn date_time_format_slots(
+fn date_time_format_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  dtf_slots_with_defaults(state, locales_v, options_v, [
-    #("c:year", "numeric"),
-    #("c:month", "numeric"),
-    #("c:day", "numeric"),
-  ])
-}
-
-fn dtf_slots_with_defaults(
-  state: State(host),
-  locales_v: JsValue,
-  options_v: JsValue,
-  default_components: List(#(String, String)),
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  dtf_slots_required(state, locales_v, options_v, default_components, "any")
+) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
+  dtf_state_required(
+    state,
+    locales_v,
+    options_v,
+    [#("year", "numeric"), #("month", "numeric"), #("day", "numeric")],
+    "any",
+  )
 }
 
 /// Keep only the pairs whose value is present.
-fn present_pairs(
-  pairs: List(#(String, Option(String))),
-) -> List(#(String, String)) {
+fn present_pairs(pairs: List(#(String, Option(a)))) -> List(#(String, a)) {
   list.filter_map(pairs, fn(kv) {
     case kv {
       #(k, Some(v)) -> Ok(#(k, v))
@@ -2388,14 +2449,17 @@ fn present_pairs(
   })
 }
 
-fn dtf_slots_required(
+/// CreateDateTimeFormat (§11.1.2). `default_components` are the
+/// #(component, width) locale defaults applied when the user requested no
+/// component of the `required` group ("date" / "time" / "any").
+fn dtf_state_required(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
   default_components: List(#(String, String)),
   required: String,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -2644,23 +2708,23 @@ fn dtf_slots_required(
       False -> Ok(Nil)
     },
   )
-  // Expand styles / apply defaults into the formatting components ("c:" keys).
+  // Expand styles / apply defaults into the effective formatting components.
   let user_date =
     present_pairs([
-      #("c:weekday", weekday),
-      #("c:era", era),
-      #("c:year", year),
-      #("c:month", month),
-      #("c:day", day),
+      #("weekday", weekday),
+      #("era", era),
+      #("year", year),
+      #("month", month),
+      #("day", day),
     ])
   let user_time =
     present_pairs([
-      #("c:dayPeriod", day_period),
-      #("c:hour", hour),
-      #("c:minute", minute),
-      #("c:second", second),
-      #("c:fractionalSecondDigits", option.map(fractional, int.to_string)),
-      #("c:timeZoneName", tz_name_opt),
+      #("dayPeriod", day_period),
+      #("hour", hour),
+      #("minute", minute),
+      #("second", second),
+      #("fractionalSecondDigits", option.map(fractional, int.to_string)),
+      #("timeZoneName", tz_name_opt),
     ])
   let #(c_date, c_time) = case date_style, time_style, required_present {
     None, None, False -> {
@@ -2677,17 +2741,17 @@ fn dtf_slots_required(
         merge(
           user_date,
           list.filter(default_components, fn(kv) {
-            kv.0 == "c:weekday"
-            || kv.0 == "c:era"
-            || kv.0 == "c:year"
-            || kv.0 == "c:month"
-            || kv.0 == "c:day"
+            kv.0 == "weekday"
+            || kv.0 == "era"
+            || kv.0 == "year"
+            || kv.0 == "month"
+            || kv.0 == "day"
           }),
         ),
         merge(
           user_time,
           list.filter(default_components, fn(kv) {
-            kv.0 == "c:hour" || kv.0 == "c:minute" || kv.0 == "c:second"
+            kv.0 == "hour" || kv.0 == "minute" || kv.0 == "second"
           }),
         ),
       )
@@ -2695,53 +2759,19 @@ fn dtf_slots_required(
     None, None, True -> #(user_date, user_time)
     ds, ts, _ -> #(date_style_components(ds), time_style_components(ts))
   }
-  let has_hour = list.any(c_time, fn(kv) { kv.0 == "c:hour" })
-  let public =
-    list.filter_map(
-      [
-        #("weekday", weekday),
-        #("era", era),
-        #("year", year),
-        #("month", month),
-        #("day", day),
-        #("dayPeriod", day_period),
-        #("hour", hour),
-        #("minute", minute),
-        #("second", second),
-        #("timeZoneName", tz_name_opt),
-        #("dateStyle", date_style),
-        #("timeStyle", time_style),
-      ],
-      fn(kv) {
-        case kv {
-          #(k, Some(v)) -> Ok(#(k, JsString(v)))
-          #(_, None) -> Error(Nil)
-        }
-      },
-    )
-  // Style-derived components are also visible in resolvedOptions when no
-  // dateStyle/timeStyle is set; with styles set, only the styles show.
-  let public = case date_style, time_style {
-    None, None ->
-      case required_present {
-        True -> public
-        False ->
-          list.append(
-            public,
-            default_components
-              |> list.filter(fn(kv) {
-                !list.any(public, fn(pv) { pv.0 == string.drop_start(kv.0, 2) })
-              })
-              |> list.map(fn(kv) {
-                #(string.drop_start(kv.0, 2), JsString(kv.1))
-              }),
-          )
-      }
-    _, _ -> public
-  }
-  let fractional_slot = case fractional {
-    Some(f) -> [#("fractionalSecondDigits", value.from_int(f))]
-    None -> []
+  let components = components_from_pairs(list.append(c_date, c_time))
+  let has_hour = option.is_some(components.hour)
+  // resolvedOptions component view: the option the user requested, or —
+  // with no dateStyle/timeStyle and no explicit option of the required
+  // group — the locale default for that component. With styles set, only
+  // the styles themselves are visible.
+  let public = fn(user: Option(String), name: String) -> Option(String) {
+    case user, date_style, time_style, required_present {
+      Some(_), _, _, _ -> user
+      None, None, None, False ->
+        list.key_find(default_components, name) |> option.from_result
+      None, _, _, _ -> None
+    }
   }
   // Names of the nine component options that were explicitly provided —
   // needed at format time to compute per-Temporal-type formats
@@ -2766,54 +2796,61 @@ fn dtf_slots_required(
         }
       },
     )
-  let hc_slots = case has_hour {
-    True -> [#("hourCycle", JsString(hc))]
-    False -> []
-  }
-  let slots =
-    dict.from_list(
-      list.flatten([
-        [
-          #("locale", JsString(locale)),
-          #("calendar", JsString(calendar)),
-          #("numberingSystem", JsString(nu)),
-          #("timeZone", JsString(tz_name)),
-          #("tzOffsetMinutes", value.from_int(tz_offset)),
-          #("tzSystem", JsBool(tz_system)),
-          #("explicit", JsString(string.join(explicit_names, ","))),
-        ],
-        hc_slots,
-        public,
-        fractional_slot,
-        list.map(c_date, fn(kv) { #(kv.0, JsString(kv.1)) }),
-        list.map(c_time, fn(kv) { #(kv.0, JsString(kv.1)) }),
-      ]),
-    )
-  Ok(#(slots, state))
+  Ok(#(
+    DateTimeFormatState(
+      locale:,
+      calendar:,
+      numbering_system: nu,
+      time_zone: tz_name,
+      tz_offset_minutes: tz_offset,
+      tz_system:,
+      hour_cycle: case has_hour {
+        True -> Some(hc)
+        False -> None
+      },
+      weekday: public(weekday, "weekday"),
+      era: public(era, "era"),
+      year: public(year, "year"),
+      month: public(month, "month"),
+      day: public(day, "day"),
+      day_period: public(day_period, "dayPeriod"),
+      hour: public(hour, "hour"),
+      minute: public(minute, "minute"),
+      second: public(second, "second"),
+      fractional_second_digits: fractional,
+      time_zone_name: public(tz_name_opt, "timeZoneName"),
+      date_style:,
+      time_style:,
+      explicit: explicit_names,
+      components:,
+      bound_format: None,
+    ),
+    state,
+  ))
 }
 
 fn date_style_components(style: Option(String)) -> List(#(String, String)) {
   case style {
     Some("full") -> [
-      #("c:weekday", "long"),
-      #("c:year", "numeric"),
-      #("c:month", "long"),
-      #("c:day", "numeric"),
+      #("weekday", "long"),
+      #("year", "numeric"),
+      #("month", "long"),
+      #("day", "numeric"),
     ]
     Some("long") -> [
-      #("c:year", "numeric"),
-      #("c:month", "long"),
-      #("c:day", "numeric"),
+      #("year", "numeric"),
+      #("month", "long"),
+      #("day", "numeric"),
     ]
     Some("medium") -> [
-      #("c:year", "numeric"),
-      #("c:month", "short"),
-      #("c:day", "numeric"),
+      #("year", "numeric"),
+      #("month", "short"),
+      #("day", "numeric"),
     ]
     Some("short") -> [
-      #("c:year", "2-digit"),
-      #("c:month", "numeric"),
-      #("c:day", "numeric"),
+      #("year", "2-digit"),
+      #("month", "numeric"),
+      #("day", "numeric"),
     ]
     _ -> []
   }
@@ -2822,23 +2859,23 @@ fn date_style_components(style: Option(String)) -> List(#(String, String)) {
 fn time_style_components(style: Option(String)) -> List(#(String, String)) {
   case style {
     Some("full") -> [
-      #("c:hour", "numeric"),
-      #("c:minute", "2-digit"),
-      #("c:second", "2-digit"),
-      #("c:timeZoneName", "long"),
+      #("hour", "numeric"),
+      #("minute", "2-digit"),
+      #("second", "2-digit"),
+      #("timeZoneName", "long"),
     ]
     Some("long") -> [
-      #("c:hour", "numeric"),
-      #("c:minute", "2-digit"),
-      #("c:second", "2-digit"),
-      #("c:timeZoneName", "short"),
+      #("hour", "numeric"),
+      #("minute", "2-digit"),
+      #("second", "2-digit"),
+      #("timeZoneName", "short"),
     ]
     Some("medium") -> [
-      #("c:hour", "numeric"),
-      #("c:minute", "2-digit"),
-      #("c:second", "2-digit"),
+      #("hour", "numeric"),
+      #("minute", "2-digit"),
+      #("second", "2-digit"),
     ]
-    Some("short") -> [#("c:hour", "numeric"), #("c:minute", "2-digit")]
+    Some("short") -> [#("hour", "numeric"), #("minute", "2-digit")]
     _ -> []
   }
 }
@@ -3095,12 +3132,12 @@ fn iana_zone_offset(s: String) -> Option(Int) {
 
 // --- Intl.PluralRules ---
 
-fn plural_rules_slots(
+fn plural_rules_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(PluralRulesState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -3129,42 +3166,30 @@ fn plural_rules_slots(
     Some("short"),
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
-  use #(digit_slots, state) <- result.try(digit_options(
+  use #(digits, state) <- result.try(digit_options(state, opts, 0, 3, notation))
+  Ok(#(
+    PluralRulesState(
+      locale: data_locale,
+      plural_type: option.unwrap(type_, "cardinal"),
+      notation:,
+      compact_display: case notation {
+        "compact" -> Some(option.unwrap(compact_display, "short"))
+        _ -> None
+      },
+      digits:,
+    ),
     state,
-    opts,
-    0,
-    3,
-    notation,
   ))
-  let compact_slot = case notation {
-    "compact" -> [
-      #("compactDisplay", JsString(option.unwrap(compact_display, "short"))),
-    ]
-    _ -> []
-  }
-  let slots =
-    dict.from_list(
-      list.flatten([
-        [
-          #("locale", JsString(data_locale)),
-          #("type", JsString(option.unwrap(type_, "cardinal"))),
-          #("notation", JsString(notation)),
-        ],
-        compact_slot,
-        dict.to_list(digit_slots),
-      ]),
-    )
-  Ok(#(slots, state))
 }
 
 // --- Intl.ListFormat ---
 
-fn list_format_slots(
+fn list_format_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(ListFormatState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -3185,23 +3210,24 @@ fn list_format_slots(
     Some("long"),
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
-  let slots =
-    dict.from_list([
-      #("locale", JsString(data_locale)),
-      #("type", JsString(option.unwrap(type_, "conjunction"))),
-      #("style", JsString(option.unwrap(style, "long"))),
-    ])
-  Ok(#(slots, state))
+  Ok(#(
+    ListFormatState(
+      locale: data_locale,
+      list_type: option.unwrap(type_, "conjunction"),
+      style: option.unwrap(style, "long"),
+    ),
+    state,
+  ))
 }
 
 // --- Intl.RelativeTimeFormat ---
 
-fn rtf_slots(
+fn rtf_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(RelativeTimeFormatState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -3226,24 +3252,25 @@ fn rtf_slots(
     ["always", "auto"],
     Some("always"),
   ))
-  let slots =
-    dict.from_list([
-      #("locale", JsString(locale)),
-      #("style", JsString(option.unwrap(style, "long"))),
-      #("numeric", JsString(option.unwrap(numeric, "always"))),
-      #("numberingSystem", JsString(nu)),
-    ])
-  Ok(#(slots, state))
+  Ok(#(
+    RelativeTimeFormatState(
+      locale:,
+      style: option.unwrap(style, "long"),
+      numeric: option.unwrap(numeric, "always"),
+      numbering_system: nu,
+    ),
+    state,
+  ))
 }
 
 // --- Intl.Segmenter ---
 
-fn segmenter_slots(
+fn segmenter_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(SegmenterState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -3257,22 +3284,23 @@ fn segmenter_slots(
     Some("grapheme"),
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
-  let slots =
-    dict.from_list([
-      #("locale", JsString(data_locale)),
-      #("granularity", JsString(option.unwrap(granularity, "grapheme"))),
-    ])
-  Ok(#(slots, state))
+  Ok(#(
+    SegmenterState(
+      locale: data_locale,
+      granularity: option.unwrap(granularity, "grapheme"),
+    ),
+    state,
+  ))
 }
 
 // --- Intl.DisplayNames ---
 
-fn display_names_slots(
+fn display_names_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(DisplayNamesState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -3312,20 +3340,19 @@ fn display_names_slots(
     Some("dialect"),
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
-  let base = [
-    #("locale", JsString(data_locale)),
-    #("style", JsString(option.unwrap(style, "long"))),
-    #("type", JsString(type_)),
-    #("fallback", JsString(option.unwrap(fallback, "code"))),
-  ]
-  let slots = case type_ {
-    "language" -> [
-      #("languageDisplay", JsString(option.unwrap(language_display, "dialect"))),
-      ..base
-    ]
-    _ -> base
-  }
-  Ok(#(dict.from_list(slots), state))
+  Ok(#(
+    DisplayNamesState(
+      locale: data_locale,
+      style: option.unwrap(style, "long"),
+      display_type: type_,
+      fallback: option.unwrap(fallback, "code"),
+      language_display: case type_ {
+        "language" -> Some(option.unwrap(language_display, "dialect"))
+        _ -> None
+      },
+    ),
+    state,
+  ))
 }
 
 // --- Intl.DurationFormat ---
@@ -3335,12 +3362,12 @@ const duration_units = [
   "milliseconds", "microseconds", "nanoseconds",
 ]
 
-fn duration_format_slots(
+fn duration_format_state(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
-  use #(requested, opts, state) <- result.try(slots_prologue(
+) -> Result(#(DurationFormatState, State(host)), Thrown(host)) {
+  use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
     locales_v,
     options_v,
@@ -3359,120 +3386,34 @@ fn duration_format_slots(
     Some("short"),
   ))
   let base_style = option.unwrap(base_style, "short")
-  use #(unit_slots, state, _prev) <- result.try(
-    list.try_fold(duration_units, #([], state, "none"), fn(acc, unit) {
-      let #(slots_acc, state, prev_style) = acc
-      let styles = case unit {
-        "hours" | "minutes" | "seconds" -> [
-          "long", "short", "narrow", "numeric", "2-digit",
-        ]
-        "milliseconds" | "microseconds" | "nanoseconds" -> [
-          "long", "short", "narrow", "numeric",
-        ]
-        _ -> ["long", "short", "narrow"]
-      }
-      use #(style_opt, state) <- result.try(get_str_opt(
-        state,
-        opts,
-        unit,
-        styles,
-        None,
-      ))
-      let sub_second =
-        unit == "milliseconds"
-        || unit == "microseconds"
-        || unit == "nanoseconds"
-      let prev_numeric =
-        prev_style == "numeric"
-        || prev_style == "2-digit"
-        || prev_style == "fractional"
-      // GetDurationUnitOptions defaulting (Intl.DurationFormat §1.1.6).
-      let #(style, display_default) = case style_opt {
-        Some(st) -> #(st, "always")
-        None ->
-          case base_style {
-            "digital" ->
-              case unit {
-                "years" | "months" | "weeks" | "days" -> #("short", "auto")
-                "minutes" | "seconds" ->
-                  case prev_numeric {
-                    True -> #("2-digit", "always")
-                    False -> #("numeric", "always")
-                  }
-                _ -> #("numeric", "always")
-              }
-            _ ->
-              case prev_numeric {
-                True ->
-                  case unit {
-                    "minutes" | "seconds" -> #("2-digit", "always")
-                    _ ->
-                      case sub_second {
-                        True -> #("numeric", "always")
-                        False -> #(base_style, "auto")
-                      }
-                  }
-                False -> #(base_style, "auto")
-              }
-          }
-      }
-      // Sub-second "numeric" after a numeric unit folds into a fraction.
-      let #(style, display_default) = case
-        style == "numeric" && sub_second && prev_numeric
-      {
-        True -> #("fractional", "auto")
-        False -> #(style, display_default)
-      }
-      use #(display, state) <- result.try(get_str_opt(
-        state,
-        opts,
-        unit <> "Display",
-        ["auto", "always"],
-        Some(display_default),
-      ))
-      let display = option.unwrap(display, display_default)
-      use Nil <- result.try(case display == "always" && style == "fractional" {
-        True ->
-          throw_range(
-            state,
-            unit <> "Display cannot be 'always' for fractional units",
-          )
-        False -> Ok(Nil)
-      })
-      use Nil <- result.try(case prev_style {
-        "fractional" ->
-          case style {
-            "fractional" -> Ok(Nil)
-            _ ->
-              throw_range(
-                state,
-                unit <> " style must be fractional after a fractional unit",
-              )
-          }
-        "numeric" | "2-digit" ->
-          case style {
-            "fractional" | "numeric" | "2-digit" -> Ok(Nil)
-            _ ->
-              throw_range(
-                state,
-                unit <> " style cannot be mixed with numeric styles",
-              )
-          }
-        _ -> Ok(Nil)
-      })
-      // [[<unit>Style]] "fractional" is exposed as "numeric" (resolvedOptions).
-      let public_style = case style {
-        "fractional" -> "numeric"
-        st -> st
-      }
-      let slots_acc = [
-        #(unit, JsString(public_style)),
-        #(unit <> "Display", JsString(display)),
-        ..slots_acc
-      ]
-      Ok(#(slots_acc, state, style))
-    }),
-  )
+  // GetDurationUnitOptions for each unit in spec order, threading the
+  // previous unit's INTERNAL style ("fractional" possible) — numeric
+  // chaining and sub-second fraction folding depend on it.
+  let unit = fn(state, name, prev) {
+    duration_unit_options(state, opts, base_style, name, prev)
+  }
+  use #(years, prev, state) <- result.try(unit(state, "years", "none"))
+  use #(months, prev, state) <- result.try(unit(state, "months", prev))
+  use #(weeks, prev, state) <- result.try(unit(state, "weeks", prev))
+  use #(days, prev, state) <- result.try(unit(state, "days", prev))
+  use #(hours, prev, state) <- result.try(unit(state, "hours", prev))
+  use #(minutes, prev, state) <- result.try(unit(state, "minutes", prev))
+  use #(seconds, prev, state) <- result.try(unit(state, "seconds", prev))
+  use #(milliseconds, prev, state) <- result.try(unit(
+    state,
+    "milliseconds",
+    prev,
+  ))
+  use #(microseconds, prev, state) <- result.try(unit(
+    state,
+    "microseconds",
+    prev,
+  ))
+  use #(nanoseconds, _prev, state) <- result.try(unit(
+    state,
+    "nanoseconds",
+    prev,
+  ))
   use #(fractional, state) <- result.try(get_num_opt(
     state,
     opts,
@@ -3481,23 +3422,158 @@ fn duration_format_slots(
     9,
     None,
   ))
-  let fractional_slot = case fractional {
-    Some(f) -> [#("fractionalDigits", value.from_int(f))]
-    None -> []
+  Ok(#(
+    DurationFormatState(
+      locale:,
+      numbering_system: nu,
+      style: base_style,
+      years:,
+      months:,
+      weeks:,
+      days:,
+      hours:,
+      minutes:,
+      seconds:,
+      milliseconds:,
+      microseconds:,
+      nanoseconds:,
+      fractional_digits: fractional,
+    ),
+    state,
+  ))
+}
+
+/// GetDurationUnitOptions (Intl.DurationFormat §1.1.6): one unit's resolved
+/// style/display. Returns the unit options (with the public style — the
+/// internal "fractional" style is exposed as "numeric") plus the internal
+/// style to thread into the next unit.
+fn duration_unit_options(
+  state: State(host),
+  opts: Option(Ref),
+  base_style: String,
+  unit: String,
+  prev_style: String,
+) -> Result(#(DurationUnitOptions, String, State(host)), Thrown(host)) {
+  let styles = case unit {
+    "hours" | "minutes" | "seconds" -> [
+      "long", "short", "narrow", "numeric", "2-digit",
+    ]
+    "milliseconds" | "microseconds" | "nanoseconds" -> [
+      "long", "short", "narrow", "numeric",
+    ]
+    _ -> ["long", "short", "narrow"]
   }
-  let slots =
-    dict.from_list(
-      list.flatten([
-        [
-          #("locale", JsString(locale)),
-          #("numberingSystem", JsString(nu)),
-          #("style", JsString(base_style)),
-        ],
-        unit_slots,
-        fractional_slot,
-      ]),
-    )
-  Ok(#(slots, state))
+  use #(style_opt, state) <- result.try(get_str_opt(
+    state,
+    opts,
+    unit,
+    styles,
+    None,
+  ))
+  let sub_second =
+    unit == "milliseconds" || unit == "microseconds" || unit == "nanoseconds"
+  let prev_numeric =
+    prev_style == "numeric"
+    || prev_style == "2-digit"
+    || prev_style == "fractional"
+  let #(style, display_default) = case style_opt {
+    Some(st) -> #(st, "always")
+    None ->
+      case base_style {
+        "digital" ->
+          case unit {
+            "years" | "months" | "weeks" | "days" -> #("short", "auto")
+            "minutes" | "seconds" ->
+              case prev_numeric {
+                True -> #("2-digit", "always")
+                False -> #("numeric", "always")
+              }
+            _ -> #("numeric", "always")
+          }
+        _ ->
+          case prev_numeric {
+            True ->
+              case unit {
+                "minutes" | "seconds" -> #("2-digit", "always")
+                _ ->
+                  case sub_second {
+                    True -> #("numeric", "always")
+                    False -> #(base_style, "auto")
+                  }
+              }
+            False -> #(base_style, "auto")
+          }
+      }
+  }
+  // Sub-second "numeric" after a numeric unit folds into a fraction.
+  let #(style, display_default) = case
+    style == "numeric" && sub_second && prev_numeric
+  {
+    True -> #("fractional", "auto")
+    False -> #(style, display_default)
+  }
+  use #(display, state) <- result.try(get_str_opt(
+    state,
+    opts,
+    unit <> "Display",
+    ["auto", "always"],
+    Some(display_default),
+  ))
+  let display = option.unwrap(display, display_default)
+  use Nil <- result.try(case display == "always" && style == "fractional" {
+    True ->
+      throw_range(
+        state,
+        unit <> "Display cannot be 'always' for fractional units",
+      )
+    False -> Ok(Nil)
+  })
+  use Nil <- result.try(case prev_style {
+    "fractional" ->
+      case style {
+        "fractional" -> Ok(Nil)
+        _ ->
+          throw_range(
+            state,
+            unit <> " style must be fractional after a fractional unit",
+          )
+      }
+    "numeric" | "2-digit" ->
+      case style {
+        "fractional" | "numeric" | "2-digit" -> Ok(Nil)
+        _ ->
+          throw_range(
+            state,
+            unit <> " style cannot be mixed with numeric styles",
+          )
+      }
+    _ -> Ok(Nil)
+  })
+  // [[<unit>Style]] "fractional" is exposed as "numeric" (resolvedOptions).
+  let public_style = case style {
+    "fractional" -> "numeric"
+    st -> st
+  }
+  Ok(#(DurationUnitOptions(style: public_style, display:), style, state))
+}
+
+/// The DurationFormat per-unit options paired with their unit name, in
+/// canonical spec order.
+fn duration_unit_list(
+  d: DurationFormatState,
+) -> List(#(String, DurationUnitOptions)) {
+  [
+    #("years", d.years),
+    #("months", d.months),
+    #("weeks", d.weeks),
+    #("days", d.days),
+    #("hours", d.hours),
+    #("minutes", d.minutes),
+    #("seconds", d.seconds),
+    #("milliseconds", d.milliseconds),
+    #("microseconds", d.microseconds),
+    #("nanoseconds", d.nanoseconds),
+  ]
 }
 
 // ============================================================================
@@ -3510,88 +3586,216 @@ fn resolved_options(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   run({
-    use #(_ref, slots) <- result.try(branded(
+    use #(_ref, data) <- result.try(branded(
       state,
       this,
       service,
       "Intl." <> service_name(service) <> ".prototype.resolvedOptions",
     ))
-    let keys = case service {
-      IntlCollator -> [
-        "locale", "usage", "sensitivity", "ignorePunctuation", "collation",
-        "numeric", "caseFirst",
-      ]
-      IntlNumberFormat -> [
-        "locale", "numberingSystem", "style", "currency", "currencyDisplay",
-        "currencySign", "unit", "unitDisplay", "minimumIntegerDigits",
-        "minimumFractionDigits", "maximumFractionDigits",
-        "minimumSignificantDigits", "maximumSignificantDigits", "useGrouping",
-        "notation", "compactDisplay", "signDisplay", "roundingIncrement",
-        "roundingMode", "roundingPriority", "trailingZeroDisplay",
-      ]
-      IntlDateTimeFormat -> [
-        "locale", "calendar", "numberingSystem", "timeZone", "hourCycle",
-        "hour12", "weekday", "era", "year", "month", "day", "dayPeriod", "hour",
-        "minute", "second", "fractionalSecondDigits", "timeZoneName",
-        "dateStyle", "timeStyle",
-      ]
-      IntlPluralRules -> [
-        "locale", "type", "notation", "compactDisplay", "minimumIntegerDigits",
-        "minimumFractionDigits", "maximumFractionDigits",
-        "minimumSignificantDigits", "maximumSignificantDigits",
-        "pluralCategories", "roundingIncrement", "roundingMode",
-        "roundingPriority", "trailingZeroDisplay",
-      ]
-      IntlListFormat -> ["locale", "type", "style"]
-      IntlRelativeTimeFormat -> [
-        "locale",
-        "style",
-        "numeric",
-        "numberingSystem",
-      ]
-      IntlSegmenter -> ["locale", "granularity"]
-      IntlDisplayNames -> [
-        "locale", "style", "type", "fallback", "languageDisplay",
-      ]
-      IntlDurationFormat ->
+    // Property order and presence are observable: each arm enumerates its
+    // state's fields in the spec's resolvedOptions order, skipping absent
+    // (None) internal slots.
+    let #(state, props) = case data {
+      LocaleData(l) -> #(state, [#("locale", JsString(l.locale))])
+      CollatorData(c) -> #(state, [
+        #("locale", JsString(c.locale)),
+        #("usage", JsString(c.usage)),
+        #("sensitivity", JsString(c.sensitivity)),
+        #("ignorePunctuation", JsBool(c.ignore_punctuation)),
+        #("collation", JsString(c.collation)),
+        #("numeric", JsBool(c.numeric)),
+        #("caseFirst", JsString(c.case_first)),
+      ])
+      NumberFormatData(nf) -> {
+        let dg = nf.digits
+        #(
+          state,
+          present_pairs([
+            #("locale", Some(JsString(nf.locale))),
+            #("numberingSystem", Some(JsString(nf.numbering_system))),
+            #("style", Some(JsString(nf.style))),
+            #("currency", option.map(nf.currency, JsString)),
+            #("currencyDisplay", option.map(nf.currency_display, JsString)),
+            #("currencySign", option.map(nf.currency_sign, JsString)),
+            #("unit", option.map(nf.unit, JsString)),
+            #("unitDisplay", option.map(nf.unit_display, JsString)),
+            #(
+              "minimumIntegerDigits",
+              Some(value.from_int(dg.minimum_integer_digits)),
+            ),
+            #(
+              "minimumFractionDigits",
+              option.map(dg.minimum_fraction_digits, value.from_int),
+            ),
+            #(
+              "maximumFractionDigits",
+              option.map(dg.maximum_fraction_digits, value.from_int),
+            ),
+            #(
+              "minimumSignificantDigits",
+              option.map(dg.minimum_significant_digits, value.from_int),
+            ),
+            #(
+              "maximumSignificantDigits",
+              option.map(dg.maximum_significant_digits, value.from_int),
+            ),
+            #("useGrouping", Some(use_grouping_js(nf.use_grouping))),
+            #("notation", Some(JsString(nf.notation))),
+            #("compactDisplay", option.map(nf.compact_display, JsString)),
+            #("signDisplay", Some(JsString(nf.sign_display))),
+            #(
+              "roundingIncrement",
+              Some(value.from_int(dg.rounding_increment)),
+            ),
+            #("roundingMode", Some(JsString(dg.rounding_mode))),
+            #("roundingPriority", Some(JsString(dg.rounding_priority))),
+            #(
+              "trailingZeroDisplay",
+              Some(JsString(dg.trailing_zero_display)),
+            ),
+          ]),
+        )
+      }
+      DateTimeFormatData(d) -> #(
+        state,
+        present_pairs([
+          #("locale", Some(JsString(d.locale))),
+          #("calendar", Some(JsString(d.calendar))),
+          #("numberingSystem", Some(JsString(d.numbering_system))),
+          #("timeZone", Some(JsString(d.time_zone))),
+          #("hourCycle", option.map(d.hour_cycle, JsString)),
+          #(
+            "hour12",
+            option.map(d.hour_cycle, fn(hc) {
+              JsBool(hc == "h11" || hc == "h12")
+            }),
+          ),
+          #("weekday", option.map(d.weekday, JsString)),
+          #("era", option.map(d.era, JsString)),
+          #("year", option.map(d.year, JsString)),
+          #("month", option.map(d.month, JsString)),
+          #("day", option.map(d.day, JsString)),
+          #("dayPeriod", option.map(d.day_period, JsString)),
+          #("hour", option.map(d.hour, JsString)),
+          #("minute", option.map(d.minute, JsString)),
+          #("second", option.map(d.second, JsString)),
+          #(
+            "fractionalSecondDigits",
+            option.map(d.fractional_second_digits, value.from_int),
+          ),
+          #("timeZoneName", option.map(d.time_zone_name, JsString)),
+          #("dateStyle", option.map(d.date_style, JsString)),
+          #("timeStyle", option.map(d.time_style, JsString)),
+        ]),
+      )
+      PluralRulesData(p) -> {
+        let dg = p.digits
+        let #(state, cats) =
+          alloc_array(
+            state,
+            fmt.plural_categories_en(p.plural_type) |> list.map(JsString),
+          )
+        #(
+          state,
+          present_pairs([
+            #("locale", Some(JsString(p.locale))),
+            #("type", Some(JsString(p.plural_type))),
+            #("notation", Some(JsString(p.notation))),
+            #("compactDisplay", option.map(p.compact_display, JsString)),
+            #(
+              "minimumIntegerDigits",
+              Some(value.from_int(dg.minimum_integer_digits)),
+            ),
+            #(
+              "minimumFractionDigits",
+              option.map(dg.minimum_fraction_digits, value.from_int),
+            ),
+            #(
+              "maximumFractionDigits",
+              option.map(dg.maximum_fraction_digits, value.from_int),
+            ),
+            #(
+              "minimumSignificantDigits",
+              option.map(dg.minimum_significant_digits, value.from_int),
+            ),
+            #(
+              "maximumSignificantDigits",
+              option.map(dg.maximum_significant_digits, value.from_int),
+            ),
+            #("pluralCategories", Some(cats)),
+            #(
+              "roundingIncrement",
+              Some(value.from_int(dg.rounding_increment)),
+            ),
+            #("roundingMode", Some(JsString(dg.rounding_mode))),
+            #("roundingPriority", Some(JsString(dg.rounding_priority))),
+            #(
+              "trailingZeroDisplay",
+              Some(JsString(dg.trailing_zero_display)),
+            ),
+          ]),
+        )
+      }
+      ListFormatData(l) -> #(state, [
+        #("locale", JsString(l.locale)),
+        #("type", JsString(l.list_type)),
+        #("style", JsString(l.style)),
+      ])
+      RelativeTimeFormatData(r) -> #(state, [
+        #("locale", JsString(r.locale)),
+        #("style", JsString(r.style)),
+        #("numeric", JsString(r.numeric)),
+        #("numberingSystem", JsString(r.numbering_system)),
+      ])
+      SegmenterData(s) -> #(state, [
+        #("locale", JsString(s.locale)),
+        #("granularity", JsString(s.granularity)),
+      ])
+      DisplayNamesData(d) -> #(
+        state,
+        present_pairs([
+          #("locale", Some(JsString(d.locale))),
+          #("style", Some(JsString(d.style))),
+          #("type", Some(JsString(d.display_type))),
+          #("fallback", Some(JsString(d.fallback))),
+          #("languageDisplay", option.map(d.language_display, JsString)),
+        ]),
+      )
+      DurationFormatData(df) -> #(
+        state,
         list.flatten([
-          ["locale", "numberingSystem", "style"],
-          list.flat_map(duration_units, fn(u) { [u, u <> "Display"] }),
-          ["fractionalDigits"],
-        ])
-      _ -> ["locale"]
+          [
+            #("locale", JsString(df.locale)),
+            #("numberingSystem", JsString(df.numbering_system)),
+            #("style", JsString(df.style)),
+          ],
+          list.flat_map(duration_unit_list(df), fn(u) {
+            let #(name, o) = u
+            [
+              #(name, JsString(o.style)),
+              #(name <> "Display", JsString(o.display)),
+            ]
+          }),
+          case df.fractional_digits {
+            Some(f) -> [#("fractionalDigits", value.from_int(f))]
+            None -> []
+          },
+        ]),
+      )
+      // %Segments%/%SegmentIterator% never expose resolvedOptions.
+      SegmentsData(_) | SegmentIteratorData(_) -> #(state, [])
     }
-    let #(state, props) =
-      list.fold(keys, #(state, []), fn(acc, key) {
-        let #(state, props) = acc
-        case key {
-          "hour12" ->
-            case slot_str(slots, "hourCycle") {
-              Some(hc) -> #(state, [
-                #("hour12", JsBool(hc == "h11" || hc == "h12")),
-                ..props
-              ])
-              None -> #(state, props)
-            }
-          "pluralCategories" -> {
-            let type_ = slot_str(slots, "type") |> option.unwrap("cardinal")
-            let #(state, arr) =
-              alloc_array(
-                state,
-                fmt.plural_categories_en(type_) |> list.map(JsString),
-              )
-            #(state, [#("pluralCategories", arr), ..props])
-          }
-          _ ->
-            case dict.get(slots, key) {
-              Ok(v) -> #(state, [#(key, v), ..props])
-              Error(Nil) -> #(state, props)
-            }
-        }
-      })
-    let #(state, obj) = alloc_pojo(state, list.reverse(props))
+    let #(state, obj) = alloc_pojo(state, props)
     Ok(#(obj, state))
   })
+}
+
+/// `[[UseGrouping]]` as its JS resolvedOptions value.
+fn use_grouping_js(g: value.IntlUseGrouping) -> JsValue {
+  case g {
+    GroupingNever -> JsBool(False)
+    GroupingMode(s) -> JsString(s)
+  }
 }
 
 // ============================================================================
@@ -3603,20 +3807,22 @@ fn bound_getter(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(slot_key, arity) = case service {
-    IntlCollator -> #("boundCompare", 2)
-    _ -> #("boundFormat", 1)
-  }
   run({
-    use #(ref, slots) <- result.try(branded(
+    use #(ref, data) <- result.try(branded(
       state,
       this,
       service,
       "Intl." <> service_name(service) <> " bound method getter",
     ))
-    case dict.get(slots, slot_key) {
-      Ok(cached) -> Ok(#(cached, state))
-      Error(Nil) -> {
+    let #(cached, arity) = case data {
+      CollatorData(c) -> #(c.bound_compare, 2)
+      NumberFormatData(nf) -> #(nf.bound_format, 1)
+      DateTimeFormatData(d) -> #(d.bound_format, 1)
+      _ -> #(None, 1)
+    }
+    case cached {
+      Some(fn_ref) -> Ok(#(JsObject(fn_ref), state))
+      None -> {
         let #(heap, fn_ref) =
           common.alloc_native_fn(
             state.heap,
@@ -3625,22 +3831,32 @@ fn bound_getter(
             "",
             arity,
           )
-        let bound = JsObject(fn_ref)
-        let heap =
-          heap.update(heap, ref, fn(slot) {
-            case slot {
-              ObjectSlot(kind: IntlObject(service: s, slots: sl), ..) ->
-                ObjectSlot(
-                  ..slot,
-                  kind: IntlObject(
-                    service: s,
-                    slots: dict.insert(sl, slot_key, bound),
-                  ),
-                )
-              other -> other
-            }
-          })
-        Ok(#(bound, State(..state, heap:)))
+        let heap = case data {
+          CollatorData(c) ->
+            write_intl_data(
+              heap,
+              ref,
+              CollatorData(CollatorState(..c, bound_compare: Some(fn_ref))),
+            )
+          NumberFormatData(nf) ->
+            write_intl_data(
+              heap,
+              ref,
+              NumberFormatData(
+                NumberFormatState(..nf, bound_format: Some(fn_ref)),
+              ),
+            )
+          DateTimeFormatData(d) ->
+            write_intl_data(
+              heap,
+              ref,
+              DateTimeFormatData(
+                DateTimeFormatState(..d, bound_format: Some(fn_ref)),
+              ),
+            )
+          _ -> heap
+        }
+        Ok(#(JsObject(fn_ref), State(..state, heap:)))
       }
     }
   })
@@ -3653,30 +3869,30 @@ fn bound_method(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   run({
-    use #(_ref, slots) <- result.try(branded(
+    use #(_ref, data) <- result.try(branded(
       state,
       JsObject(target),
       service,
       "bound Intl method",
     ))
-    case service {
-      IntlNumberFormat -> {
+    case data {
+      NumberFormatData(nf) -> {
         use #(parts, state) <- result.try(nf_format_parts(
           state,
-          slots,
+          nf,
           first_arg_or_undefined(args),
         ))
         Ok(#(JsString(fmt.parts_to_string(parts)), state))
       }
-      IntlDateTimeFormat -> {
+      DateTimeFormatData(d) -> {
         use #(parts, state) <- result.try(dtf_format_parts(
           state,
-          slots,
+          d,
           first_arg_or_undefined(args),
         ))
         Ok(#(JsString(fmt.parts_to_string(parts)), state))
       }
-      IntlCollator -> {
+      CollatorData(c) -> {
         use #(a, state) <- result.try(coerce.js_to_string(
           state,
           first_arg_or_undefined(args),
@@ -3685,7 +3901,7 @@ fn bound_method(
           state,
           helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
         ))
-        Ok(#(value.from_int(collator_compare(slots, a, b)), state))
+        Ok(#(value.from_int(collator_compare(c, a, b)), state))
       }
       _ -> throw_type(state, "Unsupported bound method")
     }
@@ -3696,41 +3912,43 @@ fn bound_method(
 // NumberFormat formatting glue
 // ============================================================================
 
-fn num_opts_from_slots(slots: Dict(String, JsValue)) -> fmt.NumOpts {
+/// The `fmt.NumOpts` a NumberFormat instance formats with.
+fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
   let d = fmt.default_num_opts()
-  fmt.NumOpts(
-    locale: slot_str(slots, "locale") |> option.unwrap(d.locale),
-    style: slot_str(slots, "style") |> option.unwrap(d.style),
-    currency: slot_str(slots, "currency"),
-    currency_display: slot_str(slots, "currencyDisplay")
-      |> option.unwrap(d.currency_display),
-    currency_sign: slot_str(slots, "currencySign")
-      |> option.unwrap(d.currency_sign),
-    unit: slot_str(slots, "unit"),
-    unit_display: slot_str(slots, "unitDisplay")
-      |> option.unwrap(d.unit_display),
-    min_int: slot_int(slots, "minimumIntegerDigits") |> option.unwrap(1),
-    min_frac: slot_int(slots, "minimumFractionDigits"),
-    max_frac: slot_int(slots, "maximumFractionDigits"),
-    min_sig: slot_int(slots, "minimumSignificantDigits"),
-    max_sig: slot_int(slots, "maximumSignificantDigits"),
-    use_grouping: case dict.get(slots, "useGrouping") {
-      Ok(JsBool(False)) -> "never"
-      Ok(JsString(s)) -> s
-      _ -> "auto"
-    },
-    notation: slot_str(slots, "notation") |> option.unwrap(d.notation),
-    compact_display: slot_str(slots, "compactDisplay")
-      |> option.unwrap(d.compact_display),
-    sign_display: slot_str(slots, "signDisplay")
-      |> option.unwrap(d.sign_display),
-    rounding_increment: slot_int(slots, "roundingIncrement") |> option.unwrap(1),
-    rounding_mode: slot_str(slots, "roundingMode")
-      |> option.unwrap(d.rounding_mode),
-    rounding_priority: slot_str(slots, "roundingPriority")
-      |> option.unwrap(d.rounding_priority),
-    trailing_zero_display: slot_str(slots, "trailingZeroDisplay")
-      |> option.unwrap(d.trailing_zero_display),
+  with_digits(
+    fmt.NumOpts(
+      ..d,
+      locale: nf.locale,
+      style: nf.style,
+      currency: nf.currency,
+      currency_display: option.unwrap(nf.currency_display, d.currency_display),
+      currency_sign: option.unwrap(nf.currency_sign, d.currency_sign),
+      unit: nf.unit,
+      unit_display: option.unwrap(nf.unit_display, d.unit_display),
+      use_grouping: case nf.use_grouping {
+        GroupingNever -> "never"
+        GroupingMode(s) -> s
+      },
+      notation: nf.notation,
+      compact_display: option.unwrap(nf.compact_display, d.compact_display),
+      sign_display: nf.sign_display,
+    ),
+    nf.digits,
+  )
+}
+
+/// The `fmt.NumOpts` a PluralRules instance derives its plural operands
+/// with — its own locale / notation / digit options over decimal defaults.
+fn num_opts_from_plural(p: PluralRulesState) -> fmt.NumOpts {
+  let d = fmt.default_num_opts()
+  with_digits(
+    fmt.NumOpts(
+      ..d,
+      locale: p.locale,
+      notation: p.notation,
+      compact_display: option.unwrap(p.compact_display, d.compact_display),
+    ),
+    p.digits,
   )
 }
 
@@ -3748,11 +3966,11 @@ fn to_intl_number(
 
 fn nf_format_parts(
   state: State(host),
-  slots: Dict(String, JsValue),
+  nf: NumberFormatState,
   x: JsValue,
 ) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
-  let opts = num_opts_from_slots(slots)
-  let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
+  let opts = num_opts_from_nf(nf)
+  let nu = nf.numbering_system
   // ToIntlMathematicalValue keeps decimal strings exact.
   case x {
     JsString(str) ->
@@ -3765,9 +3983,9 @@ fn nf_format_parts(
             ),
             state,
           ))
-        False -> nf_format_number(state, slots, x, opts, nu)
+        False -> nf_format_number(state, x, opts, nu)
       }
-    _ -> nf_format_number(state, slots, x, opts, nu)
+    _ -> nf_format_number(state, x, opts, nu)
   }
 }
 
@@ -3798,7 +4016,6 @@ fn is_plain_decimal(s: String) -> Bool {
 
 fn nf_format_number(
   state: State(host),
-  _slots: Dict(String, JsValue),
   x: JsValue,
   opts: fmt.NumOpts,
   nu: String,
@@ -3815,7 +4032,7 @@ fn nf_format_number(
 
 fn nf_range_parts(
   state: State(host),
-  slots: Dict(String, JsValue),
+  nf: NumberFormatState,
   x_v: JsValue,
   y_v: JsValue,
 ) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
@@ -3841,10 +4058,9 @@ fn nf_range_parts(
     JsString(_) -> y_v
     _ -> JsNumber(y)
   }
-  use #(x_parts, state) <- result.try(nf_format_parts(state, slots, x_fmt))
-  use #(y_parts, state) <- result.try(nf_format_parts(state, slots, y_fmt))
-  let locale = slot_str(slots, "locale") |> option.unwrap("en")
-  Ok(#(fmt.format_range_combine(locale, x_parts, y_parts), state))
+  use #(x_parts, state) <- result.try(nf_format_parts(state, nf, x_fmt))
+  use #(y_parts, state) <- result.try(nf_format_parts(state, nf, y_fmt))
+  Ok(#(fmt.format_range_combine(nf.locale, x_parts, y_parts), state))
 }
 
 // ============================================================================
@@ -3999,27 +4215,26 @@ fn tf_component_rules(
 }
 
 /// HandleDateTimeValue: validate the Temporal value against the formatter
-/// (calendar compatibility, suitable format availability) and return slots
-/// whose "c:" component keys are adjusted to the per-type format.
-fn dtf_temporal_slots(
+/// (calendar compatibility, suitable format availability) and return the
+/// state with its formatting components adjusted to the per-type format.
+fn dtf_temporal_state(
   state: State(host),
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   t: TemporalFormattable,
-) -> Result(#(Dict(String, JsValue), State(host)), Thrown(host)) {
+) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
   case t {
     TfZoned ->
       throw_type(
         state,
         "Temporal.ZonedDateTime cannot be formatted with Intl.DateTimeFormat; use Temporal.ZonedDateTime.prototype.toLocaleString instead",
       )
-    TfInstant(..) -> Ok(#(slots, state))
+    TfInstant(..) -> Ok(#(d, state))
     _ -> {
-      let dtf_cal = slot_str(slots, "calendar") |> option.unwrap("gregory")
       let cal_ok = case t {
         TfDate(calendar:, ..) | TfDateTime(calendar:, ..) ->
-          calendar == "iso8601" || calendar == dtf_cal
+          calendar == "iso8601" || calendar == d.calendar
         TfYearMonth(calendar:, ..) | TfMonthDay(calendar:, ..) ->
-          calendar == dtf_cal
+          calendar == d.calendar
         _ -> True
       }
       use Nil <- result.try(case cal_ok {
@@ -4032,16 +4247,15 @@ fn dtf_temporal_slots(
       })
       let #(allowed, required, defaults, copy_era) = tf_component_rules(t)
       let has_styles =
-        slot_str(slots, "dateStyle") != None
-        || slot_str(slots, "timeStyle") != None
+        option.is_some(d.date_style) || option.is_some(d.time_style)
       case has_styles {
         True -> {
           // AdjustDateTimeStyleFormat: per-type formats exist only when the
           // matching style was given; keep only the allowed components.
           let style_ok = case t {
             TfDate(..) | TfYearMonth(..) | TfMonthDay(..) ->
-              slot_str(slots, "dateStyle") != None
-            TfTime(..) -> slot_str(slots, "timeStyle") != None
+              option.is_some(d.date_style)
+            TfTime(..) -> option.is_some(d.time_style)
             _ -> True
           }
           use Nil <- result.try(case style_ok {
@@ -4054,36 +4268,29 @@ fn dtf_temporal_slots(
           })
           let kept =
             list.filter_map(allowed, fn(name) {
-              case c_slot(slots, name) {
-                Some(v) -> Ok(#("c:" <> name, v))
+              case component(d.components, name) {
+                Some(v) -> Ok(#(name, v))
                 None -> Error(Nil)
               }
             })
-          Ok(#(replace_components(slots, kept), state))
+          Ok(#(with_components(d, kept), state))
         }
         False -> {
           // GetDateTimeFormat with inherit = ~relevant~ over the explicitly
           // provided component options.
-          let explicit = case slot_str(slots, "explicit") {
-            Some("") | None -> []
-            Some(s) -> string.split(s, ",")
-          }
           let in_required =
-            list.filter(explicit, fn(name) { list.contains(required, name) })
-          let era_comps = case copy_era, slot_str(slots, "era") {
-            True, Some(e) -> [#("c:era", e)]
+            list.filter(d.explicit, fn(name) { list.contains(required, name) })
+          let era_comps = case copy_era, d.era {
+            True, Some(e) -> [#("era", e)]
             _, _ -> []
           }
           case in_required {
             [] ->
-              case explicit {
+              case d.explicit {
                 [] -> {
                   let comps =
-                    list.map(defaults, fn(name) { #("c:" <> name, "numeric") })
-                  Ok(#(
-                    replace_components(slots, list.append(era_comps, comps)),
-                    state,
-                  ))
+                    list.map(defaults, fn(name) { #(name, "numeric") })
+                  Ok(#(with_components(d, list.append(era_comps, comps)), state))
                 }
                 _ ->
                   throw_type(
@@ -4094,27 +4301,24 @@ fn dtf_temporal_slots(
             _ -> {
               let comps =
                 list.filter_map(required, fn(name) {
-                  case list.contains(explicit, name) {
+                  case list.contains(d.explicit, name) {
                     False -> Error(Nil)
                     True ->
                       case name {
                         "fractionalSecondDigits" ->
-                          case slot_int(slots, "fractionalSecondDigits") {
-                            Some(d) -> Ok(#("c:" <> name, int.to_string(d)))
+                          case d.fractional_second_digits {
+                            Some(n) -> Ok(#(name, int.to_string(n)))
                             None -> Error(Nil)
                           }
                         _ ->
-                          case c_slot(slots, name) {
-                            Some(v) -> Ok(#("c:" <> name, v))
+                          case component(d.components, name) {
+                            Some(v) -> Ok(#(name, v))
                             None -> Error(Nil)
                           }
                       }
                   }
                 })
-              Ok(#(
-                replace_components(slots, list.append(era_comps, comps)),
-                state,
-              ))
+              Ok(#(with_components(d, list.append(era_comps, comps)), state))
             }
           }
         }
@@ -4123,15 +4327,12 @@ fn dtf_temporal_slots(
   }
 }
 
-/// Replace every "c:" component key in `slots` with `comps`.
-fn replace_components(
-  slots: Dict(String, JsValue),
+/// Replace the formatter's component table with `comps`.
+fn with_components(
+  d: DateTimeFormatState,
   comps: List(#(String, String)),
-) -> Dict(String, JsValue) {
-  let cleaned = dict.filter(slots, fn(k, _) { !string.starts_with(k, "c:") })
-  list.fold(comps, cleaned, fn(acc, kv) {
-    dict.insert(acc, kv.0, JsString(kv.1))
-  })
+) -> DateTimeFormatState {
+  DateTimeFormatState(..d, components: components_from_pairs(comps))
 }
 
 /// Howard Hinnant's days_from_civil: civil date -> days since 1970-01-01.
@@ -4163,7 +4364,7 @@ fn civil_week_day(year: Int, month: Int, day: Int) -> Int {
 /// directly (the formatter's time zone is ignored); Instant converts through
 /// the formatter's zone like a Number time value.
 fn dtf_temporal_fields(
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   t: TemporalFormattable,
 ) -> fmt.DateFields {
   case t {
@@ -4213,14 +4414,14 @@ fn dtf_temporal_fields(
       )
     TfInstant(epoch_ns:) -> {
       let ms = floor_div(epoch_ns, 1_000_000)
-      let offset = case slot_bool(slots, "tzSystem") {
-        Some(True) -> 0 - ffi_tz_offset_minutes(ms)
-        _ -> slot_int(slots, "tzOffsetMinutes") |> option.unwrap(0)
+      let offset = case d.tz_system {
+        True -> 0 - ffi_tz_offset_minutes(ms)
+        False -> d.tz_offset_minutes
       }
       fmt.fields_from_epoch_ms(int.to_float(ms), offset)
     }
     TfZoned ->
-      // Unreachable: dtf_temporal_slots throws for ZonedDateTime first.
+      // Unreachable: dtf_temporal_state throws for ZonedDateTime first.
       fmt.fields_from_epoch_ms(0.0, 0)
   }
 }
@@ -4234,30 +4435,27 @@ fn floor_div(a: Int, b: Int) -> Int {
 
 fn dtf_format_parts(
   state: State(host),
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   date_v: JsValue,
 ) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
   case dtf_temporal_value(state, date_v) {
     Some(t) -> {
-      use #(slots, state) <- result.try(dtf_temporal_slots(state, slots, t))
-      let fields = dtf_temporal_fields(slots, t)
-      let parts = build_dtf_parts(slots, fields)
-      let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
-      Ok(#(apply_numbering_system_dtf(parts, nu), state))
+      use #(d, state) <- result.try(dtf_temporal_state(state, d, t))
+      let parts = build_dtf_parts(d, dtf_temporal_fields(d, t))
+      Ok(#(apply_numbering_system_dtf(parts, d.numbering_system), state))
     }
-    None -> dtf_format_parts_number(state, slots, date_v)
+    None -> dtf_format_parts_number(state, d, date_v)
   }
 }
 
 fn dtf_format_parts_number(
   state: State(host),
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   date_v: JsValue,
 ) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
-  use #(fields, state) <- result.try(dtf_fields_number(state, slots, date_v))
-  let parts = build_dtf_parts(slots, fields)
-  let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
-  Ok(#(apply_numbering_system_dtf(parts, nu), state))
+  use #(fields, state) <- result.try(dtf_fields_number(state, d, date_v))
+  let parts = build_dtf_parts(d, fields)
+  Ok(#(apply_numbering_system_dtf(parts, d.numbering_system), state))
 }
 
 fn apply_numbering_system_dtf(
@@ -4288,26 +4486,24 @@ fn translit_dtf(s: String, nu: String) -> String {
   translit_digits(s, nu)
 }
 
-fn c_slot(slots: Dict(String, JsValue), name: String) -> Option(String) {
-  slot_str(slots, "c:" <> name)
-}
-
 fn build_dtf_parts(
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   fields: fmt.DateFields,
 ) -> List(fmt.Part) {
-  let weekday = c_slot(slots, "weekday")
-  let era = c_slot(slots, "era")
-  let year = c_slot(slots, "year")
-  let month = c_slot(slots, "month")
-  let day = c_slot(slots, "day")
-  let day_period = c_slot(slots, "dayPeriod")
-  let hour = c_slot(slots, "hour")
-  let minute = c_slot(slots, "minute")
-  let second = c_slot(slots, "second")
-  let fractional = c_slot(slots, "fractionalSecondDigits")
-  let tz_name = c_slot(slots, "timeZoneName")
-  let hc = slot_str(slots, "hourCycle") |> option.unwrap("h12")
+  let DtfComponents(
+    weekday:,
+    era:,
+    year:,
+    month:,
+    day:,
+    day_period:,
+    hour:,
+    minute:,
+    second:,
+    fractional_second_digits: fractional,
+    time_zone_name: tz_name,
+  ) = d.components
+  let hc = option.unwrap(d.hour_cycle, "h12")
 
   let display_year = case fields.year <= 0 {
     True -> 1 - fields.year
@@ -4353,9 +4549,7 @@ fn build_dtf_parts(
     False -> {
       // Numeric month / partial combos. Most locales we ship use M/D/Y with
       // "/"; German-style locales order D.M.Y with ".".
-      let lang = case
-        tags.parse(slot_str(slots, "locale") |> option.unwrap("en"))
-      {
+      let lang = case tags.parse(d.locale) {
         Ok(lid) -> lid.language
         Error(Nil) -> "en"
       }
@@ -4502,8 +4696,7 @@ fn build_dtf_parts(
   }
   let tz_parts = case tz_name {
     Some(style) -> {
-      let offset = slot_int(slots, "tzOffsetMinutes") |> option.unwrap(0)
-      let name = tz_display(slots, style, offset)
+      let name = tz_display(d.time_zone, style, d.tz_offset_minutes)
       [#("literal", " "), #("timeZoneName", name)]
     }
     None -> []
@@ -4563,12 +4756,8 @@ fn join_parts(pieces: List(fmt.Part), sep: String) -> List(fmt.Part) {
   }
 }
 
-fn tz_display(
-  slots: Dict(String, JsValue),
-  style: String,
-  offset: Int,
-) -> String {
-  let name = slot_str(slots, "timeZone") |> option.unwrap("UTC")
+/// Render a formatter's [[TimeZone]] under a timeZoneName style.
+fn tz_display(name: String, style: String, offset: Int) -> String {
   case name, style {
     "UTC", "short" | "UTC", "shortGeneric" -> "UTC"
     "UTC", "long" | "UTC", "longGeneric" -> "Coordinated Universal Time"
@@ -4604,7 +4793,7 @@ fn gmt_offset(offset: Int, long: Bool) -> String {
 
 fn dtf_range_parts(
   state: State(host),
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   x_v: JsValue,
   y_v: JsValue,
 ) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
@@ -4632,8 +4821,8 @@ fn dtf_range_parts(
       #(JsNumber(n), state)
     }
   })
-  use #(slots, state) <- result.try(case tx, ty {
-    None, None -> Ok(#(slots, state))
+  use #(d, state) <- result.try(case tx, ty {
+    None, None -> Ok(#(d, state))
     Some(a), Some(b) ->
       case same_temporal_kind(a, b) {
         False ->
@@ -4643,17 +4832,9 @@ fn dtf_range_parts(
           )
         True -> {
           // Validates x (calendar / suitable format) and yields the
-          // per-type adjusted component slots; y is validated separately.
-          use #(adjusted, state) <- result.try(dtf_temporal_slots(
-            state,
-            slots,
-            a,
-          ))
-          use #(_slots_y, state) <- result.try(dtf_temporal_slots(
-            state,
-            slots,
-            b,
-          ))
+          // per-type adjusted components; y is validated separately.
+          use #(adjusted, state) <- result.try(dtf_temporal_state(state, d, a))
+          use #(_d_y, state) <- result.try(dtf_temporal_state(state, d, b))
           Ok(#(adjusted, state))
         }
       }
@@ -4663,12 +4844,12 @@ fn dtf_range_parts(
         "Intl.DateTimeFormat range arguments must be of the same type",
       )
   })
-  use collapsed <- result.try(dtf_collapsed_range(state, slots, x_v, y_v))
+  use collapsed <- result.try(dtf_collapsed_range(state, d, x_v, y_v))
   case collapsed {
     Some(#(parts, state)) -> Ok(#(parts, state))
     None -> {
-      use #(x_parts, state) <- result.try(dtf_format_parts(state, slots, x_v))
-      use #(y_parts, state) <- result.try(dtf_format_parts(state, slots, y_v))
+      use #(x_parts, state) <- result.try(dtf_format_parts(state, d, x_v))
+      use #(y_parts, state) <- result.try(dtf_format_parts(state, d, y_v))
       case fmt.parts_to_string(x_parts) == fmt.parts_to_string(y_parts) {
         True -> Ok(#(list.map(x_parts, fn(p) { #(p.0, p.1, "shared") }), state))
         False ->
@@ -4689,35 +4870,30 @@ fn dtf_range_parts(
 /// only in the day.
 fn dtf_collapsed_range(
   state: State(host),
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   x_v: JsValue,
   y_v: JsValue,
 ) -> Result(
   Option(#(List(#(String, String, String)), State(host))),
   Thrown(host),
 ) {
-  let month_style = c_slot(slots, "month")
+  let c = d.components
+  let month_style = c.month
   let named_month = case month_style {
     Some("long") | Some("short") | Some("narrow") -> True
     _ -> False
   }
   let date_only =
-    c_slot(slots, "hour") == None
-    && c_slot(slots, "minute") == None
-    && c_slot(slots, "second") == None
-    && c_slot(slots, "weekday") == None
-  let has_ymd =
-    c_slot(slots, "year") != None
-    && c_slot(slots, "month") != None
-    && c_slot(slots, "day") != None
+    c.hour == None && c.minute == None && c.second == None && c.weekday == None
+  let has_ymd = c.year != None && c.month != None && c.day != None
   case named_month && date_only && has_ymd {
     False -> Ok(None)
     True -> {
-      use #(xf, state) <- result.try(dtf_fields(state, slots, x_v))
-      use #(yf, state) <- result.try(dtf_fields(state, slots, y_v))
+      use #(xf, state) <- result.try(dtf_fields(state, d, x_v))
+      use #(yf, state) <- result.try(dtf_fields(state, d, y_v))
       {
-        let day_style = c_slot(slots, "day") |> option.unwrap("numeric")
-        let year_style = c_slot(slots, "year") |> option.unwrap("numeric")
+        let day_style = option.unwrap(c.day, "numeric")
+        let year_style = option.unwrap(c.year, "numeric")
         let display_year = case xf.year <= 0 {
           True -> 1 - xf.year
           False -> xf.year
@@ -4770,18 +4946,18 @@ fn dtf_collapsed_range(
 /// Compute the civil fields a DTF instance would use for a value.
 fn dtf_fields(
   state: State(host),
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   date_v: JsValue,
 ) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
   case dtf_temporal_value(state, date_v) {
-    Some(t) -> Ok(#(dtf_temporal_fields(slots, t), state))
-    None -> dtf_fields_number(state, slots, date_v)
+    Some(t) -> Ok(#(dtf_temporal_fields(d, t), state))
+    None -> dtf_fields_number(state, d, date_v)
   }
 }
 
 fn dtf_fields_number(
   state: State(host),
-  slots: Dict(String, JsValue),
+  d: DateTimeFormatState,
   date_v: JsValue,
 ) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
   use #(tv, state) <- result.try(case date_v {
@@ -4799,9 +4975,9 @@ fn dtf_fields_number(
     }
     _ -> throw_range(state, "Invalid time value")
   })
-  let offset = case slot_bool(slots, "tzSystem") {
-    Some(True) -> 0 - ffi_tz_offset_minutes(float.truncate(tv_f))
-    _ -> slot_int(slots, "tzOffsetMinutes") |> option.unwrap(0)
+  let offset = case d.tz_system {
+    True -> 0 - ffi_tz_offset_minutes(float.truncate(tv_f))
+    False -> d.tz_offset_minutes
   }
   Ok(#(fmt.fields_from_epoch_ms(tv_f, offset), state))
 }
@@ -4810,11 +4986,10 @@ fn dtf_fields_number(
 // Collator compare
 // ============================================================================
 
-fn collator_compare(slots: Dict(String, JsValue), a: String, b: String) -> Int {
-  let sensitivity = slot_str(slots, "sensitivity") |> option.unwrap("variant")
-  let numeric = slot_bool(slots, "numeric") |> option.unwrap(False)
-  let ignore_punct =
-    slot_bool(slots, "ignorePunctuation") |> option.unwrap(False)
+fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
+  let sensitivity = c.sensitivity
+  let numeric = c.numeric
+  let ignore_punct = c.ignore_punctuation
   let prep = fn(s: String) {
     case ignore_punct {
       True -> strip_punctuation(s)
@@ -5081,68 +5256,48 @@ fn run_method(
   let arg2 = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
   use <- host_method_guard(service, method, args, this, state, arg0, arg1, arg2)
   run({
-    use #(ref, slots) <- result.try(branded(
+    use #(ref, data) <- result.try(branded(
       state,
       this,
       service,
       "Intl." <> service_name(service) <> ".prototype." <> method,
     ))
-    case service, method {
-      IntlNumberFormat, "formatToParts" -> {
-        use #(parts, state) <- result.try(nf_format_parts(state, slots, arg0))
+    case data, method {
+      NumberFormatData(nf), "formatToParts" -> {
+        use #(parts, state) <- result.try(nf_format_parts(state, nf, arg0))
         let #(state, arr) = parts_to_js(state, parts)
         Ok(#(arr, state))
       }
-      IntlNumberFormat, "formatRange" -> {
-        use #(parts, state) <- result.try(nf_range_parts(
-          state,
-          slots,
-          arg0,
-          arg1,
-        ))
+      NumberFormatData(nf), "formatRange" -> {
+        use #(parts, state) <- result.try(nf_range_parts(state, nf, arg0, arg1))
         let s = parts |> list.map(fn(p) { p.1 }) |> string.join("")
         Ok(#(JsString(s), state))
       }
-      IntlNumberFormat, "formatRangeToParts" -> {
-        use #(parts, state) <- result.try(nf_range_parts(
-          state,
-          slots,
-          arg0,
-          arg1,
-        ))
+      NumberFormatData(nf), "formatRangeToParts" -> {
+        use #(parts, state) <- result.try(nf_range_parts(state, nf, arg0, arg1))
         let #(state, arr) = parts_to_js_sourced(state, parts)
         Ok(#(arr, state))
       }
-      IntlDateTimeFormat, "formatToParts" -> {
-        use #(parts, state) <- result.try(dtf_format_parts(state, slots, arg0))
+      DateTimeFormatData(d), "formatToParts" -> {
+        use #(parts, state) <- result.try(dtf_format_parts(state, d, arg0))
         let #(state, arr) = parts_to_js(state, parts)
         Ok(#(arr, state))
       }
-      IntlDateTimeFormat, "formatRange" -> {
-        use #(parts, state) <- result.try(dtf_range_parts(
-          state,
-          slots,
-          arg0,
-          arg1,
-        ))
+      DateTimeFormatData(d), "formatRange" -> {
+        use #(parts, state) <- result.try(dtf_range_parts(state, d, arg0, arg1))
         let s = parts |> list.map(fn(p) { p.1 }) |> string.join("")
         Ok(#(JsString(s), state))
       }
-      IntlDateTimeFormat, "formatRangeToParts" -> {
-        use #(parts, state) <- result.try(dtf_range_parts(
-          state,
-          slots,
-          arg0,
-          arg1,
-        ))
+      DateTimeFormatData(d), "formatRangeToParts" -> {
+        use #(parts, state) <- result.try(dtf_range_parts(state, d, arg0, arg1))
         let #(state, arr) = parts_to_js_sourced(state, parts)
         Ok(#(arr, state))
       }
-      IntlPluralRules, "select" -> {
+      PluralRulesData(p), "select" -> {
         use #(n, state) <- result.try(coerce.js_to_number(state, arg0))
-        Ok(#(JsString(plural_select(slots, n)), state))
+        Ok(#(JsString(plural_select(p, n)), state))
       }
-      IntlPluralRules, "selectRange" -> {
+      PluralRulesData(_), "selectRange" -> {
         use Nil <- result.try(case arg0, arg1 {
           JsUndefined, _ | _, JsUndefined ->
             throw_type(state, "Invalid selectRange arguments")
@@ -5158,54 +5313,40 @@ fn run_method(
         // CLDR en plural ranges resolve to "other" for all combinations.
         Ok(#(JsString("other"), state))
       }
-      IntlListFormat, "format" -> {
+      ListFormatData(l), "format" -> {
         use #(items, state) <- result.try(string_list_from_iterable(state, arg0))
-        let type_ = slot_str(slots, "type") |> option.unwrap("conjunction")
-        let style = slot_str(slots, "style") |> option.unwrap("long")
-        let parts = fmt.list_format_parts(type_, style, items)
+        let parts = fmt.list_format_parts(l.list_type, l.style, items)
         Ok(#(JsString(fmt.parts_to_string(parts)), state))
       }
-      IntlListFormat, "formatToParts" -> {
+      ListFormatData(l), "formatToParts" -> {
         use #(items, state) <- result.try(string_list_from_iterable(state, arg0))
-        let type_ = slot_str(slots, "type") |> option.unwrap("conjunction")
-        let style = slot_str(slots, "style") |> option.unwrap("long")
-        let parts = fmt.list_format_parts(type_, style, items)
+        let parts = fmt.list_format_parts(l.list_type, l.style, items)
         let #(state, arr) = parts_to_js(state, parts)
         Ok(#(arr, state))
       }
-      IntlRelativeTimeFormat, "format" -> {
-        use #(parts, state) <- result.try(rtf_method_parts(
-          state,
-          slots,
-          arg0,
-          arg1,
-        ))
+      RelativeTimeFormatData(r), "format" -> {
+        use #(parts, state) <- result.try(rtf_method_parts(state, r, arg0, arg1))
         let str = parts |> list.map(fn(part) { part.1 }) |> string.join("")
         Ok(#(JsString(str), state))
       }
-      IntlRelativeTimeFormat, "formatToParts" -> {
-        use #(parts, state) <- result.try(rtf_method_parts(
-          state,
-          slots,
-          arg0,
-          arg1,
-        ))
+      RelativeTimeFormatData(r), "formatToParts" -> {
+        use #(parts, state) <- result.try(rtf_method_parts(state, r, arg0, arg1))
         let #(state, arr) = parts_to_js_with_unit(state, parts)
         Ok(#(arr, state))
       }
-      IntlDisplayNames, "of" -> display_names_of(state, slots, arg0)
-      IntlDurationFormat, "format" -> {
-        use #(parts, state) <- result.try(duration_parts(state, slots, arg0))
+      DisplayNamesData(dn), "of" -> display_names_of(state, dn, arg0)
+      DurationFormatData(df), "format" -> {
+        use #(parts, state) <- result.try(duration_parts(state, df, arg0))
         let str = parts |> list.map(fn(part) { part.1 }) |> string.join("")
         Ok(#(JsString(str), state))
       }
-      IntlDurationFormat, "formatToParts" -> {
-        use #(parts, state) <- result.try(duration_parts(state, slots, arg0))
+      DurationFormatData(df), "formatToParts" -> {
+        use #(parts, state) <- result.try(duration_parts(state, df, arg0))
         let #(state, arr) = parts_to_js_with_unit(state, parts)
         Ok(#(arr, state))
       }
-      IntlSegments, "containing" -> segments_containing(state, slots, arg0)
-      IntlSegmentIterator, "next" -> segment_iterator_next(state, ref, slots)
+      SegmentsData(sg), "containing" -> segments_containing(state, sg, arg0)
+      SegmentIteratorData(it), "next" -> segment_iterator_next(state, ref, it)
       _, _ -> throw_type(state, "Unknown Intl method: " <> method)
     }
   })
@@ -5267,8 +5408,8 @@ fn host_number_to_locale_string(
         "Number.prototype.toLocaleString requires that 'this' be a Number",
       )
   })
-  use #(slots, state) <- result.try(number_format_slots(state, locales, options))
-  use #(parts, state) <- result.try(nf_format_parts(state, slots, JsNumber(n)))
+  use #(nf, state) <- result.try(number_format_state(state, locales, options))
+  use #(parts, state) <- result.try(nf_format_parts(state, nf, JsNumber(n)))
   Ok(#(JsString(fmt.parts_to_string(parts)), state))
 }
 
@@ -5290,8 +5431,8 @@ fn host_locale_compare(
   })
   use #(s, state) <- result.try(coerce.js_to_string(state, this))
   use #(that, state) <- result.try(coerce.js_to_string(state, that_v))
-  use #(slots, state) <- result.try(collator_slots(state, locales, options))
-  Ok(#(value.from_int(collator_compare(slots, s, that)), state))
+  use #(c, state) <- result.try(collator_state(state, locales, options))
+  Ok(#(value.from_int(collator_compare(c, s, that)), state))
 }
 
 /// String.prototype.toLocale{Lower,Upper}Case — locale list is validated,
@@ -5465,21 +5606,21 @@ fn host_date_to_locale(
     _ -> throw_type(state, "this is not a Date object")
   })
   let date_defaults = [
-    #("c:year", "numeric"),
-    #("c:month", "numeric"),
-    #("c:day", "numeric"),
+    #("year", "numeric"),
+    #("month", "numeric"),
+    #("day", "numeric"),
   ]
   let time_defaults = [
-    #("c:hour", "numeric"),
-    #("c:minute", "numeric"),
-    #("c:second", "numeric"),
+    #("hour", "numeric"),
+    #("minute", "numeric"),
+    #("second", "numeric"),
   ]
   let #(defaults, required) = case which {
     1 -> #(date_defaults, "date")
     2 -> #(time_defaults, "time")
     _ -> #(list.append(date_defaults, time_defaults), "any")
   }
-  use #(slots, state) <- result.try(dtf_slots_required(
+  use #(d, state) <- result.try(dtf_state_required(
     state,
     locales,
     options,
@@ -5488,11 +5629,7 @@ fn host_date_to_locale(
   ))
   case tv {
     value.Finite(_) -> {
-      use #(parts, state) <- result.try(dtf_format_parts(
-        state,
-        slots,
-        JsNumber(tv),
-      ))
+      use #(parts, state) <- result.try(dtf_format_parts(state, d, JsNumber(tv)))
       Ok(#(JsString(fmt.parts_to_string(parts)), state))
     }
     _ -> Ok(#(JsString("Invalid Date"), state))
@@ -5500,12 +5637,12 @@ fn host_date_to_locale(
 }
 
 /// PluralRules select: operands come from the formatted digit strings.
-fn plural_select(slots: Dict(String, JsValue), n: value.JsNum) -> String {
+fn plural_select(p: PluralRulesState, n: value.JsNum) -> String {
   case n {
     value.Finite(f) -> {
       let opts =
         fmt.NumOpts(
-          ..num_opts_from_slots(slots),
+          ..num_opts_from_plural(p),
           style: "decimal",
           use_grouping: "never",
           sign_display: "never",
@@ -5529,8 +5666,7 @@ fn plural_select(slots: Dict(String, JsValue), n: value.JsNum) -> String {
           }
         })
         |> string.join("")
-      let type_ = slot_str(slots, "type") |> option.unwrap("cardinal")
-      fmt.plural_select_en(type_, int_digits, frac_digits, f <. 0.0)
+      fmt.plural_select_en(p.plural_type, int_digits, frac_digits, f <. 0.0)
     }
     _ -> "other"
   }
@@ -5539,7 +5675,7 @@ fn plural_select(slots: Dict(String, JsValue), n: value.JsNum) -> String {
 /// RelativeTimeFormat format/formatToParts core.
 fn rtf_method_parts(
   state: State(host),
-  slots: Dict(String, JsValue),
+  r: RelativeTimeFormatState,
   value_v: JsValue,
   unit_v: JsValue,
 ) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
@@ -5553,13 +5689,10 @@ fn rtf_method_parts(
     Some(u) -> Ok(u)
     None -> throw_range(state, "Invalid unit argument: " <> unit_str)
   })
-  let style = slot_str(slots, "style") |> option.unwrap("long")
-  let numeric = slot_str(slots, "numeric") |> option.unwrap("always")
   let abs_opts = fmt.NumOpts(..fmt.default_num_opts(), sign_display: "never")
   let value_parts = fmt.format_number_parts(abs_opts, float.absolute_value(f))
-  let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
-  let value_parts = apply_numbering_system(value_parts, nu)
-  Ok(#(fmt.rtf_parts_en(style, numeric, f, unit, value_parts), state))
+  let value_parts = apply_numbering_system(value_parts, r.numbering_system)
+  Ok(#(fmt.rtf_parts_en(r.style, r.numeric, f, unit, value_parts), state))
 }
 
 fn singular_unit(unit: String) -> Option(String) {
@@ -5655,12 +5788,12 @@ fn iterate_strings(
 /// Intl.DisplayNames.prototype.of(code)
 fn display_names_of(
   state: State(host),
-  slots: Dict(String, JsValue),
+  dn: DisplayNamesState,
   code_v: JsValue,
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use #(code, state) <- result.try(coerce.js_to_string(state, code_v))
-  let type_ = slot_str(slots, "type") |> option.unwrap("language")
-  let fallback = slot_str(slots, "fallback") |> option.unwrap("code")
+  let type_ = dn.display_type
+  let fallback = dn.fallback
   use #(canonical, name) <- result.try(case type_ {
     "language" ->
       case tags.parse(code) {
@@ -5756,7 +5889,7 @@ fn titlecase_ascii(s: String) -> String {
 
 fn duration_parts(
   state: State(host),
-  slots: Dict(String, JsValue),
+  df: DurationFormatState,
   duration_v: JsValue,
 ) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
   use #(fields, state) <- result.try(to_duration_record(state, duration_v))
@@ -5771,7 +5904,7 @@ fn duration_parts(
     True -> Ok(Nil)
     False -> throw_range(state, "Duration field value is out of range")
   })
-  Ok(#(build_duration_parts(slots, fields), state))
+  Ok(#(build_duration_parts(df, fields), state))
 }
 
 /// ToDurationRecord (object) / Temporal duration string parsing.
@@ -6016,41 +6149,38 @@ fn parse_duration_number(s: String) -> Result(Float, Nil) {
 
 /// PartitionDurationFormatPattern — mirrors ECMA-402 Intl.DurationFormat §1.1.7.
 fn build_duration_parts(
-  slots: Dict(String, JsValue),
+  df: DurationFormatState,
   fields: List(#(String, Float)),
 ) -> List(#(String, String, String)) {
-  let nu = slot_str(slots, "numberingSystem") |> option.unwrap("latn")
-  let base_style = slot_str(slots, "style") |> option.unwrap("short")
-  let frac_digits = slot_int(slots, "fractionalDigits")
+  let nu = df.numbering_system
+  let base_style = df.style
+  let frac_digits = df.fractional_digits
   let get = fn(name) { list.key_find(fields, name) |> result.unwrap(0.0) }
   let overall_negative = list.any(fields, fn(f) { f.1 <. 0.0 })
   let fields = list.map(fields, fn(f) { #(f.0, f.1 +. 0.0) })
-  let style_of = fn(unit) { slot_str(slots, unit) |> option.unwrap("short") }
-  let next_unit_of = fn(unit) {
+  // The style of the next-smaller sub-second unit (seconds → ms → us → ns).
+  let next_style_of = fn(unit) {
     case unit {
-      "seconds" -> "milliseconds"
-      "milliseconds" -> "microseconds"
-      "microseconds" -> "nanoseconds"
+      "seconds" -> df.milliseconds.style
+      "milliseconds" -> df.microseconds.style
+      "microseconds" -> df.nanoseconds.style
       _ -> ""
     }
   }
   // Iterate units building groups; numeric units join via ":" separators.
   let init = #([], False, True, False)
   let #(groups_rev, _need_sep, _display_neg, _done) =
-    list.fold(duration_units, init, fn(acc, unit) {
+    list.fold(duration_unit_list(df), init, fn(acc, entry) {
+      let #(unit, unit_opts) = entry
       let #(groups, need_sep, display_neg, done) = acc
       case done {
         True -> acc
         False -> {
-          let style = style_of(unit)
-          let display =
-            slot_str(slots, unit <> "Display") |> option.unwrap("auto")
+          let style = unit_opts.style
+          let display = unit_opts.display
           let raw_value = get(unit)
           // Combine sub-second units when the next unit is numeric.
-          let next_style = case next_unit_of(unit) {
-            "" -> ""
-            nx -> style_of(nx)
-          }
+          let next_style = next_style_of(unit)
           let raw_value = raw_value +. 0.0
           let combine =
             {
@@ -6085,7 +6215,7 @@ fn build_duration_parts(
           // Display zero numeric minutes when seconds follow.
           let display_required = case unit == "minutes" && need_sep {
             True ->
-              slot_str(slots, "secondsDisplay") == Some("always")
+              df.seconds.display == "always"
               || get("seconds") != 0.0
               || get("milliseconds") != 0.0
               || get("microseconds") != 0.0
@@ -6289,28 +6419,22 @@ fn segmenter_segment(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  let name = "Intl.Segmenter.prototype.segment"
   run({
-    use #(_ref, slots) <- result.try(branded(
-      state,
-      this,
-      IntlSegmenter,
-      "Intl.Segmenter.prototype.segment",
-    ))
+    use #(_ref, data) <- result.try(branded(state, this, IntlSegmenter, name))
+    use sg <- result.try(case data {
+      SegmenterData(sg) -> Ok(sg)
+      _ -> throw_type(state, name <> " called on incompatible receiver")
+    })
     use #(s, state) <- result.try(coerce.js_to_string(
       state,
       first_arg_or_undefined(args),
     ))
-    let granularity =
-      slot_str(slots, "granularity") |> option.unwrap("grapheme")
-    let seg_slots =
-      dict.from_list([
-        #("string", JsString(s)),
-        #("granularity", JsString(granularity)),
-      ])
+    let seg = SegmentsData(SegmentsState(string: s, granularity: sg.granularity))
     let #(heap, ref) =
       common.alloc_wrapper(
         state.heap,
-        IntlObject(service: IntlSegments, slots: seg_slots),
+        IntlObject(service: IntlSegments, data: seg),
         segments_proto,
       )
     Ok(#(JsObject(ref), State(..state, heap:)))
@@ -6322,18 +6446,23 @@ fn segments_iterator(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  let name = "%Segments.prototype%[Symbol.iterator]"
   run({
-    use #(_ref, slots) <- result.try(branded(
-      state,
-      this,
-      IntlSegments,
-      "%Segments.prototype%[Symbol.iterator]",
-    ))
-    let iter_slots = dict.insert(slots, "position", value.from_int(0))
+    use #(_ref, data) <- result.try(branded(state, this, IntlSegments, name))
+    use sg <- result.try(case data {
+      SegmentsData(sg) -> Ok(sg)
+      _ -> throw_type(state, name <> " called on incompatible receiver")
+    })
+    let iter =
+      SegmentIteratorData(SegmentIteratorState(
+        string: sg.string,
+        granularity: sg.granularity,
+        position: 0,
+      ))
     let #(heap, ref) =
       common.alloc_wrapper(
         state.heap,
-        IntlObject(service: IntlSegmentIterator, slots: iter_slots),
+        IntlObject(service: IntlSegmentIterator, data: iter),
         iter_proto,
       )
     Ok(#(JsObject(ref), State(..state, heap:)))
@@ -6362,11 +6491,11 @@ fn make_segment_data(
 
 fn segments_containing(
   state: State(host),
-  slots: Dict(String, JsValue),
+  sg: SegmentsState,
   index_v: JsValue,
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
-  let input = slot_str(slots, "string") |> option.unwrap("")
-  let granularity = slot_str(slots, "granularity") |> option.unwrap("grapheme")
+  let input = sg.string
+  let granularity = sg.granularity
   use #(n, state) <- result.try(coerce.js_to_number(state, index_v))
   let idx = case n {
     value.Finite(f) -> float.truncate(f)
@@ -6400,11 +6529,11 @@ fn segments_containing(
 fn segment_iterator_next(
   state: State(host),
   ref: Ref,
-  slots: Dict(String, JsValue),
+  it: SegmentIteratorState,
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
-  let input = slot_str(slots, "string") |> option.unwrap("")
-  let granularity = slot_str(slots, "granularity") |> option.unwrap("grapheme")
-  let position = slot_int(slots, "position") |> option.unwrap(0)
+  let input = it.string
+  let granularity = it.granularity
+  let position = it.position
   let segments = fmt.segment_string(input, granularity)
   let next_seg =
     list.find(segments, fn(seg) {
@@ -6419,19 +6548,11 @@ fn segment_iterator_next(
     Ok(#(s, start, wl)) -> {
       let new_pos = start + fmt.utf16_len(s)
       let heap =
-        heap.update(state.heap, ref, fn(slot) {
-          case slot {
-            ObjectSlot(kind: IntlObject(service:, slots: sl), ..) ->
-              ObjectSlot(
-                ..slot,
-                kind: IntlObject(
-                  service:,
-                  slots: dict.insert(sl, "position", value.from_int(new_pos)),
-                ),
-              )
-            other -> other
-          }
-        })
+        write_intl_data(
+          state.heap,
+          ref,
+          SegmentIteratorData(SegmentIteratorState(..it, position: new_pos)),
+        )
       let state = State(..state, heap:)
       let #(state, data) =
         make_segment_data(state, input, granularity, s, start, wl)
@@ -6453,19 +6574,16 @@ fn iter_result(
 // Intl.Locale getters & methods
 // ============================================================================
 
-fn locale_lid(slots: Dict(String, JsValue)) -> Option(tags.LocaleId) {
-  case slot_str(slots, "locale") {
-    Some(tag) ->
-      case tags.parse(tag) {
-        Ok(lid) -> Some(lid)
-        Error(Nil) -> None
-      }
-    None -> None
+/// Parse a Locale instance's canonical tag into its LocaleId, if well formed.
+fn locale_lid(l: LocaleState) -> Option(tags.LocaleId) {
+  case tags.parse(l.locale) {
+    Ok(lid) -> Some(lid)
+    Error(Nil) -> None
   }
 }
 
-fn locale_u_kw(slots: Dict(String, JsValue), key: String) -> Option(String) {
-  use lid <- option.then(locale_lid(slots))
+fn locale_u_kw(l: LocaleState, key: String) -> Option(String) {
+  use lid <- option.then(locale_lid(l))
   lid_u_keywords(lid)
   |> list.key_find(key)
   |> option.from_result
@@ -6477,13 +6595,12 @@ fn locale_getter(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   run({
-    use #(_ref, slots) <- result.try(branded(
+    use #(_ref, l) <- result.try(branded_locale(
       state,
       this,
-      IntlLocale,
       "Intl.Locale.prototype." <> name,
     ))
-    let lid = locale_lid(slots)
+    let lid = locale_lid(l)
     let v = case name {
       "baseName" ->
         case lid {
@@ -6508,33 +6625,33 @@ fn locale_getter(
           _ -> JsUndefined
         }
       "calendar" ->
-        locale_u_kw(slots, "ca")
+        locale_u_kw(l, "ca")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
       "collation" ->
-        locale_u_kw(slots, "co")
+        locale_u_kw(l, "co")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
       "hourCycle" ->
-        locale_u_kw(slots, "hc")
+        locale_u_kw(l, "hc")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
       "numberingSystem" ->
-        locale_u_kw(slots, "nu")
+        locale_u_kw(l, "nu")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
       "caseFirst" ->
-        locale_u_kw(slots, "kf")
+        locale_u_kw(l, "kf")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
       "numeric" ->
-        case locale_u_kw(slots, "kn") {
+        case locale_u_kw(l, "kn") {
           Some("") | Some("true") -> JsBool(True)
           Some(_) -> JsBool(False)
           None -> JsBool(False)
         }
       "firstDayOfWeek" ->
-        locale_u_kw(slots, "fw")
+        locale_u_kw(l, "fw")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
       "variants" ->
@@ -6557,13 +6674,12 @@ fn locale_method(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   run({
-    use #(_ref, slots) <- result.try(branded(
+    use #(_ref, l) <- result.try(branded_locale(
       state,
       this,
-      IntlLocale,
       "Intl.Locale.prototype." <> method,
     ))
-    let tag = slot_str(slots, "locale") |> option.unwrap("und")
+    let tag = l.locale
     case method {
       "toString" -> Ok(#(JsString(tag), state))
       "maximize" | "minimize" -> {
@@ -6575,17 +6691,19 @@ fn locale_method(
             }
           Error(Nil) -> tag
         }
-        let new_slots = dict.from_list([#("locale", JsString(new_tag))])
         let #(heap, ref) =
           common.alloc_wrapper(
             state.heap,
-            IntlObject(service: IntlLocale, slots: new_slots),
+            IntlObject(
+              service: IntlLocale,
+              data: LocaleData(LocaleState(locale: new_tag)),
+            ),
             proto,
           )
         Ok(#(JsObject(ref), State(..state, heap:)))
       }
       "getCalendars" -> {
-        let vals = case locale_u_kw(slots, "ca") {
+        let vals = case locale_u_kw(l, "ca") {
           Some(ca) -> [ca]
           None -> ["gregory"]
         }
@@ -6593,7 +6711,7 @@ fn locale_method(
         Ok(#(arr, state))
       }
       "getCollations" -> {
-        let vals = case locale_u_kw(slots, "co") {
+        let vals = case locale_u_kw(l, "co") {
           Some(co) -> [co]
           None -> ["emoji", "eor"]
         }
@@ -6601,7 +6719,7 @@ fn locale_method(
         Ok(#(arr, state))
       }
       "getHourCycles" -> {
-        let vals = case locale_u_kw(slots, "hc") {
+        let vals = case locale_u_kw(l, "hc") {
           Some(hc) -> [hc]
           None -> ["h12"]
         }
@@ -6609,7 +6727,7 @@ fn locale_method(
         Ok(#(arr, state))
       }
       "getNumberingSystems" -> {
-        let vals = case locale_u_kw(slots, "nu") {
+        let vals = case locale_u_kw(l, "nu") {
           Some(nu) -> [nu]
           None -> ["latn"]
         }
@@ -6617,7 +6735,7 @@ fn locale_method(
         Ok(#(arr, state))
       }
       "getTimeZones" ->
-        case locale_lid(slots) {
+        case locale_lid(l) {
           Some(tags.LocaleId(region: Some(r), ..)) -> {
             let zones = case string.uppercase(r) {
               "US" -> ["America/New_York"]
@@ -6634,7 +6752,7 @@ fn locale_method(
           _ -> Ok(#(JsUndefined, state))
         }
       "getTextInfo" -> {
-        let lang = case locale_lid(slots) {
+        let lang = case locale_lid(l) {
           Some(l) -> string.lowercase(l.language)
           None -> "en"
         }
@@ -6650,7 +6768,7 @@ fn locale_method(
       "getWeekInfo" -> {
         let #(state, weekend) =
           alloc_array(state, [value.from_int(6), value.from_int(7)])
-        let first_day = case locale_u_kw(slots, "fw") {
+        let first_day = case locale_u_kw(l, "fw") {
           Some("mon") -> 1
           Some("tue") -> 2
           Some("wed") -> 3
