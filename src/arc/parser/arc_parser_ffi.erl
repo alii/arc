@@ -30,24 +30,73 @@ drop_bytes(Bin, Pos) when Pos >= 0, Pos < byte_size(Bin) ->
 drop_bytes(_Bin, _Pos) ->
     <<>>.
 
+%% Convert a decimal float/exponent literal to a double.
+%% Returns {ok, Float};
+%%         {error, out_of_range} when the text is valid float syntax but its
+%%             magnitude overflows an IEEE double (binary_to_float raises
+%%             badarg for overflow; underflow rounds to 0.0 and succeeds);
+%%         {error, invalid} for text binary_to_float cannot parse at all.
+%% The tags mirror number.gleam's `Result(Float, FloatParseError)`.
 parse_float(S) ->
-    try
-        {ok, erlang:binary_to_float(S)}
-    catch
-        error:badarg ->
+    case try_binary_to_float(S) of
+        {ok, F} -> {ok, F};
+        error ->
             %% Erlang's binary_to_float requires a decimal point. For inputs
             %% like "1e10" or "1E20" we insert ".0" before the exponent so the
             %% string becomes "1.0e10" / "1.0E20" which Erlang accepts.
             case insert_dot_before_exp(S) of
                 {ok, S2} ->
-                    try
-                        {ok, erlang:binary_to_float(S2)}
-                    catch
-                        error:badarg -> {error, nil}
+                    case try_binary_to_float(S2) of
+                        {ok, F} -> {ok, F};
+                        error -> classify_float_failure(S2)
                     end;
-                error -> {error, nil}
+                error -> classify_float_failure(S)
             end
     end.
+
+try_binary_to_float(S) ->
+    try
+        {ok, erlang:binary_to_float(S)}
+    catch
+        error:badarg -> error
+    end.
+
+%% binary_to_float raised badarg. If the text is nonetheless well-formed
+%% float syntax, the only remaining cause is a magnitude outside the double
+%% range — a valid JS literal (e.g. "1.0e400") the caller must not zero out.
+classify_float_failure(S) ->
+    case is_float_syntax(S) of
+        true -> {error, out_of_range};
+        false -> {error, invalid}
+    end.
+
+%% [+-]?Digits "." Digits ([eE][+-]?Digits)? — the shape binary_to_float
+%% accepts, so a badarg on a matching input can only be a range error.
+is_float_syntax(S0) ->
+    S1 = skip_sign(S0),
+    case take_digits(S1) of
+        {true, <<".", S2/binary>>} ->
+            case take_digits(S2) of
+                {true, <<>>} -> true;
+                {true, <<E, S3/binary>>} when E =:= $e; E =:= $E ->
+                    case take_digits(skip_sign(S3)) of
+                        {true, <<>>} -> true;
+                        _ -> false
+                    end;
+                _ -> false
+            end;
+        _ -> false
+    end.
+
+skip_sign(<<C, Rest/binary>>) when C =:= $+; C =:= $- -> Rest;
+skip_sign(S) -> S.
+
+%% Consume leading decimal digits: {SawAtLeastOneDigit, Rest}.
+take_digits(S) -> take_digits(S, false).
+take_digits(<<D, Rest/binary>>, _) when D >= $0, D =< $9 ->
+    take_digits(Rest, true);
+take_digits(S, Seen) ->
+    {Seen, S}.
 
 %% Insert ".0" before the first 'e' or 'E' in a binary, if no '.' precedes it.
 %% Returns {ok, NewBinary} or `error` if no exponent or already has decimal.
@@ -129,7 +178,10 @@ decode_escapes_loop(<<B, Rest/binary>>, Acc) ->
     %% Fallback for any non-UTF8 byte
     decode_escapes_loop(Rest, [<<B>> | Acc]).
 
-%% Read up to 6 octal digits for a legacy octal escape.
+%% Read up to 3 octal digits for a legacy octal escape. The resulting code
+%% point can be >= 0x80 (e.g. \251 -> U+00A9), so it must go through
+%% encode_codepoint — appending it as a raw byte would produce an invalid
+%% UTF-8 binary inside a value the rest of the engine treats as a String.
 decode_octal(<<D1, Rest/binary>>, Acc) when D1 >= $0, D1 =< $7 ->
     case Rest of
         <<D2, T/binary>> when D2 >= $0, D2 =< $7 ->
@@ -137,14 +189,14 @@ decode_octal(<<D1, Rest/binary>>, Acc) when D1 >= $0, D1 =< $7 ->
                 <<D3, T2/binary>> when D3 >= $0, D3 =< $7, D1 =< $3 ->
                     %% 3 octal digits, valid only if first is 0-3
                     CP = list_to_integer([D1, D2, D3], 8),
-                    decode_escapes_loop(T2, [<<CP>> | Acc]);
+                    decode_escapes_loop(T2, [encode_codepoint(CP) | Acc]);
                 _ ->
                     CP = list_to_integer([D1, D2], 8),
-                    decode_escapes_loop(T, [<<CP>> | Acc])
+                    decode_escapes_loop(T, [encode_codepoint(CP) | Acc])
             end;
         _ ->
             CP = list_to_integer([D1], 8),
-            decode_escapes_loop(Rest, [<<CP>> | Acc])
+            decode_escapes_loop(Rest, [encode_codepoint(CP) | Acc])
     end.
 
 read_until_brace(<<"}", Rest/binary>>, Acc) ->
