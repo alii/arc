@@ -3,9 +3,8 @@
 //// uses to provide base classes embedder JS can `extends` and to run host-side
 //// work against a live `State` without installing a global shim.
 
-import arc/engine
+import arc/engine.{Returned}
 import arc/vm/builtins/common
-import arc/vm/completion.{NormalCompletion}
 import arc/vm/ops/object
 import arc/vm/state
 import arc/vm/value.{Finite, JsNumber, JsObject, JsString, JsUndefined, Named}
@@ -76,7 +75,7 @@ fn engine_with_service() {
 
 pub fn host_class_extends_instance_method_test() {
   let eng = engine_with_service()
-  let assert Ok(#(NormalCompletion(value: JsString(out), ..), _)) =
+  let assert Ok(#(Returned(value: JsString(out)), _)) =
     engine.eval(eng, "class Channel extends Service {} new Channel().who()")
   // `super()` ran the host ctor (set this.id), the prototype method resolved.
   assert out == "svc-1"
@@ -84,7 +83,7 @@ pub fn host_class_extends_instance_method_test() {
 
 pub fn host_class_instanceof_test() {
   let eng = engine_with_service()
-  let assert Ok(#(NormalCompletion(value: JsString(out), ..), _)) =
+  let assert Ok(#(Returned(value: JsString(out)), _)) =
     engine.eval(
       eng,
       "class Channel extends Service {} String(new Channel() instanceof Service)",
@@ -96,7 +95,7 @@ pub fn host_class_static_inheritance_test() {
   let eng = engine_with_service()
   // `kind` is inherited statically (Channel.__proto__ === Service); `named`
   // reads `this.name`, which is the subclass's own name.
-  let assert Ok(#(NormalCompletion(value: JsString(out), ..), _)) =
+  let assert Ok(#(Returned(value: JsString(out)), _)) =
     engine.eval(
       eng,
       "class Channel extends Service {} Channel.kind() + ',' + Channel.named()",
@@ -106,7 +105,7 @@ pub fn host_class_static_inheritance_test() {
 
 pub fn host_class_subclass_fields_run_after_super_test() {
   let eng = engine_with_service()
-  let assert Ok(#(NormalCompletion(value: JsString(out), ..), _)) =
+  let assert Ok(#(Returned(value: JsString(out)), _)) =
     engine.eval(
       eng,
       "class Channel extends Service { count = 7 } const c = new Channel(); c.id + ':' + c.count",
@@ -119,7 +118,7 @@ pub fn host_class_not_a_global_until_placed_test() {
   // define_class does NOT install a global by itself.
   let #(eng, _service) =
     engine.define_class(engine.new(), "Service", 0, service_ctor, [], [])
-  let assert Ok(#(NormalCompletion(value: JsString(out), ..), _)) =
+  let assert Ok(#(Returned(value: JsString(out)), _)) =
     engine.eval(eng, "typeof globalThis.Service")
   assert out == "undefined"
 }
@@ -133,7 +132,7 @@ pub fn host_fn_mints_callable_value_test() {
     })
   // Not a global; place it ourselves to prove it's a real callable.
   let eng = engine.define_global(eng, "greet", greet)
-  let assert Ok(#(NormalCompletion(value: JsString(out), ..), _)) =
+  let assert Ok(#(Returned(value: JsString(out)), _)) =
     engine.eval(eng, "greet()")
   assert out == "hi"
 }

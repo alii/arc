@@ -1,6 +1,5 @@
-import arc/engine
+import arc/engine.{Returned, Threw}
 import arc/host
-import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/ops/coerce
 import arc/vm/state
 import arc/vm/value.{Finite, JsNumber, JsObject, JsString, JsUndefined}
@@ -9,7 +8,7 @@ import gleam/option
 import gleam/string
 
 fn extract_error_message(eng, source) -> String {
-  let assert Ok(#(NormalCompletion(value: JsString(msg), ..), _)) =
+  let assert Ok(#(Returned(value: JsString(msg)), _)) =
     engine.eval(eng, "try { " <> source <> " } catch (e) { e.message }")
   msg
 }
@@ -27,7 +26,7 @@ fn engine_with_validator(name, validate) {
 }
 
 fn eval_value(eng, source) {
-  let assert Ok(#(NormalCompletion(value:, ..), _)) = engine.eval(eng, source)
+  let assert Ok(#(Returned(value:), _)) = engine.eval(eng, source)
   value
 }
 
@@ -268,7 +267,7 @@ pub fn to_string_propagates_throw_test() {
       use str, s <- coerce.try_to_string(s, v)
       #(s, Ok(JsString(str)))
     })
-  let assert Ok(#(ThrowCompletion(..), _)) =
+  let assert Ok(#(Threw(_), _)) =
     engine.eval(eng, "str({ toString() { throw new Error('nope') } })")
 }
 

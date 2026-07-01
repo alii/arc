@@ -1,15 +1,14 @@
 import arc/compiler
-import arc/engine
+import arc/engine.{Threw}
 import arc/internal/path
 import arc/parser
 import arc/repl/examples
 import arc/vm/builtins/common.{type Builtins}
-import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/ops/object
-import arc/vm/state.{type Heap}
+import arc/vm/state.{type Heap, vm_error_message}
 import arc/vm/value.{type JsValue}
 import gleam/int
 import gleam/io
@@ -27,16 +26,6 @@ type ReplState(host) {
   ReplState(heap: Heap(host), builtins: Builtins, env: entry.ReplEnv)
 }
 
-// -- VM error formatting -----------------------------------------------------
-
-fn inspect_vm_error(vm_err: state.VmError) -> String {
-  case vm_err {
-    state.PcOutOfBounds(pc) -> "PC out of bounds: " <> int.to_string(pc)
-    state.StackUnderflow(op) -> "stack underflow at " <> op
-    state.Unimplemented(op) -> "unimplemented: " <> op
-  }
-}
-
 // -- Eval one line -----------------------------------------------------------
 
 fn eval(
@@ -50,17 +39,9 @@ fn eval(
     )
     Ok(#(program, sb)) ->
       case compiler.compile_repl(program, sb) {
-        Error(compiler.Unsupported(desc)) -> #(
+        Error(err) -> #(
           state,
-          Error("compile error: unsupported " <> desc),
-        )
-        Error(compiler.BreakOutsideLoop) -> #(
-          state,
-          Error("compile error: break outside loop"),
-        )
-        Error(compiler.ContinueOutsideLoop) -> #(
-          state,
-          Error("compile error: continue outside loop"),
+          Error("compile error: " <> compiler.error_message(err)),
         )
         Ok(template) ->
           case
@@ -71,21 +52,17 @@ fn eval(
               state.env,
             )
           {
-            Ok(#(NormalCompletion(val, heap), env)) -> #(
+            Ok(#(Ok(val), heap, env)) -> #(
               ReplState(..state, heap:, env:),
               Ok(val),
             )
-            Ok(#(ThrowCompletion(val, heap), env)) -> #(
+            Ok(#(Error(val), heap, env)) -> #(
               ReplState(..state, heap:, env:),
               Error("Uncaught " <> object.format_error(val, heap)),
             )
-            Ok(#(YieldCompletion(_, _), _)) ->
-              panic as "YieldCompletion should not appear at REPL level"
-            Ok(#(completion.AwaitCompletion(_, _), _)) ->
-              panic as "AwaitCompletion should not appear at REPL level"
             Error(vm_err) -> #(
               state,
-              Error("InternalError: " <> inspect_vm_error(vm_err)),
+              Error("InternalError: " <> vm_error_message(vm_err)),
             )
           }
       }
@@ -287,8 +264,8 @@ fn run_script_file(
 ) -> Nil {
   let eng = engine.new()
   case engine.eval_with(eng, source, finish) {
-    Ok(#(ThrowCompletion(val, new_heap), _)) ->
-      io.println("Uncaught " <> object.format_error(val, new_heap))
+    Ok(#(Threw(val), eng)) ->
+      io.println("Uncaught " <> engine.format_error(eng, val))
     Ok(_) -> Nil
     Error(err) -> io.println(engine.eval_error_message(err))
   }

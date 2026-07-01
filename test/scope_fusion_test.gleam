@@ -20,7 +20,6 @@
 import arc/compiler
 import arc/parser
 import arc/vm/builtins
-import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/entry
 import arc/vm/heap
 import arc/vm/value.{Finite, JsNumber, JsString}
@@ -39,9 +38,8 @@ fn run(source: String) -> Result(value.JsValue, String) {
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
           case entry.run(template, h, b, global_object) {
-            Ok(NormalCompletion(v, _)) -> Ok(v)
-            Ok(ThrowCompletion(v, _)) -> Error("threw: " <> string.inspect(v))
-            Ok(other) -> Error("non-normal: " <> string.inspect(other))
+            Ok(#(Ok(v), _)) -> Ok(v)
+            Ok(#(Error(v), _)) -> Error("threw: " <> string.inspect(v))
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
           }
         }

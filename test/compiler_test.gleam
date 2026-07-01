@@ -3,9 +3,6 @@ import arc/module
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common
-import arc/vm/completion.{
-  type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
-}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/heap
@@ -24,8 +21,11 @@ import gleam/string
 // Test helpers
 // ============================================================================
 
-/// Parse + compile + run JS source, return the completion value.
-fn run_js(source: String) -> Result(Completion(host), String) {
+/// Parse + compile + run JS source, return the settled outcome
+/// (Ok(value) / Error(thrown)) plus the final heap.
+fn run_js(
+  source: String,
+) -> Result(#(Result(value.JsValue, value.JsValue), state.Heap(host)), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(program, sb)) ->
@@ -41,7 +41,7 @@ fn run_js(source: String) -> Result(Completion(host), String) {
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
           case entry.run(template, h, b, global_object) {
-            Ok(completion) -> Ok(completion)
+            Ok(outcome) -> Ok(outcome)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
         }
@@ -54,12 +54,12 @@ fn run_js(source: String) -> Result(Completion(host), String) {
 /// panic messages.
 fn assert_promise_settles(
   source: String,
-  expected: value.JsValue,
+  expected: Result(value.JsValue, value.JsValue),
   label: String,
 ) -> Nil {
   case run_js(source) {
-    Ok(NormalCompletion(val, h)) ->
-      case entry.promise_result(h, val) {
+    Ok(#(Ok(val), h)) ->
+      case entry.promise_settlement(h, val) {
         Some(settled) -> {
           assert settled == expected
         }
@@ -73,26 +73,23 @@ fn assert_promise_settles(
             <> source
           }
       }
-    Ok(ThrowCompletion(val, _)) ->
+    Ok(#(Error(val), _)) ->
       panic as {
-        "expected NormalCompletion, got ThrowCompletion("
+        "expected a normal completion, got throw("
         <> string.inspect(val)
         <> ") for: "
         <> source
       }
-    Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
-    Ok(completion.AwaitCompletion(_, _)) ->
-      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
 
 fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
-  assert_promise_settles(source, expected, "fulfilled")
+  assert_promise_settles(source, Ok(expected), "fulfilled")
 }
 
 fn assert_promise_rejects(source: String, expected: value.JsValue) -> Nil {
-  assert_promise_settles(source, expected, "rejected")
+  assert_promise_settles(source, Error(expected), "rejected")
 }
 
 fn inspect_vm_error(err: state.VmError) -> String {
@@ -105,16 +102,11 @@ fn inspect_vm_error(err: state.VmError) -> String {
 
 fn assert_normal(source: String, expected: value.JsValue) -> Nil {
   case run_js(source) {
-    Ok(NormalCompletion(val, _)) -> {
+    Ok(#(Ok(val), _)) -> {
       assert val == expected
     }
-    Ok(ThrowCompletion(_, _)) ->
-      panic as {
-        "expected NormalCompletion, got ThrowCompletion for: " <> source
-      }
-    Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
-    Ok(completion.AwaitCompletion(_, _)) ->
-      panic as "unexpected AwaitCompletion"
+    Ok(#(Error(_), _)) ->
+      panic as { "expected a normal completion, got a throw for: " <> source }
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -125,17 +117,14 @@ fn assert_normal_number(source: String, expected: Float) -> Nil {
 
 fn assert_thrown(source: String) -> Nil {
   case run_js(source) {
-    Ok(ThrowCompletion(_, _)) -> Nil
-    Ok(NormalCompletion(val, _)) ->
+    Ok(#(Error(_), _)) -> Nil
+    Ok(#(Ok(val), _)) ->
       panic as {
-        "expected ThrowCompletion, got NormalCompletion("
+        "expected a throw, got normal completion("
         <> string.inspect(val)
         <> ") for: "
         <> source
       }
-    Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
-    Ok(completion.AwaitCompletion(_, _)) ->
-      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -382,7 +371,7 @@ pub fn ternary_false_test() -> Nil {
 pub fn empty_object_test() -> Nil {
   // Just test that it doesn't crash — the result is an object ref
   case run_js("({})") {
-    Ok(NormalCompletion(value.JsObject(_), _)) -> Nil
+    Ok(#(Ok(value.JsObject(_)), _)) -> Nil
     _other -> panic as { "expected object, got something else" }
   }
 }
@@ -972,9 +961,8 @@ pub fn try_finally_normal_test() -> Nil {
 pub fn try_finally_throw_test() -> Nil {
   // Finally runs even when exception is thrown, then re-throws
   case run_js("var x = 0; try { x = 1; throw 42; } finally { x = 10; }") {
-    Ok(ThrowCompletion(JsNumber(Finite(42.0)), _)) -> Nil
-    other ->
-      panic as { "expected ThrowCompletion(42): " <> string.inspect(other) }
+    Ok(#(Error(JsNumber(Finite(42.0))), _)) -> Nil
+    other -> panic as { "expected throw of 42: " <> string.inspect(other) }
   }
 }
 
@@ -999,9 +987,8 @@ pub fn try_catch_finally_rethrow_test() -> Nil {
       "var x = 0; try { throw 42; } catch(e) { throw e + 1; } finally { x = 99; }",
     )
   {
-    Ok(ThrowCompletion(JsNumber(Finite(43.0)), _)) -> Nil
-    other ->
-      panic as { "expected ThrowCompletion(43): " <> string.inspect(other) }
+    Ok(#(Error(JsNumber(Finite(43.0))), _)) -> Nil
+    other -> panic as { "expected throw of 43: " <> string.inspect(other) }
   }
 }
 
@@ -1050,14 +1037,13 @@ pub fn try_finally_nested_order_test() -> Nil {
 }
 
 // ============================================================================
-// Throw as ThrowCompletion test
+// Uncaught throw settles as Error(thrown)
 // ============================================================================
 
 pub fn uncaught_throw_test() -> Nil {
   case run_js("throw 42") {
-    Ok(ThrowCompletion(JsNumber(Finite(42.0)), _)) -> Nil
-    Ok(NormalCompletion(_, _)) ->
-      panic as "expected ThrowCompletion, got NormalCompletion"
+    Ok(#(Error(JsNumber(Finite(42.0))), _)) -> Nil
+    Ok(#(Ok(_), _)) -> panic as "expected a throw, got a normal completion"
     other -> panic as { "unexpected result: " <> string.inspect(other) }
   }
 }
@@ -1323,7 +1309,7 @@ pub fn closure_nested_block_shadow_test() -> Nil {
 pub fn array_literal_test() -> Nil {
   // Array literal produces an object
   case run_js("[1, 2, 3]") {
-    Ok(NormalCompletion(value.JsObject(_), _)) -> Nil
+    Ok(#(Ok(value.JsObject(_)), _)) -> Nil
     _other -> panic as "expected array object"
   }
 }
@@ -7027,13 +7013,9 @@ fn eval_repl_line(
           Error("compile error: continue outside loop")
         Ok(template) ->
           case entry.run_and_drain_repl(template, h, b, env) {
-            Ok(#(NormalCompletion(val, new_h), new_env)) ->
-              Ok(#(val, new_h, new_env))
-            Ok(#(ThrowCompletion(val, _), _)) ->
+            Ok(#(Ok(val), new_h, new_env)) -> Ok(#(val, new_h, new_env))
+            Ok(#(Error(val), _, _)) ->
               Error("throw: " <> string.inspect(val))
-            Ok(#(YieldCompletion(_, _), _)) -> Error("unexpected yield")
-            Ok(#(completion.AwaitCompletion(_, _), _)) ->
-              Error("unexpected await")
             Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
           }
       }
@@ -7066,10 +7048,11 @@ fn run_repl_throw_loop(
             Error(_) -> Error("compile error on last line")
             Ok(template) ->
               case entry.run_and_drain_repl(template, h, b, env) {
-                Ok(#(ThrowCompletion(_, _), _)) -> Ok(Nil)
-                Ok(#(NormalCompletion(val, _), _)) ->
+                Ok(#(Error(_), _, _)) -> Ok(Nil)
+                Ok(#(Ok(val), _, _)) ->
                   Error("expected throw, got normal: " <> string.inspect(val))
-                _ -> Error("unexpected result")
+                Error(vm_err) ->
+                  Error("vm error: " <> string.inspect(vm_err))
               }
           }
       }
@@ -7510,8 +7493,11 @@ pub fn strict_reference_error_type_test() -> Nil {
 // Module compilation
 // ============================================================================
 
-/// Parse + compile + run JS module source via the bundle system.
-fn run_module(source: String) -> Result(Completion(host), String) {
+/// Parse + compile + run JS module source via the bundle system. Returns the
+/// settled outcome (Ok(value) / Error(thrown)) plus the final heap.
+fn run_module(
+  source: String,
+) -> Result(#(Result(value.JsValue, value.JsValue), state.Heap(host)), String) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
@@ -7531,9 +7517,9 @@ fn run_module(source: String) -> Result(Completion(host), String) {
         module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
       {
         Ok(module.EvaluatedBundle(value: val, heap: new_heap, ..)) ->
-          Ok(NormalCompletion(val, new_heap))
+          Ok(#(Ok(val), new_heap))
         Error(module.EvaluationError(value: val, heap: new_heap)) ->
-          Ok(ThrowCompletion(val, new_heap))
+          Ok(#(Error(val), new_heap))
         Error(err) -> Error("module error: " <> string.inspect(err))
       }
   }
@@ -7541,20 +7527,17 @@ fn run_module(source: String) -> Result(Completion(host), String) {
 
 fn assert_module_normal(source: String, expected: value.JsValue) -> Nil {
   case run_module(source) {
-    Ok(NormalCompletion(value, _)) -> {
+    Ok(#(Ok(value), _)) -> {
       let assert True = value == expected
       Nil
     }
-    Ok(ThrowCompletion(thrown, heap)) ->
+    Ok(#(Error(thrown), heap)) ->
       panic as {
         "Expected normal completion but got throw: "
         <> string.inspect(thrown)
         <> " heap="
         <> string.inspect(heap)
       }
-    Ok(YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
-    Ok(completion.AwaitCompletion(_, _)) ->
-      panic as "unexpected AwaitCompletion"
     Error(err) -> panic as { "run_module failed: " <> err }
   }
 }
@@ -7669,9 +7652,8 @@ pub fn module_repl_harness_globals_test() -> Nil {
     compiler.compile_repl(harness_program, harness_sb)
 
   let env = entry.new_repl_env(global_object)
-  let assert Ok(#(harness_completion, env)) =
+  let assert Ok(#(Ok(_), h, env)) =
     entry.run_and_drain_repl(harness_template, h, b, env)
-  let assert NormalCompletion(_, h) = harness_completion
 
   // Verify greetFromHarness is on globalThis object
   let assert True =
@@ -7733,7 +7715,7 @@ pub fn run_export_namespace_call_test() -> Nil {
 
   // receive(5): returns `total` (5) synchronously; the .then microtask is
   // drained by run_export, bumping `drained` to 5.
-  let assert Ok(NormalCompletion(v1, h)) =
+  let assert Ok(#(Ok(v1), h)) =
     entry.run_export(
       receive,
       JsUndefined,
@@ -7747,7 +7729,7 @@ pub fn run_export_namespace_call_test() -> Nil {
   let assert True = v1 == value.from_int(5)
 
   // receive(3): module-scoped state persisted on the threaded heap → total 8.
-  let assert Ok(NormalCompletion(v2, h)) =
+  let assert Ok(#(Ok(v2), h)) =
     entry.run_export(
       receive,
       JsUndefined,
@@ -7763,7 +7745,7 @@ pub fn run_export_namespace_call_test() -> Nil {
   // Both .then microtasks ran (5 + 3), proving the queue was drained on each
   // call: getDrained() == 8.
   let assert Some(get_drained) = module.read_export(h, namespace, "getDrained")
-  let assert Ok(NormalCompletion(v3, _)) =
+  let assert Ok(#(Ok(v3), _)) =
     entry.run_export(
       get_drained,
       JsUndefined,

@@ -18,9 +18,7 @@ import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/atomics as builtins_atomics
 import arc/vm/builtins/common
-import arc/vm/completion.{
-  type Completion, NormalCompletion, ThrowCompletion, YieldCompletion,
-}
+import arc/vm/completion.{ThrowCompletion}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
@@ -42,6 +40,11 @@ import gleam/string
 import simplifile
 import test262_metadata.{type TestMetadata, Parse, Resolution, Runtime}
 import test_runner
+
+/// A settled top-level run: `Ok(value)` for a normal completion,
+/// `Error(thrown)` for an uncaught throw, paired with the drained heap.
+type Settled(host) =
+  #(Result(value.JsValue, value.JsValue), Heap(host))
 
 const test_dir: String = "vendor/test262/test"
 
@@ -453,8 +456,8 @@ fn run_test_completion(
   variant: StrictnessVariant,
   is_async: Bool,
   on_error: fn(String) -> TestOutcome,
-  completion_outcome: fn(Completion(host)) -> TestOutcome,
-  async_outcome: fn(Completion(host), value.Ref) -> TestOutcome,
+  completion_outcome: fn(Settled(host)) -> TestOutcome,
+  async_outcome: fn(Settled(host), value.Ref) -> TestOutcome,
 ) -> TestOutcome {
   // test262 CanBlockIsFalse flag: the test must run in an agent whose
   // [[CanBlock]] is false (sync Atomics.wait throws a TypeError). The flag
@@ -549,31 +552,25 @@ fn run_runtime_negative_test(
   )
 }
 
-/// Map a completion to the outcome for a runtime-negative test:
+/// Map a settled run to the outcome for a runtime-negative test:
 /// only a throw (of the expected error type) passes.
 fn negative_completion_outcome(
   metadata: TestMetadata,
-  completion: Completion(host),
+  settled: Settled(host),
 ) -> TestOutcome {
-  case completion {
-    ThrowCompletion(thrown, heap) ->
-      verify_negative_type(metadata, thrown, heap)
-    NormalCompletion(_, _) ->
-      Fail("expected runtime throw but completed normally")
-    YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
-    completion.AwaitCompletion(_, _) -> Fail("unexpected AwaitCompletion")
+  case settled {
+    #(Error(thrown), heap) -> verify_negative_type(metadata, thrown, heap)
+    #(Ok(_), _) -> Fail("expected runtime throw but completed normally")
   }
 }
 
-/// Map a completion to the outcome for a positive test:
+/// Map a settled run to the outcome for a positive test:
 /// only a normal completion passes.
-fn positive_completion_outcome(completion: Completion(host)) -> TestOutcome {
-  case completion {
-    NormalCompletion(_, _) -> Pass
-    ThrowCompletion(thrown, heap) ->
+fn positive_completion_outcome(settled: Settled(host)) -> TestOutcome {
+  case settled {
+    #(Ok(_), _) -> Pass
+    #(Error(thrown), heap) ->
       Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
-    YieldCompletion(_, _) -> Fail("unexpected YieldCompletion")
-    completion.AwaitCompletion(_, _) -> Fail("unexpected AwaitCompletion")
   }
 }
 
@@ -601,10 +598,10 @@ fn run_positive_test(
 /// Check async test completion for positive tests.
 /// Reads __print_output__ from the global object to determine pass/fail.
 fn check_async_positive(
-  completion: Completion(host),
+  settled: Settled(host),
   global_ref: value.Ref,
 ) -> TestOutcome {
-  case check_async_completion(completion, global_ref) {
+  case check_async_completion(settled, global_ref) {
     Ok(Nil) -> Pass
     Error(reason) -> Fail(reason)
   }
@@ -613,15 +610,13 @@ fn check_async_positive(
 /// Core async completion check. Returns Ok(Nil) for "Test262:AsyncTestComplete",
 /// Error with reason for everything else.
 fn check_async_completion(
-  completion: Completion(host),
+  settled: Settled(host),
   global_ref: value.Ref,
 ) -> Result(Nil, String) {
-  case completion {
-    ThrowCompletion(thrown, heap) ->
+  case settled {
+    #(Error(thrown), heap) ->
       Error("unexpected throw: " <> inspect_thrown(thrown, heap))
-    YieldCompletion(_, _) -> Error("unexpected YieldCompletion")
-    completion.AwaitCompletion(_, _) -> Error("unexpected AwaitCompletion")
-    NormalCompletion(_, heap) -> {
+    #(Ok(_), heap) -> {
       case get_data(heap, global_ref, "__print_output__") {
         Ok(value.JsString(output)) ->
           case output {
@@ -689,7 +684,7 @@ fn do_run_module(
   source: String,
   path: String,
   is_async: Bool,
-) -> Result(#(Completion(host), value.Ref), String) {
+) -> Result(#(Settled(host), value.Ref), String) {
   let #(h, b, global_object) = boot_base_realm()
 
   // Evaluate harness files as REPL scripts to populate globals. Async module
@@ -726,18 +721,18 @@ fn do_run_module(
         )
       case result {
         Ok(module.EvaluatedBundle(value: val, ..)) ->
-          Ok(#(NormalCompletion(val, new_heap), global_object))
+          Ok(#(#(Ok(val), new_heap), global_object))
         Error(module.EvaluationError(value: val, heap: _)) ->
-          Ok(#(ThrowCompletion(val, new_heap), global_object))
+          Ok(#(#(Error(val), new_heap), global_object))
         // Entry module still parked on top-level await after a full drain:
         // an awaited promise can never settle. Same outcome as the
         // pre-EvaluationPending behavior (a host-level throw).
         Error(module.EvaluationPending(promise_data_ref: _, heap: _)) ->
           Ok(#(
-            ThrowCompletion(
-              value.JsString(
+            #(
+              Error(value.JsString(
                 "module evaluation never completed: top-level await promise never settled",
-              ),
+              )),
               new_heap,
             ),
             global_object,
@@ -773,7 +768,7 @@ fn do_run_script_with_harness(
   path: String,
   variant: StrictnessVariant,
   is_async: Bool,
-) -> Result(#(Completion(host), value.Ref), String) {
+) -> Result(#(Settled(host), value.Ref), String) {
   let #(h, b, global_object) = boot_base_realm()
 
   // Evaluate harness files as REPL scripts to populate globals
@@ -815,8 +810,8 @@ fn do_run_script_with_harness(
             )
           {
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
-            Ok(#(completion, final_env)) ->
-              Ok(#(completion, final_env.global_object))
+            Ok(#(settled, final_heap, final_env)) ->
+              Ok(#(#(settled, final_heap), final_env.global_object))
           }
       }
   }
@@ -924,14 +919,9 @@ fn eval_harness_template(
 ) -> Result(#(Heap(host), entry.ReplEnv), String) {
   case entry.run_and_drain_repl(template, h, b, env) {
     Error(vm_err) -> Error("harness vm: " <> string.inspect(vm_err))
-    Ok(#(completion, new_env)) ->
-      case completion {
-        NormalCompletion(_, new_heap) -> Ok(#(new_heap, new_env))
-        ThrowCompletion(thrown, new_heap) ->
-          Error("harness threw: " <> inspect_thrown(thrown, new_heap))
-        YieldCompletion(_, _) -> Error("harness yielded")
-        completion.AwaitCompletion(_, _) -> Error("harness awaited")
-      }
+    Ok(#(Ok(_), new_heap, new_env)) -> Ok(#(new_heap, new_env))
+    Ok(#(Error(thrown), new_heap, _)) ->
+      Error("harness threw: " <> inspect_thrown(thrown, new_heap))
   }
 }
 
@@ -1222,7 +1212,7 @@ fn run_agent_child(source: String) -> Nil {
           )
         Ok(#(completion, st)) -> {
           let Nil = case completion {
-            ThrowCompletion(thrown, _) ->
+            ThrowCompletion(thrown) ->
               io.println_error(
                 "$262.agent: agent script threw: "
                 <> object.format_error(thrown, st.heap),

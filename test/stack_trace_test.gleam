@@ -1,14 +1,14 @@
 import arc/compiler
 import arc/parser
 import arc/vm/builtins
-import arc/vm/completion.{type Completion, NormalCompletion}
 import arc/vm/exec/entry
 import arc/vm/heap
 import arc/vm/value.{JsString}
 import gleam/string
 
-/// Parse + compile + run JS source, return the completion value.
-fn run_js(source: String) -> Result(Completion(host), String) {
+/// Parse + compile + run JS source, return the settled outcome
+/// (Ok(value) / Error(thrown)).
+fn run_js(source: String) -> Result(Result(value.JsValue, value.JsValue), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(program, sb)) ->
@@ -19,7 +19,7 @@ fn run_js(source: String) -> Result(Completion(host), String) {
           let #(h, b) = builtins.init(h)
           let #(h, global_object) = builtins.globals(b, h)
           case entry.run(template, h, b, global_object) {
-            Ok(completion) -> Ok(completion)
+            Ok(#(settled, _heap)) -> Ok(settled)
             Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
           }
         }
@@ -30,7 +30,7 @@ fn run_js(source: String) -> Result(Completion(host), String) {
 /// Run JS whose final expression is a string, return that string.
 fn eval_string(source: String) -> String {
   case run_js(source) {
-    Ok(NormalCompletion(JsString(s), _)) -> s
+    Ok(Ok(JsString(s))) -> s
     other ->
       panic as { "expected string completion, got " <> string.inspect(other) }
   }

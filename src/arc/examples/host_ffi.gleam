@@ -2,9 +2,8 @@
 ////
 //// Run with: gleam run -m arc/examples/host_ffi
 
-import arc/engine
+import arc/engine.{Returned}
 import arc/host
-import arc/vm/completion.{NormalCompletion}
 import arc/vm/state
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
@@ -27,7 +26,7 @@ pub fn main() -> Nil {
     try { mapRange(3, 'not a fn') } catch (e) { print(e.message) }
     "
 
-  let assert Ok(#(NormalCompletion(..), _)) = engine.eval(eng, source)
+  let assert Ok(#(Returned(_), _)) = engine.eval(eng, source)
   Nil
 }
 

@@ -1,6 +1,5 @@
-import arc/engine
+import arc/engine.{Returned}
 import arc/vm/builtins/console
-import arc/vm/completion.{NormalCompletion}
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
 import gleam/option.{Some}
 
@@ -10,7 +9,7 @@ import gleam/option.{Some}
 
 /// Helper: eval on engine, assert normal completion, return value.
 fn assert_eval(eng: engine.Engine(host), source: String) -> value.JsValue {
-  let assert Ok(#(NormalCompletion(value:, ..), _)) = engine.eval(eng, source)
+  let assert Ok(#(Returned(value:), _)) = engine.eval(eng, source)
   value
 }
 
@@ -117,7 +116,7 @@ pub fn serialize_preserves_mutable_closure_test() {
   let restored = roundtrip(eng)
   assert assert_eval(restored, "count") == JsNumber(Finite(3.0))
   // calling inc again on the restored engine should continue from 3
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(restored, "inc()")
   assert value == JsNumber(Finite(4.0))
 }
@@ -234,7 +233,7 @@ pub fn define_fn_callable_from_js_test() {
       }
     })
 
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "double(21)")
   assert value == JsNumber(Finite(42.0))
 }
@@ -246,7 +245,7 @@ pub fn define_fn_has_name_and_length_test() {
       #(state, Ok(JsUndefined))
     })
 
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "myFunc.name + ':' + myFunc.length")
   assert value == JsString("myFunc:3")
 }
@@ -272,7 +271,7 @@ pub fn define_namespace_creates_object_with_methods_test() {
       }),
     ])
 
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "math2.square(4) + math2.cube(2)")
   assert value == JsNumber(Finite(24.0))
 }
@@ -286,7 +285,7 @@ pub fn define_namespace_has_tostringtag_test() {
       #("noop", 0, fn(_args, _this, state) { #(state, Ok(JsUndefined)) }),
     ])
 
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "Object.prototype.toString.call(widgets)")
   assert value == JsString("[object widgets]")
 }
@@ -296,7 +295,7 @@ pub fn define_global_installs_value_test() {
     engine.new()
     |> engine.define_global("MY_CONST", JsString("hello"))
 
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "MY_CONST + ' world'")
   assert value == JsString("hello world")
 }
@@ -311,7 +310,7 @@ pub fn host_fn_receives_this_test() {
       }
     })
 
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "whoami.call('abc')")
   assert value == JsString("this=abc")
 }
@@ -323,7 +322,7 @@ pub fn host_fn_can_throw_test() {
       #(state, Error(JsString("kaboom")))
     })
 
-  let assert Ok(#(NormalCompletion(value:, ..), _)) =
+  let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "try { boom() } catch (e) { 'caught:' + e }")
   assert value == JsString("caught:kaboom")
 }
@@ -374,11 +373,11 @@ pub fn call_export_threads_module_state_test() {
   let assert Some(ns) = evaluated.namespace
   let assert Some(bump) = engine.read_export(eng, ns, "bump")
 
-  let assert Ok(#(NormalCompletion(value:, ..), eng)) =
+  let assert Ok(#(Returned(value:), eng)) =
     engine.call(eng, bump, JsUndefined, [JsNumber(Finite(5.0))])
   assert value == JsNumber(Finite(5.0))
 
-  let assert Ok(#(NormalCompletion(value:, ..), _eng)) =
+  let assert Ok(#(Returned(value:), _eng)) =
     engine.call(eng, bump, JsUndefined, [JsNumber(Finite(3.0))])
   assert value == JsNumber(Finite(8.0))
 }

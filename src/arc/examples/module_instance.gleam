@@ -7,9 +7,7 @@
 //// This is the lifecycle the Dance server (otters) is built on, distilled to
 //// one file. Run with: gleam run -m arc/examples/module_instance
 
-import arc/engine
-import arc/vm/completion.{NormalCompletion, ThrowCompletion}
-import arc/vm/ops/object
+import arc/engine.{Returned, Threw}
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
 import gleam/list
@@ -43,14 +41,11 @@ pub fn main() -> Nil {
   // 3. Drive it: each call threads the heap forward, so `count` accumulates.
   list.fold(["hello", "world", "again"], eng, fn(eng, msg) {
     case engine.call(eng, receive, JsUndefined, [JsString(msg)]) {
-      Ok(#(NormalCompletion(_, _), eng)) -> eng
-      Ok(#(ThrowCompletion(val, _), eng)) -> {
-        io.println_error(
-          "receive threw: " <> object.inspect(val, engine.heap(eng)),
-        )
+      Ok(#(Returned(_), eng)) -> eng
+      Ok(#(Threw(val), eng)) -> {
+        io.println_error("receive threw: " <> engine.inspect(eng, val))
         eng
       }
-      Ok(#(_, eng)) -> eng
       Error(err) -> {
         io.println_error("receive error: " <> engine.eval_error_message(err))
         eng

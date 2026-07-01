@@ -86,12 +86,16 @@ pub fn new_repl_env(global_object: Ref) -> ReplEnv {
 /// No macrotask loop — for that, pass a driver to `run_with`.
 /// Boots with `state.default_host_hooks()` (no host capabilities); embedders
 /// that need them use `run_with_hooks`.
+///
+/// The settled outcome is `Ok(value)` for a normal top-level return and
+/// `Error(thrown)` for an uncaught throw — the only two ways a top-level run
+/// can end (see `settle`) — paired with the drained heap.
 pub fn run(
   func: FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-) -> Result(Completion(host), VmError) {
+) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
   run_with(func, heap, builtins, global_object, event_loop.finish)
 }
 
@@ -106,7 +110,7 @@ pub fn run_with(
   builtins: Builtins,
   global_object: Ref,
   finish: fn(State(host)) -> State(host),
-) -> Result(Completion(host), VmError) {
+) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
   run_with_hooks(
     func,
     heap,
@@ -131,7 +135,7 @@ pub fn run_with_hooks(
   global_object: Ref,
   host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
-) -> Result(Completion(host), VmError) {
+) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
   let executed =
     interpreter.init_state(
       func,
@@ -143,7 +147,7 @@ pub fn run_with_hooks(
     )
     |> interpreter.execute_inner()
   use #(settled, drained) <- result.map(settle(executed, finish))
-  completion_of(settled, drained.heap)
+  #(settled, drained.heap)
 }
 
 /// Run a module template with its binding cells seeded into local slots.
@@ -181,9 +185,9 @@ pub fn run_module(
     )
   case interpreter.execute_inner(state) {
     Error(vm_err) -> ModuleError(error: vm_err)
-    Ok(#(AwaitCompletion(awaited_value, h), suspended)) ->
-      drive_top_level_await(func, awaited_value, h, suspended, finish)
-    Ok(#(NormalCompletion(val, _), final_state)) -> {
+    Ok(#(AwaitCompletion(awaited_value), suspended)) ->
+      drive_top_level_await(func, awaited_value, suspended, finish)
+    Ok(#(NormalCompletion(val), final_state)) -> {
       let drained = finish(final_state)
       ModuleOk(
         value: val,
@@ -192,11 +196,11 @@ pub fn run_module(
         jobs: remaining_jobs(drained),
       )
     }
-    Ok(#(ThrowCompletion(val, _), final_state)) -> {
+    Ok(#(ThrowCompletion(val), final_state)) -> {
       let drained = finish(final_state)
       ModuleThrow(value: val, heap: drained.heap, jobs: remaining_jobs(drained))
     }
-    Ok(#(YieldCompletion(_, _), _)) ->
+    Ok(#(YieldCompletion(_), _)) ->
       panic as "YieldCompletion should not appear at module top level"
   }
 }
@@ -213,12 +217,14 @@ pub fn run_module(
 fn drive_top_level_await(
   func: FuncTemplate,
   awaited_value: JsValue,
-  h: Heap(host),
   suspended: State(host),
   finish: fn(State(host)) -> State(host),
 ) -> ModuleResult(host) {
   let #(h, promise_ref, data_ref) =
-    builtins_promise.create_promise(h, suspended.builtins.promise.prototype)
+    builtins_promise.create_promise(
+      suspended.heap,
+      suspended.builtins.promise.prototype,
+    )
   // The host always inspects this capability below — mark it handled so a
   // rejection isn't also reported as an unhandled promise rejection.
   let h = case heap.read(h, data_ref) {
@@ -327,12 +333,15 @@ fn do_remaining_jobs(
 /// Used by the REPL so var declarations and function definitions survive.
 /// Boots with `state.default_host_hooks()`; embedders that need host
 /// capabilities use `run_and_drain_repl_with`.
+///
+/// Hands back the settled outcome (`Ok(value)` / `Error(thrown)`), the drained
+/// heap, and the persistent REPL environment for the next evaluation.
 pub fn run_and_drain_repl(
   func: FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   env: ReplEnv,
-) -> Result(#(Completion(host), ReplEnv), VmError) {
+) -> Result(#(Result(JsValue, JsValue), Heap(host), ReplEnv), VmError) {
   run_and_drain_repl_with(
     func,
     heap,
@@ -358,7 +367,7 @@ pub fn run_and_drain_repl_with(
   env: ReplEnv,
   host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
-) -> Result(#(Completion(host), ReplEnv), VmError) {
+) -> Result(#(Result(JsValue, JsValue), Heap(host), ReplEnv), VmError) {
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
   let this_val = JsObject(env.global_object)
   let locals = interpreter.init_top_level_locals(func, this_val)
@@ -387,14 +396,14 @@ pub fn run_and_drain_repl_with(
       symbol_registry: drained.ctx.symbol_registry,
       realms: drained.ctx.realms,
     )
-  #(completion_of(settled, shrink_for_handoff(settled, drained)), new_env)
+  #(settled, shrink_for_handoff(settled, drained), new_env)
 }
 
 /// Heaps above this many live slots get a mark-and-sweep before being handed
-/// back inside the Completion. An allocation-heavy script (e.g. test262's
+/// back to the caller. An allocation-heavy script (e.g. test262's
 /// dst-offset-caching family allocates ~2.4M short-lived Dates) otherwise
 /// returns a heap dict of millions of dead slots; the test runner copies the
-/// Completion as a message into a worker capped at 10M words (max_heap_size),
+/// result as a message into a worker capped at 10M words (max_heap_size),
 /// and the copy alone kills the worker. Typical scripts stay far below this
 /// threshold and skip the sweep entirely.
 const handoff_gc_min_slots = 65_536
@@ -493,9 +502,10 @@ fn add_job_roots(acc: set.Set(Int), job: value.Job) -> set.Set(Int) {
 /// (cf. Node's MakeCallback, QuickJS `JS_Call` + `JS_ExecutePendingJob`).
 ///
 /// Built on the lossless `interpreter.call_root`, so it shares its shape with
-/// `run`/`run_with`: a thrown value is a `ThrowCompletion`, an engine `VmError`
-/// surfaces as `Error` (not a panic — the embedder is outside the VM and can
-/// handle it). Draining happens once, at this outermost call.
+/// `run`/`run_with`: the settled outcome is `Ok(value)` for a normal return
+/// and `Error(thrown)` for an uncaught throw, while an engine `VmError`
+/// surfaces as the outer `Error` (not a panic — the embedder is outside the VM
+/// and can handle it). Draining happens once, at this outermost call.
 ///
 /// `host_hooks` carries the embedder's host capabilities into the fresh root
 /// State (pass `state.default_host_hooks()` for none).
@@ -508,7 +518,7 @@ pub fn run_export(
   global_object: Ref,
   host_hooks: state.HostHooks,
   finish: fn(State(host)) -> State(host),
-) -> Result(Completion(host), VmError) {
+) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
   use #(settled, drained) <- result.map(settle(
     interpreter.call_root(
       callee,
@@ -521,7 +531,7 @@ pub fn run_export(
     ),
     finish,
   ))
-  completion_of(settled, drained.heap)
+  #(settled, drained.heap)
 }
 
 /// Drain microtasks/macrotasks via `finish`, then narrow a top-level completion
@@ -531,42 +541,37 @@ pub fn run_export(
 /// Yield/Await reaching here is a compiler bug; this is the single place that
 /// invariant is enforced for the whole `run*` family.
 fn settle(
-  executed: Result(#(Completion(host), State(host)), VmError),
+  executed: Result(#(Completion, State(host)), VmError),
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Result(JsValue, JsValue), State(host)), VmError) {
   use #(completion, final_state) <- result.try(executed)
   let drained = finish(final_state)
   case completion {
-    NormalCompletion(val, _) -> Ok(#(Ok(val), drained))
-    ThrowCompletion(val, _) -> Ok(#(Error(val), drained))
-    YieldCompletion(_, _) ->
+    NormalCompletion(val) -> Ok(#(Ok(val), drained))
+    ThrowCompletion(val) -> Ok(#(Error(val), drained))
+    YieldCompletion(_) ->
       panic as "YieldCompletion should not appear at top level"
-    completion.AwaitCompletion(_, _) ->
+    completion.AwaitCompletion(_) ->
       panic as "AwaitCompletion should not appear at top level"
   }
 }
 
-/// Rebuild a Completion from a settled outcome and the drained heap.
-fn completion_of(
-  settled: Result(JsValue, JsValue),
-  heap: Heap(host),
-) -> Completion(host) {
-  case settled {
-    Ok(val) -> NormalCompletion(val, heap)
-    Error(thrown) -> ThrowCompletion(thrown, heap)
-  }
-}
-
-/// Get the fulfilled value of a promise JsValue, or None if not fulfilled.
-pub fn promise_result(h: Heap(host), val: JsValue) -> Option(JsValue) {
+/// How a promise JsValue has settled: `Some(Ok(value))` if fulfilled,
+/// `Some(Error(reason))` if rejected, `None` if it is not a promise or is
+/// still pending. The Ok/Error split matters — callers asserting on a
+/// rejection must not silently accept a fulfillment with the same value.
+pub fn promise_settlement(
+  h: Heap(host),
+  val: JsValue,
+) -> Option(Result(JsValue, JsValue)) {
   use ref <- option.then(case val {
     JsObject(ref) -> Some(ref)
     _ -> None
   })
   use data_ref <- option.then(heap.read_promise_data_ref(h, ref))
   case heap.read_promise_state(h, data_ref) {
-    Some(value.PromiseFulfilled(v)) -> Some(v)
-    Some(value.PromiseRejected(r)) -> Some(r)
+    Some(value.PromiseFulfilled(v)) -> Some(Ok(v))
+    Some(value.PromiseRejected(r)) -> Some(Error(r))
     _ -> None
   }
 }

@@ -13,10 +13,10 @@
 import arc/compiler
 import arc/internal/erlang
 import arc/module
+import arc/module/graph
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
-import arc/vm/completion.{type Completion}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
@@ -28,7 +28,6 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
-import gleam/string
 
 // ----------------------------------------------------------------------------
 // Engine type
@@ -68,6 +67,23 @@ pub type EvalError(host) {
   CompileError(compiler.CompileError)
   VmError(state.VmError)
   ModuleError(module.ModuleError(host))
+}
+
+/// How a top-level run of JS ended, once every VM-internal state has been
+/// driven to rest: the script (or called function) returned a value, or it
+/// threw one.
+///
+/// These are the only two ways a settled top-level run can end — the entry
+/// layer proves that before handing the result back (an internal Yield/Await
+/// completion escaping to the top is a compiler bug and panics there). Keeping
+/// the public boundary at exactly two variants means an embedder never has to
+/// write a dead "unexpected completion" arm.
+pub type Outcome {
+  /// Normal completion: the top-level value.
+  Returned(value: JsValue)
+  /// An uncaught exception: the thrown JS value. Render it for humans with
+  /// `format_error`.
+  Threw(error: JsValue)
 }
 
 /// The result of evaluating an ES module: the entry module's completion value
@@ -337,9 +353,9 @@ pub fn register_host_module(
 // Script evaluation
 // ----------------------------------------------------------------------------
 
-/// Parse, compile, and run a JS source string. Returns the completion
-/// (normal return value or uncaught exception) plus a new engine carrying
-/// the updated heap.
+/// Parse, compile, and run a JS source string. Returns the outcome
+/// (`Returned(value)` or `Threw(error)`) plus a new engine carrying the
+/// updated heap.
 ///
 /// Drains the microtask queue only — there is no macrotask loop in core.
 /// If your host functions use `host.suspend`, drive your own loop via
@@ -347,7 +363,7 @@ pub fn register_host_module(
 pub fn eval(
   engine: Engine(host),
   source: String,
-) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
+) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   eval_with(engine, source, event_loop.finish)
 }
 
@@ -364,7 +380,7 @@ pub fn eval_with(
   engine: Engine(host),
   source: String,
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
+) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   use #(program, sb) <- result.try(
     parser.parse(source, parser.Script)
     |> result.map_error(ParseError),
@@ -373,7 +389,7 @@ pub fn eval_with(
     compiler.compile(program, sb)
     |> result.map_error(CompileError),
   )
-  use completion <- result.map(
+  use #(settled, heap) <- result.map(
     entry.run_with_hooks(
       template,
       engine.heap,
@@ -384,7 +400,7 @@ pub fn eval_with(
     )
     |> result.map_error(VmError),
   )
-  #(completion, Engine(..engine, heap: completion_heap(completion)))
+  #(outcome_of(settled), Engine(..engine, heap:))
 }
 
 // ----------------------------------------------------------------------------
@@ -398,7 +414,7 @@ pub fn eval_with(
 /// carrying the updated heap.
 ///
 /// A module that throws at top level surfaces as `Error(ModuleError(...))`
-/// (mirroring `module.evaluate_bundle`), not a `ThrowCompletion` — read its
+/// (mirroring `module.evaluate_bundle`), not a `Threw` outcome — read its
 /// thrown value via `eval_error_message`.
 pub fn eval_module(
   engine: Engine(host),
@@ -468,14 +484,14 @@ pub fn read_export(
 /// Call a JS function value with `this` and `args`, draining microtasks. The
 /// counterpart to `eval` for a callable you already hold — e.g. a `receive`
 /// export read off a module namespace — invoked repeatedly across turns, each
-/// call threading the heap forward via the returned engine. A thrown value is a
-/// `ThrowCompletion`; an engine `VmError` is `Error(VmError(..))`.
+/// call threading the heap forward via the returned engine. A thrown value is
+/// `Threw(error)`; an engine `VmError` is `Error(VmError(..))`.
 pub fn call(
   engine: Engine(host),
   callee: JsValue,
   this: JsValue,
   args: List(JsValue),
-) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
+) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   call_with(engine, callee, this, args, event_loop.finish)
 }
 
@@ -486,8 +502,8 @@ pub fn call_with(
   this: JsValue,
   args: List(JsValue),
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(#(Completion(host), Engine(host)), EvalError(host)) {
-  use completion <- result.map(
+) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
+  use #(settled, heap) <- result.map(
     entry.run_export(
       callee,
       this,
@@ -500,7 +516,7 @@ pub fn call_with(
     )
     |> result.map_error(VmError),
   )
-  #(completion, Engine(..engine, heap: completion_heap(completion)))
+  #(outcome_of(settled), Engine(..engine, heap:))
 }
 
 // ----------------------------------------------------------------------------
@@ -535,6 +551,29 @@ pub fn deserialize(data: BitArray) -> Engine(host) {
 }
 
 // ----------------------------------------------------------------------------
+// Inspecting values
+// ----------------------------------------------------------------------------
+
+/// Render a `JsValue` produced by this engine as a human-readable string
+/// (REPL / `console.log` style), resolving heap refs against the engine's
+/// heap. Read-only — never re-enters JS (no `toString`/`valueOf` calls).
+///
+/// This is the supported way for an embedder to display values from
+/// `Returned`/`Threw`; there is no need to reach into `arc/vm/ops/object`
+/// with the raw heap.
+pub fn inspect(engine: Engine(host), value: JsValue) -> String {
+  object.inspect(value, engine.heap)
+}
+
+/// Format a thrown value (a `Threw(error)`) the way an uncaught-exception
+/// report would: `Error` instances become `"Name: message"` (or their stack),
+/// thrown strings are shown raw, anything else falls back to `inspect`.
+/// Read-only — never re-enters JS.
+pub fn format_error(engine: Engine(host), error: JsValue) -> String {
+  object.format_error(error, engine.heap)
+}
+
+// ----------------------------------------------------------------------------
 // Accessors
 // ----------------------------------------------------------------------------
 
@@ -566,51 +605,39 @@ pub fn host_hooks(engine: Engine(host)) -> state.HostHooks {
 // Helpers
 // ----------------------------------------------------------------------------
 
-fn completion_heap(c: Completion(host)) -> Heap(host) {
-  case c {
-    completion.NormalCompletion(_, h) -> h
-    completion.ThrowCompletion(_, h) -> h
-    completion.YieldCompletion(_, h) -> h
-    completion.AwaitCompletion(_, h) -> h
+/// Narrow the entry layer's settled `Result(value, thrown)` into the public
+/// `Outcome`.
+fn outcome_of(settled: Result(JsValue, JsValue)) -> Outcome {
+  case settled {
+    Ok(value) -> Returned(value)
+    Error(thrown) -> Threw(thrown)
   }
 }
 
-fn compile_error_message(err: compiler.CompileError) -> String {
-  case err {
-    compiler.BreakOutsideLoop -> "break outside loop"
-    compiler.ContinueOutsideLoop -> "continue outside loop"
-    compiler.Unsupported(desc) -> "unsupported: " <> desc
-  }
-}
-
-fn vm_error_message(err: state.VmError) -> String {
-  case err {
-    state.PcOutOfBounds(pc) -> "pc out of bounds: " <> string.inspect(pc)
-    state.StackUnderflow(op) -> "stack underflow in " <> op
-    state.Unimplemented(op) -> "unimplemented opcode: " <> op
-  }
-}
-
+/// Prefix `module.error_message`'s prose with the pipeline phase that failed.
+/// Evaluation results carry no phase label: an `EvaluationError` renders as
+/// the uncaught thrown value, and `EvaluationPending` is only reachable with a
+/// non-draining finish driver (static entry points convert pending to
+/// `EvaluationError` inside `module.evaluate_linked`).
 fn module_error_message(err: module.ModuleError(host)) -> String {
-  case err {
-    module.ParseError(m) -> "SyntaxError: " <> m
-    module.CompileError(m) -> "CompileError: " <> m
-    module.ResolutionError(m) -> "ResolutionError: " <> m
-    module.LinkError(m) -> "LinkError: " <> m
-    module.EvaluationError(val, heap) ->
-      "Uncaught " <> object.format_error(val, heap)
-    // Only reachable with a non-draining finish driver; static entry points
-    // convert pending to EvaluationError inside module.evaluate_linked.
-    module.EvaluationPending(promise_data_ref: _, heap: _) ->
-      "module evaluation never completed: top-level await promise never settled"
+  let phase = case err {
+    module.GraphError(error: graph.ParseFailed(..)) -> "SyntaxError: "
+    module.GraphError(error: graph.ResolveFailed(..))
+    | module.GraphError(error: graph.LoadFailed(..))
+    | module.ModuleNotInBundle(..) -> "ResolutionError: "
+    // A source-phase import is a link-time SyntaxError (§16.2.1.7.2).
+    module.GraphError(error: graph.SourcePhaseUnsupported(..)) -> "LinkError: "
+    module.CompileError(..) -> "CompileError: "
+    module.EvaluationError(..) | module.EvaluationPending(..) -> ""
   }
+  phase <> module.error_message(err)
 }
 
 pub fn eval_error_message(err: EvalError(host)) -> String {
   case err {
     ParseError(e) -> parser.parse_error_to_string(e)
-    CompileError(e) -> compile_error_message(e)
-    VmError(e) -> vm_error_message(e)
+    CompileError(e) -> compiler.error_message(e)
+    VmError(e) -> state.vm_error_message(e)
     ModuleError(e) -> module_error_message(e)
   }
 }
