@@ -1,4 +1,5 @@
 import arc/engine.{Returned}
+import arc/internal/erlang
 import arc/vm/builtins/console
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
 import gleam/option.{Some}
@@ -15,7 +16,36 @@ fn assert_eval(eng: engine.Engine(host), source: String) -> value.JsValue {
 
 /// Helper: serialize then deserialize an engine.
 fn roundtrip(eng: engine.Engine(host)) -> engine.Engine(host) {
-  eng |> engine.serialize |> engine.deserialize
+  let assert Ok(eng) = eng |> engine.serialize |> engine.deserialize
+  eng
+}
+
+pub fn deserialize_rejects_garbage_bytes_test() {
+  let result: Result(engine.Engine(Nil), _) =
+    engine.deserialize(<<"definitely not a snapshot":utf8>>)
+  assert result == Error(engine.MalformedBinary)
+}
+
+pub fn deserialize_rejects_unaligned_bits_test() {
+  // A BitArray that isn't even byte-aligned, let alone a serialized term.
+  let result: Result(engine.Engine(Nil), _) = engine.deserialize(<<1:size(3)>>)
+  assert result == Error(engine.MalformedBinary)
+}
+
+pub fn deserialize_rejects_foreign_term_test() {
+  // A valid external term, but not the versioned engine envelope (this is
+  // also the shape of a pre-versioned snapshot).
+  let result: Result(engine.Engine(Nil), _) =
+    engine.deserialize(erlang.term_to_binary(#(1, 2, 3)))
+  assert result == Error(engine.IncompatibleSnapshot)
+}
+
+pub fn deserialize_rejects_wrong_version_test() {
+  let result: Result(engine.Engine(Nil), _) =
+    engine.deserialize(
+      erlang.term_to_binary(#("arc-engine", 999_999, 1, 2, 3)),
+    )
+  assert result == Error(engine.IncompatibleSnapshot)
 }
 
 pub fn serialize_roundtrip_number_test() {
