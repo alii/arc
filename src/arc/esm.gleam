@@ -2,7 +2,7 @@
 //// ImportEntries / ExportEntries / ModuleRequests (§16.2.1.2), with no
 //// dependency on the compiler or VM. This is the layer to build module-graph
 //// tooling on (bundlers, dev servers, linters): parse with `arc/parser`,
-//// then `analyze` (or `imports`/`exports` à la carte) for the metadata.
+//// then `analyze` for the metadata.
 //// `arc/module/graph` composes this with a host resolver into a full graph
 //// walk, and the runtime's `arc/module.compile_bundle` builds on the same
 //// layers.
@@ -218,34 +218,6 @@ fn merge_requests(requests: List(ModuleRequest)) -> List(ModuleRequest) {
         )
     }
   })
-}
-
-/// Import bindings from a module AST, in source order:
-/// (raw_specifier, [(imported_name, local_name)]).
-pub fn imports(program: ast.Program) -> List(#(String, List(ImportBinding))) {
-  case program {
-    ast.Script(_) -> []
-    ast.Module(body) ->
-      list.filter_map(body, fn(item) {
-        case item {
-          ast.ImportDeclaration(
-            specifiers:,
-            source: ast.StringLit(source),
-            phase:,
-            ..,
-          ) -> Ok(#(source, declaration_bindings(specifiers, phase)))
-          _ -> Error(Nil)
-        }
-      })
-  }
-}
-
-/// Export entries from a module AST, in source order.
-pub fn exports(program: ast.Program) -> List(ExportEntry) {
-  case program {
-    ast.Script(_) -> []
-    ast.Module(body) -> list.flat_map(body, export_entries)
-  }
 }
 
 /// The bindings of one import declaration, at the declaration's phase.

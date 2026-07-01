@@ -1385,25 +1385,6 @@ fn scan_regex_flags(
   }
 }
 
-/// Split a pre-tokenized regex value like "/pattern/flags" into (pattern, flags).
-pub fn split_regex_value(raw: String) -> #(String, String) {
-  // Strip leading /
-  let body = string.drop_start(raw, 1)
-  // Split on "/" and rejoin all but the last segment as the pattern
-  let parts = string.split(body, "/")
-  case parts {
-    [single] -> #(single, "")
-    _ -> {
-      let assert Ok(flags) = list.last(parts)
-      let pattern =
-        parts
-        |> list.take(list.length(parts) - 1)
-        |> string.join("/")
-      #(pattern, flags)
-    }
-  }
-}
-
 // ---- Unicode property escapes (\p{...} / \P{...}) ----
 
 /// Result of looking up a property name against the ECMA-262 tables

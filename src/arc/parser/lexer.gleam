@@ -24,11 +24,12 @@ pub type Token {
 }
 
 pub type TokenKind {
-  // Literals
+  // Literals. Regex literals never get their own kind: the lexer emits
+  // `Slash`/`SlashEqual` and the parser re-lexes the source as a regex when
+  // one is grammatically possible (see `parse_regex_literal`).
   Number
   KString
   TemplateLiteral
-  RegularExpression
 
   // Identifiers & keywords
   Identifier
@@ -144,14 +145,18 @@ pub type TokenKind {
   Illegal
 }
 
+/// The failures the lexer treats as hard errors — every variant here aborts
+/// the whole lex. The lexer is deliberately lenient about anything a regex
+/// body could legally contain (the parser re-scans regex literals from
+/// source): an unexpected character, an unterminated string or template, and
+/// an identifier glued onto a numeric literal all become `Illegal` tokens
+/// instead, so the surrounding source still lexes and the PARSER rejects any
+/// stray `Illegal` it actually reaches outside a regex position.
 pub type LexError {
   UnterminatedBlockComment(pos: Int)
-  UnexpectedCharacter(char: String, pos: Int)
   InvalidEscapeSequence(pos: Int)
   InvalidHexEscapeSequence(pos: Int)
   InvalidUnicodeEscapeSequence(pos: Int)
-  UnterminatedStringLiteral(pos: Int)
-  UnterminatedTemplateLiteral(pos: Int)
   ExpectedExponentDigits(pos: Int)
   ExpectedHexDigits(pos: Int)
   ExpectedOctalDigits(pos: Int)
@@ -160,7 +165,6 @@ pub type LexError {
   ConsecutiveNumericSeparator(pos: Int)
   LeadingNumericSeparator(pos: Int)
   TrailingNumericSeparator(pos: Int)
-  IdentifierAfterNumericLiteral(pos: Int)
   InvalidBigIntLiteral(pos: Int)
   HtmlCommentInModule(pos: Int)
 }
@@ -168,12 +172,9 @@ pub type LexError {
 pub fn lex_error_to_string(error: LexError) -> String {
   case error {
     UnterminatedBlockComment(_) -> "Unterminated block comment"
-    UnexpectedCharacter(char:, ..) -> "Unexpected character: " <> char
     InvalidEscapeSequence(_) -> "Invalid escape sequence"
     InvalidHexEscapeSequence(_) -> "Invalid hexadecimal escape sequence"
     InvalidUnicodeEscapeSequence(_) -> "Invalid Unicode escape sequence"
-    UnterminatedStringLiteral(_) -> "Unterminated string literal"
-    UnterminatedTemplateLiteral(_) -> "Unterminated template literal"
     ExpectedExponentDigits(_) -> "Expected digits after exponent indicator"
     ExpectedHexDigits(_) -> "Expected hex digits after 0x"
     ExpectedOctalDigits(_) -> "Expected octal digits after 0o"
@@ -184,8 +185,6 @@ pub fn lex_error_to_string(error: LexError) -> String {
     LeadingNumericSeparator(_) ->
       "Numeric separator can not be used after leading 0"
     TrailingNumericSeparator(_) -> "Trailing numeric separator"
-    IdentifierAfterNumericLiteral(_) ->
-      "Identifier starts immediately after numeric literal"
     InvalidBigIntLiteral(_) ->
       "Invalid BigInt literal: legacy octal and leading-zero literals cannot be BigInts"
     HtmlCommentInModule(_) -> "HTML comments are not allowed in module code"
@@ -195,12 +194,9 @@ pub fn lex_error_to_string(error: LexError) -> String {
 pub fn lex_error_pos(error: LexError) -> Int {
   case error {
     UnterminatedBlockComment(pos:) -> pos
-    UnexpectedCharacter(pos:, ..) -> pos
     InvalidEscapeSequence(pos:) -> pos
     InvalidHexEscapeSequence(pos:) -> pos
     InvalidUnicodeEscapeSequence(pos:) -> pos
-    UnterminatedStringLiteral(pos:) -> pos
-    UnterminatedTemplateLiteral(pos:) -> pos
     ExpectedExponentDigits(pos:) -> pos
     ExpectedHexDigits(pos:) -> pos
     ExpectedOctalDigits(pos:) -> pos
@@ -209,7 +205,6 @@ pub fn lex_error_pos(error: LexError) -> Int {
     ConsecutiveNumericSeparator(pos:) -> pos
     LeadingNumericSeparator(pos:) -> pos
     TrailingNumericSeparator(pos:) -> pos
-    IdentifierAfterNumericLiteral(pos:) -> pos
     InvalidBigIntLiteral(pos:) -> pos
     HtmlCommentInModule(pos:) -> pos
   }
@@ -519,8 +514,8 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
           // Try reading as identifier with unicode escape (\uXXXX or \u{XXXX}).
           // If it fails (e.g. the codepoint isn't a valid identifier char),
           // fall back to Illegal spanning the full escape sequence so the
-          // lexer skips past it entirely (avoids IdentifierAfterNumericLiteral
-          // errors on sequences like \u{1ffff} inside regex bodies).
+          // lexer skips past it entirely and sequences like \u{1ffff} inside
+          // regex bodies keep lexing.
           case read_identifier(bytes, pos) {
             Ok(token) -> Ok(token)
             Error(_) -> {

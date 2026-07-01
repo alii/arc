@@ -352,8 +352,14 @@ pub fn default_analyze_opts() -> AnalyzeOpts {
 /// is known). `index` is the per-scope declaration-order counter so
 /// `finalize` can assign slots in the same order the legacy DECLARE pass
 /// would have.
+///
+/// `synthetic` is True for names the parser inserts itself (the implicit
+/// `arguments` placeholder, `*default*`, class-body helper consts, param
+/// shims, …) rather than at a user declaration site. Its one consumer is
+/// `sb_only_implicit_arguments`, which needs to tell the implicit
+/// `arguments` VarBinding apart from a user-written `var arguments`.
 pub type RawBinding {
-  RawBinding(kind: BindingKind, declared_at: Option(Int), index: Int)
+  RawBinding(kind: BindingKind, synthetic: Bool, index: Int)
 }
 
 /// What syntactic construct caused a scope to be pushed. Recorded so the
@@ -630,7 +636,7 @@ pub fn sb_declare(
   sb: ScopeBuilder,
   name: String,
   kind: BindingKind,
-  declared_at: Option(Int),
+  synthetic synthetic: Bool,
 ) -> ScopeBuilder {
   let target_id = case kind {
     VarBinding -> sb_var_target(sb)
@@ -641,7 +647,7 @@ pub fn sb_declare(
     | CaptureBinding
     | FnNameBinding -> sb.current
   }
-  sb_declare_in(sb, target_id, name, kind, declared_at)
+  sb_declare_in(sb, target_id, name, kind, synthetic:)
 }
 
 /// The scope a `var` (or hoisted function name) declared at `sb.current`
@@ -672,10 +678,10 @@ fn sb_var_target(sb: ScopeBuilder) -> ScopeId {
 pub fn sb_declare_var(
   sb: ScopeBuilder,
   name: String,
-  declared_at: Option(Int),
+  synthetic synthetic: Bool,
 ) -> ScopeBuilder {
   let sb = sb_mark_hoisted_var(sb, sb.current, name)
-  sb_declare(sb, name, VarBinding, declared_at)
+  sb_declare(sb, name, VarBinding, synthetic:)
 }
 
 /// Fold `step` over the parent chain starting at `from`, visiting each
@@ -791,7 +797,7 @@ pub fn sb_declare_in(
   scope_id: ScopeId,
   name: String,
   kind: BindingKind,
-  declared_at: Option(Int),
+  synthetic synthetic: Bool,
 ) -> ScopeBuilder {
   let scope = sb_scope(sb, scope_id)
   case dict.has_key(scope.bindings, name) {
@@ -804,7 +810,7 @@ pub fn sb_declare_in(
           bindings: dict.insert(
             scope.bindings,
             name,
-            RawBinding(kind:, declared_at:, index: idx),
+            RawBinding(kind:, synthetic:, index: idx),
           ),
           next_binding_index: idx + 1,
         )
@@ -868,7 +874,7 @@ fn insert_param_shims_loop(
         dict.insert(
           bindings,
           param_shim(i),
-          RawBinding(kind: ParamBinding, declared_at: None, index: i),
+          RawBinding(kind: ParamBinding, synthetic: True, index: i),
         ),
         i + 1,
         count,
@@ -1245,8 +1251,8 @@ fn sb_boundary_param_conflict(
 
 /// True when the only thing in the current scope blocking a
 /// `let arguments` is the implicit `arguments` placeholder the parser
-/// records BEFORE parsing a function body (VarBinding,
-/// declared_at: None). Legacy `declare_var_boundary_body` records the
+/// records BEFORE parsing a function body (a synthetic VarBinding).
+/// Legacy `declare_var_boundary_body` records the
 /// implicit binding first and `add_binding` first-wins, so a later
 /// `let arguments` is a silent no-op leaving kind=VarBinding — never
 /// an early error. The parser uses this to exempt that case from
@@ -1259,7 +1265,7 @@ pub fn sb_only_implicit_arguments(sb: ScopeBuilder, name: String) -> Bool {
   let scope = sb_scope(sb, sb.current)
   use <- bool.guard(set.contains(scope.hoisted_vars, name), False)
   case dict.get(scope.bindings, name) {
-    Ok(RawBinding(kind: VarBinding, declared_at: None, ..)) -> True
+    Ok(RawBinding(kind: VarBinding, synthetic: True, ..)) -> True
     Ok(_) | Error(Nil) -> False
   }
 }
