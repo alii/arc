@@ -142,11 +142,11 @@ fn call_value_to_completion(
         Ok(entered) ->
           case execute_inner(entered) {
             Ok(#(comp, final_state)) ->
-              Ok(#(comp, merge_back(state, final_state, final_state.heap)))
+              Ok(#(comp, merge_back(state, final_state)))
             Error(vm_err) -> Error(vm_err)
           }
         Error(#(Thrown, thrown, post)) ->
-          Ok(#(ThrowCompletion(thrown), merge_back(state, post, post.heap)))
+          Ok(#(ThrowCompletion(thrown), merge_back(state, post)))
         Error(#(StepVmError(vm_err), _, _)) -> Error(vm_err)
         Error(#(step, _, _)) ->
           Error(Unimplemented(
@@ -215,11 +215,8 @@ fn frozen_array_slot(
 /// execution back to the parent plus the child's heap in ONE State copy
 /// instead of two. Hot: runs once per re-entrant callback (Array.prototype.map
 /// element calls, promise jobs, ...).
-fn merge_back(
-  parent: State(host),
-  child: State(host),
-  heap: Heap(host),
-) -> State(host) {
+fn merge_back(parent: State(host), child: State(host)) -> State(host) {
+  let heap = child.heap
   // Fast path: the typical callback (Array.prototype.map element call, ...)
   // touches none of the shared fields, so the child's terms are the exact
   // terms the isolated state was built from — `==` hits BEAM's
@@ -293,9 +290,9 @@ fn construct_fn_callback(
         Ok(entered) ->
           case execute_inner(entered) {
             Ok(#(NormalCompletion(val), final_state)) ->
-              Ok(#(val, merge_back(state, final_state, final_state.heap)))
+              Ok(#(val, merge_back(state, final_state)))
             Ok(#(ThrowCompletion(thrown), final_state)) ->
-              Error(#(thrown, merge_back(state, final_state, final_state.heap)))
+              Error(#(thrown, merge_back(state, final_state)))
             Ok(#(YieldCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
               panic as "Yield/Await completion during construct"
             Error(vm_err) ->
@@ -5214,7 +5211,7 @@ fn step(
                 use #(res, state) <- result.try(
                   state.rethrow(state.call(state, next_fn, iter, [arg])),
                 )
-                read_iter_result(state, res)
+                builtins_iterator.read_iter_result(state, res)
               }
             },
           )
@@ -5270,7 +5267,9 @@ fn step(
       // [result_obj, iter, ..rest]. done? → push value, pc+1 : Yielded(value).
       case state.stack {
         [res, _iter, ..rest] -> {
-          use #(done, val, state) <- result.try(read_iter_result(state, res))
+          use #(done, val, state) <- result.try(
+            builtins_iterator.read_iter_result(state, res),
+          )
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
             False -> Error(#(Yielded, val, state))
@@ -6299,30 +6298,11 @@ fn is_native_generator_next(h: Heap(host), next_fn: JsValue) -> Bool {
   }
 }
 
-/// ES IteratorComplete + IteratorValue: read {done, value} from an iterator
-/// result; TypeError if not an object.
-fn read_iter_result(
-  state: State(host),
-  res: JsValue,
-) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
-  case res {
-    JsObject(rref) -> {
-      use #(done, state) <- result.try(
-        state.rethrow(object.get_value(state, rref, Named("done"), res)),
-      )
-      use #(val, state) <- result.map(
-        state.rethrow(object.get_value(state, rref, Named("value"), res)),
-      )
-      #(value.is_truthy(done), val, state)
-    }
-    _ -> state.throw_type_error(state, "Iterator result is not an object")
-  }
-}
-
 /// §7.4.8 IteratorStep / §7.4.9 IteratorStepValue: IteratorComplete reads
 /// `done` first; when done is true, `value` is NOT read (observable — the
 /// result object's value getter must not fire). yield* keeps the plain
-/// read_iter_result above because §27.5.3.2 DOES read value when done.
+/// `builtins_iterator.read_iter_result` because §27.5.3.2 DOES read value
+/// when done.
 fn read_iter_step_result(
   state: State(host),
   res: JsValue,

@@ -20,8 +20,7 @@ import gleam/string
 // ============================================================================
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) ->
-    Result(#(completion.Completion(host), State(host)), VmError)
+  fn(State(host)) -> Result(#(completion.Completion, State(host)), VmError)
 
 import arc/vm/completion
 

@@ -25,7 +25,7 @@ import gleam/result
 // ============================================================================
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(Completion(host), State(host)), state.VmError)
+  fn(State(host)) -> Result(#(Completion, State(host)), state.VmError)
 
 pub type UnwindToCatchFn(host) =
   fn(State(host), JsValue) -> Option(State(host))
@@ -561,11 +561,11 @@ fn run_to_completion(
   execute_inner: ExecuteInnerFn(host),
 ) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   case execute_inner(resumed) {
-    Ok(#(YieldCompletion(yv, h), suspended)) -> {
+    Ok(#(YieldCompletion(yv), suspended)) -> {
       let st = save_stacks(suspended.try_stack)
       let h =
         heap.write(
-          h,
+          suspended.heap,
           gen.data_ref,
           GeneratorSlot(
             gen_state: value.SuspendedYield,
@@ -587,8 +587,13 @@ fn run_to_completion(
         ),
       ))
     }
-    Ok(#(NormalCompletion(rv, h), final_state)) -> {
-      let h = heap.write(h, gen.data_ref, gen_with_state(gen, value.Completed))
+    Ok(#(NormalCompletion(rv), final_state)) -> {
+      let h =
+        heap.write(
+          final_state.heap,
+          gen.data_ref,
+          gen_with_state(gen, value.Completed),
+        )
       Ok(#(
         True,
         rv,
@@ -599,11 +604,16 @@ fn run_to_completion(
         ),
       ))
     }
-    Ok(#(ThrowCompletion(thrown, h), _)) -> {
-      let h = heap.write(h, gen.data_ref, gen_with_state(gen, value.Completed))
+    Ok(#(ThrowCompletion(thrown), thrown_state)) -> {
+      let h =
+        heap.write(
+          thrown_state.heap,
+          gen.data_ref,
+          gen_with_state(gen, value.Completed),
+        )
       Error(#(Thrown, thrown, State(..outer, heap: h)))
     }
-    Ok(#(AwaitCompletion(_, _), _)) ->
+    Ok(#(AwaitCompletion(_), _)) ->
       Error(#(
         StepVmError(Unimplemented("await in sync generator")),
         JsUndefined,
@@ -777,13 +787,13 @@ fn process_generator_return(
           pc: fin_label,
         )
       case execute_inner(finally_state) {
-        Ok(#(NormalCompletion(_val, h2), final_state)) -> {
+        Ok(#(NormalCompletion(_val), final_state)) -> {
           // Finally completed normally — Ret hit the -1 sentinel → Done(return_val).
           // Continue processing any remaining outer finally blocks.
           let updated_gen_state =
             State(
               ..state.merge_globals(gen_state, final_state, []),
-              heap: h2,
+              heap: final_state.heap,
               try_stack: final_state.try_stack,
               stack: final_state.stack,
               locals: final_state.locals,
@@ -798,13 +808,13 @@ fn process_generator_return(
             unwind_to_catch,
           )
         }
-        Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
+        Ok(#(YieldCompletion(yielded_value), suspended)) -> {
           // Generator yielded from inside the finally block.
           // Save state so next .next() resumes inside the finally.
           let saved_try2 = save_stacks(suspended.try_stack)
           let h3 =
             heap.write(
-              h2,
+              suspended.heap,
               gen.data_ref,
               GeneratorSlot(
                 gen_state: value.SuspendedYield,
@@ -832,13 +842,17 @@ fn process_generator_return(
             ),
           )
         }
-        Ok(#(ThrowCompletion(thrown, h2), _suspended)) -> {
+        Ok(#(ThrowCompletion(thrown), thrown_state)) -> {
           // Finally block threw. Mark completed and propagate the throw.
           let h3 =
-            heap.write(h2, gen.data_ref, gen_with_state(gen, value.Completed))
+            heap.write(
+              thrown_state.heap,
+              gen.data_ref,
+              gen_with_state(gen, value.Completed),
+            )
           Error(#(Thrown, thrown, State(..outer_state, heap: h3)))
         }
-        Ok(#(AwaitCompletion(_, _), _)) ->
+        Ok(#(AwaitCompletion(_), _)) ->
           Error(#(
             StepVmError(Unimplemented("await in sync generator")),
             JsUndefined,

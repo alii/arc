@@ -41,7 +41,7 @@ import gleam/result
 import gleam/string
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(Completion(host), State(host)), state.VmError)
+  fn(State(host)) -> Result(#(Completion, State(host)), state.VmError)
 
 pub type UnwindToCatchFn(host) =
   fn(State(host), JsValue) -> Option(State(host))
@@ -238,14 +238,13 @@ fn run_body(state: State(host), run: Run(host), push_arg: Bool) -> State(host) {
         AGThrow ->
           case run.unwind_to_catch(exec_state, req.value) {
             Some(caught) -> run.execute_inner(caught)
-            None ->
-              Ok(#(ThrowCompletion(req.value, exec_state.heap), exec_state))
+            None -> Ok(#(ThrowCompletion(req.value), exec_state))
           }
         AGReturn ->
           // Inject a return: if there are finally blocks they should run.
           // For now, treat as normal completion with the return value.
           // TODO: proper finally unwinding like sync gen's process_generator_return.
-          Ok(#(NormalCompletion(req.value, exec_state.heap), exec_state))
+          Ok(#(NormalCompletion(req.value), exec_state))
       }
       handle_exec_result(state, run, exec_result)
     }
@@ -419,7 +418,7 @@ fn throw_into_gen_body(
     build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
   let exec_result = case run.unwind_to_catch(exec_state, thrown) {
     Some(caught) -> run.execute_inner(caught)
-    None -> Ok(#(ThrowCompletion(thrown, exec_state.heap), exec_state))
+    None -> Ok(#(ThrowCompletion(thrown), exec_state))
   }
   handle_exec_result(state, run, exec_result)
 }
@@ -557,11 +556,7 @@ fn delegate_done(
       // (TODO finally-unwind applies here too, same as run_body's AGReturn.)
       let exec_state =
         build_exec_state(state, gen, gen.saved_stack, gen.saved_pc)
-      handle_exec_result(
-        state,
-        run,
-        Ok(#(NormalCompletion(val, exec_state.heap), exec_state)),
-      )
+      handle_exec_result(state, run, Ok(#(NormalCompletion(val), exec_state)))
     }
   }
 }
@@ -570,14 +565,15 @@ fn delegate_done(
 fn handle_exec_result(
   outer: State(host),
   run: Run(host),
-  result: Result(#(Completion(host), State(host)), state.VmError),
+  result: Result(#(Completion, State(host)), state.VmError),
 ) -> State(host) {
   let Run(data_ref:, gen:, req:, rest_queue:, execute_inner:, unwind_to_catch:) =
     run
   case result {
-    Ok(#(YieldCompletion(value, h), suspended)) -> {
+    Ok(#(YieldCompletion(value), suspended)) -> {
       // Body yielded — save suspended state, dequeue + resolve request, loop.
-      let state = State(..state.merge_globals(outer, suspended, []), heap: h)
+      let state =
+        State(..state.merge_globals(outer, suspended, []), heap: suspended.heap)
       let state =
         save_suspended(
           state,
@@ -590,10 +586,11 @@ fn handle_exec_result(
       let state = fulfill_iter(state, req.resolve, value, False)
       resume_next(state, data_ref, execute_inner, unwind_to_catch)
     }
-    Ok(#(AwaitCompletion(value, h), suspended)) -> {
+    Ok(#(AwaitCompletion(value), suspended)) -> {
       // Body hit await — save state (still Executing), set up promise callback.
       // Do NOT dequeue — the same request stays at head until a yield/return/throw.
-      let state = State(..state.merge_globals(outer, suspended, []), heap: h)
+      let state =
+        State(..state.merge_globals(outer, suspended, []), heap: suspended.heap)
       let state =
         save_suspended(state, data_ref, gen, suspended, AGExecuting, [
           req,
@@ -601,14 +598,22 @@ fn handle_exec_result(
         ])
       setup_await(state, data_ref, value, AGResumeBody)
     }
-    Ok(#(NormalCompletion(value, h), final_state)) -> {
-      let state = State(..state.merge_globals(outer, final_state, []), heap: h)
+    Ok(#(NormalCompletion(value), final_state)) -> {
+      let state =
+        State(
+          ..state.merge_globals(outer, final_state, []),
+          heap: final_state.heap,
+        )
       let state = complete(state, data_ref, gen, rest_queue)
       let state = fulfill_iter(state, req.resolve, value, True)
       resume_next(state, data_ref, execute_inner, unwind_to_catch)
     }
-    Ok(#(ThrowCompletion(thrown, h), final_state)) -> {
-      let state = State(..state.merge_globals(outer, final_state, []), heap: h)
+    Ok(#(ThrowCompletion(thrown), final_state)) -> {
+      let state =
+        State(
+          ..state.merge_globals(outer, final_state, []),
+          heap: final_state.heap,
+        )
       let state = complete(state, data_ref, gen, rest_queue)
       let state = reject_with(state, req.reject, thrown)
       resume_next(state, data_ref, execute_inner, unwind_to_catch)
