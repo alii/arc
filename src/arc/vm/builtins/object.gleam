@@ -62,10 +62,21 @@ fn to_define_key(
 }
 
 /// The DefineKey form of an already-resolved PropKey.
+///
+/// The `display` string is NOT just for error messages: `define_key_value`
+/// hands it to proxy `defineProperty` / `getOwnPropertyDescriptor` traps as
+/// the property-key argument, and the String-exotic gOPD path compares it to
+/// "length". So it must be the exact ToPropertyKey string — never
+/// `value.key_to_string`, which is a *renderer* that strips the engine's
+/// internal private-name NUL marker and would hand traps a mangled key.
 fn prop_key_to_define_key(pk: object.PropKey) -> DefineKey {
   case pk {
     object.PkSymbol(sym) -> SymbolKey(sym)
-    object.PkString(pkey) -> StringKey(pkey, value.key_to_string(pkey))
+    object.PkString(pkey) ->
+      StringKey(pkey, case pkey {
+        Named(s) -> s
+        Index(i) -> int.to_string(i)
+      })
   }
 }
 

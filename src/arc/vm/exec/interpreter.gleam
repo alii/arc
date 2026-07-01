@@ -1137,14 +1137,14 @@ fn fast_loop(
 
     // -- Dense-array computed access -------------------------------------
     // `a[i]` reads on Array/Arguments with an integral number key: pure
-    // heap probe, no State materialization. Mirrors to_property_key's
+    // heap probe, no State materialization. Mirrors to_string_key's
     // number arm + get_value's ArrayObject/ArgumentsObject Index fast path.
     // A dict override at the index (defineProperty accessor/attributes) or
     // a hole (prototype walk) bails to the generic slow path.
     GetElem ->
       case stack {
         [value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] -> {
-          // +. 0.0 normalizes -0.0 → +0.0, same as to_property_key.
+          // +. 0.0 normalizes -0.0 → +0.0, same as to_string_key.
           let n = f +. 0.0
           let idx = float.truncate(n)
           case int.to_float(idx) == n && idx >= 0 && idx <= 4_294_967_294 {
@@ -1658,7 +1658,7 @@ fn conditional_jump(
 /// ToPropertyKey, then OrdinaryGet on base with receiver=this. When
 /// `keep_base` is True the coerced key + base + this stay under the value
 /// for the trailing PutSuperValue; the coerced key is written back as a
-/// primitive JsValue so PutSuperValue's own to_property_key fast-paths
+/// primitive JsValue so PutSuperValue's own to_string_key fast-paths
 /// with no observable side effects.
 fn get_super_value(
   state: State(host),
@@ -1668,7 +1668,7 @@ fn get_super_value(
   case state.stack {
     // Symbol keys are valid property keys (§7.1.19 ToPropertyKey step 3) —
     // e.g. super[Symbol.iterator]. Must come before the generic arm whose
-    // to_property_key would throw on symbols, and the symbol stays on the
+    // to_string_key would throw on symbols, and the symbol stays on the
     // stack as-is for the trailing PutSuperValue (no string round-trip).
     [value.JsSymbol(sym) as key, JsObject(base_ref), this_val, ..rest] -> {
       use #(val, state) <- result.map(
@@ -1682,7 +1682,7 @@ fn get_super_value(
     }
     [key, JsObject(base_ref), this_val, ..rest] -> {
       use #(pk, state) <- result.try(
-        state.rethrow(property.to_property_key(state, key)),
+        state.rethrow(property.to_string_key(state, key)),
       )
       use #(val, state) <- result.map(
         state.rethrow(object.get_value(state, base_ref, pk, this_val)),
@@ -2774,24 +2774,15 @@ fn step(
               // left = key, right = object
               case right {
                 JsObject(ref) -> {
-                  use #(result, state) <- result.map(case left {
-                    value.JsSymbol(sym) ->
-                      state.rethrow(object.has_property_stateful(
-                        state,
-                        ref,
-                        object.PkSymbol(sym),
-                      ))
-                    _ ->
-                      case property.to_property_key(state, left) {
-                        Ok(#(pk, state)) ->
-                          state.rethrow(object.has_property_stateful(
-                            state,
-                            ref,
-                            object.PkString(pk),
-                          ))
-                        Error(#(thrown, state)) ->
-                          Error(#(Thrown, thrown, state))
-                      }
+                  // §13.10.1: Let propertyKey be ? ToPropertyKey(lval), then
+                  // ? HasProperty(rval, propertyKey). to_prop_key is the full
+                  // §7.1.19 — a @@toPrimitive that resolves to a Symbol yields
+                  // PkSymbol here rather than a bogus TypeError.
+                  use #(result, state) <- result.map({
+                    use #(pk, state) <- result.try(
+                      state.rethrow(property.to_prop_key(state, left)),
+                    )
+                    state.rethrow(object.has_property_stateful(state, ref, pk))
                   })
                   State(
                     ..state,
@@ -3623,7 +3614,7 @@ fn step(
         }
         [func, key, JsObject(ref) as obj, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
+            state.rethrow(property.to_string_key(state, key)),
           )
           // DefinePropertyOrThrow (§14.3.9 step 11): redefining an existing
           // non-configurable own property — e.g. static ['prototype']() on
@@ -3684,7 +3675,7 @@ fn step(
         }
         [func, key, JsObject(ref) as obj, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
+            state.rethrow(property.to_string_key(state, key)),
           )
           // DefinePropertyOrThrow (§14.3.9): an accessor cannot replace an
           // existing non-configurable own property (static get/set
@@ -3781,7 +3772,7 @@ fn step(
                 }
                 _ -> {
                   use #(pk, state) <- result.map(
-                    state.rethrow(property.to_property_key(state, key)),
+                    state.rethrow(property.to_string_key(state, key)),
                   )
                   let #(heap, _ok) =
                     object.set_property(state.heap, ref, pk, val)
@@ -3969,7 +3960,7 @@ fn step(
                 }
                 _ -> {
                   use #(pk, state) <- result.try(
-                    state.rethrow(property.to_property_key(state, key)),
+                    state.rethrow(property.to_string_key(state, key)),
                   )
                   use #(state, success) <- result.try(
                     state.rethrow(object.delete_property_stateful(
@@ -4203,7 +4194,7 @@ fn step(
         }
         [key, JsObject(ref) as obj, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
+            state.rethrow(property.to_string_key(state, key)),
           )
           use #(val, state) <- result.map(
             state.rethrow(object.get_value(state, ref, pk, obj)),
@@ -4222,7 +4213,7 @@ fn step(
         }
         [key, receiver, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
+            state.rethrow(property.to_string_key(state, key)),
           )
           use #(val, state) <- result.map(
             state.rethrow(object.get_value_of(state, receiver, pk)),
@@ -4596,7 +4587,7 @@ fn step(
         }
         [val, key, JsObject(base_ref), this_val, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_property_key(state, key)),
+            state.rethrow(property.to_string_key(state, key)),
           )
           use #(state, ok) <- result.try(
             state.rethrow(object.set_value(state, base_ref, pk, val, this_val)),
@@ -5485,7 +5476,7 @@ fn with_has_binding(
 }
 
 /// Re-materialize an already-converted PropertyKey as a JsValue whose
-/// re-conversion through to_property_key is side-effect-free and yields the
+/// re-conversion through to_string_key is side-effect-free and yields the
 /// same key. GetElem2 leaves this on the stack so the later PutElem does not
 /// re-run a user-observable ToPropertyKey (§13.15.2: ToPropertyKey once).
 fn property_key_value(pk: value.PropertyKey) -> JsValue {
@@ -5505,7 +5496,7 @@ fn get_elem_on_primitive(
   case key {
     value.JsSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
     _ -> {
-      use #(pk, state) <- result.try(property.to_property_key(state, key))
+      use #(pk, state) <- result.try(property.to_string_key(state, key))
       object.get_value_of(state, receiver, pk)
     }
   }
@@ -5888,7 +5879,7 @@ fn build_exclusion_sets(
   case key {
     value.JsSymbol(id) -> Ok(#(pks, set.insert(syms, id), state))
     _ -> {
-      use #(pk, state) <- result.map(property.to_property_key(state, key))
+      use #(pk, state) <- result.map(property.to_string_key(state, key))
       #(set.insert(pks, pk), syms, state)
     }
   }

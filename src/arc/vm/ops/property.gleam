@@ -88,7 +88,13 @@ fn primitive_to_prop_key(
 /// only ever want the string half. A key that §7.1.19 resolves to a Symbol
 /// throws the same TypeError ToString(symbol) would — callers that need the
 /// symbol must use `to_prop_key` instead.
-pub fn to_property_key(
+///
+/// Deliberately NOT named `to_property_key`: this is not §7.1.19
+/// ToPropertyKey (that's `to_prop_key` above). Reaching for the spec name
+/// and getting this narrowing silently reintroduces the symbol-mis-routing
+/// bug (`Symbol`-valued keys rejected with "Cannot convert a Symbol value to
+/// a string") that `to_prop_key` exists to prevent.
+pub fn to_string_key(
   state: State(host),
   key: JsValue,
 ) -> Result(#(PropertyKey, State(host)), #(JsValue, State(host))) {
