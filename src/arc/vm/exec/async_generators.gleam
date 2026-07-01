@@ -613,7 +613,7 @@ fn handle_exec_result(
       let #(err, outer) =
         state.type_error_value(
           outer,
-          "async generator execution failed: " <> string.inspect(vm_err),
+          "async generator execution failed: " <> state.vm_error_message(vm_err),
         )
       let state = complete(outer, data_ref, gen, rest_queue)
       reject_with(state, req.reject, err)

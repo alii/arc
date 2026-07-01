@@ -23,7 +23,7 @@ import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/opcode
 import arc/vm/ops/object
-import arc/vm/state.{type Heap, type State, State}
+import arc/vm/state.{type Heap, type State, State, vm_error_message}
 import arc/vm/value.{
   type JsValue, type Ref, BoxSlot, JsObject, JsString, JsUndefined, ObjectSlot,
 }
@@ -1038,7 +1038,8 @@ fn eval_module_body(
         )
       {
         entry.ModuleError(error: vm_err) -> {
-          let error_val = JsString("InternalError: " <> string.inspect(vm_err))
+          let error_val =
+            JsString("InternalError: " <> vm_error_message(vm_err))
           let heap = clear_module_status(heap, global_object, specifier)
           let heap =
             write_module_error(heap, global_object, specifier, error_val)
