@@ -334,16 +334,60 @@ pub type State(host) {
   )
 }
 
-/// Thread VM-global state from a child execution back to parent.
-/// Covers job_queue, event loop state, lexical globals. Does NOT thread
-/// heap (caller handles separately since it's often further mutated).
+// -- Child-execution seed / merge --------------------------------------------
+// A child execution state (eval / Function realm, $262.evalScript,
+// ShadowRealm.prototype.evaluate, generator/async resumption, job re-entry)
+// runs with its OWN copy of the agent-wide event-loop queues. `seed_child`
+// is the ONE place that defines which queues a child inherits from its
+// caller; `merge_child` is its exact mirror, threading the same set back
+// after the child has run. Every call site must use the pair — a
+// hand-rolled field-by-field copy is how a queue gets silently reset
+// (dropping the caller's outstanding host promises, Atomics waiters, or
+// pending unhandled-rejection reports).
+
+/// Seed the agent-wide event-loop queues a child execution state must
+/// inherit from its caller: the pending job queue, the outstanding
+/// `host.suspend` promise count, the Atomics.waitAsync waiter list, and the
+/// pending unhandled-rejection list. MUST stay the mirror image of
+/// `merge_child`.
+pub fn seed_child(child: State(host), caller: State(host)) -> State(host) {
+  State(
+    ..child,
+    job_queue: caller.job_queue,
+    outstanding: caller.outstanding,
+    atomics_waiters: caller.atomics_waiters,
+    unhandled_rejections: caller.unhandled_rejections,
+  )
+}
+
+/// Thread the agent-wide event-loop queues back from a finished child
+/// execution to its caller. MUST stay the mirror image of `seed_child`.
+/// Realm-context fields (lexical globals, realms, template objects) are NOT
+/// covered — same-realm callers want `merge_globals`, while cross-realm
+/// callers (evalScript / ShadowRealm) must NOT adopt the child realm's
+/// lexical globals and so thread their ctx explicitly on top of this.
+pub fn merge_child(caller: State(host), child: State(host)) -> State(host) {
+  State(
+    ..caller,
+    job_queue: child.job_queue,
+    outstanding: child.outstanding,
+    atomics_waiters: child.atomics_waiters,
+    unhandled_rejections: child.unhandled_rejections,
+  )
+}
+
+/// Thread VM-global state from a SAME-REALM child execution back to parent:
+/// the `merge_child` event-loop set plus the realm context the child may
+/// have mutated (lexical globals, tagged-template cache, realm registry).
+/// Does NOT thread heap (caller handles separately since it's often further
+/// mutated).
 pub fn merge_globals(
   parent: State(host),
   child: State(host),
   extra_jobs: List(value.Job),
 ) -> State(host) {
   State(
-    ..parent,
+    ..merge_child(parent, child),
     ctx: RealmCtx(
       ..parent.ctx,
       lexical_globals: child.ctx.lexical_globals,
@@ -353,8 +397,6 @@ pub fn merge_globals(
       realms: child.ctx.realms,
     ),
     job_queue: job_queue.append(child.job_queue, extra_jobs),
-    outstanding: child.outstanding,
-    atomics_waiters: child.atomics_waiters,
   )
 }
 
@@ -552,29 +594,65 @@ pub fn error_header(name: String, msg: String) -> String {
   }
 }
 
-/// Core error allocator: allocate a JS error via `make`, attach a stack
+/// The kind of native JS error to allocate. Every VM-raised error goes
+/// through `alloc_error` with one of these, so the constructor intrinsic and
+/// the stack-trace header can never disagree (there is no way to pair
+/// `%RangeError%` with the name "TypeError"), and every thrown error gets a
+/// stack trace attached.
+pub type ErrorKind {
+  TypeErr
+  RangeErr
+  ReferenceErr
+  SyntaxErr
+}
+
+/// Map an ErrorKind to its heap allocator and its `name` (the first word of
+/// the stack-trace header). This is the single place the pairing exists.
+fn kind_ctor(
+  kind: ErrorKind,
+) -> #(fn(Heap(host), Builtins, String) -> #(Heap(host), JsValue), String) {
+  case kind {
+    TypeErr -> #(common.make_type_error, "TypeError")
+    RangeErr -> #(common.make_range_error, "RangeError")
+    ReferenceErr -> #(common.make_reference_error, "ReferenceError")
+    SyntaxErr -> #(common.make_syntax_error, "SyntaxError")
+  }
+}
+
+/// Core error allocator: allocate a JS error of `kind`, attach a stack
 /// trace headed by `name: msg`, and return the updated state plus the
 /// error value. All error helpers below are thin shells over this.
 fn alloc_error(
   state: State(host),
-  make: fn(Heap(host), Builtins, String) -> #(Heap(host), JsValue),
-  name: String,
+  kind: ErrorKind,
   msg: String,
 ) -> #(State(host), JsValue) {
-  let #(heap, err) = make(state.heap, state.builtins, msg)
+  alloc_error_with_builtins(state, state.builtins, kind, msg)
+}
+
+/// Like alloc_error, but allocates from an explicit realm's builtins.
+/// Cross-realm-aware natives must throw the intrinsic of the realm the
+/// native function belongs to, not the calling realm's.
+fn alloc_error_with_builtins(
+  state: State(host),
+  builtins: Builtins,
+  kind: ErrorKind,
+  msg: String,
+) -> #(State(host), JsValue) {
+  let #(make, name) = kind_ctor(kind)
+  let #(heap, err) = make(state.heap, builtins, msg)
   let state = attach_stack(State(..state, heap:), err, error_header(name, msg))
   #(state, err)
 }
 
 /// Convenience wrapper: allocate a TypeError on the heap and return it as
 /// an Error result. Shared by all builtin modules to avoid boilerplate
-/// around common.make_type_error + state threading.
+/// around error allocation + state threading.
 pub fn type_error(
   state: State(host),
   msg: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(state, err) =
-    alloc_error(state, common.make_type_error, "TypeError", msg)
+  let #(state, err) = alloc_error(state, TypeErr, msg)
   #(state, Error(err))
 }
 
@@ -582,8 +660,7 @@ pub fn range_error(
   state: State(host),
   msg: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(state, err) =
-    alloc_error(state, common.make_range_error, "RangeError", msg)
+  let #(state, err) = alloc_error(state, RangeErr, msg)
   #(state, Error(err))
 }
 
@@ -596,10 +673,21 @@ pub fn type_error_with_builtins(
   builtins: Builtins,
   msg: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_type_error(state.heap, builtins, msg)
-  let state =
-    attach_stack(State(..state, heap:), err, error_header("TypeError", msg))
+  let #(state, err) = alloc_error_with_builtins(state, builtins, TypeErr, msg)
   #(state, Error(err))
+}
+
+/// Allocate an error of `kind` from an explicit realm's builtins as the bare
+/// #(thrown, state) tuple. Cross-realm-aware natives that hand the error to
+/// something other than the throw path (e.g. rejecting a promise) use this.
+pub fn error_value_with_builtins(
+  state: State(host),
+  builtins: Builtins,
+  kind: ErrorKind,
+  msg: String,
+) -> #(JsValue, State(host)) {
+  let #(state, err) = alloc_error_with_builtins(state, builtins, kind, msg)
+  #(err, state)
 }
 
 /// Allocate a TypeError as the bare #(thrown, state) tuple used by ops-level
@@ -608,8 +696,7 @@ pub fn type_error_value(
   state: State(host),
   msg: String,
 ) -> #(JsValue, State(host)) {
-  let #(state, err) =
-    alloc_error(state, common.make_type_error, "TypeError", msg)
+  let #(state, err) = alloc_error(state, TypeErr, msg)
   #(err, state)
 }
 
@@ -619,8 +706,7 @@ pub fn range_error_value(
   state: State(host),
   msg: String,
 ) -> #(JsValue, State(host)) {
-  let #(state, err) =
-    alloc_error(state, common.make_range_error, "RangeError", msg)
+  let #(state, err) = alloc_error(state, RangeErr, msg)
   #(err, state)
 }
 
@@ -631,8 +717,17 @@ pub fn reference_error_value(
   state: State(host),
   msg: String,
 ) -> #(JsValue, State(host)) {
-  let #(state, err) =
-    alloc_error(state, common.make_reference_error, "ReferenceError", msg)
+  let #(state, err) = alloc_error(state, ReferenceErr, msg)
+  #(err, state)
+}
+
+/// Allocate a SyntaxError as the bare #(thrown, state) tuple used by ops-level
+/// results `Result(_, #(JsValue, State))` (e.g. ToBigInt on a bad string).
+pub fn syntax_error_value(
+  state: State(host),
+  msg: String,
+) -> #(JsValue, State(host)) {
+  let #(state, err) = alloc_error(state, SyntaxErr, msg)
   #(err, state)
 }
 
@@ -641,8 +736,7 @@ pub fn reference_error(
   state: State(host),
   msg: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(state, err) =
-    alloc_error(state, common.make_reference_error, "ReferenceError", msg)
+  let #(state, err) = alloc_error(state, ReferenceErr, msg)
   #(state, Error(err))
 }
 
@@ -684,6 +778,16 @@ pub type VmError {
   Unimplemented(op: String)
 }
 
+/// Canonical human-readable rendering of a `VmError`. Every layer that
+/// surfaces one to a user must go through this.
+pub fn vm_error_message(err: VmError) -> String {
+  case err {
+    PcOutOfBounds(pc) -> "pc out of bounds: " <> int.to_string(pc)
+    StackUnderflow(op) -> "stack underflow in " <> op
+    Unimplemented(op) -> "unimplemented opcode: " <> op
+  }
+}
+
 /// Signals from step() — either continue with new state, or stop.
 pub type StepResult {
   Done
@@ -704,8 +808,7 @@ pub fn throw_type_error(
   state: State(host),
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State(host))) {
-  let #(state, err) =
-    alloc_error(state, common.make_type_error, "TypeError", msg)
+  let #(state, err) = alloc_error(state, TypeErr, msg)
   Error(#(Thrown, err, state))
 }
 
@@ -714,8 +817,7 @@ pub fn throw_range_error(
   state: State(host),
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State(host))) {
-  let #(state, err) =
-    alloc_error(state, common.make_range_error, "RangeError", msg)
+  let #(state, err) = alloc_error(state, RangeErr, msg)
   Error(#(Thrown, err, state))
 }
 
@@ -724,8 +826,7 @@ pub fn throw_reference_error(
   state: State(host),
   msg: String,
 ) -> Result(a, #(StepResult, JsValue, State(host))) {
-  let #(state, err) =
-    alloc_error(state, common.make_reference_error, "ReferenceError", msg)
+  let #(state, err) = alloc_error(state, ReferenceErr, msg)
   Error(#(Thrown, err, state))
 }
 

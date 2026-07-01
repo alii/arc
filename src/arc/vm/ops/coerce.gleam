@@ -1,8 +1,7 @@
-import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/ops/object
-import arc/vm/state.{type Heap, type State, State}
+import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, BigInt, Finite, FunctionObject, Infinity, JsBigInt, JsBool,
   JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
@@ -323,8 +322,7 @@ pub fn thrown_type_error(
   state: State(host),
   msg: String,
 ) -> Result(a, #(JsValue, State(host))) {
-  let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
-  Error(#(err, State(..state, heap: h)))
+  Error(state.type_error_value(state, msg))
 }
 
 /// §7.1.13 ToBigInt (CPS): ToPrimitive(number hint), then BigInt/Boolean/
@@ -345,13 +343,12 @@ pub fn to_bigint_cps(
           case string_to_bigint(s) {
             Some(n) -> cont(n, state)
             None -> {
-              let #(heap, err) =
-                common.make_syntax_error(
-                  state.heap,
-                  state.builtins,
+              let #(err, state) =
+                state.syntax_error_value(
+                  state,
                   "Cannot convert " <> s <> " to a BigInt",
                 )
-              #(State(..state, heap:), Error(err))
+              #(state, Error(err))
             }
           }
         JsNumber(_) ->

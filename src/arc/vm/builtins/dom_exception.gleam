@@ -1,12 +1,16 @@
 import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/heap
+import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, Dispatch, DomExceptionConstructor, DomExceptionGetCode,
   ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined, Named,
+  ObjectSlot,
 }
 import gleam/int
+import gleam/option.{Some}
 
 /// WebIDL §2.8.1 DOMException — Error-like with a `name` drawn from a fixed
 /// table that maps to a legacy integer `code`. Prototype chain goes through
@@ -52,7 +56,15 @@ pub fn construct(
   use message, state <- arg_string(state, msg_arg, "")
   use name, state <- arg_string(state, name_arg, "Error")
   let #(heap, val) = alloc(state.heap, proto, name, message)
-  #(State(..state, heap:), Ok(val))
+  // DOMException is an error object: give it the same stack trace every
+  // native Error instance gets (stored in its [[ErrorData]] slot).
+  let state =
+    state.attach_stack(
+      State(..state, heap:),
+      val,
+      state.error_header(name, message),
+    )
+  #(state, Ok(val))
 }
 
 fn arg_string(
@@ -71,6 +83,9 @@ fn arg_string(
 }
 
 /// Allocate a DOMException instance with own name+message data properties.
+/// The slot kind is ErrorObject — the [[ErrorData]] internal slot (§20.5.4)
+/// — so instances hold a stack trace and satisfy Error.isError, exactly like
+/// the native Error types (see error.gleam's alloc_error_slot).
 fn alloc(
   h: Heap(host),
   proto: Ref,
@@ -78,10 +93,20 @@ fn alloc(
   message: String,
 ) -> #(Heap(host), JsValue) {
   let #(h, ref) =
-    common.alloc_pojo(h, proto, [
-      #("message", value.builtin_property(JsString(message))),
-      #("name", value.builtin_property(JsString(name))),
-    ])
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: value.ErrorObject(stack: ""),
+        properties: common.named_props([
+          #("message", value.builtin_property(JsString(message))),
+          #("name", value.builtin_property(JsString(name))),
+        ]),
+        elements: elements.new(),
+        prototype: Some(proto),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
   #(h, JsObject(ref))
 }
 

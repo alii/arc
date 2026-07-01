@@ -522,19 +522,13 @@ pub fn call_native_promise_resolve_fn(
         )
 
       use <- bool.guard(resolution == JsObject(promise_ref), {
-        let #(h, err) =
-          common.make_type_error(
-            h,
-            state.builtins,
+        let #(err, state) =
+          state.type_error_value(
+            State(..state, heap: h),
             "Chaining cycle detected for promise",
           )
 
-        let state =
-          builtins_promise.reject_promise(
-            State(..state, heap: h),
-            data_ref,
-            err,
-          )
+        let state = builtins_promise.reject_promise(state, data_ref, err)
 
         Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
       })
@@ -640,15 +634,7 @@ pub fn call_native_promise_then(
 
   use this_ref <- result.try(case this {
     JsObject(this_ref) -> Ok(this_ref)
-    _ -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "then called on non-promise",
-        )
-      Error(#(Thrown, err, State(..state, heap: h)))
-    }
+    _ -> state.throw_type_error(state, "then called on non-promise")
   })
 
   case builtins_promise.get_data_ref(state.heap, this_ref) {
@@ -1942,9 +1928,9 @@ fn do_async_from_sync(
           kind: value.AsyncFromSyncIteratorObject(sync_iter:, sync_next:),
           ..,
         )) -> Ok(#(sync_iter, sync_next))
-        _ -> afs_type_error(state, "not an Async-from-Sync Iterator")
+        _ -> coerce.thrown_type_error(state, "not an Async-from-Sync Iterator")
       }
-    _ -> afs_type_error(state, "not an Async-from-Sync Iterator")
+    _ -> coerce.thrown_type_error(state, "not an Async-from-Sync Iterator")
   })
 
   let sync_iter_val = JsObject(sync_iter)
@@ -1976,7 +1962,10 @@ fn do_async_from_sync(
     }
     AfsThrow, False -> {
       use state <- result.try(iterator_close_normal(state, sync_iter))
-      afs_type_error(state, "The iterator does not provide a 'throw' method")
+      coerce.thrown_type_error(
+        state,
+        "The iterator does not provide a 'throw' method",
+      )
     }
     _, _ -> {
       use #(result_val, state) <- result.try(state.call(
@@ -1987,7 +1976,7 @@ fn do_async_from_sync(
       ))
       use result_ref <- result.try(case result_val {
         JsObject(r) -> Ok(r)
-        _ -> afs_type_error(state, "Iterator result is not an object")
+        _ -> coerce.thrown_type_error(state, "Iterator result is not an object")
       })
       let close_on_rejection = case kind {
         AfsReturn -> False
@@ -2063,16 +2052,8 @@ fn iterator_close_normal(
   )
   case ret_result {
     JsObject(_) -> Ok(state)
-    _ -> afs_type_error(state, "Iterator result is not an object")
+    _ -> coerce.thrown_type_error(state, "Iterator result is not an object")
   }
-}
-
-fn afs_type_error(
-  state: State(host),
-  msg: String,
-) -> Result(a, #(JsValue, State(host))) {
-  let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
-  Error(#(err, State(..state, heap: h)))
 }
 
 fn alloc_closure(
@@ -2285,7 +2266,7 @@ fn from_async_closure(
       case helpers.is_callable(state.heap, mf) {
         True -> Ok(Nil)
         False ->
-          afs_type_error(
+          coerce.thrown_type_error(
             state,
             common.typeof_value(mf, state.heap) <> " is not a function",
           )
@@ -2295,7 +2276,7 @@ fn from_async_closure(
   // throws TypeError (ToObject coercion).
   use Nil <- result.try(case items {
     JsUndefined | value.JsNull ->
-      afs_type_error(
+      coerce.thrown_type_error(
         state,
         "Cannot convert "
           <> common.typeof_value(items, state.heap)
@@ -2336,7 +2317,8 @@ fn from_async_closure(
           )
           use sync_iter <- result.try(case sync_iter_val {
             JsObject(r) -> Ok(r)
-            _ -> afs_type_error(state, "The iterator is not an object")
+            _ ->
+              coerce.thrown_type_error(state, "The iterator is not an object")
           })
           // §7.4.3 step 4: nextMethod = ? Get(iterator, "next") — observable
           // once here; the wrapper's .next() reuses the cached method.
@@ -2378,7 +2360,7 @@ fn from_async_closure(
       use #(iter_val, state) <- result.try(state.call(state, method, items, []))
       use iter_ref <- result.try(case iter_val {
         JsObject(r) -> Ok(r)
-        _ -> afs_type_error(state, "The iterator is not an object")
+        _ -> coerce.thrown_type_error(state, "The iterator is not an object")
       })
       use #(next_method, state) <- result.try(object.get_value(
         state,
@@ -2414,7 +2396,7 @@ fn from_async_get_method(
       case helpers.is_callable(state.heap, method) {
         True -> Ok(#(method, state))
         False ->
-          afs_type_error(
+          coerce.thrown_type_error(
             state,
             common.typeof_value(method, state.heap) <> " is not a function",
           )
@@ -2515,7 +2497,7 @@ fn from_async_next_steps(
   // Step 3.j.ii.5: If nextResult is not an Object, throw TypeError.
   use result_ref <- result.try(case next_result {
     JsObject(r) -> Ok(r)
-    _ -> afs_type_error(state, "Iterator result is not an object")
+    _ -> coerce.thrown_type_error(state, "Iterator result is not an object")
   })
   // Step 3.j.ii.6: done = ? IteratorComplete(nextResult).
   use #(done_val, state) <- result.try(object.get_value(
@@ -2826,15 +2808,7 @@ fn from_async_array_create(
   len: Int,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case len > 4_294_967_295 {
-    True -> {
-      let #(h, err) =
-        common.make_range_error(
-          state.heap,
-          state.builtins,
-          "Invalid array length",
-        )
-      Error(#(err, State(..state, heap: h)))
-    }
+    True -> Error(state.range_error_value(state, "Invalid array length"))
     False -> {
       let #(h, ref) =
         common.alloc_array_from_elements(
@@ -2876,7 +2850,8 @@ fn from_async_define_own(
 ) -> Result(State(host), #(JsValue, State(host))) {
   use ref <- result.try(case target {
     JsObject(r) -> Ok(r)
-    _ -> afs_type_error(state, "Cannot define property on a primitive")
+    _ ->
+      coerce.thrown_type_error(state, "Cannot define property on a primitive")
   })
   let fast = case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: ArrayObject(_), properties:, extensible: True, ..)) ->
@@ -2916,7 +2891,7 @@ fn from_async_define_own(
       case ok {
         True -> Ok(state)
         False ->
-          afs_type_error(
+          coerce.thrown_type_error(
             state,
             "Cannot define property " <> int.to_string(k) <> " on object",
           )
@@ -2943,7 +2918,10 @@ fn from_async_set_length(
       case ok {
         True -> Ok(state)
         False ->
-          afs_type_error(state, "Cannot set property length, it is read-only")
+          coerce.thrown_type_error(
+            state,
+            "Cannot set property length, it is read-only",
+          )
       }
     }
     _ -> Ok(state)

@@ -1314,13 +1314,7 @@ fn range_error_op(
   state: State(host),
   msg: String,
 ) -> Result(a, #(JsValue, State(host))) {
-  let #(state, res) = state.range_error(state, msg)
-  case res {
-    Error(err) -> Error(#(err, state))
-    // state.range_error always returns Error; this arm is unreachable but
-    // keeps the case exhaustive without an assert.
-    Ok(val) -> Error(#(val, state))
-  }
+  Error(state.range_error_value(state, msg))
 }
 
 /// Pragmatic iteration bound for the generic per-index loops. ToLength allows
@@ -4213,9 +4207,16 @@ fn merge_two(
       use #(res, state) <- result.try(
         state.call(state, comparefn, JsUndefined, [l, r]),
       )
-      let cmp = case res {
-        JsNumber(Finite(n)) -> n
-        _ -> 0.0
+      // §23.1.3.30.2 CompareArrayElements step 6: v = ? ToNumber(v), then
+      // step 7: if v is NaN, return +0. ToNumber runs ToPrimitive on an
+      // object result (its valueOf may throw) and throws on Symbol/BigInt;
+      // either throw propagates out of the sort.
+      use #(num, state) <- result.try(coerce.js_to_number(state, res))
+      let cmp = case num {
+        value.Finite(n) -> n
+        value.Infinity -> 1.0
+        value.NegInfinity -> -1.0
+        value.NaN -> 0.0
       }
       case cmp <=. 0.0 {
         True -> merge_two(state, ls, right, comparefn, [l, ..acc])
@@ -4509,10 +4510,7 @@ fn fold_array(
   // Pragmatic bound: this loop has no early exit, so the step count equals
   // len — fail fast on lengths that would hang (see iteration_budget_msg).
   use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    let #(err, state) = case state.range_error(state, iteration_budget_msg) {
-      #(state, Error(err)) -> #(err, state)
-      #(state, Ok(val)) -> #(val, state)
-    }
+    let #(err, state) = state.range_error_value(state, iteration_budget_msg)
     #(state, Error(err))
   })
   fold_loop(state, arr, 0, length, cb, this_arg, initial, combine)
@@ -5145,11 +5143,8 @@ fn flatten_into(
   // Pragmatic bound: visits all length indices with no early exit
   // (see iteration_budget_msg).
   use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    let #(state, res) = state.range_error(state, iteration_budget_msg)
-    case res {
-      Error(err) -> #(state, Error(err))
-      Ok(val) -> #(state, Error(val))
-    }
+    let #(err, state) = state.range_error_value(state, iteration_budget_msg)
+    #(state, Error(err))
   })
   flatten_into_loop(state, src, 0, length, depth, acc)
 }
@@ -5181,18 +5176,14 @@ fn flatten_into_loop(
               // Step 3.c.ii: shouldFlatten = ? IsArray(element) — pierces
               // proxies to their target (§7.2.2; revoked → TypeError).
               case elem, object.is_array(state.heap, elem) {
-                JsObject(_), Error(Nil) ->
-                  case
-                    coerce.thrown_type_error(
+                JsObject(_), Error(Nil) -> {
+                  let #(thrown, state) =
+                    state.type_error_value(
                       state,
                       "Cannot perform 'IsArray' on a proxy that has been revoked",
                     )
-                  {
-                    Error(#(thrown, state)) -> #(state, Error(thrown))
-                    // thrown_type_error always returns Error; keeps the case
-                    // exhaustive without an assert.
-                    Ok(_) -> #(state, Ok(acc))
-                  }
+                  #(state, Error(thrown))
+                }
                 JsObject(sub_ref), Ok(True) -> {
                   // Step 3.c.iii.1: elementLen = ? LengthOfArrayLike(element)
                   // — an observable Get(element, "length") on proxies and
@@ -5298,18 +5289,14 @@ fn flat_map_loop(
           // Step 3.c.ii (FlattenIntoArray with mapper): shouldFlatten =
           // ? IsArray(mapped) — pierces proxies (§7.2.2; revoked → TypeError).
           case mapped, object.is_array(state.heap, mapped) {
-            JsObject(_), Error(Nil) ->
-              case
-                coerce.thrown_type_error(
+            JsObject(_), Error(Nil) -> {
+              let #(thrown, state) =
+                state.type_error_value(
                   state,
                   "Cannot perform 'IsArray' on a proxy that has been revoked",
                 )
-              {
-                Error(#(thrown, state)) -> #(state, Error(thrown))
-                // thrown_type_error always returns Error; keeps the case
-                // exhaustive without an assert.
-                Ok(_) -> #(state, Ok(acc))
-              }
+              #(state, Error(thrown))
+            }
             JsObject(sub_ref), Ok(True) -> {
               // elementLen = ? LengthOfArrayLike(mapped) — observable Get
               // of "length" on proxies / length accessors.

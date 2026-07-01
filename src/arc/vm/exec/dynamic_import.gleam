@@ -174,13 +174,12 @@ pub fn evaluate_source_import_call(
       builtins_promise.reject_promise(state, data_ref, reason)
     Ok(#(_specifier_string, state)) ->
       enqueue_import_job(state, promise_ref, data_ref, fn(state) {
-        let #(heap, err) =
-          common.make_syntax_error(
-            state.heap,
-            state.builtins,
+        let #(err, state) =
+          state.syntax_error_value(
+            state,
             "Module has no source phase representation",
           )
-        #(State(..state, heap:), Error(err))
+        #(state, Error(err))
       })
   }
   promises.return_promise(state, promise_ref, rest_stack)
@@ -334,11 +333,11 @@ fn validate_options(
         Ok(#(JsObject(attributes_ref), state)) ->
           validate_attributes(state, attributes_ref)
         Ok(#(_, state)) ->
-          thrown_type_error(state, "The 'with' option must be an object")
+          coerce.thrown_type_error(state, "The 'with' option must be an object")
       }
     }
     _ ->
-      thrown_type_error(
+      coerce.thrown_type_error(
         state,
         "The second argument to import() must be an object",
       )
@@ -374,7 +373,10 @@ fn validate_attributes(
         Error(#(thrown, state)) -> Error(#(thrown, state))
         Ok(#(JsString(_), state)) -> Ok(state)
         Ok(#(_, state)) ->
-          thrown_type_error(state, "Import attribute values must be strings")
+          coerce.thrown_type_error(
+            state,
+            "Import attribute values must be strings",
+          )
       }
     }),
   )
@@ -382,22 +384,10 @@ fn validate_attributes(
   case keys {
     [] -> Ok(state)
     [key, ..] ->
-      thrown_type_error(
+      coerce.thrown_type_error(
         state,
         "Import attribute '" <> key <> "' is not supported",
       )
-  }
-}
-
-fn thrown_type_error(
-  state: State(host),
-  msg: String,
-) -> Result(State(host), #(JsValue, State(host))) {
-  let #(state, result) = state.type_error(state, msg)
-  case result {
-    Error(err) -> Error(#(err, state))
-    // state.type_error always returns Error; keep the typechecker satisfied.
-    Ok(val) -> Error(#(val, state))
   }
 }
 

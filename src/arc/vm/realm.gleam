@@ -32,8 +32,7 @@ import gleam/string
 // ============================================================================
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) ->
-    Result(#(completion.Completion(host), State(host)), VmError)
+  fn(State(host)) -> Result(#(completion.Completion, State(host)), VmError)
 
 /// Inline of interpreter.init_top_level_locals (realm.gleam can't import
 /// interpreter — cycle). JsUndefined everywhere, then seed the `this` slot.
@@ -130,9 +129,11 @@ pub fn eval_script_native(
       )
       // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
       let locals = seed_top_level_locals(template, JsObject(realm_global))
+      // Seed the agent-wide event-loop queues (job queue, outstanding count,
+      // Atomics waiters, pending unhandled rejections) from the caller.
       let eval_state =
-        State(
-          ..new_state_fn(
+        state.seed_child(
+          new_state_fn(
             template,
             locals,
             state.heap,
@@ -144,7 +145,7 @@ pub fn eval_script_native(
             // Child realm inherits the parent's embedder host capabilities.
             state.ctx.host_hooks,
           ),
-          job_queue: state.job_queue,
+          state,
         )
       let eval_state =
         State(
@@ -161,7 +162,7 @@ pub fn eval_script_native(
         Error(vm_err) ->
           state.type_error(
             state,
-            "evalScript: VM error: " <> string.inspect(vm_err),
+            "evalScript: VM error: " <> state.vm_error_message(vm_err),
           )
         Ok(#(completion, final_eval_state)) -> {
           // Drain microtasks in the eval realm
@@ -175,13 +176,13 @@ pub fn eval_script_native(
               symbol_registry: drained.ctx.symbol_registry,
             )
           let h = heap.write(drained.heap, realm_ref, updated_realm)
-          // Propagate heap and job queue back to caller
+          // Propagate the event-loop queues, heap and cross-realm ctx back to
+          // the caller. NOT merge_globals: the child realm's lexical globals
+          // belong in its RealmSlot (written above), not in the caller's ctx.
           let state =
             State(
-              ..state,
+              ..state.merge_child(state, drained),
               heap: h,
-              job_queue: drained.job_queue,
-              outstanding: drained.outstanding,
               ctx: state.RealmCtx(
                 ..state.ctx,
                 realms: drained.ctx.realms,
@@ -189,11 +190,11 @@ pub fn eval_script_native(
               ),
             )
           case completion {
-            NormalCompletion(val, _) -> #(state, Ok(val))
-            ThrowCompletion(thrown, _) -> #(state, Error(thrown))
-            YieldCompletion(_, _) ->
+            NormalCompletion(val) -> #(state, Ok(val))
+            ThrowCompletion(thrown) -> #(state, Error(thrown))
+            YieldCompletion(_) ->
               state.type_error(state, "evalScript: unexpected yield")
-            completion.AwaitCompletion(_, _) ->
+            completion.AwaitCompletion(_) ->
               state.type_error(state, "evalScript: unexpected await")
           }
         }
@@ -382,8 +383,9 @@ fn compile_or_throw(
   cont: fn(FuncTemplate) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let throw_syntax = fn(msg) {
-    let #(heap, err) = common.make_syntax_error(state.heap, builtins, msg)
-    #(State(..state, heap:), Error(err))
+    let #(err, state) =
+      state.error_value_with_builtins(state, builtins, state.SyntaxErr, msg)
+    #(state, Error(err))
   }
   // Big sources parse+compile in a heap-sized scratch process (see
   // arc_vm_ffi:run_compile_task/2): the token list / AST / IR are large
@@ -396,7 +398,7 @@ fn compile_or_throw(
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(program, sb)) ->
           case compile(program, sb) {
-            Error(err) -> Error(string.inspect(err))
+            Error(err) -> Error(compiler.error_message(err))
             Ok(template) -> Ok(template)
           }
       }
@@ -432,27 +434,27 @@ fn run_eval(
   execute_inner: ExecuteInnerFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // Seed the agent-wide event-loop queues from the caller: merge_globals
+  // threads them back after execution, so starting from new_state's empty
+  // defaults would drop the caller's pending waiters and rejection reports
+  // and zero the outstanding host.suspend count.
   let eval_state =
     State(
-      ..new_state_fn(
-        template,
-        locals,
-        h,
-        state.builtins,
-        state.ctx.global_object,
-        state.ctx.lexical_globals,
-        state.ctx.symbol_descriptions,
-        state.ctx.symbol_registry,
-        // The eval realm inherits the caller's embedder host capabilities.
-        state.ctx.host_hooks,
+      ..state.seed_child(
+        new_state_fn(
+          template,
+          locals,
+          h,
+          state.builtins,
+          state.ctx.global_object,
+          state.ctx.lexical_globals,
+          state.ctx.symbol_descriptions,
+          state.ctx.symbol_registry,
+          // The eval realm inherits the caller's embedder host capabilities.
+          state.ctx.host_hooks,
+        ),
+        state,
       ),
-      job_queue: state.job_queue,
-      // Seed event-loop state from the caller: merge_globals threads
-      // outstanding/atomics_waiters back after execution, so starting from
-      // new_state's empty defaults would drop the caller's pending waiters
-      // and zero the outstanding host.suspend count.
-      outstanding: state.outstanding,
-      atomics_waiters: state.atomics_waiters,
       eval_env:,
     )
   let eval_state =
@@ -468,7 +470,10 @@ fn run_eval(
     )
   case execute_inner(eval_state) {
     Error(vm_err) ->
-      state.type_error(state, "eval: VM error: " <> string.inspect(vm_err))
+      state.type_error(
+        state,
+        "eval: VM error: " <> state.vm_error_message(vm_err),
+      )
     Ok(#(completion, final_state)) -> {
       // Thread VM-global state back to caller
       let merged = state.merge_globals(state, final_state, [])
@@ -485,11 +490,10 @@ fn run_eval(
           eval_env: option.or(eval_env, state.eval_env),
         )
       case completion {
-        NormalCompletion(val, _) -> #(state, Ok(val))
-        ThrowCompletion(thrown, _) -> #(state, Error(thrown))
-        YieldCompletion(_, _) ->
-          state.type_error(state, "eval: unexpected yield")
-        completion.AwaitCompletion(_, _) ->
+        NormalCompletion(val) -> #(state, Ok(val))
+        ThrowCompletion(thrown) -> #(state, Error(thrown))
+        YieldCompletion(_) -> state.type_error(state, "eval: unexpected yield")
+        completion.AwaitCompletion(_) ->
           state.type_error(state, "eval: unexpected await")
       }
     }
@@ -1008,23 +1012,6 @@ fn realm_of_function_proto(
   }
 }
 
-/// Allocate a TypeError whose prototype comes from an explicit realm's
-/// builtins (cross-realm errors must be branded for the right realm).
-fn type_error_in(
-  state: State(host),
-  b: Builtins,
-  msg: String,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_type_error(state.heap, b, msg)
-  let state =
-    state.attach_stack(
-      State(..state, heap:),
-      err,
-      state.error_header("TypeError", msg),
-    )
-  #(state, Error(err))
-}
-
 /// Run `f` with the VM's realm context switched to `realm_ref` (builtins,
 /// global object, lexical globals, symbol tables), then restore the original
 /// realm. Mutations on either side are persisted through the RealmSlot heap
@@ -1132,7 +1119,7 @@ fn get_wrapped_value(
             err_builtins,
           )
         False ->
-          type_error_in(
+          state.type_error_with_builtins(
             state,
             err_builtins,
             "value crossing the ShadowRealm boundary must be callable or primitive",
@@ -1161,7 +1148,7 @@ fn wrapped_function_create(
     })
   case copied {
     Error(_thrown) ->
-      type_error_in(
+      state.type_error_with_builtins(
         state,
         err_builtins,
         "wrapped function could not copy target name and length",
@@ -1274,7 +1261,7 @@ fn shadow_realm_evaluate(
     realm_of_function_proto(state, fn_proto)
   case shadow_realm_of(state, this) {
     Error(Nil) ->
-      type_error_in(
+      state.type_error_with_builtins(
         state,
         caller_builtins,
         "ShadowRealm.prototype.evaluate called on incompatible receiver",
@@ -1293,7 +1280,7 @@ fn shadow_realm_evaluate(
             new_state_fn,
           )
         _ ->
-          type_error_in(
+          state.type_error_with_builtins(
             state,
             caller_builtins,
             "ShadowRealm.prototype.evaluate expects a string",
@@ -1316,7 +1303,7 @@ fn do_shadow_realm_evaluate(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case read_realm(state, realm_ref) {
     Error(Nil) ->
-      type_error_in(
+      state.type_error_with_builtins(
         state,
         caller_builtins,
         "ShadowRealm: realm record missing for evaluate",
@@ -1341,9 +1328,11 @@ fn do_shadow_realm_evaluate(
         dict.merge(state.ctx.symbol_descriptions, realm.symbol_descriptions)
       let merged_registry =
         dict.merge(state.ctx.symbol_registry, realm.symbol_registry)
+      // Seed the agent-wide event-loop queues (job queue, outstanding count,
+      // Atomics waiters, pending unhandled rejections) from the caller.
       let eval_state =
-        State(
-          ..new_state_fn(
+        state.seed_child(
+          new_state_fn(
             template,
             locals,
             state.heap,
@@ -1356,7 +1345,7 @@ fn do_shadow_realm_evaluate(
             // capabilities.
             state.ctx.host_hooks,
           ),
-          job_queue: state.job_queue,
+          state,
         )
       let eval_state =
         State(
@@ -1374,7 +1363,7 @@ fn do_shadow_realm_evaluate(
           state.type_error(
             state,
             "ShadowRealm.prototype.evaluate: VM error: "
-              <> string.inspect(vm_err),
+              <> state.vm_error_message(vm_err),
           )
         Ok(#(completion, final_eval_state)) -> {
           // Drain microtasks in the shadow realm.
@@ -1387,14 +1376,15 @@ fn do_shadow_realm_evaluate(
               symbol_registry: drained.ctx.symbol_registry,
             )
           let h = heap.write(drained.heap, realm_ref, updated_realm)
+          // Propagate the event-loop queues, heap and cross-realm ctx back to
+          // the caller. NOT merge_globals: the shadow realm's lexical globals
+          // belong in its RealmSlot (written above), not in the caller's ctx.
           // The drained symbol tables are a superset of the caller's (the
           // eval was seeded with the union) — adopt them agent-wide.
           let state =
             State(
-              ..state,
+              ..state.merge_child(state, drained),
               heap: h,
-              job_queue: drained.job_queue,
-              outstanding: drained.outstanding,
               ctx: state.RealmCtx(
                 ..state.ctx,
                 realms: drained.ctx.realms,
@@ -1405,7 +1395,7 @@ fn do_shadow_realm_evaluate(
             )
           case completion {
             // Step 26: GetWrappedValue(callerRealm, result).
-            NormalCompletion(val, _) ->
+            NormalCompletion(val) ->
               get_wrapped_value(
                 state,
                 caller_realm_ref,
@@ -1415,16 +1405,16 @@ fn do_shadow_realm_evaluate(
                 val,
               )
             // Step 25: abrupt completions become the caller realm's TypeError.
-            ThrowCompletion(thrown, _) ->
-              type_error_in(
+            ThrowCompletion(thrown) ->
+              state.type_error_with_builtins(
                 state,
                 caller_builtins,
                 "ShadowRealm.prototype.evaluate threw: "
                   <> object.format_error(thrown, state.heap),
               )
-            YieldCompletion(_, _) ->
+            YieldCompletion(_) ->
               state.type_error(state, "evaluate: unexpected yield")
-            completion.AwaitCompletion(_, _) ->
+            completion.AwaitCompletion(_) ->
               state.type_error(state, "evaluate: unexpected await")
           }
         }
@@ -1500,7 +1490,7 @@ fn wrapped_function_call(
             // Step 10: any abrupt completion becomes the caller realm's
             // TypeError (the original error must not cross the boundary).
             Error(thrown) ->
-              type_error_in(
+              state.type_error_with_builtins(
                 state,
                 caller_builtins,
                 "wrapped function threw: "
@@ -1567,7 +1557,7 @@ fn shadow_realm_import_value(
     realm_of_function_proto(state, fn_proto)
   case shadow_realm_of(state, this) {
     Error(Nil) ->
-      type_error_in(
+      state.type_error_with_builtins(
         state,
         caller_builtins,
         "ShadowRealm.prototype.importValue called on incompatible receiver",
@@ -1586,16 +1576,17 @@ fn shadow_realm_import_value(
       // Step 4: exportName must already be a String (no coercion).
       case export_name {
         JsString(_) -> {
-          let #(heap, err) =
-            common.make_type_error(
-              state.heap,
+          let #(err, state) =
+            state.error_value_with_builtins(
+              state,
               caller_builtins,
+              state.TypeErr,
               "ShadowRealm.prototype.importValue: module loading is not "
                 <> "available in this host",
             )
           let #(h, promise_ref, data_ref) =
             builtins_promise.create_promise(
-              heap,
+              state.heap,
               caller_builtins.promise.prototype,
             )
           let state = State(..state, heap: h)
@@ -1603,7 +1594,7 @@ fn shadow_realm_import_value(
           #(state, Ok(JsObject(promise_ref)))
         }
         _ ->
-          type_error_in(
+          state.type_error_with_builtins(
             state,
             caller_builtins,
             "ShadowRealm.prototype.importValue: exportName must be a string",
