@@ -36,6 +36,17 @@ pub type CompileError {
   Unsupported(description: String)
 }
 
+/// Canonical human-readable rendering of a `CompileError`. Every layer that
+/// surfaces a compile error to a user (CLI, REPL, engine, module loader,
+/// realm `eval`) must go through this — mirrors `parser.parse_error_to_string`.
+pub fn error_message(err: CompileError) -> String {
+  case err {
+    BreakOutsideLoop -> "break outside loop"
+    ContinueOutsideLoop -> "continue outside loop"
+    Unsupported(desc) -> "unsupported: " <> desc
+  }
+}
+
 fn map_emit_error(error: emit.EmitError) -> CompileError {
   case error {
     emit.BreakOutsideLoop -> BreakOutsideLoop
