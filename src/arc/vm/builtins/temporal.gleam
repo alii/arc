@@ -1409,44 +1409,6 @@ fn type_error_result(
   }
 }
 
-/// Minimal ToBigInt for Temporal entry points (Instant/ZonedDateTime ctors).
-/// Numbers throw TypeError per spec; strings must parse as an integer.
-fn to_bigint(
-  state: State(host),
-  v: JsValue,
-) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  case v {
-    JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
-    JsBool(True) -> Ok(#(1, state))
-    JsBool(False) -> Ok(#(0, state))
-    JsString(s) ->
-      case parse_bigint_string(s) {
-        Some(n) -> Ok(#(n, state))
-        None -> type_error_result(state, "Cannot convert string to a BigInt")
-      }
-    JsObject(_) -> {
-      use #(prim, st) <- result.try(coerce.to_primitive(
-        state,
-        v,
-        coerce.NumberHint,
-      ))
-      case prim {
-        JsObject(_) -> type_error_result(st, "Cannot convert to BigInt")
-        _ -> to_bigint(st, prim)
-      }
-    }
-    _ -> type_error_result(state, "Cannot convert value to a BigInt")
-  }
-}
-
-fn parse_bigint_string(s: String) -> Option(Int) {
-  let s = string.trim(s)
-  case s {
-    "" -> Some(0)
-    _ -> int.parse(s) |> option.from_result
-  }
-}
-
 // ============================================================================
 // Options handling
 // ============================================================================
@@ -2811,7 +2773,7 @@ fn instant_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
+  use ns, state <- state.try_op(coerce.to_bigint(state, arg_at(args, 0)))
   case int.absolute_value(ns) <= ns_max_instant {
     False -> state.range_error(state, "epoch nanoseconds out of range")
     True -> {
@@ -2827,7 +2789,7 @@ fn zoned_date_time_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
+  use ns, state <- state.try_op(coerce.to_bigint(state, arg_at(args, 0)))
   case arg_at(args, 1) {
     JsString(tz_str) -> {
       use tz <- terr(state, case parse_time_zone_id_strict(tz_str) {
@@ -4454,7 +4416,7 @@ fn static_dispatch(
       }
     }
     TemporalInstantKind, "fromEpochNanoseconds" -> {
-      use ns, state <- state.try_op(to_bigint(state, arg_at(args, 0)))
+      use ns, state <- state.try_op(coerce.to_bigint(state, arg_at(args, 0)))
       case int.absolute_value(ns) <= ns_max_instant {
         False -> state.range_error(state, "epoch nanoseconds out of range")
         True -> {
