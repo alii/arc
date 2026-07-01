@@ -1,5 +1,6 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/completion.{
   type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
   YieldCompletion,
@@ -444,19 +445,27 @@ fn forward_delegate(
             )
           Error(#(Thrown, thrown, State(..state, heap: h)))
         }
-        Ok(#(JsObject(rref) as res, state)) -> {
-          let done = case
-            object_ops.get_value(state, rref, Named("done"), res)
-          {
-            Ok(#(d, _)) -> value.is_truthy(d)
-            Error(_) -> False
-          }
-          let #(val, state) = case
-            object_ops.get_value(state, rref, Named("value"), res)
-          {
-            Ok(#(v, s)) -> #(v, s)
-            Error(#(_, s)) -> #(JsUndefined, s)
-          }
+        Ok(#(res, state)) -> {
+          // §27.5.3.2 steps 7.a/7.b: IteratorComplete + IteratorValue on the
+          // forwarded result. Both property reads can run user getters, so
+          // thread their state; a getter throw (or a non-object result)
+          // marks the generator Completed and propagates, matching the
+          // surrounding error arms.
+          use #(done, val, state) <- result.try(
+            result.map_error(
+              builtins_iterator.read_iter_result(state, res),
+              fn(err) {
+                let #(step, thrown, state) = err
+                let h =
+                  heap.write(
+                    state.heap,
+                    gen.data_ref,
+                    gen_with_state(gen, value.Completed),
+                  )
+                #(step, thrown, State(..state, heap: h))
+              },
+            ),
+          )
           case done {
             False -> {
               // Still delegating — save state (pc stays at YieldStar, iter
@@ -492,18 +501,6 @@ fn forward_delegate(
                 execute_inner,
               )
           }
-        }
-        Ok(#(_non_obj, state)) -> {
-          let h =
-            heap.write(
-              state.heap,
-              gen.data_ref,
-              gen_with_state(gen, value.Completed),
-            )
-          state.throw_type_error(
-            State(..state, heap: h),
-            "Iterator result is not an object",
-          )
         }
       }
   }
@@ -611,7 +608,14 @@ fn run_to_completion(
           gen.data_ref,
           gen_with_state(gen, value.Completed),
         )
-      Error(#(Thrown, thrown, State(..outer, heap: h)))
+      // Merge globals from the throwing body, exactly like the Normal /
+      // Yield arms: jobs it enqueued and ctx mutations must survive the
+      // throw, not just its heap.
+      Error(#(
+        Thrown,
+        thrown,
+        State(..state.merge_globals(outer, thrown_state, []), heap: h),
+      ))
     }
     Ok(#(AwaitCompletion(_), _)) ->
       Error(#(
@@ -693,15 +697,10 @@ fn process_generator_return(
         common.create_iter_result(h, outer_state.builtins, return_val, True)
       Ok(
         State(
-          ..outer_state,
+          ..state.merge_globals(outer_state, gen_state, []),
           heap: h,
           stack: [result, ..rest_stack],
           pc: outer_state.pc + 1,
-          ctx: state.RealmCtx(
-            ..outer_state.ctx,
-            lexical_globals: gen_state.ctx.lexical_globals,
-          ),
-          job_queue: gen_state.job_queue,
         ),
       )
     }
@@ -843,14 +842,20 @@ fn process_generator_return(
           )
         }
         Ok(#(ThrowCompletion(thrown), thrown_state)) -> {
-          // Finally block threw. Mark completed and propagate the throw.
+          // Finally block threw. Mark completed and propagate the throw,
+          // merging the globals the finally body mutated (same as the
+          // Normal / Yield arms) — not just its heap.
           let h3 =
             heap.write(
               thrown_state.heap,
               gen.data_ref,
               gen_with_state(gen, value.Completed),
             )
-          Error(#(Thrown, thrown, State(..outer_state, heap: h3)))
+          Error(#(
+            Thrown,
+            thrown,
+            State(..state.merge_globals(outer_state, thrown_state, []), heap: h3),
+          ))
         }
         Ok(#(AwaitCompletion(_), _)) ->
           Error(#(
@@ -955,14 +960,21 @@ fn process_return_close_throw(
       run_to_completion(caught_state, outer_state, gen, execute_inner)
       |> alloc_iter_result(rest_stack)
     None -> {
-      // No catch handler — mark completed and propagate the throw.
+      // No catch handler — mark completed and propagate the throw. The
+      // iterator-close call that produced `thrown` ran user code in
+      // gen_state (getter / return() body), so merge its globals — not
+      // just its heap — back into the outer state.
       let h2 =
         heap.write(
           gen_state.heap,
           gen.data_ref,
           gen_with_state(gen, value.Completed),
         )
-      Error(#(Thrown, thrown, State(..outer_state, heap: h2)))
+      Error(#(
+        Thrown,
+        thrown,
+        State(..state.merge_globals(outer_state, gen_state, []), heap: h2),
+      ))
     }
   }
 }

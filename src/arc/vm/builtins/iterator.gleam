@@ -11,7 +11,7 @@ import arc/vm/internal/elements
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
-import arc/vm/state.{type Heap, type State, State}
+import arc/vm/state.{type Heap, type State, type StepResult, State}
 import arc/vm/value.{
   type IteratorHelperKind, type IteratorNativeFn, type JsValue, type Ref,
   type ZipMember, type ZipMode, Dispatch, Finite, HelperDrop, HelperFilter,
@@ -1485,6 +1485,31 @@ fn or_close(
 // ============================================================================
 // Small helpers
 // ============================================================================
+
+/// §7.4.5 IteratorComplete + §7.4.6 IteratorValue: read {done, value} from an
+/// iterator result object; TypeError if it isn't an object. Both property reads
+/// can run user getters, so the returned State is threaded through and a getter
+/// throw propagates as a step-level Thrown. Shared by the interpreter's
+/// IteratorNext/yield* paths and the generator delegate-forwarding path.
+/// (§7.4.8 IteratorStep must NOT read `value` when done — that variant lives
+/// in interpreter.gleam as `read_iter_step_result`.)
+pub fn read_iter_result(
+  state: State(host),
+  res: JsValue,
+) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+  case res {
+    JsObject(rref) -> {
+      use #(done, state) <- result.try(
+        state.rethrow(object.get_value(state, rref, Named("done"), res)),
+      )
+      use #(val, state) <- result.map(
+        state.rethrow(object.get_value(state, rref, Named("value"), res)),
+      )
+      #(value.is_truthy(done), val, state)
+    }
+    _ -> state.throw_type_error(state, "Iterator result is not an object")
+  }
+}
 
 /// CreateIterResultObject(value, done) — adapts common helper to State result.
 fn create_iter_result(

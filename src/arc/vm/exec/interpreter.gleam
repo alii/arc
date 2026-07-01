@@ -1486,57 +1486,56 @@ fn dispatch_slow(
       // For YieldStar: pop arg (keep iter), DON'T advance pc — resume
       //   re-executes YieldStar with [resume_val, iter, ..].
       // For InitialYield: stack unchanged, just advance pc.
-      // Yield/Await handlers don't mutate stack before erroring; pc/stack
-      // surgery here is written against pre-step state.
-      let heap = post.heap
+      // The suspended state MUST spread from `post`, not the pre-step
+      // `state`: user code run by the step (iter.next / a `done`/`value`
+      // getter) may have enqueued jobs or mutated ctx globals, and spreading
+      // from `state` would silently revert them. Yield/Await handlers keep
+      // pc and the caller's stack shape, so the pc/stack surgery below is
+      // valid against `post` too.
       let suspended_state = case op {
         Yield ->
           State(
-            ..state,
-            heap:,
-            stack: case state.stack {
+            ..post,
+            stack: case post.stack {
               [_, ..rest] -> rest
               [] -> []
             },
-            pc: state.pc + 1,
+            pc: post.pc + 1,
           )
         YieldStar ->
           // Strip arg; also resolve an internal Iterator Record in the iter
-          // slot (pre-step stack still has it on the FIRST YieldStar after
-          // GetIterator) so gen.return/.throw forwarding off the saved stack
-          // sees the real iterator.
-          State(..state, heap:, stack: case state.stack {
-            [_arg, iter, ..rest] -> [
-              unwrap_iterator_record(state, iter),
-              ..rest
-            ]
+          // slot (still present on the FIRST YieldStar after GetIterator when
+          // the record has no cached-next fast path) so gen.return/.throw
+          // forwarding off the saved stack sees the real iterator.
+          State(..post, stack: case post.stack {
+            [_arg, iter, ..rest] -> [unwrap_iterator_record(post, iter), ..rest]
             [_arg] | [] -> []
           })
         AsyncYieldStarResume(next_pc:) ->
-          // Pre-step stack is [result_obj, iter, ..]. result_obj was fully
-          // consumed by step_generators (its .value is yielded_value, .done
-          // was false). Drop it so saved stack = [iter, ..]; resume pushes
-          // the .next(v) arg → [v, iter, ..] and pc jumps back to Next.
-          State(..state, heap:, pc: next_pc, stack: case state.stack {
+          // Stack is [result_obj, iter, ..]. result_obj was fully consumed
+          // by step_generators (its .value is yielded_value, .done was
+          // false). Drop it so saved stack = [iter, ..]; resume pushes the
+          // .next(v) arg → [v, iter, ..] and pc jumps back to Next.
+          State(..post, pc: next_pc, stack: case post.stack {
             [_result_obj, ..rest] -> rest
             [] -> []
           })
-        _ -> State(..state, heap:, pc: state.pc + 1)
+        _ -> State(..post, pc: post.pc + 1)
       }
       Ok(#(YieldCompletion(yielded_value), suspended_state))
     }
     Error(#(Awaited, awaited_value, post)) -> {
-      // Async function/generator hit await — pop value, advance pc.
-      let heap = post.heap
+      // Async function/generator hit await — pop value, advance pc. Spread
+      // from `post` (not the pre-step `state`) so globals mutated by the
+      // step aren't reverted; see the Yielded arm above.
       let suspended_state =
         State(
-          ..state,
-          heap:,
-          stack: case state.stack {
+          ..post,
+          stack: case post.stack {
             [_, ..rest] -> rest
             [] -> []
           },
-          pc: state.pc + 1,
+          pc: post.pc + 1,
         )
       Ok(#(AwaitCompletion(awaited_value), suspended_state))
     }
@@ -2715,38 +2714,35 @@ fn step(
         Error(_) -> {
           // Object record: try globalThis, return "undefined" if not found
           let key = Named(name)
-          let val = case
-            object.get_own_property(state.heap, state.ctx.global_object, key)
-          {
-            Some(DataProperty(value: v, ..)) -> v
-            _ ->
-              case
-                object.has_property(state.heap, state.ctx.global_object, key)
-              {
-                True ->
-                  // Property exists on proto chain — use get_value_of for correct result
-                  case
-                    object.get_value_of(
+          use #(val, state) <- result.map(
+            case
+              object.get_own_property(state.heap, state.ctx.global_object, key)
+            {
+              Some(DataProperty(value: v, ..)) -> Ok(#(v, state))
+              _ ->
+                case
+                  object.has_property(state.heap, state.ctx.global_object, key)
+                {
+                  // Property exists on the proto chain (possibly an
+                  // accessor) — get_value_of may run a user getter: thread
+                  // its state and propagate its throw, mirroring GetGlobal.
+                  True ->
+                    state.rethrow(object.get_value_of(
                       state,
                       JsObject(state.ctx.global_object),
                       key,
-                    )
-                  {
-                    Ok(#(v, _)) -> v
-                    Error(_) -> JsUndefined
-                  }
-                False -> JsUndefined
-              }
-          }
-          Ok(
-            State(
-              ..state,
-              stack: [
-                JsString(common.typeof_value(val, state.heap)),
-                ..state.stack
-              ],
-              pc: state.pc + 1,
-            ),
+                    ))
+                  False -> Ok(#(JsUndefined, state))
+                }
+            },
+          )
+          State(
+            ..state,
+            stack: [
+              JsString(common.typeof_value(val, state.heap)),
+              ..state.stack
+            ],
+            pc: state.pc + 1,
           )
         }
       }
