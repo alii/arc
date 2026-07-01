@@ -195,24 +195,27 @@ pub fn new_promise_capability(
 ///   7. Perform TriggerPromiseReactions(reactions, value).
 ///   8. Return unused.
 ///
-/// Step 1 assertion is a soft check — if not pending, we return an empty
-/// job list instead of asserting. Step 7 is deferred: instead of calling
-/// TriggerPromiseReactions directly, we return the jobs as a list for the
-/// VM's job queue to drain.
+/// Step 1 assertion is a soft check — if not pending, this is a no-op.
+/// Step 7 jobs are appended to state.job_queue (mirrors reject_promise, so
+/// no caller can settle the promise and forget to enqueue its reactions).
 pub fn fulfill_promise(
-  h: Heap(host),
+  state: state.State(host),
   data_ref: Ref,
   result_value: JsValue,
-) -> #(Heap(host), List(Job)) {
+) -> state.State(host) {
   let #(h, jobs, _is_handled) =
     settle_promise(
-      h,
+      state.heap,
       data_ref,
       result_value,
       fn(fulfill, _reject) { fulfill },
       value.PromiseFulfilled(result_value),
     )
-  #(h, jobs)
+  state.State(
+    ..state,
+    heap: h,
+    job_queue: job_queue.append(state.job_queue, jobs),
+  )
 }
 
 /// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
@@ -350,9 +353,9 @@ pub fn reject_promise(
 ///   13. If resultCapability is undefined, return undefined.
 ///   14. Return resultCapability.[[Promise]].
 ///
-/// Non-callable handlers are replaced with sentinel values (JsUndefined =
-/// identity pass-through, JsNull = thrower pass-through) rather than using
-/// the spec's "empty" concept. Jobs are appended to state.job_queue.
+/// Non-callable handlers become the explicit `IdentityPassThrough` /
+/// `ThrowerPassThrough` reaction handlers (the spec's "empty" concept).
+/// Jobs are appended to state.job_queue.
 /// Step 11c: HostPromiseRejectionTracker — untracks previously-unhandled
 /// rejections on State when a handler is attached.
 pub fn perform_promise_then(
@@ -364,15 +367,15 @@ pub fn perform_promise_then(
   child_reject: JsValue,
 ) -> state.State(host) {
   let h = state.heap
-  // §27.2.5.4 steps 3-4: If IsCallable(onFulfilled/onRejected) is false,
-  // set to undefined. We use sentinel values instead of the spec's "empty".
+  // §27.2.5.4 steps 3-6: a non-callable onFulfilled/onRejected is the
+  // spec's "empty" handler — an explicit pass-through, never a JsValue.
   let fulfill_handler = case helpers.is_callable(h, on_fulfilled) {
-    True -> on_fulfilled
-    False -> value.JsUndefined
+    True -> value.Handler(on_fulfilled)
+    False -> value.IdentityPassThrough
   }
   let reject_handler = case helpers.is_callable(h, on_rejected) {
-    True -> on_rejected
-    False -> value.JsNull
+    True -> value.Handler(on_rejected)
+    False -> value.ThrowerPassThrough
   }
   case heap.read(h, data_ref) {
     // Step 6: If promise.[[PromiseState]] is pending

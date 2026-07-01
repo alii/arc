@@ -247,7 +247,7 @@ fn enqueue_import_job(
   // PromiseReactionJob resolution is sufficient here.
   let job =
     value.PromiseReactionJob(
-      handler: JsObject(job_fn),
+      handler: value.Handler(JsObject(job_fn)),
       arg: JsUndefined,
       resolve: resolve_fn,
       reject: reject_fn,
@@ -288,7 +288,7 @@ fn enqueue_settling_import_job(
   // [[AlreadyResolved]] flag also makes any double settle a no-op.
   let job =
     value.PromiseReactionJob(
-      handler: JsObject(job_fn),
+      handler: value.Handler(JsObject(job_fn)),
       arg: JsUndefined,
       resolve: JsUndefined,
       reject: JsUndefined,

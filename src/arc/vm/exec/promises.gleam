@@ -574,16 +574,10 @@ pub fn call_native_promise_resolve_fn(
 
         Error(#(option.None, state)) -> {
           // Not a thenable — fulfill directly
-          let #(h, jobs) =
-            builtins_promise.fulfill_promise(state.heap, data_ref, resolution)
+          let state =
+            builtins_promise.fulfill_promise(state, data_ref, resolution)
 
-          State(
-            ..state,
-            heap: h,
-            stack: [JsUndefined, ..rest_stack],
-            pc: state.pc + 1,
-            job_queue: job_queue.append(state.job_queue, jobs),
-          )
+          State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1)
           |> Ok
         }
       }
@@ -911,16 +905,9 @@ fn resolve_static_intrinsic(
           // Getter threw — reject promise with the error
           builtins_promise.reject_promise(state, data_ref, thrown)
           |> return_promise(promise_ref, rest_stack)
-        Error(#(option.None, state)) -> {
-          let #(h, jobs) =
-            builtins_promise.fulfill_promise(state.heap, data_ref, val)
-          State(
-            ..state,
-            heap: h,
-            job_queue: job_queue.append(state.job_queue, jobs),
-          )
+        Error(#(option.None, state)) ->
+          builtins_promise.fulfill_promise(state, data_ref, val)
           |> return_promise(promise_ref, rest_stack)
-        }
       }
     }
   }
@@ -1823,18 +1810,10 @@ pub fn setup_await(
           builtins_promise.reject_promise(state, dr, thrown),
           dr,
         )
-        Error(#(option.None, state)) -> {
-          let #(h, jobs) =
-            builtins_promise.fulfill_promise(state.heap, dr, awaited)
-          #(
-            State(
-              ..state,
-              heap: h,
-              job_queue: job_queue.append(state.job_queue, jobs),
-            ),
-            dr,
-          )
-        }
+        Error(#(option.None, state)) -> #(
+          builtins_promise.fulfill_promise(state, dr, awaited),
+          dr,
+        )
       }
     }
   }
@@ -1950,15 +1929,11 @@ fn do_async_from_sync(
       let arg = list.first(args) |> result.unwrap(JsUndefined)
       let #(h, iter_result) =
         common.create_iter_result(state.heap, state.builtins, arg, True)
-      let #(h, jobs) =
-        builtins_promise.fulfill_promise(h, data_ref, iter_result)
-      Ok(
-        State(
-          ..state,
-          heap: h,
-          job_queue: job_queue.append(state.job_queue, jobs),
-        ),
-      )
+      Ok(builtins_promise.fulfill_promise(
+        State(..state, heap: h),
+        data_ref,
+        iter_result,
+      ))
     }
     AfsThrow, False -> {
       use state <- result.try(iterator_close_normal(state, sync_iter))
@@ -2171,15 +2146,8 @@ fn promise_resolve_then_with_capability(
         }
         Error(#(Some(thrown), state)) ->
           builtins_promise.reject_promise(state, wrap_data_ref, thrown)
-        Error(#(None, state)) -> {
-          let #(h, jobs) =
-            builtins_promise.fulfill_promise(state.heap, wrap_data_ref, inner)
-          State(
-            ..state,
-            heap: h,
-            job_queue: job_queue.append(state.job_queue, jobs),
-          )
-        }
+        Error(#(None, state)) ->
+          builtins_promise.fulfill_promise(state, wrap_data_ref, inner)
       }
       builtins_promise.perform_promise_then(
         state,

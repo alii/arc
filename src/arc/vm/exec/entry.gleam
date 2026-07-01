@@ -480,12 +480,16 @@ fn add_value_root(acc: set.Set(Int), val: JsValue) -> set.Set(Int) {
 
 fn add_job_roots(acc: set.Set(Int), job: value.Job) -> set.Set(Int) {
   case job {
-    value.PromiseReactionJob(handler:, arg:, resolve:, reject:) ->
+    value.PromiseReactionJob(handler:, arg:, resolve:, reject:) -> {
+      let acc = case handler {
+        value.Handler(fun:) -> add_value_root(acc, fun)
+        value.IdentityPassThrough | value.ThrowerPassThrough -> acc
+      }
       acc
-      |> add_value_root(handler)
       |> add_value_root(arg)
       |> add_value_root(resolve)
       |> add_value_root(reject)
+    }
     value.PromiseResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
       acc
       |> add_value_root(thenable)

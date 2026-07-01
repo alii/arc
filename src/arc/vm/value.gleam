@@ -1421,6 +1421,281 @@ pub type IntlService {
   IntlSegmentIterator
 }
 
+// ---------------------------------------------------------------------------
+// Intl per-service resolved state (ECMA-402 internal slots)
+// ---------------------------------------------------------------------------
+//
+// Each Intl service stores its resolved constructor options in a dedicated
+// record — one field per internal slot, with its real type. This replaces the
+// old `Dict(String, JsValue)` slot bag, where a mistyped key or a slot written
+// with the wrong JsValue shape silently read back as None.
+//
+// Enum-valued options (style, notation, roundingMode, …) stay `String` here;
+// they are validated against a closed value list at construction time.
+
+/// The resolved state carried by an `IntlObject`. The variant IS the brand:
+/// `Intl.NumberFormat.prototype.format` cannot be handed Collator state.
+pub type IntlData {
+  LocaleData(LocaleState)
+  CollatorData(CollatorState)
+  NumberFormatData(NumberFormatState)
+  DateTimeFormatData(DateTimeFormatState)
+  PluralRulesData(PluralRulesState)
+  ListFormatData(ListFormatState)
+  RelativeTimeFormatData(RelativeTimeFormatState)
+  SegmenterData(SegmenterState)
+  DisplayNamesData(DisplayNamesState)
+  DurationFormatData(DurationFormatState)
+  SegmentsData(SegmentsState)
+  SegmentIteratorData(SegmentIteratorState)
+}
+
+/// The service tag for a given Intl state — the two are 1:1.
+pub fn intl_service(data: IntlData) -> IntlService {
+  case data {
+    LocaleData(_) -> IntlLocale
+    CollatorData(_) -> IntlCollator
+    NumberFormatData(_) -> IntlNumberFormat
+    DateTimeFormatData(_) -> IntlDateTimeFormat
+    PluralRulesData(_) -> IntlPluralRules
+    ListFormatData(_) -> IntlListFormat
+    RelativeTimeFormatData(_) -> IntlRelativeTimeFormat
+    SegmenterData(_) -> IntlSegmenter
+    DisplayNamesData(_) -> IntlDisplayNames
+    DurationFormatData(_) -> IntlDurationFormat
+    SegmentsData(_) -> IntlSegments
+    SegmentIteratorData(_) -> IntlSegmentIterator
+  }
+}
+
+/// Intl.Locale — the canonicalized `[[Locale]]` tag. Every getter/method is
+/// derived by re-parsing it.
+pub type LocaleState {
+  LocaleState(locale: String)
+}
+
+/// Intl.Collator resolved options (§10.1.2 InitializeCollator).
+/// `bound_compare` caches the bound function returned by the `compare` getter.
+pub type CollatorState {
+  CollatorState(
+    locale: String,
+    usage: String,
+    sensitivity: String,
+    ignore_punctuation: Bool,
+    collation: String,
+    numeric: Bool,
+    case_first: String,
+    bound_compare: Option(Ref),
+  )
+}
+
+/// SetNumberFormatDigitOptions result (§15.1.6) — shared by NumberFormat and
+/// PluralRules. The fraction/significant pairs are absent when that rounding
+/// kind was not requested, and resolvedOptions omits absent pairs.
+pub type IntlDigitOptions {
+  IntlDigitOptions(
+    minimum_integer_digits: Int,
+    minimum_fraction_digits: Option(Int),
+    maximum_fraction_digits: Option(Int),
+    minimum_significant_digits: Option(Int),
+    maximum_significant_digits: Option(Int),
+    rounding_increment: Int,
+    rounding_mode: String,
+    rounding_priority: String,
+    trailing_zero_display: String,
+  )
+}
+
+/// `[[UseGrouping]]` — spec-wise either the boolean `false` or one of the
+/// strings "min2" / "auto" / "always" (a `true` option normalizes to
+/// "always"). resolvedOptions must surface `false` as a boolean.
+pub type IntlUseGrouping {
+  GroupingNever
+  GroupingMode(String)
+}
+
+/// Intl.NumberFormat resolved options (§15.1.2 InitializeNumberFormat).
+/// currency*/unit*/compact_display are only populated when the matching
+/// style/notation selects them (and are then omitted from resolvedOptions
+/// when absent). `bound_format` caches the `format` getter's bound function.
+pub type NumberFormatState {
+  NumberFormatState(
+    locale: String,
+    numbering_system: String,
+    style: String,
+    currency: Option(String),
+    currency_display: Option(String),
+    currency_sign: Option(String),
+    unit: Option(String),
+    unit_display: Option(String),
+    digits: IntlDigitOptions,
+    use_grouping: IntlUseGrouping,
+    notation: String,
+    compact_display: Option(String),
+    sign_display: String,
+    bound_format: Option(Ref),
+  )
+}
+
+/// The active DateTimeFormat formatting components — which date/time fields
+/// the output contains and in which width (§11.5 DateTimeFormat records).
+/// Each value is a validated width string ("numeric" / "2-digit" / "long" /
+/// …); `None` means the component is not part of the format.
+pub type DtfComponents {
+  DtfComponents(
+    weekday: Option(String),
+    era: Option(String),
+    year: Option(String),
+    month: Option(String),
+    day: Option(String),
+    day_period: Option(String),
+    hour: Option(String),
+    minute: Option(String),
+    second: Option(String),
+    fractional_second_digits: Option(String),
+    time_zone_name: Option(String),
+  )
+}
+
+/// A `DtfComponents` with every component absent.
+pub const empty_dtf_components = DtfComponents(
+  weekday: None,
+  era: None,
+  year: None,
+  month: None,
+  day: None,
+  day_period: None,
+  hour: None,
+  minute: None,
+  second: None,
+  fractional_second_digits: None,
+  time_zone_name: None,
+)
+
+/// Intl.DateTimeFormat resolved options (§11.1.2 CreateDateTimeFormat).
+///
+/// The `weekday` … `time_style` fields are the resolvedOptions view (the
+/// component options as the user requested them, plus locale defaults);
+/// `components` is the effective formatting table (style expansion applied,
+/// and re-derived per Temporal type at format time). The two intentionally
+/// differ once dateStyle/timeStyle is involved.
+///
+/// `explicit` names the component options the user provided explicitly —
+/// GetDateTimeFormat needs it for Temporal ~relevant~ inheritance.
+/// `tz_system` marks the host default zone: the offset is then resolved live
+/// per formatted instant instead of from `tz_offset_minutes`.
+pub type DateTimeFormatState {
+  DateTimeFormatState(
+    locale: String,
+    calendar: String,
+    numbering_system: String,
+    time_zone: String,
+    tz_offset_minutes: Int,
+    tz_system: Bool,
+    hour_cycle: Option(String),
+    weekday: Option(String),
+    era: Option(String),
+    year: Option(String),
+    month: Option(String),
+    day: Option(String),
+    day_period: Option(String),
+    hour: Option(String),
+    minute: Option(String),
+    second: Option(String),
+    fractional_second_digits: Option(Int),
+    time_zone_name: Option(String),
+    date_style: Option(String),
+    time_style: Option(String),
+    explicit: List(String),
+    components: DtfComponents,
+    bound_format: Option(Ref),
+  )
+}
+
+/// Intl.PluralRules resolved options (§16.1.2 InitializePluralRules).
+/// `compact_display` is only present for compact notation.
+pub type PluralRulesState {
+  PluralRulesState(
+    locale: String,
+    plural_type: String,
+    notation: String,
+    compact_display: Option(String),
+    digits: IntlDigitOptions,
+  )
+}
+
+/// Intl.ListFormat resolved options (§13.1.2).
+pub type ListFormatState {
+  ListFormatState(locale: String, list_type: String, style: String)
+}
+
+/// Intl.RelativeTimeFormat resolved options (§17.1.2). `numeric` here is the
+/// "always"/"auto" enum option, not a number.
+pub type RelativeTimeFormatState {
+  RelativeTimeFormatState(
+    locale: String,
+    style: String,
+    numeric: String,
+    numbering_system: String,
+  )
+}
+
+/// Intl.Segmenter resolved options (§18.1.2).
+pub type SegmenterState {
+  SegmenterState(locale: String, granularity: String)
+}
+
+/// Intl.DisplayNames resolved options (§12.1.2). `language_display` is only
+/// present for type "language".
+pub type DisplayNamesState {
+  DisplayNamesState(
+    locale: String,
+    style: String,
+    display_type: String,
+    fallback: String,
+    language_display: Option(String),
+  )
+}
+
+/// One DurationFormat unit's resolved `[[<Unit>Style]]` / `[[<Unit>Display]]`
+/// pair (GetDurationUnitOptions).
+pub type DurationUnitOptions {
+  DurationUnitOptions(style: String, display: String)
+}
+
+/// Intl.DurationFormat resolved options (Intl.DurationFormat §1.1.3), one
+/// `DurationUnitOptions` field per duration unit.
+pub type DurationFormatState {
+  DurationFormatState(
+    locale: String,
+    numbering_system: String,
+    style: String,
+    years: DurationUnitOptions,
+    months: DurationUnitOptions,
+    weeks: DurationUnitOptions,
+    days: DurationUnitOptions,
+    hours: DurationUnitOptions,
+    minutes: DurationUnitOptions,
+    seconds: DurationUnitOptions,
+    milliseconds: DurationUnitOptions,
+    microseconds: DurationUnitOptions,
+    nanoseconds: DurationUnitOptions,
+    fractional_digits: Option(Int),
+  )
+}
+
+/// %SegmentsPrototype% instance state: the segmenter's granularity plus the
+/// string being segmented.
+pub type SegmentsState {
+  SegmentsState(string: String, granularity: String)
+}
+
+/// %SegmentIteratorPrototype% instance state: a `SegmentsState` plus the
+/// UTF-16 code-unit position the next segment starts at.
+pub type SegmentIteratorState {
+  SegmentIteratorState(string: String, granularity: String, position: Int)
+}
+
 /// Identifies an Intl native function (ECMA-402).
 pub type IntlNativeFn {
   /// Intl.getCanonicalLocales(locales)
@@ -1965,16 +2240,21 @@ pub type ExoticKind(ctx, host) {
   /// After TimeClip only Finite or NaN are possible, but the type stays JsNum.
   DateObject(time_value: JsNum)
   /// Intl service instance (ECMA-402) — Intl.Locale, Intl.NumberFormat, etc.
-  /// `slots` holds the resolved internal slots ([[Locale]], [[Style]], …)
-  /// keyed by slot name; values are primitives except cached bound methods.
-  IntlObject(service: IntlService, slots: Dict(String, JsValue))
+  /// `data` holds the resolved internal slots ([[Locale]], [[Style]], …) as
+  /// a typed per-service record; `service` is always `intl_service(data)`.
+  IntlObject(service: IntlService, data: IntlData)
   /// DataView object -- ES2024 Section 25.3. [[ViewedArrayBuffer]] is `buffer`,
   /// [[ByteOffset]] is `byte_offset`. `byte_length: None` means byte-length
   /// auto-tracking (view over a resizable buffer with no explicit length).
   DataViewObject(buffer: Ref, byte_offset: Int, byte_length: option.Option(Int))
   /// Temporal.PlainDate — ISO calendar date plus calendar identifier.
-  /// year/month/day are always the ISO 8601 date; `calendar` is the
-  /// canonical calendar id (e.g. "iso8601", "gregory", "hebrew").
+  /// year/month/day are always the ISO 8601 date.
+  ///
+  /// `calendar` (here and on the other Temporal slots) is the canonical
+  /// identifier produced by `temporal_calendar.identifier` from the closed
+  /// `temporal_calendar.Calendar` type — never a raw user string. Slots are
+  /// only written via `temporal.make_*_cal`, so `temporal.slot_calendar`
+  /// can re-parse it into a `Calendar` totally.
   TemporalDateSlot(year: Int, month: Int, day: Int, calendar: String)
   /// Temporal.PlainTime — wall-clock time, nanosecond precision.
   TemporalTimeSlot(
@@ -1999,10 +2279,10 @@ pub type ExoticKind(ctx, host) {
     calendar: String,
   )
   /// Temporal.PlainYearMonth. `year`/`month`/`day` are the ISO date of the
-  /// reference day; `calendar` is the canonical calendar id.
+  /// reference day; `calendar` as on TemporalDateSlot.
   TemporalYearMonthSlot(year: Int, month: Int, day: Int, calendar: String)
   /// Temporal.PlainMonthDay. `month`/`day`/`ref_year` are the ISO date of
-  /// the reference day; `calendar` is the canonical calendar id.
+  /// the reference day; `calendar` as on TemporalDateSlot.
   TemporalMonthDaySlot(month: Int, day: Int, ref_year: Int, calendar: String)
   /// Temporal.Duration — ten integral fields, all the same sign.
   TemporalDurationSlot(
@@ -2477,6 +2757,18 @@ pub fn builtin_property(val: JsValue) -> Property {
   )
 }
 
+/// GC root tracing: prepend the heap ref held by a reaction handler's
+/// callable, if any, onto `acc`. Pass-through handlers hold no value.
+fn push_reaction_handler_ref(
+  handler: ReactionHandler,
+  acc: List(Ref),
+) -> List(Ref) {
+  case handler {
+    Handler(fun:) -> push_value_ref(fun, acc)
+    IdentityPassThrough | ThrowerPassThrough -> acc
+  }
+}
+
 /// GC root tracing: prepend heap refs reachable from a Property onto `acc`.
 fn push_property_refs(prop: Property, acc: List(Ref)) -> List(Ref) {
   case prop {
@@ -2494,11 +2786,25 @@ fn push_property_refs(prop: Property, acc: List(Ref)) -> List(Ref) {
   }
 }
 
+/// The [[Handler]] of a promise reaction (ES2024 §27.2.1.2).
+///
+/// The spec's "empty" handler (a `.then()` argument that is not callable)
+/// is a distinct case, not a JsValue: a fulfill value can legitimately be
+/// `undefined`, so it must never double as a "no handler" marker.
+pub type ReactionHandler {
+  /// A callable onFulfilled/onRejected — call it with the settled value.
+  Handler(fun: JsValue)
+  /// Empty onFulfilled: resolve the derived promise with the value as-is.
+  IdentityPassThrough
+  /// Empty onRejected: reject the derived promise with the reason as-is.
+  ThrowerPassThrough
+}
+
 /// A microtask job for the promise job queue.
 pub type Job {
-  /// Call handler(arg), then resolve/reject the child promise.
+  /// Run the reaction handler on `arg`, then resolve/reject the child promise.
   PromiseReactionJob(
-    handler: JsValue,
+    handler: ReactionHandler,
     arg: JsValue,
     resolve: JsValue,
     reject: JsValue,
@@ -2524,7 +2830,7 @@ pub type PromiseReaction {
   PromiseReaction(
     child_resolve: JsValue,
     child_reject: JsValue,
-    handler: JsValue,
+    handler: ReactionHandler,
   )
 }
 
@@ -3011,9 +3317,18 @@ fn do_refs_in_slot(
         // The namespace's live bindings are BoxSlot refs reachable via exports.
         ModuleNamespace(exports:) ->
           dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
-        // Intl instances may cache bound method function objects in slots.
-        IntlObject(slots:, ..) ->
-          dict.fold(slots, acc, fn(a, _k, v) { push_value_ref(v, a) })
+        // The only heap refs an Intl instance can hold are the cached bound
+        // `format`/`compare` function objects; everything else is scalar.
+        IntlObject(data:, ..) ->
+          case data {
+            CollatorData(CollatorState(bound_compare: Some(r), ..))
+            | NumberFormatData(NumberFormatState(bound_format: Some(r), ..))
+            | DateTimeFormatData(DateTimeFormatState(bound_format: Some(r), ..)) -> [
+              r,
+              ..acc
+            ]
+            _ -> acc
+          }
         // Ask the embedder for any engine refs reachable from the opaque
         // host value, so GC traces host objects that point back into the JS
         // heap. Pure host terms (pids, fds) return [] — the default hook.
@@ -3060,7 +3375,7 @@ fn do_refs_in_slot(
           a
           |> push_value_ref(r.child_resolve, _)
           |> push_value_ref(r.child_reject, _)
-          |> push_value_ref(r.handler, _)
+          |> push_reaction_handler_ref(r.handler, _)
         })
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
@@ -4059,7 +4374,7 @@ fn from_async_like_ctx_refs(
 /// Format a JS number as a string per ES2024 §6.1.6.1.20 Number::toString.
 /// Delegates to Erlang FFI for proper JS-compatible output (e.g., 1e21 → "1e+21",
 /// 1e-6 → "0.000001", -0 → "0").
-@external(erlang, "arc_math_ffi", "js_number_to_string")
+@external(erlang, "arc_number_ffi", "js_number_to_string")
 pub fn js_format_number(n: Float) -> String
 
 /// JS ToBoolean: https://tc39.es/ecma262/#sec-toboolean

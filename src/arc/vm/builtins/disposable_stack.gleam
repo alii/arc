@@ -1122,17 +1122,9 @@ fn attach_await(
         }
         // Step 8/12: non-object or non-callable `then` — already settled.
         Error(#(None, state)) -> {
-          // Freshly created promise has no reactions yet — no jobs produced.
-          let #(h, _jobs) =
-            builtins_promise.fulfill_promise(state.heap, data_ref, awaited)
-          attach_reactions(
-            State(..state, heap: h),
-            data_ref,
-            rest,
-            pending,
-            resolve,
-            reject,
-          )
+          let state =
+            builtins_promise.fulfill_promise(state, data_ref, awaited)
+          attach_reactions(state, data_ref, rest, pending, resolve, reject)
         }
       }
     }

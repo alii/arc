@@ -23,7 +23,6 @@ import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/job_queue
 import arc/vm/state.{type Heap, type HostFn, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, Finite, HostObject, JsBool, JsNumber, JsObject,
@@ -179,10 +178,7 @@ pub fn resume(
   outcome: Result(JsValue, JsValue),
 ) -> State(host) {
   let s = case outcome {
-    Ok(v) -> {
-      let #(heap, jobs) = builtins_promise.fulfill_promise(s.heap, ticket, v)
-      state.State(..s, heap:, job_queue: job_queue.append(s.job_queue, jobs))
-    }
+    Ok(v) -> builtins_promise.fulfill_promise(s, ticket, v)
     Error(reason) -> builtins_promise.reject_promise(s, ticket, reason)
   }
   state.State(..s, outstanding: s.outstanding - 1)
