@@ -963,6 +963,16 @@ pub fn prefix_member_string_tonumeric_test() -> Nil {
   assert_normal_number("var o = {y: '7'}; --o.y; o.y", 6.0)
 }
 
+// §13.4.4/§13.4.5 step 3: ToNumeric applies to the OLD value on the prefix
+// identifier path too — `++x` on a string must not string-concatenate.
+pub fn prefix_identifier_string_tonumeric_test() -> Nil {
+  assert_normal("var x = '5'; String([++x, x, typeof x])", JsString("6,6,number"))
+}
+
+pub fn prefix_identifier_string_decrement_tonumeric_test() -> Nil {
+  assert_normal_number("var x = '7'; --x", 6.0)
+}
+
 pub fn postfix_computed_member_string_tonumeric_test() -> Nil {
   assert_normal(
     "var o = {x: '5'}; var k = 'x'; String([o[k]++, o[k]])",
@@ -5518,8 +5528,18 @@ pub fn math_round_down_test() -> Nil {
 }
 
 pub fn math_round_negative_half_test() -> Nil {
-  // JS: Math.round(-0.5) → 0 (rounds toward +Infinity)
-  assert_normal("Math.round(-0.5)", JsNumber(Finite(0.0)))
+  // JS: Math.round(-0.5) → -0 (a zero result from a negative input is -0)
+  assert_normal("Math.round(-0.5)", JsNumber(Finite(-0.0)))
+}
+
+pub fn mul_infinity_by_neg_zero_test() -> Nil {
+  // JS: Infinity * -0 -> NaN (a zero of either sign times an infinity is NaN)
+  assert_normal("Infinity * -0", JsNumber(NaN))
+}
+
+pub fn mul_neg_zero_by_neg_infinity_test() -> Nil {
+  // JS: -0 * -Infinity -> NaN
+  assert_normal("(-0) * -Infinity", JsNumber(NaN))
 }
 
 pub fn math_trunc_positive_test() -> Nil {

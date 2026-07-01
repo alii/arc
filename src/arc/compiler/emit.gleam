@@ -4169,9 +4169,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
       case prefix {
         True -> {
-          // ++x: get, add 1; helper dups the result and stores to ref
+          // ++x: get, ToNumeric (§13.4.2 step 3), add 1; helper dups the
+          // result and stores to ref. Unary `+` is ToNumber.
           use e <- with_identifier_lref(e, name)
           let e = emit_var_ref_get(e, name)
+          let e = emit_ir(e, IrUnaryOp(opcode.Pos))
           let e = push_const(e, one)
           Ok(emit_ir(e, IrBinOp(bin_kind)))
         }
