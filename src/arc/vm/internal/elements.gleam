@@ -7,6 +7,7 @@
 /// (deleted/unset slots) are distinguishable from explicit `arr[i]=undefined`.
 /// The sentinel never leaks: get/get_option convert it to JsUndefined/None.
 import arc/vm/internal/tree_array
+import arc/vm/limits
 import arc/vm/value.{
   type JsElements, type JsValue, DenseElements, JsUndefined, JsUninitialized,
   NoElements, SparseElements,
@@ -70,9 +71,14 @@ pub fn set(elements: JsElements, index: Int, val: JsValue) -> JsElements {
       set(DenseElements(tree_array.new(JsUninitialized)), index, val)
     DenseElements(data) -> {
       let size = tree_array.size(data)
-      case index - size > max_gap {
+      case index - size > max_gap || index >= limits.max_dense_index {
         True ->
-          // Large gap → sparse. Dense-with-holes would waste memory.
+          // Large gap (dense-with-holes would waste memory) or index past
+          // the dense cap (the FFI's :array backing tops out at
+          // limits.max_dense_index) → sparse. This is the ONLY gate in
+          // front of tree_array.set, so every index that reaches it is
+          // < max_dense_index by construction — the FFI never has to
+          // discard an out-of-range write.
           SparseElements(dense_to_sparse(data) |> dict.insert(index, val))
         False ->
           // tree_array.set is O(log n) and auto-grows.

@@ -31,7 +31,13 @@ pub fn get(index: Int, arr: TreeArray(a)) -> a
 @external(erlang, "arc_vm_ffi", "tree_array_get_option")
 pub fn get_option(index: Int, arr: TreeArray(a)) -> Option(a)
 
-/// Write at index. Grows if needed. O(log n).
+/// Write at index, growing the array if needed. O(log n).
+///
+/// Contract: `index` must be >= 0, and the caller is responsible for the
+/// dense-range policy — `elements.set` promotes to the sparse representation
+/// at `limits.max_dense_index` and never calls this past it. An
+/// out-of-contract index crashes (function_clause in the FFI); it is NOT a
+/// silent no-op, so a violation can never silently lose a write.
 @external(erlang, "arc_vm_ffi", "tree_array_set")
 pub fn set(index: Int, value: a, arr: TreeArray(a)) -> TreeArray(a)
 
@@ -40,6 +46,10 @@ pub fn set(index: Int, value: a, arr: TreeArray(a)) -> TreeArray(a)
 pub fn size(arr: TreeArray(a)) -> Int
 
 /// Shrink to new_size. Unsets all indices >= new_size. O(log n).
+///
+/// Contract: `new_size` must be >= 0 (callers only pass JS array lengths).
+/// A negative size crashes (function_clause in the FFI) rather than
+/// silently returning the array unchanged.
 @external(erlang, "arc_vm_ffi", "tree_array_resize")
 pub fn resize(arr: TreeArray(a), new_size: Int) -> TreeArray(a)
 
