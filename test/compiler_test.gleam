@@ -9,7 +9,7 @@ import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state
 import arc/vm/value.{
-  Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN,
+  Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN, NegInfinity,
 }
 import gleam/dict
 import gleam/int
@@ -940,6 +940,40 @@ pub fn postfix_increment_test() -> Nil {
 
 pub fn postfix_increment_side_effect_test() -> Nil {
   assert_normal_number("var x = 5; x++; x", 6.0)
+}
+
+// §13.4.2/§13.4.3 step 3: ToNumeric applies to the OLD value of a member
+// update — `o.x++` on a string property must not string-concatenate, and
+// the postfix result is the numeric old value (not new ∓ 1).
+pub fn postfix_member_string_tonumeric_test() -> Nil {
+  assert_normal(
+    "var o = {x: '5'}; String([o.x++, o.x])",
+    JsString("5,6"),
+  )
+}
+
+pub fn postfix_member_valueof_tonumeric_test() -> Nil {
+  assert_normal(
+    "var o = {x: {valueOf: function() { return 3 }}}; String([o.x--, o.x])",
+    JsString("3,2"),
+  )
+}
+
+pub fn prefix_member_string_tonumeric_test() -> Nil {
+  assert_normal_number("var o = {y: '7'}; --o.y; o.y", 6.0)
+}
+
+pub fn postfix_computed_member_string_tonumeric_test() -> Nil {
+  assert_normal(
+    "var o = {x: '5'}; var k = 'x'; String([o[k]++, o[k]])",
+    JsString("5,6"),
+  )
+}
+
+// The postfix result is the *old* numeric value itself, not new ∓ 1
+// reconstructed from the stored value (which would turn -0 into +0).
+pub fn postfix_member_negative_zero_test() -> Nil {
+  assert_normal("var o = {x: -0}; 1 / o.x++", JsNumber(NegInfinity))
 }
 
 // ============================================================================

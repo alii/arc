@@ -4189,25 +4189,42 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
       }
     }
-    // ++obj.prop / obj[k]++ / super.x++ — emit as prefix via the *2 read-keep
-    // protocol (base/key/super-base evaluated exactly once), then undo ±1 for
-    // postfix to recover the old value. Spec's ToNumeric already happened in
-    // the Add/Sub, so new∓1 = old.
+    // ++obj.prop / obj[k]++ / super.x++ — the *2 read-keep protocol
+    // (base/key/super-base evaluated exactly once), then the same
+    // get -> ToNumeric -> ±1 -> put sequence as the Identifier arm above.
+    // §13.4.2/§13.4.3 step 3: ToNumeric applies to the OLD value (unary `+`
+    // is ToNumber), so `o.x = "5"; o.x++` stores 6 (not "51") and yields 5.
+    // Postfix stashes the numeric old value in a scratch slot because the
+    // put-args sit between it and the new value on the stack.
     ast.UpdateExpression(_, op, prefix, ast.MemberExpression(..) as member) -> {
       let one = JsNumber(Finite(1.0))
-      let #(bin_kind, undo) = case op {
-        ast.Increment -> #(opcode.Add, opcode.Sub)
-        ast.Decrement -> #(opcode.Sub, opcode.Add)
+      let bin_kind = case op {
+        ast.Increment -> opcode.Add
+        ast.Decrement -> opcode.Sub
       }
       use #(e, shape) <- result.map(emit_lvalue_get2(e, member))
-      let e =
-        e
-        |> push_const(one)
-        |> emit_ir(IrBinOp(bin_kind))
-        |> emit_lvalue_put(shape)
+      // Stack: [old, …put-args]
+      let e = emit_ir(e, IrUnaryOp(opcode.Pos))
       case prefix {
-        True -> e
-        False -> push_const(e, one) |> emit_ir(IrBinOp(undo))
+        True ->
+          // [oldNum, …put-args] -> [new, …put-args] -> [new]
+          e
+          |> push_const(one)
+          |> emit_ir(IrBinOp(bin_kind))
+          |> emit_lvalue_put(shape)
+        False -> {
+          // [oldNum, …put-args]: save oldNum aside, write back new, then
+          // recover oldNum as the expression value.
+          let #(e, tmp) = fresh_slot(e)
+          e
+          |> emit_ir(IrDup)
+          |> emit_scratch_put(tmp)
+          |> push_const(one)
+          |> emit_ir(IrBinOp(bin_kind))
+          |> emit_lvalue_put(shape)
+          |> emit_ir(IrPop)
+          |> emit_scratch_get(tmp)
+        }
       }
     }
 
