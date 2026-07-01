@@ -360,6 +360,12 @@ pub type State(host) {
 // hand-rolled field-by-field copy is how a queue gets silently reset
 // (dropping the caller's outstanding host promises, Atomics waiters, or
 // pending unhandled-rejection reports).
+//
+// EXCEPTION: children that finish with a NESTED `event_loop.drain_jobs`
+// ($262.evalScript, ShadowRealm.prototype.evaluate) must use the
+// `seed_draining_child` / `merge_draining_child` pair below instead — see
+// its doc for why the caller's Atomics waiters and pending
+// unhandled-rejection reports must never reach a nested drain.
 
 /// Seed the agent-wide event-loop queues a child execution state must
 /// inherit from its caller: the pending job queue, the outstanding
@@ -389,6 +395,54 @@ pub fn merge_child(caller: State(host), child: State(host)) -> State(host) {
     outstanding: child.outstanding,
     atomics_waiters: child.atomics_waiters,
     unhandled_rejections: child.unhandled_rejections,
+  )
+}
+
+/// `seed_child` variant for the two child executions whose completion runs a
+/// NESTED, non-yielding `event_loop.drain_jobs` ($262.evalScript,
+/// ShadowRealm.prototype.evaluate). Only the job queue and the outstanding
+/// `host.suspend` count are handed over. The caller's Atomics.waitAsync
+/// waiters and pending unhandled-rejection reports MUST stay behind:
+/// - a nested drain that inherited the caller's waiters would sleep until
+///   their deadlines (blocking the agent inside the synchronous eval) and
+///   force-settle them "timed-out", even though the caller's own — yielding —
+///   loop would have delivered the notify in time;
+/// - a nested drain that inherited the caller's pending rejection refs would
+///   report them to stderr mid-job and clear the list, defeating the
+///   "handler attached later in the same turn" case. The unhandled-rejection
+///   checkpoint belongs to the caller's own end-of-job drain.
+/// The child starts both lists empty; whatever it registers is unioned back
+/// by `merge_draining_child`, the mirror of this function.
+pub fn seed_draining_child(
+  child: State(host),
+  caller: State(host),
+) -> State(host) {
+  State(
+    ..child,
+    job_queue: caller.job_queue,
+    outstanding: caller.outstanding,
+    atomics_waiters: [],
+    unhandled_rejections: [],
+  )
+}
+
+/// Mirror of `seed_draining_child`: thread the job queue and outstanding
+/// count back, and APPEND the Atomics waiters / unhandled-rejection refs the
+/// child registered (and its nested drain left unsettled / unreported) to the
+/// caller's own lists — which the child never saw and must not clobber.
+pub fn merge_draining_child(
+  caller: State(host),
+  child: State(host),
+) -> State(host) {
+  State(
+    ..caller,
+    job_queue: child.job_queue,
+    outstanding: child.outstanding,
+    atomics_waiters: list.append(caller.atomics_waiters, child.atomics_waiters),
+    unhandled_rejections: list.append(
+      caller.unhandled_rejections,
+      child.unhandled_rejections,
+    ),
   )
 }
 

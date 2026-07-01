@@ -129,10 +129,13 @@ pub fn eval_script_native(
       )
       // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
       let locals = seed_top_level_locals(template, JsObject(realm_global))
-      // Seed the agent-wide event-loop queues (job queue, outstanding count,
-      // Atomics waiters, pending unhandled rejections) from the caller.
+      // Seed the pending job queue and outstanding host-promise count from
+      // the caller. NOT `seed_child`: this child ends in a nested,
+      // non-yielding `drain_jobs`, so the caller's Atomics waiters and
+      // pending unhandled-rejection reports must stay behind (see
+      // `state.seed_draining_child`).
       let eval_state =
-        state.seed_child(
+        state.seed_draining_child(
           new_state_fn(
             template,
             locals,
@@ -181,7 +184,7 @@ pub fn eval_script_native(
           // belong in its RealmSlot (written above), not in the caller's ctx.
           let state =
             State(
-              ..state.merge_child(state, drained),
+              ..state.merge_draining_child(state, drained),
               heap: h,
               ctx: state.RealmCtx(
                 ..state.ctx,
@@ -1328,10 +1331,13 @@ fn do_shadow_realm_evaluate(
         dict.merge(state.ctx.symbol_descriptions, realm.symbol_descriptions)
       let merged_registry =
         dict.merge(state.ctx.symbol_registry, realm.symbol_registry)
-      // Seed the agent-wide event-loop queues (job queue, outstanding count,
-      // Atomics waiters, pending unhandled rejections) from the caller.
+      // Seed the pending job queue and outstanding host-promise count from
+      // the caller. NOT `seed_child`: this child ends in a nested,
+      // non-yielding `drain_jobs`, so the caller's Atomics waiters and
+      // pending unhandled-rejection reports must stay behind (see
+      // `state.seed_draining_child`).
       let eval_state =
-        state.seed_child(
+        state.seed_draining_child(
           new_state_fn(
             template,
             locals,
@@ -1383,7 +1389,7 @@ fn do_shadow_realm_evaluate(
           // eval was seeded with the union) — adopt them agent-wide.
           let state =
             State(
-              ..state.merge_child(state, drained),
+              ..state.merge_draining_child(state, drained),
               heap: h,
               ctx: state.RealmCtx(
                 ..state.ctx,

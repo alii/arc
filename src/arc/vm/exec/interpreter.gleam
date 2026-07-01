@@ -227,6 +227,7 @@ fn merge_back(parent: State(host), child: State(host)) -> State(host) {
     && child.job_queue == parent.job_queue
     && child.outstanding == parent.outstanding
     && child.atomics_waiters == parent.atomics_waiters
+    && child.unhandled_rejections == parent.unhandled_rejections
   {
     True -> State(..parent, heap:)
     False ->
@@ -244,6 +245,7 @@ fn merge_back(parent: State(host), child: State(host)) -> State(host) {
         job_queue: child.job_queue,
         outstanding: child.outstanding,
         atomics_waiters: child.atomics_waiters,
+        unhandled_rejections: child.unhandled_rejections,
       )
   }
 }
