@@ -145,7 +145,10 @@ pub type Statement {
 
 pub type ForInit {
   ForInitExpression(Expression)
-  ForInitDeclaration(Statement)
+  /// A `var`/`let`/`const`/`using`/`await using` declaration in a for head.
+  /// Carries the declaration payload directly (rather than a `Statement`) so
+  /// a for-init can never hold anything but a variable declaration.
+  ForInitDeclaration(kind: VariableKind, declarations: List(VariableDeclarator))
   ForInitPattern(Pattern)
 }
 
@@ -229,7 +232,7 @@ pub type Expression {
   )
   LogicalExpression(
     span: Span,
-    operator: BinaryOp,
+    operator: LogicalOp,
     left: Expression,
     right: Expression,
   )
@@ -440,11 +443,17 @@ pub type BinaryOp {
   BitwiseAnd
   BitwiseOr
   BitwiseXor
+  In
+  InstanceOf
+}
+
+/// Short-circuiting operator of a `LogicalExpression` (`&&` / `||` / `??`).
+/// Separate from `BinaryOp` so a LogicalExpression can never carry an
+/// arithmetic/relational operator (and vice versa).
+pub type LogicalOp {
   LogicalAnd
   LogicalOr
   NullishCoalescing
-  In
-  InstanceOf
 }
 
 pub type UnaryOp {

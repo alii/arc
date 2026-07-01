@@ -114,8 +114,7 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
     ast.DoWhileStatement(_, body) -> collect_vars_stmt(body)
     ast.ForStatement(init, _, _, body) -> {
       let init_vars = case init {
-        Some(ast.ForInitDeclaration(ast.VariableDeclaration(ast.Var, decls))) ->
-          declarator_names(decls)
+        Some(ast.ForInitDeclaration(ast.Var, decls)) -> declarator_names(decls)
         _ -> []
       }
       list.append(init_vars, collect_vars_stmt(body))
@@ -131,8 +130,7 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
     }
     ast.ForInStatement(left, _, body) | ast.ForOfStatement(left, _, body, ..) -> {
       let left_vars = case left {
-        ast.ForInitDeclaration(ast.VariableDeclaration(ast.Var, decls)) ->
-          declarator_names(decls)
+        ast.ForInitDeclaration(ast.Var, decls) -> declarator_names(decls)
         _ -> []
       }
       list.append(left_vars, collect_vars_stmt(body))
@@ -242,10 +240,13 @@ pub fn block_has_declarations(body: List(ast.StmtWithLine)) -> Bool {
 }
 
 /// let names of a classic-for head `for (let x = ...; ...)`.
-pub fn for_let_names(decl: ast.Statement) -> List(String) {
-  case decl {
-    ast.VariableDeclaration(ast.Let, ds) -> declarator_names(ds)
-    _ -> []
+pub fn for_let_names(
+  kind: ast.VariableKind,
+  declarations: List(ast.VariableDeclarator),
+) -> List(String) {
+  case kind {
+    ast.Let -> declarator_names(declarations)
+    ast.Var | ast.Const | ast.Using | ast.AwaitUsing -> []
   }
 }
 
@@ -253,11 +254,10 @@ pub fn for_let_names(decl: ast.Statement) -> List(String) {
 /// TDZ scope around the for-of head expression.
 pub fn for_init_lex_names(left: ast.ForInit) -> List(String) {
   case left {
-    ast.ForInitDeclaration(ast.VariableDeclaration(ast.Let, ds))
-    | ast.ForInitDeclaration(ast.VariableDeclaration(ast.Const, ds))
-    | ast.ForInitDeclaration(ast.VariableDeclaration(ast.Using, ds))
-    | ast.ForInitDeclaration(ast.VariableDeclaration(ast.AwaitUsing, ds)) ->
-      declarator_names(ds)
+    ast.ForInitDeclaration(ast.Let, ds)
+    | ast.ForInitDeclaration(ast.Const, ds)
+    | ast.ForInitDeclaration(ast.Using, ds)
+    | ast.ForInitDeclaration(ast.AwaitUsing, ds) -> declarator_names(ds)
     _ -> []
   }
 }
@@ -267,11 +267,10 @@ pub fn for_init_lex_names(left: ast.ForInit) -> List(String) {
 /// the head and emit must consume it. var/expr/empty heads push no scope.
 pub fn for_classic_init_is_lex(init: Option(ast.ForInit)) -> Bool {
   case init {
-    Some(ast.ForInitDeclaration(ast.VariableDeclaration(ast.Let, _)))
-    | Some(ast.ForInitDeclaration(ast.VariableDeclaration(ast.Const, _)))
-    | Some(ast.ForInitDeclaration(ast.VariableDeclaration(ast.Using, _)))
-    | Some(ast.ForInitDeclaration(ast.VariableDeclaration(ast.AwaitUsing, _))) ->
-      True
+    Some(ast.ForInitDeclaration(ast.Let, _))
+    | Some(ast.ForInitDeclaration(ast.Const, _))
+    | Some(ast.ForInitDeclaration(ast.Using, _))
+    | Some(ast.ForInitDeclaration(ast.AwaitUsing, _)) -> True
     _ -> False
   }
 }
