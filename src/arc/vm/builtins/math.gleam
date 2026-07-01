@@ -375,7 +375,11 @@ fn math_imul(
     Finite(f) -> to_int32(f)
     _ -> 0
   }
-  Finite(int.to_float(to_int32(int.to_float(a32 * b32))))
+  // Wrap the exact Int product. It must NOT be routed through a Float
+  // (e.g. `to_int32(int.to_float(a32 * b32))`): the product can need up to
+  // 62 bits, so the low 32 bits — the only ones imul keeps — get rounded
+  // away by the f64 conversion whenever |product| > 2^53.
+  Finite(int.to_float(int_to_int32(a32 * b32)))
 }
 
 /// Math.expm1(x) — e^x - 1 (more precise for small x)
@@ -605,8 +609,12 @@ fn log_domain(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
+    // ±0 → -Infinity. This MUST be a guard, not a `Finite(0.0)` literal
+    // pattern: on OTP >= 27 that pattern only matches +0.0, so Math.log(-0)
+    // (for which `n <. 0.0` is also False) would fall through to
+    // `math:log(-0.0)` and crash the VM with badarith.
+    Finite(n) if n >=. 0.0 && n <=. 0.0 -> NegInfinity
     Finite(n) if n <. 0.0 -> NaN
-    Finite(0.0) -> NegInfinity
     Finite(n) -> Finite(f(n))
     NaN | NegInfinity -> NaN
     Infinity -> Infinity
@@ -628,23 +636,20 @@ fn domain_unit(
 }
 
 /// JS Math.round: round half toward +Infinity.
-/// Math.round(-0.5) → -0, Math.round(0.5) → 1
+/// Math.round(-0.5) → -0, Math.round(-0.3) → -0, Math.round(0.5) → 1
 fn js_round(n: Float) -> Float {
-  case is_neg_zero(n) {
-    True -> n
-    False -> {
-      let floored = ffi_math_floor(n)
-      case n -. floored >=. 0.5 {
-        True -> floored +. 1.0
-        False -> {
-          // Per spec, if result is 0 and input was negative, return -0
-          case floored == 0.0 && n <. 0.0 {
-            True -> -0.0
-            False -> floored
-          }
-        }
-      }
-    }
+  let floored = ffi_math_floor(n)
+  let rounded = case n -. floored >=. 0.5 {
+    True -> floored +. 1.0
+    False -> floored
+  }
+  // Per spec, a zero result from a negative (or -0) input is -0. This has
+  // to be a single post-condition on `rounded`: for n in [-0.5, 0.0) the
+  // half-up branch above yields `floored +. 1.0` = -1.0 +. 1.0 = +0.0, so
+  // any check attached to only the `floored` branch never sees those inputs.
+  case is_zero(rounded) && { n <. 0.0 || is_neg_zero(n) } {
+    True -> -0.0
+    False -> rounded
   }
 }
 
@@ -668,8 +673,11 @@ pub fn num_exp(base: value.JsNum, exp: value.JsNum) -> value.JsNum {
   case base, exp {
     // 1. If exponent is NaN, return NaN
     _, NaN -> NaN
-    // 2. If exponent is +0 or -0, return 1 (even for NaN/Infinity base)
-    _, Finite(0.0) -> Finite(1.0)
+    // 2. If exponent is +0 or -0, return 1 (even for NaN/Infinity base).
+    // Guard, not a `Finite(0.0)` literal pattern: on OTP >= 27 the literal
+    // only matches +0.0, so a -0.0 exponent would fall through to the
+    // finite/infinite arms below and produce the wrong answer.
+    _, Finite(e) if e >=. 0.0 && e <=. 0.0 -> Finite(1.0)
     // 3. If base is NaN, return NaN
     NaN, _ -> NaN
     // 4-5. ±Infinity base with ±Infinity exponent
@@ -778,19 +786,34 @@ fn is_odd_integer(f: Float) -> Bool {
   int.to_float(truncated) == f && int.is_odd(truncated)
 }
 
+/// Wrap an exact Int to an unsigned 32-bit value.
+///
+/// Work on Ints stays on Ints: converting an intermediate Int (e.g. the
+/// `a32 * b32` product in Math.imul) to a Float before wrapping rounds the
+/// low 32 bits away once the magnitude passes 2^53. `to_uint32`/`to_int32`
+/// below are the ONLY Float entry points, and they immediately truncate to
+/// an Int and delegate here.
+fn int_to_uint32(n: Int) -> Int {
+  int.bitwise_and(n, 0xFFFFFFFF)
+}
+
+/// Wrap an exact Int to a signed 32-bit value (see `int_to_uint32`).
+fn int_to_int32(n: Int) -> Int {
+  let u = int_to_uint32(n)
+  case u >= 0x80000000 {
+    True -> u - 0x100000000
+    False -> u
+  }
+}
+
 /// ToUint32: convert a float to a 32-bit unsigned integer (ES S7.1.7).
 fn to_uint32(f: Float) -> Int {
-  let n = value.float_to_int(f)
-  int.bitwise_and(n, 0xFFFFFFFF)
+  int_to_uint32(value.float_to_int(f))
 }
 
 /// ToInt32: convert a float to a 32-bit signed integer (ES S7.1.6).
 fn to_int32(f: Float) -> Int {
-  let n = to_uint32(f)
-  case n >= 0x80000000 {
-    True -> n - 0x100000000
-    False -> n
-  }
+  int_to_int32(value.float_to_int(f))
 }
 
 /// Count leading zeros in a 32-bit integer.
@@ -809,6 +832,19 @@ fn count_leading_zeros_loop(n: Int, bit: Int, count: Int) -> Int {
       }
     }
   }
+}
+
+/// True for both +0.0 and -0.0 (companion to `is_neg_zero`).
+///
+/// Always use this instead of a `0.0` literal in a case pattern or an
+/// `x == 0.0` comparison: on OTP >= 27 both of those compile to `=:=`
+/// semantics and are True/matched only for +0.0, silently missing -0.0.
+/// The `>=.`/`<=.` pair is an arithmetic comparison, which treats the two
+/// zeros as equal. Usable anywhere; in a guard position (where function
+/// calls are not allowed) inline the same expression:
+/// `Finite(n) if n >=. 0.0 && n <=. 0.0 -> ...`
+pub fn is_zero(x: Float) -> Bool {
+  x >=. 0.0 && x <=. 0.0
 }
 
 // -- FFI --
