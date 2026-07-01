@@ -20,12 +20,20 @@ import gleam/string
 // Binary and unary operator dispatch
 // ============================================================================
 
+/// A failed operator / coercion. The constructor names the error class the
+/// interpreter must throw, so a producer cannot demote a spec-mandated
+/// RangeError to a TypeError by forgetting a string prefix.
+pub type OpError {
+  OpTypeError(msg: String)
+  OpRangeError(msg: String)
+}
+
 /// Execute a binary operation on two JsValues.
 pub fn exec_binop(
   kind: BinOpKind,
   left: JsValue,
   right: JsValue,
-) -> Result(JsValue, String) {
+) -> Result(JsValue, OpError) {
   case kind {
     // Add is handled directly in the BinOp dispatcher with ToPrimitive
     Add -> panic as "Add should be handled in BinOp dispatcher"
@@ -130,9 +138,8 @@ pub fn exec_binop(
       }
 
     // In and InstanceOf handled in BinOp dispatcher (needs heap access)
-    opcode.In -> Error("in: unreachable — handled in dispatcher")
-    opcode.InstanceOf ->
-      Error("instanceof: unreachable — handled in dispatcher")
+    opcode.In | opcode.InstanceOf ->
+      panic as "in/instanceof are handled in the BinOp dispatcher"
   }
 }
 
@@ -140,24 +147,24 @@ pub fn exec_binop(
 pub fn exec_unaryop(
   kind: UnaryOpKind,
   operand: JsValue,
-) -> Result(JsValue, String) {
+) -> Result(JsValue, OpError) {
   case kind, operand {
     // §6.1.6.2.1 BigInt::unaryMinus.
     Neg, JsBigInt(BigInt(n)) -> Ok(JsBigInt(BigInt(0 - n)))
     Neg, _ -> {
-      use n <- result.map(value.to_number(operand))
+      use n <- result.map(to_number(operand))
       JsNumber(num_negate(n))
     }
     // §13.5.6 unary + applies ToNumber, which throws on BigInt — the
     // to_number call below produces that TypeError.
     Pos, _ -> {
-      use n <- result.map(value.to_number(operand))
+      use n <- result.map(to_number(operand))
       JsNumber(n)
     }
     // §6.1.6.2.2 BigInt::bitwiseNOT: -n - 1.
     BitNot, JsBigInt(BigInt(n)) -> Ok(JsBigInt(BigInt(-1 - n)))
     BitNot, _ -> {
-      use n <- result.map(value.to_number(operand))
+      use n <- result.map(to_number(operand))
       value.from_int(int.bitwise_not(num_to_int32(n)))
     }
     LogicalNot, _ -> Ok(JsBool(!value.is_truthy(operand)))
@@ -170,13 +177,17 @@ pub fn exec_unaryop(
 // ============================================================================
 
 /// §13.15.4 step 7.a / V8 message for BigInt × Number operand mixing.
-const bigint_mix_error: String = "Cannot mix BigInt and other types, use explicit conversions"
+const bigint_mix_error = OpTypeError(
+  "Cannot mix BigInt and other types, use explicit conversions",
+)
 
-/// RangeError prefix protocol: the interpreter's BinOp/UnaryOp dispatch
-/// recognizes this prefix and throws a RangeError instead of a TypeError.
-pub const range_error_prefix: String = "RangeError: "
+/// ToNumber for an operator operand. value.to_number only fails on values
+/// ToNumber rejects (BigInt, Symbol), and that failure is always a TypeError.
+fn to_number(v: JsValue) -> Result(JsNum, OpError) {
+  result.map_error(value.to_number(v), OpTypeError)
+}
 
-fn bigint_arith(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, String) {
+fn bigint_arith(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, OpError) {
   case kind {
     Sub -> Ok(JsBigInt(BigInt(a - b)))
     Mul -> Ok(JsBigInt(BigInt(a * b)))
@@ -184,23 +195,23 @@ fn bigint_arith(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, String) {
     // RangeError. Gleam's Int `/` is Erlang div (truncates toward zero).
     Div ->
       case b {
-        0 -> Error(range_error_prefix <> "Division by zero")
+        0 -> Error(OpRangeError("Division by zero"))
         _ -> Ok(JsBigInt(BigInt(a / b)))
       }
     // §6.1.6.2.6 BigInt::remainder — sign of dividend; 0n divisor throws
     // RangeError. Gleam's Int `%` is Erlang rem (sign of dividend).
     Mod ->
       case b {
-        0 -> Error(range_error_prefix <> "Division by zero")
+        0 -> Error(OpRangeError("Division by zero"))
         _ -> Ok(JsBigInt(BigInt(a % b)))
       }
     // §6.1.6.2.3 BigInt::exponentiate — negative exponent throws RangeError.
     Exp ->
       case b < 0 {
-        True -> Error(range_error_prefix <> "Exponent must be non-negative")
+        True -> Error(OpRangeError("Exponent must be non-negative"))
         False -> Ok(JsBigInt(BigInt(bigint_pow(a, b, 1))))
       }
-    _ -> Error("BigInt arithmetic: unreachable operator")
+    _ -> Error(OpTypeError("BigInt arithmetic: unreachable operator"))
   }
 }
 
@@ -216,7 +227,7 @@ fn bigint_pow(base: Int, exp: Int, acc: Int) -> Int {
   }
 }
 
-fn bigint_bitwise(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, String) {
+fn bigint_bitwise(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, OpError) {
   case kind {
     // Erlang band/bor/bxor on arbitrary-precision ints follow infinite
     // two's-complement semantics — exactly §6.1.6.2.17-19.
@@ -228,8 +239,9 @@ fn bigint_bitwise(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, String) {
     ShiftLeft -> Ok(JsBigInt(BigInt(int.bitwise_shift_left(a, b))))
     ShiftRight -> Ok(JsBigInt(BigInt(int.bitwise_shift_right(a, b))))
     // §6.1.6.2.11 BigInt::unsignedRightShift always throws.
-    UShiftRight -> Error("BigInts have no unsigned right shift, use >> instead")
-    _ -> Error("BigInt bitwise: unreachable operator")
+    UShiftRight ->
+      Error(OpTypeError("BigInts have no unsigned right shift, use >> instead"))
+    _ -> Error(OpTypeError("BigInt bitwise: unreachable operator"))
   }
 }
 
@@ -429,14 +441,14 @@ pub fn num_binop(
   left: JsValue,
   right: JsValue,
   op: fn(JsNum, JsNum) -> JsNum,
-) -> Result(JsValue, String) {
+) -> Result(JsValue, OpError) {
   case left, right {
     // Fast path: to_number on a JsNumber is the identity — skip the
     // result combinators (and their closures) for the common case.
     JsNumber(a), JsNumber(b) -> Ok(JsNumber(op(a, b)))
     _, _ -> {
-      use a <- result.try(value.to_number(left))
-      use b <- result.map(value.to_number(right))
+      use a <- result.try(to_number(left))
+      use b <- result.map(to_number(right))
       JsNumber(op(a, b))
     }
   }
@@ -477,9 +489,9 @@ fn bitwise_binop(
   left: JsValue,
   right: JsValue,
   op: fn(Int, Int) -> Int,
-) -> Result(JsValue, String) {
-  use a <- result.try(value.to_number(left))
-  use b <- result.map(value.to_number(right))
+) -> Result(JsValue, OpError) {
+  use a <- result.try(to_number(left))
+  use b <- result.map(to_number(right))
   value.from_int(op(num_to_int32(a), num_to_int32(b)))
 }
 
@@ -499,7 +511,7 @@ fn compare_values(
   left: JsValue,
   right: JsValue,
   pred: fn(CompareOrd) -> Bool,
-) -> Result(JsValue, String) {
+) -> Result(JsValue, OpError) {
   case left, right {
     JsString(a), JsString(b) -> {
       let ord = case string.compare(a, b) {
@@ -526,14 +538,14 @@ fn compare_values(
     // §7.2.13 step 4.e: BigInt × Number compares mathematical values;
     // NaN on either side → undefined → false.
     JsBigInt(BigInt(a)), _ -> {
-      use n <- result.map(value.to_number(right))
+      use n <- result.map(to_number(right))
       case compare_bigint_num(a, n) {
         Some(ord) -> JsBool(pred(ord))
         None -> JsBool(False)
       }
     }
     _, JsBigInt(BigInt(b)) -> {
-      use n <- result.map(value.to_number(left))
+      use n <- result.map(to_number(left))
       case compare_bigint_num(b, n) {
         // n <op> b: flip the BigInt-vs-Number ordering.
         Some(ord) -> JsBool(pred(flip_ord(ord)))
@@ -541,8 +553,8 @@ fn compare_values(
       }
     }
     _, _ -> {
-      use a <- result.try(value.to_number(left))
-      use b <- result.try(value.to_number(right))
+      use a <- result.try(to_number(left))
+      use b <- result.try(to_number(right))
       case a, b {
         NaN, _ | _, NaN -> Ok(JsBool(False))
         _, _ -> Ok(JsBool(pred(compare_nums(a, b))))

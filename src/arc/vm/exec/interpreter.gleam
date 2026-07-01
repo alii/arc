@@ -925,7 +925,7 @@ fn fast_loop(
                         line,
                       )
                     // Slow path re-runs the op and throws the same error.
-                    Error(_msg) ->
+                    Error(_err) ->
                       dispatch_slow(state, pc, stack, locals, hp, line)
                   }
               }
@@ -944,7 +944,7 @@ fn fast_loop(
                     line,
                   )
                 // Slow path re-runs the op and throws the same error.
-                Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+                Error(_err) -> dispatch_slow(state, pc, stack, locals, hp, line)
               }
             // instanceof / in need heap + can run user code — always slow.
             opcode.InstanceOf | opcode.In ->
@@ -970,7 +970,7 @@ fn fast_loop(
                         line,
                       )
                     // Slow path re-runs the op and throws the same error.
-                    Error(_msg) ->
+                    Error(_err) ->
                       dispatch_slow(state, pc, stack, locals, hp, line)
                   }
               }
@@ -996,7 +996,7 @@ fn fast_loop(
                 line,
               )
             // Slow path re-runs the op and throws the same error.
-            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+            Error(_err) -> dispatch_slow(state, pc, stack, locals, hp, line)
           }
         [] -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
@@ -1021,7 +1021,7 @@ fn fast_loop(
                 constants,
                 line,
               )
-            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+            Error(_err) -> dispatch_slow(state, pc, stack, locals, hp, line)
           }
         _ -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
@@ -1041,7 +1041,7 @@ fn fast_loop(
                 constants,
                 line,
               )
-            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+            Error(_err) -> dispatch_slow(state, pc, stack, locals, hp, line)
           }
         _ -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
@@ -1085,7 +1085,7 @@ fn fast_loop(
                     line,
                   )
               }
-            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+            Error(_err) -> dispatch_slow(state, pc, stack, locals, hp, line)
           }
       }
     }
@@ -1126,7 +1126,7 @@ fn fast_loop(
                     line,
                   )
               }
-            Error(_msg) -> dispatch_slow(state, pc, stack, locals, hp, line)
+            Error(_err) -> dispatch_slow(state, pc, stack, locals, hp, line)
           }
       }
     }
@@ -2856,7 +2856,7 @@ fn step(
               case operators.exec_unaryop(kind, operand) {
                 Ok(result) ->
                   Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-                Error(msg) -> throw_operator_error(state, msg)
+                Error(err) -> throw_operator_error(state, err)
               }
           }
         [] -> underflow(state, "UnaryOp")
@@ -5986,7 +5986,7 @@ fn binop_direct(
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case operators.exec_binop(kind, left, right) {
     Ok(result) -> Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-    Error(msg) -> throw_operator_error(state, msg)
+    Error(err) -> throw_operator_error(state, err)
   }
 }
 
@@ -6103,7 +6103,7 @@ fn fused_update_local(
         _ ->
           case operators.exec_unaryop(opcode.Pos, v) {
             Ok(n) -> Ok(#(n, state))
-            Error(msg) -> throw_operator_error(state, msg)
+            Error(err) -> throw_operator_error(state, err)
           }
       })
       // BinOp(Add|Sub) with the constant 1 — n is already a primitive, so
@@ -6154,16 +6154,16 @@ fn fused_cmp_jump(
   }
 }
 
-/// Operator errors are TypeErrors except for the few BigInt cases (division
-/// by zero, negative exponent) that the spec makes RangeErrors — those come
-/// back tagged with operators.range_error_prefix.
+/// Throw the error class an operator/coercion failure names. The constructor
+/// is chosen at the throw site in ops/operators, so the mapping is exhaustive:
+/// a new OpError variant is a compile error here, not a silently-wrong throw.
 fn throw_operator_error(
   state: State(host),
-  msg: String,
+  err: operators.OpError,
 ) -> Result(a, #(StepResult, JsValue, State(host))) {
-  case msg {
-    "RangeError: " <> rest -> state.throw_range_error(state, rest)
-    _ -> state.throw_type_error(state, msg)
+  case err {
+    operators.OpRangeError(msg) -> state.throw_range_error(state, msg)
+    operators.OpTypeError(msg) -> state.throw_type_error(state, msg)
   }
 }
 
@@ -6203,7 +6203,7 @@ fn binop_with_to_primitive(
   )
   case operators.exec_binop(kind, lprim, rprim) {
     Ok(result) -> Ok(State(..s2, stack: [result, ..rest], pc: state.pc + 1))
-    Error(msg) -> throw_operator_error(s2, msg)
+    Error(err) -> throw_operator_error(s2, err)
   }
 }
 
@@ -6221,7 +6221,7 @@ fn unaryop_with_to_primitive(
   )
   case operators.exec_unaryop(kind, prim) {
     Ok(result) -> Ok(State(..s1, stack: [result, ..rest], pc: state.pc + 1))
-    Error(msg) -> throw_operator_error(s1, msg)
+    Error(err) -> throw_operator_error(s1, err)
   }
 }
 
@@ -6266,7 +6266,7 @@ fn add_primitives(
       case operators.num_binop(lprim, rprim, operators.num_add) {
         Ok(result) ->
           Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-        Error(msg) -> state.throw_type_error(state, msg)
+        Error(err) -> throw_operator_error(state, err)
       }
   }
 }
