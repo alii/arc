@@ -1,147 +1,204 @@
 -module(arc_number_ffi).
--export([format_to_fixed/2, format_to_exponential/2, format_to_precision/2]).
+-export([
+    format_to_fixed/2,
+    format_to_exponential/2,
+    format_to_exponential_auto/1,
+    format_to_precision/2,
+    js_number_to_string/1
+]).
 
-%% Number.prototype.toFixed(fractionDigits)
-%% Uses Erlang's float_to_list with decimals option for formatting.
+%% JS number formatting: ES2024 §6.1.6.1.20 Number::toString and the
+%% Number.prototype.{toFixed,toExponential,toPrecision} algorithms
+%% (§21.1.3.3, §21.1.3.2, §21.1.3.5).
+%%
+%% Two digit sources, both derived from the double itself rather than from a
+%% pre-rounded intermediate string:
+%%   * shortest_digits/1   — the shortest digit string that round-trips the
+%%     double (Erlang's [short] / Ryu output), used wherever the spec asks
+%%     for "k is as small as possible".
+%%   * significant_exact/2 — the first P significant digits of the (near)
+%%     exact decimal expansion, rounded once, half away from zero.
+%% Fixed-point rounding goes through decimals_exact/2 for the same
+%% single-rounding reason (see its doc comment).
+
+%% Number.prototype.toFixed(fractionDigits) — ES2024 §21.1.3.3.
+%% The Gleam caller guarantees |X| < 1e21 (step 10: larger magnitudes use
+%% Number::toString instead) and 0 =< Digits =< 100.
 format_to_fixed(X, Digits) ->
-    %% Handle negative zero
-    case X == 0.0 andalso is_neg_zero(X) of
-        true ->
-            S = format_to_fixed_pos(0.0, Digits),
-            <<"-", (list_to_binary(S))/binary>>;
-        false when X < 0.0 ->
-            S = format_to_fixed_pos(-X, Digits),
-            <<"-", (list_to_binary(S))/binary>>;
-        false ->
-            list_to_binary(format_to_fixed_pos(X, Digits))
-    end.
+    with_abs(X, fun(A) -> list_to_binary(decimals_exact(A, Digits)) end).
 
-format_to_fixed_pos(X, Digits) ->
-    %% For very large numbers (>= 1e21), JS returns exponential notation
-    case X >= 1.0e21 of
-        true ->
-            %% Use JS-style exponential format
-            float_to_list(X, [{scientific, 20}]);
-        false ->
-            float_to_list(X, [{decimals, Digits}])
-    end.
-
-%% Number.prototype.toExponential(fractionDigits)
-%% FractionDigits = -1 means "auto" (no fractionDigits argument given).
+%% Number.prototype.toExponential(fractionDigits) — ES2024 §21.1.3.2 with an
+%% explicit fractionDigits (0..100): FractionDigits+1 significant digits.
 format_to_exponential(X, FractionDigits) ->
-    case X == 0.0 andalso is_neg_zero(X) of
-        true ->
-            S = format_exp_pos(0.0, FractionDigits),
-            <<"-", S/binary>>;
-        false when X < 0.0 ->
-            S = format_exp_pos(-X, FractionDigits),
-            <<"-", S/binary>>;
-        false ->
-            format_exp_pos(X, FractionDigits)
-    end.
+    with_abs(X, fun(A) -> exponential_pos(A, FractionDigits) end).
 
-format_exp_pos(X, FractionDigits) ->
-    %% Erlang's scientific notation: "1.23000e+02"
-    %% JS wants: "1.23e+2"
-    Digits = case FractionDigits of
-        -1 ->
-            %% Auto: use enough digits to represent uniquely
-            %% We'll use 20 and then strip trailing zeros
-            20;
-        D -> D
-    end,
-    S = float_to_list(X, [{scientific, Digits}]),
-    Bin = list_to_binary(S),
-    %% Parse and reformat to JS style
-    format_js_exponential(Bin, FractionDigits =:= -1).
+%% Number.prototype.toExponential() with fractionDigits undefined — §21.1.3.2
+%% step 6.c: as many significant digits as needed to round-trip the value
+%% and no more ("k is as small as possible").
+format_to_exponential_auto(X) ->
+    with_abs(X, fun exponential_auto_pos/1).
 
-format_js_exponential(Bin, StripTrailing) ->
-    %% Input like "1.23000e+02" or "0.00000e+00"
-    case binary:split(Bin, <<"e">>) of
-        [Mantissa, ExpPart] ->
-            M2 = case StripTrailing of
-                true -> strip_trailing_zeros(Mantissa);
-                false -> Mantissa
-            end,
-            %% Fix exponent: "+02" -> "+2", "+00" -> "+0"
-            Exp = fix_exponent(ExpPart),
-            <<M2/binary, "e", Exp/binary>>;
-        _ ->
-            Bin
-    end.
-
-strip_trailing_zeros(Bin) ->
-    case binary:match(Bin, <<".">>) of
-        nomatch -> Bin;
-        _ ->
-            S = binary_to_list(Bin),
-            R = lists:reverse(S),
-            R2 = strip_zeros(R),
-            list_to_binary(lists:reverse(R2))
-    end.
-
-strip_zeros([$0 | Rest]) -> strip_zeros(Rest);
-strip_zeros([$. | Rest]) -> [$. | Rest]; %% keep at least "X." -> will become "X"
-strip_zeros(Other) -> Other.
-
-fix_exponent(ExpPart) ->
-    %% "+02" -> "+2", "-02" -> "-2", "+00" -> "+0"
-    case ExpPart of
-        <<Sign, Rest/binary>> when Sign =:= $+; Sign =:= $- ->
-            N = binary_to_integer(Rest),
-            <<Sign, (integer_to_binary(N))/binary>>;
-        _ ->
-            ExpPart
-    end.
-
-%% Number.prototype.toPrecision(precision)
+%% Number.prototype.toPrecision(precision) — ES2024 §21.1.3.5, 1 =< P =< 100.
 format_to_precision(X, Precision) ->
-    case X == 0.0 andalso is_neg_zero(X) of
-        true ->
-            S = format_prec_pos(0.0, Precision),
-            <<"-", S/binary>>;
-        false when X < 0.0 ->
-            S = format_prec_pos(-X, Precision),
-            <<"-", S/binary>>;
-        false ->
-            format_prec_pos(X, Precision)
-    end.
+    with_abs(X, fun(A) -> precision_pos(A, Precision) end).
 
-format_prec_pos(X, Precision) ->
-    %% Use Erlang's float_to_list with significant digits
-    %% Then decide between fixed and exponential notation
-    case X == 0.0 of
-        true ->
-            case Precision of
-                1 -> <<"0">>;
-                _ ->
-                    Zeros = list_to_binary(lists:duplicate(Precision - 1, $0)),
-                    <<"0.", Zeros/binary>>
-            end;
-        false ->
-            %% Get the exponent (base 10)
-            E = floor(math:log10(X)),
-            case E >= 0 andalso E < Precision of
-                true ->
-                    %% Use fixed notation
-                    DecimalDigits = Precision - E - 1,
-                    S = decimals_exact(X, DecimalDigits),
-                    list_to_binary(S);
-                false when E < 0 andalso E >= -(4) ->
-                    %% Small numbers: use fixed notation
-                    DecimalDigits = Precision - E - 1,
-                    S = decimals_exact(X, DecimalDigits),
-                    list_to_binary(S);
-                false ->
-                    %% Use exponential notation
-                    FracDigits = Precision - 1,
-                    format_to_exponential(X, FracDigits)
-            end
-    end.
+%% JS Number::toString(x, 10) per ES2024 §6.1.6.1.20 for a finite x.
+%% -0 stringifies as "0" (the spec works on ℝ(x)), unlike the three
+%% Number.prototype formatters above, which keep the sign — so this one
+%% does not go through with_abs/2.
+js_number_to_string(N) when is_float(N) ->
+    case N == 0.0 of
+        true -> <<"0">>;
+        false when N < 0.0 -> <<"-", (js_positive_to_string(-N))/binary>>;
+        false -> js_positive_to_string(N)
+    end;
+js_number_to_string(N) when is_integer(N) ->
+    integer_to_binary(N).
 
-is_neg_zero(X) ->
+%% ---------------------------------------------------------------------------
+%% Shared sign prelude
+%% ---------------------------------------------------------------------------
+
+%% The three Number.prototype formatters all emit the absolute value and
+%% prefix "-" when the input's IEEE 754 sign bit is set — including -0.0,
+%% which compares equal to 0.0 and so needs the sign bit, not `<`.
+%% Fmt receives a float with a clear sign bit and returns a binary.
+with_abs(X, Fmt) ->
     <<Sign:1, _:63>> = <<X/float>>,
-    Sign =:= 1.
+    case Sign of
+        1 -> <<"-", (Fmt(-X))/binary>>;
+        0 -> Fmt(X)
+    end.
+
+%% ---------------------------------------------------------------------------
+%% Number::toString (radix 10)
+%% ---------------------------------------------------------------------------
+
+%% §6.1.6.1.20 steps 5-10 for a positive finite X, using its shortest
+%% round-trip digits d1…dk and the leading digit's decimal exponent E
+%% (the spec's e is E + 1).
+js_positive_to_string(X) ->
+    {Digits, E} = shortest_digits(X),
+    K = length(Digits),
+    if
+        %% Step 6: k =< e =< 21 — integer notation, zero-padded to e digits.
+        E >= K - 1, E =< 20 ->
+            list_to_binary(Digits ++ lists:duplicate(E + 1 - K, $0));
+        %% Step 7: 0 < e =< 21 — decimal point inside the digit string.
+        E >= 0, E =< 20 ->
+            {I, F} = lists:split(E + 1, Digits),
+            list_to_binary(I ++ "." ++ F);
+        %% Step 8: -6 < e =< 0 — leading "0." and -e zeros.
+        E >= -6, E < 0 ->
+            list_to_binary("0." ++ lists:duplicate(-E - 1, $0) ++ Digits);
+        %% Steps 9-10: exponential notation.
+        true ->
+            format_exponential(Digits, E)
+    end.
+
+%% ---------------------------------------------------------------------------
+%% toExponential
+%% ---------------------------------------------------------------------------
+
+%% F+1 significant digits of positive X in exponential notation.
+exponential_pos(X, F) when X == 0.0 ->
+    format_exponential(lists:duplicate(F + 1, $0), 0);
+exponential_pos(X, F) ->
+    {Digits, E} = significant_exact(X, F + 1),
+    format_exponential(Digits, E).
+
+%% Shortest round-trip digits of positive X in exponential notation.
+exponential_auto_pos(X) when X == 0.0 ->
+    <<"0e+0">>;
+exponential_auto_pos(X) ->
+    {Digits, E} = shortest_digits(X),
+    format_exponential(Digits, E).
+
+%% ---------------------------------------------------------------------------
+%% toPrecision
+%% ---------------------------------------------------------------------------
+
+precision_pos(X, P) when X == 0.0 ->
+    %% §21.1.3.5 step 9: m is p zeros and e is 0.
+    format_precision(lists:duplicate(P, $0), 0, P);
+precision_pos(X, P) ->
+    {Digits, E} = significant_exact(X, P),
+    format_precision(Digits, E, P).
+
+%% §21.1.3.5 steps 10-12: fixed vs exponential is decided from the exponent
+%% E of the ROUNDED p-significant-digit string, not of the raw value.
+format_precision(Digits, E, P) when E < -6; E >= P ->
+    %% Step 10: exponential notation.
+    format_exponential(Digits, E);
+format_precision(Digits, E, P) when E =:= P - 1 ->
+    %% Step 11: exactly p integer digits.
+    list_to_binary(Digits);
+format_precision(Digits, E, _P) when E >= 0 ->
+    %% Step 12.a: decimal point after e+1 digits.
+    {I, F} = lists:split(E + 1, Digits),
+    list_to_binary(I ++ "." ++ F);
+format_precision(Digits, E, _P) ->
+    %% Step 12.b: -6 =< e < 0 — leading "0." and -(e+1) zeros.
+    list_to_binary("0." ++ lists:duplicate(-(E + 1), $0) ++ Digits).
+
+%% ---------------------------------------------------------------------------
+%% Digit extraction
+%% ---------------------------------------------------------------------------
+
+%% "d.ddd…e±n" from a significant-digit list and the leading digit's decimal
+%% exponent: JS style, so no trailing "." for a single digit, no exponent
+%% zero-padding, and an explicit "+" for non-negative exponents.
+format_exponential([D | Rest], E) ->
+    Frac = case Rest of
+        [] -> "";
+        _ -> [$. | Rest]
+    end,
+    Sign = case E < 0 of
+        true -> $-;
+        false -> $+
+    end,
+    list_to_binary([D, Frac, $e, Sign, integer_to_list(abs(E))]).
+
+%% Decompose positive X into the shortest digit string that round-trips it
+%% (leading and trailing zeros removed) and the decimal exponent E of its
+%% leading digit: X = d1.d2…dk × 10^E.
+shortest_digits(X) ->
+    {Mantissa, E0} = split_exponent(float_to_list(X, [short])),
+    [IntPart, FracPart] = string:split(Mantissa, "."),
+    Combined = IntPart ++ FracPart,
+    Lead = length(lists:takewhile(fun(C) -> C =:= $0 end, Combined)),
+    Digits = string:trim(lists:nthtail(Lead, Combined), trailing, "0"),
+    {Digits, length(IntPart) - 1 - Lead + E0}.
+
+%% The first P significant decimal digits of positive X, rounded once, half
+%% away from zero (the spec's "pick the larger n"), and the decimal exponent
+%% E of the result's leading digit. Rounds the exact expansion (Erlang's
+%% {scientific, N} formats via the libc's correctly-rounded "%.*e") with 30
+%% guard digits, matching decimals_exact/2.
+significant_exact(X, P) ->
+    Sci = float_to_list(X, [{scientific, min(249, P + 30)}]),
+    {Mantissa, E0} = split_exponent(Sci),
+    [IntPart, FracPart] = string:split(Mantissa, "."),
+    {Keep, Rest} = lists:split(P, IntPart ++ FracPart),
+    RoundUp = case Rest of [C | _] when C >= $5 -> true; _ -> false end,
+    Rounded = case RoundUp of
+        true -> integer_to_list(list_to_integer(Keep) + 1);
+        false -> Keep
+    end,
+    case length(Rounded) > P of
+        %% Rounding carried into a new leading digit (e.g. 9.99 -> 10):
+        %% keep P digits and bump the exponent.
+        true -> {lists:sublist(Rounded, P), E0 + 1};
+        false -> {Rounded, E0}
+    end.
+
+%% Split Erlang float text into its mantissa and integer exponent
+%% ("1.5e-7" -> {"1.5", -7}); no exponent part means 0.
+split_exponent(S) ->
+    case string:split(S, "e") of
+        [Mantissa, Exp] -> {Mantissa, list_to_integer(Exp)};
+        [Mantissa] -> {Mantissa, 0}
+    end.
 
 %% float_to_list with {decimals, D} rounds from the float's shortest decimal
 %% representation, double-rounding values like 1.3548387096774195 at 15

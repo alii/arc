@@ -530,7 +530,18 @@ fn number_to_fixed(
         state,
         "toFixed() digits argument must be between 0 and 100",
       )
-    False -> #(state, Ok(JsString(format_non_finite(n, format_to_fixed(_, f)))))
+    False -> {
+      // Step 10: if |x| >= 1e21 the result is ToString(x), not fixed
+      // notation (mirrors number_to_precision's undefined branch), so the
+      // FFI only ever sees fixed-notation magnitudes.
+      let format = fn(x) {
+        case float.absolute_value(x) >=. 1.0e21 {
+          True -> value.format_number_radix(Finite(x), 10)
+          False -> format_to_fixed(x, f)
+        }
+      }
+      #(state, Ok(JsString(format_non_finite(n, format))))
+    }
   }
 }
 
@@ -541,22 +552,27 @@ fn number_to_exponential(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- require_number(this, state, "toExponential")
-  // undefined -> -1 sentinel (format with as many digits as needed).
-  let f_arg = case args {
-    [JsUndefined, ..] | [] -> JsNumber(Finite(-1.0))
-    [v, ..] -> v
-  }
-  use f, state <- arg_to_int(f_arg, 0, state)
-  case f > 100 || f < -1 {
-    True ->
-      state.range_error(
-        state,
-        "toExponential() argument must be between 0 and 100",
-      )
-    False -> #(
+  case args {
+    // Step 6.c: fractionDigits undefined — as many significant digits as
+    // needed to uniquely represent the value ("k is as small as possible").
+    [JsUndefined, ..] | [] -> #(
       state,
-      Ok(JsString(format_non_finite(n, format_to_exponential(_, f)))),
+      Ok(JsString(format_non_finite(n, format_to_exponential_auto))),
     )
+    [v, ..] -> {
+      use f, state <- arg_to_int(v, 0, state)
+      case f < 0 || f > 100 {
+        True ->
+          state.range_error(
+            state,
+            "toExponential() argument must be between 0 and 100",
+          )
+        False -> #(
+          state,
+          Ok(JsString(format_non_finite(n, format_to_exponential(_, f)))),
+        )
+      }
+    }
   }
 }
 
@@ -754,6 +770,12 @@ fn format_to_fixed(x: Float, digits: Int) -> String
 
 @external(erlang, "arc_number_ffi", "format_to_exponential")
 fn format_to_exponential(x: Float, fraction_digits: Int) -> String
+
+/// toExponential() with no fractionDigits argument: shortest-round-trip
+/// digits. A separate entry point (rather than an in-band sentinel) so a
+/// user-passed -1 hits the RangeError check instead of meaning "auto".
+@external(erlang, "arc_number_ffi", "format_to_exponential_auto")
+fn format_to_exponential_auto(x: Float) -> String
 
 @external(erlang, "arc_number_ffi", "format_to_precision")
 fn format_to_precision(x: Float, precision: Int) -> String
