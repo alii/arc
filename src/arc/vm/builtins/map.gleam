@@ -19,9 +19,9 @@
 /// -0→+0 normalization, which the spec requires anyway (§24.1.3.9 step 4).
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iterator
 import arc/vm/heap
-import arc/vm/internal/elements
-import arc/vm/ops/property
+import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, Dispatch, JsBool,
@@ -31,10 +31,7 @@ import arc/vm/value.{
   MapPrototypeValues, ObjectSlot,
 }
 import gleam/dict
-import gleam/int
 import gleam/option.{None, Some}
-import gleam/result
-import gleam/string
 
 // ============================================================================
 // Init — set up Map constructor + Map.prototype
@@ -126,33 +123,38 @@ pub fn dispatch(
 ///   6. If IsCallable(adder) is false, throw a TypeError exception.
 ///   7. Return ? AddEntriesFromIterable(map, iterable, adder).
 ///
-/// Simplifications:
-///   - NewTarget check skipped (VM handles constructor call path).
-///   - For MVP, iterable support only handles arrays of [key, value] pairs.
-///   - Full iterator protocol (Symbol.iterator) not yet implemented.
+/// The NewTarget check is skipped (the VM handles the constructor call path);
+/// everything else is the real spec: `? Get(map, "set")` is observable, and
+/// the iterable goes through §24.1.1.2 AddEntriesFromIterable (a real
+/// GetIterator loop), so `new Map(otherMap)`, generators, Sets of pairs and
+/// custom iterables all work.
 fn map_constructor(
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Step 4: If iterable is undefined or null, return empty map.
-  case args {
-    [] | [JsUndefined, ..] | [value.JsNull, ..] -> {
-      let #(heap, ref) =
-        alloc_map(state.heap, proto, dict.new(), dict.new(), dict.new(), 0)
-      #(State(..state, heap:), Ok(JsObject(ref)))
-    }
-    [iterable, ..] ->
-      // Step 7: AddEntriesFromIterable (simplified — only array of arrays)
-      add_entries_from_iterable(
+  // Steps 2-3: allocate the map with an empty [[MapData]].
+  let #(heap, ref) =
+    alloc_map(state.heap, proto, dict.new(), dict.new(), dict.new(), 0)
+  let state = State(..state, heap:)
+  let map = JsObject(ref)
+  case helpers.first_arg_or_undefined(args) {
+    // Step 4: If iterable is undefined or null, return map.
+    JsUndefined | value.JsNull -> #(state, Ok(map))
+    iterable -> {
+      // Steps 5-6: adder = ? Get(map, "set"); must be callable.
+      use adder, state <- state.try_op(object.get_value_of(
         state,
-        proto,
-        iterable,
-        dict.new(),
-        dict.new(),
-        dict.new(),
-        0,
-      )
+        map,
+        value.Named("set"),
+      ))
+      case helpers.is_callable(state.heap, adder) {
+        False ->
+          state.type_error(state, "'set' property of Map is not a function")
+        // Step 7: ? AddEntriesFromIterable(map, iterable, adder).
+        True -> iterator.add_entries_from_iterable(state, map, iterable, adder)
+      }
+    }
   }
 }
 
@@ -170,144 +172,6 @@ fn alloc_map(
     MapObject(entries:, seqs:, order:, next_seq:),
     proto,
   )
-}
-
-/// Simplified AddEntriesFromIterable — handles array of [key, value] pairs.
-///
-/// ES2024 §24.1.1.2 AddEntriesFromIterable ( target, iterable, adder ):
-///   1. Let iteratorRecord be ? GetIterator(iterable, sync).
-///   2. Repeat,
-///      a. Let next be ? IteratorStepValue(iteratorRecord).
-///      b. If next is done, return target.
-///      c. If next is not an Object, throw a TypeError.
-///      d. Let k be ? Get(next, "0").
-///      e. Let v be ? Get(next, "1").
-///      f. Let status be ? Call(adder, target, « k, v »).
-///
-/// Simplified: only handles Array iterable containing Array pairs.
-fn add_entries_from_iterable(
-  state: State(host),
-  proto: Ref,
-  iterable: JsValue,
-  entries: dict.Dict(MapKey, JsValue),
-  seqs: dict.Dict(MapKey, Int),
-  order: dict.Dict(Int, MapKey),
-  next_seq: Int,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case iterable {
-    JsObject(iter_ref) ->
-      case heap.read_array(state.heap, iter_ref) {
-        Some(#(length, elements)) ->
-          // Iterate through the array entries
-          add_entries_loop(
-            state,
-            proto,
-            elements,
-            0,
-            length,
-            entries,
-            seqs,
-            order,
-            next_seq,
-          )
-        None ->
-          state.type_error(state, "Iterator value is not an entry-like object")
-      }
-    _ -> state.type_error(state, string.inspect(iterable) <> " is not iterable")
-  }
-}
-
-/// §24.1.1.2 steps 4.e-f: read an entry's [key, value]. Arrays use the fast
-/// element store; any other object goes through real [[Get]]s of "0"/"1"
-/// (which may run getters/proxy traps and therefore throw).
-fn read_entry_kv(
-  state: State(host),
-  entry_ref: Ref,
-) -> Result(#(JsValue, JsValue, State(host)), #(JsValue, State(host))) {
-  case heap.read_array(state.heap, entry_ref) {
-    Some(#(_, entry_elems)) ->
-      Ok(#(elements.get(entry_elems, 0), elements.get(entry_elems, 1), state))
-    None -> {
-      use #(key, state) <- result.try(property.get_elem_value(
-        state,
-        entry_ref,
-        value.JsString("0"),
-      ))
-      use #(val, state) <- result.map(property.get_elem_value(
-        state,
-        entry_ref,
-        value.JsString("1"),
-      ))
-      #(key, val, state)
-    }
-  }
-}
-
-/// Loop over array entries for Map constructor.
-fn add_entries_loop(
-  state: State(host),
-  proto: Ref,
-  elements: value.JsElements,
-  idx: Int,
-  length: Int,
-  entries: dict.Dict(MapKey, JsValue),
-  seqs: dict.Dict(MapKey, Int),
-  order: dict.Dict(Int, MapKey),
-  next_seq: Int,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case idx >= length {
-    True -> {
-      // Done — allocate the map with all entries.
-      let #(heap, ref) =
-        alloc_map(state.heap, proto, entries, seqs, order, next_seq)
-      #(State(..state, heap:), Ok(JsObject(ref)))
-    }
-    False -> {
-      let entry = elements.get(elements, idx)
-      // §24.1.1.2 AddEntriesFromIterable steps 4.c-f: any OBJECT is
-      // entry-like — k/v come from Get(entry, "0") / Get(entry, "1").
-      case entry {
-        JsObject(entry_ref) ->
-          case read_entry_kv(state, entry_ref) {
-            Error(#(thrown, state)) -> #(state, Error(thrown))
-            Ok(#(key, val, state)) -> {
-              let map_key = value.js_to_map_key(key)
-              // If key already exists, update value only (keep first-occurrence
-              // insertion position per spec)
-              let #(seqs, order, next_seq) = case
-                dict.has_key(entries, map_key)
-              {
-                True -> #(seqs, order, next_seq)
-                False -> #(
-                  dict.insert(seqs, map_key, next_seq),
-                  dict.insert(order, next_seq, map_key),
-                  next_seq + 1,
-                )
-              }
-              let entries = dict.insert(entries, map_key, val)
-              add_entries_loop(
-                state,
-                proto,
-                elements,
-                idx + 1,
-                length,
-                entries,
-                seqs,
-                order,
-                next_seq,
-              )
-            }
-          }
-        _ ->
-          state.type_error(
-            state,
-            "Iterator value "
-              <> int.to_string(idx)
-              <> " is not an entry-like object",
-          )
-      }
-    }
-  }
 }
 
 // ============================================================================

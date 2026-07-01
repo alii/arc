@@ -12,8 +12,8 @@
 /// points call value.set_live_values to recover forward insertion order.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
+import arc/vm/builtins/iterator
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
@@ -31,7 +31,6 @@ import gleam/dict
 import gleam/float
 import gleam/list
 import gleam/option.{Some}
-import gleam/result
 
 /// Set up Set.prototype and Set constructor.
 pub fn init(
@@ -98,66 +97,52 @@ pub fn dispatch(
 }
 
 /// ES2024 §24.2.1.1 Set ( [ iterable ] )
+///
+///   4. Set set.[[SetData]] to a new empty List.
+///   5. If iterable is either undefined or null, return set.
+///   6. Let adder be ? Get(set, "add").
+///   7. If IsCallable(adder) is false, throw a TypeError exception.
+///   8. Repeat: IteratorStepValue, then ? Call(adder, set, « nextValue »),
+///      closing the iterator if the adder throws.
+///
+/// The iterable goes through the real GetIterator protocol, so
+/// `new Set(otherSet)`, `new Set(map)`, generators and strings all work,
+/// and the (user-overridable) `add` is observably called per value.
 fn construct(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Gather initial values from array argument
-  case args {
-    [JsObject(ref), ..] ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(
-          kind: value.ArrayObject(length:),
-          elements: els,
-          properties:,
-          ..,
-        )) ->
-          case object.has_index_overrides(properties) {
-            // Fast path: dense elements only — read them raw.
-            False ->
-              alloc_new_set_from_values(
-                state,
-                elements.to_list_padded(els, length),
-              )
-            // defineProperty moved an element into the dict (e.g. a getter)
-            // — raw elements would read the hole as undefined. Per-index
-            // Get honors the override; the getter can also resize the
-            // array mid-iteration, so length is re-read each step.
-            True ->
-              case gather_indexed_values(state, ref, 0, []) {
-                Ok(#(values, state)) -> alloc_new_set_from_values(state, values)
-                Error(#(thrown, state)) -> #(state, Error(thrown))
-              }
-          }
-        _ -> alloc_new_set_from_values(state, [])
-      }
-    _ -> alloc_new_set_from_values(state, [])
-  }
-}
-
-/// Collect array values via per-index [[Get]] — the slow path used when an
-/// element has been converted to a dict override (accessor etc.). Mirrors
-/// the array iterator: length is re-read every step because a getter can
-/// push onto or truncate the source array mid-iteration.
-fn gather_indexed_values(
-  state: State(host),
-  ref: Ref,
-  idx: Int,
-  acc: List(JsValue),
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
-  let length =
-    heap.read_array(state.heap, ref)
-    |> option.map(fn(p) { p.0 })
-    |> option.unwrap(0)
-  case idx >= length {
-    True -> Ok(#(list.reverse(acc), state))
-    False -> {
-      use #(v, state) <- result.try(object.get_value_of(
+  // Steps 2-4: allocate the set with an empty [[SetData]].
+  let #(heap, set_ref) =
+    common.alloc_wrapper(
+      state.heap,
+      SetObject(
+        data: dict.new(),
+        seqs: dict.new(),
+        order: dict.new(),
+        next_seq: 0,
+      ),
+      state.builtins.set.prototype,
+    )
+  let state = State(..state, heap:)
+  let set = JsObject(set_ref)
+  case first_arg_or_undefined(args) {
+    // Step 5: If iterable is undefined or null, return set.
+    JsUndefined | value.JsNull -> #(state, Ok(set))
+    iterable -> {
+      // Steps 6-7: adder = ? Get(set, "add"); must be callable.
+      use adder, state <- state.try_op(object.get_value_of(
         state,
-        JsObject(ref),
-        value.Index(idx),
+        set,
+        Named("add"),
       ))
-      gather_indexed_values(state, ref, idx + 1, [v, ..acc])
+      case helpers.is_callable(state.heap, adder) {
+        False ->
+          state.type_error(state, "'add' property of Set is not a function")
+        // Step 8: iterate the iterable's values, calling adder(set, v) for
+        // each one and closing the iterator on any abrupt completion.
+        True -> iterator.add_values_from_iterable(state, set, iterable, adder)
+      }
     }
   }
 }

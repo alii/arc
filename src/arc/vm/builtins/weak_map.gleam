@@ -6,17 +6,16 @@
 /// object identity, `JsSymbol(id)` by symbol identity.
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
 ///
-/// Also hosts the shared weak-collection core (`WeakKind`, `weak_insert`,
-/// `weak_has`, `weak_delete`) used by `weak_set` — Ref-keyed dict
-/// operations parameterized over the heap kind.
+/// Also exports `can_be_held_weakly` (§16.1), the key/member predicate
+/// shared with `weak_set`.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable, list_at}
 import arc/vm/builtins/iterator
 import arc/vm/heap
 import arc/vm/ops/object
-import arc/vm/state.{type ExoticKind, type Heap, type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, type WeakMapNativeFn, Dispatch, Index, JsBool, JsNull,
+  type JsValue, type Ref, type WeakMapNativeFn, Dispatch, JsBool, JsNull,
   JsObject, JsSymbol, JsUndefined, Named, ObjectSlot, WeakMapConstructor,
   WeakMapNative, WeakMapObject, WeakMapPrototypeDelete, WeakMapPrototypeGet,
   WeakMapPrototypeGetOrInsert, WeakMapPrototypeGetOrInsertComputed,
@@ -24,7 +23,7 @@ import arc/vm/value.{
 }
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 
 /// Set up WeakMap.prototype and WeakMap constructor.
 pub fn init(
@@ -83,7 +82,8 @@ pub fn dispatch(
 /// §16.1 CanBeHeldWeakly(v) — true for objects and non-registered Symbols
 /// (a symbol minted by `Symbol.for` lives in the global registry and can
 /// never be collected, so it can't be a weak key).
-fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
+/// Shared with `weak_set`, whose members obey the same predicate.
+pub fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
   case v {
     JsObject(_) -> True
     JsSymbol(id) -> !list.contains(dict.values(state.ctx.symbol_registry), id)
@@ -140,123 +140,10 @@ fn construct(
       case is_callable(state.heap, adder) {
         False ->
           state.type_error(state, "'set' property of WeakMap is not a function")
-        True -> add_entries_from_iterable(state, map, iterable, adder)
+        // Step 7: ? AddEntriesFromIterable(map, iterable, adder).
+        True -> iterator.add_entries_from_iterable(state, map, iterable, adder)
       }
     }
-  }
-}
-
-/// §24.1.1.2 AddEntriesFromIterable(target, iterable, adder) — full
-/// iterator protocol: GetIterator, then per entry Get "0"/"1" and call the
-/// adder, closing the iterator on any abrupt completion inside the loop.
-fn add_entries_from_iterable(
-  state: State(host),
-  target: JsValue,
-  iterable: JsValue,
-  adder: JsValue,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  // §7.4.3 GetIterator(iterable, sync): @@iterator must be callable.
-  use method, state <- state.try_op(object.get_symbol_value_of(
-    state,
-    iterable,
-    value.symbol_iterator,
-  ))
-  case is_callable(state.heap, method) {
-    False ->
-      state.type_error(
-        state,
-        object.inspect(iterable, state.heap) <> " is not iterable",
-      )
-    True -> {
-      use iter, state <- state.try_call(state, method, iterable, [])
-      case iter {
-        JsObject(_) -> {
-          use next, state <- state.try_op(object.get_value_of(
-            state,
-            iter,
-            Named("next"),
-          ))
-          add_entries_loop(state, target, iter, next, adder)
-        }
-        _ ->
-          state.type_error(
-            state,
-            "Result of the Symbol.iterator method is not an object",
-          )
-      }
-    }
-  }
-}
-
-/// One IteratorStepValue + entry processing per iteration. Abrupt
-/// completions from next()/Get(done)/Get(value) propagate without close
-/// (§7.4.8 marks the iterator done); abrupt completions from the entry
-/// reads or the adder call close the iterator first (§24.1.1.2 step 4).
-fn add_entries_loop(
-  state: State(host),
-  target: JsValue,
-  iter: JsValue,
-  next: JsValue,
-  adder: JsValue,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use step, state <- state.try_call(state, next, iter, [])
-  case step {
-    JsObject(_) -> {
-      use done_val, state <- state.try_op(object.get_value_of(
-        state,
-        step,
-        Named("done"),
-      ))
-      case value.is_truthy(done_val) {
-        True -> #(state, Ok(target))
-        False -> {
-          use entry, state <- state.try_op(object.get_value_of(
-            state,
-            step,
-            Named("value"),
-          ))
-          case entry {
-            JsObject(_) -> {
-              use k, state <- or_close(
-                object.get_value_of(state, entry, Index(0)),
-                iter,
-              )
-              use v, state <- or_close(
-                object.get_value_of(state, entry, Index(1)),
-                iter,
-              )
-              use _set_result, state <- or_close(
-                state.call(state, adder, target, [k, v]),
-                iter,
-              )
-              add_entries_loop(state, target, iter, next, adder)
-            }
-            _ ->
-              iterator.close_throw_type(
-                state,
-                iter,
-                "Iterator value "
-                  <> object.inspect(entry, state.heap)
-                  <> " is not an entry object",
-              )
-          }
-        }
-      }
-    }
-    _ -> state.type_error(state, "Iterator result is not an object")
-  }
-}
-
-/// Unwrap an op result, or IteratorClose with the thrown error (original
-/// error wins over any error from the close itself — §7.4.11).
-fn or_close(
-  res: Result(#(a, State(host)), #(JsValue, State(host))),
-  iter: JsValue,
-  cont: fn(a, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case res {
-    Ok(#(v, state)) -> cont(v, state)
-    Error(#(thrown, state)) -> iterator.close_throw(state, iter, thrown)
   }
 }
 
@@ -397,96 +284,4 @@ fn write_data(
 ) -> State(host) {
   let heap = heap.update_kind(state.heap, ref, WeakMapObject(data:))
   State(..state, heap:)
-}
-
-// ---- shared weak-collection core (used by WeakSet) ----
-
-/// How a weak collection is stored on the heap: WeakSet membership is
-/// `Dict(Ref, Bool)` keyed by object Ref.
-pub type WeakKind(host, v) {
-  WeakKind(
-    receiver_err: String,
-    key_err: String,
-    extract: fn(ExoticKind(host)) -> Option(Dict(Ref, v)),
-    rebuild: fn(Dict(Ref, v)) -> ExoticKind(host),
-  )
-}
-
-/// Unwrap `this` as the weak collection recognized by `kind.extract`,
-/// or return a TypeError. CPS-style — call with
-/// `use data, ref, state <- weak_require(this, state, kind)`.
-fn weak_require(
-  this: JsValue,
-  state: State(host),
-  kind: WeakKind(host, v),
-  cont: fn(Dict(Ref, v), Ref, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let found = case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: k, ..)) ->
-          option.map(kind.extract(k), fn(data) { #(data, ref) })
-        _ -> None
-      }
-    _ -> None
-  }
-  case found {
-    Some(#(data, ref)) -> cont(data, ref, state)
-    None -> state.type_error(state, kind.receiver_err)
-  }
-}
-
-/// ES2024 §24.4.3.1 — WeakSet.prototype.add.
-/// Inserts `val` under the first arg's Ref and returns `this`;
-/// TypeError when the first arg is not an object.
-pub fn weak_insert(
-  this: JsValue,
-  args: List(JsValue),
-  val: v,
-  state: State(host),
-  kind: WeakKind(host, v),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- weak_require(this, state, kind)
-  case first_arg_or_undefined(args) {
-    JsObject(key_ref) -> {
-      let data = dict.insert(data, key_ref, val)
-      let heap = heap.update_kind(state.heap, ref, kind.rebuild(data))
-      #(State(..state, heap:), Ok(this))
-    }
-    _ -> state.type_error(state, kind.key_err)
-  }
-}
-
-/// ES2024 §24.4.3.3 — WeakSet.prototype.has.
-pub fn weak_has(
-  this: JsValue,
-  args: List(JsValue),
-  state: State(host),
-  kind: WeakKind(host, v),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, _ref, state <- weak_require(this, state, kind)
-  case first_arg_or_undefined(args) {
-    JsObject(key_ref) -> #(state, Ok(JsBool(dict.has_key(data, key_ref))))
-    _ -> #(state, Ok(JsBool(False)))
-  }
-}
-
-/// ES2024 §24.4.3.2 — WeakSet.prototype.delete.
-pub fn weak_delete(
-  this: JsValue,
-  args: List(JsValue),
-  state: State(host),
-  kind: WeakKind(host, v),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- weak_require(this, state, kind)
-  case first_arg_or_undefined(args) {
-    JsObject(key_ref) -> {
-      let had = dict.has_key(data, key_ref)
-      let data = dict.delete(data, key_ref)
-      let heap = heap.update_kind(state.heap, ref, kind.rebuild(data))
-      #(State(..state, heap:), Ok(JsBool(had)))
-    }
-    _ -> #(state, Ok(JsBool(False)))
-  }
 }

@@ -15,7 +15,7 @@ import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type IteratorHelperKind, type IteratorNativeFn, type JsValue, type Ref,
   type ZipMember, type ZipMode, Dispatch, Finite, HelperDrop, HelperFilter,
-  HelperFlatMap, HelperMap, HelperTake, Infinity, IteratorConcat,
+  HelperFlatMap, HelperMap, HelperTake, Index, Infinity, IteratorConcat,
   IteratorConcatObject, IteratorConstructor, IteratorFrom, IteratorHelperNext,
   IteratorHelperObject, IteratorHelperReturn, IteratorNative,
   IteratorProtoGetConstructor, IteratorProtoGetToStringTag,
@@ -1350,6 +1350,135 @@ fn iterator_rest_loop(
     Error(thrown) -> #(state, Error(thrown))
     Ok(None) -> state.ok_array(state, list.reverse(acc))
     Ok(Some(v)) -> iterator_rest_loop(state, iter, next, [v, ..acc])
+  }
+}
+
+// ============================================================================
+// Collection-constructor abstract ops — §24.1.1.2 AddEntriesFromIterable and
+// the value-iteration analogue used by the Set/WeakSet constructors. These
+// are the ONE place the Map/WeakMap/Set/WeakSet constructors feed their
+// iterable argument through: a real GetIterator, an observable per-element
+// call of the user-reachable adder (`set` / `add`), and IteratorClose on any
+// abrupt completion inside the loop.
+// ============================================================================
+
+/// §24.1.1.2 AddEntriesFromIterable ( target, iterable, adder ) — full
+/// iterator protocol: GetIterator, then per entry Get "0"/"1" and call the
+/// adder, closing the iterator on any abrupt completion inside the loop.
+/// Used by the Map (§24.1.1.1) and WeakMap (§24.3.1.1) constructors.
+pub fn add_entries_from_iterable(
+  state: State(host),
+  target: JsValue,
+  iterable: JsValue,
+  adder: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use iter_rec, state <- state.try_op(get_iterator_sync(state, iterable))
+  let #(iter, next) = iter_rec
+  add_entries_loop(state, target, iter, next, adder)
+}
+
+/// One IteratorStepValue + entry processing per iteration. Abrupt
+/// completions from next()/Get(done)/Get(value) propagate without close
+/// (§7.4.8 marks the iterator done); abrupt completions from the entry
+/// reads or the adder call close the iterator first (§24.1.1.2 step 4).
+fn add_entries_loop(
+  state: State(host),
+  target: JsValue,
+  iter: JsValue,
+  next: JsValue,
+  adder: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use step, done, state <- iterator_step_result(state, iter, next)
+  case done {
+    True -> #(state, Ok(target))
+    False -> {
+      use entry, state <- state.try_op(object.get_value_of(
+        state,
+        step,
+        Named("value"),
+      ))
+      case entry {
+        JsObject(_) -> {
+          use k, state <- or_close(
+            object.get_value_of(state, entry, Index(0)),
+            iter,
+          )
+          use v, state <- or_close(
+            object.get_value_of(state, entry, Index(1)),
+            iter,
+          )
+          use _set_result, state <- or_close(
+            state.call(state, adder, target, [k, v]),
+            iter,
+          )
+          add_entries_loop(state, target, iter, next, adder)
+        }
+        _ ->
+          close_throw_type(
+            state,
+            iter,
+            "Iterator value "
+              <> object.inspect(entry, state.heap)
+              <> " is not an entry object",
+          )
+      }
+    }
+  }
+}
+
+/// Value-iteration analogue of AddEntriesFromIterable — §24.2.1.1 Set steps
+/// 6-8 / §24.4.1.1 WeakSet steps 5-7: for each iterator value `v`, call
+/// `adder(target, [v])`, closing the iterator if the adder throws
+/// (IfAbruptCloseIterator). Returns `target` on normal completion.
+pub fn add_values_from_iterable(
+  state: State(host),
+  target: JsValue,
+  iterable: JsValue,
+  adder: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use iter_rec, state <- state.try_op(get_iterator_sync(state, iterable))
+  let #(iter, next) = iter_rec
+  add_values_loop(state, target, iter, next, adder)
+}
+
+/// One IteratorStepValue + adder call per iteration. Abrupt completions from
+/// next()/Get(done)/Get(value) propagate without close (§7.4.8); an abrupt
+/// completion from the adder call closes the iterator first.
+fn add_values_loop(
+  state: State(host),
+  target: JsValue,
+  iter: JsValue,
+  next: JsValue,
+  adder: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use step, done, state <- iterator_step_result(state, iter, next)
+  case done {
+    True -> #(state, Ok(target))
+    False -> {
+      use v, state <- state.try_op(object.get_value_of(
+        state,
+        step,
+        Named("value"),
+      ))
+      use _add_result, state <- or_close(
+        state.call(state, adder, target, [v]),
+        iter,
+      )
+      add_values_loop(state, target, iter, next, adder)
+    }
+  }
+}
+
+/// Unwrap an op result, or IteratorClose with the thrown error (original
+/// error wins over any error from the close itself — §7.4.11).
+fn or_close(
+  res: Result(#(a, State(host)), #(JsValue, State(host))),
+  iter: JsValue,
+  cont: fn(a, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case res {
+    Ok(#(v, state)) -> cont(v, state)
+    Error(#(thrown, state)) -> close_throw(state, iter, thrown)
   }
 }
 
