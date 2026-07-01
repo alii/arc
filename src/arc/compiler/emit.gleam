@@ -431,7 +431,7 @@ pub fn emit_module(
   // stale pre-box value.
 
   // Collect and emit hoisted function declarations
-  let #(e, hoisted_funcs) = collect_hoisted_funcs(e, stmts)
+  use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
 
   use e <- result.try(case has_module_using {
@@ -882,7 +882,7 @@ fn single_using_scope(
 /// declarator. None when the head is not a using declaration.
 fn for_of_using_hint(left: ast.ForInit) -> Option(#(String, Bool)) {
   case left {
-    ast.ForInitDeclaration(ast.VariableDeclaration(kind:, declarations:)) ->
+    ast.ForInitDeclaration(kind:, declarations:) ->
       case kind, declarations {
         ast.Using, [ast.VariableDeclarator(ast.IdentifierPattern(name, ..), _)]
         -> Some(#(name, False))
@@ -926,7 +926,8 @@ fn emit_for_of_using_body(
 /// push_loop so labeled break/continue still target the loop.
 fn emit_for_using_classic(
   e: Emitter,
-  decl: ast.Statement,
+  kind: ast.VariableKind,
+  declarations: List(ast.VariableDeclarator),
   condition: Option(ast.Expression),
   update: Option(ast.Expression),
   body: ast.Statement,
@@ -934,7 +935,9 @@ fn emit_for_using_classic(
   let #(e, save) = enter_scope(e, in_block: e.in_block)
   // Line 0 → set_line is a no-op (the enclosing emit_stmt already emitted
   // the IrSetLine for this statement's source line).
-  let head = [ast.StmtWithLine(0, decl)]
+  let head = [
+    ast.StmtWithLine(0, ast.VariableDeclaration(kind:, declarations:)),
+  ]
   let #(e, scope) = build_using_scope(e, head)
   let e = emit_using_prelude(e, scope)
   use e <- result.map({
@@ -1108,7 +1111,7 @@ fn emit_top_level_body(
         emit_ir(e, IrDeclareGlobalLex(name, kind == ConstBinding))
       })
   }
-  let #(e, hoisted_funcs) = collect_hoisted_funcs(e, stmts)
+  use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
   let #(code, constants, children) = finish(e)
@@ -2626,7 +2629,7 @@ fn emit_block(
     }
   })
   let #(e, save) = enter_scope(e, in_block: True)
-  let e = emit_block_declarations(e, body)
+  use e <- result.try(emit_block_declarations(e, body))
   use e <- result.map(case ast_util.has_using_decl(body) {
     // Direct using/await-using declarations: wrap the body in the
     // DisposeResources try/catch/finally so disposal runs on every
@@ -2686,8 +2689,8 @@ fn emit_block_using(
 fn emit_block_declarations(
   e: Emitter,
   body: List(ast.StmtWithLine),
-) -> Emitter {
-  let #(e, funcs) = collect_hoisted_funcs(e, body)
+) -> Result(Emitter, EmitError) {
+  use #(e, funcs) <- result.map(collect_hoisted_funcs(e, body))
   list.fold(funcs, e, fn(e, hf) {
     let #(name, idx) = hf
     let e = emit_ir(e, IrMakeClosure(idx))
@@ -2724,10 +2727,10 @@ fn emit_if(
   use e <- result.try(branch(e, block_wrap_fn_decl(consequent)))
   let e = emit_ir(e, IrJump(end_label))
   let e = emit_ir(e, IrLabel(else_label))
-  let e = case alternate {
-    Some(alt) -> branch(e, block_wrap_fn_decl(alt)) |> result.unwrap(e)
-    None -> none(e)
-  }
+  use e <- result.try(case alternate {
+    Some(alt) -> branch(e, block_wrap_fn_decl(alt))
+    None -> Ok(none(e))
+  })
   Ok(emit_ir(e, IrLabel(end_label)))
 }
 
@@ -2751,8 +2754,7 @@ fn emit_catch_clause(
   case param {
     Some(pattern) -> {
       let #(e, save) = enter_scope(e, in_block: e.in_block)
-      let e =
-        emit_destructuring_bind(e, pattern, CatchBinding) |> result.unwrap(e)
+      use e <- result.try(emit_destructuring_bind(e, pattern, CatchBinding))
       use e <- result.map(emit_body(e))
       leave_scope(e, save)
     }
@@ -2832,33 +2834,33 @@ fn collect_top_lex_names(
 fn collect_hoisted_funcs(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
-) -> #(Emitter, List(#(String, Int))) {
-  let #(e, funcs_rev) =
-    list.fold(stmts, #(e, []), fn(acc, located) {
+) -> Result(#(Emitter, List(#(String, Int))), EmitError) {
+  use #(e, funcs_rev) <- result.map(
+    list.try_fold(stmts, #(e, []), fn(acc, located) {
       let #(e, funcs) = acc
       case ast_util.peel_labels(located.statement) {
         ast.FunctionDeclaration(Some(name), _, params, body, is_gen, is_async) -> {
-          let #(e, child) =
-            compile_function_body(
-              e,
-              Some(name),
-              None,
-              params,
-              body,
-              False,
-              is_gen,
-              is_async,
-              // Function declaration: a constructor unless gen/async.
-              !is_gen && !is_async,
-              opcode.fn_perms,
-              NoFieldInit,
-            )
+          use #(e, child) <- result.map(compile_function_body(
+            e,
+            Some(name),
+            None,
+            params,
+            body,
+            False,
+            is_gen,
+            is_async,
+            // Function declaration: a constructor unless gen/async.
+            !is_gen && !is_async,
+            opcode.fn_perms,
+            NoFieldInit,
+          ))
           let #(e, idx) = add_child_function(e, child)
           #(e, [#(name, idx), ..funcs])
         }
-        _ -> #(e, funcs)
+        _ -> Ok(#(e, funcs))
       }
-    })
+    }),
+  )
   #(e, list.reverse(funcs_rev))
 }
 
@@ -2950,7 +2952,7 @@ fn compile_function_body(
   is_constructor: Bool,
   perms: opcode.SyntaxPerms,
   field_init: FieldInitMode,
-) -> #(Emitter, CompiledChild) {
+) -> Result(#(Emitter, CompiledChild), EmitError) {
   // Consume the next child-function scope id. The analyzer's
   // `declare_stmts_hoist_order` walks each statement list with direct
   // FunctionDeclarations first — the same order `collect_hoisted_funcs`
@@ -3146,18 +3148,19 @@ fn compile_function_body(
   // emit_binding_prologue seeded them at enter_root_scope. The fold below
   // initializes them left to right, so `(x = x)` / `(x = y, y)` defaults
   // throw a ReferenceError on a not-yet-initialized parameter.
-  let e =
-    list.fold(destructured_params, e, fn(e, dp) {
+  use e <- result.try(
+    list.try_fold(destructured_params, e, fn(e, dp) {
       let #(shim, pattern) = dp
       let e = emit_var_get(e, shim)
-      emit_destructuring_bind(e, pattern, LetBinding) |> result.unwrap(e)
-    })
+      emit_destructuring_bind(e, pattern, LetBinding)
+    }),
+  )
 
   // Phase 2b: Bind the trailing rest parameter, if any. Build the array from
   // the args at `arity` and beyond, then bind it (an identifier, or a nested
   // destructuring target like `...[a, b]`). ParamBinding declares the slot.
-  let e = case rest_param {
-    None -> e
+  use e <- result.try(case rest_param {
+    None -> Ok(e)
     Some(rest_target) -> {
       let e = emit_ir(e, IrCreateRestArray(arity))
       // Non-simple lists pre-declared the rest name(s) as TDZ lets above, so
@@ -3167,9 +3170,9 @@ fn compile_function_body(
         True -> LetBinding
         False -> ParamBinding
       }
-      emit_destructuring_bind(e, rest_target, rest_kind) |> result.unwrap(e)
+      emit_destructuring_bind(e, rest_target, rest_kind)
     }
-  }
+  })
 
   // Parameter initialization is done — evals in the body proper run with
   // the body's VariableEnvironment, so the param-scope conflict check no
@@ -3209,7 +3212,7 @@ fn compile_function_body(
   // emit_binding_prologue — before hoisted-func MakeClosure so captured
   // variables are boxed by the time the closure reads them. The actual
   // let/const initializers still run at their statement's position (TDZ).
-  let #(e, hoisted_funcs) = collect_hoisted_funcs(e, stmts)
+  use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
 
   let e =
     list.fold(hoisted_funcs, e, fn(e, hf) {
@@ -3238,24 +3241,22 @@ fn compile_function_body(
     NoFieldInit | FieldInitAfterSuper -> e
   }
 
-  // Emit body statements (for MVP, compilation errors in function bodies are ignored)
-  let e =
-    case body_has_using {
-      False -> emit_stmts(e, stmts)
-      True -> {
-        // Directive prologue stays at function-scope top (already scanned
-        // for "use strict" above); the rest is wrapped in the
-        // DisposeResources try/catch/finally so a `return` inside the body
-        // crosses the gosub barrier and runs disposal before leaving.
-        let #(directives, rest) = ast_util.split_directives(stmts)
-        use e <- result.try(emit_stmts(e, directives))
-        let #(e, scope) = build_using_scope(e, rest)
-        let e = emit_using_prelude(e, scope)
-        use e <- emit_using_try_wrap(e, scope)
-        emit_using_body(e, rest, scope)
-      }
+  // Emit body statements.
+  use e <- result.try(case body_has_using {
+    False -> emit_stmts(e, stmts)
+    True -> {
+      // Directive prologue stays at function-scope top (already scanned
+      // for "use strict" above); the rest is wrapped in the
+      // DisposeResources try/catch/finally so a `return` inside the body
+      // crosses the gosub barrier and runs disposal before leaving.
+      let #(directives, rest) = ast_util.split_directives(stmts)
+      use e <- result.try(emit_stmts(e, directives))
+      let #(e, scope) = build_using_scope(e, rest)
+      let e = emit_using_prelude(e, scope)
+      use e <- emit_using_try_wrap(e, scope)
+      emit_using_body(e, rest, scope)
     }
-    |> result.unwrap(e)
+  })
 
   // Close the §10.2.11 step-28 body var-boundary scope (emits nothing —
   // only restores the emitter's scope cursor).
@@ -3337,7 +3338,7 @@ fn compile_function_body(
   // reads a stale local_count and the runtime locals tuple is allocated
   // too small — IrPutLocal on a scratch slot then crashes with
   // `badarg setelement` past the tuple end.
-  #(Emitter(..parent, scope_tree: e.scope_tree), child)
+  Ok(#(Emitter(..parent, scope_tree: e.scope_tree), child))
 }
 
 // §13.2.5.5: Some(n) only for a NAMED function expression — binds `n` in
@@ -3568,21 +3569,21 @@ fn emit_stmt_inner(
     // through to the inner push_loop so labeled break/continue still
     // target the loop.
     ast.ForStatement(
-      init: Some(ast.ForInitDeclaration(
-        ast.VariableDeclaration(kind: ast.Using, ..) as decl,
-      )),
+      init: Some(ast.ForInitDeclaration(kind: ast.Using as kind, declarations:)),
       condition:,
       update:,
       body:,
     )
     | ast.ForStatement(
         init: Some(ast.ForInitDeclaration(
-          ast.VariableDeclaration(kind: ast.AwaitUsing, ..) as decl,
+          kind: ast.AwaitUsing as kind,
+          declarations:,
         )),
         condition:,
         update:,
         body:,
-      ) -> emit_for_using_classic(e, decl, condition, update, body)
+      ) ->
+      emit_for_using_classic(e, kind, declarations, condition, update, body)
 
     ast.ForStatement(init, condition, update, body) -> {
       let #(e, save) =
@@ -3592,9 +3593,12 @@ fn emit_stmt_inner(
           use e <- result.map(emit_expr(e, expr))
           #(emit_ir(e, IrPop), [])
         }
-        Some(ast.ForInitDeclaration(decl)) -> {
-          use e <- result.map(emit_stmt(e, decl))
-          #(e, ast_util.for_let_names(decl))
+        Some(ast.ForInitDeclaration(kind:, declarations:)) -> {
+          use e <- result.map(emit_stmt(
+            e,
+            ast.VariableDeclaration(kind:, declarations:),
+          ))
+          #(e, ast_util.for_let_names(kind, declarations))
         }
         // ForInitPattern only appears in for-in/for-of heads.
         Some(ast.ForInitPattern(_)) | None -> Ok(#(e, []))
@@ -4059,13 +4063,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_ir(e, IrBinOp(translate_binop(op)))
     }
 
-    // Logical expressions: `&&` / `||` / `??` short-circuit. The parser only
-    // ever builds LogicalExpression with one of those three ops, so the
-    // shared short-circuit helper covers every case.
+    // Logical expressions: `&&` / `||` / `??` short-circuit.
     ast.LogicalExpression(_, op, left, right) -> {
       let #(e, end_label) = fresh_label(e)
       use e <- result.try(emit_expr(e, left))
-      use e <- result.try(emit_short_circuit_test(e, op, end_label))
+      let e = emit_short_circuit_test(e, op, end_label)
       let e = emit_ir(e, IrPop)
       use e <- result.map(emit_expr(e, right))
       emit_ir(e, IrLabel(end_label))
@@ -4247,10 +4249,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // §13.15.2 logical assignment: x &&= v, x ||= v, x ??= v. Must precede
     // the generic compound-assignment branches (compound_to_binop has no
     // BinOpKind for these — they short-circuit instead).
-    ast.AssignmentExpression(_, ast.LogicalAndAssign as op, lhs, right)
-    | ast.AssignmentExpression(_, ast.LogicalOrAssign as op, lhs, right)
-    | ast.AssignmentExpression(_, ast.NullishCoalesceAssign as op, lhs, right) ->
-      emit_logical_assign(e, op, lhs, right)
+    ast.AssignmentExpression(_, ast.LogicalAndAssign, lhs, right) ->
+      emit_logical_assign(e, ast.LogicalAnd, lhs, right)
+    ast.AssignmentExpression(_, ast.LogicalOrAssign, lhs, right) ->
+      emit_logical_assign(e, ast.LogicalOr, lhs, right)
+    ast.AssignmentExpression(_, ast.NullishCoalesceAssign, lhs, right) ->
+      emit_logical_assign(e, ast.NullishCoalescing, lhs, right)
 
     // Assignment to identifier — emit_named_expr so anonymous fn/class RHS
     // gets the binding name (§13.15.2 step 1.c NamedEvaluation).
@@ -4557,11 +4561,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Function expression
     ast.FunctionExpression(_, name, _, params, body, is_gen, is_async) ->
-      Ok(emit_function_closure(e, name, params, body, is_gen, is_async, True))
+      emit_function_closure(e, name, params, body, is_gen, is_async, True)
 
     // Arrow function expression
     ast.ArrowFunctionExpression(_, params, body, is_async) ->
-      Ok(emit_arrow_closure(e, None, params, body, is_async))
+      emit_arrow_closure(e, None, params, body, is_async)
 
     // `this` — non-arrows own the slot; arrows resolve it as a capture from
     // the nearest enclosing non-arrow.
@@ -4767,7 +4771,7 @@ fn emit_switch(
   // walks the SAME hoist order via ast_util.switch_emit_groups.
   let #(case_stmts, _decls, _rest) = ast_util.switch_emit_groups(cases)
   let #(e, save) = enter_scope(e, in_block: True)
-  let e = emit_block_declarations(e, case_stmts)
+  use e <- result.try(emit_block_declarations(e, case_stmts))
 
   // Allocate labels: each non-default case gets a "found" trampoline label
   // and a "body" label. Default cases only get a "body" label.
@@ -4802,29 +4806,26 @@ fn emit_switch(
 
   // Phase 1: Emit comparison jumps
   // For each case with a test: Dup discriminant, emit test, StrictEq, JumpIfTrue(found_N)
-  let #(e, default_body_label) =
-    list.fold(labelled_cases, #(e, option.None), fn(acc, entry) {
+  use #(e, default_body_label) <- result.try(
+    list.try_fold(labelled_cases, #(e, option.None), fn(acc, entry) {
       let #(e, default_lbl) = acc
       let #(c, #(body_lbl, found_lbl)) = entry
       case c {
         ast.SwitchCase(Some(test_expr), _) -> {
           let e = emit_ir(e, IrDup)
-          case emit_expr(e, test_expr) {
-            Ok(e) -> {
-              let e = emit_ir(e, IrBinOp(opcode.StrictEq))
-              let found_lbl = option.unwrap(found_lbl, end_label)
-              let e = emit_ir(e, IrJumpIfTrue(found_lbl))
-              #(e, default_lbl)
-            }
-            Error(_) -> #(e, default_lbl)
-          }
+          use e <- result.map(emit_expr(e, test_expr))
+          let e = emit_ir(e, IrBinOp(opcode.StrictEq))
+          let found_lbl = option.unwrap(found_lbl, end_label)
+          let e = emit_ir(e, IrJumpIfTrue(found_lbl))
+          #(e, default_lbl)
         }
         ast.SwitchCase(None, _) -> {
           // Default case — record its body label
-          #(e, Some(body_lbl))
+          Ok(#(e, Some(body_lbl)))
         }
       }
-    })
+    }),
+  )
 
   // No match: pop discriminant and jump to default body or end
   let e = emit_ir(e, IrPop)
@@ -4845,15 +4846,15 @@ fn emit_switch(
     })
 
   // Phase 3: Emit case bodies (fall-through between them)
-  let e =
-    list.fold(labelled_cases, e, fn(e, entry) {
+  use e <- result.try(
+    list.try_fold(labelled_cases, e, fn(e, entry) {
       let #(c, #(body_lbl, _found_lbl)) = entry
       let e = emit_ir(e, IrLabel(body_lbl))
       case c {
-        ast.SwitchCase(_, consequent) ->
-          emit_stmts(e, consequent) |> result.unwrap(e)
+        ast.SwitchCase(_, consequent) -> emit_stmts(e, consequent)
       }
-    })
+    }),
+  )
 
   let e = emit_ir(e, IrLabel(end_label))
   let e = leave_scope(e, save)
@@ -4890,7 +4891,7 @@ fn emit_named_expr(
     // Anonymous function expression → bake name (no self-name binding —
     // §8.4 NamedEvaluation does not create one)
     ast.FunctionExpression(_, None, _, params, body, is_gen, is_async) ->
-      Ok(emit_function_closure(
+      emit_function_closure(
         e,
         Some(name),
         params,
@@ -4898,10 +4899,10 @@ fn emit_named_expr(
         is_gen,
         is_async,
         False,
-      ))
+      )
     // Arrow function → bake name
     ast.ArrowFunctionExpression(_, params, body, is_async) ->
-      Ok(emit_arrow_closure(e, Some(name), params, body, is_async))
+      emit_arrow_closure(e, Some(name), params, body, is_async)
     // Anonymous class expression → bake `.name` only; NO inner binding
     // (§8.4 NamedEvaluation step 2 — classBinding is undefined).
     ast.ClassExpression(_, None, _, super_class, body) ->
@@ -4913,8 +4914,10 @@ fn emit_named_expr(
 
 /// Register a compiled child function on the emitter and emit IrMakeClosure
 /// for its index — the shared tail of every closure-producing helper below.
-fn register_closure(compiled: #(Emitter, CompiledChild)) -> Emitter {
-  let #(e, child) = compiled
+fn register_closure(
+  compiled: Result(#(Emitter, CompiledChild), EmitError),
+) -> Result(Emitter, EmitError) {
+  use #(e, child) <- result.map(compiled)
   let #(e, idx) = add_child_function(e, child)
   emit_ir(e, IrMakeClosure(idx))
 }
@@ -4929,7 +4932,7 @@ fn make_method_closure(
   body: ast.Statement,
   is_gen: Bool,
   is_async: Bool,
-) -> Emitter {
+) -> Result(Emitter, EmitError) {
   compile_function_body(
     e,
     name,
@@ -4959,7 +4962,7 @@ fn emit_function_closure(
   // §13.2.5.5 self-name binding. False for NamedEvaluation-baked names
   // (`var f = function () {}` has no inner `f` binding).
   bind_self: Bool,
-) -> Emitter {
+) -> Result(Emitter, EmitError) {
   let self_name = case bind_self {
     True -> name
     False -> None
@@ -4989,7 +4992,7 @@ fn emit_arrow_closure(
   params: List(ast.Pattern),
   body: ast.ArrowBody,
   is_async: Bool,
-) -> Emitter {
+) -> Result(Emitter, EmitError) {
   let body_stmt = case body {
     ast.ArrowBodyExpression(expr) ->
       ast.BlockStatement([ast.StmtWithLine(0, ast.ReturnStatement(Some(expr)))])
@@ -5024,7 +5027,7 @@ fn emit_method_value(
 ) -> Result(Emitter, EmitError) {
   case value {
     ast.FunctionExpression(_, _, _, params, body, is_gen, is_async) ->
-      Ok(make_method_closure(e, name, params, body, is_gen, is_async))
+      make_method_closure(e, name, params, body, is_gen, is_async)
     _ -> emit_expr(e, value)
   }
 }
@@ -5331,7 +5334,7 @@ fn emit_call_args(
 /// — the two cases with no per-iteration environment.
 fn for_head_lex_names(left: ast.ForInit) -> List(String) {
   case left {
-    ast.ForInitDeclaration(ast.VariableDeclaration(kind, declarators)) ->
+    ast.ForInitDeclaration(kind, declarators) ->
       case kind {
         ast.Let | ast.Const | ast.Using | ast.AwaitUsing ->
           list.flat_map(declarators, fn(d) {
@@ -5340,9 +5343,7 @@ fn for_head_lex_names(left: ast.ForInit) -> List(String) {
           })
         ast.Var -> []
       }
-    ast.ForInitDeclaration(_)
-    | ast.ForInitPattern(_)
-    | ast.ForInitExpression(_) -> []
+    ast.ForInitPattern(_) | ast.ForInitExpression(_) -> []
   }
 }
 
@@ -5717,7 +5718,7 @@ fn emit_for_await_of(
 
 /// Bind the current value (on top of stack) to the for-in/for-of LHS.
 /// The LHS can be:
-///   - ForInitDeclaration(VariableDeclaration(...)) e.g. `for (let x ...)`
+///   - ForInitDeclaration(kind, declarators) e.g. `for (let x ...)`
 ///   - ForInitExpression(expr) e.g. `for (x ...)`, `for (obj.k ...)`,
 ///     `for ([a,b] ...)`, `for ({a} ...)` — destructuring-assign semantics
 ///   - ForInitPattern(pattern) e.g. catch-param-style binding pattern
@@ -5727,7 +5728,7 @@ fn emit_for_lhs_bind(
   left: ast.ForInit,
 ) -> Result(Emitter, EmitError) {
   case left {
-    ast.ForInitDeclaration(ast.VariableDeclaration(kind, declarators)) -> {
+    ast.ForInitDeclaration(kind, declarators) -> {
       let binding_kind = case kind {
         ast.Var -> VarBinding
         ast.Let -> LetBinding
@@ -5741,7 +5742,6 @@ fn emit_for_lhs_bind(
         _ -> Error(Unsupported("for-in/of with multiple declarators"))
       }
     }
-    ast.ForInitDeclaration(_) -> Error(Unsupported("for-in/of left-hand side"))
     ast.ForInitPattern(pattern) ->
       emit_destructuring_bind(e, pattern, VarBinding)
     // Assignment-target LHS: `for (x of …)`, `for (obj.k of …)`,
@@ -6622,8 +6622,6 @@ fn translate_binop(op: ast.BinaryOp) -> opcode.BinOpKind {
     ast.BitwiseXor -> opcode.BitXor
     ast.In -> opcode.In
     ast.InstanceOf -> opcode.InstanceOf
-    // Logical ops should not reach here (handled separately)
-    ast.LogicalAnd | ast.LogicalOr | ast.NullishCoalescing -> opcode.Add
   }
 }
 
@@ -6667,7 +6665,7 @@ fn compound_to_binop(op: ast.AssignmentOp) -> Result(opcode.BinOpKind, Nil) {
 /// fn/class RHS is named after the variable), same as plain `=`.
 fn emit_logical_assign(
   e: Emitter,
-  op: ast.AssignmentOp,
+  op: ast.LogicalOp,
   lhs: ast.Expression,
   right: ast.Expression,
 ) -> Result(Emitter, EmitError) {
@@ -6676,7 +6674,7 @@ fn emit_logical_assign(
       let #(e, end_label) = fresh_label(e)
       with_identifier_lref(e, name, fn(e) {
         let e = emit_var_ref_get(e, name)
-        use e <- result.try(emit_logical_assign_test(e, op, end_label))
+        let e = emit_short_circuit_test(e, op, end_label)
         // Test passed: drop the old value, evaluate RHS, write, leave RHS.
         let e = emit_ir(e, IrPop)
         emit_named_expr(e, right, name)
@@ -6707,14 +6705,14 @@ fn emit_logical_assign(
 /// put-args to nip on the short-circuit path so [old, …put-args] → [old].
 fn emit_logical_assign_member(
   e: Emitter,
-  op: ast.AssignmentOp,
+  op: ast.LogicalOp,
   right: ast.Expression,
   put: fn(Emitter) -> Emitter,
   kept: Int,
 ) -> Result(Emitter, EmitError) {
   let #(e, short_label) = fresh_label(e)
   let #(e, end_label) = fresh_label(e)
-  use e <- result.try(emit_logical_assign_test(e, op, short_label))
+  let e = emit_short_circuit_test(e, op, short_label)
   let e = emit_ir(e, IrPop)
   use e <- result.map(emit_expr(e, right))
   e
@@ -6731,41 +6729,21 @@ fn emit_logical_assign_member(
 /// (value kept) when it doesn't — caller pops and evaluates the RHS.
 fn emit_short_circuit_test(
   e: Emitter,
-  op: ast.BinaryOp,
+  op: ast.LogicalOp,
   short_label: Int,
-) -> Result(Emitter, EmitError) {
+) -> Emitter {
   let e = emit_ir(e, IrDup)
   case op {
-    ast.LogicalAnd -> Ok(emit_ir(e, IrJumpIfFalse(short_label)))
-    ast.LogicalOr -> Ok(emit_ir(e, IrJumpIfTrue(short_label)))
+    ast.LogicalAnd -> emit_ir(e, IrJumpIfFalse(short_label))
+    ast.LogicalOr -> emit_ir(e, IrJumpIfTrue(short_label))
     // No jump-if-not-nullish op, so hop over an unconditional short jump.
     ast.NullishCoalescing -> {
       let #(e, go_label) = fresh_label(e)
-      Ok(
-        e
-        |> emit_ir(IrJumpIfNullish(go_label))
-        |> emit_ir(IrJump(short_label))
-        |> emit_ir(IrLabel(go_label)),
-      )
+      e
+      |> emit_ir(IrJumpIfNullish(go_label))
+      |> emit_ir(IrJump(short_label))
+      |> emit_ir(IrLabel(go_label))
     }
-    _ -> Error(Unsupported("logical op"))
-  }
-}
-
-/// `emit_short_circuit_test` keyed on the logical-assignment operator.
-fn emit_logical_assign_test(
-  e: Emitter,
-  op: ast.AssignmentOp,
-  short_label: Int,
-) -> Result(Emitter, EmitError) {
-  case op {
-    ast.LogicalAndAssign ->
-      emit_short_circuit_test(e, ast.LogicalAnd, short_label)
-    ast.LogicalOrAssign ->
-      emit_short_circuit_test(e, ast.LogicalOr, short_label)
-    ast.NullishCoalesceAssign ->
-      emit_short_circuit_test(e, ast.NullishCoalescing, short_label)
-    _ -> Error(Unsupported("assignment op"))
   }
 }
 
@@ -6893,34 +6871,32 @@ fn compile_class_body(
   // (FieldInitAfterSuper); base ctors call it before user code runs
   // (FieldInitAtStart, §10.2.2 [[Construct]] step 6). Constructors cannot be
   // generators or async (spec forbids it).
-  let #(e, init_idx) =
-    compile_class_init_fn(
-      e,
-      list.append(
-        private_method_init_stmts(instance_methods),
-        field_init_stmts(instance_fields),
-      ),
-    )
+  use #(e, init_idx) <- result.try(compile_class_init_fn(
+    e,
+    list.append(
+      private_method_init_stmts(instance_methods),
+      field_init_stmts(instance_fields),
+    ),
+  ))
   let #(ctor_perms, field_init) = case super_class {
     Some(_) -> #(opcode.derived_ctor_perms, FieldInitAfterSuper)
     None -> #(opcode.method_perms, FieldInitAtStart)
   }
-  let #(e, child) =
-    compile_function_body(
-      e,
-      name,
-      None,
-      ctor_params,
-      ctor_body,
-      False,
-      False,
-      False,
-      // Class constructor — IS a constructor.
-      True,
-      ctor_perms,
-      option.map(init_idx, fn(_) { field_init })
-        |> option.unwrap(NoFieldInit),
-    )
+  use #(e, child) <- result.try(compile_function_body(
+    e,
+    name,
+    None,
+    ctor_params,
+    ctor_body,
+    False,
+    False,
+    False,
+    // Class constructor — IS a constructor.
+    True,
+    ctor_perms,
+    option.map(init_idx, fn(_) { field_init })
+      |> option.unwrap(NoFieldInit),
+  ))
   let child =
     CompiledChild(
       ..child,
@@ -6984,11 +6960,13 @@ fn compile_class_body(
   // step 25). After methods so the init fn's [[HomeObject]] = proto sees them
   // via super.method(). Stack: [ctor] → [ctor].
   let e = emit_attach_field_init(e, init_idx)
-  let #(e, static_init_idx) =
-    compile_class_init_fn(e, static_init_stmts(static_elements))
+  use #(e, static_init_idx) <- result.map(compile_class_init_fn(
+    e,
+    static_init_stmts(static_elements),
+  ))
 
   // Stack: [ctor]
-  Ok(#(e, static_init_idx))
+  #(e, static_init_idx)
 }
 
 /// Spec default constructor body: `super(...arguments)` for derived classes,
@@ -7031,25 +7009,24 @@ fn default_ctor_body(super_class: Option(ast.Expression)) -> ast.Statement {
 fn compile_class_init_fn(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
-) -> #(Emitter, Option(Int)) {
+) -> Result(#(Emitter, Option(Int)), EmitError) {
   case stmts {
-    [] -> #(e, None)
+    [] -> Ok(#(e, None))
     _ -> {
-      let #(e, child) =
-        compile_function_body(
-          e,
-          None,
-          None,
-          [],
-          ast.BlockStatement(stmts),
-          False,
-          False,
-          False,
-          // Synthetic field initializer — never directly constructible.
-          False,
-          opcode.field_init_perms,
-          NoFieldInit,
-        )
+      use #(e, child) <- result.map(compile_function_body(
+        e,
+        None,
+        None,
+        [],
+        ast.BlockStatement(stmts),
+        False,
+        False,
+        False,
+        // Synthetic field initializer — never directly constructible.
+        False,
+        opcode.field_init_perms,
+        NoFieldInit,
+      ))
       let #(e, idx) = add_child_function(e, child)
       #(e, Some(idx))
     }
@@ -7123,8 +7100,14 @@ fn emit_class_methods(
         ast.MethodMethod | ast.MethodConstructor -> name
       }
       use e <- with_method_target(e, on_prototype)
-      let e =
-        make_method_closure(e, Some(fn_name), params, body, is_gen, is_async)
+      use e <- result.map(make_method_closure(
+        e,
+        Some(fn_name),
+        params,
+        body,
+        is_gen,
+        is_async,
+      ))
       let e = emit_ir(e, IrMakeMethod)
       let e = case on_prototype {
         True -> emit_var_init(e, ast_util.private_fn_const(kind, name))
@@ -7139,7 +7122,7 @@ fn emit_class_methods(
           |> emit_ir(define)
         }
       }
-      Ok(e)
+      e
     }
     // Static-string key: name() {}, "name"() {}, get name() {}, set name(v) {}
     ast.ClassMethod(
@@ -7172,9 +7155,15 @@ fn emit_class_methods(
         )
       }
       use e <- with_method_target(e, on_prototype)
-      let e =
-        make_method_closure(e, Some(fn_name), params, body, is_gen, is_async)
-      Ok(emit_ir(e, define_op))
+      use e <- result.map(make_method_closure(
+        e,
+        Some(fn_name),
+        params,
+        body,
+        is_gen,
+        is_async,
+      ))
+      emit_ir(e, define_op)
     }
     // Computed key or numeric-literal key (`[expr]() {}`, `0b10() {}`).
     // Function name left None — SetFunctionName from runtime keys is not yet
@@ -7186,8 +7175,15 @@ fn emit_class_methods(
       ..,
     ) -> {
       use e <- with_method_target(e, on_prototype)
-      use e <- result.map(emit_expr(e, key))
-      let e = make_method_closure(e, None, params, body, is_gen, is_async)
+      use e <- result.try(emit_expr(e, key))
+      use e <- result.map(make_method_closure(
+        e,
+        None,
+        params,
+        body,
+        is_gen,
+        is_async,
+      ))
       case kind {
         ast.MethodGet ->
           emit_ir(e, IrDefineAccessorComputed(opcode.Getter, False))
