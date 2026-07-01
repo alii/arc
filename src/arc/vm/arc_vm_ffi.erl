@@ -113,9 +113,8 @@ array_set_unchecked(Index, Value, Tuple) ->
 %% Cap tuple-backed arrays at 10M elements (~80MB on 64-bit).
 %% JS specs allow arrays up to 2^32-1 but we use a sparse dict for those.
 %% Mirrors limits.max_dense_index / limits.max_iteration in
-%% src/arc/vm/limits.gleam — keep the three in sync. Only array_repeat uses
-%% this define now: tree_array_set no longer guards on it because
-%% elements.set enforces the dense-index policy before the FFI is reached.
+%% src/arc/vm/limits.gleam — keep the three in sync. Used by array_repeat
+%% and as the upper bound of tree_array_set's guard.
 -define(MAX_DENSE_ELEMENTS, 10000000).
 
 array_repeat(Value, Count) when Count =< ?MAX_DENSE_ELEMENTS ->
@@ -221,12 +220,14 @@ tree_array_get_option(Index, A) when Index >= 0 ->
     end;
 tree_array_get_option(_Index, _A) ->
     none.
-%% No upper bound here on purpose: elements.set (the only caller) promotes
-%% to the sparse representation at limits.max_dense_index BEFORE calling us,
-%% so every Index that arrives is 0 =< Index < max_dense_index. There is
-%% deliberately no fallback clause — an out-of-contract index must crash
-%% (function_clause), never be silently discarded as it once was.
-tree_array_set(Index, Value, A) when Index >= 0 ->
+%% elements.set (the only caller) promotes to the sparse representation at
+%% limits.max_dense_index BEFORE calling us, so every Index that arrives is
+%% 0 =< Index < max_dense_index; the guard re-enforces that cap at the FFI
+%% boundary as defense in depth. There is deliberately no fallback clause —
+%% an out-of-contract index must crash (function_clause), never be silently
+%% discarded as it once was.
+tree_array_set(Index, Value, A)
+    when Index >= 0, Index < ?MAX_DENSE_ELEMENTS ->
     array:set(Index, Value, A).
 tree_array_size(A) ->
     array:size(A).
