@@ -380,11 +380,66 @@ pub fn method_body_bindings_are_not_params_test() {
   }
 }
 
+/// Regression: at grammatically committed points the parser must report the
+/// inner ParseError instead of silently backtracking to a different AST (or
+/// to a misleading error at an earlier position). The committed points are:
+/// `extends` (a ClassHeritage LeftHandSideExpression is mandatory), `=` in a
+/// binding pattern (an initializer is mandatory), and `,` in a `for(;;)`
+/// declaration head (another declarator is mandatory).
+pub fn committed_point_parse_errors_test() {
+  let results = [
+    // (a) Class heritage: before the fix `class A extends {#x} {}` silently
+    // became `class A { #x }` followed by an empty block statement.
+    expect_parse_error("class A extends", parser.Script),
+    expect_parse_error("class A extends {#x} {}", parser.Script),
+    expect_parse_error("class A extends (oops {}", parser.Script),
+    // (b) Pattern default: the `=` commits to an initializer expression.
+    expect_parse_error("let [x = ] = y;", parser.Script),
+    expect_parse_error("let {x = } = y;", parser.Script),
+    expect_parse_error("function f(a = ) {}", parser.Script),
+    // (c) Declarator list in a classic for head: `,` commits to a declarator.
+    expect_parse_error("for (var a = 1,;;) {}", parser.Script),
+    expect_parse_error("var a = 1,", parser.Script),
+    // Sanity: the committed constructs still parse when well-formed.
+    expect_parses("class A extends B {}", parser.Script),
+    expect_parses("let [x = 1] = y;", parser.Script),
+    expect_parses("for (var a = 1, b = 2;;) {}", parser.Script),
+  ]
+  let errors =
+    list.filter_map(results, fn(r) {
+      case r {
+        Ok(Nil) -> Error(Nil)
+        Error(reason) -> Ok(reason)
+      }
+    })
+  case errors {
+    [] -> Nil
+    _ -> {
+      list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
+      panic as {
+        int.to_string(list.length(errors))
+        <> " committed-point parse-error cases failed"
+      }
+    }
+  }
+}
+
 /// Parsing `src` must succeed; returns the failure reason otherwise.
 fn expect_parses(src: String, mode: parser.ParseMode) -> Result(Nil, String) {
   case parser.parse(src, mode) {
     Ok(_) -> Ok(Nil)
     Error(err) -> Error(src <> " -> " <> parser.parse_error_to_string(err))
+  }
+}
+
+/// Parsing `src` must fail (with any ParseError).
+fn expect_parse_error(
+  src: String,
+  mode: parser.ParseMode,
+) -> Result(Nil, String) {
+  case parser.parse(src, mode) {
+    Ok(_) -> Error(src <> " -> parsed; expected a SyntaxError")
+    Error(_) -> Ok(Nil)
   }
 }
 
