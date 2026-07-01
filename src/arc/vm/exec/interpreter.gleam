@@ -93,9 +93,9 @@ fn call_fn_callback(
   args: List(JsValue),
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case call_value_to_completion(state, callee, this_val, args) {
-    Ok(#(NormalCompletion(val, _), s)) -> Ok(#(val, s))
-    Ok(#(ThrowCompletion(thrown, _), s)) -> Error(#(thrown, s))
-    Ok(#(YieldCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
+    Ok(#(NormalCompletion(val), s)) -> Ok(#(val, s))
+    Ok(#(ThrowCompletion(thrown), s)) -> Error(#(thrown, s))
+    Ok(#(YieldCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
       panic as "Yield/Await completion should not appear in a re-entrant call"
     Error(vm_err) ->
       panic as { "VM error in re-entrant call: " <> string.inspect(vm_err) }
@@ -106,9 +106,9 @@ fn call_fn_callback(
 /// flow (promise jobs, native re-entry, embedder exports). Routes through
 /// `call_value`, so generator / async / async-generator callees get their
 /// proper [[Call]] semantics — a generator object or promise — instead of
-/// having their bodies executed inline. (Inline execution leaked Yield/Await
-/// completions into contexts that cannot resume them; that was the bug in the
-/// old `event_loop.call_to_completion` closure arm.)
+/// having their bodies executed inline. (An earlier re-entry path ran callee
+/// bodies inline, which leaked Yield/Await completions into contexts that
+/// cannot resume them.)
 ///
 /// A non-callable callee is the legacy pass-through `undefined` (no throw)
 /// that promise reactions and friends rely on.
@@ -117,9 +117,9 @@ fn call_value_to_completion(
   callee: JsValue,
   this_val: JsValue,
   args: List(JsValue),
-) -> Result(#(Completion(host), State(host)), VmError) {
+) -> Result(#(Completion, State(host)), VmError) {
   case helpers.is_callable(state.heap, callee) {
-    False -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
+    False -> Ok(#(NormalCompletion(JsUndefined), state))
     True -> {
       // Sentinel frame, same trick as construct_fn_callback: the call
       // machinery returns to pc+1 = 1, which is Return, so execute_inner
@@ -146,10 +146,7 @@ fn call_value_to_completion(
             Error(vm_err) -> Error(vm_err)
           }
         Error(#(Thrown, thrown, post)) ->
-          Ok(#(
-            ThrowCompletion(thrown, post.heap),
-            merge_back(state, post, post.heap),
-          ))
+          Ok(#(ThrowCompletion(thrown), merge_back(state, post, post.heap)))
         Error(#(StepVmError(vm_err), _, _)) -> Error(vm_err)
         Error(#(step, _, _)) ->
           Error(Unimplemented(
@@ -295,11 +292,11 @@ fn construct_fn_callback(
       case do_construct(isolated, ref, args, [], nt_ref) {
         Ok(entered) ->
           case execute_inner(entered) {
-            Ok(#(NormalCompletion(val, h), final_state)) ->
-              Ok(#(val, merge_back(state, final_state, h)))
-            Ok(#(ThrowCompletion(thrown, h), final_state)) ->
-              Error(#(thrown, merge_back(state, final_state, h)))
-            Ok(#(YieldCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
+            Ok(#(NormalCompletion(val), final_state)) ->
+              Ok(#(val, merge_back(state, final_state, final_state.heap)))
+            Ok(#(ThrowCompletion(thrown), final_state)) ->
+              Error(#(thrown, merge_back(state, final_state, final_state.heap)))
+            Ok(#(YieldCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
               panic as "Yield/Await completion during construct"
             Error(vm_err) ->
               panic as {
@@ -492,7 +489,7 @@ pub fn call_root(
   builtins: Builtins,
   global_object: Ref,
   hooks: state.HostHooks,
-) -> Result(#(Completion(host), State(host)), VmError) {
+) -> Result(#(Completion, State(host)), VmError) {
   let state =
     init_state(empty_template(), heap, builtins, global_object, False, hooks)
   call_value_to_completion(state, callee, this_val, args)
@@ -693,7 +690,7 @@ pub fn read_this_local(state: State(host)) -> JsValue {
 /// no bounds check. Termination flows through the Return handler.
 pub fn execute_inner(
   state: State(host),
-) -> Result(#(Completion(host), State(host)), VmError) {
+) -> Result(#(Completion, State(host)), VmError) {
   fast_loop(
     state,
     state.pc,
@@ -724,7 +721,7 @@ fn fast_loop(
   code: tuple_array.TupleArray(Op),
   constants: tuple_array.TupleArray(JsValue),
   line: Int,
-) -> Result(#(Completion(host), State(host)), VmError) {
+) -> Result(#(Completion, State(host)), VmError) {
   case tuple_array.unsafe_get(pc, code) {
     SetLine(l) ->
       fast_loop(state, pc + 1, stack, locals, hp, code, constants, l)
@@ -1479,13 +1476,12 @@ fn dispatch_slow(
   locals: tuple_array.TupleArray(JsValue),
   hp: Heap(host),
   line: Int,
-) -> Result(#(Completion(host), State(host)), VmError) {
+) -> Result(#(Completion, State(host)), VmError) {
   let state = State(..state, pc:, stack:, locals:, heap: hp, current_line: line)
   let op = tuple_array.unsafe_get(state.pc, state.code)
   case step(state, op) {
     Ok(new_state) -> execute_inner(new_state)
-    Error(#(Done, result, post)) ->
-      Ok(#(NormalCompletion(result, post.heap), post))
+    Error(#(Done, result, post)) -> Ok(#(NormalCompletion(result), post))
     Error(#(StepVmError(err), _, _)) -> Error(err)
     Error(#(Yielded, yielded_value, post)) -> {
       // Generator yielded — build suspended state.
@@ -1530,7 +1526,7 @@ fn dispatch_slow(
           })
         _ -> State(..state, heap:, pc: state.pc + 1)
       }
-      Ok(#(YieldCompletion(yielded_value, heap), suspended_state))
+      Ok(#(YieldCompletion(yielded_value), suspended_state))
     }
     Error(#(Awaited, awaited_value, post)) -> {
       // Async function/generator hit await — pop value, advance pc.
@@ -1545,7 +1541,7 @@ fn dispatch_slow(
           },
           pc: state.pc + 1,
         )
-      Ok(#(AwaitCompletion(awaited_value, heap), suspended_state))
+      Ok(#(AwaitCompletion(awaited_value), suspended_state))
     }
     Error(#(Thrown, thrown_value, post)) -> {
       // Try to unwind to a catch handler. The handler's full post-step state
@@ -1553,7 +1549,7 @@ fn dispatch_slow(
       // before throwing (e.g., undef the iter slot then propagate).
       case unwind_to_catch(post, thrown_value) {
         Some(caught_state) -> execute_inner(caught_state)
-        None -> Ok(#(ThrowCompletion(thrown_value, post.heap), post))
+        None -> Ok(#(ThrowCompletion(thrown_value), post))
       }
     }
   }
@@ -6441,8 +6437,14 @@ fn step_array_iterator_source(
           JsObject(source),
         )),
       )
-      let length = case value.to_number(len_val) {
-        Ok(value.Finite(f)) -> int.max(0, value.float_to_int(f))
+      // §7.1.20 LengthOfArrayLike: ? ToLength(len_val). The trap result may
+      // be an object — ToNumber must run ToPrimitive on it (user valueOf,
+      // which can throw), so go through coerce.js_to_number.
+      use #(len_num, state) <- result.try(
+        state.rethrow(coerce.js_to_number(state, len_val)),
+      )
+      let length = case len_num {
+        value.Finite(f) -> int.max(0, value.float_to_int(f))
         _ -> 0
       }
       case index >= length {

@@ -416,8 +416,8 @@ fn try_is_regexp(
 ///     b. If candidate is searchStr, return i.
 ///  11. Return -1.
 ///
-/// Note: Steps 4-6 use to_number_int which returns None for NaN,
-/// and None maps to len (equivalent to +inf clamped to len).
+/// Note: Steps 4-6 use ? ToNumber (coerce.try_to_number); NaN maps to len
+/// (equivalent to +inf clamped to len).
 fn string_last_index_of(
   this: JsValue,
   args: List(JsValue),
@@ -1992,9 +1992,16 @@ fn string_raw(
   }
   // Step 3: Get(cooked, "raw")
   use raw_val, state <- try_get_of(state, template, "raw")
-  // Step 4: LengthOfArrayLike(literals) — read "length" from raw
+  // Step 4: LengthOfArrayLike(literals) — ? ToLength(? Get(raw, "length")).
+  // ToNumber runs ToPrimitive on an object-valued "length" (its valueOf can
+  // run user code and throw), so it threads State.
   use len_val, state <- try_get_of(state, raw_val, "length")
-  let literal_count = helpers.to_number_int(len_val) |> option.unwrap(0)
+  use len_num, state <- coerce.try_to_number(state, len_val)
+  let literal_count = case len_num {
+    Finite(f) -> value.float_to_int(f)
+    // NaN / ±Infinity: treated as no literals.
+    _ -> 0
+  }
   // Step 5: If literalCount <= 0, return ""
   case literal_count <= 0 {
     True -> #(state, Ok(JsString("")))
@@ -2102,19 +2109,15 @@ fn from_char_code_coerce(
   case args {
     [] -> cont(acc, state)
     [arg, ..rest] -> {
-      // §22.1.2.1 step 2.a: ToUint16(nextCU) → ToNumber → ToPrimitive(number).
-      let prim_result = case arg {
-        JsObject(_) -> coerce.to_primitive(state, arg, coerce.NumberHint)
-        other -> Ok(#(other, state))
+      // §22.1.2.1 step 2.a: ToUint16(nextCU) → ? ToNumber (ToPrimitive on
+      // objects; TypeError on Symbol/BigInt propagates).
+      use num, state <- coerce.try_to_number(state, arg)
+      // §7.1.8 ToUint16: NaN/±0/±Infinity → +0, else truncate mod 2^16.
+      let n = case num {
+        Finite(f) -> value.float_to_int(f)
+        _ -> 0
       }
-      case prim_result {
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(prim, state)) -> {
-          let n = helpers.to_number_int(prim) |> option.unwrap(0)
-          let code = modulo_uint16(n)
-          from_char_code_coerce(rest, state, [code, ..acc], cont)
-        }
-      }
+      from_char_code_coerce(rest, state, [modulo_uint16(n), ..acc], cont)
     }
   }
 }
@@ -2186,10 +2189,12 @@ fn from_code_point_loop(
   case args {
     [] -> #(state, Ok(JsString(string.from_utf_codepoints(list.reverse(acc)))))
     [arg, ..rest] -> {
-      // Step 2a: ToNumber(next) — inline simplified ToNumber
-      case to_number_for_code_point(arg) {
+      // Step 2a: ? ToNumber(next) — ToPrimitive re-entry for objects,
+      // TypeError for Symbol/BigInt (which propagates, per spec).
+      use num, state <- coerce.try_to_number(state, arg)
+      case num {
         // Step 2b: must be integral
-        Ok(Finite(f)) -> {
+        Finite(f) -> {
           let i = value.float_to_int(f)
           case int.to_float(i) == f {
             // Step 2c: must be in [0, 0x10FFFF]
@@ -2208,30 +2213,10 @@ fn from_code_point_loop(
               )
           }
         }
-        Ok(NaN) -> state.range_error(state, "Invalid code point NaN")
-        Ok(_) -> state.range_error(state, "Invalid code point Infinity")
-        // Non-numeric (e.g. NaN from undefined/non-numeric string)
-        Error(Nil) -> state.range_error(state, "Invalid code point NaN")
+        NaN -> state.range_error(state, "Invalid code point NaN")
+        _ -> state.range_error(state, "Invalid code point Infinity")
       }
     }
-  }
-}
-
-/// Simplified ToNumber for fromCodePoint — returns the JsNum or Error(Nil)
-/// for values that would produce NaN from non-obvious sources.
-fn to_number_for_code_point(val: JsValue) -> Result(value.JsNum, Nil) {
-  case val {
-    JsNumber(n) -> Ok(n)
-    JsUndefined -> Error(Nil)
-    value.JsNull -> Ok(Finite(0.0))
-    value.JsBool(True) -> Ok(Finite(1.0))
-    value.JsBool(False) -> Ok(Finite(0.0))
-    JsString(s) ->
-      case int.parse(s) {
-        Ok(n) -> Ok(Finite(int.to_float(n)))
-        Error(Nil) -> Error(Nil)
-      }
-    _ -> Error(Nil)
   }
 }
 

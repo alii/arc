@@ -1,9 +1,10 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
+import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, type MathNativeFn, type Ref, Finite, Infinity, JsNumber,
-  JsString, MathAbs, MathAcos, MathAcosh, MathAsin, MathAsinh, MathAtan,
+  MathAbs, MathAcos, MathAcosh, MathAsin, MathAsinh, MathAtan,
   MathAtan2, MathAtanh, MathCbrt, MathCeil, MathClz32, MathCos, MathCosh,
   MathExp, MathExpm1, MathFloor, MathFround, MathHypot, MathImul, MathLog,
   MathLog10, MathLog1p, MathLog2, MathMax, MathMin, MathNative, MathPow,
@@ -134,9 +135,8 @@ fn math_pow(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let base = helpers.get_num_arg(args, 0, to_number)
-  let exponent = helpers.get_num_arg(args, 1, to_number)
-  #(state, Ok(JsNumber(num_exp(base, exponent))))
+  use base, exponent <- math_binary(args, state)
+  num_exp(base, exponent)
 }
 
 /// Math.abs(x)
@@ -197,16 +197,20 @@ fn math_extremum(
   dominant dominant: value.JsNum,
   keep_acc keep_acc: fn(Float, Float) -> Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // §21.3.2.24/25 step 1: ? ToNumber every argument (in order) BEFORE the
+  // fold — a later argument's valueOf must still run (and may throw) even
+  // when an earlier one was already NaN.
+  use nums, state <- coerce_args(args, state)
   let result =
-    list.fold(args, seed, fn(acc, arg) {
-      case acc, to_number(arg) {
+    list.fold(nums, seed, fn(acc, num) {
+      case acc, num {
         NaN, _ | _, NaN -> NaN
         Finite(a), Finite(b) ->
           case keep_acc(a, b) {
             True -> acc
             False -> Finite(b)
           }
-        a, num if a == seed -> num
+        a, n if a == seed -> n
         _, b if b == seed -> acc
         _, _ -> dominant
       }
@@ -233,9 +237,8 @@ fn math_atan2(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let y = helpers.get_num_arg(args, 0, to_number)
-  let x = helpers.get_num_arg(args, 1, to_number)
-  let result = case y, x {
+  use y, x <- math_binary(args, state)
+  case y, x {
     NaN, _ | _, NaN -> NaN
     Finite(yv), Finite(xv) -> Finite(ffi_math_atan2(yv, xv))
     Finite(yv), Infinity ->
@@ -255,7 +258,6 @@ fn math_atan2(
     NegInfinity, Infinity -> Finite(ffi_math_atan2(-1.0, 1.0))
     NegInfinity, NegInfinity -> Finite(ffi_math_atan2(-1.0, -1.0))
   }
-  #(state, Ok(JsNumber(result)))
 }
 
 /// Math.exp(x)
@@ -326,7 +328,8 @@ fn math_hypot(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let nums = list.map(args, to_number)
+  // §21.3.2.18 step 1: ? ToNumber every argument, in order.
+  use nums, state <- coerce_args(args, state)
   // Classify in one pass: track presence of ±∞, NaN, and running sum of squares.
   let #(inf, nan, sum_sq) =
     list.fold(nums, #(False, False, 0.0), fn(acc, n) {
@@ -350,12 +353,12 @@ fn math_clz32(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let x = helpers.get_num_arg(args, 0, to_number)
+  use x <- math_unary(args, state)
   let n = case x {
     Finite(f) -> to_uint32(f)
     _ -> 0
   }
-  #(state, Ok(value.from_int(count_leading_zeros_32(n))))
+  Finite(int.to_float(count_leading_zeros_32(n)))
 }
 
 /// Math.imul(a, b) — 32-bit integer multiplication
@@ -363,8 +366,7 @@ fn math_imul(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let a = helpers.get_num_arg(args, 0, to_number)
-  let b = helpers.get_num_arg(args, 1, to_number)
+  use a, b <- math_binary(args, state)
   let a32 = case a {
     Finite(f) -> to_int32(f)
     _ -> 0
@@ -373,8 +375,7 @@ fn math_imul(
     Finite(f) -> to_int32(f)
     _ -> 0
   }
-  let result = to_int32(int.to_float(a32 * b32))
-  #(state, Ok(value.from_int(result)))
+  Finite(int.to_float(to_int32(int.to_float(a32 * b32))))
 }
 
 /// Math.expm1(x) — e^x - 1 (more precise for small x)
@@ -486,13 +487,71 @@ fn math_atanh(
 // ============================================================================
 
 /// Apply a unary JsNum->JsNum function to the first arg.
+///
+/// §7.1.4 ToNumber via coerce.try_to_number: ToPrimitive runs on object
+/// arguments (so `Math.abs({valueOf(){return -5}})` is 5) and Symbol/BigInt
+/// arguments throw a TypeError, which propagates through the Result.
 fn math_unary(
   args: List(JsValue),
   state: State(host),
   apply: fn(value.JsNum) -> value.JsNum,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let x = helpers.get_num_arg(args, 0, to_number)
+  use x, state <- coerce.try_to_number(
+    state,
+    helpers.first_arg_or_undefined(args),
+  )
   #(state, Ok(JsNumber(apply(x))))
+}
+
+/// Apply a binary JsNum op to the first two args, coercing each in argument
+/// order with §7.1.4 ToNumber (same ToPrimitive/TypeError behaviour as
+/// math_unary — the second argument is not coerced if the first throws).
+fn math_binary(
+  args: List(JsValue),
+  state: State(host),
+  apply: fn(value.JsNum, value.JsNum) -> value.JsNum,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use a, state <- coerce.try_to_number(
+    state,
+    helpers.first_arg_or_undefined(args),
+  )
+  use b, state <- coerce.try_to_number(state, second_arg_or_undefined(args))
+  #(state, Ok(JsNumber(apply(a, b))))
+}
+
+fn second_arg_or_undefined(args: List(JsValue)) -> JsValue {
+  case args {
+    [_, v, ..] -> v
+    _ -> value.JsUndefined
+  }
+}
+
+/// §7.1.4 ToNumber over a whole argument list, left to right, threading
+/// State. The first coercion that throws aborts the rest (its `use`
+/// short-circuits), matching the spec's argument-by-argument `?` points.
+fn coerce_args(
+  args: List(JsValue),
+  state: State(host),
+  cont: fn(List(value.JsNum), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  coerce_args_loop(args, state, [], cont)
+}
+
+fn coerce_args_loop(
+  args: List(JsValue),
+  state: State(host),
+  acc: List(value.JsNum),
+  cont: fn(List(value.JsNum), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case args {
+    [] -> cont(list.reverse(acc), state)
+    [arg, ..rest] -> {
+      use n, state <- coerce.try_to_number(state, arg)
+      coerce_args_loop(rest, state, [n, ..acc], cont)
+    }
+  }
 }
 
 /// Like finite_passthrough but preserves -0.0 (for sinh, asinh, etc.)
@@ -564,20 +623,6 @@ fn domain_unit(
   case x {
     Finite(n) if n <. -1.0 || n >. 1.0 -> NaN
     Finite(n) -> Finite(f(n))
-    _ -> NaN
-  }
-}
-
-/// Simplified ToNumber for Math operations: like value.to_number but
-/// non-coercible values (Symbol, BigInt) become NaN instead of erroring.
-pub fn to_number(val: JsValue) -> value.JsNum {
-  case val {
-    JsNumber(n) -> n
-    value.JsUndefined -> NaN
-    value.JsNull -> Finite(0.0)
-    value.JsBool(True) -> Finite(1.0)
-    value.JsBool(False) -> Finite(0.0)
-    JsString(s) -> value.string_to_number(s)
     _ -> NaN
   }
 }

@@ -68,7 +68,7 @@ import gleam/string
 // ============================================================================
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(Completion(host), State(host)), VmError)
+  fn(State(host)) -> Result(#(Completion, State(host)), VmError)
 
 pub type UnwindToCatchFn(host) =
   fn(State(host), JsValue) -> Option(State(host))
@@ -292,7 +292,7 @@ fn call_generator_function(
   case
     execute_inner(generator_initial_state(state, callee_template, args, locals))
   {
-    Ok(#(YieldCompletion(_, _), suspended)) ->
+    Ok(#(YieldCompletion(_), suspended)) ->
       alloc_suspended_generator(
         state,
         suspended,
@@ -309,12 +309,12 @@ fn call_generator_function(
         GeneratorObject,
         state.builtins.generator.prototype,
       )
-    Ok(#(NormalCompletion(_, h), _)) -> {
+    Ok(#(NormalCompletion(_), final_state)) -> {
       // Generator returned without yielding -- shouldn't happen with InitialYield
       // but handle gracefully: create a completed generator
       let #(h, data_ref) =
         heap.alloc(
-          h,
+          final_state.heap,
           GeneratorSlot(
             gen_state: value.Completed,
             func_template: callee_template,
@@ -340,9 +340,9 @@ fn call_generator_function(
         ),
       )
     }
-    Ok(#(ThrowCompletion(thrown, h), _)) ->
-      Error(#(Thrown, thrown, State(..state, heap: h)))
-    Ok(#(AwaitCompletion(_, _), _)) ->
+    Ok(#(ThrowCompletion(thrown), thrown_state)) ->
+      Error(#(Thrown, thrown, State(..state, heap: thrown_state.heap)))
+    Ok(#(AwaitCompletion(_), _)) ->
       Error(#(
         StepVmError(Unimplemented("await in sync generator")),
         JsUndefined,
@@ -367,7 +367,7 @@ fn call_async_generator_function(
   case
     execute_inner(generator_initial_state(state, callee_template, args, locals))
   {
-    Ok(#(YieldCompletion(_, _), suspended)) ->
+    Ok(#(YieldCompletion(_), suspended)) ->
       alloc_suspended_generator(
         state,
         suspended,
@@ -385,9 +385,9 @@ fn call_async_generator_function(
         AsyncGeneratorObject,
         state.builtins.async_generator.prototype,
       )
-    Ok(#(ThrowCompletion(thrown, h), _)) ->
-      Error(#(Thrown, thrown, State(..state, heap: h)))
-    Ok(#(NormalCompletion(_, _), _)) | Ok(#(AwaitCompletion(_, _), _)) ->
+    Ok(#(ThrowCompletion(thrown), thrown_state)) ->
+      Error(#(Thrown, thrown, State(..state, heap: thrown_state.heap)))
+    Ok(#(NormalCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
       // InitialYield is first op — body never runs before it. Unreachable.
       Error(#(
         StepVmError(Unimplemented("async generator didn't hit InitialYield")),
@@ -461,7 +461,7 @@ fn call_async_function(
 /// to allocate a fresh slot on first await.
 fn finish_async_execution(
   state: State(host),
-  exec_result: Result(#(Completion(host), State(host)), VmError),
+  exec_result: Result(#(Completion, State(host)), VmError),
   promise_data_ref: Ref,
   resolve: JsValue,
   reject: JsValue,
@@ -472,8 +472,9 @@ fn finish_async_execution(
   rest_stack: List(JsValue),
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case exec_result {
-    Ok(#(AwaitCompletion(awaited_value, h2), suspended)) -> {
+    Ok(#(AwaitCompletion(awaited_value), suspended)) -> {
       // Body hit `await` -- save state, set up promise resolution
+      let h2 = suspended.heap
       let saved_try = generators.save_stacks(suspended.try_stack)
       let slot =
         AsyncFunctionSlot(
@@ -499,28 +500,35 @@ fn finish_async_execution(
         )
       Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
-    Ok(#(NormalCompletion(return_value, h2), final_state)) -> {
+    Ok(#(NormalCompletion(return_value), final_state)) -> {
       // Async function completed -- resolve the outer promise through the
       // resolving function (§27.7.5.1 AsyncFunctionStart performs
       // Call(promiseCapability.[[Resolve]], ...)), so a thenable return value
       // is adopted (§27.2.1.3.2) instead of fulfilling with the thenable raw.
-      let state = State(..state.merge_globals(state, final_state, []), heap: h2)
+      let state =
+        State(
+          ..state.merge_globals(state, final_state, []),
+          heap: final_state.heap,
+        )
       use #(_resolved, state) <- result.try(
         state.rethrow(state.call(state, resolve, JsUndefined, [return_value])),
       )
       Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
-    Ok(#(ThrowCompletion(thrown, h2), final_state)) -> {
+    Ok(#(ThrowCompletion(thrown), final_state)) -> {
       // Async function threw -- reject the outer promise
       let state =
         builtins_promise.reject_promise(
-          State(..state.merge_globals(state, final_state, []), heap: h2),
+          State(
+            ..state.merge_globals(state, final_state, []),
+            heap: final_state.heap,
+          ),
           promise_data_ref,
           thrown,
         )
       Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
-    Ok(#(YieldCompletion(_, _), _)) ->
+    Ok(#(YieldCompletion(_), _)) ->
       Error(#(
         StepVmError(Unimplemented("yield in non-generator async function")),
         JsUndefined,
@@ -594,8 +602,7 @@ pub fn call_native_async_resume(
         True -> {
           case unwind_to_catch(exec_state, settled_value) {
             Some(caught_state) -> execute_inner(caught_state)
-            None ->
-              Ok(#(ThrowCompletion(settled_value, exec_state.heap), exec_state))
+            None -> Ok(#(ThrowCompletion(settled_value), exec_state))
           }
         }
       }
@@ -2239,8 +2246,14 @@ fn step_array_iterator_generic(
           JsObject(source),
         )),
       )
-      let length = case value.to_number(len_val) {
-        Ok(value.Finite(f)) -> int.max(0, value.float_to_int(f))
+      // §7.1.20 LengthOfArrayLike: ? ToLength(len_val). The trap result may
+      // be an object — ToNumber must run ToPrimitive on it (user valueOf,
+      // which can throw), so go through coerce.js_to_number.
+      use #(len_num, state) <- result.try(
+        state.rethrow(coerce.js_to_number(state, len_val)),
+      )
+      let length = case len_num {
+        value.Finite(f) -> int.max(0, value.float_to_int(f))
         _ -> 0
       }
       case index >= length {

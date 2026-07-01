@@ -1,6 +1,5 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/builtins/math as builtins_math
 import arc/vm/heap
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State}
@@ -231,11 +230,14 @@ fn parse_int(
   use str, state <- state.try_op(str_result)
   // Steps 6-9: Determine radix R via ToInt32(radix).
   // If R is 0, NaN, or Infinity, default to 10.
+  // Step 6: ToInt32(radix) — arg_to_int performs the full ToNumber
+  // (ToPrimitive on objects, honoring an overridden valueOf).
   let radix_val = case args {
-    [_, r, ..] -> coerce.unwrap_primitive_wrapper(state.heap, r)
+    [_, r, ..] -> r
     _ -> JsUndefined
   }
-  let radix = case arg_to_int(radix_val, 10) {
+  use radix_int, state <- arg_to_int(radix_val, 10, state)
+  let radix = case radix_int {
     0 -> 10
     n -> n
   }
@@ -322,8 +324,9 @@ fn js_is_nan(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
-  // Step 1: Let num be ? ToNumber(number).
-  let num = builtins_math.to_number(val)
+  // Step 1: Let num be ? ToNumber(number) — ToPrimitive re-entry for
+  // objects, TypeError for Symbol/BigInt.
+  use num, state <- coerce.try_to_number(state, val)
   // Steps 2-3: If num is NaN, return true; else false.
   let result = case num {
     NaN -> value.JsBool(True)
@@ -345,8 +348,9 @@ fn js_is_finite(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
-  // Step 1: Let num be ? ToNumber(number).
-  let num = builtins_math.to_number(val)
+  // Step 1: Let num be ? ToNumber(number) — ToPrimitive re-entry for
+  // objects, TypeError for Symbol/BigInt.
+  use num, state <- coerce.try_to_number(state, val)
   // Steps 2-3: If num is finite, return true; else false.
   let result = case num {
     Finite(_) -> value.JsBool(True)
@@ -454,10 +458,11 @@ fn number_to_string(
   // Step 1: Let x be ? thisNumberValue(this value).
   use n, state <- require_number(this, state, "toString")
   // Steps 2-3: radix defaults to 10; undefined -> 10.
-  let radix = case args {
-    [] | [JsUndefined, ..] -> 10
-    [r, ..] -> arg_to_int(r, 10)
+  let radix_arg = case args {
+    [] | [JsUndefined, ..] -> JsNumber(Finite(10.0))
+    [r, ..] -> r
   }
+  use radix, state <- arg_to_int(radix_arg, 10, state)
   // Step 4: If radixMV not in [2, 36], throw RangeError.
   case radix >= 2 && radix <= 36 {
     False ->
@@ -517,10 +522,8 @@ fn number_to_fixed(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- require_number(this, state, "toFixed")
-  let f = case args {
-    [v, ..] -> arg_to_int(v, 0)
-    [] -> 0
-  }
+  // ToIntegerOrInfinity(fractionDigits): undefined -> ToNumber -> NaN -> 0.
+  use f, state <- arg_to_int(helpers.first_arg_or_undefined(args), 0, state)
   case f < 0 || f > 100 {
     True ->
       state.range_error(
@@ -538,10 +541,12 @@ fn number_to_exponential(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- require_number(this, state, "toExponential")
-  let f = case args {
-    [JsUndefined, ..] | [] -> -1
-    [v, ..] -> arg_to_int(v, 0)
+  // undefined -> -1 sentinel (format with as many digits as needed).
+  let f_arg = case args {
+    [JsUndefined, ..] | [] -> JsNumber(Finite(-1.0))
+    [v, ..] -> v
   }
+  use f, state <- arg_to_int(f_arg, 0, state)
   case f > 100 || f < -1 {
     True ->
       state.range_error(
@@ -569,7 +574,7 @@ fn number_to_precision(
       Ok(JsString(value.format_number_radix(n, 10))),
     )
     [v, ..] -> {
-      let p = arg_to_int(v, 0)
+      use p, state <- arg_to_int(v, 0, state)
       case p < 1 || p > 100 {
         True ->
           state.range_error(
@@ -607,11 +612,21 @@ fn require_number(
   }
 }
 
-/// Coerce a JsValue to an integer via ToNumber + truncate, with fallback.
-fn arg_to_int(v: JsValue, default: Int) -> Int {
-  case builtins_math.to_number(v) {
-    Finite(x) -> float.truncate(x)
-    _ -> default
+/// Coerce a JsValue to an integer via §7.1.4 ToNumber + truncate, with a
+/// fallback for NaN/±Infinity. CPS — ToNumber runs ToPrimitive (user
+/// valueOf) on objects and throws a TypeError on Symbol/BigInt, so State is
+/// threaded and the throw propagates:
+///   use i, state <- arg_to_int(v, default, state)
+fn arg_to_int(
+  v: JsValue,
+  default: Int,
+  state: State(host),
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use num, state <- coerce.try_to_number(state, v)
+  case num {
+    Finite(x) -> cont(float.truncate(x), state)
+    _ -> cont(default, state)
   }
 }
 
