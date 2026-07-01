@@ -14,6 +14,7 @@
 //// most once and repeated imports yield the identical namespace / error.
 
 import arc/module
+import arc/module/graph
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/dynamic_import
@@ -158,7 +159,7 @@ fn import_module(
               // A registered namespace alone is not enough: linking (e.g. an
               // earlier `import.defer()`) registers namespaces WITHOUT
               // evaluating. Only short-circuit when the module's body has
-              // completed ("evaluated") or is mid-run ("evaluating" — the
+              // completed (`Evaluated`) or is mid-run (`Evaluating` — the
               // re-entrant import case, which must not re-run the body).
               let status =
                 module.evaluation_status(
@@ -187,20 +188,7 @@ fn evaluate_module(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use source <- with_loaded_source(state, resolved, load)
   case module.compile_bundle(resolved, source, resolve, load) {
-    Error(module.ParseError(msg)) -> syntax_error(state, msg)
-    Error(module.CompileError(msg)) -> syntax_error(state, msg)
-    Error(module.ResolutionError(msg)) -> state.type_error(state, msg)
-    Error(module.LinkError(msg)) -> syntax_error(state, msg)
-    Error(module.EvaluationError(value: thrown, heap:)) -> #(
-      State(..state, heap:),
-      Error(thrown),
-    )
-    Error(module.EvaluationPending(promise_data_ref: _, heap:)) ->
-      // compile_bundle never evaluates — unreachable, but keep the heap.
-      state.type_error(
-        State(..state, heap:),
-        "Failed to compile module '" <> resolved <> "'",
-      )
+    Error(err) -> compile_bundle_rejection(state, resolved, err)
     Ok(bundle) -> {
       // Evaluate WITHOUT draining a nested event loop: this hook runs inside
       // a promise job on the host's own event loop, and a nested drain would
@@ -283,20 +271,7 @@ fn defer_import_module(
         Some(_) | None -> {
           use source <- with_loaded_source(state, resolved, load)
           case module.compile_bundle(resolved, source, resolve, load) {
-            Error(module.ParseError(msg)) -> syntax_error(state, msg)
-            Error(module.CompileError(msg)) -> syntax_error(state, msg)
-            Error(module.ResolutionError(msg)) -> state.type_error(state, msg)
-            Error(module.LinkError(msg)) -> syntax_error(state, msg)
-            Error(module.EvaluationError(value: thrown, heap:)) -> #(
-              State(..state, heap:),
-              Error(thrown),
-            )
-            Error(module.EvaluationPending(promise_data_ref: _, heap:)) ->
-              // compile_bundle never evaluates — unreachable, keep the heap.
-              state.type_error(
-                State(..state, heap:),
-                "Failed to compile module '" <> resolved <> "'",
-              )
+            Error(err) -> compile_bundle_rejection(state, resolved, err)
             Ok(bundle) ->
               case
                 link_bundle_with_registry(
@@ -780,8 +755,8 @@ pub fn evaluate_bundle_with_registry(
       let already_evaluated =
         list.fold(specs, set.new(), fn(acc, spec) {
           case module.evaluation_status(h, global_object, spec) {
-            Some("evaluated") -> set.insert(acc, spec)
-            _ -> acc
+            Some(module.Evaluated) -> set.insert(acc, spec)
+            Some(module.Evaluating) | None -> acc
           }
         })
       let #(evaluated, jobs, result) =
@@ -827,6 +802,37 @@ pub fn evaluate_bundle_with_registry(
         Error(_) -> #(h, jobs, result)
       }
     }
+  }
+}
+
+/// Turn a `module.compile_bundle` failure into the JS-visible rejection value.
+/// Per HostLoadImportedModule: parse failures, source-phase imports and
+/// compile failures reject with a SyntaxError; a request that cannot be
+/// resolved or loaded (or points outside the bundle) rejects with a
+/// TypeError. Evaluation errors carry the already-thrown value as-is.
+fn compile_bundle_rejection(
+  state: State(host),
+  resolved: String,
+  err: module.ModuleError(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case err {
+    module.GraphError(error: graph.ParseFailed(..))
+    | module.GraphError(error: graph.SourcePhaseUnsupported(..))
+    | module.CompileError(..) -> syntax_error(state, module.error_message(err))
+    module.GraphError(error: graph.ResolveFailed(..))
+    | module.GraphError(error: graph.LoadFailed(..))
+    | module.ModuleNotInBundle(..) ->
+      state.type_error(state, module.error_message(err))
+    module.EvaluationError(value: thrown, heap:) -> #(
+      State(..state, heap:),
+      Error(thrown),
+    )
+    // compile_bundle never evaluates — unreachable, but keep the heap.
+    module.EvaluationPending(promise_data_ref: _, heap:) ->
+      state.type_error(
+        State(..state, heap:),
+        "Failed to compile module '" <> resolved <> "'",
+      )
   }
 }
 

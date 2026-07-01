@@ -47,9 +47,8 @@ fn linkable_of(
   files: List(#(String, String)),
 ) -> link.LinkableGraph {
   let g = graph_of(entry, files)
-  dict.map_values(g.modules, fn(specifier, m) {
+  dict.map_values(g.modules, fn(_specifier, m) {
     link.LinkableModule(
-      specifier:,
       import_bindings: m.summary.imports,
       export_entries: m.summary.exports,
       specifier_map: m.specifier_map,
@@ -226,13 +225,14 @@ pub fn exported_names_circular_terminates_test() {
 }
 
 // ---------------------------------------------------------------------------
-// validate — exact SyntaxError strings (parity with the runtime link path)
+// validate — typed LinkErrors + exact SyntaxError strings (parity with the
+// runtime link path)
 // ---------------------------------------------------------------------------
 //
 // These assert byte-for-byte equality with the messages the VM surfaces from
-// `arc/module`'s `check_resolves`. The message embeds the RAW (unresolved)
-// specifier as written in source — `./m`, NOT the resolved `m` — so each graph
-// imports via a `./`-prefixed specifier to prove the raw-vs-resolved choice.
+// `link_error_message`. The message embeds the RAW (unresolved) specifier as
+// written in source — `./m`, NOT the resolved `m` — so each graph imports via
+// a `./`-prefixed specifier to prove the raw-vs-resolved choice.
 
 pub fn validate_missing_export_message_test() {
   let lg =
@@ -241,8 +241,15 @@ pub fn validate_missing_export_message_test() {
       #("m", "export const x = 1;"),
     ])
 
-  assert link.validate(lg)
-    == Error("The requested module './m' does not provide an export named 'z'")
+  let expected =
+    link.UnresolvedExport(
+      requested_module: "./m",
+      export_name: "z",
+      imported_name: "z",
+    )
+  assert link.validate(lg) == Error(expected)
+  assert link.link_error_message(expected)
+    == "The requested module './m' does not provide an export named 'z'"
 }
 
 pub fn validate_ambiguous_export_message_test() {
@@ -259,10 +266,31 @@ pub fn validate_ambiguous_export_message_test() {
   // The self-import `import { x } from './a'` forces resolution of a's own `x`,
   // which is ambiguous across the two `export *` sources. The raw specifier in
   // the message is `./a` (as written), not the resolved `a`.
-  assert link.validate(lg)
-    == Error(
-      "The requested module './a' provides an ambiguous export named 'x'",
+  let expected = link.AmbiguousExport(requested_module: "./a", export_name: "x")
+  assert link.validate(lg) == Error(expected)
+  assert link.link_error_message(expected)
+    == "The requested module './a' provides an ambiguous export named 'x'"
+}
+
+pub fn validate_renaming_reexport_carries_imported_name_test() {
+  // `export { orig as renamed } from './m'` where `./m` has no `orig`:
+  // the SyntaxError names THIS module's export (`renamed`), and the typed
+  // error additionally carries the source-side name (`orig`).
+  let lg =
+    linkable_of("a", [
+      #("a", "export { orig as renamed } from './m';"),
+      #("m", "export const x = 1;"),
+    ])
+
+  let expected =
+    link.UnresolvedExport(
+      requested_module: "./m",
+      export_name: "renamed",
+      imported_name: "orig",
     )
+  assert link.validate(lg) == Error(expected)
+  assert link.link_error_message(expected)
+    == "The requested module './m' does not provide an export named 'renamed'"
 }
 
 pub fn validate_ok_for_clean_graph_test() {

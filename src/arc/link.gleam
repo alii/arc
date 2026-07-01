@@ -2,7 +2,8 @@
 ////
 //// A string-level `ResolveExport` operating on a minimal `LinkableModule`
 //// view — just the three fields the algorithm reads (`import_bindings`,
-//// `export_entries`, `specifier_map`) plus the module's own `specifier`.
+//// `export_entries`, `specifier_map`); a module's identity is its
+//// `LinkableGraph` key, so the record carries no specifier of its own.
 //// The runtime (`arc/module`) projects each `CompiledModule` onto a
 //// `LinkableModule`, builds a `LinkableGraph`, and calls
 //// `resolve_export`/`exported_names`/`validate` — so there is one source of
@@ -22,13 +23,13 @@ import gleam/set.{type Set}
 // The minimal linkable view
 // =============================================================================
 
-/// The string-level projection of a module that ResolveExport needs: its own
-/// resolved specifier plus the three fields the algorithm reads. The VM
+/// The string-level projection of a module that ResolveExport needs: exactly
+/// the three fields the algorithm reads. The module's own resolved specifier
+/// is the `LinkableGraph` key it is stored under, not a field. The VM
 /// projects each `CompiledModule` onto this so the resolve body is decoupled
 /// from bytecode/heap state.
 pub type LinkableModule {
   LinkableModule(
-    specifier: String,
     import_bindings: List(#(String, List(esm.ImportBinding))),
     export_entries: List(esm.ExportEntry),
     specifier_map: Dict(String, String),
@@ -268,9 +269,50 @@ fn exported_names_with(
 // Validation (§16.2.1.6.4) — the VM's link path; exact SyntaxError strings
 // =============================================================================
 
+/// A link-time validation failure (§16.2.1.6.4). Both variants surface to JS
+/// as a SyntaxError whose message is `link_error_message`; callers that need
+/// to distinguish the two cases match the variant instead of the prose.
+pub type LinkError {
+  /// An import or indirect re-export names an export the requested module
+  /// does not provide. `requested_module` is the RAW specifier as written in
+  /// source and `export_name` the name that failed to resolve — both appear
+  /// verbatim in the SyntaxError message. `imported_name` is the name looked
+  /// up in the source module; it differs from `export_name` only for a
+  /// renaming indirect re-export (`export { imported_name as export_name }
+  /// from "requested_module"`).
+  UnresolvedExport(
+    requested_module: String,
+    export_name: String,
+    imported_name: String,
+  )
+  /// Two distinct `export *` sources provide `export_name` (§16.2.1.6.3
+  /// step 7) — the binding is ambiguous.
+  AmbiguousExport(requested_module: String, export_name: String)
+}
+
+/// The exact JS-visible SyntaxError message for a link failure. This is the
+/// only place the prose lives — the runtime, tests, and any tooling all render
+/// through it.
+pub fn link_error_message(e: LinkError) -> String {
+  case e {
+    UnresolvedExport(requested_module:, export_name:, imported_name: _) ->
+      "The requested module '"
+      <> requested_module
+      <> "' does not provide an export named '"
+      <> export_name
+      <> "'"
+    AmbiguousExport(requested_module:, export_name:) ->
+      "The requested module '"
+      <> requested_module
+      <> "' provides an ambiguous export named '"
+      <> export_name
+      <> "'"
+  }
+}
+
 /// Verify every import and indirect re-export in the graph resolves to a
-/// unique binding. Returns the SyntaxError message for the first failure.
-pub fn validate(graph: LinkableGraph) -> Result(Nil, String) {
+/// unique binding. Returns the first failure as a `LinkError`.
+pub fn validate(graph: LinkableGraph) -> Result(Nil, LinkError) {
   list.try_each(dict.to_list(graph), fn(entry) {
     let #(specifier, m) = entry
     use Nil <- result.try(check_imports(graph, m))
@@ -281,7 +323,7 @@ pub fn validate(graph: LinkableGraph) -> Result(Nil, String) {
 fn check_imports(
   graph: LinkableGraph,
   m: LinkableModule,
-) -> Result(Nil, String) {
+) -> Result(Nil, LinkError) {
   list.try_each(m.import_bindings, fn(entry) {
     let #(raw_dep, bindings) = entry
     let dep = resolved_specifier(m, raw_dep)
@@ -290,8 +332,9 @@ fn check_imports(
         // `import * as ns` always resolves (the namespace gathers names).
         esm.NamespaceImport(..) -> Ok(Nil)
         esm.NamedImport(imported:, ..) ->
-          check_resolves(graph, dep, imported, raw_dep)
-        esm.DefaultImport(..) -> check_resolves(graph, dep, "default", raw_dep)
+          check_resolves(graph, dep, imported, raw_dep, imported)
+        esm.DefaultImport(..) ->
+          check_resolves(graph, dep, "default", raw_dep, "default")
       }
     })
   })
@@ -301,13 +344,19 @@ fn check_indirect_exports(
   graph: LinkableGraph,
   specifier: String,
   m: LinkableModule,
-) -> Result(Nil, String) {
+) -> Result(Nil, LinkError) {
   list.try_each(m.export_entries, fn(e) {
     case e {
       // `export { x } from 'mod'` — resolve THIS module's export name, which
       // recurses into the source (§16.2.1.6.4 step 1).
-      esm.ReExport(export_name:, source_specifier:, ..) ->
-        check_resolves(graph, specifier, export_name, source_specifier)
+      esm.ReExport(export_name:, imported_name:, source_specifier:) ->
+        check_resolves(
+          graph,
+          specifier,
+          export_name,
+          source_specifier,
+          imported_name,
+        )
       _ -> Ok(Nil)
     }
   })
@@ -318,25 +367,18 @@ fn check_resolves(
   specifier: String,
   name: String,
   raw_dep: String,
-) -> Result(Nil, String) {
+  imported_name: String,
+) -> Result(Nil, LinkError) {
   case resolve_export(graph, specifier, name) {
     ResolvedTo(..) | ResolvedNamespace(..) | ResolvedDeferredNamespace(..) ->
       Ok(Nil)
     Unresolvable ->
-      Error(
-        "The requested module '"
-        <> raw_dep
-        <> "' does not provide an export named '"
-        <> name
-        <> "'",
-      )
+      Error(UnresolvedExport(
+        requested_module: raw_dep,
+        export_name: name,
+        imported_name:,
+      ))
     Ambiguous ->
-      Error(
-        "The requested module '"
-        <> raw_dep
-        <> "' provides an ambiguous export named '"
-        <> name
-        <> "'",
-      )
+      Error(AmbiguousExport(requested_module: raw_dep, export_name: name))
   }
 }

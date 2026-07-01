@@ -97,11 +97,24 @@ pub type ModuleBundle {
 // Errors
 // =============================================================================
 
+/// A failure anywhere in the module pipeline. Each pre-evaluation variant
+/// carries the structured cause from the layer that produced it (graph walk,
+/// bytecode compiler, bundle lookup) — dispatch on the variant, and render
+/// the user-facing prose with `error_message`.
+///
+/// Link-time validation failures (§16.2.1.6.4, `link.LinkError`) have no
+/// variant of their own: `link_for_evaluation` allocates the JS SyntaxError
+/// in the heap right there (its identity and stack ARE the module's rejection
+/// value), so they surface as `EvaluationError`.
 pub type ModuleError(host) {
-  ParseError(String)
-  CompileError(String)
-  ResolutionError(String)
-  LinkError(String)
+  /// The source-graph walk failed: a module failed to parse, a request failed
+  /// to resolve or load, or a source-phase import was requested. Match the
+  /// inner `graph.GraphError` to tell those apart.
+  GraphError(error: graph.GraphError)
+  /// Bytecode compilation of the module named `specifier` failed.
+  CompileError(specifier: String, error: compiler.CompileError)
+  /// Evaluation asked for a resolved specifier the bundle does not contain.
+  ModuleNotInBundle(specifier: String)
   /// A module threw during evaluation. Carries both the thrown value and the
   /// heap it was allocated in — the value is a Ref into this heap, so callers
   /// must use it (not a pre-evaluation heap) to inspect the thrown object.
@@ -113,6 +126,41 @@ pub type ModuleError(host) {
   /// must chain onto this promise (and hand any returned jobs to its own
   /// event loop) rather than treat the module as failed.
   EvaluationPending(promise_data_ref: Ref, heap: Heap(host))
+}
+
+/// The single renderer of a `ModuleError`'s user-facing prose. Every layer's
+/// own message lives in that layer (`parser.parse_error_to_string`,
+/// `compiler.error_message`); this adds the module-pipeline framing (which
+/// module, which phase) exactly once.
+pub fn error_message(err: ModuleError(host)) -> String {
+  case err {
+    GraphError(error: graph.ParseFailed(specifier, parse_error)) ->
+      "SyntaxError in '"
+      <> specifier
+      <> "': "
+      <> parser.parse_error_to_string(parse_error)
+    GraphError(error: graph.ResolveFailed(raw, referrer, message)) ->
+      "Cannot resolve module '"
+      <> raw
+      <> "' from '"
+      <> referrer
+      <> "': "
+      <> message
+    GraphError(error: graph.LoadFailed(specifier, message)) ->
+      "Cannot load module '" <> specifier <> "': " <> message
+    GraphError(error: graph.SourcePhaseUnsupported(specifier)) ->
+      "'"
+      <> specifier
+      <> "': source phase imports ('import source') are not supported"
+    CompileError(specifier:, error:) ->
+      compiler.error_message(error) <> " in '" <> specifier <> "'"
+    ModuleNotInBundle(specifier:) ->
+      "Module '" <> specifier <> "' not found in bundle"
+    EvaluationError(value:, heap:) ->
+      "Uncaught " <> object.format_error(value, heap)
+    EvaluationPending(promise_data_ref: _, heap: _) ->
+      "module evaluation never completed: top-level await promise never settled"
+  }
 }
 
 /// The successful result of `evaluate_bundle`: the entry module's completion
@@ -173,7 +221,7 @@ pub fn compile_bundle_with_hosts(
     graph.load(entry_specifier, entry_source, resolve_request, load, fn(spec) {
       dict.has_key(host_modules, spec)
     })
-    |> result.map_error(graph_error),
+    |> result.map_error(GraphError),
   )
   use modules <- result.map(
     dict.fold(source_graph.modules, Ok(dict.new()), fn(acc, specifier, node) {
@@ -183,38 +231,6 @@ pub fn compile_bundle_with_hosts(
     }),
   )
   ModuleBundle(entry: entry_specifier, modules:, host_modules:)
-}
-
-fn graph_error(error: graph.GraphError) -> ModuleError(host) {
-  case error {
-    graph.ParseFailed(specifier, parse_error) ->
-      ParseError(
-        "SyntaxError in '"
-        <> specifier
-        <> "': "
-        <> parser.parse_error_to_string(parse_error),
-      )
-    graph.ResolveFailed(raw, referrer, message) ->
-      ResolutionError(
-        "Cannot resolve module '"
-        <> raw
-        <> "' from '"
-        <> referrer
-        <> "': "
-        <> message,
-      )
-    graph.LoadFailed(specifier, message) ->
-      ResolutionError("Cannot load module '" <> specifier <> "': " <> message)
-    // Spec-wise a link-time SyntaxError: GetModuleSource for a Source Text
-    // Module Record always throws (§16.2.1.7.2), and this host has no other
-    // module kinds. LinkError surfaces to JS as a SyntaxError rejection.
-    graph.SourcePhaseUnsupported(specifier) ->
-      LinkError(
-        "'"
-        <> specifier
-        <> "': source phase imports ('import source') are not supported",
-      )
-  }
 }
 
 /// Compile one loaded module from the source graph — the import/export
@@ -232,16 +248,7 @@ fn compile_source_module(
   ) = node
   use #(template, scope_dict, hoisted_funcs) <- result.map(
     compiler.compile_module(program, sb, summary)
-    |> result.map_error(fn(err) {
-      case err {
-        compiler.Unsupported(desc) ->
-          CompileError("Unsupported in '" <> specifier <> "': " <> desc)
-        compiler.BreakOutsideLoop ->
-          CompileError("break outside loop in '" <> specifier <> "'")
-        compiler.ContinueOutsideLoop ->
-          CompileError("continue outside loop in '" <> specifier <> "'")
-      }
-    }),
+    |> result.map_error(fn(error) { CompileError(specifier:, error:) }),
   )
 
   // The bundle format keeps flat specifier lists; both project out of the
@@ -293,9 +300,8 @@ fn module_has_tla(template: value.FuncTemplate) -> Bool {
 /// reads.
 fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
   let source =
-    dict.map_values(bundle.modules, fn(specifier, m) {
+    dict.map_values(bundle.modules, fn(_specifier, m) {
       link.LinkableModule(
-        specifier:,
         import_bindings: m.import_bindings,
         export_entries: m.export_entries,
         specifier_map: m.specifier_map,
@@ -309,7 +315,6 @@ fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
     acc,
     specifier,
     link.LinkableModule(
-      specifier:,
       import_bindings: [],
       export_entries: list.map(hm.exports, fn(e) {
         esm.LocalExport(export_name: e.0, local_name: e.0)
@@ -336,19 +341,25 @@ fn resolved_specifier(m: CompiledModule, raw: String) -> String {
 // global, keyed by resolved specifier — the same technique module_host uses
 // for its namespace registry.
 
-/// Hidden global property: resolved specifier → JsString("evaluating") while
-/// the module's body runs / is parked on top-level await, JsString("evaluated")
-/// once it completes. Absent/undefined = not yet started ([[Status]] ~linked~).
+/// A module's evaluation status in the heap-resident registry. The absence of
+/// a status (`None` from `evaluation_status`) means the body has not started
+/// ([[Status]] ~linked~).
+pub type ModuleStatus {
+  /// The body is running or is parked on top-level await.
+  Evaluating
+  /// The body completed.
+  Evaluated
+}
+
+/// Hidden global property: resolved specifier → the module's `ModuleStatus`,
+/// heap-encoded as a JsString by `write_module_status`/`read_module_status`.
+/// Absent/undefined = not yet started ([[Status]] ~linked~).
 pub const status_property = "__arc_module_status__"
 
 /// Hidden global property: resolved specifier → the value the module's
 /// evaluation threw. Sticky — re-evaluation attempts rethrow it (§16.2.1.5.3).
 /// Shared with module_host's dynamic-import error cache.
 pub const error_cache_property = "__arc_module_errors__"
-
-const status_evaluating = "evaluating"
-
-const status_evaluated = "evaluated"
 
 fn read_hidden_cache(
   h: Heap(host),
@@ -405,23 +416,28 @@ fn write_hidden_cache(
 }
 
 /// Public view of a module's evaluation status for registry-keeping hosts:
-/// Some("evaluated") once its body completed, Some("evaluating") while it
-/// runs (or is parked on top-level await), None when it has not started.
+/// `Some(Evaluated)` once its body completed, `Some(Evaluating)` while it
+/// runs (or is parked on top-level await), `None` when it has not started.
 pub fn evaluation_status(
   h: Heap(host),
   global_object: Ref,
   spec: String,
-) -> Option(String) {
+) -> Option(ModuleStatus) {
   read_module_status(h, global_object, spec)
 }
+
+// The JsString encoding of `ModuleStatus` is private to the next two
+// functions: `write_module_status` is the only writer, so `read_module_status`
+// maps any other heap value (including a cleared JsUndefined) to `None`.
 
 fn read_module_status(
   h: Heap(host),
   global_object: Ref,
   spec: String,
-) -> Option(String) {
+) -> Option(ModuleStatus) {
   case read_hidden_cache(h, global_object, status_property, spec) {
-    Some(JsString(s)) -> Some(s)
+    Some(JsString("evaluating")) -> Some(Evaluating)
+    Some(JsString("evaluated")) -> Some(Evaluated)
     Some(_) | None -> None
   }
 }
@@ -430,9 +446,13 @@ fn write_module_status(
   h: Heap(host),
   global_object: Ref,
   spec: String,
-  status: String,
+  status: ModuleStatus,
 ) -> Heap(host) {
-  write_hidden_cache(h, global_object, status_property, spec, JsString(status))
+  let encoded = case status {
+    Evaluating -> "evaluating"
+    Evaluated -> "evaluated"
+  }
+  write_hidden_cache(h, global_object, status_property, spec, JsString(encoded))
 }
 
 fn clear_module_status(
@@ -559,8 +579,13 @@ pub fn link_for_evaluation_reusing(
   preexisting_deferred: Dict(String, Ref),
 ) -> Result(#(Heap(host), LinkedBundle), ModuleError(host)) {
   case link.validate(linkable_of_bundle(bundle)) {
-    Error(message) -> {
-      let #(heap, err) = common.make_syntax_error(heap, builtins, message)
+    Error(link_error) -> {
+      let #(heap, err) =
+        common.make_syntax_error(
+          heap,
+          builtins,
+          link.link_error_message(link_error),
+        )
       Error(EvaluationError(err, heap))
     }
     Ok(Nil) -> {
@@ -867,7 +892,7 @@ fn eval_module_inner(
     dict.has_key(bundle.host_modules, specifier)
     || set.contains(state.evaluated, specifier)
     || read_module_status(state.heap, global_object, specifier)
-    == Some(status_evaluated)
+    == Some(Evaluated)
   case already_evaluated {
     True -> #(state, Ok(#(JsUndefined, state.heap)))
     False ->
@@ -885,17 +910,12 @@ fn eval_module_inner(
           case
             set.contains(state.evaluating, specifier)
             || read_module_status(state.heap, global_object, specifier)
-            == Some(status_evaluating)
+            == Some(Evaluating)
           {
             True -> #(state, Ok(#(JsUndefined, state.heap)))
             False ->
               case dict.get(bundle.modules, specifier) {
-                Error(Nil) -> #(
-                  state,
-                  Error(ResolutionError(
-                    "Module '" <> specifier <> "' not found in bundle",
-                  )),
-                )
+                Error(Nil) -> #(state, Error(ModuleNotInBundle(specifier:)))
                 Ok(compiled) ->
                   eval_module_body(
                     bundle,
@@ -1004,12 +1024,7 @@ fn eval_module_body(
       // registry so a deferred-namespace trigger firing inside this body (or
       // a nested one) observes the cycle and throws instead of re-entering.
       let heap =
-        write_module_status(
-          state.heap,
-          global_object,
-          specifier,
-          status_evaluating,
-        )
+        write_module_status(state.heap, global_object, specifier, Evaluating)
       case
         run_module_with_referrer(
           specifier,
@@ -1050,12 +1065,7 @@ fn eval_module_body(
         }
         entry.ModuleOk(value: val, heap: new_heap, locals: _, jobs:) -> {
           let new_heap =
-            write_module_status(
-              new_heap,
-              global_object,
-              specifier,
-              status_evaluated,
-            )
+            write_module_status(new_heap, global_object, specifier, Evaluated)
           let state =
             EvalState(
               ..state,
@@ -1382,7 +1392,7 @@ pub fn record_module_evaluated(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_module_status(h, global_object, spec, status_evaluated)
+  write_module_status(h, global_object, spec, Evaluated)
 }
 
 /// Record `spec`'s evaluation error in the realm's heap-resident error
@@ -1696,7 +1706,7 @@ fn ensure_deferred_evaluated(
 ) -> Result(State(host), #(JsValue, State(host))) {
   let global_object = state.ctx.global_object
   case read_module_status(state.heap, global_object, spec) {
-    Some("evaluated") -> Ok(state)
+    Some(Evaluated) -> Ok(state)
     _ ->
       case read_module_error(state.heap, global_object, spec) {
         Some(err) -> Error(#(err, state))
@@ -1738,8 +1748,8 @@ fn ready_for_sync_execution(
   use <- bool.guard(set.contains(seen, spec), #(True, seen))
   let seen = set.insert(seen, spec)
   case read_module_status(h, global_object, spec) {
-    Some("evaluated") -> #(True, seen)
-    Some("evaluating") -> #(False, seen)
+    Some(Evaluated) -> #(True, seen)
+    Some(Evaluating) -> #(False, seen)
     _ ->
       case dict.get(bundle.modules, spec) {
         // Not in this bundle (registry-shared module) — its body either ran
@@ -1786,8 +1796,8 @@ fn evaluate_deferred_subgraph(
     list.fold(specs, #(set.new(), set.new()), fn(acc, s) {
       let #(done, running) = acc
       case read_module_status(state.heap, global_object, s) {
-        Some("evaluated") -> #(set.insert(done, s), running)
-        Some("evaluating") -> #(done, set.insert(running, s))
+        Some(Evaluated) -> #(set.insert(done, s), running)
+        Some(Evaluating) -> #(done, set.insert(running, s))
         _ -> acc
       }
     })
