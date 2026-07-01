@@ -328,8 +328,11 @@ fn num_sub(a: JsNum, b: JsNum) -> JsNum {
 fn num_mul(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     NaN, _ | _, NaN -> NaN
-    Infinity, Finite(0.0) | Finite(0.0), Infinity -> NaN
-    NegInfinity, Finite(0.0) | Finite(0.0), NegInfinity -> NaN
+    // ±0 * ±Infinity -> NaN. Never pattern-match a `0.0` literal: on
+    // OTP >= 27 it does not match -0.0, so use a guard that catches both.
+    Infinity, Finite(x) | Finite(x), Infinity if x >=. 0.0 && x <=. 0.0 -> NaN
+    NegInfinity, Finite(x) | Finite(x), NegInfinity if x >=. 0.0 && x <=. 0.0
+    -> NaN
     Infinity, Finite(x) | Finite(x), Infinity ->
       case x >. 0.0 {
         True -> Infinity
