@@ -809,21 +809,21 @@ fn is_valid_time(t: TimeRec) -> Bool {
   && t.ns <= 999
 }
 
-/// RegulateISODate — overflow is "constrain" or "reject". Month must already
-/// be ≥ 1 when called from property bags (ToPositiveIntegerWithTruncation).
+/// RegulateISODate. Month must already be ≥ 1 when called from property
+/// bags (ToPositiveIntegerWithTruncation).
 fn regulate_iso_date(
   y: Int,
   m: Int,
   d: Int,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   case overflow {
-    "reject" ->
+    Reject ->
       case is_valid_iso_date(y, m, d) {
         True -> Ok(IsoDate(y, m, d))
         False -> Error(RangeE("invalid ISO date"))
       }
-    _ -> {
+    Constrain -> {
       let m = int.clamp(m, 1, 12)
       let d = int.clamp(d, 1, days_in_month(y, m))
       Ok(IsoDate(y, m, d))
@@ -1470,19 +1470,120 @@ fn get_string_option(
   }
 }
 
+/// GetOption for an enum-valued option: `allowed` maps each accepted string
+/// to its variant, so the allow-list and the parse are the same table and no
+/// consumer ever sees the raw string. Anything else is a RangeError here.
+fn get_enum_option(
+  state: State(host),
+  opts: Option(Ref),
+  key: String,
+  allowed: List(#(String, a)),
+  default: a,
+) -> Result(#(a, State(host)), #(JsValue, State(host))) {
+  case opts {
+    None -> Ok(#(default, state))
+    Some(ref) -> {
+      use got <- result.try(ops_object.get_value(
+        state,
+        ref,
+        Named(key),
+        JsObject(ref),
+      ))
+      case got {
+        #(JsUndefined, st) -> Ok(#(default, st))
+        #(v, st) -> {
+          use #(s, st) <- result.try(coerce.js_to_string(st, v))
+          case list.key_find(allowed, s) {
+            Ok(parsed) -> Ok(#(parsed, st))
+            Error(Nil) ->
+              range_error_result(
+                st,
+                s <> " is not a valid value for option " <> key,
+              )
+          }
+        }
+      }
+    }
+  }
+}
+
+/// overflow option: how out-of-range calendar/time fields are handled.
+pub type Overflow {
+  Constrain
+  Reject
+}
+
+/// disambiguation option: which instant an ambiguous or skipped wall-clock
+/// time resolves to.
+pub type Disambiguation {
+  Compatible
+  Earlier
+  Later
+  RejectDisambiguation
+}
+
+/// offset option: how a ZonedDateTime's offset field is reconciled with its
+/// time zone.
+pub type OffsetOption {
+  PreferOffset
+  UseOffset
+  IgnoreOffset
+  RejectOffset
+}
+
 /// GetTemporalOverflowOption: "constrain" (default) or "reject".
 fn get_overflow_option(
   state: State(host),
   opts: Option(Ref),
-) -> Result(#(String, State(host)), #(JsValue, State(host))) {
-  use #(v, st) <- result.map(get_string_option(
+) -> Result(#(Overflow, State(host)), #(JsValue, State(host))) {
+  get_enum_option(
     state,
     opts,
     "overflow",
-    ["constrain", "reject"],
-    Some("constrain"),
-  ))
-  #(option.unwrap(v, "constrain"), st)
+    [#("constrain", Constrain), #("reject", Reject)],
+    Constrain,
+  )
+}
+
+/// GetTemporalDisambiguationOption: "compatible" (default) | "earlier" |
+/// "later" | "reject".
+fn get_disambiguation_option(
+  state: State(host),
+  opts: Option(Ref),
+) -> Result(#(Disambiguation, State(host)), #(JsValue, State(host))) {
+  get_enum_option(
+    state,
+    opts,
+    "disambiguation",
+    [
+      #("compatible", Compatible),
+      #("earlier", Earlier),
+      #("later", Later),
+      #("reject", RejectDisambiguation),
+    ],
+    Compatible,
+  )
+}
+
+/// GetTemporalOffsetOption: "prefer" | "use" | "ignore" | "reject", with a
+/// per-caller default.
+fn get_offset_option(
+  state: State(host),
+  opts: Option(Ref),
+  default: OffsetOption,
+) -> Result(#(OffsetOption, State(host)), #(JsValue, State(host))) {
+  get_enum_option(
+    state,
+    opts,
+    "offset",
+    [
+      #("prefer", PreferOffset),
+      #("use", UseOffset),
+      #("ignore", IgnoreOffset),
+      #("reject", RejectOffset),
+    ],
+    default,
+  )
 }
 
 /// GetOptionsObject + GetTemporalShowCalendarNameOption: reads the options
@@ -2231,38 +2332,38 @@ fn disambiguate_epoch_ns(
   tz: String,
   d: IsoDate,
   t: TimeRec,
-  dis: String,
+  dis: Disambiguation,
 ) -> Result(Int, TErr) {
   case possible {
     [one] -> validate_epoch_ns(one)
     [first, ..rest] ->
       case dis {
-        "compatible" | "earlier" -> validate_epoch_ns(first)
-        "later" ->
+        Compatible | Earlier -> validate_epoch_ns(first)
+        Later ->
           case list.last(rest) {
             Ok(l) -> validate_epoch_ns(l)
             Error(Nil) -> validate_epoch_ns(first)
           }
-        _ -> Error(RangeE("ambiguous wall-clock time"))
+        RejectDisambiguation -> Error(RangeE("ambiguous wall-clock time"))
       }
     [] ->
       case dis {
-        "reject" -> Error(RangeE("no such wall-clock time"))
-        _ -> {
+        RejectDisambiguation -> Error(RangeE("no such wall-clock time"))
+        Compatible | Earlier | Later -> {
           // Skipped (gap) time: shift by the size of the gap and retry.
           let utc = utc_epoch_ns(d, t)
           let before = tz_offset_ns_at(tz, utc - ns_per_day)
           let after = tz_offset_ns_at(tz, utc + ns_per_day)
           let gap = after - before
           let shifted = case dis {
-            "earlier" -> utc - gap
+            Earlier -> utc - gap
             _ -> utc + gap
           }
           let #(d2, t2) = epoch_ns_to_iso(shifted, 0)
           use possible2 <- result.try(get_possible_epoch_ns(tz, d2, t2))
           case dis, possible2 {
             _, [] -> Error(RangeE("no such wall-clock time"))
-            "earlier", [f, ..] -> validate_epoch_ns(f)
+            Earlier, [f, ..] -> validate_epoch_ns(f)
             _, [f, ..rest2] ->
               case list.last(rest2) {
                 Ok(la) -> validate_epoch_ns(la)
@@ -2279,7 +2380,7 @@ fn get_epoch_ns_for(
   tz: String,
   d: IsoDate,
   t: TimeRec,
-  dis: String,
+  dis: Disambiguation,
 ) -> Result(Int, TErr) {
   use possible <- result.try(get_possible_epoch_ns(tz, d, t))
   disambiguate_epoch_ns(possible, tz, d, t, dis)
@@ -2306,22 +2407,21 @@ fn start_of_day_ns(tz: String, d: IsoDate) -> Result(Int, TErr) {
 }
 
 /// InterpretISODateTimeOffset. `behaviour` is "wall" | "exact" | "option";
-/// `offset_opt` is "prefer" | "use" | "ignore" | "reject"; `match_minutes`
-/// allows minute-truncated offsets (ISO strings).
+/// `match_minutes` allows minute-truncated offsets (ISO strings).
 fn interpret_offset(
   d: IsoDate,
   t: TimeRec,
   behaviour: String,
   offset_ns: Int,
   tz: String,
-  dis: String,
-  offset_opt: String,
+  dis: Disambiguation,
+  offset_opt: OffsetOption,
   match_minutes: Bool,
 ) -> Result(Int, TErr) {
-  case behaviour == "wall" || offset_opt == "ignore" {
+  case behaviour == "wall" || offset_opt == IgnoreOffset {
     True -> get_epoch_ns_for(tz, d, t, dis)
     False ->
-      case behaviour == "exact" || offset_opt == "use" {
+      case behaviour == "exact" || offset_opt == UseOffset {
         True -> {
           let ns = utc_epoch_ns(d, t) - offset_ns
           use Nil <- result.try(
@@ -2339,13 +2439,13 @@ fn interpret_offset(
             list.find(possible, fn(candidate) {
               let cand_off = utc - candidate
               let rounded =
-                round_to_increment(cand_off, ns_per_minute, "halfExpand")
+                round_to_increment(cand_off, ns_per_minute, HalfExpand)
               cand_off == offset_ns || { match_minutes && rounded == offset_ns }
             })
           case matched {
             Ok(c) -> validate_epoch_ns(c)
             Error(Nil) ->
-              case offset_opt == "reject" {
+              case offset_opt == RejectOffset {
                 True -> Error(RangeE("offset does not match time zone"))
                 False -> disambiguate_epoch_ns(possible, tz, d, t, dis)
               }
@@ -2374,11 +2474,7 @@ fn format_offset_full(offset_ns: Int) -> String {
 /// Offset rounded to the nearest minute, for ISO string display
 /// (FormatDateTimeUTCOffsetRounded).
 fn format_offset_rounded(offset_ns: Int) -> String {
-  format_offset_minutes(round_to_increment(
-    offset_ns,
-    ns_per_minute,
-    "halfExpand",
-  ))
+  format_offset_minutes(round_to_increment(offset_ns, ns_per_minute, HalfExpand))
 }
 
 /// TimeZoneEquals — identical ids, or named ids resolving to the same
@@ -3174,7 +3270,7 @@ fn resolve_calendar_month(
   cal: String,
   year: Int,
   f: DateFields,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(Int, TErr) {
   case f.month_code {
     Some(#(num, leap)) -> {
@@ -3184,8 +3280,8 @@ fn resolve_calendar_month(
           Error(RangeE("monthCode is not valid for calendar " <> cal))
         Error(tcal.NotInThisYear(skip_to)) ->
           case overflow {
-            "reject" -> Error(RangeE("monthCode not present in year"))
-            _ -> Ok(skip_to)
+            Reject -> Error(RangeE("monthCode not present in year"))
+            Constrain -> Ok(skip_to)
           }
       })
       case f.month {
@@ -3202,8 +3298,8 @@ fn resolve_calendar_month(
           case m > max {
             True ->
               case overflow {
-                "reject" -> Error(RangeE("month out of range"))
-                _ -> Ok(max)
+                Reject -> Error(RangeE("month out of range"))
+                Constrain -> Ok(max)
               }
             False -> Ok(m)
           }
@@ -3216,7 +3312,7 @@ fn resolve_calendar_month(
 fn resolve_calendar_date(
   cal: String,
   f: DateFields,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   // Required-field (TypeError) checks come before all RangeError checks.
   use Nil <- result.try(case f.year, f.era, f.era_year {
@@ -3271,15 +3367,15 @@ fn regulate_calendar_day(
   year: Int,
   month: Int,
   day: Int,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(Int, TErr) {
   let max = tcal.days_in_month(cal, year, month)
   case day >= 1 && day <= max {
     True -> Ok(day)
     False ->
       case overflow {
-        "reject" -> Error(RangeE("day out of range"))
-        _ -> Ok(int.clamp(day, 1, max))
+        Reject -> Error(RangeE("day out of range"))
+        Constrain -> Ok(int.clamp(day, 1, max))
       }
   }
 }
@@ -3290,7 +3386,7 @@ fn calendar_date_add(
   cal: String,
   d: IsoDate,
   dur: DurRec,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   case cal {
     "iso8601" -> add_duration_to_date(d, dur, overflow)
@@ -3308,8 +3404,8 @@ fn calendar_date_add(
             Error(tcal.NeverValid) -> Error(RangeE("invalid month"))
             Error(tcal.NotInThisYear(skip_to)) ->
               case overflow {
-                "reject" -> Error(RangeE("month not present in year"))
-                _ -> Ok(skip_to)
+                Reject -> Error(RangeE("month not present in year"))
+                Constrain -> Ok(skip_to)
               }
           }
         }
@@ -3352,7 +3448,7 @@ fn calendar_date_until(
   cal: String,
   from: IsoDate,
   to: IsoDate,
-  largest_unit: String,
+  largest_unit: Unit,
 ) -> #(Int, Int, Int) {
   let from_days = epoch_days(from)
   let to_days = epoch_days(to)
@@ -3364,7 +3460,7 @@ fn calendar_date_until(
   let cd2 = tcal.date_from_epoch_days(cal, to_days)
   // Count whole years (only when largestUnit is years).
   let years = case largest_unit {
-    "years" -> count_calendar_years(cal, cd1, cd2, cd2.year - cd1.year, sign)
+    Year -> count_calendar_years(cal, cd1, cd2, cd2.year - cd1.year, sign)
     _ -> 0
   }
   let after_years = add_calendar_years_constrain(cal, cd1, years)
@@ -3619,7 +3715,7 @@ fn terr_r(
 fn validated_overflow(
   state: State(host),
   options: JsValue,
-) -> Result(#(String, State(host)), #(JsValue, State(host))) {
+) -> Result(#(Overflow, State(host)), #(JsValue, State(host))) {
   use #(opts, st) <- result.try(get_options_object(state, options))
   get_overflow_option(st, opts)
 }
@@ -3833,12 +3929,12 @@ fn time_from_bag(
       use #(overflow, state) <- result.try(validated_overflow(state, options))
       let t = time_fields_apply(f, midnight)
       case overflow {
-        "reject" ->
+        Reject ->
           case is_valid_time(t) {
             True -> Ok(#(t, state))
             False -> range_error_result(state, "invalid time")
           }
-        _ ->
+        Constrain ->
           Ok(#(
             TimeRec(
               hour: int.clamp(t.hour, 0, 23),
@@ -4457,12 +4553,12 @@ fn date_time_from_bag(
   use date <- terr_r(state, resolve_calendar_date(cal, f.date, overflow))
   let t = time_fields_apply(f.time, midnight)
   let t_result = case overflow {
-    "reject" ->
+    Reject ->
       case is_valid_time(t) {
         True -> Ok(t)
         False -> Error(RangeE("invalid time"))
       }
-    _ ->
+    Constrain ->
       Ok(TimeRec(
         hour: int.clamp(t.hour, 0, 23),
         minute: int.clamp(t.minute, 0, 59),
@@ -4633,7 +4729,7 @@ fn year_month_from_bag(
 fn resolve_calendar_year_month(
   cal: String,
   f: DateFields,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(#(Int, Int, Int, String), TErr) {
   use Nil <- result.try(case f.year, f.era, f.era_year {
     None, None, None -> Error(TypeE("year is required"))
@@ -4651,8 +4747,8 @@ fn resolve_calendar_year_month(
         True -> Ok(m)
         False ->
           case overflow {
-            "reject" -> Error(RangeE("invalid month"))
-            _ -> Ok(int.clamp(m, 1, 12))
+            Reject -> Error(RangeE("invalid month"))
+            Constrain -> Ok(int.clamp(m, 1, 12))
           }
       })
       check_ym_limits(y, m, 1, cal)
@@ -4773,7 +4869,7 @@ fn try_month_day_as_datetime(
             num,
             leap,
             cd.day,
-            "constrain",
+            Constrain,
           ))
           Ok(#(iso.month, iso.day, iso.year, cal))
         }
@@ -4793,7 +4889,7 @@ fn month_day_reference_iso(
   num: Int,
   leap: Bool,
   day: Int,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   let boundary_cd = tcal.date_from_epoch_days(cal, md_reference_boundary)
   case md_search(cal, num, leap, day, boundary_cd.year, 300) {
@@ -4802,8 +4898,8 @@ fn month_day_reference_iso(
       // No year in the window has this exact day. Constrain clamps to the
       // largest day the month ever has; reject throws.
       case overflow {
-        "reject" -> Error(RangeE("day out of range for month"))
-        _ -> {
+        Reject -> Error(RangeE("day out of range for month"))
+        Constrain -> {
           let dmax = md_max_day(cal, num, leap, boundary_cd.year, 300, 0)
           case dmax > 0 {
             True ->
@@ -4886,7 +4982,7 @@ fn month_day_from_bag(
 fn resolve_calendar_month_day(
   cal: String,
   f: DateFields,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(#(Int, Int, Int, String), TErr) {
   // Required fields (TypeError) first.
   use day <- result.try(case f.day {
@@ -4966,9 +5062,8 @@ fn resolve_calendar_month_day(
         {
           True ->
             case overflow {
-              "reject" ->
-                Error(RangeE("no reference year for monthCode and day"))
-              _ -> Ok(#(num, False))
+              Reject -> Error(RangeE("no reference year for monthCode and day"))
+              Constrain -> Ok(#(num, False))
             }
           False -> Ok(#(num, leap))
         },
@@ -5130,27 +5225,15 @@ fn to_temporal_zoned(
 fn validated_zdt_options(
   state: State(host),
   options: JsValue,
-) -> Result(#(#(String, String, String), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(Disambiguation, OffsetOption, Overflow), State(host)),
+  #(JsValue, State(host)),
+) {
   use #(opts, state) <- result.try(get_options_object(state, options))
-  use #(d, state) <- result.try(get_string_option(
-    state,
-    opts,
-    "disambiguation",
-    ["compatible", "earlier", "later", "reject"],
-    Some("compatible"),
-  ))
-  use #(of, state) <- result.try(get_string_option(
-    state,
-    opts,
-    "offset",
-    ["prefer", "use", "ignore", "reject"],
-    Some("reject"),
-  ))
+  use #(d, state) <- result.try(get_disambiguation_option(state, opts))
+  use #(of, state) <- result.try(get_offset_option(state, opts, RejectOffset))
   use #(ov, state) <- result.try(get_overflow_option(state, opts))
-  Ok(#(
-    #(option.unwrap(d, "compatible"), option.unwrap(of, "reject"), ov),
-    state,
-  ))
+  Ok(#(#(d, of, ov), state))
 }
 
 fn parse_zoned_string(
@@ -5185,8 +5268,8 @@ fn zoned_string_epoch_ns(
   off_opt: Option(Int),
   off_sub_minute: Bool,
   tz: String,
-  dis: String,
-  offset_opt: String,
+  dis: Disambiguation,
+  offset_opt: OffsetOption,
 ) -> Result(Int, TErr) {
   case t_opt, z, off_opt {
     None, False, None -> start_of_day_ns(tz, d)
@@ -5215,14 +5298,14 @@ fn zoned_string_epoch_ns(
 }
 
 /// RegulateTime: constrain clamps each component; reject errors.
-fn regulate_time(t: TimeRec, overflow: String) -> Result(TimeRec, TErr) {
+fn regulate_time(t: TimeRec, overflow: Overflow) -> Result(TimeRec, TErr) {
   case overflow {
-    "reject" ->
+    Reject ->
       case is_valid_time(t) {
         True -> Ok(t)
         False -> Error(RangeE("time out of range"))
       }
-    _ ->
+    Constrain ->
       Ok(TimeRec(
         hour: int.clamp(t.hour, 0, 23),
         minute: int.clamp(t.minute, 0, 59),
@@ -5374,8 +5457,8 @@ fn convert_relative_to(
                       p.offset_ns,
                       p.offset_sub_minute,
                       tz,
-                      "compatible",
-                      "reject",
+                      Compatible,
+                      RejectOffset,
                     ),
                   )
                   Ok(#(RelZoned(ens, tz, cal), state))
@@ -5420,9 +5503,9 @@ fn relative_from_bag(
     read_offset: True,
     read_tz: True,
   ))
-  use date <- terr_r(state, resolve_calendar_date(cal, f.date, "constrain"))
+  use date <- terr_r(state, resolve_calendar_date(cal, f.date, Constrain))
   let t0 = time_fields_apply(f.time, midnight)
-  use t <- terr_r(state, regulate_time(t0, "constrain"))
+  use t <- terr_r(state, regulate_time(t0, Constrain))
   case f.tz {
     JsUndefined ->
       case iso_date_within_limits(date) {
@@ -5443,8 +5526,8 @@ fn relative_from_bag(
           behaviour,
           option.unwrap(f.offset, 0),
           tz,
-          "compatible",
-          "reject",
+          Compatible,
+          RejectOffset,
           False,
         ),
       )
@@ -5475,8 +5558,8 @@ fn add_zoned_ns(
             weeks: dur.weeks,
             days: dur.days,
           )
-        use d2 <- result.try(calendar_date_add(cal, d0, date_dur, "constrain"))
-        get_epoch_ns_for(tz, d2, t0, "compatible")
+        use d2 <- result.try(calendar_date_add(cal, d0, date_dur, Constrain))
+        get_epoch_ns_for(tz, d2, t0, Compatible)
       }
     },
   )
@@ -5509,7 +5592,7 @@ fn date_duration_days(
           months: dur.months,
           weeks: dur.weeks,
         )
-      use later <- result.map(calendar_date_add(cal, rel, ymw, "constrain"))
+      use later <- result.map(calendar_date_add(cal, rel, ymw, Constrain))
       epoch_days(later) - epoch_days(rel) + dur.days
     }
   }
@@ -5612,7 +5695,7 @@ fn balance_year_month(y: Int, m: Int) -> #(Int, Int) {
 fn add_duration_to_date(
   d: IsoDate,
   dur: DurRec,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   let #(y2, m2) = balance_year_month(d.year + dur.years, d.month + dur.months)
   use intermediate <- result.try(regulate_iso_date(y2, m2, d.day, overflow))
@@ -6165,7 +6248,7 @@ fn plain_date_method(
               let assert Ok(#(num, leap)) = tcal.parse_month_code(code)
               use iso <- terr(
                 state,
-                month_day_reference_iso(cal, num, leap, cd.day, "constrain"),
+                month_day_reference_iso(cal, num, leap, cd.day, Constrain),
               )
               let #(state, v) =
                 make_month_day_cal(
@@ -6211,10 +6294,7 @@ fn plain_date_method(
                     JsUndefined -> Ok(#(midnight, state))
                     v -> to_temporal_time(state, v, JsUndefined)
                   })
-                  use ns <- terr(
-                    state,
-                    get_epoch_ns_for(tz, d, t, "compatible"),
-                  )
+                  use ns <- terr(state, get_epoch_ns_for(tz, d, t, Compatible))
                   let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
                   #(state, Ok(v))
                 }
@@ -6274,7 +6354,7 @@ fn calendar_with_fields(
   cal: String,
   d: IsoDate,
   f: DateFields,
-  overflow: String,
+  overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
   let has_year = f.year != None || f.era != None || f.era_year != None
@@ -6358,81 +6438,168 @@ fn require_partial_bag(
 // until/since — units & rounding
 // ----------------------------------------------------------------------------
 
-/// Unit metadata: name → #(singular, category) where category 0=date 1=time.
-fn singular_unit(u: String) -> Option(String) {
+/// A Temporal unit, largest to smallest. JS strings become this type exactly
+/// once, in `singular_unit` (reached only via the unit option getters);
+/// everything downstream matches on the enum, so a misspelled, plural, or
+/// otherwise unnormalized string can never reach a computation.
+pub type Unit {
+  Year
+  Month
+  Week
+  Day
+  Hour
+  Minute
+  Second
+  Millisecond
+  Microsecond
+  Nanosecond
+}
+
+/// roundingMode option values. Parsed once, in `get_rounding_mode_option`.
+pub type RoundingMode {
+  Ceil
+  Floor
+  Expand
+  Trunc
+  HalfCeil
+  HalfFloor
+  HalfExpand
+  HalfTrunc
+  HalfEven
+}
+
+/// GetUnsignedRoundingMode result: a rounding mode collapsed for a value of
+/// known sign (spec "zero"/"infinity"/"half-zero"/"half-infinity"/"half-even").
+type UnsignedRoundingMode {
+  RZero
+  RInfinity
+  RHalfZero
+  RHalfInfinity
+  RHalfEven
+}
+
+/// A largestUnit/smallestUnit option value as read from an options bag:
+/// absent, an explicit "auto", or a concrete unit.
+type UnitOption {
+  UnitAbsent
+  UnitAuto
+  UnitValue(Unit)
+}
+
+/// JS-facing singular name of a unit (error messages / option echoes).
+pub fn unit_to_string(u: Unit) -> String {
   case u {
-    "year" | "years" -> Some("year")
-    "month" | "months" -> Some("month")
-    "week" | "weeks" -> Some("week")
-    "day" | "days" -> Some("day")
-    "hour" | "hours" -> Some("hour")
-    "minute" | "minutes" -> Some("minute")
-    "second" | "seconds" -> Some("second")
-    "millisecond" | "milliseconds" -> Some("millisecond")
-    "microsecond" | "microseconds" -> Some("microsecond")
-    "nanosecond" | "nanoseconds" -> Some("nanosecond")
+    Year -> "year"
+    Month -> "month"
+    Week -> "week"
+    Day -> "day"
+    Hour -> "hour"
+    Minute -> "minute"
+    Second -> "second"
+    Millisecond -> "millisecond"
+    Microsecond -> "microsecond"
+    Nanosecond -> "nanosecond"
+  }
+}
+
+/// JS-facing name of a rounding mode.
+pub fn rounding_mode_to_string(m: RoundingMode) -> String {
+  case m {
+    Ceil -> "ceil"
+    Floor -> "floor"
+    Expand -> "expand"
+    Trunc -> "trunc"
+    HalfCeil -> "halfCeil"
+    HalfFloor -> "halfFloor"
+    HalfExpand -> "halfExpand"
+    HalfTrunc -> "halfTrunc"
+    HalfEven -> "halfEven"
+  }
+}
+
+/// GetTemporalUnitValuedOption's name table: the singular and plural forms
+/// map to the unit, anything else is rejected. The ONLY String → Unit
+/// conversion.
+fn singular_unit(u: String) -> Option(Unit) {
+  case u {
+    "year" | "years" -> Some(Year)
+    "month" | "months" -> Some(Month)
+    "week" | "weeks" -> Some(Week)
+    "day" | "days" -> Some(Day)
+    "hour" | "hours" -> Some(Hour)
+    "minute" | "minutes" -> Some(Minute)
+    "second" | "seconds" -> Some(Second)
+    "millisecond" | "milliseconds" -> Some(Millisecond)
+    "microsecond" | "microseconds" -> Some(Microsecond)
+    "nanosecond" | "nanoseconds" -> Some(Nanosecond)
     _ -> None
   }
 }
 
-fn unit_rank(u: String) -> Int {
+fn unit_rank(u: Unit) -> Int {
   case u {
-    "year" -> 9
-    "month" -> 8
-    "week" -> 7
-    "day" -> 6
-    "hour" -> 5
-    "minute" -> 4
-    "second" -> 3
-    "millisecond" -> 2
-    "microsecond" -> 1
-    _ -> 0
+    Year -> 9
+    Month -> 8
+    Week -> 7
+    Day -> 6
+    Hour -> 5
+    Minute -> 4
+    Second -> 3
+    Millisecond -> 2
+    Microsecond -> 1
+    Nanosecond -> 0
   }
 }
 
-fn unit_ns(u: String) -> Int {
+/// Length of a fixed-length unit in nanoseconds. Year/Month/Week have no
+/// fixed length; every caller guards on unit_rank before reaching here, and
+/// 1 keeps `n * unit_ns(u)` an identity if one ever did.
+fn unit_ns(u: Unit) -> Int {
   case u {
-    "day" -> ns_per_day
-    "hour" -> ns_per_hour
-    "minute" -> ns_per_minute
-    "second" -> ns_per_second
-    "millisecond" -> ns_per_ms
-    "microsecond" -> ns_per_us
-    _ -> 1
+    Year | Month | Week -> 1
+    Day -> ns_per_day
+    Hour -> ns_per_hour
+    Minute -> ns_per_minute
+    Second -> ns_per_second
+    Millisecond -> ns_per_ms
+    Microsecond -> ns_per_us
+    Nanosecond -> 1
   }
 }
 
-/// Read a unit-valued option ("largestUnit"/"smallestUnit").
+/// Read a unit-valued option ("largestUnit"/"smallestUnit"/"unit"). Both an
+/// absent option and (when `allow_auto`) an explicit "auto" become None.
 fn get_unit_option(
   state: State(host),
   opts: Option(Ref),
   key: String,
-  extra: List(String),
-) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
-  get_unit_option_impl(state, opts, key, extra, keep_extra: False)
+  allow_auto allow_auto: Bool,
+) -> Result(#(Option(Unit), State(host)), #(JsValue, State(host))) {
+  use #(u, st) <- result.map(get_unit_option_impl(state, opts, key, allow_auto))
+  case u {
+    UnitValue(v) -> #(Some(v), st)
+    UnitAuto | UnitAbsent -> #(None, st)
+  }
 }
 
-/// Like get_unit_option, but a matched `extra` value (e.g. "auto") is
-/// reported as Some(value) instead of collapsing to None, so callers can
-/// distinguish an explicit "auto" from an absent option.
+/// Like get_unit_option, but reports an explicit "auto" as UnitAuto instead
+/// of collapsing it to UnitAbsent, so callers can distinguish the two.
 fn get_unit_option_keep(
   state: State(host),
   opts: Option(Ref),
   key: String,
-  extra: List(String),
-) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
-  get_unit_option_impl(state, opts, key, extra, keep_extra: True)
+) -> Result(#(UnitOption, State(host)), #(JsValue, State(host))) {
+  get_unit_option_impl(state, opts, key, True)
 }
 
 fn get_unit_option_impl(
   state: State(host),
   opts: Option(Ref),
   key: String,
-  extra: List(String),
-  keep_extra keep_extra: Bool,
-) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
+  allow_auto: Bool,
+) -> Result(#(UnitOption, State(host)), #(JsValue, State(host))) {
   case opts {
-    None -> Ok(#(None, state))
+    None -> Ok(#(UnitAbsent, state))
     Some(ref) -> {
       use got <- result.try(ops_object.get_value(
         state,
@@ -6441,16 +6608,12 @@ fn get_unit_option_impl(
         JsObject(ref),
       ))
       case got {
-        #(JsUndefined, st) -> Ok(#(None, st))
+        #(JsUndefined, st) -> Ok(#(UnitAbsent, st))
         #(v, st) -> {
           use #(s, st) <- result.try(coerce.js_to_string(st, v))
-          case list.contains(extra, s), singular_unit(s) {
-            True, _ ->
-              case keep_extra {
-                True -> Ok(#(Some(s), st))
-                False -> Ok(#(None, st))
-              }
-            False, Some(u) -> Ok(#(Some(u), st))
+          case allow_auto && s == "auto", singular_unit(s) {
+            True, _ -> Ok(#(UnitAuto, st))
+            False, Some(u) -> Ok(#(UnitValue(u), st))
             False, None ->
               range_error_result(st, s <> " is not a valid value for " <> key)
           }
@@ -6463,18 +6626,25 @@ fn get_unit_option_impl(
 fn get_rounding_mode_option(
   state: State(host),
   opts: Option(Ref),
-) -> Result(#(String, State(host)), #(JsValue, State(host))) {
-  use #(m, st) <- result.try(get_string_option(
+  default: RoundingMode,
+) -> Result(#(RoundingMode, State(host)), #(JsValue, State(host))) {
+  get_enum_option(
     state,
     opts,
     "roundingMode",
     [
-      "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand",
-      "halfTrunc", "halfEven",
+      #("ceil", Ceil),
+      #("floor", Floor),
+      #("expand", Expand),
+      #("trunc", Trunc),
+      #("halfCeil", HalfCeil),
+      #("halfFloor", HalfFloor),
+      #("halfExpand", HalfExpand),
+      #("halfTrunc", HalfTrunc),
+      #("halfEven", HalfEven),
     ],
-    Some("trunc"),
-  ))
-  Ok(#(option.unwrap(m, "trunc"), st))
+    default,
+  )
 }
 
 fn get_rounding_increment_option(
@@ -6513,18 +6683,18 @@ fn get_rounding_increment_option(
 
 /// RoundNumberToIncrementAsIfPositive — rounding modes act as if the value
 /// were positive (floor-family on the number line). Used for instants.
-fn as_if_positive_mode(mode: String) -> String {
+fn as_if_positive_mode(mode: RoundingMode) -> RoundingMode {
   case mode {
-    "trunc" -> "floor"
-    "expand" -> "ceil"
-    "halfTrunc" -> "halfFloor"
-    "halfExpand" -> "halfCeil"
-    m -> m
+    Trunc -> Floor
+    Expand -> Ceil
+    HalfTrunc -> HalfFloor
+    HalfExpand -> HalfCeil
+    Ceil | Floor | HalfCeil | HalfFloor | HalfEven -> mode
   }
 }
 
 /// RoundNumberToIncrement on integers: round `x` to a multiple of `inc`.
-fn round_to_increment(x: Int, inc: Int, mode: String) -> Int {
+fn round_to_increment(x: Int, inc: Int, mode: RoundingMode) -> Int {
   let q = floor_div(x, inc)
   let r = x - q * inc
   case r == 0 {
@@ -6534,28 +6704,27 @@ fn round_to_increment(x: Int, inc: Int, mode: String) -> Int {
       let upper = lower + inc
       let twice = 2 * r
       let pick_upper = case mode {
-        "ceil" -> True
-        "floor" -> False
-        "expand" -> x > 0
-        "trunc" -> x < 0
-        "halfCeil" -> twice >= inc
-        "halfFloor" -> twice > inc
-        "halfExpand" ->
+        Ceil -> True
+        Floor -> False
+        Expand -> x > 0
+        Trunc -> x < 0
+        HalfCeil -> twice >= inc
+        HalfFloor -> twice > inc
+        HalfExpand ->
           case x > 0 {
             True -> twice >= inc
             False -> twice > inc
           }
-        "halfTrunc" ->
+        HalfTrunc ->
           case x > 0 {
             True -> twice > inc
             False -> twice >= inc
           }
-        "halfEven" ->
+        HalfEven ->
           case twice == inc {
             True -> math_mod(q, 2) != 0
             False -> twice > inc
           }
-        _ -> x < 0
       }
       case pick_upper {
         True -> upper
@@ -6572,23 +6741,29 @@ fn round_to_increment(x: Int, inc: Int, mode: String) -> Int {
 fn get_difference_settings(
   state: State(host),
   args: List(JsValue),
-  cont: fn(Option(String), Option(String), Int, String, State(host)) ->
+  cont: fn(Option(Unit), Option(Unit), Int, RoundingMode, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use opts, state <- state.try_op(get_options_object(state, arg_at(args, 1)))
-  use largest, state <- state.try_op(
-    get_unit_option(state, opts, "largestUnit", ["auto"]),
-  )
+  use largest, state <- state.try_op(get_unit_option(
+    state,
+    opts,
+    "largestUnit",
+    allow_auto: True,
+  ))
   use inc, state <- state.try_op(get_rounding_increment_option(state, opts))
-  use mode, state <- state.try_op(get_rounding_mode_option(state, opts))
-  use smallest, state <- state.try_op(
-    get_unit_option(state, opts, "smallestUnit", []),
-  )
+  use mode, state <- state.try_op(get_rounding_mode_option(state, opts, Trunc))
+  use smallest, state <- state.try_op(get_unit_option(
+    state,
+    opts,
+    "smallestUnit",
+    allow_auto: False,
+  ))
   cont(largest, smallest, inc, mode, state)
 }
 
 /// since: negate the rounding mode per spec (difference computed two→one).
-fn apply_since_mode(mode: String, is_since: Bool) -> String {
+fn apply_since_mode(mode: RoundingMode, is_since: Bool) -> RoundingMode {
   case is_since {
     True -> negate_rounding_mode(mode)
     False -> mode
@@ -6625,9 +6800,9 @@ fn date_until_since(
     state,
     args,
   )
-  let smallest = option.unwrap(smallest, "day")
-  let largest = option.unwrap(largest, max_unit(smallest, "day"))
-  case unit_rank(smallest) < unit_rank("day") {
+  let smallest = option.unwrap(smallest, Day)
+  let largest = option.unwrap(largest, max_unit(smallest, Day))
+  case unit_rank(smallest) < unit_rank(Day) {
     True ->
       state.range_error(state, "smallestUnit must be a date unit for PlainDate")
     False ->
@@ -6651,20 +6826,20 @@ fn date_until_since(
   }
 }
 
-fn max_unit(a: String, b: String) -> String {
+fn max_unit(a: Unit, b: Unit) -> Unit {
   case unit_rank(a) >= unit_rank(b) {
     True -> a
     False -> b
   }
 }
 
-fn negate_rounding_mode(mode: String) -> String {
+fn negate_rounding_mode(mode: RoundingMode) -> RoundingMode {
   case mode {
-    "ceil" -> "floor"
-    "floor" -> "ceil"
-    "halfCeil" -> "halfFloor"
-    "halfFloor" -> "halfCeil"
-    _ -> mode
+    Ceil -> Floor
+    Floor -> Ceil
+    HalfCeil -> HalfFloor
+    HalfFloor -> HalfCeil
+    Expand | Trunc | HalfExpand | HalfTrunc | HalfEven -> mode
   }
 }
 
@@ -6673,10 +6848,10 @@ fn difference_calendar_date(
   cal: String,
   d1: IsoDate,
   d2: IsoDate,
-  largest: String,
-  smallest: String,
+  largest: Unit,
+  smallest: Unit,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
 ) -> Result(DurRec, TErr) {
   let sign = compare_iso_date(d2, d1)
   case sign == 0 {
@@ -6687,19 +6862,15 @@ fn difference_calendar_date(
         "iso8601" -> diff_date_parts(d1, d2, largest)
         _ ->
           case largest {
-            "year" | "month" -> {
-              let lu = case largest {
-                "year" -> "years"
-                _ -> "months"
-              }
-              let #(y, m, rem_days) = calendar_date_until(cal, d1, d2, lu)
+            Year | Month -> {
+              let #(y, m, rem_days) = calendar_date_until(cal, d1, d2, largest)
               #(y, m, 0, rem_days)
             }
             _ -> diff_date_parts(d1, d2, largest)
           }
       }
       // Round to smallest/increment if needed.
-      case smallest == "day" && inc == 1 {
+      case smallest == Day && inc == 1 {
         True -> Ok(DurRec(..zero_dur, years:, months:, weeks:, days:))
         False ->
           round_relative_date_duration(
@@ -6721,15 +6892,15 @@ fn difference_calendar_date(
 fn diff_date_parts(
   d1: IsoDate,
   d2: IsoDate,
-  largest: String,
+  largest: Unit,
 ) -> #(Int, Int, Int, Int) {
   case largest {
-    "year" | "month" -> {
+    Year | Month -> {
       let sign = compare_iso_date(d2, d1)
       // months difference counting whole months.
       let total_months = count_months_between(d1, d2, sign)
       let #(years, months) = case largest {
-        "year" -> #(
+        Year -> #(
           truncate_div(total_months, 12),
           math_mod_signed(total_months, 12),
         )
@@ -6740,7 +6911,7 @@ fn diff_date_parts(
       let days = epoch_days(d2) - epoch_days(intermediate)
       #(years, months, 0, days)
     }
-    "week" -> {
+    Week -> {
       let days = epoch_days(d2) - epoch_days(d1)
       #(0, 0, truncate_div(days, 7), math_mod_signed(days, 7))
     }
@@ -6797,34 +6968,37 @@ fn cal_date_add_checked(d: IsoDate, dur: DurRec) -> Result(IsoDate, TErr) {
 }
 
 /// GetUnsignedRoundingMode — collapse a signed rounding mode for a value of
-/// known sign into "zero"/"infinity"/"half-zero"/"half-infinity"/"half-even".
-fn unsigned_rounding_mode(mode: String, positive: Bool) -> String {
+/// known sign into an UnsignedRoundingMode.
+fn unsigned_rounding_mode(
+  mode: RoundingMode,
+  positive: Bool,
+) -> UnsignedRoundingMode {
   case mode {
-    "ceil" ->
+    Ceil ->
       case positive {
-        True -> "infinity"
-        False -> "zero"
+        True -> RInfinity
+        False -> RZero
       }
-    "floor" ->
+    Floor ->
       case positive {
-        True -> "zero"
-        False -> "infinity"
+        True -> RZero
+        False -> RInfinity
       }
-    "expand" -> "infinity"
-    "trunc" -> "zero"
-    "halfCeil" ->
+    Expand -> RInfinity
+    Trunc -> RZero
+    HalfCeil ->
       case positive {
-        True -> "half-infinity"
-        False -> "half-zero"
+        True -> RHalfInfinity
+        False -> RHalfZero
       }
-    "halfFloor" ->
+    HalfFloor ->
       case positive {
-        True -> "half-zero"
-        False -> "half-infinity"
+        True -> RHalfZero
+        False -> RHalfInfinity
       }
-    "halfExpand" -> "half-infinity"
-    "halfTrunc" -> "half-zero"
-    _ -> "half-even"
+    HalfExpand -> RHalfInfinity
+    HalfTrunc -> RHalfZero
+    HalfEven -> RHalfEven
   }
 }
 
@@ -6835,24 +7009,25 @@ fn apply_unsigned_rounding(
   r2: Int,
   cmp: Int,
   even: Bool,
-  umode: String,
+  umode: UnsignedRoundingMode,
 ) -> Int {
   case umode {
-    "zero" -> r1
-    "infinity" -> r2
-    _ ->
+    RZero -> r1
+    RInfinity -> r2
+    RHalfZero | RHalfInfinity | RHalfEven ->
       case int_sign(cmp) {
         -1 -> r1
         1 -> r2
         _ ->
           case umode {
-            "half-zero" -> r1
-            "half-infinity" -> r2
-            _ ->
+            RHalfInfinity -> r2
+            RHalfEven ->
               case even {
                 True -> r1
                 False -> r2
               }
+            // RZero/RInfinity are handled above; a half-zero tie truncates.
+            RZero | RInfinity | RHalfZero -> r1
           }
       }
   }
@@ -6864,16 +7039,16 @@ fn nudge_window(
   sign: Int,
   ymwd: #(Int, Int, Int, Int),
   origin: #(IsoDate, TimeRec),
-  unit: String,
+  unit: Unit,
   inc: Int,
   shift: Bool,
   zoned: Bool,
 ) -> Result(#(Int, Int, DurRec, DurRec, Int, Int), TErr) {
   let #(years, months, weeks, days) = ymwd
   let #(whole, mk) = case unit {
-    "year" -> #(years, fn(r) { DurRec(..zero_dur, years: r) })
-    "month" -> #(months, fn(r) { DurRec(..zero_dur, years:, months: r) })
-    "week" -> #(weeks + truncate_div(days, 7), fn(r) {
+    Year -> #(years, fn(r) { DurRec(..zero_dur, years: r) })
+    Month -> #(months, fn(r) { DurRec(..zero_dur, years:, months: r) })
+    Week -> #(weeks + truncate_div(days, 7), fn(r) {
       DurRec(..zero_dur, years:, months:, weeks: r)
     })
     _ -> #(days, fn(r) { DurRec(..zero_dur, years:, months:, weeks:, days: r) })
@@ -6913,9 +7088,9 @@ fn nudge_calendar_unit(
   ymwd: #(Int, Int, Int, Int),
   origin: #(IsoDate, TimeRec),
   dest_ns: Int,
-  unit: String,
+  unit: Unit,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
   zoned: Bool,
 ) -> Result(#(DurRec, Bool, Int), TErr) {
   use w0 <- result.try(nudge_window(sign, ymwd, origin, unit, inc, False, zoned))
@@ -6988,18 +7163,18 @@ fn bubble_date_duration(
   dur: DurRec,
   nudged_ns: Int,
   origin: #(IsoDate, TimeRec),
-  largest: String,
-  start_unit: String,
+  largest: Unit,
+  start_unit: Unit,
 ) -> DurRec {
   let candidates =
     case start_unit {
-      "day" -> ["week", "month", "year"]
-      "week" -> ["month", "year"]
-      "month" -> ["year"]
+      Day -> [Week, Month, Year]
+      Week -> [Month, Year]
+      Month -> [Year]
       _ -> []
     }
     |> list.filter(fn(u) {
-      unit_rank(u) <= unit_rank(largest) && { u != "week" || largest == "week" }
+      unit_rank(u) <= unit_rank(largest) && { u != Week || largest == Week }
     })
   bubble_loop(sign, dur, nudged_ns, origin, candidates)
 }
@@ -7009,15 +7184,14 @@ fn bubble_loop(
   dur: DurRec,
   nudged_ns: Int,
   origin: #(IsoDate, TimeRec),
-  candidates: List(String),
+  candidates: List(Unit),
 ) -> DurRec {
   case candidates {
     [] -> dur
     [u, ..rest] -> {
       let end_dur = case u {
-        "year" -> DurRec(..zero_dur, years: dur.years + sign)
-        "month" ->
-          DurRec(..zero_dur, years: dur.years, months: dur.months + sign)
+        Year -> DurRec(..zero_dur, years: dur.years + sign)
+        Month -> DurRec(..zero_dur, years: dur.years, months: dur.months + sign)
         _ ->
           DurRec(
             ..zero_dur,
@@ -7044,10 +7218,10 @@ fn round_relative_date_duration(
   ymwd: #(Int, Int, Int, Int),
   origin: #(IsoDate, TimeRec),
   dest_ns: Int,
-  largest: String,
-  smallest: String,
+  largest: Unit,
+  smallest: Unit,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
   zoned: Bool,
 ) -> Result(DurRec, TErr) {
   let sign = case int_sign(dest_ns - local_ns(origin.0, origin.1)) {
@@ -7064,7 +7238,7 @@ fn round_relative_date_duration(
     mode,
     zoned,
   ))
-  case did_expand && smallest != "week" {
+  case did_expand && smallest != Week {
     True ->
       bubble_date_duration(
         sign,
@@ -7072,7 +7246,7 @@ fn round_relative_date_duration(
         nudged,
         origin,
         largest,
-        max_unit(smallest, "day"),
+        max_unit(smallest, Day),
       )
     False -> dur
   }
@@ -7157,7 +7331,7 @@ fn plain_time_method(
               ))
               let t2 = time_fields_apply(f, t)
               case overflow {
-                "reject" ->
+                Reject ->
                   case is_valid_time(t2) {
                     True -> {
                       let #(state, v) = make_time(state, protos, t2)
@@ -7165,7 +7339,7 @@ fn plain_time_method(
                     }
                     False -> state.range_error(state, "invalid time")
                   }
-                _ -> {
+                Constrain -> {
                   let t3 =
                     TimeRec(
                       hour: int.clamp(t2.hour, 0, 23),
@@ -7186,8 +7360,7 @@ fn plain_time_method(
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
-            "hour",
-            False,
+            allow_day: False,
           ))
           let u_ns = unit_ns(su)
           let max = ns_per_day / u_ns
@@ -7222,14 +7395,17 @@ fn to_string_time_options(
   state: State(host),
   opts: Option(Ref),
 ) -> Result(
-  #(#(Precision, Option(String), Int, String), State(host)),
+  #(#(Precision, Option(Unit), Int, RoundingMode), State(host)),
   #(JsValue, State(host)),
 ) {
   use #(digits, state) <- result.try(get_fractional_digits(state, opts))
-  use #(mode, state) <- result.try(get_rounding_mode_option(state, opts))
-  use #(su, state) <- result.try(
-    get_unit_option(state, opts, "smallestUnit", []),
-  )
+  use #(mode, state) <- result.try(get_rounding_mode_option(state, opts, Trunc))
+  use #(su, state) <- result.try(get_unit_option(
+    state,
+    opts,
+    "smallestUnit",
+    allow_auto: False,
+  ))
   case seconds_string_precision(digits, su, mode) {
     Ok(r) -> Ok(#(r, state))
     Error(RangeE(m)) -> range_error_result(state, m)
@@ -7240,23 +7416,23 @@ fn to_string_time_options(
 /// ToSecondsStringPrecisionRecord (pure part).
 fn seconds_string_precision(
   digits: Precision,
-  su: Option(String),
-  mode: String,
-) -> Result(#(Precision, Option(String), Int, String), TErr) {
+  su: Option(Unit),
+  mode: RoundingMode,
+) -> Result(#(Precision, Option(Unit), Int, RoundingMode), TErr) {
   case su {
-    Some("hour") | Some("day") | Some("week") | Some("month") | Some("year") ->
+    Some(Year) | Some(Month) | Some(Week) | Some(Day) | Some(Hour) ->
       Error(RangeE("smallestUnit must be a time unit"))
-    Some("minute") -> Ok(#(MinutePrec, Some("minute"), 1, mode))
-    Some("second") -> Ok(#(FixedPrec(0), Some("second"), 1, mode))
-    Some("millisecond") -> Ok(#(FixedPrec(3), Some("millisecond"), 1, mode))
-    Some("microsecond") -> Ok(#(FixedPrec(6), Some("microsecond"), 1, mode))
-    Some("nanosecond") -> Ok(#(FixedPrec(9), Some("nanosecond"), 1, mode))
-    Some(_) | None ->
+    Some(Minute) -> Ok(#(MinutePrec, Some(Minute), 1, mode))
+    Some(Second) -> Ok(#(FixedPrec(0), Some(Second), 1, mode))
+    Some(Millisecond) -> Ok(#(FixedPrec(3), Some(Millisecond), 1, mode))
+    Some(Microsecond) -> Ok(#(FixedPrec(6), Some(Microsecond), 1, mode))
+    Some(Nanosecond) -> Ok(#(FixedPrec(9), Some(Nanosecond), 1, mode))
+    None ->
       case digits {
         AutoPrec -> Ok(#(AutoPrec, None, 1, mode))
-        FixedPrec(0) -> Ok(#(FixedPrec(0), Some("second"), 1, mode))
+        FixedPrec(0) -> Ok(#(FixedPrec(0), Some(Second), 1, mode))
         FixedPrec(n) ->
-          Ok(#(FixedPrec(n), Some("nanosecond"), pow10(9 - n), mode))
+          Ok(#(FixedPrec(n), Some(Nanosecond), pow10(9 - n), mode))
         MinutePrec -> Ok(#(AutoPrec, None, 1, mode))
       }
   }
@@ -7306,16 +7482,15 @@ fn get_fractional_digits(
 fn round_options(
   state: State(host),
   arg: JsValue,
-  _max_unit: String,
-  allow_day: Bool,
-) -> Result(#(#(String, Int, String), State(host)), #(JsValue, State(host))) {
+  allow_day allow_day: Bool,
+) -> Result(#(#(Unit, Int, RoundingMode), State(host)), #(JsValue, State(host))) {
   case arg {
     JsUndefined -> type_error_result(state, "options parameter is required")
     JsString(s) ->
       case singular_unit(s) {
         Some(u) ->
           case unit_ok_for_round(u, allow_day) {
-            True -> Ok(#(#(u, 1, "halfExpand"), state))
+            True -> Ok(#(#(u, 1, HalfExpand), state))
             False -> range_error_result(state, "invalid smallestUnit")
           }
         None -> range_error_result(state, "invalid smallestUnit")
@@ -7325,24 +7500,22 @@ fn round_options(
         state,
         Some(ref),
       ))
-      use #(mode, state) <- result.try(get_string_option(
+      use #(mode, state) <- result.try(get_rounding_mode_option(
         state,
         Some(ref),
-        "roundingMode",
-        [
-          "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor",
-          "halfExpand", "halfTrunc", "halfEven",
-        ],
-        Some("halfExpand"),
+        HalfExpand,
       ))
-      use #(su, state) <- result.try(
-        get_unit_option(state, Some(ref), "smallestUnit", []),
-      )
+      use #(su, state) <- result.try(get_unit_option(
+        state,
+        Some(ref),
+        "smallestUnit",
+        allow_auto: False,
+      ))
       case su {
         None -> range_error_result(state, "smallestUnit is required")
         Some(u) ->
           case unit_ok_for_round(u, allow_day) {
-            True -> Ok(#(#(u, inc, option.unwrap(mode, "halfExpand")), state))
+            True -> Ok(#(#(u, inc, mode), state))
             False -> range_error_result(state, "invalid smallestUnit")
           }
       }
@@ -7351,16 +7524,11 @@ fn round_options(
   }
 }
 
-fn unit_ok_for_round(u: String, allow_day: Bool) -> Bool {
+fn unit_ok_for_round(u: Unit, allow_day: Bool) -> Bool {
   case u {
-    "day" -> allow_day
-    "hour"
-    | "minute"
-    | "second"
-    | "millisecond"
-    | "microsecond"
-    | "nanosecond" -> True
-    _ -> False
+    Day -> allow_day
+    Hour | Minute | Second | Millisecond | Microsecond | Nanosecond -> True
+    Year | Month | Week -> False
   }
 }
 
@@ -7377,8 +7545,8 @@ fn valid_time_increment(inc: Int, max: Int) -> Bool {
 /// for a time-unit smallest the increment must divide the unit's maximum.
 fn check_diff_setup(
   state: State(host),
-  largest: String,
-  smallest: String,
+  largest: Unit,
+  smallest: Unit,
   inc: Int,
 ) -> Result(#(Nil, State(host)), #(JsValue, State(host))) {
   case unit_rank(largest) < unit_rank(smallest) {
@@ -7389,11 +7557,11 @@ fn check_diff_setup(
       )
     False -> {
       let ok = case smallest {
-        "hour" -> valid_time_increment(inc, 24)
-        "minute" | "second" -> valid_time_increment(inc, 60)
-        "millisecond" | "microsecond" | "nanosecond" ->
+        Hour -> valid_time_increment(inc, 24)
+        Minute | Second -> valid_time_increment(inc, 60)
+        Millisecond | Microsecond | Nanosecond ->
           valid_time_increment(inc, 1000)
-        _ -> True
+        Year | Month | Week | Day -> True
       }
       case ok {
         True -> Ok(#(Nil, state))
@@ -7415,11 +7583,11 @@ fn time_until_since(
     state,
     args,
   )
-  let smallest = option.unwrap(smallest, "nanosecond")
-  let largest = option.unwrap(largest, max_unit(smallest, "hour"))
+  let smallest = option.unwrap(smallest, Nanosecond)
+  let largest = option.unwrap(largest, max_unit(smallest, Hour))
   case
-    unit_rank(smallest) > unit_rank("hour")
-    || unit_rank(largest) > unit_rank("hour")
+    unit_rank(smallest) > unit_rank(Hour)
+    || unit_rank(largest) > unit_rank(Hour)
   {
     True -> state.range_error(state, "units must be time units for PlainTime")
     False ->
@@ -7443,31 +7611,31 @@ fn time_until_since(
 }
 
 /// Balance a signed ns total into a Duration up to `largest` (time unit).
-fn balance_time_ns(total: Int, largest: String) -> DurRec {
+fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
   let sign = int_sign(total)
   let a = int.absolute_value(total)
   let lr = unit_rank(largest)
-  let #(days, a) = case lr >= unit_rank("day") {
+  let #(days, a) = case lr >= unit_rank(Day) {
     True -> #(a / ns_per_day, a % ns_per_day)
     False -> #(0, a)
   }
-  let #(hours, a) = case lr >= unit_rank("hour") {
+  let #(hours, a) = case lr >= unit_rank(Hour) {
     True -> #(a / ns_per_hour, a % ns_per_hour)
     False -> #(0, a)
   }
-  let #(minutes, a) = case lr >= unit_rank("minute") {
+  let #(minutes, a) = case lr >= unit_rank(Minute) {
     True -> #(a / ns_per_minute, a % ns_per_minute)
     False -> #(0, a)
   }
-  let #(seconds, a) = case lr >= unit_rank("second") {
+  let #(seconds, a) = case lr >= unit_rank(Second) {
     True -> #(a / ns_per_second, a % ns_per_second)
     False -> #(0, a)
   }
-  let #(ms, a) = case lr >= unit_rank("millisecond") {
+  let #(ms, a) = case lr >= unit_rank(Millisecond) {
     True -> #(a / ns_per_ms, a % ns_per_ms)
     False -> #(0, a)
   }
-  let #(us, a) = case lr >= unit_rank("microsecond") {
+  let #(us, a) = case lr >= unit_rank(Microsecond) {
     True -> #(a / ns_per_us, a % ns_per_us)
     False -> #(0, a)
   }
@@ -7628,8 +7796,8 @@ fn plain_date_time_method(
               )
               let t2 = time_fields_apply(f.time, t)
               let t2 = case overflow {
-                "reject" -> t2
-                _ ->
+                Reject -> t2
+                Constrain ->
                   TimeRec(
                     hour: int.clamp(t2.hour, 0, 23),
                     minute: int.clamp(t2.minute, 0, 59),
@@ -7662,12 +7830,11 @@ fn plain_date_time_method(
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
-            "day",
-            True,
+            allow_day: True,
           ))
           let u_ns = unit_ns(su)
           let max = case su {
-            "day" -> 1
+            Day -> 1
             _ -> ns_per_day / u_ns
           }
           case valid_time_increment(inc, max) {
@@ -7704,17 +7871,11 @@ fn plain_date_time_method(
                 state,
                 arg_at(args, 1),
               ))
-              use dis2, state <- state.try_op(get_string_option(
+              use dis2, state <- state.try_op(get_disambiguation_option(
                 state,
                 opts,
-                "disambiguation",
-                ["compatible", "earlier", "later", "reject"],
-                Some("compatible"),
               ))
-              use ns <- terr(
-                state,
-                get_epoch_ns_for(tz, d, t, option.unwrap(dis2, "compatible")),
-              )
+              use ns <- terr(state, get_epoch_ns_for(tz, d, t, dis2))
               case int.absolute_value(ns) <= ns_max_instant {
                 False -> state.range_error(state, "instant outside valid range")
                 True -> {
@@ -7770,8 +7931,8 @@ fn date_time_until_since(
     state,
     args,
   )
-  let smallest = option.unwrap(smallest, "nanosecond")
-  let largest = option.unwrap(largest, max_unit(smallest, "day"))
+  let smallest = option.unwrap(smallest, Nanosecond)
+  let largest = option.unwrap(largest, max_unit(smallest, Day))
   use Nil, state <- state.try_op(check_diff_setup(state, largest, smallest, inc))
   let mode2 = apply_since_mode(mode, is_since)
   use final <- terr(
@@ -7789,10 +7950,10 @@ fn diff_date_time_core(
   cal: String,
   a: #(IsoDate, TimeRec),
   b: #(IsoDate, TimeRec),
-  largest: String,
-  smallest: String,
+  largest: Unit,
+  smallest: Unit,
   inc: Int,
-  mode2: String,
+  mode2: RoundingMode,
   zoned: Bool,
 ) -> Result(DurRec, TErr) {
   // Time difference first; borrow a day if signs conflict.
@@ -7812,25 +7973,22 @@ fn diff_date_time_core(
     )
     _, _ -> #(b.0, time_diff)
   }
-  case unit_rank(largest) >= unit_rank("day") {
+  case unit_rank(largest) >= unit_rank(Day) {
     True -> {
       let #(years, months, weeks, days) = case cal {
         "iso8601" -> diff_date_parts(a.0, b_date, largest)
         _ ->
           case largest {
-            "year" | "month" -> {
-              let lu = case largest {
-                "year" -> "years"
-                _ -> "months"
-              }
-              let #(y, m, rem_days) = calendar_date_until(cal, a.0, b_date, lu)
+            Year | Month -> {
+              let #(y, m, rem_days) =
+                calendar_date_until(cal, a.0, b_date, largest)
               #(y, m, 0, rem_days)
             }
             _ -> diff_date_parts(a.0, b_date, largest)
           }
       }
       case
-        unit_rank(smallest) > unit_rank("day") || { zoned && smallest == "day" }
+        unit_rank(smallest) > unit_rank(Day) || { zoned && smallest == Day }
       {
         // Calendar-unit smallestUnit (or day with a time zone, whose length
         // varies): epoch-ns bounding (NudgeToCalendarUnit). A plain `day` is
@@ -7849,7 +8007,7 @@ fn diff_date_time_core(
         False -> {
           // Time-unit smallestUnit: round days+time in ns (NudgeToDayOrTime).
           let time_total = days * ns_per_day + time_diff
-          let rounded = case smallest == "nanosecond" && inc == 1 {
+          let rounded = case smallest == Nanosecond && inc == 1 {
             True -> time_total
             False ->
               round_to_increment(time_total, inc * unit_ns(smallest), mode2)
@@ -7857,7 +8015,7 @@ fn diff_date_time_core(
           let whole_days = truncate_div(time_total, ns_per_day)
           let rounded_whole = truncate_div(rounded, ns_per_day)
           let rem_ns = rounded - rounded_whole * ns_per_day
-          let time_part = balance_time_ns(rem_ns, "hour")
+          let time_part = balance_time_ns(rem_ns, Hour)
           let base =
             DurRec(..time_part, years:, months:, weeks:, days: rounded_whole)
           let did_expand =
@@ -7871,7 +8029,7 @@ fn diff_date_time_core(
                 -1 -> -1
                 _ -> 1
               }
-              Ok(bubble_date_duration(dsign, base, nudged, a, largest, "day"))
+              Ok(bubble_date_duration(dsign, base, nudged, a, largest, Day))
             }
           }
         }
@@ -8125,7 +8283,7 @@ fn plain_year_month_method(
                     "iso8601" -> {
                       use date <- terr(
                         state,
-                        regulate_iso_date(y, m, dd, "constrain"),
+                        regulate_iso_date(y, m, dd, Constrain),
                       )
                       use date <- terr(state, check_date_limits(date))
                       let #(state, v) = make_date_cal(state, protos, date, cal)
@@ -8144,7 +8302,7 @@ fn plain_year_month_method(
                           cd.year,
                           cd.month,
                           dd,
-                          "constrain",
+                          Constrain,
                         ),
                       )
                       let date =
@@ -8231,9 +8389,9 @@ fn year_month_until_since(
     state,
     args,
   )
-  let smallest = option.unwrap(smallest, "month")
-  let largest = option.unwrap(largest, max_unit(smallest, "year"))
-  case unit_rank(smallest) < unit_rank("month") {
+  let smallest = option.unwrap(smallest, Month)
+  let largest = option.unwrap(largest, max_unit(smallest, Year))
+  case unit_rank(smallest) < unit_rank(Month) {
     True -> state.range_error(state, "smallestUnit must be year or month")
     False ->
       case unit_rank(largest) < unit_rank(smallest) {
@@ -8250,19 +8408,19 @@ fn year_month_until_since(
               // Count whole calendar months between the two month-firsts.
               let ia = IsoDate(a.0, a.1, a.2)
               let ib = IsoDate(b.0, b.1, b.2)
-              let #(_, months, _) = calendar_date_until(cal, ia, ib, "months")
+              let #(_, months, _) = calendar_date_until(cal, ia, ib, Month)
               months
             }
           }
           let rounded = case smallest {
-            "year" -> round_to_increment(total_months, inc * 12, mode2) / 12
+            Year -> round_to_increment(total_months, inc * 12, mode2) / 12
             _ -> round_to_increment(total_months, inc, mode2)
           }
           use dur <- terr(state, case cal {
             "iso8601" ->
               Ok(case smallest, largest {
-                "year", _ -> DurRec(..zero_dur, years: rounded)
-                _, "year" ->
+                Year, _ -> DurRec(..zero_dur, years: rounded)
+                _, Year ->
                   DurRec(
                     ..zero_dur,
                     years: truncate_div(rounded, 12),
@@ -8279,7 +8437,7 @@ fn year_month_until_since(
               let ia = IsoDate(a.0, a.1, a.2)
               let ib = IsoDate(b.0, b.1, b.2)
               case smallest, largest {
-                "year", _ -> {
+                Year, _ -> {
                   use yrs <- result.map(round_calendar_year_total(
                     cal,
                     ia,
@@ -8289,15 +8447,14 @@ fn year_month_until_since(
                   ))
                   DurRec(..zero_dur, years: yrs)
                 }
-                _, "year" -> {
+                _, Year -> {
                   use mid <- result.map(calendar_date_add(
                     cal,
                     ia,
                     DurRec(..zero_dur, months: rounded),
-                    "constrain",
+                    Constrain,
                   ))
-                  let #(yrs, mos, _) =
-                    calendar_date_until(cal, ia, mid, "years")
+                  let #(yrs, mos, _) = calendar_date_until(cal, ia, mid, Year)
                   DurRec(..zero_dur, years: yrs, months: mos)
                 }
                 _, _ -> Ok(DurRec(..zero_dur, months: rounded))
@@ -8323,27 +8480,27 @@ fn round_calendar_year_total(
   ia: IsoDate,
   ib: IsoDate,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
 ) -> Result(Int, TErr) {
   let dest = epoch_days(ib)
   let sign = case dest < epoch_days(ia) {
     True -> -1
     False -> 1
   }
-  let #(yrs, _, _) = calendar_date_until(cal, ia, ib, "years")
+  let #(yrs, _, _) = calendar_date_until(cal, ia, ib, Year)
   let r1 = truncate_div(yrs, inc) * inc
   let r2 = r1 + inc * sign
   use start <- result.try(calendar_date_add(
     cal,
     ia,
     DurRec(..zero_dur, years: r1),
-    "constrain",
+    Constrain,
   ))
   use end_date <- result.map(calendar_date_add(
     cal,
     ia,
     DurRec(..zero_dur, years: r2),
-    "constrain",
+    Constrain,
   ))
   let num = dest - epoch_days(start)
   let den = epoch_days(end_date) - epoch_days(start)
@@ -8481,7 +8638,7 @@ fn plain_month_day_method(
                       let assert Some(y) = year
                       use date <- terr(
                         state,
-                        regulate_iso_date(y, m, d, "constrain"),
+                        regulate_iso_date(y, m, d, Constrain),
                       )
                       use date <- terr(state, check_date_limits(date))
                       let #(state, v) = make_date_cal(state, protos, date, cal)
@@ -8506,7 +8663,7 @@ fn plain_month_day_method(
                         )
                       use date <- terr(
                         state,
-                        resolve_calendar_date(cal, f, "constrain"),
+                        resolve_calendar_date(cal, f, Constrain),
                       )
                       use date <- terr(state, check_date_limits(date))
                       let #(state, v) = make_date_cal(state, protos, date, cal)
@@ -8569,15 +8726,22 @@ fn duration_method(
             arg_at(args, 0),
           ))
           use digits, state <- state.try_op(get_fractional_digits(state, opts))
-          use mode, state <- state.try_op(get_rounding_mode_option(state, opts))
-          use su, state <- state.try_op(
-            get_unit_option(state, opts, "smallestUnit", []),
-          )
+          use mode, state <- state.try_op(get_rounding_mode_option(
+            state,
+            opts,
+            Trunc,
+          ))
+          use su, state <- state.try_op(get_unit_option(
+            state,
+            opts,
+            "smallestUnit",
+            allow_auto: False,
+          ))
           use #(prec, runit, rinc) <- terr(
             state,
             duration_string_precision(digits, su),
           )
-          use d2 <- terr(state, case runit == "nanosecond" && rinc == 1 {
+          use d2 <- terr(state, case runit == Nanosecond && rinc == 1 {
             True -> Ok(d)
             False -> round_duration_for_string(d, rinc, runit, mode)
           })
@@ -8739,26 +8903,26 @@ fn duration_method(
   }
 }
 
-fn larger_time_unit(a: DurRec, b: DurRec) -> String {
+fn larger_time_unit(a: DurRec, b: DurRec) -> Unit {
   let unit_of = fn(d: DurRec) {
     case d.days != 0 {
-      True -> "day"
+      True -> Day
       False ->
         case d.hours != 0 {
-          True -> "hour"
+          True -> Hour
           False ->
             case d.minutes != 0 {
-              True -> "minute"
+              True -> Minute
               False ->
                 case d.seconds != 0 {
-                  True -> "second"
+                  True -> Second
                   False ->
                     case d.ms != 0 {
-                      True -> "millisecond"
+                      True -> Millisecond
                       False ->
                         case d.us != 0 {
-                          True -> "microsecond"
-                          False -> "nanosecond"
+                          True -> Microsecond
+                          False -> Nanosecond
                         }
                     }
                 }
@@ -8770,15 +8934,15 @@ fn larger_time_unit(a: DurRec, b: DurRec) -> String {
 }
 
 /// The largest unit with a nonzero field (DefaultTemporalLargestUnit).
-fn default_largest_unit(d: DurRec) -> String {
+fn default_largest_unit(d: DurRec) -> Unit {
   case d.years != 0 {
-    True -> "year"
+    True -> Year
     False ->
       case d.months != 0 {
-        True -> "month"
+        True -> Month
         False ->
           case d.weeks != 0 {
-            True -> "week"
+            True -> Week
             False -> larger_time_unit(d, zero_dur)
           }
       }
@@ -8801,18 +8965,20 @@ fn duration_round(
             state,
             protos,
             d,
-            "auto",
+            None,
             su,
             1,
-            "halfExpand",
+            HalfExpand,
             RelNone,
           )
         None -> state.range_error(state, "invalid smallestUnit")
       }
     JsObject(oref) -> {
-      use largest, state <- state.try_op(
-        get_unit_option_keep(state, Some(oref), "largestUnit", ["auto"]),
-      )
+      use largest, state <- state.try_op(get_unit_option_keep(
+        state,
+        Some(oref),
+        "largestUnit",
+      ))
       use rel_v, state <- state.try_op(ops_object.get_value(
         state,
         oref,
@@ -8824,41 +8990,30 @@ fn duration_round(
         state,
         Some(oref),
       ))
-      use mode, state <- state.try_op(get_string_option(
+      use mode, state <- state.try_op(get_rounding_mode_option(
         state,
         Some(oref),
-        "roundingMode",
-        [
-          "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor",
-          "halfExpand", "halfTrunc", "halfEven",
-        ],
-        Some("halfExpand"),
+        HalfExpand,
       ))
-      use smallest, state <- state.try_op(
-        get_unit_option(state, Some(oref), "smallestUnit", []),
-      )
-      case smallest == None && largest == None {
+      use smallest, state <- state.try_op(get_unit_option(
+        state,
+        Some(oref),
+        "smallestUnit",
+        allow_auto: False,
+      ))
+      case smallest == None && largest == UnitAbsent {
         True ->
           state.range_error(
             state,
             "at least one of smallestUnit or largestUnit is required",
           )
         False -> {
-          let su = option.unwrap(smallest, "nanosecond")
+          let su = option.unwrap(smallest, Nanosecond)
           let lu = case largest {
-            Some(u) -> u
-            None -> "auto"
+            UnitValue(u) -> Some(u)
+            UnitAuto | UnitAbsent -> None
           }
-          duration_round_with(
-            state,
-            protos,
-            d,
-            lu,
-            su,
-            inc,
-            option.unwrap(mode, "halfExpand"),
-            rel,
-          )
+          duration_round_with(state, protos, d, lu, su, inc, mode, rel)
         }
       }
     }
@@ -8866,24 +9021,25 @@ fn duration_round(
   }
 }
 
+/// `largest` None means "auto": the duration's own default largest unit.
 fn duration_round_with(
   state: State(host),
   protos: TemporalProtos,
   d: DurRec,
-  largest: String,
-  smallest: String,
+  largest: Option(Unit),
+  smallest: Unit,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
   rel: RelTo,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let largest = case largest {
-    "auto" -> max_unit(default_largest_unit(d), smallest)
-    u -> u
+    None -> max_unit(default_largest_unit(d), smallest)
+    Some(u) -> u
   }
   let max_inc = case smallest {
-    "hour" -> Some(24)
-    "minute" | "second" -> Some(60)
-    "millisecond" | "microsecond" | "nanosecond" -> Some(1000)
+    Hour -> Some(24)
+    Minute | Second -> Some(60)
+    Millisecond | Microsecond | Nanosecond -> Some(1000)
     _ -> None
   }
   let inc_invalid = case max_inc {
@@ -8891,7 +9047,7 @@ fn duration_round_with(
     None -> False
   }
   let date_inc_invalid =
-    inc > 1 && unit_rank(smallest) >= unit_rank("day") && largest != smallest
+    inc > 1 && unit_rank(smallest) >= unit_rank(Day) && largest != smallest
   case
     unit_rank(largest) < unit_rank(smallest),
     inc_invalid || date_inc_invalid
@@ -8909,8 +9065,8 @@ fn duration_round_with(
             d.years != 0
             || d.months != 0
             || d.weeks != 0
-            || unit_rank(largest) > unit_rank("day")
-            || unit_rank(smallest) > unit_rank("day")
+            || unit_rank(largest) > unit_rank(Day)
+            || unit_rank(smallest) > unit_rank(Day)
           case needs_rel {
             True ->
               state.range_error(
@@ -8936,7 +9092,7 @@ fn duration_round_with(
           // DifferenceZonedDateTimeWithRounding between the anchor and
           // anchor + duration.
           use target_ns <- terr(state, add_zoned_ns(rel_ns, tz, cal, d))
-          case unit_rank(largest) <= unit_rank("hour") {
+          case unit_rank(largest) <= unit_rank(Hour) {
             True -> {
               let diff = target_ns - rel_ns
               let rounded =
@@ -8953,7 +9109,7 @@ fn duration_round_with(
             False -> {
               use result <- terr(
                 state,
-                case unit_rank(smallest) >= unit_rank("day") {
+                case unit_rank(smallest) >= unit_rank(Day) {
                   // Calendar-unit (or zoned day) smallestUnit: wall-clock
                   // diff with calendar nudging.
                   True -> {
@@ -9048,10 +9204,10 @@ fn zoned_diff_round_time(
   tz: String,
   a_ns: Int,
   b_ns: Int,
-  largest: String,
-  smallest: String,
+  largest: Unit,
+  smallest: Unit,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
 ) -> Result(DurRec, TErr) {
   // Note: a zero difference still computes the next-day boundary, which can
   // throw when the anchor sits at the edge of the representable range
@@ -9075,12 +9231,9 @@ fn zoned_diff_round_time(
         "iso8601" -> diff_date_parts(a_d, b_date, largest)
         _ ->
           case largest {
-            "year" | "month" -> {
-              let lu = case largest {
-                "year" -> "years"
-                _ -> "months"
-              }
-              let #(y, m, rem_days) = calendar_date_until(cal, a_d, b_date, lu)
+            Year | Month -> {
+              let #(y, m, rem_days) =
+                calendar_date_until(cal, a_d, b_date, largest)
               #(y, m, 0, rem_days)
             }
             _ -> diff_date_parts(a_d, b_date, largest)
@@ -9091,20 +9244,20 @@ fn zoned_diff_round_time(
         cal,
         a_d,
         date_dur,
-        "constrain",
+        Constrain,
       ))
       use start_ns <- result.try(get_epoch_ns_for(
         tz,
         start_date,
         a_t,
-        "compatible",
+        Compatible,
       ))
       let time_rem = b_ns - start_ns
-      case smallest == "nanosecond" && inc == 1 {
+      case smallest == Nanosecond && inc == 1 {
         // Rounding is a noop: balance only, without materialising the
         // next-day boundary (which can be out of range at the edges).
         True -> {
-          let time_part = balance_time_ns(time_rem, "hour")
+          let time_part = balance_time_ns(time_rem, Hour)
           Ok(DurRec(..time_part, years:, months:, weeks:, days:))
         }
         False ->
@@ -9136,15 +9289,15 @@ fn zoned_nudge_time(
   time_rem: Int,
   ymwd: #(Int, Int, Int, Int),
   sign: Int,
-  largest: String,
-  smallest: String,
+  largest: Unit,
+  smallest: Unit,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
 ) -> Result(DurRec, TErr) {
   let #(a_d, a_t) = a_dt
   let #(years, months, weeks, days) = ymwd
   let end_date = iso_date_from_epoch_days(epoch_days(start_date) + sign)
-  use end_ns <- result.try(get_epoch_ns_for(tz, end_date, a_t, "compatible"))
+  use end_ns <- result.try(get_epoch_ns_for(tz, end_date, a_t, Compatible))
   let day_span = end_ns - start_ns
   let rounded_t = round_to_increment(time_rem, inc * unit_ns(smallest), mode)
   let beyond = rounded_t - day_span
@@ -9154,7 +9307,7 @@ fn zoned_nudge_time(
     True -> {
       let rounded_t2 =
         round_to_increment(time_rem - day_span, inc * unit_ns(smallest), mode)
-      let time_part = balance_time_ns(rounded_t2, "hour")
+      let time_part = balance_time_ns(rounded_t2, Hour)
       let base = DurRec(..time_part, years:, months:, weeks:, days: days + sign)
       let nudged_inst = end_ns + rounded_t2
       let #(n_d, n_t) =
@@ -9165,11 +9318,11 @@ fn zoned_nudge_time(
         local_ns(n_d, n_t),
         #(a_d, a_t),
         largest,
-        "day",
+        Day,
       ))
     }
     False -> {
-      let time_part = balance_time_ns(rounded_t, "hour")
+      let time_part = balance_time_ns(rounded_t, Hour)
       Ok(DurRec(..time_part, years:, months:, weeks:, days:))
     }
   }
@@ -9188,7 +9341,7 @@ fn duration_target_datetime(
       weeks: d.weeks,
       days: d.days,
     )
-  use base <- result.try(add_duration_to_date(rel, date_only, "constrain"))
+  use base <- result.try(add_duration_to_date(rel, date_only, Constrain))
   let time_ns = time_only_ns(d)
   let extra_days = floor_div(time_ns, ns_per_day)
   let rem = time_ns - extra_days * ns_per_day
@@ -9220,9 +9373,12 @@ fn duration_total(
         JsObject(oref),
       ))
       use rel, state <- state.try_op(convert_relative_to(state, rel_v))
-      use unit_o, state <- state.try_op(
-        get_unit_option(state, Some(oref), "unit", []),
-      )
+      use unit_o, state <- state.try_op(get_unit_option(
+        state,
+        Some(oref),
+        "unit",
+        allow_auto: False,
+      ))
       case unit_o {
         None -> state.range_error(state, "unit is required")
         Some(u) -> duration_total_with(state, d, u, rel)
@@ -9235,7 +9391,7 @@ fn duration_total(
 fn duration_total_with(
   state: State(host),
   d: DurRec,
-  unit: String,
+  unit: Unit,
   rel: RelTo,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case rel {
@@ -9244,7 +9400,7 @@ fn duration_total_with(
         d.years != 0
         || d.months != 0
         || d.weeks != 0
-        || unit_rank(unit) > unit_rank("day")
+        || unit_rank(unit) > unit_rank(Day)
       case needs_rel {
         True ->
           state.range_error(
@@ -9259,7 +9415,7 @@ fn duration_total_with(
     }
     RelZoned(anchor_ns, tz, cal) -> {
       use target_ns <- terr(state, add_zoned_ns(anchor_ns, tz, cal, d))
-      case unit_rank(unit) <= unit_rank("hour") {
+      case unit_rank(unit) <= unit_rank(Hour) {
         True -> {
           let diff = target_ns - anchor_ns
           #(state, Ok(JsNumber(Finite(ns_div_float(diff, unit_ns(unit))))))
@@ -9282,17 +9438,17 @@ fn duration_total_with(
             _, _ -> b_d
           }
           let whole0 = case unit {
-            "year" -> diff_date_parts(a_d, b_date, "year").0
-            "month" -> diff_date_parts(a_d, b_date, "month").1
-            "week" -> truncate_div(epoch_days(b_date) - epoch_days(a_d), 7)
+            Year -> diff_date_parts(a_d, b_date, Year).0
+            Month -> diff_date_parts(a_d, b_date, Month).1
+            Week -> truncate_div(epoch_days(b_date) - epoch_days(a_d), 7)
             _ -> epoch_days(b_date) - epoch_days(a_d)
           }
           let bound = fn(w: Int) {
             let date = case unit {
-              "day" -> iso_date_from_epoch_days(epoch_days(a_d) + w)
+              Day -> iso_date_from_epoch_days(epoch_days(a_d) + w)
               _ -> add_calendar_units(a_d, unit, w)
             }
-            get_epoch_ns_for(tz, date, a_t, "compatible")
+            get_epoch_ns_for(tz, date, a_t, Compatible)
           }
           use start0_ns <- terr(state, bound(whole0))
           use end0_ns <- terr(state, bound(whole0 + sign))
@@ -9345,7 +9501,7 @@ fn duration_total_with(
       use target <- terr(state, duration_target_datetime(rel_date, d))
       let rel_ns = epoch_days(rel_date) * ns_per_day
       let target_ns = epoch_days(target.0) * ns_per_day + time_to_ns(target.1)
-      case unit_rank(unit) <= unit_rank("day") {
+      case unit_rank(unit) <= unit_rank(Day) {
         True -> {
           let diff = target_ns - rel_ns
           #(state, Ok(JsNumber(Finite(ns_div_float(diff, unit_ns(unit))))))
@@ -9364,8 +9520,8 @@ fn duration_total_with(
           let target_floor_days = floor_div(target_ns, ns_per_day)
           let target_date = iso_date_from_epoch_days(target_floor_days)
           let whole0 = case unit {
-            "year" -> diff_date_parts(rel_date, target_date, "year").0
-            "month" -> diff_date_parts(rel_date, target_date, "month").1
+            Year -> diff_date_parts(rel_date, target_date, Year).0
+            Month -> diff_date_parts(rel_date, target_date, Month).1
             _ -> truncate_div(epoch_days(target_date) - epoch_days(rel_date), 7)
           }
           // Window bounds come from CalendarDateAdd, which range-checks its
@@ -9404,10 +9560,10 @@ fn duration_total_with(
   }
 }
 
-fn add_calendar_units(d: IsoDate, unit: String, n: Int) -> IsoDate {
+fn add_calendar_units(d: IsoDate, unit: Unit, n: Int) -> IsoDate {
   case unit {
-    "year" -> add_months_constrained(d, n * 12)
-    "month" -> add_months_constrained(d, n)
+    Year -> add_months_constrained(d, n * 12)
+    Month -> add_months_constrained(d, n)
     _ -> iso_date_from_epoch_days(epoch_days(d) + n * 7)
   }
 }
@@ -9477,21 +9633,24 @@ fn scale_ratio(a: Int, b: Int, s: Int) -> #(Int, Int) {
 /// smallestUnit values are allowed. Returns #(precision, unit, increment).
 fn duration_string_precision(
   digits: Precision,
-  su: Option(String),
-) -> Result(#(Precision, String, Int), TErr) {
+  su: Option(Unit),
+) -> Result(#(Precision, Unit, Int), TErr) {
   case su {
-    Some("second") -> Ok(#(FixedPrec(0), "second", 1))
-    Some("millisecond") -> Ok(#(FixedPrec(3), "millisecond", 1))
-    Some("microsecond") -> Ok(#(FixedPrec(6), "microsecond", 1))
-    Some("nanosecond") -> Ok(#(FixedPrec(9), "nanosecond", 1))
+    Some(Second) -> Ok(#(FixedPrec(0), Second, 1))
+    Some(Millisecond) -> Ok(#(FixedPrec(3), Millisecond, 1))
+    Some(Microsecond) -> Ok(#(FixedPrec(6), Microsecond, 1))
+    Some(Nanosecond) -> Ok(#(FixedPrec(9), Nanosecond, 1))
     Some(u) ->
-      Error(RangeE(u <> " is not a valid smallestUnit for Duration.toString"))
+      Error(RangeE(
+        unit_to_string(u)
+        <> " is not a valid smallestUnit for Duration.toString",
+      ))
     None ->
       case digits {
-        AutoPrec -> Ok(#(AutoPrec, "nanosecond", 1))
-        FixedPrec(0) -> Ok(#(FixedPrec(0), "second", 1))
-        FixedPrec(n) -> Ok(#(FixedPrec(n), "nanosecond", pow10(9 - n)))
-        MinutePrec -> Ok(#(AutoPrec, "nanosecond", 1))
+        AutoPrec -> Ok(#(AutoPrec, Nanosecond, 1))
+        FixedPrec(0) -> Ok(#(FixedPrec(0), Second, 1))
+        FixedPrec(n) -> Ok(#(FixedPrec(n), Nanosecond, pow10(9 - n)))
+        MinutePrec -> Ok(#(AutoPrec, Nanosecond, 1))
       }
   }
 }
@@ -9502,17 +9661,17 @@ fn duration_string_precision(
 fn round_duration_for_string(
   d: DurRec,
   inc: Int,
-  unit: String,
-  mode: String,
+  unit: Unit,
+  mode: RoundingMode,
 ) -> Result(DurRec, TErr) {
   let time_ns = time_only_ns(d)
   let rounded = round_to_increment(time_ns, inc * unit_ns(unit), mode)
-  let largest = max_unit(default_largest_unit(d), "second")
-  let result = case unit_rank(largest) >= unit_rank("day") {
+  let largest = max_unit(default_largest_unit(d), Second)
+  let result = case unit_rank(largest) >= unit_rank(Day) {
     True -> {
       let extra_days = truncate_div(rounded, ns_per_day)
       let rem = rounded - extra_days * ns_per_day
-      let t = balance_time_ns(rem, "hour")
+      let t = balance_time_ns(rem, Hour)
       DurRec(
         ..t,
         years: d.years,
@@ -9702,8 +9861,7 @@ fn instant_method(
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
-            "hour",
-            False,
+            allow_day: False,
           ))
           let u_ns = unit_ns(su)
           // For Instant: increment*unit must divide 24h.
@@ -9762,11 +9920,11 @@ fn instant_until_since(
     state,
     args,
   )
-  let smallest = option.unwrap(smallest, "nanosecond")
-  let largest = option.unwrap(largest, max_unit(smallest, "second"))
+  let smallest = option.unwrap(smallest, Nanosecond)
+  let largest = option.unwrap(largest, max_unit(smallest, Second))
   case
-    unit_rank(smallest) > unit_rank("hour")
-    || unit_rank(largest) > unit_rank("hour")
+    unit_rank(smallest) > unit_rank(Hour)
+    || unit_rank(largest) > unit_rank(Hour)
   {
     True -> state.range_error(state, "units must be time units for Instant")
     False ->
@@ -9826,10 +9984,17 @@ fn zoned_date_time_method(
             ["auto", "never"],
             Some("auto"),
           ))
-          use mode, state <- state.try_op(get_rounding_mode_option(state, opts))
-          use su_opt, state <- state.try_op(
-            get_unit_option(state, opts, "smallestUnit", []),
-          )
+          use mode, state <- state.try_op(get_rounding_mode_option(
+            state,
+            opts,
+            Trunc,
+          ))
+          use su_opt, state <- state.try_op(get_unit_option(
+            state,
+            opts,
+            "smallestUnit",
+            allow_auto: False,
+          ))
           use tz_mode, state <- state.try_op(get_string_option(
             state,
             opts,
@@ -9920,7 +10085,7 @@ fn zoned_date_time_method(
                   date_dur,
                   overflow,
                 ))
-                get_epoch_ns_for(tz, d2, t, "compatible")
+                get_epoch_ns_for(tz, d2, t, Compatible)
               }
             },
           )
@@ -9973,14 +10138,13 @@ fn zoned_date_time_method(
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
-            "day",
-            True,
+            allow_day: True,
           ))
           let u_ns = unit_ns(su)
           let max = case su {
-            "day" -> 1
-            "hour" -> 24
-            "minute" | "second" -> 60
+            Day -> 1
+            Hour -> 24
+            Minute | Second -> 60
             _ -> 1000
           }
           case valid_time_increment(inc, max) {
@@ -9989,7 +10153,7 @@ fn zoned_date_time_method(
               let local = ns + off
               let day_part = floor_div(local, ns_per_day)
               let local_date = iso_date_from_epoch_days(day_part)
-              case su == "day" {
+              case su == Day {
                 // Round within the day bounded by start-of-day instants;
                 // both bounds must be representable.
                 True -> {
@@ -10023,8 +10187,8 @@ fn zoned_date_time_method(
                       "option",
                       off,
                       tz,
-                      "compatible",
-                      "prefer",
+                      Compatible,
+                      PreferOffset,
                       False,
                     ),
                   )
@@ -10062,19 +10226,14 @@ fn zoned_date_time_method(
                 state,
                 arg_at(args, 1),
               ))
-              use dis_opt, state <- state.try_op(get_string_option(
+              use dis_opt, state <- state.try_op(get_disambiguation_option(
                 state,
                 opts,
-                "disambiguation",
-                ["compatible", "earlier", "later", "reject"],
-                Some("compatible"),
               ))
-              use off_opt, state <- state.try_op(get_string_option(
+              use off_opt, state <- state.try_op(get_offset_option(
                 state,
                 opts,
-                "offset",
-                ["prefer", "use", "ignore", "reject"],
-                Some("prefer"),
+                PreferOffset,
               ))
               use overflow, state <- state.try_op(get_overflow_option(
                 state,
@@ -10086,8 +10245,8 @@ fn zoned_date_time_method(
               )
               let t2 = time_fields_apply(f.time, t)
               let t2 = case overflow {
-                "reject" -> t2
-                _ ->
+                Reject -> t2
+                Constrain ->
                   TimeRec(
                     hour: int.clamp(t2.hour, 0, 23),
                     minute: int.clamp(t2.minute, 0, 59),
@@ -10108,8 +10267,8 @@ fn zoned_date_time_method(
                       "option",
                       option.unwrap(f.offset, off),
                       tz,
-                      option.unwrap(dis_opt, "compatible"),
-                      option.unwrap(off_opt, "prefer"),
+                      dis_opt,
+                      off_opt,
                       False,
                     ),
                   )
@@ -10143,7 +10302,7 @@ fn zoned_date_time_method(
                 arg,
                 JsUndefined,
               ))
-              use ns2 <- terr(state, get_epoch_ns_for(tz, d, t2, "compatible"))
+              use ns2 <- terr(state, get_epoch_ns_for(tz, d, t2, Compatible))
               let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
               #(state, Ok(v))
             }
@@ -10237,11 +10396,11 @@ fn zoned_until_since(
     state,
     args,
   )
-  let smallest = option.unwrap(smallest, "nanosecond")
-  let largest = option.unwrap(largest, max_unit(smallest, "hour"))
+  let smallest = option.unwrap(smallest, Nanosecond)
+  let largest = option.unwrap(largest, max_unit(smallest, Hour))
   use Nil, state <- state.try_op(check_diff_setup(state, largest, smallest, inc))
   let mode2 = apply_since_mode(mode, is_since)
-  case unit_rank(largest) <= unit_rank("hour") {
+  case unit_rank(largest) <= unit_rank(Hour) {
     True -> {
       // Exact-time difference, like Instant.
       let diff = b_ns - a_ns
