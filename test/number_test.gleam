@@ -3,8 +3,9 @@ import arc/engine.{Returned}
 import arc/parser/number
 import arc/vm/value.{Finite, JsNumber, JsString}
 
-/// Largest finite IEEE double — the value an overflowing literal clamps to
-/// (BEAM floats cannot express Infinity).
+/// Largest finite IEEE double — the value an overflowing literal currently
+/// clamps to. This is a KNOWN SPEC DEVIATION, not the correct value: see
+/// number_exponent_overflow_clamps_test.
 const max_double = 1.7976931348623157e308
 
 /// Helper: eval source on a fresh engine, assert normal completion, return
@@ -36,9 +37,15 @@ pub fn number_bare_dot_forms_test() {
 // ----------------------------------------------------------------------------
 
 pub fn number_exponent_overflow_clamps_test() {
-  // The JS value is Infinity; the AST stores a plain Float and BEAM has no
-  // float infinity, so overflow clamps to the largest finite double (the
-  // same policy huge integer literals already use).
+  // KNOWN SPEC DEVIATION — this pins the current WRONG value, it is not the
+  // fixed behaviour. Per ES2024 the value of `1e400` is +Infinity, and the VM
+  // can express it (value.JsNum has Infinity; value.num_from_int already
+  // returns it for the same overflow). We clamp only because
+  // ast.NumberLiteral stores a plain Float, which on BEAM has no infinity.
+  // The clamp is still strictly better than the prior behaviour (0.0), and
+  // this test exists so a regression back to 0.0 is caught. Once
+  // NumberLiteral carries a value.JsNum through emit's push_const, these
+  // must become Infinity.
   assert number.parse_js_number("1e400") == max_double
   assert number.parse_js_number("1.5e400") == max_double
 }
@@ -76,6 +83,13 @@ pub fn eval_dot_exponent_literal_test() {
 }
 
 pub fn eval_overflowing_literal_test() {
+  // KNOWN SPEC DEVIATION — pins the current WRONG value so the pre-existing
+  // bug (`1e400` cooking to 0) cannot come back; it is NOT the fixed
+  // behaviour. Per spec this must be JsNumber(Infinity): today
+  // `1e400 === Number.MAX_VALUE` is true, `1/1e400` is nonzero, and
+  // `(1e400).toString()` is not "Infinity". Blocked on ast.NumberLiteral
+  // carrying a value.JsNum instead of a bare Float (see
+  // number.overflow_clamp).
   assert eval("1e400") == JsNumber(Finite(max_double))
 }
 

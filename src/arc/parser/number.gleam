@@ -77,10 +77,21 @@ const two52 = 4_503_599_627_370_496
 const two53 = 9_007_199_254_740_992
 
 /// The value a numeric literal takes when its magnitude exceeds the IEEE
-/// double range. The mathematical value is ±Infinity, but the AST stores a
-/// plain Float and BEAM floats cannot express infinity, so clamp to the
-/// largest finite double. Shared by the decimal-integer path (int_to_float)
-/// and the float/exponent path (parse_js_number).
+/// double range. Shared by the decimal-integer path (int_to_float) and the
+/// float/exponent path (parse_js_number).
+///
+/// KNOWN SPEC DEVIATION. Per ES2024 the mathematical value is ±Infinity, and
+/// the VM can represent it (value.JsNum has Infinity/NegInfinity;
+/// value.num_from_int already returns Infinity for the same overflow). The
+/// only reason we clamp to the largest finite double instead is that
+/// ast.NumberLiteral stores a plain Float and BEAM's Float type has no
+/// infinity, so this function's return type cannot express the right answer.
+/// So `1e400 === Number.MAX_VALUE` is true here where it should be false.
+/// Fixing it means widening NumberLiteral to carry a value.JsNum (or a
+/// Finite|Infinity sum) through parser.gleam and emit.gleam's push_const /
+/// js_format_number sites — a cross-module change, not a local one.
+/// The clamp is still strictly better than the pre-existing behaviour of
+/// cooking an overflowing literal to 0.0.
 fn overflow_clamp(negative negative: Bool) -> Float {
   case negative {
     True -> -1.7976931348623157e308
