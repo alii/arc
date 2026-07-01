@@ -42,6 +42,7 @@ import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/operators
+import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
   type ExoticKind, type Heap, type HeapSlot, type NativeFnSlot, type State,
@@ -676,7 +677,7 @@ pub fn call_native(
         [] | [_] -> Ok(#([], state))
         [_, JsUndefined, ..] | [_, value.JsNull, ..] -> Ok(#([], state))
         [_, arg_array, ..] ->
-          state.rethrow(list_from_array_like(state, arg_array))
+          state.rethrow(property.create_list_from_array_like(state, arg_array))
       })
       call_value(
         State(..state, stack: rest_stack),
@@ -2002,71 +2003,6 @@ fn proxy_create(
       ))
     }
     _ -> Error("Cannot create proxy with a non-object as target or handler")
-  }
-}
-
-/// Extract elements from an array object as a list of JsValues.
-/// Used by Function.prototype.apply to unpack the args tuple_array.
-/// §7.3.19 CreateListFromArrayLike ( obj ) — stateful: the "length" and
-/// element reads go through [[Get]] (accessor properties, proxy traps,
-/// typed-array indices) and can throw (test262: Function/prototype/apply/
-/// get-length-abrupt, get-index-abrupt, argarray-not-object, resizable-buffer).
-fn list_from_array_like(
-  state: State(host),
-  arg: JsValue,
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
-  case arg {
-    JsObject(ref) -> {
-      // Step 3: Let len be ? LengthOfArrayLike(obj) = ToLength(? Get(obj, "length")).
-      use #(len_val, state) <- result.try(object.get_value(
-        state,
-        ref,
-        Named("length"),
-        arg,
-      ))
-      use #(len_num, state) <- result.try(coerce.js_to_number(state, len_val))
-      let len = case len_num {
-        value.Finite(f) -> int.max(float.truncate(f), 0)
-        value.Infinity -> limits.max_safe_integer
-        _ -> 0
-      }
-      case len > limits.max_iteration {
-        True ->
-          Error(state.range_error_value(
-            state,
-            "Too many arguments in function call",
-          ))
-        False -> gather_args_stateful(state, ref, arg, 0, len, [])
-      }
-    }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "CreateListFromArrayLike called on non-object",
-      ))
-  }
-}
-
-fn gather_args_stateful(
-  state: State(host),
-  ref: Ref,
-  receiver: JsValue,
-  idx: Int,
-  len: Int,
-  acc: List(JsValue),
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
-  case idx >= len {
-    True -> Ok(#(list.reverse(acc), state))
-    False -> {
-      // Step 7.b-c: Let next be ? Get(obj, ToString(F(index))).
-      use #(v, state) <- result.try(object.get_value(
-        state,
-        ref,
-        value.Index(idx),
-        receiver,
-      ))
-      gather_args_stateful(state, ref, receiver, idx + 1, len, [v, ..acc])
-    }
   }
 }
 

@@ -1,21 +1,17 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/object as builtins_object
-import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/ops/object
 import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type ReflectNativeFn, JsBool, JsNull, JsObject,
-  JsString, JsSymbol, JsUndefined, ReflectApply, ReflectConstruct,
-  ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
-  ReflectGetOwnPropertyDescriptor, ReflectGetPrototypeOf, ReflectHas,
-  ReflectIsExtensible, ReflectNative, ReflectOwnKeys, ReflectPreventExtensions,
-  ReflectSet, ReflectSetPrototypeOf,
+  JsUndefined, ReflectApply, ReflectConstruct, ReflectDefineProperty,
+  ReflectDeleteProperty, ReflectGet, ReflectGetOwnPropertyDescriptor,
+  ReflectGetPrototypeOf, ReflectHas, ReflectIsExtensible, ReflectNative,
+  ReflectOwnKeys, ReflectPreventExtensions, ReflectSet, ReflectSetPrototypeOf,
 }
 import gleam/bool
-import gleam/list
 import gleam/option.{None, Some}
 
 // ============================================================================
@@ -104,31 +100,6 @@ fn require_object(
   }
 }
 
-/// CreateListFromArrayLike ( obj ) — ES2024 §7.3.19
-/// Simplified: reads indices 0..length from array/arguments objects.
-/// Holes become undefined. Non-array-like objects produce [].
-fn create_list_from_array_like(h: Heap(host), ref: Ref) -> List(JsValue) {
-  heap.read_array_like(h, ref)
-  |> option.map(fn(p) {
-    let #(length, elems) = p
-    gather_elements(elems, 0, length, [])
-  })
-  |> option.unwrap([])
-}
-
-fn gather_elements(
-  elems: value.JsElements,
-  idx: Int,
-  length: Int,
-  acc: List(JsValue),
-) -> List(JsValue) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False ->
-      gather_elements(elems, idx + 1, length, [elements.get(elems, idx), ..acc])
-  }
-}
-
 /// Reflect.apply ( target, thisArgument, argumentsList ) — ES2024 §28.1.1
 ///
 ///   1. If IsCallable(target) is false, throw a TypeError exception.
@@ -150,8 +121,12 @@ fn reflect_apply(
     !helpers.is_callable(state.heap, target),
     state.type_error(state, "Reflect.apply: target is not a function"),
   )
-  // Step 2: Let args be ? CreateListFromArrayLike(argumentsList).
-  use call_args, state <- require_array_like(state, args_list)
+  // Step 2: Let args be ? CreateListFromArrayLike(argumentsList) — the real
+  // §7.3.19: length/element reads go through [[Get]] (proxy traps, accessors).
+  use call_args, state <- state.try_op(property.create_list_from_array_like(
+    state,
+    args_list,
+  ))
   // Step 4: Return ? Call(target, thisArgument, args).
   use result, state <- state.try_call(state, target, this_arg, call_args)
   #(state, Ok(result))
@@ -184,7 +159,10 @@ fn reflect_construct(
     state.type_error(state, "Reflect.construct: newTarget is not a constructor")
   })
   // Step 4: Let args be ? CreateListFromArrayLike(argumentsList).
-  use ctor_args, state <- require_array_like(state, args_list)
+  use ctor_args, state <- state.try_op(property.create_list_from_array_like(
+    state,
+    args_list,
+  ))
   // Step 5: state.construct_with_target runs [[Construct]] with newTarget.
   use result, state <- state.try_op(state.construct_with_target(
     state,
@@ -193,19 +171,6 @@ fn reflect_construct(
     new_target,
   ))
   #(state, Ok(result))
-}
-
-/// CreateListFromArrayLike per §7.3.19 — throws TypeError on non-object.
-fn require_array_like(
-  state: State(host),
-  val: JsValue,
-  cont: fn(List(JsValue), State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case val {
-    JsObject(ref) -> cont(create_list_from_array_like(state.heap, ref), state)
-    _ -> state.type_error(state, "CreateListFromArrayLike called on non-object")
-  }
 }
 
 /// Reflect.defineProperty ( target, propertyKey, attributes ) — ES2024 §28.1.3
@@ -251,23 +216,9 @@ fn reflect_delete_property(
   use ref, rest, state <- require_object(args, state, "deleteProperty")
   let key_val = helpers.first_arg_or_undefined(rest)
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
+  use pk, state <- state.try_op(property.to_prop_key(state, key_val))
   // Step 3: Return ? target.[[Delete]](key) — trap-aware for proxies.
-  case key_val {
-    JsSymbol(sym) ->
-      unwrap_set(object.delete_property_stateful(
-        state,
-        ref,
-        object.PkSymbol(sym),
-      ))
-    _ -> {
-      use pk, state <- state.try_op(property.to_property_key(state, key_val))
-      unwrap_set(object.delete_property_stateful(
-        state,
-        ref,
-        object.PkString(pk),
-      ))
-    }
-  }
+  unwrap_set(object.delete_property_stateful(state, ref, pk))
 }
 
 /// Reflect.get ( target, propertyKey [ , receiver ] ) — ES2024 §28.1.5
@@ -287,23 +238,15 @@ fn reflect_get(
     [] -> #(JsUndefined, JsObject(ref))
   }
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
-  case key_val {
-    JsSymbol(sym) -> {
-      use val, state <- state.try_op(object.get_symbol_value(
-        state,
-        ref,
-        sym,
-        receiver,
-      ))
-      #(state, Ok(val))
-    }
-    _ -> {
-      use pk, state <- state.try_op(property.to_property_key(state, key_val))
-      // Step 4: Return ? target.[[Get]](key, receiver).
-      use val, state <- state.try_op(object.get_value(state, ref, pk, receiver))
-      #(state, Ok(val))
-    }
-  }
+  use pk, state <- state.try_op(property.to_prop_key(state, key_val))
+  // Step 4: Return ? target.[[Get]](key, receiver).
+  use val, state <- state.try_op(object.get_prop_value(
+    state,
+    ref,
+    pk,
+    receiver,
+  ))
+  #(state, Ok(val))
 }
 
 /// Reflect.getOwnPropertyDescriptor ( target, propertyKey ) — ES2024 §28.1.6
@@ -326,19 +269,12 @@ fn reflect_get_own_property_descriptor(
   // Step 2: Let key be ? ToPropertyKey(propertyKey). A "#x" string is an
   // ordinary property key here — private elements live in their own keyspace
   // and are filtered on the ordinary lookup path (never for proxy traps).
-  use key_norm, state <- state.try_op(case key_val {
-    JsSymbol(_) -> Ok(#(key_val, state))
-    _ ->
-      case property.to_property_key(state, key_val) {
-        Ok(#(pk, state)) -> Ok(#(JsString(value.key_to_string(pk)), state))
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-      }
-  })
+  use pk, state <- state.try_op(property.to_prop_key(state, key_val))
   // Step 3: Let desc be ? target.[[GetOwnProperty]](key) — trap-aware.
   use own_prop, state <- state.try_op(builtins_object.get_own_property_stateful(
     state,
     ref,
-    key_norm,
+    object.prop_key_value(pk),
   ))
   // Steps 3-4: [[GetOwnProperty]] + FromPropertyDescriptor.
   case own_prop {
@@ -377,26 +313,10 @@ fn reflect_has(
   use ref, rest, state <- require_object(args, state, "has")
   let key_val = helpers.first_arg_or_undefined(rest)
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
+  use pk, state <- state.try_op(property.to_prop_key(state, key_val))
   // Step 3: Return ? target.[[HasProperty]](key) — trap-aware.
-  case key_val {
-    JsSymbol(sym) -> {
-      use found, state <- state.try_op(object.has_property_stateful(
-        state,
-        ref,
-        object.PkSymbol(sym),
-      ))
-      #(state, Ok(JsBool(found)))
-    }
-    _ -> {
-      use pk, state <- state.try_op(property.to_property_key(state, key_val))
-      use found, state <- state.try_op(object.has_property_stateful(
-        state,
-        ref,
-        object.PkString(pk),
-      ))
-      #(state, Ok(JsBool(found)))
-    }
-  }
+  use found, state <- state.try_op(object.has_property_stateful(state, ref, pk))
+  #(state, Ok(JsBool(found)))
 }
 
 /// Reflect.isExtensible ( target ) — ES2024 §28.1.9
@@ -468,15 +388,9 @@ fn reflect_set(
     [] -> #(JsUndefined, JsUndefined, JsObject(ref))
   }
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
-  case key_val {
-    JsSymbol(sym) ->
-      unwrap_set(object.set_symbol_value(state, ref, sym, val, receiver))
-    _ -> {
-      use pk, state <- state.try_op(property.to_property_key(state, key_val))
-      // Step 4: Return ? target.[[Set]](key, V, receiver).
-      unwrap_set(object.set_value(state, ref, pk, val, receiver))
-    }
-  }
+  use pk, state <- state.try_op(property.to_prop_key(state, key_val))
+  // Step 4: Return ? target.[[Set]](key, V, receiver).
+  unwrap_set(object.set_prop_value(state, ref, pk, val, receiver))
 }
 
 /// Adapt set_value/set_symbol_value's `Result(#(State, Bool), #(JsValue, State))`

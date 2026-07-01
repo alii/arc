@@ -5,6 +5,7 @@ import arc/vm/internal/elements
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/property
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -47,24 +48,38 @@ type DefineKey {
   SymbolKey(sym: value.SymbolId)
 }
 
-/// ToPropertyKey (§7.1.19) — resolves a JsValue to either a SymbolId or a
-/// canonical string key. CPS so callers can `use` before `case this`, preserving
-/// spec ordering (hasOwnProperty does ToPropertyKey step 1, ToObject step 2).
-///
-/// Per spec: ToPrimitive(argument, string) first, THEN check if the result is
-/// a Symbol. Covers `{[Symbol.toPrimitive]: () => sym}` used as a key.
+/// ToPropertyKey (§7.1.19) resolved to this module's DefineKey (a PropKey
+/// plus a cached display string for error messages). The spec-order
+/// conversion — ToPrimitive(argument, string) FIRST, then the Symbol check,
+/// so `{[Symbol.toPrimitive]: () => sym}` used as a key produces a symbol
+/// key — is property.to_prop_key; this only re-shapes the result.
+fn to_define_key(
+  state: State(host),
+  key_val: JsValue,
+) -> Result(#(DefineKey, State(host)), #(JsValue, State(host))) {
+  use #(pk, state) <- result.map(property.to_prop_key(state, key_val))
+  #(prop_key_to_define_key(pk), state)
+}
+
+/// The DefineKey form of an already-resolved PropKey.
+fn prop_key_to_define_key(pk: object.PropKey) -> DefineKey {
+  case pk {
+    object.PkSymbol(sym) -> SymbolKey(sym)
+    object.PkString(pkey) -> StringKey(pkey, value.key_to_string(pkey))
+  }
+}
+
+/// CPS form of `to_define_key` so callers can `use` before `case this`,
+/// preserving spec ordering (hasOwnProperty does ToPropertyKey step 1,
+/// ToObject step 2).
 fn try_to_property_key(
   state: State(host),
   key_val: JsValue,
   cont: fn(DefineKey, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case coerce.to_primitive(state, key_val, coerce.StringHint) {
+  case to_define_key(state, key_val) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(JsSymbol(sym), state)) -> cont(SymbolKey(sym), state)
-    Ok(#(prim, state)) -> {
-      use s, state <- coerce.try_to_string(state, prim)
-      cont(StringKey(value.canonical_key(s), s), state)
-    }
+    Ok(#(dkey, state)) -> cont(dkey, state)
   }
 }
 
@@ -486,21 +501,6 @@ pub fn apply_descriptor(
   case define_parsed(state, target_ref, dkey, parsed) {
     Ok(state) -> Ok(state)
     Error(#(failure, state)) -> Error(#(define_failure_value(failure), state))
-  }
-}
-
-/// ToPropertyKey (§7.1.19): Symbol → symbol key, else ToString (which may
-/// invoke user toString/valueOf and therefore throw).
-fn to_define_key(
-  state: State(host),
-  key_val: JsValue,
-) -> Result(#(DefineKey, State(host)), #(JsValue, State(host))) {
-  case key_val {
-    JsSymbol(sym) -> Ok(#(SymbolKey(sym), state))
-    _ -> {
-      use #(s, state) <- result.map(coerce.js_to_string(state, key_val))
-      #(StringKey(value.canonical_key(s), s), state)
-    }
   }
 }
 
@@ -2246,10 +2246,13 @@ fn define_properties_on(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case props_val {
     JsObject(props_ref) -> {
-      // Steps 2-3: Get own keys (filtered to enumerable-only).
-      let ks = collect_own_keys(state.heap, props_ref, True)
+      // Step 2: keys = ? props.[[OwnPropertyKeys]]() — trap-aware AND
+      // symbol-inclusive, so `Object.create(p, {[Symbol.x]: {..}})` defines
+      // the symbol property and a Proxy props object goes through its
+      // ownKeys trap.
+      use keys, state <- state.try_op(own_keys_stateful(state, props_ref))
       // Steps 4-5 (merged): For each key, read descriptor, validate, apply.
-      define_props_loop(state, target_ref, props_ref, ks)
+      define_props_loop(state, target_ref, props_ref, keys)
     }
     // Step 1: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
@@ -2260,8 +2263,10 @@ fn define_properties_on(
 
 /// Loop helper for ObjectDefineProperties (§20.1.2.3.1 steps 4-5 merged).
 ///
+/// `remaining` is the [[OwnPropertyKeys]] result — String and Symbol values.
 /// For each remaining key:
-///   Step 4.a: Let propDesc be ? props.[[GetOwnProperty]](nextKey).
+///   Step 4.a: Let propDesc be ? props.[[GetOwnProperty]](nextKey) — trap-aware.
+///   Step 4.b: skip when propDesc is undefined or not enumerable.
 ///   Step 4.b.i: Let descObj be ? Get(props, nextKey).
 ///   Step 4.b.ii: Let desc be ? ToPropertyDescriptor(descObj).
 ///     — ToPropertyDescriptor (§6.2.6.5) requires descObj to be an Object;
@@ -2273,35 +2278,55 @@ fn define_props_loop(
   state: State(host),
   target_ref: Ref,
   props_ref: Ref,
-  remaining: List(String),
+  remaining: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case remaining {
     // Step 6: Return O (all keys processed).
     [] -> #(state, Ok(JsObject(target_ref)))
-    [key, ..rest] -> {
-      let pkey = value.canonical_key(key)
-      case object.get_own_property(state.heap, props_ref, pkey) {
-        // Step 4.a: propDesc is undefined → skip (key has no own property).
-        None -> define_props_loop(state, target_ref, props_ref, rest)
-        // Step 4.b.i: descObj = Get(props, nextKey) — a real [[Get]], so
-        // accessor descriptors have their getter invoked.
-        Some(_) ->
-          case object.get_value_of(state, JsObject(props_ref), pkey) {
-            Error(#(thrown, state)) -> #(state, Error(thrown))
+    [key_val, ..rest] -> {
+      // Step 4.a: propDesc = ? props.[[GetOwnProperty]](nextKey) — trap-aware.
+      use prop, state <- state.try_op(get_own_property_stateful(
+        state,
+        props_ref,
+        key_val,
+      ))
+      let enumerable =
+        option.map(prop, value.prop_enumerable) |> option.unwrap(False)
+      case enumerable {
+        // Step 4.b: propDesc undefined or not enumerable → skip.
+        False -> define_props_loop(state, target_ref, props_ref, rest)
+        True -> {
+          // key_val is a String/Symbol from [[OwnPropertyKeys]], so
+          // ToPropertyKey is a pure fast path (no user code, cannot throw).
+          use pk, state <- state.try_op(property.to_prop_key(
+            state,
+            key_val,
+          ))
+          // Step 4.b.i: descObj = Get(props, nextKey) — a real [[Get]], so
+          // accessor descriptors have their getter invoked (and symbol keys
+          // reach define_parsed instead of being silently dropped).
+          use desc_val, state <- state.try_op(object.get_prop_value(
+            state,
+            props_ref,
+            pk,
+            JsObject(props_ref),
+          ))
+          case desc_val {
             // Step 4.b.ii: ToPropertyDescriptor + step 5.a DefinePropertyOrThrow.
-            Ok(#(JsObject(desc_ref), state)) -> {
+            JsObject(desc_ref) -> {
               use state <- state.try_state(apply_descriptor(
                 state,
                 target_ref,
-                JsString(key),
+                key_val,
                 desc_ref,
               ))
               define_props_loop(state, target_ref, props_ref, rest)
             }
             // Step 4.b.ii: ToPropertyDescriptor throws if descObj is not an Object.
-            Ok(#(_, state)) ->
+            _ ->
               state.type_error(state, "Property description must be an object")
           }
+        }
       }
     }
   }

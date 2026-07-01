@@ -1038,7 +1038,7 @@ fn set_on_receiver(
 fn proxy_receiver_guard(
   state: State(host),
   recv_ref: Ref,
-  pk: ProxyKey,
+  pk: PropKey,
   val: JsValue,
   cont: fn() -> Result(#(State(host), Bool), #(JsValue, State(host))),
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
@@ -1057,7 +1057,7 @@ fn set_on_proxy_receiver(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  pk: ProxyKey,
+  pk: PropKey,
   val: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(existing, state) <- result.try(proxy_receiver_get_own(
@@ -1083,7 +1083,7 @@ fn proxy_receiver_get_own(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  pk: ProxyKey,
+  pk: PropKey,
 ) -> Result(#(Option(Property), State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
@@ -1099,7 +1099,7 @@ fn proxy_receiver_get_own(
       }
     Some(trap_fn) -> {
       use #(res, state) <- result.try(
-        state.call(state, trap_fn, JsObject(h), [JsObject(t), pk_value(pk)]),
+        state.call(state, trap_fn, JsObject(h), [JsObject(t), prop_key_value(pk)]),
       )
       case res {
         value.JsUndefined | value.JsNull -> Ok(#(None, state))
@@ -1162,7 +1162,7 @@ fn proxy_receiver_define(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  pk: ProxyKey,
+  pk: PropKey,
   val: JsValue,
   full: Bool,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
@@ -1207,7 +1207,7 @@ fn proxy_receiver_define(
       use #(res, state) <- result.map(
         state.call(state, trap_fn, JsObject(h), [
           JsObject(t),
-          pk_value(pk),
+          prop_key_value(pk),
           JsObject(desc_ref),
         ]),
       )
@@ -3334,24 +3334,57 @@ pub fn is_constructor(heap: Heap(host), value: JsValue) -> Bool {
 // Proxy exotic object internal methods — ES2024 §10.5
 // ============================================================================
 
-/// A property key as seen by proxy traps: string-ish key or symbol.
-/// Unifies the codebase's PropertyKey / SymbolId split so every proxy
-/// internal method exists once instead of twice.
-pub type ProxyKey {
+/// A general ECMAScript property key: string-ish key or symbol.
+/// This is what §7.1.19 ToPropertyKey (property.to_prop_key) produces
+/// and what the proxy internal methods below are keyed on — it unifies the
+/// codebase's PropertyKey / SymbolId split so each internal method exists
+/// once instead of twice.
+pub type PropKey {
   PkString(PropertyKey)
   PkSymbol(SymbolId)
 }
 
-/// The trap-argument form of a proxy key (a String or Symbol value).
-fn pk_value(pk: ProxyKey) -> JsValue {
+/// The JsValue form of a PropKey (a String or Symbol value) — used both as
+/// the proxy-trap key argument and to re-materialize an already-converted
+/// key without a second user-observable ToPropertyKey.
+pub fn prop_key_value(pk: PropKey) -> JsValue {
   case pk {
     PkString(key) -> JsString(value.key_to_string(key))
     PkSymbol(sym) -> value.JsSymbol(sym)
   }
 }
 
+/// [[Get]] keyed by a resolved PropKey — dispatches to the string- or
+/// symbol-keyed [[Get]] so ToPropertyKey callers don't hand-split the key.
+pub fn get_prop_value(
+  state: State(host),
+  ref: Ref,
+  pk: PropKey,
+  receiver: JsValue,
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  case pk {
+    PkString(key) -> get_value(state, ref, key, receiver)
+    PkSymbol(sym) -> get_symbol_value(state, ref, sym, receiver)
+  }
+}
+
+/// [[Set]] keyed by a resolved PropKey — dispatches to the string- or
+/// symbol-keyed [[Set]]. Returns the [[Set]] success flag.
+pub fn set_prop_value(
+  state: State(host),
+  ref: Ref,
+  pk: PropKey,
+  val: JsValue,
+  receiver: JsValue,
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
+  case pk {
+    PkString(key) -> set_value(state, ref, key, val, receiver)
+    PkSymbol(sym) -> set_symbol_value(state, ref, sym, val, receiver)
+  }
+}
+
 /// Human-readable key for invariant-violation error messages.
-fn pk_label(pk: ProxyKey) -> String {
+fn pk_label(pk: PropKey) -> String {
   case pk {
     PkString(key) -> "'" <> value.key_to_string(key) <> "'"
     PkSymbol(_) -> "[symbol]"
@@ -3473,7 +3506,7 @@ pub fn proxy_trap(
 fn target_own_property(
   h: Heap(host),
   t: Ref,
-  pk: ProxyKey,
+  pk: PropKey,
 ) -> Option(Property) {
   case pk {
     PkString(key) -> get_own_property(h, t, key)
@@ -3486,7 +3519,7 @@ pub fn proxy_get(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  pk: ProxyKey,
+  pk: PropKey,
   receiver: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Steps 1-5: revocation check + GetMethod(handler, "get").
@@ -3508,7 +3541,7 @@ pub fn proxy_get(
       use #(res, state) <- result.try(
         state.call(state, trap_fn, JsObject(h), [
           JsObject(t),
-          pk_value(pk),
+          prop_key_value(pk),
           receiver,
         ]),
       )
@@ -3547,7 +3580,7 @@ pub fn proxy_set(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  pk: ProxyKey,
+  pk: PropKey,
   val: JsValue,
   receiver: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
@@ -3569,7 +3602,7 @@ pub fn proxy_set(
       use #(res, state) <- result.try(
         state.call(state, trap_fn, JsObject(h), [
           JsObject(t),
-          pk_value(pk),
+          prop_key_value(pk),
           val,
           receiver,
         ]),
@@ -3616,7 +3649,7 @@ pub fn proxy_set(
 pub fn has_property_stateful(
   state: State(host),
   ref: Ref,
-  pk: ProxyKey,
+  pk: PropKey,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
@@ -3689,7 +3722,7 @@ pub fn proxy_has(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  pk: ProxyKey,
+  pk: PropKey,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
@@ -3703,7 +3736,7 @@ pub fn proxy_has(
     Some(trap_fn) -> {
       // Step 7: ToBoolean(? Call(trap, handler, « target, P »)).
       use #(res, state) <- result.try(
-        state.call(state, trap_fn, JsObject(h), [JsObject(t), pk_value(pk)]),
+        state.call(state, trap_fn, JsObject(h), [JsObject(t), prop_key_value(pk)]),
       )
       case value.is_truthy(res) {
         True -> Ok(#(True, state))
@@ -3750,7 +3783,7 @@ pub fn proxy_has(
 pub fn delete_property_stateful(
   state: State(host),
   ref: Ref,
-  pk: ProxyKey,
+  pk: PropKey,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
@@ -3774,7 +3807,7 @@ pub fn proxy_delete(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  pk: ProxyKey,
+  pk: PropKey,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
@@ -3787,7 +3820,7 @@ pub fn proxy_delete(
     None -> delete_property_stateful(state, t, pk)
     Some(trap_fn) -> {
       use #(res, state) <- result.try(
-        state.call(state, trap_fn, JsObject(h), [JsObject(t), pk_value(pk)]),
+        state.call(state, trap_fn, JsObject(h), [JsObject(t), prop_key_value(pk)]),
       )
       case value.is_truthy(res) {
         False -> Ok(#(state, False))
