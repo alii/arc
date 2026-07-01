@@ -33,7 +33,6 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
-import arc/vm/internal/job_queue
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
@@ -176,28 +175,12 @@ pub fn sleep_ms(ms: Int) -> Nil {
   ffi_sleep(ms)
 }
 
-/// True while a cooperative $262.agent broadcast callback runs (set by
-/// realm.agent_broadcast_native). Infinite sync waits are bounded in that
-/// mode — nothing can ever notify them, so blocking forever would deadlock
-/// the host process.
-@external(erlang, "arc_atomics_ffi", "in_agent_callback_mode")
-fn in_agent_callback_mode() -> Bool
-
-/// Flip the cooperative-agent-callback flag. Public for realm.gleam.
-@external(erlang, "arc_atomics_ffi", "set_agent_callback_mode")
-pub fn set_agent_callback_mode(on: Bool) -> Nil
-
 /// Set the host agent's [[CanBlock]] (§9.7) for the calling process —
 /// interpreter.new_state seeds State.can_block from it at realm boot.
 /// Defaults to True; public for the test262 runner, which sets False for
 /// tests flagged CanBlockIsFalse before booting the test realm.
 @external(erlang, "arc_atomics_ffi", "set_can_block")
 pub fn set_can_block(can: Bool) -> Nil
-
-/// Bound for an unnotifiable infinite sync wait inside a cooperative agent
-/// callback. Long enough to be observably "a real wait", short enough not
-/// to stall a test run.
-const agent_infinite_wait_cap_ms: Int = 1000
 
 // ============================================================================
 // FFI — cross-process WaiterList (arc_waiter_ffi.erl)
@@ -953,19 +936,6 @@ fn sync_block(
       #(state, Ok(JsString("not-equal")))
     }
     True -> {
-      let timeout = case timeout_ms {
-        Some(ms) -> Some(ms)
-        None ->
-          case in_agent_callback_mode() {
-            // Cooperative agent callback: the main script is suspended
-            // until this callback returns, so no notify can arrive — bound
-            // the wait instead of deadlocking the host process. (Dead once
-            // agents are real processes.)
-            True -> Some(agent_infinite_wait_cap_ms)
-            // None = infinity; the embedder clamps to its receive ceiling.
-            False -> None
-          }
-      }
       case state.ctx.host_hooks.sync_wait {
         Some(wait) -> {
           let outcome =
@@ -973,7 +943,8 @@ fn sync_block(
               handle:,
               key:,
               byte_index: byte_off,
-              timeout_ms: timeout,
+              // None = infinity; the embedder clamps to its receive ceiling.
+              timeout_ms:,
             ))
           let result = case outcome {
             state.WaitOk -> "ok"
@@ -1169,13 +1140,7 @@ fn settle_waiter(
   waiter: value.AtomicsWaiter,
   msg: String,
 ) -> State(host) {
-  let #(h, jobs) =
-    builtins_promise.fulfill_promise(
-      state.heap,
-      waiter.promise_data,
-      JsString(msg),
-    )
-  State(..state, heap: h, job_queue: job_queue.append(state.job_queue, jobs))
+  builtins_promise.fulfill_promise(state, waiter.promise_data, JsString(msg))
 }
 
 /// Notify count: undefined → effectively unbounded; negative → 0.

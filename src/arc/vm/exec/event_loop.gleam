@@ -1,5 +1,5 @@
 // ============================================================================
-// Promise microtask queue draining + handler execution.
+// Promise microtask queue draining.
 //
 // The only macrotasks core knows about are host timers (the global
 // setTimeout) and Atomics.waitAsync deadlines. `drain_jobs` flushes the
@@ -10,33 +10,15 @@
 // ============================================================================
 
 import arc/vm/builtins/atomics as builtins_atomics
-import arc/vm/builtins/common
-import arc/vm/builtins/helpers
-import arc/vm/completion.{NormalCompletion, ThrowCompletion}
-import arc/vm/exec/frame
 import arc/vm/heap
 import arc/vm/internal/job_queue
 import arc/vm/ops/object
-import arc/vm/state.{
-  type NativeFnSlot, type State, type StepResult, type VmError, State,
-  StepVmError, Thrown,
-}
-import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, FunctionObject, JsNull, JsObject,
-  JsUndefined, NativeFunction, ObjectSlot,
-}
+import arc/vm/state.{type State, State}
+import arc/vm/value.{type JsValue, JsUndefined}
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
-
-pub type ExecuteInnerFn(host) =
-  fn(State(host)) ->
-    Result(#(completion.Completion(host), State(host)), VmError)
-
-pub type CallNativeFn(host) =
-  fn(State(host), NativeFnSlot(host), List(JsValue), List(JsValue), JsValue) ->
-    Result(State(host), #(StepResult, JsValue, State(host)))
 
 /// Drain the microtask queue.
 pub fn finish(state: State(host)) -> State(host) {
@@ -193,30 +175,24 @@ fn call_for_job(
   }
 }
 
-/// Execute a promise reaction job:
-/// - If handler is undefined/not callable: pass-through (resolve/reject with arg)
-/// - If handler is callable: call handler(arg), resolve child with result,
-///   or reject child if handler throws
+/// Execute a promise reaction job (ES2024 §27.2.2.1 NewPromiseReactionJob):
+/// - Handler(f): call f(arg), resolve the child with the result, or reject
+///   the child if f throws
+/// - IdentityPassThrough: resolve the child with arg as-is
+/// - ThrowerPassThrough: reject the child with arg as-is
 fn execute_reaction_job(
   state: State(host),
-  handler: JsValue,
+  handler: value.ReactionHandler,
   arg: JsValue,
   resolve: JsValue,
   reject: JsValue,
 ) -> State(host) {
-  case helpers.is_callable(state.heap, handler) {
-    False -> {
-      // JsUndefined = fulfill pass-through, JsNull = reject pass-through
-      let target = case handler {
-        JsNull -> reject
-        _ -> resolve
-      }
-      call_for_job(state, target, [arg])
-    }
-    True -> {
+  case handler {
+    value.IdentityPassThrough -> call_for_job(state, resolve, [arg])
+    value.ThrowerPassThrough -> call_for_job(state, reject, [arg])
+    value.Handler(fun) -> {
       // Call handler(arg)
-      let result = state.call(state, handler, JsUndefined, [arg])
-      case result {
+      case state.call(state, fun, JsUndefined, [arg]) {
         Ok(#(return_val, new_state)) ->
           // Resolve child with handler's return value
           call_for_job(new_state, resolve, [return_val])
@@ -242,187 +218,5 @@ fn execute_thenable_job(
     Error(#(thrown, new_state)) ->
       // then() threw — reject the promise
       call_for_job(new_state, reject, [thrown])
-  }
-}
-
-// ============================================================================
-// Handler execution (for call_fn_callback / re-entrant calls)
-// ============================================================================
-
-/// Call a JS function value with `this` and `args`, running it (and anything
-/// synchronous it triggers) to completion. **Lossless**: hands back the full
-/// `Completion` — or a `VmError` — and panics on nothing, so each caller narrows
-/// only as far as its own contract demands (`call_fn_callback` to the host-fn
-/// value/throw, panicking on the impossible; `entry.run_export` not at all).
-/// Parameterized over `execute_inner`/`call_native_fn` to avoid a cycle with the
-/// interpreter.
-pub fn call_to_completion(
-  state: State(host),
-  callee: JsValue,
-  this_val: JsValue,
-  args: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  call_native_fn: CallNativeFn(host),
-) -> Result(#(completion.Completion(host), State(host)), VmError) {
-  case callee {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(
-          kind: FunctionObject(func_template:, env: env_ref, home_object:),
-          ..,
-        )) ->
-          call_closure(
-            state,
-            ref,
-            env_ref,
-            home_object,
-            func_template,
-            args,
-            this_val,
-            execute_inner,
-          )
-        Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
-          call_native_to_completion(
-            state,
-            native,
-            args,
-            this_val,
-            call_native_fn,
-          )
-        // §10.5.12 Proxy [[Call]] — run the apply trap (or forward to the
-        // target) and recurse, so re-entrant native calls can invoke proxies.
-        Some(ObjectSlot(
-          kind: value.ProxyObject(target:, handler:, callable: True, ..),
-          ..,
-        )) ->
-          case object.proxy_trap(state, target, handler, "apply") {
-            Error(#(thrown, state)) ->
-              Ok(#(ThrowCompletion(thrown, state.heap), state))
-            Ok(#(t, h, trap, state)) ->
-              case trap {
-                None ->
-                  call_to_completion(
-                    state,
-                    JsObject(t),
-                    this_val,
-                    args,
-                    execute_inner,
-                    call_native_fn,
-                  )
-                Some(trap_fn) -> {
-                  let #(heap, args_arr) =
-                    common.alloc_array(
-                      state.heap,
-                      args,
-                      state.builtins.array.prototype,
-                    )
-                  call_to_completion(
-                    State(..state, heap:),
-                    trap_fn,
-                    JsObject(h),
-                    [JsObject(t), this_val, JsObject(args_arr)],
-                    execute_inner,
-                    call_native_fn,
-                  )
-                }
-              }
-          }
-        // Not callable: preserve the legacy pass-through (undefined, no throw)
-        // that promise reactions and friends rely on.
-        _ -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
-      }
-    _ -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
-  }
-}
-
-/// Native arm of `call_to_completion`: run the native synchronously and wrap its
-/// stack result (or thrown value) as a Completion. A `VmError` propagates.
-fn call_native_to_completion(
-  state: State(host),
-  native: NativeFnSlot(host),
-  args: List(JsValue),
-  this_val: JsValue,
-  call_native_fn: CallNativeFn(host),
-) -> Result(#(completion.Completion(host), State(host)), VmError) {
-  let job_state =
-    State(
-      ..state,
-      stack: [],
-      pc: 0,
-      code: frame.return_code_sentinel(),
-      call_stack: [],
-      try_stack: [],
-    )
-  case call_native_fn(job_state, native, args, [], this_val) {
-    Ok(new_state) -> {
-      let merged =
-        State(..state.merge_globals(state, new_state, []), heap: new_state.heap)
-      let result = case new_state.stack {
-        [r, ..] -> r
-        [] -> JsUndefined
-      }
-      Ok(#(NormalCompletion(result, merged.heap), merged))
-    }
-    Error(#(StepVmError(vm_err), _, _post)) -> Error(vm_err)
-    Error(#(Thrown, thrown, post)) ->
-      Ok(#(ThrowCompletion(thrown, post.heap), State(..state, heap: post.heap)))
-    Error(#(_step, _value, post)) ->
-      Ok(#(
-        ThrowCompletion(JsUndefined, post.heap),
-        State(..state, heap: post.heap),
-      ))
-  }
-}
-
-/// Closure arm of `call_to_completion`: set up the callee as the sole frame and
-/// drive it; the completion (and its heap) flow straight through, untouched.
-fn call_closure(
-  state: State(host),
-  fn_ref: Ref,
-  env_ref: Ref,
-  home_object: Option(Ref),
-  callee_template: FuncTemplate,
-  args: List(JsValue),
-  this_val: JsValue,
-  execute_inner: ExecuteInnerFn(host),
-) -> Result(#(completion.Completion(host), State(host)), VmError) {
-  let #(heap, new_this) = frame.bind_this(state, callee_template, this_val)
-  // Job re-entry never has a new.target, so seed it with undefined.
-  let locals =
-    frame.setup_locals(
-      heap,
-      env_ref,
-      fn_ref,
-      home_object,
-      callee_template,
-      args,
-      new_this,
-      JsUndefined,
-    )
-  let job_state =
-    State(
-      ..state,
-      heap:,
-      stack: [],
-      locals:,
-      constants: callee_template.constants,
-      func: callee_template,
-      code: callee_template.bytecode,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      new_target: JsUndefined,
-      call_args: args,
-    )
-  case execute_inner(job_state) {
-    Ok(#(comp, final_state)) ->
-      Ok(#(
-        comp,
-        State(
-          ..state.merge_globals(state, final_state, []),
-          heap: final_state.heap,
-        ),
-      ))
-    Error(vm_err) -> Error(vm_err)
   }
 }
