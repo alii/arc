@@ -610,11 +610,17 @@ pub fn error_header(name: String, msg: String) -> String {
   }
 }
 
-/// The kind of native JS error to allocate. Every VM-raised error goes
-/// through `alloc_error` with one of these, so the constructor intrinsic and
-/// the stack-trace header can never disagree (there is no way to pair
-/// `%RangeError%` with the name "TypeError"), and every thrown error gets a
+/// The kind of native JS error to allocate. VM-raised errors go through
+/// `alloc_error` with one of these, so the constructor intrinsic and the
+/// stack-trace header can never disagree (there is no way to pair
+/// `%RangeError%` with the name "TypeError"), and the thrown error gets a
 /// stack trace attached.
+///
+/// Do NOT call `common.make_*_error` from a context that has a `State` —
+/// that skips `attach_stack` and produces an error with no `.stack`. The
+/// only legitimate direct callers are `kind_ctor` below and module linking
+/// (`module.gleam`), which runs at the heap level before any call stack
+/// exists.
 pub type ErrorKind {
   TypeErr
   RangeErr
@@ -753,6 +759,15 @@ pub fn reference_error(
   msg: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, err) = alloc_error(state, ReferenceErr, msg)
+  #(state, Error(err))
+}
+
+/// Allocate a SyntaxError in the builtin-shape `#(State, Result)`.
+pub fn syntax_error(
+  state: State(host),
+  msg: String,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let #(state, err) = alloc_error(state, SyntaxErr, msg)
   #(state, Error(err))
 }
 

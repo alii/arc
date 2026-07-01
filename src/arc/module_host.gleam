@@ -818,7 +818,8 @@ fn compile_bundle_rejection(
   case err {
     module.GraphError(error: graph.ParseFailed(..))
     | module.GraphError(error: graph.SourcePhaseUnsupported(..))
-    | module.CompileError(..) -> syntax_error(state, module.error_message(err))
+    | module.CompileError(..) ->
+      state.syntax_error(state, module.error_message(err))
     module.GraphError(error: graph.ResolveFailed(..))
     | module.GraphError(error: graph.LoadFailed(..))
     | module.ModuleNotInBundle(..) ->
@@ -834,21 +835,6 @@ fn compile_bundle_rejection(
         "Failed to compile module '" <> resolved <> "'",
       )
   }
-}
-
-/// Allocate a SyntaxError (with stack) and return it as the rejection reason.
-fn syntax_error(
-  state: State(host),
-  msg: String,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
-  let state =
-    state.attach_stack(
-      State(..state, heap:),
-      err,
-      state.error_header("SyntaxError", msg),
-    )
-  #(state, Error(err))
 }
 
 /// Read `key` off the hidden cache object `property` on the global, if both exist.

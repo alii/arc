@@ -3644,14 +3644,6 @@ fn require_string(
   }
 }
 
-fn syntax_error_value(
-  state: State(host),
-  msg: String,
-) -> #(JsValue, State(host)) {
-  let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
-  #(err, State(..state, heap:))
-}
-
 /// Allocate the `{ read, written }` result object of setFromBase64/setFromHex.
 fn read_written_result(
   state: State(host),
@@ -3782,7 +3774,7 @@ fn u8_set_from_hex(
 }
 
 fn decode_error(state: State(host), codec: String) -> #(JsValue, State(host)) {
-  syntax_error_value(state, "unable to decode " <> codec <> " string")
+  state.syntax_error_value(state, "unable to decode " <> codec <> " string")
 }
 
 /// Shared setFromBase64/setFromHex tail. Per spec, bytes decoded before an

@@ -87,13 +87,12 @@ pub fn call_native_method(
   case get_async_gen_data(state.heap, this) {
     None -> {
       // Per spec: don't throw synchronously — reject the returned promise.
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
+      let #(err, state) =
+        state.type_error_value(
+          state,
           "AsyncGenerator method called on incompatible receiver",
         )
-      let state = reject_with(State(..state, heap: h), reject, err)
+      let state = reject_with(state, reject, err)
       ret(state)
     }
     Some(gen) -> {
@@ -398,13 +397,12 @@ fn throw_missing_throw_type_error(
   state: State(host),
   run: Run(host),
 ) -> State(host) {
-  let #(h, err) =
-    common.make_type_error(
-      state.heap,
-      state.builtins,
+  let #(err, state) =
+    state.type_error_value(
+      state,
       "The iterator does not provide a 'throw' method.",
     )
-  throw_into_gen_body(State(..state, heap: h), run, err)
+  throw_into_gen_body(state, run, err)
 }
 
 /// Throw a value into the generator body at saved_pc (through its try/catch),
@@ -473,15 +471,8 @@ fn read_iter_result(
       ))
       #(value.is_truthy(done_v), val, state)
     }
-    _non_obj -> {
-      let #(h, err) =
-        common.make_type_error(
-          state.heap,
-          state.builtins,
-          "Iterator result is not an object",
-        )
-      Error(#(err, State(..state, heap: h)))
-    }
+    _non_obj ->
+      Error(state.type_error_value(state, "Iterator result is not an object"))
   }
 }
 
@@ -619,13 +610,12 @@ fn handle_exec_result(
       resume_next(state, data_ref, execute_inner, unwind_to_catch)
     }
     Error(vm_err) -> {
-      let #(h, err) =
-        common.make_type_error(
-          outer.heap,
-          outer.builtins,
+      let #(err, outer) =
+        state.type_error_value(
+          outer,
           "async generator execution failed: " <> string.inspect(vm_err),
         )
-      let state = complete(State(..outer, heap: h), data_ref, gen, rest_queue)
+      let state = complete(outer, data_ref, gen, rest_queue)
       reject_with(state, req.reject, err)
     }
   }
@@ -706,13 +696,12 @@ pub fn call_native_resume(
                 True, _ -> throw_into_gen_body(state, run, settled)
                 False, JsObject(_) -> throw_missing_throw_type_error(state, run)
                 False, _non_obj -> {
-                  let #(h, err) =
-                    common.make_type_error(
-                      state.heap,
-                      state.builtins,
+                  let #(err, state) =
+                    state.type_error_value(
+                      state,
                       "Iterator result is not an object",
                     )
-                  throw_into_gen_body(State(..state, heap: h), run, err)
+                  throw_into_gen_body(state, run, err)
                 }
               }
           }

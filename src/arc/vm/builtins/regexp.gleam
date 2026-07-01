@@ -558,7 +558,7 @@ fn regexp_initialize(
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
-    Error(msg) -> regexp_syntax_error(state, msg)
+    Error(msg) -> state.syntax_error(state, msg)
     Ok(Nil) -> {
       let #(heap, ref) =
         alloc_regexp(
@@ -647,14 +647,6 @@ fn validate_flag(
     True, True -> Error("Duplicate regular expression flag '" <> f <> "'")
     True, False -> Ok([f, ..seen])
   }
-}
-
-fn regexp_syntax_error(
-  state: State(host),
-  msg: String,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
 }
 
 /// Allocate a RegExp object on the heap.
@@ -1216,7 +1208,7 @@ fn do_compile(
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
-    Error(msg) -> regexp_syntax_error(state, msg)
+    Error(msg) -> state.syntax_error(state, msg)
     Ok(Nil) -> {
       let heap =
         heap.update(state.heap, ref, fn(slot) {

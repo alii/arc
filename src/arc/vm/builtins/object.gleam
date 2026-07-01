@@ -1437,8 +1437,7 @@ fn reject_define(
   state: State(host),
   msg: String,
 ) -> Result(a, #(JsValue, State(host))) {
-  let #(h, err) = common.make_type_error(state.heap, state.builtins, msg)
-  Error(#(err, State(..state, heap: h)))
+  Error(state.type_error_value(state, msg))
 }
 
 /// Helper to create a RangeError for ArraySetLength step 5 (§10.4.2.4).
@@ -1446,8 +1445,7 @@ fn reject_range(
   state: State(host),
   msg: String,
 ) -> Result(a, #(JsValue, State(host))) {
-  let #(h, err) = common.make_range_error(state.heap, state.builtins, msg)
-  Error(#(err, State(..state, heap: h)))
+  Error(state.range_error_value(state, msg))
 }
 
 /// Helper for ToPropertyDescriptor: reads a field via [[Get]] (calls getters).

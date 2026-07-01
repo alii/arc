@@ -226,18 +226,58 @@ pub fn dispatch(
 }
 
 /// Array() / new Array() — construct a new array.
-/// Wrapper that threads State around native_array_constructor.
 /// §23.1.1 The Array Constructor: "is the initial value of the Array property
 /// of the global object." Called as both function and constructor (identical).
+///
+/// Array ( ...values ) — §23.1.1.1
+/// A single unified algorithm that branches on numberOfArgs:
+///   step 4: numberOfArgs = 0 → ArrayCreate(0, proto)
+///   step 5: numberOfArgs = 1 → single-arg (len) path
+///   step 6: numberOfArgs ≥ 2 → ...items path
+///
+/// NewTarget / subclassing is not supported — proto is always
+/// %Array.prototype%.
 fn construct(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
-  let heap = state.heap
-  let #(heap, result) =
-    native_array_constructor(args, heap, array_proto, state.builtins)
-  #(State(..state, heap:), result)
+  case args {
+    // §23.1.1.1 Array() — numberOfArgs = 0
+    // 1. Let numberOfArgs be the number of elements in values.
+    // 2. Assert: numberOfArgs = 0.
+    // 3. (NewTarget handling — skipped, no subclassing)
+    // 4. Return ! ArrayCreate(0, proto).
+    [] -> alloc_array(state, 0, elements.new(), array_proto)
+
+    // §23.1.1.2 Array(len) — numberOfArgs = 1
+    // 5. If len is not a Number, then
+    //    a. (non-numeric path — falls through to the _ branch below)
+    // 6. Else (len is a Number),
+    //    a. Let intLen be ! ToUint32(len).
+    //    b. If intLen ≠ len, throw a RangeError.
+    //    (we check integer + non-negative via float_to_int + round-trip,
+    //     which is equivalent: ToUint32 would truncate non-integers and wrap
+    //     negatives, making them !== the original value)
+    // 7. Perform ! Set(array, "length", intLen, true).
+    // 8. Return array.
+    [JsNumber(value.Finite(n))] -> {
+      let len = value.float_to_int(n)
+      case len >= 0 && int.to_float(len) == n {
+        True -> alloc_array(state, len, elements.new(), array_proto)
+        // intLen ≠ len → RangeError (spec step 6b)
+        False -> state.range_error(state, "Invalid array length")
+      }
+    }
+
+    // §23.1.1.3 Array(...items) — numberOfArgs >= 2
+    // (also handles single non-Number arg — non-Number single args fall
+    //  through here and are treated as items, producing the same result)
+    _ -> {
+      let count = list.length(args)
+      alloc_array(state, count, elements.from_list(args), array_proto)
+    }
+  }
 }
 
 /// Array.isArray(value) — check if a value is an array.
@@ -263,72 +303,16 @@ fn is_array(
   }
 }
 
-/// Array ( ...values ) — §23.1.1.1
-/// A single unified algorithm that branches on numberOfArgs:
-///   step 4: numberOfArgs = 0 → ArrayCreate(0, proto)
-///   step 5: numberOfArgs = 1 → single-arg (len) path
-///   step 6: numberOfArgs ≥ 2 → ...items path
-///
-/// NewTarget / subclassing is not supported — proto is always the passed-in
-/// array_proto (equivalent to %Array.prototype%).
-fn native_array_constructor(
-  args: List(JsValue),
-  heap: Heap(host),
-  array_proto: Ref,
-  builtins: common.Builtins,
-) -> #(Heap(host), Result(JsValue, JsValue)) {
-  case args {
-    // §23.1.1.1 Array() — numberOfArgs = 0
-    // 1. Let numberOfArgs be the number of elements in values.
-    // 2. Assert: numberOfArgs = 0.
-    // 3. (NewTarget handling — skipped, no subclassing)
-    // 4. Return ! ArrayCreate(0, proto).
-    [] -> alloc_array(heap, 0, elements.new(), array_proto)
-
-    // §23.1.1.2 Array(len) — numberOfArgs = 1
-    // 5. If len is not a Number, then
-    //    a. (non-numeric path — falls through to the _ branch below)
-    // 6. Else (len is a Number),
-    //    a. Let intLen be ! ToUint32(len).
-    //    b. If intLen ≠ len, throw a RangeError.
-    //    (we check integer + non-negative via float_to_int + round-trip,
-    //     which is equivalent: ToUint32 would truncate non-integers and wrap
-    //     negatives, making them !== the original value)
-    // 7. Perform ! Set(array, "length", intLen, true).
-    // 8. Return array.
-    [JsNumber(value.Finite(n))] -> {
-      let len = value.float_to_int(n)
-      case len >= 0 && int.to_float(len) == n {
-        True -> alloc_array(heap, len, elements.new(), array_proto)
-        // intLen ≠ len → RangeError (spec step 6b)
-        False -> {
-          let #(heap, err) =
-            common.make_range_error(heap, builtins, "Invalid array length")
-          #(heap, Error(err))
-        }
-      }
-    }
-
-    // §23.1.1.3 Array(...items) — numberOfArgs >= 2
-    // (also handles single non-Number arg — non-Number single args fall
-    //  through here and are treated as items, producing the same result)
-    _ -> {
-      let count = list.length(args)
-      alloc_array(heap, count, elements.from_list(args), array_proto)
-    }
-  }
-}
-
 /// Allocate an array object (combines ArrayCreate + element population).
 fn alloc_array(
-  heap: Heap(host),
+  state: State(host),
   length: Int,
   elements: JsElements,
   array_proto: Ref,
-) -> #(Heap(host), Result(JsValue, JsValue)) {
+) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, ref) =
-    common.alloc_array_from_elements(heap, elements, length, array_proto)
-  #(heap, Ok(JsObject(ref)))
+    common.alloc_array_from_elements(state.heap, elements, length, array_proto)
+  #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
 /// Array.prototype.join ( separator )

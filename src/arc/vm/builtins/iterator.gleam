@@ -1264,8 +1264,8 @@ pub fn close_throw_type(
   obj: JsValue,
   msg: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  close_throw(State(..state, heap:), obj, err)
+  let #(err, state) = state.type_error_value(state, msg)
+  close_throw(state, obj, err)
 }
 
 /// IteratorClose with a freshly-allocated RangeError.
@@ -1274,8 +1274,8 @@ pub fn close_throw_range(
   obj: JsValue,
   msg: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_range_error(state.heap, state.builtins, msg)
-  close_throw(State(..state, heap:), obj, err)
+  let #(err, state) = state.range_error_value(state, msg)
+  close_throw(state, obj, err)
 }
 
 /// §7.4.11 IteratorClose with normal completion: get .return; if undefined →
@@ -1580,8 +1580,8 @@ fn type_error_any(
   state: State(host),
   msg: String,
 ) -> #(State(host), Result(a, JsValue)) {
-  let #(heap, err) = common.make_type_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
+  let #(err, state) = state.type_error_value(state, msg)
+  #(state, Error(err))
 }
 
 /// Step the underlying iterator. If next() throws, mark the helper done and
@@ -2254,13 +2254,12 @@ fn zip_strict_throw(
   open: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let state = zip_mark_done(state, ref)
-  let #(heap, terr) =
-    common.make_type_error(
-      state.heap,
-      state.builtins,
+  let #(terr, state) =
+    state.type_error_value(
+      state,
       "Iterator.zip strict mode: iterators have different lengths",
     )
-  close_all_throw(State(..state, heap:), open, terr)
+  close_all_throw(state, open, terr)
 }
 
 /// §7.4.6 IteratorStep: call next() and read only `done` (never `value`).

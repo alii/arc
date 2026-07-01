@@ -102,11 +102,14 @@ fn json_parse(
           #(State(..state, heap:), Ok(js_val))
         }
         _ ->
-          syntax_error(state, "Unexpected non-whitespace character after JSON")
+          state.syntax_error(
+            state,
+            "Unexpected non-whitespace character after JSON",
+          )
       }
     }
     // Step 2: If parse fails, throw SyntaxError
-    Error(msg) -> syntax_error(state, msg)
+    Error(msg) -> state.syntax_error(state, msg)
   }
 }
 
@@ -1114,17 +1117,4 @@ fn unicode_escape(code: Int) -> String {
     |> string.lowercase
   let padded = string.pad_start(hex, to: 4, with: "0")
   "\\u" <> padded
-}
-
-// ============================================================================
-// Error helper
-// ============================================================================
-
-/// Create a SyntaxError and return it as an Error result.
-fn syntax_error(
-  state: State(host),
-  msg: String,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, err) = common.make_syntax_error(state.heap, state.builtins, msg)
-  #(State(..state, heap:), Error(err))
 }
