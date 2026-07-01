@@ -17,30 +17,30 @@ import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type CollatorState, type DateTimeFormatState, type DisplayNamesState,
-  type DtfComponents, type DurationFormatState, type DurationUnitOptions,
-  type IntlData, type IntlDigitOptions, type IntlNativeFn, type IntlService,
-  type ListFormatState, type LocaleState, type NumberFormatState,
-  type PluralRulesState, type Ref, type RelativeTimeFormatState,
-  type SegmentIteratorState, type SegmenterState, type SegmentsState,
-  CollatorData, CollatorState,
-  DateTimeFormatData, DateTimeFormatState, Dispatch, DisplayNamesData,
-  DisplayNamesState, DtfComponents, DurationFormatData, DurationFormatState,
-  DurationUnitOptions, GroupingMode, GroupingNever, IntlBoundGetter,
-  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
-  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
+  type DtfComponent, type DtfComponents, type DurationFormatState,
+  type DurationUnitOptions, type IntlData, type IntlDigitOptions,
+  type IntlNativeFn, type IntlService, type JsValue, type ListFormatState,
+  type LocaleState, type NumberFormatState, type PluralRulesState, type Ref,
+  type RelativeTimeFormatState, type SegmentIteratorState, type SegmenterState,
+  type SegmentsState, CollatorData, CollatorState, DateTimeFormatData,
+  DateTimeFormatState, Dispatch, DisplayNamesData, DisplayNamesState,
+  DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
+  DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
+  DurationFormatData, DurationFormatState, DurationUnitOptions, GroupingMode,
+  GroupingNever, IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
+  IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
   IntlGetCanonicalLocales, IntlListFormat, IntlLocale, IntlLocaleGetter,
   IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat, IntlObject,
   IntlPluralRules, IntlRelativeTimeFormat, IntlResolvedOptions,
   IntlSegmentIterator, IntlSegmenter, IntlSegmenterSegment, IntlSegments,
-  IntlSegmentsIterator, IntlSupportedLocalesOf, IntlSupportedValuesOf,
-  ListFormatData, ListFormatState, LocaleData, LocaleState, NumberFormatData,
-  NumberFormatState, PluralRulesData, PluralRulesState, RelativeTimeFormatData,
+  IntlSegmentsIterator, IntlSupportedLocalesOf, IntlSupportedValuesOf, JsBool,
+  JsNumber, JsObject, JsString, JsUndefined, ListFormatData, ListFormatState,
+  LocaleData, LocaleState, Named, NumberFormatData, NumberFormatState,
+  ObjectSlot, PluralRulesData, PluralRulesState, RelativeTimeFormatData,
   RelativeTimeFormatState, SegmentIteratorData, SegmentIteratorState,
-  SegmenterData, SegmenterState, SegmentsData, SegmentsState, type JsValue,
-  JsBool, JsNumber, JsObject, JsString, JsUndefined, Named, ObjectSlot,
-  TemporalDateSlot, TemporalDateTimeSlot, TemporalInstantSlot,
-  TemporalMonthDaySlot, TemporalTimeSlot, TemporalYearMonthSlot,
-  TemporalZonedDateTimeSlot,
+  SegmenterData, SegmenterState, SegmentsData, SegmentsState, TemporalDateSlot,
+  TemporalDateTimeSlot, TemporalInstantSlot, TemporalMonthDaySlot,
+  TemporalTimeSlot, TemporalYearMonthSlot, TemporalZonedDateTimeSlot,
 }
 import gleam/dict
 import gleam/float
@@ -640,47 +640,49 @@ fn write_intl_data(h: Heap(host), ref: Ref, data: IntlData) -> Heap(host) {
   })
 }
 
-/// Look up a DateTimeFormat formatting component by its option name.
-/// The names come from the fixed spec tables (`tf_component_rules`).
-fn component(c: DtfComponents, name: String) -> Option(String) {
-  case name {
-    "weekday" -> c.weekday
-    "era" -> c.era
-    "year" -> c.year
-    "month" -> c.month
-    "day" -> c.day
-    "dayPeriod" -> c.day_period
-    "hour" -> c.hour
-    "minute" -> c.minute
-    "second" -> c.second
-    "fractionalSecondDigits" -> c.fractional_second_digits
-    "timeZoneName" -> c.time_zone_name
-    _ -> None
+/// Look up a DateTimeFormat formatting component.
+fn component(c: DtfComponents, which: DtfComponent) -> Option(String) {
+  case which {
+    DtfWeekday -> c.weekday
+    DtfEra -> c.era
+    DtfYear -> c.year
+    DtfMonth -> c.month
+    DtfDay -> c.day
+    DtfDayPeriod -> c.day_period
+    DtfHour -> c.hour
+    DtfMinute -> c.minute
+    DtfSecond -> c.second
+    DtfFractionalSecondDigits -> c.fractional_second_digits
+    DtfTimeZoneName -> c.time_zone_name
   }
 }
 
-/// Set a DateTimeFormat formatting component by its option name. Names
-/// outside the fixed component table are ignored (callers never produce any).
-fn set_component(c: DtfComponents, name: String, v: String) -> DtfComponents {
-  case name {
-    "weekday" -> DtfComponents(..c, weekday: Some(v))
-    "era" -> DtfComponents(..c, era: Some(v))
-    "year" -> DtfComponents(..c, year: Some(v))
-    "month" -> DtfComponents(..c, month: Some(v))
-    "day" -> DtfComponents(..c, day: Some(v))
-    "dayPeriod" -> DtfComponents(..c, day_period: Some(v))
-    "hour" -> DtfComponents(..c, hour: Some(v))
-    "minute" -> DtfComponents(..c, minute: Some(v))
-    "second" -> DtfComponents(..c, second: Some(v))
-    "fractionalSecondDigits" ->
+/// Set a DateTimeFormat formatting component's width.
+fn set_component(
+  c: DtfComponents,
+  which: DtfComponent,
+  v: String,
+) -> DtfComponents {
+  case which {
+    DtfWeekday -> DtfComponents(..c, weekday: Some(v))
+    DtfEra -> DtfComponents(..c, era: Some(v))
+    DtfYear -> DtfComponents(..c, year: Some(v))
+    DtfMonth -> DtfComponents(..c, month: Some(v))
+    DtfDay -> DtfComponents(..c, day: Some(v))
+    DtfDayPeriod -> DtfComponents(..c, day_period: Some(v))
+    DtfHour -> DtfComponents(..c, hour: Some(v))
+    DtfMinute -> DtfComponents(..c, minute: Some(v))
+    DtfSecond -> DtfComponents(..c, second: Some(v))
+    DtfFractionalSecondDigits ->
       DtfComponents(..c, fractional_second_digits: Some(v))
-    "timeZoneName" -> DtfComponents(..c, time_zone_name: Some(v))
-    _ -> c
+    DtfTimeZoneName -> DtfComponents(..c, time_zone_name: Some(v))
   }
 }
 
-/// Build a component table from #(name, width) pairs; later pairs win.
-fn components_from_pairs(pairs: List(#(String, String))) -> DtfComponents {
+/// Build a component table from #(component, width) pairs; later pairs win.
+fn components_from_pairs(
+  pairs: List(#(DtfComponent, String)),
+) -> DtfComponents {
   list.fold(pairs, value.empty_dtf_components, fn(c, kv) {
     set_component(c, kv.0, kv.1)
   })
@@ -2434,13 +2436,13 @@ fn date_time_format_state(
     state,
     locales_v,
     options_v,
-    [#("year", "numeric"), #("month", "numeric"), #("day", "numeric")],
+    [#(DtfYear, "numeric"), #(DtfMonth, "numeric"), #(DtfDay, "numeric")],
     "any",
   )
 }
 
 /// Keep only the pairs whose value is present.
-fn present_pairs(pairs: List(#(String, Option(a)))) -> List(#(String, a)) {
+fn present_pairs(pairs: List(#(k, Option(a)))) -> List(#(k, a)) {
   list.filter_map(pairs, fn(kv) {
     case kv {
       #(k, Some(v)) -> Ok(#(k, v))
@@ -2456,7 +2458,7 @@ fn dtf_state_required(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-  default_components: List(#(String, String)),
+  default_components: List(#(DtfComponent, String)),
   required: String,
 ) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(constructor_prologue(
@@ -2711,26 +2713,26 @@ fn dtf_state_required(
   // Expand styles / apply defaults into the effective formatting components.
   let user_date =
     present_pairs([
-      #("weekday", weekday),
-      #("era", era),
-      #("year", year),
-      #("month", month),
-      #("day", day),
+      #(DtfWeekday, weekday),
+      #(DtfEra, era),
+      #(DtfYear, year),
+      #(DtfMonth, month),
+      #(DtfDay, day),
     ])
   let user_time =
     present_pairs([
-      #("dayPeriod", day_period),
-      #("hour", hour),
-      #("minute", minute),
-      #("second", second),
-      #("fractionalSecondDigits", option.map(fractional, int.to_string)),
-      #("timeZoneName", tz_name_opt),
+      #(DtfDayPeriod, day_period),
+      #(DtfHour, hour),
+      #(DtfMinute, minute),
+      #(DtfSecond, second),
+      #(DtfFractionalSecondDigits, option.map(fractional, int.to_string)),
+      #(DtfTimeZoneName, tz_name_opt),
     ])
   let #(c_date, c_time) = case date_style, time_style, required_present {
     None, None, False -> {
       let merge = fn(
-        user: List(#(String, String)),
-        defaults: List(#(String, String)),
+        user: List(#(DtfComponent, String)),
+        defaults: List(#(DtfComponent, String)),
       ) {
         list.append(
           user,
@@ -2741,17 +2743,13 @@ fn dtf_state_required(
         merge(
           user_date,
           list.filter(default_components, fn(kv) {
-            kv.0 == "weekday"
-            || kv.0 == "era"
-            || kv.0 == "year"
-            || kv.0 == "month"
-            || kv.0 == "day"
+            list.contains([DtfWeekday, DtfEra, DtfYear, DtfMonth, DtfDay], kv.0)
           }),
         ),
         merge(
           user_time,
           list.filter(default_components, fn(kv) {
-            kv.0 == "hour" || kv.0 == "minute" || kv.0 == "second"
+            list.contains([DtfHour, DtfMinute, DtfSecond], kv.0)
           }),
         ),
       )
@@ -2765,29 +2763,29 @@ fn dtf_state_required(
   // with no dateStyle/timeStyle and no explicit option of the required
   // group — the locale default for that component. With styles set, only
   // the styles themselves are visible.
-  let public = fn(user: Option(String), name: String) -> Option(String) {
+  let public = fn(user: Option(String), which: DtfComponent) -> Option(String) {
     case user, date_style, time_style, required_present {
       Some(_), _, _, _ -> user
       None, None, None, False ->
-        list.key_find(default_components, name) |> option.from_result
+        list.key_find(default_components, which) |> option.from_result
       None, _, _, _ -> None
     }
   }
-  // Names of the nine component options that were explicitly provided —
-  // needed at format time to compute per-Temporal-type formats
+  // The nine component options that were explicitly provided — needed at
+  // format time to compute per-Temporal-type formats
   // (GetDateTimeFormat with inherit = ~relevant~).
   let explicit_names =
     list.filter_map(
       [
-        #("weekday", weekday),
-        #("year", year),
-        #("month", month),
-        #("day", day),
-        #("dayPeriod", day_period),
-        #("hour", hour),
-        #("minute", minute),
-        #("second", second),
-        #("fractionalSecondDigits", option.map(fractional, int.to_string)),
+        #(DtfWeekday, weekday),
+        #(DtfYear, year),
+        #(DtfMonth, month),
+        #(DtfDay, day),
+        #(DtfDayPeriod, day_period),
+        #(DtfHour, hour),
+        #(DtfMinute, minute),
+        #(DtfSecond, second),
+        #(DtfFractionalSecondDigits, option.map(fractional, int.to_string)),
       ],
       fn(kv) {
         case kv {
@@ -2808,17 +2806,17 @@ fn dtf_state_required(
         True -> Some(hc)
         False -> None
       },
-      weekday: public(weekday, "weekday"),
-      era: public(era, "era"),
-      year: public(year, "year"),
-      month: public(month, "month"),
-      day: public(day, "day"),
-      day_period: public(day_period, "dayPeriod"),
-      hour: public(hour, "hour"),
-      minute: public(minute, "minute"),
-      second: public(second, "second"),
+      weekday: public(weekday, DtfWeekday),
+      era: public(era, DtfEra),
+      year: public(year, DtfYear),
+      month: public(month, DtfMonth),
+      day: public(day, DtfDay),
+      day_period: public(day_period, DtfDayPeriod),
+      hour: public(hour, DtfHour),
+      minute: public(minute, DtfMinute),
+      second: public(second, DtfSecond),
       fractional_second_digits: fractional,
-      time_zone_name: public(tz_name_opt, "timeZoneName"),
+      time_zone_name: public(tz_name_opt, DtfTimeZoneName),
       date_style:,
       time_style:,
       explicit: explicit_names,
@@ -2829,53 +2827,57 @@ fn dtf_state_required(
   ))
 }
 
-fn date_style_components(style: Option(String)) -> List(#(String, String)) {
+fn date_style_components(
+  style: Option(String),
+) -> List(#(DtfComponent, String)) {
   case style {
     Some("full") -> [
-      #("weekday", "long"),
-      #("year", "numeric"),
-      #("month", "long"),
-      #("day", "numeric"),
+      #(DtfWeekday, "long"),
+      #(DtfYear, "numeric"),
+      #(DtfMonth, "long"),
+      #(DtfDay, "numeric"),
     ]
     Some("long") -> [
-      #("year", "numeric"),
-      #("month", "long"),
-      #("day", "numeric"),
+      #(DtfYear, "numeric"),
+      #(DtfMonth, "long"),
+      #(DtfDay, "numeric"),
     ]
     Some("medium") -> [
-      #("year", "numeric"),
-      #("month", "short"),
-      #("day", "numeric"),
+      #(DtfYear, "numeric"),
+      #(DtfMonth, "short"),
+      #(DtfDay, "numeric"),
     ]
     Some("short") -> [
-      #("year", "2-digit"),
-      #("month", "numeric"),
-      #("day", "numeric"),
+      #(DtfYear, "2-digit"),
+      #(DtfMonth, "numeric"),
+      #(DtfDay, "numeric"),
     ]
     _ -> []
   }
 }
 
-fn time_style_components(style: Option(String)) -> List(#(String, String)) {
+fn time_style_components(
+  style: Option(String),
+) -> List(#(DtfComponent, String)) {
   case style {
     Some("full") -> [
-      #("hour", "numeric"),
-      #("minute", "2-digit"),
-      #("second", "2-digit"),
-      #("timeZoneName", "long"),
+      #(DtfHour, "numeric"),
+      #(DtfMinute, "2-digit"),
+      #(DtfSecond, "2-digit"),
+      #(DtfTimeZoneName, "long"),
     ]
     Some("long") -> [
-      #("hour", "numeric"),
-      #("minute", "2-digit"),
-      #("second", "2-digit"),
-      #("timeZoneName", "short"),
+      #(DtfHour, "numeric"),
+      #(DtfMinute, "2-digit"),
+      #(DtfSecond, "2-digit"),
+      #(DtfTimeZoneName, "short"),
     ]
     Some("medium") -> [
-      #("hour", "numeric"),
-      #("minute", "2-digit"),
-      #("second", "2-digit"),
+      #(DtfHour, "numeric"),
+      #(DtfMinute, "2-digit"),
+      #(DtfSecond, "2-digit"),
     ]
-    Some("short") -> [#("hour", "numeric"), #("minute", "2-digit")]
+    Some("short") -> [#(DtfHour, "numeric"), #(DtfMinute, "2-digit")]
     _ -> []
   }
 }
@@ -3643,16 +3645,10 @@ fn resolved_options(
             #("notation", Some(JsString(nf.notation))),
             #("compactDisplay", option.map(nf.compact_display, JsString)),
             #("signDisplay", Some(JsString(nf.sign_display))),
-            #(
-              "roundingIncrement",
-              Some(value.from_int(dg.rounding_increment)),
-            ),
+            #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
             #("roundingMode", Some(JsString(dg.rounding_mode))),
             #("roundingPriority", Some(JsString(dg.rounding_priority))),
-            #(
-              "trailingZeroDisplay",
-              Some(JsString(dg.trailing_zero_display)),
-            ),
+            #("trailingZeroDisplay", Some(JsString(dg.trailing_zero_display))),
           ]),
         )
       }
@@ -3723,16 +3719,10 @@ fn resolved_options(
               option.map(dg.maximum_significant_digits, value.from_int),
             ),
             #("pluralCategories", Some(cats)),
-            #(
-              "roundingIncrement",
-              Some(value.from_int(dg.rounding_increment)),
-            ),
+            #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
             #("roundingMode", Some(JsString(dg.rounding_mode))),
             #("roundingPriority", Some(JsString(dg.rounding_priority))),
-            #(
-              "trailingZeroDisplay",
-              Some(JsString(dg.trailing_zero_display)),
-            ),
+            #("trailingZeroDisplay", Some(JsString(dg.trailing_zero_display))),
           ]),
         )
       }
@@ -4167,47 +4157,47 @@ fn same_temporal_kind(a: TemporalFormattable, b: TemporalFormattable) -> Bool {
   }
 }
 
-/// Allowed / required / default component names per Temporal type, plus
+/// Allowed / required / default components per Temporal type, plus
 /// whether `era` / hour-cycle options carry over (GetDateTimeFormat's
 /// ~relevant~ inheritance).
 fn tf_component_rules(
   t: TemporalFormattable,
-) -> #(List(String), List(String), List(String), Bool) {
+) -> #(List(DtfComponent), List(DtfComponent), List(DtfComponent), Bool) {
   case t {
     TfDate(..) -> #(
-      ["weekday", "era", "year", "month", "day"],
-      ["weekday", "year", "month", "day"],
-      ["year", "month", "day"],
+      [DtfWeekday, DtfEra, DtfYear, DtfMonth, DtfDay],
+      [DtfWeekday, DtfYear, DtfMonth, DtfDay],
+      [DtfYear, DtfMonth, DtfDay],
       True,
     )
     TfYearMonth(..) -> #(
-      ["era", "year", "month"],
-      ["year", "month"],
-      ["year", "month"],
+      [DtfEra, DtfYear, DtfMonth],
+      [DtfYear, DtfMonth],
+      [DtfYear, DtfMonth],
       True,
     )
     TfMonthDay(..) -> #(
-      ["month", "day"],
-      ["month", "day"],
-      ["month", "day"],
+      [DtfMonth, DtfDay],
+      [DtfMonth, DtfDay],
+      [DtfMonth, DtfDay],
       False,
     )
     TfTime(..) -> #(
-      ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"],
-      ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"],
-      ["hour", "minute", "second"],
+      [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
+      [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
+      [DtfHour, DtfMinute, DtfSecond],
       False,
     )
     TfDateTime(..) -> #(
       [
-        "weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute",
-        "second", "fractionalSecondDigits",
+        DtfWeekday, DtfEra, DtfYear, DtfMonth, DtfDay, DtfDayPeriod, DtfHour,
+        DtfMinute, DtfSecond, DtfFractionalSecondDigits,
       ],
       [
-        "weekday", "year", "month", "day", "dayPeriod", "hour", "minute",
-        "second", "fractionalSecondDigits",
+        DtfWeekday, DtfYear, DtfMonth, DtfDay, DtfDayPeriod, DtfHour, DtfMinute,
+        DtfSecond, DtfFractionalSecondDigits,
       ],
-      ["year", "month", "day", "hour", "minute", "second"],
+      [DtfYear, DtfMonth, DtfDay, DtfHour, DtfMinute, DtfSecond],
       True,
     )
     TfInstant(..) | TfZoned -> #([], [], [], False)
@@ -4281,7 +4271,7 @@ fn dtf_temporal_state(
           let in_required =
             list.filter(d.explicit, fn(name) { list.contains(required, name) })
           let era_comps = case copy_era, d.era {
-            True, Some(e) -> [#("era", e)]
+            True, Some(e) -> [#(DtfEra, e)]
             _, _ -> []
           }
           case in_required {
@@ -4305,7 +4295,7 @@ fn dtf_temporal_state(
                     False -> Error(Nil)
                     True ->
                       case name {
-                        "fractionalSecondDigits" ->
+                        DtfFractionalSecondDigits ->
                           case d.fractional_second_digits {
                             Some(n) -> Ok(#(name, int.to_string(n)))
                             None -> Error(Nil)
@@ -4330,7 +4320,7 @@ fn dtf_temporal_state(
 /// Replace the formatter's component table with `comps`.
 fn with_components(
   d: DateTimeFormatState,
-  comps: List(#(String, String)),
+  comps: List(#(DtfComponent, String)),
 ) -> DateTimeFormatState {
   DateTimeFormatState(..d, components: components_from_pairs(comps))
 }
@@ -5606,14 +5596,14 @@ fn host_date_to_locale(
     _ -> throw_type(state, "this is not a Date object")
   })
   let date_defaults = [
-    #("year", "numeric"),
-    #("month", "numeric"),
-    #("day", "numeric"),
+    #(DtfYear, "numeric"),
+    #(DtfMonth, "numeric"),
+    #(DtfDay, "numeric"),
   ]
   let time_defaults = [
-    #("hour", "numeric"),
-    #("minute", "numeric"),
-    #("second", "numeric"),
+    #(DtfHour, "numeric"),
+    #(DtfMinute, "numeric"),
+    #(DtfSecond, "numeric"),
   ]
   let #(defaults, required) = case which {
     1 -> #(date_defaults, "date")
@@ -6430,7 +6420,8 @@ fn segmenter_segment(
       state,
       first_arg_or_undefined(args),
     ))
-    let seg = SegmentsData(SegmentsState(string: s, granularity: sg.granularity))
+    let seg =
+      SegmentsData(SegmentsState(string: s, granularity: sg.granularity))
     let #(heap, ref) =
       common.alloc_wrapper(
         state.heap,

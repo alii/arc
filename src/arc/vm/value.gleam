@@ -1537,6 +1537,23 @@ pub type NumberFormatState {
   )
 }
 
+/// A DateTimeFormat formatting component: one option name of the §11.1.2
+/// component table. A closed enum so the fixed component tables in
+/// `intl.gleam` cannot name a component that does not exist.
+pub type DtfComponent {
+  DtfWeekday
+  DtfEra
+  DtfYear
+  DtfMonth
+  DtfDay
+  DtfDayPeriod
+  DtfHour
+  DtfMinute
+  DtfSecond
+  DtfFractionalSecondDigits
+  DtfTimeZoneName
+}
+
 /// The active DateTimeFormat formatting components — which date/time fields
 /// the output contains and in which width (§11.5 DateTimeFormat records).
 /// Each value is a validated width string ("numeric" / "2-digit" / "long" /
@@ -1580,7 +1597,7 @@ pub const empty_dtf_components = DtfComponents(
 /// and re-derived per Temporal type at format time). The two intentionally
 /// differ once dateStyle/timeStyle is involved.
 ///
-/// `explicit` names the component options the user provided explicitly —
+/// `explicit` lists the component options the user provided explicitly —
 /// GetDateTimeFormat needs it for Temporal ~relevant~ inheritance.
 /// `tz_system` marks the host default zone: the offset is then resolved live
 /// per formatted instant instead of from `tz_offset_minutes`.
@@ -1606,7 +1623,7 @@ pub type DateTimeFormatState {
     time_zone_name: Option(String),
     date_style: Option(String),
     time_style: Option(String),
-    explicit: List(String),
+    explicit: List(DtfComponent),
     components: DtfComponents,
     bound_format: Option(Ref),
   )
