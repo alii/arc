@@ -353,6 +353,14 @@ pub fn new_state(
       realms: dict.new(),
       call_fn: call_fn_callback,
       construct_fn: construct_fn_callback,
+      // Canonical §7.1.4 ToNumber / §7.1.13 ToBigInt, re-entrant (they may
+      // run @@toPrimitive/valueOf/toString user code). The integer-indexed
+      // [[Set]] path (ops/typed_array_elements, reached from the MOP in
+      // ops/object) sits BELOW ops/coerce in the module graph, so it gets
+      // the canonical coercions through these hooks — the same inversion as
+      // call_fn/construct_fn — instead of a private re-implementation.
+      to_number_fn: coerce.js_to_number,
+      to_bigint_fn: coerce.to_bigint,
       callback_sentinel: value.FuncTemplate(
         ..empty_template(),
         bytecode: tuple_array.from_list([Return, Return]),

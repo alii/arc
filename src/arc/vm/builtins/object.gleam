@@ -5,6 +5,7 @@ import arc/vm/internal/elements
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsElements, type JsValue, type ObjectNativeFn, type Ref, AccessorProperty,
@@ -811,7 +812,7 @@ fn typed_array_define_index(
   case desc.value {
     None -> Ok(state)
     Some(v) ->
-      object.typed_array_store(
+      typed_array_elements.typed_array_store(
         state,
         buffer,
         elem_kind,

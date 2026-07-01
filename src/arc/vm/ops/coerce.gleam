@@ -325,39 +325,50 @@ pub fn thrown_type_error(
   Error(state.type_error_value(state, msg))
 }
 
-/// §7.1.13 ToBigInt (CPS): ToPrimitive(number hint), then BigInt/Boolean/
-/// String per the conversion table; Number/Symbol/null/undefined → TypeError.
+/// §7.1.13 ToBigInt: ToPrimitive(number hint), then BigInt/Boolean/String per
+/// the conversion table; Number/Symbol/null/undefined → TypeError, and a
+/// string StringToBigInt rejects → SyntaxError. This is THE ToBigInt — the
+/// CPS wrapper below and the `ctx.to_bigint_fn` hook (typed-array element
+/// stores) both route here.
+pub fn to_bigint(
+  state: State(host),
+  val: JsValue,
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
+  use #(prim, state) <- result.try(to_primitive(state, val, NumberHint))
+  case prim {
+    JsBigInt(BigInt(n)) -> Ok(#(n, state))
+    JsBool(True) -> Ok(#(1, state))
+    JsBool(False) -> Ok(#(0, state))
+    JsString(s) ->
+      case string_to_bigint(s) {
+        Some(n) -> Ok(#(n, state))
+        // §7.1.13: StringToBigInt returning undefined throws a SyntaxError
+        // (not TypeError — that's for Number/Symbol/null/undefined).
+        None ->
+          Error(state.syntax_error_value(
+            state,
+            "Cannot convert " <> s <> " to a BigInt",
+          ))
+      }
+    JsNumber(_) ->
+      thrown_type_error(state, "Cannot convert a Number to a BigInt")
+    JsSymbol(_) ->
+      thrown_type_error(state, "Cannot convert a Symbol to a BigInt")
+    JsNull -> thrown_type_error(state, "Cannot convert null to a BigInt")
+    _ -> thrown_type_error(state, "Cannot convert undefined to a BigInt")
+  }
+}
+
+/// CPS wrapper for to_bigint. Use with `use` syntax:
+///   use n, state <- coerce.to_bigint_cps(state, val)
 pub fn to_bigint_cps(
   state: State(host),
   val: JsValue,
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case to_primitive(state, val, NumberHint) {
+  case to_bigint(state, val) {
+    Ok(#(n, state)) -> cont(n, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(prim, state)) ->
-      case prim {
-        JsBigInt(BigInt(n)) -> cont(n, state)
-        JsBool(True) -> cont(1, state)
-        JsBool(False) -> cont(0, state)
-        JsString(s) ->
-          case string_to_bigint(s) {
-            Some(n) -> cont(n, state)
-            None -> {
-              let #(err, state) =
-                state.syntax_error_value(
-                  state,
-                  "Cannot convert " <> s <> " to a BigInt",
-                )
-              #(state, Error(err))
-            }
-          }
-        JsNumber(_) ->
-          state.type_error(state, "Cannot convert a Number to a BigInt")
-        JsSymbol(_) ->
-          state.type_error(state, "Cannot convert a Symbol to a BigInt")
-        JsNull -> state.type_error(state, "Cannot convert null to a BigInt")
-        _ -> state.type_error(state, "Cannot convert undefined to a BigInt")
-      }
   }
 }
 

@@ -106,6 +106,22 @@ pub type RealmCtx(host) {
     /// 4th arg is newTarget (§10.1.13). Set by the VM executor (wraps do_construct).
     construct_fn: fn(State(host), JsValue, List(JsValue), JsValue) ->
       Result(#(JsValue, State(host)), #(JsValue, State(host))),
+    /// Canonical §7.1.4 ToNumber, re-entrant (an object argument runs
+    /// @@toPrimitive/valueOf/toString user code). Set by the VM executor to
+    /// `coerce.js_to_number`. Exists for the same reason as `call_fn`: the
+    /// integer-indexed [[Set]] (§10.4.5.16 IntegerIndexedElementSet, in
+    /// ops/typed_array_elements, reached from the MOP in ops/object) must
+    /// convert the stored value, but ops/coerce is built ON TOP of the MOP
+    /// and cannot be imported from below it. Routing through this field is
+    /// what keeps the engine at exactly ONE ToNumber — never a private
+    /// re-implementation on the store path.
+    to_number_fn: fn(State(host), JsValue) ->
+      Result(#(value.JsNum, State(host)), #(JsValue, State(host))),
+    /// Canonical §7.1.13 ToBigInt, re-entrant. Set by the VM executor to
+    /// `coerce.to_bigint`. Same layering inversion as `to_number_fn`; used
+    /// by BigInt64/BigUint64 element stores.
+    to_bigint_fn: fn(State(host), JsValue) ->
+      Result(#(Int, State(host)), #(JsValue, State(host))),
     /// Pre-built sentinel frame template (bytecode = [Return, Return]) used by
     /// the re-entrant call/construct callbacks to drive a callee to completion
     /// on an isolated stack. Built once at state init — these callbacks run

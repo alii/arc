@@ -1,7 +1,7 @@
-import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/opcode
+import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type HeapSlot, type State, State}
 import arc/vm/value.{
   type JsElements, type JsValue, type Property, type PropertyKey, type Ref,
@@ -484,7 +484,7 @@ fn own_property_of_slot(
             )
           typed_array_element(heap, buffer, elem_kind, byte_offset, length, idx)
           |> option.map(fn(v) {
-            case buffer_is_immutable(heap, buffer) {
+            case typed_array_elements.buffer_is_immutable(heap, buffer) {
               True ->
                 DataProperty(
                   value: v,
@@ -703,7 +703,7 @@ pub fn set_value(
         ->
           case receiver == JsObject(ref) {
             True ->
-              typed_array_store(
+              typed_array_elements.typed_array_store(
                 state,
                 buffer,
                 elem_kind,
@@ -747,7 +747,7 @@ pub fn set_value(
             True ->
               case receiver == JsObject(ref) {
                 True ->
-                  typed_array_store(
+                  typed_array_elements.typed_array_store(
                     state,
                     buffer,
                     elem_kind,
@@ -1000,7 +1000,7 @@ fn set_on_receiver(
                 )
               {
                 Some(_) ->
-                  typed_array_store(
+                  typed_array_elements.typed_array_store(
                     state,
                     buffer,
                     elem_kind,
@@ -4033,7 +4033,14 @@ pub fn prevent_extensions_stateful(
 }
 
 // ============================================================================
-// TypedArray (Integer-Indexed exotic) element access — ES2024 §10.4.5
+// TypedArray (Integer-Indexed exotic) element READS — ES2024 §10.4.5
+//
+// Only the read half (§10.4.5.15 IntegerIndexedElementGet, §10.4.5.13
+// TypedArrayLength, §7.1.21 CanonicalNumericIndexString) lives here — the
+// MOP arms above need it and it never runs user code. The write half
+// (§10.4.5.16 IntegerIndexedElementSet and the element encoders), which
+// must run the observable ToNumber/ToBigInt on the stored value, lives in
+// ops/typed_array_elements.
 // ============================================================================
 
 @external(erlang, "arc_typed_array_ffi", "ta_get_int")
@@ -4044,35 +4051,12 @@ fn ta_get_int(
   signed: Bool,
 ) -> Int
 
-@external(erlang, "arc_typed_array_ffi", "ta_set_int")
-fn ta_set_int(
-  data: BitArray,
-  byte_offset: Int,
-  size_bits: Int,
-  val: Int,
-) -> BitArray
-
 @external(erlang, "arc_typed_array_ffi", "ta_get_float")
 fn ta_get_float(
   data: BitArray,
   byte_offset: Int,
   size_bits: Int,
 ) -> #(Int, Float)
-
-@external(erlang, "arc_typed_array_ffi", "ta_set_float")
-fn ta_set_float(
-  data: BitArray,
-  byte_offset: Int,
-  size_bits: Int,
-  tag: Int,
-  val: Float,
-) -> BitArray
-
-@external(erlang, "arc_typed_array_ffi", "ta_clamp_uint8")
-fn ta_clamp_uint8(tag: Int, val: Float) -> Int
-
-@external(erlang, "arc_typed_array_ffi", "ta_zeroed")
-fn ta_zeroed(byte_len: Int) -> BitArray
 
 /// Read a snapshot of the backing store of a non-detached ArrayBuffer slot.
 /// None when the ref isn't an ArrayBuffer or the buffer is detached.
@@ -4229,25 +4213,6 @@ fn tagged_to_jsnum(tagged: #(Int, Float)) -> value.JsNum {
   }
 }
 
-/// JsNum → FFI float tag pair.
-fn jsnum_to_tagged(n: value.JsNum) -> #(Int, Float) {
-  case n {
-    Finite(f) -> #(0, f)
-    value.NaN -> #(1, 0.0)
-    value.Infinity -> #(2, 0.0)
-    value.NegInfinity -> #(3, 0.0)
-  }
-}
-
-/// ToIntegerOrInfinity-style truncation for integer element stores:
-/// NaN/±Infinity → 0 (the mod-2^n wrap in the FFI handles the rest).
-fn jsnum_to_store_int(n: value.JsNum) -> Int {
-  case n {
-    Finite(f) -> value.float_to_int(f)
-    _ -> 0
-  }
-}
-
 /// §7.1.21 CanonicalNumericIndexString: "-0", or a string that round-trips
 /// through ToNumber → ToString. Such keys on a TypedArray NEVER reach the
 /// ordinary property table (§10.4.5).
@@ -4288,476 +4253,5 @@ fn is_canonical_numeric_string_slow(s: String) -> Bool {
         value.NegInfinity -> s == "-Infinity"
         Finite(f) -> value.js_format_number(f) == s
       }
-  }
-}
-
-/// §10.4.5.16 IntegerIndexedElementSet: convert the value first (observable —
-/// valueOf / toString / @@toPrimitive may run user code), then store it if
-/// `idx` is Some(valid index) and the buffer is live. Returns True for
-/// out-of-bounds/detached writes (silent no-ops), but False — BEFORE any
-/// value coercion — when the viewed buffer is immutable (Immutable
-/// ArrayBuffer proposal, sec-typedarray-set), so strict-mode assignment
-/// throws and valueOf/toString side effects never run.
-pub fn typed_array_store(
-  state: State(host),
-  buffer: Ref,
-  elem_kind: value.TypedArrayKind,
-  byte_offset: Int,
-  length: Option(Int),
-  idx: Option(Int),
-  val: JsValue,
-) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
-  // Immutable ArrayBuffer proposal, [[Set]] (sec-typedarray-set): "If
-  // IsImmutableBuffer(O.[[ViewedArrayBuffer]]) is true, return false" sits
-  // BEFORE TypedArraySetElement, so the ToNumber/ToBigInt conversion (and
-  // any user code it would run) must not happen. Per the proposal NOTE,
-  // immutable is the one case where assignment failure for a canonical
-  // numeric string property IS reported — unlike detached/out-of-bounds,
-  // which stay silent successes.
-  use <- bool.guard(
-    buffer_is_immutable(state.heap, buffer),
-    Ok(#(state, False)),
-  )
-  case value.typed_array_is_bigint(elem_kind) {
-    True -> {
-      use #(n, state) <- result.try(ta_to_bigint(state, val))
-      Ok(
-        do_typed_store(
-          state,
-          buffer,
-          elem_kind,
-          byte_offset,
-          length,
-          idx,
-          fn(data, off) { ta_set_int(data, off, 64, n) },
-        ),
-      )
-    }
-    False -> {
-      use #(num, state) <- result.try(ta_to_number(state, val))
-      Ok(
-        do_typed_store(
-          state,
-          buffer,
-          elem_kind,
-          byte_offset,
-          length,
-          idx,
-          fn(data, off) { encode_typed_number(data, off, elem_kind, num) },
-        ),
-      )
-    }
-  }
-}
-
-/// Immutable ArrayBuffer proposal: True when `buffer` is a live
-/// ArrayBufferObject whose [[ArrayBufferData]] is immutable.
-fn buffer_is_immutable(h: Heap(host), buffer: Ref) -> Bool {
-  case heap.read(h, buffer) {
-    Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
-      immutable
-    _ -> False
-  }
-}
-
-/// Shared store tail: bounds/detach check, then rebuild the buffer binary.
-fn do_typed_store(
-  state: State(host),
-  buffer: Ref,
-  elem_kind: value.TypedArrayKind,
-  byte_offset: Int,
-  length: Option(Int),
-  idx: Option(Int),
-  write: fn(BitArray, Int) -> BitArray,
-) -> #(State(host), Bool) {
-  case idx {
-    Some(i) if i >= 0 ->
-      case heap.read(state.heap, buffer) {
-        Some(
-          ObjectSlot(
-            kind: value.ArrayBufferObject(
-              data:,
-              detached: False,
-              max_byte_length:,
-              shared:,
-              immutable:,
-            ),
-            ..,
-          ) as slot,
-        ) -> {
-          let size = value.typed_array_element_size(elem_kind)
-          let byte_size = value.buffer_byte_size(data)
-          // §10.4.5.14 IsValidIntegerIndex against the LIVE buffer, resolved
-          // HERE (not at [[Set]] entry): the ToNumber/ToBigInt conversion
-          // above may have run user code that resized the buffer. A
-          // length-tracking view (None) follows the live byte length; a
-          // fixed view that no longer fits is wholly out of bounds and the
-          // write is a silent no-op, like a detached buffer.
-          let len = case length {
-            Some(n) -> n
-            None -> int.max(0, { byte_size - byte_offset } / size)
-          }
-          let off = byte_offset + i * size
-          case i < len && byte_offset + len * size <= byte_size {
-            False -> #(state, True)
-            True ->
-              case immutable {
-                // Immutable ArrayBuffer proposal: typed_array_store already
-                // reported [[Set]] failure (False) before value coercion, and
-                // a live buffer ref can never become immutable in place
-                // (transferToImmutable detaches the source and allocates a
-                // fresh ref), so this arm is unreachable. Kept as a defensive
-                // failure — immutable writes report False, never a silent
-                // success like detached/out-of-bounds.
-                True -> #(state, False)
-                False -> {
-                  let new_bits = write(value.buffer_bits(data), off)
-                  // Shared storage: persist only the element's bytes — other
-                  // regions may be concurrently written by other agents.
-                  let new_data =
-                    value.buffer_store_region(data, new_bits, off, size)
-                  let h =
-                    heap.write(
-                      state.heap,
-                      buffer,
-                      ObjectSlot(
-                        ..slot,
-                        kind: value.ArrayBufferObject(
-                          data: new_data,
-                          detached: False,
-                          max_byte_length:,
-                          shared:,
-                          immutable: False,
-                        ),
-                      ),
-                    )
-                  #(State(..state, heap: h), True)
-                }
-              }
-          }
-        }
-        // Detached (or not a buffer): silent no-op per §10.4.5.16 step 2.
-        _ -> #(state, True)
-      }
-    // Out of bounds / non-integral canonical index: silent no-op.
-    _ -> #(state, True)
-  }
-}
-
-/// §25.1.2.12 SetValueInBuffer for Number content types.
-fn encode_typed_number(
-  data: BitArray,
-  off: Int,
-  elem_kind: value.TypedArrayKind,
-  num: value.JsNum,
-) -> BitArray {
-  case elem_kind {
-    value.Uint8ClampedKind -> {
-      let #(tag, f) = jsnum_to_tagged(num)
-      ta_set_int(data, off, 8, ta_clamp_uint8(tag, f))
-    }
-    value.Float32Kind -> {
-      let #(tag, f) = jsnum_to_tagged(num)
-      ta_set_float(data, off, 32, tag, f)
-    }
-    value.Float64Kind -> {
-      let #(tag, f) = jsnum_to_tagged(num)
-      ta_set_float(data, off, 64, tag, f)
-    }
-    value.Int8Kind | value.Uint8Kind ->
-      ta_set_int(data, off, 8, jsnum_to_store_int(num))
-    value.Int16Kind | value.Uint16Kind ->
-      ta_set_int(data, off, 16, jsnum_to_store_int(num))
-    value.Int32Kind | value.Uint32Kind ->
-      ta_set_int(data, off, 32, jsnum_to_store_int(num))
-    // BigInt kinds never reach here (typed_array_store routes them through
-    // ta_to_bigint), but keep the encode total just in case.
-    value.BigInt64Kind | value.BigUint64Kind ->
-      ta_set_int(data, off, 64, jsnum_to_store_int(num))
-  }
-}
-
-/// Minimal IsCallable for the local ToPrimitive walk.
-fn ta_is_callable(h: Heap(host), val: JsValue) -> Bool {
-  case val {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: FunctionObject(..), ..)) -> True
-        Some(ObjectSlot(kind: NativeFunction(..), ..)) -> True
-        _ -> False
-      }
-    _ -> False
-  }
-}
-
-/// ToNumber for typed-array element stores. Objects go through a number-hint
-/// ToPrimitive (@@toPrimitive, then valueOf, then toString).
-fn ta_to_number(
-  state: State(host),
-  val: JsValue,
-) -> Result(#(value.JsNum, State(host)), #(JsValue, State(host))) {
-  case val {
-    JsObject(_) -> {
-      use #(prim, state) <- result.try(ta_to_primitive_number(state, val))
-      ta_number_of_primitive(state, prim)
-    }
-    _ -> ta_number_of_primitive(state, val)
-  }
-}
-
-fn ta_number_of_primitive(
-  state: State(host),
-  prim: JsValue,
-) -> Result(#(value.JsNum, State(host)), #(JsValue, State(host))) {
-  case value.to_number(prim) {
-    Ok(n) -> Ok(#(n, state))
-    Error(msg) -> Error(state.type_error_value(state, msg))
-  }
-}
-
-/// §7.1.1 ToPrimitive(input, number) for objects, local to typed-array
-/// stores: @@toPrimitive("number") → OrdinaryToPrimitive(valueOf, toString).
-fn ta_to_primitive_number(
-  state: State(host),
-  val: JsValue,
-) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case val {
-    JsObject(ref) -> {
-      use #(exotic, state) <- result.try(get_symbol_value(
-        state,
-        ref,
-        value.symbol_to_primitive,
-        val,
-      ))
-      case ta_is_callable(state.heap, exotic) {
-        True -> {
-          use #(res, state) <- result.try(
-            state.call(state, exotic, val, [JsString("number")]),
-          )
-          case res {
-            JsObject(_) ->
-              Error(state.type_error_value(
-                state,
-                "Cannot convert object to primitive value",
-              ))
-            _ -> Ok(#(res, state))
-          }
-        }
-        False -> ta_ordinary_to_primitive(state, val, ref, "valueOf")
-      }
-    }
-    _ -> Ok(#(val, state))
-  }
-}
-
-/// §7.1.1.1 OrdinaryToPrimitive with hint number: valueOf, then toString.
-fn ta_ordinary_to_primitive(
-  state: State(host),
-  val: JsValue,
-  ref: Ref,
-  method: String,
-) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  use #(f, state) <- result.try(get_value(state, ref, Named(method), val))
-  let fallthrough = fn(state) {
-    case method {
-      "valueOf" -> ta_ordinary_to_primitive(state, val, ref, "toString")
-      _ ->
-        Error(state.type_error_value(
-          state,
-          "Cannot convert object to primitive value",
-        ))
-    }
-  }
-  case ta_is_callable(state.heap, f) {
-    True -> {
-      use #(res, state) <- result.try(state.call(state, f, val, []))
-      case res {
-        JsObject(_) -> fallthrough(state)
-        _ -> Ok(#(res, state))
-      }
-    }
-    False -> fallthrough(state)
-  }
-}
-
-/// §7.1.13 ToBigInt for typed-array element stores. Numbers throw TypeError
-/// (BigInt and Number content types never mix).
-fn ta_to_bigint(
-  state: State(host),
-  val: JsValue,
-) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  case val {
-    value.JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
-    value.JsBool(True) -> Ok(#(1, state))
-    value.JsBool(False) -> Ok(#(0, state))
-    JsString(s) ->
-      case parse_bigint_string(s) {
-        Some(n) -> Ok(#(n, state))
-        // §7.1.13 ToBigInt: StringToBigInt returning undefined throws a
-        // SyntaxError (not TypeError — that's for Number/Symbol/etc).
-        None -> {
-          let #(heap, err) =
-            common.make_syntax_error(
-              state.heap,
-              state.builtins,
-              "Cannot convert " <> s <> " to a BigInt",
-            )
-          Error(#(err, State(..state, heap:)))
-        }
-      }
-    JsObject(_) -> {
-      use #(prim, state) <- result.try(ta_to_primitive_number(state, val))
-      case prim {
-        JsObject(_) ->
-          Error(state.type_error_value(
-            state,
-            "Cannot convert object to primitive value",
-          ))
-        _ -> ta_to_bigint(state, prim)
-      }
-    }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Cannot convert " <> string.inspect(val) <> " to a BigInt",
-      ))
-  }
-}
-
-/// §7.1.14 StringToBigInt (decimal only — hex/octal/binary prefixes are a
-/// known deviation here). Empty/whitespace-only → 0.
-fn parse_bigint_string(s: String) -> Option(Int) {
-  let t = string.trim(s)
-  case t {
-    "" -> Some(0)
-    _ -> int.parse(t) |> option.from_result
-  }
-}
-
-/// Encode an ALREADY-CONVERTED element value (JsNumber or JsBigInt) into the
-/// backing store at byte offset `off`. No coercion, no user code — used by
-/// TypedArray bulk operations (fill/slice/constructor copies).
-pub fn typed_array_encode_value(
-  data: BitArray,
-  off: Int,
-  elem_kind: value.TypedArrayKind,
-  val: JsValue,
-) -> BitArray {
-  // Guard against writes past the CURRENT backing store (a resizable
-  // ArrayBuffer may have shrunk below the view) — out-of-bounds typed-array
-  // writes are silent no-ops, never crashes.
-  use <- bool.guard(
-    off + value.typed_array_element_size(elem_kind) > bit_array.byte_size(data),
-    data,
-  )
-  case val {
-    JsNumber(n) -> encode_typed_number(data, off, elem_kind, n)
-    value.JsBigInt(value.BigInt(n)) -> ta_set_int(data, off, 64, n)
-    // Callers always pass converted numerics; anything else encodes as NaN/0.
-    _ -> encode_typed_number(data, off, elem_kind, value.NaN)
-  }
-}
-
-/// Encode a run of values into one concatenated element-region binary for a
-/// bulk typed-array store — only when EVERY conversion is pure: primitives
-/// whose ToNumber cannot throw (or, for BigInt views, JsBigInt values).
-/// Returns None when any value needs the observable per-element path
-/// (object coercion may run user code; Symbol/BigInt mismatches throw, and
-/// the per-element loop raises that error at the right index).
-pub fn typed_array_encode_primitives(
-  elem_kind: value.TypedArrayKind,
-  values: List(JsValue),
-) -> Option(BitArray) {
-  let size = value.typed_array_element_size(elem_kind)
-  encode_primitives_loop(
-    elem_kind,
-    size,
-    value.typed_array_is_bigint(elem_kind),
-    values,
-    [],
-  )
-}
-
-fn encode_primitives_loop(
-  elem_kind: value.TypedArrayKind,
-  size: Int,
-  bigint: Bool,
-  values: List(JsValue),
-  acc: List(BitArray),
-) -> Option(BitArray) {
-  case values {
-    [] -> Some(bit_array.concat(list.reverse(acc)))
-    [v, ..rest] -> {
-      let seg = case bigint, v {
-        True, value.JsBigInt(value.BigInt(n)) ->
-          Some(ta_set_int(ta_zeroed(size), 0, 64, n))
-        // Anything else → ToBigInt may throw (or run user code on objects).
-        True, _ -> None
-        False, JsObject(_) -> None
-        False, _ ->
-          case value.to_number(v) {
-            Ok(num) ->
-              Some(encode_typed_number(ta_zeroed(size), 0, elem_kind, num))
-            // Symbol/BigInt → TypeError; decline so the per-element path
-            // raises it at the right index.
-            Error(_to_number_throws) -> None
-          }
-      }
-      case seg {
-        Some(s) ->
-          encode_primitives_loop(elem_kind, size, bigint, rest, [s, ..acc])
-        None -> None
-      }
-    }
-  }
-}
-
-/// Read indices 0..len-1 of `ref` as plain own data values WITHOUT running
-/// any user code: Array/Arguments dense elements (with defineProperty data
-/// overrides honored) and plain-object data properties qualify. Returns None
-/// as soon as an index would need an accessor, a proxy trap, a prototype
-/// walk (hole), or any exotic [[Get]] — callers must then use the observable
-/// per-element path. Excludes object values, so a later ToNumber/ToBigInt of
-/// the extracted values cannot run user code either.
-pub fn plain_indexed_values(
-  h: Heap(host),
-  ref: Ref,
-  len: Int,
-) -> Option(List(JsValue)) {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(kind:, properties:, elements:, ..)) ->
-      case kind {
-        // Same own-lookup order as the Array/Arguments Index read fast path:
-        // properties-dict override first, dense elements otherwise. Plain
-        // objects keep indexed props in the dict only (elements stays empty),
-        // so the shared loop mirrors their ordinary [[Get]] too.
-        ArrayObject(_) | value.ArgumentsObject(_) | value.OrdinaryObject ->
-          plain_indexed_loop(properties, elements, len - 1, [])
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
-fn plain_indexed_loop(
-  properties: dict.Dict(PropertyKey, Property),
-  elements: JsElements,
-  k: Int,
-  acc: List(JsValue),
-) -> Option(List(JsValue)) {
-  case k < 0 {
-    True -> Some(acc)
-    False -> {
-      let v = case dict.get(properties, Index(k)) {
-        Ok(DataProperty(value: v, ..)) -> Some(v)
-        Ok(AccessorProperty(..)) -> None
-        Error(Nil) -> elements.get_option(elements, k)
-      }
-      case v {
-        // Object values are excluded — converting them can run user code.
-        Some(JsObject(_)) | None -> None
-        Some(v) -> plain_indexed_loop(properties, elements, k - 1, [v, ..acc])
-      }
-    }
   }
 }

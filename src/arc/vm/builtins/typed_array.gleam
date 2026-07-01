@@ -7,14 +7,17 @@
 /// their prototypes), and produce Integer-Indexed exotic objects backed by
 /// an ArrayBufferObject heap slot.
 ///
-/// Element storage/coercion lives in arc/vm/ops/object
-/// (typed_array_element / typed_array_store / typed_array_encode_value);
-/// this module is the constructor and prototype surface.
+/// Element reads live in arc/vm/ops/object (typed_array_element and the
+/// view-length helpers, next to the rest of the MOP); element stores and
+/// bulk encoding live in arc/vm/ops/typed_array_elements (typed_array_store
+/// / typed_array_encode_value); this module is the constructor and
+/// prototype surface.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type TypedArrayKind, type TypedArrayNativeFn, Dispatch,
@@ -537,7 +540,7 @@ fn ta_from(
         ))
         let bulk = case mapping, source {
           None, JsObject(src_ref) ->
-            object.plain_indexed_values(state.heap, src_ref, len)
+            typed_array_elements.plain_indexed_values(state.heap, src_ref, len)
             |> option.then(try_bulk_store(state, target, 0, _))
           _, _ -> None
         }
@@ -1028,7 +1031,12 @@ fn convert_elements_loop(
         object.typed_array_element(h, src_buf, src_kind, src_off, src_len, i)
       {
         Some(el) ->
-          object.typed_array_encode_value(ta_zeroed(dst_size), 0, dst_kind, el)
+          typed_array_elements.typed_array_encode_value(
+            ta_zeroed(dst_size),
+            0,
+            dst_kind,
+            el,
+          )
         None -> ta_zeroed(dst_size)
       }
       convert_elements_loop(
@@ -1094,7 +1102,7 @@ fn from_object(
         len,
       ))
       let bulk =
-        object.plain_indexed_values(state.heap, obj_ref, len)
+        typed_array_elements.plain_indexed_values(state.heap, obj_ref, len)
         |> option.then(try_bulk_store(state, ta_val, 0, _))
       case bulk {
         Some(state) -> Ok(#(ta_val, state))
@@ -1356,7 +1364,10 @@ fn try_bulk_store(
     state.heap,
     ta_val,
   ))
-  use region <- option.then(object.typed_array_encode_primitives(kind, values))
+  use region <- option.then(typed_array_elements.typed_array_encode_primitives(
+    kind,
+    values,
+  ))
   case object.typed_array_buffer_data(state.heap, buffer) {
     // Detached → every per-element store is a silent no-op.
     None -> Some(state)
@@ -1629,7 +1640,12 @@ fn proto_fill(
       // Single-pass fill: encode the element ONCE, then build the region
       // with binary:copy + one splice (O(n), not O(n²)).
       let elem =
-        object.typed_array_encode_value(ta_zeroed(size), 0, kind, converted)
+        typed_array_elements.typed_array_encode_value(
+          ta_zeroed(size),
+          0,
+          kind,
+          converted,
+        )
       let new_data = ta_fill_region(data, off + start * size, end - start, elem)
       let h =
         write_buffer_data(
@@ -1672,50 +1688,15 @@ fn convert_for_kind(
   }
 }
 
-/// §7.1.13 ToBigInt (returns the JsBigInt value).
+/// §7.1.13 ToBigInt (returns the JsBigInt value). Delegates to the canonical
+/// coerce.to_bigint — same ToPrimitive walk and StringToBigInt (including
+/// 0x/0o/0b prefixes) as every other ToBigInt in the engine.
 fn to_bigint_value(
   state: State(host),
   val: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case val {
-    value.JsBigInt(_) -> Ok(#(val, state))
-    JsBool(True) -> Ok(#(value.JsBigInt(value.BigInt(1)), state))
-    JsBool(False) -> Ok(#(value.JsBigInt(value.BigInt(0)), state))
-    JsString(s) -> {
-      let t = string.trim(s)
-      let parsed = case t {
-        "" -> Ok(0)
-        _ -> int.parse(t)
-      }
-      case parsed {
-        Ok(n) -> Ok(#(value.JsBigInt(value.BigInt(n)), state))
-        // §7.1.13 ToBigInt: StringToBigInt returning undefined throws a
-        // SyntaxError — not TypeError (that's for Number/Symbol/etc).
-        Error(Nil) -> {
-          let #(heap, err) =
-            common.make_syntax_error(
-              state.heap,
-              state.builtins,
-              "Cannot convert " <> s <> " to a BigInt",
-            )
-          Error(#(err, State(..state, heap:)))
-        }
-      }
-    }
-    JsObject(_) -> {
-      use #(prim, state) <- result.try(coerce.to_primitive(
-        state,
-        val,
-        coerce.NumberHint,
-      ))
-      to_bigint_value(state, prim)
-    }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Cannot convert " <> string.inspect(val) <> " to a BigInt",
-      ))
-  }
+  use #(n, state) <- result.map(coerce.to_bigint(state, val))
+  #(value.JsBigInt(value.BigInt(n)), state)
 }
 
 /// §23.2.3.26 %TypedArray%.prototype.set ( source [ , offset ] )
@@ -1918,7 +1899,7 @@ fn set_from_array_like(
     state.range_error(state, "offset is out of bounds")
   })
   let bulk =
-    object.plain_indexed_values(state.heap, src_ref, src_len)
+    typed_array_elements.plain_indexed_values(state.heap, src_ref, src_len)
     |> option.then(try_bulk_store(state, this, offset, _))
   case bulk {
     Some(state) -> #(state, Ok(JsUndefined))
@@ -2977,7 +2958,12 @@ fn proto_with(
   let data = copy_region(state.heap, buffer, off, len * size)
   let new_data = case actual < len {
     True ->
-      object.typed_array_encode_value(data, actual * size, kind, converted)
+      typed_array_elements.typed_array_encode_value(
+        data,
+        actual * size,
+        kind,
+        converted,
+      )
     False -> data
   }
   // Fresh buffer — this caller owns every byte.
@@ -3178,7 +3164,7 @@ fn encode_region(
   values: List(JsValue),
 ) -> BitArray {
   list.map(values, fn(v) {
-    object.typed_array_encode_value(ta_zeroed(size), 0, kind, v)
+    typed_array_elements.typed_array_encode_value(ta_zeroed(size), 0, kind, v)
   })
   |> bit_array.concat
 }
