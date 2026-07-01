@@ -72,10 +72,10 @@ import arc/parser/lexer.{
   KString, KTrue, LeftBrace, LeftBracket, LeftParen, LessThanLessThanEqual, Let,
   Minus, MinusEqual, MinusMinus, New, Null, Number, Of, PercentEqual, PipeEqual,
   PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
-  QuestionQuestionEqual, RegularExpression, Return, RightBrace, RightBracket,
-  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
-  StarStarEqual, Static, Super, Switch, TemplateLiteral, This, Throw, Tilde, Try,
-  Typeof, Undefined, Var, Void, While, With, Yield,
+  QuestionQuestionEqual, Return, RightBrace, RightBracket, RightParen, Semicolon,
+  Slash, SlashEqual, Star, StarEqual, StarStar, StarStarEqual, Static, Super,
+  Switch, TemplateLiteral, This, Throw, Tilde, Try, Typeof, Undefined, Var, Void,
+  While, With, Yield,
 }
 import arc/parser/number.{parse_js_number}
 import arc/parser/regex
@@ -83,10 +83,9 @@ import arc/parser/template.{
   has_legacy_octal_escape, is_legacy_octal_number, split_template_parts,
 }
 import arc/parser/token.{
-  binary_precedence, is_assignment_operator, is_contextual_keyword,
-  is_identifier_or_keyword, is_keyword_as_identifier, is_logical_op,
-  is_reserved_word_kind, token_kind_to_string, token_to_assignment_op,
-  token_to_binary_op,
+  Binary, BinaryOperator, Logical, assignment_op, binary_operator,
+  is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
+  is_reserved_word_kind, token_kind_to_string,
 }
 import arc/vm/opcode
 import gleam/bit_array
@@ -1269,8 +1268,8 @@ fn check_duplicate_binding(p: P, name: String) -> Result(P, ParseError) {
 /// `{ var x; let x }` AND `{ {var x} let x }` where the var binding
 /// itself lives in the function scope, not here.
 ///
-/// Exemption: the implicit `arguments` placeholder (VarBinding,
-/// declared_at: None — recorded BEFORE the body so its slot index
+/// Exemption: the implicit `arguments` placeholder (a synthetic
+/// VarBinding — recorded BEFORE the body so its slot index
 /// matches legacy `declare_var_boundary_body`) does not block a
 /// sloppy-mode `let arguments` at function top level. Legacy
 /// `add_binding` first-wins lets the implicit VarBinding survive and
@@ -1287,7 +1286,7 @@ fn register_lexical_name(
       && !scope.sb_only_implicit_arguments(p.sb, name),
     Error(IdentifierAlreadyDeclared(name, pos)),
   )
-  Ok(P(..p, sb: scope.sb_declare(p.sb, name, kind, Some(pos))))
+  Ok(P(..p, sb: scope.sb_declare(p.sb, name, kind, synthetic: False)))
 }
 
 /// Register a binding name in the current block scope.
@@ -1305,7 +1304,7 @@ fn register_scope_binding(p: P, name: String) -> Result(P, ParseError) {
       Ok(
         P(
           ..p,
-          sb: scope.sb_declare(p.sb, name, scope.ParamBinding, Some(pos_of(p))),
+          sb: scope.sb_declare(p.sb, name, scope.ParamBinding, synthetic: False),
         ),
       )
     BindingVar -> {
@@ -1322,7 +1321,7 @@ fn register_scope_binding(p: P, name: String) -> Result(P, ParseError) {
       // sb_declare_var: real VarBinding lands in current_fn AND each
       // intermediate block records `name` in its hoisted_vars so a
       // later let/const there is rejected (§14.2.1).
-      Ok(P(..p, sb: scope.sb_declare_var(p.sb, name, Some(pos_of(p)))))
+      Ok(P(..p, sb: scope.sb_declare_var(p.sb, name, synthetic: False)))
     }
     BindingNone -> Ok(p)
   }
@@ -1372,7 +1371,7 @@ fn register_function_name(
       Ok(
         P(
           ..p,
-          sb: scope.sb_declare(p.sb, name, scope.VarBinding, Some(name_pos)),
+          sb: scope.sb_declare(p.sb, name, scope.VarBinding, synthetic: False),
         ),
       )
     }
@@ -1400,7 +1399,7 @@ fn register_function_name(
           || scope.sb_current_has_kind(p.sb, name, scope.ConstBinding),
         Error(IdentifierAlreadyDeclared(name, name_pos)),
       )
-      Ok(P(..p, sb: scope.sb_declare_var(p.sb, name, Some(name_pos))))
+      Ok(P(..p, sb: scope.sb_declare_var(p.sb, name, synthetic: False)))
     }
   }
 }
@@ -1421,8 +1420,7 @@ fn check_duplicate_export(p: P, name: String) -> Result(P, ParseError) {
 /// Check if an import binding name is a duplicate. Only applies in Module mode.
 /// Returns Ok(p) with the name added to import_bindings AND sb_declared
 /// as a `ConstBinding` in the module (root) scope (§16.2.1.5.5: imported
-/// bindings are immutable; `declared_at: None` — never TDZ). Errors on
-/// duplicate.
+/// bindings are immutable). Errors on duplicate.
 fn check_duplicate_import_binding(p: P, name: String) -> Result(P, ParseError) {
   case p.mode {
     Module ->
@@ -1430,7 +1428,15 @@ fn check_duplicate_import_binding(p: P, name: String) -> Result(P, ParseError) {
         True -> Error(DuplicateImportBinding(name, pos_of(p)))
         False -> {
           let p =
-            P(..p, sb: scope.sb_declare(p.sb, name, scope.ConstBinding, None))
+            P(
+              ..p,
+              sb: scope.sb_declare(
+                p.sb,
+                name,
+                scope.ConstBinding,
+                synthetic: False,
+              ),
+            )
           Ok(P(..p, import_bindings: set.insert(p.import_bindings, name)))
         }
       }
@@ -1463,19 +1469,22 @@ fn check_export_binding(p: P, name: String) -> Result(P, ParseError) {
 }
 
 /// If the current token is `=`, parse a default initializer and wrap `pat`
-/// in an AssignmentPattern; otherwise return `pat` unchanged. On a parse
-/// error in the initializer, backtracks to the input parser.
-fn parse_pattern_default(p: P, pat: ast.Pattern) -> #(P, ast.Pattern) {
+/// in an AssignmentPattern; otherwise return `pat` unchanged. The `=` commits
+/// to an initializer (there is no alternative production), so a parse error
+/// in it is propagated rather than backtracked over — `let [x = ] = y` must
+/// report the bad initializer, not pretend there was no default.
+fn parse_pattern_default(
+  p: P,
+  pat: ast.Pattern,
+) -> Result(#(P, ast.Pattern), ParseError) {
   case peek(p) {
-    Equal ->
-      case parse_assignment_expression(advance(p)) {
-        Ok(#(p2, default_expr)) -> #(
-          p2,
-          ast.AssignmentPattern(left: pat, right: default_expr),
-        )
-        Error(_) -> #(p, pat)
-      }
-    _ -> #(p, pat)
+    Equal -> {
+      use #(p2, default_expr) <- result.map(
+        parse_assignment_expression(advance(p)),
+      )
+      #(p2, ast.AssignmentPattern(left: pat, right: default_expr))
+    }
+    _ -> Ok(#(p, pat))
   }
 }
 
@@ -1512,7 +1521,7 @@ fn parse_array_binding_elements(
     }
     _ -> {
       use #(p2, pat) <- result.try(parse_binding_pattern(p))
-      let #(p3, final_pat) = parse_pattern_default(p2, pat)
+      use #(p3, final_pat) <- result.try(parse_pattern_default(p2, pat))
       case peek(p3) {
         Comma ->
           parse_array_binding_elements(advance(p3), [Some(final_pat), ..acc])
@@ -1582,8 +1591,8 @@ fn parse_object_binding_property(
     Colon -> {
       // property: pattern
       use #(p4, val_pat) <- result.try(parse_binding_pattern(advance(p2)))
-      let #(p5, final_pat) = parse_pattern_default(p4, val_pat)
-      Ok(#(
+      use #(p5, final_pat) <- result.map(parse_pattern_default(p4, val_pat))
+      #(
         p5,
         ast.PatternProperty(
           key: key_expr,
@@ -1591,7 +1600,7 @@ fn parse_object_binding_property(
           computed: is_computed,
           shorthand: False,
         ),
-      ))
+      )
     }
     next -> {
       // shorthand binding (with optional default) — validate the name as a binding identifier
@@ -1858,11 +1867,9 @@ fn parse_for_using_declaration(
     In -> Error(UsingInForIn(pos_of(p3)))
     Of -> {
       let decl =
-        ast.ForInitDeclaration(
-          ast.VariableDeclaration(kind:, declarations: [
-            ast.VariableDeclarator(id: pattern, init: None),
-          ]),
-        )
+        ast.ForInitDeclaration(kind:, declarations: [
+          ast.VariableDeclarator(id: pattern, init: None),
+        ])
       parse_for_in_of_rest(exit_for_decl_context(p3, p), decl, True, is_await)
     }
     Equal -> {
@@ -1872,10 +1879,7 @@ fn parse_for_using_declaration(
       let first = ast.VariableDeclarator(id: pattern, init: Some(init_expr))
       use #(p6, rest) <- result.try(parse_using_remaining_declarators(p5, []))
       let p6 = P(..p6, allow_in: p.allow_in)
-      let decl =
-        ast.ForInitDeclaration(
-          ast.VariableDeclaration(kind:, declarations: [first, ..rest]),
-        )
+      let decl = ast.ForInitDeclaration(kind:, declarations: [first, ..rest])
       use p7 <- result.try(expect(p6, Semicolon))
       parse_for_classic_rest(exit_for_decl_context(p7, p), Some(decl))
     }
@@ -1960,11 +1964,9 @@ fn parse_for_declaration(
   let catch_params = scope.sb_nearest_catch_params(p2.sb)
   use #(p3, pattern) <- result.try(parse_for_binding_or_declarator(p2))
   let decl =
-    ast.ForInitDeclaration(
-      ast.VariableDeclaration(kind: var_kind, declarations: [
-        ast.VariableDeclarator(id: pattern, init: None),
-      ]),
-    )
+    ast.ForInitDeclaration(kind: var_kind, declarations: [
+      ast.VariableDeclarator(id: pattern, init: None),
+    ])
   case peek(p3) {
     In -> parse_for_in_of_rest(exit_for_decl_context(p3, p), decl, False, False)
     Of -> {
@@ -2031,11 +2033,9 @@ fn finish_for_classic_decl(
   init: Option(ast.Expression),
 ) -> Result(#(P, ast.Statement), ParseError) {
   let first = ast.VariableDeclarator(id: pattern, init:)
-  let #(p2, rest) = parse_remaining_declarators(p, kind, [])
+  use #(p2, rest) <- result.try(parse_remaining_declarators(p, kind, []))
   let decl =
-    ast.ForInitDeclaration(
-      ast.VariableDeclaration(kind: var_kind, declarations: [first, ..rest]),
-    )
+    ast.ForInitDeclaration(kind: var_kind, declarations: [first, ..rest])
   use p3 <- result.try(expect(p2, Semicolon))
   parse_for_classic_rest(exit_for_decl_context(p3, outer), Some(decl))
 }
@@ -2185,20 +2185,21 @@ fn parse_for_binding_or_declarator(
   parse_binding_pattern(p)
 }
 
+/// Collect the `, name = init` declarators that follow the first declarator
+/// of a classic `for (var/let/const …;;)` head. A `,` commits to another
+/// declarator (there is no alternative production), so a parse error there
+/// is propagated rather than swallowed into a shorter declaration list.
 fn parse_remaining_declarators(
   p: P,
   kind: TokenKind,
   acc: List(ast.VariableDeclarator),
-) -> #(P, List(ast.VariableDeclarator)) {
+) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
   case peek(p) {
     Comma -> {
-      let p2 = advance(p)
-      case parse_variable_declarator(p2, kind) {
-        Ok(#(p3, decl)) -> parse_remaining_declarators(p3, kind, [decl, ..acc])
-        Error(_) -> #(p, list.reverse(acc))
-      }
+      use #(p2, decl) <- result.try(parse_variable_declarator(advance(p), kind))
+      parse_remaining_declarators(p2, kind, [decl, ..acc])
     }
-    _ -> #(p, list.reverse(acc))
+    _ -> Ok(#(p, list.reverse(acc)))
   }
 }
 
@@ -2677,7 +2678,15 @@ fn parse_function_params_and_body(
   // so the prior parser's no-error behavior is preserved. Arrows skip
   // this path entirely — they go through `parse_arrow_body`, not here.
   let p5 =
-    P(..p5, sb: scope.sb_declare(p5.sb, "arguments", scope.VarBinding, None))
+    P(
+      ..p5,
+      sb: scope.sb_declare(
+        p5.sb,
+        "arguments",
+        scope.VarBinding,
+        synthetic: True,
+      ),
+    )
   use #(p6, body) <- result.try(case !was_strict && p5.strict {
     True -> {
       use Nil <- result.try(check_pending_strict_names(p5))
@@ -2896,7 +2905,12 @@ fn parse_getter_params_and_body(
       let p3 =
         P(
           ..p3,
-          sb: scope.sb_declare(p3.sb, "arguments", scope.VarBinding, None),
+          sb: scope.sb_declare(
+            p3.sb,
+            "arguments",
+            scope.VarBinding,
+            synthetic: True,
+          ),
         )
       use #(p4, body) <- result.try(parse_function_body_block(p3))
       Ok(#(p4, [], body))
@@ -2934,7 +2948,7 @@ fn parse_setter_params_and_body(
         Equal -> P(..p3, has_non_simple_param: True)
         _ -> p3
       }
-      let #(p4, final_pat) = parse_pattern_default(p3, pat)
+      use #(p4, final_pat) <- result.try(parse_pattern_default(p3, pat))
       case peek(p4) {
         RightParen -> {
           let p5 =
@@ -2955,7 +2969,12 @@ fn parse_setter_params_and_body(
           let p5 =
             P(
               ..p5,
-              sb: scope.sb_declare(p5.sb, "arguments", scope.VarBinding, None),
+              sb: scope.sb_declare(
+                p5.sb,
+                "arguments",
+                scope.VarBinding,
+                synthetic: True,
+              ),
             )
           use #(p6, body) <- result.try(
             parse_fn_body_maybe_var_boundary(p5, [final_pat]),
@@ -3080,7 +3099,7 @@ fn parse_formal_param_default(
   pat: ast.Pattern,
   acc: List(ast.Pattern),
 ) -> Result(#(P, List(ast.Pattern)), ParseError) {
-  let #(p2, final_pat) = parse_pattern_default(p, pat)
+  use #(p2, final_pat) <- result.try(parse_pattern_default(p, pat))
   parse_formal_param_rest(p2, seen, [final_pat, ..acc])
 }
 
@@ -3286,18 +3305,21 @@ fn parse_class_tail(
   // (declare_class step 3 walks the heritage with `class_id`).
   let #(sb, class_id) = scope.sb_push(p.sb, scope.ClassBody)
   let p = P(..p, sb:, strict: True)
-  // Optional extends
+  // Optional extends. Once `extends` is consumed a LeftHandSideExpression is
+  // mandatory (ClassHeritage has no alternative production), so a parse error
+  // in it is the user's error and must be propagated — backtracking to "no
+  // heritage" would silently turn `class A extends {#x} {}` into
+  // `class A { #x }` followed by an empty block.
   let has_extends = peek(p) == Extends
-  let #(p2, super_class) = case has_extends {
+  use #(p2, super_class) <- result.try(case has_extends {
     True -> {
-      let p2 = advance(p)
-      case parse_left_hand_side_expression(p2) {
-        Ok(#(p_val, expr)) -> #(p_val, Some(expr))
-        Error(_) -> #(p2, None)
-      }
+      use #(p2, expr) <- result.map(
+        parse_left_hand_side_expression(advance(p)),
+      )
+      #(p2, Some(expr))
     }
-    False -> #(p, None)
-  }
+    False -> Ok(#(p, None))
+  })
   // All direct children of class_id at this point came from the heritage
   // expression (oldest-first source order).
   let heritage_scopes = scope.sb_children_raw(p2.sb, class_id) |> list.reverse
@@ -3365,7 +3387,13 @@ fn class_scope_finalize(
   // emitter looks them up by (scope_id, name).
   let sb =
     list.fold(ast_util.class_body_bindings(name, elements), sb, fn(sb, n) {
-      scope.sb_declare_in(sb, ctx.class_id, n, scope.ConstBinding, None)
+      scope.sb_declare_in(
+        sb,
+        ctx.class_id,
+        n,
+        scope.ConstBinding,
+        synthetic: True,
+      )
     })
   // (4) every computed key, source order — flatten across elements.
   let key_scopes = list.flat_map(tagged, fn(pair) { { pair.1 }.key_scopes })
@@ -3511,7 +3539,13 @@ fn class_seed_field_shell(
   let sb = scope.sb_enter(sb, shell_id)
   // §10.2.11 step 22 — non-arrow Function gets `arguments`.
   let sb =
-    scope.sb_declare_in(sb, shell_id, "arguments", scope.VarBinding, None)
+    scope.sb_declare_in(
+      sb,
+      shell_id,
+      "arguments",
+      scope.VarBinding,
+      synthetic: True,
+    )
   // Every ClassFieldInit emits `get_this`.
   let sb = scope.sb_lexical_ref(sb, opcode.RefThis)
   // §7.3.29 PrivateMethodOrAccessorAdd: each instance private
@@ -3561,7 +3595,13 @@ fn class_seed_ctor_shell(
   // so `arguments` was never declared.
   let sb = case is_synthetic {
     True ->
-      scope.sb_declare_in(sb, ctor_id, "arguments", scope.VarBinding, None)
+      scope.sb_declare_in(
+        sb,
+        ctor_id,
+        "arguments",
+        scope.VarBinding,
+        synthetic: True,
+      )
     False -> sb
   }
   // emit_field_init_call reads `<class_fields_init>` + `this`.
@@ -4097,7 +4137,7 @@ fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let synth = scope.with_object_name(depth, with_id)
   let sb =
     scope.sb_update_current(
-      scope.sb_declare(sb, synth, scope.LetBinding, None),
+      scope.sb_declare(sb, synth, scope.LetBinding, synthetic: True),
       fn(s) { scope.RawScope(..s, with_object_name: Some(synth)) },
     )
   use #(p6, body) <- result.try(parse_single_statement(P(..p5, sb:), False))
@@ -4233,7 +4273,7 @@ fn parse_assignment_expression_inner(
               case peek_value(p) {
                 "eval" | "arguments" -> {
                   let name = peek_value(p)
-                  case is_assignment_operator(peek_at(p, 1)) {
+                  case option.is_some(assignment_op(peek_at(p, 1))) {
                     True -> Error(StrictModeAssignment(name, pos_of(p)))
                     False -> parse_assignment_rhs(p)
                   }
@@ -4293,12 +4333,11 @@ fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
           }
       }
     _ ->
-      case is_assignment_operator(peek(p2)) {
-        True -> {
+      case assignment_op(peek(p2)) {
+        Some(op) -> {
           // Compound assignment — LHS must be a simple assignment target.
           // Annex B ~web-compat~ call targets are allowed for `op=` but NOT
           // for logical assignment (&&=, ||=, ??=), which stay early errors.
-          let op = token_to_assignment_op(peek(p2))
           let web_compat_ok = case op {
             ast.LogicalAndAssign
             | ast.LogicalOrAssign
@@ -4315,7 +4354,7 @@ fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
         }
         // Not an assignment — clear the flag so it doesn't leak
         // from a previous sibling expression (e.g. [a = 1, 0])
-        False -> Ok(#(P(..p2, last_expr_is_assignment: False), lhs_expr))
+        None -> Ok(#(P(..p2, last_expr_is_assignment: False), lhs_expr))
       }
   }
 }
@@ -4698,25 +4737,30 @@ fn parse_binary_rhs(
   min_prec: Int,
 ) -> Result(#(P, ast.Expression), ParseError) {
   let tok = peek(p)
-  let prec = binary_precedence(tok, p.allow_in)
-  case prec > min_prec {
-    True -> {
-      let op = token_to_binary_op(tok)
-      let p2 = advance(p)
-      // Right-associative for **
-      let next_min = case tok {
-        StarStar -> prec - 1
-        _ -> prec
+  case binary_operator(tok, p.allow_in) {
+    // Not a binary/logical operator (or `in` while `allow_in` is off).
+    None -> Ok(#(p, left))
+    Some(BinaryOperator(precedence:, op:)) ->
+      case precedence > min_prec {
+        False -> Ok(#(p, left))
+        True -> {
+          let p2 = advance(p)
+          // Right-associative for **
+          let next_min = case tok {
+            StarStar -> precedence - 1
+            _ -> precedence
+          }
+          use #(p3, right) <- result.try(parse_binary_expression(p2, next_min))
+          let span = ast.Span(ast.expression_span(left).start, p3.prev_end)
+          let expr = case op {
+            Logical(op) ->
+              ast.LogicalExpression(operator: op, left:, right:, span:)
+            Binary(op) ->
+              ast.BinaryExpression(operator: op, left:, right:, span:)
+          }
+          parse_binary_rhs(P(..p3, last_expr_assignable: False), expr, min_prec)
+        }
       }
-      use #(p3, right) <- result.try(parse_binary_expression(p2, next_min))
-      let span = ast.Span(ast.expression_span(left).start, p3.prev_end)
-      let expr = case is_logical_op(tok) {
-        True -> ast.LogicalExpression(operator: op, left:, right:, span:)
-        False -> ast.BinaryExpression(operator: op, left:, right:, span:)
-      }
-      parse_binary_rhs(P(..p3, last_expr_assignable: False), expr, min_prec)
-    }
-    False -> Ok(#(p, left))
   }
 }
 
@@ -5645,11 +5689,6 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       // /= at the start of an expression is a regex starting with =
       parse_regex_literal(p)
     }
-    RegularExpression -> {
-      // Pre-tokenized regex: value is /pattern/flags
-      let #(pattern, flags) = regex.split_regex_value(peek_value(p))
-      ok_lit(p, ast.RegExpLiteral(pattern:, flags:, span: span_of(p)))
-    }
     New -> parse_new_expression(p)
     _ ->
       case is_contextual_keyword(peek(p)) {
@@ -6125,7 +6164,7 @@ fn parse_function_expression(
           fn_scope,
           name,
           scope.FnNameBinding,
-          None,
+          synthetic: True,
         ),
       )
   }
@@ -6599,7 +6638,7 @@ fn finish_export_default_decl(
           p4.sb,
           scope.default_export,
           scope.VarBinding,
-          None,
+          synthetic: True,
         ),
       )
     _ -> p4
@@ -6632,7 +6671,12 @@ fn finish_export_default_expr(
   let p5 =
     P(
       ..p5,
-      sb: scope.sb_declare(p5.sb, scope.default_export, scope.VarBinding, None),
+      sb: scope.sb_declare(
+        p5.sb,
+        scope.default_export,
+        scope.VarBinding,
+        synthetic: True,
+      ),
     )
   #(
     p5,
@@ -7027,7 +7071,7 @@ fn enter_arrow_context(p: P, is_async: Bool, param_names: List(String)) -> P {
     })
   let sb =
     list.fold(param_names, sb, fn(acc, name) {
-      scope.sb_declare(acc, name, scope.ParamBinding, None)
+      scope.sb_declare(acc, name, scope.ParamBinding, synthetic: False)
     })
   P(
     ..inner,

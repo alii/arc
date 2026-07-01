@@ -10,16 +10,17 @@ import arc/parser/lexer.{
   EqualEqualEqual, Export, Extends, Finally, For, From, Function, GreaterThan,
   GreaterThanEqual, GreaterThanGreaterThan, GreaterThanGreaterThanEqual,
   GreaterThanGreaterThanGreaterThan, GreaterThanGreaterThanGreaterThanEqual,
-  Identifier, If, Import, In, Instanceof, KFalse, KString, KTrue, LeftBrace,
-  LeftBracket, LeftParen, LessThan, LessThanEqual, LessThanLessThan,
+  Identifier, If, Illegal, Import, In, Instanceof, KFalse, KString, KTrue,
+  LeftBrace, LeftBracket, LeftParen, LessThan, LessThanEqual, LessThanLessThan,
   LessThanLessThanEqual, Let, Minus, MinusEqual, MinusMinus, New, Null, Number,
   Of, Percent, PercentEqual, Pipe, PipeEqual, PipePipe, PipePipeEqual, Plus,
   PlusEqual, PlusPlus, Question, QuestionDot, QuestionQuestion,
-  QuestionQuestionEqual, RegularExpression, Return, RightBrace, RightBracket,
-  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
-  StarStarEqual, Static, Super, Switch, TemplateLiteral, This, Throw, Tilde, Try,
-  Typeof, Undefined, Var, Void, While, With, Yield,
+  QuestionQuestionEqual, Return, RightBrace, RightBracket, RightParen, Semicolon,
+  Slash, SlashEqual, Star, StarEqual, StarStar, StarStarEqual, Static, Super,
+  Switch, TemplateLiteral, This, Throw, Tilde, Try, Typeof, Undefined, Var, Void,
+  While, With, Yield,
 }
+import gleam/option.{type Option, None, Some}
 
 /// Returns True for keywords that are ALWAYS reserved and cannot be used as
 /// binding identifiers in any context (strict or sloppy).
@@ -82,110 +83,87 @@ pub fn is_keyword_as_identifier(kind: TokenKind) -> Bool {
   is_reserved_word_kind(kind) || is_contextual_keyword(kind)
 }
 
-pub fn is_assignment_operator(kind: TokenKind) -> Bool {
-  case kind {
-    Equal
-    | PlusEqual
-    | MinusEqual
-    | StarEqual
-    | StarStarEqual
-    | SlashEqual
-    | PercentEqual
-    | AmpersandEqual
-    | PipeEqual
-    | CaretEqual
-    | LessThanLessThanEqual
-    | GreaterThanGreaterThanEqual
-    | GreaterThanGreaterThanGreaterThanEqual
-    | AmpersandAmpersandEqual
-    | PipePipeEqual
-    | QuestionQuestionEqual -> True
-    _ -> False
-  }
+/// A binary/logical operator token's Pratt precedence together with the AST
+/// operator it produces. Keeping both in ONE value (returned by
+/// `binary_operator`) makes it impossible for the precedence table and the
+/// token→operator mapping to drift apart: a token either is an operator (and
+/// carries both facts) or it isn't (`None`).
+pub type BinaryOperator {
+  BinaryOperator(precedence: Int, op: BinOrLogical)
 }
 
-pub fn binary_precedence(kind: TokenKind, allow_in: Bool) -> Int {
+/// The two AST shapes a binary-operator token can build: an ordinary
+/// `BinaryExpression`, or a short-circuiting `LogicalExpression`
+/// (`&&` / `||` / `??`).
+pub type BinOrLogical {
+  Binary(ast.BinaryOp)
+  Logical(ast.LogicalOp)
+}
+
+/// The single table of binary/logical operator tokens.
+/// Returns `None` for every token that is not a binary operator, and for `in`
+/// when `allow_in` is False (a `for (a in b;;)` head must not treat `in` as a
+/// relational operator).
+pub fn binary_operator(
+  kind: TokenKind,
+  allow_in: Bool,
+) -> Option(BinaryOperator) {
   case kind {
-    PipePipe -> 1
-    AmpersandAmpersand -> 2
-    Pipe -> 3
-    Caret -> 4
-    Ampersand -> 5
-    EqualEqual | BangEqual | EqualEqualEqual | BangEqualEqual -> 6
-    LessThan | LessThanEqual | GreaterThan | GreaterThanEqual | Instanceof -> 7
+    QuestionQuestion -> Some(BinaryOperator(1, Logical(ast.NullishCoalescing)))
+    PipePipe -> Some(BinaryOperator(1, Logical(ast.LogicalOr)))
+    AmpersandAmpersand -> Some(BinaryOperator(2, Logical(ast.LogicalAnd)))
+    Pipe -> Some(BinaryOperator(3, Binary(ast.BitwiseOr)))
+    Caret -> Some(BinaryOperator(4, Binary(ast.BitwiseXor)))
+    Ampersand -> Some(BinaryOperator(5, Binary(ast.BitwiseAnd)))
+    EqualEqual -> Some(BinaryOperator(6, Binary(ast.Equal)))
+    BangEqual -> Some(BinaryOperator(6, Binary(ast.NotEqual)))
+    EqualEqualEqual -> Some(BinaryOperator(6, Binary(ast.StrictEqual)))
+    BangEqualEqual -> Some(BinaryOperator(6, Binary(ast.StrictNotEqual)))
+    LessThan -> Some(BinaryOperator(7, Binary(ast.LessThan)))
+    LessThanEqual -> Some(BinaryOperator(7, Binary(ast.LessThanEqual)))
+    GreaterThan -> Some(BinaryOperator(7, Binary(ast.GreaterThan)))
+    GreaterThanEqual -> Some(BinaryOperator(7, Binary(ast.GreaterThanEqual)))
+    Instanceof -> Some(BinaryOperator(7, Binary(ast.InstanceOf)))
     In ->
       case allow_in {
-        True -> 7
-        False -> 0
+        True -> Some(BinaryOperator(7, Binary(ast.In)))
+        False -> None
       }
-    LessThanLessThan
-    | GreaterThanGreaterThan
-    | GreaterThanGreaterThanGreaterThan -> 8
-    Plus | Minus -> 9
-    Star | Slash | Percent -> 10
-    StarStar -> 11
-    QuestionQuestion -> 1
-    _ -> 0
+    LessThanLessThan -> Some(BinaryOperator(8, Binary(ast.LeftShift)))
+    GreaterThanGreaterThan -> Some(BinaryOperator(8, Binary(ast.RightShift)))
+    GreaterThanGreaterThanGreaterThan ->
+      Some(BinaryOperator(8, Binary(ast.UnsignedRightShift)))
+    Plus -> Some(BinaryOperator(9, Binary(ast.Add)))
+    Minus -> Some(BinaryOperator(9, Binary(ast.Subtract)))
+    Star -> Some(BinaryOperator(10, Binary(ast.Multiply)))
+    Slash -> Some(BinaryOperator(10, Binary(ast.Divide)))
+    Percent -> Some(BinaryOperator(10, Binary(ast.Modulo)))
+    StarStar -> Some(BinaryOperator(11, Binary(ast.Exponentiation)))
+    _ -> None
   }
 }
 
-pub fn token_to_binary_op(kind: TokenKind) -> ast.BinaryOp {
+/// The single table of assignment-operator tokens: `Some(op)` for `=` and
+/// every compound/logical assignment, `None` for every other token.
+pub fn assignment_op(kind: TokenKind) -> Option(ast.AssignmentOp) {
   case kind {
-    Plus -> ast.Add
-    Minus -> ast.Subtract
-    Star -> ast.Multiply
-    Slash -> ast.Divide
-    Percent -> ast.Modulo
-    StarStar -> ast.Exponentiation
-    EqualEqualEqual -> ast.StrictEqual
-    BangEqualEqual -> ast.StrictNotEqual
-    EqualEqual -> ast.Equal
-    BangEqual -> ast.NotEqual
-    LessThan -> ast.LessThan
-    GreaterThan -> ast.GreaterThan
-    LessThanEqual -> ast.LessThanEqual
-    GreaterThanEqual -> ast.GreaterThanEqual
-    LessThanLessThan -> ast.LeftShift
-    GreaterThanGreaterThan -> ast.RightShift
-    GreaterThanGreaterThanGreaterThan -> ast.UnsignedRightShift
-    Ampersand -> ast.BitwiseAnd
-    Pipe -> ast.BitwiseOr
-    Caret -> ast.BitwiseXor
-    AmpersandAmpersand -> ast.LogicalAnd
-    PipePipe -> ast.LogicalOr
-    QuestionQuestion -> ast.NullishCoalescing
-    In -> ast.In
-    Instanceof -> ast.InstanceOf
-    _ -> ast.Add
-  }
-}
-
-pub fn is_logical_op(kind: TokenKind) -> Bool {
-  case kind {
-    AmpersandAmpersand | PipePipe | QuestionQuestion -> True
-    _ -> False
-  }
-}
-
-pub fn token_to_assignment_op(kind: TokenKind) -> ast.AssignmentOp {
-  case kind {
-    Equal -> ast.Assign
-    PlusEqual -> ast.AddAssign
-    MinusEqual -> ast.SubtractAssign
-    StarEqual -> ast.MultiplyAssign
-    SlashEqual -> ast.DivideAssign
-    PercentEqual -> ast.ModuloAssign
-    StarStarEqual -> ast.ExponentiationAssign
-    LessThanLessThanEqual -> ast.LeftShiftAssign
-    GreaterThanGreaterThanEqual -> ast.RightShiftAssign
-    GreaterThanGreaterThanGreaterThanEqual -> ast.UnsignedRightShiftAssign
-    AmpersandEqual -> ast.BitwiseAndAssign
-    PipeEqual -> ast.BitwiseOrAssign
-    CaretEqual -> ast.BitwiseXorAssign
-    AmpersandAmpersandEqual -> ast.LogicalAndAssign
-    PipePipeEqual -> ast.LogicalOrAssign
-    QuestionQuestionEqual -> ast.NullishCoalesceAssign
-    _ -> ast.Assign
+    Equal -> Some(ast.Assign)
+    PlusEqual -> Some(ast.AddAssign)
+    MinusEqual -> Some(ast.SubtractAssign)
+    StarEqual -> Some(ast.MultiplyAssign)
+    SlashEqual -> Some(ast.DivideAssign)
+    PercentEqual -> Some(ast.ModuloAssign)
+    StarStarEqual -> Some(ast.ExponentiationAssign)
+    LessThanLessThanEqual -> Some(ast.LeftShiftAssign)
+    GreaterThanGreaterThanEqual -> Some(ast.RightShiftAssign)
+    GreaterThanGreaterThanGreaterThanEqual -> Some(ast.UnsignedRightShiftAssign)
+    AmpersandEqual -> Some(ast.BitwiseAndAssign)
+    PipeEqual -> Some(ast.BitwiseOrAssign)
+    CaretEqual -> Some(ast.BitwiseXorAssign)
+    AmpersandAmpersandEqual -> Some(ast.LogicalAndAssign)
+    PipePipeEqual -> Some(ast.LogicalOrAssign)
+    QuestionQuestionEqual -> Some(ast.NullishCoalesceAssign)
+    _ -> None
   }
 }
 
@@ -194,7 +172,6 @@ pub fn token_kind_to_string(kind: TokenKind) -> String {
     Number -> "number"
     KString -> "string"
     TemplateLiteral -> "template"
-    RegularExpression -> "regex"
     Identifier -> "identifier"
     Var -> "'var'"
     Let -> "'let'"
@@ -279,10 +256,25 @@ pub fn token_kind_to_string(kind: TokenKind) -> String {
     LessThanLessThan -> "'<<'"
     GreaterThanGreaterThan -> "'>>'"
     GreaterThanGreaterThanGreaterThan -> "'>>>'"
+    PlusEqual -> "'+='"
+    MinusEqual -> "'-='"
+    StarEqual -> "'*='"
+    StarStarEqual -> "'**='"
+    SlashEqual -> "'/='"
+    PercentEqual -> "'%='"
+    AmpersandEqual -> "'&='"
+    AmpersandAmpersandEqual -> "'&&='"
+    PipeEqual -> "'|='"
+    PipePipeEqual -> "'||='"
+    CaretEqual -> "'^='"
+    QuestionQuestionEqual -> "'??='"
+    LessThanLessThanEqual -> "'<<='"
+    GreaterThanGreaterThanEqual -> "'>>='"
+    GreaterThanGreaterThanGreaterThanEqual -> "'>>>='"
     PlusPlus -> "'++'"
     MinusMinus -> "'--'"
     Question -> "'?'"
     Eof -> "end of file"
-    _ -> "token"
+    Illegal -> "illegal token"
   }
 }
