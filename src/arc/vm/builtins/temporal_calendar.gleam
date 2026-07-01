@@ -33,39 +33,113 @@ pub type MonthCodeIssue {
 // Identifier handling
 // ============================================================================
 
+/// A supported calendar, as a closed set. The ONLY way to obtain one from a
+/// string is `canonicalize`, so holding a `Calendar` is proof the identifier
+/// was validated and aliases resolved. Render it back with `identifier`.
+pub type Calendar {
+  Iso8601
+  Gregory
+  Buddhist
+  Japanese
+  Roc
+  Coptic
+  Ethiopic
+  Ethioaa
+  Hebrew
+  IslamicCivil
+  IslamicTbla
+  IslamicUmalqura
+  Persian
+  Indian
+  Chinese
+  Dangi
+}
+
 /// Canonicalize a calendar identifier (case-insensitive, resolves aliases).
-/// Error(Nil) for unsupported identifiers.
-pub fn canonicalize(id: String) -> Result(String, Nil) {
+/// Error(Nil) for unsupported identifiers. This is the only String ->
+/// Calendar site.
+pub fn canonicalize(id: String) -> Result(Calendar, Nil) {
   case string.lowercase(id) {
-    "iso8601" -> Ok("iso8601")
-    "gregory" | "gregorian" -> Ok("gregory")
-    "buddhist" -> Ok("buddhist")
-    "japanese" -> Ok("japanese")
-    "roc" -> Ok("roc")
-    "coptic" -> Ok("coptic")
-    "ethiopic" -> Ok("ethiopic")
-    "ethioaa" | "ethiopic-amete-alem" -> Ok("ethioaa")
-    "hebrew" -> Ok("hebrew")
-    "islamic-civil" | "islamicc" -> Ok("islamic-civil")
-    "islamic-tbla" -> Ok("islamic-tbla")
-    "islamic-umalqura" -> Ok("islamic-umalqura")
-    "persian" -> Ok("persian")
-    "indian" -> Ok("indian")
-    "chinese" -> Ok("chinese")
-    "dangi" -> Ok("dangi")
+    "iso8601" -> Ok(Iso8601)
+    "gregory" | "gregorian" -> Ok(Gregory)
+    "buddhist" -> Ok(Buddhist)
+    "japanese" -> Ok(Japanese)
+    "roc" -> Ok(Roc)
+    "coptic" -> Ok(Coptic)
+    "ethiopic" -> Ok(Ethiopic)
+    "ethioaa" | "ethiopic-amete-alem" -> Ok(Ethioaa)
+    "hebrew" -> Ok(Hebrew)
+    "islamic-civil" | "islamicc" -> Ok(IslamicCivil)
+    "islamic-tbla" -> Ok(IslamicTbla)
+    "islamic-umalqura" -> Ok(IslamicUmalqura)
+    "persian" -> Ok(Persian)
+    "indian" -> Ok(Indian)
+    "chinese" -> Ok(Chinese)
+    "dangi" -> Ok(Dangi)
     _ -> Error(Nil)
   }
 }
 
-/// Calendars that are ISO-like (same months/days as ISO 8601, only year
-/// numbering and eras differ).
-fn iso_like_year_offset(cal: String) -> Option(Int) {
-  // calendar year = iso year + offset
+/// Canonical Temporal identifier for a calendar (inverse of `canonicalize`).
+pub fn identifier(cal: Calendar) -> String {
   case cal {
-    "gregory" | "japanese" -> Some(0)
-    "buddhist" -> Some(543)
-    "roc" -> Some(-1911)
-    _ -> None
+    Iso8601 -> "iso8601"
+    Gregory -> "gregory"
+    Buddhist -> "buddhist"
+    Japanese -> "japanese"
+    Roc -> "roc"
+    Coptic -> "coptic"
+    Ethiopic -> "ethiopic"
+    Ethioaa -> "ethioaa"
+    Hebrew -> "hebrew"
+    IslamicCivil -> "islamic-civil"
+    IslamicTbla -> "islamic-tbla"
+    IslamicUmalqura -> "islamic-umalqura"
+    Persian -> "persian"
+    Indian -> "indian"
+    Chinese -> "chinese"
+    Dangi -> "dangi"
+  }
+}
+
+/// The date-arithmetic family a calendar belongs to, carrying the family's
+/// parameters. `arithmetic` derives it exhaustively from `Calendar`, so the
+/// per-family algorithms below never dispatch on (or default over) calendar
+/// identifiers themselves.
+type Arithmetic {
+  /// Same months/days as ISO 8601; calendar year = ISO year + `year_offset`.
+  IsoLike(year_offset: Int)
+  /// Coptic family: 12 thirty-day months plus an epagomenal 13th.
+  /// `year_shift` maps the arithmetic year onto the coptic year count
+  /// (ethioaa's amete alem epoch is 5500 years before amete mihret).
+  CopticLike(epoch: Int, year_shift: Int)
+  /// 30-year-cycle tabular Islamic.
+  TabularIslamic(epoch: Int)
+  /// Islamic Umm al-Qura (ICU table for AH 1300-1600, civil fallback).
+  UmmAlQura
+  PersianArith
+  IndianArith
+  HebrewArith
+  /// Chinese/Dangi table-driven lunisolar; `data` is the packed year table.
+  LunisolarArith(data: fn(Int) -> Int)
+}
+
+fn arithmetic(cal: Calendar) -> Arithmetic {
+  case cal {
+    Iso8601 | Gregory | Japanese -> IsoLike(0)
+    Buddhist -> IsoLike(543)
+    Roc -> IsoLike(-1911)
+    Coptic -> CopticLike(epoch: coptic_epoch, year_shift: 0)
+    Ethiopic -> CopticLike(epoch: ethiopic_epoch, year_shift: 0)
+    Ethioaa -> CopticLike(epoch: ethiopic_epoch, year_shift: 5500)
+    IslamicCivil -> TabularIslamic(islamic_civil_epoch)
+    IslamicTbla -> TabularIslamic(islamic_tbla_epoch)
+    IslamicUmalqura -> UmmAlQura
+    Persian -> PersianArith
+    Indian -> IndianArith
+    Hebrew -> HebrewArith
+    Chinese -> LunisolarArith(chinese_data)
+    Dangi -> LunisolarArith(dangi_data)
   }
 }
 
@@ -148,50 +222,34 @@ const coptic_epoch = -615_558
 
 const ethiopic_epoch = -716_367
 
-fn coptic_family_epoch(cal: String) -> Int {
-  case cal {
-    "coptic" -> coptic_epoch
-    _ -> ethiopic_epoch
-  }
+/// `epoch`/`shift` come from the calendar's `CopticLike` arithmetic record.
+fn coptic_to_days(
+  epoch: Int,
+  shift: Int,
+  year: Int,
+  month: Int,
+  day: Int,
+) -> Int {
+  let y = year - shift
+  epoch - 1 + 365 * { y - 1 } + floor_div(y, 4) + 30 * { month - 1 } + day
 }
 
-/// ethioaa year = ethiopic year + 5500 (amete alem vs amete mihret).
-fn coptic_family_year_shift(cal: String) -> Int {
-  case cal {
-    "ethioaa" -> 5500
-    _ -> 0
-  }
-}
-
-fn coptic_to_days(cal: String, year: Int, month: Int, day: Int) -> Int {
-  let y = year - coptic_family_year_shift(cal)
-  coptic_family_epoch(cal)
-  - 1
-  + 365
-  * { y - 1 }
-  + floor_div(y, 4)
-  + 30
-  * { month - 1 }
-  + day
-}
-
-fn coptic_from_days(cal: String, date: Int) -> CalDate {
-  let epoch = coptic_family_epoch(cal)
+fn coptic_from_days(epoch: Int, shift: Int, date: Int) -> CalDate {
   let y = floor_div(4 * { date - epoch } + 1463, 1461)
-  let shift = coptic_family_year_shift(cal)
-  let m = floor_div(date - coptic_to_days(cal, y + shift, 1, 1), 30) + 1
-  let d = date - coptic_to_days(cal, y + shift, m, 1) + 1
+  let m =
+    floor_div(date - coptic_to_days(epoch, shift, y + shift, 1, 1), 30) + 1
+  let d = date - coptic_to_days(epoch, shift, y + shift, m, 1) + 1
   CalDate(y + shift, m, d)
 }
 
-fn coptic_is_leap(cal: String, year: Int) -> Bool {
-  floor_mod(year - coptic_family_year_shift(cal), 4) == 3
+fn coptic_is_leap(shift: Int, year: Int) -> Bool {
+  floor_mod(year - shift, 4) == 3
 }
 
-fn coptic_days_in_month(cal: String, year: Int, month: Int) -> Int {
+fn coptic_days_in_month(shift: Int, year: Int, month: Int) -> Int {
   case month {
     13 ->
-      case coptic_is_leap(cal, year) {
+      case coptic_is_leap(shift, year) {
         True -> 6
         False -> 5
       }
@@ -207,19 +265,13 @@ const islamic_civil_epoch = -492_148
 
 const islamic_tbla_epoch = -492_149
 
-fn islamic_epoch(cal: String) -> Int {
-  case cal {
-    "islamic-tbla" -> islamic_tbla_epoch
-    _ -> islamic_civil_epoch
-  }
-}
-
 fn islamic_is_leap(year: Int) -> Bool {
   floor_mod(14 + 11 * year, 30) < 11
 }
 
-fn islamic_to_days(cal: String, year: Int, month: Int, day: Int) -> Int {
-  islamic_epoch(cal)
+/// `epoch` comes from the calendar's `TabularIslamic` arithmetic record.
+fn islamic_to_days(epoch: Int, year: Int, month: Int, day: Int) -> Int {
+  epoch
   - 1
   + 354
   * { year - 1 }
@@ -241,11 +293,11 @@ fn islamic_days_in_month(year: Int, month: Int) -> Int {
   }
 }
 
-fn islamic_from_days(cal: String, date: Int) -> CalDate {
-  let y0 = floor_div(30 * { date - islamic_epoch(cal) } + 10_646, 10_631)
-  let y = adjust_year(date, y0, fn(yy) { islamic_to_days(cal, yy, 1, 1) })
+fn islamic_from_days(epoch: Int, date: Int) -> CalDate {
+  let y0 = floor_div(30 * { date - epoch } + 10_646, 10_631)
+  let y = adjust_year(date, y0, fn(yy) { islamic_to_days(epoch, yy, 1, 1) })
   let #(m, d) =
-    scan_months(date, y, 1, 12, fn(yy, mm) { islamic_to_days(cal, yy, mm, 1) })
+    scan_months(date, y, 1, 12, fn(yy, mm) { islamic_to_days(epoch, yy, mm, 1) })
   CalDate(y, m, d)
 }
 
@@ -675,110 +727,101 @@ fn scan_months(
 // ============================================================================
 
 /// Calendar date for an epoch-days value.
-pub fn date_from_epoch_days(cal: String, days: Int) -> CalDate {
-  case iso_like_year_offset(cal) {
-    Some(offset) -> {
+pub fn date_from_epoch_days(cal: Calendar, days: Int) -> CalDate {
+  case arithmetic(cal) {
+    IsoLike(offset) -> {
       let #(y, m, d) = civil_from_days(days)
       CalDate(y + offset, m, d)
     }
-    None ->
-      case cal {
-        "coptic" | "ethiopic" | "ethioaa" -> coptic_from_days(cal, days)
-        "islamic-civil" | "islamic-tbla" -> islamic_from_days(cal, days)
-        "islamic-umalqura" -> umalqura_from_days(days)
-        "persian" -> persian_from_days(days)
-        "indian" -> indian_from_days(days)
-        "hebrew" -> hebrew_from_days(days)
-        "chinese" | "dangi" -> lunisolar_from_days(cal, days)
-        _ -> {
-          // iso8601
-          let #(y, m, d) = civil_from_days(days)
-          CalDate(y, m, d)
-        }
-      }
+    CopticLike(epoch:, year_shift:) -> coptic_from_days(epoch, year_shift, days)
+    TabularIslamic(epoch) -> islamic_from_days(epoch, days)
+    UmmAlQura -> umalqura_from_days(days)
+    PersianArith -> persian_from_days(days)
+    IndianArith -> indian_from_days(days)
+    HebrewArith -> hebrew_from_days(days)
+    LunisolarArith(data) -> lunisolar_from_days(data, days)
   }
 }
 
 /// Epoch days for a (valid) calendar date.
-pub fn date_to_epoch_days(cal: String, year: Int, month: Int, day: Int) -> Int {
-  case iso_like_year_offset(cal) {
-    Some(offset) -> days_from_civil(year - offset, month, day)
-    None ->
-      case cal {
-        "coptic" | "ethiopic" | "ethioaa" ->
-          coptic_to_days(cal, year, month, day)
-        "islamic-civil" | "islamic-tbla" ->
-          islamic_to_days(cal, year, month, day)
-        "islamic-umalqura" -> umalqura_to_days(year, month, day)
-        "persian" -> persian_to_days(year, month, day)
-        "indian" -> indian_to_days(year, month, day)
-        "hebrew" -> hebrew_to_days(year, month, day)
-        "chinese" | "dangi" -> lunisolar_to_days(cal, year, month, day)
-        _ -> days_from_civil(year, month, day)
-      }
+pub fn date_to_epoch_days(
+  cal: Calendar,
+  year: Int,
+  month: Int,
+  day: Int,
+) -> Int {
+  case arithmetic(cal) {
+    IsoLike(offset) -> days_from_civil(year - offset, month, day)
+    CopticLike(epoch:, year_shift:) ->
+      coptic_to_days(epoch, year_shift, year, month, day)
+    TabularIslamic(epoch) -> islamic_to_days(epoch, year, month, day)
+    UmmAlQura -> umalqura_to_days(year, month, day)
+    PersianArith -> persian_to_days(year, month, day)
+    IndianArith -> indian_to_days(year, month, day)
+    HebrewArith -> hebrew_to_days(year, month, day)
+    LunisolarArith(data) -> lunisolar_to_days(data, year, month, day)
   }
 }
 
-pub fn months_in_year(cal: String, year: Int) -> Int {
-  case cal {
-    "coptic" | "ethiopic" | "ethioaa" -> 13
-    "hebrew" -> hebrew_months_in_year(year)
-    "chinese" | "dangi" ->
-      case lunisolar_leap_num(cal, year) == 0 {
+pub fn months_in_year(cal: Calendar, year: Int) -> Int {
+  case arithmetic(cal) {
+    CopticLike(..) -> 13
+    HebrewArith -> hebrew_months_in_year(year)
+    LunisolarArith(data) ->
+      case lunisolar_leap_num(data, year) == 0 {
         True -> 12
         False -> 13
       }
-    _ -> 12
+    IsoLike(_) | TabularIslamic(_) | UmmAlQura | PersianArith | IndianArith ->
+      12
   }
 }
 
-pub fn days_in_month(cal: String, year: Int, month: Int) -> Int {
-  case iso_like_year_offset(cal) {
-    Some(offset) -> gregorian_days_in_month(year - offset, month)
-    None ->
-      case cal {
-        "coptic" | "ethiopic" | "ethioaa" ->
-          coptic_days_in_month(cal, year, month)
-        "islamic-civil" | "islamic-tbla" -> islamic_days_in_month(year, month)
-        "islamic-umalqura" -> umalqura_days_in_month(year, month)
-        "persian" -> persian_days_in_month(year, month)
-        "indian" -> indian_days_in_month(year, month)
-        "hebrew" -> hebrew_days_in_month(year, month)
-        "chinese" | "dangi" -> lunisolar_month_len(cal, year, month)
-        _ -> gregorian_days_in_month(year, month)
-      }
+pub fn days_in_month(cal: Calendar, year: Int, month: Int) -> Int {
+  case arithmetic(cal) {
+    IsoLike(offset) -> gregorian_days_in_month(year - offset, month)
+    CopticLike(epoch: _, year_shift:) ->
+      coptic_days_in_month(year_shift, year, month)
+    TabularIslamic(_) -> islamic_days_in_month(year, month)
+    UmmAlQura -> umalqura_days_in_month(year, month)
+    PersianArith -> persian_days_in_month(year, month)
+    IndianArith -> indian_days_in_month(year, month)
+    HebrewArith -> hebrew_days_in_month(year, month)
+    LunisolarArith(data) -> lunisolar_month_len(data, year, month)
   }
 }
 
-pub fn days_in_year(cal: String, year: Int) -> Int {
-  case cal {
-    "hebrew" -> hebrew_year_length(year)
-    _ ->
+pub fn days_in_year(cal: Calendar, year: Int) -> Int {
+  case arithmetic(cal) {
+    HebrewArith -> hebrew_year_length(year)
+    IsoLike(_)
+    | CopticLike(..)
+    | TabularIslamic(_)
+    | UmmAlQura
+    | PersianArith
+    | IndianArith
+    | LunisolarArith(_) ->
       date_to_epoch_days(cal, year + 1, 1, 1)
       - date_to_epoch_days(cal, year, 1, 1)
   }
 }
 
-pub fn in_leap_year(cal: String, year: Int) -> Bool {
-  case iso_like_year_offset(cal) {
-    Some(offset) -> is_gregorian_leap(year - offset)
-    None ->
-      case cal {
-        "coptic" | "ethiopic" | "ethioaa" -> coptic_is_leap(cal, year)
-        "islamic-civil" | "islamic-tbla" -> islamic_is_leap(year)
-        "islamic-umalqura" ->
-          umalqura_to_days(year + 1, 1, 1) - umalqura_to_days(year, 1, 1) > 354
-        "persian" -> persian_is_leap(year)
-        "indian" -> is_gregorian_leap(year + 78)
-        "hebrew" -> hebrew_is_leap(year)
-        "chinese" | "dangi" -> lunisolar_leap_num(cal, year) != 0
-        _ -> is_gregorian_leap(year)
-      }
+pub fn in_leap_year(cal: Calendar, year: Int) -> Bool {
+  case arithmetic(cal) {
+    IsoLike(offset) -> is_gregorian_leap(year - offset)
+    CopticLike(epoch: _, year_shift:) -> coptic_is_leap(year_shift, year)
+    TabularIslamic(_) -> islamic_is_leap(year)
+    UmmAlQura ->
+      umalqura_to_days(year + 1, 1, 1) - umalqura_to_days(year, 1, 1) > 354
+    PersianArith -> persian_is_leap(year)
+    IndianArith -> is_gregorian_leap(year + 78)
+    HebrewArith -> hebrew_is_leap(year)
+    LunisolarArith(data) -> lunisolar_leap_num(data, year) != 0
   }
 }
 
 /// 1-based day of year for a calendar date.
-pub fn day_of_year(cal: String, year: Int, month: Int, day: Int) -> Int {
+pub fn day_of_year(cal: Calendar, year: Int, month: Int, day: Int) -> Int {
   date_to_epoch_days(cal, year, month, day)
   - date_to_epoch_days(cal, year, 1, 1)
   + 1
@@ -796,9 +839,9 @@ fn pad2(n: Int) -> String {
 }
 
 /// Month code string for an ordinal month in a year.
-pub fn month_code(cal: String, year: Int, month: Int) -> String {
-  case cal {
-    "hebrew" ->
+pub fn month_code(cal: Calendar, year: Int, month: Int) -> String {
+  case arithmetic(cal) {
+    HebrewArith ->
       case hebrew_is_leap(year) {
         True ->
           case month == 6 {
@@ -811,8 +854,8 @@ pub fn month_code(cal: String, year: Int, month: Int) -> String {
           }
         False -> "M" <> pad2(month)
       }
-    "chinese" | "dangi" -> {
-      let leap = lunisolar_leap_num(cal, year)
+    LunisolarArith(data) -> {
+      let leap = lunisolar_leap_num(data, year)
       case leap > 0 && month == leap + 1 {
         True -> "M" <> pad2(leap) <> "L"
         False ->
@@ -822,7 +865,12 @@ pub fn month_code(cal: String, year: Int, month: Int) -> String {
           }
       }
     }
-    _ -> "M" <> pad2(month)
+    IsoLike(_)
+    | CopticLike(..)
+    | TabularIslamic(_)
+    | UmmAlQura
+    | PersianArith
+    | IndianArith -> "M" <> pad2(month)
   }
 }
 
@@ -849,13 +897,13 @@ pub fn parse_month_code(s: String) -> Result(#(Int, Bool), Nil) {
 
 /// Resolve a month code to an ordinal month within `year`.
 pub fn month_for_code(
-  cal: String,
+  cal: Calendar,
   year: Int,
   num: Int,
   leap: Bool,
 ) -> Result(Int, MonthCodeIssue) {
-  case cal, leap {
-    "hebrew", True ->
+  case arithmetic(cal), leap {
+    HebrewArith, True ->
       case num == 5 {
         True ->
           case hebrew_is_leap(year) {
@@ -865,11 +913,11 @@ pub fn month_for_code(
           }
         False -> Error(NeverValid)
       }
-    "chinese", True | "dangi", True ->
+    LunisolarArith(data), True ->
       case num >= 1 && num <= 12 {
         False -> Error(NeverValid)
         True -> {
-          let leap = lunisolar_leap_num(cal, year)
+          let leap = lunisolar_leap_num(data, year)
           case leap == num {
             True -> Ok(num + 1)
             // Constrain MxxL to the regular month Mxx of this year.
@@ -883,8 +931,14 @@ pub fn month_for_code(
           }
         }
       }
-    _, True -> Error(NeverValid)
-    "hebrew", False ->
+    IsoLike(_), True
+    | CopticLike(..), True
+    | TabularIslamic(_), True
+    | UmmAlQura, True
+    | PersianArith, True
+    | IndianArith, True
+    -> Error(NeverValid)
+    HebrewArith, False ->
       case num >= 1 && num <= 12 {
         True ->
           case hebrew_is_leap(year) && num >= 6 {
@@ -893,15 +947,15 @@ pub fn month_for_code(
           }
         False -> Error(NeverValid)
       }
-    "coptic", False | "ethiopic", False | "ethioaa", False ->
+    CopticLike(..), False ->
       case num >= 1 && num <= 13 {
         True -> Ok(num)
         False -> Error(NeverValid)
       }
-    "chinese", False | "dangi", False ->
+    LunisolarArith(data), False ->
       case num >= 1 && num <= 12 {
         True -> {
-          let leap = lunisolar_leap_num(cal, year)
+          let leap = lunisolar_leap_num(data, year)
           case leap > 0 && num > leap {
             True -> Ok(num + 1)
             False -> Ok(num)
@@ -909,7 +963,12 @@ pub fn month_for_code(
         }
         False -> Error(NeverValid)
       }
-    _, False ->
+    IsoLike(_), False
+    | TabularIslamic(_), False
+    | UmmAlQura, False
+    | PersianArith, False
+    | IndianArith, False
+    ->
       case num >= 1 && num <= 12 {
         True -> Ok(num)
         False -> Error(NeverValid)
@@ -923,47 +982,61 @@ pub fn month_for_code(
 
 /// True when the calendar's dates carry era/eraYear. The chinese/dangi
 /// calendars have no eras (era/eraYear fields are ignored entirely).
-pub fn has_eras(cal: String) -> Bool {
-  cal != "iso8601" && cal != "chinese" && cal != "dangi"
+pub fn has_eras(cal: Calendar) -> Bool {
+  case cal {
+    Iso8601 | Chinese | Dangi -> False
+    Gregory
+    | Buddhist
+    | Japanese
+    | Roc
+    | Coptic
+    | Ethiopic
+    | Ethioaa
+    | Hebrew
+    | IslamicCivil
+    | IslamicTbla
+    | IslamicUmalqura
+    | Persian
+    | Indian -> True
+  }
 }
 
 /// era + eraYear for a calendar date.
 pub fn era_for(
-  cal: String,
+  cal: Calendar,
   year: Int,
   month: Int,
   day: Int,
 ) -> #(Option(String), Option(Int)) {
   case cal {
-    "iso8601" -> #(None, None)
-    "gregory" ->
+    Iso8601 | Chinese | Dangi -> #(None, None)
+    Gregory ->
       case year >= 1 {
         True -> #(Some("ce"), Some(year))
         False -> #(Some("bce"), Some(1 - year))
       }
-    "buddhist" -> #(Some("be"), Some(year))
-    "japanese" -> japanese_era(year, month, day)
-    "roc" ->
+    Buddhist -> #(Some("be"), Some(year))
+    Japanese -> japanese_era(year, month, day)
+    Roc ->
       case year >= 1 {
         True -> #(Some("roc"), Some(year))
         False -> #(Some("broc"), Some(1 - year))
       }
-    "coptic" -> #(Some("am"), Some(year))
-    "ethiopic" ->
+    Coptic -> #(Some("am"), Some(year))
+    Ethiopic ->
       case year >= 1 {
         True -> #(Some("am"), Some(year))
         False -> #(Some("aa"), Some(year + 5500))
       }
-    "ethioaa" -> #(Some("aa"), Some(year))
-    "hebrew" -> #(Some("am"), Some(year))
-    "islamic-civil" | "islamic-tbla" | "islamic-umalqura" ->
+    Ethioaa -> #(Some("aa"), Some(year))
+    Hebrew -> #(Some("am"), Some(year))
+    IslamicCivil | IslamicTbla | IslamicUmalqura ->
       case year >= 1 {
         True -> #(Some("ah"), Some(year))
         False -> #(Some("bh"), Some(1 - year))
       }
-    "persian" -> #(Some("ap"), Some(year))
-    "indian" -> #(Some("shaka"), Some(year))
-    _ -> #(None, None)
+    Persian -> #(Some("ap"), Some(year))
+    Indian -> #(Some("shaka"), Some(year))
   }
 }
 
@@ -1001,33 +1074,76 @@ fn japanese_era(y: Int, m: Int, d: Int) -> #(Option(String), Option(Int)) {
 }
 
 /// Arithmetic year for era + eraYear. Error(Nil) when the era code is not
-/// valid for the calendar.
-pub fn year_for_era(cal: String, era: String, ey: Int) -> Result(Int, Nil) {
-  case cal, era {
-    "gregory", "ce" | "gregory", "ad" -> Ok(ey)
-    "gregory", "bce" | "gregory", "bc" -> Ok(1 - ey)
-    "buddhist", "be" -> Ok(ey)
-    "japanese", "reiwa" -> Ok(2018 + ey)
-    "japanese", "heisei" -> Ok(1988 + ey)
-    "japanese", "showa" -> Ok(1925 + ey)
-    "japanese", "taisho" -> Ok(1911 + ey)
-    "japanese", "meiji" -> Ok(1867 + ey)
-    "japanese", "ce" | "japanese", "ad" -> Ok(ey)
-    "japanese", "bce" | "japanese", "bc" -> Ok(1 - ey)
-    "roc", "roc" -> Ok(ey)
-    "roc", "broc" -> Ok(1 - ey)
-    "coptic", "am" -> Ok(ey)
-    "ethiopic", "am" -> Ok(ey)
-    "ethiopic", "aa" -> Ok(ey - 5500)
-    "ethioaa", "aa" -> Ok(ey)
-    "hebrew", "am" -> Ok(ey)
-    "islamic-civil", "ah" | "islamic-tbla", "ah" | "islamic-umalqura", "ah" ->
-      Ok(ey)
-    "islamic-civil", "bh" | "islamic-tbla", "bh" | "islamic-umalqura", "bh" ->
-      Ok(1 - ey)
-    "persian", "ap" -> Ok(ey)
-    "indian", "shaka" -> Ok(ey)
-    _, _ -> Error(Nil)
+/// valid for the calendar. The dispatch is exhaustive over `Calendar`; only
+/// the era code (free-form user input) keeps a rejecting wildcard.
+pub fn year_for_era(cal: Calendar, era: String, ey: Int) -> Result(Int, Nil) {
+  case cal {
+    Iso8601 | Chinese | Dangi -> Error(Nil)
+    Gregory ->
+      case era {
+        "ce" | "ad" -> Ok(ey)
+        "bce" | "bc" -> Ok(1 - ey)
+        _ -> Error(Nil)
+      }
+    Buddhist ->
+      case era {
+        "be" -> Ok(ey)
+        _ -> Error(Nil)
+      }
+    Japanese ->
+      case era {
+        "reiwa" -> Ok(2018 + ey)
+        "heisei" -> Ok(1988 + ey)
+        "showa" -> Ok(1925 + ey)
+        "taisho" -> Ok(1911 + ey)
+        "meiji" -> Ok(1867 + ey)
+        "ce" | "ad" -> Ok(ey)
+        "bce" | "bc" -> Ok(1 - ey)
+        _ -> Error(Nil)
+      }
+    Roc ->
+      case era {
+        "roc" -> Ok(ey)
+        "broc" -> Ok(1 - ey)
+        _ -> Error(Nil)
+      }
+    Coptic ->
+      case era {
+        "am" -> Ok(ey)
+        _ -> Error(Nil)
+      }
+    Ethiopic ->
+      case era {
+        "am" -> Ok(ey)
+        "aa" -> Ok(ey - 5500)
+        _ -> Error(Nil)
+      }
+    Ethioaa ->
+      case era {
+        "aa" -> Ok(ey)
+        _ -> Error(Nil)
+      }
+    Hebrew ->
+      case era {
+        "am" -> Ok(ey)
+        _ -> Error(Nil)
+      }
+    IslamicCivil | IslamicTbla | IslamicUmalqura ->
+      case era {
+        "ah" -> Ok(ey)
+        "bh" -> Ok(1 - ey)
+        _ -> Error(Nil)
+      }
+    Persian ->
+      case era {
+        "ap" -> Ok(ey)
+        _ -> Error(Nil)
+      }
+    Indian ->
+      case era {
+        "shaka" -> Ok(ey)
+        _ -> Error(Nil)
+      }
   }
 }
 
@@ -1052,12 +1168,8 @@ pub fn year_for_era(cal: String, era: String, ey: Int) -> Result(Int, Nil) {
 // approximation that tiles exactly against both table edges, keeping all
 // conversions total and monotonic.
 
-fn lunisolar_data(cal: String, y: Int) -> Int {
-  case cal {
-    "dangi" -> dangi_data(y)
-    _ -> chinese_data(y)
-  }
-}
+// The per-calendar packed year table (`chinese_data` / `dangi_data`) is
+// carried in the `LunisolarArith` arithmetic record as `data`.
 
 /// Months elapsed before lunisolar year y in the metonic fallback (235
 /// synodic months per 19 years).
@@ -1071,10 +1183,9 @@ fn lunisolar_fb_pos(t: Int) -> Int {
   floor_div(1447 * t, 49)
 }
 
-fn lunisolar_leap_num(cal: String, y: Int) -> Int {
+fn lunisolar_leap_num(data: fn(Int) -> Int, y: Int) -> Int {
   case y >= 1700 && y <= 2300 {
-    True ->
-      int.bitwise_and(int.bitwise_shift_right(lunisolar_data(cal, y), 13), 15)
+    True -> int.bitwise_and(int.bitwise_shift_right(data(y), 13), 15)
     False ->
       // 13-month fallback years get their leap month after month 6.
       case lunisolar_eb(y + 1) - lunisolar_eb(y) == 13 {
@@ -1084,8 +1195,8 @@ fn lunisolar_leap_num(cal: String, y: Int) -> Int {
   }
 }
 
-fn lunisolar_table_start(cal: String, y: Int) -> Int {
-  days_from_civil(y, 1, 1) + int.bitwise_shift_right(lunisolar_data(cal, y), 17)
+fn lunisolar_table_start(data: fn(Int) -> Int, y: Int) -> Int {
+  days_from_civil(y, 1, 1) + int.bitwise_shift_right(data(y), 17)
 }
 
 fn count_bits(n: Int) -> Int {
@@ -1095,8 +1206,8 @@ fn count_bits(n: Int) -> Int {
   }
 }
 
-fn lunisolar_table_year_len(cal: String, y: Int) -> Int {
-  let v = lunisolar_data(cal, y)
+fn lunisolar_table_year_len(data: fn(Int) -> Int, y: Int) -> Int {
+  let v = data(y)
   let months = case int.bitwise_and(int.bitwise_shift_right(v, 13), 15) {
     0 -> 12
     _ -> 13
@@ -1106,32 +1217,27 @@ fn lunisolar_table_year_len(cal: String, y: Int) -> Int {
 
 /// Epoch days of the first day of lunisolar year y. The fallback regions are
 /// anchored so they tile exactly against the table at both edges.
-fn lunisolar_year_start(cal: String, y: Int) -> Int {
+fn lunisolar_year_start(data: fn(Int) -> Int, y: Int) -> Int {
   case y < 1700 {
     True ->
-      lunisolar_table_start(cal, 1700)
+      lunisolar_table_start(data, 1700)
       - lunisolar_fb_pos(lunisolar_eb(1700))
       + lunisolar_fb_pos(lunisolar_eb(y))
     False ->
       case y > 2300 {
         True ->
-          lunisolar_table_start(cal, 2300)
-          + lunisolar_table_year_len(cal, 2300)
+          lunisolar_table_start(data, 2300)
+          + lunisolar_table_year_len(data, 2300)
           - lunisolar_fb_pos(lunisolar_eb(2301))
           + lunisolar_fb_pos(lunisolar_eb(y))
-        False -> lunisolar_table_start(cal, y)
+        False -> lunisolar_table_start(data, y)
       }
   }
 }
 
-fn lunisolar_month_len(cal: String, y: Int, m: Int) -> Int {
+fn lunisolar_month_len(data: fn(Int) -> Int, y: Int, m: Int) -> Int {
   case y >= 1700 && y <= 2300 {
-    True ->
-      29
-      + int.bitwise_and(
-        int.bitwise_shift_right(lunisolar_data(cal, y), m - 1),
-        1,
-      )
+    True -> 29 + int.bitwise_and(int.bitwise_shift_right(data(y), m - 1), 1)
     False -> {
       let t = lunisolar_eb(y) + m - 1
       lunisolar_fb_pos(t + 1) - lunisolar_fb_pos(t)
@@ -1139,29 +1245,32 @@ fn lunisolar_month_len(cal: String, y: Int, m: Int) -> Int {
   }
 }
 
-fn lunisolar_days_before_month(cal: String, y: Int, m: Int) -> Int {
+fn lunisolar_days_before_month(data: fn(Int) -> Int, y: Int, m: Int) -> Int {
   case m <= 1 {
     True -> 0
     False ->
-      lunisolar_days_before_month(cal, y, m - 1)
-      + lunisolar_month_len(cal, y, m - 1)
+      lunisolar_days_before_month(data, y, m - 1)
+      + lunisolar_month_len(data, y, m - 1)
   }
 }
 
-fn lunisolar_to_days(cal: String, y: Int, m: Int, d: Int) -> Int {
-  lunisolar_year_start(cal, y) + lunisolar_days_before_month(cal, y, m) + d - 1
+fn lunisolar_to_days(data: fn(Int) -> Int, y: Int, m: Int, d: Int) -> Int {
+  lunisolar_year_start(data, y)
+  + lunisolar_days_before_month(data, y, m)
+  + d
+  - 1
 }
 
-fn lunisolar_from_days(cal: String, date: Int) -> CalDate {
+fn lunisolar_from_days(data: fn(Int) -> Int, date: Int) -> CalDate {
   let #(y0, _, _) = civil_from_days(date)
-  let y = adjust_year(date, y0, fn(yy) { lunisolar_year_start(cal, yy) })
-  let max = case lunisolar_leap_num(cal, y) {
+  let y = adjust_year(date, y0, fn(yy) { lunisolar_year_start(data, yy) })
+  let max = case lunisolar_leap_num(data, y) {
     0 -> 12
     _ -> 13
   }
   let #(m, d) =
     scan_months(date, y, 1, max, fn(yy, mm) {
-      lunisolar_to_days(cal, yy, mm, 1)
+      lunisolar_to_days(data, yy, mm, 1)
     })
   CalDate(y, m, d)
 }

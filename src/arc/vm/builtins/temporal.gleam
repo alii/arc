@@ -952,16 +952,25 @@ fn this_date(state: State(host), this: JsValue) -> Option(IsoDate) {
   }
 }
 
+/// A Temporal*Slot's `calendar` field is always the canonical identifier
+/// written by `make_*_cal` via `tcal.identifier`, so re-parsing it back into
+/// the closed `tcal.Calendar` type is total. This is the ONLY place a
+/// calendar string is turned back into a `Calendar` outside `canonicalize`.
+fn slot_calendar(id: String) -> tcal.Calendar {
+  let assert Ok(cal) = tcal.canonicalize(id)
+  cal
+}
+
 /// Calendar slot of any calendared Temporal object (PlainDate,
 /// PlainDateTime, PlainYearMonth, PlainMonthDay, ZonedDateTime).
-fn this_calendar(state: State(host), this: JsValue) -> String {
+fn this_calendar(state: State(host), this: JsValue) -> tcal.Calendar {
   case read_kind(state, this) {
-    Some(TemporalDateSlot(calendar:, ..)) -> calendar
-    Some(TemporalDateTimeSlot(calendar:, ..)) -> calendar
-    Some(TemporalYearMonthSlot(calendar:, ..)) -> calendar
-    Some(TemporalMonthDaySlot(calendar:, ..)) -> calendar
-    Some(TemporalZonedDateTimeSlot(calendar:, ..)) -> calendar
-    _ -> "iso8601"
+    Some(TemporalDateSlot(calendar:, ..)) -> slot_calendar(calendar)
+    Some(TemporalDateTimeSlot(calendar:, ..)) -> slot_calendar(calendar)
+    Some(TemporalYearMonthSlot(calendar:, ..)) -> slot_calendar(calendar)
+    Some(TemporalMonthDaySlot(calendar:, ..)) -> slot_calendar(calendar)
+    Some(TemporalZonedDateTimeSlot(calendar:, ..)) -> slot_calendar(calendar)
+    _ -> tcal.Iso8601
   }
 }
 
@@ -1067,10 +1076,10 @@ fn this_instant(state: State(host), this: JsValue) -> Option(Int) {
 fn this_zoned(
   state: State(host),
   this: JsValue,
-) -> Option(#(Int, String, String)) {
+) -> Option(#(Int, String, tcal.Calendar)) {
   case read_kind(state, this) {
     Some(TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:)) ->
-      Some(#(epoch_ns, time_zone, calendar))
+      Some(#(epoch_ns, time_zone, slot_calendar(calendar)))
     _ -> None
   }
 }
@@ -1108,18 +1117,23 @@ fn make_date(
   protos: TemporalProtos,
   d: IsoDate,
 ) -> #(State(host), JsValue) {
-  make_date_cal(state, protos, d, "iso8601")
+  make_date_cal(state, protos, d, tcal.Iso8601)
 }
 
 fn make_date_cal(
   state: State(host),
   protos: TemporalProtos,
   d: IsoDate,
-  cal: String,
+  cal: tcal.Calendar,
 ) -> #(State(host), JsValue) {
   alloc_value(
     state,
-    TemporalDateSlot(year: d.year, month: d.month, day: d.day, calendar: cal),
+    TemporalDateSlot(
+      year: d.year,
+      month: d.month,
+      day: d.day,
+      calendar: tcal.identifier(cal),
+    ),
     protos.plain_date,
   )
 }
@@ -1149,7 +1163,7 @@ fn make_date_time(
   d: IsoDate,
   t: TimeRec,
 ) -> #(State(host), JsValue) {
-  make_date_time_cal(state, protos, d, t, "iso8601")
+  make_date_time_cal(state, protos, d, t, tcal.Iso8601)
 }
 
 fn make_date_time_cal(
@@ -1157,7 +1171,7 @@ fn make_date_time_cal(
   protos: TemporalProtos,
   d: IsoDate,
   t: TimeRec,
-  cal: String,
+  cal: tcal.Calendar,
 ) -> #(State(host), JsValue) {
   alloc_value(
     state,
@@ -1171,7 +1185,7 @@ fn make_date_time_cal(
       millisecond: t.ms,
       microsecond: t.us,
       nanosecond: t.ns,
-      calendar: cal,
+      calendar: tcal.identifier(cal),
     ),
     protos.plain_date_time,
   )
@@ -1184,7 +1198,7 @@ fn make_year_month(
   m: Int,
   ref_day: Int,
 ) -> #(State(host), JsValue) {
-  make_year_month_cal(state, protos, y, m, ref_day, "iso8601")
+  make_year_month_cal(state, protos, y, m, ref_day, tcal.Iso8601)
 }
 
 fn make_year_month_cal(
@@ -1193,11 +1207,16 @@ fn make_year_month_cal(
   y: Int,
   m: Int,
   ref_day: Int,
-  cal: String,
+  cal: tcal.Calendar,
 ) -> #(State(host), JsValue) {
   alloc_value(
     state,
-    TemporalYearMonthSlot(year: y, month: m, day: ref_day, calendar: cal),
+    TemporalYearMonthSlot(
+      year: y,
+      month: m,
+      day: ref_day,
+      calendar: tcal.identifier(cal),
+    ),
     protos.plain_year_month,
   )
 }
@@ -1208,11 +1227,16 @@ fn make_month_day_cal(
   m: Int,
   d: Int,
   ref_year: Int,
-  cal: String,
+  cal: tcal.Calendar,
 ) -> #(State(host), JsValue) {
   alloc_value(
     state,
-    TemporalMonthDaySlot(month: m, day: d, ref_year: ref_year, calendar: cal),
+    TemporalMonthDaySlot(
+      month: m,
+      day: d,
+      ref_year: ref_year,
+      calendar: tcal.identifier(cal),
+    ),
     protos.plain_month_day,
   )
 }
@@ -1272,7 +1296,7 @@ fn make_zoned(
   ns: Int,
   tz: String,
 ) -> #(State(host), JsValue) {
-  make_zoned_cal(state, protos, ns, tz, "iso8601")
+  make_zoned_cal(state, protos, ns, tz, tcal.Iso8601)
 }
 
 fn make_zoned_cal(
@@ -1280,11 +1304,15 @@ fn make_zoned_cal(
   protos: TemporalProtos,
   ns: Int,
   tz: String,
-  cal: String,
+  cal: tcal.Calendar,
 ) -> #(State(host), JsValue) {
   alloc_value(
     state,
-    TemporalZonedDateTimeSlot(epoch_ns: ns, time_zone: tz, calendar: cal),
+    TemporalZonedDateTimeSlot(
+      epoch_ns: ns,
+      time_zone: tz,
+      calendar: tcal.identifier(cal),
+    ),
     protos.zoned_date_time,
   )
 }
@@ -1608,7 +1636,7 @@ fn get_calendar_name_option(
 // Calendar handling (iso8601 only)
 // ============================================================================
 
-fn canonicalize_calendar(id: String) -> Result(String, TErr) {
+fn canonicalize_calendar(id: String) -> Result(tcal.Calendar, TErr) {
   case tcal.canonicalize(id) {
     Ok(c) -> Ok(c)
     Error(Nil) -> Error(RangeE("calendar " <> id <> " is not supported"))
@@ -1618,7 +1646,7 @@ fn canonicalize_calendar(id: String) -> Result(String, TErr) {
 /// ToTemporalCalendarIdentifier for string inputs: either a bare calendar id,
 /// or an ISO date/date-time/year-month/month-day/time string whose [u-ca=]
 /// annotation (default iso8601) supplies the calendar.
-fn calendar_from_string(s: String) -> Result(String, TErr) {
+fn calendar_from_string(s: String) -> Result(tcal.Calendar, TErr) {
   case canonicalize_calendar(s) {
     Ok(c) -> Ok(c)
     Error(e) ->
@@ -1670,9 +1698,9 @@ fn try_ym_md_calendar(s: String) -> Option(String) {
 
 /// Calendar argument of constructors: undefined → iso8601; string → must be
 /// supported; anything else → TypeError.
-fn to_calendar_arg(v: JsValue) -> Result(String, TErr) {
+fn to_calendar_arg(v: JsValue) -> Result(tcal.Calendar, TErr) {
   case v {
-    JsUndefined -> Ok("iso8601")
+    JsUndefined -> Ok(tcal.Iso8601)
     JsString(s) -> canonicalize_calendar(s)
     _ -> Error(TypeE("calendar must be a string"))
   }
@@ -2929,12 +2957,12 @@ fn read_bag_era(
   }
 }
 
-/// Read a property bag's "calendar" field; returns the canonical calendar
-/// id ("iso8601" when absent).
+/// Read a property bag's "calendar" field; returns the calendar (iso8601
+/// when absent).
 fn read_bag_calendar(
   state: State(host),
   ref: Ref,
-) -> Result(#(String, State(host)), #(JsValue, State(host))) {
+) -> Result(#(tcal.Calendar, State(host)), #(JsValue, State(host))) {
   use got <- result.try(ops_object.get_value(
     state,
     ref,
@@ -2942,7 +2970,7 @@ fn read_bag_calendar(
     JsObject(ref),
   ))
   case got {
-    #(JsUndefined, st) -> Ok(#("iso8601", st))
+    #(JsUndefined, st) -> Ok(#(tcal.Iso8601, st))
     #(JsString(s), st) ->
       case calendar_from_string(s) {
         Ok(c) -> Ok(#(c, st))
@@ -2957,7 +2985,7 @@ fn read_bag_calendar(
         | Some(ObjectSlot(kind: TemporalYearMonthSlot(calendar:, ..), ..))
         | Some(ObjectSlot(kind: TemporalMonthDaySlot(calendar:, ..), ..))
         | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(calendar:, ..), ..)) ->
-          Ok(#(calendar, st))
+          Ok(#(slot_calendar(calendar), st))
         _ -> type_error_result(st, "invalid calendar")
       }
     #(_, st) -> type_error_result(st, "invalid calendar")
@@ -2969,7 +2997,7 @@ fn read_bag_calendar(
 fn to_temporal_calendar_identifier(
   state: State(host),
   v: JsValue,
-) -> Result(#(String, State(host)), #(JsValue, State(host))) {
+) -> Result(#(tcal.Calendar, State(host)), #(JsValue, State(host))) {
   case v {
     JsString(s) ->
       case calendar_from_string(s) {
@@ -2984,7 +3012,7 @@ fn to_temporal_calendar_identifier(
         | Some(ObjectSlot(kind: TemporalYearMonthSlot(calendar:, ..), ..))
         | Some(ObjectSlot(kind: TemporalMonthDaySlot(calendar:, ..), ..))
         | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(calendar:, ..), ..)) ->
-          Ok(#(calendar, state))
+          Ok(#(slot_calendar(calendar), state))
         _ -> type_error_result(state, "not a valid calendar")
       }
     _ -> type_error_result(state, "not a valid calendar")
@@ -3014,7 +3042,7 @@ type DateFields {
 fn read_date_fields(
   state: State(host),
   ref: Ref,
-  cal: String,
+  cal: tcal.Calendar,
 ) -> Result(#(DateFields, State(host)), #(JsValue, State(host))) {
   use #(day, state) <- result.try(read_bag_int_field(
     state,
@@ -3142,7 +3170,7 @@ fn date_time_fields_all_none(f: DateTimeFields) -> Bool {
 fn read_date_time_fields(
   state: State(host),
   ref: Ref,
-  cal: String,
+  cal: tcal.Calendar,
   read_offset read_offset: Bool,
   read_tz read_tz: Bool,
 ) -> Result(#(DateTimeFields, State(host)), #(JsValue, State(host))) {
@@ -3241,7 +3269,10 @@ fn read_date_time_fields(
 
 /// Resolve the arithmetic year from year/era/eraYear fields. The fields must
 /// contain a year (checked by the caller for TypeError ordering).
-fn resolve_calendar_year(cal: String, f: DateFields) -> Result(Int, TErr) {
+fn resolve_calendar_year(
+  cal: tcal.Calendar,
+  f: DateFields,
+) -> Result(Int, TErr) {
   // era and eraYear must come as a pair.
   use Nil <- result.try(case f.era, f.era_year {
     Some(_), None | None, Some(_) ->
@@ -3252,7 +3283,9 @@ fn resolve_calendar_year(cal: String, f: DateFields) -> Result(Int, TErr) {
     _, Some(era), Some(ey) ->
       case tcal.year_for_era(cal, era, ey) {
         Error(Nil) ->
-          Error(RangeE(era <> " is not a valid era for calendar " <> cal))
+          Error(RangeE(
+            era <> " is not a valid era for calendar " <> tcal.identifier(cal),
+          ))
         Ok(y2) ->
           case f.year {
             Some(y) if y != y2 ->
@@ -3267,7 +3300,7 @@ fn resolve_calendar_year(cal: String, f: DateFields) -> Result(Int, TErr) {
 
 /// Resolve the ordinal month within `year` from month/monthCode fields.
 fn resolve_calendar_month(
-  cal: String,
+  cal: tcal.Calendar,
   year: Int,
   f: DateFields,
   overflow: Overflow,
@@ -3277,7 +3310,9 @@ fn resolve_calendar_month(
       use ordinal <- result.try(case tcal.month_for_code(cal, year, num, leap) {
         Ok(o) -> Ok(o)
         Error(tcal.NeverValid) ->
-          Error(RangeE("monthCode is not valid for calendar " <> cal))
+          Error(RangeE(
+            "monthCode is not valid for calendar " <> tcal.identifier(cal),
+          ))
         Error(tcal.NotInThisYear(skip_to)) ->
           case overflow {
             Reject -> Error(RangeE("monthCode not present in year"))
@@ -3310,7 +3345,7 @@ fn resolve_calendar_month(
 
 /// Full date resolution: fields -> ISO date (CalendarDateToISO).
 fn resolve_calendar_date(
-  cal: String,
+  cal: tcal.Calendar,
   f: DateFields,
   overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
@@ -3329,7 +3364,7 @@ fn resolve_calendar_date(
   })
   use y <- result.try(resolve_calendar_year(cal, f))
   case cal {
-    "iso8601" -> {
+    tcal.Iso8601 -> {
       use m <- result.try(resolve_iso_month(f))
       regulate_iso_date(y, m, day, overflow)
     }
@@ -3363,7 +3398,7 @@ fn resolve_iso_month(f: DateFields) -> Result(Int, TErr) {
 }
 
 fn regulate_calendar_day(
-  cal: String,
+  cal: tcal.Calendar,
   year: Int,
   month: Int,
   day: Int,
@@ -3383,13 +3418,13 @@ fn regulate_calendar_day(
 /// CalendarDateAdd: add a duration's years/months/weeks/days to an ISO date
 /// interpreted in `cal`.
 fn calendar_date_add(
-  cal: String,
+  cal: tcal.Calendar,
   d: IsoDate,
   dur: DurRec,
   overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   case cal {
-    "iso8601" -> add_duration_to_date(d, dur, overflow)
+    tcal.Iso8601 -> add_duration_to_date(d, dur, overflow)
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
       // Add years keeping the month code (leap months constrain forward).
@@ -3423,7 +3458,11 @@ fn calendar_date_add(
   }
 }
 
-fn balance_calendar_month(cal: String, year: Int, month: Int) -> #(Int, Int) {
+fn balance_calendar_month(
+  cal: tcal.Calendar,
+  year: Int,
+  month: Int,
+) -> #(Int, Int) {
   case month < 1 {
     True ->
       balance_calendar_month(
@@ -3445,7 +3484,7 @@ fn balance_calendar_month(cal: String, year: Int, month: Int) -> #(Int, Int) {
 /// #(years, months, day_remainder) — weeks/days handled by the caller from
 /// the day remainder.
 fn calendar_date_until(
-  cal: String,
+  cal: tcal.Calendar,
   from: IsoDate,
   to: IsoDate,
   largest_unit: Unit,
@@ -3494,7 +3533,7 @@ fn compare_triple(a: #(Int, Int, Int), b: #(Int, Int, Int)) -> Int {
 /// Sort position of a month within a year that is comparable across years
 /// of the same calendar: a leap month sorts between its base month and the
 /// next one (M05 < M05L < M06).
-fn month_code_pos(cal: String, year: Int, month: Int) -> Int {
+fn month_code_pos(cal: tcal.Calendar, year: Int, month: Int) -> Int {
   let assert Ok(#(num, leap)) =
     tcal.parse_month_code(tcal.month_code(cal, year, month))
   case leap {
@@ -3505,7 +3544,7 @@ fn month_code_pos(cal: String, year: Int, month: Int) -> Int {
 
 /// Add years to a calendar date keeping month code (constrain semantics).
 fn add_calendar_years_constrain(
-  cal: String,
+  cal: tcal.Calendar,
   cd: tcal.CalDate,
   years: Int,
 ) -> tcal.CalDate {
@@ -3528,7 +3567,7 @@ fn add_calendar_years_constrain(
 /// 11 months and days, not one year), while a leap month code missing from
 /// the stepped year constrains in the direction of travel.
 fn count_calendar_years(
-  cal: String,
+  cal: tcal.Calendar,
   cd1: tcal.CalDate,
   cd2: tcal.CalDate,
   candidate: Int,
@@ -3558,7 +3597,7 @@ fn count_calendar_years(
 /// constrains in the direction of travel: forward to the following month
 /// (skip-forward), backward to the preceding base month.
 fn stepped_month_pos(
-  cal: String,
+  cal: tcal.Calendar,
   cd1: tcal.CalDate,
   target_year: Int,
   sign: Int,
@@ -3585,7 +3624,7 @@ fn stepped_month_pos(
 /// step is O(1) — re-balancing `acc` months from cd on every iteration
 /// made large spans accidentally quadratic.
 fn count_calendar_months(
-  cal: String,
+  cal: tcal.Calendar,
   cd: tcal.CalDate,
   day_cmp: Int,
   cd2: tcal.CalDate,
@@ -3597,7 +3636,7 @@ fn count_calendar_months(
 }
 
 fn count_calendar_months_loop(
-  cal: String,
+  cal: tcal.Calendar,
   y: Int,
   m: Int,
   day_cmp: Int,
@@ -3616,7 +3655,12 @@ fn count_calendar_months_loop(
 
 /// Step a valid (year, month) pair by exactly one month in `sign` direction,
 /// wrapping across variable-length years.
-fn step_calendar_month(cal: String, y: Int, m: Int, sign: Int) -> #(Int, Int) {
+fn step_calendar_month(
+  cal: tcal.Calendar,
+  y: Int,
+  m: Int,
+  sign: Int,
+) -> #(Int, Int) {
   case sign > 0 {
     True ->
       case m >= tcal.months_in_year(cal, y) {
@@ -3637,7 +3681,7 @@ fn to_temporal_date(
   state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(IsoDate, String), State(host)), #(JsValue, State(host))) {
+) -> Result(#(#(IsoDate, tcal.Calendar), State(host)), #(JsValue, State(host))) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -3646,14 +3690,14 @@ fn to_temporal_date(
           ..,
         )) -> {
           use #(_opts, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(IsoDate(year, month, day), calendar), st))
+          Ok(#(#(IsoDate(year, month, day), slot_calendar(calendar)), st))
         }
         Some(ObjectSlot(
           kind: TemporalDateTimeSlot(year:, month:, day:, calendar:, ..),
           ..,
         )) -> {
           use #(_opts, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(IsoDate(year, month, day), calendar), st))
+          Ok(#(#(IsoDate(year, month, day), slot_calendar(calendar)), st))
         }
         Some(ObjectSlot(
           kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:),
@@ -3662,7 +3706,7 @@ fn to_temporal_date(
           use #(_opts, st) <- result.try(validated_overflow(state, options))
           let #(d, _) =
             epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
-          Ok(#(#(d, calendar), st))
+          Ok(#(#(d, slot_calendar(calendar)), st))
         }
         _ -> date_from_bag(state, ref, options)
       }
@@ -3690,9 +3734,9 @@ fn to_temporal_date(
 }
 
 /// Canonical calendar id from a parsed ISO string's annotation.
-fn parsed_calendar_id(p: ParsedIso) -> Result(String, TErr) {
+fn parsed_calendar_id(p: ParsedIso) -> Result(tcal.Calendar, TErr) {
   case p.calendar {
-    None -> Ok("iso8601")
+    None -> Ok(tcal.Iso8601)
     Some(c) -> canonicalize_calendar(c)
   }
 }
@@ -3726,7 +3770,7 @@ fn date_from_bag(
   state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(IsoDate, String), State(host)), #(JsValue, State(host))) {
+) -> Result(#(#(IsoDate, tcal.Calendar), State(host)), #(JsValue, State(host))) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(fields, state) <- result.try(read_date_fields(state, ref, cal))
   use #(overflow, state) <- result.try(validated_overflow(state, options))
@@ -4478,7 +4522,7 @@ fn to_temporal_date_time(
   item: JsValue,
   options: JsValue,
 ) -> Result(
-  #(#(IsoDate, TimeRec, String), State(host)),
+  #(#(IsoDate, TimeRec, tcal.Calendar), State(host)),
   #(JsValue, State(host)),
 ) {
   case item {
@@ -4487,14 +4531,17 @@ fn to_temporal_date_time(
         Some(ObjectSlot(kind: TemporalDateTimeSlot(calendar:, ..), ..)) -> {
           let assert Some(#(d, t)) = this_date_time(state, item)
           use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(d, t, calendar), st))
+          Ok(#(#(d, t, slot_calendar(calendar)), st))
         }
         Some(ObjectSlot(
           kind: TemporalDateSlot(year:, month:, day:, calendar:),
           ..,
         )) -> {
           use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(IsoDate(year, month, day), midnight, calendar), st))
+          Ok(#(
+            #(IsoDate(year, month, day), midnight, slot_calendar(calendar)),
+            st,
+          ))
         }
         Some(ObjectSlot(
           kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:),
@@ -4503,7 +4550,7 @@ fn to_temporal_date_time(
           use #(_o, st) <- result.try(validated_overflow(state, options))
           let #(d, t) =
             epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
-          Ok(#(#(d, t, calendar), st))
+          Ok(#(#(d, t, slot_calendar(calendar)), st))
         }
         _ -> date_time_from_bag(state, ref, options)
       }
@@ -4538,7 +4585,7 @@ fn date_time_from_bag(
   ref: Ref,
   options: JsValue,
 ) -> Result(
-  #(#(IsoDate, TimeRec, String), State(host)),
+  #(#(IsoDate, TimeRec, tcal.Calendar), State(host)),
   #(JsValue, State(host)),
 ) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
@@ -4580,7 +4627,10 @@ fn to_temporal_year_month(
   state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(Int, Int, Int, tcal.Calendar), State(host)),
+  #(JsValue, State(host)),
+) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -4589,7 +4639,7 @@ fn to_temporal_year_month(
           ..,
         )) -> {
           use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(year, month, day, calendar), st))
+          Ok(#(#(year, month, day, slot_calendar(calendar)), st))
         }
         _ -> year_month_from_bag(state, ref, options)
       }
@@ -4608,7 +4658,7 @@ fn to_temporal_year_month(
 
 fn parse_year_month_string(
   s: String,
-) -> Result(#(Int, Int, Int, String), TErr) {
+) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
   // YYYY-MM or YYYYMM (+ annotations), or any full date-time string.
   let ym = case parse_year_part(s) {
     Some(#(y, rest)) -> {
@@ -4633,12 +4683,12 @@ fn parse_year_month_string(
         False -> Error(RangeE("invalid year-month string"))
         True ->
           case cal {
-            None -> check_ym_limits(y, m, 1, "iso8601")
+            None -> check_ym_limits(y, m, 1, tcal.Iso8601)
             Some(c) -> {
               use canon <- result.try(canonicalize_calendar(c))
               // Year-month-only strings are only valid for iso8601.
               case canon {
-                "iso8601" -> check_ym_limits(y, m, 1, "iso8601")
+                tcal.Iso8601 -> check_ym_limits(y, m, 1, tcal.Iso8601)
                 _ ->
                   Error(RangeE(
                     "year-month string requires a day for non-ISO calendars",
@@ -4653,7 +4703,8 @@ fn parse_year_month_string(
         Some(d) -> {
           use cal_id <- result.try(parsed_calendar_id(p))
           case cal_id {
-            "iso8601" -> check_ym_limits(d.year, d.month, d.day, "iso8601")
+            tcal.Iso8601 ->
+              check_ym_limits(d.year, d.month, d.day, tcal.Iso8601)
             cal -> {
               // Reference day: first day of the calendar month
               // containing the parsed date.
@@ -4679,8 +4730,8 @@ fn check_ym_limits(
   y: Int,
   m: Int,
   rd: Int,
-  cal: String,
-) -> Result(#(Int, Int, Int, String), TErr) {
+  cal: tcal.Calendar,
+) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
   case iso_year_month_within_limits(y, m) {
     True -> Ok(#(y, m, rd, cal))
     False -> Error(RangeE("year-month outside of supported range"))
@@ -4693,7 +4744,10 @@ fn year_month_from_bag(
   state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(Int, Int, Int, tcal.Calendar), State(host)),
+  #(JsValue, State(host)),
+) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(era, state) <- result.try(case tcal.has_eras(cal) {
     True -> read_bag_era(state, ref)
@@ -4727,10 +4781,10 @@ fn year_month_from_bag(
 /// Resolve year-month fields to the ISO date of the calendar month's first
 /// day (day 1 for iso8601).
 fn resolve_calendar_year_month(
-  cal: String,
+  cal: tcal.Calendar,
   f: DateFields,
   overflow: Overflow,
-) -> Result(#(Int, Int, Int, String), TErr) {
+) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
   use Nil <- result.try(case f.year, f.era, f.era_year {
     None, None, None -> Error(TypeE("year is required"))
     _, _, _ -> Ok(Nil)
@@ -4741,7 +4795,7 @@ fn resolve_calendar_year_month(
   })
   use y <- result.try(resolve_calendar_year(cal, f))
   case cal {
-    "iso8601" -> {
+    tcal.Iso8601 -> {
       use m <- result.try(resolve_iso_month(f))
       use m <- result.try(case m >= 1 && m <= 12 {
         True -> Ok(m)
@@ -4767,7 +4821,10 @@ fn to_temporal_month_day(
   state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(Int, Int, Int, tcal.Calendar), State(host)),
+  #(JsValue, State(host)),
+) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -4776,7 +4833,7 @@ fn to_temporal_month_day(
           ..,
         )) -> {
           use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(month, day, ref_year, calendar), st))
+          Ok(#(#(month, day, ref_year, slot_calendar(calendar)), st))
         }
         _ -> month_day_from_bag(state, ref, options)
       }
@@ -4793,7 +4850,9 @@ fn to_temporal_month_day(
   }
 }
 
-fn parse_month_day_string(s: String) -> Result(#(Int, Int, Int, String), TErr) {
+fn parse_month_day_string(
+  s: String,
+) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
   // --MM-DD / --MMDD / MM-DD / MMDD (+ annotations), or full date-time.
   let body = case s {
     "--" <> r -> Some(r)
@@ -4827,12 +4886,12 @@ fn parse_month_day_string(s: String) -> Result(#(Int, Int, Int, String), TErr) {
         False -> try_month_day_as_datetime(s)
         True ->
           case cal {
-            None -> Ok(#(m, d, 1972, "iso8601"))
+            None -> Ok(#(m, d, 1972, tcal.Iso8601))
             Some(c) -> {
               use canon <- result.try(canonicalize_calendar(c))
               // Month-day-only strings are only valid for iso8601.
               case canon {
-                "iso8601" -> Ok(#(m, d, 1972, "iso8601"))
+                tcal.Iso8601 -> Ok(#(m, d, 1972, tcal.Iso8601))
                 _ ->
                   Error(RangeE(
                     "month-day string requires a year for non-ISO calendars",
@@ -4847,13 +4906,13 @@ fn parse_month_day_string(s: String) -> Result(#(Int, Int, Int, String), TErr) {
 
 fn try_month_day_as_datetime(
   s: String,
-) -> Result(#(Int, Int, Int, String), TErr) {
+) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
   use p <- result.try(parse_plain_datetime_string(s))
   case p.date {
     Some(d) -> {
       use cal_id <- result.try(parsed_calendar_id(p))
       case cal_id {
-        "iso8601" -> Ok(#(d.month, d.day, 1972, "iso8601"))
+        tcal.Iso8601 -> Ok(#(d.month, d.day, 1972, tcal.Iso8601))
         cal -> {
           // ISODateWithinLimits before converting to calendar space:
           // e.g. -999999-01-01[u-ca=gregory] must throw RangeError.
@@ -4885,7 +4944,7 @@ const md_reference_boundary = 1095
 /// Find the ISO date of the latest calendar month-day on or before
 /// 1972-12-31 with the given month code and day.
 fn month_day_reference_iso(
-  cal: String,
+  cal: tcal.Calendar,
   num: Int,
   leap: Bool,
   day: Int,
@@ -4916,7 +4975,7 @@ fn month_day_reference_iso(
 }
 
 fn md_search(
-  cal: String,
+  cal: tcal.Calendar,
   num: Int,
   leap: Bool,
   day: Int,
@@ -4945,7 +5004,7 @@ fn md_search(
 
 /// Largest day the month with this code reaches in the search window.
 fn md_max_day(
-  cal: String,
+  cal: tcal.Calendar,
   num: Int,
   leap: Bool,
   year: Int,
@@ -4970,7 +5029,10 @@ fn month_day_from_bag(
   state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(Int, Int, Int, String), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(Int, Int, Int, tcal.Calendar), State(host)),
+  #(JsValue, State(host)),
+) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(fields, state) <- result.try(read_date_fields(state, ref, cal))
   use #(overflow, state) <- result.try(validated_overflow(state, options))
@@ -4980,10 +5042,10 @@ fn month_day_from_bag(
 
 /// Resolve month-day fields to #(iso_month, iso_day, iso_ref_year, calendar).
 fn resolve_calendar_month_day(
-  cal: String,
+  cal: tcal.Calendar,
   f: DateFields,
   overflow: Overflow,
-) -> Result(#(Int, Int, Int, String), TErr) {
+) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
   // Required fields (TypeError) first.
   use day <- result.try(case f.day {
     None -> Error(TypeE("day is required"))
@@ -4997,13 +5059,13 @@ fn resolve_calendar_month_day(
   // Month without year is only ambiguous for non-ISO calendars; for iso8601
   // the month maps directly to a month code (reference year 1972).
   use Nil <- result.try(
-    case cal != "iso8601" && f.month_code == None && !has_year {
+    case cal != tcal.Iso8601 && f.month_code == None && !has_year {
       True -> Error(TypeE("either year or monthCode required with month"))
       False -> Ok(Nil)
     },
   )
   case cal {
-    "iso8601" -> {
+    tcal.Iso8601 -> {
       use m <- result.try(resolve_iso_month(f))
       let ref_year = case f.month_code {
         Some(_) -> 1972
@@ -5041,7 +5103,9 @@ fn resolve_calendar_month_day(
           use Nil <- result.try(
             case tcal.month_for_code(cal, md_probe_year(cal, leap), num, leap) {
               Error(tcal.NeverValid) ->
-                Error(RangeE("monthCode is not valid for calendar " <> cal))
+                Error(RangeE(
+                  "monthCode is not valid for calendar " <> tcal.identifier(cal),
+                ))
               _ -> Ok(Nil)
             },
           )
@@ -5056,7 +5120,7 @@ fn resolve_calendar_month_day(
       // to the non-leap month (keeping the day).
       use #(num, leap) <- result.try(
         case
-          { cal == "chinese" || cal == "dangi" }
+          { cal == tcal.Chinese || cal == tcal.Dangi }
           && leap
           && chinese_ref_year_missing(num, day)
         {
@@ -5093,8 +5157,8 @@ fn chinese_ref_year_missing(num: Int, day: Int) -> Bool {
 
 /// A year in which a leap/normal month code can plausibly occur, used only
 /// for NeverValid validation of bare month codes.
-fn md_probe_year(cal: String, leap: Bool) -> Int {
-  case cal == "hebrew" && leap {
+fn md_probe_year(cal: tcal.Calendar, leap: Bool) -> Int {
+  case cal == tcal.Hebrew && leap {
     True -> 5779
     False -> {
       let cd = tcal.date_from_epoch_days(cal, md_reference_boundary)
@@ -5174,7 +5238,10 @@ fn to_temporal_zoned(
   state: State(host),
   item: JsValue,
   options: JsValue,
-) -> Result(#(#(Int, String, String), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(Int, String, tcal.Calendar), State(host)),
+  #(JsValue, State(host)),
+) {
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -5183,7 +5250,7 @@ fn to_temporal_zoned(
           ..,
         )) -> {
           use #(_o, st) <- result.try(validated_zdt_options(state, options))
-          Ok(#(#(epoch_ns, time_zone, calendar), st))
+          Ok(#(#(epoch_ns, time_zone, slot_calendar(calendar)), st))
         }
         _ -> zoned_from_bag(state, ref, options)
       }
@@ -5194,7 +5261,7 @@ fn to_temporal_zoned(
         Ok(#(d, t_opt, z, off_opt, off_sub, tz)) -> {
           use cal <- terr_r(state, case extract_calendar_annotation(s) {
             Some(c) -> canonicalize_calendar(c)
-            None -> Ok("iso8601")
+            None -> Ok(tcal.Iso8601)
           })
           use #(#(dis, offset_opt, _ov), st) <- result.try(
             validated_zdt_options(state, options),
@@ -5324,7 +5391,10 @@ fn zoned_from_bag(
   state: State(host),
   ref: Ref,
   options: JsValue,
-) -> Result(#(#(Int, String, String), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(Int, String, tcal.Calendar), State(host)),
+  #(JsValue, State(host)),
+) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
   use #(f, state) <- result.try(read_date_time_fields(
     state,
@@ -5407,8 +5477,8 @@ fn read_bag_offset(
 /// zoned instant.
 type RelTo {
   RelNone
-  RelPlain(date: IsoDate, cal: String)
-  RelZoned(epoch_ns: Int, tz: String, cal: String)
+  RelPlain(date: IsoDate, cal: tcal.Calendar)
+  RelZoned(epoch_ns: Int, tz: String, cal: tcal.Calendar)
 }
 
 /// GetTemporalRelativeToOption, after the `relativeTo` value itself has been
@@ -5424,15 +5494,24 @@ fn convert_relative_to(
         Some(ObjectSlot(
           kind: TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:),
           ..,
-        )) -> Ok(#(RelZoned(epoch_ns, time_zone, calendar), state))
+        )) ->
+          Ok(#(RelZoned(epoch_ns, time_zone, slot_calendar(calendar)), state))
         Some(ObjectSlot(
           kind: TemporalDateSlot(year:, month:, day:, calendar:),
           ..,
-        )) -> Ok(#(RelPlain(IsoDate(year, month, day), calendar), state))
+        )) ->
+          Ok(#(
+            RelPlain(IsoDate(year, month, day), slot_calendar(calendar)),
+            state,
+          ))
         Some(ObjectSlot(
           kind: TemporalDateTimeSlot(year:, month:, day:, calendar:, ..),
           ..,
-        )) -> Ok(#(RelPlain(IsoDate(year, month, day), calendar), state))
+        )) ->
+          Ok(#(
+            RelPlain(IsoDate(year, month, day), slot_calendar(calendar)),
+            state,
+          ))
         _ -> relative_from_bag(state, ref)
       }
     JsString(s) ->
@@ -5542,7 +5621,7 @@ fn relative_from_bag(
 fn add_zoned_ns(
   ns: Int,
   tz: String,
-  cal: String,
+  cal: tcal.Calendar,
   dur: DurRec,
 ) -> Result(Int, TErr) {
   use base <- result.try(
@@ -5580,7 +5659,7 @@ fn check_time_duration_range(ns: Int) -> Result(Nil, TErr) {
 fn date_duration_days(
   dur: DurRec,
   rel: IsoDate,
-  cal: String,
+  cal: tcal.Calendar,
 ) -> Result(Int, TErr) {
   case dur.years == 0 && dur.months == 0 && dur.weeks == 0 {
     True -> Ok(dur.days)
@@ -5775,10 +5854,10 @@ fn getter_dispatch(
         Some(#(m, d, ry)) -> {
           let cal = this_calendar(state, this)
           case name {
-            "calendarId" -> #(state, Ok(JsString(cal)))
+            "calendarId" -> #(state, Ok(JsString(tcal.identifier(cal))))
             "monthCode" ->
               case cal {
-                "iso8601" -> #(state, Ok(JsString(month_code_str(m))))
+                tcal.Iso8601 -> #(state, Ok(JsString(month_code_str(m))))
                 _ -> {
                   let cd =
                     tcal.date_from_epoch_days(
@@ -5793,7 +5872,7 @@ fn getter_dispatch(
               }
             "day" ->
               case cal {
-                "iso8601" -> #(state, Ok(value.from_int(d)))
+                tcal.Iso8601 -> #(state, Ok(value.from_int(d)))
                 _ -> {
                   let cd =
                     tcal.date_from_epoch_days(
@@ -5869,13 +5948,13 @@ fn date_field(d: IsoDate, name: String) -> JsValue {
 }
 
 /// Calendar-aware date field getter (ISO dates fall through to date_field).
-fn date_field_cal(cal: String, d: IsoDate, name: String) -> JsValue {
+fn date_field_cal(cal: tcal.Calendar, d: IsoDate, name: String) -> JsValue {
   case cal {
-    "iso8601" -> date_field(d, name)
+    tcal.Iso8601 -> date_field(d, name)
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
       case name {
-        "calendarId" -> JsString(cal)
+        "calendarId" -> JsString(tcal.identifier(cal))
         "era" | "eraYear" -> {
           let #(era, era_year) = tcal.era_for(cal, cd.year, cd.month, cd.day)
           case name {
@@ -5938,18 +6017,18 @@ fn year_month_field(y: Int, m: Int, name: String) -> JsValue {
 
 /// Calendar-aware year-month field getter. y/m/rd are the slot's ISO date.
 fn year_month_field_cal(
-  cal: String,
+  cal: tcal.Calendar,
   y: Int,
   m: Int,
   rd: Int,
   name: String,
 ) -> JsValue {
   case cal {
-    "iso8601" -> year_month_field(y, m, name)
+    tcal.Iso8601 -> year_month_field(y, m, name)
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
       case name {
-        "calendarId" -> JsString(cal)
+        "calendarId" -> JsString(tcal.identifier(cal))
         "era" | "eraYear" -> {
           let #(era, era_year) = tcal.era_for(cal, cd.year, cd.month, cd.day)
           case name {
@@ -5996,7 +6075,7 @@ fn zoned_field(
   state: State(host),
   ns: Int,
   tz: String,
-  zcal: String,
+  zcal: tcal.Calendar,
   name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let offset = tz_offset_ns_at(tz, ns)
@@ -6218,7 +6297,7 @@ fn plain_date_method(
         }
         "toPlainYearMonth" -> {
           let #(ymy, ymm, ymd) = case cal {
-            "iso8601" -> #(d.year, d.month, 1)
+            tcal.Iso8601 -> #(d.year, d.month, 1)
             _ -> {
               let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
               let first =
@@ -6237,7 +6316,7 @@ fn plain_date_method(
         }
         "toPlainMonthDay" -> {
           case cal {
-            "iso8601" -> {
+            tcal.Iso8601 -> {
               let #(state, v) =
                 make_month_day_cal(state, protos, d.month, d.day, 1972, cal)
               #(state, Ok(v))
@@ -6334,15 +6413,16 @@ fn plain_date_method(
   }
 }
 
-fn calendar_suffix(mode: String, cal: String) -> String {
+fn calendar_suffix(mode: String, cal: tcal.Calendar) -> String {
+  let id = tcal.identifier(cal)
   case mode {
     "never" -> ""
-    "always" -> "[u-ca=" <> cal <> "]"
-    "critical" -> "[!u-ca=" <> cal <> "]"
+    "always" -> "[u-ca=" <> id <> "]"
+    "critical" -> "[!u-ca=" <> id <> "]"
     _ ->
       case cal {
-        "iso8601" -> ""
-        _ -> "[u-ca=" <> cal <> "]"
+        tcal.Iso8601 -> ""
+        _ -> "[u-ca=" <> id <> "]"
       }
   }
 }
@@ -6351,7 +6431,7 @@ fn calendar_suffix(mode: String, cal: String) -> String {
 /// Existing date contributes year, monthCode (not ordinal month), day —
 /// matching CalendarMergeFields/ISODateToFields.
 fn calendar_with_fields(
-  cal: String,
+  cal: tcal.Calendar,
   d: IsoDate,
   f: DateFields,
   overflow: Overflow,
@@ -6790,7 +6870,7 @@ fn apply_since_ns(ns: Int, is_since: Bool) -> Int {
 fn date_until_since(
   state: State(host),
   protos: TemporalProtos,
-  cal: String,
+  cal: tcal.Calendar,
   d1: IsoDate,
   d2: IsoDate,
   args: List(JsValue),
@@ -6845,7 +6925,7 @@ fn negate_rounding_mode(mode: RoundingMode) -> RoundingMode {
 
 /// DifferenceDate in a specific calendar + date-unit rounding.
 fn difference_calendar_date(
-  cal: String,
+  cal: tcal.Calendar,
   d1: IsoDate,
   d2: IsoDate,
   largest: Unit,
@@ -6859,7 +6939,7 @@ fn difference_calendar_date(
     False -> {
       // Compute exact difference at `largest` granularity.
       let #(years, months, weeks, days) = case cal {
-        "iso8601" -> diff_date_parts(d1, d2, largest)
+        tcal.Iso8601 -> diff_date_parts(d1, d2, largest)
         _ ->
           case largest {
             Year | Month -> {
@@ -7921,7 +8001,7 @@ fn plain_date_time_method(
 fn date_time_until_since(
   state: State(host),
   protos: TemporalProtos,
-  cal: String,
+  cal: tcal.Calendar,
   a: #(IsoDate, TimeRec),
   b: #(IsoDate, TimeRec),
   args: List(JsValue),
@@ -7947,7 +8027,7 @@ fn date_time_until_since(
 /// Difference between two ISO date-times decomposed per largest/smallest
 /// units with rounding. Shared by PlainDateTime and ZonedDateTime until/since.
 fn diff_date_time_core(
-  cal: String,
+  cal: tcal.Calendar,
   a: #(IsoDate, TimeRec),
   b: #(IsoDate, TimeRec),
   largest: Unit,
@@ -7976,7 +8056,7 @@ fn diff_date_time_core(
   case unit_rank(largest) >= unit_rank(Day) {
     True -> {
       let #(years, months, weeks, days) = case cal {
-        "iso8601" -> diff_date_parts(a.0, b_date, largest)
+        tcal.Iso8601 -> diff_date_parts(a.0, b_date, largest)
         _ ->
           case largest {
             Year | Month -> {
@@ -8122,7 +8202,7 @@ fn plain_year_month_method(
             False -> Ok(Nil)
           })
           case cal {
-            "iso8601" -> {
+            tcal.Iso8601 -> {
               // AddDurationToYearMonth steps 8-9: the intermediate date is
               // day 1 of the receiver's month and goes through
               // CalendarDateFromFields, which throws when it is outside the
@@ -8280,7 +8360,7 @@ fn plain_year_month_method(
               case day {
                 Some(dd) -> {
                   case cal {
-                    "iso8601" -> {
+                    tcal.Iso8601 -> {
                       use date <- terr(
                         state,
                         regulate_iso_date(y, m, dd, Constrain),
@@ -8356,9 +8436,15 @@ fn plain_year_month_method(
 
 /// Format a PlainYearMonth: non-ISO calendars always include the reference
 /// day and the calendar annotation.
-fn format_ym_cal(y: Int, m: Int, rd: Int, cal: String, mode: String) -> String {
+fn format_ym_cal(
+  y: Int,
+  m: Int,
+  rd: Int,
+  cal: tcal.Calendar,
+  mode: String,
+) -> String {
   case cal {
-    "iso8601" ->
+    tcal.Iso8601 ->
       case mode {
         "always" | "critical" ->
           format_iso_date(IsoDate(y, m, rd)) <> calendar_suffix(mode, cal)
@@ -8379,7 +8465,7 @@ fn format_ym(y: Int, m: Int) -> String {
 fn year_month_until_since(
   state: State(host),
   protos: TemporalProtos,
-  cal: String,
+  cal: tcal.Calendar,
   a: #(Int, Int, Int),
   b: #(Int, Int, Int),
   args: List(JsValue),
@@ -8403,7 +8489,7 @@ fn year_month_until_since(
         False -> {
           let mode2 = apply_since_mode(mode, is_since)
           let total_months = case cal {
-            "iso8601" -> { b.0 - a.0 } * 12 + b.1 - a.1
+            tcal.Iso8601 -> { b.0 - a.0 } * 12 + b.1 - a.1
             _ -> {
               // Count whole calendar months between the two month-firsts.
               let ia = IsoDate(a.0, a.1, a.2)
@@ -8417,7 +8503,7 @@ fn year_month_until_since(
             _ -> round_to_increment(total_months, inc, mode2)
           }
           use dur <- terr(state, case cal {
-            "iso8601" ->
+            tcal.Iso8601 ->
               Ok(case smallest, largest {
                 Year, _ -> DurRec(..zero_dur, years: rounded)
                 _, Year ->
@@ -8476,7 +8562,7 @@ fn year_month_until_since(
 /// (start = ia + r1 years, end = ia + r2 years), like the spec's
 /// epoch-nanosecond progress.
 fn round_calendar_year_total(
-  cal: String,
+  cal: tcal.Calendar,
   ia: IsoDate,
   ib: IsoDate,
   inc: Int,
@@ -8634,7 +8720,7 @@ fn plain_month_day_method(
               case year != None || { era != None && era_year != None } {
                 True -> {
                   case cal {
-                    "iso8601" -> {
+                    tcal.Iso8601 -> {
                       let assert Some(y) = year
                       use date <- terr(
                         state,
@@ -8685,9 +8771,15 @@ fn plain_month_day_method(
 
 /// Format a PlainMonthDay: non-ISO calendars always include the reference
 /// year and the calendar annotation.
-fn format_md_cal(m: Int, d: Int, ry: Int, cal: String, mode: String) -> String {
+fn format_md_cal(
+  m: Int,
+  d: Int,
+  ry: Int,
+  cal: tcal.Calendar,
+  mode: String,
+) -> String {
   case cal {
-    "iso8601" ->
+    tcal.Iso8601 ->
       case mode {
         "always" | "critical" ->
           format_iso_date(IsoDate(ry, m, d)) <> calendar_suffix(mode, cal)
@@ -9200,7 +9292,7 @@ fn duration_round_with(
 /// instants (variable length); the time remainder is rounded within the
 /// final day and carries into it when it overflows.
 fn zoned_diff_round_time(
-  cal: String,
+  cal: tcal.Calendar,
   tz: String,
   a_ns: Int,
   b_ns: Int,
@@ -9228,7 +9320,7 @@ fn zoned_diff_round_time(
         _, _ -> b_d
       }
       let #(years, months, weeks, days) = case cal {
-        "iso8601" -> diff_date_parts(a_d, b_date, largest)
+        tcal.Iso8601 -> diff_date_parts(a_d, b_date, largest)
         _ ->
           case largest {
             Year | Month -> {
@@ -10384,7 +10476,7 @@ fn zoned_date_time_method(
 fn zoned_until_since(
   state: State(host),
   protos: TemporalProtos,
-  cal: String,
+  cal: tcal.Calendar,
   a_ns: Int,
   a_tz: String,
   b_ns: Int,
