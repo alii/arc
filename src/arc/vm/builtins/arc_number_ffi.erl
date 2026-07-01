@@ -43,9 +43,9 @@ format_to_precision(X, Precision) ->
     with_abs(X, fun(A) -> precision_pos(A, Precision) end).
 
 %% JS Number::toString(x, 10) per ES2024 §6.1.6.1.20 for a finite x.
-%% -0 stringifies as "0" (the spec works on ℝ(x)), unlike the three
-%% Number.prototype formatters above, which keep the sign — so this one
-%% does not go through with_abs/2.
+%% Like the three Number.prototype formatters above, this operates on ℝ(x),
+%% so -0 stringifies unsigned as "0". It short-circuits the zero case itself
+%% (js_positive_to_string/1 has no zero guard) rather than using with_abs/2.
 js_number_to_string(N) when is_float(N) ->
     case N == 0.0 of
         true -> <<"0">>;
@@ -59,15 +59,16 @@ js_number_to_string(N) when is_integer(N) ->
 %% Shared sign prelude
 %% ---------------------------------------------------------------------------
 
-%% The three Number.prototype formatters all emit the absolute value and
-%% prefix "-" when the input's IEEE 754 sign bit is set — including -0.0,
-%% which compares equal to 0.0 and so needs the sign bit, not `<`.
-%% Fmt receives a float with a clear sign bit and returns a binary.
+%% The three Number.prototype formatters all set x to ℝ(x) and then emit a
+%% "-" prefix only "if x < 0" (§21.1.3.2/3/5). ℝ(-0) = 0 is not < 0, so -0
+%% formats unsigned — hence the numeric `<`, NOT the IEEE sign bit.
+%% Fmt may therefore receive -0.0 and must format it as +0 (the exponential/
+%% precision zero guards use `== 0.0`, which matches -0.0; decimals_exact/2
+%% collapses "-0" to 0 when it parses the digits). Fmt returns a binary.
 with_abs(X, Fmt) ->
-    <<Sign:1, _:63>> = <<X/float>>,
-    case Sign of
-        1 -> <<"-", (Fmt(-X))/binary>>;
-        0 -> Fmt(X)
+    case X < 0.0 of
+        true -> <<"-", (Fmt(-X))/binary>>;
+        false -> Fmt(X)
     end.
 
 %% ---------------------------------------------------------------------------
