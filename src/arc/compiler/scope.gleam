@@ -151,9 +151,15 @@ pub type Binding {
 ///
 /// `function_scope` is the nearest enclosing scope (possibly self) whose kind
 /// satisfies `is_function_kind` — the owner of this scope's local-slot space.
-/// `with_object_slot` is Some for With scopes only: the local slot holding
-/// the (ToObject'd) with-target; any lookup that walks PAST this scope must
-/// emit a runtime check against that slot (IrWith*).
+/// `with_object` is Some for With scopes only: the NAME of the synthetic
+/// `<withN_M>` binding (declared IN this scope) holding the (ToObject'd)
+/// with-target. Carried straight through from `RawScope.with_object_name`
+/// — deliberately NOT a copied-out slot number, so `do_lookup` reads the
+/// holder's slot AND boxedness from the one authoritative
+/// `scope.bindings` entry (a derived slot copy would have to be shifted
+/// in lockstep by `insert_captures` and could silently drift). Any lookup
+/// that walks PAST this scope must emit a runtime check against that
+/// slot (IrWith*).
 /// `contains_direct_eval` is true when this scope's own statement list (not a
 /// nested function) contains a `CallExpression` whose callee is the
 /// identifier `eval` — used to propagate eval-poisoning to ancestor function
@@ -165,7 +171,7 @@ pub type Scope {
     function_scope: ScopeId,
     kind: ScopeKind,
     bindings: Dict(String, Binding),
-    with_object_slot: Option(Int),
+    with_object: Option(String),
     contains_direct_eval: Bool,
     /// §B.3.2: names of FunctionDeclarations directly in this Block scope
     /// that are BLOCKED from Annex B var promotion — an intermediate
@@ -425,7 +431,7 @@ pub type RawScope {
     /// lives in `current_fn.bindings`, not here. NOT a binding;
     /// `finalize` ignores this field.
     hoisted_vars: Set(String),
-    /// §10.2.11 step 28: count of `$param_N` shims `sb_insert_param_shims`
+    /// §10.2.11 step 28: count of `<paramN>` shims `sb_insert_param_shims`
     /// inserted at indices `0..count-1` for a NON-SIMPLE parameter list
     /// (0 = simple / not a function scope). The user formal names —
     /// recorded as ParamBinding during `parse_formal_parameters`, then
@@ -445,7 +451,7 @@ pub type RawScope {
     /// It is the var sink for that body — `sb_var_target` stops here, so
     /// the body's VarDeclaredNames / hoisted FunctionDeclarations bind in
     /// THIS scope instead of the enclosing Function scope (which keeps the
-    /// params, the `$param_N` shims, `arguments`, and the NFE self-name).
+    /// params, the `<paramN>` shims, `arguments`, and the NFE self-name).
     /// Closures created by parameter initializers are children of the
     /// Function scope and therefore can never see body declarations.
     /// Parser/finalize-internal: emit identifies the body scope
@@ -474,8 +480,8 @@ const blank_raw_fn_info = RawFunctionInfo(
 
 /// A fresh `RawScope` with the 9 always-default fields filled in. The 5
 /// per-site fields (id / parent / function_scope / kind / is_strict) are
-/// arguments. Shared by `sb_init`, `sb_push`, and `sb_scope`'s dead
-/// fallback so the default-field list lives in exactly one place.
+/// arguments. Shared by `sb_init` and `sb_push` so the default-field
+/// list lives in exactly one place.
 fn new_raw_scope(
   id: ScopeId,
   parent: Option(ScopeId),
@@ -550,13 +556,16 @@ pub fn sb_init(root_kind: ScopeKind, strict: Bool) -> ScopeBuilder {
 }
 
 /// Look up a `RawScope` by id. Internal — every id the parser holds was
-/// minted by `sb_push`, so a miss is a bug; the fallback keeps callers
-/// total without `assert`.
+/// minted by `sb_push`, so a miss is a bug and we say so loudly instead
+/// of fabricating a wrong Block-kind orphan that would silently corrupt
+/// resolution. Pruning cannot trip this: `sb_prune_empty_block`
+/// deliberately KEEPS pruned blocks in `sb.scopes` as tombstones (only
+/// `children_at` is spliced), and `sb_discard`'s callers never hold the
+/// discarded id afterwards.
 fn sb_scope(sb: ScopeBuilder, id: ScopeId) -> RawScope {
-  case dict.get(sb.scopes, id) {
-    Ok(s) -> s
-    Error(Nil) -> new_raw_scope(id, None, id, Block, False)
-  }
+  let assert Ok(s) = dict.get(sb.scopes, id)
+    as "scope.sb_scope: unknown ScopeId"
+  s
 }
 
 /// Allocate and enter a fresh child scope of `kind` under `sb.current`.
@@ -608,7 +617,7 @@ pub fn sb_push(sb: ScopeBuilder, kind: ScopeKind) -> #(ScopeBuilder, ScopeId) {
 /// Function scope (same FunctionInfo slot space) marked `is_var_boundary`,
 /// so `sb_var_target` routes the body's `var`s / hoisted function names
 /// into it instead of the Function scope. Pushed AFTER the params, the
-/// `$param_N` shims, and the implicit `arguments` are declared — those
+/// `<paramN>` shims, and the implicit `arguments` are declared — those
 /// stay in the Function (parameter) scope.
 pub fn sb_push_var_boundary(sb: ScopeBuilder) -> #(ScopeBuilder, ScopeId) {
   let #(sb, id) = sb_push(sb, Block)
@@ -830,7 +839,7 @@ pub fn sb_declare_in(
 }
 
 /// Retrofit the current function scope for a NON-SIMPLE parameter list
-/// (§10.2.11 step 28): insert `$param_0`..`$param_{count-1}` shim
+/// (§10.2.11 step 28): insert `<param0>`..`<param{count-1}>` shim
 /// ParamBindings at indices `0..count-1`, and shift every binding the
 /// parser already declared during `parse_formal_parameters` (the
 /// destructured / defaulted / rest-target names) past the shims. The
@@ -915,6 +924,19 @@ pub fn sb_discard(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   )
 }
 
+/// Whether `scope` is a Block that `sb_prune_empty_block` may splice
+/// out. THE single definition — `sb_close_block` and
+/// `sb_prune_empty_block` must agree on it, and it MUST match
+/// emit.gleam's `ast_util.block_has_declarations` (which knows nothing
+/// about direct-eval) so the parser-built tree and emit's per-block
+/// scope_cursor stay in lockstep. A declaration-free block has no
+/// bindings by construction. The non-simple-params BODY block
+/// (`is_var_boundary`) is never pruned — emit locates it positionally
+/// as the function root's sole trailing block-kind child.
+fn sb_block_prunable(scope: RawScope) -> Bool {
+  scope.kind == Block && dict.is_empty(scope.bindings) && !scope.is_var_boundary
+}
+
 /// V8 `Scope::FinalizeBlockScope`: if `id` is a Block scope with no
 /// bindings, splice it out — reparent its children to its grandparent in
 /// `children_at` (preserving order, replacing `id`'s slot in the
@@ -923,15 +945,7 @@ pub fn sb_discard(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
 /// with the scope tree.
 pub fn sb_prune_empty_block(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   let scope = sb_scope(sb, id)
-  // Predicate MUST match emit.gleam's `ast_util.block_has_declarations`
-  // (which knows nothing about direct-eval) so the parser-built tree and
-  // emit's per-block scope_cursor stay in lockstep. A declaration-free
-  // block has no bindings by construction.
-  let prunable =
-    scope.kind == Block
-    && dict.is_empty(scope.bindings)
-    && !scope.is_var_boundary
-  case prunable, scope.parent {
+  case sb_block_prunable(scope), scope.parent {
     True, Some(parent_id) -> {
       // A direct eval recorded against the pruned block must survive the
       // prune or the enclosing function never learns it contains an eval
@@ -1141,12 +1155,7 @@ pub fn sb_reorder_switch_children(
 /// so hoist-reorder is unnecessary. Returns the ScopeBuilder still
 /// positioned INSIDE `block_id` — caller follows with `sb_pop`.
 pub fn sb_close_block(sb: ScopeBuilder, block_id: ScopeId) -> ScopeBuilder {
-  let scope = sb_scope(sb, block_id)
-  let prunable =
-    scope.kind == Block
-    && dict.is_empty(scope.bindings)
-    && !scope.is_var_boundary
-  case prunable {
+  case sb_block_prunable(sb_scope(sb, block_id)) {
     True -> sb_prune_empty_block(sb, block_id)
     False -> sb_reorder_block_children(sb, block_id)
   }
@@ -1625,8 +1634,8 @@ fn finalize_scope(
       use <- bool.guard(keep_seeded, acc)
       let slot = info.local_count
       // §10.2.11 step 28: in a non-simple parameter list the SHIMS
-      // (`$param_0..N-1`, indices 0..N-1) stay ParamBinding; every
-      // user formal name (shifted to index >= N, still ParamBinding
+      // (`<param0>`..`<paramN-1>`, indices 0..N-1) stay ParamBinding;
+      // every user formal name (shifted to index >= N, still ParamBinding
       // at parse time so `sb_var_conflicts_lexical` allowed a body
       // `var` redecl) is rekinded HERE to LetBinding so emit's
       // `emit_binding_prologue` TDZ-seeds it — matching legacy
@@ -1654,16 +1663,6 @@ fn finalize_scope(
         FunctionInfo(..info, local_count: slot + 1, names:),
       )
     })
-  // `RawScope.with_object_name` → `Scope.with_object_slot`: the parser
-  // recorded the synthetic `<withN_M>` holder NAME (no slot existed
-  // yet); look it up now that the binding has one.
-  let with_object_slot =
-    option.then(raw.with_object_name, fn(n) {
-      case dict.get(bindings, n) {
-        Ok(b) -> Some(b.slot)
-        Error(Nil) -> None
-      }
-    })
   let scope =
     Scope(
       id: raw.id,
@@ -1671,7 +1670,11 @@ fn finalize_scope(
       function_scope: raw.function_scope,
       kind: raw.kind,
       bindings:,
-      with_object_slot:,
+      // The synthetic `<withN_M>` holder NAME, carried as-is. It is
+      // declared IN this With scope by the parser (declare_stmt's
+      // WithStatement arm), so `do_lookup` resolves its slot + boxedness
+      // from `bindings` — no derived slot copy to keep in sync.
+      with_object: raw.with_object_name,
       contains_direct_eval: raw.contains_direct_eval,
       annexb_blocked: raw.annexb_blocked,
       is_strict:,
@@ -2011,10 +2014,15 @@ pub fn with_object_name(depth: Int, with_id: ScopeId) -> String {
   "<with" <> int.to_string(depth) <> "_" <> int.to_string(with_id) <> ">"
 }
 
-/// `$param_N` shim for a non-simple positional parameter — holds the raw
-/// argument before destructuring.
+/// `<paramN>` — shim for a non-simple positional parameter; holds the raw
+/// argument before destructuring. Like `with_object_name`'s `<withN_M>`,
+/// the angle brackets make the name IMPOSSIBLE as a JS identifier: a user
+/// formal literally spelled like a shim would otherwise be silently
+/// clobbered when `sb_insert_param_shims` shifts the already-declared
+/// formals past the shims and then inserts the shims at indices 0..N-1
+/// (the `dict.insert` overwrites the user binding, mis-wiring arguments).
 pub fn param_shim(idx: Int) -> String {
-  "$param_" <> int.to_string(idx)
+  "<param" <> int.to_string(idx) <> ">"
 }
 
 // ============================================================================
@@ -2071,9 +2079,18 @@ fn do_lookup(
     }
     Error(Nil) -> {
       // Crossing a `with` scope adds its object-slot to the runtime probe
-      // chain BEFORE consulting the next outer scope.
-      let crossed = case scope.with_object_slot {
-        Some(slot) -> [#(slot, with_slot_is_boxed(scope, slot)), ..crossed]
+      // chain BEFORE consulting the next outer scope. The `<withN_M>`
+      // holder binding is declared IN the With scope itself (see
+      // declare_stmt's WithStatement arm), so both its slot and its
+      // `is_boxed` flag — set by `analyze_captures` like any other
+      // binding, when a child closure defined inside the `with` body
+      // captures it — come from this scope's own `bindings` entry.
+      let crossed = case scope.with_object {
+        Some(holder) -> {
+          let assert Ok(b) = dict.get(scope.bindings, holder)
+            as "scope.do_lookup: with-object holder binding missing from its With scope"
+          [#(b.slot, b.is_boxed), ..crossed]
+        }
         None -> crossed
       }
       // STOP at function boundaries. A name not found anywhere in this
@@ -2112,21 +2129,6 @@ fn wrap_with_chain(
     [] -> Plain(fallback)
     _ -> WithChain(crossed_slots: list.reverse(crossed), fallback:)
   }
-}
-
-/// A with-object slot is boxed when a child closure defined inside the
-/// `with` body captures it. The `<withN_M>` holder binding is declared IN
-/// the With scope itself (see declare_stmt's WithStatement arm), so its
-/// `is_boxed` flag — set by `analyze_captures` like any other binding — is
-/// found in `scope.bindings`, not the parent's. Searching the immediate
-/// parent's bindings is wrong: the parent may be an intermediate Block
-/// that has no binding at this slot (`function f(){ { with(o){…} } }`),
-/// which would silently return False and emit an unboxed read of a box.
-fn with_slot_is_boxed(scope: Scope, slot: Int) -> Bool {
-  dict.to_list(scope.bindings)
-  |> list.find(fn(entry) { { entry.1 }.slot == slot })
-  |> result.map(fn(entry) { { entry.1 }.is_boxed })
-  |> result.unwrap(False)
 }
 
 /// With-object slots inherited from enclosing functions — the legacy
@@ -2834,10 +2836,11 @@ fn compute_down(
 /// captures N..N+K-1, then insert a `CaptureBinding` per name capture into
 /// the function-root scope. Mirrors the legacy resolver's
 /// `resolve_with_captures`, which received captures FIRST and allocated own
-/// bindings AFTER them. Also shifts `with_object_slot` (a declared-binding
-/// slot) and `FunctionInfo.names` (slot-keyed for module-export / direct-eval
-/// lookup), and bumps `local_count` so `alloc_scratch` allocates past the
-/// captures.
+/// bindings AFTER them. Also shifts `FunctionInfo.names` (slot-keyed for
+/// module-export / direct-eval lookup) and bumps `local_count` so
+/// `alloc_scratch` allocates past the captures. `Scope.with_object` is a
+/// NAME, not a slot, so it needs no shift — `do_lookup` reads the holder's
+/// (already-shifted) slot out of `scope.bindings`.
 fn insert_captures(
   tree: ScopeTree,
   fn_id: ScopeId,
@@ -2847,8 +2850,7 @@ fn insert_captures(
   const_captures: Set(String),
   fn_name_captures: Set(String),
 ) -> ScopeTree {
-  // Shift every declared binding's slot (and any with_object_slot —
-  // it indexes a declared `<withN_M>` binding) in this function's scopes.
+  // Shift every declared binding's slot in this function's scopes.
   let scopes =
     list.fold(own_scope_ids, tree.scopes, fn(scopes, sid) {
       case dict.get(scopes, sid) {
@@ -2858,9 +2860,7 @@ fn insert_captures(
             dict.map_values(scope.bindings, fn(_name, b) {
               Binding(..b, slot: b.slot + cap_count)
             })
-          let with_object_slot =
-            option.map(scope.with_object_slot, fn(s) { s + cap_count })
-          dict.insert(scopes, sid, Scope(..scope, bindings:, with_object_slot:))
+          dict.insert(scopes, sid, Scope(..scope, bindings:))
         }
       }
     })
