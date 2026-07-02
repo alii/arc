@@ -229,14 +229,20 @@ fn parse_int(
   }
   use str, state <- state.try_op(str_result)
   // Steps 6-9: Determine radix R via ToInt32(radix).
-  // If R is 0, NaN, or Infinity, default to 10.
-  // Step 6: ToInt32(radix) — arg_to_int performs the full ToNumber
-  // (ToPrimitive on objects, honoring an overridden valueOf).
+  // Step 6 is ToInt32 (§7.1.6), NOT ToIntegerOrInfinity: ToInt32 maps NaN
+  // and ±∞ to +0, and step 8 then turns R = 0 into the default radix 10.
+  // The full ToNumber runs first (ToPrimitive on objects, honoring an
+  // overridden valueOf), so this site keeps its own non-finite → 0 mapping
+  // rather than the saturated coerce.jsnum_to_integer_or_infinity.
   let radix_val = case args {
     [_, r, ..] -> r
     _ -> JsUndefined
   }
-  use radix_int, state <- arg_to_int(radix_val, 10, state)
+  use radix_num, state <- coerce.try_to_number(state, radix_val)
+  let radix_int = case radix_num {
+    Finite(x) -> value.float_to_int(x)
+    NaN | Infinity | NegInfinity -> 0
+  }
   let radix = case radix_int {
     0 -> 10
     n -> n
@@ -466,7 +472,9 @@ fn number_to_string(
     [] | [JsUndefined, ..] -> JsNumber(Finite(10.0))
     [r, ..] -> r
   }
-  use radix, state <- arg_to_int(radix_arg, 10, state)
+  // Step 3: radixMV = ToIntegerOrInfinity(radix). ±∞ saturate to
+  // ±(2^53 - 1) and NaN → 0, so step 4's range check sees them.
+  use radix, state <- coerce.try_to_integer_or_infinity(state, radix_arg)
   // Step 4: If radixMV not in [2, 36], throw RangeError.
   case radix >= 2 && radix <= 36 {
     False ->
@@ -526,8 +534,12 @@ fn number_to_fixed(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use n, state <- require_number(this, state, "toFixed")
-  // ToIntegerOrInfinity(fractionDigits): undefined -> ToNumber -> NaN -> 0.
-  use f, state <- arg_to_int(helpers.first_arg_or_undefined(args), 0, state)
+  // Step 2: f = ToIntegerOrInfinity(fractionDigits). undefined → NaN → 0;
+  // ±∞ saturate out of [0, 100] so step 3's RangeError fires.
+  use f, state <- coerce.try_to_integer_or_infinity(
+    state,
+    helpers.first_arg_or_undefined(args),
+  )
   case f < 0 || f > 100 {
     True ->
       state.range_error(
@@ -564,7 +576,9 @@ fn number_to_exponential(
       Ok(JsString(format_non_finite(n, format_to_exponential_auto))),
     )
     [v, ..] -> {
-      use f, state <- arg_to_int(v, 0, state)
+      // Step 2: f = ToIntegerOrInfinity(fractionDigits); ±∞ saturate out of
+      // [0, 100] so step 5's RangeError fires.
+      use f, state <- coerce.try_to_integer_or_infinity(state, v)
       case f < 0 || f > 100 {
         True ->
           state.range_error(
@@ -594,7 +608,9 @@ fn number_to_precision(
       Ok(JsString(value.format_number_radix(n, 10))),
     )
     [v, ..] -> {
-      use p, state <- arg_to_int(v, 0, state)
+      // Step 3: p = ToIntegerOrInfinity(precision); ±∞ saturate out of
+      // [1, 100] so step 5's RangeError fires.
+      use p, state <- coerce.try_to_integer_or_infinity(state, v)
       case p < 1 || p > 100 {
         True ->
           state.range_error(
@@ -629,24 +645,6 @@ fn require_number(
         state,
         "Number.prototype." <> method <> " requires that 'this' be a Number",
       )
-  }
-}
-
-/// Coerce a JsValue to an integer via §7.1.4 ToNumber + truncate, with a
-/// fallback for NaN/±Infinity. CPS — ToNumber runs ToPrimitive (user
-/// valueOf) on objects and throws a TypeError on Symbol/BigInt, so State is
-/// threaded and the throw propagates:
-///   use i, state <- arg_to_int(v, default, state)
-fn arg_to_int(
-  v: JsValue,
-  default: Int,
-  state: State(host),
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use num, state <- coerce.try_to_number(state, v)
-  case num {
-    Finite(x) -> cont(float.truncate(x), state)
-    _ -> cont(default, state)
   }
 }
 

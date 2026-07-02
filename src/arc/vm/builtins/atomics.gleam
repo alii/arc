@@ -33,6 +33,7 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
+import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
@@ -486,34 +487,12 @@ fn arg(args: List(JsValue), idx: Int) -> JsValue {
   helpers.list_at(args, idx) |> option.unwrap(JsUndefined)
 }
 
-/// §7.1.5 ToIntegerOrInfinity (CPS) — keeps ±∞ distinct (callers decide how
-/// to clamp). NaN/±0 → 0.
-fn to_integer_or_infinity(
-  state: State(host),
-  val: JsValue,
-  cont: fn(IntOrInf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case coerce.js_to_number(state, val) {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(num, state)) ->
-      case num {
-        Finite(f) -> cont(IntVal(value.float_to_int(f)), state)
-        NaN -> cont(IntVal(0), state)
-        Infinity -> cont(PosInf, state)
-        NegInfinity -> cont(NegInf, state)
-      }
-  }
-}
-
-type IntOrInf {
-  IntVal(Int)
-  PosInf
-  NegInf
-}
-
 /// Coerce the operand for a read-modify-write/store per the array's content
-/// type: ToBigInt for BigInt64/BigUint64, ToIntegerOrInfinity (±∞ → 0 on
-/// store) for the integer kinds.
+/// type: ToBigInt for BigInt64/BigUint64, ToIntegerOrInfinity for the
+/// integer kinds. ±∞ must be matched on the raw JsNum BEFORE the saturated
+/// `coerce.jsnum_to_integer_or_infinity`: §7.1.7-§7.1.11 (ToInt8..ToUint32)
+/// all map a non-finite ToIntegerOrInfinity result to +0, not to a huge
+/// saturated integer whose low bits would be stored.
 fn to_operand(
   state: State(host),
   info: TaInfo,
@@ -522,13 +501,13 @@ fn to_operand(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case info.bits {
     64 -> coerce.to_bigint_cps(state, val, cont)
-    _ ->
-      to_integer_or_infinity(state, val, fn(i, state) {
-        case i {
-          IntVal(n) -> cont(n, state)
-          PosInf | NegInf -> cont(0, state)
-        }
-      })
+    _ -> {
+      use num, state <- coerce.try_to_number(state, val)
+      case num {
+        Infinity | NegInfinity -> cont(0, state)
+        _ -> cont(coerce.jsnum_to_integer_or_infinity(num), state)
+      }
+    }
   }
 }
 
@@ -737,12 +716,19 @@ fn atomic_store(
       #(state, Ok(JsBigInt(BigInt(v))))
     }
     _ -> {
-      use i, state <- to_integer_or_infinity(state, arg(args, 2))
+      // §25.4.10 step 3: v = 𝔽(? ToIntegerOrInfinity(value)) — and v itself
+      // is the return value, so ±∞ must survive the coercion (the STORED
+      // element is ToIntN(±∞) = +0). Match on the raw JsNum rather than the
+      // saturated Int to keep both.
+      use num, state <- coerce.try_to_number(state, arg(args, 2))
       use data, state <- revalidate(state, info, idx)
-      let #(stored, ret) = case i {
-        IntVal(n) -> #(n, value.from_int(n))
-        PosInf -> #(0, JsNumber(Infinity))
-        NegInf -> #(0, JsNumber(NegInfinity))
+      let #(stored, ret) = case num {
+        Infinity -> #(0, JsNumber(Infinity))
+        NegInfinity -> #(0, JsNumber(NegInfinity))
+        _ -> {
+          let n = coerce.jsnum_to_integer_or_infinity(num)
+          #(n, value.from_int(n))
+        }
       }
       let state = write_element(state, info, data, idx, stored)
       #(state, Ok(ret))
@@ -756,12 +742,12 @@ fn is_lock_free(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- to_integer_or_infinity(
+  use n, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
   let ok = case n {
-    IntVal(1) | IntVal(2) | IntVal(4) | IntVal(8) -> True
+    1 | 2 | 4 | 8 -> True
     _ -> False
   }
   #(state, Ok(JsBool(ok)))
@@ -1143,22 +1129,21 @@ fn settle_waiter(
   builtins_promise.fulfill_promise(state, waiter.promise_data, JsString(msg))
 }
 
-/// Notify count: undefined → effectively unbounded; negative → 0.
+/// Notify count (§25.4.13 step 3): undefined → effectively unbounded;
+/// otherwise max(ToIntegerOrInfinity(count), 0). The saturated +∞
+/// (2^53 - 1) is already "unbounded" for any realistic waiter list, and
+/// -∞ saturates negative so the max(_, 0) clamps it to 0.
 fn notify_count(
   state: State(host),
   val: JsValue,
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
-    JsUndefined -> cont(9_007_199_254_740_991, state)
-    _ ->
-      to_integer_or_infinity(state, val, fn(i, state) {
-        case i {
-          IntVal(n) -> cont(int.max(n, 0), state)
-          PosInf -> cont(9_007_199_254_740_991, state)
-          NegInf -> cont(0, state)
-        }
-      })
+    JsUndefined -> cont(limits.max_safe_integer, state)
+    _ -> {
+      use n, state <- coerce.try_to_integer_or_infinity(state, val)
+      cont(int.max(n, 0), state)
+    }
   }
 }
 

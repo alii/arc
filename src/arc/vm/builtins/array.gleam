@@ -256,19 +256,26 @@ fn construct(
     // 6. Else (len is a Number),
     //    a. Let intLen be ! ToUint32(len).
     //    b. If intLen ≠ len, throw a RangeError.
-    //    (we check integer + non-negative via float_to_int + round-trip,
-    //     which is equivalent: ToUint32 would truncate non-integers and wrap
-    //     negatives, making them !== the original value)
+    //    (equivalent check: len must be an integer in [0, 2^32 - 1] —
+    //     ToUint32 truncates non-integers, wraps negatives, wraps values
+    //     >= 2^32, and maps NaN/±Infinity to 0, all of which end up
+    //     !== the original value)
     // 7. Perform ! Set(array, "length", intLen, true).
     // 8. Return array.
-    [JsNumber(value.Finite(n))] -> {
-      let len = value.float_to_int(n)
-      case len >= 0 && int.to_float(len) == n {
-        True -> alloc_array(state, len, elements.new(), array_proto)
-        // intLen ≠ len → RangeError (spec step 6b)
-        False -> state.range_error(state, "Invalid array length")
+    [JsNumber(num)] ->
+      case num {
+        Finite(n) -> {
+          let len = value.float_to_int(n)
+          case len >= 0 && len <= 4_294_967_295 && int.to_float(len) == n {
+            True -> alloc_array(state, len, elements.new(), array_proto)
+            // intLen ≠ len → RangeError (spec step 6b)
+            False -> state.range_error(state, "Invalid array length")
+          }
+        }
+        // ToUint32(NaN | ±Infinity) is 0, which ≠ len → RangeError.
+        value.NaN | value.Infinity | value.NegInfinity ->
+          state.range_error(state, "Invalid array length")
       }
-    }
 
     // §23.1.1.3 Array(...items) — numberOfArgs >= 2
     // (also handles single non-Number arg — non-Number single args fall
@@ -1273,23 +1280,17 @@ fn to_length_value(
   state: State(host),
   val: JsValue,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  case val {
-    // String lengths go through StringToNumber's full grammar (hex/octal/
-    // binary prefixes) — helpers.to_number_int implements it.
-    JsString(_) -> Ok(#(to_length(val), state))
-    _ -> {
-      use #(num, state) <- result.map(coerce.js_to_number(state, val))
-      let len = case num {
-        value.Finite(f) ->
-          int.max(0, int.min(value.float_to_int(f), limits.max_safe_integer))
-        // §7.1.5 step 3: +∞ → §7.1.17 step 3 clamps to 2^53 - 1.
-        value.Infinity -> limits.max_safe_integer
-        // NaN / -∞ / anything non-positive → +0.
-        _ -> 0
-      }
-      #(len, state)
-    }
-  }
+  use #(num, state) <- result.map(coerce.js_to_number(state, val))
+  // Step 1: ToIntegerOrInfinity saturates ±∞ to ±(2^53 - 1), so the
+  // [0, 2^53 - 1] clamp is exactly steps 2-3 (NaN/-∞/negatives → 0,
+  // +∞ → 2^53 - 1).
+  let len =
+    int.clamp(
+      coerce.jsnum_to_integer_or_infinity(num),
+      0,
+      limits.max_safe_integer,
+    )
+  #(len, state)
 }
 
 /// Allocate a RangeError in the op-result shape `Result(a, #(JsValue, State))`
@@ -1309,27 +1310,6 @@ fn range_error_op(
 /// QuickJS lets such loops spin; we don't, since BEAM recursion is heavier
 /// than a C for-loop.
 const iteration_budget_msg = "Invalid array length"
-
-/// ES2024 §7.1.17 ToLength(argument)
-fn to_length(val: JsValue) -> Int {
-  case helpers.to_number_int(val) {
-    Some(n) if n > 0 -> int.min(n, limits.max_safe_integer)
-    // helpers.to_number_int collapses NaN and ±Infinity to None. §7.1.4.1.1
-    // StringNumericLiteral parses "Infinity"/"+Infinity" to +∞, which §7.1.17
-    // step 3 clamps to 2^53-1 — distinguish it from the NaN/-∞ → 0 bucket.
-    None ->
-      case val {
-        JsNumber(value.Infinity) -> limits.max_safe_integer
-        JsString(s) ->
-          case string.trim(s) {
-            "Infinity" | "+Infinity" -> limits.max_safe_integer
-            _ -> 0
-          }
-        _ -> 0
-      }
-    _ -> 0
-  }
-}
 
 /// IsCallable check + argument extraction for Array.prototype callback methods.
 ///
@@ -1370,79 +1350,6 @@ fn require_callback(
   }
 }
 
-/// Relative index resolution used by Array.prototype.{slice,fill,copyWithin,
-/// splice,at,indexOf,lastIndexOf,flat,flatMap,etc.}.
-///
-/// Implements the common "relative index" clamping pattern found throughout
-/// §23.1.3.*. Many array methods contain steps like:
-///
-///   Let relativeStart be ? ToIntegerOrInfinity(start).    (§7.1.5)
-///   If relativeStart = -∞, let k = 0.
-///   Else if relativeStart < 0, let k = max(len + relativeStart, 0).
-///   Else, let k = min(relativeStart, len).
-///
-/// ToIntegerOrInfinity (§7.1.5):
-///   1. Let number be ? ToNumber(argument).
-///   2. If number is NaN, +0, or -0, return 0.
-///   3. If number is +∞, return +∞. If -∞, return -∞.
-///   4. Return truncate(number).
-///
-/// Parameters:
-///   arg     — the raw JS argument (e.g. args[1] for slice's start)
-///   len     — the array length (for relative-to-end computation)
-///   default — value to use when arg is undefined (spec says different defaults
-///             for different methods: 0 for start, len for end, etc.)
-fn try_resolve_index(
-  state: State(host),
-  arg: JsValue,
-  len: Int,
-  default: Int,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case arg {
-    // Undefined args use the caller-specified default (e.g. slice(start)
-    // with no end → end defaults to len, not 0). ToNumber(undefined) has no
-    // observable steps, so skipping the coercion is spec-equivalent.
-    JsUndefined -> cont(default, state)
-    _ -> {
-      // §7.1.5 ToIntegerOrInfinity(arg) — observable: ToPrimitive may run
-      // user valueOf/toString/@@toPrimitive or throw (Symbol/BigInt).
-      use raw, state <- try_integer_or_infinity(state, arg)
-      // Relative index clamping (common pattern across §23.1.3.*):
-      //   If relativeIndex < 0, let k = max(len + relativeIndex, 0).
-      //   Else, let k = min(relativeIndex, len).
-      let k = case raw < 0 {
-        True -> int.max(len + raw, 0)
-        False -> int.min(raw, len)
-      }
-      cont(k, state)
-    }
-  }
-}
-
-/// CPS ToIntegerOrInfinity (ES2024 §7.1.5): full ToNumber — including
-/// ToPrimitive (valueOf/toString/@@toPrimitive) on objects, which can run
-/// user code or throw, and TypeError on Symbol/BigInt — then truncate, with
-/// ±∞ saturated to ±(2^53 - 1) so downstream clamps behave like the spec's
-/// explicit ±∞ branches (array lengths never exceed 2^53 - 1).
-fn try_integer_or_infinity(
-  state: State(host),
-  arg: JsValue,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use num, state <- coerce.try_to_number(state, arg)
-  let raw = case num {
-    // §7.1.5 step 5: truncate(number)
-    Finite(f) -> value.float_to_int(f)
-    // §7.1.5 step 2: NaN → +0
-    value.NaN -> 0
-    // §7.1.5 steps 3-4: ±∞, saturated for Int arithmetic
-    value.Infinity -> limits.max_safe_integer
-    value.NegInfinity -> -limits.max_safe_integer
-  }
-  cont(raw, state)
-}
-
 /// args[n], or undefined when absent — for optional trailing arguments.
 fn arg_or_undefined(args: List(JsValue), n: Int) -> JsValue {
   case list.drop(args, n) {
@@ -1471,7 +1378,7 @@ fn try_delete_count(
     [] -> cont(#(0, []), state)
     [_] -> cont(#(length - actual_start, []), state)
     [_, dc_val, ..rest] -> {
-      use dc, state <- try_integer_or_infinity(state, dc_val)
+      use dc, state <- coerce.try_to_integer_or_infinity(state, dc_val)
       cont(#(int.clamp(dc, 0, length - actual_start), rest), state)
     }
   }
@@ -1983,14 +1890,14 @@ fn array_slice(
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O).
   use this, _ref, length, state <- require_array(this, state)
   // Steps 3-6: relativeStart → k (clamped). Default 0 if no arg.
-  use start, state <- try_resolve_index(
+  use start, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 0),
     length,
     0,
   )
   // Steps 7-10: relativeEnd → final (clamped). Default len if no end arg.
-  use end, state <- try_resolve_index(
+  use end, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 1),
     length,
@@ -2965,9 +2872,9 @@ fn array_fill(
   // Step 12 uses value; if not provided, defaults to undefined
   let fill_val = helpers.first_arg_or_undefined(args)
   // Steps 3-6: relativeStart → k (clamped index)
-  // try_resolve_index handles ToIntegerOrInfinity + clamping; default 0 when
-  // absent. The coercion can run user code or throw.
-  use start, state <- try_resolve_index(
+  // coerce.try_relative_index handles ToIntegerOrInfinity + clamping;
+  // default 0 when absent. The coercion can run user code or throw.
+  use start, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 1),
     length,
@@ -2975,7 +2882,7 @@ fn array_fill(
   )
   // Steps 7-11: relativeEnd → final (clamped index); default len when absent
   // (step 7: if end is undefined, relativeEnd = len)
-  use end, state <- try_resolve_index(
+  use end, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 2),
     length,
@@ -3038,7 +2945,10 @@ fn array_at(
   use this, _ref, length, state <- require_array(this, state)
   // Step 3: relativeIndex = ToIntegerOrInfinity(index) — observable
   // coercion: valueOf/toString run, Symbol/BigInt throw TypeError.
-  use raw, state <- try_integer_or_infinity(state, arg_or_undefined(args, 0))
+  use raw, state <- coerce.try_to_integer_or_infinity(
+    state,
+    arg_or_undefined(args, 0),
+  )
   // Steps 4-5: resolve negative index
   let idx = case raw < 0 {
     True -> length + raw
@@ -3118,7 +3028,10 @@ fn forward_search_driver(
   // ±(2^53 - 1), so:
   //   Step 5 (n = +∞ → miss): start >= length, search loop exits with -1.
   //   Step 6 (n = -∞ → 0): max(length + n, 0) = 0.
-  use from, state <- try_integer_or_infinity(state, arg_or_undefined(args, 1))
+  use from, state <- coerce.try_to_integer_or_infinity(
+    state,
+    arg_or_undefined(args, 1),
+  )
   // Steps 7-8: resolve start index (negative → max(len + n, 0))
   let start = case from < 0 {
     True -> int.max(length + from, 0)
@@ -3197,7 +3110,7 @@ fn array_last_index_of(
   }
   case args {
     [_, f, ..] -> {
-      use from, state <- try_integer_or_infinity(state, f)
+      use from, state <- coerce.try_to_integer_or_infinity(state, f)
       proceed(from, state)
     }
     _ -> proceed(length - 1, state)
@@ -4829,7 +4742,7 @@ fn array_splice(
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use this, ref, length, state <- require_array(this, state)
   // Steps 3-6: actualStart
-  use actual_start, state <- try_resolve_index(
+  use actual_start, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 0),
     length,
@@ -4842,7 +4755,13 @@ fn array_splice(
     length,
     actual_start,
   )
-  // Step 11 prologue: A = ArraySpeciesCreate(O, actualDeleteCount) — the
+  // §23.1.3.31 step 11: If len + insertCount - actualDeleteCount > 2^53 - 1,
+  // throw TypeError. This precedes ArraySpeciesCreate (step 12) so a species
+  // constructor never observes a splice the spec has already rejected.
+  let item_count = list.length(items)
+  let new_length = length - actual_delete_count + item_count
+  use <- state.guard_safe_length(state, new_length)
+  // Step 12 prologue: A = ArraySpeciesCreate(O, actualDeleteCount) — the
   // species constructor (if any) runs before the removal copy loop.
   use species, state <- state.try_op(array_species_create(
     state,
@@ -4892,11 +4811,7 @@ fn array_splice(
       #(JsObject(target), state)
     }
   })
-  // Steps 12-17: Shift elements and insert items.
-  let item_count = list.length(items)
-  let new_length = length - actual_delete_count + item_count
-  // §23.1.3.31 step 11: If len + insertCount - actualDeleteCount > 2^53 - 1, throw TypeError
-  use <- state.guard_safe_length(state, new_length)
+  // Steps 15-20: Shift elements, insert items, set length.
   let shift = item_count - actual_delete_count
   // Fast path: shift + insert + truncate + length update fused into one heap
   // read-modify-write. Eligibility is checked here, after copy_range — on
@@ -5071,7 +4986,7 @@ fn array_flat(
   case helpers.first_arg_or_undefined(args) {
     JsUndefined -> proceed(1, state)
     d -> {
-      use raw, state <- try_integer_or_infinity(state, d)
+      use raw, state <- coerce.try_to_integer_or_infinity(state, d)
       proceed(int.max(raw, 0), state)
     }
   }
@@ -5337,21 +5252,21 @@ fn array_copy_within(
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use this, ref, length, state <- require_array(this, state)
   // Steps 3-5: target (observable ToIntegerOrInfinity, in argument order)
-  use target, state <- try_resolve_index(
+  use target, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 0),
     length,
     0,
   )
   // Steps 6-8: start (from)
-  use from, state <- try_resolve_index(
+  use from, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 1),
     length,
     0,
   )
   // Steps 9-11: end (final)
-  use final, state <- try_resolve_index(
+  use final, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 2),
     length,
@@ -5761,7 +5676,7 @@ fn array_to_spliced(
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use this, _ref, length, state <- require_array(this, state)
   // Steps 3-6: actualStart
-  use actual_start, state <- try_resolve_index(
+  use actual_start, state <- coerce.try_relative_index(
     state,
     arg_or_undefined(args, 0),
     length,
@@ -5853,7 +5768,10 @@ fn array_with(
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
   use this, _ref, length, state <- require_array(this, state)
   // Step 3: relativeIndex = ToIntegerOrInfinity(index) — observable coercion
-  use raw, state <- try_integer_or_infinity(state, arg_or_undefined(args, 0))
+  use raw, state <- coerce.try_to_integer_or_infinity(
+    state,
+    arg_or_undefined(args, 0),
+  )
   // Steps 4-5: resolve relative index (without clamping — out of bounds throws)
   let actual_index = case raw < 0 {
     True -> length + raw

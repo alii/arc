@@ -239,7 +239,7 @@ fn string_char_at(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 3: ToIntegerOrInfinity(pos)
-  use idx, state <- try_integer_or_infinity(
+  use idx, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -275,7 +275,7 @@ fn string_char_code_at(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 3: ToIntegerOrInfinity(pos)
-  use idx, state <- try_integer_or_infinity(
+  use idx, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -319,55 +319,20 @@ fn string_index_of(
     state,
     helpers.first_arg_or_undefined(args),
   )
-  // Steps 4-7: ToIntegerOrInfinity(position), clamp between 0 and len.
-  // This goes through ToNumber, so an object position argument (e.g.
+  // Steps 4-7: ToIntegerOrInfinity(position), clamped to a valid start index
+  // in [0, len] (the step-7 clamp): NaN/±0 → 0, +∞ → len, -∞ → 0. This goes
+  // through ToNumber, so an object position argument (e.g.
   // `{valueOf(){return 1}}`) is coerced via valueOf/@@toPrimitive rather than
   // silently falling back to 0.
   let pos_val = case helpers.list_at(args, 1) {
     Some(v) -> v
     None -> JsUndefined
   }
-  use num, state <- coerce.try_to_number(state, pos_val)
-  let from = integer_or_infinity_to_start(num, object.string_length(s))
+  use pos, state <- coerce.try_to_integer_or_infinity(state, pos_val)
+  let from = int.clamp(pos, 0, object.string_length(s))
   // Step 8: StringIndexOf(S, searchStr, start)
   let result = index_of_from(s, search, from)
   #(state, Ok(value.from_int(result)))
-}
-
-/// ToIntegerOrInfinity (§7.1.5) of an already-ToNumber'd value, clamped to a
-/// valid string start index in [0, len] (the indexOf step-7 clamp). NaN and
-/// ±0 → 0; +inf → len; -inf → 0; finite → truncate toward zero, then clamp.
-fn integer_or_infinity_to_start(num: value.JsNum, len: Int) -> Int {
-  case num {
-    Finite(n) -> int.clamp(value.float_to_int(n), 0, len)
-    NaN -> 0
-    value.Infinity -> len
-    value.NegInfinity -> 0
-  }
-}
-
-/// §7.1.5 ToIntegerOrInfinity of an already-ToNumber'd value, with ±∞
-/// saturated to ±(2^53 - 1) so downstream clamps behave like the spec's
-/// explicit ±∞ branches (string lengths are far below 2^53).
-fn jsnum_to_int_saturated(num: value.JsNum) -> Int {
-  case num {
-    Finite(n) -> value.float_to_int(n)
-    NaN -> 0
-    value.Infinity -> 9_007_199_254_740_991
-    value.NegInfinity -> -9_007_199_254_740_991
-  }
-}
-
-/// CPS: full ToIntegerOrInfinity (§7.1.5) — runs ToNumber (including
-/// ToPrimitive via valueOf/@@toPrimitive on objects, which can throw), then
-/// converts to an Int with saturated infinities.
-fn try_integer_or_infinity(
-  state: State(host),
-  val: JsValue,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use num, state <- coerce.try_to_number(state, val)
-  cont(jsnum_to_int_saturated(num), state)
 }
 
 /// ES2024 §7.2.6 IsRegExp ( argument )
@@ -440,7 +405,7 @@ fn string_last_index_of(
   let from = case num {
     // Step 6: NaN => +inf, clamped to len
     NaN -> len
-    _ -> int.clamp(jsnum_to_int_saturated(num), 0, len)
+    _ -> int.clamp(coerce.jsnum_to_integer_or_infinity(num), 0, len)
   }
   // Steps 10-11: search backwards from start
   let result = last_index_of_from(s, search, from)
@@ -497,7 +462,7 @@ fn string_search_bool(
       // ToString(searchString)
       use search, state <- coerce.try_to_string(state, search_val)
       // ToIntegerOrInfinity(position), clamp, then test from that offset
-      use pos, state <- try_integer_or_infinity(
+      use pos, state <- coerce.try_to_integer_or_infinity(
         state,
         helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
       )
@@ -591,7 +556,7 @@ fn string_end_position(
   case args {
     [_, JsUndefined, ..] -> cont(len, state)
     [_, pos_val, ..] -> {
-      use pos, state <- try_integer_or_infinity(state, pos_val)
+      use pos, state <- coerce.try_to_integer_or_infinity(state, pos_val)
       cont(int.clamp(pos, 0, len), state)
     }
     _ -> cont(len, state)
@@ -624,7 +589,7 @@ fn string_slice(
   // Step 3: len = length of S
   let len = object.string_length(s)
   // Steps 4-7: ToIntegerOrInfinity(start), resolve negatives
-  use int_start, state <- try_integer_or_infinity(
+  use int_start, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -649,7 +614,7 @@ fn string_slice_end(
   case args {
     [_, JsUndefined, ..] -> cont(len, state)
     [_, v, ..] -> {
-      use int_end, state <- try_integer_or_infinity(state, v)
+      use int_end, state <- coerce.try_to_integer_or_infinity(state, v)
       cont(resolve_slice_index(int_end, len), state)
     }
     _ -> cont(len, state)
@@ -690,7 +655,7 @@ fn string_substring(
   // Step 3: len = length of S
   let len = object.string_length(s)
   // Step 4: ToIntegerOrInfinity(start)
-  use raw_start, state <- try_integer_or_infinity(
+  use raw_start, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -717,7 +682,7 @@ fn string_substring_end(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [_, JsUndefined, ..] -> cont(len, state)
-    [_, v, ..] -> try_integer_or_infinity(state, v, cont)
+    [_, v, ..] -> coerce.try_to_integer_or_infinity(state, v, cont)
     _ -> cont(len, state)
   }
 }
@@ -1724,7 +1689,7 @@ fn string_repeat(
     value.Infinity | value.NegInfinity ->
       state.range_error(state, "Invalid count value: Infinity")
     _ -> {
-      let count = jsnum_to_int_saturated(num)
+      let count = coerce.jsnum_to_integer_or_infinity(num)
       case count < 0 {
         True ->
           state.range_error(
@@ -1791,7 +1756,7 @@ fn string_pad(
   use s, state <- with_this_string(this, state)
   // StringPad step 2: ToLength(maxLength) — ToNumber then clamp to
   // [0, 2^53 - 1] (negative and NaN become 0).
-  use max_len, state <- try_integer_or_infinity(
+  use max_len, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -1834,7 +1799,7 @@ fn string_at(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 4: ToIntegerOrInfinity(index)
-  use idx, state <- try_integer_or_infinity(
+  use idx, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -1876,7 +1841,7 @@ fn string_code_point_at(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 3: ToIntegerOrInfinity(pos)
-  use pos, state <- try_integer_or_infinity(
+  use pos, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -2233,7 +2198,7 @@ fn string_substr(
   use s, state <- with_this_string(this, state)
   let size = object.string_length(s)
   // B.2.2.1 step 3: intStart = ToIntegerOrInfinity(start)
-  use raw_start, state <- try_integer_or_infinity(
+  use raw_start, state <- coerce.try_to_integer_or_infinity(
     state,
     helpers.first_arg_or_undefined(args),
   )
@@ -2263,7 +2228,8 @@ fn substr_length(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [_, JsUndefined, ..] -> cont(size, state)
-    [_, length_arg, ..] -> try_integer_or_infinity(state, length_arg, cont)
+    [_, length_arg, ..] ->
+      coerce.try_to_integer_or_infinity(state, length_arg, cont)
     _ -> cont(size, state)
   }
 }

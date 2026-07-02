@@ -1,8 +1,6 @@
 /// Shared runtime helpers for builtins.
 import arc/vm/heap.{type Heap}
-import arc/vm/value.{
-  type JsValue, Finite, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot,
-}
+import arc/vm/value.{type JsValue, JsObject, JsUndefined, ObjectSlot}
 import gleam/option.{type Option, None, Some}
 
 /// ES2024 §7.2.3 IsCallable(argument)
@@ -47,47 +45,5 @@ pub fn first_arg_or_undefined(args: List(JsValue)) -> JsValue {
   case args {
     [v, ..] -> v
     [] -> JsUndefined
-  }
-}
-
-/// Partial implementation of ES2024 §7.1.5 ToIntegerOrInfinity(argument)
-/// combined with §7.1.4 ToNumber(argument).
-///
-/// Spec steps for ToIntegerOrInfinity:
-///   1. Let number be ? ToNumber(argument).
-///   2. If number is NaN, +0, or -0, return 0.
-///   3. If number is +Infinity, return +Infinity.
-///   4. If number is -Infinity, return -Infinity.
-///   5. Return truncate(number).
-///
-/// Returns Option(Int) instead of a numeric type — None stands for
-/// NaN/Infinity/undefined (callers supply a default). This collapses
-/// steps 2-4 differently: NaN/Infinity -> None, finite -> truncated Int.
-/// The ToNumber conversion (step 1) is inlined here using the §7.1.4 table:
-///   undefined -> NaN, null -> +0, true -> 1, false -> 0, string -> parsed.
-/// Objects are not handled (would need ToPrimitive first).
-pub fn to_number_int(val: JsValue) -> Option(Int) {
-  case val {
-    // §7.1.4: Number -> identity; then §7.1.5 step 5: truncate
-    JsNumber(Finite(n)) -> Some(value.float_to_int(n))
-    // §7.1.5 steps 3-4: Infinity -> None (caller supplies default)
-    JsNumber(_) -> None
-    // §7.1.4: undefined -> NaN; §7.1.5 step 2: NaN -> None
-    JsUndefined -> None
-    // §7.1.4: null -> +0
-    value.JsNull -> Some(0)
-    // §7.1.4: true -> 1, false -> 0
-    value.JsBool(True) -> Some(1)
-    value.JsBool(False) -> Some(0)
-    // §7.1.4: String -> StringToNumber (§7.1.4.1.1). value.string_to_number
-    // is the single StringToNumber implementation: it trims StrWhiteSpace and
-    // handles signs, Infinity, exponents and hex/octal/binary prefixes.
-    JsString(s) ->
-      case value.string_to_number(s) {
-        Finite(f) -> Some(value.float_to_int(f))
-        _ -> None
-      }
-    // Objects would need ToPrimitive — not handled, returns None
-    _ -> None
   }
 }

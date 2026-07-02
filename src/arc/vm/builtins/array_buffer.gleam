@@ -549,14 +549,14 @@ fn buffer_slice(
   // Step 5
   let len = value.buffer_byte_size(buf.data)
   // Steps 6-7: relativeStart
-  use first, state <- try_relative_index(
+  use first, state <- coerce.try_relative_index(
     state,
     helpers.first_arg_or_undefined(args),
     len,
     0,
   )
   // Steps 8-9: relativeEnd (undefined → len)
-  use final, state <- try_relative_index(
+  use final, state <- coerce.try_relative_index(
     state,
     helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
     len,
@@ -663,13 +663,13 @@ fn slice_to_immutable(
   // Step 5
   let len = value.buffer_byte_size(buf.data)
   // Steps 6-8: ResolveBounds — ToIntegerOrInfinity may run user code.
-  use first, state <- try_relative_index(
+  use first, state <- coerce.try_relative_index(
     state,
     helpers.first_arg_or_undefined(args),
     len,
     0,
   )
-  use final, state <- try_relative_index(
+  use final, state <- coerce.try_relative_index(
     state,
     helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
     len,
@@ -1117,37 +1117,6 @@ fn try_to_index(
     }
     value.Infinity | value.NegInfinity ->
       state.range_error(state, "Invalid array buffer length")
-  }
-}
-
-/// ToIntegerOrInfinity(value) clamped into [0, len] with the slice-relative
-/// rule: negative values count back from len. `default` is used when the
-/// argument is undefined (start → 0, end → len).
-fn try_relative_index(
-  state: State(host),
-  val: JsValue,
-  len: Int,
-  default: Int,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case val {
-    JsUndefined -> cont(default, state)
-    _ -> {
-      use n, state <- coerce.try_to_number(state, val)
-      let idx = case n {
-        value.NaN -> 0
-        value.Infinity -> len
-        value.NegInfinity -> 0
-        value.Finite(f) -> {
-          let i = value.float_to_int(f)
-          case i < 0 {
-            True -> int.max(len + i, 0)
-            False -> int.min(i, len)
-          }
-        }
-      }
-      cont(idx, state)
-    }
   }
 }
 

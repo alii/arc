@@ -19,18 +19,17 @@ import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type MapKey, type Ref, type SetNativeFn, Dispatch, Finite,
-  Infinity, JsBool, JsNumber, JsObject, JsUndefined, NaN, Named, NegInfinity,
-  ObjectSlot, SetConstructor, SetNative, SetObject, SetPrototypeAdd,
-  SetPrototypeClear, SetPrototypeDelete, SetPrototypeDifference,
-  SetPrototypeEntries, SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas,
+  JsBool, JsNumber, JsObject, JsUndefined, NaN, Named, ObjectSlot,
+  SetConstructor, SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear,
+  SetPrototypeDelete, SetPrototypeDifference, SetPrototypeEntries,
+  SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas,
   SetPrototypeIntersection, SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf,
   SetPrototypeIsSupersetOf, SetPrototypeSymmetricDifference, SetPrototypeUnion,
   SetPrototypeValues,
 }
 import gleam/dict
-import gleam/float
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{type Option, None, Some}
 
 /// Set up Set.prototype and Set constructor.
 pub fn init(
@@ -428,13 +427,36 @@ fn set_is_superset_of(
   case dict.size(data) < rec.size {
     True -> #(state, Ok(JsBool(False)))
     False -> {
-      use other_values, state <- with_drained_keys(state, rec)
-      let is_superset =
-        list.all(other_values, fn(v) {
-          dict.has_key(data, value.js_to_map_key(v))
-        })
-      #(state, Ok(JsBool(is_superset)))
+      // Steps 5-8: step other's keys iterator one value at a time.
+      // Draining the whole iterator first would never terminate on an
+      // infinite iterator whose first value is already a non-member.
+      use iter, next_fn, state <- with_keys_iterator(state, rec)
+      superset_step_loop(state, data, iter, next_fn)
     }
+  }
+}
+
+/// §24.2.3.10 steps 7-8: return true once the keys iterator is exhausted;
+/// on the FIRST key absent from `data`, close the iterator (step 7.b.i.1)
+/// and return false.
+fn superset_step_loop(
+  state: State(host),
+  data: dict.Dict(MapKey, JsValue),
+  iter: JsValue,
+  next_fn: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use next, state <- step_keys(state, iter, next_fn)
+  case next {
+    None -> #(state, Ok(JsBool(True)))
+    Some(v) ->
+      case dict.has_key(data, value.js_to_map_key(v)) {
+        True -> superset_step_loop(state, data, iter, next_fn)
+        False ->
+          case iterator.iterator_close_normal(state, iter) {
+            #(state, Ok(Nil)) -> #(state, Ok(JsBool(False)))
+            #(state, Error(thrown)) -> #(state, Error(thrown))
+          }
+      }
   }
 }
 
@@ -528,7 +550,7 @@ fn alloc_new_set_from_values(
 // ---- GetSetRecord + protocol helpers ----
 
 /// Spec's "Set Record" — captured size/has/keys from the other argument.
-/// `size` is the post-ToIntegerOrInfinity integer (Infinity → max int).
+/// `size` is the post-ToIntegerOrInfinity integer (+∞ saturated to 2^53 - 1).
 type SetRecord {
   SetRecord(obj: JsValue, size: Int, has: JsValue, keys: JsValue)
 }
@@ -564,13 +586,10 @@ fn get_set_record(
         Error(msg) -> state.type_error(state, msg)
         Ok(NaN) -> state.type_error(state, "size is NaN")
         Ok(num) -> {
-          // Step 5: ToIntegerOrInfinity(numSize)
-          let int_size = case num {
-            Finite(f) -> float.truncate(f)
-            Infinity -> 2_147_483_647
-            NegInfinity -> -1
-            NaN -> 0
-          }
+          // Step 5: ToIntegerOrInfinity(numSize). ±∞ saturate to
+          // ±(2^53 - 1), so -∞ still trips step 6's `< 0` RangeError and
+          // +∞ still exceeds every real [[SetData]] size.
+          let int_size = coerce.jsnum_to_integer_or_infinity(num)
           // Step 6: if intSize < 0, throw RangeError
           case int_size < 0 {
             True -> state.range_error(state, "size is negative")
@@ -611,12 +630,13 @@ fn get_set_record(
   }
 }
 
-/// Call rec.keys(), then drain the returned iterator via .next() into a list.
-/// CPS wrapper so callers can `use values, state <- with_drained_keys(...)`.
-fn with_drained_keys(
+/// §24.2.1.3 GetKeysIterator(rec): call rec.keys(), resolve the returned
+/// iterator's .next method, and hand both to the continuation.
+/// CPS wrapper — `use iter, next_fn, state <- with_keys_iterator(state, rec)`.
+fn with_keys_iterator(
   state: State(host),
   rec: SetRecord,
-  cont: fn(List(JsValue), State(host)) ->
+  cont: fn(JsValue, JsValue, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use iter, state <- state.try_call(state, rec.keys, rec.obj, [])
@@ -630,11 +650,27 @@ fn with_drained_keys(
       ))
       case helpers.is_callable(state.heap, next_fn) {
         False -> state.type_error(state, "iterator.next is not a function")
-        True -> drain_loop(state, iter, next_fn, [], cont)
+        True -> cont(iter, next_fn, state)
       }
     }
     _ -> state.type_error(state, "keys() did not return an object")
   }
+}
+
+/// Call rec.keys(), then drain the returned iterator via .next() into a list.
+/// Only for consumers that must visit every key regardless (difference,
+/// symmetricDifference, union) — anything that can short-circuit must step
+/// the iterator itself (see superset_step_loop) or it will never terminate
+/// on an infinite iterator.
+/// CPS wrapper so callers can `use values, state <- with_drained_keys(...)`.
+fn with_drained_keys(
+  state: State(host),
+  rec: SetRecord,
+  cont: fn(List(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use iter, next_fn, state <- with_keys_iterator(state, rec)
+  drain_loop(state, iter, next_fn, [], cont)
 }
 
 fn drain_loop(
@@ -643,6 +679,23 @@ fn drain_loop(
   next_fn: JsValue,
   acc: List(JsValue),
   cont: fn(List(JsValue), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use next, state <- step_keys(state, iter, next_fn)
+  case next {
+    None -> cont(list.reverse(acc), state)
+    Some(v) -> drain_loop(state, iter, next_fn, [v, ..acc], cont)
+  }
+}
+
+/// One §7.4.8 IteratorStepValue on a keys iterator: `None` = done,
+/// `Some(v)` = the next value (with -0 normalized to +0 per §24.2.1.2
+/// step 7.b.ii). CPS — `use next, state <- step_keys(state, iter, next_fn)`.
+fn step_keys(
+  state: State(host),
+  iter: JsValue,
+  next_fn: JsValue,
+  cont: fn(Option(JsValue), State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use result_obj, state <- state.try_call(state, next_fn, iter, [])
@@ -655,7 +708,7 @@ fn drain_loop(
         result_obj,
       ))
       case value.is_truthy(done) {
-        True -> cont(list.reverse(acc), state)
+        True -> cont(None, state)
         False -> {
           use v, state <- state.try_op(object.get_value(
             state,
@@ -663,9 +716,7 @@ fn drain_loop(
             Named("value"),
             result_obj,
           ))
-          // §24.2.1.2 step 7.b.ii: if nextValue is -0, set nextValue to +0.
-          let v = normalize_neg_zero(v)
-          drain_loop(state, iter, next_fn, [v, ..acc], cont)
+          cont(Some(normalize_neg_zero(v)), state)
         }
       }
     }

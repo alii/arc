@@ -1,5 +1,6 @@
 import arc/vm/builtins/helpers
 import arc/vm/heap
+import arc/vm/limits
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
@@ -196,6 +197,82 @@ pub fn try_to_number(
   case js_to_number(state, val) {
     Ok(#(n, state)) -> cont(n, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+// ============================================================================
+// ToIntegerOrInfinity (ES2024 §7.1.5)
+// ============================================================================
+
+/// ES2024 §7.1.5 ToIntegerOrInfinity of an already-ToNumber'd value, with
+/// ±∞ saturated to ±(2^53 - 1) (`limits.max_safe_integer`, the spec cap on
+/// array-like lengths). This is THE single §7.1.5 / saturation point in the
+/// codebase:
+///   step 2: NaN, +0, -0 → 0
+///   steps 3-4: +∞ → 2^53 - 1, -∞ → -(2^53 - 1)
+///   step 5: finite → truncate toward zero
+/// Because every string/array length is < 2^53 - 1, the downstream
+/// `int.clamp`/`int.min`/`int.max` a caller applies behaves exactly like the
+/// spec's explicit "+∞ → len / -∞ → 0" branches — and range guards (e.g.
+/// toString's `radix < 2 || radix > 36`) actually SEE an out-of-range value
+/// for ±∞ instead of a caller-invented default.
+///
+/// The one thing saturation erases is the ±∞ itself. The rare callers for
+/// which +∞/-∞ is directly observable (Atomics stores return it; typed-array
+/// element conversion maps non-finite to +0) must match on the `value.JsNum`
+/// from `try_to_number` before saturating.
+pub fn jsnum_to_integer_or_infinity(num: value.JsNum) -> Int {
+  case num {
+    NaN -> 0
+    Finite(f) -> value.float_to_int(f)
+    Infinity -> limits.max_safe_integer
+    NegInfinity -> -limits.max_safe_integer
+  }
+}
+
+/// CPS ToIntegerOrInfinity (ES2024 §7.1.5): full ToNumber — including
+/// ToPrimitive (valueOf/toString/@@toPrimitive) on objects, which can run
+/// user code or throw, and TypeError on Symbol/BigInt — then
+/// `jsnum_to_integer_or_infinity`. Use with `use` syntax:
+///   use i, state <- coerce.try_to_integer_or_infinity(state, val)
+pub fn try_to_integer_or_infinity(
+  state: State(host),
+  val: JsValue,
+  cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  use num, state <- try_to_number(state, val)
+  cont(jsnum_to_integer_or_infinity(num), state)
+}
+
+/// Relative start/end index resolution shared by the Array / ArrayBuffer /
+/// TypedArray slice-family methods (§23.1.3.x, §25.1.6.x common steps):
+///
+///   Let relativeIndex be ? ToIntegerOrInfinity(val).
+///   If relativeIndex = -∞, k = 0.
+///   Else if relativeIndex < 0, k = max(len + relativeIndex, 0).
+///   Else, k = min(relativeIndex, len).
+///
+/// `default` is used when `val` is undefined (the spec gives different
+/// defaults per position: 0 for start, `len` for end). ToNumber(undefined)
+/// has no observable steps, so skipping the coercion there is
+/// spec-equivalent.
+pub fn try_relative_index(
+  state: State(host),
+  val: JsValue,
+  len: Int,
+  default: Int,
+  cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  case val {
+    JsUndefined -> cont(default, state)
+    _ -> {
+      use raw, state <- try_to_integer_or_infinity(state, val)
+      let k = case raw < 0 {
+        True -> int.max(len + raw, 0)
+        False -> int.min(raw, len)
+      }
+      cont(k, state)
+    }
   }
 }
 
