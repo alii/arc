@@ -20,13 +20,6 @@ import gleam/option.{type Option, None, Some}
 // Pattern / declarator name extraction
 // ============================================================================
 
-/// Recursively extract all bound variable names from a pattern.
-/// Compiler-local alias for `ast.pattern_bound_names` (§8.2.1 BoundNames),
-/// the single implementation shared with ESM export analysis.
-pub fn collect_pattern_names(pattern: ast.Pattern) -> List(String) {
-  ast.pattern_bound_names(pattern)
-}
-
 /// Split off a trailing `...rest` parameter. Returns the fixed params (in
 /// order) and the rest target pattern (the binding inside `...`), if
 /// present. A rest element is only valid as the last formal, so checking
@@ -65,7 +58,7 @@ pub fn declarator_names(
 ) -> List(String) {
   list.flat_map(declarators, fn(d) {
     let ast.VariableDeclarator(pattern, _) = d
-    collect_pattern_names(pattern)
+    ast.pattern_bound_names(pattern)
   })
 }
 

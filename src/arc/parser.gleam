@@ -1992,7 +1992,7 @@ fn parse_for_declaration(
       use Nil <- result.try(case kind {
         Var ->
           check_new_vars_vs_params(
-            ast_util.collect_pattern_names(pattern),
+            ast.pattern_bound_names(pattern),
             catch_params,
             pos_of(p3),
           )

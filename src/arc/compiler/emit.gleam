@@ -3001,7 +3001,7 @@ fn compile_function_body(
   // blocked set. This is function-code-only — B.3.3.2/B.3.3.3 (script/eval)
   // have no parameter condition.
   let param_names =
-    set.from_list(list.flat_map(params, ast_util.collect_pattern_names))
+    set.from_list(list.flat_map(params, ast.pattern_bound_names))
 
   // Fresh emitter wired to the parent's whole-program scope tree and
   // positioned at this child's function-kind scope so emit_var_* /
@@ -3135,7 +3135,7 @@ fn compile_function_body(
   // no own `arguments` binding (argumentsObjectNeeded is false), so only
   // their parameter names participate.
   let declared_param_names =
-    list.flat_map(params, ast_util.collect_pattern_names)
+    list.flat_map(params, ast.pattern_bound_names)
   let param_scope_names = case is_arrow {
     True -> declared_param_names
     False -> ["arguments", ..declared_param_names]
@@ -5385,7 +5385,7 @@ fn for_head_lex_names(left: ast.ForInit) -> List(String) {
         ast.Let | ast.Const | ast.Using | ast.AwaitUsing ->
           list.flat_map(declarators, fn(d) {
             let ast.VariableDeclarator(pattern, _) = d
-            ast_util.collect_pattern_names(pattern)
+            ast.pattern_bound_names(pattern)
           })
         ast.Var -> []
       }
