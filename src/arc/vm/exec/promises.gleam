@@ -1432,7 +1432,7 @@ fn get_keyed_value(
       object.get_value(
         state,
         loop.promises_ref,
-        value.canonical_key(s),
+        key.canonical_key(s),
         loop.promises,
       )
     value.JsSymbol(sym) ->
@@ -1481,7 +1481,7 @@ fn create_keyed_result(
       let #(k, v) = kv
       case k {
         JsString(s) ->
-          object.create_data_property(h, obj_ref, value.canonical_key(s), v)
+          object.create_data_property(h, obj_ref, key.canonical_key(s), v)
         value.JsSymbol(sym) ->
           object.define_symbol_property(h, obj_ref, sym, value.data_property(v))
         // Keys come from [[OwnPropertyKeys]] — String/Symbol only.

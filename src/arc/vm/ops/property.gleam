@@ -1,10 +1,10 @@
-import arc/vm/key.{Index, Named, max_array_index}
+import arc/vm/key.{type PropertyKey, Index, Named, max_array_index}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object.{type PropKey, PkString, PkSymbol}
 import arc/vm/state.{type State}
 import arc/vm/value.{
-  type JsValue, type PropertyKey, Finite, JsNumber, JsObject, JsString, JsSymbol,
+  type JsValue, Finite, JsNumber, JsObject, JsString, JsSymbol,
 }
 import gleam/float
 import gleam/int
@@ -74,11 +74,11 @@ fn primitive_to_prop_key(
     JsNumber(value.NaN) -> Ok(#(PkString(Named("NaN")), state))
     JsNumber(value.Infinity) -> Ok(#(PkString(Named("Infinity")), state))
     JsNumber(value.NegInfinity) -> Ok(#(PkString(Named("-Infinity")), state))
-    JsString(s) -> Ok(#(PkString(value.canonical_key(s)), state))
+    JsString(s) -> Ok(#(PkString(key.canonical_key(s)), state))
     // Step 3: ToString(key) — key is a non-Symbol primitive, cannot re-enter.
     _ -> {
       use #(s, state) <- result.map(coerce.js_to_string(state, key))
-      #(PkString(value.canonical_key(s)), state)
+      #(PkString(key.canonical_key(s)), state)
     }
   }
 }

@@ -271,7 +271,7 @@ pub type Op {
   DeleteField(key: PropertyKey)
   DeleteElem
   // The four static private-element ops carry the RAW private name ("#x").
-  // Private names live in a hidden NUL-marker namespace (value.private_key)
+  // Private names live in a hidden NUL-marker namespace (key.private_key)
   // and are never canonicalized to array indices — carrying a String makes a
   // private→public Index leak unrepresentable.
   /// §7.3.31 PrivateGet. Stack: [obj, ..] → [val, ..]. Throws TypeError if

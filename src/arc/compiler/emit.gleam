@@ -420,7 +420,7 @@ pub fn emit_module(
   // (§16.2.3.7 BoundNames) and are lowered to ordinary declarations below.
   // The analyzer pre-registers `*default*` (VarBinding) in the module
   // function scope when an anonymous default export is present.
-  let stmts = ast_util.module_items_to_stmts(items)
+  let stmts = module_items_to_stmts(items)
   // Module-top-level using declarations: exported bindings must stay
   // module-scoped, so no AST try block — emit_module_using_top installs a
   // scope-free try frame instead so the DisposeResources sequence also
@@ -1048,6 +1048,26 @@ fn emit_module_using_top(
   // surrounding emit_module expects one on stack like the no-using
   // emit_stmts_tail path).
   push_const(e, JsUndefined)
+}
+
+/// Convert module items to statements — see
+/// ast_util.module_items_to_stmts for the shared lowering. An ANONYMOUS
+/// `export default <expr>` becomes `*default* = expr;` (the *default*
+/// local is declared during module hoisting; the synthesized assignment
+/// carries the declaration span so errors point at real source).
+fn module_items_to_stmts(
+  items: List(ast.ModuleItem),
+) -> List(ast.StmtWithLine) {
+  use expr, span <- ast_util.module_items_to_stmts(items)
+  ast.ExpressionStatement(
+    expression: ast.AssignmentExpression(
+      operator: ast.Assign,
+      left: ast.Identifier(name: "*default*", span:),
+      right: expr,
+      span:,
+    ),
+    directive: None,
+  )
 }
 
 /// Shared top-level emission trunk for emit_program / emit_eval_direct:
@@ -4829,10 +4849,9 @@ fn emit_switch(
 
   // The CaseBlock is a single block scope (§14.12.4 step 3-5): case tests and
   // bodies run inside it, with its let/const/class + function declarations
-  // instantiated up front (BlockDeclarationInstantiation). The parser put
-  // its child scopes into the SAME hoist order (scope.
-  // sb_reorder_switch_children) so the positional cursors below line up.
-  let case_stmts = ast_util.switch_case_stmts(cases)
+  // instantiated up front (BlockDeclarationInstantiation). The scope analyzer
+  // walks the SAME hoist order via ast_util.switch_emit_groups.
+  let #(case_stmts, _decls, _rest) = ast_util.switch_emit_groups(cases)
   let #(e, save) = enter_scope(e, in_block: True)
   use e <- result.try(emit_block_declarations(e, case_stmts))
 

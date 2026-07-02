@@ -21,12 +21,11 @@ import arc/vm/internal/elements
 import arc/vm/internal/typed_array_ffi.{
   ta_clamp_uint8, ta_set_float, ta_set_int, ta_zeroed,
 }
-import arc/vm/key.{Index}
+import arc/vm/key.{type PropertyKey, Index}
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsElements, type JsValue, type Property, type PropertyKey, type Ref,
-  AccessorProperty, ArrayObject, DataProperty, Finite, JsNumber, JsObject,
-  ObjectSlot,
+  type JsElements, type JsValue, type Property, type Ref, AccessorProperty,
+  ArrayObject, DataProperty, Finite, JsNumber, JsObject, ObjectSlot,
 }
 import gleam/bit_array
 import gleam/bool

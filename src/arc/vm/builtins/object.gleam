@@ -45,7 +45,7 @@ const tdz_message = "Cannot access module export before initialization"
 /// apply_descriptor so it can look up/write to the right dict without
 /// threading two code paths through the validation logic.
 type DefineKey {
-  StringKey(pkey: value.PropertyKey, display: String)
+  StringKey(pkey: key.PropertyKey, display: String)
   SymbolKey(sym: value.SymbolId)
 }
 
@@ -68,7 +68,7 @@ fn to_define_key(
 /// hands it to proxy `defineProperty` / `getOwnPropertyDescriptor` traps as
 /// the property-key argument, and the String-exotic gOPD path compares it to
 /// "length". So it must be the exact ToPropertyKey string — never
-/// `value.key_to_string`, which is a *renderer* that strips the engine's
+/// `key.key_to_string`, which is a *renderer* that strips the engine's
 /// internal private-name NUL marker and would hand traps a mangled key.
 fn prop_key_to_define_key(pk: object.PropKey) -> DefineKey {
   case pk {
@@ -103,7 +103,7 @@ fn get_own_property_by_key(
 ) -> Option(value.Property) {
   case key {
     SymbolKey(sym) -> object.get_own_symbol_property(heap, ref, sym)
-    // Private elements (NUL-marker keys, see value.private_key) are stored in
+    // Private elements (NUL-marker keys, see key.private_key) are stored in
     // the ordinary property table but are invisible to reflection (spec keeps
     // them in [[PrivateElements]]).
     StringKey(pkey: Named("\u{0}" <> _), ..) -> None
@@ -121,7 +121,7 @@ fn try_get(
   receiver: JsValue,
   cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case object.get_value(state, ref, value.canonical_key(key), receiver) {
+  case object.get_value(state, ref, key.canonical_key(key), receiver) {
     Ok(#(val, state)) -> cont(val, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
@@ -1702,7 +1702,7 @@ pub fn collect_own_keys(
 
 /// [[HasProperty]] — §7.3.11. Walks the prototype chain looking for a string key.
 /// Returns True if found as own property at any level, False if not found.
-fn has_property(heap: Heap(host), ref: Ref, key: value.PropertyKey) -> Bool {
+fn has_property(heap: Heap(host), ref: Ref, key: key.PropertyKey) -> Bool {
   case heap.read(heap, ref) {
     Some(ObjectSlot(properties:, prototype:, ..)) ->
       case dict.has_key(properties, key) {
@@ -2144,7 +2144,7 @@ fn collect_enumerable_via_traps(
           use #(val, state) <- result.try(object.get_value(
             state,
             ref,
-            value.canonical_key(s),
+            key.canonical_key(s),
             receiver,
           ))
           collect_enumerable_via_traps(state, ref, receiver, rest, combine, [
@@ -2180,7 +2180,7 @@ fn collect_enumerable(
       use #(val, state) <- result.try(object.get_value(
         state,
         ref,
-        value.canonical_key(k),
+        key.canonical_key(k),
         receiver,
       ))
       collect_enumerable(state, ref, receiver, rest, combine, [
@@ -2462,7 +2462,7 @@ fn assign_source(
           // String keys first:
           let ks =
             collect_own_keys(state.heap, src_ref, True)
-            |> list.map(value.canonical_key)
+            |> list.map(key.canonical_key)
           // Step 3.a.iii: For each string key, copy it.
           use state <- result.try(
             assign_keys(
@@ -2473,7 +2473,7 @@ fn assign_source(
               ks,
               object.get_value,
               object.set_value,
-              fn(_state, key) { value.key_to_string(key) },
+              fn(_state, key) { key.key_to_string(key) },
             ),
           )
           // Symbol keys next (also enumerable-only):
@@ -2624,7 +2624,7 @@ fn assign_proxy_keys(
         option.map(prop, value.prop_enumerable) |> option.unwrap(False)
       use state <- result.try(case enumerable, k {
         True, JsString(s) -> {
-          let key = value.canonical_key(s)
+          let key = key.canonical_key(s)
           // Step 2.a: Let propValue be ? Get(from, nextKey).
           use #(val, state) <- result.try(object.get_value(
             state,
@@ -2682,7 +2682,7 @@ pub fn copy_data_properties_stateful(
   state: State(host),
   target_ref: Ref,
   source: JsValue,
-  excluded_keys: set.Set(value.PropertyKey),
+  excluded_keys: set.Set(key.PropertyKey),
   excluded_syms: set.Set(value.SymbolId),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case source {
@@ -2729,7 +2729,7 @@ fn copy_proxy_keys(
   src_ref: Ref,
   target_ref: Ref,
   keys: List(JsValue),
-  excluded_keys: set.Set(value.PropertyKey),
+  excluded_keys: set.Set(key.PropertyKey),
   excluded_syms: set.Set(value.SymbolId),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case keys {
@@ -2737,7 +2737,7 @@ fn copy_proxy_keys(
     [k, ..rest] -> {
       // Step 4.a-b: skip keys named in excludedItems.
       let excluded = case k {
-        JsString(s) -> set.contains(excluded_keys, value.canonical_key(s))
+        JsString(s) -> set.contains(excluded_keys, key.canonical_key(s))
         JsSymbol(sym) -> set.contains(excluded_syms, sym)
         _ -> True
       }
@@ -2775,7 +2775,7 @@ fn copy_one_proxy_key(
       use #(val, state) <- result.map(object.get_value(
         state,
         src_ref,
-        value.canonical_key(s),
+        key.canonical_key(s),
         JsObject(src_ref),
       ))
       // Step 4.c.ii.2: CreateDataPropertyOrThrow(target, nextKey, propValue).
@@ -2783,7 +2783,7 @@ fn copy_one_proxy_key(
         object.create_data_property(
           state.heap,
           target_ref,
-          value.canonical_key(s),
+          key.canonical_key(s),
           val,
         )
       State(..state, heap:)
@@ -3794,7 +3794,7 @@ fn descriptors_from_keys(
   object_proto: Ref,
   own_property: fn(State(host), DefineKey) ->
     Result(#(Option(value.Property), State(host)), #(JsValue, State(host))),
-  props: dict.Dict(value.PropertyKey, value.Property),
+  props: dict.Dict(key.PropertyKey, value.Property),
   syms: List(#(value.SymbolId, value.Property)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case keys {
@@ -3979,7 +3979,7 @@ fn object_to_locale_string(
       use to_string_fn, state <- state.try_op(object.get_value_of(
         state,
         this,
-        value.canonical_key("toString"),
+        key.canonical_key("toString"),
       ))
       case helpers.is_callable(state.heap, to_string_fn) {
         True -> {
@@ -4155,8 +4155,8 @@ fn define_key_label(key: DefineKey) -> String {
 fn key_value_to_define_key(val: JsValue) -> DefineKey {
   case val {
     JsSymbol(sym) -> SymbolKey(sym)
-    JsString(s) -> StringKey(value.canonical_key(s), s)
-    _ -> StringKey(value.canonical_key(""), "")
+    JsString(s) -> StringKey(key.canonical_key(s), s)
+    _ -> StringKey(key.canonical_key(""), "")
   }
 }
 

@@ -2546,7 +2546,7 @@ fn parse_switch_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   use #(p7, cases) <- result.try(parse_switch_cases(p_inner, False, []))
   // Reorder children_at[switch_id] into emit_switch's consumption order
   // ([fn-decls from all case bodies] ++ [case tests] ++ [rest]) — see
-  // scope.sb_reorder_switch_children. parse_switch_cases tagged test-children
+  // ast_util.switch_emit_groups. parse_switch_cases tagged test-children
   // with TagSwitchTest. The switch Block scope is NEVER pruned: emit_switch
   // unconditionally calls enter_scope, so the tree must keep the node even
   // when no case body declares anything.
@@ -2578,7 +2578,7 @@ fn parse_switch_cases(
     Case -> {
       let p2 = advance(p)
       // emit_switch evaluates ALL case tests AFTER hoisted fn-decls but
-      // BEFORE any case body (§14.12.4 CaseBlockEvaluation). Tag every
+      // BEFORE any case body (ast_util.switch_emit_groups). Tag every
       // direct child scope pushed while parsing this test expression so
       // sb_reorder_switch_children can partition them into the middle
       // group. sb.current is the switch's Block scope here.
@@ -2703,12 +2703,12 @@ fn parse_function_decl_impl(
   // ahead of sibling fn-expressions / arrows / classes — matching
   // emit.gleam's collect_hoisted_funcs consumption order.
   //
-  // Tag ONLY when the resulting AST node is one emit's
-  // `collect_hoisted_funcs` treats as hoisted — i.e. a
+  // Tag ONLY when the resulting AST node is one `is_hoisted_fn_decl`
+  // (and so emit's `collect_hoisted_funcs`) treats as hoisted — i.e. a
   // direct statement-list FunctionDeclaration after `peel_labels`. Two
   // syntactic positions reach here but are NOT direct-list members in
   // the lowered AST: (a) anonymous `export default function(){}` lowers
-  // via `ast_util.module_items_to_stmts` to an ExpressionStatement, not a
+  // via `anon_default` to an ExpressionStatement, not a
   // FunctionDeclaration; (b) Annex-B sloppy `if (c) function f(){}`
   // wraps the decl in IfStatement, which `peel_labels` does not unwrap.
   // `in_single_stmt_pos` was set on the OUTER state by
@@ -2776,7 +2776,7 @@ fn parse_function_params_and_body(
   use p5 <- result.try(check_use_strict_in_body(p4))
   // §10.2.11 step 28: a non-simple parameter list (any default /
   // destructuring among the FIXED formals) routes positional args
-  // through `<paramN>` shims; the user names become TDZ LetBindings
+  // through `$param_N` shims; the user names become TDZ LetBindings
   // initialized by emit's destructuring prologue. Done HERE (after
   // the param names are already sb_declared, before `arguments`) so
   // the shims occupy declaration-indices 0..arity-1 — the runtime
@@ -2816,7 +2816,7 @@ fn parse_function_params_and_body(
 }
 
 /// When `params` is non-simple (§10.2.11 — any default / destructuring
-/// among the FIXED formals), insert `<paramN>` shim ParamBindings at
+/// among the FIXED formals), insert `$param_N` shim ParamBindings at
 /// the FRONT of the current function scope and shift the
 /// already-declared formal names (recorded as ParamBinding by
 /// `register_scope_binding` during `parse_formal_parameters`) past
@@ -2881,7 +2881,7 @@ fn parse_function_body_block(p: P) -> Result(#(P, ast.Statement), ParseError) {
 /// §10.2.11 step 28: when the fixed formal list is non-simple, the body's
 /// VarDeclaredNames / top-level LexicallyDeclaredNames / hoisted
 /// FunctionDeclarations live in a SEPARATE var-boundary Block scope (child
-/// of the Function scope, which keeps the params, the `<paramN>` shims,
+/// of the Function scope, which keeps the params, the `$param_N` shims,
 /// `arguments`, and the NFE self-name) so closures created by parameter
 /// initializers cannot see body declarations. Simple lists keep the legacy
 /// single-scope shape. emit.compile_function_body `enter_scope`s this Block
@@ -3078,8 +3078,8 @@ fn parse_setter_params_and_body(
           use p5 <- result.try(check_use_strict_in_body(p5))
           // §10.2.11 step 28: a setter's single PropertySetParameterList
           // formal can be non-simple (`set x({a}) {}` / `set x(v=1) {}`).
-          // emit.compile_function_body routes it through the `<param0>`
-          // shim and resolves that name via scope.lookup, so it must be
+          // emit.compile_function_body routes it through `$param_0` and
+          // resolves that name via scope.lookup, so the shim must be
           // declared here exactly as in `parse_function_params_and_body`.
           let p5 = P(..p5, sb: declare_param_shims(p5.sb, [final_pat]))
           // §10.2.11 step 18: like getters (and every non-arrow function),
@@ -4300,9 +4300,8 @@ fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // scopes already on the chain to root (computed BEFORE the push so the
   // first/outermost `with` gets 0). The holder is a LetBinding so it
   // lands IN the With scope — sb_declare routes VarBinding to current_fn,
-  // which would leave the With scope's own bindings empty, so
-  // `scope.do_lookup` could never resolve the holder named by
-  // `Scope.with_object` from that scope's bindings.
+  // which would leave the With scope's own bindings empty and break
+  // finalize's with_object_slot lookup.
   let depth = scope.sb_with_depth(p5.sb)
   let #(sb, with_id) = scope.sb_push(p5.sb, scope.With)
   let synth = scope.with_object_name(depth, with_id)
@@ -4747,7 +4746,7 @@ fn try_paren_arrow(
                   // back to the arrow body's own values. The arrow's
                   // ParamBindings are already in p4.sb (started empty in
                   // p_ctx, populated by parse_formal_parameters); for a
-                  // non-simple list, retrofit `<paramN>` shims at the
+                  // non-simple list, retrofit `$param_N` shims at the
                   // front and rekind the user names to LetBinding so
                   // the runtime arg→slot layout and emit's
                   // destructuring prologue agree.

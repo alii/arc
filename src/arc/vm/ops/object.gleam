@@ -2,15 +2,15 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/typed_array_ffi.{ta_get_float, ta_get_int}
-import arc/vm/key.{Index, Named}
+import arc/vm/key.{type PropertyKey, Index, Named}
 import arc/vm/opcode
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type HeapSlot, type State, State}
 import arc/vm/value.{
-  type JsElements, type JsValue, type Property, type PropertyKey, type Ref,
-  type SymbolId, AccessorProperty, ArrayObject, DataProperty, Finite,
-  FunctionObject, GeneratorObject, JsNumber, JsObject, JsString, NativeFunction,
-  ObjectSlot, OrdinaryObject, PromiseObject,
+  type JsElements, type JsValue, type Property, type Ref, type SymbolId,
+  AccessorProperty, ArrayObject, DataProperty, Finite, FunctionObject,
+  GeneratorObject, JsNumber, JsObject, JsString, NativeFunction, ObjectSlot,
+  OrdinaryObject, PromiseObject,
 }
 import gleam/bit_array
 import gleam/bool
@@ -437,7 +437,7 @@ fn namespace_own_property(
   exports: dict.Dict(String, Ref),
   key: PropertyKey,
 ) -> Option(Property) {
-  case dict.get(exports, value.key_to_string(key)) {
+  case dict.get(exports, key.key_to_string(key)) {
     Error(Nil) -> None
     Ok(box) -> {
       let val = heap.read_box(heap, box) |> option.unwrap(value.JsUndefined)
@@ -1766,7 +1766,7 @@ pub fn define_method_property(
   val: JsValue,
 ) -> Heap(host) {
   // §7.3.32 PrivateSet: writing to a private METHOD throws TypeError. Arc
-  // stores private methods as marker-keyed properties (value.private_key), so
+  // stores private methods as marker-keyed properties (key.private_key), so
   // mark them non-writable — set_found_value then reports failure and
   // PutPrivateField turns that into the spec'd TypeError.
   let prop = case value.is_private_name(key) {
@@ -1978,7 +1978,7 @@ pub fn has_property(heap: Heap(host), ref: Ref, key: PropertyKey) -> Bool {
     // §10.4.6.6 Module Namespace [[HasProperty]]: true iff the key is an
     // exported name. Null prototype → no inheritance.
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
-      dict.has_key(exports, value.key_to_string(key))
+      dict.has_key(exports, key.key_to_string(key))
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined, return true.
       case own_property_of_slot(heap, kind, properties, elements, key) {
@@ -2151,7 +2151,7 @@ pub fn delete_property(
     // §10.4.6.10 Module Namespace [[Delete]]: deleting an exported name fails
     // (non-configurable); a non-export "succeeds" vacuously.
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
-      case dict.has_key(exports, value.key_to_string(key)) {
+      case dict.has_key(exports, key.key_to_string(key)) {
         True -> #(h, False)
         False -> #(h, True)
       }
@@ -3203,7 +3203,7 @@ fn inspect_plain_object(
           case prop {
             DataProperty(enumerable: True, value: val, ..) ->
               Ok(
-                value.key_to_string(key)
+                key.key_to_string(key)
                 <> ": "
                 <> inspect_inner(val, heap, depth + 1, visited),
               )
@@ -3362,7 +3362,7 @@ pub type PropKey {
 /// key without a second user-observable ToPropertyKey.
 pub fn prop_key_value(pk: PropKey) -> JsValue {
   case pk {
-    PkString(key) -> JsString(value.key_to_string(key))
+    PkString(key) -> JsString(key.key_to_string(key))
     PkSymbol(sym) -> value.JsSymbol(sym)
   }
 }
@@ -3399,7 +3399,7 @@ pub fn set_prop_value(
 /// Human-readable key for invariant-violation error messages.
 fn pk_label(pk: PropKey) -> String {
   case pk {
-    PkString(key) -> "'" <> value.key_to_string(key) <> "'"
+    PkString(key) -> "'" <> key.key_to_string(key) <> "'"
     PkSymbol(_) -> "[symbol]"
   }
 }
@@ -3670,7 +3670,7 @@ pub fn has_property_stateful(
     )) ->
       case pk {
         PkString(key) ->
-          Ok(#(dict.has_key(exports, value.key_to_string(key)), state))
+          Ok(#(dict.has_key(exports, key.key_to_string(key)), state))
         PkSymbol(sym) ->
           Ok(#(result.is_ok(list.key_find(symbol_properties, sym)), state))
       }

@@ -1975,7 +1975,7 @@ fn try_get_of(
   key: String,
   cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case object.get_value_of(state, val, value.canonical_key(key)) {
+  case object.get_value_of(state, val, key.canonical_key(key)) {
     Ok(#(v, state)) -> cont(v, state)
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }

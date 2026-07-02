@@ -2071,7 +2071,7 @@ fn get_keyed(
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case key {
     JsSymbol(sym) -> object.get_symbol_value_of(state, obj, sym)
-    JsString(s) -> object.get_value_of(state, obj, value.canonical_key(s))
+    JsString(s) -> object.get_value_of(state, obj, key.canonical_key(s))
     // Unreachable: own_keys_stateful only yields strings and symbols.
     _ -> Ok(#(JsUndefined, state))
   }
@@ -2346,7 +2346,7 @@ fn alloc_zip_keyed_result(
           list.key_set(syms, sym, value.data_property(v)),
         )
         JsString(s) -> #(
-          dict.insert(props, value.canonical_key(s), value.data_property(v)),
+          dict.insert(props, key.canonical_key(s), value.data_property(v)),
           syms,
         )
         // Unreachable: keys are only ever strings or symbols.

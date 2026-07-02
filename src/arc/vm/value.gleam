@@ -1,7 +1,7 @@
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/key.{Index, Named}
+import arc/vm/key.{type PropertyKey, Index, Named}
 import arc/vm/opcode.{type Op}
 import gleam/bit_array
 import gleam/bool
@@ -178,19 +178,13 @@ pub type FuncTemplate {
   )
 }
 
-/// Describes how to capture one variable from the enclosing scope when
-/// creating a closure: copy the parent frame's local at `parent_index`.
-///
-/// This is the ONLY capture mode the compiler emits. Transitive captures
-/// (a grandchild reading a grandparent's variable) never need their own
-/// mode because scope.analyze_captures flattens them: every intermediate
-/// function declares its own CaptureBinding for the name, so each
-/// MakeClosure only ever reaches ONE frame up. For boxed (mutated-
-/// after-capture) variables the parent local already holds the
-/// JsObject(box_ref), so copying it shares the BoxSlot.
+/// Describes how to capture one variable from the enclosing scope
+/// when creating a closure.
 pub type EnvCapture {
   /// Capture from parent's local frame at the given index.
   CaptureLocal(parent_index: Int)
+  /// Capture from parent's EnvSlot at the given index (transitive).
+  CaptureEnv(parent_env_index: Int)
 }
 
 /// JS number representation. BEAM floats can't represent NaN or Infinity,
@@ -2703,37 +2697,13 @@ pub type ExoticKind(ctx, host) {
   IteratorRecordObject(iterated: JsValue, next_method: JsValue)
 }
 
-/// Canonical property key — see `arc/vm/key`. Re-exported here (with the
-/// canonicalizer aliases below) because `value` is the module every VM layer
-/// already imports; the definition lives in the leaf `key` module so `opcode`
-/// can embed PropertyKey in Op payloads without a value↔opcode import cycle.
-/// NOTE: Gleam type aliases don't re-export constructors — construction /
-/// pattern sites import `Index`/`Named` from `arc/vm/key`.
-pub type PropertyKey =
-  key.PropertyKey
-
-/// See `key.canonical_key` — THE canonicalizer, shared with the compiler.
-pub fn canonical_key(s: String) -> PropertyKey {
-  key.canonical_key(s)
-}
-
-/// See `key.key_to_string`.
-pub fn key_to_string(k: PropertyKey) -> String {
-  key.key_to_string(k)
-}
-
-/// See `key.private_key`.
-pub fn private_key(name: String) -> PropertyKey {
-  key.private_key(name)
-}
-
 @external(erlang, "arc_vm_ffi", "unique_positive_integer")
 fn unique_positive_integer() -> Int
 
 /// §15.7.14 ClassDefinitionEvaluation step 5/6: mint the storage-key text for
 /// a fresh per-class-evaluation PrivateName. Format:
 /// "\u{0}" <> source_text <> "\u{0}" <> uid — the NUL marker keeps it in the
-/// hidden private namespace (see private_key), the uid makes each class
+/// hidden private namespace (see key.private_key), the uid makes each class
 /// evaluation's names distinct (spec PrivateName identity). The text is
 /// carried at runtime as a JsString bound to a class-scope const named after
 /// the source text ("#m"); access ops wrap it in Named(_) directly.
@@ -2755,7 +2725,7 @@ pub fn private_display_name(key_text: String) -> String {
 }
 
 /// Whether a PropertyKey is a class private element (NUL-marker-prefixed —
-/// see private_key). Reflection sites call this to skip private keys.
+/// see key.private_key). Reflection sites call this to skip private keys.
 pub fn is_private_name(key: PropertyKey) -> Bool {
   case key {
     Named("\u{0}" <> _) -> True
@@ -3288,7 +3258,7 @@ pub fn heap_slot_to_string(slot: HeapSlot(ctx, host)) -> String {
               <> dict.fold(properties, [], fn(acc, key, property) {
               [
                 [
-                  key_to_string(key) <> ":",
+                  key.key_to_string(key) <> ":",
                   property_debug_lines(property) |> indent(4),
                 ],
                 ..acc

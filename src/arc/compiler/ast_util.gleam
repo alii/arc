@@ -1,20 +1,12 @@
-//// Pure-AST query helpers shared by the PARSER (arc/parser.gleam, which
-//// builds the scope tree via `scope.ScopeBuilder` as it parses) and the
-//// EMITTER (compiler/emit.gleam), plus the compiler driver.
+//// Pure-AST query helpers shared by the emitter and the scope analyzer.
 ////
-//// The parser runs BEFORE emission and cannot import compiler/emit.gleam,
-//// so every helper here depends ONLY on arc/parser/ast and the Gleam
-//// stdlib — no Emitter, no IrOp, no BindingKind. emit.gleam wraps these
-//// where it needs an emit-local type (e.g. collect_top_lex_names below
-//// returns `is_const: Bool`; emit's thin wrapper maps that to
-//// LetBinding/ConstBinding).
-////
-//// The parser and the emitter must make IDENTICAL structural decisions
-//// (which parameter lists are "simple", which statements are hoisted
-//// FunctionDeclarations, the class-body element order): the parser
-//// allocates scopes/slots from them and the emitter consumes child scopes
-//// with positional cursors. Keeping ONE copy of each predicate here is
-//// what keeps the two in lockstep.
+//// The AST-level scope analyzer (compiler/scope.gleam) runs BEFORE emission
+//// and so cannot import compiler/emit.gleam (the import direction is
+//// emit → scope). Every helper here therefore depends ONLY on
+//// arc/parser/ast and the Gleam stdlib — no Emitter, no IrOp, no
+//// BindingKind. emit.gleam wraps these where it needs an emit-local type
+//// (e.g. collect_top_lex_names below returns `is_const: Bool`; emit's
+//// thin wrapper maps that to LetBinding/ConstBinding).
 ////
 //// Everything in this module is a pure function over AST nodes: no I/O, no
 //// state, no side effects.
@@ -47,9 +39,9 @@ pub fn split_trailing_rest(
 /// True when every FIXED formal (after `split_trailing_rest`) is a bare
 /// `IdentifierPattern` (no default, no destructuring). §10.2.11 step 22 —
 /// only a "simple parameter list" gets ParamBinding semantics; otherwise
-/// `<paramN>` shims receive the raw positional args and the user names are
-/// TDZ-declared LetBindings. Single source of truth: the PARSER and the
-/// EMITTER MUST agree on this predicate or the parser declares
+/// `$param_N` shims receive the raw positional args and the user names are
+/// TDZ-declared LetBindings. Single source of truth: the scope analyzer and
+/// the emitter MUST agree on this predicate or the analyzer declares
 /// shims+LetBindings while the emitter takes the simple positional path,
 /// leaving the user names seeded JsUninitialized → TDZ on first read.
 pub fn all_simple_params(fixed: List(ast.Pattern)) -> Bool {
@@ -61,7 +53,9 @@ pub fn all_simple_params(fixed: List(ast.Pattern)) -> Bool {
 }
 
 /// All pattern-bound names across a list of declarators.
-fn declarator_names(declarators: List(ast.VariableDeclarator)) -> List(String) {
+pub fn declarator_names(
+  declarators: List(ast.VariableDeclarator),
+) -> List(String) {
   list.flat_map(declarators, fn(d) {
     let ast.VariableDeclarator(pattern, _) = d
     ast.pattern_bound_names(pattern)
@@ -163,24 +157,34 @@ pub fn direct_fn_names(stmts: List(ast.StmtWithLine)) -> List(String) {
   })
 }
 
-/// §14.12.4 step 3-5: a switch's CaseBlock is ONE block scope, so its
-/// BlockDeclarationInstantiation runs over every case body concatenated in
-/// source order. Returns that single flat statement list — the input to
-/// `emit_switch`'s `emit_block_declarations`. The parser's
-/// `scope.sb_reorder_switch_children` puts the corresponding CHILD SCOPES
-/// into the same emission order (fn-decls, then case tests, then the rest)
-/// so emit's positional child-scope cursor stays in lockstep.
-pub fn switch_case_stmts(
+/// True when `located` is a (possibly labeled) FunctionDeclaration —
+/// matches emit.gleam's `collect_hoisted_funcs` predicate.
+pub fn is_hoisted_fn_decl(located: ast.StmtWithLine) -> Bool {
+  case peel_labels(located.statement) {
+    ast.FunctionDeclaration(..) -> True
+    _ -> False
+  }
+}
+
+/// §14.12.4: a switch's CaseBlock is ONE block scope. Returns the three
+/// statement groups that emit_switch, declare_stmt and ref_stmt walk in
+/// lockstep so their child-scope cursors stay aligned: `flat` (every
+/// case body concatenated), `decls` (its hoisted FunctionDeclarations,
+/// compiled first), `rest` (flat minus decls — walked AFTER all case
+/// test expressions).
+pub fn switch_emit_groups(
   cases: List(ast.SwitchCase),
-) -> List(ast.StmtWithLine) {
-  list.flat_map(cases, fn(c) { c.consequent })
+) -> #(List(ast.StmtWithLine), List(ast.StmtWithLine), List(ast.StmtWithLine)) {
+  let flat = list.flat_map(cases, fn(c) { c.consequent })
+  let #(decls, rest) = list.partition(flat, is_hoisted_fn_decl)
+  #(flat, decls, rest)
 }
 
 /// Collect let/const names declared directly in the given statement list (NOT
 /// recursing into nested blocks). Returned tuple is `(name, is_const)` —
 /// `is_const = True` for const/using/await using, `False` for let/class.
-/// emit.gleam's same-named `collect_top_lex_names` wraps this, mapping
-/// `is_const` onto its own `LetBinding`/`ConstBinding` type.
+/// emit.gleam wraps this with a BindingKind mapping; the scope analyzer uses
+/// it directly.
 pub fn collect_top_lex_names(
   stmts: List(ast.StmtWithLine),
 ) -> List(#(String, Bool)) {
@@ -225,6 +229,18 @@ pub fn for_let_names(
   case kind {
     ast.Let -> declarator_names(declarations)
     ast.Var | ast.Const | ast.Using | ast.AwaitUsing -> []
+  }
+}
+
+/// Head let/const/using names of a for-in/for-of left-hand side — the
+/// TDZ scope around the for-of head expression.
+pub fn for_init_lex_names(left: ast.ForInit) -> List(String) {
+  case left {
+    ast.ForInitDeclaration(ast.Let, ds)
+    | ast.ForInitDeclaration(ast.Const, ds)
+    | ast.ForInitDeclaration(ast.Using, ds)
+    | ast.ForInitDeclaration(ast.AwaitUsing, ds) -> declarator_names(ds)
+    _ -> []
   }
 }
 
@@ -280,18 +296,18 @@ pub fn split_directives(
   })
 }
 
-/// Lower a Module body to the statement list `emit_module` compiles.
-/// Imports and re-export-only items are dropped; an `export <decl>` is
-/// unwrapped to its inner declaration; a NAMED
+/// Lower a Module body to its statement list for declaration analysis /
+/// emission. Imports and re-export-only items are dropped; an
+/// `export <decl>` is unwrapped to its inner declaration; a NAMED
 /// `export default function foo() {}` / `export default class Foo {}`
 /// is lowered to the ordinary FunctionDeclaration / ClassDeclaration so
 /// the name is hoisted as a module-level binding (§16.2.3.7 BoundNames).
-/// An ANONYMOUS `export default <expr>` becomes the ExpressionStatement
-/// `*default* = expr;` — the `*default*` local was declared during module
-/// hoisting, and the synthesized assignment carries the declaration span
-/// so errors point at real source.
+/// Only the ANONYMOUS-default arm differs between the scope analyzer
+/// (wraps the expression as a bare ExpressionStatement) and the emitter
+/// (synthesizes `*default* = expr`) — that arm is supplied by the caller.
 pub fn module_items_to_stmts(
   items: List(ast.ModuleItem),
+  anon_default anon_default: fn(ast.Expression, ast.Span) -> ast.Statement,
 ) -> List(ast.StmtWithLine) {
   list.filter_map(items, fn(item) {
     case item {
@@ -330,18 +346,7 @@ pub fn module_items_to_stmts(
       ) ->
         Ok(ast.StmtWithLine(0, ast.ClassDeclaration(name:, super_class:, body:)))
       ast.ExportDefaultDeclaration(declaration: expr, span:) ->
-        Ok(ast.StmtWithLine(
-          0,
-          ast.ExpressionStatement(
-            expression: ast.AssignmentExpression(
-              operator: ast.Assign,
-              left: ast.Identifier(name: "*default*", span:),
-              right: expr,
-              span:,
-            ),
-            directive: None,
-          ),
-        ))
+        Ok(ast.StmtWithLine(0, anon_default(expr, span)))
       ast.ImportDeclaration(..)
       | ast.ExportNamedDeclaration(declaration: None, ..)
       | ast.ExportAllDeclaration(..) -> Error(Nil)
@@ -432,11 +437,9 @@ pub fn has_spread_element(elements: List(Option(ast.Expression))) -> Bool {
 // A class body opens a per-class lexical scope holding hidden const bindings
 // (private-name keys, the [[Fields]] initializer closure, stashed computed
 // element keys, stashed instance private-method closures). These names are
-// minted by the EMITTER but the PARSER must pre-register them in the
-// ClassBody scope (see parser.gleam's class-body handling, which folds
-// `class_body_bindings` into `sb_declare`) so the emitter's later
-// (scope_id, name) lookups resolve. Both sides therefore call the same
-// naming functions below — one source of truth for the slot layout.
+// minted by the EMITTER but the SCOPE ANALYZER must pre-register them so the
+// emitter's later (scope_id, name) lookups resolve. Both sides therefore call
+// the same naming functions below — one source of truth for the slot layout.
 // ============================================================================
 
 /// Partition a class body into (constructor, instance methods, static
@@ -446,11 +449,9 @@ pub fn has_spread_element(elements: List(Option(ast.Expression))) -> Bool {
 /// runs once per class, so five filter passes are no worse than one fold +
 /// five reverses, and avoid 5-tuple unpack/repack boilerplate in every arm.
 ///
-/// The PARSER (which orders the ClassBody scope's children at the closing
-/// `}` — see parser.gleam's class-body scope handling) and emit.gleam's
-/// `compile_class_body` MUST partition identically so child scopes are
-/// created/consumed in the EXACT order `child_fn_cursor` entries are
-/// popped — hence one shared copy.
+/// scope.gleam (DECLARE/REFERENCE passes) and emit.gleam (compile_class_body)
+/// MUST partition identically so child scopes are created/consumed in the
+/// EXACT order `child_fn_cursor` entries are popped — hence one shared copy.
 pub fn classify_class_body(
   body: List(ast.ClassElement),
 ) -> #(
@@ -570,12 +571,10 @@ pub fn computed_element_keys(
 }
 
 /// Ordered list of every synthetic const the per-class scope (V8/SM
-/// ClassBody scope) declares — the EXACT slot-allocation order the PARSER
-/// must `sb_declare` into the ClassBody scope for a ClassExpression /
-/// ClassDeclaration (its sole caller: parser.gleam folds this list through
-/// `scope.sb_declare` when it opens a class body) so that the emitter's
-/// later (scope_id, name) lookups (emit_var_init / emit_var_get in
-/// compile_class / compile_class_body / emit_class_methods /
+/// ClassBody scope) declares — the EXACT slot-allocation order the AST
+/// scope analyzer must pre-register for a ClassExpression / ClassDeclaration
+/// so that the emitter's later (scope_id, name) lookups (emit_var_init /
+/// emit_var_get in compile_class / compile_class_body / emit_class_methods /
 /// emit_field_init_call) hit the same slot indices. Every entry is a
 /// const binding. Order:
 ///   1. inner class-name binding (only if the class has a BindingIdentifier)
@@ -583,10 +582,9 @@ pub fn computed_element_keys(
 ///   3. each private name "#x" in source order (deduped get/set pairs)
 ///   4. each instance private-method closure stash "\u{0}pm:/pg:/ps:#x"
 ///   5. each computed-element-key stash "\u{0}ck:N" in body-index order
-/// The emitter re-derives the same names via the naming helpers above
-/// (`class_fields_init`, `private_fn_const`, `computed_field_const`) when
-/// it emits each element, so this list is the ONE source of truth for the
-/// class-scope slot layout.
+/// `compile_class` drives its (transitional) DeclareVar markers from this
+/// list and the analyzer registers the ClassBody scope's bindings from it,
+/// so there is ONE source of truth for the class-scope slot layout.
 pub fn class_body_bindings(
   binding_name: Option(String),
   body: List(ast.ClassElement),

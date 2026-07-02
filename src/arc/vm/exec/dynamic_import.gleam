@@ -390,7 +390,7 @@ fn validate_attributes(
         object.get_value(
           state,
           attributes_ref,
-          value.canonical_key(key),
+          key.canonical_key(key),
           JsObject(attributes_ref),
         )
       {

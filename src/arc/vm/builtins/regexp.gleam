@@ -663,7 +663,7 @@ fn try_get(
 fn try_get_of(
   state: State(host),
   val: JsValue,
-  key: value.PropertyKey,
+  key: key.PropertyKey,
   cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   state.try_op(ops_object.get_value_of(state, val, key), cont)

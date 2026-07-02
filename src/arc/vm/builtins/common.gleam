@@ -1,11 +1,11 @@
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
-import arc/vm/key.{Named}
+import arc/vm/key.{type PropertyKey, Named}
 import arc/vm/value.{
   type CallNativeFn, type ExoticKind, type JsElements, type JsValue,
-  type NativeFn, type NativeFnSlot, type Property, type PropertyKey, type Ref,
-  ArrayObject, Call, Dispatch, JsBool, JsObject, JsString, NativeFunction,
-  ObjectSlot, OrdinaryObject,
+  type NativeFn, type NativeFnSlot, type Property, type Ref, ArrayObject, Call,
+  Dispatch, JsBool, JsObject, JsString, NativeFunction, ObjectSlot,
+  OrdinaryObject,
 }
 import gleam/dict.{type Dict}
 import gleam/list

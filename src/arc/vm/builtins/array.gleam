@@ -358,29 +358,6 @@ fn array_join(
 /// join_elements — implements step 6 of Array.prototype.join (§23.1.3.18).
 /// Iterates k from 0 to len-1, building the result string R.
 ///
-/// Terminal step of the join loops (§23.1.3.15 step 8: Return R).
-///
-/// Joins the accumulated (reversed) parts through limits.join, which
-/// pre-scans the total byte size and refuses to materialize a result over
-/// limits.max_string_bytes — without this bound, `bigArray.join(sep)` would
-/// build an unbounded binary and OOM the BEAM before max_heap_size could
-/// intervene. Over-budget joins throw the same "Invalid string length"
-/// RangeError V8 raises.
-fn finish_join(
-  state: State(host),
-  acc: List(String),
-  separator: String,
-) -> #(State(host), Result(String, JsValue)) {
-  case limits.join(list.reverse(acc), separator) {
-    Ok(joined) -> #(state, Ok(joined))
-    Error(Nil) -> {
-      let #(err, state) =
-        state.range_error_value(state, "Invalid string length")
-      #(state, Error(err))
-    }
-  }
-}
-
 /// Plain arrays with no index overrides take join_elements_snapshot (one
 /// heap read for the whole loop); everything else takes the generic
 /// per-element path via get_index (object.get_value_of — walks prototype
@@ -425,7 +402,7 @@ fn join_elements_snapshot(
 ) -> #(State(host), Result(String, JsValue)) {
   case idx >= length {
     // Step 8: Return R.
-    True -> finish_join(state, acc, separator)
+    True -> #(state, Ok(acc |> list.reverse |> string.join(separator)))
     False ->
       case elements.get_option(els, idx) {
         // Step 7c: If element is undefined or null, let next be "".
@@ -494,7 +471,7 @@ fn join_elements_generic(
 ) -> #(State(host), Result(String, JsValue)) {
   case idx >= length {
     // Step 8: Return R.
-    True -> finish_join(state, acc, separator)
+    True -> #(state, Ok(acc |> list.reverse |> string.join(separator)))
     False -> {
       // Step 7b: Let element be ? Get(O, ! ToString(𝔽(k))).
       use val, state <- state.try_op(get_index(state, this, idx))
@@ -724,14 +701,14 @@ fn require_array(
   }
 }
 
-/// Canonical PropertyKey for an integer index, matching value.canonical_key:
+/// Canonical PropertyKey for an integer index, matching key.canonical_key:
 /// array indices (§6.1.7) are integers in [0, 2^32-2], stored as Index(n);
 /// anything outside that range is stored under its ToString form as Named.
 /// Array.prototype methods are generic over array-likes whose length can
 /// reach 2^53-1, so per-element keys derived from such lengths MUST go
 /// through this — a raw Index(idx) for idx >= 2^32-1 can never match how the
 /// property was stored.
-fn index_key(idx: Int) -> value.PropertyKey {
+fn index_key(idx: Int) -> key.PropertyKey {
   case 0 <= idx && idx <= max_array_index {
     True -> Index(idx)
     False -> Named(int.to_string(idx))
@@ -883,7 +860,7 @@ fn get_index_if_present(
 fn proxy_index(
   state: State(host),
   ref: Ref,
-  key: value.PropertyKey,
+  key: key.PropertyKey,
   this: JsValue,
 ) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
   use #(has, state) <- result.try(object.has_property_stateful(
@@ -907,7 +884,7 @@ fn proxy_index(
 fn inherited_index(
   state: State(host),
   proto: Ref,
-  key: value.PropertyKey,
+  key: key.PropertyKey,
   this: JsValue,
 ) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
   case object.has_property(state.heap, proto, key) {
@@ -963,7 +940,7 @@ fn dense_snapshot(
 /// per-index accessor or attribute override that the elements store can't
 /// represent. Such entries force the spec-faithful generic per-element path.
 fn properties_have_index_keys(
-  properties: dict.Dict(value.PropertyKey, Property),
+  properties: dict.Dict(key.PropertyKey, Property),
 ) -> Bool {
   // Plain arrays have an empty properties dict — skip building the key list.
   !dict.is_empty(properties)
@@ -1153,7 +1130,7 @@ fn try_push_fast_path(
 /// [start, start + count). Per-index dict.get instead of scanning the whole
 /// key set — Array.prototype/Object.prototype hold dozens of Named keys.
 fn dict_has_index_in_range(
-  properties: dict.Dict(value.PropertyKey, Property),
+  properties: dict.Dict(key.PropertyKey, Property),
   start: Int,
   count: Int,
 ) -> Bool {
@@ -1163,7 +1140,7 @@ fn dict_has_index_in_range(
 }
 
 fn dict_index_in_range_loop(
-  properties: dict.Dict(value.PropertyKey, Property),
+  properties: dict.Dict(key.PropertyKey, Property),
   idx: Int,
   end: Int,
 ) -> Bool {
@@ -1273,7 +1250,7 @@ fn object_length(
 fn length_of_properties(
   state: State(host),
   ref: value.Ref,
-  properties: dict.Dict(value.PropertyKey, Property),
+  properties: dict.Dict(key.PropertyKey, Property),
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   // Fast path: own data property — no user code can run on the Get itself,
   // but ToLength may still call valueOf on an object-valued length.
@@ -1429,7 +1406,7 @@ fn try_delete_count(
 fn generic_set(
   state: State(host),
   ref: Ref,
-  key: value.PropertyKey,
+  key: key.PropertyKey,
   val: JsValue,
 ) -> Result(State(host), #(JsValue, State(host))) {
   // §7.3.4 step 1: Let success be ? O.[[Set]](P, V, O).
@@ -1449,7 +1426,7 @@ fn generic_set(
         coerce.thrown_type_error(
           state,
           "Cannot assign to read only property '"
-            <> value.key_to_string(key)
+            <> key.key_to_string(key)
             <> "' of object",
         )
     }
@@ -1506,7 +1483,7 @@ fn generic_set_length(
 fn generic_delete(
   state: State(host),
   ref: Ref,
-  key: value.PropertyKey,
+  key: key.PropertyKey,
 ) -> Result(State(host), #(JsValue, State(host))) {
   // §7.3.9 step 1: Let success be ? O.[[Delete]](P) — trap-aware so a Proxy
   // "deleteProperty" trap runs (it can record the call and throw).
@@ -1522,7 +1499,7 @@ fn generic_delete(
     False ->
       coerce.thrown_type_error(
         state,
-        "Cannot delete property '" <> value.key_to_string(key) <> "' of object",
+        "Cannot delete property '" <> key.key_to_string(key) <> "' of object",
       )
   }
 }
@@ -1897,18 +1874,15 @@ fn wrap(
 ///  15. Perform ? Set(A, "length", 𝔽(n), true).
 ///  16. Return A.
 ///
-/// Implementation notes:
+/// Simplifications:
 ///   - require_array collapses steps 1-2 (ToObject + LengthOfArrayLike).
-///   - Steps 3-10 are handled by coerce.try_relative_index (clamp logic).
-///   - Step 12: ArraySpeciesCreate via array_species_create. `None` means the
-///     default @@species (plain Array) — the fast path allocates the result
-///     directly. `Some(target)` is a custom-species constructor's object;
-///     write_species_result performs the per-index CreateDataPropertyOrThrow
-///     writes and the step-15 Set(A, "length") on it.
+///   - Steps 3-10 are handled by resolve_index (see §7.1.22 / clamp logic).
+///   - Step 12: we skip ArraySpeciesCreate and always create a plain Array.
+///     This means @@species is not respected (a known simplification).
 ///   - Steps 14b-14c: copy_range uses get_index_if_present for HasProperty+Get
 ///     on the source, preserving holes (sparse indices are not copied).
-///   - Step 15 (plain-array path): length is baked into ArrayObject(count) in
-///     the slot constructor rather than a separate Set("length") call.
+///   - Step 15: length is set via ArrayObject(count) in the slot constructor
+///     rather than a separate Set("length") call.
 fn array_slice(
   this: JsValue,
   args: List(JsValue),
@@ -2212,20 +2186,17 @@ fn copy_range_generic(
 ///   6. Perform ? Set(A, "length", 𝔽(n), true).
 ///   7. Return A.
 ///
-/// Implementation notes:
-///   - Step 2: ArraySpeciesCreate via array_species_create. `None` (default
-///     @@species → plain Array) takes concat_items, which accumulates into a
-///     plain elements store; `Some(target)` takes concat_items_species, which
-///     interleaves HasProperty → Get → CreateDataPropertyOrThrow on the
-///     custom-species object and then sets its length (step 6).
-///   - Step 5a: is_concat_spreadable implements IsConcatSpreadable (§7.2.18):
-///     Get(E, @@isConcatSpreadable), falling back to IsArray(E) when that is
-///     undefined (piercing proxies, throwing on revoked ones).
-///   - Steps 5b.ii-iii: the 2^53-1 length overflow check throws a TypeError
-///     in both concat_item and concat_items_species.
+/// Simplifications:
+///   - Step 2: ArraySpeciesCreate is skipped; we always create a plain Array.
+///     @@species is not respected (known simplification).
+///   - Step 5a: IsConcatSpreadable (§7.2.18) checks @@isConcatSpreadable then
+///     falls back to IsArray. We simplify: only ArrayObject kinds are spread.
+///     This means @@isConcatSpreadable on non-arrays is not honored, and
+///     arrays with @@isConcatSpreadable=false are still spread.
+///   - Step 5b.ii: The 2^53-1 length overflow check is not implemented.
 ///   - Steps 5b.iv.2-3: Hole handling done by copy_range (HasProperty check).
-///   - Step 6 (plain-array path): length is baked into ArrayObject(length) at
-///     construction time rather than a separate Set("length") call.
+///   - Step 6: length is baked into ArrayObject(length) at construction time
+///     rather than a separate Set("length") call.
 fn array_concat(
   this: JsValue,
   args: List(JsValue),
@@ -3410,21 +3381,18 @@ fn array_for_each(
 ///      d. Set k to k + 1.
 ///   7. Return A.
 ///
-/// Implementation notes:
+/// Simplifications:
 ///   - Steps 1-2: require_array collapses ToObject + LengthOfArrayLike.
 ///   - Step 3: require_callback handles IsCallable check + TypeError.
-///   - Step 4: ArraySpeciesCreate via array_species_create, run before the
-///     iteration loop so a custom @@species constructor is invoked exactly
-///     once and before any callback.
-///   - Steps 5-6: fold_array implements the iteration. Holes are preserved
+///   - Step 4: we skip ArraySpeciesCreate and always create a plain Array
+///     (@@species is not respected — a known simplification).
+///   - Steps 5-6: map_loop implements the iteration. Holes are preserved
 ///     in the result (callback is not called for absent elements, matching
 ///     step 6b's HasProperty check).
-///   - Step 6c.iii: on the plain-array path CreateDataPropertyOrThrow is done
-///     via elements.set on the accumulator (equivalent for dense arrays); on
-///     the custom-species path write_species_result performs the real
-///     per-index defines on the species object.
-///   - Step 7: finish_array (plain path) allocates the result array with the
-///     collected elements and the original length.
+///   - Step 6c.iii: CreateDataPropertyOrThrow is done via elements.set
+///     on the accumulator elements (equivalent for dense arrays).
+///   - Step 7: finish_array allocates the result array with the collected
+///     elements and the original length.
 fn array_map(
   this: JsValue,
   args: List(JsValue),
@@ -3468,14 +3436,13 @@ fn array_map(
   }
 }
 
-/// Allocates a result array from collected elements — the final "Return A"
-/// (§23.1.3.19 step 7) for the plain-array (default @@species) path.
+/// Allocates a result array from collected elements — corresponds to
+/// ArraySpeciesCreate (step 4) + the final "Return A" (step 7) in both
+/// Array.prototype.map (§23.1.3.19) and similar methods.
 ///
-/// Callers have already run array_species_create and got `None` back, so a
-/// plain Array is the spec-correct result here; the custom-species path goes
-/// through write_species_result instead. The length is set directly via
-/// ArrayObject(length) in the slot constructor rather than a separate
-/// Set("length") call.
+/// Simplification: always creates a plain Array (ignores @@species).
+/// The length is set directly via ArrayObject(length) in the slot
+/// constructor rather than a separate Set("length") call.
 fn finish_array(
   result: #(State(host), Result(JsElements, JsValue)),
   length: Int,
@@ -3537,17 +3504,16 @@ fn finish_list(
 ///      d. Set k to k + 1.
 ///   8. Return A.
 ///
-/// Implementation notes:
+/// Simplifications:
 ///   - Steps 1-2: require_array collapses ToObject + LengthOfArrayLike.
 ///   - Step 3: require_callback handles IsCallable check + TypeError.
-///   - Step 4: ArraySpeciesCreate via array_species_create, run before the
-///     iteration loop.
-///   - Steps 5-7: fold_array implements the iteration, collecting kept
+///   - Step 4: we skip ArraySpeciesCreate and always create a plain Array
+///     (@@species is not respected — a known simplification).
+///   - Steps 5-7: filter_loop implements the iteration, collecting kept
 ///     values into a reversed list (the "to" index is implicit via list length).
 ///   - Step 7c.ii: ToBoolean is done via value.is_truthy.
-///   - Step 8: on the plain-array path the result is allocated from the
-///     reversed kept list — contiguous, no holes; on the custom-species path
-///     write_species_result defines each kept value on the species object.
+///   - Step 8: result array is allocated via common.alloc_array from the
+///     reversed kept list — contiguous, no holes.
 fn array_filter(
   this: JsValue,
   args: List(JsValue),
@@ -6081,13 +6047,10 @@ fn to_locale_string_loop(
   acc: List(String),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case idx >= length {
-    True ->
-      // Same bounded terminal as Array.prototype.join: refuse to
-      // materialize a result over limits.max_string_bytes.
-      case limits.join(list.reverse(acc), ",") {
-        Ok(result) -> #(state, Ok(JsString(result)))
-        Error(Nil) -> state.range_error(state, "Invalid string length")
-      }
+    True -> {
+      let result = list.reverse(acc) |> string.join(",")
+      #(state, Ok(JsString(result)))
+    }
     False -> {
       use elem, state <- state.try_op(get_index(state, this, idx))
       case elem {

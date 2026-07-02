@@ -72,10 +72,10 @@ import gleam/string
 /// path. FFI mirrors the DataProperty tuple layout; see arc_vm_ffi.erl.
 @external(erlang, "arc_vm_ffi", "put_existing_writable_data")
 fn put_existing_writable_data(
-  properties: dict.Dict(value.PropertyKey, value.Property),
-  key: value.PropertyKey,
+  properties: dict.Dict(key.PropertyKey, value.Property),
+  key: key.PropertyKey,
   val: JsValue,
-) -> Result(dict.Dict(value.PropertyKey, value.Property), Nil)
+) -> Result(dict.Dict(key.PropertyKey, value.Property), Nil)
 
 // ============================================================================
 // Internal state (types defined in state.gleam for cross-module access)
@@ -168,7 +168,7 @@ fn call_value_to_completion(
 fn frozen_array_slot(
   values: List(JsValue),
   count: Int,
-  extra_props: List(#(value.PropertyKey, value.Property)),
+  extra_props: List(#(key.PropertyKey, value.Property)),
   array_proto: Ref,
 ) {
   let index_props =
@@ -1433,7 +1433,7 @@ const number_one = value.JsNumber(value.Finite(1.0))
 /// defineProperty override in the dict is authoritative). Mirrors
 /// object.set_property_on_slot's length_writable probe.
 fn array_length_writable(
-  properties: dict.Dict(value.PropertyKey, value.Property),
+  properties: dict.Dict(key.PropertyKey, value.Property),
 ) -> Bool {
   case dict.get(properties, Named("length")) {
     Ok(DataProperty(writable: writable, ..)) -> writable
@@ -1707,7 +1707,7 @@ fn get_super_value(
       let stack = case keep_base {
         True -> [
           val,
-          JsString(value.key_to_string(pk)),
+          JsString(key.key_to_string(pk)),
           JsObject(base_ref),
           this_val,
           ..rest
@@ -3128,7 +3128,7 @@ fn step(
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> value.key_to_string(key)
+              <> key.key_to_string(key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -3151,7 +3151,7 @@ fn step(
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> value.key_to_string(key)
+              <> key.key_to_string(key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -3180,7 +3180,7 @@ fn step(
               state.throw_type_error(
                 state,
                 "Cannot assign to read only property '"
-                  <> value.key_to_string(key)
+                  <> key.key_to_string(key)
                   <> "' of object",
               )
             _, _ -> Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
@@ -3193,7 +3193,7 @@ fn step(
           state.throw_type_error(
             state,
             "Cannot set properties of undefined or null (setting '"
-              <> value.key_to_string(key)
+              <> key.key_to_string(key)
               <> "')",
           )
         [value, _, ..rest] -> {
@@ -3204,7 +3204,7 @@ fn step(
               state.throw_type_error(
                 state,
                 "Cannot create property '"
-                  <> value.key_to_string(key)
+                  <> key.key_to_string(key)
                   <> "' on primitive value",
               )
             False ->
@@ -3216,7 +3216,7 @@ fn step(
     }
 
     GetPrivateField(name) -> {
-      let key = value.private_key(name)
+      let key = key.private_key(name)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
@@ -3246,7 +3246,7 @@ fn step(
     }
 
     GetPrivateField2(name) -> {
-      let key = value.private_key(name)
+      let key = key.private_key(name)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk — see GetPrivateField.
@@ -3275,7 +3275,7 @@ fn step(
     }
 
     PutPrivateField(name) -> {
-      let key = value.private_key(name)
+      let key = key.private_key(name)
       case state.stack {
         [val, JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
@@ -3323,7 +3323,7 @@ fn step(
     }
 
     PrivateIn(name) -> {
-      let key = value.private_key(name)
+      let key = key.private_key(name)
       case state.stack {
         [JsObject(ref), ..rest] -> {
           // Brand check via find_property (chain walk) — has_property hides
@@ -3604,7 +3604,7 @@ fn step(
               use state <- result.map(define_field_full(
                 state,
                 ref,
-                JsString(value.key_to_string(key)),
+                JsString(key.key_to_string(key)),
                 value,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -3665,7 +3665,7 @@ fn step(
           // the constructor — throws TypeError.
           use Nil <- result.map(check_define_nonconfigurable(state, ref, pk))
           let heap =
-            set_computed_fn_name(state.heap, func, "", value.key_to_string(pk))
+            set_computed_fn_name(state.heap, func, "", key.key_to_string(pk))
           let heap = make_method(heap, func, ref)
           let heap = object.define_method_property(heap, ref, pk, func)
           State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
@@ -3728,7 +3728,7 @@ fn step(
               state.heap,
               func,
               accessor_name_prefix(kind),
-              value.key_to_string(pk),
+              key.key_to_string(pk),
             )
           let heap = make_method(heap, func, ref)
           let heap =
@@ -3949,9 +3949,7 @@ fn step(
                 False, True ->
                   state.throw_type_error(
                     state,
-                    "Cannot delete property '"
-                      <> value.key_to_string(key)
-                      <> "'",
+                    "Cannot delete property '" <> key.key_to_string(key) <> "'",
                   )
                 _, _ ->
                   Ok(
@@ -4663,7 +4661,13 @@ fn step(
       // copying that ref means the closure shares the same BoxSlot.
       let captured_values =
         list.map(child_template.env_descriptors, fn(desc) {
-          tuple_array.unsafe_get(desc.parent_index, state.locals)
+          case desc {
+            value.CaptureLocal(parent_index) ->
+              tuple_array.unsafe_get(parent_index, state.locals)
+            value.CaptureEnv(_parent_env_index) ->
+              // Transitive capture not yet implemented
+              JsUndefined
+          }
         })
       let #(heap, closure_ref) =
         make_closure(
@@ -5519,7 +5523,7 @@ fn with_has_binding(
 /// re-conversion through to_string_key is side-effect-free and yields the
 /// same key. GetElem2 leaves this on the stack so the later PutElem does not
 /// re-run a user-observable ToPropertyKey (§13.15.2: ToPropertyKey once).
-fn property_key_value(pk: value.PropertyKey) -> JsValue {
+fn property_key_value(pk: key.PropertyKey) -> JsValue {
   case pk {
     Index(n) -> value.from_int(n)
     Named(s) -> JsString(s)
@@ -5634,7 +5638,7 @@ fn call_native(
 fn define_needs_full_semantics(
   state: State(host),
   ref: value.Ref,
-  key: value.PropertyKey,
+  key: key.PropertyKey,
 ) -> Bool {
   case value.is_private_name(key) {
     True -> False
@@ -5687,7 +5691,7 @@ fn define_field_full(
 fn check_define_nonconfigurable(
   state: State(host),
   ref: value.Ref,
-  pk: value.PropertyKey,
+  pk: key.PropertyKey,
 ) -> Result(Nil, #(StepResult, JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(properties:, ..)) ->
@@ -5696,7 +5700,7 @@ fn check_define_nonconfigurable(
         | Ok(value.AccessorProperty(configurable: False, ..)) ->
           state.throw_type_error(
             state,
-            "Cannot redefine property: " <> value.key_to_string(pk),
+            "Cannot redefine property: " <> key.key_to_string(pk),
           )
         _ -> Ok(Nil)
       }
@@ -5918,7 +5922,7 @@ fn build_exclusion_sets(
   state: State(host),
   keys: List(JsValue),
 ) -> Result(
-  #(set.Set(value.PropertyKey), set.Set(value.SymbolId), State(host)),
+  #(set.Set(key.PropertyKey), set.Set(value.SymbolId), State(host)),
   #(JsValue, State(host)),
 ) {
   use #(pks, syms, state), key <- list.try_fold(keys, #(

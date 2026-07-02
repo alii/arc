@@ -3,13 +3,14 @@ import arc/vm/builtins/helpers
 import arc/vm/builtins/object as object_builtins
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key
 import arc/vm/ops/coerce
 import arc/vm/ops/object as objops
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type JsonNativeFn, type Property, type Ref, Finite, JsBool,
-  JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonNative,
-  JsonParse, JsonStringify, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
+  JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonNative, JsonParse,
+  JsonStringify, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 import gleam/bit_array
 import gleam/dict
@@ -715,14 +716,14 @@ fn materialize_object_entries(
   h: Heap(host),
   b: common.Builtins,
   entries: List(#(String, JsonValue)),
-  acc: List(#(value.PropertyKey, Property)),
-) -> #(Heap(host), List(#(value.PropertyKey, Property))) {
+  acc: List(#(key.PropertyKey, Property)),
+) -> #(Heap(host), List(#(key.PropertyKey, Property))) {
   case entries {
     [] -> #(h, list.reverse(acc))
     [#(key, val), ..rest] -> {
       let #(h, js_val) = materialize(h, b, val)
       materialize_object_entries(h, b, rest, [
-        #(value.canonical_key(key), value.data_property(js_val)),
+        #(key.canonical_key(key), value.data_property(js_val)),
         ..acc
       ])
     }
@@ -765,7 +766,7 @@ fn json_stringify(
         ObjectSlot(
           kind: OrdinaryObject,
           properties: dict.from_list([
-            #(value.canonical_key(""), value.data_property(val)),
+            #(key.canonical_key(""), value.data_property(val)),
           ]),
           elements: elements.new(),
           prototype: Some(state.builtins.object.prototype),
@@ -850,7 +851,7 @@ fn collect_property_list(
       use #(v, state) <- result.try(objops.get_value(
         state,
         ref,
-        value.canonical_key(int.to_string(k)),
+        key.canonical_key(int.to_string(k)),
         JsObject(ref),
       ))
       use #(item, state) <- result.try(replacer_item(state, v))
@@ -966,7 +967,7 @@ fn length_of_array_like(
   use #(len_val, state) <- result.try(objops.get_value(
     state,
     ref,
-    value.canonical_key("length"),
+    key.canonical_key("length"),
     JsObject(ref),
   ))
   use #(n, state) <- result.map(coerce.js_to_number(state, len_val))
@@ -996,7 +997,7 @@ fn serialize_property(
   use #(val, state) <- result.try(objops.get_value(
     state,
     holder,
-    value.canonical_key(key),
+    key.canonical_key(key),
     JsObject(holder),
   ))
   // Step 2: toJSON — looked up for Objects AND BigInt primitives (GetV).
@@ -1005,7 +1006,7 @@ fn serialize_property(
       use #(to_json, state) <- result.try(objops.get_value_of(
         state,
         val,
-        value.canonical_key("toJSON"),
+        key.canonical_key("toJSON"),
       ))
       case helpers.is_callable(state.heap, to_json) {
         True -> state.call(state, to_json, val, [JsString(key)])
