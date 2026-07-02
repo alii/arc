@@ -243,23 +243,35 @@ fn parse_int(
     Finite(x) -> value.float_to_int(x)
     NaN | Infinity | NegInfinity -> 0
   }
-  let radix = case radix_int {
-    0 -> 10
-    n -> n
+  // Steps 3-5: Strip the sign BEFORE the prefix check so "-0x10" still
+  // reaches the "0x" path (the prefix follows the sign in the grammar).
+  let #(str, negative) = case string.first(str) {
+    Ok("-") -> #(string.drop_start(str, 1), True)
+    Ok("+") -> #(string.drop_start(str, 1), False)
+    _ -> #(str, False)
   }
-  // Step 10: If radix is 10 or 16, check for "0x"/"0X" prefix.
+  // Steps 7-9: R = 0 means "radix was unspecified" (undefined, NaN, ±∞ all
+  // reach here as 0), which defaults to 10 WITH prefix detection. An
+  // explicit 16 also keeps prefix detection; any other explicit radix must
+  // never have "0x" stripped (step 8.b), even radix 10.
+  let #(radix, strip_prefix) = case radix_int {
+    0 -> #(10, True)
+    16 -> #(16, True)
+    n -> #(n, False)
+  }
+  // Step 10: A "0x"/"0X" prefix (only when stripPrefix) forces radix 16.
   let has_hex_prefix =
     string.starts_with(str, "0x") || string.starts_with(str, "0X")
-  let #(str, radix) = case radix, has_hex_prefix {
-    10, True | 16, True -> #(string.drop_start(str, 2), 16)
-    _, _ -> #(str, radix)
+  let #(str, radix) = case strip_prefix && has_hex_prefix {
+    True -> #(string.drop_start(str, 2), 16)
+    False -> #(str, radix)
   }
   // Step 8a: If R < 2 or R > 36, return NaN.
   case radix >= 2 && radix <= 36 {
     False -> #(state, Ok(JsNumber(NaN)))
     True -> {
-      // Steps 3-5, 11-16: Parse sign + digits in parse_int_digits.
-      let result = parse_int_digits(str, radix)
+      // Steps 11-16: Parse the longest digit prefix and apply the sign.
+      let result = parse_int_digits(str, radix, negative)
       #(state, Ok(JsNumber(result)))
     }
   }
@@ -279,10 +291,6 @@ fn parse_int(
 /// StrDecimalLiteral includes: "Infinity", decimal literals with optional
 /// sign, integer literals. Does NOT include "0x" hex, "0o" octal, "0b"
 /// binary, or BigInt "n" suffix.
-///
-/// TODO(Deviation): Does not implement longest-prefix parsing — the full trimmed
-/// string is attempted. E.g. parseFloat("123abc") should return 123 but
-/// this implementation returns NaN.
 fn parse_float(
   args: List(JsValue),
   state: State(host),
@@ -298,25 +306,110 @@ fn parse_float(
     [] -> Ok(#("", state))
   }
   use str, state <- state.try_op(str_result)
-  // Steps 3-6: Parse as StrDecimalLiteral.
+  // Steps 3-6: Take the longest StrDecimalLiteral prefix and convert it.
   #(state, Ok(JsNumber(parse_decimal_string(str))))
 }
 
-/// Parse a trimmed string as a StrDecimalLiteral. Handles Infinity literals,
-/// then tries float parse, then int parse, defaulting to NaN.
+/// parseFloat steps 3-6: find the longest prefix of the (already trimmed)
+/// string that satisfies StrDecimalLiteral; NaN when no prefix does.
+///
+/// The matched slice is a subset of the StringNumericLiteral grammar (it can
+/// never be empty, whitespace, or a "0x"/"0o"/"0b" form), so its numeric
+/// value is exactly value.string_to_number's — one shared string→float path
+/// that already saturates beyond-double-range digit strings (e.g. 400 nines)
+/// to ±Infinity via value.num_from_int instead of crashing erlang:float/1.
 fn parse_decimal_string(str: String) -> JsNum {
-  case str {
-    "Infinity" | "+Infinity" -> Infinity
-    "-Infinity" -> NegInfinity
+  case scan_decimal_literal(str) {
+    0 -> NaN
+    len -> value.string_to_number(string.slice(str, 0, len))
+  }
+}
+
+/// Longest-prefix StrDecimalLiteral scanner (§19.2.4 steps 3-4).
+///
+/// Grammar (§7.1.4.1 StrDecimalLiteral, sign made explicit):
+///   [+|-] ( Infinity
+///         | DecimalDigits [. DecimalDigits_opt] ExponentPart_opt
+///         | . DecimalDigits ExponentPart_opt )
+///
+/// Returns how many leading graphemes of `s` form the longest valid
+/// literal, or 0 when no prefix matches. The walk stops at the first
+/// grapheme that cannot extend the literal, so e.g. "1.2.3" → 3 ("1.2")
+/// and "1foo" → 1 ("1").
+fn scan_decimal_literal(s: String) -> Int {
+  let graphemes = string.to_graphemes(s)
+  let #(sign_len, rest) = case graphemes {
+    ["+", ..r] | ["-", ..r] -> #(1, r)
+    _ -> #(0, graphemes)
+  }
+  case rest {
+    // "Infinity" — any trailing garbage is simply not part of the match.
+    ["I", "n", "f", "i", "n", "i", "t", "y", ..] -> sign_len + 8
     _ ->
-      gleam_stdlib_parse_float(str)
-      |> result.map(Finite)
-      // Beyond-double-range digit strings (e.g. 400 nines) must saturate to
-      // Infinity, not crash erlang:float/1 — so route through num_from_int.
-      |> result.try_recover(fn(_: Nil) {
-        int.parse(str) |> result.map(value.num_from_int)
-      })
-      |> result.unwrap(NaN)
+      case scan_unsigned_decimal(rest) {
+        // A bare sign with no literal after it matches nothing.
+        0 -> 0
+        n -> sign_len + n
+      }
+  }
+}
+
+/// Length of the longest StrUnsignedDecimalLiteral (minus Infinity, handled
+/// by the caller) at the head of `gs`, or 0 when none matches. A mantissa
+/// needs at least one digit on either side of the (optional) dot; the
+/// exponent only counts when it is complete (`e`/`E`, optional sign, 1+
+/// digits) — "5e" matches just "5".
+fn scan_unsigned_decimal(gs: List(String)) -> Int {
+  let #(icount, after_int) = scan_digit_run(gs, 0)
+  let #(mantissa_len, after_mantissa) = case after_int {
+    [".", ..after_dot] -> {
+      let #(fcount, after_frac) = scan_digit_run(after_dot, 0)
+      case icount + fcount > 0 {
+        True -> #(icount + 1 + fcount, after_frac)
+        // "." alone (or "+.") is not a mantissa.
+        False -> #(0, after_frac)
+      }
+    }
+    _ -> #(icount, after_int)
+  }
+  case mantissa_len {
+    0 -> 0
+    _ -> mantissa_len + scan_exponent_length(after_mantissa)
+  }
+}
+
+/// Consume a run of ASCII decimal digits; returns #(count, remainder).
+fn scan_digit_run(gs: List(String), count: Int) -> #(Int, List(String)) {
+  case gs {
+    ["0", ..rest]
+    | ["1", ..rest]
+    | ["2", ..rest]
+    | ["3", ..rest]
+    | ["4", ..rest]
+    | ["5", ..rest]
+    | ["6", ..rest]
+    | ["7", ..rest]
+    | ["8", ..rest]
+    | ["9", ..rest] -> scan_digit_run(rest, count + 1)
+    _ -> #(count, gs)
+  }
+}
+
+/// Length of a complete ExponentPart (`e`/`E`, optional sign, 1+ digits) at
+/// the head of `gs`, or 0 when it is absent or incomplete ("e", "e+").
+fn scan_exponent_length(gs: List(String)) -> Int {
+  case gs {
+    ["e", ..rest] | ["E", ..rest] -> {
+      let #(sign_len, digits) = case rest {
+        ["+", ..r] | ["-", ..r] -> #(1, r)
+        _ -> #(0, rest)
+      }
+      case scan_digit_run(digits, 0) {
+        #(0, _) -> 0
+        #(dcount, _) -> 1 + sign_len + dcount
+      }
+    }
+    _ -> 0
   }
 }
 
@@ -658,20 +751,16 @@ fn format_non_finite(n: JsNum, f: fn(Float) -> String) -> String {
   }
 }
 
-/// parseInt digit parsing — implements ES2024 §19.2.5 steps 3-5, 11-16.
+/// parseInt digit parsing — implements ES2024 §19.2.5 steps 11-16.
 ///
-/// Steps 3-5: Handle leading sign (+ or -).
+/// The caller has already trimmed, stripped the sign (steps 3-5, passed as
+/// `negative`) and stripped any "0x" prefix, so `s` starts at the digits.
+///
 /// Steps 11-12: Parse digits until first non-radix-R character.
 /// Step 13: If no valid digits found, return NaN.
 /// Steps 14-16: Compute mathematical integer value with sign.
 ///
-fn parse_int_digits(s: String, radix: Int) -> value.JsNum {
-  // Steps 3-5: Handle leading sign.
-  let #(s, negative) = case string.first(s) {
-    Ok("-") -> #(string.drop_start(s, 1), True)
-    Ok("+") -> #(string.drop_start(s, 1), False)
-    _ -> #(s, False)
-  }
+fn parse_int_digits(s: String, radix: Int, negative: Bool) -> value.JsNum {
   // Steps 11-14: Parse valid digits, stop at first invalid character.
   let graphemes = string.to_graphemes(s)
   case parse_digits_loop(graphemes, radix, 0, False) {
@@ -765,9 +854,6 @@ fn digit_value(ch: String) -> Option(Int) {
     _ -> None
   }
 }
-
-@external(erlang, "gleam_stdlib", "parse_float")
-fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
 
 @external(erlang, "arc_number_ffi", "format_to_fixed")
 fn format_to_fixed(x: Float, digits: Int) -> String

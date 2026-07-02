@@ -1,7 +1,7 @@
 /// Numeric-literal and string-escape cooking tests.
 import arc/engine.{Returned}
 import arc/parser/number
-import arc/vm/value.{Finite, Infinity, JsNumber, JsString, NegInfinity}
+import arc/vm/value.{Finite, Infinity, JsNumber, JsString, NaN, NegInfinity}
 
 /// Largest finite IEEE double — the value an overflowing literal currently
 /// clamps to. This is a KNOWN SPEC DEVIATION, not the correct value: see
@@ -122,6 +122,50 @@ pub fn eval_parse_int_huge_digit_string_is_infinity_test() {
 pub fn eval_parse_float_huge_digit_string_is_infinity_test() {
   assert eval("parseFloat('9'.repeat(400))") == JsNumber(Infinity)
   assert eval("parseFloat('-' + '9'.repeat(400))") == JsNumber(NegInfinity)
+}
+
+// ----------------------------------------------------------------------------
+// parseInt — §19.2.5 sign / radix / "0x" prefix ordering
+// ----------------------------------------------------------------------------
+
+pub fn eval_parse_int_sign_before_hex_prefix_test() {
+  // Steps 3-5 strip the sign BEFORE step 10's "0x" prefix check.
+  assert eval("parseInt('-0x10')") == JsNumber(Finite(-16.0))
+  assert eval("parseInt(' +0x10')") == JsNumber(Finite(16.0))
+}
+
+pub fn eval_parse_int_explicit_radix_and_hex_prefix_test() {
+  // Step 8.b: only an unspecified radix or an explicit 16 strips "0x".
+  assert eval("parseInt('0x10', 8)") == JsNumber(Finite(0.0))
+  assert eval("parseInt('0x10', 10)") == JsNumber(Finite(0.0))
+  assert eval("parseInt('0x10', 16)") == JsNumber(Finite(16.0))
+  // Step 8/9: radix 0 means "unspecified" (default 10), not "radix zero".
+  assert eval("parseInt('12', 0)") == JsNumber(Finite(12.0))
+}
+
+// ----------------------------------------------------------------------------
+// parseFloat — §19.2.4 longest StrDecimalLiteral prefix
+// ----------------------------------------------------------------------------
+
+pub fn eval_parse_float_literal_forms_test() {
+  assert eval("parseFloat('.5')") == JsNumber(Finite(0.5))
+  assert eval("parseFloat('1e5')") == JsNumber(Finite(100_000.0))
+  assert eval("parseFloat('1.')") == JsNumber(Finite(1.0))
+  assert eval("parseFloat('+.5e+3')") == JsNumber(Finite(500.0))
+}
+
+pub fn eval_parse_float_longest_prefix_test() {
+  assert eval("parseFloat('Infinityx')") == JsNumber(Infinity)
+  assert eval("parseFloat('1.2.3')") == JsNumber(Finite(1.2))
+  assert eval("parseFloat('1foo')") == JsNumber(Finite(1.0))
+  // An incomplete exponent is not part of the match.
+  assert eval("parseFloat('5e')") == JsNumber(Finite(5.0))
+}
+
+pub fn eval_parse_float_no_match_is_nan_test() {
+  assert eval("parseFloat('e5')") == JsNumber(NaN)
+  assert eval("parseFloat('.')") == JsNumber(NaN)
+  assert eval("parseFloat('')") == JsNumber(NaN)
 }
 
 pub fn eval_legacy_octal_escape_above_7f_test() {
