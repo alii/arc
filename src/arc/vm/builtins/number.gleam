@@ -230,19 +230,16 @@ fn parse_int(
   use str, state <- state.try_op(str_result)
   // Steps 6-9: Determine radix R via ToInt32(radix).
   // Step 6 is ToInt32 (§7.1.6), NOT ToIntegerOrInfinity: ToInt32 maps NaN
-  // and ±∞ to +0, and step 8 then turns R = 0 into the default radix 10.
-  // The full ToNumber runs first (ToPrimitive on objects, honoring an
-  // overridden valueOf), so this site keeps its own non-finite → 0 mapping
-  // rather than the saturated coerce.jsnum_to_integer_or_infinity.
+  // and ±∞ to +0 (step 8 then turns R = 0 into the default radix 10) and
+  // wraps a finite radix modulo 2^32 with sign extension — so
+  // `parseInt("f", 2**32 + 16)` is 15, not NaN. The full ToNumber runs
+  // first (ToPrimitive on objects, honoring an overridden valueOf).
   let radix_val = case args {
     [_, r, ..] -> r
     _ -> JsUndefined
   }
   use radix_num, state <- coerce.try_to_number(state, radix_val)
-  let radix_int = case radix_num {
-    Finite(x) -> value.float_to_int(x)
-    NaN | Infinity | NegInfinity -> 0
-  }
+  let radix_int = coerce.jsnum_to_int32(radix_num)
   // Steps 3-5: Strip the sign BEFORE the prefix check so "-0x10" still
   // reaches the "0x" path (the prefix follows the sign in the grammar).
   let #(str, negative) = case string.first(str) {

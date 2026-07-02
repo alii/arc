@@ -174,6 +174,16 @@ pub fn eval_parse_int_explicit_radix_and_hex_prefix_test() {
   assert eval("parseInt('12', 0)") == JsNumber(Finite(12.0))
 }
 
+pub fn eval_parse_int_radix_is_to_int32_test() {
+  // Step 6 is ToInt32(radix), not a plain truncation: 2^32 + 16 wraps to 16.
+  assert eval("parseInt('f', 2**32 + 16)") == JsNumber(Finite(15.0))
+  assert eval("parseInt('12', 2**32 + 8)") == JsNumber(Finite(10.0))
+  // 2^32 + 1 wraps to 1, which step 7 rejects (radix < 2) -> NaN.
+  assert eval("parseInt('10', 2**32 + 1)") == JsNumber(NaN)
+  // 2^31 wraps to -2147483648 -> NaN (out of [2, 36]).
+  assert eval("parseInt('10', 2**31)") == JsNumber(NaN)
+}
+
 // ----------------------------------------------------------------------------
 // parseFloat — §19.2.4 longest StrDecimalLiteral prefix
 // ----------------------------------------------------------------------------
