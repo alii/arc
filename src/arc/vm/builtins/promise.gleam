@@ -216,7 +216,20 @@ pub fn fulfill_promise(
   data_ref: Ref,
   result_value: JsValue,
 ) -> state.State(host) {
-  let #(h, jobs, _is_handled) =
+  let #(state, _did_settle) =
+    fulfill_promise_tracked(state, data_ref, result_value)
+  state
+}
+
+/// FulfillPromise, additionally reporting whether THIS call performed the
+/// pending -> fulfilled transition (`True`) or found the promise already
+/// settled and was a no-op (`False`). See `settle_outcome`.
+fn fulfill_promise_tracked(
+  state: state.State(host),
+  data_ref: Ref,
+  result_value: JsValue,
+) -> #(state.State(host), Bool) {
+  let #(h, jobs, settled) =
     settle_promise(
       state.heap,
       data_ref,
@@ -224,11 +237,33 @@ pub fn fulfill_promise(
       fn(fulfill, _reject) { fulfill },
       value.PromiseFulfilled(result_value),
     )
-  state.State(
-    ..state,
-    heap: h,
-    job_queue: job_queue.append(state.job_queue, jobs),
+  #(
+    state.State(
+      ..state,
+      heap: h,
+      job_queue: job_queue.append(state.job_queue, jobs),
+    ),
+    option.is_some(settled),
   )
+}
+
+/// Settle a promise from a host outcome: FulfillPromise on `Ok`,
+/// RejectPromise on `Error`. Returns `True` when THIS call performed the
+/// pending -> settled transition, `False` when the promise was already
+/// settled (the underlying settle is a soft no-op, per the spec's pending
+/// Assert). `arc/host.resume` relies on the Bool to decrement its
+/// `outstanding` counter exactly once per suspend, no matter how many times
+/// the embedder resumes the same ticket. `fulfill_promise`/`reject_promise`
+/// are thin wrappers that discard the Bool for internal callers.
+pub fn settle_outcome(
+  state: state.State(host),
+  data_ref: Ref,
+  outcome: Result(JsValue, JsValue),
+) -> #(state.State(host), Bool) {
+  case outcome {
+    Ok(v) -> fulfill_promise_tracked(state, data_ref, v)
+    Error(reason) -> reject_promise_tracked(state, data_ref, reason)
+  }
 }
 
 /// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
@@ -307,6 +342,18 @@ pub fn reject_promise(
   data_ref: Ref,
   reason: JsValue,
 ) -> state.State(host) {
+  let #(state, _did_settle) = reject_promise_tracked(state, data_ref, reason)
+  state
+}
+
+/// RejectPromise, additionally reporting whether THIS call performed the
+/// pending -> rejected transition (`True`) or found the promise already
+/// settled and was a no-op (`False`). See `settle_outcome`.
+fn reject_promise_tracked(
+  state: state.State(host),
+  data_ref: Ref,
+  reason: JsValue,
+) -> #(state.State(host), Bool) {
   let #(h, jobs, settled) =
     settle_promise(
       state.heap,
@@ -322,15 +369,18 @@ pub fn reject_promise(
         False -> [data_ref, ..state.unhandled_rejections]
         True -> state.unhandled_rejections
       }
-      state.State(
-        ..state,
-        heap: h,
-        job_queue: job_queue.append(state.job_queue, jobs),
-        unhandled_rejections:,
+      #(
+        state.State(
+          ..state,
+          heap: h,
+          job_queue: job_queue.append(state.job_queue, jobs),
+          unhandled_rejections:,
+        ),
+        True,
       )
     }
     // Soft assertion: not pending -> no-op (spec says Assert)
-    None -> state
+    None -> #(state, False)
   }
 }
 

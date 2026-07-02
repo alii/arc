@@ -136,9 +136,10 @@ pub fn validate_boolean(
 //
 // The macrotask loop is the embedder's. Core only knows about Promises and
 // the microtask queue. These two functions are the bridge: a host function
-// hands JS a pending Promise and walks away with a settle handle; later,
+// hands JS a pending Promise and walks away with a settle `Ticket`; later,
 // from its own loop (BEAM mailbox, libuv, epoll, whatever), it calls
-// `resume` to settle that Promise and re-enters `drain_jobs`.
+// `resume` with that Ticket to settle the Promise and re-enters
+// `drain_jobs`.
 //
 //     fn fetch(args, _this, s) {
 //       let #(s, promise, ticket) = host.suspend(s)
@@ -156,32 +157,48 @@ pub fn validate_boolean(
 //       }
 //     }
 
+/// Opaque settle handle for one `suspend`ed Promise. The ONLY way to get one
+/// is from `suspend`, and the only thing to do with it is hand it back to
+/// `resume` — so the two classic embedder mistakes (passing the Promise
+/// OBJECT's `Ref` to `resume`, or passing some unrelated `Ref`) are compile
+/// errors, not silent heap corruption. Internally it wraps the promise's
+/// PromiseSlot data ref; that never leaks.
+pub opaque type Ticket {
+  Ticket(data_ref: Ref)
+}
+
 /// Create a pending Promise and bump `outstanding`. Return the JsValue from
-/// your host function so JS can `await` it; keep the `Ref` to pass to
+/// your host function so JS can `await` it; keep the `Ticket` to pass to
 /// `resume` once your external work completes.
-pub fn suspend(s: State(host)) -> #(State(host), JsValue, Ref) {
+pub fn suspend(s: State(host)) -> #(State(host), JsValue, Ticket) {
   let #(heap, obj_ref, data_ref) =
     builtins_promise.create_promise(s.heap, s.builtins.promise.prototype)
   #(
     state.State(..s, heap:, outstanding: s.outstanding + 1),
     JsObject(obj_ref),
-    data_ref,
+    Ticket(data_ref:),
   )
 }
 
-/// Settle a Promise created by `suspend` — fulfils on `Ok`, rejects on
-/// `Error`, decrements `outstanding`, and enqueues the reaction microtasks.
-/// Call from your event-loop driver, then re-drain.
+/// Settle the Promise behind a `suspend` Ticket — fulfils on `Ok`, rejects
+/// on `Error`, enqueues the reaction microtasks, and decrements
+/// `outstanding`. Call from your event-loop driver, then re-drain.
+///
+/// Resuming an already-settled ticket (a double resume) is a no-op: the
+/// Promise stays as first settled and `outstanding` is NOT decremented
+/// again, so the counter can never go negative and the embedder's
+/// `outstanding(s) == 0` drain condition stays honest.
 pub fn resume(
   s: State(host),
-  ticket: Ref,
+  ticket: Ticket,
   outcome: Result(JsValue, JsValue),
 ) -> State(host) {
-  let s = case outcome {
-    Ok(v) -> builtins_promise.fulfill_promise(s, ticket, v)
-    Error(reason) -> builtins_promise.reject_promise(s, ticket, reason)
+  let Ticket(data_ref:) = ticket
+  let #(s, did_settle) = builtins_promise.settle_outcome(s, data_ref, outcome)
+  case did_settle {
+    True -> state.State(..s, outstanding: s.outstanding - 1)
+    False -> s
   }
-  state.State(..s, outstanding: s.outstanding - 1)
 }
 
 // -- Atomics host capabilities -----------------------------------------------
