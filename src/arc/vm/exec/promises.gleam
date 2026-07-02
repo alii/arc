@@ -157,6 +157,60 @@ fn new_capability_from_constructor(
   }
 }
 
+/// §7.3.22 SpeciesConstructor(O, %Promise%) as used by
+/// Promise.prototype.then step 3:
+///
+///   1. Let C be ? Get(O, "constructor")   (getter/proxy-trap aware)
+///   2. If C is undefined, return %Promise%.
+///   3. If C is not an Object, throw a TypeError.
+///   4. Let S be ? Get(C, @@species).
+///   5. If S is undefined or null, return %Promise%.
+///   6-7. If IsConstructor(S), return S; else throw a TypeError.
+fn promise_species_constructor(
+  state: State(host),
+  promise: JsValue,
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  let intrinsic = JsObject(state.builtins.promise.constructor)
+  // Step 1: C = ? Get(O, "constructor").
+  use #(ctor, state) <- result.try(object.get_value_of(
+    state,
+    promise,
+    Named("constructor"),
+  ))
+  case ctor {
+    // Step 2: no constructor → the intrinsic default.
+    JsUndefined -> Ok(#(intrinsic, state))
+    // Step 4: S = ? Get(C, @@species).
+    JsObject(_) -> {
+      use #(species, state) <- result.try(object.get_symbol_value_of(
+        state,
+        ctor,
+        value.symbol_species,
+      ))
+      case species {
+        // Step 5: undefined/null species → the intrinsic default.
+        JsUndefined | value.JsNull -> Ok(#(intrinsic, state))
+        // Steps 6-7: anything else must be a constructor.
+        _ ->
+          case object.is_constructor(state.heap, species) {
+            True -> Ok(#(species, state))
+            False ->
+              Error(state.type_error_value(
+                state,
+                "@@species is not a constructor",
+              ))
+          }
+      }
+    }
+    // Step 3: a present but non-object "constructor" is a TypeError.
+    _ ->
+      Error(state.type_error_value(
+        state,
+        "Promise constructor property is not an object",
+      ))
+  }
+}
+
 /// §27.2.4.1.2 GetPromiseResolve(C): Get(C, "resolve"), require callable.
 fn get_promise_resolve(
   state: State(host),
@@ -464,7 +518,7 @@ fn with_element_once(
 // ============================================================================
 
 /// new Promise(executor) — create promise, call executor(resolve, reject),
-/// catch throws and reject.
+/// catch a throwing executor with the capability's reject function.
 pub fn call_native_promise_constructor(
   state: State(host),
   args: List(JsValue),
@@ -491,8 +545,18 @@ pub fn call_native_promise_constructor(
         Ok(#(_, after_state)) ->
           return_promise(after_state, cap.promise, rest_stack)
         Error(#(thrown, after_state)) ->
-          builtins_promise.reject_promise(after_state, cap.data, thrown)
-          |> return_promise(cap.promise, rest_stack)
+          // §27.2.3.1 step 10.a: a throwing executor goes through the reject
+          // FUNCTION — `? Call(resolvingFunctions.[[Reject]], undefined,
+          // «thrown»)` — never RejectPromise directly. Its [[AlreadyResolved]]
+          // flag makes `resolve(x); throw e` keep the resolution instead of
+          // overwriting it with a rejection.
+          case state.call(after_state, cap.reject, JsUndefined, [thrown]) {
+            Ok(#(_, after_state)) ->
+              return_promise(after_state, cap.promise, rest_stack)
+            // Step 10.b: the reject call's own abrupt completion propagates.
+            Error(#(reject_thrown, after_state)) ->
+              Error(#(Thrown, reject_thrown, after_state))
+          }
       }
     }
   }
@@ -581,7 +645,12 @@ pub fn call_native_promise_reject_fn(
   }
 }
 
-/// Promise.prototype.then(onFulfilled, onRejected)
+/// §27.2.5.4 Promise.prototype.then(onFulfilled, onRejected).
+///
+/// Steps 3-4: the result promise comes from
+/// NewPromiseCapability(? SpeciesConstructor(this, %Promise%)), so a
+/// subclass instance's .then/.catch/.finally returns a subclass promise
+/// (`class P extends Promise {}` → `P.resolve(1).then(f) instanceof P`).
 pub fn call_native_promise_then(
   state: State(host),
   this: JsValue,
@@ -598,28 +667,26 @@ pub fn call_native_promise_then(
 
   case builtins_promise.get_data_ref(state.heap, this_ref) {
     Some(data_ref) -> {
-      // Create child promise (the one returned by .then)
-      let #(h, child) =
-        builtins_promise.new_promise_capability(state.heap, state.builtins)
-
-      // Perform the .then logic
+      // Step 3: C = ? SpeciesConstructor(promise, %Promise%).
+      use #(ctor, state) <- result.try(
+        state.rethrow(promise_species_constructor(state, this)),
+      )
+      // Step 4: resultCapability = ? NewPromiseCapability(C).
+      use #(cap, state) <- result.try(
+        state.rethrow(new_capability_from_constructor(state, ctor)),
+      )
+      // Step 5: PerformPromiseThen(promise, onFulfilled, onRejected, cap).
       let state =
         builtins_promise.perform_promise_then(
-          State(..state, heap: h),
+          state,
           data_ref,
           on_fulfilled,
           on_rejected,
-          child.resolve,
-          child.reject,
+          cap.resolve,
+          cap.reject,
         )
 
-      Ok(
-        State(
-          ..state,
-          stack: [JsObject(child.promise), ..rest_stack],
-          pc: state.pc + 1,
-        ),
-      )
+      Ok(State(..state, stack: [cap.promise, ..rest_stack], pc: state.pc + 1))
     }
     None -> {
       state.throw_type_error(state, "then called on non-promise")

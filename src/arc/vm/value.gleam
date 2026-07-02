@@ -1130,13 +1130,22 @@ pub type DataViewNativeFn {
 }
 
 /// Iterator Helper kind — ES2025 §27.1.3. Which lazy combinator created
-/// this %IteratorHelper% object. Stored in IteratorHelperObject.kind.
+/// this %IteratorHelper% object, together with that combinator's own state.
+/// Stored in IteratorHelperObject.kind. Keeping the per-kind payload inside
+/// the variant means take/drop provably have no callback and map/filter/
+/// flatMap provably have one — there is no "func is JsUndefined" sentinel.
 pub type IteratorHelperKind {
-  HelperMap
-  HelperFilter
-  HelperTake
-  HelperDrop
-  HelperFlatMap
+  HelperMap(func: JsValue)
+  HelperFilter(func: JsValue)
+  /// `remaining` counts down; at 0 the underlying iterator is closed.
+  HelperTake(remaining: Int)
+  /// `remaining` counts down; once it hits 0 every step is yielded.
+  HelperDrop(remaining: Int)
+  /// `inner` is the currently-open inner iterator record as
+  /// #(inner_iterator, cached_next_method) — GetIteratorFlattenable (§7.4.13)
+  /// caches `next` once. `None` between inner iterators, so a half-initialized
+  /// inner (an iterator without its cached next method) is unrepresentable.
+  HelperFlatMap(func: JsValue, inner: Option(#(JsValue, JsValue)))
 }
 
 /// Iterator.zip / Iterator.zipKeyed mode — tc39 joint-iteration proposal.
@@ -2352,16 +2361,15 @@ pub type ExoticKind(ctx, host) {
   /// Iterator.prototype.{map,filter,take,drop,flatMap}.
   /// `next_method` is cached once per GetIteratorDirect (spec §7.4.9) so
   /// monkey-patching `underlying.next` after creation has no effect.
-  /// `count` is remaining limit (take/drop) OR running counter
-  /// (map/filter/flatMap). `inner` is flatMap's current inner iterator.
+  /// `kind` carries the combinator's own state (callback, take/drop
+  /// remaining, flatMap inner iterator). `counter` is the spec's running
+  /// element index passed to map/filter/flatMap callbacks; take/drop's
+  /// countdown lives in their variants instead.
   IteratorHelperObject(
     kind: IteratorHelperKind,
     underlying: JsValue,
     next_method: JsValue,
-    func: JsValue,
-    inner: JsValue,
-    inner_next: JsValue,
-    count: Int,
+    counter: Int,
     done: Bool,
   )
   /// Wrap For Valid Iterator — ES2025 §27.1.2.1.2. Created by Iterator.from
@@ -3266,20 +3274,23 @@ fn do_refs_in_slot(
         ]
         AsyncFromSyncIteratorObject(sync_iter:, sync_next:) ->
           push_value_ref(sync_next, [sync_iter, ..acc])
-        IteratorHelperObject(
-          underlying:,
-          next_method:,
-          func:,
-          inner:,
-          inner_next:,
-          ..,
-        ) ->
-          acc
-          |> push_value_ref(underlying, _)
-          |> push_value_ref(next_method, _)
-          |> push_value_ref(func, _)
-          |> push_value_ref(inner, _)
-          |> push_value_ref(inner_next, _)
+        IteratorHelperObject(kind:, underlying:, next_method:, ..) -> {
+          let acc =
+            acc
+            |> push_value_ref(underlying, _)
+            |> push_value_ref(next_method, _)
+          case kind {
+            HelperTake(remaining: _) | HelperDrop(remaining: _) -> acc
+            HelperMap(func:)
+            | HelperFilter(func:)
+            | HelperFlatMap(func:, inner: None) -> push_value_ref(func, acc)
+            HelperFlatMap(func:, inner: Some(#(inner, inner_next))) ->
+              acc
+              |> push_value_ref(func, _)
+              |> push_value_ref(inner, _)
+              |> push_value_ref(inner_next, _)
+          }
+        }
         WrapForValidIteratorObject(iterated:, next_method:)
         | IteratorRecordObject(iterated:, next_method:) ->
           push_value_ref(next_method, push_value_ref(iterated, acc))

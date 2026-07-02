@@ -946,10 +946,7 @@ pub fn postfix_increment_side_effect_test() -> Nil {
 // update — `o.x++` on a string property must not string-concatenate, and
 // the postfix result is the numeric old value (not new ∓ 1).
 pub fn postfix_member_string_tonumeric_test() -> Nil {
-  assert_normal(
-    "var o = {x: '5'}; String([o.x++, o.x])",
-    JsString("5,6"),
-  )
+  assert_normal("var o = {x: '5'}; String([o.x++, o.x])", JsString("5,6"))
 }
 
 pub fn postfix_member_valueof_tonumeric_test() -> Nil {
@@ -966,7 +963,10 @@ pub fn prefix_member_string_tonumeric_test() -> Nil {
 // §13.4.4/§13.4.5 step 3: ToNumeric applies to the OLD value on the prefix
 // identifier path too — `++x` on a string must not string-concatenate.
 pub fn prefix_identifier_string_tonumeric_test() -> Nil {
-  assert_normal("var x = '5'; String([++x, x, typeof x])", JsString("6,6,number"))
+  assert_normal(
+    "var x = '5'; String([++x, x, typeof x])",
+    JsString("6,6,number"),
+  )
 }
 
 pub fn prefix_identifier_string_decrement_tonumeric_test() -> Nil {
@@ -6419,6 +6419,79 @@ pub fn promise_reject_propagation_test() -> Nil {
   )
 }
 
+pub fn promise_then_species_subclass_test() -> Nil {
+  // §27.2.5.4 steps 3-4: the result promise comes from
+  // SpeciesConstructor(this, %Promise%), so a Promise subclass survives
+  // .then / .catch / .finally chaining (matches node).
+  assert_normal(
+    "class P extends Promise {}
+     var a = P.resolve(1).then(x => x) instanceof P;
+     var b = P.resolve(1).catch(e => e) instanceof P;
+     var c = P.resolve(1).finally(() => {}) instanceof P;
+     '' + a + b + c",
+    JsString("truetruetrue"),
+  )
+}
+
+pub fn promise_then_species_null_test() -> Nil {
+  // §7.3.22 step 5: a null @@species falls back to the intrinsic %Promise%.
+  assert_normal(
+    "var p = Promise.resolve(1);
+     p.constructor = { [Symbol.species]: null };
+     var child = p.then(x => x);
+     '' + (child instanceof Promise) + (child.constructor === Promise)",
+    JsString("truetrue"),
+  )
+}
+
+pub fn promise_then_species_not_constructor_test() -> Nil {
+  // §7.3.22 step 7: a non-constructor @@species is a TypeError.
+  assert_thrown(
+    "var p = Promise.resolve(1);
+     p.constructor = { [Symbol.species]: 42 };
+     p.then(x => x)",
+  )
+}
+
+pub fn promise_then_constructor_not_object_test() -> Nil {
+  // §7.3.22 step 3: a present, non-object `constructor` is a TypeError.
+  assert_thrown(
+    "var p = Promise.resolve(1);
+     p.constructor = 42;
+     p.then(x => x)",
+  )
+}
+
+pub fn promise_then_non_promise_receiver_test() -> Nil {
+  assert_thrown("Promise.prototype.then.call(1)")
+}
+
+pub fn promise_executor_resolve_thenable_then_throw_test() -> Nil {
+  // §27.2.3.1 step 10.a: a throwing executor is handled by the capability's
+  // reject FUNCTION, whose [[AlreadyResolved]] flag the earlier resolve()
+  // already set — the thenable resolution wins over the throw.
+  assert_promise_resolves(
+    "new Promise(res => { res({ then(r) { r(42); } }); throw new Error('x'); })",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn promise_executor_resolve_then_throw_test() -> Nil {
+  // resolve(7) then throw: the resolution wins (matches node).
+  assert_promise_resolves(
+    "new Promise(res => { res(7); throw 'boom'; })",
+    JsNumber(Finite(7.0)),
+  )
+}
+
+pub fn promise_executor_reject_then_throw_test() -> Nil {
+  // reject(1) then throw: the first rejection wins.
+  assert_promise_rejects(
+    "new Promise((res, rej) => { rej(1); throw 2; })",
+    JsNumber(Finite(1.0)),
+  )
+}
+
 pub fn promise_resolve_identity_test() -> Nil {
   // Promise.resolve on a non-thenable returns a fulfilled promise
   assert_promise_resolves("Promise.resolve('hello')", JsString("hello"))
@@ -7068,8 +7141,7 @@ fn eval_repl_line(
         Ok(template) ->
           case entry.run_and_drain_repl(template, h, b, env) {
             Ok(#(Ok(val), new_h, new_env)) -> Ok(#(val, new_h, new_env))
-            Ok(#(Error(val), _, _)) ->
-              Error("throw: " <> string.inspect(val))
+            Ok(#(Error(val), _, _)) -> Error("throw: " <> string.inspect(val))
             Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
           }
       }
@@ -7105,8 +7177,7 @@ fn run_repl_throw_loop(
                 Ok(#(Error(_), _, _)) -> Ok(Nil)
                 Ok(#(Ok(val), _, _)) ->
                   Error("expected throw, got normal: " <> string.inspect(val))
-                Error(vm_err) ->
-                  Error("vm error: " <> string.inspect(vm_err))
+                Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
               }
           }
       }

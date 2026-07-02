@@ -63,6 +63,30 @@ pub fn init(
     )
   // §27.2.5.6 Promise.prototype [ @@toStringTag ] = "Promise"
   let h = common.add_to_string_tag(h, bt.prototype, "Promise")
+  // §27.2.4.9 get Promise [ @@species ] — an accessor returning `this`, so
+  // SpeciesConstructor(promise, %Promise%) resolves to the SUBCLASS through
+  // inheritance (`class P extends Promise {}` → Get(P, @@species) is P).
+  // Reuses the VM's generic return-`this` native (IteratorSymbolIterator).
+  let #(h, species_getter) =
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      value.VmNative(value.IteratorSymbolIterator),
+      "get [Symbol.species]",
+      0,
+    )
+  let h =
+    common.add_symbol_property(
+      h,
+      bt.constructor,
+      value.symbol_species,
+      value.accessor(
+        get: Some(JsObject(species_getter)),
+        set: None,
+        enumerable: False,
+        configurable: True,
+      ),
+    )
   #(h, bt)
 }
 
