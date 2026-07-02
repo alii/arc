@@ -239,8 +239,9 @@ pub opaque type Emitter {
     /// Synthetic with-object local names (innermost first) for the `with`
     /// statements lexically enclosing the current emission point — including
     /// withs inherited from enclosing functions (child emitters copy the
-    /// parent's stack). The scope analyzer's `inherited_with_slots` /
-    /// `fn_with_stack_free` handle cross-function inheritance from the tree.
+    /// parent's stack). The scope tree's `inherited_with_slots` /
+    /// `fn_with_stack_free` (computed by `scope.finalize`) handle
+    /// cross-function inheritance from the tree.
     with_stack: List(String),
     /// Private names ("#x") visible at the current emission point — the
     /// running [[PrivateEnvironment]] chain. compile_class prepends its
@@ -451,15 +452,16 @@ pub fn emit_module(
   let has_module_using = ast_util.has_using_decl(stmts)
   let e = Emitter(..new_emitter(tree, root_scope_id), strict: True)
   let e = enter_root_scope(e)
-  // Module top-level `this === undefined` (§16.2.1.6.4) — the analyzer
+  // Module top-level `this === undefined` (§16.2.1.6.4) — scope.finalize
   // allocates slot 0 for RefThis; runtime padding leaves it JsUndefined.
   //
   // Hoisted var declarations (top-level function names are var-scoped too),
   // the *default* binding (when the module has a default export —
   // §16.2.1.6.2 step 24.b.i CreateMutableBinding, VarBinding so the
   // synthetic `*default* = expr` assignment below is a plain store), and
-  // top-level let/const/class slots are all pre-registered by the analyzer
-  // and seeded by enter_root_scope's emit_binding_prologue — before
+  // top-level let/const/class slots are all pre-registered in the
+  // parser-built scope tree and seeded by enter_root_scope's
+  // emit_binding_prologue — before
   // hoisted-func MakeClosure so closures capture the boxed slot, not a
   // stale pre-box value.
 
@@ -2519,9 +2521,9 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
 }
 
 /// Extract final results from the emitter. `code` is already a plain
-/// `List(IrOp)` — the AST-level scope analyzer resolved every binding
-/// up front, so there are no scope markers to strip; just reverse the
-/// accumulated stream into source order.
+/// `List(IrOp)` — the parser-built scope tree (`scope.finalize`) resolved
+/// every binding up front, so there are no scope markers to strip; just
+/// reverse the accumulated stream into source order.
 fn finish(e: Emitter) -> #(List(IrOp), List(JsValue), List(CompiledChild)) {
   #(
     list.reverse(e.code),
@@ -3106,7 +3108,8 @@ fn compile_function_body(
   // then initialized strictly left to right, so a default initializer that
   // reads its own or a later parameter throws a ReferenceError. Simple lists
   // keep the fast positional path (args land directly in the named slots).
-  // Shared predicate with the scope analyzer — the two MUST agree.
+  // Shared predicate with the parser's scope pass
+  // (ast_util.all_simple_params) — the two MUST agree.
   let non_simple_fixed = !ast_util.all_simple_params(fixed_params)
 
   // Phase 1: Declare parameters. Simple lists bind identifiers positionally;
@@ -4510,8 +4513,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> {
           let e = emit_var_get(e, "eval")
           use e <- result.map(list.try_fold(args, e, emit_expr))
-          // The scope analyzer's declare-pass already marked this scope's
-          // `contains_direct_eval` — no emitter-side flag to maintain.
+          // The parser already marked this scope's `contains_direct_eval`
+          // on the ScopeBuilder — no emitter-side flag to maintain.
           emit_ir(
             e,
             opcode.IrCallEval(
@@ -6888,7 +6891,7 @@ fn compile_class(
   // class-name binding (if any), the <class_fields_init> [[Fields]] const,
   // every "#x" PrivateName const, every instance private-method closure stash
   // ("\u{0}pm:/pg:/ps:"), and every computed-element-key stash ("\u{0}ck:N").
-  // The AST scope analyzer pre-registers this same list (ast_util.class_body_bindings
+  // The parser's scope pass pre-registers this same list (ast_util.class_body_bindings
   // is the single source of truth) so emit_var_init/get below resolve by
   // (scope_id, name) to the right slot; enter_scope's prologue seeds them
   // BEFORE heritage emit so `class C extends C {}` TDZs on the inner C,

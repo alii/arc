@@ -355,10 +355,7 @@ fn array_join(
   }
 }
 
-/// join_elements — implements step 6 of Array.prototype.join (§23.1.3.18).
-/// Iterates k from 0 to len-1, building the result string R.
-///
-/// Terminal step of the join loops (§23.1.3.15 step 8: Return R).
+/// Terminal step of the join loops (§23.1.3.18 step 8: Return R).
 ///
 /// Joins the accumulated (reversed) parts through limits.join, which
 /// pre-scans the total byte size and refuses to materialize a result over
@@ -381,6 +378,9 @@ fn finish_join(
   }
 }
 
+/// join_elements — implements step 6 of Array.prototype.join (§23.1.3.18).
+/// Iterates k from 0 to len-1, building the result string R.
+///
 /// Plain arrays with no index overrides take join_elements_snapshot (one
 /// heap read for the whole loop); everything else takes the generic
 /// per-element path via get_index (object.get_value_of — walks prototype
