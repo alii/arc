@@ -1,4 +1,4 @@
-import gleam/int
+import arc/vm/key.{type PropertyKey}
 import gleam/option.{type Option, None}
 
 // ============================================================================
@@ -131,50 +131,14 @@ pub const derived_ctor_perms = SyntaxPerms(True, True, True, True)
 pub const field_init_perms = SyntaxPerms(True, True, False, False)
 
 // ============================================================================
-// Precomputed property keys
-// ============================================================================
-
-/// Precomputed canonical property key, baked into bytecode at resolve time so
-/// the interpreter never re-parses a compile-time-constant string per dispatch.
-/// Mirrors value.PropertyKey — separate type only to avoid the value↔opcode
-/// import cycle (value imports opcode for FuncTemplate). value.from_op_key
-/// converts in O(1).
-pub type OpKey {
-  /// Canonical array index — `s` parsed to non-negative int and round-trips.
-  OpIndex(Int)
-  /// Any other string key.
-  OpNamed(String)
-}
-
-/// Canonicalize a string key. Same algorithm as value.canonical_key —
-/// CanonicalNumericIndexString (§7.1.21) + array-index range check.
-/// Called once per opcode in resolve.gleam, never at runtime.
-pub fn make_key(s: String) -> OpKey {
-  case int.parse(s) {
-    // Same [0, 2^32-1) array-index range cap as value.canonical_key — keep
-    // the two canonicalizers in lockstep or compile-time and runtime keys
-    // for the same string would land in different dict slots.
-    Ok(n) if n >= 0 && n <= 4_294_967_294 ->
-      case int.to_string(n) == s {
-        True -> OpIndex(n)
-        False -> OpNamed(s)
-      }
-    _ -> OpNamed(s)
-  }
-}
-
-/// Render an OpKey back to its string form for error messages. Only called on
-/// the cold throw path.
-pub fn key_name(k: OpKey) -> String {
-  case k {
-    OpIndex(n) -> int.to_string(n)
-    OpNamed(s) -> s
-  }
-}
-
-// ============================================================================
 // Final Bytecode — resolved, ready for VM execution
 // ============================================================================
+//
+// Static property-access ops carry a `key.PropertyKey`, precomputed by
+// resolve.gleam via `key.canonical_key` so the interpreter never re-parses a
+// compile-time-constant string per dispatch. There is exactly ONE
+// canonicalizer (see arc/vm/key), so compile-time and runtime keys for the
+// same string can never land in different dict slots.
 
 /// Native error constructor selector for `ThrowError` — mirrors the kind
 /// argument to QuickJS OP_throw_error. Extend as needed.
@@ -287,29 +251,33 @@ pub type Op {
   WithPutRefValue(name: String, target: Int)
 
   // -- Property Access --
-  GetField(key: OpKey)
-  GetField2(key: OpKey)
-  PutField(key: OpKey)
+  GetField(key: PropertyKey)
+  GetField2(key: PropertyKey)
+  PutField(key: PropertyKey)
   GetElem
   GetElem2
   PutElem
-  DeleteField(key: OpKey)
+  DeleteField(key: PropertyKey)
   DeleteElem
+  // The four static private-element ops carry the RAW private name ("#x").
+  // Private names live in a hidden NUL-marker namespace (value.private_key)
+  // and are never canonicalized to array indices — carrying a String makes a
+  // private→public Index leak unrepresentable.
   /// §7.3.31 PrivateGet. Stack: [obj, ..] → [val, ..]. Throws TypeError if
   /// obj is not a JsObject or if obj lacks the private brand (has_property
   /// returns False). Brand check uses proto-chain walk so private methods
   /// stored on the prototype pass — pragmatic, not spec-pure PrivateName.
-  GetPrivateField(key: OpKey)
+  GetPrivateField(name: String)
   /// Like GetPrivateField but keeps obj on stack: [obj, ..] → [val, obj, ..].
   /// Used for `obj.#m(args)` method calls (mirrors GetField2).
-  GetPrivateField2(key: OpKey)
+  GetPrivateField2(name: String)
   /// §7.3.32 PrivateSet. Stack: [val, obj, ..] → [val, ..]. Throws TypeError
   /// if obj is not a JsObject or lacks the brand.
-  PutPrivateField(key: OpKey)
+  PutPrivateField(name: String)
   /// §13.10.1 `#x in obj`. Stack: [obj, ..] → [JsBool, ..]. Throws TypeError
   /// if obj is not a JsObject (step 2). Name is encoded in the opcode, not
   /// on the stack — unlike BinOp(In) which pops two operands.
-  PrivateIn(key: OpKey)
+  PrivateIn(name: String)
 
   // -- Spec-shaped PrivateName ops (per-class-evaluation unique names) --
   /// §15.7.14 ClassDefinitionEvaluation step 5/6: mint a fresh PrivateName for
@@ -355,7 +323,7 @@ pub type Op {
 
   // -- Object/Array Construction --
   NewObject
-  DefineField(key: OpKey)
+  DefineField(key: PropertyKey)
   DefineFieldComputed
   /// §7.1.19 ToPropertyKey. Stack: [key, ..] → [key', ..]. Runs
   /// ToPrimitive(key, string); Symbols pass through, everything else is
@@ -363,12 +331,12 @@ pub type Op {
   /// (§15.7.14 ClassFieldDefinitionEvaluation step 1) so name side effects
   /// and abrupt completions happen ONCE, not per instantiation.
   ToPropertyKey
-  DefineMethod(key: OpKey)
+  DefineMethod(key: PropertyKey)
   DefineMethodComputed
   /// `enumerable`: True for object-literal accessors (§13.2.5.5
   /// PropertyDefinitionEvaluation passes enumerable=true), False for class
   /// methods (§15.4.5 MethodDefinitionEvaluation passes enumerable=false).
-  DefineAccessor(key: OpKey, kind: AccessorKind, enumerable: Bool)
+  DefineAccessor(key: PropertyKey, kind: AccessorKind, enumerable: Bool)
   DefineAccessorComputed(kind: AccessorKind, enumerable: Bool)
   /// §15.4.4 MakeMethod — peek [fn, obj, ...], set fn.[[HomeObject]] = obj.
   /// Stack-neutral. Emitted for object-literal shorthand methods so super.x

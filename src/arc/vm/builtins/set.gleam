@@ -10,16 +10,24 @@
 /// record, so a deleted-then-re-added value gets a fresh seq and is revisited
 /// by in-flight iterators per §24.2.5. Iteration points call
 /// ordered_entries.live_values to recover forward insertion order.
-import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/iterator
 import arc/vm/heap
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{type JsValue, type MapKey, type Ref, type SetNativeFn, Dispatch, Finite, JsBool, JsNumber, JsObject, JsUndefined, NaN, ObjectSlot, SetConstructor, SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear, SetPrototypeDelete, SetPrototypeDifference, SetPrototypeEntries, SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas, SetPrototypeIntersection, SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf, SetPrototypeIsSupersetOf, SetPrototypeSymmetricDifference, SetPrototypeUnion, SetPrototypeValues}
+import arc/vm/value.{
+  type JsValue, type MapKey, type Ref, type SetNativeFn, Dispatch, Finite,
+  JsBool, JsNumber, JsObject, JsUndefined, NaN, ObjectSlot, SetConstructor,
+  SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear, SetPrototypeDelete,
+  SetPrototypeDifference, SetPrototypeEntries, SetPrototypeForEach,
+  SetPrototypeGetSize, SetPrototypeHas, SetPrototypeIntersection,
+  SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf, SetPrototypeIsSupersetOf,
+  SetPrototypeSymmetricDifference, SetPrototypeUnion, SetPrototypeValues,
+}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 

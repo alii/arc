@@ -24,6 +24,7 @@ import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/realm
@@ -871,7 +872,7 @@ fn eval_harness(
         object.set_property(
           h,
           global_object,
-          value.Named("$262"),
+          Named("$262"),
           value.JsObject(dollar_262_ref),
         )
 
@@ -941,7 +942,7 @@ fn get_data(
   ref: value.Ref,
   key: String,
 ) -> Result(value.JsValue, Nil) {
-  case object.get_own_property(h, ref, value.Named(key)) {
+  case object.get_own_property(h, ref, Named(key)) {
     Some(value.DataProperty(value: val, ..)) -> Ok(val)
     Some(_) -> Error(Nil)
     None ->
@@ -1027,7 +1028,7 @@ fn extend_262_with_agent(
   object.define_method_property(
     h,
     dollar_262,
-    value.Named("agent"),
+    Named("agent"),
     value.JsObject(agent_ref),
   )
 }
@@ -1056,17 +1057,17 @@ fn build_agent(h: Heap(host), b: common.Builtins) -> #(Heap(host), value.Ref) {
       let #(name, impl, arity) = method
       let #(h, fn_ref) = common.alloc_host_fn(h, func_proto, impl, name, arity)
       #(h, [
-        #(value.Named(name), value.builtin_property(value.JsObject(fn_ref))),
+        #(Named(name), value.builtin_property(value.JsObject(fn_ref))),
         ..props
       ])
     })
   let hidden = [
     #(
-      value.Named("__reports__"),
+      Named("__reports__"),
       value.data(value.JsObject(reports_ref)) |> value.configurable(),
     ),
     #(
-      value.Named("__agents__"),
+      Named("__agents__"),
       value.data(value.JsObject(agents_ref)) |> value.configurable(),
     ),
   ]
@@ -1163,14 +1164,14 @@ fn run_agent_child(source: String) -> Nil {
     object.set_property(
       h,
       global_ref,
-      value.Named("$262"),
+      Named("$262"),
       value.JsObject(dollar_262_ref),
     )
   // The child's $262.agent object — its __agents__ queue collects the
   // receiveBroadcast callbacks the script registers; the broadcast loop
   // below invokes them.
   let agent_this = case
-    object.get_own_property(h, dollar_262_ref, value.Named("agent"))
+    object.get_own_property(h, dollar_262_ref, Named("agent"))
   {
     Some(value.DataProperty(value: v, ..)) -> v
     _ -> value.JsUndefined
@@ -1217,7 +1218,9 @@ fn run_agent_child(source: String) -> Nil {
             realms: dict.insert(st.ctx.realms, realm_ref, b),
           ),
         )
-      case interpreter.execute_inner(st) {
+      // Agent scripts are plain top-level scripts (non-coroutine frames):
+      // the narrowed loop reports a leaked suspension as a VmError.
+      case interpreter.execute_to_completion(st, "test262 agent script") {
         Error(vm_err) ->
           io.println_error(
             "$262.agent: agent VM error: " <> string.inspect(vm_err),
@@ -1498,7 +1501,7 @@ fn agent_hidden_ref(
 ) -> Result(value.Ref, Nil) {
   case this {
     value.JsObject(this_ref) ->
-      case object.get_own_property(st.heap, this_ref, value.Named(name)) {
+      case object.get_own_property(st.heap, this_ref, Named(name)) {
         Some(value.DataProperty(value: value.JsObject(ref), ..)) -> Ok(ref)
         _ -> Error(Nil)
       }

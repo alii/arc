@@ -18,10 +18,14 @@
 
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/typed_array_ffi.{
+  ta_clamp_uint8, ta_set_float, ta_set_int, ta_zeroed,
+}
+import arc/vm/key.{Index}
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsElements, type JsValue, type Property, type PropertyKey, type Ref,
-  AccessorProperty, ArrayObject, DataProperty, Finite, Index, JsNumber, JsObject,
+  AccessorProperty, ArrayObject, DataProperty, Finite, JsNumber, JsObject,
   ObjectSlot,
 }
 import gleam/bit_array
@@ -31,39 +35,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-
-@external(erlang, "arc_typed_array_ffi", "ta_set_int")
-fn ta_set_int(
-  data: BitArray,
-  byte_offset: Int,
-  size_bits: Int,
-  val: Int,
-) -> BitArray
-
-@external(erlang, "arc_typed_array_ffi", "ta_set_float")
-fn ta_set_float(
-  data: BitArray,
-  byte_offset: Int,
-  size_bits: Int,
-  tag: Int,
-  val: Float,
-) -> BitArray
-
-@external(erlang, "arc_typed_array_ffi", "ta_clamp_uint8")
-fn ta_clamp_uint8(tag: Int, val: Float) -> Int
-
-@external(erlang, "arc_typed_array_ffi", "ta_zeroed")
-fn ta_zeroed(byte_len: Int) -> BitArray
-
-/// JsNum → FFI float tag pair. Tags: 0 finite, 1 NaN, 2 +Inf, 3 -Inf.
-fn jsnum_to_tagged(n: value.JsNum) -> #(Int, Float) {
-  case n {
-    Finite(f) -> #(0, f)
-    value.NaN -> #(1, 0.0)
-    value.Infinity -> #(2, 0.0)
-    value.NegInfinity -> #(3, 0.0)
-  }
-}
 
 /// ToIntegerOrInfinity-style truncation for integer element stores:
 /// NaN/±Infinity → 0 (the mod-2^n wrap in the FFI handles the rest).
@@ -237,18 +208,9 @@ fn encode_typed_number(
   num: value.JsNum,
 ) -> BitArray {
   case elem_kind {
-    value.Uint8ClampedKind -> {
-      let #(tag, f) = jsnum_to_tagged(num)
-      ta_set_int(data, off, 8, ta_clamp_uint8(tag, f))
-    }
-    value.Float32Kind -> {
-      let #(tag, f) = jsnum_to_tagged(num)
-      ta_set_float(data, off, 32, tag, f)
-    }
-    value.Float64Kind -> {
-      let #(tag, f) = jsnum_to_tagged(num)
-      ta_set_float(data, off, 64, tag, f)
-    }
+    value.Uint8ClampedKind -> ta_set_int(data, off, 8, ta_clamp_uint8(num))
+    value.Float32Kind -> ta_set_float(data, off, 32, num)
+    value.Float64Kind -> ta_set_float(data, off, 64, num)
     value.Int8Kind | value.Uint8Kind ->
       ta_set_int(data, off, 8, jsnum_to_store_int(num))
     value.Int16Kind | value.Uint16Kind ->

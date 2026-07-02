@@ -16,7 +16,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
-import arc/vm/limits
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
@@ -27,7 +27,7 @@ import arc/vm/value.{
   ArrayBufferIsView, ArrayBufferNative, ArrayBufferObject, ArrayBufferResize,
   ArrayBufferSlice, ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable,
-  DetachArrayBuffer262, Dispatch, JsBool, JsNull, JsObject, JsUndefined, Named,
+  DetachArrayBuffer262, Dispatch, JsBool, JsNull, JsObject, JsUndefined,
   ObjectSlot, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
   SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
   SharedArrayBufferGetSpecies, SharedArrayBufferGrow, SharedArrayBufferSlice,
@@ -42,6 +42,10 @@ import gleam/option.{type Option, None, Some}
 /// "If it is impossible to create such a Data Block, throw a RangeError").
 /// 2^31 - 1 bytes — matches V8's ~2 GiB limit on 64-bit.
 const max_buffer_byte_length = 2_147_483_647
+
+/// RangeError message for every §7.1.22 ToIndex in this module (constructor
+/// length, maxByteLength option, resize, grow, transfer).
+const invalid_length_msg = "Invalid array buffer length"
 
 // ============================================================================
 // Init — constructors + prototypes for ArrayBuffer and SharedArrayBuffer
@@ -259,9 +263,10 @@ fn constructor(
       state.type_error(state, "Constructor " <> name <> " requires 'new'")
     new_target -> {
       // Step 2: ToIndex(length)
-      use byte_length, state <- try_to_index(
+      use byte_length, state <- coerce.to_index_cps(
         state,
         helpers.first_arg_or_undefined(args),
+        invalid_length_msg,
       )
       // Step 3: GetArrayBufferMaxByteLengthOption(options)
       let options = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
@@ -367,7 +372,11 @@ fn try_max_byte_length_option(
       case max_val {
         JsUndefined -> cont(None, state)
         _ -> {
-          use max, state <- try_to_index(state, max_val)
+          use max, state <- coerce.to_index_cps(
+            state,
+            max_val,
+            invalid_length_msg,
+          )
           cont(Some(max), state)
         }
       }
@@ -490,9 +499,10 @@ fn ab_resize(
       // Step 2
       use buf, state <- require_unshared(buf, state, "resize")
       // Step 3: ToIndex may run user code (valueOf) — re-read O after.
-      use new_len, state <- try_to_index(
+      use new_len, state <- coerce.to_index_cps(
         state,
         helpers.first_arg_or_undefined(args),
+        invalid_length_msg,
       )
       use buf, state <- require_buffer(JsObject(buf.ref), state, "resize")
       // Step 4
@@ -689,11 +699,19 @@ fn slice_to_immutable(
       )
     False -> {
       // Step 15: AllocateImmutableArrayBuffer — copy [first, first+newLen).
-      let data = case
-        bit_array.slice(value.buffer_bits(buf.data), first, new_len)
-      {
-        Ok(part) -> part
-        Error(Nil) -> zero_block(new_len)
+      // In bounds by construction: step 14 just proved final <= currentLen,
+      // and newLen > 0 implies first < final, so [first, first+newLen) =
+      // [first, final) sits inside the buffer. (newLen == 0 must not reach
+      // bit_array.slice: a mid-coercion shrink can leave `first` past
+      // currentLen, and binary:part rejects an out-of-range start even for
+      // an empty take.)
+      let data = case new_len {
+        0 -> <<>>
+        _ -> {
+          let assert Ok(part) =
+            bit_array.slice(value.buffer_bits(buf.data), first, new_len)
+          part
+        }
       }
       let #(heap, new_ref) =
         common.alloc_wrapper(
@@ -759,14 +777,14 @@ fn ab_transfer(
   case new_len <= max_buffer_byte_length && max_ok {
     False -> state.range_error(state, "Array buffer allocation failed")
     True -> {
-      // Step 8: copy then zero-extend
+      // Step 8: copy then zero-extend. In bounds by construction:
+      // copyLen = min(newByteLength, old byteLength) <= byte_size(old_bits),
+      // so CopyDataBlockBytes' source range [0, copyLen) always exists.
       let old_bits = value.buffer_bits(buf.data)
       let old_len = bit_array.byte_size(old_bits)
       let copy_len = int.min(new_len, old_len)
-      let data = case bit_array.slice(old_bits, 0, copy_len) {
-        Ok(part) -> bit_array.append(part, zero_block(new_len - copy_len))
-        Error(Nil) -> zero_block(new_len)
-      }
+      let assert Ok(copied) = bit_array.slice(old_bits, 0, copy_len)
+      let data = bit_array.append(copied, zero_block(new_len - copy_len))
       let #(heap, new_ref) =
         common.alloc_wrapper(
           state.heap,
@@ -800,7 +818,7 @@ fn try_transfer_length(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case len_arg {
     JsUndefined -> cont(value.buffer_byte_size(buf.data), state)
-    _ -> try_to_index(state, len_arg, cont)
+    _ -> coerce.to_index_cps(state, len_arg, invalid_length_msg, cont)
   }
 }
 
@@ -863,9 +881,10 @@ fn sab_grow(
       )
     Some(max) -> {
       use buf, state <- require_shared(buf, state, "grow")
-      use new_len, state <- try_to_index(
+      use new_len, state <- coerce.to_index_cps(
         state,
         helpers.first_arg_or_undefined(args),
+        invalid_length_msg,
       )
       // ToIndex may run user code — re-read.
       use buf, state <- require_buffer(JsObject(buf.ref), state, "grow")
@@ -975,7 +994,12 @@ fn require_buffer(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: ArrayBufferObject(data:, detached:, max_byte_length:, immutable:),
+          kind: ArrayBufferObject(
+            data:,
+            detached:,
+            max_byte_length:,
+            immutable:,
+          ),
           ..,
         )) ->
           cont(
@@ -1079,31 +1103,6 @@ fn incompatible(
   )
 }
 
-/// §7.1.22 ToIndex ( value )
-///
-///   1. Let integer be ? ToIntegerOrInfinity(value).
-///   2. If integer is not in the inclusive interval from 0 to 2^53 - 1,
-///      throw a RangeError exception.
-fn try_to_index(
-  state: State(host),
-  val: JsValue,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- coerce.try_to_number(state, val)
-  case n {
-    value.NaN -> cont(0, state)
-    value.Finite(f) -> {
-      let i = value.float_to_int(f)
-      case i < 0 || i > limits.max_safe_integer {
-        True -> state.range_error(state, "Invalid array buffer length")
-        False -> cont(i, state)
-      }
-    }
-    value.Infinity | value.NegInfinity ->
-      state.range_error(state, "Invalid array buffer length")
-  }
-}
-
 /// §7.3.22 SpeciesConstructor ( O, defaultConstructor )
 ///
 ///   1. Let C be ? Get(O, "constructor").
@@ -1162,11 +1161,11 @@ fn zero_block(n: Int) -> BitArray {
 fn resize_data(data: BitArray, new_len: Int) -> BitArray {
   let old_len = bit_array.byte_size(data)
   case new_len <= old_len {
-    True ->
-      case bit_array.slice(data, 0, new_len) {
-        Ok(truncated) -> truncated
-        Error(Nil) -> zero_block(new_len)
-      }
+    True -> {
+      // In bounds by construction: newLen <= byte_size(data).
+      let assert Ok(truncated) = bit_array.slice(data, 0, new_len)
+      truncated
+    }
     False -> bit_array.append(data, zero_block(new_len - old_len))
   }
 }
@@ -1174,6 +1173,11 @@ fn resize_data(data: BitArray, new_len: Int) -> BitArray {
 /// Overwrite the first `count` bytes of `target` with
 /// `source[offset .. offset+count)` (§6.2.9.3 CopyDataBlockBytes at
 /// destination offset 0, as used by slice).
+///
+/// The caller (§25.1.6.13 slice, steps 19-21) has already proven both ranges:
+/// `offset < currentLen` and `count = min(newLen, currentLen - offset)` bound
+/// the source, and step 17 (`byteLength(new) >= newLen >= count`) bounds the
+/// target — so a slice failure is an arithmetic bug, never a data path.
 fn copy_into(
   source: BitArray,
   offset: Int,
@@ -1181,11 +1185,7 @@ fn copy_into(
   target: BitArray,
 ) -> BitArray {
   let target_len = bit_array.byte_size(target)
-  case
-    bit_array.slice(source, offset, count),
-    bit_array.slice(target, count, target_len - count)
-  {
-    Ok(part), Ok(rest) -> bit_array.append(part, rest)
-    _, _ -> target
-  }
+  let assert Ok(part) = bit_array.slice(source, offset, count)
+  let assert Ok(rest) = bit_array.slice(target, count, target_len - count)
+  bit_array.append(part, rest)
 }

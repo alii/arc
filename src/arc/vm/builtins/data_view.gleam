@@ -14,6 +14,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, list_at}
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -91,7 +92,7 @@ pub fn init(
             ..slot,
             properties: dict.insert(
               properties,
-              value.Named("prototype"),
+              Named("prototype"),
               value.data(JsObject(bt.prototype)),
             ),
           )

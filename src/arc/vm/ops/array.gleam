@@ -5,6 +5,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array
+import arc/vm/key.{Index, Named}
 import arc/vm/ops/object
 import arc/vm/state.{
   type Heap, type State, type StepResult, type VmError, State, Thrown,
@@ -24,7 +25,7 @@ import gleam/string
 // ============================================================================
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(completion.Completion, State(host)), VmError)
+  fn(State(host)) -> Result(#(completion.Outcome, State(host)), VmError)
 
 import arc/vm/completion
 
@@ -331,7 +332,7 @@ pub fn spread_into_array(
             object.find_property(
               state.heap,
               state.builtins.array_iterator_proto,
-              value.Named("next"),
+              Named("next"),
             )
             |> is_intrinsic_array_iterator_next(state.heap, _)
           case intrinsic_iter && intrinsic_next {
@@ -393,7 +394,7 @@ pub fn spread_into_array(
             find_symbol_property(state.heap, src_ref, value.symbol_iterator)
             |> is_intrinsic_iterator_proto_iterator(state.heap, _)
           let intrinsic_next =
-            object.find_property(state.heap, src_ref, value.Named("next"))
+            object.find_property(state.heap, src_ref, Named("next"))
             |> is_intrinsic_array_iterator_next(state.heap, _)
           case intrinsic_self_iter && intrinsic_next {
             False -> spread_via_iterator(state, iterable, target_ref)
@@ -574,7 +575,7 @@ fn spread_array_generic(
   case idx >= length {
     True -> Ok(state)
     False ->
-      case object.get_value_of(state, JsObject(src_ref), value.Index(idx)) {
+      case object.get_value_of(state, JsObject(src_ref), Index(idx)) {
         Ok(#(v, state)) -> {
           let heap = push_onto_array(state.heap, target_ref, v)
           spread_array_generic(
@@ -824,10 +825,7 @@ fn is_intrinsic_array_iterator_next(
     Some(value.DataProperty(value: JsObject(fn_ref), ..)) ->
       case heap.read(h, fn_ref) {
         Some(ObjectSlot(
-          kind: value.NativeFunction(
-            value.Call(value.ArrayIteratorNext),
-            ..,
-          ),
+          kind: value.NativeFunction(value.Call(value.ArrayIteratorNext), ..),
           ..,
         )) -> True
         _ -> False

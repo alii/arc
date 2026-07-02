@@ -5,16 +5,21 @@
 /// JsValues — `JsObject(ref)` compares by object identity, `JsSymbol(id)`
 /// by symbol identity — exactly like WeakMap keys.
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
-import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{
   can_be_held_weakly, first_arg_or_undefined, is_callable,
 }
 import arc/vm/builtins/iterator
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsNull, JsObject, JsUndefined, ObjectSlot, WeakSetConstructor, WeakSetNative, WeakSetObject, WeakSetPrototypeAdd, WeakSetPrototypeDelete, WeakSetPrototypeHas}
+import arc/vm/value.{
+  type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsNull,
+  JsObject, JsUndefined, ObjectSlot, WeakSetConstructor, WeakSetNative,
+  WeakSetObject, WeakSetPrototypeAdd, WeakSetPrototypeDelete,
+  WeakSetPrototypeHas,
+}
 import gleam/dict.{type Dict}
 import gleam/option.{None, Some}
 

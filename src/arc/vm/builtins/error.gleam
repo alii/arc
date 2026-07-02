@@ -3,13 +3,14 @@ import arc/vm/builtins/dom_exception
 import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ErrorNativeFn, type JsValue, type Property, type Ref, DataProperty,
   Dispatch, ErrorConstructor, ErrorNative, JsBool, JsNull, JsObject, JsString,
-  JsUndefined, Named, ObjectSlot,
+  JsUndefined, ObjectSlot,
 }
 import gleam/dict
 import gleam/list
@@ -556,27 +557,13 @@ fn set_stack_ignoring_prototype(
         // Step 4: CreateDataPropertyOrThrow(this, "stack", v) — defines a
         // writable/enumerable/configurable data property; false → TypeError.
         None -> {
-          let #(heap, desc_ref) =
-            common.alloc_pojo(state.heap, state.builtins.object.prototype, [
-              #("value", value.data_property(JsString(s))),
-              #("writable", value.data_property(JsBool(True))),
-              #("enumerable", value.data_property(JsBool(True))),
-              #("configurable", value.data_property(JsBool(True))),
-            ])
-          let state = State(..state, heap:)
-          case
-            builtins_object.define_property_bool(
-              state,
-              ref,
-              JsString("stack"),
-              desc_ref,
-            )
-          {
-            Ok(#(state, True)) -> #(state, Ok(JsUndefined))
-            Ok(#(state, False)) ->
-              state.type_error(state, "Cannot create property 'stack'")
-            Error(#(thrown, state)) -> #(state, Error(thrown))
-          }
+          use state <- builtins_object.create_data_property_or_throw(
+            state,
+            ref,
+            JsString("stack"),
+            JsString(s),
+          )
+          #(state, Ok(JsUndefined))
         }
         // Step 5: Set(this, "stack", v, true) — false → TypeError.
         Some(_) ->

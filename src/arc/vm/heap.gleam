@@ -1,3 +1,4 @@
+import arc/vm/key.{Named}
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
 import gleam/list
@@ -74,7 +75,7 @@ fn synth_lazy_proto(id: Int) -> HeapSlot(ctx, host) {
     True ->
       dict.from_list([
         #(
-          value.Named("constructor"),
+          Named("constructor"),
           value.builtin_property(value.JsObject(Ref(fn_id))),
         ),
       ])
@@ -174,10 +175,7 @@ pub fn alloc_lazy_proto(
       let properties = case constructor {
         Some(f) ->
           dict.from_list([
-            #(
-              value.Named("constructor"),
-              value.builtin_property(value.JsObject(f)),
-            ),
+            #(Named("constructor"), value.builtin_property(value.JsObject(f))),
           ])
         None -> dict.new()
       }

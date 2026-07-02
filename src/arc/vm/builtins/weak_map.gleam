@@ -9,16 +9,22 @@
 /// The key/member predicate (§9.13 CanBeHeldWeakly) is
 /// `helpers.can_be_held_weakly`, shared with `weak_set` and
 /// `finalization_registry`.
-import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{
   can_be_held_weakly, first_arg_or_undefined, is_callable, list_at,
 }
 import arc/vm/builtins/iterator
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{type JsValue, type Ref, type WeakMapNativeFn, Dispatch, JsBool, JsNull, JsObject, JsUndefined, ObjectSlot, WeakMapConstructor, WeakMapNative, WeakMapObject, WeakMapPrototypeDelete, WeakMapPrototypeGet, WeakMapPrototypeGetOrInsert, WeakMapPrototypeGetOrInsertComputed, WeakMapPrototypeHas, WeakMapPrototypeSet}
+import arc/vm/value.{
+  type JsValue, type Ref, type WeakMapNativeFn, Dispatch, JsBool, JsNull,
+  JsObject, JsUndefined, ObjectSlot, WeakMapConstructor, WeakMapNative,
+  WeakMapObject, WeakMapPrototypeDelete, WeakMapPrototypeGet,
+  WeakMapPrototypeGetOrInsert, WeakMapPrototypeGetOrInsertComputed,
+  WeakMapPrototypeHas, WeakMapPrototypeSet,
+}
 import gleam/dict.{type Dict}
 import gleam/option.{None, Some}
 

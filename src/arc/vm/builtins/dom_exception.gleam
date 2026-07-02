@@ -1,12 +1,15 @@
-import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{type JsValue, type Ref, Dispatch, DomExceptionConstructor, DomExceptionGetCode, ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot}
+import arc/vm/value.{
+  type JsValue, type Ref, Dispatch, DomExceptionConstructor, DomExceptionGetCode,
+  ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot,
+}
 import gleam/int
 import gleam/option.{Some}
 

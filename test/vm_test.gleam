@@ -3,12 +3,13 @@ import arc/vm/builtins/common
 import arc/vm/exec/entry
 import arc/vm/heap
 import arc/vm/internal/tuple_array
+import arc/vm/key.{Named}
 import arc/vm/opcode.{
   type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq,
   Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue, LogicalNot,
-  Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, OpNamed, Pop, Pos, PushConst,
-  PushTry, PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq,
-  StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void,
+  Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry,
+  PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
+  Swap, UShiftRight, UnaryOp, Void,
 }
 import arc/vm/ops/object
 import arc/vm/state
@@ -26,7 +27,7 @@ fn get_data(
   ref: value.Ref,
   key: String,
 ) -> Result(value.JsValue, Nil) {
-  case object.get_own_property(h, ref, value.Named(key)) {
+  case object.get_own_property(h, ref, Named(key)) {
     Some(DataProperty(value: val, ..)) -> Ok(val)
     Some(AccessorProperty(..)) -> Error(Nil)
     None ->
@@ -74,7 +75,9 @@ fn run_simple(
   bytecode: List(Op),
   constants: List(value.JsValue),
 ) -> Result(value.JsValue, state.VmError) {
-  use #(settled, _heap) <- result.map(run_func(make_func(bytecode, constants, 0)))
+  use #(settled, _heap) <- result.map(
+    run_func(make_func(bytecode, constants, 0)),
+  )
   case settled {
     Ok(val) -> val
     Error(_thrown) -> panic as "unexpected throw"
@@ -86,7 +89,9 @@ fn run_throwing(
   bytecode: List(Op),
   constants: List(value.JsValue),
 ) -> Result(value.JsValue, state.VmError) {
-  use #(settled, _heap) <- result.map(run_func(make_func(bytecode, constants, 0)))
+  use #(settled, _heap) <- result.map(
+    run_func(make_func(bytecode, constants, 0)),
+  )
   case settled {
     Error(thrown) -> thrown
     Ok(_) -> panic as "expected a throw, got a normal return"
@@ -96,7 +101,10 @@ fn run_throwing(
 /// Helper: run func with locals + builtins, return the settled outcome + heap.
 fn run_func(
   func: FuncTemplate,
-) -> Result(#(Result(value.JsValue, value.JsValue), state.Heap(host)), state.VmError) {
+) -> Result(
+  #(Result(value.JsValue, value.JsValue), state.Heap(host)),
+  state.VmError,
+) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_object) = builtins.globals(b, h)
@@ -390,6 +398,22 @@ pub fn shift_left_test() {
     run_simple([PushConst(0), PushConst(1), BinOp(ShiftLeft)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(4.0)),
+    ])
+}
+
+pub fn shift_left_wraps_to_int32_test() {
+  // §6.1.6.1.9 Number::leftShift returns an int32: 1 << 31 = -2147483648,
+  // not 2147483648.
+  let assert Ok(JsNumber(Finite(-2_147_483_648.0))) =
+    run_simple([PushConst(0), PushConst(1), BinOp(ShiftLeft)], [
+      JsNumber(Finite(1.0)),
+      JsNumber(Finite(31.0)),
+    ])
+  // 0xffff << 16 = -65536, not 4294901760.
+  let assert Ok(JsNumber(Finite(-65_536.0))) =
+    run_simple([PushConst(0), PushConst(1), BinOp(ShiftLeft)], [
+      JsNumber(Finite(65_535.0)),
+      JsNumber(Finite(16.0)),
     ])
 }
 
@@ -696,8 +720,8 @@ pub fn define_and_get_field_test() {
       [
         NewObject,
         PushConst(0),
-        DefineField(OpNamed("x")),
-        GetField(OpNamed("x")),
+        DefineField(Named("x")),
+        GetField(Named("x")),
       ],
       [JsNumber(Finite(42.0))],
     )
@@ -717,9 +741,9 @@ pub fn put_and_get_field_test() {
         NewObject,
         Dup,
         PushConst(0),
-        PutField(OpNamed("y")),
+        PutField(Named("y")),
         Pop,
-        GetField(OpNamed("y")),
+        GetField(Named("y")),
       ],
       [JsString("hello")],
     )
@@ -728,18 +752,18 @@ pub fn put_and_get_field_test() {
 pub fn get_field_nonexistent_returns_undefined_test() {
   // {}.doesNotExist => undefined
   let assert Ok(JsUndefined) =
-    run_simple([NewObject, GetField(OpNamed("doesNotExist"))], [])
+    run_simple([NewObject, GetField(Named("doesNotExist"))], [])
 }
 
 pub fn get_field_on_null_throws_type_error_test() {
   // null.x => TypeError
-  let func = make_func([PushConst(0), GetField(OpNamed("x"))], [JsNull], 0)
+  let func = make_func([PushConst(0), GetField(Named("x"))], [JsNull], 0)
   expect_throw_named(func, "TypeError")
 }
 
 pub fn get_field_on_undefined_throws_type_error_test() {
   // undefined.x => TypeError
-  let func = make_func([PushConst(0), GetField(OpNamed("x"))], [JsUndefined], 0)
+  let func = make_func([PushConst(0), GetField(Named("x"))], [JsUndefined], 0)
   expect_throw_named(func, "TypeError")
 }
 

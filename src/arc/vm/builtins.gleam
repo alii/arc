@@ -2,6 +2,7 @@ import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/array_buffer as builtins_array_buffer
 import arc/vm/builtins/async_generator as builtins_async_generator
 import arc/vm/builtins/atomics as builtins_atomics
+import arc/vm/builtins/bigint as builtins_bigint
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type Builtins, Builtins}
 import arc/vm/builtins/console as builtins_console
@@ -32,8 +33,9 @@ import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/state.{type Heap}
-import arc/vm/value.{JsObject, JsUndefined, Named, ObjectSlot, OrdinaryObject}
+import arc/vm/value.{JsObject, JsUndefined, ObjectSlot, OrdinaryObject}
 import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
@@ -306,44 +308,8 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
   let #(h, typed_array, typed_arrays) =
     builtins_typed_array.init(h, object_proto, function.prototype)
 
-  // BigInt global function (§21.2.1.1) — callable, not constructible
-  let #(h, bigint) =
-    common.alloc_native_fn(
-      h,
-      function.prototype,
-      value.VmNative(value.BigIntGlobal),
-      "BigInt",
-      1,
-    )
-  // %BigInt.prototype% (§21.2.3): toString/toLocaleString/valueOf +
-  // @@toStringTag "BigInt". Primitive BigInt property access delegates here.
-  let #(h, bigint_proto_methods) =
-    common.alloc_methods(h, function.prototype, [
-      #("toString", value.VmNative(value.BigIntPrototypeToString), 0),
-      #("toLocaleString", value.VmNative(value.BigIntPrototypeToString), 0),
-      #("valueOf", value.VmNative(value.BigIntPrototypeValueOf), 0),
-    ])
-  let #(h, bigint_proto) =
-    common.init_namespace(h, object_proto, "BigInt", [
-      #("constructor", value.builtin_property(JsObject(bigint))),
-      ..bigint_proto_methods
-    ])
-  // BigInt.prototype = %BigInt.prototype% { W:F, E:F, C:F } (§21.2.2.3).
-  let h =
-    heap.update(h, bigint, fn(slot) {
-      case slot {
-        value.ObjectSlot(properties:, ..) ->
-          value.ObjectSlot(
-            ..slot,
-            properties: dict.insert(
-              properties,
-              value.Named("prototype"),
-              value.data(JsObject(bigint_proto)),
-            ),
-          )
-        other -> other
-      }
-    })
+  // BigInt global function (§21.2.1.1) + %BigInt.prototype% (§21.2.3)
+  let #(h, bigint) = builtins_bigint.init(h, object_proto, function.prototype)
 
   // Global utility functions: eval, URI functions
   let #(h, eval) =
@@ -462,7 +428,6 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       typed_array:,
       typed_arrays:,
       bigint:,
-      bigint_proto:,
       iterator:,
       iterator_helper_proto:,
       wrap_for_valid_iterator_proto:,
@@ -611,7 +576,7 @@ pub fn globals(b: Builtins, h: Heap(host)) -> #(Heap(host), value.Ref) {
     Builtin("ArrayBuffer", JsObject(b.array_buffer.constructor)),
     Builtin("SharedArrayBuffer", JsObject(b.shared_array_buffer.constructor)),
     Builtin("DataView", JsObject(b.data_view.constructor)),
-    Builtin("BigInt", JsObject(b.bigint)),
+    Builtin("BigInt", JsObject(b.bigint.constructor)),
     Builtin("Iterator", JsObject(b.iterator.constructor)),
     Builtin("eval", JsObject(b.eval)),
     Builtin("decodeURI", JsObject(b.decode_uri)),

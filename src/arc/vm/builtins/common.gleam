@@ -1,9 +1,10 @@
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/value.{
   type CallNativeFn, type ExoticKind, type JsElements, type JsValue,
   type NativeFn, type NativeFnSlot, type Property, type PropertyKey, type Ref,
-  ArrayObject, Call, Dispatch, JsBool, JsObject, JsString, Named, NativeFunction,
+  ArrayObject, Call, Dispatch, JsBool, JsObject, JsString, NativeFunction,
   ObjectSlot, OrdinaryObject,
 }
 import gleam/dict.{type Dict}
@@ -81,22 +82,13 @@ pub fn init_generator_function(
     )
   // §27.5.1.1 / §27.6.1.1: Generator.prototype.constructor is the fn_proto
   // object itself ({ W:F, E:F, C:T }).
-  let h = case heap.read(h, generator_proto) {
-    Some(ObjectSlot(properties:, ..) as slot) ->
-      heap.write(
-        h,
-        generator_proto,
-        ObjectSlot(
-          ..slot,
-          properties: dict.insert(
-            properties,
-            Named("constructor"),
-            value.data(JsObject(fn_proto_ref)) |> value.configurable,
-          ),
-        ),
-      )
-    _ -> h
-  }
+  let h =
+    add_named_property(
+      h,
+      generator_proto,
+      "constructor",
+      value.data(JsObject(fn_proto_ref)) |> value.configurable,
+    )
   #(h, fn_proto_ref)
 }
 
@@ -210,11 +202,10 @@ pub type Builtins {
     typed_array: BuiltinType,
     /// The 11 concrete TypedArray constructors, keyed by element kind.
     typed_arrays: List(#(value.TypedArrayKind, BuiltinType)),
-    /// The BigInt global function (§21.2.1.1). Callable, not constructible.
-    bigint: Ref,
-    /// %BigInt.prototype% (§21.2.3) — primitive BigInt property access
-    /// delegates here (toString/toLocaleString/valueOf).
-    bigint_proto: Ref,
+    /// The BigInt global function (§21.2.1.1, callable, not constructible)
+    /// plus %BigInt.prototype% (§21.2.3) — primitive BigInt property access
+    /// delegates to the prototype (toString/toLocaleString/valueOf).
+    bigint: BuiltinType,
     data_view: BuiltinType,
     iterator: BuiltinType,
     iterator_helper_proto: Ref,
@@ -764,24 +755,46 @@ pub fn init_keyed_collection(
   #(h, bt)
 }
 
+/// Add a named property to an existing object (typically a prototype).
+/// Used after init_type / alloc to backpatch e.g. `constructor`.
+///
+/// `ref` must be a live object: builtins only ever backpatch refs they just
+/// allocated, so a missing or non-ObjectSlot slot is a wiring bug — crash at
+/// the desync rather than silently dropping the property.
+pub fn add_named_property(
+  h: Heap(ctx, host),
+  ref: Ref,
+  name: String,
+  prop: Property,
+) -> Heap(ctx, host) {
+  let assert Some(ObjectSlot(properties:, ..) as slot) = heap.read(h, ref)
+  heap.write(
+    h,
+    ref,
+    ObjectSlot(..slot, properties: dict.insert(properties, Named(name), prop)),
+  )
+}
+
 /// Add a symbol-keyed property to an existing object (typically a prototype).
 /// Used after init_type to wire up Symbol.iterator, Symbol.toStringTag, etc.
+///
+/// Same invariant as `add_named_property`: the ref is always an object the
+/// caller just allocated, so anything else is a wiring bug and must crash.
 pub fn add_symbol_property(
   h: Heap(ctx, host),
   ref: Ref,
   symbol: value.SymbolId,
   prop: Property,
 ) -> Heap(ctx, host) {
-  heap.update(h, ref, fn(slot) {
-    case slot {
-      ObjectSlot(symbol_properties:, ..) ->
-        ObjectSlot(
-          ..slot,
-          symbol_properties: list.key_set(symbol_properties, symbol, prop),
-        )
-      other -> other
-    }
-  })
+  let assert Some(ObjectSlot(symbol_properties:, ..) as slot) = heap.read(h, ref)
+  heap.write(
+    h,
+    ref,
+    ObjectSlot(
+      ..slot,
+      symbol_properties: list.key_set(symbol_properties, symbol, prop),
+    ),
+  )
 }
 
 /// @@toStringTag symbol-property pair: { writable: false, enumerable: false, configurable: true }.
@@ -984,8 +997,6 @@ pub fn make_syntax_error(
 ///
 /// TODO(Deviation): SymbolObject uses Object.prototype instead of Symbol.prototype
 ///   (no dedicated Symbol.prototype with toString/valueOf/description yet).
-/// TODO(Deviation): BigInt wrappers are OrdinaryObject (no [[BigIntData]]
-///   kind yet), though they inherit from %BigInt.prototype%.
 pub fn to_object(
   h: Heap(ctx, host),
   b: Builtins,
@@ -1008,26 +1019,9 @@ pub fn to_object(
     // Table 15 row 6: Symbol → new Symbol object with [[SymbolData]]
     value.JsSymbol(sym) ->
       Some(alloc_wrapper(h, value.SymbolObject(sym), b.symbol_proto))
-    // Table 15 row 7: BigInt → new BigInt object with [[BigIntData]].
-    // The wrapper is an OrdinaryObject inheriting %BigInt.prototype%; the
-    // [[BigIntData]] slot is a NUL-marker private property (invisible to
-    // reflection) that thisBigIntValue reads back.
-    value.JsBigInt(_) ->
-      Some(heap.alloc(
-        h,
-        ObjectSlot(
-          kind: OrdinaryObject,
-          properties: dict.insert(
-            dict.new(),
-            value.bigint_data_key(),
-            value.data(val),
-          ),
-          elements: elements.new(),
-          symbol_properties: [],
-          prototype: Some(b.bigint_proto),
-          extensible: True,
-        ),
-      ))
+    // Table 15 row 7: BigInt → new BigInt object with [[BigIntData]]
+    value.JsBigInt(bv) ->
+      Some(alloc_wrapper(h, value.BigIntObject(bv), b.bigint.prototype))
     // Internal: TDZ sentinel, not in spec — treat as Undefined (→ TypeError)
     value.JsUninitialized -> None
   }

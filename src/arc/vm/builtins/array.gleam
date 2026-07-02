@@ -4,6 +4,7 @@ import arc/vm/builtins/iterator
 import arc/vm/builtins/object as object_builtin
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Index, Named, max_array_index}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -22,8 +23,8 @@ import arc/vm/value.{
   ArrayPrototypeSlice, ArrayPrototypeSome, ArrayPrototypeSort,
   ArrayPrototypeSplice, ArrayPrototypeToReversed, ArrayPrototypeToSorted,
   ArrayPrototypeToSpliced, ArrayPrototypeUnshift, ArrayPrototypeWith,
-  DataProperty, Dispatch, Finite, Index, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsUndefined, Named, ObjectSlot,
+  DataProperty, Dispatch, Finite, JsBool, JsNull, JsNumber, JsObject, JsString,
+  JsUndefined, ObjectSlot,
 }
 import gleam/bool
 import gleam/dict
@@ -708,7 +709,7 @@ fn require_array(
 /// through this — a raw Index(idx) for idx >= 2^32-1 can never match how the
 /// property was stored.
 fn index_key(idx: Int) -> value.PropertyKey {
-  case 0 <= idx && idx <= 4_294_967_294 {
+  case 0 <= idx && idx <= max_array_index {
     True -> Index(idx)
     False -> Named(int.to_string(idx))
   }
@@ -753,7 +754,7 @@ fn get_index_if_present(
 ) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
   case this {
     JsObject(ref) ->
-      case 0 <= idx && idx <= 4_294_967_294 {
+      case 0 <= idx && idx <= max_array_index {
         // Fast path: ONE heap read both detects proxy-ness and performs the
         // own [[GetOwnProperty]] probe, with no synthesized descriptor boxing
         // and no PropertyKey construction on the dense-elements hit.

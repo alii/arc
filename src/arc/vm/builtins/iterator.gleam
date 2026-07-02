@@ -8,6 +8,7 @@ import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
 import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -15,7 +16,7 @@ import arc/vm/state.{type Heap, type State, type StepResult, State}
 import arc/vm/value.{
   type IteratorHelperKind, type IteratorNativeFn, type JsValue, type Ref,
   type ZipMember, type ZipMode, Dispatch, Finite, HelperDrop, HelperFilter,
-  HelperFlatMap, HelperMap, HelperTake, Index, Infinity, IteratorConcat,
+  HelperFlatMap, HelperMap, HelperTake, Infinity, IteratorConcat,
   IteratorConcatObject, IteratorConstructor, IteratorFrom, IteratorHelperNext,
   IteratorHelperObject, IteratorHelperReturn, IteratorNative,
   IteratorProtoGetConstructor, IteratorProtoGetToStringTag,
@@ -25,7 +26,7 @@ import arc/vm/value.{
   IteratorPrototypeMap, IteratorPrototypeReduce, IteratorPrototypeSome,
   IteratorPrototypeTake, IteratorPrototypeToArray, IteratorZip, IteratorZipKeyed,
   IteratorZipObject, JsBool, JsNull, JsObject, JsString, JsSymbol, JsUndefined,
-  NaN, Named, NegInfinity, ObjectSlot, OrdinaryObject, WrapForValidIteratorNext,
+  NaN, NegInfinity, ObjectSlot, OrdinaryObject, WrapForValidIteratorNext,
   WrapForValidIteratorObject, WrapForValidIteratorReturn, ZipExhausted,
   ZipLongest, ZipOpen, ZipShortest, ZipStrict,
 }

@@ -5,6 +5,7 @@
 ///   Pass 1: Walk IR, skip IrLabel markers, build Dict(label_id → PC)
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
 import arc/vm/internal/tuple_array
+import arc/vm/key
 import arc/vm/opcode.{
   type IrOp, type LexicalSlots, type Op, type SyntaxPerms, IrArrayFrom,
   IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole, IrArraySpread,
@@ -344,41 +345,44 @@ fn resolve_ops(
     [IrRot3, ..rest] -> resolve_ops(rest, labels, [opcode.Rot3, ..acc])
     [IrUnrot4, ..rest] -> resolve_ops(rest, labels, [opcode.Unrot4, ..acc])
 
-    // Property access — precompute canonical key once so the interpreter
-    // never re-parses the constant string per dispatch.
+    // Property access — precompute canonical key once (key.canonical_key,
+    // THE canonicalizer shared with the runtime) so the interpreter never
+    // re-parses the constant string per dispatch.
     [IrGetField(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetField(opcode.make_key(name)), ..acc])
+      resolve_ops(rest, labels, [
+        opcode.GetField(key.canonical_key(name)),
+        ..acc
+      ])
     [IrGetField2(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetField2(opcode.make_key(name)), ..acc])
+      resolve_ops(rest, labels, [
+        opcode.GetField2(key.canonical_key(name)),
+        ..acc
+      ])
     [IrPutField(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutField(opcode.make_key(name)), ..acc])
+      resolve_ops(rest, labels, [
+        opcode.PutField(key.canonical_key(name)),
+        ..acc
+      ])
     [IrGetElem, ..rest] -> resolve_ops(rest, labels, [opcode.GetElem, ..acc])
     [IrGetElem2, ..rest] -> resolve_ops(rest, labels, [opcode.GetElem2, ..acc])
     [IrPutElem, ..rest] -> resolve_ops(rest, labels, [opcode.PutElem, ..acc])
     [IrDeleteField(name), ..rest] ->
       resolve_ops(rest, labels, [
-        opcode.DeleteField(opcode.make_key(name)),
+        opcode.DeleteField(key.canonical_key(name)),
         ..acc
       ])
     [IrDeleteElem, ..rest] ->
       resolve_ops(rest, labels, [opcode.DeleteElem, ..acc])
+    // Private-element ops carry the RAW source name ("#x") — private names
+    // are never canonicalized (they live in a separate hidden namespace).
     [IrGetPrivateField(name), ..rest] ->
-      resolve_ops(rest, labels, [
-        opcode.GetPrivateField(opcode.make_key(name)),
-        ..acc
-      ])
+      resolve_ops(rest, labels, [opcode.GetPrivateField(name), ..acc])
     [IrGetPrivateField2(name), ..rest] ->
-      resolve_ops(rest, labels, [
-        opcode.GetPrivateField2(opcode.make_key(name)),
-        ..acc
-      ])
+      resolve_ops(rest, labels, [opcode.GetPrivateField2(name), ..acc])
     [IrPutPrivateField(name), ..rest] ->
-      resolve_ops(rest, labels, [
-        opcode.PutPrivateField(opcode.make_key(name)),
-        ..acc
-      ])
+      resolve_ops(rest, labels, [opcode.PutPrivateField(name), ..acc])
     [IrPrivateIn(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PrivateIn(opcode.make_key(name)), ..acc])
+      resolve_ops(rest, labels, [opcode.PrivateIn(name), ..acc])
     [IrNewPrivateName(name), ..rest] ->
       resolve_ops(rest, labels, [opcode.NewPrivateName(name), ..acc])
     [IrGetPrivateFieldDyn, ..rest] ->
@@ -401,7 +405,7 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.NewObject, ..acc])
     [IrDefineField(name), ..rest] ->
       resolve_ops(rest, labels, [
-        opcode.DefineField(opcode.make_key(name)),
+        opcode.DefineField(key.canonical_key(name)),
         ..acc
       ])
     [IrDefineFieldComputed, ..rest] ->
@@ -410,14 +414,14 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.ToPropertyKey, ..acc])
     [IrDefineMethod(name), ..rest] ->
       resolve_ops(rest, labels, [
-        opcode.DefineMethod(opcode.make_key(name)),
+        opcode.DefineMethod(key.canonical_key(name)),
         ..acc
       ])
     [IrDefineMethodComputed, ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineMethodComputed, ..acc])
     [IrDefineAccessor(name, kind, enumerable), ..rest] ->
       resolve_ops(rest, labels, [
-        opcode.DefineAccessor(opcode.make_key(name), kind, enumerable),
+        opcode.DefineAccessor(key.canonical_key(name), kind, enumerable),
         ..acc
       ])
     [IrDefineAccessorComputed(kind, enumerable), ..rest] ->

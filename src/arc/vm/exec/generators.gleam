@@ -2,11 +2,11 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/completion.{
-  type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
-  YieldCompletion,
+  type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
 import arc/vm/heap
 import arc/vm/internal/tuple_array
+import arc/vm/key.{Named}
 import arc/vm/opcode.{type Op, Gosub, IteratorCloseThrow, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
@@ -15,7 +15,7 @@ import arc/vm/state.{
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, GeneratorObject, GeneratorSlot,
-  JsObject, JsUndefined, Named, ObjectSlot,
+  JsObject, JsUndefined, ObjectSlot,
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -26,7 +26,7 @@ import gleam/result
 // ============================================================================
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(Completion, State(host)), state.VmError)
+  fn(State(host)) -> Result(#(Outcome, State(host)), state.VmError)
 
 pub type UnwindToCatchFn(host) =
   fn(State(host), JsValue) -> Option(State(host))
@@ -560,12 +560,12 @@ fn run_to_completion(
 /// (`unwind_return`), which produces the completion itself, shares the exact
 /// same settlement.
 fn settle_completion(
-  exec_result: Result(#(Completion, State(host)), state.VmError),
+  exec_result: Result(#(Outcome, State(host)), state.VmError),
   outer: State(host),
   gen: GenData,
 ) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
   case exec_result {
-    Ok(#(YieldCompletion(yv), suspended)) -> {
+    Ok(#(Suspended(completion.Yield, yv), suspended)) -> {
       let st = save_stacks(suspended.try_stack)
       let h =
         heap.write(
@@ -591,7 +591,7 @@ fn settle_completion(
         ),
       ))
     }
-    Ok(#(NormalCompletion(rv), final_state)) -> {
+    Ok(#(Completed(NormalCompletion(rv)), final_state)) -> {
       let h =
         heap.write(
           final_state.heap,
@@ -608,7 +608,7 @@ fn settle_completion(
         ),
       ))
     }
-    Ok(#(ThrowCompletion(thrown), thrown_state)) -> {
+    Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) -> {
       let h =
         heap.write(
           thrown_state.heap,
@@ -624,7 +624,7 @@ fn settle_completion(
         State(..state.merge_globals(outer, thrown_state, []), heap: h),
       ))
     }
-    Ok(#(AwaitCompletion(_), _)) ->
+    Ok(#(Suspended(completion.Await, _), _)) ->
       Error(#(
         StepVmError(InternalError(
           "settle_completion",
@@ -690,21 +690,21 @@ fn find_next_return_handler(
 /// any live for-of / destructuring iterators (§7.4.9). The result has the
 /// same shape as `execute_inner`, so each driver settles it with its normal
 /// completion dispatch (`settle_completion` / `handle_exec_result`):
-/// - NormalCompletion(return_val): nothing intercepted the return — the
-///   generator completes with the requested value.
-/// - YieldCompletion / AwaitCompletion: a finally block suspended; the
-///   returned State is the new suspension point.
-/// - ThrowCompletion: a finally block or iterator close threw and nothing
-///   inside the generator caught it.
+/// - Completed(NormalCompletion(return_val)): nothing intercepted the return
+///   — the generator completes with the requested value.
+/// - Suspended(Yield/Await, ..): a finally block suspended; the returned
+///   State is the new suspension point.
+/// - Completed(ThrowCompletion(..)): a finally block or iterator close threw
+///   and nothing inside the generator caught it.
 pub fn unwind_return(
   gen_state: State(host),
   return_val: JsValue,
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(#(Completion, State(host)), state.VmError) {
+) -> Result(#(Outcome, State(host)), state.VmError) {
   case find_next_return_handler(gen_state.code, gen_state.try_stack) {
     // No more finally blocks / iterator guards: the return completes the body.
-    None -> Ok(#(NormalCompletion(return_val), gen_state))
+    None -> Ok(#(Completed(NormalCompletion(return_val)), gen_state))
     // §7.4.9 IteratorClose with a return completion: a for-of loop or
     // array-destructuring scaffold suspended at a yield has its live
     // iterator at the frame's recorded stack depth. Call its `return`
@@ -769,7 +769,7 @@ pub fn unwind_return(
           pc: fin_label,
         )
       case execute_inner(finally_state) {
-        Ok(#(NormalCompletion(_val), final_state)) -> {
+        Ok(#(Completed(NormalCompletion(_val)), final_state)) -> {
           // Finally completed normally — Ret hit the -1 sentinel → Done(return_val).
           // Continue processing any remaining outer finally blocks.
           let updated_gen_state =
@@ -788,10 +788,10 @@ pub fn unwind_return(
           )
         }
         // Yield / await inside the finally block (the body suspends there),
-        // a throw out of it, or a VM error: that IS the body's completion —
+        // a throw out of it, or a VM error: that IS the body's outcome —
         // hand it to the driver unchanged. It settles it exactly as it
-        // settles the same completion from a plain resume.
-        completion -> completion
+        // settles the same outcome from a plain resume.
+        other -> other
       }
     }
   }
@@ -807,7 +807,7 @@ fn close_for_return(
   return_val: JsValue,
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(#(Completion, State(host)), state.VmError) {
+) -> Result(#(Outcome, State(host)), state.VmError) {
   let iter = JsObject(iter_ref)
   let continue_return = fn(st: State(host)) {
     unwind_return(st, return_val, execute_inner, unwind_to_catch)
@@ -844,14 +844,14 @@ fn replace_return_with_throw(
   thrown: JsValue,
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(#(Completion, State(host)), state.VmError) {
+) -> Result(#(Outcome, State(host)), state.VmError) {
   // unwind_to_catch expects the throw site's stack; gen_state.stack is
   // already truncated to the frame base and try_stack holds the remaining
   // frames, so the unwind lands on the next handler in spec order.
   case unwind_to_catch(gen_state, thrown) {
     // The generator caught it — continue executing from the handler.
     Some(caught_state) -> execute_inner(caught_state)
-    None -> Ok(#(ThrowCompletion(thrown), gen_state))
+    None -> Ok(#(Completed(ThrowCompletion(thrown)), gen_state))
   }
 }
 

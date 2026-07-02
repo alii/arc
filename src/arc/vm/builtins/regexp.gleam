@@ -17,23 +17,24 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type LegacySlot, type Ref, type RegExpNativeFn, Dispatch, Finite,
-  Index, Infinity, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
-  LegacyInput, LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen,
-  LegacyRightContext, NaN, Named, NativeFunction, NegInfinity, ObjectSlot,
-  OrdinaryObject, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags,
-  RegExpGetGlobal, RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline,
-  RegExpGetSource, RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets,
-  RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpNative, RegExpObject,
-  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
-  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpStringIteratorObject,
-  RegExpSymbolMatch, RegExpSymbolMatchAll, RegExpSymbolReplace,
-  RegExpSymbolSearch, RegExpSymbolSplit,
+  JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, LegacyInput,
+  LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen,
+  LegacyRightContext, NativeFunction, ObjectSlot, OrdinaryObject,
+  RegExpConstructor, RegExpGetDotAll, RegExpGetFlags, RegExpGetGlobal,
+  RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline, RegExpGetSource,
+  RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets, RegExpLegacyGetter,
+  RegExpLegacyInputSetter, RegExpNative, RegExpObject, RegExpPrototypeCompile,
+  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
+  RegExpStringIteratorNext, RegExpStringIteratorObject, RegExpSymbolMatch,
+  RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
+  RegExpSymbolSplit,
 }
 import gleam/bit_array
 import gleam/bool
@@ -710,61 +711,6 @@ fn try_set_throw(
   }
 }
 
-/// §7.1.17 ToLength — full observable ToNumber (valueOf may run), clamped to
-/// [0, 2^53-1].
-fn try_to_length(
-  state: State(host),
-  val: JsValue,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- coerce.try_to_number(state, val)
-  let len = case n {
-    Finite(f) -> int.clamp(value.float_to_int(f), 0, limits.max_safe_integer)
-    NaN -> 0
-    Infinity -> limits.max_safe_integer
-    NegInfinity -> 0
-  }
-  cont(len, state)
-}
-
-/// §7.1.5 ToIntegerOrInfinity followed by a clamp to [low, high].
-fn try_to_integer_clamp(
-  state: State(host),
-  val: JsValue,
-  low: Int,
-  high: Int,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- coerce.try_to_number(state, val)
-  let i = case n {
-    Finite(f) -> int.clamp(value.float_to_int(f), low, high)
-    NaN -> int.clamp(0, low, high)
-    Infinity -> high
-    NegInfinity -> low
-  }
-  cont(i, state)
-}
-
-/// §7.1.7 ToUint32.
-fn try_to_uint32(
-  state: State(host),
-  val: JsValue,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- coerce.try_to_number(state, val)
-  let u = case n {
-    Finite(f) -> {
-      let m = value.float_to_int(f) % 4_294_967_296
-      case m < 0 {
-        True -> m + 4_294_967_296
-        False -> m
-      }
-    }
-    NaN | Infinity | NegInfinity -> 0
-  }
-  cont(u, state)
-}
-
 /// §22.2.7.1 RegExpExec ( R, S ) — calls R.exec if callable (validating the
 /// return is Object or null), else falls back to RegExpBuiltinExec for real
 /// RegExp objects.
@@ -830,7 +776,7 @@ fn try_builtin_exec(
   let length = string.byte_size(s)
   // Step 2: lastIndex = ? ToLength(? Get(R, "lastIndex")) — always read.
   use li_val, state <- try_get(state, ref, "lastIndex")
-  use last_index, state <- try_to_length(state, li_val)
+  use last_index, state <- coerce.try_to_length(state, li_val)
   let global = string.contains(flags, "g")
   let sticky = string.contains(flags, "y")
   let has_indices = string.contains(flags, "d")
@@ -1414,7 +1360,7 @@ fn advance_if_empty(
   case match_str {
     "" -> {
       use li_val, state <- try_get(state, ref, "lastIndex")
-      use this_index, state <- try_to_length(state, li_val)
+      use this_index, state <- coerce.try_to_length(state, li_val)
       let next = next_char_boundary(s, this_index)
       try_set_throw(state, ref, "lastIndex", value.from_int(next), cont)
     }
@@ -1550,14 +1496,15 @@ fn process_replace_results(
     [result, ..rest] -> {
       // 14.a-b: nCaptures = max(LengthOfArrayLike(result) - 1, 0).
       use len_val, state <- try_get_of(state, result, Named("length"))
-      use result_length, state <- try_to_length(state, len_val)
+      use result_length, state <- coerce.try_to_length(state, len_val)
       let n_captures = int.max(result_length - 1, 0)
       // 14.c: matched = ToString(Get(result, "0")).
       use m_val, state <- try_get_of(state, result, Index(0))
       use matched, state <- coerce.try_to_string(state, m_val)
       // 14.e-f: position = clamp(ToIntegerOrInfinity(Get(result, "index"))).
       use pos_val, state <- try_get_of(state, result, Named("index"))
-      use position, state <- try_to_integer_clamp(state, pos_val, 0, length_s)
+      use pos_raw, state <- coerce.try_to_integer_or_infinity(state, pos_val)
+      let position = int.clamp(pos_raw, 0, length_s)
       // 14.g: captures (each coerced to String unless undefined).
       use captures, state <- collect_coerced_captures(
         state,
@@ -2083,7 +2030,7 @@ fn split_limit(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case limit_arg {
     JsUndefined -> cont(4_294_967_295, state)
-    _ -> try_to_uint32(state, limit_arg, cont)
+    _ -> coerce.try_to_uint32(state, limit_arg, cont)
   }
 }
 
@@ -2131,7 +2078,7 @@ fn split_loop(
         _ -> {
           // 17.d.i-ii: e = min(ToLength(Get(splitter, "lastIndex")), size).
           use li_val, state <- try_get(state, sp_ref, "lastIndex")
-          use e0, state <- try_to_length(state, li_val)
+          use e0, state <- coerce.try_to_length(state, li_val)
           let e = int.min(e0, size)
           case e == p {
             True ->
@@ -2154,7 +2101,7 @@ fn split_loop(
                 True -> state.ok_array(state, list.reverse(acc))
                 False -> {
                   use len_val, state <- try_get_of(state, z, Named("length"))
-                  use z_len, state <- try_to_length(state, len_val)
+                  use z_len, state <- coerce.try_to_length(state, len_val)
                   let n_caps = int.max(z_len - 1, 0)
                   use #(acc, count, hit_limit), state <- split_captures(
                     state,
@@ -2275,7 +2222,7 @@ fn regexp_symbol_match_all(
     ]),
   )
   use li_val, state <- try_get(state, ref, "lastIndex")
-  use last_index, state <- try_to_length(state, li_val)
+  use last_index, state <- coerce.try_to_length(state, li_val)
   case matcher {
     JsObject(m_ref) -> {
       use state <- try_set_throw(

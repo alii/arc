@@ -1,6 +1,7 @@
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/array_buffer as builtins_array_buffer
 import arc/vm/builtins/atomics as builtins_atomics
+import arc/vm/builtins/bigint as builtins_bigint
 import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common
 import arc/vm/builtins/console as builtins_console
@@ -29,8 +30,7 @@ import arc/vm/builtins/uri as builtins_uri
 import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/completion.{
-  type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
-  YieldCompletion,
+  type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
 import arc/vm/exec/async_generators
 import arc/vm/exec/frame
@@ -40,6 +40,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tuple_array
+import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -54,7 +55,7 @@ import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot,
   AsyncGeneratorObject, AsyncGeneratorSlot, DataProperty, FunctionObject,
   GeneratorObject, GeneratorSlot, JsBool, JsObject, JsString, JsUndefined,
-  JsUninitialized, Named, NativeFunction, ObjectSlot, OrdinaryObject,
+  JsUninitialized, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/bool
 import gleam/dict
@@ -70,7 +71,7 @@ import gleam/string
 // ============================================================================
 
 pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(Completion, State(host)), VmError)
+  fn(State(host)) -> Result(#(Outcome, State(host)), VmError)
 
 pub type UnwindToCatchFn(host) =
   fn(State(host), JsValue) -> Option(State(host))
@@ -294,7 +295,7 @@ fn call_generator_function(
   case
     execute_inner(generator_initial_state(state, callee_template, args, locals))
   {
-    Ok(#(YieldCompletion(_), suspended)) ->
+    Ok(#(Suspended(completion.Yield, _), suspended)) ->
       alloc_suspended_generator(
         state,
         suspended,
@@ -313,7 +314,7 @@ fn call_generator_function(
       )
     // InitialYield is the first op — the body can neither complete nor await
     // before it. Either arriving here is a VM bug.
-    Ok(#(NormalCompletion(_), _)) ->
+    Ok(#(Completed(NormalCompletion(_)), _)) ->
       Error(#(
         StepVmError(InternalError(
           "call_generator_function",
@@ -322,9 +323,9 @@ fn call_generator_function(
         JsUndefined,
         state,
       ))
-    Ok(#(ThrowCompletion(thrown), thrown_state)) ->
+    Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) ->
       Error(#(Thrown, thrown, State(..state, heap: thrown_state.heap)))
-    Ok(#(AwaitCompletion(_), _)) ->
+    Ok(#(Suspended(completion.Await, _), _)) ->
       Error(#(
         StepVmError(InternalError(
           "call_generator_function",
@@ -352,7 +353,7 @@ fn call_async_generator_function(
   case
     execute_inner(generator_initial_state(state, callee_template, args, locals))
   {
-    Ok(#(YieldCompletion(_), suspended)) ->
+    Ok(#(Suspended(completion.Yield, _), suspended)) ->
       alloc_suspended_generator(
         state,
         suspended,
@@ -370,9 +371,10 @@ fn call_async_generator_function(
         AsyncGeneratorObject,
         state.builtins.async_generator.prototype,
       )
-    Ok(#(ThrowCompletion(thrown), thrown_state)) ->
+    Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) ->
       Error(#(Thrown, thrown, State(..state, heap: thrown_state.heap)))
-    Ok(#(NormalCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
+    Ok(#(Completed(NormalCompletion(_)), _))
+    | Ok(#(Suspended(completion.Await, _), _)) ->
       // InitialYield is first op — body never runs before it. Unreachable.
       Error(#(
         StepVmError(InternalError(
@@ -449,7 +451,7 @@ fn call_async_function(
 /// to allocate a fresh slot on first await.
 fn finish_async_execution(
   state: State(host),
-  exec_result: Result(#(Completion, State(host)), VmError),
+  exec_result: Result(#(Outcome, State(host)), VmError),
   promise_data_ref: Ref,
   resolve: JsValue,
   reject: JsValue,
@@ -460,7 +462,7 @@ fn finish_async_execution(
   rest_stack: List(JsValue),
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   case exec_result {
-    Ok(#(AwaitCompletion(awaited_value), suspended)) -> {
+    Ok(#(Suspended(completion.Await, awaited_value), suspended)) -> {
       // Body hit `await` -- save state, set up promise resolution
       let h2 = suspended.heap
       let saved_try = generators.save_stacks(suspended.try_stack)
@@ -488,7 +490,7 @@ fn finish_async_execution(
         )
       Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
-    Ok(#(NormalCompletion(return_value), final_state)) -> {
+    Ok(#(Completed(NormalCompletion(return_value)), final_state)) -> {
       // Async function completed -- resolve the outer promise through the
       // resolving function (§27.7.5.1 AsyncFunctionStart performs
       // Call(promiseCapability.[[Resolve]], ...)), so a thenable return value
@@ -503,7 +505,7 @@ fn finish_async_execution(
       )
       Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
-    Ok(#(ThrowCompletion(thrown), final_state)) -> {
+    Ok(#(Completed(ThrowCompletion(thrown)), final_state)) -> {
       // Async function threw -- reject the outer promise
       let state =
         builtins_promise.reject_promise(
@@ -516,7 +518,7 @@ fn finish_async_execution(
         )
       Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
-    Ok(#(YieldCompletion(_), _)) ->
+    Ok(#(Suspended(completion.Yield, _), _)) ->
       Error(#(
         StepVmError(InternalError(
           "finish_async_execution",
@@ -593,7 +595,7 @@ pub fn call_native_async_resume(
         True -> {
           case unwind_to_catch(exec_state, settled_value) {
             Some(caught_state) -> execute_inner(caught_state)
-            None -> Ok(#(ThrowCompletion(settled_value), exec_state))
+            None -> Ok(#(Completed(ThrowCompletion(settled_value)), exec_state))
           }
         }
       }
@@ -2211,7 +2213,7 @@ fn step_array_iterator_generic(
                 state.rethrow(object.get_value(
                   state,
                   source,
-                  value.Index(index),
+                  Index(index),
                   JsObject(source),
                 )),
               )
@@ -2255,7 +2257,7 @@ fn step_array_iterator_generic(
                     state.rethrow(object.get_value(
                       state,
                       source,
-                      value.Index(index),
+                      Index(index),
                       JsObject(source),
                     ))
                 },
@@ -2334,7 +2336,7 @@ fn element_without_override(
 ) -> Option(JsValue) {
   case heap.read(h, source) {
     Some(ObjectSlot(properties:, ..)) ->
-      case dict.has_key(properties, value.Index(index)) {
+      case dict.has_key(properties, Index(index)) {
         True -> None
         False -> elements.get_option(elems, index)
       }
@@ -2620,12 +2622,18 @@ fn restricted_function_property(
 // Native dispatch — route NativeFn to the correct builtins module
 // ============================================================================
 
+/// `run_to_completion` is the SUSPENSION-NARROWED step loop
+/// (`interpreter.execute_to_completion`): every native that runs code here
+/// (eval, evalScript, the Function constructors, ShadowRealm.evaluate) runs a
+/// whole non-coroutine frame, so realm.gleam only ever receives a
+/// `Completion` — a suspension escaping such a frame surfaces as an
+/// `InternalError` inside the callback, never as a value.
 pub fn dispatch_native(
   native: value.NativeFn,
   args: List(JsValue),
   this: JsValue,
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: realm.ExecuteInnerFn(host),
   new_state_fn: realm.NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
@@ -2639,7 +2647,13 @@ pub fn dispatch_native(
     value.ErrorNative(n) -> builtins_error.dispatch(n, args, this, state)
     value.ConsoleNative(n) -> builtins_console.dispatch(n, args, this, state)
     value.VmNative(value.EvalScript) ->
-      realm.eval_script_native(args, this, state, execute_inner, new_state_fn)
+      realm.eval_script_native(
+        args,
+        this,
+        state,
+        run_to_completion,
+        new_state_fn,
+      )
     value.VmNative(value.CreateRealm) -> realm.create_realm_native(this, state)
     value.VmNative(value.Gc) -> #(state, Ok(JsUndefined))
     value.AtomicsNative(n) -> builtins_atomics.dispatch(n, args, this, state)
@@ -2664,7 +2678,7 @@ pub fn dispatch_native(
         args,
         this,
         state,
-        execute_inner,
+        run_to_completion,
         new_state_fn,
       )
     value.ArrayBufferNative(n) ->
@@ -2678,7 +2692,7 @@ pub fn dispatch_native(
         args,
         "function",
         state,
-        execute_inner,
+        run_to_completion,
         new_state_fn,
       )
     value.VmNative(value.GeneratorFunctionConstructor) ->
@@ -2686,7 +2700,7 @@ pub fn dispatch_native(
         args,
         "function*",
         state,
-        execute_inner,
+        run_to_completion,
         new_state_fn,
       )
     value.VmNative(value.AsyncGeneratorFunctionConstructor) ->
@@ -2694,7 +2708,7 @@ pub fn dispatch_native(
         args,
         "async function*",
         state,
-        execute_inner,
+        run_to_completion,
         new_state_fn,
       )
     value.VmNative(value.AsyncFunctionConstructor) ->
@@ -2702,7 +2716,7 @@ pub fn dispatch_native(
         args,
         "async function",
         state,
-        execute_inner,
+        run_to_completion,
         new_state_fn,
       )
     value.VmNative(value.IteratorSymbolIterator) -> #(state, Ok(this))
@@ -2717,7 +2731,7 @@ pub fn dispatch_native(
     value.VmNative(value.FunctionPrototypeCall) -> #(state, Ok(JsUndefined))
     // Global functions: eval, URI encoding/decoding
     value.VmNative(value.Eval) ->
-      realm.eval_native(args, state, execute_inner, new_state_fn)
+      realm.eval_native(args, state, run_to_completion, new_state_fn)
     // §19.2.6.2 decodeURI ( encodedURI ) — reserved escapes are preserved.
     value.VmNative(value.DecodeURI) ->
       uri_decode_global(args, state, preserve_reserved: True)
@@ -2736,13 +2750,13 @@ pub fn dispatch_native(
       string_global(args, state, builtins_uri.js_unescape)
     // §21.2.1.1 BigInt ( value )
     value.VmNative(value.BigIntGlobal) ->
-      builtins_typed_array.bigint_global(args, state)
+      builtins_bigint.bigint_global(args, state)
     // §21.2.3.3 BigInt.prototype.toString ( [ radix ] )
     value.VmNative(value.BigIntPrototypeToString) ->
-      builtins_typed_array.bigint_proto_to_string(this, args, state)
+      builtins_bigint.bigint_proto_to_string(this, args, state)
     // §21.2.3.4 BigInt.prototype.valueOf ( )
     value.VmNative(value.BigIntPrototypeValueOf) ->
-      builtins_typed_array.bigint_proto_value_of(this, args, state)
+      builtins_bigint.bigint_proto_value_of(this, args, state)
   }
 }
 

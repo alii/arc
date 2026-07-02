@@ -21,20 +21,21 @@ import arc/vm/builtins/temporal_calendar as tcal
 import arc/vm/builtins/temporal_tz
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type TemporalKind, type TemporalNativeFn,
   type TemporalProtos, Dispatch, Finite, JsBigInt, JsBool, JsNull, JsNumber,
-  JsObject, JsString, JsUndefined, Named, NativeFunction, ObjectSlot,
-  OrdinaryObject, TemporalCtor, TemporalDateSlot, TemporalDateTimeSlot,
-  TemporalDurationKind, TemporalDurationSlot, TemporalGetterFn,
-  TemporalInstantKind, TemporalInstantSlot, TemporalMethod, TemporalMonthDaySlot,
-  TemporalNative, TemporalNowFn, TemporalPlainDateKind,
-  TemporalPlainDateTimeKind, TemporalPlainMonthDayKind, TemporalPlainTimeKind,
-  TemporalPlainYearMonthKind, TemporalProtos, TemporalStatic, TemporalTimeSlot,
-  TemporalYearMonthSlot, TemporalZonedDateTimeKind, TemporalZonedDateTimeSlot,
+  JsObject, JsString, JsUndefined, NativeFunction, ObjectSlot, OrdinaryObject,
+  TemporalCtor, TemporalDateSlot, TemporalDateTimeSlot, TemporalDurationKind,
+  TemporalDurationSlot, TemporalGetterFn, TemporalInstantKind,
+  TemporalInstantSlot, TemporalMethod, TemporalMonthDaySlot, TemporalNative,
+  TemporalNowFn, TemporalPlainDateKind, TemporalPlainDateTimeKind,
+  TemporalPlainMonthDayKind, TemporalPlainTimeKind, TemporalPlainYearMonthKind,
+  TemporalProtos, TemporalStatic, TemporalTimeSlot, TemporalYearMonthSlot,
+  TemporalZonedDateTimeKind, TemporalZonedDateTimeSlot,
 }
 import gleam/float
 import gleam/int

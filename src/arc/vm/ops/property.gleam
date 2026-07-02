@@ -1,10 +1,10 @@
+import arc/vm/key.{Index, Named, max_array_index}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object.{type PropKey, PkString, PkSymbol}
 import arc/vm/state.{type State}
 import arc/vm/value.{
-  type JsValue, type PropertyKey, Finite, Index, JsNumber, JsObject, JsString,
-  JsSymbol, Named,
+  type JsValue, type PropertyKey, Finite, JsNumber, JsObject, JsString, JsSymbol,
 }
 import gleam/float
 import gleam/int
@@ -61,10 +61,10 @@ fn primitive_to_prop_key(
       // +. 0.0 normalizes -0.0 → +0.0 (BEAM =:= distinguishes them)
       let n = n +. 0.0
       let i = float.truncate(n)
-      // Same [0, 2^32-1) array-index cap as value.canonical_key — numbers
+      // Same [0, 2^32-1) array-index cap as key.canonical_key — numbers
       // beyond it (e.g. 4294967296) must stringify to Named so the numeric
       // and string forms of the same key land in the same dict slot.
-      case int.to_float(i) == n && i >= 0 && i <= 4_294_967_294 {
+      case int.to_float(i) == n && i >= 0 && i <= max_array_index {
         // Valid array index — skip stringification entirely.
         True -> Ok(#(PkString(Index(i)), state))
         // Non-index number — stringify (e.g. 1.5 → "1.5", -1 → "-1").
@@ -171,11 +171,8 @@ pub fn create_list_from_array_like(
         arg,
       ))
       use #(len_num, state) <- result.try(coerce.js_to_number(state, len_val))
-      let len = case len_num {
-        value.Finite(f) -> int.max(float.truncate(f), 0)
-        value.Infinity -> limits.max_safe_integer
-        _ -> 0
-      }
+      // §7.1.20 ToLength: clamp to [0, 2^53-1].
+      let len = coerce.jsnum_to_length(len_num)
       case len > limits.max_iteration {
         True ->
           Error(state.range_error_value(
@@ -210,7 +207,7 @@ fn gather_array_like(
       use #(v, state) <- result.try(object.get_value(
         state,
         ref,
-        value.Index(idx),
+        Index(idx),
         receiver,
       ))
       gather_array_like(state, ref, receiver, idx + 1, len, [v, ..acc])

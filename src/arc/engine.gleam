@@ -21,9 +21,10 @@ import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type HostFn}
-import arc/vm/value.{type JsValue, type Ref, JsObject, Named}
+import arc/vm/value.{type JsValue, type Ref, JsObject}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}

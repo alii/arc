@@ -6,8 +6,8 @@ import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/completion.{
-  type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
-  YieldCompletion,
+  type Completion, type Outcome, Completed, NormalCompletion, Suspended,
+  ThrowCompletion,
 }
 import arc/vm/exec/call
 import arc/vm/exec/dynamic_import
@@ -16,6 +16,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
+import arc/vm/key.{Index, Named, max_array_index}
 import arc/vm/opcode.{
   type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
   ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal,
@@ -52,7 +53,7 @@ import arc/vm/state.{
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
   DataProperty, EvalEnvSlot, ForInIteratorSlot, FunctionObject, GeneratorObject,
-  JsBool, JsNull, JsObject, JsString, JsUndefined, JsUninitialized, Named,
+  JsBool, JsNull, JsObject, JsString, JsUndefined, JsUninitialized,
   NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
@@ -84,8 +85,9 @@ fn put_existing_writable_data(
 /// JS call made from native code (e.g. Array.prototype.map's callback). The
 /// caller already holds a State, so it drives the lossless
 /// `call_value_to_completion` directly and narrows it to the host-fn
-/// `Ok(value)`/`Error(thrown)` contract; a `VmError` or a stray Yield/Await is an
-/// engine bug here (no channel to surface it through, mid-execution) → panic.
+/// `Ok(value)`/`Error(thrown)` contract; a `VmError` (which is also how a
+/// stray suspension surfaces) is an engine bug here (no channel to surface it
+/// through, mid-execution) → panic.
 fn call_fn_callback(
   state: State(host),
   callee: JsValue,
@@ -95,8 +97,6 @@ fn call_fn_callback(
   case call_value_to_completion(state, callee, this_val, args) {
     Ok(#(NormalCompletion(val), s)) -> Ok(#(val, s))
     Ok(#(ThrowCompletion(thrown), s)) -> Error(#(thrown, s))
-    Ok(#(YieldCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
-      panic as "Yield/Await completion should not appear in a re-entrant call"
     Error(vm_err) ->
       panic as { "VM error in re-entrant call: " <> string.inspect(vm_err) }
   }
@@ -140,7 +140,7 @@ fn call_value_to_completion(
         )
       case call_value(isolated, callee, args, this_val) {
         Ok(entered) ->
-          case execute_inner(entered) {
+          case execute_to_completion(entered, "call_value_to_completion") {
             Ok(#(comp, final_state)) ->
               Ok(#(comp, merge_back(state, final_state)))
             Error(vm_err) -> Error(vm_err)
@@ -174,7 +174,7 @@ fn frozen_array_slot(
   let index_props =
     list.index_map(values, fn(v, i) {
       #(
-        value.Index(i),
+        Index(i),
         // seq: 0 — Index keys enumerate numerically, never by seq.
         DataProperty(
           value: v,
@@ -291,13 +291,11 @@ fn construct_fn_callback(
       // Either way, execute_inner drives to completion.
       case do_construct(isolated, ref, args, [], nt_ref) {
         Ok(entered) ->
-          case execute_inner(entered) {
+          case execute_to_completion(entered, "construct_fn_callback") {
             Ok(#(NormalCompletion(val), final_state)) ->
               Ok(#(val, merge_back(state, final_state)))
             Ok(#(ThrowCompletion(thrown), final_state)) ->
               Error(#(thrown, merge_back(state, final_state)))
-            Ok(#(YieldCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
-              panic as "Yield/Await completion during construct"
             Error(vm_err) ->
               panic as {
                 "VM error during construct: " <> string.inspect(vm_err)
@@ -552,8 +550,8 @@ pub fn make_closure(
       #(
         heap,
         dict.from_list([
-          #(value.Named("name"), name_prop),
-          #(value.Named("length"), length_prop),
+          #(Named("name"), name_prop),
+          #(Named("length"), length_prop),
         ]),
         None,
         closure_ref,
@@ -613,9 +611,9 @@ pub fn make_closure(
       #(
         h,
         dict.from_list([
-          #(value.Named("prototype"), proto_prop),
-          #(value.Named("name"), name_prop),
-          #(value.Named("length"), length_prop),
+          #(Named("prototype"), proto_prop),
+          #(Named("name"), name_prop),
+          #(Named("length"), length_prop),
         ]),
         Some(proto_obj_ref),
         closure_ref,
@@ -691,14 +689,16 @@ pub fn read_this_local(state: State(host)) -> JsValue {
 // ============================================================================
 
 /// Main execution loop. Tail-recursive.
-/// Returns the completion and the final state (for job queue access).
+/// Returns the outcome (completion or suspension) and the final state (for
+/// job queue access). Only coroutine drivers may see `Suspended`; every
+/// other caller narrows through `execute_to_completion`.
 ///
 /// Every bytecode stream ends with a sentinel Return (appended by
 /// resolve.gleam), so fetch uses unchecked element/2 — no Option box,
 /// no bounds check. Termination flows through the Return handler.
 pub fn execute_inner(
   state: State(host),
-) -> Result(#(Completion, State(host)), VmError) {
+) -> Result(#(Outcome, State(host)), VmError) {
   fast_loop(
     state,
     state.pc,
@@ -709,6 +709,23 @@ pub fn execute_inner(
     state.constants,
     state.current_line,
   )
+}
+
+/// Run the step loop over a frame that cannot resume a suspension: top-level
+/// scripts, eval frames, and re-entrant native calls. Narrows `Completed` to
+/// its `Completion`; a `Suspended` escaping such a frame is an engine bug and
+/// is reported on the `VmError` channel (`InternalError` at `site`), never
+/// returned as a value.
+pub fn execute_to_completion(
+  state: State(host),
+  site: String,
+) -> Result(#(Completion, State(host)), VmError) {
+  case execute_inner(state) {
+    Ok(#(Completed(comp), final_state)) -> Ok(#(comp, final_state))
+    Ok(#(Suspended(kind, _), _)) ->
+      Error(InternalError(site, completion.suspension_leak_detail(kind)))
+    Error(vm_err) -> Error(vm_err)
+  }
 }
 
 /// Hot inner loop. Carries the per-instruction-mutable hot fields (pc, stack,
@@ -729,7 +746,7 @@ fn fast_loop(
   code: tuple_array.TupleArray(Op),
   constants: tuple_array.TupleArray(JsValue),
   line: Int,
-) -> Result(#(Completion, State(host)), VmError) {
+) -> Result(#(Outcome, State(host)), VmError) {
   case tuple_array.unsafe_get(pc, code) {
     SetLine(l) ->
       fast_loop(state, pc + 1, stack, locals, hp, code, constants, l)
@@ -1148,7 +1165,7 @@ fn fast_loop(
           // +. 0.0 normalizes -0.0 → +0.0, same as to_string_key.
           let n = f +. 0.0
           let idx = float.truncate(n)
-          case int.to_float(idx) == n && idx >= 0 && idx <= 4_294_967_294 {
+          case int.to_float(idx) == n && idx >= 0 && idx <= max_array_index {
             False -> dispatch_slow(state, pc, stack, locals, hp, line)
             True ->
               case heap.read(hp, ref) {
@@ -1164,7 +1181,7 @@ fn fast_loop(
                     elements: els,
                     ..,
                   )) ->
-                  case dict.has_key(properties, value.Index(idx)) {
+                  case dict.has_key(properties, Index(idx)) {
                     True -> dispatch_slow(state, pc, stack, locals, hp, line)
                     False ->
                       case elements.get_option(els, idx) {
@@ -1204,7 +1221,7 @@ fn fast_loop(
         [val, value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] -> {
           let n = f +. 0.0
           let idx = float.truncate(n)
-          case int.to_float(idx) == n && idx >= 0 && idx <= 4_294_967_294 {
+          case int.to_float(idx) == n && idx >= 0 && idx <= max_array_index {
             False -> dispatch_slow(state, pc, stack, locals, hp, line)
             True ->
               case heap.read(hp, ref) {
@@ -1218,7 +1235,7 @@ fn fast_loop(
                     ..,
                   ) as slot,
                 ) ->
-                  case dict.has_key(properties, value.Index(idx)) {
+                  case dict.has_key(properties, Index(idx)) {
                     True -> dispatch_slow(state, pc, stack, locals, hp, line)
                     False ->
                       case elements.has(els, idx) {
@@ -1292,7 +1309,7 @@ fn fast_loop(
     // `obj.x` read: own data-property hit on an OrdinaryObject is a pure
     // dict probe. Misses (proto walk), accessors, and every exotic kind
     // (Array length, String indices, Proxy, Namespace, ...) bail.
-    GetField(opcode.OpNamed(name)) ->
+    GetField(Named(name)) ->
       case stack {
         [JsObject(ref), ..rest] ->
           case heap.read(hp, ref) {
@@ -1323,7 +1340,7 @@ fn fast_loop(
     // — the key keeps its enumeration position). Creation (needs the
     // proto-chain setter walk), non-writable, accessors, and exotic kinds
     // bail to the slow path.
-    PutField(opcode.OpNamed(name)) ->
+    PutField(Named(name)) ->
       case stack {
         [val, JsObject(ref), ..rest] ->
           case heap.read(hp, ref) {
@@ -1382,7 +1399,7 @@ fn fast_loop(
     // define_needs_full_semantics == False region, where a raw
     // object.set_property insert is spec-equivalent (CreateDataProperty on a
     // fresh literal). Proxies and non-extensible receivers bail to step.
-    DefineField(opcode.OpNamed(name)) ->
+    DefineField(Named(name)) ->
       case stack {
         [val, JsObject(ref) as obj, ..rest] ->
           case heap.read(hp, ref) {
@@ -1446,7 +1463,7 @@ fn proto_chain_index_free(
             prototype:,
             ..,
           )) ->
-          case dict.has_key(properties, value.Index(idx)) {
+          case dict.has_key(properties, Index(idx)) {
             True -> False
             False -> proto_chain_index_free(hp, prototype, idx)
           }
@@ -1464,9 +1481,7 @@ fn proto_chain_index_free(
             prototype:,
             ..,
           )) ->
-          case
-            dict.has_key(properties, value.Index(idx)) || elements.has(els, idx)
-          {
+          case dict.has_key(properties, Index(idx)) || elements.has(els, idx) {
             True -> False
             False -> proto_chain_index_free(hp, prototype, idx)
           }
@@ -1484,12 +1499,13 @@ fn dispatch_slow(
   locals: tuple_array.TupleArray(JsValue),
   hp: Heap(host),
   line: Int,
-) -> Result(#(Completion, State(host)), VmError) {
+) -> Result(#(Outcome, State(host)), VmError) {
   let state = State(..state, pc:, stack:, locals:, heap: hp, current_line: line)
   let op = tuple_array.unsafe_get(state.pc, state.code)
   case step(state, op) {
     Ok(new_state) -> execute_inner(new_state)
-    Error(#(Done, result, post)) -> Ok(#(NormalCompletion(result), post))
+    Error(#(Done, result, post)) ->
+      Ok(#(Completed(NormalCompletion(result)), post))
     Error(#(StepVmError(err), _, _)) -> Error(err)
     Error(#(Yielded, yielded_value, post)) -> {
       // Generator yielded — build suspended state.
@@ -1533,7 +1549,7 @@ fn dispatch_slow(
           })
         _ -> State(..post, pc: post.pc + 1)
       }
-      Ok(#(YieldCompletion(yielded_value), suspended_state))
+      Ok(#(Suspended(completion.Yield, yielded_value), suspended_state))
     }
     Error(#(Awaited, awaited_value, post)) -> {
       // Async function/generator hit await — pop value, advance pc. Spread
@@ -1548,7 +1564,7 @@ fn dispatch_slow(
           },
           pc: post.pc + 1,
         )
-      Ok(#(AwaitCompletion(awaited_value), suspended_state))
+      Ok(#(Suspended(completion.Await, awaited_value), suspended_state))
     }
     Error(#(Thrown, thrown_value, post)) -> {
       // Try to unwind to a catch handler. The handler's full post-step state
@@ -1556,7 +1572,7 @@ fn dispatch_slow(
       // before throwing (e.g., undef the iter slot then propagate).
       case unwind_to_catch(post, thrown_value) {
         Some(caught_state) -> execute_inner(caught_state)
-        None -> Ok(#(ThrowCompletion(thrown_value), post))
+        None -> Ok(#(Completed(ThrowCompletion(thrown_value)), post))
       }
     }
   }
@@ -3066,8 +3082,7 @@ fn step(
       )
     }
 
-    GetField(op_key) -> {
-      let key = value.from_op_key(op_key)
+    GetField(key) -> {
       case state.stack {
         [JsNull as v, ..] | [JsUndefined as v, ..] ->
           state.throw_type_error(
@@ -3075,7 +3090,7 @@ fn step(
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> opcode.key_name(op_key)
+              <> value.key_to_string(key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -3088,10 +3103,9 @@ fn step(
       }
     }
 
-    GetField2(op_key) -> {
+    GetField2(key) -> {
       // Like GetField but keeps the object on the stack for CallMethod.
       // Stack: [obj, ..rest] → [prop_value, obj, ..rest]
-      let key = value.from_op_key(op_key)
       case state.stack {
         [JsNull as v, ..] | [JsUndefined as v, ..] ->
           state.throw_type_error(
@@ -3099,7 +3113,7 @@ fn step(
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> opcode.key_name(op_key)
+              <> value.key_to_string(key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -3112,10 +3126,9 @@ fn step(
       }
     }
 
-    PutField(op_key) -> {
+    PutField(key) -> {
       // Consumes [value, obj] and pushes value back (assignment is an expression).
       // Consistent with PutElem which also leaves the value on the stack.
-      let key = value.from_op_key(op_key)
       case state.stack {
         [value, JsObject(ref) as receiver, ..rest] -> {
           // set_value walks proto chain, calls setters, handles non-writable.
@@ -3129,7 +3142,7 @@ fn step(
               state.throw_type_error(
                 state,
                 "Cannot assign to read only property '"
-                  <> opcode.key_name(op_key)
+                  <> value.key_to_string(key)
                   <> "' of object",
               )
             _, _ -> Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
@@ -3142,7 +3155,7 @@ fn step(
           state.throw_type_error(
             state,
             "Cannot set properties of undefined or null (setting '"
-              <> opcode.key_name(op_key)
+              <> value.key_to_string(key)
               <> "')",
           )
         [value, _, ..rest] -> {
@@ -3153,7 +3166,7 @@ fn step(
               state.throw_type_error(
                 state,
                 "Cannot create property '"
-                  <> opcode.key_name(op_key)
+                  <> value.key_to_string(key)
                   <> "' on primitive value",
               )
             False ->
@@ -3164,8 +3177,8 @@ fn step(
       }
     }
 
-    GetPrivateField(op_key) -> {
-      let key = value.private_from_op_key(op_key)
+    GetPrivateField(name) -> {
+      let key = value.private_key(name)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
@@ -3181,23 +3194,21 @@ fn step(
               state.throw_type_error(
                 state,
                 "Cannot read private member "
-                  <> opcode.key_name(op_key)
+                  <> name
                   <> " from an object whose class did not declare it",
               )
           }
         [_, ..] ->
           state.throw_type_error(
             state,
-            "Cannot read private member "
-              <> opcode.key_name(op_key)
-              <> " on non-object",
+            "Cannot read private member " <> name <> " on non-object",
           )
         [] -> underflow(state, "GetPrivateField")
       }
     }
 
-    GetPrivateField2(op_key) -> {
-      let key = value.private_from_op_key(op_key)
+    GetPrivateField2(name) -> {
+      let key = value.private_key(name)
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk — see GetPrivateField.
@@ -3212,23 +3223,21 @@ fn step(
               state.throw_type_error(
                 state,
                 "Cannot read private member "
-                  <> opcode.key_name(op_key)
+                  <> name
                   <> " from an object whose class did not declare it",
               )
           }
         [_, ..] ->
           state.throw_type_error(
             state,
-            "Cannot read private member "
-              <> opcode.key_name(op_key)
-              <> " on non-object",
+            "Cannot read private member " <> name <> " on non-object",
           )
         [] -> underflow(state, "GetPrivateField2")
       }
     }
 
-    PutPrivateField(op_key) -> {
-      let key = value.private_from_op_key(op_key)
+    PutPrivateField(name) -> {
+      let key = value.private_key(name)
       case state.stack {
         [val, JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
@@ -3253,7 +3262,7 @@ fn step(
                   state.throw_type_error(
                     state,
                     "Cannot write private member "
-                      <> opcode.key_name(op_key)
+                      <> name
                       <> ": it is a method or has no setter",
                   )
               }
@@ -3262,23 +3271,21 @@ fn step(
               state.throw_type_error(
                 state,
                 "Cannot write private member "
-                  <> opcode.key_name(op_key)
+                  <> name
                   <> " to an object whose class did not declare it",
               )
           }
         [_, _, ..] ->
           state.throw_type_error(
             state,
-            "Cannot write private member "
-              <> opcode.key_name(op_key)
-              <> " on non-object",
+            "Cannot write private member " <> name <> " on non-object",
           )
         _ -> underflow(state, "PutPrivateField")
       }
     }
 
-    PrivateIn(op_key) -> {
-      let key = value.private_from_op_key(op_key)
+    PrivateIn(name) -> {
+      let key = value.private_key(name)
       case state.stack {
         [JsObject(ref), ..rest] -> {
           // Brand check via find_property (chain walk) — has_property hides
@@ -3291,7 +3298,7 @@ fn step(
           state.throw_type_error(
             state,
             "Cannot use 'in' operator to search for private name "
-              <> opcode.key_name(op_key)
+              <> name
               <> " in non-object",
           )
         [] -> underflow(state, "PrivateIn")
@@ -3538,11 +3545,11 @@ fn step(
       }
     }
 
-    DefineField(op_key) -> {
+    DefineField(key) -> {
       // Like PutField but keeps the object on the stack (for object literal
-      // construction). "#"-prefixed static keys come from class private field
-      // syntax and land in the private namespace (value.from_op_key_define).
-      let key = value.from_op_key_define(op_key)
+      // construction). Class private fields never flow through this opcode
+      // (they use DefinePrivateField with per-evaluation minted keys), so a
+      // "#"-prefixed key here is an ordinary public property (e.g. {"#x": 1}).
       case state.stack {
         [value, JsObject(ref) as obj, ..rest] ->
           case define_needs_full_semantics(state, ref, key) {
@@ -3559,7 +3566,7 @@ fn step(
               use state <- result.map(define_field_full(
                 state,
                 ref,
-                JsString(opcode.key_name(op_key)),
+                JsString(value.key_to_string(key)),
                 value,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -3573,12 +3580,10 @@ fn step(
       }
     }
 
-    DefineMethod(op_key) -> {
+    DefineMethod(key) -> {
       // Like DefineField but creates a non-enumerable property (for class
       // methods). §15.4.4 MakeMethod: also set [[HomeObject]] = target on the
-      // function so super.prop inside it finds the right base. "#"-prefixed
-      // static keys (private methods) land in the private namespace.
-      let key = value.from_op_key_define(op_key)
+      // function so super.prop inside it finds the right base.
       case state.stack {
         [v, JsObject(ref) as obj, ..rest] -> {
           let heap = make_method(state.heap, v, ref)
@@ -3632,12 +3637,10 @@ fn step(
       }
     }
 
-    DefineAccessor(op_key, kind, enumerable) -> {
+    DefineAccessor(key, kind, enumerable) -> {
       // Object literal getter/setter: { get x() {}, set x(v) {} }
       // Stack: [fn, obj, ...] → [obj, ...]
-      // Defines or updates an AccessorProperty on the object. "#"-prefixed
-      // static keys (private accessors) land in the private namespace.
-      let key = value.from_op_key_define(op_key)
+      // Defines or updates an AccessorProperty on the object.
       case state.stack {
         [func, JsObject(ref) as obj, ..rest] -> {
           let heap = make_method(state.heap, func, ref)
@@ -3890,8 +3893,7 @@ fn step(
       }
 
     // -- Delete operator --
-    DeleteField(op_key) -> {
-      let key = value.from_op_key(op_key)
+    DeleteField(key) -> {
       case state.stack {
         [obj, ..rest] ->
           case obj {
@@ -3909,7 +3911,9 @@ fn step(
                 False, True ->
                   state.throw_type_error(
                     state,
-                    "Cannot delete property '" <> opcode.key_name(op_key) <> "'",
+                    "Cannot delete property '"
+                      <> value.key_to_string(key)
+                      <> "'",
                   )
                 _, _ ->
                   Ok(
@@ -4323,7 +4327,7 @@ fn step(
               with_names,
               private_names,
               State(..state, stack: rest_stack),
-              execute_inner,
+              execute_to_completion(_, "direct_eval_native"),
               new_state,
             )
           case result {
@@ -5485,8 +5489,8 @@ fn with_has_binding(
 /// re-run a user-observable ToPropertyKey (§13.15.2: ToPropertyKey once).
 fn property_key_value(pk: value.PropertyKey) -> JsValue {
   case pk {
-    value.Index(n) -> value.from_int(n)
-    value.Named(s) -> JsString(s)
+    Index(n) -> value.from_int(n)
+    Named(s) -> JsString(s)
   }
 }
 
@@ -5829,7 +5833,17 @@ fn dispatch_native(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  call.dispatch_native(native, args, this, state, execute_inner, new_state)
+  // Realm-level natives (eval / evalScript / Function constructor /
+  // ShadowRealm.evaluate) run whole non-coroutine frames, so they get the
+  // narrowed step loop: a suspension escaping one is an InternalError.
+  call.dispatch_native(
+    native,
+    args,
+    this,
+    state,
+    execute_to_completion(_, "dispatch_native"),
+    new_state,
+  )
 }
 
 /// Get the Ref of a named property's JsObject value from a heap object.
@@ -6450,7 +6464,7 @@ fn step_array_iterator_source(
                 state.rethrow(object.get_value(
                   state,
                   source,
-                  value.Index(index),
+                  Index(index),
                   JsObject(source),
                 )),
               )
@@ -6514,7 +6528,7 @@ fn step_array_iterator_source(
                     state.rethrow(object.get_value(
                       state,
                       source,
-                      value.Index(index),
+                      Index(index),
                       JsObject(source),
                     ))
                 },
@@ -6576,7 +6590,7 @@ fn array_elem_without_override(
 ) -> Option(JsValue) {
   case heap.read(h, source) {
     Some(ObjectSlot(properties:, ..)) ->
-      case dict.has_key(properties, value.Index(index)) {
+      case dict.has_key(properties, Index(index)) {
         True -> None
         False -> elements.get_option(elems, index)
       }

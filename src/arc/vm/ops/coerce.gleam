@@ -1,7 +1,9 @@
 import arc/vm/builtins/helpers
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/ops/object
+import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, BigInt, Finite, FunctionObject, Infinity, JsBigInt, JsBool,
@@ -109,7 +111,7 @@ fn try_to_primitive_methods(
       use #(method, state) <- result.try(object.get_value(
         state,
         ref,
-        value.Named(name),
+        Named(name),
         val,
       ))
       case helpers.is_callable(state.heap, method) {
@@ -207,9 +209,9 @@ pub fn try_to_number(
 /// ES2024 §7.1.5 ToIntegerOrInfinity of an already-ToNumber'd value, with
 /// ±∞ saturated to ±(2^53 - 1) (`limits.max_safe_integer`, the spec cap on
 /// array-like lengths). This is the canonical §7.1.5 / saturation helper;
-/// prefer it over hand-rolling the JsNum match. (A few modules still carry
-/// pre-existing local copies — e.g. typed_array's `to_int_or_inf` and
-/// regexp's `try_to_length` — that have not been migrated onto it yet.)
+/// prefer it over hand-rolling the JsNum match. (typed_array's
+/// `to_int_or_inf` is the one remaining pre-existing local copy — it keeps
+/// the ±∞ distinction its callers still need.)
 ///   step 2: NaN, +0, -0 → 0
 ///   steps 3-4: +∞ → 2^53 - 1, -∞ → -(2^53 - 1)
 ///   step 5: finite → truncate toward zero
@@ -244,6 +246,69 @@ pub fn try_to_integer_or_infinity(
 ) -> #(State(host), Result(b, JsValue)) {
   use num, state <- try_to_number(state, val)
   cont(jsnum_to_integer_or_infinity(num), state)
+}
+
+// ============================================================================
+// ToInt32 / ToUint32 (ES2024 §7.1.6 / §7.1.7)
+// ============================================================================
+
+/// ES2024 §7.1.6 ToInt32 of an already-ToNumber'd value. Delegates to the
+/// single modular-reduction implementation in `operators` (which the bitwise
+/// operators use directly on the hot path).
+pub fn jsnum_to_int32(num: value.JsNum) -> Int {
+  operators.num_to_int32(num)
+}
+
+/// ES2024 §7.1.7 ToUint32 of an already-ToNumber'd value (see
+/// `jsnum_to_int32`).
+pub fn jsnum_to_uint32(num: value.JsNum) -> Int {
+  operators.num_to_uint32(num)
+}
+
+/// CPS ToInt32 (ES2024 §7.1.6): full ToNumber (ToPrimitive on objects,
+/// TypeError on Symbol/BigInt), then modular reduction to [-2^31, 2^31).
+///   use i, state <- coerce.try_to_int32(state, val)
+pub fn try_to_int32(
+  state: State(host),
+  val: JsValue,
+  cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  use num, state <- try_to_number(state, val)
+  cont(operators.num_to_int32(num), state)
+}
+
+/// CPS ToUint32 (ES2024 §7.1.7): full ToNumber, then modular reduction to
+/// [0, 2^32).
+///   use u, state <- coerce.try_to_uint32(state, val)
+pub fn try_to_uint32(
+  state: State(host),
+  val: JsValue,
+  cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  use num, state <- try_to_number(state, val)
+  cont(operators.num_to_uint32(num), state)
+}
+
+// ============================================================================
+// ToLength (ES2024 §7.1.20)
+// ============================================================================
+
+/// ES2024 §7.1.20 ToLength of an already-ToNumber'd value: ToIntegerOrInfinity
+/// clamped to [0, 2^53 - 1]. Never throws.
+pub fn jsnum_to_length(num: value.JsNum) -> Int {
+  int.clamp(jsnum_to_integer_or_infinity(num), 0, limits.max_safe_integer)
+}
+
+/// CPS ToLength (ES2024 §7.1.20): full ToNumber — including ToPrimitive
+/// (valueOf may run user code or throw) — then `jsnum_to_length`.
+///   use len, state <- coerce.try_to_length(state, val)
+pub fn try_to_length(
+  state: State(host),
+  val: JsValue,
+  cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  use num, state <- try_to_number(state, val)
+  cont(jsnum_to_length(num), state)
 }
 
 /// Relative start/end index resolution shared by the Array / ArrayBuffer
@@ -349,7 +414,7 @@ pub fn ordinary_has_instance(
           use #(proto_val, state) <- result.try(object.get_value(
             state,
             ctor_ref,
-            value.Named("prototype"),
+            Named("prototype"),
             JsObject(ctor_ref),
           ))
           case proto_val {
@@ -452,32 +517,48 @@ pub fn to_bigint_cps(
   }
 }
 
-/// §7.1.22 ToIndex (CPS): undefined → 0; else ToIntegerOrInfinity with a
-/// RangeError (using `err_msg`) outside [0, 2^53-1].
+/// §7.1.22 ToIndex ( value ):
+///
+///   1. Let integer be ? ToIntegerOrInfinity(value).
+///   2. If integer is not in the inclusive interval from 0 to 2^53 - 1,
+///      throw a RangeError exception (with the caller-supplied `err_msg`).
+///
+/// undefined → 0 (ToNumber(undefined) is NaN and has no observable steps).
+pub fn to_index(
+  state: State(host),
+  val: JsValue,
+  err_msg: String,
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
+  case val {
+    JsUndefined -> Ok(#(0, state))
+    _ -> {
+      use #(num, state) <- result.try(js_to_number(state, val))
+      case num {
+        Finite(f) -> {
+          let i = value.float_to_int(f)
+          case i < 0 || i > limits.max_safe_integer {
+            True -> Error(state.range_error_value(state, err_msg))
+            False -> Ok(#(i, state))
+          }
+        }
+        NaN -> Ok(#(0, state))
+        Infinity | NegInfinity -> Error(state.range_error_value(state, err_msg))
+      }
+    }
+  }
+}
+
+/// CPS wrapper for `to_index` (§7.1.22). Use with `use` syntax:
+///   use i, state <- coerce.to_index_cps(state, val, "Invalid ... length")
 pub fn to_index_cps(
   state: State(host),
   val: JsValue,
   err_msg: String,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case val {
-    JsUndefined -> cont(0, state)
-    _ ->
-      case js_to_number(state, val) {
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(num, state)) ->
-          case num {
-            Finite(f) -> {
-              let i = value.float_to_int(f)
-              case i < 0 || i > 9_007_199_254_740_991 {
-                True -> state.range_error(state, err_msg)
-                False -> cont(i, state)
-              }
-            }
-            NaN -> cont(0, state)
-            Infinity | NegInfinity -> state.range_error(state, err_msg)
-          }
-      }
+  cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  case to_index(state, val, err_msg) {
+    Ok(#(i, state)) -> cont(i, state)
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 

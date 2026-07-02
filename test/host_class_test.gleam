@@ -5,9 +5,10 @@
 
 import arc/engine.{Returned}
 import arc/vm/builtins/common
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state
-import arc/vm/value.{Finite, JsNumber, JsObject, JsString, JsUndefined, Named}
+import arc/vm/value.{Finite, JsNumber, JsObject, JsString, JsUndefined}
 import gleam/option.{Some}
 
 // -- host class bodies -------------------------------------------------------

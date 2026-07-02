@@ -27,10 +27,11 @@
 
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined, Named,
+  type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined,
   ObjectSlot, OrdinaryObject,
 }
 import gleam/dict

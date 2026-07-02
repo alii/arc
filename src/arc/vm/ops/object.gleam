@@ -1,14 +1,16 @@
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
+import arc/vm/internal/typed_array_ffi.{ta_get_float, ta_get_int}
+import arc/vm/key.{Index, Named}
 import arc/vm/opcode
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type HeapSlot, type State, State}
 import arc/vm/value.{
   type JsElements, type JsValue, type Property, type PropertyKey, type Ref,
   type SymbolId, AccessorProperty, ArrayObject, DataProperty, Finite,
-  FunctionObject, GeneratorObject, Index, JsNumber, JsObject, JsString, Named,
-  NativeFunction, ObjectSlot, OrdinaryObject, PromiseObject,
+  FunctionObject, GeneratorObject, JsNumber, JsObject, JsString, NativeFunction,
+  ObjectSlot, OrdinaryObject, PromiseObject,
 }
 import gleam/bit_array
 import gleam/bool
@@ -68,7 +70,8 @@ pub fn get_value_of(
       get_value(state, state.builtins.boolean.prototype, key, val)
     value.JsSymbol(_) -> get_value(state, state.builtins.symbol_proto, key, val)
     // BigInt primitive → %BigInt.prototype% (toString/valueOf/…).
-    value.JsBigInt(_) -> get_value(state, state.builtins.bigint_proto, key, val)
+    value.JsBigInt(_) ->
+      get_value(state, state.builtins.bigint.prototype, key, val)
     // null/undefined → JsUndefined; callers guard and throw TypeError as needed.
     _ -> Ok(#(value.JsUndefined, state))
   }
@@ -92,7 +95,7 @@ pub fn get_symbol_value_of(
     value.JsSymbol(_) ->
       get_symbol_value(state, state.builtins.symbol_proto, sym, val)
     value.JsBigInt(_) ->
-      get_symbol_value(state, state.builtins.bigint_proto, sym, val)
+      get_symbol_value(state, state.builtins.bigint.prototype, sym, val)
     _ -> Ok(#(value.JsUndefined, state))
   }
 }
@@ -3028,6 +3031,10 @@ fn inspect_object(
           "[Number: " <> inspect_inner(JsNumber(n), heap, depth, visited) <> "]"
         value.BooleanObject(value: True) -> "[Boolean: true]"
         value.BooleanObject(value: False) -> "[Boolean: false]"
+        value.BigIntObject(value: bi) ->
+          "[BigInt: "
+          <> inspect_inner(value.JsBigInt(bi), heap, depth, visited)
+          <> "]"
         value.SymbolObject(value: sym) ->
           "[Symbol: "
           <> inspect_inner(value.JsSymbol(sym), heap, depth, visited)
@@ -4084,21 +4091,6 @@ pub fn prevent_extensions_stateful(
 // ops/typed_array_elements.
 // ============================================================================
 
-@external(erlang, "arc_typed_array_ffi", "ta_get_int")
-fn ta_get_int(
-  data: BitArray,
-  byte_offset: Int,
-  size_bits: Int,
-  signed: Bool,
-) -> Int
-
-@external(erlang, "arc_typed_array_ffi", "ta_get_float")
-fn ta_get_float(
-  data: BitArray,
-  byte_offset: Int,
-  size_bits: Int,
-) -> #(Int, Float)
-
 /// Read a snapshot of the backing store of a non-detached ArrayBuffer slot.
 /// None when the ref isn't an ArrayBuffer or the buffer is detached.
 /// For shared (atomics-backed) buffers this copies the live bytes out of the
@@ -4235,22 +4227,12 @@ fn decode_typed_element(
     value.Uint16Kind -> value.from_int(ta_get_int(data, off, 16, False))
     value.Int32Kind -> value.from_int(ta_get_int(data, off, 32, True))
     value.Uint32Kind -> value.from_int(ta_get_int(data, off, 32, False))
-    value.Float32Kind -> JsNumber(tagged_to_jsnum(ta_get_float(data, off, 32)))
-    value.Float64Kind -> JsNumber(tagged_to_jsnum(ta_get_float(data, off, 64)))
+    value.Float32Kind -> JsNumber(ta_get_float(data, off, 32))
+    value.Float64Kind -> JsNumber(ta_get_float(data, off, 64))
     value.BigInt64Kind ->
       value.JsBigInt(value.BigInt(ta_get_int(data, off, 64, True)))
     value.BigUint64Kind ->
       value.JsBigInt(value.BigInt(ta_get_int(data, off, 64, False)))
-  }
-}
-
-/// FFI float tag → JsNum. Tags: 0 finite, 1 NaN, 2 +Inf, 3 -Inf.
-fn tagged_to_jsnum(tagged: #(Int, Float)) -> value.JsNum {
-  case tagged {
-    #(1, _) -> value.NaN
-    #(2, _) -> value.Infinity
-    #(3, _) -> value.NegInfinity
-    #(_, f) -> Finite(f)
   }
 }
 

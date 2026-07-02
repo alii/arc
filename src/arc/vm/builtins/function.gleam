@@ -1,6 +1,7 @@
 import arc/vm/builtins/common.{type BuiltinType, alloc_proto}
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
+import arc/vm/key.{Named}
 import arc/vm/value.{
   type Ref, Dispatch, FunctionApply, FunctionBind, FunctionCall,
   FunctionConstructor, FunctionHasInstance, FunctionToString, JsObject,
@@ -52,8 +53,8 @@ pub fn init(
           constructible: False,
         ),
         properties: dict.from_list([
-          #(value.Named("length"), value.data(value.from_int(0))),
-          #(value.Named("name"), value.data(value.JsString(""))),
+          #(Named("length"), value.data(value.from_int(0))),
+          #(Named("name"), value.data(value.JsString(""))),
         ]),
         elements: elements.new(),
         prototype: Some(func_proto),

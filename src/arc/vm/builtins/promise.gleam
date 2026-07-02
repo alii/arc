@@ -2,12 +2,13 @@ import arc/vm/builtins/common.{type BuiltinType, type Builtins}
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/job_queue
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
   type Job, type JsValue, type PromiseReaction, type Ref, BoxSlot, Call, JsBool,
-  JsObject, Named, PromiseCatch, PromiseConstructor, PromiseFinally,
-  PromiseObject, PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
+  JsObject, PromiseCatch, PromiseConstructor, PromiseFinally, PromiseObject,
+  PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
 }
 import gleam/list

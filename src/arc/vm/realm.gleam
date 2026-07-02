@@ -6,18 +6,19 @@ import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
-import arc/vm/completion.{NormalCompletion, ThrowCompletion, YieldCompletion}
+import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
+import arc/vm/key.{Named}
 import arc/vm/opcode
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type VmError, State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, DataProperty, JsObject, JsString,
-  JsUndefined, Named, ObjectSlot, OrdinaryObject,
+  JsUndefined, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
 import gleam/float
@@ -31,6 +32,12 @@ import gleam/string
 // Callback types for VM functions that can't be imported directly
 // ============================================================================
 
+/// The SUSPENSION-NARROWED step loop (`interpreter.execute_to_completion`),
+/// not the raw one: every realm-level entry point here (eval, evalScript,
+/// the Function constructors, ShadowRealm.evaluate) runs a whole
+/// non-coroutine frame, so it only ever receives a terminal `Completion`.
+/// A yield/await escaping such a frame is an engine bug and surfaces as an
+/// `InternalError` on the `VmError` channel inside the callback.
 pub type ExecuteInnerFn(host) =
   fn(State(host)) -> Result(#(completion.Completion, State(host)), VmError)
 
@@ -195,10 +202,6 @@ pub fn eval_script_native(
           case completion {
             NormalCompletion(val) -> #(state, Ok(val))
             ThrowCompletion(thrown) -> #(state, Error(thrown))
-            YieldCompletion(_) ->
-              state.type_error(state, "evalScript: unexpected yield")
-            completion.AwaitCompletion(_) ->
-              state.type_error(state, "evalScript: unexpected await")
           }
         }
       }
@@ -491,9 +494,6 @@ fn run_eval(
       case completion {
         NormalCompletion(val) -> #(state, Ok(val))
         ThrowCompletion(thrown) -> #(state, Error(thrown))
-        YieldCompletion(_) -> state.type_error(state, "eval: unexpected yield")
-        completion.AwaitCompletion(_) ->
-          state.type_error(state, "eval: unexpected await")
       }
     }
   }
@@ -1414,10 +1414,6 @@ fn do_shadow_realm_evaluate(
                 "ShadowRealm.prototype.evaluate threw: "
                   <> object.format_error(thrown, state.heap),
               )
-            YieldCompletion(_) ->
-              state.type_error(state, "evaluate: unexpected yield")
-            completion.AwaitCompletion(_) ->
-              state.type_error(state, "evaluate: unexpected await")
           }
         }
       }

@@ -1,6 +1,7 @@
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
+import arc/vm/key.{Named}
 import arc/vm/opcode
 import arc/vm/value.{
   type FuncTemplate, type Ref, ArrayObject, BigInt, BoxSlot, EnvSlot, Finite,
@@ -55,7 +56,7 @@ fn alloc_closure(h, env) {
 fn ordinary(props: dict.Dict(String, value.JsValue)) {
   let keyed =
     dict.fold(props, dict.new(), fn(acc, k, v) {
-      dict.insert(acc, value.Named(k), value.data_property(v))
+      dict.insert(acc, Named(k), value.data_property(v))
     })
   ObjectSlot(
     kind: OrdinaryObject,

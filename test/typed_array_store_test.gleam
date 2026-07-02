@@ -10,8 +10,9 @@
 ////      participates in OrdinaryToPrimitive.
 
 import arc/engine
+import arc/vm/key.{Named}
 import arc/vm/ops/object
-import arc/vm/value.{DataProperty, Finite, JsNumber, JsString, Named}
+import arc/vm/value.{DataProperty, Finite, JsNumber, JsString}
 import gleam/option.{Some}
 
 /// Run `source` on a fresh engine and return the value of the global

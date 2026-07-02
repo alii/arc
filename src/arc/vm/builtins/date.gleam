@@ -15,6 +15,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
@@ -39,7 +40,7 @@ import arc/vm/value.{
   DatePrototypeToLocaleString, DatePrototypeToLocaleTimeString,
   DatePrototypeToString, DatePrototypeToTimeString, DatePrototypeToUTCString,
   DatePrototypeValueOf, DateUTC, Dispatch, Finite, JsNull, JsNumber, JsObject,
-  JsString, NaN, ObjectSlot,
+  JsString, JsUndefined, NaN, ObjectSlot,
 }
 import gleam/float
 import gleam/int
@@ -195,50 +196,73 @@ pub fn dispatch(
     DateUTC -> date_utc(args, state)
     DatePrototypeValueOf | DatePrototypeGetTime -> date_get_time(this, state)
     DatePrototypeGetTimezoneOffset -> date_get_tz_offset(this, state)
-    DatePrototypeGetFullYear -> date_get_field(this, state, 0, True)
-    DatePrototypeGetUTCFullYear -> date_get_field(this, state, 0, False)
-    DatePrototypeGetMonth -> date_get_field(this, state, 1, True)
-    DatePrototypeGetUTCMonth -> date_get_field(this, state, 1, False)
-    DatePrototypeGetDate -> date_get_field(this, state, 2, True)
-    DatePrototypeGetUTCDate -> date_get_field(this, state, 2, False)
-    DatePrototypeGetDay -> date_get_field(this, state, 7, True)
-    DatePrototypeGetUTCDay -> date_get_field(this, state, 7, False)
-    DatePrototypeGetHours -> date_get_field(this, state, 3, True)
-    DatePrototypeGetUTCHours -> date_get_field(this, state, 3, False)
-    DatePrototypeGetMinutes -> date_get_field(this, state, 4, True)
-    DatePrototypeGetUTCMinutes -> date_get_field(this, state, 4, False)
-    DatePrototypeGetSeconds -> date_get_field(this, state, 5, True)
-    DatePrototypeGetUTCSeconds -> date_get_field(this, state, 5, False)
-    DatePrototypeGetMilliseconds -> date_get_field(this, state, 6, True)
-    DatePrototypeGetUTCMilliseconds -> date_get_field(this, state, 6, False)
+    DatePrototypeGetFullYear ->
+      date_get_field(this, state, FieldYear, LocalTime)
+    DatePrototypeGetUTCFullYear ->
+      date_get_field(this, state, FieldYear, UtcTime)
+    DatePrototypeGetMonth -> date_get_field(this, state, FieldMonth, LocalTime)
+    DatePrototypeGetUTCMonth -> date_get_field(this, state, FieldMonth, UtcTime)
+    DatePrototypeGetDate -> date_get_field(this, state, FieldDate, LocalTime)
+    DatePrototypeGetUTCDate -> date_get_field(this, state, FieldDate, UtcTime)
+    DatePrototypeGetDay -> date_get_field(this, state, FieldWeekday, LocalTime)
+    DatePrototypeGetUTCDay ->
+      date_get_field(this, state, FieldWeekday, UtcTime)
+    DatePrototypeGetHours -> date_get_field(this, state, FieldHours, LocalTime)
+    DatePrototypeGetUTCHours -> date_get_field(this, state, FieldHours, UtcTime)
+    DatePrototypeGetMinutes ->
+      date_get_field(this, state, FieldMinutes, LocalTime)
+    DatePrototypeGetUTCMinutes ->
+      date_get_field(this, state, FieldMinutes, UtcTime)
+    DatePrototypeGetSeconds ->
+      date_get_field(this, state, FieldSeconds, LocalTime)
+    DatePrototypeGetUTCSeconds ->
+      date_get_field(this, state, FieldSeconds, UtcTime)
+    DatePrototypeGetMilliseconds ->
+      date_get_field(this, state, FieldMs, LocalTime)
+    DatePrototypeGetUTCMilliseconds ->
+      date_get_field(this, state, FieldMs, UtcTime)
     DatePrototypeSetTime -> date_set_time(this, args, state)
     DatePrototypeSetMilliseconds ->
-      date_set_field(this, args, state, 6, 1, True)
+      date_set_field(this, args, state, FieldMs, 1, LocalTime)
     DatePrototypeSetUTCMilliseconds ->
-      date_set_field(this, args, state, 6, 1, False)
-    DatePrototypeSetSeconds -> date_set_field(this, args, state, 5, 2, True)
-    DatePrototypeSetUTCSeconds -> date_set_field(this, args, state, 5, 2, False)
-    DatePrototypeSetMinutes -> date_set_field(this, args, state, 4, 3, True)
-    DatePrototypeSetUTCMinutes -> date_set_field(this, args, state, 4, 3, False)
-    DatePrototypeSetHours -> date_set_field(this, args, state, 3, 4, True)
-    DatePrototypeSetUTCHours -> date_set_field(this, args, state, 3, 4, False)
-    DatePrototypeSetDate -> date_set_field(this, args, state, 2, 1, True)
-    DatePrototypeSetUTCDate -> date_set_field(this, args, state, 2, 1, False)
-    DatePrototypeSetMonth -> date_set_field(this, args, state, 1, 2, True)
-    DatePrototypeSetUTCMonth -> date_set_field(this, args, state, 1, 2, False)
-    DatePrototypeSetFullYear -> date_set_field(this, args, state, 0, 3, True)
+      date_set_field(this, args, state, FieldMs, 1, UtcTime)
+    DatePrototypeSetSeconds ->
+      date_set_field(this, args, state, FieldSeconds, 2, LocalTime)
+    DatePrototypeSetUTCSeconds ->
+      date_set_field(this, args, state, FieldSeconds, 2, UtcTime)
+    DatePrototypeSetMinutes ->
+      date_set_field(this, args, state, FieldMinutes, 3, LocalTime)
+    DatePrototypeSetUTCMinutes ->
+      date_set_field(this, args, state, FieldMinutes, 3, UtcTime)
+    DatePrototypeSetHours ->
+      date_set_field(this, args, state, FieldHours, 4, LocalTime)
+    DatePrototypeSetUTCHours ->
+      date_set_field(this, args, state, FieldHours, 4, UtcTime)
+    DatePrototypeSetDate ->
+      date_set_field(this, args, state, FieldDate, 1, LocalTime)
+    DatePrototypeSetUTCDate ->
+      date_set_field(this, args, state, FieldDate, 1, UtcTime)
+    DatePrototypeSetMonth ->
+      date_set_field(this, args, state, FieldMonth, 2, LocalTime)
+    DatePrototypeSetUTCMonth ->
+      date_set_field(this, args, state, FieldMonth, 2, UtcTime)
+    DatePrototypeSetFullYear ->
+      date_set_field(this, args, state, FieldYear, 3, LocalTime)
     DatePrototypeSetUTCFullYear ->
-      date_set_field(this, args, state, 0, 3, False)
+      date_set_field(this, args, state, FieldYear, 3, UtcTime)
     DatePrototypeGetYear -> date_get_year(this, state)
     DatePrototypeSetYear -> date_set_year(this, args, state)
-    DatePrototypeToString -> date_to_string(this, state, FmtLocal, 3)
-    DatePrototypeToDateString -> date_to_string(this, state, FmtLocal, 1)
-    DatePrototypeToTimeString -> date_to_string(this, state, FmtLocal, 2)
-    DatePrototypeToISOString -> date_to_string(this, state, FmtIso, 3)
-    DatePrototypeToUTCString -> date_to_string(this, state, FmtUtc, 3)
-    DatePrototypeToLocaleString -> date_to_string(this, state, FmtLocale, 3)
-    DatePrototypeToLocaleDateString -> date_to_string(this, state, FmtLocale, 1)
-    DatePrototypeToLocaleTimeString -> date_to_string(this, state, FmtLocale, 2)
+    DatePrototypeToString -> date_to_string(this, state, FmtLocal, DateAndTime)
+    DatePrototypeToDateString -> date_to_string(this, state, FmtLocal, DateOnly)
+    DatePrototypeToTimeString -> date_to_string(this, state, FmtLocal, TimeOnly)
+    DatePrototypeToISOString -> date_to_string(this, state, FmtIso, DateAndTime)
+    DatePrototypeToUTCString -> date_to_string(this, state, FmtUtc, DateAndTime)
+    DatePrototypeToLocaleString ->
+      date_to_string(this, state, FmtLocale, DateAndTime)
+    DatePrototypeToLocaleDateString ->
+      date_to_string(this, state, FmtLocale, DateOnly)
+    DatePrototypeToLocaleTimeString ->
+      date_to_string(this, state, FmtLocale, TimeOnly)
     DatePrototypeToJSON -> date_to_json(this, state)
     DatePrototypeSymbolToPrimitive -> date_to_primitive(this, args, state)
   }
@@ -330,6 +354,13 @@ fn time_clip(t: JsNum) -> JsNum {
   }
 }
 
+/// Which coordinate system a time value is interpreted in: local wall-clock
+/// time (apply the FFI timezone offset) or UTC.
+type TimeRef {
+  LocalTime
+  UtcTime
+}
+
 /// Broken-down date components (all Int). `tz` is the timezone-offset minutes
 /// at the moment in question (UTC - local; 0 for UTC fields).
 type DateFields {
@@ -346,27 +377,55 @@ type DateFields {
   )
 }
 
-/// Project a field by index (0=year .. 6=ms, 7=weekday).
-fn field_at(f: DateFields, idx: Int) -> Int {
-  case idx {
-    0 -> f.year
-    1 -> f.month
-    2 -> f.date
-    3 -> f.hours
-    4 -> f.minutes
-    5 -> f.seconds
-    6 -> f.ms
-    7 -> f.weekday
-    _ -> 0
+/// One calendar field of a broken-down Date, as named by the get*/set*
+/// accessor pairs. The first seven (year..ms) are also the setters' write
+/// targets, in `setHours(h, m, s, ms)` argument order — see `field_index`.
+type DateField {
+  FieldYear
+  FieldMonth
+  FieldDate
+  FieldHours
+  FieldMinutes
+  FieldSeconds
+  FieldMs
+  FieldWeekday
+}
+
+/// Project a field out of the broken-down record.
+fn field_at(f: DateFields, field: DateField) -> Int {
+  case field {
+    FieldYear -> f.year
+    FieldMonth -> f.month
+    FieldDate -> f.date
+    FieldHours -> f.hours
+    FieldMinutes -> f.minutes
+    FieldSeconds -> f.seconds
+    FieldMs -> f.ms
+    FieldWeekday -> f.weekday
   }
 }
 
-/// Decompose an integral epoch-ms time value into calendar fields. When
-/// `is_local` the FFI timezone offset for that instant is applied first.
-fn get_date_fields(tv: Int, is_local: Bool) -> DateFields {
-  let tz = case is_local {
-    True -> tz_offset_minutes(tv)
-    False -> 0
+/// Position of a field in the year..ms component order (0..6, weekday last).
+/// The setters overwrite a consecutive run of components starting here.
+fn field_index(field: DateField) -> Int {
+  case field {
+    FieldYear -> 0
+    FieldMonth -> 1
+    FieldDate -> 2
+    FieldHours -> 3
+    FieldMinutes -> 4
+    FieldSeconds -> 5
+    FieldMs -> 6
+    FieldWeekday -> 7
+  }
+}
+
+/// Decompose an integral epoch-ms time value into calendar fields. For
+/// `LocalTime` the FFI timezone offset for that instant is applied first.
+fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
+  let tz = case time_ref {
+    LocalTime -> tz_offset_minutes(tv)
+    UtcTime -> 0
   }
   let d = tv - tz * 60_000
   let h = math_mod(d, ms_per_day)
@@ -413,7 +472,7 @@ fn make_date(
   minutes: Int,
   seconds: Int,
   ms: Int,
-  is_local: Bool,
+  time_ref: TimeRef,
 ) -> JsNum {
   let ym = y + floor_div(mon, 12)
   let mn = math_mod(mon, 12)
@@ -425,9 +484,9 @@ fn make_date(
       let day = days_from_year(ym) + sum_month_days(ym, mn, 0, 0) + date - 1
       let time = hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + ms
       let tv = day * ms_per_day + time
-      let tv = case is_local {
-        True -> tv + tz_offset_minutes(tv) * 60_000
-        False -> tv
+      let tv = case time_ref {
+        LocalTime -> tv + tz_offset_minutes(tv) * 60_000
+        UtcTime -> tv
       }
       time_clip(Finite(int.to_float(tv)))
     }
@@ -441,33 +500,57 @@ fn sum_month_days(y: Int, until: Int, i: Int, acc: Int) -> Int {
   }
 }
 
-/// Convert a list of JsNum fields (year, month, date, h, m, s, ms) to a time
-/// value. Any NaN/Infinity → NaN. All values truncated toward zero. Year in
-/// [0,100) is mapped to 1900+year per spec §21.4.2.1 step 5.k.
-fn make_date_checked(fields: List(JsNum), is_local: Bool) -> JsNum {
-  case nums_to_ints(fields) {
+/// The seven MakeDay/MakeTime inputs of §21.4.1.28, always all present.
+/// Built exclusively by `pad_fields` / `overwrite_fields`, so a wrong number
+/// of components is unrepresentable.
+type DateComponents {
+  DateComponents(
+    year: JsNum,
+    month: JsNum,
+    date: JsNum,
+    hours: JsNum,
+    minutes: JsNum,
+    seconds: JsNum,
+    ms: JsNum,
+  )
+}
+
+/// Truncate all seven components toward zero. None if any is non-finite.
+fn components_to_ints(
+  c: DateComponents,
+) -> Option(#(Int, Int, Int, Int, Int, Int, Int)) {
+  use y <- option.then(num_to_int(c.year))
+  use mon <- option.then(num_to_int(c.month))
+  use dt <- option.then(num_to_int(c.date))
+  use h <- option.then(num_to_int(c.hours))
+  use mi <- option.then(num_to_int(c.minutes))
+  use s <- option.then(num_to_int(c.seconds))
+  use ms <- option.map(num_to_int(c.ms))
+  #(y, mon, dt, h, mi, s, ms)
+}
+
+/// Truncate a finite JsNum toward zero; NaN/±Infinity → None.
+fn num_to_int(n: JsNum) -> Option(Int) {
+  case n {
+    Finite(f) -> Some(value.float_to_int(f))
+    _ -> None
+  }
+}
+
+/// Convert the constructor/Date.UTC components to a time value. Any
+/// NaN/Infinity → NaN. All values truncated toward zero. Year in [0,100) is
+/// mapped to 1900+year per spec §21.4.2.1 step 5.k.
+fn make_date_checked(c: DateComponents, time_ref: TimeRef) -> JsNum {
+  case components_to_ints(c) {
     None -> NaN
-    Some([y, mon, dt, h, mi, s, ms]) -> {
+    Some(#(y, mon, dt, h, mi, s, ms)) -> {
       let y = case y >= 0 && y <= 99 {
         True -> y + 1900
         False -> y
       }
-      make_date(y, mon, dt, h, mi, s, ms, is_local)
+      make_date(y, mon, dt, h, mi, s, ms, time_ref)
     }
-    Some(_) -> NaN
   }
-}
-
-/// Convert a List(JsNum) to List(Int), short-circuiting to None on any
-/// non-finite element. Truncates toward zero.
-fn nums_to_ints(nums: List(JsNum)) -> Option(List(Int)) {
-  list.try_map(nums, fn(n) {
-    case n {
-      Finite(f) -> Ok(value.float_to_int(f))
-      _ -> Error(Nil)
-    }
-  })
-  |> option.from_result
 }
 
 // ============================================================================
@@ -528,25 +611,35 @@ fn set_this_time_value(state: State(host), ref: Ref, tv: JsNum) -> State(host) {
 /// 0 args → now; 1 arg → time value or parsed string; 2..7 args → component
 /// fields interpreted as local time.
 ///
-/// Known deviation: arc's call layer passes `this=JsUndefined` for both `f()`
-/// and `new f()` so we can't distinguish — this always returns a Date object,
-/// never the §21.4.2.1 step 1 string. Only ~2 test262 tests rely on that path.
+/// §21.4.2.4: when NewTarget is undefined (`Date(...)` called as a function)
+/// every argument is ignored and the result is the current time formatted as
+/// by `new Date().toString()` — no Date object is allocated. `do_construct`
+/// sets `state.new_target` before native dispatch; a plain call leaves it
+/// `JsUndefined`.
 fn date_constructor(
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(state, tv_result) = case args {
-    [] -> #(state, Ok(Finite(int.to_float(now_ms()))))
-    [single] -> single_arg_time_value(state, single)
-    many -> args_to_time_value(state, many, True)
-  }
-  case tv_result {
-    Error(e) -> #(state, Error(e))
-    Ok(tv) -> {
-      let #(heap, ref) =
-        common.alloc_wrapper(state.heap, DateObject(time_value: tv), proto)
-      #(State(..state, heap:), Ok(JsObject(ref)))
+  case state.new_target {
+    JsUndefined -> {
+      let fields = get_date_fields(now_ms(), LocalTime)
+      #(state, Ok(JsString(format_date(FmtLocal, DateAndTime, fields))))
+    }
+    _ -> {
+      let #(state, tv_result) = case args {
+        [] -> #(state, Ok(Finite(int.to_float(now_ms()))))
+        [single] -> single_arg_time_value(state, single)
+        many -> args_to_time_value(state, many, LocalTime)
+      }
+      case tv_result {
+        Error(e) -> #(state, Error(e))
+        Ok(tv) -> {
+          let #(heap, ref) =
+            common.alloc_wrapper(state.heap, DateObject(time_value: tv), proto)
+          #(State(..state, heap:), Ok(JsObject(ref)))
+        }
+      }
     }
   }
 }
@@ -579,30 +672,29 @@ fn single_arg_time_value(
 fn args_to_time_value(
   state: State(host),
   args: List(JsValue),
-  is_local: Bool,
+  time_ref: TimeRef,
 ) -> #(State(host), Result(JsNum, JsValue)) {
   use nums, st <- state.try_op(args_to_nums(state, list.take(args, 7)))
-  #(st, Ok(make_date_checked(pad_fields(nums), is_local)))
+  #(st, Ok(make_date_checked(pad_fields(nums), time_ref)))
 }
 
-/// Pad a fields list to length 7 with spec defaults.
-fn pad_fields(nums: List(JsNum)) -> List(JsNum) {
-  let defaults = [
-    Finite(0.0),
-    Finite(1.0),
-    Finite(0.0),
-    Finite(0.0),
-    Finite(0.0),
-    Finite(0.0),
-  ]
+/// Turn the 1..7 supplied constructor/Date.UTC arguments into the full
+/// component record, filling the unsupplied tail with the spec defaults
+/// (month 0, date 1, time 0). This is the ONE place that handles arity; the
+/// zero-argument arm is unreachable (both callers special-case it) and yields
+/// a NaN year so the result would be NaN.
+fn pad_fields(nums: List(JsNum)) -> DateComponents {
+  let zero = Finite(0.0)
+  let one = Finite(1.0)
   case nums {
-    [y] -> [y, ..defaults]
-    [y, m] -> [y, m, ..list.drop(defaults, 1)]
-    [y, m, d] -> [y, m, d, ..list.drop(defaults, 2)]
-    [y, m, d, h] -> [y, m, d, h, ..list.drop(defaults, 3)]
-    [y, m, d, h, mi] -> [y, m, d, h, mi, ..list.drop(defaults, 4)]
-    [y, m, d, h, mi, s] -> [y, m, d, h, mi, s, Finite(0.0)]
-    other -> other
+    [] -> DateComponents(NaN, zero, one, zero, zero, zero, zero)
+    [y] -> DateComponents(y, zero, one, zero, zero, zero, zero)
+    [y, mon] -> DateComponents(y, mon, one, zero, zero, zero, zero)
+    [y, mon, d] -> DateComponents(y, mon, d, zero, zero, zero, zero)
+    [y, mon, d, h] -> DateComponents(y, mon, d, h, zero, zero, zero)
+    [y, mon, d, h, mi] -> DateComponents(y, mon, d, h, mi, zero, zero)
+    [y, mon, d, h, mi, s] -> DateComponents(y, mon, d, h, mi, s, zero)
+    [y, mon, d, h, mi, s, ms, ..] -> DateComponents(y, mon, d, h, mi, s, ms)
   }
 }
 
@@ -625,7 +717,7 @@ fn date_utc(
   case args {
     [] -> #(state, Ok(JsNumber(NaN)))
     many -> {
-      let #(st, r) = args_to_time_value(state, many, False)
+      let #(st, r) = args_to_time_value(state, many, UtcTime)
       #(st, result.map(r, JsNumber))
     }
   }
@@ -652,9 +744,7 @@ fn date_get_tz_offset(
     Finite(f) -> #(
       state,
       Ok(
-        JsNumber(
-          Finite(int.to_float(tz_offset_minutes(value.float_to_int(f)))),
-        ),
+        JsNumber(Finite(int.to_float(tz_offset_minutes(value.float_to_int(f))))),
       ),
     )
     _ -> #(state, Ok(JsNumber(NaN)))
@@ -665,14 +755,14 @@ fn date_get_tz_offset(
 fn date_get_field(
   this: JsValue,
   state: State(host),
-  field_index: Int,
-  is_local: Bool,
+  field: DateField,
+  time_ref: TimeRef,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, "get")
   case tv {
     Finite(f) -> {
-      let fields = get_date_fields(value.float_to_int(f), is_local)
-      #(state, Ok(value.from_int(field_at(fields, field_index))))
+      let fields = get_date_fields(value.float_to_int(f), time_ref)
+      #(state, Ok(value.from_int(field_at(fields, field))))
     }
     _ -> #(state, Ok(JsNumber(NaN)))
   }
@@ -696,27 +786,27 @@ fn date_set_time(
   #(st, Ok(JsNumber(tv)))
 }
 
-/// Shared setter. `first` is the first field index being set (0=year .. 6=ms),
-/// `max_args` is how many of [first, first+1, ...] may be supplied. Ported
-/// from QuickJS `set_date_field`.
+/// Shared setter. `first` is the first field being written (year .. ms),
+/// `max_args` is how many consecutive fields from `first` may be supplied.
+/// Ported from QuickJS `set_date_field`.
 ///
-/// When `first==0` (setFullYear/setUTCFullYear) and the current value is NaN,
-/// the spec uses +0 as the base time (§21.4.4.21 step 5). For all other
-/// setters, NaN base → result stays NaN.
+/// When `first` is `FieldYear` (setFullYear/setUTCFullYear) and the current
+/// value is NaN, the spec uses +0 as the base time (§21.4.4.21 step 5). For
+/// all other setters, NaN base → result stays NaN.
 fn date_set_field(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
-  first: Int,
+  first: DateField,
   max_args: Int,
-  is_local: Bool,
+  time_ref: TimeRef,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, tv <- require_time_value(state, this, "set")
   // Coerce supplied args (capped at max_args) to JsNum — full ToNumber so
   // valueOf side effects and abrupt completions are observed in order.
   let supplied = list.take(args, max_args)
   use new_nums, state <- state.try_op(args_to_nums(state, supplied))
-  case compute_set_field(tv, first, new_nums, is_local) {
+  case compute_set_field(tv, first, new_nums, time_ref) {
     // Original [[DateValue]] was NaN (and this isn't setFullYear): per
     // spec step "If t is NaN, return NaN" — early return WITHOUT
     // writing back, so any side-effect setTime in valueOf is preserved.
@@ -737,79 +827,93 @@ fn date_set_field(
 /// NaN" early-out (caller must NOT write back), Some(tv) otherwise.
 fn compute_set_field(
   tv: JsNum,
-  first: Int,
+  first: DateField,
   new_nums: List(JsNum),
-  is_local: Bool,
+  time_ref: TimeRef,
 ) -> Option(JsNum) {
   case tv {
     Finite(f) -> {
-      let base = get_date_fields(value.float_to_int(f), is_local)
-      let base_floats = [
-        int.to_float(base.year),
-        int.to_float(base.month),
-        int.to_float(base.date),
-        int.to_float(base.hours),
-        int.to_float(base.minutes),
-        int.to_float(base.seconds),
-        int.to_float(base.ms),
-      ]
-      let merged = overwrite_fields(base_floats, first, new_nums)
-      Some(make_date_from_floats(merged, is_local))
+      let base = get_date_fields(value.float_to_int(f), time_ref)
+      let merged = overwrite_fields(fields_to_components(base), first, new_nums)
+      Some(make_date_from_components(merged, time_ref))
     }
     _ ->
-      case first == 0 {
+      case first {
         // setFullYear on Invalid Date: per §21.4.4.21 step 5, t becomes +0
         // (NOT LocalTime(+0)) → Year 1970, Month 0, Date 1, all-zero time.
-        True -> {
-          let base_floats = [1970.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-          let merged = overwrite_fields(base_floats, first, new_nums)
-          Some(make_date_from_floats(merged, is_local))
+        FieldYear -> {
+          let zero = Finite(0.0)
+          let epoch =
+            DateComponents(
+              year: Finite(1970.0),
+              month: zero,
+              date: Finite(1.0),
+              hours: zero,
+              minutes: zero,
+              seconds: zero,
+              ms: zero,
+            )
+          let merged = overwrite_fields(epoch, first, new_nums)
+          Some(make_date_from_components(merged, time_ref))
         }
-        False -> None
+        _ -> None
       }
   }
 }
 
-/// Replace `len(new_nums)` consecutive Float fields starting at `first` with
-/// the supplied JsNum values. Any non-finite new_num → return None (caller
-/// turns that into NaN). Otherwise returns the merged 7-field list as Floats.
-fn overwrite_fields(
-  base: List(Float),
-  first: Int,
-  new_nums: List(JsNum),
-) -> Option(List(Float)) {
-  list.index_map(base, fn(v, i) {
-    case i >= first && i < first + list.length(new_nums) {
-      True ->
-        case helpers.list_at(new_nums, i - first) {
-          Some(Finite(f)) -> Ok(f)
-          _ -> Error(Nil)
-        }
-      False -> Ok(v)
-    }
-  })
-  |> list.try_map(fn(r) { r })
-  |> option.from_result
+/// The year..ms components of a broken-down date as (finite) JsNums.
+fn fields_to_components(f: DateFields) -> DateComponents {
+  DateComponents(
+    year: int_num(f.year),
+    month: int_num(f.month),
+    date: int_num(f.date),
+    hours: int_num(f.hours),
+    minutes: int_num(f.minutes),
+    seconds: int_num(f.seconds),
+    ms: int_num(f.ms),
+  )
 }
 
-/// Variant of make_date_checked that takes plain Floats (already merged from
-/// integer fields, so no [0,100) year mapping is applied — setFullYear sets
-/// the year literally). None → NaN.
-fn make_date_from_floats(fields: Option(List(Float)), is_local: Bool) -> JsNum {
-  case fields {
+fn int_num(i: Int) -> JsNum {
+  Finite(int.to_float(i))
+}
+
+/// Replace `len(new_nums)` consecutive components starting at `first` with
+/// the supplied values; every other component keeps its base value.
+fn overwrite_fields(
+  base: DateComponents,
+  first: DateField,
+  new_nums: List(JsNum),
+) -> DateComponents {
+  let lo = field_index(first)
+  DateComponents(
+    year: merge_field(base.year, 0, lo, new_nums),
+    month: merge_field(base.month, 1, lo, new_nums),
+    date: merge_field(base.date, 2, lo, new_nums),
+    hours: merge_field(base.hours, 3, lo, new_nums),
+    minutes: merge_field(base.minutes, 4, lo, new_nums),
+    seconds: merge_field(base.seconds, 5, lo, new_nums),
+    ms: merge_field(base.ms, 6, lo, new_nums),
+  )
+}
+
+/// Component `i` of the merge: at/after `lo` take the supplied value at that
+/// offset if one was given, otherwise keep the base value.
+fn merge_field(base: JsNum, i: Int, lo: Int, new_nums: List(JsNum)) -> JsNum {
+  case i >= lo {
+    True -> helpers.list_at(new_nums, i - lo) |> option.unwrap(base)
+    False -> base
+  }
+}
+
+/// Variant of make_date_checked for the setters: the merged components are
+/// already integral fields, so no [0,100) year mapping is applied —
+/// setFullYear sets the year literally. Any non-finite component → NaN.
+fn make_date_from_components(c: DateComponents, time_ref: TimeRef) -> JsNum {
+  case components_to_ints(c) {
     None -> NaN
-    Some([y, mon, dt, h, mi, s, ms]) ->
-      make_date(
-        value.float_to_int(y),
-        value.float_to_int(mon),
-        value.float_to_int(dt),
-        value.float_to_int(h),
-        value.float_to_int(mi),
-        value.float_to_int(s),
-        value.float_to_int(ms),
-        is_local,
-      )
-    Some(_) -> NaN
+    Some(#(y, mon, dt, h, mi, s, ms)) ->
+      make_date(y, mon, dt, h, mi, s, ms, time_ref)
   }
 }
 
@@ -822,6 +926,14 @@ type DateFmt {
   FmtUtc
   FmtIso
   FmtLocale
+}
+
+/// Which half of a formatted date string a toString-family method returns:
+/// to*DateString → DateOnly, to*TimeString → TimeOnly, toString → both.
+type DatePart {
+  DateOnly
+  TimeOnly
+  DateAndTime
 }
 
 const day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -844,21 +956,20 @@ fn pad3(n: Int) -> String {
 }
 
 /// ES2024 §21.4.4.41-.43 + .35-.39 toString family.
-/// `part`: bit 1 = date, bit 2 = time, 3 = both.
 fn date_to_string(
   this: JsValue,
   state: State(host),
   fmt: DateFmt,
-  part: Int,
+  part: DatePart,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, "toString")
   case tv {
     Finite(f) -> {
-      let is_local = case fmt {
-        FmtLocal | FmtLocale -> True
-        FmtUtc | FmtIso -> False
+      let time_ref = case fmt {
+        FmtLocal | FmtLocale -> LocalTime
+        FmtUtc | FmtIso -> UtcTime
       }
-      let fields = get_date_fields(value.float_to_int(f), is_local)
+      let fields = get_date_fields(value.float_to_int(f), time_ref)
       let s = format_date(fmt, part, fields)
       #(state, Ok(JsString(s)))
     }
@@ -870,7 +981,7 @@ fn date_to_string(
   }
 }
 
-fn format_date(fmt: DateFmt, part: Int, f: DateFields) -> String {
+fn format_date(fmt: DateFmt, part: DatePart, f: DateFields) -> String {
   case fmt {
     FmtIso -> format_iso(f)
     FmtUtc -> format_utc(f)
@@ -927,7 +1038,7 @@ fn format_utc(f: DateFields) -> String {
 }
 
 /// Full toString / toDateString / toTimeString.
-fn format_local(part: Int, f: DateFields) -> String {
+fn format_local(part: DatePart, f: DateFields) -> String {
   let date_part =
     name_at(day_names, f.weekday)
     <> " "
@@ -945,15 +1056,15 @@ fn format_local(part: Int, f: DateFields) -> String {
     <> " GMT"
     <> format_tz(f.tz)
   case part {
-    1 -> date_part
-    2 -> time_part
-    _ -> date_part <> " " <> time_part
+    DateOnly -> date_part
+    TimeOnly -> time_part
+    DateAndTime -> date_part <> " " <> time_part
   }
 }
 
 /// Minimal locale formatting — "M/D/YYYY, HH:mm:ss AM/PM" enough to satisfy
 /// type/shape tests; spec leaves the exact format implementation-defined.
-fn format_locale(part: Int, f: DateFields) -> String {
+fn format_locale(part: DatePart, f: DateFields) -> String {
   let date_part =
     int.to_string(f.month + 1)
     <> "/"
@@ -977,9 +1088,9 @@ fn format_locale(part: Int, f: DateFields) -> String {
     <> " "
     <> ampm
   case part {
-    1 -> date_part
-    2 -> time_part
-    _ -> date_part <> ", " <> time_part
+    DateOnly -> date_part
+    TimeOnly -> time_part
+    DateAndTime -> date_part <> ", " <> time_part
   }
 }
 
@@ -1027,17 +1138,15 @@ fn parse_iso(s: String) -> Option(JsNum) {
   }
   // Zone (optional). Date-only forms are UTC; date-time forms with no zone
   // are local time per spec — but only when no zone is present.
-  use #(tz_min, rest, is_local) <- option.then(parse_zone(
-    rest,
-    has_time,
-    has_sign,
-  ))
+  use #(zone, rest) <- option.then(parse_zone(rest, has_time, has_sign))
   case rest {
     "" ->
-      Some(
-        make_date(year, mon - 1, day, h, mi, sec, ms, is_local)
-        |> jsnum_add_minutes(tz_min),
-      )
+      Some(case zone {
+        LocalZone -> make_date(year, mon - 1, day, h, mi, sec, ms, LocalTime)
+        FixedOffset(minutes) ->
+          make_date(year, mon - 1, day, h, mi, sec, ms, UtcTime)
+          |> jsnum_add_minutes(minutes)
+      })
     _ -> None
   }
 }
@@ -1076,20 +1185,38 @@ fn parse_time(s: String) -> #(Int, Int, Int, Int, String, Bool) {
   #(h, mi, sec, ms, rest, True)
 }
 
-/// Returns Some(#(tz_minutes, remaining, is_local)). When is_local is True the
-/// caller computes the offset at the parsed time; tz_minutes is 0 in that case.
-/// `has_time` selects the no-zone default: date-only → UTC, date-time → local.
+/// The time zone designation (or lack of one) at the end of an ISO string.
+/// `FixedOffset(minutes)` follows the getTimezoneOffset sign convention
+/// (UTC − local): it is the correction to ADD to the wall-clock components
+/// interpreted as UTC. `LocalZone` means "no designator" — the caller derives
+/// the host offset at the parsed instant instead.
+type Zone {
+  FixedOffset(minutes: Int)
+  LocalZone
+}
+
+/// Parse the optional trailing zone designator, returning the zone and the
+/// unconsumed remainder. `has_time` selects the no-designator default:
+/// date-only → UTC, date-time → local.
 fn parse_zone(
   s: String,
   has_time: Bool,
   has_sign: Bool,
-) -> Option(#(Int, String, Bool)) {
+) -> Option(#(Zone, String)) {
   case s {
-    "Z" <> rest -> Some(#(0, rest, False))
+    "Z" <> rest -> Some(#(FixedOffset(0), rest))
     "+" <> rest ->
-      parse_hhmm(rest) |> option.map(fn(p) { #(0 - p.0, p.1, False) })
-    "-" <> rest -> parse_hhmm(rest) |> option.map(fn(p) { #(p.0, p.1, False) })
-    "" -> Some(#(0, "", has_time && !has_sign))
+      parse_hhmm(rest) |> option.map(fn(p) { #(FixedOffset(0 - p.0), p.1) })
+    "-" <> rest ->
+      parse_hhmm(rest) |> option.map(fn(p) { #(FixedOffset(p.0), p.1) })
+    "" ->
+      Some(#(
+        case has_time && !has_sign {
+          True -> LocalZone
+          False -> FixedOffset(0)
+        },
+        "",
+      ))
     _ -> None
   }
 }
@@ -1173,7 +1300,7 @@ fn date_get_year(
   use _, tv <- require_time_value(state, this, "getYear")
   case tv {
     Finite(f) -> {
-      let fields = get_date_fields(value.float_to_int(f), True)
+      let fields = get_date_fields(value.float_to_int(f), LocalTime)
       #(state, Ok(value.from_int(fields.year - 1900)))
     }
     _ -> #(state, Ok(JsNumber(NaN)))
@@ -1201,7 +1328,7 @@ fn date_set_year(
       // Month 0, Date 1, all-zero time (NOT LocalTime(+0)).
       let new_tv = case tv {
         Finite(f) -> {
-          let b = get_date_fields(value.float_to_int(f), True)
+          let b = get_date_fields(value.float_to_int(f), LocalTime)
           make_date(
             yi,
             b.month,
@@ -1210,10 +1337,10 @@ fn date_set_year(
             b.minutes,
             b.seconds,
             b.ms,
-            True,
+            LocalTime,
           )
         }
-        _ -> make_date(yi, 0, 1, 0, 0, 0, 0, True)
+        _ -> make_date(yi, 0, 1, 0, 0, 0, 0, LocalTime)
       }
       let st = set_this_time_value(st, ref, new_tv)
       #(st, Ok(JsNumber(new_tv)))
@@ -1312,7 +1439,7 @@ fn invoke_to_iso_string(
   obj: JsValue,
   ref: Ref,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let lookup = ops_object.get_value(state, ref, value.Named("toISOString"), obj)
+  let lookup = ops_object.get_value(state, ref, Named("toISOString"), obj)
   use method, st <- state.try_op(lookup)
   case helpers.is_callable(st.heap, method) {
     True -> {

@@ -44,12 +44,11 @@ import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/promises
 import arc/vm/internal/job_queue
+import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type State, type StepResult, State}
-import arc/vm/value.{
-  type JsValue, type Ref, JsObject, JsString, JsUndefined, Named,
-}
+import arc/vm/value.{type JsValue, type Ref, JsObject, JsString, JsUndefined}
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}

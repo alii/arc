@@ -15,13 +15,15 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
+import arc/vm/internal/typed_array_ffi.{ta_fill_region, ta_splice, ta_zeroed}
+import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, type TypedArrayKind, type TypedArrayNativeFn, Dispatch,
-  Finite, JsBool, JsNumber, JsObject, JsString, JsUndefined, Named, ObjectSlot,
+  Finite, JsBool, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot,
   TypedArrayConstructor, TypedArrayGetBuffer, TypedArrayGetByteLength,
   TypedArrayGetByteOffset, TypedArrayGetLength, TypedArrayGetSpecies,
   TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor, TypedArrayNative,
@@ -55,9 +57,6 @@ const max_byte_length = 2_147_483_647
 
 /// 2^53 - 1 — MAX_SAFE_INTEGER, the ToIndex/ToLength upper bound.
 const max_safe_integer = 9_007_199_254_740_991
-
-@external(erlang, "arc_typed_array_ffi", "ta_zeroed")
-fn ta_zeroed(byte_len: Int) -> BitArray
 
 // ============================================================================
 // Init — %TypedArray%, %TypedArray%.prototype, and the 11 concrete ctors
@@ -601,11 +600,7 @@ fn from_array_like_loop(
   case k >= len {
     True -> Ok(#(target, state))
     False -> {
-      use #(v, state) <- result.try(object.get_value_of(
-        state,
-        source,
-        value.Index(k),
-      ))
+      use #(v, state) <- result.try(object.get_value_of(state, source, Index(k)))
       use state <- result.try(map_and_store(
         state,
         target,
@@ -646,7 +641,7 @@ fn map_and_store(
   use #(state, _) <- result.map(object.set_value(
     state,
     target_ref,
-    value.Index(k),
+    Index(k),
     mapped,
     target,
   ))
@@ -1185,7 +1180,7 @@ fn store_list(
           use #(state, _ok) <- result.try(object.set_value(
             state,
             ta_ref,
-            value.Index(idx),
+            Index(idx),
             v,
             ta_val,
           ))
@@ -1210,7 +1205,7 @@ fn store_array_like(
       use #(v, state) <- result.try(object.get_value(
         state,
         obj_ref,
-        value.Index(k),
+        Index(k),
         obj_val,
       ))
       case ta_val {
@@ -1218,7 +1213,7 @@ fn store_array_like(
           use #(state, _ok) <- result.try(object.set_value(
             state,
             ta_ref,
-            value.Index(k),
+            Index(k),
             v,
             ta_val,
           ))
@@ -1234,51 +1229,23 @@ fn store_array_like(
 // Conversions
 // ============================================================================
 
-/// §7.1.22 ToIndex: ToIntegerOrInfinity clamped to [0, 2^53-1], RangeError
-/// outside.
+/// §7.1.22 ToIndex with this module's RangeError message. The algorithm
+/// lives in `coerce.to_index`.
 fn to_index(
   state: State(host),
   val: JsValue,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  case val {
-    JsUndefined -> Ok(#(0, state))
-    _ -> {
-      use #(n, state) <- result.try(coerce.js_to_number(state, val))
-      case n {
-        value.NaN -> Ok(#(0, state))
-        Finite(f) -> {
-          let i = value.float_to_int(f)
-          case i < 0 || i > max_safe_integer {
-            True ->
-              Error(state.range_error_value(state, "Invalid typed array length"))
-            False -> Ok(#(i, state))
-          }
-        }
-        value.Infinity | value.NegInfinity ->
-          Error(state.range_error_value(state, "Invalid typed array length"))
-      }
-    }
-  }
+  coerce.to_index(state, val, "Invalid typed array length")
 }
 
 /// §7.1.20 ToLength: ToIntegerOrInfinity clamped to [0, 2^53-1], no throw.
+/// The clamp itself is `coerce.jsnum_to_length`.
 fn to_length(
   state: State(host),
   val: JsValue,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   use #(n, state) <- result.map(coerce.js_to_number(state, val))
-  let len = case n {
-    value.NaN | value.NegInfinity -> 0
-    value.Infinity -> max_safe_integer
-    Finite(f) -> {
-      let i = value.float_to_int(f)
-      case i < 0 {
-        True -> 0
-        False -> int.min(i, max_safe_integer)
-      }
-    }
-  }
-  #(len, state)
+  #(coerce.jsnum_to_length(n), state)
 }
 
 /// ToIntegerOrInfinity, with infinities preserved as sentinels.
@@ -1659,17 +1626,6 @@ fn proto_fill(
   }
 }
 
-@external(erlang, "arc_typed_array_ffi", "ta_fill_region")
-fn ta_fill_region(
-  data: BitArray,
-  byte_off: Int,
-  count: Int,
-  elem: BitArray,
-) -> BitArray
-
-@external(erlang, "arc_typed_array_ffi", "ta_splice")
-fn ta_splice(data: BitArray, byte_off: Int, region: BitArray) -> BitArray
-
 /// Convert a JS value to the typed array's element domain ONCE
 /// (ToBigInt for BigInt kinds, ToNumber otherwise). Result is a JsNumber or
 /// JsBigInt ready for typed_array_encode_value.
@@ -1918,18 +1874,13 @@ fn set_array_like_loop(
   case k >= src_len {
     True -> #(state, Ok(JsUndefined))
     False -> {
-      use v, state <- try_state(object.get_value(
-        state,
-        src_ref,
-        value.Index(k),
-        src,
-      ))
+      use v, state <- try_state(object.get_value(state, src_ref, Index(k), src))
       case this {
         JsObject(ta_ref) -> {
           use #(state, _) <- try_state_pair(object.set_value(
             state,
             ta_ref,
-            value.Index(offset + k),
+            Index(offset + k),
             v,
             this,
           ))
@@ -2619,7 +2570,7 @@ fn map_loop(
   use #(state, _) <- result.try(object.set_value(
     state,
     target_ref,
-    value.Index(k),
+    Index(k),
     mapped,
     target,
   ))
@@ -2685,7 +2636,7 @@ fn write_values(
       use #(state, _) <- result.try(object.set_value(
         state,
         target_ref,
-        value.Index(k),
+        Index(k),
         v,
         target,
       ))
@@ -4214,138 +4165,4 @@ fn try_state_pair(
     Ok(pair) -> cont(pair)
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-}
-
-// ============================================================================
-// BigInt ( value ) — §21.2.1.1 (global function, lives here with the other
-// BigInt-content-type conversion logic)
-// ============================================================================
-
-pub fn bigint_global(
-  args: List(JsValue),
-  state: State(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let arg = helpers.first_arg_or_undefined(args)
-  wrap({
-    // Step 2: prim = ToPrimitive(value, number).
-    use #(prim, state) <- result.try(coerce.to_primitive(
-      state,
-      arg,
-      coerce.NumberHint,
-    ))
-    case prim {
-      // Step 3: Number → NumberToBigInt (RangeError unless integral).
-      JsNumber(n) ->
-        case n {
-          Finite(f) -> {
-            let i = value.float_to_int(f)
-            case int.to_float(i) == f {
-              True -> Ok(#(value.JsBigInt(value.BigInt(i)), state))
-              False ->
-                Error(state.range_error_value(
-                  state,
-                  "The number "
-                    <> value.js_format_number(f)
-                    <> " cannot be converted to a BigInt because it is not an integer",
-                ))
-            }
-          }
-          _ ->
-            Error(state.range_error_value(
-              state,
-              "The number cannot be converted to a BigInt because it is not an integer",
-            ))
-        }
-      // Step 4: otherwise ToBigInt(prim).
-      _ -> to_bigint_value(state, prim)
-    }
-  })
-}
-
-/// §21.2.3 "thisBigIntValue" — a BigInt primitive, or a BigInt wrapper
-/// object carrying a [[BigIntData]] slot (stored as a NUL-marker private
-/// property by ToObject — see value.bigint_data_key).
-fn this_bigint_value(
-  state: State(host),
-  this: JsValue,
-) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  let incompatible = fn() {
-    Error(state.type_error_value(
-      state,
-      "BigInt.prototype method called on incompatible receiver",
-    ))
-  }
-  case this {
-    value.JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(properties:, ..)) ->
-          case dict.get(properties, value.bigint_data_key()) {
-            Ok(value.DataProperty(value: value.JsBigInt(value.BigInt(n)), ..)) ->
-              Ok(#(n, state))
-            _ -> incompatible()
-          }
-        _ -> incompatible()
-      }
-    _ -> incompatible()
-  }
-}
-
-/// §21.2.3.3 BigInt.prototype.toString ( [ radix ] )
-pub fn bigint_proto_to_string(
-  this: JsValue,
-  args: List(JsValue),
-  state: State(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
-    use #(n, state) <- result.try(this_bigint_value(state, this))
-    let radix_arg = helpers.first_arg_or_undefined(args)
-    // Step 2: radixMV = ToIntegerOrInfinity(radix); undefined → 10.
-    use #(radix, state) <- result.try(case radix_arg {
-      JsUndefined -> Ok(#(10, state))
-      _ -> {
-        use #(r, state) <- result.map(to_int_or_inf(state, radix_arg))
-        let i = case r {
-          IInt(i) -> i
-          IPosInf -> 37
-          INegInf -> -1
-        }
-        #(i, state)
-      }
-    })
-    // Step 3: radixMV < 2 or > 36 → RangeError.
-    use <- bool.lazy_guard(radix < 2 || radix > 36, fn() {
-      Error(state.range_error_value(
-        state,
-        "toString() radix must be between 2 and 36",
-      ))
-    })
-    // Steps 4-5: BigInt::toString(x, radix) — lowercase digits, no suffix.
-    case radix {
-      10 -> Ok(#(JsString(int.to_string(n)), state))
-      _ ->
-        case int.to_base_string(n, radix) {
-          Ok(s) -> Ok(#(JsString(string.lowercase(s)), state))
-          Error(err) ->
-            Error(state.range_error_value(
-              state,
-              "toString() radix must be between 2 and 36 ("
-                <> string.inspect(err)
-                <> ")",
-            ))
-        }
-    }
-  })
-}
-
-/// §21.2.3.4 BigInt.prototype.valueOf ( )
-pub fn bigint_proto_value_of(
-  this: JsValue,
-  _args: List(JsValue),
-  state: State(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
-    use #(n, state) <- result.try(this_bigint_value(state, this))
-    Ok(#(value.JsBigInt(value.BigInt(n)), state))
-  })
 }

@@ -17,12 +17,12 @@
 /// iterators per §24.1.5. Original JS keys are reconstructed via
 /// `map_key_to_js` — the MapKey encoding is lossless modulo -0→+0
 /// normalization, which the spec requires anyway (§24.1.3.9 step 4).
-import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iterator
 import arc/vm/heap
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -190,8 +190,7 @@ fn map_get(
   use store, _ref, state <- require_map(this, state)
   // Steps 3-4: Look up key
   let map_key = value.js_to_map_key(key_arg)
-  let result =
-    ordered_entries.get(store, map_key) |> option.unwrap(JsUndefined)
+  let result = ordered_entries.get(store, map_key) |> option.unwrap(JsUndefined)
   #(state, Ok(result))
 }
 

@@ -2,6 +2,7 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/heap
 import arc/vm/internal/job_queue.{type JobQueue}
 import arc/vm/internal/tuple_array.{type TupleArray}
+import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/opcode.{type Op}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
@@ -216,6 +217,25 @@ pub type SyncWaitFn =
 pub type DeliverWakeFn =
   fn(List(ClaimedWaiter)) -> Nil
 
+/// The two Atomics embedder capabilities, bundled. Both together, always
+/// (arc/host contract clause 5): a host that can block an agent but cannot
+/// deliver wakes — or vice versa — deadlocks its peer agents. Making them
+/// one record under a single `Option` makes that half-configured embedder
+/// unrepresentable: `HostHooks.atomics` is either BOTH capabilities or
+/// neither.
+pub type AtomicsCapabilities {
+  AtomicsCapabilities(
+    /// Blocking-wait capability for sync Atomics.wait (§25.4.3.14 DoWait
+    /// steps 11-27). Core registers the waiterlist entry and re-reads the
+    /// cell, then calls this to block IN THE EMBEDDER.
+    sync_wait: SyncWaitFn,
+    /// Wake delivery for Atomics.notify. Core's waiterlist take CLAIMS
+    /// remote waiters atomically (so they count as woken, §25.4.11 step 10)
+    /// and hands them here for actual message delivery.
+    deliver_wake: DeliverWakeFn,
+  )
+}
+
 /// The embedder's host capabilities, bundled into one record carried on
 /// `RealmCtx.host_hooks`. Supplied exactly once at engine/realm construction
 /// (an explicit argument to `interpreter.new_state`) and inherited by every
@@ -227,22 +247,18 @@ pub type DeliverWakeFn =
 /// `can_block` (Agent Record [[CanBlock]], §9.7) is deliberately NOT in here —
 /// it is per-agent spec POLICY, not an embedder capability, and stays a
 /// separate field on `State`. AgentCanSuspend() remains
-/// `can_block && option.is_some(host_hooks.sync_wait)`.
+/// `can_block && option.is_some(host_hooks.atomics)`.
 pub type HostHooks {
   HostHooks(
-    /// Blocking-wait capability for sync Atomics.wait (§25.4.3.14 DoWait
-    /// steps 11-27). Core registers the waiterlist entry and re-reads the
-    /// cell, then calls this to block. `None` = this host cannot suspend
-    /// the agent: sync wait is treated exactly like `can_block == False`
-    /// (DoWait step 10 TypeError) — there is no bounded fallback, because
-    /// a wait that silently can't be woken is worse than an eager error.
-    sync_wait: Option(SyncWaitFn),
-    /// Wake delivery for Atomics.notify. Core's waiterlist take CLAIMS
-    /// remote waiters atomically (so they count as woken, §25.4.11 step 10)
-    /// and hands them here for actual message delivery. `None` = claimed
-    /// remote wakes are dropped undelivered (only headless states lack the
-    /// capability; every shipped embedder installs it alongside sync_wait).
-    deliver_wake: Option(DeliverWakeFn),
+    /// The Atomics blocking-wait + wake-delivery capability pair
+    /// (`AtomicsCapabilities`), installed as one unit or not at all.
+    /// `None` = this host cannot suspend the agent: sync Atomics.wait is
+    /// treated exactly like `can_block == False` (DoWait step 10
+    /// TypeError) — there is no bounded fallback, because a wait that
+    /// silently can't be woken is worse than an eager error — and claimed
+    /// remote wakes have nobody to deliver to (with no capability nothing
+    /// remote can be blocked on this agent anyway).
+    atomics: Option(AtomicsCapabilities),
     /// Monotonic clock in milliseconds. Used for Atomics waitAsync deadline
     /// bookkeeping and the event loop's timer wheel. NOT optional — every
     /// host has a clock — so it defaults to the BEAM monotonic clock
@@ -308,8 +324,7 @@ fn host_sleep_ms(ms: Int) -> Nil
 /// host wants unless it is virtualising time.
 pub fn default_host_hooks() -> HostHooks {
   HostHooks(
-    sync_wait: option.None,
-    deliver_wake: option.None,
+    atomics: option.None,
     monotonic_now: host_monotonic_now,
     sleep_ms: host_sleep_ms,
     import_hook: option.None,
@@ -375,7 +390,7 @@ pub type State(host) {
     /// throws a TypeError when AgentCanSuspend() is false. Spec POLICY, not
     /// an embedder capability — the capabilities themselves (blocking wait,
     /// wake delivery) live on `ctx.host_hooks`. AgentCanSuspend() is
-    /// `can_block && option.is_some(ctx.host_hooks.sync_wait)`.
+    /// `can_block && option.is_some(ctx.host_hooks.atomics)`.
     can_block: Bool,
   )
 }
@@ -642,7 +657,7 @@ fn format_frame(frame: #(Option(String), Int)) -> String {
 fn stack_trace_limit(state: State(host)) -> Int {
   case heap.read(state.heap, state.builtins.error.constructor) {
     option.Some(value.ObjectSlot(properties:, ..)) ->
-      case dict.get(properties, value.Named("stackTraceLimit")) {
+      case dict.get(properties, Named("stackTraceLimit")) {
         Ok(value.DataProperty(value: value.JsNumber(value.Finite(n)), ..)) ->
           int.max(0, float.truncate(n))
         Ok(value.DataProperty(value: value.JsNumber(value.Infinity), ..)) ->
@@ -679,7 +694,7 @@ pub fn attach_stack(
                 ..slot,
                 properties: dict.insert(
                   properties,
-                  value.Named("stack"),
+                  Named("stack"),
                   value.builtin_property(value.JsString(trace)),
                 ),
               )

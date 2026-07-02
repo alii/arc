@@ -1,6 +1,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -1231,7 +1232,7 @@ fn replace_all_global_check(
       use flags_val, state <- state.try_op(object.get_value(
         state,
         ref,
-        value.Named("flags"),
+        Named("flags"),
         search_val,
       ))
       case flags_val {
@@ -1526,25 +1527,7 @@ fn split_limit(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case limit_val {
     JsUndefined -> cont(4_294_967_295, state)
-    _ -> {
-      use num, state <- coerce.try_to_number(state, limit_val)
-      cont(jsnum_to_uint32(num), state)
-    }
-  }
-}
-
-/// §7.1.7 ToUint32 of an already-ToNumber'd value: NaN/±∞ => 0, finite =>
-/// truncate then take modulo 2^32 (non-negative result).
-fn jsnum_to_uint32(num: value.JsNum) -> Int {
-  case num {
-    Finite(n) -> {
-      let m = value.float_to_int(n) % 4_294_967_296
-      case m < 0 {
-        True -> m + 4_294_967_296
-        False -> m
-      }
-    }
-    _ -> 0
+    _ -> coerce.try_to_uint32(state, limit_val, cont)
   }
 }
 
@@ -2381,7 +2364,7 @@ fn match_all_flags_check(
       use flags_val, state <- state.try_op(object.get_value(
         state,
         ref,
-        value.Named("flags"),
+        Named("flags"),
         regexp_arg,
       ))
       case flags_val {

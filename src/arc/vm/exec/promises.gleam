@@ -4,13 +4,14 @@ import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type StepResult, State, Thrown}
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, Finite, JsBool, JsNumber, JsObject,
-  JsString, JsUndefined, Named, ObjectSlot, OrdinaryObject,
+  JsString, JsUndefined, ObjectSlot, OrdinaryObject,
 }
 import gleam/bool
 import gleam/dict
@@ -2647,7 +2648,7 @@ fn from_async_like_step(
       use #(k_val, state) <- result.try(object.get_value_of(
         state,
         ctx.items,
-        value.Index(ctx.k),
+        Index(ctx.k),
       ))
       Ok(from_async_await(
         state,
@@ -2783,7 +2784,7 @@ fn from_async_define_own(
     Some(ObjectSlot(kind: ArrayObject(_), properties:, extensible: True, ..)) ->
       // No descriptor override at the index and no redefined "length"
       // (a non-writable length must reject growth via ArraySetLength).
-      result.is_error(dict.get(properties, value.Index(k)))
+      result.is_error(dict.get(properties, Index(k)))
       && result.is_error(dict.get(properties, Named("length")))
     _ -> False
   }

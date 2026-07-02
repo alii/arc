@@ -1,7 +1,9 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
+import arc/vm/builtins/symbol
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -10,18 +12,17 @@ import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsElements, type JsValue, type ObjectNativeFn, type Ref, AccessorProperty,
-  ArrayObject, DataProperty, Dispatch, FunctionObject, GeneratorObject, Index,
-  JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, Named,
-  NativeFunction, ObjectAssign, ObjectConstructor, ObjectCreate,
-  ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
-  ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
-  ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
-  ObjectGetOwnPropertySymbols, ObjectGetPrototypeOf, ObjectHasOwn, ObjectIs,
-  ObjectIsExtensible, ObjectIsFrozen, ObjectIsSealed, ObjectKeys, ObjectNative,
-  ObjectPreventExtensions, ObjectPrototypeHasOwnProperty,
-  ObjectPrototypePropertyIsEnumerable, ObjectPrototypeToString,
-  ObjectPrototypeValueOf, ObjectSeal, ObjectSetPrototypeOf, ObjectSlot,
-  ObjectValues, OrdinaryObject,
+  ArrayObject, DataProperty, Dispatch, FunctionObject, GeneratorObject, JsBool,
+  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, NativeFunction,
+  ObjectAssign, ObjectConstructor, ObjectCreate, ObjectDefineProperties,
+  ObjectDefineProperty, ObjectEntries, ObjectFreeze, ObjectFromEntries,
+  ObjectGetOwnPropertyDescriptor, ObjectGetOwnPropertyDescriptors,
+  ObjectGetOwnPropertyNames, ObjectGetOwnPropertySymbols, ObjectGetPrototypeOf,
+  ObjectHasOwn, ObjectIs, ObjectIsExtensible, ObjectIsFrozen, ObjectIsSealed,
+  ObjectKeys, ObjectNative, ObjectPreventExtensions,
+  ObjectPrototypeHasOwnProperty, ObjectPrototypePropertyIsEnumerable,
+  ObjectPrototypeToString, ObjectPrototypeValueOf, ObjectSeal,
+  ObjectSetPrototypeOf, ObjectSlot, ObjectValues, OrdinaryObject,
 }
 import gleam/bool
 import gleam/dict
@@ -1756,8 +1757,10 @@ fn has_own_property(
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: own keys are index chars + "length" — the shared
     // string-exotic own-property table decides.
-    JsString(s) ->
-      #(state, Ok(JsBool(option.is_some(string_exotic_own_property(s, key)))))
+    JsString(s) -> #(
+      state,
+      Ok(JsBool(option.is_some(string_exotic_own_property(s, key)))),
+    )
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsBool(False)))
   }
@@ -2328,10 +2331,7 @@ fn define_props_loop(
         True -> {
           // key_val is a String/Symbol from [[OwnPropertyKeys]], so
           // ToPropertyKey is a pure fast path (no user code, cannot throw).
-          use pk, state <- state.try_op(property.to_prop_key(
-            state,
-            key_val,
-          ))
+          use pk, state <- state.try_op(property.to_prop_key(state, key_val))
           // Step 4.b.i: descObj = Get(props, nextKey) — a real [[Get]], so
           // accessor descriptors have their getter invoked (and symbol keys
           // reach define_parsed instead of being silently dropped).
@@ -2455,15 +2455,18 @@ fn assign_source(
             collect_own_keys(state.heap, src_ref, True)
             |> list.map(value.canonical_key)
           // Step 3.a.iii: For each string key, copy it.
-          use state <- result.try(assign_keys(
-            state,
-            target_ref,
-            src_ref,
-            receiver,
-            ks,
-            object.get_value,
-            object.set_value,
-          ))
+          use state <- result.try(
+            assign_keys(
+              state,
+              target_ref,
+              src_ref,
+              receiver,
+              ks,
+              object.get_value,
+              object.set_value,
+              fn(_state, key) { value.key_to_string(key) },
+            ),
+          )
           // Symbol keys next (also enumerable-only):
           let sym_ks = collect_own_symbol_keys(state.heap, src_ref, True)
           assign_keys(
@@ -2474,6 +2477,7 @@ fn assign_source(
             sym_ks,
             object.get_symbol_value,
             object.set_symbol_value,
+            symbol_key_label,
           )
         }
       }
@@ -2508,9 +2512,21 @@ fn assign_string_chars(
   case chars {
     [] -> Ok(state)
     [ch, ..rest] -> {
-      let #(heap, _ok) =
-        object.set_property(state.heap, target_ref, Index(idx), JsString(ch))
-      assign_string_chars(State(..state, heap:), target_ref, rest, idx + 1)
+      // Step 2.b: Perform ? Set(to, ToString(idx), ch, true) — the throwing
+      // [[Set]] path (invokes setters; a false result is a TypeError), not
+      // the raw own-property store.
+      use #(state, ok) <- result.try(object.set_value(
+        state,
+        target_ref,
+        Index(idx),
+        JsString(ch),
+        JsObject(target_ref),
+      ))
+      use Nil <- result.try(case ok {
+        True -> Ok(Nil)
+        False -> assign_set_failed(state, int.to_string(idx))
+      })
+      assign_string_chars(state, target_ref, rest, idx + 1)
     }
   }
 }
@@ -2531,23 +2547,47 @@ fn assign_keys(
     Result(#(JsValue, State(host)), #(JsValue, State(host))),
   set: fn(State(host), Ref, k, JsValue, JsValue) ->
     Result(#(State(host), Bool), #(JsValue, State(host))),
+  label: fn(State(host), k) -> String,
 ) -> Result(State(host), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(state)
     [k, ..rest] -> {
       // Step 2.a: Let propValue be ? Get(from, nextKey).
       use #(val, state) <- result.try(get(state, src_ref, k, receiver))
-      // Step 2.b: Perform ? Set(to, nextKey, propValue, true).
-      use #(state, _ok) <- result.try(set(
+      // Step 2.b: Perform ? Set(to, nextKey, propValue, true) — the
+      // throw=true flag: a false [[Set]] (frozen target, non-writable or
+      // accessor-without-setter property) is a TypeError, not a silent skip.
+      use #(state, ok) <- result.try(set(
         state,
         target_ref,
         k,
         val,
         JsObject(target_ref),
       ))
-      assign_keys(state, target_ref, src_ref, receiver, rest, get, set)
+      use Nil <- result.try(case ok {
+        True -> Ok(Nil)
+        False -> assign_set_failed(state, label(state, k))
+      })
+      assign_keys(state, target_ref, src_ref, receiver, rest, get, set, label)
     }
   }
+}
+
+/// §20.1.2.1 step 3.a.iii.2.b `Perform ? Set(to, nextKey, propValue, true)`
+/// with a false result — the TypeError required by the `throw` flag.
+fn assign_set_failed(
+  state: State(host),
+  key: String,
+) -> Result(a, #(JsValue, State(host))) {
+  coerce.thrown_type_error(
+    state,
+    "Cannot assign to read only property '" <> key <> "' of object",
+  )
+}
+
+/// Error-message label for a symbol key, e.g. "Symbol(foo)".
+fn symbol_key_label(state: State(host), sym: value.SymbolId) -> String {
+  symbol.descriptive_string(sym, state.ctx.symbol_descriptions)
 }
 
 /// Object.assign step 3.a.iii for a proxy source — per trap-provided key:
@@ -2583,15 +2623,19 @@ fn assign_proxy_keys(
             key,
             receiver,
           ))
-          // Step 2.b: Perform ? Set(to, nextKey, propValue, true).
-          use #(state, _ok) <- result.map(object.set_value(
+          // Step 2.b: Perform ? Set(to, nextKey, propValue, true) — a
+          // false [[Set]] throws.
+          use #(state, ok) <- result.try(object.set_value(
             state,
             target_ref,
             key,
             val,
             JsObject(target_ref),
           ))
-          state
+          case ok {
+            True -> Ok(state)
+            False -> assign_set_failed(state, s)
+          }
         }
         True, JsSymbol(sym) -> {
           use #(val, state) <- result.try(object.get_symbol_value(
@@ -2600,14 +2644,17 @@ fn assign_proxy_keys(
             sym,
             receiver,
           ))
-          use #(state, _ok) <- result.map(object.set_symbol_value(
+          use #(state, ok) <- result.try(object.set_symbol_value(
             state,
             target_ref,
             sym,
             val,
             JsObject(target_ref),
           ))
-          state
+          case ok {
+            True -> Ok(state)
+            False -> assign_set_failed(state, symbol_key_label(state, sym))
+          }
         }
         // Not enumerable / not own — skipped per step 2. (own_keys_stateful
         // only yields String/Symbol values, so other shapes are unreachable.)
@@ -2886,7 +2933,7 @@ fn get_prototype_of(
     JsString(_) -> #(state, Ok(JsObject(state.builtins.string.prototype)))
     JsBool(_) -> #(state, Ok(JsObject(state.builtins.boolean.prototype)))
     value.JsSymbol(_) -> #(state, Ok(JsObject(state.builtins.symbol_proto)))
-    value.JsBigInt(_) -> #(state, Ok(JsObject(state.builtins.bigint_proto)))
+    value.JsBigInt(_) -> #(state, Ok(JsObject(state.builtins.bigint.prototype)))
     _ -> #(state, Ok(JsObject(state.builtins.object.prototype)))
   }
 }
@@ -3515,7 +3562,10 @@ fn keys_at_integrity_level(
 
 /// §7.3.17 step 8.b: sealed needs [[Configurable]]: false; frozen
 /// additionally needs [[Writable]]: false on data descriptors.
-fn prop_at_integrity_level(prop: value.Property, level: IntegrityLevel) -> Bool {
+fn prop_at_integrity_level(
+  prop: value.Property,
+  level: IntegrityLevel,
+) -> Bool {
   case level, prop {
     // Step 8.b.iii: [[Configurable]] must be false at either level.
     _, AccessorProperty(configurable:, ..) -> !configurable
@@ -3617,11 +3667,19 @@ fn from_entries(
     JsObject(ref) -> {
       // Read the source array/iterable
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: ArrayObject(..), elements:, ..)) -> {
-          // Iterate over array elements to build object properties.
-          // Use a list accumulator to preserve insertion order.
-          let entry_values = elements.values(elements)
-          from_entries_loop(entry_values, state, [], [])
+        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+          // Iterate exactly `length` slots in index order. Holes read as
+          // JsUndefined (elements.to_list_padded never leaks the
+          // JsUninitialized hole sentinel) and hit the "not an entry
+          // object" TypeError below, matching array iteration semantics.
+          let entry_values = elements.to_list_padded(elements, length)
+          // Step 2: obj = OrdinaryObjectCreate(%Object.prototype%), then
+          // each entry is added via CreateDataPropertyOrThrow in iteration
+          // order (a duplicate key overwrites the value but KEEPS its
+          // original insertion position, §10.1.6.3).
+          let #(heap, obj_ref) =
+            common.alloc_pojo(state.heap, state.builtins.object.prototype, [])
+          from_entries_loop(entry_values, State(..state, heap:), obj_ref)
         }
         _ -> state.type_error(state, "Object.fromEntries requires an iterable")
       }
@@ -3630,65 +3688,24 @@ fn from_entries(
   }
 }
 
-/// Loop over iterable entries for Object.fromEntries.
-///
-/// `str_acc` is a list of #(String, Property) pairs in reverse insertion order
-/// (prepended for O(1) accumulation). `sym_acc` is a dict of symbol-keyed properties.
+/// AddEntriesFromIterable's per-entry body for Object.fromEntries: each entry
+/// object's "0"/"1" are read with [[Get]] (invoking getters), then written
+/// onto the result via ? CreateDataPropertyOrThrow(obj, ToPropertyKey(k), v)
+/// in iteration order.
 fn from_entries_loop(
   entries: List(JsValue),
   state: State(host),
-  str_acc: List(#(String, value.Property)),
-  sym_acc: List(#(value.SymbolId, value.Property)),
+  obj_ref: Ref,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case entries {
-    [] -> {
-      // Build the result object.
-      // String properties are inserted in iteration order: convert list to dict.
-      // Since later entries with the same key should overwrite earlier ones,
-      // we reverse (to restore insertion order) then fold left-to-right.
-      let props =
-        list.fold(list.reverse(str_acc), dict.new(), fn(d, pair) {
-          dict.insert(d, value.canonical_key(pair.0), pair.1)
-        })
-      let #(heap, obj_ref) =
-        heap.alloc(
-          state.heap,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: props,
-            symbol_properties: sym_acc,
-            elements: elements.new(),
-            prototype: Some(state.builtins.object.prototype),
-            extensible: True,
-          ),
-        )
-      #(State(..state, heap:), Ok(JsObject(obj_ref)))
-    }
+    [] -> #(state, Ok(JsObject(obj_ref)))
     [JsObject(entry_ref) as entry, ..rest] -> {
       // Step b: k = Get(item, "0"), v = Get(item, "1")
-      // Use object.get_value to invoke getters (handles accessor properties).
       use key_val, state <- try_get(state, entry_ref, "0", entry)
       use val, state <- try_get(state, entry_ref, "1", entry)
-      // Step c: ToPropertyKey(k) — symbol keys go to symbol_properties.
-      case key_val {
-        JsSymbol(sym) ->
-          from_entries_loop(
-            rest,
-            state,
-            str_acc,
-            list.key_set(sym_acc, sym, value.data_property(val)),
-          )
-        _ -> {
-          // ToPropertyKey via ToString for non-symbol keys.
-          use key_str, state <- coerce.try_to_string(state, key_val)
-          from_entries_loop(
-            rest,
-            state,
-            [#(key_str, value.data_property(val)), ..str_acc],
-            sym_acc,
-          )
-        }
-      }
+      // Step c: CreateDataPropertyOrThrow(obj, ToPropertyKey(k), v).
+      use state <- create_data_property_or_throw(state, obj_ref, key_val, val)
+      from_entries_loop(rest, state, obj_ref)
     }
     [_, ..] -> state.type_error(state, "Iterator value is not an entry object")
   }
@@ -3986,7 +4003,7 @@ fn group_by(
           case heap.read_array(state.heap, ref) {
             Some(#(length, elements)) -> {
               let elems = extract_elements(elements, 0, length, [])
-              group_by_loop(state, elems, callback, 0, dict.new())
+              group_by_loop(state, elems, callback, 0, dict.new(), [])
             }
             None ->
               state.type_error(state, "Object.groupBy: items is not iterable")
@@ -3997,57 +4014,91 @@ fn group_by(
   }
 }
 
+/// §7.3.35 GroupBy(items, callback, property) loop.
+///
+/// `groups` maps each resolved ToPropertyKey (a JsString or JsSymbol) to its
+/// members in reverse encounter order; `order` is the keys in reverse
+/// FIRST-occurrence order. The spec's AddValueToKeyedGroup appends to an
+/// existing group without moving it, so the result object's key order is
+/// first-occurrence order — `order` carries that, while the dict keeps the
+/// per-item lookup O(log n) instead of an O(groups) assoc-list scan.
 fn group_by_loop(
   state: State(host),
   items: List(JsValue),
   callback: JsValue,
   index: Int,
-  groups: dict.Dict(String, List(JsValue)),
+  groups: dict.Dict(JsValue, List(JsValue)),
+  order: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case items {
+    // Object.groupBy steps 3-4: obj = OrdinaryObjectCreate(null), then for
+    // each group ! CreateDataPropertyOrThrow(obj, g.[[Key]],
+    // CreateArrayFromList(g.[[Elements]])).
     [] -> {
-      // Build result object from groups — allocate arrays for each group
-      let #(heap, props) =
-        list.fold(dict.to_list(groups), #(state.heap, []), fn(acc, entry) {
-          let #(h, ps) = acc
-          let #(key, values) = entry
-          let #(h, arr_ref) =
-            common.alloc_array(
-              h,
-              list.reverse(values),
-              state.builtins.array.prototype,
-            )
-          #(h, [
-            #(
-              value.canonical_key(key),
-              value.builtin_property(JsObject(arr_ref)),
-            ),
-            ..ps
-          ])
-        })
       let #(heap, obj_ref) =
         heap.alloc(
-          heap,
+          state.heap,
           ObjectSlot(
             kind: OrdinaryObject,
-            properties: dict.from_list(props),
+            properties: dict.new(),
             elements: elements.new(),
             prototype: None,
             symbol_properties: [],
             extensible: True,
           ),
         )
-      #(State(..state, heap:), Ok(JsObject(obj_ref)))
+      group_by_finish(
+        State(..state, heap:),
+        obj_ref,
+        list.reverse(order),
+        groups,
+      )
     }
     [item, ..rest] -> {
       use key_val, state <- state.try_call(state, callback, JsUndefined, [
         item,
         value.from_int(index),
       ])
-      use key, state <- coerce.try_to_string(state, key_val)
-      let current = dict.get(groups, key) |> result.unwrap([])
-      let groups = dict.insert(groups, key, [item, ..current])
-      group_by_loop(state, rest, callback, index + 1, groups)
+      // GroupBy step 6.d (property coercion): key = ? ToPropertyKey(key) —
+      // a symbol key groups under the symbol, never a stringification.
+      use dkey, state <- try_to_property_key(state, key_val)
+      let key = define_key_value(dkey)
+      let #(groups, order) = case dict.get(groups, key) {
+        Ok(members) -> #(dict.insert(groups, key, [item, ..members]), order)
+        Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
+      }
+      group_by_loop(state, rest, callback, index + 1, groups, order)
+    }
+  }
+}
+
+/// Define each group's array on the (null-prototype) result object via
+/// CreateDataPropertyOrThrow — writable/enumerable/configurable, so
+/// `Object.keys(Object.groupBy(...))` sees every group — in first-occurrence
+/// key order (`keys`).
+fn group_by_finish(
+  state: State(host),
+  obj_ref: Ref,
+  keys: List(JsValue),
+  groups: dict.Dict(JsValue, List(JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case keys {
+    [] -> #(state, Ok(JsObject(obj_ref)))
+    [key, ..rest] -> {
+      let members = dict.get(groups, key) |> result.unwrap([])
+      let #(heap, arr_ref) =
+        common.alloc_array(
+          state.heap,
+          list.reverse(members),
+          state.builtins.array.prototype,
+        )
+      use state <- create_data_property_or_throw(
+        State(..state, heap:),
+        obj_ref,
+        key,
+        JsObject(arr_ref),
+      )
+      group_by_finish(state, obj_ref, rest, groups)
     }
   }
 }
@@ -4638,6 +4689,45 @@ pub fn define_property_bool(
         Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
         Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
       }
+  }
+}
+
+/// §7.3.7 CreateDataPropertyOrThrow ( O, P, V ) in the file's CPS shape.
+///
+/// CreateDataProperty (§7.3.5) is [[DefineOwnProperty]](P, {[[Value]]: V,
+/// [[Writable]]: true, [[Enumerable]]: true, [[Configurable]]: true}); the
+/// OrThrow wrapper converts a `false` result (non-extensible target,
+/// incompatible non-configurable existing key, falsy proxy `defineProperty`
+/// trap) into the realm's TypeError. Builtins that create result properties
+/// (Object.fromEntries, Object.groupBy, `stack` setter, ...) MUST funnel
+/// through here rather than hand-rolling the descriptor — a hand-rolled copy
+/// can silently get the attributes wrong (e.g. a non-enumerable property) or
+/// drop the `false` result.
+pub fn create_data_property_or_throw(
+  state: State(host),
+  ref: Ref,
+  key_val: JsValue,
+  val: JsValue,
+  cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let #(heap, desc_ref) =
+    common.alloc_pojo(state.heap, state.builtins.object.prototype, [
+      #("value", value.data_property(val)),
+      #("writable", value.data_property(JsBool(True))),
+      #("enumerable", value.data_property(JsBool(True))),
+      #("configurable", value.data_property(JsBool(True))),
+    ])
+  // Trap-aware [[DefineOwnProperty]]; its ToPropertyKey handles `key_val`.
+  case define_property_bool(State(..state, heap:), ref, key_val, desc_ref) {
+    Ok(#(state, True)) -> cont(state)
+    // §7.3.7 step 3: success is false → throw a TypeError exception.
+    Ok(#(state, False)) ->
+      state.type_error(
+        state,
+        "Cannot create property "
+          <> define_key_label(key_value_to_define_key(key_val)),
+      )
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
