@@ -14,44 +14,57 @@ import arc/vm/builtins/intl_format as fmt
 import arc/vm/builtins/intl_locale as tags
 import arc/vm/builtins/temporal_tz
 import arc/vm/heap
+import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type CollatorState, type DateTimeFormatState, type DisplayNamesState,
   type DtfComponent, type DtfComponents, type DurationFormatState,
-  type DurationUnitOptions, type IntlData, type IntlDigitOptions,
-  type IntlNativeFn, type IntlService, type JsValue, type ListFormatState,
-  type LocaleState, type Notation, type NumberFormatState,
+  type DurationUnitOptions, type HostOverride, type IntlData,
+  type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
+  type IntlService, type JsValue, type ListFormatState, type LocaleGetterName,
+  type LocaleMethodName, type LocaleState, type Notation, type NumberFormatState,
   type PluralRulesState, type Ref, type RelativeTimeFormatState,
   type SegmentIteratorState, type SegmenterState, type SegmentsState,
-  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting,
-  CurCode, CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
-  DateTimeFormatState, Dispatch, DisplayNamesData, DisplayNamesState,
+  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting, CurCode,
+  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
+  DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
+  DateToLocaleTimeString, Dispatch, DisplayNamesData, DisplayNamesState,
   DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
   DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
   DurationFormatData, DurationFormatState, DurationUnitOptions, GroupingAlways,
   GroupingAuto, GroupingMin2, GroupingNever, IntlBoundGetter, IntlBoundMethod,
   IntlCollator, IntlConstructor, IntlDateTimeFormat, IntlDigitOptions,
-  IntlDisplayNames, IntlDurationFormat, IntlGetCanonicalLocales, IntlListFormat,
-  IntlLocale, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative,
-  IntlNumberFormat, IntlObject, IntlPluralRules, IntlRelativeTimeFormat,
-  IntlResolvedOptions, IntlSegmentIterator, IntlSegmenter, IntlSegmenterSegment,
-  IntlSegments, IntlSegmentsIterator, IntlSupportedLocalesOf,
+  IntlDisplayNames, IntlDurationFormat, IntlFormat, IntlFormatRange,
+  IntlFormatRangeToParts, IntlFormatToParts, IntlGetCanonicalLocales,
+  IntlHostOverride, IntlListFormat, IntlLocale, IntlLocaleGetter,
+  IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat, IntlObject, IntlOf,
+  IntlPluralRules, IntlRelativeTimeFormat, IntlResolvedOptions,
+  IntlSegmentIterator, IntlSegmentIteratorNext, IntlSegmenter,
+  IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
+  IntlSegmentsIterator, IntlSelect, IntlSelectRange, IntlSupportedLocalesOf,
   IntlSupportedValuesOf, JsBool, JsNumber, JsObject, JsString, JsUndefined,
-  ListFormatData, ListFormatState, LocaleData, LocaleState, Named,
-  NotationCompact, NotationEngineering, NotationScientific, NotationStandard,
-  NumberFormatData, NumberFormatState, ObjectSlot, PluralRulesData,
+  ListFormatData, ListFormatState, LocaleBaseName, LocaleCalendar,
+  LocaleCaseFirst, LocaleCollation, LocaleData, LocaleFirstDayOfWeek,
+  LocaleGetCalendars, LocaleGetCollations, LocaleGetHourCycles,
+  LocaleGetNumberingSystems, LocaleGetTextInfo, LocaleGetTimeZones,
+  LocaleGetWeekInfo, LocaleHourCycle, LocaleLanguage, LocaleMaximize,
+  LocaleMinimize, LocaleNumberingSystem, LocaleNumeric, LocaleRegion,
+  LocaleScript, LocaleState, LocaleToString, LocaleVariants, NotationCompact,
+  NotationEngineering, NotationScientific, NotationStandard, NumberFormatData,
+  NumberFormatState, NumberToLocaleString, ObjectSlot, PluralRulesData,
   PluralRulesState, PriorityAuto, PriorityLessPrecision, PriorityMorePrecision,
   RelativeTimeFormatData, RelativeTimeFormatState, RoundCeil, RoundExpand,
   RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
   RoundHalfTrunc, RoundTrunc, SegmentIteratorData, SegmentIteratorState,
   SegmenterData, SegmenterState, SegmentsData, SegmentsState, SignAlways,
-  SignAuto, SignExceptZero, SignNegative, SignNever, StyleCurrency,
-  StyleDecimal, StylePercent, StyleUnit, TemporalDateSlot,
-  TemporalDateTimeSlot, TemporalInstantSlot, TemporalMonthDaySlot,
-  TemporalTimeSlot, TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TzdAuto,
-  TzdStripIfInteger, UnitLong, UnitNarrow, UnitShort,
+  SignAuto, SignExceptZero, SignNegative, SignNever, StringLocaleCompare,
+  StringToLocaleLowerCase, StringToLocaleUpperCase, StyleCurrency, StyleDecimal,
+  StylePercent, StyleUnit, TemporalDateSlot, TemporalDateTimeSlot,
+  TemporalInstantSlot, TemporalMonthDaySlot, TemporalTimeSlot,
+  TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TzdAuto, TzdStripIfInteger,
+  UnitLong, UnitNarrow, UnitShort,
 }
 import gleam/dict
 import gleam/float
@@ -89,11 +102,14 @@ pub fn init(
       function_proto,
       list.map(
         [
-          "baseName", "calendar", "caseFirst", "collation", "firstDayOfWeek",
-          "hourCycle", "numeric", "numberingSystem", "language", "script",
-          "region", "variants",
+          LocaleBaseName, LocaleCalendar, LocaleCaseFirst, LocaleCollation,
+          LocaleFirstDayOfWeek, LocaleHourCycle, LocaleNumeric,
+          LocaleNumberingSystem, LocaleLanguage, LocaleScript, LocaleRegion,
+          LocaleVariants,
         ],
-        fn(name) { #(name, IntlNative(IntlLocaleGetter(name))) },
+        fn(getter) {
+          #(locale_getter_js_name(getter), IntlNative(IntlLocaleGetter(getter)))
+        },
       ),
     )
   let #(h, locale) =
@@ -111,58 +127,24 @@ pub fn init(
   let h = freeze_prototype_prop(h, locale.constructor, locale.prototype)
   // Locale methods need the prototype ref for maximize/minimize results.
   let #(h, locale_methods) =
-    common.alloc_methods(h, function_proto, [
-      #(
-        "toString",
-        IntlNative(IntlLocaleMethod("toString", locale.prototype)),
-        0,
+    common.alloc_methods(
+      h,
+      function_proto,
+      list.map(
+        [
+          LocaleToString, LocaleMaximize, LocaleMinimize, LocaleGetCalendars,
+          LocaleGetCollations, LocaleGetHourCycles, LocaleGetNumberingSystems,
+          LocaleGetTimeZones, LocaleGetTextInfo, LocaleGetWeekInfo,
+        ],
+        fn(method) {
+          #(
+            locale_method_js_name(method),
+            IntlNative(IntlLocaleMethod(method, locale.prototype)),
+            0,
+          )
+        },
       ),
-      #(
-        "maximize",
-        IntlNative(IntlLocaleMethod("maximize", locale.prototype)),
-        0,
-      ),
-      #(
-        "minimize",
-        IntlNative(IntlLocaleMethod("minimize", locale.prototype)),
-        0,
-      ),
-      #(
-        "getCalendars",
-        IntlNative(IntlLocaleMethod("getCalendars", locale.prototype)),
-        0,
-      ),
-      #(
-        "getCollations",
-        IntlNative(IntlLocaleMethod("getCollations", locale.prototype)),
-        0,
-      ),
-      #(
-        "getHourCycles",
-        IntlNative(IntlLocaleMethod("getHourCycles", locale.prototype)),
-        0,
-      ),
-      #(
-        "getNumberingSystems",
-        IntlNative(IntlLocaleMethod("getNumberingSystems", locale.prototype)),
-        0,
-      ),
-      #(
-        "getTimeZones",
-        IntlNative(IntlLocaleMethod("getTimeZones", locale.prototype)),
-        0,
-      ),
-      #(
-        "getTextInfo",
-        IntlNative(IntlLocaleMethod("getTextInfo", locale.prototype)),
-        0,
-      ),
-      #(
-        "getWeekInfo",
-        IntlNative(IntlLocaleMethod("getWeekInfo", locale.prototype)),
-        0,
-      ),
-    ])
+    )
   let h = add_named_properties(h, locale.prototype, locale_methods)
 
   // --- Simple formatter services ---
@@ -178,21 +160,9 @@ pub fn init(
       IntlNumberFormat,
       "NumberFormat",
       [
-        #(
-          "formatToParts",
-          IntlNative(IntlMethod(IntlNumberFormat, "formatToParts")),
-          1,
-        ),
-        #(
-          "formatRange",
-          IntlNative(IntlMethod(IntlNumberFormat, "formatRange")),
-          2,
-        ),
-        #(
-          "formatRangeToParts",
-          IntlNative(IntlMethod(IntlNumberFormat, "formatRangeToParts")),
-          2,
-        ),
+        service_method(IntlNumberFormat, IntlFormatToParts, 1),
+        service_method(IntlNumberFormat, IntlFormatRange, 2),
+        service_method(IntlNumberFormat, IntlFormatRangeToParts, 2),
       ],
       [#("format", IntlNative(IntlBoundGetter(IntlNumberFormat)))],
     )
@@ -204,21 +174,9 @@ pub fn init(
       IntlDateTimeFormat,
       "DateTimeFormat",
       [
-        #(
-          "formatToParts",
-          IntlNative(IntlMethod(IntlDateTimeFormat, "formatToParts")),
-          1,
-        ),
-        #(
-          "formatRange",
-          IntlNative(IntlMethod(IntlDateTimeFormat, "formatRange")),
-          2,
-        ),
-        #(
-          "formatRangeToParts",
-          IntlNative(IntlMethod(IntlDateTimeFormat, "formatRangeToParts")),
-          2,
-        ),
+        service_method(IntlDateTimeFormat, IntlFormatToParts, 1),
+        service_method(IntlDateTimeFormat, IntlFormatRange, 2),
+        service_method(IntlDateTimeFormat, IntlFormatRangeToParts, 2),
       ],
       [#("format", IntlNative(IntlBoundGetter(IntlDateTimeFormat)))],
     )
@@ -230,12 +188,8 @@ pub fn init(
       IntlPluralRules,
       "PluralRules",
       [
-        #("select", IntlNative(IntlMethod(IntlPluralRules, "select")), 1),
-        #(
-          "selectRange",
-          IntlNative(IntlMethod(IntlPluralRules, "selectRange")),
-          2,
-        ),
+        service_method(IntlPluralRules, IntlSelect, 1),
+        service_method(IntlPluralRules, IntlSelectRange, 2),
       ],
       [],
     )
@@ -247,12 +201,8 @@ pub fn init(
       IntlListFormat,
       "ListFormat",
       [
-        #("format", IntlNative(IntlMethod(IntlListFormat, "format")), 1),
-        #(
-          "formatToParts",
-          IntlNative(IntlMethod(IntlListFormat, "formatToParts")),
-          1,
-        ),
+        service_method(IntlListFormat, IntlFormat, 1),
+        service_method(IntlListFormat, IntlFormatToParts, 1),
       ],
       [],
     )
@@ -264,12 +214,8 @@ pub fn init(
       IntlRelativeTimeFormat,
       "RelativeTimeFormat",
       [
-        #("format", IntlNative(IntlMethod(IntlRelativeTimeFormat, "format")), 2),
-        #(
-          "formatToParts",
-          IntlNative(IntlMethod(IntlRelativeTimeFormat, "formatToParts")),
-          2,
-        ),
+        service_method(IntlRelativeTimeFormat, IntlFormat, 2),
+        service_method(IntlRelativeTimeFormat, IntlFormatToParts, 2),
       ],
       [],
     )
@@ -280,7 +226,7 @@ pub fn init(
       function_proto,
       IntlDisplayNames,
       "DisplayNames",
-      [#("of", IntlNative(IntlMethod(IntlDisplayNames, "of")), 1)],
+      [service_method(IntlDisplayNames, IntlOf, 1)],
       [],
     )
   let #(h, duration_format) =
@@ -291,12 +237,8 @@ pub fn init(
       IntlDurationFormat,
       "DurationFormat",
       [
-        #("format", IntlNative(IntlMethod(IntlDurationFormat, "format")), 1),
-        #(
-          "formatToParts",
-          IntlNative(IntlMethod(IntlDurationFormat, "formatToParts")),
-          1,
-        ),
+        service_method(IntlDurationFormat, IntlFormat, 1),
+        service_method(IntlDurationFormat, IntlFormatToParts, 1),
       ],
       [],
     )
@@ -304,7 +246,7 @@ pub fn init(
   // --- Segmenter (needs %SegmentIteratorPrototype% / %SegmentsPrototype%) ---
   let #(h, seg_iter_next) =
     common.alloc_methods(h, function_proto, [
-      #("next", IntlNative(IntlMethod(IntlSegmentIterator, "next")), 0),
+      service_method(IntlSegmentIterator, IntlSegmentIteratorNext, 0),
     ])
   let #(h, seg_iter_proto) =
     common.init_namespace(
@@ -315,7 +257,7 @@ pub fn init(
     )
   let #(h, seg_containing) =
     common.alloc_methods(h, function_proto, [
-      #("containing", IntlNative(IntlMethod(IntlSegments, "containing")), 1),
+      service_method(IntlSegments, IntlSegmentsContaining, 1),
     ])
   let #(h, segments_proto) =
     common.alloc_proto(h, Some(object_proto), dict.new())
@@ -408,47 +350,35 @@ pub fn init(
   // ECMA-402 §17-19: locale-sensitive overrides on Number/String/Date.
   let #(h, number_methods) =
     common.alloc_methods(h, function_proto, [
-      #(
-        "toLocaleString",
-        IntlNative(IntlMethod(IntlNumberFormat, "Number#toLocaleString")),
-        0,
-      ),
+      #("toLocaleString", IntlNative(IntlHostOverride(NumberToLocaleString)), 0),
     ])
   let h = add_named_properties(h, number_proto, number_methods)
   let #(h, string_methods) =
     common.alloc_methods(h, function_proto, [
-      #(
-        "localeCompare",
-        IntlNative(IntlMethod(IntlCollator, "String#localeCompare")),
-        1,
-      ),
+      #("localeCompare", IntlNative(IntlHostOverride(StringLocaleCompare)), 1),
       #(
         "toLocaleLowerCase",
-        IntlNative(IntlMethod(IntlCollator, "String#toLocaleLowerCase")),
+        IntlNative(IntlHostOverride(StringToLocaleLowerCase)),
         0,
       ),
       #(
         "toLocaleUpperCase",
-        IntlNative(IntlMethod(IntlCollator, "String#toLocaleUpperCase")),
+        IntlNative(IntlHostOverride(StringToLocaleUpperCase)),
         0,
       ),
     ])
   let h = add_named_properties(h, string_proto, string_methods)
   let #(h, date_methods) =
     common.alloc_methods(h, function_proto, [
-      #(
-        "toLocaleString",
-        IntlNative(IntlMethod(IntlDateTimeFormat, "Date#toLocaleString")),
-        0,
-      ),
+      #("toLocaleString", IntlNative(IntlHostOverride(DateToLocaleString)), 0),
       #(
         "toLocaleDateString",
-        IntlNative(IntlMethod(IntlDateTimeFormat, "Date#toLocaleDateString")),
+        IntlNative(IntlHostOverride(DateToLocaleDateString)),
         0,
       ),
       #(
         "toLocaleTimeString",
-        IntlNative(IntlMethod(IntlDateTimeFormat, "Date#toLocaleTimeString")),
+        IntlNative(IntlHostOverride(DateToLocaleTimeString)),
         0,
       ),
     ])
@@ -496,6 +426,66 @@ fn init_service(
   let h = common.add_to_string_tag(h, bt.prototype, "Intl." <> name)
   let h = freeze_prototype_prop(h, bt.constructor, bt.prototype)
   #(h, bt)
+}
+
+/// A prototype-method registration triple for `init_service` /
+/// `common.alloc_methods` — the JS property name is derived from the
+/// `IntlMethodName` variant so the two can never disagree.
+fn service_method(
+  service: IntlService,
+  method: IntlMethodName,
+  arity: Int,
+) -> #(String, value.NativeFn, Int) {
+  #(intl_method_js_name(method), IntlNative(IntlMethod(service, method)), arity)
+}
+
+/// The JS property name an `IntlMethodName` is installed under.
+fn intl_method_js_name(method: IntlMethodName) -> String {
+  case method {
+    IntlFormat -> "format"
+    IntlFormatToParts -> "formatToParts"
+    IntlFormatRange -> "formatRange"
+    IntlFormatRangeToParts -> "formatRangeToParts"
+    IntlSelect -> "select"
+    IntlSelectRange -> "selectRange"
+    IntlOf -> "of"
+    IntlSegmentIteratorNext -> "next"
+    IntlSegmentsContaining -> "containing"
+  }
+}
+
+/// The JS property name an Intl.Locale.prototype getter is installed under.
+fn locale_getter_js_name(getter: LocaleGetterName) -> String {
+  case getter {
+    LocaleBaseName -> "baseName"
+    LocaleCalendar -> "calendar"
+    LocaleCaseFirst -> "caseFirst"
+    LocaleCollation -> "collation"
+    LocaleFirstDayOfWeek -> "firstDayOfWeek"
+    LocaleHourCycle -> "hourCycle"
+    LocaleNumeric -> "numeric"
+    LocaleNumberingSystem -> "numberingSystem"
+    LocaleLanguage -> "language"
+    LocaleScript -> "script"
+    LocaleRegion -> "region"
+    LocaleVariants -> "variants"
+  }
+}
+
+/// The JS property name an Intl.Locale.prototype method is installed under.
+fn locale_method_js_name(method: LocaleMethodName) -> String {
+  case method {
+    LocaleToString -> "toString"
+    LocaleMaximize -> "maximize"
+    LocaleMinimize -> "minimize"
+    LocaleGetCalendars -> "getCalendars"
+    LocaleGetCollations -> "getCollations"
+    LocaleGetHourCycles -> "getHourCycles"
+    LocaleGetNumberingSystems -> "getNumberingSystems"
+    LocaleGetTimeZones -> "getTimeZones"
+    LocaleGetTextInfo -> "getTextInfo"
+    LocaleGetWeekInfo -> "getWeekInfo"
+  }
 }
 
 /// Intl constructors have non-writable, non-configurable .prototype.
@@ -558,6 +548,7 @@ pub fn dispatch(
       bound_method(service, target, args, state)
     IntlMethod(service:, method:) ->
       run_method(service, method, args, this, state)
+    IntlHostOverride(which:) -> run_host_override(which, args, this, state)
     IntlSegmenterSegment(segments_proto:) ->
       segmenter_segment(segments_proto, args, this, state)
     IntlSegmentsIterator(iter_proto:) ->
@@ -1039,7 +1030,7 @@ fn locale_list_loop(
   case k >= len {
     True -> Ok(#(list.reverse(seen), state))
     False -> {
-      let key = value.Index(k)
+      let key = Index(k)
       case object.has_property(state.heap, ref, key) {
         False -> locale_list_loop(state, ref, k + 1, len, seen)
         True -> {
@@ -2374,8 +2365,7 @@ fn digit_options(
     PriorityMorePrecision | PriorityLessPrecision -> True
   }
   let need_fd = case rounding_priority {
-    PriorityAuto ->
-      !{ has_sd || { !has_fd && notation == NotationCompact } }
+    PriorityAuto -> !{ has_sd || { !has_fd && notation == NotationCompact } }
     PriorityMorePrecision | PriorityLessPrecision -> True
   }
   // sig / fd are #(min, max) when that rounding kind is in effect.
@@ -2507,8 +2497,18 @@ fn date_time_format_state(
     locales_v,
     options_v,
     [#(DtfYear, "numeric"), #(DtfMonth, "numeric"), #(DtfDay, "numeric")],
-    "any",
+    DateAndTime,
   )
+}
+
+/// Which group of date-time components a DateTimeFormat is required to
+/// produce (ToDateTimeOptions' `required` argument, §17):
+/// Date.prototype.toLocaleDateString needs date fields,
+/// toLocaleTimeString needs time fields, everything else accepts either.
+pub type DtfRequired {
+  DateOnly
+  TimeOnly
+  DateAndTime
 }
 
 /// Keep only the pairs whose value is present.
@@ -2523,13 +2523,13 @@ fn present_pairs(pairs: List(#(k, Option(a)))) -> List(#(k, a)) {
 
 /// CreateDateTimeFormat (§11.1.2). `default_components` are the
 /// #(component, width) locale defaults applied when the user requested no
-/// component of the `required` group ("date" / "time" / "any").
+/// component of the `required` group.
 fn dtf_state_required(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
   default_components: List(#(DtfComponent, String)),
-  required: String,
+  required: DtfRequired,
 ) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(constructor_prologue(
     state,
@@ -2747,26 +2747,26 @@ fn dtf_state_required(
   // ToDateTimeOptions: defaults apply when no component of the required
   // group was requested.
   let required_present = case required {
-    "date" -> list.any([weekday, year, month, day], option.is_some)
-    "time" ->
+    DateOnly -> list.any([weekday, year, month, day], option.is_some)
+    TimeOnly ->
       list.any([day_period, hour, minute, second], option.is_some)
       || option.is_some(fractional)
-    _ -> explicit
+    DateAndTime -> explicit
   }
   use Nil <- result.try(case required {
-    "date" ->
+    DateOnly ->
       case time_style {
         Some(_) ->
           throw_type(state, "timeStyle cannot be used with toLocaleDateString")
         None -> Ok(Nil)
       }
-    "time" ->
+    TimeOnly ->
       case date_style {
         Some(_) ->
           throw_type(state, "dateStyle cannot be used with toLocaleTimeString")
         None -> Ok(Nil)
       }
-    _ -> Ok(Nil)
+    DateAndTime -> Ok(Nil)
   })
   use Nil <- result.try(
     case
@@ -3931,9 +3931,9 @@ fn digit_rounding_pairs(
     #(
       "trailingZeroDisplay",
       Some(
-        JsString(
-          value.trailing_zero_display_to_js_string(dg.trailing_zero_display),
-        ),
+        JsString(value.trailing_zero_display_to_js_string(
+          dg.trailing_zero_display,
+        )),
       ),
     ),
   ]
@@ -5385,58 +5385,56 @@ fn take_digits(gs: List(String), acc: String) -> #(String, List(String)) {
 
 fn run_method(
   service: IntlService,
-  method: String,
+  method: IntlMethodName,
   args: List(JsValue),
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let arg0 = first_arg_or_undefined(args)
   let arg1 = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
-  let arg2 = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
-  use <- host_method_guard(service, method, args, this, state, arg0, arg1, arg2)
+  let js_name =
+    "Intl."
+    <> service_name(service)
+    <> ".prototype."
+    <> intl_method_js_name(method)
   run({
-    use #(ref, data) <- result.try(branded(
-      state,
-      this,
-      service,
-      "Intl." <> service_name(service) <> ".prototype." <> method,
-    ))
-    case data, method {
-      NumberFormatData(nf), "formatToParts" -> {
+    use #(ref, data) <- result.try(branded(state, this, service, js_name))
+    case method, data {
+      IntlFormatToParts, NumberFormatData(nf) -> {
         use #(parts, state) <- result.try(nf_format_parts(state, nf, arg0))
         let #(state, arr) = parts_to_js(state, parts)
         Ok(#(arr, state))
       }
-      NumberFormatData(nf), "formatRange" -> {
+      IntlFormatRange, NumberFormatData(nf) -> {
         use #(parts, state) <- result.try(nf_range_parts(state, nf, arg0, arg1))
         let s = parts |> list.map(fn(p) { p.1 }) |> string.join("")
         Ok(#(JsString(s), state))
       }
-      NumberFormatData(nf), "formatRangeToParts" -> {
+      IntlFormatRangeToParts, NumberFormatData(nf) -> {
         use #(parts, state) <- result.try(nf_range_parts(state, nf, arg0, arg1))
         let #(state, arr) = parts_to_js_sourced(state, parts)
         Ok(#(arr, state))
       }
-      DateTimeFormatData(d), "formatToParts" -> {
+      IntlFormatToParts, DateTimeFormatData(d) -> {
         use #(parts, state) <- result.try(dtf_format_parts(state, d, arg0))
         let #(state, arr) = parts_to_js(state, parts)
         Ok(#(arr, state))
       }
-      DateTimeFormatData(d), "formatRange" -> {
+      IntlFormatRange, DateTimeFormatData(d) -> {
         use #(parts, state) <- result.try(dtf_range_parts(state, d, arg0, arg1))
         let s = parts |> list.map(fn(p) { p.1 }) |> string.join("")
         Ok(#(JsString(s), state))
       }
-      DateTimeFormatData(d), "formatRangeToParts" -> {
+      IntlFormatRangeToParts, DateTimeFormatData(d) -> {
         use #(parts, state) <- result.try(dtf_range_parts(state, d, arg0, arg1))
         let #(state, arr) = parts_to_js_sourced(state, parts)
         Ok(#(arr, state))
       }
-      PluralRulesData(p), "select" -> {
+      IntlSelect, PluralRulesData(p) -> {
         use #(n, state) <- result.try(coerce.js_to_number(state, arg0))
         Ok(#(JsString(plural_select(p, n)), state))
       }
-      PluralRulesData(_), "selectRange" -> {
+      IntlSelectRange, PluralRulesData(_) -> {
         use Nil <- result.try(case arg0, arg1 {
           JsUndefined, _ | _, JsUndefined ->
             throw_type(state, "Invalid selectRange arguments")
@@ -5452,75 +5450,84 @@ fn run_method(
         // CLDR en plural ranges resolve to "other" for all combinations.
         Ok(#(JsString("other"), state))
       }
-      ListFormatData(l), "format" -> {
+      IntlFormat, ListFormatData(l) -> {
         use #(items, state) <- result.try(string_list_from_iterable(state, arg0))
         let parts = fmt.list_format_parts(l.list_type, l.style, items)
         Ok(#(JsString(fmt.parts_to_string(parts)), state))
       }
-      ListFormatData(l), "formatToParts" -> {
+      IntlFormatToParts, ListFormatData(l) -> {
         use #(items, state) <- result.try(string_list_from_iterable(state, arg0))
         let parts = fmt.list_format_parts(l.list_type, l.style, items)
         let #(state, arr) = parts_to_js(state, parts)
         Ok(#(arr, state))
       }
-      RelativeTimeFormatData(r), "format" -> {
+      IntlFormat, RelativeTimeFormatData(r) -> {
         use #(parts, state) <- result.try(rtf_method_parts(state, r, arg0, arg1))
         let str = parts |> list.map(fn(part) { part.1 }) |> string.join("")
         Ok(#(JsString(str), state))
       }
-      RelativeTimeFormatData(r), "formatToParts" -> {
+      IntlFormatToParts, RelativeTimeFormatData(r) -> {
         use #(parts, state) <- result.try(rtf_method_parts(state, r, arg0, arg1))
         let #(state, arr) = parts_to_js_with_unit(state, parts)
         Ok(#(arr, state))
       }
-      DisplayNamesData(dn), "of" -> display_names_of(state, dn, arg0)
-      DurationFormatData(df), "format" -> {
+      IntlOf, DisplayNamesData(dn) -> display_names_of(state, dn, arg0)
+      IntlFormat, DurationFormatData(df) -> {
         use #(parts, state) <- result.try(duration_parts(state, df, arg0))
         let str = parts |> list.map(fn(part) { part.1 }) |> string.join("")
         Ok(#(JsString(str), state))
       }
-      DurationFormatData(df), "formatToParts" -> {
+      IntlFormatToParts, DurationFormatData(df) -> {
         use #(parts, state) <- result.try(duration_parts(state, df, arg0))
         let #(state, arr) = parts_to_js_with_unit(state, parts)
         Ok(#(arr, state))
       }
-      SegmentsData(sg), "containing" -> segments_containing(state, sg, arg0)
-      SegmentIteratorData(it), "next" -> segment_iterator_next(state, ref, it)
-      _, _ -> throw_type(state, "Unknown Intl method: " <> method)
+      IntlSegmentsContaining, SegmentsData(sg) ->
+        segments_containing(state, sg, arg0)
+      IntlSegmentIteratorNext, SegmentIteratorData(it) ->
+        segment_iterator_next(state, ref, it)
+      // `branded` guarantees data matches `service`, so these pairings are
+      // methods that were never registered on the receiver's prototype.
+      IntlFormat, _
+      | IntlFormatToParts, _
+      | IntlFormatRange, _
+      | IntlFormatRangeToParts, _
+      | IntlSelect, _
+      | IntlSelectRange, _
+      | IntlOf, _
+      | IntlSegmentIteratorNext, _
+      | IntlSegmentsContaining, _
+      -> throw_type(state, js_name <> " called on incompatible receiver")
     }
   })
 }
 
-/// Routes the Number/String/Date prototype overrides; falls through to the
-/// branded Intl prototype methods otherwise.
-fn host_method_guard(
-  service: IntlService,
-  method: String,
-  _args: List(JsValue),
+/// The Number/String/Date prototype locale-sensitive overrides
+/// (ECMA-402 §17-19) — installed by `init`, no Intl brand check.
+fn run_host_override(
+  which: HostOverride,
+  args: List(JsValue),
   this: JsValue,
   state: State(host),
-  arg0: JsValue,
-  arg1: JsValue,
-  arg2: JsValue,
-  next: fn() -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case service, method {
-    IntlNumberFormat, "Number#toLocaleString" ->
-      run(host_number_to_locale_string(state, this, arg0, arg1))
-    IntlCollator, "String#localeCompare" ->
-      run(host_locale_compare(state, this, arg0, arg1, arg2))
-    IntlCollator, "String#toLocaleLowerCase" ->
-      run(host_locale_case(state, this, arg0, False))
-    IntlCollator, "String#toLocaleUpperCase" ->
-      run(host_locale_case(state, this, arg0, True))
-    IntlDateTimeFormat, "Date#toLocaleString" ->
-      run(host_date_to_locale(state, this, arg0, arg1, 3))
-    IntlDateTimeFormat, "Date#toLocaleDateString" ->
-      run(host_date_to_locale(state, this, arg0, arg1, 1))
-    IntlDateTimeFormat, "Date#toLocaleTimeString" ->
-      run(host_date_to_locale(state, this, arg0, arg1, 2))
-    _, _ -> next()
-  }
+  let arg0 = first_arg_or_undefined(args)
+  let arg1 = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  run(case which {
+    NumberToLocaleString ->
+      host_number_to_locale_string(state, this, arg0, arg1)
+    StringLocaleCompare -> {
+      let arg2 = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
+      host_locale_compare(state, this, arg0, arg1, arg2)
+    }
+    StringToLocaleLowerCase -> host_locale_case(state, this, arg0, False)
+    StringToLocaleUpperCase -> host_locale_case(state, this, arg0, True)
+    DateToLocaleString ->
+      host_date_to_locale(state, this, arg0, arg1, DateAndTime)
+    DateToLocaleDateString ->
+      host_date_to_locale(state, this, arg0, arg1, DateOnly)
+    DateToLocaleTimeString ->
+      host_date_to_locale(state, this, arg0, arg1, TimeOnly)
+  })
 }
 
 /// Number.prototype.toLocaleString (ECMA-402 §18.2.1).
@@ -5728,13 +5735,12 @@ fn mark_str(c: Int) -> String {
 }
 
 /// Date.prototype.toLocale{,Date,Time}String (ECMA-402 §17).
-/// `which`: 1 = date, 2 = time, 3 = both.
 fn host_date_to_locale(
   state: State(host),
   this: JsValue,
   locales: JsValue,
   options: JsValue,
-  which: Int,
+  required: DtfRequired,
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use tv <- result.try(case this {
     JsObject(ref) ->
@@ -5754,10 +5760,10 @@ fn host_date_to_locale(
     #(DtfMinute, "numeric"),
     #(DtfSecond, "numeric"),
   ]
-  let #(defaults, required) = case which {
-    1 -> #(date_defaults, "date")
-    2 -> #(time_defaults, "time")
-    _ -> #(list.append(date_defaults, time_defaults), "any")
+  let defaults = case required {
+    DateOnly -> date_defaults
+    TimeOnly -> time_defaults
+    DateAndTime -> list.append(date_defaults, time_defaults)
   }
   use #(d, state) <- result.try(dtf_state_required(
     state,
@@ -6755,7 +6761,7 @@ fn locale_u_kw(l: LocaleState, key: String) -> Option(String) {
 }
 
 fn locale_getter(
-  name: String,
+  name: LocaleGetterName,
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
@@ -6763,76 +6769,75 @@ fn locale_getter(
     use #(_ref, l) <- result.try(branded_locale(
       state,
       this,
-      "Intl.Locale.prototype." <> name,
+      "Intl.Locale.prototype." <> locale_getter_js_name(name),
     ))
     let lid = locale_lid(l)
     let v = case name {
-      "baseName" ->
+      LocaleBaseName ->
         case lid {
           Some(l) -> JsString(tags.base_name(l))
           None -> JsUndefined
         }
-      "language" ->
+      LocaleLanguage ->
         case lid {
           Some(l) -> JsString(string.lowercase(l.language))
           None -> JsUndefined
         }
-      "script" ->
+      LocaleScript ->
         case lid {
           Some(tags.LocaleId(script: Some(s), ..)) ->
             JsString(titlecase_ascii(s))
           _ -> JsUndefined
         }
-      "region" ->
+      LocaleRegion ->
         case lid {
           Some(tags.LocaleId(region: Some(r), ..)) ->
             JsString(string.uppercase(r))
           _ -> JsUndefined
         }
-      "calendar" ->
+      LocaleCalendar ->
         locale_u_kw(l, "ca")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
-      "collation" ->
+      LocaleCollation ->
         locale_u_kw(l, "co")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
-      "hourCycle" ->
+      LocaleHourCycle ->
         locale_u_kw(l, "hc")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
-      "numberingSystem" ->
+      LocaleNumberingSystem ->
         locale_u_kw(l, "nu")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
-      "caseFirst" ->
+      LocaleCaseFirst ->
         locale_u_kw(l, "kf")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
-      "numeric" ->
+      LocaleNumeric ->
         case locale_u_kw(l, "kn") {
           Some("") | Some("true") -> JsBool(True)
           Some(_) -> JsBool(False)
           None -> JsBool(False)
         }
-      "firstDayOfWeek" ->
+      LocaleFirstDayOfWeek ->
         locale_u_kw(l, "fw")
         |> option.map(JsString)
         |> option.unwrap(JsUndefined)
-      "variants" ->
+      LocaleVariants ->
         case lid {
           Some(tags.LocaleId(variants: [_, ..] as vs, ..)) ->
             JsString(string.join(vs, "-"))
           _ -> JsUndefined
         }
-      _ -> JsUndefined
     }
     Ok(#(v, state))
   })
 }
 
 fn locale_method(
-  method: String,
+  method: LocaleMethodName,
   proto: Ref,
   _args: List(JsValue),
   this: JsValue,
@@ -6842,16 +6847,16 @@ fn locale_method(
     use #(_ref, l) <- result.try(branded_locale(
       state,
       this,
-      "Intl.Locale.prototype." <> method,
+      "Intl.Locale.prototype." <> locale_method_js_name(method),
     ))
     let tag = l.locale
     case method {
-      "toString" -> Ok(#(JsString(tag), state))
-      "maximize" | "minimize" -> {
+      LocaleToString -> Ok(#(JsString(tag), state))
+      LocaleMaximize | LocaleMinimize -> {
         let new_tag = case tags.parse(tag) {
           Ok(lid) ->
             case method {
-              "maximize" -> tags.to_string(tags.maximize(lid))
+              LocaleMaximize -> tags.to_string(tags.maximize(lid))
               _ -> tags.to_string(tags.minimize(lid))
             }
           Error(Nil) -> tag
@@ -6867,7 +6872,7 @@ fn locale_method(
           )
         Ok(#(JsObject(ref), State(..state, heap:)))
       }
-      "getCalendars" -> {
+      LocaleGetCalendars -> {
         let vals = case locale_u_kw(l, "ca") {
           Some(ca) -> [ca]
           None -> ["gregory"]
@@ -6875,7 +6880,7 @@ fn locale_method(
         let #(state, arr) = alloc_array(state, list.map(vals, JsString))
         Ok(#(arr, state))
       }
-      "getCollations" -> {
+      LocaleGetCollations -> {
         let vals = case locale_u_kw(l, "co") {
           Some(co) -> [co]
           None -> ["emoji", "eor"]
@@ -6883,7 +6888,7 @@ fn locale_method(
         let #(state, arr) = alloc_array(state, list.map(vals, JsString))
         Ok(#(arr, state))
       }
-      "getHourCycles" -> {
+      LocaleGetHourCycles -> {
         let vals = case locale_u_kw(l, "hc") {
           Some(hc) -> [hc]
           None -> ["h12"]
@@ -6891,7 +6896,7 @@ fn locale_method(
         let #(state, arr) = alloc_array(state, list.map(vals, JsString))
         Ok(#(arr, state))
       }
-      "getNumberingSystems" -> {
+      LocaleGetNumberingSystems -> {
         let vals = case locale_u_kw(l, "nu") {
           Some(nu) -> [nu]
           None -> ["latn"]
@@ -6899,7 +6904,7 @@ fn locale_method(
         let #(state, arr) = alloc_array(state, list.map(vals, JsString))
         Ok(#(arr, state))
       }
-      "getTimeZones" ->
+      LocaleGetTimeZones ->
         case locale_lid(l) {
           Some(tags.LocaleId(region: Some(r), ..)) -> {
             let zones = case string.uppercase(r) {
@@ -6916,7 +6921,7 @@ fn locale_method(
           }
           _ -> Ok(#(JsUndefined, state))
         }
-      "getTextInfo" -> {
+      LocaleGetTextInfo -> {
         let lang = case locale_lid(l) {
           Some(l) -> string.lowercase(l.language)
           None -> "en"
@@ -6930,7 +6935,7 @@ fn locale_method(
         let #(state, obj) = alloc_pojo(state, [#("direction", JsString(dir))])
         Ok(#(obj, state))
       }
-      "getWeekInfo" -> {
+      LocaleGetWeekInfo -> {
         let #(state, weekend) =
           alloc_array(state, [value.from_int(6), value.from_int(7)])
         let first_day = case locale_u_kw(l, "fw") {
@@ -6950,7 +6955,6 @@ fn locale_method(
           ])
         Ok(#(obj, state))
       }
-      _ -> throw_type(state, "Unknown Intl.Locale method: " <> method)
     }
   })
 }

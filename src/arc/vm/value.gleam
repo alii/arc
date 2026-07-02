@@ -1,7 +1,7 @@
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
-import arc/vm/key.{Index, Named}
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
+import arc/vm/key.{Index, Named}
 import arc/vm/opcode.{type Op}
 import gleam/bit_array
 import gleam/bool
@@ -1908,18 +1908,97 @@ pub type IntlNativeFn {
   IntlBoundGetter(service: IntlService)
   /// The bound method produced by IntlBoundGetter — target is the instance.
   IntlBoundMethod(service: IntlService, target: Ref)
-  /// Named prototype method (format/formatToParts/select/of/segment/…).
-  /// The method name discriminates inside the intl builtins module.
-  IntlMethod(service: IntlService, method: String)
+  /// Named prototype method (format/formatToParts/select/of/…). The
+  /// receiver's brand (`service`) plus `method` pick the implementation
+  /// inside the intl builtins module.
+  IntlMethod(service: IntlService, method: IntlMethodName)
+  /// ECMA-402 §17-19 locale-sensitive overrides installed on
+  /// Number.prototype / String.prototype / Date.prototype — these are not
+  /// Intl.* prototype methods and have no Intl brand check.
+  IntlHostOverride(which: HostOverride)
   /// Segmenter.prototype.segment — needs the %SegmentsPrototype% ref.
   IntlSegmenterSegment(segments_proto: Ref)
   /// %SegmentsPrototype%[Symbol.iterator] — needs %SegmentIteratorPrototype%.
   IntlSegmentsIterator(iter_proto: Ref)
   /// Intl.Locale.prototype getter (language/script/region/baseName/…).
-  IntlLocaleGetter(name: String)
+  IntlLocaleGetter(name: LocaleGetterName)
   /// Intl.Locale.prototype method needing the Locale prototype to allocate
   /// result Locale objects (maximize/minimize) or plain (toString).
-  IntlLocaleMethod(method: String, proto: Ref)
+  IntlLocaleMethod(method: LocaleMethodName, proto: Ref)
+}
+
+/// The Intl.<Service>.prototype methods registered via `IntlMethod` —
+/// one variant per method name so a registration typo is a compile error,
+/// not a silent fallthrough at dispatch time.
+pub type IntlMethodName {
+  /// ListFormat/RelativeTimeFormat/DurationFormat.prototype.format
+  IntlFormat
+  /// NumberFormat/DateTimeFormat/ListFormat/RelativeTimeFormat/
+  /// DurationFormat.prototype.formatToParts
+  IntlFormatToParts
+  /// NumberFormat/DateTimeFormat.prototype.formatRange
+  IntlFormatRange
+  /// NumberFormat/DateTimeFormat.prototype.formatRangeToParts
+  IntlFormatRangeToParts
+  /// PluralRules.prototype.select
+  IntlSelect
+  /// PluralRules.prototype.selectRange
+  IntlSelectRange
+  /// DisplayNames.prototype.of
+  IntlOf
+  /// %SegmentIteratorPrototype%.next
+  IntlSegmentIteratorNext
+  /// %SegmentsPrototype%.containing
+  IntlSegmentsContaining
+}
+
+/// The ECMA-402 locale-sensitive host overrides (§17-19) installed on the
+/// Number / String / Date prototypes at Intl init.
+pub type HostOverride {
+  /// Number.prototype.toLocaleString (§18.2.1)
+  NumberToLocaleString
+  /// String.prototype.localeCompare (§19.1.1)
+  StringLocaleCompare
+  /// String.prototype.toLocaleLowerCase (§19.1.2)
+  StringToLocaleLowerCase
+  /// String.prototype.toLocaleUpperCase (§19.1.3)
+  StringToLocaleUpperCase
+  /// Date.prototype.toLocaleString (§17.4.1)
+  DateToLocaleString
+  /// Date.prototype.toLocaleDateString (§17.4.2)
+  DateToLocaleDateString
+  /// Date.prototype.toLocaleTimeString (§17.4.3)
+  DateToLocaleTimeString
+}
+
+/// The Intl.Locale.prototype accessor getters.
+pub type LocaleGetterName {
+  LocaleBaseName
+  LocaleCalendar
+  LocaleCaseFirst
+  LocaleCollation
+  LocaleFirstDayOfWeek
+  LocaleHourCycle
+  LocaleNumeric
+  LocaleNumberingSystem
+  LocaleLanguage
+  LocaleScript
+  LocaleRegion
+  LocaleVariants
+}
+
+/// The Intl.Locale.prototype methods.
+pub type LocaleMethodName {
+  LocaleToString
+  LocaleMaximize
+  LocaleMinimize
+  LocaleGetCalendars
+  LocaleGetCollations
+  LocaleGetHourCycles
+  LocaleGetNumberingSystems
+  LocaleGetTimeZones
+  LocaleGetTextInfo
+  LocaleGetWeekInfo
 }
 
 /// Native functions handled in call_native — need stack manipulation,
@@ -2326,6 +2405,10 @@ pub type ExoticKind(ctx, host) {
   NumberObject(value: JsNum)
   /// Boxed Boolean primitive (`new Boolean(true)`, etc.). Has [[BooleanData]].
   BooleanObject(value: Bool)
+  /// Boxed BigInt primitive (`Object(1n)` only; `new BigInt()` is a
+  /// TypeError). Has [[BigIntData]] (§21.2.4). Ordinary object aside from
+  /// the internal slot.
+  BigIntObject(value: BigInt)
   /// Boxed Symbol (`Object(sym)` only; `new Symbol()` is a TypeError).
   /// Has [[SymbolData]]. Ordinary object aside from the internal slot.
   SymbolObject(value: SymbolId)
@@ -2663,14 +2746,6 @@ pub fn private_display_name(key_text: String) -> String {
       }
     _ -> key_text
   }
-}
-
-/// Storage key for a BigInt wrapper object's [[BigIntData]] internal slot
-/// (§21.2.4). Wrappers are OrdinaryObjects (no dedicated ExoticKind), so the
-/// primitive is stashed under a NUL-marker key — invisible to all ordinary
-/// property reflection, exactly like class private elements.
-pub fn bigint_data_key() -> PropertyKey {
-  private_key("[[BigIntData]]")
 }
 
 /// Whether a PropertyKey is a class private element (NUL-marker-prefixed —
@@ -3473,6 +3548,7 @@ fn do_refs_in_slot(
         | StringObject(_)
         | NumberObject(_)
         | BooleanObject(_)
+        | BigIntObject(_)
         | SymbolObject(_)
         | DateObject(_)
         | TemporalDateSlot(..)
@@ -4111,6 +4187,7 @@ fn intl_native_refs(f: IntlNativeFn, acc: List(Ref)) -> List(Ref) {
     | IntlResolvedOptions(service: _)
     | IntlBoundGetter(service: _)
     | IntlMethod(service: _, method: _)
+    | IntlHostOverride(which: _)
     | IntlLocaleGetter(name: _) -> acc
   }
 }
