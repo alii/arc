@@ -1637,6 +1637,16 @@ pub fn template_literal_unterminated_substitution_test() -> Nil {
   assert_parse_error("`${'}`")
 }
 
+// A template substitution is always Expression[+In] (ECMA-262 13.2.8), so
+// `in` is an operator inside `${}` even when the template appears in a
+// for-head initializer where the enclosing context is [~In].
+pub fn template_literal_substitution_in_operator_for_head_test() -> Nil {
+  assert_normal(
+    "var r; for (r = `${'x' in {x:1}}`; false; ) ; r",
+    JsString("true"),
+  )
+}
+
 // ============================================================================
 // Switch statements
 // ============================================================================
