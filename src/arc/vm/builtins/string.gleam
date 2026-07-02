@@ -427,8 +427,8 @@ fn string_last_index_of(
 ///  11. If index is not -1, return true.
 ///  12. Return false.
 ///
-/// TODO(Deviation): Steps 3-4 (IsRegExp check) not implemented — needs RegExp.
-/// Passing a RegExp will be coerced to string instead of throwing TypeError.
+/// Steps 3-4 (IsRegExp check → TypeError) are handled by try_is_regexp in
+/// string_search_bool.
 fn string_includes(
   this: JsValue,
   args: List(JsValue),
@@ -490,7 +490,8 @@ fn string_search_bool(
 ///      searchStr, return true.
 ///  12. Return false.
 ///
-/// TODO(Deviation): Steps 3-4 (IsRegExp check) not implemented — needs RegExp.
+/// Steps 3-4 (IsRegExp check → TypeError) are handled by try_is_regexp in
+/// string_search_bool.
 fn string_starts_with(
   this: JsValue,
   args: List(JsValue),
@@ -514,8 +515,6 @@ fn string_starts_with(
 ///  11. Let start be end - searchLength.
 ///  12. If the substring of S from start to end is searchStr, return true.
 ///  13. Return false.
-///
-/// TODO(Deviation): Steps 3-4 (IsRegExp check) not implemented — needs RegExp.
 fn string_ends_with(
   this: JsValue,
   args: List(JsValue),
@@ -1484,7 +1483,8 @@ fn get_substitution(
 ///  10-15. (General splitting algorithm, collect substrings between
 ///      matches of R in S, up to lim entries.)
 ///
-/// TODO(Deviation): Step 4 uses ToIntegerOrInfinity instead of ToUint32 for limit.
+/// Step 4 uses the real ToUint32 (see split_limit).
+///
 /// TODO(Deviation): Step 9 uses graphemes instead of UTF-16 code units for
 /// empty-string split — needs UTF-16 string model.
 fn string_split(
@@ -1868,12 +1868,10 @@ fn ffi_codepoint_at(s: String, pos: Int) -> option.Option(Int)
 ///      to S using normalization form f.
 ///   7. Return ns.
 ///
-/// Note: This is a stub that returns the string unchanged. A full
-/// implementation requires Unicode normalization tables (NFC/NFD/NFKC/NFKD).
-/// Most JS strings encountered in practice are already in NFC form, so this
-/// is sufficient for basic tests. The form argument validation is done to
-/// match spec behaviour (throw on invalid form), but valid forms return the
-/// input unchanged.
+/// Step 6 (the Unicode Normalization Algorithm) is performed for real:
+/// ffi_nfc / ffi_nfd / ffi_nfkc / ffi_nfkd bind directly to OTP's
+/// `unicode:characters_to_nf*_binary`. Step 5's form validation throws a
+/// RangeError on anything other than the four spec-named forms.
 fn string_normalize(
   this: JsValue,
   args: List(JsValue),

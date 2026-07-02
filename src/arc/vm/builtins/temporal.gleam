@@ -2,11 +2,14 @@
 /// feature "Temporal").
 ///
 /// Design notes:
-/// - Only the iso8601 calendar is supported. Other calendar identifiers
-///   throw RangeError (matching an implementation without 402 calendars).
-/// - Time zones: "UTC" plus fixed-offset identifiers ("±HH:MM"). Named IANA
-///   zones other than UTC throw RangeError. Offset zones have no DST, so all
-///   ZonedDateTime arithmetic is exact.
+/// - Calendars: the full CLDR set implemented by temporal_calendar (iso8601,
+///   gregory, buddhist, japanese, roc, coptic, ethiopic, ethioaa, hebrew,
+///   the islamic-* tabular variants, persian, indian, chinese, dangi).
+///   Unrecognised identifiers throw RangeError.
+/// - Time zones: named IANA zones resolved through the system tzdata (TZif,
+///   via arc_tz_ffi in temporal_tz), plus "UTC" and fixed-offset identifiers
+///   ("±HH:MM"). Named zones observe real DST transitions; only offset zones
+///   are transition-free.
 /// - All numeric internals are BEAM Ints (arbitrary precision), so epoch
 ///   nanoseconds (±8.64e21) and duration totals (≤2^53·1e9) are exact.
 ///
@@ -1594,9 +1597,12 @@ fn get_calendar_name_option(
 }
 
 // ============================================================================
-// Calendar handling (iso8601 only)
+// Calendar handling (delegates to temporal_calendar's CLDR calendar set)
 // ============================================================================
 
+/// ToTemporalCalendarIdentifier / CanonicalizeCalendar for a bare identifier:
+/// case-insensitive lookup + alias resolution via tcal.canonicalize.
+/// RangeError for identifiers outside temporal_calendar's supported set.
 fn canonicalize_calendar(id: String) -> Result(tcal.Calendar, TErr) {
   case tcal.canonicalize(id) {
     Ok(c) -> Ok(c)
@@ -2086,7 +2092,8 @@ fn is_time_prefix(s: String) -> Bool {
   }
 }
 
-/// Validate the calendar annotation (if any) is iso8601. RangeError otherwise.
+/// Validate that the string's [u-ca=] calendar annotation (if any) names a
+/// supported calendar. RangeError otherwise. No annotation is always valid.
 fn check_parsed_calendar(p: ParsedIso) -> Result(Nil, TErr) {
   case p.calendar {
     None -> Ok(Nil)
@@ -2114,7 +2121,8 @@ fn parse_plain_datetime_string(s: String) -> Result(ParsedIso, TErr) {
 }
 
 // ============================================================================
-// Time zone handling — "UTC" plus fixed offsets
+// Time zone handling — named IANA zones (system tzdata via temporal_tz),
+// "UTC", and fixed numeric offsets
 // ============================================================================
 
 /// Parse + canonicalize a time zone identifier. Returns the canonical id.
