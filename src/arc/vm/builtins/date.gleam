@@ -205,8 +205,7 @@ pub fn dispatch(
     DatePrototypeGetDate -> date_get_field(this, state, FieldDate, LocalTime)
     DatePrototypeGetUTCDate -> date_get_field(this, state, FieldDate, UtcTime)
     DatePrototypeGetDay -> date_get_field(this, state, FieldWeekday, LocalTime)
-    DatePrototypeGetUTCDay ->
-      date_get_field(this, state, FieldWeekday, UtcTime)
+    DatePrototypeGetUTCDay -> date_get_field(this, state, FieldWeekday, UtcTime)
     DatePrototypeGetHours -> date_get_field(this, state, FieldHours, LocalTime)
     DatePrototypeGetUTCHours -> date_get_field(this, state, FieldHours, UtcTime)
     DatePrototypeGetMinutes ->
