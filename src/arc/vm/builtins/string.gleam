@@ -1053,19 +1053,25 @@ fn call_symbol_method(
   #(state, Ok(result))
 }
 
-/// Delegate to a Symbol method if `val` has one; otherwise construct a RegExp
-/// from `val` and call the symbol method on that. Shared by match/search.
+/// Delegate to a Symbol method on `val` if it has one, passing the ORIGINAL
+/// `this` value (spec §22.1.3.13/§22.1.3.20 step 2 — ToString(this) must not
+/// be observable before delegation). Otherwise ToString(this), construct a
+/// RegExp from `val`, and invoke the symbol method on that with the string.
+/// Shared by match/search.
 fn delegate_or_regexp(
   state: State(host),
   val: JsValue,
   symbol: value.SymbolId,
-  str_arg: JsValue,
+  this: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use method_opt, state <- state.try_op(try_symbol_method(state, val, symbol))
   case method_opt {
-    Some(method) -> call_symbol_method(state, method, val, [str_arg])
+    Some(method) -> call_symbol_method(state, method, val, [this])
     None -> {
-      // Construct RegExp from the argument, then delegate to its symbol method
+      // Step 3: S = ToString(O) — only now, after delegation was declined.
+      use s, state <- coerce.try_to_string(state, this)
+      // Step 4: construct RegExp from the argument, then delegate to its
+      // symbol method.
       use rx, state <- state.try_call(
         state,
         JsObject(state.builtins.regexp.constructor),
@@ -1076,7 +1082,7 @@ fn delegate_or_regexp(
       // undefined, which throws TypeError; a throwing getter propagates.
       use method_opt, state <- state.try_op(try_symbol_method(state, rx, symbol))
       case method_opt {
-        Some(method) -> call_symbol_method(state, method, rx, [str_arg])
+        Some(method) -> call_symbol_method(state, method, rx, [JsString(s)])
         None -> {
           let name =
             value.well_known_symbol_description(symbol)
@@ -1094,10 +1100,12 @@ fn string_match(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use s, state <- with_this_string(this, state)
+  // Step 1: RequireObjectCoercible(O) — ToString deferred so a @@match
+  // delegation never observes ToString(this).
+  use Nil, state <- require_object_coercible(this, state, "match")
   let regexp_val = helpers.first_arg_or_undefined(args)
   // Step 2-3: delegate to Symbol.match, or construct RegExp and delegate
-  delegate_or_regexp(state, regexp_val, value.symbol_match, JsString(s))
+  delegate_or_regexp(state, regexp_val, value.symbol_match, this)
 }
 
 /// ES2024 §22.1.3.20 String.prototype.search(regexp)
@@ -1106,10 +1114,12 @@ fn string_search(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use s, state <- with_this_string(this, state)
+  // Step 1: RequireObjectCoercible(O) — ToString deferred so a @@search
+  // delegation never observes ToString(this).
+  use Nil, state <- require_object_coercible(this, state, "search")
   let regexp_val = helpers.first_arg_or_undefined(args)
   // Step 2-3: delegate to Symbol.search, or construct RegExp and delegate
-  delegate_or_regexp(state, regexp_val, value.symbol_search, JsString(s))
+  delegate_or_regexp(state, regexp_val, value.symbol_search, this)
 }
 
 /// ES2024 §22.1.3.18 String.prototype.replace(searchValue, replaceValue)
@@ -1481,6 +1491,8 @@ fn string_split(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // Step 1: RequireObjectCoercible(O) — must run before the @@split lookup.
+  use Nil, state <- require_object_coercible(this, state, "split")
   let sep_val = helpers.first_arg_or_undefined(args)
   let limit_val = case args {
     [_, l, ..] -> l
@@ -1496,7 +1508,7 @@ fn string_split(
     Some(method) ->
       call_symbol_method(state, method, sep_val, [this, limit_val])
     None -> {
-      // Steps 1, 3: RequireObjectCoercible + ToString
+      // Step 3: string = ToString(O)
       use s, state <- with_this_string(this, state)
       // Step 4: If limit is undefined, let lim be 2^32-1; else ToUint32(limit).
       use lim, state <- split_limit(state, limit_val)
