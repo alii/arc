@@ -54,7 +54,7 @@ uncompress_lit(Chunks) ->
     end.
 
 %% Pre-packed library avm — slurp its entries so shadowing works (our shims
-%% for unicode_ffi/arc_regexp_ffi must win over any duplicates downstream).
+%% for arc_unicode_ffi/arc_regexp_ffi must win over any duplicates downstream).
 load_avm(Path) ->
     {ok, <<"#!/usr/bin/env AtomVM\n", 0, 0, Body/binary>>} = file:read_file(Path),
     avm_entries(Body, []).

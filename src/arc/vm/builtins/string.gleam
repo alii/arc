@@ -1860,7 +1860,7 @@ fn string_code_point_at(
 /// Integer codepoint at codepoint index `pos`, or None when out of bounds.
 /// Shares the cursor cache with object.string_char_at, so sequential scans
 /// resume from the previous position instead of re-walking from byte 0.
-@external(erlang, "arc_vm_ffi", "string_codepoint_at")
+@external(erlang, "arc_string_ffi", "string_codepoint_at")
 fn ffi_codepoint_at(s: String, pos: Int) -> option.Option(Int)
 
 /// ES2024 22.1.3.13 — String.prototype.normalize ( [ form ] )
@@ -2117,7 +2117,7 @@ fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
 /// U+FFFD REPLACEMENT CHARACTER. FFI because UtfCodepoint has no public
 /// constructor — on Erlang it's just an Int, so this is a constant-pool load
 /// instead of a `string.utf_codepoint` call + Result unwrap + assert.
-@external(erlang, "arc_vm_ffi", "replacement_codepoint")
+@external(erlang, "arc_string_ffi", "replacement_codepoint")
 fn replacement_codepoint() -> UtfCodepoint
 
 /// ToUint16: modulo 65536 (2^16), always returns 0..65535.
@@ -2517,7 +2517,7 @@ fn index_of_from(s: String, search: String, from: Int) -> Int {
   }
 }
 
-@external(erlang, "arc_vm_ffi", "string_index_of")
+@external(erlang, "arc_string_ffi", "string_index_of")
 fn ffi_index_of(haystack: String, needle: String, from: Int) -> Int
 
 /// Reverse StringIndexOf: find last occurrence of `search` in `s`
@@ -2530,22 +2530,22 @@ fn last_index_of_from(s: String, search: String, from: Int) -> Int {
   }
 }
 
-@external(erlang, "arc_vm_ffi", "string_last_index_of")
+@external(erlang, "arc_string_ffi", "string_last_index_of")
 fn ffi_last_index_of(haystack: String, needle: String, from: Int) -> Int
 
 /// Codepoint-based substring: `len` codepoints starting at codepoint `start`.
 /// Plain UTF-8 byte walk returning a sub-binary — no per-character
 /// allocation, unlike gleam/string.slice's grapheme clustering (~20x
 /// slower). Same UTF-16 deviation as object.string_char_at.
-@external(erlang, "arc_vm_ffi", "string_cp_slice")
+@external(erlang, "arc_string_ffi", "string_cp_slice")
 fn cp_slice(s: String, start: Int, len: Int) -> String
 
 /// Drop the first `n` codepoints (clamps; n <= 0 returns s unchanged).
 /// Sub-binary result, alloc-free walk — replaces gleam/string.drop_start.
-@external(erlang, "arc_vm_ffi", "string_cp_drop")
+@external(erlang, "arc_string_ffi", "string_cp_drop")
 fn cp_drop(s: String, n: Int) -> String
 
 /// Split into single-codepoint strings — replaces string.to_graphemes for
 /// String.prototype.split(""), matching the engine's codepoint indexing.
-@external(erlang, "arc_vm_ffi", "string_cp_explode")
+@external(erlang, "arc_string_ffi", "string_cp_explode")
 fn cp_explode(s: String) -> List(String)

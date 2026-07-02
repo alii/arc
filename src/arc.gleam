@@ -10,6 +10,7 @@ import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, vm_error_message}
 import arc/vm/value.{type JsValue}
+import gleam/dynamic
 import gleam/int
 import gleam/io
 import gleam/option.{None, Some}
@@ -19,8 +20,17 @@ import simplifile
 
 // -- FFI: read a line from stdin ---------------------------------------------
 
-@external(erlang, "arc_vm_ffi", "read_line")
-fn read_line(prompt: String) -> Result(String, Nil)
+/// One `read_line` outcome. `Eof` (Ctrl-D / closed stdin) is a normal way to
+/// leave the REPL; `ReadError` is a real I/O failure and is reported, not
+/// silently conflated with end-of-input.
+type ReadLine {
+  Line(String)
+  Eof
+  ReadError(reason: dynamic.Dynamic)
+}
+
+@external(erlang, "arc_cli_ffi", "read_line")
+fn read_line(prompt: String) -> ReadLine
 
 // -- REPL state --------------------------------------------------------------
 
@@ -197,12 +207,17 @@ fn handle_repl_line(state: ReplState(host), line: String) -> ReplStep(host) {
 
 fn repl_loop(state: ReplState(host)) -> Nil {
   case read_line("> ") {
-    Error(Nil) -> {
+    Eof -> {
       io.println("")
       Nil
     }
 
-    Ok(line) ->
+    ReadError(reason) -> {
+      io.println_error("Error reading stdin: " <> string.inspect(reason))
+      Nil
+    }
+
+    Line(line) ->
       case handle_repl_line(state, line) {
         Continue(next) -> repl_loop(next)
         Quit -> Nil
@@ -210,7 +225,7 @@ fn repl_loop(state: ReplState(host)) -> Nil {
   }
 }
 
-@external(erlang, "arc_vm_ffi", "get_script_args")
+@external(erlang, "arc_cli_ffi", "get_script_args")
 fn get_script_args() -> List(String)
 
 @external(erlang, "erlang", "halt")

@@ -1775,10 +1775,10 @@ fn is_cp_id_continue(n: Int) -> Bool {
   || { n > 127 && is_unicode_id_continue(n) }
 }
 
-@external(erlang, "unicode_ffi", "is_id_start")
+@external(erlang, "arc_unicode_ffi", "is_id_start")
 fn is_unicode_id_start(cp: Int) -> Bool
 
-@external(erlang, "unicode_ffi", "is_id_continue")
+@external(erlang, "arc_unicode_ffi", "is_id_continue")
 fn is_unicode_id_continue(cp: Int) -> Bool
 
 pub fn keyword_or_identifier(word: String) -> TokenKind {

@@ -6,6 +6,8 @@
 //// "Asia/Calcutta" stays "Asia/Calcutta"). `canonical` resolves links for
 //// TimeZoneEquals.
 
+import gleam/result
+
 /// Case-insensitive zone id lookup; returns the properly-cased identifier.
 @external(erlang, "arc_tz_ffi", "lookup")
 pub fn lookup(id: String) -> Result(String, Nil)
@@ -24,7 +26,7 @@ pub fn canonical(id: String) -> String {
 }
 
 @external(erlang, "arc_tz_ffi", "offset_at")
-fn ffi_offset_at(id: String, epoch_seconds: Int) -> Int
+fn ffi_offset_at(id: String, epoch_seconds: Int) -> Result(Int, Nil)
 
 @external(erlang, "arc_tz_ffi", "next_transition")
 fn ffi_next_transition(id: String, epoch_seconds: Int) -> Result(Int, Nil)
@@ -43,8 +45,14 @@ fn floor_div(a: Int, b: Int) -> Int {
 }
 
 /// UTC offset of a named zone, in nanoseconds, at the given epoch instant.
-pub fn offset_ns_at(id: String, epoch_ns: Int) -> Int {
-  ffi_offset_at(id, floor_div(epoch_ns, ns_per_second)) * ns_per_second
+/// `Error(Nil)` when the zone id is unknown or its TZif data cannot be
+/// read/parsed.
+pub fn offset_ns_at(id: String, epoch_ns: Int) -> Result(Int, Nil) {
+  use offset_s <- result.map(ffi_offset_at(
+    id,
+    floor_div(epoch_ns, ns_per_second),
+  ))
+  offset_s * ns_per_second
 }
 
 /// Earliest offset transition strictly after `epoch_ns`, in epoch ns.

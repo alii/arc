@@ -29,18 +29,19 @@ lookup(Id) when is_binary(Id) ->
         error -> {error, nil}
     end.
 
-%% UTC offset in seconds at the given epoch second. Returns 0 for unknown
-%% zones (callers validate ids with lookup/1 first).
+%% UTC offset in seconds at the given epoch second.
+%% {ok, OffsetSec} | {error, nil} when the zone is unknown or its TZif data
+%% cannot be read/parsed.
 offset_at(Id, Sec) ->
     case zone(Id) of
-        error -> 0;
+        error -> {error, nil};
         {First, Trans, Footer} ->
             LastT = last_transition_time(Trans),
             UseFooter = Footer =/= none andalso
                 (LastT =:= none orelse Sec >= LastT),
             case UseFooter of
-                true -> footer_offset(Footer, Sec);
-                false -> offset_from_transitions(First, Trans, Sec)
+                true -> {ok, footer_offset(Footer, Sec)};
+                false -> {ok, offset_from_transitions(First, Trans, Sec)}
             end
     end.
 

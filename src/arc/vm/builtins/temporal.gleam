@@ -10502,11 +10502,7 @@ fn zoned_until_since(
   }
 }
 
-fn format_zoned(
-  ns: Int,
-  tz: String,
-  prec: Precision,
-) -> Result(String, TErr) {
+fn format_zoned(ns: Int, tz: String, prec: Precision) -> Result(String, TErr) {
   use off <- result.map(tz_offset_ns_at(tz, ns))
   let #(d, t) = epoch_ns_to_iso(ns, off)
   format_iso_date(d)

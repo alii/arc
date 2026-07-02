@@ -358,12 +358,12 @@ pub fn get_own_index(heap: Heap(host), ref: Ref, idx: Int) -> OwnIndex {
 /// should count as 2 indices. Codepoint indexing matches code-unit indexing
 /// for all BMP chars, so this is strictly more correct than grapheme
 /// indexing was. Full fix needs UTF-16 string storage.
-@external(erlang, "arc_vm_ffi", "string_char_at")
+@external(erlang, "arc_string_ffi", "string_char_at")
 pub fn string_char_at(s: String, idx: Int) -> Option(String)
 
 /// Codepoint count — ~20x faster than gleam/string.length (no grapheme
 /// clustering). Same UTF-16 deviation as string_char_at.
-@external(erlang, "arc_vm_ffi", "string_codepoint_length")
+@external(erlang, "arc_string_ffi", "string_codepoint_length")
 pub fn string_length(s: String) -> Int
 
 /// **[[GetOwnProperty]](P)** — dispatches to the appropriate spec algorithm

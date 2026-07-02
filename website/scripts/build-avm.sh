@@ -105,7 +105,7 @@ echo "==> patch WASM max memory (256 -> 4096 pages)"
 python3 "$WEBSITE/scripts/patch_wasm_memory.py" "$OUT/AtomVM.wasm" 4096
 
 echo "==> pack arc.avm"
-# Shims first so they shadow the real unicode_ffi/arc_regexp_ffi beams.
+# Shims first so they shadow the real arc_unicode_ffi/arc_regexp_ffi beams.
 escript "$WEBSITE/scripts/pack_avm.escript" "$OUT/arc.avm" arc_wasm_ffi \
   "$SHIM_OUT"/*.beam \
   "$REPO_ROOT"/build/dev/erlang/arc/ebin/*.beam \

@@ -1,4 +1,4 @@
--module(unicode_ffi).
+-module(arc_unicode_ffi).
 -export([is_id_start/1, is_id_continue/1]).
 
 %% Compiled regexes, lazily initialized via persistent_term.
