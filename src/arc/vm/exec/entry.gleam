@@ -5,8 +5,7 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{
-  type Completion, AwaitCompletion, NormalCompletion, ThrowCompletion,
-  YieldCompletion,
+  type Completion, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
 import arc/vm/exec/event_loop
 import arc/vm/exec/generators
@@ -145,7 +144,7 @@ pub fn run_with_hooks(
       False,
       host_hooks,
     )
-    |> interpreter.execute_inner()
+    |> interpreter.execute_to_completion("run_with_hooks")
   use #(settled, drained) <- result.map(settle(executed, finish))
   #(settled, drained.heap)
 }
@@ -185,9 +184,11 @@ pub fn run_module(
     )
   case interpreter.execute_inner(state) {
     Error(vm_err) -> ModuleError(error: vm_err)
-    Ok(#(AwaitCompletion(awaited_value), suspended)) ->
+    // A module body is the ONE non-function frame that can legitimately
+    // suspend: top-level await (§16.2.1.5.3).
+    Ok(#(Suspended(completion.Await, awaited_value), suspended)) ->
       drive_top_level_await(func, awaited_value, suspended, finish)
-    Ok(#(NormalCompletion(val), final_state)) -> {
+    Ok(#(Completed(NormalCompletion(val)), final_state)) -> {
       let drained = finish(final_state)
       ModuleOk(
         value: val,
@@ -196,12 +197,17 @@ pub fn run_module(
         jobs: remaining_jobs(drained),
       )
     }
-    Ok(#(ThrowCompletion(val), final_state)) -> {
+    Ok(#(Completed(ThrowCompletion(val)), final_state)) -> {
       let drained = finish(final_state)
       ModuleThrow(value: val, heap: drained.heap, jobs: remaining_jobs(drained))
     }
-    Ok(#(YieldCompletion(_), _)) ->
-      panic as "YieldCompletion should not appear at module top level"
+    // `yield` cannot occur outside a generator body — a module top level
+    // yielding is an engine bug, reported on the VmError channel.
+    Ok(#(Suspended(completion.Yield, _), _)) ->
+      ModuleError(error: state.InternalError(
+        "run_module",
+        completion.suspension_leak_detail(completion.Yield),
+      ))
   }
 }
 
@@ -383,7 +389,7 @@ pub fn run_and_drain_repl_with(
     )
   let run_state = State(..base, ctx: RealmCtx(..base.ctx, realms: env.realms))
   use #(settled, drained) <- result.map(settle(
-    interpreter.execute_inner(run_state),
+    interpreter.execute_to_completion(run_state, "run_and_drain_repl"),
     finish,
   ))
   let new_env =
@@ -539,9 +545,9 @@ pub fn run_export(
 /// Drain microtasks/macrotasks via `finish`, then narrow a top-level completion
 /// to its settled outcome — `Ok(value)` for a normal completion,
 /// `Error(thrown)` for a throw — paired with the drained State. A top-level
-/// script, module, or embedder call can only finish Normal or Throw, so a
-/// Yield/Await reaching here is a compiler bug; this is the single place that
-/// invariant is enforced for the whole `run*` family.
+/// script or embedder call can only finish Normal or Throw: the `run*` family
+/// drives the step loop through `interpreter.execute_to_completion`, which
+/// turns a leaked Yield/Await into a `VmError` before it ever reaches here.
 fn settle(
   executed: Result(#(Completion, State(host)), VmError),
   finish: fn(State(host)) -> State(host),
@@ -551,10 +557,6 @@ fn settle(
   case completion {
     NormalCompletion(val) -> Ok(#(Ok(val), drained))
     ThrowCompletion(val) -> Ok(#(Error(val), drained))
-    YieldCompletion(_) ->
-      panic as "YieldCompletion should not appear at top level"
-    completion.AwaitCompletion(_) ->
-      panic as "AwaitCompletion should not appear at top level"
   }
 }
 
