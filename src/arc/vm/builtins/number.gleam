@@ -319,10 +319,25 @@ fn parse_float(
 /// that already saturates beyond-double-range digit strings (e.g. 400 nines)
 /// to ±Infinity via value.num_from_int instead of crashing erlang:float/1.
 fn parse_decimal_string(str: String) -> JsNum {
-  case scan_decimal_literal(str) {
+  // Walk code points, NOT graphemes: the grammar is defined over code units
+  // and every StrDecimalLiteral token is ASCII, so a combining mark must
+  // terminate the literal AFTER the digit ("1\u{0301}" parses as 1).
+  // string.to_graphemes would fold the mark into the digit's cluster and
+  // reject it. No token is astral, so code points == code units here.
+  let chars = to_codepoint_chars(str)
+  case scan_decimal_literal(chars) {
     0 -> NaN
-    len -> value.string_to_number(string.slice(str, 0, len))
+    len -> value.string_to_number(string.concat(list.take(chars, len)))
   }
+}
+
+/// Split a string into single-code-point strings. Unlike
+/// string.to_graphemes, this keeps a combining mark separate from the base
+/// character it follows, which is what the parseInt/parseFloat grammars
+/// (defined over code units, all-ASCII tokens) require.
+fn to_codepoint_chars(s: String) -> List(String) {
+  use cp <- list.map(string.to_utf_codepoints(s))
+  string.from_utf_codepoints([cp])
 }
 
 /// Longest-prefix StrDecimalLiteral scanner (§19.2.4 steps 3-4).
@@ -332,15 +347,15 @@ fn parse_decimal_string(str: String) -> JsNum {
 ///         | DecimalDigits [. DecimalDigits_opt] ExponentPart_opt
 ///         | . DecimalDigits ExponentPart_opt )
 ///
-/// Returns how many leading graphemes of `s` form the longest valid
-/// literal, or 0 when no prefix matches. The walk stops at the first
-/// grapheme that cannot extend the literal, so e.g. "1.2.3" → 3 ("1.2")
-/// and "1foo" → 1 ("1").
-fn scan_decimal_literal(s: String) -> Int {
-  let graphemes = string.to_graphemes(s)
-  let #(sign_len, rest) = case graphemes {
+/// Takes the input as a list of single-code-point strings (see
+/// to_codepoint_chars) and returns how many leading code points form the
+/// longest valid literal, or 0 when no prefix matches. The walk stops at
+/// the first code point that cannot extend the literal, so e.g.
+/// "1.2.3" → 3 ("1.2") and "1foo" → 1 ("1").
+fn scan_decimal_literal(chars: List(String)) -> Int {
+  let #(sign_len, rest) = case chars {
     ["+", ..r] | ["-", ..r] -> #(1, r)
-    _ -> #(0, graphemes)
+    _ -> #(0, chars)
   }
   case rest {
     // "Infinity" — any trailing garbage is simply not part of the match.
@@ -354,8 +369,9 @@ fn scan_decimal_literal(s: String) -> Int {
   }
 }
 
-/// Length of the longest StrUnsignedDecimalLiteral (minus Infinity, handled
-/// by the caller) at the head of `gs`, or 0 when none matches. A mantissa
+/// Length (in code points) of the longest StrUnsignedDecimalLiteral (minus
+/// Infinity, handled by the caller) at the head of `gs`, or 0 when none
+/// matches. A mantissa
 /// needs at least one digit on either side of the (optional) dot; the
 /// exponent only counts when it is complete (`e`/`E`, optional sign, 1+
 /// digits) — "5e" matches just "5".
@@ -782,8 +798,9 @@ fn format_non_finite(n: JsNum, f: fn(Float) -> String) -> String {
 ///
 fn parse_int_digits(s: String, radix: Int, negative: Bool) -> value.JsNum {
   // Steps 11-14: Parse valid digits, stop at first invalid character.
-  let graphemes = string.to_graphemes(s)
-  case parse_digits_loop(graphemes, radix, 0, False) {
+  // Code points, not graphemes: a combining mark must END the digit run
+  // ("1\u{0301}" parses as 1), not merge with the digit and reject it.
+  case parse_digits_loop(to_codepoint_chars(s), radix, 0, False) {
     // Step 13: If Z is empty, return NaN.
     None -> NaN
     // Steps 14-16: Apply sign and return.
@@ -801,16 +818,18 @@ fn parse_int_digits(s: String, radix: Int, negative: Bool) -> value.JsNum {
 
 /// parseInt digit accumulation loop — ES2024 §19.2.5 steps 11-14.
 ///
-/// Iterates through characters, accumulating digits valid in the given radix.
-/// Stops at the first character that is not a valid radix-R digit (step 11).
-/// Returns None if no valid digits were found (step 13: Z is empty).
+/// Iterates through code points (single-code-point strings from
+/// to_codepoint_chars), accumulating digits valid in the given radix.
+/// Stops at the first code point that is not a valid radix-R digit
+/// (step 11). Returns None if no valid digits were found (step 13: Z is
+/// empty).
 fn parse_digits_loop(
-  graphemes: List(String),
+  chars: List(String),
   radix: Int,
   acc: Int,
   found_any: Bool,
 ) -> Option(Int) {
-  case graphemes {
+  case chars {
     [] ->
       case found_any {
         True -> Some(acc)

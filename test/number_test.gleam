@@ -199,6 +199,21 @@ pub fn eval_parse_float_no_match_is_nan_test() {
   assert eval("parseFloat('')") == JsNumber(NaN)
 }
 
+pub fn eval_parse_combining_mark_terminates_literal_test() {
+  // §19.2.4 / §19.2.5: the grammar is defined over code units, so a
+  // combining mark (U+0300-U+0301) AFTER a digit ends the literal. It must
+  // not merge with the digit into one grapheme cluster and reject it.
+  // test262: built-ins/parseFloat/S15.1.2.3_A6.js, parseInt/S15.1.2.2_A8.js
+  assert eval("parseFloat('1' + String.fromCharCode(0x0301))")
+    == JsNumber(Finite(1.0))
+  assert eval("parseFloat('1.5' + String.fromCharCode(0x0300))")
+    == JsNumber(Finite(1.5))
+  assert eval("parseInt('19' + String.fromCharCode(0x0301))")
+    == JsNumber(Finite(19.0))
+  // A leading combining mark is not a digit, so nothing matches.
+  assert eval("parseFloat(String.fromCharCode(0x0301) + '1')") == JsNumber(NaN)
+}
+
 pub fn eval_legacy_octal_escape_above_7f_test() {
   // '\251' is U+00A9 (©): must cook to valid UTF-8, not a raw 0xA9 byte.
   assert eval("'\\251'") == JsString("©")
