@@ -21,23 +21,10 @@ import gleam/option.{type Option, None, Some}
 // ============================================================================
 
 /// Recursively extract all bound variable names from a pattern.
+/// Compiler-local alias for `ast.pattern_bound_names` (§8.2.1 BoundNames),
+/// the single implementation shared with ESM export analysis.
 pub fn collect_pattern_names(pattern: ast.Pattern) -> List(String) {
-  case pattern {
-    ast.IdentifierPattern(name, ..) -> [name]
-    ast.ArrayPattern(elements) ->
-      list.flat_map(elements, fn(elem) {
-        elem |> option.map(collect_pattern_names) |> option.unwrap([])
-      })
-    ast.ObjectPattern(properties) ->
-      list.flat_map(properties, fn(prop) {
-        case prop {
-          ast.PatternProperty(_, value:, ..) -> collect_pattern_names(value)
-          ast.RestProperty(argument) -> collect_pattern_names(argument)
-        }
-      })
-    ast.AssignmentPattern(left, _) -> collect_pattern_names(left)
-    ast.RestElement(argument) -> collect_pattern_names(argument)
-  }
+  ast.pattern_bound_names(pattern)
 }
 
 /// Split off a trailing `...rest` parameter. Returns the fixed params (in

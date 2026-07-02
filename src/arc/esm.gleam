@@ -157,7 +157,9 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
       )
     }
     ast.StatementItem(_) -> acc
-    _ -> {
+    ast.ExportNamedDeclaration(..)
+    | ast.ExportDefaultDeclaration(..)
+    | ast.ExportAllDeclaration(..) -> {
       let entries = export_entries(item)
       let exports =
         list.fold(entries, acc.exports, fn(exports, entry) {
@@ -288,7 +290,7 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
     ast.ExportAllDeclaration(exported: None, source: ast.StringLit(source), ..) -> [
       ReExportAll(source_specifier: source),
     ]
-    _ -> []
+    ast.StatementItem(_) | ast.ImportDeclaration(..) -> []
   }
 }
 
@@ -306,15 +308,17 @@ fn named_exports(
       }
     })
 
-  // From declaration: `export let x = 42`, `export function f() {}`
+  // From declaration: `export let x = 42`, `export const { a, b } = o`,
+  // `export function f() {}`. §16.2.3.3: the ExportedNames of an exported
+  // VariableDeclaration are the BoundNames of every declarator's binding
+  // target — including everything a destructuring pattern binds.
   let decl_exports = case declaration {
     Some(ast.VariableDeclaration(declarations:, ..)) ->
-      list.filter_map(declarations, fn(decl) {
-        case decl {
-          ast.VariableDeclarator(id: ast.IdentifierPattern(name:, ..), ..) ->
-            Ok(LocalExport(export_name: name, local_name: name))
-          _ -> Error(Nil)
-        }
+      list.flat_map(declarations, fn(decl) {
+        ast.pattern_bound_names(decl.id)
+        |> list.map(fn(name) {
+          LocalExport(export_name: name, local_name: name)
+        })
       })
     Some(ast.FunctionDeclaration(name: Some(name), ..)) -> [
       LocalExport(export_name: name, local_name: name),

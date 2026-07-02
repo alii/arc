@@ -201,6 +201,29 @@ pub fn exported_names_flattens_star_test() {
   assert list.length(names) == 3
 }
 
+pub fn exported_names_include_destructured_declarations_test() {
+  // §16.2.3.3 ExportedNames of `export <VariableDeclaration>` are the
+  // BoundNames of every declarator — including everything an object /
+  // array pattern binds (renamed targets, rest elements, defaulted holes).
+  let lg =
+    linkable_of("a", [
+      #(
+        "a",
+        "const o = {}; const arr = [];
+         export const { a, b: c, ...r } = o;
+         export let [x, , y = 1] = arr;",
+      ),
+    ])
+
+  assert link.exported_names(lg, "a") == ["a", "c", "r", "x", "y"]
+  // `b` is a property key, not a binding — it must NOT be exported.
+  assert link.resolve_export(lg, "a", "b") == link.Unresolvable
+  list.each(["a", "c", "r", "x", "y"], fn(name) {
+    assert link.resolve_export(lg, "a", name)
+      == link.ResolvedTo(module: "a", binding: name)
+  })
+}
+
 pub fn exported_names_excludes_star_default_test() {
   let lg =
     linkable_of("a", [

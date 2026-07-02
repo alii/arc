@@ -1,5 +1,6 @@
 /// Core AST types for the Arc JavaScript parser.
 /// Based on the ESTree specification, adapted for Gleam's type system.
+import gleam/list
 import gleam/option.{type Option}
 
 pub type Program {
@@ -420,6 +421,30 @@ pub type PatternProperty {
     shorthand: Bool,
   )
   RestProperty(argument: Pattern)
+}
+
+/// §8.2.1 BoundNames of a BindingPattern, in source order. This is the single
+/// place that answers "which identifiers does this pattern bind?" — use it
+/// instead of matching `IdentifierPattern` at a call site, which silently
+/// drops every name bound by a destructuring pattern.
+pub fn pattern_bound_names(p: Pattern) -> List(String) {
+  case p {
+    IdentifierPattern(name:, ..) -> [name]
+    ArrayPattern(elements:) ->
+      // Elisions (`[a, , b]`) are `None` slots — they bind nothing.
+      list.flat_map(elements, fn(element) {
+        option.map(element, pattern_bound_names) |> option.unwrap([])
+      })
+    ObjectPattern(properties:) ->
+      list.flat_map(properties, fn(property) {
+        case property {
+          PatternProperty(value:, ..) -> pattern_bound_names(value)
+          RestProperty(argument:) -> pattern_bound_names(argument)
+        }
+      })
+    AssignmentPattern(left:, ..) -> pattern_bound_names(left)
+    RestElement(argument:) -> pattern_bound_names(argument)
+  }
 }
 
 pub type BinaryOp {

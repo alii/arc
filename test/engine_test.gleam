@@ -412,6 +412,46 @@ pub fn call_export_threads_module_state_test() {
   assert value == JsNumber(Finite(8.0))
 }
 
+pub fn destructured_declaration_exports_test() {
+  // `export const { … } = o` / `export let [ … ] = a` export EVERY name the
+  // pattern binds (§16.2.3.3 ExportedNames = BoundNames). Import them all by
+  // name AND through a namespace object from a second module.
+  let dep =
+    "const o = { a: 1, b: 2, extra: 3 };
+     const arr = [10, 20];
+     export const { a, b: c, ...r } = o;
+     export let [x, , y = 1] = arr;"
+  let resolve = fn(raw: String, _referrer: String) { Ok(raw) }
+  let load = fn(resolved: String) {
+    case resolved {
+      "dep" -> Ok(dep)
+      other -> Error("no such module: " <> other)
+    }
+  }
+  let assert Ok(#(evaluated, eng)) =
+    engine.eval_module(
+      engine.new(),
+      "entry",
+      "import { a, c, r, x, y } from 'dep';
+       import * as ns from 'dep';
+       export const sum = a + c + x;
+       export const rest = r.extra;
+       export const gap = y;
+       export const keys = Object.keys(ns).join(',');",
+      resolve,
+      load,
+    )
+  let assert Some(ns) = evaluated.namespace
+  // a=1, c (renamed from b)=2, x=10 — every destructured binding linked.
+  assert engine.read_export(eng, ns, "sum") == Some(JsNumber(Finite(13.0)))
+  // Rest element: `r` is `{ extra: 3 }`.
+  assert engine.read_export(eng, ns, "rest") == Some(JsNumber(Finite(3.0)))
+  // Elision + default: `[x, , y = 1]` over a 2-element array leaves y = 1.
+  assert engine.read_export(eng, ns, "gap") == Some(JsNumber(Finite(1.0)))
+  // §10.4.6.11 [[OwnPropertyKeys]]: exported names in sorted code-unit order.
+  assert engine.read_export(eng, ns, "keys") == Some(JsString("a,c,r,x,y"))
+}
+
 pub fn eval_module_syntax_error_test() {
   let assert Error(err) =
     engine.eval_module(

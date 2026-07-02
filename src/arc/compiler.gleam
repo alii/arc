@@ -208,12 +208,11 @@ fn collect_undef_export_names(
   }
   case declaration, item {
     Some(ast.VariableDeclaration(kind: ast.Var, declarations:)), _ ->
+      // Every name the declarator binds — `var {a, b} = o` hoists `a` and
+      // `b` exactly like `var a` does, so destructured names seed
+      // `undefined` too.
       list.fold(declarations, acc, fn(a, decl) {
-        case decl {
-          ast.VariableDeclarator(id: ast.IdentifierPattern(name:, ..), ..) ->
-            set.insert(a, name)
-          _ -> a
-        }
+        list.fold(ast.pattern_bound_names(decl.id), a, set.insert)
       })
     Some(ast.FunctionDeclaration(name: Some(name), ..)), _ ->
       set.insert(acc, name)
