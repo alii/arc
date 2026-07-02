@@ -4661,13 +4661,7 @@ fn step(
       // copying that ref means the closure shares the same BoxSlot.
       let captured_values =
         list.map(child_template.env_descriptors, fn(desc) {
-          case desc {
-            value.CaptureLocal(parent_index) ->
-              tuple_array.unsafe_get(parent_index, state.locals)
-            value.CaptureEnv(_parent_env_index) ->
-              // Transitive capture not yet implemented
-              JsUndefined
-          }
+          tuple_array.unsafe_get(desc.parent_index, state.locals)
         })
       let #(heap, closure_ref) =
         make_closure(

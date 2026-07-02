@@ -47,7 +47,10 @@ pub type CompiledModule {
     template: value.FuncTemplate,
     import_bindings: List(#(String, List(esm.ImportBinding))),
     export_entries: List(esm.ExportEntry),
-    scope_dict: Dict(String, Int),
+    /// Module-root name → local-slot map (compiler.CompiledModuleBody.
+    /// export_names): the linker looks exported local names up in it to
+    /// find the slot whose BoxSlot importers share.
+    export_names: Dict(String, Int),
     specifier_map: Dict(String, String),
     requested_modules: List(String),
     /// Exported local name → value the linker seeds into its BoxSlot before the
@@ -246,10 +249,12 @@ fn compile_source_module(
     summary:,
     specifier_map:,
   ) = node
-  use #(template, scope_dict, hoisted_funcs) <- result.map(
+  use body <- result.map(
     compiler.compile_module(program, sb, summary)
     |> result.map_error(fn(error) { CompileError(specifier:, error:) }),
   )
+  let compiler.CompiledModuleBody(template:, export_names:, hoisted_funcs:) =
+    body
 
   // The bundle format keeps flat specifier lists; both project out of the
   // summary's merged ModuleRequests.
@@ -268,7 +273,7 @@ fn compile_source_module(
     template:,
     import_bindings: summary.imports,
     export_entries: summary.exports,
-    scope_dict:,
+    export_names:,
     specifier_map:,
     requested_modules:,
     export_seeds: compiler.module_export_seeds(program, summary),
@@ -1313,10 +1318,7 @@ fn instantiate_hoisted_functions(
             tuple_array.unsafe_get(func_idx, compiled.template.functions)
           let captures =
             list.map(child.env_descriptors, fn(desc) {
-              case desc {
-                value.CaptureLocal(i) -> tuple_array.unsafe_get(i, frame)
-                value.CaptureEnv(_) -> JsUndefined
-              }
+              tuple_array.unsafe_get(desc.parent_index, frame)
             })
           let #(heap, closure) =
             interpreter.make_closure(heap, builtins, child, captures)
@@ -1753,7 +1755,7 @@ fn own_export_seeds(
   |> list.filter_map(fn(pair) {
     let #(local_name, box) = pair
     use <- bool.guard(set.contains(import_locals, local_name), Error(Nil))
-    case dict.get(compiled.scope_dict, local_name) {
+    case dict.get(compiled.export_names, local_name) {
       Ok(index) -> Ok(#(index, JsObject(box)))
       Error(Nil) -> Error(Nil)
     }

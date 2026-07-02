@@ -102,18 +102,33 @@ pub fn compile(
   case program {
     ast.Script(body) -> compile_script(body, sb, scope.LexLocal)
     ast.Module(_) -> {
-      use #(template, _scope_dict, _hoisted) <- result.map(compile_module(
-        program,
-        sb,
-        esm.analyze(program),
-      ))
-      template
+      use body <- result.map(compile_module(program, sb, esm.analyze(program)))
+      body.template
     }
   }
 }
 
-/// Compile a module, returning both the template and the scope dict
-/// (name → local index) for export extraction after evaluation.
+/// Everything `compile_module` produces for one ES module body: the root
+/// FuncTemplate plus the two pieces of compile-time scope information the
+/// module linker needs afterwards.
+pub type CompiledModuleBody {
+  CompiledModuleBody(
+    /// The module body's compiled function template.
+    template: FuncTemplate,
+    /// The module root scope's name → local-slot map. The linker looks up
+    /// each EXPORTED local name here to find the slot whose BoxSlot it
+    /// shares with importers (§16.2 live bindings). It carries every
+    /// root-scope binding, not only exports; the linker only queries the
+    /// exported ones.
+    export_names: Dict(String, Int),
+    /// Top-level hoisted FunctionDeclarations as `(name, func_index)` into
+    /// `template.functions`, in source order. The linker instantiates the
+    /// exported ones before evaluation so importers observe the closures.
+    hoisted_funcs: List(#(String, Int)),
+  )
+}
+
+/// Compile a module body to a `CompiledModuleBody`.
 ///
 /// Imports are compiled as pre-boxed captures in slots 0..N-1 (the same
 /// mechanism direct eval uses to alias a caller's variables). At link time
@@ -125,10 +140,7 @@ pub fn compile_module(
   program: ast.Program,
   sb: scope.ScopeBuilder,
   summary: esm.ModuleSummary,
-) -> Result(
-  #(FuncTemplate, Dict(String, Int), List(#(String, Int))),
-  CompileError,
-) {
+) -> Result(CompiledModuleBody, CompileError) {
   case program {
     ast.Script(_) -> Error(emit.Internal("compile_module called on Script"))
     ast.Module(body) -> {
@@ -233,10 +245,7 @@ fn compile_module_with_scope(
   sb: scope.ScopeBuilder,
   import_locals: List(String),
   forced_box: List(String),
-) -> Result(
-  #(FuncTemplate, Dict(String, Int), List(#(String, Int))),
-  CompileError,
-) {
+) -> Result(CompiledModuleBody, CompileError) {
   // Phase 1: finalize the parser-built scope tree. Imports occupy boxed
   // capture slots 0..N-1 (parent_names); exported locals are linker-seeded —
   // the linker pre-allocates each export's BoxSlot (so it can be shared with
@@ -274,7 +283,7 @@ fn compile_module_with_scope(
       opcode.script_perms,
       None,
     )
-  #(template, info.names, hoisted_funcs)
+  CompiledModuleBody(template:, export_names: info.names, hoisted_funcs:)
 }
 
 /// Compile in REPL mode: top-level let/const/class go to the global lexical

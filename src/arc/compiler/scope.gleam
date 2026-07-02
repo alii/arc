@@ -397,7 +397,7 @@ pub type SourceTag {
   /// A scope (any kind) created while parsing a switch `case` test
   /// expression — emit_switch evaluates ALL case tests after the
   /// hoisted fn-decls but before any case body (see
-  /// `ast_util.switch_emit_groups`).
+  /// `sb_reorder_switch_children`).
   TagSwitchTest
   /// Default — function expressions, arrows, nested blocks, catch,
   /// with, for-heads, class expressions in non-class-body context.

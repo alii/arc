@@ -178,13 +178,19 @@ pub type FuncTemplate {
   )
 }
 
-/// Describes how to capture one variable from the enclosing scope
-/// when creating a closure.
+/// Describes how to capture one variable from the enclosing scope when
+/// creating a closure: copy the parent frame's local at `parent_index`.
+///
+/// This is the ONLY capture mode the compiler emits. Transitive captures
+/// (a grandchild reading a grandparent's variable) never need their own
+/// mode because scope.analyze_captures flattens them: every intermediate
+/// function declares its own CaptureBinding for the name, so each
+/// MakeClosure only ever reaches ONE frame up. For boxed (mutated-
+/// after-capture) variables the parent local already holds the
+/// JsObject(box_ref), so copying it shares the BoxSlot.
 pub type EnvCapture {
   /// Capture from parent's local frame at the given index.
   CaptureLocal(parent_index: Int)
-  /// Capture from parent's EnvSlot at the given index (transitive).
-  CaptureEnv(parent_env_index: Int)
 }
 
 /// JS number representation. BEAM floats can't represent NaN or Infinity,
