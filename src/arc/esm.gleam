@@ -253,11 +253,17 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
     // the NAME (BoundNames = « fn »); only anonymous defaults use the
     // synthetic *default* binding.
     ast.ExportDefaultDeclaration(
-      declaration: ast.FunctionExpression(name: Some(name), ..),
+      declaration: ast.FunctionExpression(
+        name: Some(ast.NamedBinding(name:, ..)),
+        ..,
+      ),
       ..,
     ) -> [LocalExport(export_name: "default", local_name: name)]
     ast.ExportDefaultDeclaration(
-      declaration: ast.ClassExpression(name: Some(name), ..),
+      declaration: ast.ClassExpression(
+        name: Some(ast.NamedBinding(name:, ..)),
+        ..,
+      ),
       ..,
     ) -> [LocalExport(export_name: "default", local_name: name)]
     ast.ExportDefaultDeclaration(..) -> [
@@ -320,10 +326,10 @@ fn named_exports(
           LocalExport(export_name: name, local_name: name)
         })
       })
-    Some(ast.FunctionDeclaration(name: Some(name), ..)) -> [
+    Some(ast.FunctionDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..)) -> [
       LocalExport(export_name: name, local_name: name),
     ]
-    Some(ast.ClassDeclaration(name: Some(name), ..)) -> [
+    Some(ast.ClassDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..)) -> [
       LocalExport(export_name: name, local_name: name),
     ]
     _ -> []

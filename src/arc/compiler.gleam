@@ -214,13 +214,17 @@ fn collect_undef_export_names(
       list.fold(declarations, acc, fn(a, decl) {
         list.fold(ast.pattern_bound_names(decl.id), a, set.insert)
       })
-    Some(ast.FunctionDeclaration(name: Some(name), ..)), _ ->
-      set.insert(acc, name)
+    Some(ast.FunctionDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..)),
+      _
+    -> set.insert(acc, name)
     // `export default function fn() {}` — hoisted like any top-level
     // function declaration, so its binding seeds `undefined` (not TDZ).
     _,
       ast.ExportDefaultDeclaration(
-        declaration: ast.FunctionExpression(name: Some(name), ..),
+        declaration: ast.FunctionExpression(
+          name: Some(ast.NamedBinding(name:, ..)),
+          ..,
+        ),
         ..,
       )
     -> set.insert(acc, name)

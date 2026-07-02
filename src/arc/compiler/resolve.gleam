@@ -308,11 +308,8 @@ fn resolve_ops(
     [IrToObject, ..rest] -> resolve_ops(rest, labels, [opcode.ToObject, ..acc])
     [IrToStringVal, ..rest] ->
       resolve_ops(rest, labels, [opcode.ToStringVal, ..acc])
-    [IrGetTemplateObject(site, cooked, raw), ..rest] ->
-      resolve_ops(rest, labels, [
-        opcode.GetTemplateObject(site, cooked, raw),
-        ..acc
-      ])
+    [IrGetTemplateObject(site, quasis), ..rest] ->
+      resolve_ops(rest, labels, [opcode.GetTemplateObject(site, quasis), ..acc])
 
     // Resolved variable access (emitted directly from the scope tree)
     [IrGetLocal(index), ..rest] ->

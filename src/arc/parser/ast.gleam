@@ -16,6 +16,34 @@ pub type Span {
   Span(start: Int, end: Int)
 }
 
+/// A binding identifier together with the byte span of its name token in the
+/// source. Used wherever a declaration/expression carries an OPTIONAL name
+/// (function/class declarations and expressions): pairing the two makes
+/// "a name without its span" (or vice versa) unrepresentable — either both
+/// are present (`Some(NamedBinding(..))`) or neither is (`None`). Slicing the
+/// source by `span` returns the exact name text.
+pub type NamedBinding {
+  NamedBinding(name: String, span: Span)
+}
+
+/// One quasi (literal chunk) of a tagged template. `cooked` is the decoded
+/// template value — `None` when the quasi contains an invalid escape
+/// sequence, which is legal in tagged templates and yields `undefined`
+/// (§12.9.6). `raw` is the verbatim source text of the quasi (line endings
+/// normalized to LF per the spec's TRV definition). Pairing them per-quasi
+/// makes a cooked/raw length mismatch unrepresentable.
+pub type TemplateQuasi {
+  TemplateQuasi(cooked: Option(String), raw: String)
+}
+
+/// Which meta property a `MetaProperty` expression is. The grammar only has
+/// these two (§13.3.12 `new.target`, §13.3.13 `import.meta`), so anything
+/// else is unrepresentable.
+pub type MetaPropertyKind {
+  NewTarget
+  ImportMeta
+}
+
 /// A statement paired with the 1-based source line where it begins. Statement
 /// *lists* (block bodies, program bodies, switch-case bodies) hold `Stmt` so the
 /// compiler can emit `SetLine` ops and build line numbers for `Error.stack`.
@@ -117,23 +145,20 @@ pub type Statement {
   DebuggerStatement
   LabeledStatement(label: String, body: Statement)
   WithStatement(object: Expression, body: Statement)
-  /// `name_span` is the byte span of the declaration's name identifier (the
-  /// binding introduced by `function f`), or `None` when the declaration is
-  /// anonymous (only possible for `export default function`). Slicing the
-  /// source by this span returns the exact name text.
+  /// `name` is the declaration's name identifier (the binding introduced by
+  /// `function f`) with its source span, or `None` when the declaration is
+  /// anonymous (only possible for `export default function`).
   FunctionDeclaration(
-    name: Option(String),
-    name_span: Option(Span),
+    name: Option(NamedBinding),
     params: List(Pattern),
     body: Statement,
     is_generator: Bool,
     is_async: Bool,
   )
-  /// `name_span` is the byte span of the class name identifier, or `None` for
+  /// `name` is the class name identifier with its source span, or `None` for
   /// an anonymous class (`export default class`).
   ClassDeclaration(
-    name: Option(String),
-    name_span: Option(Span),
+    name: Option(NamedBinding),
     super_class: Option(Expression),
     body: List(ClassElement),
   )
@@ -237,12 +262,7 @@ pub type Expression {
     left: Expression,
     right: Expression,
   )
-  UnaryExpression(
-    span: Span,
-    operator: UnaryOp,
-    prefix: Bool,
-    argument: Expression,
-  )
+  UnaryExpression(span: Span, operator: UnaryOp, argument: Expression)
   UpdateExpression(
     span: Span,
     operator: UpdateOp,
@@ -284,14 +304,13 @@ pub type Expression {
   SuperExpression(span: Span)
   ArrayExpression(span: Span, elements: List(Option(Expression)))
   ObjectExpression(span: Span, properties: List(Property))
-  /// `name_span` is the byte span of the optional self-name identifier in a
-  /// named function expression (`const f = function g() {}` -> span of `g`),
-  /// or `None` for an anonymous function expression. The self-name binding is
-  /// visible only inside the expression body (§13.2.5.5).
+  /// `name` is the optional self-name identifier (with its span) in a named
+  /// function expression (`const f = function g() {}` -> `g`), or `None` for
+  /// an anonymous function expression. The self-name binding is visible only
+  /// inside the expression body (§13.2.5.5).
   FunctionExpression(
     span: Span,
-    name: Option(String),
-    name_span: Option(Span),
+    name: Option(NamedBinding),
     params: List(Pattern),
     body: Statement,
     is_generator: Bool,
@@ -303,13 +322,12 @@ pub type Expression {
     body: ArrowBody,
     is_async: Bool,
   )
-  /// `name_span` is the byte span of the optional class-expression name
-  /// (`const C = class D {}` -> span of `D`), or `None` when anonymous. The
-  /// name binding is visible only inside the class body.
+  /// `name` is the optional class-expression name (with its span,
+  /// `const C = class D {}` -> `D`), or `None` when anonymous. The name
+  /// binding is visible only inside the class body.
   ClassExpression(
     span: Span,
-    name: Option(String),
-    name_span: Option(Span),
+    name: Option(NamedBinding),
     super_class: Option(Expression),
     body: List(ClassElement),
   )
@@ -322,19 +340,17 @@ pub type Expression {
     quasis: List(String),
     expressions: List(Expression),
   )
-  /// Tagged template: tag`raw0 ${e0} raw1`. `cooked` holds the decoded
-  /// template values (None when a quasi contains an invalid escape sequence —
-  /// legal in tagged templates, the cooked entry becomes undefined). `raw`
-  /// holds the verbatim source text of each quasi (line endings normalized
-  /// to LF per the spec's TRV definition).
+  /// Tagged template: tag`raw0 ${e0} raw1`. Each quasi carries its cooked
+  /// value (None for an invalid escape sequence — legal in tagged templates,
+  /// the entry becomes undefined) alongside its verbatim raw text.
   TaggedTemplateExpression(
     span: Span,
     tag: Expression,
-    cooked: List(Option(String)),
-    raw: List(String),
+    quasis: List(TemplateQuasi),
     expressions: List(Expression),
   )
-  MetaProperty(span: Span, meta: String, property: String)
+  /// `new.target` / `import.meta` (§13.3.12, §13.3.13).
+  MetaProperty(span: Span, kind: MetaPropertyKind)
   ImportExpression(
     span: Span,
     source: Expression,
@@ -350,12 +366,7 @@ pub type Expression {
   /// compiler when lowering TaggedTemplateExpression: evaluates to the
   /// per-site cached template object (GetTemplateObject, §13.2.8.4).
   /// `site` is a globally unique call-site id baked in at compile time.
-  IntrinsicTemplateObject(
-    span: Span,
-    site: Int,
-    cooked: List(Option(String)),
-    raw: List(String),
-  )
+  IntrinsicTemplateObject(span: Span, site: Int, quasis: List(TemplateQuasi))
 }
 
 /// Universal accessor for the source span of any `Expression`. Equivalent to
@@ -364,6 +375,12 @@ pub type Expression {
 /// value in `list.map` and similar.
 pub fn expression_span(e: Expression) -> Span {
   e.span
+}
+
+/// The plain name text of an optional `NamedBinding` — for the many consumers
+/// (emit, esm, compiler) that only need the identifier, not its span.
+pub fn binding_name(binding: Option(NamedBinding)) -> Option(String) {
+  option.map(binding, fn(b) { b.name })
 }
 
 /// Module request phase, shared by static ImportDeclarations and dynamic

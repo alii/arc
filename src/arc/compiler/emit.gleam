@@ -2829,7 +2829,13 @@ fn collect_hoisted_funcs(
     list.try_fold(stmts, #(e, []), fn(acc, located) {
       let #(e, funcs) = acc
       case ast_util.peel_labels(located.statement) {
-        ast.FunctionDeclaration(Some(name), _, params, body, is_gen, is_async) -> {
+        ast.FunctionDeclaration(
+          Some(ast.NamedBinding(name, _)),
+          params,
+          body,
+          is_gen,
+          is_async,
+        ) -> {
           use #(e, child) <- result.map(compile_function_body(
             e,
             Some(name),
@@ -3746,7 +3752,7 @@ fn emit_stmt_inner(
       }
     }
 
-    ast.FunctionDeclaration(name, _, _, _, is_generator, is_async) -> {
+    ast.FunctionDeclaration(name, _, _, is_generator, is_async) -> {
       // The closure itself was instantiated during hoisting (function/program
       // top level) or BlockDeclarationInstantiation (block level). The only
       // runtime effect at the statement's position is Annex B §B.3.2.6:
@@ -3756,7 +3762,7 @@ fn emit_stmt_inner(
       // §B.3.2/§B.3.3 cover plain functions only — generators, async
       // functions, and async generators are never promoted.
       case name {
-        Some(fname) -> {
+        Some(ast.NamedBinding(name: fname, ..)) -> {
           let promote =
             e.in_block
             && !e.strict
@@ -3772,12 +3778,18 @@ fn emit_stmt_inner(
       }
     }
 
-    ast.ClassDeclaration(name, _, super_class, body) -> {
+    ast.ClassDeclaration(name, super_class, body) -> {
       case name {
-        Some(n) -> {
+        Some(ast.NamedBinding(name: n, ..)) -> {
           // Class names are block-scoped (like let)
           let e = declare_lex(e, n, False)
-          use e <- result.map(compile_class(e, name, name, super_class, body))
+          use e <- result.map(compile_class(
+            e,
+            Some(n),
+            Some(n),
+            super_class,
+            body,
+          ))
           // compile_class leaves [ctor] on stack; init pops it
           init_lex(e, n)
         }
@@ -4068,7 +4080,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Unary expressions
     // typeof uses ast_util.unwrap_parens because typeof (x) === typeof x per spec.
-    ast.UnaryExpression(_, ast.TypeOf, _, arg) ->
+    ast.UnaryExpression(_, ast.TypeOf, arg) ->
       case ast_util.unwrap_parens(arg) {
         ast.Identifier(name:, ..) -> {
           // typeof x must NOT throw for undeclared variables
@@ -4081,7 +4093,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
 
     // delete expression — uses ast_util.unwrap_parens because delete (x) === delete x.
-    ast.UnaryExpression(_, ast.Delete, _, arg) ->
+    ast.UnaryExpression(_, ast.Delete, arg) ->
       case ast_util.unwrap_parens(arg) {
         // §13.5.1.2 step 5.b — delete on a super reference is an
         // unconditional ReferenceError. Evaluate `this` (TDZ check) and the
@@ -4125,7 +4137,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
       }
 
-    ast.UnaryExpression(_, op, _, arg) -> {
+    ast.UnaryExpression(_, op, arg) -> {
       use e <- result.map(emit_expr(e, arg))
       emit_ir(e, IrUnaryOp(translate_unaryop(op)))
     }
@@ -4572,8 +4584,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
 
     // Function expression
-    ast.FunctionExpression(_, name, _, params, body, is_gen, is_async) ->
-      emit_function_closure(e, name, params, body, is_gen, is_async, True)
+    ast.FunctionExpression(_, name, params, body, is_gen, is_async) ->
+      emit_function_closure(
+        e,
+        ast.binding_name(name),
+        params,
+        body,
+        is_gen,
+        is_async,
+        True,
+      )
 
     // Arrow function expression
     ast.ArrowFunctionExpression(_, params, body, is_async) ->
@@ -4584,8 +4604,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.ThisExpression(_) -> Ok(get_this(e))
 
     // §13.3.12 new.target — reads the lexical [[NewTarget]] slot.
-    ast.MetaProperty(_, "new", "target") ->
+    ast.MetaProperty(_, ast.NewTarget) ->
       Ok(get_lexical(e, opcode.RefNewTarget))
+
+    // §13.3.13 import.meta — the per-module meta object is not plumbed
+    // through the runtime yet, so this is a typed unsupported-feature error
+    // rather than a silent miscompile.
+    ast.MetaProperty(_, ast.ImportMeta) -> Error(Unsupported("import.meta"))
 
     // New expression: new Foo(args). CallConstructor's stack contract is
     // [args, new_target, ctor] — for plain `new`, newTarget == ctor, so Dup.
@@ -4601,8 +4626,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_template_literal(e, quasis, expressions)
 
     // Class expression
-    ast.ClassExpression(_, name, _, super_class, body) ->
+    ast.ClassExpression(_, name, super_class, body) -> {
+      let name = ast.binding_name(name)
       compile_class(e, name, name, super_class, body)
+    }
 
     // Yield expression (inside generator functions)
     ast.YieldExpression(_, argument, is_delegate) -> {
@@ -4690,9 +4717,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // the per-site template object as the first argument, reusing the
     // regular CallExpression paths so this-binding works (obj.tag`x` calls
     // tag with this = obj, §13.3.6.2 EvaluateCall).
-    ast.TaggedTemplateExpression(tag:, cooked:, raw:, expressions:, span:) -> {
+    ast.TaggedTemplateExpression(tag:, quasis:, expressions:, span:) -> {
       let site = unique_positive_integer()
-      let template = ast.IntrinsicTemplateObject(site:, cooked:, raw:, span:)
+      let template = ast.IntrinsicTemplateObject(site:, quasis:, span:)
       // §13.3.11.1 step 1 note: a tagged template is never a direct eval —
       // wrap a bare `eval` tag in parens to dodge the IrCallEval path.
       let tag = case tag {
@@ -4708,8 +4735,15 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         ]),
       )
     }
-    ast.IntrinsicTemplateObject(site:, cooked:, raw:, span: _) ->
-      Ok(emit_ir(e, opcode.IrGetTemplateObject(site, cooked, raw)))
+    ast.IntrinsicTemplateObject(site:, quasis:, span: _) -> {
+      // Mirror the parser-side quasis into the VM's opcode-payload type —
+      // the VM layer does not depend on the parser AST.
+      let quasis =
+        list.map(quasis, fn(q) {
+          opcode.TemplateQuasi(cooked: q.cooked, raw: q.raw)
+        })
+      Ok(emit_ir(e, opcode.IrGetTemplateObject(site, quasis)))
+    }
 
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
@@ -4902,7 +4936,7 @@ fn emit_named_expr(
     ast.ParenthesizedExpression(_, inner) -> emit_named_expr(e, inner, name)
     // Anonymous function expression → bake name (no self-name binding —
     // §8.4 NamedEvaluation does not create one)
-    ast.FunctionExpression(_, None, _, params, body, is_gen, is_async) ->
+    ast.FunctionExpression(_, None, params, body, is_gen, is_async) ->
       emit_function_closure(
         e,
         Some(name),
@@ -4917,7 +4951,7 @@ fn emit_named_expr(
       emit_arrow_closure(e, Some(name), params, body, is_async)
     // Anonymous class expression → bake `.name` only; NO inner binding
     // (§8.4 NamedEvaluation step 2 — classBinding is undefined).
-    ast.ClassExpression(_, None, _, super_class, body) ->
+    ast.ClassExpression(_, None, super_class, body) ->
       compile_class(e, None, Some(name), super_class, body)
     // Not anonymous → emit normally (named fn keeps its own name)
     _ -> emit_expr(e, expr)
@@ -5038,7 +5072,7 @@ fn emit_method_value(
   name: Option(String),
 ) -> Result(Emitter, EmitError) {
   case value {
-    ast.FunctionExpression(_, _, _, params, body, is_gen, is_async) ->
+    ast.FunctionExpression(_, _, params, body, is_gen, is_async) ->
       make_method_closure(e, name, params, body, is_gen, is_async)
     _ -> emit_expr(e, value)
   }
@@ -7101,7 +7135,7 @@ fn emit_class_methods(
     // Static: install on the constructor right now as an own private element.
     ast.ClassMethod(
       key: ast.Identifier(name: "#" <> rest, ..),
-      value: ast.FunctionExpression(_, _, _, params, body, is_gen, is_async),
+      value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
       kind:,
       ..,
     ) -> {
@@ -7139,14 +7173,14 @@ fn emit_class_methods(
     // Static-string key: name() {}, "name"() {}, get name() {}, set name(v) {}
     ast.ClassMethod(
       key: ast.Identifier(name:, ..),
-      value: ast.FunctionExpression(_, _, _, params, body, is_gen, is_async),
+      value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
       kind:,
       computed: False,
       ..,
     )
     | ast.ClassMethod(
         key: ast.StringExpression(_, name),
-        value: ast.FunctionExpression(_, _, _, params, body, is_gen, is_async),
+        value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
         kind:,
         computed: False,
         ..,
@@ -7182,7 +7216,7 @@ fn emit_class_methods(
     // implemented (matches object-literal computed methods).
     ast.ClassMethod(
       key:,
-      value: ast.FunctionExpression(_, _, _, params, body, is_gen, is_async),
+      value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
       kind:,
       ..,
     ) -> {

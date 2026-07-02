@@ -158,7 +158,7 @@ pub fn peel_labels(stmt: ast.Statement) -> ast.Statement {
 pub fn direct_fn_names(stmts: List(ast.StmtWithLine)) -> List(String) {
   list.filter_map(stmts, fn(located) {
     case peel_labels(located.statement) {
-      ast.FunctionDeclaration(Some(name), ..) -> Ok(name)
+      ast.FunctionDeclaration(Some(ast.NamedBinding(name:, ..)), ..) -> Ok(name)
       _ -> Error(Nil)
     }
   })
@@ -203,7 +203,9 @@ pub fn collect_top_lex_names(
       | ast.VariableDeclaration(ast.Using, declarators)
       | ast.VariableDeclaration(ast.AwaitUsing, declarators) ->
         declarator_names(declarators) |> list.map(fn(n) { #(n, True) })
-      ast.ClassDeclaration(name: Some(name), ..) -> [#(name, False)]
+      ast.ClassDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..) -> [
+        #(name, False),
+      ]
       _ -> []
     }
   })
@@ -322,7 +324,6 @@ pub fn module_items_to_stmts(
       ast.ExportDefaultDeclaration(
         declaration: ast.FunctionExpression(
           name: Some(_) as name,
-          name_span:,
           params:,
           body:,
           is_generator:,
@@ -335,7 +336,6 @@ pub fn module_items_to_stmts(
           0,
           ast.FunctionDeclaration(
             name:,
-            name_span:,
             params:,
             body:,
             is_generator:,
@@ -345,17 +345,13 @@ pub fn module_items_to_stmts(
       ast.ExportDefaultDeclaration(
         declaration: ast.ClassExpression(
           name: Some(_) as name,
-          name_span:,
           super_class:,
           body:,
           span: _,
         ),
         ..,
       ) ->
-        Ok(ast.StmtWithLine(
-          0,
-          ast.ClassDeclaration(name:, name_span:, super_class:, body:),
-        ))
+        Ok(ast.StmtWithLine(0, ast.ClassDeclaration(name:, super_class:, body:)))
       ast.ExportDefaultDeclaration(declaration: expr, span:) ->
         Ok(ast.StmtWithLine(0, anon_default(expr, span)))
       ast.ImportDeclaration(..)

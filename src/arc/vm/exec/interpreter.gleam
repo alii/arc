@@ -2202,7 +2202,7 @@ fn step(
     // { writable: false, enumerable: true, configurable: false }; both are
     // stored as dict overrides so freeze semantics (writes reject, deletes
     // reject, isFrozen reports true) hold.
-    opcode.GetTemplateObject(site, cooked, raw) -> {
+    opcode.GetTemplateObject(site, quasis) -> {
       case dict.get(state.ctx.template_objects, site) {
         Ok(ref) ->
           Ok(
@@ -2213,13 +2213,13 @@ fn step(
             ),
           )
         Error(Nil) -> {
-          let count = list.length(raw)
+          let count = list.length(quasis)
           // Step 10: raw array — frozen Array of the verbatim quasi strings.
           let #(heap, raw_ref) =
             heap.alloc(
               state.heap,
               frozen_array_slot(
-                list.map(raw, JsString),
+                list.map(quasis, fn(q) { JsString(q.raw) }),
                 count,
                 [],
                 state.builtins.array.prototype,
@@ -2229,8 +2229,8 @@ fn step(
           // values (undefined for invalid escapes), with a non-enumerable,
           // non-writable, non-configurable "raw" property.
           let cooked_values =
-            list.map(cooked, fn(c) {
-              case c {
+            list.map(quasis, fn(q) {
+              case q.cooked {
                 Some(s) -> JsString(s)
                 None -> JsUndefined
               }

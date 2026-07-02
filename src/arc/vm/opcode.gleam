@@ -14,6 +14,16 @@ import gleam/option.{type Option, None}
 // function object at call-setup (FunctionObject.home_object) and cached here
 // per-frame so super-reference reads are pure local/capture loads.
 
+/// One quasi (literal chunk) of a tagged template, as carried by
+/// GetTemplateObject. `cooked` is the decoded template value (`None` when
+/// the quasi contains an invalid escape sequence — its entry becomes
+/// undefined, §12.9.6); `raw` is the verbatim source text. Mirrors the
+/// parser's `ast.TemplateQuasi` so the VM layer stays independent of the
+/// parser AST while a cooked/raw length mismatch stays unrepresentable.
+pub type TemplateQuasi {
+  TemplateQuasi(cooked: Option(String), raw: String)
+}
+
 /// Which lexical pseudo-binding a get_lexical / DeclareLexical refers to.
 pub type LexicalRef {
   RefThis
@@ -232,10 +242,10 @@ pub type Op {
   /// tagged-template call site, creating + caching it on first evaluation.
   /// `site` is a globally unique id baked in at compile time, so each parse
   /// of the same source (e.g. repeated eval) gets distinct template objects
-  /// while re-execution of the same compiled site reuses one. `cooked` holds
-  /// the template values (None → undefined for invalid escape sequences),
-  /// `raw` the verbatim quasi text.
-  GetTemplateObject(site: Int, cooked: List(Option(String)), raw: List(String))
+  /// while re-execution of the same compiled site reuses one. Each quasi
+  /// pairs the template value (None → undefined for an invalid escape
+  /// sequence) with its verbatim raw text.
+  GetTemplateObject(site: Int, quasis: List(TemplateQuasi))
   /// §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against the with
   /// object. Stack: [obj, ..] — if obj has `name` (and it is not blocked by
   /// @@unscopables), replace obj with Get(obj, name) and jump to `target`;
@@ -721,11 +731,7 @@ pub type IrOp {
   /// Lowers 1:1 to ToStringVal (template literal substitutions).
   IrToStringVal
   /// Lowers 1:1 to GetTemplateObject (tagged templates, §13.2.8.4).
-  IrGetTemplateObject(
-    site: Int,
-    cooked: List(Option(String)),
-    raw: List(String),
-  )
+  IrGetTemplateObject(site: Int, quasis: List(TemplateQuasi))
   IrWithGetVar(name: String, label: Int)
   IrWithGetVarThis(name: String, label: Int)
   IrWithPutVar(name: String, label: Int)

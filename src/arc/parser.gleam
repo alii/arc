@@ -165,6 +165,17 @@ type LabelUse {
   ContinueLabel
 }
 
+/// The `get` / `set` accessor prefix (if any) detected ahead of a method
+/// definition's property name, in both object literals and class bodies.
+type AccessorPrefix {
+  /// No `get`/`set` prefix — a plain method (or field / data property).
+  NoAccessor
+  /// `get name(...) { ... }`
+  GetPrefix
+  /// `set name(...) { ... }`
+  SetPrefix
+}
+
 /// Internal parser state: remaining tokens + the line of the last consumed token.
 type P {
   P(
@@ -361,31 +372,17 @@ fn statement_to_default_export_expr(
   decl_span: ast.Span,
 ) -> ast.Expression {
   case stmt {
-    ast.FunctionDeclaration(
-      name:,
-      name_span:,
-      params:,
-      body:,
-      is_generator:,
-      is_async:,
-    ) ->
+    ast.FunctionDeclaration(name:, params:, body:, is_generator:, is_async:) ->
       ast.FunctionExpression(
         name:,
-        name_span:,
         params:,
         body:,
         is_generator:,
         is_async:,
         span: decl_span,
       )
-    ast.ClassDeclaration(name:, name_span:, super_class:, body:) ->
-      ast.ClassExpression(
-        name:,
-        name_span:,
-        super_class:,
-        body:,
-        span: decl_span,
-      )
+    ast.ClassDeclaration(name:, super_class:, body:) ->
+      ast.ClassExpression(name:, super_class:, body:, span: decl_span)
     _ -> ast.Identifier(name: "*default*", span: default_span)
   }
 }
@@ -2658,12 +2655,11 @@ fn parse_function_decl_impl(
   use p7 <- result.try(p6)
   // The name identifier is the current token of `p3` (consumed above by
   // `eat_optional_name`), so `span_of(p3)` covers exactly the name text.
-  let #(name_opt, name_span) = optional_name_pair(func_name, span_of(p3))
+  let name_opt = optional_named_binding(func_name, span_of(p3))
   Ok(#(
     p7,
     ast.FunctionDeclaration(
       name: name_opt,
-      name_span: name_span,
       params: params,
       body: body,
       is_generator: is_generator,
@@ -3029,13 +3025,13 @@ fn parse_setter_params_and_body(
 fn parse_method_params_body(
   p: P,
   outer: P,
-  accessor_kind: String,
+  accessor_kind: AccessorPrefix,
   is_generator: Bool,
   is_async: Bool,
   is_constructor: Bool,
   has_extends: Bool,
 ) -> Result(#(P, List(ast.Pattern), ast.Statement), ParseError) {
-  let is_accessor = accessor_kind == "get" || accessor_kind == "set"
+  let is_accessor = accessor_kind != NoAccessor
   let ctx =
     enter_method_context(
       p,
@@ -3045,9 +3041,9 @@ fn parse_method_params_body(
       has_extends,
     )
   case accessor_kind {
-    "get" -> parse_getter_params_and_body(ctx)
-    "set" -> parse_setter_params_and_body(ctx)
-    _ -> parse_function_params_and_body(ctx)
+    GetPrefix -> parse_getter_params_and_body(ctx)
+    SetPrefix -> parse_setter_params_and_body(ctx)
+    NoAccessor -> parse_function_params_and_body(ctx)
   }
   |> restore_context_fn(outer)
 }
@@ -3167,15 +3163,15 @@ fn get_simple_binding_name(p: P) -> String {
   }
 }
 
-/// Convert an optional name (empty string = absent) and its span into a
-/// `#(Option(String), Option(Span))` pair for AST construction.
-fn optional_name_pair(
+/// Convert an optional name (empty string = absent) and its span into an
+/// `Option(NamedBinding)` for AST construction.
+fn optional_named_binding(
   name: String,
   span: ast.Span,
-) -> #(Option(String), Option(ast.Span)) {
+) -> Option(ast.NamedBinding) {
   case name {
-    "" -> #(None, None)
-    n -> #(Some(n), Some(span))
+    "" -> None
+    n -> Some(ast.NamedBinding(name: n, span:))
   }
 }
 
@@ -3230,10 +3226,12 @@ fn parse_class_decl_impl(
   name_required: Bool,
 ) -> Result(#(P, ast.Statement), ParseError) {
   // Class declarations are always lexical bindings (like let/const).
-  use #(p2, name, name_span, super_class, body) <- result.map(
-    parse_class_head_and_tail(p, name_required, True),
-  )
-  #(p2, ast.ClassDeclaration(name:, name_span:, super_class:, body:))
+  use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
+    p,
+    name_required,
+    True,
+  ))
+  #(p2, ast.ClassDeclaration(name:, super_class:, body:))
 }
 
 /// Shared core for class declarations and class expressions: starting at the
@@ -3246,13 +3244,7 @@ fn parse_class_head_and_tail(
   name_required: Bool,
   register_name: Bool,
 ) -> Result(
-  #(
-    P,
-    Option(String),
-    Option(ast.Span),
-    Option(ast.Expression),
-    List(ast.ClassElement),
-  ),
+  #(P, Option(ast.NamedBinding), Option(ast.Expression), List(ast.ClassElement)),
   ParseError,
 ) {
   let p2 = advance(p)
@@ -3274,12 +3266,12 @@ fn parse_class_head_and_tail(
         advance(p3),
         Some(name),
       ))
-      #(p4, Some(name), Some(name_span), super_class, body)
+      #(p4, Some(ast.NamedBinding(name:, span: name_span)), super_class, body)
     }
     False -> {
       use <- bool.guard(name_required, Error(ExpectedIdentifier(pos_of(p2))))
       use #(p3, super_class, body) <- result.map(parse_class_tail(p2, None))
-      #(p3, None, None, super_class, body)
+      #(p3, None, super_class, body)
     }
   }
 }
@@ -3866,9 +3858,9 @@ fn parse_class_element(
   use Nil <- result.try(case is_named_constructor {
     True ->
       case class_accessor_kind {
-        "get" -> Error(ClassConstructorNotGetter(pos_of(p5)))
-        "set" -> Error(ClassConstructorNotSetter(pos_of(p5)))
-        _ -> {
+        GetPrefix -> Error(ClassConstructorNotGetter(pos_of(p5)))
+        SetPrefix -> Error(ClassConstructorNotSetter(pos_of(p5)))
+        NoAccessor -> {
           use <- bool.guard(
             is_generator,
             Error(ClassConstructorGenerator(pos_of(p5))),
@@ -3913,7 +3905,7 @@ fn parse_class_element_body(
   has_extends: Bool,
   is_method_async: Bool,
   is_generator: Bool,
-  class_accessor_kind: String,
+  class_accessor_kind: AccessorPrefix,
   is_constructor: Bool,
   is_static: Bool,
 ) -> Result(#(P, Bool, ast.ClassElement, ClassElementScopes), ParseError) {
@@ -3940,9 +3932,9 @@ fn parse_class_element_body(
         True -> ast.MethodConstructor
         False ->
           case class_accessor_kind {
-            "get" -> ast.MethodGet
-            "set" -> ast.MethodSet
-            _ -> ast.MethodMethod
+            GetPrefix -> ast.MethodGet
+            SetPrefix -> ast.MethodSet
+            NoAccessor -> ast.MethodMethod
           }
       }
       // parse_method_params_body → enter_method_context →
@@ -3972,7 +3964,6 @@ fn parse_class_element_body(
           key: key_expr,
           value: ast.FunctionExpression(
             name: None,
-            name_span: None,
             params: params,
             body: body,
             is_generator: is_generator,
@@ -4882,7 +4873,6 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       P(..p3, last_expr_assignable: False, last_expr_is_assignment: False),
       ast.UnaryExpression(
         operator: op,
-        prefix: True,
         argument: arg,
         span: span_from(start, p3),
       ),
@@ -5153,8 +5143,7 @@ fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
                     )
                   let meta =
                     ast.MetaProperty(
-                      meta: "new",
-                      property: "target",
+                      kind: ast.NewTarget,
                       span: span_from(pos_of(p), p4),
                     )
                   parse_call_chain(p4, meta)
@@ -5324,8 +5313,7 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               Ok(#(
                 p4,
                 ast.MetaProperty(
-                  meta: "import",
-                  property: "meta",
+                  kind: ast.ImportMeta,
                   span: span_from(pos_of(p), p4),
                 ),
               ))
@@ -5568,7 +5556,7 @@ fn parse_tagged_template(
   p: P,
   tag: ast.Expression,
 ) -> Result(#(P, ast.Expression), ParseError) {
-  use #(p, cooked, raw, expressions) <- result.map(parse_tagged_template_raw(
+  use #(p, quasis, expressions) <- result.map(parse_tagged_template_raw(
     p,
     peek_value(p),
   ))
@@ -5576,8 +5564,7 @@ fn parse_tagged_template(
   let expr =
     ast.TaggedTemplateExpression(
       tag:,
-      cooked:,
-      raw:,
+      quasis:,
       expressions:,
       span: span_from(tag.span.start, p2),
     )
@@ -6019,7 +6006,7 @@ fn parse_method_prefix(
   p: P,
   is_terminator: fn(TokenKind) -> Bool,
   star_ends_accessor: Bool,
-) -> #(P, Bool, String, Bool) {
+) -> #(P, Bool, AccessorPrefix, Bool) {
   let is_async = case peek(p) {
     Async -> !is_terminator(peek_at(p, 1))
     _ -> False
@@ -6030,23 +6017,27 @@ fn parse_method_prefix(
   }
   let accessor_kind = case peek(p), peek_had_escape(p) {
     Identifier, False -> {
-      let val = peek_value(p)
-      case val {
-        "get" | "set" -> {
+      let prefix = case peek_value(p) {
+        "get" -> GetPrefix
+        "set" -> SetPrefix
+        _ -> NoAccessor
+      }
+      case prefix {
+        NoAccessor -> NoAccessor
+        GetPrefix | SetPrefix -> {
           let next = peek_at(p, 1)
           case is_terminator(next) || { star_ends_accessor && next == Star } {
-            True -> ""
-            False -> val
+            True -> NoAccessor
+            False -> prefix
           }
         }
-        _ -> ""
       }
     }
-    _, _ -> ""
+    _, _ -> NoAccessor
   }
   let p = case accessor_kind {
-    "" -> p
-    _ -> advance(p)
+    NoAccessor -> p
+    GetPrefix | SetPrefix -> advance(p)
   }
   let is_generator = peek(p) == Star
   let p = case is_generator {
@@ -6104,7 +6095,7 @@ fn parse_object_property_value(
   p: P,
   p5: P,
   has_async: Bool,
-  accessor_kind: String,
+  accessor_kind: AccessorPrefix,
   is_generator: Bool,
   prop_name_kind: TokenKind,
   prop_name_value: String,
@@ -6119,9 +6110,9 @@ fn parse_object_property_value(
       // Methods make the object invalid as destructuring target
       let p5 = P(..p5, has_invalid_pattern: True)
       let #(kind, is_method) = case accessor_kind {
-        "get" -> #(ast.Get, False)
-        "set" -> #(ast.Set, False)
-        _ -> #(ast.Init, True)
+        GetPrefix -> #(ast.Get, False)
+        SetPrefix -> #(ast.Set, False)
+        NoAccessor -> #(ast.Init, True)
       }
       use #(p6, params, body) <- result.try(parse_method_params_body(
         p5,
@@ -6138,7 +6129,6 @@ fn parse_object_property_value(
           key: key_expr,
           value: ast.FunctionExpression(
             name: None,
-            name_span: None,
             params: params,
             body: body,
             is_generator: is_generator,
@@ -6274,12 +6264,11 @@ fn parse_function_expression(
       )
   }
   // The optional self-name identifier is the current token of `p3`.
-  let #(name_opt, name_span) = optional_name_pair(func_name, span_of(p3))
+  let name_opt = optional_named_binding(func_name, span_of(p3))
   Ok(#(
     p5,
     ast.FunctionExpression(
       name: name_opt,
-      name_span: name_span,
       params: params,
       body: body,
       is_generator: is_generator,
@@ -6291,18 +6280,14 @@ fn parse_function_expression(
 
 fn parse_class_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let start = pos_of(p)
-  use #(p2, name, name_span, super_class, body) <- result.map(
-    parse_class_head_and_tail(p, False, False),
-  )
+  use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
+    p,
+    False,
+    False,
+  ))
   #(
     p2,
-    ast.ClassExpression(
-      name:,
-      name_span:,
-      super_class:,
-      body:,
-      span: span_from(start, p2),
-    ),
+    ast.ClassExpression(name:, super_class:, body:, span: span_from(start, p2)),
   )
 }
 
@@ -7317,25 +7302,22 @@ fn parse_template_raw(
   #(p, cooked, expressions)
 }
 
-/// Parse a raw template literal string into TAGGED-template parts: cooked
-/// quasis (None for quasis with invalid escapes), raw quasis (verbatim,
-/// line-ending normalized), and expression ASTs.
+/// Parse a raw template literal string into TAGGED-template parts: quasis
+/// (each pairing the cooked value — None for an invalid escape — with the
+/// verbatim, line-ending-normalized raw text) and expression ASTs.
 fn parse_tagged_template_raw(
   p: P,
   raw: String,
-) -> Result(
-  #(P, List(Option(String)), List(String), List(ast.Expression)),
-  ParseError,
-) {
+) -> Result(#(P, List(ast.TemplateQuasi), List(ast.Expression)), ParseError) {
   use #(p, raw_quasis, expressions) <- result.map(parse_template_parts(p, raw))
-  let cooked =
+  let quasis =
     list.map(raw_quasis, fn(q) {
       case cook_template_string(q) {
-        Ok(s) -> Some(s)
-        Error(Nil) -> None
+        Ok(s) -> ast.TemplateQuasi(cooked: Some(s), raw: q)
+        Error(Nil) -> ast.TemplateQuasi(cooked: None, raw: q)
       }
     })
-  #(p, cooked, raw_quasis, expressions)
+  #(p, quasis, expressions)
 }
 
 /// Shared splitting + substitution parsing for templates. Returns RAW quasi
