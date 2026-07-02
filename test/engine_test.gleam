@@ -521,9 +521,12 @@ pub fn console_format_edge_cases_test() {
 }
 
 pub fn console_format_specifier_throw_propagates_test() {
-  // %s / %d / %i / %f run user `toString` / `valueOf`; a throw there must
-  // escape console.log as an abrupt completion (Node behaviour), not be
-  // swallowed into a fallback string.
+  // A USER throw raised by a specifier's coercion must escape console.log as
+  // an abrupt completion (Node behaviour), not be swallowed into a fallback
+  // string. Which user hook a specifier can reach follows its spec function:
+  // %s = String() and %d = Number(), so toString (%s) / valueOf (%d) throws
+  // escape; %i/%f = parseInt/parseFloat, which coerce via ToString only, so
+  // a toString throw escapes there too.
   let eng = fmt_engine()
   assert assert_eval(
       eng,
@@ -537,9 +540,14 @@ pub fn console_format_specifier_throw_propagates_test() {
     == JsNumber(Finite(2.0))
   assert assert_eval(
       eng,
-      "try { fmt('%f', {valueOf(){ throw 3 }}); 'no throw' } catch (e) { e }",
+      "try { fmt('%f', {toString(){ throw 3 }}); 'no throw' } catch (e) { e }",
     )
     == JsNumber(Finite(3.0))
+  assert assert_eval(
+      eng,
+      "try { fmt('%i', {toString(){ throw 5 }}); 'no throw' } catch (e) { e }",
+    )
+    == JsNumber(Finite(5.0))
   // The real console.log path (Logger -> Formatter) propagates too.
   assert assert_eval(
       eng,
@@ -553,6 +561,14 @@ pub fn console_format_specifier_throw_propagates_test() {
       "try { fmt('%O', {toString(){ throw 1 }}); 'no throw' } catch (e) { e }",
     )
     == JsString("no throw")
+  // %i/%f are %parseInt%/%parseFloat% (WHATWG Console §2.2.1 step 4.2/4.3),
+  // which coerce with ToString — NOT ToNumber. A valueOf-thrower is never
+  // invoked: Node prints "NaN" for both. Only %d (Number()) reaches valueOf.
+  assert assert_eval(
+      eng,
+      "fmt('%i %f', {valueOf(){ throw 6 }}, {valueOf(){ throw 7 }})",
+    )
+    == JsString("NaN NaN")
 }
 
 pub fn console_format_symbol_never_throws_test() {
@@ -567,6 +583,17 @@ pub fn console_format_symbol_never_throws_test() {
     == JsString("<Symbol(Symbol.iterator)>")
   assert assert_eval(eng, "fmt('%d %i %f', Symbol(), Symbol(), Symbol())")
     == JsString("NaN NaN NaN")
+}
+
+pub fn console_format_bigint_never_throws_test() {
+  // BigInt is the OTHER value whose ToNumber raises an engine TypeError
+  // ("Cannot convert BigInt to number"). Like Symbol, that must never escape
+  // a specifier: Node renders %d/%i of a bigint as "<n>n", %f goes through
+  // parseFloat(String(bigint)), and %s is String(bigint). Nothing throws.
+  let eng = fmt_engine()
+  assert assert_eval(eng, "fmt('%d %i %f', 1n, 2n, 3n)") == JsString("1n 2n 3")
+  assert assert_eval(eng, "fmt('%s', -42n)") == JsString("-42")
+  assert assert_eval(eng, "fmt('%d', -42n)") == JsString("-42n")
 }
 
 // ----------------------------------------------------------------------------

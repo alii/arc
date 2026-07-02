@@ -1,6 +1,7 @@
 //// `console` global per WHATWG Console.
 
 import arc/vm/builtins/common
+import arc/vm/builtins/number
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -9,6 +10,7 @@ import arc/vm/value.{
   type ConsoleNativeFn, type JsValue, type Ref, ConsoleLog, ConsoleLogError,
   ConsoleNative, JsNumber, JsString, JsSymbol, JsUndefined,
 }
+import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -121,10 +123,15 @@ fn formatter(
 /// - `Ok(Some(#(substitution, rest_args, state)))` — recognised, arg consumed.
 /// - `Ok(None)` — unknown specifier, or a known one with no arg left
 ///   (§2.2.1 step 2); the caller emits `%x` literally.
-/// - `Error(#(thrown, state))` — %s/%d/%i/%f ran a user `toString`/`valueOf`
-///   (via `js_to_string`/`js_to_number`) and it threw. The abrupt completion
-///   must propagate out of `console.log`, not be papered over with a
-///   fallback string — Node throws here too.
+/// - `Error(#(thrown, state))` — the specifier's coercion ran a user
+///   `toString`/`valueOf` and it threw. The abrupt completion must propagate
+///   out of `console.log`, not be papered over with a fallback string — Node
+///   throws here too. Which user hook can throw depends on the specifier:
+///   %s is `js_to_string` and %d is `js_to_number`, so a toString-thrower
+///   (%s) or valueOf-thrower (%d) escapes. %i/%f go through
+///   %parseInt%/%parseFloat%, which coerce with ToString only — so under
+///   %i/%f a toString-thrower escapes but a valueOf-thrower is never called
+///   (Node prints "NaN" there, it does not throw).
 fn spec(
   state: State(host),
   sp: String,
@@ -141,8 +148,9 @@ fn spec(
     // engine machinery, not user code, and neither WHATWG Console nor Node
     // lets it escape a specifier: %s is Call(%String%, undefined, «arg»)
     // — NOT ToString — so a Symbol yields its descriptive string, and
-    // %d/%i/%f yield "NaN". Match Symbols BEFORE the coercing arms below so
-    // the only throws that propagate are the user's own toString/valueOf.
+    // %d/%i/%f yield "NaN" (Console §2.2.1 step 4.2/4.3 special-cases
+    // Symbol). Match Symbols BEFORE the coercing arms below so the only
+    // throws that propagate are the user's own toString/valueOf.
     "s", [JsSymbol(id), ..rest] ->
       Ok(
         Some(#(
@@ -159,20 +167,43 @@ fn spec(
       use #(s, state) <- result.map(coerce.js_to_string(state, head))
       Some(#(s, rest, state))
     }
-    // §2.2.1 step 4.2: "%d/%i shall be converted by spec function %parseInt%".
-    // We feed ToNumber's result through int truncation; non-numeric → "NaN".
-    "d", [head, ..rest] | "i", [head, ..rest] -> {
+    // BigInt is the other value ToNumber rejects with an ENGINE TypeError
+    // ("Cannot convert BigInt to number"). Like Symbol, that must never
+    // escape %d/%i: Node renders a bigint under %d/%i as "<n>n" and never
+    // throws. Guard it BEFORE the ToNumber arm below. (%f needs no guard:
+    // it goes through %parseFloat%, i.e. ToString — fine on BigInt.)
+    "d", [value.JsBigInt(value.BigInt(n)), ..rest]
+    | "i", [value.JsBigInt(value.BigInt(n)), ..rest]
+    -> Ok(Some(#(int.to_string(n) <> "n", rest, state)))
+    // %d is Number() in Node, i.e. ToNumber: a user valueOf runs and its
+    // throw propagates. Non-numeric → "NaN".
+    "d", [head, ..rest] -> {
       use #(n, state) <- result.map(coerce.js_to_number(state, head))
-      let sub = case n {
-        value.Finite(f) -> string.inspect(value.float_to_int(f))
-        _ -> "NaN"
-      }
-      Some(#(sub, rest, state))
+      Some(#(int_substitution(n), rest, state))
     }
-    // §2.2.1 step 4.3: "%f shall be converted by spec function %parseFloat%".
+    // §2.2.1 step 4.2: "%i shall be converted by Call(%parseInt%, undefined,
+    // « current, 10 »)". parseInt coerces with ToString, NOT ToNumber — so a
+    // user toString throw propagates, but a valueOf-thrower is never called
+    // and Node prints "NaN". Do not "simplify" this into the %d arm.
+    "i", [head, ..rest] -> {
+      let radix = JsNumber(value.Finite(10.0))
+      let #(state, res) =
+        number.dispatch(value.GlobalParseInt, [head, radix], JsUndefined, state)
+      case res {
+        Ok(JsNumber(n)) -> Ok(Some(#(int_substitution(n), rest, state)))
+        Ok(other) -> Ok(Some(#(object.inspect(other, state.heap), rest, state)))
+        Error(thrown) -> Error(#(thrown, state))
+      }
+    }
+    // §2.2.1 step 4.3: "%f shall be converted by Call(%parseFloat%,
+    // undefined, « current »)". Same ToString-only coercion note as %i.
     "f", [head, ..rest] -> {
-      use #(n, state) <- result.map(coerce.js_to_number(state, head))
-      Some(#(object.inspect(JsNumber(n), state.heap), rest, state))
+      let #(state, res) =
+        number.dispatch(value.GlobalParseFloat, [head], JsUndefined, state)
+      case res {
+        Ok(num) -> Ok(Some(#(object.inspect(num, state.heap), rest, state)))
+        Error(thrown) -> Error(#(thrown, state))
+      }
     }
     "o", [head, ..rest] | "O", [head, ..rest] ->
       Ok(Some(#(object.inspect(head, state.heap), rest, state)))
@@ -180,6 +211,15 @@ fn spec(
     // and emits nothing, like Node.
     "c", [_, ..rest] -> Ok(Some(#("", rest, state)))
     _, _ -> Ok(None)
+  }
+}
+
+/// Render the %d/%i substitution for a coerced number: an integer with no
+/// `.0`, or "NaN" for anything non-finite.
+fn int_substitution(n: value.JsNum) -> String {
+  case n {
+    value.Finite(f) -> string.inspect(value.float_to_int(f))
+    _ -> "NaN"
   }
 }
 
