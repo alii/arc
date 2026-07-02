@@ -447,16 +447,9 @@ fn ta_create_with_args(
             }
           }
         _ ->
-          Error(state.type_error_value(
-            state,
-            "Method invoked on an object that is not a TypedArray",
-          ))
+          Error(state.type_error_value(state, witness_message(NotTypedArray)))
       }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Method invoked on an object that is not a TypedArray",
-      ))
+    _ -> Error(state.type_error_value(state, witness_message(NotTypedArray)))
   }
 }
 
@@ -3414,11 +3407,7 @@ fn check_content_type(
             "Content types of source and created typed arrays differ",
           ))
       }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Method invoked on an object that is not a TypedArray",
-      ))
+    _ -> Error(state.type_error_value(state, witness_message(NotTypedArray)))
   }
 }
 
@@ -3531,14 +3520,11 @@ fn u8_live_view(
         object.typed_array_view_length(state.heap, buffer, kind, off, decl_len)
       case object.typed_array_buffer_data(state.heap, buffer) {
         None ->
-          Error(state.type_error_value(
-            state,
-            "Cannot perform operation on a detached ArrayBuffer",
-          ))
+          Error(state.type_error_value(state, witness_message(Detached)))
         Some(data) ->
           case off + len > bit_array.byte_size(data) {
             True ->
-              Error(state.type_error_value(state, "TypedArray is out of bounds"))
+              Error(state.type_error_value(state, witness_message(OutOfBounds)))
             False -> Ok(#(buffer, data, off, len))
           }
       }
