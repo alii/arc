@@ -608,8 +608,13 @@ pub type Op {
   DynamicImportDefer
 
   // -- Global Environment Record --
-  /// §9.1.1.4.17: Create writable/enumerable/configurable property on globalThis (if not already there).
-  DeclareGlobalVar(name: String)
+  /// §9.1.1.4.17 CreateGlobalVarBinding: create a writable/enumerable
+  /// data property on globalThis (if not already an own property).
+  /// `deletable` is the spec's D argument and becomes [[Configurable]]:
+  /// script/function GlobalDeclarationInstantiation passes D = false
+  /// (§9.1.1.4.18), so a top-level `var`/function binding survives
+  /// `delete`; sloppy eval code passes D = true (§19.2.1.3).
+  DeclareGlobalVar(name: String, deletable: Bool)
   /// Create entry in lexical_globals (with JsUninitialized for TDZ).
   DeclareGlobalLex(name: String, is_const: Bool)
   /// Pop value from stack, initialize lexical binding (TDZ → value).
@@ -830,7 +835,8 @@ pub type IrOp {
   IrDynamicImportDefer
 
   // -- Global Environment Record --
-  IrDeclareGlobalVar(name: String)
+  /// Lowers 1:1 to DeclareGlobalVar. See Op.DeclareGlobalVar for `deletable`.
+  IrDeclareGlobalVar(name: String, deletable: Bool)
   IrDeclareGlobalLex(name: String, is_const: Bool)
   IrInitGlobalLex(name: String)
 

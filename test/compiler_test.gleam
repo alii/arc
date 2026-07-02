@@ -2469,13 +2469,40 @@ pub fn delete_computed_test() -> Nil {
 }
 
 pub fn delete_variable_test() -> Nil {
-  // KNOWN DEVIATION from §9.1.1.4.7: a top-level `var` should be a
-  // non-configurable global property (§9.1.1.4.17 CreateGlobalVarBinding
-  // with D = false), making this `delete` return false. Arc's
-  // DeclareGlobalVar does not thread the D flag yet and creates a
-  // configurable property, so the real [[Delete]] succeeds and returns
-  // true. Fix DeclareGlobalVar's attributes to flip this expectation.
-  assert_normal("var x = 1; delete x", JsBool(True))
+  // §9.1.1.4.17 CreateGlobalVarBinding with D = false (§9.1.1.4.18): a
+  // top-level `var` is a non-configurable global property, so the real
+  // [[Delete]] fails — false, and the binding survives.
+  assert_normal("var x = 1; [delete x, x].join()", JsString("false,1"))
+}
+
+pub fn delete_hoisted_function_test() -> Nil {
+  // §9.1.1.4.16 CreateGlobalFunctionBinding with D = false: same as vars,
+  // a top-level function declaration is not deletable.
+  assert_normal(
+    "function f() {}; [delete f, typeof f].join()",
+    JsString("false,function"),
+  )
+}
+
+pub fn delete_sloppy_direct_eval_var_test() -> Nil {
+  // §19.2.1.3 EvalDeclarationInstantiation passes D = true to
+  // CreateGlobalVarBinding, so a var introduced by sloppy direct eval at
+  // global scope IS deletable — unlike a script's own top-level vars.
+  assert_normal(
+    "eval('var ev = 1'); [delete ev, typeof ev].join()",
+    JsString("true,undefined"),
+  )
+}
+
+pub fn global_var_descriptor_test() -> Nil {
+  // §9.1.1.4.17 step 4: the created property is
+  // { writable: true, enumerable: true, configurable: false }.
+  assert_normal(
+    "var d = 1;"
+      <> "var pd = Object.getOwnPropertyDescriptor(globalThis, 'd');"
+      <> "[pd.value, pd.writable, pd.enumerable, pd.configurable].join()",
+    JsString("1,true,true,false"),
+  )
 }
 
 // §13.5.1.2 `delete identifier` (sloppy mode).

@@ -583,8 +583,11 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.DynamicImportDefer, ..acc])
 
     // Global Environment Record
-    [IrDeclareGlobalVar(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.DeclareGlobalVar(name), ..acc])
+    [IrDeclareGlobalVar(name, deletable), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.DeclareGlobalVar(name, deletable),
+        ..acc
+      ])
     [IrDeclareGlobalLex(name, is_const), ..rest] ->
       resolve_ops(rest, labels, [opcode.DeclareGlobalLex(name, is_const), ..acc])
     [IrInitGlobalLex(name), ..rest] ->

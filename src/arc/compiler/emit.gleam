@@ -217,6 +217,16 @@ pub opaque type Emitter {
     /// and a candidate for Annex B var promotion. False at function/program
     /// top level (those declarations are var-scoped already).
     in_block: Bool,
+    /// §9.1.1.4.17 CreateGlobalVarBinding's D argument for the top-level
+    /// var / hoisted-function bindings this unit sends to the global object
+    /// (IrDeclareGlobalVar). False for scripts (§9.1.1.4.18 passes
+    /// D = false, so `delete x` on a top-level var is false and the
+    /// binding survives). True only for direct-eval units
+    /// (emit_eval_direct): §19.2.1.3 EvalDeclarationInstantiation passes
+    /// D = true, so an eval-introduced global var IS deletable. Never
+    /// inherited by child function emitters — only a unit's own top level
+    /// emits IrDeclareGlobalVar.
+    deletable_global_vars: Bool,
     /// Non-empty only while emitting formal-parameter initializers (default
     /// values / destructuring defaults): the parameter-scope binding names
     /// (parameters + implicit `arguments` for non-arrows). Attached to any
@@ -387,6 +397,14 @@ pub fn emit_eval_direct(
         False -> inherit_param_scope
       },
       private_env: inherit_private_env,
+      // §19.2.1.3 EvalDeclarationInstantiation passes D = true to
+      // CreateGlobalVarBinding / CreateGlobalFunctionBinding, so the
+      // top-level vars a sloppy global-caller direct eval sends to the
+      // global object (fallthrough ToGlobal) are created configurable.
+      // Strict direct eval never emits IrDeclareGlobalVar (its vars are
+      // locals in the eval's own VariableEnvironment), so the flag is
+      // moot there.
+      deletable_global_vars: True,
     )
   // No DeclareLexical(RefThis): the lexical pseudo-slots are the CALLER's
   // boxed slots, threaded as lexical_captures by compile_eval_direct.
@@ -1152,6 +1170,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     child_fn_cursor: scope.child_function_scopes(tree, fn_id),
     field_init: NoFieldInit,
     in_block: False,
+    deletable_global_vars: False,
     param_scope_names: [],
     with_stack: [],
     private_env: [],
@@ -1546,7 +1565,16 @@ fn emit_slot_put(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
 /// the caller's frame, not the global object.
 fn emit_declare_var_global(e: Emitter, name: String) -> Emitter {
   case fn_fallthrough(e) {
-    ToGlobal -> emit_ir(e, IrDeclareGlobalVar(name))
+    // `deletable_global_vars` is the §9.1.1.4.17 CreateGlobalVarBinding
+    // D argument: False for scripts (§9.1.1.4.18 — `delete x` on a
+    // top-level var / hoisted function is false and the binding
+    // survives), True for direct-eval units (§19.2.1.3). GAP: indirect
+    // eval (compile_eval) compiles through the same emit_program entry
+    // as a script, so its global vars are wrongly created non-deletable
+    // (delete answers false and the binding survives; nothing is
+    // destroyed).
+    ToGlobal ->
+      emit_ir(e, IrDeclareGlobalVar(name, deletable: e.deletable_global_vars))
     ToEvalEnv -> emit_ir(e, opcode.IrDeclareEvalVar(name))
   }
 }
@@ -2907,7 +2935,7 @@ fn emit_hoisted_funcs(
 /// (those get the hoisted closure instead). Emitted immediately after the
 /// body var-boundary scope is entered (its prologue has just seeded every
 /// body binding undefined/TDZ), reading the source slot from the FUNCTION
-/// scope (params, `$param_N` shims, `arguments`) via `scope.lookup` —
+/// scope (params, `<paramN>` shims, `arguments`) via `scope.lookup` —
 /// resolving by name from inside the body scope would find the body's own
 /// shadowing binding.
 ///
@@ -3082,7 +3110,7 @@ fn compile_function_body(
   let non_simple_fixed = !ast_util.all_simple_params(fixed_params)
 
   // Phase 1: Declare parameters. Simple lists bind identifiers positionally;
-  // non-simple lists route EVERY fixed param through a `$param_N` shim
+  // non-simple lists route EVERY fixed param through a `<paramN>` shim
   // binding (scope.param_shim) so the real names can be TDZ-declared and
   // initialized in order. The shim is NOT pure scratch: the runtime locals
   // layout is [captures, lexical_seeds, args, undef] (frame.gleam:57 /
@@ -3836,7 +3864,8 @@ fn emit_stmt_inner(
 /// §14.11 WithStatement (sloppy mode only — the parser rejects `with` in
 /// strict code). The ToObject'd head expression is stored in a synthetic
 /// block-scoped local; the body sits in the analyzer's With scope whose
-/// `with_object_slot` points at that local — `scope.lookup` picks it up
+/// `with_object` names that local (the `<withN_M>` holder) —
+/// `scope.lookup` picks it up
 /// for every name resolution inside the body (returned as `WithChain`) and
 /// the emit_var_* helpers emit
 /// the IrWith* runtime probes inline.
@@ -3859,8 +3888,8 @@ fn emit_with(
   let e = emit_ir(e, opcode.IrToObject)
   // Enter the analyzer's With scope. ONE cursor move — the analyzer
   // creates a single With node that BOTH holds the `<withN_M>` binding
-  // (so `enter_scope`'s prologue seeds its slot) and carries
-  // `with_object_slot` (so `scope.lookup` from inside the body wraps the
+  // (so `enter_scope`'s prologue seeds its slot) and carries that holder's
+  // NAME in `with_object` (so `scope.lookup` from inside the body wraps the
   // resolution in a `WithChain`). The body's own block, if any, is a child of
   // this node and is entered by emit_stmt/emit_block — NOT here.
   let #(e, save) = enter_scope(e, in_block: e.in_block)

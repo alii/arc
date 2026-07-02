@@ -2135,8 +2135,14 @@ fn step(
       }
     }
 
-    // §9.1.1.4.17 CreateGlobalVarBinding — create var on globalThis
-    DeclareGlobalVar(name) -> {
+    // §9.1.1.4.17 CreateGlobalVarBinding — create var on globalThis.
+    // `deletable` is the spec's D argument and becomes the new property's
+    // [[Configurable]] attribute ([[Writable]] and [[Enumerable]] are
+    // always true). Scripts pass D = false (§9.1.1.4.18 step 18), so
+    // `delete x` on a top-level var / hoisted function declaration returns
+    // false and the binding survives; sloppy eval var declarations that
+    // land on the global object pass D = true (§19.2.1.3 step 17).
+    DeclareGlobalVar(name, deletable) -> {
       let key = Named(name)
       // §9.1.1.4.17 CreateGlobalVarBinding: hasProperty = ? HasOwnProperty(
       // globalObject, N) — own properties only, NOT the prototype chain.
@@ -2153,12 +2159,12 @@ fn step(
           // Already exists — no-op
           Ok(State(..state, pc: state.pc + 1))
         False -> {
-          let #(heap, _) =
-            object.set_property(
+          let heap =
+            declare_global_var_property(
               state.heap,
               state.ctx.global_object,
               key,
-              JsUndefined,
+              deletable,
             )
           Ok(State(..state, heap:, pc: state.pc + 1))
         }
@@ -2218,7 +2224,12 @@ fn step(
     // Sloppy direct-eval var declaration: seed name=undefined into eval_env.
     DeclareEvalVar(name) -> {
       case state.eval_env {
-        None -> step(state, DeclareGlobalVar(name))
+        // No eval_env allocated for this frame: the eval'd var falls
+        // through to the global object. §19.2.1.3
+        // EvalDeclarationInstantiation calls CreateGlobalVarBinding with
+        // D = true for eval code, so eval-created global vars ARE
+        // deletable — unlike a script's own top-level vars.
+        None -> step(state, DeclareGlobalVar(name, deletable: True))
         Some(ref) -> {
           let vars =
             heap.read_eval_env(state.heap, ref) |> option.unwrap(dict.new())
@@ -5471,6 +5482,38 @@ fn step(
 fn lookup_eval_env(state: State(host), name: String) -> Option(JsValue) {
   option.then(state.eval_env, heap.read_eval_env(state.heap, _))
   |> option.then(fn(vars) { dict.get(vars, name) |> option.from_result })
+}
+
+/// §9.1.1.4.17 CreateGlobalVarBinding step 4: DefinePropertyOrThrow(
+/// globalObject, N, { [[Value]]: undefined, [[Writable]]: true,
+/// [[Enumerable]]: true, [[Configurable]]: D }). Only called when the name
+/// is not already an own property (the DeclareGlobalVar arm checks first),
+/// so this is a plain create — no descriptor-compatibility validation and
+/// no seq to preserve. The bare property insert is what makes `deletable`
+/// stick: `object.set_property` would create the property configurable.
+///
+/// A non-extensible global object refuses the create (§10.1.6.3 step 2.a),
+/// same as the `object.set_property` path this replaced. The spec would
+/// instead have GlobalDeclarationInstantiation throw a TypeError up front
+/// (§9.1.1.4.15 CanDeclareGlobalVar → §16.1.7 step 4/13) — a pre-existing
+/// gap, kept as a silent no-op here.
+fn declare_global_var_property(
+  h: Heap(host),
+  global: value.Ref,
+  key: key.PropertyKey,
+  deletable: Bool,
+) -> Heap(host) {
+  let prop = value.data(JsUndefined) |> value.writable |> value.enumerable
+  let prop = case deletable {
+    True -> value.configurable(prop)
+    False -> prop
+  }
+  use slot <- heap.update(h, global)
+  case slot {
+    ObjectSlot(properties:, extensible: True, ..) ->
+      ObjectSlot(..slot, properties: dict.insert(properties, key, prop))
+    _ -> slot
+  }
 }
 
 /// §9.1.1.2.1 Object Environment Record HasBinding(N) for a `with` scope:
