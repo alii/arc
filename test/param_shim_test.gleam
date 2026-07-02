@@ -43,6 +43,11 @@ pub fn user_param_named_like_shim_test() {
 /// It must behave like any other parameter — the passed argument wins, the
 /// default applies only when the argument is absent — and its value must
 /// stay independent of the sibling destructured parameter.
+///
+/// NOTE: unlike the test above, this is NOT a witness of the old bug — for
+/// position 0 alone, the shim clobbering the same-named user binding was
+/// coincidentally self-consistent, so this already passed under the old
+/// `$param_N` naming. It only guards against future shim-naming regressions.
 pub fn user_param_named_param_0_test() {
   assert assert_eval(
       "function f($param_0 = 'd', [x] = ['y']) {
