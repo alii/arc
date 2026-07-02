@@ -298,6 +298,57 @@ fn call_native(
   }
 }
 
+/// §10.4.3.5 StringGetOwnProperty ( S, P ) plus the "length" own data
+/// property created by §10.4.3.4 StringCreate — the synthesized own-property
+/// table of a String primitive receiver, keyed by an ALREADY-RESOLVED
+/// property key.
+///
+/// This is the single source of truth for which keys are own properties of a
+/// String primitive: getOwnPropertyDescriptor(s), hasOwnProperty,
+/// Object.hasOwn, propertyIsEnumerable and (via `object.string_length`, the
+/// same length source) the [[OwnPropertyKeys]] listing in own_keys_impl all
+/// derive from it, so they agree by construction. String *wrapper objects*
+/// take the mirror-image path in ops/object.own_property_of_slot.
+///
+/// Matching on the resolved `DefineKey` (not the display string) is
+/// load-bearing: ToPropertyKey already canonicalized array indices, so
+/// "01", "+1" or " 1" arrive as `Named(..)` and correctly report no own
+/// property — re-parsing the display string with int.parse would fabricate
+/// index properties for them.
+fn string_exotic_own_property(
+  s: String,
+  key: DefineKey,
+) -> Option(value.Property) {
+  // seq: 0 on both arms — synthesized descriptors, only rendered by
+  // make_descriptor_object, never stored in a property table.
+  case key {
+    // §10.4.3.4 StringCreate step 10: "length" is { W:F, E:F, C:F }.
+    StringKey(pkey: Named("length"), ..) ->
+      Some(DataProperty(
+        value: value.from_int(object.string_length(s)),
+        writable: False,
+        enumerable: False,
+        configurable: False,
+        seq: 0,
+      ))
+    // §10.4.3.5 steps 5-10: an in-range integer index yields
+    // { value: <element>, W:F, E:T, C:F }; out of range → undefined.
+    StringKey(pkey: Index(i), ..) -> {
+      use ch <- option.map(object.string_char_at(s, i))
+      DataProperty(
+        value: JsString(ch),
+        writable: False,
+        enumerable: True,
+        configurable: False,
+        seq: 0,
+      )
+    }
+    // Any other string name, and every symbol, is not an own property of a
+    // String primitive.
+    StringKey(pkey: Named(_), ..) | SymbolKey(_) -> None
+  }
+}
+
 /// Object.getOwnPropertyDescriptor(O, P)
 /// ES2024 §20.1.2.8
 ///
@@ -342,50 +393,18 @@ fn get_own_property_descriptor(
     }
     // Step 1: ToObject throws TypeError for null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // String primitives: index properties + "length" are own properties.
-    JsString(s) -> {
-      let key_str = case key {
-        StringKey(display:, ..) -> display
-        SymbolKey(_) -> ""
-      }
-      let len = string.length(s)
-      case key_str == "length" {
-        True -> {
-          let prop =
-            // seq: 0 — synthesized descriptor, only rendered by
-            // make_descriptor_object, never stored in a property table.
-            DataProperty(
-              value: value.from_int(len),
-              writable: False,
-              enumerable: False,
-              configurable: False,
-              seq: 0,
-            )
+    // String primitives: index properties + "length" are own properties,
+    // synthesized by the shared string-exotic own-property table.
+    JsString(s) ->
+      case string_exotic_own_property(s, key) {
+        // Step 4: Return FromPropertyDescriptor(desc).
+        Some(prop) -> {
           let #(heap, desc_ref) =
             make_descriptor_object(state.heap, prop, object_proto)
           #(State(..state, heap:), Ok(JsObject(desc_ref)))
         }
-        False ->
-          case int.parse(key_str) {
-            Ok(i) if i >= 0 && i < len -> {
-              let ch = string.slice(s, i, 1)
-              let prop =
-                // seq: 0 — synthesized descriptor, never stored.
-                DataProperty(
-                  value: JsString(ch),
-                  writable: False,
-                  enumerable: True,
-                  configurable: False,
-                  seq: 0,
-                )
-              let #(heap, desc_ref) =
-                make_descriptor_object(state.heap, prop, object_proto)
-              #(State(..state, heap:), Ok(JsObject(desc_ref)))
-            }
-            _ -> #(state, Ok(JsUndefined))
-          }
+        None -> #(state, Ok(JsUndefined))
       }
-    }
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsUndefined))
   }
@@ -509,10 +528,8 @@ pub fn apply_descriptor(
   use #(parsed, state) <- result.try(parse_descriptor(state, JsObject(desc_ref)))
   // DefinePropertyOrThrow (§7.3.8): a false [[DefineOwnProperty]] result and
   // a genuine abrupt completion both surface as a throw here.
-  case define_parsed(state, target_ref, dkey, parsed) {
-    Ok(state) -> Ok(state)
-    Error(#(failure, state)) -> Error(#(define_failure_value(failure), state))
-  }
+  define_parsed(state, target_ref, dkey, parsed)
+  |> result.map_error(as_define_throw)
 }
 
 /// [[DefineOwnProperty]] dispatch for an already-parsed descriptor.
@@ -1431,6 +1448,16 @@ fn define_failure_value(failure: DefineFailure) -> JsValue {
   }
 }
 
+/// DefinePropertyOrThrow (§7.3.8) failure channel: a false
+/// [[DefineOwnProperty]] result and a genuine abrupt completion both surface
+/// as a throw. `result.map_error` adapter for `define_parsed`.
+fn as_define_throw(
+  err: #(DefineFailure, State(host)),
+) -> #(JsValue, State(host)) {
+  let #(failure, state) = err
+  #(define_failure_value(failure), state)
+}
+
 /// Tag a raw thrown error as a validation rejection (boolean-false result).
 fn as_rejected(err: #(JsValue, State(host))) -> #(DefineFailure, State(host)) {
   let #(thrown, state) = err
@@ -1600,9 +1627,12 @@ fn own_keys_impl(
       }
     // Step 1: ToObject — null/undefined throw TypeError
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // String primitives: own keys are index chars + "length"
+    // String primitives: own keys are index chars + "length". The length
+    // comes from object.string_length, the same source
+    // string_exotic_own_property uses, so the key LIST and the per-key
+    // [[GetOwnProperty]] lookups agree by construction.
     JsString(s) -> {
-      let len = string.length(s)
+      let len = object.string_length(s)
       let index_keys = string_index_keys(0, len)
       // "length" is own but non-enumerable — include for getOwnPropertyNames, skip for keys
       let ks = case enumerable_only {
@@ -1724,21 +1754,12 @@ fn has_own_property(
     }
     // Step 2: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // String primitives: own keys are index chars + "length"
-    JsString(s) -> #(state, Ok(JsBool(string_own_key(s, key))))
+    // String primitives: own keys are index chars + "length" — the shared
+    // string-exotic own-property table decides.
+    JsString(s) ->
+      #(state, Ok(JsBool(option.is_some(string_exotic_own_property(s, key)))))
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsBool(False)))
-  }
-}
-
-/// Whether a DefineKey names an own property on a string primitive — only
-/// "length" and valid indices; symbol keys are never own on string wrappers.
-fn string_own_key(s: String, key: DefineKey) -> Bool {
-  case key {
-    SymbolKey(_) -> False
-    StringKey(pkey: Named("length"), ..) -> True
-    StringKey(pkey: Index(i), ..) -> i >= 0 && i < string.length(s)
-    StringKey(pkey: Named(_), ..) -> False
   }
 }
 
@@ -1773,14 +1794,14 @@ fn property_is_enumerable(
     }
     // Step 2: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // String primitives: index properties are own+enumerable,
-    // "length" is own but non-enumerable.
+    // String primitives: the shared string-exotic own-property table gives
+    // [[Enumerable]] (index chars are enumerable, "length" is not).
     JsString(s) -> {
-      let result = case key {
-        StringKey(pkey: Index(i), ..) -> i >= 0 && i < string.length(s)
-        _ -> False
-      }
-      #(state, Ok(JsBool(result)))
+      let enumerable =
+        string_exotic_own_property(s, key)
+        |> option.map(value.prop_enumerable)
+        |> option.unwrap(False)
+      #(state, Ok(JsBool(enumerable)))
     }
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsBool(False)))
@@ -2823,10 +2844,11 @@ fn has_own(
     }
     // Step 1: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // String primitives: own keys are index chars + "length"
+    // String primitives: own keys are index chars + "length" — the shared
+    // string-exotic own-property table decides.
     JsString(s) -> {
       use key, state <- try_to_property_key(state, key_val)
-      #(state, Ok(JsBool(string_own_key(s, key))))
+      #(state, Ok(JsBool(option.is_some(string_exotic_own_property(s, key)))))
     }
     // Number/boolean/symbol have no own string-keyed properties.
     _ -> #(state, Ok(JsBool(False)))
@@ -3218,112 +3240,142 @@ fn would_create_cycle(
   }
 }
 
-/// Helper for SetIntegrityLevel "frozen" — §7.3.16 step 6.a-b.
-///
-/// For each own property descriptor:
-///   6.a. If IsDataDescriptor(Desc) is true, then
-///        i. If Desc has a [[Value]] field, set Desc.[[Writable]] to false.
-///        (our data props always have [[Value]], so writable is always set)
-///   6.b. Set Desc.[[Configurable]] to false.
-///
-/// Accessor properties only get configurable=false (step 6.b), writable
-/// does not apply to accessors.
-fn freeze_prop(prop: value.Property) -> value.Property {
-  case prop {
-    // §7.3.16 step 6.a: DataDescriptor → writable=false, configurable=false.
-    // seq is preserved: freezing does not move keys (§10.1.11).
-    DataProperty(value:, enumerable:, seq:, ..) ->
-      DataProperty(
-        value:,
-        writable: False,
-        enumerable:,
-        configurable: False,
-        seq:,
-      )
-    // §7.3.16 step 6.b: AccessorDescriptor → configurable=false only.
-    AccessorProperty(get:, set:, enumerable:, seq:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable: False, seq:)
+/// The integrity level requested by Object.freeze/seal and tested by
+/// Object.isFrozen/isSealed — §7.3.16 / §7.3.17's `level` parameter.
+type IntegrityLevel {
+  Sealed
+  Frozen
+}
+
+/// The Object method name for a level, for TypeError messages.
+fn integrity_level_verb(level: IntegrityLevel) -> String {
+  case level {
+    Sealed -> "seal"
+    Frozen -> "freeze"
+  }
+}
+
+/// §7.3.16 step 7.a / step 8.a.ii.1: { [[Configurable]]: false }.
+const seal_level_desc = ParsedDesc(
+  get: None,
+  set: None,
+  value: None,
+  writable: None,
+  enumerable: None,
+  configurable: Some(False),
+)
+
+/// §7.3.16 step 8.a.ii.2: { [[Configurable]]: false, [[Writable]]: false }.
+const freeze_data_desc = ParsedDesc(
+  get: None,
+  set: None,
+  value: None,
+  writable: Some(False),
+  enumerable: None,
+  configurable: Some(False),
+)
+
+/// §7.3.16 step 8.a.ii: the "frozen" descriptor for a current own property —
+/// accessors only lose [[Configurable]], data properties also lose
+/// [[Writable]].
+fn frozen_level_desc(cur: value.Property) -> ParsedDesc {
+  case cur {
+    AccessorProperty(..) -> seal_level_desc
+    DataProperty(..) -> freeze_data_desc
   }
 }
 
 /// SetIntegrityLevel ( O, level ) — ES2024 §7.3.16
 ///
-/// Shared core of Object.freeze and Object.seal. The `transform` callback
-/// applies the level-specific descriptor change (freeze_prop / seal_prop).
+/// Shared core of Object.freeze and Object.seal, routed entirely through the
+/// trap-aware internal methods: a Proxy fires its preventExtensions, ownKeys
+/// and defineProperty traps, and exotic receivers (arrays with dense
+/// elements, string wrappers, typed arrays, module namespaces) get their own
+/// [[OwnPropertyKeys]] / [[DefineOwnProperty]] semantics instead of a raw
+/// rewrite of the named-property dict.
 ///
-///   1. Let status be ? O.[[PreventExtensions]]().
-///   3. Let keys be ? O.[[OwnPropertyKeys]]().
-///   4-6. For each key, transform its property descriptor.
-///   7. Return true.
-///
-/// NOTE: Elements (dense indexed properties) are NOT transformed — only
-/// named and symbol properties. This is a known simplification.
+///   3. Let status be ? O.[[PreventExtensions]]().
+///   4. If status is false, return false (→ TypeError, freeze/seal step 3).
+///   6. Let keys be ? O.[[OwnPropertyKeys]]().
+///   7-8. For each key, ? DefinePropertyOrThrow with the level descriptor.
+///   9. Return true.
 fn set_integrity_level(
   args: List(JsValue),
   state: State(host),
-  transform: fn(value.Property) -> value.Property,
+  level: IntegrityLevel,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let target = first_arg_or_undefined(args)
   case target {
     JsObject(ref) -> {
-      let heap = {
-        use slot <- heap.update(state.heap, ref)
-        case slot {
-          ObjectSlot(kind:, properties:, symbol_properties:, ..) -> {
-            let properties =
-              dict.map_values(properties, fn(k, p) {
-                // Private elements are unaffected by freeze/seal —
-                // SetIntegrityLevel only touches [[OwnPropertyKeys]], which
-                // excludes private names.
-                case value.is_private_name(k) {
-                  True -> p
-                  False -> transform(p)
-                }
-              })
-            // Array exotic: the virtual "length" property participates in
-            // SetIntegrityLevel too (§7.3.16 — [[OwnPropertyKeys]] includes
-            // "length"). Its attributes live in an OPTIONAL Named("length")
-            // dict override consulted by array_length_writable and the
-            // [[Set]]/[[DefineOwnProperty]] paths — materialize one so the
-            // transform is recorded and a later Set(O, "length") on a frozen
-            // array rejects (Set's Throw=true then raises TypeError).
-            let properties = case kind {
-              ArrayObject(length:) ->
-                case dict.has_key(properties, Named("length")) {
-                  True -> properties
-                  False ->
-                    dict.insert(
-                      properties,
-                      Named("length"),
-                      // seq: 0 — array "length" never enumerates through the
-                      // seq-ordered named-key path.
-                      transform(DataProperty(
-                        value: value.from_int(length),
-                        writable: True,
-                        enumerable: False,
-                        configurable: False,
-                        seq: 0,
-                      )),
-                    )
-                }
-              _ -> properties
-            }
-            ObjectSlot(
-              ..slot,
-              properties:,
-              symbol_properties: list.map(symbol_properties, fn(pair) {
-                #(pair.0, transform(pair.1))
-              }),
-              extensible: False,
-            )
-          }
-          _ -> slot
+      // Step 3: ? O.[[PreventExtensions]]() — trap-aware.
+      use #(state, ok) <- try_op_pair(object.prevent_extensions_stateful(
+        state,
+        ref,
+      ))
+      case ok {
+        // Step 4 → §20.1.2.6/.20 step 3: status false → TypeError.
+        False ->
+          state.type_error(
+            state,
+            "Object." <> integrity_level_verb(level) <> " returned false",
+          )
+        True -> {
+          // Step 6: ? O.[[OwnPropertyKeys]]() — trap-aware.
+          use keys, state <- state.try_op(own_keys_stateful(state, ref))
+          // Steps 7-8: ? DefinePropertyOrThrow per key.
+          use state <- state.try_state(set_integrity_keys(
+            state,
+            ref,
+            keys,
+            level,
+          ))
+          // §20.1.2.6/§20.1.2.20 step 4: Return O.
+          #(state, Ok(target))
         }
       }
-      #(State(..state, heap:), Ok(target))
     }
     // §20.1.2.6/§20.1.2.20 step 1: If O is not an Object, return O.
     _ -> #(state, Ok(target))
+  }
+}
+
+/// §7.3.16 steps 7-8: DefinePropertyOrThrow(O, k, <level descriptor>) for
+/// every own key, through the trap-aware [[GetOwnProperty]] /
+/// [[DefineOwnProperty]] funnels.
+///
+/// Private elements never appear here — [[OwnPropertyKeys]]
+/// (own_keys_stateful → collect_own_keys) excludes private names, so they
+/// stay writable after freeze without a per-key filter.
+fn set_integrity_keys(
+  state: State(host),
+  ref: Ref,
+  keys: List(JsValue),
+  level: IntegrityLevel,
+) -> Result(State(host), #(JsValue, State(host))) {
+  case keys {
+    [] -> Ok(state)
+    [key_val, ..rest] -> {
+      let dkey = key_value_to_define_key(key_val)
+      use #(desc, state) <- result.try(case level {
+        // Step 7.a: sealed → { [[Configurable]]: false } for every key.
+        Sealed -> Ok(#(Some(seal_level_desc), state))
+        // Steps 8.a.i-ii: frozen reads the current descriptor first
+        // (trap-aware); an absent key (e.g. one an ownKeys trap invented) is
+        // skipped per step 8.a.ii.
+        Frozen -> {
+          use #(cur, state) <- result.map(own_property_via(state, ref, dkey))
+          #(option.map(cur, frozen_level_desc), state)
+        }
+      })
+      use state <- result.try(case desc {
+        None -> Ok(state)
+        // Step 7.a.i / 8.a.ii.3: ? DefinePropertyOrThrow(O, k, desc).
+        Some(parsed) ->
+          define_parsed(state, ref, dkey, parsed)
+          |> result.map_error(as_define_throw)
+      })
+      set_integrity_keys(state, ref, rest, level)
+    }
   }
 }
 
@@ -3337,7 +3389,7 @@ fn freeze(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  set_integrity_level(args, state, freeze_prop)
+  set_integrity_level(args, state, Frozen)
 }
 
 /// Object.preventExtensions ( O ) — ES2024 §20.1.2.17
@@ -3389,65 +3441,89 @@ fn try_op_pair(
   }
 }
 
-/// Helper for TestIntegrityLevel "frozen" — §7.3.17 step 4.b.
-///
-/// For each own property descriptor, checks the frozen invariant:
-///   4.b.i.  If IsDataDescriptor(currentDesc) is true, then
-///           1. If currentDesc.[[Writable]] is true, return false.
-///   4.b.ii. If currentDesc.[[Configurable]] is true, return false.
-///
-/// Returns True only if ALL properties satisfy the frozen constraint.
-fn all_frozen(props: List(value.Property)) -> Bool {
-  use p <- list.all(props)
-  case p {
-    // §7.3.17 step 4.b.i + 4.b.ii: data prop must be non-writable AND non-configurable.
-    DataProperty(writable: False, configurable: False, ..) -> True
-    // §7.3.17 step 4.b.ii: accessor prop must be non-configurable.
-    AccessorProperty(configurable: False, ..) -> True
-    _ -> False
-  }
-}
-
 /// TestIntegrityLevel ( O, level ) — ES2024 §7.3.17
 ///
-/// Shared core of Object.isFrozen and Object.isSealed. The `check` callback
-/// is the level-specific predicate over property lists (all_frozen / all_sealed).
+/// Shared core of Object.isFrozen and Object.isSealed, routed entirely
+/// through the trap-aware internal methods: a Proxy fires its isExtensible,
+/// ownKeys and getOwnPropertyDescriptor traps, and exotic own properties
+/// (dense array elements, string-exotic indices, typed-array elements) are
+/// actually inspected instead of only the named-property dict.
 ///
-///   1. Let extensible be ? IsExtensible(O).
-///   2. If extensible is true, return false.
-///   3-4. For each own property, apply the level check.
-///   5. Return true.
-///
-/// TODO(Deviation): Elements (dense indexed properties) are not checked —
-/// only named and symbol properties. Same simplification as SetIntegrityLevel.
+///   3. Let extensible be ? IsExtensible(O).
+///   4. If extensible is true, return false.
+///   6. Let keys be ? O.[[OwnPropertyKeys]]().
+///   7-8. For each key, ? O.[[GetOwnProperty]](k) must satisfy the level.
+///   9. Return true.
 fn test_integrity_level(
   args: List(JsValue),
   state: State(host),
-  check: fn(List(value.Property)) -> Bool,
+  level: IntegrityLevel,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let result = case first_arg_or_undefined(args) {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(properties:, symbol_properties:, extensible: False, ..)) ->
-          check(
-            dict.to_list(properties)
-            // Private elements stay writable after freeze — exclude them from
-            // the integrity check, matching their exclusion in SetIntegrityLevel.
-            |> list.filter_map(fn(pair) {
-              case value.is_private_name(pair.0) {
-                True -> Error(Nil)
-                False -> Ok(pair.1)
-              }
-            }),
-          )
-          && check(list.map(symbol_properties, fn(p) { p.1 }))
-        Some(ObjectSlot(extensible: True, ..)) -> False
-        _ -> False
+  case first_arg_or_undefined(args) {
+    JsObject(ref) -> {
+      // Step 3: ? IsExtensible(O) — trap-aware.
+      use ext, state <- state.try_op(object.is_extensible_stateful(state, ref))
+      case ext {
+        // Step 4: an extensible object is neither sealed nor frozen.
+        True -> #(state, Ok(JsBool(False)))
+        False -> {
+          // Step 6: ? O.[[OwnPropertyKeys]]() — trap-aware.
+          use keys, state <- state.try_op(own_keys_stateful(state, ref))
+          // Steps 7-9.
+          use ok, state <- state.try_op(keys_at_integrity_level(
+            state,
+            ref,
+            keys,
+            level,
+          ))
+          #(state, Ok(JsBool(ok)))
+        }
       }
+    }
     // §20.1.2.14/§20.1.2.15 step 1: If O is not an Object, return true.
-    _ -> True
+    _ -> #(state, Ok(JsBool(True)))
   }
-  #(state, Ok(JsBool(result)))
+}
+
+/// §7.3.17 steps 7-8: every reported own descriptor must satisfy the level.
+/// Short-circuits on the first violation. Keys whose [[GetOwnProperty]]
+/// reports undefined (e.g. one an ownKeys trap invented) are skipped per
+/// step 8.b. Private elements never appear — [[OwnPropertyKeys]] excludes
+/// private names, matching their exclusion in SetIntegrityLevel.
+fn keys_at_integrity_level(
+  state: State(host),
+  ref: Ref,
+  keys: List(JsValue),
+  level: IntegrityLevel,
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
+  case keys {
+    [] -> Ok(#(True, state))
+    [key_val, ..rest] -> {
+      // Step 8.a: ? O.[[GetOwnProperty]](k) — trap-aware.
+      use #(cur, state) <- result.try(own_property_via(
+        state,
+        ref,
+        key_value_to_define_key(key_val),
+      ))
+      case option.map(cur, prop_at_integrity_level(_, level)) {
+        Some(False) -> Ok(#(False, state))
+        Some(True) | None -> keys_at_integrity_level(state, ref, rest, level)
+      }
+    }
+  }
+}
+
+/// §7.3.17 step 8.b: sealed needs [[Configurable]]: false; frozen
+/// additionally needs [[Writable]]: false on data descriptors.
+fn prop_at_integrity_level(prop: value.Property, level: IntegrityLevel) -> Bool {
+  case level, prop {
+    // Step 8.b.iii: [[Configurable]] must be false at either level.
+    _, AccessorProperty(configurable:, ..) -> !configurable
+    Sealed, DataProperty(configurable:, ..) -> !configurable
+    // Step 8.b.ii.1: frozen data properties must also be non-writable.
+    Frozen, DataProperty(configurable:, writable:, ..) ->
+      !configurable && !writable
+  }
 }
 
 /// Object.isFrozen ( O ) — ES2024 §20.1.2.14
@@ -3458,7 +3534,7 @@ fn is_frozen(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  test_integrity_level(args, state, all_frozen)
+  test_integrity_level(args, state, Frozen)
 }
 
 /// Object.isExtensible ( O ) — ES2024 §20.1.2.13
@@ -3496,18 +3572,7 @@ fn seal(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  set_integrity_level(args, state, seal_prop)
-}
-
-/// Helper for seal — make property non-configurable (but keep writable as-is).
-fn seal_prop(prop: value.Property) -> value.Property {
-  case prop {
-    // seq is preserved: sealing does not move keys (§10.1.11).
-    DataProperty(value:, writable:, enumerable:, seq:, ..) ->
-      DataProperty(value:, writable:, enumerable:, configurable: False, seq:)
-    AccessorProperty(get:, set:, enumerable:, seq:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable: False, seq:)
-  }
+  set_integrity_level(args, state, Sealed)
 }
 
 /// Object.isSealed ( O ) — ES2024 §20.1.2.15
@@ -3518,17 +3583,7 @@ fn is_sealed(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  test_integrity_level(args, state, all_sealed)
-}
-
-/// Check if all properties are non-configurable (sealed check).
-fn all_sealed(props: List(value.Property)) -> Bool {
-  use p <- list.all(props)
-  case p {
-    DataProperty(configurable: False, ..) -> True
-    AccessorProperty(configurable: False, ..) -> True
-    _ -> False
-  }
+  test_integrity_level(args, state, Sealed)
 }
 
 /// Object.fromEntries ( iterable ) — ES2024 §20.1.2.8
@@ -3656,52 +3711,124 @@ fn get_own_property_descriptors(
   let object_proto = state.builtins.object.prototype
   let target = first_arg_or_undefined(args)
   case target {
+    // Step 1: ToObject throws TypeError for null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     JsObject(ref) -> {
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(properties:, ..)) -> {
-          // Build descriptor objects for each own property
-          // Iterate in §10.1.11 [[OwnPropertyKeys]] order so the result
-          // object's properties are created (seq-stamped) in the same order.
-          let #(heap, desc_props) =
-            list.fold(
-              value.ordered_property_pairs(properties),
-              #(state.heap, dict.new()),
-              fn(acc, pair) {
-                let #(h, descs) = acc
-                let #(key, prop) = pair
-                // Private names ("#x") are invisible to reflection.
-                use <- bool.guard(value.is_private_name(key), acc)
-                let #(h, desc_ref) =
-                  make_descriptor_object(h, prop, object_proto)
-                #(
-                  h,
-                  dict.insert(
-                    descs,
-                    key,
-                    value.data_property(JsObject(desc_ref)),
-                  ),
-                )
-              },
-            )
-          let #(heap, result_ref) =
-            heap.alloc(
-              heap,
-              ObjectSlot(
-                kind: OrdinaryObject,
-                properties: desc_props,
-                symbol_properties: [],
-                elements: elements.new(),
-                prototype: Some(object_proto),
-                extensible: True,
-              ),
-            )
-          #(State(..state, heap:), Ok(JsObject(result_ref)))
+      // Step 2: ownKeys = ? obj.[[OwnPropertyKeys]]() — trap-aware, and the
+      // one funnel that already yields fast-element indices, string-exotic /
+      // typed-array indices and symbol keys in §10.1.11 order.
+      use keys, state <- state.try_op(own_keys_stateful(state, ref))
+      // Steps 3-5: per key ? obj.[[GetOwnProperty]](key) (trap-aware) →
+      // FromPropertyDescriptor, accumulated in key order.
+      descriptors_from_keys(
+        state,
+        keys,
+        object_proto,
+        fn(state, dkey) { own_property_via(state, ref, dkey) },
+        dict.new(),
+        [],
+      )
+    }
+    // String primitives: [[OwnPropertyKeys]] is the index chars then
+    // "length" (§10.4.3.3); descriptors come from the shared string-exotic
+    // own-property table.
+    JsString(s) -> {
+      let keys =
+        list.append(string_index_keys(0, object.string_length(s)), [
+          JsString("length"),
+        ])
+      descriptors_from_keys(
+        state,
+        keys,
+        object_proto,
+        fn(state, dkey) { Ok(#(string_exotic_own_property(s, dkey), state)) },
+        dict.new(),
+        [],
+      )
+    }
+    // TODO(Deviation): number/boolean/symbol should produce {} (ToObject
+    // wrapper with no own keys); we return undefined.
+    _ -> #(state, Ok(JsUndefined))
+  }
+}
+
+/// §20.1.2.9 step 4: for each own key, `own_property` ([[GetOwnProperty]])
+/// → FromPropertyDescriptor → CreateDataPropertyOrThrow on the result
+/// object, in [[OwnPropertyKeys]] order.
+///
+/// String-keyed descriptors accumulate in `props` (index keys sort
+/// numerically; named keys get a fresh creation seq per iteration, so
+/// §10.1.11 enumeration order is preserved). Symbol-keyed descriptors
+/// accumulate reversed in `syms`. Keys reported absent by `own_property`
+/// (step 4.c — e.g. an ownKeys-trap key the getOwnPropertyDescriptor trap
+/// denies) are skipped.
+fn descriptors_from_keys(
+  state: State(host),
+  keys: List(JsValue),
+  object_proto: Ref,
+  own_property: fn(State(host), DefineKey) ->
+    Result(#(Option(value.Property), State(host)), #(JsValue, State(host))),
+  props: dict.Dict(value.PropertyKey, value.Property),
+  syms: List(#(value.SymbolId, value.Property)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case keys {
+    // Steps 3 + 5: OrdinaryObjectCreate(%Object.prototype%) holding the
+    // accumulated descriptors.
+    [] -> {
+      let #(heap, result_ref) =
+        heap.alloc(
+          state.heap,
+          ObjectSlot(
+            kind: OrdinaryObject,
+            properties: props,
+            symbol_properties: list.reverse(syms),
+            elements: elements.new(),
+            prototype: Some(object_proto),
+            extensible: True,
+          ),
+        )
+      #(State(..state, heap:), Ok(JsObject(result_ref)))
+    }
+    [key_val, ..rest] -> {
+      let dkey = key_value_to_define_key(key_val)
+      // Step 4.a: desc = ? obj.[[GetOwnProperty]](key).
+      use prop_opt, state <- state.try_op(own_property(state, dkey))
+      case prop_opt {
+        // §10.4.6.5: a namespace [[GetOwnProperty]] performs [[Get]], so a
+        // TDZ binding throws before a descriptor can be built.
+        Some(DataProperty(value: value.JsUninitialized, ..)) ->
+          state.reference_error(state, tdz_message)
+        // Steps 4.b-c: FromPropertyDescriptor + CreateDataPropertyOrThrow.
+        Some(prop) -> {
+          let #(heap, desc_ref) =
+            make_descriptor_object(state.heap, prop, object_proto)
+          let state = State(..state, heap:)
+          let desc = value.data_property(JsObject(desc_ref))
+          let #(props, syms) = case dkey {
+            SymbolKey(sym) -> #(props, [#(sym, desc), ..syms])
+            StringKey(pkey:, ..) -> #(dict.insert(props, pkey, desc), syms)
+          }
+          descriptors_from_keys(
+            state,
+            rest,
+            object_proto,
+            own_property,
+            props,
+            syms,
+          )
         }
-        _ -> #(state, Ok(JsUndefined))
+        // Step 4.c: descriptor is undefined — skip the key.
+        None ->
+          descriptors_from_keys(
+            state,
+            rest,
+            object_proto,
+            own_property,
+            props,
+            syms,
+          )
       }
     }
-    _ -> #(state, Ok(JsUndefined))
   }
 }
 
