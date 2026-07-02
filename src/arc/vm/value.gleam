@@ -2991,13 +2991,17 @@ pub type HeapSlot(ctx, host) {
   /// without settling.
   AsyncGeneratorSlot(
     gen_state: AsyncGeneratorState,
-    /// Two-list FIFO (Okasaki) encoded as `[]` (empty) or `[front, back]`:
-    /// front in dequeue order, back reversed (newest first). Enqueue prepends
-    /// to back (O(1)); dequeue pops front, reversing back→front when front
-    /// empties — O(1) amortized vs the old `list.append` O(n) per enqueue.
-    /// Kept List-of-List (not a record/tuple) so the `queue: []` init in
-    /// call.gleam needs no separate empty constructor.
-    queue: List(List(AsyncGenRequest)),
+    /// Two-list FIFO (Okasaki) as `#(front, back)`: front in dequeue order,
+    /// back reversed (newest first). Enqueue prepends to back (O(1)); dequeue
+    /// pops front, reversing back→front when front empties — O(1) amortized
+    /// vs `list.append`'s O(n) per enqueue. Empty is `#([], [])`.
+    ///
+    /// IMPORTANT: this queue is mutated re-entrantly — user code running inside
+    /// the generator body (or a getter run while settling) can call
+    /// .next()/.return()/.throw(), which enqueues onto `back`. Writers in
+    /// async_generators.gleam therefore never write a queue captured before
+    /// user code ran; they re-read the live slot at write time (`write_live`).
+    queue: #(List(AsyncGenRequest), List(AsyncGenRequest)),
     func_template: FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
@@ -3414,14 +3418,22 @@ fn do_refs_in_slot(
         |> push_value_ref(reject, _)
       push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
     }
-    AsyncGeneratorSlot(queue:, env_ref:, saved_locals:, saved_stack:, ..) -> {
-      let acc =
-        list.fold(list.flatten(queue), acc, fn(a, r) {
-          a
-          |> push_value_ref(r.value, _)
-          |> push_value_ref(r.resolve, _)
-          |> push_value_ref(r.reject, _)
-        })
+    AsyncGeneratorSlot(
+      queue: #(queue_front, queue_back),
+      env_ref:,
+      saved_locals:,
+      saved_stack:,
+      ..,
+    ) -> {
+      // Both halves of the two-list FIFO hold live requests — walk both.
+      let push_request = fn(a, r: AsyncGenRequest) {
+        a
+        |> push_value_ref(r.value, _)
+        |> push_value_ref(r.resolve, _)
+        |> push_value_ref(r.reject, _)
+      }
+      let acc = list.fold(queue_front, acc, push_request)
+      let acc = list.fold(queue_back, acc, push_request)
       push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
     }
     RealmSlot(

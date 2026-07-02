@@ -375,7 +375,7 @@ fn call_async_generator_function(
         rest_stack,
         AsyncGeneratorSlot(
           gen_state: value.AGSuspendedStart,
-          queue: [],
+          queue: #([], []),
           func_template: callee_template,
           env_ref:,
           saved_pc: suspended.pc,
