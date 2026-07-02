@@ -224,14 +224,36 @@ fn encode_typed_number(
   }
 }
 
-/// Encode an ALREADY-CONVERTED element value (JsNumber or JsBigInt) into the
-/// backing store at byte offset `off`. No coercion, no user code — used by
-/// TypedArray bulk operations (fill/slice/constructor copies).
+/// An element value ALREADY converted to a typed array's content-type domain
+/// (§10.4.5's "numValue"): the ToNumber result for the Number content types,
+/// the ToBigInt result for BigInt64/BigUint64. This is the ONLY value shape
+/// the encoders accept — an unconverted JsValue (a string, an object, …)
+/// cannot reach a buffer write.
+pub type TypedElement {
+  NumberElement(value.JsNum)
+  BigIntElement(Int)
+}
+
+/// Re-classify a value READ back out of a typed array (always a JsNumber for
+/// the Number content types, a JsBigInt for the BigInt ones) as a
+/// TypedElement for re-encoding. None for any other value — element reads
+/// never produce one, so callers treat it like a missing element.
+pub fn decoded_element(val: JsValue) -> Option(TypedElement) {
+  case val {
+    JsNumber(n) -> Some(NumberElement(n))
+    value.JsBigInt(value.BigInt(n)) -> Some(BigIntElement(n))
+    _ -> None
+  }
+}
+
+/// Encode an ALREADY-CONVERTED element into the backing store at byte offset
+/// `off`. No coercion, no user code — used by TypedArray bulk operations
+/// (fill/slice/constructor copies).
 pub fn typed_array_encode_value(
   data: BitArray,
   off: Int,
   elem_kind: value.TypedArrayKind,
-  val: JsValue,
+  el: TypedElement,
 ) -> BitArray {
   // Guard against writes past the CURRENT backing store (a resizable
   // ArrayBuffer may have shrunk below the view) — out-of-bounds typed-array
@@ -240,11 +262,9 @@ pub fn typed_array_encode_value(
     off + value.typed_array_element_size(elem_kind) > bit_array.byte_size(data),
     data,
   )
-  case val {
-    JsNumber(n) -> encode_typed_number(data, off, elem_kind, n)
-    value.JsBigInt(value.BigInt(n)) -> ta_set_int(data, off, 64, n)
-    // Callers always pass converted numerics; anything else encodes as NaN/0.
-    _ -> encode_typed_number(data, off, elem_kind, value.NaN)
+  case el {
+    NumberElement(n) -> encode_typed_number(data, off, elem_kind, n)
+    BigIntElement(n) -> ta_set_int(data, off, 64, n)
   }
 }
 

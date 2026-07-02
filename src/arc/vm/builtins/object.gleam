@@ -840,18 +840,27 @@ fn typed_array_define_index(
   })
   case desc.value {
     None -> Ok(state)
-    Some(v) ->
-      typed_array_elements.typed_array_store(
-        state,
-        buffer,
-        elem_kind,
-        byte_offset,
-        length,
-        Some(idx),
-        v,
+    Some(v) -> {
+      use #(state, stored) <- result.try(
+        typed_array_elements.typed_array_store(
+          state,
+          buffer,
+          elem_kind,
+          byte_offset,
+          length,
+          Some(idx),
+          v,
+        )
+        |> result.map_error(as_thrown),
       )
-      |> result.map(fn(pair) { pair.0 })
-      |> result.map_error(as_thrown)
+      // Immutable ArrayBuffer proposal: [[Set]] on a view over an immutable
+      // buffer refuses the store (False) — that MUST surface as a false
+      // [[DefineOwnProperty]] result, never as a silent success.
+      case stored {
+        True -> Ok(state)
+        False -> reject("Cannot redefine property: " <> label)
+      }
+    }
   }
 }
 

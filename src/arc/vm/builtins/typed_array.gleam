@@ -3906,7 +3906,7 @@ fn from_base64(
   handling: String,
   max_len: Int,
 ) -> DecodeResult {
-  use <- bool.guard(max_len == 0, DecodeResult(0, <<>>, True))
+  use <- bool.guard(max_len == 0, Decoded(0, <<>>))
   b64_loop(bit_array.from_string(s), 0, 0, [], 0, 0, 0, url, handling, max_len)
 }
 
@@ -3937,34 +3937,34 @@ fn b64_loop(
       case chunk_len > 0 {
         True ->
           case handling {
-            "stop-before-partial" -> DecodeResult(read, decode_bytes(acc), True)
+            "stop-before-partial" -> Decoded(read, decode_bytes(acc))
             "loose" ->
               case chunk_len == 1 {
-                True -> DecodeResult(read, decode_bytes(acc), False)
+                True -> DecodeFailed(decode_bytes(acc))
                 False ->
                   case b64_decode_partial(chunk, chunk_len, False) {
                     Some(tail) ->
-                      DecodeResult(index, decode_bytes([tail, ..acc]), True)
-                    None -> DecodeResult(read, decode_bytes(acc), False)
+                      Decoded(index, decode_bytes([tail, ..acc]))
+                    None -> DecodeFailed(decode_bytes(acc))
                   }
               }
-            _ -> DecodeResult(read, decode_bytes(acc), False)
+            _ -> DecodeFailed(decode_bytes(acc))
           }
-        False -> DecodeResult(index, decode_bytes(acc), True)
+        False -> Decoded(index, decode_bytes(acc))
       }
     // '='
     <<61, rest:bits>> ->
       b64_padding(rest, index + 1, read, acc, chunk, chunk_len, handling)
     <<c, rest:bits>> ->
       case b64_value(c, url) {
-        None -> DecodeResult(read, decode_bytes(acc), False)
+        None -> DecodeFailed(decode_bytes(acc))
         Some(v) -> {
           let remaining = max_len - written
           let stop =
             { remaining == 1 && chunk_len == 2 }
             || { remaining == 2 && chunk_len == 3 }
           case stop {
-            True -> DecodeResult(read, decode_bytes(acc), True)
+            True -> Decoded(read, decode_bytes(acc))
             False -> {
               let chunk = chunk * 64 + v
               case chunk_len + 1 == 4 {
@@ -3972,7 +3972,7 @@ fn b64_loop(
                   let acc = [<<chunk:size(24)>>, ..acc]
                   let written = written + 3
                   case written == max_len {
-                    True -> DecodeResult(index + 1, decode_bytes(acc), True)
+                    True -> Decoded(index + 1, decode_bytes(acc))
                     False ->
                       b64_loop(
                         rest,
@@ -4007,7 +4007,7 @@ fn b64_loop(
         }
       }
     // Unreachable: the input is a UTF-8 binary, always whole bytes.
-    _ -> DecodeResult(read, decode_bytes(acc), False)
+    _ -> DecodeFailed(decode_bytes(acc))
   }
 }
 
@@ -4022,25 +4022,24 @@ fn b64_padding(
   chunk_len: Int,
   handling: String,
 ) -> DecodeResult {
-  use <- bool.guard(chunk_len < 2, DecodeResult(read, decode_bytes(acc), False))
+  use <- bool.guard(chunk_len < 2, DecodeFailed(decode_bytes(acc)))
   let #(bin, index) = b64_skip_ws(bin, index)
   case chunk_len == 2 {
     True ->
       case bin {
         <<>> ->
           case handling == "stop-before-partial" {
-            True -> DecodeResult(read, decode_bytes(acc), True)
-            False -> DecodeResult(read, decode_bytes(acc), False)
+            True -> Decoded(read, decode_bytes(acc))
+            False -> DecodeFailed(decode_bytes(acc))
           }
         // second '='
         <<61, rest:bits>> -> {
           let #(rest, index) = b64_skip_ws(rest, index + 1)
-          b64_finish_padding(rest, index, read, acc, chunk, chunk_len, handling)
+          b64_finish_padding(rest, index, acc, chunk, chunk_len, handling)
         }
-        _ -> DecodeResult(read, decode_bytes(acc), False)
+        _ -> DecodeFailed(decode_bytes(acc))
       }
-    False ->
-      b64_finish_padding(bin, index, read, acc, chunk, chunk_len, handling)
+    False -> b64_finish_padding(bin, index, acc, chunk, chunk_len, handling)
   }
 }
 
@@ -4049,7 +4048,6 @@ fn b64_padding(
 fn b64_finish_padding(
   bin: BitArray,
   index: Int,
-  read: Int,
   acc: List(BitArray),
   chunk: Int,
   chunk_len: Int,
@@ -4058,10 +4056,10 @@ fn b64_finish_padding(
   case bin {
     <<>> ->
       case b64_decode_partial(chunk, chunk_len, handling == "strict") {
-        Some(tail) -> DecodeResult(index, decode_bytes([tail, ..acc]), True)
-        None -> DecodeResult(read, decode_bytes(acc), False)
+        Some(tail) -> Decoded(index, decode_bytes([tail, ..acc]))
+        None -> DecodeFailed(decode_bytes(acc))
       }
-    _ -> DecodeResult(read, decode_bytes(acc), False)
+    _ -> DecodeFailed(decode_bytes(acc))
   }
 }
 
@@ -4112,7 +4110,7 @@ fn from_hex(s: String, max_len: Int) -> DecodeResult {
   // The odd-length check is on the string's UTF-16 length, not its UTF-8
   // byte count (they can differ when the bad char is non-ASCII).
   case object.string_length(s) % 2 != 0 {
-    True -> DecodeResult(0, <<>>, False)
+    True -> DecodeFailed(<<>>)
     False -> hex_loop(bit_array.from_string(s), 0, [], 0, max_len)
   }
 }
@@ -4125,17 +4123,17 @@ fn hex_loop(
   max_len: Int,
 ) -> DecodeResult {
   case bin {
-    <<>> -> DecodeResult(read, decode_bytes(acc), True)
-    _ if written >= max_len -> DecodeResult(read, decode_bytes(acc), True)
+    <<>> -> Decoded(read, decode_bytes(acc))
+    _ if written >= max_len -> Decoded(read, decode_bytes(acc))
     <<h1, h2, rest:bits>> ->
       case hex_value(h1), hex_value(h2) {
         Some(a), Some(b) -> {
           let byte = a * 16 + b
           hex_loop(rest, read + 2, [<<byte>>, ..acc], written + 1, max_len)
         }
-        _, _ -> DecodeResult(read, decode_bytes(acc), False)
+        _, _ -> DecodeFailed(decode_bytes(acc))
       }
-    _ -> DecodeResult(read, decode_bytes(acc), False)
+    _ -> DecodeFailed(decode_bytes(acc))
   }
 }
 
