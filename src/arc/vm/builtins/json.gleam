@@ -415,11 +415,8 @@ fn parse_number(
   case scan_number(bytes) {
     Ok(span) -> {
       let len = span.int_len + span.frac_len + span.exp_len
-      use num_str <- result.try(take_string(bytes, len))
-      case number_span_to_num(num_str, span) {
-        Ok(f) -> Ok(#(JsonNumber(f), drop_bytes(bytes, len)))
-        Error(Nil) -> Error(InvalidNumber(raw: num_str))
-      }
+      use num_str <- result.map(take_string(bytes, len))
+      #(JsonNumber(number_span_to_num(num_str, span)), drop_bytes(bytes, len))
     }
     // Report the whole number-looking span (e.g. "01", "1e", "-"), not just
     // the prefix that scanned cleanly.
@@ -528,20 +525,49 @@ fn count_number_bytes(bytes: BitArray, n: Int) -> Int {
 ///     ±Infinity instead). "-0" goes through the float parser to keep -0.0.
 ///   - exponent, no fraction → synthesize one: "1e5" → "1.0e5".
 ///   - fraction present → the span is already valid Erlang float syntax.
-fn number_span_to_num(s: String, span: NumberSpan) -> Result(value.JsNum, Nil) {
+///
+/// This is total: `scan_number` has already validated the grammar, so the
+/// only remaining failure mode is magnitude overflow, which saturates to
+/// ±Infinity (§7.1.4.1) instead of being misreported as a syntax error.
+fn number_span_to_num(s: String, span: NumberSpan) -> value.JsNum {
   case span.frac_len > 0, span.exp_len > 0 {
-    True, _ -> gleam_stdlib_parse_float(s) |> result.map(Finite)
+    True, _ -> float_or_saturate(s, s)
     False, True -> {
       let mantissa = string.slice(s, 0, span.int_len)
       let exponent = string.drop_start(s, span.int_len)
-      gleam_stdlib_parse_float(mantissa <> ".0" <> exponent)
-      |> result.map(Finite)
+      float_or_saturate(mantissa <> ".0" <> exponent, s)
     }
     False, False ->
       case s {
-        "-0" -> gleam_stdlib_parse_float("-0.0") |> result.map(Finite)
-        _ -> int.parse(s) |> result.map(value.num_from_int)
+        "-0" -> float_or_saturate("-0.0", s)
+        _ ->
+          case int.parse(s) {
+            Ok(n) -> value.num_from_int(n)
+            // Unreachable: scan_number only accepts `-? (0 | [1-9][0-9]*)`
+            // here, which int.parse always handles (arbitrary precision).
+            Error(Nil) -> saturate_to_infinity(s)
+          }
       }
+  }
+}
+
+/// Parse `erlang_syntax` (the span rewritten into Erlang float syntax) as a
+/// float. Erlang's parser underflows to 0.0 silently, so after `scan_number`
+/// has accepted the grammar the ONLY way it can fail is magnitude overflow —
+/// a double can't hold the value. Saturate to ±Infinity, mirroring what
+/// `value.num_from_int` does for huge integer spans.
+fn float_or_saturate(erlang_syntax: String, original: String) -> value.JsNum {
+  case gleam_stdlib_parse_float(erlang_syntax) {
+    Ok(f) -> Finite(f)
+    Error(Nil) -> saturate_to_infinity(original)
+  }
+}
+
+/// ±Infinity, signed by the leading '-' of the original number span.
+fn saturate_to_infinity(s: String) -> value.JsNum {
+  case string.starts_with(s, "-") {
+    True -> NegInfinity
+    False -> value.Infinity
   }
 }
 
