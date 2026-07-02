@@ -1,8 +1,17 @@
-/// Template literal string splitting and escape processing.
+/// Template literal string splitting.
 /// Pure string functions split from parser.gleam. The parser still owns
 /// parse_template_raw since that calls back into parse_expression.
 import gleam/list
 import gleam/string
+
+/// Why a template's inner text could not be split into quasis and
+/// substitution sources.
+pub type TemplateSplitError {
+  /// A `${` substitution never reached its closing `}` — e.g. the text
+  /// inside it ends in an unterminated string or nested template literal.
+  /// The parser reports this as a SyntaxError at the template's position.
+  UnterminatedSubstitution
+}
 
 /// Split template inner text (without backticks) into RAW quasi strings and
 /// expression source strings. Tracks brace depth for nested `{}`.
@@ -12,7 +21,9 @@ import gleam/string
 /// values (via the parser's cook_template_string FFI). Line endings are
 /// normalized to LF per the spec's TRV definition (§12.9.6: <CR><LF> and
 /// <CR> → <LF>).
-pub fn split_template_parts(inner: String) -> #(List(String), List(String)) {
+pub fn split_template_parts(
+  inner: String,
+) -> Result(#(List(String), List(String)), TemplateSplitError) {
   let graphemes = string.to_graphemes(inner)
   do_split_template(graphemes, "", [], [], 0, False)
 }
@@ -33,16 +44,14 @@ fn do_split_template(
   expr_sources: List(String),
   brace_depth: Int,
   in_expr: Bool,
-) -> #(List(String), List(String)) {
+) -> Result(#(List(String), List(String)), TemplateSplitError) {
   case chars, in_expr {
     // End of input
-    [], False -> #(
-      list.reverse([current_quasi, ..quasis]),
-      list.reverse(expr_sources),
-    )
-    [], True ->
-      // Unterminated expression (shouldn't happen if lexer is correct)
-      #(list.reverse([current_quasi, ..quasis]), list.reverse(expr_sources))
+    [], False ->
+      Ok(#(list.reverse([current_quasi, ..quasis]), list.reverse(expr_sources)))
+    // A `${` whose `}` was never found (e.g. it swallowed the rest of the
+    // template via an unterminated string or nested template literal).
+    [], True -> Error(UnterminatedSubstitution)
     // In quasi mode: look for ${ to start an expression
     ["\\", next, ..rest], False ->
       // Escaped character in quasi — keep verbatim (raw), so `\${` and
@@ -130,6 +139,20 @@ fn do_split_template(
         True,
       )
     }
+    // A nested template literal inside the expression: collect it verbatim
+    // so its own `}` / `${` / quoted text never affect the outer brace
+    // depth (`` `${`}`}` `` must not end the substitution at the inner `}`).
+    ["`", ..rest], True -> {
+      let #(tpl, remaining) = collect_template_in_expr(rest, "`", 0, False)
+      do_split_template(
+        remaining,
+        current_quasi <> tpl,
+        quasis,
+        expr_sources,
+        brace_depth,
+        True,
+      )
+    }
     [ch, ..rest], True ->
       do_split_template(
         rest,
@@ -158,71 +181,52 @@ fn collect_string_in_expr(
   }
 }
 
-// ---- Legacy octal detection (strict mode checks) ----
-
-/// Check if a number literal value is a legacy octal (e.g. 0123, 09)
-pub fn is_legacy_octal_number(value: String) -> Bool {
-  case string.first(value) {
-    Ok("0") ->
-      case string.slice(value, 1, 1) {
-        // 0x, 0o, 0b, 0X, 0O, 0B are modern prefixed forms
-        "x" | "o" | "b" | "X" | "O" | "B" -> False
-        // 0. or 0e/0E are decimal floats
-        "." | "e" | "E" -> False
-        // 0n is BigInt 0
-        "n" -> False
-        // Just "0" is fine
-        "" -> False
-        // 0 followed by digit is legacy octal (01, 07, 08, 09 etc.)
-        _ -> string.length(value) > 1
+/// Collect an entire nested template literal — the opening backtick is
+/// already in `acc` — verbatim into the enclosing expression source,
+/// tracking its own escape / `${…}` / backtick state (symmetric to
+/// collect_string_in_expr). `in_sub` is True while inside one of the nested
+/// template's own `${…}` substitutions, whose brace depth is tracked
+/// independently of the caller's; templates nested inside such a
+/// substitution recurse. If the nested template is unterminated the whole
+/// remaining input is consumed and the caller's expression scan reports
+/// UnterminatedSubstitution.
+fn collect_template_in_expr(
+  chars: List(String),
+  acc: String,
+  brace_depth: Int,
+  in_sub: Bool,
+) -> #(String, List(String)) {
+  case chars, in_sub {
+    [], _ -> #(acc, [])
+    // Quasi text of the nested template
+    ["\\", next, ..rest], False ->
+      collect_template_in_expr(rest, acc <> "\\" <> next, brace_depth, False)
+    ["`", ..rest], False -> #(acc <> "`", rest)
+    ["$", "{", ..rest], False ->
+      collect_template_in_expr(rest, acc <> "${", 0, True)
+    [ch, ..rest], False ->
+      collect_template_in_expr(rest, acc <> ch, brace_depth, False)
+    // Inside one of the nested template's `${…}` substitutions
+    ["}", ..rest], True ->
+      case brace_depth {
+        0 -> collect_template_in_expr(rest, acc <> "}", 0, False)
+        _ -> collect_template_in_expr(rest, acc <> "}", brace_depth - 1, True)
       }
-    _ -> False
-  }
-}
-
-/// Check if a string literal value contains legacy octal escapes (\0-\7 followed by more)
-pub fn has_legacy_octal_escape(value: String) -> Bool {
-  check_string_escapes(value, 0, string.length(value))
-}
-
-fn check_string_escapes(s: String, pos: Int, end: Int) -> Bool {
-  case pos >= end {
-    True -> False
-    False ->
-      case string.slice(s, pos, 1) {
-        "\\" ->
-          case string.slice(s, pos + 1, 1) {
-            "0" ->
-              // \0 followed by a digit is legacy octal
-              case string.slice(s, pos + 2, 1) {
-                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-                  True
-                _ -> check_string_escapes(s, pos + 2, end)
-              }
-            "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
-            "x" -> check_string_escapes(s, pos + 4, end)
-            "u" ->
-              case string.slice(s, pos + 2, 1) {
-                "{" -> {
-                  // Skip to closing brace
-                  skip_to_brace(s, pos + 3, end)
-                }
-                _ -> check_string_escapes(s, pos + 6, end)
-              }
-            _ -> check_string_escapes(s, pos + 2, end)
-          }
-        _ -> check_string_escapes(s, pos + 1, end)
-      }
-  }
-}
-
-fn skip_to_brace(s: String, pos: Int, end: Int) -> Bool {
-  case pos >= end {
-    True -> False
-    False ->
-      case string.slice(s, pos, 1) {
-        "}" -> check_string_escapes(s, pos + 1, end)
-        _ -> skip_to_brace(s, pos + 1, end)
-      }
+    ["{", ..rest], True ->
+      collect_template_in_expr(rest, acc <> "{", brace_depth + 1, True)
+    ["\"", ..rest], True -> {
+      let #(str_content, remaining) = collect_string_in_expr(rest, "\"", "\"")
+      collect_template_in_expr(remaining, acc <> str_content, brace_depth, True)
+    }
+    ["'", ..rest], True -> {
+      let #(str_content, remaining) = collect_string_in_expr(rest, "'", "'")
+      collect_template_in_expr(remaining, acc <> str_content, brace_depth, True)
+    }
+    ["`", ..rest], True -> {
+      let #(nested, remaining) = collect_template_in_expr(rest, "`", 0, False)
+      collect_template_in_expr(remaining, acc <> nested, brace_depth, True)
+    }
+    [ch, ..rest], True ->
+      collect_template_in_expr(rest, acc <> ch, brace_depth, True)
   }
 }

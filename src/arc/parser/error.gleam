@@ -145,6 +145,9 @@ pub type ParseError {
   /// (untagged templates only — tagged templates get `undefined` cooked
   /// values instead).
   InvalidTemplateEscape(pos: Int)
+  /// A template literal's `${` substitution never reached its closing `}`
+  /// (e.g. it was swallowed by an unterminated string or nested template).
+  UnterminatedTemplateSubstitution(pos: Int)
   /// A "use strict" directive in the body of a function whose parameter
   /// list is non-simple (defaults / destructuring / rest).
   MisplacedUseStrictDirective(pos: Int)
@@ -355,6 +358,7 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     UnicodeEscapeInMetaProperty(_) ->
       "'target' in new.target must not contain unicode escape sequences"
     InvalidTemplateEscape(_) -> "Invalid escape sequence"
+    UnterminatedTemplateSubstitution(_) -> "Unterminated template substitution"
     // Rendered like the `UnexpectedToken("use strict", _)` it replaced so
     // the reported message is unchanged.
     MisplacedUseStrictDirective(_) -> "Unexpected token: use strict"
@@ -507,6 +511,7 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | ExportNotTopLevel(pos:)
     | UnicodeEscapeInMetaProperty(pos:)
     | InvalidTemplateEscape(pos:)
+    | UnterminatedTemplateSubstitution(pos:)
     | MisplacedUseStrictDirective(pos:) -> pos
   }
 }

@@ -59,11 +59,12 @@ import arc/parser/error.{
   UndeclaredExportBinding, UndeclaredPrivateName, UndefinedLabel,
   UnexpectedAfterExport, UnexpectedCloseBrace, UnexpectedCloseParen,
   UnexpectedExport, UnexpectedSuper, UnexpectedToken,
-  UnicodeEscapeInMetaProperty, UsingAtScriptTopLevel, UsingInCaseClause,
-  UsingInForIn, UsingMissingInitializer, UsingPatternBinding,
-  WithNotAllowedStrictMode, YieldInFormalParameter, YieldInGenerator,
-  YieldReservedStrictMode,
+  UnicodeEscapeInMetaProperty, UnterminatedTemplateSubstitution,
+  UsingAtScriptTopLevel, UsingInCaseClause, UsingInForIn,
+  UsingMissingInitializer, UsingPatternBinding, WithNotAllowedStrictMode,
+  YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode,
 }
+import arc/parser/legacy_octal.{has_legacy_octal_escape, is_legacy_octal_number}
 import arc/parser/lexer.{
   type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
   Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
@@ -80,9 +81,7 @@ import arc/parser/lexer.{
 }
 import arc/parser/number.{parse_js_number}
 import arc/parser/regex
-import arc/parser/template.{
-  has_legacy_octal_escape, is_legacy_octal_number, split_template_parts,
-}
+import arc/parser/template.{UnterminatedSubstitution, split_template_parts}
 import arc/parser/token.{
   Binary, BinaryOperator, Logical, assignment_op, binary_operator,
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
@@ -176,6 +175,74 @@ type AccessorPrefix {
   SetPrefix
 }
 
+/// The nesting-sensitive parsing context.
+///
+/// Everything a function boundary saves and restores lives here, as ONE
+/// record: `enter_function_context` overwrites it for the body and
+/// `restore_outer_context` puts the outer record back wholesale
+/// (`ctx: outer.ctx`). Adding a field here therefore restores it
+/// automatically — there is no per-field list to forget an entry in.
+/// (That is exactly how a nested function body's retroactive
+/// `"use strict"` used to leak `strict: True` into the enclosing sloppy
+/// scope: `strict` was missing from the hand-written restore list.)
+///
+/// Corollary: a `P` field that must survive across `restore_outer_context`
+/// (e.g. `class_private_depth`, the accumulator lists/sets, `sb`) must
+/// stay OUT of this record.
+type Ctx {
+  Ctx(
+    strict: Bool,
+    // Context tracking for semantic validation
+    function_depth: Int,
+    loop_depth: Int,
+    switch_depth: Int,
+    // Labels currently in scope, innermost first, each tagged with whether
+    // it names an IterationStatement (see LabelKind). Reset at function
+    // boundaries.
+    label_set: List(#(String, LabelKind)),
+    in_generator: Bool,
+    in_async: Bool,
+    // §15.7.1 ClassStaticBlock: [+Await] but ContainsAwait/ContainsArguments
+    // must be false. Distinct from in_async because `await expr` is also
+    // forbidden (not just await-as-identifier). Cleared at function boundaries.
+    in_static_block: Bool,
+    // §15.7.10 FieldDefinition: ContainsArguments of Initializer must be
+    // false. Set while parsing a class field initializer; arrows inherit it,
+    // ordinary function boundaries clear it.
+    in_class_field_init: Bool,
+    // Whether we are inside a method definition (class or object literal).
+    // Methods always forbid duplicate parameter names even in sloppy mode.
+    in_method: Bool,
+    // new.target is allowed in any function/method body (arrows inherit from
+    // enclosing). Distinct from function_depth>0 because arrows increment
+    // function_depth but must NOT enable new.target on their own.
+    allow_new_target: Bool,
+    // super() is only allowed in constructors of derived classes
+    allow_super_call: Bool,
+    // super.x is allowed in any method (class or object literal)
+    allow_super_property: Bool,
+    // What kind of binding we are currently parsing.
+    binding_kind: BindingKind,
+    // Whether we are inside a block scope (as opposed to function/script
+    // top-level). Affects function declaration scoping: in blocks, function
+    // decls are lexical; at function/script top level in sloppy mode, they
+    // are var-like.
+    in_block: Bool,
+    module_top_level: Bool,
+    // Whether we are in a single-statement position (body of if/for/while/
+    // do-while/with). Used to forbid labeled function declarations in these
+    // contexts per spec Annex B 3.4.
+    in_single_stmt_pos: Bool,
+    // Whether we are currently parsing the bindings of a let/const declaration.
+    // When true, "let" is forbidden as a binding name even in sloppy mode.
+    in_lexical_decl: Bool,
+    // Binding names seen so far in the current let/const declaration.
+    // Used to detect duplicate bindings like `let a, a;`.
+    // Only checked when in_lexical_decl is True.
+    decl_bound_names: Set(String),
+  )
+}
+
 /// Internal parser state: remaining tokens + the line of the last consumed token.
 type P {
   P(
@@ -189,20 +256,9 @@ type P {
     allow_in: Bool,
     source: String,
     bytes: BitArray,
-    // Context tracking for semantic validation
-    function_depth: Int,
-    loop_depth: Int,
-    switch_depth: Int,
-    in_generator: Bool,
-    in_async: Bool,
-    // §15.7.1 ClassStaticBlock: [+Await] but ContainsAwait/ContainsArguments
-    // must be false. Distinct from in_async because `await expr` is also
-    // forbidden (not just await-as-identifier). Cleared at function boundaries.
-    in_static_block: Bool,
-    // §15.7.10 FieldDefinition: ContainsArguments of Initializer must be
-    // false. Set while parsing a class field initializer; arrows inherit it,
-    // ordinary function boundaries clear it.
-    in_class_field_init: Bool,
+    // The nesting-sensitive context, saved/restored WHOLE at function
+    // boundaries. See `Ctx`.
+    ctx: Ctx,
     // §15.7.1 AllPrivateIdentifiersValid: count of enclosing class bodies.
     // 0 outside any class. Function boundaries do NOT reset it - private
     // access is purely lexical.
@@ -217,19 +273,6 @@ type P {
     // survive resolve_private_refs / the final check instead of erroring.
     // Empty for scripts/modules/indirect eval.
     outer_private_names: List(String),
-    strict: Bool,
-    // Labels currently in scope, innermost first, each tagged with whether
-    // it names an IterationStatement (see LabelKind). Reset at function
-    // boundaries.
-    label_set: List(#(String, LabelKind)),
-    // super() is only allowed in constructors of derived classes
-    allow_super_call: Bool,
-    // super.x is allowed in any method (class or object literal)
-    allow_super_property: Bool,
-    // new.target is allowed in any function/method body (arrows inherit from
-    // enclosing). Distinct from function_depth>0 because arrows increment
-    // function_depth but must NOT enable new.target on their own.
-    allow_new_target: Bool,
     // Whether the last parsed expression is a valid assignment/update target
     // (identifier, member expression). Set by expression parsers, checked by
     // assignment operators and ++/--.
@@ -239,13 +282,6 @@ type P {
     // 1 is default) from `{a: 0}` (invalid pattern: literal). Both have
     // last_expr_assignable=False, but only the assignment covers AssignmentPattern.
     last_expr_is_assignment: Bool,
-    // Whether we are currently parsing the bindings of a let/const declaration.
-    // When true, "let" is forbidden as a binding name even in sloppy mode.
-    in_lexical_decl: Bool,
-    // Binding names seen so far in the current let/const declaration.
-    // Used to detect duplicate bindings like `let a, a;`.
-    // Only checked when in_lexical_decl is True.
-    decl_bound_names: Set(String),
     // Whether the expression being parsed contains a cover-grammar initializer
     // like `{a = 0}` in an object literal. This is only valid if the
     // expression ends up as a destructuring pattern (assignment LHS or arrow
@@ -266,9 +302,6 @@ type P {
     // Whether we are inside arrow function parameter parsing. When true,
     // duplicate parameter names are always an error (even in sloppy mode).
     in_arrow_params: Bool,
-    // Whether we are inside a method definition (class or object literal).
-    // Methods always forbid duplicate parameter names even in sloppy mode.
-    in_method: Bool,
     // Whether the current formal parameter list contains non-simple params
     // (destructuring, defaults, or rest). When true, duplicate parameter
     // names are always forbidden even in sloppy mode.
@@ -277,10 +310,6 @@ type P {
     // Used to detect duplicate parameter names across all params including
     // destructured ones. Populated when in_formal_params is True.
     param_bound_names: List(String),
-    // Whether we are in a single-statement position (body of if/for/while/
-    // do-while/with). Used to forbid labeled function declarations in these
-    // contexts per spec Annex B 3.4.
-    in_single_stmt_pos: Bool,
     // Whether the expression being parsed contains a pattern that would be
     // invalid as a destructuring assignment target. Examples:
     // - [...x, y] (rest element not last in array)
@@ -325,13 +354,6 @@ type P {
     // scope.analyze AST walks: scopes, bindings and references are recorded
     // here as they are parsed; finalize converts to a ScopeTree.
     sb: scope.ScopeBuilder,
-    // What kind of binding we are currently parsing.
-    binding_kind: BindingKind,
-    // Whether we are inside a block scope (as opposed to function/script top-level).
-    // Affects function declaration scoping: in blocks, function decls are lexical;
-    // at function/script top level in sloppy mode, they are var-like.
-    in_block: Bool,
-    module_top_level: Bool,
     // Whether the next statement is DIRECTLY in a CaseClause/DefaultClause
     // statement list (not nested in a block). using/await-using declarations
     // are early errors there. Reset by blocks and function boundaries.
@@ -412,33 +434,38 @@ fn init_parser(
         allow_in: True,
         source: source,
         bytes: bit_array.from_string(source),
-        function_depth: 0,
-        loop_depth: 0,
-        switch_depth: 0,
-        in_generator: False,
-        in_async: False,
-        in_static_block: False,
-        in_class_field_init: False,
+        ctx: Ctx(
+          strict: mode == Module,
+          function_depth: 0,
+          loop_depth: 0,
+          switch_depth: 0,
+          label_set: [],
+          in_generator: False,
+          in_async: False,
+          in_static_block: False,
+          in_class_field_init: False,
+          in_method: False,
+          allow_new_target: False,
+          allow_super_call: False,
+          allow_super_property: False,
+          binding_kind: BindingNone,
+          in_block: False,
+          module_top_level: False,
+          in_single_stmt_pos: False,
+          in_lexical_decl: False,
+          decl_bound_names: set.new(),
+        ),
         class_private_depth: 0,
         private_refs: [],
         outer_private_names: [],
-        strict: mode == Module,
-        label_set: [],
-        allow_super_call: False,
-        allow_super_property: False,
-        allow_new_target: False,
         last_expr_assignable: False,
         last_expr_is_assignment: False,
-        in_lexical_decl: False,
-        decl_bound_names: set.new(),
         has_cover_initializer: False,
         dup_proto_pos: None,
         in_formal_params: False,
         in_arrow_params: False,
-        in_method: False,
         has_non_simple_param: False,
         param_bound_names: [],
-        in_single_stmt_pos: False,
         has_invalid_pattern: False,
         export_names: set.new(),
         export_local_refs: [],
@@ -453,9 +480,6 @@ fn init_parser(
           },
           mode == Module,
         ),
-        binding_kind: BindingNone,
-        in_block: False,
-        module_top_level: False,
         in_case_clause: False,
       ))
   }
@@ -508,10 +532,13 @@ pub fn parse_direct_eval(
   parse_script_check_privates(
     P(
       ..p,
-      allow_new_target:,
-      allow_super_property:,
-      allow_super_call:,
-      in_class_field_init: !allow_arguments,
+      ctx: Ctx(
+        ..p.ctx,
+        allow_new_target:,
+        allow_super_property:,
+        allow_super_call:,
+        in_class_field_init: !allow_arguments,
+      ),
       outer_private_names:,
     ),
   )
@@ -553,7 +580,7 @@ fn parse_module_body(
   p: P,
   acc: List(ast.ModuleItem),
 ) -> Result(#(P, List(ast.ModuleItem)), ParseError) {
-  let p = P(..p, module_top_level: True)
+  let p = P(..p, ctx: Ctx(..p.ctx, module_top_level: True))
   case peek(p) {
     Eof -> Ok(#(p, list.reverse(acc)))
     Import ->
@@ -680,7 +707,7 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
         _ -> {
           case p.mode {
             Module ->
-              case p.module_top_level {
+              case p.ctx.module_top_level {
                 // Top-level imports handled by parse_module_body
                 True -> Error(ImportNotTopLevel(pos_of(p)))
                 False -> Error(ImportNotTopLevel(pos_of(p)))
@@ -693,7 +720,7 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     Export -> {
       case p.mode {
         Module ->
-          case p.module_top_level {
+          case p.ctx.module_top_level {
             // Top-level exports handled by parse_module_body
             True -> Error(ExportNotTopLevel(pos_of(p)))
             False -> Error(ExportNotTopLevel(pos_of(p)))
@@ -731,8 +758,8 @@ fn is_using_decl_start(p: P, at: Int) -> Bool {
 /// only where `await` is a keyword (async context or module top level —
 /// otherwise `await` is an ordinary identifier and this is an expression).
 fn is_await_using_decl_start(p: P) -> Bool {
-  { p.in_async || p.mode == Module }
-  && !p.in_static_block
+  { p.ctx.in_async || p.mode == Module }
+  && !p.ctx.in_static_block
   && token_line_at(p, 1) == token_line_at(p, 0)
   && is_using_decl_start(p, 1)
 }
@@ -752,15 +779,15 @@ fn is_binding_ident_token(kind: TokenKind) -> Bool {
 /// ClassStaticBlockBody etc. Module top level is allowed.
 fn check_using_placement(p: P) -> Result(Nil, ParseError) {
   use <- bool.guard(
-    p.in_single_stmt_pos,
+    p.ctx.in_single_stmt_pos,
     Error(LexicalDeclInSingleStatement(pos_of(p))),
   )
   use <- bool.guard(p.in_case_clause, Error(UsingInCaseClause(pos_of(p))))
   let script_top_level =
     p.mode == Script
-    && p.function_depth == 0
-    && !p.in_block
-    && !p.in_static_block
+    && p.ctx.function_depth == 0
+    && !p.ctx.in_block
+    && !p.ctx.in_static_block
   use <- bool.guard(script_top_level, Error(UsingAtScriptTopLevel(pos_of(p))))
   Ok(Nil)
 }
@@ -777,20 +804,17 @@ fn parse_using_declaration(
     True -> advance(advance(p))
     False -> advance(p)
   }
-  let p2 =
-    P(
-      ..p2,
-      in_lexical_decl: True,
-      decl_bound_names: set.new(),
-      binding_kind: BindingLexical(scope.ConstBinding),
-    )
+  let p2 = enter_lexical_decl_context(p2, scope.ConstBinding)
   use #(p3, declarations) <- result.try(parse_using_declarator_list(p2, []))
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      in_lexical_decl: p.in_lexical_decl,
-      decl_bound_names: p.decl_bound_names,
-      binding_kind: p.binding_kind,
+      ctx: Ctx(
+        ..p3.ctx,
+        in_lexical_decl: p.ctx.in_lexical_decl,
+        decl_bound_names: p.ctx.decl_bound_names,
+        binding_kind: p.ctx.binding_kind,
+      ),
       in_export_decl: False,
     ),
   ))
@@ -842,16 +866,17 @@ fn parse_single_statement(
 ) -> Result(#(P, ast.Statement), ParseError) {
   // in_single_stmt_pos must not leak to statements parsed AFTER this one —
   // restore the surrounding value on the way out.
-  let saved = p.in_single_stmt_pos
+  let saved = p.ctx.in_single_stmt_pos
   use #(p_out, stmt) <- result.map(parse_single_statement_inner(p, allow_fn))
-  #(P(..p_out, in_single_stmt_pos: saved), stmt)
+  #(P(..p_out, ctx: Ctx(..p_out.ctx, in_single_stmt_pos: saved)), stmt)
 }
 
 fn parse_single_statement_inner(
   p: P,
   allow_fn: Bool,
 ) -> Result(#(P, ast.Statement), ParseError) {
-  let p = P(..p, in_single_stmt_pos: True, module_top_level: False)
+  let p =
+    P(..p, ctx: Ctx(..p.ctx, in_single_stmt_pos: True, module_top_level: False))
   case peek(p) {
     Const -> Error(LexicalDeclInSingleStatement(pos_of(p)))
     Let -> {
@@ -875,7 +900,7 @@ fn parse_single_statement_inner(
       }
     }
     Function ->
-      case allow_fn && !p.strict {
+      case allow_fn && !p.ctx.strict {
         // Annex B §B.3.3: sloppy `if (c) function f(){}` parses AS IF
         // `if (c) { function f(){} }` — push a synthetic Block scope so
         // register_function_name's in_block path fires (LetBinding for
@@ -887,12 +912,17 @@ fn parse_single_statement_inner(
         // FunctionDeclaration, so the elision guard does not skip it).
         True -> {
           let #(sb, block_id) = scope.sb_push(p.sb, scope.Block)
-          let p_inner = P(..p, sb:, in_block: True, in_single_stmt_pos: False)
+          let p_inner =
+            P(
+              ..p,
+              sb:,
+              ctx: Ctx(..p.ctx, in_block: True, in_single_stmt_pos: False),
+            )
           use #(p2, stmt) <- result.map(parse_statement(p_inner))
           let sb =
             scope.sb_close_block(p2.sb, block_id)
             |> scope.sb_pop(p.sb.current, p.sb.current_fn)
-          #(P(..p2, sb:, in_block: p.in_block), stmt)
+          #(P(..p2, sb:, ctx: Ctx(..p2.ctx, in_block: p.ctx.in_block)), stmt)
         }
         // In strict mode or in iteration/with context, function decls are forbidden
         False -> Error(FunctionDeclInSingleStatement(pos_of(p)))
@@ -915,7 +945,7 @@ fn parse_single_statement_inner(
 /// extras fold into one P construction.
 fn enter_block_scope(p: P) -> P {
   let #(sb, _id) = scope.sb_push(p.sb, scope.Block)
-  P(..p, sb:, in_block: True)
+  P(..p, sb:, ctx: Ctx(..p.ctx, in_block: True))
 }
 
 /// Restore the enclosing block-scope tracking state after parsing an inner
@@ -936,7 +966,7 @@ fn restore_block_scope(after p: P, before saved: P) -> P {
   P(
     ..p,
     sb: scope.sb_pop(sb, saved.sb.current, saved.sb.current_fn),
-    in_block: saved.in_block,
+    ctx: Ctx(..p.ctx, in_block: saved.ctx.in_block),
   )
 }
 
@@ -952,7 +982,11 @@ fn parse_block_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     LeftBrace, RightBrace -> {
       let p2 = advance(advance(p))
       Ok(#(
-        P(..p2, in_single_stmt_pos: False, in_case_clause: False),
+        P(
+          ..p2,
+          ctx: Ctx(..p2.ctx, in_single_stmt_pos: False),
+          in_case_clause: False,
+        ),
         ast.BlockStatement(body: []),
       ))
     }
@@ -972,9 +1006,12 @@ fn parse_block_statement_slow(p: P) -> Result(#(P, ast.Statement), ParseError) {
     P(
       ..p2,
       sb:,
-      in_block: True,
-      in_single_stmt_pos: False,
-      module_top_level: False,
+      ctx: Ctx(
+        ..p2.ctx,
+        in_block: True,
+        in_single_stmt_pos: False,
+        module_top_level: False,
+      ),
       in_case_clause: False,
     )
   use #(p3, stmts) <- result.try(parse_statement_list(p_inner, False, []))
@@ -989,7 +1026,15 @@ fn parse_block_statement_slow(p: P) -> Result(#(P, ast.Statement), ParseError) {
   Ok(#(
     // restore_block_scope inlined: keep p4.sb's accumulated scopes/refs;
     // restore only the current/current_fn cursors to the outer scope.
-    P(..p4, sb:, in_block: p2.in_block, module_top_level: p2.module_top_level),
+    P(
+      ..p4,
+      sb:,
+      ctx: Ctx(
+        ..p4.ctx,
+        in_block: p2.ctx.in_block,
+        module_top_level: p2.ctx.module_top_level,
+      ),
+    ),
     ast.BlockStatement(body: stmts),
   ))
 }
@@ -999,21 +1044,9 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let kind = peek(p)
   let p2 = advance(p)
   let p2 = case kind {
-    Let ->
-      P(
-        ..p2,
-        in_lexical_decl: True,
-        decl_bound_names: set.new(),
-        binding_kind: BindingLexical(scope.LetBinding),
-      )
-    Const ->
-      P(
-        ..p2,
-        in_lexical_decl: True,
-        decl_bound_names: set.new(),
-        binding_kind: BindingLexical(scope.ConstBinding),
-      )
-    _ -> P(..p2, binding_kind: BindingVar)
+    Let -> enter_lexical_decl_context(p2, scope.LetBinding)
+    Const -> enter_lexical_decl_context(p2, scope.ConstBinding)
+    _ -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
   }
   use #(p3, declarations) <- result.try(
     parse_variable_declarator_list(p2, kind, []),
@@ -1021,9 +1054,12 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      in_lexical_decl: p.in_lexical_decl,
-      decl_bound_names: p.decl_bound_names,
-      binding_kind: p.binding_kind,
+      ctx: Ctx(
+        ..p3.ctx,
+        in_lexical_decl: p.ctx.in_lexical_decl,
+        decl_bound_names: p.ctx.decl_bound_names,
+        binding_kind: p.ctx.binding_kind,
+      ),
       in_export_decl: False,
     ),
   ))
@@ -1146,9 +1182,9 @@ fn accumulate_param_name(p: P, name: String) -> Result(P, ParseError) {
         True ->
           // In strict mode, arrow params, methods, or non-simple params: reject dups
           case
-            p.strict
+            p.ctx.strict
             || p.in_arrow_params
-            || p.in_method
+            || p.ctx.in_method
             || p.has_non_simple_param
           {
             True -> Error(DuplicateParameterName(name, pos_of(p)))
@@ -1197,18 +1233,18 @@ fn check_reserved_identifier_common(
     | "protected"
     | "public"
     | "static" ->
-      case p.strict {
+      case p.ctx.strict {
         True -> Error(ReservedWordStrictMode(name, pos_of(p)))
         False -> Ok(Nil)
       }
     "yield" -> {
-      use <- bool.guard(p.strict, Error(YieldReservedStrictMode(pos_of(p))))
-      use <- bool.guard(p.in_generator, Error(YieldInGenerator(pos_of(p))))
+      use <- bool.guard(p.ctx.strict, Error(YieldReservedStrictMode(pos_of(p))))
+      use <- bool.guard(p.ctx.in_generator, Error(YieldInGenerator(pos_of(p))))
       Ok(Nil)
     }
     "await" -> {
       use <- bool.guard(p.mode == Module, Error(AwaitInModule(pos_of(p))))
-      use <- bool.guard(p.in_async, Error(AwaitInAsyncFunction(pos_of(p))))
+      use <- bool.guard(p.ctx.in_async, Error(AwaitInAsyncFunction(pos_of(p))))
       Ok(Nil)
     }
     _ -> Ok(Nil)
@@ -1221,12 +1257,12 @@ fn check_identifier_reference(p: P, name: String) -> Result(Nil, ParseError) {
   use Nil <- result.try(check_reserved_identifier_common(p, name))
   case name {
     "let" ->
-      case p.strict {
+      case p.ctx.strict {
         True -> Error(ReservedWordStrictMode(name, pos_of(p)))
         False -> Ok(Nil)
       }
     "await" ->
-      case p.in_static_block {
+      case p.ctx.in_static_block {
         True -> Error(AwaitInStaticBlock(pos_of(p)))
         False -> Ok(Nil)
       }
@@ -1234,11 +1270,11 @@ fn check_identifier_reference(p: P, name: String) -> Result(Nil, ParseError) {
       // §15.7.1 ClassStaticBlockBody / §15.7.10 FieldDefinition Initializer:
       // ContainsArguments must be false.
       use <- bool.guard(
-        p.in_static_block,
+        p.ctx.in_static_block,
         Error(ArgumentsInStaticBlock(pos_of(p))),
       )
       use <- bool.guard(
-        p.in_class_field_init,
+        p.ctx.in_class_field_init,
         Error(ArgumentsInClassFieldInit(pos_of(p))),
       )
       Ok(Nil)
@@ -1251,12 +1287,12 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
   use Nil <- result.try(check_reserved_identifier_common(p, name))
   case name {
     "eval" | "arguments" ->
-      case p.strict {
+      case p.ctx.strict {
         True -> Error(StrictModeBindingName(name, pos_of(p)))
         False -> Ok(Nil)
       }
     "let" ->
-      case p.strict || p.in_lexical_decl {
+      case p.ctx.strict || p.ctx.in_lexical_decl {
         True -> Error(LetBindingInLexicalDecl(pos_of(p)))
         False -> Ok(Nil)
       }
@@ -1268,12 +1304,20 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
 /// Returns Ok(p) with the name added to decl_bound_names, or Error if duplicate.
 /// Only checks when in_lexical_decl is True (i.e., inside let/const, not var).
 fn check_duplicate_binding(p: P, name: String) -> Result(P, ParseError) {
-  case p.in_lexical_decl {
+  case p.ctx.in_lexical_decl {
     True ->
-      case set.contains(p.decl_bound_names, name) {
+      case set.contains(p.ctx.decl_bound_names, name) {
         True -> Error(DuplicateBindingLexical(name, pos_of(p)))
         False ->
-          Ok(P(..p, decl_bound_names: set.insert(p.decl_bound_names, name)))
+          Ok(
+            P(
+              ..p,
+              ctx: Ctx(
+                ..p.ctx,
+                decl_bound_names: set.insert(p.ctx.decl_bound_names, name),
+              ),
+            ),
+          )
       }
     False -> Ok(p)
   }
@@ -1316,7 +1360,7 @@ fn register_lexical_name(
 ///   sloppy-mode function decls)
 /// - BindingNone: no scope registration
 fn register_scope_binding(p: P, name: String) -> Result(P, ParseError) {
-  case p.binding_kind {
+  case p.ctx.binding_kind {
     BindingLexical(kind) -> register_lexical_name(p, name, kind, pos_of(p))
     BindingParam ->
       Ok(
@@ -1364,7 +1408,7 @@ fn register_function_name(
   // the declaration were wrapped in its own Block — the name is lexically
   // scoped to that synthetic block, so it can never clash with surrounding
   // declarations (`let f; if (c) function f() {}` is legal).
-  use <- bool.guard(!p.strict && p.in_single_stmt_pos, Ok(p))
+  use <- bool.guard(!p.ctx.strict && p.ctx.in_single_stmt_pos, Ok(p))
   // §16.1.1: a script's LexicallyDeclaredNames EXCLUDE top-level function
   // declarations (they are VarDeclaredNames), so `var f; function f() {}` is
   // legal at script/function top level even in strict mode. Module top level
@@ -1374,7 +1418,7 @@ fn register_function_name(
   // `direct_fn_names → VarBinding` for Module roots, which have
   // `vars_are_local = True`): emit hoists the closure with a plain store,
   // no TDZ slot.
-  case p.in_block, p.module_top_level {
+  case p.ctx.in_block, p.ctx.module_top_level {
     // Module top-level: lexical conflict check, var-like binding kind.
     // Recorded via plain `sb_declare` (NOT `sb_declare_var`) so the name
     // lands in root.bindings WITHOUT root.hoisted_vars — that absence is
@@ -1405,7 +1449,7 @@ fn register_function_name(
         scope.LetBinding,
         name_pos,
       ))
-      case p.in_block && !p.strict && is_plain {
+      case p.ctx.in_block && !p.ctx.strict && is_plain {
         False -> p2
         True -> P(..p2, sb: scope.sb_annexb_candidate(p2.sb, name))
       }
@@ -1665,7 +1709,7 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
     }
     Number -> {
       use <- bool.guard(
-        p.strict && is_legacy_octal_number(peek_value(p)),
+        p.ctx.strict && is_legacy_octal_number(peek_value(p)),
         Error(OctalLiteralStrictMode(pos_of(p))),
       )
       let raw = peek_value(p)
@@ -1678,7 +1722,7 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
     }
     KString -> {
       use <- bool.guard(
-        p.strict && has_legacy_octal_escape(peek_value(p)),
+        p.ctx.strict && has_legacy_octal_escape(peek_value(p)),
         Error(OctalEscapeStrictMode(pos_of(p))),
       )
       Ok(#(
@@ -1742,14 +1786,17 @@ fn parse_while_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, condition) <- result.try(parse_expression(p3))
   use p5 <- result.try(expect(p4, RightParen))
-  let p5 = P(..p5, loop_depth: p5.loop_depth + 1)
+  let p5 = set_loop_depth(p5, p5.ctx.loop_depth + 1)
   use #(p6, body) <- result.try(parse_single_statement(p5, False))
-  Ok(#(P(..p6, loop_depth: p.loop_depth), ast.WhileStatement(condition:, body:)))
+  Ok(#(
+    set_loop_depth(p6, p.ctx.loop_depth),
+    ast.WhileStatement(condition:, body:),
+  ))
 }
 
 fn parse_do_while_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let p2 = advance(p)
-  let p2 = P(..p2, loop_depth: p2.loop_depth + 1)
+  let p2 = set_loop_depth(p2, p2.ctx.loop_depth + 1)
   use #(p3, body) <- result.try(parse_single_statement(p2, False))
   use p4 <- result.try(expect(p3, While))
   use p5 <- result.try(expect(p4, LeftParen))
@@ -1763,7 +1810,7 @@ fn parse_do_while_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     _ -> p7
   }
   Ok(#(
-    P(..p8, loop_depth: p.loop_depth),
+    set_loop_depth(p8, p.ctx.loop_depth),
     ast.DoWhileStatement(condition:, body:),
   ))
 }
@@ -1776,10 +1823,16 @@ fn parse_for_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     _ -> #(p2, False)
   }
   // Increment loop_depth for the body (parsed inside parse_for_head)
-  let p2 = P(..p2, loop_depth: p2.loop_depth + 1)
+  let p2 = set_loop_depth(p2, p2.ctx.loop_depth + 1)
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, stmt) <- result.try(parse_for_head(p3, is_await))
-  Ok(#(P(..p4, loop_depth: p.loop_depth), stmt))
+  Ok(#(set_loop_depth(p4, p.ctx.loop_depth), stmt))
+}
+
+/// Overwrite `ctx.loop_depth` — used to enter/exit the body of an
+/// IterationStatement (while / do-while / for).
+fn set_loop_depth(p: P, depth: Int) -> P {
+  P(..p, ctx: Ctx(..p.ctx, loop_depth: depth))
 }
 
 fn parse_for_head(
@@ -1869,13 +1922,7 @@ fn parse_for_using_declaration(
     True -> advance(advance(p))
     False -> advance(p)
   }
-  let p2 =
-    P(
-      ..p2,
-      in_lexical_decl: True,
-      decl_bound_names: set.new(),
-      binding_kind: BindingLexical(scope.ConstBinding),
-    )
+  let p2 = enter_lexical_decl_context(p2, scope.ConstBinding)
   use #(p3, pattern) <- result.try(parse_using_binding(p2))
   let kind = case is_await_using {
     True -> ast.AwaitUsing
@@ -1939,9 +1986,27 @@ fn parse_for_declaration_scoped(
 fn exit_for_decl_context(p: P, outer: P) -> P {
   P(
     ..p,
-    in_lexical_decl: outer.in_lexical_decl,
-    decl_bound_names: outer.decl_bound_names,
-    binding_kind: outer.binding_kind,
+    ctx: Ctx(
+      ..p.ctx,
+      in_lexical_decl: outer.ctx.in_lexical_decl,
+      decl_bound_names: outer.ctx.decl_bound_names,
+      binding_kind: outer.ctx.binding_kind,
+    ),
+  )
+}
+
+/// Enter a let/const/using declarator-list context: `in_lexical_decl` turns
+/// on the same-declaration duplicate-name check, `decl_bound_names` starts
+/// empty, and `binding_kind` records which kind the declarators bind as.
+fn enter_lexical_decl_context(p: P, kind: scope.BindingKind) -> P {
+  P(
+    ..p,
+    ctx: Ctx(
+      ..p.ctx,
+      in_lexical_decl: True,
+      decl_bound_names: set.new(),
+      binding_kind: BindingLexical(kind),
+    ),
   )
 }
 
@@ -1953,21 +2018,9 @@ fn parse_for_declaration(
   let p2 = advance(p)
   let is_destr = peek(p2) == LeftBrace || peek(p2) == LeftBracket
   let p2 = case kind {
-    Let ->
-      P(
-        ..p2,
-        in_lexical_decl: True,
-        decl_bound_names: set.new(),
-        binding_kind: BindingLexical(scope.LetBinding),
-      )
-    Const ->
-      P(
-        ..p2,
-        in_lexical_decl: True,
-        decl_bound_names: set.new(),
-        binding_kind: BindingLexical(scope.ConstBinding),
-      )
-    _ -> P(..p2, binding_kind: BindingVar)
+    Let -> enter_lexical_decl_context(p2, scope.LetBinding)
+    Const -> enter_lexical_decl_context(p2, scope.ConstBinding)
+    _ -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
   }
   let var_kind = case kind {
     Var -> ast.Var
@@ -2164,7 +2217,9 @@ fn parse_for_expression(
             // eval/arguments in non-target positions (initializer RHS,
             // computed keys, member-expression bases) stays legal.
             case
-              is_bare_pattern && p2.strict && pattern_has_eval_args_target(expr)
+              is_bare_pattern
+              && p2.ctx.strict
+              && pattern_has_eval_args_target(expr)
             {
               True -> Error(EvalArgsAssignStrictMode(pos_of(p2)))
               False -> {
@@ -2275,7 +2330,7 @@ fn parse_for_classic_update(
 }
 
 fn parse_return_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  case p.function_depth > 0 {
+  case p.ctx.function_depth > 0 {
     False -> Error(ReturnOutsideFunction(pos_of(p)))
     True -> parse_return_statement_body(p)
   }
@@ -2333,7 +2388,7 @@ fn check_label_target(
   label: String,
   label_use: LabelUse,
 ) -> Result(Nil, ParseError) {
-  case find_label(p.label_set, label), label_use {
+  case find_label(p.ctx.label_set, label), label_use {
     None, _ -> Error(UndefinedLabel(label, pos_of(p)))
     Some(_), BreakLabel -> Ok(Nil)
     Some(LoopLabel), ContinueLabel -> Ok(Nil)
@@ -2346,7 +2401,7 @@ fn parse_break_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   use #(p2, label) <- result.try(parse_optional_label(advance(p), BreakLabel))
   case label {
     option.None ->
-      case p.loop_depth > 0 || p.switch_depth > 0 {
+      case p.ctx.loop_depth > 0 || p.ctx.switch_depth > 0 {
         False -> Error(BreakOutsideLoopOrSwitch(pos_of(p)))
         True -> Ok(#(p2, ast.BreakStatement(label: option.None)))
       }
@@ -2355,7 +2410,10 @@ fn parse_break_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
 }
 
 fn parse_continue_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  use <- bool.guard(p.loop_depth <= 0, Error(ContinueOutsideLoop(pos_of(p))))
+  use <- bool.guard(
+    p.ctx.loop_depth <= 0,
+    Error(ContinueOutsideLoop(pos_of(p))),
+  )
   use #(p2, label) <- result.map(parse_optional_label(advance(p), ContinueLabel))
   #(p2, ast.ContinueStatement(label:))
 }
@@ -2405,8 +2463,7 @@ fn parse_catch_clause(
         P(
           ..p3,
           sb:,
-          in_block: True,
-          binding_kind: BindingParam,
+          ctx: Ctx(..p3.ctx, in_block: True, binding_kind: BindingParam),
           // Enable dup param detection for catch destructured bindings
           in_formal_params: True,
           param_bound_names: [],
@@ -2427,7 +2484,11 @@ fn parse_catch_clause(
           }),
         )
       use p5 <- result.try(expect(
-        P(..p4, binding_kind: BindingNone, in_formal_params: False),
+        P(
+          ..p4,
+          ctx: Ctx(..p4.ctx, binding_kind: BindingNone),
+          in_formal_params: False,
+        ),
         RightParen,
       ))
       // §14.15.2-3: the catch parameter lives in its OWN scope (catchEnv);
@@ -2449,8 +2510,11 @@ fn parse_catch_clause(
           ..p6,
           sb: scope.sb_reorder_block_children(p6.sb, catch_id)
             |> scope.sb_pop(p3.sb.current, p3.sb.current_fn),
-          in_block: p3.in_block,
-          binding_kind: p3.binding_kind,
+          ctx: Ctx(
+            ..p6.ctx,
+            in_block: p3.ctx.in_block,
+            binding_kind: p3.ctx.binding_kind,
+          ),
         ),
         option.Some(ast.CatchClause(param: option.Some(param), body:)),
       )
@@ -2473,7 +2537,12 @@ fn parse_switch_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // blocks, the CaseBlock scope may shadow params/catch params
   // (`catch (f) { switch (1) { case 1: function f() {} } }`).
   let #(sb, switch_id) = scope.sb_push(p6.sb, scope.Block)
-  let p_inner = P(..p6, sb:, in_block: True, switch_depth: p6.switch_depth + 1)
+  let p_inner =
+    P(
+      ..p6,
+      sb:,
+      ctx: Ctx(..p6.ctx, in_block: True, switch_depth: p6.ctx.switch_depth + 1),
+    )
   use #(p7, cases) <- result.try(parse_switch_cases(p_inner, False, []))
   // Reorder children_at[switch_id] into emit_switch's consumption order
   // ([fn-decls from all case bodies] ++ [case tests] ++ [rest]) — see
@@ -2486,7 +2555,15 @@ fn parse_switch_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     |> scope.sb_pop(p6.sb.current, p6.sb.current_fn)
   Ok(#(
     // restore_block_scope inlined.
-    P(..p7, sb:, in_block: p6.in_block, switch_depth: p6.switch_depth),
+    P(
+      ..p7,
+      sb:,
+      ctx: Ctx(
+        ..p7.ctx,
+        in_block: p6.ctx.in_block,
+        switch_depth: p6.ctx.switch_depth,
+      ),
+    ),
     ast.SwitchStatement(discriminant:, cases: list.reverse(cases)),
   ))
 }
@@ -2590,7 +2667,11 @@ fn parse_function_head(
   }
   let func_name = get_simple_binding_name(p3)
   let p_for_name = case inner_name_ctx {
-    True -> P(..p3, in_generator: is_generator, in_async: is_async)
+    True ->
+      P(
+        ..p3,
+        ctx: Ctx(..p3.ctx, in_generator: is_generator, in_async: is_async),
+      )
     False -> p3
   }
   use p4 <- result.map(eat_optional_name(p_for_name))
@@ -2633,7 +2714,7 @@ fn parse_function_decl_impl(
   // `in_single_stmt_pos` was set on the OUTER state by
   // `parse_single_statement_inner` and is reset by
   // `enter_function_context`, so check `p4` BEFORE entering.
-  let is_hoisted_decl = func_name != "" && !p4.in_single_stmt_pos
+  let is_hoisted_decl = func_name != "" && !p4.ctx.in_single_stmt_pos
   let p_fn = enter_function_context(p4, is_generator, is_async)
   let p_fn = case is_hoisted_decl {
     True ->
@@ -2679,14 +2760,19 @@ fn parse_function_params_and_body(
       in_formal_params: True,
       param_bound_names: [],
       has_non_simple_param: False,
-      binding_kind: BindingParam,
+      ctx: Ctx(..p2.ctx, binding_kind: BindingParam),
     )
   use #(p3, params) <- result.try(parse_formal_parameters(p2))
-  let p3 = P(..p3, in_formal_params: False, binding_kind: BindingNone)
+  let p3 =
+    P(
+      ..p3,
+      in_formal_params: False,
+      ctx: Ctx(..p3.ctx, binding_kind: BindingNone),
+    )
   use p4 <- result.try(expect(p3, RightParen))
   // Check for "use strict" directive at start of function body.
   // If transitioning to strict, retroactively check for dup params.
-  let was_strict = p4.strict
+  let was_strict = p4.ctx.strict
   use p5 <- result.try(check_use_strict_in_body(p4))
   // §10.2.11 step 28: a non-simple parameter list (any default /
   // destructuring among the FIXED formals) routes positional args
@@ -2718,7 +2804,7 @@ fn parse_function_params_and_body(
         synthetic: True,
       ),
     )
-  use #(p6, body) <- result.try(case !was_strict && p5.strict {
+  use #(p6, body) <- result.try(case !was_strict && p5.ctx.strict {
     True -> {
       use Nil <- result.try(check_pending_strict_names(p5))
       use Nil <- result.try(check_param_names_for_dups(p5))
@@ -2961,7 +3047,7 @@ fn parse_setter_params_and_body(
       in_formal_params: True,
       param_bound_names: [],
       has_non_simple_param: False,
-      binding_kind: BindingParam,
+      ctx: Ctx(..p2.ctx, binding_kind: BindingParam),
     )
   case peek(p2) {
     RightParen -> Error(SetterExactlyOneParam(pos_of(p2)))
@@ -2983,7 +3069,11 @@ fn parse_setter_params_and_body(
       case peek(p4) {
         RightParen -> {
           let p5 =
-            P(..advance(p4), in_formal_params: False, binding_kind: BindingNone)
+            P(
+              ..advance(p4),
+              in_formal_params: False,
+              ctx: Ctx(..p4.ctx, binding_kind: BindingNone),
+            )
           // Check for "use strict" directive
           use p5 <- result.try(check_use_strict_in_body(p5))
           // §10.2.11 step 28: a setter's single PropertySetParameterList
@@ -3185,7 +3275,10 @@ fn check_duplicate_param(
 ) -> Result(Nil, ParseError) {
   use <- bool.guard(name == "", Ok(Nil))
   let must_be_unique =
-    p.strict || p.in_arrow_params || p.in_method || p.has_non_simple_param
+    p.ctx.strict
+    || p.in_arrow_params
+    || p.ctx.in_method
+    || p.has_non_simple_param
   use <- bool.guard(
     must_be_unique && set.contains(seen, name),
     Error(DuplicateParameterName(name, pos_of(p))),
@@ -3255,7 +3348,7 @@ fn parse_class_head_and_tail(
       // The class name identifier is the current token of `p2`.
       let name_span = span_of(p2)
       use Nil <- result.try(check_binding_identifier(
-        P(..p2, strict: True),
+        P(..p2, ctx: Ctx(..p2.ctx, strict: True)),
         name,
       ))
       use p3 <- result.try(case register_name {
@@ -3321,7 +3414,7 @@ fn parse_class_tail(
   name: Option(String),
 ) -> Result(#(P, Option(ast.Expression), List(ast.ClassElement)), ParseError) {
   // Class bodies (and extends clause) are always strict
-  let saved_strict = p.strict
+  let saved_strict = p.ctx.strict
   // Save the OUTER scope cursors so the matching `sb_pop` at the closing
   // `}` restores them (accumulated scopes/refs flow forward).
   let outer_current = p.sb.current
@@ -3331,7 +3424,7 @@ fn parse_class_tail(
   // and any nested scopes in the heritage are children of the ClassBody
   // (declare_class step 3 walks the heritage with `class_id`).
   let #(sb, class_id) = scope.sb_push(p.sb, scope.ClassBody)
-  let p = P(..p, sb:, strict: True)
+  let p = P(..p, sb:, ctx: Ctx(..p.ctx, strict: True))
   // Optional extends. Once `extends` is consumed a LeftHandSideExpression is
   // mandatory (ClassHeritage has no alternative production), so a parse error
   // in it is the user's error and must be propagated — backtracking to "no
@@ -3378,7 +3471,12 @@ fn parse_class_tail(
   // Pop the ClassBody scope.
   let sb = scope.sb_pop(sb, outer_current, outer_fn)
   Ok(#(
-    P(..p4, sb:, strict: saved_strict, class_private_depth: outer_depth),
+    P(
+      ..p4,
+      sb:,
+      ctx: Ctx(..p4.ctx, strict: saved_strict),
+      class_private_depth: outer_depth,
+    ),
     super_class,
     elements,
   ))
@@ -3809,10 +3907,10 @@ fn parse_class_element(
     // pruning whenever the body has a `let`/`const`/`class`/`function`,
     // desyncing emit's positional cursor and misplacing slot lookups.
     use #(p3, block) <- result.map(parse_function_body_block(p_body))
-    // restore_outer_context threads function_depth/loops/labels/generator/
-    // async/static_block/scope; allow_super_* are not threaded — restore here.
-    // sb_pop inside restore_outer_context restores to p2_static's cursors
-    // (= static_id); re-enter class_id afterwards.
+    // restore_outer_context restores the whole `Ctx` (incl. allow_super_*)
+    // from p2_static, whose ctx is p2's. sb_pop inside restore_outer_context
+    // restores to p2_static's cursors (= static_id); re-enter class_id
+    // afterwards.
     let p3 =
       P(
         ..restore_outer_context(p3, p2_static),
@@ -3820,8 +3918,6 @@ fn parse_class_element(
           scope.sb_pop(p3.sb, p2_static.sb.current, p2_static.sb.current_fn),
           ctx.class_id,
         ),
-        allow_super_property: p2.allow_super_property,
-        allow_super_call: p2.allow_super_call,
       )
     let body = case block {
       ast.BlockStatement(body:) -> body
@@ -3999,20 +4095,26 @@ fn parse_class_element_body(
             P(
               ..advance(p6),
               sb: scope.sb_enter(p6.sb, shell_id),
-              allow_super_property: True,
-              allow_super_call: False,
-              allow_new_target: True,
-              in_class_field_init: True,
+              ctx: Ctx(
+                ..p6.ctx,
+                allow_super_property: True,
+                allow_super_call: False,
+                allow_new_target: True,
+                in_class_field_init: True,
+              ),
             )
           use #(p8, init) <- result.map(parse_assignment_expression(p7))
           #(
             P(
               ..p8,
               sb: scope.sb_enter(p8.sb, ctx.class_id),
-              allow_super_property: outer_p.allow_super_property,
-              allow_super_call: outer_p.allow_super_call,
-              allow_new_target: outer_p.allow_new_target,
-              in_class_field_init: outer_p.in_class_field_init,
+              ctx: Ctx(
+                ..p8.ctx,
+                allow_super_property: outer_p.ctx.allow_super_property,
+                allow_super_call: outer_p.ctx.allow_super_call,
+                allow_new_target: outer_p.ctx.allow_new_target,
+                in_class_field_init: outer_p.ctx.in_class_field_init,
+              ),
             ),
             Some(init),
           )
@@ -4050,13 +4152,13 @@ fn class_key_name(key_expr: ast.Expression) -> Option(String) {
 fn check_label_identifier(p: P, label: String) -> Result(Nil, ParseError) {
   case label {
     "yield" -> {
-      use <- bool.guard(p.strict, Error(YieldReservedStrictMode(pos_of(p))))
-      use <- bool.guard(p.in_generator, Error(YieldInGenerator(pos_of(p))))
+      use <- bool.guard(p.ctx.strict, Error(YieldReservedStrictMode(pos_of(p))))
+      use <- bool.guard(p.ctx.in_generator, Error(YieldInGenerator(pos_of(p))))
       Ok(Nil)
     }
     "await" -> {
       use <- bool.guard(p.mode == Module, Error(AwaitInModule(pos_of(p))))
-      use <- bool.guard(p.in_async, Error(AwaitInAsyncFunction(pos_of(p))))
+      use <- bool.guard(p.ctx.in_async, Error(AwaitInAsyncFunction(pos_of(p))))
       Ok(Nil)
     }
     _ -> Ok(Nil)
@@ -4096,7 +4198,7 @@ fn parse_label_chain(
   // Check for duplicate labels — against the enclosing label set and the
   // labels already collected from this chain (`a: a: ;`).
   let duplicate =
-    option.is_some(find_label(p.label_set, label))
+    option.is_some(find_label(p.ctx.label_set, label))
     || list.contains(collected, label)
   use <- bool.guard(duplicate, Error(DuplicateLabel(label, pos_of(p))))
   let p2 = advance(p)
@@ -4121,13 +4223,16 @@ fn parse_labeled_statement_body(
       While | Do | For -> LoopLabel
       _ -> PlainLabel
     }
-    let outer_labels = p3.label_set
+    let outer_labels = p3.ctx.label_set
     let p3 =
       P(
         ..p3,
-        label_set: list.append(
-          list.map(labels, fn(label) { #(label, kind) }),
-          outer_labels,
+        ctx: Ctx(
+          ..p3.ctx,
+          label_set: list.append(
+            list.map(labels, fn(label) { #(label, kind) }),
+            outer_labels,
+          ),
         ),
       )
     let wrap_label = fn(res) {
@@ -4136,7 +4241,7 @@ fn parse_labeled_statement_body(
         list.fold(labels, stmt, fn(body, label) {
           ast.LabeledStatement(label:, body:)
         })
-      #(P(..inner_p, label_set: outer_labels), labeled)
+      #(P(..inner_p, ctx: Ctx(..inner_p.ctx, label_set: outer_labels)), labeled)
     }
     // Check for labeled generator declarations (always forbidden),
     // labeled lexical declarations (always forbidden),
@@ -4158,7 +4263,7 @@ fn parse_labeled_statement_body(
           Error(GeneratorDeclLabeled(pos_of(p3))),
         )
         use <- bool.guard(
-          p3.strict || p3.in_single_stmt_pos,
+          p3.ctx.strict || p3.ctx.in_single_stmt_pos,
           Error(FunctionDeclInLabelBody(pos_of(p3))),
         )
         wrap_label(parse_statement(p3))
@@ -4181,7 +4286,7 @@ fn parse_labeled_statement_body(
 }
 
 fn parse_with_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  use <- bool.guard(p.strict, Error(WithNotAllowedStrictMode(pos_of(p))))
+  use <- bool.guard(p.ctx.strict, Error(WithNotAllowedStrictMode(pos_of(p))))
   parse_with_statement_body(p)
 }
 
@@ -4285,7 +4390,7 @@ fn parse_assignment_expression(
       // Only parse yield expression inside generators.
       // Outside generators, yield is an identifier (sloppy mode) or reserved
       // word (strict mode), both handled by parse_assignment_expression_inner.
-      case p.in_generator {
+      case p.ctx.in_generator {
         False -> parse_assignment_expression_inner(p)
         True ->
           case peek_at(p, 1) {
@@ -4336,7 +4441,7 @@ fn parse_assignment_expression_inner(
     Error(NotAnArrow) -> {
       // In strict mode, check if this is a simple assignment to eval/arguments
       // before parsing — if current token is eval/arguments and next is assignment op
-      case p.strict {
+      case p.ctx.strict {
         True ->
           case peek(p) {
             Identifier ->
@@ -4384,7 +4489,7 @@ fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
                   // §13.15.1: strict-mode eval/arguments as a destructuring
                   // assignment target — walk the LHS as an AssignmentPattern
                   // so non-target uses (`[x = eval] = []`) stay legal.
-                  case p.strict && pattern_has_eval_args_target(lhs_expr) {
+                  case p.ctx.strict && pattern_has_eval_args_target(lhs_expr) {
                     True -> Error(EvalArgsAssignStrictMode(pos_of(p2)))
                     False ->
                       finish_assignment(
@@ -4465,7 +4570,7 @@ fn check_strict_restricted_target(
   p: P,
   lhs: ast.Expression,
 ) -> Result(Nil, ParseError) {
-  case p.strict, ast_util.unwrap_parens(lhs) {
+  case p.ctx.strict, ast_util.unwrap_parens(lhs) {
     True, ast.Identifier(name:, ..) ->
       case name {
         "eval" | "arguments" -> Error(StrictModeAssignment(name, pos_of(p)))
@@ -4485,7 +4590,7 @@ fn check_strict_restricted_target(
 /// early SyntaxError even in sloppy mode (test262
 /// language/expressions/optional-chaining/static-semantics-simple-assignment.js).
 fn is_web_compat_call_target(p: P, lhs: ast.Expression) -> Bool {
-  case p.strict, ast_util.unwrap_parens(lhs) {
+  case p.ctx.strict, ast_util.unwrap_parens(lhs) {
     False, ast.CallExpression(callee:, ..) ->
       !ast_util.chain_has_optional(callee)
     _, _ -> False
@@ -4546,7 +4651,7 @@ fn try_single_ident_arrow(
   // which lexes as Identifier) is reserved as a binding name there. The
   // non-async case checks against the enclosing context unchanged.
   let check_p = case is_async {
-    True -> P(..outer, in_async: True)
+    True -> P(..outer, ctx: Ctx(..outer.ctx, in_async: True))
     False -> outer
   }
   // The `=>` has not been consumed yet, so arrow-ness is not committed: a
@@ -4599,18 +4704,21 @@ fn try_paren_arrow(
       in_formal_params: True,
       param_bound_names: [],
       has_non_simple_param: False,
-      binding_kind: BindingParam,
-      // §15.3 ArrowParameters[?Yield, ?Await] — arrow params inherit the
-      // ENCLOSING yield/await context (unlike full functions, whose params
-      // use the function's own context). enter_arrow_context above set the
-      // BODY's context; restore the enclosing flags for the duration of
-      // param parsing so `yield`/`await`/`arguments` in defaults behave as
-      // before. Async-arrow formals refine to [+Await] via §15.9
-      // AsyncArrowHead, hence the `|| is_async`.
-      in_generator: p_params.in_generator,
-      in_async: p_params.in_async || is_async,
-      in_static_block: p_params.in_static_block,
-      in_class_field_init: p_params.in_class_field_init,
+      ctx: Ctx(
+        ..p_ctx.ctx,
+        binding_kind: BindingParam,
+        // §15.3 ArrowParameters[?Yield, ?Await] — arrow params inherit the
+        // ENCLOSING yield/await context (unlike full functions, whose params
+        // use the function's own context). enter_arrow_context above set the
+        // BODY's context; restore the enclosing flags for the duration of
+        // param parsing so `yield`/`await`/`arguments` in defaults behave as
+        // before. Async-arrow formals refine to [+Await] via §15.9
+        // AsyncArrowHead, hence the `|| is_async`.
+        in_generator: p_params.ctx.in_generator,
+        in_async: p_params.ctx.in_async || is_async,
+        in_static_block: p_params.ctx.in_static_block,
+        in_class_field_init: p_params.ctx.in_class_field_init,
+      ),
     )
   case parse_formal_parameters(p_arrow) {
     Ok(#(p3, params)) ->
@@ -4620,7 +4728,7 @@ fn try_paren_arrow(
             ..p3,
             in_arrow_params: False,
             in_formal_params: False,
-            binding_kind: BindingNone,
+            ctx: Ctx(..p3.ctx, binding_kind: BindingNone),
           ),
           RightParen,
         )
@@ -4646,10 +4754,13 @@ fn try_paren_arrow(
                     P(
                       ..advance(p4),
                       sb: declare_param_shims(p4.sb, params),
-                      in_generator: p_ctx.in_generator,
-                      in_async: p_ctx.in_async,
-                      in_static_block: p_ctx.in_static_block,
-                      in_class_field_init: p_ctx.in_class_field_init,
+                      ctx: Ctx(
+                        ..p4.ctx,
+                        in_generator: p_ctx.ctx.in_generator,
+                        in_async: p_ctx.ctx.in_async,
+                        in_static_block: p_ctx.ctx.in_static_block,
+                        in_class_field_init: p_ctx.ctx.in_class_field_init,
+                      ),
                     )
                   finish_arrow(
                     parse_arrow_body(p5, params),
@@ -4888,7 +4999,7 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       //   - `delete expr.#priv` (private name, through parens) → strict-mode error
       //     (private names only occur in class bodies, which are always strict)
       use <- bool.guard(
-        p.strict && is_bare_identifier(operand),
+        p.ctx.strict && is_bare_identifier(operand),
         Error(DeleteUnqualifiedStrictMode(start)),
       )
       use <- bool.guard(
@@ -4913,10 +5024,13 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       finish_update_expr(p3, arg, op, True, start, start)
     }
     Await ->
-      case p.in_async || p.mode == Module {
+      case p.ctx.in_async || p.mode == Module {
         True -> {
           // §15.7.1: ContainsAwait of ClassStaticBlockBody must be false.
-          use <- bool.guard(p.in_static_block, Error(AwaitInStaticBlock(start)))
+          use <- bool.guard(
+            p.ctx.in_static_block,
+            Error(AwaitInStaticBlock(start)),
+          )
           let p2 = advance(p)
           use #(p3, arg) <- result.try(parse_unary_expression(p2))
           Ok(#(
@@ -5093,7 +5207,7 @@ fn finish_update_expr(
     False, True -> Error(InvalidLhsPrefixOp(err_pos))
     False, False -> Error(InvalidPostfixLhs(err_pos))
     True, _ ->
-      case p.strict, p.last_expr_name {
+      case p.ctx.strict, p.last_expr_name {
         True, Some("eval" as n) | True, Some("arguments" as n) ->
           Error(StrictModeModification(n, err_pos))
         _, _ ->
@@ -5131,7 +5245,7 @@ fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
             // new.target must be spelled literally — unicode escapes forbidden
             "target", True -> Error(UnicodeEscapeInMetaProperty(pos_of(p3)))
             "target", False ->
-              case p.allow_new_target {
+              case p.ctx.allow_new_target {
                 True -> {
                   // Span covers `new.target` — from the `new` keyword's
                   // start to just past the `target` identifier.
@@ -5211,7 +5325,7 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let p2 = advance(p)
       case peek(p2) {
         LeftParen ->
-          case p.allow_super_call {
+          case p.ctx.allow_super_call {
             True -> {
               use #(p3, args) <- result.try(parse_arguments(p2))
               // §13.3.7.1 SuperCall: reads the active function (for
@@ -5240,7 +5354,7 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
             False -> Error(SuperCallNotInDerivedConstructor(pos_of(p)))
           }
         Dot | LeftBracket ->
-          case p.allow_super_property {
+          case p.ctx.allow_super_property {
             True -> {
               // §13.3.7.3 MakeSuperPropertyReference — see the
               // parse_primary_expression Super arm.
@@ -5663,7 +5777,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     }
     Number -> {
       use <- bool.guard(
-        p.strict && is_legacy_octal_number(peek_value(p)),
+        p.ctx.strict && is_legacy_octal_number(peek_value(p)),
         Error(OctalLiteralStrictMode(pos_of(p))),
       )
       let raw = peek_value(p)
@@ -5676,7 +5790,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     }
     KString -> {
       use <- bool.guard(
-        p.strict && has_legacy_octal_escape(peek_value(p)),
+        p.ctx.strict && has_legacy_octal_escape(peek_value(p)),
         Error(OctalEscapeStrictMode(pos_of(p))),
       )
       Ok(#(
@@ -5715,7 +5829,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let next = peek_at(p, 1)
       case next {
         Dot | LeftBracket ->
-          case p.allow_super_property {
+          case p.ctx.allow_super_property {
             True -> {
               // §13.3.7.3 MakeSuperPropertyReference reads [[HomeObject]]
               // for the prototype lookup and `this` as the receiver
@@ -5788,10 +5902,10 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           // Check for contextual keywords that are restricted in certain contexts
           case peek(p) {
             Yield ->
-              case p.strict {
+              case p.ctx.strict {
                 True -> Error(YieldReservedStrictMode(pos_of(p)))
                 False ->
-                  case p.in_generator {
+                  case p.ctx.in_generator {
                     True -> Error(YieldInGenerator(pos_of(p)))
                     False -> contextual_ident_ok(p)
                   }
@@ -5800,18 +5914,18 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               case p.mode {
                 Module -> Error(AwaitInModule(pos_of(p)))
                 Script ->
-                  case p.in_async {
+                  case p.ctx.in_async {
                     True -> Error(AwaitInAsyncFunction(pos_of(p)))
                     False -> contextual_ident_ok(p)
                   }
               }
             Let ->
-              case p.strict {
+              case p.ctx.strict {
                 True -> Error(LetIdentifierStrictMode(pos_of(p)))
                 False -> contextual_ident_ok(p)
               }
             Static ->
-              case p.strict {
+              case p.ctx.strict {
                 True -> Error(StaticReservedStrictMode(pos_of(p)))
                 False -> contextual_ident_ok(p)
               }
@@ -6978,7 +7092,7 @@ fn parse_export_specifier(
 /// directive prologue. If so, set strict mode. Does NOT consume tokens.
 /// Also checks for retroactive octal escape errors and parameter name errors.
 fn check_use_strict_in_body(p: P) -> Result(P, ParseError) {
-  case p.strict {
+  case p.ctx.strict {
     True ->
       // FunctionBodyContainsUseStrict + non-simple parameter list is a
       // SyntaxError even when the function is ALREADY strict (class methods,
@@ -7022,7 +7136,7 @@ fn prologue_has_use_strict(p: P, offset: Int) -> Bool {
 
 /// Check if program body starts with "use strict" directive.
 fn check_use_strict_at_start(p: P) -> Result(P, ParseError) {
-  case p.strict {
+  case p.ctx.strict {
     True -> Ok(p)
     False -> scan_directive_prologue(p, 0, [])
   }
@@ -7041,7 +7155,7 @@ fn scan_directive_prologue(
       case val {
         "use strict" -> {
           use Nil <- result.try(check_retroactive_octals(p, seen_strings))
-          let p = P(..p, strict: True)
+          let p = P(..p, ctx: Ctx(..p.ctx, strict: True))
           check_retroactive_params(p)
         }
         _ -> {
@@ -7109,33 +7223,41 @@ fn validate_retroactive_param_names(
 // ---- Context helpers ----
 
 /// Enter a new function context — resets loop/switch/labels, increments function_depth
+///
+/// The whole outer `Ctx` is put back by `restore_outer_context` at the
+/// matching function exit; `strict` is the only field carried IN (a nested
+/// function inherits the enclosing strictness).
 fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
   let #(sb, _id) = scope.sb_push(p.sb, scope.Function)
   P(
     ..p,
-    function_depth: p.function_depth + 1,
-    loop_depth: 0,
-    switch_depth: 0,
-    label_set: [],
-    in_generator: is_generator,
-    in_async: is_async,
-    in_static_block: False,
-    in_class_field_init: False,
-    allow_super_call: False,
-    allow_super_property: False,
-    allow_new_target: True,
-    in_single_stmt_pos: False,
-    in_method: False,
-    // A function boundary is never part of an enclosing let/const declaration:
-    // params and body bindings must not collide with outer declarator names.
-    in_lexical_decl: False,
-    decl_bound_names: set.new(),
+    ctx: Ctx(
+      strict: p.ctx.strict,
+      function_depth: p.ctx.function_depth + 1,
+      loop_depth: 0,
+      switch_depth: 0,
+      label_set: [],
+      in_generator: is_generator,
+      in_async: is_async,
+      in_static_block: False,
+      in_class_field_init: False,
+      in_method: False,
+      allow_new_target: True,
+      allow_super_call: False,
+      allow_super_property: False,
+      binding_kind: BindingNone,
+      in_block: False,
+      module_top_level: False,
+      in_single_stmt_pos: False,
+      // A function boundary is never part of an enclosing let/const
+      // declaration: params and body bindings must not collide with outer
+      // declarator names.
+      in_lexical_decl: False,
+      decl_bound_names: set.new(),
+    ),
     // Push a fresh Function scope; the new scope's id is now sb.current
     // and sb.current_fn.
     sb:,
-    binding_kind: BindingNone,
-    in_block: False,
-    module_top_level: False,
     in_case_clause: False,
   )
 }
@@ -7166,10 +7288,13 @@ fn enter_arrow_context(p: P, is_async: Bool, param_names: List(String)) -> P {
   P(
     ..inner,
     sb:,
-    allow_super_call: p.allow_super_call,
-    allow_super_property: p.allow_super_property,
-    allow_new_target: p.allow_new_target,
-    in_class_field_init: p.in_class_field_init || p.in_static_block,
+    ctx: Ctx(
+      ..inner.ctx,
+      allow_super_call: p.ctx.allow_super_call,
+      allow_super_property: p.ctx.allow_super_property,
+      allow_new_target: p.ctx.allow_new_target,
+      in_class_field_init: p.ctx.in_class_field_init || p.ctx.in_static_block,
+    ),
   )
 }
 
@@ -7180,11 +7305,15 @@ fn enter_method_context(
   is_constructor: Bool,
   has_super_class: Bool,
 ) -> P {
+  let inner = enter_function_context(p, is_generator, is_async)
   P(
-    ..enter_function_context(p, is_generator, is_async),
-    allow_super_call: is_constructor && has_super_class,
-    allow_super_property: True,
-    in_method: True,
+    ..inner,
+    ctx: Ctx(
+      ..inner.ctx,
+      allow_super_call: is_constructor && has_super_class,
+      allow_super_property: True,
+      in_method: True,
+    ),
   )
 }
 
@@ -7204,9 +7333,12 @@ fn enter_static_block_context(p: P) -> P {
   P(
     ..inner,
     sb:,
-    function_depth: 0,
-    in_static_block: True,
-    allow_super_property: True,
+    ctx: Ctx(
+      ..inner.ctx,
+      function_depth: 0,
+      in_static_block: True,
+      allow_super_property: True,
+    ),
   )
 }
 
@@ -7218,35 +7350,23 @@ fn restore_context_fn(
   #(restore_outer_context(p, outer), params, stmt)
 }
 
+/// Leave a function body: put back the enclosing parsing context WHOLE.
+///
+/// `ctx: outer.ctx` restores every nesting-sensitive flag/counter at once —
+/// including `strict`, which a body's retroactive `"use strict"` directive
+/// may have flipped and which must NOT leak into the enclosing sloppy code
+/// (`function f(){"use strict"} with({}) {}` is legal). Because the whole
+/// `Ctx` record is copied there is no per-field restore list to keep in
+/// sync with `Ctx`'s (and `enter_function_context`'s) field set.
+///
+/// The scope builder is NOT part of `Ctx`: its accumulated scopes/refs must
+/// flow forward across the pop, so only the `current`/`current_fn` cursors
+/// come back from `outer`.
 fn restore_outer_context(p: P, outer: P) -> P {
   P(
     ..p,
-    function_depth: outer.function_depth,
-    loop_depth: outer.loop_depth,
-    switch_depth: outer.switch_depth,
-    label_set: outer.label_set,
-    in_generator: outer.in_generator,
-    in_async: outer.in_async,
-    in_static_block: outer.in_static_block,
-    in_class_field_init: outer.in_class_field_init,
-    in_method: outer.in_method,
-    allow_new_target: outer.allow_new_target,
-    // Nested function bodies cleared these (enter_function_context); the
-    // ENCLOSING code's legality is the outer context's — e.g. `super()`
-    // after a nested function declaration in a derived-class constructor.
-    allow_super_call: outer.allow_super_call,
-    allow_super_property: outer.allow_super_property,
-    // Pop the function scope: keep p.sb's accumulated scopes/refs, restore
-    // ONLY the current/current_fn cursors from the outer parser state.
+    ctx: outer.ctx,
     sb: scope.sb_pop(p.sb, outer.sb.current, outer.sb.current_fn),
-    binding_kind: outer.binding_kind,
-    in_block: outer.in_block,
-    module_top_level: outer.module_top_level,
-    in_single_stmt_pos: outer.in_single_stmt_pos,
-    // Resume the enclosing let/const declaration (if any) so later
-    // declarators still dup-check: `let a = function () {}, a = 2` errors.
-    in_lexical_decl: outer.in_lexical_decl,
-    decl_bound_names: outer.decl_bound_names,
   )
 }
 
@@ -7281,7 +7401,6 @@ fn peek_at(p: P, n: Int) -> TokenKind {
   }
 }
 
-/// Check if a number literal value is a legacy octal (e.g. 0123, 09)
 /// Parse a raw template literal string into cooked quasis and expression
 /// ASTs. The raw string includes backticks, e.g. `hello ${x} world`.
 /// Used for UNTAGGED templates: an invalid escape sequence in any quasi is
@@ -7334,11 +7453,23 @@ fn parse_template_parts(
   p: P,
   raw: String,
 ) -> Result(#(P, List(String), List(ast.Expression)), ParseError) {
+  // The whole template is a single token in the outer stream, so the
+  // current token's position is the template's opening backtick.
+  let template_pos = pos_of(p)
   // Strip leading ` and trailing `
   let len = string.length(raw)
   let inner = string.slice(raw, 1, len - 2)
   // Split into raw quasis and expression source strings
-  let #(raw_quasis, expr_sources) = split_template_parts(inner)
+  use #(raw_quasis, expr_sources) <- result.try(
+    result.map_error(split_template_parts(inner), fn(err) {
+      let UnterminatedSubstitution = err
+      UnterminatedTemplateSubstitution(template_pos)
+    }),
+  )
+  // Absolute source position where each substitution's expression source
+  // starts, so errors inside a substitution point into the real source.
+  let expr_positions =
+    substitution_positions(raw_quasis, expr_sources, template_pos + 1)
   // Save outer cursor-ish state we are about to overwrite per substitution.
   let outer_tokens = p.tokens
   let outer_bytes = p.bytes
@@ -7347,27 +7478,41 @@ fn parse_template_parts(
   // Parse each expression source, threading P through so accumulated
   // scope state (sb) flows forward across substitutions and back out.
   use #(p, rev_exprs) <- result.map(
-    list.try_fold(expr_sources, #(p, []), fn(acc, src) {
-      let #(p, exprs) = acc
-      case lexer.tokenize(src) {
-        Error(e) -> Error(LexError(e))
-        Ok(tokens) -> {
-          // parse_regex_literal re-scans regex bodies from `bytes` using
-          // token-relative byte offsets, so `bytes` must match the source
-          // these tokens were lexed from.
-          let sub_p =
-            P(
-              ..p,
-              tokens: tokens,
-              bytes: bit_array.from_string(src),
-              last_expr_assignable: False,
-              last_expr_is_assignment: False,
-            )
-          use #(sub_p, expr) <- result.map(parse_expression(sub_p))
-          #(sub_p, [expr, ..exprs])
+    list.try_fold(
+      list.zip(expr_sources, expr_positions),
+      #(p, []),
+      fn(acc, entry) {
+        let #(p, exprs) = acc
+        let #(src, expr_pos) = entry
+        case lexer.tokenize(src) {
+          Error(e) -> Error(LexError(e))
+          Ok(tokens) -> {
+            // parse_regex_literal re-scans regex bodies from `bytes` using
+            // token-relative byte offsets, so `bytes` must match the source
+            // these tokens were lexed from.
+            let sub_p =
+              P(
+                ..p,
+                tokens: tokens,
+                bytes: bit_array.from_string(src),
+                last_expr_assignable: False,
+                last_expr_is_assignment: False,
+              )
+            use #(sub_p, expr) <- result.try(parse_expression(sub_p))
+            // The substitution must be exactly one expression: `${a b}`
+            // is a SyntaxError, not "parse `a` and drop ` b`".
+            case peek(sub_p) {
+              Eof -> Ok(#(sub_p, [expr, ..exprs]))
+              trailing ->
+                Error(UnexpectedToken(
+                  token_kind_to_string(trailing),
+                  expr_pos + pos_of(sub_p),
+                ))
+            }
+          }
         }
-      }
-    }),
+      },
+    ),
   )
   let p =
     P(
@@ -7378,6 +7523,33 @@ fn parse_template_parts(
       last_expr_is_assignment: outer_is_assignment,
     )
   #(p, raw_quasis, list.reverse(rev_exprs))
+}
+
+/// Absolute byte offset (in the enclosing source) where each substitution's
+/// expression source starts. `at` is the offset just past the template's
+/// opening backtick; each quasi is followed by `${` (2 bytes) and each
+/// expression by `}` (1 byte). Quasi lengths are measured after the split's
+/// CRLF→LF normalization, so a CRLF earlier in the template shifts later
+/// positions by one byte — close enough for error reporting.
+fn substitution_positions(
+  quasis: List(String),
+  expr_sources: List(String),
+  at: Int,
+) -> List(Int) {
+  case quasis, expr_sources {
+    [quasi, ..quasis_rest], [src, ..sources_rest] -> {
+      let start = at + string.byte_size(quasi) + 2
+      [
+        start,
+        ..substitution_positions(
+          quasis_rest,
+          sources_rest,
+          start + string.byte_size(src) + 1,
+        )
+      ]
+    }
+    _, _ -> []
+  }
 }
 
 fn peek_value(p: P) -> String {
