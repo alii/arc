@@ -447,6 +447,10 @@ fn incompatible(
 
 /// Write back a stack's disposable state / [[DisposableResourceStack]].
 /// The brand (`async`) never changes after allocation.
+///
+/// Every caller reaches here only after `require_stack` (RequireInternalSlot)
+/// has proven `ref` is a live DisposableStackObject, so any other slot shape
+/// is a wiring bug — crash rather than silently drop the write.
 fn write_stack(
   state: State(host),
   ref: Ref,
@@ -455,14 +459,11 @@ fn write_stack(
 ) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
-      case slot {
-        ObjectSlot(kind: DisposableStackObject(async:, ..), ..) ->
-          ObjectSlot(
-            ..slot,
-            kind: DisposableStackObject(async:, disposed:, resources:),
-          )
-        other -> other
-      }
+      let assert ObjectSlot(kind: DisposableStackObject(async:, ..), ..) = slot
+      ObjectSlot(
+        ..slot,
+        kind: DisposableStackObject(async:, disposed:, resources:),
+      )
     })
   State(..state, heap:)
 }

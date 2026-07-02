@@ -2113,11 +2113,13 @@ fn push_barrier(
   ])
 }
 
+/// Pop the innermost `loop_stack` entry. Every pop is paired with a
+/// push_loop/push_loop_ctx/push_barrier in the same emit function, so an
+/// empty stack here is a push/pop desync — crash at the desync instead of
+/// silently leaving the (now stale) outer context in place.
 fn pop_loop(e: Emitter) -> Emitter {
-  case e.loop_stack {
-    [_, ..rest] -> Emitter(..e, loop_stack: rest)
-    [] -> e
-  }
+  let assert [_, ..rest] = e.loop_stack
+  Emitter(..e, loop_stack: rest)
 }
 
 fn repeat_ir(e: Emitter, op: IrOp, n: Int) -> Emitter {
@@ -2974,11 +2976,12 @@ fn compile_function_body(
   // FunctionDeclarations first — the same order `collect_hoisted_funcs`
   // compiles them here — so the cursor and emission order stay aligned
   // even when a FunctionDeclaration shares a statement list with an
-  // earlier-in-source function expression / arrow / class.
-  let #(parent, fn_id) = case parent.child_fn_cursor {
-    [id, ..rest] -> #(Emitter(..parent, child_fn_cursor: rest), id)
-    [] -> #(parent, root_scope_id)
-  }
+  // earlier-in-source function expression / arrow / class. An exhausted
+  // cursor means the emitter is compiling a child function the analyzer
+  // never numbered (a walk-order desync) — crash here rather than
+  // miscompile the child against the root scope's slots.
+  let assert [fn_id, ..rest] = parent.child_fn_cursor
+  let parent = Emitter(..parent, child_fn_cursor: rest)
   let stmts = case body {
     ast.BlockStatement(s) -> s
     other -> [ast.StmtWithLine(0, other)]
@@ -3867,39 +3870,24 @@ fn emit_with(
   // Marking the slot `initialized` keeps later TDZ-check heuristics from
   // treating it as possibly-uninit.
   //
-  // The empty-bindings arm is the empty-tree bootstrap fallback only
-  // (every entry point wires the analyzer tree, so a real With scope
-  // always carries exactly one binding): mint a name unique along the
-  // with-chain AND across siblings, and route the store through
-  // `emit_var_init` so the bootstrap's `scope.lookup` fallthrough decides.
-  let #(e, synth) = case
+  // Every entry point wires the analyzer tree, and the analyzer creates a
+  // With node holding exactly the `<withN_M>` binding — an empty bindings
+  // list here means the emitter is not sitting in that node (a cursor
+  // desync), so crash rather than mint a holder name the analyzer never
+  // allocated a slot for.
+  let assert [#(synth, scope.Binding(slot:, is_boxed:, ..)), ..] =
     dict.to_list(scope.get_scope(e.scope_tree, e.current_scope).bindings)
-  {
-    [#(name, scope.Binding(slot:, is_boxed:, ..)), ..] -> {
-      let e = Emitter(..e, initialized: set.insert(e.initialized, slot))
-      #(emit_slot_put(e, slot, is_boxed), name)
-    }
-    [] -> {
-      let #(e, uid) = fresh_label(e)
-      let synth =
-        "<with"
-        <> int.to_string(list.length(e.with_stack))
-        <> "_"
-        <> int.to_string(uid)
-        <> ">"
-      #(emit_var_init(e, synth), synth)
-    }
-  }
+  let e = Emitter(..e, initialized: set.insert(e.initialized, slot))
+  let e = emit_slot_put(e, slot, is_boxed)
   let e = Emitter(..e, with_stack: [synth, ..e.with_stack])
   use e <- result.map(case tail {
     True -> emit_stmt_tail(e, body)
     False -> emit_stmt(e, body)
   })
-  let e = case e.with_stack {
-    [_, ..rest] -> Emitter(..e, with_stack: rest)
-    [] -> e
-  }
-  leave_scope(e, save)
+  // Pop the holder pushed above. Body emission pushes and pops with_stack
+  // entries in balanced pairs, so ours is still on top.
+  let assert [_, ..with_rest] = e.with_stack
+  leave_scope(Emitter(..e, with_stack: with_rest), save)
 }
 
 // ============================================================================

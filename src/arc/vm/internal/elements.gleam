@@ -118,15 +118,6 @@ fn to_list_padded_loop(
   }
 }
 
-/// Get all values as a list (for GC ref tracing).
-pub fn values(elements: JsElements) -> List(JsValue) {
-  case elements {
-    NoElements -> []
-    DenseElements(data) -> tree_array.to_list(data)
-    SparseElements(data) -> dict.values(data)
-  }
-}
-
 /// Present indices in ascending order. Skips holes. O(k) for dense (via
 /// sparse_fold), O(k log k) for sparse (dict.keys + sort). Use this instead
 /// of probing 0..length when iterating — critical for sparse arrays where

@@ -144,58 +144,59 @@ fn visit(
   walk: Walk,
 ) -> Result(Walk, GraphError) {
   let specifier = node.specifier
-  // Insert before walking dependencies so cycles terminate.
+  // Insert before walking dependencies so cycles terminate. The raw→resolved
+  // specifier_map is accumulated through the fold below and written back in
+  // one final insert — dependencies never look their referrer up by
+  // specifier, so the placeholder's empty map is never observed.
   let walk = Walk(..walk, modules: dict.insert(walk.modules, specifier, node))
-  use walk <- result.try(
-    list.try_fold(node.summary.requested, walk, fn(walk, request) {
-      let raw = request.specifier
-      use resolved <- result.try(
-        resolve(request, specifier)
-        |> result.map_error(ResolveFailed(raw, specifier, _)),
-      )
-      let walk = record_resolution(walk, specifier, raw, resolved)
-      // A host module is a leaf: resolution is recorded above, but there is no
-      // source to load or dependencies to walk.
-      use <- bool.guard(is_host(resolved), Ok(walk))
-      case dict.has_key(walk.modules, resolved) {
-        True -> Ok(walk)
-        False -> {
-          use source <- result.try(
-            load_source(resolved) |> result.map_error(LoadFailed(resolved, _)),
-          )
-          use dep <- result.try(prepare(resolved, source))
-          visit(dep, resolve, load_source, is_host, walk)
+  use #(walk, specifier_map) <- result.try(
+    list.try_fold(
+      node.summary.requested,
+      #(walk, node.specifier_map),
+      fn(acc, request) {
+        let #(walk, specifier_map) = acc
+        let raw = request.specifier
+        use resolved <- result.try(
+          resolve(request, specifier)
+          |> result.map_error(ResolveFailed(raw, specifier, _)),
+        )
+        let specifier_map = dict.insert(specifier_map, raw, resolved)
+        // A host module is a leaf: resolution is recorded above, but there is
+        // no source to load or dependencies to walk.
+        use <- bool.guard(is_host(resolved), Ok(#(walk, specifier_map)))
+        case dict.has_key(walk.modules, resolved) {
+          True -> Ok(#(walk, specifier_map))
+          False -> {
+            use source <- result.try(
+              load_source(resolved)
+              |> result.map_error(LoadFailed(resolved, _)),
+            )
+            use dep <- result.try(prepare(resolved, source))
+            use walk <- result.map(visit(
+              dep,
+              resolve,
+              load_source,
+              is_host,
+              walk,
+            ))
+            #(walk, specifier_map)
+          }
         }
-      }
-    }),
+      },
+    ),
   )
+  let walk =
+    Walk(
+      ..walk,
+      modules: dict.insert(
+        walk.modules,
+        specifier,
+        SourceModule(..node, specifier_map:),
+      ),
+    )
   case node.summary.has_source_phase {
     True -> Error(SourcePhaseUnsupported(specifier))
     False -> Ok(Walk(..walk, order: [specifier, ..walk.order]))
-  }
-}
-
-/// Record a raw→resolved mapping in the referrer's specifier_map.
-fn record_resolution(
-  walk: Walk,
-  referrer: String,
-  raw: String,
-  resolved: String,
-) -> Walk {
-  case dict.get(walk.modules, referrer) {
-    Ok(node) ->
-      Walk(
-        ..walk,
-        modules: dict.insert(
-          walk.modules,
-          referrer,
-          SourceModule(
-            ..node,
-            specifier_map: dict.insert(node.specifier_map, raw, resolved),
-          ),
-        ),
-      )
-    Error(Nil) -> walk
   }
 }
 
