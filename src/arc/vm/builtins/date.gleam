@@ -50,13 +50,23 @@ import gleam/string
 
 // ============================================================================
 // FFI
+//
+// This is the ONLY place the arc_date_ffi Erlang contract is declared. Other
+// modules (intl, temporal) must call `date.now_ms()` / `date.tz_offset_minutes`
+// rather than redeclaring the @external — a private redeclaration can silently
+// lie about the return type (Gleam trusts the annotation) and the BEAM term
+// would then be misused.
 // ============================================================================
 
+/// Milliseconds since the Unix epoch (`erlang:system_time(millisecond)`).
+/// Returns an Erlang integer — convert with `int.to_float` where a Float is
+/// needed.
 @external(erlang, "arc_date_ffi", "now_ms")
-fn ffi_now_ms() -> Int
+pub fn now_ms() -> Int
 
+/// Local time zone offset in minutes (UTC − local) at the given epoch ms.
 @external(erlang, "arc_date_ffi", "tz_offset_minutes")
-fn ffi_tz_offset_minutes(epoch_ms: Int) -> Int
+pub fn tz_offset_minutes(epoch_ms: Int) -> Int
 
 // ============================================================================
 // Init — Date constructor + Date.prototype
@@ -180,7 +190,7 @@ pub fn dispatch(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     DateConstructor(proto:) -> date_constructor(proto, args, state)
-    DateNow -> #(state, Ok(value.from_int(ffi_now_ms())))
+    DateNow -> #(state, Ok(value.from_int(now_ms())))
     DateParse -> date_parse(args, state)
     DateUTC -> date_utc(args, state)
     DatePrototypeValueOf | DatePrototypeGetTime -> date_get_time(this, state)
@@ -355,7 +365,7 @@ fn field_at(f: DateFields, idx: Int) -> Int {
 /// `is_local` the FFI timezone offset for that instant is applied first.
 fn get_date_fields(tv: Int, is_local: Bool) -> DateFields {
   let tz = case is_local {
-    True -> ffi_tz_offset_minutes(tv)
+    True -> tz_offset_minutes(tv)
     False -> 0
   }
   let d = tv - tz * 60_000
@@ -416,7 +426,7 @@ fn make_date(
       let time = hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + ms
       let tv = day * ms_per_day + time
       let tv = case is_local {
-        True -> tv + ffi_tz_offset_minutes(tv) * 60_000
+        True -> tv + tz_offset_minutes(tv) * 60_000
         False -> tv
       }
       time_clip(Finite(int.to_float(tv)))
@@ -527,7 +537,7 @@ fn date_constructor(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, tv_result) = case args {
-    [] -> #(state, Ok(Finite(int.to_float(ffi_now_ms()))))
+    [] -> #(state, Ok(Finite(int.to_float(now_ms()))))
     [single] -> single_arg_time_value(state, single)
     many -> args_to_time_value(state, many, True)
   }
@@ -643,7 +653,7 @@ fn date_get_tz_offset(
       state,
       Ok(
         JsNumber(
-          Finite(int.to_float(ffi_tz_offset_minutes(value.float_to_int(f)))),
+          Finite(int.to_float(tz_offset_minutes(value.float_to_int(f)))),
         ),
       ),
     )

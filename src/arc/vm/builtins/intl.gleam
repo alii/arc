@@ -8,6 +8,7 @@
 //// intl_locale.gleam.
 
 import arc/vm/builtins/common
+import arc/vm/builtins/date
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/intl_format as fmt
 import arc/vm/builtins/intl_locale as tags
@@ -53,12 +54,6 @@ import gleam/string
 
 type Thrown(host) =
   #(JsValue, State(host))
-
-@external(erlang, "arc_date_ffi", "now_ms")
-fn now_ms() -> Float
-
-@external(erlang, "arc_date_ffi", "tz_offset_minutes")
-fn ffi_tz_offset_minutes(epoch_ms: Int) -> Int
 
 // ============================================================================
 // Initialization
@@ -2551,7 +2546,7 @@ fn dtf_state_required(
   use #(tz_name, tz_offset, tz_system, state) <- result.try(case tz_v {
     // DefaultTimeZone: the host environment zone (offset resolved per-date).
     JsUndefined -> {
-      let offset = 0 - ffi_tz_offset_minutes(float.truncate(now_ms()))
+      let offset = 0 - date.tz_offset_minutes(date.now_ms())
       // The host zone name is unknown; expose "UTC" while formatting with
       // the live host offset (tzSystem).
       Ok(#("UTC", offset, True, state))
@@ -4405,7 +4400,7 @@ fn dtf_temporal_fields(
     TfInstant(epoch_ns:) -> {
       let ms = floor_div(epoch_ns, 1_000_000)
       let offset = case d.tz_system {
-        True -> 0 - ffi_tz_offset_minutes(ms)
+        True -> 0 - date.tz_offset_minutes(ms)
         False -> d.tz_offset_minutes
       }
       fmt.fields_from_epoch_ms(int.to_float(ms), offset)
@@ -4951,7 +4946,7 @@ fn dtf_fields_number(
   date_v: JsValue,
 ) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
   use #(tv, state) <- result.try(case date_v {
-    JsUndefined -> Ok(#(value.Finite(now_ms()), state))
+    JsUndefined -> Ok(#(value.Finite(int.to_float(date.now_ms())), state))
     _ -> coerce.js_to_number(state, date_v)
   })
   use tv_f <- result.try(case tv {
@@ -4966,7 +4961,7 @@ fn dtf_fields_number(
     _ -> throw_range(state, "Invalid time value")
   })
   let offset = case d.tz_system {
-    True -> 0 - ffi_tz_offset_minutes(float.truncate(tv_f))
+    True -> 0 - date.tz_offset_minutes(float.truncate(tv_f))
     False -> d.tz_offset_minutes
   }
   Ok(#(fmt.fields_from_epoch_ms(tv_f, offset), state))

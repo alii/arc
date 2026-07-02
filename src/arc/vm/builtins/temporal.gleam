@@ -15,6 +15,7 @@
 /// abstract-operation semantics (ToIntegerWithTruncation, RegulateISODate,
 /// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
 import arc/vm/builtins/common
+import arc/vm/builtins/date
 import arc/vm/builtins/helpers
 import arc/vm/builtins/temporal_calendar as tcal
 import arc/vm/builtins/temporal_tz
@@ -41,9 +42,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-
-@external(erlang, "arc_date_ffi", "now_ms")
-fn ffi_now_ms() -> Int
 
 // ============================================================================
 // Constants
@@ -6070,7 +6068,7 @@ fn zoned_field(
 // ============================================================================
 
 fn now_epoch_ns() -> Int {
-  ffi_now_ms() * ns_per_ms
+  date.now_ms() * ns_per_ms
 }
 
 fn now_dispatch(
