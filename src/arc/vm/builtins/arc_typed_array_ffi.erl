@@ -1,6 +1,21 @@
+%% Typed-array element codecs on the ArrayBuffer backing binary.
+%%
+%% The ONLY Gleam bindings to this module live in
+%% arc/vm/internal/typed_array_ffi.gleam — declare new exports there, not in
+%% the modules that call them.
+%%
+%% Float elements speak the Gleam `arc/vm/value.JsNum` runtime term directly:
+%%
+%%     {finite, Float} | na_n | infinity | neg_infinity
+%%
+%% (same technique as arc_math_ffi). BEAM floats cannot represent NaN/±Inf,
+%% so the non-finite cases MUST cross the FFI boundary as their own
+%% constructors — and doing it with the real JsNum shape means the Gleam
+%% side is forced by the type checker to handle them, with no hand-kept
+%% integer-tag table to drift out of sync on either side.
 -module(arc_typed_array_ffi).
 -export([ta_zeroed/1, ta_get_int/4, ta_set_int/4, ta_get_float/3,
-         ta_set_float/5, ta_clamp_uint8/2, ta_splice/3, ta_fill_region/4]).
+         ta_set_float/4, ta_clamp_uint8/1, ta_splice/3, ta_fill_region/4]).
 
 %% Allocate an all-zero binary of N bytes (ArrayBuffer backing store).
 ta_zeroed(N) when N =< 0 -> <<>>;
@@ -35,65 +50,61 @@ ta_set_int(Bin, Off, SizeBits, V) ->
     <<Before:Off/binary, _:SizeBytes/binary, After/bits>> = Bin,
     <<Before/binary, V:SizeBits/little, After/bits>>.
 
-%% Read a float element. Returns {Tag, Float} with
-%% Tag: 0 = finite, 1 = NaN, 2 = +Infinity, 3 = -Infinity.
-%% NaN/Inf bit patterns cannot be decoded by an Erlang float segment, so the
-%% exponent is inspected on the raw bits first.
+%% Read a float element as a `value.JsNum`. NaN/Inf bit patterns cannot be
+%% decoded by an Erlang float segment, so the exponent is inspected on the
+%% raw bits first.
 ta_get_float(Bin, Off, 32) ->
     <<_:Off/binary, B:32/little, _/bits>> = Bin,
     case <<B:32>> of
-        <<0:1, 16#FF:8, 0:23>> -> {2, +0.0};
-        <<1:1, 16#FF:8, 0:23>> -> {3, +0.0};
-        <<_:1, 16#FF:8, _:23>> -> {1, +0.0};
-        <<F:32/float>> -> {0, F}
+        <<0:1, 16#FF:8, 0:23>> -> infinity;
+        <<1:1, 16#FF:8, 0:23>> -> neg_infinity;
+        <<_:1, 16#FF:8, _:23>> -> na_n;
+        <<F:32/float>> -> {finite, F}
     end;
 ta_get_float(Bin, Off, 64) ->
     <<_:Off/binary, B:64/little, _/bits>> = Bin,
     case <<B:64>> of
-        <<0:1, 16#7FF:11, 0:52>> -> {2, +0.0};
-        <<1:1, 16#7FF:11, 0:52>> -> {3, +0.0};
-        <<_:1, 16#7FF:11, _:52>> -> {1, +0.0};
-        <<F:64/float>> -> {0, F}
+        <<0:1, 16#7FF:11, 0:52>> -> infinity;
+        <<1:1, 16#7FF:11, 0:52>> -> neg_infinity;
+        <<_:1, 16#7FF:11, _:52>> -> na_n;
+        <<F:64/float>> -> {finite, F}
     end.
 
-%% Write a float element. Tag as in ta_get_float. Finite values that overflow
-%% the 32-bit range round to the correctly-signed infinity (IEEE 754
-%% round-to-nearest), matching Float32Array store semantics.
-ta_set_float(Bin, Off, 32, Tag, V) ->
-    ta_set_int(Bin, Off, 32, f32_bits(Tag, V));
-ta_set_float(Bin, Off, 64, Tag, V) ->
-    ta_set_int(Bin, Off, 64, f64_bits(Tag, V)).
+%% Write a float element given as a `value.JsNum`. Finite values that
+%% overflow the 32-bit range round to the correctly-signed infinity
+%% (IEEE 754 round-to-nearest), matching Float32Array store semantics.
+ta_set_float(Bin, Off, 32, N) ->
+    ta_set_int(Bin, Off, 32, f32_bits(N));
+ta_set_float(Bin, Off, 64, N) ->
+    ta_set_int(Bin, Off, 64, f64_bits(N)).
 
-f32_bits(1, _) -> 16#7FC00000;
-f32_bits(2, _) -> 16#7F800000;
-f32_bits(3, _) -> 16#FF800000;
-f32_bits(0, V) ->
-    try
-        <<B:32>> = <<V:32/float>>,
-        B
-    catch
-        error:badarg ->
-            case V < 0.0 of
-                true -> 16#FF800000;
-                false -> 16#7F800000
-            end
-    end.
+%% The ENCODE `<<V:32/float>>` never fails: a finite float64 whose magnitude
+%% exceeds the float32 range is rounded to ±infinity's bit pattern by the
+%% BEAM's native IEEE 754 round-to-nearest (it is only the DECODE of such
+%% bits that raises). arc_math_ffi:fround/1 and data_view's float32 stores
+%% already rely on exactly this, so there is no badarg to catch here.
+f32_bits(na_n) -> 16#7FC00000;
+f32_bits(infinity) -> 16#7F800000;
+f32_bits(neg_infinity) -> 16#FF800000;
+f32_bits({finite, V}) ->
+    <<B:32>> = <<V:32/float>>,
+    B.
 
-f64_bits(1, _) -> 16#7FF8000000000000;
-f64_bits(2, _) -> 16#7FF0000000000000;
-f64_bits(3, _) -> 16#FFF0000000000000;
-f64_bits(0, V) ->
+f64_bits(na_n) -> 16#7FF8000000000000;
+f64_bits(infinity) -> 16#7FF0000000000000;
+f64_bits(neg_infinity) -> 16#FFF0000000000000;
+f64_bits({finite, V}) ->
     <<B:64>> = <<V:64/float>>,
     B.
 
-%% ES2024 §7.1.12 ToUint8Clamp: clamp to [0,255] with round-half-to-EVEN.
-%% Tag as in ta_get_float (NaN -> 0, +inf -> 255, -inf -> 0).
-ta_clamp_uint8(1, _) -> 0;
-ta_clamp_uint8(2, _) -> 255;
-ta_clamp_uint8(3, _) -> 0;
-ta_clamp_uint8(0, V) when V =< 0.0 -> 0;
-ta_clamp_uint8(0, V) when V >= 255.0 -> 255;
-ta_clamp_uint8(0, V) ->
+%% ES2024 §7.1.12 ToUint8Clamp on a `value.JsNum`: clamp to [0,255] with
+%% round-half-to-EVEN. NaN -> 0, +Infinity -> 255, -Infinity -> 0.
+ta_clamp_uint8(na_n) -> 0;
+ta_clamp_uint8(infinity) -> 255;
+ta_clamp_uint8(neg_infinity) -> 0;
+ta_clamp_uint8({finite, V}) when V =< 0.0 -> 0;
+ta_clamp_uint8({finite, V}) when V >= 255.0 -> 255;
+ta_clamp_uint8({finite, V}) ->
     F = trunc(V),
     Frac = V - F,
     if

@@ -10,10 +10,11 @@
 //// path remains trivially atomic there. The spec's WaiterList lives
 //// in a shared, DATA-ONLY ETS table (arc_waiter_ffi): a blocking
 //// `Atomics.wait` registers itself there, then delegates the actual
-//// blocking to the embedder's `state.ctx.host_hooks.sync_wait` capability —
-//// core never executes a mailbox receive. `Atomics.notify` atomically
-//// CLAIMS waiters from the table (the claim is the spec's "woken" count)
-//// and hands remote ones to `state.ctx.host_hooks.deliver_wake` for message
+//// blocking to the embedder's `sync_wait` capability (on
+//// `state.ctx.host_hooks.atomics`) — core never executes a mailbox
+//// receive. `Atomics.notify` atomically CLAIMS waiters from the table
+//// (the claim is the spec's "woken" count) and hands remote ones to the
+//// embedder's `deliver_wake` capability for message
 //// delivery — core never sends wake messages either. See arc/host.gleam
 //// for the full capability contract. `Atomics.waitAsync` waiters are
 //// kept on State (FIFO, where the promise lives) plus an interchangeable
@@ -33,6 +34,7 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
+import arc/vm/internal/typed_array_ffi.{ta_get_int, ta_set_int}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -112,24 +114,9 @@ pub fn dispatch(
 }
 
 // ============================================================================
-// FFI — element access on the buffer binary + blocking sleep
+// FFI — atomic shared-cell access + blocking sleep. Plain (non-shared)
+// element access comes from arc/vm/internal/typed_array_ffi.
 // ============================================================================
-
-@external(erlang, "arc_typed_array_ffi", "ta_get_int")
-fn ta_get_int(
-  data: BitArray,
-  byte_off: Int,
-  size_bits: Int,
-  signed: Bool,
-) -> Int
-
-@external(erlang, "arc_typed_array_ffi", "ta_set_int")
-fn ta_set_int(
-  data: BitArray,
-  byte_off: Int,
-  size_bits: Int,
-  val: Int,
-) -> BitArray
 
 /// Atomic read-modify-write of one element in shared (atomics-backed)
 /// storage: the FFI reads the containing 64-bit cell, applies `op` to the
@@ -223,7 +210,8 @@ fn ffi_cancel_waiter(handle: WaiterHandle) -> Bool
 
 /// Atomically claim up to `count` waiters FIFO (data-only ets:take loop).
 /// Returns the CLAIMED remote waiters — delivery of their wake messages is
-/// the embedder's job via state.ctx.host_hooks.deliver_wake — plus the count of our
+/// the embedder's job via the `deliver_wake` capability on
+/// `state.ctx.host_hooks.atomics` — plus the count of our
 /// own waitAsync tokens taken (settled directly on State by the caller).
 @external(erlang, "arc_waiter_ffi", "take_waiters")
 fn ffi_take_waiters(
@@ -817,6 +805,18 @@ fn wait_result_js(result: WaitResult) -> JsValue {
   })
 }
 
+/// How this DoWait is allowed to suspend, decided ONCE by
+/// `check_agent_can_suspend` (step 10). A sync wait is only reachable when
+/// the agent may block AND the realm installed the Atomics capabilities, so
+/// `SyncWait` CARRIES that proof — the installed `AtomicsCapabilities` —
+/// and `sync_block` consumes it directly instead of re-reading
+/// `state.ctx.host_hooks` and pretending an "unreachable `None`" arm is
+/// possible.
+type WaitMode {
+  SyncWait(caps: state.AtomicsCapabilities)
+  AsyncWait
+}
+
 fn do_wait(
   args: List(JsValue),
   state: State(host),
@@ -836,29 +836,33 @@ fn do_wait(
   // Step 10: if mode is sync and AgentCanSuspend() is false, throw a
   // TypeError. Sits after the value/timeout coercions (steps 6-9) per the
   // current spec text — the position is observable via valueOf side effects.
-  use Nil, state <- check_agent_can_suspend(state, sync)
+  // A surviving sync wait comes back as `SyncWait(caps)`, carrying the
+  // capabilities the check just proved are installed.
+  use mode, state <- check_agent_can_suspend(state, sync)
   // SharedArrayBuffers are never detached and never shrink, so the
   // validation-time data would do — but re-read for the freshest bytes
   // (the coercions above may have run Atomics.store via user code).
   use buf, state <- revalidate(state, info, idx)
   let w = read_element(buf.bits, info, idx)
-  case w != v, timeout_ms, sync {
+  case w != v, timeout_ms, mode {
     // Value mismatch → "not-equal" (sync: string; async: {async:false,...}).
-    True, _, True -> #(state, Ok(wait_result_js(NotEqual)))
-    True, _, False -> wait_result_object(state, False, wait_result_js(NotEqual))
+    True, _, SyncWait(_) -> #(state, Ok(wait_result_js(NotEqual)))
+    True, _, AsyncWait ->
+      wait_result_object(state, False, wait_result_js(NotEqual))
     // Zero timeout → immediate "timed-out".
-    False, Some(0), True -> #(state, Ok(wait_result_js(TimedOut)))
-    False, Some(0), False ->
+    False, Some(0), SyncWait(_) -> #(state, Ok(wait_result_js(TimedOut)))
+    False, Some(0), AsyncWait ->
       wait_result_object(state, False, wait_result_js(TimedOut))
     // Sync block (§25.4.3.14 steps 11+): register on the shared WaiterList
     // and suspend in a receive until a notify message or the timeout.
-    False, Some(ms), True -> sync_block(state, info, idx, v, Some(ms))
-    False, None, True -> sync_block(state, info, idx, v, None)
+    False, Some(ms), SyncWait(caps) ->
+      sync_block(state, caps, info, idx, v, Some(ms))
+    False, None, SyncWait(caps) -> sync_block(state, caps, info, idx, v, None)
     // Async waiter: park a promise on State's waiter list (plus a token on
     // the shared WaiterList so notify — from any process — can count and
     // wake it). Un-notified infinite waiters stay pending, like a pending
     // host task.
-    False, _, False -> {
+    False, _, AsyncWait -> {
       let #(h, promise_ref, data_ref) =
         builtins_promise.create_promise(
           state.heap,
@@ -908,12 +912,18 @@ fn do_wait(
 /// ets take) before returning.
 ///
 /// The BLOCKING itself is not core's: the registered entry is handed to
-/// the embedder's `state.ctx.host_hooks.sync_wait` capability (contract
-/// clause 1, arc/host.gleam), which suspends in ITS mailbox until the
-/// entry's wake message arrives or the timeout elapses — resolving the
+/// the embedder's `sync_wait` capability (contract clause 1,
+/// arc/host.gleam), which suspends in ITS mailbox until the entry's wake
+/// message arrives or the timeout elapses — resolving the
 /// notify-vs-timeout race exactly as the old in-core receive did.
+///
+/// `caps` is the proof `check_agent_can_suspend` already established: the
+/// realm's installed `AtomicsCapabilities`. It arrives BY VALUE, so this
+/// function cannot be reached without a blocking capability and never
+/// re-reads `state.ctx.host_hooks`.
 fn sync_block(
   state: State(host),
+  caps: state.AtomicsCapabilities,
   info: TaInfo,
   idx: Int,
   v: Int,
@@ -932,61 +942,41 @@ fn sync_block(
       // embedder loops match wakes by (key, byte index) — not ref — so a
       // stale wake would spuriously settle the next waitAsync waiter this
       // agent registers at the same address. Delegate the flush to the
-      // embedder's `state.ctx.host_hooks.sync_wait` capability: its
+      // embedder's `caps.sync_wait` capability: its
       // await_notify selectively
       // receives on the entry's exact ref, and on the claimed path
       // (ets:take of our own key finds nothing) performs the same
       // safety-bounded flush receive the old in-core cancel did. Core
       // still performs no receive of its own.
-      case ffi_cancel_waiter(handle) {
-        True ->
-          case state.ctx.host_hooks.sync_wait {
-            Some(wait) -> {
-              let _flushed: state.WaitOutcome =
-                wait(state.WaitRequest(
-                  handle:,
-                  key:,
-                  byte_index: byte_off,
-                  timeout_ms: Some(0),
-                ))
-              Nil
-            }
-            // Unreachable: check_agent_can_suspend rejected sync mode
-            // before AddWaiter when no capability is installed — and with
-            // no embedder there is no mailbox loop to poison anyway.
-            None -> Nil
-          }
+      let Nil = case ffi_cancel_waiter(handle) {
+        True -> {
+          let _flushed: state.WaitOutcome =
+            caps.sync_wait(state.WaitRequest(
+              handle:,
+              key:,
+              byte_index: byte_off,
+              timeout_ms: Some(0),
+            ))
+          Nil
+        }
         False -> Nil
       }
       #(state, Ok(wait_result_js(NotEqual)))
     }
     True -> {
-      case state.ctx.host_hooks.sync_wait {
-        Some(wait) -> {
-          let outcome =
-            wait(state.WaitRequest(
-              handle:,
-              key:,
-              byte_index: byte_off,
-              // None = infinity; the embedder clamps to its receive ceiling.
-              timeout_ms:,
-            ))
-          let result = case outcome {
-            state.WaitOk -> WaitedOk
-            state.WaitTimedOut -> TimedOut
-          }
-          #(state, Ok(wait_result_js(result)))
-        }
-        // Unreachable: check_agent_can_suspend rejected sync mode before
-        // AddWaiter when no capability is installed. Fail safe by
-        // withdrawing the entry rather than blocking on nothing (with no
-        // capability there is no embedder mailbox loop to flush, so the
-        // claimed/unclaimed distinction is discarded).
-        None -> {
-          let _claimed = ffi_cancel_waiter(handle)
-          #(state, Ok(wait_result_js(TimedOut)))
-        }
+      let outcome =
+        caps.sync_wait(state.WaitRequest(
+          handle:,
+          key:,
+          byte_index: byte_off,
+          // None = infinity; the embedder clamps to its receive ceiling.
+          timeout_ms:,
+        ))
+      let result = case outcome {
+        state.WaitOk -> WaitedOk
+        state.WaitTimedOut -> TimedOut
       }
+      #(state, Ok(wait_result_js(result)))
     }
   }
 }
@@ -995,20 +985,25 @@ fn sync_block(
 /// agent's [[CanBlock]] is false — throw a TypeError. arc's main agent and
 /// spawned agent children can always block; the flag is only False when the
 /// host opted out (test262's CanBlockIsFalse), threaded in via
-/// State.can_block at realm boot. A host that supplied no
-/// `state.ctx.host_hooks.sync_wait` capability cannot suspend the agent
+/// State.can_block at realm boot. A host that installed no
+/// `state.ctx.host_hooks.atomics` capabilities cannot suspend the agent
 /// either (contract clause 1): treated identically to [[CanBlock]] = false.
 /// waitAsync never blocks, so async mode is exempt.
+///
+/// Continues with the `WaitMode` this check ESTABLISHED rather than a bare
+/// `Nil`: a surviving sync wait carries the realm's `AtomicsCapabilities`
+/// as `SyncWait(caps)`, so downstream code consumes the proof instead of
+/// re-deriving it.
 fn check_agent_can_suspend(
   state: State(host),
   sync: Bool,
-  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(WaitMode, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let host_can_suspend = option.is_some(state.ctx.host_hooks.sync_wait)
-  case sync && { !state.can_block || !host_can_suspend } {
-    True ->
+  case sync, state.ctx.host_hooks.atomics, state.can_block {
+    False, _, _ -> cont(AsyncWait, state)
+    True, Some(caps), True -> cont(SyncWait(caps), state)
+    True, _, _ ->
       state.type_error(state, "Atomics.wait cannot be called in this agent")
-    False -> cont(Nil, state)
   }
 }
 
@@ -1107,18 +1102,18 @@ fn notify(
       // "woken" accounting (§25.4.3.11 NotifyWaiter): remote waiters
       // (blocked sync waits and other agents' waitAsync tokens) come back
       // as claims whose wake-message DELIVERY is the embedder's, via the
-      // `state.ctx.host_hooks.deliver_wake` capability; our own waitAsync
-      // tokens come back as a count to settle on State right here (pure
-      // data, no message).
+      // `deliver_wake` capability on `state.ctx.host_hooks.atomics`; our
+      // own waitAsync tokens come back as a count to settle on State right
+      // here (pure data, no message).
       let #(claimed, self_async) =
         ffi_take_waiters(ffi_shared_buffer_key(sab_ref), byte_off, count)
-      let Nil = case claimed, state.ctx.host_hooks.deliver_wake {
+      let Nil = case claimed, state.ctx.host_hooks.atomics {
         [], _ -> Nil
-        _, Some(deliver) -> deliver(claimed)
-        // No embedder capability: claims still count as woken, but with no
-        // capability supplied nothing remote can be blocked on us anyway
-        // (sync wait requires state.ctx.host_hooks.sync_wait; cross-process
-        // waitAsync requires a multi-agent embedder).
+        _, Some(caps) -> caps.deliver_wake(claimed)
+        // No embedder capabilities installed: claims still count as woken,
+        // but with no capabilities nothing remote can be blocked on us
+        // anyway (sync wait requires the same `atomics` capability record;
+        // cross-process waitAsync requires a multi-agent embedder).
         _, None -> Nil
       }
       let remote_woken = list.length(claimed)
