@@ -47,8 +47,8 @@ import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
   type ExoticKind, type Heap, type HeapSlot, type NativeFnSlot, type State,
-  type StepResult, type VmError, SavedFrame, State, StepVmError, Thrown,
-  Unimplemented,
+  type StepResult, type VmError, InternalError, SavedFrame, State, StepVmError,
+  Thrown,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot,
@@ -311,42 +311,25 @@ fn call_generator_function(
         GeneratorObject,
         state.builtins.generator.prototype,
       )
-    Ok(#(NormalCompletion(_), final_state)) -> {
-      // Generator returned without yielding -- shouldn't happen with InitialYield
-      // but handle gracefully: create a completed generator
-      let #(h, data_ref) =
-        heap.alloc(
-          final_state.heap,
-          GeneratorSlot(
-            gen_state: value.Completed,
-            func_template: callee_template,
-            env_ref:,
-            saved_pc: 0,
-            saved_locals: tuple_array.from_list([]),
-            saved_stack: [],
-            saved_try_stack: [],
-          ),
-        )
-      let #(h, gen_obj_ref) =
-        common.alloc_wrapper(
-          h,
-          GeneratorObject(generator_data: data_ref),
-          state.builtins.generator.prototype,
-        )
-      Ok(
-        State(
-          ..state,
-          heap: h,
-          stack: [JsObject(gen_obj_ref), ..rest_stack],
-          pc: state.pc + 1,
-        ),
-      )
-    }
+    // InitialYield is the first op — the body can neither complete nor await
+    // before it. Either arriving here is a VM bug.
+    Ok(#(NormalCompletion(_), _)) ->
+      Error(#(
+        StepVmError(InternalError(
+          "call_generator_function",
+          "completed before InitialYield",
+        )),
+        JsUndefined,
+        state,
+      ))
     Ok(#(ThrowCompletion(thrown), thrown_state)) ->
       Error(#(Thrown, thrown, State(..state, heap: thrown_state.heap)))
     Ok(#(AwaitCompletion(_), _)) ->
       Error(#(
-        StepVmError(Unimplemented("await in sync generator")),
+        StepVmError(InternalError(
+          "call_generator_function",
+          "await in sync generator",
+        )),
         JsUndefined,
         state,
       ))
@@ -392,7 +375,10 @@ fn call_async_generator_function(
     Ok(#(NormalCompletion(_), _)) | Ok(#(AwaitCompletion(_), _)) ->
       // InitialYield is first op — body never runs before it. Unreachable.
       Error(#(
-        StepVmError(Unimplemented("async generator didn't hit InitialYield")),
+        StepVmError(InternalError(
+          "call_async_generator_function",
+          "didn't hit InitialYield",
+        )),
         JsUndefined,
         state,
       ))
@@ -532,7 +518,10 @@ fn finish_async_execution(
     }
     Ok(#(YieldCompletion(_), _)) ->
       Error(#(
-        StepVmError(Unimplemented("yield in non-generator async function")),
+        StepVmError(InternalError(
+          "finish_async_execution",
+          "yield in non-generator async function",
+        )),
         JsUndefined,
         state,
       ))
@@ -623,9 +612,9 @@ pub fn call_native_async_resume(
     }
     _ ->
       Error(#(
-        StepVmError(Unimplemented(
-          "async resume: invalid slot for ref "
-          <> string.inspect(async_data_ref),
+        StepVmError(InternalError(
+          "call_native_async_resume",
+          "invalid slot for ref " <> string.inspect(async_data_ref),
         )),
         JsUndefined,
         state,

@@ -1,4 +1,5 @@
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
+import arc/vm/key.{Index, Named}
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/opcode.{type Op}
@@ -29,74 +30,97 @@ pub type Empty
 /// Created via make_ref() FFI — no two calls ever return the same value.
 pub type ErlangRef
 
-/// Symbol identity. Well-known symbols use fixed integer IDs (compile-time
-/// constants). User-created symbols use Erlang references for global uniqueness
+/// The closed set of well-known symbols (ES2024 §6.1.5.1) the engine mints.
+/// Being a sum type, a fabricated well-known symbol is unrepresentable, and
+/// adding a member forces every `case` over it to be revisited. Engine-internal
+/// per-object state belongs in a typed `ObjectKind` variant (see e.g.
+/// `RegExpStringIteratorObject`), never in a symbol-keyed property.
+pub type WellKnown {
+  SymToStringTag
+  SymIterator
+  SymHasInstance
+  SymIsConcatSpreadable
+  SymToPrimitive
+  SymSpecies
+  SymAsyncIterator
+  SymMatch
+  SymMatchAll
+  SymReplace
+  SymSearch
+  SymSplit
+  SymUnscopables
+  SymDispose
+  SymAsyncDispose
+}
+
+/// Symbol identity. Well-known symbols are members of the closed `WellKnown`
+/// sum. User-created symbols use Erlang references for global uniqueness
 /// across processes — no shared counter needed.
-///
-/// INVARIANT: the only `WellKnownSymbol` ids in existence are 1-15, the
-/// `symbol_*` constants below — `well_known_symbol_description` is total over
-/// them. No other module may mint a `WellKnownSymbol(id)`: a fabricated id
-/// would collide with a future real well-known symbol and, being a symbol,
-/// would be guest-observable. Engine-internal per-object state belongs in a
-/// typed `ObjectKind` variant (see e.g. `RegExpStringIteratorObject`), never
-/// in a symbol-keyed property.
 pub type SymbolId {
-  WellKnownSymbol(id: Int)
+  WellKnownSymbol(which: WellKnown)
   UserSymbol(ref: ErlangRef)
 }
 
-// Well-known symbol constants — the COMPLETE set (see the SymbolId invariant).
-pub const symbol_to_string_tag = WellKnownSymbol(1)
+// Well-known symbol constants.
+pub const symbol_to_string_tag = WellKnownSymbol(SymToStringTag)
 
-pub const symbol_iterator = WellKnownSymbol(2)
+pub const symbol_iterator = WellKnownSymbol(SymIterator)
 
-pub const symbol_has_instance = WellKnownSymbol(3)
+pub const symbol_has_instance = WellKnownSymbol(SymHasInstance)
 
-pub const symbol_is_concat_spreadable = WellKnownSymbol(4)
+pub const symbol_is_concat_spreadable = WellKnownSymbol(SymIsConcatSpreadable)
 
-pub const symbol_to_primitive = WellKnownSymbol(5)
+pub const symbol_to_primitive = WellKnownSymbol(SymToPrimitive)
 
-pub const symbol_species = WellKnownSymbol(6)
+pub const symbol_species = WellKnownSymbol(SymSpecies)
 
-pub const symbol_async_iterator = WellKnownSymbol(7)
+pub const symbol_async_iterator = WellKnownSymbol(SymAsyncIterator)
 
-pub const symbol_match = WellKnownSymbol(8)
+pub const symbol_match = WellKnownSymbol(SymMatch)
 
-pub const symbol_match_all = WellKnownSymbol(9)
+pub const symbol_match_all = WellKnownSymbol(SymMatchAll)
 
-pub const symbol_replace = WellKnownSymbol(10)
+pub const symbol_replace = WellKnownSymbol(SymReplace)
 
-pub const symbol_search = WellKnownSymbol(11)
+pub const symbol_search = WellKnownSymbol(SymSearch)
 
-pub const symbol_split = WellKnownSymbol(12)
+pub const symbol_split = WellKnownSymbol(SymSplit)
 
-pub const symbol_unscopables = WellKnownSymbol(13)
+pub const symbol_unscopables = WellKnownSymbol(SymUnscopables)
 
-pub const symbol_dispose = WellKnownSymbol(14)
+pub const symbol_dispose = WellKnownSymbol(SymDispose)
 
-pub const symbol_async_dispose = WellKnownSymbol(15)
+pub const symbol_async_dispose = WellKnownSymbol(SymAsyncDispose)
 
-/// Get the description string for a well-known symbol. Total over every
-/// `WellKnownSymbol` id the engine mints (1-15; see the SymbolId invariant) —
-/// `None` is only reachable for `UserSymbol`.
+/// The description string of a well-known symbol, e.g. "Symbol.iterator".
+/// Exhaustive over `WellKnown`, so a new member cannot be added without
+/// naming it here.
+pub fn well_known_description(which: WellKnown) -> String {
+  case which {
+    SymToStringTag -> "Symbol.toStringTag"
+    SymIterator -> "Symbol.iterator"
+    SymHasInstance -> "Symbol.hasInstance"
+    SymIsConcatSpreadable -> "Symbol.isConcatSpreadable"
+    SymToPrimitive -> "Symbol.toPrimitive"
+    SymSpecies -> "Symbol.species"
+    SymAsyncIterator -> "Symbol.asyncIterator"
+    SymMatch -> "Symbol.match"
+    SymMatchAll -> "Symbol.matchAll"
+    SymReplace -> "Symbol.replace"
+    SymSearch -> "Symbol.search"
+    SymSplit -> "Symbol.split"
+    SymUnscopables -> "Symbol.unscopables"
+    SymDispose -> "Symbol.dispose"
+    SymAsyncDispose -> "Symbol.asyncDispose"
+  }
+}
+
+/// Get the description string for a well-known symbol. `None` for `UserSymbol`
+/// (whose description, if any, lives on its `SymbolObject`).
 pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
   case id {
-    WellKnownSymbol(1) -> Some("Symbol.toStringTag")
-    WellKnownSymbol(2) -> Some("Symbol.iterator")
-    WellKnownSymbol(3) -> Some("Symbol.hasInstance")
-    WellKnownSymbol(4) -> Some("Symbol.isConcatSpreadable")
-    WellKnownSymbol(5) -> Some("Symbol.toPrimitive")
-    WellKnownSymbol(6) -> Some("Symbol.species")
-    WellKnownSymbol(7) -> Some("Symbol.asyncIterator")
-    WellKnownSymbol(8) -> Some("Symbol.match")
-    WellKnownSymbol(9) -> Some("Symbol.matchAll")
-    WellKnownSymbol(10) -> Some("Symbol.replace")
-    WellKnownSymbol(11) -> Some("Symbol.search")
-    WellKnownSymbol(12) -> Some("Symbol.split")
-    WellKnownSymbol(13) -> Some("Symbol.unscopables")
-    WellKnownSymbol(14) -> Some("Symbol.dispose")
-    WellKnownSymbol(15) -> Some("Symbol.asyncDispose")
-    _ -> None
+    WellKnownSymbol(which) -> Some(well_known_description(which))
+    UserSymbol(_) -> None
   }
 }
 
@@ -2590,93 +2614,28 @@ pub type ExoticKind(ctx, host) {
   IteratorRecordObject(iterated: JsValue, next_method: JsValue)
 }
 
-/// Canonical property key. Per spec, property keys are String | Symbol, but
-/// we distinguish array-index strings (canonical numeric strings in [0, 2^32-1))
-/// at the type level so `arr[5]` never round-trips through string conversion.
-/// Symbols are stored separately in `symbol_properties` so they're not here.
-pub type PropertyKey {
-  /// Canonical array index — a non-negative integer whose ToString form equals
-  /// the original key. `"5"` → `Index(5)`, but `"05"` stays `Named("05")`.
-  Index(Int)
-  /// Any other string key.
-  Named(String)
-}
+/// Canonical property key — see `arc/vm/key`. Re-exported here (with the
+/// canonicalizer aliases below) because `value` is the module every VM layer
+/// already imports; the definition lives in the leaf `key` module so `opcode`
+/// can embed PropertyKey in Op payloads without a value↔opcode import cycle.
+/// NOTE: Gleam type aliases don't re-export constructors — construction /
+/// pattern sites import `Index`/`Named` from `arc/vm/key`.
+pub type PropertyKey =
+  key.PropertyKey
 
-/// Canonicalize a string key. Implements CanonicalNumericIndexString (§7.1.21)
-/// combined with the array-index range check: if `s` parses to a non-negative
-/// int and `int.to_string(n) == s`, it's `Index(n)`; otherwise `Named(s)`.
-///
-/// HOT-PATH NOTE: this does an int.parse + int.to_string + string-compare.
-/// The interpreter must NOT call it for compile-time-constant property names —
-/// resolve.gleam canonicalizes those once into `opcode.OpKey` and the
-/// dispatch path uses `from_op_key` (O(1) tag match) instead.
+/// See `key.canonical_key` — THE canonicalizer, shared with the compiler.
 pub fn canonical_key(s: String) -> PropertyKey {
-  // Cheap leading-byte guard: a canonical array index must start with a digit
-  // ("0".."9" — sign-prefixed strings can never satisfy `n >= 0` round-trip).
-  // gleam's int.parse is binary_to_integer wrapped in try/catch on BEAM, so
-  // without this guard every non-numeric key (the common case) raises and
-  // catches a badarg exception per access. bit_array.from_string is identity
-  // on Erlang, so the guard is a single byte comparison.
-  case bit_array.from_string(s) {
-    <<c, _:bytes>> if c >= 48 && c <= 57 ->
-      case int.parse(s) {
-        // Array-index range check (§6.1.7): an array index is an integer in
-        // [0, 2^32-1). BEAM ints are arbitrary precision, so without the cap
-        // "1000000000000000000000" would round-trip and wrongly become an
-        // Index — but per spec it is a plain string key (its ToNumber →
-        // ToString form is "1e+21", so it isn't even a canonical numeric
-        // index string).
-        Ok(n) if n >= 0 && n <= 4_294_967_294 ->
-          case int.to_string(n) == s {
-            True -> Index(n)
-            False -> Named(s)
-          }
-        _ -> Named(s)
-      }
-    _ -> Named(s)
-  }
+  key.canonical_key(s)
 }
 
-/// Convert a compile-time-canonicalized opcode.OpKey to a runtime PropertyKey.
-/// O(1) tag match — the canonicalization (int.parse) already happened in
-/// resolve.gleam via opcode.make_key. The mirror type exists only to break the
-/// value↔opcode import cycle (value imports opcode for FuncTemplate.bytecode).
-pub fn from_op_key(k: opcode.OpKey) -> PropertyKey {
-  case k {
-    opcode.OpIndex(n) -> Index(n)
-    opcode.OpNamed(s) -> Named(s)
-  }
+/// See `key.key_to_string`.
+pub fn key_to_string(k: PropertyKey) -> String {
+  key.key_to_string(k)
 }
 
-/// Render a PropertyKey back to its spec string form (for error messages,
-/// for-in enumeration, etc.).
-pub fn key_to_string(key: PropertyKey) -> String {
-  case key {
-    Index(n) -> int.to_string(n)
-    // Private-element keys render as their source text ("#x"), without the
-    // internal NUL marker or the per-evaluation uid suffix (see private_key
-    // and mint_private_key).
-    Named("\u{0}" <> s) ->
-      case string.split_once(s, "\u{0}") {
-        Ok(#(name, _uid)) -> name
-        Error(Nil) -> s
-      }
-    Named(s) -> s
-  }
-}
-
-/// Build the storage key for a class private element ("#x"). Arc stores
-/// private fields/methods in the ordinary property table, but the spec keeps
-/// private elements in a separate [[PrivateElements]] list invisible to ALL
-/// ordinary property reflection (hasOwnProperty, ownKeys, for-in, `in`,
-/// spread, JSON, freeze, ...) — AND a plain string property named "#x"
-/// (created via o["#x"], computed keys, defineProperty, JSON.parse, ...) is a
-/// perfectly ordinary, fully reflectable property. So privates are keyed with
-/// a NUL-byte marker prefix ("\u{0}#x") that string-to-key conversion of
-/// source-level identifiers/literals never produces, keeping the two
-/// namespaces apart.
+/// See `key.private_key`.
 pub fn private_key(name: String) -> PropertyKey {
-  Named("\u{0}" <> name)
+  key.private_key(name)
 }
 
 @external(erlang, "arc_vm_ffi", "unique_positive_integer")
@@ -2704,27 +2663,6 @@ pub fn private_display_name(key_text: String) -> String {
       }
     _ -> key_text
   }
-}
-
-/// Convert an OpKey from one of the four private-element opcodes
-/// (GetPrivateField/GetPrivateField2/PutPrivateField/PrivateIn) — these are
-/// only emitted for PrivateIdentifier syntax, so the key always lands in the
-/// private namespace. See private_key.
-pub fn private_from_op_key(k: opcode.OpKey) -> PropertyKey {
-  case k {
-    opcode.OpNamed(s) -> private_key(s)
-    // Unreachable: private names are never integer-like.
-    opcode.OpIndex(n) -> Index(n)
-  }
-}
-
-/// Convert an OpKey at a static *definition* site (DefineField/DefineMethod/
-/// DefineAccessor). Class private elements no longer flow through these
-/// opcodes (they use the DefinePrivate* ops with per-evaluation minted keys),
-/// so "#"-prefixed string keys here are ordinary public properties
-/// (e.g. {"#x": 1}).
-pub fn from_op_key_define(k: opcode.OpKey) -> PropertyKey {
-  from_op_key(k)
 }
 
 /// Storage key for a BigInt wrapper object's [[BigIntData]] internal slot

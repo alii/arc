@@ -891,6 +891,10 @@ pub type VmError {
   StackUnderflow(op: String)
   /// Unimplemented opcode
   Unimplemented(op: String)
+  /// An engine invariant was breached (a bug in the VM, never something a
+  /// guest program can trigger). `site` names the code location that detected
+  /// it; `detail` says what was expected vs. found.
+  InternalError(site: String, detail: String)
 }
 
 /// Canonical human-readable rendering of a `VmError`. Every layer that
@@ -900,6 +904,8 @@ pub fn vm_error_message(err: VmError) -> String {
     PcOutOfBounds(pc) -> "pc out of bounds: " <> int.to_string(pc)
     StackUnderflow(op) -> "stack underflow in " <> op
     Unimplemented(op) -> "unimplemented opcode: " <> op
+    InternalError(site:, detail:) ->
+      "internal error at " <> site <> ": " <> detail
   }
 }
 

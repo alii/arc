@@ -301,15 +301,13 @@ fn drive_top_level_await(
         jobs: remaining_jobs(drained),
       )
     // The capability slot we allocated above is gone — internal invariant
-    // breach, never a successful evaluation.
+    // breach, never a successful evaluation. Report it on the VmError
+    // channel (like every other engine bug), not as a guest throw.
     None ->
-      ModuleThrow(
-        value: value.JsString(
-          "InternalError: top-level await promise capability slot missing",
-        ),
-        heap: drained.heap,
-        jobs: remaining_jobs(drained),
-      )
+      ModuleError(error: state.InternalError(
+        "drive_top_level_await",
+        "promise capability slot missing",
+      ))
   }
 }
 

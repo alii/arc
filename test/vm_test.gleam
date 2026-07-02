@@ -670,7 +670,7 @@ pub fn type_error_thrown_for_symbol_conversion_test() {
   let func =
     make_func(
       [PushConst(0), UnaryOp(Pos)],
-      [value.JsSymbol(value.WellKnownSymbol(1))],
+      [value.JsSymbol(value.symbol_to_string_tag)],
       0,
     )
   expect_throw_named(func, "TypeError")

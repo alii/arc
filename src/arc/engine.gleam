@@ -529,7 +529,12 @@ pub fn call_with(
 /// instead of misreading them.
 const snapshot_tag = "arc-engine"
 
-const snapshot_version = 1
+// Version history:
+//   1 — initial versioned envelope.
+//   2 — `value.SymbolId`'s well-known variant carries a `WellKnown` sum
+//       member instead of an Int, changing the serialized term shape of
+//       every well-known symbol in the heap.
+const snapshot_version = 2
 
 /// Why `deserialize` rejected a binary.
 pub type DeserializeError {

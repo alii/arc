@@ -24,8 +24,8 @@ import arc/vm/internal/tuple_array
 import arc/vm/opcode.{AsyncYieldStarNext}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
-  type Heap, type HeapSlot, type State, type StepResult, State, StepVmError,
-  Unimplemented,
+  type Heap, type HeapSlot, type State, type StepResult, InternalError, State,
+  StepVmError,
 }
 import arc/vm/value.{
   type AGResumeKind, type AsyncGenCompletion, type AsyncGenRequest, type JsValue,
@@ -109,12 +109,16 @@ pub fn call_native_method(
           resolve: cap.resolve,
           reject: cap.reject,
         )
-      let state = enqueue(state, gen.data_ref, req)
-      let state = case gen.gen_state {
-        AGExecuting | AGAwaitingReturn -> state
-        _ -> resume_next(state, gen.data_ref, execute_inner, unwind_to_catch)
+      let enqueued = enqueue(state, gen.data_ref, req)
+      let stepped = case gen.gen_state {
+        AGExecuting | AGAwaitingReturn -> Ok(enqueued)
+        _ ->
+          resume_next(enqueued, gen.data_ref, execute_inner, unwind_to_catch)
       }
-      ret(state)
+      case stepped {
+        Ok(state) -> ret(state)
+        Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
+      }
     }
   }
 }
@@ -122,22 +126,26 @@ pub fn call_native_method(
 /// The core driver loop — ES AsyncGeneratorResumeNext.
 /// Pulls the head request and acts on it based on current state.
 /// Loops until queue is empty or we hit an await (which suspends via microtask).
+///
+/// Errors with a `VmError` when the body execution hits an engine bug; the
+/// public entry points surface it as `StepVmError`, exactly like every other
+/// execution path.
 fn resume_next(
   state: State(host),
   data_ref: Ref,
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   case read_slot(state.heap, data_ref) {
-    None -> state
+    None -> Ok(state)
     Some(gen) -> {
       let gen = normalize_queue(gen)
       case gen.queue_front {
-        [] -> state
+        [] -> Ok(state)
         [req, ..] -> {
           let run = Run(data_ref:, gen:, req:, execute_inner:, unwind_to_catch:)
           case gen.gen_state {
-            AGExecuting | AGAwaitingReturn -> state
+            AGExecuting | AGAwaitingReturn -> Ok(state)
 
             AGCompleted ->
               case req.completion {
@@ -156,12 +164,12 @@ fn resume_next(
                 AGReturn -> {
                   // Spec: await Promise.resolve(value) first, then settle.
                   let state = set_gen_state(state, data_ref, AGAwaitingReturn)
-                  setup_await(
+                  Ok(setup_await(
                     state,
                     data_ref,
                     req.value,
                     AGResumeAwaitingReturn,
-                  )
+                  ))
                 }
               }
 
@@ -187,7 +195,11 @@ fn resume_next(
 /// Resume the generator body from a suspended state. Dispatches on the
 /// request kind to push the arg / throw / inject return, then runs until
 /// the body yields, awaits, returns, or throws.
-fn run_body(state: State(host), run: Run(host), push_arg: Bool) -> State(host) {
+fn run_body(
+  state: State(host),
+  run: Run(host),
+  push_arg: Bool,
+) -> Result(State(host), state.VmError) {
   let Run(data_ref:, gen:, req:, ..) = run
   // Mark executing FIRST so concurrent calls enqueue. saved_pc/stack preserved.
   let state = set_gen_state(state, data_ref, AGExecuting)
@@ -306,7 +318,7 @@ fn forward_async_delegate(
   state: State(host),
   run: Run(host),
   iter_ref: Ref,
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   let iter = JsObject(iter_ref)
   let method_name = case run.req.completion {
     AGThrow -> "throw"
@@ -323,12 +335,12 @@ fn forward_async_delegate(
         Ok(#(result, state)) ->
           // Await the result. Gen stays AGExecuting, req stays at queue head,
           // saved_pc/stack unchanged. Resume via AGResumeDelegate.
-          setup_await(
+          Ok(setup_await(
             state,
             run.data_ref,
             result,
             AGResumeDelegate(run.req.completion),
-          )
+          ))
       }
   }
 }
@@ -341,7 +353,7 @@ fn delegate_method_missing(
   state: State(host),
   run: Run(host),
   iter_ref: Ref,
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   case run.req.completion {
     AGThrow ->
       // §7.b.iii.1-4: AsyncIteratorClose(iter, NormalCompletion(empty)),
@@ -353,7 +365,12 @@ fn delegate_method_missing(
         Ok(#(state, Some(close_result))) ->
           // Await the close. Gen stays AGExecuting; settlement is handled
           // in the AGResumeDelegateClose branch of call_native_resume.
-          setup_await(state, run.data_ref, close_result, AGResumeDelegateClose)
+          Ok(setup_await(
+            state,
+            run.data_ref,
+            close_result,
+            AGResumeDelegateClose,
+          ))
         Ok(#(state, None)) ->
           // No .return on iter — skip the await, straight to the TypeError.
           throw_missing_throw_type_error(state, run)
@@ -368,7 +385,7 @@ fn delegate_method_missing(
       // the sync driver). Gen stays AGExecuting, req stays at queue head;
       // settlement is handled in the AGResumeReturnUnwind branch of
       // call_native_resume.
-      setup_await(state, run.data_ref, run.req.value, AGResumeReturnUnwind)
+      Ok(setup_await(state, run.data_ref, run.req.value, AGResumeReturnUnwind))
   }
 }
 
@@ -378,7 +395,7 @@ fn delegate_method_missing(
 fn throw_missing_throw_type_error(
   state: State(host),
   run: Run(host),
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   let #(err, state) =
     state.type_error_value(
       state,
@@ -393,7 +410,7 @@ fn throw_into_gen_body(
   state: State(host),
   run: Run(host),
   thrown: JsValue,
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   let exec_state =
     build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
   let exec_result = case run.unwind_to_catch(exec_state, thrown) {
@@ -411,7 +428,7 @@ fn unwind_return_into_body(
   state: State(host),
   run: Run(host),
   value: JsValue,
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   let exec_state =
     build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
   handle_exec_result(
@@ -489,7 +506,7 @@ fn resume_after_delegate(
   method: AsyncGenCompletion,
   is_reject: Bool,
   settled: JsValue,
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   // Awaited promise rejected → throw into body.
   case is_reject {
     True -> throw_into_gen_body(state, run, settled)
@@ -527,7 +544,7 @@ fn delegate_done(
   run: Run(host),
   method: AsyncGenCompletion,
   val: JsValue,
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   let gen = run.gen
   case method {
     AGThrow -> {
@@ -551,11 +568,15 @@ fn delegate_done(
 }
 
 /// Dispatch on the body's completion: yield/await/return/throw.
+///
+/// A `VmError` from the body is an engine bug, not a guest throw — it is
+/// propagated to the caller unchanged (never converted into a rejection the
+/// guest could observe).
 fn handle_exec_result(
   outer: State(host),
   run: Run(host),
   result: Result(#(Completion, State(host)), state.VmError),
-) -> State(host) {
+) -> Result(State(host), state.VmError) {
   let Run(data_ref:, req:, execute_inner:, unwind_to_catch:, ..) = run
   case result {
     Ok(#(YieldCompletion(value), suspended)) -> {
@@ -573,7 +594,7 @@ fn handle_exec_result(
       let state =
         State(..state.merge_globals(outer, suspended, []), heap: suspended.heap)
       let state = save_suspended(state, data_ref, suspended, AGExecuting)
-      setup_await(state, data_ref, value, AGResumeBody)
+      Ok(setup_await(state, data_ref, value, AGResumeBody))
     }
     Ok(#(NormalCompletion(value), final_state)) -> {
       let state =
@@ -595,15 +616,7 @@ fn handle_exec_result(
       let state = reject_with(state, req.reject, thrown)
       resume_next(state, data_ref, execute_inner, unwind_to_catch)
     }
-    Error(vm_err) -> {
-      let #(err, outer) =
-        state.type_error_value(
-          outer,
-          "async generator execution failed: " <> state.vm_error_message(vm_err),
-        )
-      let state = complete(outer, data_ref)
-      reject_with(state, req.reject, err)
-    }
+    Error(vm_err) -> Error(vm_err)
   }
 }
 
@@ -627,7 +640,7 @@ pub fn call_native_resume(
   case read_slot(state.heap, data_ref) {
     None ->
       Error(#(
-        StepVmError(Unimplemented("async gen resume: slot missing")),
+        StepVmError(InternalError("call_native_resume", "slot missing")),
         JsUndefined,
         state,
       ))
@@ -637,7 +650,7 @@ pub fn call_native_resume(
         [] -> ret(state)
         [req, ..] -> {
           let run = Run(data_ref:, gen:, req:, execute_inner:, unwind_to_catch:)
-          let state = case kind {
+          let stepped = case kind {
             AGResumeAwaitingReturn -> {
               // AwaitingReturn callback: settle the head return request.
               let state = complete(state, data_ref)
@@ -687,7 +700,10 @@ pub fn call_native_resume(
                 False -> unwind_return_into_body(state, run, settled)
               }
           }
-          ret(state)
+          case stepped {
+            Ok(state) -> ret(state)
+            Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
+          }
         }
       }
     }

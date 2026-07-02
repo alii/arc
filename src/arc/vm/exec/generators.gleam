@@ -10,8 +10,8 @@ import arc/vm/internal/tuple_array
 import arc/vm/opcode.{type Op, Gosub, IteratorCloseThrow, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
-  type Heap, type HeapSlot, type State, type StepResult, type TryFrame, State,
-  StepVmError, Thrown, TryFrame, Unimplemented,
+  type Heap, type HeapSlot, type State, type StepResult, type TryFrame,
+  InternalError, State, StepVmError, Thrown, TryFrame,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, GeneratorObject, GeneratorSlot,
@@ -626,7 +626,10 @@ fn settle_completion(
     }
     Ok(#(AwaitCompletion(_), _)) ->
       Error(#(
-        StepVmError(Unimplemented("await in sync generator")),
+        StepVmError(InternalError(
+          "settle_completion",
+          "await in sync generator",
+        )),
         JsUndefined,
         outer,
       ))
