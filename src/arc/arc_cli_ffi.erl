@@ -13,7 +13,16 @@ read_line(Prompt) ->
     case io:get_line(Prompt) of
         eof -> eof;
         {error, Reason} -> {read_error, Reason};
-        Line -> {line, Line}
+        %% io:get_line returns a binary only when stdio is in binary mode
+        %% (an option set elsewhere, by Gleam's generated entrypoint).
+        %% Normalize here so `{line, binary()}` holds unconditionally
+        %% instead of depending on that cross-module precondition.
+        Line when is_binary(Line) -> {line, Line};
+        Line when is_list(Line) -> {line, unicode:characters_to_binary(Line)}
     end.
 
-get_script_args() -> [list_to_binary(A) || A <- init:get_plain_arguments()].
+%% argv arrives as lists of Unicode CODEPOINTS. `list_to_binary/1` would
+%% badarg on any codepoint > 255 (e.g. `arc café.js`) and silently emit
+%% latin-1 (not UTF-8) bytes for codepoints 128-255, so encode properly.
+get_script_args() ->
+    [unicode:characters_to_binary(A) || A <- init:get_plain_arguments()].
