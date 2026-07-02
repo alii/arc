@@ -7,10 +7,10 @@
 //// bundler relies on to locate and rewrite each occurrence, and what the
 //// emitter relies on for column-precise errors.
 ////
-//// Template-literal substitution expressions (`${…}`) are re-tokenized from
-//// a sliced inner string, so their byte offsets are relative to the
-//// substitution slice, not the outer source — out of scope here; tests must
-//// not assert on inner-template-expr spans against the outer source.
+//// Template-literal substitution expressions (`${…}`) are parsed from the
+//// SAME on-demand scanner as everything else, so their spans are absolute
+//// byte offsets into the outer source and round-trip like any other
+//// expression (see template_substitution_expression_span_roundtrip_test).
 
 import arc/parser
 import arc/parser/ast
@@ -394,4 +394,23 @@ pub fn yield_no_argument_span_roundtrip_test() {
   let source = "function* g() { yield; }\n"
   let expr = first_generator_body_expr(source)
   assert slice_span(source, expr.span) == "yield"
+}
+
+// ---- Template substitution expression spans -------------------------------
+
+/// Substitution expressions are lexed by the same on-demand scanner as the
+/// enclosing source (they are NOT re-tokenized from a sliced inner string),
+/// so their spans are absolute and must round-trip against the outer source
+/// — the guarantee a bundler needs to rewrite code inside `${…}`.
+pub fn template_substitution_expression_span_roundtrip_test() {
+  // Non-ASCII before the template exercises byte (not char) offsets.
+  let source = "const π = 1;\n`a${foo(π) + 1}b${  bar  }c`;\n"
+  let assert [_, ast.StmtWithLine(statement: stmt, ..)] =
+    script_statements(source)
+  let assert ast.ExpressionStatement(
+    expression: ast.TemplateLiteral(expressions: [first, second, ..], ..),
+    ..,
+  ) = stmt
+  assert slice_span(source, first.span) == "foo(π) + 1"
+  assert slice_span(source, second.span) == "bar"
 }

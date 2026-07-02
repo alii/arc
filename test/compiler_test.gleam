@@ -8433,3 +8433,17 @@ pub fn super_member_destructuring_targets_test() -> Nil {
     value.JsString("x=1|x=2|x=3,4|x=5|x=k|body"),
   )
 }
+
+/// A TemplateMiddle / TemplateTail span begins at the `}` closing a
+/// substitution. A combining mark immediately after that `}` forms ONE
+/// grapheme cluster with it, so the quasi must be sliced off by BYTES —
+/// grapheme slicing silently drops the mark from both raw and cooked.
+pub fn template_quasi_combining_mark_after_substitution_test() -> Nil {
+  assert_normal(
+    "
+    function tag(s) { return '' + s.raw[1].length + s[1].length; }
+    tag`a${0}\u{0301}e`;
+    ",
+    value.JsString("22"),
+  )
+}

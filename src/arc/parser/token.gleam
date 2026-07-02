@@ -17,8 +17,8 @@ import arc/parser/lexer.{
   PlusEqual, PlusPlus, Question, QuestionDot, QuestionQuestion,
   QuestionQuestionEqual, Return, RightBrace, RightBracket, RightParen, Semicolon,
   Slash, SlashEqual, Star, StarEqual, StarStar, StarStarEqual, Static, Super,
-  Switch, TemplateLiteral, This, Throw, Tilde, Try, Typeof, Undefined, Var, Void,
-  While, With, Yield,
+  Switch, TemplateHead, TemplateLiteral, This, Throw, Tilde, Try, Typeof,
+  Undefined, Var, Void, While, With, Yield,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -172,6 +172,7 @@ pub fn token_kind_to_string(kind: TokenKind) -> String {
     Number -> "number"
     KString -> "string"
     TemplateLiteral -> "template"
+    TemplateHead -> "template"
     Identifier -> "identifier"
     Var -> "'var'"
     Let -> "'let'"

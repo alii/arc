@@ -5,8 +5,6 @@
 /// SyntaxErrors in strict mode (§12.9.3.1 / §12.9.4.1). The parser calls
 /// these predicates on the RAW token text of number and string literals
 /// (and directive prologues) when the surrounding code is strict.
-///
-/// Split out of `arc/parser/template` — nothing here is template-specific.
 import gleam/string
 
 /// Check if a number literal value is a legacy octal (e.g. 0123, 09)

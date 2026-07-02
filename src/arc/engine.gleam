@@ -17,6 +17,7 @@ import arc/module/graph
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
+import arc/vm/compile_task
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
@@ -29,6 +30,7 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
+import gleam/string
 
 // ----------------------------------------------------------------------------
 // Engine type
@@ -382,13 +384,19 @@ pub fn eval_with(
   source: String,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
-  use #(program, sb) <- result.try(
-    parser.parse(source, parser.Script)
-    |> result.map_error(ParseError),
-  )
+  // Big sources parse+compile in a heap-sized scratch process (see
+  // arc/vm/compile_task): the AST / scope tree / IR are large transients
+  // the copying GC would otherwise re-copy many times as the live set
+  // grows; only the compact FuncTemplate (or error) crosses back.
   use template <- result.try(
-    compiler.compile(program, sb)
-    |> result.map_error(CompileError),
+    compile_task.run(string.byte_size(source), fn() {
+      use #(program, sb) <- result.try(
+        parser.parse(source, parser.Script)
+        |> result.map_error(ParseError),
+      )
+      compiler.compile(program, sb)
+      |> result.map_error(CompileError)
+    }),
   )
   use #(settled, heap) <- result.map(
     entry.run_with_hooks(

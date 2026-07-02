@@ -448,6 +448,14 @@ pub fn regex_literal_resyncs_token_stream_test() {
     expect_parses("`${i-- / 2} ${j / 3}`;", parser.Script),
     // Regex heads after an operator keyword inside a substitution.
     expect_parses("`${typeof /'/}`;", parser.Script),
+    // A regex inside a substitution re-scans within the SUBSTITUTION
+    // source; the enclosing file's scanning state must survive it — the
+    // trailing statements exist to drain the prefetch window afterwards.
+    expect_parses(
+      "`${s.replace(/x/g, \"y\")}`;\nvar a = 1;\nvar b = 2;\nvar c = 3;\n"
+        <> "var d = 4;\nvar e = 5;\nconsole.log(a, b, c, d, e);",
+      parser.Script,
+    ),
     // A keyword used as a PROPERTY NAME is an operand: `/` is division.
     expect_parses("`${o.in / 2} ${x / 3}`;", parser.Script),
     // Phantom COMMENT from a regex body: `/\\//` lexes up front as `\\` +
@@ -480,6 +488,63 @@ pub fn regex_literal_resyncs_token_stream_test() {
       list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
       panic as {
         int.to_string(list.length(errors)) <> " regex token-resync cases failed"
+      }
+    }
+  }
+}
+
+/// With on-demand lexing, hard lexer errors are materialised as sentinel
+/// tokens (see the parser's ensure_current) and must surface with the
+/// LEXER's message at the lexer's position — while lexically broken text
+/// inside a regex body or template quasi (source the parser re-scans and
+/// jumps over) must not surface at all.
+pub fn lazy_lexer_error_reporting_test() {
+  let results = [
+    // `0x` degrades to a LENIENT Illegal token (not a hard error), same
+    // as it always has: a generic unexpected-token report.
+    expect_parse_error_containing("var x = 0x;", parser.Script, "illegal token"),
+    expect_parse_error_containing(
+      "x\n/*",
+      parser.Script,
+      "Unterminated block comment",
+    ),
+    expect_parse_error_containing(
+      "x /*",
+      parser.Script,
+      "Unterminated block comment",
+    ),
+    // …including where a grammar-specific "expected X" error would
+    // otherwise mask it.
+    expect_parse_error_containing(
+      "var o = { /*",
+      parser.Script,
+      "Unterminated block comment",
+    ),
+    expect_parse_error_containing(
+      "a . /*",
+      parser.Script,
+      "Unterminated block comment",
+    ),
+    // Lexically-invalid text INSIDE a regex body is fine: the body is
+    // re-scanned as a regex, never lexed as tokens.
+    expect_parses("x = /0x/;", parser.Script),
+    expect_parses("var m = \"s\".match(/\"\\x\"/);", parser.Script),
+    // …and so is template text after a substitution (`/*` in a quasi).
+    expect_parses("var t = `${a} /* ${b}`;", parser.Script),
+  ]
+  let errors =
+    list.filter_map(results, fn(r) {
+      case r {
+        Ok(Nil) -> Error(Nil)
+        Error(reason) -> Ok(reason)
+      }
+    })
+  case errors {
+    [] -> Nil
+    _ -> {
+      list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
+      panic as {
+        int.to_string(list.length(errors)) <> " lazy lexer-error cases failed"
       }
     }
   }

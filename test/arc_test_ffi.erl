@@ -200,9 +200,11 @@ spawn_worker({Name, Fun}, Parent, Ref, Feeder, FeedRef) ->
         TestRef = make_ref(),
         process_flag(trap_exit, true),
         Pid = spawn_link(fun() ->
-            %% Limit heap to ~80MB to prevent pathological tests
+            %% Limit the heap to prevent pathological tests
             %% (e.g. Array(2**32-1).join()) from consuming all RAM on CI.
-            process_flag(max_heap_size, #{size => 10000000, kill => true, error_logger => false}),
+            process_flag(max_heap_size,
+                         #{size => max_heap_for(Name), kill => true,
+                           error_logger => false}),
             Res = try Fun(), ok
             catch Class:Reason:Stack -> {error, {Class, Reason, Stack}}
             end,
@@ -322,12 +324,29 @@ to_list(V) -> lists:flatten(io_lib:format("~p", [V])).
 %% (A2.5 does 1M decodeURI calls, CharacterClassEscapes iterate 0..0x10FFFF).
 timeout_for(Name) ->
     case binary:match(Name, <<"test262/">>) of
-        nomatch -> 10000;
+        nomatch ->
+            %% The TEST262=1 parser-fixture suites (pass/fail/early, ~55k
+            %% files) run as ONE test function; give it a real budget
+            %% instead of the per-test default.
+            case binary:match(Name, <<"test262_run_test">>) of
+                nomatch -> 10000;
+                _ -> 90_000
+            end;
         _ ->
             case is_slow_test(Name) of
                 true -> 90_000;
                 false -> 30_000
             end
+    end.
+
+%% Per-test heap cap (words). The default ~80MB kills pathological exec
+%% tests; the TEST262=1 parser sweep is ONE test that parses ~53k files —
+%% several are multi-megabyte source files whose ASTs alone exceed the
+%% default cap — so it gets a large one of its own.
+max_heap_for(Name) ->
+    case binary:match(Name, <<"test262_run_test">>) of
+        nomatch -> 10000000;
+        _ -> 120000000
     end.
 
 is_slow_test(Name) ->

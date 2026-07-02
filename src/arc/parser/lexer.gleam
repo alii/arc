@@ -27,9 +27,20 @@ pub type TokenKind {
   // Literals. Regex literals never get their own kind: the lexer emits
   // `Slash`/`SlashEqual` and the parser re-lexes the source as a regex when
   // one is grammatically possible (see `parse_regex_literal`).
+  //
+  // Template literals are lexed as SPANS, parser-driven:
+  //   TemplateLiteral   `…`  or  }…`   — a span ending at a backtick
+  //                     (a complete no-substitution template, or the TAIL
+  //                     of one, §12.9.6 TemplateTail)
+  //   TemplateHead      `…${ or  }…${  — a span ending at `${`: a
+  //                     substitution follows (TemplateHead / TemplateMiddle)
+  // The `}…` forms are only ever produced by `scan_template_continuation`,
+  // which the PARSER calls at the `}` closing a substitution — the token
+  // grammar alone cannot know a `}` re-enters a template.
   Number
   KString
   TemplateLiteral
+  TemplateHead
 
   // Identifiers & keywords
   Identifier
@@ -210,83 +221,146 @@ pub fn lex_error_pos(error: LexError) -> Int {
   }
 }
 
-/// Tokenize entire source into a list of tokens.
+/// Script vs Module lexical goal: modules reject HTML-like comments.
 pub type LexMode {
   LexScript
   LexModule
 }
 
-pub fn tokenize(source: String) -> Result(List(Token), LexError) {
-  let bytes = bit_array.from_string(source)
-  do_tokenize(bytes, 0, 1, [], LexScript)
-}
-
-pub fn tokenize_module(source: String) -> Result(List(Token), LexError) {
-  let bytes = bit_array.from_string(source)
-  do_tokenize(bytes, 0, 1, [], LexModule)
-}
-
-/// Re-lex `bytes` from byte offset `pos` (which sits on line `line`),
-/// producing absolutely-positioned tokens for the rest of the source.
+/// An incremental scanning cursor: a byte position (and its 1-based source
+/// line) inside `bytes`. `scan_next` lexes exactly one token and returns
+/// the advanced cursor.
 ///
-/// Used by the parser after it re-scans a regex literal from source: the
-/// up-front lex has no expression context, so a quote or backtick inside a
-/// regex body (`/'/g`) opens a phantom string/template token that swallows
-/// real source after the regex, and every token past it must be rebuilt.
-pub fn tokenize_from(
-  bytes: BitArray,
-  pos: Int,
-  line: Int,
-  mode: LexMode,
-) -> Result(List(Token), LexError) {
-  do_tokenize(bytes, pos, line, [], mode)
+/// This is how the PARSER lexes — on demand, token by token — so that when
+/// it re-scans something the token grammar cannot classify without
+/// grammatical context (a regex literal, a template continuation) it can
+/// simply continue from the end of the re-scan. A whole-file up-front pass
+/// cannot do that: everything it lexed past such a construct is garbage.
+pub type Scanner {
+  Scanner(bytes: BitArray, pos: Int, line: Int, mode: LexMode)
 }
 
-fn do_tokenize(
+/// A scanner positioned at byte `pos` of `bytes`, on 1-based line `line`.
+pub fn scanner_at(
   bytes: BitArray,
   pos: Int,
   line: Int,
-  acc: List(Token),
   mode: LexMode,
-) -> Result(List(Token), LexError) {
-  use #(new_pos, ws_newlines, rest) <- result.try(skip_whitespace_and_comments(
-    bytes,
-    pos,
-    mode,
-  ))
-  let token_line = line + ws_newlines
-  // Single-byte punctuation fast path: match the remaining binary directly,
-  // skipping the two char_at calls (each two bit_array slices + a UTF-8
-  // validation) that the generic path pays per token. These tokens are
-  // single-line and escape-free, so the multi-line bookkeeping below is
-  // statically known too.
-  case read_fast_punct(rest) {
-    Some(#(kind, value)) -> {
-      let token = Token(kind, value, new_pos, token_line, 1, False)
-      do_tokenize(bytes, new_pos + 1, token_line, [token, ..acc], mode)
-    }
-    None ->
-      case char_at(bytes, new_pos) {
-        "" ->
-          Ok(
-            list.reverse([Token(Eof, "", new_pos, token_line, 0, False), ..acc]),
-          )
-        _ -> {
-          use token <- result.try(read_token(bytes, new_pos))
-          let token = Token(..token, line: token_line)
-          let end_pos = token.pos + token.raw_len
-          let end_line = case token.kind {
-            // Only these token kinds can span multiple lines
-            KString | TemplateLiteral -> {
-              let raw_value = byte_slice(bytes, token.pos, token.raw_len)
-              token_line + count_newlines_in(raw_value)
-            }
-            _ -> token_line
+) -> Scanner {
+  Scanner(bytes:, pos:, line:, mode:)
+}
+
+/// Lex up to `max` tokens from the scanner's position, in one pass that
+/// threads bare byte/line integers (no per-token allocation beyond the
+/// tokens themselves). This is the parser's bulk refill path.
+///
+/// The batch always ends the moment an Eof token is produced. A hard
+/// lexer error (unterminated block comment, invalid escape, …) is
+/// materialised INTO the stream as a zero-length `Illegal` token carrying
+/// its message, followed by Eof: no grammar production accepts `Illegal`,
+/// so the parser reports a SyntaxError at exactly the error's position —
+/// and hard errors inside source the parser never reaches (or jumps over,
+/// e.g. a regex body) are never raised at all.
+///
+/// Returns the tokens and the scanner just past the last one; the batch
+/// ends early the moment it produces an Eof token.
+pub fn scan_tokens(s: Scanner, max: Int) -> #(List(Token), Scanner) {
+  let Scanner(bytes:, pos:, line:, mode:) = s
+  do_scan_tokens(bytes, pos, line, mode, max, [])
+}
+
+fn do_scan_tokens(
+  bytes: BitArray,
+  pos: Int,
+  line: Int,
+  mode: LexMode,
+  max: Int,
+  acc: List(Token),
+) -> #(List(Token), Scanner) {
+  case max {
+    0 -> #(list.reverse(acc), Scanner(bytes:, pos:, line:, mode:))
+    _ ->
+      // The single-token step is inlined here (not a call to scan_one) so
+      // the per-token hot path allocates nothing beyond the token and its
+      // list cell — same as the whole-file loop this replaced.
+      case skip_whitespace_and_comments(bytes, pos, mode) {
+        Error(err) -> #(
+          list.reverse(hard_error_tokens(err, bytes, pos, line, acc)),
+          Scanner(bytes:, pos:, line:, mode:),
+        )
+        Ok(#(new_pos, ws_newlines, rest)) -> {
+          let token_line = line + ws_newlines
+          case read_fast_punct(rest) {
+            Some(#(kind, value)) ->
+              do_scan_tokens(bytes, new_pos + 1, token_line, mode, max - 1, [
+                Token(kind, value, new_pos, token_line, 1, False),
+                ..acc
+              ])
+            None ->
+              case char_at(bytes, new_pos) {
+                "" -> #(
+                  list.reverse([
+                    Token(Eof, "", new_pos, token_line, 0, False),
+                    ..acc
+                  ]),
+                  Scanner(bytes:, pos: new_pos, line: token_line, mode:),
+                )
+                _ ->
+                  case read_token(bytes, new_pos) {
+                    Error(err) -> #(
+                      list.reverse(hard_error_tokens(
+                        err,
+                        bytes,
+                        new_pos,
+                        token_line,
+                        acc,
+                      )),
+                      Scanner(bytes:, pos: new_pos, line: token_line, mode:),
+                    )
+                    Ok(token) -> {
+                      let token = Token(..token, line: token_line)
+                      let end_pos = token.pos + token.raw_len
+                      let end_line = case token.kind {
+                        // Only these token kinds can span multiple lines
+                        KString | TemplateLiteral | TemplateHead -> {
+                          let raw = byte_slice(bytes, token.pos, token.raw_len)
+                          token_line + count_newlines_in(raw)
+                        }
+                        _ -> token_line
+                      }
+                      do_scan_tokens(bytes, end_pos, end_line, mode, max - 1, [
+                        token,
+                        ..acc
+                      ])
+                    }
+                  }
+              }
           }
-          do_tokenize(bytes, end_pos, end_line, [token, ..acc], mode)
         }
       }
   }
+}
+
+/// A hard lexer error materialised into the token stream: a zero-length
+/// Illegal token carrying its message, then Eof (both onto the reversed
+/// accumulator). `from`/`line` are where the failed token step started;
+/// the error may sit lines further down (an unterminated `/*` reports at
+/// the `/*`, past any newlines the skip already crossed), and the token's
+/// line must be the ERROR's line or ASI misjudges the line break before it.
+fn hard_error_tokens(
+  err: LexError,
+  bytes: BitArray,
+  from: Int,
+  line: Int,
+  acc: List(Token),
+) -> List(Token) {
+  let epos = lex_error_pos(err)
+  let err_line = line + count_newlines_in(byte_slice(bytes, from, epos - from))
+  [
+    Token(Eof, "", epos, err_line, 0, False),
+    Token(Illegal, lex_error_to_string(err), epos, err_line, 0, False),
+    ..acc
+  ]
 }
 
 /// Tokens recognizable from their first byte alone, with no multi-char
@@ -974,26 +1048,62 @@ fn scan_string_inner(rest: BitArray, n: Int, quote: Int) -> StrScan {
 }
 
 // --- Template literal reader ---
+//
+// Templates are lexed as SPANS (the QuickJS / V8 shape). A span never
+// looks inside `${…}`: the substitution's contents are ordinary tokens
+// produced by the ordinary scanner, its expression is parsed by the
+// ordinary grammar, and at its closing `}` the parser explicitly asks for
+// the next span via `scan_template_continuation`. There is therefore no
+// brace counting here and no way for a string, comment, regex or nested
+// template inside a substitution to confuse the span scan.
 
+/// Lex the template span opening at the backtick at `start`: a complete
+/// no-substitution template (TemplateLiteral, `…`) or a head ending at
+/// `${` (TemplateHead). Called by the ordinary scanner on a backtick.
 fn read_template_literal(
   bytes: BitArray,
   start: Int,
 ) -> Result(Token, LexError) {
-  read_template_body(bytes, start + 1, start, 0)
+  read_template_span(bytes, start + 1, start)
 }
 
-fn read_template_body(
+/// Lex the template span that CONTINUES at the `}` closing a substitution
+/// — TemplateMiddle / TemplateTail lexically begin with that `}`
+/// (§12.9.6). Returns the span token (TemplateHead when another
+/// substitution follows, TemplateLiteral when the template ends) and a
+/// scanner positioned just past it, its line count advanced over any line
+/// terminators inside the span.
+///
+/// Only the PARSER can call this: a `}` is a plain RightBrace to the token
+/// grammar, and only the grammar knows it terminates a substitution.
+pub fn scan_template_continuation(
+  bytes: BitArray,
+  rbrace_pos: Int,
+  line: Int,
+  mode: LexMode,
+) -> Result(#(Token, Scanner), LexError) {
+  use token <- result.try(read_template_span(bytes, rbrace_pos + 1, rbrace_pos))
+  let token = Token(..token, line:)
+  let end_pos = token.pos + token.raw_len
+  let raw = byte_slice(bytes, token.pos, token.raw_len)
+  Ok(#(token, scanner_at(bytes, end_pos, line + count_newlines_in(raw), mode)))
+}
+
+/// Scan one template span starting at `start` (a backtick or the `}` of a
+/// substitution), with `pos` just past that opening delimiter. Ends at an
+/// unescaped `` ` `` (TemplateLiteral) or `${` (TemplateHead), both
+/// included in the token's raw text.
+fn read_template_span(
   bytes: BitArray,
   pos: Int,
   start: Int,
-  brace_depth: Int,
 ) -> Result(Token, LexError) {
   let ch = char_at(bytes, pos)
   case ch {
     // An unterminated template is legal inside a regex literal (`` /`/ ``),
     // which the parser re-scans from source — emit an Illegal token spanning
-    // just the backtick so the rest of the input still lexes. A stray
-    // Illegal token outside a regex is rejected by the parser.
+    // just the opening delimiter so the rest of the input still lexes. A
+    // stray Illegal token outside a regex is rejected by the parser.
     "" -> Ok(unterminated_quote_token(bytes, start))
     "\\" -> {
       let next = char_at(bytes, pos + 1)
@@ -1001,24 +1111,21 @@ fn read_template_body(
         "" -> Ok(unterminated_quote_token(bytes, start))
         _ ->
           case validate_escape(bytes, pos + 1, pos, True) {
-            Ok(skip) ->
-              read_template_body(bytes, pos + skip, start, brace_depth)
+            Ok(skip) -> read_template_span(bytes, pos + skip, start)
             // Invalid escape sequences are LEGAL in tagged templates (the
             // cooked value becomes undefined, §12.9.6); the lexer can't know
             // whether this template is tagged, so it tolerates them and the
             // parser raises the SyntaxError for untagged templates when
             // cooking the quasi. Skip the backslash plus the escape lead-in
-            // ("\u{" as a unit so a dangling "{" doesn't skew brace_depth).
+            // ("\u{" as a unit so a dangling "{" is not mistaken for one).
             Error(_invalid_escape) ->
               case char_at(bytes, pos + 1), char_at(bytes, pos + 2) {
-                "u", "{" ->
-                  read_template_body(bytes, pos + 3, start, brace_depth)
+                "u", "{" -> read_template_span(bytes, pos + 3, start)
                 _, _ ->
-                  read_template_body(
+                  read_template_span(
                     bytes,
                     pos + 1 + char_width_at(bytes, pos + 1),
                     start,
-                    brace_depth,
                   )
               }
           }
@@ -1026,35 +1133,17 @@ fn read_template_body(
     }
     "$" ->
       case char_at(bytes, pos + 1) {
-        "{" -> read_template_body(bytes, pos + 2, start, brace_depth + 1)
-        _ -> read_template_body(bytes, pos + 1, start, brace_depth)
-      }
-    "{" -> read_template_body(bytes, pos + 1, start, brace_depth + 1)
-    "}" ->
-      case brace_depth > 0 {
-        True -> read_template_body(bytes, pos + 1, start, brace_depth - 1)
-        False -> read_template_body(bytes, pos + 1, start, 0)
-      }
-    "`" ->
-      case brace_depth > 0 {
-        // Nested template literal inside an expression — skip it
-        True -> {
-          use inner <- result.try(read_template_literal(bytes, pos))
-          let end_pos = inner.pos + inner.raw_len
-          read_template_body(bytes, end_pos, start, brace_depth)
+        "{" -> {
+          let len = pos + 2 - start
+          Ok(tokn(TemplateHead, byte_slice(bytes, start, len), start, len))
         }
-        False -> {
-          let len = pos - start + 1
-          Ok(tokn(TemplateLiteral, byte_slice(bytes, start, len), start, len))
-        }
+        _ -> read_template_span(bytes, pos + 1, start)
       }
-    _ ->
-      read_template_body(
-        bytes,
-        pos + char_width_at(bytes, pos),
-        start,
-        brace_depth,
-      )
+    "`" -> {
+      let len = pos - start + 1
+      Ok(tokn(TemplateLiteral, byte_slice(bytes, start, len), start, len))
+    }
+    _ -> read_template_span(bytes, pos + char_width_at(bytes, pos), start)
   }
 }
 

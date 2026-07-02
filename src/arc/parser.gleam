@@ -1,15 +1,19 @@
 /// JavaScript parser for Arc.
 /// Recursive descent parser for ES2023+ strict mode JavaScript.
 ///
-/// The parser consumes a token list and validates syntax.
+/// The parser lexes ON DEMAND from a scanner cursor (`lexer.Scanner`),
+/// holding only a small prefetch window of upcoming tokens — never the
+/// whole file. That is what lets it re-scan the constructs a standalone
+/// token grammar cannot classify (regex literals, template continuations)
+/// from source and simply continue after them.
 /// Uses Pratt parsing for expression precedence.
 ///
 /// Submodules:
-///   parser/error    — ParseError type, formatting, position extraction
-///   parser/token    — TokenKind classification and conversion
-///   parser/number   — JS number literal parsing
-///   parser/regex    — Regex literal scanning and /u validation
-///   parser/template — Template literal splitting and octal detection
+///   parser/error        — ParseError type, formatting, position extraction
+///   parser/token        — TokenKind classification and conversion
+///   parser/number       — JS number literal parsing
+///   parser/regex        — Regex literal scanning and /u validation
+///   parser/legacy_octal — Annex B legacy-octal detection (strict checks)
 ///
 /// The mutually-recursive core (statements ↔ expressions ↔ patterns) lives
 /// here since Gleam doesn't support cross-module recursion.
@@ -42,7 +46,7 @@ import arc/parser/error.{
   ExpectedNewTargetGot, ExpectedPropertyName, ExpectedSemicolon, ExpectedToken,
   ExportNotTopLevel, FieldNamedConstructor, ForInInitializer, ForOfInitializer,
   FunctionDeclInLabelBody, FunctionDeclInSingleStatement, GeneratorDeclLabeled,
-  GetterNoParams, IdentifierAlreadyDeclared, ImportNotTopLevel,
+  GetterNoParams, IdentifierAlreadyDeclared, IllegalToken, ImportNotTopLevel,
   InvalidAssignmentLhs, InvalidDestructuringTarget, InvalidForInLhs,
   InvalidForOfLhs, InvalidLhsPrefixOp, InvalidPostfixLhs, InvalidTemplateEscape,
   LetBindingInLexicalDecl, LetIdentifierStrictMode, LexError, LexicalDeclInLabel,
@@ -70,18 +74,17 @@ import arc/parser/lexer.{
   Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
   Continue, Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal,
   Export, Extends, Finally, For, From, Function, GreaterThanGreaterThanEqual,
-  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Import, In, KFalse,
-  KString, KTrue, LeftBrace, LeftBracket, LeftParen, LessThanLessThanEqual, Let,
-  Minus, MinusEqual, MinusMinus, New, Null, Number, Of, PercentEqual, PipeEqual,
-  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
-  QuestionQuestionEqual, Return, RightBrace, RightBracket, RightParen, Semicolon,
-  Slash, SlashEqual, Star, StarEqual, StarStar, StarStarEqual, Static, Super,
-  Switch, TemplateLiteral, This, Throw, Tilde, Try, Typeof, Undefined, Var, Void,
-  While, With, Yield,
+  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Illegal, Import, In,
+  KFalse, KString, KTrue, LeftBrace, LeftBracket, LeftParen,
+  LessThanLessThanEqual, Let, Minus, MinusEqual, MinusMinus, New, Null, Number,
+  Of, PercentEqual, PipeEqual, PipePipeEqual, Plus, PlusEqual, PlusPlus,
+  Question, QuestionDot, QuestionQuestionEqual, Return, RightBrace, RightBracket,
+  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
+  StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral, This,
+  Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
 }
 import arc/parser/number.{parse_js_number}
 import arc/parser/regex
-import arc/parser/template.{UnterminatedSubstitution, split_template_parts}
 import arc/parser/token.{
   Binary, BinaryOperator, Logical, assignment_op, binary_operator,
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
@@ -243,10 +246,18 @@ type Ctx {
   )
 }
 
-/// Internal parser state: remaining tokens + the line of the last consumed token.
+/// Internal parser state: the upcoming-token window + the scanner it is
+/// filled from + the line of the last consumed token.
 type P {
   P(
+    // Prefetched upcoming tokens (a bounded window, NOT the whole file):
+    // `advance` tops it up from `scan` on demand. Always ends at the first
+    // Eof it reaches; nothing past the window has been lexed yet, so the
+    // parser can re-scan context-dependent constructs (regex literals,
+    // template parts) from source and just continue after them.
     tokens: List(Token),
+    // The on-demand lexing cursor the window is filled from.
+    scan: lexer.Scanner,
     mode: ParseMode,
     prev_line: Int,
     // Byte offset just past the last token consumed by `advance`
@@ -411,29 +422,33 @@ fn statement_to_default_export_expr(
 
 // ---- Public API ----
 
-/// Tokenize `source` and build the initial parser state. CPS so callers
-/// write `use p <- init_parser(source, mode)` and get the lexer-error →
-/// ParseError mapping for free.
+/// Build the initial parser state over an on-demand scanner. CPS so
+/// callers write `use p <- init_parser(source, mode)`.
+///
+/// Nothing is lexed up front: the token window is filled lazily as the
+/// parse advances, so a lexer error is reported when (and only if) the
+/// parse reaches its position — see `ensure_current`.
 fn init_parser(
   source: String,
   mode: ParseMode,
   cont: fn(P) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError),
 ) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
-  let tokenize_fn = case mode {
-    Module -> lexer.tokenize_module
-    Script -> lexer.tokenize
+  let bytes = bit_array.from_string(source)
+  let lex_mode = case mode {
+    Module -> lexer.LexModule
+    Script -> lexer.LexScript
   }
-  case tokenize_fn(source) {
-    Error(e) -> Error(LexError(e))
-    Ok(tokens) ->
-      cont(P(
-        tokens: tokens,
+  {
+    cont(
+      ensure_current(P(
+        tokens: [],
+        scan: lexer.scanner_at(bytes, 0, 1, lex_mode),
         mode: mode,
         prev_line: 1,
         prev_end: 0,
         allow_in: True,
         source: source,
-        bytes: bit_array.from_string(source),
+        bytes:,
         ctx: Ctx(
           strict: mode == Module,
           function_depth: 0,
@@ -481,7 +496,8 @@ fn init_parser(
           mode == Module,
         ),
         in_case_clause: False,
-      ))
+      )),
+    )
   }
 }
 
@@ -650,6 +666,7 @@ fn parse_statement_list(
 
 fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   case peek(p) {
+    Illegal -> Error(illegal_token_error(p))
     LeftBrace -> parse_block_statement(p)
     Var | Const -> parse_variable_declaration(p)
     Let -> {
@@ -852,7 +869,7 @@ fn parse_using_binding(p: P) -> Result(#(P, ast.Pattern), ParseError) {
     kind ->
       case kind == Identifier || is_contextual_keyword(kind) {
         True -> validate_and_register_binding(p, peek_value(p))
-        False -> Error(ExpectedBindingPattern(pos_of(p)))
+        False -> Error(error_at_current(p, ExpectedBindingPattern(pos_of(p))))
       }
   }
 }
@@ -1131,7 +1148,7 @@ fn parse_binding_pattern(p: P) -> Result(#(P, ast.Pattern), ParseError) {
     _ ->
       case is_contextual_keyword(peek(p)) {
         True -> validate_and_register_binding(p, peek_value(p))
-        False -> Error(ExpectedBindingPattern(pos_of(p)))
+        False -> Error(error_at_current(p, ExpectedBindingPattern(pos_of(p))))
       }
   }
 }
@@ -1750,7 +1767,7 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
           let name = peek_value(p)
           Ok(#(advance(p), ast.Identifier(name: name, span: span_of(p)), False))
         }
-        False -> Error(ExpectedPropertyName(pos_of(p)))
+        False -> Error(error_at_current(p, ExpectedPropertyName(pos_of(p))))
       }
   }
 }
@@ -5286,7 +5303,7 @@ fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
         // Tagged template binds tighter than `new` (§13.3 MemberExpression :
         // MemberExpression TemplateLiteral): `new tag`tpl`` constructs the
         // RESULT of the tagged-template call, with optional arguments after.
-        TemplateLiteral -> {
+        TemplateLiteral | TemplateHead -> {
           use #(p5, tagged) <- result.try(parse_member_templates(p4, callee))
           finish_new(p5, start, tagged)
         }
@@ -5552,7 +5569,7 @@ fn parse_call_chain(
           parse_call_chain(p2, expr)
         }
       }
-    TemplateLiteral -> {
+    TemplateLiteral | TemplateHead -> {
       use #(p2, expr) <- result.try(parse_tagged_template(p, callee))
       parse_call_chain(p2, expr)
     }
@@ -5579,7 +5596,8 @@ fn parse_member_suffix(
           use Nil <- result.try(check_super_private(p2, object, prop_name))
           Ok(finish_dot_member(p2, object, start, prop_name, False))
         }
-        False -> Error(ExpectedIdentifierAfterDot(pos_of(p2)))
+        False ->
+          Error(error_at_current(p2, ExpectedIdentifierAfterDot(pos_of(p2))))
       }
     }
     LeftBracket -> parse_bracket_member(p, object, start, False)
@@ -5591,7 +5609,8 @@ fn parse_member_suffix(
           case is_identifier_or_keyword(peek(p2)) {
             True ->
               Ok(finish_dot_member(p2, object, start, peek_value(p2), True))
-            False -> Error(ExpectedAfterOptionalChain(pos_of(p2)))
+            False ->
+              Error(error_at_current(p2, ExpectedAfterOptionalChain(pos_of(p2))))
           }
       }
     }
@@ -5671,11 +5690,16 @@ fn parse_tagged_template(
   p: P,
   tag: ast.Expression,
 ) -> Result(#(P, ast.Expression), ParseError) {
-  use #(p, quasis, expressions) <- result.map(parse_tagged_template_raw(
-    p,
-    peek_value(p),
-  ))
-  let p2 = advance(p)
+  use #(p2, raw_quasis, expressions) <- result.map(parse_template_spans(p))
+  // §12.9.6: an invalid escape in a TAGGED template's quasi is legal — its
+  // cooked value is undefined (None); the raw text is always available.
+  let quasis =
+    list.map(raw_quasis, fn(q) {
+      case cook_template_string(q) {
+        Ok(s) -> ast.TemplateQuasi(cooked: Some(s), raw: q)
+        Error(Nil) -> ast.TemplateQuasi(cooked: None, raw: q)
+      }
+    })
   let expr =
     ast.TaggedTemplateExpression(
       tag:,
@@ -5695,7 +5719,7 @@ fn parse_member_templates(
   callee: ast.Expression,
 ) -> Result(#(P, ast.Expression), ParseError) {
   case peek(p) {
-    TemplateLiteral -> {
+    TemplateLiteral | TemplateHead -> {
       use #(p2, expr) <- result.try(parse_tagged_template(p, callee))
       let #(p3, expr) = parse_member_chain(p2, expr)
       parse_member_templates(p3, expr)
@@ -5756,6 +5780,9 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   // Default to no name — only the Identifier branch sets Some(name).
   let p = P(..p, last_expr_name: None)
   case peek(p) {
+    // A hard lexer error, materialised as a zero-length Illegal token
+    // (lexing is on demand — see ensure_current): report ITS message.
+    Illegal -> Error(illegal_token_error(p))
     Identifier -> {
       let val = peek_value(p)
       // §13.1.1 IdentifierReference early errors: escaped always-reserved
@@ -5806,16 +5833,26 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     KFalse -> ok_lit(p, ast.BooleanLiteral(value: False, span: span_of(p)))
     Null -> ok_lit(p, ast.NullLiteral(span: span_of(p)))
     Undefined -> ok_lit(p, ast.UndefinedExpression(span: span_of(p)))
-    TemplateLiteral -> {
-      let raw = peek_value(p)
-      // The lexer emits the entire template literal (backtick to backtick,
-      // including all `${…}` substitutions) as a single token, so the
-      // current token's span covers the whole expression.
-      let span = span_of(p)
-      use #(p, quasis, expressions) <- result.map(parse_template_raw(p, raw))
+    TemplateLiteral | TemplateHead -> {
+      let start = pos_of(p)
+      use #(p, raw_quasis, expressions) <- result.try(parse_template_spans(p))
+      // §12.9.6: an undefined TV (invalid escape) is only legal in TAGGED
+      // templates; in a plain template literal it is a SyntaxError.
+      use quasis <- result.map(
+        list.try_map(raw_quasis, fn(q) {
+          case cook_template_string(q) {
+            Ok(s) -> Ok(s)
+            Error(Nil) -> Error(InvalidTemplateEscape(start))
+          }
+        }),
+      )
       #(
-        P(..advance(p), last_expr_assignable: False),
-        ast.TemplateLiteral(quasis:, expressions:, span:),
+        P(..p, last_expr_assignable: False),
+        ast.TemplateLiteral(
+          quasis:,
+          expressions:,
+          span: ast.Span(start:, end: p.prev_end),
+        ),
       )
     }
     This ->
@@ -6430,19 +6467,11 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let pattern =
         regex.byte_slice_source(p.bytes, body_start, end_pos - 1 - body_start)
       let flags_str = string.join(flags, "")
-      // Move the token cursor past the regex. The up-front lexer had no
-      // expression context here: inside the regex source a quote/backtick
-      // opened a phantom string/template TOKEN, and `//` or `/*` a phantom
-      // COMMENT (which leaves no token at all) — either way everything
-      // lexed after the regex is garbage and the stream must be rebuilt
-      // from source. Otherwise the mis-lexed tokens are all contained
-      // inside the regex and skipping them positionally is enough.
-      let source =
-        regex.byte_slice_source(p.bytes, start_pos, flags_end - start_pos)
-      use p2 <- result.try(case regex_source_confuses_lexer(source) {
-        True -> resync_tokens_at(p, flags_end)
-        False -> skip_tokens_past(p, flags_end)
-      })
+      // The token window at/past the `/` was lexed with no expression
+      // context, so it is garbage (a quote, backtick or `/*` in the body
+      // may have opened a phantom string / template / comment). Lexing is
+      // on demand: throw the window away and continue just past the flags.
+      let p2 = jump_to(p, flags_end)
       // Span covers the whole `/pattern/flags` source slice — the regex was
       // re-scanned byte-wise, so use the exact byte bounds.
       let span = ast.Span(start: start_pos, end: flags_end)
@@ -6452,61 +6481,21 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   }
 }
 
-/// Whether a regex literal's source text could have derailed the up-front
-/// lexer PAST the regex: a quote or backtick in the body opens a phantom
-/// string / template token, and `//` / `/*` (e.g. `/\//`, `/[/*]/`) open a
-/// phantom comment — all of which swallow real source after the regex.
-fn regex_source_confuses_lexer(source: String) -> Bool {
-  string.contains(source, "'")
-  || string.contains(source, "\"")
-  || string.contains(source, "`")
-  || string.contains(source, "//")
-  || string.contains(source, "/*")
-}
-
-/// Advance the token cursor past a regex literal that was re-scanned from
-/// source and ends at byte `target_pos` (just past its flags).
-///
-/// Only used when the regex source cannot have confused the lexer past the
-/// regex (see regex_source_confuses_lexer): the mis-lexed tokens covering
-/// the regex source are skipped, and the stream is positionally back in
-/// sync at the first token starting at or after `target_pos`. A token that
-/// still crosses `target_pos` falls back to a full re-lex, defensively.
-fn skip_tokens_past(p: P, target_pos: Int) -> Result(P, ParseError) {
-  case peek(p) {
-    Eof -> Ok(p)
-    _ -> {
-      let pos = pos_of(p)
-      case pos >= target_pos {
-        // In sync: first token at/after the end of the regex.
-        True -> Ok(p)
-        False ->
-          case pos + peek_raw_len(p) > target_pos {
-            True -> resync_tokens_at(p, target_pos)
-            False -> skip_tokens_past(advance(p), target_pos)
-          }
-      }
-    }
-  }
-}
-
-/// Rebuild the token stream by re-lexing the source from byte `from`,
-/// leaving the cursor there. The token crossing `from` starts on the same
-/// line as `from` (a regex literal cannot contain a line terminator), so
-/// its line seeds the re-lex.
-fn resync_tokens_at(p: P, from: Int) -> Result(P, ParseError) {
-  let line = case p.tokens {
-    [lexer.Token(line: line, ..), ..] -> line
-    [] -> p.prev_line
-  }
-  let mode = case p.mode {
-    Module -> lexer.LexModule
-    Script -> lexer.LexScript
-  }
-  case lexer.tokenize_from(p.bytes, from, line, mode) {
-    Ok(tokens) -> Ok(P(..p, tokens:, prev_line: line, prev_end: from))
-    Error(e) -> Error(LexError(e))
-  }
+/// Discard the token window and continue lexing at byte `from`, which sits
+/// on the current token's line (used after re-scanning a construct the
+/// token grammar cannot classify itself — a regex literal, a template
+/// part — none of which spans a line terminator).
+fn jump_to(p: P, from: Int) -> P {
+  let line = line_of(p)
+  ensure_current(
+    P(
+      ..p,
+      tokens: [],
+      scan: lexer.scanner_at(p.bytes, from, line, p.scan.mode),
+      prev_line: line,
+      prev_end: from,
+    ),
+  )
 }
 
 // ---- Import/Export ----
@@ -7127,7 +7116,8 @@ fn parse_export_specifier(
           let p3 = advance(advance(p))
           case is_specifier_name(peek(p3)) {
             True -> Ok(#(p3, peek_value(p3)))
-            False -> Error(ExpectedExportAlias(pos_of(p3)))
+            False ->
+              Error(error_at_current(p3, ExpectedExportAlias(pos_of(p3))))
           }
         }
         _ -> Ok(#(p, local))
@@ -7155,7 +7145,10 @@ fn check_use_strict_in_body(p: P) -> Result(P, ParseError) {
       // check_retroactive_params, this catches the already-strict case.
       case p.has_non_simple_param {
         True ->
-          case peek(p) == LeftBrace && prologue_has_use_strict(p, 1) {
+          case
+            peek(p) == LeftBrace
+            && prologue_has_use_strict(look_skip(look_from(p)))
+          {
             True -> Error(MisplacedUseStrictDirective(pos_of(p)))
             False -> Ok(p)
           }
@@ -7163,66 +7156,118 @@ fn check_use_strict_in_body(p: P) -> Result(P, ParseError) {
       }
     False ->
       case peek(p) {
-        LeftBrace -> scan_directive_prologue(p, 1, [])
+        LeftBrace -> scan_directive_prologue(p, look_skip(look_from(p)))
         _ -> Ok(p)
       }
   }
 }
 
-/// Whether the directive prologue starting at token `offset` contains a
-/// "use strict" directive. Pure lookahead - mirrors the iteration shape of
-/// scan_directive_prologue without mutating parser state.
-fn prologue_has_use_strict(p: P, offset: Int) -> Bool {
-  case peek_at(p, offset) {
-    KString ->
-      case peek_value_at(p, offset) {
-        "use strict" -> True
-        _ -> {
-          let next_offset = case peek_at(p, offset + 1) {
-            Semicolon -> offset + 2
-            _ -> offset + 1
-          }
-          prologue_has_use_strict(p, next_offset)
-        }
+/// A pure lookahead cursor over the upcoming tokens: it yields the
+/// already-lexed current token(s) first and then keeps LEXING from the
+/// scanner WITHOUT retaining anything — the parser's own state is
+/// untouched, and whatever it lexes is thrown away.
+///
+/// This is the ONLY way the parser looks past its current token (see
+/// `upcoming` for the grammar's bounded lookahead and the
+/// directive-prologue scans for the unbounded one), which is what keeps
+/// the ordinary scan from ever running ahead of the parse — the invariant
+/// the re-scanned constructs (regex literals, template continuations)
+/// depend on, and the reason no source the parser jumps over is ever
+/// touched by the token scan at all.
+type Look {
+  Look(tokens: List(Token), scan: lexer.Scanner)
+}
+
+/// The lookahead cursor positioned at the parser's current token.
+fn look_from(p: P) -> Look {
+  Look(tokens: p.tokens, scan: p.scan)
+}
+
+/// The next token of the lookahead (Eof forever at the end of input) and
+/// the advanced cursor. A hard lexer error ahead surfaces as the lexer's
+/// Illegal sentinel — never accepted by these lookaheads — exactly as the
+/// real window would materialise it.
+fn look_next(look: Look) -> #(Token, Look) {
+  case look.tokens {
+    [token, ..rest] -> #(token, Look(..look, tokens: rest))
+    [] -> {
+      let #(batch, scan) = lexer.scan_tokens(look.scan, 1)
+      case batch {
+        [token, ..rest] -> #(token, Look(tokens: rest, scan:))
+        // scan_tokens always yields at least an Eof token; unreachable.
+        [] -> #(lexer.Token(Eof, "", 0, 0, 0, False), look)
       }
-    _ -> False
+    }
   }
+}
+
+/// The `n`-th token of the lookahead (0 = its first token).
+fn look_at(look: Look, n: Int) -> Token {
+  let #(token, look) = look_next(look)
+  case n <= 0 || token.kind == Eof {
+    True -> token
+    False -> look_at(look, n - 1)
+  }
+}
+
+/// Drop one lookahead token.
+fn look_skip(look: Look) -> Look {
+  let #(_, look) = look_next(look)
+  look
+}
+
+/// Skip the optional `;` terminating a directive.
+fn look_skip_semicolon(look: Look) -> Look {
+  let #(token, after) = look_next(look)
+  case token.kind {
+    Semicolon -> after
+    // Not a `;`: put the freshly seen token back rather than dropping the
+    // cursor that already lexed it.
+    _ -> Look(tokens: [token, ..after.tokens], scan: after.scan)
+  }
+}
+
+/// Walk the directive prologue at the lookahead cursor (pure lookahead —
+/// nothing is consumed): `Some(raw directive strings seen BEFORE it)`
+/// when a "use strict" directive is present, `None` otherwise. The one
+/// walk both the boolean check and strict-mode activation share.
+fn prologue_use_strict(look: Look, seen: List(String)) -> Option(List(String)) {
+  let #(token, look) = look_next(look)
+  case token.kind {
+    KString ->
+      case token.value {
+        "use strict" -> Some(seen)
+        val -> prologue_use_strict(look_skip_semicolon(look), [val, ..seen])
+      }
+    _ -> None
+  }
+}
+
+/// Whether the directive prologue at the lookahead cursor contains a
+/// "use strict" directive.
+fn prologue_has_use_strict(look: Look) -> Bool {
+  option.is_some(prologue_use_strict(look, []))
 }
 
 /// Check if program body starts with "use strict" directive.
 fn check_use_strict_at_start(p: P) -> Result(P, ParseError) {
   case p.ctx.strict {
     True -> Ok(p)
-    False -> scan_directive_prologue(p, 0, [])
+    False -> scan_directive_prologue(p, look_from(p))
   }
 }
 
-/// Scan the directive prologue looking for "use strict". If found, set strict
-/// mode and check retroactive octal escapes and parameter names.
-fn scan_directive_prologue(
-  p: P,
-  offset: Int,
-  seen_strings: List(String),
-) -> Result(P, ParseError) {
-  case peek_at(p, offset) {
-    KString -> {
-      let val = peek_value_at(p, offset)
-      case val {
-        "use strict" -> {
-          use Nil <- result.try(check_retroactive_octals(p, seen_strings))
-          let p = P(..p, ctx: Ctx(..p.ctx, strict: True))
-          check_retroactive_params(p)
-        }
-        _ -> {
-          let next_offset = case peek_at(p, offset + 1) {
-            Semicolon -> offset + 2
-            _ -> offset + 1
-          }
-          scan_directive_prologue(p, next_offset, [val, ..seen_strings])
-        }
-      }
+/// Scan the directive prologue (pure lookahead from `look`) for
+/// "use strict". If found, set strict mode and check retroactive octal
+/// escapes and parameter names.
+fn scan_directive_prologue(p: P, look: Look) -> Result(P, ParseError) {
+  case prologue_use_strict(look, []) {
+    None -> Ok(p)
+    Some(seen_strings) -> {
+      use Nil <- result.try(check_retroactive_octals(p, seen_strings))
+      let p = P(..p, ctx: Ctx(..p.ctx, strict: True))
+      check_retroactive_params(p)
     }
-    _ -> Ok(p)
   }
 }
 
@@ -7449,170 +7494,149 @@ fn peek(p: P) -> TokenKind {
   }
 }
 
+/// The `n`-th upcoming token (0 = the current token). Depths >= 1 are a
+/// bounded, pure lookahead that LEXES ahead on demand without retaining
+/// the result — the ordinary scan never runs ahead of the parse (see
+/// `advance`), so nothing is ever lexed past a construct the parser
+/// re-scans from source (a regex literal's body, a template span) unless
+/// a grammar rule explicitly looks there. The grammar's deepest lookahead
+/// is 3 (`export async function *` name extraction). At end of input the
+/// Eof token is returned for every deeper `n`.
+fn upcoming(p: P, n: Int) -> Token {
+  look_at(look_from(p), n)
+}
+
 fn peek_at(p: P, n: Int) -> TokenKind {
-  case list_nth(p.tokens, n) {
-    Ok(lexer.Token(kind: k, ..)) -> k
-    Error(_) -> Eof
+  case n {
+    0 -> peek(p)
+    _ -> {
+      let lexer.Token(kind: k, ..) = upcoming(p, n)
+      k
+    }
   }
 }
 
-/// Parse a raw template literal string into cooked quasis and expression
-/// ASTs. The raw string includes backticks, e.g. `hello ${x} world`.
-/// Used for UNTAGGED templates: an invalid escape sequence in any quasi is
-/// a SyntaxError (§12.9.6 — undefined TV is only legal in tagged templates).
-fn parse_template_raw(
-  p: P,
-  raw: String,
-) -> Result(#(P, List(String), List(ast.Expression)), ParseError) {
-  use #(p, raw_quasis, expressions) <- result.try(parse_template_parts(p, raw))
-  use cooked <- result.map(
-    list.try_map(raw_quasis, fn(q) {
-      case cook_template_string(q) {
-        Ok(s) -> Ok(s)
-        Error(Nil) -> Error(InvalidTemplateEscape(pos_of(p)))
-      }
-    }),
-  )
-  #(p, cooked, expressions)
-}
-
-/// Parse a raw template literal string into TAGGED-template parts: quasis
-/// (each pairing the cooked value — None for an invalid escape — with the
-/// verbatim, line-ending-normalized raw text) and expression ASTs.
-fn parse_tagged_template_raw(
-  p: P,
-  raw: String,
-) -> Result(#(P, List(ast.TemplateQuasi), List(ast.Expression)), ParseError) {
-  use #(p, raw_quasis, expressions) <- result.map(parse_template_parts(p, raw))
-  let quasis =
-    list.map(raw_quasis, fn(q) {
-      case cook_template_string(q) {
-        Ok(s) -> ast.TemplateQuasi(cooked: Some(s), raw: q)
-        Error(Nil) -> ast.TemplateQuasi(cooked: None, raw: q)
-      }
-    })
-  #(p, quasis, expressions)
-}
-
-/// Shared splitting + substitution parsing for templates. Returns RAW quasi
-/// strings (escapes undecoded) plus the parsed substitution expressions.
+/// Parse an entire template literal starting at the current
+/// TemplateLiteral (no-substitution) or TemplateHead token: its RAW quasi
+/// texts (line-ending normalized, escapes undecoded — cooking is the
+/// caller's job) and its substitution expressions, with the parser
+/// advanced past the closing backtick.
 ///
-/// Each `${expr}` is parsed by re-tokenizing its source and temporarily
-/// swapping P's token stream. The returned sub-parser is threaded forward
-/// (NOT discarded) so that scope-builder state accumulated while parsing
-/// the substitution — sb_ref for identifier references, sb_push for nested
-/// function/class scopes — flows back into the outer P. The outer token
-/// stream and last-expr flags are restored at the end since the whole
-/// template is a single token in the enclosing stream.
-fn parse_template_parts(
+/// §13.2.8: each substitution is Expression[+In]. Its tokens come from the
+/// ordinary on-demand scanner (a TemplateHead token ends just past `${`,
+/// so the window continues INSIDE the substitution), the ordinary grammar
+/// parses it — strings, objects, regexes and nested templates in it are
+/// real tokens — and at its closing `}` the next span is re-scanned from
+/// source (`template_continuation`): the token grammar alone cannot know
+/// that a `}` re-enters a template.
+fn parse_template_spans(
   p: P,
-  raw: String,
 ) -> Result(#(P, List(String), List(ast.Expression)), ParseError) {
-  // The whole template is a single token in the outer stream, so the
-  // current token's position is the template's opening backtick.
-  let template_pos = pos_of(p)
-  // Strip leading ` and trailing `
-  let len = string.length(raw)
-  let inner = string.slice(raw, 1, len - 2)
-  // Split into raw quasis and expression source strings
-  use #(raw_quasis, expr_sources) <- result.try(
-    result.map_error(split_template_parts(inner), fn(err) {
-      let UnterminatedSubstitution = err
-      UnterminatedTemplateSubstitution(template_pos)
-    }),
-  )
-  // Absolute source position where each substitution's expression source
-  // starts, so errors inside a substitution point into the real source.
-  let expr_positions =
-    substitution_positions(raw_quasis, expr_sources, template_pos + 1)
-  // Save outer cursor-ish state we are about to overwrite per substitution.
-  let outer_tokens = p.tokens
-  let outer_bytes = p.bytes
-  let outer_allow_in = p.allow_in
-  let outer_assignable = p.last_expr_assignable
-  let outer_is_assignment = p.last_expr_is_assignment
-  // Parse each expression source, threading P through so accumulated
-  // scope state (sb) flows forward across substitutions and back out.
-  use #(p, rev_exprs) <- result.map(
-    list.try_fold(
-      list.zip(expr_sources, expr_positions),
-      #(p, []),
-      fn(acc, entry) {
-        let #(p, exprs) = acc
-        let #(src, expr_pos) = entry
-        case lexer.tokenize(src) {
-          Error(e) -> Error(LexError(e))
-          Ok(tokens) -> {
-            // parse_regex_literal re-scans regex bodies from `bytes` using
-            // token-relative byte offsets, so `bytes` must match the source
-            // these tokens were lexed from.
-            // A substitution is always Expression[+In] (ECMA-262 13.2.8),
-            // even when the template sits in a for-head initializer where
-            // the enclosing context has [~In]. Without this, `in` inside
-            // `${...}` would be left unconsumed and trip the trailing-token
-            // check below.
-            let sub_p =
-              P(
-                ..p,
-                tokens: tokens,
-                bytes: bit_array.from_string(src),
-                allow_in: True,
-                last_expr_assignable: False,
-                last_expr_is_assignment: False,
-              )
-            use #(sub_p, expr) <- result.try(parse_expression(sub_p))
-            // The substitution must be exactly one expression: `${a b}`
-            // is a SyntaxError, not "parse `a` and drop ` b`".
-            case peek(sub_p) {
-              Eof -> Ok(#(sub_p, [expr, ..exprs]))
-              trailing ->
-                Error(UnexpectedToken(
-                  token_kind_to_string(trailing),
-                  expr_pos + pos_of(sub_p),
-                ))
-            }
-          }
-        }
-      },
-    ),
-  )
-  let p =
+  case peek(p) {
+    // `…` — complete, no substitutions.
+    TemplateLiteral -> Ok(#(advance(p), [template_span_raw(p, 1)], []))
+    // `…${ — one or more substitutions follow. The last-expression flags
+    // and the enclosing [In] context are none of the substitutions'
+    // business: restore them once the whole template is consumed.
+    _ -> {
+      let saved_allow_in = p.allow_in
+      let saved_assignable = p.last_expr_assignable
+      let saved_is_assignment = p.last_expr_is_assignment
+      use #(p, rev_quasis, rev_exprs) <- result.map(
+        parse_template_substitutions(advance(p), [template_span_raw(p, 2)], []),
+      )
+      #(
+        P(
+          ..p,
+          allow_in: saved_allow_in,
+          last_expr_assignable: saved_assignable,
+          last_expr_is_assignment: saved_is_assignment,
+        ),
+        list.reverse(rev_quasis),
+        list.reverse(rev_exprs),
+      )
+    }
+  }
+}
+
+/// Parse one `${ Expression }` — the parser sits on the first token INSIDE
+/// the substitution — plus the template span at its `}`, recursing while
+/// spans keep ending in `${`.
+fn parse_template_substitutions(
+  p: P,
+  rev_quasis: List(String),
+  rev_exprs: List(ast.Expression),
+) -> Result(#(P, List(String), List(ast.Expression)), ParseError) {
+  use #(p, expr) <- result.try(parse_expression(
     P(
       ..p,
-      tokens: outer_tokens,
-      bytes: outer_bytes,
-      allow_in: outer_allow_in,
-      last_expr_assignable: outer_assignable,
-      last_expr_is_assignment: outer_is_assignment,
-    )
-  #(p, raw_quasis, list.reverse(rev_exprs))
+      allow_in: True,
+      last_expr_assignable: False,
+      last_expr_is_assignment: False,
+    ),
+  ))
+  case peek(p) {
+    RightBrace -> {
+      use p <- result.try(template_continuation(p))
+      case peek(p) {
+        // }…${ — another substitution follows.
+        TemplateHead ->
+          parse_template_substitutions(
+            advance(p),
+            [template_span_raw(p, 2), ..rev_quasis],
+            [expr, ..rev_exprs],
+          )
+        // }…` — the template ends.
+        TemplateLiteral ->
+          Ok(
+            #(advance(p), [template_span_raw(p, 1), ..rev_quasis], [
+              expr,
+              ..rev_exprs
+            ]),
+          )
+        // The continuation hit end of input: unterminated template.
+        _ -> Error(UnterminatedTemplateSubstitution(pos_of(p)))
+      }
+    }
+    other ->
+      Error(error_at_current(
+        p,
+        ExpectedToken("}", token_kind_to_string(other), pos_of(p)),
+      ))
+  }
 }
 
-/// Absolute byte offset (in the enclosing source) where each substitution's
-/// expression source starts. `at` is the offset just past the template's
-/// opening backtick; each quasi is followed by `${` (2 bytes) and each
-/// expression by `}` (1 byte). Quasi lengths are measured after the split's
-/// CRLF→LF normalization, so a CRLF earlier in the template shifts later
-/// positions by one byte — close enough for error reporting.
-fn substitution_positions(
-  quasis: List(String),
-  expr_sources: List(String),
-  at: Int,
-) -> List(Int) {
-  case quasis, expr_sources {
-    [quasi, ..quasis_rest], [src, ..sources_rest] -> {
-      let start = at + string.byte_size(quasi) + 2
-      [
-        start,
-        ..substitution_positions(
-          quasis_rest,
-          sources_rest,
-          start + string.byte_size(src) + 1,
-        )
-      ]
-    }
-    _, _ -> []
-  }
+/// At the `}` closing a template substitution, re-scan the next template
+/// span from source and make it the current token. The token window past
+/// the `}` is garbage — it was lexed without knowing that the `}`
+/// re-enters a template — so it is discarded, exactly like the window
+/// past a re-scanned regex literal.
+fn template_continuation(p: P) -> Result(P, ParseError) {
+  use #(token, scan) <- result.map(
+    lexer.scan_template_continuation(
+      p.bytes,
+      pos_of(p),
+      line_of(p),
+      p.scan.mode,
+    )
+    |> result.map_error(LexError),
+  )
+  P(..p, tokens: [token], scan:)
+}
+
+/// The current template-span token's RAW quasi text (§12.9.6 TRV): the
+/// source between its delimiters — one leading char (`` ` `` or `}`) and
+/// `trailing` chars (1 for a closing `` ` ``, 2 for `${`), all ASCII, so
+/// the slice is byte-exact — with line-terminator sequences normalized
+/// (<CR><LF> and <CR> → <LF>).
+fn template_span_raw(p: P, trailing: Int) -> String {
+  regex.byte_slice_source(
+    p.bytes,
+    pos_of(p) + 1,
+    peek_raw_len(p) - 1 - trailing,
+  )
+  |> string.replace("\r\n", "\n")
+  |> string.replace("\r", "\n")
 }
 
 fn peek_value(p: P) -> String {
@@ -7623,9 +7647,15 @@ fn peek_value(p: P) -> String {
 }
 
 fn peek_value_at(p: P, n: Int) -> String {
-  case list_nth(p.tokens, n) {
-    Ok(lexer.Token(value: v, ..)) -> v
-    Error(_) -> ""
+  case n {
+    0 -> peek_value(p)
+    _ -> {
+      let lexer.Token(kind: kind, value: v, ..) = upcoming(p, n)
+      case kind {
+        Eof -> ""
+        _ -> v
+      }
+    }
   }
 }
 
@@ -7699,11 +7729,47 @@ fn line_of(p: P) -> Int {
   }
 }
 
+/// Consume the current token and lex the next one (when none is buffered
+/// already — after a template continuation the tail span is).
+///
+/// NOTHING is ever lexed beyond the token the parse is at, except through
+/// an explicit bounded lookahead (`upcoming`), which retains nothing. That
+/// is the invariant the on-demand design rests on (QuickJS / V8 keep at
+/// most one pending token for the same reason): the ordinary token scan
+/// never touches source the parser re-scans and jumps over — a regex
+/// literal's body, a template span after a substitution's `}` — so no
+/// garbage token, however expensive its scan would be, is ever produced.
 fn advance(p: P) -> P {
   case p.tokens {
     [lexer.Token(line: line, pos: pos, raw_len: rl, ..), ..rest] ->
-      P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
+      case rest {
+        [] -> {
+          let #(batch, scan) = lexer.scan_tokens(p.scan, 1)
+          P(..p, tokens: batch, scan:, prev_line: line, prev_end: pos + rl)
+        }
+        _ -> P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
+      }
     [] -> p
+  }
+}
+
+/// Ensure the current token is present (lexing exactly one if the window
+/// is empty): used to build the window at parser start and after a source
+/// re-scan (regex literal, template continuation) discarded it.
+///
+/// A hard lexer error is materialised by the lexer as a zero-length
+/// `Illegal` token (carrying the message) followed by Eof: no grammar
+/// production accepts `Illegal`, so the parse fails at exactly the lexer
+/// error's position with its message (see illegal_token_error) — and
+/// errors inside source the parser jumps over (a regex body) never
+/// surface at all.
+fn ensure_current(p: P) -> P {
+  case p.tokens {
+    [] -> {
+      let #(batch, scan) = lexer.scan_tokens(p.scan, 1)
+      P(..p, tokens: batch, scan:)
+    }
+    _ -> p
   }
 }
 
@@ -7711,17 +7777,22 @@ fn expect(p: P, kind: TokenKind) -> Result(P, ParseError) {
   case peek(p) == kind {
     True -> Ok(advance(p))
     False ->
-      Error(ExpectedToken(
-        token_kind_to_string(kind),
-        token_kind_to_string(peek(p)),
-        pos_of(p),
-      ))
+      case peek(p) {
+        Illegal -> Error(illegal_token_error(p))
+        found ->
+          Error(ExpectedToken(
+            token_kind_to_string(kind),
+            token_kind_to_string(found),
+            pos_of(p),
+          ))
+      }
   }
 }
 
 fn expect_identifier(p: P) -> Result(P, ParseError) {
   case peek(p) {
     Identifier -> Ok(advance(p))
+    Illegal -> Error(illegal_token_error(p))
     _ ->
       case is_keyword_as_identifier(peek(p)) {
         True -> Ok(advance(p))
@@ -7730,10 +7801,46 @@ fn expect_identifier(p: P) -> Result(P, ParseError) {
   }
 }
 
+/// The error for the current token being `Illegal`. A ZERO-length Illegal
+/// token is the on-demand lexer's hard-error sentinel (see ensure_current):
+/// its `value` carries the lexer's message and its position the error's,
+/// so it is reported exactly as the old whole-file lex pass reported the
+/// LexError. A lenient Illegal token (a stray character the lexer
+/// tolerates because a regex body could have made it legal) keeps the
+/// generic unexpected-token report.
+fn illegal_token_error(p: P) -> ParseError {
+  case p.tokens {
+    [lexer.Token(kind: Illegal, raw_len: 0, value: message, pos: pos, ..), ..] ->
+      IllegalToken(message, pos)
+    _ -> UnexpectedToken(token_kind_to_string(peek(p)), pos_of(p))
+  }
+}
+
+/// Report an unexpected current token: the LEXER's own message when the
+/// token is a hard-lex-error sentinel (see illegal_token_error), the
+/// caller's grammar-specific `otherwise` error for a real token. Every
+/// site that rejects an arbitrary unexpected token should go through
+/// this, or a lexer error behind it gets masked by a misleading
+/// "expected X" report.
+fn error_at_current(p: P, otherwise: ParseError) -> ParseError {
+  case peek(p) {
+    Illegal -> illegal_token_error(p)
+    _ -> otherwise
+  }
+}
+
 fn eat_semicolon(p: P) -> Result(P, ParseError) {
   case peek(p) {
     Semicolon -> Ok(advance(p))
     RightBrace | Eof -> Ok(p)
+    // A hard lexer error right after the statement (see ensure_current):
+    // when ASI does not save it, report the LEXER's message, not a
+    // misleading "Expected ';'" pointing at it.
+    Illegal ->
+      case has_line_break_before(p) {
+        True -> Ok(p)
+        False -> Error(illegal_token_error(p))
+      }
     _ ->
       // ASI: insert semicolon if there's a line break before the current token
       case has_line_break_before(p) {
@@ -7753,20 +7860,16 @@ fn has_line_break_before(p: P) -> Bool {
   }
 }
 
-fn list_nth(lst: List(a), n: Int) -> Result(a, Nil) {
-  case lst, n {
-    [first, ..], 0 -> Ok(first)
-    [_, ..rest], _ -> list_nth(rest, n - 1)
-    [], _ -> Error(Nil)
-  }
-}
-
 /// Source line of the n-th upcoming token (-1 past EOF). Used for the
 /// `let`-ASI lookahead in single-statement position.
 fn token_line_at(p: P, n: Int) -> Int {
-  case list_nth(p.tokens, n) {
-    Ok(lexer.Token(line: line, ..)) -> line
-    Error(Nil) -> -1
+  let lexer.Token(kind: kind, line: line, ..) = upcoming(p, n)
+  case kind {
+    // Past the end of input every deeper token is the Eof token; keep the
+    // old answer for a missing token so line comparisons never pair with
+    // it.
+    Eof -> -1
+    _ -> line
   }
 }
 

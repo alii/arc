@@ -7,6 +7,7 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/compile_task
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/event_loop
 import arc/vm/heap
@@ -396,12 +397,12 @@ fn compile_or_throw(
     #(state, Error(err))
   }
   // Big sources parse+compile in a heap-sized scratch process (see
-  // arc_vm_ffi:run_compile_task/2): the token list / AST / IR are large
-  // transients the copying GC would otherwise re-copy many times, and only
-  // the compact FuncTemplate (or error string) crosses back. Small sources
+  // arc/vm/compile_task): the AST / scope tree / IR are large transients
+  // the copying GC would otherwise re-copy many times, and only the
+  // compact FuncTemplate (or error string) crosses back. Small sources
   // run inline.
   let compiled =
-    ffi_run_compile_task(string.byte_size(source), fn() {
+    compile_task.run(string.byte_size(source), fn() {
       case parse(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(program, sb)) ->
@@ -416,11 +417,6 @@ fn compile_or_throw(
     Ok(template) -> cont(template)
   }
 }
-
-/// See arc_vm_ffi:run_compile_task/2 — runs `task` in a short-lived,
-/// heap-pre-sized process when `source_bytes` is large, inline otherwise.
-@external(erlang, "arc_vm_ffi", "run_compile_task")
-fn ffi_run_compile_task(source_bytes: Int, task: fn() -> a) -> a
 
 /// Build an eval State from `template`/`locals`/`h`, copy the caller's realm
 /// table in, execute, merge VM-global state back into the caller, and map

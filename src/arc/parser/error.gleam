@@ -28,6 +28,12 @@ pub type ParseError {
   UnexpectedSuper(pos: Int)
   UnexpectedCloseParen(pos: Int)
   UnexpectedToken(token: String, pos: Int)
+  /// The parse reached a hard lexer error (unterminated block comment,
+  /// invalid escape, malformed numeric literal, …): lexing is on demand,
+  /// so the lexer materialises it as a zero-length `Illegal` token
+  /// carrying its message, and the parser reports it here — rendered
+  /// exactly like the whole-file lexer error it replaced.
+  IllegalToken(message: String, pos: Int)
   ReturnOutsideFunction(pos: Int)
   BreakOutsideLoopOrSwitch(pos: Int)
   ContinueOutsideLoop(pos: Int)
@@ -185,6 +191,7 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     UnexpectedSuper(_) -> "Unexpected 'super'"
     UnexpectedCloseParen(_) -> "Unexpected token ')'"
     UnexpectedToken(token:, ..) -> "Unexpected token: " <> token
+    IllegalToken(message:, ..) -> message
     ReturnOutsideFunction(_) -> "'return' outside of function"
     BreakOutsideLoopOrSwitch(_) -> "'break' outside of loop or switch"
     ContinueOutsideLoop(_) -> "'continue' outside of loop"
@@ -394,6 +401,7 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | UnexpectedSuper(pos:)
     | UnexpectedCloseParen(pos:)
     | UnexpectedToken(pos:, ..)
+    | IllegalToken(pos:, ..)
     | ReturnOutsideFunction(pos:)
     | BreakOutsideLoopOrSwitch(pos:)
     | ContinueOutsideLoop(pos:)
