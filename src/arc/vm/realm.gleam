@@ -32,13 +32,9 @@ import gleam/string
 // Callback types for VM functions that can't be imported directly
 // ============================================================================
 
-/// The SUSPENSION-NARROWED step loop (`interpreter.execute_to_completion`),
-/// not the raw one: every realm-level entry point here (eval, evalScript,
-/// the Function constructors, ShadowRealm.evaluate) runs a whole
-/// non-coroutine frame, so it only ever receives a terminal `Completion`.
-/// A yield/await escaping such a frame is an engine bug and surfaces as an
-/// `InternalError` on the `VmError` channel inside the callback.
-pub type ExecuteInnerFn(host) =
+/// `interpreter.execute_to_completion`: runs a whole non-coroutine frame to a
+/// terminal `Completion` (a leaked yield/await surfaces as a `VmError`).
+pub type RunToCompletionFn(host) =
   fn(State(host)) -> Result(#(completion.Completion, State(host)), VmError)
 
 /// Inline of interpreter.init_top_level_locals (realm.gleam can't import
@@ -77,7 +73,7 @@ pub fn eval_script_native(
   args: List(JsValue),
   this: JsValue,
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let source = case args {
@@ -168,7 +164,7 @@ pub fn eval_script_native(
             template_objects: state.ctx.template_objects,
           ),
         )
-      case execute_inner(eval_state) {
+      case run_to_completion(eval_state) {
         Error(vm_err) ->
           state.type_error(
             state,
@@ -437,7 +433,7 @@ fn run_eval(
   h: Heap(host),
   state: State(host),
   eval_env: option.Option(Ref),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Seed the agent-wide event-loop queues from the caller: merge_globals
@@ -474,7 +470,7 @@ fn run_eval(
         template_objects: state.ctx.template_objects,
       ),
     )
-  case execute_inner(eval_state) {
+  case run_to_completion(eval_state) {
     Error(vm_err) ->
       state.type_error(
         state,
@@ -505,7 +501,7 @@ fn run_eval(
 fn run_source_in_current_realm(
   source: String,
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use template <- compile_or_throw(
@@ -525,7 +521,7 @@ fn run_source_in_current_realm(
     state.heap,
     state,
     None,
-    execute_inner,
+    run_to_completion,
     new_state_fn,
   )
 }
@@ -536,12 +532,12 @@ fn run_source_in_current_realm(
 pub fn eval_native(
   args: List(JsValue),
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [JsString(source), ..] ->
-      run_source_in_current_realm(source, state, execute_inner, new_state_fn)
+      run_source_in_current_realm(source, state, run_to_completion, new_state_fn)
     // Non-string first arg: return it unchanged (spec §19.2.1 step 2)
     [x, ..] -> #(state, Ok(x))
     [] -> #(state, Ok(JsUndefined))
@@ -563,7 +559,7 @@ pub fn direct_eval_native(
   with_names: List(String),
   private_names: List(String),
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
@@ -575,7 +571,7 @@ pub fn direct_eval_native(
           run_source_in_current_realm(
             source,
             state,
-            execute_inner,
+            run_to_completion,
             new_state_fn,
           )
         Some(name_table) ->
@@ -586,7 +582,7 @@ pub fn direct_eval_native(
             with_names,
             private_names,
             state,
-            execute_inner,
+            run_to_completion,
             new_state_fn,
           )
       }
@@ -603,7 +599,7 @@ fn run_direct_eval(
   with_names: List(String),
   private_names: List(String),
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // A sentinel head entry marks the caller frame's VariableEnvironment as
@@ -688,7 +684,7 @@ fn run_direct_eval(
   }
   // Direct eval inherits the caller's `this` (spec §19.2.1.1 step 16.a)
   // via the boxed capture appended to caller_box_refs above.
-  run_eval(template, locals, h, state, eval_env, execute_inner, new_state_fn)
+  run_eval(template, locals, h, state, eval_env, run_to_completion, new_state_fn)
 }
 
 /// Coerce a list of JsValues to strings, threading state.
@@ -717,7 +713,7 @@ pub fn function_constructor_native(
   args: List(JsValue),
   keyword: String,
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use str_args, state <- state.try_op(coerce_all_to_string(args, state, []))
@@ -744,7 +740,7 @@ pub fn function_constructor_native(
     <> body
     <> "\n})"
   let #(state, res) =
-    run_source_in_current_realm(source, state, execute_inner, new_state_fn)
+    run_source_in_current_realm(source, state, run_to_completion, new_state_fn)
   case res {
     Ok(JsObject(fn_ref)) -> #(set_function_name_anonymous(state, fn_ref), res)
     _ -> #(state, res)
@@ -819,7 +815,7 @@ pub fn shadow_realm_dispatch(
   args: List(JsValue),
   this: JsValue,
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
@@ -831,7 +827,7 @@ pub fn shadow_realm_dispatch(
         this,
         fn_proto,
         state,
-        execute_inner,
+        run_to_completion,
         new_state_fn,
       )
     value.ShadowRealmImportValue(fn_proto:) ->
@@ -1250,7 +1246,7 @@ fn shadow_realm_evaluate(
   this: JsValue,
   fn_proto: Ref,
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // The method's own realm is the spec's callerRealm: it brands every error
@@ -1275,7 +1271,7 @@ fn shadow_realm_evaluate(
             caller_realm_ref,
             caller_builtins,
             state,
-            execute_inner,
+            run_to_completion,
             new_state_fn,
           )
         _ ->
@@ -1297,7 +1293,7 @@ fn do_shadow_realm_evaluate(
   caller_realm_ref: Ref,
   caller_builtins: Builtins,
   state: State(host),
-  execute_inner: ExecuteInnerFn(host),
+  run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case read_realm(state, realm_ref) {
@@ -1360,7 +1356,7 @@ fn do_shadow_realm_evaluate(
             template_objects: state.ctx.template_objects,
           ),
         )
-      case execute_inner(eval_state) {
+      case run_to_completion(eval_state) {
         Error(vm_err) ->
           state.type_error(
             state,

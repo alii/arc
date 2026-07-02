@@ -2633,7 +2633,7 @@ pub fn dispatch_native(
   args: List(JsValue),
   this: JsValue,
   state: State(host),
-  run_to_completion: realm.ExecuteInnerFn(host),
+  run_to_completion: realm.RunToCompletionFn(host),
   new_state_fn: realm.NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
