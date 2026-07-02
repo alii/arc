@@ -278,24 +278,34 @@ pub type ScopeTree {
   )
 }
 
-/// Result of `lookup(tree, scope_id, name)` — what the emitter should emit
-/// for a variable reference.
+/// The non-`with` ("static") half of a `Resolution` — where a variable
+/// reference lands once every crossed `with` object has been probed and
+/// missed.
 ///
 /// `Local`: a slot in the current function's frame.
-/// `WithChain`: the lookup crossed one or more `with` scopes BEFORE reaching
-/// `fallback`. `crossed_slots` lists the with-object slots (innermost first)
-/// as `#(slot, is_boxed)`; the emitter must emit one IrWith* probe per entry,
-/// then `fallback` for the miss case. `fallback` is never itself a WithChain.
 ///
 /// `origin_kind` on `Local` is the binding's `origin_kind_for_capture` — for
 /// a CaptureBinding it is the parent declaration's kind (Const / FnName /
 /// Let / …), so the emitter's static-put can route a captured-const write to
 /// IrThrowConstAssign without a second tree walk.
-pub type Resolution {
+pub type Direct {
   Local(slot: Int, boxed: Bool, kind: BindingKind, origin_kind: BindingKind)
   Global(name: String)
   EvalEnv(name: String)
-  WithChain(crossed_slots: List(#(Int, Bool)), fallback: Resolution)
+}
+
+/// Result of `lookup(tree, scope_id, name)` — what the emitter should emit
+/// for a variable reference.
+///
+/// `Plain`: no `with` scope was crossed — emit `direct` as-is.
+/// `WithChain`: the lookup crossed one or more `with` scopes BEFORE reaching
+/// `fallback`. `crossed_slots` lists the with-object slots (innermost first)
+/// as `#(slot, is_boxed)`; the emitter must emit one IrWith* probe per entry,
+/// then `fallback` for the miss case. `fallback` being a `Direct` (not a
+/// `Resolution`) makes a nested WithChain unrepresentable by construction.
+pub type Resolution {
+  Plain(direct: Direct)
+  WithChain(crossed_slots: List(#(Int, Bool)), fallback: Direct)
 }
 
 /// Inputs to `analyze` that come from OUTSIDE the AST — the calling
@@ -2096,10 +2106,10 @@ fn do_lookup(
 
 fn wrap_with_chain(
   crossed: List(#(Int, Bool)),
-  fallback: Resolution,
+  fallback: Direct,
 ) -> Resolution {
   case crossed {
-    [] -> fallback
+    [] -> Plain(fallback)
     _ -> WithChain(crossed_slots: list.reverse(crossed), fallback:)
   }
 }

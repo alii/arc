@@ -1659,9 +1659,6 @@ fn emit_var_init(e: Emitter, name: String) -> Emitter {
       |> emit_ir(IrPutLocal(slot))
     scope.Global(name:) -> emit_ir(e, IrPutGlobal(name))
     scope.EvalEnv(name:) -> emit_ir(e, opcode.IrPutEvalVar(name))
-    // `fallback` of split_with_chain is never a WithChain (the wrapper
-    // type is consumed by the split).
-    scope.WithChain(..) -> e
   }
 }
 
@@ -1677,7 +1674,6 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
         emit_slot_get(e, slot, boxed) |> emit_ir(IrTypeOf)
       scope.Global(name:) -> emit_ir(e, opcode.IrTypeofGlobal(name))
       scope.EvalEnv(name:) -> emit_ir(e, opcode.IrTypeofEvalVar(name))
-      scope.WithChain(..) -> e
     }
   }
   case crossed {
@@ -1825,37 +1821,32 @@ fn resolve(e: Emitter, name: String) -> scope.Resolution {
 }
 
 /// Split a `scope.Resolution` into the with-object probe slots crossed
-/// (innermost first) and the non-with fallback. `scope.lookup` already
-/// guarantees `WithChain.fallback` is never itself a `WithChain`, so the
-/// returned fallback is always Local/Global/EvalEnv. Lets the emit_var_*
-/// helpers reuse `emit_with_chain` unchanged.
+/// (innermost first) and the non-with `scope.Direct` fallback. Lets the
+/// emit_var_* helpers reuse `emit_with_chain` unchanged.
 fn split_with_chain(
   res: scope.Resolution,
-) -> #(List(#(Int, Bool)), scope.Resolution) {
+) -> #(List(#(Int, Bool)), scope.Direct) {
   case res {
     scope.WithChain(crossed_slots:, fallback:) -> #(crossed_slots, fallback)
-    scope.Local(..) | scope.Global(_) | scope.EvalEnv(_) -> #([], res)
+    scope.Plain(direct) -> #([], direct)
   }
 }
 
 /// The non-with ("static") read of a resolved binding: local/boxed slot, or
-/// global/eval-env fallthrough. `res` is the `fallback` half of
-/// `split_with_chain` — never a `WithChain`.
-fn emit_static_get(e: Emitter, res: scope.Resolution) -> Emitter {
+/// global/eval-env fallthrough.
+fn emit_static_get(e: Emitter, res: scope.Direct) -> Emitter {
   case res {
     scope.Local(slot:, boxed:, ..) -> emit_slot_get(e, slot, boxed)
     scope.Global(name:) -> emit_ir(e, opcode.IrGetGlobal(name))
     scope.EvalEnv(name:) -> emit_ir(e, opcode.IrGetEvalVar(name))
-    scope.WithChain(..) -> e
   }
 }
 
 /// The non-with ("static") store to a resolved binding. §9.1.1.1.5
 /// SetMutableBinding step 6 — const bindings are always strict (§14.3.1.3),
 /// so reassignment unconditionally throws TypeError. RHS is already on the
-/// stack; throw discards it via unwind. `res` is the `fallback` half of
-/// `split_with_chain` — never a `WithChain`.
-fn emit_static_put(e: Emitter, res: scope.Resolution, name: String) -> Emitter {
+/// stack; throw discards it via unwind.
+fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
   case res {
     // Immutable-origin writes (§9.1.1.1.5 SetMutableBinding). For every
     // non-capture binding `origin_kind == kind` (scope.add_binding), so
@@ -1890,7 +1881,6 @@ fn emit_static_put(e: Emitter, res: scope.Resolution, name: String) -> Emitter {
     scope.Local(slot:, boxed:, ..) -> emit_slot_put(e, slot, boxed)
     scope.Global(name:) -> emit_ir(e, IrPutGlobal(name))
     scope.EvalEnv(name:) -> emit_ir(e, opcode.IrPutEvalVar(name))
-    scope.WithChain(..) -> e
   }
 }
 
@@ -2926,7 +2916,7 @@ fn emit_body_param_copies(
     && !list.contains(function_names, bname)
   use <- bool.guard(!copies, e)
   case scope.lookup(e.scope_tree, fn_scope_id, bname) {
-    scope.Local(slot: src_slot, boxed: src_boxed, ..) -> {
+    scope.Plain(scope.Local(slot: src_slot, boxed: src_boxed, ..)) -> {
       // The copy IS a read of the parameter-scope `arguments` binding, so
       // it must trigger the IrCreateArguments splice like any other read.
       let e = track_arguments_ref(e, bname)
@@ -2936,7 +2926,9 @@ fn emit_body_param_copies(
     // Degenerate: the analyzer registered no Function-scope binding for
     // the name (only possible for `arguments` in exotic shapes). Nothing
     // to copy from — the prologue's undefined seed stands.
-    scope.Global(_) | scope.EvalEnv(_) | scope.WithChain(..) -> e
+    scope.Plain(scope.Global(_))
+    | scope.Plain(scope.EvalEnv(_))
+    | scope.WithChain(..) -> e
   }
 }
 
@@ -3285,10 +3277,11 @@ fn compile_function_body(
   // it, Global/EvalEnv as a fallthrough otherwise (degenerate but kept for
   // the type's sake).
   let put_args = case scope.lookup(e.scope_tree, e.fn_scope, "arguments") {
-    scope.Local(slot:, boxed: True, ..) -> IrPutBoxed(slot)
-    scope.Local(slot:, boxed: False, ..) -> IrPutLocal(slot)
-    scope.Global(_) | scope.EvalEnv(_) | scope.WithChain(..) ->
-      IrPutGlobal("arguments")
+    scope.Plain(scope.Local(slot:, boxed: True, ..)) -> IrPutBoxed(slot)
+    scope.Plain(scope.Local(slot:, boxed: False, ..)) -> IrPutLocal(slot)
+    scope.Plain(scope.Global(_))
+    | scope.Plain(scope.EvalEnv(_))
+    | scope.WithChain(..) -> IrPutGlobal("arguments")
   }
   // The `arguments` slot was already seeded (push undef + PutLocal +
   // optional BoxLocal) by `emit_binding_prologue` at `enter_root_scope` —
