@@ -118,7 +118,7 @@ fn json_parse(
 type JsonValue {
   JsonNull
   JsonBool(Bool)
-  JsonNumber(Float)
+  JsonNumber(value.JsNum)
   JsonString(String)
   JsonArray(List(JsonValue))
   JsonObject(List(#(String, JsonValue)))
@@ -359,11 +359,16 @@ fn count_number_bytes(bytes: BitArray, n: Int) -> Int {
   }
 }
 
-/// Parse a collected number string into a Float.
-fn parse_json_number_string(s: String) -> Result(Float, Nil) {
-  // Try parsing as float first, then fall back to int parse → to_float
+/// Parse a collected number string into a JsNum.
+/// The integer fallback must go through `value.num_from_int`: a bare
+/// `int.to_float` on an arbitrary-precision int (e.g. a 400-digit JSON
+/// integer) raises an uncatchable `erlang:float/1` badarg. num_from_int
+/// saturates out-of-range magnitudes to ±Infinity instead.
+fn parse_json_number_string(s: String) -> Result(value.JsNum, Nil) {
+  // Try parsing as float first, then fall back to int parse → num_from_int
   gleam_stdlib_parse_float(s)
-  |> result.try_recover(fn(_) { int.parse(s) |> result.map(int.to_float) })
+  |> result.map(Finite)
+  |> result.try_recover(fn(_) { int.parse(s) |> result.map(value.num_from_int) })
 }
 
 @external(erlang, "gleam_stdlib", "parse_float")
@@ -465,7 +470,7 @@ fn materialize(
   case val {
     JsonNull -> #(h, JsNull)
     JsonBool(b_val) -> #(h, JsBool(b_val))
-    JsonNumber(n) -> #(h, JsNumber(Finite(n)))
+    JsonNumber(n) -> #(h, JsNumber(n))
     JsonString(s) -> #(h, JsString(s))
     JsonArray(items) -> {
       let #(h, js_items) = materialize_list(h, b, items, [])

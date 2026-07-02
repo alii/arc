@@ -4076,8 +4076,9 @@ fn to_intl_number(
   v: JsValue,
 ) -> Result(#(value.JsNum, State(host)), Thrown(host)) {
   case v {
-    value.JsBigInt(value.BigInt(n)) ->
-      Ok(#(value.Finite(int.to_float(n)), state))
+    // num_from_int saturates out-of-range BigInts to ±Infinity; a bare
+    // int.to_float would badarg (and kill the VM) on e.g. 10n ** 400n.
+    value.JsBigInt(value.BigInt(n)) -> Ok(#(value.num_from_int(n), state))
     _ -> coerce.js_to_number(state, v)
   }
 }
@@ -6261,8 +6262,21 @@ fn take_designator(
 }
 
 fn parse_duration_number(s: String) -> Result(Float, Nil) {
+  // The integer fallback must go through value.num_from_int: a bare
+  // int.to_float on an arbitrary-precision int (e.g. a 400-digit duration
+  // component) raises an uncatchable erlang:float/1 badarg. Out-of-range
+  // values saturate to ±Infinity, which is not a valid duration field, so
+  // treat them as a parse failure (the caller surfaces a RangeError).
   float.parse(s)
-  |> result.lazy_or(fn() { int.parse(s) |> result.map(int.to_float) })
+  |> result.lazy_or(fn() {
+    int.parse(s)
+    |> result.try(fn(n) {
+      case value.num_from_int(n) {
+        value.Finite(f) -> Ok(f)
+        _ -> Error(Nil)
+      }
+    })
+  })
 }
 
 /// PartitionDurationFormatPattern — mirrors ECMA-402 Intl.DurationFormat §1.1.7.

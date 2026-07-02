@@ -96,10 +96,10 @@ pub fn eval_overflowing_literal_test() {
 // ----------------------------------------------------------------------------
 // ToNumber / parseInt / parseFloat on beyond-double-range digit strings
 //
-// §7.1.4.1 / §19.2.5: these must yield Infinity. Before every Int→JsNum
-// conversion was routed through value.num_from_int, they called
-// int.to_float on a >1.8e308 bignum, which is an uncaught erlang badarg
-// (erlang:float/1) that killed the whole VM.
+// §7.1.4.1 / §19.2.5: these must yield Infinity. These parse sites used to
+// call int.to_float on a >1.8e308 bignum, which is an uncaught erlang badarg
+// (erlang:float/1) that killed the whole VM; they now route the Int→JsNum
+// conversion through value.num_from_int, which saturates to ±Infinity.
 // ----------------------------------------------------------------------------
 
 pub fn eval_number_of_huge_decimal_string_is_infinity_test() {
@@ -122,6 +122,37 @@ pub fn eval_parse_int_huge_digit_string_is_infinity_test() {
 pub fn eval_parse_float_huge_digit_string_is_infinity_test() {
   assert eval("parseFloat('9'.repeat(400))") == JsNumber(Infinity)
   assert eval("parseFloat('-' + '9'.repeat(400))") == JsNumber(NegInfinity)
+}
+
+// Same bug class in JSON.parse: a dot-less digit string is rejected by the
+// float parser, so it fell into `int.parse |> int.to_float` on a bignum.
+// Per §25.5.1 the mathematical value rounds to +Infinity.
+pub fn eval_json_parse_huge_integer_is_infinity_test() {
+  assert eval("JSON.parse('1' + '0'.repeat(400))") == JsNumber(Infinity)
+  assert eval("JSON.parse('-' + '9'.repeat(400))") == JsNumber(NegInfinity)
+}
+
+// Same bug class in Intl.DurationFormat's ISO-8601 duration-string parser: an
+// unbounded digit run hit the bare int.to_float fallback. A beyond-range
+// field value is not a valid duration, so it must throw a RangeError — not
+// kill the VM.
+pub fn eval_intl_duration_format_huge_component_throws_range_error_test() {
+  let src =
+    "try { new Intl.DurationFormat('en').format('PT' + '9'.repeat(400) + 'S') }"
+    <> " catch (e) { e.name }"
+  assert eval(src) == JsString("RangeError")
+}
+
+// Same bug class in Intl.NumberFormat's BigInt arm (ToIntlMathematicalValue,
+// approximated with ToNumber). KNOWN SPEC DEVIATION: real engines format the
+// exact mathematical value of the BigInt; we saturate a beyond-double BigInt
+// to Infinity (like the Number(bigint) coercion does). That loses precision
+// but must not crash the VM the way the previous bare int.to_float did.
+pub fn eval_intl_number_format_huge_bigint_test() {
+  let src =
+    "var nf = new Intl.NumberFormat('en');"
+    <> " nf.format(10n ** 400n) === nf.format(Infinity)"
+  assert eval(src) == value.JsBool(True)
 }
 
 // ----------------------------------------------------------------------------
