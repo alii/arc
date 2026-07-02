@@ -64,3 +64,23 @@ pub fn escape_unescape_roundtrip_test() {
   assert eval_outcome("unescape(escape('a b\\u00e9\\u4e2d'))")
     == Returned(JsString("a bé中"))
 }
+
+/// B.2.1.1: escape works on UTF-16 code units, so a supplementary-plane
+/// code point becomes two `%uXXXX` escapes (never five hex digits), and
+/// B.2.1.2 unescape reassembles the surrogate pair.
+pub fn escape_astral_emits_surrogate_pair_test() {
+  assert eval_outcome("escape('\u{1F600}')")
+    == Returned(JsString("%uD83D%uDE00"))
+}
+
+pub fn unescape_astral_roundtrip_test() {
+  assert eval_outcome("unescape(escape('\u{1F600}')) === '\u{1F600}'")
+    == Returned(JsBool(True))
+}
+
+/// B.2.1.2: only hex DIGITS advance an escape sequence. A leading sign —
+/// which Erlang's integer parser accepts — must leave the text untouched.
+pub fn unescape_rejects_signed_hex_test() {
+  assert eval_outcome("unescape('%+41') + unescape('%u+0061')")
+    == Returned(JsString("%+41%u+0061"))
+}
