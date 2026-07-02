@@ -7473,6 +7473,7 @@ fn parse_template_parts(
   // Save outer cursor-ish state we are about to overwrite per substitution.
   let outer_tokens = p.tokens
   let outer_bytes = p.bytes
+  let outer_allow_in = p.allow_in
   let outer_assignable = p.last_expr_assignable
   let outer_is_assignment = p.last_expr_is_assignment
   // Parse each expression source, threading P through so accumulated
@@ -7490,11 +7491,17 @@ fn parse_template_parts(
             // parse_regex_literal re-scans regex bodies from `bytes` using
             // token-relative byte offsets, so `bytes` must match the source
             // these tokens were lexed from.
+            // A substitution is always Expression[+In] (ECMA-262 13.2.8),
+            // even when the template sits in a for-head initializer where
+            // the enclosing context has [~In]. Without this, `in` inside
+            // `${...}` would be left unconsumed and trip the trailing-token
+            // check below.
             let sub_p =
               P(
                 ..p,
                 tokens: tokens,
                 bytes: bit_array.from_string(src),
+                allow_in: True,
                 last_expr_assignable: False,
                 last_expr_is_assignment: False,
               )
@@ -7519,6 +7526,7 @@ fn parse_template_parts(
       ..p,
       tokens: outer_tokens,
       bytes: outer_bytes,
+      allow_in: outer_allow_in,
       last_expr_assignable: outer_assignable,
       last_expr_is_assignment: outer_is_assignment,
     )

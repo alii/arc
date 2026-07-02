@@ -70,3 +70,41 @@ pub fn from_entries_duplicate_key_keeps_position_test() {
     )
     == JsString("a,b|32")
 }
+
+pub fn from_entries_ignores_object_prototype_get_pollution_test() {
+  // §7.3.5 CreateDataProperty builds the Property Descriptor RECORD directly
+  // and never runs ToPropertyDescriptor over a descriptor OBJECT, so a plain
+  // `get` on %Object.prototype% (legal user code — MooTools-era mixins) must
+  // be invisible. A funnel that materializes a real POJO descriptor and
+  // re-parses it inherits `get` and throws "Getter must be a function".
+  assert eval_js(
+      "Object.prototype.get = 42;
+       var r = JSON.stringify(Object.fromEntries([['a', 1]]));
+       delete Object.prototype.get;
+       r;",
+    )
+    == JsString("{\"a\":1}")
+}
+
+pub fn from_entries_ignores_object_prototype_set_pollution_test() {
+  // Same as above for an inherited callable `set` — must not be seen as an
+  // accessor field on the internal data-property descriptor.
+  assert eval_js(
+      "Object.prototype.set = function () {};
+       var r = JSON.stringify(Object.fromEntries([['a', 1]]));
+       delete Object.prototype.set;
+       r;",
+    )
+    == JsString("{\"a\":1}")
+}
+
+pub fn group_by_ignores_object_prototype_get_pollution_test() {
+  // Object.groupBy funnels through the same CreateDataPropertyOrThrow.
+  assert eval_js(
+      "Object.prototype.get = function () { throw new Error('boom'); };
+       var r = JSON.stringify(Object.groupBy([1, 2], function () { return 'k'; }));
+       delete Object.prototype.get;
+       r;",
+    )
+    == JsString("{\"k\":[1,2]}")
+}

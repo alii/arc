@@ -4719,15 +4719,39 @@ pub fn create_data_property_or_throw(
   val: JsValue,
   cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(heap, desc_ref) =
-    common.alloc_pojo(state.heap, state.builtins.object.prototype, [
-      #("value", value.data_property(val)),
-      #("writable", value.data_property(JsBool(True))),
-      #("enumerable", value.data_property(JsBool(True))),
-      #("configurable", value.data_property(JsBool(True))),
-    ])
-  // Trap-aware [[DefineOwnProperty]]; its ToPropertyKey handles `key_val`.
-  case define_property_bool(State(..state, heap:), ref, key_val, desc_ref) {
+  // §7.3.5 builds the Property Descriptor RECORD directly — it never runs
+  // ToPropertyDescriptor over a descriptor object. Materializing a real JS
+  // POJO here and re-parsing it would (a) make the internal descriptor
+  // observably inherit `get`/`set` from a user-extended %Object.prototype%
+  // (breaking Object.fromEntries / Object.groupBy under a plain
+  // `Object.prototype.get = ...`), and (b) cost a heap allocation plus a
+  // 6-field re-parse per created property inside builtin loops.
+  let parsed =
+    ParsedDesc(
+      get: None,
+      set: None,
+      value: Some(val),
+      writable: Some(True),
+      enumerable: Some(True),
+      configurable: Some(True),
+    )
+  let defined = {
+    use #(dkey, state) <- result.try(to_define_key(state, key_val))
+    // Trap-aware [[DefineOwnProperty]] on the already-parsed record —
+    // the same tail define_property_bool dispatches to after parsing.
+    case object.as_proxy(state.heap, ref) {
+      Some(#(target, handler)) ->
+        proxy_define_own_property(state, target, handler, dkey, parsed)
+      None ->
+        case define_parsed(state, ref, dkey, parsed) {
+          Ok(state) -> Ok(#(state, True))
+          // [[DefineOwnProperty]] validated to false → false (not rethrown).
+          Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
+          Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
+        }
+    }
+  }
+  case defined {
     Ok(#(state, True)) -> cont(state)
     // §7.3.7 step 3: success is false → throw a TypeError exception.
     Ok(#(state, False)) ->
