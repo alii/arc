@@ -296,11 +296,26 @@ pub type FieldInitMode {
 /// classes in one parent function don't share a box.
 const class_fields_init = ast_util.class_fields_init
 
-/// Compile error from the emitter.
+/// Compile error from the emitter. `arc/compiler` re-exports this as
+/// `CompileError`; `compiler.error_message` is the single renderer.
+///
+/// The three string-carrying variants are deliberately distinct so callers
+/// (and readers) can tell "your code is illegal" from "the engine can't do
+/// this yet" from "the parser and emitter disagree":
+///   - `EarlySyntaxError` — a spec-mandated early error the emitter (not the
+///     parser) detects. The message is surfaced VERBATIM as a JS SyntaxError
+///     message, so write it spec/engine-shaped ("Unexpected private name #x").
+///   - `UnsupportedFeature` — a real JavaScript construct this engine does
+///     not implement yet. Rendered as "unsupported: <feature>".
+///   - `Internal` — an AST shape the parser guarantees can never reach the
+///     emitter. Reaching one is an engine bug, never a user error. Rendered
+///     as "internal compiler error: <context>".
 pub type EmitError {
   BreakOutsideLoop
   ContinueOutsideLoop
-  Unsupported(description: String)
+  EarlySyntaxError(message: String)
+  UnsupportedFeature(feature: String)
+  Internal(context: String)
 }
 
 // ============================================================================
@@ -2438,7 +2453,10 @@ fn emit_lvalue_get2(
       use e <- result.map(emit_expr(e, key))
       #(emit_ir(e, IrGetElem2), LvElem)
     }
-    _ -> Error(Unsupported("lvalue"))
+    // Only MemberExpressions reach here (update-expression / compound-
+    // assignment callers match on `ast.MemberExpression(..) as member`), and
+    // every member shape is covered above.
+    _ -> Error(Internal("emit_lvalue_get2: non-member lvalue"))
   }
 }
 
@@ -3134,8 +3152,7 @@ fn compile_function_body(
   // var-declares a name already bound in the parameter scope. Arrows have
   // no own `arguments` binding (argumentsObjectNeeded is false), so only
   // their parameter names participate.
-  let declared_param_names =
-    list.flat_map(params, ast.pattern_bound_names)
+  let declared_param_names = list.flat_map(params, ast.pattern_bound_names)
   let param_scope_names = case is_arrow {
     True -> declared_param_names
     False -> ["arguments", ..declared_param_names]
@@ -3793,7 +3810,10 @@ fn emit_stmt_inner(
           // compile_class leaves [ctor] on stack; init pops it
           init_lex(e, n)
         }
-        None -> Error(Unsupported("anonymous class declaration"))
+        // Statement-position `class` requires a name (the parser's
+        // name_required flag); anonymous `export default class {}` is
+        // rewritten to a ClassExpression before it reaches the emitter.
+        None -> Error(Internal("anonymous class declaration"))
       }
     }
 
@@ -4044,7 +4064,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // The `#x in obj` BinaryExpression arm below does NOT recurse on its LHS,
     // so this only catches genuinely-bare `#x` used as a value.
     ast.Identifier(name: "#" <> rest, ..) ->
-      Error(Unsupported("Unexpected private name #" <> rest))
+      Error(EarlySyntaxError("Unexpected private name #" <> rest))
     ast.Identifier(name:, ..) -> Ok(emit_var_get(e, name))
 
     // Binary expressions
@@ -4299,7 +4319,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           use e <- result.map(emit_expr(e, right))
           emit_ir(e, IrBinOp(bin_kind))
         }
-        Error(_) -> Error(Unsupported("assignment op"))
+        // This arm only matches compound operators; plain `=` and the
+        // logical assignments have their own arms above/below.
+        Error(Nil) ->
+          Error(Internal("non-compound operator in compound identifier assign"))
       }
     }
 
@@ -4355,7 +4378,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           use e <- result.map(emit_expr(e, right))
           emit_ir(e, IrBinOp(bin_kind)) |> emit_lvalue_put(shape)
         }
-        Error(Nil) -> Error(Unsupported("assignment op"))
+        // As above: only compound operators reach this arm.
+        Error(Nil) ->
+          Error(Internal("non-compound operator in compound member assign"))
       }
 
     // Destructuring assignment expression: `[a, x.y] = rhs` or `({a, b} = rhs)`.
@@ -4610,7 +4635,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // §13.3.13 import.meta — the per-module meta object is not plumbed
     // through the runtime yet, so this is a typed unsupported-feature error
     // rather than a silent miscompile.
-    ast.MetaProperty(_, ast.ImportMeta) -> Error(Unsupported("import.meta"))
+    ast.MetaProperty(_, ast.ImportMeta) ->
+      Error(UnsupportedFeature("import.meta"))
 
     // New expression: new Foo(args). CallConstructor's stack contract is
     // [args, new_target, ctor] — for plain `new`, newTarget == ctor, so Dup.
@@ -4745,7 +4771,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       Ok(emit_ir(e, opcode.IrGetTemplateObject(site, quasis)))
     }
 
-    _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
+    _ ->
+      Error(UnsupportedFeature("expression: " <> string_inspect_expr_kind(expr)))
   }
 }
 
@@ -5785,7 +5812,10 @@ fn emit_for_lhs_bind(
       case declarators {
         [ast.VariableDeclarator(pattern, _)] ->
           emit_destructuring_bind(e, pattern, binding_kind)
-        _ -> Error(Unsupported("for-in/of with multiple declarators"))
+        // The grammar allows exactly one ForBinding in a for-in/of head; a
+        // second declarator forces the parser down the classic `for(;;)`
+        // path, so this arm is unreachable from parser output.
+        _ -> Error(Internal("for-in/of head with multiple declarators"))
       }
     }
     ast.ForInitPattern(pattern) ->
@@ -6134,10 +6164,11 @@ fn emit_destructuring_assign(
       emit_ir(e, IrPop)
     }
 
-    _, other ->
-      Error(Unsupported(
-        "destructuring assignment target: " <> string_inspect_expr_kind(other),
-      ))
+    // §13.15.5 early error: DestructuringAssignmentTargetType must be
+    // simple. The parser catches most of these, but some — e.g. an object
+    // rest with a non-target argument, `({...5} = {})` — only get shape-
+    // checked here, so report them with the parser's own message.
+    _, _ -> Error(EarlySyntaxError("Invalid destructuring assignment target"))
   }
 }
 
@@ -6339,7 +6370,7 @@ fn emit_single_object_assign_prop(
     ast.Property(kind: ast.Get, ..)
     | ast.Property(kind: ast.Set, ..)
     | ast.Property(method: True, ..) ->
-      Error(Unsupported("accessor/method in destructuring assignment"))
+      Error(Internal("accessor/method in destructuring assignment"))
 
     // {a, b, ...target} — §13.15.5.4 RestDestructuringAssignmentEvaluation.
     // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → assign.
@@ -6517,7 +6548,9 @@ fn emit_elem_keyed_member_default(
       let e = emit_unrot3(e)
       #(emit_ir(e, IrGetElem), emit_ir(_, IrPutElem))
     }
-    _, _ -> Error(Unsupported("keyed member default target"))
+    // Only MemberExpression targets reach here, and the two arms above cover
+    // static and computed keys.
+    _, _ -> Error(Internal("keyed member default target"))
   })
   use e <- result.map(emit_default_if_undefined(e, default_expr, None))
   emit_ir(put(e), IrPop)
@@ -6728,9 +6761,9 @@ fn emit_logical_assign(
       |> result.map(emit_ir(_, IrLabel(end_label)))
     }
     // super.x &&= v — needs GetSuperValue2/PutSuperValue stack juggling on
-    // the short-circuit path; keep the pre-existing unsupported error.
+    // the short-circuit path; a genuine engine gap, not a user error.
     _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) ->
-      Error(Unsupported("assignment op"))
+      Error(UnsupportedFeature("logical assignment to a super property"))
     Some(#(obj, prop)), _ -> {
       use e <- result.try(emit_expr(e, obj))
       let e = emit_get_field2(e, prop)
@@ -6742,7 +6775,9 @@ fn emit_logical_assign(
       let e = emit_ir(e, IrGetElem2)
       emit_logical_assign_member(e, op, right, emit_ir(_, IrPutElem), 2)
     }
-    _, _ -> Error(Unsupported("assignment op"))
+    // The parser rejects non-simple logical-assignment targets, so this
+    // should only ever be a target shape the emitter can't lower yet.
+    _, _ -> Error(UnsupportedFeature("logical assignment target"))
   }
 }
 
@@ -7241,7 +7276,8 @@ fn emit_class_methods(
           emit_ir(e, IrDefineMethodComputed)
       }
     }
-    _ -> Error(Unsupported("class method with non-function value"))
+    // The parser only produces function values for class methods.
+    _ -> Error(Internal("class method with non-function value"))
   }
 }
 

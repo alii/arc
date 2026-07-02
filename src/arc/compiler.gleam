@@ -29,29 +29,25 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 
-/// Compilation errors.
-pub type CompileError {
-  BreakOutsideLoop
-  ContinueOutsideLoop
-  Unsupported(description: String)
-}
+/// Compilation errors. This is `emit.EmitError` — the emitter's error sum is
+/// THE compile-error type; there is deliberately no mirror type to keep in
+/// sync. See `emit.EmitError` for what each variant means.
+pub type CompileError =
+  emit.EmitError
 
 /// Canonical human-readable rendering of a `CompileError`. Every layer that
 /// surfaces a compile error to a user (CLI, REPL, engine, module loader,
 /// realm `eval`) must go through this — mirrors `parser.parse_error_to_string`.
+///
+/// `EarlySyntaxError` is rendered VERBATIM: the message becomes the thrown
+/// SyntaxError's message with no "unsupported:" (or any other) prefix.
 pub fn error_message(err: CompileError) -> String {
   case err {
-    BreakOutsideLoop -> "break outside loop"
-    ContinueOutsideLoop -> "continue outside loop"
-    Unsupported(desc) -> "unsupported: " <> desc
-  }
-}
-
-fn map_emit_error(error: emit.EmitError) -> CompileError {
-  case error {
-    emit.BreakOutsideLoop -> BreakOutsideLoop
-    emit.ContinueOutsideLoop -> ContinueOutsideLoop
-    emit.Unsupported(desc) -> Unsupported(desc)
+    emit.BreakOutsideLoop -> "break outside loop"
+    emit.ContinueOutsideLoop -> "continue outside loop"
+    emit.EarlySyntaxError(message:) -> message
+    emit.UnsupportedFeature(feature:) -> "unsupported: " <> feature
+    emit.Internal(context:) -> "internal compiler error: " <> context
   }
 }
 
@@ -134,7 +130,7 @@ pub fn compile_module(
   CompileError,
 ) {
   case program {
-    ast.Script(_) -> Error(Unsupported("compile_module called on Script"))
+    ast.Script(_) -> Error(emit.Internal("compile_module called on Script"))
     ast.Module(body) -> {
       let import_locals = import_local_names(summary.imports)
       let forced_box = local_export_names(summary.exports)
@@ -264,7 +260,7 @@ fn compile_module_with_scope(
   // locals tuple and IrPutLocal on a scratch slot crashes with `badarg
   // setelement`. Shadow `tree` with the emitter's copy.
   use #(code, constants, children, is_strict, hoisted_funcs, tree) <- result.map(
-    result.map_error(emit.emit_module(items, tree), map_emit_error),
+    emit.emit_module(items, tree),
   )
   let info = scope.function_info(tree, scope.root_scope_id)
   let child_templates = compile_children(children, tree, scope.root_scope_id)
@@ -289,7 +285,8 @@ pub fn compile_repl(
 ) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, sb, scope.LexGlobal)
-    ast.Module(_) -> Error(Unsupported("modules not supported in REPL"))
+    // REPL input is always parsed with `parser.Script`.
+    ast.Module(_) -> Error(emit.Internal("compile_repl called on a Module"))
   }
 }
 
@@ -302,7 +299,8 @@ pub fn compile_eval(
 ) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, sb, scope.LexLocal)
-    ast.Module(_) -> Error(Unsupported("modules not supported in eval"))
+    // Eval source is always parsed with `parser.Script`.
+    ast.Module(_) -> Error(emit.Internal("compile_eval called on a Module"))
   }
 }
 
@@ -330,7 +328,9 @@ pub fn compile_eval_direct(
   outer_private_names: List(String),
 ) -> Result(FuncTemplate, CompileError) {
   case program {
-    ast.Module(_) -> Error(Unsupported("modules not supported in eval"))
+    // Direct-eval source is always parsed with `parser.Script`.
+    ast.Module(_) ->
+      Error(emit.Internal("compile_eval_direct called on a Module"))
     ast.Script(body) -> {
       // Effective strictness for §19.2.1.1: caller's strictness OR a
       // "use strict" directive in the eval source itself. Computed up
@@ -398,7 +398,8 @@ pub fn compile_eval_direct(
           caller_is_strict
           && list.any(dict.values(tree.scopes), fn(s) { s.kind == scope.With })
         {
-          True -> Error(Unsupported("'with' not allowed in strict mode"))
+          True ->
+            Error(emit.EarlySyntaxError("'with' not allowed in strict mode"))
           False -> Ok(Nil)
         },
       )
@@ -415,15 +416,12 @@ pub fn compile_eval_direct(
       // Shadow `tree` with the emitter's post-emission copy — scratch
       // slots (alloc_scratch) bumped local_count there.
       use #(code, constants, children, strict, tree) <- result.try(
-        result.map_error(
-          emit.emit_eval_direct(
-            body,
-            tree,
-            caller_is_strict,
-            param_scope_names,
-            outer_private_names,
-          ),
-          map_emit_error,
+        emit.emit_eval_direct(
+          body,
+          tree,
+          caller_is_strict,
+          param_scope_names,
+          outer_private_names,
         ),
       )
       // §19.2.1.1 PerformEval → EvalDeclarationInstantiation step 3.d:
@@ -493,7 +491,7 @@ fn compile_script(
   // `function_info` from the analyzer's tree would under-size the
   // runtime locals tuple. Shadow `tree`.
   use #(code, constants, children, is_strict, tree) <- result.map(
-    result.map_error(emit.emit_program(stmts, tree), map_emit_error),
+    emit.emit_program(stmts, tree),
   )
   let info = scope.function_info(tree, scope.root_scope_id)
   // Phase 2 already produced concrete IrOps for every nested function;
@@ -650,8 +648,8 @@ fn check_param_scope_var_conflict(
         |> list.find(list.contains(param_scope_names, _))
       case conflict {
         Ok(name) ->
-          Error(Unsupported(
-            "SyntaxError: variable '"
+          Error(emit.EarlySyntaxError(
+            "variable '"
             <> name
             <> "' declared by direct eval conflicts with a parameter-scope binding",
           ))

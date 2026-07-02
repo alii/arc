@@ -30,12 +30,7 @@ fn run_js(
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(program, sb)) ->
       case compiler.compile(program, sb) {
-        Error(compiler.Unsupported(desc)) ->
-          Error("compile error: unsupported " <> desc)
-        Error(compiler.BreakOutsideLoop) ->
-          Error("compile error: break outside loop")
-        Error(compiler.ContinueOutsideLoop) ->
-          Error("compile error: continue outside loop")
+        Error(err) -> Error("compile error: " <> compiler.error_message(err))
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
@@ -7134,12 +7129,7 @@ fn eval_repl_line(
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(program, sb)) ->
       case compiler.compile_repl(program, sb) {
-        Error(compiler.Unsupported(desc)) ->
-          Error("compile error: unsupported " <> desc)
-        Error(compiler.BreakOutsideLoop) ->
-          Error("compile error: break outside loop")
-        Error(compiler.ContinueOutsideLoop) ->
-          Error("compile error: continue outside loop")
+        Error(err) -> Error("compile error: " <> compiler.error_message(err))
         Ok(template) ->
           case entry.run_and_drain_repl(template, h, b, env) {
             Ok(#(Ok(val), new_h, new_env)) -> Ok(#(val, new_h, new_env))
