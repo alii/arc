@@ -25,8 +25,24 @@ permissions:
   contents: write
 
 jobs:
-  test262:
+  # The full suite is ~2 CPU-hours (~30 min on one 4-vCPU runner), so it is
+  # fanned out across parallel jobs. Each shard runs a disjoint slice of the
+  # test files (TEST262_SHARD hash-partitions them) on its own runner, with
+  # exactly the same per-machine worker count and memory profile as a single
+  # full run, and uploads the pass list + result counts for its slice.
+  shard:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # The shard count (8) is written out in three places that must agree:
+      # this list, the /8 in TEST262_SHARD below, and the count check in the
+      # merge job. Every mismatch fails loudly (the runner rejects k >= n; the
+      # merge job counts its inputs). The denominator is deliberately NOT
+      # strategy.job-total: that context tracks the jobs in the current
+      # attempt, so a "re-run failed jobs" of a subset would silently change
+      # the partition.
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,6 +54,46 @@ jobs:
           gleam-version: '1.17'
           rebar3-version: '3'
 
+      - name: Build
+        run: gleam deps download
+
+      - name: Run test262 shard
+        # UPDATE_SNAPSHOT=1 makes the runner write the set of tests that pass
+        # in this shard's slice to .github/test262/pass.txt instead of failing
+        # on snapshot mismatches. Real unit-test failures still fail the job.
+        # The merge job reassembles the full set and turns snapshot
+        # *regressions* back into a failure.
+        run: |
+          TEST262_EXEC=1 UPDATE_SNAPSHOT=1 TEST262_SHARD='${{ matrix.shard }}/8' RESULTS_FILE='results-${{ matrix.shard }}.json' gleam test
+          cp .github/test262/pass.txt 'pass-${{ matrix.shard }}.txt'
+        timeout-minutes: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test262-shard-${{ matrix.shard }}
+          path: |
+            pass-${{ matrix.shard }}.txt
+            results-${{ matrix.shard }}.json
+          retention-days: 1
+          if-no-files-found: error
+          # Lets "Re-run all jobs" replace the previous attempt's artifact
+          # instead of failing with a name conflict.
+          overwrite: true
+
+  merge:
+    needs: shard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test262-shard-*
+          merge-multiple: true
+          path: /tmp/shards
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -46,22 +102,25 @@ jobs:
       - name: Install Python dependencies
         run: pip install matplotlib
 
-      - name: Build
-        run: gleam deps download
-
-      - name: Run test262 suite
-        # UPDATE_SNAPSHOT=1 rewrites pass.txt to exactly the tests passing now,
-        # in a single run, and never fails the build on a snapshot mismatch.
-        # Real unit-test failures still fail the build. We turn snapshot
-        # *regressions* back into a failure in the next step (a removed line in
-        # pass.txt), so the only thing this lets through automatically is new
-        # passes — which is the whole point.
+      - name: Reassemble pass.txt and results.json
+        # The shards' slices are disjoint, and each shard writes its pass list
+        # byte-sorted with a trailing newline, so a byte-order merge of all of
+        # them is exactly the pass.txt a single full run would have written.
+        # (sed drops the blank line a shard with zero passes would contribute.)
         run: |
-          TEST262_EXEC=1 UPDATE_SNAPSHOT=1 RESULTS_FILE=.github/test262/results.json gleam test
-        timeout-minutes: 60
+          set -o pipefail
+          n_pass=$(ls /tmp/shards/pass-*.txt | wc -l)
+          n_results=$(ls /tmp/shards/results-*.json | wc -l)
+          # 8 = the number of entries in jobs.shard.strategy.matrix.shard.
+          if [ "$n_pass" -ne 8 ] || [ "$n_results" -ne 8 ]; then
+            echo "::error::expected 8 shard pass lists and results files, got $n_pass and $n_results"
+            exit 1
+          fi
+          LC_ALL=C sort -u /tmp/shards/pass-*.txt | sed '/^$/d' > .github/test262/pass.txt
+          python3 .github/scripts/merge_results.py .github/test262/results.json /tmp/shards/results-*.json
 
       - name: Guard against test262 regressions
-        # The suite above rewrote pass.txt. Added lines = new passing tests
+        # The step above rewrote pass.txt. Added lines = new passing tests
         # (fine — we'll commit them). A removed line = a test that used to pass
         # and now fails: fail the job and leave pass.txt untouched.
         #

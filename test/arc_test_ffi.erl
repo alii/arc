@@ -26,6 +26,9 @@ main() ->
 
     %% If TEST262_EXEC=1, add test262 files as individual tests.
     %% TEST262_FILTER=path/prefix filters to only matching files.
+    %% TEST262_SHARD=k/n runs only bucket k (0-based) of a deterministic
+    %% n-way hash partition — used by CI to fan the suite out across
+    %% parallel jobs. Every file lands in exactly one bucket.
     {Test262Tests, HasTest262} = case os:getenv("TEST262_EXEC") of
         false -> {[], false};
         "" -> {[], false};
@@ -36,9 +39,24 @@ main() ->
                 false -> <<>>;
                 Val -> list_to_binary(Val)
             end,
-            Files = case Filter of
+            Filtered = case Filter of
                 <<>> -> AllFiles;
                 _ -> [F || F <- AllFiles, binary:match(F, Filter) =/= nomatch]
+            end,
+            Files = case os:getenv("TEST262_SHARD") of
+                false -> Filtered;
+                "" -> Filtered;
+                Spec ->
+                    {K, N} = try
+                        [KStr, NStr] = string:tokens(Spec, "/"),
+                        K0 = list_to_integer(KStr),
+                        N0 = list_to_integer(NStr),
+                        true = N0 > 0 andalso K0 >= 0 andalso K0 < N0,
+                        {K0, N0}
+                    catch
+                        _:_ -> erlang:error({bad_test262_shard, Spec})
+                    end,
+                    [F || F <- Filtered, erlang:phash2(F, N) =:= K]
             end,
             Tests = [{<<"test262/", F/binary>>, fun() ->
                 case test262_exec:run_file(F) of

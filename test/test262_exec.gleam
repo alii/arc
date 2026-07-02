@@ -9,6 +9,13 @@
 ///   TEST262_EXEC=1 UPDATE_SNAPSHOT=1 gleam test — run and update the snapshot
 ///   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
 ///   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
+///   TEST262_FILTER=path/prefix                  — only run matching test files
+///   TEST262_SHARD=k/n                           — only run bucket k of an n-way
+///                                                 hash partition (CI parallelism)
+///
+/// With TEST262_FILTER or TEST262_SHARD set, UPDATE_SNAPSHOT rewrites pass.txt
+/// to just that subset — fine for CI shards (the merge job reassembles them),
+/// wrong to commit from a local partial run.
 import arc/compiler
 import arc/host
 import arc/internal/path
@@ -259,7 +266,7 @@ pub fn finish(errors: List(#(String, String))) -> Result(Nil, String) {
       let paths = get_pass_paths()
       let content = string.join(paths, "\n") <> "\n"
       case simplifile.write(to: snapshot_path, contents: content) {
-        Ok(Nil) ->
+        Ok(Nil) -> {
           io.println(
             "Snapshot updated: "
             <> snapshot_path
@@ -267,6 +274,18 @@ pub fn finish(errors: List(#(String, String))) -> Result(Nil, String) {
             <> int.to_string(list.length(paths))
             <> " passing tests)",
           )
+          case partial_run_env() {
+            Some(name) ->
+              io.println(
+                "Warning: "
+                <> name
+                <> " is set, so "
+                <> snapshot_path
+                <> " now covers only that subset — do not commit it",
+              )
+            None -> Nil
+          }
+        }
         Error(err) ->
           io.println(
             "Warning: could not write snapshot: " <> string.inspect(err),
@@ -358,6 +377,20 @@ fn load_snapshot(path: String) -> set.Set(String) {
       |> set.from_list
     Error(_) -> set.new()
   }
+}
+
+/// The env var, if any, that restricts this run to a subset of test262 — a
+/// snapshot written from such a run must not be committed as the full baseline.
+fn partial_run_env() -> Option(String) {
+  ["TEST262_SHARD", "TEST262_FILTER"]
+  |> list.find(fn(name) {
+    case test_runner.get_env(name) {
+      Ok("") -> False
+      Ok(_) -> True
+      Error(Nil) -> False
+    }
+  })
+  |> option.from_result
 }
 
 fn format_percent(pass: Int, tested: Int) -> String {
