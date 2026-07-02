@@ -221,10 +221,16 @@ fn run_body(state: State(host), run: Run(host), push_arg: Bool) -> State(host) {
             None -> Ok(#(ThrowCompletion(req.value), exec_state))
           }
         AGReturn ->
-          // Inject a return: if there are finally blocks they should run.
-          // For now, treat as normal completion with the return value.
-          // TODO: proper finally unwinding like sync gen's process_generator_return.
-          Ok(#(NormalCompletion(req.value), exec_state))
+          // Inject a return completion at the suspended yield (§27.6.3.8):
+          // unwind through enclosing finally blocks / for-of iterator closes
+          // before completing. Shared with the sync driver
+          // (generators.unwind_return) so the two flavours cannot diverge.
+          generators.unwind_return(
+            exec_state,
+            req.value,
+            run.execute_inner,
+            run.unwind_to_catch,
+          )
       }
       handle_exec_result(state, run, exec_result)
     }
@@ -324,7 +330,8 @@ fn forward_async_delegate(
 
 /// Inner iterator lacks .return/.throw. Per ES §15.5.5:
 ///   - missing throw → AsyncIteratorClose(iter), throw TypeError into body
-///   - missing return → Await(received), then ReturnCompletion out of body
+///   - missing return → return completion propagates out of the yield*
+///     (through the outer generator's finally blocks)
 fn delegate_method_missing(
   state: State(host),
   run: Run(host),
@@ -350,13 +357,24 @@ fn delegate_method_missing(
           throw_into_gen_body(state, run, thrown)
       }
     AGReturn | AGNext -> {
-      // §7.c.ii.1-3: no .return → Await(received), then ReturnCompletion out.
-      // Reuse AGResumeAwaitingReturn: on settle it fulfils the head request
-      // with {value: awaited, done: true} and marks AGCompleted.
-      // NOTE: skips outer try/finally — same pre-existing limitation as the
-      // non-delegating AGReturn path in run_body (see TODO there).
-      let state = set_gen_state(state, run.data_ref, AGAwaitingReturn)
-      setup_await(state, run.data_ref, run.req.value, AGResumeAwaitingReturn)
+      // §7.c.ii.3: no .return → the return completion propagates out of the
+      // yield*, so unwind the OUTER generator's enclosing finally blocks /
+      // iterator closes (shared with the sync driver) before completing.
+      // NOTE: the spec's intermediate Await(received) (§7.c.ii.2) is not
+      // performed — same pre-existing limitation as the non-delegating
+      // AGReturn path in run_body.
+      let exec_state =
+        build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
+      handle_exec_result(
+        state,
+        run,
+        generators.unwind_return(
+          exec_state,
+          run.req.value,
+          run.execute_inner,
+          run.unwind_to_catch,
+        ),
+      )
     }
   }
 }
@@ -508,11 +526,22 @@ fn delegate_done(
       handle_exec_result(state, run, run.execute_inner(exec_state))
     }
     AGReturn | AGNext -> {
-      // Inner returned done — outer gen returns val.
-      // (TODO finally-unwind applies here too, same as run_body's AGReturn.)
+      // §27.5.3.8 step 7.c.viii: the inner iterator's return() reported
+      // done — a return completion (carrying its value) propagates out of
+      // the yield*, so unwind the outer generator's enclosing finally
+      // blocks / iterator closes (shared with the sync driver).
       let exec_state =
         build_exec_state(state, gen, gen.saved_stack, gen.saved_pc)
-      handle_exec_result(state, run, Ok(#(NormalCompletion(val), exec_state)))
+      handle_exec_result(
+        state,
+        run,
+        generators.unwind_return(
+          exec_state,
+          val,
+          run.execute_inner,
+          run.unwind_to_catch,
+        ),
+      )
     }
   }
 }

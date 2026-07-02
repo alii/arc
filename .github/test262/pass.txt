@@ -4538,6 +4538,8 @@ built-ins/AsyncGeneratorPrototype/return/return-promise.js
 built-ins/AsyncGeneratorPrototype/return/return-state-completed.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedStart-promise.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedStart.js
+built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally-throw.js
+built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedYield.js
 built-ins/AsyncGeneratorPrototype/return/this-val-not-async-generator.js
 built-ins/AsyncGeneratorPrototype/return/this-val-not-object.js

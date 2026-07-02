@@ -42,9 +42,7 @@ pub fn deserialize_rejects_foreign_term_test() {
 
 pub fn deserialize_rejects_wrong_version_test() {
   let result: Result(engine.Engine(Nil), _) =
-    engine.deserialize(
-      erlang.term_to_binary(#("arc-engine", 999_999, 1, 2, 3)),
-    )
+    engine.deserialize(erlang.term_to_binary(#("arc-engine", 999_999, 1, 2, 3)))
   assert result == Error(engine.IncompatibleSnapshot)
 }
 
@@ -146,8 +144,7 @@ pub fn serialize_preserves_mutable_closure_test() {
   let restored = roundtrip(eng)
   assert assert_eval(restored, "count") == JsNumber(Finite(3.0))
   // calling inc again on the restored engine should continue from 3
-  let assert Ok(#(Returned(value:), _)) =
-    engine.eval(restored, "inc()")
+  let assert Ok(#(Returned(value:), _)) = engine.eval(restored, "inc()")
   assert value == JsNumber(Finite(4.0))
 }
 
@@ -263,8 +260,7 @@ pub fn define_fn_callable_from_js_test() {
       }
     })
 
-  let assert Ok(#(Returned(value:), _)) =
-    engine.eval(eng, "double(21)")
+  let assert Ok(#(Returned(value:), _)) = engine.eval(eng, "double(21)")
   assert value == JsNumber(Finite(42.0))
 }
 
@@ -340,8 +336,7 @@ pub fn host_fn_receives_this_test() {
       }
     })
 
-  let assert Ok(#(Returned(value:), _)) =
-    engine.eval(eng, "whoami.call('abc')")
+  let assert Ok(#(Returned(value:), _)) = engine.eval(eng, "whoami.call('abc')")
   assert value == JsString("this=abc")
 }
 
@@ -561,4 +556,149 @@ pub fn regexp_flags_canonical_order_test() {
   assert assert_eval(eng, "(/abc/yusmigd).flags") == JsString("dgimsuy")
   // Constructor path matches literal path.
   assert assert_eval(eng, "new RegExp('abc', 'mig').flags") == JsString("gim")
+}
+
+// ----------------------------------------------------------------------------
+// AsyncGenerator return completions run finally blocks (§27.6.3.8).
+// `engine.eval` drains the microtask queue, so the trailing eval observes the
+// fully settled log.
+// ----------------------------------------------------------------------------
+
+/// Run a script (draining microtasks), then read the global `log` array.
+fn eval_then_read_log(source: String) -> value.JsValue {
+  let eng = engine.new()
+  let assert Ok(#(Returned(_), eng)) = engine.eval(eng, source)
+  assert_eval(eng, "log.join('|')")
+}
+
+pub fn async_generator_return_runs_finally_test() {
+  // .return() on a generator suspended at `yield` must run the enclosing
+  // finally block, and still resolve with the requested {value, done: true}.
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       async function* g() {
+         try { yield 1; log.push('after'); } finally { log.push('finally'); }
+       }
+       var it = g();
+       it.next().then(function (r) {
+         log.push('n:' + r.value + ',' + r.done);
+         return it.return(42);
+       }).then(function (r) {
+         log.push('r:' + r.value + ',' + r.done);
+       });",
+    )
+  assert log == JsString("n:1,false|finally|r:42,true")
+}
+
+pub fn for_await_break_runs_finally_test() {
+  // Breaking out of `for await` closes the async generator via .return(),
+  // which must run its finally block before the loop's completion settles.
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       async function* g() {
+         try { yield 'a'; yield 'b'; } finally { log.push('cleanup'); }
+       }
+       (async function () {
+         for await (var x of g()) { log.push('got:' + x); break; }
+         log.push('done');
+       })();",
+    )
+  assert log == JsString("got:a|cleanup|done")
+}
+
+pub fn async_yield_star_missing_return_runs_finally_test() {
+  // yield* over an async iterator with no .return: the return completion
+  // still propagates out of the yield*, through the outer finally.
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       var inner = {};
+       inner[Symbol.asyncIterator] = function () {
+         return {
+           next: function () {
+             return Promise.resolve({ value: 'x', done: false });
+           }
+         };
+       };
+       async function* g() {
+         try { yield* inner; } finally { log.push('fin'); }
+       }
+       var it = g();
+       it.next().then(function (r) {
+         log.push('n:' + r.value + ',' + r.done);
+         return it.return('rv');
+       }).then(function (r) {
+         log.push('r:' + r.value + ',' + r.done);
+       });",
+    )
+  assert log == JsString("n:x,false|fin|r:rv,true")
+}
+
+pub fn async_yield_star_delegated_return_runs_outer_finally_test() {
+  // Inner iterator HAS a .return: after the delegated return reports done,
+  // the outer generator's own finally must still run (§27.5.3.8 7.c.viii).
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       var inner = {};
+       inner[Symbol.asyncIterator] = function () {
+         return {
+           next: function () {
+             return Promise.resolve({ value: 'i', done: false });
+           },
+           return: function (v) {
+             log.push('inner-return:' + v);
+             return Promise.resolve({ value: v, done: true });
+           }
+         };
+       };
+       async function* g() {
+         try { yield* inner; } finally { log.push('outer-fin'); }
+       }
+       var it = g();
+       it.next().then(function (r) {
+         return it.return('z');
+       }).then(function (r) {
+         log.push('r:' + r.value + ',' + r.done);
+       });",
+    )
+  assert log == JsString("inner-return:z|outer-fin|r:z,true")
+}
+
+pub fn async_generator_finally_can_yield_test() {
+  // A yield inside the finally suspends the return-unwind; the next .next()
+  // resumes inside the finally and then completes with the original
+  // .return() value.
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       async function* g() {
+         try { yield 1; }
+         finally { log.push('fs'); yield 2; log.push('fe'); }
+       }
+       var it = g();
+       (async function () {
+         var r = await it.next(); log.push('n:' + r.value + ',' + r.done);
+         r = await it.return(9); log.push('r1:' + r.value + ',' + r.done);
+         r = await it.next(); log.push('r2:' + r.value + ',' + r.done);
+       })();",
+    )
+  assert log == JsString("n:1,false|fs|r1:2,false|fe|r2:9,true")
+}
+
+pub fn sync_generator_return_runs_finally_test() {
+  // The sync driver shares the same return-unwinder — keep it covered.
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       function* g() {
+         try { yield 1; } finally { log.push('sfin'); }
+       }
+       var it = g();
+       var r = it.next(); log.push('n:' + r.value + ',' + r.done);
+       r = it.return(7); log.push('r:' + r.value + ',' + r.done);",
+    )
+  assert log == JsString("n:1,false|sfin|r:7,true")
 }

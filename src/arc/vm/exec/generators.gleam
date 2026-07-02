@@ -192,15 +192,9 @@ fn do_return_resume(
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let gen_exec_state =
     build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
-  process_generator_return(
-    gen_exec_state,
-    state,
-    gen,
-    return_val,
-    rest_stack,
-    execute_inner,
-    unwind_to_catch,
-  )
+  unwind_return(gen_exec_state, return_val, execute_inner, unwind_to_catch)
+  |> settle_completion(state, gen)
+  |> alloc_iter_result(rest_stack)
 }
 
 /// Generator.prototype.throw(exception) -- throw into the generator.
@@ -557,7 +551,20 @@ fn run_to_completion(
   gen: GenData,
   execute_inner: ExecuteInnerFn(host),
 ) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
-  case execute_inner(resumed) {
+  settle_completion(execute_inner(resumed), outer, gen)
+}
+
+/// Marshal a body completion into the sync driver's #(done, value, state)
+/// convention: save the generator on yield, mark it Completed on
+/// return/throw. Split out of `run_to_completion` so return-unwinding
+/// (`unwind_return`), which produces the completion itself, shares the exact
+/// same settlement.
+fn settle_completion(
+  exec_result: Result(#(Completion, State(host)), state.VmError),
+  outer: State(host),
+  gen: GenData,
+) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+  case exec_result {
     Ok(#(YieldCompletion(yv), suspended)) -> {
       let st = save_stacks(suspended.try_stack)
       let h =
@@ -670,40 +677,31 @@ fn find_next_return_handler(
   }
 }
 
-/// Process generator.return(val) by unwinding through any enclosing finally blocks.
-/// This runs each finally block in order (innermost to outermost) and handles:
-/// - Normal completion: continue to next finally, or mark completed
-/// - Yield inside finally: save generator state, return {value, done: false}
-/// - Throw inside finally: mark completed, propagate the throw
-fn process_generator_return(
+/// Resume a suspended generator body with a *return completion* — the core of
+/// GeneratorResumeAbrupt (§27.5.3.4) shared by the sync driver
+/// (`do_return_resume`) and the async driver's AGReturn paths
+/// (async_generators.gleam), so the two flavours cannot diverge.
+///
+/// Given the body State restored at its suspension point, walk the try_stack
+/// running each enclosing finally block (innermost → outermost) and closing
+/// any live for-of / destructuring iterators (§7.4.9). The result has the
+/// same shape as `execute_inner`, so each driver settles it with its normal
+/// completion dispatch (`settle_completion` / `handle_exec_result`):
+/// - NormalCompletion(return_val): nothing intercepted the return — the
+///   generator completes with the requested value.
+/// - YieldCompletion / AwaitCompletion: a finally block suspended; the
+///   returned State is the new suspension point.
+/// - ThrowCompletion: a finally block or iterator close threw and nothing
+///   inside the generator caught it.
+pub fn unwind_return(
   gen_state: State(host),
-  outer_state: State(host),
-  gen: GenData,
   return_val: JsValue,
-  rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(#(Completion, State(host)), state.VmError) {
   case find_next_return_handler(gen_state.code, gen_state.try_stack) {
-    None -> {
-      // No more finally blocks. Mark completed and return {value, done: true}.
-      let h =
-        heap.write(
-          gen_state.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Completed),
-        )
-      let #(h, result) =
-        common.create_iter_result(h, outer_state.builtins, return_val, True)
-      Ok(
-        State(
-          ..state.merge_globals(outer_state, gen_state, []),
-          heap: h,
-          stack: [result, ..rest_stack],
-          pc: outer_state.pc + 1,
-        ),
-      )
-    }
+    // No more finally blocks / iterator guards: the return completes the body.
+    None -> Ok(#(NormalCompletion(return_val), gen_state))
     // §7.4.9 IteratorClose with a return completion: a for-of loop or
     // array-destructuring scaffold suspended at a yield has its live
     // iterator at the frame's recorded stack depth. Call its `return`
@@ -728,45 +726,27 @@ fn process_generator_return(
               close_for_return(
                 st,
                 iter_ref,
-                outer_state,
-                gen,
                 return_val,
-                rest_stack,
                 execute_inner,
                 unwind_to_catch,
               )
             // Not an object (defensive) — nothing to close.
-            _ ->
-              process_generator_return(
-                st,
-                outer_state,
-                gen,
-                return_val,
-                rest_stack,
-                execute_inner,
-                unwind_to_catch,
-              )
+            _ -> unwind_return(st, return_val, execute_inner, unwind_to_catch)
           }
         }
         // Slot is not a live iterator (for-of's [[Done]] sentinel writes
         // undefined into it) — nothing to close, keep unwinding.
         [_, ..base] ->
-          process_generator_return(
+          unwind_return(
             State(..gen_state, try_stack: remaining_try, stack: base),
-            outer_state,
-            gen,
             return_val,
-            rest_stack,
             execute_inner,
             unwind_to_catch,
           )
         [] ->
-          process_generator_return(
+          unwind_return(
             State(..gen_state, try_stack: remaining_try, stack: []),
-            outer_state,
-            gen,
             return_val,
-            rest_stack,
             execute_inner,
             unwind_to_catch,
           )
@@ -797,85 +777,18 @@ fn process_generator_return(
               stack: final_state.stack,
               locals: final_state.locals,
             )
-          process_generator_return(
+          unwind_return(
             updated_gen_state,
-            outer_state,
-            gen,
             return_val,
-            rest_stack,
             execute_inner,
             unwind_to_catch,
           )
         }
-        Ok(#(YieldCompletion(yielded_value), suspended)) -> {
-          // Generator yielded from inside the finally block.
-          // Save state so next .next() resumes inside the finally.
-          let saved_try2 = save_stacks(suspended.try_stack)
-          let h3 =
-            heap.write(
-              suspended.heap,
-              gen.data_ref,
-              GeneratorSlot(
-                gen_state: value.SuspendedYield,
-                func_template: gen.func_template,
-                env_ref: gen.env_ref,
-                saved_pc: suspended.pc,
-                saved_locals: suspended.locals,
-                saved_stack: suspended.stack,
-                saved_try_stack: saved_try2,
-              ),
-            )
-          let #(h3, result) =
-            common.create_iter_result(
-              h3,
-              outer_state.builtins,
-              yielded_value,
-              False,
-            )
-          Ok(
-            State(
-              ..state.merge_globals(outer_state, suspended, []),
-              heap: h3,
-              stack: [result, ..rest_stack],
-              pc: outer_state.pc + 1,
-            ),
-          )
-        }
-        Ok(#(ThrowCompletion(thrown), thrown_state)) -> {
-          // Finally block threw. Mark completed and propagate the throw,
-          // merging the globals the finally body mutated (same as the
-          // Normal / Yield arms) — not just its heap.
-          let h3 =
-            heap.write(
-              thrown_state.heap,
-              gen.data_ref,
-              gen_with_state(gen, value.Completed),
-            )
-          Error(#(
-            Thrown,
-            thrown,
-            State(..state.merge_globals(outer_state, thrown_state, []), heap: h3),
-          ))
-        }
-        Ok(#(AwaitCompletion(_), _)) ->
-          Error(#(
-            StepVmError(Unimplemented("await in sync generator")),
-            JsUndefined,
-            gen_state,
-          ))
-        Error(vm_err) -> {
-          let h2 =
-            heap.write(
-              gen_state.heap,
-              gen.data_ref,
-              gen_with_state(gen, value.Completed),
-            )
-          Error(#(
-            StepVmError(vm_err),
-            JsUndefined,
-            State(..gen_state, heap: h2),
-          ))
-        }
+        // Yield / await inside the finally block (the body suspends there),
+        // a throw out of it, or a VM error: that IS the body's completion —
+        // hand it to the driver unchanged. It settles it exactly as it
+        // settles the same completion from a plain resume.
+        completion -> completion
       }
     }
   }
@@ -888,35 +801,16 @@ fn process_generator_return(
 fn close_for_return(
   st: State(host),
   iter_ref: Ref,
-  outer_state: State(host),
-  gen: GenData,
   return_val: JsValue,
-  rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(#(Completion, State(host)), state.VmError) {
   let iter = JsObject(iter_ref)
   let continue_return = fn(st: State(host)) {
-    process_generator_return(
-      st,
-      outer_state,
-      gen,
-      return_val,
-      rest_stack,
-      execute_inner,
-      unwind_to_catch,
-    )
+    unwind_return(st, return_val, execute_inner, unwind_to_catch)
   }
   let continue_throw = fn(st: State(host), thrown: JsValue) {
-    process_return_close_throw(
-      st,
-      outer_state,
-      gen,
-      thrown,
-      rest_stack,
-      execute_inner,
-      unwind_to_catch,
-    )
+    replace_return_with_throw(st, thrown, execute_inner, unwind_to_catch)
   }
   case object_ops.get_value(st, iter_ref, Named("return"), iter) {
     Ok(#(JsUndefined, st)) | Ok(#(value.JsNull, st)) -> continue_return(st)
@@ -941,41 +835,20 @@ fn close_for_return(
 /// completion (§7.4.9 steps 8-9), which unwinds through the generator's
 /// REMAINING try frames — so an enclosing try/catch (or another iterator
 /// close guard) inside the generator can observe it. If nothing catches,
-/// the generator completes and the error propagates to the .return() caller.
-fn process_return_close_throw(
+/// the body's completion is the throw.
+fn replace_return_with_throw(
   gen_state: State(host),
-  outer_state: State(host),
-  gen: GenData,
   thrown: JsValue,
-  rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(#(Completion, State(host)), state.VmError) {
   // unwind_to_catch expects the throw site's stack; gen_state.stack is
   // already truncated to the frame base and try_stack holds the remaining
   // frames, so the unwind lands on the next handler in spec order.
   case unwind_to_catch(gen_state, thrown) {
-    Some(caught_state) ->
-      // The generator caught it — continue executing from the handler.
-      run_to_completion(caught_state, outer_state, gen, execute_inner)
-      |> alloc_iter_result(rest_stack)
-    None -> {
-      // No catch handler — mark completed and propagate the throw. The
-      // iterator-close call that produced `thrown` ran user code in
-      // gen_state (getter / return() body), so merge its globals — not
-      // just its heap — back into the outer state.
-      let h2 =
-        heap.write(
-          gen_state.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Completed),
-        )
-      Error(#(
-        Thrown,
-        thrown,
-        State(..state.merge_globals(outer_state, gen_state, []), heap: h2),
-      ))
-    }
+    // The generator caught it — continue executing from the handler.
+    Some(caught_state) -> execute_inner(caught_state)
+    None -> Ok(#(ThrowCompletion(thrown), gen_state))
   }
 }
 
