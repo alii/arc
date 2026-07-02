@@ -221,7 +221,7 @@ pub type DeliverWakeFn =
 /// (an explicit argument to `interpreter.new_state`) and inherited by every
 /// derived State via the `RealmCtx(..spread)`s, replacing the old pair of
 /// loose, post-boot-installed `State.host_sync_wait` / `State.host_deliver_wake`
-/// fields. NOT generic over `host`: neither capability mentions the embedder's
+/// fields. NOT generic over `host`: no field mentions the embedder's
 /// heap-value type.
 ///
 /// `can_block` (Agent Record [[CanBlock]], §9.7) is deliberately NOT in here —
@@ -256,6 +256,33 @@ pub type HostHooks {
     /// `monotonic_now` for a virtual clock, or to yield to its own scheduler
     /// instead of blocking the OS thread.
     sleep_ms: fn(Int) -> Nil,
+    /// §16.2.1.8 HostLoadImportedModule: the embedder's dynamic-import host
+    /// hook — a host function (see `arc/module_host.install_import_hook`)
+    /// called with `(specifier, referrer?, phase?, resolve?, reject?)` that
+    /// loads/links/evaluates the requested module graph. `None` = this host
+    /// does not support dynamic import: `import()` rejects with a TypeError.
+    ///
+    /// For the eager phase the hook's return value settles the import
+    /// promise. For the `defer` phase the hook is handed the promise's
+    /// resolving functions and MUST settle through them itself — its return
+    /// value is ignored (see `arc/vm/exec/dynamic_import.DeferHookOutcome`
+    /// for the full contract, and `throw` to reject in either phase).
+    ///
+    /// This is ENGINE state, not a globalThis property: guest JS can neither
+    /// read nor replace it. The `Ref` inside the `JsValue` is pinned with
+    /// `heap.root` at install time (like `RealmCtx.template_objects` entries),
+    /// because nothing else in the heap reaches it.
+    import_hook: Option(JsValue),
+    /// §16.2.1.8 referencingScriptOrModule: the resolved specifier of the
+    /// module whose body is currently executing, set by the module evaluator
+    /// on each body's freshly booted State (`arc/module.run_module_with_referrer`)
+    /// and read at ImportCall time so a nested `import()` resolves relative to
+    /// the importing MODULE. `None` = script code: the host hook falls back to
+    /// its install-time entry referrer.
+    ///
+    /// ENGINE state, never a globalThis property — guest JS cannot forge a
+    /// referrer to escape the module loader's resolution root.
+    import_referrer: Option(String),
   )
 }
 
@@ -273,9 +300,10 @@ fn host_monotonic_now() -> Int
 fn host_sleep_ms(ms: Int) -> Nil
 
 /// The capability-free default: a host that can neither block an agent nor
-/// deliver wakes. "No capabilities" is the safe baseline — sync Atomics.wait
-/// throws (AgentCanSuspend is false) rather than hanging. The clock and
-/// sleep hooks are NOT capability-gated: they default to the real
+/// deliver wakes, and that has no dynamic-import hook (so `import()` rejects
+/// with a TypeError). "No capabilities" is the safe baseline — sync
+/// Atomics.wait throws (AgentCanSuspend is false) rather than hanging. The
+/// clock and sleep hooks are NOT capability-gated: they default to the real
 /// `arc_atomics_ffi` monotonic clock and `timer:sleep`, which is what every
 /// host wants unless it is virtualising time.
 pub fn default_host_hooks() -> HostHooks {
@@ -284,6 +312,8 @@ pub fn default_host_hooks() -> HostHooks {
     deliver_wake: option.None,
     monotonic_now: host_monotonic_now,
     sleep_ms: host_sleep_ms,
+    import_hook: option.None,
+    import_referrer: option.None,
   )
 }
 

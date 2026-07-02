@@ -15,7 +15,6 @@ import arc/module/registry
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/reflect
-import arc/vm/exec/dynamic_import
 import arc/vm/exec/entry
 import arc/vm/exec/interpreter
 import arc/vm/heap
@@ -988,11 +987,15 @@ fn eval_module_body(
 // Helper Functions
 // =============================================================================
 
-/// Run a module body with the hidden referrer marker set to its resolved
-/// specifier, restoring the previous marker afterwards. An ImportCall inside
-/// the body captures this marker as its referencingScriptOrModule
-/// (§16.2.1.8 HostLoadImportedModule), so nested dynamic imports resolve
-/// relative to the importing MODULE, not the realm's entry script.
+/// Run a module body with `host_hooks.import_referrer` set to its resolved
+/// specifier on the body's freshly booted State. An ImportCall inside the
+/// body captures this as its referencingScriptOrModule (§16.2.1.8
+/// HostLoadImportedModule), so nested dynamic imports resolve relative to the
+/// importing MODULE, not the realm's entry script.
+///
+/// The referrer is per-boot ENGINE state on `RealmCtx.host_hooks`, not a
+/// mutable globalThis property, so there is nothing to save/restore around
+/// the body and guest JS can neither read nor forge it.
 fn run_module_with_referrer(
   specifier: String,
   template: value.FuncTemplate,
@@ -1003,35 +1006,15 @@ fn run_module_with_referrer(
   host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> entry.ModuleResult(host) {
-  let key = value.Named(dynamic_import.referrer_property)
-  let previous = case object.get_own_property(heap, global_object, key) {
-    Some(value.DataProperty(value: v, ..)) -> v
-    _ -> JsUndefined
-  }
-  let heap =
-    object.define_method_property(heap, global_object, key, JsString(specifier))
-  let restore = fn(h) {
-    object.define_method_property(h, global_object, key, previous)
-  }
-  case
-    entry.run_module(
-      template,
-      heap,
-      builtins,
-      global_object,
-      seeds,
-      host_hooks,
-      finish,
-    )
-  {
-    entry.ModuleOk(value:, heap:, locals:, jobs:) ->
-      entry.ModuleOk(value:, heap: restore(heap), locals:, jobs:)
-    entry.ModuleThrow(value:, heap:, jobs:) ->
-      entry.ModuleThrow(value:, heap: restore(heap), jobs:)
-    entry.ModuleError(error:) -> entry.ModuleError(error:)
-    entry.ModulePending(promise_data_ref:, heap:, jobs:) ->
-      entry.ModulePending(promise_data_ref:, heap: restore(heap), jobs:)
-  }
+  entry.run_module(
+    template,
+    heap,
+    builtins,
+    global_object,
+    seeds,
+    state.HostHooks(..host_hooks, import_referrer: Some(specifier)),
+    finish,
+  )
 }
 
 /// Allocate a GC-rooted BoxSlot holding `val`. Module binding cells are rooted

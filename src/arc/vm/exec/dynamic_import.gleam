@@ -20,15 +20,24 @@
 ////       e. If AllImportAttributesSupported(attributes) is false, reject
 ////          with TypeError (this host supports no import attributes).
 ////   9+. HostLoadImportedModule / ContinueDynamicImport — delegated to the
-////       embedder's import hook (a host function installed on the global
-////       object, see arc/module_host.install_import_hook). The hook returns
-////       the module namespace object or throws; the promise is resolved or
-////       rejected accordingly. Without a hook, import() rejects with a
-////       TypeError (dynamic import unsupported in this context).
+////       embedder's import hook, a host function carried as ENGINE state on
+////       `state.ctx.host_hooks.import_hook` (installed by
+////       arc/module_host.install_import_hook, never visible to guest JS).
+////       The hook returns the module namespace object or throws; the promise
+////       is resolved or rejected accordingly. Without a hook, import()
+////       rejects with a TypeError (dynamic import unsupported in this
+////       context).
 ////
 //// All failures after argument evaluation reject the returned promise —
 //// nothing here throws synchronously (IfAbruptRejectPromise semantics).
 //// Cross-referenced with QuickJS js_dynamic_import / engine262 ImportCall.
+////
+//// The VM↔host channel is deliberately NOT smuggled through globalThis
+//// properties: the hook, the active referrer, and the ~defer~ "already
+//// settled" signal all used to live in guest-reachable strings/properties,
+//// which let user JS replace the module loader or forge its resolution root.
+//// They are now typed engine state (`HostHooks.import_hook` /
+//// `HostHooks.import_referrer`) and a typed job outcome (`DeferHookOutcome`).
 
 import arc/vm/builtins/common
 import arc/vm/builtins/object as builtins_object
@@ -39,32 +48,41 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type State, type StepResult, State}
 import arc/vm/value.{
-  type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined, Named,
+  type JsValue, type Ref, JsObject, JsString, JsUndefined, Named,
 }
 import gleam/io
 import gleam/list
-import gleam/option
+import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 
-/// Well-known (hidden) global property holding the embedder's dynamic-import
-/// host hook: a function called with (specifier_string, referrer?) returning
-/// the module namespace object, or throwing the value to reject with.
-pub const hook_property = "__arc_dynamic_import__"
+/// Positional phase marker (3rd hook argument) that `import.defer(spec)`
+/// passes to the host hook: load + LINK the graph without evaluating it, and
+/// settle the import promise with the Deferred Module Namespace. This is a
+/// private VM↔host argument encoding — the hook is engine state that guest JS
+/// can never call, so the value is not forgeable from JS.
+pub const defer_phase_marker = "defer"
 
-/// Well-known (hidden) global property naming the resolved specifier of the
-/// module whose body is currently executing (set/restored by the module
-/// evaluator). §16.2.1.8 HostLoadImportedModule resolves the requested
-/// specifier against this referencingScriptOrModule, not the realm's entry
-/// script; we read it at ImportCall time (the spec captures
-/// referencingScriptOrModule in step 2, synchronously) and hand it to the
-/// host hook.
-pub const referrer_property = "__arc_import_referrer__"
-
-/// Sentinel the import hook returns when it has wired the import promise's
-/// settlement itself (the ~defer~ phase waiting on async transitive
-/// dependency evaluation promises) — the import job must not also settle.
-pub const settled_marker = "__arc_import_settled__"
+/// What the ~defer~ arm of the host hook did with the import promise's
+/// capability. The hook is handed the promise's resolving functions and — on
+/// any NORMAL return — OWNS settlement: it settles immediately, or wires
+/// reactions onto async transitive-dependency evaluation promises that settle
+/// later. The import job's only remaining duty is rejecting on an ABRUPT
+/// completion (no hook installed, or the hook threw before taking ownership).
+/// Encoding this in a type (instead of the old in-band
+/// `"__arc_import_settled__"` string returned as a JsValue) makes "the job
+/// double-settled" and "a hook return was mistaken for a namespace"
+/// unrepresentable, and removes a guest-forgeable sentinel from the protocol.
+pub type DeferHookOutcome {
+  /// Normal hook return: it took ownership of the capability (already
+  /// settled the import promise, or wired the reactions that will). Do
+  /// nothing.
+  DeferHookSettledCapability
+  /// Abrupt completion: no `import_hook` is installed, or the hook threw
+  /// before taking ownership of the capability. Reject the import promise
+  /// with this value.
+  DeferHookRejected(reason: JsValue)
+}
 
 /// Run the DynamicImport opcode: `specifier` and `options` were popped off the
 /// stack by the caller; pushes the import promise onto `rest_stack`.
@@ -91,7 +109,13 @@ pub fn evaluate_import_call(
     Error(#(reason, state)) ->
       builtins_promise.reject_promise(state, data_ref, reason)
     Ok(#(specifier_string, state)) -> {
-      let referrer_args = capture_referrer(state)
+      // §16.2.1.8 referencingScriptOrModule, captured synchronously at
+      // ImportCall time: the job may only run after the current module body
+      // finishes and a differently-referred State is executing.
+      let referrer_args =
+        capture_referrer(state)
+        |> option.map(fn(referrer) { [JsString(referrer)] })
+        |> option.unwrap([])
       enqueue_import_job(state, promise_ref, data_ref, fn(state) {
         call_host_hook(state, specifier_string, referrer_args)
       })
@@ -137,12 +161,18 @@ pub fn evaluate_defer_import_call(
       let state = State(..state, heap:)
       // The phase marker is positional (3rd argument), so a missing referrer
       // is padded with undefined.
-      let hook_args = case capture_referrer(state) {
-        [] -> [JsUndefined, JsString("defer"), resolve_fn, reject_fn]
-        [referrer, ..] -> [referrer, JsString("defer"), resolve_fn, reject_fn]
-      }
-      enqueue_settling_import_job(state, resolve_fn, reject_fn, fn(state) {
-        call_host_hook(state, specifier_string, hook_args)
+      let referrer_arg =
+        capture_referrer(state)
+        |> option.map(JsString)
+        |> option.unwrap(JsUndefined)
+      let hook_args = [
+        referrer_arg,
+        JsString(defer_phase_marker),
+        resolve_fn,
+        reject_fn,
+      ]
+      enqueue_defer_import_job(state, reject_fn, fn(state) {
+        call_defer_host_hook(state, specifier_string, hook_args)
       })
     }
   }
@@ -201,21 +231,14 @@ fn import_request(
   #(specifier_string, state)
 }
 
-/// §16.2.1.8 HostLoadImportedModule referrer: read the marker naming the
-/// module whose body is currently executing. Captured at ImportCall time (the
+/// §16.2.1.8 HostLoadImportedModule referrer: the resolved specifier of the
+/// module whose body is currently executing, carried as ENGINE state on the
+/// realm's host hooks (set on each module body's freshly booted State by
+/// `arc/module.run_module_with_referrer`). Captured at ImportCall time (the
 /// spec captures referencingScriptOrModule synchronously) — the import job
-/// may run after the current module body finishes and the marker is restored.
-fn capture_referrer(state: State(host)) -> List(JsValue) {
-  case
-    object.get_own_property(
-      state.heap,
-      state.ctx.global_object,
-      Named(referrer_property),
-    )
-  {
-    option.Some(DataProperty(value: JsString(r), ..)) -> [JsString(r)]
-    _ -> []
-  }
+/// may run after the current module body finishes. `None` = script code.
+fn capture_referrer(state: State(host)) -> option.Option(String) {
+  state.ctx.host_hooks.import_referrer
 }
 
 /// Step 9+ deferred: enqueue a promise job that runs `settle` (loading the
@@ -255,28 +278,30 @@ fn enqueue_import_job(
   State(..state, heap:, job_queue: job_queue.push(state.job_queue, job))
 }
 
-/// As `enqueue_import_job`, but the job settles the import promise itself
-/// through the provided resolving functions instead of relying on the
-/// reaction machinery's child resolution: a hook that defers settlement (the
-/// ~defer~ phase waiting on async transitive dependencies) wires the
-/// resolving functions into promise reactions and returns `settled_marker`,
-/// and the job then leaves the promise pending for those reactions to settle.
-fn enqueue_settling_import_job(
+/// As `enqueue_import_job`, but for the ~defer~ phase, whose host hook is
+/// handed the import promise's resolving functions and OWNS settlement (see
+/// `DeferHookOutcome`). The job therefore never resolves the promise itself —
+/// it only rejects when the hook was never entered or threw before taking
+/// ownership. This replaces the old in-band `settled_marker` string the hook
+/// returned to say "don't also settle": the "hook settled it" case is now a
+/// distinct constructor, so forgetting it (or a hook return colliding with
+/// the sentinel) is a compile error instead of a hung or double-settled
+/// promise.
+fn enqueue_defer_import_job(
   state: State(host),
-  resolve_fn: JsValue,
   reject_fn: JsValue,
-  settle: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
+  settle: fn(State(host)) -> #(State(host), DeferHookOutcome),
 ) -> State(host) {
   let #(heap, job_fn) =
     common.alloc_host_fn(
       state.heap,
       state.builtins.function.prototype,
       fn(_args, _this, state) {
-        let #(state, result) = settle(state)
-        let state = case result {
-          Ok(JsString(marker)) if marker == settled_marker -> state
-          Ok(resolution) -> call_resolving_fn(state, resolve_fn, resolution)
-          Error(reason) -> call_resolving_fn(state, reject_fn, reason)
+        let #(state, outcome) = settle(state)
+        let state = case outcome {
+          DeferHookSettledCapability -> state
+          DeferHookRejected(reason) ->
+            call_resolving_fn(state, reject_fn, reason)
         }
         #(state, Ok(JsUndefined))
       },
@@ -284,7 +309,7 @@ fn enqueue_settling_import_job(
       0,
     )
   // The job's own child resolve/reject are unused (non-callable sentinels):
-  // settlement happens through resolve_fn/reject_fn above, whose
+  // settlement happens through the hook / reject_fn above, whose
   // [[AlreadyResolved]] flag also makes any double settle a no-op.
   let job =
     value.PromiseReactionJob(
@@ -391,32 +416,48 @@ fn validate_attributes(
   }
 }
 
-/// Steps 9+ (HostLoadImportedModule): look up the embedder's import hook on
-/// the global object and invoke it with the specifier string and the
-/// captured referrer (when one was active at the ImportCall site).
+/// Steps 9+ (HostLoadImportedModule): read the embedder's import hook off the
+/// realm's ENGINE state (`ctx.host_hooks.import_hook` — never a globalThis
+/// property, so guest JS can neither observe nor replace it) and invoke it
+/// with the specifier string followed by `extra_args` (the captured referrer,
+/// and for `import.defer` the phase marker plus resolving functions).
+/// `Ok(returned)` is a normal hook return; `Error(thrown)` is either "no hook
+/// installed" (a TypeError) or the value the hook threw.
 fn call_host_hook(
   state: State(host),
   specifier_string: String,
-  referrer_args: List(JsValue),
+  extra_args: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let hook =
-    object.get_own_property(
-      state.heap,
-      state.ctx.global_object,
-      Named(hook_property),
-    )
-  case hook {
-    option.Some(DataProperty(value: JsObject(_) as hook_fn, ..)) ->
+  case state.ctx.host_hooks.import_hook {
+    Some(hook_fn) ->
       case
         state.call(state, hook_fn, JsUndefined, [
           JsString(specifier_string),
-          ..referrer_args
+          ..extra_args
         ])
       {
         Ok(#(namespace, state)) -> #(state, Ok(namespace))
         Error(#(thrown, state)) -> #(state, Error(thrown))
       }
-    _ ->
+    None ->
       state.type_error(state, "Dynamic import is not supported in this context")
+  }
+}
+
+/// `call_host_hook` for the ~defer~ phase, mapping the raw call outcome onto
+/// the typed `DeferHookOutcome` contract: any NORMAL return means the hook
+/// took ownership of the import promise's capability (its return VALUE
+/// carries nothing — the hook was handed the resolving functions and settles
+/// through them), any ABRUPT completion is a value to reject with. There is
+/// deliberately no way to express "resolve with the hook's return value"
+/// here.
+fn call_defer_host_hook(
+  state: State(host),
+  specifier_string: String,
+  hook_args: List(JsValue),
+) -> #(State(host), DeferHookOutcome) {
+  case call_host_hook(state, specifier_string, hook_args) {
+    #(state, Ok(_)) -> #(state, DeferHookSettledCapability)
+    #(state, Error(reason)) -> #(state, DeferHookRejected(reason))
   }
 }

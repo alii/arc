@@ -1,11 +1,13 @@
 //// Host side of dynamic import() — HostLoadImportedModule (§16.2.1.8).
 ////
 //// The VM's DynamicImport opcode (see arc/vm/exec/dynamic_import) performs
-//// the language-level ImportCall steps and then calls a host hook installed
-//// on the global object. This module provides that hook: it resolves and
-//// loads the requested module source via an embedder-supplied loader,
-//// compiles + links + evaluates the module graph through arc/module, and
-//// returns the Module Namespace Exotic Object.
+//// the language-level ImportCall steps and then calls a host hook carried as
+//// ENGINE state on the realm's `HostHooks.import_hook` — never a globalThis
+//// property, so guest JS can neither observe nor replace the module loader.
+//// This module provides that hook: it resolves and loads the requested
+//// module source via an embedder-supplied loader, compiles + links +
+//// evaluates the module graph through arc/module, and returns the Module
+//// Namespace Exotic Object.
 ////
 //// Per spec, "If this operation is called multiple times with the same
 //// (referrer, moduleRequest) pair ... it must perform FinishLoadingImportedModule
@@ -19,12 +21,10 @@ import arc/module/registry
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/dynamic_import
+import arc/vm/heap
 import arc/vm/internal/job_queue
-import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{
-  type JsValue, type Ref, JsObject, JsString, JsUndefined, Named,
-}
+import arc/vm/value.{type JsValue, type Ref, JsObject, JsString, JsUndefined}
 import gleam/dict
 import gleam/io
 import gleam/list
@@ -47,23 +47,29 @@ pub type ResolveFn =
 pub type LoadFn =
   fn(String) -> Result(String, String)
 
-/// Install the dynamic-import host hook on `global_object`. `referrer` is the
-/// path of the entry script/module (relative specifiers resolve against it
-/// when no module body is active); `resolve` maps specifiers to module
-/// identities and `load` reads their sources — a cached import never calls
-/// `load` at all. After installation, `import(specifier)` works in any code
-/// evaluated against this global. The VM passes the active module's resolved
-/// specifier as a second argument when one was executing at the ImportCall
-/// site, which takes precedence over the install-time referrer (§16.2.1.8's
-/// referencingScriptOrModule).
+/// Build the dynamic-import host hook. `referrer` is the path of the entry
+/// script/module (relative specifiers resolve against it when no module body
+/// is active); `resolve` maps specifiers to module identities and `load`
+/// reads their sources — a cached import never calls `load` at all.
+///
+/// The returned function value is ENGINE state: the embedder stores it in the
+/// `HostHooks.import_hook` it boots the realm with, and every derived State
+/// (eval realms, module bodies, dynamic-import continuations) inherits it.
+/// It is NEVER installed as a globalThis property, so guest JS cannot read,
+/// replace or delete the module loader. Because nothing else in the heap
+/// reaches the hook's function object, it is pinned as a persistent GC root
+/// here (like builtins prototypes and template objects).
+///
+/// The VM passes the active module's resolved specifier as a second argument
+/// when one was executing at the ImportCall site, which takes precedence over
+/// the install-time referrer (§16.2.1.8's referencingScriptOrModule).
 pub fn install_import_hook(
   h: Heap(host),
   b: Builtins,
-  global_object: Ref,
   referrer: String,
   resolve: ResolveFn,
   load: LoadFn,
-) -> Heap(host) {
+) -> #(Heap(host), JsValue) {
   let #(h, hook_ref) =
     common.alloc_host_fn(
       h,
@@ -74,16 +80,79 @@ pub fn install_import_hook(
       "%DynamicImportHook%",
       1,
     )
-  object.define_method_property(
-    h,
-    global_object,
-    Named(dynamic_import.hook_property),
-    JsObject(hook_ref),
-  )
+  #(heap.root(h, hook_ref), JsObject(hook_ref))
 }
 
-/// The hook body: load, compile, link and evaluate the requested module
-/// graph, returning its namespace (or the error to reject the import with).
+/// One dynamic-import hook invocation, parsed EXACTLY once from the
+/// positional argument list the VM's DynamicImport / DynamicImportDefer
+/// opcodes build (see `arc/vm/exec/dynamic_import`). Existence of a value of
+/// this type means the call was well-formed: the specifier is a real string
+/// (never a silently-defaulted `""`), and a `Defer` phase always carries both
+/// resolving functions.
+type ImportCall {
+  ImportCall(specifier: String, referrer: String, phase: ImportPhase)
+}
+
+/// Which HostLoadImportedModule phase was requested.
+type ImportPhase {
+  /// `import(specifier)`: load, link and EVALUATE the graph. The hook's
+  /// return value (the namespace, or an in-flight namespace promise) settles
+  /// the import promise via the standard reaction machinery.
+  Eager
+  /// `import.defer(specifier)` (tc39/proposal-defer-import-eval): load and
+  /// LINK only. The hook OWNS the import promise's settlement through these
+  /// resolving functions (see `dynamic_import.DeferHookOutcome`) and its
+  /// return value carries nothing. The constructor requires BOTH functions:
+  /// a defer call without a capability is unrepresentable.
+  Defer(resolve_fn: JsValue, reject_fn: JsValue)
+}
+
+/// Parse the hook's positional argument list into an `ImportCall`, or the
+/// TypeError message to reject the import promise with. This is the ONLY
+/// place the arg-list encoding is read; a missing or non-string specifier,
+/// or a defer phase without its promise capability, is an immediate
+/// rejection — never a silent fallback.
+fn parse_import_call(
+  args: List(JsValue),
+  entry_referrer: String,
+) -> Result(ImportCall, String) {
+  let defer_marker = dynamic_import.defer_phase_marker
+  case args {
+    [] -> Error("import hook called without a specifier")
+    [JsString(specifier), ..rest] -> {
+      // The referencingScriptOrModule captured at the ImportCall site (the
+      // module whose body contained the import()); a script-level import()
+      // has no active module and falls back to the realm's entry referrer.
+      let referrer = case rest {
+        [JsString(referrer), ..] -> referrer
+        _ -> entry_referrer
+      }
+      case rest {
+        // Eager: at most the referrer follows the specifier.
+        [] | [_] -> Ok(ImportCall(specifier:, referrer:, phase: Eager))
+        // Defer: the phase marker AND both resolving functions, together.
+        [_, JsString(phase), resolve_fn, reject_fn] if phase == defer_marker ->
+          Ok(ImportCall(
+            specifier:,
+            referrer:,
+            phase: Defer(resolve_fn:, reject_fn:),
+          ))
+        [_, JsString(phase), ..] if phase == defer_marker ->
+          Error(
+            "import hook called with the defer phase but no promise capability",
+          )
+        _ -> Error("import hook called with unexpected arguments")
+      }
+    }
+    [_, ..] -> Error("import hook called with a non-string specifier")
+  }
+}
+
+/// The hook body: parse the call, then load, compile, link and evaluate (or,
+/// for `import.defer`, link) the requested module graph. For `Eager` the
+/// returned `Ok` value settles the import promise; for `Defer` the hook
+/// settles the promise itself through its capability and the `Ok` value is
+/// meaningless. `Error(thrown)` always means "reject with `thrown`".
 fn import_module(
   args: List(JsValue),
   _this: JsValue,
@@ -92,89 +161,83 @@ fn import_module(
   resolve: ResolveFn,
   load: LoadFn,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let specifier = case args {
-    [JsString(s), ..] -> s
-    _ -> ""
+  case parse_import_call(args, entry_referrer) {
+    Error(message) -> state.type_error(state, message)
+    Ok(ImportCall(specifier:, referrer:, phase:)) ->
+      case resolve(specifier, referrer) {
+        Error(reason) ->
+          // Resolution failure → TypeError (host resolution error).
+          state.type_error(
+            state,
+            "Cannot find module '" <> specifier <> "': " <> reason,
+          )
+        Ok(resolved) ->
+          case phase {
+            Defer(resolve_fn:, reject_fn:) ->
+              defer_import_module(
+                state,
+                resolved,
+                resolve,
+                load,
+                resolve_fn,
+                reject_fn,
+              )
+            Eager -> eager_import_module(state, resolved, resolve, load)
+          }
+      }
   }
-  // The referencingScriptOrModule captured at the ImportCall site (the module
-  // whose body contained the import()), else the realm's entry script.
-  let referrer = case args {
-    [_, JsString(r), ..] -> r
-    _ -> entry_referrer
-  }
-  // Phase marker: `import.defer(specifier)` passes "defer" as a third
-  // argument — load + link only, resolve with the Deferred Module Namespace.
-  let is_defer = case args {
-    [_, _, JsString("defer"), ..] -> True
-    _ -> False
-  }
-  // The DynamicImportDefer opcode passes the import promise's resolving
-  // functions as 4th/5th arguments, so the defer continuation can settle
-  // AFTER pending async transitive dependencies finish evaluating.
-  let capability = case args {
-    [_, _, _, resolve_fn, reject_fn, ..] -> Some(#(resolve_fn, reject_fn))
-    _ -> None
-  }
-  case resolve(specifier, referrer) {
-    Error(reason) ->
-      // Resolution failure → TypeError (host resolution error).
-      state.type_error(
-        state,
-        "Cannot find module '" <> specifier <> "': " <> reason,
-      )
-    Ok(resolved) if is_defer ->
-      defer_import_module(state, resolved, resolve, load, capability)
-    Ok(resolved) ->
-      // A previous import of this module settled (or is mid-evaluation) —
-      // repeat the same result. The error cache wins: a namespace entry is
-      // pre-published before evaluation and may be stale after a throw. The
-      // pending cache (module parked on top-level await) wins over the
-      // namespace cache: per Evaluate() step 4 a re-import returns the same
-      // in-flight top-level promise instead of re-running the body.
+}
+
+/// The `import(specifier)` continuation: repeat a previously settled (or
+/// in-flight) result, else load + evaluate the graph.
+fn eager_import_module(
+  state: State(host),
+  resolved: String,
+  resolve: ResolveFn,
+  load: LoadFn,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  // A previous import of this module settled (or is mid-evaluation) —
+  // repeat the same result. The error cache wins: a namespace entry is
+  // pre-published before evaluation and may be stale after a throw. The
+  // pending cache (module parked on top-level await) wins over the
+  // namespace cache: per Evaluate() step 4 a re-import returns the same
+  // in-flight top-level promise instead of re-running the body.
+  case
+    registry.read_module_error(state.heap, state.ctx.global_object, resolved)
+  {
+    Some(error) -> #(state, Error(error))
+    None ->
       case
-        registry.read_module_error(
+        registry.read_pending_promise(
           state.heap,
           state.ctx.global_object,
           resolved,
         )
       {
-        Some(error) -> #(state, Error(error))
-        None ->
-          case
-            registry.read_pending_promise(
+        Some(pending_promise_ref) -> #(state, Ok(JsObject(pending_promise_ref)))
+        None -> {
+          // A registered namespace alone is not enough: linking (e.g. an
+          // earlier `import.defer()`) registers namespaces WITHOUT
+          // evaluating. Only short-circuit when the module's body has
+          // completed (`Evaluated`) or is mid-run (`Evaluating` — the
+          // re-entrant import case, which must not re-run the body).
+          let status =
+            registry.read_module_status(
               state.heap,
               state.ctx.global_object,
               resolved,
             )
-          {
-            Some(pending_promise_ref) -> #(
-              state,
-              Ok(JsObject(pending_promise_ref)),
+          let namespace =
+            registry.read_namespace(
+              state.heap,
+              state.ctx.global_object,
+              resolved,
             )
-            None -> {
-              // A registered namespace alone is not enough: linking (e.g. an
-              // earlier `import.defer()`) registers namespaces WITHOUT
-              // evaluating. Only short-circuit when the module's body has
-              // completed (`Evaluated`) or is mid-run (`Evaluating` — the
-              // re-entrant import case, which must not re-run the body).
-              let status =
-                registry.read_module_status(
-                  state.heap,
-                  state.ctx.global_object,
-                  resolved,
-                )
-              let namespace =
-                registry.read_namespace(
-                  state.heap,
-                  state.ctx.global_object,
-                  resolved,
-                )
-              case namespace, status {
-                Some(ns_ref), Some(_) -> #(state, Ok(JsObject(ns_ref)))
-                _, _ -> evaluate_module(state, resolved, resolve, load)
-              }
-            }
+          case namespace, status {
+            Some(ns_ref), Some(_) -> #(state, Ok(JsObject(ns_ref)))
+            _, _ -> evaluate_module(state, resolved, resolve, load)
           }
+        }
       }
   }
 }
@@ -252,15 +315,21 @@ fn evaluate_module(
 /// Deferred Module Namespace — cached so repeated deferred imports (static
 /// or dynamic) of the same module yield the identical object — once those
 /// evaluation promises settle (immediately when there are none).
+///
+/// This is the hook's ~defer~ arm, so it OWNS the import promise's
+/// settlement (see `dynamic_import.DeferHookOutcome`): every success path
+/// calls `resolve_fn` itself and the returned `Ok` value is meaningless.
+/// `Error(thrown)` is an abrupt completion the caller rejects with.
 fn defer_import_module(
   state: State(host),
   resolved: String,
   resolve: ResolveFn,
   load: LoadFn,
-  capability: option.Option(#(JsValue, JsValue)),
+  resolve_fn: JsValue,
+  reject_fn: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // An already-failed module repeats the same rejection; an already
-  // registered deferred namespace is returned as-is.
+  // registered deferred namespace is resolved with as-is.
   case
     registry.read_module_error(state.heap, state.ctx.global_object, resolved)
   {
@@ -273,7 +342,8 @@ fn defer_import_module(
           resolved,
         )
       {
-        Some(deferred_ns_ref) -> #(state, Ok(JsObject(deferred_ns_ref)))
+        Some(deferred_ns_ref) ->
+          settle_defer_import(state, resolve_fn, JsObject(deferred_ns_ref))
         None -> {
           use source <- with_loaded_source(state, resolved, load)
           case module.compile_bundle(resolved, source, resolve, load) {
@@ -325,7 +395,8 @@ fn defer_import_module(
                         resolved,
                         ns,
                         linked_bundle,
-                        capability,
+                        resolve_fn,
+                        reject_fn,
                       )
                     }
                     Some(_) | None ->
@@ -342,6 +413,18 @@ fn defer_import_module(
         }
       }
   }
+}
+
+/// Settle the deferred import's promise with `value` through the capability
+/// the VM handed the hook, and hand back the "hook took ownership" normal
+/// completion (its `Ok` value carries nothing — see
+/// `dynamic_import.DeferHookOutcome`).
+fn settle_defer_import(
+  state: State(host),
+  resolve_fn: JsValue,
+  value: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  #(call_import_settle_fn(state, resolve_fn, value), Ok(JsUndefined))
 }
 
 /// Read `resolved`'s source for compilation, or reject the import with a
@@ -364,13 +447,17 @@ fn with_loaded_source(
 
 /// ContinueDynamicImport's ~defer~ arm, after linking: evaluate the entry's
 /// asynchronous transitive dependencies; resolve the import promise with the
-/// deferred namespace only after their top-level promises settle.
+/// deferred namespace only after their top-level promises settle. The
+/// promise capability is guaranteed present (a `Defer` phase cannot be
+/// constructed without it), so "pending async deps but nowhere to settle" is
+/// no longer a reachable error.
 fn evaluate_deferred_async_deps(
   state: State(host),
   resolved: String,
   ns: JsValue,
   linked_bundle: module.LinkedBundle,
-  capability: option.Option(#(JsValue, JsValue)),
+  resolve_fn: JsValue,
+  reject_fn: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // As in evaluate_module: never drain a nested event loop here — bodies run
   // with an identity driver and any jobs they enqueued (including the parked
@@ -388,33 +475,13 @@ fn evaluate_deferred_async_deps(
     State(..state, heap: h, job_queue: job_queue.append(state.job_queue, jobs))
   case dep_result {
     // No async dependency parked on top-level await — resolve immediately.
-    Ok([]) -> #(state, Ok(ns))
-    Ok(pendings) ->
-      case capability {
-        Some(#(resolve_fn, reject_fn)) -> {
-          let state =
-            chain_deferred_settlement(
-              state,
-              ns,
-              pendings,
-              resolve_fn,
-              reject_fn,
-            )
-          // The reactions above settle the import promise; tell the import
-          // job not to.
-          #(state, Ok(JsString(dynamic_import.settled_marker)))
-        }
-        // No resolving functions (hook not invoked via the
-        // DynamicImportDefer opcode) — reject rather than resolve before the
-        // async dependencies finished evaluating.
-        None ->
-          state.type_error(
-            state,
-            "import.defer('"
-              <> resolved
-              <> "'): missing promise capability for pending async dependencies",
-          )
-      }
+    Ok([]) -> settle_defer_import(state, resolve_fn, ns)
+    // The chained reactions settle the import promise once every pending
+    // dependency's top-level promise does.
+    Ok(pendings) -> #(
+      chain_deferred_settlement(state, ns, pendings, resolve_fn, reject_fn),
+      Ok(JsUndefined),
+    )
     Error(module.EvaluationError(value: thrown, heap: _)) -> {
       // Repeat the same rejection on every future import of this entry.
       let state = cache_module_error(state, resolved, thrown)

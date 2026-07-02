@@ -689,7 +689,7 @@ fn do_run_module(
 
   // Evaluate harness files as REPL scripts to populate globals. Async module
   // tests use the same $DONE/print protocol as scripts (doneprintHandle.js).
-  use #(h, env) <- result.try(eval_harness(
+  use #(h, env, test_hooks) <- result.try(eval_harness(
     metadata,
     h,
     b,
@@ -716,7 +716,7 @@ fn do_run_module(
           b,
           global_object,
           bundle,
-          harness_host_hooks(),
+          test_hooks,
           settle_pending_wakes,
         )
       case result {
@@ -772,7 +772,7 @@ fn do_run_script_with_harness(
   let #(h, b, global_object) = boot_base_realm()
 
   // Evaluate harness files as REPL scripts to populate globals
-  use #(h, env) <- result.try(eval_harness(
+  use #(h, env, test_hooks) <- result.try(eval_harness(
     metadata,
     h,
     b,
@@ -805,7 +805,7 @@ fn do_run_script_with_harness(
               h,
               b,
               env,
-              harness_host_hooks(),
+              test_hooks,
               settle_pending_wakes,
             )
           {
@@ -821,6 +821,11 @@ fn do_run_script_with_harness(
 /// This is the spec-correct approach: harness is evaluated in the realm
 /// before the test module runs, making harness functions (assert, etc.)
 /// available as globals.
+///
+/// Also hands back the `HostHooks` the TEST source must be booted with:
+/// the harness's Atomics capabilities plus the dynamic-import host hook —
+/// engine state, not a globalThis property, so it has to be threaded into
+/// the State that runs the test rather than installed on the realm's global.
 fn eval_harness(
   metadata: TestMetadata,
   h: Heap(host),
@@ -828,24 +833,27 @@ fn eval_harness(
   global_object: value.Ref,
   path: String,
   is_async: Bool,
-) -> Result(#(Heap(host), entry.ReplEnv), String) {
+) -> Result(#(Heap(host), entry.ReplEnv, host.HostHooks), String) {
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
     True -> {
-      Ok(#(h, entry.new_repl_env(global_object)))
+      // Raw tests get no harness and no import hook — import() rejects.
+      Ok(#(h, entry.new_repl_env(global_object), harness_host_hooks()))
     }
     False -> {
-      // Install the dynamic-import host hook: import() resolves specifiers
-      // relative to the test file and loads fixtures from disk.
-      let h =
+      // Build the dynamic-import host hook: import() resolves specifiers
+      // relative to the test file and loads fixtures from disk. It rides on
+      // `HostHooks.import_hook`, never on globalThis.
+      let #(h, import_hook) =
         module_host.install_import_hook(
           h,
           b,
-          global_object,
           path,
           test262_resolve,
           test262_load,
         )
+      let test_hooks =
+        state.HostHooks(..harness_host_hooks(), import_hook: Some(import_hook))
       // Install native $262 object on the global
       let #(h, realm_ref) =
         heap.alloc(
@@ -899,13 +907,16 @@ fn eval_harness(
       )
       use #(h, env) <- result.try(eval_harness_template(preamble, h, b, env))
 
-      list.try_fold(harness_files, #(h, env), fn(acc, filename) {
-        let #(heap, env) = acc
-        use template <- result.try(
-          harness_template(filename, fn() { read_harness_file(filename) }),
-        )
-        eval_harness_template(template, heap, b, env)
-      })
+      use #(h, env) <- result.map(
+        list.try_fold(harness_files, #(h, env), fn(acc, filename) {
+          let #(heap, env) = acc
+          use template <- result.try(
+            harness_template(filename, fn() { read_harness_file(filename) }),
+          )
+          eval_harness_template(template, heap, b, env)
+        }),
+      )
+      #(h, env, test_hooks)
     }
   }
 }
