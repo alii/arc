@@ -538,7 +538,12 @@ pub fn eval_native(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [JsString(source), ..] ->
-      run_source_in_current_realm(source, state, run_to_completion, new_state_fn)
+      run_source_in_current_realm(
+        source,
+        state,
+        run_to_completion,
+        new_state_fn,
+      )
     // Non-string first arg: return it unchanged (spec §19.2.1 step 2)
     [x, ..] -> #(state, Ok(x))
     [] -> #(state, Ok(JsUndefined))
@@ -685,7 +690,15 @@ fn run_direct_eval(
   }
   // Direct eval inherits the caller's `this` (spec §19.2.1.1 step 16.a)
   // via the boxed capture appended to caller_box_refs above.
-  run_eval(template, locals, h, state, eval_env, run_to_completion, new_state_fn)
+  run_eval(
+    template,
+    locals,
+    h,
+    state,
+    eval_env,
+    run_to_completion,
+    new_state_fn,
+  )
 }
 
 /// Coerce a list of JsValues to strings, threading state.

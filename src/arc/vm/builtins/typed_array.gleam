@@ -2393,10 +2393,7 @@ fn witness_type_error(
 /// buffer: Some(error) when the buffer is detached or the view is out of
 /// bounds (a fixed view past the end of a shrunk resizable buffer, or a
 /// length-tracking view whose byte offset is past the end).
-fn view_witness_error(
-  h: Heap(host),
-  view: TaView,
-) -> Option(WitnessError) {
+fn view_witness_error(h: Heap(host), view: TaView) -> Option(WitnessError) {
   let TaView(buffer:, kind:, byte_offset: off, length: declared) = view
   case object.typed_array_buffer_data(h, buffer) {
     None -> Some(Detached)
@@ -3195,8 +3192,7 @@ fn sorted_snapshot(
     },
   )
   use view, state <- validate_ta(this, state)
-  let items =
-    join_collect(state.heap, this, view.length, 0, []) |> list.reverse
+  let items = join_collect(state.heap, this, view.length, 0, []) |> list.reverse
   use sorted, state <- try_state(sort_values(state, items, comparator_for(cmp)))
   cont(view, sorted, state)
 }
@@ -3519,8 +3515,7 @@ fn u8_live_view(
       let len =
         object.typed_array_view_length(state.heap, buffer, kind, off, decl_len)
       case object.typed_array_buffer_data(state.heap, buffer) {
-        None ->
-          Error(state.type_error_value(state, witness_message(Detached)))
+        None -> Error(state.type_error_value(state, witness_message(Detached)))
         Some(data) ->
           case off + len > bit_array.byte_size(data) {
             True ->
@@ -3783,7 +3778,10 @@ fn decode_into_view(
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case res {
     DecodeFailed(partial:) ->
-      Error(decode_error(u8_write_bytes(state, buffer, data, off, partial), codec))
+      Error(decode_error(
+        u8_write_bytes(state, buffer, data, off, partial),
+        codec,
+      ))
     Decoded(read:, bytes:) -> {
       let state = u8_write_bytes(state, buffer, data, off, bytes)
       Ok(read_written_result(state, read, bit_array.byte_size(bytes)))
@@ -3929,8 +3927,7 @@ fn b64_loop(
                 True -> DecodeFailed(decode_bytes(acc))
                 False ->
                   case b64_decode_partial(chunk, chunk_len, False) {
-                    Some(tail) ->
-                      Decoded(index, decode_bytes([tail, ..acc]))
+                    Some(tail) -> Decoded(index, decode_bytes([tail, ..acc]))
                     None -> DecodeFailed(decode_bytes(acc))
                   }
               }

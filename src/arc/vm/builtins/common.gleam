@@ -786,7 +786,8 @@ pub fn add_symbol_property(
   symbol: value.SymbolId,
   prop: Property,
 ) -> Heap(ctx, host) {
-  let assert Some(ObjectSlot(symbol_properties:, ..) as slot) = heap.read(h, ref)
+  let assert Some(ObjectSlot(symbol_properties:, ..) as slot) =
+    heap.read(h, ref)
   heap.write(
     h,
     ref,

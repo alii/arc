@@ -65,7 +65,12 @@ pub fn insert(
       next_seq + 1,
     )
   }
-  OrderedEntries(entries: dict.insert(entries, key, val), seqs:, order:, next_seq:)
+  OrderedEntries(
+    entries: dict.insert(entries, key, val),
+    seqs:,
+    order:,
+    next_seq:,
+  )
 }
 
 /// Delete `key`, returning the updated store and whether the key was present.

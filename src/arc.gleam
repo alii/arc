@@ -79,7 +79,12 @@ fn eval(
     Error(err) -> #(state, Error(err))
     Ok(template) ->
       case
-        entry.run_and_drain_repl(template, state.heap, state.builtins, state.env)
+        entry.run_and_drain_repl(
+          template,
+          state.heap,
+          state.builtins,
+          state.env,
+        )
       {
         Ok(#(Ok(val), heap, env)) -> #(ReplState(..state, heap:, env:), Ok(val))
         Ok(#(Error(val), heap, env)) -> #(
@@ -183,8 +188,7 @@ fn handle_repl_line(state: ReplState(host), line: String) -> ReplStep(host) {
               let #(new_state, result) = eval(state, ex.source)
               case result {
                 Ok(_) -> Nil
-                Error(err) ->
-                  io.println(format_repl_error(err, new_state.heap))
+                Error(err) -> io.println(format_repl_error(err, new_state.heap))
               }
               io.println("")
               Continue(new_state)

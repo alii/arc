@@ -157,7 +157,10 @@ fn take_unicode_escape(
       case is_high_surrogate(unit) {
         True ->
           case take_low_surrogate_escape(rest) {
-            Ok(#(low, after_pair)) -> #(combine_surrogates(unit, low), after_pair)
+            Ok(#(low, after_pair)) -> #(
+              combine_surrogates(unit, low),
+              after_pair,
+            )
             Error(Nil) -> #(replacement_character, rest)
           }
         False ->

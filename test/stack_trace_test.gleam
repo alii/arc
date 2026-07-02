@@ -8,7 +8,9 @@ import gleam/string
 
 /// Parse + compile + run JS source, return the settled outcome
 /// (Ok(value) / Error(thrown)).
-fn run_js(source: String) -> Result(Result(value.JsValue, value.JsValue), String) {
+fn run_js(
+  source: String,
+) -> Result(Result(value.JsValue, value.JsValue), String) {
   case parser.parse(source, parser.Script) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(program, sb)) ->

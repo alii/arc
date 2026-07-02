@@ -7,9 +7,9 @@ import arc/vm/builtins/common
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
 import arc/vm/value.{
-  type JsValue, type Ref, JsObject, JsSymbol, ObjectSlot,
-  SymbolConstructor, SymbolDescriptionGetter, SymbolFor, SymbolKeyFor,
-  SymbolPrototypeToPrimitive, SymbolPrototypeToString, SymbolPrototypeValueOf,
+  type JsValue, type Ref, JsObject, JsSymbol, ObjectSlot, SymbolConstructor,
+  SymbolDescriptionGetter, SymbolFor, SymbolKeyFor, SymbolPrototypeToPrimitive,
+  SymbolPrototypeToString, SymbolPrototypeValueOf,
 }
 import gleam/dict
 import gleam/option.{type Option, None, Some}

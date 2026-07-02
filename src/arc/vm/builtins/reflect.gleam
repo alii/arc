@@ -240,12 +240,7 @@ fn reflect_get(
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
   use pk, state <- state.try_op(property.to_prop_key(state, key_val))
   // Step 4: Return ? target.[[Get]](key, receiver).
-  use val, state <- state.try_op(object.get_prop_value(
-    state,
-    ref,
-    pk,
-    receiver,
-  ))
+  use val, state <- state.try_op(object.get_prop_value(state, ref, pk, receiver))
   #(state, Ok(val))
 }
 

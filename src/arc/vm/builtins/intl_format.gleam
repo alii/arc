@@ -1126,8 +1126,7 @@ fn round_fraction(
                   }
               }
           }
-          let up =
-            round_up_cmp(mode, negative, cmp, odd: { n / inc } % 2 == 1)
+          let up = round_up_cmp(mode, negative, cmp, odd: { n / inc } % 2 == 1)
           case up {
             True -> n - r + inc
             False -> n - r
