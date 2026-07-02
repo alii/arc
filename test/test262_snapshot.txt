@@ -2089,7 +2089,6 @@ language/statements/block/early-errors/invalid-names-call-expression-bad-referen
 language/statements/block/early-errors/invalid-names-call-expression-this.js
 language/statements/block/early-errors/invalid-names-member-expression-bad-reference.js
 language/statements/block/early-errors/invalid-names-member-expression-this.js
-language/statements/block/labeled-continue.js
 language/statements/class/async-gen-method-static/array-destructuring-param-strict-body.js
 language/statements/class/async-gen-method-static/await-as-identifier-reference-escaped.js
 language/statements/class/async-gen-method-static/object-destructuring-param-strict-body.js
@@ -2586,7 +2585,6 @@ language/statements/if/if-stmt-else-async-gen.js
 language/statements/if/if-stmt-else-gen.js
 language/statements/if/let-block-with-newline.js
 language/statements/if/let-identifier-with-newline.js
-language/statements/labeled/continue.js
 language/statements/labeled/decl-async-function.js
 language/statements/labeled/decl-async-generator.js
 language/statements/labeled/decl-cls.js

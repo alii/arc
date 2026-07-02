@@ -448,13 +448,104 @@ fn expect_dup_param(
   src: String,
   mode: parser.ParseMode,
 ) -> Result(Nil, String) {
+  expect_parse_error_containing(src, mode, "Duplicate parameter")
+}
+
+/// Parsing `src` must fail with an error whose message contains `needle`.
+fn expect_parse_error_containing(
+  src: String,
+  mode: parser.ParseMode,
+  needle: String,
+) -> Result(Nil, String) {
   case parser.parse(src, mode) {
-    Ok(_) -> Error(src <> " -> parsed; expected a duplicate-param error")
+    Ok(_) -> Error(src <> " -> parsed; expected: " <> needle)
     Error(err) -> {
       let msg = parser.parse_error_to_string(err)
-      case string.contains(msg, "Duplicate parameter") {
+      case string.contains(msg, needle) {
         True -> Ok(Nil)
         False -> Error(src <> " -> wrong error: " <> msg)
+      }
+    }
+  }
+}
+
+/// ES2024 §14.9.1 Early Errors: `continue L` must target a label that
+/// denotes an IterationStatement. The kind of a label is a property of the
+/// whole `a: b: …` chain in front of the statement, not of the single
+/// innermost label, so every label of a chain that prefixes a loop is a
+/// legal continue target.
+pub fn continue_label_must_denote_iteration_statement_test() {
+  let non_iteration = "does not denote an iteration statement"
+  let results = [
+    // A label on a plain (non-loop) statement is not a continue target...
+    expect_parse_error_containing(
+      "while (1) { x: { continue x; } }",
+      parser.Script,
+      non_iteration,
+    ),
+    expect_parse_error_containing(
+      "do { x: { continue x; } } while (0);",
+      parser.Script,
+      non_iteration,
+    ),
+    expect_parse_error_containing(
+      "x: while (1) { y: { continue y; } }",
+      parser.Script,
+      non_iteration,
+    ),
+    expect_parse_error_containing(
+      "a: switch (1) { default: while (1) { continue a; } }",
+      parser.Script,
+      non_iteration,
+    ),
+    // ...but it is still a legal break target.
+    expect_parses("x: { break x; }", parser.Script),
+    expect_parses("while (1) { x: { break x; } }", parser.Script),
+    // EVERY label of a chain that prefixes a loop is a continue target.
+    expect_parses("a: while (1) { continue a; }", parser.Script),
+    expect_parses("a: b: while (1) { continue a; }", parser.Script),
+    expect_parses("a: b: c: for (;;) { continue b; }", parser.Script),
+    expect_parses("a: b: do { continue a; } while (0);", parser.Script),
+    expect_parses("a: for (x in {}) { continue a; }", parser.Script),
+    // A loop label stays a continue target through nested plain labels.
+    expect_parses("a: while (1) { b: { continue a; } }", parser.Script),
+    // Duplicate labels are still rejected, within one chain and across
+    // nested statements.
+    expect_parse_error_containing(
+      "a: a: while (1) {}",
+      parser.Script,
+      "Duplicate label",
+    ),
+    expect_parse_error_containing(
+      "a: b: a: while (1) {}",
+      parser.Script,
+      "Duplicate label",
+    ),
+    expect_parse_error_containing(
+      "a: { a: ; }",
+      parser.Script,
+      "Duplicate label",
+    ),
+    // Undefined labels are still rejected.
+    expect_parse_error_containing(
+      "while (1) { continue nope; }",
+      parser.Script,
+      "Undefined label",
+    ),
+  ]
+  let errors =
+    list.filter_map(results, fn(r) {
+      case r {
+        Ok(Nil) -> Error(Nil)
+        Error(reason) -> Ok(reason)
+      }
+    })
+  case errors {
+    [] -> Nil
+    _ -> {
+      list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
+      panic as {
+        int.to_string(list.length(errors)) <> " continue-label cases failed"
       }
     }
   }
