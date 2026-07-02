@@ -231,22 +231,48 @@ fn get_script_args() -> List(String)
 @external(erlang, "erlang", "halt")
 fn halt(code: Int) -> a
 
+/// Everything that can go wrong on a non-interactive CLI path (`arc <file>`,
+/// `arc -p <expr>`), still carrying its original typed cause plus whatever
+/// context (engine, heap) is needed to render it. The runners never print —
+/// they return one of these and `main` renders it once via `format_cli_error`,
+/// mirroring `ReplError` / `format_repl_error`.
+type CliError(host) {
+  /// The entry file could not be read from disk.
+  ReadFailed(path: String, error: simplifile.FileError)
+  /// The parse → compile → run pipeline failed (or an ES module bundle
+  /// failed to link/evaluate).
+  EvalFailed(error: engine.EvalError(host))
+  /// The script ran but threw an uncaught exception. The engine that produced
+  /// it is kept so the thrown value can be inspected at the print site.
+  Uncaught(engine: engine.Engine(host), thrown: JsValue)
+  /// `arc -p <expr>` failed. The heap that produced the error is kept so a
+  /// thrown value can be inspected at the print site.
+  PrintFailed(heap: Heap(host), error: ReplError)
+}
+
+/// Render a `CliError` at the print site (in `main`, just before exiting
+/// non-zero).
+fn format_cli_error(err: CliError(host)) -> String {
+  case err {
+    ReadFailed(path, file_err) ->
+      "Error reading " <> path <> ": " <> simplifile.describe_error(file_err)
+    EvalFailed(eval_err) -> engine.eval_error_message(eval_err)
+    Uncaught(eng, thrown) -> "Uncaught " <> engine.format_error(eng, thrown)
+    PrintFailed(heap, repl_err) -> format_repl_error(repl_err, heap)
+  }
+}
+
 /// Run a JS source file. `Ok(Nil)` means it ran to completion with nothing
-/// uncaught; every failure prints its diagnostic to stderr and returns
-/// `Error(Nil)` so `main` can exit non-zero. The engine boots with its default
-/// host hooks (`engine.new()`); `finish` drains microtasks (and any embedder
-/// macrotask loop) after the top level returns.
+/// uncaught; every failure is returned as a typed `CliError` for `main` to
+/// render and exit non-zero on. The engine boots with its default host hooks
+/// (`engine.new()`); `finish` drains microtasks (and any embedder macrotask
+/// loop) after the top level returns.
 fn run_file(
   path: String,
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(Nil, Nil) {
+) -> Result(Nil, CliError(host)) {
   case simplifile.read(path) {
-    Error(err) -> {
-      io.println_error(
-        "Error reading " <> path <> ": " <> simplifile.describe_error(err),
-      )
-      Error(Nil)
-    }
+    Error(err) -> Error(ReadFailed(path:, error: err))
     Ok(source) -> {
       let is_module = !string.ends_with(path, ".cjs")
       case is_module {
@@ -262,17 +288,11 @@ fn run_module_file(
   path: String,
   source: String,
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(Nil, Nil) {
+) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
-  case
-    engine.eval_module_with(eng, path, source, resolve_dep, load_dep, finish)
-  {
-    Ok(_) -> Ok(Nil)
-    Error(err) -> {
-      io.println_error(engine.eval_error_message(err))
-      Error(Nil)
-    }
-  }
+  engine.eval_module_with(eng, path, source, resolve_dep, load_dep, finish)
+  |> result.replace(Nil)
+  |> result.map_error(EvalFailed)
 }
 
 /// Resolve a dependency specifier: relative paths (./foo, ../bar) against
@@ -303,34 +323,25 @@ fn load_dep(resolved: String) -> Result(String, String) {
 fn run_script_file(
   source: String,
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(Nil, Nil) {
+) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
   case engine.eval_with(eng, source, finish) {
-    Ok(#(Threw(val), eng)) -> {
-      io.println_error("Uncaught " <> engine.format_error(eng, val))
-      Error(Nil)
-    }
+    Ok(#(Threw(val), eng)) -> Error(Uncaught(engine: eng, thrown: val))
     Ok(_) -> Ok(Nil)
-    Error(err) -> {
-      io.println_error(engine.eval_error_message(err))
-      Error(Nil)
-    }
+    Error(err) -> Error(EvalFailed(err))
   }
 }
 
 /// `arc -p <expr>`: evaluate one expression in a fresh REPL state and print
-/// the result. `Error(Nil)` (and a stderr diagnostic) if the eval failed.
-fn run_print(source: String) -> Result(Nil, Nil) {
+/// the result. A failed eval comes back as a `CliError` for `main` to render.
+fn run_print(source: String) -> Result(Nil, CliError(host)) {
   let #(new_state, result) = eval(new_repl_state(), source)
   case result {
     Ok(val) -> {
       io.println(object.inspect(val, new_state.heap))
       Ok(Nil)
     }
-    Error(err) -> {
-      io.println_error(format_repl_error(err, new_state.heap))
-      Error(Nil)
-    }
+    Error(err) -> Error(PrintFailed(heap: new_state.heap, error: err))
   }
 }
 
@@ -358,6 +369,9 @@ pub fn main() -> Nil {
 
   case outcome {
     Ok(Nil) -> Nil
-    Error(Nil) -> halt(1)
+    Error(err) -> {
+      io.println_error(format_cli_error(err))
+      halt(1)
+    }
   }
 }
