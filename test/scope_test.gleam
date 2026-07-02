@@ -78,3 +78,16 @@ pub fn lexical_decl_boundary_test() {
   assert should_fail("let a = (x) => x, a = 2;")
   assert should_fail("for (let a = 1, a = 2;;);")
 }
+
+/// An inner function body's "use strict" directive must not leak strict mode
+/// into the enclosing sloppy scope once the function body ends.
+pub fn inner_strict_does_not_leak_test() {
+  // `with` is only illegal in strict code — the enclosing Script is sloppy.
+  assert should_pass("function f(){\"use strict\"} with({}) {}")
+  // Legacy octal literals are only illegal in strict code.
+  assert should_pass("function f(){\"use strict\"} var x = 010;")
+  // Same, but the strict function is nested in an expression position.
+  assert should_pass("var g = function(){\"use strict\"}; with({}) {}")
+  // Strict mode must still apply INSIDE the function body itself.
+  assert should_fail("function f(){\"use strict\"; with({}) {}}")
+}
