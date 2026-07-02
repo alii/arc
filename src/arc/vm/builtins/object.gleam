@@ -789,7 +789,10 @@ fn array_define_index(
 ///   v.   [[Writable]] present and false → false
 ///   vi.  [[Value]] present → ? IntegerIndexedElementSet (value conversion
 ///        may run user code and throw; a buffer detached DURING conversion
-///        makes the store a silent no-op, still true)
+///        makes the store a silent no-op, still true). Immutable-buffer
+///        views never reach the element store: the define succeeds only if
+///        [[Value]] is SameValue to the current element and Desc asks for
+///        no [[Writable]]/[[Configurable]] upgrade; otherwise it is rejected.
 ///   vii. true
 /// The checks run BEFORE any value conversion — an invalid index must not
 /// trigger observable ToNumber/ToBigInt side effects.
@@ -802,8 +805,8 @@ fn typed_array_define_index(
   idx: Int,
   desc: ParsedDesc,
 ) -> Result(State(host), #(DefineFailure, State(host))) {
-  let valid =
-    option.is_some(object.typed_array_element(
+  let current =
+    object.typed_array_element(
       state.heap,
       buffer,
       elem_kind,
@@ -816,7 +819,8 @@ fn typed_array_define_index(
         length,
       ),
       idx,
-    ))
+    )
+  let valid = option.is_some(current)
   let label = int.to_string(idx)
   let reject = fn(msg) {
     reject_define(state, msg)
@@ -853,12 +857,29 @@ fn typed_array_define_index(
         )
         |> result.map_error(as_thrown),
       )
-      // Immutable ArrayBuffer proposal: [[Set]] on a view over an immutable
-      // buffer refuses the store (False) — that MUST surface as a false
-      // [[DefineOwnProperty]] result, never as a silent success.
+      // Immutable ArrayBuffer proposal, [[DefineOwnProperty]]
+      // (sec-typedarray-defineownproperty): an immutable-buffer-backed
+      // element behaves as a {[[Writable]]: false, [[Enumerable]]: true,
+      // [[Configurable]]: false} data property, so
+      // ValidateAndApplyPropertyDescriptor returns true iff Desc.[[Value]]
+      // is SameValue to the current element AND Desc asks for no attribute
+      // upgrade (a true [[Writable]]/[[Configurable]] on a non-writable,
+      // non-configurable current is always false); anything else is false.
+      // The store refused (False) BEFORE any ToNumber/ToBigInt conversion,
+      // so no user code ran and `current` (read at entry) is still live.
       case stored {
         True -> Ok(state)
-        False -> reject("Cannot redefine property: " <> label)
+        False -> {
+          let unchanged =
+            option.map(current, value.same_value(v, _))
+            |> option.unwrap(False)
+          let widened =
+            desc.writable == Some(True) || desc.configurable == Some(True)
+          case unchanged && !widened {
+            True -> Ok(state)
+            False -> reject("Cannot redefine property: " <> label)
+          }
+        }
       }
     }
   }
