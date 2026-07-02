@@ -169,18 +169,31 @@ pub fn create_resolving_functions(
   #(h, JsObject(resolve_fn_ref), JsObject(reject_fn_ref))
 }
 
+/// ES2024 §27.2.1.5 PromiseCapability Record.
+///
+/// - `promise`: the visible promise object ([[Promise]])
+/// - `data`: the internal PromiseSlot backing that object
+/// - `resolve` / `reject`: the resolving functions ([[Resolve]] / [[Reject]])
+///
+/// Labelled fields so a promise/data or resolve/reject swap cannot
+/// type-check silently the way it could with a bare tuple.
+pub type PromiseCapability {
+  PromiseCapability(promise: Ref, data: Ref, resolve: JsValue, reject: JsValue)
+}
+
 /// ES spec NewPromiseCapability — create a promise and its resolve/reject
 /// functions in one step (create_promise + create_resolving_functions).
-///
-/// Returns #(heap, promise_ref, data_ref, resolve_fn, reject_fn).
 pub fn new_promise_capability(
   h: Heap(host),
   b: Builtins,
-) -> #(Heap(host), Ref, Ref, JsValue, JsValue) {
+) -> #(Heap(host), PromiseCapability) {
   let #(h, promise_ref, data_ref) = create_promise(h, b.promise.prototype)
   let #(h, resolve, reject) =
     create_resolving_functions(h, b.function.prototype, promise_ref, data_ref)
-  #(h, promise_ref, data_ref, resolve, reject)
+  #(
+    h,
+    PromiseCapability(promise: promise_ref, data: data_ref, resolve:, reject:),
+  )
 }
 
 /// ES2024 §27.2.1.4 FulfillPromise(promise, value)
@@ -502,34 +515,84 @@ pub fn get_data_ref(h: Heap(host), promise_ref: Ref) -> Option(Ref) {
 ///
 /// This function implements steps 8-12's checks and returns the then function
 /// if found. The caller handles steps 8a/10a/12a (fulfill or reject) and
-/// step 13 (enqueue thenable job).
-///
-/// Returns:
-///   Ok(#(then_fn, state)) — value is a thenable (step 13 path)
-///   Error(#(None, state)) — not an object (step 8) or then not callable (step 12)
-///   Error(#(Some(thrown), state)) — Get(resolution, "then") threw (step 10)
+/// step 13 (enqueue thenable job). Most callers should just use
+/// `resolve_promise`, which performs those steps.
 pub fn get_thenable_then(
   state: state.State(host),
   val: JsValue,
-) -> Result(
-  #(JsValue, state.State(host)),
-  #(option.Option(JsValue), state.State(host)),
-) {
+) -> #(ThenLookup, state.State(host)) {
   case val {
-    // Step 8: If resolution is not an Object -> Error(None) (caller fulfills)
+    // Step 8: If resolution is not an Object -> NotThenable (caller fulfills)
     JsObject(ref) ->
       // Step 9: Let then be Completion(Get(resolution, "then"))
       case object.get_value(state, ref, Named("then"), val) {
         Ok(#(then_val, state)) ->
-          // Step 12: If IsCallable(thenAction) is false -> Error(None)
+          // Step 12: If IsCallable(thenAction) is false -> NotThenable
           case helpers.is_callable(state.heap, then_val) {
-            True -> Ok(#(then_val, state))
-            False -> Error(#(option.None, state))
+            True -> #(Thenable(then_val), state)
+            False -> #(NotThenable, state)
           }
-        // Step 10: If then is an abrupt completion -> Error(Some(thrown))
-        Error(#(thrown, state)) -> Error(#(option.Some(thrown), state))
+        // Step 10: If then is an abrupt completion -> ThenAccessThrew
+        Error(#(thrown, state)) -> #(ThenAccessThrew(thrown), state)
       }
-    _ -> Error(#(option.None, state))
+    _ -> #(NotThenable, state)
+  }
+}
+
+/// Outcome of looking up `then` on a resolution value (Promise Resolve
+/// Functions §27.2.1.3.2 steps 8-12). The three cases lead to OPPOSITE
+/// promise outcomes, so they are distinct variants — a caller must decide
+/// each one explicitly.
+pub type ThenLookup {
+  /// Step 13 path: the value is an object with a callable `then`.
+  /// The caller must enqueue a PromiseResolveThenableJob.
+  Thenable(then_fn: JsValue)
+  /// Step 8 / step 12 path: not an object, or `then` is not callable.
+  /// The caller must FULFILL the promise with the value itself.
+  NotThenable
+  /// Step 10 path: Get(resolution, "then") threw.
+  /// The caller must REJECT the promise with the thrown value.
+  ThenAccessThrew(thrown: JsValue)
+}
+
+/// ES2024 §27.2.1.3.2 Promise Resolve Functions, steps 8-13 — resolve
+/// `promise_ref`/`data_ref` with `resolution` (which the caller has already
+/// checked is not the promise itself, step 7):
+///
+///   - thenable            → enqueue PromiseResolveThenableJob (step 13-14)
+///   - `then` getter threw → RejectPromise with the thrown value (step 10)
+///   - anything else       → FulfillPromise with the resolution (steps 8, 12)
+pub fn resolve_promise(
+  state: state.State(host),
+  promise_ref: Ref,
+  data_ref: Ref,
+  resolution: JsValue,
+) -> state.State(host) {
+  let #(lookup, state) = get_thenable_then(state, resolution)
+  case lookup {
+    Thenable(then_fn:) -> {
+      let #(h, resolve, reject) =
+        create_resolving_functions(
+          state.heap,
+          state.builtins.function.prototype,
+          promise_ref,
+          data_ref,
+        )
+      let job =
+        value.PromiseResolveThenableJob(
+          thenable: resolution,
+          then_fn:,
+          resolve:,
+          reject:,
+        )
+      state.State(
+        ..state,
+        heap: h,
+        job_queue: job_queue.push(state.job_queue, job),
+      )
+    }
+    ThenAccessThrew(thrown:) -> reject_promise(state, data_ref, thrown)
+    NotThenable -> fulfill_promise(state, data_ref, resolution)
   }
 }
 

@@ -72,14 +72,14 @@ pub fn call_native_method(
   unwind_to_catch: UnwindToCatchFn(host),
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   let arg = helpers.first_arg_or_undefined(args)
-  let #(h, promise_ref, _data_ref, resolve, reject) =
+  let #(h, cap) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
   let ret = fn(state: State(host)) {
     Ok(
       State(
         ..state,
-        stack: [JsObject(promise_ref), ..rest_stack],
+        stack: [JsObject(cap.promise), ..rest_stack],
         pc: state.pc + 1,
       ),
     )
@@ -92,11 +92,17 @@ pub fn call_native_method(
           state,
           "AsyncGenerator method called on incompatible receiver",
         )
-      let state = reject_with(state, reject, err)
+      let state = reject_with(state, cap.reject, err)
       ret(state)
     }
     Some(gen) -> {
-      let req = AsyncGenRequest(completion:, value: arg, resolve:, reject:)
+      let req =
+        AsyncGenRequest(
+          completion:,
+          value: arg,
+          resolve: cap.resolve,
+          reject: cap.reject,
+        )
       // O(1) prepend to back; see AsyncGeneratorSlot.queue doc in value.gleam.
       let h =
         heap.write(

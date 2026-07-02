@@ -4,7 +4,6 @@ import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/job_queue
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -102,10 +101,14 @@ fn new_capability_from_constructor(
 ) -> Result(#(Capability, State(host)), #(JsValue, State(host))) {
   case c == JsObject(state.builtins.promise.constructor) {
     True -> {
-      let #(h, promise_ref, _data_ref, resolve, reject) =
+      let #(h, cap) =
         builtins_promise.new_promise_capability(state.heap, state.builtins)
       Ok(#(
-        Capability(promise: JsObject(promise_ref), resolve:, reject:),
+        Capability(
+          promise: JsObject(cap.promise),
+          resolve: cap.resolve,
+          reject: cap.reject,
+        ),
         State(..state, heap: h),
       ))
     }
@@ -475,21 +478,21 @@ pub fn call_native_promise_constructor(
       state.throw_type_error(state, "Promise resolver is not a function")
     }
     True -> {
-      let #(h, promise_ref, data_ref, resolve_fn, reject_fn) =
+      let #(h, cap) =
         builtins_promise.new_promise_capability(state.heap, state.builtins)
       // Run executor inline — its return value is discarded, the promise is the result.
       let new_state = State(..state, heap: h, stack: rest_stack)
       case
         state.call(new_state, executor, JsUndefined, [
-          resolve_fn,
-          reject_fn,
+          cap.resolve,
+          cap.reject,
         ])
       {
         Ok(#(_, after_state)) ->
-          return_promise(after_state, promise_ref, rest_stack)
+          return_promise(after_state, cap.promise, rest_stack)
         Error(#(thrown, after_state)) ->
-          builtins_promise.reject_promise(after_state, data_ref, thrown)
-          |> return_promise(promise_ref, rest_stack)
+          builtins_promise.reject_promise(after_state, cap.data, thrown)
+          |> return_promise(cap.promise, rest_stack)
       }
     }
   }
@@ -533,54 +536,16 @@ pub fn call_native_promise_resolve_fn(
         Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
       })
 
-      // Check if resolution is a thenable
-      case
-        builtins_promise.get_thenable_then(State(..state, heap: h), resolution)
-      {
-        Ok(#(then_fn, state)) -> {
-          // Create resolving functions for assimilation
-          let #(h, resolve_fn, reject_fn) =
-            builtins_promise.create_resolving_functions(
-              state.heap,
-              state.builtins.function.prototype,
-              promise_ref,
-              data_ref,
-            )
-          let job =
-            value.PromiseResolveThenableJob(
-              thenable: resolution,
-              then_fn:,
-              resolve: resolve_fn,
-              reject: reject_fn,
-            )
-
-          State(
-            ..state,
-            heap: h,
-            stack: [JsUndefined, ..rest_stack],
-            pc: state.pc + 1,
-            job_queue: job_queue.push(state.job_queue, job),
-          )
-          |> Ok
-        }
-
-        Error(#(option.Some(thrown), state)) -> {
-          // Getter threw — reject promise with the error (spec 25.6.1.3.2 step 9)
-          let state = builtins_promise.reject_promise(state, data_ref, thrown)
-
-          State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1)
-          |> Ok
-        }
-
-        Error(#(option.None, state)) -> {
-          // Not a thenable — fulfill directly
-          let state =
-            builtins_promise.fulfill_promise(state, data_ref, resolution)
-
-          State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1)
-          |> Ok
-        }
-      }
+      // §27.2.1.3.2 steps 8-13: thenable → job, throwing `then` getter →
+      // reject, anything else → fulfill.
+      let state =
+        builtins_promise.resolve_promise(
+          State(..state, heap: h),
+          promise_ref,
+          data_ref,
+          resolution,
+        )
+      Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
     }
   }
 }
@@ -634,7 +599,7 @@ pub fn call_native_promise_then(
   case builtins_promise.get_data_ref(state.heap, this_ref) {
     Some(data_ref) -> {
       // Create child promise (the one returned by .then)
-      let #(h, child_ref, _child_data_ref, child_resolve, child_reject) =
+      let #(h, child) =
         builtins_promise.new_promise_capability(state.heap, state.builtins)
 
       // Perform the .then logic
@@ -644,14 +609,14 @@ pub fn call_native_promise_then(
           data_ref,
           on_fulfilled,
           on_rejected,
-          child_resolve,
-          child_reject,
+          child.resolve,
+          child.reject,
         )
 
       Ok(
         State(
           ..state,
-          stack: [JsObject(child_ref), ..rest_stack],
+          stack: [JsObject(child.promise), ..rest_stack],
           pc: state.pc + 1,
         ),
       )
@@ -774,11 +739,11 @@ fn finally_chain(
   rest_stack: List(JsValue),
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   // Promise.resolve(resolve_value)
-  let #(h, resolved_ref, _, resolve_fn, _) =
+  let #(h, cap) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   // Call resolve(resolve_value)
   let state1 =
-    call_native_for_job(State(..state, heap: h), resolve_fn, [resolve_value])
+    call_native_for_job(State(..state, heap: h), cap.resolve, [resolve_value])
   // Create the handler
   let #(h2, handler_ref) =
     common.alloc_wrapper(
@@ -789,7 +754,7 @@ fn finally_chain(
   // Chain .then(handler) on the resolved promise
   call_native_promise_then(
     State(..state1, heap: h2),
-    JsObject(resolved_ref),
+    JsObject(cap.promise),
     [JsObject(handler_ref), JsUndefined],
     rest_stack,
   )
@@ -871,44 +836,20 @@ fn resolve_static_intrinsic(
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   {
     {
-      // Create new promise and resolve it
+      // Create new promise and resolve it (thenable → job, throwing `then`
+      // getter → reject, anything else → fulfill).
       let #(h, promise_ref, data_ref) =
         builtins_promise.create_promise(
           state.heap,
           state.builtins.promise.prototype,
         )
-      // Check for thenable
-      case builtins_promise.get_thenable_then(State(..state, heap: h), val) {
-        Ok(#(then_fn, state)) -> {
-          let #(h, resolve_fn, reject_fn) =
-            builtins_promise.create_resolving_functions(
-              state.heap,
-              state.builtins.function.prototype,
-              promise_ref,
-              data_ref,
-            )
-          let job =
-            value.PromiseResolveThenableJob(
-              thenable: val,
-              then_fn:,
-              resolve: resolve_fn,
-              reject: reject_fn,
-            )
-          State(
-            ..state,
-            heap: h,
-            job_queue: job_queue.push(state.job_queue, job),
-          )
-          |> return_promise(promise_ref, rest_stack)
-        }
-        Error(#(option.Some(thrown), state)) ->
-          // Getter threw — reject promise with the error
-          builtins_promise.reject_promise(state, data_ref, thrown)
-          |> return_promise(promise_ref, rest_stack)
-        Error(#(option.None, state)) ->
-          builtins_promise.fulfill_promise(state, data_ref, val)
-          |> return_promise(promise_ref, rest_stack)
-      }
+      builtins_promise.resolve_promise(
+        State(..state, heap: h),
+        promise_ref,
+        data_ref,
+        val,
+      )
+      |> return_promise(promise_ref, rest_stack)
     }
   }
 }
@@ -1779,42 +1720,14 @@ pub fn setup_await(
     None -> {
       let #(h, promise_ref, dr) =
         builtins_promise.create_promise(state.heap, b.promise.prototype)
-      case
-        builtins_promise.get_thenable_then(State(..state, heap: h), awaited)
-      {
-        Ok(#(then_fn, state)) -> {
-          let #(h, resolve_fn, reject_fn) =
-            builtins_promise.create_resolving_functions(
-              state.heap,
-              b.function.prototype,
-              promise_ref,
-              dr,
-            )
-          let job =
-            value.PromiseResolveThenableJob(
-              thenable: awaited,
-              then_fn:,
-              resolve: resolve_fn,
-              reject: reject_fn,
-            )
-          #(
-            State(
-              ..state,
-              heap: h,
-              job_queue: job_queue.push(state.job_queue, job),
-            ),
-            dr,
-          )
-        }
-        Error(#(option.Some(thrown), state)) -> #(
-          builtins_promise.reject_promise(state, dr, thrown),
+      let state =
+        builtins_promise.resolve_promise(
+          State(..state, heap: h),
+          promise_ref,
           dr,
+          awaited,
         )
-        Error(#(option.None, state)) -> #(
-          builtins_promise.fulfill_promise(state, dr, awaited),
-          dr,
-        )
-      }
+      #(state, dr)
     }
   }
   let h = state.heap
@@ -1869,7 +1782,7 @@ pub fn call_native_async_from_sync(
   rest_stack: List(JsValue),
   kind: AsyncFromSyncKind,
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
-  let #(h, promise_ref, data_ref, cap_resolve, cap_reject) =
+  let #(h, cap) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
 
@@ -1879,16 +1792,16 @@ pub fn call_native_async_from_sync(
       this,
       args,
       kind,
-      data_ref,
-      cap_resolve,
-      cap_reject,
+      cap.data,
+      cap.resolve,
+      cap.reject,
     )
   {
     Ok(state) -> state
     Error(#(thrown, state)) ->
-      builtins_promise.reject_promise(state, data_ref, thrown)
+      builtins_promise.reject_promise(state, cap.data, thrown)
   }
-  return_promise(state, promise_ref, rest_stack)
+  return_promise(state, cap.promise, rest_stack)
 }
 
 fn do_async_from_sync(
@@ -2120,35 +2033,13 @@ fn promise_resolve_then_with_capability(
     False -> {
       let #(h, wrap_ref, wrap_data_ref) =
         builtins_promise.create_promise(h, state.builtins.promise.prototype)
-      let state = case
-        builtins_promise.get_thenable_then(State(..state, heap: h), inner)
-      {
-        Ok(#(then_fn, state)) -> {
-          let #(h, resolve_fn, reject_fn) =
-            builtins_promise.create_resolving_functions(
-              state.heap,
-              state.builtins.function.prototype,
-              wrap_ref,
-              wrap_data_ref,
-            )
-          let job =
-            value.PromiseResolveThenableJob(
-              thenable: inner,
-              then_fn:,
-              resolve: resolve_fn,
-              reject: reject_fn,
-            )
-          State(
-            ..state,
-            heap: h,
-            job_queue: job_queue.push(state.job_queue, job),
-          )
-        }
-        Error(#(Some(thrown), state)) ->
-          builtins_promise.reject_promise(state, wrap_data_ref, thrown)
-        Error(#(None, state)) ->
-          builtins_promise.fulfill_promise(state, wrap_data_ref, inner)
-      }
+      let state =
+        builtins_promise.resolve_promise(
+          State(..state, heap: h),
+          wrap_ref,
+          wrap_data_ref,
+          inner,
+        )
       builtins_promise.perform_promise_then(
         state,
         wrap_data_ref,
@@ -2197,19 +2088,19 @@ pub fn call_native_array_from_async(
   rest_stack: List(JsValue),
 ) -> Result(State(host), #(StepResult, JsValue, State(host))) {
   // Step 2: promiseCapability = \! NewPromiseCapability(%Promise%).
-  let #(h, promise_ref, data_ref, cap_resolve, cap_reject) =
+  let #(h, cap) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
   // Steps 3-4: run the closure; abrupt completion rejects the promise.
   let state = case
-    from_async_closure(state, this, args, cap_resolve, cap_reject)
+    from_async_closure(state, this, args, cap.resolve, cap.reject)
   {
     Ok(state) -> state
     Error(#(thrown, state)) ->
-      builtins_promise.reject_promise(state, data_ref, thrown)
+      builtins_promise.reject_promise(state, cap.data, thrown)
   }
   // Step 5: return promiseCapability.[[Promise]].
-  return_promise(state, promise_ref, rest_stack)
+  return_promise(state, cap.promise, rest_stack)
 }
 
 /// Steps 3.a-3.k of the fromAsyncClosure, up to (and including) kicking off

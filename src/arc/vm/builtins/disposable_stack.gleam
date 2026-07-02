@@ -13,7 +13,6 @@ import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/job_queue
 import arc/vm/ops/object
 import arc/vm/state.{type State, State}
 import arc/vm/value.{
@@ -26,8 +25,7 @@ import arc/vm/value.{
   DisposableStackNative, DisposableStackObject, DisposableStackPrototypeAdopt,
   DisposableStackPrototypeDefer, DisposableStackPrototypeDispose,
   DisposableStackPrototypeMove, DisposableStackPrototypeUse, DisposeCallback,
-  JsBool, JsNull, JsObject, JsUndefined, NullDispose, ObjectSlot,
-  PromiseResolveThenableJob, SyncDispose,
+  JsBool, JsNull, JsObject, JsUndefined, NullDispose, ObjectSlot, SyncDispose,
 }
 import gleam/dict
 import gleam/list
@@ -882,10 +880,10 @@ fn dispose_async(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 2: NewPromiseCapability(%Promise%)
-  let #(h, promise_ref, _data_ref, resolve, reject) =
+  let #(h, cap) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
-  let promise = JsObject(promise_ref)
+  let promise = JsObject(cap.promise)
   let stack = case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -905,12 +903,12 @@ fn dispose_async(
           state,
           "Method AsyncDisposableStack.prototype.disposeAsync called on incompatible receiver",
         )
-      let state = settle_capability(state, reject, err)
+      let state = settle_capability(state, cap.reject, err)
       #(state, Ok(promise))
     }
     // Step 4: already disposed → resolve with undefined
     Some(#(_ref, True, _resources)) -> {
-      let state = settle_capability(state, resolve, JsUndefined)
+      let state = settle_capability(state, cap.resolve, JsUndefined)
       #(state, Ok(promise))
     }
     Some(#(ref, False, resources)) -> {
@@ -924,8 +922,8 @@ fn dispose_async(
           pending: None,
           needs_await: False,
           has_awaited: False,
-          resolve: resolve,
-          reject: reject,
+          resolve: cap.resolve,
+          reject: cap.reject,
         )
       #(state, Ok(promise))
     }
@@ -1090,43 +1088,14 @@ fn attach_await(
           state.heap,
           state.builtins.promise.prototype,
         )
-      let state = State(..state, heap: h)
-      case builtins_promise.get_thenable_then(state, awaited) {
-        Ok(#(then_fn, state)) -> {
-          let #(h, resolve_fn, reject_fn) =
-            builtins_promise.create_resolving_functions(
-              state.heap,
-              state.builtins.function.prototype,
-              promise_ref,
-              data_ref,
-            )
-          let job =
-            PromiseResolveThenableJob(
-              thenable: awaited,
-              then_fn:,
-              resolve: resolve_fn,
-              reject: reject_fn,
-            )
-          let state =
-            State(
-              ..state,
-              heap: h,
-              job_queue: job_queue.push(state.job_queue, job),
-            )
-          attach_reactions(state, data_ref, rest, pending, resolve, reject)
-        }
-        // Step 10: Get(value, "then") threw — reject with the error.
-        Error(#(Some(thrown), state)) -> {
-          let state = builtins_promise.reject_promise(state, data_ref, thrown)
-          attach_reactions(state, data_ref, rest, pending, resolve, reject)
-        }
-        // Step 8/12: non-object or non-callable `then` — already settled.
-        Error(#(None, state)) -> {
-          let state =
-            builtins_promise.fulfill_promise(state, data_ref, awaited)
-          attach_reactions(state, data_ref, rest, pending, resolve, reject)
-        }
-      }
+      let state =
+        builtins_promise.resolve_promise(
+          State(..state, heap: h),
+          promise_ref,
+          data_ref,
+          awaited,
+        )
+      attach_reactions(state, data_ref, rest, pending, resolve, reject)
     }
   }
 }
