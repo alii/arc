@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iterator
 import arc/vm/builtins/object as object_builtin
 import arc/vm/heap
 import arc/vm/internal/elements
@@ -5471,7 +5472,13 @@ fn array_from_array_like(
   }
 }
 
-/// §23.1.2.1 steps 5.e-5.g: drain the iterator, applying mapFn per element.
+/// §23.1.2.1 steps 5.e-5.g (iterator path): GetIteratorFromMethod, then drain
+/// via the shared §7.4.8 IteratorStepValue, applying mapFn per element.
+///
+/// Built on the shared iterator ops so it gets IfAbruptCloseIterator for
+/// free: a throwing mapFn is followed by IteratorClose(§7.4.11) — running
+/// the source's `return` / a generator's `finally` — BEFORE the exception
+/// propagates.
 fn array_from_iterator(
   state: State(host),
   items: JsValue,
@@ -5480,33 +5487,19 @@ fn array_from_iterator(
   this_arg: JsValue,
   array_proto: Ref,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // GetIteratorFromMethod: iterator = ? Call(method, items).
-  use iter, state <- state.try_call(state, iter_method, items, [])
-  case iter {
-    JsObject(_) -> {
-      // GetIterator step: nextMethod fetched ONCE (§7.4.3).
-      use next_method, state <- state.try_op(object.get_value_of(
-        state,
-        iter,
-        Named("next"),
-      ))
-      array_from_iterator_loop(
-        state,
-        iter,
-        next_method,
-        map_fn,
-        this_arg,
-        array_proto,
-        0,
-        [],
-      )
-    }
-    _ ->
-      state.type_error(
-        state,
-        "Result of the Symbol.iterator method is not an object",
-      )
-  }
+  use #(iter, next_method), state <- state.try_op(
+    iterator.get_iterator_from_method(state, items, iter_method),
+  )
+  array_from_iterator_loop(
+    state,
+    iter,
+    next_method,
+    map_fn,
+    this_arg,
+    array_proto,
+    0,
+    [],
+  )
 }
 
 fn array_from_iterator_loop(
@@ -5519,34 +5512,28 @@ fn array_from_iterator_loop(
   k: Int,
   acc: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use res, state <- state.try_call(state, next_method, iter, [])
-  case res {
-    JsObject(_) -> {
-      use done_val, state <- state.try_op(object.get_value_of(
-        state,
-        res,
-        Named("done"),
-      ))
-      case value.is_truthy(done_val) {
-        True -> {
-          let #(heap, ref) =
-            common.alloc_array(state.heap, list.reverse(acc), array_proto)
-          #(State(..state, heap:), Ok(JsObject(ref)))
-        }
-        False -> {
-          use item, state <- state.try_op(object.get_value_of(
-            state,
-            res,
-            Named("value"),
-          ))
-          use mapped, state <- state.try_op(case map_fn {
-            Some(mf) ->
-              case state.call(state, mf, this_arg, [item, value.from_int(k)]) {
-                Ok(#(v, state)) -> Ok(#(v, state))
-                Error(e) -> Error(e)
-              }
-            None -> Ok(#(item, state))
-          })
+  // §7.4.8: an abrupt .next()/`done`/`value` read propagates WITHOUT
+  // IteratorClose — the iterator record is already [[Done]].
+  case iterator.iterator_step_value(state, iter, next_method) {
+    #(state, Error(thrown)) -> #(state, Error(thrown))
+    #(state, Ok(None)) -> {
+      let #(heap, ref) =
+        common.alloc_array(state.heap, list.reverse(acc), array_proto)
+      #(State(..state, heap:), Ok(JsObject(ref)))
+    }
+    #(state, Ok(Some(item))) -> {
+      // Steps 5.e.vi-vii: IfAbruptCloseIterator on the mapFn completion.
+      let #(state, mapped) = case map_fn {
+        Some(mf) ->
+          case state.call(state, mf, this_arg, [item, value.from_int(k)]) {
+            Ok(#(v, state)) -> #(state, Ok(v))
+            Error(#(thrown, state)) -> iterator.close_throw(state, iter, thrown)
+          }
+        None -> #(state, Ok(item))
+      }
+      case mapped {
+        Error(thrown) -> #(state, Error(thrown))
+        Ok(mapped) ->
           array_from_iterator_loop(
             state,
             iter,
@@ -5557,10 +5544,8 @@ fn array_from_iterator_loop(
             k + 1,
             [mapped, ..acc],
           )
-        }
       }
     }
-    _ -> state.type_error(state, "Iterator result is not an object")
   }
 }
 

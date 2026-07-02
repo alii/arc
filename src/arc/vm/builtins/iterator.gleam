@@ -876,25 +876,21 @@ fn wrap_next(
   #(state, Ok(result))
 }
 
+/// §27.1.5.2.2 %WrapForValidIteratorPrototype%.return: reuses IteratorClose's
+/// GetMethod(iterated, "return") + Call step (`call_return`), so a
+/// non-callable `return` is a TypeError. No `return` method synthesizes
+/// CreateIterResultObject(undefined, true); otherwise the return method's
+/// result is forwarded as-is (the spec does NOT require it to be an Object
+/// here — only §7.4.11 IteratorClose does).
 fn wrap_return(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use iterated, _next_method <- require_wrap(this, state)
-  use ret_fn, state <- state.try_op(object.get_value_of(
-    state,
-    iterated,
-    Named("return"),
-  ))
-  case ret_fn {
-    JsUndefined | JsNull -> create_iter_result(state, JsUndefined, True)
-    _ -> {
-      use result, state <- state.try_call(state, ret_fn, iterated, [])
-      case result {
-        JsObject(_) -> #(state, Ok(result))
-        _ -> state.type_error(state, "Iterator return result is not an object")
-      }
-    }
+  case call_return(state, iterated) {
+    #(state, Ok(NoReturnMethod)) -> create_iter_result(state, JsUndefined, True)
+    #(state, Ok(Returned(result))) -> #(state, Ok(result))
+    #(state, Error(thrown)) -> #(state, Error(thrown))
   }
 }
 
@@ -1293,28 +1289,40 @@ pub fn iterator_close_normal(
   obj: JsValue,
 ) -> #(State(host), Result(Nil, JsValue)) {
   case call_return(state, obj) {
-    #(state, Ok(JsUndefined)) -> #(state, Ok(Nil))
-    #(state, Ok(JsObject(_))) -> #(state, Ok(Nil))
-    #(state, Ok(_other)) ->
+    #(state, Ok(NoReturnMethod)) -> #(state, Ok(Nil))
+    #(state, Ok(Returned(JsObject(_)))) -> #(state, Ok(Nil))
+    #(state, Ok(Returned(_other))) ->
       type_error_any(state, "Iterator return result is not an object")
     #(state, Error(thrown)) -> #(state, Error(thrown))
   }
 }
 
-/// Shared body of IteratorClose: GetMethod(iterator, "return") and call it.
-/// Ok(JsUndefined) means "no return method" (so the not-an-object check is
-/// skipped). Ok(other) is the return method's result.
+/// Successful outcome of `call_return`. §7.4.11 IteratorClose and
+/// %WrapForValidIteratorPrototype%.return both need to tell "there was no
+/// `return` method" apart from "a `return` method ran and produced this value"
+/// — a JsUndefined sentinel cannot (a `return` that RAN and returned undefined
+/// must be a TypeError under IteratorClose, not a silent success).
+pub type ReturnCall {
+  /// GetMethod(iterator, "return") was undefined/null: nothing was called.
+  NoReturnMethod
+  /// The `return` method was called; this is its (unchecked) result.
+  Returned(JsValue)
+}
+
+/// Shared body of IteratorClose: GetMethod(iterator, "return") and, if
+/// present, call it. Callers decide what the §7.4.11 completion rules make of
+/// the two `ReturnCall` outcomes.
 pub fn call_return(
   state: State(host),
   obj: JsValue,
-) -> #(State(host), Result(JsValue, JsValue)) {
+) -> #(State(host), Result(ReturnCall, JsValue)) {
   use ret_fn, state <- state.try_op(object.get_value_of(
     state,
     obj,
     Named("return"),
   ))
   case ret_fn {
-    JsUndefined | JsNull -> #(state, Ok(JsUndefined))
+    JsUndefined | JsNull -> #(state, Ok(NoReturnMethod))
     _ ->
       // §7.3.10 GetMethod step 3: a non-callable `return` property is a
       // TypeError. The re-entrant call path silently passes non-callables
@@ -1323,7 +1331,7 @@ pub fn call_return(
         False -> type_error_any(state, "iterator.return is not a function")
         True -> {
           use result, state <- state.try_call(state, ret_fn, obj, [])
-          #(state, Ok(result))
+          #(state, Ok(Returned(result)))
         }
       }
   }
@@ -1832,24 +1840,38 @@ pub fn get_iterator_sync(
         state,
         object.inspect(obj, state.heap) <> " is not iterable",
       ))
-    True -> {
-      use #(iter, state) <- result.try(state.call(state, method, obj, []))
-      case iter {
-        JsObject(_) -> {
-          use #(next, state) <- result.map(object.get_value_of(
-            state,
-            iter,
-            Named("next"),
-          ))
-          #(#(iter, next), state)
-        }
-        _ ->
-          Error(state.type_error_value(
-            state,
-            "Result of the Symbol.iterator method is not an object",
-          ))
-      }
+    True -> get_iterator_from_method(state, obj, method)
+  }
+}
+
+/// §7.4.4 GetIteratorFromMethod(obj, method): iterator = ? Call(method, obj);
+/// the result must be an Object; the `next` method is read once and cached
+/// (GetIteratorDirect). Returns the Iterator Record as `#(iterator, next)`.
+///
+/// Public for consumers that already performed their own
+/// GetMethod(obj, @@iterator) — e.g. Array.from, which must fall back to the
+/// array-like path when @@iterator is undefined — and so must NOT re-Get it
+/// via `get_iterator_sync`.
+pub fn get_iterator_from_method(
+  state: State(host),
+  obj: JsValue,
+  method: JsValue,
+) -> Result(#(#(JsValue, JsValue), State(host)), #(JsValue, State(host))) {
+  use #(iter, state) <- result.try(state.call(state, method, obj, []))
+  case iter {
+    JsObject(_) -> {
+      use #(next, state) <- result.map(object.get_value_of(
+        state,
+        iter,
+        Named("next"),
+      ))
+      #(#(iter, next), state)
     }
+    _ ->
+      Error(state.type_error_value(
+        state,
+        "Result of the Symbol.iterator method is not an object",
+      ))
   }
 }
 

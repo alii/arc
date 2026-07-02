@@ -4435,6 +4435,20 @@ pub fn array_method_on_number_this_test() -> Nil {
   )
 }
 
+pub fn array_from_closes_iterator_when_mapfn_throws_test() -> Nil {
+  // §23.1.2.1 step 5.e.vii (IfAbruptCloseIterator): a throwing mapFn must run
+  // IteratorClose on the source iterator — the generator's `finally` executes
+  // — BEFORE the exception propagates out of Array.from.
+  assert_normal(
+    "var log = [];
+     function* g() { try { yield 1; yield 2; } finally { log.push('finally'); } }
+     try { Array.from(g(), function () { throw 'boom'; }); }
+     catch (e) { log.push('caught:' + e); }
+     log.join('|')",
+    JsString("finally|caught:boom"),
+  )
+}
+
 pub fn array_reduce_on_plain_object_test() -> Nil {
   // reduce over an array-like: sum of values.
   assert_normal(
