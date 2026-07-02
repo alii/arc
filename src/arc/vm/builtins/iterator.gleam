@@ -180,7 +180,13 @@ pub fn dispatch(
     IteratorPrototypeFilter ->
       lazy_helper(this, args, state, HelperFilter, "filter")
     IteratorPrototypeFlatMap ->
-      lazy_helper(this, args, state, HelperFlatMap, "flatMap")
+      lazy_helper(
+        this,
+        args,
+        state,
+        fn(func) { HelperFlatMap(func:, inner: None) },
+        "flatMap",
+      )
     IteratorPrototypeTake -> take_or_drop(this, args, state, HelperTake, "take")
     IteratorPrototypeDrop -> take_or_drop(this, args, state, HelperDrop, "drop")
     IteratorPrototypeToArray -> to_array(this, state)
@@ -273,9 +279,15 @@ fn from(
     iter,
     Named("next"),
   ))
-  // OrdinaryHasInstance(%Iterator%, iterator) — proto chain walk.
+  // OrdinaryHasInstance(%Iterator%, iterator) — §7.3.22 step 4 walks the
+  // chain starting from O's [[Prototype]], NOT from O itself. Starting at
+  // O would wrongly treat %Iterator.prototype% ITSELF as an instance.
   let target = state.builtins.iterator.prototype
-  case has_in_proto_chain(state.heap, iter_ref, target) {
+  let start = case heap.read(state.heap, iter_ref) {
+    Some(ObjectSlot(prototype: proto, ..)) -> proto
+    _ -> None
+  }
+  case proto_chain_contains(state.heap, start, target) {
     True -> #(state, Ok(iter))
     False -> {
       let #(heap, ref) =
@@ -289,15 +301,25 @@ fn from(
   }
 }
 
-/// Walk obj's prototype chain looking for target. Includes obj itself.
-fn has_in_proto_chain(h: Heap(host), obj: Ref, target: Ref) -> Bool {
-  case obj.id == target.id {
-    True -> True
-    False ->
-      case heap.read(h, obj) {
-        Some(ObjectSlot(prototype: Some(proto), ..)) ->
-          has_in_proto_chain(h, proto, target)
-        _ -> False
+/// §7.3.22 OrdinaryHasInstance step 4: walk the prototype chain starting at
+/// `start` (already the object's [[Prototype]], NOT the object itself)
+/// looking for `target`.
+fn proto_chain_contains(
+  h: Heap(host),
+  start: Option(Ref),
+  target: Ref,
+) -> Bool {
+  case start {
+    None -> False
+    Some(obj) ->
+      case obj.id == target.id {
+        True -> True
+        False ->
+          case heap.read(h, obj) {
+            Some(ObjectSlot(prototype: proto, ..)) ->
+              proto_chain_contains(h, proto, target)
+            _ -> False
+          }
       }
   }
 }
@@ -310,11 +332,11 @@ fn lazy_helper(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
-  kind: IteratorHelperKind,
+  make_kind: fn(JsValue) -> IteratorHelperKind,
   name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use this, next, func, state <- consumer_with_callback(this, args, state, name)
-  alloc_helper(state, kind, this, next, func, 0)
+  alloc_helper(state, make_kind(func), this, next)
 }
 
 // ============================================================================
@@ -325,7 +347,7 @@ fn take_or_drop(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
-  kind: IteratorHelperKind,
+  make_kind: fn(Int) -> IteratorHelperKind,
   name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use _this_ref <- require_object_of(
@@ -335,13 +357,13 @@ fn take_or_drop(
   )
   // §27.1.4.10 step 3-6: ToNumber(limit) BEFORE GetIteratorDirect. On any
   // abrupt completion / NaN / negative, close `this` then throw.
-  use count, state <- after(coerce_limit(state, this, args, name))
+  use remaining, state <- after(coerce_limit(state, this, args, name))
   use next, state <- state.try_op(object.get_value_of(
     state,
     this,
     Named("next"),
   ))
-  alloc_helper(state, kind, this, next, JsUndefined, count)
+  alloc_helper(state, make_kind(remaining), this, next)
 }
 
 /// ES2025 §27.1.3.10/12 step 3-6: ToIntegerOrInfinity(ToNumber(limit)) with
@@ -384,8 +406,6 @@ fn alloc_helper(
   kind: IteratorHelperKind,
   underlying: JsValue,
   next_method: JsValue,
-  func: JsValue,
-  count: Int,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, ref) =
     common.alloc_wrapper(
@@ -394,10 +414,7 @@ fn alloc_helper(
         kind:,
         underlying:,
         next_method:,
-        func:,
-        inner: JsUndefined,
-        inner_next: JsUndefined,
-        count:,
+        counter: 0,
         done: False,
       ),
       state.builtins.iterator_helper_proto,
@@ -423,10 +440,7 @@ fn helper_next(
             kind:,
             underlying:,
             next_method:,
-            func:,
-            inner:,
-            inner_next:,
-            count:,
+            counter:,
             done:,
           ),
           ..,
@@ -437,10 +451,7 @@ fn helper_next(
             kind,
             underlying,
             next_method,
-            func,
-            inner,
-            inner_next,
-            count,
+            counter,
             done,
           )
         Some(ObjectSlot(
@@ -536,31 +547,23 @@ fn classic_helper_next(
   kind: IteratorHelperKind,
   underlying: JsValue,
   next: JsValue,
-  func: JsValue,
-  inner: JsValue,
-  inner_next: JsValue,
-  count: Int,
+  counter: Int,
   done: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case done {
     True -> create_iter_result(state, JsUndefined, True)
     False ->
       case kind {
-        HelperMap -> step_map(state, ref, underlying, next, func, count)
-        HelperFilter -> step_filter(state, ref, underlying, next, func, count)
-        HelperTake -> step_take(state, ref, underlying, next, count)
-        HelperDrop -> step_drop(state, ref, underlying, next, count)
-        HelperFlatMap ->
-          step_flat_map(
-            state,
-            ref,
-            underlying,
-            next,
-            func,
-            inner,
-            inner_next,
-            count,
-          )
+        HelperMap(func:) ->
+          step_map(state, ref, underlying, next, func, counter)
+        HelperFilter(func:) ->
+          step_filter(state, ref, underlying, next, func, counter)
+        HelperTake(remaining:) ->
+          step_take(state, ref, underlying, next, remaining)
+        HelperDrop(remaining:) ->
+          step_drop(state, ref, underlying, next, remaining)
+        HelperFlatMap(func:, inner:) ->
+          step_flat_map(state, ref, underlying, next, func, inner, counter)
       }
   }
 }
@@ -573,9 +576,9 @@ fn helper_return(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: IteratorHelperObject(kind:, underlying:, inner:, done:, ..),
+          kind: IteratorHelperObject(kind:, underlying:, done:, ..),
           ..,
-        )) -> classic_helper_return(state, ref, kind, underlying, inner, done)
+        )) -> classic_helper_return(state, ref, kind, underlying, done)
         Some(ObjectSlot(
           kind: IteratorZipObject(members:, done:, running:, started:, ..),
           ..,
@@ -624,7 +627,6 @@ fn classic_helper_return(
   ref: Ref,
   kind: IteratorHelperKind,
   underlying: JsValue,
-  inner: JsValue,
   done: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case done {
@@ -632,9 +634,14 @@ fn classic_helper_return(
     False -> {
       let state = mark_done(state, ref)
       // For flatMap, close the inner iterator first (best-effort), then outer.
-      let #(state, inner_res) = case kind, inner {
-        HelperFlatMap, JsObject(_) -> iterator_close_normal(state, inner)
-        _, _ -> #(state, Ok(Nil))
+      let #(state, inner_res) = case kind {
+        HelperFlatMap(inner: Some(#(inner, _inner_next)), func: _) ->
+          iterator_close_normal(state, inner)
+        HelperFlatMap(inner: None, func: _)
+        | HelperMap(func: _)
+        | HelperFilter(func: _)
+        | HelperTake(remaining: _)
+        | HelperDrop(remaining: _) -> #(state, Ok(Nil))
       }
       let #(state, outer_res) = iterator_close_normal(state, underlying)
       case inner_res, outer_res {
@@ -658,7 +665,7 @@ fn step_map(
   case step {
     None -> finish(state, ref)
     Some(v) -> {
-      let state = write_count(state, ref, count + 1)
+      let state = write_counter(state, ref, count + 1)
       let counter = value.from_int(count)
       case state.call(state, func, JsUndefined, [v, counter]) {
         Ok(#(mapped, state)) -> create_iter_result(state, mapped, False)
@@ -681,7 +688,7 @@ fn step_filter(
   case step {
     None -> finish(state, ref)
     Some(v) -> {
-      let state = write_count(state, ref, count + 1)
+      let state = write_counter(state, ref, count + 1)
       let counter = value.from_int(count)
       case state.call(state, func, JsUndefined, [v, counter]) {
         Error(#(thrown, state)) ->
@@ -719,7 +726,7 @@ fn step_take(
       case step {
         None -> finish(state, ref)
         Some(v) -> {
-          let state = write_count(state, ref, remaining - 1)
+          let state = write_kind(state, ref, HelperTake(remaining - 1))
           create_iter_result(state, v, False)
         }
       }
@@ -740,7 +747,7 @@ fn step_drop(
     Some(v) ->
       case remaining > 0 {
         True -> {
-          let state = write_count(state, ref, remaining - 1)
+          let state = write_kind(state, ref, HelperDrop(remaining - 1))
           step_drop(state, ref, underlying, next, remaining - 1)
         }
         False -> create_iter_result(state, v, False)
@@ -754,41 +761,31 @@ fn step_flat_map(
   underlying: JsValue,
   next: JsValue,
   func: JsValue,
-  inner: JsValue,
-  inner_next: JsValue,
+  inner: Option(#(JsValue, JsValue)),
   count: Int,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case inner {
     // Have an active inner iterator — pull from it.
-    JsObject(_) ->
-      case iterator_step_value(state, inner, inner_next) {
+    Some(#(inner_iter, inner_next)) ->
+      case iterator_step_value(state, inner_iter, inner_next) {
         #(state, Error(thrown)) ->
           // inner.next() threw → close outer (inner is already broken).
           close_throw(mark_done(state, ref), underlying, thrown)
         #(state, Ok(Some(v))) -> create_iter_result(state, v, False)
         #(state, Ok(None)) -> {
           // Inner exhausted — clear and pull from outer.
-          let state = write_inner(state, ref, JsUndefined, JsUndefined)
-          step_flat_map(
-            state,
-            ref,
-            underlying,
-            next,
-            func,
-            JsUndefined,
-            JsUndefined,
-            count,
-          )
+          let state = write_kind(state, ref, HelperFlatMap(func:, inner: None))
+          step_flat_map(state, ref, underlying, next, func, None, count)
         }
       }
     // No inner — pull from outer, map, open new inner.
-    _ -> {
+    None -> {
       use step, state <- after_step(state, ref, underlying, next)
       case step {
         None -> finish(state, ref)
         Some(v) -> {
           let counter = value.from_int(count)
-          let state = write_count(state, ref, count + 1)
+          let state = write_counter(state, ref, count + 1)
           case state.call(state, func, JsUndefined, [v, counter]) {
             Error(#(thrown, state)) ->
               close_throw(mark_done(state, ref), underlying, thrown)
@@ -803,16 +800,20 @@ fn step_flat_map(
               {
                 #(state, Error(thrown)) ->
                   close_throw(mark_done(state, ref), underlying, thrown)
-                #(state, Ok(#(inner, inner_next))) -> {
-                  let state = write_inner(state, ref, inner, inner_next)
+                #(state, Ok(inner)) -> {
+                  let state =
+                    write_kind(
+                      state,
+                      ref,
+                      HelperFlatMap(func:, inner: Some(inner)),
+                    )
                   step_flat_map(
                     state,
                     ref,
                     underlying,
                     next,
                     func,
-                    inner,
-                    inner_next,
+                    Some(inner),
                     count + 1,
                   )
                 }
@@ -1615,32 +1616,35 @@ fn finish(
   create_iter_result(mark_done(state, ref), JsUndefined, True)
 }
 
+/// Latch the helper's `done` flag.
 fn mark_done(state: State(host), ref: Ref) -> State(host) {
-  update_helper(state, ref, None, None, None, True)
+  use kind, counter, _done <- update_helper(state, ref)
+  #(kind, counter, True)
 }
 
-fn write_count(state: State(host), ref: Ref, count: Int) -> State(host) {
-  update_helper(state, ref, Some(count), None, None, False)
+/// Advance map/filter/flatMap's running element index.
+fn write_counter(state: State(host), ref: Ref, counter: Int) -> State(host) {
+  use kind, _counter, done <- update_helper(state, ref)
+  #(kind, counter, done)
 }
 
-fn write_inner(
+/// Replace the per-kind payload (take/drop's `remaining`, flatMap's `inner`).
+fn write_kind(
   state: State(host),
   ref: Ref,
-  inner: JsValue,
-  inner_next: JsValue,
+  kind: IteratorHelperKind,
 ) -> State(host) {
-  update_helper(state, ref, None, Some(inner), Some(inner_next), False)
+  use _kind, counter, done <- update_helper(state, ref)
+  #(kind, counter, done)
 }
 
-/// Rewrite the IteratorHelperObject kind in place. Gleam's record-update
-/// can't narrow an ExoticKind variant, so we re-match and rebuild manually.
+/// Rewrite the IteratorHelperObject's mutable fields in place. Gleam's
+/// record-update can't narrow an ExoticKind variant, so we re-match and
+/// rebuild manually.
 fn update_helper(
   state: State(host),
   ref: Ref,
-  new_count: Option(Int),
-  new_inner: Option(JsValue),
-  new_inner_next: Option(JsValue),
-  set_done: Bool,
+  update: fn(IteratorHelperKind, Int, Bool) -> #(IteratorHelperKind, Int, Bool),
 ) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
@@ -1650,27 +1654,23 @@ fn update_helper(
             kind:,
             underlying:,
             next_method:,
-            func:,
-            inner:,
-            inner_next:,
-            count:,
+            counter:,
             done:,
           ),
           ..,
-        ) ->
+        ) -> {
+          let #(kind, counter, done) = update(kind, counter, done)
           ObjectSlot(
             ..slot,
             kind: IteratorHelperObject(
               kind:,
               underlying:,
               next_method:,
-              func:,
-              inner: option.unwrap(new_inner, inner),
-              inner_next: option.unwrap(new_inner_next, inner_next),
-              count: option.unwrap(new_count, count),
-              done: done || set_done,
+              counter:,
+              done:,
             ),
           )
+        }
         other -> other
       }
     })

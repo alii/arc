@@ -5,6 +5,8 @@
 //// Error(Nil) if it would exceed max_string_bytes, so pathological inputs
 //// (`"x".repeat(2**30)`) fail fast instead of OOMing the BEAM process.
 
+import gleam/bool
+import gleam/int
 import gleam/string
 
 /// Practical cap on iteration for methods that must materialize O(length)
@@ -42,19 +44,36 @@ pub fn repeat(s: String, count: Int) -> Result(String, Nil) {
   }
 }
 
-/// Bounded pad. Returns Error(Nil) if target_len (in bytes, approximating
-/// chars for ASCII fillers) would exceed max_string_bytes.
+/// Bounded pad. Returns Error(Nil) if the padded output would exceed
+/// max_string_bytes.
 pub fn pad_start(s: String, to: Int, with: String) -> Result(String, Nil) {
-  case to > max_string_bytes {
-    True -> Error(Nil)
-    False -> Ok(string.pad_start(s, to, with))
-  }
+  bounded_pad(s, to, with, string.pad_start)
 }
 
 pub fn pad_end(s: String, to: Int, with: String) -> Result(String, Nil) {
-  case to > max_string_bytes {
+  bounded_pad(s, to, with, string.pad_end)
+}
+
+/// Guard on the *byte* size of the padded result, not the grapheme count `to`.
+/// Comparing `to` (graphemes) against max_string_bytes (bytes) lets a
+/// multi-byte filler like "\u{10000}" (4 bytes/grapheme) build a string up to
+/// 4x over the cap. Estimate: existing bytes + (graphemes still needed) *
+/// (bytes per filler grapheme).
+fn bounded_pad(
+  s: String,
+  to: Int,
+  with: String,
+  pad: fn(String, Int, String) -> String,
+) -> Result(String, Nil) {
+  // §22.1.3.16.1 StringPad step 4: an empty filler pads nothing — the result
+  // is `s` no matter how large `to` is, so it must never be length-rejected.
+  use <- bool.guard(with == "", Ok(s))
+  let estimated_bytes =
+    string.byte_size(s)
+    + int.max(0, to - string.length(s)) * string.byte_size(with)
+  case estimated_bytes > max_string_bytes {
     True -> Error(Nil)
-    False -> Ok(string.pad_end(s, to, with))
+    False -> Ok(pad(s, to, with))
   }
 }
 

@@ -290,10 +290,10 @@ fn parse_unicode_escape(bytes: BitArray) -> Result(#(Int, BitArray), String) {
 fn decode_unicode_escape(
   bytes: BitArray,
 ) -> Result(#(String, BitArray), String) {
-  use #(high, rest) <- result.try(parse_unicode_escape(bytes))
-  case high >= 0xD800 && high <= 0xDBFF {
+  use #(cp, rest) <- result.try(parse_unicode_escape(bytes))
+  case cp {
     // High surrogate — look for a trailing \uXXXX low surrogate
-    True ->
+    high if high >= 0xD800 && high <= 0xDBFF ->
       case parse_low_surrogate(rest) {
         Some(#(low, rest)) -> {
           let combined = { high - 0xD800 } * 0x400 + { low - 0xDC00 } + 0x10000
@@ -302,7 +302,10 @@ fn decode_unicode_escape(
         // Lone/unpaired high surrogate → U+FFFD replacement char
         None -> Ok(#("\u{FFFD}", rest))
       }
-    False -> codepoint_to_string(high) |> result.map(fn(s) { #(s, rest) })
+    // Lone LOW surrogate (never valid on its own) → U+FFFD as well, rather
+    // than a parse error: JSON.parse('"\\udc62"') must succeed.
+    low if low >= 0xDC00 && low <= 0xDFFF -> Ok(#("\u{FFFD}", rest))
+    _ -> codepoint_to_string(cp) |> result.map(fn(s) { #(s, rest) })
   }
 }
 

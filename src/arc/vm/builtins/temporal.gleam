@@ -1827,18 +1827,19 @@ fn parse_time_part(s: String) -> Option(#(TimeRec, String)) {
         None -> #(0, 0, 0, rest)
       }
   }
-  // Leap second: 60 → 59 per spec.
-  let sec = int.min(sec, 59)
+  // Leap second: 60 → 59 per spec. Anything above 60 is a syntax error, so
+  // the range check below MUST see the raw parsed value — clamping first
+  // would silently accept "T00:00:61".
   let t =
     TimeRec(
       hour: h,
       minute: mi,
-      second: sec,
+      second: int.min(sec, 59),
       ms: frac_ns / ns_per_ms,
       us: { frac_ns % ns_per_ms } / ns_per_us,
       ns: frac_ns % ns_per_us,
     )
-  case h <= 23 && mi <= 59 {
+  case h <= 23 && mi <= 59 && sec <= 60 {
     True -> Some(#(t, rest))
     False -> None
   }
@@ -2246,12 +2247,26 @@ fn tz_kind(tz: String) -> TzKind {
 }
 
 /// GetOffsetNanosecondsFor — UTC offset of `tz` at an exact instant.
-fn tz_offset_ns_at(tz: String, epoch_ns: Int) -> Int {
+/// RangeError when a named zone's TZif data cannot be loaded (same error as
+/// an unsupported time zone identifier).
+fn tz_offset_ns_at(tz: String, epoch_ns: Int) -> Result(Int, TErr) {
   case tz_kind(tz) {
-    UtcZone -> 0
-    OffsetZone(off) -> off
-    NamedZone -> temporal_tz.offset_ns_at(tz, epoch_ns)
+    UtcZone -> Ok(0)
+    OffsetZone(off) -> Ok(off)
+    NamedZone ->
+      temporal_tz.offset_ns_at(tz, epoch_ns)
+      |> result.replace_error(RangeE("time zone " <> tz <> " is not supported"))
   }
+}
+
+/// Wall-clock date/time of `epoch_ns` in `tz`.
+/// RangeError when a named zone's TZif data cannot be loaded.
+fn epoch_ns_to_iso_in(
+  tz: String,
+  epoch_ns: Int,
+) -> Result(#(IsoDate, TimeRec), TErr) {
+  use off <- result.map(tz_offset_ns_at(tz, epoch_ns))
+  epoch_ns_to_iso(epoch_ns, off)
 }
 
 fn validate_epoch_ns(ns: Int) -> Result(Int, TErr) {
@@ -2295,8 +2310,8 @@ fn get_possible_epoch_ns(
     }
     NamedZone -> {
       use Nil <- result.try(check_iso_days_range(d))
-      let before = temporal_tz.offset_ns_at(tz, utc - ns_per_day)
-      let after = temporal_tz.offset_ns_at(tz, utc + ns_per_day)
+      use before <- result.try(tz_offset_ns_at(tz, utc - ns_per_day))
+      use after <- result.try(tz_offset_ns_at(tz, utc + ns_per_day))
       let candidates = case before == after {
         True -> [before]
         False -> [before, after]
@@ -2304,7 +2319,7 @@ fn get_possible_epoch_ns(
       Ok(
         list.filter_map(candidates, fn(off) {
           let ens = utc - off
-          case temporal_tz.offset_ns_at(tz, ens) == off {
+          case temporal_tz.offset_ns_at(tz, ens) == Ok(off) {
             True -> Ok(ens)
             False -> Error(Nil)
           }
@@ -2340,8 +2355,8 @@ fn disambiguate_epoch_ns(
         Compatible | Earlier | Later -> {
           // Skipped (gap) time: shift by the size of the gap and retry.
           let utc = utc_epoch_ns(d, t)
-          let before = tz_offset_ns_at(tz, utc - ns_per_day)
-          let after = tz_offset_ns_at(tz, utc + ns_per_day)
+          use before <- result.try(tz_offset_ns_at(tz, utc - ns_per_day))
+          use after <- result.try(tz_offset_ns_at(tz, utc + ns_per_day))
           let gap = after - before
           let shifted = case dis {
             Earlier -> utc - gap
@@ -3664,8 +3679,7 @@ fn to_temporal_date(
           ..,
         )) -> {
           use #(_opts, st) <- result.try(validated_overflow(state, options))
-          let #(d, _) =
-            epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
+          use #(d, _) <- terr_r(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
           Ok(#(#(d, slot_calendar(calendar)), st))
         }
         _ -> date_from_bag(state, ref, options)
@@ -3790,8 +3804,7 @@ fn to_temporal_time(
           ..,
         )) -> {
           use #(_o, st) <- result.try(validated_overflow(state, options))
-          let #(_, t) =
-            epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
+          use #(_, t) <- terr_r(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
           Ok(#(t, st))
         }
         _ -> time_from_bag(state, ref, options)
@@ -4508,8 +4521,7 @@ fn to_temporal_date_time(
           ..,
         )) -> {
           use #(_o, st) <- result.try(validated_overflow(state, options))
-          let #(d, t) =
-            epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(time_zone, epoch_ns))
+          use #(d, t) <- terr_r(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
           Ok(#(#(d, t, slot_calendar(calendar)), st))
         }
         _ -> date_time_from_bag(state, ref, options)
@@ -5588,7 +5600,7 @@ fn add_zoned_ns(
     case dur.years == 0 && dur.months == 0 && dur.weeks == 0 && dur.days == 0 {
       True -> Ok(ns)
       False -> {
-        let #(d0, t0) = epoch_ns_to_iso(ns, tz_offset_ns_at(tz, ns))
+        use #(d0, t0) <- result.try(epoch_ns_to_iso_in(tz, ns))
         let date_dur =
           DurRec(
             ..zero_dur,
@@ -6038,7 +6050,7 @@ fn zoned_field(
   zcal: tcal.Calendar,
   name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let offset = tz_offset_ns_at(tz, ns)
+  use offset <- terr(state, tz_offset_ns_at(tz, ns))
   let #(d, t) = epoch_ns_to_iso(ns, offset)
   case name {
     "timeZoneId" -> #(state, Ok(JsString(tz)))
@@ -6086,21 +6098,21 @@ fn now_dispatch(
     "plainDateISO" -> {
       use tz, state <- state.try_op(now_tz_arg(state, args))
       let nns = now_epoch_ns()
-      let #(d, _) = epoch_ns_to_iso(nns, tz_offset_ns_at(tz, nns))
+      use #(d, _) <- terr(state, epoch_ns_to_iso_in(tz, nns))
       let #(state, v) = make_date(state, protos, d)
       #(state, Ok(v))
     }
     "plainDateTimeISO" -> {
       use tz, state <- state.try_op(now_tz_arg(state, args))
       let nns = now_epoch_ns()
-      let #(d, t) = epoch_ns_to_iso(nns, tz_offset_ns_at(tz, nns))
+      use #(d, t) <- terr(state, epoch_ns_to_iso_in(tz, nns))
       let #(state, v) = make_date_time(state, protos, d, t)
       #(state, Ok(v))
     }
     "plainTimeISO" -> {
       use tz, state <- state.try_op(now_tz_arg(state, args))
       let nns = now_epoch_ns()
-      let #(_, t) = epoch_ns_to_iso(nns, tz_offset_ns_at(tz, nns))
+      use #(_, t) <- terr(state, epoch_ns_to_iso_in(tz, nns))
       let #(state, v) = make_time(state, protos, t)
       #(state, Ok(v))
     }
@@ -9165,10 +9177,8 @@ fn duration_round_with(
                   // Calendar-unit (or zoned day) smallestUnit: wall-clock
                   // diff with calendar nudging.
                   True -> {
-                    let a_dt =
-                      epoch_ns_to_iso(rel_ns, tz_offset_ns_at(tz, rel_ns))
-                    let b_dt =
-                      epoch_ns_to_iso(target_ns, tz_offset_ns_at(tz, target_ns))
+                    use a_dt <- result.try(epoch_ns_to_iso_in(tz, rel_ns))
+                    use b_dt <- result.try(epoch_ns_to_iso_in(tz, target_ns))
                     diff_date_time_core(
                       cal,
                       a_dt,
@@ -9266,8 +9276,8 @@ fn zoned_diff_round_time(
   // (NudgeToZonedTime always materialises both day bounds).
   {
     {
-      let #(a_d, a_t) = epoch_ns_to_iso(a_ns, tz_offset_ns_at(tz, a_ns))
-      let #(b_d, b_t) = epoch_ns_to_iso(b_ns, tz_offset_ns_at(tz, b_ns))
+      use #(a_d, a_t) <- result.try(epoch_ns_to_iso_in(tz, a_ns))
+      use #(b_d, b_t) <- result.try(epoch_ns_to_iso_in(tz, b_ns))
       let sign = case b_ns < a_ns {
         True -> -1
         False -> 1
@@ -9362,16 +9372,15 @@ fn zoned_nudge_time(
       let time_part = balance_time_ns(rounded_t2, Hour)
       let base = DurRec(..time_part, years:, months:, weeks:, days: days + sign)
       let nudged_inst = end_ns + rounded_t2
-      let #(n_d, n_t) =
-        epoch_ns_to_iso(nudged_inst, tz_offset_ns_at(tz, nudged_inst))
-      Ok(bubble_date_duration(
+      use #(n_d, n_t) <- result.map(epoch_ns_to_iso_in(tz, nudged_inst))
+      bubble_date_duration(
         sign,
         base,
         local_ns(n_d, n_t),
         #(a_d, a_t),
         largest,
         Day,
-      ))
+      )
     }
     False -> {
       let time_part = balance_time_ns(rounded_t, Hour)
@@ -9475,10 +9484,8 @@ fn duration_total_with(
         False -> {
           // Whole calendar units in wall-clock space + fractional progress
           // between the bounding instants (NudgeToCalendarUnit, zoned).
-          let #(a_d, a_t) =
-            epoch_ns_to_iso(anchor_ns, tz_offset_ns_at(tz, anchor_ns))
-          let #(b_d, b_t) =
-            epoch_ns_to_iso(target_ns, tz_offset_ns_at(tz, target_ns))
+          use #(a_d, a_t) <- terr(state, epoch_ns_to_iso_in(tz, anchor_ns))
+          use #(b_d, b_t) <- terr(state, epoch_ns_to_iso_in(tz, target_ns))
           let sign = case target_ns < anchor_ns {
             True -> -1
             False -> 1
@@ -9856,7 +9863,7 @@ fn instant_method(
             JsUndefined -> #(state, Ok(JsString(format_instant(rounded, prec))))
             JsString(tz_str) -> {
               use tz <- terr(state, parse_time_zone_id(tz_str))
-              let off = tz_offset_ns_at(tz, rounded)
+              use off <- terr(state, tz_offset_ns_at(tz, rounded))
               let #(d, t) = epoch_ns_to_iso(rounded, off)
               let s =
                 format_iso_date(d)
@@ -10014,13 +10021,13 @@ fn zoned_date_time_method(
     None -> brand_error(state, "ZonedDateTime", name)
     Some(#(ns, tz, zcal)) -> {
       let _ = zcal
-      let off = tz_offset_ns_at(tz, ns)
+      use off <- terr(state, tz_offset_ns_at(tz, ns))
       let #(d, t) = epoch_ns_to_iso(ns, off)
       case name {
-        "toJSON" | "toLocaleString" -> #(
-          state,
-          Ok(JsString(format_zoned(ns, tz, AutoPrec))),
-        )
+        "toJSON" | "toLocaleString" -> {
+          use s <- terr(state, format_zoned(ns, tz, AutoPrec))
+          #(state, Ok(JsString(s)))
+        }
         "toString" -> {
           // Read order: calendarName, fractionalSecondDigits, offset,
           // roundingMode, smallestUnit, timeZoneName; validate after.
@@ -10067,7 +10074,7 @@ fn zoned_date_time_method(
                 as_if_positive_mode(mode),
               )
           }
-          let off2 = tz_offset_ns_at(tz, rounded)
+          use off2 <- terr(state, tz_offset_ns_at(tz, rounded))
           let #(d2, t2) = epoch_ns_to_iso(rounded, off2)
           let base = format_iso_date(d2) <> "T" <> format_iso_time(t2, prec)
           let with_offset = case option.unwrap(offset_mode, "auto") {
@@ -10472,8 +10479,8 @@ fn zoned_until_since(
             "time zones must be equal for calendar-unit differences",
           )
         True -> {
-          let a_dt = epoch_ns_to_iso(a_ns, tz_offset_ns_at(a_tz, a_ns))
-          let b_dt = epoch_ns_to_iso(b_ns, tz_offset_ns_at(a_tz, b_ns))
+          use a_dt <- terr(state, epoch_ns_to_iso_in(a_tz, a_ns))
+          use b_dt <- terr(state, epoch_ns_to_iso_in(a_tz, b_ns))
           use final <- terr(
             state,
             diff_date_time_core(
@@ -10495,8 +10502,12 @@ fn zoned_until_since(
   }
 }
 
-fn format_zoned(ns: Int, tz: String, prec: Precision) -> String {
-  let off = tz_offset_ns_at(tz, ns)
+fn format_zoned(
+  ns: Int,
+  tz: String,
+  prec: Precision,
+) -> Result(String, TErr) {
+  use off <- result.map(tz_offset_ns_at(tz, ns))
   let #(d, t) = epoch_ns_to_iso(ns, off)
   format_iso_date(d)
   <> "T"

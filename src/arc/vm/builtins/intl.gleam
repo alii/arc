@@ -2970,7 +2970,12 @@ fn iana_zone(lower: String) -> Option(#(String, Int)) {
           case known_area && parts_ok {
             True -> {
               let name = normalize_zone_case(lower)
-              Some(#(name, iana_zone_offset(name) |> option.unwrap(0)))
+              // A structurally-valid but unknown Area/Location has no entry
+              // in the offset table. Propagate the None so the caller's
+              // "Invalid time zone specified" RangeError fires instead of
+              // silently rendering the zone as UTC (offset 0).
+              use offset <- option.map(iana_zone_offset(name))
+              #(name, offset)
             }
             False -> None
           }

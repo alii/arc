@@ -303,7 +303,7 @@ fn construct_fn_callback(
               }
           }
         Error(#(Thrown, thrown, post)) ->
-          Error(#(thrown, State(..state, heap: post.heap)))
+          Error(#(thrown, merge_back(state, post)))
         Error(#(StepVmError(vm_err), _, _)) ->
           panic as { "VM error in do_construct: " <> string.inspect(vm_err) }
         Error(#(other, _, _post)) ->

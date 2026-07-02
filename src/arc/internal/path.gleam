@@ -38,10 +38,18 @@ pub fn normalize(path: String) -> String {
     list.fold(parts, [], fn(acc, part) {
       case part {
         "." -> acc
+        // Only a real directory segment can be popped by "..". `acc` is
+        // built in reverse, so its head is the most recent segment:
+        //  - ["", ..]    → at the root of an absolute path; ".." can't climb
+        //                  above it, so it is dropped
+        //  - [] / [".."] → nothing left to pop; the ".." must be preserved
+        //                  (a leading run of ".."s escapes the base dir)
+        //  - [seg, ..]   → pop it
         ".." ->
           case acc {
+            ["", ..] -> acc
+            [] | ["..", ..] -> ["..", ..acc]
             [_, ..rest] -> rest
-            [] -> [".."]
           }
         "" ->
           case acc {

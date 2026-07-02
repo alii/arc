@@ -7,12 +7,12 @@ import arc/vm/builtins/common
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
 import arc/vm/value.{
-  type JsValue, type Ref, JsObject, JsString, JsSymbol, ObjectSlot,
+  type JsValue, type Ref, JsObject, JsSymbol, ObjectSlot,
   SymbolConstructor, SymbolDescriptionGetter, SymbolFor, SymbolKeyFor,
   SymbolPrototypeToPrimitive, SymbolPrototypeToString, SymbolPrototypeValueOf,
 }
 import gleam/dict
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 
 /// Set up the Symbol constructor (with well-known symbol properties) and a
@@ -173,16 +173,20 @@ pub fn new_symbol_ref() -> value.ErlangRef {
 
 /// Symbol() call implementation. Creates a new unique symbol backed by
 /// an Erlang reference — globally unique across the BEAM cluster.
+///
+/// §20.4.1.1 step 4 requires ToString(description) on any non-undefined
+/// argument, which can run user code and throw — so the caller (the
+/// SymbolConstructor dispatch arm) performs the coercion and hands us the
+/// already-stringified description here.
 pub fn call_symbol(
-  args: List(JsValue),
+  description: Option(String),
   symbol_descriptions: dict.Dict(value.SymbolId, String),
 ) -> #(dict.Dict(value.SymbolId, String), JsValue) {
   let id = value.UserSymbol(make_ref())
 
-  // Optional description argument
-  let new_descriptions = case args {
-    [JsString(desc), ..] -> dict.insert(symbol_descriptions, id, desc)
-    _ -> symbol_descriptions
+  let new_descriptions = case description {
+    Some(desc) -> dict.insert(symbol_descriptions, id, desc)
+    None -> symbol_descriptions
   }
 
   #(new_descriptions, JsSymbol(id))

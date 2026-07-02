@@ -38,6 +38,7 @@ import arc/vm/exec/generators
 import arc/vm/exec/promises
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/ordered_entries
 import arc/vm/internal/tuple_array
 import arc/vm/limits
 import arc/vm/ops/coerce
@@ -1213,8 +1214,22 @@ pub fn call_native(
     }
     // Symbol() constructor -- callable but NOT new-able
     value.Call(value.SymbolConstructor) -> {
+      // §20.4.1.1 step 4: If description is undefined, descString is
+      // undefined; else descString = ? ToString(description). The coercion
+      // is observable — Symbol({toString(){throw x}}) must throw x.
+      use #(description, state) <- result.try(
+        case helpers.first_arg_or_undefined(args) {
+          JsUndefined -> Ok(#(None, state))
+          desc -> {
+            use #(s, state) <- result.map(
+              state.rethrow(coerce.js_to_string(state, desc)),
+            )
+            #(Some(s), state)
+          }
+        },
+      )
       let #(new_descs, sym_val) =
-        builtins_symbol.call_symbol(args, state.ctx.symbol_descriptions)
+        builtins_symbol.call_symbol(description, state.ctx.symbol_descriptions)
       Ok(
         State(
           ..state,
@@ -2372,10 +2387,8 @@ fn call_set_iterator_next(
             push_iter_result(state, rest_stack, state.heap, JsUndefined, True)
           })
           let next = case heap.read(state.heap, source) {
-            Some(ObjectSlot(
-              kind: value.SetObject(data:, order:, next_seq:, ..),
-              ..,
-            )) -> value.entry_from_seq(data, order, cursor, next_seq)
+            Some(ObjectSlot(kind: value.SetObject(store:), ..)) ->
+              ordered_entries.entry_from_seq(store, cursor)
             _ -> None
           }
           case next {
@@ -2446,10 +2459,8 @@ fn call_map_iterator_next(
             push_iter_result(state, rest_stack, state.heap, JsUndefined, True)
           })
           let next = case heap.read(state.heap, source) {
-            Some(ObjectSlot(
-              kind: value.MapObject(entries:, order:, next_seq:, ..),
-              ..,
-            )) -> value.entry_from_seq(entries, order, cursor, next_seq)
+            Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
+              ordered_entries.entry_from_seq(store, cursor)
             _ -> None
           }
           case next {
