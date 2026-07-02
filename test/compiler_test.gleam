@@ -97,6 +97,8 @@ fn inspect_vm_error(err: state.VmError) -> String {
     state.PcOutOfBounds(pc) -> "PcOutOfBounds(" <> pc |> int.to_string <> ")"
     state.StackUnderflow(op) -> "StackUnderflow(" <> op <> ")"
     state.Unimplemented(op) -> "Unimplemented(" <> op <> ")"
+    state.InternalError(site:, detail:) ->
+      "InternalError(" <> site <> ", " <> detail <> ")"
   }
 }
 

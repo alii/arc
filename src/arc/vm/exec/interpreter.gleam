@@ -46,8 +46,8 @@ import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
   type Heap, type NativeFnSlot, type State, type StepResult, type VmError,
-  Awaited, Done, SavedFrame, StackUnderflow, State, StepVmError, Thrown,
-  TryFrame, Unimplemented, Yielded,
+  Awaited, Done, InternalError, SavedFrame, StackUnderflow, State, StepVmError,
+  Thrown, TryFrame, Yielded,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
@@ -149,9 +149,10 @@ fn call_value_to_completion(
           Ok(#(ThrowCompletion(thrown), merge_back(state, post)))
         Error(#(StepVmError(vm_err), _, _)) -> Error(vm_err)
         Error(#(step, _, _)) ->
-          Error(Unimplemented(
+          Error(InternalError(
+            "call_value_to_completion",
             "unexpected step result entering a re-entrant call: "
-            <> string.inspect(step),
+              <> string.inspect(step),
           ))
       }
     }
@@ -1834,14 +1835,14 @@ fn step(
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
             None ->
               Error(#(
-                StepVmError(Unimplemented("GetBoxed: not a BoxSlot")),
+                StepVmError(InternalError("GetBoxed", "not a BoxSlot")),
                 JsUndefined,
                 state,
               ))
           }
         _ ->
           Error(#(
-            StepVmError(Unimplemented("GetBoxed: local is not a box ref")),
+            StepVmError(InternalError("GetBoxed", "local is not a box ref")),
             JsUndefined,
             state,
           ))
@@ -1859,7 +1860,7 @@ fn step(
             }
             _ ->
               Error(#(
-                StepVmError(Unimplemented("PutBoxed: local is not a box ref")),
+                StepVmError(InternalError("PutBoxed", "local is not a box ref")),
                 JsUndefined,
                 state,
               ))
@@ -1889,9 +1890,9 @@ fn step(
               }
             other ->
               Error(#(
-                StepVmError(Unimplemented(
-                  "PutBoxedCheckInit: local is not a box ref: "
-                  <> string.inspect(other),
+                StepVmError(InternalError(
+                  "PutBoxedCheckInit",
+                  "local is not a box ref: " <> string.inspect(other),
                 )),
                 JsUndefined,
                 state,
@@ -4731,7 +4732,10 @@ fn step(
               }
             _ ->
               Error(#(
-                StepVmError(Unimplemented("ForInNext: not a ForInIteratorSlot")),
+                StepVmError(InternalError(
+                  "ForInNext",
+                  "not a ForInIteratorSlot",
+                )),
                 JsUndefined,
                 state,
               ))
