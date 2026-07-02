@@ -4,8 +4,17 @@
 /// Parse error types and formatting.
 /// Split from parser.gleam — the ParseError type, string formatting, and
 /// position extraction live here so parser.gleam can focus on parsing logic.
+import arc/parser/lexer
+import arc/parser/regex
+
 pub type ParseError {
-  LexerError(message: String, pos: Int)
+  /// A lexer error surfaced through the parser. Carries the lexer's own
+  /// typed error rather than a pre-formatted message.
+  LexError(error: lexer.LexError)
+  /// A regular-expression literal failed scanning or ECMAScript Pattern
+  /// validation. Carries `parser/regex`'s own typed error; its message and
+  /// position come from `regex.pattern_error_message` / `pattern_error_pos`.
+  RegExpSyntaxError(error: regex.PatternError)
   ExpectedToken(expected: String, got: String, pos: Int)
   ExpectedIdentifier(pos: Int)
   ExpectedSemicolon(pos: Int)
@@ -19,10 +28,12 @@ pub type ParseError {
   UnexpectedSuper(pos: Int)
   UnexpectedCloseParen(pos: Int)
   UnexpectedToken(token: String, pos: Int)
-  NotAnArrowFunction(pos: Int)
   ReturnOutsideFunction(pos: Int)
   BreakOutsideLoopOrSwitch(pos: Int)
   ContinueOutsideLoop(pos: Int)
+  /// `continue L` where L is in scope but does not label an
+  /// IterationStatement (ES2024 §14.9.1 Early Errors).
+  ContinueToNonIterationLabel(name: String, pos: Int)
   ReservedWordStrictMode(name: String, pos: Int)
   YieldReservedStrictMode(pos: Int)
   LetIdentifierStrictMode(pos: Int)
@@ -73,7 +84,8 @@ pub type ParseError {
   ExpectedForDeclSeparator(pos: Int)
   ExpectedCloseAfterSetter(pos: Int)
   ClassConstructorNotSetter(pos: Int)
-  InvalidForInOfLhs(kind: String, pos: Int)
+  InvalidForInLhs(pos: Int)
+  InvalidForOfLhs(pos: Int)
   ExpectedForSeparator(pos: Int)
   UndefinedLabel(label: String, pos: Int)
   ThrowLineBreak(pos: Int)
@@ -121,7 +133,6 @@ pub type ParseError {
   InvalidPostfixLhs(pos: Int)
   ExpectedNewTargetGot(got: String, pos: Int)
   ExpectedImportMetaGot(got: String, pos: Int)
-  StrictModeModifyRestricted(name: String, pos: Int)
   ExpectedIdentifierAsString(name: String, pos: Int)
   DuplicateParamNameStrictMode(name: String, pos: Int)
   ReservedWordImportBinding(name: String, pos: Int)
@@ -130,6 +141,13 @@ pub type ParseError {
   ImportNotTopLevel(pos: Int)
   ExportNotTopLevel(pos: Int)
   UnicodeEscapeInMetaProperty(pos: Int)
+  /// A template literal quasi whose escape sequence cannot be cooked
+  /// (untagged templates only — tagged templates get `undefined` cooked
+  /// values instead).
+  InvalidTemplateEscape(pos: Int)
+  /// A "use strict" directive in the body of a function whose parameter
+  /// list is non-simple (defaults / destructuring / rest).
+  MisplacedUseStrictDirective(pos: Int)
   /// `using`/`await using` at the top level of a Script (or eval) — early
   /// error: a UsingDeclaration with goal Script must be contained within a
   /// Block, ForStatement, ForInOfStatement, FunctionBody, etc.
@@ -148,7 +166,8 @@ pub type ParseError {
 
 pub fn parse_error_to_string(error: ParseError) -> String {
   case error {
-    LexerError(message:, ..) -> message
+    LexError(error:) -> lexer.lex_error_to_string(error)
+    RegExpSyntaxError(error:) -> regex.pattern_error_message(error)
     ExpectedToken(expected:, got:, ..) ->
       "Expected " <> expected <> " but got " <> got
     ExpectedIdentifier(_) -> "Expected identifier"
@@ -163,10 +182,13 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     UnexpectedSuper(_) -> "Unexpected 'super'"
     UnexpectedCloseParen(_) -> "Unexpected token ')'"
     UnexpectedToken(token:, ..) -> "Unexpected token: " <> token
-    NotAnArrowFunction(_) -> "Not an arrow function"
     ReturnOutsideFunction(_) -> "'return' outside of function"
     BreakOutsideLoopOrSwitch(_) -> "'break' outside of loop or switch"
     ContinueOutsideLoop(_) -> "'continue' outside of loop"
+    ContinueToNonIterationLabel(name:, ..) ->
+      "Illegal continue statement: '"
+      <> name
+      <> "' does not denote an iteration statement"
     ReservedWordStrictMode(name:, ..) ->
       "'" <> name <> "' is a reserved word in strict mode"
     YieldReservedStrictMode(_) -> "'yield' is a reserved word in strict mode"
@@ -242,8 +264,8 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     ExpectedForDeclSeparator(_) -> "Expected 'in', 'of', ';', '=', or ','"
     ExpectedCloseAfterSetter(_) -> "Expected ')' after setter parameter"
     ClassConstructorNotSetter(_) -> "Class constructor may not be a setter"
-    InvalidForInOfLhs(kind:, ..) ->
-      "Invalid left-hand side in for-" <> kind <> " statement"
+    InvalidForInLhs(_) -> "Invalid left-hand side in for-in statement"
+    InvalidForOfLhs(_) -> "Invalid left-hand side in for-of statement"
     ExpectedForSeparator(_) -> "Expected ';', 'in', or 'of' in for statement"
     UndefinedLabel(label:, ..) -> "Undefined label '" <> label <> "'"
     ThrowLineBreak(_) ->
@@ -314,8 +336,6 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "Expected 'target' after 'new.' but got '" <> got <> "'"
     ExpectedImportMetaGot(got:, ..) ->
       "Expected 'meta' after 'import.' but got '" <> got <> "'"
-    StrictModeModifyRestricted(name:, ..) ->
-      "'" <> name <> "' cannot be modified in strict mode"
     ExpectedIdentifierAsString(name:, ..) ->
       "'" <> name <> "' is a reserved word and cannot be used as an identifier"
     DuplicateParamNameStrictMode(name:, ..) ->
@@ -334,6 +354,10 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "'export' declarations may only appear at top level of a module"
     UnicodeEscapeInMetaProperty(_) ->
       "'target' in new.target must not contain unicode escape sequences"
+    InvalidTemplateEscape(_) -> "Invalid escape sequence"
+    // Rendered like the `UnexpectedToken("use strict", _)` it replaced so
+    // the reported message is unchanged.
+    MisplacedUseStrictDirective(_) -> "Unexpected token: use strict"
     UsingAtScriptTopLevel(_) ->
       "'using' declarations are not allowed at the top level of a script"
     UsingInCaseClause(_) ->
@@ -348,8 +372,12 @@ pub fn parse_error_to_string(error: ParseError) -> String {
 
 pub fn parse_error_pos(error: ParseError) -> Int {
   case error {
-    LexerError(pos:, ..)
-    | ExpectedToken(pos:, ..)
+    // Every lexer.LexError variant carries its own `pos`.
+    LexError(error: lex_error) -> lexer.lex_error_pos(lex_error)
+    // Every regex.PatternError variant carries its own `pos`.
+    RegExpSyntaxError(error: pattern_error) ->
+      regex.pattern_error_pos(pattern_error)
+    ExpectedToken(pos:, ..)
     | ExpectedIdentifier(pos:)
     | ExpectedSemicolon(pos:)
     | ExpectedBindingPattern(pos:)
@@ -362,10 +390,10 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | UnexpectedSuper(pos:)
     | UnexpectedCloseParen(pos:)
     | UnexpectedToken(pos:, ..)
-    | NotAnArrowFunction(pos:)
     | ReturnOutsideFunction(pos:)
     | BreakOutsideLoopOrSwitch(pos:)
     | ContinueOutsideLoop(pos:)
+    | ContinueToNonIterationLabel(pos:, ..)
     | ReservedWordStrictMode(pos:, ..)
     | EscapedReservedWord(pos:, ..)
     | YieldReservedStrictMode(pos:)
@@ -416,7 +444,8 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | ExpectedForDeclSeparator(pos:)
     | ExpectedCloseAfterSetter(pos:)
     | ClassConstructorNotSetter(pos:)
-    | InvalidForInOfLhs(pos:, ..)
+    | InvalidForInLhs(pos:)
+    | InvalidForOfLhs(pos:)
     | ExpectedForSeparator(pos:)
     | UndefinedLabel(pos:, ..)
     | ThrowLineBreak(pos:)
@@ -469,7 +498,6 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | InvalidPostfixLhs(pos:)
     | ExpectedNewTargetGot(pos:, ..)
     | ExpectedImportMetaGot(pos:, ..)
-    | StrictModeModifyRestricted(pos:, ..)
     | ExpectedIdentifierAsString(pos:, ..)
     | DuplicateParamNameStrictMode(pos:, ..)
     | ReservedWordImportBinding(pos:, ..)
@@ -477,6 +505,8 @@ pub fn parse_error_pos(error: ParseError) -> Int {
     | UndeclaredExportBinding(pos:, ..)
     | ImportNotTopLevel(pos:)
     | ExportNotTopLevel(pos:)
-    | UnicodeEscapeInMetaProperty(pos:) -> pos
+    | UnicodeEscapeInMetaProperty(pos:)
+    | InvalidTemplateEscape(pos:)
+    | MisplacedUseStrictDirective(pos:) -> pos
   }
 }

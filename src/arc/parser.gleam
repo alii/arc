@@ -21,7 +21,7 @@ import arc/parser/error.{
   AwaitInModule, AwaitInStaticBlock, BreakOutsideLoopOrSwitch,
   ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
   ClassConstructorNotSetter, ClassDuplicateConstructor, ContinueOutsideLoop,
-  DeletePrivateName, DeleteUnqualifiedStrictMode,
+  ContinueToNonIterationLabel, DeletePrivateName, DeleteUnqualifiedStrictMode,
   DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,
   DuplicateExport, DuplicateImportBinding, DuplicateLabel,
   DuplicateParamNameStrictMode, DuplicateParameterName, DuplicatePrivateName,
@@ -43,23 +43,24 @@ import arc/parser/error.{
   ExportNotTopLevel, FieldNamedConstructor, ForInInitializer, ForOfInitializer,
   FunctionDeclInLabelBody, FunctionDeclInSingleStatement, GeneratorDeclLabeled,
   GetterNoParams, IdentifierAlreadyDeclared, ImportNotTopLevel,
-  InvalidAssignmentLhs, InvalidDestructuringTarget, InvalidForInOfLhs,
-  InvalidLhsPrefixOp, InvalidPostfixLhs, LetBindingInLexicalDecl,
-  LetIdentifierStrictMode, LexerError, LexicalDeclInLabel,
-  LexicalDeclInSingleStatement, MissingCatchOrFinally, MissingConstInitializer,
-  NewTargetOutsideFunction, NotAnArrowFunction, OctalEscapeStrictMode,
-  OctalLiteralStrictMode, PrivateNameAsPropertyKey, PrivateNameConstructor,
-  ReservedWordImportBinding, ReservedWordStrictMode, RestDefaultInitializer,
-  RestMustBeLast, RestTrailingComma, ReturnOutsideFunction,
-  SetterExactlyOneParam, SetterNoRest, ShorthandDefaultOutsideDestructuring,
-  StaticPrototype, StaticReservedStrictMode, StrictModeAssignment,
-  StrictModeBindingName, StrictModeModification, StrictModeModifyRestricted,
-  StrictModeParamName, SuperCallNotInDerivedConstructor, SuperPrivateName,
-  SuperPropertyNotInMethod, ThrowLineBreak, UndeclaredExportBinding,
-  UndeclaredPrivateName, UndefinedLabel, UnexpectedAfterExport,
-  UnexpectedCloseBrace, UnexpectedCloseParen, UnexpectedExport, UnexpectedSuper,
-  UnexpectedToken, UnicodeEscapeInMetaProperty, UsingAtScriptTopLevel,
-  UsingInCaseClause, UsingInForIn, UsingMissingInitializer, UsingPatternBinding,
+  InvalidAssignmentLhs, InvalidDestructuringTarget, InvalidForInLhs,
+  InvalidForOfLhs, InvalidLhsPrefixOp, InvalidPostfixLhs, InvalidTemplateEscape,
+  LetBindingInLexicalDecl, LetIdentifierStrictMode, LexError, LexicalDeclInLabel,
+  LexicalDeclInSingleStatement, MisplacedUseStrictDirective,
+  MissingCatchOrFinally, MissingConstInitializer, NewTargetOutsideFunction,
+  OctalEscapeStrictMode, OctalLiteralStrictMode, PrivateNameAsPropertyKey,
+  PrivateNameConstructor, RegExpSyntaxError, ReservedWordImportBinding,
+  ReservedWordStrictMode, RestDefaultInitializer, RestMustBeLast,
+  RestTrailingComma, ReturnOutsideFunction, SetterExactlyOneParam, SetterNoRest,
+  ShorthandDefaultOutsideDestructuring, StaticPrototype,
+  StaticReservedStrictMode, StrictModeAssignment, StrictModeBindingName,
+  StrictModeModification, StrictModeParamName, SuperCallNotInDerivedConstructor,
+  SuperPrivateName, SuperPropertyNotInMethod, ThrowLineBreak,
+  UndeclaredExportBinding, UndeclaredPrivateName, UndefinedLabel,
+  UnexpectedAfterExport, UnexpectedCloseBrace, UnexpectedCloseParen,
+  UnexpectedExport, UnexpectedSuper, UnexpectedToken,
+  UnicodeEscapeInMetaProperty, UsingAtScriptTopLevel, UsingInCaseClause,
+  UsingInForIn, UsingMissingInitializer, UsingPatternBinding,
   WithNotAllowedStrictMode, YieldInFormalParameter, YieldInGenerator,
   YieldReservedStrictMode,
 }
@@ -146,6 +147,24 @@ type BindingKind {
   BindingParam
 }
 
+/// What the statement behind a label is. `continue L` is only legal when L
+/// denotes an IterationStatement (ES2024 §14.9.1 Early Errors); `break L`
+/// accepts any label in scope.
+type LabelKind {
+  /// The label (or the whole `a: b: …` chain it belongs to) directly
+  /// prefixes a `for` / `while` / `do` statement.
+  LoopLabel
+  /// The label prefixes any other statement.
+  PlainLabel
+}
+
+/// Which statement a `break L` / `continue L` label reference comes from.
+/// Decides how strict `parse_optional_label` is about the label's kind.
+type LabelUse {
+  BreakLabel
+  ContinueLabel
+}
+
 /// Internal parser state: remaining tokens + the line of the last consumed token.
 type P {
   P(
@@ -188,7 +207,10 @@ type P {
     // Empty for scripts/modules/indirect eval.
     outer_private_names: List(String),
     strict: Bool,
-    label_set: List(#(String, Bool)),
+    // Labels currently in scope, innermost first, each tagged with whether
+    // it names an IterationStatement (see LabelKind). Reset at function
+    // boundaries.
+    label_set: List(#(String, LabelKind)),
     // super() is only allowed in constructors of derived classes
     allow_super_call: Bool,
     // super.x is allowed in any method (class or object literal)
@@ -383,8 +405,7 @@ fn init_parser(
     Script -> lexer.tokenize
   }
   case tokenize_fn(source) {
-    Error(e) ->
-      Error(LexerError(lexer.lex_error_to_string(e), lexer.lex_error_pos(e)))
+    Error(e) -> Error(LexError(e))
     Ok(tokens) ->
       cont(P(
         tokens: tokens,
@@ -1812,7 +1833,7 @@ fn parse_for_head(
         && peek_at(p, 1) == Of
         && peek_at(p, 2) != Arrow
       {
-        True -> Error(InvalidForInOfLhs("of", pos_of(p)))
+        True -> Error(InvalidForOfLhs(pos_of(p)))
         False -> parse_for_expression(p, is_await)
       }
     // `for (await using x of …)` — unlike plain `using`, `await using of`
@@ -2165,13 +2186,11 @@ fn parse_for_expression(
                 }
               }
             }
-          False -> {
-            let kind = case peek(p2) {
-              In -> "in"
-              _ -> "of"
+          False ->
+            case peek(p2) {
+              In -> Error(InvalidForInLhs(pos_of(p2)))
+              _ -> Error(InvalidForOfLhs(pos_of(p2)))
             }
-            Error(InvalidForInOfLhs(kind, pos_of(p2)))
-          }
         }
       }
       _ -> Error(ExpectedForSeparator(pos_of(p2)))
@@ -2285,8 +2304,12 @@ fn parse_return_statement_body(
 }
 
 /// Parse the optional label after `break`/`continue`, handling ASI and the
-/// no-line-terminator restriction. Validates the label exists in scope.
-fn parse_optional_label(p: P) -> Result(#(P, Option(String)), ParseError) {
+/// no-line-terminator restriction. Validates the label exists in scope and —
+/// for `continue` — that it denotes an IterationStatement (ES2024 §14.9.1).
+fn parse_optional_label(
+  p: P,
+  label_use: LabelUse,
+) -> Result(#(P, Option(String)), ParseError) {
   case peek(p) {
     Semicolon -> Ok(#(advance(p), option.None))
     Identifier ->
@@ -2294,13 +2317,9 @@ fn parse_optional_label(p: P) -> Result(#(P, Option(String)), ParseError) {
         True -> Ok(#(p, option.None))
         False -> {
           let label = peek_value(p)
-          case find_label(p.label_set, label) {
-            False -> Error(UndefinedLabel(label, pos_of(p)))
-            True -> {
-              use p2 <- result.map(eat_semicolon(advance(p)))
-              #(p2, option.Some(label))
-            }
-          }
+          use Nil <- result.try(check_label_target(p, label, label_use))
+          use p2 <- result.map(eat_semicolon(advance(p)))
+          #(p2, option.Some(label))
         }
       }
     _ -> {
@@ -2310,8 +2329,24 @@ fn parse_optional_label(p: P) -> Result(#(P, Option(String)), ParseError) {
   }
 }
 
+/// Reject a `break L` / `continue L` whose label is out of scope, and a
+/// `continue L` whose label does not denote an IterationStatement.
+fn check_label_target(
+  p: P,
+  label: String,
+  label_use: LabelUse,
+) -> Result(Nil, ParseError) {
+  case find_label(p.label_set, label), label_use {
+    None, _ -> Error(UndefinedLabel(label, pos_of(p)))
+    Some(_), BreakLabel -> Ok(Nil)
+    Some(LoopLabel), ContinueLabel -> Ok(Nil)
+    Some(PlainLabel), ContinueLabel ->
+      Error(ContinueToNonIterationLabel(label, pos_of(p)))
+  }
+}
+
 fn parse_break_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  use #(p2, label) <- result.try(parse_optional_label(advance(p)))
+  use #(p2, label) <- result.try(parse_optional_label(advance(p), BreakLabel))
   case label {
     option.None ->
       case p.loop_depth > 0 || p.switch_depth > 0 {
@@ -2324,7 +2359,7 @@ fn parse_break_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
 
 fn parse_continue_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   use <- bool.guard(p.loop_depth <= 0, Error(ContinueOutsideLoop(pos_of(p))))
-  use #(p2, label) <- result.map(parse_optional_label(advance(p)))
+  use #(p2, label) <- result.map(parse_optional_label(advance(p), ContinueLabel))
   #(p2, ast.ContinueStatement(label:))
 }
 
@@ -3313,9 +3348,7 @@ fn parse_class_tail(
   let has_extends = peek(p) == Extends
   use #(p2, super_class) <- result.try(case has_extends {
     True -> {
-      use #(p2, expr) <- result.map(
-        parse_left_hand_side_expression(advance(p)),
-      )
+      use #(p2, expr) <- result.map(parse_left_hand_side_expression(advance(p)))
       #(p2, Some(expr))
     }
     False -> Ok(#(p, None))
@@ -4040,38 +4073,79 @@ fn check_label_identifier(p: P, label: String) -> Result(Nil, ParseError) {
 }
 
 fn parse_labeled_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  // identifier : statement
+  parse_label_chain(p, [])
+}
+
+/// Whether the parser is positioned at another `Label :` link of a label
+/// chain. Mirrors the label dispatch in `parse_statement`.
+fn at_label_start(p: P) -> Bool {
+  case peek(p) {
+    Identifier | Async | Yield | Await -> peek_at(p, 1) == Colon
+    _ -> False
+  }
+}
+
+/// Parse a whole `L1: L2: … Ln: Statement` label chain.
+///
+/// The chain is collected up-front (rather than one label per recursive
+/// descent into `parse_statement`) because a label's kind is a property of
+/// the CHAIN, not of the single label it follows: when the chain directly
+/// prefixes an IterationStatement, `continue L` may target ANY of its
+/// labels (ES2024 §14.13.1), so every one of them must be a LoopLabel.
+///
+/// `collected` holds the label names seen so far, innermost first.
+fn parse_label_chain(
+  p: P,
+  collected: List(String),
+) -> Result(#(P, ast.Statement), ParseError) {
+  // identifier : ...
   let label = peek_value(p)
   // Check if yield/await are used as labels in restricted contexts
   use Nil <- result.try(check_label_identifier(p, label))
-  // Check for duplicate labels
-  use <- bool.guard(
-    find_label(p.label_set, label),
-    Error(DuplicateLabel(label, pos_of(p))),
-  )
-  parse_labeled_statement_body(p, label)
-}
-
-fn parse_labeled_statement_body(
-  p: P,
-  label: String,
-) -> Result(#(P, ast.Statement), ParseError) {
+  // Check for duplicate labels — against the enclosing label set and the
+  // labels already collected from this chain (`a: a: ;`).
+  let duplicate =
+    option.is_some(find_label(p.label_set, label))
+    || list.contains(collected, label)
+  use <- bool.guard(duplicate, Error(DuplicateLabel(label, pos_of(p))))
   let p2 = advance(p)
   use p3 <- result.try(expect(p2, Colon))
+  let collected = [label, ..collected]
+  case at_label_start(p3) {
+    True -> parse_label_chain(p3, collected)
+    False -> parse_labeled_statement_body(p3, collected)
+  }
+}
+
+/// Parse the statement behind a label chain. `labels` is innermost first;
+/// every label gets the same LabelKind, decided by the statement's leading
+/// token.
+fn parse_labeled_statement_body(
+  p3: P,
+  labels: List(String),
+) -> Result(#(P, ast.Statement), ParseError) {
   {
     // Determine if the labeled statement is a loop
-    let is_loop = case peek(p3) {
-      While | Do | For -> True
-      _ -> False
+    let kind = case peek(p3) {
+      While | Do | For -> LoopLabel
+      _ -> PlainLabel
     }
     let outer_labels = p3.label_set
-    let p3 = P(..p3, label_set: [#(label, is_loop), ..p3.label_set])
+    let p3 =
+      P(
+        ..p3,
+        label_set: list.append(
+          list.map(labels, fn(label) { #(label, kind) }),
+          outer_labels,
+        ),
+      )
     let wrap_label = fn(res) {
       use #(inner_p, stmt) <- result.map(res)
-      #(
-        P(..inner_p, label_set: outer_labels),
-        ast.LabeledStatement(label:, body: stmt),
-      )
+      let labeled =
+        list.fold(labels, stmt, fn(body, label) {
+          ast.LabeledStatement(label:, body:)
+        })
+      #(P(..inner_p, label_set: outer_labels), labeled)
     }
     // Check for labeled generator declarations (always forbidden),
     // labeled lexical declarations (always forbidden),
@@ -4263,7 +4337,12 @@ fn parse_assignment_expression_inner(
   // Try arrow function: (params) => body or ident => body
   case try_arrow_function(p) {
     Ok(#(p2, arrow_expr)) -> Ok(#(p2, arrow_expr))
-    Error(_) -> {
+    // A ParseError raised after the `=>` was consumed is a real error in a
+    // committed arrow function — report it. Backtracking here would swallow
+    // it and re-parse the arrow head as a plain expression, producing a
+    // misleading error at a later position.
+    Error(ArrowError(e)) -> Error(e)
+    Error(NotAnArrow) -> {
       // In strict mode, check if this is a simple assignment to eval/arguments
       // before parsing — if current token is eval/arguments and next is assignment op
       case p.strict {
@@ -4422,7 +4501,20 @@ fn is_web_compat_call_target(p: P, lhs: ast.Expression) -> Bool {
   }
 }
 
-fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
+/// Outcome of a speculative arrow-function parse.
+///
+/// `NotAnArrow` means the tokens do not form an arrow head (or the head is
+/// ambiguous with a parenthesized expression / call and failed to parse as
+/// arrow parameters): the caller must backtrack and parse a non-arrow
+/// expression instead. `ArrowError` carries a real `ParseError` raised
+/// AFTER arrow-ness was committed (the `=>` token was consumed): the caller
+/// must propagate it, never backtrack over it.
+type ArrowAttempt {
+  NotAnArrow
+  ArrowError(ParseError)
+}
+
+fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
   case peek(p) {
     // async (...) => or async ident =>
     Async -> {
@@ -4431,20 +4523,20 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
         Identifier ->
           case peek_at(p, 2) {
             Arrow -> try_single_ident_arrow(p, advance(p), True)
-            _ -> Error(NotAnArrowFunction(pos_of(p)))
+            _ -> Error(NotAnArrow)
           }
-        _ -> Error(NotAnArrowFunction(pos_of(p)))
+        _ -> Error(NotAnArrow)
       }
     }
     Identifier | Yield | Await ->
       case peek_at(p, 1) {
         Arrow -> try_single_ident_arrow(p, p, False)
-        _ -> Error(NotAnArrowFunction(pos_of(p)))
+        _ -> Error(NotAnArrow)
       }
     // (a, b) => is the hardest case — vs (a, b) as expression.
     // We speculatively parse and backtrack if it's not an arrow.
     LeftParen -> try_paren_arrow(p, advance(p), False)
-    _ -> Error(NotAnArrowFunction(pos_of(p)))
+    _ -> Error(NotAnArrow)
   }
 }
 
@@ -4457,7 +4549,7 @@ fn try_single_ident_arrow(
   outer: P,
   ident_p: P,
   is_async: Bool,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(P, ast.Expression), ArrowAttempt) {
   let name = peek_value(ident_p)
   // Async-arrow params are [+Await] — `await` (incl. an escaped `await`,
   // which lexes as Identifier) is reserved as a binding name there. The
@@ -4466,11 +4558,17 @@ fn try_single_ident_arrow(
     True -> P(..outer, in_async: True)
     False -> outer
   }
-  use Nil <- result.try(check_binding_identifier(check_p, name))
+  // The `=>` has not been consumed yet, so arrow-ness is not committed: a
+  // name that can't be a binding identifier here means "not an arrow head",
+  // and the caller backtracks to parse a non-arrow expression.
+  use Nil <- result.try(
+    check_binding_identifier(check_p, name)
+    |> result.replace_error(NotAnArrow),
+  )
   let p2 = advance(ident_p)
   // No line terminator allowed before =>
   case has_line_break_before(p2) {
-    True -> Error(NotAnArrowFunction(pos_of(outer)))
+    True -> Error(NotAnArrow)
     False -> {
       // Save param name for the retroactive strict-mode check in the body.
       let p3 = P(..advance(p2), param_bound_names: [name])
@@ -4491,7 +4589,7 @@ fn try_paren_arrow(
   outer: P,
   p_params: P,
   is_async: Bool,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(P, ast.Expression), ArrowAttempt) {
   // Enter the arrow's function context BEFORE parsing parameters so the
   // arrow's Function scope is pushed before param-default expressions are
   // parsed — their bindings/refs then record under the arrow's scope, not
@@ -4541,7 +4639,7 @@ fn try_paren_arrow(
             Arrow ->
               // Line terminator before => is not allowed
               case has_line_break_before(p4) {
-                True -> Error(NotAnArrowFunction(pos_of(outer)))
+                True -> Error(NotAnArrow)
                 False -> {
                   // Already inside the arrow's function context (entered
                   // above before params); switch the four enclosing-context
@@ -4570,21 +4668,30 @@ fn try_paren_arrow(
                   )
                 }
               }
-            _ -> Error(NotAnArrowFunction(pos_of(outer)))
+            // No `=>` after the parenthesized list: an ordinary
+            // parenthesized expression / call arguments — backtrack.
+            _ -> Error(NotAnArrow)
           }
-        Error(_) -> Error(NotAnArrowFunction(pos_of(outer)))
+        // The speculative parameter parse consumed something that isn't a
+        // `)`-terminated arrow head — backtrack.
+        Error(_speculative_error) -> Error(NotAnArrow)
       }
-    Error(_) -> Error(NotAnArrowFunction(pos_of(outer)))
+    // Not parseable as formal parameters (e.g. `(a.b)`) — backtrack and
+    // re-parse as a parenthesized expression.
+    Error(_speculative_error) -> Error(NotAnArrow)
   }
 }
 
+/// Finish a COMMITTED arrow function: the `=>` has been consumed and
+/// `body_result` is the parse of its body. A body error is a real error in
+/// this arrow (`ArrowError`), never a reason to backtrack.
 fn finish_arrow(
   body_result: Result(#(P, ast.ArrowBody), ParseError),
   outer: P,
   is_async: Bool,
   params: List(ast.Pattern),
-) -> Result(#(P, ast.Expression), ParseError) {
-  use #(p_body, body) <- result.try(body_result)
+) -> Result(#(P, ast.Expression), ArrowAttempt) {
+  use #(p_body, body) <- result.try(result.map_error(body_result, ArrowError))
   // Span: `outer` is positioned at the arrow's first source token (`async`
   // for async arrows, otherwise `(` or the bare-identifier param), and the
   // body ends at the last token consumed by parse_arrow_body. Capture the
@@ -4997,10 +5104,8 @@ fn finish_update_expr(
     False, False -> Error(InvalidPostfixLhs(err_pos))
     True, _ ->
       case p.strict, p.last_expr_name {
-        True, Some("eval" as n) | True, Some("arguments" as n) if prefix ->
-          Error(StrictModeModification(n, err_pos))
         True, Some("eval" as n) | True, Some("arguments" as n) ->
-          Error(StrictModeModifyRestricted(n, err_pos))
+          Error(StrictModeModification(n, err_pos))
         _, _ ->
           Ok(#(
             P(..p, last_expr_assignable: False),
@@ -6210,16 +6315,16 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   case regex.scan_regex_source(p.bytes, body_start, False) {
     Ok(end_pos) -> {
       // end_pos is past the closing /, now skip optional flags
-      use #(flags_end, flags) <- result.try(regex.skip_regex_flags(
-        p.bytes,
-        end_pos,
-      ))
+      use #(flags_end, flags) <- result.try(
+        regex.skip_regex_flags(p.bytes, end_pos)
+        |> result.map_error(RegExpSyntaxError),
+      )
       // Validate the body [body_start, end_pos - 1) against the ECMAScript
       // Pattern grammar (Annex B extended grammar without u/v, strict
       // grammar with it), reporting parse-time early errors.
       use Nil <- result.try(
         regex.validate_pattern(p.bytes, body_start, end_pos - 1, flags)
-        |> result.map_error(fn(msg) { LexerError(message: msg, pos: start_pos) }),
+        |> result.map_error(RegExpSyntaxError),
       )
       // Extract pattern body and flags as strings
       let pattern =
@@ -6233,7 +6338,7 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let span = ast.Span(start: start_pos, end: flags_end)
       Ok(#(p2, ast.RegExpLiteral(pattern: pattern, flags: flags_str, span:)))
     }
-    Error(msg) -> Error(LexerError(message: msg, pos: start_pos))
+    Error(e) -> Error(RegExpSyntaxError(e))
   }
 }
 
@@ -6897,7 +7002,7 @@ fn check_use_strict_in_body(p: P) -> Result(P, ParseError) {
       case p.has_non_simple_param {
         True ->
           case peek(p) == LeftBrace && prologue_has_use_strict(p, 1) {
-            True -> Error(UnexpectedToken("use strict", pos_of(p)))
+            True -> Error(MisplacedUseStrictDirective(pos_of(p)))
             False -> Ok(p)
           }
         False -> Ok(p)
@@ -6987,7 +7092,7 @@ fn check_retroactive_octals(
 /// Also rejects "use strict" when params are non-simple (destructuring/rest/default).
 fn check_retroactive_params(p: P) -> Result(P, ParseError) {
   case p.has_non_simple_param {
-    True -> Error(UnexpectedToken("use strict", pos_of(p)))
+    True -> Error(MisplacedUseStrictDirective(pos_of(p)))
     False -> validate_retroactive_param_names(p, p.param_bound_names)
   }
 }
@@ -7162,11 +7267,15 @@ fn restore_outer_context(p: P, outer: P) -> P {
 
 // ---- Label helpers ----
 
-/// Find any label (for break)
-fn find_label(labels: List(#(String, Bool)), name: String) -> Bool {
+/// Look up a label in the enclosing label set. Returns the kind of the
+/// innermost label with that name, or None if no such label is in scope.
+fn find_label(
+  labels: List(#(String, LabelKind)),
+  name: String,
+) -> Option(LabelKind) {
   case labels {
-    [] -> False
-    [#(n, _), ..] if n == name -> True
+    [] -> None
+    [#(n, kind), ..] if n == name -> Some(kind)
     [_, ..rest] -> find_label(rest, name)
   }
 }
@@ -7201,7 +7310,7 @@ fn parse_template_raw(
     list.try_map(raw_quasis, fn(q) {
       case cook_template_string(q) {
         Ok(s) -> Ok(s)
-        Error(Nil) -> Error(LexerError("Invalid escape sequence", pos_of(p)))
+        Error(Nil) -> Error(InvalidTemplateEscape(pos_of(p)))
       }
     }),
   )
@@ -7259,8 +7368,7 @@ fn parse_template_parts(
     list.try_fold(expr_sources, #(p, []), fn(acc, src) {
       let #(p, exprs) = acc
       case lexer.tokenize(src) {
-        Error(e) ->
-          Error(LexerError(lexer.lex_error_to_string(e), lexer.lex_error_pos(e)))
+        Error(e) -> Error(LexError(e))
         Ok(tokens) -> {
           // parse_regex_literal re-scans regex bodies from `bytes` using
           // token-relative byte offsets, so `bytes` must match the source

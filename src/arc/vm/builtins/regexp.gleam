@@ -576,7 +576,8 @@ fn regexp_initialize(
 /// parse the pattern against the ECMAScript Pattern grammar (Annex B
 /// extended grammar without u/v, strict grammar with it). An invalid
 /// pattern is a SyntaxError at construction time — same validator the
-/// parser runs on regex literals.
+/// parser runs on regex literals. The returned string is the SyntaxError
+/// message to throw.
 fn validate_flags_and_pattern(
   pattern: String,
   flags: String,
@@ -588,6 +589,7 @@ fn validate_flags_and_pattern(
   )
   let bytes = <<pattern:utf8>>
   regex.validate_pattern(bytes, 0, bit_array.byte_size(bytes), flag_list)
+  |> result.map_error(regex.pattern_error_message)
 }
 
 /// ToString, except undefined → "" (RegExpInitialize steps 1-2).

@@ -2,7 +2,6 @@
 /// Pure bit-array scanning functions split from parser.gleam.
 /// The parser re-lexes regex literals from source bytes since the lexer
 /// can't always distinguish / (divide) from / (regex start).
-import arc/parser/error.{type ParseError, LexerError}
 import arc/parser/lexer
 import gleam/bit_array
 import gleam/int
@@ -10,6 +9,164 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+
+// ---- Pattern errors ----
+
+/// Every syntax error the regex scanner / pattern validator can report.
+/// One variant per distinct diagnostic; `pattern_error_message` is the single
+/// place each is rendered to its user-facing string, and `pattern_error_pos`
+/// gives the byte offset of the offending construct in the scanned source
+/// (absolute for a regex literal, pattern-relative for `new RegExp(src)`).
+///
+/// NOTE: this module must not import `arc/parser/error` — `error.gleam`
+/// wraps `PatternError` in its `RegExpSyntaxError` variant, so an import
+/// here would be a cycle.
+pub type PatternError {
+  /// Source ended, or a line terminator appeared, before the closing `/`.
+  UnterminatedRegex(pos: Int)
+  /// A flag letter appeared twice after the closing `/`.
+  DuplicateFlag(pos: Int, flag: String)
+  /// The `u` and `v` flags were both present.
+  ExclusiveUnicodeFlags(pos: Int)
+  /// A `)` with no matching `(` ended the top-level Disjunction early.
+  UnmatchedParen(pos: Int)
+  /// A quantifier with no quantifiable atom before it.
+  NothingToRepeat(pos: Int)
+  /// The same group name declared twice in terms that can both participate
+  /// in a match.
+  DuplicateGroupName(pos: Int, name: String)
+  /// A lone `{` / `}` outside a braced quantifier (Unicode modes only).
+  LoneQuantifierBrackets(pos: Int)
+  /// A lone `]` outside a character class (Unicode modes only).
+  LoneClassBracket(pos: Int)
+  /// A group was opened but never closed.
+  MissingClosingParen(pos: Int)
+  /// `{n,m}` with `m < n`.
+  OutOfOrderQuantifier(pos: Int)
+  /// An escape that is not an IdentityEscape in Unicode modes.
+  InvalidEscape(pos: Int)
+  /// `\N` where `N` exceeds the number of capturing groups (strict modes).
+  BackReferenceOutOfRange(pos: Int, n: Int, captures: Int)
+  /// `\0` followed by a digit in Unicode modes.
+  InvalidDecimalEscape(pos: Int)
+  /// `\xHH` with fewer than two hex digits in Unicode modes.
+  InvalidHexEscape(pos: Int)
+  /// `\k` not followed by `<name>`, or naming a group that doesn't exist.
+  InvalidNamedReference(pos: Int)
+  /// The pattern ends with a bare backslash.
+  BackslashAtEnd(pos: Int)
+  /// `\uHHHH` / `\u{...}` that is not a well-formed Unicode escape.
+  InvalidUnicodeEscape(pos: Int)
+  /// `\u{...}` whose code point exceeds U+10FFFF.
+  InvalidUnicodeEscapeValue(pos: Int)
+  /// A `[` character class with no closing `]`.
+  UnterminatedClass(pos: Int)
+  /// A range endpoint that is a class escape (`\d`, `\p{..}`, ...).
+  InvalidClassRange(pos: Int)
+  /// A literal range `a-b` with `a > b`.
+  OutOfOrderClassRange(pos: Int)
+  /// An escape that is not a ClassEscape inside a character class.
+  InvalidClassEscape(pos: Int)
+  /// `&&` / `--` in a v-mode class with a missing operand.
+  InvalidClassSetOperation(pos: Int)
+  /// An unescaped ClassSetSyntaxCharacter, or misplaced `-`, in a v-mode
+  /// class.
+  InvalidClassCharacter(pos: Int)
+  /// A reserved double punctuator (`!!`, `##`, ...) in a v-mode class.
+  ReservedDoublePunctuator(pos: Int)
+  /// A `<name>` group name with no closing `>`.
+  UnterminatedGroupName(pos: Int)
+  /// `(?<>...)` — a group name must have at least one character.
+  EmptyGroupName(pos: Int)
+  /// A group name that is not a valid identifier (or a malformed escape
+  /// within one).
+  InvalidGroupName(pos: Int)
+  /// A `(?` group head that is not a recognised group kind.
+  InvalidGroup(pos: Int)
+  /// Inline modifiers (`(?ims-ims:`) that are malformed.
+  InvalidModifierFlags(pos: Int)
+  /// `(?-:` — the add and remove modifier sets are both empty.
+  EmptyModifiers(pos: Int)
+  /// A modifier flag repeated within, or across, the add/remove sets.
+  RepeatedModifierFlag(pos: Int)
+  /// `\p{...}` naming an unknown Unicode property (or a `\p` with no `{`).
+  InvalidPropertyName(pos: Int)
+  /// A property of strings (e.g. `RGI_Emoji`) outside a non-negated v-mode
+  /// `\p`.
+  PropertyOfStringsRequiresVFlag(pos: Int)
+}
+
+/// Render a `PatternError` to its user-facing message. This is the ONLY
+/// place the regex diagnostic strings live — callers that surface the error
+/// as a `SyntaxError` message must go through here.
+pub fn pattern_error_message(e: PatternError) -> String {
+  case e {
+    UnterminatedRegex(_) -> "Unterminated regular expression"
+    DuplicateFlag(_, flag) ->
+      "Duplicate regular expression flag '" <> flag <> "'"
+    ExclusiveUnicodeFlags(_) ->
+      "Invalid regular expression flags: u and v are exclusive"
+    UnmatchedParen(_) -> "Invalid regular expression: unmatched ')'"
+    NothingToRepeat(_) -> "Invalid regular expression: nothing to repeat"
+    DuplicateGroupName(..) -> "Invalid regular expression: duplicate group name"
+    LoneQuantifierBrackets(_) ->
+      "Invalid regular expression: lone quantifier brackets"
+    LoneClassBracket(_) ->
+      "Invalid regular expression: lone character class bracket"
+    MissingClosingParen(_) ->
+      "Invalid regular expression: missing closing parenthesis"
+    OutOfOrderQuantifier(_) ->
+      "Invalid regular expression: numbers out of order in {} quantifier"
+    InvalidEscape(_) -> "Invalid regular expression: invalid escape"
+    BackReferenceOutOfRange(..) ->
+      "Invalid regular expression: back reference out of range"
+    InvalidDecimalEscape(_) ->
+      "Invalid regular expression: invalid decimal escape"
+    InvalidHexEscape(_) ->
+      "Invalid regular expression: invalid hexadecimal escape"
+    InvalidNamedReference(_) ->
+      "Invalid regular expression: invalid named reference"
+    BackslashAtEnd(_) -> "Invalid regular expression: \\ at end of pattern"
+    InvalidUnicodeEscape(_) ->
+      "Invalid regular expression: invalid Unicode escape"
+    InvalidUnicodeEscapeValue(_) ->
+      "Invalid regular expression: invalid Unicode escape value"
+    UnterminatedClass(_) ->
+      "Invalid regular expression: unterminated character class"
+    InvalidClassRange(_) ->
+      "Invalid regular expression: invalid character class range"
+    OutOfOrderClassRange(_) ->
+      "Invalid regular expression: range out of order in character class"
+    InvalidClassEscape(_) -> "Invalid regular expression: invalid class escape"
+    InvalidClassSetOperation(_) ->
+      "Invalid regular expression: invalid set operation in character class"
+    InvalidClassCharacter(_) ->
+      "Invalid regular expression: invalid character in character class"
+    ReservedDoublePunctuator(_) ->
+      "Invalid regular expression: reserved double punctuator in character class"
+    UnterminatedGroupName(_) ->
+      "Invalid regular expression: unterminated group name"
+    EmptyGroupName(_) -> "Invalid regular expression: empty group name"
+    InvalidGroupName(_) -> "Invalid regular expression: invalid group name"
+    InvalidGroup(_) -> "Invalid regular expression: invalid group"
+    InvalidModifierFlags(_) ->
+      "Invalid regular expression: invalid modifier flags"
+    EmptyModifiers(_) ->
+      "Invalid regular expression: add and remove modifiers must not both be empty"
+    RepeatedModifierFlag(_) ->
+      "Invalid regular expression: repeated modifier flag"
+    InvalidPropertyName(_) ->
+      "Invalid regular expression: invalid property name in \\p{}"
+    PropertyOfStringsRequiresVFlag(_) ->
+      "Invalid regular expression: properties of strings require the v flag and a non-negated \\p"
+  }
+}
+
+/// Byte offset of the offending construct. `pos` is the first field of every
+/// variant, so this is a plain accessor.
+pub fn pattern_error_pos(e: PatternError) -> Int {
+  e.pos
+}
 
 // ---- Source byte access ----
 
@@ -70,34 +227,33 @@ pub fn scan_regex_source(
   bytes: BitArray,
   pos: Int,
   in_class: Bool,
-) -> Result(Int, String) {
+) -> Result(Int, PatternError) {
   case bit_array.slice(bytes, pos, 1) {
     // End of source before the closing /.
-    Error(_) -> Error("Unterminated regular expression")
+    Error(_) -> Error(UnterminatedRegex(pos))
     // Non-ASCII byte: part of the regex body (any SourceCharacter is allowed,
     // e.g. the Cf format-control U+180E). char_at_source is ASCII-only, so we
     // handle these here. U+2028/U+2029 are line terminators and end the regex.
     Ok(<<b>>) if b >= 0x80 ->
       case is_unicode_line_terminator(bytes, pos) {
-        True -> Error("Unterminated regular expression")
+        True -> Error(UnterminatedRegex(pos))
         False -> scan_regex_source(bytes, pos + utf8_byte_width(b), in_class)
       }
     Ok(_) -> {
       let ch = char_at_source(bytes, pos)
       case ch {
-        "\n" | "\r" -> Error("Unterminated regular expression")
+        "\n" | "\r" -> Error(UnterminatedRegex(pos))
         "\\" -> {
           // Escaped character — skip the backslash and the next character
           // (which may itself be multi-byte, e.g. an escaped non-ASCII char).
           // A line terminator after `\` is not allowed (RegularExpressionChar
           // excludes LineTerminator), including U+2028/U+2029.
           case bit_array.slice(bytes, pos + 1, 1) {
-            Error(_) -> Error("Unterminated regular expression")
-            Ok(<<0x0A>>) | Ok(<<0x0D>>) ->
-              Error("Unterminated regular expression")
+            Error(_) -> Error(UnterminatedRegex(pos + 1))
+            Ok(<<0x0A>>) | Ok(<<0x0D>>) -> Error(UnterminatedRegex(pos + 1))
             Ok(<<nb>>) if nb >= 0x80 ->
               case is_unicode_line_terminator(bytes, pos + 1) {
-                True -> Error("Unterminated regular expression")
+                True -> Error(UnterminatedRegex(pos + 1))
                 False ->
                   scan_regex_source(
                     bytes,
@@ -190,11 +346,11 @@ pub fn validate_pattern(
   start: Int,
   end: Int,
   flags: List(String),
-) -> Result(Nil, String) {
+) -> Result(Nil, PatternError) {
   let has_u = list.contains(flags, "u")
   let has_v = list.contains(flags, "v")
   use Nil <- result.try(case has_u && has_v {
-    True -> Error("Invalid regular expression flags: u and v are exclusive")
+    True -> Error(ExclusiveUnicodeFlags(start))
     False -> Ok(Nil)
   })
   let mode = case has_v, has_u {
@@ -208,7 +364,7 @@ pub fn validate_pattern(
   use #(stop, _names) <- result.try(p_disjunction(ctx, start))
   use Nil <- result.try(case stop >= end {
     True -> Ok(Nil)
-    False -> Error("Invalid regular expression: unmatched ')'")
+    False -> Error(UnmatchedParen(stop))
   })
   // v mode: walk nested classes for property-escape validity (the main
   // parser skips over v-mode class internals).
@@ -360,7 +516,10 @@ fn scan_groups(
   }
 }
 
-fn p_disjunction(ctx: Ctx, pos: Int) -> Result(#(Int, List(String)), String) {
+fn p_disjunction(
+  ctx: Ctx,
+  pos: Int,
+) -> Result(#(Int, List(String)), PatternError) {
   use #(pos2, names) <- result.try(p_alternative(ctx, pos, []))
   case pos2 < ctx.end && char_at_source(ctx.bytes, pos2) == "|" {
     True -> {
@@ -377,7 +536,7 @@ fn p_alternative(
   ctx: Ctx,
   pos: Int,
   acc: List(String),
-) -> Result(#(Int, List(String)), String) {
+) -> Result(#(Int, List(String)), PatternError) {
   case pos >= ctx.end {
     True -> Ok(#(pos, acc))
     False ->
@@ -385,13 +544,13 @@ fn p_alternative(
         "|" | ")" -> Ok(#(pos, acc))
         _ -> {
           use #(pos2, tnames, kind) <- result.try(p_term(ctx, pos))
-          use Nil <- result.try(check_no_duplicate(tnames, acc))
+          use Nil <- result.try(check_no_duplicate(tnames, acc, pos))
           use #(pos3, quantified) <- result.try(p_quantifier_opt(ctx, pos2))
           use Nil <- result.try(case quantified, kind, ctx.mode {
             False, _, _ -> Ok(Nil)
             True, KAtom, _ -> Ok(Nil)
             True, KLookahead, Legacy -> Ok(Nil)
-            True, _, _ -> Error("Invalid regular expression: nothing to repeat")
+            True, _, _ -> Error(NothingToRepeat(pos2))
           })
           p_alternative(ctx, pos3, list.append(tnames, acc))
         }
@@ -401,20 +560,22 @@ fn p_alternative(
 
 /// Group names declared in terms of the same alternative (or nested within
 /// one another) can both participate in a match — duplicates are an error.
+/// `pos` is the position of the term/group that introduced `new_names`.
 fn check_no_duplicate(
   new_names: List(String),
   seen: List(String),
-) -> Result(Nil, String) {
-  case list.any(new_names, list.contains(seen, _)) {
-    True -> Error("Invalid regular expression: duplicate group name")
-    False -> Ok(Nil)
+  pos: Int,
+) -> Result(Nil, PatternError) {
+  case list.find(new_names, list.contains(seen, _)) {
+    Ok(name) -> Error(DuplicateGroupName(pos, name))
+    Error(Nil) -> Ok(Nil)
   }
 }
 
 fn p_term(
   ctx: Ctx,
   pos: Int,
-) -> Result(#(Int, List(String), TermKind), String) {
+) -> Result(#(Int, List(String), TermKind), PatternError) {
   case char_at_source(ctx.bytes, pos) {
     "^" | "$" -> Ok(#(pos + 1, [], KAssertion))
     "\\" ->
@@ -426,7 +587,7 @@ fn p_term(
         }
       }
     "(" -> p_group(ctx, pos)
-    "*" | "+" | "?" -> Error("Invalid regular expression: nothing to repeat")
+    "*" | "+" | "?" -> Error(NothingToRepeat(pos))
     "{" ->
       case ctx.mode {
         // Annex B: a braced-quantifier-shaped `{...}` with nothing to
@@ -434,23 +595,20 @@ fn p_term(
         // `{` is an ExtendedPatternCharacter.
         Legacy ->
           case braced_quantifier_end(ctx.bytes, pos, ctx.end) {
-            Ok(_) -> Error("Invalid regular expression: nothing to repeat")
+            Ok(_) -> Error(NothingToRepeat(pos))
             Error(Nil) -> Ok(#(pos + 1, [], KAtom))
           }
-        Unicode | UnicodeSets ->
-          Error("Invalid regular expression: lone quantifier brackets")
+        Unicode | UnicodeSets -> Error(LoneQuantifierBrackets(pos))
       }
     "}" ->
       case ctx.mode {
         Legacy -> Ok(#(pos + 1, [], KAtom))
-        Unicode | UnicodeSets ->
-          Error("Invalid regular expression: lone quantifier brackets")
+        Unicode | UnicodeSets -> Error(LoneQuantifierBrackets(pos))
       }
     "]" ->
       case ctx.mode {
         Legacy -> Ok(#(pos + 1, [], KAtom))
-        Unicode | UnicodeSets ->
-          Error("Invalid regular expression: lone character class bracket")
+        Unicode | UnicodeSets -> Error(LoneClassBracket(pos))
       }
     "[" -> {
       use pos2 <- result.map(p_class(ctx, pos + 1))
@@ -466,7 +624,7 @@ fn p_term(
 fn p_group(
   ctx: Ctx,
   pos: Int,
-) -> Result(#(Int, List(String), TermKind), String) {
+) -> Result(#(Int, List(String), TermKind), PatternError) {
   case char_at_source(ctx.bytes, pos + 1) {
     "?" ->
       case char_at_source(ctx.bytes, pos + 2) {
@@ -491,7 +649,7 @@ fn p_group(
                 ctx.end,
               ))
               use #(pos2, inner) <- result.try(p_group_body(ctx, after_gt))
-              use Nil <- result.try(check_no_duplicate([name], inner))
+              use Nil <- result.try(check_no_duplicate([name], inner, pos))
               Ok(#(pos2, [name, ..inner], KAtom))
             }
           }
@@ -508,11 +666,14 @@ fn p_group(
   }
 }
 
-fn p_group_body(ctx: Ctx, pos: Int) -> Result(#(Int, List(String)), String) {
+fn p_group_body(
+  ctx: Ctx,
+  pos: Int,
+) -> Result(#(Int, List(String)), PatternError) {
   use #(pos2, names) <- result.try(p_disjunction(ctx, pos))
   case pos2 < ctx.end && char_at_source(ctx.bytes, pos2) == ")" {
     True -> Ok(#(pos2 + 1, names))
-    False -> Error("Invalid regular expression: missing closing parenthesis")
+    False -> Error(MissingClosingParen(pos2))
   }
 }
 
@@ -520,7 +681,7 @@ fn p_group_body(ctx: Ctx, pos: Int) -> Result(#(Int, List(String)), String) {
 /// each with an optional lazy `?` suffix. In legacy mode a `{` that is not a
 /// valid braced quantifier is left for the caller (ExtendedPatternCharacter);
 /// in Unicode modes it is an error.
-fn p_quantifier_opt(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), String) {
+fn p_quantifier_opt(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
   case pos >= ctx.end {
     True -> Ok(#(pos, False))
     False ->
@@ -530,17 +691,13 @@ fn p_quantifier_opt(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), String) {
           case braced_quantifier_end(ctx.bytes, pos, ctx.end) {
             Ok(#(after, lo, hi)) ->
               case hi {
-                Some(h) if h < lo ->
-                  Error(
-                    "Invalid regular expression: numbers out of order in {} quantifier",
-                  )
+                Some(h) if h < lo -> Error(OutOfOrderQuantifier(pos))
                 _ -> Ok(#(skip_lazy(ctx.bytes, after), True))
               }
             Error(Nil) ->
               case ctx.mode {
                 Legacy -> Ok(#(pos, False))
-                Unicode | UnicodeSets ->
-                  Error("Invalid regular expression: lone quantifier brackets")
+                Unicode | UnicodeSets -> Error(LoneQuantifierBrackets(pos))
               }
           }
         _ -> Ok(#(pos, False))
@@ -599,9 +756,9 @@ fn braced_quantifier_end(
 
 /// AtomEscape at `pos` (the backslash), outside a character class.
 /// \b and \B are handled by the caller (they are assertions).
-fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
+fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   let strict = ctx.mode != Legacy
-  let invalid = "Invalid regular expression: invalid escape"
+  let invalid = InvalidEscape(pos)
   case char_at_source(ctx.bytes, pos + 1) {
     "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> {
       let after = skip_decimal_run(ctx.bytes, pos + 1, ctx.end)
@@ -614,8 +771,7 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
             int.parse(byte_slice_source(ctx.bytes, pos + 1, after - pos - 1))
             |> result.unwrap(0)
           case n > ctx.captures {
-            True ->
-              Error("Invalid regular expression: back reference out of range")
+            True -> Error(BackReferenceOutOfRange(pos, n, ctx.captures))
             False -> Ok(after)
           }
         }
@@ -623,7 +779,7 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
     }
     "0" ->
       case strict && is_digit_char(char_at_source(ctx.bytes, pos + 2)) {
-        True -> Error("Invalid regular expression: invalid decimal escape")
+        True -> Error(InvalidDecimalEscape(pos))
         False -> Ok(pos + 2)
       }
     "f" | "n" | "r" | "t" | "v" -> Ok(pos + 2)
@@ -670,8 +826,7 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
         True -> Ok(pos + 4)
         False ->
           case strict {
-            True ->
-              Error("Invalid regular expression: invalid hexadecimal escape")
+            True -> Error(InvalidHexEscape(pos))
             False -> Ok(pos + 2)
           }
       }
@@ -688,11 +843,10 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
               ))
               case list.contains(ctx.names, name) {
                 True -> Ok(after)
-                False ->
-                  Error("Invalid regular expression: invalid named reference")
+                False -> Error(InvalidNamedReference(pos))
               }
             }
-            _ -> Error("Invalid regular expression: invalid named reference")
+            _ -> Error(InvalidNamedReference(pos))
           }
         False -> Ok(pos + 2)
       }
@@ -700,7 +854,7 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
       // Either the end of the body (the scanner prevents this) or an
       // escaped non-ASCII character.
       case pos + 1 >= ctx.end {
-        True -> Error("Invalid regular expression: \\ at end of pattern")
+        True -> Error(BackslashAtEnd(pos))
         False ->
           case strict {
             True -> Error(invalid)
@@ -726,7 +880,7 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
 /// \u escape at `pos` (the backslash). In Unicode modes: Hex4Digits or
 /// {CodePoint}; in legacy mode an incomplete escape is the identity `u`
 /// (so `/\u{2}/` is `u` with a braced quantifier).
-fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
+fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   let bytes = ctx.bytes
   let hex4 =
     is_hex_char(char_at_source(bytes, pos + 2))
@@ -745,8 +899,7 @@ fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
               let closed =
                 after > pos + 3 && char_at_source(bytes, after) == "}"
               case closed {
-                False ->
-                  Error("Invalid regular expression: invalid Unicode escape")
+                False -> Error(InvalidUnicodeEscape(pos))
                 True -> {
                   let value =
                     parse_hex_value(byte_slice_source(
@@ -756,16 +909,13 @@ fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
                     ))
                     |> result.unwrap(0)
                   case value > 0x10FFFF {
-                    True ->
-                      Error(
-                        "Invalid regular expression: invalid Unicode escape value",
-                      )
+                    True -> Error(InvalidUnicodeEscapeValue(pos))
                     False -> Ok(after + 1)
                   }
                 }
               }
             }
-            _ -> Error("Invalid regular expression: invalid Unicode escape")
+            _ -> Error(InvalidUnicodeEscape(pos))
           }
       }
   }
@@ -774,7 +924,7 @@ fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(Int, String) {
 /// Character class starting just after the `[`. v-mode classes have their
 /// own (nested) grammar — skip over them bracket-aware; their property
 /// escapes are validated by the separate v-mode walk.
-fn p_class(ctx: Ctx, pos: Int) -> Result(Int, String) {
+fn p_class(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   case ctx.mode {
     UnicodeSets -> skip_v_class(ctx.bytes, pos, ctx.end)
     Legacy | Unicode -> {
@@ -787,9 +937,9 @@ fn p_class(ctx: Ctx, pos: Int) -> Result(Int, String) {
   }
 }
 
-fn p_class_ranges(ctx: Ctx, pos: Int) -> Result(Int, String) {
+fn p_class_ranges(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   case pos >= ctx.end {
-    True -> Error("Invalid regular expression: unterminated character class")
+    True -> Error(UnterminatedClass(pos))
     False ->
       case char_at_source(ctx.bytes, pos) {
         "]" -> Ok(pos + 1)
@@ -809,13 +959,15 @@ fn p_class_ranges(ctx: Ctx, pos: Int) -> Result(Int, String) {
               // endpoints. Annex B treats such a `-` as a literal.
               let bad = ctx.mode == Unicode && { a_is_class || b_is_class }
               use Nil <- result.try(case bad {
-                True ->
-                  Error(
-                    "Invalid regular expression: invalid character class range",
-                  )
+                True -> Error(InvalidClassRange(pos))
                 False -> Ok(Nil)
               })
-              use Nil <- result.try(check_range_order(ctx.mode, a_val, b_val))
+              use Nil <- result.try(check_range_order(
+                ctx.mode,
+                a_val,
+                b_val,
+                pos,
+              ))
               p_class_ranges(ctx, after_b)
             }
             False -> p_class_ranges(ctx, after_a)
@@ -832,15 +984,13 @@ fn check_range_order(
   mode: RegexMode,
   a_val: Option(Int),
   b_val: Option(Int),
-) -> Result(Nil, String) {
+  pos: Int,
+) -> Result(Nil, PatternError) {
   case a_val, b_val {
     Some(av), Some(bv) -> {
       let unknowable = mode == Legacy && { av > 0xFFFF || bv > 0xFFFF }
       case !unknowable && av > bv {
-        True ->
-          Error(
-            "Invalid regular expression: range out of order in character class",
-          )
+        True -> Error(OutOfOrderClassRange(pos))
         False -> Ok(Nil)
       }
     }
@@ -854,9 +1004,9 @@ fn check_range_order(
 fn p_class_atom(
   ctx: Ctx,
   pos: Int,
-) -> Result(#(Int, Bool, Option(Int)), String) {
+) -> Result(#(Int, Bool, Option(Int)), PatternError) {
   case pos >= ctx.end {
-    True -> Error("Invalid regular expression: unterminated character class")
+    True -> Error(UnterminatedClass(pos))
     False ->
       case char_at_source(ctx.bytes, pos) {
         "\\" -> {
@@ -872,9 +1022,9 @@ fn p_class_atom(
 }
 
 /// ClassEscape at `pos` (the backslash) inside a legacy or u-mode class.
-fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), String) {
+fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
   let strict = ctx.mode == Unicode
-  let invalid = "Invalid regular expression: invalid class escape"
+  let invalid = InvalidClassEscape(pos)
   case char_at_source(ctx.bytes, pos + 1) {
     "b" | "-" -> Ok(#(pos + 2, False))
     "d" | "D" | "s" | "S" | "w" | "W" -> Ok(#(pos + 2, True))
@@ -917,8 +1067,7 @@ fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), String) {
         True -> Ok(#(pos + 4, False))
         False ->
           case strict {
-            True ->
-              Error("Invalid regular expression: invalid hexadecimal escape")
+            True -> Error(InvalidHexEscape(pos))
             False -> Ok(#(pos + 2, False))
           }
       }
@@ -948,8 +1097,7 @@ fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), String) {
       }
     "" ->
       case pos + 1 >= ctx.end {
-        True ->
-          Error("Invalid regular expression: unterminated character class")
+        True -> Error(UnterminatedClass(pos))
         False ->
           case strict {
             True -> Error(invalid)
@@ -981,7 +1129,11 @@ fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), String) {
 /// - a single `-` is only valid between two range operands
 /// Property/string escapes (\p{...}, \q{...}) are skipped brace-aware; their
 /// contents are validated by the separate v-mode walk.
-fn skip_v_class(bytes: BitArray, pos: Int, end: Int) -> Result(Int, String) {
+fn skip_v_class(
+  bytes: BitArray,
+  pos: Int,
+  end: Int,
+) -> Result(Int, PatternError) {
   // Skip the optional leading negation `^` (a lone `^` here is the negation
   // marker, not an atom — `[^^^]` is negation + the reserved `^^`).
   let pos2 = case char_at_source(bytes, pos) {
@@ -996,10 +1148,10 @@ fn v_class_loop(
   pos: Int,
   end: Int,
   prev_atom: Bool,
-) -> Result(Int, String) {
+) -> Result(Int, PatternError) {
   let nxt = char_at_source(bytes, pos + 1)
   case pos >= end, char_at_source(bytes, pos) {
-    True, _ -> Error("Invalid regular expression: unterminated character class")
+    True, _ -> Error(UnterminatedClass(pos))
     _, "]" -> Ok(pos + 1)
     _, "[" -> {
       use after <- result.try(skip_v_class(bytes, pos + 1, end))
@@ -1028,10 +1180,7 @@ fn v_class_loop(
           let after2 = char_at_source(bytes, pos + 2)
           case prev_atom && after2 != "]" && after2 != "&" && pos + 2 < end {
             True -> v_class_loop(bytes, pos + 2, end, False)
-            False ->
-              Error(
-                "Invalid regular expression: invalid set operation in character class",
-              )
+            False -> Error(InvalidClassSetOperation(pos))
           }
         }
         _ -> v_class_loop(bytes, pos + 1, end, True)
@@ -1042,24 +1191,18 @@ fn v_class_loop(
           let after2 = char_at_source(bytes, pos + 2)
           case prev_atom && after2 != "]" && pos + 2 < end {
             True -> v_class_loop(bytes, pos + 2, end, False)
-            False ->
-              Error(
-                "Invalid regular expression: invalid set operation in character class",
-              )
+            False -> Error(InvalidClassSetOperation(pos))
           }
         }
         _ ->
           // Single dash: only valid as a range separator between operands.
           case prev_atom && nxt != "]" && pos + 1 < end {
             True -> v_class_loop(bytes, pos + 1, end, False)
-            False ->
-              Error(
-                "Invalid regular expression: invalid character in character class",
-              )
+            False -> Error(InvalidClassCharacter(pos))
           }
       }
     _, "(" | _, ")" | _, "{" | _, "}" | _, "/" | _, "|" ->
-      Error("Invalid regular expression: invalid character in character class")
+      Error(InvalidClassCharacter(pos))
     _, "!"
     | _, "#"
     | _, "$"
@@ -1081,10 +1224,7 @@ fn v_class_loop(
     -> {
       let ch = char_at_source(bytes, pos)
       case nxt == ch {
-        True ->
-          Error(
-            "Invalid regular expression: reserved double punctuator in character class",
-          )
+        True -> Error(ReservedDoublePunctuator(pos))
         False -> v_class_loop(bytes, pos + 1, end, True)
       }
     }
@@ -1100,9 +1240,9 @@ fn skip_to_close_brace(
   bytes: BitArray,
   pos: Int,
   end: Int,
-) -> Result(Int, String) {
+) -> Result(Int, PatternError) {
   case pos >= end {
-    True -> Error("Invalid regular expression: unterminated character class")
+    True -> Error(UnterminatedClass(pos))
     False ->
       case char_at_source(bytes, pos) {
         "}" -> Ok(pos + 1)
@@ -1119,7 +1259,7 @@ fn parse_group_name(
   bytes: BitArray,
   pos: Int,
   end: Int,
-) -> Result(#(String, Int), String) {
+) -> Result(#(String, Int), PatternError) {
   group_name_loop(bytes, pos, end, True, [])
 }
 
@@ -1129,12 +1269,12 @@ fn group_name_loop(
   end: Int,
   is_first: Bool,
   acc: List(Int),
-) -> Result(#(String, Int), String) {
+) -> Result(#(String, Int), PatternError) {
   case pos >= end, char_at_source(bytes, pos) {
-    True, _ -> Error("Invalid regular expression: unterminated group name")
+    True, _ -> Error(UnterminatedGroupName(pos))
     _, ">" ->
       case is_first {
-        True -> Error("Invalid regular expression: empty group name")
+        True -> Error(EmptyGroupName(pos))
         False -> Ok(#(codepoints_to_string(list.reverse(acc)), pos + 1))
       }
     _, "\\" -> {
@@ -1153,14 +1293,14 @@ fn group_name_loop(
       }
       case lexer.validate_identifier_codepoint(cp, is_first) {
         True -> group_name_loop(bytes, next, end, False, [cp, ..acc])
-        False -> Error("Invalid regular expression: invalid group name")
+        False -> Error(InvalidGroupName(pos))
       }
     }
     _, _ -> {
       let #(cp, width) = codepoint_at(bytes, pos)
       case lexer.validate_identifier_codepoint(cp, is_first) {
         True -> group_name_loop(bytes, pos + width, end, False, [cp, ..acc])
-        False -> Error("Invalid regular expression: invalid group name")
+        False -> Error(InvalidGroupName(pos))
       }
     }
   }
@@ -1175,7 +1315,7 @@ fn codepoints_to_string(cps: List(Int)) -> String {
 fn decode_name_escape(
   bytes: BitArray,
   pos: Int,
-) -> Result(#(Int, Int), String) {
+) -> Result(#(Int, Int), PatternError) {
   case char_at_source(bytes, pos + 1) {
     "u" ->
       case char_at_source(bytes, pos + 2) {
@@ -1193,10 +1333,9 @@ fn decode_name_escape(
                 // Reject code points above U+10FFFF here — downstream
                 // identifier checks assume a valid Unicode scalar range.
                 Ok(cp) if cp <= 0x10FFFF -> Ok(#(cp, after + 1))
-                Ok(_) | Error(Nil) ->
-                  Error("Invalid regular expression: invalid group name")
+                Ok(_) | Error(Nil) -> Error(InvalidGroupName(pos))
               }
-            _ -> Error("Invalid regular expression: invalid group name")
+            _ -> Error(InvalidGroupName(pos))
           }
         }
         _ -> {
@@ -1212,14 +1351,13 @@ fn decode_name_escape(
             True ->
               case parse_hex_value(byte_slice_source(bytes, pos + 2, 4)) {
                 Ok(cp) -> Ok(#(cp, pos + 6))
-                Error(Nil) ->
-                  Error("Invalid regular expression: invalid group name")
+                Error(Nil) -> Error(InvalidGroupName(pos))
               }
-            False -> Error("Invalid regular expression: invalid group name")
+            False -> Error(InvalidGroupName(pos))
           }
         }
       }
-    _ -> Error("Invalid regular expression: invalid group name")
+    _ -> Error(InvalidGroupName(pos))
   }
 }
 
@@ -1227,33 +1365,34 @@ fn decode_name_escape(
 /// `(?-i:`. Only i/m/s are allowed; no flag may repeat (including across the
 /// add/remove sets), and the two sets must not both be empty. Returns the
 /// position just after the `:`.
-fn p_modifiers(bytes: BitArray, pos: Int, end: Int) -> Result(Int, String) {
+fn p_modifiers(
+  bytes: BitArray,
+  pos: Int,
+  end: Int,
+) -> Result(Int, PatternError) {
   use #(pos2, add) <- result.try(p_mod_flags(bytes, pos, end, []))
   case char_at_source(bytes, pos2) {
     ":" ->
       case add {
-        [] -> Error("Invalid regular expression: invalid group")
+        [] -> Error(InvalidGroup(pos2))
         _ -> Ok(pos2 + 1)
       }
     "-" -> {
       use #(pos3, remove) <- result.try(p_mod_flags(bytes, pos2 + 1, end, []))
       use Nil <- result.try(case char_at_source(bytes, pos3) {
         ":" -> Ok(Nil)
-        _ -> Error("Invalid regular expression: invalid modifier flags")
+        _ -> Error(InvalidModifierFlags(pos3))
       })
       use Nil <- result.try(case add, remove {
-        [], [] ->
-          Error(
-            "Invalid regular expression: add and remove modifiers must not both be empty",
-          )
+        [], [] -> Error(EmptyModifiers(pos))
         _, _ -> Ok(Nil)
       })
       case list.any(add, list.contains(remove, _)) {
-        True -> Error("Invalid regular expression: repeated modifier flag")
+        True -> Error(RepeatedModifierFlag(pos))
         False -> Ok(pos3 + 1)
       }
     }
-    _ -> Error("Invalid regular expression: invalid modifier flags")
+    _ -> Error(InvalidModifierFlags(pos2))
   }
 }
 
@@ -1262,7 +1401,7 @@ fn p_mod_flags(
   pos: Int,
   end: Int,
   seen: List(String),
-) -> Result(#(Int, List(String)), String) {
+) -> Result(#(Int, List(String)), PatternError) {
   case pos >= end {
     True -> Ok(#(pos, seen))
     False ->
@@ -1270,7 +1409,7 @@ fn p_mod_flags(
         "i" | "m" | "s" -> {
           let f = char_at_source(bytes, pos)
           case list.contains(seen, f) {
-            True -> Error("Invalid regular expression: repeated modifier flag")
+            True -> Error(RepeatedModifierFlag(pos))
             False -> p_mod_flags(bytes, pos + 1, end, [f, ..seen])
           }
         }
@@ -1361,7 +1500,7 @@ fn codepoint_at(bytes: BitArray, pos: Int) -> #(Int, Int) {
 pub fn skip_regex_flags(
   bytes: BitArray,
   pos: Int,
-) -> Result(#(Int, List(String)), ParseError) {
+) -> Result(#(Int, List(String)), PatternError) {
   scan_regex_flags(bytes, pos, [])
 }
 
@@ -1369,16 +1508,12 @@ fn scan_regex_flags(
   bytes: BitArray,
   pos: Int,
   seen: List(String),
-) -> Result(#(Int, List(String)), ParseError) {
+) -> Result(#(Int, List(String)), PatternError) {
   let ch = char_at_source(bytes, pos)
   case ch {
     "g" | "i" | "m" | "s" | "u" | "v" | "y" | "d" ->
       case list.contains(seen, ch) {
-        True ->
-          Error(LexerError(
-            "Duplicate regular expression flag '" <> ch <> "'",
-            pos,
-          ))
+        True -> Error(DuplicateFlag(pos, ch))
         False -> scan_regex_flags(bytes, pos + 1, [ch, ..seen])
       }
     _ -> Ok(#(pos, seen))
@@ -1443,8 +1578,8 @@ fn property_escape_length(
   pos: Int,
   end: Int,
   allow_strings allow_strings: Bool,
-) -> Result(Int, String) {
-  let invalid = "Invalid regular expression: invalid property name in \\p{}"
+) -> Result(Int, PatternError) {
+  let invalid = InvalidPropertyName(pos)
   case char_at_source(bytes, pos + 2) {
     "{" -> {
       let name_end = skip_property_chars(bytes, pos + 3, end)
@@ -1456,10 +1591,7 @@ fn property_escape_length(
             PropString ->
               case allow_strings {
                 True -> Ok(name_end + 1 - pos)
-                False ->
-                  Error(
-                    "Invalid regular expression: properties of strings require the v flag and a non-negated \\p",
-                  )
+                False -> Error(PropertyOfStringsRequiresVFlag(pos))
               }
             PropInvalid -> Error(invalid)
           }
@@ -1497,7 +1629,7 @@ pub fn validate_regex_vmode_body(
   bytes: BitArray,
   pos: Int,
   end: Int,
-) -> Result(Nil, String) {
+) -> Result(Nil, PatternError) {
   validate_vmode_loop(bytes, pos, end, [])
 }
 
@@ -1506,7 +1638,7 @@ fn validate_vmode_loop(
   pos: Int,
   end: Int,
   class_negations: List(Bool),
-) -> Result(Nil, String) {
+) -> Result(Nil, PatternError) {
   case pos >= end {
     True -> Ok(Nil)
     False ->
