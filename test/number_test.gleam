@@ -1,7 +1,7 @@
 /// Numeric-literal and string-escape cooking tests.
 import arc/engine.{Returned}
 import arc/parser/number
-import arc/vm/value.{Finite, JsNumber, JsString}
+import arc/vm/value.{Finite, Infinity, JsNumber, JsString, NegInfinity}
 
 /// Largest finite IEEE double — the value an overflowing literal currently
 /// clamps to. This is a KNOWN SPEC DEVIATION, not the correct value: see
@@ -91,6 +91,37 @@ pub fn eval_overflowing_literal_test() {
   // carrying a value.JsNum instead of a bare Float (see
   // number.overflow_clamp).
   assert eval("1e400") == JsNumber(Finite(max_double))
+}
+
+// ----------------------------------------------------------------------------
+// ToNumber / parseInt / parseFloat on beyond-double-range digit strings
+//
+// §7.1.4.1 / §19.2.5: these must yield Infinity. Before every Int→JsNum
+// conversion was routed through value.num_from_int, they called
+// int.to_float on a >1.8e308 bignum, which is an uncaught erlang badarg
+// (erlang:float/1) that killed the whole VM.
+// ----------------------------------------------------------------------------
+
+pub fn eval_number_of_huge_decimal_string_is_infinity_test() {
+  assert eval("Number('1' + '0'.repeat(400))") == JsNumber(Infinity)
+  assert eval("Number('-' + '9'.repeat(400))") == JsNumber(NegInfinity)
+}
+
+pub fn eval_number_of_huge_radix_string_is_infinity_test() {
+  assert eval("Number('0x' + 'f'.repeat(300))") == JsNumber(Infinity)
+  assert eval("Number('0b' + '1'.repeat(2000))") == JsNumber(Infinity)
+  assert eval("Number('0o' + '7'.repeat(500))") == JsNumber(Infinity)
+}
+
+pub fn eval_parse_int_huge_digit_string_is_infinity_test() {
+  assert eval("parseInt('9'.repeat(400))") == JsNumber(Infinity)
+  assert eval("parseInt('-' + '9'.repeat(400))") == JsNumber(NegInfinity)
+  assert eval("parseInt('f'.repeat(300), 16)") == JsNumber(Infinity)
+}
+
+pub fn eval_parse_float_huge_digit_string_is_infinity_test() {
+  assert eval("parseFloat('9'.repeat(400))") == JsNumber(Infinity)
+  assert eval("parseFloat('-' + '9'.repeat(400))") == JsNumber(NegInfinity)
 }
 
 pub fn eval_legacy_octal_escape_above_7f_test() {

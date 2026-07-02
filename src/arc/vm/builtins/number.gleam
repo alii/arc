@@ -304,8 +304,12 @@ fn parse_decimal_string(str: String) -> JsNum {
     "-Infinity" -> NegInfinity
     _ ->
       gleam_stdlib_parse_float(str)
-      |> result.try_recover(fn(_) { int.parse(str) |> result.map(int.to_float) })
       |> result.map(Finite)
+      // Beyond-double-range digit strings (e.g. 400 nines) must saturate to
+      // Infinity, not crash erlang:float/1 — so route through num_from_int.
+      |> result.try_recover(fn(_: Nil) {
+        int.parse(str) |> result.map(value.num_from_int)
+      })
       |> result.unwrap(NaN)
   }
 }
@@ -680,8 +684,10 @@ fn parse_int_digits(s: String, radix: Int) -> value.JsNum {
       case negative {
         // Step 15: If sign = -1 and mathInt = 0, return -0.
         True if n == 0 -> Finite(-0.0)
-        True -> Finite(int.to_float(-n))
-        False -> Finite(int.to_float(n))
+        // num_from_int saturates beyond-double-range digit strings (e.g.
+        // parseInt of 400 nines) to +/-Infinity instead of crashing.
+        True -> value.num_from_int(-n)
+        False -> value.num_from_int(n)
       }
   }
 }

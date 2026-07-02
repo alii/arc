@@ -4785,14 +4785,13 @@ fn build_and_parse_float(
 
 /// Parse an all-digits integer literal. Goes through float syntax first;
 /// only literals beyond double range (~1e308, 309+ digits) fall back to
-/// arbitrary-precision integer parsing, exactly like the previous
-/// implementation.
+/// arbitrary-precision integer parsing, which `num_from_int` saturates to
+/// Infinity per §7.1.4.1 instead of crashing in erlang:float/1.
 fn parse_integer_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   use digits <- result.try(bit_array.to_string(bytes))
   case float.parse(digits <> ".0") {
     Ok(f) -> Ok(Finite(f))
-    Error(Nil) ->
-      int.parse(digits) |> result.map(fn(n) { Finite(int.to_float(n)) })
+    Error(Nil) -> int.parse(digits) |> result.map(num_from_int)
   }
 }
 
@@ -4806,7 +4805,7 @@ fn parse_radix_literal(digits: BitArray, radix: Int) -> JsNum {
         bit_array.to_string(digits)
         |> result.try(int.base_parse(_, radix))
       case parsed {
-        Ok(n) -> Finite(int.to_float(n))
+        Ok(n) -> num_from_int(n)
         Error(Nil) -> NaN
       }
     }
