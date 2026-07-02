@@ -5,19 +5,16 @@
 /// JsValues — `JsObject(ref)` compares by object identity, `JsSymbol(id)`
 /// by symbol identity — exactly like WeakMap keys.
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
+import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
+import arc/vm/builtins/helpers.{
+  can_be_held_weakly, first_arg_or_undefined, is_callable,
+}
 import arc/vm/builtins/iterator
-import arc/vm/builtins/weak_map
 import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{
-  type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsNull,
-  JsObject, JsUndefined, Named, ObjectSlot, WeakSetConstructor, WeakSetNative,
-  WeakSetObject, WeakSetPrototypeAdd, WeakSetPrototypeDelete,
-  WeakSetPrototypeHas,
-}
+import arc/vm/value.{type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsNull, JsObject, JsUndefined, ObjectSlot, WeakSetConstructor, WeakSetNative, WeakSetObject, WeakSetPrototypeAdd, WeakSetPrototypeDelete, WeakSetPrototypeHas}
 import gleam/dict.{type Dict}
 import gleam/option.{None, Some}
 
@@ -65,11 +62,21 @@ pub fn dispatch(
 }
 
 /// ES2024 §24.4.1.1 WeakSet ( [ iterable ] )
+///
+///   1. If NewTarget is undefined, throw a TypeError exception.
+///   2. Let set be ? OrdinaryCreateFromConstructor(NewTarget,
+///      "%WeakSet.prototype%", « [[WeakSetData]] »).
+///   3. Set set.[[WeakSetData]] to a new empty List.
+///   4. If iterable is undefined or null, return set.
+///   5-6. adder = ? Get(set, "add"); must be callable.
+///   7. Iterate the iterable, calling adder(set, v) for each value.
 fn construct(
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // Steps 1-2: reject a plain call and resolve new.target.prototype.
+  use proto, state <- helpers.require_new_target(state, "WeakSet", proto)
   let #(heap, set_ref) =
     common.alloc_wrapper(state.heap, WeakSetObject(data: dict.new()), proto)
   let state = State(..state, heap:)
@@ -131,7 +138,7 @@ fn weak_set_add(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use data, ref, state <- set_require(this, state)
   let val = first_arg_or_undefined(args)
-  case weak_map.can_be_held_weakly(state, val) {
+  case can_be_held_weakly(state, val) {
     True -> {
       let state = write_data(state, ref, dict.insert(data, val, Nil))
       #(state, Ok(this))

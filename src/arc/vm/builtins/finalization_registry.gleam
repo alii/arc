@@ -6,7 +6,7 @@
 /// WeakMap/WeakSet), so cleanup callbacks never fire — but the constructor and
 /// the register/unregister bookkeeping follow the spec exactly.
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers
+import arc/vm/builtins/helpers.{can_be_held_weakly}
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/object
@@ -15,8 +15,8 @@ import arc/vm/value.{
   type FinalizationRegistryNativeFn, type JsValue, type Ref, Dispatch,
   FinRegCell, FinalizationRegistryConstructor, FinalizationRegistryNative,
   FinalizationRegistryObject, FinalizationRegistryPrototypeRegister,
-  FinalizationRegistryPrototypeUnregister, JsBool, JsObject, JsSymbol,
-  JsUndefined, ObjectSlot,
+  FinalizationRegistryPrototypeUnregister, JsBool, JsObject, JsUndefined,
+  ObjectSlot,
 }
 import gleam/dict
 import gleam/list
@@ -252,19 +252,5 @@ fn require_registry(
           <> method
           <> " called on incompatible receiver",
       )
-  }
-}
-
-/// §9.13 CanBeHeldWeakly ( v ) — objects, and symbols that are NOT in the
-/// global symbol registry (Symbol.for), can be held weakly.
-fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
-  case v {
-    JsObject(_) -> True
-    JsSymbol(id) ->
-      !{
-        dict.to_list(state.ctx.symbol_registry)
-        |> list.any(fn(entry) { entry.1 == id })
-      }
-    _ -> False
   }
 }

@@ -6,23 +6,20 @@
 /// object identity, `JsSymbol(id)` by symbol identity.
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
 ///
-/// Also exports `can_be_held_weakly` (§16.1), the key/member predicate
-/// shared with `weak_set`.
+/// The key/member predicate (§9.13 CanBeHeldWeakly) is
+/// `helpers.can_be_held_weakly`, shared with `weak_set` and
+/// `finalization_registry`.
+import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable, list_at}
+import arc/vm/builtins/helpers.{
+  can_be_held_weakly, first_arg_or_undefined, is_callable, list_at,
+}
 import arc/vm/builtins/iterator
 import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{
-  type JsValue, type Ref, type WeakMapNativeFn, Dispatch, JsBool, JsNull,
-  JsObject, JsSymbol, JsUndefined, Named, ObjectSlot, WeakMapConstructor,
-  WeakMapNative, WeakMapObject, WeakMapPrototypeDelete, WeakMapPrototypeGet,
-  WeakMapPrototypeGetOrInsert, WeakMapPrototypeGetOrInsertComputed,
-  WeakMapPrototypeHas, WeakMapPrototypeSet,
-}
+import arc/vm/value.{type JsValue, type Ref, type WeakMapNativeFn, Dispatch, JsBool, JsNull, JsObject, JsUndefined, ObjectSlot, WeakMapConstructor, WeakMapNative, WeakMapObject, WeakMapPrototypeDelete, WeakMapPrototypeGet, WeakMapPrototypeGetOrInsert, WeakMapPrototypeGetOrInsertComputed, WeakMapPrototypeHas, WeakMapPrototypeSet}
 import gleam/dict.{type Dict}
-import gleam/list
 import gleam/option.{None, Some}
 
 /// Set up WeakMap.prototype and WeakMap constructor.
@@ -79,18 +76,6 @@ pub fn dispatch(
   }
 }
 
-/// §16.1 CanBeHeldWeakly(v) — true for objects and non-registered Symbols
-/// (a symbol minted by `Symbol.for` lives in the global registry and can
-/// never be collected, so it can't be a weak key).
-/// Shared with `weak_set`, whose members obey the same predicate.
-pub fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
-  case v {
-    JsObject(_) -> True
-    JsSymbol(id) -> !list.contains(dict.values(state.ctx.symbol_registry), id)
-    _ -> False
-  }
-}
-
 /// Unwrap `this` as a WeakMap, or throw TypeError. CPS-style — call with
 /// `use data, ref, state <- map_require(this, state)`.
 fn map_require(
@@ -118,11 +103,21 @@ fn map_require(
 }
 
 /// ES2024 §24.3.1.1 WeakMap ( [ iterable ] )
+///
+///   1. If NewTarget is undefined, throw a TypeError exception.
+///   2. Let map be ? OrdinaryCreateFromConstructor(NewTarget,
+///      "%WeakMap.prototype%", « [[WeakMapData]] »).
+///   3. Set map.[[WeakMapData]] to a new empty List.
+///   4. If iterable is undefined or null, return map.
+///   5-6. adder = ? Get(map, "set"); must be callable.
+///   7. Return ? AddEntriesFromIterable(map, iterable, adder).
 fn construct(
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // Steps 1-2: reject a plain call and resolve new.target.prototype.
+  use proto, state <- helpers.require_new_target(state, "WeakMap", proto)
   let #(heap, map_ref) =
     common.alloc_wrapper(state.heap, WeakMapObject(data: dict.new()), proto)
   let state = State(..state, heap:)

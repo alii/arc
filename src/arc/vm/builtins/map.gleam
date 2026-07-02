@@ -17,6 +17,7 @@
 /// iterators per §24.1.5. Original JS keys are reconstructed via
 /// `map_key_to_js` — the MapKey encoding is lossless modulo -0→+0
 /// normalization, which the spec requires anyway (§24.1.3.9 step 4).
+import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iterator
@@ -123,16 +124,17 @@ pub fn dispatch(
 ///   6. If IsCallable(adder) is false, throw a TypeError exception.
 ///   7. Return ? AddEntriesFromIterable(map, iterable, adder).
 ///
-/// The NewTarget check is skipped (the VM handles the constructor call path);
-/// everything else is the real spec: `? Get(map, "set")` is observable, and
-/// the iterable goes through §24.1.1.2 AddEntriesFromIterable (a real
-/// GetIterator loop), so `new Map(otherMap)`, generators, Sets of pairs and
-/// custom iterables all work.
+/// `? Get(map, "set")` is observable, and the iterable goes through
+/// §24.1.1.2 AddEntriesFromIterable (a real GetIterator loop), so
+/// `new Map(otherMap)`, generators, Sets of pairs and custom iterables all
+/// work.
 fn map_constructor(
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // Steps 1-2: reject a plain call and resolve new.target.prototype.
+  use proto, state <- helpers.require_new_target(state, "Map", proto)
   // Steps 2-3: allocate the map with an empty [[MapData]].
   let #(heap, ref) = alloc_map(state.heap, proto, ordered_entries.new())
   let state = State(..state, heap:)
@@ -145,7 +147,7 @@ fn map_constructor(
       use adder, state <- state.try_op(object.get_value_of(
         state,
         map,
-        value.Named("set"),
+        Named("set"),
       ))
       case helpers.is_callable(state.heap, adder) {
         False ->

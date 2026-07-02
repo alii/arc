@@ -1,14 +1,12 @@
+import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{
-  type JsValue, type Ref, Dispatch, DomExceptionConstructor, DomExceptionGetCode,
-  ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined, Named,
-  ObjectSlot,
-}
+import arc/vm/value.{type JsValue, type Ref, Dispatch, DomExceptionConstructor, DomExceptionGetCode, ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot}
 import gleam/int
 import gleam/option.{Some}
 
@@ -40,14 +38,18 @@ pub fn init(
 }
 
 /// new DOMException(message = "", name = "Error")
-/// Always installs own `name` and `message` (writable+configurable, not
-/// enumerable) so the prototype `code` getter and Error.prototype.toString
-/// resolve via ordinary Get.
+///
+/// WebIDL interface objects throw a TypeError when [[Call]]ed without `new`,
+/// and honour `new.target.prototype` for subclasses — both handled by the
+/// shared `require_new_target` guard. Always installs own `name` and
+/// `message` (writable+configurable, not enumerable) so the prototype `code`
+/// getter and Error.prototype.toString resolve via ordinary Get.
 pub fn construct(
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  use proto, state <- helpers.require_new_target(state, "DOMException", proto)
   let #(msg_arg, name_arg) = case args {
     [m, n, ..] -> #(m, n)
     [m] -> #(m, JsUndefined)

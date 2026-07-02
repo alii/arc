@@ -10,6 +10,7 @@
 /// record, so a deleted-then-re-added value gets a fresh seq and is revisited
 /// by in-flight iterators per §24.2.5. Iteration points call
 /// ordered_entries.live_values to recover forward insertion order.
+import arc/vm/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/iterator
@@ -18,16 +19,7 @@ import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{
-  type JsValue, type MapKey, type Ref, type SetNativeFn, Dispatch, Finite,
-  JsBool, JsNumber, JsObject, JsUndefined, NaN, Named, ObjectSlot,
-  SetConstructor, SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear,
-  SetPrototypeDelete, SetPrototypeDifference, SetPrototypeEntries,
-  SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas,
-  SetPrototypeIntersection, SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf,
-  SetPrototypeIsSupersetOf, SetPrototypeSymmetricDifference, SetPrototypeUnion,
-  SetPrototypeValues,
-}
+import arc/vm/value.{type JsValue, type MapKey, type Ref, type SetNativeFn, Dispatch, Finite, JsBool, JsNumber, JsObject, JsUndefined, NaN, ObjectSlot, SetConstructor, SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear, SetPrototypeDelete, SetPrototypeDifference, SetPrototypeEntries, SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas, SetPrototypeIntersection, SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf, SetPrototypeIsSupersetOf, SetPrototypeSymmetricDifference, SetPrototypeUnion, SetPrototypeValues}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -75,7 +67,7 @@ pub fn dispatch(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
-    SetConstructor(_) -> construct(args, state)
+    SetConstructor(proto:) -> construct(proto, args, state)
     SetPrototypeAdd -> set_add(this, args, state)
     SetPrototypeHas -> set_has(this, args, state)
     SetPrototypeDelete -> set_delete(this, args, state)
@@ -97,6 +89,9 @@ pub fn dispatch(
 
 /// ES2024 §24.2.1.1 Set ( [ iterable ] )
 ///
+///   1. If NewTarget is undefined, throw a TypeError exception.
+///   2. Let set be ? OrdinaryCreateFromConstructor(NewTarget,
+///      "%Set.prototype%", « [[SetData]] »).
 ///   4. Set set.[[SetData]] to a new empty List.
 ///   5. If iterable is either undefined or null, return set.
 ///   6. Let adder be ? Get(set, "add").
@@ -108,15 +103,18 @@ pub fn dispatch(
 /// `new Set(otherSet)`, `new Set(map)`, generators and strings all work,
 /// and the (user-overridable) `add` is observably called per value.
 fn construct(
+  proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // Steps 1-2: reject a plain call and resolve new.target.prototype.
+  use proto, state <- helpers.require_new_target(state, "Set", proto)
   // Steps 2-4: allocate the set with an empty [[SetData]].
   let #(heap, set_ref) =
     common.alloc_wrapper(
       state.heap,
       SetObject(store: ordered_entries.new()),
-      state.builtins.set.prototype,
+      proto,
     )
   let state = State(..state, heap:)
   let set = JsObject(set_ref)
