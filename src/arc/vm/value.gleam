@@ -1,3 +1,4 @@
+import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/opcode.{type Op}
@@ -31,12 +32,20 @@ pub type ErlangRef
 /// Symbol identity. Well-known symbols use fixed integer IDs (compile-time
 /// constants). User-created symbols use Erlang references for global uniqueness
 /// across processes — no shared counter needed.
+///
+/// INVARIANT: the only `WellKnownSymbol` ids in existence are 1-15, the
+/// `symbol_*` constants below — `well_known_symbol_description` is total over
+/// them. No other module may mint a `WellKnownSymbol(id)`: a fabricated id
+/// would collide with a future real well-known symbol and, being a symbol,
+/// would be guest-observable. Engine-internal per-object state belongs in a
+/// typed `ObjectKind` variant (see e.g. `RegExpStringIteratorObject`), never
+/// in a symbol-keyed property.
 pub type SymbolId {
   WellKnownSymbol(id: Int)
   UserSymbol(ref: ErlangRef)
 }
 
-// Well-known symbol constants.
+// Well-known symbol constants — the COMPLETE set (see the SymbolId invariant).
 pub const symbol_to_string_tag = WellKnownSymbol(1)
 
 pub const symbol_iterator = WellKnownSymbol(2)
@@ -67,7 +76,9 @@ pub const symbol_dispose = WellKnownSymbol(14)
 
 pub const symbol_async_dispose = WellKnownSymbol(15)
 
-/// Get the description string for a well-known symbol.
+/// Get the description string for a well-known symbol. Total over every
+/// `WellKnownSymbol` id the engine mints (1-15; see the SymbolId invariant) —
+/// `None` is only reachable for `UserSymbol`.
 pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
   case id {
     WellKnownSymbol(1) -> Some("Symbol.toStringTag")
@@ -775,67 +786,6 @@ fn nf_bit_length(n: Int, acc: Int) -> Int {
   }
 }
 
-/// Forward-insertion-order live values of a SetObject: the live seqs in
-/// `order`, ascending, resolved through the data dict.
-pub fn set_live_values(
-  data: Dict(MapKey, JsValue),
-  order: Dict(Int, MapKey),
-) -> List(JsValue) {
-  live_entries(data, order) |> list.map(fn(e) { e.1 })
-}
-
-/// Forward-insertion-order live (key, value) entries of a Map/Set backing
-/// store. `order` maps insertion sequence number → live key (deleted entries
-/// are removed, leaving a gap); sorting the seqs recovers insertion order.
-pub fn live_entries(
-  data: Dict(MapKey, JsValue),
-  order: Dict(Int, MapKey),
-) -> List(#(MapKey, JsValue)) {
-  live_entries_from(data, order, 0)
-}
-
-/// Live (key, value) entries whose insertion sequence number is >= cursor,
-/// ascending. Used to drain a partially-consumed Map/Set iterator.
-pub fn live_entries_from(
-  data: Dict(MapKey, JsValue),
-  order: Dict(Int, MapKey),
-  cursor: Int,
-) -> List(#(MapKey, JsValue)) {
-  dict.to_list(order)
-  |> list.filter(fn(p) { p.0 >= cursor })
-  |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
-  |> list.filter_map(fn(p) {
-    dict.get(data, p.1) |> result.map(fn(v) { #(p.1, v) })
-  })
-}
-
-/// First live Map/Set entry at sequence number >= cursor, scanning past the
-/// gaps that deleted entries leave behind (the spec's "empty" records).
-/// Returns #(seq, key, value); the iterator resumes at seq + 1. Each seq
-/// value is scanned at most once over an iterator's lifetime, so a full
-/// iteration is O(total insertions), amortized O(1) per .next().
-pub fn entry_from_seq(
-  data: Dict(MapKey, JsValue),
-  order: Dict(Int, MapKey),
-  cursor: Int,
-  next_seq: Int,
-) -> option.Option(#(Int, MapKey, JsValue)) {
-  case cursor >= next_seq {
-    True -> option.None
-    False ->
-      case dict.get(order, cursor) {
-        Ok(k) ->
-          case dict.get(data, k) {
-            Ok(v) -> option.Some(#(cursor, k, v))
-            // order/data are kept in lockstep; a missing key would mean a
-            // stale order entry — skip it rather than yield a dead record.
-            Error(Nil) -> entry_from_seq(data, order, cursor + 1, next_seq)
-          }
-        Error(Nil) -> entry_from_seq(data, order, cursor + 1, next_seq)
-      }
-  }
-}
-
 /// Map methods — constructor, prototype methods, size getter.
 pub type MapNativeFn {
   MapConstructor(proto: Ref)
@@ -997,7 +947,8 @@ pub type DisposeResource {
 
 /// ArrayBuffer / SharedArrayBuffer methods — ES2024 §25.1/§25.2.
 /// One dispatch family covers both: the same internal slot layout
-/// (ArrayBufferObject exotic kind) backs both, distinguished by `shared`.
+/// (ArrayBufferObject exotic kind) backs both, distinguished by the storage
+/// kind (`buffer_is_shared(data)` — `BufShared` vs `BufBytes`).
 pub type ArrayBufferNativeFn {
   /// §25.1.4.1 ArrayBuffer ( length [ , options ] )
   ArrayBufferConstructor(proto: Ref)
@@ -1201,16 +1152,32 @@ pub type IteratorNativeFn {
   IteratorProtoSetConstructor
 }
 
+/// One of %RegExp%'s legacy internal slots (tc39
+/// proposal-regexp-legacy-features): [[RegExpInput]], [[RegExpLastMatch]],
+/// [[RegExpLastParen]], [[RegExpLeftContext]], [[RegExpRightContext]], and
+/// [[RegExpParenN]] for N in 1..9 (`LegacyParen(n)`). Keys the
+/// `RegExpConstructor` kind's `legacy` state dict and names the slot a
+/// `RegExpLegacyGetter` reads — structural equality/ordering makes it a
+/// valid Dict key, and the closed enum makes a mis-numbered slot impossible.
+pub type LegacySlot {
+  LegacyInput
+  LegacyLastMatch
+  LegacyLastParen
+  LegacyLeftContext
+  LegacyRightContext
+  LegacyParen(n: Int)
+}
+
 /// RegExp methods — constructor, prototype methods, accessor getters.
 pub type RegExpNativeFn {
   /// `legacy` holds the tc39 legacy-regexp proposal's internal slots
   /// ([[RegExpInput]], [[RegExpLastMatch]], [[RegExpParen1]], …) keyed by
-  /// slot id. Living inside the constructor's NativeFunction kind keeps the
-  /// state per-realm (each realm has its own %RegExp% object) while staying
-  /// invisible to OrdinaryOwnPropertyKeys — internal slots must never show
-  /// up in Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
+  /// `LegacySlot`. Living inside the constructor's NativeFunction kind keeps
+  /// the state per-realm (each realm has its own %RegExp% object) while
+  /// staying invisible to OrdinaryOwnPropertyKeys — internal slots must never
+  /// show up in Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
   /// Unwritten slots read as "" (InitializeLegacyRegExpStaticProperties).
-  RegExpConstructor(legacy: Dict(Int, String))
+  RegExpConstructor(legacy: Dict(LegacySlot, String))
   RegExpPrototypeTest
   RegExpPrototypeExec
   RegExpPrototypeToString
@@ -1238,7 +1205,7 @@ pub type RegExpNativeFn {
   /// rightContext/$', $1-$9. `ctor` is the owning realm's %RegExp%
   /// (GetLegacyRegExpStaticProperty's SameValue receiver check); `slot` is
   /// the key in the RegExpConstructor kind's `legacy` state dict.
-  RegExpLegacyGetter(ctor: Ref, slot: Int)
+  RegExpLegacyGetter(ctor: Ref, slot: LegacySlot)
   /// Legacy static accessor setter — only RegExp.input/$_ has one.
   RegExpLegacyInputSetter(ctor: Ref)
 }
@@ -1498,6 +1465,181 @@ pub type CollatorState {
   )
 }
 
+// --- Intl.NumberFormat closed option sets (§15.1) -------------------------
+//
+// Each of these options admits a fixed set of spellings. They are parsed
+// (and validated) exactly once, in the constructors in `intl.gleam`; the
+// formatting engine then dispatches on the variants exhaustively, so an
+// out-of-set value cannot reach — or be silently defaulted by — a formatter.
+// The `*_to_js_string` functions render the spec spelling for
+// resolvedOptions.
+
+/// `[[Style]]` (§15.1.3 SetNumberFormatUnitOptions).
+pub type NumStyle {
+  StyleDecimal
+  StylePercent
+  StyleCurrency
+  StyleUnit
+}
+
+pub fn num_style_to_js_string(v: NumStyle) -> String {
+  case v {
+    StyleDecimal -> "decimal"
+    StylePercent -> "percent"
+    StyleCurrency -> "currency"
+    StyleUnit -> "unit"
+  }
+}
+
+/// `[[Notation]]` — shared by NumberFormat and PluralRules.
+pub type Notation {
+  NotationStandard
+  NotationScientific
+  NotationEngineering
+  NotationCompact
+}
+
+pub fn notation_to_js_string(v: Notation) -> String {
+  case v {
+    NotationStandard -> "standard"
+    NotationScientific -> "scientific"
+    NotationEngineering -> "engineering"
+    NotationCompact -> "compact"
+  }
+}
+
+/// `[[CompactDisplay]]` — only meaningful under compact notation.
+pub type CompactDisplay {
+  CompactShort
+  CompactLong
+}
+
+pub fn compact_display_to_js_string(v: CompactDisplay) -> String {
+  case v {
+    CompactShort -> "short"
+    CompactLong -> "long"
+  }
+}
+
+/// `[[SignDisplay]]`.
+pub type SignDisplay {
+  SignAuto
+  SignNever
+  SignAlways
+  SignExceptZero
+  SignNegative
+}
+
+pub fn sign_display_to_js_string(v: SignDisplay) -> String {
+  case v {
+    SignAuto -> "auto"
+    SignNever -> "never"
+    SignAlways -> "always"
+    SignExceptZero -> "exceptZero"
+    SignNegative -> "negative"
+  }
+}
+
+/// `[[CurrencyDisplay]]` — only meaningful for the currency style.
+pub type CurrencyDisplay {
+  CurCode
+  CurSymbol
+  CurNarrowSymbol
+  CurName
+}
+
+pub fn currency_display_to_js_string(v: CurrencyDisplay) -> String {
+  case v {
+    CurCode -> "code"
+    CurSymbol -> "symbol"
+    CurNarrowSymbol -> "narrowSymbol"
+    CurName -> "name"
+  }
+}
+
+/// `[[CurrencySign]]` — only meaningful for the currency style.
+pub type CurrencySign {
+  CurStandard
+  CurAccounting
+}
+
+pub fn currency_sign_to_js_string(v: CurrencySign) -> String {
+  case v {
+    CurStandard -> "standard"
+    CurAccounting -> "accounting"
+  }
+}
+
+/// `[[UnitDisplay]]` — only meaningful for the unit style.
+pub type UnitDisplay {
+  UnitShort
+  UnitNarrow
+  UnitLong
+}
+
+pub fn unit_display_to_js_string(v: UnitDisplay) -> String {
+  case v {
+    UnitShort -> "short"
+    UnitNarrow -> "narrow"
+    UnitLong -> "long"
+  }
+}
+
+/// `[[RoundingMode]]` (§15.5.2).
+pub type RoundingMode {
+  RoundCeil
+  RoundFloor
+  RoundExpand
+  RoundTrunc
+  RoundHalfCeil
+  RoundHalfFloor
+  RoundHalfExpand
+  RoundHalfTrunc
+  RoundHalfEven
+}
+
+pub fn rounding_mode_to_js_string(v: RoundingMode) -> String {
+  case v {
+    RoundCeil -> "ceil"
+    RoundFloor -> "floor"
+    RoundExpand -> "expand"
+    RoundTrunc -> "trunc"
+    RoundHalfCeil -> "halfCeil"
+    RoundHalfFloor -> "halfFloor"
+    RoundHalfExpand -> "halfExpand"
+    RoundHalfTrunc -> "halfTrunc"
+    RoundHalfEven -> "halfEven"
+  }
+}
+
+/// `[[RoundingType]]` selection priority (§15.1.6).
+pub type RoundingPriority {
+  PriorityAuto
+  PriorityMorePrecision
+  PriorityLessPrecision
+}
+
+pub fn rounding_priority_to_js_string(v: RoundingPriority) -> String {
+  case v {
+    PriorityAuto -> "auto"
+    PriorityMorePrecision -> "morePrecision"
+    PriorityLessPrecision -> "lessPrecision"
+  }
+}
+
+/// `[[TrailingZeroDisplay]]`.
+pub type TrailingZeroDisplay {
+  TzdAuto
+  TzdStripIfInteger
+}
+
+pub fn trailing_zero_display_to_js_string(v: TrailingZeroDisplay) -> String {
+  case v {
+    TzdAuto -> "auto"
+    TzdStripIfInteger -> "stripIfInteger"
+  }
+}
+
 /// SetNumberFormatDigitOptions result (§15.1.6) — shared by NumberFormat and
 /// PluralRules. The fraction/significant pairs are absent when that rounding
 /// kind was not requested, and resolvedOptions omits absent pairs.
@@ -1509,18 +1651,21 @@ pub type IntlDigitOptions {
     minimum_significant_digits: Option(Int),
     maximum_significant_digits: Option(Int),
     rounding_increment: Int,
-    rounding_mode: String,
-    rounding_priority: String,
-    trailing_zero_display: String,
+    rounding_mode: RoundingMode,
+    rounding_priority: RoundingPriority,
+    trailing_zero_display: TrailingZeroDisplay,
   )
 }
 
 /// `[[UseGrouping]]` — spec-wise either the boolean `false` or one of the
 /// strings "min2" / "auto" / "always" (a `true` option normalizes to
-/// "always"). resolvedOptions must surface `false` as a boolean.
+/// "always", `false` to never). resolvedOptions must surface never as the
+/// boolean `false`, the rest as their string spelling.
 pub type IntlUseGrouping {
+  GroupingAuto
+  GroupingAlways
+  GroupingMin2
   GroupingNever
-  GroupingMode(String)
 }
 
 /// Intl.NumberFormat resolved options (§15.1.2 InitializeNumberFormat).
@@ -1531,17 +1676,17 @@ pub type NumberFormatState {
   NumberFormatState(
     locale: String,
     numbering_system: String,
-    style: String,
+    style: NumStyle,
     currency: Option(String),
-    currency_display: Option(String),
-    currency_sign: Option(String),
+    currency_display: Option(CurrencyDisplay),
+    currency_sign: Option(CurrencySign),
     unit: Option(String),
-    unit_display: Option(String),
+    unit_display: Option(UnitDisplay),
     digits: IntlDigitOptions,
     use_grouping: IntlUseGrouping,
-    notation: String,
-    compact_display: Option(String),
-    sign_display: String,
+    notation: Notation,
+    compact_display: Option(CompactDisplay),
+    sign_display: SignDisplay,
     bound_format: Option(Ref),
   )
 }
@@ -1644,8 +1789,8 @@ pub type PluralRulesState {
   PluralRulesState(
     locale: String,
     plural_type: String,
-    notation: String,
-    compact_display: Option(String),
+    notation: Notation,
+    compact_display: Option(CompactDisplay),
     digits: IntlDigitOptions,
   )
 }
@@ -2035,6 +2180,16 @@ pub fn sab_write_bytes(
   bytes: BitArray,
 ) -> Nil
 
+/// Whether the storage is shared across agents (SharedArrayBuffer backing).
+/// This is THE definition of shared-ness — there is no separate flag; a
+/// buffer is shared iff its storage is `BufShared`.
+pub fn buffer_is_shared(data: BufferData) -> Bool {
+  case data {
+    BufShared(..) -> True
+    BufBytes(..) -> False
+  }
+}
+
 /// [[ArrayBufferByteLength]] of a storage value.
 pub fn buffer_byte_size(data: BufferData) -> Int {
   case data {
@@ -2165,35 +2320,19 @@ pub type ExoticKind(ctx, host) {
   HostObject(value: host)
   /// Map object — ES2024 §24.1 Map Objects.
   /// Stores key-value pairs using SameValueZero equality.
-  /// `entries` maps normalized MapKey → value. Original JS keys are
-  /// reconstructed via `map_key_to_js` (lossless inverse modulo -0→+0, which
-  /// §24.1.3.9 step 4 mandates anyway), so no second dict is needed.
-  /// Insertion order is the spec's append-only [[MapData]] list, modelled
-  /// with monotonically increasing sequence numbers: `seqs` maps live key →
-  /// its seq, `order` maps seq → live key, `next_seq` is the next seq to
-  /// assign (never reset — clear() keeps it so in-flight iterators, which
-  /// hold seq cursors, still see entries added after the clear). delete()
-  /// removes the record entirely; the seq gap is the spec's emptied record,
-  /// and a re-added key gets a fresh seq past every live iterator's cursor,
-  /// so it is revisited per §24.1.5.
-  MapObject(
-    entries: Dict(MapKey, JsValue),
-    seqs: Dict(MapKey, Int),
-    order: Dict(Int, MapKey),
-    next_seq: Int,
-  )
+  /// `store` maps normalized MapKey → value and models the spec's append-only
+  /// [[MapData]] insertion order (see `arc/vm/internal/ordered_entries`).
+  /// Original JS keys are reconstructed via `map_key_to_js` (lossless inverse
+  /// modulo -0→+0, which §24.1.3.9 step 4 mandates anyway), so no second dict
+  /// is needed. delete() leaves a seq gap (the spec's emptied record) and a
+  /// re-added key appends past every live iterator's cursor, so it is
+  /// revisited per §24.1.5.
+  MapObject(store: OrderedEntries(MapKey, JsValue))
   /// Set object — ES2024 §24.2 Set Objects.
   /// Stores unique values using SameValueZero equality.
-  /// `data` maps normalized MapKey → original JsValue. Insertion order uses
-  /// the same seq-number model as MapObject (see above): `seqs`/`order` track
-  /// live records, `next_seq` is monotonic, delete leaves a gap and re-add
-  /// appends past every live iterator's cursor.
-  SetObject(
-    data: Dict(MapKey, JsValue),
-    seqs: Dict(MapKey, Int),
-    order: Dict(Int, MapKey),
-    next_seq: Int,
-  )
+  /// `store` maps normalized MapKey → original JsValue and models the spec's
+  /// append-only [[SetData]] insertion order, exactly as MapObject does.
+  SetObject(store: OrderedEntries(MapKey, JsValue))
   /// WeakMap object — ES2024 §24.3 WeakMap Objects.
   /// Keys are canonical JsValues for which CanBeHeldWeakly is true:
   /// `JsObject(ref)` (identity) or `JsSymbol(id)` (non-registered symbols).
@@ -2231,7 +2370,10 @@ pub type ExoticKind(ctx, host) {
   /// is derived (`buffer_byte_size(data)`). `detached` models
   /// [[ArrayBufferData]] = null (data is reset to BufBytes(<<>>) on detach).
   /// `max_byte_length` is Some for resizable (AB) / growable (SAB) buffers.
-  /// `shared` distinguishes SharedArrayBuffer (never detachable).
+  /// Shared-ness (SharedArrayBuffer, never detachable) is NOT a separate
+  /// flag — it is derived from the storage: `buffer_is_shared(data)` is True
+  /// iff `data` is `BufShared`. This makes "flagged shared but backed by
+  /// process-local bytes" unrepresentable.
   /// `immutable` is the TC39 Immutable ArrayBuffer proposal's
   /// IsImmutableBuffer state (transferToImmutable / sliceToImmutable
   /// results): always BufBytes, never shared, never detachable, never
@@ -2240,7 +2382,6 @@ pub type ExoticKind(ctx, host) {
     data: BufferData,
     detached: Bool,
     max_byte_length: option.Option(Int),
-    shared: Bool,
     immutable: Bool,
   )
   /// Integer-Indexed (TypedArray) exotic object — ES2024 §10.4.5 / §23.2.
@@ -2341,6 +2482,20 @@ pub type ExoticKind(ctx, host) {
   /// so unlike arrays there's no mutation to observe). O(1) per .next()
   /// instead of an O(i) UTF-8 walk per indexed read.
   StringIteratorObject(remaining: List(UtfCodepoint))
+  /// RegExp String Iterator — ES2024 §22.2.9, created by
+  /// RegExp.prototype[Symbol.matchAll]. `matcher` is [[IteratingRegExp]]
+  /// (the species-constructed matcher — any object with a callable `exec`,
+  /// so a JsValue rather than a Ref to a RegExpObject); `string` is
+  /// [[IteratedString]]; `global`/`unicode` cache [[Global]]/[[Unicode]]
+  /// from the flags read at creation; `done` latches [[Done]] once the
+  /// iterator is exhausted so later .next() calls short-circuit.
+  RegExpStringIteratorObject(
+    matcher: JsValue,
+    string: String,
+    global: Bool,
+    unicode: Bool,
+    done: Bool,
+  )
   /// Set iterator — ES2024 §24.2.5. `cursor` is the iterator's index into
   /// the source Set's insertion-sequence space: .next() yields the first
   /// live entry with seq >= cursor and resumes at seq + 1 (amortized O(1)).
@@ -3268,6 +3423,9 @@ fn do_refs_in_slot(
         GeneratorObject(generator_data:) -> [generator_data, ..acc]
         AsyncGeneratorObject(generator_data:) -> [generator_data, ..acc]
         ArrayIteratorObject(source:, ..) -> [source, ..acc]
+        // The iterated matcher is the only heap reference the RegExp String
+        // Iterator's internal state can hold; the rest is scalar.
+        RegExpStringIteratorObject(matcher:, ..) -> push_value_ref(matcher, acc)
         SetIteratorObject(source:, ..) | MapIteratorObject(source:, ..) -> [
           source,
           ..acc
@@ -3321,12 +3479,12 @@ fn do_refs_in_slot(
             None -> acc
           }
         }
-        MapObject(entries:, ..) ->
-          dict.fold(entries, acc, fn(a, k, v) {
+        MapObject(store:) ->
+          ordered_entries.fold(store, acc, fn(a, k, v) {
             push_value_ref(v, push_value_ref(map_key_to_js(k), a))
           })
-        SetObject(data:, ..) ->
-          dict.fold(data, acc, fn(a, k, v) {
+        SetObject(store:) ->
+          ordered_entries.fold(store, acc, fn(a, k, v) {
             push_value_ref(v, push_value_ref(map_key_to_js(k), a))
           })
         WeakMapObject(data:) ->

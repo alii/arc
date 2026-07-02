@@ -1,5 +1,6 @@
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/ordered_entries
 import arc/vm/opcode
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type HeapSlot, type State, State}
@@ -1099,7 +1100,10 @@ fn proxy_receiver_get_own(
       }
     Some(trap_fn) -> {
       use #(res, state) <- result.try(
-        state.call(state, trap_fn, JsObject(h), [JsObject(t), prop_key_value(pk)]),
+        state.call(state, trap_fn, JsObject(h), [
+          JsObject(t),
+          prop_key_value(pk),
+        ]),
       )
       case res {
         value.JsUndefined | value.JsNull -> Ok(#(None, state))
@@ -3028,15 +3032,17 @@ fn inspect_object(
           "[Symbol: "
           <> inspect_inner(value.JsSymbol(sym), heap, depth, visited)
           <> "]"
-        value.MapObject(entries:, ..) ->
-          "Map(" <> int.to_string(dict.size(entries)) <> ")"
-        value.SetObject(data:, ..) ->
-          "Set(" <> int.to_string(dict.size(data)) <> ")"
+        value.MapObject(store:) ->
+          "Map(" <> int.to_string(ordered_entries.size(store)) <> ")"
+        value.SetObject(store:) ->
+          "Set(" <> int.to_string(ordered_entries.size(store)) <> ")"
         value.WeakMapObject(_) -> "WeakMap {}"
         value.WeakSetObject(_) -> "WeakSet {}"
         value.FinalizationRegistryObject(..) -> "FinalizationRegistry {}"
         value.ArrayIteratorObject(..) -> "Object [Array Iterator] {}"
         value.StringIteratorObject(..) -> "Object [String Iterator] {}"
+        value.RegExpStringIteratorObject(..) ->
+          "Object [RegExp String Iterator] {}"
         value.SetIteratorObject(..) -> "Object [Set Iterator] {}"
         value.MapIteratorObject(..) -> "Object [Map Iterator] {}"
         value.AsyncFromSyncIteratorObject(..) ->
@@ -3054,11 +3060,11 @@ fn inspect_object(
           "/" <> source <> "/" <> flags
         }
         value.DataViewObject(..) -> "DataView {}"
-        value.ArrayBufferObject(data:, shared: False, ..) ->
+        value.ArrayBufferObject(data: value.BufBytes(..) as data, ..) ->
           "ArrayBuffer { byteLength: "
           <> int.to_string(value.buffer_byte_size(data))
           <> " }"
-        value.ArrayBufferObject(data:, shared: True, ..) ->
+        value.ArrayBufferObject(data: value.BufShared(..) as data, ..) ->
           "SharedArrayBuffer { byteLength: "
           <> int.to_string(value.buffer_byte_size(data))
           <> " }"
@@ -3503,11 +3509,7 @@ pub fn proxy_trap(
 /// target.[[GetOwnProperty]](P) for either key kind. Non-trapping read used
 /// by the invariant checks (a nested-proxy target reports no own properties
 /// here, which only makes the invariant checks more permissive).
-fn target_own_property(
-  h: Heap(host),
-  t: Ref,
-  pk: PropKey,
-) -> Option(Property) {
+fn target_own_property(h: Heap(host), t: Ref, pk: PropKey) -> Option(Property) {
   case pk {
     PkString(key) -> get_own_property(h, t, key)
     PkSymbol(sym) -> get_own_symbol_property(h, t, sym)
@@ -3736,7 +3738,10 @@ pub fn proxy_has(
     Some(trap_fn) -> {
       // Step 7: ToBoolean(? Call(trap, handler, « target, P »)).
       use #(res, state) <- result.try(
-        state.call(state, trap_fn, JsObject(h), [JsObject(t), prop_key_value(pk)]),
+        state.call(state, trap_fn, JsObject(h), [
+          JsObject(t),
+          prop_key_value(pk),
+        ]),
       )
       case value.is_truthy(res) {
         True -> Ok(#(True, state))
@@ -3820,7 +3825,10 @@ pub fn proxy_delete(
     None -> delete_property_stateful(state, t, pk)
     Some(trap_fn) -> {
       use #(res, state) <- result.try(
-        state.call(state, trap_fn, JsObject(h), [JsObject(t), prop_key_value(pk)]),
+        state.call(state, trap_fn, JsObject(h), [
+          JsObject(t),
+          prop_key_value(pk),
+        ]),
       )
       case value.is_truthy(res) {
         False -> Ok(#(state, False))

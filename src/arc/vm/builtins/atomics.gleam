@@ -269,7 +269,13 @@ type TaInfo {
     bits: Int,
     /// Whether reads should sign-extend (Int8/Int16/Int32/BigInt64).
     signed: Bool,
-    shared: Bool,
+    /// The atomics ref of the view's shared (cross-process) storage, or
+    /// None for plain process-local byte storage — captured ONCE from the
+    /// validated buffer's [[ArrayBufferData]], the single source of truth
+    /// for shared-ness. Some(_) means an RMW must go through the FFI's
+    /// cell-CAS loop (cross-process atomicity); None means the snapshot
+    /// path is trivially atomic (single process).
+    storage: option.Option(value.AtomicsRef),
   )
 }
 
@@ -278,20 +284,20 @@ type TaInfo {
 fn kind_bits(
   kind: TypedArrayKind,
   waitable: Bool,
-) -> Result(#(Int, Bool), Nil) {
+) -> option.Option(#(Int, Bool)) {
   case waitable, kind {
-    True, value.Int32Kind -> Ok(#(32, True))
-    True, value.BigInt64Kind -> Ok(#(64, True))
-    True, _ -> Error(Nil)
-    False, value.Int8Kind -> Ok(#(8, True))
-    False, value.Uint8Kind -> Ok(#(8, False))
-    False, value.Int16Kind -> Ok(#(16, True))
-    False, value.Uint16Kind -> Ok(#(16, False))
-    False, value.Int32Kind -> Ok(#(32, True))
-    False, value.Uint32Kind -> Ok(#(32, False))
-    False, value.BigInt64Kind -> Ok(#(64, True))
-    False, value.BigUint64Kind -> Ok(#(64, False))
-    False, _ -> Error(Nil)
+    True, value.Int32Kind -> Some(#(32, True))
+    True, value.BigInt64Kind -> Some(#(64, True))
+    True, _ -> None
+    False, value.Int8Kind -> Some(#(8, True))
+    False, value.Uint8Kind -> Some(#(8, False))
+    False, value.Int16Kind -> Some(#(16, True))
+    False, value.Uint16Kind -> Some(#(16, False))
+    False, value.Int32Kind -> Some(#(32, True))
+    False, value.Uint32Kind -> Some(#(32, False))
+    False, value.BigInt64Kind -> Some(#(64, True))
+    False, value.BigUint64Kind -> Some(#(64, False))
+    False, _ -> None
   }
 }
 
@@ -313,67 +319,60 @@ fn with_ta_and_index(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let ta_val = helpers.first_arg_or_undefined(args)
-  case read_typed_array(state, ta_val) {
-    None ->
-      state.type_error(state, "Atomics operation needs an integer TypedArray")
-    Some(#(buffer, elem_kind, byte_offset, length)) ->
-      case kind_bits(elem_kind, waitable) {
-        Error(Nil) ->
-          state.type_error(
-            state,
-            "Invalid TypedArray element type for Atomics operation",
-          )
-        Ok(#(bits, signed)) ->
-          case read_buffer(state, buffer) {
-            None -> state.type_error(state, "TypedArray is not attached")
-            Some(#(data, detached, shared, immutable)) -> {
-              use Nil <- require(!require_shared || shared, fn() {
-                state.type_error(
-                  state,
-                  "Atomics.wait requires a SharedArrayBuffer TypedArray",
-                )
-              })
-              use Nil <- require(!detached, fn() {
-                state.type_error(state, "ArrayBuffer is detached")
-              })
-              // ValidateTypedArray step 4 (immutable-arraybuffer proposal):
-              // accessMode ~write~ on an immutable buffer → TypeError.
-              use Nil <- require(!write || !immutable, fn() {
-                state.type_error(
-                  state,
-                  "Atomics operation cannot write to an immutable ArrayBuffer",
-                )
-              })
-              // Live length: a resizable buffer may have shrunk below the
-              // view (§10.4.5.12 IsTypedArrayOutOfBounds folds into this).
-              let size = bits / 8
-              let avail = { bit_array.byte_size(data) - byte_offset } / size
-              let live = int.clamp(avail, 0, length)
-              let info =
-                TaInfo(
-                  buffer:,
-                  elem_kind:,
-                  byte_offset:,
-                  length: live,
-                  bits:,
-                  signed:,
-                  shared:,
-                )
-              // §25.4.3.2 ValidateAtomicAccess: ToIndex then bounds check.
-              use idx, state <- coerce.to_index_cps(
-                state,
-                arg(args, 1),
-                "Invalid atomic access index",
-              )
-              case idx < live {
-                False ->
-                  state.range_error(state, "Atomics access index out of range")
-                True -> cont(info, idx, state)
-              }
-            }
-          }
-      }
-  }
+  use view <- some_or(read_typed_array(state, ta_val), fn() {
+    state.type_error(state, "Atomics operation needs an integer TypedArray")
+  })
+  use #(bits, signed) <- some_or(kind_bits(view.elem_kind, waitable), fn() {
+    state.type_error(
+      state,
+      "Invalid TypedArray element type for Atomics operation",
+    )
+  })
+  use buf <- some_or(read_buffer(state, view.buffer), fn() {
+    state.type_error(state, "TypedArray is not attached")
+  })
+  use Nil <- require(!require_shared || option.is_some(buf.storage), fn() {
+    state.type_error(
+      state,
+      "Atomics.wait requires a SharedArrayBuffer TypedArray",
+    )
+  })
+  use Nil <- require(!buf.detached, fn() {
+    state.type_error(state, "ArrayBuffer is detached")
+  })
+  // ValidateTypedArray step 4 (immutable-arraybuffer proposal):
+  // accessMode ~write~ on an immutable buffer → TypeError.
+  use Nil <- require(!write || !buf.immutable, fn() {
+    state.type_error(
+      state,
+      "Atomics operation cannot write to an immutable ArrayBuffer",
+    )
+  })
+  // Live length: a resizable buffer may have shrunk below the view
+  // (§10.4.5.12 IsTypedArrayOutOfBounds folds into this).
+  let size = bits / 8
+  let avail = { bit_array.byte_size(buf.bits) - view.byte_offset } / size
+  let live = int.clamp(avail, 0, view.length)
+  let info =
+    TaInfo(
+      buffer: view.buffer,
+      elem_kind: view.elem_kind,
+      byte_offset: view.byte_offset,
+      length: live,
+      bits:,
+      signed:,
+      storage: buf.storage,
+    )
+  // §25.4.3.2 ValidateAtomicAccess: ToIndex then bounds check.
+  use idx, state <- coerce.to_index_cps(
+    state,
+    arg(args, 1),
+    "Invalid atomic access index",
+  )
+  use Nil <- require(idx < live, fn() {
+    state.range_error(state, "Atomics access index out of range")
+  })
+  cont(info, idx, state)
 }
 
 /// `bool.guard`-shaped helper for the dispatch-result shape: call `or` when
@@ -389,11 +388,28 @@ fn require(
   }
 }
 
+/// `require`'s Option twin for the dispatch-result shape: call `alt` when
+/// the value is absent, otherwise continue with it.
+fn some_or(
+  opt: option.Option(a),
+  alt: fn() -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(a) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case opt {
+    Some(v) -> cont(v)
+    None -> alt()
+  }
+}
+
+/// The internal slots of the TypedArray under validation (§25.4.3.1
+/// step 1): its viewed buffer, element kind, view byte offset and view
+/// element count.
+type TaView {
+  TaView(buffer: Ref, elem_kind: TypedArrayKind, byte_offset: Int, length: Int)
+}
+
 /// Pull the TypedArray internal slots out of a value, or None.
-fn read_typed_array(
-  state: State(host),
-  val: JsValue,
-) -> option.Option(#(Ref, TypedArrayKind, Int, Int)) {
+fn read_typed_array(state: State(host), val: JsValue) -> option.Option(TaView) {
   case val {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -406,11 +422,11 @@ fn read_typed_array(
           ),
           ..,
         )) ->
-          Some(#(
-            buffer,
-            elem_kind,
-            byte_offset,
-            object.typed_array_view_length(
+          Some(TaView(
+            buffer:,
+            elem_kind:,
+            byte_offset:,
+            length: object.typed_array_view_length(
               state.heap,
               buffer,
               elem_kind,
@@ -424,59 +440,89 @@ fn read_typed_array(
   }
 }
 
-/// Read the viewed buffer's (data snapshot, detached, shared) triple.
-/// For shared (atomics-backed) buffers the BitArray is a fresh copy of the
-/// live shared cells, so a re-read observes other agents' writes.
-fn read_buffer(
-  state: State(host),
-  buffer: Ref,
-) -> option.Option(#(BitArray, Bool, Bool, Bool)) {
+/// One heap read of a viewed ArrayBuffer slot, fully destructured. This is
+/// the ONLY place Atomics inspects [[ArrayBufferData]]: `storage` is
+/// derived from `data` right here, so a "shared" flag can never disagree
+/// with the storage it describes, and a write-back rebuilds the slot from
+/// THESE fields rather than from a second heap read.
+type BufferInfo {
+  BufferInfo(
+    /// The live [[ArrayBufferData]] storage (BufBytes | BufShared).
+    data: value.BufferData,
+    /// Byte snapshot of `data`. For shared (atomics-backed) storage this is
+    /// a fresh copy of the live cells, so a re-read observes other agents'
+    /// writes.
+    bits: BitArray,
+    /// The atomics ref of shared (cross-process) storage, or None for plain
+    /// process-local byte storage. Derived from `data`, never stored as a
+    /// separate flag. Some(_) means an RMW must go through the FFI's
+    /// cell-CAS loop (cross-process atomicity); None means the snapshot
+    /// path is trivially atomic (single process).
+    storage: option.Option(value.AtomicsRef),
+    detached: Bool,
+    max_byte_length: option.Option(Int),
+    immutable: Bool,
+  )
+}
+
+/// Read the viewed buffer's slot, or None when `buffer` does not hold an
+/// ArrayBuffer at all.
+fn read_buffer(state: State(host), buffer: Ref) -> option.Option(BufferInfo) {
   case heap.read(state.heap, buffer) {
     Some(ObjectSlot(
-      kind: value.ArrayBufferObject(data:, detached:, shared:, immutable:, ..),
+      kind: value.ArrayBufferObject(
+        data:,
+        detached:,
+        max_byte_length:,
+        immutable:,
+      ),
       ..,
-    )) -> Some(#(value.buffer_bits(data), detached, shared, immutable))
+    )) ->
+      Some(BufferInfo(
+        data:,
+        bits: value.buffer_bits(data),
+        storage: buffer_storage(data),
+        detached:,
+        max_byte_length:,
+        immutable:,
+      ))
     _ -> None
   }
 }
 
-/// The atomics ref of a buffer backed by shared storage, or None for plain
-/// (process-local) byte storage. Decides whether an RMW must go through the
-/// FFI's cell-CAS loop (cross-process atomicity) or may use the snapshot
-/// path (single process — trivially atomic).
-fn shared_storage_ref(
-  state: State(host),
-  buffer: Ref,
-) -> option.Option(value.AtomicsRef) {
-  case heap.read(state.heap, buffer) {
-    Some(ObjectSlot(
-      kind: value.ArrayBufferObject(data: value.BufShared(ref:, ..), ..),
-      ..,
-    )) -> Some(ref)
-    _ -> None
+/// The atomics ref backing shared (cross-process) storage, or None for
+/// plain process-local byte storage. [[ArrayBufferData]] itself is the
+/// single source of truth for shared-ness.
+fn buffer_storage(data: value.BufferData) -> option.Option(value.AtomicsRef) {
+  case data {
+    value.BufShared(ref:, ..) -> Some(ref)
+    value.BufBytes(..) -> None
   }
 }
 
 /// §25.4.3.4 RevalidateAtomicAccess — the value coercion may have run user
-/// code that detached or shrank the buffer. Returns the fresh data on success.
+/// code that detached or shrank the buffer. Hands the continuation the live
+/// buffer it just destructured; `write_element` persists into THAT, so a
+/// second heap read that disagrees with this one (and would silently drop
+/// the store) cannot exist.
 fn revalidate(
   state: State(host),
   info: TaInfo,
   idx: Int,
-  cont: fn(BitArray, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(BufferInfo, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case read_buffer(state, info.buffer) {
-    None -> state.type_error(state, "TypedArray is not attached")
-    Some(#(_, True, _, _)) -> state.type_error(state, "ArrayBuffer is detached")
-    Some(#(data, False, _, _)) -> {
-      let size = info.bits / 8
-      let byte_off = info.byte_offset + idx * size
-      case byte_off + size <= bit_array.byte_size(data) {
-        False -> state.range_error(state, "Atomics access index out of range")
-        True -> cont(data, state)
-      }
-    }
-  }
+  use buf <- some_or(read_buffer(state, info.buffer), fn() {
+    state.type_error(state, "TypedArray is not attached")
+  })
+  use Nil <- require(!buf.detached, fn() {
+    state.type_error(state, "ArrayBuffer is detached")
+  })
+  let size = info.bits / 8
+  let byte_off = info.byte_offset + idx * size
+  use Nil <- require(byte_off + size <= bit_array.byte_size(buf.bits), fn() {
+    state.range_error(state, "Atomics access index out of range")
+  })
+  cont(buf, state)
 }
 
 // ============================================================================
@@ -533,56 +579,29 @@ fn read_element(data: BitArray, info: TaInfo, idx: Int) -> Int {
 }
 
 /// Write raw integer `v` (truncated mod 2^bits by the FFI) at element `idx`
-/// and persist it into the buffer slot. Shared (atomics-backed) storage
-/// writes only the element's bytes into the shared cells — other regions
-/// may be concurrently written by other agent processes.
+/// and persist it into the buffer slot `revalidate` just witnessed (`buf`) —
+/// NOT into a second heap read that could disagree with the revalidation
+/// and silently drop the store. Shared (atomics-backed) storage writes only
+/// the element's bytes into the shared cells — other regions may be
+/// concurrently written by other agent processes.
 fn write_element(
   state: State(host),
   info: TaInfo,
-  data: BitArray,
+  buf: BufferInfo,
   idx: Int,
   v: Int,
 ) -> State(host) {
-  let off = info.byte_offset + idx * { info.bits / 8 }
-  let new_data = ta_set_int(data, off, info.bits, v)
-  case heap.read(state.heap, info.buffer) {
-    Some(
-      ObjectSlot(
-        kind: value.ArrayBufferObject(
-          data: old_data,
-          detached:,
-          max_byte_length:,
-          shared:,
-          immutable:,
-        ),
-        ..,
-      ) as slot,
-    ) -> {
-      let h =
-        heap.write(
-          state.heap,
-          info.buffer,
-          ObjectSlot(
-            ..slot,
-            kind: value.ArrayBufferObject(
-              data: value.buffer_store_region(
-                old_data,
-                new_data,
-                off,
-                info.bits / 8,
-              ),
-              detached:,
-              max_byte_length:,
-              shared:,
-              immutable:,
-            ),
-          ),
-        )
-      State(..state, heap: h)
-    }
-    // Unreachable: revalidate() just read this slot as a live buffer.
-    _ -> state
-  }
+  let size = info.bits / 8
+  let off = info.byte_offset + idx * size
+  let new_bits = ta_set_int(buf.bits, off, info.bits, v)
+  let kind =
+    value.ArrayBufferObject(
+      data: value.buffer_store_region(buf.data, new_bits, off, size),
+      detached: buf.detached,
+      max_byte_length: buf.max_byte_length,
+      immutable: buf.immutable,
+    )
+  State(..state, heap: heap.update_kind(state.heap, info.buffer, kind))
 }
 
 /// Old element value → JS value per content type.
@@ -610,8 +629,8 @@ fn rmw(
     write: True,
   )
   use operand, state <- to_operand(state, info, arg(args, 2))
-  use data, state <- revalidate(state, info, idx)
-  case shared_storage_ref(state, info.buffer) {
+  use buf, state <- revalidate(state, info, idx)
+  case info.storage {
     // Shared storage: other agent processes may race this element — the
     // whole read-compute-write must be one atomic step (§25.4.3.12), so the
     // FFI runs it as a CAS retry loop on the containing cell.
@@ -626,8 +645,8 @@ fn rmw(
     // Process-local storage: no interleaving is possible, the snapshot
     // read-compute-write is trivially atomic.
     None -> {
-      let old = read_element(data, info, idx)
-      let state = write_element(state, info, data, idx, op(old, operand))
+      let old = read_element(buf.bits, info, idx)
+      let state = write_element(state, info, buf, idx, op(old, operand))
       #(state, Ok(element_to_js(info, old)))
     }
   }
@@ -647,9 +666,9 @@ fn compare_exchange(
   )
   use expected, state <- to_operand(state, info, arg(args, 2))
   use replacement, state <- to_operand(state, info, arg(args, 3))
-  use data, state <- revalidate(state, info, idx)
+  use buf, state <- revalidate(state, info, idx)
   let wrapped_expected = wrap_to_kind(expected, info.bits, info.signed)
-  case shared_storage_ref(state, info.buffer) {
+  case info.storage {
     // Shared storage: compare and (conditional) store must be one atomic
     // step across agent processes — the FFI CAS-es the containing cell
     // against the value the comparison witnessed.
@@ -668,9 +687,9 @@ fn compare_exchange(
     }
     // Process-local storage: snapshot compare-then-write is atomic.
     None -> {
-      let old = read_element(data, info, idx)
+      let old = read_element(buf.bits, info, idx)
       let state = case old == wrapped_expected {
-        True -> write_element(state, info, data, idx, replacement)
+        True -> write_element(state, info, buf, idx, replacement)
         False -> state
       }
       #(state, Ok(element_to_js(info, old)))
@@ -691,8 +710,8 @@ fn atomic_load(
     write: False,
   )
   // The index coercion may have run user code — revalidate (§25.4.10 step 2).
-  use data, state <- revalidate(state, info, idx)
-  #(state, Ok(element_to_js(info, read_element(data, info, idx))))
+  use buf, state <- revalidate(state, info, idx)
+  #(state, Ok(element_to_js(info, read_element(buf.bits, info, idx))))
 }
 
 // §25.4.12 Atomics.store ( typedArray, index, value ) — returns the COERCED
@@ -711,8 +730,8 @@ fn atomic_store(
   case info.bits {
     64 -> {
       use v, state <- coerce.to_bigint_cps(state, arg(args, 2))
-      use data, state <- revalidate(state, info, idx)
-      let state = write_element(state, info, data, idx, v)
+      use buf, state <- revalidate(state, info, idx)
+      let state = write_element(state, info, buf, idx, v)
       #(state, Ok(JsBigInt(BigInt(v))))
     }
     _ -> {
@@ -721,7 +740,7 @@ fn atomic_store(
       // element is ToIntN(±∞) = +0). Match on the raw JsNum rather than the
       // saturated Int to keep both.
       use num, state <- coerce.try_to_number(state, arg(args, 2))
-      use data, state <- revalidate(state, info, idx)
+      use buf, state <- revalidate(state, info, idx)
       let #(stored, ret) = case num {
         Infinity -> #(0, JsNumber(Infinity))
         NegInfinity -> #(0, JsNumber(NegInfinity))
@@ -730,7 +749,7 @@ fn atomic_store(
           #(n, value.from_int(n))
         }
       }
-      let state = write_element(state, info, data, idx, stored)
+      let state = write_element(state, info, buf, idx, stored)
       #(state, Ok(ret))
     }
   }
@@ -778,6 +797,26 @@ fn pause(
 // §25.4.3.14 DoWait — Atomics.wait (sync) and Atomics.waitAsync (async)
 // ============================================================================
 
+/// The three observable outcomes of a wait (§25.4.3.14 DoWait): the woken,
+/// timed-out and value-mismatch results. Every completion — the sync return
+/// value, a waitAsync promise settlement, a cross-process wake — goes
+/// through `wait_result_js`, so the spec's three result strings are spelled
+/// exactly once.
+type WaitResult {
+  WaitedOk
+  TimedOut
+  NotEqual
+}
+
+/// The spec string a WaitResult surfaces to JS as.
+fn wait_result_js(result: WaitResult) -> JsValue {
+  JsString(case result {
+    WaitedOk -> "ok"
+    TimedOut -> "timed-out"
+    NotEqual -> "not-equal"
+  })
+}
+
 fn do_wait(
   args: List(JsValue),
   state: State(host),
@@ -801,16 +840,16 @@ fn do_wait(
   // SharedArrayBuffers are never detached and never shrink, so the
   // validation-time data would do — but re-read for the freshest bytes
   // (the coercions above may have run Atomics.store via user code).
-  use data, state <- revalidate(state, info, idx)
-  let w = read_element(data, info, idx)
+  use buf, state <- revalidate(state, info, idx)
+  let w = read_element(buf.bits, info, idx)
   case w != v, timeout_ms, sync {
     // Value mismatch → "not-equal" (sync: string; async: {async:false,...}).
-    True, _, True -> #(state, Ok(JsString("not-equal")))
-    True, _, False -> wait_result_object(state, False, JsString("not-equal"))
+    True, _, True -> #(state, Ok(wait_result_js(NotEqual)))
+    True, _, False -> wait_result_object(state, False, wait_result_js(NotEqual))
     // Zero timeout → immediate "timed-out".
-    False, Some(0), True -> #(state, Ok(JsString("timed-out")))
+    False, Some(0), True -> #(state, Ok(wait_result_js(TimedOut)))
     False, Some(0), False ->
-      wait_result_object(state, False, JsString("timed-out"))
+      wait_result_object(state, False, wait_result_js(TimedOut))
     // Sync block (§25.4.3.14 steps 11+): register on the shared WaiterList
     // and suspend in a receive until a notify message or the timeout.
     False, Some(ms), True -> sync_block(state, info, idx, v, Some(ms))
@@ -884,8 +923,8 @@ fn sync_block(
   let key = buffer_key(state, info.buffer)
   let handle = ffi_insert_waiter(key, byte_off, False)
   // Fresh post-insert read: read_buffer snapshots the live shared cells.
-  use data, state <- revalidate(state, info, idx)
-  case read_element(data, info, idx) == v {
+  use buf, state <- revalidate(state, info, idx)
+  case read_element(buf.bits, info, idx) == v {
     False -> {
       // Withdraw the entry (data-only ets:take). If a notifier claimed it
       // in this same instant (cancel returns True), its in-flight
@@ -919,7 +958,7 @@ fn sync_block(
           }
         False -> Nil
       }
-      #(state, Ok(JsString("not-equal")))
+      #(state, Ok(wait_result_js(NotEqual)))
     }
     True -> {
       case state.ctx.host_hooks.sync_wait {
@@ -933,10 +972,10 @@ fn sync_block(
               timeout_ms:,
             ))
           let result = case outcome {
-            state.WaitOk -> "ok"
-            state.WaitTimedOut -> "timed-out"
+            state.WaitOk -> WaitedOk
+            state.WaitTimedOut -> TimedOut
           }
-          #(state, Ok(JsString(result)))
+          #(state, Ok(wait_result_js(result)))
         }
         // Unreachable: check_agent_can_suspend rejected sync mode before
         // AddWaiter when no capability is installed. Fail safe by
@@ -945,7 +984,7 @@ fn sync_block(
         // claimed/unclaimed distinction is discarded).
         None -> {
           let _claimed = ffi_cancel_waiter(handle)
-          #(state, Ok(JsString("timed-out")))
+          #(state, Ok(wait_result_js(TimedOut)))
         }
       }
     }
@@ -1059,9 +1098,9 @@ fn notify(
   // Coerced BEFORE the non-shared early return (observable, test262 checks).
   use count, state <- notify_count(state, arg(args, 2))
   // Step 6: non-shared buffers can have no waiters → +0.
-  case info.shared {
-    False -> #(state, Ok(value.from_int(0)))
-    True -> {
+  case info.storage {
+    None -> #(state, Ok(value.from_int(0)))
+    Some(sab_ref) -> {
       let byte_off = info.byte_offset + idx * { info.bits / 8 }
       // Atomically claim up to `count` waiters FIFO from the shared
       // WaiterList (data-only ets:take loop). Claiming is the spec's
@@ -1072,7 +1111,7 @@ fn notify(
       // tokens come back as a count to settle on State right here (pure
       // data, no message).
       let #(claimed, self_async) =
-        ffi_take_waiters(buffer_key(state, info.buffer), byte_off, count)
+        ffi_take_waiters(ffi_shared_buffer_key(sab_ref), byte_off, count)
       let Nil = case claimed, state.ctx.host_hooks.deliver_wake {
         [], _ -> Nil
         _, Some(deliver) -> deliver(claimed)
@@ -1091,7 +1130,7 @@ fn notify(
 }
 
 /// Settle the first `n` pending State waitAsync waiters on
-/// (buffer, byte_off) with "ok", FIFO. Returns how many were settled
+/// (buffer, byte_off) as woken, FIFO. Returns how many were settled
 /// (equal to `n` unless tokens and State momentarily disagree, in which
 /// case the settled count is the truthful one for this agent).
 fn settle_n_matching(
@@ -1114,19 +1153,23 @@ fn settle_n_matching(
     list.fold(
       woken,
       State(..state, atomics_waiters: list.reverse(kept)),
-      fn(state, waiter) { settle_waiter(state, waiter, "ok") },
+      fn(state, waiter) { settle_waiter(state, waiter, WaitedOk) },
     )
   #(state, list.length(woken))
 }
 
-/// Fulfill a waitAsync waiter's promise with the given message ("ok" or
-/// "timed-out"), appending its reaction jobs to the job queue.
+/// Fulfill a waitAsync waiter's promise with the given wait outcome,
+/// appending its reaction jobs to the job queue.
 fn settle_waiter(
   state: State(host),
   waiter: value.AtomicsWaiter,
-  msg: String,
+  result: WaitResult,
 ) -> State(host) {
-  builtins_promise.fulfill_promise(state, waiter.promise_data, JsString(msg))
+  builtins_promise.fulfill_promise(
+    state,
+    waiter.promise_data,
+    wait_result_js(result),
+  )
 }
 
 /// Notify count (§25.4.13 step 3): undefined → effectively unbounded;
@@ -1151,8 +1194,8 @@ fn notify_count(
 // waitAsync timeout jobs — fired by the event loop between microtasks
 // ============================================================================
 
-/// Settle every pending waitAsync waiter whose deadline has passed with
-/// "timed-out" (§25.4.3.14 DoWait timeout path). Reaction jobs are appended
+/// Settle every pending waitAsync waiter whose deadline has passed as
+/// timed out (§25.4.3.14 DoWait timeout path). Reaction jobs are appended
 /// to the job queue; the caller's drain loop runs them.
 pub fn settle_expired_waiters(state: State(host)) -> State(host) {
   case state.atomics_waiters {
@@ -1180,7 +1223,7 @@ pub fn settle_expired_waiters(state: State(host)) -> State(host) {
               buffer_key(state, waiter.buffer),
               waiter.byte_offset,
             )
-          settle_waiter(state, waiter, "timed-out")
+          settle_waiter(state, waiter, TimedOut)
         },
       )
     }
@@ -1188,7 +1231,7 @@ pub fn settle_expired_waiters(state: State(host)) -> State(host) {
 }
 
 /// Settle this agent's first pending waitAsync waiter on (key, byte index)
-/// with "ok" — called by the event loop when its bounded dry-queue receive
+/// as woken — called by the event loop when its bounded dry-queue receive
 /// is woken by a cross-process Atomics.notify message. A stale message
 /// (the waiter already expired) settles nothing.
 pub fn settle_notified_waiter(
@@ -1199,7 +1242,7 @@ pub fn settle_notified_waiter(
   case pop_first_matching(state.atomics_waiters, key, byte_index, state, []) {
     None -> state
     Some(#(waiter, rest)) ->
-      settle_waiter(State(..state, atomics_waiters: rest), waiter, "ok")
+      settle_waiter(State(..state, atomics_waiters: rest), waiter, WaitedOk)
   }
 }
 

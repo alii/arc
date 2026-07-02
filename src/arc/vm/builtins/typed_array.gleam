@@ -780,7 +780,6 @@ fn alloc_fresh_ta(
         data: value.BufBytes(data),
         detached: False,
         max_byte_length: None,
-        shared: False,
         immutable: False,
       ),
       state.builtins.array_buffer.prototype,
@@ -4170,7 +4169,6 @@ fn write_buffer_data(
         kind: value.ArrayBufferObject(
           detached:,
           max_byte_length:,
-          shared:,
           immutable:,
           data: old_data,
         ),
@@ -4187,7 +4185,6 @@ fn write_buffer_data(
             ),
             detached:,
             max_byte_length:,
-            shared:,
             immutable:,
           ),
         )

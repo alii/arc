@@ -1,7 +1,8 @@
 //// ES2024 §25.1 ArrayBuffer Objects + §25.2 SharedArrayBuffer Objects
 ////
-//// Both share one exotic kind — value.ArrayBufferObject — whose `shared`
-//// flag distinguishes them. [[ArrayBufferData]] is a value.BufferData:
+//// Both share one exotic kind — value.ArrayBufferObject — distinguished by
+//// their storage kind (value.buffer_is_shared). [[ArrayBufferData]] is a
+//// value.BufferData:
 //// BufBytes (an immutable BEAM binary) for plain ArrayBuffers, BufShared
 //// (an Erlang `atomics` array, genuinely shared across BEAM processes —
 //// see arc_sab_ffi.erl) for SharedArrayBuffers. [[ArrayBufferByteLength]]
@@ -333,7 +334,6 @@ fn allocate(
                 data:,
                 detached: False,
                 max_byte_length: max,
-                shared:,
                 immutable: False,
               ),
               proto,
@@ -702,7 +702,6 @@ fn slice_to_immutable(
             data: value.BufBytes(data),
             detached: False,
             max_byte_length: None,
-            shared: False,
             immutable: True,
           ),
           state.builtins.array_buffer.prototype,
@@ -775,7 +774,6 @@ fn ab_transfer(
             data: value.BufBytes(data),
             detached: False,
             max_byte_length: new_max,
-            shared: False,
             immutable: to_immutable,
           ),
           state.builtins.array_buffer.prototype,
@@ -932,14 +930,14 @@ fn detach_262(
 // Helpers
 // ============================================================================
 
-/// Internal view of an ArrayBufferObject heap slot.
+/// Internal view of an ArrayBufferObject heap slot. Shared-ness is not a
+/// field — it is derived from `data` via `value.buffer_is_shared`.
 type Buf {
   Buf(
     ref: Ref,
     data: value.BufferData,
     detached: Bool,
     max: Option(Int),
-    shared: Bool,
     immutable: Bool,
   )
 }
@@ -961,7 +959,6 @@ fn kind_with(
     data:,
     detached:,
     max_byte_length: buf.max,
-    shared: buf.shared,
     immutable: buf.immutable,
   )
 }
@@ -978,24 +975,11 @@ fn require_buffer(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: ArrayBufferObject(
-            data:,
-            detached:,
-            max_byte_length:,
-            shared:,
-            immutable:,
-          ),
+          kind: ArrayBufferObject(data:, detached:, max_byte_length:, immutable:),
           ..,
         )) ->
           cont(
-            Buf(
-              ref:,
-              data:,
-              detached:,
-              max: max_byte_length,
-              shared:,
-              immutable:,
-            ),
+            Buf(ref:, data:, detached:, max: max_byte_length, immutable:),
             state,
           )
         _ -> incompatible(state, method)
@@ -1011,7 +995,7 @@ fn require_unshared(
   method: String,
   cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case buf.shared {
+  case value.buffer_is_shared(buf.data) {
     True -> incompatible(state, method)
     False -> cont(buf, state)
   }
@@ -1024,7 +1008,7 @@ fn require_shared(
   method: String,
   cont: fn(Buf, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case buf.shared {
+  case value.buffer_is_shared(buf.data) {
     True -> cont(buf, state)
     False -> incompatible(state, method)
   }

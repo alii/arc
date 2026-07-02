@@ -1084,10 +1084,11 @@ type AgentPid
 /// to preserve). Non-object primitives pass through as-is — they are
 /// heap-independent.
 type AgentPayload {
+  /// Shared-ness is derived from `data` (`value.buffer_is_shared`), not a
+  /// separate flag — `BufShared` is shared, `BufBytes` is not.
   AgentSabPayload(
     data: value.BufferData,
     max_byte_length: option.Option(Int),
-    shared: Bool,
     immutable: Bool,
   )
   AgentValuePayload(value: value.JsValue)
@@ -1280,8 +1281,8 @@ fn payload_to_value(
 ) -> #(State(host), value.JsValue) {
   case payload {
     AgentValuePayload(v) -> #(st, v)
-    AgentSabPayload(data:, max_byte_length:, shared:, immutable:) -> {
-      let proto = case shared {
+    AgentSabPayload(data:, max_byte_length:, immutable:) -> {
+      let proto = case value.buffer_is_shared(data) {
         True -> st.builtins.shared_array_buffer.prototype
         False -> st.builtins.array_buffer.prototype
       }
@@ -1292,7 +1293,6 @@ fn payload_to_value(
             data:,
             detached: False,
             max_byte_length:,
-            shared:,
             immutable:,
           ),
           proto,
@@ -1366,11 +1366,10 @@ fn make_broadcast_payload(
             data:,
             detached: _,
             max_byte_length:,
-            shared:,
             immutable:,
           ),
           ..,
-        )) -> Ok(AgentSabPayload(data:, max_byte_length:, shared:, immutable:))
+        )) -> Ok(AgentSabPayload(data:, max_byte_length:, immutable:))
         _ -> Error(Nil)
       }
     other -> Ok(AgentValuePayload(other))
