@@ -627,12 +627,20 @@ pub fn call_native_async_resume(
 /// Call a native (Gleam-implemented) function. Most natives execute synchronously
 /// and push their result onto the stack. However, call/apply/bind need special
 /// handling because they invoke other functions (potentially pushing call frames).
+///
+/// `new_target` is §9.4.5 GetNewTarget for THIS invocation: `do_construct`
+/// passes the real newTarget; every plain-[[Call]] site passes JsUndefined.
+/// It is applied only around the synchronous native-body branches (Dispatch /
+/// Host) — the frame-pushing delegation natives (call/apply/bound) must keep
+/// the caller frame's ambient `state.new_target` intact so the SavedFrame they
+/// push saves/restores the right value.
 pub fn call_native(
   state: State(host),
   native: NativeFnSlot(host),
   args: List(JsValue),
   rest_stack: List(JsValue),
   this: JsValue,
+  new_target: JsValue,
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
   dispatch_fn: DispatchNativeFn(host),
@@ -1374,9 +1382,16 @@ pub fn call_native(
             Error(#(thrown, new_state)) -> Error(#(Thrown, thrown, new_state))
           }
       }
-    // All other native functions: synchronous dispatch via Dispatch slot
+    // All other native functions: synchronous dispatch via Dispatch slot.
+    // §10.2.1: the native body observes THIS invocation's newTarget
+    // (JsUndefined for a plain [[Call]], the real one from do_construct) —
+    // never the enclosing frame's ambient value. Dispatch natives run
+    // synchronously in the current frame, so the caller's new_target is
+    // restored on both the return and the throw path.
     value.Dispatch(native) -> {
-      let #(new_state, result) = dispatch_fn(native, args, this, state)
+      let #(new_state, result) =
+        dispatch_fn(native, args, this, State(..state, new_target:))
+      let new_state = State(..new_state, new_target: state.new_target)
       case result {
         Ok(return_value) ->
           Ok(
@@ -1389,9 +1404,12 @@ pub fn call_native(
         Error(thrown) -> Error(#(Thrown, thrown, new_state))
       }
     }
-    // Host-provided native: call the embedder's closure directly
+    // Host-provided native: call the embedder's closure directly. Same
+    // newTarget set/restore as the Dispatch branch — host natives are
+    // synchronous too.
     value.Host(f) -> {
-      let #(new_state, result) = f(args, this, state)
+      let #(new_state, result) = f(args, this, State(..state, new_target:))
+      let new_state = State(..new_state, new_target: state.new_target)
       case result {
         Ok(return_value) ->
           Ok(
@@ -1760,6 +1778,7 @@ pub fn do_construct(
               args,
               rest_stack,
               JsUndefined,
+              new_target,
               execute_inner,
               unwind_to_catch,
               dispatch_fn,
@@ -1905,12 +1924,15 @@ pub fn call_value(
             unwind_to_catch,
           )
         Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
+          // Plain [[Call]] of a native: NewTarget is undefined (§10.2.1),
+          // regardless of the caller frame's ambient `state.new_target`.
           call_native(
             state,
             native,
             args,
             state.stack,
             this_val,
+            JsUndefined,
             execute_inner,
             unwind_to_catch,
             dispatch_fn,

@@ -18,8 +18,10 @@ import gleam/option.{type Option, None, Some}
 ///   1. If NewTarget is undefined, throw a TypeError exception.
 ///   2. Let O be ? OrdinaryCreateFromConstructor(NewTarget, fallback_proto).
 ///
-/// `do_construct` sets `state.new_target` before native dispatch; a plain
-/// call leaves it JsUndefined. Step 2's prototype lookup goes through
+/// `do_construct` threads the real NewTarget into the native dispatch; a
+/// plain [[Call]] dispatches the native body with `state.new_target` forced
+/// to JsUndefined (the calling frame's ambient newTarget is never inherited
+/// — see `call_native`). Step 2's prototype lookup goes through
 /// §10.1.13 GetPrototypeFromConstructor via a real [[Get]] of
 /// `new.target.prototype` (accessor `prototype` properties are invoked),
 /// falling back to the intrinsic `fallback_proto` when the result is not an

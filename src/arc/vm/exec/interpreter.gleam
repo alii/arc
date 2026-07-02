@@ -5597,6 +5597,9 @@ fn call_function(
 }
 
 /// Thin wrapper: delegates to call.call_native with execute_inner/unwind_to_catch/dispatch_native.
+/// Only the plain-[[Call]] opcodes (Call/CallMethod) route here, so NewTarget
+/// for the native body is always undefined (§10.2.1) — constructs go through
+/// call.do_construct, which threads the real newTarget itself.
 fn call_native(
   state: State(host),
   native: NativeFnSlot(host),
@@ -5610,6 +5613,7 @@ fn call_native(
     args,
     rest_stack,
     this,
+    JsUndefined,
     execute_inner,
     unwind_to_catch,
     dispatch_native,

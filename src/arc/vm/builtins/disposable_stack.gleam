@@ -352,31 +352,13 @@ fn construct(
   async async: Bool,
   name name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Step 1: do_construct sets state.new_target before native dispatch;
-  // a plain call leaves it JsUndefined.
-  case state.new_target {
-    JsUndefined ->
-      state.type_error(state, "Constructor " <> name <> " requires 'new'")
-    new_target -> {
-      // Step 2: GetPrototypeFromConstructor(NewTarget, intrinsic) — must use
-      // a real [[Get]] so accessor `prototype` properties are invoked.
-      use proto_ref, state <- object.proto_from_new_target(
-        state,
-        new_target,
-        proto,
-      )
-      // Steps 3-4: pending state, empty resource stack
-      let #(heap, ref) =
-        alloc_stack(
-          state.heap,
-          proto_ref,
-          async:,
-          disposed: False,
-          resources: [],
-        )
-      #(State(..state, heap:), Ok(JsObject(ref)))
-    }
-  }
+  // Steps 1-2: require NewTarget, then
+  // GetPrototypeFromConstructor(NewTarget, intrinsic).
+  use proto_ref, state <- helpers.require_new_target(state, name, proto)
+  // Steps 3-4: pending state, empty resource stack
+  let #(heap, ref) =
+    alloc_stack(state.heap, proto_ref, async:, disposed: False, resources: [])
+  #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
 /// Allocate a DisposableStackObject with the given brand/state/resources.

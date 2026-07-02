@@ -4,6 +4,7 @@ import arc/parser
 import arc/parser/ast
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
+import arc/vm/builtins/helpers
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
@@ -849,40 +850,34 @@ fn shadow_realm_constructor(
   proto: Ref,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Step 1: If NewTarget is undefined, throw a TypeError.
-  case state.new_target {
-    JsUndefined ->
-      state.type_error(state, "Constructor ShadowRealm requires 'new'")
-    new_target -> {
-      // Step 2: OrdinaryCreateFromConstructor(NewTarget, %ShadowRealm.prototype%).
-      use proto_ref, state <- object.proto_from_new_target(
-        state,
-        new_target,
-        proto,
-      )
-      // Steps 3-12: CreateRealm + SetRealmGlobalObject + SetDefaultGlobalBindings.
-      let #(h, new_builtins) = builtins.init(state.heap)
-      let #(h, new_global) = builtins.globals(new_builtins, h)
-      let #(h, realm_ref) =
-        heap.alloc(
-          h,
-          value.RealmSlot(
-            global_object: new_global,
-            lexical_globals: dict.new(),
-            symbol_descriptions: dict.new(),
-            symbol_registry: dict.new(),
-          ),
-        )
-      let h = heap.root(h, realm_ref)
-      let #(h, instance_ref) =
-        common.alloc_wrapper(h, value.ShadowRealmObject(realm_ref:), proto_ref)
-      let realms = dict.insert(state.ctx.realms, realm_ref, new_builtins)
-      #(
-        State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
-        Ok(JsObject(instance_ref)),
-      )
-    }
-  }
+  // Steps 1-2: require NewTarget, then
+  // OrdinaryCreateFromConstructor(NewTarget, %ShadowRealm.prototype%).
+  use proto_ref, state <- helpers.require_new_target(
+    state,
+    "ShadowRealm",
+    proto,
+  )
+  // Steps 3-12: CreateRealm + SetRealmGlobalObject + SetDefaultGlobalBindings.
+  let #(h, new_builtins) = builtins.init(state.heap)
+  let #(h, new_global) = builtins.globals(new_builtins, h)
+  let #(h, realm_ref) =
+    heap.alloc(
+      h,
+      value.RealmSlot(
+        global_object: new_global,
+        lexical_globals: dict.new(),
+        symbol_descriptions: dict.new(),
+        symbol_registry: dict.new(),
+      ),
+    )
+  let h = heap.root(h, realm_ref)
+  let #(h, instance_ref) =
+    common.alloc_wrapper(h, value.ShadowRealmObject(realm_ref:), proto_ref)
+  let realms = dict.insert(state.ctx.realms, realm_ref, new_builtins)
+  #(
+    State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
+    Ok(JsObject(instance_ref)),
+  )
 }
 
 /// Brand check: read the [[ShadowRealm]] slot off `this`.
