@@ -9,18 +9,19 @@
 /// that, on average, provide access times that are sublinear on the number of
 /// elements in the collection.
 ///
-/// Storage: `Dict(MapKey, JsValue)` for O(log n) get/set/has/delete, plus the
-/// spec's append-only [[MapData]] order modelled with monotonically
-/// increasing sequence numbers (`seqs`: key → seq, `order`: seq → key,
-/// `next_seq`). delete() removes the record; the seq gap is the spec's
-/// emptied record, so a deleted-then-re-added key gets a fresh seq and is
-/// revisited by in-flight iterators per §24.1.5. Original JS keys are
-/// reconstructed via `map_key_to_js` — the MapKey encoding is lossless modulo
-/// -0→+0 normalization, which the spec requires anyway (§24.1.3.9 step 4).
+/// Storage: an `OrderedEntries(MapKey, JsValue)` store (see
+/// `arc/vm/internal/ordered_entries`) — O(log n) get/set/has/delete plus the
+/// spec's append-only [[MapData]] insertion order. delete() removes the
+/// record; the seq gap is the spec's emptied record, so a
+/// deleted-then-re-added key gets a fresh seq and is revisited by in-flight
+/// iterators per §24.1.5. Original JS keys are reconstructed via
+/// `map_key_to_js` — the MapKey encoding is lossless modulo -0→+0
+/// normalization, which the spec requires anyway (§24.1.3.9 step 4).
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iterator
 import arc/vm/heap
+import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -30,7 +31,6 @@ import arc/vm/value.{
   MapPrototypeGetSize, MapPrototypeHas, MapPrototypeKeys, MapPrototypeSet,
   MapPrototypeValues, ObjectSlot,
 }
-import gleam/dict
 import gleam/option.{None, Some}
 
 // ============================================================================
@@ -134,8 +134,7 @@ fn map_constructor(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 2-3: allocate the map with an empty [[MapData]].
-  let #(heap, ref) =
-    alloc_map(state.heap, proto, dict.new(), dict.new(), dict.new(), 0)
+  let #(heap, ref) = alloc_map(state.heap, proto, ordered_entries.new())
   let state = State(..state, heap:)
   let map = JsObject(ref)
   case helpers.first_arg_or_undefined(args) {
@@ -162,16 +161,9 @@ fn map_constructor(
 fn alloc_map(
   heap: Heap(host),
   proto: Ref,
-  entries: dict.Dict(MapKey, JsValue),
-  seqs: dict.Dict(MapKey, Int),
-  order: dict.Dict(Int, MapKey),
-  next_seq: Int,
+  store: OrderedEntries(MapKey, JsValue),
 ) -> #(Heap(host), Ref) {
-  common.alloc_wrapper(
-    heap,
-    MapObject(entries:, seqs:, order:, next_seq:),
-    proto,
-  )
+  common.alloc_wrapper(heap, MapObject(store:), proto)
 }
 
 // ============================================================================
@@ -193,13 +185,11 @@ fn map_get(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
-  use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
+  use store, _ref, state <- require_map(this, state)
   // Steps 3-4: Look up key
   let map_key = value.js_to_map_key(key_arg)
-  let result = case dict.get(entries, map_key) {
-    Ok(val) -> val
-    Error(Nil) -> JsUndefined
-  }
+  let result =
+    ordered_entries.get(store, map_key) |> option.unwrap(JsUndefined)
   #(state, Ok(result))
 }
 
@@ -232,25 +222,17 @@ fn map_set(
     [] -> #(JsUndefined, JsUndefined)
   }
   // Steps 1-2: RequireInternalSlot
-  use entries, seqs, order, next_seq, ref, state <- require_map(this, state)
+  use store, ref, state <- require_map(this, state)
 
   // Step 4 (-0 → +0) happens inside js_to_map_key
   let map_key = value.js_to_map_key(key_arg)
-  // Step 3: existing key keeps its insertion position (seq); a new key —
-  // including a deleted-then-re-added one — appends at next_seq, past every
-  // live iterator's cursor.
-  let #(seqs, order, next_seq) = case dict.has_key(entries, map_key) {
-    True -> #(seqs, order, next_seq)
-    False -> #(
-      dict.insert(seqs, map_key, next_seq),
-      dict.insert(order, next_seq, map_key),
-      next_seq + 1,
-    )
-  }
-  let entries = dict.insert(entries, map_key, val_arg)
+  // Steps 3, 5-6: an existing key keeps its insertion position; a new key —
+  // including a deleted-then-re-added one — appends past every live
+  // iterator's cursor.
+  let store = ordered_entries.insert(store, map_key, val_arg)
 
   // Write updated MapObject back to heap
-  let heap = update_map_data(state.heap, ref, entries, seqs, order, next_seq)
+  let heap = update_map_data(state.heap, ref, store)
 
   // Step 7: Return M
   #(State(..state, heap:), Ok(this))
@@ -274,9 +256,9 @@ fn map_has(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
+  use store, _ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
-  #(state, Ok(JsBool(dict.has_key(entries, map_key))))
+  #(state, Ok(JsBool(ordered_entries.has(store, map_key))))
 }
 
 // ============================================================================
@@ -302,16 +284,12 @@ fn map_delete(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use entries, seqs, order, next_seq, ref, state <- require_map(this, state)
+  use store, ref, state <- require_map(this, state)
   let map_key = value.js_to_map_key(key_arg)
-  case dict.get(seqs, map_key) {
-    Error(Nil) -> #(state, Ok(JsBool(False)))
-    Ok(seq) -> {
-      let entries = dict.delete(entries, map_key)
-      let seqs = dict.delete(seqs, map_key)
-      let order = dict.delete(order, seq)
-      let heap =
-        update_map_data(state.heap, ref, entries, seqs, order, next_seq)
+  case ordered_entries.delete(store, map_key) {
+    #(_store, False) -> #(state, Ok(JsBool(False)))
+    #(store, True) -> {
+      let heap = update_map_data(state.heap, ref, store)
       #(State(..state, heap:), Ok(JsBool(True)))
     }
   }
@@ -333,18 +311,11 @@ fn map_clear(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _entries, _seqs, _order, next_seq, ref, state <- require_map(this, state)
-  // next_seq is preserved: clear() empties the spec's records but appends
-  // still land past in-flight iterator cursors, so they remain visited.
-  let heap =
-    update_map_data(
-      state.heap,
-      ref,
-      dict.new(),
-      dict.new(),
-      dict.new(),
-      next_seq,
-    )
+  use store, ref, state <- require_map(this, state)
+  // next_seq is preserved by clear(): the spec's records are emptied but
+  // appends still land past in-flight iterator cursors, so they remain
+  // visited.
+  let heap = update_map_data(state.heap, ref, ordered_entries.clear(store))
   #(State(..state, heap:), Ok(JsUndefined))
 }
 
@@ -385,10 +356,7 @@ fn map_for_each(
       )
     True -> {
       // Steps 1-2: RequireInternalSlot
-      use _entries, _seqs, _order, _next_seq, ref, state <- require_map(
-        this,
-        state,
-      )
+      use _store, ref, state <- require_map(this, state)
       // Steps 4-5: LIVE iteration by seq cursor — the source is re-read from
       // the heap each step, so entries the callback deletes before being
       // reached are skipped and entries it adds (including delete + re-add)
@@ -409,8 +377,8 @@ fn for_each_loop(
   map_this: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let next = case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: MapObject(entries:, order:, next_seq:, ..), ..)) ->
-      value.entry_from_seq(entries, order, cursor, next_seq)
+    Some(ObjectSlot(kind: MapObject(store:), ..)) ->
+      ordered_entries.entry_from_seq(store, cursor)
     _ -> None
   }
   case next {
@@ -446,9 +414,8 @@ fn map_get_size(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use entries, _seqs, _order, _next_seq, _ref, state <- require_map(this, state)
-  let size = dict.size(entries)
-  #(state, Ok(value.from_int(size)))
+  use store, _ref, state <- require_map(this, state)
+  #(state, Ok(value.from_int(ordered_entries.size(store))))
 }
 
 // ============================================================================
@@ -463,7 +430,7 @@ fn map_iterator(
   state: State(host),
   kind: value.MapIterKind,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _entries, _seqs, _order, _next_seq, ref, state <- require_map(this, state)
+  use _store, ref, state <- require_map(this, state)
   let #(heap, iter_ref) =
     common.alloc_wrapper(
       state.heap,
@@ -480,25 +447,18 @@ fn map_iterator(
 /// RequireInternalSlot(M, [[MapData]]) — validates that `this` is a Map object
 /// and extracts its internal data.
 ///
-/// Calls `cont` with the entries dict, the seqs/order dicts, the next seq
-/// number, heap ref, and state. Returns TypeError if `this` is not a Map.
+/// Calls `cont` with the ordered-entries store, heap ref, and state.
+/// Returns TypeError if `this` is not a Map.
 fn require_map(
   this: JsValue,
   state: State(host),
-  cont: fn(
-    dict.Dict(MapKey, JsValue),
-    dict.Dict(MapKey, Int),
-    dict.Dict(Int, MapKey),
-    Int,
-    Ref,
-    State(host),
-  ) -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(OrderedEntries(MapKey, JsValue), Ref, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: MapObject(entries:, seqs:, order:, next_seq:), ..)) ->
-          cont(entries, seqs, order, next_seq, ref, state)
+        Some(ObjectSlot(kind: MapObject(store:), ..)) -> cont(store, ref, state)
         _ ->
           state.type_error(
             state,
@@ -517,10 +477,7 @@ fn require_map(
 fn update_map_data(
   h: Heap(host),
   ref: Ref,
-  entries: dict.Dict(MapKey, JsValue),
-  seqs: dict.Dict(MapKey, Int),
-  order: dict.Dict(Int, MapKey),
-  next_seq: Int,
+  store: OrderedEntries(MapKey, JsValue),
 ) -> Heap(host) {
-  heap.update_kind(h, ref, MapObject(entries:, seqs:, order:, next_seq:))
+  heap.update_kind(h, ref, MapObject(store:))
 }

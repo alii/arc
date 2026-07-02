@@ -3,6 +3,7 @@ import arc/vm/builtins/iterator
 import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/internal/ordered_entries
 import arc/vm/ops/object
 import arc/vm/state.{
   type Heap, type State, type StepResult, type VmError, State, Thrown,
@@ -374,9 +375,9 @@ pub fn spread_into_array(
                 iter_kind,
               )
           }
-        Some(ObjectSlot(kind: value.SetObject(data:, order:, ..), ..)) -> {
+        Some(ObjectSlot(kind: value.SetObject(store:), ..)) -> {
           // Set fast path — push values in insertion order.
-          let values = value.set_live_values(data, order)
+          let values = ordered_entries.live_values(store)
           let heap = append_list_to_array(state.heap, target_ref, values)
           Ok(State(..state, heap:))
         }
@@ -392,8 +393,8 @@ pub fn spread_into_array(
             True -> []
             False ->
               case heap.read(state.heap, source) {
-                Some(ObjectSlot(kind: value.SetObject(data:, order:, ..), ..)) ->
-                  value.live_entries_from(data, order, cursor)
+                Some(ObjectSlot(kind: value.SetObject(store:), ..)) ->
+                  ordered_entries.live_entries_from(store, cursor)
                 _ -> []
               }
           }
@@ -431,12 +432,12 @@ pub fn spread_into_array(
             )
           Ok(State(..state, heap:))
         }
-        Some(ObjectSlot(kind: value.MapObject(entries:, order:, ..), ..)) -> {
+        Some(ObjectSlot(kind: value.MapObject(store:), ..)) -> {
           // Map fast path — push [k,v] pairs in insertion order.
           let proto = state.builtins.array.prototype
           let heap = {
             use h, els, len <- batch_append(state.heap, target_ref)
-            value.live_entries(entries, order)
+            ordered_entries.live_entries(store)
             |> list.fold(#(h, els, len), fn(acc, e) {
               let #(h, els, len) = acc
               let #(h, pair) =
@@ -456,8 +457,8 @@ pub fn spread_into_array(
             True -> []
             False ->
               case heap.read(state.heap, source) {
-                Some(ObjectSlot(kind: value.MapObject(entries:, order:, ..), ..)) ->
-                  value.live_entries_from(entries, order, cursor)
+                Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
+                  ordered_entries.live_entries_from(store, cursor)
                 _ -> []
               }
           }
