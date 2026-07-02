@@ -465,12 +465,16 @@ pub fn eval_module_syntax_error_test() {
 // ----------------------------------------------------------------------------
 
 /// Host fn that returns what `console.log(...args)` would print, so the
-/// formatter is assertable from JS without touching stdout.
+/// formatter is assertable from JS without touching stdout. A throw from a
+/// user `toString`/`valueOf` during %s/%d/%i/%f coercion propagates, exactly
+/// as it does out of `console.log`.
 fn fmt_engine() -> engine.Engine(host) {
   engine.new()
   |> engine.define_fn("fmt", 0, fn(args, _this, s) {
-    let #(s, line) = console.format(args, s)
-    #(s, Ok(JsString(line)))
+    case console.format(args, s) {
+      Ok(#(line, s)) -> #(s, Ok(JsString(line)))
+      Error(#(thrown, s)) -> #(s, Error(thrown))
+    }
   })
 }
 
@@ -514,6 +518,87 @@ pub fn console_format_edge_cases_test() {
   assert assert_eval(eng, "fmt('a%cb', 'color:red')") == JsString("ab")
   // §2.2 step 5: leftover args after format string.
   assert assert_eval(eng, "fmt('x=%d', 1, {y: 2})") == JsString("x=1 { y: 2 }")
+}
+
+pub fn console_format_specifier_throw_propagates_test() {
+  // %s / %d / %i / %f run user `toString` / `valueOf`; a throw there must
+  // escape console.log as an abrupt completion (Node behaviour), not be
+  // swallowed into a fallback string.
+  let eng = fmt_engine()
+  assert assert_eval(
+      eng,
+      "try { fmt('%s', {toString(){ throw 1 }}); 'no throw' } catch (e) { e }",
+    )
+    == JsNumber(Finite(1.0))
+  assert assert_eval(
+      eng,
+      "try { fmt('%d', {valueOf(){ throw 2 }}); 'no throw' } catch (e) { e }",
+    )
+    == JsNumber(Finite(2.0))
+  assert assert_eval(
+      eng,
+      "try { fmt('%f', {valueOf(){ throw 3 }}); 'no throw' } catch (e) { e }",
+    )
+    == JsNumber(Finite(3.0))
+  // The real console.log path (Logger -> Formatter) propagates too.
+  assert assert_eval(
+      eng,
+      "try { console.log('%s', {toString(){ throw 4 }}); 'no throw' }
+       catch (e) { e }",
+    )
+    == JsNumber(Finite(4.0))
+  // %o / %O never coerce, so a throwing toString is never invoked.
+  assert assert_eval(
+      eng,
+      "try { fmt('%O', {toString(){ throw 1 }}); 'no throw' } catch (e) { e }",
+    )
+    == JsString("no throw")
+}
+
+pub fn console_format_symbol_never_throws_test() {
+  // A Symbol makes ToString/ToNumber throw a spec TypeError — but that's
+  // engine machinery, not user code, and Node/WHATWG never let it escape a
+  // specifier: %s is Call(%String%, «sym») (its descriptive string) and
+  // %d/%i/%f are "NaN". Only USER throws (toString/valueOf) may propagate.
+  let eng = fmt_engine()
+  assert assert_eval(eng, "fmt('<%s>', Symbol('x'))") == JsString("<Symbol(x)>")
+  assert assert_eval(eng, "fmt('<%s>', Symbol())") == JsString("<Symbol()>")
+  assert assert_eval(eng, "fmt('<%s>', Symbol.iterator)")
+    == JsString("<Symbol(Symbol.iterator)>")
+  assert assert_eval(eng, "fmt('%d %i %f', Symbol(), Symbol(), Symbol())")
+    == JsString("NaN NaN NaN")
+}
+
+// ----------------------------------------------------------------------------
+// Promise jobs — a throwing user-capability resolve must not derail the drain
+// ----------------------------------------------------------------------------
+
+pub fn promise_job_user_capability_resolve_throw_test() {
+  // `Promise.prototype.then` builds the child capability with
+  // NewPromiseCapability(SpeciesConstructor(this)), so `cap.resolve` can be
+  // an arbitrary user function. When it throws inside the reaction job there
+  // is no caller to catch it: the drain reports it to stderr
+  // (event_loop.call_for_job, "Uncaught (in promise job) ...") and MUST keep
+  // draining — the second, independent chain below still has to run. stderr
+  // isn't capturable here, so this pins the "keeps draining" half.
+  let eng = engine.new()
+  let assert Ok(#(Returned(_), eng)) =
+    engine.eval(
+      eng,
+      "var log = [];
+       function C(executor) {
+         executor(
+           function (v) { log.push('resolve:' + v); throw new Error('boom'); },
+           function (e) {},
+         );
+       }
+       Object.defineProperty(C, Symbol.species, { value: C });
+       var p = Promise.resolve(42);
+       p.constructor = C;
+       p.then(v => v * 2);
+       Promise.resolve('x').then(v => log.push('after:' + v));",
+    )
+  assert assert_eval(eng, "log.join(',')") == JsString("resolve:84,after:x")
 }
 
 // ----------------------------------------------------------------------------

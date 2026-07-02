@@ -1,12 +1,14 @@
 // ============================================================================
 // Promise microtask queue draining.
 //
-// The only macrotasks core knows about are host timers (the global
-// setTimeout) and Atomics.waitAsync deadlines. `drain_jobs` flushes the
-// Promise reaction queue, fires due timers between flushes, and sleeps
-// until the earliest pending deadline before exiting. Embedders that need
-// IO / process messages run their own loop on top — see `arc/beam.run` for
-// the Erlang-mailbox version, built on `host.suspend`/`host.resume`.
+// Core owns no timer wheel and defines no `setTimeout` — the ONLY deadline
+// source it knows about is Atomics.waitAsync waiter timeouts. `drain_jobs`
+// flushes the Promise reaction queue, settling expired waiters between
+// flushes, and sleeps until the earliest pending waiter deadline before
+// exiting. Everything else that could produce a macrotask — timers, IO,
+// process messages — is an embedder concern layered on top; see
+// `arc/beam.run` for the Erlang-mailbox version, built on
+// `host.suspend`/`host.resume`.
 // ============================================================================
 
 import arc/vm/builtins/atomics as builtins_atomics
@@ -44,11 +46,11 @@ fn report_unhandled_rejections(state: State(host)) -> Nil {
 /// during execution. Loops until the queue is empty. When empty, reports any
 /// unhandled promise rejections (like Node.js checking after each microtask flush).
 ///
-/// The core loop honors two kinds of deadlines: Atomics.waitAsync timeouts
-/// (each pass settles waiters whose deadline already passed) and host timers
-/// from the global setTimeout (fired one at a time when the microtask queue
-/// is empty). When the queue runs dry with deadlines still pending, the loop
-/// sleeps until the earliest one instead of exiting.
+/// The only deadlines the core loop honors are Atomics.waitAsync timeouts:
+/// each pass settles waiters whose deadline already passed, and when the
+/// queue runs dry with waiter deadlines still pending, the loop sleeps until
+/// the earliest one instead of exiting. Core has no timers of its own —
+/// embedders that want `setTimeout` schedule it themselves around this drain.
 pub fn drain_jobs(state: State(host)) -> State(host) {
   do_drain_jobs(state, False)
 }
@@ -61,8 +63,8 @@ pub fn drain_jobs(state: State(host)) -> State(host) {
 /// sleeping. Sleeping here would starve the embedder's mailbox (IO,
 /// process messages, arc_notify wakes) until the deadline. The embedder
 /// bounds its blocking receive with `next_deadline_timeout`, injects
-/// notify wakes via `inject_notify`, and re-drains so host timers and
-/// mailbox events interleave.
+/// notify wakes via `inject_notify`, and re-drains so waitAsync
+/// deadlines and mailbox events interleave.
 pub fn drain_jobs_yielding(state: State(host)) -> State(host) {
   do_drain_jobs(state, True)
 }
@@ -162,7 +164,8 @@ fn execute_job(state: State(host), job: value.Job) -> State(host) {
   }
 }
 
-/// Helper: Call a function via state.call during job execution (fire-and-forget).
+/// Helper: Call a function via state.call during job execution (fire-and-forget:
+/// there is no continuation to hand the return value to).
 /// Used for calling resolve/reject on child promises after a handler runs.
 fn call_for_job(
   state: State(host),
@@ -171,7 +174,23 @@ fn call_for_job(
 ) -> State(host) {
   case state.call(state, target, JsUndefined, args) {
     Ok(#(_, new_state)) -> new_state
-    Error(#(_, new_state)) -> new_state
+    // `target` is a promise-capability resolve/reject function. The native
+    // ones never throw, but `Promise.prototype.then` builds the child
+    // capability with NewPromiseCapability(SpeciesConstructor(this)), so a
+    // user species constructor hands us arbitrary user callables here. A
+    // job has no caller to propagate an abrupt completion to, so without
+    // this report a throwing user `resolve`/`reject` vanishes silently.
+    // There is no promise ref to blame it on (the throw happened AFTER the
+    // reaction settled, outside any promise), so `unhandled_rejections` —
+    // a list of promise data refs — can't carry it; report it on the same
+    // stderr channel `report_unhandled_rejections` uses.
+    Error(#(thrown, new_state)) -> {
+      io.println_error(
+        "Uncaught (in promise job) "
+        <> object.format_error(thrown, new_state.heap),
+      )
+      new_state
+    }
   }
 }
 

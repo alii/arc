@@ -1,16 +1,18 @@
 //// `console` global per WHATWG Console.
 
 import arc/vm/builtins/common
+import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type ConsoleNativeFn, type JsValue, type Ref, ConsoleLog, ConsoleLogError,
-  ConsoleNative, JsNumber, JsString, JsUndefined,
+  ConsoleNative, JsNumber, JsString, JsSymbol, JsUndefined,
 }
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 
 /// Build the `console` global per WHATWG Console.
@@ -45,112 +47,139 @@ pub fn dispatch(
 
 /// WHATWG Console §2.1 Logger — format `args` then hand the line to `write`
 /// (`io.println` for log/info/debug, `io.println_error` for warn/error).
+/// Formatting runs user code (`toString`/`valueOf` via %s/%d/%i/%f), so it
+/// can throw; a throw aborts the log — nothing is written — and propagates
+/// out of `console.log`, matching Node.
 pub fn print(
   args: List(JsValue),
   state: State(host),
   write: fn(String) -> Nil,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(state, line) = format(args, state)
-  write(line)
-  #(state, Ok(JsUndefined))
+  case format(args, state) {
+    Ok(#(line, state)) -> {
+      write(line)
+      #(state, Ok(JsUndefined))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
 }
 
 /// Format `args` to the string a console method would print, without the
 /// I/O. Public so tests can assert formatting independent of stdout/stderr.
+/// `Error(#(thrown, state))` is an abrupt completion from a user
+/// `toString`/`valueOf` invoked by a format specifier.
 pub fn format(
   args: List(JsValue),
   state: State(host),
-) -> #(State(host), String) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   case args {
     // §2.1 step 4: only run Formatter if first is a string AND there are more
     // args. `console.log("100%")` must print `100%`, not consume the `%`.
     [JsString(fmt), next, ..rest] -> formatter(state, fmt, [next, ..rest], "")
-    _ -> #(state, list.map(args, display(state.heap, _)) |> string.join(" "))
+    _ ->
+      Ok(#(list.map(args, display(state.heap, _)) |> string.join(" "), state))
   }
 }
 
 /// WHATWG Console §2.2.1 Formatter. Walk `fmt` consuming one arg per
 /// specifier, then append leftover args space-separated. Supports
 /// `%s %d %i %f %o %O %c %%`; unknown `%x` is left literal (matches
-/// Node/Chrome, spec says skip).
+/// Node/Chrome, spec says skip). Propagates a throw from a specifier's
+/// coercion (see `spec`).
 fn formatter(
   state: State(host),
   fmt: String,
   args: List(JsValue),
   acc: String,
-) -> #(State(host), String) {
+) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   case string.pop_grapheme(fmt) {
     Error(Nil) -> {
       // §2.2 step 5: leftover args are Printer'd after the formatted string.
       let trailing = list.map(args, display(state.heap, _))
-      #(state, string.join([acc, ..trailing], " "))
+      Ok(#(string.join([acc, ..trailing], " "), state))
     }
     Ok(#("%", rest)) ->
       case string.pop_grapheme(rest) {
         // Trailing lone `%` — emit literally, keep going so leftover args
         // still get appended.
         Error(Nil) -> formatter(state, "", args, acc <> "%")
-        Ok(#(sp, rest)) ->
-          case spec(state, sp, args) {
-            Some(#(state, sub, args)) ->
+        Ok(#(sp, rest)) -> {
+          use consumed <- result.try(spec(state, sp, args))
+          case consumed {
+            Some(#(sub, args, state)) ->
               formatter(state, rest, args, acc <> sub)
             None -> formatter(state, rest, args, acc <> "%" <> sp)
           }
+        }
       }
     Ok(#(ch, rest)) -> formatter(state, rest, args, acc <> ch)
   }
 }
 
-/// Apply one format specifier. Returns `Some(state, substitution, rest_args)`
-/// or `None` for an unknown specifier (caller emits it literally). `%c` is
-/// CSS styling — meaningless on a terminal, so it consumes its arg and
-/// emits nothing, like Node.
+/// Apply one format specifier.
+///
+/// - `Ok(Some(#(substitution, rest_args, state)))` — recognised, arg consumed.
+/// - `Ok(None)` — unknown specifier, or a known one with no arg left
+///   (§2.2.1 step 2); the caller emits `%x` literally.
+/// - `Error(#(thrown, state))` — %s/%d/%i/%f ran a user `toString`/`valueOf`
+///   (via `js_to_string`/`js_to_number`) and it threw. The abrupt completion
+///   must propagate out of `console.log`, not be papered over with a
+///   fallback string — Node throws here too.
 fn spec(
   state: State(host),
   sp: String,
   args: List(JsValue),
-) -> Option(#(State(host), String, List(JsValue))) {
+) -> Result(
+  Option(#(String, List(JsValue), State(host))),
+  #(JsValue, State(host)),
+) {
   case sp, args {
-    "%", _ -> Some(#(state, "%", args))
+    "%", _ -> Ok(Some(#("%", args, state)))
     // §2.2.1 step 2: out of args → leave the specifier literal.
-    _, [] -> None
-    "s", [head, ..rest]
-    | "d", [head, ..rest]
-    | "i", [head, ..rest]
-    | "f", [head, ..rest]
-    | "o", [head, ..rest]
-    | "O", [head, ..rest]
-    | "c", [head, ..rest]
-    -> {
-      let #(state, sub) = case sp {
-        "s" ->
-          case coerce.js_to_string(state, head) {
-            Ok(#(s, state)) -> #(state, s)
-            Error(#(_, state)) -> #(state, display(state.heap, head))
-          }
-        // §2.2.1 step 4.2/4.3: "%d/%i/%f shall be converted by spec function
-        // %parseInt%/%parseFloat%". We feed ToNumber's result through int
-        // truncation for d/i; both yield "NaN" for non-numeric.
-        "d" | "i" ->
-          case coerce.js_to_number(state, head) {
-            Ok(#(value.Finite(n), state)) -> #(
-              state,
-              string.inspect(value.float_to_int(n)),
-            )
-            Ok(#(_, state)) | Error(#(_, state)) -> #(state, "NaN")
-          }
-        "f" ->
-          case coerce.js_to_number(state, head) {
-            Ok(#(n, state)) -> #(state, object.inspect(JsNumber(n), state.heap))
-            Error(#(_, state)) -> #(state, "NaN")
-          }
-        "o" | "O" -> #(state, object.inspect(head, state.heap))
-        // "c"
-        _ -> #(state, "")
-      }
-      Some(#(state, sub, rest))
+    _, [] -> Ok(None)
+    // A Symbol makes ToString/ToNumber throw the spec TypeError. That is
+    // engine machinery, not user code, and neither WHATWG Console nor Node
+    // lets it escape a specifier: %s is Call(%String%, undefined, «arg»)
+    // — NOT ToString — so a Symbol yields its descriptive string, and
+    // %d/%i/%f yield "NaN". Match Symbols BEFORE the coercing arms below so
+    // the only throws that propagate are the user's own toString/valueOf.
+    "s", [JsSymbol(id), ..rest] ->
+      Ok(
+        Some(#(
+          builtins_symbol.descriptive_string(id, state.ctx.symbol_descriptions),
+          rest,
+          state,
+        )),
+      )
+    "d", [JsSymbol(_), ..rest]
+    | "i", [JsSymbol(_), ..rest]
+    | "f", [JsSymbol(_), ..rest]
+    -> Ok(Some(#("NaN", rest, state)))
+    "s", [head, ..rest] -> {
+      use #(s, state) <- result.map(coerce.js_to_string(state, head))
+      Some(#(s, rest, state))
     }
-    _, _ -> None
+    // §2.2.1 step 4.2: "%d/%i shall be converted by spec function %parseInt%".
+    // We feed ToNumber's result through int truncation; non-numeric → "NaN".
+    "d", [head, ..rest] | "i", [head, ..rest] -> {
+      use #(n, state) <- result.map(coerce.js_to_number(state, head))
+      let sub = case n {
+        value.Finite(f) -> string.inspect(value.float_to_int(f))
+        _ -> "NaN"
+      }
+      Some(#(sub, rest, state))
+    }
+    // §2.2.1 step 4.3: "%f shall be converted by spec function %parseFloat%".
+    "f", [head, ..rest] -> {
+      use #(n, state) <- result.map(coerce.js_to_number(state, head))
+      Some(#(object.inspect(JsNumber(n), state.heap), rest, state))
+    }
+    "o", [head, ..rest] | "O", [head, ..rest] ->
+      Ok(Some(#(object.inspect(head, state.heap), rest, state)))
+    // %c is CSS styling — meaningless on a terminal, so it consumes its arg
+    // and emits nothing, like Node.
+    "c", [_, ..rest] -> Ok(Some(#("", rest, state)))
+    _, _ -> Ok(None)
   }
 }
 
