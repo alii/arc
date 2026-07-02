@@ -672,15 +672,25 @@ fn number_to_exponential(
       // Step 2: f = ToIntegerOrInfinity(fractionDigits); ±∞ saturate out of
       // [0, 100] so step 5's RangeError fires.
       use f, state <- coerce.try_to_integer_or_infinity(state, v)
-      case f < 0 || f > 100 {
-        True ->
-          state.range_error(
-            state,
-            "toExponential() argument must be between 0 and 100",
-          )
-        False -> #(
+      // Step 4 comes BEFORE step 5's range check: a non-finite `this` returns
+      // Number::toString(x, 10) even when fractionDigits is out of range, so
+      // NaN.toExponential(Infinity) is "NaN", not a RangeError.
+      case n {
+        Finite(_) ->
+          case f < 0 || f > 100 {
+            True ->
+              state.range_error(
+                state,
+                "toExponential() argument must be between 0 and 100",
+              )
+            False -> #(
+              state,
+              Ok(JsString(format_non_finite(n, format_to_exponential(_, f)))),
+            )
+          }
+        NaN | Infinity | NegInfinity -> #(
           state,
-          Ok(JsString(format_non_finite(n, format_to_exponential(_, f)))),
+          Ok(JsString(value.format_number_radix(n, 10))),
         )
       }
     }
@@ -704,15 +714,25 @@ fn number_to_precision(
       // Step 3: p = ToIntegerOrInfinity(precision); ±∞ saturate out of
       // [1, 100] so step 5's RangeError fires.
       use p, state <- coerce.try_to_integer_or_infinity(state, v)
-      case p < 1 || p > 100 {
-        True ->
-          state.range_error(
-            state,
-            "toPrecision() argument must be between 1 and 100",
-          )
-        False -> #(
+      // Step 4 comes BEFORE step 5's range check: a non-finite `this` returns
+      // Number::toString(x, 10) even when precision is out of range, so
+      // NaN.toPrecision(Infinity) is "NaN", not a RangeError.
+      case n {
+        Finite(_) ->
+          case p < 1 || p > 100 {
+            True ->
+              state.range_error(
+                state,
+                "toPrecision() argument must be between 1 and 100",
+              )
+            False -> #(
+              state,
+              Ok(JsString(format_non_finite(n, format_to_precision(_, p)))),
+            )
+          }
+        NaN | Infinity | NegInfinity -> #(
           state,
-          Ok(JsString(format_non_finite(n, format_to_precision(_, p)))),
+          Ok(JsString(value.format_number_radix(n, 10))),
         )
       }
     }

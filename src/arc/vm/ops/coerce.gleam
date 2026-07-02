@@ -206,8 +206,10 @@ pub fn try_to_number(
 
 /// ES2024 §7.1.5 ToIntegerOrInfinity of an already-ToNumber'd value, with
 /// ±∞ saturated to ±(2^53 - 1) (`limits.max_safe_integer`, the spec cap on
-/// array-like lengths). This is THE single §7.1.5 / saturation point in the
-/// codebase:
+/// array-like lengths). This is the canonical §7.1.5 / saturation helper;
+/// prefer it over hand-rolling the JsNum match. (A few modules still carry
+/// pre-existing local copies — e.g. typed_array's `to_int_or_inf` and
+/// regexp's `try_to_length` — that have not been migrated onto it yet.)
 ///   step 2: NaN, +0, -0 → 0
 ///   steps 3-4: +∞ → 2^53 - 1, -∞ → -(2^53 - 1)
 ///   step 5: finite → truncate toward zero
@@ -244,8 +246,9 @@ pub fn try_to_integer_or_infinity(
   cont(jsnum_to_integer_or_infinity(num), state)
 }
 
-/// Relative start/end index resolution shared by the Array / ArrayBuffer /
-/// TypedArray slice-family methods (§23.1.3.x, §25.1.6.x common steps):
+/// Relative start/end index resolution shared by the Array / ArrayBuffer
+/// slice-family methods (§23.1.3.x, §25.1.6.x common steps; TypedArray still
+/// uses its own private `relative_index` in typed_array.gleam):
 ///
 ///   Let relativeIndex be ? ToIntegerOrInfinity(val).
 ///   If relativeIndex = -∞, k = 0.
