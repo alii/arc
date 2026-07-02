@@ -1228,7 +1228,13 @@ fn iterator_step_result(
 }
 
 /// §7.4.8 IteratorStepValue: if done return None; else read .value.
-fn iterator_step_value(
+///
+/// Public because it is the ONE next()/done/value reader shared by every
+/// consumer that drains an already-obtained iterator record: the
+/// Iterator.prototype helpers here, `iterator_rest`, `zip_collect`, and the
+/// ArraySpread generic path in `arc/vm/ops/array`. New drain sites must reuse
+/// it rather than re-implementing the §7.4.5/§7.4.6 done/value reads.
+pub fn iterator_step_value(
   state: State(host),
   obj: JsValue,
   next_method: JsValue,
@@ -1807,7 +1813,11 @@ fn map_thrown(
 
 /// §7.4.3 GetIterator(obj, sync): the @@iterator method must be callable and
 /// its result must be an Object; caches the next method (GetIteratorDirect).
-fn get_iterator_sync(
+///
+/// Returns the Iterator Record as `#(iterator, next_method)`. The "<obj> is
+/// not iterable" TypeError message is relied on by both for-of (interpreter
+/// GetIterator) and ArraySpread (`arc/vm/ops/array`) — keep them in sync.
+pub fn get_iterator_sync(
   state: State(host),
   obj: JsValue,
 ) -> Result(#(#(JsValue, JsValue), State(host)), #(JsValue, State(host))) {
