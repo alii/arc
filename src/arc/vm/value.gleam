@@ -3064,6 +3064,11 @@ pub type AGResumeKind {
   /// from the close await is discarded per spec (outer abrupt completion
   /// takes precedence, ES §7.4.12 step 5).
   AGResumeDelegateClose
+  /// yield* .return where the inner iterator has no `return` method: the
+  /// spec's intermediate `Await(received.[[Value]])` settled (§27.5.3.8
+  /// step 7.c.ii.2). Fulfil → unwind the outer generator's finally blocks
+  /// with the awaited value; reject → throw into the body instead.
+  AGResumeReturnUnwind
 }
 
 /// A pending .next()/.return()/.throw() call on an async generator.

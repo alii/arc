@@ -31,9 +31,9 @@ import arc/vm/value.{
   type AGResumeKind, type AsyncGenCompletion, type AsyncGenRequest, type JsValue,
   type Ref, AGAwaitingReturn, AGCompleted, AGExecuting, AGNext,
   AGResumeAwaitingReturn, AGResumeBody, AGResumeDelegate, AGResumeDelegateClose,
-  AGReturn, AGSuspendedStart, AGSuspendedYield, AGThrow, AsyncGenRequest,
-  AsyncGeneratorObject, AsyncGeneratorSlot, JsNull, JsObject, JsUndefined, Named,
-  ObjectSlot,
+  AGResumeReturnUnwind, AGReturn, AGSuspendedStart, AGSuspendedYield, AGThrow,
+  AsyncGenRequest, AsyncGeneratorObject, AsyncGeneratorSlot, JsNull, JsObject,
+  JsUndefined, Named, ObjectSlot,
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -225,6 +225,11 @@ fn run_body(state: State(host), run: Run(host), push_arg: Bool) -> State(host) {
           // unwind through enclosing finally blocks / for-of iterator closes
           // before completing. Shared with the sync driver
           // (generators.unwind_return) so the two flavours cannot diverge.
+          // NOTE: the spec's Await of the resumption value (§27.6.3.8
+          // AsyncGeneratorUnwrapYieldResumption) is not performed on this
+          // NON-delegating path, so a thenable passed to .return() is not
+          // unwrapped here (test262 return-suspendedYield-promise.js). The
+          // delegating path (delegate_method_missing) does await it.
           generators.unwind_return(
             exec_state,
             req.value,
@@ -356,26 +361,14 @@ fn delegate_method_missing(
           // GetMethod/Call threw — propagate into the body (steps 4 & 6).
           throw_into_gen_body(state, run, thrown)
       }
-    AGReturn | AGNext -> {
-      // §7.c.ii.3: no .return → the return completion propagates out of the
-      // yield*, so unwind the OUTER generator's enclosing finally blocks /
-      // iterator closes (shared with the sync driver) before completing.
-      // NOTE: the spec's intermediate Await(received) (§7.c.ii.2) is not
-      // performed — same pre-existing limitation as the non-delegating
-      // AGReturn path in run_body.
-      let exec_state =
-        build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
-      handle_exec_result(
-        state,
-        run,
-        generators.unwind_return(
-          exec_state,
-          run.req.value,
-          run.execute_inner,
-          run.unwind_to_catch,
-        ),
-      )
-    }
+    AGReturn | AGNext ->
+      // §7.c.ii.2-3: no .return → Await(received.[[Value]]) first, THEN the
+      // return completion propagates out of the yield*, unwinding the OUTER
+      // generator's enclosing finally blocks / iterator closes (shared with
+      // the sync driver). Gen stays AGExecuting, req stays at queue head;
+      // settlement is handled in the AGResumeReturnUnwind branch of
+      // call_native_resume.
+      setup_await(state, run.data_ref, run.req.value, AGResumeReturnUnwind)
   }
 }
 
@@ -408,6 +401,29 @@ fn throw_into_gen_body(
     None -> Ok(#(ThrowCompletion(thrown), exec_state))
   }
   handle_exec_result(state, run, exec_result)
+}
+
+/// Inject a RETURN completion carrying `value` at the generator's saved
+/// suspension point (§27.5.3.4): unwind the enclosing finally blocks /
+/// iterator closes via the shared unwinder, then dispatch through
+/// handle_exec_result. Counterpart to `throw_into_gen_body`.
+fn unwind_return_into_body(
+  state: State(host),
+  run: Run(host),
+  value: JsValue,
+) -> State(host) {
+  let exec_state =
+    build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
+  handle_exec_result(
+    state,
+    run,
+    generators.unwind_return(
+      exec_state,
+      value,
+      run.execute_inner,
+      run.unwind_to_catch,
+    ),
+  )
 }
 
 /// AsyncIteratorClose steps 1-4 with a NORMAL closeCompletion (the yield*
@@ -525,24 +541,12 @@ fn delegate_done(
         build_exec_state(state, gen, stack_after, gen.saved_pc + 3)
       handle_exec_result(state, run, run.execute_inner(exec_state))
     }
-    AGReturn | AGNext -> {
+    AGReturn | AGNext ->
       // §27.5.3.8 step 7.c.viii: the inner iterator's return() reported
       // done — a return completion (carrying its value) propagates out of
       // the yield*, so unwind the outer generator's enclosing finally
       // blocks / iterator closes (shared with the sync driver).
-      let exec_state =
-        build_exec_state(state, gen, gen.saved_stack, gen.saved_pc)
-      handle_exec_result(
-        state,
-        run,
-        generators.unwind_return(
-          exec_state,
-          val,
-          run.execute_inner,
-          run.unwind_to_catch,
-        ),
-      )
-    }
+      unwind_return_into_body(state, run, val)
   }
 }
 
@@ -671,6 +675,16 @@ pub fn call_native_resume(
                     )
                   throw_into_gen_body(state, run, err)
                 }
+              }
+            AGResumeReturnUnwind ->
+              // yield*-with-no-.return: Await(received.[[Value]]) settled
+              // (§27.5.3.8 step 7.c.ii.2). Fulfil → unwind the outer
+              // generator's finallys with the AWAITED value; reject → the
+              // abrupt Await replaces the return completion and is thrown
+              // into the body.
+              case is_reject {
+                True -> throw_into_gen_body(state, run, settled)
+                False -> unwind_return_into_body(state, run, settled)
               }
           }
           ret(state)

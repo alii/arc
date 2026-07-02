@@ -636,6 +636,67 @@ pub fn async_yield_star_missing_return_runs_finally_test() {
   assert log == JsString("n:x,false|fin|r:rv,true")
 }
 
+pub fn async_yield_star_missing_return_awaits_value_test() {
+  // §27.5.3.8 step 7.c.ii.2: when the inner iterator has no .return, the
+  // .return() argument is Await-ed BEFORE the return completion unwinds the
+  // outer generator, so a thenable is unwrapped (value 42, not a Promise) and
+  // the enclosing finally still runs.
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       var inner = {};
+       inner[Symbol.asyncIterator] = function () {
+         return {
+           next: function () {
+             return Promise.resolve({ value: 'x', done: false });
+           }
+         };
+       };
+       async function* g() {
+         try { yield* inner; } finally { log.push('fin'); }
+       }
+       var it = g();
+       it.next().then(function (r) {
+         log.push('n:' + r.value + ',' + r.done);
+         return it.return(Promise.resolve(42));
+       }).then(function (r) {
+         log.push('r:' + r.value + ',' + r.done);
+       });",
+    )
+  assert log == JsString("n:x,false|fin|r:42,true")
+}
+
+pub fn async_yield_star_missing_return_rejected_value_test() {
+  // §27.5.3.8 step 7.c.ii.2: if the Await of the .return() argument rejects,
+  // the abrupt completion replaces the return completion — it is thrown into
+  // the body (running the finally) and the .return() promise REJECTS.
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       var inner = {};
+       inner[Symbol.asyncIterator] = function () {
+         return {
+           next: function () {
+             return Promise.resolve({ value: 'x', done: false });
+           }
+         };
+       };
+       async function* g() {
+         try { yield* inner; } finally { log.push('fin'); }
+       }
+       var it = g();
+       it.next().then(function (r) {
+         log.push('n:' + r.value + ',' + r.done);
+         return it.return(Promise.reject('boom'));
+       }).then(function (r) {
+         log.push('unexpected:' + r.value);
+       }, function (e) {
+         log.push('rej:' + e);
+       });",
+    )
+  assert log == JsString("n:x,false|fin|rej:boom")
+}
+
 pub fn async_yield_star_delegated_return_runs_outer_finally_test() {
   // Inner iterator HAS a .return: after the delegated return reports done,
   // the outer generator's own finally must still run (§27.5.3.8 7.c.viii).
