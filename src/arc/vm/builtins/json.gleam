@@ -7,8 +7,8 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as objops
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type JsonNativeFn, type Property, type Ref, DataProperty, Finite,
-  JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonNative,
+  type JsValue, type JsonNativeFn, type Property, type Ref, Finite, JsBool,
+  JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonNative,
   JsonParse, JsonStringify, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 import gleam/bit_array
@@ -1011,13 +1011,8 @@ fn serialize_property(
         Some(ObjectSlot(kind: value.BooleanObject(b), ..)) ->
           Ok(#(JsBool(b), state))
         // Step 4.d: [[BigIntData]] → the wrapped BigInt (then step 10 throws).
-        // BigInt wrappers are OrdinaryObjects with a private-key slot.
-        Some(ObjectSlot(kind: OrdinaryObject, properties:, ..)) ->
-          case dict.get(properties, value.bigint_data_key()) {
-            Ok(DataProperty(value: value.JsBigInt(bi), ..)) ->
-              Ok(#(value.JsBigInt(bi), state))
-            _ -> Ok(#(val, state))
-          }
+        Some(ObjectSlot(kind: value.BigIntObject(bi), ..)) ->
+          Ok(#(value.JsBigInt(bi), state))
         _ -> Ok(#(val, state))
       }
     _ -> Ok(#(val, state))
