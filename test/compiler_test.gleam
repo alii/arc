@@ -6,6 +6,7 @@ import arc/vm/builtins/common
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/heap
+import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state
 import arc/vm/value.{
@@ -1613,6 +1614,28 @@ pub fn template_literal_multiple_expressions_test() -> Nil {
 
 pub fn template_literal_empty_test() -> Nil {
   assert_normal("``", JsString(""))
+}
+
+pub fn template_literal_nested_template_test() -> Nil {
+  assert_normal("var x = 'y'; `${`inner${x}`}`", JsString("innery"))
+}
+
+// A nested template whose quasi text is `}` must not end the outer
+// substitution at that inner `}`.
+pub fn template_literal_nested_template_brace_quasi_test() -> Nil {
+  assert_normal("`${`}`}`", JsString("}"))
+}
+
+// A substitution must contain exactly one expression: trailing tokens after
+// it are a SyntaxError, not silently dropped.
+pub fn template_literal_substitution_trailing_tokens_test() -> Nil {
+  assert_parse_error("var a = 1; var b = 2; `${a b}`")
+}
+
+// A `${` whose `}` is swallowed (here by an unterminated string) is a
+// SyntaxError, not a template whose quasi is the leftover text.
+pub fn template_literal_unterminated_substitution_test() -> Nil {
+  assert_parse_error("`${'}`")
 }
 
 // ============================================================================
@@ -5603,6 +5626,127 @@ pub fn math_pi_computation_test() -> Nil {
 }
 
 // ============================================================================
+// Math overflow totality
+//
+// The BEAM has no IEEE-754 infinities: math:exp/pow/cosh/sinh raise
+// `badarith` the moment the true result overflows a 64-bit float, and a
+// float32 infinity bit pattern refuses to DECODE (badmatch). Left unhandled,
+// each of the expressions below crashed the whole runtime instead of
+// returning ±Infinity (ES §21.3.2 / §6.1.6.1.3). arc_math_ffi now returns
+// the JsNum shape directly so overflow is a value, not an exception.
+// ============================================================================
+
+pub fn math_exp_overflow_test() -> Nil {
+  assert_normal("Math.exp(1000)", JsNumber(value.Infinity))
+}
+
+pub fn math_pow_overflow_test() -> Nil {
+  assert_normal("Math.pow(1e300, 2)", JsNumber(value.Infinity))
+}
+
+pub fn exp_operator_overflow_test() -> Nil {
+  // The `**` operator routes through the same Number::exponentiate.
+  assert_normal("1e300 ** 2", JsNumber(value.Infinity))
+}
+
+pub fn exp_operator_overflow_negative_odd_test() -> Nil {
+  // Negative base with an odd integer exponent: the overflow keeps the sign.
+  assert_normal("(-1e300) ** 3", JsNumber(value.NegInfinity))
+}
+
+pub fn math_cosh_overflow_test() -> Nil {
+  assert_normal("Math.cosh(1000)", JsNumber(value.Infinity))
+}
+
+pub fn math_sinh_overflow_test() -> Nil {
+  assert_normal("Math.sinh(1000)", JsNumber(value.Infinity))
+}
+
+pub fn math_sinh_overflow_negative_test() -> Nil {
+  // sinh is odd, so a large-magnitude negative argument overflows to -∞.
+  assert_normal("Math.sinh(-1000)", JsNumber(value.NegInfinity))
+}
+
+pub fn math_expm1_overflow_test() -> Nil {
+  assert_normal("Math.expm1(1000)", JsNumber(value.Infinity))
+}
+
+pub fn math_fround_overflow_test() -> Nil {
+  // 1e300 is beyond the float32 range, so it rounds to +Infinity.
+  assert_normal("Math.fround(1e300)", JsNumber(value.Infinity))
+}
+
+pub fn math_fround_overflow_negative_test() -> Nil {
+  assert_normal("Math.fround(-1e300)", JsNumber(value.NegInfinity))
+}
+
+pub fn math_fround_finite_test() -> Nil {
+  // Exactly representable in float32: passes through unchanged.
+  assert_normal("Math.fround(5.5)", JsNumber(Finite(5.5)))
+}
+
+pub fn math_fround_rounds_to_float32_test() -> Nil {
+  // 1.1 is not exact in float32; fround widens the rounded float32 back.
+  assert_normal("Math.fround(1.1)", JsNumber(Finite(1.100000023841858)))
+}
+
+// ============================================================================
+// Math.expm1 / Math.log1p precision for small |x|
+//
+// The whole point of these functions is accuracy near 0, where the naive
+// `exp(x) - 1` / `log(1 + x)` cancel catastrophically (to exactly 0 once
+// |x| < 2^-53). These asserted the OLD (naive) behaviour was wrong.
+// ============================================================================
+
+pub fn math_expm1_tiny_test() -> Nil {
+  // 1 + 1e-16 rounds to exactly 1.0, so the naive exp(x)-1 returned 0.
+  assert_normal("Math.expm1(1e-16)", JsNumber(Finite(1.0e-16)))
+}
+
+pub fn math_log1p_tiny_test() -> Nil {
+  // 1 + 1e-16 rounds to exactly 1.0, so the naive log(1+x) returned 0.
+  assert_normal("Math.log1p(1e-16)", JsNumber(Finite(1.0e-16)))
+}
+
+pub fn math_expm1_large_no_intermediate_overflow_test() -> Nil {
+  // The Kahan rescale must divide BEFORE multiplying: with `(u-1) *. n` as
+  // the intermediate, Math.expm1(708) badariths on the BEAM even though the
+  // true answer (~3.02e307) is a perfectly finite float. Assert the value is
+  // in the right ballpark rather than bit-equal so the test is
+  // libm-independent.
+  assert_normal(
+    "Math.expm1(708) > 3.0e307 && Math.expm1(708) < 3.1e307",
+    JsBool(True),
+  )
+}
+
+pub fn math_log1p_large_no_intermediate_overflow_test() -> Nil {
+  // Same intermediate-overflow trap: `ln(u) *. n` badariths for n = 1e308
+  // even though log1p(1e308) is just ~709.196. For n this large the rescale
+  // factor n/(u-1) is exactly 1.0, so the answer equals Math.log(1e308).
+  assert_normal("Math.log1p(1e308) === Math.log(1e308)", JsBool(True))
+}
+
+pub fn math_expm1_small_precision_test() -> Nil {
+  // expm1(1e-10)/1e-10 - 1 must be ~5e-11 (the x^2/2 term). The naive
+  // exp(x)-1 is off by ~8e-8 here, which fails this bound by 5 orders of
+  // magnitude. Tolerance (not bit-equality) keeps the test libm-independent.
+  assert_normal(
+    "Math.abs(Math.expm1(1e-10) / 1e-10 - 1 - 5e-11) < 1e-13",
+    JsBool(True),
+  )
+}
+
+pub fn math_log1p_small_precision_test() -> Nil {
+  // log1p(1e-10)/1e-10 - 1 must be ~-5e-11 (the -x^2/2 term). The naive
+  // log(1+x) is off by ~8e-8 here.
+  assert_normal(
+    "Math.abs(Math.log1p(1e-10) / 1e-10 - 1 + 5e-11) < 1e-13",
+    JsBool(True),
+  )
+}
+
+// ============================================================================
 // String.prototype.split (returns array, test via .join or .length)
 // ============================================================================
 
@@ -7788,7 +7932,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   // Verify greetFromHarness is on globalThis object
   let assert True =
-    object.has_property(h, env.global_object, value.Named("greetFromHarness"))
+    object.has_property(h, env.global_object, Named("greetFromHarness"))
 
   // Step 2: Compile and run a module that uses the harness function
   let module_source = "greetFromHarness()"

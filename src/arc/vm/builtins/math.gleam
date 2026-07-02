@@ -1,15 +1,21 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/ops/coerce
+
+// `num_exp` (§6.1.6.1.3 Number::exponentiate), the ToInt32/ToUint32
+// reductions and the ±0 float helpers live in the ops layer with the rest of
+// the JsNum arithmetic — Math.pow/imul/clz32 are just callers. Builtins may
+// depend on ops, never the reverse.
+import arc/vm/ops/operators.{is_neg_zero, is_zero, num_exp, num_negate}
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
-  type JsValue, type MathNativeFn, type Ref, Finite, Infinity, JsNumber,
-  MathAbs, MathAcos, MathAcosh, MathAsin, MathAsinh, MathAtan,
-  MathAtan2, MathAtanh, MathCbrt, MathCeil, MathClz32, MathCos, MathCosh,
-  MathExp, MathExpm1, MathFloor, MathFround, MathHypot, MathImul, MathLog,
-  MathLog10, MathLog1p, MathLog2, MathMax, MathMin, MathNative, MathPow,
-  MathRandom, MathRound, MathSign, MathSin, MathSinh, MathSqrt, MathTan,
-  MathTanh, MathTrunc, NaN, NegInfinity,
+  type JsValue, type MathNativeFn, type Ref, Finite, Infinity, JsNumber, MathAbs,
+  MathAcos, MathAcosh, MathAsin, MathAsinh, MathAtan, MathAtan2, MathAtanh,
+  MathCbrt, MathCeil, MathClz32, MathCos, MathCosh, MathExp, MathExpm1,
+  MathFloor, MathFround, MathHypot, MathImul, MathLog, MathLog10, MathLog1p,
+  MathLog2, MathMax, MathMin, MathNative, MathPow, MathRandom, MathRound,
+  MathSign, MathSin, MathSinh, MathSqrt, MathTan, MathTanh, MathTrunc, NaN,
+  NegInfinity,
 }
 import gleam/float
 import gleam/int
@@ -112,12 +118,12 @@ pub fn dispatch(
     MathSign -> math_sign(args, state)
     MathCbrt -> math_cbrt(args, state)
     MathHypot -> math_hypot(args, state)
-    MathFround -> finite_passthrough(args, state, ffi_fround)
+    MathFround -> math_fround(args, state)
     MathClz32 -> math_clz32(args, state)
     MathImul -> math_imul(args, state)
     MathExpm1 -> math_expm1(args, state)
     MathLog1p -> math_log1p(args, state)
-    MathSinh -> neg_zero_preserving(args, state, ffi_math_sinh)
+    MathSinh -> math_sinh(args, state)
     MathCosh -> math_cosh(args, state)
     MathTanh -> math_tanh(args, state)
     MathAsinh -> neg_zero_preserving(args, state, ffi_math_asinh)
@@ -267,7 +273,8 @@ fn math_exp(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) -> Finite(ffi_math_exp(n))
+    // exp_total already yields Infinity when e^n overflows a 64-bit float.
+    Finite(n) -> exp_total(n)
     NaN -> NaN
     Infinity -> Infinity
     NegInfinity -> Finite(0.0)
@@ -310,11 +317,10 @@ fn math_cbrt(
         True -> Finite(-0.0)
         False ->
           case n <. 0.0 {
-            True -> {
-              let result = float_power(float.absolute_value(n), 1.0 /. 3.0)
-              Finite(float.negate(result))
-            }
-            False -> Finite(float_power(n, 1.0 /. 3.0))
+            // |n|^(1/3) never overflows for a finite n, but pow_total is
+            // total so we get a JsNum back: negate it structurally.
+            True -> num_negate(pow_total(float.absolute_value(n), 1.0 /. 3.0))
+            False -> pow_total(n, 1.0 /. 3.0)
           }
       }
     NaN -> NaN
@@ -354,10 +360,8 @@ fn math_clz32(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
-  let n = case x {
-    Finite(f) -> to_uint32(f)
-    _ -> 0
-  }
+  // §7.1.7 ToUint32 (NaN/±∞ → 0).
+  let n = operators.num_to_uint32(x)
   Finite(int.to_float(count_leading_zeros_32(n)))
 }
 
@@ -367,19 +371,15 @@ fn math_imul(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use a, b <- math_binary(args, state)
-  let a32 = case a {
-    Finite(f) -> to_int32(f)
-    _ -> 0
-  }
-  let b32 = case b {
-    Finite(f) -> to_int32(f)
-    _ -> 0
-  }
-  // Wrap the exact Int product. It must NOT be routed through a Float
-  // (e.g. `to_int32(int.to_float(a32 * b32))`): the product can need up to
-  // 62 bits, so the low 32 bits — the only ones imul keeps — get rounded
-  // away by the f64 conversion whenever |product| > 2^53.
-  Finite(int.to_float(int_to_int32(a32 * b32)))
+  // §7.1.6 ToInt32 (NaN/±∞ → 0) on each operand.
+  let a32 = operators.num_to_int32(a)
+  let b32 = operators.num_to_int32(b)
+  // Wrap the exact Int product with operators.wrap_int32. It must NOT be
+  // routed through a Float (e.g. `num_to_int32` of `int.to_float(a32 * b32)`):
+  // the product can need up to 62 bits, so the low 32 bits — the only ones
+  // imul keeps — get rounded away by the f64 conversion whenever
+  // |product| > 2^53.
+  Finite(int.to_float(operators.wrap_int32(a32 * b32)))
 }
 
 /// Math.expm1(x) — e^x - 1 (more precise for small x)
@@ -392,11 +392,45 @@ fn math_expm1(
     Finite(n) ->
       case is_neg_zero(n) {
         True -> Finite(-0.0)
-        False -> Finite(ffi_math_exp(n) -. 1.0)
+        False -> expm1_finite(n)
       }
     NaN -> NaN
     Infinity -> Infinity
     NegInfinity -> Finite(-1.0)
+  }
+}
+
+/// e^n - 1 for a finite non-(-0) n.
+///
+/// Erlang's `math` module has no `expm1`; the naive `exp(n) -. 1.0` this
+/// replaces loses ALL significant digits once |n| is small (e^n rounds to a
+/// float adjacent to 1.0 and the subtraction cancels), so it returned 0 for
+/// e.g. `Math.expm1(1e-10)`. Kahan's correction recovers full precision
+/// from the (already rounded) `u = e^n`: `u - 1` is computed exactly by
+/// Sterbenz, then rescaled by `n / ln(u)` — the ratio of the argument we
+/// wanted to the argument `u` actually corresponds to.
+fn expm1_finite(n: Float) -> value.JsNum {
+  case exp_total(n) {
+    // e^n rounded to exactly 1: n is tiny, and e^n - 1 == n to full precision.
+    Finite(u) if u >=. 1.0 && u <=. 1.0 -> Finite(n)
+    Finite(u) -> {
+      let um1 = u -. 1.0
+      case um1 == -1.0 {
+        // e^n rounded to exactly 0 (n very negative): the answer is -1.
+        True -> Finite(-1.0)
+        // Divide FIRST: `n /. ln(u)` is ~1 (ln(u) is n to within a rounding),
+        // so multiplying by `um1` last cannot overflow. The other order,
+        // `um1 *. n`, is huge*huge near the top of the range and its
+        // intermediate overflows a 64-bit float even though the true result
+        // is finite — e.g. `Math.expm1(708)` would badarith on the BEAM.
+        False -> Finite(um1 *. { n /. ffi_math_log(u) })
+      }
+    }
+    // e^n overflowed a 64-bit float, so e^n - 1 overflows to the same value.
+    Infinity -> Infinity
+    // Unreachable from a finite n, but exp_total is total; pass them through.
+    NaN -> NaN
+    NegInfinity -> NegInfinity
   }
 }
 
@@ -412,10 +446,68 @@ fn math_log1p(
     Finite(n) ->
       case is_neg_zero(n) {
         True -> Finite(-0.0)
-        False -> Finite(ffi_math_log(1.0 +. n))
+        False -> log1p_finite(n)
       }
     NaN | NegInfinity -> NaN
     Infinity -> Infinity
+  }
+}
+
+/// ln(1 + n) for a finite n > -1 (the caller has already handled n <= -1).
+///
+/// Erlang's `math` module has no `log1p`; the naive `log(1.0 +. n)` this
+/// replaces loses ALL significant digits once |n| is small (`1.0 +. n`
+/// rounds away n's low bits, or to exactly 1.0), so it returned 0 for e.g.
+/// `Math.log1p(1e-10)`. Kahan's correction recovers full precision from the
+/// (already rounded) `u = 1 + n`: `ln(u)` is the answer for the value
+/// `u - 1` we actually have (exact by Sterbenz), so rescale by `n / (u-1)`.
+///
+/// `u` is always > 0 here — for n > -1 the nearest double to `1 + n` is
+/// never 0 — so `ffi_math_log(u)` cannot badarith.
+fn log1p_finite(n: Float) -> value.JsNum {
+  let u = 1.0 +. n
+  case u == 1.0 {
+    // 1 + n rounded to exactly 1: n is tiny, and ln(1+n) == n to full
+    // precision.
+    True -> Finite(n)
+    // Divide FIRST: `n /. (u - 1)` is ~1 (u - 1 is n to within a rounding),
+    // so multiplying by `ln(u)` (|·| <= ~745) last cannot overflow. The
+    // other order, `ln(u) *. n`, is ~709*n near the top of the range and its
+    // intermediate overflows a 64-bit float even though the true result is
+    // finite — e.g. `Math.log1p(1e308)` would badarith on the BEAM.
+    False -> Finite(ffi_math_log(u) *. { n /. { u -. 1.0 } })
+  }
+}
+
+/// Math.fround(x) — round to the nearest 32-bit float and widen back.
+/// A finite double whose magnitude exceeds the float32 range rounds to
+/// ±Infinity, which is why `ffi_fround` returns a JsNum, not a Float.
+fn math_fround(
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  case x {
+    Finite(n) -> ffi_fround(n)
+    other -> other
+  }
+}
+
+/// Math.sinh(x)
+fn math_sinh(
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  case x {
+    Finite(n) ->
+      case is_neg_zero(n) {
+        True -> Finite(-0.0)
+        // sinh_total yields ±Infinity (matching n's sign) once sinh(n)
+        // overflows a 64-bit float.
+        False -> sinh_total(n)
+      }
+    other -> other
   }
 }
 
@@ -426,7 +518,8 @@ fn math_cosh(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) -> Finite(ffi_math_cosh(n))
+    // cosh_total already yields Infinity when cosh(n) overflows.
+    Finite(n) -> cosh_total(n)
     NaN -> NaN
     Infinity | NegInfinity -> Infinity
   }
@@ -558,7 +651,8 @@ fn coerce_args_loop(
   }
 }
 
-/// Like finite_passthrough but preserves -0.0 (for sinh, asinh, etc.)
+/// Like finite_passthrough but preserves -0.0 (for asinh; sinh needs its
+/// own `math_sinh` because its FFI must be total over overflow).
 fn neg_zero_preserving(
   args: List(JsValue),
   state: State(host),
@@ -668,154 +762,6 @@ fn js_trunc(n: Float) -> Float {
   }
 }
 
-/// Exponentiation per ES2024 §6.1.6.1.3 Number::exponentiate.
-pub fn num_exp(base: value.JsNum, exp: value.JsNum) -> value.JsNum {
-  case base, exp {
-    // 1. If exponent is NaN, return NaN
-    _, NaN -> NaN
-    // 2. If exponent is +0 or -0, return 1 (even for NaN/Infinity base).
-    // Guard, not a `Finite(0.0)` literal pattern: on OTP >= 27 the literal
-    // only matches +0.0, so a -0.0 exponent would fall through to the
-    // finite/infinite arms below and produce the wrong answer.
-    _, Finite(e) if e >=. 0.0 && e <=. 0.0 -> Finite(1.0)
-    // 3. If base is NaN, return NaN
-    NaN, _ -> NaN
-    // 4-5. ±Infinity base with ±Infinity exponent
-    Infinity, Infinity -> Infinity
-    Infinity, NegInfinity -> Finite(0.0)
-    NegInfinity, Infinity -> Infinity
-    NegInfinity, NegInfinity -> Finite(0.0)
-    // abs(base) vs 1 with ±Infinity exponent
-    Finite(x), Infinity -> num_exp_finite_inf(x)
-    Finite(x), NegInfinity -> num_exp_finite_neginf(x)
-    // 6-7. Base is +Infinity
-    Infinity, Finite(y) ->
-      case y >. 0.0 {
-        True -> Infinity
-        False -> Finite(0.0)
-      }
-    // 8-11. Base is -Infinity
-    NegInfinity, Finite(y) ->
-      case y >. 0.0 {
-        True ->
-          case is_odd_integer(y) {
-            True -> NegInfinity
-            False -> Infinity
-          }
-        False ->
-          case is_odd_integer(y) {
-            True -> Finite(-0.0)
-            False -> Finite(0.0)
-          }
-      }
-    // 12-17. Base is ±0
-    Finite(x), Finite(y) -> num_exp_finite(x, y)
-  }
-}
-
-fn num_exp_finite_inf(x: Float) -> value.JsNum {
-  let abs_x = float.absolute_value(x)
-  case abs_x >. 1.0 {
-    True -> Infinity
-    False ->
-      case abs_x <. 1.0 {
-        True -> Finite(0.0)
-        // abs == 1
-        False -> NaN
-      }
-  }
-}
-
-fn num_exp_finite_neginf(x: Float) -> value.JsNum {
-  let abs_x = float.absolute_value(x)
-  case abs_x >. 1.0 {
-    True -> Finite(0.0)
-    False ->
-      case abs_x <. 1.0 {
-        True -> Infinity
-        // abs == 1
-        False -> NaN
-      }
-  }
-}
-
-fn num_exp_finite(x: Float, y: Float) -> value.JsNum {
-  case is_neg_zero(x) {
-    // Base is -0
-    True ->
-      case y >. 0.0 {
-        True ->
-          case is_odd_integer(y) {
-            True -> Finite(-0.0)
-            False -> Finite(0.0)
-          }
-        False ->
-          case is_odd_integer(y) {
-            True -> NegInfinity
-            False -> Infinity
-          }
-      }
-    False ->
-      case x == 0.0 {
-        // Base is +0
-        True ->
-          case y >. 0.0 {
-            True -> Finite(0.0)
-            False -> Infinity
-          }
-        // Normal finite case
-        False ->
-          case x <. 0.0 {
-            True -> {
-              let truncated = int.to_float(value.float_to_int(y))
-              case truncated == y {
-                True -> Finite(float_power(x, y))
-                // Non-integer exponent with negative base
-                False -> NaN
-              }
-            }
-            False -> Finite(float_power(x, y))
-          }
-      }
-  }
-}
-
-/// Check if a float is an odd integer.
-fn is_odd_integer(f: Float) -> Bool {
-  let truncated = value.float_to_int(f)
-  int.to_float(truncated) == f && int.is_odd(truncated)
-}
-
-/// Wrap an exact Int to an unsigned 32-bit value.
-///
-/// Work on Ints stays on Ints: converting an intermediate Int (e.g. the
-/// `a32 * b32` product in Math.imul) to a Float before wrapping rounds the
-/// low 32 bits away once the magnitude passes 2^53. `to_uint32`/`to_int32`
-/// below are the ONLY Float entry points, and they immediately truncate to
-/// an Int and delegate here.
-fn int_to_uint32(n: Int) -> Int {
-  int.bitwise_and(n, 0xFFFFFFFF)
-}
-
-/// Wrap an exact Int to a signed 32-bit value (see `int_to_uint32`).
-fn int_to_int32(n: Int) -> Int {
-  let u = int_to_uint32(n)
-  case u >= 0x80000000 {
-    True -> u - 0x100000000
-    False -> u
-  }
-}
-
-/// ToUint32: convert a float to a 32-bit unsigned integer (ES S7.1.7).
-fn to_uint32(f: Float) -> Int {
-  int_to_uint32(value.float_to_int(f))
-}
-
-/// ToInt32: convert a float to a 32-bit signed integer (ES S7.1.6).
-fn to_int32(f: Float) -> Int {
-  int_to_int32(value.float_to_int(f))
-}
-
 /// Count leading zeros in a 32-bit integer.
 fn count_leading_zeros_32(n: Int) -> Int {
   count_leading_zeros_loop(n, 31, 0)
@@ -834,26 +780,35 @@ fn count_leading_zeros_loop(n: Int, bit: Int, count: Int) -> Int {
   }
 }
 
-/// True for both +0.0 and -0.0 (companion to `is_neg_zero`).
-///
-/// Always use this instead of a `0.0` literal in a case pattern or an
-/// `x == 0.0` comparison: on OTP >= 27 both of those compile to `=:=`
-/// semantics and are True/matched only for +0.0, silently missing -0.0.
-/// The `>=.`/`<=.` pair is an arithmetic comparison, which treats the two
-/// zeros as equal. Usable anywhere; in a guard position (where function
-/// calls are not allowed) inline the same expression:
-/// `Finite(n) if n >=. 0.0 && n <=. 0.0 -> ...`
-pub fn is_zero(x: Float) -> Bool {
-  x >=. 0.0 && x <=. 0.0
-}
-
 // -- FFI --
+//
+// TOTAL wrappers (arc_math_ffi): every `math` BIF that can OVERFLOW a
+// 64-bit float — exp, pow, cosh, sinh — raises `badarith` on the BEAM
+// instead of returning ±Infinity, and Math.fround's float32 encoding of an
+// out-of-range double decodes to a `badmatch`. Any of those exceptions
+// would crash the whole runtime. So those entry points go through
+// arc_math_ffi, which catches the exception and returns the `value.JsNum`
+// runtime shape directly (`Finite(f)` / `Infinity` / `NegInfinity` / `NaN`).
+// Returning `JsNum` rather than `Float` means a caller CANNOT forget the
+// overflow case — the compiler rejects treating the result as a plain Float.
+//
+// Do not add a raw `@external(erlang, "math", ...)` binding for an
+// overflow-capable function; route it through arc_math_ffi instead.
 
-@external(erlang, "arc_math_ffi", "is_neg_zero")
-pub fn is_neg_zero(x: Float) -> Bool
+@external(erlang, "arc_math_ffi", "exp")
+fn exp_total(x: Float) -> value.JsNum
 
-@external(erlang, "math", "pow")
-fn float_power(base: Float, exp: Float) -> Float
+@external(erlang, "arc_math_ffi", "pow")
+fn pow_total(base: Float, exp: Float) -> value.JsNum
+
+@external(erlang, "arc_math_ffi", "cosh")
+fn cosh_total(x: Float) -> value.JsNum
+
+@external(erlang, "arc_math_ffi", "sinh")
+fn sinh_total(x: Float) -> value.JsNum
+
+@external(erlang, "arc_math_ffi", "fround")
+fn ffi_fround(x: Float) -> value.JsNum
 
 @external(erlang, "math", "sqrt")
 fn ffi_math_sqrt(x: Float) -> Float
@@ -888,20 +843,11 @@ fn ffi_math_atan(x: Float) -> Float
 @external(erlang, "math", "atan2")
 fn ffi_math_atan2(y: Float, x: Float) -> Float
 
-@external(erlang, "math", "exp")
-fn ffi_math_exp(x: Float) -> Float
-
 @external(erlang, "math", "log2")
 fn ffi_math_log2(x: Float) -> Float
 
 @external(erlang, "math", "log10")
 fn ffi_math_log10(x: Float) -> Float
-
-@external(erlang, "math", "sinh")
-fn ffi_math_sinh(x: Float) -> Float
-
-@external(erlang, "math", "cosh")
-fn ffi_math_cosh(x: Float) -> Float
 
 @external(erlang, "math", "tanh")
 fn ffi_math_tanh(x: Float) -> Float
@@ -917,6 +863,3 @@ fn ffi_math_atanh(x: Float) -> Float
 
 @external(erlang, "rand", "uniform")
 fn ffi_rand_uniform() -> Float
-
-@external(erlang, "arc_math_ffi", "fround")
-fn ffi_fround(x: Float) -> Float
