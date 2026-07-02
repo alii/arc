@@ -4,6 +4,7 @@ import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
+import arc/vm/internal/tree_array
 import arc/vm/ops/object
 import arc/vm/state.{
   type Heap, type State, type StepResult, type VmError, State, Thrown,
@@ -12,6 +13,7 @@ import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, GeneratorObject, JsObject, JsUndefined,
   ObjectSlot,
 }
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -270,10 +272,16 @@ fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
 ///
 /// Layout, from most to least specialized:
 ///   - GUARDED fast paths for Array/Arguments and ArrayIterator: a pure
-///     raw-heap copy/drain, taken only when a "protector" guard — a
-///     non-observable heap walk — proves it is equivalent to the spec's
-///     GetIterator + IteratorStepValue loop. See `is_intrinsic_array_values`
-///     and `is_intrinsic_array_iterator_next`; a failed guard falls to
+///     raw-heap copy/drain, taken only when "protector" guards —
+///     non-observable heap walks — prove it is equivalent to the spec's
+///     GetIterator + IteratorStepValue loop. Array/Arguments checks BOTH
+///     the source's @@iterator AND %ArrayIteratorPrototype%.next (plus
+///     holes / index overrides); ArrayIterator checks BOTH the iterator's
+///     inherited @@iterator AND its `next` (plus the same hole/override
+///     protector on its source array). See `is_intrinsic_array_values`,
+///     `is_intrinsic_array_iterator_next`,
+///     `is_intrinsic_iterator_proto_iterator` and
+///     `raw_iterator_source_copy_is_safe`; a failed guard falls to
 ///     `spread_via_iterator`.
 ///   - UNGUARDED fast paths for Generator, Set/Map + their iterators, and
 ///     String: these still assume the intrinsic @@iterator/`next` and do
@@ -303,19 +311,35 @@ pub fn spread_into_array(
             properties:,
             ..,
           )) -> {
-          // V8-protector-style guard for the raw-element copy. Resolving
-          // @@iterator here is a pure heap walk (no getter runs), so a
-          // guard MISS is never observable; a guard HIT means the object's
-          // @@iterator is still the intrinsic %Array.prototype.values%
-          // data property — no own override, no patched
-          // Array.prototype[Symbol.iterator], no swapped [[Prototype]].
+          // V8-protector-style guard for the raw-element copy. Both reads
+          // are pure heap walks (no getter runs), so a guard MISS is never
+          // observable; a guard HIT means the whole spec chain is still
+          // intrinsic:
+          //   1. the object's @@iterator is the intrinsic
+          //      %Array.prototype.values% data property — no own override,
+          //      no patched Array.prototype[Symbol.iterator], no swapped
+          //      [[Prototype]]; and
+          //   2. %ArrayIteratorPrototype%.next is still the intrinsic
+          //      (§23.1.5.2.1). GetIteratorDirect does Get(iter, "next") on
+          //      the FRESH array iterator that values() returns, which
+          //      resolves through %ArrayIteratorPrototype% — V8's
+          //      array-iterator protector guards exactly this.
           let intrinsic_iter =
             find_symbol_property(state.heap, src_ref, value.symbol_iterator)
             |> is_intrinsic_array_values(state.heap, _)
-          case intrinsic_iter {
-            // (a) @@iterator was overridden. The raw copy would ignore it
-            // entirely (`a[Symbol.iterator] = function*(){yield 9}` must
-            // NOT still spread a's elements) → real iterator protocol.
+          let intrinsic_next =
+            object.find_property(
+              state.heap,
+              state.builtins.array_iterator_proto,
+              value.Named("next"),
+            )
+            |> is_intrinsic_array_iterator_next(state.heap, _)
+          case intrinsic_iter && intrinsic_next {
+            // (a) @@iterator was overridden (the raw copy would ignore it
+            // entirely — `a[Symbol.iterator] = function*(){yield 9}` must
+            // NOT still spread a's elements), or (b)
+            // %ArrayIteratorPrototype%.next was patched (the spec loop
+            // calls it per element) → real iterator protocol.
             False -> spread_via_iterator(state, iterable, target_ref)
             True ->
               case
@@ -354,16 +378,24 @@ pub fn spread_into_array(
         Some(ObjectSlot(
           kind: value.ArrayIteratorObject(source:, index:, iter_kind:),
           ..,
-        )) ->
-          // Guard: the raw drain below never calls `.next`, so it is only
-          // valid while `next` still resolves (pure heap walk, no getter
-          // runs) to the intrinsic %ArrayIteratorPrototype%.next
-          // (§23.1.5.2.1). An own `it.next = ...` or a patched
-          // %ArrayIteratorPrototype%.next must be honored per call.
-          case
+        )) -> {
+          // Guard (both reads are pure heap walks, no getter runs):
+          //   1. §7.4.3 GetIterator(it) first calls it[@@iterator]
+          //      (inherited from %Iterator.prototype% — the `return this`
+          //      self-iterator), so `it[Symbol.iterator] = ...` must be
+          //      honored and must fail the guard.
+          //   2. The raw drain below never calls `.next`, so it is only
+          //      valid while `next` still resolves to the intrinsic
+          //      %ArrayIteratorPrototype%.next (§23.1.5.2.1). An own
+          //      `it.next = ...` or a patched %ArrayIteratorPrototype%.next
+          //      must be honored per call.
+          let intrinsic_self_iter =
+            find_symbol_property(state.heap, src_ref, value.symbol_iterator)
+            |> is_intrinsic_iterator_proto_iterator(state.heap, _)
+          let intrinsic_next =
             object.find_property(state.heap, src_ref, value.Named("next"))
             |> is_intrinsic_array_iterator_next(state.heap, _)
-          {
+          case intrinsic_self_iter && intrinsic_next {
             False -> spread_via_iterator(state, iterable, target_ref)
             True ->
               spread_array_iterator(
@@ -375,6 +407,7 @@ pub fn spread_into_array(
                 iter_kind,
               )
           }
+        }
         Some(ObjectSlot(kind: value.SetObject(store:), ..)) -> {
           // Set fast path — push values in insertion order.
           let values = ordered_entries.live_values(store)
@@ -556,11 +589,14 @@ fn spread_array_generic(
   }
 }
 
-/// Raw drain of an ArrayIteratorObject whose `next` is still the intrinsic
-/// %ArrayIteratorPrototype%.next (the caller has already proved this — see
-/// `is_intrinsic_array_iterator_next`). Copies the remaining elements from
-/// the iterator's current position in bulk and latches the iterator done,
-/// with no per-element .next() call or {value, done} result allocation.
+/// Raw drain of an ArrayIteratorObject whose @@iterator and `next` are still
+/// the intrinsics (the caller has already proved this — see
+/// `is_intrinsic_iterator_proto_iterator` / `is_intrinsic_array_iterator_next`).
+/// Copies the remaining elements from the iterator's current position in bulk
+/// and latches the iterator done, with no per-element .next() call or
+/// {value, done} result allocation. A second protector on the SOURCE array
+/// (`raw_iterator_source_copy_is_safe`) deopts holes / index overrides to the
+/// real per-.next() drain.
 fn spread_array_iterator(
   state: State(host),
   src_ref: Ref,
@@ -615,42 +651,80 @@ fn spread_array_iterator(
           Ok(State(..state, heap:))
         }
       }
-    _ -> {
-      // Drain remaining elements from the iterator's current position.
-      let #(length, elems) =
-        heap.read_array_like(state.heap, source)
-        |> option.unwrap(#(0, elements.new()))
-      let from = int.max(index, 0)
-      let heap = case iter_kind, index < 0 {
-        _, True -> state.heap
-        value.ArrayIterValues, False ->
-          append_range_to_array(state.heap, target_ref, elems, from, length)
-        _, False -> {
-          let values = case from >= length {
-            True -> []
-            False ->
-              int.range(from:, to: length, with: [], run: fn(acc, i) {
-                [
-                  elements.get_option(elems, i) |> option.unwrap(JsUndefined),
-                  ..acc
-                ]
-              })
-              |> list.reverse
+    _ ->
+      // Second protector, on the SOURCE array: the intrinsic next does
+      // Get(source, i) per index (§23.1.5.1), which runs accessor getters
+      // installed with defineProperty and consults the prototype chain for
+      // holes. The raw block copy below can't see either, so it is only
+      // equivalent when the source is a dense Array/Arguments with no dict
+      // index override. Anything else (including a non-array source, e.g.
+      // `Array.prototype.values.call(arrayLike)`) deopts to the real
+      // per-.next() drain, which the caller already proved intrinsic.
+      case raw_iterator_source_copy_is_safe(state.heap, source) {
+        None -> spread_via_iterator(state, JsObject(src_ref), target_ref)
+        // Drain remaining elements from the iterator's current position.
+        Some(#(length, elems)) -> {
+          let from = int.max(index, 0)
+          let heap = case iter_kind, index < 0 {
+            _, True -> state.heap
+            value.ArrayIterValues, False ->
+              append_range_to_array(state.heap, target_ref, elems, from, length)
+            _, False -> {
+              let values = case from >= length {
+                True -> []
+                False ->
+                  int.range(from:, to: length, with: [], run: fn(acc, i) {
+                    [
+                      elements.get_option(elems, i)
+                        |> option.unwrap(JsUndefined),
+                      ..acc
+                    ]
+                  })
+                  |> list.reverse
+              }
+              let #(heap, values) =
+                shape_iter_values(
+                  state.heap,
+                  state.builtins.array.prototype,
+                  iter_kind,
+                  from,
+                  values,
+                )
+              append_list_to_array(heap, target_ref, values)
+            }
           }
-          let #(heap, values) =
-            shape_iter_values(
-              state.heap,
-              state.builtins.array.prototype,
-              iter_kind,
-              from,
-              values,
-            )
-          append_list_to_array(heap, target_ref, values)
+          let heap = latch_array_iter_done(heap, src_ref)
+          Ok(State(..state, heap:))
         }
       }
-      let heap = latch_array_iter_done(heap, src_ref)
-      Ok(State(..state, heap:))
-    }
+  }
+}
+
+/// Protector for `spread_array_iterator`'s raw block copy of the SOURCE
+/// array's element storage: Some(#(length, elements)) iff the source is an
+/// Array/Arguments that is dense over [0, length) and has no dict index
+/// override, i.e. the raw element block IS what the intrinsic next's
+/// per-index Get would return (the block is returned so the caller does not
+/// re-read the slot). Pure heap walk, never observable — a miss only deopts.
+fn raw_iterator_source_copy_is_safe(
+  h: Heap(host),
+  source: Ref,
+) -> option.Option(#(Int, value.JsElements)) {
+  case heap.read(h, source) {
+    Some(ObjectSlot(kind: ArrayObject(length:), elements:, properties:, ..))
+    | Some(ObjectSlot(
+        kind: value.ArgumentsObject(length:),
+        elements:,
+        properties:,
+        ..,
+      )) ->
+      case
+        !object.has_index_overrides(properties) && is_dense(elements, length)
+      {
+        True -> Some(#(length, elements))
+        False -> None
+      }
+    _ -> None
   }
 }
 
@@ -762,6 +836,30 @@ fn is_intrinsic_array_iterator_next(
   }
 }
 
+/// True iff `prop` is a plain data property whose value is THE intrinsic
+/// %Iterator.prototype%[@@iterator] (§27.1.4.1) — the `return this`
+/// self-iterator every built-in iterator inherits. Same single-realm
+/// tag-equals-identity argument as `is_intrinsic_array_values`.
+fn is_intrinsic_iterator_proto_iterator(
+  h: Heap(host),
+  prop: option.Option(value.Property),
+) -> Bool {
+  case prop {
+    Some(value.DataProperty(value: JsObject(fn_ref), ..)) ->
+      case heap.read(h, fn_ref) {
+        Some(ObjectSlot(
+          kind: value.NativeFunction(
+            value.Dispatch(value.VmNative(value.IteratorSymbolIterator)),
+            ..,
+          ),
+          ..,
+        )) -> True
+        _ -> False
+      }
+    _ -> False
+  }
+}
+
 /// Resolve a symbol-keyed property along the prototype chain WITHOUT running
 /// any getter — the symbol analogue of `object.find_property`. Used only as
 /// a protector read, never as an observable [[Get]].
@@ -786,8 +884,21 @@ fn find_symbol_property(
 /// chain for a missing own index (`Array.prototype[1] = x; [...[0,,2]]`
 /// yields x, not undefined). The raw-element copy can't see that, so any
 /// hole forces the per-index-Get path.
+/// Runs on every guarded array spread, so it must stay allocation-free: a
+/// single counting fold (no intermediate index list, no reverse, no sort).
 fn is_dense(els: value.JsElements, length: Int) -> Bool {
-  list.length(elements.indices(els)) == length
+  count_present(els) == length
+}
+
+/// Number of present (non-hole) elements. O(k) with zero allocation for
+/// dense storage, O(1) for sparse (dict.size) and empty.
+fn count_present(els: value.JsElements) -> Int {
+  case els {
+    value.NoElements -> 0
+    value.DenseElements(data) ->
+      tree_array.sparse_fold(fn(_i, _v, n) { n + 1 }, 0, data)
+    value.SparseElements(data) -> dict.size(data)
+  }
 }
 
 /// Repeatedly resume the generator, pushing each yielded value onto the
