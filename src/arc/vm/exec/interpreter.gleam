@@ -25,19 +25,19 @@ import arc/vm/opcode.{
   CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
   DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
   DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
-  DefinePrivateMethod, DeleteElem, DeleteField, Dup, ForInNext, ForInStart,
-  GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar, GetField, GetField2,
-  GetGlobal, GetIterator, GetLocal, GetPrivateField, GetPrivateField2,
-  GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue,
-  GetSuperValue2, IncLocal, InitGlobalLex, InitialYield, IteratorCheckObject,
-  IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
-  Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod,
-  NewObject, NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pop,
-  PrivateIn, PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit,
-  PutElem, PutEvalVar, PutField, PutGlobal, PutLocal, PutLocalCheckInit,
-  PutPrivateField, PutPrivateFieldDyn, PutSuperValue, Return, Rot3, SetLine,
-  SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal,
-  UnaryOp, Unrot4, Yield, YieldStar,
+  DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
+  ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar,
+  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateField,
+  GetPrivateField2, GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf,
+  GetSuperValue, GetSuperValue2, IncLocal, InitGlobalLex, InitialYield,
+  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
+  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
+  MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
+  ObjectSpread, Pop, PrivateIn, PrivateInDyn, PushConst, PushTry, PutBoxed,
+  PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
+  PutLocalCheckInit, PutPrivateField, PutPrivateFieldDyn, PutSuperValue, Return,
+  Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
+  TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/coerce
@@ -2094,6 +2094,44 @@ fn step(
           }
         }
         [] -> underflow(state, "PutGlobal")
+      }
+    }
+
+    // §9.1.1.4.7 DeleteBinding on the global Environment Record — the static
+    // fallback of a sloppy `delete identifier` (emit_var_delete). A lexical
+    // (let/const) global lives in the declarative record; those bindings are
+    // never created deletable, so the answer is false without touching the
+    // object record. Otherwise perform a real [[Delete]] on the global
+    // object and push the result: configurable properties (implicit `x = 1`
+    // globals) are removed → true, non-configurable ones (NaN, Infinity,
+    // undefined) → false, and a missing name falls through [[Delete]]'s
+    // no-own-property case → true (spec step 4). Unlike DeleteField there is
+    // no strict-mode TypeError branch — `delete identifier` never parses in
+    // strict code (§13.5.1.1).
+    DeleteGlobalVar(name) -> {
+      case dict.get(state.ctx.lexical_globals, name) {
+        Ok(_lexical_binding) ->
+          Ok(
+            State(
+              ..state,
+              stack: [JsBool(False), ..state.stack],
+              pc: state.pc + 1,
+            ),
+          )
+        Error(Nil) -> {
+          use #(state, success) <- result.map(
+            state.rethrow(object.delete_property_stateful(
+              state,
+              state.ctx.global_object,
+              object.PkString(Named(name)),
+            )),
+          )
+          State(
+            ..state,
+            stack: [JsBool(success), ..state.stack],
+            pc: state.pc + 1,
+          )
+        }
       }
     }
 

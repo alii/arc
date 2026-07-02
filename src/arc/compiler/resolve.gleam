@@ -16,10 +16,10 @@ import arc/vm/opcode.{
   IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
   IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
   IrDefineMethodComputed, IrDefinePrivateAccessor, IrDefinePrivateField,
-  IrDefinePrivateMethod, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
-  IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
-  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
-  IrGetPrivateField, IrGetPrivateField2, IrGetPrivateFieldDyn,
+  IrDefinePrivateMethod, IrDeleteElem, IrDeleteField, IrDeleteGlobalVar, IrDup,
+  IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem,
+  IrGetElem2, IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
+  IrGetLocal, IrGetPrivateField, IrGetPrivateField2, IrGetPrivateFieldDyn,
   IrGetPrivateFieldDyn2, IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2,
   IrGetTemplateObject, IrGosub, IrIncLocal, IrInitGlobalLex, IrInitialYield,
   IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
@@ -323,6 +323,8 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.GetGlobal(name), ..acc])
     [IrPutGlobal(name), ..rest] ->
       resolve_ops(rest, labels, [opcode.PutGlobal(name), ..acc])
+    [IrDeleteGlobalVar(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.DeleteGlobalVar(name), ..acc])
     [IrTypeofGlobal(name), ..rest] ->
       resolve_ops(rest, labels, [opcode.TypeofGlobal(name), ..acc])
     [IrGetEvalVar(name), ..rest] ->

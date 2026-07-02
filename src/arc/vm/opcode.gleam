@@ -179,6 +179,17 @@ pub type Op {
   PutLocalCheckInit(index: Int)
   GetGlobal(name: String)
   PutGlobal(name: String)
+  /// §9.1.1.4.7 DeleteBinding on the global Environment Record — the static
+  /// fallback of a sloppy `delete identifier` that resolves to the global
+  /// scope. Lexical (let/const) globals live in the declarative record and
+  /// are never deletable, so they push false without touching the object
+  /// record. Everything else is a REAL [[Delete]] on the global object:
+  /// configurable properties (implicit `x = 1` globals) are removed and push
+  /// true, non-configurable ones push false, and undeclared names fall
+  /// through [[Delete]]'s missing-property case to true (spec step 4).
+  /// Never emitted in strict code — `delete identifier` is an early
+  /// SyntaxError there (§13.5.1.1).
+  DeleteGlobalVar(name: String)
   /// Check state.eval_env dict for `name`; if present push its value, else
   /// fall through to GetGlobal semantics. Emitted in sloppy functions that
   /// contain a direct eval call — lets eval-created vars be read by name.
@@ -687,6 +698,8 @@ pub type IrOp {
   IrPutLocalCheckInit(index: Int)
   IrGetGlobal(name: String)
   IrPutGlobal(name: String)
+  /// Lowers 1:1 to DeleteGlobalVar. See Op.DeleteGlobalVar.
+  IrDeleteGlobalVar(name: String)
   IrTypeofGlobal(name: String)
   IrGetEvalVar(name: String)
   IrPutEvalVar(name: String)

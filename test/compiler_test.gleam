@@ -2460,8 +2460,56 @@ pub fn delete_computed_test() -> Nil {
 }
 
 pub fn delete_variable_test() -> Nil {
-  // delete of a plain variable returns true in sloppy mode
+  // KNOWN DEVIATION from §9.1.1.4.7: a top-level `var` should be a
+  // non-configurable global property (§9.1.1.4.17 CreateGlobalVarBinding
+  // with D = false), making this `delete` return false. Arc's
+  // DeclareGlobalVar does not thread the D flag yet and creates a
+  // configurable property, so the real [[Delete]] succeeds and returns
+  // true. Fix DeclareGlobalVar's attributes to flip this expectation.
   assert_normal("var x = 1; delete x", JsBool(True))
+}
+
+// §13.5.1.2 `delete identifier` (sloppy mode).
+
+pub fn delete_implicit_global_removes_binding_test() -> Nil {
+  // An implicit global (`x = 5`) is a configurable property of the global
+  // object, so `delete x` performs a real [[Delete]] and the name is gone.
+  assert_normal("x = 5; delete x; typeof x", JsString("undefined"))
+}
+
+pub fn delete_var_in_function_test() -> Nil {
+  // §9.1.1.1.7 DeleteBinding: bindings created by declarations are never
+  // deletable — false, and the binding survives.
+  assert_normal(
+    "(function () { var y = 1; return [delete y, y]; })().join()",
+    JsString("false,1"),
+  )
+}
+
+pub fn delete_let_in_function_test() -> Nil {
+  assert_normal("(function () { let z; return delete z; })()", JsBool(False))
+}
+
+pub fn delete_top_level_let_test() -> Nil {
+  assert_normal("let z = 3; [delete z, z].join()", JsString("false,3"))
+}
+
+pub fn delete_arguments_binding_test() -> Nil {
+  assert_normal("(function () { return delete arguments; })()", JsBool(False))
+}
+
+pub fn delete_catch_parameter_test() -> Nil {
+  assert_normal("try { throw 1; } catch (e) { delete e; }", JsBool(False))
+}
+
+pub fn delete_undeclared_global_test() -> Nil {
+  // Not a binding anywhere: [[Delete]] of a missing own property is true.
+  assert_normal("delete definitelyNotDeclared", JsBool(True))
+}
+
+pub fn delete_non_configurable_global_test() -> Nil {
+  // NaN is a non-configurable global data property — false, still bound.
+  assert_normal("[delete NaN, typeof NaN].join()", JsString("false,number"))
 }
 
 pub fn delete_non_object_test() -> Nil {
@@ -7365,6 +7413,19 @@ pub fn repl_var_persistence_test() -> Nil {
 
 pub fn repl_function_persistence_test() -> Nil {
   assert_repl(["function f() { return 1; }", "f()"], JsNumber(Finite(1.0)))
+}
+
+pub fn repl_delete_lexical_global_test() -> Nil {
+  // §9.1.1.4.7 step 1: at LexGlobal top level a `let` lives in the global
+  // declarative record (state.ctx.lexical_globals) and is never deletable,
+  // so DeleteGlobalVar answers false without touching the global object.
+  assert_repl(["let dq = 1", "[delete dq, dq].join()"], JsString("false,1"))
+}
+
+pub fn repl_delete_implicit_global_test() -> Nil {
+  // An implicit global is a configurable property of the global object, so
+  // DeleteGlobalVar's [[Delete]] really removes it.
+  assert_repl(["dg = 1", "delete dg", "typeof dg"], JsString("undefined"))
 }
 
 pub fn repl_redeclaration_let_test() -> Nil {

@@ -1714,13 +1714,34 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
   }
 }
 
-/// `delete name` (sloppy mode). If an enclosing with object has the
-/// property, [[Delete]] it and push the result; otherwise push true.
+/// §13.5.1.2 `delete name` (sloppy mode — strict `delete identifier` is an
+/// early SyntaxError). If an enclosing with object has the property,
+/// IrWithDeleteVar performs the [[Delete]] and pushes the result; otherwise
+/// the static resolution decides:
+///
+/// - `scope.Local` — a binding created by a declaration (var/let/const/
+///   param/catch/function). §9.1.1.1.7 DeleteBinding on a declarative
+///   Environment Record whose binding was not created deletable returns
+///   false and removes nothing, so this is a compile-time constant.
+/// - `scope.Global` — §9.1.1.4.7: a real [[Delete]] against the realm's
+///   global object at runtime (IrDeleteGlobalVar), so configurable implicit
+///   globals (`x = 1`) really disappear and non-configurable ones report
+///   false.
+/// - `scope.EvalEnv` — GAP: there is no eval-env DeleteBinding opcode yet.
+///   Sloppy direct-eval `var` bindings ARE deletable (§19.2.1.3
+///   EvalDeclarationInstantiation creates them with D = true), so `true` is
+///   the right VALUE, but the binding is not actually removed from
+///   state.eval_env. Kept as the historical push-true rather than
+///   regressing it.
 fn emit_var_delete(e: Emitter, name: String) -> Emitter {
   let e = track_arguments_ref(e, name)
-  let #(crossed, _fallback) = split_with_chain(resolve(e, name))
+  let #(crossed, fallback) = split_with_chain(resolve(e, name))
   use e <- emit_with_chain(e, crossed, opcode.IrWithDeleteVar(name, _))
-  push_const(e, JsBool(True))
+  case fallback {
+    scope.Local(..) -> push_const(e, JsBool(False))
+    scope.Global(name:) -> emit_ir(e, opcode.IrDeleteGlobalVar(name))
+    scope.EvalEnv(name: _) -> push_const(e, JsBool(True))
+  }
 }
 
 /// §13.15.2 step 1a — ResolveBinding for an assignment-like target before
