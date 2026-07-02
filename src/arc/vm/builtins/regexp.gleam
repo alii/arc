@@ -22,16 +22,18 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, type RegExpNativeFn, DataProperty, Dispatch, Finite,
+  type JsValue, type LegacySlot, type Ref, type RegExpNativeFn, Dispatch, Finite,
   Index, Infinity, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
-  NaN, Named, NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
-  RegExpConstructor, RegExpGetDotAll, RegExpGetFlags, RegExpGetGlobal,
-  RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline, RegExpGetSource,
-  RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets, RegExpLegacyGetter,
-  RegExpLegacyInputSetter, RegExpNative, RegExpObject, RegExpPrototypeCompile,
-  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
-  RegExpStringIteratorNext, RegExpSymbolMatch, RegExpSymbolMatchAll,
-  RegExpSymbolReplace, RegExpSymbolSearch, RegExpSymbolSplit, WellKnownSymbol,
+  LegacyInput, LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen,
+  LegacyRightContext, NaN, Named, NativeFunction, NegInfinity, ObjectSlot,
+  OrdinaryObject, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags,
+  RegExpGetGlobal, RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline,
+  RegExpGetSource, RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets,
+  RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpNative, RegExpObject,
+  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
+  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpStringIteratorObject,
+  RegExpSymbolMatch, RegExpSymbolMatchAll, RegExpSymbolReplace,
+  RegExpSymbolSearch, RegExpSymbolSplit,
 }
 import gleam/bit_array
 import gleam/bool
@@ -72,42 +74,13 @@ fn byte_drop_start(string: String, start: Int) -> String
 @external(erlang, "arc_regexp_ffi", "next_char_boundary")
 fn next_char_boundary(string: String, position: Int) -> Int
 
-// ---------------------------------------------------------------------------
-// Internal slots for RegExp String Iterator objects (§22.2.9).
-// Stored as symbol properties under reserved ids no user code can construct.
-// ---------------------------------------------------------------------------
-
-const iter_slot_matcher = WellKnownSymbol(9101)
-
-const iter_slot_string = WellKnownSymbol(9102)
-
-const iter_slot_global = WellKnownSymbol(9103)
-
-const iter_slot_unicode = WellKnownSymbol(9104)
-
-const iter_slot_done = WellKnownSymbol(9105)
-
-// ---------------------------------------------------------------------------
-// Legacy static property slots (tc39 proposal-regexp-legacy-features).
-// Stored in the `legacy` dict inside the %RegExp% constructor's
-// NativeFunction(RegExpConstructor) kind, so each realm's constructor
-// carries its own state while keeping the slots invisible to property
-// enumeration (they are internal slots, not symbol-keyed properties).
-// Ids must stay in sync with the `slot` payload of RegExpLegacyGetter.
-// ---------------------------------------------------------------------------
-
-const legacy_slot_input = 9110
-
-const legacy_slot_last_match = 9111
-
-const legacy_slot_last_paren = 9112
-
-const legacy_slot_left_context = 9113
-
-const legacy_slot_right_context = 9114
-
-/// $N (1-9) is stored at legacy_slot_paren_base + N.
-const legacy_slot_paren_base = 9114
+// RegExp String Iterator internal state (§22.2.9) lives in the typed
+// `value.RegExpStringIteratorObject` object kind, and the legacy static
+// property slots (tc39 proposal-regexp-legacy-features) live in the `legacy`
+// dict inside the %RegExp% constructor's NativeFunction(RegExpConstructor)
+// kind, keyed by `value.LegacySlot`. Both keep each realm's state private —
+// neither is a property, so nothing shows up in Reflect.ownKeys /
+// Object.getOwnPropertySymbols.
 
 /// Set up RegExp constructor + RegExp.prototype.
 pub fn init(
@@ -240,18 +213,18 @@ fn install_legacy_accessors(
 ) -> Heap(host) {
   let getter_only =
     [
-      #("lastMatch", legacy_slot_last_match),
-      #("$&", legacy_slot_last_match),
-      #("lastParen", legacy_slot_last_paren),
-      #("$+", legacy_slot_last_paren),
-      #("leftContext", legacy_slot_left_context),
-      #("$`", legacy_slot_left_context),
-      #("rightContext", legacy_slot_right_context),
-      #("$'", legacy_slot_right_context),
+      #("lastMatch", LegacyLastMatch),
+      #("$&", LegacyLastMatch),
+      #("lastParen", LegacyLastParen),
+      #("$+", LegacyLastParen),
+      #("leftContext", LegacyLeftContext),
+      #("$`", LegacyLeftContext),
+      #("rightContext", LegacyRightContext),
+      #("$'", LegacyRightContext),
     ]
     |> list.append(
       int.range(1, 10, [], fn(acc, n) {
-        [#("$" <> int.to_string(n), legacy_slot_paren_base + n), ..acc]
+        [#("$" <> int.to_string(n), LegacyParen(n)), ..acc]
       }),
     )
 
@@ -263,7 +236,7 @@ fn install_legacy_accessors(
         common.alloc_native_fn(
           h,
           function_proto,
-          RegExpNative(RegExpLegacyGetter(ctor, legacy_slot_input)),
+          RegExpNative(RegExpLegacyGetter(ctor, LegacyInput)),
           "get " <> name,
           0,
         )
@@ -366,7 +339,7 @@ pub fn dispatch(
 fn legacy_static_get(
   this: JsValue,
   ctor: Ref,
-  slot: Int,
+  slot: LegacySlot,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this == JsObject(ctor) {
@@ -396,14 +369,14 @@ fn legacy_static_set_input(
     True -> {
       let val = helpers.first_arg_or_undefined(args)
       use s, state <- coerce.try_to_string(state, val)
-      let heap = write_legacy_slots(state.heap, ctor, [#(legacy_slot_input, s)])
+      let heap = write_legacy_slots(state.heap, ctor, [#(LegacyInput, s)])
       #(State(..state, heap:), Ok(JsUndefined))
     }
   }
 }
 
 /// Read one legacy slot off the constructor ("" when never written).
-fn read_legacy_slot(state: State(host), ctor: Ref, slot: Int) -> String {
+fn read_legacy_slot(state: State(host), ctor: Ref, slot: LegacySlot) -> String {
   case heap.read(state.heap, ctor) {
     Some(ObjectSlot(
       kind: NativeFunction(
@@ -422,7 +395,7 @@ fn read_legacy_slot(state: State(host), ctor: Ref, slot: Int) -> String {
 fn write_legacy_slots(
   h: Heap(host),
   ctor: Ref,
-  values: List(#(Int, String)),
+  values: List(#(LegacySlot, String)),
 ) -> Heap(host) {
   heap.update(h, ctor, fn(slot) {
     case slot {
@@ -475,7 +448,7 @@ fn update_legacy_statics(
     int.range(1, 10, [], fn(acc, n) {
       [
         #(
-          legacy_slot_paren_base + n,
+          LegacyParen(n),
           helpers.list_at(group_strings, n - 1) |> option.unwrap(""),
         ),
         ..acc
@@ -483,11 +456,11 @@ fn update_legacy_statics(
     })
   let heap =
     write_legacy_slots(state.heap, state.builtins.regexp.constructor, [
-      #(legacy_slot_input, s),
-      #(legacy_slot_last_match, byte_slice(s, match_start, match_len)),
-      #(legacy_slot_last_paren, last_paren),
-      #(legacy_slot_left_context, byte_slice(s, 0, match_start)),
-      #(legacy_slot_right_context, byte_drop_start(s, match_start + match_len)),
+      #(LegacyInput, s),
+      #(LegacyLastMatch, byte_slice(s, match_start, match_len)),
+      #(LegacyLastParen, last_paren),
+      #(LegacyLeftContext, byte_slice(s, 0, match_start)),
+      #(LegacyRightContext, byte_drop_start(s, match_start + match_len)),
       ..parens
     ])
   State(..state, heap:)
@@ -2322,7 +2295,8 @@ fn regexp_symbol_match_all(
 
 /// §22.2.9.1 CreateRegExpStringIterator. The iterator inherits from
 /// %Iterator.prototype% and carries an own `next` method; its internal state
-/// lives in reserved symbol slots.
+/// ([[IteratingRegExp]], [[IteratedString]], [[Global]], [[Unicode]],
+/// [[Done]]) lives in the typed RegExpStringIteratorObject kind.
 fn create_regexp_string_iterator(
   state: State(host),
   matcher: JsValue,
@@ -2342,69 +2316,34 @@ fn create_regexp_string_iterator(
     heap.alloc(
       heap,
       ObjectSlot(
-        kind: OrdinaryObject,
+        kind: RegExpStringIteratorObject(
+          matcher:,
+          string: s,
+          global:,
+          unicode: full_unicode,
+          done: False,
+        ),
         properties: common.named_props([
           #("next", value.builtin_property(JsObject(next_fn))),
         ]),
         elements: elements.new(),
         prototype: Some(state.builtins.iterator.prototype),
-        symbol_properties: [
-          #(iter_slot_matcher, value.data(matcher)),
-          #(iter_slot_string, value.data(JsString(s))),
-          #(iter_slot_global, value.data(JsBool(global))),
-          #(iter_slot_unicode, value.data(JsBool(full_unicode))),
-          #(iter_slot_done, value.data(JsBool(False))),
-        ],
+        symbol_properties: [],
         extensible: True,
       ),
     )
   #(State(..state, heap:), Ok(JsObject(iter_ref)))
 }
 
-/// Internal iterator state read out of the reserved symbol slots.
-type IterState {
-  IterState(matcher: JsValue, string: String, global: Bool, done: Bool)
-}
-
-fn read_iter_state(state: State(host), ref: Ref) -> Option(IterState) {
-  case heap.read(state.heap, ref) {
-    Some(ObjectSlot(symbol_properties: sp, ..)) -> {
-      let find = fn(key) {
-        case list.key_find(sp, key) {
-          Ok(DataProperty(value: v, ..)) -> Some(v)
-          _ -> None
-        }
-      }
-      case
-        find(iter_slot_matcher),
-        find(iter_slot_string),
-        find(iter_slot_global),
-        find(iter_slot_done)
-      {
-        Some(matcher),
-          Some(JsString(s)),
-          Some(JsBool(global)),
-          Some(JsBool(done))
-        -> Some(IterState(matcher:, string: s, global:, done:))
-        _, _, _, _ -> None
-      }
-    }
-    _ -> None
-  }
-}
-
+/// Latch the iterator's [[Done]] internal slot.
 fn mark_iter_done(state: State(host), ref: Ref) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       case slot {
-        ObjectSlot(symbol_properties: sp, ..) ->
+        ObjectSlot(kind: RegExpStringIteratorObject(..) as kind, ..) ->
           ObjectSlot(
             ..slot,
-            symbol_properties: list.key_set(
-              sp,
-              iter_slot_done,
-              value.data(JsBool(True)),
-            ),
+            kind: RegExpStringIteratorObject(..kind, done: True),
           )
         other -> other
       }
@@ -2419,14 +2358,19 @@ fn regexp_string_iterator_next(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
-      case read_iter_state(state, ref) {
-        None ->
-          state.type_error(
-            state,
-            "next method called on incompatible receiver: not a RegExp String Iterator",
-          )
-        Some(IterState(done: True, ..)) -> iter_result(state, JsUndefined, True)
-        Some(IterState(matcher:, string: s, global:, done: False)) -> {
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: RegExpStringIteratorObject(done: True, ..), ..)) ->
+          iter_result(state, JsUndefined, True)
+        Some(ObjectSlot(
+          kind: RegExpStringIteratorObject(
+            matcher:,
+            string: s,
+            global:,
+            done: False,
+            ..,
+          ),
+          ..,
+        )) -> {
           use match, state <- try_regexp_exec(state, matcher, s)
           case match {
             JsNull -> {
@@ -2453,6 +2397,11 @@ fn regexp_string_iterator_next(
               }
           }
         }
+        _ ->
+          state.type_error(
+            state,
+            "next method called on incompatible receiver: not a RegExp String Iterator",
+          )
       }
     _ ->
       state.type_error(
