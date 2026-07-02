@@ -15,17 +15,15 @@
 
 import arc/module
 import arc/module/graph
+import arc/module/registry
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/dynamic_import
-import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined, Named,
-  ObjectSlot, OrdinaryObject,
+  type JsValue, type Ref, JsObject, JsString, JsUndefined, Named,
 }
 import gleam/dict
 import gleam/io
@@ -34,25 +32,11 @@ import gleam/option.{None, Some}
 import gleam/set
 import gleam/string
 
-/// Hidden global property: resolved specifier → cached namespace object.
-const cache_property = "__arc_module_cache__"
-
-/// Hidden global property: resolved specifier → cached evaluation error.
-/// Shared with the module evaluator's heap-resident error registry (a
-/// deferred-namespace trigger that hits an evaluation error caches it here,
-/// and rethrows one cached by an earlier dynamic import — and vice versa).
-const error_cache_property = module.error_cache_property
-
-/// Hidden global property: resolved specifier → cached Deferred Module
-/// Namespace. `import defer` / `import.defer()` of the same module must
-/// yield the identical object ([[DeferredNamespace]] is per module record).
-const deferred_cache_property = "__arc_module_deferred__"
-
-/// Hidden global property: resolved specifier → in-flight namespace promise
-/// for a module parked on top-level await. A re-import of an
-/// ~evaluating-async~ module returns this same promise (Evaluate() step 4 —
-/// [[TopLevelCapability]]); cleared when evaluation settles.
-const pending_cache_property = "__arc_module_pending__"
+// The realm-wide module caches (namespaces, deferred namespaces, evaluation
+// errors, pending top-level-await promises, statuses) live on hidden global
+// objects behind the typed accessors of `arc/module/registry` — shared with
+// the module evaluator so a deferred-namespace trigger and a dynamic import
+// observe the same state.
 
 /// Resolve a raw specifier against its referrer to the module's canonical
 /// specifier — specifier math and existence probing, no source reading.
@@ -147,31 +131,46 @@ fn import_module(
       // pending cache (module parked on top-level await) wins over the
       // namespace cache: per Evaluate() step 4 a re-import returns the same
       // in-flight top-level promise instead of re-running the body.
-      case read_cached(state, error_cache_property, resolved) {
+      case
+        registry.read_module_error(
+          state.heap,
+          state.ctx.global_object,
+          resolved,
+        )
+      {
         Some(error) -> #(state, Error(error))
         None ->
-          case read_cached(state, pending_cache_property, resolved) {
-            Some(JsObject(_) as pending_promise) -> #(
-              state,
-              Ok(pending_promise),
+          case
+            registry.read_pending_promise(
+              state.heap,
+              state.ctx.global_object,
+              resolved,
             )
-            Some(_) | None -> {
+          {
+            Some(pending_promise_ref) -> #(
+              state,
+              Ok(JsObject(pending_promise_ref)),
+            )
+            None -> {
               // A registered namespace alone is not enough: linking (e.g. an
               // earlier `import.defer()`) registers namespaces WITHOUT
               // evaluating. Only short-circuit when the module's body has
               // completed (`Evaluated`) or is mid-run (`Evaluating` — the
               // re-entrant import case, which must not re-run the body).
               let status =
-                module.evaluation_status(
+                registry.read_module_status(
                   state.heap,
                   state.ctx.global_object,
                   resolved,
                 )
-              case read_cached(state, cache_property, resolved), status {
-                Some(JsObject(_) as namespace), Some(_) -> #(
-                  state,
-                  Ok(namespace),
+              let namespace =
+                registry.read_namespace(
+                  state.heap,
+                  state.ctx.global_object,
+                  resolved,
                 )
+              case namespace, status {
+                Some(ns_ref), Some(_) -> #(state, Ok(JsObject(ns_ref)))
                 _, _ -> evaluate_module(state, resolved, resolve, load)
               }
             }
@@ -227,8 +226,7 @@ fn evaluate_module(
           )
         Error(module.EvaluationError(value: thrown, heap: _)) -> {
           // Repeat the same rejection on every future import of this entry.
-          let state =
-            write_cached(state, error_cache_property, resolved, thrown)
+          let state = cache_module_error(state, resolved, thrown)
           #(state, Error(thrown))
         }
         Error(module.EvaluationPending(promise_data_ref:, heap: _)) ->
@@ -263,12 +261,20 @@ fn defer_import_module(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // An already-failed module repeats the same rejection; an already
   // registered deferred namespace is returned as-is.
-  case read_cached(state, error_cache_property, resolved) {
+  case
+    registry.read_module_error(state.heap, state.ctx.global_object, resolved)
+  {
     Some(error) -> #(state, Error(error))
     None ->
-      case read_cached(state, deferred_cache_property, resolved) {
-        Some(JsObject(_) as deferred_ns) -> #(state, Ok(deferred_ns))
-        Some(_) | None -> {
+      case
+        registry.read_deferred_namespace(
+          state.heap,
+          state.ctx.global_object,
+          resolved,
+        )
+      {
+        Some(deferred_ns_ref) -> #(state, Ok(JsObject(deferred_ns_ref)))
+        None -> {
           use source <- with_loaded_source(state, resolved, load)
           case module.compile_bundle(resolved, source, resolve, load) {
             Error(err) -> compile_bundle_rejection(state, resolved, err)
@@ -305,11 +311,14 @@ fn defer_import_module(
                   case deferred_ns {
                     Some(JsObject(_) as ns) -> {
                       let state =
-                        write_cached(
-                          state,
-                          deferred_cache_property,
-                          resolved,
-                          ns,
+                        State(
+                          ..state,
+                          heap: registry.write_deferred_namespace(
+                            state.heap,
+                            state.ctx.global_object,
+                            resolved,
+                            ns,
+                          ),
                         )
                       evaluate_deferred_async_deps(
                         state,
@@ -408,7 +417,7 @@ fn evaluate_deferred_async_deps(
       }
     Error(module.EvaluationError(value: thrown, heap: _)) -> {
       // Repeat the same rejection on every future import of this entry.
-      let state = write_cached(state, error_cache_property, resolved, thrown)
+      let state = cache_module_error(state, resolved, thrown)
       #(state, Error(thrown))
     }
     Error(other) ->
@@ -447,10 +456,11 @@ fn chain_deferred_settlement(
             // record ~evaluated~ so a later deferred-namespace trigger does
             // not see a stuck ~evaluating~ and refuse to run.
             let heap =
-              module.record_module_evaluated(
+              registry.write_module_status(
                 state.heap,
                 state.ctx.global_object,
                 dep_spec,
+                registry.Evaluated,
               )
             let state =
               chain_deferred_settlement(
@@ -478,15 +488,8 @@ fn chain_deferred_settlement(
             // imports and deferred-namespace triggers rethrow it. The entry
             // itself stays unevaluated and uncached — a later import.defer
             // re-links and surfaces the dep's cached error.
-            let heap =
-              module.record_module_error(
-                state.heap,
-                state.ctx.global_object,
-                dep_spec,
-                reason,
-              )
-            let state =
-              call_import_settle_fn(State(..state, heap:), reject_fn, reason)
+            let state = cache_module_error(state, dep_spec, reason)
+            let state = call_import_settle_fn(state, reject_fn, reason)
             #(state, Ok(JsUndefined))
           },
           "%ContinueDeferredImportRejected%",
@@ -539,16 +542,16 @@ fn link_bundle_with_registry(
   let specs = dict.keys(bundle.modules)
   let preexisting =
     list.fold(specs, dict.new(), fn(acc, spec) {
-      case read_cached_heap(h, global_object, cache_property, spec) {
-        Some(JsObject(ns_ref)) -> dict.insert(acc, spec, ns_ref)
-        Some(_) | None -> acc
+      case registry.read_namespace(h, global_object, spec) {
+        Some(ns_ref) -> dict.insert(acc, spec, ns_ref)
+        None -> acc
       }
     })
   let preexisting_deferred =
     list.fold(specs, dict.new(), fn(acc, spec) {
-      case read_cached_heap(h, global_object, deferred_cache_property, spec) {
-        Some(JsObject(ns_ref)) -> dict.insert(acc, spec, ns_ref)
-        Some(_) | None -> acc
+      case registry.read_deferred_namespace(h, global_object, spec) {
+        Some(ns_ref) -> dict.insert(acc, spec, ns_ref)
+        None -> acc
       }
     })
   case
@@ -568,8 +571,7 @@ fn link_bundle_with_registry(
           let #(spec, ns) = pair
           case dict.has_key(preexisting, spec) {
             True -> h
-            False ->
-              write_cached_heap(h, global_object, cache_property, spec, ns)
+            False -> registry.write_namespace(h, global_object, spec, ns)
           }
         })
       let h =
@@ -581,13 +583,7 @@ fn link_bundle_with_registry(
             case dict.has_key(preexisting_deferred, spec) {
               True -> h
               False ->
-                write_cached_heap(
-                  h,
-                  global_object,
-                  deferred_cache_property,
-                  spec,
-                  ns,
-                )
+                registry.write_deferred_namespace(h, global_object, spec, ns)
             }
           },
         )
@@ -608,8 +604,9 @@ fn pending_module_promise(
   tla_data_ref: Ref,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // The namespace was pre-published in the registry before any body ran.
-  case read_cached(state, cache_property, resolved) {
-    Some(JsObject(_) as namespace) -> {
+  case registry.read_namespace(state.heap, state.ctx.global_object, resolved) {
+    Some(namespace_ref) -> {
+      let namespace = JsObject(namespace_ref)
       let #(heap, ns_promise_ref, ns_data_ref) =
         builtins_promise.create_promise(
           state.heap,
@@ -629,8 +626,7 @@ fn pending_module_promise(
           heap,
           state.builtins.function.prototype,
           fn(_args, _this, state) {
-            let state =
-              write_cached(state, pending_cache_property, resolved, JsUndefined)
+            let state = clear_pending_promise(state, resolved)
             #(state, Ok(namespace))
           },
           "%FinishDynamicImport%",
@@ -647,10 +643,8 @@ fn pending_module_promise(
               [r, ..] -> r
               [] -> JsUndefined
             }
-            let state =
-              write_cached(state, pending_cache_property, resolved, JsUndefined)
-            let state =
-              write_cached(state, error_cache_property, resolved, reason)
+            let state = clear_pending_promise(state, resolved)
+            let state = cache_module_error(state, resolved, reason)
             #(state, Error(reason))
           },
           "%FinishDynamicImportRejected%",
@@ -667,38 +661,53 @@ fn pending_module_promise(
           ns_reject,
         )
       let state =
-        write_cached(
-          state,
-          pending_cache_property,
-          resolved,
-          JsObject(ns_promise_ref),
+        State(
+          ..state,
+          heap: registry.write_pending_promise(
+            state.heap,
+            state.ctx.global_object,
+            resolved,
+            ns_promise_ref,
+          ),
         )
       #(state, Ok(JsObject(ns_promise_ref)))
     }
-    other -> {
-      let state = case other {
-        Some(unexpected) -> {
-          echo_unexpected_pending_namespace(resolved, unexpected)
-          state
-        }
-        None -> state
-      }
+    None ->
       state.type_error(
         state,
         "Module '" <> resolved <> "' produced no namespace",
       )
-    }
   }
 }
 
-/// Log an unexpected non-object namespace cache entry for a pending module —
-/// indicates registry corruption, never expected in normal operation.
-fn echo_unexpected_pending_namespace(resolved: String, val: JsValue) -> Nil {
-  io.println_error(
-    "arc: pending module '"
-    <> resolved
-    <> "' has non-object namespace cache entry: "
-    <> string.inspect(val),
+/// Record `resolved`'s sticky evaluation error in the realm registry — every
+/// later import or deferred-namespace trigger repeats the same rejection.
+fn cache_module_error(
+  state: State(host),
+  resolved: String,
+  err: JsValue,
+) -> State(host) {
+  State(
+    ..state,
+    heap: registry.write_module_error(
+      state.heap,
+      state.ctx.global_object,
+      resolved,
+      err,
+    ),
+  )
+}
+
+/// Drop `resolved`'s in-flight top-level-await promise: its evaluation has
+/// settled, so future imports read the namespace or error cache instead.
+fn clear_pending_promise(state: State(host), resolved: String) -> State(host) {
+  State(
+    ..state,
+    heap: registry.clear_pending_promise(
+      state.heap,
+      state.ctx.global_object,
+      resolved,
+    ),
   )
 }
 
@@ -737,9 +746,9 @@ pub fn evaluate_bundle_with_registry(
   let specs = dict.keys(bundle.modules)
   let preexisting =
     list.fold(specs, dict.new(), fn(acc, spec) {
-      case read_cached_heap(h, global_object, cache_property, spec) {
-        Some(JsObject(ns_ref)) -> dict.insert(acc, spec, ns_ref)
-        Some(_) | None -> acc
+      case registry.read_namespace(h, global_object, spec) {
+        Some(ns_ref) -> dict.insert(acc, spec, ns_ref)
+        None -> acc
       }
     })
   // Link + register every NEW module's namespace (and deferred namespace)
@@ -754,9 +763,9 @@ pub fn evaluate_bundle_with_registry(
       // run when imported eagerly.
       let already_evaluated =
         list.fold(specs, set.new(), fn(acc, spec) {
-          case module.evaluation_status(h, global_object, spec) {
-            Some(module.Evaluated) -> set.insert(acc, spec)
-            Some(module.Evaluating) | None -> acc
+          case registry.read_module_status(h, global_object, spec) {
+            Some(registry.Evaluated) -> set.insert(acc, spec)
+            Some(registry.Evaluating) | None -> acc
           }
         })
       let #(evaluated, jobs, result) =
@@ -779,14 +788,7 @@ pub fn evaluate_bundle_with_registry(
                 dict.has_key(preexisting, spec) || set.contains(evaluated, spec)
               {
                 True -> h
-                False ->
-                  write_cached_heap(
-                    h,
-                    global_object,
-                    cache_property,
-                    spec,
-                    JsUndefined,
-                  )
+                False -> registry.clear_namespace(h, global_object, spec)
               }
             })
           #(h, jobs, Error(module.EvaluationError(value:, heap: h)))
@@ -835,80 +837,4 @@ fn compile_bundle_rejection(
         "Failed to compile module '" <> resolved <> "'",
       )
   }
-}
-
-/// Read `key` off the hidden cache object `property` on the global, if both exist.
-fn read_cached(
-  state: State(host),
-  property: String,
-  key: String,
-) -> option.Option(JsValue) {
-  read_cached_heap(state.heap, state.ctx.global_object, property, key)
-}
-
-fn read_cached_heap(
-  h: Heap(host),
-  global_object: Ref,
-  property: String,
-  key: String,
-) -> option.Option(JsValue) {
-  case object.get_own_property(h, global_object, Named(property)) {
-    Some(DataProperty(value: JsObject(cache_ref), ..)) ->
-      case object.get_own_property(h, cache_ref, Named(key)) {
-        Some(DataProperty(value: cached, ..)) -> Some(cached)
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
-/// Write `key` → `val` into the hidden cache object `property` on the global,
-/// creating the cache object on first use.
-fn write_cached(
-  state: State(host),
-  property: String,
-  key: String,
-  val: JsValue,
-) -> State(host) {
-  let h =
-    write_cached_heap(state.heap, state.ctx.global_object, property, key, val)
-  State(..state, heap: h)
-}
-
-fn write_cached_heap(
-  h: Heap(host),
-  global_object: Ref,
-  property: String,
-  key: String,
-  val: JsValue,
-) -> Heap(host) {
-  let #(h, cache_ref) = case
-    object.get_own_property(h, global_object, Named(property))
-  {
-    Some(DataProperty(value: JsObject(cache_ref), ..)) -> #(h, cache_ref)
-    _ -> {
-      let #(h, cache_ref) =
-        heap.alloc(
-          h,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: None,
-            symbol_properties: [],
-            extensible: True,
-          ),
-        )
-      let h =
-        object.define_method_property(
-          h,
-          global_object,
-          Named(property),
-          JsObject(cache_ref),
-        )
-      #(h, cache_ref)
-    }
-  }
-  let #(h, _) = object.set_property(h, cache_ref, Named(key), val)
-  h
 }

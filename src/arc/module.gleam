@@ -11,6 +11,7 @@ import arc/compiler
 import arc/esm
 import arc/link
 import arc/module/graph
+import arc/module/registry
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/reflect
@@ -331,157 +332,15 @@ fn resolved_specifier(m: CompiledModule, raw: String) -> String {
 }
 
 // =============================================================================
-// Module status registry (heap-resident, on hidden global-object properties)
+// Module status / error registry
 // =============================================================================
 //
 // Deferred evaluation needs module evaluation state that BOTH the link-time
 // DFS evaluator and a deferred namespace's runtime trigger (which fires while
 // some other module's body is mid-execution) can observe. Gleam data is
-// immutable, so that shared state lives in the heap: hidden objects on the
-// global, keyed by resolved specifier — the same technique module_host uses
-// for its namespace registry.
-
-/// A module's evaluation status in the heap-resident registry. The absence of
-/// a status (`None` from `evaluation_status`) means the body has not started
-/// ([[Status]] ~linked~).
-pub type ModuleStatus {
-  /// The body is running or is parked on top-level await.
-  Evaluating
-  /// The body completed.
-  Evaluated
-}
-
-/// Hidden global property: resolved specifier → the module's `ModuleStatus`,
-/// heap-encoded as a JsString by `write_module_status`/`read_module_status`.
-/// Absent/undefined = not yet started ([[Status]] ~linked~).
-pub const status_property = "__arc_module_status__"
-
-/// Hidden global property: resolved specifier → the value the module's
-/// evaluation threw. Sticky — re-evaluation attempts rethrow it (§16.2.1.5.3).
-/// Shared with module_host's dynamic-import error cache.
-pub const error_cache_property = "__arc_module_errors__"
-
-fn read_hidden_cache(
-  h: Heap(host),
-  global_object: Ref,
-  property: String,
-  key: String,
-) -> Option(JsValue) {
-  case object.get_own_property(h, global_object, value.Named(property)) {
-    Some(value.DataProperty(value: JsObject(cache_ref), ..)) ->
-      case object.get_own_property(h, cache_ref, value.Named(key)) {
-        Some(value.DataProperty(value: cached, ..)) -> Some(cached)
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
-fn write_hidden_cache(
-  h: Heap(host),
-  global_object: Ref,
-  property: String,
-  key: String,
-  val: JsValue,
-) -> Heap(host) {
-  let #(h, cache_ref) = case
-    object.get_own_property(h, global_object, value.Named(property))
-  {
-    Some(value.DataProperty(value: JsObject(cache_ref), ..)) -> #(h, cache_ref)
-    _ -> {
-      let #(h, cache_ref) =
-        heap.alloc(
-          h,
-          ObjectSlot(
-            kind: value.OrdinaryObject,
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: None,
-            symbol_properties: [],
-            extensible: True,
-          ),
-        )
-      let h =
-        object.define_method_property(
-          h,
-          global_object,
-          value.Named(property),
-          JsObject(cache_ref),
-        )
-      #(h, cache_ref)
-    }
-  }
-  let #(h, _) = object.set_property(h, cache_ref, value.Named(key), val)
-  h
-}
-
-/// Public view of a module's evaluation status for registry-keeping hosts:
-/// `Some(Evaluated)` once its body completed, `Some(Evaluating)` while it
-/// runs (or is parked on top-level await), `None` when it has not started.
-pub fn evaluation_status(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(ModuleStatus) {
-  read_module_status(h, global_object, spec)
-}
-
-// The JsString encoding of `ModuleStatus` is private to the next two
-// functions: `write_module_status` is the only writer, so `read_module_status`
-// maps any other heap value (including a cleared JsUndefined) to `None`.
-
-fn read_module_status(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(ModuleStatus) {
-  case read_hidden_cache(h, global_object, status_property, spec) {
-    Some(JsString("evaluating")) -> Some(Evaluating)
-    Some(JsString("evaluated")) -> Some(Evaluated)
-    Some(_) | None -> None
-  }
-}
-
-fn write_module_status(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-  status: ModuleStatus,
-) -> Heap(host) {
-  let encoded = case status {
-    Evaluating -> "evaluating"
-    Evaluated -> "evaluated"
-  }
-  write_hidden_cache(h, global_object, status_property, spec, JsString(encoded))
-}
-
-fn clear_module_status(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Heap(host) {
-  write_hidden_cache(h, global_object, status_property, spec, JsUndefined)
-}
-
-fn read_module_error(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(JsValue) {
-  case read_hidden_cache(h, global_object, error_cache_property, spec) {
-    Some(JsUndefined) | None -> None
-    Some(err) -> Some(err)
-  }
-}
-
-fn write_module_error(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-  err: JsValue,
-) -> Heap(host) {
-  write_hidden_cache(h, global_object, error_cache_property, spec, err)
-}
+// immutable, so that shared state lives in the heap, behind the typed
+// accessors of `arc/module/registry` — the single owner of every hidden
+// global-object cache the module system keeps (status, errors, namespaces).
 
 // =============================================================================
 // Runtime Evaluation (evaluate_bundle)
@@ -891,8 +750,8 @@ fn eval_module_inner(
   let already_evaluated =
     dict.has_key(bundle.host_modules, specifier)
     || set.contains(state.evaluated, specifier)
-    || read_module_status(state.heap, global_object, specifier)
-    == Some(Evaluated)
+    || registry.read_module_status(state.heap, global_object, specifier)
+    == Some(registry.Evaluated)
   case already_evaluated {
     True -> #(state, Ok(#(JsUndefined, state.heap)))
     False ->
@@ -900,7 +759,11 @@ fn eval_module_inner(
       case
         dict.get(state.errors, specifier)
         |> option.from_result
-        |> option.or(read_module_error(state.heap, global_object, specifier))
+        |> option.or(registry.read_module_error(
+          state.heap,
+          global_object,
+          specifier,
+        ))
       {
         Some(err_val) -> #(state, Error(EvaluationError(err_val, state.heap)))
         None ->
@@ -909,8 +772,8 @@ fn eval_module_inner(
           // re-entering
           case
             set.contains(state.evaluating, specifier)
-            || read_module_status(state.heap, global_object, specifier)
-            == Some(Evaluating)
+            || registry.read_module_status(state.heap, global_object, specifier)
+            == Some(registry.Evaluating)
           {
             True -> #(state, Ok(#(JsUndefined, state.heap)))
             False ->
@@ -1002,7 +865,12 @@ fn eval_module_body(
         _ -> JsString(string.inspect(err))
       }
       let heap =
-        write_module_error(state.heap, global_object, specifier, error_val)
+        registry.write_module_error(
+          state.heap,
+          global_object,
+          specifier,
+          error_val,
+        )
       let state =
         EvalState(
           ..state,
@@ -1024,7 +892,12 @@ fn eval_module_body(
       // registry so a deferred-namespace trigger firing inside this body (or
       // a nested one) observes the cycle and throws instead of re-entering.
       let heap =
-        write_module_status(state.heap, global_object, specifier, Evaluating)
+        registry.write_module_status(
+          state.heap,
+          global_object,
+          specifier,
+          registry.Evaluating,
+        )
       case
         run_module_with_referrer(
           specifier,
@@ -1040,9 +913,15 @@ fn eval_module_body(
         entry.ModuleError(error: vm_err) -> {
           let error_val =
             JsString("InternalError: " <> vm_error_message(vm_err))
-          let heap = clear_module_status(heap, global_object, specifier)
           let heap =
-            write_module_error(heap, global_object, specifier, error_val)
+            registry.clear_module_status(heap, global_object, specifier)
+          let heap =
+            registry.write_module_error(
+              heap,
+              global_object,
+              specifier,
+              error_val,
+            )
           let state =
             EvalState(
               ..state,
@@ -1052,9 +931,15 @@ fn eval_module_body(
           #(state, Error(EvaluationError(error_val, state.heap)))
         }
         entry.ModuleThrow(value: thrown_val, heap: new_heap, jobs:) -> {
-          let new_heap = clear_module_status(new_heap, global_object, specifier)
           let new_heap =
-            write_module_error(new_heap, global_object, specifier, thrown_val)
+            registry.clear_module_status(new_heap, global_object, specifier)
+          let new_heap =
+            registry.write_module_error(
+              new_heap,
+              global_object,
+              specifier,
+              thrown_val,
+            )
           let state =
             EvalState(
               ..state,
@@ -1066,7 +951,12 @@ fn eval_module_body(
         }
         entry.ModuleOk(value: val, heap: new_heap, locals: _, jobs:) -> {
           let new_heap =
-            write_module_status(new_heap, global_object, specifier, Evaluated)
+            registry.write_module_status(
+              new_heap,
+              global_object,
+              specifier,
+              registry.Evaluated,
+            )
           let state =
             EvalState(
               ..state,
@@ -1290,7 +1180,7 @@ fn gather_async_transitive_deps(
   let already_done =
     set.contains(state.evaluated, spec)
     || set.contains(state.evaluating, spec)
-    || read_module_status(state.heap, global_object, spec) != None
+    || registry.read_module_status(state.heap, global_object, spec) != None
   use <- bool.guard(already_done, #([], seen))
   case dict.get(bundle.modules, spec) {
     Error(Nil) -> #([], seen)
@@ -1381,31 +1271,6 @@ pub fn evaluate_async_transitive_deps(
   }
   let result = result.map(result, list.reverse)
   #(eval_state.heap, eval_state.jobs, result)
-}
-
-/// Record `spec`'s body as completed in the realm's heap-resident status
-/// registry — what the host calls when a module parked on top-level await
-/// settles its [[TopLevelCapability]] (AsyncModuleExecutionFulfilled), so a
-/// later deferred-namespace trigger sees ~evaluated~ instead of a stuck
-/// ~evaluating~.
-pub fn record_module_evaluated(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Heap(host) {
-  write_module_status(h, global_object, spec, Evaluated)
-}
-
-/// Record `spec`'s evaluation error in the realm's heap-resident error
-/// registry (AsyncModuleExecutionRejected) — later imports and
-/// deferred-namespace triggers rethrow the same error.
-pub fn record_module_error(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-  err: JsValue,
-) -> Heap(host) {
-  write_module_error(h, global_object, spec, err)
 }
 
 /// The resolved specifiers some module in the bundle imports with
@@ -1706,10 +1571,10 @@ fn ensure_deferred_evaluated(
   builtins: Builtins,
 ) -> Result(State(host), #(JsValue, State(host))) {
   let global_object = state.ctx.global_object
-  case read_module_status(state.heap, global_object, spec) {
-    Some(Evaluated) -> Ok(state)
+  case registry.read_module_status(state.heap, global_object, spec) {
+    Some(registry.Evaluated) -> Ok(state)
     _ ->
-      case read_module_error(state.heap, global_object, spec) {
+      case registry.read_module_error(state.heap, global_object, spec) {
         Some(err) -> Error(#(err, state))
         None -> {
           let #(ready, _seen) =
@@ -1748,9 +1613,9 @@ fn ready_for_sync_execution(
 ) -> #(Bool, Set(String)) {
   use <- bool.guard(set.contains(seen, spec), #(True, seen))
   let seen = set.insert(seen, spec)
-  case read_module_status(h, global_object, spec) {
-    Some(Evaluated) -> #(True, seen)
-    Some(Evaluating) -> #(False, seen)
+  case registry.read_module_status(h, global_object, spec) {
+    Some(registry.Evaluated) -> #(True, seen)
+    Some(registry.Evaluating) -> #(False, seen)
     _ ->
       case dict.get(bundle.modules, spec) {
         // Not in this bundle (registry-shared module) — its body either ran
@@ -1796,15 +1661,15 @@ fn evaluate_deferred_subgraph(
   let #(evaluated, evaluating) =
     list.fold(specs, #(set.new(), set.new()), fn(acc, s) {
       let #(done, running) = acc
-      case read_module_status(state.heap, global_object, s) {
-        Some(Evaluated) -> #(set.insert(done, s), running)
-        Some(Evaluating) -> #(done, set.insert(running, s))
+      case registry.read_module_status(state.heap, global_object, s) {
+        Some(registry.Evaluated) -> #(set.insert(done, s), running)
+        Some(registry.Evaluating) -> #(done, set.insert(running, s))
         _ -> acc
       }
     })
   let errors =
     list.fold(specs, dict.new(), fn(acc, s) {
-      case read_module_error(state.heap, global_object, s) {
+      case registry.read_module_error(state.heap, global_object, s) {
         Some(err) -> dict.insert(acc, s, err)
         None -> acc
       }
