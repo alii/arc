@@ -21,27 +21,36 @@ import arc/vm/value.{
   type DtfComponent, type DtfComponents, type DurationFormatState,
   type DurationUnitOptions, type IntlData, type IntlDigitOptions,
   type IntlNativeFn, type IntlService, type JsValue, type ListFormatState,
-  type LocaleState, type NumberFormatState, type PluralRulesState, type Ref,
-  type RelativeTimeFormatState, type SegmentIteratorState, type SegmenterState,
-  type SegmentsState, CollatorData, CollatorState, DateTimeFormatData,
+  type LocaleState, type Notation, type NumberFormatState,
+  type PluralRulesState, type Ref, type RelativeTimeFormatState,
+  type SegmentIteratorState, type SegmenterState, type SegmentsState,
+  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting,
+  CurCode, CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
   DateTimeFormatState, Dispatch, DisplayNamesData, DisplayNamesState,
   DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
   DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
-  DurationFormatData, DurationFormatState, DurationUnitOptions, GroupingMode,
-  GroupingNever, IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
-  IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
-  IntlGetCanonicalLocales, IntlListFormat, IntlLocale, IntlLocaleGetter,
-  IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat, IntlObject,
-  IntlPluralRules, IntlRelativeTimeFormat, IntlResolvedOptions,
-  IntlSegmentIterator, IntlSegmenter, IntlSegmenterSegment, IntlSegments,
-  IntlSegmentsIterator, IntlSupportedLocalesOf, IntlSupportedValuesOf, JsBool,
-  JsNumber, JsObject, JsString, JsUndefined, ListFormatData, ListFormatState,
-  LocaleData, LocaleState, Named, NumberFormatData, NumberFormatState,
-  ObjectSlot, PluralRulesData, PluralRulesState, RelativeTimeFormatData,
-  RelativeTimeFormatState, SegmentIteratorData, SegmentIteratorState,
-  SegmenterData, SegmenterState, SegmentsData, SegmentsState, TemporalDateSlot,
+  DurationFormatData, DurationFormatState, DurationUnitOptions, GroupingAlways,
+  GroupingAuto, GroupingMin2, GroupingNever, IntlBoundGetter, IntlBoundMethod,
+  IntlCollator, IntlConstructor, IntlDateTimeFormat, IntlDigitOptions,
+  IntlDisplayNames, IntlDurationFormat, IntlGetCanonicalLocales, IntlListFormat,
+  IntlLocale, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative,
+  IntlNumberFormat, IntlObject, IntlPluralRules, IntlRelativeTimeFormat,
+  IntlResolvedOptions, IntlSegmentIterator, IntlSegmenter, IntlSegmenterSegment,
+  IntlSegments, IntlSegmentsIterator, IntlSupportedLocalesOf,
+  IntlSupportedValuesOf, JsBool, JsNumber, JsObject, JsString, JsUndefined,
+  ListFormatData, ListFormatState, LocaleData, LocaleState, Named,
+  NotationCompact, NotationEngineering, NotationScientific, NotationStandard,
+  NumberFormatData, NumberFormatState, ObjectSlot, PluralRulesData,
+  PluralRulesState, PriorityAuto, PriorityLessPrecision, PriorityMorePrecision,
+  RelativeTimeFormatData, RelativeTimeFormatState, RoundCeil, RoundExpand,
+  RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
+  RoundHalfTrunc, RoundTrunc, SegmentIteratorData, SegmentIteratorState,
+  SegmenterData, SegmenterState, SegmentsData, SegmentsState, SignAlways,
+  SignAuto, SignExceptZero, SignNegative, SignNever, StyleCurrency,
+  StyleDecimal, StylePercent, StyleUnit, TemporalDateSlot,
   TemporalDateTimeSlot, TemporalInstantSlot, TemporalMonthDaySlot,
-  TemporalTimeSlot, TemporalYearMonthSlot, TemporalZonedDateTimeSlot,
+  TemporalTimeSlot, TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TzdAuto,
+  TzdStripIfInteger, UnitLong, UnitNarrow, UnitShort,
 }
 import gleam/dict
 import gleam/float
@@ -839,6 +848,34 @@ fn get_str_opt(
       case allowed == [] || list.contains(allowed, s) {
         True -> Ok(#(Some(s), state))
         False ->
+          throw_range(
+            state,
+            "Value " <> s <> " out of range for options property " <> name,
+          )
+      }
+    }
+  }
+}
+
+/// GetOption for a closed string-enum option. `variants` is the full option
+/// set as #(spec spelling, variant) pairs: it is both the validation list and
+/// the (single) place the spelling is turned into its typed variant, so an
+/// out-of-set spelling always throws instead of silently defaulting.
+fn get_enum_opt(
+  state: State(host),
+  opts: Option(Ref),
+  name: String,
+  variants: List(#(String, a)),
+  default: a,
+) -> Result(#(a, State(host)), Thrown(host)) {
+  use #(v, state) <- result.try(opt_get(state, opts, name))
+  case v {
+    JsUndefined -> Ok(#(default, state))
+    _ -> {
+      use #(s, state) <- result.try(coerce.js_to_string(state, v))
+      case list.key_find(variants, s) {
+        Ok(variant) -> Ok(#(variant, state))
+        Error(Nil) ->
           throw_range(
             state,
             "Value " <> s <> " out of range for options property " <> name,
@@ -2041,14 +2078,18 @@ fn number_format_state(
     requested,
   ))
   // SetNumberFormatUnitOptions (§15.1.3)
-  use #(style, state) <- result.try(get_str_opt(
+  use #(style, state) <- result.try(get_enum_opt(
     state,
     opts,
     "style",
-    ["decimal", "percent", "currency", "unit"],
-    Some("decimal"),
+    [
+      #("decimal", StyleDecimal),
+      #("percent", StylePercent),
+      #("currency", StyleCurrency),
+      #("unit", StyleUnit),
+    ],
+    StyleDecimal,
   ))
-  let style = option.unwrap(style, "decimal")
   use #(currency, state) <- result.try(get_str_opt(
     state,
     opts,
@@ -2063,25 +2104,30 @@ fn number_format_state(
         False -> throw_range(state, "Invalid currency code: " <> c)
       }
     None ->
-      case style == "currency" {
+      case style == StyleCurrency {
         True ->
           throw_type(state, "Currency code is required with currency style")
         False -> Ok(Nil)
       }
   })
-  use #(currency_display, state) <- result.try(get_str_opt(
+  use #(currency_display, state) <- result.try(get_enum_opt(
     state,
     opts,
     "currencyDisplay",
-    ["code", "symbol", "narrowSymbol", "name"],
-    Some("symbol"),
+    [
+      #("code", CurCode),
+      #("symbol", CurSymbol),
+      #("narrowSymbol", CurNarrowSymbol),
+      #("name", CurName),
+    ],
+    CurSymbol,
   ))
-  use #(currency_sign, state) <- result.try(get_str_opt(
+  use #(currency_sign, state) <- result.try(get_enum_opt(
     state,
     opts,
     "currencySign",
-    ["standard", "accounting"],
-    Some("standard"),
+    [#("standard", CurStandard), #("accounting", CurAccounting)],
+    CurStandard,
   ))
   use #(unit, state) <- result.try(get_str_opt(state, opts, "unit", [], None))
   use Nil <- result.try(case unit {
@@ -2092,35 +2138,34 @@ fn number_format_state(
           throw_range(state, "Invalid unit argument for option unit: " <> u)
       }
     None ->
-      case style == "unit" {
+      case style == StyleUnit {
         True -> throw_type(state, "Unit is required with unit style")
         False -> Ok(Nil)
       }
   })
-  use #(unit_display, state) <- result.try(get_str_opt(
+  use #(unit_display, state) <- result.try(get_enum_opt(
     state,
     opts,
     "unitDisplay",
-    ["short", "narrow", "long"],
-    Some("short"),
+    [#("short", UnitShort), #("narrow", UnitNarrow), #("long", UnitLong)],
+    UnitShort,
   ))
   let currency = option.map(currency, string.uppercase)
   let #(mnfd_default, mxfd_default) = case style {
-    "currency" -> {
+    StyleCurrency -> {
       let d = fmt.currency_digits(option.unwrap(currency, "USD"))
       #(d, d)
     }
-    "percent" -> #(0, 0)
-    _ -> #(0, 3)
+    StylePercent -> #(0, 0)
+    StyleDecimal | StyleUnit -> #(0, 3)
   }
-  use #(notation, state) <- result.try(get_str_opt(
+  use #(notation, state) <- result.try(get_enum_opt(
     state,
     opts,
     "notation",
-    ["standard", "scientific", "engineering", "compact"],
-    Some("standard"),
+    notation_variants(),
+    NotationStandard,
   ))
-  let notation = option.unwrap(notation, "standard")
   use #(digits, state) <- result.try(digit_options(
     state,
     opts,
@@ -2128,37 +2173,34 @@ fn number_format_state(
     mxfd_default,
     notation,
   ))
-  use #(compact_display, state) <- result.try(get_str_opt(
+  use #(compact_display, state) <- result.try(get_enum_opt(
     state,
     opts,
     "compactDisplay",
-    ["short", "long"],
-    Some("short"),
+    compact_display_variants(),
+    CompactShort,
   ))
   // useGrouping: boolean or "min2"/"auto"/"always" (§15.1.6 GetBooleanOrStringNumberFormatOption)
   use #(grouping_v, state) <- result.try(opt_get(state, opts, "useGrouping"))
   use #(use_grouping, state) <- result.try(case grouping_v {
     JsUndefined ->
       Ok(#(
-        GroupingMode(case notation {
-          "compact" -> "min2"
-          _ -> "auto"
-        }),
+        case notation {
+          NotationCompact -> GroupingMin2
+          NotationStandard | NotationScientific | NotationEngineering ->
+            GroupingAuto
+        },
         state,
       ))
     JsBool(False) -> Ok(#(GroupingNever, state))
-    JsBool(True) -> Ok(#(GroupingMode("always"), state))
+    JsBool(True) -> Ok(#(GroupingAlways, state))
     _ -> {
       use #(s, state) <- result.try(coerce.js_to_string(state, grouping_v))
       case s {
-        "min2" | "auto" | "always" -> Ok(#(GroupingMode(s), state))
-        "true" | "false" ->
-          // Legacy: any other truthy value behaves per ToBoolean? Spec:
-          // strings must be in the allowed set.
-          throw_range(
-            state,
-            "Value " <> s <> " out of range for options property useGrouping",
-          )
+        "min2" -> Ok(#(GroupingMin2, state))
+        "auto" -> Ok(#(GroupingAuto, state))
+        "always" -> Ok(#(GroupingAlways, state))
+        // Spec: any other string (including "true"/"false") is out of range.
         _ ->
           throw_range(
             state,
@@ -2167,12 +2209,18 @@ fn number_format_state(
       }
     }
   })
-  use #(sign_display, state) <- result.try(get_str_opt(
+  use #(sign_display, state) <- result.try(get_enum_opt(
     state,
     opts,
     "signDisplay",
-    ["auto", "never", "always", "exceptZero", "negative"],
-    Some("auto"),
+    [
+      #("auto", SignAuto),
+      #("never", SignNever),
+      #("always", SignAlways),
+      #("exceptZero", SignExceptZero),
+      #("negative", SignNegative),
+    ],
+    SignAuto,
   ))
   Ok(#(
     NumberFormatState(
@@ -2181,30 +2229,45 @@ fn number_format_state(
       style:,
       currency:,
       currency_display: case style {
-        "currency" -> currency_display
-        _ -> None
+        StyleCurrency -> Some(currency_display)
+        StyleDecimal | StylePercent | StyleUnit -> None
       },
       currency_sign: case style {
-        "currency" -> currency_sign
-        _ -> None
+        StyleCurrency -> Some(currency_sign)
+        StyleDecimal | StylePercent | StyleUnit -> None
       },
       unit:,
       unit_display: case style {
-        "unit" -> unit_display
-        _ -> None
+        StyleUnit -> Some(unit_display)
+        StyleDecimal | StylePercent | StyleCurrency -> None
       },
       digits:,
       use_grouping:,
       notation:,
       compact_display: case notation {
-        "compact" -> compact_display
-        _ -> None
+        NotationCompact -> Some(compact_display)
+        NotationStandard | NotationScientific | NotationEngineering -> None
       },
-      sign_display: option.unwrap(sign_display, "auto"),
+      sign_display:,
       bound_format: None,
     ),
     state,
   ))
+}
+
+/// The `notation` option's spellings — shared by NumberFormat and PluralRules.
+fn notation_variants() -> List(#(String, Notation)) {
+  [
+    #("standard", NotationStandard),
+    #("scientific", NotationScientific),
+    #("engineering", NotationEngineering),
+    #("compact", NotationCompact),
+  ]
+}
+
+/// The `compactDisplay` option's spellings.
+fn compact_display_variants() -> List(#(String, value.CompactDisplay)) {
+  [#("short", CompactShort), #("long", CompactLong)]
 }
 
 /// SetNumberFormatDigitOptions (§15.1.6) — resolves the digit-related slots.
@@ -2213,7 +2276,7 @@ fn digit_options(
   opts: Option(Ref),
   mnfd_default: Int,
   mxfd_default: Int,
-  notation: String,
+  notation: Notation,
 ) -> Result(#(IntlDigitOptions, State(host)), Thrown(host)) {
   use #(mnid, state) <- result.try(get_num_opt(
     state,
@@ -2268,40 +2331,51 @@ fn digit_options(
         )
     },
   )
-  use #(rounding_mode, state) <- result.try(get_str_opt(
+  use #(rounding_mode, state) <- result.try(get_enum_opt(
     state,
     opts,
     "roundingMode",
     [
-      "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand",
-      "halfTrunc", "halfEven",
+      #("ceil", RoundCeil),
+      #("floor", RoundFloor),
+      #("expand", RoundExpand),
+      #("trunc", RoundTrunc),
+      #("halfCeil", RoundHalfCeil),
+      #("halfFloor", RoundHalfFloor),
+      #("halfExpand", RoundHalfExpand),
+      #("halfTrunc", RoundHalfTrunc),
+      #("halfEven", RoundHalfEven),
     ],
-    Some("halfExpand"),
+    RoundHalfExpand,
   ))
-  use #(rounding_priority, state) <- result.try(get_str_opt(
+  use #(rounding_priority, state) <- result.try(get_enum_opt(
     state,
     opts,
     "roundingPriority",
-    ["auto", "morePrecision", "lessPrecision"],
-    Some("auto"),
+    [
+      #("auto", PriorityAuto),
+      #("morePrecision", PriorityMorePrecision),
+      #("lessPrecision", PriorityLessPrecision),
+    ],
+    PriorityAuto,
   ))
-  let rounding_priority = option.unwrap(rounding_priority, "auto")
-  use #(trailing_zero, state) <- result.try(get_str_opt(
+  use #(trailing_zero, state) <- result.try(get_enum_opt(
     state,
     opts,
     "trailingZeroDisplay",
-    ["auto", "stripIfInteger"],
-    Some("auto"),
+    [#("auto", TzdAuto), #("stripIfInteger", TzdStripIfInteger)],
+    TzdAuto,
   ))
   let has_sd = mnsd_v != JsUndefined || mxsd_v != JsUndefined
   let has_fd = mnfd_v != JsUndefined || mxfd_v != JsUndefined
   let need_sd = case rounding_priority {
-    "auto" -> has_sd
-    _ -> True
+    PriorityAuto -> has_sd
+    PriorityMorePrecision | PriorityLessPrecision -> True
   }
   let need_fd = case rounding_priority {
-    "auto" -> !{ has_sd || { !has_fd && notation == "compact" } }
-    _ -> True
+    PriorityAuto ->
+      !{ has_sd || { !has_fd && notation == NotationCompact } }
+    PriorityMorePrecision | PriorityLessPrecision -> True
   }
   // sig / fd are #(min, max) when that rounding kind is in effect.
   use #(sig, state) <- result.try(case need_sd {
@@ -2379,7 +2453,7 @@ fn digit_options(
   // Neither kind requested (compact notation default): more-precision
   // rounding with mnfd/mxfd = 0 and mnsd/mxsd = 1..2 (§15.1.6 step 16).
   let #(sig, fd, rounding_priority) = case sig, fd {
-    None, None -> #(Some(#(1, 2)), Some(#(0, 0)), "morePrecision")
+    None, None -> #(Some(#(1, 2)), Some(#(0, 0)), PriorityMorePrecision)
     _, _ -> #(sig, fd, rounding_priority)
   }
   // roundingIncrement constraints (§15.1.6 steps 24-26).
@@ -2412,9 +2486,9 @@ fn digit_options(
       minimum_significant_digits: option.map(sig, fn(p) { p.0 }),
       maximum_significant_digits: option.map(sig, fn(p) { p.1 }),
       rounding_increment:,
-      rounding_mode: option.unwrap(rounding_mode, "halfExpand"),
+      rounding_mode:,
       rounding_priority:,
-      trailing_zero_display: option.unwrap(trailing_zero, "auto"),
+      trailing_zero_display: trailing_zero,
     ),
     state,
   ))
@@ -3152,20 +3226,19 @@ fn plural_rules_state(
     ["cardinal", "ordinal"],
     Some("cardinal"),
   ))
-  use #(notation, state) <- result.try(get_str_opt(
+  use #(notation, state) <- result.try(get_enum_opt(
     state,
     opts,
     "notation",
-    ["standard", "scientific", "engineering", "compact"],
-    Some("standard"),
+    notation_variants(),
+    NotationStandard,
   ))
-  let notation = option.unwrap(notation, "standard")
-  use #(compact_display, state) <- result.try(get_str_opt(
+  use #(compact_display, state) <- result.try(get_enum_opt(
     state,
     opts,
     "compactDisplay",
-    ["short", "long"],
-    Some("short"),
+    compact_display_variants(),
+    CompactShort,
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
   use #(digits, state) <- result.try(digit_options(state, opts, 0, 3, notation))
@@ -3175,8 +3248,8 @@ fn plural_rules_state(
       plural_type: option.unwrap(type_, "cardinal"),
       notation:,
       compact_display: case notation {
-        "compact" -> Some(option.unwrap(compact_display, "short"))
-        _ -> None
+        NotationCompact -> Some(compact_display)
+        NotationStandard | NotationScientific | NotationEngineering -> None
       },
       digits:,
     ),
@@ -3615,12 +3688,15 @@ fn resolved_options(
           present_pairs([
             #("locale", Some(JsString(nf.locale))),
             #("numberingSystem", Some(JsString(nf.numbering_system))),
-            #("style", Some(JsString(nf.style))),
+            #("style", Some(JsString(value.num_style_to_js_string(nf.style)))),
             #("currency", option.map(nf.currency, JsString)),
-            #("currencyDisplay", option.map(nf.currency_display, JsString)),
-            #("currencySign", option.map(nf.currency_sign, JsString)),
+            #(
+              "currencyDisplay",
+              option.map(nf.currency_display, currency_display_js),
+            ),
+            #("currencySign", option.map(nf.currency_sign, currency_sign_js)),
             #("unit", option.map(nf.unit, JsString)),
-            #("unitDisplay", option.map(nf.unit_display, JsString)),
+            #("unitDisplay", option.map(nf.unit_display, unit_display_js)),
             #(
               "minimumIntegerDigits",
               Some(value.from_int(dg.minimum_integer_digits)),
@@ -3642,13 +3718,20 @@ fn resolved_options(
               option.map(dg.maximum_significant_digits, value.from_int),
             ),
             #("useGrouping", Some(use_grouping_js(nf.use_grouping))),
-            #("notation", Some(JsString(nf.notation))),
-            #("compactDisplay", option.map(nf.compact_display, JsString)),
-            #("signDisplay", Some(JsString(nf.sign_display))),
+            #(
+              "notation",
+              Some(JsString(value.notation_to_js_string(nf.notation))),
+            ),
+            #(
+              "compactDisplay",
+              option.map(nf.compact_display, compact_display_js),
+            ),
+            #(
+              "signDisplay",
+              Some(JsString(value.sign_display_to_js_string(nf.sign_display))),
+            ),
             #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
-            #("roundingMode", Some(JsString(dg.rounding_mode))),
-            #("roundingPriority", Some(JsString(dg.rounding_priority))),
-            #("trailingZeroDisplay", Some(JsString(dg.trailing_zero_display))),
+            ..digit_rounding_pairs(dg)
           ]),
         )
       }
@@ -3696,8 +3779,14 @@ fn resolved_options(
           present_pairs([
             #("locale", Some(JsString(p.locale))),
             #("type", Some(JsString(p.plural_type))),
-            #("notation", Some(JsString(p.notation))),
-            #("compactDisplay", option.map(p.compact_display, JsString)),
+            #(
+              "notation",
+              Some(JsString(value.notation_to_js_string(p.notation))),
+            ),
+            #(
+              "compactDisplay",
+              option.map(p.compact_display, compact_display_js),
+            ),
             #(
               "minimumIntegerDigits",
               Some(value.from_int(dg.minimum_integer_digits)),
@@ -3720,9 +3809,7 @@ fn resolved_options(
             ),
             #("pluralCategories", Some(cats)),
             #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
-            #("roundingMode", Some(JsString(dg.rounding_mode))),
-            #("roundingPriority", Some(JsString(dg.rounding_priority))),
-            #("trailingZeroDisplay", Some(JsString(dg.trailing_zero_display))),
+            ..digit_rounding_pairs(dg)
           ]),
         )
       }
@@ -3780,12 +3867,56 @@ fn resolved_options(
   })
 }
 
-/// `[[UseGrouping]]` as its JS resolvedOptions value.
+/// `[[UseGrouping]]` as its JS resolvedOptions value: never is the boolean
+/// `false`, everything else its string spelling.
 fn use_grouping_js(g: value.IntlUseGrouping) -> JsValue {
   case g {
     GroupingNever -> JsBool(False)
-    GroupingMode(s) -> JsString(s)
+    GroupingAuto -> JsString("auto")
+    GroupingAlways -> JsString("always")
+    GroupingMin2 -> JsString("min2")
   }
+}
+
+fn currency_display_js(v: value.CurrencyDisplay) -> JsValue {
+  JsString(value.currency_display_to_js_string(v))
+}
+
+fn currency_sign_js(v: value.CurrencySign) -> JsValue {
+  JsString(value.currency_sign_to_js_string(v))
+}
+
+fn unit_display_js(v: value.UnitDisplay) -> JsValue {
+  JsString(value.unit_display_to_js_string(v))
+}
+
+fn compact_display_js(v: value.CompactDisplay) -> JsValue {
+  JsString(value.compact_display_to_js_string(v))
+}
+
+/// The roundingMode/roundingPriority/trailingZeroDisplay resolvedOptions
+/// tail shared by NumberFormat and PluralRules.
+fn digit_rounding_pairs(
+  dg: IntlDigitOptions,
+) -> List(#(String, Option(JsValue))) {
+  [
+    #(
+      "roundingMode",
+      Some(JsString(value.rounding_mode_to_js_string(dg.rounding_mode))),
+    ),
+    #(
+      "roundingPriority",
+      Some(JsString(value.rounding_priority_to_js_string(dg.rounding_priority))),
+    ),
+    #(
+      "trailingZeroDisplay",
+      Some(
+        JsString(
+          value.trailing_zero_display_to_js_string(dg.trailing_zero_display),
+        ),
+      ),
+    ),
+  ]
 }
 
 // ============================================================================
@@ -3915,10 +4046,7 @@ fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
       currency_sign: option.unwrap(nf.currency_sign, d.currency_sign),
       unit: nf.unit,
       unit_display: option.unwrap(nf.unit_display, d.unit_display),
-      use_grouping: case nf.use_grouping {
-        GroupingNever -> "never"
-        GroupingMode(s) -> s
-      },
+      use_grouping: nf.use_grouping,
       notation: nf.notation,
       compact_display: option.unwrap(nf.compact_display, d.compact_display),
       sign_display: nf.sign_display,
@@ -5633,9 +5761,9 @@ fn plural_select(p: PluralRulesState, n: value.JsNum) -> String {
       let opts =
         fmt.NumOpts(
           ..num_opts_from_plural(p),
-          style: "decimal",
-          use_grouping: "never",
-          sign_display: "never",
+          style: StyleDecimal,
+          use_grouping: GroupingNever,
+          sign_display: SignNever,
         )
       let parts = fmt.format_number_parts(opts, f)
       let int_digits =
@@ -5679,7 +5807,7 @@ fn rtf_method_parts(
     Some(u) -> Ok(u)
     None -> throw_range(state, "Invalid unit argument: " <> unit_str)
   })
-  let abs_opts = fmt.NumOpts(..fmt.default_num_opts(), sign_display: "never")
+  let abs_opts = fmt.NumOpts(..fmt.default_num_opts(), sign_display: SignNever)
   let value_parts = fmt.format_number_parts(abs_opts, float.absolute_value(f))
   let value_parts = apply_numbering_system(value_parts, r.numbering_system)
   Ok(#(fmt.rtf_parts_en(r.style, r.numeric, f, unit, value_parts), state))
@@ -6223,9 +6351,9 @@ fn build_duration_parts(
                     True -> FloatValue(-1.0 *. 0.0)
                     False -> value_repr
                   }
-                  #("auto", value_repr, False)
+                  #(SignAuto, value_repr, False)
                 }
-                False -> #("never", value_repr, False)
+                False -> #(SignNever, value_repr, False)
               }
               let numeric_style = style == "numeric" || style == "2-digit"
               let opts =
@@ -6237,8 +6365,8 @@ fn build_duration_parts(
                     False -> 1
                   },
                   use_grouping: case numeric_style {
-                    True -> "never"
-                    False -> "auto"
+                    True -> GroupingNever
+                    False -> GroupingAuto
                   },
                   min_frac: case min_frac {
                     Some(_) -> min_frac
@@ -6249,20 +6377,22 @@ fn build_duration_parts(
                     None -> Some(0)
                   },
                   rounding_mode: case trunc_mode {
-                    True -> "trunc"
-                    False -> "halfExpand"
+                    True -> RoundTrunc
+                    False -> RoundHalfExpand
                   },
                   style: case numeric_style {
-                    True -> "decimal"
-                    False -> "unit"
+                    True -> StyleDecimal
+                    False -> StyleUnit
                   },
                   unit: case numeric_style {
                     True -> None
                     False -> Some(singular_duration_unit(unit))
                   },
                   unit_display: case numeric_style {
-                    True -> "short"
-                    False -> style
+                    True -> UnitShort
+                    // DurationFormat unit styles are "long"/"short"/"narrow"
+                    // here (the numeric styles took the branch above).
+                    False -> unit_display_from_duration_style(style)
                   },
                 )
               let parts = case value_repr {
@@ -6327,6 +6457,16 @@ type DurationValue {
 
 fn singular_duration_unit(unit: String) -> String {
   string.slice(unit, 0, string.length(unit) - 1)
+}
+
+/// A DurationFormat per-unit non-numeric style ("long"/"short"/"narrow") as
+/// the NumberFormat unitDisplay it renders with.
+fn unit_display_from_duration_style(style: String) -> value.UnitDisplay {
+  case style {
+    "long" -> UnitLong
+    "narrow" -> UnitNarrow
+    _ -> UnitShort
+  }
 }
 
 /// durationToFractional: exact decimal string for combined sub-second units.

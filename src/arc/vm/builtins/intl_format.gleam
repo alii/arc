@@ -5,7 +5,20 @@
 //// ECMA-402 (PartitionNumberPattern, PartitionDateTimePattern, …). The
 //// builtins layer turns parts into strings or {type, value} part objects.
 
-import arc/vm/value
+import arc/vm/value.{
+  type CompactDisplay, type CurrencyDisplay, type CurrencySign,
+  type IntlUseGrouping, type Notation, type NumStyle, type RoundingMode,
+  type RoundingPriority, type SignDisplay, type TrailingZeroDisplay,
+  type UnitDisplay, CompactLong, CompactShort, CurAccounting, CurCode, CurName,
+  CurNarrowSymbol, CurStandard, CurSymbol, GroupingAlways, GroupingAuto,
+  GroupingMin2, GroupingNever, NotationCompact, NotationEngineering,
+  NotationScientific, NotationStandard, PriorityAuto, PriorityLessPrecision,
+  PriorityMorePrecision, RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil,
+  RoundHalfEven, RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
+  SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever, StyleCurrency,
+  StyleDecimal, StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitLong,
+  UnitNarrow, UnitShort,
+}
 import gleam/bool
 import gleam/float
 import gleam/int
@@ -117,50 +130,50 @@ fn range_sep(key: String, spaced: Bool) -> String {
 pub type NumOpts {
   NumOpts(
     locale: String,
-    style: String,
+    style: NumStyle,
     currency: Option(String),
-    currency_display: String,
-    currency_sign: String,
+    currency_display: CurrencyDisplay,
+    currency_sign: CurrencySign,
     unit: Option(String),
-    unit_display: String,
+    unit_display: UnitDisplay,
     min_int: Int,
     min_frac: Option(Int),
     max_frac: Option(Int),
     min_sig: Option(Int),
     max_sig: Option(Int),
-    use_grouping: String,
-    notation: String,
-    compact_display: String,
-    sign_display: String,
+    use_grouping: IntlUseGrouping,
+    notation: Notation,
+    compact_display: CompactDisplay,
+    sign_display: SignDisplay,
     rounding_increment: Int,
-    rounding_mode: String,
-    rounding_priority: String,
-    trailing_zero_display: String,
+    rounding_mode: RoundingMode,
+    rounding_priority: RoundingPriority,
+    trailing_zero_display: TrailingZeroDisplay,
   )
 }
 
 pub fn default_num_opts() -> NumOpts {
   NumOpts(
     locale: "en",
-    style: "decimal",
+    style: StyleDecimal,
     currency: None,
-    currency_display: "symbol",
-    currency_sign: "standard",
+    currency_display: CurSymbol,
+    currency_sign: CurStandard,
     unit: None,
-    unit_display: "short",
+    unit_display: UnitShort,
     min_int: 1,
     min_frac: Some(0),
     max_frac: Some(3),
     min_sig: None,
     max_sig: None,
-    use_grouping: "auto",
-    notation: "standard",
-    compact_display: "short",
-    sign_display: "auto",
+    use_grouping: GroupingAuto,
+    notation: NotationStandard,
+    compact_display: CompactShort,
+    sign_display: SignAuto,
     rounding_increment: 1,
-    rounding_mode: "halfExpand",
-    rounding_priority: "auto",
-    trailing_zero_display: "auto",
+    rounding_mode: RoundHalfExpand,
+    rounding_priority: PriorityAuto,
+    trailing_zero_display: TzdAuto,
   )
 }
 
@@ -262,24 +275,24 @@ pub fn format_decimal_string_parts(opts: NumOpts, s: String) -> List(Part) {
 fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
   // Compact notation defaults useGrouping "auto" to the min2 behavior
   // (ECMA-402 §15.5.3 / CLDR compact patterns).
-  let opts = case opts.notation == "compact" && opts.use_grouping == "auto" {
-    True -> NumOpts(..opts, use_grouping: "min2")
-    False -> opts
+  let opts = case opts.notation, opts.use_grouping {
+    NotationCompact, GroupingAuto -> NumOpts(..opts, use_grouping: GroupingMin2)
+    _, _ -> opts
   }
   // Percent scaling happens before rounding (ECMA-402 §15.5.1).
   let dec = case opts.style {
-    "percent" -> Dec(..dec, exp: dec.exp + 2)
-    _ -> dec
+    StylePercent -> Dec(..dec, exp: dec.exp + 2)
+    StyleDecimal | StyleCurrency | StyleUnit -> dec
   }
   let dec = normalize(dec)
   let key = loc_key(opts.locale)
   let #(mantissa, exponent, compact_one, compact_other) = case opts.notation {
-    "scientific" ->
+    NotationScientific ->
       case dec.digits {
         "" -> #(dec, 0, [], [])
         _ -> #(Dec(..dec, exp: 1), dec.exp - 1, [], [])
       }
-    "engineering" ->
+    NotationEngineering ->
       case dec.digits {
         "" -> #(dec, 0, [], [])
         _ -> {
@@ -287,7 +300,7 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
           #(Dec(..dec, exp: dec.exp - e), e, [], [])
         }
       }
-    "compact" ->
+    NotationCompact ->
       case dec.digits {
         "" -> #(dec, 0, [], [])
         _ -> {
@@ -296,11 +309,11 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
           #(Dec(..dec, exp: dec.exp - div_exp), 0, one_p, other_p)
         }
       }
-    _ -> #(dec, 0, [], [])
+    NotationStandard -> #(dec, 0, [], [])
   }
   let digit_parts = format_digits(opts, mantissa, negative)
   let digit_parts = case opts.notation {
-    "scientific" | "engineering" -> {
+    NotationScientific | NotationEngineering -> {
       let exp_parts = case exponent < 0 {
         True -> [
           #("exponentSeparator", "E"),
@@ -314,7 +327,7 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
       }
       list.append(digit_parts, exp_parts)
     }
-    "compact" ->
+    NotationCompact ->
       case compact_other {
         [] -> digit_parts
         _ ->
@@ -323,7 +336,7 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
             False -> list.append(digit_parts, compact_other)
           }
       }
-    _ -> digit_parts
+    NotationStandard -> digit_parts
   }
   wrap_affixes(opts, digit_parts, negative, False)
 }
@@ -333,7 +346,7 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
 /// #(divisor_exponent, suffix parts for plural "one", suffix parts otherwise).
 fn compact_entry(
   key: String,
-  display: String,
+  display: CompactDisplay,
   e: Int,
 ) -> #(Int, List(Part), List(Part)) {
   use <- bool.lazy_guard(key == "en-IN", fn() { in_compact(e, display) })
@@ -350,28 +363,34 @@ fn compact_entry(
   }
 }
 
-fn en_compact(e: Int, display: String) -> #(Int, List(Part), List(Part)) {
+fn en_compact(
+  e: Int,
+  display: CompactDisplay,
+) -> #(Int, List(Part), List(Part)) {
   use <- bool.guard(e < 3, #(0, [], []))
   let k = int.min(4, e / 3)
-  let suffix = case k, display == "long" {
-    1, False -> [#("compact", "K")]
-    2, False -> [#("compact", "M")]
-    3, False -> [#("compact", "B")]
-    _, False -> [#("compact", "T")]
-    1, True -> [#("literal", " "), #("compact", "thousand")]
-    2, True -> [#("literal", " "), #("compact", "million")]
-    3, True -> [#("literal", " "), #("compact", "billion")]
-    _, True -> [#("literal", " "), #("compact", "trillion")]
+  let suffix = case k, display {
+    1, CompactShort -> [#("compact", "K")]
+    2, CompactShort -> [#("compact", "M")]
+    3, CompactShort -> [#("compact", "B")]
+    _, CompactShort -> [#("compact", "T")]
+    1, CompactLong -> [#("literal", " "), #("compact", "thousand")]
+    2, CompactLong -> [#("literal", " "), #("compact", "million")]
+    3, CompactLong -> [#("literal", " "), #("compact", "billion")]
+    _, CompactLong -> [#("literal", " "), #("compact", "trillion")]
   }
   #(3 * k, suffix, suffix)
 }
 
 /// en-IN compact data: thousand (K), lakh (10^5, L), crore (10^7, Cr).
-fn in_compact(e: Int, display: String) -> #(Int, List(Part), List(Part)) {
+fn in_compact(
+  e: Int,
+  display: CompactDisplay,
+) -> #(Int, List(Part), List(Part)) {
   let entry = fn(div: Int, short: String, long: String) {
-    let suffix = case display == "long" {
-      False -> [#("compact", short)]
-      True -> [#("literal", " "), #("compact", long)]
+    let suffix = case display {
+      CompactShort -> [#("compact", short)]
+      CompactLong -> [#("literal", " "), #("compact", long)]
     }
     #(div, suffix, suffix)
   }
@@ -405,11 +424,14 @@ fn cjk_compact(
   }
 }
 
-fn de_compact(e: Int, display: String) -> #(Int, List(Part), List(Part)) {
+fn de_compact(
+  e: Int,
+  display: CompactDisplay,
+) -> #(Int, List(Part), List(Part)) {
   let short = fn(s: String) { [#("literal", "\u{00A0}"), #("compact", s)] }
   let long = fn(s: String) { [#("literal", " "), #("compact", s)] }
-  case display == "long" {
-    False ->
+  case display {
+    CompactShort ->
       // CLDR de short compact has no abbreviation below one million.
       case e {
         _ if e >= 6 && e <= 8 -> #(6, short("Mio."), short("Mio."))
@@ -417,7 +439,7 @@ fn de_compact(e: Int, display: String) -> #(Int, List(Part), List(Part)) {
         _ if e >= 12 -> #(12, short("Bio."), short("Bio."))
         _ -> #(0, [], [])
       }
-    True ->
+    CompactLong ->
       case e {
         _ if e >= 3 && e <= 5 -> #(3, long("Tausend"), long("Tausend"))
         _ if e >= 6 && e <= 8 -> #(6, long("Million"), long("Millionen"))
@@ -447,22 +469,23 @@ fn wrap_affixes(
   let zero = !is_nan && !negative && is_zero_parts(core)
   let neg_zero = negative && is_zero_parts(core)
   let show_minus = case opts.sign_display {
-    "never" -> False
-    "always" -> negative
-    "exceptZero" -> negative && !neg_zero
-    "negative" -> negative && !neg_zero
-    _ -> negative
+    SignNever -> False
+    SignAlways -> negative
+    SignExceptZero -> negative && !neg_zero
+    SignNegative -> negative && !neg_zero
+    SignAuto -> negative
   }
   let show_plus = case opts.sign_display, is_nan {
-    "always", _ -> !negative
-    "exceptZero", False -> !negative && !zero
-    _, _ -> False
+    SignAlways, _ -> !negative
+    SignExceptZero, False -> !negative && !zero
+    SignExceptZero, True -> False
+    SignAuto, _ | SignNever, _ | SignNegative, _ -> False
   }
   // Accounting parentheses replace the minus sign when it would be shown —
   // in locales whose accounting pattern uses parentheses at all (not de).
   let accounting =
-    opts.style == "currency"
-    && opts.currency_sign == "accounting"
+    opts.style == StyleCurrency
+    && opts.currency_sign == CurAccounting
     && show_minus
     && accounting_parens(key)
   let sign_parts = case accounting {
@@ -475,13 +498,13 @@ fn wrap_affixes(
       }
   }
   case opts.style {
-    "percent" -> list.flatten([sign_parts, core, [#("percentSign", "%")]])
-    "currency" -> {
+    StylePercent -> list.flatten([sign_parts, core, [#("percentSign", "%")]])
+    StyleCurrency -> {
       let code = option.unwrap(opts.currency, "USD")
       let #(text, spaced) = currency_text(key, code, opts.currency_display)
       let with_cur = case opts.currency_display {
-        "name" -> list.append(core, [#("literal", " "), #("currency", text)])
-        _ ->
+        CurName -> list.append(core, [#("literal", " "), #("currency", text)])
+        CurCode | CurSymbol | CurNarrowSymbol ->
           case currency_suffixed(key) {
             True ->
               list.append(core, [
@@ -505,14 +528,14 @@ fn wrap_affixes(
         False -> list.append(sign_parts, with_cur)
       }
     }
-    "unit" -> {
+    StyleUnit -> {
       let u = option.unwrap(opts.unit, "")
       let #(u_pre, u_suf) =
         unit_affixes(key, u, opts.unit_display, is_one_parts(core))
       // The sign sits between a unit prefix and the number ("時速 -987 …").
       list.flatten([u_pre, sign_parts, core, u_suf])
     }
-    _ -> list.append(sign_parts, core)
+    StyleDecimal -> list.append(sign_parts, core)
   }
 }
 
@@ -520,7 +543,7 @@ fn wrap_affixes(
 fn unit_affixes(
   key: String,
   unit: String,
-  display: String,
+  display: UnitDisplay,
   one: Bool,
 ) -> #(List(Part), List(Part)) {
   let lang = loc_lang(key)
@@ -529,48 +552,51 @@ fn unit_affixes(
     // CLDR kilometer-per-hour patterns for the locales we carry data for.
     "kilometer-per-hour", "de" ->
       case display {
-        "long" -> #([], [#("literal", " "), #("unit", "Kilometer pro Stunde")])
-        _ -> #([], [#("literal", " "), #("unit", "km/h")])
+        UnitLong -> #([], [#("literal", " "), #("unit", "Kilometer pro Stunde")])
+        UnitShort | UnitNarrow -> #([], [#("literal", " "), #("unit", "km/h")])
       }
     "kilometer-per-hour", "ja" ->
       case display {
-        "long" -> #([#("unit", "時速"), #("literal", " ")], [
+        UnitLong -> #([#("unit", "時速"), #("literal", " ")], [
           #("literal", " "),
           #("unit", "キロメートル"),
         ])
-        "narrow" -> #([], [#("unit", "km/h")])
-        _ -> #([], [#("literal", " "), #("unit", "km/h")])
+        UnitNarrow -> #([], [#("unit", "km/h")])
+        UnitShort -> #([], [#("literal", " "), #("unit", "km/h")])
       }
     "kilometer-per-hour", "ko" ->
       case display {
-        "long" -> #([#("unit", "시속"), #("literal", " ")], [
+        UnitLong -> #([#("unit", "시속"), #("literal", " ")], [
           #("unit", "킬로미터"),
         ])
-        _ -> #([], [#("unit", "km/h")])
+        UnitShort | UnitNarrow -> #([], [#("unit", "km/h")])
       }
     "kilometer-per-hour", "zh" if hant ->
       case display {
-        "long" -> #([#("unit", "每小時"), #("literal", " ")], [
+        UnitLong -> #([#("unit", "每小時"), #("literal", " ")], [
           #("literal", " "),
           #("unit", "公里"),
         ])
-        "narrow" -> #([], [#("unit", "公里/小時")])
-        _ -> #([], [#("literal", " "), #("unit", "公里/小時")])
+        UnitNarrow -> #([], [#("unit", "公里/小時")])
+        UnitShort -> #([], [#("literal", " "), #("unit", "公里/小時")])
       }
     // en/root fallback.
     "percent", _ ->
       case display {
-        "long" -> #([], [#("literal", " "), #("unit", "percent")])
-        _ -> #([], [#("unit", "%")])
+        UnitLong -> #([], [#("literal", " "), #("unit", "percent")])
+        UnitShort | UnitNarrow -> #([], [#("unit", "%")])
       }
     _, _ ->
       case display {
-        "long" -> #([], [
+        UnitLong -> #([], [
           #("literal", " "),
           #("unit", unit_name_long(unit, one)),
         ])
-        "narrow" -> #([], [#("unit", unit_name(unit, "narrow"))])
-        _ -> #([], [#("literal", " "), #("unit", unit_name(unit, display))])
+        UnitNarrow -> #([], [#("unit", unit_name(unit, narrow: True))])
+        UnitShort -> #([], [
+          #("literal", " "),
+          #("unit", unit_name(unit, narrow: False)),
+        ])
       }
   }
 }
@@ -619,17 +645,18 @@ fn is_zero_parts(parts: List(Part)) -> Bool {
 fn currency_text(
   key: String,
   code: String,
-  display: String,
+  display: CurrencyDisplay,
 ) -> #(String, Bool) {
   let usd_prefixed = case key {
     "ko" | "ko-KR" | "zh-TW" | "zh-Hant" -> True
     _ -> False
   }
   case display {
-    "symbol" | "narrowSymbol" ->
+    CurSymbol | CurNarrowSymbol -> {
+      let narrow = display == CurNarrowSymbol
       case code {
         "USD" ->
-          case display == "symbol" && usd_prefixed {
+          case !narrow && usd_prefixed {
             True -> #("US$", False)
             False -> #("$", False)
           }
@@ -640,20 +667,20 @@ fn currency_text(
         "KRW" -> #("₩", False)
         "INR" -> #("₹", False)
         "CAD" ->
-          case display {
-            "narrowSymbol" -> #("$", False)
-            _ -> #("CA$", False)
+          case narrow {
+            True -> #("$", False)
+            False -> #("CA$", False)
           }
         "AUD" ->
-          case display {
-            "narrowSymbol" -> #("$", False)
-            _ -> #("A$", False)
+          case narrow {
+            True -> #("$", False)
+            False -> #("A$", False)
           }
         _ -> #(code, True)
       }
-    "name" -> #(currency_name(code), False)
-    // "code"
-    _ -> #(code, True)
+    }
+    CurName -> #(currency_name(code), False)
+    CurCode -> #(code, True)
   }
 }
 
@@ -731,42 +758,43 @@ fn unit_name_long(unit: String, one: Bool) -> String {
   }
 }
 
-/// en-US unit display names (CLDR subset; falls back to the identifier).
-fn unit_name(unit: String, display: String) -> String {
+/// en-US short/narrow unit display names (CLDR subset; falls back to the
+/// identifier). The long width is handled by `unit_name_long`.
+fn unit_name(unit: String, narrow narrow: Bool) -> String {
   let simple = fn(u: String) -> String {
-    case u, display {
-      "acre", "narrow" -> "ac"
-      "acre", _ -> "ac"
+    case u, narrow {
+      "acre", True -> "ac"
+      "acre", False -> "ac"
       "bit", _ -> "bit"
       "byte", _ -> "byte"
-      "celsius", "narrow" -> "°C"
-      "celsius", _ -> "°C"
+      "celsius", True -> "°C"
+      "celsius", False -> "°C"
       "centimeter", _ -> "cm"
-      "day", "narrow" -> "d"
-      "day", _ -> "day"
-      "degree", "narrow" -> "°"
-      "degree", _ -> "deg"
+      "day", True -> "d"
+      "day", False -> "day"
+      "degree", True -> "°"
+      "degree", False -> "deg"
       "fahrenheit", _ -> "°F"
       "fluid-ounce", _ -> "fl oz"
-      "foot", "narrow" -> "′"
-      "foot", _ -> "ft"
+      "foot", True -> "′"
+      "foot", False -> "ft"
       "gallon", _ -> "gal"
       "gigabit", _ -> "Gb"
       "gigabyte", _ -> "GB"
-      "gram", "narrow" -> "g"
-      "gram", _ -> "g"
+      "gram", True -> "g"
+      "gram", False -> "g"
       "hectare", _ -> "ha"
-      "hour", "narrow" -> "h"
-      "hour", _ -> "hr"
-      "inch", "narrow" -> "″"
-      "inch", _ -> "in"
+      "hour", True -> "h"
+      "hour", False -> "hr"
+      "inch", True -> "″"
+      "inch", False -> "in"
       "kilobit", _ -> "kb"
       "kilobyte", _ -> "kB"
-      "kilogram", "narrow" -> "kg"
-      "kilogram", _ -> "kg"
+      "kilogram", True -> "kg"
+      "kilogram", False -> "kg"
       "kilometer", _ -> "km"
-      "liter", "narrow" -> "L"
-      "liter", _ -> "L"
+      "liter", True -> "L"
+      "liter", False -> "L"
       "megabit", _ -> "Mb"
       "megabyte", _ -> "MB"
       "meter", _ -> "m"
@@ -775,28 +803,28 @@ fn unit_name(unit: String, display: String) -> String {
       "mile-scandinavian", _ -> "smi"
       "milliliter", _ -> "mL"
       "millimeter", _ -> "mm"
-      "millisecond", "narrow" -> "ms"
-      "millisecond", _ -> "ms"
-      "minute", "narrow" -> "m"
-      "minute", _ -> "min"
-      "month", "narrow" -> "m"
-      "month", _ -> "mth"
+      "millisecond", True -> "ms"
+      "millisecond", False -> "ms"
+      "minute", True -> "m"
+      "minute", False -> "min"
+      "month", True -> "m"
+      "month", False -> "mth"
       "nanosecond", _ -> "ns"
       "ounce", _ -> "oz"
       "percent", _ -> "%"
       "petabyte", _ -> "PB"
-      "pound", "narrow" -> "#"
-      "pound", _ -> "lb"
-      "second", "narrow" -> "s"
-      "second", _ -> "sec"
+      "pound", True -> "#"
+      "pound", False -> "lb"
+      "second", True -> "s"
+      "second", False -> "sec"
       "stone", _ -> "st"
       "terabit", _ -> "Tb"
       "terabyte", _ -> "TB"
-      "week", "narrow" -> "w"
-      "week", _ -> "wk"
+      "week", True -> "w"
+      "week", False -> "wk"
       "yard", _ -> "yd"
-      "year", "narrow" -> "y"
-      "year", _ -> "yr"
+      "year", True -> "y"
+      "year", False -> "yr"
       _, _ -> u
     }
   }
@@ -915,7 +943,7 @@ fn strip_trailing(digits: String) -> String {
 }
 
 /// Round `dec` keeping `keep` leading digits (rest become remainder).
-fn round_dec(dec: Dec, keep: Int, mode: String, negative: Bool) -> Dec {
+fn round_dec(dec: Dec, keep: Int, mode: RoundingMode, negative: Bool) -> Dec {
   let n_digits = string.length(dec.digits)
   case dec.digits == "" || keep >= n_digits {
     True -> dec
@@ -936,16 +964,7 @@ fn round_dec(dec: Dec, keep: Int, mode: String, negative: Bool) -> Dec {
       let rem_nonzero = string.to_graphemes(rem) |> list.any(fn(c) { c != "0" })
       let up = case rem_nonzero {
         False -> False
-        True ->
-          case mode {
-            "halfEven" ->
-              case cmp {
-                1 -> True
-                0 -> n % 2 == 1
-                _ -> False
-              }
-            _ -> round_up_cmp(mode, negative, cmp)
-          }
+        True -> round_up_cmp(mode, negative, cmp, odd: n % 2 == 1)
       }
       let n2 = case up {
         True -> n + 1
@@ -956,29 +975,41 @@ fn round_dec(dec: Dec, keep: Int, mode: String, negative: Bool) -> Dec {
   }
 }
 
-/// `cmp` is remainder vs half (-1 below, 0 tie, 1 above). Remainder is known
-/// to be nonzero when this is called.
-fn round_up_cmp(mode: String, negative: Bool, cmp: Int) -> Bool {
+/// Whether the truncated result must be bumped away from zero. `cmp` is the
+/// remainder vs half (-1 below, 0 tie, 1 above) and the remainder is known to
+/// be nonzero when this is called; `odd` is the parity of the truncated
+/// result, which only halfEven consults.
+fn round_up_cmp(
+  mode: RoundingMode,
+  negative: Bool,
+  cmp: Int,
+  odd odd: Bool,
+) -> Bool {
   case mode {
-    "ceil" -> !negative
-    "floor" -> negative
-    "expand" -> True
-    "trunc" -> False
-    "halfCeil" ->
+    RoundCeil -> !negative
+    RoundFloor -> negative
+    RoundExpand -> True
+    RoundTrunc -> False
+    RoundHalfCeil ->
       case cmp {
         1 -> True
         0 -> !negative
         _ -> False
       }
-    "halfFloor" ->
+    RoundHalfFloor ->
       case cmp {
         1 -> True
         0 -> negative
         _ -> False
       }
-    "halfTrunc" -> cmp == 1
-    // halfExpand (default)
-    _ -> cmp >= 0
+    RoundHalfTrunc -> cmp == 1
+    RoundHalfExpand -> cmp >= 0
+    RoundHalfEven ->
+      case cmp {
+        1 -> True
+        0 -> odd
+        _ -> False
+      }
   }
 }
 
@@ -1036,7 +1067,7 @@ fn round_fraction(
   dec: Dec,
   f: Int,
   inc: Int,
-  mode: String,
+  mode: RoundingMode,
   negative: Bool,
 ) -> Dec {
   let keep = dec.exp + f
@@ -1095,15 +1126,8 @@ fn round_fraction(
                   }
               }
           }
-          let up = case mode {
-            "halfEven" ->
-              case cmp {
-                1 -> True
-                0 -> { n / inc } % 2 == 1
-                _ -> False
-              }
-            _ -> round_up_cmp(mode, negative, cmp)
-          }
+          let up =
+            round_up_cmp(mode, negative, cmp, odd: { n / inc } % 2 == 1)
           case up {
             True -> n - r + inc
             False -> n - r
@@ -1185,7 +1209,8 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
     False, _ -> False
     True, True ->
       case opts.rounding_priority {
-        "morePrecision" | "lessPrecision" -> {
+        PriorityAuto -> True
+        PriorityMorePrecision | PriorityLessPrecision -> {
           let max_sig = option.unwrap(opts.max_sig, 21)
           let max_frac = option.unwrap(opts.max_frac, 3)
           // Rounding magnitudes: lower = more precise.
@@ -1194,12 +1219,11 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
             _ -> dec.exp - max_sig
           }
           let m_f = 0 - max_frac
-          case opts.rounding_priority {
-            "morePrecision" -> m_s <= m_f
-            _ -> m_s >= m_f
+          case opts.rounding_priority == PriorityMorePrecision {
+            True -> m_s <= m_f
+            False -> m_s >= m_f
           }
         }
-        _ -> True
       }
   }
   let #(int_str, frac_str) = case use_sig {
@@ -1235,12 +1259,12 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
   }
   // stripIfInteger: drop fraction when it is all zeros.
   let frac_str = case opts.trailing_zero_display {
-    "stripIfInteger" ->
+    TzdStripIfInteger ->
       case string.to_graphemes(frac_str) |> list.all(fn(c) { c == "0" }) {
         True -> ""
         False -> frac_str
       }
-    _ -> frac_str
+    TzdAuto -> frac_str
   }
   // Pad to minimumIntegerDigits.
   let key = loc_key(opts.locale)
@@ -1275,11 +1299,11 @@ fn group_integer(opts: NumOpts, int_str: String) -> List(Part) {
   let key = loc_key(opts.locale)
   let n = string.length(int_str)
   let grouped = case opts.use_grouping {
-    "never" -> False
-    "always" -> n > 3
-    "min2" -> n > 4
-    // "auto" — groups at 4+ digits
-    _ -> n > 3
+    GroupingNever -> False
+    GroupingAlways -> n > 3
+    GroupingMin2 -> n > 4
+    // auto — groups at 4+ digits
+    GroupingAuto -> n > 3
   }
   case grouped {
     False -> [#("integer", int_str)]
