@@ -223,7 +223,8 @@ pub fn resume(
 // 1. Sync wait (Atomics.wait, DoWait steps 11-27). Core registers the
 //    waiterlist entry (data-only ETS insert via arc_waiter_ffi), re-reads
 //    the cell ("not-equal" short-circuits, cancelling the entry), then
-//    calls the realm's `host_hooks.sync_wait` with a `WaitRequest`. The
+//    calls the realm's `host_hooks.atomics` sync_wait capability with a
+//    `WaitRequest`. The
 //    capability blocks IN THE EMBEDDER until notified or timed out and returns
 //    `WaitOk` / `WaitTimedOut` (JS "ok" / "timed-out"). The CanBlock
 //    TypeError check (DoWait step 10) stays first and unchanged; a missing
@@ -238,7 +239,7 @@ pub fn resume(
 //    (arc_waiter_ffi:take_waiters) atomically CLAIMS up to `count` waiters
 //    FIFO and RETURNS the claimed remote waiters instead of messaging
 //    them. Claiming is the spec's "woken" count; delivery is the realm's
-//    `host_hooks.deliver_wake(claimed)`, which sends
+//    `host_hooks.atomics` deliver_wake capability, which sends
 //    `Pid ! {arc_notify, Ref, Key, ByteIndex}` per claimed waiter.
 //    Same-process waitAsync settles stay in core (pure data, no message).
 //
@@ -283,7 +284,8 @@ pub fn resume(
 //            (bounded dry-queue receive for embedder loops; feeds
 //             clause 3's inject_notify)
 //
-// 5. Construction. Both capabilities live in ONE `HostHooks` record
+// 5. Construction. Both capabilities live in ONE `AtomicsCapabilities`
+//    record, stored as a single `Option` on the `HostHooks` record
 //    (re-exported below) carried on the per-realm `RealmCtx`. Embedders
 //    build it ONCE with `atomics_capabilities` below and hand it to the
 //    engine/realm constructor (the `host_hooks` argument of the entry/
@@ -330,6 +332,12 @@ pub type WaiterKey =
 pub type WaiterHandle =
   state.WaiterHandle
 
+/// Re-export: the bundled blocking-wait + wake-delivery capability pair.
+/// `HostHooks.atomics` holds `Option(AtomicsCapabilities)` — both
+/// capabilities or neither, never one without the other.
+pub type AtomicsCapabilities =
+  state.AtomicsCapabilities
+
 /// Re-export: the embedder host-capability record carried on every realm's
 /// `RealmCtx`. Build one with `atomics_capabilities` below (or
 /// `state.default_host_hooks()` for "no capabilities") and hand it to the
@@ -339,7 +347,10 @@ pub type HostHooks =
 
 /// Build the Atomics blocking-wait + wake-delivery capability record
 /// (contract clause 5). Both together, always: a host that blocks but
-/// cannot deliver wakes (or vice versa) deadlocks its peer agents.
+/// cannot deliver wakes (or vice versa) deadlocks its peer agents. This
+/// is enforced by construction — `HostHooks.atomics` is one
+/// `Option(AtomicsCapabilities)`, so the half-configured embedder is not
+/// representable.
 ///
 /// Hand the result to the engine/realm constructor ONCE — it is a value,
 /// not a State mutation — and every State derived from that realm
@@ -353,8 +364,7 @@ pub fn atomics_capabilities(
 ) -> HostHooks {
   state.HostHooks(
     ..state.default_host_hooks(),
-    sync_wait: option.Some(sync_wait),
-    deliver_wake: option.Some(deliver_wake),
+    atomics: option.Some(state.AtomicsCapabilities(sync_wait:, deliver_wake:)),
   )
 }
 

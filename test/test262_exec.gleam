@@ -1622,7 +1622,8 @@ fn ffi_wait_for_notify(_ms: Int) -> Option(#(state.WaiterKey, Int)) {
   panic as beam_only_test
 }
 
-/// Blocking-wait capability (`HostHooks.sync_wait`, contract clause 1):
+/// Blocking-wait capability (`AtomicsCapabilities.sync_wait` on
+/// `HostHooks.atomics`, contract clause 1):
 /// suspend this worker process in a selective receive until the registered
 /// waiterlist entry is woken or the timeout elapses. `timeout_ms: None` =
 /// wait forever (the FFI clamps to the BEAM receive ceiling). A `Some(0)`
