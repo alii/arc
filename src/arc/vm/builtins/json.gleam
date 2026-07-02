@@ -66,7 +66,9 @@ pub fn dispatch(
 
 /// ES2024 S25.5.1 JSON.parse ( text [ , reviver ] )
 ///
-/// Simplified: reviver parameter is not yet implemented.
+/// DEVIATION from the spec: the optional `reviver` argument (steps 7-10,
+/// InternalizeJSONProperty) is accepted but ignored — implementing it is a
+/// separate feature.
 ///
 /// Steps:
 ///   1. Let jsonString be ? ToString(text).
@@ -109,7 +111,7 @@ fn json_parse(
       }
     }
     // Step 2: If parse fails, throw SyntaxError
-    Error(msg) -> state.syntax_error(state, msg)
+    Error(e) -> state.syntax_error(state, json_error_message(e))
   }
 }
 
@@ -124,6 +126,61 @@ type JsonValue {
   JsonObject(List(#(String, JsonValue)))
 }
 
+/// Everything that can go wrong while scanning JSON text.
+///
+/// The scanner never builds user-facing strings: each `parse_*` function
+/// returns one of these, and `json_error_message` renders it at the single
+/// point where the SyntaxError is thrown (`json_parse`).
+type JsonParseError {
+  /// Input ran out where a value / more input was required.
+  UnexpectedEnd
+  /// A byte that cannot start a JSON value (rendered as the offending char).
+  UnexpectedToken(found: String)
+  /// A string ran to the end of input without a closing quote.
+  UnterminatedString
+  /// Input ended in the middle of a backslash escape.
+  UnterminatedEscape
+  /// An array ran to the end of input without a closing bracket.
+  UnterminatedArray
+  /// An object ran to the end of input without a closing brace.
+  UnterminatedObject
+  /// A raw control character (U+0000–U+001F) inside a string.
+  ControlCharInString
+  /// `\x` where `x` is not one of the eight legal escape characters.
+  InvalidEscape(escape: String)
+  /// `\u` not followed by exactly four hex digits.
+  InvalidUnicodeEscape
+  /// A `\uXXXX` (or surrogate pair) that names an invalid codepoint.
+  InvalidCodepoint
+  /// A number-shaped span that does not match the ECMA-404 number grammar.
+  InvalidNumber(raw: String)
+  /// A specific punctuator/production was required and something else found.
+  Expected(what: String, in_: String)
+  /// The input bytes are not valid UTF-8.
+  InvalidUtf8
+}
+
+/// Render a `JsonParseError` as the SyntaxError message users see.
+/// This is the ONLY place parse errors become strings.
+fn json_error_message(e: JsonParseError) -> String {
+  case e {
+    UnexpectedEnd -> "Unexpected end of JSON input"
+    UnexpectedToken(found:) -> "Unexpected token '" <> found <> "' in JSON"
+    UnterminatedString -> "Unterminated string in JSON"
+    UnterminatedEscape -> "Unterminated string escape in JSON"
+    UnterminatedArray -> "Unterminated array in JSON"
+    UnterminatedObject -> "Unterminated object in JSON"
+    ControlCharInString -> "Unexpected control character in JSON string"
+    InvalidEscape(escape:) ->
+      "Invalid escape character '\\" <> escape <> "' in JSON"
+    InvalidUnicodeEscape -> "Invalid Unicode escape in JSON"
+    InvalidCodepoint -> "Invalid Unicode codepoint in JSON string"
+    InvalidNumber(raw:) -> "Invalid number '" <> raw <> "' in JSON"
+    Expected(what:, in_:) -> "Expected " <> what <> " in " <> in_
+    InvalidUtf8 -> "Invalid UTF-8 in JSON input"
+  }
+}
+
 /// Skip whitespace bytes (space, tab, newline, carriage return).
 fn skip_whitespace(bytes: BitArray) -> BitArray {
   case bytes {
@@ -136,10 +193,12 @@ fn skip_whitespace(bytes: BitArray) -> BitArray {
 }
 
 /// Parse a JSON value from UTF-8 bytes.
-fn parse_value(bytes: BitArray) -> Result(#(JsonValue, BitArray), String) {
+fn parse_value(
+  bytes: BitArray,
+) -> Result(#(JsonValue, BitArray), JsonParseError) {
   let bytes = skip_whitespace(bytes)
   case bytes {
-    <<>> -> Error("Unexpected end of JSON input")
+    <<>> -> Error(UnexpectedEnd)
     // "null"
     <<0x6E, 0x75, 0x6C, 0x6C, rest:bytes>> -> Ok(#(JsonNull, rest))
     // "true"
@@ -158,10 +217,8 @@ fn parse_value(bytes: BitArray) -> Result(#(JsonValue, BitArray), String) {
     // '-' or '0'..'9'
     <<b, _:bytes>> if b == 0x2D || b >= 0x30 && b <= 0x39 -> parse_number(bytes)
     <<c:utf8_codepoint, _:bytes>> ->
-      Error(
-        "Unexpected token '" <> string.from_utf_codepoints([c]) <> "' in JSON",
-      )
-    _ -> Error("Unexpected token in JSON")
+      Error(UnexpectedToken(found: string.from_utf_codepoints([c])))
+    _ -> Error(InvalidUtf8)
   }
 }
 
@@ -173,7 +230,8 @@ type StringScan {
   FoundEscape(prefix_len: Int, after: BitArray)
   /// ECMA-404: an unescaped control character (U+0000–U+001F) — invalid JSON.
   FoundControlChar
-  UnterminatedString
+  /// Input ended before the closing quote.
+  NoClosingQuote
 }
 
 /// Scan forward for the closing quote or the first backslash.
@@ -190,14 +248,16 @@ fn scan_string(bytes: BitArray, n: Int) -> StringScan {
         True -> FoundControlChar
         False -> scan_string(rest, n + 1)
       }
-    _ -> UnterminatedString
+    _ -> NoClosingQuote
   }
 }
 
 /// Parse the content of a JSON string (after the opening quote).
 /// Fast path: no escapes — the result is an O(1) zero-copy sub-binary of
 /// the input. Only when a backslash is seen do we build an escape buffer.
-fn parse_string(bytes: BitArray) -> Result(#(String, BitArray), String) {
+fn parse_string(
+  bytes: BitArray,
+) -> Result(#(String, BitArray), JsonParseError) {
   case scan_string(bytes, 0) {
     FoundQuote(n, after) -> {
       use s <- result.map(take_string(bytes, n))
@@ -207,8 +267,8 @@ fn parse_string(bytes: BitArray) -> Result(#(String, BitArray), String) {
       use chunk <- result.try(take_string(bytes, n))
       parse_escape(after, string_tree.from_string(chunk))
     }
-    FoundControlChar -> Error("Unexpected control character in JSON string")
-    UnterminatedString -> Error("Unterminated string in JSON")
+    FoundControlChar -> Error(ControlCharInString)
+    NoClosingQuote -> Error(UnterminatedString)
   }
 }
 
@@ -217,7 +277,7 @@ fn parse_string(bytes: BitArray) -> Result(#(String, BitArray), String) {
 fn parse_string_content(
   bytes: BitArray,
   acc: StringTree,
-) -> Result(#(String, BitArray), String) {
+) -> Result(#(String, BitArray), JsonParseError) {
   case scan_string(bytes, 0) {
     FoundQuote(n, after) -> {
       use chunk <- result.map(take_string(bytes, n))
@@ -227,8 +287,8 @@ fn parse_string_content(
       use chunk <- result.try(take_string(bytes, n))
       parse_escape(after, string_tree.append(acc, chunk))
     }
-    FoundControlChar -> Error("Unexpected control character in JSON string")
-    UnterminatedString -> Error("Unterminated string in JSON")
+    FoundControlChar -> Error(ControlCharInString)
+    NoClosingQuote -> Error(UnterminatedString)
   }
 }
 
@@ -236,9 +296,9 @@ fn parse_string_content(
 fn parse_escape(
   bytes: BitArray,
   acc: StringTree,
-) -> Result(#(String, BitArray), String) {
+) -> Result(#(String, BitArray), JsonParseError) {
   case bytes {
-    <<>> -> Error("Unterminated string escape in JSON")
+    <<>> -> Error(UnterminatedEscape)
     <<0x22, rest:bytes>> ->
       parse_string_content(rest, string_tree.append(acc, "\""))
     <<0x5C, rest:bytes>> ->
@@ -260,28 +320,36 @@ fn parse_escape(
       parse_string_content(rest, string_tree.append(acc, decoded))
     }
     <<c:utf8_codepoint, _:bytes>> ->
-      Error(
-        "Invalid escape character '\\"
-        <> string.from_utf_codepoints([c])
-        <> "' in JSON",
-      )
-    _ -> Error("Unterminated string escape in JSON")
+      Error(InvalidEscape(escape: string.from_utf_codepoints([c])))
+    _ -> Error(UnterminatedEscape)
   }
 }
 
 /// Parse a 4-digit hex escape (\uXXXX), returning the integer codepoint value.
-fn parse_unicode_escape(bytes: BitArray) -> Result(#(Int, BitArray), String) {
+///
+/// Each digit is read structurally rather than via `int.base_parse`, which
+/// accepts a leading sign — `"\u+061"` must be a SyntaxError, not U+0061.
+fn parse_unicode_escape(
+  bytes: BitArray,
+) -> Result(#(Int, BitArray), JsonParseError) {
   case bytes {
-    <<a, b, c, d, rest:bytes>> -> {
-      let parsed =
-        bit_array.to_string(<<a, b, c, d>>)
-        |> result.try(int.base_parse(_, 16))
-      case parsed {
-        Ok(n) -> Ok(#(n, rest))
-        Error(Nil) -> Error("Invalid Unicode escape in JSON")
+    <<a, b, c, d, rest:bytes>> ->
+      case hex_digit(a), hex_digit(b), hex_digit(c), hex_digit(d) {
+        Some(h1), Some(h2), Some(h3), Some(h4) ->
+          Ok(#(h1 * 4096 + h2 * 256 + h3 * 16 + h4, rest))
+        _, _, _, _ -> Error(InvalidUnicodeEscape)
       }
-    }
-    _ -> Error("Unexpected end of Unicode escape in JSON")
+    _ -> Error(InvalidUnicodeEscape)
+  }
+}
+
+/// The value of an ASCII hex-digit byte ('0'-'9', 'A'-'F', 'a'-'f'), or None.
+fn hex_digit(byte: Int) -> Option(Int) {
+  case byte {
+    b if b >= 0x30 && b <= 0x39 -> Some(b - 0x30)
+    b if b >= 0x41 && b <= 0x46 -> Some(b - 0x41 + 10)
+    b if b >= 0x61 && b <= 0x66 -> Some(b - 0x61 + 10)
+    _ -> None
   }
 }
 
@@ -289,7 +357,7 @@ fn parse_unicode_escape(bytes: BitArray) -> Result(#(Int, BitArray), String) {
 /// Returns #(decoded_string, remaining_bytes). Lone surrogates become U+FFFD.
 fn decode_unicode_escape(
   bytes: BitArray,
-) -> Result(#(String, BitArray), String) {
+) -> Result(#(String, BitArray), JsonParseError) {
   use #(cp, rest) <- result.try(parse_unicode_escape(bytes))
   case cp {
     // High surrogate — look for a trailing \uXXXX low surrogate
@@ -324,28 +392,118 @@ fn parse_low_surrogate(bytes: BitArray) -> Option(#(Int, BitArray)) {
 }
 
 /// Convert an integer codepoint into a single-char string, or error.
-fn codepoint_to_string(codepoint: Int) -> Result(String, String) {
+fn codepoint_to_string(codepoint: Int) -> Result(String, JsonParseError) {
   string.utf_codepoint(codepoint)
   |> result.map(fn(cp) { string.from_utf_codepoints([cp]) })
-  |> result.replace_error("Invalid Unicode codepoint in JSON string")
+  |> result.replace_error(InvalidCodepoint)
 }
 
-/// Parse a JSON number — count the number-byte span, slice it out as a
-/// sub-binary (O(1)), and parse that.
-fn parse_number(bytes: BitArray) -> Result(#(JsonValue, BitArray), String) {
-  let n = count_number_bytes(bytes, 0)
-  use num_str <- result.try(take_string(bytes, n))
-  let rest = drop_bytes(bytes, n)
-  case parse_json_number_string(num_str) {
-    Ok(f) -> Ok(#(JsonNumber(f), rest))
-    Error(Nil) -> Error("Invalid number '" <> num_str <> "' in JSON")
+/// The three spans of a scanned JSON number, as byte lengths:
+///   int_len  — optional '-' plus the integer digits (always > 0)
+///   frac_len — '.' plus the fraction digits, or 0 if absent
+///   exp_len  — 'e'/'E', optional sign, exponent digits, or 0 if absent
+/// The total number span is `int_len + frac_len + exp_len` bytes.
+type NumberSpan {
+  NumberSpan(int_len: Int, frac_len: Int, exp_len: Int)
+}
+
+/// Parse a JSON number: scan the leading bytes against the ECMA-404 number
+/// grammar, slice the span out as a sub-binary (O(1)), and convert it.
+fn parse_number(
+  bytes: BitArray,
+) -> Result(#(JsonValue, BitArray), JsonParseError) {
+  case scan_number(bytes) {
+    Ok(span) -> {
+      let len = span.int_len + span.frac_len + span.exp_len
+      use num_str <- result.try(take_string(bytes, len))
+      case number_span_to_num(num_str, span) {
+        Ok(f) -> Ok(#(JsonNumber(f), drop_bytes(bytes, len)))
+        Error(Nil) -> Error(InvalidNumber(raw: num_str))
+      }
+    }
+    // Report the whole number-looking span (e.g. "01", "1e", "-"), not just
+    // the prefix that scanned cleanly.
+    Error(Nil) -> {
+      use raw <- result.try(take_string(bytes, count_number_bytes(bytes, 0)))
+      Error(InvalidNumber(raw:))
+    }
   }
 }
 
-/// Count leading bytes that could be part of a JSON number.
+/// Byte-scan the ECMA-404 number grammar
+///
+///   -? (0 | [1-9][0-9]*) ('.' [0-9]+)? ([eE] [+-]? [0-9]+)?
+///
+/// This rejects leading zeros ("01"), a bare or trailing '.' (".5", "1."),
+/// a bare or dangling exponent ("1e", "1e+"), and signs anywhere but the
+/// two allowed positions — none of which the Erlang number parsers reject.
+fn scan_number(bytes: BitArray) -> Result(NumberSpan, Nil) {
+  let #(bytes, sign_len) = case bytes {
+    <<0x2D, rest:bytes>> -> #(rest, 1)
+    _ -> #(bytes, 0)
+  }
+  use #(bytes, digits) <- result.try(scan_integer_digits(bytes))
+  use #(bytes, frac_len) <- result.try(scan_fraction(bytes))
+  use exp_len <- result.map(scan_exponent(bytes))
+  NumberSpan(int_len: sign_len + digits, frac_len:, exp_len:)
+}
+
+/// `0 | [1-9][0-9]*` — a leading '0' must not be followed by another digit.
+fn scan_integer_digits(bytes: BitArray) -> Result(#(BitArray, Int), Nil) {
+  case bytes {
+    <<0x30, next, _:bytes>> if next >= 0x30 && next <= 0x39 -> Error(Nil)
+    <<0x30, rest:bytes>> -> Ok(#(rest, 1))
+    <<b, rest:bytes>> if b >= 0x31 && b <= 0x39 -> {
+      let #(rest, n) = scan_digits(rest, 0)
+      Ok(#(rest, 1 + n))
+    }
+    _ -> Error(Nil)
+  }
+}
+
+/// `('.' [0-9]+)?` — a '.' must be followed by at least one digit.
+fn scan_fraction(bytes: BitArray) -> Result(#(BitArray, Int), Nil) {
+  case bytes {
+    <<0x2E, rest:bytes>> ->
+      case scan_digits(rest, 0) {
+        #(_, 0) -> Error(Nil)
+        #(rest, n) -> Ok(#(rest, 1 + n))
+      }
+    _ -> Ok(#(bytes, 0))
+  }
+}
+
+/// `([eE] [+-]? [0-9]+)?` — an 'e' must be followed by (optionally signed)
+/// digits.
+fn scan_exponent(bytes: BitArray) -> Result(Int, Nil) {
+  case bytes {
+    <<e, rest:bytes>> if e == 0x65 || e == 0x45 -> {
+      let #(rest, sign_len) = case rest {
+        <<s, tail:bytes>> if s == 0x2B || s == 0x2D -> #(tail, 1)
+        _ -> #(rest, 0)
+      }
+      case scan_digits(rest, 0) {
+        #(_, 0) -> Error(Nil)
+        #(_, n) -> Ok(1 + sign_len + n)
+      }
+    }
+    _ -> Ok(0)
+  }
+}
+
+/// Count a leading run of ASCII digits.
+fn scan_digits(bytes: BitArray, n: Int) -> #(BitArray, Int) {
+  case bytes {
+    <<b, rest:bytes>> if b >= 0x30 && b <= 0x39 -> scan_digits(rest, n + 1)
+    _ -> #(bytes, n)
+  }
+}
+
+/// Count leading bytes that look like they belong to a number ('-' '+' '.'
+/// 'e' 'E' or a digit). Only used to report the full malformed span in
+/// `InvalidNumber` — the real grammar check is `scan_number`.
 fn count_number_bytes(bytes: BitArray, n: Int) -> Int {
   case bytes {
-    // '-' '+' '.' 'e' 'E' or '0'..'9'
     <<b, rest:bytes>>
       if b == 0x2D
       || b == 0x2B
@@ -359,16 +517,32 @@ fn count_number_bytes(bytes: BitArray, n: Int) -> Int {
   }
 }
 
-/// Parse a collected number string into a JsNum.
-/// The integer fallback must go through `value.num_from_int`: a bare
-/// `int.to_float` on an arbitrary-precision int (e.g. a 400-digit JSON
-/// integer) raises an uncatchable `erlang:float/1` badarg. num_from_int
-/// saturates out-of-range magnitudes to ±Infinity instead.
-fn parse_json_number_string(s: String) -> Result(value.JsNum, Nil) {
-  // Try parsing as float first, then fall back to int parse → num_from_int
-  gleam_stdlib_parse_float(s)
-  |> result.map(Finite)
-  |> result.try_recover(fn(_) { int.parse(s) |> result.map(value.num_from_int) })
+/// Convert a grammar-checked number span into a JsNum.
+///
+/// Erlang's float parser demands a fraction before any exponent, and its
+/// integer parser folds "-0" into 0, so the route depends on which parts the
+/// scanner saw:
+///   - integer only  → `int.parse` then `value.num_from_int` (a bare
+///     `int.to_float` on an arbitrary-precision int, e.g. a 400-digit JSON
+///     integer, raises an uncatchable badarg; num_from_int saturates to
+///     ±Infinity instead). "-0" goes through the float parser to keep -0.0.
+///   - exponent, no fraction → synthesize one: "1e5" → "1.0e5".
+///   - fraction present → the span is already valid Erlang float syntax.
+fn number_span_to_num(s: String, span: NumberSpan) -> Result(value.JsNum, Nil) {
+  case span.frac_len > 0, span.exp_len > 0 {
+    True, _ -> gleam_stdlib_parse_float(s) |> result.map(Finite)
+    False, True -> {
+      let mantissa = string.slice(s, 0, span.int_len)
+      let exponent = string.drop_start(s, span.int_len)
+      gleam_stdlib_parse_float(mantissa <> ".0" <> exponent)
+      |> result.map(Finite)
+    }
+    False, False ->
+      case s {
+        "-0" -> gleam_stdlib_parse_float("-0.0") |> result.map(Finite)
+        _ -> int.parse(s) |> result.map(value.num_from_int)
+      }
+  }
 }
 
 @external(erlang, "gleam_stdlib", "parse_float")
@@ -378,10 +552,10 @@ fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
 fn parse_array(
   bytes: BitArray,
   acc: List(JsonValue),
-) -> Result(#(JsonValue, BitArray), String) {
+) -> Result(#(JsonValue, BitArray), JsonParseError) {
   let bytes = skip_whitespace(bytes)
   case bytes {
-    <<>> -> Error("Unterminated array in JSON")
+    <<>> -> Error(UnterminatedArray)
     // ']'
     <<0x5D, rest:bytes>> -> Ok(#(JsonArray(list.reverse(acc)), rest))
     _ -> {
@@ -392,7 +566,7 @@ fn parse_array(
           case bytes {
             // ','
             <<0x2C, rest:bytes>> -> Ok(skip_whitespace(rest))
-            _ -> Error("Expected ',' or ']' in array")
+            _ -> Error(Expected(what: "',' or ']'", in_: "array"))
           }
       }
       use bytes <- result.try(bytes)
@@ -406,10 +580,10 @@ fn parse_array(
 fn parse_object(
   bytes: BitArray,
   acc: List(#(String, JsonValue)),
-) -> Result(#(JsonValue, BitArray), String) {
+) -> Result(#(JsonValue, BitArray), JsonParseError) {
   let bytes = skip_whitespace(bytes)
   case bytes {
-    <<>> -> Error("Unterminated object in JSON")
+    <<>> -> Error(UnterminatedObject)
     // '}'
     <<0x7D, rest:bytes>> -> Ok(#(JsonObject(list.reverse(acc)), rest))
     _ -> {
@@ -420,7 +594,7 @@ fn parse_object(
           case bytes {
             // ','
             <<0x2C, rest:bytes>> -> Ok(skip_whitespace(rest))
-            _ -> Error("Expected ',' or '}' in object")
+            _ -> Error(Expected(what: "',' or '}'", in_: "object"))
           }
       }
       use bytes <- result.try(bytes)
@@ -428,13 +602,13 @@ fn parse_object(
       use rest <- result.try(case skip_whitespace(bytes) {
         // '"'
         <<0x22, rest:bytes>> -> Ok(rest)
-        _ -> Error("Expected string key in object")
+        _ -> Error(Expected(what: "string key", in_: "object"))
       })
       use #(key, rest) <- result.try(parse_string(rest))
       use rest <- result.try(case skip_whitespace(rest) {
         // ':'
         <<0x3A, rest:bytes>> -> Ok(rest)
-        _ -> Error("Expected ':' after key in object")
+        _ -> Error(Expected(what: "':' after key", in_: "object"))
       })
       use #(val, rest) <- result.try(parse_value(rest))
       parse_object(rest, [#(key, val), ..acc])
@@ -444,12 +618,10 @@ fn parse_object(
 
 /// Slice the first `len` bytes off `bytes` as a String.
 /// O(1) on BEAM — the slice is a zero-copy sub-binary of the input.
-fn take_string(bytes: BitArray, len: Int) -> Result(String, String) {
+fn take_string(bytes: BitArray, len: Int) -> Result(String, JsonParseError) {
   case bit_array.slice(bytes, 0, len) {
-    Ok(slice) ->
-      bit_array.to_string(slice)
-      |> result.replace_error("Invalid UTF-8 in JSON input")
-    Error(Nil) -> Error("Unexpected end of JSON input")
+    Ok(slice) -> bit_array.to_string(slice) |> result.replace_error(InvalidUtf8)
+    Error(Nil) -> Error(UnexpectedEnd)
   }
 }
 
