@@ -9,3 +9,4 @@ erl_crash.dump
 .github/test262/results.json
 node_modules
 .local
+.claude/worktrees/

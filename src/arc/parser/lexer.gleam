@@ -226,6 +226,22 @@ pub fn tokenize_module(source: String) -> Result(List(Token), LexError) {
   do_tokenize(bytes, 0, 1, [], LexModule)
 }
 
+/// Re-lex `bytes` from byte offset `pos` (which sits on line `line`),
+/// producing absolutely-positioned tokens for the rest of the source.
+///
+/// Used by the parser after it re-scans a regex literal from source: the
+/// up-front lex has no expression context, so a quote or backtick inside a
+/// regex body (`/'/g`) opens a phantom string/template token that swallows
+/// real source after the regex, and every token past it must be rebuilt.
+pub fn tokenize_from(
+  bytes: BitArray,
+  pos: Int,
+  line: Int,
+  mode: LexMode,
+) -> Result(List(Token), LexError) {
+  do_tokenize(bytes, pos, line, [], mode)
+}
+
 fn do_tokenize(
   bytes: BitArray,
   pos: Int,

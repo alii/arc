@@ -100,7 +100,8 @@ pub fn compile(
   sb: scope.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
   case program {
-    ast.Script(body) -> compile_script(body, sb, scope.LexLocal)
+    ast.Script(body) ->
+      compile_script(body, sb, scope.LexLocal, deletable_global_vars: False)
     ast.Module(_) -> {
       use body <- result.map(compile_module(program, sb, esm.analyze(program)))
       body.template
@@ -293,7 +294,8 @@ pub fn compile_repl(
   sb: scope.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
   case program {
-    ast.Script(body) -> compile_script(body, sb, scope.LexGlobal)
+    ast.Script(body) ->
+      compile_script(body, sb, scope.LexGlobal, deletable_global_vars: False)
     // REPL input is always parsed with `parser.Script`.
     ast.Module(_) -> Error(emit.Internal("compile_repl called on a Module"))
   }
@@ -307,7 +309,10 @@ pub fn compile_eval(
   sb: scope.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
   case program {
-    ast.Script(body) -> compile_script(body, sb, scope.LexLocal)
+    // §19.2.1.3 EvalDeclarationInstantiation passes D = true: an
+    // eval-introduced global var / function binding is configurable.
+    ast.Script(body) ->
+      compile_script(body, sb, scope.LexLocal, deletable_global_vars: True)
     // Eval source is always parsed with `parser.Script`.
     ast.Module(_) -> Error(emit.Internal("compile_eval called on a Module"))
   }
@@ -486,6 +491,11 @@ fn compile_script(
   stmts: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
   top_lex: scope.TopLevelLex,
+  // §9.1.1.4.17 CreateGlobalVarBinding's D argument for the unit's
+  // top-level var / hoisted-function globals: False for a script / the
+  // REPL (§16.1.7 step 18), True for global eval code (§19.2.1.3 step 17
+  // — an eval-introduced global var / function IS deletable).
+  deletable_global_vars deletable_global_vars: Bool,
 ) -> Result(FuncTemplate, CompileError) {
   // Phase 1: finalize the parser-built scope tree (top-level body + every
   // nested function), computing capture sets, boxing decisions, and slot
@@ -500,7 +510,7 @@ fn compile_script(
   // `function_info` from the analyzer's tree would under-size the
   // runtime locals tuple. Shadow `tree`.
   use #(code, constants, children, is_strict, tree) <- result.map(
-    emit.emit_program(stmts, tree),
+    emit.emit_program(stmts, tree, deletable_global_vars:),
   )
   let info = scope.function_info(tree, scope.root_scope_id)
   // Phase 2 already produced concrete IrOps for every nested function;

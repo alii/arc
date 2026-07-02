@@ -221,12 +221,22 @@ pub opaque type Emitter {
     /// var / hoisted-function bindings this unit sends to the global object
     /// (IrDeclareGlobalVar). False for scripts (§9.1.1.4.18 passes
     /// D = false, so `delete x` on a top-level var is false and the
-    /// binding survives). True only for direct-eval units
-    /// (emit_eval_direct): §19.2.1.3 EvalDeclarationInstantiation passes
-    /// D = true, so an eval-introduced global var IS deletable. Never
+    /// binding survives). True only for eval units — direct
+    /// (emit_eval_direct) and global/indirect (emit_program with
+    /// deletable_global_vars: True): §19.2.1.3 EvalDeclarationInstantiation
+    /// passes D = true, so an eval-introduced global IS deletable. Never
     /// inherited by child function emitters — only a unit's own top level
     /// emits IrDeclareGlobalVar.
     deletable_global_vars: Bool,
+    /// True while compiling the SYNTHESIZED default constructor of a
+    /// derived class (§15.7.14 ClassDefaultConstructor). Its implicit
+    /// `super(...args)` forwards the received argument List as-is — unlike
+    /// a source-level spread it performs NO array iteration, so
+    /// %Array.prototype%[@@iterator] must not be observable there
+    /// (test262 default-constructor-spread-override). Set on the parent
+    /// emitter around that one compile_function_body call and inherited by
+    /// the child; the synthesized body cannot nest further functions.
+    in_synth_default_ctor: Bool,
     /// Non-empty only while emitting formal-parameter initializers (default
     /// values / destructuring defaults): the parameter-scope binding names
     /// (parameters + implicit `arguments` for non-arrows). Attached to any
@@ -339,15 +349,28 @@ pub type EmitError {
 /// `fresh_slot` / `at_global_lex` / `is_annexb_blocked` consult populated
 /// scope data. `top_lex` is read from the tree.
 /// Returns the emitter ops, constants, child functions, and script strictness.
+/// `deletable_global_vars` is §9.1.1.4.17 CreateGlobalVarBinding's D
+/// argument for this unit's top-level var / hoisted-function globals: False
+/// for real scripts and the REPL (§16.1.7 GlobalDeclarationInstantiation
+/// step 18 passes D = false), True for global eval code compiled through
+/// this entry — indirect eval, and a global-caller eval that gets its own
+/// unit (§19.2.1.3 EvalDeclarationInstantiation passes D = true, so an
+/// eval-introduced global var / function IS deletable).
 pub fn emit_program(
   stmts: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
+  deletable_global_vars deletable_global_vars: Bool,
 ) -> Result(
   #(List(IrOp), List(JsValue), List(CompiledChild), Bool, scope.ScopeTree),
   EmitError,
 ) {
   let script_strict = ast_util.has_use_strict_directive(stmts)
-  let e = Emitter(..new_emitter(tree, root_scope_id), strict: script_strict)
+  let e =
+    Emitter(
+      ..new_emitter(tree, root_scope_id),
+      strict: script_strict,
+      deletable_global_vars:,
+    )
   emit_top_level_body(e, stmts, script_strict, True)
 }
 
@@ -1173,6 +1196,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     field_init: NoFieldInit,
     in_block: False,
     deletable_global_vars: False,
+    in_synth_default_ctor: False,
     param_scope_names: [],
     with_stack: [],
     private_env: [],
@@ -3075,6 +3099,9 @@ fn compile_function_body(
       // A function's [[PrivateEnvironment]] is fixed at its definition
       // site — nested functions see the enclosing classes' private names.
       private_env: parent.private_env,
+      // Set by compile_class_body around the one call that compiles a
+      // synthesized default derived constructor (see the field's doc).
+      in_synth_default_ctor: parent.in_synth_default_ctor,
     )
   // Non-arrows own all four lexical slots starting at len(captures), in
   // canonical order — pre-registered by the analyzer. Runtime setup_locals
@@ -4429,12 +4456,22 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         |> get_lexical(opcode.RefActiveFunc)
         |> emit_ir(IrGetPrototypeOf)
         |> get_lexical(opcode.RefNewTarget)
-      use e <- result.map(emit_call_args(
-        e,
-        args,
-        IrCallConstructor,
-        IrCallConstructorApply,
-      ))
+      use e <- result.map(case e.in_synth_default_ctor {
+        // §15.7.14 ClassDefaultConstructor: a class with no source
+        // constructor forwards its whole argument List to the parent
+        // as-is. IrCreateRestArray(0) snapshots the frame's arguments
+        // into a fresh array — unlike a source-level `super(...xs)`
+        // there is NO iteration, so a poisoned
+        // %Array.prototype%[@@iterator] must not be observable here.
+        True ->
+          Ok(
+            e
+            |> emit_ir(IrCreateRestArray(0))
+            |> emit_ir(IrCallConstructorApply),
+          )
+        False ->
+          emit_call_args(e, args, IrCallConstructor, IrCallConstructorApply)
+      })
       let e = e |> emit_ir(IrDup) |> set_this
       case e.field_init {
         FieldInitAfterSuper -> emit_field_init_call(e)
@@ -6115,6 +6152,27 @@ fn emit_destructuring_assign(
     _, ast.ParenthesizedExpression(_, inner) ->
       emit_destructuring_assign(e, inner)
 
+    // super.p / super[k] — a SuperReference PutValue (§13.3.7.3) needs the
+    // super base ([[HomeObject]]'s prototype) AND the `this` receiver under
+    // the value: the IrPutSuperValue shape, not the single-object PutField
+    // shape below. Stack: [val] → this → Swap → [val,this] → home proto →
+    // Swap → [val,proto,this] → key → Swap → [val,key,proto,this]
+    // → PutSuperValue → [val] → Pop.
+    _, ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
+      let e =
+        e
+        |> get_this
+        |> emit_ir(IrSwap)
+        |> get_lexical(opcode.RefHomeObject)
+        |> emit_ir(IrGetPrototypeOf)
+        |> emit_ir(IrSwap)
+      use e <- result.map(emit_super_key(e, key, computed))
+      e
+      |> emit_ir(IrSwap)
+      |> emit_ir(IrPutSuperValue)
+      |> emit_ir(IrPop)
+    }
+
     // obj.prop — stack [val] → eval obj → [obj,val] → swap → [val,obj]
     // → PutField → [val] → Pop. (PutField pops [value,obj], leaves value.)
     Some(#(obj, prop)), _ -> {
@@ -6228,6 +6286,16 @@ fn emit_array_assign_element(
   target: ast.Expression,
 ) -> Result(Emitter, EmitError) {
   case ast_util.member_static_prop(target), target {
+    // super.p / super[k] — its Reference evaluation (lexical home object +
+    // `this`) has no observable effect, so step the iterator first and let
+    // emit_destructuring_assign build the PutSuperValue store (the member
+    // arms below are shaped around a single evaluated base object). Only a
+    // COMPUTED super key deviates from lref-before-step order.
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+      let e = emit_ir(e, IrIteratorNext)
+      let e = emit_ir(e, IrPop)
+      emit_destructuring_assign(e, target)
+    }
     // obj.prop — [iter] → obj → [obj,iter] → Swap → [iter,obj]
     // → IteratorNext → [done,value,iter,obj] → Pop → [value,iter,obj]
     // → Rot3 → [obj,value,iter] → Swap → [value,obj,iter]
@@ -6287,6 +6355,15 @@ fn emit_array_assign_rest(
   close_throw: Int,
 ) -> Result(#(Emitter, Bool), EmitError) {
   case ast_util.member_static_prop(target), target {
+    // super.p / super[k] rest target — same routing as
+    // emit_array_assign_element: no observable lref evaluation, so drain
+    // first and let emit_destructuring_assign build the super store.
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+      let e = emit_ir(e, IrPopTry)
+      let e = emit_ir(e, IrIteratorRest)
+      use e <- result.map(emit_destructuring_assign(e, target))
+      #(e, True)
+    }
     // obj.prop — evaluate obj (under the F_body guard, above iter so a throw
     // unwinds to [thrown, iter, ..]), then drain, then PutField.
     // [iter] → [obj,iter] → Swap → [iter,obj] → PopTry → IteratorRest
@@ -6420,6 +6497,13 @@ fn emit_keyed_destructure_assign(
 ) -> Result(Emitter, EmitError) {
   let bare = ast_util.unwrap_parens(target)
   case ast_util.member_static_prop(bare), bare {
+    // super.p / super[k] target: no observable lref evaluation, so GetV
+    // first and let emit_destructuring_assign build the super store.
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+      let e = emit_ir(e, IrDup)
+      let e = emit_ir(e, IrGetField(name))
+      emit_destructuring_assign(e, target)
+    }
     // [src] → Dup → [src,src] → obj → [obj,src,src] → Swap → [src,obj,src]
     // → GetField → [v,obj,src] → Put → [v,src] → Pop → [src].
     Some(#(obj, prop)), _ -> {
@@ -6497,6 +6581,12 @@ fn emit_elem_keyed_target(
   target: ast.Expression,
 ) -> Result(Emitter, EmitError) {
   case ast_util.member_static_prop(target), target {
+    // super.p / super[k] target: no observable lref evaluation — get the
+    // source value and let emit_destructuring_assign build the super store.
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+      let e = emit_ir(e, IrGetElem)
+      emit_destructuring_assign(e, target)
+    }
     // [key,srcd,src] → tobj → [tobj,key,srcd,src] → unrot3
     // → [key,srcd,tobj,src] → GetElem → [v,tobj,src]
     // → PutField → [v,src] → Pop → [src].
@@ -6525,6 +6615,12 @@ fn emit_elem_keyed_target(
     // default check, then PutValue.
     _, ast.AssignmentExpression(_, ast.Assign, left, default_expr) as assign ->
       case ast_util.unwrap_parens(left) {
+        // Super member with a default: handled by the generic path (the
+        // lref has no observable evaluation).
+        ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+          let e = emit_ir(e, IrGetElem)
+          emit_destructuring_assign(e, assign)
+        }
         ast.MemberExpression(..) as member -> {
           use e <- result.try(emit_elem_keyed_member_default(
             e,
@@ -6955,16 +7051,18 @@ fn compile_class_body(
   ) = ast_util.classify_class_body(body)
 
   // Build constructor: if none provided, synthesize the spec default. For a
-  // derived class that's (§15.7.14 step 14): constructor(...args) {
-  // super(...args); }. Arc doesn't support rest parameters yet, so spread
-  // `arguments` instead — observably equivalent here since the synthetic body
-  // never re-reads it. For a base class it's an empty body.
-  let #(ctor_params, ctor_body) = case ctor_method {
+  // derived class that's (§15.7.14 ClassDefaultConstructor) a forward of
+  // the received argument List to the parent constructor — emitted as a
+  // `super(...)` whose arguments come straight from the frame, with NO
+  // observable array iteration (`in_synth_default_ctor`). For a base class
+  // it's an empty body.
+  let #(ctor_params, ctor_body, synth_super_forward) = case ctor_method {
     Some(ast.ClassMethod(value: ast.FunctionExpression(params:, body:, ..), ..)) -> #(
       params,
       body,
+      False,
     )
-    _ -> #([], default_ctor_body(super_class))
+    _ -> #([], default_ctor_body(super_class), option.is_some(super_class))
   }
 
   // §13.3.7.1 SuperCall step 12 / §15.7.14 step 28: instance fields are
@@ -6986,7 +7084,8 @@ fn compile_class_body(
     None -> #(opcode.method_perms, FieldInitAtStart)
   }
   use #(e, child) <- result.try(compile_function_body(
-    e,
+    // Scoped to this one compile: the child emitter inherits the flag.
+    Emitter(..e, in_synth_default_ctor: synth_super_forward),
     name,
     None,
     ctor_params,
@@ -7000,6 +7099,7 @@ fn compile_class_body(
     option.map(init_idx, fn(_) { field_init })
       |> option.unwrap(NoFieldInit),
   ))
+  let e = Emitter(..e, in_synth_default_ctor: False)
   let child =
     CompiledChild(
       ..child,

@@ -6430,11 +6430,21 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let pattern =
         regex.byte_slice_source(p.bytes, body_start, end_pos - 1 - body_start)
       let flags_str = string.join(flags, "")
-      // Now skip tokens until we're past this regex in the token stream
-      use p2 <- result.try(skip_tokens_past(p, flags_end))
+      // Move the token cursor past the regex. The up-front lexer had no
+      // expression context here: inside the regex source a quote/backtick
+      // opened a phantom string/template TOKEN, and `//` or `/*` a phantom
+      // COMMENT (which leaves no token at all) — either way everything
+      // lexed after the regex is garbage and the stream must be rebuilt
+      // from source. Otherwise the mis-lexed tokens are all contained
+      // inside the regex and skipping them positionally is enough.
+      let source =
+        regex.byte_slice_source(p.bytes, start_pos, flags_end - start_pos)
+      use p2 <- result.try(case regex_source_confuses_lexer(source) {
+        True -> resync_tokens_at(p, flags_end)
+        False -> skip_tokens_past(p, flags_end)
+      })
       // Span covers the whole `/pattern/flags` source slice — the regex was
-      // re-scanned byte-wise, so use the exact byte bounds rather than
-      // p2.prev_end (which is the last lexer token's end and may overshoot).
+      // re-scanned byte-wise, so use the exact byte bounds.
       let span = ast.Span(start: start_pos, end: flags_end)
       Ok(#(p2, ast.RegExpLiteral(pattern: pattern, flags: flags_str, span:)))
     }
@@ -6442,16 +6452,60 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   }
 }
 
+/// Whether a regex literal's source text could have derailed the up-front
+/// lexer PAST the regex: a quote or backtick in the body opens a phantom
+/// string / template token, and `//` / `/*` (e.g. `/\//`, `/[/*]/`) open a
+/// phantom comment — all of which swallow real source after the regex.
+fn regex_source_confuses_lexer(source: String) -> Bool {
+  string.contains(source, "'")
+  || string.contains(source, "\"")
+  || string.contains(source, "`")
+  || string.contains(source, "//")
+  || string.contains(source, "/*")
+}
+
+/// Advance the token cursor past a regex literal that was re-scanned from
+/// source and ends at byte `target_pos` (just past its flags).
+///
+/// Only used when the regex source cannot have confused the lexer past the
+/// regex (see regex_source_confuses_lexer): the mis-lexed tokens covering
+/// the regex source are skipped, and the stream is positionally back in
+/// sync at the first token starting at or after `target_pos`. A token that
+/// still crosses `target_pos` falls back to a full re-lex, defensively.
 fn skip_tokens_past(p: P, target_pos: Int) -> Result(P, ParseError) {
   case peek(p) {
     Eof -> Ok(p)
     _ -> {
-      let token_end = pos_of(p) + peek_raw_len(p)
-      case token_end >= target_pos {
-        True -> Ok(advance(p))
-        False -> skip_tokens_past(advance(p), target_pos)
+      let pos = pos_of(p)
+      case pos >= target_pos {
+        // In sync: first token at/after the end of the regex.
+        True -> Ok(p)
+        False ->
+          case pos + peek_raw_len(p) > target_pos {
+            True -> resync_tokens_at(p, target_pos)
+            False -> skip_tokens_past(advance(p), target_pos)
+          }
       }
     }
+  }
+}
+
+/// Rebuild the token stream by re-lexing the source from byte `from`,
+/// leaving the cursor there. The token crossing `from` starts on the same
+/// line as `from` (a regex literal cannot contain a line terminator), so
+/// its line seeds the re-lex.
+fn resync_tokens_at(p: P, from: Int) -> Result(P, ParseError) {
+  let line = case p.tokens {
+    [lexer.Token(line: line, ..), ..] -> line
+    [] -> p.prev_line
+  }
+  let mode = case p.mode {
+    Module -> lexer.LexModule
+    Script -> lexer.LexScript
+  }
+  case lexer.tokenize_from(p.bytes, from, line, mode) {
+    Ok(tokens) -> Ok(P(..p, tokens:, prev_line: line, prev_end: from))
+    Error(e) -> Error(LexError(e))
   }
 }
 

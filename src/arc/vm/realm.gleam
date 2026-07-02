@@ -129,7 +129,12 @@ pub fn eval_script_native(
         realm_builtins,
         source_str,
         parser.parse(_, parser.Script),
-        compiler.compile_eval,
+        // $262.evalScript runs the source "as if by ScriptEvaluation"
+        // (test262 INTERPRETING.md), NOT as eval code: §16.1.7
+        // GlobalDeclarationInstantiation, so its top-level var / function
+        // globals are non-configurable (D = false) — `compiler.compile`,
+        // not `compiler.compile_eval`.
+        compiler.compile,
       )
       // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
       let locals = seed_top_level_locals(template, JsObject(realm_global))

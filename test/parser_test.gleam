@@ -424,6 +424,67 @@ pub fn committed_point_parse_errors_test() {
   }
 }
 
+/// Regression: a regex literal is re-scanned from source by the parser, but
+/// the up-front lexer has no expression context — a quote or backtick in a
+/// regex body (`/'/g`) opens a phantom string/template token that swallows
+/// the real tokens after the regex, so the parser must re-lex from the end
+/// of the regex instead of resuming on the poisoned stream. The same body
+/// inside a `${…}` substitution additionally exercises the template
+/// splitter's regex scanning (a `'` in a regex must not start a string, and
+/// `/` after an operand must still be division).
+pub fn regex_literal_resyncs_token_stream_test() {
+  let results = [
+    // Plain code: the `'` inside the regex used to swallow `, "\\'"`.
+    expect_parses("s.replace(/'/g, \"\\\\'\");", parser.Script),
+    // Backtick in a regex body: the phantom token is a template literal.
+    expect_parses("s.replace(/`/g, \"x\"); var t = `q`;", parser.Script),
+    // Same regexes inside a template substitution.
+    expect_parses("`${s.replace(/'/g, \"\\\\'\")}`;", parser.Script),
+    expect_parses("`[${s.replace(/'/g, \"\\\\'\")}]`;", parser.Script),
+    // `/` after an operand inside a substitution is still division —
+    // including after a postfix ++/--.
+    expect_parses("`${a / b} ${(a) / [1][0]}`;", parser.Script),
+    expect_parses("`${i++ / 2} ${j / 3}`;", parser.Script),
+    expect_parses("`${i-- / 2} ${j / 3}`;", parser.Script),
+    // Regex heads after an operator keyword inside a substitution.
+    expect_parses("`${typeof /'/}`;", parser.Script),
+    // A keyword used as a PROPERTY NAME is an operand: `/` is division.
+    expect_parses("`${o.in / 2} ${x / 3}`;", parser.Script),
+    // Phantom COMMENT from a regex body: `/\\//` lexes up front as `\\` +
+    // a `//` line comment that swallows the rest of the line, and the `/*`
+    // in `/[/*]/` as a block comment that swallows source up to the next
+    // real `*/` — both leave a positional GAP (comments produce no token),
+    // so the parser must re-lex, not positionally skip. (An unterminated
+    // phantom `/*` — no later `*/` anywhere — still fails at lex time;
+    // fixing that needs regex context in the lexer itself.)
+    expect_parses("var r = s.split(/\\//); f(r);", parser.Script),
+    expect_parses(
+      "var r = s.split(/[/*]/);\nf(r);\ng(); /* trailing */",
+      parser.Script,
+    ),
+    // Comments inside a substitution: quotes / braces in them are inert.
+    expect_parses("`${q /* don't } panic */ + 1}`;", parser.Script),
+    expect_parses("`${q + // it's fine\n 2}`;", parser.Script),
+    expect_parses("`${s.replace(/* sep */ /'/g, \"#\")}`;", parser.Script),
+  ]
+  let errors =
+    list.filter_map(results, fn(r) {
+      case r {
+        Ok(Nil) -> Error(Nil)
+        Error(reason) -> Ok(reason)
+      }
+    })
+  case errors {
+    [] -> Nil
+    _ -> {
+      list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
+      panic as {
+        int.to_string(list.length(errors)) <> " regex token-resync cases failed"
+      }
+    }
+  }
+}
+
 /// Parsing `src` must succeed; returns the failure reason otherwise.
 fn expect_parses(src: String, mode: parser.ParseMode) -> Result(Nil, String) {
   case parser.parse(src, mode) {

@@ -1,4 +1,5 @@
 import arc/compiler
+import arc/dis
 import arc/engine.{Threw}
 import arc/internal/path
 import arc/parser
@@ -62,20 +63,23 @@ fn format_repl_error(err: ReplError, heap: Heap(host)) -> String {
 
 // -- Eval one line -----------------------------------------------------------
 
+/// Parse + compile one REPL line to a template, without running it. Shared
+/// by `eval` and the `/dis` command so both report syntax/compile errors the
+/// same way.
+fn compile_line(source: String) -> Result(value.FuncTemplate, ReplError) {
+  use #(program, sb) <- result.try(
+    parser.parse(source, parser.Script)
+    |> result.map_error(ReplSyntax),
+  )
+  compiler.compile_repl(program, sb)
+  |> result.map_error(ReplCompile)
+}
+
 fn eval(
   state: ReplState(host),
   source: String,
 ) -> #(ReplState(host), Result(JsValue, ReplError)) {
-  let template = {
-    use #(program, sb) <- result.try(
-      parser.parse(source, parser.Script)
-      |> result.map_error(ReplSyntax),
-    )
-    compiler.compile_repl(program, sb)
-    |> result.map_error(ReplCompile)
-  }
-
-  case template {
+  case compile_line(source) {
     Error(err) -> #(state, Error(err))
     Ok(template) ->
       case
@@ -144,6 +148,19 @@ fn handle_repl_line(state: ReplState(host), line: String) -> ReplStep(host) {
       Continue(new_state)
     }
 
+    "/dis" -> {
+      io.println("Usage: `/dis <source>`")
+      Continue(state)
+    }
+
+    "/dis " <> source -> {
+      case compile_line(source) {
+        Ok(template) -> io.print(dis.disassemble(template))
+        Error(err) -> io.println(format_repl_error(err, state.heap))
+      }
+      Continue(state)
+    }
+
     "/exit" -> {
       io.println("Goodbye!")
       Quit
@@ -157,6 +174,7 @@ fn handle_repl_line(state: ReplState(host), line: String) -> ReplStep(host) {
 
     "/help" -> {
       io.println("    /clear          - clear the console")
+      io.println("    /dis <source>   - show the bytecode <source> compiles to")
       io.println("    /help           - show this message")
       io.println("    /reset          - reset the REPL state")
       io.println("    /examples [n]   - list or run built-in demos")
@@ -243,6 +261,8 @@ fn halt(code: Int) -> a
 type CliError(host) {
   /// The entry file could not be read from disk.
   ReadFailed(path: String, error: simplifile.FileError)
+  /// `arc --dis <file>`: the disassembly output file could not be written.
+  WriteFailed(path: String, error: simplifile.FileError)
   /// The parse → compile → run pipeline failed (or an ES module bundle
   /// failed to link/evaluate).
   EvalFailed(error: engine.EvalError(host))
@@ -260,6 +280,8 @@ fn format_cli_error(err: CliError(host)) -> String {
   case err {
     ReadFailed(path, file_err) ->
       "Error reading " <> path <> ": " <> simplifile.describe_error(file_err)
+    WriteFailed(path, file_err) ->
+      "Error writing " <> path <> ": " <> simplifile.describe_error(file_err)
     EvalFailed(eval_err) -> engine.eval_error_message(eval_err)
     Uncaught(eng, thrown) -> "Uncaught " <> engine.format_error(eng, thrown)
     PrintFailed(heap, repl_err) -> format_repl_error(repl_err, heap)
@@ -336,6 +358,36 @@ fn run_script_file(
   }
 }
 
+/// `arc --dis <file>`: parse and compile <file> WITHOUT running it, and write
+/// the disassembled bytecode next to it as `<file>.dis.txt`. `.cjs` files
+/// compile as classic scripts, everything else as an ES module — the same
+/// rule `run_file` uses to pick an execution path. Parse/compile failures are
+/// reported through the same `engine.EvalError` shapes a normal run would use.
+fn run_dis(path: String) -> Result(Nil, CliError(host)) {
+  use source <- result.try(
+    simplifile.read(path)
+    |> result.map_error(fn(err) { ReadFailed(path:, error: err) }),
+  )
+  let mode = case string.ends_with(path, ".cjs") {
+    True -> parser.Script
+    False -> parser.Module
+  }
+  use #(program, sb) <- result.try(
+    parser.parse(source, mode)
+    |> result.map_error(fn(err) { EvalFailed(engine.ParseError(err)) }),
+  )
+  use template <- result.try(
+    compiler.compile(program, sb)
+    |> result.map_error(fn(err) { EvalFailed(engine.CompileError(err)) }),
+  )
+  let out_path = path <> ".dis.txt"
+  use Nil <- result.map(
+    simplifile.write(out_path, dis.disassemble(template))
+    |> result.map_error(fn(err) { WriteFailed(path: out_path, error: err) }),
+  )
+  io.println("wrote " <> out_path)
+}
+
 /// `arc -p <expr>`: evaluate one expression in a fresh REPL state and print
 /// the result. A failed eval comes back as a `CliError` for `main` to render.
 fn run_print(source: String) -> Result(Nil, CliError(host)) {
@@ -361,6 +413,13 @@ fn new_repl_state() -> ReplState(host) {
 pub fn main() -> Nil {
   let outcome = case get_script_args() {
     ["-p", ..rest] -> run_print(string.join(rest, " "))
+
+    ["--dis", path, ..] -> run_dis(path)
+
+    ["--dis"] -> {
+      io.println_error("Usage: arc --dis <file>")
+      Ok(Nil)
+    }
 
     [path, ..] -> run_file(path, event_loop.finish)
 

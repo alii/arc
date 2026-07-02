@@ -8384,3 +8384,52 @@ pub fn dom_exception_to_string_tag_test() -> Nil {
     JsString("[object DOMException]"),
   )
 }
+
+/// §15.7.14 ClassDefaultConstructor: the synthesized default constructor of
+/// a derived class forwards its argument List to the parent WITHOUT array
+/// iteration, so a poisoned %Array.prototype%[@@iterator] is not observable.
+/// A source-level `super(...xs)` spread, by contrast, must observe it.
+pub fn default_derived_ctor_does_not_iterate_test() -> Nil {
+  assert_normal(
+    "
+    var hits = 0;
+    Array.prototype[Symbol.iterator] = function () {
+      hits++;
+      throw new Error('poisoned');
+    };
+    class A { constructor(a, b) { this.sum = a + b; } }
+    class B extends A {}
+    var b = new B(1, 2);
+    var hitsAfterDefault = hits;
+    var explicitThrew = false;
+    class C extends A { constructor(...xs) { super(...xs); } }
+    try { new C(3, 4); } catch (e) { explicitThrew = true; }
+    '' + b.sum + ':' + hitsAfterDefault + ':' + explicitThrew;
+    ",
+    value.JsString("3:0:true"),
+  )
+}
+
+/// super.p / super[k] as assignment targets outside a plain `super.x = v`:
+/// array/object destructuring, rest, parenthesized, and for-in heads all
+/// PutValue through the SuperReference (IrPutSuperValue).
+pub fn super_member_destructuring_targets_test() -> Nil {
+  assert_normal(
+    "
+    var log = [];
+    class A { set x(v) { log.push('x=' + v); } }
+    class B extends A {
+      m() {
+        [super.x] = [1];
+        ({ p: super.x } = { p: 2 });
+        [...super.x] = [3, 4];
+        (super.x) = 5;
+        for (super.x in { k: 0 }) log.push('body');
+      }
+    }
+    new B().m();
+    log.join('|');
+    ",
+    value.JsString("x=1|x=2|x=3,4|x=5|x=k|body"),
+  )
+}
