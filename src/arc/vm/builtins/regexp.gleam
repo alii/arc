@@ -532,7 +532,7 @@ fn regexp_initialize(
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
-    Error(msg) -> state.syntax_error(state, msg)
+    Error(err) -> state.syntax_error(state, regex.pattern_error_message(err))
     Ok(Nil) -> {
       let #(heap, ref) =
         alloc_regexp(
@@ -549,21 +549,16 @@ fn regexp_initialize(
 /// §22.2.3.4 RegExpInitialize steps 5-8: validate the flags string, then
 /// parse the pattern against the ECMAScript Pattern grammar (Annex B
 /// extended grammar without u/v, strict grammar with it). An invalid
-/// pattern is a SyntaxError at construction time — same validator the
-/// parser runs on regex literals. The returned string is the SyntaxError
-/// message to throw.
+/// pattern is a SyntaxError at construction time — same flag and pattern
+/// validators the parser runs on regex literals. The caller renders the
+/// typed error into the SyntaxError message at the throw site.
 fn validate_flags_and_pattern(
   pattern: String,
   flags: String,
-) -> Result(Nil, String) {
-  let flag_list = string.to_graphemes(flags)
-  use Nil <- result.try(
-    list.try_fold(flag_list, [], validate_flag)
-    |> result.replace(Nil),
-  )
+) -> Result(Nil, regex.PatternError) {
+  use parsed <- result.try(regex.validate_flags(flags))
   let bytes = <<pattern:utf8>>
-  regex.validate_pattern(bytes, 0, bit_array.byte_size(bytes), flag_list)
-  |> result.map_error(regex.pattern_error_message)
+  regex.validate_pattern(bytes, 0, bit_array.byte_size(bytes), parsed.flags)
 }
 
 /// ToString, except undefined → "" (RegExpInitialize steps 1-2).
@@ -605,23 +600,6 @@ fn has_regexp_slot(state: State(host), ref: Ref) -> Bool {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: RegExpObject(..), ..)) -> True
     _ -> False
-  }
-}
-
-/// Fold step for RegExp flag validation: accumulate seen flags, rejecting any
-/// invalid character or duplicate.
-fn validate_flag(
-  seen: List(String),
-  f: String,
-) -> Result(List(String), String) {
-  let is_valid = case f {
-    "d" | "g" | "i" | "m" | "s" | "u" | "v" | "y" -> True
-    _ -> False
-  }
-  case is_valid, list.contains(seen, f) {
-    False, _ -> Error("Invalid regular expression flag '" <> f <> "'")
-    True, True -> Error("Duplicate regular expression flag '" <> f <> "'")
-    True, False -> Ok([f, ..seen])
   }
 }
 
@@ -1129,7 +1107,7 @@ fn do_compile(
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
-    Error(msg) -> state.syntax_error(state, msg)
+    Error(err) -> state.syntax_error(state, regex.pattern_error_message(err))
     Ok(Nil) -> {
       let heap =
         heap.update(state.heap, ref, fn(slot) {

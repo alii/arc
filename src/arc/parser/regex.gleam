@@ -26,6 +26,8 @@ pub type PatternError {
   UnterminatedRegex(pos: Int)
   /// A flag letter appeared twice after the closing `/`.
   DuplicateFlag(pos: Int, flag: String)
+  /// A character outside the flag alphabet in a `new RegExp(_, flags)` string.
+  InvalidFlag(pos: Int, flag: String)
   /// The `u` and `v` flags were both present.
   ExclusiveUnicodeFlags(pos: Int)
   /// A `)` with no matching `(` ended the top-level Disjunction early.
@@ -104,6 +106,7 @@ pub fn pattern_error_message(e: PatternError) -> String {
     UnterminatedRegex(_) -> "Unterminated regular expression"
     DuplicateFlag(_, flag) ->
       "Duplicate regular expression flag '" <> flag <> "'"
+    InvalidFlag(_, flag) -> "Invalid regular expression flag '" <> flag <> "'"
     ExclusiveUnicodeFlags(_) ->
       "Invalid regular expression flags: u and v are exclusive"
     UnmatchedParen(_) -> "Invalid regular expression: unmatched ')'"
@@ -1495,8 +1498,44 @@ fn codepoint_at(bytes: BitArray, pos: Int) -> #(Int, Int) {
   }
 }
 
+/// The decoded flags of a regular expression. Produced only by
+/// `validate_flags`, so holding one proves the flags string contained no
+/// unknown or duplicate flag.
+pub type RegexFlags {
+  RegexFlags(has_u: Bool, has_v: Bool, flags: List(String))
+}
+
+/// Validate a whole flags string (e.g. the second argument of
+/// `new RegExp(pattern, flags)`): every character must belong to the flag
+/// alphabet and none may repeat. Positions in the returned error are byte
+/// offsets into `flags`. This shares `scan_regex_flags` with the literal
+/// scanner, so the flag alphabet and duplicate detection live in one place.
+pub fn validate_flags(flags: String) -> Result(RegexFlags, PatternError) {
+  let bytes = <<flags:utf8>>
+  use #(end, seen) <- result.try(scan_regex_flags(bytes, 0, []))
+  case end >= bit_array.byte_size(bytes) {
+    True ->
+      Ok(RegexFlags(
+        has_u: list.contains(seen, "u"),
+        has_v: list.contains(seen, "v"),
+        flags: seen,
+      ))
+    False -> Error(InvalidFlag(end, grapheme_at(bytes, end)))
+  }
+}
+
+/// The full (possibly non-ASCII) grapheme starting at byte `pos`, for
+/// reporting the offending character of an `InvalidFlag`.
+fn grapheme_at(bytes: BitArray, pos: Int) -> String {
+  bit_array.slice(bytes, pos, bit_array.byte_size(bytes) - pos)
+  |> result.try(bit_array.to_string)
+  |> result.try(string.first)
+  |> result.unwrap("")
+}
+
 /// Scan regex flags after the closing /, returning end position and flag list.
-/// Rejects duplicate flags.
+/// Rejects duplicate flags. The literal scanner's entry point into the same
+/// alphabet + duplicate detection that `validate_flags` uses.
 pub fn skip_regex_flags(
   bytes: BitArray,
   pos: Int,
@@ -1504,6 +1543,8 @@ pub fn skip_regex_flags(
   scan_regex_flags(bytes, pos, [])
 }
 
+/// The single owner of the flag alphabet: consume flag characters from `pos`,
+/// rejecting duplicates, and stop at the first character that is not a flag.
 fn scan_regex_flags(
   bytes: BitArray,
   pos: Int,
