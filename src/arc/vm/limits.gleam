@@ -57,8 +57,12 @@ pub fn pad_end(s: String, to: Int, with: String) -> Result(String, Nil) {
 /// Guard on the *byte* size of the padded result, not the grapheme count `to`.
 /// Comparing `to` (graphemes) against max_string_bytes (bytes) lets a
 /// multi-byte filler like "\u{10000}" (4 bytes/grapheme) build a string up to
-/// 4x over the cap. Estimate: existing bytes + (graphemes still needed) *
-/// (bytes per filler grapheme).
+/// 4x over the cap. gleam/string.pad_* emits exactly the `needed` missing
+/// graphemes: floor(needed / length(with)) whole copies of the filler plus a
+/// prefix slice of one more, so the padding is bounded by
+/// ceil(needed / length(with)) whole copies. Multiplying `needed` by the byte
+/// size of the WHOLE filler instead would over-estimate by a factor of
+/// length(with) and spuriously reject spec-valid pads.
 fn bounded_pad(
   s: String,
   to: Int,
@@ -68,9 +72,12 @@ fn bounded_pad(
   // §22.1.3.16.1 StringPad step 4: an empty filler pads nothing — the result
   // is `s` no matter how large `to` is, so it must never be length-rejected.
   use <- bool.guard(with == "", Ok(s))
-  let estimated_bytes =
-    string.byte_size(s)
-    + int.max(0, to - string.length(s)) * string.byte_size(with)
+  let needed = int.max(0, to - string.length(s))
+  let with_len = string.length(with)
+  // ceil(needed / with_len) copies; 0 when no padding is needed, so a string
+  // already at the cap is never rejected when `to` doesn't grow it.
+  let pad_bytes = { needed + with_len - 1 } / with_len * string.byte_size(with)
+  let estimated_bytes = string.byte_size(s) + pad_bytes
   case estimated_bytes > max_string_bytes {
     True -> Error(Nil)
     False -> Ok(pad(s, to, with))

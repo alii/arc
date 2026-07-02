@@ -12,6 +12,7 @@ import arc/vm/builtins/date
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/intl_format as fmt
 import arc/vm/builtins/intl_locale as tags
+import arc/vm/builtins/temporal_tz
 import arc/vm/heap
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -2952,7 +2953,8 @@ fn time_style_components(
 }
 
 /// IsValidTimeZoneName + identifier case normalization. Offsets come from a
-/// fixed standard-time table (no DST database). Returns #(name, offset_min).
+/// fixed standard-time table for common zones, falling back to the system
+/// tzdata for the rest (see `tzdata_zone`). Returns #(name, offset_min).
 fn canonical_time_zone(s: String) -> Option(#(String, Int)) {
   let lower = string.lowercase(s)
   case lower {
@@ -3044,12 +3046,17 @@ fn iana_zone(lower: String) -> Option(#(String, Int)) {
           case known_area && parts_ok {
             True -> {
               let name = normalize_zone_case(lower)
-              // A structurally-valid but unknown Area/Location has no entry
-              // in the offset table. Propagate the None so the caller's
-              // "Invalid time zone specified" RangeError fires instead of
-              // silently rendering the zone as UTC (offset 0).
-              use offset <- option.map(iana_zone_offset(name))
-              #(name, offset)
+              // ECMA-402 §6.5: an implementation supporting named zones must
+              // accept every IANA Zone/Link name, not just the ones in our
+              // small hardcoded offset table. For names the table misses,
+              // resolve against the system tzdata (Temporal's TZif backend)
+              // and only reject names absent from tzdata too — those get the
+              // caller's "Invalid time zone specified" RangeError instead of
+              // silently rendering as UTC (offset 0).
+              case iana_zone_offset(name) {
+                Some(offset) -> Some(#(name, offset))
+                None -> tzdata_zone(lower)
+              }
             }
             False -> None
           }
@@ -3057,6 +3064,19 @@ fn iana_zone(lower: String) -> Option(#(String, Int)) {
         _ -> None
       }
   }
+}
+
+/// Structurally-valid IANA names absent from the hardcoded offset table,
+/// resolved against the system tzdata via Temporal's TZif backend. Returns
+/// the properly-cased identifier and its UTC offset (minutes) at the current
+/// instant; None when the name is not in tzdata either.
+fn tzdata_zone(lower: String) -> Option(#(String, Int)) {
+  let epoch_ns = date.now_ms() * 1_000_000
+  option.from_result({
+    use name <- result.try(temporal_tz.lookup(lower))
+    use offset_ns <- result.map(temporal_tz.offset_ns_at(name, epoch_ns))
+    #(name, offset_ns / 60_000_000_000)
+  })
 }
 
 fn is_zone_word(p: String) -> Bool {
