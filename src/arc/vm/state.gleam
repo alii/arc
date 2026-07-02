@@ -478,7 +478,8 @@ pub fn merge_draining_child(
 
 /// Thread VM-global state from a SAME-REALM child execution back to parent:
 /// the `merge_child` event-loop set plus the realm context the child may
-/// have mutated (lexical globals, tagged-template cache, realm registry).
+/// have mutated (lexical globals, symbol tables, tagged-template cache,
+/// realm registry).
 /// Does NOT thread heap (caller handles separately since it's often further
 /// mutated).
 pub fn merge_globals(
@@ -491,6 +492,12 @@ pub fn merge_globals(
     ctx: RealmCtx(
       ..parent.ctx,
       lexical_globals: child.ctx.lexical_globals,
+      // Symbol descriptions / the Symbol.for registry are agent-wide and
+      // only ever grow, so the child's tables are a superset of the
+      // parent's: Symbols created (or registered) during the child
+      // execution must survive the merge.
+      symbol_descriptions: child.ctx.symbol_descriptions,
+      symbol_registry: child.ctx.symbol_registry,
       template_objects: child.ctx.template_objects,
       // Realms registered during the child execution (ShadowRealm /
       // $262.createRealm constructors) must survive the merge.

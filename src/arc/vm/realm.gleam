@@ -478,18 +478,14 @@ fn run_eval(
         "eval: VM error: " <> state.vm_error_message(vm_err),
       )
     Ok(#(completion, final_state)) -> {
-      // Thread VM-global state back to caller
+      // Thread VM-global state back to caller. merge_globals is the ONE
+      // merge path for realm-context state (lexical globals, symbol tables,
+      // template cache, realm registry) — only heap/eval_env need patching.
       let merged = state.merge_globals(state, final_state, [])
       let state =
         State(
           ..merged,
           heap: final_state.heap,
-          ctx: state.RealmCtx(
-            ..merged.ctx,
-            symbol_descriptions: final_state.ctx.symbol_descriptions,
-            symbol_registry: final_state.ctx.symbol_registry,
-            realms: final_state.ctx.realms,
-          ),
           eval_env: option.or(eval_env, state.eval_env),
         )
       case completion {

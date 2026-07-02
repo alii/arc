@@ -763,3 +763,43 @@ pub fn sync_generator_return_runs_finally_test() {
     )
   assert log == JsString("n:1,false|sfin|r:7,true")
 }
+
+// ----------------------------------------------------------------------------
+// Agent-wide symbol tables survive child executions (state.merge_globals).
+// Symbol descriptions and the Symbol.for registry are agent-wide: a Symbol
+// created (or registered) inside an eval / generator child execution must keep
+// its description and registry entry after control returns to the caller.
+// ----------------------------------------------------------------------------
+
+pub fn eval_child_preserves_symbol_tables_test() {
+  let eng = engine.new()
+  // The Symbol is created (and Symbol.for-registered) inside the eval child;
+  // the caller must still see its description and registry key afterwards
+  // (Symbol.for in the caller must find the child's registration).
+  assert assert_eval(
+      eng,
+      "eval('globalThis.s = Symbol(\"x\"); globalThis.reg = Symbol.for(\"k\")');
+       [
+         s.description,
+         Symbol.keyFor(reg),
+         Symbol.keyFor(Symbol.for('k')),
+       ].join('|')",
+    )
+    == JsString("x|k|k")
+}
+
+pub fn generator_child_preserves_symbol_tables_test() {
+  let eng = engine.new()
+  // Symbols created inside the generator body (a child execution merged back
+  // via merge_globals on each resume) must keep their description / registry
+  // entry in the outer frame.
+  assert assert_eval(
+      eng,
+      "function* g() { yield Symbol('gd'); yield Symbol.for('gk'); }
+       var it = g();
+       var s1 = it.next().value;
+       var s2 = it.next().value;
+       s1.description + '|' + Symbol.keyFor(s2)",
+    )
+    == JsString("gd|gk")
+}
