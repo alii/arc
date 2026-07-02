@@ -69,13 +69,13 @@ pub type BindingKind {
 }
 
 // ============================================================================
-// AST-level Scope Tree (V8/SM/JSC model)
+// Scope Tree (V8/SM/JSC model)
 //
-// Built by `analyze` from the parsed AST BEFORE emission. The emitter tracks
-// `current_scope_id` as it descends and consults this tree via `lookup` /
-// `lookup_lexical` / `function_info` to emit concrete GetLocal/GetBoxed/
-// GetGlobal/IrWith* ops directly — replacing the deleted IR-walking
-// Phase-2 resolver and the IrScope* op family.
+// Built BEFORE emission: the parser threads a `ScopeBuilder` (`sb_*` calls)
+// through the parse and `finalize` converts it into this slot-bearing tree.
+// The emitter tracks `current_scope_id` as it descends and consults the
+// tree via `lookup` / `lookup_lexical` / `function_info` to emit concrete
+// GetLocal/GetBoxed/GetGlobal/IrWith* ops directly.
 // Resolution is keyed by (scope_id, name): the emitter mints
 // synthetic bindings (`arguments`, `<class_fields_init>`, `#name`,
 // `<withN_M>`, NFE self-name, lexical pseudo-slots) that have NO source
@@ -185,8 +185,8 @@ pub type Scope {
     /// resolver's positional `annexb_target`.
     annexb_blocked: Set(String),
     /// Strict-mode code. Inherited from `parent` and forced True for
-    /// Module / ClassBody / ClassStaticBlock; `declare_var_boundary_body`
-    /// upgrades it to True when a `"use strict"` directive opens the body.
+    /// Module / ClassBody / ClassStaticBlock; the parser upgrades it to
+    /// True when a `"use strict"` directive opens the body.
     /// Gates Annex B §B.3.2 var-twin declaration (sloppy bodies only) and
     /// `annexb_blocked` computation. V8: `Scope::is_strict_`.
     is_strict: Bool,
@@ -252,7 +252,7 @@ pub type FunctionInfo {
     /// Arrow function — does NOT own lexical pseudo-slots (this /
     /// active_func / home_object / new.target); a reference inside the
     /// body resolves to the enclosing non-arrow's slot via capture
-    /// (§15.3). Recorded by `declare_var_boundary_body` so
+    /// (§15.3). Recorded by the parser on the function's RawScope so
     /// `build_capture_inputs` can derive `FnAnalysisInput.is_arrow`
     /// without re-walking the AST. V8: `IsArrowFunction(function_kind_)`.
     is_arrow: Bool,
@@ -314,7 +314,7 @@ pub type Resolution {
   WithChain(crossed_slots: List(#(Int, Bool)), fallback: Direct)
 }
 
-/// Inputs to `analyze` that come from OUTSIDE the AST — the calling
+/// Inputs to `finalize` that come from OUTSIDE the parse — the calling
 /// context (compile_module / compile_script / compile_eval_direct /
 /// compile_function_body for a child) supplies these.
 pub type AnalyzeOpts {
@@ -379,7 +379,8 @@ pub type RawBinding {
 }
 
 /// What syntactic construct caused a scope to be pushed. Recorded so the
-/// parser can reproduce `declare_stmts_hoist_order` at each closing `}` —
+/// parser can put `children_at` into HOIST order at each closing `}` (see
+/// `sb_reorder_block_children` / `sb_reorder_body_children`) —
 /// emit.gleam consumes `children_at` via positional cursors in EMISSION
 /// order (FunctionDeclarations first, then everything else; switch case
 /// tests between the two; class bodies in the 7-step `fold_class_body`
@@ -437,9 +438,9 @@ pub type RawScope {
     /// recorded as ParamBinding during `parse_formal_parameters`, then
     /// shifted to indices `>= count` — must surface in the final
     /// ScopeTree as **LetBinding** so emit's `emit_binding_prologue`
-    /// TDZ-seeds them with JsUninitialized (matching legacy
-    /// `declare_var_boundary_body`'s `LetBinding` / `rest_kind=LetBinding`
-    /// branch). The rekind is deferred to `finalize_scope` (NOT done at
+    /// TDZ-seeds them with JsUninitialized (§10.2.11 step 28: non-simple
+    /// parameter lists get let-like TDZ semantics for the user names).
+    /// The rekind is deferred to `finalize_scope` (NOT done at
     /// parse time) because `sb_var_conflicts_lexical` must still treat
     /// the names as ParamBinding while the body is parsed: a body-level
     /// `var` of a destructured-formal name is legal (§14.3.2 checks
@@ -649,8 +650,8 @@ pub fn sb_pop(
 
 /// Record `name` in the appropriate scope (var/fn-decl-sloppy → `current_fn`;
 /// let/const/param/catch/class/fn-name → `current`). No-op when the target
-/// scope already has a binding of that name (first-declaration-wins,
-/// matching `add_binding`).
+/// scope already has a binding of that name (first-declaration-wins — the
+/// invariant `finalize_scope` relies on when it skips seed-shadowing names).
 pub fn sb_declare(
   sb: ScopeBuilder,
   name: String,
@@ -847,11 +848,10 @@ pub fn sb_declare_in(
 /// declared slot (frame.gleam:57 / arc_vm_ffi:setup_locals_tuple), so
 /// the shims must own indices 0..count-1; emit.compile_function_body
 /// then reads each shim by name and runs `emit_destructuring_bind`
-/// into the user names. Mirrors legacy `declare_var_boundary_body`'s
-/// non-simple branch (`param_shim(i)` + name bindings), with the
-/// shims contiguous at the front rather than interleaved per-param —
-/// equivalent because emit resolves every slot by name via
-/// `scope.lookup`.
+/// into the user names. The shims are contiguous at the front (rather
+/// than interleaved per-param) — the exact ordering is irrelevant
+/// because emit resolves every slot by name via `scope.lookup`; only
+/// "shims own indices 0..count-1" matters.
 pub fn sb_insert_param_shims(sb: ScopeBuilder, count: Int) -> ScopeBuilder {
   use <- bool.guard(count <= 0, sb)
   let fn_id = sb.current_fn
@@ -1024,9 +1024,10 @@ pub fn sb_prune_empty_block(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
 // the 7-step `fold_class_body` order. The parser pushes children in SOURCE
 // order (prepended → reverse-source in `children_at`); these helpers
 // rewrite each scope's `children_at` entry to emission order at the
-// closing `}`, reproducing `declare_stmts_hoist_order` /
-// `ast_util.switch_emit_groups` / `fold_class_body` so emit's cursors stay
-// in lockstep without an AST re-walk.
+// closing `}` — the same fn-decls-first / switch case-tests-between /
+// class 7-step order emit.gleam's `collect_hoisted_funcs`, `emit_switch`
+// and `compile_class_body` consume — so emit's cursors stay in lockstep
+// without an AST re-walk.
 
 /// Set the `source_tag` on an already-pushed scope. Called by the parser
 /// immediately after `sb_push` when the syntactic context is known
@@ -1072,8 +1073,7 @@ fn sb_tag_of(sb: ScopeBuilder, id: ScopeId) -> SourceTag {
 }
 
 /// Reorder `children_at[scope_id]` from reverse-source-order (as left by
-/// `sb_push` prepends) into HOIST order — the order
-/// `declare_stmts_hoist_order` would have produced and emit.gleam's
+/// `sb_push` prepends) into HOIST order — the order emit.gleam's
 /// `collect_hoisted_funcs` consumes: every `TagFnDecl` child first
 /// (source-ordered among themselves), then every other child
 /// (source-ordered among themselves). Idempotent on an already-reordered
@@ -1096,8 +1096,8 @@ pub fn sb_reorder_block_children(
 /// children (those in `marker`) at the front in source order. Used at
 /// function-body / catch-body close where param default-expression
 /// scopes are pushed BEFORE the body and emit consumes them before any
-/// hoisted body FunctionDeclaration (`declare_var_boundary_body` walks
-/// `declare_pattern_exprs` then `declare_stmts_hoist_order`).
+/// hoisted body FunctionDeclaration (`compile_function_body` walks the
+/// param-default child scopes first, then the hoisted fn-decls).
 pub fn sb_reorder_body_children(
   sb: ScopeBuilder,
   scope_id: ScopeId,
@@ -1120,8 +1120,8 @@ pub fn sb_reorder_body_children(
   )
 }
 
-/// Reorder `children_at[switch_id]` into the order `declare_stmt`'s
-/// `SwitchStatement` arm produces and `emit_switch` consumes:
+/// Reorder `children_at[switch_id]` into the order `emit_switch` consumes
+/// (§14.12.4: a switch's CaseBlock is ONE block scope):
 /// `[fn-decls from all case bodies] ++ [scopes from all case tests] ++
 /// [non-fn-decl scopes from all case bodies]`, each group internally
 /// source-ordered. Requires the parser to have tagged test-expression
@@ -1271,10 +1271,11 @@ fn sb_boundary_param_conflict(
 /// True when the only thing in the current scope blocking a
 /// `let arguments` is the implicit `arguments` placeholder the parser
 /// records BEFORE parsing a function body (a synthetic VarBinding).
-/// Legacy `declare_var_boundary_body` records the
-/// implicit binding first and `add_binding` first-wins, so a later
-/// `let arguments` is a silent no-op leaving kind=VarBinding — never
-/// an early error. The parser uses this to exempt that case from
+/// Because that implicit binding is recorded first and `sb_declare` is
+/// first-declaration-wins, a later `let arguments` is a silent no-op
+/// leaving kind=VarBinding — never an early error (§10.2.11 step 18:
+/// the implicit `arguments` binding pre-exists any body declaration).
+/// The parser uses this to exempt that case from
 /// `sb_lexical_conflict`. A user `var arguments` /
 /// `function arguments(){}` at fn top-level still trips
 /// `hoisted_vars` (via `sb_declare_var`), and a param named
@@ -1319,10 +1320,10 @@ pub fn sb_var_conflicts_lexical(sb: ScopeBuilder, name: String) -> Bool {
 
 /// §16.2.1.1: a `var name` whose hoist target is the Module root
 /// conflicts with a module-top-level HoistableDeclaration
-/// (`function`/`async function`/generator). Those are recorded as
-/// VarBinding (matching `declare_var_boundary_body`'s
-/// `direct_fn_names → VarBinding`) so `sb_var_conflicts_lexical` misses
-/// them, but per spec they are LexicallyDeclaredNames at module top.
+/// (`function`/`async function`/generator). The parser records those as
+/// VarBinding (top-level function declarations are var-like everywhere
+/// BUT a Module root), so `sb_var_conflicts_lexical` misses them —
+/// yet per spec they are LexicallyDeclaredNames at module top.
 /// Discriminator: a module-top function decl is recorded via plain
 /// `sb_declare` (bindings only); a `var` via `sb_declare_var`
 /// (bindings + hoisted_vars). So "in root bindings, not in root
@@ -1379,26 +1380,25 @@ pub fn sb_with_depth(sb: ScopeBuilder) -> Int {
 //
 // Converts the parser's slot-free `ScopeBuilder` into the slot-bearing
 // `ScopeTree` the emitter consumes. Runs ZERO AST reads — every datum
-// comes from the builder + `AnalyzeOpts`. Replaces `analyze` once the
-// parser threads `sb` through every scope-introducing construct; the
-// produced tree is structurally identical to `analyze(program, opts)`
-// for the same `program` provided the parser recorded declarations /
-// refs / `children_at` in the same order the legacy DECLARE/REFERENCE
-// passes would have.
+// comes from the builder + `AnalyzeOpts`. The parser has already threaded
+// `sb` through every scope-introducing construct, so by the time
+// `finalize` runs, declarations / raw refs / `children_at` are all
+// recorded in the exact order the emitter will consume them in.
 //
-// Steps (mirroring `analyze`'s DECLARE → REFERENCE → CAPTURE pipeline):
+// Steps (DECLARE → REFERENCE → CAPTURE):
 //   (a) seed the root scope/FunctionInfo from `opts` — direct-eval
 //       caller-frame state (`parent_names`, `with_stack`,
 //       `lexical_captures`, `strict`) is runtime, unknowable at parse;
-//   (b) walk the scope tree pre-order via `children_at`, converting each
-//       `RawScope` → `Scope` by assigning `slot = local_count++` to its
-//       `RawBinding`s in `index` order — the parser controls slot order
-//       by controlling `sb_declare` call order;
-//   (c) resolve `raw_refs` to the per-function free-name set `captured`
-//       (the `record_ref` walk, ported to a flat fold over the list);
-//   (d) hand `captured` + `sb.own_lexical_refs` to the EXISTING
-//       `analyze_captures` — capture/boxing/lexical-slot allocation is
-//       already AST-free and stays unchanged.
+//   (b) DECLARE — `finalize_scope`: walk the scope tree pre-order via
+//       `children_at`, converting each `RawScope` → `Scope` by assigning
+//       `slot = local_count++` to its `RawBinding`s in `index` order —
+//       the parser controls slot order by controlling `sb_declare` call
+//       order;
+//   (c) REFERENCE — `resolve_raw_refs`: fold the flat `raw_refs` list
+//       into the per-function free-name set `captured`;
+//   (d) CAPTURE — hand `captured` + `sb.own_lexical_refs` to
+//       `analyze_captures`, which fills in boxing / capture lists /
+//       lexical-slot allocation.
 // ============================================================================
 
 /// Threaded state for `finalize`'s pre-order slot-allocation walk.
@@ -1436,7 +1436,9 @@ fn blank_function_info(
 }
 
 /// Convert a parse-time `ScopeBuilder` into the emitter's `ScopeTree`.
-/// Scope-tree-only — reads NO AST. Drop-in for `analyze`.
+/// Scope-tree-only — reads NO AST. This is the ONLY constructor of a
+/// `ScopeTree`; every compile entry point (compile_script / compile_module
+/// / compile_eval_direct / compile_function_body) goes through it.
 pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   // --- (a) seed root from opts --------------------------------------------
   let root_raw = sb_scope(sb, root_scope_id)
@@ -1467,8 +1469,9 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   let root_raw_fn =
     dict.get(sb.functions, root_scope_id) |> result.unwrap(blank_raw_fn_info)
   // Root local_count starts past the seeded captures + inherited
-  // with-stack holders + inherited lexical pseudo-slots, so user
-  // bindings allocate from the same offset `analyze` uses.
+  // with-stack holders + inherited lexical pseudo-slots — the
+  // captures-first frame layout `do_lookup` / `child_parent_view` assume
+  // — so user bindings allocate from the first free slot after them.
   let root_base =
     dict.size(opts.parent_names)
     + list.length(opts.with_stack)
@@ -1528,8 +1531,7 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       // CONTRACT with the parser: `children_at` arrives in the FINAL
       // hoist order (the parser calls `sb_set_children` at each scope
       // close to reorder fn-decls-first / class 7-step). No reversal
-      // here — unlike `analyze`'s `Builder`, which prepends and
-      // reverses once at the end.
+      // here.
       children_at: sb.children_at,
       top_lex: opts.top_lex,
       linker_seeded: opts.linker_seeded,
@@ -1545,9 +1547,10 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
 /// `function_scope`'s `local_count` in declaration-`index` order.
 ///
 /// `seed_bindings` is non-empty only for the root (the
-/// `opts.parent_names` captures — first-wins, so a parser-recorded raw
-/// binding of the same name is skipped, matching `add_binding`'s
-/// `dict.has_key` no-op). `inherited_strict` propagates `opts.strict`
+/// `opts.parent_names` captures — first-declaration-wins, so a
+/// parser-recorded raw binding of the same name is skipped, mirroring
+/// `sb_declare`'s no-op on an already-bound name).
+/// `inherited_strict` propagates `opts.strict`
 /// down the tree: the parser built `RawScope.is_strict` from its OWN
 /// strict flag, which for direct-eval is the caller's strictness only
 /// if `parse_direct_eval` was given it; OR-ing here makes `finalize`
@@ -1585,20 +1588,19 @@ fn finalize_scope(
   let assert Ok(info) = dict.get(st.functions, fn_id)
     as "scope.finalize_scope: function_scope FunctionInfo missing (pre-order invariant violated)"
   // `index` is the per-scope counter the parser bumped on each
-  // `sb_declare`; sorting by it reproduces the order `add_binding` would
-  // have been called in the legacy DECLARE pass — and so the same slot
-  // numbers, since each scope's own bindings are fully declared before
-  // any child scope's (the DECLARE pass calls `declare_direct_lexicals`
-  // / `declare_var_boundary_body`'s hoists BEFORE descending).
+  // `sb_declare`; sorting by it recovers declaration order (and so slot
+  // order) — the dict has no ordering of its own. The parser declares a
+  // scope's own bindings (direct lexicals, hoisted vars) BEFORE
+  // descending into any child scope, so within a function all ancestor
+  // slots precede descendant slots.
   let sorted =
     raw.bindings
     |> dict.to_list
     |> list.filter(fn(entry) {
-      // Mirror `declare_var_boundary_body`'s Script-root gates: the
-      // parser unconditionally records every Script-root `var`/fn-decl/
-      // let/const (it doesn't know `opts`); `analyze` SKIPS those when
-      // they belong to the global/eval-env environment instead of a
-      // local slot. Drop them here so `lookup` falls through (→
+      // Script-root gate: the parser unconditionally records every
+      // Script-root `var`/fn-decl/let/const (it doesn't know `opts`),
+      // but names that belong to the global / eval-env environment must
+      // NOT get a local slot. Drop them here so `lookup` falls through (→
       // IrGetGlobal / IrGetEvalVar) and emit's IrDeclareGlobalVar /
       // IrDeclareGlobalLex prologue handles the actual declaration.
       // Applies ONLY at the Script root — nested functions and Module/
@@ -1615,8 +1617,7 @@ fn finalize_scope(
     list.fold(sorted, #(seed_bindings, info), fn(acc, entry) {
       let #(bindings, info) = acc
       let #(name, rb) = entry
-      // Pre-seeded root bindings — first-declaration-wins, matching
-      // `add_binding`:
+      // Pre-seeded root bindings — first-declaration-wins:
       // - Module root: the seeds are the linker's import boxes; the
       //   parser-recorded binding for the same import name must NOT
       //   shadow them.
@@ -1638,9 +1639,9 @@ fn finalize_scope(
       // every user formal name (shifted to index >= N, still ParamBinding
       // at parse time so `sb_var_conflicts_lexical` allowed a body
       // `var` redecl) is rekinded HERE to LetBinding so emit's
-      // `emit_binding_prologue` TDZ-seeds it — matching legacy
-      // `declare_var_boundary_body`'s `LetBinding`/`rest_kind` branch
-      // and the frozen contract at emit.gleam:2986-2988.
+      // `emit_binding_prologue` TDZ-seeds it — the contract
+      // `compile_function_body`'s non-simple param path relies on when
+      // it destructures the shims into the user names.
       let kind = case rb.kind {
         ParamBinding ->
           case
@@ -1671,9 +1672,10 @@ fn finalize_scope(
       kind: raw.kind,
       bindings:,
       // The synthetic `<withN_M>` holder NAME, carried as-is. It is
-      // declared IN this With scope by the parser (declare_stmt's
-      // WithStatement arm), so `do_lookup` resolves its slot + boxedness
-      // from `bindings` — no derived slot copy to keep in sync.
+      // declared IN this With scope by the parser
+      // (`parse_with_statement_body` sb_declares it as a LetBinding), so
+      // `do_lookup` resolves its slot + boxedness from `bindings` — no
+      // derived slot copy to keep in sync.
       with_object: raw.with_object_name,
       contains_direct_eval: raw.contains_direct_eval,
       annexb_blocked: raw.annexb_blocked,
@@ -1695,9 +1697,9 @@ fn finalize_scope(
 }
 
 /// Whether a parser-recorded RawBinding in `scope_id` should become a
-/// real local-slot Binding. Reproduces `declare_var_boundary_body`'s
-/// `vars_are_local` / `lexicals_are_local` Script-root gates (the parser
-/// can't apply them itself — it doesn't have `AnalyzeOpts`):
+/// real local-slot Binding. Applies the Script-root "does this name get
+/// a local slot at all?" gates the parser can't apply itself (it doesn't
+/// have `AnalyzeOpts`):
 ///
 ///   - Script root, `!opts.strict` (sloppy script / sloppy direct eval /
 ///     REPL / indirect eval): `var` and top-level fn-decls belong to the
@@ -1791,8 +1793,8 @@ fn hoist_annexb_block_functions(
           let already = dict.has_key(fn_scope.bindings, name)
           // Allocate a var-twin slot only when the var would be local
           // and no same-named binding (explicit `var f` / param /
-          // earlier candidate) already exists. First-declaration-wins,
-          // matching `add_binding`.
+          // earlier candidate) already exists — first-declaration-wins,
+          // the same rule `sb_declare` / `finalize_scope` apply.
           let #(fn_scope, info) = case var_is_local && !already {
             False -> #(fn_scope, info)
             True -> {
@@ -1901,10 +1903,11 @@ fn annexb_check_chain(
   }
 }
 
-/// Port of `record_ref` over the parser's flat `raw_refs` list: for
-/// each `#(scope_id, name)` reference the parser recorded, determine
-/// whether `name` is FREE in the referencing function (declared in an
-/// enclosing function or nowhere) and, if so, add `#(ref_fn, name)` to
+/// REFERENCE pass, over the parser's flat `raw_refs` list (each `sb_ref`
+/// call appended one entry): for each `#(scope_id, name)` reference the
+/// parser recorded, determine whether `name` is FREE in the referencing
+/// function (declared in an enclosing function or nowhere) and, if so,
+/// add `#(ref_fn, name)` to
 /// the result — `analyze_captures`' `derive_free_own` pivots that into
 /// `FnAnalysisInput.free_own`. `seen` dedupes repeat refs from the same
 /// scope so each `(scope, name)` pair walks the parent chain at most
@@ -2080,8 +2083,8 @@ fn do_lookup(
     Error(Nil) -> {
       // Crossing a `with` scope adds its object-slot to the runtime probe
       // chain BEFORE consulting the next outer scope. The `<withN_M>`
-      // holder binding is declared IN the With scope itself (see
-      // declare_stmt's WithStatement arm), so both its slot and its
+      // holder binding is declared IN the With scope itself (the
+      // parser's `parse_with_statement_body`), so both its slot and its
       // `is_boxed` flag — set by `analyze_captures` like any other
       // binding, when a child closure defined inside the `with` body
       // captures it — come from this scope's own `bindings` entry.
@@ -2156,8 +2159,9 @@ fn inherited_with_slots(tree: ScopeTree, fn_root: Scope) -> List(#(Int, Bool)) {
       |> list.reverse
     Some(_) -> {
       use acc, scope <- fold_enclosing_withs(tree, fn_root.parent, [])
-      // The With scope's holder is its sole binding (declare_stmt's
-      // WithStatement arm). Look its NAME up in the function root's
+      // The With scope's holder is its sole binding (declared by the
+      // parser's `parse_with_statement_body`). Look its NAME up in the
+      // function root's
       // bindings — `fn_with_stack_free` adds every enclosing
       // with-holder to this function's free set, so `insert_captures`
       // placed a CaptureBinding for it. Skip if absent (matches the
@@ -2251,8 +2255,8 @@ pub fn function_info(tree: ScopeTree, scope_id: ScopeId) -> FunctionInfo {
   info
 }
 
-/// Fetch a scope node. Panics on an unknown id — every ScopeId handed out
-/// by `analyze` is present in the tree.
+/// Fetch a scope node. Panics on an unknown id — every ScopeId the parser
+/// allocated via `sb_push` is present in the `finalize`d tree.
 pub fn get_scope(tree: ScopeTree, scope_id: ScopeId) -> Scope {
   let assert Ok(scope) = dict.get(tree.scopes, scope_id)
     as "scope.get_scope: unknown ScopeId"
@@ -2356,8 +2360,8 @@ type ParentView {
 /// entry per function-kind scope. Derives every field from the tree the
 /// DECLARE + REFERENCE passes produced, so the caller threads no extra
 /// state:
-///   `is_arrow`   — `FunctionInfo.is_arrow` (recorded by
-///                  `declare_var_boundary_body`).
+///   `is_arrow`   — `FunctionInfo.is_arrow` (recorded by the parser on
+///                  the function's RawScope).
 ///   `is_strict`  — `Scope.is_strict` of the function-root scope.
 ///   `free_own`   — names in `captured` whose declaring scope's
 ///                  `function_scope` differs from the reference site's
@@ -2369,8 +2373,9 @@ type ParentView {
 ///                  — mirrors emit.gleam's CompiledChild propagation
 ///                  where an arrow's lexical_refs OR into the parent's.
 ///
-/// `captured` / `own_lexical_refs` are the REFERENCE-pass outputs from
-/// `resolve_references` — pass-internal, never stored on `ScopeTree`.
+/// `captured` (from `resolve_raw_refs`) and `own_lexical_refs` (from the
+/// parser's `sb_lexical_ref` recording) are the REFERENCE-pass outputs —
+/// pass-internal, never stored on `ScopeTree`.
 fn build_capture_inputs(
   tree: ScopeTree,
   captured: Set(#(ScopeId, String)),
@@ -2387,7 +2392,7 @@ fn build_capture_inputs(
 }
 
 /// Group every free reference recorded by the REFERENCE pass by the
-/// function scope it occurs in. `record_ref` already performed the
+/// function scope it occurs in. `resolve_raw_refs` already performed the
 /// `find_declaring_scope` walk and stored `(ref_fn, name)` for every
 /// name FREE in `ref_fn` — this just pivots that flat set into a
 /// per-function dict.
@@ -2743,18 +2748,18 @@ fn compute_down(
       )
   }
 
-  // Frame layout reconciliation: the DECLARE pass allocated own bindings
-  // at slots 0.. (`new_scope` sets `local_count: 0`; `add_binding` counts
-  // from there). The legacy resolver — and `child_parent_view` /
-  // `do_lookup` — assume the frame is laid out captures-first: slots
+  // Frame layout reconciliation: `finalize_scope` allocated each
+  // non-root function's own bindings at slots 0.. (a `RawScope`'s
+  // FunctionInfo starts at `local_count: 0`), but `child_parent_view` /
+  // `do_lookup` assume the frame is laid out captures-FIRST: slots
   // 0..N-1 = name captures (CaptureBinding), N..N+K-1 = lexical_captures,
   // N+K..N+K+L-1 = owned lexical pseudo-slots (`lexical` above),
   // N+K+L.. = own declared bindings. So shift every declared binding by
   // N+K+L, bump local_count, and insert a CaptureBinding per capture name
   // into the function-root scope. Without this, captures and own bindings
   // collide at the same slot indices and grandchildren capture the wrong
-  // parent slot. The root scope's bindings are ALREADY offset (`analyze`
-  // seeds `local_count` past `opts.parent_names` + `opts.with_stack` +
+  // parent slot. The ROOT scope's bindings are already offset (`finalize`
+  // seeds its `local_count` past `opts.parent_names` + `opts.with_stack` +
   // `opts.lexical_captures` and pre-inserts the parent-name CaptureBindings)
   // so it is skipped — root captures are caller-supplied, not computed here.
   let cap_count = lex_base + own_lexical_count
@@ -3061,15 +3066,14 @@ fn declared_in(scopes: List(Scope)) -> Set(String) {
 /// creation site that this body must capture as free names. Walks the
 /// scope chain from `fn_id`'s parent to the root, collecting every `With`
 /// scope's holder binding name (the sole binding in a With scope —
-/// declared by the WithStatement arm of `declare_stmt`).
+/// declared by the parser's `parse_with_statement_body`).
 ///
-/// `FunctionInfo.with_stack` is NOT consulted: `new_scope` initializes it
-/// to `[]` for every non-root function and nothing repopulates it, so it
-/// is empty by construction here. The legacy `collect_free_vars` read
-/// `child.with_stack: List(String)` — the full inherited holder-name
-/// stack the emitter recorded at the IrMakeClosure site; this tree walk
-/// reconstructs the same set directly from scope structure. Replaces the
-/// with-stack tail of collect_free_vars.
+/// `FunctionInfo.with_stack` is NOT consulted: `finalize` initializes it
+/// to `[]` for every non-root function and nothing repopulates it (only
+/// the ROOT's with_stack — `opts.with_stack`, direct-eval's inherited
+/// holders — is ever non-empty), so it is empty by construction here.
+/// This tree walk derives the with-holder set directly from scope
+/// structure instead.
 fn fn_with_stack_free(
   tree: ScopeTree,
   fn_id: ScopeId,
