@@ -528,16 +528,14 @@ fn num_exp_finite(x: Float, y: Float) -> JsNum {
         // Normal finite case
         False ->
           case x <. 0.0 {
-            True -> {
-              let truncated = int.to_float(value.float_to_int(y))
-              case truncated == y {
+            True ->
+              case value.integral_int(y) {
                 // pow_total returns ±Infinity (sign from the odd/even
                 // integer exponent) when |x^y| overflows a 64-bit float.
-                True -> pow_total(x, y)
+                Some(_) -> pow_total(x, y)
                 // Non-integer exponent with negative base
-                False -> NaN
+                None -> NaN
               }
-            }
             // pow_total returns +Infinity when x^y overflows.
             False -> pow_total(x, y)
           }
@@ -547,8 +545,9 @@ fn num_exp_finite(x: Float, y: Float) -> JsNum {
 
 /// Check if a float is an odd integer.
 fn is_odd_integer(f: Float) -> Bool {
-  let truncated = value.float_to_int(f)
-  int.to_float(truncated) == f && int.is_odd(truncated)
+  value.integral_int(f)
+  |> option.map(int.is_odd)
+  |> option.unwrap(False)
 }
 
 /// `math:pow/2` made total: Erlang raises `badarith` when the true result

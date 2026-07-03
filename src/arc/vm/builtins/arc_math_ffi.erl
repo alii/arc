@@ -3,10 +3,12 @@
 %% Erlang has no IEEE-754 infinities: `math:exp/1`, `math:pow/2`, `math:cosh/1`
 %% and `math:sinh/1` raise `badarith` the moment the true result overflows a
 %% 64-bit float, and decoding a `:32/float` segment whose bits encode ±Inf
-%% raises `badmatch`. Left unhandled those exceptions take down the whole VM
-%% process, so `Math.exp(710)`, `1e300 ** 2`, `Math.cosh(711)`,
-%% `Math.fround(1e300)`, ... would crash the runtime instead of returning
-%% ±Infinity as ES §21.3.2 requires.
+%% raises `badmatch`. Plain float arithmetic (`X * X`, `A + B`) badariths on
+%% overflow too — see `hypot/1`. Left unhandled those exceptions take down the
+%% whole VM process, so `Math.exp(710)`, `1e300 ** 2`, `Math.cosh(711)`,
+%% `Math.fround(1e300)`, `Math.hypot(1e200, 1e200)`, ... would crash the
+%% runtime instead of returning a finite result or ±Infinity as ES §21.3.2
+%% requires.
 %%
 %% Every overflow-capable entry point here therefore returns the Gleam
 %% `arc/vm/value.JsNum` runtime shape directly —
@@ -17,7 +19,7 @@
 %% outcomes; there is no `-> Float` signature left through which an overflow
 %% can escape as an uncaught exception.
 -module(arc_math_ffi).
--export([exp/1, pow/2, cosh/1, sinh/1, fround/1, is_neg_zero/1]).
+-export([exp/1, pow/2, cosh/1, sinh/1, hypot/1, fround/1, is_neg_zero/1]).
 
 %% math:exp/1 overflows only toward +Infinity (e^x for large positive x).
 exp(X) ->
@@ -34,14 +36,12 @@ cosh(X) ->
 %% math:sinh/1 is odd, so the overflow takes the sign of the argument.
 sinh(X) ->
     try {finite, math:sinh(X)}
-    catch
-        error:badarith when X < 0 -> neg_infinity;
-        error:badarith -> infinity
+    catch error:badarith -> signed_infinity(X)
     end.
 
 %% math:pow/2 raises badarith in exactly two situations:
 %%   * the true result's magnitude overflows a 64-bit float, or
-%%   * Base < 0 with a non-integer Exp (no real result).
+%%   * the base is negative with a non-integer Exp (no real result).
 %% Distinguish them so overflow gets the sign the real result would have
 %% had: negative iff the base is negative and the (integer) exponent is odd.
 pow(Base, Exp) ->
@@ -49,15 +49,42 @@ pow(Base, Exp) ->
     catch error:badarith -> pow_non_finite(Base, Exp)
     end.
 
-pow_non_finite(Base, Exp) when Base < 0 ->
-    T = trunc(Exp),
-    if
-        T /= Exp -> na_n;
-        T rem 2 =:= 0 -> infinity;
-        true -> neg_infinity
-    end;
-pow_non_finite(_Base, _Exp) ->
-    infinity.
+pow_non_finite(Base, Exp) ->
+    case neg_sign(Base) of
+        true ->
+            T = trunc(Exp),
+            if
+                T /= Exp -> na_n;
+                T rem 2 =:= 0 -> infinity;
+                true -> neg_infinity
+            end;
+        false ->
+            infinity
+    end.
+
+%% Math.hypot's sum of squares over the FINITE arguments (the caller has
+%% already short-circuited ±Infinity and NaN per §21.3.2.18). Naively folding
+%% `S + V*V` in Gleam overflows a 64-bit float — and thus badariths, killing
+%% the process — for arguments as ordinary as `Math.hypot(1e200, 1e200)`,
+%% whose true result is finite. So scale by the largest magnitude first: every
+%% (V/Max)^2 is then in [0, 1] and the sum cannot overflow. Only the final
+%% rescale can, and only when the true result really is out of range
+%% (`Math.hypot(1e308, 1e308)`), where ES requires +Infinity.
+hypot(Values) ->
+    Max = lists:foldl(fun(V, Acc) -> max(abs(V), Acc) end, 0.0, Values),
+    case Max == 0.0 of
+        true ->
+            {finite, 0.0};
+        false ->
+            SumSq = lists:foldl(
+                fun(V, Acc) -> R = V / Max, Acc + R * R end,
+                0.0,
+                Values
+            ),
+            try {finite, Max * math:sqrt(SumSq)}
+            catch error:badarith -> infinity
+            end
+    end.
 
 %% Math.fround: round a 64-bit float to the nearest 32-bit (IEEE 754
 %% single-precision) float, then widen back to 64-bit (ES2024 §21.3.2.17).
@@ -80,11 +107,26 @@ fround(X) when is_float(X) ->
 fround(X) when is_integer(X) ->
     fround(float(X)).
 
-%% Detect IEEE 754 negative zero. BEAM floats preserve the sign bit but
-%% Erlang's == and =:= don't reliably distinguish ±0 in all contexts.
-%% We check the sign bit of the IEEE 754 binary representation directly.
-is_neg_zero(X) when is_float(X) ->
+%% THE sign test for a float, straight off the IEEE 754 sign bit — the ONLY
+%% thing in this module allowed to ask "is this negative". Erlang's `<`, `>=`
+%% and friends are arithmetic comparisons: `-0.0 < 0` is FALSE, so a guard
+%% like `when Base < 0` silently classifies -0.0 as positive and hands the
+%% overflow the wrong sign.
+neg_sign(X) when is_float(X) ->
     <<Sign:1, _:63>> = <<X:64/float>>,
-    X == 0.0 andalso Sign =:= 1;
+    Sign =:= 1.
+
+%% ±Infinity, taking the sign of X (for odd functions that overflowed).
+signed_infinity(X) ->
+    case neg_sign(X) of
+        true -> neg_infinity;
+        false -> infinity
+    end.
+
+%% Detect IEEE 754 negative zero: a zero whose sign bit is set. BEAM floats
+%% preserve the sign bit but Erlang's == and =:= don't reliably distinguish
+%% ±0 in all contexts.
+is_neg_zero(X) when is_float(X) ->
+    X == 0.0 andalso neg_sign(X);
 is_neg_zero(_) ->
     false.

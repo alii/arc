@@ -6,7 +6,9 @@ import arc/vm/ops/coerce
 // reductions and the ±0 float helpers live in the ops layer with the rest of
 // the JsNum arithmetic — Math.pow/imul/clz32 are just callers. Builtins may
 // depend on ops, never the reverse.
-import arc/vm/ops/operators.{is_neg_zero, is_zero, num_exp, num_negate}
+import arc/vm/ops/operators.{
+  is_neg_zero, is_negative_float, is_zero, num_exp, num_negate,
+}
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, type MathNativeFn, type Ref, Finite, Infinity, JsNumber, MathAbs,
@@ -146,13 +148,22 @@ fn math_pow(
 }
 
 /// Math.abs(x)
+///
+/// §21.3.2.1 step 4: "If x is -0𝔽, return +0𝔽". `float.absolute_value` gets
+/// this wrong — it is `case x >=. 0.0 { True -> x .. }`, and `-0.0 >=. 0.0`
+/// is True on the BEAM, so it hands -0.0 straight back. Use the canonical
+/// sign predicate instead: `0.0 -. -0.0` is +0.0, and `0.0 -. -5.0` is 5.0.
 fn math_abs(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) -> Finite(float.absolute_value(n))
+    Finite(n) ->
+      case is_negative_float(n) {
+        True -> Finite(0.0 -. n)
+        False -> Finite(n)
+      }
     NaN -> NaN
     Infinity | NegInfinity -> Infinity
   }
@@ -175,14 +186,18 @@ fn math_sqrt(
   }
 }
 
+/// Which end of the ordering `math_extremum` folds toward.
+type Extremum {
+  Max
+  Min
+}
+
 /// Math.max(a, b, ...) — returns -Infinity for no args.
 fn math_max(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Per spec: Math.max(+0, -0) → +0, so a -0 accumulator loses ties.
-  use a, b <- math_extremum(args, state, seed: NegInfinity, dominant: Infinity)
-  a >=. b && { a >. b || !is_neg_zero(a) }
+  math_extremum(args, state, Max)
 }
 
 /// Math.min(a, b, ...) — returns +Infinity for no args.
@@ -190,19 +205,27 @@ fn math_min(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Per spec: Math.min(+0, -0) → -0, so a -0 argument wins ties.
-  use a, b <- math_extremum(args, state, seed: Infinity, dominant: NegInfinity)
-  a <=. b && { a <. b || !is_neg_zero(b) }
+  math_extremum(args, state, Min)
 }
 
-/// Math.max/min fold: `seed` loses to all, `dominant` beats all, `keep_acc` decides finites.
+/// Math.max/min fold. The seed (loses to everything), the dominant value
+/// (beats everything) and the finite tie-break all come out of ONE `case
+/// which` — they must agree, so they cannot be chosen independently.
 fn math_extremum(
   args: List(JsValue),
   state: State(host),
-  seed seed: value.JsNum,
-  dominant dominant: value.JsNum,
-  keep_acc keep_acc: fn(Float, Float) -> Bool,
+  which: Extremum,
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  let #(seed, dominant, keep_acc) = case which {
+    // Per spec: Math.max(+0, -0) → +0, so a -0 accumulator loses ties.
+    Max -> #(NegInfinity, Infinity, fn(a: Float, b: Float) {
+      a >=. b && { a >. b || !is_neg_zero(a) }
+    })
+    // Per spec: Math.min(+0, -0) → -0, so a -0 argument wins ties.
+    Min -> #(Infinity, NegInfinity, fn(a: Float, b: Float) {
+      a <=. b && { a <. b || !is_neg_zero(b) }
+    })
+  }
   // §21.3.2.24/25 step 1: ? ToNumber every argument (in order) BEFORE the
   // fold — a later argument's valueOf must still run (and may throw) even
   // when an earlier one was already NaN.
@@ -247,15 +270,18 @@ fn math_atan2(
   case y, x {
     NaN, _ | _, NaN -> NaN
     Finite(yv), Finite(xv) -> Finite(ffi_math_atan2(yv, xv))
+    // §21.3.2.8 steps 12-15: the result's sign is y's — and a -0 y is
+    // NEGATIVE. `yv >=. 0.0` is True for -0.0, so it would hand
+    // `Math.atan2(-0, Infinity)` a +0 and `Math.atan2(-0, -Infinity)` a +π.
     Finite(yv), Infinity ->
-      case yv >=. 0.0 {
-        True -> Finite(0.0)
-        False -> Finite(-0.0)
+      case is_negative_float(yv) {
+        True -> Finite(-0.0)
+        False -> Finite(0.0)
       }
     Finite(yv), NegInfinity ->
-      case yv >=. 0.0 {
-        True -> Finite(3.141592653589793)
-        False -> Finite(-3.141592653589793)
+      case is_negative_float(yv) {
+        True -> Finite(-3.141592653589793)
+        False -> Finite(3.141592653589793)
       }
     Infinity, Finite(_) -> Finite(ffi_math_atan2(1.0, 0.0))
     NegInfinity, Finite(_) -> Finite(ffi_math_atan2(-1.0, 0.0))
@@ -336,20 +362,24 @@ fn math_hypot(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // §21.3.2.18 step 1: ? ToNumber every argument, in order.
   use nums, state <- coerce_args(args, state)
-  // Classify in one pass: track presence of ±∞, NaN, and running sum of squares.
-  let #(inf, nan, sum_sq) =
-    list.fold(nums, #(False, False, 0.0), fn(acc, n) {
-      let #(i, na, s) = acc
+  // Classify in one pass: presence of ±∞, of NaN, and the finite magnitudes.
+  let #(inf, nan, finites) =
+    list.fold(nums, #(False, False, []), fn(acc, n) {
+      let #(i, na, vs) = acc
       case n {
-        Infinity | NegInfinity -> #(True, na, s)
-        NaN -> #(i, True, s)
-        Finite(v) -> #(i, na, s +. v *. v)
+        Infinity | NegInfinity -> #(True, na, vs)
+        NaN -> #(i, True, vs)
+        Finite(v) -> #(i, na, [v, ..vs])
       }
     })
   let result = case inf, nan {
     True, _ -> Infinity
     _, True -> NaN
-    _, _ -> Finite(ffi_math_sqrt(sum_sq))
+    // hypot_total returns Infinity when the true result overflows a 64-bit
+    // float; folding `sum +. v *. v` here instead would badarith (crashing
+    // the process, NOT throwing) on inputs as ordinary as
+    // `Math.hypot(1e200, 1e200)`, whose true result is finite.
+    _, _ -> hypot_total(finites)
   }
   #(state, Ok(JsNumber(result)))
 }
@@ -741,7 +771,7 @@ fn js_round(n: Float) -> Float {
   // to be a single post-condition on `rounded`: for n in [-0.5, 0.0) the
   // half-up branch above yields `floored +. 1.0` = -1.0 +. 1.0 = +0.0, so
   // any check attached to only the `floored` branch never sees those inputs.
-  case is_zero(rounded) && { n <. 0.0 || is_neg_zero(n) } {
+  case is_zero(rounded) && is_negative_float(n) {
     True -> -0.0
     False -> rounded
   }
@@ -806,6 +836,11 @@ fn cosh_total(x: Float) -> value.JsNum
 
 @external(erlang, "arc_math_ffi", "sinh")
 fn sinh_total(x: Float) -> value.JsNum
+
+/// sqrt(sum of squares) of the FINITE arguments — the caller has already
+/// short-circuited ±Infinity/NaN. Overflow-safe (see arc_math_ffi:hypot/1).
+@external(erlang, "arc_math_ffi", "hypot")
+fn hypot_total(values: List(Float)) -> value.JsNum
 
 @external(erlang, "arc_math_ffi", "fround")
 fn ffi_fround(x: Float) -> value.JsNum

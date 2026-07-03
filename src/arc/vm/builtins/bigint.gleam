@@ -20,7 +20,7 @@ import arc/vm/value.{
 }
 import gleam/bool
 import gleam/int
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 
@@ -81,11 +81,14 @@ pub fn bigint_global(
       // Step 3: Number → NumberToBigInt (RangeError unless integral).
       JsNumber(n) ->
         case n {
-          Finite(f) -> {
-            let i = value.float_to_int(f)
-            case int.to_float(i) == f {
-              True -> Ok(#(value.JsBigInt(value.BigInt(i)), state))
-              False ->
+          // §4.4.31 IsIntegralNumber via value.integral_int, which is ±0-safe:
+          // the naive `int.to_float(i) == f` compiles to BEAM `=:=`, and
+          // `0.0 =:= -0.0` is False, so `BigInt(-0)` used to RangeError
+          // instead of yielding 0n.
+          Finite(f) ->
+            case value.integral_int(f) {
+              Some(i) -> Ok(#(value.JsBigInt(value.BigInt(i)), state))
+              None ->
                 Error(state.range_error_value(
                   state,
                   "The number "
@@ -93,7 +96,6 @@ pub fn bigint_global(
                     <> " cannot be converted to a BigInt because it is not an integer",
                 ))
             }
-          }
           _ ->
             Error(state.range_error_value(
               state,

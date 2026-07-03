@@ -5,6 +5,7 @@ import arc/vm/builtins/number
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type ConsoleNativeFn, type JsValue, type Ref, ConsoleLog, ConsoleLogError,
@@ -179,7 +180,7 @@ fn spec(
     // throw propagates. Non-numeric → "NaN".
     "d", [head, ..rest] -> {
       use #(n, state) <- result.map(coerce.js_to_number(state, head))
-      Some(#(int_substitution(n), rest, state))
+      Some(#(number_substitution(n), rest, state))
     }
     // §2.2.1 step 4.2: "%i shall be converted by Call(%parseInt%, undefined,
     // « current, 10 »)". parseInt coerces with ToString, NOT ToNumber — so a
@@ -190,7 +191,7 @@ fn spec(
       let #(state, res) =
         number.dispatch(value.GlobalParseInt, [head, radix], JsUndefined, state)
       case res {
-        Ok(JsNumber(n)) -> Ok(Some(#(int_substitution(n), rest, state)))
+        Ok(JsNumber(n)) -> Ok(Some(#(number_substitution(n), rest, state)))
         Ok(other) -> Ok(Some(#(object.inspect(other, state.heap), rest, state)))
         Error(thrown) -> Error(#(thrown, state))
       }
@@ -201,7 +202,8 @@ fn spec(
       let #(state, res) =
         number.dispatch(value.GlobalParseFloat, [head], JsUndefined, state)
       case res {
-        Ok(num) -> Ok(Some(#(object.inspect(num, state.heap), rest, state)))
+        Ok(JsNumber(n)) -> Ok(Some(#(number_substitution(n), rest, state)))
+        Ok(other) -> Ok(Some(#(object.inspect(other, state.heap), rest, state)))
         Error(thrown) -> Error(#(thrown, state))
       }
     }
@@ -214,12 +216,25 @@ fn spec(
   }
 }
 
-/// Render the %d/%i substitution for a coerced number: an integer with no
-/// `.0`, or "NaN" for anything non-finite.
-fn int_substitution(n: value.JsNum) -> String {
+/// Render the number a %d/%i/%f specifier coerced its argument to — Node's
+/// `formatNumber`, i.e. Number::toString of the WHOLE number, plus the "-0"
+/// that §6.1.6.1.20 renders as "0".
+///
+/// The three specifiers differ only in HOW they coerce (%d = Number(),
+/// %i = parseInt, %f = parseFloat), never in how the result prints — so they
+/// share this one renderer. Truncating here (the old `%d`) would print
+/// `console.log("%d", 42.9)` as "42" instead of Node's "42.9", and collapsing
+/// the non-finite arms into "NaN" would print `Infinity` as "NaN".
+fn number_substitution(n: value.JsNum) -> String {
   case n {
-    value.Finite(f) -> string.inspect(value.float_to_int(f))
-    _ -> "NaN"
+    value.Finite(f) ->
+      case operators.is_neg_zero(f) {
+        True -> "-0"
+        False -> value.js_format_number(f)
+      }
+    value.NaN -> "NaN"
+    value.Infinity -> "Infinity"
+    value.NegInfinity -> "-Infinity"
   }
 }
 

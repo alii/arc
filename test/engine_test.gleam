@@ -497,11 +497,36 @@ pub fn console_inspect_objects_test() {
 pub fn console_format_specifiers_test() {
   let eng = fmt_engine()
   assert assert_eval(eng, "fmt('hi %s!', 'world')") == JsString("hi world!")
-  assert assert_eval(eng, "fmt('%d/%i', 42.9, '7.5')") == JsString("42/7")
+  // %d renders the WHOLE number (Node's formatNumber), it does not truncate:
+  // only %i truncates, and it does so in parseInt, not in the renderer.
+  assert assert_eval(eng, "fmt('%d/%i', 42.9, '7.5')") == JsString("42.9/7")
   assert assert_eval(eng, "fmt('%f', 3.14)") == JsString("3.14")
   assert assert_eval(eng, "fmt('%o', {x: 1})") == JsString("{ x: 1 }")
   // `%%` only collapses inside Formatter, i.e. with 2+ args.
   assert assert_eval(eng, "fmt('%% done', 0)") == JsString("% done 0")
+}
+
+/// %d/%i/%f share ONE renderer, so each non-finite prints under its own name
+/// and a -0 Number prints "-0". The truncating `int_substitution` this
+/// replaced collapsed all three of ±Infinity/NaN into "NaN" and printed -0
+/// as "0".
+///
+/// The three still DIFFER in how they coerce, and only there: %d is
+/// ToNumber, so it sees a real -0; %i/%f go through parseInt/parseFloat,
+/// which coerce via ToString first, and String(-0) is "0" — so -0 is already
+/// gone before the renderer runs. Likewise parseFloat("-Infinity") is
+/// -Infinity but parseInt("-Infinity") is NaN.
+pub fn console_format_number_edge_values_test() {
+  let eng = fmt_engine()
+  assert assert_eval(eng, "fmt('%d', -0)") == JsString("-0")
+  assert assert_eval(eng, "fmt('%d', Infinity)") == JsString("Infinity")
+  assert assert_eval(eng, "fmt('%d', -Infinity)") == JsString("-Infinity")
+  assert assert_eval(eng, "fmt('%d', NaN)") == JsString("NaN")
+  assert assert_eval(eng, "fmt('%f', -0)") == JsString("0")
+  assert assert_eval(eng, "fmt('%i', -0)") == JsString("0")
+  assert assert_eval(eng, "fmt('%f', Infinity)") == JsString("Infinity")
+  assert assert_eval(eng, "fmt('%f', -Infinity)") == JsString("-Infinity")
+  assert assert_eval(eng, "fmt('%i', -Infinity)") == JsString("NaN")
 }
 
 pub fn console_format_edge_cases_test() {
