@@ -14,6 +14,7 @@ import arc/vm/builtins/intl_format as fmt
 import arc/vm/builtins/intl_locale as tags
 import arc/vm/builtins/temporal_tz
 import arc/vm/heap
+import arc/vm/internal/temporal_calendar as tcal
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -4674,15 +4675,28 @@ fn dtf_temporal_value(
         Some(ObjectSlot(
           kind: TemporalDateSlot(year:, month:, day:, calendar:),
           ..,
-        )) -> Some(TfDate(year:, month:, day:, calendar:))
+        )) ->
+          Some(TfDate(year:, month:, day:, calendar: tcal.identifier(calendar)))
         Some(ObjectSlot(
           kind: TemporalYearMonthSlot(year:, month:, day:, calendar:),
           ..,
-        )) -> Some(TfYearMonth(year:, month:, day:, calendar:))
+        )) ->
+          Some(TfYearMonth(
+            year:,
+            month:,
+            day:,
+            calendar: tcal.identifier(calendar),
+          ))
         Some(ObjectSlot(
           kind: TemporalMonthDaySlot(month:, day:, ref_year:, calendar:),
           ..,
-        )) -> Some(TfMonthDay(month:, day:, ref_year:, calendar:))
+        )) ->
+          Some(TfMonthDay(
+            month:,
+            day:,
+            ref_year:,
+            calendar: tcal.identifier(calendar),
+          ))
         Some(ObjectSlot(
           kind: TemporalTimeSlot(
             hour:,
@@ -4717,7 +4731,7 @@ fn dtf_temporal_value(
             minute:,
             second:,
             millisecond:,
-            calendar:,
+            calendar: tcal.identifier(calendar),
           ))
         Some(ObjectSlot(kind: TemporalInstantSlot(epoch_ns:), ..)) ->
           Some(TfInstant(epoch_ns:))
