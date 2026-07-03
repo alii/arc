@@ -1330,14 +1330,15 @@ fn escape_byte(byte: Int) -> String {
 fn append_span(acc: StringTree, bytes: BitArray, n: Int) -> StringTree {
   case n {
     0 -> acc
-    _ ->
-      case bit_array.slice(bytes, 0, n) |> result.try(bit_array.to_string) {
-        Ok(chunk) -> string_tree.append(acc, chunk)
-        // Unreachable: `bytes` is the UTF-8 encoding of a Gleam String and
-        // `n` always lands on an ASCII boundary (`scan_escapable` only stops
-        // on bytes < 0x80), so the span is valid UTF-8 and within bounds.
-        Error(Nil) -> acc
-      }
+    _ -> {
+      // The slice cannot fail: `bytes` is the UTF-8 encoding of a Gleam String
+      // and `n` always lands on an ASCII boundary (`scan_escapable` only stops
+      // on bytes < 0x80), so the span is valid UTF-8 and within bounds. Assert
+      // rather than fall back — a broken invariant must not silently truncate.
+      let assert Ok(chunk) =
+        bit_array.slice(bytes, 0, n) |> result.try(bit_array.to_string)
+      string_tree.append(acc, chunk)
+    }
   }
 }
 
