@@ -13,6 +13,7 @@ import arc/vm/value.{
 }
 import gleam/bool
 import gleam/option.{None, Some}
+import gleam/result
 
 // ============================================================================
 // Init — set up the Reflect global object
@@ -191,16 +192,19 @@ fn reflect_define_property(
     [k] -> #(k, JsUndefined)
     [] -> #(JsUndefined, JsUndefined)
   }
-  case desc_val {
-    JsObject(desc_ref) ->
-      // Steps 2-4: ToPropertyKey + ToPropertyDescriptor + [[DefineOwnProperty]].
-      // define_property_bool returns the raw [[DefineOwnProperty]] boolean;
-      // proxy trap exceptions propagate, ordinary validation failures → false.
-      case builtins_object.define_property_bool(state, ref, key_val, desc_ref) {
-        Ok(#(state, ok)) -> #(state, Ok(JsBool(ok)))
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
-    _ -> state.type_error(state, "Property description must be an object")
+  // Steps 2-4: ToPropertyKey, THEN ToPropertyDescriptor (which is what raises
+  // the "not an object" TypeError, only after the key's user code has run),
+  // then [[DefineOwnProperty]]. define_property_bool_value returns the raw
+  // [[DefineOwnProperty]] boolean; proxy trap exceptions propagate, ordinary
+  // validation failures → false.
+  case builtins_object.define_property_bool_value(
+    state,
+    ref,
+    key_val,
+    desc_val,
+  ) {
+    Ok(#(state, ok)) -> #(state, Ok(JsBool(ok)))
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -421,26 +425,12 @@ fn reflect_set_prototype_of(
   case new_proto {
     Error(Nil) ->
       state.type_error(state, "Object prototype may only be an Object or null")
+    // Step 3: ? target.[[SetPrototypeOf]](proto) — the proxy-vs-ordinary
+    // dispatch lives in builtins/object; every refusal is just `false` here.
     Ok(new_proto) ->
-      // §10.5.2: proxies trap [[SetPrototypeOf]]; ordinary objects use the
-      // cycle/extensibility-checking ordinary algorithm.
-      case object.as_proxy(state.heap, ref) {
-        Some(#(target, handler)) ->
-          unwrap_set(builtins_object.proxy_set_proto(
-            state,
-            target,
-            handler,
-            new_proto,
-          ))
-        None ->
-          case
-            builtins_object.ordinary_set_prototype_of(state, ref, new_proto)
-          {
-            Ok(state) -> #(state, Ok(JsBool(True)))
-            Error(builtins_object.NotExtensible)
-            | Error(builtins_object.Cyclic)
-            | Error(builtins_object.Immutable) -> #(state, Ok(JsBool(False)))
-          }
+      case builtins_object.set_prototype_of_stateful(state, ref, new_proto) {
+        Ok(#(state, status)) -> #(state, Ok(JsBool(result.is_ok(status))))
+        Error(#(thrown, state)) -> #(state, Error(thrown))
       }
   }
 }

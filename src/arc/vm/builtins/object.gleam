@@ -4,7 +4,7 @@ import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/symbol
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Index, Named}
+import arc/vm/key.{Index, Named, Private}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -320,8 +320,10 @@ fn string_exotic_own_property(
       )
     }
     // Any other string name, and every symbol, is not an own property of a
-    // String primitive.
-    StringPropKey(pkey: Named(_), ..) | SymbolPropKey(_) -> None
+    // String primitive. (Private keys never come out of ToPropertyKey.)
+    StringPropKey(pkey: Named(_), ..)
+    | StringPropKey(pkey: Private(_), ..)
+    | SymbolPropKey(_) -> None
   }
 }
 
@@ -459,22 +461,25 @@ fn define_property(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
-    [JsObject(ref) as obj, key_val, JsObject(desc_ref), ..] -> {
+    [JsObject(ref) as obj, ..rest] -> {
+      let key_val = first_arg_or_undefined(rest)
+      let desc_val = case rest {
+        [_, d, ..] -> d
+        _ -> JsUndefined
+      }
       // Steps 2-4: ToPropertyKey + ToPropertyDescriptor + DefinePropertyOrThrow
-      // (apply_descriptor combines all three steps.)
+      // (apply_descriptor combines all three steps, in that order — a
+      // non-object `Attributes` is only rejected AFTER ToPropertyKey has run
+      // any user `toString`/`valueOf` on P).
       use state <- state.try_state(apply_descriptor(
         state,
         ref,
         key_val,
-        desc_ref,
+        desc_val,
       ))
       // Step 5: Return O.
       #(state, Ok(obj))
     }
-    // Step 3 (implicit): Attributes is not an Object — TypeError.
-    // Spec: ToPropertyDescriptor step 1 throws if Type(Obj) is not Object.
-    [JsObject(_), _, ..] ->
-      state.type_error(state, "Property description must be an object")
     // Step 1: If O is not an Object, throw a TypeError.
     _ -> state.type_error(state, "Object.defineProperty called on non-object")
   }
@@ -484,7 +489,8 @@ fn define_property(
 /// ES2024 §6.2.6.5 (ToPropertyDescriptor) + §7.3.8 (DefinePropertyOrThrow)
 ///
 /// ToPropertyDescriptor steps:
-///   1. If Type(Obj) is not Object, throw TypeError. (checked by caller)
+///   1. If Type(Obj) is not Object, throw TypeError. (in parse_descriptor,
+///      i.e. AFTER this function's ToPropertyKey step — spec order.)
 ///   2. Let desc be a new empty Property Descriptor.
 ///   3. If Obj has "enumerable", set desc.[[Enumerable]] = ToBoolean(Get(Obj, "enumerable")).
 ///   4. If Obj has "configurable", set desc.[[Configurable]] = ToBoolean(Get(Obj, "configurable")).
@@ -502,23 +508,24 @@ pub fn apply_descriptor(
   state: State(host),
   target_ref: Ref,
   key_val: JsValue,
-  desc_ref: Ref,
+  desc_val: JsValue,
 ) -> Result(State(host), #(JsValue, State(host))) {
+  // ToPropertyKey (which may run user code) strictly precedes
+  // ToPropertyDescriptor's "not an object" rejection.
   use #(dkey, state) <- result.try(to_object_key(state, key_val))
-  apply_descriptor_keyed(state, target_ref, dkey, desc_ref)
+  use #(parsed, state) <- result.try(parse_descriptor(state, desc_val))
+  apply_parsed_or_throw(state, target_ref, dkey, parsed)
 }
 
-/// apply_descriptor for callers whose key is already a resolved ObjectKey (so
-/// no ToPropertyKey step, which could otherwise re-run user code).
-fn apply_descriptor_keyed(
+/// DefinePropertyOrThrow (§7.3.8) on an already-parsed descriptor: a false
+/// [[DefineOwnProperty]] result and a genuine abrupt completion both surface
+/// as a throw here.
+fn apply_parsed_or_throw(
   state: State(host),
   target_ref: Ref,
   dkey: ObjectKey,
-  desc_ref: Ref,
+  parsed: ParsedDesc,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  use #(parsed, state) <- result.try(parse_descriptor(state, JsObject(desc_ref)))
-  // DefinePropertyOrThrow (§7.3.8): a false [[DefineOwnProperty]] result and
-  // a genuine abrupt completion both surface as a throw here.
   define_parsed(state, target_ref, dkey, parsed)
   |> result.map_error(as_define_throw)
 }
@@ -579,7 +586,7 @@ fn define_parsed(
               ordinary_define(state, target_ref, dkey, parsed)
               |> result.map_error(as_rejected)
           }
-        SymbolPropKey(_) ->
+        StringPropKey(pkey: Private(_), ..) | SymbolPropKey(_) ->
           ordinary_define(state, target_ref, dkey, parsed)
           |> result.map_error(as_rejected)
       }
@@ -1094,7 +1101,7 @@ fn shrink_array(
         dict.filter(properties, fn(k, _prop) {
           case k {
             Index(i) -> i < final_len
-            Named(_) -> True
+            Named(_) | Private(_) -> True
           }
         })
       let h =
@@ -2223,8 +2230,16 @@ fn define_properties_on(
       // the symbol property and a Proxy props object goes through its
       // ownKeys trap.
       use keys, state <- state.try_op(own_property_keys(state, props_ref))
-      // Steps 4-5 (merged): For each key, read descriptor, validate, apply.
-      define_props_loop(state, target_ref, props_ref, keys)
+      // Step 4: read + parse EVERY descriptor first — nothing is defined on
+      // the target until all of them validate.
+      use descriptors, state <- state.try_op(collect_descriptors(
+        state,
+        props_ref,
+        keys,
+        [],
+      ))
+      // Step 5: only now apply them, in key order.
+      apply_descriptors(state, target_ref, descriptors)
     }
     // Step 1: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
@@ -2233,63 +2248,81 @@ fn define_properties_on(
   }
 }
 
-/// Loop helper for ObjectDefineProperties (§20.1.2.3.1 steps 4-5 merged).
+/// ObjectDefineProperties §20.1.2.3.1 STEP 4 — read and parse every descriptor
+/// BEFORE any of them is applied. This phase separation is observable: if a
+/// later key's descriptor is invalid (`{a: {value: 1}, b: 1}`), the whole call
+/// throws with `a` still undefined on the target.
 ///
 /// `remaining` is the [[OwnPropertyKeys]] result — String and Symbol values.
 /// For each remaining key:
 ///   Step 4.a: Let propDesc be ? props.[[GetOwnProperty]](nextKey) — trap-aware.
 ///   Step 4.b: skip when propDesc is undefined or not enumerable.
 ///   Step 4.b.i: Let descObj be ? Get(props, nextKey).
-///   Step 4.b.ii: Let desc be ? ToPropertyDescriptor(descObj).
-///     — ToPropertyDescriptor (§6.2.6.5) requires descObj to be an Object;
-///       if not, throw TypeError.
-///   Step 5.a: Perform ? DefinePropertyOrThrow(O, key, desc).
-///     — Handled by apply_descriptor.
-///   Step 6: Return O.
-fn define_props_loop(
+///   Step 4.b.ii: Let desc be ? ToPropertyDescriptor(descObj) — throws if
+///     descObj is not an Object (parse_descriptor step 1).
+///   Step 4.b.iii: Append { [[Key]], [[Descriptor]] } to descriptors.
+fn collect_descriptors(
   state: State(host),
-  target_ref: Ref,
   props_ref: Ref,
   remaining: List(ObjectKey),
-) -> #(State(host), Result(JsValue, JsValue)) {
+  acc: List(#(ObjectKey, ParsedDesc)),
+) -> Result(
+  #(List(#(ObjectKey, ParsedDesc)), State(host)),
+  #(JsValue, State(host)),
+) {
   case remaining {
-    // Step 6: Return O (all keys processed).
-    [] -> #(state, Ok(JsObject(target_ref)))
+    [] -> Ok(#(list.reverse(acc), state))
     [dkey, ..rest] -> {
       // Step 4.a: propDesc = ? props.[[GetOwnProperty]](nextKey) — trap-aware.
-      use prop, state <- state.try_op(own_property_keyed(state, props_ref, dkey))
+      use #(prop, state) <- result.try(own_property_keyed(
+        state,
+        props_ref,
+        dkey,
+      ))
       let enumerable =
         option.map(prop, value.prop_enumerable) |> option.unwrap(False)
       case enumerable {
         // Step 4.b: propDesc undefined or not enumerable → skip.
-        False -> define_props_loop(state, target_ref, props_ref, rest)
+        False -> collect_descriptors(state, props_ref, rest, acc)
         True -> {
           // Step 4.b.i: descObj = Get(props, nextKey) — a real [[Get]], so
           // accessor descriptors have their getter invoked (and symbol keys
           // reach define_parsed instead of being silently dropped).
-          use desc_val, state <- state.try_op(object.get_prop_value(
+          use #(desc_val, state) <- result.try(object.get_prop_value(
             state,
             props_ref,
             object_key_prop_key(dkey),
             JsObject(props_ref),
           ))
-          case desc_val {
-            // Step 4.b.ii: ToPropertyDescriptor + step 5.a DefinePropertyOrThrow.
-            JsObject(desc_ref) -> {
-              use state <- state.try_state(apply_descriptor_keyed(
-                state,
-                target_ref,
-                dkey,
-                desc_ref,
-              ))
-              define_props_loop(state, target_ref, props_ref, rest)
-            }
-            // Step 4.b.ii: ToPropertyDescriptor throws if descObj is not an Object.
-            _ ->
-              state.type_error(state, "Property description must be an object")
-          }
+          // Step 4.b.ii: ToPropertyDescriptor(descObj).
+          use #(parsed, state) <- result.try(parse_descriptor(state, desc_val))
+          // Step 4.b.iii.
+          collect_descriptors(state, props_ref, rest, [#(dkey, parsed), ..acc])
         }
       }
+    }
+  }
+}
+
+/// ObjectDefineProperties §20.1.2.3.1 STEP 5-6: apply the already-parsed
+/// descriptors in key order, then return O.
+fn apply_descriptors(
+  state: State(host),
+  target_ref: Ref,
+  descriptors: List(#(ObjectKey, ParsedDesc)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case descriptors {
+    // Step 6: Return O (all descriptors applied).
+    [] -> #(state, Ok(JsObject(target_ref)))
+    [#(dkey, parsed), ..rest] -> {
+      // Step 5.a: Perform ? DefinePropertyOrThrow(O, key, desc).
+      use state <- state.try_state(apply_parsed_or_throw(
+        state,
+        target_ref,
+        dkey,
+        parsed,
+      ))
+      apply_descriptors(state, target_ref, rest)
     }
   }
 }
@@ -2515,9 +2548,10 @@ fn assign_set_failed(
   )
 }
 
-/// Error-message label for a symbol key, e.g. "Symbol(foo)".
-fn symbol_key_label(state: State(host), sym: value.SymbolId) -> String {
-  symbol.descriptive_string(sym, state.ctx.symbol_descriptions)
+/// Error-message label for a symbol key, e.g. "Symbol(foo)". Takes the state
+/// only to match the key-label callback shape `assign_keys` expects.
+fn symbol_key_label(_state: State(host), sym: value.SymbolId) -> String {
+  symbol.descriptive_string(sym)
 }
 
 /// Object.assign step 3.a.iii for a proxy source — per trap-provided key:
@@ -2753,10 +2787,9 @@ pub fn collect_own_symbol_keys(
 ///        (NaN === NaN is true; +0 !== -0)
 ///   3. Return SameValueNonNumber(x, y).
 ///
-/// Implementation: Gleam's structural `==` on JsValue IS SameValue because:
-///   - `JsNumber(NaN) == JsNumber(NaN)` is True (constructor equality on BEAM)
-///   - `Finite(0.0) == Finite(-0.0)` is False (BEAM `=:=` distinguishes ±0)
-///   - All other types use structural equality, matching SameValueNonNumber.
+/// Delegates to `value.same_value` — the engine's single SameValue — rather
+/// than leaning on structural `==`, whose ±0 and string-representation
+/// behaviour is an implementation detail, not a spec guarantee.
 fn is(
   args: List(JsValue),
   state: State(host),
@@ -2767,7 +2800,7 @@ fn is(
     [] -> #(JsUndefined, JsUndefined)
   }
   // Step 1: Return SameValue(value1, value2).
-  #(state, Ok(JsBool(a == b)))
+  #(state, Ok(JsBool(value.same_value(a, b))))
 }
 
 /// Object.hasOwn ( O, P ) — ES2024 §20.1.2.10
@@ -3662,9 +3695,18 @@ fn get_own_property_descriptors(
         [],
       )
     }
-    // TODO(Deviation): number/boolean/symbol should produce {} (ToObject
-    // wrapper with no own keys); we return undefined.
-    _ -> #(state, Ok(JsUndefined))
+    // Number/Boolean/Symbol/BigInt: ToObject yields a wrapper with no own
+    // keys, so step 4 iterates nothing and step 3's empty object is the
+    // result — same funnel, empty key list.
+    _ ->
+      descriptors_from_keys(
+        state,
+        [],
+        object_proto,
+        fn(state, _dkey) { Ok(#(None, state)) },
+        dict.new(),
+        [],
+      )
   }
 }
 
@@ -4239,9 +4281,14 @@ fn require_callable_accessor(
   }
 }
 
-/// ToPropertyDescriptor (§6.2.6.5) on an arbitrary object value — reads the
-/// six fields (invoking getters), validates get/set callability and the
-/// accessor/data conflict.
+/// ToPropertyDescriptor (§6.2.6.5) on an arbitrary value — step 1 rejects a
+/// non-Object, then the six fields are read (invoking getters), get/set
+/// callability and the accessor/data conflict validated.
+///
+/// This is the ONLY place the "descriptor is not an object" TypeError is
+/// raised, so no caller can accidentally raise it before its own
+/// ? ToPropertyKey step (whose user code — a `toString` that throws — must be
+/// observed first).
 ///
 /// The read ORDER is normative and observable — a Proxy descriptor sees the
 /// `has`/`get` traps in exactly this sequence: enumerable, configurable, value,
@@ -4252,6 +4299,11 @@ fn parse_descriptor(
   state: State(host),
   desc_obj: JsValue,
 ) -> Result(#(ParsedDesc, State(host)), #(JsValue, State(host))) {
+  // Step 1: If Obj is not an Object, throw a TypeError exception.
+  use Nil <- result.try(case desc_obj {
+    JsObject(_) -> Ok(Nil)
+    _ -> reject_define(state, "Property description must be an object")
+  })
   // Steps 3-4.
   use #(desc_enumerable, state) <- result.try(read_desc_bool(
     state,
@@ -4626,19 +4678,32 @@ fn proxy_define_own_property(
   }
 }
 
-/// Reflect.defineProperty semantics (§28.1.6): ? ToPropertyKey +
-/// ? ToPropertyDescriptor (their throws propagate), then
-/// ? target.[[DefineOwnProperty]] — a validation rejection becomes `false`,
-/// while genuine abrupt completions (ArraySetLength's RangeError, user code
-/// throwing, proxy trap/invariant errors) are re-thrown.
+/// `define_property_bool` for callers that already hold a descriptor OBJECT
+/// (so ToPropertyDescriptor's step 1 can never fire and the argument order is
+/// unobservable).
 pub fn define_property_bool(
   state: State(host),
   ref: Ref,
   key_val: JsValue,
   desc_ref: Ref,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
+  define_property_bool_value(state, ref, key_val, JsObject(desc_ref))
+}
+
+/// Reflect.defineProperty semantics (§28.1.3): ? ToPropertyKey (step 2) then
+/// ? ToPropertyDescriptor (step 3) — in that order, so a `propertyKey` whose
+/// `toString` throws is observed BEFORE a non-object `attributes` is rejected
+/// — then ? target.[[DefineOwnProperty]] — a validation rejection becomes
+/// `false`, while genuine abrupt completions (ArraySetLength's RangeError,
+/// user code throwing, proxy trap/invariant errors) are re-thrown.
+pub fn define_property_bool_value(
+  state: State(host),
+  ref: Ref,
+  key_val: JsValue,
+  desc_val: JsValue,
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(dkey, state) <- result.try(to_object_key(state, key_val))
-  use #(parsed, state) <- result.try(parse_descriptor(state, JsObject(desc_ref)))
+  use #(parsed, state) <- result.try(parse_descriptor(state, desc_val))
   case object.as_proxy(state.heap, ref) {
     Some(#(target, handler)) ->
       proxy_define_own_property(state, target, handler, dkey, parsed)
