@@ -6,9 +6,9 @@ import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
-  type JsValue, BigInt, Finite, FunctionObject, Infinity, JsBigInt, JsBool,
-  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
-  NaN, NativeFunction, NegInfinity, ObjectSlot,
+  type JsValue, BigInt, Finite, Infinity, JsBigInt, JsBool, JsNull, JsNumber,
+  JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized, NaN,
+  NativeFunction, NegInfinity, ObjectSlot,
 }
 import gleam/int
 import gleam/option.{type Option, None, Some}
@@ -25,24 +25,46 @@ pub type ToPrimitiveHint {
   DefaultHint
 }
 
-/// ES2024 §7.1.1 ToPrimitive(input, preferredType)
-/// For primitives, returns as-is. For objects, calls Symbol.toPrimitive
-/// or falls back to OrdinaryToPrimitive.
+/// ES2024 §7.1.1 ToPrimitive(input, preferredType), widened back to `JsValue`
+/// for callers that immediately re-dispatch on the full value domain (property
+/// keys, the interpreter's binops). Prefer `to_primitive_prim` when you are
+/// going to `case` on the result: it hands you a `JsPrimitive`, so the compiler
+/// checks that you covered every outcome and there is no object left to worry
+/// about.
 pub fn to_primitive(
   state: State(host),
   val: JsValue,
   hint: ToPrimitiveHint,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  use #(prim, state) <- result.map(to_primitive_prim(state, val, hint))
+  #(value.primitive_to_value(prim), state)
+}
+
+/// ES2024 §7.1.1 ToPrimitive(input, preferredType).
+/// For primitives, returns as-is. For objects, calls Symbol.toPrimitive
+/// or falls back to OrdinaryToPrimitive.
+///
+/// The `JsPrimitive` return type is the enforcement of §7.1.1's post-condition:
+/// an object result from a user `@@toPrimitive` (or from valueOf/toString) can
+/// only be turned into a TypeError / a retry HERE, at the one point where the
+/// call result is narrowed.
+pub fn to_primitive_prim(
+  state: State(host),
+  val: JsValue,
+  hint: ToPrimitiveHint,
+) -> Result(#(value.JsPrimitive, State(host)), #(JsValue, State(host))) {
   case val {
     // Primitives pass through
-    JsUndefined
-    | JsNull
-    | JsBool(_)
-    | JsNumber(_)
-    | JsString(_)
-    | JsSymbol(_)
-    | JsBigInt(_)
-    | JsUninitialized -> Ok(#(val, state))
+    JsUndefined -> Ok(#(value.PUndefined, state))
+    JsNull -> Ok(#(value.PNull, state))
+    JsBool(b) -> Ok(#(value.PBool(b), state))
+    JsNumber(n) -> Ok(#(value.PNumber(n), state))
+    JsString(s) -> Ok(#(value.PString(s), state))
+    JsSymbol(s) -> Ok(#(value.PSymbol(s), state))
+    JsBigInt(b) -> Ok(#(value.PBigInt(b), state))
+    // The TDZ sentinel is not a JS value and never reaches user code; every
+    // coercion has always treated it exactly like undefined.
+    JsUninitialized -> Ok(#(value.PUndefined, state))
     // Objects: try Symbol.toPrimitive, then OrdinaryToPrimitive
     JsObject(ref) -> {
       // §7.1.1 step 1.a: check @@toPrimitive
@@ -55,7 +77,8 @@ pub fn to_primitive(
       case exotic_fn {
         // @@toPrimitive not found (GetMethod treats undefined and null the
         // same) → fall through to OrdinaryToPrimitive
-        JsUndefined | JsNull -> ordinary_to_primitive(state, val, ref, hint)
+        JsUndefined | JsNull ->
+          ordinary_to_primitive_prim(state, val, ref, hint)
         _ ->
           case helpers.is_callable(state.heap, exotic_fn) {
             True -> {
@@ -67,13 +90,14 @@ pub fn to_primitive(
               use #(result, new_state) <- result.try(
                 state.call(state, exotic_fn, val, [JsString(hint_str)]),
               )
-              case result {
-                JsObject(_) ->
+              // §7.1.1 step 2.d: an object result is a TypeError.
+              case value.value_to_primitive(result) {
+                Some(prim) -> Ok(#(prim, new_state))
+                None ->
                   thrown_type_error(
                     new_state,
                     "Cannot convert object to primitive value",
                   )
-                _ -> Ok(#(result, new_state))
               }
             }
             False -> thrown_type_error(state, "@@toPrimitive is not callable")
@@ -83,14 +107,30 @@ pub fn to_primitive(
   }
 }
 
-/// ES2024 §7.1.1.1 OrdinaryToPrimitive(O, hint)
-/// Tries toString/valueOf (or valueOf/toString for number hint).
+/// §7.1.1.1 OrdinaryToPrimitive widened back to `JsValue` — see `to_primitive`.
 pub fn ordinary_to_primitive(
   state: State(host),
   val: JsValue,
   ref: value.Ref,
   hint: ToPrimitiveHint,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  use #(prim, state) <- result.map(ordinary_to_primitive_prim(
+    state,
+    val,
+    ref,
+    hint,
+  ))
+  #(value.primitive_to_value(prim), state)
+}
+
+/// ES2024 §7.1.1.1 OrdinaryToPrimitive(O, hint)
+/// Tries toString/valueOf (or valueOf/toString for number hint).
+pub fn ordinary_to_primitive_prim(
+  state: State(host),
+  val: JsValue,
+  ref: value.Ref,
+  hint: ToPrimitiveHint,
+) -> Result(#(value.JsPrimitive, State(host)), #(JsValue, State(host))) {
   let method_names = case hint {
     StringHint -> ["toString", "valueOf"]
     NumberHint | DefaultHint -> ["valueOf", "toString"]
@@ -104,7 +144,7 @@ fn try_to_primitive_methods(
   val: JsValue,
   ref: value.Ref,
   method_names: List(String),
-) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+) -> Result(#(value.JsPrimitive, State(host)), #(JsValue, State(host))) {
   case method_names {
     [] -> thrown_type_error(state, "Cannot convert object to primitive value")
     [name, ..rest] -> {
@@ -119,9 +159,10 @@ fn try_to_primitive_methods(
           use #(result, new_state) <- result.try(
             state.call(state, method, val, []),
           )
-          case result {
-            JsObject(_) -> try_to_primitive_methods(new_state, val, ref, rest)
-            _ -> Ok(#(result, new_state))
+          // §7.1.1.1 step 2.b.iii: a non-primitive result → try the next method.
+          case value.value_to_primitive(result) {
+            Some(prim) -> Ok(#(prim, new_state))
+            None -> try_to_primitive_methods(new_state, val, ref, rest)
           }
         }
         False -> try_to_primitive_methods(state, val, ref, rest)
@@ -131,29 +172,26 @@ fn try_to_primitive_methods(
 }
 
 /// ES2024 §7.1.12 ToString with VM re-entry for ToPrimitive.
-/// For primitives, converts directly. For objects, calls ToPrimitive(string) first.
+/// ToPrimitive is the identity on primitives, so this is one call followed by
+/// a total match on §7.1.12's conversion table — no re-dispatch, no recursion.
 pub fn js_to_string(
   state: State(host),
   val: JsValue,
 ) -> Result(#(String, State(host)), #(JsValue, State(host))) {
-  case val {
-    JsObject(_) -> {
-      use #(prim, new_state) <- result.try(to_primitive(state, val, StringHint))
-      js_to_string(new_state, prim)
-    }
-    JsSymbol(_) ->
+  use #(prim, state) <- result.try(to_primitive_prim(state, val, StringHint))
+  case prim {
+    value.PSymbol(_) ->
       thrown_type_error(state, "Cannot convert a Symbol value to a string")
-    JsString(s) -> Ok(#(s, state))
-    JsNumber(Finite(n)) -> Ok(#(value.js_format_number(n), state))
-    JsNumber(NaN) -> Ok(#("NaN", state))
-    JsNumber(Infinity) -> Ok(#("Infinity", state))
-    JsNumber(NegInfinity) -> Ok(#("-Infinity", state))
-    JsBool(True) -> Ok(#("true", state))
-    JsBool(False) -> Ok(#("false", state))
-    JsNull -> Ok(#("null", state))
-    JsUndefined -> Ok(#("undefined", state))
-    JsUninitialized -> Ok(#("undefined", state))
-    JsBigInt(BigInt(n)) -> Ok(#(int.to_string(n), state))
+    value.PString(s) -> Ok(#(s, state))
+    value.PNumber(Finite(n)) -> Ok(#(value.js_format_number(n), state))
+    value.PNumber(NaN) -> Ok(#("NaN", state))
+    value.PNumber(Infinity) -> Ok(#("Infinity", state))
+    value.PNumber(NegInfinity) -> Ok(#("-Infinity", state))
+    value.PBool(True) -> Ok(#("true", state))
+    value.PBool(False) -> Ok(#("false", state))
+    value.PNull -> Ok(#("null", state))
+    value.PUndefined -> Ok(#("undefined", state))
+    value.PBigInt(BigInt(n)) -> Ok(#(int.to_string(n), state))
   }
 }
 
@@ -171,24 +209,20 @@ pub fn try_to_string(
 }
 
 /// ES2024 §7.1.4 ToNumber with VM re-entry for ToPrimitive.
-/// For primitives, converts directly. For objects, calls ToPrimitive(number) first.
+/// ToPrimitive is the identity on primitives, so this is one call followed by
+/// `value.to_number` on the primitive — which, being a primitive, can never hit
+/// that function's "object / TDZ sentinel" panics.
 pub fn js_to_number(
   state: State(host),
   val: JsValue,
 ) -> Result(#(value.JsNum, State(host)), #(JsValue, State(host))) {
-  case val {
-    JsObject(_) -> {
-      use #(prim, state) <- result.try(to_primitive(state, val, NumberHint))
-      js_to_number(state, prim)
-    }
-    other ->
-      case value.to_number(other) {
-        Ok(n) -> Ok(#(n, state))
-        Error(value.BigIntNotConvertible) ->
-          thrown_type_error(state, "Cannot convert BigInt to number")
-        Error(value.SymbolNotConvertible) ->
-          thrown_type_error(state, "Cannot convert Symbol to number")
-      }
+  use #(prim, state) <- result.try(to_primitive_prim(state, val, NumberHint))
+  case value.to_number(value.primitive_to_value(prim)) {
+    Ok(n) -> Ok(#(n, state))
+    Error(value.BigIntNotConvertible) ->
+      thrown_type_error(state, "Cannot convert BigInt to number")
+    Error(value.SymbolNotConvertible) ->
+      thrown_type_error(state, "Cannot convert Symbol to number")
   }
 }
 
@@ -365,6 +399,19 @@ pub fn unwrap_primitive_wrapper(h: Heap(host), val: JsValue) -> JsValue {
 }
 
 /// ES2024 §13.10.2 InstanceofOperator ( V, target )
+///
+///   1. If target is not an Object, throw a TypeError exception.
+///   2. Let instOfHandler be ? GetMethod(target, @@hasInstance).
+///   3. If instOfHandler is not undefined, then
+///      a. Return ToBoolean(? Call(instOfHandler, target, « V »)).
+///   4. If IsCallable(target) is false, throw a TypeError exception.
+///   5. Return ? OrdinaryHasInstance(target, V).
+///
+/// Step 2 is a real [[Get]]: it walks the prototype chain, fires proxy traps,
+/// and finds a user's `static [Symbol.hasInstance]`. Every function inherits
+/// %Function.prototype[@@hasInstance]% (§20.2.3.6), whose whole body is
+/// OrdinaryHasInstance — recognising it by slot kind lets the common case
+/// skip the call without changing anything observable.
 pub fn js_instanceof(
   state: State(host),
   left: JsValue,
@@ -372,25 +419,91 @@ pub fn js_instanceof(
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case constructor {
     // Step 1: target must be an Object.
-    JsObject(ctor_ref) ->
-      case heap.read(state.heap, ctor_ref) {
-        // Step 4: IsCallable(target) — we check for function slot kinds
-        // (including callable proxies, §10.5.15).
-        Some(ObjectSlot(kind: FunctionObject(..), ..))
-        | Some(ObjectSlot(kind: NativeFunction(..), ..))
-        | Some(ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->
-          // Step 5: OrdinaryHasInstance(target, V).
-          ordinary_has_instance(state, ctor_ref, left)
-        // Step 4: Not callable → TypeError.
-        _ ->
-          thrown_type_error(
-            state,
-            "Right-hand side of instanceof is not callable",
+    JsObject(ctor_ref) -> {
+      // Step 2: instOfHandler = ? GetMethod(target, @@hasInstance).
+      use #(handler, state) <- result.try(object.get_symbol_value(
+        state,
+        ctor_ref,
+        value.symbol_has_instance,
+        constructor,
+      ))
+      let ctor_callable = object.value_is_callable(state.heap, constructor)
+      case classify_has_instance(state.heap, handler) {
+        // Step 3 with the inherited %Function.prototype[@@hasInstance]%: its
+        // whole body is `? OrdinaryHasInstance(this, V)`, so run that directly
+        // rather than allocating a call frame for it. A non-callable target
+        // reaches OrdinaryHasInstance step 1 → false (NOT a TypeError: that is
+        // what makes `x instanceof Object.create(Function.prototype)` answer
+        // false instead of throwing).
+        IntrinsicHandler ->
+          case ctor_callable {
+            True -> ordinary_has_instance(state, ctor_ref, left)
+            False -> Ok(#(False, state))
+          }
+        // Step 2's GetMethod (§7.3.11 step 2): undefined/null → absent.
+        NoHandler ->
+          case ctor_callable {
+            // Step 5: OrdinaryHasInstance(target, V).
+            True -> ordinary_has_instance(state, ctor_ref, left)
+            // Step 4: Not callable → TypeError.
+            False ->
+              thrown_type_error(
+                state,
+                "Right-hand side of instanceof is not callable",
+              )
+          }
+        // Step 3.a: user-supplied handler — Call(instOfHandler, target, «V»),
+        // then ToBoolean the result.
+        UserHandler -> {
+          use #(res, state) <- result.map(
+            state.call(state, handler, constructor, [left]),
           )
+          #(value.is_truthy(res), state)
+        }
+        // GetMethod step 3: present but not callable → TypeError.
+        NotCallable ->
+          thrown_type_error(state, "Symbol.hasInstance handler is not callable")
       }
+    }
     // Step 1: Not an Object → TypeError.
     _ ->
       thrown_type_error(state, "Right-hand side of instanceof is not callable")
+  }
+}
+
+/// What §13.10.2 step 2's `GetMethod(target, @@hasInstance)` came back with.
+type HasInstanceHandler {
+  /// Steps 2/3 saw undefined or null — fall through to steps 4-5.
+  NoHandler
+  /// The inherited %Function.prototype[@@hasInstance]% (§20.2.3.6), whose
+  /// observable behaviour is `? OrdinaryHasInstance(this, V)` and nothing
+  /// else — so `js_instanceof` may inline it instead of calling it.
+  IntrinsicHandler
+  /// A user-supplied callable — must actually be Called (step 3.a).
+  UserHandler
+  /// Present but not callable — GetMethod step 3 throws.
+  NotCallable
+}
+
+fn classify_has_instance(h: Heap(host), val: JsValue) -> HasInstanceHandler {
+  case val {
+    JsUndefined | JsNull | JsUninitialized -> NoHandler
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(
+          kind: NativeFunction(
+            native: value.Dispatch(value.VmNative(value.FunctionHasInstance)),
+            ..,
+          ),
+          ..,
+        )) -> IntrinsicHandler
+        _ ->
+          case object.value_is_callable(h, val) {
+            True -> UserHandler
+            False -> NotCallable
+          }
+      }
+    _ -> NotCallable
   }
 }
 
@@ -482,12 +595,12 @@ pub fn to_bigint(
   state: State(host),
   val: JsValue,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  use #(prim, state) <- result.try(to_primitive(state, val, NumberHint))
+  use #(prim, state) <- result.try(to_primitive_prim(state, val, NumberHint))
   case prim {
-    JsBigInt(BigInt(n)) -> Ok(#(n, state))
-    JsBool(True) -> Ok(#(1, state))
-    JsBool(False) -> Ok(#(0, state))
-    JsString(s) ->
+    value.PBigInt(BigInt(n)) -> Ok(#(n, state))
+    value.PBool(True) -> Ok(#(1, state))
+    value.PBool(False) -> Ok(#(0, state))
+    value.PString(s) ->
       case string_to_bigint(s) {
         Some(n) -> Ok(#(n, state))
         // §7.1.13: StringToBigInt returning undefined throws a SyntaxError
@@ -498,12 +611,13 @@ pub fn to_bigint(
             "Cannot convert " <> s <> " to a BigInt",
           ))
       }
-    JsNumber(_) ->
+    value.PNumber(_) ->
       thrown_type_error(state, "Cannot convert a Number to a BigInt")
-    JsSymbol(_) ->
+    value.PSymbol(_) ->
       thrown_type_error(state, "Cannot convert a Symbol to a BigInt")
-    JsNull -> thrown_type_error(state, "Cannot convert null to a BigInt")
-    _ -> thrown_type_error(state, "Cannot convert undefined to a BigInt")
+    value.PNull -> thrown_type_error(state, "Cannot convert null to a BigInt")
+    value.PUndefined ->
+      thrown_type_error(state, "Cannot convert undefined to a BigInt")
   }
 }
 
