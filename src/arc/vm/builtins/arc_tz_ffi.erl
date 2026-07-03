@@ -43,14 +43,18 @@ lookup(Id) when is_binary(Id) ->
 offset_at(Id, Sec) ->
     case zone(Id) of
         {error, _} -> {error, nil};
-        {ok, {First, Trans, Footer}} ->
-            LastT = last_transition_time(Trans),
-            UseFooter = Footer =/= none andalso
-                (LastT =:= none orelse Sec >= LastT),
-            case UseFooter of
-                true -> {ok, footer_offset(Footer, Sec)};
-                false -> {ok, offset_from_transitions(First, Trans, Sec)}
-            end
+        {ok, Zone} -> {ok, zone_offset(Zone, Sec)}
+    end.
+
+%% The offset a parsed zone reports at Sec: past the last recorded transition
+%% the POSIX footer rule takes over, before it a binary search over the
+%% transition array answers in O(log n).
+zone_offset({tz, First, Trans, Footer, LastT}, Sec) ->
+    UseFooter = Footer =/= none andalso
+        (LastT =:= none orelse Sec >= LastT),
+    case UseFooter of
+        true -> footer_offset(Footer, Sec);
+        false -> offset_from_transitions(First, Trans, Sec)
     end.
 
 %% Smallest transition time T (epoch seconds) with T > Sec where the UTC
@@ -62,8 +66,8 @@ offset_at(Id, Sec) ->
 next_transition(Id, Sec) ->
     case zone(Id) of
         {error, _} -> unloadable;
-        {ok, {_First, Trans, Footer}} ->
-            LastT = last_transition_time(Trans),
+        {ok, {tz, _First, TransArr, Footer, LastT}} ->
+            Trans = tuple_to_list(TransArr),
             case [T || {T, _} <- Trans, T > Sec] of
                 [T | _] -> {found, T};
                 [] ->
@@ -90,8 +94,8 @@ next_transition(Id, Sec) ->
 previous_transition(Id, Sec) ->
     case zone(Id) of
         {error, _} -> unloadable;
-        {ok, {_First, Trans, Footer}} ->
-            LastT = last_transition_time(Trans),
+        {ok, {tz, _First, TransArr, Footer, LastT}} ->
+            Trans = tuple_to_list(TransArr),
             FooterCands =
                 case Footer of
                     {dst, _, _, _, _} when LastT =:= none orelse Sec > LastT ->
@@ -127,9 +131,10 @@ follow_links(Id, Links, N) ->
 %% Host time zone — Date's LocalTZA (ES2024 §21.4.1.25)
 %% ----------------------------------------------------------------------
 
-%% The host's IANA zone id, or `none` when it cannot be resolved — in which
-%% case the runtime's local time simply is UTC. Cached in persistent_term
-%% alongside the zone tables; the host zone cannot change under a live VM.
+%% The host's time zone: an IANA zone id, a `{posix, Footer}` rule from a bare
+%% POSIX TZ string, or `none` when nothing resolves — in which case the
+%% runtime's local time simply is UTC. Cached in persistent_term alongside the
+%% zone tables; the host zone cannot change under a live VM.
 host_zone() ->
     case persistent_term:get({?MODULE, host_zone}, undefined) of
         undefined ->
@@ -140,18 +145,83 @@ host_zone() ->
     end.
 
 %% TZ overrides the host default (as it does for libc, and as node does);
-%% otherwise /etc/localtime, a symlink into the zoneinfo tree on every platform
-%% we support.
+%% otherwise the /etc/localtime chain.
 detect_host_zone() ->
     case os:getenv("TZ") of
-        false -> zone_from_localtime_link();
+        false -> detect_localtime_zone();
         Raw -> zone_from_tz_env(Raw)
+    end.
+
+%% /etc/localtime is a symlink into the zoneinfo tree on most hosts, but a
+%% plain copy of the TZif file on plenty of others (`cp` installs, RHEL,
+%% `docker run -v /etc/localtime:/etc/localtime`). Falling straight to UTC
+%% there would silently report the wrong local time, so try, in order: the
+%% symlink target, /etc/timezone (Debian), and finally the bytes of
+%% /etc/localtime matched against the zoneinfo tree.
+detect_localtime_zone() ->
+    first_resolved([fun zone_from_localtime_link/0,
+                    fun zone_from_timezone_file/0,
+                    fun zone_from_localtime_contents/0]).
+
+first_resolved([]) ->
+    warn_unresolved_host_zone(),
+    none;
+first_resolved([Resolve | Rest]) ->
+    case Resolve() of
+        none -> first_resolved(Rest);
+        Zone -> Zone
+    end.
+
+%% A host with no zoneinfo database at all is legitimately UTC-only; a host
+%% that has one and still cannot say which zone it is in is a misconfiguration
+%% worth surfacing rather than quietly answering UTC.
+warn_unresolved_host_zone() ->
+    case root() of
+        none -> ok;
+        Root ->
+            logger:warning(
+              "arc_tz_ffi: cannot determine host time zone (zoneinfo at ~ts, "
+              "no TZ, no /etc/localtime symlink, no /etc/timezone, no content "
+              "match); local time will be UTC", [Root])
     end.
 
 zone_from_localtime_link() ->
     case file:read_link_all("/etc/localtime") of
         {ok, Target} -> zone_from_path(Target);
-        {error, _} -> none
+        {error, _NotASymlink} -> none
+    end.
+
+%% Debian/Ubuntu record the bare zone id here ("Europe/London\n").
+zone_from_timezone_file() ->
+    case file:read_file("/etc/timezone") of
+        {ok, Bin} -> known_zone(string:trim(binary_to_list(Bin)));
+        {error, _NoSuchFile} -> none
+    end.
+
+%% Last resort: /etc/localtime is a regular TZif file with no name attached to
+%% it. Its bytes identify the zone — find the zoneinfo file that matches.
+zone_from_localtime_contents() ->
+    case file:read_file("/etc/localtime") of
+        {ok, Bin} -> zone_with_contents(Bin);
+        {error, enoent} -> none;
+        {error, Reason} ->
+            logger:warning("arc_tz_ffi: cannot read /etc/localtime: ~p",
+                           [Reason]),
+            none
+    end.
+
+zone_with_contents(Bin) ->
+    case root() of
+        none -> none;
+        Root -> match_zone_contents(Root, Bin, maps:values(names()))
+    end.
+
+match_zone_contents(_Root, _Bin, []) -> none;
+match_zone_contents(Root, Bin, [Id | Rest]) ->
+    Path = filename:join(Root, binary_to_list(Id)),
+    case file:read_file(Path) of
+        {ok, Bin} -> Id;
+        _Miss -> match_zone_contents(Root, Bin, Rest)
     end.
 
 %% ".../zoneinfo/Europe/London" -> <<"Europe/London">>.
@@ -161,20 +231,36 @@ zone_from_path(Path) ->
         _ -> none
     end.
 
-%% TZ set but empty means UTC (POSIX), and so does a TZ we cannot resolve to a
-%% zone we can load — a bare POSIX rule string like "<-03>3" names no zoneinfo
-%% file. Either way TZ still wins: we do not silently fall back to the host
-%% default the user asked us to override.
+%% TZ set but empty means UTC (POSIX). Anything else names either a zone we
+%% can load, a path to one, or a bare POSIX rule ("<-03>3", "PST8PDT,M3.2.0")
+%% that libc would honour and so do we — only an unparseable TZ degrades to
+%% UTC. Either way TZ wins: we never fall back to the host default the user
+%% asked us to override.
 zone_from_tz_env(Raw) ->
     %% glibc allows a leading ':' before either a zone name or a path.
     Tz = string:trim(Raw, leading, ":"),
     case known_zone(Tz) of
-        none -> zone_from_path(Tz);
+        none -> zone_from_path_or_posix(Tz);
         Id -> Id
     end.
 
-%% A host zone must name a zone we can actually load; a POSIX TZ string
-%% ("PST8PDT7,M3.2.0") that is not also a zoneinfo file is not one.
+zone_from_path_or_posix("") -> none;
+zone_from_path_or_posix(Tz) ->
+    case zone_from_path(Tz) of
+        none -> posix_zone(Tz);
+        Id -> Id
+    end.
+
+%% A POSIX TZ rule string is a complete zone definition on its own: keep it as
+%% a synthetic zone whose offsets come from footer_offset/2, exactly as they
+%% would past the last transition of a real zone.
+posix_zone(Tz) ->
+    case parse_posix(Tz) of
+        none -> none;
+        Footer -> {posix, Footer}
+    end.
+
+%% A named host zone must be one we can actually load.
 known_zone("") -> none;
 known_zone(Name) ->
     case lookup(unicode:characters_to_binary(Name)) of
@@ -198,15 +284,17 @@ offset_at_utc_ms(EpochMs) when is_integer(EpochMs) ->
 offset_at_local_ms(LocalMs) when is_integer(LocalMs) ->
     case host_zone() of
         none -> 0;
-        Zone ->
-            LocalSec = floor_div(LocalMs, 1000),
-            %% The instant a wall clock names is within a day of itself (all
-            %% offsets are < 24h), so the offsets a day either side are the
-            %% only two candidates.
-            Before = host_offset(Zone, LocalSec - 86400),
-            After = host_offset(Zone, LocalSec + 86400),
-            to_minutes(local_offset(Zone, LocalSec, Before, After))
+        Zone -> to_minutes(memo(local, Zone, floor_div(LocalMs, 1000),
+                                fun resolve_local_offset/2))
     end.
+
+resolve_local_offset(Zone, LocalSec) ->
+    %% The instant a wall clock names is within a day of itself (all offsets
+    %% are < 24h), so the offsets a day either side are the only two
+    %% candidates.
+    Before = host_offset(Zone, LocalSec - 86400),
+    After = host_offset(Zone, LocalSec + 86400),
+    local_offset(Zone, LocalSec, Before, After).
 
 %% An offset is a possible reading of the wall clock when the instant it
 %% produces really has that offset. Two possible (ambiguous) or none possible
@@ -227,9 +315,45 @@ is_possible(Zone, LocalSec, Off) ->
     host_offset(Zone, LocalSec - Off) =:= Off.
 
 host_offset(Zone, Sec) ->
+    memo(utc, Zone, Sec, fun resolve_host_offset/2).
+
+resolve_host_offset({posix, Footer}, Sec) -> footer_offset(Footer, Sec);
+resolve_host_offset(Zone, Sec) ->
     case offset_at(Zone, Sec) of
         {ok, Off} -> Off;
         {error, nil} -> none
+    end.
+
+%% Per-instant offset memo, in the process dictionary. Date getters ask for the
+%% same instant over and over — `d.getFullYear(); d.getMonth(); d.getDate()` is
+%% three lookups of one epoch second, and every wall-clock resolution probes
+%% four instants — so an offset search per call is exactly what V8's DateCache
+%% and its SunSpider-era dst-offset-caching tests exist to avoid. Bounded, and
+%% dropped wholesale when full: the working set of a date-heavy program is
+%% small and clustered, so a cleared cache refills immediately.
+-define(MEMO_LIMIT, 512).
+
+memo(Kind, Zone, Sec, Resolve) ->
+    Key = {Kind, Zone, Sec},
+    case memo_cache() of
+        #{Key := Off} -> Off;
+        _ ->
+            Off = Resolve(Zone, Sec),
+            %% Resolve may have memoized on its own (a wall-clock lookup probes
+            %% instants), so re-read rather than write back a stale snapshot.
+            Cache = memo_cache(),
+            Kept = case map_size(Cache) >= ?MEMO_LIMIT of
+                true -> #{};
+                false -> Cache
+            end,
+            put({?MODULE, memo}, Kept#{Key => Off}),
+            Off
+    end.
+
+memo_cache() ->
+    case get({?MODULE, memo}) of
+        undefined -> #{};
+        Cache -> Cache
     end.
 
 to_minutes(none) -> 0;
@@ -390,10 +514,13 @@ add_link_line(_, Acc) -> Acc.
 %% TZif file parsing
 %% ----------------------------------------------------------------------
 
-%% zone(Id) -> {ok, {FirstOffsetSec, [{TransitionSec, OffsetSec}], Footer}}
+%% zone(Id) -> {ok, {tz, FirstOffsetSec, TransArray, Footer, LastTransSec}}
 %%           | {error, Reason}
-%% Transitions are ascending and deduplicated so each entry changes the
-%% offset. Footer is none | {fixed, OffSec} | {dst, StdOff, DstOff, R1, R2}.
+%% TransArray is a tuple of ascending, deduplicated {TransitionSec, OffsetSec}
+%% (each entry changes the offset) so a query can binary-search it, and
+%% LastTransSec is its last transition time — precomputed here rather than
+%% walked on every query. Footer is none | {fixed, OffSec} |
+%% {dst, StdOff, DstOff, R1, R2}.
 zone(Id) ->
     Key = {?MODULE, zone, Id},
     case persistent_term:get(Key, undefined) of
@@ -438,7 +565,7 @@ parse_tzif(<<"TZif", Ver:8, _:15/binary, IsUt:32, IsStd:32, Leap:32,
             %% Version 1: 32-bit data, no footer.
             {First, Trans, _After} =
                 parse_block(Rest, Timecnt, Typecnt, Charcnt, 4),
-            {First, dedupe(First, Trans), none};
+            make_zone(First, dedupe(First, Trans), none);
         _ ->
             %% Version 2/3: skip the v1 block, parse the 64-bit block + footer.
             V1Size = Timecnt * 5 + Typecnt * 6 + Charcnt + Leap * 8
@@ -450,8 +577,15 @@ parse_tzif(<<"TZif", Ver:8, _:15/binary, IsUt:32, IsStd:32, Leap:32,
                 parse_block(Rest2, Timecnt2, Typecnt2, Charcnt2, 8),
             SkipTail = Leap2 * 12 + IsStd2 + IsUt2,
             <<_:SkipTail/binary, FooterBin/binary>> = After,
-            {First, dedupe(First, Trans), parse_footer(FooterBin)}
+            make_zone(First, dedupe(First, Trans), parse_footer(FooterBin))
     end.
+
+make_zone(First, Trans, Footer) ->
+    LastT = case Trans of
+        [] -> none;
+        _ -> element(1, lists:last(Trans))
+    end,
+    {tz, First, list_to_tuple(Trans), Footer, LastT}.
 
 parse_block(Bin, Timecnt, Typecnt, Charcnt, TSize) ->
     TransBytes = Timecnt * TSize,
@@ -488,17 +622,19 @@ dedupe(First, Trans) ->
                  end, {First, []}, Trans),
     lists:reverse(Out).
 
-last_transition_time([]) -> none;
-last_transition_time(Trans) -> element(1, lists:last(Trans)).
-
+%% Offset in effect at Sec: the offset of the last transition at or before it,
+%% First when there is none. Trans is a sorted tuple, so binary-search it —
+%% zones carry a couple hundred transitions and this runs on every Date getter.
 offset_from_transitions(First, Trans, Sec) ->
-    lists:foldl(
-      fun({T, Off}, Acc) ->
-          case T =< Sec of
-              true -> Off;
-              false -> Acc
-          end
-      end, First, Trans).
+    search_transitions(First, Trans, Sec, 1, tuple_size(Trans)).
+
+search_transitions(Acc, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Acc;
+search_transitions(Acc, Trans, Sec, Lo, Hi) ->
+    Mid = (Lo + Hi) div 2,
+    case element(Mid, Trans) of
+        {T, Off} when T =< Sec -> search_transitions(Off, Trans, Sec, Mid + 1, Hi);
+        _ -> search_transitions(Acc, Trans, Sec, Lo, Mid - 1)
+    end.
 
 %% ----------------------------------------------------------------------
 %% POSIX TZ footer ("PST8PDT,M3.2.0,M11.1.0")
