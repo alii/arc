@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/dom_exception
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
 import arc/vm/internal/elements
@@ -100,44 +101,41 @@ pub fn init(
       }
     })
 
-  // Error subclasses — each inherits from Error.prototype
-  let subclass = fn(h, name, arity) {
+  // Error subclasses — the prototype inherits from %Error.prototype% and,
+  // per §20.5.6.2, the CONSTRUCTOR's [[Prototype]] is %Error% (not
+  // %Function.prototype%): `Object.getPrototypeOf(TypeError) === Error`.
+  // `native` names the constructor's own dispatch variant — AggregateError and
+  // SuppressedError take different arguments and must not reuse the plain
+  // NativeError one.
+  let subclass = fn(h, name, arity, native) {
     common.init_type(
       h,
       error.prototype,
-      function_proto,
+      error.constructor,
       [#("name", value.builtin_property(JsString(name)))],
-      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
+      fn(proto) { Dispatch(ErrorNative(native(proto))) },
       name,
       arity,
       [],
     )
   }
 
-  let #(h, type_error) = subclass(h, "TypeError", 1)
-  let #(h, reference_error) = subclass(h, "ReferenceError", 1)
-  let #(h, range_error) = subclass(h, "RangeError", 1)
-  let #(h, syntax_error) = subclass(h, "SyntaxError", 1)
-  let #(h, eval_error) = subclass(h, "EvalError", 1)
-  let #(h, uri_error) = subclass(h, "URIError", 1)
-  let #(h, aggregate_error) = subclass(h, "AggregateError", 2)
+  let #(h, type_error) = subclass(h, "TypeError", 1, ErrorConstructor)
+  let #(h, reference_error) = subclass(h, "ReferenceError", 1, ErrorConstructor)
+  let #(h, range_error) = subclass(h, "RangeError", 1, ErrorConstructor)
+  let #(h, syntax_error) = subclass(h, "SyntaxError", 1, ErrorConstructor)
+  let #(h, eval_error) = subclass(h, "EvalError", 1, ErrorConstructor)
+  let #(h, uri_error) = subclass(h, "URIError", 1, ErrorConstructor)
 
-  // SuppressedError (Explicit Resource Management proposal) — inherits from
-  // Error.prototype like the other NativeErrors, but its constructor takes
-  // (error, suppressed, message), so it gets a dedicated native fn.
+  // AggregateError ( errors, message [ , options ] ) — §20.5.7.1.1. arg0 is
+  // an iterable of errors, NOT the message, hence its own native fn.
+  let #(h, aggregate_error) =
+    subclass(h, "AggregateError", 2, value.AggregateErrorConstructor)
+
+  // SuppressedError ( error, suppressed, message ) — Explicit Resource
+  // Management proposal. Also a distinct signature, also its own native fn.
   let #(h, suppressed_error) =
-    common.init_type(
-      h,
-      error.prototype,
-      function_proto,
-      [#("name", value.builtin_property(JsString("SuppressedError")))],
-      fn(proto) {
-        Dispatch(ErrorNative(value.SuppressedErrorConstructor(proto:)))
-      },
-      "SuppressedError",
-      3,
-      [],
-    )
+    subclass(h, "SuppressedError", 3, value.SuppressedErrorConstructor)
 
   #(
     h,
@@ -164,6 +162,8 @@ pub fn dispatch(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case native {
     ErrorConstructor(proto:) -> call_native(proto, args, JsUndefined, state)
+    value.AggregateErrorConstructor(proto:) ->
+      aggregate_error_native(proto, args, state)
     value.SuppressedErrorConstructor(proto:) ->
       suppressed_error_native(proto, args, state)
     value.ErrorPrototypeToString -> error_to_string(this, state)
@@ -237,14 +237,110 @@ fn call_native(
     _ -> JsUndefined
   }
   case args {
-    [JsUndefined, ..] | [] -> alloc_error(state, proto, None, options)
-    [JsString(msg), ..] -> alloc_error(state, proto, Some(msg), options)
+    [JsUndefined, ..] | [] ->
+      alloc_error(state, proto, None, options) |> as_object
+    [JsString(msg), ..] ->
+      alloc_error(state, proto, Some(msg), options) |> as_object
     [other, ..] -> {
       // Step 3a: ToString(message) — runs BEFORE the options "cause" get.
       use msg, state <- coerce.try_to_string(state, other)
+      alloc_error(state, proto, Some(msg), options) |> as_object
+    }
+  }
+}
+
+/// AggregateError ( errors, message [ , options ] ) — §20.5.7.1.1:
+///
+///   1-2. (skipped/simplified as elsewhere in this module) allocate O with the
+///        intrinsic %AggregateError.prototype%.
+///   3.   If message is not undefined, then
+///        a. Let msg be ? ToString(message).
+///        b. Perform CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
+///   4.   Perform ? InstallErrorCause(O, options).
+///   5.   Let errorsList be ? IteratorToList(? GetIterator(errors, sync)).
+///   6.   Perform ! DefinePropertyOrThrow(O, "errors", PropertyDescriptor {
+///        [[Configurable]]: true, [[Enumerable]]: false, [[Writable]]: true,
+///        [[Value]]: CreateArrayFromList(errorsList) }).
+///   7.   Return O.
+///
+/// Note the argument order: `errors` is arg0 and `message` is arg1, so this
+/// cannot share the plain NativeError constructor. Steps 3-5 are observable in
+/// order (ToString, then the "cause" get, then the iteration).
+fn aggregate_error_native(
+  proto: Ref,
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let #(errors, message, options) = case args {
+    [] -> #(JsUndefined, JsUndefined, JsUndefined)
+    [e] -> #(e, JsUndefined, JsUndefined)
+    [e, m] -> #(e, m, JsUndefined)
+    [e, m, o, ..] -> #(e, m, o)
+  }
+  // Steps 3-4: message + cause, exactly as for a plain Error.
+  let #(state, created) = case message {
+    JsUndefined -> alloc_error(state, proto, None, options)
+    _ -> {
+      use msg, state <- coerce.try_to_string(state, message)
       alloc_error(state, proto, Some(msg), options)
     }
   }
+  case created {
+    Error(thrown) -> #(state, Error(thrown))
+    // Steps 5-6: drain the iterable, install the "errors" array.
+    Ok(ref) -> {
+      use collected, state <- state.try_op(iterate_to_list(state, errors))
+      let #(heap, arr) =
+        common.alloc_array(
+          state.heap,
+          collected,
+          state.builtins.array.prototype,
+        )
+      let heap =
+        common.add_named_property(
+          heap,
+          ref,
+          "errors",
+          value.builtin_property(JsObject(arr)),
+        )
+      #(State(..state, heap:), Ok(JsObject(ref)))
+    }
+  }
+}
+
+/// §7.4.14 IteratorToList ( ? GetIterator(iterable, sync) ) — drain every value
+/// of `iterable` into a Gleam list. A non-iterable (including `undefined`, i.e.
+/// `new AggregateError()`) throws a TypeError from GetIterator, per spec.
+fn iterate_to_list(
+  state: State(host),
+  iterable: JsValue,
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+  use #(rec, state) <- result.try(iter_protocol.get_iterator_sync(
+    state,
+    iterable,
+  ))
+  drain_iterator(state, rec, [])
+}
+
+fn drain_iterator(
+  state: State(host),
+  rec: value.IteratorRecord,
+  acc: List(JsValue),
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+  case iter_protocol.iterator_step_value(state, rec) {
+    #(state, Error(thrown)) -> Error(#(thrown, state))
+    #(state, Ok(None)) -> Ok(#(list.reverse(acc), state))
+    #(state, Ok(Some(v))) -> drain_iterator(state, rec, [v, ..acc])
+  }
+}
+
+/// The error constructors all build a `Ref` internally; the dispatch surface
+/// speaks `JsValue`.
+fn as_object(
+  produced: #(State(host), Result(Ref, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let #(state, ref) = produced
+  #(state, result.map(ref, JsObject))
 }
 
 /// SuppressedError ( error, suppressed, message ) — Explicit Resource
@@ -330,12 +426,14 @@ pub fn make_suppressed_error(
 /// Allocate an error object with the given message (None = no `message`
 /// property), attach a `stack` trace captured from the current call stack,
 /// and install a `cause` from the options bag (§20.5.8.1 InstallErrorCause).
+/// Yields the new object's `Ref` so callers that must keep decorating it
+/// (AggregateError's "errors") don't have to unwrap a JsValue.
 fn alloc_error(
   state: State(host),
   proto: Ref,
   message: Option(String),
   options: JsValue,
-) -> #(State(host), Result(JsValue, JsValue)) {
+) -> #(State(host), Result(Ref, JsValue)) {
   let props = case message {
     Some(msg) -> [#("message", value.builtin_property(JsString(msg)))]
     None -> []
@@ -363,7 +461,7 @@ fn install_error_cause(
   state: State(host),
   ref: Ref,
   options: JsValue,
-) -> #(State(host), Result(JsValue, JsValue)) {
+) -> #(State(host), Result(Ref, JsValue)) {
   case options {
     JsObject(opts_ref) -> {
       use has, state <- state.try_op(object.has_property_stateful(
@@ -372,7 +470,7 @@ fn install_error_cause(
         object.PkString(Named("cause")),
       ))
       case has {
-        False -> #(state, Ok(JsObject(ref)))
+        False -> #(state, Ok(ref))
         True -> {
           // Step 1a: Get(options, "cause") — may invoke a getter / throw.
           use cause, state <- state.try_op(object.get_value(
@@ -397,11 +495,11 @@ fn install_error_cause(
                 other -> other
               }
             })
-          #(State(..state, heap:), Ok(JsObject(ref)))
+          #(State(..state, heap:), Ok(ref))
         }
       }
     }
-    _ -> #(state, Ok(JsObject(ref)))
+    _ -> #(state, Ok(ref))
   }
 }
 

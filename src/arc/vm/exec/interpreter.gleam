@@ -345,6 +345,13 @@ pub fn new_state(
   symbol_registry: dict.Dict(String, value.SymbolId),
   hooks: state.HostHooks,
 ) -> State(host) {
+  // Realm boot: bring up the shared Atomics waiterlist registry (the ETS
+  // table + its owner process) once, explicitly, at the same seam that reads
+  // this agent's [[CanBlock]]. Idempotent, so every booting agent process may
+  // call it. Nothing on the Atomics hot path creates the table lazily — an
+  // insert/take/cancel is then a plain ETS access that cannot fail with "the
+  // registry does not exist yet".
+  let Nil = start_waiter_registry()
   State(
     stack: [],
     locals:,
@@ -404,6 +411,13 @@ pub fn new_state(
 /// flagged CanBlockIsFalse.
 @external(erlang, "arc_agent_ffi", "can_block")
 fn host_can_block() -> Bool
+
+/// Create the node-wide Atomics WaiterList registry (§25.4.3.6 GetWaiterList)
+/// if it does not exist yet: a public named ETS table owned by a dedicated
+/// long-lived process, joined synchronously so callers never race its
+/// creation. Idempotent. See arc_waiter_ffi.erl.
+@external(erlang, "arc_waiter_ffi", "start_registry")
+fn start_waiter_registry() -> Nil
 
 pub fn init_state(
   func: FuncTemplate,
@@ -1168,14 +1182,14 @@ fn fast_loop(
 
     // -- Dense-array computed access -------------------------------------
     // `a[i]` reads on Array/Arguments with an integral number key: pure
-    // heap probe, no State materialization. Mirrors to_string_key's
+    // heap probe, no State materialization. Mirrors to_prop_key's
     // number arm + get_value's ArrayObject/ArgumentsObject Index fast path.
     // A dict override at the index (defineProperty accessor/attributes) or
     // a hole (prototype walk) bails to the generic slow path.
     GetElem ->
       case stack {
         [value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] -> {
-          // +. 0.0 normalizes -0.0 → +0.0, same as to_string_key.
+          // +. 0.0 normalizes -0.0 → +0.0, same as to_prop_key.
           let n = f +. 0.0
           let idx = float.truncate(n)
           case int.to_float(idx) == n && idx >= 0 && idx <= max_array_index {
@@ -1601,7 +1615,9 @@ fn unwind_to_catch(
   thrown_value: JsValue,
 ) -> Option(State(host)) {
   case state.try_stack {
-    [TryFrame(catch_target:, stack_depth:), ..rest_try] -> {
+    // `kind` only matters to the return-completion unwinder; a *throw* lands
+    // at catch_target no matter what the frame guards.
+    [TryFrame(catch_target:, stack_depth:, kind: _), ..rest_try] -> {
       let restored_stack = truncate_stack(state.stack, stack_depth)
       Some(
         State(
@@ -1705,43 +1721,26 @@ fn conditional_jump(
 /// ToPropertyKey, then OrdinaryGet on base with receiver=this. When
 /// `keep_base` is True the coerced key + base + this stay under the value
 /// for the trailing PutSuperValue; the coerced key is written back as a
-/// primitive JsValue so PutSuperValue's own to_string_key fast-paths
-/// with no observable side effects.
+/// primitive JsValue (`prop_key_value`) so PutSuperValue's own to_prop_key
+/// re-conversion has no observable side effects.
 fn get_super_value(
   state: State(host),
   keep_base: Bool,
   op: String,
 ) -> Result(State(host), StepExit(host)) {
   case state.stack {
-    // Symbol keys are valid property keys (§7.1.19 ToPropertyKey step 3) —
-    // e.g. super[Symbol.iterator]. Must come before the generic arm whose
-    // to_string_key would throw on symbols, and the symbol stays on the
-    // stack as-is for the trailing PutSuperValue (no string round-trip).
-    [value.JsSymbol(sym) as key, JsObject(base_ref), this_val, ..rest] -> {
-      use #(val, state) <- result.map(
-        state.rethrow(object.get_symbol_value(state, base_ref, sym, this_val)),
-      )
-      let stack = case keep_base {
-        True -> [val, key, JsObject(base_ref), this_val, ..rest]
-        False -> [val, ..rest]
-      }
-      State(..state, stack:, pc: state.pc + 1)
-    }
+    // §7.1.19 ToPropertyKey — a Symbol key (super[Symbol.iterator]) or an
+    // object whose @@toPrimitive yields one routes to the symbol-keyed
+    // [[Get]]; everything else canonicalizes to a string/index key.
     [key, JsObject(base_ref), this_val, ..rest] -> {
       use #(pk, state) <- result.try(
-        state.rethrow(property.to_string_key(state, key)),
+        state.rethrow(property.to_prop_key(state, key)),
       )
       use #(val, state) <- result.map(
-        state.rethrow(object.get_value(state, base_ref, pk, this_val)),
+        state.rethrow(object.get_prop_value(state, base_ref, pk, this_val)),
       )
       let stack = case keep_base {
-        True -> [
-          val,
-          JsString(key.key_to_string(pk)),
-          JsObject(base_ref),
-          this_val,
-          ..rest
-        ]
+        True -> [val, prop_key_value(pk), JsObject(base_ref), this_val, ..rest]
         False -> [val, ..rest]
       }
       State(..state, stack:, pc: state.pc + 1)
@@ -3111,8 +3110,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       }
 
     // -- Exception handling --
-    PushTry(catch_target) -> {
-      let frame = TryFrame(catch_target:, stack_depth: list.length(state.stack))
+    PushTry(catch_target:, kind:) -> {
+      let frame =
+        TryFrame(catch_target:, stack_depth: list.length(state.stack), kind:)
       Ok(
         State(..state, try_stack: [frame, ..state.try_stack], pc: state.pc + 1),
       )
@@ -3677,37 +3677,46 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // Stack: [fn, key, obj, ...] → [obj, ...]
       // Non-enumerable data property (writable, configurable).
       case state.stack {
-        [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
-          let heap =
-            set_computed_fn_name(
-              state.heap,
-              func,
-              "",
-              symbol_fn_name(state, sym),
-            )
-          let heap = make_method(heap, func, ref)
-          let heap =
-            object.define_symbol_property(
-              heap,
-              ref,
-              sym,
-              value.builtin_property(func),
-            )
-          Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
-        }
         [func, key, JsObject(ref) as obj, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_string_key(state, key)),
+            state.rethrow(property.to_prop_key(state, key)),
           )
-          // DefinePropertyOrThrow (§14.3.9 step 11): redefining an existing
-          // non-configurable own property — e.g. static ['prototype']() on
-          // the constructor — throws TypeError.
-          use Nil <- result.map(check_define_nonconfigurable(state, ref, pk))
-          let heap =
-            set_computed_fn_name(state.heap, func, "", key.key_to_string(pk))
-          let heap = make_method(heap, func, ref)
-          let heap = object.define_method_property(heap, ref, pk, func)
-          State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+          case pk {
+            object.PkSymbol(sym) -> {
+              let heap =
+                set_computed_fn_name(
+                  state.heap,
+                  func,
+                  "",
+                  symbol_fn_name(state, sym),
+                )
+              let heap = make_method(heap, func, ref)
+              let heap =
+                object.define_symbol_property(
+                  heap,
+                  ref,
+                  sym,
+                  value.builtin_property(func),
+                )
+              Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+            }
+            object.PkString(pk) -> {
+              // DefinePropertyOrThrow (§14.3.9 step 11): redefining an existing
+              // non-configurable own property — e.g. static ['prototype']() on
+              // the constructor — throws TypeError.
+              use Nil <- result.map(check_define_nonconfigurable(state, ref, pk))
+              let heap =
+                set_computed_fn_name(
+                  state.heap,
+                  func,
+                  "",
+                  key.key_to_string(pk),
+                )
+              let heap = make_method(heap, func, ref)
+              let heap = object.define_method_property(heap, ref, pk, func)
+              State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+            }
+          }
         }
         [_, _, _, ..] -> Ok(State(..state, pc: state.pc + 1))
         _ -> underflow(state, "DefineMethodComputed")
@@ -3734,45 +3743,49 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // Computed getter/setter: { get [expr]() {} }
       // Stack: [fn, key, obj, ...] → [obj, ...]
       case state.stack {
-        [func, value.JsSymbol(sym), JsObject(ref) as obj, ..rest] -> {
-          let heap =
-            set_computed_fn_name(
-              state.heap,
-              func,
-              accessor_name_prefix(kind),
-              symbol_fn_name(state, sym),
-            )
-          let heap = make_method(heap, func, ref)
-          let heap =
-            object.define_symbol_accessor(
-              heap,
-              ref,
-              sym,
-              func,
-              kind,
-              enumerable:,
-            )
-          Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
-        }
         [func, key, JsObject(ref) as obj, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_string_key(state, key)),
+            state.rethrow(property.to_prop_key(state, key)),
           )
-          // DefinePropertyOrThrow (§14.3.9): an accessor cannot replace an
-          // existing non-configurable own property (static get/set
-          // ['prototype'] on the constructor) — TypeError.
-          use Nil <- result.map(check_define_nonconfigurable(state, ref, pk))
-          let heap =
-            set_computed_fn_name(
-              state.heap,
-              func,
-              accessor_name_prefix(kind),
-              key.key_to_string(pk),
-            )
-          let heap = make_method(heap, func, ref)
-          let heap =
-            object.define_accessor(heap, ref, pk, func, kind, enumerable:)
-          State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+          case pk {
+            object.PkSymbol(sym) -> {
+              let heap =
+                set_computed_fn_name(
+                  state.heap,
+                  func,
+                  accessor_name_prefix(kind),
+                  symbol_fn_name(state, sym),
+                )
+              let heap = make_method(heap, func, ref)
+              let heap =
+                object.define_symbol_accessor(
+                  heap,
+                  ref,
+                  sym,
+                  func,
+                  kind,
+                  enumerable:,
+                )
+              Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+            }
+            object.PkString(pk) -> {
+              // DefinePropertyOrThrow (§14.3.9): an accessor cannot replace an
+              // existing non-configurable own property (static get/set
+              // ['prototype'] on the constructor) — TypeError.
+              use Nil <- result.map(check_define_nonconfigurable(state, ref, pk))
+              let heap =
+                set_computed_fn_name(
+                  state.heap,
+                  func,
+                  accessor_name_prefix(kind),
+                  key.key_to_string(pk),
+                )
+              let heap = make_method(heap, func, ref)
+              let heap =
+                object.define_accessor(heap, ref, pk, func, kind, enumerable:)
+              State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+            }
+          }
         }
         [_, _, _, ..] -> Ok(State(..state, pc: state.pc + 1))
         _ -> underflow(state, "DefineAccessorComputed")
@@ -3819,22 +3832,15 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
             }
             False -> {
-              // CreateDataPropertyOrThrow (§7.3.7): defining over an existing
-              // non-configurable own property → TypeError. Reachable via a
-              // static class field with computed name "prototype" (class
-              // field keys are already ToPropertyKey'd primitives here);
-              // fresh object literals have no non-configurable properties.
-              use Nil <- result.try(case key {
-                JsString("prototype") ->
-                  check_define_nonconfigurable(state, ref, Named("prototype"))
-                _ -> Ok(Nil)
-              })
+              use #(pk, state) <- result.try(
+                state.rethrow(property.to_prop_key(state, key)),
+              )
               // §7.3.7 CreateDataProperty defines an OWN property — it must
               // NOT walk the prototype chain or invoke inherited setters
               // (e.g. `{0: v}` with an accessor "0" on Object.prototype),
               // so use the raw own-define, not [[Set]].
-              case key {
-                value.JsSymbol(sym) -> {
+              case pk {
+                object.PkSymbol(sym) -> {
                   let heap =
                     object.define_symbol_property(
                       state.heap,
@@ -3851,10 +3857,17 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                     ),
                   )
                 }
-                _ -> {
-                  use #(pk, state) <- result.map(
-                    state.rethrow(property.to_string_key(state, key)),
-                  )
+                object.PkString(pk) -> {
+                  // CreateDataPropertyOrThrow (§7.3.7): defining over an
+                  // existing non-configurable own property → TypeError.
+                  // Reachable via a static class field with computed name
+                  // "prototype"; fresh object literals have no
+                  // non-configurable properties.
+                  use Nil <- result.map(case pk {
+                    Named("prototype") ->
+                      check_define_nonconfigurable(state, ref, pk)
+                    _ -> Ok(Nil)
+                  })
                   let #(heap, _ok) =
                     object.set_property(state.heap, ref, pk, val)
                   State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
@@ -4014,56 +4027,27 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       case state.stack {
         [key, obj, ..rest] ->
           case obj {
-            JsObject(ref) ->
-              case key {
-                value.JsSymbol(sym) -> {
-                  use #(state, success) <- result.try(
-                    state.rethrow(object.delete_property_stateful(
-                      state,
-                      ref,
-                      object.PkSymbol(sym),
-                    )),
+            JsObject(ref) -> {
+              use #(pk, state) <- result.try(
+                state.rethrow(property.to_prop_key(state, key)),
+              )
+              use #(state, success) <- result.try(
+                state.rethrow(object.delete_property_stateful(state, ref, pk)),
+              )
+              // §13.5.1.2 step 5.b.i: strict delete failure throws.
+              case success, state.func.is_strict {
+                False, True ->
+                  state.throw_type_error(state, "Cannot delete property")
+                _, _ ->
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(success), ..rest],
+                      pc: state.pc + 1,
+                    ),
                   )
-                  // §13.5.1.2 step 5.b.i: strict delete failure throws.
-                  case success, state.func.is_strict {
-                    False, True ->
-                      state.throw_type_error(state, "Cannot delete property")
-                    _, _ ->
-                      Ok(
-                        State(
-                          ..state,
-                          stack: [JsBool(success), ..rest],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                  }
-                }
-                _ -> {
-                  use #(pk, state) <- result.try(
-                    state.rethrow(property.to_string_key(state, key)),
-                  )
-                  use #(state, success) <- result.try(
-                    state.rethrow(object.delete_property_stateful(
-                      state,
-                      ref,
-                      object.PkString(pk),
-                    )),
-                  )
-                  // §13.5.1.2 step 5.b.i: strict delete failure throws.
-                  case success, state.func.is_strict {
-                    False, True ->
-                      state.throw_type_error(state, "Cannot delete property")
-                    _, _ ->
-                      Ok(
-                        State(
-                          ..state,
-                          stack: [JsBool(success), ..rest],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                  }
-                }
               }
+            }
             _ ->
               Ok(
                 State(..state, stack: [JsBool(True), ..rest], pc: state.pc + 1),
@@ -4266,41 +4250,29 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             state,
             "Cannot read properties of " <> value.nullish_label(v),
           )
-        [value.JsSymbol(sym) as key, JsObject(ref) as obj, ..rest] -> {
-          use #(val, state) <- result.map(
-            state.rethrow(object.get_symbol_value(state, ref, sym, obj)),
-          )
-          State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1)
-        }
         [key, JsObject(ref) as obj, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_string_key(state, key)),
+            state.rethrow(property.to_prop_key(state, key)),
           )
           use #(val, state) <- result.map(
-            state.rethrow(object.get_value(state, ref, pk, obj)),
+            state.rethrow(object.get_prop_value(state, ref, pk, obj)),
           )
           State(
             ..state,
-            stack: [val, property_key_value(pk), obj, ..rest],
+            stack: [val, prop_key_value(pk), obj, ..rest],
             pc: state.pc + 1,
           )
         }
-        [value.JsSymbol(sym) as key, receiver, ..rest] -> {
-          use #(val, state) <- result.map(
-            state.rethrow(object.get_symbol_value_of(state, receiver, sym)),
-          )
-          State(..state, stack: [val, key, receiver, ..rest], pc: state.pc + 1)
-        }
         [key, receiver, ..rest] -> {
           use #(pk, state) <- result.try(
-            state.rethrow(property.to_string_key(state, key)),
+            state.rethrow(property.to_prop_key(state, key)),
           )
           use #(val, state) <- result.map(
-            state.rethrow(object.get_value_of(state, receiver, pk)),
+            state.rethrow(get_prop_value_of(state, receiver, pk)),
           )
           State(
             ..state,
-            stack: [val, property_key_value(pk), receiver, ..rest],
+            stack: [val, prop_key_value(pk), receiver, ..rest],
             pc: state.pc + 1,
           )
         }
@@ -4645,32 +4617,20 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     PutSuperValue ->
       // [val, key, base, this, ..] → [val, ..]. OrdinarySet, receiver=this.
       case state.stack {
-        // Symbol-keyed super assignment: super[Symbol.x] = v.
-        [val, value.JsSymbol(sym), JsObject(base_ref), this_val, ..rest] -> {
+        // Symbol-keyed super assignment (super[Symbol.x] = v) rides the same
+        // to_prop_key → set_prop_value path as string keys.
+        [val, key, JsObject(base_ref), this_val, ..rest] -> {
+          use #(pk, state) <- result.try(
+            state.rethrow(property.to_prop_key(state, key)),
+          )
           use #(state, ok) <- result.try(
-            state.rethrow(object.set_symbol_value(
+            state.rethrow(object.set_prop_value(
               state,
               base_ref,
-              sym,
+              pk,
               val,
               this_val,
             )),
-          )
-          case ok, state.func.is_strict {
-            False, True ->
-              state.throw_type_error(
-                state,
-                "Cannot assign to read-only super property",
-              )
-            _, _ -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-          }
-        }
-        [val, key, JsObject(base_ref), this_val, ..rest] -> {
-          use #(pk, state) <- result.try(
-            state.rethrow(property.to_string_key(state, key)),
-          )
-          use #(state, ok) <- result.try(
-            state.rethrow(object.set_value(state, base_ref, pk, val, this_val)),
           )
           // §6.2.5.6 PutValue step 5.c — gate on caller strictness so sloppy
           // object-literal methods stay non-throwing (QuickJS JS_PROP_THROW_STRICT).
@@ -5295,7 +5255,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       }
     }
 
-    AsyncYieldStarNext ->
+    // `after_pc` is only read by the async-generator driver when it resumes a
+    // delegation from the outside; stepping the op itself just falls through.
+    AsyncYieldStarNext(after_pc: _) ->
       // [arg, iter, ..rest]. Call iter.next(arg), replace arg with result →
       // [result, iter, ..rest], pc+1. The following Await op suspends on it.
       // The iter slot is an internal Iterator Record (cached [[NextMethod]],
@@ -5363,8 +5325,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // function is strict OR its parameter list is non-simple (defaults,
       // destructuring, rest). §10.4.4.7 CreateUnmappedArgumentsObject step 8:
       // its "callee" is the %ThrowTypeError% accessor (non-enumerable,
-      // non-configurable) — reuse the restricted accessor's getter installed
-      // on Function.prototype ("arguments"), same function identity
+      // non-configurable) — the SAME function object as the restricted
+      // `caller`/`arguments` accessors on Function.prototype, taken straight
+      // from the realm's intrinsics
       // (test262: built-ins/ThrowTypeError/unique-per-realm-non-simple.js).
       // Sloppy functions with simple parameter lists get the MAPPED form,
       // whose "callee" is a writable data property holding the function.
@@ -5375,18 +5338,15 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         |> value.writable
         |> value.configurable
       let callee_prop = case state.func.is_strict || !simple_params {
-        True ->
-          case
-            object.get_own_property(
-              state.heap,
-              state.builtins.function.prototype,
-              Named("arguments"),
-            )
-          {
-            Some(value.AccessorProperty(get:, set:, ..)) ->
-              value.accessor(get:, set:, enumerable: False, configurable: False)
-            _ -> value.data(callee) |> value.writable |> value.configurable
-          }
+        True -> {
+          let thrower = Some(JsObject(state.builtins.throw_type_error))
+          value.accessor(
+            get: thrower,
+            set: thrower,
+            enumerable: False,
+            configurable: False,
+          )
+        }
         False -> value.data(callee) |> value.writable |> value.configurable
       }
       let props =
@@ -5577,31 +5537,42 @@ fn with_has_binding(
   }
 }
 
-/// Re-materialize an already-converted PropertyKey as a JsValue whose
-/// re-conversion through to_string_key is side-effect-free and yields the
-/// same key. GetElem2 leaves this on the stack so the later PutElem does not
-/// re-run a user-observable ToPropertyKey (§13.15.2: ToPropertyKey once).
-fn property_key_value(pk: key.PropertyKey) -> JsValue {
+/// Re-materialize an already-converted PropKey as a JsValue whose
+/// re-conversion through to_prop_key is side-effect-free and yields the same
+/// key. GetElem2 / GetSuperValue2 leave this on the stack so the later
+/// PutElem / PutSuperValue does not re-run a user-observable ToPropertyKey
+/// (§13.15.2: ToPropertyKey once). Index keys round-trip as numbers so the
+/// re-conversion skips stringification.
+fn prop_key_value(pk: object.PropKey) -> JsValue {
   case pk {
-    Index(n) -> value.from_int(n)
-    Named(s) -> JsString(s)
+    object.PkSymbol(sym) -> value.JsSymbol(sym)
+    object.PkString(Index(n)) -> value.from_int(n)
+    object.PkString(Named(s)) -> JsString(s)
   }
 }
 
-/// GetElem on a primitive receiver — ToPropertyKey (Symbol → symbol lookup
-/// on prototype, else ToString → string lookup) then delegate to get_value_of.
+/// [[Get]] on any receiver keyed by a resolved PropKey — the primitive-
+/// receiver counterpart of `object.get_prop_value` (which needs a Ref).
+fn get_prop_value_of(
+  state: State(host),
+  receiver: JsValue,
+  pk: object.PropKey,
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  case pk {
+    object.PkSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
+    object.PkString(k) -> object.get_value_of(state, receiver, k)
+  }
+}
+
+/// GetElem on a primitive receiver — ToPropertyKey (§7.1.19) then delegate to
+/// the PropKey-keyed [[Get]].
 fn get_elem_on_primitive(
   state: State(host),
   receiver: JsValue,
   key: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case key {
-    value.JsSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
-    _ -> {
-      use #(pk, state) <- result.try(property.to_string_key(state, key))
-      object.get_value_of(state, receiver, pk)
-    }
-  }
+  use #(pk, state) <- result.try(property.to_prop_key(state, key))
+  get_prop_value_of(state, receiver, pk)
 }
 
 // ============================================================================
@@ -5992,12 +5963,10 @@ fn build_exclusion_sets(
     set.new(),
     state,
   ))
-  case key {
-    value.JsSymbol(id) -> Ok(#(pks, set.insert(syms, id), state))
-    _ -> {
-      use #(pk, state) <- result.map(property.to_string_key(state, key))
-      #(set.insert(pks, pk), syms, state)
-    }
+  use #(pk, state) <- result.map(property.to_prop_key(state, key))
+  case pk {
+    object.PkSymbol(id) -> #(pks, set.insert(syms, id), state)
+    object.PkString(k) -> #(set.insert(pks, k), syms, state)
   }
 }
 

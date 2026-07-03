@@ -1,8 +1,9 @@
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
+import arc/vm/internal/temporal_calendar.{type Calendar}
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key.{type PropertyKey, Index, Named}
-import arc/vm/opcode.{type Op}
+import arc/vm/opcode.{type Op, type TryKind}
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -261,6 +262,54 @@ pub type JsValue {
   JsUninitialized
 }
 
+/// The primitive half of `JsValue`: everything ES2024 §7.1.1 ToPrimitive can
+/// return, and nothing else. Carrying it as its own type is what makes
+/// "ToPrimitive handed me back an object" a compile error rather than a
+/// caller-side re-dispatch that could recurse forever — see
+/// `arc/vm/ops/coerce.to_primitive_prim`, whose consumers (ToString, ToNumber,
+/// ToBigInt) match on it TOTALLY instead of self-recursing.
+///
+/// There is deliberately no `PUninitialized`: the TDZ sentinel is not a JS
+/// value, so it cannot survive a coercion (`value_to_primitive` rejects it).
+pub type JsPrimitive {
+  PUndefined
+  PNull
+  PBool(Bool)
+  PNumber(JsNum)
+  PString(String)
+  PSymbol(SymbolId)
+  PBigInt(BigInt)
+}
+
+/// Widen a primitive back into the full `JsValue` domain. Total, lossless.
+pub fn primitive_to_value(prim: JsPrimitive) -> JsValue {
+  case prim {
+    PUndefined -> JsUndefined
+    PNull -> JsNull
+    PBool(b) -> JsBool(b)
+    PNumber(n) -> JsNumber(n)
+    PString(s) -> JsString(s)
+    PSymbol(s) -> JsSymbol(s)
+    PBigInt(b) -> JsBigInt(b)
+  }
+}
+
+/// Narrow a `JsValue` to a `JsPrimitive`, or `None` when it is not one:
+/// `JsObject` (the case ToPrimitive must reject/retry) and `JsUninitialized`
+/// (the TDZ sentinel, not a JS value at all).
+pub fn value_to_primitive(val: JsValue) -> Option(JsPrimitive) {
+  case val {
+    JsUndefined -> Some(PUndefined)
+    JsNull -> Some(PNull)
+    JsBool(b) -> Some(PBool(b))
+    JsNumber(n) -> Some(PNumber(n))
+    JsString(s) -> Some(PString(s))
+    JsSymbol(s) -> Some(PSymbol(s))
+    JsBigInt(b) -> Some(PBigInt(b))
+    JsObject(_) | JsUninitialized -> None
+  }
+}
+
 /// Tri-representation JS array elements.
 ///
 /// None: zero-cost empty. Every non-array object (functions, promises, maps,
@@ -413,7 +462,12 @@ pub type StringNativeFn {
 
 /// Error constructor — carries proto Ref.
 pub type ErrorNativeFn {
+  /// Error / NativeError ( message [ , options ] ) — §20.5.1.1, §20.5.6.1.1.
   ErrorConstructor(proto: Ref)
+  /// AggregateError ( errors, message [ , options ] ) — §20.5.7.1.1. `errors`
+  /// is drained through the iterator protocol into an own "errors" array;
+  /// arg0 is NOT the message, so it cannot share ErrorConstructor.
+  AggregateErrorConstructor(proto: Ref)
   /// SuppressedError ( error, suppressed, message ) — Explicit Resource
   /// Management proposal. Different argument order from NativeError.
   SuppressedErrorConstructor(proto: Ref)
@@ -1099,6 +1153,16 @@ pub type WaiterKey
 /// the registry about which waiters it is talking about. `buffer` stays for
 /// GC rooting.
 ///
+/// The waiter deliberately does NOT store the handle of the registry token it
+/// registered: this agent's tokens at one (key, byte offset) are FUNGIBLE.
+/// A cross-process wake message carries no per-waiter identity into core
+/// (`event_loop.inject_notify` settles the FIRST matching waiter), so what
+/// must stay balanced is the COUNT of live tokens against the count of
+/// pending waiters — withdrawing "one of ours" is exactly the right
+/// operation, and withdrawing "mine specifically" would let a claimed waiter
+/// settle itself AND leave the notifier's in-flight wake to settle a second
+/// waiter (two "ok"s for one claim, plus a stale token).
+///
 /// `promise_data` is the PromiseSlot ref (for settling); `promise` is the
 /// visible Promise object ref (kept rooted while the waiter is pending).
 /// `deadline` is the absolute monotonic-clock millisecond at which the waiter
@@ -1160,11 +1224,32 @@ pub type IteratorHelperKind {
   HelperTake(remaining: Int)
   /// `remaining` counts down; once it hits 0 every step is yielded.
   HelperDrop(remaining: Int)
-  /// `inner` is the currently-open inner iterator record as
-  /// #(inner_iterator, cached_next_method) — GetIteratorFlattenable (§7.4.13)
-  /// caches `next` once. `None` between inner iterators, so a half-initialized
-  /// inner (an iterator without its cached next method) is unrepresentable.
-  HelperFlatMap(func: JsValue, inner: Option(#(JsValue, JsValue)))
+  /// `inner` is the currently-open inner iterator record — GetIteratorFlattenable
+  /// (§7.4.13) caches `next` once. `None` between inner iterators, so a
+  /// half-initialized inner (an iterator without its cached next method) is
+  /// unrepresentable.
+  HelperFlatMap(func: JsValue, inner: Option(IteratorRecord))
+}
+
+/// An OPENED Iterator Record — ES2024 §7.4: the iterator object plus its
+/// [[NextMethod]], read exactly once by GetIteratorDirect (§7.4.9) so that
+/// monkey-patching `iterator.next` mid-iteration has no effect.
+///
+/// This is deliberately NOT a bare `#(JsValue, JsValue)`: `ConcatItem` below is
+/// a same-shaped-but-completely-different pair, and the two used to flow
+/// through the same functions as adjacent parameters, where transposing them
+/// still typechecked.
+pub type IteratorRecord {
+  IteratorRecord(iterator: JsValue, next_method: JsValue)
+}
+
+/// One UNOPENED `Iterator.concat` argument — the tc39 iterator-sequencing
+/// proposal validates each argument's `[Symbol.iterator]` up front but only
+/// CALLS it lazily, when the previous iterable is exhausted. So `open_method`
+/// is a not-yet-invoked `[Symbol.iterator]` and `iterable` is its receiver;
+/// calling `open_method` on `iterable` is what produces an `IteratorRecord`.
+pub type ConcatItem {
+  ConcatItem(open_method: JsValue, iterable: JsValue)
 }
 
 /// Iterator.zip / Iterator.zipKeyed mode — tc39 joint-iteration proposal.
@@ -2724,15 +2809,14 @@ pub type ExoticKind(ctx, host) {
   /// [[ByteOffset]] is `byte_offset`. `byte_length: None` means byte-length
   /// auto-tracking (view over a resizable buffer with no explicit length).
   DataViewObject(buffer: Ref, byte_offset: Int, byte_length: option.Option(Int))
-  /// Temporal.PlainDate — ISO calendar date plus calendar identifier.
+  /// Temporal.PlainDate — ISO calendar date plus its calendar.
   /// year/month/day are always the ISO 8601 date.
   ///
-  /// `calendar` (here and on the other Temporal slots) is the canonical
-  /// identifier produced by `temporal_calendar.identifier` from the closed
-  /// `temporal_calendar.Calendar` type — never a raw user string. Slots are
-  /// only written via `temporal.make_*_cal`, so `temporal.slot_calendar`
-  /// can re-parse it into a `Calendar` totally.
-  TemporalDateSlot(year: Int, month: Int, day: Int, calendar: String)
+  /// `calendar` (here and on the other Temporal slots) is the closed
+  /// `temporal_calendar.Calendar` type, only ever minted by
+  /// `temporal_calendar.canonicalize` — a slot cannot hold an unsupported
+  /// calendar, and reading one back needs no re-parse.
+  TemporalDateSlot(year: Int, month: Int, day: Int, calendar: Calendar)
   /// Temporal.PlainTime — wall-clock time, nanosecond precision.
   TemporalTimeSlot(
     hour: Int,
@@ -2753,14 +2837,14 @@ pub type ExoticKind(ctx, host) {
     millisecond: Int,
     microsecond: Int,
     nanosecond: Int,
-    calendar: String,
+    calendar: Calendar,
   )
   /// Temporal.PlainYearMonth. `year`/`month`/`day` are the ISO date of the
   /// reference day; `calendar` as on TemporalDateSlot.
-  TemporalYearMonthSlot(year: Int, month: Int, day: Int, calendar: String)
+  TemporalYearMonthSlot(year: Int, month: Int, day: Int, calendar: Calendar)
   /// Temporal.PlainMonthDay. `month`/`day`/`ref_year` are the ISO date of
   /// the reference day; `calendar` as on TemporalDateSlot.
-  TemporalMonthDaySlot(month: Int, day: Int, ref_year: Int, calendar: String)
+  TemporalMonthDaySlot(month: Int, day: Int, ref_year: Int, calendar: Calendar)
   /// Temporal.Duration — ten integral fields, all the same sign.
   TemporalDurationSlot(
     years: Int,
@@ -2779,7 +2863,11 @@ pub type ExoticKind(ctx, host) {
   TemporalInstantSlot(epoch_ns: Int)
   /// Temporal.ZonedDateTime — exact time + time zone identifier. Only "UTC"
   /// and fixed-offset zones (canonical "±HH:MM" form) are supported.
-  TemporalZonedDateTimeSlot(epoch_ns: Int, time_zone: String, calendar: String)
+  TemporalZonedDateTimeSlot(
+    epoch_ns: Int,
+    time_zone: String,
+    calendar: Calendar,
+  )
   /// Array iterator — ES2024 §23.1.5 Array Iterator Objects.
   /// Created by Array.prototype[Symbol.iterator](), values(), keys(), entries()
   /// (and the %TypedArray%.prototype counterparts).
@@ -2824,16 +2912,15 @@ pub type ExoticKind(ctx, host) {
   AsyncFromSyncIteratorObject(sync_iter: Ref, sync_next: JsValue)
   /// Iterator Helper — ES2025 §27.1.3.2. Created by
   /// Iterator.prototype.{map,filter,take,drop,flatMap}.
-  /// `next_method` is cached once per GetIteratorDirect (spec §7.4.9) so
-  /// monkey-patching `underlying.next` after creation has no effect.
+  /// `underlying`'s next method is cached once per GetIteratorDirect (spec
+  /// §7.4.9) so monkey-patching `underlying.next` after creation has no effect.
   /// `kind` carries the combinator's own state (callback, take/drop
   /// remaining, flatMap inner iterator). `counter` is the spec's running
   /// element index passed to map/filter/flatMap callbacks; take/drop's
   /// countdown lives in their variants instead.
   IteratorHelperObject(
     kind: IteratorHelperKind,
-    underlying: JsValue,
-    next_method: JsValue,
+    underlying: IteratorRecord,
     counter: Int,
     done: Bool,
   )
@@ -2844,9 +2931,9 @@ pub type ExoticKind(ctx, host) {
   /// proposal's IteratorZip generator, modelled as a data-driven helper on
   /// %IteratorHelperPrototype%. `members` is the spec's iters list (a
   /// ZipExhausted member is the spec's null entry); `keys` is None for
-  /// Iterator.zip (array results) and Some(property keys, as
-  /// JsString/JsSymbol values) for Iterator.zipKeyed (null-proto object
-  /// results). `padding` is index-aligned with `members`.
+  /// Iterator.zip (array results) and Some(property keys) for
+  /// Iterator.zipKeyed (null-proto object results). `padding` is
+  /// index-aligned with `members`.
   /// `running` is the generator "executing" state (reentrant next/return
   /// throws TypeError); `started` distinguishes suspended-start from
   /// suspended-yield for .return() semantics.
@@ -2854,20 +2941,21 @@ pub type ExoticKind(ctx, host) {
     members: List(ZipMember),
     mode: ZipMode,
     padding: List(JsValue),
-    keys: Option(List(JsValue)),
+    keys: Option(List(ObjectKey)),
     done: Bool,
     running: Bool,
     started: Bool,
   )
   /// Iterator.concat result — tc39 iterator-sequencing proposal, modelled as
   /// a data-driven helper on %IteratorHelperPrototype%. `remaining` holds the
-  /// not-yet-opened (openMethod, iterable) records; `inner` is the currently
-  /// open iterator record (iterator, cached next method).
+  /// not-yet-opened items; `inner` is the currently open iterator record. The
+  /// two are different types on purpose — a `ConcatItem` cannot be handed to
+  /// something expecting an already-opened `IteratorRecord`, or vice versa.
   /// `running` is the generator "executing" state (reentrant next/return
   /// throws TypeError).
   IteratorConcatObject(
-    remaining: List(#(JsValue, JsValue)),
-    inner: Option(#(JsValue, JsValue)),
+    remaining: List(ConcatItem),
+    inner: Option(IteratorRecord),
     done: Bool,
     running: Bool,
   )
@@ -2934,6 +3022,23 @@ pub fn is_private_name(key: PropertyKey) -> Bool {
     Named("\u{0}" <> _) -> True
     _ -> False
   }
+}
+
+/// A property key as it can actually exist on an object: §6.1.7 says that is
+/// exactly a String or a Symbol, so this closed sum is what
+/// [[OwnPropertyKeys]] / [[GetOwnProperty]] / [[DefineOwnProperty]] speak.
+/// A `JsValue` key would also admit numbers, objects, `undefined`, … — none of
+/// which any internal method can ever see, yet every `case` would have to
+/// invent a fallback for them (and those fallbacks silently dropped keys).
+///
+/// The `display` string is NOT just for error messages: proxy
+/// `defineProperty` / `getOwnPropertyDescriptor` traps receive it as the
+/// property-key argument, so it must be the exact ToPropertyKey string —
+/// never `key.key_to_string`, which is a *renderer* that strips the engine's
+/// internal private-name NUL marker and would hand traps a mangled key.
+pub type ObjectKey {
+  StringPropKey(pkey: PropertyKey, display: String)
+  SymbolPropKey(sym: SymbolId)
 }
 
 /// Property descriptor — writable/enumerable/configurable flags per property.
@@ -3208,7 +3313,7 @@ pub type PromiseReaction {
 
 /// Saved try-frame for generator suspension (mirrors TryFrame from state.gleam).
 pub type SavedTryFrame {
-  SavedTryFrame(catch_target: Int, stack_depth: Int)
+  SavedTryFrame(catch_target: Int, stack_depth: Int, kind: TryKind)
 }
 
 /// Generator internal lifecycle state.
@@ -3532,6 +3637,13 @@ fn push_option_ref(r: Option(Ref), acc: List(Ref)) -> List(Ref) {
   }
 }
 
+/// Both halves of an Iterator Record are heap-reachable: the iterator object
+/// itself and its cached [[NextMethod]] (a bound function keeps its target and
+/// receiver alive).
+fn push_iter_record(rec: IteratorRecord, acc: List(Ref)) -> List(Ref) {
+  push_value_ref(rec.next_method, push_value_ref(rec.iterator, acc))
+}
+
 fn push_option_value(v: Option(JsValue), acc: List(Ref)) -> List(Ref) {
   case v {
     Some(val) -> push_value_ref(val, acc)
@@ -3640,27 +3752,23 @@ fn do_refs_in_slot(
         ]
         AsyncFromSyncIteratorObject(sync_iter:, sync_next:) ->
           push_value_ref(sync_next, [sync_iter, ..acc])
-        IteratorHelperObject(kind:, underlying:, next_method:, ..) -> {
-          let acc =
-            acc
-            |> push_value_ref(underlying, _)
-            |> push_value_ref(next_method, _)
+        IteratorHelperObject(kind:, underlying:, ..) -> {
+          let acc = push_iter_record(underlying, acc)
           case kind {
             HelperTake(remaining: _) | HelperDrop(remaining: _) -> acc
             HelperMap(func:)
             | HelperFilter(func:)
             | HelperFlatMap(func:, inner: None) -> push_value_ref(func, acc)
-            HelperFlatMap(func:, inner: Some(#(inner, inner_next))) ->
-              acc
-              |> push_value_ref(func, _)
-              |> push_value_ref(inner, _)
-              |> push_value_ref(inner_next, _)
+            HelperFlatMap(func:, inner: Some(inner)) ->
+              push_iter_record(inner, push_value_ref(func, acc))
           }
         }
         WrapForValidIteratorObject(iterated:, next_method:)
         | IteratorRecordObject(iterated:, next_method:) ->
           push_value_ref(next_method, push_value_ref(iterated, acc))
-        IteratorZipObject(members:, padding:, keys:, ..) -> {
+        // `keys` holds no heap refs (an ObjectKey is a string or a symbol),
+        // so only members and padding are traced.
+        IteratorZipObject(members:, padding:, ..) -> {
           let acc =
             list.fold(members, acc, fn(a, m) {
               case m {
@@ -3669,21 +3777,15 @@ fn do_refs_in_slot(
                 ZipExhausted -> a
               }
             })
-          let acc = list.fold(padding, acc, fn(a, v) { push_value_ref(v, a) })
-          case keys {
-            Some(ks) -> list.fold(ks, acc, fn(a, k) { push_value_ref(k, a) })
-            None -> acc
-          }
+          list.fold(padding, acc, fn(a, v) { push_value_ref(v, a) })
         }
         IteratorConcatObject(remaining:, inner:, ..) -> {
           let acc =
-            list.fold(remaining, acc, fn(a, rec) {
-              let #(method, iterable) = rec
-              push_value_ref(iterable, push_value_ref(method, a))
+            list.fold(remaining, acc, fn(a, item) {
+              push_value_ref(item.iterable, push_value_ref(item.open_method, a))
             })
           case inner {
-            Some(#(iter, next_method)) ->
-              push_value_ref(next_method, push_value_ref(iter, acc))
+            Some(inner) -> push_iter_record(inner, acc)
             None -> acc
           }
         }
@@ -4009,6 +4111,7 @@ fn string_native_refs(f: StringNativeFn, acc: List(Ref)) -> List(Ref) {
 fn error_native_refs(f: ErrorNativeFn, acc: List(Ref)) -> List(Ref) {
   case f {
     ErrorConstructor(proto:)
+    | AggregateErrorConstructor(proto:)
     | SuppressedErrorConstructor(proto:)
     | ErrorStackSetter(proto:)
     | DomExceptionConstructor(proto:) -> [proto, ..acc]

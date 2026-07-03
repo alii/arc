@@ -57,7 +57,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
   let #(h, object_proto) = common.alloc_proto(h, None, dict.new())
 
   // Core types
-  let #(h, function) = builtins_function.init(h, object_proto)
+  let #(h, function, throw_type_error) = builtins_function.init(h, object_proto)
   let #(h, object) = builtins_object.init(h, object_proto, function.prototype)
   let #(h, array) = builtins_array.init(h, object_proto, function.prototype)
 
@@ -72,9 +72,18 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
   // String constructor + prototype
   let #(h, string) = builtins_string.init(h, object_proto, function.prototype)
 
-  // Number constructor + prototype + global utility functions
-  let #(h, number, parse_int, parse_float, is_nan, is_finite) =
+  // Number constructor + prototype + global utility functions. Number.parseInt
+  // and Number.parseFloat are the SAME objects as the parse_int/parse_float
+  // globals installed below (§21.1.2.13/§21.1.2.12).
+  let #(h, number_builtins) =
     builtins_number.init(h, object_proto, function.prototype)
+  let builtins_number.NumberBuiltins(
+    type_: number,
+    parse_int:,
+    parse_float:,
+    is_nan:,
+    is_finite:,
+  ) = number_builtins
 
   // Boolean constructor + prototype
   let #(h, boolean) = builtins_boolean.init(h, object_proto, function.prototype)
@@ -384,6 +393,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
     Builtins(
       object:,
       function:,
+      throw_type_error:,
       array:,
       proxy:,
       error: errors.error,

@@ -12,10 +12,16 @@ import gleam/list
 import gleam/option.{Some}
 
 /// Set up Function.prototype and Function constructor.
+///
+/// Also allocates %ThrowTypeError% (§10.2.4.1) and hands its Ref back to the
+/// caller: it is an intrinsic in its own right, referenced by the unmapped
+/// arguments object's `callee` as well as by the restricted `caller`/
+/// `arguments` accessors installed here, so it must not be sunk into the
+/// heap and forgotten.
 pub fn init(
   h: Heap(ctx, host),
   object_proto: Ref,
-) -> #(Heap(ctx, host), BuiltinType) {
+) -> #(Heap(ctx, host), BuiltinType, Ref) {
   // Allocate func_proto first (empty) so call/apply/bind can reference it
   // as their [[Prototype]] from the start — no fix-up needed.
   let #(h, func_proto) = alloc_proto(h, Some(object_proto), dict.new())
@@ -135,5 +141,5 @@ pub fn init(
       }
     })
 
-  #(h, bt)
+  #(h, bt, thrower_ref)
 }

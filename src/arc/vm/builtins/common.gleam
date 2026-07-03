@@ -153,6 +153,11 @@ pub type Builtins {
   Builtins(
     object: BuiltinType,
     function: BuiltinType,
+    /// %ThrowTypeError% (§10.2.4.1) — the single frozen intrinsic shared by
+    /// every restricted `caller`/`arguments` accessor and by an unmapped
+    /// arguments object's `callee`. Held as a Ref so those install sites can
+    /// name it directly instead of fishing it back out of the heap.
+    throw_type_error: Ref,
     array: BuiltinType,
     /// The Proxy constructor function object (§28.2). No prototype property.
     proxy: Ref,
@@ -295,29 +300,12 @@ pub fn alloc_pojo(
   )
 }
 
-/// §10.1.13 OrdinaryCreateFromConstructor — read newTarget.prototype, fall
-/// back to `intrinsic_proto` if not an object, then allocate an OrdinaryObject
-/// with that prototype. Native constructors that support subclassing call
-/// this with `state.new_target` (set by `do_construct` before native dispatch).
-pub fn ordinary_create_from_constructor(
-  h: Heap(ctx, host),
-  new_target: JsValue,
-  intrinsic_proto: Ref,
-) -> #(Heap(ctx, host), Ref) {
-  let proto = case new_target {
-    JsObject(nt_ref) ->
-      case heap.read(h, nt_ref) {
-        Some(ObjectSlot(properties:, ..)) ->
-          case dict.get(properties, Named("prototype")) {
-            Ok(value.DataProperty(value: JsObject(proto_ref), ..)) -> proto_ref
-            _ -> intrinsic_proto
-          }
-        _ -> intrinsic_proto
-      }
-    _ -> intrinsic_proto
-  }
-  alloc_pojo(h, proto, [])
-}
+// §10.1.13.1 OrdinaryCreateFromConstructor lives at `ops/object` — this layer
+// cannot perform the real `? Get(newTarget, "prototype")` its step 2 requires
+// (`state` imports `common`, not the other way round), so a copy here could
+// only ever be a raw slot read that silently skips proxy traps and accessor
+// `prototype` properties. Native constructors reach it via
+// `helpers.require_new_target` / `ops_object.proto_from_new_target`.
 
 /// CreateIterResultObject(value, done) — §7.4.11. Allocates `{value, done}`.
 pub fn create_iter_result(
@@ -665,10 +653,20 @@ pub fn typeof_value(val: JsValue, heap: Heap(ctx, host)) -> String {
 /// Reserves the proto ref first, then allocates both objects in one pass —
 /// no read-modify-write. Both proto and constructor are written exactly once.
 /// This is the common case for most builtins.
+///
+/// Two DIFFERENT prototypes go in here, and mixing them up is a silent
+/// spec violation:
+///   * `parent_proto` — the *prototype object's* [[Prototype]], i.e. what
+///     instances inherit from beyond their own proto (%Object.prototype% for
+///     most builtins, %Error.prototype% for the NativeErrors).
+///   * `ctor_parent`  — the *constructor object's* [[Prototype]], i.e. what
+///     `Object.getPrototypeOf(Ctor)` returns. %Function.prototype% for most
+///     builtins, but §20.5.6.2 requires %Error% for every NativeError, so
+///     error.gleam passes the Error constructor here.
 pub fn init_type(
   h: Heap(ctx, host),
   parent_proto: Ref,
-  function_proto: Ref,
+  ctor_parent: Ref,
   proto_props: List(#(String, Property)),
   ctor_fn: fn(Ref) -> NativeFnSlot(ctx),
   name: String,
@@ -693,7 +691,7 @@ pub fn init_type(
           ctor_props,
         )),
         elements: elements.new(),
-        prototype: Some(function_proto),
+        prototype: Some(ctor_parent),
         symbol_properties: [],
         extensible: True,
       ),
@@ -716,6 +714,45 @@ pub fn init_type(
     )
 
   #(h, BuiltinType(prototype: proto_ref, constructor: ctor_ref))
+}
+
+/// A *primitive wrapper* type (Boolean §20.3.3, Number §21.1.3, String
+/// §22.1.3). Identical to `init_type`, except the caller must also name the
+/// value of the internal data slot the spec puts on the PROTOTYPE object
+/// itself — [[BooleanData]] false, [[NumberData]] +0, [[StringData]] "".
+///
+/// That slot is what makes `Number.prototype.valueOf()` return 0 instead of
+/// throwing, and it is easy to forget: with plain `init_type` it is a second,
+/// separate `heap.update_kind` call that nothing forces you to make. Routing
+/// wrappers through here makes "registered a wrapper prototype without its
+/// data slot" a missing-argument compile error.
+///
+/// TODO: String still calls `init_type` and so has no [[StringData]] slot on
+/// String.prototype — `String.prototype.toString()` throws instead of
+/// returning "". Switch `builtins/string.gleam` over to this function.
+pub fn init_wrapper_type(
+  h: Heap(ctx, host),
+  parent_proto: Ref,
+  ctor_parent: Ref,
+  proto_props: List(#(String, Property)),
+  ctor_fn: fn(Ref) -> NativeFnSlot(ctx),
+  name: String,
+  arity: Int,
+  ctor_props: List(#(String, Property)),
+  proto_kind proto_kind: ExoticKind(ctx, host),
+) -> #(Heap(ctx, host), BuiltinType) {
+  let #(h, bt) =
+    init_type(
+      h,
+      parent_proto,
+      ctor_parent,
+      proto_props,
+      ctor_fn,
+      name,
+      arity,
+      ctor_props,
+    )
+  #(heap.update_kind(h, bt.prototype, proto_kind), bt)
 }
 
 /// Shared init scaffold for keyed collections (Map/Set): allocates the
