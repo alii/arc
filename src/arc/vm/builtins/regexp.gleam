@@ -811,12 +811,18 @@ fn try_builtin_exec(
       // Step 16: Set(R, "lastIndex", e, true) iff global or sticky.
       use state <- maybe_write_last_index(state, ref, global || sticky, e)
       // Legacy-regexp proposal: UpdateLegacyRegExpStaticProperties on every
-      // successful builtin exec (RegExp.input, RegExp.$1-$9, etc.) — but only
-      // when R has [[LegacyFeaturesEnabled]], same gate `compile` uses.
-      let state = case legacy_features_enabled(state, ref) {
-        True -> update_legacy_statics(state, s, captures)
-        False -> state
-      }
+      // successful builtin exec (RegExp.input, RegExp.$1-$9, etc.).
+      // Unconditional, matching V8/JSC/SpiderMonkey. The proposal gates this on
+      // R.[[LegacyFeaturesEnabled]] and otherwise runs
+      // InvalidateLegacyRegExpStaticProperties (making the getters throw
+      // TypeError); we implement neither half. Gating alone would be strictly
+      // wrong: it would leave a *stale* previous match readable through
+      // RegExp.$1 & co, a result no engine and no spec produces. So the gate
+      // stays out until invalidation exists — see `compile_receiver_ok`, whose
+      // prototype-identity check is a `compile`-only approximation and is NOT
+      // a stand-in for the [[LegacyFeaturesEnabled]] slot (that slot is fixed
+      // at construction; a prototype swap must not change it).
+      let state = update_legacy_statics(state, s, captures)
       build_exec_result(
         state,
         s,
@@ -1097,7 +1103,7 @@ fn regexp_compile(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
-      case legacy_features_enabled(state, ref) {
+      case compile_receiver_ok(state, ref) {
         False -> not_regexp(state, "compile")
         True -> {
           let pattern = helpers.first_arg_or_undefined(args)
@@ -1129,11 +1135,15 @@ fn regexp_compile(
   }
 }
 
-/// [[LegacyFeaturesEnabled]] (tc39 proposal-regexp-legacy-features): true only
-/// for a real RegExp whose [[Prototype]] is %RegExp.prototype% — subclass
-/// instances neither update the legacy statics on exec nor accept `compile`.
-/// Prototype identity is our approximation of that internal slot.
-fn legacy_features_enabled(state: State(host), ref: Ref) -> Bool {
+/// May `compile` re-initialize this receiver? True only for a real RegExp
+/// whose current [[Prototype]] is %RegExp.prototype% — subclass instances are
+/// rejected (Annex B §B.2.4.1 gates on [[LegacyFeaturesEnabled]]).
+///
+/// Prototype identity only APPROXIMATES that slot, which is really fixed at
+/// construction: `Object.setPrototypeOf(/a/, {})` must not disable legacy
+/// features, but does disable `compile` here. That is why this is scoped to
+/// `compile` — do not reuse it to gate the exec-time legacy statics.
+fn compile_receiver_ok(state: State(host), ref: Ref) -> Bool {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: RegExpObject(..), prototype: Some(proto), ..)) ->
       proto == state.builtins.regexp.prototype
