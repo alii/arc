@@ -11,7 +11,7 @@
 ///
 /// Date math (year/month/day/weekday/hour/minute/second/ms breakdown) is done
 /// in pure Gleam Int arithmetic ported from the QuickJS algorithms; only
-/// `now_ms` and `tz_offset_minutes` go through FFI.
+/// `now_ms` and the two local-time-zone offset lookups go through FFI.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
@@ -52,11 +52,16 @@ import gleam/string
 // ============================================================================
 // FFI
 //
-// This is the ONLY place the arc_date_ffi Erlang contract is declared. Other
-// modules (intl, temporal) must call `date.now_ms()` / `date.tz_offset_minutes`
-// rather than redeclaring the @external — a private redeclaration can silently
-// lie about the return type (Gleam trusts the annotation) and the BEAM term
-// would then be misused.
+// This is the ONLY place these Erlang contracts are declared. Other modules
+// (intl, temporal) must call `date.now_ms()` / `date.offset_at_utc_ms` rather
+// than redeclaring the @external — a private redeclaration can silently lie
+// about the return type (Gleam trusts the annotation) and the BEAM term would
+// then be misused.
+//
+// Both offset lookups read the same IANA/TZif data Temporal reads and report
+// LOCAL MINUS UTC minutes. They differ in what their argument *is*: an instant
+// (`_utc_ms`) or a wall clock (`_local_ms`). Passing one where the other
+// belongs is what the old single `tz_offset_minutes(epoch_ms)` allowed.
 // ============================================================================
 
 /// Milliseconds since the Unix epoch (`erlang:system_time(millisecond)`).
@@ -65,9 +70,25 @@ import gleam/string
 @external(erlang, "arc_date_ffi", "now_ms")
 pub fn now_ms() -> Int
 
-/// Local time zone offset in minutes (UTC − local) at the given epoch ms.
-@external(erlang, "arc_date_ffi", "tz_offset_minutes")
-pub fn tz_offset_minutes(epoch_ms: Int) -> Int
+/// Local time zone offset in minutes (local − UTC) at the UTC instant
+/// `epoch_ms`.
+@external(erlang, "arc_tz_ffi", "offset_at_utc_ms")
+pub fn offset_at_utc_ms(epoch_ms: Int) -> Int
+
+/// Local time zone offset in minutes (local − UTC) for the *local wall clock*
+/// `local_ms` — ES2024 §21.4.1.25 LocalTZA with isUTC = false, so a wall clock
+/// a transition skips or repeats is read with the offset in effect before that
+/// transition. Not interchangeable with `offset_at_utc_ms`.
+@external(erlang, "arc_tz_ffi", "offset_at_local_ms")
+pub fn offset_at_local_ms(local_ms: Int) -> Int
+
+/// The `Date.prototype.getTimezoneOffset` sign convention: minutes UTC is
+/// *ahead of* local (US Pacific Standard is +480). This negation is the only
+/// place the runtime flips the sign — everything else, arc_tz_ffi and Temporal
+/// included, speaks local − UTC.
+pub fn tz_offset_minutes(epoch_ms: Int) -> Int {
+  0 - offset_at_utc_ms(epoch_ms)
+}
 
 // ============================================================================
 // Init — Date constructor + Date.prototype
@@ -361,7 +382,7 @@ type TimeRef {
 }
 
 /// Broken-down date components (all Int). `tz` is the timezone-offset minutes
-/// at the moment in question (UTC - local; 0 for UTC fields).
+/// at the moment in question (local − UTC; 0 for UTC fields).
 type DateFields {
   DateFields(
     year: Int,
@@ -423,10 +444,10 @@ fn field_index(field: DateField) -> Int {
 /// `LocalTime` the FFI timezone offset for that instant is applied first.
 fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
   let tz = case time_ref {
-    LocalTime -> tz_offset_minutes(tv)
+    LocalTime -> offset_at_utc_ms(tv)
     UtcTime -> 0
   }
-  let d = tv - tz * 60_000
+  let d = tv + tz * 60_000
   let h = math_mod(d, ms_per_day)
   let days = { d - h } / ms_per_day
   let ms = math_mod(h, 1000)
@@ -483,8 +504,11 @@ fn make_date(
       let day = days_from_year(ym) + sum_month_days(ym, mn, 0, 0) + date - 1
       let time = hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + ms
       let tv = day * ms_per_day + time
+      // `tv` here is a *local wall clock* in ms, not an instant: resolve it
+      // through LocalTZA-for-a-wall-clock, which pins skipped and repeated
+      // times to the offset before their transition.
       let tv = case time_ref {
-        LocalTime -> tv + tz_offset_minutes(tv) * 60_000
+        LocalTime -> tv - offset_at_local_ms(tv) * 60_000
         UtcTime -> tv
       }
       time_clip(Finite(int.to_float(tv)))
@@ -1100,15 +1124,13 @@ fn format_year_signed(y: Int) -> String {
   }
 }
 
-/// "+HHMM" / "-HHMM" — note JS sign convention is local-minus-UTC, the
-/// negation of getTimezoneOffset().
+/// "+HHMM" / "-HHMM" from local-minus-UTC minutes (`DateFields.tz`).
 fn format_tz(tz: Int) -> String {
-  let off = 0 - tz
-  let sign = case off < 0 {
+  let sign = case tz < 0 {
     True -> "-"
     False -> "+"
   }
-  let a = int.absolute_value(off)
+  let a = int.absolute_value(tz)
   sign <> pad2(a / 60) <> pad2(a % 60)
 }
 

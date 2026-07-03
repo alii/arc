@@ -1,11 +1,18 @@
-%% IANA time zone database access for Temporal.
+%% IANA time zone database access — the runtime's ONLY time zone engine.
+%% Both Temporal (explicit zones) and Date (the host zone) go through here.
 %%
 %% Reads binary TZif files (RFC 8536) from the system zoneinfo directory and
-%% answers three questions:
+%% answers four questions:
 %%   * is this a valid zone identifier (case-insensitive), and what is its
 %%     properly-cased spelling?
 %%   * what is the UTC offset (in seconds) at a given epoch second?
 %%   * when is the next/previous UTC-offset transition?
+%%   * which zone is the host in, and what is its offset at a given UTC
+%%     instant / for a given local wall-clock time?
+%%
+%% Every offset this module reports is LOCAL MINUS UTC (so America/Los_Angeles
+%% in winter is -28800 seconds / -480 minutes). JS `getTimezoneOffset` uses the
+%% opposite sign; that negation lives at that one call site, not here.
 %%
 %% Parsed zone data is cached in persistent_term (immutable, read-mostly).
 %% If no zoneinfo database exists on the host, lookups simply fail and the
@@ -13,7 +20,8 @@
 -module(arc_tz_ffi).
 
 -export([lookup/1, offset_at/2, next_transition/2, previous_transition/2,
-         canonical_id/1]).
+         canonical_id/1, host_zone/0, offset_at_utc_ms/1,
+         offset_at_local_ms/1]).
 
 -define(EPOCH_GS, 62167219200).  %% gregorian seconds at 1970-01-01T00:00Z
 -define(EPOCH_DAYS, 719528).     %% gregorian days at 1970-01-01
@@ -34,8 +42,8 @@ lookup(Id) when is_binary(Id) ->
 %% cannot be read/parsed.
 offset_at(Id, Sec) ->
     case zone(Id) of
-        error -> {error, nil};
-        {First, Trans, Footer} ->
+        {error, _} -> {error, nil};
+        {ok, {First, Trans, Footer}} ->
             LastT = last_transition_time(Trans),
             UseFooter = Footer =/= none andalso
                 (LastT =:= none orelse Sec >= LastT),
@@ -46,14 +54,18 @@ offset_at(Id, Sec) ->
     end.
 
 %% Smallest transition time T (epoch seconds) with T > Sec where the UTC
-%% offset changes. {ok, T} | {error, nil}.
+%% offset changes.
+%%   {found, T}     -- the next transition
+%%   no_transition  -- the zone has none after Sec (a `null` result for JS)
+%%   unloadable     -- the zone's TZif data could not be read/parsed
+%% The last two used to be indistinguishable; they are different bugs.
 next_transition(Id, Sec) ->
     case zone(Id) of
-        error -> {error, nil};
-        {_First, Trans, Footer} ->
+        {error, _} -> unloadable;
+        {ok, {_First, Trans, Footer}} ->
             LastT = last_transition_time(Trans),
             case [T || {T, _} <- Trans, T > Sec] of
-                [T | _] -> {ok, T};
+                [T | _] -> {found, T};
                 [] ->
                     case Footer of
                         {dst, _, _, _, _} ->
@@ -65,19 +77,20 @@ next_transition(Id, Sec) ->
                                           T > Sec,
                                           LastT =:= none orelse T > LastT],
                             case Cands of
-                                [] -> {error, nil};
-                                _ -> {ok, lists:min(Cands)}
+                                [] -> no_transition;
+                                _ -> {found, lists:min(Cands)}
                             end;
-                        _ -> {error, nil}
+                        _ -> no_transition
                     end
             end
     end.
 
 %% Largest transition time T with T < Sec where the UTC offset changes.
+%% Same three-way result as next_transition/2.
 previous_transition(Id, Sec) ->
     case zone(Id) of
-        error -> {error, nil};
-        {_First, Trans, Footer} ->
+        {error, _} -> unloadable;
+        {ok, {_First, Trans, Footer}} ->
             LastT = last_transition_time(Trans),
             FooterCands =
                 case Footer of
@@ -91,10 +104,10 @@ previous_transition(Id, Sec) ->
             case FooterCands of
                 [] ->
                     case [T || {T, _} <- Trans, T < Sec] of
-                        [] -> {error, nil};
-                        Ts -> {ok, lists:max(Ts)}
+                        [] -> no_transition;
+                        Ts -> {found, lists:max(Ts)}
                     end;
-                _ -> {ok, lists:max(FooterCands)}
+                _ -> {found, lists:max(FooterCands)}
             end
     end.
 
@@ -108,6 +121,126 @@ follow_links(Id, Links, N) ->
     case maps:find(string:lowercase(Id), Links) of
         {ok, Target} -> follow_links(Target, Links, N - 1);
         error -> Id
+    end.
+
+%% ----------------------------------------------------------------------
+%% Host time zone — Date's LocalTZA (ES2024 §21.4.1.25)
+%% ----------------------------------------------------------------------
+
+%% The host's IANA zone id, or `none` when it cannot be resolved — in which
+%% case the runtime's local time simply is UTC. Cached in persistent_term
+%% alongside the zone tables; the host zone cannot change under a live VM.
+host_zone() ->
+    case persistent_term:get({?MODULE, host_zone}, undefined) of
+        undefined ->
+            Z = detect_host_zone(),
+            persistent_term:put({?MODULE, host_zone}, Z),
+            Z;
+        Z -> Z
+    end.
+
+%% TZ overrides the host default (as it does for libc, and as node does);
+%% otherwise /etc/localtime, a symlink into the zoneinfo tree on every platform
+%% we support.
+detect_host_zone() ->
+    case os:getenv("TZ") of
+        false -> zone_from_localtime_link();
+        Raw -> zone_from_tz_env(Raw)
+    end.
+
+zone_from_localtime_link() ->
+    case file:read_link_all("/etc/localtime") of
+        {ok, Target} -> zone_from_path(Target);
+        {error, _} -> none
+    end.
+
+%% ".../zoneinfo/Europe/London" -> <<"Europe/London">>.
+zone_from_path(Path) ->
+    case string:split(Path, "zoneinfo/", trailing) of
+        [_, Id] -> known_zone(Id);
+        _ -> none
+    end.
+
+%% TZ set but empty means UTC (POSIX), and so does a TZ we cannot resolve to a
+%% zone we can load — a bare POSIX rule string like "<-03>3" names no zoneinfo
+%% file. Either way TZ still wins: we do not silently fall back to the host
+%% default the user asked us to override.
+zone_from_tz_env(Raw) ->
+    %% glibc allows a leading ':' before either a zone name or a path.
+    Tz = string:trim(Raw, leading, ":"),
+    case known_zone(Tz) of
+        none -> zone_from_path(Tz);
+        Id -> Id
+    end.
+
+%% A host zone must name a zone we can actually load; a POSIX TZ string
+%% ("PST8PDT7,M3.2.0") that is not also a zoneinfo file is not one.
+known_zone("") -> none;
+known_zone(Name) ->
+    case lookup(unicode:characters_to_binary(Name)) of
+        {ok, Id} -> Id;
+        {error, nil} -> none
+    end.
+
+%% Local-minus-UTC offset in MINUTES at the UTC instant EpochMs.
+%% 0 when the host zone is unresolvable or its data cannot be loaded (the
+%% failure is logged by load_zone/1 for anything but a missing database).
+offset_at_utc_ms(EpochMs) when is_integer(EpochMs) ->
+    case host_zone() of
+        none -> 0;
+        Zone -> to_minutes(host_offset(Zone, floor_div(EpochMs, 1000)))
+    end.
+
+%% Local-minus-UTC offset in MINUTES for the local wall-clock time LocalMs
+%% (§21.4.1.25 LocalTZA with isUTC = false): a local time that a transition
+%% skips or repeats "must be interpreted using the time zone offset before the
+%% transition".
+offset_at_local_ms(LocalMs) when is_integer(LocalMs) ->
+    case host_zone() of
+        none -> 0;
+        Zone ->
+            LocalSec = floor_div(LocalMs, 1000),
+            %% The instant a wall clock names is within a day of itself (all
+            %% offsets are < 24h), so the offsets a day either side are the
+            %% only two candidates.
+            Before = host_offset(Zone, LocalSec - 86400),
+            After = host_offset(Zone, LocalSec + 86400),
+            to_minutes(local_offset(Zone, LocalSec, Before, After))
+    end.
+
+%% An offset is a possible reading of the wall clock when the instant it
+%% produces really has that offset. Two possible (ambiguous) or none possible
+%% (skipped) both resolve to `Before`, the offset before the transition.
+local_offset(_Zone, _LocalSec, none, _After) -> none;
+local_offset(_Zone, _LocalSec, _Before, none) -> none;
+local_offset(Zone, LocalSec, Before, After) ->
+    case is_possible(Zone, LocalSec, Before) of
+        true -> Before;
+        false ->
+            case is_possible(Zone, LocalSec, After) of
+                true -> After;
+                false -> Before
+            end
+    end.
+
+is_possible(Zone, LocalSec, Off) ->
+    host_offset(Zone, LocalSec - Off) =:= Off.
+
+host_offset(Zone, Sec) ->
+    case offset_at(Zone, Sec) of
+        {ok, Off} -> Off;
+        {error, nil} -> none
+    end.
+
+to_minutes(none) -> 0;
+to_minutes(OffSec) -> floor_div(OffSec, 60).
+
+%% Erlang's `div` truncates toward zero; every division here is of a signed
+%% instant/offset by a positive unit and wants floor.
+floor_div(A, B) ->
+    case A rem B =/= 0 andalso (A < 0) =/= (B < 0) of
+        true -> A div B - 1;
+        false -> A div B
     end.
 
 %% ----------------------------------------------------------------------
@@ -257,7 +390,8 @@ add_link_line(_, Acc) -> Acc.
 %% TZif file parsing
 %% ----------------------------------------------------------------------
 
-%% zone(Id) -> {FirstOffsetSec, [{TransitionSec, OffsetSec}], Footer} | error
+%% zone(Id) -> {ok, {FirstOffsetSec, [{TransitionSec, OffsetSec}], Footer}}
+%%           | {error, Reason}
 %% Transitions are ascending and deduplicated so each entry changes the
 %% offset. Footer is none | {fixed, OffSec} | {dst, StdOff, DstOff, R1, R2}.
 zone(Id) ->
@@ -270,17 +404,30 @@ zone(Id) ->
         Z -> Z
     end.
 
+%% {ok, Zone} | {error, no_zoneinfo} | {error, {read, Reason}}
+%%           | {error, {parse, Class, Reason}}
+%% "the host has no zoneinfo database" and "our TZif parser blew up on a file
+%% that does exist" are different problems; only the first is expected. Any
+%% unexpected reason is logged rather than silently swallowed.
 load_zone(Id) ->
     case root() of
-        none -> error;
+        none -> {error, no_zoneinfo};
         Root ->
             Path = filename:join(Root, binary_to_list(Id)),
             case file:read_file(Path) of
                 {ok, Bin} ->
-                    try parse_tzif(Bin)
-                    catch _:_ -> error
+                    try {ok, parse_tzif(Bin)}
+                    catch Class:Reason:Stack ->
+                        logger:warning(
+                          "arc_tz_ffi: cannot parse TZif ~ts: ~p:~p~n~p",
+                          [Path, Class, Reason, Stack]),
+                        {error, {parse, Class, Reason}}
                     end;
-                {error, _} -> error
+                {error, enoent} -> {error, {read, enoent}};
+                {error, Reason} ->
+                    logger:warning("arc_tz_ffi: cannot read ~ts: ~p",
+                                   [Path, Reason]),
+                    {error, {read, Reason}}
             end
     end.
 
@@ -365,43 +512,57 @@ parse_footer(<<"\n", Rest/binary>>) ->
     end;
 parse_footer(_) -> none.
 
+%% Every sub-parser below answers `{ok, Rest} | none` or `{ok, Value, Rest} |
+%% none`; `bind`/`bind3` chain them so a failure short-circuits to `none`
+%% instead of another level of nesting.
+bind(none, _F) -> none;
+bind({ok, Rest}, F) -> F(Rest).
+
+bind3(none, _F) -> none;
+bind3({ok, V, Rest}, F) -> F(V, Rest).
+
+%% "StdName StdOff [DstName [DstOff] [,Rule,Rule]]".
 parse_posix(S) ->
+    bind(parse_name(S),
+         fun(R1) ->
+             bind3(parse_posix_offset(R1),
+                   fun(StdPosix, R2) -> parse_posix_dst(-StdPosix, R2) end)
+         end).
+
+%% Everything after the standard-time name and offset. No DST name at all
+%% means the zone never leaves standard time.
+parse_posix_dst(StdOff, S) ->
     case parse_name(S) of
-        {ok, R1} ->
-            case parse_posix_offset(R1) of
-                {ok, StdPosix, R2} ->
-                    StdOff = -StdPosix,
-                    case parse_name(R2) of
-                        {ok, R3} ->
-                            {DstOff, R4} =
-                                case parse_posix_offset(R3) of
-                                    {ok, DP, RR} -> {-DP, RR};
-                                    none -> {StdOff + 3600, R3}
-                                end,
-                            case R4 of
-                                "," ++ R5 ->
-                                    case parse_rule(R5) of
-                                        {ok, Rule1, "," ++ R6} ->
-                                            case parse_rule(R6) of
-                                                {ok, Rule2, _} ->
-                                                    {dst, StdOff, DstOff,
-                                                     Rule1, Rule2};
-                                                _ -> {fixed, StdOff}
-                                            end;
-                                        _ -> {fixed, StdOff}
-                                    end;
-                                _ ->
-                                    %% DST named with no rule: use the POSIX
-                                    %% default US rule (M3.2.0, M11.1.0).
-                                    {dst, StdOff, DstOff,
-                                     {m, 3, 2, 0, 7200}, {m, 11, 1, 0, 7200}}
-                            end;
-                        none -> {fixed, StdOff}
-                    end;
-                none -> none
-            end;
-        none -> none
+        none -> {fixed, StdOff};
+        {ok, R3} ->
+            {DstOff, R4} =
+                case parse_posix_offset(R3) of
+                    {ok, DP, RR} -> {-DP, RR};
+                    none -> {StdOff + 3600, R3}
+                end,
+            parse_posix_rules(StdOff, DstOff, R4)
     end.
+
+%% The ",Rule,Rule" tail. A malformed or out-of-range rule degrades the whole
+%% footer to a fixed-offset zone rather than being carried into rule
+%% evaluation, which happens at query time outside any try/catch.
+parse_posix_rules(StdOff, DstOff, "," ++ R5) ->
+    Footer =
+        bind3(parse_rule(R5),
+              fun(Rule1, "," ++ R6) ->
+                      bind3(parse_rule(R6),
+                            fun(Rule2, _) ->
+                                    {dst, StdOff, DstOff, Rule1, Rule2}
+                            end);
+                 (_, _) -> none
+              end),
+    case Footer of
+        none -> {fixed, StdOff};
+        _ -> Footer
+    end;
+parse_posix_rules(StdOff, DstOff, _) ->
+    %% DST named with no rule: use the POSIX default US rule (M3.2.0, M11.1.0).
+    {dst, StdOff, DstOff, {m, 3, 2, 0, 7200}, {m, 11, 1, 0, 7200}}.
 
 %% Zone abbreviation: <...> quoted form or a run of letters.
 parse_name("<" ++ Rest) ->
@@ -448,35 +609,52 @@ parse_int(S) ->
         _ -> {ok, list_to_integer(Digits), R}
     end.
 
-%% Rule date: Mm.w.d | Jn | n, optionally followed by /time.
+%% Rule date: Mm.w.d | Jn | n, optionally followed by /time. Out-of-range
+%% components are rejected here, at parse time and inside load_zone/1's
+%% try/catch — footer rules are otherwise only *evaluated* at query time,
+%% where a bad month or weekday would crash calendar/1 with no handler.
+in_range(N, Lo, Hi) -> is_integer(N) andalso N >= Lo andalso N =< Hi.
+
 parse_rule("M" ++ R0) ->
-    case parse_int(R0) of
-        {ok, M, "." ++ R1} ->
-            case parse_int(R1) of
-                {ok, W, "." ++ R2} ->
-                    case parse_int(R2) of
-                        {ok, D, R3} ->
-                            {T, R4} = parse_rule_time(R3),
-                            {ok, {m, M, W, D, T}, R4};
-                        none -> none
-                    end;
-                _ -> none
-            end;
-        _ -> none
-    end;
+    bind3(parse_int(R0),
+          fun(M, "." ++ R1) ->
+                  bind3(parse_int(R1),
+                        fun(W, "." ++ R2) ->
+                                bind3(parse_int(R2),
+                                      fun(D, R3) ->
+                                              {T, R4} = parse_rule_time(R3),
+                                              rule_m(M, W, D, T, R4)
+                                      end);
+                           (_, _) -> none
+                        end);
+             (_, _) -> none
+          end);
 parse_rule("J" ++ R0) ->
-    case parse_int(R0) of
-        {ok, N, R1} ->
-            {T, R2} = parse_rule_time(R1),
-            {ok, {j, N, T}, R2};
-        none -> none
-    end;
+    bind3(parse_int(R0),
+          fun(N, R1) ->
+                  {T, R2} = parse_rule_time(R1),
+                  %% Jn: 1..365, February 29 never counted.
+                  case in_range(N, 1, 365) of
+                      true -> {ok, {j, N, T}, R2};
+                      false -> none
+                  end
+          end);
 parse_rule(S) ->
-    case parse_int(S) of
-        {ok, N, R1} ->
-            {T, R2} = parse_rule_time(R1),
-            {ok, {d0, N, T}, R2};
-        none -> none
+    bind3(parse_int(S),
+          fun(N, R1) ->
+                  {T, R2} = parse_rule_time(R1),
+                  %% n: zero-based day of year, 0..365.
+                  case in_range(N, 0, 365) of
+                      true -> {ok, {d0, N, T}, R2};
+                      false -> none
+                  end
+          end).
+
+%% Mm.w.d: month 1..12, week 1..5 (5 = last), weekday 0..6 (0 = Sunday).
+rule_m(M, W, D, T, Rest) ->
+    case in_range(M, 1, 12) andalso in_range(W, 1, 5) andalso in_range(D, 0, 6) of
+        true -> {ok, {m, M, W, D, T}, Rest};
+        false -> none
     end.
 
 parse_rule_time("/" ++ R0) ->
