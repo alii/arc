@@ -197,6 +197,15 @@ pub type Scope {
     /// body would be an early error), so the emitter's Annex B target walk
     /// only steps THROUGH a `CatchBinding` when this is True.
     catch_param_simple: Bool,
+    /// §10.2.11 step 28: this Block IS the body of a function whose
+    /// parameter list is non-simple, and therefore the sink every body
+    /// `var` / hoisted FunctionDeclaration binds in (see
+    /// `RawScope.is_var_boundary` / `sb_var_target`). With a SIMPLE
+    /// parameter list those same bindings would live in the function root,
+    /// so anything reasoning about "the function's var scope" must treat
+    /// this Block as part of it — `insert_captures` does. False everywhere
+    /// else, including on the function root itself.
+    is_var_boundary: Bool,
   )
 }
 
@@ -455,9 +464,9 @@ pub type RawScope {
     /// params, the `<paramN>` shims, `arguments`, and the NFE self-name).
     /// Closures created by parameter initializers are children of the
     /// Function scope and therefore can never see body declarations.
-    /// Parser/finalize-internal: emit identifies the body scope
-    /// positionally (it is the sole trailing block-kind child of the
-    /// function root), so the flag is not propagated to the final `Scope`.
+    /// Carried through to `Scope.is_var_boundary` so post-parse passes
+    /// (`insert_captures`) can recognise the body sink without the
+    /// positional "sole trailing block-kind child" heuristic emit uses.
     is_var_boundary: Bool,
   )
 }
@@ -1689,6 +1698,7 @@ fn finalize_scope(
       annexb_blocked: raw.annexb_blocked,
       is_strict:,
       catch_param_simple: raw.catch_param_simple,
+      is_var_boundary: raw.is_var_boundary,
     )
   let st =
     FinSt(
@@ -2876,17 +2886,52 @@ fn insert_captures(
     })
   // A capture whose name is ALSO declared by this function (e.g. an
   // eval-poisoned body that declares `var x` while the parent has `x`)
-  // is SHADOWED: the own declaration wins everywhere. `shadowed` is the
-  // one predicate both writes below consult, so `do_lookup` (which reads
-  // `root.bindings`) and `local_names` (which reads `info.names`) can
-  // never disagree about which slot `x` is. The capture slot stays
-  // reserved and is still filled from `env_descriptors[i]`; it is simply
-  // not nameable from inside this frame.
-  let root_bindings =
-    dict.get(scopes, fn_id)
+  // is SHADOWED: the own declaration wins and the capture, though its
+  // slot stays reserved and is still filled from `env_descriptors[i]`,
+  // is not nameable from inside this frame.
+  //
+  // The two writes below need DIFFERENT shadow sets, because they have
+  // different reach:
+  //
+  //   * `root_shadowed` gates the CaptureBinding insert. `do_lookup` from
+  //     any scope in this function walks up to the root, so a root
+  //     binding hides the capture everywhere — but a binding in a nested
+  //     block must NOT, or a reference outside that block would lose the
+  //     capture entirely.
+  //   * `names_shadowed` gates the `FunctionInfo.names` write, and adds
+  //     the §10.2.11 step-28 var-boundary body Block. That Block is where
+  //     `sb_var_target` sinks every body-level `var` / hoisted function of
+  //     a NON-SIMPLE-parameter function; with a simple parameter list the
+  //     very same bindings would sit in the root and shadow. `names` is a
+  //     flat name→slot map with no block structure, so it cannot express
+  //     "capture at the root, own binding inside the block" — and letting
+  //     the capture win there makes direct eval in the body read the
+  //     parent's box instead of the body's `var`.
+  //
+  // `names` and `do_lookup` therefore still disagree in the two places the
+  // flat map has nowhere to record: a name declared only in an ordinary
+  // nested block, and a direct eval in a PARAMETER initializer naming a
+  // body `var` (it now sees the body slot, not the capture). Both are
+  // strictly rarer than the body-eval case this gate exists to get right.
+  let scope_bindings = fn(sid) {
+    dict.get(scopes, sid)
     |> result.map(fn(s: Scope) { s.bindings })
     |> result.unwrap(dict.new())
-  let shadowed = fn(name) { dict.has_key(root_bindings, name) }
+  }
+  let root_bindings = scope_bindings(fn_id)
+  let root_shadowed = fn(name) { dict.has_key(root_bindings, name) }
+  let var_boundary_names =
+    own_scope_ids
+    |> list.filter(fn(sid) {
+      dict.get(scopes, sid)
+      |> result.map(fn(s: Scope) { s.is_var_boundary })
+      |> result.unwrap(False)
+    })
+    |> list.flat_map(fn(sid) { dict.keys(scope_bindings(sid)) })
+    |> set.from_list
+  let names_shadowed = fn(name) {
+    root_shadowed(name) || set.contains(var_boundary_names, name)
+  }
   // Insert CaptureBinding entries at slots 0..N-1 in the function-root
   // scope so `do_lookup` resolves captured names to a Local in THIS frame
   // and `visible_at_creation` exposes them to grandchildren. Captures are
@@ -2899,7 +2944,7 @@ fn insert_captures(
       let bindings =
         list.index_fold(captures, root.bindings, fn(bs, cap, i) {
           let #(name, _parent_slot) = cap
-          use <- bool.guard(shadowed(name), bs)
+          use <- bool.guard(root_shadowed(name), bs)
           let origin = case
             set.contains(const_captures, name),
             set.contains(fn_name_captures, name)
@@ -2924,13 +2969,13 @@ fn insert_captures(
   }
   // Shift the per-function names map and bump local_count; record capture
   // names at their new slots so direct-eval `local_names` exposes them.
-  // Same `shadowed` gate as the CaptureBinding insert above: a shadowed
-  // name keeps its (already-shifted) own-declaration slot.
+  // The wider `names_shadowed` gate (see above): a shadowed name keeps its
+  // (already-shifted) own-declaration slot.
   let info = function_info(tree, fn_id)
   let names =
     dict.map_values(info.names, fn(_n, slot) { slot + cap_count })
     |> list.index_fold(captures, _, fn(d, cap, i) {
-      case shadowed(cap.0) {
+      case names_shadowed(cap.0) {
         True -> d
         False -> dict.insert(d, cap.0, i)
       }
