@@ -13,8 +13,12 @@
 %% constructors — and doing it with the real JsNum shape means the Gleam
 %% side is forced by the type checker to handle them, with no hand-kept
 %% integer-tag table to drift out of sync on either side.
+%% Integer/float element widths arrive as the Gleam `IntElem` / `FloatElem`
+%% atoms (i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64, f32 | f64) — one clause
+%% per element the codecs actually implement. A shape with no clause is a
+%% `function_clause` crash, never a wrong-width read of an adjacent element.
 -module(arc_typed_array_ffi).
--export([ta_zeroed/1, ta_get_int/4, ta_set_int/4, ta_get_float/3,
+-export([ta_zeroed/1, ta_get_int/3, ta_set_int/4, ta_get_float/3,
          ta_set_float/4, ta_clamp_uint8/1, ta_splice/3, ta_fill_region/4]).
 
 %% Allocate an all-zero binary of N bytes (ArrayBuffer backing store).
@@ -35,17 +39,36 @@ ta_fill_region(Bin, _Off, Count, _ElemBin) when Count =< 0 -> Bin;
 ta_fill_region(Bin, Off, Count, ElemBin) ->
     ta_splice(Bin, Off, binary:copy(ElemBin, Count)).
 
-%% Read a little-endian integer element. SizeBits in {8,16,32,64}.
-ta_get_int(Bin, Off, SizeBits, true) ->
+%% Read a little-endian integer element, one clause per IntElem.
+ta_get_int(Bin, Off, i8)  -> get_int(Bin, Off, 8, signed);
+ta_get_int(Bin, Off, u8)  -> get_int(Bin, Off, 8, unsigned);
+ta_get_int(Bin, Off, i16) -> get_int(Bin, Off, 16, signed);
+ta_get_int(Bin, Off, u16) -> get_int(Bin, Off, 16, unsigned);
+ta_get_int(Bin, Off, i32) -> get_int(Bin, Off, 32, signed);
+ta_get_int(Bin, Off, u32) -> get_int(Bin, Off, 32, unsigned);
+ta_get_int(Bin, Off, i64) -> get_int(Bin, Off, 64, signed);
+ta_get_int(Bin, Off, u64) -> get_int(Bin, Off, 64, unsigned).
+
+get_int(Bin, Off, SizeBits, signed) ->
     <<_:Off/binary, V:SizeBits/little-signed, _/bits>> = Bin,
     V;
-ta_get_int(Bin, Off, SizeBits, false) ->
+get_int(Bin, Off, SizeBits, unsigned) ->
     <<_:Off/binary, V:SizeBits/little-unsigned, _/bits>> = Bin,
     V.
 
-%% Write a little-endian integer element. Erlang truncates V mod 2^SizeBits
-%% when encoding, which is exactly the ToInt8/ToUint32/... wrap semantics.
-ta_set_int(Bin, Off, SizeBits, V) ->
+%% Write a little-endian integer element, one clause per IntElem. Erlang
+%% truncates V mod 2^SizeBits when encoding, which is exactly the
+%% ToInt8/ToUint32/... wrap semantics — signedness is irrelevant on write.
+ta_set_int(Bin, Off, i8, V)  -> set_int(Bin, Off, 8, V);
+ta_set_int(Bin, Off, u8, V)  -> set_int(Bin, Off, 8, V);
+ta_set_int(Bin, Off, i16, V) -> set_int(Bin, Off, 16, V);
+ta_set_int(Bin, Off, u16, V) -> set_int(Bin, Off, 16, V);
+ta_set_int(Bin, Off, i32, V) -> set_int(Bin, Off, 32, V);
+ta_set_int(Bin, Off, u32, V) -> set_int(Bin, Off, 32, V);
+ta_set_int(Bin, Off, i64, V) -> set_int(Bin, Off, 64, V);
+ta_set_int(Bin, Off, u64, V) -> set_int(Bin, Off, 64, V).
+
+set_int(Bin, Off, SizeBits, V) ->
     SizeBytes = SizeBits div 8,
     <<Before:Off/binary, _:SizeBytes/binary, After/bits>> = Bin,
     <<Before/binary, V:SizeBits/little, After/bits>>.
@@ -53,7 +76,7 @@ ta_set_int(Bin, Off, SizeBits, V) ->
 %% Read a float element as a `value.JsNum`. NaN/Inf bit patterns cannot be
 %% decoded by an Erlang float segment, so the exponent is inspected on the
 %% raw bits first.
-ta_get_float(Bin, Off, 32) ->
+ta_get_float(Bin, Off, f32) ->
     <<_:Off/binary, B:32/little, _/bits>> = Bin,
     case <<B:32>> of
         <<0:1, 16#FF:8, 0:23>> -> infinity;
@@ -61,7 +84,7 @@ ta_get_float(Bin, Off, 32) ->
         <<_:1, 16#FF:8, _:23>> -> na_n;
         <<F:32/float>> -> {finite, F}
     end;
-ta_get_float(Bin, Off, 64) ->
+ta_get_float(Bin, Off, f64) ->
     <<_:Off/binary, B:64/little, _/bits>> = Bin,
     case <<B:64>> of
         <<0:1, 16#7FF:11, 0:52>> -> infinity;
@@ -73,10 +96,10 @@ ta_get_float(Bin, Off, 64) ->
 %% Write a float element given as a `value.JsNum`. Finite values that
 %% overflow the 32-bit range round to the correctly-signed infinity
 %% (IEEE 754 round-to-nearest), matching Float32Array store semantics.
-ta_set_float(Bin, Off, 32, N) ->
-    ta_set_int(Bin, Off, 32, f32_bits(N));
-ta_set_float(Bin, Off, 64, N) ->
-    ta_set_int(Bin, Off, 64, f64_bits(N)).
+ta_set_float(Bin, Off, f32, N) ->
+    set_int(Bin, Off, 32, f32_bits(N));
+ta_set_float(Bin, Off, f64, N) ->
+    set_int(Bin, Off, 64, f64_bits(N)).
 
 %% The ENCODE `<<V:32/float>>` never fails: a finite float64 whose magnitude
 %% exceeds the float32 range is rounded to ±infinity's bit pattern by the
