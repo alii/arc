@@ -19,13 +19,67 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
+/// What `init` hands back: the Number type itself plus the four global function
+/// objects it allocates on the way (they live here because §21.1.2.12/.13 make
+/// two of them shared with the Number constructor's own properties).
+///
+/// Named fields, not a tuple of four structurally identical `Ref`s — swapping
+/// parse_int with parse_float, or is_nan with is_finite, used to typecheck.
+pub type NumberBuiltins {
+  NumberBuiltins(
+    type_: BuiltinType,
+    parse_int: Ref,
+    parse_float: Ref,
+    is_nan: Ref,
+    is_finite: Ref,
+  )
+}
+
 /// Set up Number constructor + Number.prototype + global parseInt/parseFloat/isNaN/isFinite.
-/// Returns #(Heap, BuiltinType, parse_int_ref, parse_float_ref, is_nan_ref, is_finite_ref).
 pub fn init(
   h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-) -> #(Heap(host), BuiltinType, Ref, Ref, Ref, Ref) {
+) -> #(Heap(host), NumberBuiltins) {
+  // Global utility functions. parseInt/parseFloat are allocated FIRST because
+  // §21.1.2.13/§21.1.2.12 require `Number.parseInt === parseInt` and
+  // `Number.parseFloat === parseFloat` — the constructor installs these very
+  // refs below rather than allocating twins.
+  let #(h, parse_int_ref) =
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalParseInt),
+      "parseInt",
+      2,
+    )
+  let #(h, parse_float_ref) =
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalParseFloat),
+      "parseFloat",
+      1,
+    )
+  // Number.isNaN / Number.isFinite are deliberately NOT the globals: they skip
+  // ToNumber coercion, so they are distinct function objects (§21.1.2.2/.4).
+  let #(h, is_nan_ref) =
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalIsNaN),
+      "isNaN",
+      1,
+    )
+  let #(h, is_finite_ref) =
+    common.alloc_native_fn(
+      h,
+      function_proto,
+      NumberNative(GlobalIsFinite),
+      "isFinite",
+      1,
+    )
+
   // Static methods on Number constructor
   let #(h, static_methods) =
     common.alloc_methods(h, function_proto, [
@@ -33,9 +87,12 @@ pub fn init(
       #("isFinite", NumberNative(NumberIsFinite), 1),
       #("isInteger", NumberNative(NumberIsInteger), 1),
       #("isSafeInteger", NumberNative(NumberIsSafeInteger), 1),
-      #("parseInt", NumberNative(NumberParseInt), 2),
-      #("parseFloat", NumberNative(NumberParseFloat), 1),
     ])
+  // Same shape common.alloc_methods produces, but pointing at the global refs.
+  let shared_globals = [
+    #("parseInt", value.builtin_property(JsObject(parse_int_ref))),
+    #("parseFloat", value.builtin_property(JsObject(parse_float_ref))),
+  ]
 
   // Static constants
   let constants = [
@@ -54,40 +111,6 @@ pub fn init(
     #("MIN_VALUE", value.data(JsNumber(Finite(5.0e-324)))),
   ]
 
-  // Global utility functions (separate refs — these are standalone globals)
-  let #(h, parse_int_ref) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      NumberNative(GlobalParseInt),
-      "parseInt",
-      2,
-    )
-  let #(h, parse_float_ref) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      NumberNative(GlobalParseFloat),
-      "parseFloat",
-      1,
-    )
-  let #(h, is_nan_ref) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      NumberNative(GlobalIsNaN),
-      "isNaN",
-      1,
-    )
-  let #(h, is_finite_ref) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      NumberNative(GlobalIsFinite),
-      "isFinite",
-      1,
-    )
-
   // Number.prototype methods
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
@@ -98,9 +121,15 @@ pub fn init(
       #("toExponential", NumberNative(NumberPrototypeToExponential), 1),
     ])
 
-  let ctor_props = list.append(constants, static_methods)
+  // Number.parseInt/parseFloat are the SAME function objects as the globals
+  // (§21.1.2.13/§21.1.2.12), so shared_globals goes in alongside the constants
+  // and the Number-only static methods.
+  let ctor_props =
+    list.append(constants, list.append(static_methods, shared_globals))
+  // ES2024 §21.1.3: the Number prototype object is itself a Number object,
+  // with a [[NumberData]] internal slot whose value is +0.
   let #(h, bt) =
-    common.init_type(
+    common.init_wrapper_type(
       h,
       object_proto,
       function_proto,
@@ -109,13 +138,19 @@ pub fn init(
       "Number",
       1,
       ctor_props,
+      proto_kind: NumberObject(value: Finite(0.0)),
     )
 
-  // ES2024 §21.1.3: The Number prototype object has a [[NumberData]] internal
-  // slot with value +0. Update from OrdinaryObject to NumberObject.
-  let h = heap.update_kind(h, bt.prototype, NumberObject(value: Finite(0.0)))
-
-  #(h, bt, parse_int_ref, parse_float_ref, is_nan_ref, is_finite_ref)
+  #(
+    h,
+    NumberBuiltins(
+      type_: bt,
+      parse_int: parse_int_ref,
+      parse_float: parse_float_ref,
+      is_nan: is_nan_ref,
+      is_finite: is_finite_ref,
+    ),
+  )
 }
 
 /// Per-module dispatch for Number native functions.

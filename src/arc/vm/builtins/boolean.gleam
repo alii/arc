@@ -19,8 +19,11 @@ pub fn init(
       #("valueOf", BooleanNative(BooleanPrototypeValueOf), 0),
       #("toString", BooleanNative(BooleanPrototypeToString), 0),
     ])
+  // ES2024 §20.3.3: the Boolean prototype object is itself a Boolean object,
+  // with a [[BooleanData]] internal slot whose value is false — hence
+  // init_wrapper_type rather than init_type.
   let #(h, bt) =
-    common.init_type(
+    common.init_wrapper_type(
       h,
       object_proto,
       function_proto,
@@ -29,11 +32,8 @@ pub fn init(
       "Boolean",
       1,
       [],
+      proto_kind: BooleanObject(value: False),
     )
-
-  // ES2024 §20.3.3: The Boolean prototype object has a [[BooleanData]] internal
-  // slot with value false. Update from OrdinaryObject to BooleanObject.
-  let h = heap.update_kind(h, bt.prototype, BooleanObject(value: False))
 
   #(h, bt)
 }
