@@ -25,16 +25,17 @@ import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type LegacySlot, type Ref, type RegExpNativeFn, Dispatch, Finite,
   JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, LegacyInput,
-  LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen,
-  LegacyRightContext, NativeFunction, ObjectSlot, OrdinaryObject,
-  RegExpConstructor, RegExpGetDotAll, RegExpGetFlags, RegExpGetGlobal,
-  RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline, RegExpGetSource,
-  RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets, RegExpLegacyGetter,
-  RegExpLegacyInputSetter, RegExpNative, RegExpObject, RegExpPrototypeCompile,
-  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
-  RegExpStringIteratorNext, RegExpStringIteratorObject, RegExpSymbolMatch,
-  RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
-  RegExpSymbolSplit,
+  LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen1,
+  LegacyParen2, LegacyParen3, LegacyParen4, LegacyParen5, LegacyParen6,
+  LegacyParen7, LegacyParen8, LegacyParen9, LegacyRightContext, NativeFunction,
+  ObjectSlot, OrdinaryObject, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags,
+  RegExpGetGlobal, RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline,
+  RegExpGetSource, RegExpGetSticky, RegExpGetUnicode, RegExpGetUnicodeSets,
+  RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpNative, RegExpObject,
+  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
+  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpStringIteratorObject,
+  RegExpSymbolMatch, RegExpSymbolMatchAll, RegExpSymbolReplace,
+  RegExpSymbolSearch, RegExpSymbolSplit,
 }
 import gleam/bit_array
 import gleam/bool
@@ -78,8 +79,8 @@ fn next_char_boundary(string: String, position: Int) -> Int
 // RegExp String Iterator internal state (§22.2.9) lives in the typed
 // `value.RegExpStringIteratorObject` object kind, and the legacy static
 // property slots (tc39 proposal-regexp-legacy-features) live in the `legacy`
-// dict inside the %RegExp% constructor's NativeFunction(RegExpConstructor)
-// kind, keyed by `value.LegacySlot`. Both keep each realm's state private —
+// record (`value.LegacyStatics`) inside the %RegExp% constructor's
+// NativeFunction(RegExpConstructor) kind. Both keep each realm's state private —
 // neither is a property, so nothing shows up in Reflect.ownKeys /
 // Object.getOwnPropertySymbols.
 
@@ -121,7 +122,9 @@ pub fn init(
       object_proto,
       function_proto,
       proto_props,
-      fn(_) { Dispatch(RegExpNative(RegExpConstructor(dict.new()))) },
+      fn(_) {
+        Dispatch(RegExpNative(RegExpConstructor(value.empty_legacy_statics())))
+      },
       "RegExp",
       2,
       [],
@@ -212,22 +215,25 @@ fn install_legacy_accessors(
   function_proto: Ref,
   ctor: Ref,
 ) -> Heap(host) {
-  let getter_only =
-    [
-      #("lastMatch", LegacyLastMatch),
-      #("$&", LegacyLastMatch),
-      #("lastParen", LegacyLastParen),
-      #("$+", LegacyLastParen),
-      #("leftContext", LegacyLeftContext),
-      #("$`", LegacyLeftContext),
-      #("rightContext", LegacyRightContext),
-      #("$'", LegacyRightContext),
-    ]
-    |> list.append(
-      int.range(1, 10, [], fn(acc, n) {
-        [#("$" <> int.to_string(n), LegacyParen(n)), ..acc]
-      }),
-    )
+  let getter_only = [
+    #("lastMatch", LegacyLastMatch),
+    #("$&", LegacyLastMatch),
+    #("lastParen", LegacyLastParen),
+    #("$+", LegacyLastParen),
+    #("leftContext", LegacyLeftContext),
+    #("$`", LegacyLeftContext),
+    #("rightContext", LegacyRightContext),
+    #("$'", LegacyRightContext),
+    #("$1", LegacyParen1),
+    #("$2", LegacyParen2),
+    #("$3", LegacyParen3),
+    #("$4", LegacyParen4),
+    #("$5", LegacyParen5),
+    #("$6", LegacyParen6),
+    #("$7", LegacyParen7),
+    #("$8", LegacyParen8),
+    #("$9", LegacyParen9),
+  ]
 
   // input/$_ get a setter as well; everything else is getter-only.
   let #(h, props) =
@@ -349,7 +355,18 @@ fn legacy_static_get(
         state,
         "RegExp legacy static properties may only be accessed on the RegExp constructor",
       )
-    True -> #(state, Ok(JsString(read_legacy_slot(state, ctor, slot))))
+    True ->
+      case read_legacy_statics(state, ctor) {
+        Some(statics) -> #(
+          state,
+          Ok(JsString(value.legacy_slot(statics, slot))),
+        )
+        None ->
+          state.type_error(
+            state,
+            "RegExp legacy static properties may only be accessed on the RegExp constructor",
+          )
+      }
   }
 }
 
@@ -370,14 +387,22 @@ fn legacy_static_set_input(
     True -> {
       let val = helpers.first_arg_or_undefined(args)
       use s, state <- coerce.try_to_string(state, val)
-      let heap = write_legacy_slots(state.heap, ctor, [#(LegacyInput, s)])
+      let heap =
+        write_legacy_statics(state.heap, ctor, fn(statics) {
+          value.LegacyStatics(..statics, input: s)
+        })
       #(State(..state, heap:), Ok(JsUndefined))
     }
   }
 }
 
-/// Read one legacy slot off the constructor ("" when never written).
-fn read_legacy_slot(state: State(host), ctor: Ref, slot: LegacySlot) -> String {
+/// Read the constructor's legacy statics. `None` only when `ctor` is not a
+/// %RegExp% constructor object at all — never "this slot was never set", which
+/// the typed record makes unrepresentable (every slot always holds a String).
+fn read_legacy_statics(
+  state: State(host),
+  ctor: Ref,
+) -> Option(value.LegacyStatics) {
   case heap.read(state.heap, ctor) {
     Some(ObjectSlot(
       kind: NativeFunction(
@@ -385,18 +410,18 @@ fn read_legacy_slot(state: State(host), ctor: Ref, slot: LegacySlot) -> String {
         ..,
       ),
       ..,
-    )) -> dict.get(legacy, slot) |> result.unwrap("")
-    _ -> ""
+    )) -> Some(legacy)
+    _ -> None
   }
 }
 
-/// Write legacy slots into the constructor kind's hidden `legacy` state —
-/// internal slots, deliberately NOT properties, so they never appear in
+/// Rewrite the constructor kind's hidden `legacy` record — internal slots,
+/// deliberately NOT properties, so they never appear in
 /// Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
-fn write_legacy_slots(
+fn write_legacy_statics(
   h: Heap(host),
   ctor: Ref,
-  values: List(#(LegacySlot, String)),
+  update: fn(value.LegacyStatics) -> value.LegacyStatics,
 ) -> Heap(host) {
   heap.update(h, ctor, fn(slot) {
     case slot {
@@ -410,15 +435,7 @@ fn write_legacy_slots(
         ObjectSlot(
           ..slot,
           kind: NativeFunction(
-            native: Dispatch(
-              RegExpNative(
-                RegExpConstructor(
-                  legacy: list.fold(values, legacy, fn(acc, pair) {
-                    dict.insert(acc, pair.0, pair.1)
-                  }),
-                ),
-              ),
-            ),
+            native: Dispatch(RegExpNative(RegExpConstructor(update(legacy)))),
             constructible:,
           ),
         )
@@ -445,25 +462,34 @@ fn update_legacy_statics(
   }
   let group_strings = list.map(groups, capture_to_legacy_string(s, _))
   let last_paren = list.last(group_strings) |> result.unwrap("")
-  let parens =
-    int.range(1, 10, [], fn(acc, n) {
-      [
-        #(
-          LegacyParen(n),
-          helpers.list_at(group_strings, n - 1) |> option.unwrap(""),
-        ),
-        ..acc
-      ]
-    })
+  // Groups the pattern doesn't have read as "" — the spec's [[RegExpParenN]]
+  // for N > the group count.
+  let paren = fn(n) {
+    helpers.list_at(group_strings, n - 1) |> option.unwrap("")
+  }
   let heap =
-    write_legacy_slots(state.heap, state.builtins.regexp.constructor, [
-      #(LegacyInput, s),
-      #(LegacyLastMatch, byte_slice(s, match_start, match_len)),
-      #(LegacyLastParen, last_paren),
-      #(LegacyLeftContext, byte_slice(s, 0, match_start)),
-      #(LegacyRightContext, byte_drop_start(s, match_start + match_len)),
-      ..parens
-    ])
+    write_legacy_statics(
+      state.heap,
+      state.builtins.regexp.constructor,
+      fn(_previous) {
+        value.LegacyStatics(
+          input: s,
+          last_match: byte_slice(s, match_start, match_len),
+          last_paren:,
+          left_context: byte_slice(s, 0, match_start),
+          right_context: byte_drop_start(s, match_start + match_len),
+          paren1: paren(1),
+          paren2: paren(2),
+          paren3: paren(3),
+          paren4: paren(4),
+          paren5: paren(5),
+          paren6: paren(6),
+          paren7: paren(7),
+          paren8: paren(8),
+          paren9: paren(9),
+        )
+      },
+    )
   State(..state, heap:)
 }
 
@@ -715,14 +741,8 @@ fn try_regexp_exec(
         }
         False ->
           case heap.read(state.heap, ref) {
-            Some(ObjectSlot(kind: RegExpObject(pattern:, flags:), ..)) -> {
-              use result, state <- try_builtin_exec(
-                state,
-                ref,
-                pattern,
-                flags,
-                s,
-              )
+            Some(ObjectSlot(kind: RegExpObject(..), ..)) -> {
+              use result, state <- try_builtin_exec(state, ref, s)
               cont(result, state)
             }
             _ ->
@@ -743,11 +763,14 @@ fn try_regexp_exec(
 
 /// §22.2.7.2 RegExpBuiltinExec ( R, S ) — returns the match-result array or
 /// null. lastIndex is read/written through the observable Get/Set protocol.
+///
+/// [[OriginalSource]]/[[OriginalFlags]] are read off `ref` HERE, after the
+/// observable Get(R, "lastIndex") — a poisoned lastIndex getter (or, upstream,
+/// a poisoned ToString on the argument) can call `R.compile(...)`, and the
+/// match must then run the NEW pattern, not one snapshotted by the caller.
 fn try_builtin_exec(
   state: State(host),
   ref: Ref,
-  pattern: String,
-  flags: String,
   s: String,
   cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
@@ -755,6 +778,7 @@ fn try_builtin_exec(
   // Step 2: lastIndex = ? ToLength(? Get(R, "lastIndex")) — always read.
   use li_val, state <- try_get(state, ref, "lastIndex")
   use last_index, state <- coerce.try_to_length(state, li_val)
+  use pattern, flags, state <- with_regexp_slot(state, ref)
   let global = string.contains(flags, "g")
   let sticky = string.contains(flags, "y")
   let has_indices = string.contains(flags, "d")
@@ -787,8 +811,12 @@ fn try_builtin_exec(
       // Step 16: Set(R, "lastIndex", e, true) iff global or sticky.
       use state <- maybe_write_last_index(state, ref, global || sticky, e)
       // Legacy-regexp proposal: UpdateLegacyRegExpStaticProperties on every
-      // successful builtin exec (RegExp.input, RegExp.$1-$9, etc.).
-      let state = update_legacy_statics(state, s, captures)
+      // successful builtin exec (RegExp.input, RegExp.$1-$9, etc.) — but only
+      // when R has [[LegacyFeaturesEnabled]], same gate `compile` uses.
+      let state = case legacy_features_enabled(state, ref) {
+        True -> update_legacy_statics(state, s, captures)
+        False -> state
+      }
       build_exec_result(
         state,
         s,
@@ -1020,10 +1048,12 @@ fn regexp_exec(
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: RegExpObject(pattern:, flags:), ..)) -> {
+        // Slot re-read inside try_builtin_exec: ToString(argument) below can
+        // run user code that calls `re.compile(...)`.
+        Some(ObjectSlot(kind: RegExpObject(..), ..)) -> {
           let arg = helpers.first_arg_or_undefined(args)
           use str, state <- coerce.try_to_string(state, arg)
-          use result, state <- try_builtin_exec(state, ref, pattern, flags, str)
+          use result, state <- try_builtin_exec(state, ref, str)
           #(state, Ok(result))
         }
         _ -> not_regexp(state, "exec")
@@ -1042,6 +1072,22 @@ fn not_regexp(
   )
 }
 
+/// Read [[OriginalSource]]/[[OriginalFlags]] off `ref` right now. Callers must
+/// re-read through this after every observable step — user code reachable from
+/// ToString/valueOf/getters can `compile()` the RegExp out from under them.
+fn with_regexp_slot(
+  state: State(host),
+  ref: Ref,
+  cont: fn(String, String, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind: RegExpObject(pattern:, flags:), ..)) ->
+      cont(pattern, flags, state)
+    _ -> not_regexp(state, "exec")
+  }
+}
+
 /// Annex B §B.2.4.1 RegExp.prototype.compile(pattern, flags) — re-initialize
 /// an existing RegExp in place and reset lastIndex through [[Set]].
 fn regexp_compile(
@@ -1051,7 +1097,7 @@ fn regexp_compile(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
-      case compile_receiver_ok(state, ref) {
+      case legacy_features_enabled(state, ref) {
         False -> not_regexp(state, "compile")
         True -> {
           let pattern = helpers.first_arg_or_undefined(args)
@@ -1083,11 +1129,11 @@ fn regexp_compile(
   }
 }
 
-/// compile requires a real RegExp whose [[Prototype]] is %RegExp.prototype% —
-/// the legacy-regexp proposal makes compile throw TypeError on subclass
-/// instances ([[LegacyFeaturesEnabled]] is false for them). Prototype
-/// identity is our approximation of that internal slot.
-fn compile_receiver_ok(state: State(host), ref: Ref) -> Bool {
+/// [[LegacyFeaturesEnabled]] (tc39 proposal-regexp-legacy-features): true only
+/// for a real RegExp whose [[Prototype]] is %RegExp.prototype% — subclass
+/// instances neither update the legacy statics on exec nor accept `compile`.
+/// Prototype identity is our approximation of that internal slot.
+fn legacy_features_enabled(state: State(host), ref: Ref) -> Bool {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: RegExpObject(..), prototype: Some(proto), ..)) ->
       proto == state.builtins.regexp.prototype
@@ -1961,7 +2007,11 @@ fn regexp_symbol_split(
   let arg = helpers.first_arg_or_undefined(args)
   use s, state <- coerce.try_to_string(state, arg)
   // Step 3: C = SpeciesConstructor(rx, %RegExp%).
-  use c, state <- try_species_constructor(state, ref)
+  use c_ref, state <- state.try_op(ops_object.species_constructor(
+    state,
+    JsObject(ref),
+    state.builtins.regexp.constructor,
+  ))
   use flags_val, state <- try_get(state, ref, "flags")
   use flags, state <- coerce.try_to_string(state, flags_val)
   let new_flags = case string.contains(flags, "y") {
@@ -1970,7 +2020,7 @@ fn regexp_symbol_split(
   }
   // Step 10: splitter = Construct(C, «rx, newFlags»).
   use splitter, state <- state.try_op(
-    state.construct(state, c, [
+    state.construct(state, JsObject(c_ref), [
       this,
       JsString(new_flags),
     ]),
@@ -2143,40 +2193,6 @@ fn split_captures(
   }
 }
 
-/// §7.3.22 SpeciesConstructor ( O, %RegExp% )
-fn try_species_constructor(
-  state: State(host),
-  ref: Ref,
-  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let default_ctor = JsObject(state.builtins.regexp.constructor)
-  use c, state <- try_get(state, ref, "constructor")
-  case c {
-    JsUndefined -> cont(default_ctor, state)
-    JsObject(c_ref) -> {
-      use species, state <- state.try_op(ops_object.get_symbol_value(
-        state,
-        c_ref,
-        value.symbol_species,
-        c,
-      ))
-      case species {
-        JsUndefined | JsNull -> cont(default_ctor, state)
-        _ ->
-          case ops_object.is_constructor(state.heap, species) {
-            True -> cont(species, state)
-            False ->
-              state.type_error(
-                state,
-                "species constructor is not a constructor",
-              )
-          }
-      }
-    }
-    _ -> state.type_error(state, "constructor property is not an object")
-  }
-}
-
 // ---------------------------------------------------------------------------
 // @@matchAll + RegExp String Iterator
 // ---------------------------------------------------------------------------
@@ -2190,11 +2206,16 @@ fn regexp_symbol_match_all(
   use ref, state <- require_object(this, state, "[Symbol.matchAll]")
   let arg = helpers.first_arg_or_undefined(args)
   use s, state <- coerce.try_to_string(state, arg)
-  use c, state <- try_species_constructor(state, ref)
+  // Step 4: C = SpeciesConstructor(R, %RegExp%).
+  use c_ref, state <- state.try_op(ops_object.species_constructor(
+    state,
+    JsObject(ref),
+    state.builtins.regexp.constructor,
+  ))
   use flags_val, state <- try_get(state, ref, "flags")
   use flags, state <- coerce.try_to_string(state, flags_val)
   use matcher, state <- state.try_op(
-    state.construct(state, c, [
+    state.construct(state, JsObject(c_ref), [
       this,
       JsString(flags),
     ]),
@@ -2212,7 +2233,7 @@ fn regexp_symbol_match_all(
       let global = string.contains(flags, "g")
       let full_unicode =
         string.contains(flags, "u") || string.contains(flags, "v")
-      create_regexp_string_iterator(state, matcher, s, global, full_unicode)
+      create_regexp_string_iterator(state, m_ref, s, global, full_unicode)
     }
     _ -> state.type_error(state, "constructed matcher is not an object")
   }
@@ -2224,7 +2245,7 @@ fn regexp_symbol_match_all(
 /// [[Done]]) lives in the typed RegExpStringIteratorObject kind.
 fn create_regexp_string_iterator(
   state: State(host),
-  matcher: JsValue,
+  matcher: Ref,
   s: String,
   global: Bool,
   full_unicode: Bool,
@@ -2296,7 +2317,7 @@ fn regexp_string_iterator_next(
           ),
           ..,
         )) -> {
-          use match, state <- try_regexp_exec(state, matcher, s)
+          use match, state <- try_regexp_exec(state, JsObject(matcher), s)
           case match {
             JsNull -> {
               let state = mark_iter_done(state, ref)
@@ -2311,13 +2332,11 @@ fn regexp_string_iterator_next(
                 True -> {
                   use m_val, state <- try_get_of(state, match, Index(0))
                   use match_str, state <- coerce.try_to_string(state, m_val)
-                  case matcher {
-                    JsObject(m_ref) -> {
-                      use state <- advance_if_empty(state, m_ref, s, match_str)
-                      iter_result(state, match, False)
-                    }
-                    _ -> iter_result(state, match, False)
-                  }
+                  // AdvanceStringIndex on an empty match — the [[IteratingRegExp]]
+                  // is always an object, so this can never be skipped (which
+                  // would loop forever on //g).
+                  use state <- advance_if_empty(state, matcher, s, match_str)
+                  iter_result(state, match, False)
                 }
               }
           }

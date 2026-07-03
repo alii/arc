@@ -3795,13 +3795,16 @@ pub type HeapSlot(ctx, host) {
     saved_try_stack: List(SavedTryFrame),
   )
   /// Engine-internal async function suspended state.
-  /// Saves the full execution context so await can resume.
+  /// Saves the full execution context so await can resume. There is no
+  /// `env_ref`: the closure environment is read once at frame setup (its
+  /// captures are copied into `saved_locals`) and never again, so a
+  /// suspended body has no function environment to carry — module bodies,
+  /// which suspend here on top-level await, have none at all.
   AsyncFunctionSlot(
     promise_data_ref: Ref,
     resolve: JsValue,
     reject: JsValue,
     func_template: FuncTemplate,
-    env_ref: Ref,
     saved_pc: Int,
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
@@ -4024,7 +4027,16 @@ fn push_saved_frame_refs(
   saved_stack: List(JsValue),
   acc: List(Ref),
 ) -> List(Ref) {
-  let acc = [env_ref, ..acc]
+  push_saved_locals_stack_refs(saved_locals, saved_stack, [env_ref, ..acc])
+}
+
+/// Same, for a suspended frame that owns no environment ref (an async
+/// function's captures live in `saved_locals`; a module body has none).
+fn push_saved_locals_stack_refs(
+  saved_locals: TupleArray(JsValue),
+  saved_stack: List(JsValue),
+  acc: List(Ref),
+) -> List(Ref) {
   let acc =
     list.fold(tuple_array.to_list(saved_locals), acc, fn(a, v) {
       push_value_ref(v, a)
@@ -4233,7 +4245,6 @@ fn do_refs_in_slot(
       promise_data_ref:,
       resolve:,
       reject:,
-      env_ref:,
       saved_locals:,
       saved_stack:,
       ..,
@@ -4242,7 +4253,7 @@ fn do_refs_in_slot(
         [promise_data_ref, ..acc]
         |> push_value_ref(resolve, _)
         |> push_value_ref(reject, _)
-      push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
+      push_saved_locals_stack_refs(saved_locals, saved_stack, acc)
     }
     AsyncGeneratorSlot(
       queue: #(queue_front, queue_back),
