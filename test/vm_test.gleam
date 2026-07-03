@@ -5,11 +5,11 @@ import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
 import arc/vm/opcode.{
-  type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq,
-  Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue, LogicalNot,
-  Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry,
-  PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
-  Swap, UShiftRight, UnaryOp, Void,
+  type Op, Add, BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq, Exp,
+  GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue, LogicalNot, Lt,
+  LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutField,
+  PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub, Swap,
+  UShiftRight, UnaryOp, Void, bin_op,
 }
 import arc/vm/ops/object
 import arc/vm/state
@@ -178,7 +178,7 @@ pub fn return_test() {
 pub fn add_numbers_test() {
   // 1 + 2 = 3
   let assert Ok(JsNumber(Finite(3.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Add)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Add)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(2.0)),
     ])
@@ -187,7 +187,7 @@ pub fn add_numbers_test() {
 pub fn sub_test() {
   // 10 - 3 = 7
   let assert Ok(JsNumber(Finite(7.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Sub)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Sub)], [
       JsNumber(Finite(10.0)),
       JsNumber(Finite(3.0)),
     ])
@@ -196,7 +196,7 @@ pub fn sub_test() {
 pub fn mul_test() {
   // 4 * 5 = 20
   let assert Ok(JsNumber(Finite(20.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Mul)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Mul)], [
       JsNumber(Finite(4.0)),
       JsNumber(Finite(5.0)),
     ])
@@ -205,7 +205,7 @@ pub fn mul_test() {
 pub fn div_test() {
   // 10 / 4 = 2.5
   let assert Ok(JsNumber(Finite(2.5))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Div)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Div)], [
       JsNumber(Finite(10.0)),
       JsNumber(Finite(4.0)),
     ])
@@ -214,7 +214,7 @@ pub fn div_test() {
 pub fn mod_test() {
   // 7 % 3 = 1
   let assert Ok(JsNumber(Finite(1.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Mod)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Mod)], [
       JsNumber(Finite(7.0)),
       JsNumber(Finite(3.0)),
     ])
@@ -223,7 +223,7 @@ pub fn mod_test() {
 pub fn exp_test() {
   // 2 ** 10 = 1024
   let assert Ok(JsNumber(Finite(1024.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Exp)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Exp)], [
       JsNumber(Finite(2.0)),
       JsNumber(Finite(10.0)),
     ])
@@ -236,7 +236,7 @@ pub fn exp_test() {
 pub fn add_strings_test() {
   // "hello" + " world"
   let assert Ok(JsString("hello world")) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Add)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Add)], [
       JsString("hello"),
       JsString(" world"),
     ])
@@ -245,7 +245,7 @@ pub fn add_strings_test() {
 pub fn add_string_number_test() {
   // "x=" + 42 => "x=42.0"
   let assert Ok(JsString(_)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Add)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Add)], [
       JsString("x="),
       JsNumber(Finite(42.0)),
     ])
@@ -254,7 +254,7 @@ pub fn add_string_number_test() {
 pub fn add_number_string_test() {
   // 5 + "px" => "5.0px"
   let assert Ok(JsString(_)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Add)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Add)], [
       JsNumber(Finite(5.0)),
       JsString("px"),
     ])
@@ -266,7 +266,7 @@ pub fn add_number_string_test() {
 
 pub fn strict_eq_same_test() {
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(StrictEq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(StrictEq)], [
       JsNumber(Finite(42.0)),
       JsNumber(Finite(42.0)),
     ])
@@ -274,7 +274,7 @@ pub fn strict_eq_same_test() {
 
 pub fn strict_eq_diff_test() {
   let assert Ok(JsBool(False)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(StrictEq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(StrictEq)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(2.0)),
     ])
@@ -282,7 +282,7 @@ pub fn strict_eq_diff_test() {
 
 pub fn strict_neq_test() {
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(StrictNotEq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(StrictNotEq)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(2.0)),
     ])
@@ -291,13 +291,13 @@ pub fn strict_neq_test() {
 pub fn abstract_eq_null_undefined_test() {
   // null == undefined => true
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Eq)], [JsNull, JsUndefined])
+    run_simple([PushConst(0), PushConst(1), bin_op(Eq)], [JsNull, JsUndefined])
 }
 
 pub fn abstract_eq_number_string_test() {
   // 42 == "42" => true
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Eq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Eq)], [
       JsNumber(Finite(42.0)),
       JsString("42"),
     ])
@@ -306,7 +306,7 @@ pub fn abstract_eq_number_string_test() {
 pub fn abstract_neq_test() {
   // 1 != 2 => true
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(NotEq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(NotEq)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(2.0)),
     ])
@@ -314,7 +314,7 @@ pub fn abstract_neq_test() {
 
 pub fn lt_test() {
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Lt)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Lt)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(2.0)),
     ])
@@ -322,7 +322,7 @@ pub fn lt_test() {
 
 pub fn lt_false_test() {
   let assert Ok(JsBool(False)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Lt)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Lt)], [
       JsNumber(Finite(5.0)),
       JsNumber(Finite(3.0)),
     ])
@@ -330,7 +330,7 @@ pub fn lt_false_test() {
 
 pub fn lteq_test() {
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(LtEq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(LtEq)], [
       JsNumber(Finite(3.0)),
       JsNumber(Finite(3.0)),
     ])
@@ -338,7 +338,7 @@ pub fn lteq_test() {
 
 pub fn gt_test() {
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Gt)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Gt)], [
       JsNumber(Finite(5.0)),
       JsNumber(Finite(3.0)),
     ])
@@ -346,7 +346,7 @@ pub fn gt_test() {
 
 pub fn gteq_test() {
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(GtEq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(GtEq)], [
       JsNumber(Finite(3.0)),
       JsNumber(Finite(3.0)),
     ])
@@ -355,7 +355,7 @@ pub fn gteq_test() {
 pub fn string_compare_test() {
   // "apple" < "banana" => true
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Lt)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Lt)], [
       JsString("apple"),
       JsString("banana"),
     ])
@@ -368,7 +368,7 @@ pub fn string_compare_test() {
 pub fn bit_and_test() {
   // 0b1100 & 0b1010 = 0b1000 = 8
   let assert Ok(JsNumber(Finite(8.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(BitAnd)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(BitAnd)], [
       JsNumber(Finite(12.0)),
       JsNumber(Finite(10.0)),
     ])
@@ -377,7 +377,7 @@ pub fn bit_and_test() {
 pub fn bit_or_test() {
   // 0b1100 | 0b1010 = 0b1110 = 14
   let assert Ok(JsNumber(Finite(14.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(BitOr)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(BitOr)], [
       JsNumber(Finite(12.0)),
       JsNumber(Finite(10.0)),
     ])
@@ -386,7 +386,7 @@ pub fn bit_or_test() {
 pub fn bit_xor_test() {
   // 0b1100 ^ 0b1010 = 0b0110 = 6
   let assert Ok(JsNumber(Finite(6.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(BitXor)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(BitXor)], [
       JsNumber(Finite(12.0)),
       JsNumber(Finite(10.0)),
     ])
@@ -395,7 +395,7 @@ pub fn bit_xor_test() {
 pub fn shift_left_test() {
   // 1 << 4 = 16
   let assert Ok(JsNumber(Finite(16.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(ShiftLeft)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(ShiftLeft)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(4.0)),
     ])
@@ -405,13 +405,13 @@ pub fn shift_left_wraps_to_int32_test() {
   // §6.1.6.1.9 Number::leftShift returns an int32: 1 << 31 = -2147483648,
   // not 2147483648.
   let assert Ok(JsNumber(Finite(-2_147_483_648.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(ShiftLeft)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(ShiftLeft)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(31.0)),
     ])
   // 0xffff << 16 = -65536, not 4294901760.
   let assert Ok(JsNumber(Finite(-65_536.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(ShiftLeft)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(ShiftLeft)], [
       JsNumber(Finite(65_535.0)),
       JsNumber(Finite(16.0)),
     ])
@@ -420,7 +420,7 @@ pub fn shift_left_wraps_to_int32_test() {
 pub fn shift_right_test() {
   // 16 >> 2 = 4
   let assert Ok(JsNumber(Finite(4.0))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(ShiftRight)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(ShiftRight)], [
       JsNumber(Finite(16.0)),
       JsNumber(Finite(2.0)),
     ])
@@ -429,7 +429,7 @@ pub fn shift_right_test() {
 pub fn unsigned_shift_right_test() {
   // -1 >>> 0 = 4294967295 (0xFFFFFFFF)
   let assert Ok(JsNumber(Finite(n))) =
-    run_simple([PushConst(0), PushConst(1), BinOp(UShiftRight)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(UShiftRight)], [
       JsNumber(Finite(-1.0)),
       JsNumber(Finite(0.0)),
     ])
@@ -492,7 +492,7 @@ pub fn var_x_eq_1_plus_2_test() {
   // var x = 1 + 2; x
   let func =
     make_func(
-      [PushConst(0), PushConst(1), BinOp(Add), PutLocal(0), GetLocal(0)],
+      [PushConst(0), PushConst(1), bin_op(Add), PutLocal(0), GetLocal(0)],
       [JsNumber(Finite(1.0)), JsNumber(Finite(2.0))],
       1,
     )
@@ -512,7 +512,7 @@ pub fn multiple_locals_test() {
         // b = 20
         GetLocal(0),
         GetLocal(1),
-        BinOp(Add),
+        bin_op(Add),
         // a + b
       ],
       [JsNumber(Finite(10.0)), JsNumber(Finite(20.0))],
@@ -607,7 +607,7 @@ pub fn truthy_nonempty_string_is_true_test() {
 pub fn abstract_eq_bool_number_test() {
   // true == 1 => true
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Eq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Eq)], [
       JsBool(True),
       JsNumber(Finite(1.0)),
     ])
@@ -616,7 +616,7 @@ pub fn abstract_eq_bool_number_test() {
 pub fn abstract_eq_false_zero_test() {
   // false == 0 => true
   let assert Ok(JsBool(True)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(Eq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(Eq)], [
       JsBool(False),
       JsNumber(Finite(0.0)),
     ])
@@ -625,7 +625,7 @@ pub fn abstract_eq_false_zero_test() {
 pub fn strict_eq_bool_number_false_test() {
   // true === 1 => false (different types)
   let assert Ok(JsBool(False)) =
-    run_simple([PushConst(0), PushConst(1), BinOp(StrictEq)], [
+    run_simple([PushConst(0), PushConst(1), bin_op(StrictEq)], [
       JsBool(True),
       JsNumber(Finite(1.0)),
     ])
@@ -803,12 +803,12 @@ pub fn fibonacci_like_loop_test() {
         // b = 1
         GetLocal(0),
         GetLocal(1),
-        BinOp(Add),
+        bin_op(Add),
         PutLocal(0),
         // a = a + b
         GetLocal(0),
         GetLocal(1),
-        BinOp(Add),
+        bin_op(Add),
         PutLocal(1),
         // b = a + b
         GetLocal(1),
@@ -831,13 +831,13 @@ pub fn simple_loop_with_jump_test() {
         GetLocal(0),
         PushConst(1),
         // 2,3: push i, push 3
-        BinOp(Lt),
+        bin_op(Lt),
         JumpIfFalse(11),
         // 4,5: i < 3 ? continue : exit
         GetLocal(0),
         PushConst(2),
         // 6,7: push i, push 1
-        BinOp(Add),
+        bin_op(Add),
         PutLocal(0),
         // 8,9: i = i + 1
         Jump(2),
@@ -862,21 +862,21 @@ pub fn try_catch_with_computation_test() {
   //  0: PushTry(6)
   //  1: PushConst(0)      -- 1
   //  2: PushConst(1)      -- 2
-  //  3: BinOp(Add)        -- 3
+  //  3: bin_op(Add)        -- 3
   //  4: PutLocal(0)       -- x = 3
   //  5: GetLocal(0); Throw -- throw x (combined into two ops at 5,6)
   // Wait, let me re-index:
   //  0: PushTry(7)
   //  1: PushConst(0)      -- 1
   //  2: PushConst(1)      -- 2
-  //  3: BinOp(Add)        -- 3
+  //  3: bin_op(Add)        -- 3
   //  4: PutLocal(0)       -- x = 3
   //  5: GetLocal(0)       -- push x
   //  6: Throw             -- throw x
   //  7: PutLocal(0)       -- catch: e in local 0 (caught value)
   //  8: GetLocal(0)       -- push e
   //  9: PushConst(2)      -- push 10
-  // 10: BinOp(Mul)        -- e * 10
+  // 10: bin_op(Mul)        -- e * 10
   // 11: Return
   let func =
     make_func(
@@ -884,7 +884,7 @@ pub fn try_catch_with_computation_test() {
         PushTry(7),
         PushConst(0),
         PushConst(1),
-        BinOp(Add),
+        bin_op(Add),
         PutLocal(0),
         GetLocal(0),
         opcode.Throw,
@@ -892,7 +892,7 @@ pub fn try_catch_with_computation_test() {
         PutLocal(0),
         GetLocal(0),
         PushConst(2),
-        BinOp(Mul),
+        bin_op(Mul),
         Return,
       ],
       [JsNumber(Finite(1.0)), JsNumber(Finite(2.0)), JsNumber(Finite(10.0))],

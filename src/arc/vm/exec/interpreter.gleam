@@ -916,10 +916,12 @@ fn fast_loop(
         [] -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
 
+    // `kind` arrives already classified — the resolver narrowed it, so this
+    // is a plain dispatch on the stored variant, no call, no re-derivation.
     BinOp(kind) ->
       case stack {
         [right, left, ..rest] ->
-          case opcode.classify(kind) {
+          case kind {
             // §13.15.3: objects need ToPrimitive (stateful), string×non-string
             // needs js_to_string (stateful), BigInt mixes throw — all slow.
             // string×string and number×number are pure.
@@ -2854,7 +2856,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       case state.stack {
         [right, left, ..rest] -> {
           // instanceof and in need heap access
-          case opcode.classify(kind) {
+          case kind {
             opcode.InstanceOfOp -> {
               use #(result, state) <- result.map(
                 state.rethrow(coerce.js_instanceof(state, left, right)),

@@ -24,7 +24,7 @@ pub fn disassemble_shape_test() {
   assert string.contains(text, "MakeClosure(0)")
   assert string.contains(text, "; add")
   assert string.contains(text, "function [0] add (arity 2,")
-  assert string.contains(text, "BinOp(Add)")
+  assert string.contains(text, "BinOp(AddOp)")
   assert string.contains(text, "; 2")
 }
 

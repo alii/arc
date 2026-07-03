@@ -485,8 +485,10 @@ fn resolve_ops(
       ])
 
     // Operators
+    // Narrow the operator to its handler HERE, once per instruction resolved,
+    // rather than once per instruction executed.
     [IrBinOp(kind), ..rest] ->
-      resolve_ops(rest, labels, [opcode.BinOp(kind), ..acc])
+      resolve_ops(rest, labels, [opcode.bin_op(kind), ..acc])
     [IrUnaryOp(kind), ..rest] ->
       resolve_ops(rest, labels, [opcode.UnaryOp(kind), ..acc])
     [IrTypeOf, ..rest] -> resolve_ops(rest, labels, [opcode.TypeOf, ..acc])

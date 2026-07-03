@@ -474,7 +474,12 @@ pub type Op {
   PutBoxedCheckInit(index: Int)
 
   // -- Operators --
-  BinOp(kind: BinOpKind)
+  /// Carries the operator ALREADY narrowed to its handler (see `Classified`).
+  /// The resolver classifies once, when it lowers `IrBinOp`; the interpreter
+  /// then dispatches straight on the stored variant, so a `BinOp` step costs
+  /// no call and cannot hand `exec_binop` an `Add`/`In`/`InstanceOf`. Build it
+  /// with `bin_op`, never `BinOp(classify(..))` at execution time.
+  BinOp(kind: Classified)
   UnaryOp(kind: UnaryOpKind)
   TypeOf
   TypeofGlobal(name: String)
@@ -678,6 +683,11 @@ pub type BinOpKind {
 /// A `BinOpKind` split by WHO evaluates it. Produced by `classify`, which is
 /// the single, total place a source-level operator narrows to the pure subset
 /// `ops/operators.exec_binop` can actually run.
+///
+/// This is what `Op.BinOp` stores: classification is a pure function of the
+/// operator, so it is done ONCE at bytecode-resolution time rather than on
+/// every execution of the instruction — same trick the fused
+/// `CmpLocalLocalJump` / `CmpLocalConstJump` superinstructions already use.
 pub type Classified {
   /// Pure: two primitives in, one JsValue out. `exec_binop` handles it.
   PureOp(op: PureBinOp)
@@ -717,6 +727,12 @@ pub fn classify(kind: BinOpKind) -> Classified {
     Gt -> PureOp(binop.Gt)
     GtEq -> PureOp(binop.GtEq)
   }
+}
+
+/// The `BinOp` opcode for a source-level operator, classified once here so the
+/// interpreter never has to. The only way `Op.BinOp` should ever be built.
+pub fn bin_op(kind: BinOpKind) -> Op {
+  BinOp(classify(kind))
 }
 
 pub type UnaryOpKind {
