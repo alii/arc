@@ -7065,6 +7065,7 @@ built-ins/Iterator/prototype/drop/return-is-not-forwarded-after-exhaustion.js
 built-ins/Iterator/prototype/drop/this-non-callable-next.js
 built-ins/Iterator/prototype/drop/this-non-object.js
 built-ins/Iterator/prototype/drop/this-plain-iterator.js
+built-ins/Iterator/prototype/drop/throws-typeerror-when-generator-is-running.js
 built-ins/Iterator/prototype/drop/underlying-iterator-advanced-in-parallel.js
 built-ins/Iterator/prototype/drop/underlying-iterator-closed-in-parallel.js
 built-ins/Iterator/prototype/drop/underlying-iterator-closed.js
@@ -7134,6 +7135,7 @@ built-ins/Iterator/prototype/filter/return-is-not-forwarded-after-exhaustion.js
 built-ins/Iterator/prototype/filter/this-non-callable-next.js
 built-ins/Iterator/prototype/filter/this-non-object.js
 built-ins/Iterator/prototype/filter/this-plain-iterator.js
+built-ins/Iterator/prototype/filter/throws-typeerror-when-generator-is-running.js
 built-ins/Iterator/prototype/filter/underlying-iterator-advanced-in-parallel.js
 built-ins/Iterator/prototype/filter/underlying-iterator-closed-in-parallel.js
 built-ins/Iterator/prototype/filter/underlying-iterator-closed.js
@@ -7208,6 +7210,7 @@ built-ins/Iterator/prototype/flatMap/strings-are-not-flattened.js
 built-ins/Iterator/prototype/flatMap/this-non-callable-next.js
 built-ins/Iterator/prototype/flatMap/this-non-object.js
 built-ins/Iterator/prototype/flatMap/this-plain-iterator.js
+built-ins/Iterator/prototype/flatMap/throws-typeerror-when-generator-is-running.js
 built-ins/Iterator/prototype/flatMap/underlying-iterator-advanced-in-parallel.js
 built-ins/Iterator/prototype/flatMap/underlying-iterator-closed-in-parallel.js
 built-ins/Iterator/prototype/flatMap/underlying-iterator-closed.js
@@ -7271,6 +7274,7 @@ built-ins/Iterator/prototype/map/returned-iterator-yields-mapper-return-values.j
 built-ins/Iterator/prototype/map/this-non-callable-next.js
 built-ins/Iterator/prototype/map/this-non-object.js
 built-ins/Iterator/prototype/map/this-plain-iterator.js
+built-ins/Iterator/prototype/map/throws-typeerror-when-generator-is-running.js
 built-ins/Iterator/prototype/map/underlying-iterator-advanced-in-parallel.js
 built-ins/Iterator/prototype/map/underlying-iterator-closed-in-parallel.js
 built-ins/Iterator/prototype/map/underlying-iterator-closed.js
@@ -7365,6 +7369,7 @@ built-ins/Iterator/prototype/take/return-is-not-forwarded-after-exhaustion.js
 built-ins/Iterator/prototype/take/this-non-callable-next.js
 built-ins/Iterator/prototype/take/this-non-object.js
 built-ins/Iterator/prototype/take/this-plain-iterator.js
+built-ins/Iterator/prototype/take/throws-typeerror-when-generator-is-running.js
 built-ins/Iterator/prototype/take/underlying-iterator-advanced-in-parallel.js
 built-ins/Iterator/prototype/take/underlying-iterator-closed-in-parallel.js
 built-ins/Iterator/prototype/take/underlying-iterator-closed.js
@@ -50847,6 +50852,7 @@ staging/sm/Iterator/prototype/lazy-methods-multiple-return-close-iterator-once.j
 staging/sm/Iterator/prototype/lazy-methods-pass-through-lastValue.js
 staging/sm/Iterator/prototype/lazy-methods-pass-value-through-chain.js
 staging/sm/Iterator/prototype/lazy-methods-proxy-accesses.js
+staging/sm/Iterator/prototype/lazy-methods-reentry-not-close-iterator.js
 staging/sm/Iterator/prototype/lazy-methods-return-closes-iterator.js
 staging/sm/Iterator/prototype/lazy-methods-return-new-iterator-result.js
 staging/sm/Iterator/prototype/lazy-methods-throw-eagerly-on-next-non-callable.js
@@ -50854,6 +50860,7 @@ staging/sm/Iterator/prototype/lazy-methods-throw-eagerly-on-non-callable.js
 staging/sm/Iterator/prototype/lazy-methods-throw-eagerly-on-non-iterator.js
 staging/sm/Iterator/prototype/lazy-methods-throw-next-done-throws.js
 staging/sm/Iterator/prototype/lazy-methods-throw-next-not-object.js
+staging/sm/Iterator/prototype/lazy-methods-throw-on-reentry.js
 staging/sm/Iterator/prototype/map/call-next-on-iterator-while-iterating.js
 staging/sm/Iterator/prototype/map/clobber-symbol.js
 staging/sm/Iterator/prototype/map/interleaved-map-calls.js
