@@ -8,9 +8,9 @@ import arc/vm/value.{
   GlobalIsFinite, GlobalIsNaN, GlobalParseFloat, GlobalParseInt, Infinity,
   JsNumber, JsObject, JsString, JsUndefined, NaN, NegInfinity, NumberConstructor,
   NumberIsFinite, NumberIsInteger, NumberIsNaN, NumberIsSafeInteger,
-  NumberNative, NumberObject, NumberParseFloat, NumberParseInt,
-  NumberPrototypeToExponential, NumberPrototypeToFixed,
-  NumberPrototypeToPrecision, NumberPrototypeToString, NumberPrototypeValueOf,
+  NumberNative, NumberObject, NumberPrototypeToExponential,
+  NumberPrototypeToFixed, NumberPrototypeToPrecision, NumberPrototypeToString,
+  NumberPrototypeValueOf,
 }
 import gleam/float
 import gleam/int
@@ -165,8 +165,6 @@ pub fn dispatch(
     NumberIsNaN -> number_is_nan(args, state)
     NumberIsFinite -> number_is_finite(args, state)
     NumberIsInteger -> number_is_integer(args, state)
-    NumberParseInt -> parse_int(args, state)
-    NumberParseFloat -> parse_float(args, state)
     NumberPrototypeValueOf -> number_value_of(this, args, state)
     NumberPrototypeToString -> number_to_string(this, args, state)
     GlobalParseInt -> parse_int(args, state)
