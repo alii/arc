@@ -1,6 +1,8 @@
 import arc/vm/binop.{
-  type PureBinOp, BitAnd, BitOr, BitXor, Div, Eq, Exp, Gt, GtEq, Lt, LtEq, Mod,
-  Mul, NotEq, Shl, Shr, StrictEq, StrictNotEq, Sub, UShr,
+  type ArithOp, type BitwiseOp, type CompareOp, type EqualityOp, type PureBinOp,
+  AndOp, Arith, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, Bitwise,
+  Compare, EqOp, Equality, GtCmp, GtEqCmp, LtCmp, LtEqCmp, NotEqOp, OrOp, ShlOp,
+  ShrOp, StrictEqOp, StrictNotEqOp, UShrOp, XorOp,
 }
 import arc/vm/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
 import arc/vm/value.{
@@ -36,110 +38,127 @@ pub fn exec_binop(
   left: JsValue,
   right: JsValue,
 ) -> Result(JsValue, OpError) {
-  case kind {
-    Sub | Mul | Div | Mod | Exp ->
-      case left, right {
-        // §6.1.6.2 BigInt arithmetic.
-        JsBigInt(BigInt(a)), JsBigInt(BigInt(b)) -> bigint_arith(kind, a, b)
-        // §13.15.4 ApplyStringOrNumericBinaryOperator step 7.a:
-        // Type(lnum) ≠ Type(rnum) → TypeError.
-        JsBigInt(_), _ | _, JsBigInt(_) -> Error(bigint_mix_error)
-        // Fast path: both operands are already Numbers — to_number is the
-        // identity, so call the JsNum op directly without combinators or
-        // closure indirection.
-        JsNumber(a), JsNumber(b) ->
-          Ok(
-            JsNumber(case kind {
-              Sub -> num_sub(a, b)
-              Mul -> num_mul(a, b)
-              Div -> num_div(a, b)
-              Mod -> num_mod(a, b)
-              _ -> num_exp(a, b)
-            }),
+  case binop.classify(kind) {
+    Arith(op) -> exec_arith(op, left, right)
+    Bitwise(op) -> exec_bitwise(op, left, right)
+    Equality(op) -> Ok(JsBool(exec_equality(op, left, right)))
+    Compare(op) -> exec_compare(op, left, right)
+  }
+}
+
+fn exec_arith(
+  op: ArithOp,
+  left: JsValue,
+  right: JsValue,
+) -> Result(JsValue, OpError) {
+  case left, right {
+    // §6.1.6.2 BigInt arithmetic.
+    JsBigInt(BigInt(a)), JsBigInt(BigInt(b)) -> bigint_arith(op, a, b)
+    // §13.15.4 ApplyStringOrNumericBinaryOperator step 7.a:
+    // Type(lnum) ≠ Type(rnum) → TypeError.
+    JsBigInt(_), _ | _, JsBigInt(_) -> Error(bigint_mix_error)
+    // Fast path: both operands are already Numbers — to_number is the
+    // identity, so call the JsNum op directly without combinators or
+    // closure indirection.
+    JsNumber(a), JsNumber(b) ->
+      Ok(
+        JsNumber(case op {
+          ArithSub -> num_sub(a, b)
+          ArithMul -> num_mul(a, b)
+          ArithDiv -> num_div(a, b)
+          ArithMod -> num_mod(a, b)
+          ArithExp -> num_exp(a, b)
+        }),
+      )
+    _, _ -> num_binop(left, right, arith_num_op(op))
+  }
+}
+
+fn arith_num_op(op: ArithOp) -> fn(JsNum, JsNum) -> JsNum {
+  case op {
+    ArithSub -> num_sub
+    ArithMul -> num_mul
+    ArithDiv -> num_div
+    ArithMod -> num_mod
+    ArithExp -> num_exp
+  }
+}
+
+/// Bitwise / shifts — BigInt×BigInt operates on arbitrary precision
+/// (§6.1.6.2), mixed types throw, Number path converts to i32.
+fn exec_bitwise(
+  op: BitwiseOp,
+  left: JsValue,
+  right: JsValue,
+) -> Result(JsValue, OpError) {
+  case left, right {
+    JsBigInt(BigInt(a)), JsBigInt(BigInt(b)) -> bigint_bitwise(op, a, b)
+    JsBigInt(_), _ | _, JsBigInt(_) -> Error(bigint_mix_error)
+    _, _ ->
+      case op {
+        AndOp -> bitwise_binop(left, right, int.bitwise_and)
+        OrOp -> bitwise_binop(left, right, int.bitwise_or)
+        XorOp -> bitwise_binop(left, right, int.bitwise_exclusive_or)
+        // §6.1.6.1.9 Number::leftShift: the raw shift of an int32 by up
+        // to 31 bits needs up to 62 bits on the BEAM's unbounded Ints, so
+        // the result MUST be re-wrapped to int32 (`(1<<31)|0` is
+        // -2147483648, not 2147483648).
+        ShlOp -> {
+          use a, b <- bitwise_binop(left, right)
+          wrap_int32(int.bitwise_shift_left(a, int.bitwise_and(b, 31)))
+        }
+        ShrOp -> {
+          use a, b <- bitwise_binop(left, right)
+          int.bitwise_shift_right(a, int.bitwise_and(b, 31))
+        }
+        UShrOp -> {
+          use a, b <- bitwise_binop(left, right)
+          int.bitwise_shift_right(
+            int.bitwise_and(a, 0xFFFFFFFF),
+            int.bitwise_and(b, 31),
           )
-        _, _ ->
-          case kind {
-            Sub -> num_binop(left, right, num_sub)
-            Mul -> num_binop(left, right, num_mul)
-            Div -> num_binop(left, right, num_div)
-            Mod -> num_binop(left, right, num_mod)
-            _ -> num_binop(left, right, num_exp)
-          }
+        }
       }
+  }
+}
 
-    // Bitwise / shifts — BigInt×BigInt operates on arbitrary precision
-    // (§6.1.6.2), mixed types throw, Number path converts to i32.
-    BitAnd | BitOr | BitXor | Shl | Shr | UShr ->
-      case left, right {
-        JsBigInt(BigInt(a)), JsBigInt(BigInt(b)) -> bigint_bitwise(kind, a, b)
-        JsBigInt(_), _ | _, JsBigInt(_) -> Error(bigint_mix_error)
-        _, _ ->
-          case kind {
-            BitAnd -> bitwise_binop(left, right, int.bitwise_and)
-            BitOr -> bitwise_binop(left, right, int.bitwise_or)
-            BitXor -> bitwise_binop(left, right, int.bitwise_exclusive_or)
-            // §6.1.6.1.9 Number::leftShift: the raw shift of an int32 by up
-            // to 31 bits needs up to 62 bits on the BEAM's unbounded Ints, so
-            // the result MUST be re-wrapped to int32 (`(1<<31)|0` is
-            // -2147483648, not 2147483648).
-            Shl -> {
-              use a, b <- bitwise_binop(left, right)
-              wrap_int32(int.bitwise_shift_left(a, int.bitwise_and(b, 31)))
-            }
-            Shr -> {
-              use a, b <- bitwise_binop(left, right)
-              int.bitwise_shift_right(a, int.bitwise_and(b, 31))
-            }
-            _ -> {
-              use a, b <- bitwise_binop(left, right)
-              int.bitwise_shift_right(
-                int.bitwise_and(a, 0xFFFFFFFF),
-                int.bitwise_and(b, 31),
-              )
-            }
-          }
-      }
+fn exec_equality(op: EqualityOp, left: JsValue, right: JsValue) -> Bool {
+  case op {
+    StrictEqOp -> value.strict_equal(left, right)
+    StrictNotEqOp -> !value.strict_equal(left, right)
+    EqOp -> loose_equal(left, right)
+    NotEqOp -> !loose_equal(left, right)
+  }
+}
 
-    // Comparison
-    StrictEq -> Ok(JsBool(value.strict_equal(left, right)))
-    StrictNotEq -> Ok(JsBool(!value.strict_equal(left, right)))
-    Eq -> Ok(JsBool(loose_equal(left, right)))
-    NotEq -> Ok(JsBool(!loose_equal(left, right)))
+/// Relational: fast path for Number × Number avoids the per-op pred
+/// closure and the to_number round-trip in compare_values.
+fn exec_compare(
+  op: CompareOp,
+  left: JsValue,
+  right: JsValue,
+) -> Result(JsValue, OpError) {
+  case left, right {
+    JsNumber(a), JsNumber(b) ->
+      Ok(
+        JsBool(case op {
+          LtCmp -> num_lt(a, b)
+          LtEqCmp -> num_lt_eq(a, b)
+          GtCmp -> num_gt(a, b)
+          GtEqCmp -> num_gt_eq(a, b)
+        }),
+      )
+    _, _ -> compare_values(left, right, compare_pred(op))
+  }
+}
 
-    // Relational: fast path for Number × Number avoids the per-op pred
-    // closure and the to_number round-trip in compare_values.
-    Lt ->
-      case left, right {
-        JsNumber(a), JsNumber(b) -> Ok(JsBool(num_lt(a, b)))
-        _, _ -> {
-          use ord <- compare_values(left, right)
-          ord == LtOrd
-        }
-      }
-    LtEq ->
-      case left, right {
-        JsNumber(a), JsNumber(b) -> Ok(JsBool(num_lt_eq(a, b)))
-        _, _ -> {
-          use ord <- compare_values(left, right)
-          ord == LtOrd || ord == EqOrd
-        }
-      }
-    Gt ->
-      case left, right {
-        JsNumber(a), JsNumber(b) -> Ok(JsBool(num_gt(a, b)))
-        _, _ -> {
-          use ord <- compare_values(left, right)
-          ord == GtOrd
-        }
-      }
-    GtEq ->
-      case left, right {
-        JsNumber(a), JsNumber(b) -> Ok(JsBool(num_gt_eq(a, b)))
-        _, _ -> {
-          use ord <- compare_values(left, right)
-          ord == GtOrd || ord == EqOrd
-        }
-      }
+/// The predicate a relational operator applies to a `<`/`=`/`>` ordering.
+fn compare_pred(op: CompareOp) -> fn(CompareOrd) -> Bool {
+  case op {
+    LtCmp -> fn(ord) { ord == LtOrd }
+    LtEqCmp -> fn(ord) { ord != GtOrd }
+    GtCmp -> fn(ord) { ord == GtOrd }
+    GtEqCmp -> fn(ord) { ord != LtOrd }
   }
 }
 
@@ -195,31 +214,30 @@ fn to_number(v: JsValue) -> Result(JsNum, OpError) {
   }
 }
 
-fn bigint_arith(kind: PureBinOp, a: Int, b: Int) -> Result(JsValue, OpError) {
+fn bigint_arith(kind: ArithOp, a: Int, b: Int) -> Result(JsValue, OpError) {
   case kind {
-    Sub -> Ok(JsBigInt(BigInt(a - b)))
-    Mul -> Ok(JsBigInt(BigInt(a * b)))
+    ArithSub -> Ok(JsBigInt(BigInt(a - b)))
+    ArithMul -> Ok(JsBigInt(BigInt(a * b)))
     // §6.1.6.2.5 BigInt::divide — truncating division; 0n divisor throws
     // RangeError. Gleam's Int `/` is Erlang div (truncates toward zero).
-    Div ->
+    ArithDiv ->
       case b {
         0 -> Error(OpRangeError("Division by zero"))
         _ -> Ok(JsBigInt(BigInt(a / b)))
       }
     // §6.1.6.2.6 BigInt::remainder — sign of dividend; 0n divisor throws
     // RangeError. Gleam's Int `%` is Erlang rem (sign of dividend).
-    Mod ->
+    ArithMod ->
       case b {
         0 -> Error(OpRangeError("Division by zero"))
         _ -> Ok(JsBigInt(BigInt(a % b)))
       }
     // §6.1.6.2.3 BigInt::exponentiate — negative exponent throws RangeError.
-    Exp ->
+    ArithExp ->
       case b < 0 {
         True -> Error(OpRangeError("Exponent must be non-negative"))
         False -> Ok(JsBigInt(BigInt(bigint_pow(a, b, 1))))
       }
-    _ -> Error(OpTypeError("BigInt arithmetic: unreachable operator"))
   }
 }
 
@@ -235,21 +253,20 @@ fn bigint_pow(base: Int, exp: Int, acc: Int) -> Int {
   }
 }
 
-fn bigint_bitwise(kind: PureBinOp, a: Int, b: Int) -> Result(JsValue, OpError) {
+fn bigint_bitwise(kind: BitwiseOp, a: Int, b: Int) -> Result(JsValue, OpError) {
   case kind {
     // Erlang band/bor/bxor on arbitrary-precision ints follow infinite
     // two's-complement semantics — exactly §6.1.6.2.17-19.
-    BitAnd -> Ok(JsBigInt(BigInt(int.bitwise_and(a, b))))
-    BitOr -> Ok(JsBigInt(BigInt(int.bitwise_or(a, b))))
-    BitXor -> Ok(JsBigInt(BigInt(int.bitwise_exclusive_or(a, b))))
+    AndOp -> Ok(JsBigInt(BigInt(int.bitwise_and(a, b))))
+    OrOp -> Ok(JsBigInt(BigInt(int.bitwise_or(a, b))))
+    XorOp -> Ok(JsBigInt(BigInt(int.bitwise_exclusive_or(a, b))))
     // §6.1.6.2.9/10: shifts are arbitrary-precision; Erlang bsl/bsr accept
     // negative counts and shift the other way, matching leftShift(x, -y).
-    Shl -> Ok(JsBigInt(BigInt(int.bitwise_shift_left(a, b))))
-    Shr -> Ok(JsBigInt(BigInt(int.bitwise_shift_right(a, b))))
+    ShlOp -> Ok(JsBigInt(BigInt(int.bitwise_shift_left(a, b))))
+    ShrOp -> Ok(JsBigInt(BigInt(int.bitwise_shift_right(a, b))))
     // §6.1.6.2.11 BigInt::unsignedRightShift always throws.
-    UShr ->
+    UShrOp ->
       Error(OpTypeError("BigInts have no unsigned right shift, use >> instead"))
-    _ -> Error(OpTypeError("BigInt bitwise: unreachable operator"))
   }
 }
 
@@ -609,33 +626,30 @@ pub fn num_binop(
 }
 
 // Relational fast paths for Number × Number (§7.2.13 IsLessThan with both
-// operands Numbers): NaN on either side → undefined → false.
+// operands Numbers): NaN on either side is unordered (`compare_nums` returns
+// None) → undefined → false.
 fn num_lt(a: JsNum, b: JsNum) -> Bool {
-  case a, b {
-    NaN, _ | _, NaN -> False
-    _, _ -> compare_nums(a, b) == LtOrd
-  }
+  compare_nums(a, b)
+  |> option.map(fn(ord) { ord == LtOrd })
+  |> option.unwrap(False)
 }
 
 fn num_lt_eq(a: JsNum, b: JsNum) -> Bool {
-  case a, b {
-    NaN, _ | _, NaN -> False
-    _, _ -> compare_nums(a, b) != GtOrd
-  }
+  compare_nums(a, b)
+  |> option.map(fn(ord) { ord != GtOrd })
+  |> option.unwrap(False)
 }
 
 fn num_gt(a: JsNum, b: JsNum) -> Bool {
-  case a, b {
-    NaN, _ | _, NaN -> False
-    _, _ -> compare_nums(a, b) == GtOrd
-  }
+  compare_nums(a, b)
+  |> option.map(fn(ord) { ord == GtOrd })
+  |> option.unwrap(False)
 }
 
 fn num_gt_eq(a: JsNum, b: JsNum) -> Bool {
-  case a, b {
-    NaN, _ | _, NaN -> False
-    _, _ -> compare_nums(a, b) != LtOrd
-  }
+  compare_nums(a, b)
+  |> option.map(fn(ord) { ord != LtOrd })
+  |> option.unwrap(False)
 }
 
 /// Apply a bitwise binary operation (convert to i32, operate, convert back).
@@ -708,11 +722,9 @@ fn compare_values(
     }
     _, _ -> {
       use a <- result.try(to_number(left))
-      use b <- result.try(to_number(right))
-      case a, b {
-        NaN, _ | _, NaN -> Ok(JsBool(False))
-        _, _ -> Ok(JsBool(pred(compare_nums(a, b))))
-      }
+      use b <- result.map(to_number(right))
+      // NaN on either side is unordered → undefined → false.
+      JsBool(compare_nums(a, b) |> option.map(pred) |> option.unwrap(False))
     }
   }
 }
@@ -759,25 +771,29 @@ fn compare_bigint_num(a: Int, n: JsNum) -> Option(CompareOrd) {
   }
 }
 
-/// Compare two JsNums (neither is NaN).
-fn compare_nums(a: JsNum, b: JsNum) -> CompareOrd {
+/// Compare two JsNums. `None` means unordered — i.e. either operand is NaN,
+/// which every relational operator turns into `false` (§7.2.13 IsLessThan
+/// returns undefined). Returning an Option (like `compare_bigint_num`) rather
+/// than a fabricated `EqOrd` means a caller cannot forget the NaN case.
+fn compare_nums(a: JsNum, b: JsNum) -> Option(CompareOrd) {
   case a, b {
-    Infinity, Infinity | NegInfinity, NegInfinity -> EqOrd
-    Infinity, _ -> GtOrd
-    _, Infinity -> LtOrd
-    NegInfinity, _ -> LtOrd
-    _, NegInfinity -> GtOrd
+    NaN, _ | _, NaN -> None
+    Infinity, Infinity | NegInfinity, NegInfinity -> Some(EqOrd)
+    Infinity, _ -> Some(GtOrd)
+    _, Infinity -> Some(LtOrd)
+    NegInfinity, _ -> Some(LtOrd)
+    _, NegInfinity -> Some(GtOrd)
+    // §7.2.13 steps 4.f-4.h: -0 and +0 are neither less nor greater than one
+    // another. Never decide this with `x == y` (Gleam `==` on Floats is
+    // Erlang `=:=`, which on OTP >= 27 says -0.0 /= 0.0, so `-0 <= 0` came
+    // out False and `-0 > 0` came out True). `<.`/`>.` are the arithmetic
+    // comparisons, and both are False for the two zeros — hence EqOrd.
     Finite(x), Finite(y) ->
-      case x == y {
-        True -> EqOrd
-        False ->
-          case x <. y {
-            True -> LtOrd
-            False -> GtOrd
-          }
+      case x <. y, x >. y {
+        True, _ -> Some(LtOrd)
+        _, True -> Some(GtOrd)
+        _, _ -> Some(EqOrd)
       }
-    // NaN cases handled by caller
-    NaN, _ | _, NaN -> EqOrd
   }
 }
 
