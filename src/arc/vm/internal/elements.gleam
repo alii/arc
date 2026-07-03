@@ -132,6 +132,41 @@ pub fn indices(elements: JsElements) -> List(Int) {
   }
 }
 
+/// True when every index in [0, length) holds a present element — no holes in
+/// that range. Elements stored at or above `length` are ignored: an
+/// `arguments` object writes `args[9]` straight into the element store without
+/// touching its `length` slot, so a total (unbounded) count would overshoot
+/// and call a holey range dense.
+pub fn is_dense_below(elements: JsElements, length: Int) -> Bool {
+  count_present_below(elements, length) == length
+}
+
+/// Number of present (non-hole) elements at indices in [0, length). Allocation
+/// -free: a single counting fold, no intermediate index list.
+pub fn count_present_below(elements: JsElements, length: Int) -> Int {
+  case elements {
+    NoElements -> 0
+    DenseElements(data) ->
+      tree_array.sparse_fold(
+        fn(i, _v, n) {
+          case i < length {
+            True -> n + 1
+            False -> n
+          }
+        },
+        0,
+        data,
+      )
+    SparseElements(data) ->
+      dict.fold(data, 0, fn(n, i, _v) {
+        case i < length {
+          True -> n + 1
+          False -> n
+        }
+      })
+  }
+}
+
 /// True when no element is present at any index. O(k) worst case, O(1) for
 /// the common NoElements case. Used by the array-mutator fast path to verify
 /// prototype-chain objects carry no indexed elements.
