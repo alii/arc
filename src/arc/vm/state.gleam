@@ -468,6 +468,27 @@ pub fn seed_child(child: State(host), caller: State(host)) -> State(host) {
   )
 }
 
+/// The one place the non-draining merges name the event-loop fields a
+/// finished child threads back. `ctx` and `queue` are passed in so each merge
+/// builds exactly ONE `RealmCtx` and ONE `State` — `merge_globals` sits on
+/// the generator-resume / await-suspend path, so a discarded record copy per
+/// call is not free.
+fn merge_child_into(
+  caller: State(host),
+  child: State(host),
+  ctx: RealmCtx(host),
+  queue: JobQueue(value.Job),
+) -> State(host) {
+  State(
+    ..caller,
+    ctx:,
+    job_queue: queue,
+    outstanding: child.outstanding,
+    atomics_waiters: child.atomics_waiters,
+    unhandled_rejections: child.unhandled_rejections,
+  )
+}
+
 /// Thread the agent-wide state back from a finished child execution to its
 /// caller. MUST stay the mirror image of `seed_child`. The child's
 /// realm-LOCAL ctx (lexical globals, global object) is deliberately not
@@ -475,19 +496,17 @@ pub fn seed_child(child: State(host), caller: State(host)) -> State(host) {
 /// callers (evalScript / ShadowRealm) write the child realm's lexical globals
 /// back to its own `value.RealmSlot`.
 pub fn merge_child(caller: State(host), child: State(host)) -> State(host) {
-  State(
-    ..caller,
-    ctx: RealmCtx(
+  merge_child_into(
+    caller,
+    child,
+    RealmCtx(
       ..caller.ctx,
       // Realms registered and template objects cached during the child
       // execution are agent-wide and must survive the merge.
       realms: child.ctx.realms,
       template_objects: child.ctx.template_objects,
     ),
-    job_queue: child.job_queue,
-    outstanding: child.outstanding,
-    atomics_waiters: child.atomics_waiters,
-    unhandled_rejections: child.unhandled_rejections,
+    child.job_queue,
   )
 }
 
@@ -562,11 +581,15 @@ pub fn merge_globals(
   child: State(host),
   extra_jobs: List(value.Job),
 ) -> State(host) {
-  let merged = merge_child(parent, child)
-  State(
-    ..merged,
-    ctx: RealmCtx(
-      ..merged.ctx,
+  merge_child_into(
+    parent,
+    child,
+    RealmCtx(
+      ..parent.ctx,
+      // The agent-wide tables `merge_child` threads back, spelled out here so
+      // this hot path builds the ctx exactly once.
+      realms: child.ctx.realms,
+      template_objects: child.ctx.template_objects,
       // Same realm, so the child's global lexical bindings ARE the parent's.
       lexical_globals: child.ctx.lexical_globals,
       // Symbol descriptions / the Symbol.for registry are agent-wide and
@@ -576,7 +599,7 @@ pub fn merge_globals(
       symbol_descriptions: child.ctx.symbol_descriptions,
       symbol_registry: child.ctx.symbol_registry,
     ),
-    job_queue: job_queue.append(child.job_queue, extra_jobs),
+    job_queue.append(child.job_queue, extra_jobs),
   )
 }
 
