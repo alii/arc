@@ -32,6 +32,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/order
+import gleam/result
 import gleam/string
 
 /// Set up String constructor + String.prototype.
@@ -104,8 +105,10 @@ pub fn init(
       #("fromCodePoint", StringNative(StringFromCodePoint), 1),
     ])
   // Note: StringConstructor stays VM-level (needs ToPrimitive/ToString)
+  // ES2024 §22.1.3: the String prototype object is itself a String exotic
+  // object, with a [[StringData]] internal slot whose value is "".
   let #(h, bt) =
-    common.init_type(
+    common.init_wrapper_type(
       h,
       object_proto,
       function_proto,
@@ -114,6 +117,7 @@ pub fn init(
       "String",
       1,
       static_methods,
+      proto_kind: value.StringObject(value: ""),
     )
   // §22.1.3.36 String.prototype [ @@iterator ] ( ) — yields code points.
   let #(h, iter_fn) =
@@ -468,7 +472,7 @@ fn string_search_bool(
         helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
       )
       let from = int.clamp(pos, 0, object.string_length(s))
-      let sub = cp_drop(s, from)
+      let sub = object.string_drop_start(s, from)
       #(state, Ok(value.JsBool(predicate(sub, search))))
     }
   }
@@ -539,7 +543,7 @@ fn string_ends_with(
       // Steps 7-8: endPosition handling, clamp to [0, len]
       use end_pos, state <- string_end_position(state, args, len)
       // Steps 10-13: take prefix of length end_pos, check ends_with
-      let sub = cp_slice(s, 0, end_pos)
+      let sub = object.string_slice(s, 0, end_pos)
       #(state, Ok(value.JsBool(string.ends_with(sub, search))))
     }
   }
@@ -598,7 +602,7 @@ fn string_slice(
   use end, state <- string_slice_end(state, args, len)
   // Steps 12-13: if from >= to return "", else return substring
   case end > start {
-    True -> #(state, Ok(JsString(cp_slice(s, start, end - start))))
+    True -> #(state, Ok(JsString(object.string_slice(s, start, end - start))))
     False -> #(state, Ok(JsString("")))
   }
 }
@@ -670,7 +674,7 @@ fn string_substring(
     False -> #(start, end)
   }
   // Step 10: return substring from..to
-  #(state, Ok(JsString(cp_slice(s, start, end - start))))
+  #(state, Ok(JsString(object.string_slice(s, start, end - start))))
 }
 
 /// substring step 5: end undefined => len, else ToIntegerOrInfinity.
@@ -990,7 +994,7 @@ fn js_trim_start(s: String) -> String {
   case ffi_codepoint_at(s, 0) {
     Some(cp) ->
       case is_js_whitespace(cp) {
-        True -> js_trim_start(cp_drop(s, 1))
+        True -> js_trim_start(object.string_drop_start(s, 1))
         False -> s
       }
     None -> s
@@ -1013,7 +1017,7 @@ fn js_trim_end(s: String) -> String {
     |> list.length
   case trailing {
     0 -> s
-    _ -> cp_slice(s, 0, len - trailing)
+    _ -> object.string_slice(s, 0, len - trailing)
   }
 }
 
@@ -1021,25 +1025,58 @@ fn js_trim_end(s: String) -> String {
 // Symbol method delegation helpers
 // ---------------------------------------------------------------------------
 
-/// Try to get a Symbol method from an object value.
-/// Returns Ok(#(Some(method), state)) if the object has the symbol method,
-/// Ok(#(None, state)) if it's not an object or doesn't have it,
-/// Error if the lookup throws.
-fn try_symbol_method(
+/// **`if V is an Object: ? GetMethod ( V, @@symbol )`** — the guard + §7.3.11
+/// pair that String.prototype.match/matchAll/replace/replaceAll/search/split
+/// all open with (§22.1.3.13/.14/.19/.20/.21/.22 step 2).
+///
+/// GetMethod:
+///   1. Let func be ? GetV(V, P).
+///   2. If func is either undefined or null, return undefined.
+///   3. If IsCallable(func) is false, throw a TypeError exception.
+///   4. Return func.
+///
+/// The **object-only guard is deliberate**, not an approximation of GetV: a
+/// primitive `searchValue`/`separator` must NOT box and consult its prototype
+/// (test262 `cstm-replace-on-string-primitive.js` and its five siblings install
+/// a throwing `String.prototype[@@replace]` getter and require it never runs).
+/// Step 3, on the other hand, is real: `"a".replace({[Symbol.replace]: 3})`
+/// throws a TypeError before any ToString of `this`.
+fn get_method(
   state: State(host),
   val: JsValue,
   symbol: value.SymbolId,
 ) -> Result(#(option.Option(JsValue), State(host)), #(JsValue, State(host))) {
   case val {
-    JsObject(ref) ->
-      case object.get_symbol_value(state, ref, symbol, val) {
-        Ok(#(JsUndefined, state)) -> Ok(#(None, state))
-        Ok(#(JsNull, state)) -> Ok(#(None, state))
-        Ok(#(method, state)) -> Ok(#(Some(method), state))
-        Error(#(thrown, state)) -> Error(#(thrown, state))
+    JsObject(ref) -> {
+      // Step 1: func = ? GetV(V, P) — a getter or a proxy `get` trap runs here.
+      use #(func, state) <- result.try(object.get_symbol_value(
+        state,
+        ref,
+        symbol,
+        val,
+      ))
+      case func {
+        // Step 2: undefined/null → the method is absent.
+        JsUndefined | JsNull -> Ok(#(None, state))
+        // Steps 3-4: present, must be callable.
+        _ ->
+          case helpers.is_callable(state.heap, func) {
+            True -> Ok(#(Some(func), state))
+            False ->
+              Error(state.type_error_value(state, not_a_function(symbol)))
+          }
       }
+    }
+    // Not an Object — the caller's guard declines the delegation entirely.
     _ -> Ok(#(None, state))
   }
+}
+
+/// The TypeError message for a well-known symbol method that isn't callable.
+fn not_a_function(symbol: value.SymbolId) -> String {
+  value.well_known_symbol_description(symbol)
+  |> option.unwrap("Symbol method")
+  |> string.append(" is not a function")
 }
 
 /// Call a Symbol method on an object: method.call(obj, args)
@@ -1064,7 +1101,7 @@ fn delegate_or_regexp(
   symbol: value.SymbolId,
   this: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use method_opt, state <- state.try_op(try_symbol_method(state, val, symbol))
+  use method_opt, state <- state.try_op(get_method(state, val, symbol))
   case method_opt {
     Some(method) -> call_symbol_method(state, method, val, [this])
     None -> {
@@ -1080,15 +1117,10 @@ fn delegate_or_regexp(
       )
       // Invoke(rx, symbol): a missing/undefined method means calling
       // undefined, which throws TypeError; a throwing getter propagates.
-      use method_opt, state <- state.try_op(try_symbol_method(state, rx, symbol))
+      use method_opt, state <- state.try_op(get_method(state, rx, symbol))
       case method_opt {
         Some(method) -> call_symbol_method(state, method, rx, [JsString(s)])
-        None -> {
-          let name =
-            value.well_known_symbol_description(symbol)
-            |> option.unwrap("Symbol method")
-          state.type_error(state, name <> " is not a function")
-        }
+        None -> state.type_error(state, not_a_function(symbol))
       }
     }
   }
@@ -1136,20 +1168,16 @@ fn string_replace(
     [_, rv, ..] -> rv
     _ -> JsUndefined
   }
-  // Step 2: If searchValue is an Object with @@replace, delegate with the
-  // original this value.
-  use method_opt, state <- state.try_op(try_symbol_method(
+  // Step 2: replacer = ? GetMethod(searchValue, @@replace); delegate if set,
+  // passing the original this value.
+  use method_opt, state <- state.try_op(get_method(
     state,
     search_val,
     value.symbol_replace,
   ))
   case method_opt {
     Some(method) ->
-      case helpers.is_callable(state.heap, method) {
-        True ->
-          call_symbol_method(state, method, search_val, [this, replace_val])
-        False -> state.type_error(state, "@@replace method is not a function")
-      }
+      call_symbol_method(state, method, search_val, [this, replace_val])
     None -> {
       // Steps 3-4: string = ToString(O), searchString = ToString(searchValue)
       use s, state <- coerce.try_to_string(state, this)
@@ -1177,19 +1205,15 @@ fn string_replace_all(
   // object-coercible and its string must contain "g".
   use is_re, state <- try_is_regexp(state, search_val)
   use Nil, state <- replace_all_global_check(state, search_val, is_re)
-  // Step 2b: replacer = GetMethod(searchValue, @@replace); delegate if set.
-  use method_opt, state <- state.try_op(try_symbol_method(
+  // Step 2b: replacer = ? GetMethod(searchValue, @@replace); delegate if set.
+  use method_opt, state <- state.try_op(get_method(
     state,
     search_val,
     value.symbol_replace,
   ))
   case method_opt {
     Some(method) ->
-      case helpers.is_callable(state.heap, method) {
-        True ->
-          call_symbol_method(state, method, search_val, [this, replace_val])
-        False -> state.type_error(state, "@@replace method is not a function")
-      }
+      call_symbol_method(state, method, search_val, [this, replace_val])
     None -> {
       // Steps 3-4: string = ToString(O), searchString = ToString(searchValue)
       use s, state <- coerce.try_to_string(state, this)
@@ -1323,8 +1347,8 @@ fn replace_loop_functional(
   case index_of_from(tail, search_str, 0) {
     -1 -> #(state, Ok(JsString(acc <> tail)))
     rel -> {
-      let preserved = cp_slice(tail, 0, rel)
-      let after = cp_drop(tail, rel + search_len)
+      let preserved = object.string_slice(tail, 0, rel)
+      let after = object.string_drop_start(tail, rel + search_len)
       let p = abs_pos + rel
       use result, state <- state.try_call(state, replace_fn, JsUndefined, [
         JsString(search_str),
@@ -1343,12 +1367,12 @@ fn replace_loop_functional(
             _ ->
               replace_loop_functional(
                 state,
-                cp_drop(after, 1),
+                object.string_drop_start(after, 1),
                 s,
                 search_str,
                 search_len,
                 p + 1,
-                acc <> cp_slice(after, 0, 1),
+                acc <> object.string_slice(after, 0, 1),
                 replace_fn,
                 all,
               )
@@ -1387,8 +1411,8 @@ fn replace_loop_template(
   case index_of_from(tail, search_str, 0) {
     -1 -> acc <> tail
     rel -> {
-      let preserved = cp_slice(tail, 0, rel)
-      let after = cp_drop(tail, rel + search_len)
+      let preserved = object.string_slice(tail, 0, rel)
+      let after = object.string_drop_start(tail, rel + search_len)
       let replacement = case has_dollar {
         True ->
           get_substitution(template, search_str, before <> preserved, after)
@@ -1403,13 +1427,13 @@ fn replace_loop_template(
           case after {
             "" -> acc
             _ -> {
-              let cp = cp_slice(after, 0, 1)
+              let cp = object.string_slice(after, 0, 1)
               let before = case has_dollar {
                 True -> before <> cp
                 False -> ""
               }
               replace_loop_template(
-                cp_drop(after, 1),
+                object.string_drop_start(after, 1),
                 search_str,
                 search_len,
                 template,
@@ -1499,8 +1523,8 @@ fn string_split(
     [_, l, ..] -> l
     _ -> JsUndefined
   }
-  // Step 2: If separator is an object, check for Symbol.split
-  use method_opt, state <- state.try_op(try_symbol_method(
+  // Step 2: splitter = ? GetMethod(separator, @@split); delegate if set.
+  use method_opt, state <- state.try_op(get_method(
     state,
     sep_val,
     value.symbol_split,
@@ -1556,7 +1580,7 @@ fn string_split_parts(
         0 -> state.ok_array(state, [])
         _ -> {
           let parts = case sep {
-            "" -> cp_explode(s) |> list.map(JsString)
+            "" -> object.string_explode(s) |> list.map(JsString)
             _ -> string.split(s, sep) |> list.map(JsString)
           }
           state.ok_array(state, list.take(parts, lim))
@@ -1807,7 +1831,7 @@ fn string_at(
   }
   // Steps 7-8: bounds check, return char or undefined
   case actual_idx >= 0 && actual_idx < len {
-    True -> #(state, Ok(JsString(cp_slice(s, actual_idx, 1))))
+    True -> #(state, Ok(JsString(object.string_slice(s, actual_idx, 1))))
     False -> #(state, Ok(JsUndefined))
   }
 }
@@ -2208,7 +2232,7 @@ fn string_substr(
   let end = int.min(start + len, size)
   case start >= end {
     True -> #(state, Ok(JsString("")))
-    False -> #(state, Ok(JsString(cp_slice(s, start, end - start))))
+    False -> #(state, Ok(JsString(object.string_slice(s, start, end - start))))
   }
 }
 
@@ -2322,19 +2346,16 @@ fn match_all_create_regexp(
     JsUndefined,
     [regexp_arg, JsString("g")],
   )
-  // Step 5: Invoke(rx, @@matchAll, « S »)
-  use method_opt, state <- state.try_op(try_symbol_method(
+  // Step 5: Invoke(rx, @@matchAll, « S ») — a missing method means calling
+  // undefined, i.e. TypeError.
+  use method_opt, state <- state.try_op(get_method(
     state,
     rx,
     value.symbol_match_all,
   ))
   case method_opt {
-    Some(method) ->
-      case helpers.is_callable(state.heap, method) {
-        True -> call_symbol_method(state, method, rx, [JsString(s)])
-        False -> state.type_error(state, "@@matchAll method is not a function")
-      }
-    None -> state.type_error(state, "@@matchAll method is not a function")
+    Some(method) -> call_symbol_method(state, method, rx, [JsString(s)])
+    None -> state.type_error(state, not_a_function(value.symbol_match_all))
   }
 }
 
@@ -2526,19 +2547,7 @@ fn last_index_of_from(s: String, search: String, from: Int) -> Int {
 @external(erlang, "arc_string_ffi", "string_last_index_of")
 fn ffi_last_index_of(haystack: String, needle: String, from: Int) -> Int
 
-/// Codepoint-based substring: `len` codepoints starting at codepoint `start`.
-/// Plain UTF-8 byte walk returning a sub-binary — no per-character
-/// allocation, unlike gleam/string.slice's grapheme clustering (~20x
-/// slower). Same UTF-16 deviation as object.string_char_at.
-@external(erlang, "arc_string_ffi", "string_cp_slice")
-fn cp_slice(s: String, start: Int, len: Int) -> String
-
-/// Drop the first `n` codepoints (clamps; n <= 0 returns s unchanged).
-/// Sub-binary result, alloc-free walk — replaces gleam/string.drop_start.
-@external(erlang, "arc_string_ffi", "string_cp_drop")
-fn cp_drop(s: String, n: Int) -> String
-
-/// Split into single-codepoint strings — replaces string.to_graphemes for
-/// String.prototype.split(""), matching the engine's codepoint indexing.
-@external(erlang, "arc_string_ffi", "string_cp_explode")
-fn cp_explode(s: String) -> List(String)
+// The codepoint string primitives (`object.string_slice`,
+// `object.string_drop_start`, `object.string_explode`) live next to
+// `object.string_length`/`object.string_char_at` in `arc/vm/ops/object` — one
+// place that defines what a JS string index means for the whole engine.

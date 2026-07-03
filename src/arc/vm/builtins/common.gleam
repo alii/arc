@@ -746,10 +746,6 @@ pub fn init_type(
 /// separate `heap.update_kind` call that nothing forces you to make. Routing
 /// wrappers through here makes "registered a wrapper prototype without its
 /// data slot" a missing-argument compile error.
-///
-/// TODO: String still calls `init_type` and so has no [[StringData]] slot on
-/// String.prototype — `String.prototype.toString()` throws instead of
-/// returning "". Switch `builtins/string.gleam` over to this function.
 pub fn init_wrapper_type(
   h: Heap(ctx, host),
   parent_proto: Ref,
