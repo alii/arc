@@ -1552,7 +1552,9 @@ fn set_property_on_slot(
 /// Step 3: Let newLen be ToUint32(Desc.[[Value]]).
 /// Step 5: If SameValueZero(newLen, ToNumber(Desc.[[Value]])) is false, throw
 /// RangeError — `ThrewRangeError`, which every caller re-raises regardless of
-/// strict mode.
+/// strict mode. Only `InvalidLength` (a value we *did* coerce, and it wasn't a
+/// uint32) reaches step 5; `UncoercibleLength` is our ToPrimitive gap and stays
+/// a silent `Rejected` rather than inventing a spurious RangeError.
 ///
 /// Steps 9-10: Let oldLen be the current "length" property's [[Value]].
 /// Step 11: If newLen >= oldLen, set length and return true.
@@ -1574,8 +1576,11 @@ fn array_set_length(
   // §10.4.2.4 steps 3-5: Coerce value to valid uint32 length.
   case coerce_length(h, val) {
     // Step 5: newLen != numberLen — throw RangeError, in every mode.
-    None -> #(h, ThrewRangeError("Invalid array length"))
-    Some(new_length) -> {
+    InvalidLength -> #(h, ThrewRangeError("Invalid array length"))
+    // Not a step-5 failure: we simply cannot run the coercion here (see
+    // `length_to_number`). Preserve the pre-existing silent no-op.
+    UncoercibleLength -> #(h, Rejected)
+    CoercedLength(new_length) -> {
       let assert ObjectSlot(properties:, elements:, ..) = slot
       // §10.4.2.4 steps 8-18: If shrinking, delete own indices >= newLen in
       // descending order. Plain elements are implicitly configurable; dict
@@ -1650,34 +1655,56 @@ fn array_set_length(
 /// false, throw RangeError.
 ///
 /// Simplified: we accept finite numbers that are non-negative integers.
-/// Fractional, negative, NaN, Infinity, and non-numeric values return None
-/// (caller treats as failure). This covers both internal Set(O,"length",n,true)
-/// calls from Array.prototype mutators and user-level `arr.length = 3.5`.
-fn coerce_length(h: Heap(host), val: JsValue) -> Option(Int) {
+/// Fractional, negative, NaN and Infinity are `InvalidLength` (step-5
+/// RangeError). Values whose ToNumber we cannot compute here are
+/// `UncoercibleLength` — a deviation, NOT a step-5 failure. This covers both
+/// internal Set(O,"length",n,true) calls from Array.prototype mutators and
+/// user-level `arr.length = 3.5`.
+fn coerce_length(h: Heap(host), val: JsValue) -> LengthCoercion {
   case length_to_number(h, val) {
+    None -> UncoercibleLength
     Some(Finite(f)) -> {
       let n = value.float_to_int(f)
       case n >= 0 && int.to_float(n) == f {
-        True -> Some(n)
-        False -> None
+        True -> CoercedLength(n)
+        False -> InvalidLength
       }
     }
-    _ -> None
+    // NaN / ±Infinity: ToUint32 differs from ToNumber, so step 5 throws.
+    Some(value.NaN) | Some(value.Infinity) | Some(value.NegInfinity) ->
+      InvalidLength
   }
+}
+
+/// The three answers §10.4.2.4 steps 3-5 can give us. `InvalidLength` and
+/// `UncoercibleLength` used to be one `None`, which made a spec RangeError and
+/// an Arc deviation indistinguishable at the call site.
+type LengthCoercion {
+  /// ToUint32(Desc.[[Value]]) == ToNumber(Desc.[[Value]]) — a real length.
+  CoercedLength(length: Int)
+  /// Step 5: coerced fine, but the number is not a uint32 (`-1`, `3.5`, `NaN`,
+  /// `Infinity`, `undefined`) → RangeError.
+  InvalidLength
+  /// TODO(Deviation): ToNumber here would need user code (a plain object's
+  /// valueOf/toString) or should be a TypeError (Symbol, BigInt). Neither is
+  /// possible from this heap-only layer, so the define is silently rejected —
+  /// wrong, but strictly better than throwing a RangeError the spec never
+  /// throws. Fix by hoisting ToPrimitive to a State-carrying caller.
+  UncoercibleLength
 }
 
 /// ToNumber for array-length values (§10.4.2.4 step 4), without running user
 /// code: primitives coerce directly; Number/String/Boolean wrapper objects
 /// unwrap their primitive data (what ToPrimitive returns when valueOf is
-/// intact). Other objects return None.
-///
-/// TODO(Deviation): spec ToPrimitive may run user valueOf/toString here.
+/// intact). `None` means "not coercible here" — see `UncoercibleLength`; it is
+/// deliberately NOT the same as coercing to NaN.
 fn length_to_number(h: Heap(host), val: JsValue) -> Option(value.JsNum) {
   case val {
     JsNumber(n) -> Some(n)
     JsString(s) -> Some(value.string_to_number(s))
     value.JsBool(True) -> Some(Finite(1.0))
     value.JsBool(False) | value.JsNull -> Some(Finite(0.0))
+    value.JsUndefined -> Some(value.NaN)
     JsObject(ref) ->
       case heap.read(h, ref) {
         Some(ObjectSlot(kind: value.NumberObject(value: n), ..)) -> Some(n)
@@ -1687,9 +1714,11 @@ fn length_to_number(h: Heap(host), val: JsValue) -> Option(value.JsNum) {
           Some(Finite(1.0))
         Some(ObjectSlot(kind: value.BooleanObject(value: False), ..)) ->
           Some(Finite(0.0))
+        // Plain object: needs ToPrimitive → user valueOf/toString.
         _ -> None
       }
-    _ -> None
+    // Symbol / BigInt (spec: TypeError), TDZ sentinel (never a JS value).
+    value.JsSymbol(_) | value.JsBigInt(_) | value.JsUninitialized -> None
   }
 }
 
@@ -4385,6 +4414,11 @@ pub fn typed_array_element(
   length: Int,
   idx: Int,
 ) -> Option(JsValue) {
+  // Cheap pre-filter, redundant with `valid_integer_index` below but ahead of
+  // it: reading the backing store of a SharedArrayBuffer copies the whole
+  // buffer out of its atomics cells, so an out-of-range read (`ta[len]`, the
+  // terminating step of a scan loop) must not pay for it.
+  use <- bool.guard(idx < 0 || idx >= length, None)
   case typed_array_buffer_data(h, buffer) {
     None -> None
     Some(data) -> {

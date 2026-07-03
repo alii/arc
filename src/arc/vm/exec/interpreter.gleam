@@ -3631,10 +3631,17 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         [value, JsObject(ref) as obj, ..rest] ->
           case define_needs_full_semantics(state, ref, key) {
             // Fast path: ordinary extensible target (fresh object literals,
-            // normal class instances) — a raw insert is spec-equivalent.
+            // normal class instances) — a raw insert is spec-equivalent, but
+            // the receiver may still be an exotic array
+            // (`class C extends Array { length = -1 }`), so honour the outcome.
             False -> {
-              let #(heap, _) = object.set_property(state.heap, ref, key, value)
-              Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+              use state <- result.map(create_data_property_or_throw(
+                state,
+                ref,
+                key,
+                value,
+              ))
+              State(..state, stack: [obj, ..rest], pc: state.pc + 1)
             }
             // §7.3.32 DefineField → CreateDataPropertyOrThrow: a proxy
             // receiver fires its defineProperty trap; a frozen /
@@ -3863,14 +3870,18 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                   // Reachable via a static class field with computed name
                   // "prototype"; fresh object literals have no
                   // non-configurable properties.
-                  use Nil <- result.map(case pk {
+                  use Nil <- result.try(case pk {
                     Named("prototype") ->
                       check_define_nonconfigurable(state, ref, pk)
                     _ -> Ok(Nil)
                   })
-                  let #(heap, _ok) =
-                    object.set_property(state.heap, ref, pk, val)
-                  State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1)
+                  use state <- result.map(create_data_property_or_throw(
+                    state,
+                    ref,
+                    pk,
+                    val,
+                  ))
+                  State(..state, stack: [obj, ..rest], pc: state.pc + 1)
                 }
               }
             }
@@ -5683,6 +5694,30 @@ fn define_needs_full_semantics(
         Some(ObjectSlot(extensible:, ..)) -> !extensible
         _ -> False
       }
+  }
+}
+
+/// §7.3.7 CreateDataPropertyOrThrow on the DefineField fast paths — no proxy
+/// trap and no user code can run, so the raw own-define is spec-equivalent, but
+/// its `DefineOutcome` still has to be honoured: the receiver may be an exotic
+/// array (`class C extends Array { length = -1 }` → ArraySetLength RangeError),
+/// and a `Rejected` define is a TypeError, never a silent no-op.
+fn create_data_property_or_throw(
+  state: State(host),
+  ref: value.Ref,
+  pk: key.PropertyKey,
+  val: JsValue,
+) -> Result(State(host), StepExit(host)) {
+  let #(heap, outcome) = object.set_property(state.heap, ref, pk, val)
+  let state = State(..state, heap:)
+  case outcome {
+    object.Defined -> Ok(state)
+    object.Rejected ->
+      state.throw_type_error(
+        state,
+        "Cannot define property " <> key.key_display_string(pk),
+      )
+    object.ThrewRangeError(msg) -> state.throw_range_error(state, msg)
   }
 }
 

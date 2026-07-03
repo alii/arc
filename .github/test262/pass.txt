@@ -1256,6 +1256,7 @@ built-ins/Array/length/S15.4.2.2_A2.3_T3.js
 built-ins/Array/length/S15.4.2.2_A2.3_T4.js
 built-ins/Array/length/S15.4.2.2_A2.3_T5.js
 built-ins/Array/length/S15.4.4_A1.3_T1.js
+built-ins/Array/length/S15.4.5.1_A1.1_T2.js
 built-ins/Array/length/S15.4.5.1_A1.2_T1.js
 built-ins/Array/length/S15.4.5.1_A1.2_T3.js
 built-ins/Array/length/S15.4.5.1_A1.3_T1.js
