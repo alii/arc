@@ -34,7 +34,10 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
-import arc/vm/internal/typed_array_ffi.{ta_get_int, ta_set_int}
+import arc/vm/internal/typed_array_ffi.{
+  type IntElem, I16, I32, I64, I8, U16, U32, U64, U8, int_elem_bits,
+  int_elem_signed, int_elem_size, ta_get_int, ta_set_int,
+}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -144,7 +147,7 @@ fn sab_cas_element(
   replacement: Int,
 ) -> Int
 
-@external(erlang, "arc_atomics_ffi", "sleep")
+@external(erlang, "arc_clock_ffi", "sleep")
 fn ffi_sleep(ms: Int) -> Nil
 
 /// Raw BEAM monotonic clock in milliseconds. The VM itself reads the clock
@@ -153,12 +156,14 @@ fn ffi_sleep(ms: Int) -> Nil
 /// virtualise time; this external is the real clock behind the DEFAULT hook
 /// and stays public for embedder natives (e.g. the $262 agent helpers) that
 /// want the same wall clock outside any State.
-@external(erlang, "arc_atomics_ffi", "monotonic_now")
+@external(erlang, "arc_clock_ffi", "monotonic_now")
 pub fn monotonic_now() -> Int
 
 /// Raw blocking sleep (`timer:sleep/1`, no-op for ms <= 0). The event loop
 /// sleeps via `state.ctx.host_hooks.sleep_ms`; this is the real sleep behind
 /// the DEFAULT hook, public for embedder natives ($262 agent `sleep`).
+/// Always a bounded idle — an untimed sync wait blocks in the embedder's
+/// `HostHooks.atomics` capability, never in a local sleep.
 pub fn sleep_ms(ms: Int) -> Nil {
   ffi_sleep(ms)
 }
@@ -167,7 +172,7 @@ pub fn sleep_ms(ms: Int) -> Nil {
 /// interpreter.new_state seeds State.can_block from it at realm boot.
 /// Defaults to True; public for the test262 runner, which sets False for
 /// tests flagged CanBlockIsFalse before booting the test realm.
-@external(erlang, "arc_atomics_ffi", "set_can_block")
+@external(erlang, "arc_agent_ffi", "set_can_block")
 pub fn set_can_block(can: Bool) -> Nil
 
 // ============================================================================
@@ -176,16 +181,34 @@ pub fn set_can_block(can: Bool) -> Nil
 
 /// Cross-process identity of a buffer's WaiterList (an Erlang term: the
 /// SAB's atomics ref for shared storage, a pid-scoped heap id otherwise).
-/// Alias of the contract type in arc/vm/state (State's capability fields
-/// reference it); re-exported here for existing callers.
+/// Alias of `value.WaiterKey` (which `arc/vm/state` also re-exports as its
+/// capability contract type); named here for existing callers.
 pub type WaiterKey =
-  state.WaiterKey
+  value.WaiterKey
 
 /// Opaque handle to one registered waiterlist entry (its ETS key plus the
 /// unique message ref the notifier will address). Contract type from
 /// arc/vm/state — handed to the embedder inside a WaitRequest.
 type WaiterHandle =
   state.WaiterHandle
+
+/// Which side won the race when this agent withdrew a waiterlist entry of its
+/// own — the ONE answer both withdrawal callers (a sync wait's
+/// not-equal/error unwind, an expiring waitAsync waiter) need. It used to be
+/// a `Bool` returned by two functions with OPPOSITE polarity (`cancel_waiter`
+/// said `false` for "withdrew", `remove_async_token` said `true`); as a sum
+/// type, reading one call site's arms tells you the other's, and swapping
+/// them is a compile error rather than a silently inverted outcome.
+type WithdrawOutcome {
+  /// We removed the entry: nobody claimed us, no wake message can be in
+  /// flight, and no notifier counted this waiter as woken.
+  Withdrew
+  /// A notifier atomically claimed the entry first: it ALREADY counted this
+  /// waiter as woken, and its `{arc_notify, ...}` message is in flight to
+  /// this process's mailbox (the caller must flush it, and must not claim
+  /// to have timed out).
+  AlreadyClaimed
+}
 
 @external(erlang, "arc_waiter_ffi", "local_buffer_key")
 fn ffi_local_buffer_key(id: Int) -> WaiterKey
@@ -200,19 +223,21 @@ fn ffi_insert_waiter(
   is_async: Bool,
 ) -> WaiterHandle
 
-/// Withdraw our own waiterlist entry (data-only ets:take). Returns True
-/// when a notifier had ALREADY claimed the entry — its wake message is in
-/// flight to this process's mailbox and the caller must flush it via the
-/// embedder capability (see sync_block's not-equal arm), or it will
-/// spuriously settle the next waiter at the same (key, byte index).
+/// Withdraw the exact entry named by `handle` (data-only ets:take):
+/// `AlreadyClaimed` means a notifier got there first — its wake message is
+/// in flight to this process's mailbox and the caller must flush it via the
+/// embedder capability (see `withdraw_entry`), or it will spuriously settle
+/// the next waiter at the same (key, byte index).
 @external(erlang, "arc_waiter_ffi", "cancel_waiter")
-fn ffi_cancel_waiter(handle: WaiterHandle) -> Bool
+fn ffi_cancel_waiter(handle: WaiterHandle) -> WithdrawOutcome
 
 /// Atomically claim up to `count` waiters FIFO (data-only ets:take loop).
-/// Returns the CLAIMED remote waiters — delivery of their wake messages is
-/// the embedder's job via the `deliver_wake` capability on
-/// `state.ctx.host_hooks.atomics` — plus the count of our
-/// own waitAsync tokens taken (settled directly on State by the caller).
+/// Returns the CLAIMED remote waiters — plus the count of our own waitAsync
+/// tokens taken (settled directly on State by the caller).
+///
+/// Claiming a remote waiter is a PROMISE to wake it, so the ONLY caller is
+/// `take_and_wake_waiters`, which takes the discharging `deliver_wake`
+/// capability by value and always delivers.
 @external(erlang, "arc_waiter_ffi", "take_waiters")
 fn ffi_take_waiters(
   key: WaiterKey,
@@ -220,8 +245,37 @@ fn ffi_take_waiters(
   count: Int,
 ) -> #(List(state.ClaimedWaiter), Int)
 
-@external(erlang, "arc_waiter_ffi", "remove_async_token")
-fn ffi_remove_async_token(key: WaiterKey, byte_index: Int) -> Nil
+/// Claim up to `count` of THIS process's own waitAsync tokens at
+/// (key, byte index), FIFO; returns how many were taken. Other processes'
+/// entries are left registered — waking them needs a message, and this is
+/// the no-`deliver_wake`-capability path. Settling our own tokens is pure
+/// data (the promises live on State), so it is always safe.
+@external(erlang, "arc_waiter_ffi", "take_self_async_tokens")
+fn ffi_take_self_async_tokens(
+  key: WaiterKey,
+  byte_index: Int,
+  count: Int,
+) -> Int
+
+/// Withdraw ONE of this agent's waitAsync tokens at (key, byte index) — an
+/// expiring waiter's deadline elapsed and it must not be counted by a future
+/// notify. Tokens here are fungible (see `value.AtomicsWaiter`), so this is
+/// the same "take my own tokens" primitive notify uses, with a budget of one.
+///
+/// `AlreadyClaimed` (no token of ours survived) says only that some notifier
+/// took the token — NOT that this particular waiter was woken. Tokens are
+/// per-process and fungible while `atomics_waiters` is per-State, so the two
+/// counts can legitimately drift (a nested drain settles against a child
+/// State's empty waiter list). Callers must not infer a wait outcome from it.
+fn withdraw_own_async_token(
+  key: WaiterKey,
+  byte_index: Int,
+) -> WithdrawOutcome {
+  case ffi_take_self_async_tokens(key, byte_index, 1) {
+    0 -> AlreadyClaimed
+    _ -> Withdrew
+  }
+}
 
 /// WaiterList identity of a buffer (§25.4.3.6 GetWaiterList): the shared
 /// storage's atomics ref — identical in every process observing the SAB —
@@ -230,7 +284,7 @@ fn ffi_remove_async_token(key: WaiterKey, byte_index: Int) -> Nil
 fn buffer_key(state: State(host), buffer: Ref) -> WaiterKey {
   case heap.read(state.heap, buffer) {
     Some(ObjectSlot(
-      kind: value.ArrayBufferObject(data: value.BufShared(ref:, ..), ..),
+      kind: value.ArrayBufferObject(data: Some(value.BufShared(ref:)), ..),
       ..,
     )) -> ffi_shared_buffer_key(ref)
     _ -> {
@@ -248,15 +302,18 @@ fn buffer_key(state: State(host), buffer: Ref) -> WaiterKey {
 type TaInfo {
   TaInfo(
     buffer: Ref,
+    /// [[TypedArrayName]] / [[ContentType]] — matched as `BigKind(_)` /
+    /// `NumKind(_)` wherever the content type decides between ToBigInt and
+    /// ToNumber. There is no second encoding of ContentType here.
     elem_kind: TypedArrayKind,
     byte_offset: Int,
     /// Live element count at validation time (clamped for shrunk resizable
     /// buffers).
     length: Int,
-    /// Bit width of one element (8/16/32/64).
-    bits: Int,
-    /// Whether reads should sign-extend (Int8/Int16/Int32/BigInt64).
-    signed: Bool,
+    /// The integer element type: its byte width and signedness are read off
+    /// it (`int_elem_size` / `int_elem_signed`), so a bits/signed pair that
+    /// names no real element type is unrepresentable.
+    elem: IntElem,
     /// The atomics ref of the view's shared (cross-process) storage, or
     /// None for plain process-local byte storage — captured ONCE from the
     /// validated buffer's [[ArrayBufferData]], the single source of truth
@@ -268,25 +325,30 @@ type TaInfo {
 }
 
 /// Allowed element kinds per Table 60 (§25.4.3.1): the 8 integer kinds for
-/// general ops; only Int32/BigInt64 when `waitable`. Returns #(bits, signed).
-fn kind_bits(
+/// general ops; only Int32/BigInt64 when `waitable`.
+fn atomics_elem(
   kind: TypedArrayKind,
   waitable: Bool,
-) -> option.Option(#(Int, Bool)) {
+) -> option.Option(IntElem) {
   case waitable, kind {
-    True, value.Int32Kind -> Some(#(32, True))
-    True, value.BigInt64Kind -> Some(#(64, True))
+    True, value.NumKind(value.Int32Kind) -> Some(I32)
+    True, value.BigKind(value.BigInt64Kind) -> Some(I64)
     True, _ -> None
-    False, value.Int8Kind -> Some(#(8, True))
-    False, value.Uint8Kind -> Some(#(8, False))
-    False, value.Int16Kind -> Some(#(16, True))
-    False, value.Uint16Kind -> Some(#(16, False))
-    False, value.Int32Kind -> Some(#(32, True))
-    False, value.Uint32Kind -> Some(#(32, False))
-    False, value.BigInt64Kind -> Some(#(64, True))
-    False, value.BigUint64Kind -> Some(#(64, False))
+    False, value.NumKind(value.Int8Kind) -> Some(I8)
+    False, value.NumKind(value.Uint8Kind) -> Some(U8)
+    False, value.NumKind(value.Int16Kind) -> Some(I16)
+    False, value.NumKind(value.Uint16Kind) -> Some(U16)
+    False, value.NumKind(value.Int32Kind) -> Some(I32)
+    False, value.NumKind(value.Uint32Kind) -> Some(U32)
+    False, value.BigKind(value.BigInt64Kind) -> Some(I64)
+    False, value.BigKind(value.BigUint64Kind) -> Some(U64)
     False, _ -> None
   }
+}
+
+/// Byte width of one element of the validated view.
+fn elem_size(info: TaInfo) -> Int {
+  int_elem_size(info.elem)
 }
 
 /// §25.4.3.1 ValidateIntegerTypedArray + §25.4.3.3 ValidateAtomicAccessOn-
@@ -310,22 +372,25 @@ fn with_ta_and_index(
   use view <- some_or(read_typed_array(state, ta_val), fn() {
     state.type_error(state, "Atomics operation needs an integer TypedArray")
   })
-  use #(bits, signed) <- some_or(kind_bits(view.elem_kind, waitable), fn() {
+  use elem <- some_or(atomics_elem(view.elem_kind, waitable), fn() {
     state.type_error(
       state,
       "Invalid TypedArray element type for Atomics operation",
     )
   })
-  use buf <- some_or(read_buffer(state, view.buffer), fn() {
+  use slot <- some_or(read_buffer(state, view.buffer), fn() {
     state.type_error(state, "TypedArray is not attached")
   })
-  use Nil <- require(!require_shared || option.is_some(buf.storage), fn() {
-    state.type_error(
-      state,
-      "Atomics.wait requires a SharedArrayBuffer TypedArray",
-    )
-  })
-  use Nil <- require(!buf.detached, fn() {
+  use Nil <- require(
+    !require_shared || option.is_some(slot_storage(slot)),
+    fn() {
+      state.type_error(
+        state,
+        "Atomics.wait requires a SharedArrayBuffer TypedArray",
+      )
+    },
+  )
+  use buf <- some_or(live_buffer(slot), fn() {
     state.type_error(state, "ArrayBuffer is detached")
   })
   // ValidateTypedArray step 4 (immutable-arraybuffer proposal):
@@ -338,7 +403,7 @@ fn with_ta_and_index(
   })
   // Live length: a resizable buffer may have shrunk below the view
   // (§10.4.5.12 IsTypedArrayOutOfBounds folds into this).
-  let size = bits / 8
+  let size = int_elem_size(elem)
   let avail = { bit_array.byte_size(buf.bits) - view.byte_offset } / size
   let live = int.clamp(avail, 0, view.length)
   let info =
@@ -347,8 +412,7 @@ fn with_ta_and_index(
       elem_kind: view.elem_kind,
       byte_offset: view.byte_offset,
       length: live,
-      bits:,
-      signed:,
+      elem:,
       storage: buf.storage,
     )
   // §25.4.3.2 ValidateAtomicAccess: ToIndex then bounds check.
@@ -433,6 +497,18 @@ fn read_typed_array(state: State(host), val: JsValue) -> option.Option(TaView) {
 /// derived from `data` right here, so a "shared" flag can never disagree
 /// with the storage it describes, and a write-back rebuilds the slot from
 /// THESE fields rather than from a second heap read.
+type BufferSlot {
+  BufferSlot(
+    /// [[ArrayBufferData]]: None IS the detached case — there is no separate
+    /// `detached` flag that could disagree with the storage.
+    data: option.Option(value.BufferData),
+    max_byte_length: option.Option(Int),
+    immutable: Bool,
+  )
+}
+
+/// A buffer slot projected onto its LIVE storage: only reachable for a
+/// non-detached buffer, so nothing downstream has to re-check that.
 type BufferInfo {
   BufferInfo(
     /// The live [[ArrayBufferData]] storage (BufBytes | BufShared).
@@ -447,7 +523,6 @@ type BufferInfo {
     /// cell-CAS loop (cross-process atomicity); None means the snapshot
     /// path is trivially atomic (single process).
     storage: option.Option(value.AtomicsRef),
-    detached: Bool,
     max_byte_length: option.Option(Int),
     immutable: Bool,
   )
@@ -455,27 +530,27 @@ type BufferInfo {
 
 /// Read the viewed buffer's slot, or None when `buffer` does not hold an
 /// ArrayBuffer at all.
-fn read_buffer(state: State(host), buffer: Ref) -> option.Option(BufferInfo) {
+fn read_buffer(state: State(host), buffer: Ref) -> option.Option(BufferSlot) {
   case heap.read(state.heap, buffer) {
     Some(ObjectSlot(
-      kind: value.ArrayBufferObject(
-        data:,
-        detached:,
-        max_byte_length:,
-        immutable:,
-      ),
+      kind: value.ArrayBufferObject(data:, max_byte_length:, immutable:),
       ..,
-    )) ->
-      Some(BufferInfo(
-        data:,
-        bits: value.buffer_bits(data),
-        storage: buffer_storage(data),
-        detached:,
-        max_byte_length:,
-        immutable:,
-      ))
+    )) -> Some(BufferSlot(data:, max_byte_length:, immutable:))
     _ -> None
   }
+}
+
+/// IsDetachedBuffer(O) is false — project a slot onto its live storage.
+/// None IS the detached case: there are no bytes to hand out.
+fn live_buffer(slot: BufferSlot) -> option.Option(BufferInfo) {
+  use data <- option.map(slot.data)
+  BufferInfo(
+    data:,
+    bits: value.buffer_bits(data),
+    storage: buffer_storage(data),
+    max_byte_length: slot.max_byte_length,
+    immutable: slot.immutable,
+  )
 }
 
 /// The atomics ref backing shared (cross-process) storage, or None for
@@ -483,9 +558,15 @@ fn read_buffer(state: State(host), buffer: Ref) -> option.Option(BufferInfo) {
 /// single source of truth for shared-ness.
 fn buffer_storage(data: value.BufferData) -> option.Option(value.AtomicsRef) {
   case data {
-    value.BufShared(ref:, ..) -> Some(ref)
+    value.BufShared(ref:) -> Some(ref)
     value.BufBytes(..) -> None
   }
+}
+
+/// Shared-ness of a possibly-detached slot: a detached buffer is never
+/// shared (a SharedArrayBuffer cannot be detached in the first place).
+fn slot_storage(slot: BufferSlot) -> option.Option(value.AtomicsRef) {
+  option.then(slot.data, buffer_storage)
 }
 
 /// §25.4.3.4 RevalidateAtomicAccess — the value coercion may have run user
@@ -499,15 +580,36 @@ fn revalidate(
   idx: Int,
   cont: fn(BufferInfo, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use buf <- some_or(read_buffer(state, info.buffer), fn() {
+  revalidate_or_abort(state, info, idx, fn() { Nil }, cont)
+}
+
+/// `revalidate` with a cleanup hook: `on_abort` runs on EVERY error exit,
+/// before the throw propagates. `sync_block` registers its waiterlist entry
+/// BEFORE this re-read (the lock-free insert-then-re-read ordering, so no
+/// wakeup can be lost) and would otherwise leak that entry into the shared
+/// ETS registry — where a later notify would claim it and wake nobody —
+/// whenever the re-read throws (detached / shrunk buffer). Every error exit
+/// below therefore goes through `on_abort`; a new one that forgets to is a
+/// missing call the reader can see, not an invisible leak.
+fn revalidate_or_abort(
+  state: State(host),
+  info: TaInfo,
+  idx: Int,
+  on_abort: fn() -> Nil,
+  cont: fn(BufferInfo, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use slot <- some_or(read_buffer(state, info.buffer), fn() {
+    let Nil = on_abort()
     state.type_error(state, "TypedArray is not attached")
   })
-  use Nil <- require(!buf.detached, fn() {
+  use buf <- some_or(live_buffer(slot), fn() {
+    let Nil = on_abort()
     state.type_error(state, "ArrayBuffer is detached")
   })
-  let size = info.bits / 8
+  let size = elem_size(info)
   let byte_off = info.byte_offset + idx * size
   use Nil <- require(byte_off + size <= bit_array.byte_size(buf.bits), fn() {
+    let Nil = on_abort()
     state.range_error(state, "Atomics access index out of range")
   })
   cont(buf, state)
@@ -533,9 +635,9 @@ fn to_operand(
   val: JsValue,
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case info.bits {
-    64 -> coerce.to_bigint_cps(state, val, cont)
-    _ -> {
+  case info.elem_kind {
+    value.BigKind(_) -> coerce.to_bigint_cps(state, val, cont)
+    value.NumKind(_) -> {
       use num, state <- coerce.try_to_number(state, val)
       case num {
         Infinity | NegInfinity -> cont(0, state)
@@ -562,8 +664,8 @@ fn wrap_to_kind(v: Int, bits: Int, signed: Bool) -> Int {
 
 /// Read element `idx` (already validated) from fresh buffer data.
 fn read_element(data: BitArray, info: TaInfo, idx: Int) -> Int {
-  let off = info.byte_offset + idx * { info.bits / 8 }
-  ta_get_int(data, off, info.bits, info.signed)
+  let off = info.byte_offset + idx * elem_size(info)
+  ta_get_int(data, off, info.elem)
 }
 
 /// Write raw integer `v` (truncated mod 2^bits by the FFI) at element `idx`
@@ -579,13 +681,12 @@ fn write_element(
   idx: Int,
   v: Int,
 ) -> State(host) {
-  let size = info.bits / 8
+  let size = elem_size(info)
   let off = info.byte_offset + idx * size
-  let new_bits = ta_set_int(buf.bits, off, info.bits, v)
+  let new_bits = ta_set_int(buf.bits, off, info.elem, v)
   let kind =
     value.ArrayBufferObject(
-      data: value.buffer_store_region(buf.data, new_bits, off, size),
-      detached: buf.detached,
+      data: Some(value.buffer_store_region(buf.data, new_bits, off, size)),
       max_byte_length: buf.max_byte_length,
       immutable: buf.immutable,
     )
@@ -595,8 +696,8 @@ fn write_element(
 /// Old element value → JS value per content type.
 fn element_to_js(info: TaInfo, raw: Int) -> JsValue {
   case info.elem_kind {
-    value.BigInt64Kind | value.BigUint64Kind -> JsBigInt(BigInt(raw))
-    _ -> value.from_int(raw)
+    value.BigKind(_) -> JsBigInt(BigInt(raw))
+    value.NumKind(_) -> value.from_int(raw)
   }
 }
 
@@ -623,11 +724,15 @@ fn rmw(
     // whole read-compute-write must be one atomic step (§25.4.3.12), so the
     // FFI runs it as a CAS retry loop on the containing cell.
     Some(ref) -> {
-      let off = info.byte_offset + idx * { info.bits / 8 }
+      let off = info.byte_offset + idx * elem_size(info)
       let old =
-        sab_rmw_element(ref, off, info.bits, info.signed, fn(old) {
-          op(old, operand)
-        })
+        sab_rmw_element(
+          ref,
+          off,
+          int_elem_bits(info.elem),
+          int_elem_signed(info.elem),
+          fn(old) { op(old, operand) },
+        )
       #(state, Ok(element_to_js(info, old)))
     }
     // Process-local storage: no interleaving is possible, the snapshot
@@ -655,19 +760,20 @@ fn compare_exchange(
   use expected, state <- to_operand(state, info, arg(args, 2))
   use replacement, state <- to_operand(state, info, arg(args, 3))
   use buf, state <- revalidate(state, info, idx)
-  let wrapped_expected = wrap_to_kind(expected, info.bits, info.signed)
+  let wrapped_expected =
+    wrap_to_kind(expected, int_elem_bits(info.elem), int_elem_signed(info.elem))
   case info.storage {
     // Shared storage: compare and (conditional) store must be one atomic
     // step across agent processes — the FFI CAS-es the containing cell
     // against the value the comparison witnessed.
     Some(ref) -> {
-      let off = info.byte_offset + idx * { info.bits / 8 }
+      let off = info.byte_offset + idx * elem_size(info)
       let old =
         sab_cas_element(
           ref,
           off,
-          info.bits,
-          info.signed,
+          int_elem_bits(info.elem),
+          int_elem_signed(info.elem),
           wrapped_expected,
           replacement,
         )
@@ -715,14 +821,14 @@ fn atomic_store(
     require_shared: False,
     write: True,
   )
-  case info.bits {
-    64 -> {
+  case info.elem_kind {
+    value.BigKind(_) -> {
       use v, state <- coerce.to_bigint_cps(state, arg(args, 2))
       use buf, state <- revalidate(state, info, idx)
       let state = write_element(state, info, buf, idx, v)
       #(state, Ok(JsBigInt(BigInt(v))))
     }
-    _ -> {
+    value.NumKind(_) -> {
       // §25.4.10 step 3: v = 𝔽(? ToIntegerOrInfinity(value)) — and v itself
       // is the return value, so ±∞ must survive the coercion (the STORED
       // element is ToIntN(±∞) = +0). Match on the raw JsNum rather than the
@@ -868,7 +974,7 @@ fn do_wait(
           state.heap,
           state.builtins.promise.prototype,
         )
-      let size = info.bits / 8
+      let size = elem_size(info)
       // §25.4.3.14 step 21: a finite timeout arms a timeout job that settles
       // the waiter with "timed-out"; the event loop fires it at `deadline`.
       let deadline = case timeout_ms {
@@ -876,20 +982,29 @@ fn do_wait(
         None -> None
       }
       let byte_off = info.byte_offset + idx * size
+      // The waiter's WaiterList identity, resolved ONCE here and stored on
+      // the waiter: this is the key the ETS token below is registered under,
+      // so every later reconciliation against the registry (notify's
+      // self-token settle, a cross-process wake, this waiter's own expiry)
+      // matches on the same term the registry used, not on `buffer`.
+      let key = buffer_key(state, info.buffer)
       let waiter =
         AtomicsWaiter(
+          key:,
           buffer: info.buffer,
           byte_offset: byte_off,
           promise_data: data_ref,
           promise: promise_ref,
           deadline:,
         )
-      // Register an interchangeable token on the shared WaiterList: tokens
-      // at the same (key, byte index, pid) are equivalent — settlement
-      // always picks the first matching State waiter FIFO — so the handle
-      // is deliberately discarded (expiry removes a token by match).
-      let _token =
-        ffi_insert_waiter(buffer_key(state, info.buffer), byte_off, True)
+      // Register an interchangeable token on the shared WaiterList: this
+      // agent's tokens at the same (key, byte index) are FUNGIBLE — a wake
+      // message names no waiter, so settlement always picks the first
+      // matching State waiter FIFO and only the COUNT of tokens has to track
+      // the count of pending waiters. The handle is therefore deliberately
+      // discarded; expiry withdraws "one of ours"
+      // (`withdraw_own_async_token`), not "this one".
+      let _token = ffi_insert_waiter(key, byte_off, True)
       let state =
         State(
           ..state,
@@ -908,8 +1023,9 @@ fn do_wait(
 /// first, then re-read the cell, then block. A racing store+notify that
 /// lands before the insert is caught by the re-read ("not-equal"); one that
 /// lands after the insert finds our entry and messages us — so no wakeup
-/// can be lost. If the re-read disagrees, the entry is withdrawn (data-only
-/// ets take) before returning.
+/// can be lost. If the re-read disagrees — OR THROWS (detached / shrunk
+/// buffer, hence `revalidate_or_abort`) — the entry is withdrawn before
+/// returning, so no exit path can leave it stranded in the shared registry.
 ///
 /// The BLOCKING itself is not core's: the registered entry is handed to
 /// the embedder's `sync_wait` capability (contract clause 1,
@@ -929,38 +1045,16 @@ fn sync_block(
   v: Int,
   timeout_ms: option.Option(Int),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let byte_off = info.byte_offset + idx * { info.bits / 8 }
+  let byte_off = info.byte_offset + idx * elem_size(info)
   let key = buffer_key(state, info.buffer)
   let handle = ffi_insert_waiter(key, byte_off, False)
+  let withdraw = fn() { withdraw_entry(caps, handle, key, byte_off) }
   // Fresh post-insert read: read_buffer snapshots the live shared cells.
-  use buf, state <- revalidate(state, info, idx)
+  // Any throw out of it withdraws the entry we just registered.
+  use buf, state <- revalidate_or_abort(state, info, idx, withdraw)
   case read_element(buf.bits, info, idx) == v {
     False -> {
-      // Withdraw the entry (data-only ets:take). If a notifier claimed it
-      // in this same instant (cancel returns True), its in-flight
-      // {arc_notify, ref, ...} wake must NOT be left in our mailbox:
-      // embedder loops match wakes by (key, byte index) — not ref — so a
-      // stale wake would spuriously settle the next waitAsync waiter this
-      // agent registers at the same address. Delegate the flush to the
-      // embedder's `caps.sync_wait` capability: its
-      // await_notify selectively
-      // receives on the entry's exact ref, and on the claimed path
-      // (ets:take of our own key finds nothing) performs the same
-      // safety-bounded flush receive the old in-core cancel did. Core
-      // still performs no receive of its own.
-      let Nil = case ffi_cancel_waiter(handle) {
-        True -> {
-          let _flushed: state.WaitOutcome =
-            caps.sync_wait(state.WaitRequest(
-              handle:,
-              key:,
-              byte_index: byte_off,
-              timeout_ms: Some(0),
-            ))
-          Nil
-        }
-        False -> Nil
-      }
+      let Nil = withdraw()
       #(state, Ok(wait_result_js(NotEqual)))
     }
     True -> {
@@ -977,6 +1071,38 @@ fn sync_block(
         state.WaitTimedOut -> TimedOut
       }
       #(state, Ok(wait_result_js(result)))
+    }
+  }
+}
+
+/// Withdraw a registered SYNC waiterlist entry (data-only ets:take), and if a
+/// notifier claimed it in that same instant, consume the wake it already put
+/// in flight.
+///
+/// The flush matters because embedder loops match wakes by (key, byte index)
+/// — not by ref — so a stale `{arc_notify, ...}` left in the mailbox would
+/// spuriously settle the NEXT waiter this agent registers at the same
+/// address. Core performs no receive of its own: it delegates to the
+/// embedder's `sync_wait` capability with a zero timeout, whose await_notify
+/// selectively receives on this entry's exact ref and, on the claimed path,
+/// does the same safety-bounded flush the old in-core cancel did.
+fn withdraw_entry(
+  caps: state.AtomicsCapabilities,
+  handle: WaiterHandle,
+  key: WaiterKey,
+  byte_off: Int,
+) -> Nil {
+  case ffi_cancel_waiter(handle) {
+    Withdrew -> Nil
+    AlreadyClaimed -> {
+      let _flushed: state.WaitOutcome =
+        caps.sync_wait(state.WaitRequest(
+          handle:,
+          key:,
+          byte_index: byte_off,
+          timeout_ms: Some(0),
+        ))
+      Nil
     }
   }
 }
@@ -1014,12 +1140,12 @@ fn wait_value(
   val: JsValue,
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case info.bits {
-    64 -> {
+  case info.elem_kind {
+    value.BigKind(_) -> {
       use n, state <- coerce.to_bigint_cps(state, val)
       cont(wrap_to_kind(n, 64, True), state)
     }
-    _ ->
+    value.NumKind(_) ->
       case coerce.js_to_number(state, val) {
         Error(#(thrown, state)) -> #(state, Error(thrown))
         Ok(#(num, state)) ->
@@ -1096,48 +1222,69 @@ fn notify(
   case info.storage {
     None -> #(state, Ok(value.from_int(0)))
     Some(sab_ref) -> {
-      let byte_off = info.byte_offset + idx * { info.bits / 8 }
-      // Atomically claim up to `count` waiters FIFO from the shared
-      // WaiterList (data-only ets:take loop). Claiming is the spec's
-      // "woken" accounting (§25.4.3.11 NotifyWaiter): remote waiters
-      // (blocked sync waits and other agents' waitAsync tokens) come back
-      // as claims whose wake-message DELIVERY is the embedder's, via the
-      // `deliver_wake` capability on `state.ctx.host_hooks.atomics`; our
-      // own waitAsync tokens come back as a count to settle on State right
-      // here (pure data, no message).
-      let #(claimed, self_async) =
-        ffi_take_waiters(ffi_shared_buffer_key(sab_ref), byte_off, count)
-      let Nil = case claimed, state.ctx.host_hooks.atomics {
-        [], _ -> Nil
-        _, Some(caps) -> caps.deliver_wake(claimed)
-        // No embedder capabilities installed: claims still count as woken,
-        // but with no capabilities nothing remote can be blocked on us
-        // anyway (sync wait requires the same `atomics` capability record;
-        // cross-process waitAsync requires a multi-agent embedder).
-        _, None -> Nil
+      let byte_off = info.byte_offset + idx * elem_size(info)
+      let key = ffi_shared_buffer_key(sab_ref)
+      // Claiming a waiter out of the shared WaiterList (an atomic ets:take)
+      // IS the spec's "woken" accounting (§25.4.3.11 NotifyWaiter) — so a
+      // waiter may only be claimed by an agent that can actually wake it.
+      // Remote waiters are woken by MESSAGE, which needs the embedder's
+      // `deliver_wake` capability; our own waitAsync tokens are settled from
+      // State, pure data. Hence the split: without the capability we take
+      // only what we can settle ourselves, and other agents' waiters stay
+      // registered (unclaimed, uncounted, still wakeable) rather than being
+      // claimed and then dropped, which would block them forever.
+      let #(remote_woken, self_async) = case state.ctx.host_hooks.atomics {
+        Some(caps) -> take_and_wake_waiters(caps, key, byte_off, count)
+        None -> #(0, ffi_take_self_async_tokens(key, byte_off, count))
       }
-      let remote_woken = list.length(claimed)
       let #(state, settled) =
-        settle_n_matching(state, info.buffer, byte_off, self_async)
+        settle_n_matching(state, key, byte_off, self_async)
       #(state, Ok(value.from_int(remote_woken + settled)))
     }
   }
 }
 
+/// Claim up to `count` waiters FIFO and DELIVER the wakes: `#(remote woken,
+/// our own waitAsync tokens taken)`.
+///
+/// The `deliver_wake` capability arrives BY VALUE, and this is the module's
+/// only route to `ffi_take_waiters` — so "claimed a remote waiter with no way
+/// to wake it" is not something a caller can express. A capability-less
+/// notifier calls `ffi_take_self_async_tokens` and never touches another
+/// agent's entry.
+fn take_and_wake_waiters(
+  caps: state.AtomicsCapabilities,
+  key: WaiterKey,
+  byte_off: Int,
+  count: Int,
+) -> #(Int, Int) {
+  let #(claimed, self_async) = ffi_take_waiters(key, byte_off, count)
+  let Nil = case claimed {
+    [] -> Nil
+    _ -> caps.deliver_wake(claimed)
+  }
+  #(list.length(claimed), self_async)
+}
+
 /// Settle the first `n` pending State waitAsync waiters on
-/// (buffer, byte_off) as woken, FIFO. Returns how many were settled
+/// (key, byte_off) as woken, FIFO. Returns how many were settled
 /// (equal to `n` unless tokens and State momentarily disagree, in which
 /// case the settled count is the truthful one for this agent).
+///
+/// Matching is by `WaiterKey`, the same identity the ETS registry keyed the
+/// `n` claimed tokens by — matching by `Ref` instead would let two heap
+/// objects that share one SharedArrayBuffer's storage (so one WaiterList)
+/// disagree with the count the registry just handed us.
 fn settle_n_matching(
   state: State(host),
-  buffer: Ref,
+  key: WaiterKey,
   byte_off: Int,
   n: Int,
 ) -> #(State(host), Int) {
   let #(woken, kept, _) =
     list.fold(state.atomics_waiters, #([], [], n), fn(acc, waiter) {
       let #(woken, kept, remaining) = acc
-      let matches = waiter.buffer == buffer && waiter.byte_offset == byte_off
+      let matches = waiter.key == key && waiter.byte_offset == byte_off
       case matches && remaining > 0 {
         True -> #([waiter, ..woken], kept, remaining - 1)
         False -> #(woken, [waiter, ..kept], remaining)
@@ -1208,16 +1355,17 @@ pub fn settle_expired_waiters(state: State(host)) -> State(host) {
         expired,
         State(..state, atomics_waiters: pending),
         fn(state, waiter) {
-          // Drop one of our tokens from the shared WaiterList so a future
-          // notify cannot count this settled waiter. (If a notifier in
-          // another process claimed the token in this same instant, its
-          // in-flight message finds no pending State waiter and is
-          // dropped — see the race note in arc_waiter_ffi.erl.)
-          let Nil =
-            ffi_remove_async_token(
-              buffer_key(state, waiter.buffer),
-              waiter.byte_offset,
-            )
+          // Withdraw one of our tokens from the shared WaiterList so a future
+          // notify cannot count this settled waiter. The withdrawal's OUTCOME
+          // is deliberately not read: tokens are keyed per-PROCESS while
+          // `atomics_waiters` is per-STATE, and a nested drain (`$262`
+          // .evalScript / ShadowRealm.evaluate seed a child State with an
+          // empty waiter list) can consume this process's tokens without ever
+          // settling — or counting — the parked State waiter they belong to.
+          // "No token of mine survived" therefore does not imply "somebody
+          // woke me", so an expired waiter always settles "timed-out".
+          let _outcome =
+            withdraw_own_async_token(waiter.key, waiter.byte_offset)
           settle_waiter(state, waiter, TimedOut)
         },
       )
@@ -1234,28 +1382,30 @@ pub fn settle_notified_waiter(
   key: WaiterKey,
   byte_index: Int,
 ) -> State(host) {
-  case pop_first_matching(state.atomics_waiters, key, byte_index, state, []) {
+  case pop_first_matching(state.atomics_waiters, key, byte_index, []) {
     None -> state
     Some(#(waiter, rest)) ->
       settle_waiter(State(..state, atomics_waiters: rest), waiter, WaitedOk)
   }
 }
 
-/// First State waiter whose buffer maps to `key` at `byte_index`, plus the
-/// remaining list in order.
+/// First State waiter registered on `key` at `byte_index`, plus the remaining
+/// list in order. `key` is the waiter's own stored WaiterList identity — the
+/// same term the ETS registry (and therefore the incoming wake message) uses,
+/// so this cannot resolve a wake to a different waiter than the registry
+/// counted.
 fn pop_first_matching(
   waiters: List(value.AtomicsWaiter),
   key: WaiterKey,
   byte_index: Int,
-  state: State(host),
   seen: List(value.AtomicsWaiter),
 ) -> option.Option(#(value.AtomicsWaiter, List(value.AtomicsWaiter))) {
   case waiters {
     [] -> None
     [w, ..rest] ->
-      case w.byte_offset == byte_index && buffer_key(state, w.buffer) == key {
+      case w.byte_offset == byte_index && w.key == key {
         True -> Some(#(w, list.append(list.reverse(seen), rest)))
-        False -> pop_first_matching(rest, key, byte_index, state, [w, ..seen])
+        False -> pop_first_matching(rest, key, byte_index, [w, ..seen])
       }
   }
 }
