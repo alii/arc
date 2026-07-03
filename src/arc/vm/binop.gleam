@@ -82,40 +82,7 @@ pub type EqualityOp {
   StrictNotEqOp
 }
 
-/// A `PureBinOp` split by WHICH evaluator handles it. The split is exactly the
-/// one `ops/operators.exec_binop` used to draw by hand with `Sub | Mul | ...`
-/// group patterns and then re-dispatch on inside each group — the group arms
-/// forced the per-group helpers to accept the whole 20-variant `PureBinOp` and
-/// carry an unreachable `_ ->` arm that fabricated a user-visible error.
-pub type BinOpClass {
-  Arith(op: ArithOp)
-  Bitwise(op: BitwiseOp)
-  Compare(op: CompareOp)
-  Equality(op: EqualityOp)
-}
-
-/// Total classification of a pure binary operator. Adding a `PureBinOp`
-/// variant is a compile error here, and only here.
-pub fn classify(op: PureBinOp) -> BinOpClass {
-  case op {
-    Sub -> Arith(ArithSub)
-    Mul -> Arith(ArithMul)
-    Div -> Arith(ArithDiv)
-    Mod -> Arith(ArithMod)
-    Exp -> Arith(ArithExp)
-    BitAnd -> Bitwise(AndOp)
-    BitOr -> Bitwise(OrOp)
-    BitXor -> Bitwise(XorOp)
-    Shl -> Bitwise(ShlOp)
-    Shr -> Bitwise(ShrOp)
-    UShr -> Bitwise(UShrOp)
-    Eq -> Equality(EqOp)
-    NotEq -> Equality(NotEqOp)
-    StrictEq -> Equality(StrictEqOp)
-    StrictNotEq -> Equality(StrictNotEqOp)
-    Lt -> Compare(LtCmp)
-    LtEq -> Compare(LtEqCmp)
-    Gt -> Compare(GtCmp)
-    GtEq -> Compare(GtEqCmp)
-  }
-}
+// `ops/operators.exec_binop` narrows a `PureBinOp` straight into one of the
+// four families above with a single exhaustive `case` — adding a variant here
+// is a compile error there, and the per-family helpers cannot be handed an
+// operator they don't evaluate (`bigint_arith` cannot see a `Shl`).

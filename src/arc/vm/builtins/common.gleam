@@ -794,8 +794,13 @@ pub fn init_keyed_collection(
   let #(h, iter_ref) =
     alloc_native_fn(h, function_proto, iter_native, iter_name, 0)
   let iter_prop = value.builtin_property(JsObject(iter_ref))
-  let iter_props =
-    list.map([iter_name, ..iter_aliases], fn(n) { #(n, iter_prop) })
+  // Each named alias gets its OWN seq (value.restamp keeps the function-object
+  // identity): two keys sharing one Property record is an enumeration-order
+  // tie broken by map iteration order, not by creation order.
+  let iter_props = [
+    #(iter_name, iter_prop),
+    ..list.map(iter_aliases, fn(n) { #(n, value.restamp(iter_prop)) })
+  ]
   // size accessor property (getter, no setter)
   let #(h, getters) = alloc_getters(h, function_proto, [#("size", size_getter)])
   let proto_props = list.flatten([getters, iter_props, proto_methods])

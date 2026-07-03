@@ -140,7 +140,7 @@ fn init_stack_type(
         ),
         properties: common.named_props([
           // §12.3.2.1: { writable: false, enumerable: false, configurable: false }
-          #("prototype", value.data(JsObject(proto_ref))),
+          #("prototype", common.fn_prototype_property(proto_ref)),
           #("length", common.fn_length_property(0)),
           #("name", common.fn_name_property(name)),
         ]),

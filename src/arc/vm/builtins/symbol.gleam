@@ -61,7 +61,7 @@ pub fn init(
       props: [
         #("length", common.fn_length_property(0)),
         #("name", common.fn_name_property("Symbol")),
-        #("prototype", value.data(JsObject(proto_ref))),
+        #("prototype", common.fn_prototype_property(proto_ref)),
         #("for", value.builtin_property(JsObject(for_ref))),
         #("keyFor", value.builtin_property(JsObject(key_for_ref))),
         // Well-known symbol properties

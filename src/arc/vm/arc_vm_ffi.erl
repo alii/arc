@@ -145,17 +145,19 @@ put_existing_writable_data(Props, Key, Val) ->
 %% (§10.1.11 — redefinition keeps the enumeration position). Hot path:
 %% object literals.
 %%
-%% Both value.Property variants are matched by NAME and full arity, so if
-%% either record ever grows or reorders a field this crashes with a
-%% function_clause instead of reading some other field as the seq and
-%% silently scrambling every object's enumeration order.
+%% maps:find/2 (not two `#{Key := ...}` clauses) so BOTH paths do exactly one
+%% lookup — the new-key path is the dominant one here. Both value.Property
+%% variants are matched by NAME and full arity, and the only fallthrough is
+%% `error` (key absent), so if either record ever grows or reorders a field an
+%% existing key raises case_clause instead of reading some other field as the
+%% seq and silently scrambling every object's enumeration order.
 define_own_data_property(Props, Key, Val) ->
-    case Props of
-        #{Key := {data_property, _V, _W, _E, _C, Seq}} ->
+    case maps:find(Key, Props) of
+        {ok, {data_property, _V, _W, _E, _C, Seq}} ->
             Props#{Key := new_data_property(Val, Seq)};
-        #{Key := {accessor_property, _G, _S, _E, _C, Seq}} ->
+        {ok, {accessor_property, _G, _S, _E, _C, Seq}} ->
             Props#{Key := new_data_property(Val, Seq)};
-        _ ->
+        error ->
             Props#{Key => new_data_property(Val, next_prop_seq())}
     end.
 

@@ -1,8 +1,9 @@
 import arc/vm/binop.{
   type ArithOp, type BitwiseOp, type CompareOp, type EqualityOp, type PureBinOp,
-  AndOp, Arith, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, Bitwise,
-  Compare, EqOp, Equality, GtCmp, GtEqCmp, LtCmp, LtEqCmp, NotEqOp, OrOp, ShlOp,
-  ShrOp, StrictEqOp, StrictNotEqOp, UShrOp, XorOp,
+  AndOp, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, BitAnd, BitOr,
+  BitXor, Div, Eq, EqOp, Exp, Gt, GtCmp, GtEq, GtEqCmp, Lt, LtCmp, LtEq,
+  LtEqCmp, Mod, Mul, NotEq, NotEqOp, OrOp, Shl, ShlOp, Shr, ShrOp, StrictEq,
+  StrictEqOp, StrictNotEq, StrictNotEqOp, Sub, UShr, UShrOp, XorOp,
 }
 import arc/vm/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
 import arc/vm/value.{
@@ -33,16 +34,35 @@ pub type OpError {
 /// The `PureBinOp` argument (rather than the full 22-variant `BinOpKind`) is
 /// what makes this total: `Add`, `In` and `InstanceOf` are handled by the
 /// interpreter and are simply not spellable here.
+///
+/// This single exhaustive `case` is also where a `PureBinOp` narrows to the
+/// family that evaluates it, so `exec_arith` and friends can only ever be
+/// handed an operator they actually implement.
 pub fn exec_binop(
   kind: PureBinOp,
   left: JsValue,
   right: JsValue,
 ) -> Result(JsValue, OpError) {
-  case binop.classify(kind) {
-    Arith(op) -> exec_arith(op, left, right)
-    Bitwise(op) -> exec_bitwise(op, left, right)
-    Equality(op) -> Ok(JsBool(exec_equality(op, left, right)))
-    Compare(op) -> exec_compare(op, left, right)
+  case kind {
+    Sub -> exec_arith(ArithSub, left, right)
+    Mul -> exec_arith(ArithMul, left, right)
+    Div -> exec_arith(ArithDiv, left, right)
+    Mod -> exec_arith(ArithMod, left, right)
+    Exp -> exec_arith(ArithExp, left, right)
+    BitAnd -> exec_bitwise(AndOp, left, right)
+    BitOr -> exec_bitwise(OrOp, left, right)
+    BitXor -> exec_bitwise(XorOp, left, right)
+    Shl -> exec_bitwise(ShlOp, left, right)
+    Shr -> exec_bitwise(ShrOp, left, right)
+    UShr -> exec_bitwise(UShrOp, left, right)
+    Eq -> Ok(JsBool(exec_equality(EqOp, left, right)))
+    NotEq -> Ok(JsBool(exec_equality(NotEqOp, left, right)))
+    StrictEq -> Ok(JsBool(exec_equality(StrictEqOp, left, right)))
+    StrictNotEq -> Ok(JsBool(exec_equality(StrictNotEqOp, left, right)))
+    Lt -> exec_compare(LtCmp, left, right)
+    LtEq -> exec_compare(LtEqCmp, left, right)
+    Gt -> exec_compare(GtCmp, left, right)
+    GtEq -> exec_compare(GtEqCmp, left, right)
   }
 }
 
@@ -152,13 +172,25 @@ fn exec_compare(
   }
 }
 
-/// The predicate a relational operator applies to a `<`/`=`/`>` ordering.
+/// The predicate a relational operator applies to an ordering. Every arm is
+/// exhaustive over `CompareOrd`, so `UnorderedOrd` (a NaN operand) cannot be
+/// forgotten: it is `false` for all four operators.
 fn compare_pred(op: CompareOp) -> fn(CompareOrd) -> Bool {
   case op {
     LtCmp -> fn(ord) { ord == LtOrd }
-    LtEqCmp -> fn(ord) { ord != GtOrd }
     GtCmp -> fn(ord) { ord == GtOrd }
-    GtEqCmp -> fn(ord) { ord != LtOrd }
+    LtEqCmp -> fn(ord) {
+      case ord {
+        LtOrd | EqOrd -> True
+        GtOrd | UnorderedOrd -> False
+      }
+    }
+    GtEqCmp -> fn(ord) {
+      case ord {
+        GtOrd | EqOrd -> True
+        LtOrd | UnorderedOrd -> False
+      }
+    }
   }
 }
 
@@ -627,29 +659,29 @@ pub fn num_binop(
 
 // Relational fast paths for Number × Number (§7.2.13 IsLessThan with both
 // operands Numbers): NaN on either side is unordered (`compare_nums` returns
-// None) → undefined → false.
+// `UnorderedOrd`) → undefined → false. These are the hottest comparisons in
+// the interpreter (`i < n` loop conditions), so they compare atoms directly
+// rather than going through `compare_pred`'s closure.
 fn num_lt(a: JsNum, b: JsNum) -> Bool {
-  compare_nums(a, b)
-  |> option.map(fn(ord) { ord == LtOrd })
-  |> option.unwrap(False)
+  compare_nums(a, b) == LtOrd
 }
 
 fn num_lt_eq(a: JsNum, b: JsNum) -> Bool {
-  compare_nums(a, b)
-  |> option.map(fn(ord) { ord != GtOrd })
-  |> option.unwrap(False)
+  case compare_nums(a, b) {
+    LtOrd | EqOrd -> True
+    GtOrd | UnorderedOrd -> False
+  }
 }
 
 fn num_gt(a: JsNum, b: JsNum) -> Bool {
-  compare_nums(a, b)
-  |> option.map(fn(ord) { ord == GtOrd })
-  |> option.unwrap(False)
+  compare_nums(a, b) == GtOrd
 }
 
 fn num_gt_eq(a: JsNum, b: JsNum) -> Bool {
-  compare_nums(a, b)
-  |> option.map(fn(ord) { ord != LtOrd })
-  |> option.unwrap(False)
+  case compare_nums(a, b) {
+    GtOrd | EqOrd -> True
+    LtOrd | UnorderedOrd -> False
+  }
 }
 
 /// Apply a bitwise binary operation (convert to i32, operate, convert back).
@@ -667,11 +699,15 @@ fn bitwise_binop(
 // Comparison
 // ============================================================================
 
-/// Comparison order for relational ops.
+/// Comparison order for relational ops. `UnorderedOrd` is the NaN case: it is
+/// a variant rather than an `Option` wrapper so the hot `compare_nums` path
+/// stays allocation-free, while every predicate over a `CompareOrd` still has
+/// to say what it means (§7.2.13 IsLessThan returns undefined → false).
 type CompareOrd {
   LtOrd
   EqOrd
   GtOrd
+  UnorderedOrd
 }
 
 /// Compare two values for relational operators (<, <=, >, >=).
@@ -723,8 +759,8 @@ fn compare_values(
     _, _ -> {
       use a <- result.try(to_number(left))
       use b <- result.map(to_number(right))
-      // NaN on either side is unordered → undefined → false.
-      JsBool(compare_nums(a, b) |> option.map(pred) |> option.unwrap(False))
+      // NaN on either side is unordered → undefined → false (`pred` says so).
+      JsBool(pred(compare_nums(a, b)))
     }
   }
 }
@@ -742,6 +778,7 @@ fn flip_ord(ord: CompareOrd) -> CompareOrd {
     LtOrd -> GtOrd
     GtOrd -> LtOrd
     EqOrd -> EqOrd
+    UnorderedOrd -> UnorderedOrd
   }
 }
 
@@ -771,18 +808,18 @@ fn compare_bigint_num(a: Int, n: JsNum) -> Option(CompareOrd) {
   }
 }
 
-/// Compare two JsNums. `None` means unordered — i.e. either operand is NaN,
-/// which every relational operator turns into `false` (§7.2.13 IsLessThan
-/// returns undefined). Returning an Option (like `compare_bigint_num`) rather
-/// than a fabricated `EqOrd` means a caller cannot forget the NaN case.
-fn compare_nums(a: JsNum, b: JsNum) -> Option(CompareOrd) {
+/// Compare two JsNums. `UnorderedOrd` means either operand is NaN, which every
+/// relational operator turns into `false` (§7.2.13 IsLessThan returns
+/// undefined). Reporting it as its own variant rather than a fabricated `EqOrd`
+/// means a caller cannot forget the NaN case.
+fn compare_nums(a: JsNum, b: JsNum) -> CompareOrd {
   case a, b {
-    NaN, _ | _, NaN -> None
-    Infinity, Infinity | NegInfinity, NegInfinity -> Some(EqOrd)
-    Infinity, _ -> Some(GtOrd)
-    _, Infinity -> Some(LtOrd)
-    NegInfinity, _ -> Some(LtOrd)
-    _, NegInfinity -> Some(GtOrd)
+    NaN, _ | _, NaN -> UnorderedOrd
+    Infinity, Infinity | NegInfinity, NegInfinity -> EqOrd
+    Infinity, _ -> GtOrd
+    _, Infinity -> LtOrd
+    NegInfinity, _ -> LtOrd
+    _, NegInfinity -> GtOrd
     // §7.2.13 steps 4.f-4.h: -0 and +0 are neither less nor greater than one
     // another. Never decide this with `x == y` (Gleam `==` on Floats is
     // Erlang `=:=`, which on OTP >= 27 says -0.0 /= 0.0, so `-0 <= 0` came
@@ -790,9 +827,9 @@ fn compare_nums(a: JsNum, b: JsNum) -> Option(CompareOrd) {
     // comparisons, and both are False for the two zeros — hence EqOrd.
     Finite(x), Finite(y) ->
       case x <. y, x >. y {
-        True, _ -> Some(LtOrd)
-        _, True -> Some(GtOrd)
-        _, _ -> Some(EqOrd)
+        True, _ -> LtOrd
+        _, True -> GtOrd
+        _, _ -> EqOrd
       }
   }
 }
