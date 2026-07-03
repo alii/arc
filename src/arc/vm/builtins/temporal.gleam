@@ -660,7 +660,9 @@ fn init_temporal_type(
         ),
         properties: common.named_props([
           // §x: constructor "prototype" is non-writable, non-configurable.
-          #("prototype", value.data(JsObject(proto_ref))),
+          // Constant seq 2 — the statics above already took counter seqs, and
+          // "prototype" must enumerate before them.
+          #("prototype", common.fn_prototype_property(proto_ref)),
           #("length", common.fn_length_property(arity)),
           #("name", common.fn_name_property(name)),
           ..static_props
@@ -3092,16 +3094,33 @@ fn parse_month_code_grammar(s: String) -> Result(tcal.MonthCode, Nil) {
         True -> #(string.drop_end(rest, 1), True)
         False -> #(rest, False)
       }
-      case string.length(digits) == 2, int.parse(digits) {
-        True, Ok(n) ->
-          case n >= 1 || leap {
-            True -> Ok(tcal.MonthCode(number: n, leap:))
-            False -> Error(Nil)
-          }
-        _, _ -> Error(Nil)
+      case two_decimal_digits(digits) {
+        // "M00" is only meaningful as the leap month "M00L".
+        Ok(n) if n >= 1 || leap -> Ok(tcal.MonthCode(number: n, leap:))
+        Ok(_) | Error(Nil) -> Error(Nil)
       }
     }
     _ -> Error(Nil)
+  }
+}
+
+/// Exactly two ASCII decimal digits, so signed forms ("M-1L", "M+1") are
+/// rejected before `int.parse` — which would happily accept them.
+fn two_decimal_digits(s: String) -> Result(Int, Nil) {
+  case string.to_graphemes(s) {
+    [a, b] ->
+      case is_ascii_digit(a) && is_ascii_digit(b) {
+        True -> int.parse(s)
+        False -> Error(Nil)
+      }
+    _ -> Error(Nil)
+  }
+}
+
+fn is_ascii_digit(g: String) -> Bool {
+  case g {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
+    _ -> False
   }
 }
 
