@@ -82,11 +82,13 @@ pub fn dispatch(
   }
 }
 
-/// Unwrap `this` as a WeakMap, or throw TypeError. CPS-style — call with
-/// `use data, ref, state <- map_require(this, state)`.
-fn map_require(
+/// RequireInternalSlot(this, [[WeakMapData]]) — proves `this` is a WeakMap and
+/// hands over its entry dict, or throws a TypeError naming `method`.
+/// CPS-style — `use data, ref, state <- require_weak_map(this, state, "get")`.
+fn require_weak_map(
   this: JsValue,
   state: State(host),
+  method: String,
   cont: fn(Dict(JsValue, JsValue), Ref, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
@@ -103,7 +105,9 @@ fn map_require(
     None ->
       state.type_error(
         state,
-        "Method WeakMap.prototype called on incompatible receiver",
+        "Method WeakMap.prototype."
+          <> method
+          <> " called on incompatible receiver",
       )
   }
 }
@@ -154,7 +158,7 @@ fn weak_map_get(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, _ref, state <- map_require(this, state)
+  use data, _ref, state <- require_weak_map(this, state, "get")
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
     True ->
@@ -172,12 +176,12 @@ fn weak_map_set(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- map_require(this, state)
+  use _data, ref, state <- require_weak_map(this, state, "set")
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
     True -> {
       let val = list_at(args, 1) |> option.unwrap(JsUndefined)
-      let state = write_data(state, ref, dict.insert(data, key, val))
+      let state = mutate(state, ref, dict.insert(_, key, val))
       #(state, Ok(this))
     }
     False -> state.type_error(state, "Invalid value used as weak map key")
@@ -190,7 +194,7 @@ fn weak_map_has(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, _ref, state <- map_require(this, state)
+  use data, _ref, state <- require_weak_map(this, state, "has")
   let key = first_arg_or_undefined(args)
   #(state, Ok(JsBool(dict.has_key(data, key))))
 }
@@ -201,11 +205,11 @@ fn weak_map_delete(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- map_require(this, state)
+  use data, ref, state <- require_weak_map(this, state, "delete")
   let key = first_arg_or_undefined(args)
   case dict.has_key(data, key) {
     True -> {
-      let state = write_data(state, ref, dict.delete(data, key))
+      let state = mutate(state, ref, dict.delete(_, key))
       #(state, Ok(JsBool(True)))
     }
     False -> #(state, Ok(JsBool(False)))
@@ -218,7 +222,7 @@ fn get_or_insert(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- map_require(this, state)
+  use data, ref, state <- require_weak_map(this, state, "getOrInsert")
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
     False -> state.type_error(state, "Invalid value used as weak map key")
@@ -227,7 +231,7 @@ fn get_or_insert(
         Ok(existing) -> #(state, Ok(existing))
         Error(Nil) -> {
           let val = list_at(args, 1) |> option.unwrap(JsUndefined)
-          let state = write_data(state, ref, dict.insert(data, key, val))
+          let state = mutate(state, ref, dict.insert(_, key, val))
           #(state, Ok(val))
         }
       }
@@ -243,7 +247,7 @@ fn get_or_insert_computed(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, _ref, state <- map_require(this, state)
+  use data, ref, state <- require_weak_map(this, state, "getOrInsertComputed")
   let key = first_arg_or_undefined(args)
   let callback = list_at(args, 1) |> option.unwrap(JsUndefined)
   case is_callable(state.heap, callback) {
@@ -265,11 +269,10 @@ fn get_or_insert_computed(
                 JsUndefined,
                 [key],
               )
-              // The callback may have mutated the map — re-read and
-              // overwrite any entry it inserted under this key.
-              use data, ref, state <- map_require(this, state)
-              let state =
-                write_data(state, ref, dict.insert(data, key, computed))
+              // The callback may have mutated the map — `mutate` re-reads the
+              // live entry dict, so an entry it inserted under this key is
+              // overwritten rather than the whole dict being reverted.
+              let state = mutate(state, ref, dict.insert(_, key, computed))
               #(state, Ok(computed))
             }
           }
@@ -277,12 +280,25 @@ fn get_or_insert_computed(
   }
 }
 
-/// Write an updated entry dict back to the WeakMap's heap slot.
-fn write_data(
+/// Read-modify-write the WeakMap's entry dict inside a single heap access.
+/// `ref` must have been proved a WeakMap by `require_weak_map`.
+///
+/// Takes a *function* rather than a finished dict on purpose: a caller cannot
+/// hand back a dict it captured before running user code, so a re-entrant
+/// mutation (a getOrInsertComputed callback that sets the same key) can never
+/// be silently reverted by a stale write.
+fn mutate(
   state: State(host),
   ref: Ref,
-  data: Dict(JsValue, JsValue),
+  update: fn(Dict(JsValue, JsValue)) -> Dict(JsValue, JsValue),
 ) -> State(host) {
-  let heap = heap.update_kind(state.heap, ref, WeakMapObject(data:))
-  State(..state, heap:)
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind: WeakMapObject(data:), ..)) -> {
+      let heap =
+        heap.update_kind(state.heap, ref, WeakMapObject(data: update(data)))
+      State(..state, heap:)
+    }
+    // Unreachable: a heap slot's kind never changes after allocation.
+    _ -> state
+  }
 }

@@ -28,7 +28,6 @@ import arc/vm/value.{
   SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf, SetPrototypeIsSupersetOf,
   SetPrototypeSymmetricDifference, SetPrototypeUnion, SetPrototypeValues,
 }
-import gleam/list
 import gleam/option.{type Option, None, Some}
 
 /// Set up Set.prototype and Set constructor.
@@ -156,18 +155,48 @@ fn update_set(
   heap.update_kind(h, ref, SetObject(store:))
 }
 
+/// Read `ref`'s [[SetData]] out of the heap. `ref` must have been proved a Set
+/// by `require_set`, which is why this can't fail.
+///
+/// This is the ONLY way to get at a Set's store: `require_set` hands out a
+/// bare `Ref`, never a snapshot. Every op re-reads at the exact spec point at
+/// which the spec inspects [[SetData]], because the set-relation methods call
+/// arbitrary user code (`other.size`, `other.has`, `other.keys`, `next`) that
+/// can add to or delete from the receiver mid-operation.
+fn read_set_store(h: Heap(host), ref: Ref) -> OrderedEntries(MapKey, JsValue) {
+  case heap.read(h, ref) {
+    Some(ObjectSlot(kind: SetObject(store:), ..)) -> store
+    // Unreachable: a heap slot's kind never changes after allocation.
+    _ -> ordered_entries.new()
+  }
+}
+
+/// SetDataAppend — the ONE place a value enters a [[SetData]] store.
+///
+/// §24.2.3.1 step 3 requires -0 to be stored as +0 (`SetDataHas` compares with
+/// SameValueZero, but the *stored* value is what iteration yields), so
+/// `[...new Set([-0])][0]` must be `+0`. Normalizing here — rather than only
+/// in the MapKey — is what makes that true for every insert path.
+///
+/// An existing value keeps its insertion position (seq); a new one — including
+/// a deleted-then-re-added one — appends past every live iterator's cursor.
+fn set_data_append(
+  store: OrderedEntries(MapKey, JsValue),
+  val: JsValue,
+) -> OrderedEntries(MapKey, JsValue) {
+  let val = normalize_neg_zero(val)
+  ordered_entries.insert(store, value.js_to_map_key(val), val)
+}
+
 /// ES2024 §24.2.3.1 Set.prototype.add ( value )
 fn set_add(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, ref, state <- require_set(this, state)
-  let val = first_arg_or_undefined(args)
-  // An existing value keeps its insertion position (seq); a new one —
-  // including a deleted-then-re-added one — appends past every live
-  // iterator's cursor.
-  let store = ordered_entries.insert(store, value.js_to_map_key(val), val)
+  use ref, state <- require_set(this, state, "add")
+  let store = read_set_store(state.heap, ref)
+  let store = set_data_append(store, first_arg_or_undefined(args))
   let heap = update_set(state.heap, ref, store)
   #(State(..state, heap:), Ok(this))
 }
@@ -178,9 +207,12 @@ fn set_has(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "has")
   let key = value.js_to_map_key(first_arg_or_undefined(args))
-  #(state, Ok(JsBool(ordered_entries.has(store, key))))
+  #(
+    state,
+    Ok(JsBool(ordered_entries.has(read_set_store(state.heap, ref), key))),
+  )
 }
 
 /// ES2024 §24.2.3.3 Set.prototype.delete ( value )
@@ -192,7 +224,8 @@ fn set_delete(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "delete")
+  let store = read_set_store(state.heap, ref)
   let key = value.js_to_map_key(first_arg_or_undefined(args))
   case ordered_entries.delete(store, key) {
     #(_store, False) -> #(state, Ok(JsBool(False)))
@@ -208,7 +241,8 @@ fn set_clear(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "clear")
+  let store = read_set_store(state.heap, ref)
   // next_seq is preserved by clear(): the spec's records are emptied but
   // appends still land past in-flight iterator cursors, so they remain
   // visited.
@@ -221,7 +255,8 @@ fn set_size(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "size")
+  let store = read_set_store(state.heap, ref)
   #(state, Ok(value.from_int(ordered_entries.size(store))))
 }
 
@@ -231,7 +266,7 @@ fn set_for_each(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _store, ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "forEach")
   let callback = first_arg_or_undefined(args)
   let this_arg = case args {
     [_, ta, ..] -> ta
@@ -259,13 +294,9 @@ fn for_each_loop(
   this_arg: JsValue,
   set_this: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let next = case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: SetObject(store:), ..)) ->
-      ordered_entries.entry_from_seq(store, cursor)
-    _ -> option.None
-  }
-  case next {
-    option.None -> #(state, Ok(JsUndefined))
+  let store = read_set_store(state.heap, ref)
+  case ordered_entries.entry_from_seq(store, cursor) {
+    None -> #(state, Ok(JsUndefined))
     Some(#(seq, _key, val)) ->
       case state.call(state, callback, this_arg, [val, val, set_this]) {
         Ok(#(_result, new_state)) ->
@@ -276,85 +307,217 @@ fn for_each_loop(
 }
 
 /// ES2025 §24.2.3.14 Set.prototype.union ( other )
+///
+/// Steps 3-5: GetSetRecord and GetKeysIterator both run user code, so the copy
+/// of this's [[SetData]] (step 5) is taken *after* them, not at method entry.
 fn set_union(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "union")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  use other_values, state <- with_drained_keys(state, rec)
-  // Copy this's records, then append other's values (in its iteration order)
-  // that aren't already present.
-  let result =
-    list.fold(other_values, store, fn(acc, v) {
-      let key = value.js_to_map_key(v)
-      case ordered_entries.has(acc, key) {
-        True -> acc
-        False -> ordered_entries.insert(acc, key, v)
-      }
-    })
-  alloc_new_set(state, result)
+  use iter, next_fn, state <- with_keys_iterator(state, rec)
+  union_loop(state, iter, next_fn, read_set_store(state.heap, ref))
+}
+
+/// §24.2.3.14 steps 6-7: append every key other yields that isn't already in
+/// the accumulating result. `this` is never re-read — the spec froze it into
+/// resultSetData at step 5.
+fn union_loop(
+  state: State(host),
+  iter: JsValue,
+  next_fn: JsValue,
+  result: OrderedEntries(MapKey, JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use next, state <- step_keys(state, iter, next_fn)
+  case next {
+    None -> alloc_new_set(state, result)
+    Some(v) -> union_loop(state, iter, next_fn, set_data_append(result, v))
+  }
 }
 
 /// ES2025 §24.2.3.7 Set.prototype.intersection ( other )
+///
+/// Step 4 dispatches on size: with a small `this` we ask other.has() once per
+/// element of this; with a large `this` (a huge `other` would mean a huge
+/// number of has() calls) we drain other's keys instead and test membership
+/// against this. Getting this branch wrong is not just slow — the two paths
+/// call *different* user code, which is observable.
 fn set_intersection(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "intersection")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  // Iterate this's elements in forward order, keep those where other.has(e).
-  let entries = ordered_entries.live_values(store)
-  use kept, state <- with_filtered_by_has(state, rec, entries, True)
-  alloc_new_set_from_values(state, kept)
+  case ordered_entries.size(read_set_store(state.heap, ref)) <= rec.size {
+    True -> intersection_this_loop(state, ref, rec, 0, ordered_entries.new())
+    False -> {
+      use iter, next_fn, state <- with_keys_iterator(state, rec)
+      intersection_other_loop(state, ref, iter, next_fn, ordered_entries.new())
+    }
+  }
 }
 
-/// ES2025 §24.2.3.3 Set.prototype.difference ( other )
+/// §24.2.3.7 step 4.b: walk this's records by seq, keeping the ones other.has().
+/// Each `has()` may add to or delete from this, so the store is re-read every
+/// step (the spec re-reads `O.[[SetData]][index]` and refreshes `thisSize`).
+fn intersection_this_loop(
+  state: State(host),
+  ref: Ref,
+  rec: SetRecord,
+  cursor: Int,
+  result: OrderedEntries(MapKey, JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let store = read_set_store(state.heap, ref)
+  case ordered_entries.entry_from_seq(store, cursor) {
+    None -> alloc_new_set(state, result)
+    Some(#(seq, _key, e)) -> {
+      use in_other, state <- set_record_has(state, rec, e)
+      let result = case in_other {
+        True -> set_data_append(result, e)
+        False -> result
+      }
+      intersection_this_loop(state, ref, rec, seq + 1, result)
+    }
+  }
+}
+
+/// §24.2.3.7 step 5: drain other's keys, keeping the ones this still contains.
+/// `next()` is user code, so this's store is re-read on every step.
+fn intersection_other_loop(
+  state: State(host),
+  ref: Ref,
+  iter: JsValue,
+  next_fn: JsValue,
+  result: OrderedEntries(MapKey, JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use next, state <- step_keys(state, iter, next_fn)
+  case next {
+    None -> alloc_new_set(state, result)
+    Some(v) -> {
+      let store = read_set_store(state.heap, ref)
+      let result = case ordered_entries.has(store, value.js_to_map_key(v)) {
+        True -> set_data_append(result, v)
+        False -> result
+      }
+      intersection_other_loop(state, ref, iter, next_fn, result)
+    }
+  }
+}
+
+/// ES2025 §24.2.3.5 Set.prototype.difference ( other )
+///
+/// Step 3 copies this's [[SetData]] into the result (after GetSetRecord ran
+/// user code); step 4 then *removes* from that copy. Same size dispatch as
+/// intersection.
 fn set_difference(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "difference")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  // Iterate this's elements in forward order, keep those where !other.has(e).
-  let entries = ordered_entries.live_values(store)
-  use kept, state <- with_filtered_by_has(state, rec, entries, False)
-  alloc_new_set_from_values(state, kept)
+  let result = read_set_store(state.heap, ref)
+  case ordered_entries.size(result) <= rec.size {
+    // Step 4.b iterates the *copy*, not this — a re-entrant has() that mutates
+    // this cannot change which elements are visited.
+    True ->
+      difference_this_loop(
+        state,
+        rec,
+        ordered_entries.live_values(result),
+        result,
+      )
+    False -> {
+      use iter, next_fn, state <- with_keys_iterator(state, rec)
+      difference_other_loop(state, iter, next_fn, result)
+    }
+  }
+}
+
+fn difference_this_loop(
+  state: State(host),
+  rec: SetRecord,
+  remaining: List(JsValue),
+  result: OrderedEntries(MapKey, JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case remaining {
+    [] -> alloc_new_set(state, result)
+    [e, ..rest] -> {
+      use in_other, state <- set_record_has(state, rec, e)
+      let result = case in_other {
+        True -> ordered_entries.delete(result, value.js_to_map_key(e)).0
+        False -> result
+      }
+      difference_this_loop(state, rec, rest, result)
+    }
+  }
+}
+
+fn difference_other_loop(
+  state: State(host),
+  iter: JsValue,
+  next_fn: JsValue,
+  result: OrderedEntries(MapKey, JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use next, state <- step_keys(state, iter, next_fn)
+  case next {
+    None -> alloc_new_set(state, result)
+    Some(v) -> {
+      let result = ordered_entries.delete(result, value.js_to_map_key(v)).0
+      difference_other_loop(state, iter, next_fn, result)
+    }
+  }
 }
 
 /// ES2025 §24.2.3.13 Set.prototype.symmetricDifference ( other )
 ///
-/// Spec algorithm: copy this → resultSetData, then drain other.keys();
-/// for each nextValue, if it's in this remove it from result, else add it.
-/// (Using `this` for the membership test, not the mutating result, so an
-/// element appearing twice in other doesn't toggle back in.)
+/// Steps 3-4: keys iterator first, then copy this → resultSetData. Then drain
+/// other.keys(); for each nextValue, if it's in this remove it from result,
+/// else add it. (Membership is tested against `this`, not the mutating result,
+/// so an element other yields twice doesn't toggle back in.)
 fn set_symmetric_difference(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "symmetricDifference")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  use other_values, state <- with_drained_keys(state, rec)
-  let result =
-    list.fold(other_values, store, fn(acc, v) {
+  use iter, next_fn, state <- with_keys_iterator(state, rec)
+  symmetric_difference_loop(
+    state,
+    ref,
+    iter,
+    next_fn,
+    read_set_store(state.heap, ref),
+  )
+}
+
+fn symmetric_difference_loop(
+  state: State(host),
+  ref: Ref,
+  iter: JsValue,
+  next_fn: JsValue,
+  result: OrderedEntries(MapKey, JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use next, state <- step_keys(state, iter, next_fn)
+  case next {
+    None -> alloc_new_set(state, result)
+    Some(v) -> {
       let key = value.js_to_map_key(v)
-      case ordered_entries.has(store, key) {
-        // In this → remove from result (the record may already be gone if
-        // other yielded it twice; removal is a no-op then).
-        True -> ordered_entries.delete(acc, key).0
-        // Not in this → add to result if not already added.
-        False ->
-          case ordered_entries.has(acc, key) {
-            True -> acc
-            False -> ordered_entries.insert(acc, key, v)
-          }
+      // Step 5.b.iii is a LIVE read of this's [[SetData]] — other's next()
+      // may have mutated it since the copy was taken.
+      let in_this = ordered_entries.has(read_set_store(state.heap, ref), key)
+      let result = case in_this {
+        // Already gone if other yielded it twice; removal is a no-op then.
+        True -> ordered_entries.delete(result, key).0
+        False -> set_data_append(result, v)
       }
-    })
-  alloc_new_set(state, result)
+      symmetric_difference_loop(state, ref, iter, next_fn, result)
+    }
+  }
 }
 
 /// ES2025 §24.2.3.9 Set.prototype.isSubsetOf ( other )
@@ -363,14 +526,32 @@ fn set_is_subset_of(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "isSubsetOf")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  // §24.2.3.9 step 4: if thisSize > otherRec.size, return false
-  case ordered_entries.size(store) > rec.size {
+  // Step 4: if thisSize > otherRec.size, return false
+  case ordered_entries.size(read_set_store(state.heap, ref)) > rec.size {
     True -> #(state, Ok(JsBool(False)))
-    False -> {
-      let entries = ordered_entries.live_values(store)
-      all_match_has(state, rec, entries, True)
+    False -> subset_step_loop(state, ref, rec, 0)
+  }
+}
+
+/// §24.2.3.9 steps 5-7: every live record of this must satisfy other.has().
+/// Each has() is user code, so this's store is re-read every step.
+fn subset_step_loop(
+  state: State(host),
+  ref: Ref,
+  rec: SetRecord,
+  cursor: Int,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let store = read_set_store(state.heap, ref)
+  case ordered_entries.entry_from_seq(store, cursor) {
+    None -> #(state, Ok(JsBool(True)))
+    Some(#(seq, _key, e)) -> {
+      use in_other, state <- set_record_has(state, rec, e)
+      case in_other {
+        False -> #(state, Ok(JsBool(False)))
+        True -> subset_step_loop(state, ref, rec, seq + 1)
+      }
     }
   }
 }
@@ -381,56 +562,114 @@ fn set_is_superset_of(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "isSupersetOf")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  // §24.2.3.10 step 4: if thisSize < otherRec.size, return false
-  case ordered_entries.size(store) < rec.size {
+  // Step 4: if thisSize < otherRec.size, return false
+  case ordered_entries.size(read_set_store(state.heap, ref)) < rec.size {
     True -> #(state, Ok(JsBool(False)))
     False -> {
       // Steps 5-8: step other's keys iterator one value at a time.
       // Draining the whole iterator first would never terminate on an
       // infinite iterator whose first value is already a non-member.
       use iter, next_fn, state <- with_keys_iterator(state, rec)
-      superset_step_loop(state, store, iter, next_fn)
+      superset_step_loop(state, ref, iter, next_fn)
     }
   }
 }
 
 /// §24.2.3.10 steps 7-8: return true once the keys iterator is exhausted;
-/// on the FIRST key absent from `store`, close the iterator (step 7.b.i.1)
-/// and return false.
+/// on the FIRST key absent from this, close the iterator (step 7.b.i.1) and
+/// return false. `next()` is user code, so this's store is re-read every step.
 fn superset_step_loop(
   state: State(host),
-  store: OrderedEntries(MapKey, JsValue),
+  ref: Ref,
   iter: JsValue,
   next_fn: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use next, state <- step_keys(state, iter, next_fn)
   case next {
     None -> #(state, Ok(JsBool(True)))
-    Some(v) ->
+    Some(v) -> {
+      let store = read_set_store(state.heap, ref)
       case ordered_entries.has(store, value.js_to_map_key(v)) {
-        True -> superset_step_loop(state, store, iter, next_fn)
-        False ->
-          case iterator.iterator_close_normal(state, iter) {
-            #(state, Ok(Nil)) -> #(state, Ok(JsBool(False)))
-            #(state, Error(thrown)) -> #(state, Error(thrown))
-          }
+        True -> superset_step_loop(state, ref, iter, next_fn)
+        False -> close_keys_iterator_and_answer_false(state, iter)
       }
+    }
   }
 }
 
 /// ES2025 §24.2.3.8 Set.prototype.isDisjointFrom ( other )
+///
+/// Same size dispatch as intersection: only ask other.has() per element of
+/// this when this is the smaller side; otherwise drain other's keys.
 fn set_is_disjoint_from(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "isDisjointFrom")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  // every element of this must NOT be in other
-  let entries = ordered_entries.live_values(store)
-  all_match_has(state, rec, entries, False)
+  case ordered_entries.size(read_set_store(state.heap, ref)) <= rec.size {
+    True -> disjoint_this_loop(state, ref, rec, 0)
+    False -> {
+      use iter, next_fn, state <- with_keys_iterator(state, rec)
+      disjoint_other_loop(state, ref, iter, next_fn)
+    }
+  }
+}
+
+/// §24.2.3.8 step 4.b: no live record of this may satisfy other.has().
+fn disjoint_this_loop(
+  state: State(host),
+  ref: Ref,
+  rec: SetRecord,
+  cursor: Int,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let store = read_set_store(state.heap, ref)
+  case ordered_entries.entry_from_seq(store, cursor) {
+    None -> #(state, Ok(JsBool(True)))
+    Some(#(seq, _key, e)) -> {
+      use in_other, state <- set_record_has(state, rec, e)
+      case in_other {
+        True -> #(state, Ok(JsBool(False)))
+        False -> disjoint_this_loop(state, ref, rec, seq + 1)
+      }
+    }
+  }
+}
+
+/// §24.2.3.8 step 5: no key other yields may be present in this.
+fn disjoint_other_loop(
+  state: State(host),
+  ref: Ref,
+  iter: JsValue,
+  next_fn: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use next, state <- step_keys(state, iter, next_fn)
+  case next {
+    None -> #(state, Ok(JsBool(True)))
+    Some(v) -> {
+      let store = read_set_store(state.heap, ref)
+      case ordered_entries.has(store, value.js_to_map_key(v)) {
+        False -> disjoint_other_loop(state, ref, iter, next_fn)
+        True -> close_keys_iterator_and_answer_false(state, iter)
+      }
+    }
+  }
+}
+
+/// Short-circuit exit shared by isSupersetOf/isDisjointFrom: close other's
+/// keys iterator with a normal completion, then answer false (unless the
+/// close itself threw).
+fn close_keys_iterator_and_answer_false(
+  state: State(host),
+  iter: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case iterator.iterator_close_normal(state, iter) {
+    #(state, Ok(Nil)) -> #(state, Ok(JsBool(False)))
+    #(state, Error(thrown)) -> #(state, Error(thrown))
+  }
 }
 
 /// ES2024 §24.2.3.12 Set.prototype.values ()
@@ -439,7 +678,7 @@ fn set_values(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _store, ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "values")
   alloc_set_iterator(state, ref, value.SetIterValues)
 }
 
@@ -448,7 +687,7 @@ fn set_entries(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _store, ref, state <- require_set(this, state)
+  use ref, state <- require_set(this, state, "entries")
   alloc_set_iterator(state, ref, value.SetIterEntries)
 }
 
@@ -482,22 +721,6 @@ fn alloc_new_set(
   #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
-/// Allocate a new Set from a forward-ordered list of values.
-fn alloc_new_set_from_values(
-  state: State(host),
-  values: List(JsValue),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let store =
-    list.fold(values, ordered_entries.new(), fn(acc, v) {
-      let key = value.js_to_map_key(v)
-      case ordered_entries.has(acc, key) {
-        True -> acc
-        False -> ordered_entries.insert(acc, key, v)
-      }
-    })
-  alloc_new_set(state, store)
-}
-
 // ---- GetSetRecord + protocol helpers ----
 
 /// Spec's "Set Record" — captured size/has/keys from the other argument.
@@ -525,18 +748,13 @@ fn get_set_record(
         Named("size"),
         other,
       ))
-      // Step 3: numSize = ToNumber(rawSize). Route via ToPrimitive(NumberHint)
-      // so {valueOf(){...}} works — value.to_number on a raw object yields NaN.
-      use prim, state <- state.try_op(coerce.to_primitive(
-        state,
-        raw_size,
-        coerce.NumberHint,
-      ))
-      case value.to_number(prim) {
-        // Step 4: if numSize is NaN, throw TypeError
-        Error(msg) -> state.type_error(state, msg)
-        Ok(NaN) -> state.type_error(state, "size is NaN")
-        Ok(num) -> {
+      // Step 3: numSize = ? ToNumber(rawSize) — the real §7.1.4, so
+      // {valueOf(){...}} works and Symbol/BigInt throw a TypeError.
+      use num, state <- coerce.try_to_number(state, raw_size)
+      // Step 4: if numSize is NaN, throw TypeError
+      case num {
+        NaN -> state.type_error(state, "size is NaN")
+        num -> {
           // Step 5: ToIntegerOrInfinity(numSize). ±∞ saturate to
           // ±(2^53 - 1), so -∞ still trips step 6's `< 0` RangeError and
           // +∞ still exceeds every real [[SetData]] size.
@@ -608,37 +826,6 @@ fn with_keys_iterator(
   }
 }
 
-/// Call rec.keys(), then drain the returned iterator via .next() into a list.
-/// Only for consumers that must visit every key regardless (difference,
-/// symmetricDifference, union) — anything that can short-circuit must step
-/// the iterator itself (see superset_step_loop) or it will never terminate
-/// on an infinite iterator.
-/// CPS wrapper so callers can `use values, state <- with_drained_keys(...)`.
-fn with_drained_keys(
-  state: State(host),
-  rec: SetRecord,
-  cont: fn(List(JsValue), State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use iter, next_fn, state <- with_keys_iterator(state, rec)
-  drain_loop(state, iter, next_fn, [], cont)
-}
-
-fn drain_loop(
-  state: State(host),
-  iter: JsValue,
-  next_fn: JsValue,
-  acc: List(JsValue),
-  cont: fn(List(JsValue), State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use next, state <- step_keys(state, iter, next_fn)
-  case next {
-    None -> cont(list.reverse(acc), state)
-    Some(v) -> drain_loop(state, iter, next_fn, [v, ..acc], cont)
-  }
-}
-
 /// One §7.4.8 IteratorStepValue on a keys iterator: `None` = done,
 /// `Some(v)` = the next value (with -0 normalized to +0 per §24.2.1.2
 /// step 7.b.ii). CPS — `use next, state <- step_keys(state, iter, next_fn)`.
@@ -695,80 +882,41 @@ fn set_record_has(
   cont(value.is_truthy(r), state)
 }
 
-/// Filter `entries` keeping those where ToBoolean(rec.has(e)) == keep_when.
-/// State-threaded recursion since each .has() may mutate the heap or throw.
-/// CPS — `use kept, state <- with_filtered_by_has(...)`. Result is forward order.
-fn with_filtered_by_has(
-  state: State(host),
-  rec: SetRecord,
-  entries: List(JsValue),
-  keep_when: Bool,
-  cont: fn(List(JsValue), State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  filter_loop(state, rec, entries, keep_when, [], cont)
-}
-
-fn filter_loop(
-  state: State(host),
-  rec: SetRecord,
-  entries: List(JsValue),
-  keep_when: Bool,
-  acc: List(JsValue),
-  cont: fn(List(JsValue), State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case entries {
-    [] -> cont(list.reverse(acc), state)
-    [v, ..rest] -> {
-      use present, state <- set_record_has(state, rec, v)
-      let acc = case present == keep_when {
-        True -> [v, ..acc]
-        False -> acc
-      }
-      filter_loop(state, rec, rest, keep_when, acc, cont)
-    }
-  }
-}
-
-/// Return JsBool(true) if every entry has rec.has(e) == expected, else false.
-/// Short-circuits on first mismatch. State-threaded.
-fn all_match_has(
-  state: State(host),
-  rec: SetRecord,
-  entries: List(JsValue),
-  expected: Bool,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case entries {
-    [] -> #(state, Ok(JsBool(True)))
-    [v, ..rest] -> {
-      use present, state <- set_record_has(state, rec, v)
-      case present == expected {
-        False -> #(state, Ok(JsBool(False)))
-        True -> all_match_has(state, rec, rest, expected)
-      }
-    }
-  }
-}
-
 // ---- helpers ----
 
-/// Unwrap `this` as a Set or return a TypeError.
-/// CPS-style — call with
-/// `use store, ref, state <- require_set(this, state)`.
+/// The heap ref of `this` if it is a Set object, else `None`.
+fn set_ref(h: Heap(host), this: JsValue) -> Option(Ref) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(kind: SetObject(..), ..)) -> Some(ref)
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// RequireInternalSlot(this, [[SetData]]) — proves `this` is a Set, or throws
+/// a TypeError naming `method`.
+///
+/// Deliberately hands the continuation only a `Ref`, never the [[SetData]]
+/// store: a store read at method entry is stale the moment any user code runs,
+/// and every set-relation method runs user code. Read the store with
+/// `read_set_store` at the point the spec reads it.
+///
+/// CPS-style — call with `use ref, state <- require_set(this, state, "add")`.
 fn require_set(
   this: JsValue,
   state: State(host),
-  cont: fn(OrderedEntries(MapKey, JsValue), Ref, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
+  method: String,
+  cont: fn(Ref, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let err = "Method Set.prototype.* called on incompatible receiver"
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: SetObject(store:), ..)) -> cont(store, ref, state)
-        _ -> state.type_error(state, err)
-      }
-    _ -> state.type_error(state, err)
+  case set_ref(state.heap, this) {
+    Some(ref) -> cont(ref, state)
+    None ->
+      state.type_error(
+        state,
+        "Method Set.prototype." <> method <> " called on incompatible receiver",
+      )
   }
 }

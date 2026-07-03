@@ -107,11 +107,13 @@ fn construct(
   }
 }
 
-/// Unwrap `this` as a WeakSet, or throw TypeError. CPS-style — call with
-/// `use data, ref, state <- set_require(this, state)`.
-fn set_require(
+/// RequireInternalSlot(this, [[WeakSetData]]) — proves `this` is a WeakSet and
+/// hands over its membership dict, or throws a TypeError naming `method`.
+/// CPS-style — `use data, ref, state <- require_weak_set(this, state, "add")`.
+fn require_weak_set(
   this: JsValue,
   state: State(host),
+  method: String,
   cont: fn(Dict(JsValue, Nil), Ref, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
@@ -128,7 +130,9 @@ fn set_require(
     None ->
       state.type_error(
         state,
-        "Method WeakSet.prototype called on incompatible receiver",
+        "Method WeakSet.prototype."
+          <> method
+          <> " called on incompatible receiver",
       )
   }
 }
@@ -141,11 +145,11 @@ fn weak_set_add(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- set_require(this, state)
+  use _data, ref, state <- require_weak_set(this, state, "add")
   let val = first_arg_or_undefined(args)
   case can_be_held_weakly(state, val) {
     True -> {
-      let state = write_data(state, ref, dict.insert(data, val, Nil))
+      let state = mutate(state, ref, dict.insert(_, val, Nil))
       #(state, Ok(this))
     }
     False -> state.type_error(state, "Invalid value used in weak set")
@@ -159,7 +163,7 @@ fn weak_set_has(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, _ref, state <- set_require(this, state)
+  use data, _ref, state <- require_weak_set(this, state, "has")
   let val = first_arg_or_undefined(args)
   #(state, Ok(JsBool(dict.has_key(data, val))))
 }
@@ -170,23 +174,35 @@ fn weak_set_delete(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- set_require(this, state)
+  use data, ref, state <- require_weak_set(this, state, "delete")
   let val = first_arg_or_undefined(args)
   case dict.has_key(data, val) {
     True -> {
-      let state = write_data(state, ref, dict.delete(data, val))
+      let state = mutate(state, ref, dict.delete(_, val))
       #(state, Ok(JsBool(True)))
     }
     False -> #(state, Ok(JsBool(False)))
   }
 }
 
-/// Write an updated membership dict back to the WeakSet's heap slot.
-fn write_data(
+/// Read-modify-write the WeakSet's membership dict inside a single heap access.
+/// `ref` must have been proved a WeakSet by `require_weak_set`.
+///
+/// Takes a *function* rather than a finished dict on purpose: a caller cannot
+/// hand back a dict it captured before running user code, so a stale write can
+/// never silently revert a re-entrant mutation.
+fn mutate(
   state: State(host),
   ref: Ref,
-  data: Dict(JsValue, Nil),
+  update: fn(Dict(JsValue, Nil)) -> Dict(JsValue, Nil),
 ) -> State(host) {
-  let heap = heap.update_kind(state.heap, ref, WeakSetObject(data:))
-  State(..state, heap:)
+  case heap.read(state.heap, ref) {
+    Some(ObjectSlot(kind: WeakSetObject(data:), ..)) -> {
+      let heap =
+        heap.update_kind(state.heap, ref, WeakSetObject(data: update(data)))
+      State(..state, heap:)
+    }
+    // Unreachable: a heap slot's kind never changes after allocation.
+    _ -> state
+  }
 }

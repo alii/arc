@@ -32,7 +32,7 @@ import arc/vm/value.{
   MapPrototypeGetSize, MapPrototypeHas, MapPrototypeKeys, MapPrototypeSet,
   MapPrototypeValues, ObjectSlot,
 }
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 // ============================================================================
 // Init — set up Map constructor + Map.prototype
@@ -102,9 +102,11 @@ pub fn dispatch(
     MapPrototypeClear -> map_clear(this, state)
     MapPrototypeForEach -> map_for_each(this, args, state)
     MapPrototypeGetSize -> map_get_size(this, state)
-    MapPrototypeKeys -> map_iterator(this, state, value.MapIterKeys)
-    MapPrototypeValues -> map_iterator(this, state, value.MapIterValues)
-    MapPrototypeEntries -> map_iterator(this, state, value.MapIterEntries)
+    MapPrototypeKeys -> map_iterator(this, state, "keys", value.MapIterKeys)
+    MapPrototypeValues ->
+      map_iterator(this, state, "values", value.MapIterValues)
+    MapPrototypeEntries ->
+      map_iterator(this, state, "entries", value.MapIterEntries)
   }
 }
 
@@ -187,7 +189,7 @@ fn map_get(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
-  use store, _ref, state <- require_map(this, state)
+  use store, _ref, state <- require_map(this, state, "get")
   // Steps 3-4: Look up key
   let map_key = value.js_to_map_key(key_arg)
   let result = ordered_entries.get(store, map_key) |> option.unwrap(JsUndefined)
@@ -223,7 +225,7 @@ fn map_set(
     [] -> #(JsUndefined, JsUndefined)
   }
   // Steps 1-2: RequireInternalSlot
-  use store, ref, state <- require_map(this, state)
+  use store, ref, state <- require_map(this, state, "set")
 
   // Step 4 (-0 → +0) happens inside js_to_map_key
   let map_key = value.js_to_map_key(key_arg)
@@ -257,7 +259,7 @@ fn map_has(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use store, _ref, state <- require_map(this, state)
+  use store, _ref, state <- require_map(this, state, "has")
   let map_key = value.js_to_map_key(key_arg)
   #(state, Ok(JsBool(ordered_entries.has(store, map_key))))
 }
@@ -285,7 +287,7 @@ fn map_delete(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use store, ref, state <- require_map(this, state)
+  use store, ref, state <- require_map(this, state, "delete")
   let map_key = value.js_to_map_key(key_arg)
   case ordered_entries.delete(store, map_key) {
     #(_store, False) -> #(state, Ok(JsBool(False)))
@@ -312,7 +314,7 @@ fn map_clear(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, ref, state <- require_map(this, state)
+  use store, ref, state <- require_map(this, state, "clear")
   // next_seq is preserved by clear(): the spec's records are emptied but
   // appends still land past in-flight iterator cursors, so they remain
   // visited.
@@ -357,7 +359,7 @@ fn map_for_each(
       )
     True -> {
       // Steps 1-2: RequireInternalSlot
-      use _store, ref, state <- require_map(this, state)
+      use _store, ref, state <- require_map(this, state, "forEach")
       // Steps 4-5: LIVE iteration by seq cursor — the source is re-read from
       // the heap each step, so entries the callback deletes before being
       // reached are skipped and entries it adds (including delete + re-add)
@@ -415,7 +417,7 @@ fn map_get_size(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_map(this, state)
+  use store, _ref, state <- require_map(this, state, "size")
   #(state, Ok(value.from_int(ordered_entries.size(store))))
 }
 
@@ -429,9 +431,10 @@ fn map_get_size(
 fn map_iterator(
   this: JsValue,
   state: State(host),
+  method: String,
   kind: value.MapIterKind,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _store, ref, state <- require_map(this, state)
+  use _store, ref, state <- require_map(this, state, method)
   let #(heap, iter_ref) =
     common.alloc_wrapper(
       state.heap,
@@ -445,31 +448,43 @@ fn map_iterator(
 // Helpers
 // ============================================================================
 
+/// `this`'s [[MapData]] store and heap ref, or `None` if `this` isn't a Map.
+fn map_store(
+  h: Heap(host),
+  this: JsValue,
+) -> Option(#(OrderedEntries(MapKey, JsValue), Ref)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(kind: MapObject(store:), ..)) -> Some(#(store, ref))
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
 /// RequireInternalSlot(M, [[MapData]]) — validates that `this` is a Map object
-/// and extracts its internal data.
+/// and extracts its internal data, or throws a TypeError naming `method`.
 ///
-/// Calls `cont` with the ordered-entries store, heap ref, and state.
-/// Returns TypeError if `this` is not a Map.
+/// The store handed to `cont` is only safe to keep because no Map method
+/// re-enters user code between the check and the store's use. `forEach` — the
+/// one method that does — ignores it and re-reads the source from `ref` on
+/// every step (see `for_each_loop`).
+///
+/// CPS-style — `use store, ref, state <- require_map(this, state, "get")`.
 fn require_map(
   this: JsValue,
   state: State(host),
+  method: String,
   cont: fn(OrderedEntries(MapKey, JsValue), Ref, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: MapObject(store:), ..)) -> cont(store, ref, state)
-        _ ->
-          state.type_error(
-            state,
-            "Method Map.prototype.* called on incompatible receiver",
-          )
-      }
-    _ ->
+  case map_store(state.heap, this) {
+    Some(#(store, ref)) -> cont(store, ref, state)
+    None ->
       state.type_error(
         state,
-        "Method Map.prototype.* called on incompatible receiver",
+        "Method Map.prototype." <> method <> " called on incompatible receiver",
       )
   }
 }

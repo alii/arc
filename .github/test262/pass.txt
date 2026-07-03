@@ -14880,6 +14880,7 @@ built-ins/Set/prototype/difference/combines-empty-sets.js
 built-ins/Set/prototype/difference/combines-itself.js
 built-ins/Set/prototype/difference/combines-same-sets.js
 built-ins/Set/prototype/difference/combines-sets.js
+built-ins/Set/prototype/difference/converts-negative-zero.js
 built-ins/Set/prototype/difference/difference.js
 built-ins/Set/prototype/difference/has-is-callable.js
 built-ins/Set/prototype/difference/keys-is-callable.js
@@ -14890,6 +14891,8 @@ built-ins/Set/prototype/difference/receiver-not-set.js
 built-ins/Set/prototype/difference/require-internal-slot.js
 built-ins/Set/prototype/difference/result-order.js
 built-ins/Set/prototype/difference/set-like-array.js
+built-ins/Set/prototype/difference/set-like-class-mutation.js
+built-ins/Set/prototype/difference/set-like-class-order.js
 built-ins/Set/prototype/difference/size-is-a-number.js
 built-ins/Set/prototype/difference/subclass-receiver-methods.js
 built-ins/Set/prototype/difference/subclass-symbol-species.js
@@ -14985,6 +14988,7 @@ built-ins/Set/prototype/intersection/combines-empty-sets.js
 built-ins/Set/prototype/intersection/combines-itself.js
 built-ins/Set/prototype/intersection/combines-same-sets.js
 built-ins/Set/prototype/intersection/combines-sets.js
+built-ins/Set/prototype/intersection/converts-negative-zero.js
 built-ins/Set/prototype/intersection/has-is-callable.js
 built-ins/Set/prototype/intersection/intersection.js
 built-ins/Set/prototype/intersection/keys-is-callable.js
@@ -14993,7 +14997,10 @@ built-ins/Set/prototype/intersection/name.js
 built-ins/Set/prototype/intersection/not-a-constructor.js
 built-ins/Set/prototype/intersection/receiver-not-set.js
 built-ins/Set/prototype/intersection/require-internal-slot.js
+built-ins/Set/prototype/intersection/result-order.js
 built-ins/Set/prototype/intersection/set-like-array.js
+built-ins/Set/prototype/intersection/set-like-class-mutation.js
+built-ins/Set/prototype/intersection/set-like-class-order.js
 built-ins/Set/prototype/intersection/size-is-a-number.js
 built-ins/Set/prototype/intersection/subclass-receiver-methods.js
 built-ins/Set/prototype/intersection/subclass-symbol-species.js
@@ -15008,6 +15015,7 @@ built-ins/Set/prototype/isDisjointFrom/compares-empty-sets.js
 built-ins/Set/prototype/isDisjointFrom/compares-itself.js
 built-ins/Set/prototype/isDisjointFrom/compares-same-sets.js
 built-ins/Set/prototype/isDisjointFrom/compares-sets.js
+built-ins/Set/prototype/isDisjointFrom/converts-negative-zero.js
 built-ins/Set/prototype/isDisjointFrom/has-is-callable.js
 built-ins/Set/prototype/isDisjointFrom/isDisjointFrom.js
 built-ins/Set/prototype/isDisjointFrom/keys-is-callable.js
@@ -15017,6 +15025,9 @@ built-ins/Set/prototype/isDisjointFrom/not-a-constructor.js
 built-ins/Set/prototype/isDisjointFrom/receiver-not-set.js
 built-ins/Set/prototype/isDisjointFrom/require-internal-slot.js
 built-ins/Set/prototype/isDisjointFrom/set-like-array.js
+built-ins/Set/prototype/isDisjointFrom/set-like-class-mutation.js
+built-ins/Set/prototype/isDisjointFrom/set-like-class-order.js
+built-ins/Set/prototype/isDisjointFrom/set-like-iter-return.js
 built-ins/Set/prototype/isDisjointFrom/size-is-a-number.js
 built-ins/Set/prototype/isDisjointFrom/subclass-receiver-methods.js
 built-ins/Set/prototype/isSubsetOf/allows-set-like-class.js
@@ -15038,6 +15049,7 @@ built-ins/Set/prototype/isSubsetOf/not-a-constructor.js
 built-ins/Set/prototype/isSubsetOf/receiver-not-set.js
 built-ins/Set/prototype/isSubsetOf/require-internal-slot.js
 built-ins/Set/prototype/isSubsetOf/set-like-array.js
+built-ins/Set/prototype/isSubsetOf/set-like-class-mutation.js
 built-ins/Set/prototype/isSubsetOf/set-like-class-order.js
 built-ins/Set/prototype/isSubsetOf/size-is-a-number.js
 built-ins/Set/prototype/isSubsetOf/subclass-receiver-methods.js
@@ -15094,6 +15106,7 @@ built-ins/Set/prototype/symmetricDifference/receiver-not-set.js
 built-ins/Set/prototype/symmetricDifference/require-internal-slot.js
 built-ins/Set/prototype/symmetricDifference/result-order.js
 built-ins/Set/prototype/symmetricDifference/set-like-array.js
+built-ins/Set/prototype/symmetricDifference/set-like-class-mutation.js
 built-ins/Set/prototype/symmetricDifference/set-like-class-order.js
 built-ins/Set/prototype/symmetricDifference/size-is-a-number.js
 built-ins/Set/prototype/symmetricDifference/subclass-receiver-methods.js
@@ -15122,6 +15135,7 @@ built-ins/Set/prototype/union/receiver-not-set.js
 built-ins/Set/prototype/union/require-internal-slot.js
 built-ins/Set/prototype/union/result-order.js
 built-ins/Set/prototype/union/set-like-array.js
+built-ins/Set/prototype/union/set-like-class-mutation.js
 built-ins/Set/prototype/union/set-like-class-order.js
 built-ins/Set/prototype/union/size-is-a-number.js
 built-ins/Set/prototype/union/subclass-receiver-methods.js
@@ -51101,6 +51115,13 @@ staging/sm/RegExp/unicode-everything.js
 staging/sm/RegExp/unicode-ignoreCase-ascii.js
 staging/sm/RegExp/unicode-ignoreCase-negated.js
 staging/sm/RegExp/unicode-ignoreCase.js
+staging/sm/Set/difference.js
+staging/sm/Set/intersection.js
+staging/sm/Set/is-disjoint-from.js
+staging/sm/Set/is-subset-of.js
+staging/sm/Set/is-superset-of.js
+staging/sm/Set/symmetric-difference.js
+staging/sm/Set/union.js
 staging/sm/String/15.5.4.11-01.js
 staging/sm/String/15.5.4.2.js
 staging/sm/String/15.5.4.7.js
