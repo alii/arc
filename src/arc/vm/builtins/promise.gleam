@@ -11,10 +11,8 @@ import arc/vm/value.{
   PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
 }
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/string
 
 /// ES2024 §27.2.4 Properties of the Promise Constructor &
 /// ES2024 §27.2.5 Properties of the Promise Prototype Object
@@ -264,11 +262,8 @@ fn fulfill_promise_tracked(
       value.PromiseFulfilled(result_value),
     )
   case outcome {
-    // Engine bug: this ref never pointed at a promise's internal slot.
-    NotAPromiseSlot -> {
-      log_not_a_promise_slot("FulfillPromise", data_ref)
-      #(state, outcome)
-    }
+    // Not a promise slot: nothing to settle, report it back to the caller.
+    NotAPromiseSlot -> #(state, outcome)
     // Legitimate soft no-op (the spec's pending Assert), or the transition.
     AlreadySettled | Transitioned(_) -> #(
       state.State(
@@ -312,18 +307,12 @@ pub type SettleOutcome {
   /// The promise was already settled — a legitimate no-op, which the spec
   /// models as an Assert (e.g. `resolve(1); reject(2)`).
   AlreadySettled
-  /// The ref does not point at a PromiseSlot at all — an engine bug, never
-  /// something a JS program can cause.
+  /// The ref does not point at a PromiseSlot at all. No JS program can cause
+  /// this, but an embedder can: a `Ticket` outlives the promise slot it names
+  /// once `shrink_for_handoff` has dropped that slot, so resuming a stale
+  /// ticket lands here. Treated as a settle that did nothing — `settle_outcome`
+  /// reports `False` and the caller decides what to do.
   NotAPromiseSlot
-}
-
-fn log_not_a_promise_slot(op: String, data_ref: Ref) -> Nil {
-  io.println_error(
-    "arc internal error: "
-    <> op
-    <> " called with a ref that is not a PromiseSlot: "
-    <> string.inspect(data_ref),
-  )
 }
 
 /// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
@@ -332,7 +321,7 @@ fn log_not_a_promise_slot(op: String, data_ref: Ref) -> Nil {
 /// cleared reaction lists.
 ///
 /// The `SettleOutcome` distinguishes the transition, the legitimate
-/// already-settled no-op, and a ref that is not a promise at all (engine bug).
+/// already-settled no-op, and a ref that is not a promise at all.
 fn settle_promise(
   h: Heap(host),
   data_ref: Ref,
@@ -377,7 +366,7 @@ fn settle_promise(
     }
     // Soft assertion: not pending -> no-op (spec says Assert)
     Some(PromiseSlot(..)) -> #(h, [], AlreadySettled)
-    // Not a promise's internal slot at all — an engine bug.
+    // Not a promise's internal slot at all (see `NotAPromiseSlot`).
     Some(_) | None -> #(h, [], NotAPromiseSlot)
   }
 }
@@ -442,11 +431,8 @@ fn reject_promise_tracked(
     }
     // Soft assertion: not pending -> no-op (spec says Assert)
     AlreadySettled -> #(state, outcome)
-    // Engine bug: this ref never pointed at a promise's internal slot.
-    NotAPromiseSlot -> {
-      log_not_a_promise_slot("RejectPromise", data_ref)
-      #(state, outcome)
-    }
+    // Not a promise slot: nothing to settle, report it back to the caller.
+    NotAPromiseSlot -> #(state, outcome)
   }
 }
 
