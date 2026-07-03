@@ -117,14 +117,14 @@ pub fn call_native_generator_return(
       case gen.gen_state {
         value.Completed | value.SuspendedStart -> {
           // Mark completed and return {value, done: true}
-          let h =
-            heap.write(
-              state.heap,
-              gen.data_ref,
-              gen_with_state(gen, value.Completed),
-            )
+          let state = complete(state, gen)
           let #(h, result) =
-            common.create_iter_result(h, state.builtins, return_val, True)
+            common.create_iter_result(
+              state.heap,
+              state.builtins,
+              return_val,
+              True,
+            )
           Ok(
             State(
               ..state,
@@ -208,16 +208,9 @@ pub fn call_native_generator_throw(
   case get_generator_data(state.heap, this) {
     Some(gen) ->
       case gen.gen_state {
-        value.Completed | value.SuspendedStart -> {
+        value.Completed | value.SuspendedStart ->
           // Mark completed and throw the exception
-          let h =
-            heap.write(
-              state.heap,
-              gen.data_ref,
-              gen_with_state(gen, value.Completed),
-            )
-          Error(Threw(throw_val, State(..state, heap: h)))
-        }
+          complete_and_throw(state, gen, throw_val)
         value.Executing -> {
           state.throw_type_error(state, "Generator is already running")
         }
@@ -243,13 +236,7 @@ pub fn call_native_generator_throw(
                       state,
                       JsObject(iter_ref),
                     )
-                  let h =
-                    heap.write(
-                      state.heap,
-                      gen.data_ref,
-                      gen_with_state(gen, value.Completed),
-                    )
-                  let state = State(..state, heap: h)
+                  let state = complete(state, gen)
                   case closed {
                     Error(thrown) -> Error(Threw(thrown, state))
                     Ok(Nil) ->
@@ -269,16 +256,14 @@ pub fn call_native_generator_throw(
                   // The generator caught it -- continue executing
                   run_to_completion(caught_state, state, gen, execute_inner)
                   |> alloc_iter_result(rest_stack)
-                None -> {
-                  // No catch handler -- mark completed and propagate the throw
-                  let h2 =
-                    heap.write(
-                      gen_exec_state.heap,
-                      gen.data_ref,
-                      gen_with_state(gen, value.Completed),
-                    )
-                  Error(Threw(throw_val, State(..state, heap: h2)))
-                }
+                None ->
+                  // No catch handler -- mark completed and propagate the throw.
+                  // Keep the body's heap (build_resumed_state wrote Executing).
+                  complete_and_throw(
+                    State(..state, heap: gen_exec_state.heap),
+                    gen,
+                    throw_val,
+                  )
               }
             }
           }
@@ -353,6 +338,29 @@ fn gen_with_state(
   )
 }
 
+/// Mark the generator Completed in `state`'s heap. The ONLY way this module
+/// completes a generator — "marked done but forgot to write the heap" (or
+/// wrote it to the wrong ref) is not expressible through it.
+fn complete(state: State(host), gen: GenData) -> State(host) {
+  State(
+    ..state,
+    heap: heap.write(
+      state.heap,
+      gen.data_ref,
+      gen_with_state(gen, value.Completed),
+    ),
+  )
+}
+
+/// Complete the generator and propagate `thrown` out of the driver.
+fn complete_and_throw(
+  state: State(host),
+  gen: GenData,
+  thrown: JsValue,
+) -> Result(a, StepExit(host)) {
+  Error(Threw(thrown, complete(state, gen)))
+}
+
 /// Mark a generator Executing and restore its saved execution context into a
 /// fresh State for resumption. `stack` and `pc` vary per resume mode.
 fn build_resumed_state(
@@ -413,27 +421,11 @@ fn forward_delegate(
 ) -> Result(State(host), StepExit(host)) {
   let iter = JsObject(iter_ref)
   case object_ops.get_value(state, iter_ref, delegate_key(method), iter) {
-    Error(#(thrown, state)) -> {
-      let h =
-        heap.write(
-          state.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Completed),
-        )
-      Error(Threw(thrown, State(..state, heap: h)))
-    }
+    Error(#(thrown, state)) -> complete_and_throw(state, gen, thrown)
     Ok(#(JsUndefined, state)) | Ok(#(value.JsNull, state)) -> on_missing(state)
     Ok(#(method_fn, state)) ->
       case state.call(state, method_fn, iter, [arg]) {
-        Error(#(thrown, state)) -> {
-          let h =
-            heap.write(
-              state.heap,
-              gen.data_ref,
-              gen_with_state(gen, value.Completed),
-            )
-          Error(Threw(thrown, State(..state, heap: h)))
-        }
+        Error(#(thrown, state)) -> complete_and_throw(state, gen, thrown)
         Ok(#(res, state)) -> {
           // §27.5.3.2 steps 7.a/7.b: IteratorComplete + IteratorValue on the
           // forwarded result. Both property reads can run user getters, so
@@ -443,16 +435,7 @@ fn forward_delegate(
           use #(done, val, state) <- result.try(
             result.map_error(
               builtins_iterator.read_iter_result(state, res),
-              state.map_exit_state(_, fn(state: State(host)) {
-                State(
-                  ..state,
-                  heap: heap.write(
-                    state.heap,
-                    gen.data_ref,
-                    gen_with_state(gen, value.Completed),
-                  ),
-                )
-              }),
+              state.map_exit_state(_, fn(st) { complete(st, gen) }),
             ),
           )
           case done {
@@ -518,13 +501,9 @@ fn resume_after_delegate(
     DelegateReturn -> {
       // §27.5.3.8 step 7.c.viii: if the inner iterator's return completed,
       // perform a return completion on the outer generator too.
-      let h =
-        heap.write(
-          state.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Completed),
-        )
-      let #(h, result) = common.create_iter_result(h, state.builtins, val, True)
+      let state = complete(state, gen)
+      let #(h, result) =
+        common.create_iter_result(state.heap, state.builtins, val, True)
       Ok(
         State(..state, heap: h, stack: [result, ..rest_stack], pc: state.pc + 1),
       )
@@ -595,35 +574,28 @@ fn settle_completion(
       ))
     }
     Ok(#(Completed(NormalCompletion(rv)), final_state)) -> {
-      let h =
-        heap.write(
-          final_state.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Completed),
-        )
+      let final_state = complete(final_state, gen)
       Ok(#(
         True,
         rv,
         State(
           ..state.merge_globals(outer, final_state, []),
-          heap: h,
+          heap: final_state.heap,
           pc: outer.pc + 1,
         ),
       ))
     }
     Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) -> {
-      let h =
-        heap.write(
-          thrown_state.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Completed),
-        )
+      let thrown_state = complete(thrown_state, gen)
       // Merge globals from the throwing body, exactly like the Normal /
       // Yield arms: jobs it enqueued and ctx mutations must survive the
       // throw, not just its heap.
       Error(Threw(
         thrown,
-        State(..state.merge_globals(outer, thrown_state, []), heap: h),
+        State(
+          ..state.merge_globals(outer, thrown_state, []),
+          heap: thrown_state.heap,
+        ),
       ))
     }
     Ok(#(Suspended(completion.Await, _), _)) ->
@@ -631,15 +603,7 @@ fn settle_completion(
         InternalError("settle_completion", "await in sync generator"),
         outer,
       ))
-    Error(vm_err) -> {
-      let h =
-        heap.write(
-          outer.heap,
-          gen.data_ref,
-          gen_with_state(gen, value.Completed),
-        )
-      Error(VmFailed(vm_err, State(..outer, heap: h)))
-    }
+    Error(vm_err) -> Error(VmFailed(vm_err, complete(outer, gen)))
   }
 }
 

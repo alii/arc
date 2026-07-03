@@ -50,16 +50,14 @@ pub type UnwindToCatchFn(host) =
 
 /// Bundle of per-request context threaded through the body-execution helpers.
 ///
-/// `gen` is a READ-ONLY snapshot taken before user code runs: it is safe to
-/// read saved_pc / saved_stack / func_template from it, but its queue fields
-/// must never be written back — user code running inside the body can enqueue
-/// more requests re-entrantly. All slot writes go through `write_live`, which
-/// re-reads the heap at write time. That is why none of the writers below
-/// accept a queue.
+/// `frame` is the suspended body snapshot and `req` the head request that was
+/// peeled off the queue — the queue itself is deliberately absent, because
+/// everything downstream of here runs user code that can enqueue re-entrantly.
+/// Slot writes go through `write_live`, which re-reads the queue from the heap.
 type Run(host) {
   Run(
     data_ref: Ref,
-    gen: AsyncGenData,
+    frame: AsyncGenFrame,
     req: AsyncGenRequest,
     execute_inner: ExecuteInnerFn(host),
     unwind_to_catch: UnwindToCatchFn(host),
@@ -93,7 +91,7 @@ pub fn call_native_method(
     )
   }
   case get_async_gen_data(state.heap, this) {
-    None -> {
+    Error(NotAnAsyncGenerator) -> {
       // Per spec: don't throw synchronously — reject the returned promise.
       let #(err, state) =
         state.type_error_value(
@@ -103,7 +101,12 @@ pub fn call_native_method(
       let state = reject_with(state, cap.reject, err)
       ret(state)
     }
-    Some(gen) -> {
+    Error(SlotCorrupt) ->
+      Error(VmFailed(
+        InternalError("call_native_method", "async gen slot missing"),
+        state,
+      ))
+    Ok(#(data_ref, AsyncGenLive(frame:, ..))) -> {
       let req =
         AsyncGenRequest(
           completion:,
@@ -111,10 +114,10 @@ pub fn call_native_method(
           resolve: cap.resolve,
           reject: cap.reject,
         )
-      let enqueued = enqueue(state, gen.data_ref, req)
-      let stepped = case gen.gen_state {
+      let enqueued = enqueue(state, data_ref, req)
+      let stepped = case frame.gen_state {
         AGExecuting | AGAwaitingReturn -> Ok(enqueued)
-        _ -> resume_next(enqueued, gen.data_ref, execute_inner, unwind_to_catch)
+        _ -> resume_next(enqueued, data_ref, execute_inner, unwind_to_catch)
       }
       case stepped {
         Ok(state) -> ret(state)
@@ -137,57 +140,51 @@ fn resume_next(
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
 ) -> Result(State(host), state.VmError) {
-  case read_slot(state.heap, data_ref) {
-    None -> Ok(state)
-    Some(gen) -> {
-      let gen = normalize_queue(gen)
-      case gen.queue_front {
-        [] -> Ok(state)
-        [req, ..] -> {
-          let run = Run(data_ref:, gen:, req:, execute_inner:, unwind_to_catch:)
-          case gen.gen_state {
-            AGExecuting | AGAwaitingReturn -> Ok(state)
+  case option.map(read_slot(state.heap, data_ref), normalize_queue) {
+    // The data_ref of a live async generator always holds an
+    // AsyncGeneratorSlot; anything else is an engine bug. Returning Ok here
+    // would leave the generator permanently suspended instead of crashing.
+    None -> Error(InternalError("resume_next", "async gen slot missing"))
+    // Only `frame` and `req` escape the match — the queue is not in scope for
+    // any of the body-execution helpers below, which run user code.
+    Some(AsyncGenLive(queue_front: [], ..)) -> Ok(state)
+    Some(AsyncGenLive(frame:, queue_front: [req, ..], ..)) -> {
+      let run = Run(data_ref:, frame:, req:, execute_inner:, unwind_to_catch:)
+      case frame.gen_state {
+        AGExecuting | AGAwaitingReturn -> Ok(state)
 
-            AGCompleted ->
-              case req.completion {
-                AGNext -> {
-                  // Resolve {undefined, done:true}, dequeue, loop
-                  let state = settle_head(state, data_ref)
-                  let state =
-                    fulfill_iter(state, req.resolve, JsUndefined, True)
-                  resume_next(state, data_ref, execute_inner, unwind_to_catch)
-                }
-                AGThrow -> {
-                  let state = settle_head(state, data_ref)
-                  let state = reject_with(state, req.reject, req.value)
-                  resume_next(state, data_ref, execute_inner, unwind_to_catch)
-                }
-                AGReturn -> {
-                  // Spec: await Promise.resolve(value) first, then settle.
-                  let state = set_gen_state(state, data_ref, AGAwaitingReturn)
-                  Ok(setup_await(
-                    state,
-                    data_ref,
-                    req.value,
-                    AGResumeAwaitingReturn,
-                  ))
-                }
-              }
-
-            AGSuspendedStart ->
-              case req.completion {
-                // return/throw on a never-started gen: complete immediately,
-                // then fall through to the Completed logic above.
-                AGReturn | AGThrow -> {
-                  let state = set_gen_state(state, data_ref, AGCompleted)
-                  resume_next(state, data_ref, execute_inner, unwind_to_catch)
-                }
-                AGNext -> run_body(state, run, False)
-              }
-
-            AGSuspendedYield -> run_body(state, run, True)
+        AGCompleted ->
+          case req.completion {
+            AGNext -> {
+              // Resolve {undefined, done:true}, dequeue, loop
+              let state = settle_head(state, data_ref)
+              let state = fulfill_iter(state, req.resolve, JsUndefined, True)
+              resume_next(state, data_ref, execute_inner, unwind_to_catch)
+            }
+            AGThrow -> {
+              let state = settle_head(state, data_ref)
+              let state = reject_with(state, req.reject, req.value)
+              resume_next(state, data_ref, execute_inner, unwind_to_catch)
+            }
+            AGReturn -> {
+              // Spec: await Promise.resolve(value) first, then settle.
+              let state = set_gen_state(state, data_ref, AGAwaitingReturn)
+              Ok(setup_await(state, data_ref, req.value, AGResumeAwaitingReturn))
+            }
           }
-        }
+
+        AGSuspendedStart ->
+          case req.completion {
+            // return/throw on a never-started gen: complete immediately,
+            // then fall through to the Completed logic above.
+            AGReturn | AGThrow -> {
+              let state = set_gen_state(state, data_ref, AGCompleted)
+              resume_next(state, data_ref, execute_inner, unwind_to_catch)
+            }
+            AGNext -> run_body(state, run, False)
+          }
+
+        AGSuspendedYield -> run_body(state, run, True)
       }
     }
   }
@@ -201,7 +198,7 @@ fn run_body(
   run: Run(host),
   push_arg: Bool,
 ) -> Result(State(host), state.VmError) {
-  let Run(data_ref:, gen:, req:, ..) = run
+  let Run(data_ref:, frame:, req:, ..) = run
   // Mark executing FIRST so concurrent calls enqueue. saved_pc/stack preserved.
   let state = set_gen_state(state, data_ref, AGExecuting)
 
@@ -211,8 +208,9 @@ fn run_body(
   // downstream carries that instead of re-deriving it from `req.completion`.
   let delegated = case push_arg, req.completion {
     True, AGReturn ->
-      pair_delegate(DelegateReturn, async_delegate_iterator(gen))
-    True, AGThrow -> pair_delegate(DelegateThrow, async_delegate_iterator(gen))
+      pair_delegate(DelegateReturn, async_delegate_iterator(frame))
+    True, AGThrow ->
+      pair_delegate(DelegateThrow, async_delegate_iterator(frame))
     _, _ -> None
   }
   case delegated {
@@ -227,10 +225,10 @@ fn run_body(
       )
     None -> {
       let gen_stack = case push_arg, req.completion {
-        True, AGNext -> [req.value, ..gen.saved_stack]
-        _, _ -> gen.saved_stack
+        True, AGNext -> [req.value, ..frame.saved_stack]
+        _, _ -> frame.saved_stack
       }
-      let exec_state = build_exec_state(state, gen, gen_stack, gen.saved_pc)
+      let exec_state = build_exec_state(state, frame, gen_stack, frame.saved_pc)
       let exec_result = case req.completion {
         AGNext -> run.execute_inner(exec_state)
         AGThrow ->
@@ -265,19 +263,19 @@ fn run_body(
 /// Does NOT write AGExecuting — caller is responsible for slot state.
 fn build_exec_state(
   state: State(host),
-  gen: AsyncGenData,
+  frame: AsyncGenFrame,
   stack: List(JsValue),
   pc: Int,
 ) -> State(host) {
-  let restored_try = generators.restore_stacks(gen.saved_try_stack)
+  let restored_try = generators.restore_stacks(frame.saved_try_stack)
   State(
     ..state,
     stack:,
     pc:,
-    locals: gen.saved_locals,
-    func: gen.func_template,
-    code: gen.func_template.bytecode,
-    constants: gen.func_template.constants,
+    locals: frame.saved_locals,
+    func: frame.func_template,
+    code: frame.func_template.bytecode,
+    constants: frame.func_template.constants,
     call_stack: [],
     try_stack: restored_try,
     new_target: JsUndefined,
@@ -302,10 +300,10 @@ fn pair_delegate(
 /// `AsyncYieldStarNext` it is parked on — the emitter-resolved label of the
 /// instruction the delegation falls out to.
 /// saved_pc was a valid dispatch target — always in bounds.
-fn async_delegate_site(gen: AsyncGenData) -> Option(#(Ref, Int)) {
-  case tuple_array.unsafe_get(gen.saved_pc, gen.func_template.bytecode) {
+fn async_delegate_site(frame: AsyncGenFrame) -> Option(#(Ref, Int)) {
+  case tuple_array.unsafe_get(frame.saved_pc, frame.func_template.bytecode) {
     AsyncYieldStarNext(after_pc:) ->
-      case gen.saved_stack {
+      case frame.saved_stack {
         [JsObject(iter_ref), ..] -> Some(#(iter_ref, after_pc))
         _ -> None
       }
@@ -314,8 +312,8 @@ fn async_delegate_site(gen: AsyncGenData) -> Option(#(Ref, Int)) {
 }
 
 /// The delegated iterator ref, when the body is suspended mid-`yield*`.
-fn async_delegate_iterator(gen: AsyncGenData) -> Option(Ref) {
-  option.map(async_delegate_site(gen), pair.first)
+fn async_delegate_iterator(frame: AsyncGenFrame) -> Option(Ref) {
+  option.map(async_delegate_site(frame), pair.first)
 }
 
 /// The yield* iter slot may hold an internal Iterator Record wrapper
@@ -430,7 +428,12 @@ fn throw_into_gen_body(
   thrown: JsValue,
 ) -> Result(State(host), state.VmError) {
   let exec_state =
-    build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
+    build_exec_state(
+      state,
+      run.frame,
+      run.frame.saved_stack,
+      run.frame.saved_pc,
+    )
   let exec_result = case run.unwind_to_catch(exec_state, thrown) {
     Some(caught) -> run.execute_inner(caught)
     None -> Ok(#(Completed(ThrowCompletion(thrown)), exec_state))
@@ -448,7 +451,12 @@ fn unwind_return_into_body(
   value: JsValue,
 ) -> Result(State(host), state.VmError) {
   let exec_state =
-    build_exec_state(state, run.gen, run.gen.saved_stack, run.gen.saved_pc)
+    build_exec_state(
+      state,
+      run.frame,
+      run.frame.saved_stack,
+      run.frame.saved_pc,
+    )
   handle_exec_result(
     state,
     run,
@@ -563,24 +571,24 @@ fn delegate_done(
   method: DelegateMethod,
   val: JsValue,
 ) -> Result(State(host), state.VmError) {
-  let gen = run.gen
+  let frame = run.frame
   case method {
     DelegateThrow ->
       // The resume target is `AsyncYieldStarNext`'s `after_pc` operand — a
       // label the emitter placed after the sequence, so nothing here depends
       // on how many opcodes yield* lowers to.
-      case async_delegate_site(gen) {
+      case async_delegate_site(frame) {
         None ->
           Error(InternalError(
             "delegate_done",
             "not suspended at AsyncYieldStarNext",
           ))
         Some(#(_iter_ref, after_pc)) -> {
-          let stack_after = case gen.saved_stack {
+          let stack_after = case frame.saved_stack {
             [_iter, ..rest] -> [val, ..rest]
             [] -> [val]
           }
-          let exec_state = build_exec_state(state, gen, stack_after, after_pc)
+          let exec_state = build_exec_state(state, frame, stack_after, after_pc)
           handle_exec_result(state, run, run.execute_inner(exec_state))
         }
       }
@@ -663,70 +671,69 @@ pub fn call_native_resume(
   let ret = fn(state: State(host)) {
     Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
   }
-  case read_slot(state.heap, data_ref) {
+  case option.map(read_slot(state.heap, data_ref), normalize_queue) {
     None ->
-      Error(VmFailed(InternalError("call_native_resume", "slot missing"), state))
-    Some(gen) -> {
-      let gen = normalize_queue(gen)
-      case gen.queue_front {
-        [] -> ret(state)
-        [req, ..] -> {
-          let run = Run(data_ref:, gen:, req:, execute_inner:, unwind_to_catch:)
-          let stepped = case kind {
-            AGResumeAwaitingReturn -> {
-              // AwaitingReturn callback: settle the head return request.
-              let state = complete(state, data_ref)
-              let state = case is_reject {
-                False -> fulfill_iter(state, req.resolve, settled, True)
-                True -> reject_with(state, req.reject, settled)
-              }
-              resume_next(state, data_ref, execute_inner, unwind_to_catch)
-            }
-            AGResumeBody ->
-              // Body await resumed — push settled value and run, or throw it in.
-              case is_reject {
-                True -> throw_into_gen_body(state, run, settled)
-                False -> {
-                  let stack = [settled, ..gen.saved_stack]
-                  let es = build_exec_state(state, gen, stack, gen.saved_pc)
-                  handle_exec_result(state, run, execute_inner(es))
-                }
-              }
-            AGResumeDelegate(method) ->
-              resume_after_delegate(state, run, method, is_reject, settled)
-            AGResumeDelegateClose ->
-              // AsyncIteratorClose await settled (closeCompletion was
-              // normal): rejection propagates (step 6), non-object fulfilment
-              // is its own TypeError (step 7), otherwise fall through to the
-              // yield* missing-throw TypeError.
-              case is_reject, settled {
-                True, _ -> throw_into_gen_body(state, run, settled)
-                False, JsObject(_) -> throw_missing_throw_type_error(state, run)
-                False, _non_obj -> {
-                  let #(err, state) =
-                    state.type_error_value(
-                      state,
-                      "Iterator result is not an object",
-                    )
-                  throw_into_gen_body(state, run, err)
-                }
-              }
-            AGResumeReturnUnwind ->
-              // yield*-with-no-.return: Await(received.[[Value]]) settled
-              // (§27.5.3.8 step 7.c.ii.2). Fulfil → unwind the outer
-              // generator's finallys with the AWAITED value; reject → the
-              // abrupt Await replaces the return completion and is thrown
-              // into the body.
-              case is_reject {
-                True -> throw_into_gen_body(state, run, settled)
-                False -> unwind_return_into_body(state, run, settled)
-              }
+      Error(VmFailed(
+        InternalError("call_native_resume", "async gen slot missing"),
+        state,
+      ))
+    // Only `frame` and `req` escape the match — see resume_next.
+    Some(AsyncGenLive(queue_front: [], ..)) -> ret(state)
+    Some(AsyncGenLive(frame:, queue_front: [req, ..], ..)) -> {
+      let run = Run(data_ref:, frame:, req:, execute_inner:, unwind_to_catch:)
+      let stepped = case kind {
+        AGResumeAwaitingReturn -> {
+          // AwaitingReturn callback: settle the head return request.
+          let state = complete(state, data_ref)
+          let state = case is_reject {
+            False -> fulfill_iter(state, req.resolve, settled, True)
+            True -> reject_with(state, req.reject, settled)
           }
-          case stepped {
-            Ok(state) -> ret(state)
-            Error(vm_err) -> Error(VmFailed(vm_err, state))
-          }
+          resume_next(state, data_ref, execute_inner, unwind_to_catch)
         }
+        AGResumeBody ->
+          // Body await resumed — push settled value and run, or throw it in.
+          case is_reject {
+            True -> throw_into_gen_body(state, run, settled)
+            False -> {
+              let stack = [settled, ..frame.saved_stack]
+              let es = build_exec_state(state, frame, stack, frame.saved_pc)
+              handle_exec_result(state, run, execute_inner(es))
+            }
+          }
+        AGResumeDelegate(method) ->
+          resume_after_delegate(state, run, method, is_reject, settled)
+        AGResumeDelegateClose ->
+          // AsyncIteratorClose await settled (closeCompletion was
+          // normal): rejection propagates (step 6), non-object fulfilment
+          // is its own TypeError (step 7), otherwise fall through to the
+          // yield* missing-throw TypeError.
+          case is_reject, settled {
+            True, _ -> throw_into_gen_body(state, run, settled)
+            False, JsObject(_) -> throw_missing_throw_type_error(state, run)
+            False, _non_obj -> {
+              let #(err, state) =
+                state.type_error_value(
+                  state,
+                  "Iterator result is not an object",
+                )
+              throw_into_gen_body(state, run, err)
+            }
+          }
+        AGResumeReturnUnwind ->
+          // yield*-with-no-.return: Await(received.[[Value]]) settled
+          // (§27.5.3.8 step 7.c.ii.2). Fulfil → unwind the outer
+          // generator's finallys with the AWAITED value; reject → the
+          // abrupt Await replaces the return completion and is thrown
+          // into the body.
+          case is_reject {
+            True -> throw_into_gen_body(state, run, settled)
+            False -> unwind_return_into_body(state, run, settled)
+          }
+      }
+      case stepped {
+        Ok(state) -> ret(state)
+        Error(vm_err) -> Error(VmFailed(vm_err, state))
       }
     }
   }
@@ -751,25 +758,13 @@ fn setup_await(
 // Slot read/write helpers
 // ============================================================================
 
-/// A decoded AsyncGeneratorSlot. Two roles, one type:
-///
-///   READ — a snapshot taken at the top of resume_next / call_native_resume.
-///   Its `queue_front`/`queue_back` are only ever used to DECIDE (is there a
-///   head request? is more work pending?), never written back: user code can
-///   enqueue re-entrantly at any point after the snapshot was taken, so a
-///   snapshot queue is stale by the time we get to a write.
-///
-///   WRITE — `write_live` re-reads the slot into a fresh AsyncGenData at
-///   write time, applies a pure update, and encodes it back. No writer in
-///   this module accepts a queue argument, so it is impossible to overwrite
-///   the live queue with a stale snapshot.
-type AsyncGenData {
-  AsyncGenData(
-    data_ref: Ref,
+/// The suspended body of an async generator: everything needed to rebuild an
+/// execution State, and nothing else. Deliberately carries NO queue — a frame
+/// is handed to the body-execution helpers, which run user code and therefore
+/// must never see (let alone write back) a queue captured before that ran.
+type AsyncGenFrame {
+  AsyncGenFrame(
     gen_state: value.AsyncGeneratorState,
-    /// Decoded two-list FIFO — see AsyncGeneratorSlot.queue in value.gleam.
-    queue_front: List(AsyncGenRequest),
-    queue_back: List(AsyncGenRequest),
     func_template: value.FuncTemplate,
     env_ref: Ref,
     saved_pc: Int,
@@ -779,19 +774,47 @@ type AsyncGenData {
   )
 }
 
-fn get_async_gen_data(h: Heap(host), this: JsValue) -> Option(AsyncGenData) {
+/// A whole decoded AsyncGeneratorSlot: the frame plus the request queue.
+/// Only ever produced by `read_slot` and consumed by `encode_slot`, so the
+/// queue exists exactly where a live slot is being read or written — the
+/// drivers peel the head request off and thereafter hold only a frame.
+type AsyncGenLive {
+  AsyncGenLive(
+    frame: AsyncGenFrame,
+    /// Decoded two-list FIFO — see AsyncGeneratorSlot.queue in value.gleam.
+    queue_front: List(AsyncGenRequest),
+    queue_back: List(AsyncGenRequest),
+  )
+}
+
+/// Why a `this` value did not yield an async-generator slot.
+type SlotLookupError {
+  /// `this` is not an async generator object — a guest TypeError.
+  NotAnAsyncGenerator
+  /// It IS one, but its data_ref does not hold an AsyncGeneratorSlot — an
+  /// engine bug, never a guest-observable condition.
+  SlotCorrupt
+}
+
+fn get_async_gen_data(
+  h: Heap(host),
+  this: JsValue,
+) -> Result(#(Ref, AsyncGenLive), SlotLookupError) {
   case this {
     JsObject(ref) ->
       case heap.read(h, ref) {
         Some(ObjectSlot(kind: AsyncGeneratorObject(generator_data: dr), ..)) ->
-          read_slot(h, dr)
-        _ -> None
+          case read_slot(h, dr) {
+            Some(live) -> Ok(#(dr, live))
+            None -> Error(SlotCorrupt)
+          }
+        _ -> Error(NotAnAsyncGenerator)
       }
-    _ -> None
+    _ -> Error(NotAnAsyncGenerator)
   }
 }
 
-fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenData) {
+fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenLive) {
   case heap.read(h, data_ref) {
     Some(AsyncGeneratorSlot(
       gen_state:,
@@ -804,17 +827,18 @@ fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenData) {
       saved_try_stack:,
     )) -> {
       let #(queue_front, queue_back) = queue
-      Some(AsyncGenData(
-        data_ref:,
-        gen_state:,
+      Some(AsyncGenLive(
+        frame: AsyncGenFrame(
+          gen_state:,
+          func_template:,
+          env_ref:,
+          saved_pc:,
+          saved_locals:,
+          saved_stack:,
+          saved_try_stack:,
+        ),
         queue_front:,
         queue_back:,
-        func_template:,
-        env_ref:,
-        saved_pc:,
-        saved_locals:,
-        saved_stack:,
-        saved_try_stack:,
       ))
     }
     _ -> None
@@ -823,30 +847,31 @@ fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenData) {
 
 /// If front is empty, reverse back into front. Called at dequeue sites so the
 /// head pattern-match `[req, ..rest]` always sees the oldest request.
-fn normalize_queue(gen: AsyncGenData) -> AsyncGenData {
-  case gen.queue_front, gen.queue_back {
+fn normalize_queue(live: AsyncGenLive) -> AsyncGenLive {
+  case live.queue_front, live.queue_back {
     [], [_, ..] ->
-      AsyncGenData(
-        ..gen,
-        queue_front: list.reverse(gen.queue_back),
+      AsyncGenLive(
+        ..live,
+        queue_front: list.reverse(live.queue_back),
         queue_back: [],
       )
-    _, _ -> gen
+    _, _ -> live
   }
 }
 
-/// Encode a decoded AsyncGenData back into its heap slot — the exact inverse
+/// Encode a decoded AsyncGenLive back into its heap slot — the exact inverse
 /// of `read_slot`.
-fn encode_slot(gen: AsyncGenData) -> HeapSlot(host) {
+fn encode_slot(live: AsyncGenLive) -> HeapSlot(host) {
+  let AsyncGenLive(frame:, queue_front:, queue_back:) = live
   AsyncGeneratorSlot(
-    gen_state: gen.gen_state,
-    queue: #(gen.queue_front, gen.queue_back),
-    func_template: gen.func_template,
-    env_ref: gen.env_ref,
-    saved_pc: gen.saved_pc,
-    saved_locals: gen.saved_locals,
-    saved_stack: gen.saved_stack,
-    saved_try_stack: gen.saved_try_stack,
+    gen_state: frame.gen_state,
+    queue: #(queue_front, queue_back),
+    func_template: frame.func_template,
+    env_ref: frame.env_ref,
+    saved_pc: frame.saved_pc,
+    saved_locals: frame.saved_locals,
+    saved_stack: frame.saved_stack,
+    saved_try_stack: frame.saved_try_stack,
   )
 }
 
@@ -856,20 +881,19 @@ fn encode_slot(gen: AsyncGenData) -> HeapSlot(host) {
 
 /// Re-read the LIVE slot at write time, apply a pure update, write it back.
 ///
-/// This is the structural fix for the stale-snapshot bug: user code running
-/// inside the generator body (or a getter run while settling an iterator
-/// result) can call .next()/.return()/.throw() re-entrantly, which enqueues
-/// onto the live slot's queue_back. If a writer used a queue captured before
-/// that user code ran, the re-entrant request would be silently overwritten.
-/// Because every writer goes through here — and none of them takes a queue
-/// argument — that overwrite is now impossible.
+/// User code running inside the generator body (or a getter run while settling
+/// an iterator result) can call .next()/.return()/.throw() re-entrantly, which
+/// enqueues onto the live slot's queue_back. Re-reading here is what stops a
+/// stale queue from being written back over it — and since the drivers only
+/// ever hold an `AsyncGenFrame` once user code is in play, they have no queue
+/// to write back even if they wanted to.
 ///
 /// The slot must exist: every caller is inside a driver step that just read
 /// it, and nothing deallocates AsyncGeneratorSlots mid-step.
 fn write_live(
   state: State(host),
   data_ref: Ref,
-  update: fn(AsyncGenData) -> AsyncGenData,
+  update: fn(AsyncGenLive) -> AsyncGenLive,
 ) -> State(host) {
   let assert Some(live) = read_slot(state.heap, data_ref)
     as "async gen slot vanished between read and write"
@@ -884,7 +908,7 @@ fn enqueue(
   req: AsyncGenRequest,
 ) -> State(host) {
   use live <- write_live(state, data_ref)
-  AsyncGenData(..live, queue_back: [req, ..live.queue_back])
+  AsyncGenLive(..live, queue_back: [req, ..live.queue_back])
 }
 
 /// Transition gen_state only; queue and saved frame untouched.
@@ -918,29 +942,35 @@ fn save_suspended(
   new_state: value.AsyncGeneratorState,
 ) -> State(host) {
   use live <- write_live(state, data_ref)
-  AsyncGenData(
+  AsyncGenLive(
     ..live,
-    gen_state: new_state,
-    saved_pc: suspended.pc,
-    saved_locals: suspended.locals,
-    saved_stack: suspended.stack,
-    saved_try_stack: generators.save_stacks(suspended.try_stack),
+    frame: AsyncGenFrame(
+      ..live.frame,
+      gen_state: new_state,
+      saved_pc: suspended.pc,
+      saved_locals: suspended.locals,
+      saved_stack: suspended.stack,
+      saved_try_stack: generators.save_stacks(suspended.try_stack),
+    ),
   )
 }
 
-// -- pure AsyncGenData updaters, composed inside `write_live` callbacks ------
+// -- pure AsyncGenLive updaters, composed inside `write_live` callbacks ------
 
-fn with_state(gen: AsyncGenData, s: value.AsyncGeneratorState) -> AsyncGenData {
-  AsyncGenData(..gen, gen_state: s)
+fn with_state(
+  live: AsyncGenLive,
+  s: value.AsyncGeneratorState,
+) -> AsyncGenLive {
+  AsyncGenLive(..live, frame: AsyncGenFrame(..live.frame, gen_state: s))
 }
 
 /// Drop the head (oldest) request — the one the caller just settled. Any
 /// requests enqueued re-entrantly after it are preserved.
-fn drop_head(gen: AsyncGenData) -> AsyncGenData {
-  let gen = normalize_queue(gen)
-  case gen.queue_front {
-    [_head, ..rest] -> AsyncGenData(..gen, queue_front: rest)
-    [] -> gen
+fn drop_head(live: AsyncGenLive) -> AsyncGenLive {
+  let live = normalize_queue(live)
+  case live.queue_front {
+    [_head, ..rest] -> AsyncGenLive(..live, queue_front: rest)
+    [] -> live
   }
 }
 
