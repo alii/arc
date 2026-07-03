@@ -842,8 +842,15 @@ fn validate_escape(
 ) -> Result(Int, LexError) {
   let ch = char_at(bytes, pos)
   case ch {
-    // \8 and \9 are always invalid
-    "8" | "9" -> Error(InvalidEscapeSequence(backslash_pos))
+    // \8 and \9 — NonOctalDecimalEscapeSequence.
+    // In templates: a NotEscapeSequence, always invalid.
+    // In strings: legal in sloppy mode ('\8' === '8'), rejected in strict code
+    // at parser level (see legacy_octal.has_strict_forbidden_escape).
+    "8" | "9" ->
+      case in_template {
+        True -> Error(InvalidEscapeSequence(backslash_pos))
+        False -> Ok(2)
+      }
 
     // Legacy octal escapes \0-\7
     // In templates: always invalid (even tagged templates fail at parse level)

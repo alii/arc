@@ -68,7 +68,9 @@ import arc/parser/error.{
   UsingMissingInitializer, UsingPatternBinding, WithNotAllowedStrictMode,
   YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode,
 }
-import arc/parser/legacy_octal.{is_legacy_octal_number, strict_forbidden_escape}
+import arc/parser/legacy_octal.{
+  has_strict_forbidden_escape, is_legacy_octal_number,
+}
 import arc/parser/lexer.{
   type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
   Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
@@ -1773,10 +1775,41 @@ fn numeric_literal(p: P) -> Result(ast.Expression, ParseError) {
   }
 }
 
-/// Does the current string token carry an Annex B escape form that strict
-/// mode forbids (`\07` legacy octal, or `\8`/`\9` non-octal decimal)?
-fn has_strict_forbidden_escape(p: P) -> Bool {
-  option.is_some(strict_forbidden_escape(peek_value(p)))
+/// The cooked value of the current string token, rejecting the Annex B escape
+/// forms (`\07` legacy octal, `\8`/`\9` non-octal decimal) that strict code
+/// forbids as an early SyntaxError (§12.9.4.1). The lexer accepts both forms
+/// unconditionally, so this is the ONLY place they are rejected — every
+/// consumer of a `KString` token's value must go through here (or through
+/// `module_specifier_value`) or the check is silently skipped.
+fn string_literal_value(p: P) -> Result(String, ParseError) {
+  string_token_value(p, p.ctx.strict)
+}
+
+/// The cooked value of the current ModuleSpecifier token. Module code is
+/// always strict, so the Annex B escape ban applies regardless of `ctx.strict`.
+fn module_specifier_value(p: P) -> Result(String, ParseError) {
+  string_token_value(p, True)
+}
+
+/// The value of an import/export specifier name (`{ x }`, `{ x as y }`,
+/// `export * as y`). A ModuleExportName may be a StringLiteral, whose *string
+/// value* — not its raw text — is the name, so escapes must be decoded and the
+/// strict-only Annex B forms rejected. Identifier/keyword forms are passed
+/// through untouched, exactly as before.
+fn specifier_name_value(p: P) -> Result(String, ParseError) {
+  case peek(p) {
+    KString -> module_specifier_value(p)
+    _ -> Ok(peek_value(p))
+  }
+}
+
+fn string_token_value(p: P, strict: Bool) -> Result(String, ParseError) {
+  let raw = peek_value(p)
+  use <- bool.guard(
+    strict && has_strict_forbidden_escape(raw),
+    Error(OctalEscapeStrictMode(pos_of(p))),
+  )
+  Ok(decode_string_escapes(raw))
 }
 
 /// Parse a property name and return (parser, key_expression, is_computed).
@@ -1795,18 +1828,8 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
       #(advance(p), lit, False)
     }
     KString -> {
-      use <- bool.guard(
-        p.ctx.strict && has_strict_forbidden_escape(p),
-        Error(OctalEscapeStrictMode(pos_of(p))),
-      )
-      Ok(#(
-        advance(p),
-        ast.StringExpression(
-          value: decode_string_escapes(peek_value(p)),
-          span: span_of(p),
-        ),
-        False,
-      ))
+      use value <- result.map(string_literal_value(p))
+      #(advance(p), ast.StringExpression(value:, span: span_of(p)), False)
     }
     LeftBracket -> {
       // ComputedPropertyName : [ AssignmentExpression[+In] ] - brackets reset
@@ -5844,17 +5867,11 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       #(P(..advance(p), last_expr_assignable: False), lit)
     }
     KString -> {
-      use <- bool.guard(
-        p.ctx.strict && has_strict_forbidden_escape(p),
-        Error(OctalEscapeStrictMode(pos_of(p))),
-      )
-      Ok(#(
+      use value <- result.map(string_literal_value(p))
+      #(
         P(..advance(p), last_expr_assignable: False),
-        ast.StringExpression(
-          value: decode_string_escapes(peek_value(p)),
-          span: span_of(p),
-        ),
-      ))
+        ast.StringExpression(value:, span: span_of(p)),
+      )
     }
     KTrue -> ok_lit(p, ast.BooleanLiteral(value: True, span: span_of(p)))
     KFalse -> ok_lit(p, ast.BooleanLiteral(value: False, span: span_of(p)))
@@ -6538,11 +6555,11 @@ fn expect_from_module_specifier(
   use p2 <- result.try(expect(p, From))
   case peek(p2) {
     KString -> {
-      let value = decode_string_escapes(peek_value(p2))
+      use value <- result.try(module_specifier_value(p2))
       let spec_end = pos_of(p2) + peek_raw_len(p2)
       use p3 <- result.try(skip_import_attributes(advance(p2)))
-      use p4 <- result.try(eat_semicolon(p3))
-      Ok(#(p4, ast.StringLit(value:), spec_end))
+      use p4 <- result.map(eat_semicolon(p3))
+      #(p4, ast.StringLit(value:), spec_end)
     }
     _ -> Error(ExpectedModuleSpecifier(pos_of(p2)))
   }
@@ -6640,10 +6657,10 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
   case peek(p2) {
     KString -> {
       // import "module"
-      let value = decode_string_escapes(peek_value(p2))
+      use value <- result.try(module_specifier_value(p2))
       let span_end = pos_of(p2) + peek_raw_len(p2)
-      use p3 <- result.try(eat_semicolon(advance(p2)))
-      Ok(#(
+      use p3 <- result.map(eat_semicolon(advance(p2)))
+      #(
         p3,
         ast.ImportDeclaration(
           specifiers: [],
@@ -6651,7 +6668,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           phase: ast.PhaseEvaluation,
           span: ast.Span(start: span_start, end: span_end),
         ),
-      ))
+      )
     }
     Star ->
       // import * as name from "module"
@@ -6797,7 +6814,7 @@ fn parse_import_specifier(
   case is_specifier_name(peek(p)) {
     False -> Error(ExpectedImportSpecifierName(pos_of(p)))
     True -> {
-      let imported_name = peek_value(p)
+      use imported_name <- result.try(specifier_name_value(p))
       let p2 = advance(p)
       case peek(p2) {
         As -> {
@@ -6971,7 +6988,7 @@ fn finish_export_all(
 ) -> Result(#(P, ast.ModuleItem), ParseError) {
   case peek(p) {
     KString -> {
-      let value = peek_value(p)
+      use value <- result.try(module_specifier_value(p))
       // Span ends at the end of the module-specifier string token.
       let span_end = pos_of(p) + peek_raw_len(p)
       use p2 <- result.map(eat_semicolon(advance(p)))
@@ -7053,7 +7070,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
         As -> {
           // export * as name from "module"
           let p4 = advance(p3)
-          let exported_value = peek_value(p4)
+          use exported_value <- result.try(specifier_name_value(p4))
           let p5 = case is_specifier_name(peek(p4)) {
             True -> advance(p4)
             False -> p4
@@ -7079,9 +7096,9 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           let p5 = advance(p4)
           case peek(p5) {
             KString -> {
-              let value = peek_value(p5)
-              use p6 <- result.try(eat_semicolon(advance(p5)))
-              Ok(#(
+              use value <- result.try(module_specifier_value(p5))
+              use p6 <- result.map(eat_semicolon(advance(p5)))
+              #(
                 p6,
                 ast.ExportNamedDeclaration(
                   declaration: None,
@@ -7089,7 +7106,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
                   source: Some(ast.StringLit(value:)),
                   span: ast.Span(start: pos_of(p), end: consumed_end(p, p6)),
                 ),
-              ))
+              )
             }
             _ -> Error(ExpectedModuleSpecifier(pos_of(p5)))
           }
@@ -7130,7 +7147,7 @@ fn parse_export_specifier(
   case is_specifier_name(peek(p)) {
     False -> Error(ExpectedExportSpecifierName(pos_of(p)))
     True -> {
-      let local = peek_value(p)
+      use local <- result.try(specifier_name_value(p))
       // The local-binding identifier is the current token (the name before
       // `as`, or the whole identifier when there is no alias).
       let local_span = span_of(p)
@@ -7142,7 +7159,10 @@ fn parse_export_specifier(
         As -> {
           let p3 = advance(advance(p))
           case is_specifier_name(peek(p3)) {
-            True -> Ok(#(p3, peek_value(p3)))
+            True -> {
+              use exported <- result.map(specifier_name_value(p3))
+              #(p3, exported)
+            }
             False ->
               Error(error_at_current(p3, ExpectedExportAlias(pos_of(p3))))
           }
@@ -7305,14 +7325,11 @@ fn check_retroactive_octals(
   p: P,
   seen_strings: List(String),
 ) -> Result(Nil, ParseError) {
-  case seen_strings {
-    [] -> Ok(Nil)
-    [val, ..rest] ->
-      case strict_forbidden_escape(val) {
-        Some(_) -> Error(OctalEscapeStrictMode(pos_of(p)))
-        None -> check_retroactive_octals(p, rest)
-      }
-  }
+  use <- bool.guard(
+    list.any(seen_strings, has_strict_forbidden_escape),
+    Error(OctalEscapeStrictMode(pos_of(p))),
+  )
+  Ok(Nil)
 }
 
 /// When "use strict" is found in a function body, retroactively validate

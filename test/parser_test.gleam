@@ -23,6 +23,14 @@ const outdated_fail_tests = [
   // runtime. test262 annexB/language/expressions/assignmenttargettype/*
   // requires parse success; this fixture predates the Annex B addition.
   "a8beb1480f385441.js",
+  // `"\\8"` / `"\\9"` — NonOctalDecimalEscapeSequence (ES2019, spec B.1.2):
+  // legal in sloppy-mode strings (`'\\8' === '8'`), a SyntaxError only in
+  // strict code. These fixtures predate that spec addition. See
+  // legacy_octal.has_strict_forbidden_escape.
+  "79f882da06f88c9f.js",
+  "0d5e450f1da8a92a.js",
+  "92b6af54adef3624.js",
+  "748656edbfb2d0bb.js",
 ]
 
 /// Determine parse mode from filename — files with ".module." parse as module.
