@@ -1167,9 +1167,14 @@ fn parse_variable_declarator(
       // duplicate-export check on the shared parameter name `r`. Restored
       // afterwards for any later declarators in the same declaration.
       let was_export_decl = p2.in_export_decl
+      let init_start = pos_of(p2)
       use #(p3, init_expr) <- result.try(
         parse_assignment_expression(advance(P(..p2, in_export_decl: False))),
       )
+      // The initializer is an ordinary expression (the declarator's TARGET is
+      // a binding pattern, which never sets these flags), so a cover grammar
+      // it left unconsumed is due now: `var x = {a = 1};` is a SyntaxError.
+      use Nil <- result.try(check_cover_grammar_errors(p3, init_start))
       Ok(#(
         P(..p3, in_export_decl: was_export_decl),
         ast.VariableDeclarator(id: pattern, init: Some(init_expr)),
@@ -2455,7 +2460,11 @@ fn parse_return_statement_body(
       case has_line_break_before(p2) {
         True -> Ok(#(p2, ast.ReturnStatement(argument: option.None)))
         False -> {
+          let start = pos_of(p2)
           use #(p3, expr) <- result.try(parse_expression(p2))
+          // A returned value is an ordinary expression, never a destructuring
+          // pattern: `return {a = 1};` is a SyntaxError.
+          use Nil <- result.try(check_cover_grammar_errors(p3, start))
           use p4 <- result.try(eat_semicolon(p3))
           Ok(#(p4, ast.ReturnStatement(argument: option.Some(expr))))
         }
@@ -2533,7 +2542,11 @@ fn parse_throw_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     has_line_break_before(p2),
     Error(ThrowLineBreak(pos_of(p2))),
   )
+  let start = pos_of(p2)
   use #(p3, expr) <- result.try(parse_expression(p2))
+  // A thrown value is an ordinary expression, never a destructuring pattern:
+  // `throw {a = 1};` is a SyntaxError.
+  use Nil <- result.try(check_cover_grammar_errors(p3, start))
   use p4 <- result.try(eat_semicolon(p3))
   Ok(#(p4, ast.ThrowStatement(argument: expr)))
 }
@@ -2988,6 +3001,15 @@ fn parse_function_body_block(
   let body_id = p2.sb.current
   let mark = scope.sb_children_raw(p2.sb, body_id)
   use #(p3, stmts) <- result.try(parse_statement_list(p2, False, []))
+  // Backstop for the deferred cover-grammar errors: `restore_outer_context`
+  // is about to hand the enclosing `Ctx` back wholesale, dropping whatever
+  // this body set. `enter_function_context` zeroed both flags on the way in,
+  // so anything still set here is genuinely owed by an expression INSIDE this
+  // body that no consumption point claimed (`function f(){ return {a=1}; }`) —
+  // never the enclosing expression's debt, so this cannot false-positive on
+  // `({a = 1}) => a` or `({a = 1} = b)`. Reported at the closing brace; the
+  // wired consumption points below give sharper positions where they apply.
+  use Nil <- result.try(check_cover_grammar_errors(p3, pos_of(p3)))
   use p4 <- result.try(expect(p3, RightBrace))
   // Reorder body children to hoist order (FunctionDeclarations first,
   // then everything else in source order). `sb.current` is the
@@ -4453,11 +4475,16 @@ fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
 /// default, duplicate `__proto__`) of the expression just parsed, now that
 /// it is known NOT to have been consumed as a destructuring pattern.
 ///
-/// Every consumption point of an ObjectLiteral-that-might-cover-a-pattern
-/// funnels here: expression statements, the `for(;;)` head, a concise arrow
-/// body, and formal-parameter defaults. `pos` is where the SyntaxError is
-/// reported for the shorthand-default case (the `__proto__` case carries the
-/// duplicate property's own recorded position).
+/// Wired into the ordinary-expression consumption points that would otherwise
+/// let the deferred error escape: expression statements, the `for(;;)` head, a
+/// concise arrow body, formal-parameter (and setter-parameter) defaults, `return`
+/// / `throw` arguments, and variable-declarator initializers. A function BODY is
+/// also a hard boundary — `restore_outer_context` discards these flags — so
+/// `parse_function_body_block` runs a backstop check at the closing brace to
+/// catch any consumption point not enumerated above.
+///
+/// `pos` is where the SyntaxError is reported for the shorthand-default case
+/// (the `__proto__` case carries the duplicate property's own recorded position).
 fn check_cover_grammar_errors(p: P, pos: Int) -> Result(Nil, ParseError) {
   case p.ctx.has_cover_initializer, p.ctx.dup_proto_pos {
     True, _ -> Error(ShorthandDefaultOutsideDestructuring(pos))

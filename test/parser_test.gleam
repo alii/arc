@@ -778,6 +778,31 @@ pub fn arrow_preserves_enclosing_cover_grammar_errors_test() {
     expect_parses("function f(x = {a: 1}) {}", parser.Script),
     expect_parses("var o = { set x(v = 1) {} };", parser.Script),
     expect_parses("(x = {a: 1}) => {};", parser.Script),
+    // A function body is a hard boundary for the deferred flags, so an
+    // expression inside it must raise its own error rather than have it
+    // silently dropped by restore_outer_context.
+    expect_parse_error("function f() { return {a = 1}; }", parser.Script),
+    expect_parse_error(
+      "function f() { return {__proto__: 1, __proto__: 2}; }",
+      parser.Script,
+    ),
+    expect_parse_error("function f() { throw {a = 1}; }", parser.Script),
+    expect_parse_error("function f() { var x = {a = 1}; }", parser.Script),
+    expect_parse_error("function f() { if ({a = 1}) {} }", parser.Script),
+    expect_parse_error("class C { m() { return {a = 1}; } }", parser.Script),
+    expect_parse_error("(() => { return {a = 1}; });", parser.Script),
+    expect_parse_error("class C { static { ({a = 1}); } }", parser.Script),
+    // Same statements at script top level, where there is no function body
+    // to backstop them.
+    expect_parse_error("throw {a = 1};", parser.Script),
+    expect_parse_error("var x = {a = 1};", parser.Script),
+    expect_parse_error("var x = {__proto__: 1, __proto__: 2};", parser.Script),
+    expect_parses("var x = {a: 1};", parser.Script),
+    expect_parses("var {a = 1} = b;", parser.Script),
+    expect_parses("function f() { return {a: 1}; }", parser.Script),
+    expect_parses("function f() { var {a = 1} = b; }", parser.Script),
+    expect_parses("function f() { return ({a = 1} = b); }", parser.Script),
+    expect_parses("function f() { return ({a = 1}) => a; }", parser.Script),
   ]
   |> report("cover-grammar boundary cases failed")
 }
