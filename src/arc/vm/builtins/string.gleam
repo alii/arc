@@ -2151,12 +2151,12 @@ fn from_code_point_loop(
       // TypeError for Symbol/BigInt (which propagates, per spec).
       use num, state <- coerce.try_to_number(state, arg)
       case num {
-        // Step 2b: must be integral
+        // Step 2b: must be integral. -0 IS integral (and encodes to U+0000),
+        // so this has to go through the ±0-safe predicate.
         Finite(f) -> {
-          let i = value.float_to_int(f)
-          case int.to_float(i) == f {
+          case value.integral_int(f) {
             // Step 2c: must be in [0, 0x10FFFF]
-            True if i >= 0 && i <= 0x10FFFF -> {
+            Some(i) if i >= 0 && i <= 0x10FFFF -> {
               // Step 2d: UTF16EncodeCodePoint
               let cp = case string.utf_codepoint(i) {
                 Ok(cp) -> cp

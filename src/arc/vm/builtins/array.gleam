@@ -257,21 +257,23 @@ fn construct(
     //    a. (non-numeric path — falls through to the _ branch below)
     // 6. Else (len is a Number),
     //    a. Let intLen be ! ToUint32(len).
-    //    b. If intLen ≠ len, throw a RangeError.
+    //    b. If SameValueZero(intLen, len) is false, throw a RangeError.
     //    (equivalent check: len must be an integer in [0, 2^32 - 1] —
     //     ToUint32 truncates non-integers, wraps negatives, wraps values
     //     >= 2^32, and maps NaN/±Infinity to 0, all of which end up
     //     !== the original value)
+    //    SameValueZero(0, -0) is true, so `Array(-0)` is a length-0 array,
+    //    not a RangeError — hence the ±0-safe integrality predicate.
     // 7. Perform ! Set(array, "length", intLen, true).
     // 8. Return array.
     [JsNumber(num)] ->
       case num {
         Finite(n) -> {
-          let len = value.float_to_int(n)
-          case len >= 0 && len <= 4_294_967_295 && int.to_float(len) == n {
-            True -> alloc_array(state, len, elements.new(), array_proto)
+          case value.integral_int(n) {
+            Some(len) if len >= 0 && len <= 4_294_967_295 ->
+              alloc_array(state, len, elements.new(), array_proto)
             // intLen ≠ len → RangeError (spec step 6b)
-            False -> state.range_error(state, "Invalid array length")
+            _ -> state.range_error(state, "Invalid array length")
           }
         }
         // ToUint32(NaN | ±Infinity) is 0, which ≠ len → RangeError.

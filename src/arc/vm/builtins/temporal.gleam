@@ -4416,10 +4416,10 @@ fn static_dispatch(
       use n, state <- state.try_op(coerce.js_to_number(state, arg_at(args, 0)))
       case n {
         Finite(f) -> {
-          let i = value.float_to_int(f)
-          case int.to_float(i) == f {
-            False -> state.range_error(state, "not an integral number")
-            True -> {
+          // -0 IS an integral Number, so this needs the ±0-safe predicate.
+          case value.integral_int(f) {
+            None -> state.range_error(state, "not an integral number")
+            Some(i) -> {
               let ns = i * ns_per_ms
               case int.absolute_value(ns) <= ns_max_instant {
                 False ->

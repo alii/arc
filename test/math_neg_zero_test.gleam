@@ -112,3 +112,50 @@ pub fn math_negative_zero_preserving_test() {
   assert eval("Object.is(Math.sign(-0), -0)") == JsBool(True)
   assert eval("Object.is(Math.cbrt(-0), -0)") == JsBool(True)
 }
+
+/// §22.1.2.2 String.fromCodePoint step 2b requires an integral Number, and -0
+/// IS integral: `String.fromCodePoint(-0)` is U+0000, not a RangeError. The
+/// open-coded `int.to_float(i) == f` read -0 as fractional and threw.
+pub fn string_from_code_point_negative_zero_test() {
+  assert eval("String.fromCodePoint(-0) === '\\u0000'") == JsBool(True)
+  assert eval("String.fromCodePoint(0) === '\\u0000'") == JsBool(True)
+  assert eval("String.fromCodePoint(65) === 'A'") == JsBool(True)
+  // Genuinely fractional / out-of-range code points still throw.
+  assert eval(range_error("String.fromCodePoint(0.5)")) == JsBool(True)
+  assert eval(range_error("String.fromCodePoint(-1)")) == JsBool(True)
+  assert eval(range_error("String.fromCodePoint(0x110000)")) == JsBool(True)
+}
+
+/// §23.1.1.1 step 5b compares intLen to len with SameValueZero, and
+/// SameValueZero(0, -0) is true — so `Array(-0)` is a length-0 array, not a
+/// RangeError. The open-coded `int.to_float(len) == n` read -0 as fractional
+/// and threw.
+pub fn array_constructor_negative_zero_length_test() {
+  assert eval("new Array(-0).length === 0") == JsBool(True)
+  assert eval("Array(-0).length === 0") == JsBool(True)
+  assert eval("new Array(0).length === 0") == JsBool(True)
+  assert eval("new Array(3).length === 3") == JsBool(True)
+  assert eval("new Array(4294967295).length === 4294967295") == JsBool(True)
+  // Non-integral, negative and >= 2^32 lengths still throw.
+  assert eval(range_error("new Array(1.5)")) == JsBool(True)
+  assert eval(range_error("new Array(-1)")) == JsBool(True)
+  assert eval(range_error("new Array(4294967296)")) == JsBool(True)
+}
+
+/// Temporal.Instant.fromEpochMilliseconds(-0) is the epoch, not a "not an
+/// integral number" RangeError.
+pub fn temporal_instant_negative_zero_epoch_test() {
+  assert eval(
+      "Temporal.Instant.fromEpochMilliseconds(-0).epochMilliseconds === 0",
+    )
+    == JsBool(True)
+  assert eval(range_error("Temporal.Instant.fromEpochMilliseconds(1.5)"))
+    == JsBool(True)
+}
+
+/// `expr` throws a RangeError — as a JS expression evaluating to a boolean.
+fn range_error(expr: String) -> String {
+  "(() => { try { "
+  <> expr
+  <> "; return false } catch (e) { return e instanceof RangeError } })()"
+}
