@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/symbol
 import arc/vm/heap
 import arc/vm/internal/elements
@@ -108,22 +109,6 @@ fn get_own_property_by_key(
     // them in [[PrivateElements]]).
     StringKey(pkey: Named("\u{0}" <> _), ..) -> None
     StringKey(pkey:, ..) -> object.get_own_property(heap, ref, pkey)
-  }
-}
-
-/// CPS wrapper for `object.get_value`. Use with `use` syntax:
-///   use val, state <- try_get(state, ref, key, receiver)
-/// Propagates thrown errors as `#(state, Error(thrown))`.
-fn try_get(
-  state: State(host),
-  ref: Ref,
-  key: String,
-  receiver: JsValue,
-  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case object.get_value(state, ref, key.canonical_key(key), receiver) {
-    Ok(#(val, state)) -> cont(val, state)
-    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -367,13 +352,16 @@ fn get_own_property_descriptor(
     [t] -> #(t, JsUndefined)
     [] -> #(JsUndefined, JsUndefined)
   }
-  // Step 2: Let key be ? ToPropertyKey(P). (Spec orders this after step 1
-  // ToObject, but since our ToObject is a case match with no side effects
-  // before the null/undefined throw, resolving the key first is observably
-  // equivalent and keeps the code flat.)
-  use key, state <- try_to_property_key(state, key_val)
+  // Step 1 STRICTLY BEFORE step 2: ToPropertyKey(P) can run user code (a
+  // `toString`/`valueOf`/`@@toPrimitive` on P), and ToObject(null) must throw
+  // its TypeError first — `Object.getOwnPropertyDescriptor(null, {toString(){
+  // throw new Error()}})` throws the TypeError, not the Error.
   case target {
+    // Step 1: ToObject throws TypeError for null/undefined.
+    JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     JsObject(ref) -> {
+      // Step 2: Let key be ? ToPropertyKey(P).
+      use key, state <- try_to_property_key(state, key_val)
       // Step 3: Let desc be ? obj.[[GetOwnProperty]](key) — trap-aware.
       use prop_opt, state <- state.try_op(own_property_via(state, ref, key))
       case prop_opt {
@@ -392,11 +380,10 @@ fn get_own_property_descriptor(
         None -> #(state, Ok(JsUndefined))
       }
     }
-    // Step 1: ToObject throws TypeError for null/undefined.
-    JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: index properties + "length" are own properties,
     // synthesized by the shared string-exotic own-property table.
-    JsString(s) ->
+    JsString(s) -> {
+      use key, state <- try_to_property_key(state, key_val)
       case string_exotic_own_property(s, key) {
         // Step 4: Return FromPropertyDescriptor(desc).
         Some(prop) -> {
@@ -406,8 +393,13 @@ fn get_own_property_descriptor(
         }
         None -> #(state, Ok(JsUndefined))
       }
-    // Number/boolean/symbol have no own string-keyed properties.
-    _ -> #(state, Ok(JsUndefined))
+    }
+    // Number/boolean/symbol wrappers have no own string-keyed properties, but
+    // ToObject succeeded so step 2's ToPropertyKey still runs (observable).
+    _ -> {
+      use _key, state <- try_to_property_key(state, key_val)
+      #(state, Ok(JsUndefined))
+    }
   }
 }
 
@@ -1517,33 +1509,45 @@ fn reject_range(
   Error(state.range_error_value(state, msg))
 }
 
-/// Helper for ToPropertyDescriptor: reads a field via [[Get]] (calls getters).
-/// Implements the "If HasProperty(Obj, name)" + "Let val = Get(Obj, name)" pattern
-/// from §6.2.6.5 steps 3-8.
+/// Helper for ToPropertyDescriptor: `if ? HasProperty(Obj, name) then
+/// ? Get(Obj, name)` — §6.2.6.5 steps 3-8, in that order.
 ///
 /// Returns #(Some(value), state) if the property exists, #(None, state) if absent.
 /// The distinction matters because absent fields are not set in the descriptor,
 /// while present-but-undefined fields ARE set (e.g. {value: undefined} is different
 /// from {} — the former sets [[Value]] to undefined, the latter leaves it absent).
+///
+/// Both halves are trap-aware and can throw: `Object.defineProperty(o, "k",
+/// new Proxy({}, {has(){...}, get(){...}}))` must fire `has` for each of the
+/// six descriptor fields, then `get` only for the ones `has` claimed.
 fn read_desc_field(
   state: State(host),
   desc: JsValue,
   key: String,
 ) -> Result(#(option.Option(JsValue), State(host)), #(JsValue, State(host))) {
-  use #(val, state) <- result.try(object.get_value_of(state, desc, Named(key)))
-  case val {
-    JsUndefined ->
-      // get_value_of returns undefined for both "absent" and "present with value
-      // undefined". We need HasProperty semantics (proto chain walk) to distinguish.
-      case desc {
-        JsObject(ref) ->
-          case has_property(state.heap, ref, Named(key)) {
-            True -> Ok(#(Some(JsUndefined), state))
-            False -> Ok(#(option.None, state))
-          }
-        _ -> Ok(#(option.None, state))
+  case desc {
+    JsObject(ref) -> {
+      // Step 3/5/7/…: HasProperty(Obj, name).
+      use #(present, state) <- result.try(object.has_property_stateful(
+        state,
+        ref,
+        object.PkString(Named(key)),
+      ))
+      case present {
+        False -> Ok(#(option.None, state))
+        // Step 4/6/8/…: Get(Obj, name) — a getter or `get` trap runs here.
+        True -> {
+          use #(val, state) <- result.map(object.get_value_of(
+            state,
+            desc,
+            Named(key),
+          ))
+          #(Some(val), state)
+        }
       }
-    _ -> Ok(#(Some(val), state))
+    }
+    // ToPropertyDescriptor step 1 already rejected non-objects.
+    _ -> Ok(#(option.None, state))
   }
 }
 
@@ -1721,23 +1725,6 @@ pub fn collect_own_keys(
   }
 }
 
-/// [[HasProperty]] — §7.3.11. Walks the prototype chain looking for a string key.
-/// Returns True if found as own property at any level, False if not found.
-fn has_property(heap: Heap(host), ref: Ref, key: key.PropertyKey) -> Bool {
-  case heap.read(heap, ref) {
-    Some(ObjectSlot(properties:, prototype:, ..)) ->
-      case dict.has_key(properties, key) {
-        True -> True
-        False ->
-          case prototype {
-            Some(proto_ref) -> has_property(heap, proto_ref, key)
-            None -> False
-          }
-      }
-    _ -> False
-  }
-}
-
 /// Build list of JsString index keys ["0", "1", ..., "len-1"] for string primitives.
 fn string_index_keys(i: Int, len: Int) -> List(JsValue) {
   case i >= len {
@@ -1868,43 +1855,36 @@ fn object_to_string(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let heap = state.heap
-  // Steps 1-14: early returns for undefined/null, else builtinTag.
-  let builtin = case this {
-    // Step 1: If the this value is undefined, return "[object Undefined]".
-    JsUndefined | value.JsUninitialized -> Ok(Error("Undefined"))
-    // Step 2: If the this value is null, return "[object Null]".
-    JsNull -> Ok(Error("Null"))
-    // Step 3 for primitives: ToObject wraps — the wrapper's internal slots
-    // ([[BooleanData]]/[[NumberData]]/[[StringData]]) drive steps 9-11.
-    // Symbol/BigInt wrappers have no builtinTag step → "Object" (step 14);
-    // Symbol stays "Symbol" while %Symbol.prototype% lacks @@toStringTag
-    // (deviation — it currently aliases %Object.prototype%).
-    JsBool(_) -> Ok(Ok("Boolean"))
-    JsNumber(_) -> Ok(Ok("Number"))
-    JsString(_) -> Ok(Ok("String"))
-    JsSymbol(_) -> Ok(Ok("Symbol"))
-    value.JsBigInt(_) -> Ok(Ok("Object"))
-    // Step 4: Let isArray be ? IsArray(O) — pierces proxies to their
-    // target (§7.2.2 step 3) and throws TypeError when revoked.
-    JsObject(ref) ->
-      case object.is_array_ref(heap, ref) {
-        Error(Nil) -> Error(Nil)
+  case this {
+    // Steps 1-2: undefined/null skip ToObject and the @@toStringTag lookup.
+    JsUndefined | value.JsUninitialized -> #(
+      state,
+      Ok(JsString("[object Undefined]")),
+    )
+    JsNull -> #(state, Ok(JsString("[object Null]")))
+    _ -> {
+      // Step 4: Let isArray be ? IsArray(O) — pierces proxies to their
+      // target (§7.2.2 step 3) and throws TypeError when revoked.
+      use is_arr, state <- state.try_op(object.try_is_array(state, this))
+      // Steps 5-14: builtinTag.
+      let fallback = case is_arr, this {
         // Step 5: If isArray is true, builtinTag is "Array".
-        Ok(True) -> Ok(Ok("Array"))
+        True, _ -> "Array"
+        // Step 3 for primitives: ToObject wraps — the wrapper's internal
+        // slots ([[BooleanData]]/[[NumberData]]/[[StringData]]) drive
+        // steps 9-11. Symbol/BigInt wrappers have no builtinTag step →
+        // "Object" (step 14); Symbol stays "Symbol" while
+        // %Symbol.prototype% lacks @@toStringTag (deviation — it currently
+        // aliases %Object.prototype%).
+        False, JsBool(_) -> "Boolean"
+        False, JsNumber(_) -> "Number"
+        False, JsString(_) -> "String"
+        False, JsSymbol(_) -> "Symbol"
         // Steps 6-14: classify by internal slots / [[Call]].
-        Ok(False) -> Ok(Ok(object_tag(heap, ref)))
+        False, JsObject(ref) -> object_tag(state.heap, ref)
+        // JsBigInt and any other primitive → step 14.
+        False, _ -> "Object"
       }
-  }
-  case builtin {
-    Error(Nil) ->
-      state.type_error(
-        state,
-        "Cannot perform 'IsArray' on a proxy that has been revoked",
-      )
-    // Steps 1-2: undefined/null skip the @@toStringTag lookup entirely.
-    Ok(Error(t)) -> #(state, Ok(JsString("[object " <> t <> "]")))
-    Ok(Ok(fallback)) -> {
       // Step 15: Let tag be ? Get(O, @@toStringTag) — a genuine [[Get]]:
       // walks the prototype chain, invokes getters, fires proxy traps, and
       // propagates abrupt completions.
@@ -3013,42 +2993,18 @@ fn set_prototype_of(
     _, Error(_) ->
       // §20.1.2.21 step 2: proto is not Object or null.
       state.type_error(state, "Object prototype may only be an Object or null")
-    JsObject(ref), Ok(new_proto) ->
-      case object.as_proxy(state.heap, ref) {
-        // §10.5.2: proxies trap [[SetPrototypeOf]].
-        Some(#(p_target, p_handler)) -> {
-          use #(state, ok) <- try_op_pair(proxy_set_proto(
-            state,
-            p_target,
-            p_handler,
-            new_proto,
-          ))
-          case ok {
-            True -> #(state, Ok(target))
-            False ->
-              state.type_error(
-                state,
-                "'setPrototypeOf' on proxy: trap returned falsish",
-              )
-          }
-        }
-        None ->
-          // §20.1.2.21 step 4-6: O.[[SetPrototypeOf]](proto); throw if false.
-          case ordinary_set_prototype_of(state, ref, new_proto) {
-            Ok(state) -> #(state, Ok(target))
-            Error(NotExtensible) ->
-              state.type_error(
-                state,
-                "Cannot set prototype of a non-extensible object",
-              )
-            Error(Cyclic) -> state.type_error(state, "Cyclic __proto__ value")
-            Error(Immutable) ->
-              state.type_error(
-                state,
-                "Immutable prototype object cannot have its prototype set",
-              )
-          }
+    JsObject(ref), Ok(new_proto) -> {
+      // §20.1.2.21 steps 4-6: O.[[SetPrototypeOf]](proto); throw if false.
+      use #(state, status) <- try_op_pair(set_prototype_of_stateful(
+        state,
+        ref,
+        new_proto,
+      ))
+      case status {
+        Ok(Nil) -> #(state, Ok(target))
+        Error(fail) -> state.type_error(state, set_proto_fail_message(fail))
       }
+    }
     // §20.1.2.21 step 3: If O is not an Object, return O.
     _, Ok(_) -> #(state, Ok(target))
   }
@@ -3231,17 +3187,64 @@ fn lookup_accessor_chain(
   }
 }
 
+/// Why an object's [[SetPrototypeOf]] returned **false**. Callers that must
+/// throw (Object.setPrototypeOf) turn each variant into its own TypeError;
+/// callers that report a flag (Reflect.setPrototypeOf) collapse them all.
 pub type SetProtoFail {
   NotExtensible
   Cyclic
   Immutable
+  /// A proxy's `setPrototypeOf` trap returned falsish (§10.5.2 step 8).
+  TrapRefused
+}
+
+/// Trap-aware **[[SetPrototypeOf]]** ( V ) — §10.5.2 for proxies, §10.1.2
+/// OrdinarySetPrototypeOf otherwise. THE single dispatch: `Object
+/// .setPrototypeOf`, `Reflect.setPrototypeOf` and `__proto__`'s setter all
+/// route through it, so a proxy can never be handed to the ordinary
+/// algorithm (which would rewrite the *proxy's* internal prototype slot and
+/// never fire the trap).
+pub fn set_prototype_of_stateful(
+  state: State(host),
+  ref: Ref,
+  new_proto: Option(Ref),
+) -> Result(#(State(host), Result(Nil, SetProtoFail)), #(JsValue, State(host))) {
+  case object.as_proxy(state.heap, ref) {
+    Some(#(target, handler)) -> {
+      use #(state, ok) <- result.map(proxy_set_proto(
+        state,
+        target,
+        handler,
+        new_proto,
+      ))
+      case ok {
+        True -> #(state, Ok(Nil))
+        False -> #(state, Error(TrapRefused))
+      }
+    }
+    None ->
+      case ordinary_set_prototype_of(state, ref, new_proto) {
+        Ok(state) -> Ok(#(state, Ok(Nil)))
+        Error(fail) -> Ok(#(state, Error(fail)))
+      }
+  }
+}
+
+/// The TypeError message Object.setPrototypeOf raises for each refusal.
+pub fn set_proto_fail_message(fail: SetProtoFail) -> String {
+  case fail {
+    NotExtensible -> "Cannot set prototype of a non-extensible object"
+    Cyclic -> "Cyclic __proto__ value"
+    Immutable -> "Immutable prototype object cannot have its prototype set"
+    TrapRefused -> "'setPrototypeOf' on proxy: trap returned falsish"
+  }
 }
 
 /// OrdinarySetPrototypeOf — ES2024 §10.1.2.1
 /// (with §10.4.7 SetImmutablePrototype check for Object.prototype)
 ///
-/// Shared core for Object.setPrototypeOf (§20.1.2.21, throws on fail)
-/// and Reflect.setPrototypeOf (§28.1.13, returns Bool on fail).
+/// Ordinary objects only — proxies must go through `set_prototype_of_stateful`.
+/// `TrapRefused` is unreachable here.
 pub fn ordinary_set_prototype_of(
   state: State(host),
   ref: Ref,
@@ -3666,78 +3669,44 @@ fn is_sealed(
   test_integrity_level(args, state, Sealed)
 }
 
-/// Object.fromEntries ( iterable ) — ES2024 §20.1.2.8
+/// Object.fromEntries ( iterable ) — ES2024 §20.1.2.7
 ///
 ///   1. Perform ? RequireObjectCoercible(iterable).
 ///   2. Let obj be OrdinaryObjectCreate(%Object.prototype%).
-///   3. Let adder be CreateDataPropertyOnObject (i.e. for each entry [k, v],
-///      set obj[k] = v using CreateDataPropertyOrThrow).
+///   3. Let closure be a new Abstract Closure that performs
+///      ! CreateDataPropertyOrThrow(obj, ToPropertyKey(key), value).
 ///   4. Return ? AddEntriesFromIterable(obj, iterable, adder).
 ///
-/// AddEntriesFromIterable (§7.4.8):
-///   - Iterates using GetIterator + IteratorStep.
-///   - For each next item:
-///     a. If item is not an Object, throw TypeError (and close iterator).
-///     b. k = Get(item, "0"), v = Get(item, "1").
-///     c. CreateDataPropertyOrThrow(obj, ToPropertyKey(k), v).
+/// The §7.4.9 drain (GetIterator, per-entry object check, Get "0"/"1",
+/// IteratorClose on any abrupt completion) is `iter_protocol`'s ONE loop, the
+/// same one the Map/WeakMap constructors use — so `Object.fromEntries(map)`,
+/// `Object.fromEntries(gen())` and a patched `@@iterator` all work. Only the
+/// per-entry sink differs: this one is a Gleam-level
+/// CreateDataPropertyOrThrow, theirs is a JS [[Call]] of `Map.prototype.set`.
 ///
-/// Property insertion order matches the iteration order of the iterable.
-/// Symbol keys (when k is a JsSymbol) are stored in symbol_properties.
-///
-/// Simplified: handles Arrays of [key, value] pairs. General iterables
-/// (objects with Symbol.iterator) are not yet supported.
+/// Property insertion order matches the iteration order of the iterable
+/// (a duplicate key overwrites the value but KEEPS its original insertion
+/// position, §10.1.6.3). Symbol keys are stored in symbol_properties.
 fn from_entries(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let target = first_arg_or_undefined(args)
-  case target {
+  let iterable = first_arg_or_undefined(args)
+  case iterable {
     // Step 1: RequireObjectCoercible — null/undefined throw TypeError.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    JsObject(ref) -> {
-      // Read the source array/iterable
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
-          // Iterate exactly `length` slots in index order. Holes read as
-          // JsUndefined (elements.to_list_padded never leaks the
-          // JsUninitialized hole sentinel) and hit the "not an entry
-          // object" TypeError below, matching array iteration semantics.
-          let entry_values = elements.to_list_padded(elements, length)
-          // Step 2: obj = OrdinaryObjectCreate(%Object.prototype%), then
-          // each entry is added via CreateDataPropertyOrThrow in iteration
-          // order (a duplicate key overwrites the value but KEEPS its
-          // original insertion position, §10.1.6.3).
-          let #(heap, obj_ref) =
-            common.alloc_pojo(state.heap, state.builtins.object.prototype, [])
-          from_entries_loop(entry_values, State(..state, heap:), obj_ref)
-        }
-        _ -> state.type_error(state, "Object.fromEntries requires an iterable")
-      }
+    _ -> {
+      // Step 2: obj = OrdinaryObjectCreate(%Object.prototype%).
+      let #(heap, obj_ref) =
+        common.alloc_pojo(state.heap, state.builtins.object.prototype, [])
+      use state, key_val, val <- iter_protocol.add_entries_from_iterable(
+        State(..state, heap:),
+        JsObject(obj_ref),
+        iterable,
+      )
+      // Step 3: ! CreateDataPropertyOrThrow(obj, ToPropertyKey(key), value).
+      create_data_property(state, obj_ref, key_val, val)
     }
-    _ -> state.type_error(state, "Object.fromEntries requires an iterable")
-  }
-}
-
-/// AddEntriesFromIterable's per-entry body for Object.fromEntries: each entry
-/// object's "0"/"1" are read with [[Get]] (invoking getters), then written
-/// onto the result via ? CreateDataPropertyOrThrow(obj, ToPropertyKey(k), v)
-/// in iteration order.
-fn from_entries_loop(
-  entries: List(JsValue),
-  state: State(host),
-  obj_ref: Ref,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case entries {
-    [] -> #(state, Ok(JsObject(obj_ref)))
-    [JsObject(entry_ref) as entry, ..rest] -> {
-      // Step b: k = Get(item, "0"), v = Get(item, "1")
-      use key_val, state <- try_get(state, entry_ref, "0", entry)
-      use val, state <- try_get(state, entry_ref, "1", entry)
-      // Step c: CreateDataPropertyOrThrow(obj, ToPropertyKey(k), v).
-      use state <- create_data_property_or_throw(state, obj_ref, key_val, val)
-      from_entries_loop(rest, state, obj_ref)
-    }
-    [_, ..] -> state.type_error(state, "Iterator value is not an entry object")
   }
 }
 
@@ -4014,7 +3983,14 @@ fn object_to_locale_string(
   }
 }
 
-/// ES2024 §22.1.2.4 Object.groupBy ( items, callbackfn )
+/// ES2024 §22.1.2.4 Object.groupBy ( items, callbackfn ) — GroupBy(items,
+/// callback, property) with a null-prototype result object.
+///
+/// `items` is drained through the real iterator protocol (§7.4.3 GetIterator +
+/// §7.4.8 IteratorStepValue), so a Set / Map / generator / `arguments` / any
+/// userland `{ [Symbol.iterator]() {…} }` groups correctly, and a patched
+/// `Array.prototype[Symbol.iterator]` is honoured. An abrupt completion from
+/// the callback or from ToPropertyKey closes the iterator (IfAbruptCloseIterator).
 fn group_by(
   args: List(JsValue),
   state: State(host),
@@ -4027,19 +4003,13 @@ fn group_by(
   case helpers.is_callable(state.heap, callback) {
     False -> state.type_error(state, "Object.groupBy callback is not callable")
     True -> {
-      // Get elements from iterable
-      case items {
-        JsObject(ref) ->
-          case heap.read_array(state.heap, ref) {
-            Some(#(length, elements)) -> {
-              let elems = extract_elements(elements, 0, length, [])
-              group_by_loop(state, elems, callback, 0, dict.new(), [])
-            }
-            None ->
-              state.type_error(state, "Object.groupBy: items is not iterable")
-          }
-        _ -> state.type_error(state, "Object.groupBy: items is not iterable")
-      }
+      // §7.3.35 step 4: iteratorRecord = ? GetIterator(items, sync).
+      use iter_rec, state <- state.try_op(iter_protocol.get_iterator_sync(
+        state,
+        items,
+      ))
+      let #(iter, next) = iter_rec
+      group_by_loop(state, iter, next, callback, 0, dict.new(), [])
     }
   }
 }
@@ -4054,17 +4024,22 @@ fn group_by(
 /// per-item lookup O(log n) instead of an O(groups) assoc-list scan.
 fn group_by_loop(
   state: State(host),
-  items: List(JsValue),
+  iter: JsValue,
+  next: JsValue,
   callback: JsValue,
   index: Int,
   groups: dict.Dict(JsValue, List(JsValue)),
   order: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case items {
+  // Step 6.c: value = ? IteratorStepValue(iteratorRecord). An abrupt
+  // completion here propagates WITHOUT close (§7.4.8 already marked it done).
+  let #(state, step) = iter_protocol.iterator_step_value(state, iter, next)
+  case step {
+    Error(thrown) -> #(state, Error(thrown))
     // Object.groupBy steps 3-4: obj = OrdinaryObjectCreate(null), then for
     // each group ! CreateDataPropertyOrThrow(obj, g.[[Key]],
     // CreateArrayFromList(g.[[Elements]])).
-    [] -> {
+    Ok(None) -> {
       let #(heap, obj_ref) =
         heap.alloc(
           state.heap,
@@ -4084,21 +4059,45 @@ fn group_by_loop(
         groups,
       )
     }
-    [item, ..rest] -> {
-      use key_val, state <- state.try_call(state, callback, JsUndefined, [
-        item,
-        value.from_int(index),
-      ])
-      // GroupBy step 6.d (property coercion): key = ? ToPropertyKey(key) —
-      // a symbol key groups under the symbol, never a stringification.
-      use dkey, state <- try_to_property_key(state, key_val)
-      let key = define_key_value(dkey)
-      let #(groups, order) = case dict.get(groups, key) {
-        Ok(members) -> #(dict.insert(groups, key, [item, ..members]), order)
-        Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
+    Ok(Some(item)) ->
+      // Steps 6.e-6.f: key = Call(callback, undefined, «value, k»);
+      // IfAbruptCloseIterator(key, iteratorRecord).
+      case
+        state.call(state, callback, JsUndefined, [
+          item,
+          value.from_int(index),
+        ])
+      {
+        Error(#(thrown, state)) ->
+          iter_protocol.close_throw(state, iter, thrown)
+        Ok(#(key_val, state)) ->
+          // Step 6.g (property coercion): key = ? ToPropertyKey(key) — a symbol
+          // key groups under the symbol, never a stringification. Abrupt →
+          // IfAbruptCloseIterator.
+          case to_define_key(state, key_val) {
+            Error(#(thrown, state)) ->
+              iter_protocol.close_throw(state, iter, thrown)
+            Ok(#(dkey, state)) -> {
+              let key = define_key_value(dkey)
+              let #(groups, order) = case dict.get(groups, key) {
+                Ok(members) -> #(
+                  dict.insert(groups, key, [item, ..members]),
+                  order,
+                )
+                Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
+              }
+              group_by_loop(
+                state,
+                iter,
+                next,
+                callback,
+                index + 1,
+                groups,
+                order,
+              )
+            }
+          }
       }
-      group_by_loop(state, rest, callback, index + 1, groups, order)
-    }
   }
 }
 
@@ -4129,22 +4128,6 @@ fn group_by_finish(
         JsObject(arr_ref),
       )
       group_by_finish(state, obj_ref, rest, groups)
-    }
-  }
-}
-
-/// Helper: extract array elements as a list.
-fn extract_elements(
-  elements: JsElements,
-  idx: Int,
-  length: Int,
-  acc: List(JsValue),
-) -> List(JsValue) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False -> {
-      let val = elements.get(elements, idx)
-      extract_elements(elements, idx + 1, length, [val, ..acc])
     }
   }
 }
@@ -4740,6 +4723,21 @@ pub fn create_data_property_or_throw(
   val: JsValue,
   cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  case create_data_property(state, ref, key_val, val) {
+    Ok(state) -> cont(state)
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// §7.3.7 CreateDataPropertyOrThrow as a plain fallible op — the shape the
+/// `iter_protocol` entry sinks want. `create_data_property_or_throw` is the
+/// CPS wrapper over it.
+pub fn create_data_property(
+  state: State(host),
+  ref: Ref,
+  key_val: JsValue,
+  val: JsValue,
+) -> Result(State(host), #(JsValue, State(host))) {
   // §7.3.5 builds the Property Descriptor RECORD directly — it never runs
   // ToPropertyDescriptor over a descriptor object. Materializing a real JS
   // POJO here and re-parsing it would (a) make the internal descriptor
@@ -4773,15 +4771,15 @@ pub fn create_data_property_or_throw(
     }
   }
   case defined {
-    Ok(#(state, True)) -> cont(state)
+    Ok(#(state, True)) -> Ok(state)
     // §7.3.7 step 3: success is false → throw a TypeError exception.
     Ok(#(state, False)) ->
-      state.type_error(
+      Error(state.type_error_value(
         state,
         "Cannot create property "
           <> define_key_label(key_value_to_define_key(key_val)),
-      )
-    Error(#(thrown, state)) -> #(state, Error(thrown))
+      ))
+    Error(#(thrown, state)) -> Error(#(thrown, state))
   }
 }
 
@@ -5077,9 +5075,11 @@ pub fn enumerable_string_keys_stateful(
   })
 }
 
-/// §10.5.2 Proxy [[SetPrototypeOf]] — trap, falling through to the ordinary
-/// algorithm on the (possibly nested-proxy) target when no trap is defined.
-pub fn proxy_set_proto(
+/// §10.5.2 Proxy [[SetPrototypeOf]] — trap, falling through to
+/// target.[[SetPrototypeOf]] (which may itself be a proxy) when no trap is
+/// defined. Callers use `set_prototype_of_stateful`, which owns the
+/// proxy-vs-ordinary dispatch this recurses back into.
+fn proxy_set_proto(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
@@ -5097,16 +5097,15 @@ pub fn proxy_set_proto(
   ))
   case fallthrough {
     None -> Ok(#(state, ok))
-    Some(t) ->
-      case object.as_proxy(state.heap, t) {
-        Some(#(t2, h2)) -> proxy_set_proto(state, t2, h2, new_proto)
-        None ->
-          case ordinary_set_prototype_of(state, t, new_proto) {
-            Ok(state) -> Ok(#(state, True))
-            Error(NotExtensible) | Error(Cyclic) | Error(Immutable) ->
-              Ok(#(state, False))
-          }
-      }
+    // Step 6: no trap → target.[[SetPrototypeOf]](V).
+    Some(t) -> {
+      use #(state, status) <- result.map(set_prototype_of_stateful(
+        state,
+        t,
+        new_proto,
+      ))
+      #(state, result.is_ok(status))
+    }
   }
 }
 
