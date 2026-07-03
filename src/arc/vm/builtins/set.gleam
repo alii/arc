@@ -295,12 +295,19 @@ fn for_each_loop(
   set_this: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let store = read_set_store(state.heap, ref)
-  case ordered_entries.entry_from_seq(store, cursor) {
+  case ordered_entries.next_from(store, cursor) {
     None -> #(state, Ok(JsUndefined))
-    Some(#(seq, _key, val)) ->
+    Some(#(next_cursor, _key, val)) ->
       case state.call(state, callback, this_arg, [val, val, set_this]) {
         Ok(#(_result, new_state)) ->
-          for_each_loop(new_state, ref, seq + 1, callback, this_arg, set_this)
+          for_each_loop(
+            new_state,
+            ref,
+            next_cursor,
+            callback,
+            this_arg,
+            set_this,
+          )
         Error(#(thrown, new_state)) -> #(new_state, Error(thrown))
       }
   }
@@ -371,15 +378,15 @@ fn intersection_this_loop(
   result: OrderedEntries(MapKey, JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let store = read_set_store(state.heap, ref)
-  case ordered_entries.entry_from_seq(store, cursor) {
+  case ordered_entries.next_from(store, cursor) {
     None -> alloc_new_set(state, result)
-    Some(#(seq, _key, e)) -> {
+    Some(#(next_cursor, _key, e)) -> {
       use in_other, state <- set_record_has(state, rec, e)
       let result = case in_other {
         True -> set_data_append(result, e)
         False -> result
       }
-      intersection_this_loop(state, ref, rec, seq + 1, result)
+      intersection_this_loop(state, ref, rec, next_cursor, result)
     }
   }
 }
@@ -544,13 +551,13 @@ fn subset_step_loop(
   cursor: Int,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let store = read_set_store(state.heap, ref)
-  case ordered_entries.entry_from_seq(store, cursor) {
+  case ordered_entries.next_from(store, cursor) {
     None -> #(state, Ok(JsBool(True)))
-    Some(#(seq, _key, e)) -> {
+    Some(#(next_cursor, _key, e)) -> {
       use in_other, state <- set_record_has(state, rec, e)
       case in_other {
         False -> #(state, Ok(JsBool(False)))
-        True -> subset_step_loop(state, ref, rec, seq + 1)
+        True -> subset_step_loop(state, ref, rec, next_cursor)
       }
     }
   }
@@ -627,13 +634,13 @@ fn disjoint_this_loop(
   cursor: Int,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let store = read_set_store(state.heap, ref)
-  case ordered_entries.entry_from_seq(store, cursor) {
+  case ordered_entries.next_from(store, cursor) {
     None -> #(state, Ok(JsBool(True)))
-    Some(#(seq, _key, e)) -> {
+    Some(#(next_cursor, _key, e)) -> {
       use in_other, state <- set_record_has(state, rec, e)
       case in_other {
         True -> #(state, Ok(JsBool(False)))
-        False -> disjoint_this_loop(state, ref, rec, seq + 1)
+        False -> disjoint_this_loop(state, ref, rec, next_cursor)
       }
     }
   }

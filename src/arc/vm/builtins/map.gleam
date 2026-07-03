@@ -381,12 +381,12 @@ fn for_each_loop(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let next = case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: MapObject(store:), ..)) ->
-      ordered_entries.entry_from_seq(store, cursor)
+      ordered_entries.next_from(store, cursor)
     _ -> None
   }
   case next {
     None -> #(state, Ok(JsUndefined))
-    Some(#(seq, map_key, val)) -> {
+    Some(#(next_cursor, map_key, val)) -> {
       // Reconstruct original JS key. map_key_to_js is lossless (-0 already
       // normalized to +0 per spec §24.1.3.9 step 4).
       let original_key = value.map_key_to_js(map_key)
@@ -396,7 +396,7 @@ fn for_each_loop(
         original_key,
         map_this,
       ])
-      for_each_loop(state, ref, seq + 1, cb, this_arg, map_this)
+      for_each_loop(state, ref, next_cursor, cb, this_arg, map_this)
     }
   }
 }

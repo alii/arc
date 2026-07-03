@@ -969,7 +969,7 @@ pub fn call_native(
         values_ref,
         already_called_ref,
         resolve,
-        #("fulfilled", "value"),
+        value.Fulfilled,
       )
     // Promise.allSettled per-element reject handler
     value.Call(value.PromiseAllSettledRejectElement(
@@ -988,7 +988,7 @@ pub fn call_native(
         values_ref,
         already_called_ref,
         resolve,
-        #("rejected", "reason"),
+        value.Rejected,
       )
     // Promise.any per-element reject handler
     value.Call(value.PromiseAnyRejectElement(
@@ -2337,7 +2337,8 @@ fn alloc_entry_pair(
 
 /// ES §24.2.5.2.1 %SetIteratorPrototype%.next() — LIVE iteration by seq
 /// cursor: yield the source Set's first live record at seq >= cursor and
-/// resume at seq + 1 (amortized O(1) per step). Entries added during
+/// resume at the cursor `next_from` hands back (amortized O(1) per step).
+/// Entries added during
 /// iteration — including delete + re-add, which assigns a fresh seq — are
 /// visited; entries deleted before being reached leave a gap that's skipped.
 fn call_set_iterator_next(
@@ -2359,7 +2360,7 @@ fn call_set_iterator_next(
           })
           let next = case heap.read(state.heap, source) {
             Some(ObjectSlot(kind: value.SetObject(store:), ..)) ->
-              ordered_entries.entry_from_seq(store, cursor)
+              ordered_entries.next_from(store, cursor)
             _ -> None
           }
           case next {
@@ -2380,7 +2381,7 @@ fn call_set_iterator_next(
                 )
               push_iter_result(state, rest_stack, h, JsUndefined, True)
             }
-            Some(#(seq, _k, v)) -> {
+            Some(#(next_cursor, _k, v)) -> {
               // For "entries" yield [v, v]; for "values"/"keys" yield v.
               let #(h, yielded) = case kind {
                 value.SetIterValues -> #(state.heap, v)
@@ -2394,7 +2395,7 @@ fn call_set_iterator_next(
                     ..slot,
                     kind: value.SetIteratorObject(
                       source:,
-                      cursor: seq + 1,
+                      cursor: next_cursor,
                       done: False,
                       kind:,
                     ),
@@ -2431,7 +2432,7 @@ fn call_map_iterator_next(
           })
           let next = case heap.read(state.heap, source) {
             Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
-              ordered_entries.entry_from_seq(store, cursor)
+              ordered_entries.next_from(store, cursor)
             _ -> None
           }
           case next {
@@ -2452,7 +2453,7 @@ fn call_map_iterator_next(
                 )
               push_iter_result(state, rest_stack, h, JsUndefined, True)
             }
-            Some(#(seq, k, v)) -> {
+            Some(#(next_cursor, k, v)) -> {
               let #(h, yielded) = case kind {
                 value.MapIterKeys -> #(state.heap, value.map_key_to_js(k))
                 value.MapIterValues -> #(state.heap, v)
@@ -2467,7 +2468,7 @@ fn call_map_iterator_next(
                     ..slot,
                     kind: value.MapIteratorObject(
                       source:,
-                      cursor: seq + 1,
+                      cursor: next_cursor,
                       done: False,
                       kind:,
                     ),

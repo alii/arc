@@ -4,23 +4,26 @@
 //// A `Dict` alone gives O(log n) lookup but loses insertion order, so order
 //// is modelled with monotonically increasing sequence numbers:
 ////
-////   - `entries`  live key → value (the actual data)
-////   - `seqs`     live key → its insertion sequence number
-////   - `order`    insertion sequence number → live key (inverse of `seqs`)
+////   - `entries`  live key → #(insertion sequence number, value)
+////   - `order`    insertion sequence number → live key (inverse of `entries`)
 ////   - `next_seq` the next sequence number to assign; never reset
 ////
-//// `delete` removes the record from all three dicts; the gap it leaves in the
-//// seq space is the spec's "emptied" record, skipped by iterator cursors. A
+//// A key's seq lives *inside* its entry, so a live key and its seq cannot
+//// disagree — the only remaining relationship is that `order` is the inverse
+//// of `entries`, maintained by `insert`/`delete`, which read that seq from
+//// the single place it is stored.
+////
+//// `delete` removes the record from both dicts; the gap it leaves in the seq
+//// space is the spec's "emptied" record, skipped by iterator cursors. A
 //// deleted-then-re-inserted key gets a fresh seq past every live iterator's
 //// cursor, so it is revisited (§24.1.5 / §24.2.5). `clear` empties the dicts
 //// but keeps `next_seq`, so entries added after a clear still land past
 //// in-flight cursors. An overwrite of a live key keeps its original seq.
 ////
-//// The type is opaque so the invariant — `order` and `seqs` are exact
-//// inverses, both cover exactly the keys of `entries`, and `next_seq` is
-//// strictly greater than every assigned seq — cannot be broken from outside.
-//// Every state a caller can reach through this API satisfies it; a ghost or
-//// missing iteration entry (a desynced `order`/`seqs`) is unrepresentable.
+//// The type is opaque so the invariant — `order` maps exactly the seqs held
+//// by `entries` back to their keys, and `next_seq` is strictly greater than
+//// every assigned seq — cannot be broken from outside. Every state a caller
+//// can reach through this API satisfies it.
 
 import gleam/dict.{type Dict}
 import gleam/int
@@ -30,8 +33,7 @@ import gleam/result
 
 pub opaque type OrderedEntries(k, v) {
   OrderedEntries(
-    entries: Dict(k, v),
-    seqs: Dict(k, Int),
+    entries: Dict(k, #(Int, v)),
     order: Dict(Int, k),
     next_seq: Int,
   )
@@ -39,12 +41,7 @@ pub opaque type OrderedEntries(k, v) {
 
 /// An empty store. `next_seq` starts at 0.
 pub fn new() -> OrderedEntries(k, v) {
-  OrderedEntries(
-    entries: dict.new(),
-    seqs: dict.new(),
-    order: dict.new(),
-    next_seq: 0,
-  )
+  OrderedEntries(entries: dict.new(), order: dict.new(), next_seq: 0)
 }
 
 /// Insert or overwrite `key`. An existing key keeps its insertion position
@@ -56,21 +53,21 @@ pub fn insert(
   key: k,
   val: v,
 ) -> OrderedEntries(k, v) {
-  let OrderedEntries(entries:, seqs:, order:, next_seq:) = store
-  let #(seqs, order, next_seq) = case dict.has_key(entries, key) {
-    True -> #(seqs, order, next_seq)
-    False -> #(
-      dict.insert(seqs, key, next_seq),
-      dict.insert(order, next_seq, key),
-      next_seq + 1,
-    )
+  let OrderedEntries(entries:, order:, next_seq:) = store
+  case dict.get(entries, key) {
+    Ok(#(seq, _)) ->
+      OrderedEntries(
+        entries: dict.insert(entries, key, #(seq, val)),
+        order:,
+        next_seq:,
+      )
+    Error(Nil) ->
+      OrderedEntries(
+        entries: dict.insert(entries, key, #(next_seq, val)),
+        order: dict.insert(order, next_seq, key),
+        next_seq: next_seq + 1,
+      )
   }
-  OrderedEntries(
-    entries: dict.insert(entries, key, val),
-    seqs:,
-    order:,
-    next_seq:,
-  )
 }
 
 /// Delete `key`, returning the updated store and whether the key was present.
@@ -80,13 +77,12 @@ pub fn delete(
   store: OrderedEntries(k, v),
   key: k,
 ) -> #(OrderedEntries(k, v), Bool) {
-  let OrderedEntries(entries:, seqs:, order:, next_seq:) = store
-  case dict.get(seqs, key) {
+  let OrderedEntries(entries:, order:, next_seq:) = store
+  case dict.get(entries, key) {
     Error(Nil) -> #(store, False)
-    Ok(seq) -> #(
+    Ok(#(seq, _)) -> #(
       OrderedEntries(
         entries: dict.delete(entries, key),
-        seqs: dict.delete(seqs, key),
         order: dict.delete(order, seq),
         next_seq:,
       ),
@@ -101,7 +97,6 @@ pub fn delete(
 pub fn clear(store: OrderedEntries(k, v)) -> OrderedEntries(k, v) {
   OrderedEntries(
     entries: dict.new(),
-    seqs: dict.new(),
     order: dict.new(),
     next_seq: store.next_seq,
   )
@@ -109,7 +104,9 @@ pub fn clear(store: OrderedEntries(k, v)) -> OrderedEntries(k, v) {
 
 /// Look up the value stored under `key`.
 pub fn get(store: OrderedEntries(k, v), key: k) -> Option(v) {
-  option.from_result(dict.get(store.entries, key))
+  dict.get(store.entries, key)
+  |> result.map(fn(e) { e.1 })
+  |> option.from_result
 }
 
 /// Whether `key` is live in the store.
@@ -131,7 +128,8 @@ pub fn next_seq(store: OrderedEntries(k, v)) -> Int {
 /// Fold over the live entries in unspecified order. For consumers that don't
 /// care about insertion order (GC tracing), avoiding `live_entries`' sort.
 pub fn fold(store: OrderedEntries(k, v), acc: a, f: fn(a, k, v) -> a) -> a {
-  dict.fold(store.entries, acc, f)
+  use acc, k, entry <- dict.fold(store.entries, acc)
+  f(acc, k, entry.1)
 }
 
 /// Live (key, value) entries in forward insertion order.
@@ -154,16 +152,18 @@ pub fn live_entries_from(
   |> list.filter(fn(p) { p.0 >= cursor })
   |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
   |> list.filter_map(fn(p) {
-    dict.get(store.entries, p.1) |> result.map(fn(v) { #(p.1, v) })
+    dict.get(store.entries, p.1) |> result.map(fn(e) { #(p.1, e.1) })
   })
 }
 
 /// First live entry at sequence number >= `cursor`, scanning past the gaps
 /// that deleted entries leave behind (the spec's "empty" records).
-/// Returns #(seq, key, value); the iterator resumes at seq + 1. Each seq
-/// value is scanned at most once over an iterator's lifetime, so a full
-/// iteration is O(total insertions), amortized O(1) per .next().
-pub fn entry_from_seq(
+/// Returns #(next_cursor, key, value) where `next_cursor` is where the
+/// iterator resumes — one past the entry just yielded, so a caller can never
+/// re-yield it. Each seq value is scanned at most once over an iterator's
+/// lifetime, so a full iteration is O(total insertions), amortized O(1) per
+/// .next().
+pub fn next_from(
   store: OrderedEntries(k, v),
   cursor: Int,
 ) -> Option(#(Int, k, v)) {
@@ -173,13 +173,13 @@ pub fn entry_from_seq(
       case dict.get(store.order, cursor) {
         Ok(k) ->
           case dict.get(store.entries, k) {
-            Ok(v) -> Some(#(cursor, k, v))
+            Ok(#(_seq, v)) -> Some(#(cursor + 1, k, v))
             // order/entries are kept in lockstep by construction; a missing
             // key would mean a stale order entry — skip it rather than yield
             // a dead record.
-            Error(Nil) -> entry_from_seq(store, cursor + 1)
+            Error(Nil) -> next_from(store, cursor + 1)
           }
-        Error(Nil) -> entry_from_seq(store, cursor + 1)
+        Error(Nil) -> next_from(store, cursor + 1)
       }
   }
 }
