@@ -33,7 +33,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/pair
 import gleam/result
 import gleam/set
-import gleam/string
 
 /// V8/Node's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
@@ -1517,9 +1516,11 @@ fn reject_range(
 /// while present-but-undefined fields ARE set (e.g. {value: undefined} is different
 /// from {} — the former sets [[Value]] to undefined, the latter leaves it absent).
 ///
-/// Both halves are trap-aware and can throw: `Object.defineProperty(o, "k",
-/// new Proxy({}, {has(){...}, get(){...}}))` must fire `has` for each of the
-/// six descriptor fields, then `get` only for the ones `has` claimed.
+/// Both halves are trap-aware and can throw. The two are INTERLEAVED per field,
+/// not batched: `Object.defineProperty(o, "k", new Proxy({}, {has(){…},
+/// get(){…}}))` fires `has("enumerable")` and then, only if it claimed the
+/// property, `get("enumerable")`, before `has("configurable")` is fired at all.
+/// `parse_descriptor` owns the field order that makes that sequence normative.
 fn read_desc_field(
   state: State(host),
   desc: JsValue,
@@ -2111,10 +2112,25 @@ fn own_enumerable_impl(
     // §7.1.18: ToObject(String) creates a String exotic object; the indexed
     // character properties (enumerable, 0..len-1) come from §10.4.3 String exotics.
     JsString(s) ->
-      cont(list.index_map(string.to_graphemes(s), from_char), state)
+      cont(list.index_map(string_own_index_values(s), from_char), state)
     // Number/boolean/symbol wrappers have no own enumerable string keys.
     _ -> cont([], state)
   }
+}
+
+/// The own index-property VALUES of a String primitive, in index order.
+///
+/// The exact counterpart of the index KEYS, which every other String-exotic
+/// path derives from `object.string_length` (see `string_index_keys`,
+/// `own_property_names`, `has_own`): both count CODEPOINTS, so
+/// `Object.keys(s)` and `Object.values(s)` cannot disagree in length and
+/// `Object.values(s)` cannot disagree with `s[i]` (`object.string_char_at`).
+///
+/// A grapheme cluster is not a JS string unit — `string.to_graphemes("e\u{301}")`
+/// yields ONE entry where the engine has TWO indices — so it must never appear
+/// on a String-exotic own-property path.
+fn string_own_index_values(s: String) -> List(String) {
+  object.string_explode(s)
 }
 
 /// EnumerableOwnProperties §7.3.23 step 3 for a proxy ref — per String key:
@@ -2491,12 +2507,10 @@ fn assign_source(
           )
         }
       }
-    // String sources: each character is an enumerable own property.
+    // String sources: each index character is an enumerable own property.
     // "length" is own but non-enumerable, so it's excluded.
-    JsString(s) -> {
-      let chars = string.to_graphemes(s)
-      assign_string_chars(state, target_ref, chars, 0)
-    }
+    JsString(s) ->
+      assign_string_chars(state, target_ref, string_own_index_values(s), 0)
     // Step 3.a: null/undefined are skipped; number/boolean/symbol wrappers have
     // no own enumerable string-keyed properties.
     _ -> Ok(state)
@@ -4059,45 +4073,29 @@ fn group_by_loop(
         groups,
       )
     }
-    Ok(Some(item)) ->
+    Ok(Some(item)) -> {
       // Steps 6.e-6.f: key = Call(callback, undefined, «value, k»);
       // IfAbruptCloseIterator(key, iteratorRecord).
-      case
-        state.call(state, callback, JsUndefined, [
-          item,
-          value.from_int(index),
-        ])
-      {
-        Error(#(thrown, state)) ->
-          iter_protocol.close_throw(state, iter, thrown)
-        Ok(#(key_val, state)) ->
-          // Step 6.g (property coercion): key = ? ToPropertyKey(key) — a symbol
-          // key groups under the symbol, never a stringification. Abrupt →
-          // IfAbruptCloseIterator.
-          case to_define_key(state, key_val) {
-            Error(#(thrown, state)) ->
-              iter_protocol.close_throw(state, iter, thrown)
-            Ok(#(dkey, state)) -> {
-              let key = define_key_value(dkey)
-              let #(groups, order) = case dict.get(groups, key) {
-                Ok(members) -> #(
-                  dict.insert(groups, key, [item, ..members]),
-                  order,
-                )
-                Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
-              }
-              group_by_loop(
-                state,
-                iter,
-                next,
-                callback,
-                index + 1,
-                groups,
-                order,
-              )
-            }
-          }
+      use key_val, state <- iter_protocol.or_close(
+        state.call(state, callback, JsUndefined, [item, value.from_int(index)]),
+        iter,
+      )
+      // Step 6.g (property coercion): key = ? ToPropertyKey(key) — a symbol key
+      // groups under the symbol, never a stringification. Abrupt →
+      // IfAbruptCloseIterator.
+      use dkey, state <- iter_protocol.or_close(
+        to_define_key(state, key_val),
+        iter,
+      )
+      let key = define_key_value(dkey)
+      // AddValueToKeyedGroup: append to the existing group without moving it,
+      // so `order` only grows on a key's FIRST occurrence.
+      let #(groups, order) = case dict.get(groups, key) {
+        Ok(members) -> #(dict.insert(groups, key, [item, ..members]), order)
+        Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
       }
+      group_by_loop(state, iter, next, callback, index + 1, groups, order)
+    }
   }
 }
 
@@ -4307,51 +4305,70 @@ fn from_parsed_descriptor(
   common.alloc_pojo(h, object_proto, entries)
 }
 
+/// §6.2.6.5 steps 12.b / 14.b: a `get`/`set` field that is present, is not
+/// undefined and is not callable is a TypeError. `role` is "Getter"/"Setter".
+///
+/// Split out because each check must fire the instant its own field is read —
+/// batching both until after all six reads would let a later field's getter or
+/// `has` trap run after the spec has already thrown.
+fn require_callable_accessor(
+  state: State(host),
+  field: Option(JsValue),
+  role: String,
+) -> Result(Nil, #(JsValue, State(host))) {
+  case field {
+    Some(f) ->
+      case f == JsUndefined || helpers.is_callable(state.heap, f) {
+        True -> Ok(Nil)
+        False -> reject_define(state, role <> " must be a function")
+      }
+    None -> Ok(Nil)
+  }
+}
+
 /// ToPropertyDescriptor (§6.2.6.5) on an arbitrary object value — reads the
 /// six fields (invoking getters), validates get/set callability and the
 /// accessor/data conflict.
+///
+/// The read ORDER is normative and observable — a Proxy descriptor sees the
+/// `has`/`get` traps in exactly this sequence: enumerable, configurable, value,
+/// writable, get, set. Step 12.b's getter check also runs BEFORE step 13 reads
+/// "set", so `Object.defineProperty(o, "k", { get: 1, get set() { throw } })`
+/// is a plain TypeError and never runs the `set` accessor.
 fn parse_descriptor(
   state: State(host),
   desc_obj: JsValue,
 ) -> Result(#(ParsedDesc, State(host)), #(JsValue, State(host))) {
-  use #(desc_get, state) <- result.try(read_desc_field(state, desc_obj, "get"))
-  use #(desc_set, state) <- result.try(read_desc_field(state, desc_obj, "set"))
-  use #(desc_value, state) <- result.try(read_desc_field(
-    state,
-    desc_obj,
-    "value",
-  ))
-  use #(desc_writable, state) <- result.try(read_desc_bool(
-    state,
-    desc_obj,
-    "writable",
-  ))
+  // Steps 3-4.
   use #(desc_enumerable, state) <- result.try(read_desc_bool(
     state,
     desc_obj,
     "enumerable",
   ))
+  // Steps 5-6.
   use #(desc_configurable, state) <- result.try(read_desc_bool(
     state,
     desc_obj,
     "configurable",
   ))
-  use Nil <- result.try(case desc_get {
-    Some(g) ->
-      case g != JsUndefined && !helpers.is_callable(state.heap, g) {
-        True -> reject_define(state, "Getter must be a function")
-        False -> Ok(Nil)
-      }
-    _ -> Ok(Nil)
-  })
-  use Nil <- result.try(case desc_set {
-    Some(s) ->
-      case s != JsUndefined && !helpers.is_callable(state.heap, s) {
-        True -> reject_define(state, "Setter must be a function")
-        False -> Ok(Nil)
-      }
-    _ -> Ok(Nil)
-  })
+  // Steps 7-8.
+  use #(desc_value, state) <- result.try(read_desc_field(
+    state,
+    desc_obj,
+    "value",
+  ))
+  // Steps 9-10.
+  use #(desc_writable, state) <- result.try(read_desc_bool(
+    state,
+    desc_obj,
+    "writable",
+  ))
+  // Steps 11-12: read "get", then reject a non-callable one immediately.
+  use #(desc_get, state) <- result.try(read_desc_field(state, desc_obj, "get"))
+  use Nil <- result.try(require_callable_accessor(state, desc_get, "Getter"))
+  // Steps 13-14: only now is "set" observed at all.
+  use #(desc_set, state) <- result.try(read_desc_field(state, desc_obj, "set"))
+  use Nil <- result.try(require_callable_accessor(state, desc_set, "Setter"))
   let parsed =
     ParsedDesc(
       get: desc_get,
@@ -4361,6 +4378,7 @@ fn parse_descriptor(
       enumerable: desc_enumerable,
       configurable: desc_configurable,
     )
+  // Step 15: accessor and data attributes are mutually exclusive.
   use Nil <- result.map(case desc_is_accessor(parsed) && desc_is_data(parsed) {
     True ->
       reject_define(
