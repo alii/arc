@@ -62,9 +62,12 @@ pub fn to_primitive_prim(
     JsString(s) -> Ok(#(value.PString(s), state))
     JsSymbol(s) -> Ok(#(value.PSymbol(s), state))
     JsBigInt(b) -> Ok(#(value.PBigInt(b), state))
-    // The TDZ sentinel is not a JS value and never reaches user code; every
-    // coercion has always treated it exactly like undefined.
-    JsUninitialized -> Ok(#(value.PUndefined, state))
+    // The TDZ sentinel is not a JS value, and every TDZ load throws
+    // ReferenceError before it can reach an operand — so one arriving here is
+    // an engine bug (a leaked hole/TDZ slot). Rewriting it to `undefined`
+    // would only turn that bug into silent NaN arithmetic downstream.
+    // `value.value_to_primitive` rejects it for the same reason.
+    JsUninitialized -> panic as "ToPrimitive on the TDZ sentinel"
     // Objects: try Symbol.toPrimitive, then OrdinaryToPrimitive
     JsObject(ref) -> {
       // §7.1.1 step 1.a: check @@toPrimitive
@@ -210,18 +213,24 @@ pub fn try_to_string(
 
 /// ES2024 §7.1.4 ToNumber with VM re-entry for ToPrimitive.
 /// ToPrimitive is the identity on primitives, so this is one call followed by
-/// `value.to_number` on the primitive — which, being a primitive, can never hit
-/// that function's "object / TDZ sentinel" panics.
+/// a total match on §7.1.4's conversion table — the object and TDZ-sentinel
+/// cases `value.to_number` still has to `panic` on are structurally absent
+/// from `JsPrimitive`, so they need no arm here.
 pub fn js_to_number(
   state: State(host),
   val: JsValue,
 ) -> Result(#(value.JsNum, State(host)), #(JsValue, State(host))) {
   use #(prim, state) <- result.try(to_primitive_prim(state, val, NumberHint))
-  case value.to_number(value.primitive_to_value(prim)) {
-    Ok(n) -> Ok(#(n, state))
-    Error(value.BigIntNotConvertible) ->
+  case prim {
+    value.PNumber(n) -> Ok(#(n, state))
+    value.PString(s) -> Ok(#(value.string_to_number(s), state))
+    value.PBool(True) -> Ok(#(Finite(1.0), state))
+    value.PBool(False) -> Ok(#(Finite(0.0), state))
+    value.PNull -> Ok(#(Finite(0.0), state))
+    value.PUndefined -> Ok(#(NaN, state))
+    value.PBigInt(_) ->
       thrown_type_error(state, "Cannot convert BigInt to number")
-    Error(value.SymbolNotConvertible) ->
+    value.PSymbol(_) ->
       thrown_type_error(state, "Cannot convert Symbol to number")
   }
 }
