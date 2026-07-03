@@ -29,16 +29,54 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, type TemporalKind, type TemporalNativeFn,
-  type TemporalProtos, Dispatch, Finite, JsBigInt, JsBool, JsNull, JsNumber,
-  JsObject, JsString, JsUndefined, NativeFunction, ObjectSlot, OrdinaryObject,
+  type DurationMethod, type InstantMethod, type JsValue, type PlainDateMethod,
+  type PlainDateTimeMethod, type PlainMonthDayMethod, type PlainTimeMethod,
+  type PlainYearMonthMethod, type Ref, type TemporalDateGetter,
+  type TemporalDateTimeGetter, type TemporalDurationGetter, type TemporalGetter,
+  type TemporalInstantGetter, type TemporalKind, type TemporalMethodName,
+  type TemporalMonthDayGetter, type TemporalNativeFn, type TemporalProtos,
+  type TemporalTimeGetter, type TemporalYearMonthGetter,
+  type TemporalZonedGetter, type ZonedDateTimeMethod, DgCalendarId, DgDay,
+  DgDayOfWeek, DgDayOfYear, DgDaysInMonth, DgDaysInWeek, DgDaysInYear, DgEra,
+  DgEraYear, DgInLeapYear, DgMonth, DgMonthCode, DgMonthsInYear, DgWeekOfYear,
+  DgYear, DgYearOfWeek, Dispatch, DmAbs, DmAdd, DmNegated, DmRound, DmSubtract,
+  DmToJson, DmToLocaleString, DmToString, DmTotal, DmValueOf, DmWith, DrBlank,
+  DrDays, DrHours, DrMicroseconds, DrMilliseconds, DrMinutes, DrMonths,
+  DrNanoseconds, DrSeconds, DrSign, DrWeeks, DrYears, DtDate, DtTime,
+  DurationGetter, DurationMethodName, Finite, ImAdd, ImEquals, ImRound, ImSince,
+  ImSubtract, ImToJson, ImToLocaleString, ImToString, ImToZonedDateTimeIso,
+  ImUntil, ImValueOf, InEpochMilliseconds, InEpochNanoseconds, InstantGetter,
+  InstantMethodName, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString,
+  JsUndefined, MdCalendarId, MdDay, MdMonthCode, NativeFunction, ObjectSlot,
+  OrdinaryObject, PdAdd, PdEquals, PdSince, PdSubtract, PdToJson,
+  PdToLocaleString, PdToPlainDateTime, PdToPlainMonthDay, PdToPlainYearMonth,
+  PdToString, PdToZonedDateTime, PdUntil, PdValueOf, PdWith, PdWithCalendar,
+  PdtAdd, PdtEquals, PdtRound, PdtSince, PdtSubtract, PdtToJson,
+  PdtToLocaleString, PdtToPlainDate, PdtToPlainTime, PdtToString,
+  PdtToZonedDateTime, PdtUntil, PdtValueOf, PdtWith, PdtWithCalendar,
+  PdtWithPlainTime, PlainDateGetter, PlainDateMethodName, PlainDateTimeGetter,
+  PlainDateTimeMethodName, PlainMonthDayGetter, PlainMonthDayMethodName,
+  PlainTimeGetter, PlainTimeMethodName, PlainYearMonthGetter,
+  PlainYearMonthMethodName, PmdEquals, PmdToJson, PmdToLocaleString,
+  PmdToPlainDate, PmdToString, PmdValueOf, PmdWith, PtAdd, PtEquals, PtRound,
+  PtSince, PtSubtract, PtToJson, PtToLocaleString, PtToString, PtUntil,
+  PtValueOf, PtWith, PymAdd, PymEquals, PymSince, PymSubtract, PymToJson,
+  PymToLocaleString, PymToPlainDate, PymToString, PymUntil, PymValueOf, PymWith,
   TemporalCtor, TemporalDateSlot, TemporalDateTimeSlot, TemporalDurationKind,
   TemporalDurationSlot, TemporalGetterFn, TemporalInstantKind,
   TemporalInstantSlot, TemporalMethod, TemporalMonthDaySlot, TemporalNative,
   TemporalNowFn, TemporalPlainDateKind, TemporalPlainDateTimeKind,
   TemporalPlainMonthDayKind, TemporalPlainTimeKind, TemporalPlainYearMonthKind,
   TemporalProtos, TemporalStatic, TemporalTimeSlot, TemporalYearMonthSlot,
-  TemporalZonedDateTimeKind, TemporalZonedDateTimeSlot,
+  TemporalZonedDateTimeKind, TemporalZonedDateTimeSlot, TgHour, TgMicrosecond,
+  TgMillisecond, TgMinute, TgNanosecond, TgSecond, YmCalendarId, YmDaysInMonth,
+  YmDaysInYear, YmEra, YmEraYear, YmInLeapYear, YmMonth, YmMonthCode,
+  YmMonthsInYear, YmYear, ZgDate, ZgEpochMilliseconds, ZgEpochNanoseconds,
+  ZgHoursInDay, ZgOffset, ZgOffsetNanoseconds, ZgTime, ZgTimeZoneId, ZmAdd,
+  ZmEquals, ZmGetTimeZoneTransition, ZmRound, ZmSince, ZmStartOfDay, ZmSubtract,
+  ZmToInstant, ZmToJson, ZmToLocaleString, ZmToPlainDate, ZmToPlainDateTime,
+  ZmToPlainTime, ZmToString, ZmUntil, ZmValueOf, ZmWith, ZmWithCalendar,
+  ZmWithPlainTime, ZmWithTimeZone, ZonedDateTimeGetter, ZonedDateTimeMethodName,
 }
 import gleam/float
 import gleam/int
@@ -153,28 +191,27 @@ pub fn init(
       3,
       pd_proto,
       [#("from", 1), #("compare", 2)],
-      [
-        "calendarId", "era", "eraYear", "year", "month", "monthCode", "day",
-        "dayOfWeek", "dayOfYear", "weekOfYear", "yearOfWeek", "daysInWeek",
-        "daysInMonth", "daysInYear", "monthsInYear", "inLeapYear",
-      ],
-      [
-        #("toPlainYearMonth", 0),
-        #("toPlainMonthDay", 0),
-        #("toPlainDateTime", 0),
-        #("toZonedDateTime", 1),
-        #("add", 1),
-        #("subtract", 1),
-        #("with", 1),
-        #("withCalendar", 1),
-        #("until", 1),
-        #("since", 1),
-        #("equals", 1),
-        #("toString", 0),
-        #("toLocaleString", 0),
-        #("toJSON", 0),
-        #("valueOf", 0),
-      ],
+      list.map(all_date_getters, PlainDateGetter),
+      wrap_methods(
+        [
+          #(PdToPlainYearMonth, 0),
+          #(PdToPlainMonthDay, 0),
+          #(PdToPlainDateTime, 0),
+          #(PdToZonedDateTime, 1),
+          #(PdAdd, 1),
+          #(PdSubtract, 1),
+          #(PdWith, 1),
+          #(PdWithCalendar, 1),
+          #(PdUntil, 1),
+          #(PdSince, 1),
+          #(PdEquals, 1),
+          #(PdToString, 0),
+          #(PdToLocaleString, 0),
+          #(PdToJson, 0),
+          #(PdValueOf, 0),
+        ],
+        PlainDateMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -188,20 +225,23 @@ pub fn init(
       0,
       pt_proto,
       [#("from", 1), #("compare", 2)],
-      ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"],
-      [
-        #("add", 1),
-        #("subtract", 1),
-        #("with", 1),
-        #("until", 1),
-        #("since", 1),
-        #("round", 1),
-        #("equals", 1),
-        #("toString", 0),
-        #("toLocaleString", 0),
-        #("toJSON", 0),
-        #("valueOf", 0),
-      ],
+      list.map(all_time_getters, PlainTimeGetter),
+      wrap_methods(
+        [
+          #(PtAdd, 1),
+          #(PtSubtract, 1),
+          #(PtWith, 1),
+          #(PtUntil, 1),
+          #(PtSince, 1),
+          #(PtRound, 1),
+          #(PtEquals, 1),
+          #(PtToString, 0),
+          #(PtToLocaleString, 0),
+          #(PtToJson, 0),
+          #(PtValueOf, 0),
+        ],
+        PlainTimeMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -215,30 +255,54 @@ pub fn init(
       3,
       pdt_proto,
       [#("from", 1), #("compare", 2)],
-      [
-        "calendarId", "era", "eraYear", "year", "month", "monthCode", "day",
-        "hour", "minute", "second", "millisecond", "microsecond", "nanosecond",
-        "dayOfWeek", "dayOfYear", "weekOfYear", "yearOfWeek", "daysInWeek",
-        "daysInMonth", "daysInYear", "monthsInYear", "inLeapYear",
-      ],
-      [
-        #("with", 1),
-        #("withPlainTime", 0),
-        #("withCalendar", 1),
-        #("add", 1),
-        #("subtract", 1),
-        #("until", 1),
-        #("since", 1),
-        #("round", 1),
-        #("equals", 1),
-        #("toString", 0),
-        #("toLocaleString", 0),
-        #("toJSON", 0),
-        #("valueOf", 0),
-        #("toPlainDate", 0),
-        #("toPlainTime", 0),
-        #("toZonedDateTime", 1),
-      ],
+      list.map(
+        [
+          DtDate(DgCalendarId),
+          DtDate(DgEra),
+          DtDate(DgEraYear),
+          DtDate(DgYear),
+          DtDate(DgMonth),
+          DtDate(DgMonthCode),
+          DtDate(DgDay),
+          DtTime(TgHour),
+          DtTime(TgMinute),
+          DtTime(TgSecond),
+          DtTime(TgMillisecond),
+          DtTime(TgMicrosecond),
+          DtTime(TgNanosecond),
+          DtDate(DgDayOfWeek),
+          DtDate(DgDayOfYear),
+          DtDate(DgWeekOfYear),
+          DtDate(DgYearOfWeek),
+          DtDate(DgDaysInWeek),
+          DtDate(DgDaysInMonth),
+          DtDate(DgDaysInYear),
+          DtDate(DgMonthsInYear),
+          DtDate(DgInLeapYear),
+        ],
+        PlainDateTimeGetter,
+      ),
+      wrap_methods(
+        [
+          #(PdtWith, 1),
+          #(PdtWithPlainTime, 0),
+          #(PdtWithCalendar, 1),
+          #(PdtAdd, 1),
+          #(PdtSubtract, 1),
+          #(PdtUntil, 1),
+          #(PdtSince, 1),
+          #(PdtRound, 1),
+          #(PdtEquals, 1),
+          #(PdtToString, 0),
+          #(PdtToLocaleString, 0),
+          #(PdtToJson, 0),
+          #(PdtValueOf, 0),
+          #(PdtToPlainDate, 0),
+          #(PdtToPlainTime, 0),
+          #(PdtToZonedDateTime, 1),
+        ],
+        PlainDateTimeMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -252,23 +316,37 @@ pub fn init(
       2,
       pym_proto,
       [#("from", 1), #("compare", 2)],
-      [
-        "calendarId", "era", "eraYear", "year", "month", "monthCode",
-        "daysInYear", "daysInMonth", "monthsInYear", "inLeapYear",
-      ],
-      [
-        #("with", 1),
-        #("add", 1),
-        #("subtract", 1),
-        #("until", 1),
-        #("since", 1),
-        #("equals", 1),
-        #("toString", 0),
-        #("toLocaleString", 0),
-        #("toJSON", 0),
-        #("valueOf", 0),
-        #("toPlainDate", 1),
-      ],
+      list.map(
+        [
+          YmCalendarId,
+          YmEra,
+          YmEraYear,
+          YmYear,
+          YmMonth,
+          YmMonthCode,
+          YmDaysInYear,
+          YmDaysInMonth,
+          YmMonthsInYear,
+          YmInLeapYear,
+        ],
+        PlainYearMonthGetter,
+      ),
+      wrap_methods(
+        [
+          #(PymWith, 1),
+          #(PymAdd, 1),
+          #(PymSubtract, 1),
+          #(PymUntil, 1),
+          #(PymSince, 1),
+          #(PymEquals, 1),
+          #(PymToString, 0),
+          #(PymToLocaleString, 0),
+          #(PymToJson, 0),
+          #(PymValueOf, 0),
+          #(PymToPlainDate, 1),
+        ],
+        PlainYearMonthMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -282,16 +360,19 @@ pub fn init(
       2,
       pmd_proto,
       [#("from", 1)],
-      ["calendarId", "monthCode", "day"],
-      [
-        #("with", 1),
-        #("equals", 1),
-        #("toString", 0),
-        #("toLocaleString", 0),
-        #("toJSON", 0),
-        #("valueOf", 0),
-        #("toPlainDate", 1),
-      ],
+      list.map([MdCalendarId, MdMonthCode, MdDay], PlainMonthDayGetter),
+      wrap_methods(
+        [
+          #(PmdWith, 1),
+          #(PmdEquals, 1),
+          #(PmdToString, 0),
+          #(PmdToLocaleString, 0),
+          #(PmdToJson, 0),
+          #(PmdValueOf, 0),
+          #(PmdToPlainDate, 1),
+        ],
+        PlainMonthDayMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -305,23 +386,39 @@ pub fn init(
       0,
       dur_proto,
       [#("from", 1), #("compare", 2)],
-      [
-        "years", "months", "weeks", "days", "hours", "minutes", "seconds",
-        "milliseconds", "microseconds", "nanoseconds", "sign", "blank",
-      ],
-      [
-        #("with", 1),
-        #("negated", 0),
-        #("abs", 0),
-        #("add", 1),
-        #("subtract", 1),
-        #("round", 1),
-        #("total", 1),
-        #("toString", 0),
-        #("toJSON", 0),
-        #("toLocaleString", 0),
-        #("valueOf", 0),
-      ],
+      list.map(
+        [
+          DrYears,
+          DrMonths,
+          DrWeeks,
+          DrDays,
+          DrHours,
+          DrMinutes,
+          DrSeconds,
+          DrMilliseconds,
+          DrMicroseconds,
+          DrNanoseconds,
+          DrSign,
+          DrBlank,
+        ],
+        DurationGetter,
+      ),
+      wrap_methods(
+        [
+          #(DmWith, 1),
+          #(DmNegated, 0),
+          #(DmAbs, 0),
+          #(DmAdd, 1),
+          #(DmSubtract, 1),
+          #(DmRound, 1),
+          #(DmTotal, 1),
+          #(DmToString, 0),
+          #(DmToJson, 0),
+          #(DmToLocaleString, 0),
+          #(DmValueOf, 0),
+        ],
+        DurationMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -340,20 +437,23 @@ pub fn init(
         #("fromEpochNanoseconds", 1),
         #("compare", 2),
       ],
-      ["epochMilliseconds", "epochNanoseconds"],
-      [
-        #("add", 1),
-        #("subtract", 1),
-        #("until", 1),
-        #("since", 1),
-        #("round", 1),
-        #("equals", 1),
-        #("toString", 0),
-        #("toLocaleString", 0),
-        #("toJSON", 0),
-        #("valueOf", 0),
-        #("toZonedDateTimeISO", 1),
-      ],
+      list.map([InEpochMilliseconds, InEpochNanoseconds], InstantGetter),
+      wrap_methods(
+        [
+          #(ImAdd, 1),
+          #(ImSubtract, 1),
+          #(ImUntil, 1),
+          #(ImSince, 1),
+          #(ImRound, 1),
+          #(ImEquals, 1),
+          #(ImToString, 0),
+          #(ImToLocaleString, 0),
+          #(ImToJson, 0),
+          #(ImValueOf, 0),
+          #(ImToZonedDateTimeIso, 1),
+        ],
+        InstantMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -367,36 +467,64 @@ pub fn init(
       2,
       zdt_proto,
       [#("from", 1), #("compare", 2)],
-      [
-        "calendarId", "timeZoneId", "era", "eraYear", "year", "month",
-        "monthCode", "day", "hour", "minute", "second", "millisecond",
-        "microsecond", "nanosecond", "epochMilliseconds", "epochNanoseconds",
-        "dayOfWeek", "dayOfYear", "weekOfYear", "yearOfWeek", "hoursInDay",
-        "daysInWeek", "daysInMonth", "daysInYear", "monthsInYear", "inLeapYear",
-        "offsetNanoseconds", "offset",
-      ],
-      [
-        #("withTimeZone", 1),
-        #("withCalendar", 1),
-        #("withPlainTime", 0),
-        #("with", 1),
-        #("add", 1),
-        #("subtract", 1),
-        #("until", 1),
-        #("since", 1),
-        #("round", 1),
-        #("equals", 1),
-        #("toString", 0),
-        #("toLocaleString", 0),
-        #("toJSON", 0),
-        #("valueOf", 0),
-        #("startOfDay", 0),
-        #("getTimeZoneTransition", 1),
-        #("toInstant", 0),
-        #("toPlainDate", 0),
-        #("toPlainTime", 0),
-        #("toPlainDateTime", 0),
-      ],
+      list.map(
+        [
+          ZgDate(DgCalendarId),
+          ZgTimeZoneId,
+          ZgDate(DgEra),
+          ZgDate(DgEraYear),
+          ZgDate(DgYear),
+          ZgDate(DgMonth),
+          ZgDate(DgMonthCode),
+          ZgDate(DgDay),
+          ZgTime(TgHour),
+          ZgTime(TgMinute),
+          ZgTime(TgSecond),
+          ZgTime(TgMillisecond),
+          ZgTime(TgMicrosecond),
+          ZgTime(TgNanosecond),
+          ZgEpochMilliseconds,
+          ZgEpochNanoseconds,
+          ZgDate(DgDayOfWeek),
+          ZgDate(DgDayOfYear),
+          ZgDate(DgWeekOfYear),
+          ZgDate(DgYearOfWeek),
+          ZgHoursInDay,
+          ZgDate(DgDaysInWeek),
+          ZgDate(DgDaysInMonth),
+          ZgDate(DgDaysInYear),
+          ZgDate(DgMonthsInYear),
+          ZgDate(DgInLeapYear),
+          ZgOffsetNanoseconds,
+          ZgOffset,
+        ],
+        ZonedDateTimeGetter,
+      ),
+      wrap_methods(
+        [
+          #(ZmWithTimeZone, 1),
+          #(ZmWithCalendar, 1),
+          #(ZmWithPlainTime, 0),
+          #(ZmWith, 1),
+          #(ZmAdd, 1),
+          #(ZmSubtract, 1),
+          #(ZmUntil, 1),
+          #(ZmSince, 1),
+          #(ZmRound, 1),
+          #(ZmEquals, 1),
+          #(ZmToString, 0),
+          #(ZmToLocaleString, 0),
+          #(ZmToJson, 0),
+          #(ZmValueOf, 0),
+          #(ZmStartOfDay, 0),
+          #(ZmGetTimeZoneTransition, 1),
+          #(ZmToInstant, 0),
+          #(ZmToPlainDate, 0),
+          #(ZmToPlainTime, 0),
+          #(ZmToPlainDateTime, 0),
+        ],
+        ZonedDateTimeMethodName,
+      ),
       object_proto,
       function_proto,
     )
@@ -444,6 +572,45 @@ fn reserve_rooted(h: Heap(host)) -> #(Heap(host), Ref) {
   #(heap.root(h, r), r)
 }
 
+/// The full date/time getter sets, in prototype-registration order. Kept as
+/// values (never strings) so `getter_name` is the only place a JS-facing name
+/// is written down.
+const all_date_getters = [
+  DgCalendarId,
+  DgEra,
+  DgEraYear,
+  DgYear,
+  DgMonth,
+  DgMonthCode,
+  DgDay,
+  DgDayOfWeek,
+  DgDayOfYear,
+  DgWeekOfYear,
+  DgYearOfWeek,
+  DgDaysInWeek,
+  DgDaysInMonth,
+  DgDaysInYear,
+  DgMonthsInYear,
+  DgInLeapYear,
+]
+
+const all_time_getters = [
+  TgHour,
+  TgMinute,
+  TgSecond,
+  TgMillisecond,
+  TgMicrosecond,
+  TgNanosecond,
+]
+
+/// Tag one Temporal type's `#(method, arity)` pairs with the type they belong to.
+fn wrap_methods(
+  methods: List(#(a, Int)),
+  wrap: fn(a) -> TemporalMethodName,
+) -> List(#(TemporalMethodName, Int)) {
+  list.map(methods, fn(m) { #(wrap(m.0), m.1) })
+}
+
 /// Build one Temporal type: constructor (with statics) + filled prototype
 /// (getters, methods, @@toStringTag, constructor backlink).
 fn init_temporal_type(
@@ -454,8 +621,8 @@ fn init_temporal_type(
   arity: Int,
   proto_ref: Ref,
   statics: List(#(String, Int)),
-  getters: List(String),
-  methods: List(#(String, Int)),
+  getters: List(TemporalGetter),
+  methods: List(#(TemporalMethodName, Int)),
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap(host), Ref) {
@@ -472,7 +639,7 @@ fn init_temporal_type(
       h,
       function_proto,
       list.map(getters, fn(g) {
-        #(g, TemporalNative(TemporalGetterFn(kind, g, protos)))
+        #(getter_name(g), TemporalNative(TemporalGetterFn(g, protos)))
       }),
     )
   let #(h, method_props) =
@@ -480,7 +647,7 @@ fn init_temporal_type(
       h,
       function_proto,
       list.map(methods, fn(m) {
-        #(m.0, TemporalNative(TemporalMethod(kind, m.0, protos)), m.1)
+        #(method_name(m.0), TemporalNative(TemporalMethod(m.0, protos)), m.1)
       }),
     )
   let #(h, ctor_ref) =
@@ -538,10 +705,10 @@ pub fn dispatch(
     TemporalCtor(kind:, protos:) -> ctor_dispatch(kind, protos, args, state)
     TemporalStatic(kind:, name:, protos:) ->
       static_dispatch(kind, name, protos, args, state)
-    TemporalGetterFn(kind:, name:, protos:) ->
-      getter_dispatch(kind, name, protos, this, state)
-    TemporalMethod(kind:, name:, protos:) ->
-      method_dispatch(kind, name, protos, this, args, state)
+    TemporalGetterFn(getter:, protos:) ->
+      getter_dispatch(getter, protos, this, state)
+    TemporalMethod(method:, protos:) ->
+      method_dispatch(method, protos, this, args, state)
     TemporalNowFn(name:, protos:) -> now_dispatch(name, protos, args, state)
   }
 }
@@ -5776,215 +5943,283 @@ fn negate_dur(d: DurRec) -> DurRec {
 // ============================================================================
 
 fn getter_dispatch(
-  kind: TemporalKind,
-  name: String,
+  getter: TemporalGetter,
   protos: TemporalProtos,
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let _ = protos
-  case kind {
-    TemporalPlainDateKind ->
+  case getter {
+    PlainDateGetter(g) ->
       case this_date(state, this) {
         Some(d) -> #(
           state,
-          Ok(date_field_cal(this_calendar(state, this), d, name)),
+          Ok(date_field_cal(this_calendar(state, this), d, g)),
         )
-        None -> brand_error(state, "PlainDate", name)
+        None -> brand_error(state, "PlainDate", date_getter_name(g))
       }
-    TemporalPlainTimeKind ->
+    PlainTimeGetter(g) ->
       case this_time(state, this) {
-        Some(t) -> #(state, Ok(time_field(t, name)))
-        None -> brand_error(state, "PlainTime", name)
+        Some(t) -> #(state, Ok(time_field(t, g)))
+        None -> brand_error(state, "PlainTime", time_getter_name(g))
       }
-    TemporalPlainDateTimeKind ->
+    PlainDateTimeGetter(g) ->
       case this_date_time(state, this) {
         Some(#(d, t)) ->
-          case is_time_field(name) {
-            True -> #(state, Ok(time_field(t, name)))
-            False -> #(
+          case g {
+            DtTime(tg) -> #(state, Ok(time_field(t, tg)))
+            DtDate(dg) -> #(
               state,
-              Ok(date_field_cal(this_calendar(state, this), d, name)),
+              Ok(date_field_cal(this_calendar(state, this), d, dg)),
             )
           }
-        None -> brand_error(state, "PlainDateTime", name)
+        None -> brand_error(state, "PlainDateTime", date_time_getter_name(g))
       }
-    TemporalPlainYearMonthKind ->
+    PlainYearMonthGetter(g) ->
       case this_year_month(state, this) {
         Some(#(y, m, rd)) -> #(
           state,
-          Ok(year_month_field_cal(this_calendar(state, this), y, m, rd, name)),
+          Ok(year_month_field_cal(this_calendar(state, this), y, m, rd, g)),
         )
-        None -> brand_error(state, "PlainYearMonth", name)
+        None -> brand_error(state, "PlainYearMonth", year_month_getter_name(g))
       }
-    TemporalPlainMonthDayKind ->
+    PlainMonthDayGetter(g) ->
       case this_month_day(state, this) {
-        Some(#(m, d, ry)) -> {
-          let cal = this_calendar(state, this)
-          case name {
-            "calendarId" -> #(state, Ok(JsString(tcal.identifier(cal))))
-            "monthCode" ->
-              case cal {
-                tcal.Iso8601 -> #(state, Ok(JsString(month_code_str(m))))
-                _ -> {
-                  let cd =
-                    tcal.date_from_epoch_days(
-                      cal,
-                      epoch_days(IsoDate(ry, m, d)),
-                    )
-                  #(
-                    state,
-                    Ok(JsString(tcal.month_code(cal, cd.year, cd.month))),
-                  )
-                }
-              }
-            "day" ->
-              case cal {
-                tcal.Iso8601 -> #(state, Ok(value.from_int(d)))
-                _ -> {
-                  let cd =
-                    tcal.date_from_epoch_days(
-                      cal,
-                      epoch_days(IsoDate(ry, m, d)),
-                    )
-                  #(state, Ok(value.from_int(cd.day)))
-                }
-              }
-            _ -> brand_error(state, "PlainMonthDay", name)
-          }
-        }
-        None -> brand_error(state, "PlainMonthDay", name)
+        Some(#(m, d, ry)) -> #(
+          state,
+          Ok(month_day_field_cal(this_calendar(state, this), m, d, ry, g)),
+        )
+        None -> brand_error(state, "PlainMonthDay", month_day_getter_name(g))
       }
-    TemporalDurationKind ->
+    DurationGetter(g) ->
       case this_duration(state, this) {
-        Some(d) -> #(state, Ok(duration_field(d, name)))
-        None -> brand_error(state, "Duration", name)
+        Some(d) -> #(state, Ok(duration_field(d, g)))
+        None -> brand_error(state, "Duration", duration_getter_name(g))
       }
-    TemporalInstantKind ->
+    InstantGetter(g) ->
       case this_instant(state, this) {
-        Some(ns) ->
-          case name {
-            "epochMilliseconds" -> #(
-              state,
-              Ok(value.from_int(floor_div(ns, ns_per_ms))),
-            )
-            "epochNanoseconds" -> #(state, Ok(JsBigInt(value.BigInt(ns))))
-            _ -> brand_error(state, "Instant", name)
-          }
-        None -> brand_error(state, "Instant", name)
+        Some(ns) -> #(state, Ok(instant_field(ns, g)))
+        None -> brand_error(state, "Instant", instant_getter_name(g))
       }
-    TemporalZonedDateTimeKind ->
+    ZonedDateTimeGetter(g) ->
       case this_zoned(state, this) {
-        Some(#(ns, tz, zcal)) -> zoned_field(state, ns, tz, zcal, name)
-        None -> brand_error(state, "ZonedDateTime", name)
+        Some(#(ns, tz, zcal)) -> zoned_field(state, ns, tz, zcal, g)
+        None -> brand_error(state, "ZonedDateTime", zoned_getter_name(g))
       }
   }
 }
 
-fn is_time_field(name: String) -> Bool {
-  case name {
-    "hour"
-    | "minute"
-    | "second"
-    | "millisecond"
-    | "microsecond"
-    | "nanosecond" -> True
-    _ -> False
+// ----------------------------------------------------------------------------
+// Getter names — the single source of truth for what each prototype registers.
+// ----------------------------------------------------------------------------
+
+fn getter_name(g: TemporalGetter) -> String {
+  case g {
+    PlainDateGetter(g) -> date_getter_name(g)
+    PlainTimeGetter(g) -> time_getter_name(g)
+    PlainDateTimeGetter(g) -> date_time_getter_name(g)
+    PlainYearMonthGetter(g) -> year_month_getter_name(g)
+    PlainMonthDayGetter(g) -> month_day_getter_name(g)
+    DurationGetter(g) -> duration_getter_name(g)
+    InstantGetter(g) -> instant_getter_name(g)
+    ZonedDateTimeGetter(g) -> zoned_getter_name(g)
   }
 }
 
-fn date_field(d: IsoDate, name: String) -> JsValue {
-  case name {
-    "calendarId" -> JsString("iso8601")
-    "era" -> JsUndefined
-    "eraYear" -> JsUndefined
-    "year" -> value.from_int(d.year)
-    "month" -> value.from_int(d.month)
-    "monthCode" -> JsString(month_code_str(d.month))
-    "day" -> value.from_int(d.day)
-    "dayOfWeek" -> value.from_int(day_of_week(d))
-    "dayOfYear" -> value.from_int(day_of_year(d))
-    "weekOfYear" -> value.from_int(week_of_year(d).0)
-    "yearOfWeek" -> value.from_int(week_of_year(d).1)
-    "daysInWeek" -> value.from_int(7)
-    "daysInMonth" -> value.from_int(days_in_month(d.year, d.month))
-    "daysInYear" -> value.from_int(days_in_iso_year(d.year))
-    "monthsInYear" -> value.from_int(12)
-    "inLeapYear" -> JsBool(is_leap_year(d.year))
-    _ -> JsUndefined
+fn date_getter_name(g: TemporalDateGetter) -> String {
+  case g {
+    DgCalendarId -> "calendarId"
+    DgEra -> "era"
+    DgEraYear -> "eraYear"
+    DgYear -> "year"
+    DgMonth -> "month"
+    DgMonthCode -> "monthCode"
+    DgDay -> "day"
+    DgDayOfWeek -> "dayOfWeek"
+    DgDayOfYear -> "dayOfYear"
+    DgWeekOfYear -> "weekOfYear"
+    DgYearOfWeek -> "yearOfWeek"
+    DgDaysInWeek -> "daysInWeek"
+    DgDaysInMonth -> "daysInMonth"
+    DgDaysInYear -> "daysInYear"
+    DgMonthsInYear -> "monthsInYear"
+    DgInLeapYear -> "inLeapYear"
+  }
+}
+
+fn time_getter_name(g: TemporalTimeGetter) -> String {
+  case g {
+    TgHour -> "hour"
+    TgMinute -> "minute"
+    TgSecond -> "second"
+    TgMillisecond -> "millisecond"
+    TgMicrosecond -> "microsecond"
+    TgNanosecond -> "nanosecond"
+  }
+}
+
+fn date_time_getter_name(g: TemporalDateTimeGetter) -> String {
+  case g {
+    DtDate(g) -> date_getter_name(g)
+    DtTime(g) -> time_getter_name(g)
+  }
+}
+
+fn year_month_getter_name(g: TemporalYearMonthGetter) -> String {
+  case g {
+    YmCalendarId -> "calendarId"
+    YmEra -> "era"
+    YmEraYear -> "eraYear"
+    YmYear -> "year"
+    YmMonth -> "month"
+    YmMonthCode -> "monthCode"
+    YmDaysInYear -> "daysInYear"
+    YmDaysInMonth -> "daysInMonth"
+    YmMonthsInYear -> "monthsInYear"
+    YmInLeapYear -> "inLeapYear"
+  }
+}
+
+fn month_day_getter_name(g: TemporalMonthDayGetter) -> String {
+  case g {
+    MdCalendarId -> "calendarId"
+    MdMonthCode -> "monthCode"
+    MdDay -> "day"
+  }
+}
+
+fn duration_getter_name(g: TemporalDurationGetter) -> String {
+  case g {
+    DrYears -> "years"
+    DrMonths -> "months"
+    DrWeeks -> "weeks"
+    DrDays -> "days"
+    DrHours -> "hours"
+    DrMinutes -> "minutes"
+    DrSeconds -> "seconds"
+    DrMilliseconds -> "milliseconds"
+    DrMicroseconds -> "microseconds"
+    DrNanoseconds -> "nanoseconds"
+    DrSign -> "sign"
+    DrBlank -> "blank"
+  }
+}
+
+fn instant_getter_name(g: TemporalInstantGetter) -> String {
+  case g {
+    InEpochMilliseconds -> "epochMilliseconds"
+    InEpochNanoseconds -> "epochNanoseconds"
+  }
+}
+
+fn zoned_getter_name(g: TemporalZonedGetter) -> String {
+  case g {
+    ZgTimeZoneId -> "timeZoneId"
+    ZgEpochMilliseconds -> "epochMilliseconds"
+    ZgEpochNanoseconds -> "epochNanoseconds"
+    ZgOffsetNanoseconds -> "offsetNanoseconds"
+    ZgOffset -> "offset"
+    ZgHoursInDay -> "hoursInDay"
+    ZgDate(g) -> date_getter_name(g)
+    ZgTime(g) -> time_getter_name(g)
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Getter implementations
+// ----------------------------------------------------------------------------
+
+fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsValue {
+  case g {
+    DgCalendarId -> JsString("iso8601")
+    DgEra -> JsUndefined
+    DgEraYear -> JsUndefined
+    DgYear -> value.from_int(d.year)
+    DgMonth -> value.from_int(d.month)
+    DgMonthCode -> JsString(month_code_str(d.month))
+    DgDay -> value.from_int(d.day)
+    DgDayOfWeek -> value.from_int(day_of_week(d))
+    DgDayOfYear -> value.from_int(day_of_year(d))
+    DgWeekOfYear -> value.from_int(week_of_year(d).0)
+    DgYearOfWeek -> value.from_int(week_of_year(d).1)
+    DgDaysInWeek -> value.from_int(7)
+    DgDaysInMonth -> value.from_int(days_in_month(d.year, d.month))
+    DgDaysInYear -> value.from_int(days_in_iso_year(d.year))
+    DgMonthsInYear -> value.from_int(12)
+    DgInLeapYear -> JsBool(is_leap_year(d.year))
   }
 }
 
 /// Calendar-aware date field getter (ISO dates fall through to date_field).
-fn date_field_cal(cal: tcal.Calendar, d: IsoDate, name: String) -> JsValue {
+fn date_field_cal(
+  cal: tcal.Calendar,
+  d: IsoDate,
+  g: TemporalDateGetter,
+) -> JsValue {
   case cal {
-    tcal.Iso8601 -> date_field(d, name)
+    tcal.Iso8601 -> date_field(d, g)
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-      case name {
-        "calendarId" -> JsString(tcal.identifier(cal))
-        "era" | "eraYear" -> {
-          let era = tcal.era_for(cal, cd.year, cd.month, cd.day)
-          case name {
-            "era" ->
-              era
-              |> option.map(fn(e: tcal.Era) {
-                JsString(tcal.era_code_string(e.code))
-              })
-              |> option.unwrap(JsUndefined)
-            _ ->
-              era
-              |> option.map(fn(e: tcal.Era) { value.from_int(e.year) })
-              |> option.unwrap(JsUndefined)
-          }
-        }
-        "year" -> value.from_int(cd.year)
-        "month" -> value.from_int(cd.month)
-        "monthCode" -> JsString(tcal.month_code(cal, cd.year, cd.month))
-        "day" -> value.from_int(cd.day)
-        "dayOfWeek" -> value.from_int(day_of_week(d))
-        "dayOfYear" ->
+      case g {
+        DgCalendarId -> JsString(tcal.identifier(cal))
+        DgEra -> era_field(cal, cd)
+        DgEraYear -> era_year_field(cal, cd)
+        DgYear -> value.from_int(cd.year)
+        DgMonth -> value.from_int(cd.month)
+        DgMonthCode -> JsString(tcal.month_code(cal, cd.year, cd.month))
+        DgDay -> value.from_int(cd.day)
+        DgDayOfWeek -> value.from_int(day_of_week(d))
+        DgDayOfYear ->
           value.from_int(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
         // weekOfYear/yearOfWeek are undefined for non-ISO calendars.
-        "weekOfYear" -> JsUndefined
-        "yearOfWeek" -> JsUndefined
-        "daysInWeek" -> value.from_int(7)
-        "daysInMonth" ->
+        DgWeekOfYear -> JsUndefined
+        DgYearOfWeek -> JsUndefined
+        DgDaysInWeek -> value.from_int(7)
+        DgDaysInMonth ->
           value.from_int(tcal.days_in_month(cal, cd.year, cd.month))
-        "daysInYear" -> value.from_int(tcal.days_in_year(cal, cd.year))
-        "monthsInYear" -> value.from_int(tcal.months_in_year(cal, cd.year))
-        "inLeapYear" -> JsBool(tcal.in_leap_year(cal, cd.year))
-        _ -> JsUndefined
+        DgDaysInYear -> value.from_int(tcal.days_in_year(cal, cd.year))
+        DgMonthsInYear -> value.from_int(tcal.months_in_year(cal, cd.year))
+        DgInLeapYear -> JsBool(tcal.in_leap_year(cal, cd.year))
       }
     }
   }
 }
 
-fn time_field(t: TimeRec, name: String) -> JsValue {
-  case name {
-    "hour" -> value.from_int(t.hour)
-    "minute" -> value.from_int(t.minute)
-    "second" -> value.from_int(t.second)
-    "millisecond" -> value.from_int(t.ms)
-    "microsecond" -> value.from_int(t.us)
-    "nanosecond" -> value.from_int(t.ns)
-    _ -> JsUndefined
+fn era_field(cal: tcal.Calendar, cd: tcal.CalDate) -> JsValue {
+  tcal.era_for(cal, cd.year, cd.month, cd.day)
+  |> option.map(fn(e: tcal.Era) { JsString(tcal.era_code_string(e.code)) })
+  |> option.unwrap(JsUndefined)
+}
+
+fn era_year_field(cal: tcal.Calendar, cd: tcal.CalDate) -> JsValue {
+  tcal.era_for(cal, cd.year, cd.month, cd.day)
+  |> option.map(fn(e: tcal.Era) { value.from_int(e.year) })
+  |> option.unwrap(JsUndefined)
+}
+
+fn time_field(t: TimeRec, g: TemporalTimeGetter) -> JsValue {
+  case g {
+    TgHour -> value.from_int(t.hour)
+    TgMinute -> value.from_int(t.minute)
+    TgSecond -> value.from_int(t.second)
+    TgMillisecond -> value.from_int(t.ms)
+    TgMicrosecond -> value.from_int(t.us)
+    TgNanosecond -> value.from_int(t.ns)
   }
 }
 
-fn year_month_field(y: Int, m: Int, name: String) -> JsValue {
-  case name {
-    "calendarId" -> JsString("iso8601")
-    "era" -> JsUndefined
-    "eraYear" -> JsUndefined
-    "year" -> value.from_int(y)
-    "month" -> value.from_int(m)
-    "monthCode" -> JsString(month_code_str(m))
-    "daysInYear" -> value.from_int(days_in_iso_year(y))
-    "daysInMonth" -> value.from_int(days_in_month(y, m))
-    "monthsInYear" -> value.from_int(12)
-    "inLeapYear" -> JsBool(is_leap_year(y))
-    _ -> JsUndefined
+fn year_month_field(y: Int, m: Int, g: TemporalYearMonthGetter) -> JsValue {
+  case g {
+    YmCalendarId -> JsString("iso8601")
+    YmEra -> JsUndefined
+    YmEraYear -> JsUndefined
+    YmYear -> value.from_int(y)
+    YmMonth -> value.from_int(m)
+    YmMonthCode -> JsString(month_code_str(m))
+    YmDaysInYear -> value.from_int(days_in_iso_year(y))
+    YmDaysInMonth -> value.from_int(days_in_month(y, m))
+    YmMonthsInYear -> value.from_int(12)
+    YmInLeapYear -> JsBool(is_leap_year(y))
   }
 }
 
@@ -5994,58 +6229,79 @@ fn year_month_field_cal(
   y: Int,
   m: Int,
   rd: Int,
-  name: String,
+  g: TemporalYearMonthGetter,
 ) -> JsValue {
   case cal {
-    tcal.Iso8601 -> year_month_field(y, m, name)
+    tcal.Iso8601 -> year_month_field(y, m, g)
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
-      case name {
-        "calendarId" -> JsString(tcal.identifier(cal))
-        "era" | "eraYear" -> {
-          let era = tcal.era_for(cal, cd.year, cd.month, cd.day)
-          case name {
-            "era" ->
-              era
-              |> option.map(fn(e: tcal.Era) {
-                JsString(tcal.era_code_string(e.code))
-              })
-              |> option.unwrap(JsUndefined)
-            _ ->
-              era
-              |> option.map(fn(e: tcal.Era) { value.from_int(e.year) })
-              |> option.unwrap(JsUndefined)
-          }
-        }
-        "year" -> value.from_int(cd.year)
-        "month" -> value.from_int(cd.month)
-        "monthCode" -> JsString(tcal.month_code(cal, cd.year, cd.month))
-        "daysInYear" -> value.from_int(tcal.days_in_year(cal, cd.year))
-        "daysInMonth" ->
+      case g {
+        YmCalendarId -> JsString(tcal.identifier(cal))
+        YmEra -> era_field(cal, cd)
+        YmEraYear -> era_year_field(cal, cd)
+        YmYear -> value.from_int(cd.year)
+        YmMonth -> value.from_int(cd.month)
+        YmMonthCode -> JsString(tcal.month_code(cal, cd.year, cd.month))
+        YmDaysInYear -> value.from_int(tcal.days_in_year(cal, cd.year))
+        YmDaysInMonth ->
           value.from_int(tcal.days_in_month(cal, cd.year, cd.month))
-        "monthsInYear" -> value.from_int(tcal.months_in_year(cal, cd.year))
-        "inLeapYear" -> JsBool(tcal.in_leap_year(cal, cd.year))
-        _ -> JsUndefined
+        YmMonthsInYear -> value.from_int(tcal.months_in_year(cal, cd.year))
+        YmInLeapYear -> JsBool(tcal.in_leap_year(cal, cd.year))
       }
     }
   }
 }
 
-fn duration_field(d: DurRec, name: String) -> JsValue {
-  case name {
-    "years" -> value.from_int(d.years)
-    "months" -> value.from_int(d.months)
-    "weeks" -> value.from_int(d.weeks)
-    "days" -> value.from_int(d.days)
-    "hours" -> value.from_int(d.hours)
-    "minutes" -> value.from_int(d.minutes)
-    "seconds" -> value.from_int(d.seconds)
-    "milliseconds" -> value.from_int(d.ms)
-    "microseconds" -> value.from_int(d.us)
-    "nanoseconds" -> value.from_int(d.ns)
-    "sign" -> value.from_int(duration_sign(d))
-    "blank" -> JsBool(duration_sign(d) == 0)
-    _ -> JsUndefined
+/// Calendar-aware month-day field getter. m/d/ry are the slot's ISO date.
+fn month_day_field_cal(
+  cal: tcal.Calendar,
+  m: Int,
+  d: Int,
+  ry: Int,
+  g: TemporalMonthDayGetter,
+) -> JsValue {
+  case g {
+    MdCalendarId -> JsString(tcal.identifier(cal))
+    MdMonthCode ->
+      case cal {
+        tcal.Iso8601 -> JsString(month_code_str(m))
+        _ -> {
+          let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
+          JsString(tcal.month_code(cal, cd.year, cd.month))
+        }
+      }
+    MdDay ->
+      case cal {
+        tcal.Iso8601 -> value.from_int(d)
+        _ -> {
+          let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
+          value.from_int(cd.day)
+        }
+      }
+  }
+}
+
+fn duration_field(d: DurRec, g: TemporalDurationGetter) -> JsValue {
+  case g {
+    DrYears -> value.from_int(d.years)
+    DrMonths -> value.from_int(d.months)
+    DrWeeks -> value.from_int(d.weeks)
+    DrDays -> value.from_int(d.days)
+    DrHours -> value.from_int(d.hours)
+    DrMinutes -> value.from_int(d.minutes)
+    DrSeconds -> value.from_int(d.seconds)
+    DrMilliseconds -> value.from_int(d.ms)
+    DrMicroseconds -> value.from_int(d.us)
+    DrNanoseconds -> value.from_int(d.ns)
+    DrSign -> value.from_int(duration_sign(d))
+    DrBlank -> JsBool(duration_sign(d) == 0)
+  }
+}
+
+fn instant_field(ns: Int, g: TemporalInstantGetter) -> JsValue {
+  case g {
+    InEpochMilliseconds -> value.from_int(floor_div(ns, ns_per_ms))
+    InEpochNanoseconds -> JsBigInt(value.BigInt(ns))
   }
 }
 
@@ -6054,30 +6310,27 @@ fn zoned_field(
   ns: Int,
   tz: String,
   zcal: tcal.Calendar,
-  name: String,
+  g: TemporalZonedGetter,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use offset <- terr(state, tz_offset_ns_at(tz, ns))
   let #(d, t) = epoch_ns_to_iso(ns, offset)
-  case name {
-    "timeZoneId" -> #(state, Ok(JsString(tz)))
-    "epochMilliseconds" -> #(
+  case g {
+    ZgTimeZoneId -> #(state, Ok(JsString(tz)))
+    ZgEpochMilliseconds -> #(
       state,
       Ok(value.from_int(floor_div(ns, ns_per_ms))),
     )
-    "epochNanoseconds" -> #(state, Ok(JsBigInt(value.BigInt(ns))))
-    "offsetNanoseconds" -> #(state, Ok(value.from_int(offset)))
-    "offset" -> #(state, Ok(JsString(format_offset_full(offset))))
-    "hoursInDay" -> {
+    ZgEpochNanoseconds -> #(state, Ok(JsBigInt(value.BigInt(ns))))
+    ZgOffsetNanoseconds -> #(state, Ok(value.from_int(offset)))
+    ZgOffset -> #(state, Ok(JsString(format_offset_full(offset))))
+    ZgHoursInDay -> {
       let tomorrow = iso_date_from_epoch_days(epoch_days(d) + 1)
       use s1 <- terr(state, start_of_day_ns(tz, d))
       use s2 <- terr(state, start_of_day_ns(tz, tomorrow))
       #(state, Ok(JsNumber(Finite(ns_div_float(s2 - s1, ns_per_hour)))))
     }
-    _ ->
-      case is_time_field(name) {
-        True -> #(state, Ok(time_field(t, name)))
-        False -> #(state, Ok(date_field_cal(zcal, d, name)))
-      }
+    ZgTime(tg) -> #(state, Ok(time_field(t, tg)))
+    ZgDate(dg) -> #(state, Ok(date_field_cal(zcal, d, dg)))
   }
 }
 
@@ -6152,26 +6405,181 @@ fn now_tz_arg(
 // ============================================================================
 
 fn method_dispatch(
-  kind: TemporalKind,
-  name: String,
+  method: TemporalMethodName,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case kind {
-    TemporalPlainDateKind -> plain_date_method(name, protos, this, args, state)
-    TemporalPlainTimeKind -> plain_time_method(name, protos, this, args, state)
-    TemporalPlainDateTimeKind ->
-      plain_date_time_method(name, protos, this, args, state)
-    TemporalPlainYearMonthKind ->
-      plain_year_month_method(name, protos, this, args, state)
-    TemporalPlainMonthDayKind ->
-      plain_month_day_method(name, protos, this, args, state)
-    TemporalDurationKind -> duration_method(name, protos, this, args, state)
-    TemporalInstantKind -> instant_method(name, protos, this, args, state)
-    TemporalZonedDateTimeKind ->
-      zoned_date_time_method(name, protos, this, args, state)
+  case method {
+    PlainDateMethodName(m) -> plain_date_method(m, protos, this, args, state)
+    PlainTimeMethodName(m) -> plain_time_method(m, protos, this, args, state)
+    PlainDateTimeMethodName(m) ->
+      plain_date_time_method(m, protos, this, args, state)
+    PlainYearMonthMethodName(m) ->
+      plain_year_month_method(m, protos, this, args, state)
+    PlainMonthDayMethodName(m) ->
+      plain_month_day_method(m, protos, this, args, state)
+    DurationMethodName(m) -> duration_method(m, protos, this, args, state)
+    InstantMethodName(m) -> instant_method(m, protos, this, args, state)
+    ZonedDateTimeMethodName(m) ->
+      zoned_date_time_method(m, protos, this, args, state)
+  }
+}
+
+/// JS-facing name of a prototype method — the only place these strings live.
+fn method_name(m: TemporalMethodName) -> String {
+  case m {
+    PlainDateMethodName(m) -> plain_date_method_name(m)
+    PlainTimeMethodName(m) -> plain_time_method_name(m)
+    PlainDateTimeMethodName(m) -> plain_date_time_method_name(m)
+    PlainYearMonthMethodName(m) -> plain_year_month_method_name(m)
+    PlainMonthDayMethodName(m) -> plain_month_day_method_name(m)
+    DurationMethodName(m) -> duration_method_name(m)
+    InstantMethodName(m) -> instant_method_name(m)
+    ZonedDateTimeMethodName(m) -> zoned_date_time_method_name(m)
+  }
+}
+
+fn plain_date_method_name(m: PlainDateMethod) -> String {
+  case m {
+    PdToPlainYearMonth -> "toPlainYearMonth"
+    PdToPlainMonthDay -> "toPlainMonthDay"
+    PdToPlainDateTime -> "toPlainDateTime"
+    PdToZonedDateTime -> "toZonedDateTime"
+    PdAdd -> "add"
+    PdSubtract -> "subtract"
+    PdWith -> "with"
+    PdWithCalendar -> "withCalendar"
+    PdUntil -> "until"
+    PdSince -> "since"
+    PdEquals -> "equals"
+    PdToString -> "toString"
+    PdToLocaleString -> "toLocaleString"
+    PdToJson -> "toJSON"
+    PdValueOf -> "valueOf"
+  }
+}
+
+fn plain_time_method_name(m: PlainTimeMethod) -> String {
+  case m {
+    PtAdd -> "add"
+    PtSubtract -> "subtract"
+    PtWith -> "with"
+    PtUntil -> "until"
+    PtSince -> "since"
+    PtRound -> "round"
+    PtEquals -> "equals"
+    PtToString -> "toString"
+    PtToLocaleString -> "toLocaleString"
+    PtToJson -> "toJSON"
+    PtValueOf -> "valueOf"
+  }
+}
+
+fn plain_date_time_method_name(m: PlainDateTimeMethod) -> String {
+  case m {
+    PdtWith -> "with"
+    PdtWithPlainTime -> "withPlainTime"
+    PdtWithCalendar -> "withCalendar"
+    PdtAdd -> "add"
+    PdtSubtract -> "subtract"
+    PdtUntil -> "until"
+    PdtSince -> "since"
+    PdtRound -> "round"
+    PdtEquals -> "equals"
+    PdtToString -> "toString"
+    PdtToLocaleString -> "toLocaleString"
+    PdtToJson -> "toJSON"
+    PdtValueOf -> "valueOf"
+    PdtToPlainDate -> "toPlainDate"
+    PdtToPlainTime -> "toPlainTime"
+    PdtToZonedDateTime -> "toZonedDateTime"
+  }
+}
+
+fn plain_year_month_method_name(m: PlainYearMonthMethod) -> String {
+  case m {
+    PymWith -> "with"
+    PymAdd -> "add"
+    PymSubtract -> "subtract"
+    PymUntil -> "until"
+    PymSince -> "since"
+    PymEquals -> "equals"
+    PymToString -> "toString"
+    PymToLocaleString -> "toLocaleString"
+    PymToJson -> "toJSON"
+    PymValueOf -> "valueOf"
+    PymToPlainDate -> "toPlainDate"
+  }
+}
+
+fn plain_month_day_method_name(m: PlainMonthDayMethod) -> String {
+  case m {
+    PmdWith -> "with"
+    PmdEquals -> "equals"
+    PmdToString -> "toString"
+    PmdToLocaleString -> "toLocaleString"
+    PmdToJson -> "toJSON"
+    PmdValueOf -> "valueOf"
+    PmdToPlainDate -> "toPlainDate"
+  }
+}
+
+fn duration_method_name(m: DurationMethod) -> String {
+  case m {
+    DmWith -> "with"
+    DmNegated -> "negated"
+    DmAbs -> "abs"
+    DmAdd -> "add"
+    DmSubtract -> "subtract"
+    DmRound -> "round"
+    DmTotal -> "total"
+    DmToString -> "toString"
+    DmToJson -> "toJSON"
+    DmToLocaleString -> "toLocaleString"
+    DmValueOf -> "valueOf"
+  }
+}
+
+fn instant_method_name(m: InstantMethod) -> String {
+  case m {
+    ImAdd -> "add"
+    ImSubtract -> "subtract"
+    ImUntil -> "until"
+    ImSince -> "since"
+    ImRound -> "round"
+    ImEquals -> "equals"
+    ImToString -> "toString"
+    ImToLocaleString -> "toLocaleString"
+    ImToJson -> "toJSON"
+    ImValueOf -> "valueOf"
+    ImToZonedDateTimeIso -> "toZonedDateTimeISO"
+  }
+}
+
+fn zoned_date_time_method_name(m: ZonedDateTimeMethod) -> String {
+  case m {
+    ZmWithTimeZone -> "withTimeZone"
+    ZmWithCalendar -> "withCalendar"
+    ZmWithPlainTime -> "withPlainTime"
+    ZmWith -> "with"
+    ZmAdd -> "add"
+    ZmSubtract -> "subtract"
+    ZmUntil -> "until"
+    ZmSince -> "since"
+    ZmRound -> "round"
+    ZmEquals -> "equals"
+    ZmToString -> "toString"
+    ZmToLocaleString -> "toLocaleString"
+    ZmToJson -> "toJSON"
+    ZmValueOf -> "valueOf"
+    ZmStartOfDay -> "startOfDay"
+    ZmGetTimeZoneTransition -> "getTimeZoneTransition"
+    ZmToInstant -> "toInstant"
+    ZmToPlainDate -> "toPlainDate"
+    ZmToPlainTime -> "toPlainTime"
+    ZmToPlainDateTime -> "toPlainDateTime"
   }
 }
 
@@ -6180,22 +6588,22 @@ fn method_dispatch(
 // ----------------------------------------------------------------------------
 
 fn plain_date_method(
-  name: String,
+  m: PlainDateMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_date(state, this) {
-    None -> brand_error(state, "PlainDate", name)
+    None -> brand_error(state, "PlainDate", plain_date_method_name(m))
     Some(d) -> {
       let cal = this_calendar(state, this)
-      case name {
-        "toJSON" | "toLocaleString" -> #(
+      case m {
+        PdToJson | PdToLocaleString -> #(
           state,
           Ok(JsString(format_iso_date(d) <> calendar_suffix(CalAuto, cal))),
         )
-        "toString" -> {
+        PdToString -> {
           use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
@@ -6203,12 +6611,12 @@ fn plain_date_method(
           let s = format_iso_date(d) <> calendar_suffix(cal_name, cal)
           #(state, Ok(JsString(s)))
         }
-        "valueOf" ->
+        PdValueOf ->
           state.type_error(
             state,
             "Temporal.PlainDate cannot be converted with valueOf; use compare() or equals()",
           )
-        "equals" -> {
+        PdEquals -> {
           use #(other, other_cal), state <- state.try_op(to_temporal_date(
             state,
             arg_at(args, 0),
@@ -6216,7 +6624,7 @@ fn plain_date_method(
           ))
           #(state, Ok(JsBool(d == other && cal == other_cal)))
         }
-        "add" | "subtract" -> {
+        PdAdd | PdSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
             arg_at(args, 0),
@@ -6225,15 +6633,15 @@ fn plain_date_method(
             state,
             arg_at(args, 1),
           ))
-          let dur = case name {
-            "subtract" -> negate_dur(dur)
+          let dur = case m {
+            PdSubtract -> negate_dur(dur)
             _ -> dur
           }
           use d2 <- terr(state, calendar_date_add(cal, d, dur, overflow))
           let #(state, v) = make_date_cal(state, protos, d2, cal)
           #(state, Ok(v))
         }
-        "with" -> {
+        PdWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
             arg_at(args, 0),
@@ -6257,7 +6665,7 @@ fn plain_date_method(
             }
           }
         }
-        "withCalendar" -> {
+        PdWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
             state,
             arg_at(args, 0),
@@ -6265,7 +6673,7 @@ fn plain_date_method(
           let #(state, v) = make_date_cal(state, protos, d, new_cal)
           #(state, Ok(v))
         }
-        "toPlainDateTime" -> {
+        PdToPlainDateTime -> {
           use t, state <- state.try_op(case arg_at(args, 0) {
             JsUndefined -> Ok(#(midnight, state))
             v -> to_temporal_time(state, v, JsUndefined)
@@ -6273,7 +6681,7 @@ fn plain_date_method(
           let #(state, v) = make_date_time_cal(state, protos, d, t, cal)
           #(state, Ok(v))
         }
-        "toPlainYearMonth" -> {
+        PdToPlainYearMonth -> {
           let #(ymy, ymm, ymd) = case cal {
             tcal.Iso8601 -> #(d.year, d.month, 1)
             _ -> {
@@ -6292,7 +6700,7 @@ fn plain_date_method(
             make_year_month_cal(state, protos, ymy, ymm, ymd, cal)
           #(state, Ok(v))
         }
-        "toPlainMonthDay" -> {
+        PdToPlainMonthDay -> {
           case cal {
             tcal.Iso8601 -> {
               let #(state, v) =
@@ -6320,7 +6728,7 @@ fn plain_date_method(
             }
           }
         }
-        "toZonedDateTime" -> {
+        PdToZonedDateTime -> {
           // Argument: a time zone string, or an object with a timeZone
           // property (plus optional plainTime).
           case arg_at(args, 0) {
@@ -6361,7 +6769,7 @@ fn plain_date_method(
             _ -> state.type_error(state, "time zone must be a string")
           }
         }
-        "until" | "since" -> {
+        PdUntil | PdSince -> {
           use #(other, other_cal), state <- state.try_op(to_temporal_date(
             state,
             arg_at(args, 0),
@@ -6374,18 +6782,9 @@ fn plain_date_method(
                 "cannot compute difference between dates of different calendars",
               )
             True ->
-              date_until_since(
-                state,
-                protos,
-                cal,
-                d,
-                other,
-                args,
-                name == "since",
-              )
+              date_until_since(state, protos, cal, d, other, args, m == PdSince)
           }
         }
-        _ -> state.type_error(state, "unknown method")
       }
     }
   }
@@ -7316,21 +7715,21 @@ fn round_relative_date_duration(
 // ----------------------------------------------------------------------------
 
 fn plain_time_method(
-  name: String,
+  m: PlainTimeMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_time(state, this) {
-    None -> brand_error(state, "PlainTime", name)
+    None -> brand_error(state, "PlainTime", plain_time_method_name(m))
     Some(t) ->
-      case name {
-        "toJSON" | "toLocaleString" -> #(
+      case m {
+        PtToJson | PtToLocaleString -> #(
           state,
           Ok(JsString(format_iso_time(t, AutoPrec))),
         )
-        "toString" -> {
+        PtToString -> {
           use opts, state <- state.try_op(get_options_object(
             state,
             arg_at(args, 0),
@@ -7348,12 +7747,12 @@ fn plain_time_method(
           }
           #(state, Ok(JsString(format_iso_time(t2, prec))))
         }
-        "valueOf" ->
+        PtValueOf ->
           state.type_error(
             state,
             "Temporal.PlainTime cannot be converted with valueOf",
           )
-        "equals" -> {
+        PtEquals -> {
           use other, state <- state.try_op(to_temporal_time(
             state,
             arg_at(args, 0),
@@ -7361,20 +7760,20 @@ fn plain_time_method(
           ))
           #(state, Ok(JsBool(t == other)))
         }
-        "add" | "subtract" -> {
+        PtAdd | PtSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
             arg_at(args, 0),
           ))
-          let dur = case name {
-            "subtract" -> negate_dur(dur)
+          let dur = case m {
+            PtSubtract -> negate_dur(dur)
             _ -> dur
           }
           let #(_, t2) = add_time(t, time_only_ns(dur))
           let #(state, v) = make_time(state, protos, t2)
           #(state, Ok(v))
         }
-        "with" -> {
+        PtWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
             arg_at(args, 0),
@@ -7395,7 +7794,7 @@ fn plain_time_method(
             }
           }
         }
-        "round" -> {
+        PtRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
@@ -7413,15 +7812,14 @@ fn plain_time_method(
             }
           }
         }
-        "until" | "since" -> {
+        PtUntil | PtSince -> {
           use other, state <- state.try_op(to_temporal_time(
             state,
             arg_at(args, 0),
             JsUndefined,
           ))
-          time_until_since(state, protos, t, other, args, name == "since")
+          time_until_since(state, protos, t, other, args, m == PtSince)
         }
-        _ -> state.type_error(state, "unknown method")
       }
   }
 }
@@ -7707,18 +8105,18 @@ fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
 // ----------------------------------------------------------------------------
 
 fn plain_date_time_method(
-  name: String,
+  m: PlainDateTimeMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_date_time(state, this) {
-    None -> brand_error(state, "PlainDateTime", name)
+    None -> brand_error(state, "PlainDateTime", plain_date_time_method_name(m))
     Some(#(d, t)) -> {
       let cal = this_calendar(state, this)
-      case name {
-        "toJSON" -> #(
+      case m {
+        PdtToJson -> #(
           state,
           Ok(JsString(
             format_iso_date(d)
@@ -7727,11 +8125,11 @@ fn plain_date_time_method(
             <> calendar_suffix(CalAuto, cal),
           )),
         )
-        "toLocaleString" -> #(
+        PdtToLocaleString -> #(
           state,
           Ok(JsString(format_iso_date(d) <> " " <> format_iso_time(t, AutoPrec))),
         )
-        "toString" -> {
+        PdtToString -> {
           use #(cal_name, opts), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
@@ -7754,12 +8152,12 @@ fn plain_date_time_method(
             <> calendar_suffix(cal_name, cal)
           #(state, Ok(JsString(s)))
         }
-        "valueOf" ->
+        PdtValueOf ->
           state.type_error(
             state,
             "Temporal.PlainDateTime cannot be converted with valueOf",
           )
-        "equals" -> {
+        PdtEquals -> {
           use #(od, ot, ocal), state <- state.try_op(to_temporal_date_time(
             state,
             arg_at(args, 0),
@@ -7767,7 +8165,7 @@ fn plain_date_time_method(
           ))
           #(state, Ok(JsBool(#(d, t) == #(od, ot) && cal == ocal)))
         }
-        "add" | "subtract" -> {
+        PdtAdd | PdtSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
             arg_at(args, 0),
@@ -7776,8 +8174,8 @@ fn plain_date_time_method(
             state,
             arg_at(args, 1),
           ))
-          let dur = case name {
-            "subtract" -> negate_dur(dur)
+          let dur = case m {
+            PdtSubtract -> negate_dur(dur)
             _ -> dur
           }
           // Time first, carry days into the date addition.
@@ -7800,7 +8198,7 @@ fn plain_date_time_method(
             }
           }
         }
-        "withPlainTime" -> {
+        PdtWithPlainTime -> {
           use t2, state <- state.try_op(case arg_at(args, 0) {
             JsUndefined -> Ok(#(midnight, state))
             v -> to_temporal_time(state, v, JsUndefined)
@@ -7808,7 +8206,7 @@ fn plain_date_time_method(
           let #(state, v) = make_date_time_cal(state, protos, d, t2, cal)
           #(state, Ok(v))
         }
-        "withCalendar" -> {
+        PdtWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
             state,
             arg_at(args, 0),
@@ -7816,7 +8214,7 @@ fn plain_date_time_method(
           let #(state, v) = make_date_time_cal(state, protos, d, t, new_cal)
           #(state, Ok(v))
         }
-        "with" -> {
+        PdtWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
             arg_at(args, 0),
@@ -7854,7 +8252,7 @@ fn plain_date_time_method(
             }
           }
         }
-        "round" -> {
+        PdtRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
@@ -7883,15 +8281,15 @@ fn plain_date_time_method(
             }
           }
         }
-        "toPlainDate" -> {
+        PdtToPlainDate -> {
           let #(state, v) = make_date_cal(state, protos, d, cal)
           #(state, Ok(v))
         }
-        "toPlainTime" -> {
+        PdtToPlainTime -> {
           let #(state, v) = make_time(state, protos, t)
           #(state, Ok(v))
         }
-        "toZonedDateTime" -> {
+        PdtToZonedDateTime -> {
           case arg_at(args, 0) {
             JsString(tz_str) -> {
               use tz <- terr(state, parse_time_zone_id(tz_str))
@@ -7916,7 +8314,7 @@ fn plain_date_time_method(
             _ -> state.type_error(state, "time zone must be a string")
           }
         }
-        "until" | "since" -> {
+        PdtUntil | PdtSince -> {
           use #(od, ot, ocal), state <- state.try_op(to_temporal_date_time(
             state,
             arg_at(args, 0),
@@ -7936,11 +8334,10 @@ fn plain_date_time_method(
                 #(d, t),
                 #(od, ot),
                 args,
-                name == "since",
+                m == PdtSince,
               )
           }
         }
-        _ -> state.type_error(state, "unknown method")
       }
     }
   }
@@ -8080,34 +8477,35 @@ fn diff_date_time_core(
 // ----------------------------------------------------------------------------
 
 fn plain_year_month_method(
-  name: String,
+  meth: PlainYearMonthMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_year_month(state, this) {
-    None -> brand_error(state, "PlainYearMonth", name)
+    None ->
+      brand_error(state, "PlainYearMonth", plain_year_month_method_name(meth))
     Some(#(y, m, rd)) -> {
       let cal = this_calendar(state, this)
-      case name {
-        "toJSON" | "toLocaleString" -> #(
+      case meth {
+        PymToJson | PymToLocaleString -> #(
           state,
           Ok(JsString(format_ym_cal(y, m, rd, cal, CalAuto))),
         )
-        "toString" -> {
+        PymToString -> {
           use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
           ))
           #(state, Ok(JsString(format_ym_cal(y, m, rd, cal, cal_name))))
         }
-        "valueOf" ->
+        PymValueOf ->
           state.type_error(
             state,
             "Temporal.PlainYearMonth cannot be converted with valueOf",
           )
-        "equals" -> {
+        PymEquals -> {
           use other, state <- state.try_op(to_temporal_year_month(
             state,
             arg_at(args, 0),
@@ -8115,7 +8513,7 @@ fn plain_year_month_method(
           ))
           #(state, Ok(JsBool(#(y, m, rd, cal) == other)))
         }
-        "add" | "subtract" -> {
+        PymAdd | PymSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
             arg_at(args, 0),
@@ -8124,8 +8522,8 @@ fn plain_year_month_method(
             state,
             arg_at(args, 1),
           ))
-          let dur = case name {
-            "subtract" -> negate_dur(dur)
+          let dur = case meth {
+            PymSubtract -> negate_dur(dur)
             _ -> dur
           }
           // AddDurationToYearMonth: only years and months are allowed
@@ -8211,7 +8609,7 @@ fn plain_year_month_method(
             }
           }
         }
-        "with" -> {
+        PymWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
             arg_at(args, 0),
@@ -8293,7 +8691,7 @@ fn plain_year_month_method(
             }
           }
         }
-        "toPlainDate" -> {
+        PymToPlainDate -> {
           case arg_at(args, 0) {
             JsObject(ref) -> {
               use day, state <- state.try_op(read_bag_int_field(
@@ -8349,7 +8747,7 @@ fn plain_year_month_method(
             _ -> state.type_error(state, "argument must be an object")
           }
         }
-        "until" | "since" -> {
+        PymUntil | PymSince -> {
           use other, state <- state.try_op(to_temporal_year_month(
             state,
             arg_at(args, 0),
@@ -8369,11 +8767,10 @@ fn plain_year_month_method(
                 #(y, m, rd),
                 #(other.0, other.1, other.2),
                 args,
-                name == "since",
+                meth == PymSince,
               )
           }
         }
-        _ -> state.type_error(state, "unknown method")
       }
     }
   }
@@ -8561,34 +8958,35 @@ fn round_calendar_year_total(
 // ----------------------------------------------------------------------------
 
 fn plain_month_day_method(
-  name: String,
+  meth: PlainMonthDayMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_month_day(state, this) {
-    None -> brand_error(state, "PlainMonthDay", name)
+    None ->
+      brand_error(state, "PlainMonthDay", plain_month_day_method_name(meth))
     Some(#(m, d, ry)) -> {
       let cal = this_calendar(state, this)
-      case name {
-        "toJSON" | "toLocaleString" -> #(
+      case meth {
+        PmdToJson | PmdToLocaleString -> #(
           state,
           Ok(JsString(format_md_cal(m, d, ry, cal, CalAuto))),
         )
-        "toString" -> {
+        PmdToString -> {
           use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
             arg_at(args, 0),
           ))
           #(state, Ok(JsString(format_md_cal(m, d, ry, cal, cal_name))))
         }
-        "valueOf" ->
+        PmdValueOf ->
           state.type_error(
             state,
             "Temporal.PlainMonthDay cannot be converted with valueOf",
           )
-        "equals" -> {
+        PmdEquals -> {
           use other, state <- state.try_op(to_temporal_month_day(
             state,
             arg_at(args, 0),
@@ -8596,7 +8994,7 @@ fn plain_month_day_method(
           ))
           #(state, Ok(JsBool(#(m, d, ry, cal) == other)))
         }
-        "with" -> {
+        PmdWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
             arg_at(args, 0),
@@ -8637,7 +9035,7 @@ fn plain_month_day_method(
             }
           }
         }
-        "toPlainDate" -> {
+        PmdToPlainDate -> {
           case arg_at(args, 0) {
             JsObject(ref) -> {
               use era, state <- state.try_op(case tcal.has_eras(cal) {
@@ -8705,7 +9103,6 @@ fn plain_month_day_method(
             _ -> state.type_error(state, "argument must be an object")
           }
         }
-        _ -> state.type_error(state, "unknown method")
       }
     }
   }
@@ -8741,21 +9138,21 @@ fn format_md_cal(
 // ----------------------------------------------------------------------------
 
 fn duration_method(
-  name: String,
+  m: DurationMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_duration(state, this) {
-    None -> brand_error(state, "Duration", name)
+    None -> brand_error(state, "Duration", duration_method_name(m))
     Some(d) ->
-      case name {
-        "toJSON" | "toLocaleString" -> #(
+      case m {
+        DmToJson | DmToLocaleString -> #(
           state,
           Ok(JsString(format_duration(d, AutoPrec))),
         )
-        "toString" -> {
+        DmToString -> {
           use opts, state <- state.try_op(get_options_object(
             state,
             arg_at(args, 0),
@@ -8782,16 +9179,16 @@ fn duration_method(
           })
           #(state, Ok(JsString(format_duration(d2, prec))))
         }
-        "valueOf" ->
+        DmValueOf ->
           state.type_error(
             state,
             "Temporal.Duration cannot be converted with valueOf",
           )
-        "negated" -> {
+        DmNegated -> {
           let #(state, v) = make_duration(state, protos, negate_dur(d))
           #(state, Ok(v))
         }
-        "abs" -> {
+        DmAbs -> {
           let abs_d = case duration_sign(d) < 0 {
             True -> negate_dur(d)
             False -> d
@@ -8799,7 +9196,7 @@ fn duration_method(
           let #(state, v) = make_duration(state, protos, abs_d)
           #(state, Ok(v))
         }
-        "with" -> {
+        DmWith -> {
           case arg_at(args, 0) {
             JsObject(ref) -> {
               use days, state <- state.try_op(read_bag_int_field(
@@ -8895,13 +9292,13 @@ fn duration_method(
             _ -> state.type_error(state, "argument must be an object")
           }
         }
-        "add" | "subtract" -> {
+        DmAdd | DmSubtract -> {
           use other, state <- state.try_op(to_temporal_duration(
             state,
             arg_at(args, 0),
           ))
-          let other = case name {
-            "subtract" -> negate_dur(other)
+          let other = case m {
+            DmSubtract -> negate_dur(other)
             _ -> other
           }
           let has_cal =
@@ -8931,9 +9328,8 @@ fn duration_method(
             }
           }
         }
-        "round" -> duration_round(state, protos, d, args)
-        "total" -> duration_total(state, d, args)
-        _ -> state.type_error(state, "unknown method")
+        DmRound -> duration_round(state, protos, d, args)
+        DmTotal -> duration_total(state, d, args)
       }
   }
 }
@@ -9786,21 +10182,21 @@ fn join_unit(n: Int, designator: String) -> String {
 // ----------------------------------------------------------------------------
 
 fn instant_method(
-  name: String,
+  m: InstantMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_instant(state, this) {
-    None -> brand_error(state, "Instant", name)
+    None -> brand_error(state, "Instant", instant_method_name(m))
     Some(ns) ->
-      case name {
-        "toJSON" | "toLocaleString" -> #(
+      case m {
+        ImToJson | ImToLocaleString -> #(
           state,
           Ok(JsString(format_instant(ns, AutoPrec))),
         )
-        "toString" -> {
+        ImToString -> {
           use opts, state <- state.try_op(get_options_object(
             state,
             arg_at(args, 0),
@@ -9845,19 +10241,19 @@ fn instant_method(
             _ -> state.type_error(state, "timeZone must be a string")
           }
         }
-        "valueOf" ->
+        ImValueOf ->
           state.type_error(
             state,
             "Temporal.Instant cannot be converted with valueOf",
           )
-        "equals" -> {
+        ImEquals -> {
           use other, state <- state.try_op(to_temporal_instant(
             state,
             arg_at(args, 0),
           ))
           #(state, Ok(JsBool(ns == other)))
         }
-        "add" | "subtract" -> {
+        ImAdd | ImSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
             arg_at(args, 0),
@@ -9871,8 +10267,8 @@ fn instant_method(
                 "Instant arithmetic does not support date units",
               )
             False -> {
-              let delta = case name {
-                "subtract" -> 0 - time_only_ns(dur)
+              let delta = case m {
+                ImSubtract -> 0 - time_only_ns(dur)
                 _ -> time_only_ns(dur)
               }
               let ns2 = ns + delta
@@ -9886,7 +10282,7 @@ fn instant_method(
             }
           }
         }
-        "round" -> {
+        ImRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
@@ -9909,14 +10305,14 @@ fn instant_method(
             }
           }
         }
-        "until" | "since" -> {
+        ImUntil | ImSince -> {
           use other, state <- state.try_op(to_temporal_instant(
             state,
             arg_at(args, 0),
           ))
-          instant_until_since(state, protos, ns, other, args, name == "since")
+          instant_until_since(state, protos, ns, other, args, m == ImSince)
         }
-        "toZonedDateTimeISO" -> {
+        ImToZonedDateTimeIso -> {
           case arg_at(args, 0) {
             JsString(tz_str) -> {
               use tz <- terr(state, parse_time_zone_id(tz_str))
@@ -9927,7 +10323,6 @@ fn instant_method(
             _ -> state.type_error(state, "time zone must be a string")
           }
         }
-        _ -> state.type_error(state, "unknown method")
       }
   }
 }
@@ -9981,24 +10376,24 @@ fn instant_until_since(
 // ----------------------------------------------------------------------------
 
 fn zoned_date_time_method(
-  name: String,
+  m: ZonedDateTimeMethod,
   protos: TemporalProtos,
   this: JsValue,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_zoned(state, this) {
-    None -> brand_error(state, "ZonedDateTime", name)
+    None -> brand_error(state, "ZonedDateTime", zoned_date_time_method_name(m))
     Some(#(ns, tz, zcal)) -> {
       let _ = zcal
       use off <- terr(state, tz_offset_ns_at(tz, ns))
       let #(d, t) = epoch_ns_to_iso(ns, off)
-      case name {
-        "toJSON" | "toLocaleString" -> {
+      case m {
+        ZmToJson | ZmToLocaleString -> {
           use s <- terr(state, format_zoned(ns, tz, AutoPrec))
           #(state, Ok(JsString(s)))
         }
-        "toString" -> {
+        ZmToString -> {
           // Read order: calendarName, fractionalSecondDigits, offset,
           // roundingMode, smallestUnit, timeZoneName; validate after.
           use #(cal_name, opts), state <- state.try_op(get_calendar_name_option(
@@ -10053,12 +10448,12 @@ fn zoned_date_time_method(
           let s = with_tz <> calendar_suffix(cal_name, zcal)
           #(state, Ok(JsString(s)))
         }
-        "valueOf" ->
+        ZmValueOf ->
           state.type_error(
             state,
             "Temporal.ZonedDateTime cannot be converted with valueOf",
           )
-        "equals" -> {
+        ZmEquals -> {
           use #(ons, otz, ocal), state <- state.try_op(to_temporal_zoned(
             state,
             arg_at(args, 0),
@@ -10069,7 +10464,7 @@ fn zoned_date_time_method(
             Ok(JsBool(ns == ons && time_zone_equals(tz, otz) && zcal == ocal)),
           )
         }
-        "add" | "subtract" -> {
+        ZmAdd | ZmSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
             arg_at(args, 0),
@@ -10078,8 +10473,8 @@ fn zoned_date_time_method(
             state,
             arg_at(args, 1),
           ))
-          let dur = case name {
-            "subtract" -> negate_dur(dur)
+          let dur = case m {
+            ZmSubtract -> negate_dur(dur)
             _ -> dur
           }
           // Add date part in local wall-clock space, then exact time. Pure
@@ -10121,7 +10516,7 @@ fn zoned_date_time_method(
             }
           }
         }
-        "withTimeZone" -> {
+        ZmWithTimeZone -> {
           case arg_at(args, 0) {
             JsString(tz_str) -> {
               use tz2 <- terr(state, parse_time_zone_id(tz_str))
@@ -10131,7 +10526,7 @@ fn zoned_date_time_method(
             _ -> state.type_error(state, "time zone must be a string")
           }
         }
-        "until" | "since" -> {
+        ZmUntil | ZmSince -> {
           use #(ons, otz, ocal), state <- state.try_op(to_temporal_zoned(
             state,
             arg_at(args, 0),
@@ -10153,11 +10548,11 @@ fn zoned_date_time_method(
                 ons,
                 otz,
                 args,
-                name == "since",
+                m == ZmSince,
               )
           }
         }
-        "round" -> {
+        ZmRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
             arg_at(args, 0),
@@ -10228,7 +10623,7 @@ fn zoned_date_time_method(
             }
           }
         }
-        "with" -> {
+        ZmWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
             arg_at(args, 0),
@@ -10284,7 +10679,7 @@ fn zoned_date_time_method(
             }
           }
         }
-        "withCalendar" -> {
+        ZmWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
             state,
             arg_at(args, 0),
@@ -10292,7 +10687,7 @@ fn zoned_date_time_method(
           let #(state, v) = make_zoned_cal(state, protos, ns, tz, new_cal)
           #(state, Ok(v))
         }
-        "withPlainTime" -> {
+        ZmWithPlainTime -> {
           // Undefined → GetStartOfDay; an explicit time (even midnight) uses
           // compatible disambiguation. These differ when midnight is skipped.
           case arg_at(args, 0) {
@@ -10313,12 +10708,12 @@ fn zoned_date_time_method(
             }
           }
         }
-        "startOfDay" -> {
+        ZmStartOfDay -> {
           use ns2 <- terr(state, start_of_day_ns(tz, d))
           let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
           #(state, Ok(v))
         }
-        "getTimeZoneTransition" -> {
+        ZmGetTimeZoneTransition -> {
           use dir, state <- state.try_op(case arg_at(args, 0) {
             JsUndefined ->
               type_error_result(state, "direction parameter is required")
@@ -10367,23 +10762,22 @@ fn zoned_date_time_method(
             UtcZone | OffsetZone(_) | UnknownZone -> #(state, Ok(JsNull))
           }
         }
-        "toInstant" -> {
+        ZmToInstant -> {
           let #(state, v) = make_instant(state, protos, ns)
           #(state, Ok(v))
         }
-        "toPlainDate" -> {
+        ZmToPlainDate -> {
           let #(state, v) = make_date_cal(state, protos, d, zcal)
           #(state, Ok(v))
         }
-        "toPlainTime" -> {
+        ZmToPlainTime -> {
           let #(state, v) = make_time(state, protos, t)
           #(state, Ok(v))
         }
-        "toPlainDateTime" -> {
+        ZmToPlainDateTime -> {
           let #(state, v) = make_date_time_cal(state, protos, d, t, zcal)
           #(state, Ok(v))
         }
-        _ -> state.type_error(state, "unknown method")
       }
     }
   }
