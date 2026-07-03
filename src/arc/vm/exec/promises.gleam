@@ -10,8 +10,9 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}
 import arc/vm/value.{
-  type JsValue, type Ref, ArrayObject, Finite, JsBool, JsObject, JsString,
-  JsUndefined, ObjectSlot, OrdinaryObject,
+  type JsValue, type ObjectKey, type Ref, ArrayObject, Finite, JsBool, JsObject,
+  JsString, JsUndefined, ObjectSlot, OrdinaryObject, StringPropKey,
+  SymbolPropKey,
 }
 import gleam/bool
 import gleam/dict
@@ -1176,7 +1177,7 @@ fn perform_promise_all_keyed(
   case promises {
     JsObject(promises_ref) -> {
       // Step 1: Let allKeys be ? promises.[[OwnPropertyKeys]]() — trap-aware.
-      use #(all_keys, state) <- result.try(builtins_object.own_keys_stateful(
+      use #(all_keys, state) <- result.try(builtins_object.own_property_keys(
         state,
         promises_ref,
       ))
@@ -1232,7 +1233,7 @@ type KeyedLoop {
 fn perform_keyed_loop(
   state: State(host),
   loop: KeyedLoop,
-  all_keys: List(JsValue),
+  all_keys: List(ObjectKey),
   index: Int,
 ) -> Result(State(host), #(JsValue, State(host))) {
   case all_keys {
@@ -1255,15 +1256,13 @@ fn perform_keyed_loop(
         }
       }
     }
-    [key_val, ..rest] -> {
+    [key, ..rest] -> {
       // Step 6.a: Let propertyDesc be ? promises.[[GetOwnProperty]](key).
-      use #(desc, state) <- result.try(
-        builtins_object.get_own_property_stateful(
-          state,
-          loop.promises_ref,
-          key_val,
-        ),
-      )
+      use #(desc, state) <- result.try(builtins_object.own_property_keyed(
+        state,
+        loop.promises_ref,
+        key,
+      ))
       // Step 6.b: skip absent / non-enumerable properties.
       let enumerable =
         option.map(desc, value.prop_enumerable) |> option.unwrap(False)
@@ -1274,10 +1273,16 @@ fn perform_keyed_loop(
           use #(prop_value, state) <- result.try(get_keyed_value(
             state,
             loop,
-            key_val,
+            key,
           ))
           // Steps 6.b.ii-iii: append key to keys, undefined to values.
-          let h = set_array_element(state.heap, loop.keys_ref, index, key_val)
+          let h =
+            set_array_element(
+              state.heap,
+              loop.keys_ref,
+              index,
+              builtins_object.object_key_value(key),
+            )
           let h = set_array_element(h, loop.values_ref, index, JsUndefined)
           // Step 6.b.iv: nextPromise = ? Call(promiseResolve, ctor,
           // «propertyValue»).
@@ -1349,24 +1354,17 @@ fn perform_keyed_loop(
 }
 
 /// Step 6.b.i Get(promises, key) for a property key produced by
-/// [[OwnPropertyKeys]] — JsString or JsSymbol only.
+/// [[OwnPropertyKeys]].
 fn get_keyed_value(
   state: State(host),
   loop: KeyedLoop,
-  key_val: JsValue,
+  key: ObjectKey,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case key_val {
-    JsString(s) ->
-      object.get_value(
-        state,
-        loop.promises_ref,
-        key.canonical_key(s),
-        loop.promises,
-      )
-    value.JsSymbol(sym) ->
+  case key {
+    StringPropKey(pkey:, ..) ->
+      object.get_value(state, loop.promises_ref, pkey, loop.promises)
+    SymbolPropKey(sym) ->
       object.get_symbol_value(state, loop.promises_ref, sym, loop.promises)
-    // own_keys_stateful only yields String/Symbol values.
-    _ -> Ok(#(JsUndefined, state))
   }
 }
 

@@ -4016,8 +4016,9 @@ fn group_by_finish(
 // descriptor plumbing above)
 // ============================================================================
 
-/// ObjectKey → trap-argument JsValue (String or Symbol).
-fn object_key_value(key: ObjectKey) -> JsValue {
+/// ObjectKey → JS-visible key value (String or Symbol). Used for proxy trap
+/// arguments and wherever a key crosses back into JS (arrays, result objects).
+pub fn object_key_value(key: ObjectKey) -> JsValue {
   case key {
     StringPropKey(display:, ..) -> JsString(display)
     SymbolPropKey(sym) -> JsSymbol(sym)
