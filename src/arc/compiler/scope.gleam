@@ -511,10 +511,13 @@ fn new_raw_scope(
 
 /// Threaded parse-time accumulator. `current` is the innermost scope the
 /// parser is inside; `current_fn` is its nearest enclosing function-kind
-/// scope (the var-hoist target). `sb_push` updates both; `sb_pop` restores
-/// ONLY those two cursors — accumulated `scopes`/`functions`/`children_at`/
-/// `raw_refs` flow forward so an inner scope's declarations survive the
-/// `}` that closes it.
+/// scope (the var-hoist target). INVARIANT: `current_fn ==
+/// sb_scope(sb, current).function_scope` — the pair is never set
+/// independently, only by `sb_init` / `sb_push` / `sb_enter`, each of
+/// which derives `current_fn` from the scope itself. Leaving a scope is
+/// `sb_enter(sb, outer_id)`; accumulated `scopes`/`functions`/
+/// `children_at`/`raw_refs` flow forward so an inner scope's declarations
+/// survive the `}` that closes it.
 pub type ScopeBuilder {
   ScopeBuilder(
     scopes: Dict(ScopeId, RawScope),
@@ -559,10 +562,9 @@ pub fn sb_init(root_kind: ScopeKind, strict: Bool) -> ScopeBuilder {
 /// Look up a `RawScope` by id. Internal — every id the parser holds was
 /// minted by `sb_push`, so a miss is a bug and we say so loudly instead
 /// of fabricating a wrong Block-kind orphan that would silently corrupt
-/// resolution. Pruning cannot trip this: `sb_prune_empty_block`
-/// deliberately KEEPS pruned blocks in `sb.scopes` as tombstones (only
-/// `children_at` is spliced), and `sb_discard`'s callers never hold the
-/// discarded id afterwards.
+/// resolution. Neither pruning nor discarding can trip this: both
+/// `sb_prune_empty_block` and `sb_discard` deliberately KEEP the removed
+/// scope in `sb.scopes` as a tombstone (only `children_at` is unlinked).
 fn sb_scope(sb: ScopeBuilder, id: ScopeId) -> RawScope {
   let assert Ok(s) = dict.get(sb.scopes, id)
     as "scope.sb_scope: unknown ScopeId"
@@ -572,7 +574,8 @@ fn sb_scope(sb: ScopeBuilder, id: ScopeId) -> RawScope {
 /// Allocate and enter a fresh child scope of `kind` under `sb.current`.
 /// Mirrors `new_scope` but records a `RawScope` (no slots) and a
 /// `RawFunctionInfo` skeleton when `kind` is function-like. Returns the
-/// new scope's id so the caller can stash it for the matching `sb_pop`.
+/// new scope's id so the caller can stash it (the matching close is
+/// `sb_enter(sb, outer_id)`).
 pub fn sb_push(sb: ScopeBuilder, kind: ScopeKind) -> #(ScopeBuilder, ScopeId) {
   let id = sb.next_id
   let parent = sb_scope(sb, sb.current)
@@ -634,18 +637,6 @@ pub fn sb_push_var_boundary(sb: ScopeBuilder) -> #(ScopeBuilder, ScopeId) {
     ),
     id,
   )
-}
-
-/// Leave the innermost scope: restore ONLY the `current`/`current_fn`
-/// cursors to the saved outer values. Accumulated `scopes`/`functions`/
-/// `children_at`/`raw_refs` flow forward unchanged — the closed scope's
-/// declarations and refs persist for `finalize`.
-pub fn sb_pop(
-  sb: ScopeBuilder,
-  restore_to: ScopeId,
-  restore_fn_to: ScopeId,
-) -> ScopeBuilder {
-  ScopeBuilder(..sb, current: restore_to, current_fn: restore_fn_to)
 }
 
 /// Record `name` in the appropriate scope (var/fn-decl-sloppy → `current_fn`;
@@ -790,11 +781,21 @@ pub fn sb_set_children(
   )
 }
 
-/// Set `current` (and `current_fn`) to an already-pushed scope `id`. Used
-/// to re-enter a pre-created synthetic scope (the per-class instance-init
-/// / static-init shells) so that scopes pushed while parsing a class
-/// field's initializer parent under that shell — matching `declare_class`
-/// — without allocating a fresh scope. Does NOT touch `children_at`.
+/// Move the cursor to an already-pushed scope `id`, deriving `current_fn`
+/// from that scope's own `function_scope` so the two can never desync (a
+/// desynced pair would route `sb_lexical_ref` into the wrong function's
+/// `own_lexical_refs` and silently drop, e.g., an arrow's `this` capture).
+///
+/// This is BOTH primitives:
+///   * leaving a scope at its closing `}` — `sb_enter(sb, outer_id)`;
+///   * re-entering a pre-created synthetic scope (the per-class
+///     instance-init / static-init shells) so scopes pushed while parsing
+///     a class field's initializer parent under that shell, matching
+///     `declare_class`, without allocating a fresh scope.
+///
+/// Accumulated `scopes`/`functions`/`children_at`/`raw_refs` flow forward
+/// unchanged, so a closed scope's declarations and refs persist for
+/// `finalize`. Does NOT touch `children_at`.
 pub fn sb_enter(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   let scope = sb_scope(sb, id)
   ScopeBuilder(..sb, current: id, current_fn: scope.function_scope)
@@ -901,11 +902,19 @@ fn insert_param_shims_loop(
   }
 }
 
-/// Drop `id` from the tree and unlink it from its parent's `children_at`.
+/// Unlink `id` from the tree: drop it from its parent's `children_at` and
+/// from `functions`/`own_lexical_refs`, so `finalize` never visits it.
 /// Used to discard the pre-created class instance-init / static-init
 /// shells when the class body had no instance fields/private methods
 /// (resp. no static elements), so `declare_class` would not have created
 /// the shell. Caller guarantees `id` has no children.
+///
+/// The `RawScope` STAYS in `sb.scopes` as a tombstone, exactly as
+/// `sb_prune_empty_block` leaves pruned blocks: `sb.scopes` is the
+/// address space every id the parser ever minted resolves through
+/// (`sb_scope`, `resolve_raw_refs`), and deleting from it would make an
+/// id the parser still holds dangle. The shell has no bindings and no
+/// refs, so keeping it is invisible to resolution.
 pub fn sb_discard(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   let scope = sb_scope(sb, id)
   let children_at = case scope.parent {
@@ -917,7 +926,6 @@ pub fn sb_discard(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   }
   ScopeBuilder(
     ..sb,
-    scopes: dict.delete(sb.scopes, id),
     functions: dict.delete(sb.functions, id),
     children_at: dict.delete(children_at, id),
     own_lexical_refs: dict.delete(sb.own_lexical_refs, id),
@@ -1153,7 +1161,7 @@ pub fn sb_reorder_switch_children(
 /// them into the parent's still-accumulating reverse-source list, and a
 /// declaration-free block contains no FunctionDeclarations by definition
 /// so hoist-reorder is unnecessary. Returns the ScopeBuilder still
-/// positioned INSIDE `block_id` — caller follows with `sb_pop`.
+/// positioned INSIDE `block_id` — caller follows with `sb_enter`.
 pub fn sb_close_block(sb: ScopeBuilder, block_id: ScopeId) -> ScopeBuilder {
   case sb_block_prunable(sb_scope(sb, block_id)) {
     True -> sb_prune_empty_block(sb, block_id)
@@ -1920,35 +1928,32 @@ fn resolve_raw_refs(
     list.fold(sb.raw_refs, #(set.new(), set.new()), fn(acc, ref) {
       let #(seen, captured) = acc
       let #(scope_id, name) = ref
-      // The ref's scope may be a `sb_prune_empty_block` tombstone:
-      // present in `sb.scopes` but absent from `tree.scopes`. Read
-      // `function_scope` from the RawScope (a pruned Block inherits
+      // The ref's scope may be a `sb_prune_empty_block` / `sb_discard`
+      // tombstone: present in `sb.scopes` but absent from `tree.scopes`.
+      // Read `function_scope` from the RawScope (a pruned Block inherits
       // its parent's, so it's correct), then walk up the RawScope
       // parent chain to the nearest ancestor that DID survive into
       // `tree.scopes` and start `find_declaring_scope` from there —
       // the skipped tombstones have no bindings by construction so
-      // they cannot affect resolution. A miss in `sb.scopes` itself
-      // means a genuinely dangling ref (parser bug); skip rather than
-      // panic so one bad ref doesn't bring the compile down.
-      case dict.get(sb.scopes, scope_id) {
-        Error(Nil) -> acc
-        Ok(raw) -> {
-          use <- bool.guard(set.contains(seen, ref), acc)
-          let seen = set.insert(seen, ref)
-          let ref_fn = raw.function_scope
-          let is_free = case nearest_finalized(tree, sb, scope_id) {
+      // they cannot affect resolution. `sb.scopes` retains EVERY id ever
+      // minted, so a miss is a dangling ref (parser bug) — crash rather
+      // than silently drop the reference and mis-resolve a capture.
+      let assert Ok(raw) = dict.get(sb.scopes, scope_id)
+        as "scope.resolve_raw_refs: dangling raw_ref"
+      use <- bool.guard(set.contains(seen, ref), acc)
+      let seen = set.insert(seen, ref)
+      let ref_fn = raw.function_scope
+      let is_free = case nearest_finalized(tree, sb, scope_id) {
+        None -> True
+        Some(start) ->
+          case find_declaring_scope(tree, start, name) {
             None -> True
-            Some(start) ->
-              case find_declaring_scope(tree, start, name) {
-                None -> True
-                Some(decl) -> decl.function_scope != ref_fn
-              }
+            Some(decl) -> decl.function_scope != ref_fn
           }
-          case is_free {
-            False -> #(seen, captured)
-            True -> #(seen, set.insert(captured, #(ref_fn, name)))
-          }
-        }
+      }
+      case is_free {
+        False -> #(seen, captured)
+        True -> #(seen, set.insert(captured, #(ref_fn, name)))
       }
     })
   captured
@@ -2869,6 +2874,19 @@ fn insert_captures(
         }
       }
     })
+  // A capture whose name is ALSO declared by this function (e.g. an
+  // eval-poisoned body that declares `var x` while the parent has `x`)
+  // is SHADOWED: the own declaration wins everywhere. `shadowed` is the
+  // one predicate both writes below consult, so `do_lookup` (which reads
+  // `root.bindings`) and `local_names` (which reads `info.names`) can
+  // never disagree about which slot `x` is. The capture slot stays
+  // reserved and is still filled from `env_descriptors[i]`; it is simply
+  // not nameable from inside this frame.
+  let root_bindings =
+    dict.get(scopes, fn_id)
+    |> result.map(fn(s: Scope) { s.bindings })
+    |> result.unwrap(dict.new())
+  let shadowed = fn(name) { dict.has_key(root_bindings, name) }
   // Insert CaptureBinding entries at slots 0..N-1 in the function-root
   // scope so `do_lookup` resolves captured names to a Local in THIS frame
   // and `visible_at_creation` exposes them to grandchildren. Captures are
@@ -2881,19 +2899,7 @@ fn insert_captures(
       let bindings =
         list.index_fold(captures, root.bindings, fn(bs, cap, i) {
           let #(name, _parent_slot) = cap
-          // A same-named OWN declaration (e.g. eval-poisoned body that
-          // also declares `var x` while parent has `x`) shadows the
-          // capture for lookup — leave the (already-shifted) own
-          // binding in place. The capture slot is still reserved and
-          // filled by env_descriptors[i] and gets no Binding entry
-          // here — BUT the info.names fold below is intentionally
-          // NOT guarded: it overwrites names[x] to the capture slot
-          // so local_names (compiler.gleam) exposes the capture, not
-          // the own decl, matching the legacy resolver bit-for-bit.
-          // lookup() and local_names therefore disagree on the slot
-          // in this shadowed case; that divergence is pre-existing
-          // and deliberately preserved by this refactor.
-          use <- bool.guard(dict.has_key(bs, name), bs)
+          use <- bool.guard(shadowed(name), bs)
           let origin = case
             set.contains(const_captures, name),
             set.contains(fn_name_captures, name)
@@ -2918,10 +2924,17 @@ fn insert_captures(
   }
   // Shift the per-function names map and bump local_count; record capture
   // names at their new slots so direct-eval `local_names` exposes them.
+  // Same `shadowed` gate as the CaptureBinding insert above: a shadowed
+  // name keeps its (already-shifted) own-declaration slot.
   let info = function_info(tree, fn_id)
   let names =
     dict.map_values(info.names, fn(_n, slot) { slot + cap_count })
-    |> list.index_fold(captures, _, fn(d, cap, i) { dict.insert(d, cap.0, i) })
+    |> list.index_fold(captures, _, fn(d, cap, i) {
+      case shadowed(cap.0) {
+        True -> d
+        False -> dict.insert(d, cap.0, i)
+      }
+    })
   let functions =
     dict.insert(
       tree.functions,

@@ -28088,6 +28088,7 @@ language/eval-code/direct/gen-meth-fn-body-cntns-arguments-var-bind-declare-argu
 language/eval-code/direct/gen-meth-no-pre-existing-arguments-bindings-are-present-declare-arguments-and-assign.js
 language/eval-code/direct/gen-meth-no-pre-existing-arguments-bindings-are-present-declare-arguments.js
 language/eval-code/direct/global-env-rec-catch.js
+language/eval-code/direct/global-env-rec-fun.js
 language/eval-code/direct/global-env-rec-with.js
 language/eval-code/direct/global-env-rec.js
 language/eval-code/direct/import.js

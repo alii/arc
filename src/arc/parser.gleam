@@ -11,9 +11,9 @@
 /// Submodules:
 ///   parser/error        — ParseError type, formatting, position extraction
 ///   parser/token        — TokenKind classification and conversion
-///   parser/number       — JS number literal parsing
+///   parser/number       — Numeric literal classification (Number vs BigInt)
 ///   parser/regex        — Regex literal scanning and /u validation
-///   parser/legacy_octal — Annex B legacy-octal detection (strict checks)
+///   parser/legacy_octal — Annex B legacy-form detection (strict checks)
 ///
 /// The mutually-recursive core (statements ↔ expressions ↔ patterns) lives
 /// here since Gleam doesn't support cross-module recursion.
@@ -68,7 +68,7 @@ import arc/parser/error.{
   UsingMissingInitializer, UsingPatternBinding, WithNotAllowedStrictMode,
   YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode,
 }
-import arc/parser/legacy_octal.{has_legacy_octal_escape, is_legacy_octal_number}
+import arc/parser/legacy_octal.{is_legacy_octal_number, strict_forbidden_escape}
 import arc/parser/lexer.{
   type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
   Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
@@ -83,7 +83,7 @@ import arc/parser/lexer.{
   StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral, This,
   Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
 }
-import arc/parser/number.{parse_js_number}
+import arc/parser/number
 import arc/parser/regex
 import arc/parser/token.{
   Binary, BinaryOperator, Logical, assignment_op, binary_operator,
@@ -144,9 +144,24 @@ type BindingKind {
   /// ConstBinding (legacy `declare_direct_lexicals`), not LetBinding,
   /// or emit's `IrThrowConstAssign` / `IrDeclareGlobalLex(is_const)`
   /// paths never fire.
-  BindingLexical(kind: scope.BindingKind)
+  ///
+  /// `bound` is the set of binding names seen so far in THIS declaration,
+  /// used to reject `let a, a;` (§14.3.1). It lives on the variant, not on
+  /// `Ctx`, so a `BindingVar`/`BindingParam`/`BindingNone` context can
+  /// never carry stale lexical bound-names; and "`let` is forbidden as a
+  /// binding name" (§13.3.1.1) is exactly `BindingLexical(..)` rather than
+  /// a separately-maintained `in_lexical_decl` flag that could disagree.
+  BindingLexical(kind: scope.BindingKind, bound: Set(String))
   /// Inside formal parameter parsing (treated as lexical for scope purposes).
   BindingParam
+}
+
+/// Whether the parser is currently inside a let/const/using declarator list.
+fn in_lexical_decl(ctx: Ctx) -> Bool {
+  case ctx.binding_kind {
+    BindingLexical(..) -> True
+    BindingNone | BindingVar | BindingParam -> False
+  }
 }
 
 /// What the statement behind a label is. `continue L` is only legal when L
@@ -224,7 +239,10 @@ type Ctx {
     allow_super_call: Bool,
     // super.x is allowed in any method (class or object literal)
     allow_super_property: Bool,
-    // What kind of binding we are currently parsing.
+    // What kind of binding we are currently parsing. `BindingLexical` also
+    // carries the names already bound by the current let/const declarator
+    // list — the two used to be separate `in_lexical_decl`/`decl_bound_names`
+    // Ctx fields that had to be saved and restored in lockstep with this one.
     binding_kind: BindingKind,
     // Whether we are inside a block scope (as opposed to function/script
     // top-level). Affects function declaration scoping: in blocks, function
@@ -236,13 +254,6 @@ type Ctx {
     // do-while/with). Used to forbid labeled function declarations in these
     // contexts per spec Annex B 3.4.
     in_single_stmt_pos: Bool,
-    // Whether we are currently parsing the bindings of a let/const declaration.
-    // When true, "let" is forbidden as a binding name even in sloppy mode.
-    in_lexical_decl: Bool,
-    // Binding names seen so far in the current let/const declaration.
-    // Used to detect duplicate bindings like `let a, a;`.
-    // Only checked when in_lexical_decl is True.
-    decl_bound_names: Set(String),
   )
 }
 
@@ -356,11 +367,12 @@ type P {
     // Replaces the old per-block scope_lexical/scope_var/scope_params/
     // scope_funcs/outer_lexical Sets. The parser threads a single
     // `ScopeBuilder` accumulator: `sb_push` at every scope-introducing
-    // construct, `sb_declare` at every binding, `sb_pop` at every closing
-    // brace. Early-error duplicate-binding checks read the builder's
+    // construct, `sb_declare` at every binding, `sb_enter(outer_id)` at
+    // every closing brace.
+    // Early-error duplicate-binding checks read the builder's
     // `scopes` dict via `sb_lexical_conflict` / `sb_var_conflicts_lexical`.
-    // Accumulated scopes/refs flow FORWARD across `sb_pop` (only the
-    // `current`/`current_fn` cursors restore), so a `}` does not discard
+    // Accumulated scopes/refs flow FORWARD across the close (only the
+    // `current`/`current_fn` cursors move), so a `}` does not discard
     // the inner scope's recorded declarations. Replaces the post-parse
     // scope.analyze AST walks: scopes, bindings and references are recorded
     // here as they are parsed; finalize converts to a ScopeTree.
@@ -431,8 +443,8 @@ fn statement_to_default_export_expr(
 fn init_parser(
   source: String,
   mode: ParseMode,
-  cont: fn(P) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError),
-) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
+  cont: fn(P) -> Result(a, ParseError),
+) -> Result(a, ParseError) {
   let bytes = bit_array.from_string(source)
   let lex_mode = case mode {
     Module -> lexer.LexModule
@@ -467,8 +479,6 @@ fn init_parser(
           in_block: False,
           module_top_level: False,
           in_single_stmt_pos: False,
-          in_lexical_decl: False,
-          decl_bound_names: set.new(),
         ),
         class_private_depth: 0,
         private_refs: [],
@@ -509,15 +519,44 @@ fn init_parser(
 /// `scope.finalize` to allocate slots and resolve captures. Callers that
 /// only need the AST (tests, tooling) destructure and discard the
 /// builder; the compile pipeline threads it to `scope.finalize`.
+///
+/// The compile pipeline uses `parse_script` / `parse_module` instead: those
+/// hand back the BODY the matching `compiler.compile*` entry point consumes,
+/// so no caller has to unwrap (or mis-match) a `Program` variant.
 pub fn parse(
   source: String,
   mode: ParseMode,
 ) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
-  use p <- init_parser(source, mode)
   case mode {
-    Script -> parse_script(p)
-    Module -> parse_module(p)
+    Script -> {
+      use #(body, sb) <- result.map(parse_script(source))
+      #(ast.Script(body:), sb)
+    }
+    Module -> {
+      use #(items, sb) <- result.map(parse_module(source))
+      #(ast.Module(body: items), sb)
+    }
   }
+}
+
+/// Parse source under the Script goal symbol, returning the statement list
+/// (`compiler.compile` / `compile_repl` / `compile_eval` take exactly this)
+/// paired with the parse-time scope builder.
+pub fn parse_script(
+  source: String,
+) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
+  use p <- init_parser(source, Script)
+  script_body(p)
+}
+
+/// Parse source under the Module goal symbol, returning the module-item list
+/// (`compiler.compile_module` and `esm.analyze` take exactly this) paired
+/// with the parse-time scope builder.
+pub fn parse_module(
+  source: String,
+) -> Result(#(List(ast.ModuleItem), scope.ScopeBuilder), ParseError) {
+  use p <- init_parser(source, Module)
+  module_body(p)
 }
 
 /// Parse a direct-eval Script with `allow_new_target` inherited from the
@@ -534,7 +573,7 @@ pub fn parse_direct_eval(
   allow_super_call allow_super_call: Bool,
   allow_arguments allow_arguments: Bool,
   outer_private_names outer_private_names: List(String),
-) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Script)
   // §19.2.1.1 PerformEval step 5: direct eval inside a method may legally
   // reference the caller's private names — `outer_private_names` is the
@@ -545,7 +584,7 @@ pub fn parse_direct_eval(
   // `allow_arguments: False` (field initializers, static blocks) re-uses the
   // in_class_field_init ContainsArguments rejection - the exact error
   // variant differs from the static-block one but both are SyntaxErrors.
-  parse_script_check_privates(
+  script_body(
     P(
       ..p,
       ctx: Ctx(
@@ -562,15 +601,9 @@ pub fn parse_direct_eval(
 
 // ---- Script / Module entry points ----
 
-fn parse_script(
+fn script_body(
   p: P,
-) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
-  parse_script_check_privates(p)
-}
-
-fn parse_script_check_privates(
-  p: P,
-) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
   use p <- result.try(check_use_strict_at_start(p))
   use #(p_final, stmts) <- result.try(parse_statement_list(p, True, []))
   use Nil <- result.try(check_unresolved_private_refs(p_final))
@@ -578,18 +611,18 @@ fn parse_script_check_privates(
   // emit_program's child_fn_cursor (seeded from children_at[0]) pops
   // top-level FunctionDeclarations before fn-exprs/arrows/classes.
   let sb = scope.sb_reorder_block_children(p_final.sb, scope.root_scope_id)
-  Ok(#(ast.Script(body: stmts), sb))
+  Ok(#(stmts, sb))
 }
 
-fn parse_module(
+fn module_body(
   p: P,
-) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.ModuleItem), scope.ScopeBuilder), ParseError) {
   use #(p_final, items) <- result.try(parse_module_body(p, []))
   use Nil <- result.try(validate_export_local_refs(p_final))
   use Nil <- result.try(check_unresolved_private_refs(p_final))
   // Root scope close: reorder root's children to hoist order.
   let sb = scope.sb_reorder_block_children(p_final.sb, scope.root_scope_id)
-  Ok(#(ast.Module(body: items), sb))
+  Ok(#(items, sb))
 }
 
 fn parse_module_body(
@@ -826,12 +859,7 @@ fn parse_using_declaration(
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      ctx: Ctx(
-        ..p3.ctx,
-        in_lexical_decl: p.ctx.in_lexical_decl,
-        decl_bound_names: p.ctx.decl_bound_names,
-        binding_kind: p.ctx.binding_kind,
-      ),
+      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind),
       in_export_decl: False,
     ),
   ))
@@ -938,7 +966,7 @@ fn parse_single_statement_inner(
           use #(p2, stmt) <- result.map(parse_statement(p_inner))
           let sb =
             scope.sb_close_block(p2.sb, block_id)
-            |> scope.sb_pop(p.sb.current, p.sb.current_fn)
+            |> scope.sb_enter(p.sb.current)
           #(P(..p2, sb:, ctx: Ctx(..p2.ctx, in_block: p.ctx.in_block)), stmt)
         }
         // In strict mode or in iteration/with context, function decls are forbidden
@@ -982,12 +1010,22 @@ fn restore_block_scope(after p: P, before saved: P) -> P {
   let sb = scope.sb_reorder_block_children(p.sb, p.sb.current)
   P(
     ..p,
-    sb: scope.sb_pop(sb, saved.sb.current, saved.sb.current_fn),
+    sb: scope.sb_enter(sb, saved.sb.current),
     ctx: Ctx(..p.ctx, in_block: saved.ctx.in_block),
   )
 }
 
 fn parse_block_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+  use #(p2, stmts) <- result.map(parse_block_body(p))
+  #(p2, ast.BlockStatement(body: stmts))
+}
+
+/// The `{ StatementList }` of a Block, as its raw statement list. Every
+/// production whose body is a Block but whose AST node holds the statements
+/// directly (function / arrow / try / catch / method bodies) parses through
+/// this rather than `parse_block_statement`, so no consumer has to
+/// re-destructure a `BlockStatement` it already knows is there.
+fn parse_block_body(p: P) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
   // `{}` fast path: an empty block declares nothing, so the block-scope
   // context construction + restore below would be a no-op — skip it. Hot on
   // `{}`-dense code (staging/sm/regress/regress-610026.js evals 2^21+ empty
@@ -998,20 +1036,24 @@ fn parse_block_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   case peek(p), peek_at(p, 1) {
     LeftBrace, RightBrace -> {
       let p2 = advance(advance(p))
-      Ok(#(
-        P(
-          ..p2,
-          ctx: Ctx(..p2.ctx, in_single_stmt_pos: False),
-          in_case_clause: False,
+      Ok(
+        #(
+          P(
+            ..p2,
+            ctx: Ctx(..p2.ctx, in_single_stmt_pos: False),
+            in_case_clause: False,
+          ),
+          [],
         ),
-        ast.BlockStatement(body: []),
-      ))
+      )
     }
-    _, _ -> parse_block_statement_slow(p)
+    _, _ -> parse_block_body_slow(p)
   }
 }
 
-fn parse_block_statement_slow(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_block_body_slow(
+  p: P,
+) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftBrace))
   // Enter block scope (enter_block_scope inlined so the per-caller extras
   // fold into one P construction). Param-name conflicts apply only to the
@@ -1039,7 +1081,7 @@ fn parse_block_statement_slow(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // child_fn_cursor stays in lockstep. Then pop.
   let sb =
     scope.sb_close_block(p4.sb, block_id)
-    |> scope.sb_pop(p2.sb.current, p2.sb.current_fn)
+    |> scope.sb_enter(p2.sb.current)
   Ok(#(
     // restore_block_scope inlined: keep p4.sb's accumulated scopes/refs;
     // restore only the current/current_fn cursors to the outer scope.
@@ -1052,7 +1094,7 @@ fn parse_block_statement_slow(p: P) -> Result(#(P, ast.Statement), ParseError) {
         module_top_level: p2.ctx.module_top_level,
       ),
     ),
-    ast.BlockStatement(body: stmts),
+    stmts,
   ))
 }
 
@@ -1071,12 +1113,7 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      ctx: Ctx(
-        ..p3.ctx,
-        in_lexical_decl: p.ctx.in_lexical_decl,
-        decl_bound_names: p.ctx.decl_bound_names,
-        binding_kind: p.ctx.binding_kind,
-      ),
+      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind),
       in_export_decl: False,
     ),
   ))
@@ -1309,7 +1346,7 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
         False -> Ok(Nil)
       }
     "let" ->
-      case p.ctx.strict || p.ctx.in_lexical_decl {
+      case p.ctx.strict || in_lexical_decl(p.ctx) {
         True -> Error(LetBindingInLexicalDecl(pos_of(p)))
         False -> Ok(Nil)
       }
@@ -1317,13 +1354,15 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
   }
 }
 
-/// Check if a binding name is a duplicate within the current let/const declaration.
-/// Returns Ok(p) with the name added to decl_bound_names, or Error if duplicate.
-/// Only checks when in_lexical_decl is True (i.e., inside let/const, not var).
+/// Check if a binding name is a duplicate within the current let/const
+/// declaration (`let a, a;` — §14.3.1). Returns Ok(p) with the name added to
+/// the declaration's `bound` set. Only a `BindingLexical` context has such a
+/// set to check against, so var/param/no-declaration contexts are a no-op by
+/// construction rather than by a separate flag.
 fn check_duplicate_binding(p: P, name: String) -> Result(P, ParseError) {
-  case p.ctx.in_lexical_decl {
-    True ->
-      case set.contains(p.ctx.decl_bound_names, name) {
+  case p.ctx.binding_kind {
+    BindingLexical(kind:, bound:) ->
+      case set.contains(bound, name) {
         True -> Error(DuplicateBindingLexical(name, pos_of(p)))
         False ->
           Ok(
@@ -1331,12 +1370,15 @@ fn check_duplicate_binding(p: P, name: String) -> Result(P, ParseError) {
               ..p,
               ctx: Ctx(
                 ..p.ctx,
-                decl_bound_names: set.insert(p.ctx.decl_bound_names, name),
+                binding_kind: BindingLexical(
+                  kind:,
+                  bound: set.insert(bound, name),
+                ),
               ),
             ),
           )
       }
-    False -> Ok(p)
+    BindingNone | BindingVar | BindingParam -> Ok(p)
   }
 }
 
@@ -1378,7 +1420,7 @@ fn register_lexical_name(
 /// - BindingNone: no scope registration
 fn register_scope_binding(p: P, name: String) -> Result(P, ParseError) {
   case p.ctx.binding_kind {
-    BindingLexical(kind) -> register_lexical_name(p, name, kind, pos_of(p))
+    BindingLexical(kind:, ..) -> register_lexical_name(p, name, kind, pos_of(p))
     BindingParam ->
       Ok(
         P(
@@ -1717,6 +1759,26 @@ fn parse_object_binding_property(
   }
 }
 
+/// The current `Number` token as its AST literal — a NumberLiteral or a
+/// BigIntLiteral, decided by `number.parse_numeric_literal` (which owns the
+/// trailing-`n` test, the radix prefixes and Annex B legacy octal). Malformed
+/// text is a hard SyntaxError, not a silently-cooked 0.
+fn numeric_literal(p: P) -> Result(ast.Expression, ParseError) {
+  let span = span_of(p)
+  case number.parse_numeric_literal(peek_value(p)) {
+    Ok(number.NumberValue(n)) -> Ok(ast.NumberLiteral(value: n, span:))
+    Ok(number.BigIntValue(i)) -> Ok(ast.BigIntLiteral(value: i, span:))
+    Error(err) ->
+      Error(IllegalToken(number.parse_error_message(err), pos_of(p)))
+  }
+}
+
+/// Does the current string token carry an Annex B escape form that strict
+/// mode forbids (`\07` legacy octal, or `\8`/`\9` non-octal decimal)?
+fn has_strict_forbidden_escape(p: P) -> Bool {
+  option.is_some(strict_forbidden_escape(peek_value(p)))
+}
+
 /// Parse a property name and return (parser, key_expression, is_computed).
 fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
   case peek(p) {
@@ -1729,17 +1791,12 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
         p.ctx.strict && is_legacy_octal_number(peek_value(p)),
         Error(OctalLiteralStrictMode(pos_of(p))),
       )
-      let raw = peek_value(p)
-      let span = span_of(p)
-      let lit = case string.ends_with(raw, "n") {
-        True -> ast.BigIntLiteral(value: number.parse_js_bigint(raw), span:)
-        False -> ast.NumberLiteral(value: parse_js_number(raw), span:)
-      }
-      Ok(#(advance(p), lit, False))
+      use lit <- result.map(numeric_literal(p))
+      #(advance(p), lit, False)
     }
     KString -> {
       use <- bool.guard(
-        p.ctx.strict && has_legacy_octal_escape(peek_value(p)),
+        p.ctx.strict && has_strict_forbidden_escape(p),
         Error(OctalEscapeStrictMode(pos_of(p))),
       )
       Ok(#(
@@ -1997,33 +2054,20 @@ fn parse_for_declaration_scoped(
 
 /// Leave the for-head declaration context once its declarator list is fully
 /// parsed, before the in/of right-hand side, condition, update, or body.
-/// Otherwise in_lexical_decl/decl_bound_names leak into the rest of the
-/// statement and unrelated bindings (params, catch params, var) are
-/// dup-checked against the for-head names.
+/// Otherwise the for-head's `BindingLexical` (and its accumulated `bound`
+/// names) leaks into the rest of the statement and unrelated bindings
+/// (params, catch params, var) are dup-checked against the for-head names.
 fn exit_for_decl_context(p: P, outer: P) -> P {
-  P(
-    ..p,
-    ctx: Ctx(
-      ..p.ctx,
-      in_lexical_decl: outer.ctx.in_lexical_decl,
-      decl_bound_names: outer.ctx.decl_bound_names,
-      binding_kind: outer.ctx.binding_kind,
-    ),
-  )
+  P(..p, ctx: Ctx(..p.ctx, binding_kind: outer.ctx.binding_kind))
 }
 
-/// Enter a let/const/using declarator-list context: `in_lexical_decl` turns
-/// on the same-declaration duplicate-name check, `decl_bound_names` starts
-/// empty, and `binding_kind` records which kind the declarators bind as.
+/// Enter a let/const/using declarator-list context: `binding_kind` records
+/// which kind the declarators bind as, and starts the same-declaration
+/// duplicate-name check with an empty `bound` set.
 fn enter_lexical_decl_context(p: P, kind: scope.BindingKind) -> P {
   P(
     ..p,
-    ctx: Ctx(
-      ..p.ctx,
-      in_lexical_decl: True,
-      decl_bound_names: set.new(),
-      binding_kind: BindingLexical(kind),
-    ),
+    ctx: Ctx(..p.ctx, binding_kind: BindingLexical(kind:, bound: set.new())),
   )
 }
 
@@ -2449,11 +2493,11 @@ fn parse_throw_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
 
 fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let p2 = advance(p)
-  use #(p3, block) <- result.try(parse_block_statement(p2))
+  use #(p3, block) <- result.try(parse_block_body(p2))
   use #(p4, handler) <- result.try(parse_catch_clause(p3))
   use #(p5, finalizer) <- result.try(case peek(p4) {
     Finally -> {
-      use #(p, b) <- result.map(parse_block_statement(advance(p4)))
+      use #(p, b) <- result.map(parse_block_body(advance(p4)))
       #(p, option.Some(b))
     }
     _ -> Ok(#(p4, option.None))
@@ -2510,12 +2554,12 @@ fn parse_catch_clause(
       ))
       // §14.15.2-3: the catch parameter lives in its OWN scope (catchEnv);
       // the Block that follows gets its own child env via the ordinary
-      // BlockStatement path (parse_block_statement → emit_block), so a
-      // closure in the parameter's destructuring default can never see the
-      // body's lexical declarations, and the parser/emit scope cursors
-      // agree on the body Block (emit_block enters it iff it has
-      // declarations — parse_block_statement prunes it in lockstep).
-      use #(p6, body) <- result.map(parse_block_statement(p5))
+      // Block path (parse_block_body → emit_block), so a closure in the
+      // parameter's destructuring default can never see the body's lexical
+      // declarations, and the parser/emit scope cursors agree on the body
+      // Block (emit_block enters it iff it has declarations —
+      // parse_block_body prunes it in lockstep).
+      use #(p6, body) <- result.map(parse_block_body(p5))
       #(
         // restore_block_scope inlined: keep p6.sb's accumulated state;
         // restore only the current/current_fn cursors. The Catch's
@@ -2526,7 +2570,7 @@ fn parse_catch_clause(
         P(
           ..p6,
           sb: scope.sb_reorder_block_children(p6.sb, catch_id)
-            |> scope.sb_pop(p3.sb.current, p3.sb.current_fn),
+            |> scope.sb_enter(p3.sb.current),
           ctx: Ctx(
             ..p6.ctx,
             in_block: p3.ctx.in_block,
@@ -2538,7 +2582,7 @@ fn parse_catch_clause(
     }
     _ -> {
       // catch without binding — Block is required
-      use #(p3, body) <- result.map(parse_block_statement(p2))
+      use #(p3, body) <- result.map(parse_block_body(p2))
       #(p3, option.Some(ast.CatchClause(param: option.None, body:)))
     }
   }
@@ -2569,7 +2613,7 @@ fn parse_switch_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // when no case body declares anything.
   let sb =
     scope.sb_reorder_switch_children(p7.sb, switch_id)
-    |> scope.sb_pop(p6.sb.current, p6.sb.current_fn)
+    |> scope.sb_enter(p6.sb.current)
   Ok(#(
     // restore_block_scope inlined.
     P(
@@ -2768,7 +2812,7 @@ fn parse_function_decl_impl(
 
 fn parse_function_params_and_body(
   p: P,
-) -> Result(#(P, List(ast.Pattern), ast.Statement), ParseError) {
+) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
   // Parse params with BindingParam so names land in the function scope
   let p2 =
@@ -2871,7 +2915,9 @@ fn fixed_params_non_simple(params: List(ast.Pattern)) -> Bool {
 /// Parse a function body block WITHOUT creating a new block scope.
 /// The function's params are already in the function scope, so the body
 /// shares the same scope as the params.
-fn parse_function_body_block(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_function_body_block(
+  p: P,
+) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftBrace))
   // Snapshot the enclosing scope's children BEFORE the body so the
   // hoist-reorder at `}` only repositions body-statement children —
@@ -2889,10 +2935,10 @@ fn parse_function_body_block(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // function / catch / static-block scope the caller pushed; this is
   // the ONE chokepoint every `{...}` body that does NOT introduce its
   // own Block scope flows through, so the reorder lives here rather
-  // than at each caller. The caller's sb_pop / restore_outer_context
+  // than at each caller. The caller's sb_enter / restore_outer_context
   // runs after.
   let p4 = P(..p4, sb: scope.sb_reorder_body_children(p4.sb, body_id, mark))
-  Ok(#(p4, ast.BlockStatement(body: stmts)))
+  Ok(#(p4, stmts))
 }
 
 /// §10.2.11 step 28: when the fixed formal list is non-simple, the body's
@@ -2907,15 +2953,14 @@ fn parse_function_body_block(p: P) -> Result(#(P, ast.Statement), ParseError) {
 fn parse_fn_body_maybe_var_boundary(
   p: P,
   params: List(ast.Pattern),
-) -> Result(#(P, ast.Statement), ParseError) {
+) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
   case fixed_params_non_simple(params) {
     False -> parse_function_body_block(p)
     True -> {
       let fn_id = p.sb.current
-      let outer_fn = p.sb.current_fn
       let #(sb, _body_id) = scope.sb_push_var_boundary(p.sb)
       use #(p2, body) <- result.map(parse_function_body_block(P(..p, sb:)))
-      // Pop back to the Function scope, then flip `children_at[fn root]`
+      // Re-enter the Function scope, then flip `children_at[fn root]`
       // (param-default scopes ++ this body scope, in sb_push's
       // newest-first order) to source order. parse_function_body_block
       // reordered the BODY scope's children; in the legacy single-scope
@@ -2924,7 +2969,7 @@ fn parse_fn_body_maybe_var_boundary(
       // (FunctionDeclaration statements can only appear inside the body),
       // so the hoist partition is the plain source-order reverse that
       // finalize's children_at contract requires.
-      let sb = scope.sb_pop(p2.sb, fn_id, outer_fn)
+      let sb = scope.sb_enter(p2.sb, fn_id)
       #(P(..p2, sb: scope.sb_reorder_block_children(sb, fn_id)), body)
     }
   }
@@ -3026,7 +3071,7 @@ fn is_strict_binding_error(name: String) -> Bool {
 /// Getter must have exactly 0 parameters
 fn parse_getter_params_and_body(
   p: P,
-) -> Result(#(P, List(ast.Pattern), ast.Statement), ParseError) {
+) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
   case peek(p2) {
     RightParen -> {
@@ -3056,7 +3101,7 @@ fn parse_getter_params_and_body(
 /// Setter must have exactly 1 simple parameter (no rest)
 fn parse_setter_params_and_body(
   p: P,
-) -> Result(#(P, List(ast.Pattern), ast.Statement), ParseError) {
+) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
   let p2 =
     P(
@@ -3137,7 +3182,7 @@ fn parse_method_params_body(
   is_async: Bool,
   is_constructor: Bool,
   has_extends: Bool,
-) -> Result(#(P, List(ast.Pattern), ast.Statement), ParseError) {
+) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   let is_accessor = accessor_kind != NoAccessor
   let ctx =
     enter_method_context(
@@ -3399,19 +3444,22 @@ type ClassScopeCtx {
 
 /// Per-element record of which scope ids a class element introduced as
 /// DIRECT children of the ClassBody scope. `key_scopes` are scopes pushed
-/// while parsing a computed `[expr]` key (step 4 of `fold_class_body`);
-/// `method_fn_id` is the Function scope a method's body was parsed in
-/// (step 2/5/6). Fields and static blocks parent their body scopes under
-/// `init_id`/`static_id` directly during the parse, so they contribute
-/// nothing here.
+/// while parsing a computed `[expr]` key (step 4 of `fold_class_body`).
+///
+/// A `ClassMethod` ALWAYS pushed exactly one Function scope for its body
+/// (steps 2/5/6), so `MethodScopes` carries that id unconditionally; a
+/// `ClassField` / `StaticBlock` never pushes one (they parent their body
+/// scopes under `init_id`/`static_id` during the parse), so
+/// `NonMethodScopes` has no place to put one. The old single-variant shape
+/// with `method_fn_id: Option(ScopeId)` let a field claim a method's
+/// function-scope id and forced a `[] -> None` fallback at the one site
+/// that reads it back.
 type ClassElementScopes {
-  ClassElementScopes(
-    key_scopes: List(scope.ScopeId),
-    method_fn_id: Option(scope.ScopeId),
-  )
+  MethodScopes(key_scopes: List(scope.ScopeId), method_fn_id: scope.ScopeId)
+  NonMethodScopes(key_scopes: List(scope.ScopeId))
 }
 
-const no_element_scopes = ClassElementScopes(key_scopes: [], method_fn_id: None)
+const no_element_scopes = NonMethodScopes(key_scopes: [])
 
 /// New direct children of `parent_id` that have appeared since `before`
 /// (a snapshot taken via `scope.sb_children_raw`). Returned in push order
@@ -3432,10 +3480,9 @@ fn parse_class_tail(
 ) -> Result(#(P, Option(ast.Expression), List(ast.ClassElement)), ParseError) {
   // Class bodies (and extends clause) are always strict
   let saved_strict = p.ctx.strict
-  // Save the OUTER scope cursors so the matching `sb_pop` at the closing
-  // `}` restores them (accumulated scopes/refs flow forward).
+  // Save the OUTER scope so the matching `sb_enter` at the closing `}`
+  // returns to it (accumulated scopes/refs flow forward).
   let outer_current = p.sb.current
-  let outer_fn = p.sb.current_fn
   // Push the ClassBody scope BEFORE parsing the heritage: §15.7.14 sets
   // classScope as the running env first, so `class C extends C {}` TDZs
   // and any nested scopes in the heritage are children of the ClassBody
@@ -3465,9 +3512,9 @@ fn parse_class_tail(
   // parsed. Both are no-param non-arrow Functions, children of class_id.
   // Unneeded shells are discarded at the closing `}`.
   let #(sb, init_id) = scope.sb_push(p3.sb, scope.Function)
-  let sb = scope.sb_pop(sb, class_id, outer_fn)
+  let sb = scope.sb_enter(sb, class_id)
   let #(sb, static_id) = scope.sb_push(sb, scope.Function)
-  let sb = scope.sb_pop(sb, class_id, outer_fn)
+  let sb = scope.sb_enter(sb, class_id)
   let ctx = ClassScopeCtx(class_id:, init_id:, static_id:)
   // ClassHeritage above was parsed at the OUTER private depth (§15.7.14:
   // heritage is evaluated with outerPrivateEnvironment); the body is one
@@ -3485,8 +3532,8 @@ fn parse_class_tail(
   // in lockstep.
   let sb =
     class_scope_finalize(p4.sb, ctx, name, has_extends, heritage_scopes, tagged)
-  // Pop the ClassBody scope.
-  let sb = scope.sb_pop(sb, outer_current, outer_fn)
+  // Leave the ClassBody scope.
+  let sb = scope.sb_enter(sb, outer_current)
   Ok(#(
     P(
       ..p4,
@@ -3537,48 +3584,47 @@ fn class_scope_finalize(
     })
   // (4) every computed key, source order — flatten across elements.
   let key_scopes = list.flat_map(tagged, fn(pair) { { pair.1 }.key_scopes })
-  // (5)+(6)+(2) partition method Function ids by kind/static-ness.
+  // (5)+(6)+(2) partition method Function ids by kind/static-ness. The
+  // buckets MUST match `ast_util.classify_class_body`'s exactly — emit
+  // consumes these child scopes with a positional cursor — so both sides
+  // ask the same exported predicates rather than re-deriving the shapes.
   let #(ctor_fn, instance_methods, static_methods) =
     list.fold(tagged, #(None, [], []), fn(acc, pair) {
       let #(ctor, im, sm) = acc
-      case pair.0, { pair.1 }.method_fn_id {
-        ast.ClassMethod(kind: ast.MethodConstructor, ..), Some(id) -> #(
-          Some(id),
-          im,
-          sm,
-        )
-        ast.ClassMethod(is_static: False, ..), Some(id) -> #(
-          ctor,
-          [id, ..im],
-          sm,
-        )
-        ast.ClassMethod(is_static: True, ..), Some(id) -> #(ctor, im, [id, ..sm])
-        _, _ -> acc
+      let #(element, scopes) = pair
+      case scopes {
+        NonMethodScopes(..) -> acc
+        MethodScopes(method_fn_id: id, ..) ->
+          case
+            ast_util.is_class_ctor(element),
+            ast_util.is_instance_method(element),
+            ast_util.is_static_method(element)
+          {
+            True, _, _ -> #(Some(id), im, sm)
+            _, True, _ -> #(ctor, [id, ..im], sm)
+            _, _, True -> #(ctor, im, [id, ..sm])
+            _, _, _ -> acc
+          }
       }
     })
   let instance_methods = list.reverse(instance_methods)
   let static_methods = list.reverse(static_methods)
-  // (1) `needs_instance_init` — same predicate as `fold_class_body`.
+  // (1) `needs_instance_init` — an instance field, or an instance private
+  // method (§7.3.29 installs those from the field-init fn too).
   let needs_instance_init =
     list.any(elements, fn(el) {
       case el {
-        ast.ClassField(is_static: False, ..) -> True
         ast.ClassMethod(
           key: ast.Identifier(name: "#" <> _, ..),
           is_static: False,
           ..,
         ) -> True
-        _ -> False
+        _ -> ast_util.is_instance_field(el)
       }
     })
-  // (7) any static fields / static blocks.
-  let needs_static_init =
-    list.any(elements, fn(el) {
-      case el {
-        ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) -> True
-        _ -> False
-      }
-    })
+  // (7) any static fields / static blocks — the same predicate
+  // `classify_class_body` buckets `static_elements` with.
+  let needs_static_init = list.any(elements, ast_util.is_static_element)
   // Discard pre-created shells the class doesn't need (declare_class
   // would not have created them); for kept shells, flip their
   // `children_at` from sb_push's newest-first to the oldest-first
@@ -3915,32 +3961,25 @@ fn parse_class_element(
         scope.RawFunctionInfo(..fi, is_arrow: True)
       })
     let p_body = P(..p_body, sb:)
-    // parse_function_body_block (NOT parse_block_statement): the body's
+    // parse_function_body_block (NOT parse_block_body): the body's
     // direct lexicals/children must land in the arrow Function scope itself
     // with no intervening Block — declare_class step (7) does
     // `declare_var_boundary_body(b, arrow_id, None, [], body, is_arrow: True)`,
     // and emit's compile_class_init_fn consumes children_at[arrow_id]
-    // directly. parse_block_statement would push a Block child that survives
+    // directly. parse_block_body would push a Block child that survives
     // pruning whenever the body has a `let`/`const`/`class`/`function`,
     // desyncing emit's positional cursor and misplacing slot lookups.
     use #(p3, block) <- result.map(parse_function_body_block(p_body))
     // restore_outer_context restores the whole `Ctx` (incl. allow_super_*)
-    // from p2_static, whose ctx is p2's. sb_pop inside restore_outer_context
-    // restores to p2_static's cursors (= static_id); re-enter class_id
-    // afterwards.
+    // from p2_static, whose ctx is p2's, and would leave the cursor at
+    // p2_static's scope (= static_id); re-enter class_id instead so the
+    // NEXT class element parents under the ClassBody.
     let p3 =
       P(
         ..restore_outer_context(p3, p2_static),
-        sb: scope.sb_enter(
-          scope.sb_pop(p3.sb, p2_static.sb.current, p2_static.sb.current_fn),
-          ctx.class_id,
-        ),
+        sb: scope.sb_enter(p3.sb, ctx.class_id),
       )
-    let body = case block {
-      ast.BlockStatement(body:) -> body
-      _ -> []
-    }
-    #(p3, False, ast.StaticBlock(body:), no_element_scopes)
+    #(p3, False, ast.StaticBlock(body: block), no_element_scopes)
   })
   // async / get / set / * modifiers. Each keyword is a name (not a modifier)
   // when followed by `( = ; }`. `Star` also terminates get/set: a getter or
@@ -3995,7 +4034,6 @@ fn parse_class_element(
     p,
     p5,
     ctx,
-    pos_of(p2),
     has_extends,
     is_method_async,
     is_generator,
@@ -4007,14 +4045,10 @@ fn parse_class_element(
 
 /// Parse the property name, params, and body of a class element.
 /// Returns the updated parser and whether this element was a constructor.
-/// `method_start` is the byte offset before `async`/`get`/`set`/`*`/key
-/// (after `static`), used as the start of the synthesized FunctionExpression
-/// span so it covers the whole method definition.
 fn parse_class_element_body(
   outer_p: P,
   p5: P,
   ctx: ClassScopeCtx,
-  method_start: Int,
   has_extends: Bool,
   is_method_async: Bool,
   is_generator: Bool,
@@ -4064,30 +4098,28 @@ fn parse_class_element_body(
         is_constructor,
         has_extends,
       ))
-      let method_fn_id = case
+      // `parse_method_params_body` always pushed exactly one Function scope
+      // as a direct child of class_id, so this list is never empty.
+      let assert [method_fn_id, ..] =
         class_new_children(p7.sb, ctx.class_id, body_before)
-      {
-        [id, ..] -> Some(id)
-        [] -> None
-      }
+        as "parser: class method body pushed no Function scope"
       Ok(#(
         p7,
         is_constructor,
         ast.ClassMethod(
           key: key_expr,
-          value: ast.FunctionExpression(
+          value: ast.FunctionLiteral(
             name: None,
             params: params,
             body: body,
             is_generator: is_generator,
             is_async: is_method_async,
-            span: span_from(method_start, p7),
           ),
           kind: method_kind,
           is_static: is_static,
           computed: is_computed,
         ),
-        ClassElementScopes(key_scopes:, method_fn_id:),
+        MethodScopes(key_scopes:, method_fn_id:),
       ))
     }
     _ -> {
@@ -4148,7 +4180,7 @@ fn parse_class_element_body(
           is_static: is_static,
           computed: is_computed,
         ),
-        ClassElementScopes(key_scopes:, method_fn_id: None),
+        NonMethodScopes(key_scopes:),
       ))
     }
   }
@@ -4335,7 +4367,7 @@ fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // that finalize's `children_at` contract requires.
   let sb = scope.sb_reorder_block_children(p6.sb, with_id)
   Ok(#(
-    P(..p6, sb: scope.sb_pop(sb, p5.sb.current, p5.sb.current_fn)),
+    P(..p6, sb: scope.sb_enter(sb, p5.sb.current)),
     ast.WithStatement(object:, body:),
   ))
 }
@@ -4859,7 +4891,7 @@ fn parse_arrow_body(
       // Flip children_at[arrow-fn] to source order. The block-body
       // branch above goes through `parse_function_body_block` which
       // does the equivalent `sb_reorder_body_children`; this branch
-      // returns straight to `restore_outer_context`'s bare `sb_pop`,
+      // returns straight to `restore_outer_context`'s bare `sb_enter`,
       // so without this the arrow's children (param-default scopes +
       // any scopes inside the body expression) would stay
       // reverse-source. No FunctionDeclaration can appear in either
@@ -5808,17 +5840,12 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
         p.ctx.strict && is_legacy_octal_number(peek_value(p)),
         Error(OctalLiteralStrictMode(pos_of(p))),
       )
-      let raw = peek_value(p)
-      let span = span_of(p)
-      let lit = case string.ends_with(raw, "n") {
-        True -> ast.BigIntLiteral(value: number.parse_js_bigint(raw), span:)
-        False -> ast.NumberLiteral(value: parse_js_number(raw), span:)
-      }
-      Ok(#(P(..advance(p), last_expr_assignable: False), lit))
+      use lit <- result.map(numeric_literal(p))
+      #(P(..advance(p), last_expr_assignable: False), lit)
     }
     KString -> {
       use <- bool.guard(
-        p.ctx.strict && has_legacy_octal_escape(peek_value(p)),
+        p.ctx.strict && has_strict_forbidden_escape(p),
         Error(OctalEscapeStrictMode(pos_of(p))),
       )
       Ok(#(
@@ -7271,7 +7298,9 @@ fn scan_directive_prologue(p: P, look: Look) -> Result(P, ParseError) {
   }
 }
 
-/// Check if any seen directive strings contain legacy octal escapes.
+/// Check if any seen directive strings contain an Annex B escape form
+/// (`\07` legacy octal, or `\8`/`\9` non-octal decimal) that "use strict"
+/// retroactively forbids.
 fn check_retroactive_octals(
   p: P,
   seen_strings: List(String),
@@ -7279,9 +7308,9 @@ fn check_retroactive_octals(
   case seen_strings {
     [] -> Ok(Nil)
     [val, ..rest] ->
-      case has_legacy_octal_escape(val) {
-        True -> Error(OctalEscapeStrictMode(pos_of(p)))
-        False -> check_retroactive_octals(p, rest)
+      case strict_forbidden_escape(val) {
+        Some(_) -> Error(OctalEscapeStrictMode(pos_of(p)))
+        None -> check_retroactive_octals(p, rest)
       }
   }
 }
@@ -7345,15 +7374,14 @@ fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
       allow_new_target: True,
       allow_super_call: False,
       allow_super_property: False,
+      // A function boundary is never part of an enclosing let/const
+      // declaration: params and body bindings must not collide with outer
+      // declarator names, so `binding_kind` resets to BindingNone (which,
+      // not being BindingLexical, carries no `bound` names to collide with).
       binding_kind: BindingNone,
       in_block: False,
       module_top_level: False,
       in_single_stmt_pos: False,
-      // A function boundary is never part of an enclosing let/const
-      // declaration: params and body bindings must not collide with outer
-      // declarator names.
-      in_lexical_decl: False,
-      decl_bound_names: set.new(),
     ),
     // Push a fresh Function scope; the new scope's id is now sb.current
     // and sb.current_fn.
@@ -7443,11 +7471,11 @@ fn enter_static_block_context(p: P) -> P {
 }
 
 fn restore_context_fn(
-  res: Result(#(P, List(ast.Pattern), ast.Statement), ParseError),
+  res: Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError),
   outer: P,
-) -> Result(#(P, List(ast.Pattern), ast.Statement), ParseError) {
-  use #(p, params, stmt) <- result.map(res)
-  #(restore_outer_context(p, outer), params, stmt)
+) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
+  use #(p, params, body) <- result.map(res)
+  #(restore_outer_context(p, outer), params, body)
 }
 
 /// Leave a function body: put back the enclosing parsing context WHOLE.
@@ -7460,14 +7488,10 @@ fn restore_context_fn(
 /// sync with `Ctx`'s (and `enter_function_context`'s) field set.
 ///
 /// The scope builder is NOT part of `Ctx`: its accumulated scopes/refs must
-/// flow forward across the pop, so only the `current`/`current_fn` cursors
-/// come back from `outer`.
+/// flow forward across the close, so only the cursor moves back to
+/// `outer.sb.current` (`sb_enter` re-derives `current_fn` from it).
 fn restore_outer_context(p: P, outer: P) -> P {
-  P(
-    ..p,
-    ctx: outer.ctx,
-    sb: scope.sb_pop(p.sb, outer.sb.current, outer.sb.current_fn),
-  )
+  P(..p, ctx: outer.ctx, sb: scope.sb_enter(p.sb, outer.sb.current))
 }
 
 // ---- Label helpers ----
