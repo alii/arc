@@ -14,26 +14,26 @@ import arc/compiler/scope.{
 }
 import arc/parser/ast
 import arc/vm/opcode.{
-  type IrOp, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole,
-  IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp,
-  IrBoxLocal, IrCallApply, IrCallConstructor, IrCallConstructorApply,
-  IrCallMethod, IrCallMethodApply, IrCreateArguments, IrCreateRestArray,
-  IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
-  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDefineMethodComputed, IrDefinePrivateAccessor, IrDefinePrivateField,
-  IrDefinePrivateMethod, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
-  IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
-  IrGetField, IrGetField2, IrGetIterator, IrGetLocal, IrGetPrivateFieldDyn,
-  IrGetPrivateFieldDyn2, IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2,
-  IrGosub, IrInitGlobalLex, IrInitialYield, IrIteratorCheckObject,
-  IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext, IrIteratorRecord,
-  IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrMakeClosure, IrMakeMethod, IrNewObject, IrNewPrivateName, IrNewRegExp,
-  IrObjectRestCopy, IrObjectSpread, IrPop, IrPopTry, IrPrivateInDyn, IrPushConst,
-  IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal, IrPutLocal,
-  IrPutPrivateFieldDyn, IrPutSuperValue, IrRet, IrReturn, IrSetLine, IrSetProto,
-  IrSetupDerivedClass, IrSwap, IrThrow, IrThrowError, IrTypeOf, IrUnaryOp,
-  IrYield, IrYieldStar,
+  type IrOp, type TryKind, CatchOnly, Finally, IrArrayFrom, IrArrayFromWithHoles,
+  IrArrayPush, IrArrayPushHole, IrArraySpread, IrAsyncYieldStarNext,
+  IrAsyncYieldStarResume, IrAwait, IrBinOp, IrBoxLocal, IrCallApply,
+  IrCallConstructor, IrCallConstructorApply, IrCallMethod, IrCallMethodApply,
+  IrCreateArguments, IrCreateRestArray, IrDeclareGlobalLex, IrDeclareGlobalVar,
+  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed,
+  IrDefinePrivateAccessor, IrDefinePrivateField, IrDefinePrivateMethod,
+  IrDeleteElem, IrDeleteField, IrDup, IrForInNext, IrForInStart,
+  IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
+  IrGetIterator, IrGetLocal, IrGetPrivateFieldDyn, IrGetPrivateFieldDyn2,
+  IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2, IrGosub, IrInitGlobalLex,
+  IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
+  IrIteratorNext, IrIteratorRecord, IrIteratorRest, IrJump, IrJumpIfFalse,
+  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure, IrMakeMethod,
+  IrNewObject, IrNewPrivateName, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
+  IrPop, IrPopTry, IrPrivateInDyn, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem,
+  IrPutField, IrPutGlobal, IrPutLocal, IrPutPrivateFieldDyn, IrPutSuperValue,
+  IrRet, IrReturn, IrSetLine, IrSetProto, IrSetupDerivedClass, IrSwap, IrThrow,
+  IrThrowError, IrTypeOf, IrUnaryOp, IrYield, IrYieldStar, IterCloseGuard,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -268,14 +268,6 @@ pub opaque type Emitter {
     /// undefined). Never captured (no name), never inherited by child
     /// function emitters (fresh new_emitter()).
     completion_var: Option(Int),
-    /// Scratch local slots holding active reference bases for the
-    /// emit_var_ref_make … emit_var_ref_put pairs that cross `with` scopes.
-    /// §13.15.2 step 1a — ResolveBinding for an assignment target before the
-    /// RHS runs: when the resolution crosses a with scope, the matched with
-    /// object (or undefined = static) is stashed in a scratch slot so the
-    /// paired GetRef/PutRef hit the ORIGINAL reference base even if the RHS
-    /// mutates the with object. Head = innermost (LIFO; refs always nest).
-    ref_active: List(Int),
     /// Scratch slots returned by closed refs (emit_var_ref_put), reused by
     /// later emit_var_ref_make calls instead of allocating a fresh one.
     ref_free: List(Int),
@@ -354,6 +346,25 @@ pub type EmitError {
   /// A defaulted destructuring target that is neither a static nor a
   /// computed member expression.
   NonMemberDefaultTarget
+  /// `super` in bare expression position. The parser only produces
+  /// `SuperExpression` under a MemberExpression object or a CallExpression
+  /// callee, both of which have their own emit paths.
+  BareSuperExpression
+  /// `...x` in bare expression position. The parser only produces
+  /// `SpreadElement` inside an argument list or an array literal, both of
+  /// which have their own emit paths.
+  BareSpreadElement
+  /// `++`/`--` on a target that is neither an Identifier, a
+  /// MemberExpression, nor a (web-compat) CallExpression. The parser rejects
+  /// every other operand as an early error.
+  InvalidUpdateTarget
+  /// Compound assignment (`+=` …) onto a target that is neither an
+  /// Identifier, a MemberExpression, nor a (web-compat) CallExpression. Only
+  /// plain `=` admits a destructuring pattern target.
+  InvalidCompoundAssignTarget
+  /// A non-computed `MemberExpression` (`o.x`) whose property is not an
+  /// Identifier. The parser only ever puts an Identifier there.
+  NonIdentifierStaticMember
 }
 
 // ============================================================================
@@ -540,9 +551,8 @@ type UsingScope {
     /// DisposeResources `completion` value.
     err: Int,
     has_err: Int,
-    /// One disposer slot per declarator, in declaration order; the Bool is
-    /// the slot's hint (True = async-dispose).
-    disposers: List(#(Int, Bool)),
+    /// One disposer per resource, in declaration order.
+    disposers: List(Disposer),
     /// True iff any slot is async — gates the await-coalescing scratch
     /// slots and the per-sync-resource pending-await flush.
     has_async: Bool,
@@ -553,37 +563,97 @@ type UsingScope {
   )
 }
 
-/// Walk `stmts` and mint a fresh disposer-slot name for every
+/// The scratch slot holding one resource's disposer method (or null), plus
+/// whether it disposes async ([Symbol.asyncDispose], awaited).
+type Disposer {
+  Disposer(slot: Int, is_async: Bool)
+}
+
+/// One `using` / `await using` declarator, narrowed and slot-minted exactly
+/// once by `build_using_scope`. The disposer travels WITH the binding it
+/// disposes, so no later walk can pair a slot with the wrong resource.
+type UsingResource {
+  UsingResource(
+    line: Int,
+    name: String,
+    init: ast.Expression,
+    disposer: Disposer,
+  )
+}
+
+/// A using-scope's body, lowered once: ordinary statements interleaved with
+/// the individual using declarators, in source order.
+type UsingItem {
+  PlainItem(stmt: ast.StmtWithLine)
+  ResourceItem(resource: UsingResource)
+}
+
+/// Lower `stmts` into `UsingItem`s, minting a fresh disposer slot for every
 /// using/await-using declarator (in declaration order), plus the
-/// completion-state and (if any slot is async) await-coalescing scratch
+/// completion-state and (if any resource is async) await-coalescing scratch
 /// slots. Slot names come from `fresh_slot` so two using-scopes nested in
-/// the SAME lexical scope (e.g. switch cases) never collide.
+/// the SAME lexical scope (e.g. switch cases) never collide. The returned
+/// items are the ONLY description of the body — `emit_using_body` walks
+/// them, so the disposer slots and the resources they dispose can never
+/// drift apart.
 fn build_using_scope(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
-) -> #(Emitter, UsingScope) {
-  let #(e, disposers_rev) =
+) -> #(Emitter, UsingScope, List(UsingItem)) {
+  let #(e, items_rev) =
     list.fold(stmts, #(e, []), fn(acc, located) {
-      let #(e, slots) = acc
+      let #(e, items) = acc
       case located.statement {
         ast.VariableDeclaration(kind: ast.Using, declarations:) ->
-          mint_disposer_slots(e, slots, declarations, False)
+          lower_using_declarators(e, items, located.line, declarations, False)
         ast.VariableDeclaration(kind: ast.AwaitUsing, declarations:) ->
-          mint_disposer_slots(e, slots, declarations, True)
-        _ -> #(e, slots)
+          lower_using_declarators(e, items, located.line, declarations, True)
+        _ -> #(e, [PlainItem(located), ..items])
       }
     })
-  make_using_scope(e, list.reverse(disposers_rev))
+  let items = list.reverse(items_rev)
+  let disposers =
+    list.filter_map(items, fn(item) {
+      case item {
+        ResourceItem(resource:) -> Ok(resource.disposer)
+        PlainItem(_) -> Error(Nil)
+      }
+    })
+  let #(e, scope) = make_using_scope(e, disposers)
+  #(e, scope, items)
+}
+
+/// One Using/AwaitUsing declaration's declarator list → one UsingResource
+/// each, with a freshly minted disposer slot. The parser rejects both a
+/// destructuring binding (`using [a] = …` → UsingPatternBinding) and a
+/// missing initializer (`using x;` → UsingMissingInitializer), so this is
+/// the point where those two guarantees are cashed in — once, for good.
+fn lower_using_declarators(
+  e: Emitter,
+  items: List(UsingItem),
+  line: Int,
+  declarations: List(ast.VariableDeclarator),
+  is_async: Bool,
+) -> #(Emitter, List(UsingItem)) {
+  list.fold(declarations, #(e, items), fn(acc, decl) {
+    let #(e, items) = acc
+    let assert ast.IdentifierPattern(name, ..) = decl.id
+    let assert Some(init) = decl.init
+    let #(e, slot) = fresh_slot(e)
+    let resource =
+      UsingResource(line:, name:, init:, disposer: Disposer(slot:, is_async:))
+    #(e, [ResourceItem(resource), ..items])
+  })
 }
 
 /// Mint the six completion/await-coalescing scratch slots and wrap them,
-/// together with the supplied disposer slots, into a UsingScope. Shared by
+/// together with the supplied disposers, into a UsingScope. Shared by
 /// `build_using_scope` (block bodies) and `single_using_scope` (for-of head).
 fn make_using_scope(
   e: Emitter,
-  disposers: List(#(Int, Bool)),
+  disposers: List(Disposer),
 ) -> #(Emitter, UsingScope) {
-  let has_async = list.any(disposers, fn(d) { d.1 })
+  let has_async = list.any(disposers, fn(d) { d.is_async })
   let #(e, err) = fresh_slot(e)
   let #(e, has_err) = fresh_slot(e)
   let #(e, needs_await) = fresh_slot(e)
@@ -605,19 +675,6 @@ fn make_using_scope(
   )
 }
 
-fn mint_disposer_slots(
-  e: Emitter,
-  slots: List(#(Int, Bool)),
-  declarations: List(ast.VariableDeclarator),
-  is_async: Bool,
-) -> #(Emitter, List(#(Int, Bool))) {
-  list.fold(declarations, #(e, slots), fn(acc, _decl) {
-    let #(e, slots) = acc
-    let #(e, slot) = fresh_slot(e)
-    #(e, [#(slot, is_async), ..slots])
-  })
-}
-
 /// Declare and initialise the scratch locals for one UsingScope. Each is a
 /// LetBinding so IrScopePutVar in the body/handler/dispose may reassign it.
 /// The `%u:` names cannot be referenced by user code, so declaration order
@@ -626,7 +683,9 @@ fn emit_using_prelude(e: Emitter, scope: UsingScope) -> Emitter {
   let e = declare_scratch(e, scope.err, JsUndefined)
   let e = declare_scratch(e, scope.has_err, JsBool(False))
   let e =
-    list.fold(scope.disposers, e, fn(e, d) { declare_scratch(e, d.0, JsNull) })
+    list.fold(scope.disposers, e, fn(e, d) {
+      declare_scratch(e, d.slot, JsNull)
+    })
   case scope.has_async {
     False -> e
     True ->
@@ -642,78 +701,46 @@ fn declare_scratch(e: Emitter, slot: Int, init: JsValue) -> Emitter {
   seed_local(e, slot, init)
 }
 
-/// Emit the body statement list, registering each using/await-using bound
-/// value's disposer in its slot immediately after that one const binding is
-/// initialised — per-declarator interleaving so `using a = x, b = throwy()`
-/// has slot d1 populated before `throwy()` runs and `a` IS disposed (RS:
-/// BindingEvaluation — each binding's AddDisposableResource runs before the
-/// next LexicalBinding's Initializer evaluates). Routing the whole
-/// declaration through emit_stmt would init a, b, … first and leave every
-/// slot null on a mid-list throw. Consumes `scope.disposers` in lockstep.
+/// Emit the body items from `build_using_scope`, registering each
+/// using/await-using bound value's disposer in ITS OWN slot immediately after
+/// that one const binding is initialised — per-declarator interleaving so
+/// `using a = x, b = throwy()` has a's slot populated before `throwy()` runs
+/// and `a` IS disposed (RS: BindingEvaluation — each binding's
+/// AddDisposableResource runs before the next LexicalBinding's Initializer
+/// evaluates). Routing the whole declaration through emit_stmt would init
+/// a, b, … first and leave every slot null on a mid-list throw.
 fn emit_using_body(
   e: Emitter,
-  stmts: List(ast.StmtWithLine),
-  scope: UsingScope,
+  items: List(UsingItem),
 ) -> Result(Emitter, EmitError) {
-  use #(e, leftover) <- result.map(
-    list.try_fold(stmts, #(e, scope.disposers), fn(acc, located) {
-      let #(e, remaining) = acc
-      let e = set_line(e, located.line)
-      case located.statement {
-        ast.VariableDeclaration(kind: ast.Using, declarations:) ->
-          emit_using_declarators(e, declarations, remaining, False)
-        ast.VariableDeclaration(kind: ast.AwaitUsing, declarations:) ->
-          emit_using_declarators(e, declarations, remaining, True)
-        // Non-using statements emit normally (real source spans intact).
-        other -> {
-          use e <- result.map(emit_stmt(e, other))
-          #(e, remaining)
-        }
-      }
-    }),
-  )
-  // build_using_scope minted exactly one slot per declarator — the lists
-  // walk in lockstep so nothing is left over.
-  let assert [] = leftover
-  e
-}
-
-/// One Using/AwaitUsing declaration's declarator list, interleaving the
-/// const-bind and disposer-register per declarator: declare(name) →
-/// eval(init) → init(name) → GetDisposer(name) → PutVar(slot). Each
-/// declarator is fully registered before the next begins so a throw from a
-/// later declarator's init OR its GetDisposer leaves every earlier slot
-/// populated and those resources still dispose.
-fn emit_using_declarators(
-  e: Emitter,
-  declarations: List(ast.VariableDeclarator),
-  remaining: List(#(Int, Bool)),
-  is_async: Bool,
-) -> Result(#(Emitter, List(#(Int, Bool))), EmitError) {
-  list.try_fold(declarations, #(e, remaining), fn(acc, decl) {
-    let #(e, remaining) = acc
-    case decl.id, remaining {
-      ast.IdentifierPattern(name, ..), [#(slot, _), ..rest] -> {
-        let e = declare_lex(e, name, True)
-        // Parser guarantees an initializer on every using declarator.
-        use e <- result.map(case decl.init {
-          Some(init_expr) -> emit_named_expr(e, init_expr, name)
-          None -> Ok(push_const(e, JsUndefined))
-        })
-        let e =
-          e
-          |> init_lex(name)
-          |> emit_var_get(name)
-          |> emit_ir(opcode.IrGetDisposer(is_async))
-          |> emit_scratch_put(slot)
-        #(e, rest)
-      }
-      // Unreachable — the parser only allows identifier bindings in using
-      // declarations and build_using_scope minted exactly one slot per
-      // declarator.
-      _, _ -> Ok(#(e, remaining))
+  list.try_fold(items, e, fn(e, item) {
+    case item {
+      ResourceItem(resource:) -> emit_using_resource(e, resource)
+      // Non-using statements emit normally (real source spans intact).
+      PlainItem(located) ->
+        emit_stmt(set_line(e, located.line), located.statement)
     }
   })
+}
+
+/// One using declarator, interleaving the const-bind and disposer-register:
+/// declare(name) → eval(init) → init(name) → GetDisposer(name) →
+/// PutVar(slot). Each declarator is fully registered before the next begins
+/// so a throw from a later declarator's init OR its GetDisposer leaves every
+/// earlier slot populated and those resources still dispose.
+fn emit_using_resource(
+  e: Emitter,
+  resource: UsingResource,
+) -> Result(Emitter, EmitError) {
+  let UsingResource(line:, name:, init:, disposer:) = resource
+  let e = set_line(e, line)
+  let e = declare_lex(e, name, True)
+  use e <- result.map(emit_named_expr(e, init, name))
+  e
+  |> init_lex(name)
+  |> emit_var_get(name)
+  |> emit_ir(opcode.IrGetDisposer(disposer.is_async))
+  |> emit_scratch_put(disposer.slot)
 }
 
 /// DisposeResources error fold (proposal step 3.e.iii): given the thrown
@@ -748,7 +775,7 @@ fn emit_using_try_merge(
   let #(e, catch_label) = fresh_label(e)
   let #(e, end_label) = fresh_label(e)
   e
-  |> emit_ir(IrPushTry(catch_label))
+  |> emit_ir(IrPushTry(catch_label, CatchOnly))
   |> body
   |> emit_ir(IrPopTry)
   |> emit_ir(IrJump(end_label))
@@ -893,10 +920,9 @@ fn emit_using_dispose_async(
 fn emit_using_dispose(e: Emitter, scope: UsingScope) -> Emitter {
   let e =
     list.fold(list.reverse(scope.disposers), e, fn(e, d) {
-      let #(slot, is_async) = d
-      case is_async {
-        True -> emit_using_dispose_async(e, scope, slot)
-        False -> emit_using_dispose_sync(e, scope, slot)
+      case d.is_async {
+        True -> emit_using_dispose_async(e, scope, d.slot)
+        False -> emit_using_dispose_sync(e, scope, d.slot)
       }
     })
   let e = case scope.has_async {
@@ -949,7 +975,7 @@ fn single_using_scope(
   is_async: Bool,
 ) -> #(Emitter, UsingScope, Int) {
   let #(e, slot) = fresh_slot(e)
-  let #(e, scope) = make_using_scope(e, [#(slot, is_async)])
+  let #(e, scope) = make_using_scope(e, [Disposer(slot:, is_async:)])
   #(e, scope, slot)
 }
 
@@ -1013,12 +1039,12 @@ fn emit_for_using_classic(
   let head = [
     ast.StmtWithLine(0, ast.VariableDeclaration(kind:, declarations:)),
   ]
-  let #(e, scope) = build_using_scope(e, head)
+  let #(e, scope, items) = build_using_scope(e, head)
   let e = emit_using_prelude(e, scope)
   use e <- result.map({
     use e <- emit_using_try_wrap(e, scope)
     // const x = a; <register disposer>; … (real spans on the user binding).
-    use e <- result.try(emit_using_body(e, head, scope))
+    use e <- result.try(emit_using_body(e, items))
     // Headless `for (; c; u) body` inside the try so the loop's break_label
     // sits under the disposal barrier.
     emit_classic_loop(e, condition, update, body, [])
@@ -1079,15 +1105,15 @@ fn emit_module_using_top(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
-  let #(e, scope) = build_using_scope(e, stmts)
+  let #(e, scope, items) = build_using_scope(e, stmts)
   let e = emit_using_prelude(e, scope)
 
   let #(e, catch_label) = fresh_label(e)
   let #(e, dispose_label) = fresh_label(e)
 
-  let e = emit_ir(e, IrPushTry(catch_label))
+  let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
-  use e <- result.map(emit_using_body(e, stmts, scope))
+  use e <- result.map(emit_using_body(e, items))
   let e = pop_loop(e)
   let e = emit_ir(e, IrPopTry)
   let e = emit_ir(e, IrJump(dispose_label))
@@ -1218,7 +1244,6 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     with_stack: [],
     private_env: [],
     completion_var: None,
-    ref_active: [],
     ref_free: [],
     initialized: set.new(),
   )
@@ -1795,17 +1820,30 @@ fn emit_var_delete(e: Emitter, name: String) -> Emitter {
   }
 }
 
+/// A resolved reference to an identifier assignment target — the compile-time
+/// residue of §13.15.2 step 1a ResolveBinding. `emit_var_ref_make` is its only
+/// constructor, and `emit_var_ref_get` / `emit_var_ref_put` only accept one,
+/// so a get/put can never re-resolve the binding *after* the RHS ran (which
+/// would read/write the wrong `with` scope).
+///
+/// `base_slot` is `Some(slot)` exactly when the resolution crossed a `with`
+/// scope: the scratch local holds the matched with object (or undefined =
+/// take the static fallback), captured before the RHS could mutate it.
+pub opaque type VarRef {
+  VarRef(name: String, fallback: scope.Direct, base_slot: Option(Int))
+}
+
 /// §13.15.2 step 1a — ResolveBinding for an assignment-like target before
 /// the RHS runs. When the resolution crosses with-scope markers, stash the
 /// matched with object (or undefined = static) in a scratch local so the
 /// paired emit_var_ref_get / emit_var_ref_put hit the ORIGINAL reference
-/// base even if the RHS mutates the with object. No-op for non-with
+/// base even if the RHS mutates the with object. Emits nothing for non-with
 /// resolutions.
-fn emit_var_ref_make(e: Emitter, name: String) -> Emitter {
+fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
   let e = track_arguments_ref(e, name)
-  let #(crossed, _fallback) = split_with_chain(resolve(e, name))
+  let #(crossed, fallback) = split_with_chain(resolve(e, name))
   case crossed {
-    [] -> e
+    [] -> #(e, VarRef(name:, fallback:, base_slot: None))
     _ -> {
       let #(e, slot) = acquire_ref_slot(e)
       let #(e, lref) = fresh_label(e)
@@ -1819,24 +1857,25 @@ fn emit_var_ref_make(e: Emitter, name: String) -> Emitter {
       // GetRef/PutRef know to take the static fallback.
       let e = push_const(e, JsUndefined)
       let e = emit_ir(e, IrLabel(lref))
-      emit_ir(e, IrPutLocal(slot))
+      #(
+        emit_ir(e, IrPutLocal(slot)),
+        VarRef(name:, fallback:, base_slot: Some(slot)),
+      )
     }
   }
 }
 
 /// GetValue on the reference opened by emit_var_ref_make (§9.1.1.2.6).
-fn emit_var_ref_get(e: Emitter, name: String) -> Emitter {
-  let e = track_arguments_ref(e, name)
-  let #(crossed, fallback) = split_with_chain(resolve(e, name))
-  case crossed, e.ref_active {
-    [], _ | _, [] -> emit_static_get(e, fallback)
-    _, [slot, ..] -> {
+fn emit_var_ref_get(e: Emitter, ref: VarRef) -> Emitter {
+  case ref.base_slot {
+    None -> emit_static_get(e, ref.fallback)
+    Some(slot) -> {
       let #(e, lg) = fresh_label(e)
       let e = emit_ir(e, IrGetLocal(slot))
-      let e = emit_ir(e, opcode.IrWithGetRefValue(name, lg))
+      let e = emit_ir(e, opcode.IrWithGetRefValue(ref.name, lg))
       // Base was undefined (no with object matched at MakeRef time):
       // resolve statically.
-      let e = emit_static_get(e, fallback)
+      let e = emit_static_get(e, ref.fallback)
       emit_ir(e, IrLabel(lg))
     }
   }
@@ -1844,17 +1883,15 @@ fn emit_var_ref_get(e: Emitter, name: String) -> Emitter {
 
 /// PutValue on the reference opened by emit_var_ref_make (§9.1.1.2.5);
 /// closes it (frees the scratch base slot).
-fn emit_var_ref_put(e: Emitter, name: String) -> Emitter {
-  let e = track_arguments_ref(e, name)
-  let #(crossed, fallback) = split_with_chain(resolve(e, name))
-  case crossed, e.ref_active {
-    [], _ | _, [] -> emit_static_put(e, fallback, name)
-    _, [slot, ..rest] -> {
-      let e = Emitter(..e, ref_active: rest, ref_free: [slot, ..e.ref_free])
+fn emit_var_ref_put(e: Emitter, ref: VarRef) -> Emitter {
+  case ref.base_slot {
+    None -> emit_static_put(e, ref.fallback, ref.name)
+    Some(slot) -> {
+      let e = Emitter(..e, ref_free: [slot, ..e.ref_free])
       let #(e, ld) = fresh_label(e)
       let e = emit_ir(e, IrGetLocal(slot))
-      let e = emit_ir(e, opcode.IrWithPutRefValue(name, ld))
-      let e = emit_static_put(e, fallback, name)
+      let e = emit_ir(e, opcode.IrWithPutRefValue(ref.name, ld))
+      let e = emit_static_put(e, ref.fallback, ref.name)
       emit_ir(e, IrLabel(ld))
     }
   }
@@ -1864,14 +1901,17 @@ fn emit_var_ref_put(e: Emitter, name: String) -> Emitter {
 /// shape of identifier-target assignment (§13.15.2 step 1.a): the reference
 /// is resolved once before the body runs (observable via `with` Proxy traps
 /// and binding deletion during RHS), Dup keeps the value as the expression
-/// result, PutValue stores it.
+/// result, PutValue stores it. The body receives the resolved `VarRef` so a
+/// read of the target (compound assignment, `x++`, `&&=`) goes through the
+/// SAME reference rather than re-resolving.
 fn with_identifier_lref(
   e: Emitter,
   name: String,
-  body: fn(Emitter) -> Result(Emitter, EmitError),
+  body: fn(Emitter, VarRef) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
-  use e <- result.map(body(emit_var_ref_make(e, name)))
-  e |> emit_ir(IrDup) |> emit_var_ref_put(name)
+  let #(e, ref) = emit_var_ref_make(e, name)
+  use e <- result.map(body(e, ref))
+  e |> emit_ir(IrDup) |> emit_var_ref_put(ref)
 }
 
 /// §14.7.4.2 CreatePerIterationEnvironment: copy a for-let binding's current
@@ -2008,19 +2048,13 @@ fn emit_with_chain(
 }
 
 /// Acquire a scratch local for a with-reference base — reuse a freed one
-/// (LIFO) or allocate a fresh anonymous slot via `fresh_slot`. Pushed onto
-/// `ref_active` so the matching emit_var_ref_get / emit_var_ref_put can find
-/// it; emit_var_ref_put returns it to `ref_free`.
+/// (LIFO) or allocate a fresh anonymous slot via `fresh_slot`. The slot
+/// travels in the returned `VarRef`; emit_var_ref_put returns it to
+/// `ref_free`.
 fn acquire_ref_slot(e: Emitter) -> #(Emitter, Int) {
   case e.ref_free {
-    [slot, ..rest] -> #(
-      Emitter(..e, ref_free: rest, ref_active: [slot, ..e.ref_active]),
-      slot,
-    )
-    [] -> {
-      let #(e, slot) = fresh_slot(e)
-      #(Emitter(..e, ref_active: [slot, ..e.ref_active]), slot)
-    }
+    [slot, ..rest] -> #(Emitter(..e, ref_free: rest), slot)
+    [] -> fresh_slot(e)
   }
 }
 
@@ -2262,8 +2296,8 @@ fn emit_try_catch_finally(
   let #(e, end_label) = fresh_label(e)
 
   // -- try body ----------------------------------------------------------
-  let e = emit_ir(e, IrPushTry(throw_label))
-  let e = emit_ir(e, IrPushTry(catch_label))
+  let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
+  let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 2, label_finally: Some(fin_label), drop: 0)
   use e <- result.try(emit_body(e))
   let e = pop_loop(e)
@@ -2603,7 +2637,7 @@ fn emit_stmt_tail(
           let #(e, catch_label) = fresh_label(e)
           let #(e, end_label) = fresh_label(e)
 
-          let e = emit_ir(e, IrPushTry(catch_label))
+          let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
           use e <- result.try(emit_block(e, block, tail: True))
           let e = emit_ir(e, IrPopTry)
           let e = emit_ir(e, IrJump(end_label))
@@ -2741,7 +2775,7 @@ fn emit_block_using(
   body: List(ast.StmtWithLine),
   tail: Bool,
 ) -> Result(Emitter, EmitError) {
-  let #(e, scope) = build_using_scope(e, body)
+  let #(e, scope, items) = build_using_scope(e, body)
   let e = emit_using_prelude(e, scope)
   let saved_cv = e.completion_var
   let #(e, cv) = case tail {
@@ -2754,7 +2788,7 @@ fn emit_block_using(
   }
   use e <- result.map({
     use e <- emit_using_try_wrap(e, scope)
-    emit_using_body(e, body, scope)
+    emit_using_body(e, items)
   })
   let e = Emitter(..e, completion_var: saved_cv)
   case cv {
@@ -3342,10 +3376,10 @@ fn compile_function_body(
       // crosses the gosub barrier and runs disposal before leaving.
       let #(directives, rest) = ast_util.split_directives(stmts)
       use e <- result.try(emit_stmts(e, directives))
-      let #(e, scope) = build_using_scope(e, rest)
+      let #(e, scope, items) = build_using_scope(e, rest)
       let e = emit_using_prelude(e, scope)
       use e <- emit_using_try_wrap(e, scope)
-      emit_using_body(e, rest, scope)
+      emit_using_body(e, items)
     }
   })
 
@@ -3741,7 +3775,7 @@ fn emit_stmt_inner(
           let #(e, catch_label) = fresh_label(e)
           let #(e, end_label) = fresh_label(e)
 
-          let e = emit_ir(e, IrPushTry(catch_label))
+          let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
           let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
           let e = pop_loop(e)
@@ -3766,7 +3800,7 @@ fn emit_stmt_inner(
           let #(e, end_label) = fresh_label(e)
 
           // -- try body --------------------------------------------------
-          let e = emit_ir(e, IrPushTry(throw_label))
+          let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
@@ -4235,8 +4269,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
 
     ast.UnaryExpression(_, op, arg) -> {
+      let kind = case translate_unaryop(op) {
+        Ok(kind) -> kind
+        Error(Nil) ->
+          panic as "typeof/delete are handled by their own emit_expr arms above"
+      }
       use e <- result.map(emit_expr(e, arg))
-      emit_ir(e, IrUnaryOp(translate_unaryop(op)))
+      emit_ir(e, IrUnaryOp(kind))
     }
 
     // Update expressions (++/--) — unwrap parens because (x)++ === x++.
@@ -4273,8 +4312,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         True -> {
           // ++x: get, ToNumeric (§13.4.2 step 3), add 1; helper dups the
           // result and stores to ref. Unary `+` is ToNumber.
-          use e <- with_identifier_lref(e, name)
-          let e = emit_var_ref_get(e, name)
+          use e, ref <- with_identifier_lref(e, name)
+          let e = emit_var_ref_get(e, ref)
           let e = emit_ir(e, IrUnaryOp(opcode.Pos))
           let e = push_const(e, one)
           Ok(emit_ir(e, IrBinOp(bin_kind)))
@@ -4282,13 +4321,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> {
           // x++: make ref, get, ToNumeric (§13.4.2.1 step 3), dup (old value
           // stays as result), add 1, store to ref. Unary `+` is ToNumber.
-          let e = emit_var_ref_make(e, name)
-          let e = emit_var_ref_get(e, name)
+          let #(e, ref) = emit_var_ref_make(e, name)
+          let e = emit_var_ref_get(e, ref)
           let e = emit_ir(e, IrUnaryOp(opcode.Pos))
           let e = emit_ir(e, IrDup)
           let e = push_const(e, one)
           let e = emit_ir(e, IrBinOp(bin_kind))
-          let e = emit_var_ref_put(e, name)
+          let e = emit_var_ref_put(e, ref)
           Ok(e)
         }
       }
@@ -4331,6 +4370,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
       }
     }
+    // Every other `++`/`--` operand is an early error in the parser
+    // (`finish_update_expr` requires an assignable LHS), so this is an
+    // engine bug, not user code.
+    ast.UpdateExpression(..) -> Error(InvalidUpdateTarget)
 
     // Parenthesized LHS assignment — §13.15.2 IsIdentifierRef returns false
     // for parens, so `(x) = function(){}` must NOT infer the name "x"; hence
@@ -4340,7 +4383,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       ast.Assign,
       ast.ParenthesizedExpression(_, ast.Identifier(name:, ..)),
       right,
-    ) -> with_identifier_lref(e, name, emit_expr(_, right))
+    ) -> with_identifier_lref(e, name, fn(e, _ref) { emit_expr(e, right) })
     // Non-simple-assign parenthesized LHS — safe to unwrap (no name inference
     // for compound assignment anyway).
     ast.AssignmentExpression(
@@ -4384,15 +4427,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         "*default*" -> "default"
         _ -> name
       }
-      with_identifier_lref(e, name, emit_named_expr(_, right, inferred_name))
+      with_identifier_lref(e, name, fn(e, _ref) {
+        emit_named_expr(e, right, inferred_name)
+      })
     }
 
     // Compound assignment to identifier (x += v etc.).
     ast.AssignmentExpression(_, op, ast.Identifier(name:, ..), right) -> {
       case compound_to_binop(op) {
         Ok(bin_kind) -> {
-          use e <- with_identifier_lref(e, name)
-          let e = emit_var_ref_get(e, name)
+          use e, ref <- with_identifier_lref(e, name)
+          let e = emit_var_ref_get(e, ref)
           use e <- result.map(emit_expr(e, right))
           emit_ir(e, IrBinOp(bin_kind))
         }
@@ -4468,6 +4513,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       let e = emit_ir(e, IrDup)
       emit_destructuring_assign(e, lhs)
     }
+    // Only compound assignment (`+=` …) reaches here, and only with a target
+    // that is neither an Identifier, a MemberExpression, nor a (web-compat)
+    // CallExpression — all handled above. `x++`-style targets are validated
+    // by the parser, so this is an engine bug: a destructuring pattern can
+    // never carry a compound operator.
+    ast.AssignmentExpression(..) -> Error(InvalidCompoundAssignTarget)
 
     // super(args) — §13.3.7.1 SuperCall, fully decomposed (QuickJS shape):
     //   GetLexical(active_func); GetPrototypeOf;        → parent ctor
@@ -4659,6 +4710,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           emit_ir(e, IrGetElem)
         }
       }
+    // A non-computed member (`o.x`) whose property is not an Identifier: the
+    // parser only ever puts an Identifier there, so this is an engine bug.
+    ast.MemberExpression(..) -> Error(NonIdentifierStaticMember)
 
     // Optional member / call expressions — always chain roots.
     ast.OptionalMemberExpression(..) | ast.OptionalCallExpression(..) ->
@@ -4757,10 +4811,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               let e = emit_ir(e, IrIteratorRecord)
               let e = push_const(e, JsUndefined)
               let #(e, next_label) = fresh_label(e)
+              // `after_label` marks the instruction the delegation falls out
+              // to. The async-gen driver resumes there when a forwarded
+              // .throw() finishes the inner iterator, so the sequence's shape
+              // is free to change.
+              let #(e, after_label) = fresh_label(e)
               let e = emit_ir(e, IrLabel(next_label))
-              let e = emit_ir(e, IrAsyncYieldStarNext)
+              let e = emit_ir(e, IrAsyncYieldStarNext(after_label))
               let e = emit_ir(e, IrAwait)
-              Ok(emit_ir(e, IrAsyncYieldStarResume(next_label)))
+              let e = emit_ir(e, IrAsyncYieldStarResume(next_label))
+              Ok(emit_ir(e, IrLabel(after_label)))
             }
             False -> {
               // Sync yield* — get iterator, seed undefined, self-looping
@@ -4840,8 +4900,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       Ok(emit_ir(e, opcode.IrGetTemplateObject(site, quasis)))
     }
 
-    _ ->
-      Error(UnsupportedFeature("expression: " <> string_inspect_expr_kind(expr)))
+    // The two shapes the parser only ever produces INSIDE a construct that
+    // has its own emit path (`super.x` / `super()`; `f(...a)` / `[...a]`), so
+    // reaching them standalone is an engine bug. Named rather than swept up
+    // by a `_ ->` arm: adding an Expression variant must be a compile error
+    // here, not a runtime "unsupported: <variant name>".
+    ast.SuperExpression(_) -> Error(BareSuperExpression)
+    ast.SpreadElement(_, _) -> Error(BareSpreadElement)
   }
 }
 
@@ -5629,11 +5694,17 @@ fn emit_for_of_iter_body(
 /// lands on [thrown, iter, ..base]. push_loop_iter must come AFTER F_body
 /// so a labeled break/continue/return that *crosses* this loop drops
 /// F_body and closes iter (cross_pop_try=1, has_iterator).
+///
+/// `body_kind` is F_body's `TryKind`: `IterCloseGuard` for the sync loop (a
+/// return completion out of a suspended `yield` closes the iterator), but
+/// `CatchOnly` for `for await`, whose close needs an Await the generator
+/// unwinder cannot perform.
 fn emit_for_of_common(
   e: Emitter,
   left: ast.ForInit,
   right: ast.Expression,
   get_iter: IrOp,
+  body_kind: TryKind,
   // tail receives: e, loop_start, loop_continue, break_target, catch_body, end
   tail: fn(Emitter, Int, Int, Int, Int, Int) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
@@ -5648,7 +5719,7 @@ fn emit_for_of_common(
   let e =
     e
     |> emit_ir(get_iter)
-    |> emit_ir(IrPushTry(catch_body))
+    |> emit_ir(IrPushTry(catch_body, body_kind))
     |> push_loop_iter(break_target, loop_continue)
     |> emit_ir(IrLabel(loop_start))
   use e <- result.map(tail(
@@ -5682,6 +5753,7 @@ fn emit_for_of(
     left,
     right,
     IrGetIterator,
+    IterCloseGuard,
   )
   let #(e, exhausted) = fresh_label(e)
   let e = emit_ir(e, IrIteratorNext)
@@ -5752,6 +5824,10 @@ fn emit_for_await_of(
     left,
     right,
     IrGetAsyncIterator,
+    // §7.4.12 AsyncIteratorClose Awaits the .return() result, which the
+    // return-completion unwinder cannot do — so F_body is a plain catch here
+    // and the close is open-coded in bytecode below.
+    CatchOnly,
   )
   let #(e, exhausted) = fresh_label(e)
   let #(e, catch_next) = fresh_label(e)
@@ -5762,7 +5838,7 @@ fn emit_for_await_of(
   // F_next shadows F_body for the next/await/unwrap region. Same recorded
   // depth (stack is [iter, ..base]). §14.7.5.6 step 6.a-f: errors here must
   // NOT close the iterator.
-  let e = emit_ir(e, IrPushTry(catch_next))
+  let e = emit_ir(e, IrPushTry(catch_next, CatchOnly))
   let e = emit_ir(e, IrDup)
   let e = emit_ir(e, IrGetField2("next"))
   let e = emit_ir(e, IrCallMethod(0))
@@ -5797,7 +5873,7 @@ fn emit_for_await_of(
   // [thrown, iter, ..base], try=[..outer]. F_swallow recorded at depth B+2
   // catches every error from get/call/await; original error always wins.
   let e = emit_ir(e, IrLabel(catch_body))
-  let e = emit_ir(e, IrPushTry(rethrow))
+  let e = emit_ir(e, IrPushTry(rethrow, CatchOnly))
   let e = emit_ir(e, IrSwap)
   // [iter, thrown, ..base]
   let e = emit_ir(e, IrGetField2("return"))
@@ -6398,7 +6474,7 @@ fn emit_array_assign_rest(
       use e <- result.try(emit_expr(e, obj))
       let e = emit_ir(e, IrPopTry)
       let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPushTry(close_throw))
+      let e = emit_ir(e, IrPushTry(close_throw, IterCloseGuard))
       use e <- result.map(emit_expr(e, key))
       let e = emit_ir(e, IrSwap)
       let e = emit_ir(e, IrPopTry)
@@ -6725,7 +6801,7 @@ fn with_iterator_scaffold(
   // [source] → [iter]. PushTry immediately after so the recorded stack_depth
   // has iter on top — unwind_to_catch will leave [thrown, iter, ..].
   let e = emit_ir(e, IrGetIterator)
-  let e = emit_ir(e, IrPushTry(close_throw))
+  let e = emit_ir(e, IrPushTry(close_throw, IterCloseGuard))
   use #(e, rested) <- result.map(emit_elements(e, close_throw))
   let e = case rested {
     // Rest path already PopTry'd, drained iter, bound it. Stack at base.
@@ -6834,16 +6910,20 @@ fn translate_binop(op: ast.BinaryOp) -> opcode.BinOpKind {
   }
 }
 
-fn translate_unaryop(op: ast.UnaryOp) -> opcode.UnaryOpKind {
+/// The unary operators that lower to a single `IrUnaryOp`. `typeof` and
+/// `delete` do NOT: they need the unresolvable-reference / property-reference
+/// treatment their dedicated `emit_expr` arms give them, so they return
+/// `Error(Nil)` here rather than a plausible-but-wrong opcode. (Same shape as
+/// `compound_to_binop`, which rejects the operators its caller handles
+/// elsewhere.)
+fn translate_unaryop(op: ast.UnaryOp) -> Result(opcode.UnaryOpKind, Nil) {
   case op {
-    ast.Negate -> opcode.Neg
-    ast.UnaryPlus -> opcode.Pos
-    ast.LogicalNot -> opcode.LogicalNot
-    ast.BitwiseNot -> opcode.BitNot
-    ast.Void -> opcode.Void
-    // TypeOf handled separately, Delete not in MVP
-    ast.TypeOf -> opcode.Void
-    ast.Delete -> opcode.Void
+    ast.Negate -> Ok(opcode.Neg)
+    ast.UnaryPlus -> Ok(opcode.Pos)
+    ast.LogicalNot -> Ok(opcode.LogicalNot)
+    ast.BitwiseNot -> Ok(opcode.BitNot)
+    ast.Void -> Ok(opcode.Void)
+    ast.TypeOf | ast.Delete -> Error(Nil)
   }
 }
 
@@ -6881,8 +6961,8 @@ fn emit_logical_assign(
   case ast_util.member_static_prop(lhs), lhs {
     _, ast.Identifier(name:, ..) -> {
       let #(e, end_label) = fresh_label(e)
-      with_identifier_lref(e, name, fn(e) {
-        let e = emit_var_ref_get(e, name)
+      with_identifier_lref(e, name, fn(e, ref) {
+        let e = emit_var_ref_get(e, ref)
         let e = emit_short_circuit_test(e, op, end_label)
         // Test passed: drop the old value, evaluate RHS, write, leave RHS.
         let e = emit_ir(e, IrPop)
@@ -7556,50 +7636,5 @@ fn static_init_stmts(
           directive: None,
         ),
       )
-  }
-}
-
-// ============================================================================
-// Debug helpers
-// ============================================================================
-
-fn string_inspect_expr_kind(expr: ast.Expression) -> String {
-  case expr {
-    ast.Identifier(..) -> "Identifier"
-    ast.NumberLiteral(_, _) -> "NumberLiteral"
-    ast.BigIntLiteral(_, _) -> "BigIntLiteral"
-    ast.StringExpression(_, _) -> "StringExpression"
-    ast.BooleanLiteral(_, _) -> "BooleanLiteral"
-    ast.NullLiteral(_) -> "NullLiteral"
-    ast.UndefinedExpression(_) -> "UndefinedExpression"
-    ast.BinaryExpression(..) -> "BinaryExpression"
-    ast.LogicalExpression(..) -> "LogicalExpression"
-    ast.UnaryExpression(..) -> "UnaryExpression"
-    ast.UpdateExpression(..) -> "UpdateExpression"
-    ast.AssignmentExpression(..) -> "AssignmentExpression"
-    ast.CallExpression(..) -> "CallExpression"
-    ast.MemberExpression(..) -> "MemberExpression"
-    ast.OptionalMemberExpression(..) -> "OptionalMemberExpression"
-    ast.OptionalCallExpression(..) -> "OptionalCallExpression"
-    ast.ConditionalExpression(..) -> "ConditionalExpression"
-    ast.NewExpression(..) -> "NewExpression"
-    ast.ThisExpression(_) -> "ThisExpression"
-    ast.SuperExpression(_) -> "SuperExpression"
-    ast.ArrayExpression(_, _) -> "ArrayExpression"
-    ast.ObjectExpression(_, _) -> "ObjectExpression"
-    ast.FunctionExpression(..) -> "FunctionExpression"
-    ast.ArrowFunctionExpression(..) -> "ArrowFunctionExpression"
-    ast.ClassExpression(..) -> "ClassExpression"
-    ast.YieldExpression(..) -> "YieldExpression"
-    ast.AwaitExpression(_, _) -> "AwaitExpression"
-    ast.SequenceExpression(_, _) -> "SequenceExpression"
-    ast.SpreadElement(_, _) -> "SpreadElement"
-    ast.TemplateLiteral(..) -> "TemplateLiteral"
-    ast.TaggedTemplateExpression(..) -> "TaggedTemplateExpression"
-    ast.MetaProperty(..) -> "MetaProperty"
-    ast.ImportExpression(..) -> "ImportExpression"
-    ast.RegExpLiteral(..) -> "RegExpLiteral"
-    ast.ParenthesizedExpression(..) -> "ParenthesizedExpression"
-    ast.IntrinsicTemplateObject(..) -> "IntrinsicTemplateObject"
   }
 }

@@ -7,7 +7,7 @@ import arc/vm/completion.{
 import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
-import arc/vm/opcode.{type Op, Gosub, IteratorCloseThrow, YieldStar}
+import arc/vm/opcode.{CatchOnly, Finally, IterCloseGuard, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
   type Heap, type HeapSlot, type State, type StepExit, type TryFrame,
@@ -655,26 +655,23 @@ type ReturnHandler {
 }
 
 /// Walk the try_stack, skipping catch-only entries, looking for the first
-/// frame a return completion must visit. Since the gosub/ret rewrite (wave 3)
-/// the throw entry of a try/finally is `Gosub(fin_label); Throw`, so a
-/// finally-owning frame is identified by `Gosub` at its catch_target.
-/// For-of loops and array-destructuring scaffolds place `IteratorCloseThrow`
-/// at their catch target with the iterator at the recorded stack depth —
-/// §27.5.3.4 GeneratorResumeAbrupt: a return completion propagating out of a
-/// yield must IteratorClose those iterators too, not only run finallys.
+/// frame a return completion must visit — §27.5.3.4 GeneratorResumeAbrupt: a
+/// return propagating out of a yield runs enclosing finallys AND closes any
+/// live for-of / destructuring iterators.
+///
+/// Each frame's `TryKind` was supplied by the emitter at the site that knew
+/// which of the three it was building, so this never has to disassemble the
+/// instruction sitting at `catch_target` to guess.
 fn find_next_return_handler(
-  code: tuple_array.TupleArray(Op),
   try_stack: List(TryFrame),
 ) -> Option(ReturnHandler) {
   case try_stack {
     [] -> None
-    [TryFrame(catch_target:, stack_depth:), ..rest] ->
-      // catch_target is a compiler-resolved label PC — always in bounds.
-      case tuple_array.unsafe_get(catch_target, code) {
-        Gosub(fin_label) -> Some(FinallyHandler(fin_label, stack_depth, rest))
-        IteratorCloseThrow -> Some(IterCloseHandler(stack_depth, rest))
-        _ -> find_next_return_handler(code, rest)
-      }
+    [TryFrame(kind: Finally(fin_label:), stack_depth:, ..), ..rest] ->
+      Some(FinallyHandler(fin_label, stack_depth, rest))
+    [TryFrame(kind: IterCloseGuard, stack_depth:, ..), ..rest] ->
+      Some(IterCloseHandler(stack_depth, rest))
+    [TryFrame(kind: CatchOnly, ..), ..rest] -> find_next_return_handler(rest)
   }
 }
 
@@ -700,7 +697,7 @@ pub fn unwind_return(
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
 ) -> Result(#(Outcome, State(host)), state.VmError) {
-  case find_next_return_handler(gen_state.code, gen_state.try_stack) {
+  case find_next_return_handler(gen_state.try_stack) {
     // No more finally blocks / iterator guards: the return completes the body.
     None -> Ok(#(Completed(NormalCompletion(return_val)), gen_state))
     // §7.4.9 IteratorClose with a return completion: a for-of loop or
@@ -859,6 +856,7 @@ pub fn save_stacks(try_stack: List(TryFrame)) -> List(value.SavedTryFrame) {
   value.SavedTryFrame(
     catch_target: tf.catch_target,
     stack_depth: tf.stack_depth,
+    kind: tf.kind,
   )
 }
 
@@ -867,7 +865,11 @@ pub fn restore_stacks(
   saved_try_stack: List(value.SavedTryFrame),
 ) -> List(TryFrame) {
   use stf <- list.map(saved_try_stack)
-  TryFrame(catch_target: stf.catch_target, stack_depth: stf.stack_depth)
+  TryFrame(
+    catch_target: stf.catch_target,
+    stack_depth: stf.stack_depth,
+    kind: stf.kind,
+  )
 }
 
 /// Truncate stack to a given depth.

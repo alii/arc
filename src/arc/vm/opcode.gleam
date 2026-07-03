@@ -148,6 +148,30 @@ pub type ErrorKind {
   TypeErrorKind
 }
 
+/// What a `PushTry` handler frame is FOR. Carried by both `IrPushTry` and
+/// `PushTry` (and mirrored onto `state.TryFrame` when the frame is pushed) so
+/// that unwinding a *return* completion out of a suspended generator
+/// (§27.5.3.4 GeneratorResumeAbrupt) can dispatch on a value the emitter
+/// supplied instead of disassembling the instruction at `catch_target`.
+///
+/// Like every other label-carrying operand, `Finally`'s payload is a label id
+/// in `IrPushTry` and an absolute PC after `resolve` rewrites it.
+pub type TryKind {
+  /// A plain `catch` handler, or an internal handler that only ever catches
+  /// throws. A return completion unwinding past it just skips it.
+  CatchOnly
+  /// A `try`/`finally` — the frame's `catch_target` is the throw entry
+  /// (`Gosub(fin_label); Throw`). A return completion must run the finally
+  /// subroutine at `fin_label` before it keeps unwinding.
+  Finally(fin_label: Int)
+  /// A for-of loop / array-destructuring scaffold guarding a live iterator:
+  /// the value at the frame's recorded `stack_depth` is the iterator, and a
+  /// return completion must close it (§7.4.9 IteratorClose). Only the *sync*
+  /// close paths use this — a `for await` guard is `CatchOnly` because
+  /// AsyncIteratorClose needs an Await the unwinder cannot perform.
+  IterCloseGuard
+}
+
 /// Resolved bytecode instruction. All variable references are numeric indices,
 /// all jump targets are absolute PC addresses. The VM only sees these.
 pub type Op {
@@ -459,7 +483,10 @@ pub type Op {
   /// unconditional runtime throws (e.g. §13.5.1.2 `delete super.x`). Mirrors
   /// QuickJS OP_throw_error.
   ThrowError(kind: ErrorKind, msg: String)
-  PushTry(catch_target: Int)
+  /// Push an exception-handler frame. `kind` says what the frame is FOR, so
+  /// the return-completion unwinder (generators.find_next_return_handler)
+  /// never has to guess by disassembling whatever sits at `catch_target`.
+  PushTry(catch_target: Int, kind: TryKind)
   PopTry
 
   // -- Closures --
@@ -571,7 +598,12 @@ pub type Op {
   /// Ok-returning (not Awaited) so job_queue mutations from the inner
   /// .next() call (e.g. AsyncFromSyncIterator's unwrap microtask) thread
   /// through to the Await step. ES §15.5.5 step 8.a.i-ii.
-  AsyncYieldStarNext
+  ///
+  /// `after_pc` is the resolved PC of the instruction *following* the whole
+  /// yield* sequence. The async-generator driver resumes the body there when
+  /// a forwarded `.throw()` makes the inner iterator report done, so nothing
+  /// depends on how many opcodes the sequence lowers to.
+  AsyncYieldStarNext(after_pc: Int)
   /// Async-generator yield* — phase 2/2. Stack: [result_obj, iter, ..].
   /// IteratorComplete(result_obj): if done → pop both, push value, pc+1.
   /// If !done → Yielded(value); execute_inner's Yielded arm pops result_obj,
@@ -757,7 +789,7 @@ pub type IrOp {
   IrJumpIfFalse(label: Int)
   IrJumpIfTrue(label: Int)
   IrJumpIfNullish(label: Int)
-  IrPushTry(catch_label: Int)
+  IrPushTry(catch_label: Int, kind: TryKind)
   IrGosub(label: Int)
   IrRet
 
@@ -888,7 +920,7 @@ pub type IrOp {
   IrInitialYield
   IrYield
   IrYieldStar
-  IrAsyncYieldStarNext
+  IrAsyncYieldStarNext(after_label: Int)
   IrAsyncYieldStarResume(next_label: Int)
   IrAwait
   IrCreateArguments(simple_params: Bool)

@@ -38,6 +38,7 @@ import arc/vm/value.{
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/pair
 import gleam/result
 import gleam/string
 
@@ -296,17 +297,25 @@ fn pair_delegate(
   option.map(iter, fn(iter_ref) { #(method, iter_ref) })
 }
 
-/// If suspended at AsyncYieldStarNext, return the delegated iterator ref.
+/// The `yield*` delegation the body is suspended in, if any: the delegated
+/// iterator (top of the saved stack) plus the `after_pc` operand of the
+/// `AsyncYieldStarNext` it is parked on — the emitter-resolved label of the
+/// instruction the delegation falls out to.
 /// saved_pc was a valid dispatch target — always in bounds.
-fn async_delegate_iterator(gen: AsyncGenData) -> Option(Ref) {
+fn async_delegate_site(gen: AsyncGenData) -> Option(#(Ref, Int)) {
   case tuple_array.unsafe_get(gen.saved_pc, gen.func_template.bytecode) {
-    AsyncYieldStarNext ->
+    AsyncYieldStarNext(after_pc:) ->
       case gen.saved_stack {
-        [JsObject(iter_ref), ..] -> Some(iter_ref)
+        [JsObject(iter_ref), ..] -> Some(#(iter_ref, after_pc))
         _ -> None
       }
     _ -> None
   }
+}
+
+/// The delegated iterator ref, when the body is suspended mid-`yield*`.
+fn async_delegate_iterator(gen: AsyncGenData) -> Option(Ref) {
+  option.map(async_delegate_site(gen), pair.first)
 }
 
 /// The yield* iter slot may hold an internal Iterator Record wrapper
@@ -546,7 +555,7 @@ fn resume_after_delegate(
 
 /// Delegated iterator returned {done:true} from a forwarded return/throw.
 ///   throw → inner caught the throw and finished — yield* expr evaluates to
-///           val; resume body at saved_pc+3 (past Next/Await/Resume).
+///           val; resume the body past the whole yield* sequence.
 ///   return → inner returned done — outer gen returns val.
 fn delegate_done(
   state: State(host),
@@ -556,17 +565,25 @@ fn delegate_done(
 ) -> Result(State(host), state.VmError) {
   let gen = run.gen
   case method {
-    DelegateThrow -> {
-      // Bytecode layout (emit.gleam): N=AsyncYieldStarNext, N+1=Await,
-      // N+2=AsyncYieldStarResume, N+3=<after yield*>. saved_pc==N.
-      let stack_after = case gen.saved_stack {
-        [_iter, ..rest] -> [val, ..rest]
-        [] -> [val]
+    DelegateThrow ->
+      // The resume target is `AsyncYieldStarNext`'s `after_pc` operand — a
+      // label the emitter placed after the sequence, so nothing here depends
+      // on how many opcodes yield* lowers to.
+      case async_delegate_site(gen) {
+        None ->
+          Error(InternalError(
+            "delegate_done",
+            "not suspended at AsyncYieldStarNext",
+          ))
+        Some(#(_iter_ref, after_pc)) -> {
+          let stack_after = case gen.saved_stack {
+            [_iter, ..rest] -> [val, ..rest]
+            [] -> [val]
+          }
+          let exec_state = build_exec_state(state, gen, stack_after, after_pc)
+          handle_exec_result(state, run, run.execute_inner(exec_state))
+        }
       }
-      let exec_state =
-        build_exec_state(state, gen, stack_after, gen.saved_pc + 3)
-      handle_exec_result(state, run, run.execute_inner(exec_state))
-    }
     DelegateReturn ->
       // §27.5.3.8 step 7.c.viii: the inner iterator's return() reported
       // done — a return completion (carrying its value) propagates out of

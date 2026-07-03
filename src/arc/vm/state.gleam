@@ -5,7 +5,7 @@ import arc/vm/internal/job_queue.{type JobQueue}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key.{Named}
 import arc/vm/limits
-import arc/vm/opcode.{type Op}
+import arc/vm/opcode.{type Op, type TryKind}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
 import gleam/dict
 import gleam/float
@@ -41,9 +41,12 @@ pub type HostFn(host) =
   fn(List(JsValue), JsValue, State(host)) ->
     #(State(host), Result(JsValue, JsValue))
 
-/// Exception handler frame, pushed by PushTry.
+/// Exception handler frame, pushed by PushTry. `kind` is copied straight off
+/// the opcode: it says whether unwinding a *return* completion past this frame
+/// must run a finally subroutine, close a live iterator, or just skip it
+/// (see `opcode.TryKind` and `generators.find_next_return_handler`).
 pub type TryFrame {
-  TryFrame(catch_target: Int, stack_depth: Int)
+  TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind)
 }
 
 /// A saved caller frame, pushed onto call_stack when Call enters a function.

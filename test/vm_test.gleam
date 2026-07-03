@@ -5,11 +5,11 @@ import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
 import arc/vm/opcode.{
-  type Op, Add, BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq, Exp,
-  GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue, LogicalNot, Lt,
-  LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutField,
-  PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub, Swap,
-  UShiftRight, UnaryOp, Void, bin_op,
+  type Op, Add, BitAnd, BitNot, BitOr, BitXor, CatchOnly, DefineField, Div, Dup,
+  Eq, Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue,
+  LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst,
+  PushTry, PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq,
+  StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void, bin_op,
 }
 import arc/vm/ops/object
 import arc/vm/state
@@ -656,7 +656,7 @@ pub fn try_catch_basic_test() {
   //  2: Throw             -- throw it
   //  3: Return            -- catch: stack has thrown value, return it
   let assert Ok(JsString("caught!")) =
-    run_simple([PushTry(3), PushConst(0), opcode.Throw, Return], [
+    run_simple([PushTry(3, CatchOnly), PushConst(0), opcode.Throw, Return], [
       JsString("caught!"),
     ])
 }
@@ -670,9 +670,12 @@ pub fn try_no_throw_test() {
   //  3: Return            -- return 42
   //  4: Return            -- catch (never reached)
   let assert Ok(JsNumber(Finite(42.0))) =
-    run_simple([PushTry(4), PushConst(0), opcode.PopTry, Return, Return], [
-      JsNumber(Finite(42.0)),
-    ])
+    run_simple(
+      [PushTry(4, CatchOnly), PushConst(0), opcode.PopTry, Return, Return],
+      [
+        JsNumber(Finite(42.0)),
+      ],
+    )
 }
 
 pub fn tdz_throws_reference_error_test() {
@@ -881,7 +884,7 @@ pub fn try_catch_with_computation_test() {
   let func =
     make_func(
       [
-        PushTry(7),
+        PushTry(7, CatchOnly),
         PushConst(0),
         PushConst(1),
         bin_op(Add),

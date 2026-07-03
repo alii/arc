@@ -49,8 +49,9 @@ import gleam/option.{type Option, None, Some}
 ///
 /// Variable access is already concrete (the emitter consults the scope tree
 /// and emits GetLocal/GetBoxed/GetGlobal/IrWith* directly); only
-/// IrLabel/IrJump/IrJumpIfFalse/IrJumpIfTrue/IrJumpIfNullish/IrPushTry
-/// still need label→PC resolution.
+/// IrLabel/IrJump/IrJumpIfFalse/IrJumpIfTrue/IrJumpIfNullish/IrPushTry (both
+/// its catch target and a `Finally` kind's subroutine entry) still need
+/// label→PC resolution.
 ///
 /// Assembling the surrounding `value.FuncTemplate` is the CALLER's job
 /// (`compiler.resolve_top_level` / `compiler.compile_child`): they own the
@@ -224,6 +225,18 @@ fn label_pc(labels: Dict(Int, Int), label: Int) -> Int {
   pc
 }
 
+/// `TryKind` is shared between IR and bytecode; the only label it can carry is
+/// `Finally`'s finally-subroutine entry, resolved here like any other target.
+fn resolve_try_kind(
+  labels: Dict(Int, Int),
+  kind: opcode.TryKind,
+) -> opcode.TryKind {
+  case kind {
+    opcode.Finally(fin_label:) -> opcode.Finally(label_pc(labels, fin_label))
+    opcode.CatchOnly | opcode.IterCloseGuard -> kind
+  }
+}
+
 /// Pass 2: Walk the IR, resolve labels to PCs, translate IrOp → Op.
 /// Appends a sentinel Return at the end so the interpreter's fetch loop
 /// can use unchecked element/2 — termination happens via normal Return
@@ -250,8 +263,11 @@ fn resolve_ops(
       let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.JumpIfNullish(pc), ..acc])
     }
-    [IrPushTry(l), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PushTry(label_pc(labels, l)), ..acc])
+    [IrPushTry(l, kind), ..rest] -> {
+      let op =
+        opcode.PushTry(label_pc(labels, l), resolve_try_kind(labels, kind))
+      resolve_ops(rest, labels, [op, ..acc])
+    }
     [IrGosub(l), ..rest] ->
       resolve_ops(rest, labels, [opcode.Gosub(label_pc(labels, l)), ..acc])
 
@@ -533,8 +549,10 @@ fn resolve_ops(
     [IrYield, ..rest] -> resolve_ops(rest, labels, [opcode.Yield, ..acc])
     [IrYieldStar, ..rest] ->
       resolve_ops(rest, labels, [opcode.YieldStar, ..acc])
-    [IrAsyncYieldStarNext, ..rest] ->
-      resolve_ops(rest, labels, [opcode.AsyncYieldStarNext, ..acc])
+    [IrAsyncYieldStarNext(l), ..rest] -> {
+      let pc = label_pc(labels, l)
+      resolve_ops(rest, labels, [opcode.AsyncYieldStarNext(pc), ..acc])
+    }
     [IrAsyncYieldStarResume(l), ..rest] -> {
       let pc = label_pc(labels, l)
       resolve_ops(rest, labels, [opcode.AsyncYieldStarResume(pc), ..acc])
