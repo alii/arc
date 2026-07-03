@@ -22,29 +22,31 @@ import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type CollatorState, type DateStyle, type DateTimeFormatState,
   type DisplayNamesState, type DtfComponent, type DtfComponents,
-  type DurationFormatState, type DurationUnitOptions, type DurationUnitStyle,
-  type HostOverride, type HourCycle, type IntlData, type IntlDigitOptions,
-  type IntlMethodName, type IntlNativeFn, type IntlService, type JsValue,
-  type ListFormatState, type LocaleGetterName, type LocaleMethodName,
-  type LocaleState, type MonthWidth, type NameWidth, type Notation,
-  type NumberFormatState, type NumericWidth, type PluralRulesState, type Ref,
-  type RelativeTimeFormatState, type SegmentIteratorState, type SegmenterState,
-  type SegmentsState, type TimeStyle, type TimeZoneNameWidth, CollatorData,
-  CollatorState, CompactLong, CompactShort, CurAccounting, CurCode, CurName,
-  CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
+  type DurationBaseStyle, type DurationFormatState, type DurationUnitOptions,
+  type DurationUnitStyle, type HostOverride, type HourCycle, type IntlData,
+  type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
+  type IntlService, type JsValue, type ListFormatState, type LocaleGetterName,
+  type LocaleMethodName, type LocaleState, type MonthWidth, type NameWidth,
+  type Notation, type NumberFormatState, type NumericWidth,
+  type PluralRulesState, type Ref, type RelativeTimeFormatState,
+  type SegmentIteratorState, type SegmenterState, type SegmentsState,
+  type TimeStyle, type TimeZoneNameWidth, BsDigital, BsLong, BsNarrow, BsShort,
+  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting, CurCode,
+  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
   DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
-  DateToLocaleTimeString, Dispatch, DisplayNamesData, DisplayNamesState, DsFull,
-  DsLong, DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
-  DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
-  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
-  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
-  DurationUnitOptions, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever,
-  H11, H12, H23, H24, IntlBoundGetter, IntlBoundMethod, IntlCollator,
-  IntlConstructor, IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames,
-  IntlDurationFormat, IntlFormat, IntlFormatRange, IntlFormatRangeToParts,
-  IntlFormatToParts, IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat,
-  IntlLocale, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative,
-  IntlNumberFormat, IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
+  DateToLocaleTimeString, Dispatch, DisplayAlways, DisplayAuto, DisplayNamesData,
+  DisplayNamesState, DsFull, DsLong, DsMedium, DsShort, DtfComponents, DtfDay,
+  DtfDayPeriod, DtfEra, DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth,
+  DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong,
+  DurNarrow, DurNumeric, DurShort, DurTwoDigit, DurationFormatData,
+  DurationFormatState, DurationUnitOptions, GroupingAlways, GroupingAuto,
+  GroupingMin2, GroupingNever, H11, H12, H23, H24, IntlBoundGetter,
+  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
+  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat, IntlFormat,
+  IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
+  IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat, IntlLocale,
+  IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat,
+  IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
   IntlResolvedOptions, IntlSegmentIterator, IntlSegmentIteratorNext,
   IntlSegmenter, IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
   IntlSegmentsIterator, IntlSelect, IntlSelectRange, IntlSupportedLocalesOf,
@@ -3855,7 +3857,7 @@ fn duration_format_state(
     DurationFormatState(
       locale:,
       numbering_system: nu,
-      style: duration_base_style_js(base_style),
+      style: base_style,
       years:,
       months:,
       weeks:,
@@ -3933,48 +3935,49 @@ fn duration_unit_options(
   }
   // Steps 2-3: default the style from baseStyle / the previous unit's style.
   let #(style, display_default) = case style_opt {
-    Some(st) -> #(st, "always")
+    Some(st) -> #(st, DisplayAlways)
     None ->
       case base_style {
         // digitalBase: "short" for the calendar units, "numeric" for the rest.
         BsDigital ->
           case unit {
-            DuYears | DuMonths | DuWeeks | DuDays -> #(DurShort, "auto")
-            _ -> #(DurNumeric, "always")
+            DuYears | DuMonths | DuWeeks | DuDays -> #(DurShort, DisplayAuto)
+            _ -> #(DurNumeric, DisplayAlways)
           }
         BsLong | BsShort | BsNarrow ->
           case prev_numeric {
             True ->
               case two_digit_unit {
-                True -> #(DurNumeric, "always")
-                False -> #(DurNumeric, "auto")
+                True -> #(DurNumeric, DisplayAlways)
+                False -> #(DurNumeric, DisplayAuto)
               }
-            False -> #(duration_base_unit_style(base_style), "auto")
+            False -> #(duration_base_unit_style(base_style), DisplayAuto)
           }
       }
   }
   // Step 4: a numeric sub-second unit always folds into a fraction.
   let #(style, display_default) = case style == DurNumeric && sub_second {
-    True -> #(DurFractional, "auto")
+    True -> #(DurFractional, DisplayAuto)
     False -> #(style, display_default)
   }
-  use #(display, state) <- result.try(get_str_opt(
+  use #(display, state) <- result.try(get_enum_opt(
     state,
     opts,
     name <> "Display",
-    ["auto", "always"],
-    Some(display_default),
+    [#("auto", DisplayAuto), #("always", DisplayAlways)],
+    display_default,
   ))
-  let display = option.unwrap(display, display_default)
   // Step 7.
-  use Nil <- result.try(case display == "always" && style == DurFractional {
-    True ->
-      throw_range(
-        state,
-        name <> "Display cannot be 'always' for fractional units",
-      )
-    False -> Ok(Nil)
-  })
+  use Nil <- result.try(
+    case display == DisplayAlways && style == DurFractional {
+      True ->
+        throw_range(
+          state,
+          name <> "Display cannot be 'always' for fractional units",
+        )
+      False -> Ok(Nil)
+    },
+  )
   // Steps 8-9.
   use style <- result.try(case prev_style {
     Some(DurFractional) ->
@@ -4005,23 +4008,6 @@ fn duration_unit_options(
   Ok(#(DurationUnitOptions(style:, display:), style, state))
 }
 
-/// The DurationFormat `style` option (`[[Style]]`).
-type DurationBaseStyle {
-  BsLong
-  BsShort
-  BsNarrow
-  BsDigital
-}
-
-fn duration_base_style_js(s: DurationBaseStyle) -> String {
-  case s {
-    BsLong -> "long"
-    BsShort -> "short"
-    BsNarrow -> "narrow"
-    BsDigital -> "digital"
-  }
-}
-
 /// The base style as a per-unit style — `digital` has none of its own (each
 /// unit takes its digitalBase instead), so it is not accepted here.
 fn duration_base_unit_style(base: DurationBaseStyle) -> DurationUnitStyle {
@@ -4029,6 +4015,15 @@ fn duration_base_unit_style(base: DurationBaseStyle) -> DurationUnitStyle {
     BsLong -> DurLong
     BsShort | BsDigital -> DurShort
     BsNarrow -> DurNarrow
+  }
+}
+
+/// The ListFormat style the assembled duration groups are joined with —
+/// `digital` has no list style of its own and joins like `short`.
+fn duration_list_style(base: DurationBaseStyle) -> String {
+  case base {
+    BsDigital -> "short"
+    BsLong | BsShort | BsNarrow -> value.duration_base_style_to_js_string(base)
   }
 }
 
@@ -4270,14 +4265,20 @@ fn resolved_options(
           [
             #("locale", JsString(df.locale)),
             #("numberingSystem", JsString(df.numbering_system)),
-            #("style", JsString(df.style)),
+            #(
+              "style",
+              JsString(value.duration_base_style_to_js_string(df.style)),
+            ),
           ],
           list.flat_map(duration_unit_list(df), fn(u) {
             let #(unit, o) = u
             let name = duration_unit_js_name(unit)
             [
               #(name, JsString(value.duration_unit_style_to_js_string(o.style))),
-              #(name <> "Display", JsString(o.display)),
+              #(
+                name <> "Display",
+                JsString(value.duration_display_to_js_string(o.display)),
+              ),
             ]
           }),
           case df.fractional_digits {
@@ -6754,14 +6755,14 @@ fn build_duration_parts(
           // Display zero numeric minutes when seconds follow.
           let display_required = case unit == DuMinutes && need_sep {
             True ->
-              df.seconds.display == "always"
+              df.seconds.display == DisplayAlways
               || duration_field(fields, DuSeconds) != 0.0
               || duration_field(fields, DuMilliseconds) != 0.0
               || duration_field(fields, DuMicroseconds) != 0.0
               || duration_field(fields, DuNanoseconds) != 0.0
             False -> False
           }
-          let show = !is_zero || display != "auto" || display_required
+          let show = !is_zero || display == DisplayAlways || display_required
           case show {
             False -> #(groups, need_sep, display_neg, this_done)
             True -> {
@@ -6862,12 +6863,9 @@ fn build_duration_parts(
     list.map(groups, fn(g) {
       g |> list.map(fn(part) { part.1 }) |> string.join("")
     })
-  let list_style = case base_style {
-    "digital" -> "short"
-    other -> other
-  }
   // Re-expand element parts so formatToParts keeps the numeric structure.
-  let lf_parts = fmt.list_format_parts("unit", list_style, strings)
+  let lf_parts =
+    fmt.list_format_parts("unit", duration_list_style(base_style), strings)
   expand_list_elements(lf_parts, groups, [])
 }
 

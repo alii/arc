@@ -383,8 +383,6 @@ pub type NumberNativeFn {
   NumberIsNaN
   NumberIsFinite
   NumberIsInteger
-  NumberParseInt
-  NumberParseFloat
   NumberPrototypeValueOf
   NumberPrototypeToString
   /// Global parseInt (coerces via ToNumber)
@@ -2438,10 +2436,42 @@ pub fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
   }
 }
 
+/// A DurationFormat unit's resolved `[[<Unit>Display]]`.
+pub type DurationDisplay {
+  DisplayAuto
+  DisplayAlways
+}
+
+/// The resolvedOptions spelling of a `[[<Unit>Display]]`.
+pub fn duration_display_to_js_string(v: DurationDisplay) -> String {
+  case v {
+    DisplayAuto -> "auto"
+    DisplayAlways -> "always"
+  }
+}
+
+/// The DurationFormat `style` option (`[[Style]]`).
+pub type DurationBaseStyle {
+  BsLong
+  BsShort
+  BsNarrow
+  BsDigital
+}
+
+/// The resolvedOptions spelling of a `[[Style]]`.
+pub fn duration_base_style_to_js_string(v: DurationBaseStyle) -> String {
+  case v {
+    BsLong -> "long"
+    BsShort -> "short"
+    BsNarrow -> "narrow"
+    BsDigital -> "digital"
+  }
+}
+
 /// One DurationFormat unit's resolved `[[<Unit>Style]]` / `[[<Unit>Display]]`
 /// pair (GetDurationUnitOptions). `style` is the INTERNAL style.
 pub type DurationUnitOptions {
-  DurationUnitOptions(style: DurationUnitStyle, display: String)
+  DurationUnitOptions(style: DurationUnitStyle, display: DurationDisplay)
 }
 
 /// Intl.DurationFormat resolved options (Intl.DurationFormat §1.1.3), one
@@ -2450,7 +2480,7 @@ pub type DurationFormatState {
   DurationFormatState(
     locale: String,
     numbering_system: String,
-    style: String,
+    style: DurationBaseStyle,
     years: DurationUnitOptions,
     months: DurationUnitOptions,
     weeks: DurationUnitOptions,
@@ -4393,8 +4423,6 @@ fn number_native_refs(f: NumberNativeFn, acc: List(Ref)) -> List(Ref) {
     | NumberIsNaN
     | NumberIsFinite
     | NumberIsInteger
-    | NumberParseInt
-    | NumberParseFloat
     | NumberPrototypeValueOf
     | NumberPrototypeToString
     | GlobalParseInt
