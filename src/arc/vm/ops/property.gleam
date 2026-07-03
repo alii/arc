@@ -1,4 +1,4 @@
-import arc/vm/key.{type PropertyKey, Index, Named, max_array_index}
+import arc/vm/key.{Index, Named, max_array_index}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object.{type PropKey, PkString, PkSymbol}
@@ -80,32 +80,6 @@ fn primitive_to_prop_key(
       use #(s, state) <- result.map(coerce.js_to_string(state, key))
       #(PkString(key.canonical_key(s)), state)
     }
-  }
-}
-
-/// The *string-key* projection of `to_prop_key`, for VM opcodes that
-/// pattern-match `JsSymbol` off the stack before calling it and therefore
-/// only ever want the string half. A key that §7.1.19 resolves to a Symbol
-/// throws the same TypeError ToString(symbol) would — callers that need the
-/// symbol must use `to_prop_key` instead.
-///
-/// Deliberately NOT named `to_property_key`: this is not §7.1.19
-/// ToPropertyKey (that's `to_prop_key` above). Reaching for the spec name
-/// and getting this narrowing silently reintroduces the symbol-mis-routing
-/// bug (`Symbol`-valued keys rejected with "Cannot convert a Symbol value to
-/// a string") that `to_prop_key` exists to prevent.
-pub fn to_string_key(
-  state: State(host),
-  key: JsValue,
-) -> Result(#(PropertyKey, State(host)), #(JsValue, State(host))) {
-  use #(pk, state) <- result.try(to_prop_key(state, key))
-  case pk {
-    PkString(k) -> Ok(#(k, state))
-    PkSymbol(_) ->
-      Error(state.type_error_value(
-        state,
-        "Cannot convert a Symbol value to a string",
-      ))
   }
 }
 
