@@ -712,31 +712,53 @@ fn declare_scratch(e: Emitter, slot: Int, init: JsValue) -> Emitter {
 /// AddDisposableResource runs before the next LexicalBinding's Initializer
 /// evaluates). Routing the whole declaration through emit_stmt would init
 /// a, b, … first and leave every slot null on a mid-list throw.
+///
+/// The fold carries the last line marker this function emitted (0 = unknown).
+/// `set_line` only collapses a marker against an *immediately* preceding one,
+/// and each declarator's disposer-register ops sit between the two, so
+/// `using a = 1, b = 2;` would otherwise emit a redundant IrSetLine per extra
+/// declarator. A PlainItem's statement can move the marker anywhere, so it
+/// resets the tracker to unknown rather than claiming its own line.
 fn emit_using_body(
   e: Emitter,
   items: List(UsingItem),
 ) -> Result(Emitter, EmitError) {
-  list.try_fold(items, e, fn(e, item) {
-    case item {
-      ResourceItem(resource:) -> emit_using_resource(e, resource)
-      // Non-using statements emit normally (real source spans intact).
-      PlainItem(located) ->
-        emit_stmt(set_line(e, located.line), located.statement)
-    }
-  })
+  use #(e, _last_line) <- result.map(
+    list.try_fold(items, #(e, 0), fn(acc, item) {
+      let #(e, last_line) = acc
+      case item {
+        ResourceItem(resource:) -> {
+          let e = case resource.line == last_line {
+            True -> e
+            False -> set_line(e, resource.line)
+          }
+          use e <- result.map(emit_using_resource(e, resource))
+          #(e, resource.line)
+        }
+        // Non-using statements emit normally (real source spans intact).
+        PlainItem(located) -> {
+          use e <- result.map(
+            emit_stmt(set_line(e, located.line), located.statement),
+          )
+          #(e, 0)
+        }
+      }
+    }),
+  )
+  e
 }
 
 /// One using declarator, interleaving the const-bind and disposer-register:
 /// declare(name) → eval(init) → init(name) → GetDisposer(name) →
 /// PutVar(slot). Each declarator is fully registered before the next begins
 /// so a throw from a later declarator's init OR its GetDisposer leaves every
-/// earlier slot populated and those resources still dispose.
+/// earlier slot populated and those resources still dispose. The caller
+/// (`emit_using_body`) owns the line marker.
 fn emit_using_resource(
   e: Emitter,
   resource: UsingResource,
 ) -> Result(Emitter, EmitError) {
-  let UsingResource(line:, name:, init:, disposer:) = resource
-  let e = set_line(e, line)
+  let UsingResource(line: _, name:, init:, disposer:) = resource
   let e = declare_lex(e, name, True)
   use e <- result.map(emit_named_expr(e, init, name))
   e
