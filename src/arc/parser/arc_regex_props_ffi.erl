@@ -22,43 +22,81 @@
 -export([classify_lone/1, classify_pair/2, translate_lone/4, translate_pair/4,
          char_set/1, string_list/1]).
 
-%% ---- Public API ----
+%% ---- Property-name resolution ----
+%%
+%% Every consumer below (parse-time classification, PCRE translation, exact
+%% range lookup) asks the same two questions of a \p{...} payload. They ask
+%% them HERE, once, instead of each re-deriving the gc -> binary_prop ->
+%% string_prop chain and the gc/sc/scx guard triple.
 
-%% classify_lone(Name) -> prop_valid | prop_string | prop_invalid
-%% Lone name inside \p{...}: a General_Category value, a binary property,
-%% or (v-flag only) a binary property of strings.
-classify_lone(Name) ->
+%% resolve_lone(Name) -> {gc, ShortCode}
+%%                     | {binary, PcreName, Flip, PcreSupported}
+%%                     | strings
+%%                     | invalid
+%% A lone name inside \p{...}: a General_Category value, a binary property,
+%% or (v-flag only) a binary property of strings. `Flip` marks the complement
+%% aliases (Assigned = \P{Cn}), whose exact data lives under the underlying GC
+%% key. `PcreSupported` says whether PCRE2's own tables know the property,
+%% i.e. whether the \p{...} fallback is usable when we have no exact ranges.
+resolve_lone(Name) ->
     case gc_value(Name) of
         invalid ->
             case binary_prop(Name) of
                 invalid ->
                     case string_prop(Name) of
-                        true -> prop_string;
-                        false -> prop_invalid
+                        true -> strings;
+                        false -> invalid
                     end;
-                _ -> prop_valid
+                {Pcre, Flip, Supported} -> {binary, Pcre, Flip, Supported}
             end;
+        Short -> {gc, Short}
+    end.
+
+%% resolve_pair(Name, Value) -> {gc, ShortCode}
+%%                            | {sc, Canonical, PcreSupported}
+%%                            | {scx, Canonical, PcreSupported}
+%%                            | invalid
+%% Name=Value inside \p{...}: only gc/sc/scx (and their long forms) may take a
+%% value, per ECMA-262 table-nonbinary-unicode-properties. Script and
+%% Script_Extensions are probed separately at generation time, hence two flags
+%% on script_value/1; every General_Category value is known to PCRE2.
+resolve_pair(Name, Value)
+  when Name =:= <<"General_Category">>; Name =:= <<"gc">> ->
+    case gc_value(Value) of
+        invalid -> invalid;
+        Short -> {gc, Short}
+    end;
+resolve_pair(Name, Value)
+  when Name =:= <<"Script">>; Name =:= <<"sc">> ->
+    case script_value(Value) of
+        invalid -> invalid;
+        {Canon, ScOk, _ScxOk} -> {sc, Canon, ScOk}
+    end;
+resolve_pair(Name, Value)
+  when Name =:= <<"Script_Extensions">>; Name =:= <<"scx">> ->
+    case script_value(Value) of
+        invalid -> invalid;
+        {Canon, _ScOk, ScxOk} -> {scx, Canon, ScxOk}
+    end;
+resolve_pair(_, _) ->
+    invalid.
+
+%% ---- Public API ----
+
+%% classify_lone(Name) -> prop_valid | prop_string | prop_invalid
+classify_lone(Name) ->
+    case resolve_lone(Name) of
+        invalid -> prop_invalid;
+        strings -> prop_string;
         _ -> prop_valid
     end.
 
 %% classify_pair(Name, Value) -> prop_valid | prop_invalid
-%% Name=Value inside \p{...}: only gc/sc/scx (and their long forms) may
-%% take a value, per ECMA-262 table-nonbinary-unicode-properties.
-classify_pair(Name, Value)
-  when Name =:= <<"General_Category">>; Name =:= <<"gc">> ->
-    case gc_value(Value) of
+classify_pair(Name, Value) ->
+    case resolve_pair(Name, Value) of
         invalid -> prop_invalid;
         _ -> prop_valid
-    end;
-classify_pair(Name, Value)
-  when Name =:= <<"Script">>; Name =:= <<"sc">>;
-       Name =:= <<"Script_Extensions">>; Name =:= <<"scx">> ->
-    case script_value(Value) of
-        invalid -> prop_invalid;
-        _ -> prop_valid
-    end;
-classify_pair(_, _) ->
-    prop_invalid.
+    end.
 
 %% translate_lone(Name, Negated, InClass, VFlag) -> {ok, iodata()} | error
 %% Replacement text for \p{Name} (or \P{Name} when Negated). InClass is
@@ -68,62 +106,41 @@ classify_pair(_, _) ->
 %% a class (the parser enforces that for literals; constructor patterns that
 %% violate it simply fail to translate and degrade to no-match).
 translate_lone(Name, Negated, InClass, VFlag) ->
-    case gc_value(Name) of
-        invalid ->
-            case binary_prop(Name) of
-                invalid ->
-                    case VFlag andalso not Negated andalso not InClass
-                        andalso string_prop(Name) of
-                        true ->
-                            case arc_regex_uni17_ffi:strings(Name) of
-                                none -> error;
-                                Alt -> {ok, Alt}
-                            end;
-                        false ->
-                            error
-                    end;
-                {Pcre, Flip, _Supported} ->
-                    %% Flip marks complement aliases (Assigned = \P{Cn});
-                    %% their exact data lives under the underlying GC key.
-                    Key = case Flip of
-                              true -> <<"gc:", Pcre/binary>>;
-                              false -> <<"bin:", Pcre/binary>>
-                          end,
-                    expand(Key, Negated xor Flip, InClass,
-                           [esc(Negated xor Flip), ${, Pcre, $}])
+    case resolve_lone(Name) of
+        {gc, Short} ->
+            expand(<<"gc:", Short/binary>>, Negated, InClass, true,
+                   [esc(Negated), ${, Short, $}]);
+        {binary, Pcre, Flip, Supported} ->
+            Neg = Negated xor Flip,
+            Key = case Flip of
+                      true -> <<"gc:", Pcre/binary>>;
+                      false -> <<"bin:", Pcre/binary>>
+                  end,
+            expand(Key, Neg, InClass, Supported, [esc(Neg), ${, Pcre, $}]);
+        strings when VFlag, not Negated, not InClass ->
+            case arc_regex_uni17_ffi:strings(Name) of
+                none -> error;
+                Alt -> {ok, Alt}
             end;
-        Short ->
-            expand(<<"gc:", Short/binary>>, Negated, InClass,
-                   [esc(Negated), ${, Short, $}])
+        strings -> error;
+        invalid -> error
     end.
 
 %% translate_pair(Name, Value, Negated, InClass) -> {ok, iodata()} | error
-translate_pair(Name, Value, Negated, InClass)
-  when Name =:= <<"General_Category">>; Name =:= <<"gc">> ->
-    case gc_value(Value) of
-        invalid -> error;
-        Short ->
-            expand(<<"gc:", Short/binary>>, Negated, InClass,
-                   [esc(Negated), ${, Short, $}])
-    end;
-translate_pair(Name, Value, Negated, InClass)
-  when Name =:= <<"Script">>; Name =:= <<"sc">> ->
-    case script_value(Value) of
-        invalid -> error;
-        {Canon, _ScOk, _ScxOk} ->
-            expand(<<"sc:", Canon/binary>>, Negated, InClass,
-                   [esc(Negated), "{sc:", Canon, $}])
-    end;
-translate_pair(Name, Value, Negated, InClass)
-  when Name =:= <<"Script_Extensions">>; Name =:= <<"scx">> ->
-    case script_value(Value) of
-        invalid -> error;
-        {Canon, _ScOk, _ScxOk} ->
-            expand(<<"scx:", Canon/binary>>, Negated, InClass,
-                   [esc(Negated), "{scx:", Canon, $}])
-    end;
-translate_pair(_, _, _, _) ->
-    error.
+translate_pair(Name, Value, Negated, InClass) ->
+    case resolve_pair(Name, Value) of
+        {gc, Short} ->
+            expand(<<"gc:", Short/binary>>, Negated, InClass, true,
+                   [esc(Negated), ${, Short, $}]);
+        {sc, Canon, ScOk} ->
+            expand(<<"sc:", Canon/binary>>, Negated, InClass, ScOk,
+                   [esc(Negated), "{sc:", Canon, $}]);
+        {scx, Canon, ScxOk} ->
+            expand(<<"scx:", Canon/binary>>, Negated, InClass, ScxOk,
+                   [esc(Negated), "{scx:", Canon, $}]);
+        invalid ->
+            error
+    end.
 
 esc(true) -> "\\P";
 esc(false) -> "\\p".
@@ -132,10 +149,14 @@ esc(false) -> "\\p".
 %% (arc_regexp_ffi evaluates v-mode set algebra over explicit codepoint
 %% ranges and string lists, so it needs the raw data, not rendered PCRE.)
 
-%% char_set(Payload) -> {ok, [{Lo, Hi}]} | error
+%% char_set(Payload) -> {ok, [{Lo, Hi}]}
+%%                    | {error, unknown_property}    %% not a property at all
+%%                    | {error, property_of_strings} %% \p{RGI_Emoji} & friends
+%%                    | {error, no_exact_data}       %% real property, no
+%%                                                   %% Unicode 17 range table
 %% Exact (non-negated) codepoint ranges for a \p{...} payload (lone name or
-%% Name=Value). error when the payload is invalid, names a property of
-%% strings, or has no exact Unicode 17 data.
+%% Name=Value). The three causes are distinct because callers act on them
+%% differently: only property_of_strings should be retried via string_list/1.
 char_set(Payload) ->
     case binary:split(Payload, <<"=">>) of
         [Name, Value] -> pair_char_set(Name, Value);
@@ -143,25 +164,25 @@ char_set(Payload) ->
     end.
 
 lone_char_set(Name) ->
-    case gc_value(Name) of
-        invalid ->
-            case binary_prop(Name) of
-                invalid -> error;
-                {Pcre, true, _Supported} ->
-                    %% Complement alias (Assigned = \P{Cn}); exact data lives
-                    %% under the underlying GC key.
-                    case ranges_for(<<"gc:", Pcre/binary>>) of
-                        {ok, Ranges} ->
-                            {ok, strip_surrogates(complement(Ranges))};
-                        error -> error
-                    end;
-                {Pcre, false, _Supported} ->
-                    case ranges_for(<<"bin:", Pcre/binary>>) of
-                        {ok, Ranges} -> {ok, Ranges};
-                        error -> builtin_char_set(Pcre)
-                    end
+    case resolve_lone(Name) of
+        {gc, Short} ->
+            ranges_for(<<"gc:", Short/binary>>);
+        {binary, Pcre, true, _Supported} ->
+            %% Complement alias (Assigned = \P{Cn}); exact data lives under
+            %% the underlying GC key.
+            case ranges_for(<<"gc:", Pcre/binary>>) of
+                {ok, Ranges} -> {ok, strip_surrogates(complement(Ranges))};
+                {error, no_exact_data} -> {error, no_exact_data}
             end;
-        Short -> ranges_for(<<"gc:", Short/binary>>)
+        {binary, Pcre, false, _Supported} ->
+            case ranges_for(<<"bin:", Pcre/binary>>) of
+                {ok, Ranges} -> {ok, Ranges};
+                {error, no_exact_data} -> builtin_char_set(Pcre)
+            end;
+        strings ->
+            {error, property_of_strings};
+        invalid ->
+            {error, unknown_property}
     end.
 
 %% Definition-frozen properties (their membership is fixed by the Unicode
@@ -174,51 +195,40 @@ builtin_char_set(<<"ASCII">>) ->
 builtin_char_set(<<"Any">>) ->
     {ok, [{0, 16#10FFFF}]};
 builtin_char_set(_) ->
-    error.
+    {error, no_exact_data}.
 
-pair_char_set(Name, Value)
-  when Name =:= <<"General_Category">>; Name =:= <<"gc">> ->
-    case gc_value(Value) of
-        invalid -> error;
-        Short -> ranges_for(<<"gc:", Short/binary>>)
-    end;
-pair_char_set(Name, Value)
-  when Name =:= <<"Script">>; Name =:= <<"sc">> ->
-    case script_value(Value) of
-        invalid -> error;
-        {Canon, _ScOk, _ScxOk} -> ranges_for(<<"sc:", Canon/binary>>)
-    end;
-pair_char_set(Name, Value)
-  when Name =:= <<"Script_Extensions">>; Name =:= <<"scx">> ->
-    case script_value(Value) of
-        invalid -> error;
-        {Canon, _ScOk, _ScxOk} -> ranges_for(<<"scx:", Canon/binary>>)
-    end;
-pair_char_set(_, _) ->
-    error.
-
-ranges_for(Key) ->
-    case arc_regex_uni17_ffi:ranges(Key) of
-        none -> error;
-        Hex -> {ok, decode_ranges(Hex)}
+pair_char_set(Name, Value) ->
+    case resolve_pair(Name, Value) of
+        {gc, Short} -> ranges_for(<<"gc:", Short/binary>>);
+        {sc, Canon, _ScOk} -> ranges_for(<<"sc:", Canon/binary>>);
+        {scx, Canon, _ScxOk} -> ranges_for(<<"scx:", Canon/binary>>);
+        invalid -> {error, unknown_property}
     end.
 
-%% string_list(Name) -> {ok, [[Codepoint]]} | error
+ranges_for(Key) ->
+    case arc_regex_uni17_ffi:decoded_ranges(Key) of
+        none -> {error, no_exact_data};
+        Ranges -> {ok, Ranges}
+    end.
+
+%% string_list(Name) -> {ok, [[Codepoint]]}
+%%                    | {error, unknown_property}
+%%                    | {error, no_exact_data}
 %% The members of a binary property of strings, decoded from the generated
 %% alternation data. Single-codepoint members are included as 1-element lists.
 string_list(Name) ->
     case string_prop(Name) of
-        false -> error;
+        false -> {error, unknown_property};
         true ->
             case arc_regex_uni17_ffi:strings(Name) of
-                none -> error;
+                none -> {error, no_exact_data};
                 Alt -> alt_members(Alt)
             end
     end.
 
 %% Decode "(?:\\x{23}\\x{FE0F}|...)" into {ok, [[16#23, 16#FE0F], ...]}.
 %% Some properties (RGI_Emoji) are stored as a compressed regex with nested
-%% groups and classes rather than a flat alternation — those return error
+%% groups and classes rather than a flat alternation — those are `no_exact_data`
 %% and the caller falls back to the non-desugared translation.
 alt_members(Bin) ->
     L = unicode:characters_to_list(Bin),
@@ -233,28 +243,32 @@ alt_members([$\\, $x, ${ | Rest], Cur, Acc) ->
     case lists:splitwith(fun is_hex_digit/1, Rest) of
         {HexDigits, [$} | Rest2]} when HexDigits =/= [] ->
             alt_members(Rest2, [list_to_integer(HexDigits, 16) | Cur], Acc);
-        {_HexDigits, _NoClosingBrace} -> error
+        {_HexDigits, _NoClosingBrace} -> {error, no_exact_data}
     end;
 alt_members(_Unexpected, _Cur, _Acc) ->
-    error.
+    {error, no_exact_data}.
 
 is_hex_digit(C) ->
     (C >= $0 andalso C =< $9)
         orelse (C >= $a andalso C =< $f)
         orelse (C >= $A andalso C =< $F).
 
-%% Expand a property to explicit codepoint ranges when exact Unicode 17
-%% data exists for it, otherwise emit the PCRE2 fallback. Outside a class
-%% the expansion is a (possibly negated) bracket class of its own; inside a
-%% class the range items are spliced directly — for a negated escape that
-%% means splicing the complement set, since classes cannot nest. The
-%% complement excludes the surrogate block: PCRE2 rejects surrogate
+%% Expand a property to explicit codepoint ranges when exact Unicode 17 data
+%% exists for it, otherwise emit the PCRE2 fallback — but only when PCRE2's own
+%% tables actually know the property (`PcreSupported`, probed at generation
+%% time). With neither exact ranges nor PCRE2 support there is nothing we can
+%% emit, so say `error` instead of handing PCRE2 a \p{...} it will reject.
+%%
+%% Outside a class the expansion is a (possibly negated) bracket class of its
+%% own; inside a class the range items are spliced directly — for a negated
+%% escape that means splicing the complement set, since classes cannot nest.
+%% The complement excludes the surrogate block: PCRE2 rejects surrogate
 %% codepoints in UTF patterns, and valid-UTF-8 subjects cannot contain them.
-expand(Key, Negated, InClass, Fallback) ->
-    case arc_regex_uni17_ffi:ranges(Key) of
-        none -> {ok, Fallback};
-        Hex ->
-            Ranges = decode_ranges(Hex),
+expand(Key, Negated, InClass, PcreSupported, Fallback) ->
+    case arc_regex_uni17_ffi:decoded_ranges(Key) of
+        none when PcreSupported -> {ok, Fallback};
+        none -> error;
+        Ranges ->
             case {Negated, InClass} of
                 {false, false} -> {ok, [$[, render_ranges(Ranges), $]]};
                 {true, false} -> {ok, ["[^", render_ranges(Ranges), $]]};
@@ -263,12 +277,6 @@ expand(Key, Negated, InClass, Fallback) ->
                     {ok, render_ranges(strip_surrogates(complement(Ranges)))}
             end
     end.
-
-%% Hex-packed ranges (12 hex chars each: low bound then high bound).
-decode_ranges(<<>>) -> [];
-decode_ranges(<<Lo:6/binary, Hi:6/binary, Rest/binary>>) ->
-    [{binary_to_integer(Lo, 16), binary_to_integer(Hi, 16)}
-     | decode_ranges(Rest)].
 
 render_ranges([]) -> [];
 render_ranges([{Lo, Lo} | Rest]) ->

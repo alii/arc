@@ -12,12 +12,28 @@
 %% patterns; subjects are valid UTF-8 so they can never match anyway).
 %% Keys: <<"gc:Lu">> | <<"sc:Latin">> | <<"scx:Latin">> | <<"bin:Alphabetic">>.
 %%
+%% decoded_ranges(Key) -> the same ranges as [{Lo, Hi}], or `none`. This module
+%% owns the hex packing, so it owns the decoder — no caller needs to know the
+%% encoding. (decoded_ranges/1 + decode_ranges/1 are hand-written; keep them
+%% when regenerating the tables below.)
+%%
 %% strings(Name) -> a ready-to-splice PCRE2 group matching the
 %% property-of-strings' sequences, as a trie-factored alternation (flat
 %% alternations exceed PCRE2's LINK_SIZE=2 compiled-size cap) that prefers
 %% the longest sequence at every branch point.
 -module(arc_regex_uni17_ffi).
--export([ranges/1, strings/1]).
+-export([ranges/1, decoded_ranges/1, strings/1]).
+
+decoded_ranges(Key) ->
+    case ranges(Key) of
+        none -> none;
+        Hex -> decode_ranges(Hex)
+    end.
+
+decode_ranges(<<>>) -> [];
+decode_ranges(<<Lo:6/binary, Hi:6/binary, Rest/binary>>) ->
+    [{binary_to_integer(Lo, 16), binary_to_integer(Hi, 16)}
+     | decode_ranges(Rest)].
 
 ranges(<<"bin:Alphabetic">>) ->
     <<"00004100005A00006100007A0000AA0000AA0000B50000B50000BA0000BA0000C00000D60000D80000F60000F80002C1"

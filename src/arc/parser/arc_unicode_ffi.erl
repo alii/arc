@@ -1,6 +1,6 @@
 %% Unicode ID_Start / ID_Continue membership for the lexer, backed by the
 %% SAME generated Unicode 17 range tables the regex engine uses
-%% (arc_regex_uni17_ffi:ranges/1), so the lexer and \p{ID_Start} in RegExp
+%% (arc_regex_uni17_ffi:decoded_ranges/1), so the lexer and \p{ID_Start} in RegExp
 %% can never disagree about which identifiers are legal.
 %%
 %% Both predicates are total over the integers: surrogates (reachable from a
@@ -22,28 +22,31 @@ is_id_continue(CP) -> in_ranges(CP, id_ranges(id_continue)).
 %% -- range tables ---------------------------------------------------------
 
 %% Tuple of {Lo, Hi} pairs (inclusive, sorted, disjoint), decoded once from
-%% the generated hex-packed table and cached in persistent_term so lookups
-%% are a pure O(log n) binary search.
+%% the generated table and cached in persistent_term so lookups are a pure
+%% O(log n) binary search.
 id_ranges(Which) ->
     Key = {?MODULE, Which},
     case persistent_term:get(Key, undefined) of
         undefined ->
-            Ranges = list_to_tuple(decode_ranges(table(Which))),
+            Ranges = list_to_tuple(table(Which)),
             persistent_term:put(Key, Ranges),
             Ranges;
         Ranges ->
             Ranges
     end.
 
-table(id_start) -> arc_regex_uni17_ffi:ranges(<<"bin:ID_Start">>);
-table(id_continue) -> arc_regex_uni17_ffi:ranges(<<"bin:ID_Continue">>).
+%% The generated table carrying these two properties is a hard build
+%% invariant: without it every identifier in every source file would be
+%% rejected. Crash on a missing key rather than answer `false` forever.
+table(Which) ->
+    Key = table_key(Which),
+    case arc_regex_uni17_ffi:decoded_ranges(Key) of
+        none -> erlang:error({missing_unicode_table, Key});
+        Ranges -> Ranges
+    end.
 
-%% Hex-packed ranges: 12 hex chars each (6 for the low bound, 6 for the
-%% high). Same encoding arc_regex_props_ffi decodes for the regex engine.
-decode_ranges(<<>>) -> [];
-decode_ranges(<<Lo:6/binary, Hi:6/binary, Rest/binary>>) ->
-    [{binary_to_integer(Lo, 16), binary_to_integer(Hi, 16)}
-     | decode_ranges(Rest)].
+table_key(id_start) -> <<"bin:ID_Start">>;
+table_key(id_continue) -> <<"bin:ID_Continue">>.
 
 %% Binary search: is CP inside any {Lo, Hi} of the sorted, disjoint tuple?
 in_ranges(CP, Ranges) -> in_ranges(CP, Ranges, 1, tuple_size(Ranges)).

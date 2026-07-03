@@ -44,6 +44,9 @@ flags_to_opts(<<"s", Rest/binary>>, Acc) -> flags_to_opts(Rest, [dotall | Acc]);
 flags_to_opts(<<_, Rest/binary>>, Acc) -> flags_to_opts(Rest, Acc).
 %% g, y, u, d, v are handled at the Gleam level, not PCRE options
 
+%% get_compiled(Pattern, Flags) -> {ok, {MP, GroupCount, Names}}
+%%                               | {error, {compile_failed, Reason}}
+%%
 %% Get a compiled pattern, caching it in the process dictionary. re:run/3
 %% with a binary pattern recompiles the PCRE pattern on every call, and the
 %% global match/replace/split loops at the Gleam level call exec once per
@@ -51,10 +54,11 @@ flags_to_opts(<<_, Rest/binary>>, Acc) -> flags_to_opts(Rest, Acc).
 %% Caching the compiled MP makes that one compile + k cheap match calls.
 %% Translation happens behind the same cache: property escapes can expand
 %% into multi-kilobyte classes, so re-translating per exec would dominate
-%% tight test()/exec loops over short subjects. Keyed by the ORIGINAL
-%% pattern plus {CompileOpts, UnicodeMode} — both compilation and
-%% translation inputs — so flag chars that affect neither (g/y/d/etc.)
-%% share an entry.
+%% tight test()/exec loops over short subjects. The scan of the source
+%% pattern (group count + named groups) is cached alongside the MP, so
+%% regexp_exec_info gets it for free on a hit. Keyed by the ORIGINAL pattern
+%% plus {CompileOpts, UnicodeMode} — both compilation and translation inputs
+%% — so flag chars that affect neither (g/y/d/etc.) share an entry.
 get_compiled(Pattern, Flags) ->
     Opts = flags_to_opts(Flags),
     Mode = unicode_mode(Flags),
@@ -62,16 +66,19 @@ get_compiled(Pattern, Flags) ->
     case erlang:get(Key) of
         undefined ->
             Caseless = lists:member(caseless, Opts),
-            case re:compile(translate_pattern(Pattern, Mode, Caseless), Opts) of
+            {Stripped, GroupCount, Names} = scan_pattern(Pattern),
+            Translated = unicode:characters_to_binary(
+                           translate_pat(Stripped, false, Mode, Caseless)),
+            case re:compile(Translated, Opts) of
                 {ok, MP} ->
-                    cache_put(Key, MP),
-                    MP;
-                {error, _Reason} ->
-                    %% Same failure mode as re:run/3 on an invalid pattern.
-                    erlang:error(badarg)
+                    Entry = {MP, GroupCount, Names},
+                    cache_put(Key, Entry),
+                    {ok, Entry};
+                {error, Reason} ->
+                    {error, {compile_failed, Reason}}
             end;
-        MP ->
-            MP
+        Entry ->
+            {ok, Entry}
     end.
 
 %% Max compiled patterns cached per process before the cache is flushed.
@@ -81,7 +88,7 @@ get_compiled(Pattern, Flags) ->
 %% have a small, fixed set of patterns; the cap only triggers for
 %% pathological dynamically-generated patterns, where recompiling matches
 %% the old behavior anyway.
-cache_put(Key, MP) ->
+cache_put(Key, Entry) ->
     N = case erlang:get(arc_re_mp_count) of
             undefined -> 0;
             C -> C
@@ -93,67 +100,109 @@ cache_put(Key, MP) ->
         false ->
             erlang:put(arc_re_mp_count, N + 1)
     end,
-    erlang:put(Key, MP).
+    erlang:put(Key, Entry).
 
-%% Run with a per-process cached compiled pattern. re:compile/re:run raise
-%% badarg on a pattern PCRE can't handle (or an out-of-range offset); catch it
-%% so such a regex degrades to "no match" instead of crashing the VM.
-safe_run(String, Pattern, Flags, RunOpts) ->
-    try
-        MP = get_compiled(Pattern, Flags),
-        re:run(String, MP, RunOpts)
-    catch _:_ -> nomatch
+%% re:run/3 raises badarg for a byte offset that is out of range or lands in
+%% the middle of a UTF-8 character; JS semantics for both is a failed match.
+%% NOTHING else is caught here: a crash inside the translator (scan_pattern,
+%% translate_pat, vclass, ...) is a bug in this module and must surface as a
+%% crash rather than masquerade as "the regex didn't match".
+run_mp(String, MP, RunOpts) ->
+    try re:run(String, MP, RunOpts)
+    catch error:badarg -> nomatch
     end.
 
-%% Translate the JS-regex escapes PCRE doesn't accept into their PCRE form.
-%% Currently: \uHHHH and \u{H..} -> \x{H..}, and (with the u or v flag)
-%% \p{...}/\P{...} property escapes -> the PCRE2 property syntax (long
-%% General_Category names -> short codes, Script=X -> sc:X,
-%% Script_Extensions=X -> scx:X, Assigned -> negated Cn). Backslash escapes
-%% are consumed in pairs so an escaped backslash (\\) before a `u` is not
-%% misread as a unicode escape. The original (untranslated) source is what
-%% RegExp.prototype.source returns; this only affects what is handed to re.
-%% The caseless flag matters in v mode: the desugared class-set algebra must
-%% run over case-folded operands (mode `vi`); see MaybeSimpleCaseFolding.
-translate_pattern(Pattern, Mode, Caseless) ->
-    TransMode = case Mode of
-                    v when Caseless -> vi;
-                    _ -> Mode
-                end,
-    {_, Names} = group_info(Pattern),
-    Stripped = strip_named(unicode:characters_to_list(Pattern), Names, false),
-    unicode:characters_to_binary(translate_pat(Stripped, false, TransMode)).
+%% ---- One scan of the source pattern -------------------------------------
+%%
+%% scan_pattern(Pattern) -> {StrippedChars, GroupCount, Names}
+%%
+%% A single walk of the JS pattern grammar produces everything the rest of
+%% the module needs to know about the source pattern:
+%%
+%%   StrippedChars — the pattern with named-group syntax removed. JS group
+%%     names (any IdentifierName, including $ and astral characters, and
+%%     ES2025 duplicate names across alternatives) are a superset of what
+%%     PCRE accepts, so "(?<name>" becomes a plain "(" and "\k<name>" becomes
+%%     a numeric "\g{N}" backreference. With no named groups in the pattern
+%%     \k<...> is left alone (Annex B identity-escape semantics).
+%%   GroupCount — number of capturing groups.
+%%   Names — [{GroupName, CaptureIndex}] in source order, handed to the Gleam
+%%     caller to build the `groups` object. A name may repeat (ES2025).
+%%
+%% Group counting and name stripping used to be two independent hand-written
+%% scanners over the same grammar; nothing forced them to agree. They are one
+%% walk now, so they cannot drift.
+scan_pattern(Pattern) ->
+    {ChunksRev, GroupCount, NamesRev} =
+        scan(unicode:characters_to_list(Pattern), false, 0, [], []),
+    Names = lists:reverse(NamesRev),
+    Stripped = resolve_backrefs(lists:reverse(ChunksRev), index_by_name(Names)),
+    {Stripped, GroupCount, Names}.
 
-%% Strip named-group syntax before handing the pattern to PCRE: JS group
-%% names (any identifier, including $ and astral chars, and ES2025 duplicate
-%% names across alternatives) are a superset of what PCRE accepts, so
-%% "(?<name>" becomes a plain "(" and "\k<name>" becomes the numeric "\g{N}"
-%% backreference. Names are resolved on the Gleam side via group_info/1.
-%% With no named groups in the pattern, \k<...> is left alone (Annex B
-%% identity-escape semantics).
-strip_named([], _Names, _InClass) -> [];
-strip_named([$\\, $k, $< | Rest], Names, false) when Names =/= [] ->
-    case take_group_name(Rest, []) of
-        {Name, Rest2} ->
-            case lists:keyfind(unicode:characters_to_binary(Name), 1, Names) of
-                {_, Idx} ->
-                    "\\g{" ++ integer_to_list(Idx) ++ "}"
-                        ++ strip_named(Rest2, Names, false);
-                false ->
-                    [$\\, $k, $< | strip_named(Rest, Names, false)]
-            end
+%% Chunks accumulate in reverse: a codepoint, or a {backref, Name, Raw} that
+%% resolve_backrefs/2 fills in once every group index is known (a
+%% backreference may textually precede the group it names).
+scan([], _InClass, N, Chunks, Names) ->
+    {Chunks, N, Names};
+scan([$\\, $k, $< | Rest], false, N, Chunks, Names) ->
+    {Name, Rest2, Terminated} = take_group_name(Rest),
+    Raw = "\\k<" ++ Name ++ case Terminated of true -> ">"; false -> "" end,
+    Chunk = {backref, unicode:characters_to_binary(Name), Raw},
+    scan(Rest2, false, N, [Chunk | Chunks], Names);
+scan([$\\, C | Rest], InClass, N, Chunks, Names) ->
+    scan(Rest, InClass, N, [C, $\\ | Chunks], Names);
+scan([$[ | Rest], false, N, Chunks, Names) ->
+    scan(Rest, true, N, [$[ | Chunks], Names);
+scan([$] | Rest], true, N, Chunks, Names) ->
+    scan(Rest, false, N, [$] | Chunks], Names);
+%% `(?` introduces non-capturing constructs — except `(?<name>` (named
+%% capture), distinguished from the lookbehinds `(?<=` / `(?<!` by the third
+%% character.
+scan([$(, $?, $<, C | Rest], false, N, Chunks, Names) when C =/= $=, C =/= $! ->
+    {Name, Rest2, _Terminated} = take_group_name([C | Rest]),
+    scan(Rest2, false, N + 1, [$( | Chunks],
+         [{unicode:characters_to_binary(Name), N + 1} | Names]);
+scan([$(, $? | Rest], false, N, Chunks, Names) ->
+    scan(Rest, false, N, [$?, $( | Chunks], Names);
+scan([$( | Rest], false, N, Chunks, Names) ->
+    scan(Rest, false, N + 1, [$( | Chunks], Names);
+scan([C | Rest], InClass, N, Chunks, Names) ->
+    scan(Rest, InClass, N, [C | Chunks], Names).
+
+%% [{Name, Idx}] (source order, duplicates allowed) -> [{Name, [Idx]}].
+index_by_name(Names) ->
+    lists:foldl(
+      fun({Name, Idx}, Acc) ->
+              case lists:keyfind(Name, 1, Acc) of
+                  {Name, Idxs} ->
+                      lists:keyreplace(Name, 1, Acc, {Name, Idxs ++ [Idx]});
+                  false ->
+                      Acc ++ [{Name, [Idx]}]
+              end
+      end, [], Names).
+
+resolve_backrefs(Chunks, ByName) ->
+    lists:flatmap(fun(Chunk) -> resolve_chunk(Chunk, ByName) end, Chunks).
+
+resolve_chunk({backref, Name, Raw}, ByName) ->
+    case lists:keyfind(Name, 1, ByName) of
+        {_, [Idx]} ->
+            "\\g{" ++ integer_to_list(Idx) ++ "}";
+        {_, Idxs} ->
+            %% ES2025 duplicate group names: the same name is bound by several
+            %% groups in different alternatives, so at most one of them can
+            %% have participated in the match. An unset PCRE backreference
+            %% fails to match, so an alternation over every index picks
+            %% whichever group actually did participate.
+            Refs = ["\\g{" ++ integer_to_list(I) ++ "}" || I <- Idxs],
+            "(?:" ++ lists:append(lists:join("|", Refs)) ++ ")";
+        false ->
+            %% No such group (or no named groups at all): leave the source
+            %% text alone.
+            Raw
     end;
-strip_named([$\\, C | Rest], Names, InClass) ->
-    [$\\, C | strip_named(Rest, Names, InClass)];
-strip_named([$[ | Rest], Names, false) ->
-    [$[ | strip_named(Rest, Names, true)];
-strip_named([$] | Rest], Names, true) ->
-    [$] | strip_named(Rest, Names, false)];
-strip_named([$(, $?, $<, C | Rest], Names, false) when C =/= $=, C =/= $! ->
-    {_Name, Rest2} = take_group_name([C | Rest], []),
-    [$( | strip_named(Rest2, Names, false)];
-strip_named([C | Rest], Names, InClass) ->
-    [C | strip_named(Rest, Names, InClass)].
+resolve_chunk(C, _ByName) when is_integer(C) ->
+    [C].
 
 %% Property escapes are only translated in unicode mode (u or v flag) —
 %% without it, JS treats \p as an identity escape, not a property. The v
@@ -171,8 +220,9 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
 %% under PCRE caseless, to get JS's case-fold closure for free — caseless
 %% folding maps U+017F (long s) to s and U+212A (Kelvin) to k, so `(?i:[a-z])`
 %% matches them. PCRE's own \w doesn't do this, and `ucp` over-broadens \s/\b.
--define(WORD, "[0-9A-Za-z_]").
--define(NWORD, "[^0-9A-Za-z_]").
+-define(WORD_BODY, "0-9A-Za-z_").
+-define(WORD, "[" ?WORD_BODY "]").
+-define(NWORD, "[^" ?WORD_BODY "]").
 
 %% JS \s per §22.2.2.9: WhiteSpace + LineTerminator productions — ASCII
 %% whitespace plus NBSP, Ogham space, the U+2000 block, LS/PS, NNBSP, MMSP,
@@ -182,11 +232,28 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
         "\\t\\n\\x0B\\f\\r \\x{A0}\\x{1680}\\x{2000}-\\x{200A}"
         "\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}\\x{FEFF}").
 
-%% Second argument tracks whether we are inside a [...] character class, where
-%% \w/\b are not the same productions (\b is backspace) and must be left alone.
-%% Third argument is whether the u or v flag is set (property escape mode).
-translate_pat([], _InClass, _Prop) -> [];
-translate_pat([$\\, $u, ${ | Rest], InClass, Prop) ->
+%% ---- Escape translation --------------------------------------------------
+%%
+%% Rewrite the JS-regex escapes PCRE doesn't accept, or reads differently, into
+%% their PCRE form: \uHHHH and \u{H..} -> \x{H..}; \s/\S/\w/\W/\b/\B -> the
+%% explicit JS sets; and (with the u or v flag) \p{...}/\P{...} property escapes
+%% -> the PCRE2 property syntax (long General_Category names -> short codes,
+%% Script=X -> sc:X, Script_Extensions=X -> scx:X, Assigned -> negated Cn).
+%% Backslash escapes are consumed in pairs so an escaped backslash (\\) before
+%% a `u` is not misread as a unicode escape. The original (untranslated) source
+%% is what RegExp.prototype.source returns; this only affects what re sees.
+%%
+%% translate_pat(Chars, InClass, Mode, CI)
+%%   InClass — inside a [...] character class, where \w/\b are not the same
+%%             productions (\b is backspace) and a negated set cannot be
+%%             written as a nested class.
+%%   Mode    — none | u | v: whether property escapes / v-flag class-set
+%%             expressions are in play.
+%%   CI      — the i flag. It changes what a class must contain: PCRE folds
+%%             every class item at match time, so an emitted set has to be
+%%             closed under simple case folding to mean what JS means.
+translate_pat([], _InClass, _Mode, _CI) -> [];
+translate_pat([$\\, $u, ${ | Rest], InClass, Mode, CI) ->
     case take_hex(Rest, []) of
         {Hex, [$} | Rest2]} when Hex =/= [] ->
             case is_surrogate_hex(Hex) of
@@ -195,14 +262,15 @@ translate_pat([$\\, $u, ${ | Rest], InClass, Prop) ->
                     %% mode, which would degrade the WHOLE pattern to
                     %% no-match. Neutralize to a never-matching sentinel.
                     surrogate_sentinel(InClass)
-                        ++ translate_pat(Rest2, InClass, Prop);
+                        ++ translate_pat(Rest2, InClass, Mode, CI);
                 false ->
-                    [$\\, $x, ${] ++ Hex ++ [$}] ++ translate_pat(Rest2, InClass, Prop)
+                    [$\\, $x, ${] ++ Hex ++ [$}]
+                        ++ translate_pat(Rest2, InClass, Mode, CI)
             end;
         _ ->
-            [$\\, $u, ${ | translate_pat(Rest, InClass, Prop)]
+            [$\\, $u, ${ | translate_pat(Rest, InClass, Mode, CI)]
     end;
-translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Prop) ->
+translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Mode, CI) ->
     case is_hex(A) andalso is_hex(B) andalso is_hex(C) andalso is_hex(D) of
         true ->
             V = list_to_integer([A, B, C, D], 16),
@@ -228,71 +296,82 @@ translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Prop) ->
                                                 + (W - 16#DC00),
                                             "\\x{" ++ integer_to_list(CP, 16)
                                                 ++ "}"
-                                                ++ translate_pat(Rest2, InClass, Prop);
+                                                ++ translate_pat(Rest2, InClass, Mode, CI);
                                         true ->
                                             surrogate_sentinel(InClass)
-                                                ++ translate_pat(Rest, InClass, Prop)
+                                                ++ translate_pat(Rest, InClass, Mode, CI)
                                     end;
                                 false ->
                                     surrogate_sentinel(InClass)
-                                        ++ translate_pat(Rest, InClass, Prop)
+                                        ++ translate_pat(Rest, InClass, Mode, CI)
                             end;
                         _ ->
                             surrogate_sentinel(InClass)
-                                ++ translate_pat(Rest, InClass, Prop)
+                                ++ translate_pat(Rest, InClass, Mode, CI)
                     end;
                 V >= 16#D800, V =< 16#DFFF ->
                     %% Unpaired trail surrogate, or any surrogate inside a
                     %% character class: never matches a well-formed string —
                     %% the sentinel keeps the pattern compiling.
                     surrogate_sentinel(InClass)
-                        ++ translate_pat(Rest, InClass, Prop);
+                        ++ translate_pat(Rest, InClass, Mode, CI);
                 true ->
-                    [$\\, $x, ${, A, B, C, D, $} | translate_pat(Rest, InClass, Prop)]
+                    [$\\, $x, ${, A, B, C, D, $}
+                     | translate_pat(Rest, InClass, Mode, CI)]
             end;
-        false -> [$\\, $u | translate_pat([A, B, C, D | Rest], InClass, Prop)]
+        false -> [$\\, $u | translate_pat([A, B, C, D | Rest], InClass, Mode, CI)]
     end;
 %% \p{...} / \P{...} in unicode mode -> PCRE2 property syntax. An
 %% untranslatable payload is left verbatim; PCRE then fails to compile and
 %% the regex degrades to no-match (the parser already rejected invalid names
 %% in literals, so this only affects RegExp-constructor patterns).
-translate_pat([$\\, P, ${ | Rest], InClass, Mode)
+translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI)
   when (P =:= $p orelse P =:= $P), Mode =/= none ->
     case take_prop(Rest, []) of
         {Payload, Rest2} ->
             case prop_translation(Payload, P =:= $P, InClass, Mode) of
                 {ok, Io} ->
                     unicode:characters_to_list(iolist_to_binary(Io))
-                        ++ translate_pat(Rest2, InClass, Mode);
+                        ++ translate_pat(Rest2, InClass, Mode, CI);
                 error ->
-                    [$\\, P, ${ | translate_pat(Rest, InClass, Mode)]
+                    [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI)]
             end;
         none ->
-            [$\\, P, ${ | translate_pat(Rest, InClass, Mode)]
+            [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI)]
     end;
-%% \s, \S -> explicit JS whitespace class (see ?JSS_CHARS). Inside a
-%% character class the set's contents are spliced in directly; a negated \S
-%% cannot be spliced into a class, so it keeps PCRE semantics there.
-translate_pat([$\\, $s | Rest], false, Prop) ->
-    "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Prop);
-translate_pat([$\\, $S | Rest], false, Prop) ->
-    "[^" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Prop);
-translate_pat([$\\, $s | Rest], true, Prop) ->
-    ?JSS_CHARS ++ translate_pat(Rest, true, Prop);
-%% \w, \W, \b, \B outside a character class -> explicit JS forms so caseless
-%% folding includes long-s / Kelvin (matching the JS word-char case closure).
-translate_pat([$\\, $w | Rest], false, Prop) -> ?WORD ++ translate_pat(Rest, false, Prop);
-translate_pat([$\\, $W | Rest], false, Prop) -> ?NWORD ++ translate_pat(Rest, false, Prop);
-translate_pat([$\\, $b | Rest], false, Prop) ->
+%% \s, \S, \w, \W -> the explicit JS sets. PCRE's own \s/\w are ASCII-only and
+%% `ucp` both over- and under-shoots, so every one of them is spelled out.
+%% Outside a class the negated forms are their own negated bracket class;
+%% inside a class they must become class ITEMS (classes cannot nest), so the
+%% negated forms splice their complement — see class_complement/2.
+translate_pat([$\\, $s | Rest], false, Mode, CI) ->
+    "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI);
+translate_pat([$\\, $S | Rest], false, Mode, CI) ->
+    "[^" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI);
+translate_pat([$\\, $w | Rest], false, Mode, CI) ->
+    ?WORD ++ translate_pat(Rest, false, Mode, CI);
+translate_pat([$\\, $W | Rest], false, Mode, CI) ->
+    ?NWORD ++ translate_pat(Rest, false, Mode, CI);
+translate_pat([$\\, $s | Rest], true, Mode, CI) ->
+    splice_in_class(?JSS_CHARS, Rest, Mode, CI);
+translate_pat([$\\, $w | Rest], true, Mode, CI) ->
+    splice_in_class(?WORD_BODY, Rest, Mode, CI);
+translate_pat([$\\, $S | Rest], true, Mode, CI) ->
+    splice_in_class(class_complement(vspace(), CI), Rest, Mode, CI);
+translate_pat([$\\, $W | Rest], true, Mode, CI) ->
+    splice_in_class(class_complement(vword(), CI), Rest, Mode, CI);
+%% \b, \B outside a character class (inside one, \b is backspace).
+translate_pat([$\\, $b | Rest], false, Mode, CI) ->
     %% Word boundary: word|nonword transition (start/end count as nonword).
     "(?:(?<=" ?WORD ")(?!" ?WORD ")|(?<!" ?WORD ")(?=" ?WORD "))"
-        ++ translate_pat(Rest, false, Prop);
-translate_pat([$\\, $B | Rest], false, Prop) ->
+        ++ translate_pat(Rest, false, Mode, CI);
+translate_pat([$\\, $B | Rest], false, Mode, CI) ->
     %% Non-boundary: both sides word, or both sides nonword/edge.
     "(?:(?<=" ?WORD ")(?=" ?WORD ")|(?<!" ?WORD ")(?!" ?WORD "))"
-        ++ translate_pat(Rest, false, Prop);
+        ++ translate_pat(Rest, false, Mode, CI);
 %% Preserve any other escape pair verbatim (don't reinterpret its 2nd char).
-translate_pat([$\\, C | Rest], InClass, Prop) -> [$\\, C | translate_pat(Rest, InClass, Prop)];
+translate_pat([$\\, C | Rest], InClass, Mode, CI) ->
+    [$\\, C | translate_pat(Rest, InClass, Mode, CI)];
 %% v-flag classes: PCRE has no ClassSetExpression (nested classes, &&
 %% intersection, -- subtraction, \q{...} string literals, properties of
 %% strings inside classes). Desugar the whole [...] here: parse the set
@@ -300,26 +379,60 @@ translate_pat([$\\, C | Rest], InClass, Prop) -> [$\\, C | translate_pat(Rest, I
 %% and emit a plain PCRE class plus an alternation for the strings. A class
 %% the desugarer can't handle falls through to the generic translation
 %% (degrading to PCRE's interpretation / no-match), as before.
-translate_pat([$[ | Rest], false, Mode) when Mode =:= v; Mode =:= vi ->
-    case vclass(Rest, Mode =:= vi) of
+translate_pat([$[ | Rest], false, v, CI) ->
+    case vclass(Rest, CI) of
         {ok, Ranges0, Strings, Rest2} ->
-            %% In vi mode the algebra ran over scf-folded sets; PCRE's own
+            %% With the i flag the algebra ran over scf-folded sets; PCRE's own
             %% caseless closure is unreliable inside large compiled classes
             %% (it folds single chars and small ranges fully, but not long
             %% XCLASS item lists), so close the final set over the scf
             %% equivalence classes ourselves instead of relying on it.
-            Ranges = case Mode of
-                         vi -> vclose(Ranges0);
-                         v -> Ranges0
+            Ranges = case CI of
+                         true -> vclose(Ranges0);
+                         false -> Ranges0
                      end,
-            emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, Mode);
+            emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, v, CI);
         error ->
-            [$[ | translate_pat(Rest, true, Mode)]
+            [$[ | translate_pat(Rest, true, v, CI)]
     end;
 %% Track character-class nesting on unescaped brackets.
-translate_pat([$[ | Rest], false, Prop) -> [$[ | translate_pat(Rest, true, Prop)];
-translate_pat([$] | Rest], true, Prop) -> [$] | translate_pat(Rest, false, Prop)];
-translate_pat([C | Rest], InClass, Prop) -> [C | translate_pat(Rest, InClass, Prop)].
+translate_pat([$[ | Rest], false, Mode, CI) ->
+    [$[ | translate_pat(Rest, true, Mode, CI)];
+translate_pat([$] | Rest], true, Mode, CI) ->
+    [$] | translate_pat(Rest, false, Mode, CI)];
+translate_pat([C | Rest], InClass, Mode, CI) ->
+    [C | translate_pat(Rest, InClass, Mode, CI)].
+
+%% Splice a class escape's items into the enclosing [...] and carry on.
+%%
+%% A `-` right after the splice must NOT be read as a range endpoint. JS never
+%% lets a class escape start a range: `[\w-.]` is three atoms under Annex B and
+%% a SyntaxError under u/v (which the parser rejects before we get here). PCRE
+%% would read the last spliced item and the `-` as a range — either rejecting
+%% the pattern (`[\s-.]`: \x{FEFF}-. is out of order) or, worse, silently
+%% widening it (`[\w-z]`: _-z quietly admits a backtick). Escape the dash.
+splice_in_class(Items, [$-, C | Rest], Mode, CI) when C =/= $] ->
+    Items ++ [$\\, $-] ++ translate_pat([C | Rest], true, Mode, CI);
+splice_in_class(Items, Rest, Mode, CI) ->
+    Items ++ translate_pat(Rest, true, Mode, CI).
+
+%% Class ITEMS for a negated JS class escape (\S, \W) spliced into a [...]:
+%% PCRE has no nested classes, so the complement set has to be written out.
+%%
+%% Under `caseless` PCRE folds every class item at match time, so a spliced
+%% item drags its case partners into the class — closing the POSITIVE set over
+%% the scf equivalence classes first is what stops a complement item folding
+%% back onto a member of it. That is what makes /[\W]/i reject "ſ" and "K"
+%% (they fold to word characters), exactly like the out-of-class /\W/i, which
+%% PCRE renders as [^0-9A-Za-z_] and folds for us. Surrogates are dropped:
+%% PCRE2 rejects them in UTF patterns and valid subjects cannot contain them.
+class_complement(Set, CI) ->
+    Closed = case CI of
+                 true -> vclose(Set);
+                 false -> vnorm(Set)
+             end,
+    Ranges = vstrip_surrogates(vcomplement(Closed)),
+    unicode:characters_to_list(iolist_to_binary(vrender_ranges(Ranges))).
 
 %% Collect a property-escape payload up to the closing }. Only property
 %% name/value characters and a single = are expected; anything else means
@@ -336,8 +449,7 @@ prop_translation(Payload, Negated, InClass, Mode) ->
         [Name, Value] ->
             arc_regex_props_ffi:translate_pair(Name, Value, Negated, InClass);
         [Name] ->
-            arc_regex_props_ffi:translate_lone(Name, Negated, InClass,
-                                               Mode =:= v orelse Mode =:= vi)
+            arc_regex_props_ffi:translate_lone(Name, Negated, InClass, Mode =:= v)
     end.
 
 %% ---- v-flag ClassSetExpression desugaring (§22.2.1 ClassSetExpression) ----
@@ -580,17 +692,25 @@ vprop(Negated, L, CI) ->
                     {set, vcomp(vfold(Ranges, CI), CI), [], Rest};
                 {ok, Ranges} ->
                     {set, vfold(Ranges, CI), [], Rest};
-                error when Negated ->
-                    error;
-                error ->
-                    case arc_regex_props_ffi:string_list(PayloadBin) of
-                        {ok, Strs} ->
-                            {R, S} = vsplit_singles(Strs, CI),
-                            {set, R, S, Rest};
-                        error -> error
-                    end
+                %% Only a property OF STRINGS has a string list, and only \p
+                %% (never \P) may name one — no blind retry on other causes.
+                {error, property_of_strings} when not Negated ->
+                    vstring_prop(PayloadBin, Rest, CI);
+                {error, property_of_strings} -> error;
+                {error, unknown_property} -> error;
+                {error, no_exact_data} -> error
             end;
         none -> error
+    end.
+
+vstring_prop(PayloadBin, Rest, CI) ->
+    case arc_regex_props_ffi:string_list(PayloadBin) of
+        {ok, Strs} ->
+            {R, S} = vsplit_singles(Strs, CI),
+            {set, R, S, Rest};
+        %% RGI_Emoji is stored as a compressed regex the desugarer cannot
+        %% decode; the class then falls back to the non-desugared translation.
+        {error, no_exact_data} -> error
     end.
 
 vsplit_singles(Strs, CI) ->
@@ -713,14 +833,16 @@ scf(CP) ->
 %% cached per process. Derived from Changes_When_Casefolded (a superset:
 %% it also contains the F-only codepoints, which scf fixes; filter those
 %% out by applying scf).
+%%
+%% The table carrying Changes_When_Casefolded is a hard invariant of this
+%% module: without it every case-insensitive class silently evaluates against
+%% an EMPTY fold domain and matches the wrong characters. Crash on a missing
+%% table rather than degrade forever.
 scf_domain() ->
     case erlang:get(arc_scf_domain) of
         undefined ->
-            Cwcf = case arc_regex_props_ffi:char_set(
-                          <<"Changes_When_Casefolded">>) of
-                       {ok, Ranges} -> Ranges;
-                       error -> []
-                   end,
+            {ok, Cwcf} =
+                arc_regex_props_ffi:char_set(<<"Changes_When_Casefolded">>),
             Dom = vnorm([{C, C} || {Lo, Hi} <- Cwcf,
                                    C <- lists:seq(Lo, Hi),
                                    scf(C) =/= C]),
@@ -834,12 +956,18 @@ regexp_exec_info(Pattern, Flags, String, Offset, Sticky) ->
                true -> [anchored | Opts0];
                false -> Opts0
            end,
-    case safe_run(String, Pattern, Flags, Opts) of
-        {match, Captured} ->
-            {GroupCount, Names} = group_info(Pattern),
-            Padded = pad_captures(Captured, GroupCount + 1),
-            {ok, {Padded, GroupCount, Names}};
-        _ -> {error, nil}
+    case get_compiled(Pattern, Flags) of
+        %% A pattern PCRE cannot express even after translation degrades to
+        %% "no match" rather than crashing the VM.
+        {error, {compile_failed, _Reason}} ->
+            {error, nil};
+        {ok, {MP, GroupCount, Names}} ->
+            case run_mp(String, MP, Opts) of
+                {match, Captured} ->
+                    Padded = pad_captures(Captured, GroupCount + 1),
+                    {ok, {Padded, GroupCount, Names}};
+                _ -> {error, nil}
+            end
     end.
 
 %% Pad the capture list with {-1, 0} (PCRE's "unset group" marker) to N
@@ -847,34 +975,11 @@ regexp_exec_info(Pattern, Flags, String, Offset, Sticky) ->
 pad_captures(Caps, N) when length(Caps) >= N -> Caps;
 pad_captures(Caps, N) -> Caps ++ lists:duplicate(N - length(Caps), {-1, 0}).
 
-%% Count capturing groups and collect named-group capture indices by scanning
-%% the ORIGINAL (untranslated) JS pattern. Tracks character classes (parens
-%% are literal inside [...]) and escape pairs. `(?` introduces non-capturing
-%% constructs — except `(?<name>` (named capture), distinguished from the
-%% lookbehinds `(?<=` / `(?<!` by the third character.
-group_info(Pattern) ->
-    group_info(unicode:characters_to_list(Pattern), false, 0, []).
+%% Consume a group name up to its closing `>` (after "(?<" or "\k<").
+%% Terminated=false means the pattern ran out before the `>` — the caller
+%% needs to know so it can restore the source text byte-for-byte.
+take_group_name(L) -> take_group_name(L, []).
 
-group_info([], _InClass, N, Names) ->
-    {N, lists:reverse(Names)};
-group_info([$\\, _ | Rest], InClass, N, Names) ->
-    group_info(Rest, InClass, N, Names);
-group_info([$[ | Rest], false, N, Names) ->
-    group_info(Rest, true, N, Names);
-group_info([$] | Rest], true, N, Names) ->
-    group_info(Rest, false, N, Names);
-group_info([$(, $?, $<, C | Rest], false, N, Names)
-  when C =/= $=, C =/= $! ->
-    {Name, Rest2} = take_group_name([C | Rest], []),
-    group_info(Rest2, false, N + 1,
-               [{unicode:characters_to_binary(Name), N + 1} | Names]);
-group_info([$(, $? | Rest], false, N, Names) ->
-    group_info(Rest, false, N, Names);
-group_info([$( | Rest], false, N, Names) ->
-    group_info(Rest, false, N + 1, Names);
-group_info([_ | Rest], InClass, N, Names) ->
-    group_info(Rest, InClass, N, Names).
-
-take_group_name([$> | Rest], Acc) -> {lists:reverse(Acc), Rest};
+take_group_name([$> | Rest], Acc) -> {lists:reverse(Acc), Rest, true};
 take_group_name([C | Rest], Acc) -> take_group_name(Rest, [C | Acc]);
-take_group_name([], Acc) -> {lists:reverse(Acc), []}.
+take_group_name([], Acc) -> {lists:reverse(Acc), [], false}.
