@@ -19,30 +19,33 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type CollatorState, type DateTimeFormatState, type DisplayNamesState,
-  type DtfComponent, type DtfComponents, type DurationFormatState,
-  type DurationUnitOptions, type HostOverride, type IntlData,
-  type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
-  type IntlService, type JsValue, type ListFormatState, type LocaleGetterName,
-  type LocaleMethodName, type LocaleState, type Notation, type NumberFormatState,
-  type PluralRulesState, type Ref, type RelativeTimeFormatState,
-  type SegmentIteratorState, type SegmenterState, type SegmentsState,
-  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting, CurCode,
-  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
+  type CollatorState, type DateStyle, type DateTimeFormatState,
+  type DisplayNamesState, type DtfComponent, type DtfComponents,
+  type DurationFormatState, type DurationUnitOptions, type DurationUnitStyle,
+  type HostOverride, type HourCycle, type IntlData, type IntlDigitOptions,
+  type IntlMethodName, type IntlNativeFn, type IntlService, type JsValue,
+  type ListFormatState, type LocaleGetterName, type LocaleMethodName,
+  type LocaleState, type MonthWidth, type NameWidth, type Notation,
+  type NumberFormatState, type NumericWidth, type PluralRulesState, type Ref,
+  type RelativeTimeFormatState, type SegmentIteratorState, type SegmenterState,
+  type SegmentsState, type TimeStyle, type TimeZoneNameWidth, CollatorData,
+  CollatorState, CompactLong, CompactShort, CurAccounting, CurCode, CurName,
+  CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
   DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
-  DateToLocaleTimeString, Dispatch, DisplayNamesData, DisplayNamesState,
-  DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
-  DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
-  DurationFormatData, DurationFormatState, DurationUnitOptions, GroupingAlways,
-  GroupingAuto, GroupingMin2, GroupingNever, IntlBoundGetter, IntlBoundMethod,
-  IntlCollator, IntlConstructor, IntlDateTimeFormat, IntlDigitOptions,
-  IntlDisplayNames, IntlDurationFormat, IntlFormat, IntlFormatRange,
-  IntlFormatRangeToParts, IntlFormatToParts, IntlGetCanonicalLocales,
-  IntlHostOverride, IntlListFormat, IntlLocale, IntlLocaleGetter,
-  IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat, IntlObject, IntlOf,
-  IntlPluralRules, IntlRelativeTimeFormat, IntlResolvedOptions,
-  IntlSegmentIterator, IntlSegmentIteratorNext, IntlSegmenter,
-  IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
+  DateToLocaleTimeString, Dispatch, DisplayNamesData, DisplayNamesState, DsFull,
+  DsLong, DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
+  DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
+  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
+  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
+  DurationUnitOptions, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever,
+  H11, H12, H23, H24, IntlBoundGetter, IntlBoundMethod, IntlCollator,
+  IntlConstructor, IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames,
+  IntlDurationFormat, IntlFormat, IntlFormatRange, IntlFormatRangeToParts,
+  IntlFormatToParts, IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat,
+  IntlLocale, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative,
+  IntlNumberFormat, IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
+  IntlResolvedOptions, IntlSegmentIterator, IntlSegmentIteratorNext,
+  IntlSegmenter, IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
   IntlSegmentsIterator, IntlSelect, IntlSelectRange, IntlSupportedLocalesOf,
   IntlSupportedValuesOf, JsBool, JsNumber, JsObject, JsString, JsUndefined,
   ListFormatData, ListFormatState, LocaleBaseName, LocaleCalendar,
@@ -51,20 +54,23 @@ import arc/vm/value.{
   LocaleGetNumberingSystems, LocaleGetTextInfo, LocaleGetTimeZones,
   LocaleGetWeekInfo, LocaleHourCycle, LocaleLanguage, LocaleMaximize,
   LocaleMinimize, LocaleNumberingSystem, LocaleNumeric, LocaleRegion,
-  LocaleScript, LocaleState, LocaleToString, LocaleVariants, NotationCompact,
-  NotationEngineering, NotationScientific, NotationStandard, NumberFormatData,
-  NumberFormatState, NumberToLocaleString, ObjectSlot, PluralRulesData,
-  PluralRulesState, PriorityAuto, PriorityLessPrecision, PriorityMorePrecision,
-  RelativeTimeFormatData, RelativeTimeFormatState, RoundCeil, RoundExpand,
-  RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
-  RoundHalfTrunc, RoundTrunc, SegmentIteratorData, SegmentIteratorState,
-  SegmenterData, SegmenterState, SegmentsData, SegmentsState, SignAlways,
-  SignAuto, SignExceptZero, SignNegative, SignNever, StringLocaleCompare,
-  StringToLocaleLowerCase, StringToLocaleUpperCase, StyleCurrency, StyleDecimal,
-  StylePercent, StyleUnit, TemporalDateSlot, TemporalDateTimeSlot,
-  TemporalInstantSlot, TemporalMonthDaySlot, TemporalTimeSlot,
-  TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TzdAuto, TzdStripIfInteger,
-  UnitLong, UnitNarrow, UnitShort,
+  LocaleScript, LocaleState, LocaleToString, LocaleVariants, MonthName, MonthNum,
+  NotationCompact, NotationEngineering, NotationScientific, NotationStandard,
+  NumberFormatData, NumberFormatState, NumberToLocaleString, ObjectSlot,
+  PluralRulesData, PluralRulesState, PriorityAuto, PriorityLessPrecision,
+  PriorityMorePrecision, RelativeTimeFormatData, RelativeTimeFormatState,
+  RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil, RoundHalfEven,
+  RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
+  SegmentIteratorData, SegmentIteratorState, SegmenterData, SegmenterState,
+  SegmentsData, SegmentsState, SignAlways, SignAuto, SignExceptZero,
+  SignNegative, SignNever, StringLocaleCompare, StringToLocaleLowerCase,
+  StringToLocaleUpperCase, StyleCurrency, StyleDecimal, StylePercent, StyleUnit,
+  TemporalDateSlot, TemporalDateTimeSlot, TemporalInstantSlot,
+  TemporalMonthDaySlot, TemporalTimeSlot, TemporalYearMonthSlot,
+  TemporalZonedDateTimeSlot, TsFull, TsLong, TsMedium, TsShort, TzLong,
+  TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric, TzShortOffset, TzdAuto,
+  TzdStripIfInteger, UnitLong, UnitNarrow, UnitShort, WLong, WNarrow, WNumeric,
+  WShort, WTwoDigit,
 }
 import gleam/dict
 import gleam/float
@@ -598,90 +604,168 @@ fn branded(
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(service: s, data:), ..))
-          if s == service
-        -> Ok(#(ref, data))
+        Some(ObjectSlot(kind: IntlObject(data:), ..)) ->
+          case value.intl_service(data) == service {
+            True -> Ok(#(ref, data))
+            False ->
+              throw_type(state, method <> " called on incompatible receiver")
+          }
         _ -> throw_type(state, method <> " called on incompatible receiver")
       }
     _ -> throw_type(state, method <> " called on incompatible receiver")
   }
 }
 
-/// `branded` narrowed to Intl.Locale instances.
+// --- `branded` narrowed to one service ------------------------------------
+//
+// Each extractor pattern-matches the receiver's `IntlData` variant directly,
+// so callers get the concrete state record instead of the sum plus a
+// hand-written "cannot happen" arm.
+
+/// The narrowing helper behind the service-specific `branded_*` extractors.
+fn branded_of(
+  state: State(host),
+  this: JsValue,
+  method: String,
+  extract: fn(IntlData) -> Option(a),
+) -> Result(#(Ref, a), Thrown(host)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: IntlObject(data:), ..)) ->
+          case extract(data) {
+            Some(v) -> Ok(#(ref, v))
+            None ->
+              throw_type(state, method <> " called on incompatible receiver")
+          }
+        _ -> throw_type(state, method <> " called on incompatible receiver")
+      }
+    _ -> throw_type(state, method <> " called on incompatible receiver")
+  }
+}
+
 fn branded_locale(
   state: State(host),
   this: JsValue,
   method: String,
 ) -> Result(#(Ref, LocaleState), Thrown(host)) {
-  use #(ref, data) <- result.try(branded(state, this, IntlLocale, method))
+  use data <- branded_of(state, this, method)
   case data {
-    LocaleData(l) -> Ok(#(ref, l))
-    _ -> throw_type(state, method <> " called on incompatible receiver")
+    LocaleData(l) -> Some(l)
+    _other -> None
+  }
+}
+
+fn branded_segmenter(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> Result(#(Ref, SegmenterState), Thrown(host)) {
+  use data <- branded_of(state, this, method)
+  case data {
+    SegmenterData(s) -> Some(s)
+    _other -> None
+  }
+}
+
+fn branded_segments(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> Result(#(Ref, SegmentsState), Thrown(host)) {
+  use data <- branded_of(state, this, method)
+  case data {
+    SegmentsData(s) -> Some(s)
+    _other -> None
   }
 }
 
 /// Replace an Intl instance's per-service state in the heap, keeping every
-/// other object attribute. The service tag is re-derived from the new data
-/// so the two can never disagree.
+/// other object attribute.
 fn write_intl_data(h: Heap(host), ref: Ref, data: IntlData) -> Heap(host) {
   heap.update(h, ref, fn(slot) {
     case slot {
       ObjectSlot(kind: IntlObject(..), ..) ->
-        ObjectSlot(
-          ..slot,
-          kind: IntlObject(service: value.intl_service(data), data:),
-        )
+        ObjectSlot(..slot, kind: IntlObject(data:))
       other -> other
     }
   })
 }
 
-/// Look up a DateTimeFormat formatting component.
-fn component(c: DtfComponents, which: DtfComponent) -> Option(String) {
+/// Whether a DateTimeFormat formatting component is part of the format.
+fn has_component(c: DtfComponents, which: DtfComponent) -> Bool {
   case which {
-    DtfWeekday -> c.weekday
-    DtfEra -> c.era
-    DtfYear -> c.year
-    DtfMonth -> c.month
-    DtfDay -> c.day
-    DtfDayPeriod -> c.day_period
-    DtfHour -> c.hour
-    DtfMinute -> c.minute
-    DtfSecond -> c.second
-    DtfFractionalSecondDigits -> c.fractional_second_digits
-    DtfTimeZoneName -> c.time_zone_name
+    DtfWeekday -> option.is_some(c.weekday)
+    DtfEra -> option.is_some(c.era)
+    DtfYear -> option.is_some(c.year)
+    DtfMonth -> option.is_some(c.month)
+    DtfDay -> option.is_some(c.day)
+    DtfDayPeriod -> option.is_some(c.day_period)
+    DtfHour -> option.is_some(c.hour)
+    DtfMinute -> option.is_some(c.minute)
+    DtfSecond -> option.is_some(c.second)
+    DtfFractionalSecondDigits -> option.is_some(c.fractional_second_digits)
+    DtfTimeZoneName -> option.is_some(c.time_zone_name)
   }
 }
 
-/// Set a DateTimeFormat formatting component's width.
-fn set_component(
-  c: DtfComponents,
+/// Keep a component's width only when the component is in `keep`.
+fn kept_width(
+  keep: List(DtfComponent),
   which: DtfComponent,
-  v: String,
-) -> DtfComponents {
-  case which {
-    DtfWeekday -> DtfComponents(..c, weekday: Some(v))
-    DtfEra -> DtfComponents(..c, era: Some(v))
-    DtfYear -> DtfComponents(..c, year: Some(v))
-    DtfMonth -> DtfComponents(..c, month: Some(v))
-    DtfDay -> DtfComponents(..c, day: Some(v))
-    DtfDayPeriod -> DtfComponents(..c, day_period: Some(v))
-    DtfHour -> DtfComponents(..c, hour: Some(v))
-    DtfMinute -> DtfComponents(..c, minute: Some(v))
-    DtfSecond -> DtfComponents(..c, second: Some(v))
-    DtfFractionalSecondDigits ->
-      DtfComponents(..c, fractional_second_digits: Some(v))
-    DtfTimeZoneName -> DtfComponents(..c, time_zone_name: Some(v))
+  v: Option(a),
+) -> Option(a) {
+  case list.contains(keep, which) {
+    True -> v
+    False -> None
   }
 }
 
-/// Build a component table from #(component, width) pairs; later pairs win.
-fn components_from_pairs(
-  pairs: List(#(DtfComponent, String)),
+/// Drop every component not in `keep`, keeping the widths of the rest.
+fn keep_components(
+  c: DtfComponents,
+  keep: List(DtfComponent),
 ) -> DtfComponents {
-  list.fold(pairs, value.empty_dtf_components, fn(c, kv) {
-    set_component(c, kv.0, kv.1)
-  })
+  DtfComponents(
+    weekday: kept_width(keep, DtfWeekday, c.weekday),
+    era: kept_width(keep, DtfEra, c.era),
+    year: kept_width(keep, DtfYear, c.year),
+    month: kept_width(keep, DtfMonth, c.month),
+    day: kept_width(keep, DtfDay, c.day),
+    day_period: kept_width(keep, DtfDayPeriod, c.day_period),
+    hour: kept_width(keep, DtfHour, c.hour),
+    minute: kept_width(keep, DtfMinute, c.minute),
+    second: kept_width(keep, DtfSecond, c.second),
+    fractional_second_digits: kept_width(
+      keep,
+      DtfFractionalSecondDigits,
+      c.fractional_second_digits,
+    ),
+    time_zone_name: kept_width(keep, DtfTimeZoneName, c.time_zone_name),
+  )
+}
+
+/// Field-wise overlay: `base`'s component wins where present, else `fallback`.
+fn merge_components(
+  base: DtfComponents,
+  fallback: DtfComponents,
+) -> DtfComponents {
+  DtfComponents(
+    weekday: option.or(base.weekday, fallback.weekday),
+    era: option.or(base.era, fallback.era),
+    year: option.or(base.year, fallback.year),
+    month: option.or(base.month, fallback.month),
+    day: option.or(base.day, fallback.day),
+    day_period: option.or(base.day_period, fallback.day_period),
+    hour: option.or(base.hour, fallback.hour),
+    minute: option.or(base.minute, fallback.minute),
+    second: option.or(base.second, fallback.second),
+    fractional_second_digits: option.or(
+      base.fractional_second_digits,
+      fallback.fractional_second_digits,
+    ),
+    time_zone_name: option.or(base.time_zone_name, fallback.time_zone_name),
+  )
 }
 
 /// Overlay a formatter's resolved digit options onto a `fmt.NumOpts` base.
@@ -969,7 +1053,7 @@ fn canonicalize_locale_list(
     }
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(data: LocaleData(l), ..), ..)) ->
+        Some(ObjectSlot(kind: IntlObject(data: LocaleData(l)), ..)) ->
           Ok(#([l.locale], state))
         _ -> locale_list_from_object(state, ref)
       }
@@ -1031,7 +1115,14 @@ fn locale_list_loop(
     True -> Ok(#(list.reverse(seen), state))
     False -> {
       let key = Index(k)
-      case object.has_property(state.heap, ref, key) {
+      // §9.2.1 step 6.c: HasProperty(O, Pk) — the list may be a proxy, whose
+      // `has` trap is user code and can throw.
+      use #(has, state) <- result.try(object.has_property_stateful(
+        state,
+        ref,
+        object.PkString(key),
+      ))
+      case has {
         False -> locale_list_loop(state, ref, k + 1, len, seen)
         True -> {
           use #(k_value, state) <- result.try(object.get_value(
@@ -1044,7 +1135,7 @@ fn locale_list_loop(
             JsString(s) -> Ok(#(s, state))
             JsObject(o_ref) ->
               case heap.read(state.heap, o_ref) {
-                Some(ObjectSlot(kind: IntlObject(data: LocaleData(l), ..), ..)) ->
+                Some(ObjectSlot(kind: IntlObject(data: LocaleData(l)), ..)) ->
                   Ok(#(l.locale, state))
                 _ -> coerce.js_to_string(state, k_value)
               }
@@ -1509,11 +1600,7 @@ fn construct_service(
             throw_type(state, "Illegal constructor")
         })
         let #(heap, ref) =
-          common.alloc_wrapper(
-            state.heap,
-            IntlObject(service: value.intl_service(data), data:),
-            proto,
-          )
+          common.alloc_wrapper(state.heap, IntlObject(data:), proto)
         Ok(#(JsObject(ref), State(..state, heap:)))
       })
     }
@@ -1532,7 +1619,7 @@ fn locale_state(
     JsString(s) -> Ok(#(s, state))
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(data: LocaleData(l), ..), ..)) ->
+        Some(ObjectSlot(kind: IntlObject(data: LocaleData(l)), ..)) ->
           Ok(#(l.locale, state))
         _ -> coerce.js_to_string(state, tag_v)
       }
@@ -1823,9 +1910,37 @@ fn set_u_keywords(
   }
 }
 
-/// Extension keyword or option value for a relevant key, with validation.
-/// Returns the resolved value plus whether the (valid) value came from the
-/// locale's u-extension (those flow into the resolved locale string).
+/// Extension keyword or option value for a relevant key. `parse` both
+/// validates the (string) extension keyword and turns it into the option's own
+/// type. Returns the resolved value plus whether the (valid) value came from
+/// the locale's u-extension (those flow into the resolved locale string).
+fn resolve_typed_keyword(
+  ext_kws: List(#(String, String)),
+  key: String,
+  option_value: Option(a),
+  parse: fn(String) -> Option(a),
+  default: a,
+) -> #(a, Bool) {
+  // Bare keywords ("-u-kn") mean "true" (UTS 35).
+  let from_ext = case list.key_find(ext_kws, key) {
+    Ok("") -> parse("true")
+    Ok(v) -> parse(v)
+    Error(Nil) -> None
+  }
+  case option_value {
+    // §9.2.7 ResolveLocale step 9.h.ii.2: an options value that matches
+    // the requested extension keyword keeps the keyword in [[Locale]].
+    Some(v) -> #(v, from_ext == Some(v))
+    None ->
+      case from_ext {
+        Some(v) -> #(v, True)
+        None -> #(default, False)
+      }
+  }
+}
+
+/// `resolve_typed_keyword` for the string-valued keys (ca / nu / co / kf / kn):
+/// an option value the host does not support falls back like an absent one.
 fn resolve_keyword(
   ext_kws: List(#(String, String)),
   key: String,
@@ -1833,39 +1948,20 @@ fn resolve_keyword(
   valid: fn(String) -> Bool,
   default: String,
 ) -> #(String, Bool) {
-  // Bare keywords ("-u-kn") mean "true" (UTS 35).
-  let ext = case list.key_find(ext_kws, key) {
-    Ok("") -> Some("true")
-    Ok(v) -> Some(v)
-    Error(Nil) -> None
+  let parse = fn(v) {
+    case valid(v) {
+      True -> Some(v)
+      False -> None
+    }
   }
-  let from_ext = case ext {
-    Some(v) ->
-      case valid(v) {
-        True -> Some(v)
-        False -> None
-      }
-    None -> None
-  }
-  case option_value {
-    Some(v) ->
-      case valid(v) {
-        // §9.2.7 ResolveLocale step 9.h.ii.2: an options value that matches
-        // the requested extension keyword keeps the keyword in [[Locale]];
-        // an unsupported options value leaves the extension value in place.
-        True -> #(v, from_ext == Some(v))
-        False ->
-          case from_ext {
-            Some(e) -> #(e, True)
-            None -> #(default, False)
-          }
-      }
-    None ->
-      case from_ext {
-        Some(v) -> #(v, True)
-        None -> #(default, False)
-      }
-  }
+  resolve_typed_keyword(
+    ext_kws,
+    key,
+    // An unsupported options value leaves the extension value in place.
+    option.then(option_value, parse),
+    parse,
+    default,
+  )
 }
 
 /// GetOption "localeMatcher" — validated then discarded (we only implement
@@ -2070,115 +2166,37 @@ fn number_format_state(
     requested,
   ))
   // SetNumberFormatUnitOptions (§15.1.3)
-  use #(style, state) <- result.try(get_enum_opt(
-    state,
-    opts,
-    "style",
-    [
-      #("decimal", StyleDecimal),
-      #("percent", StylePercent),
-      #("currency", StyleCurrency),
-      #("unit", StyleUnit),
-    ],
-    StyleDecimal,
-  ))
-  use #(currency, state) <- result.try(get_str_opt(
-    state,
-    opts,
-    "currency",
-    [],
-    None,
-  ))
-  use Nil <- result.try(case currency {
-    Some(c) ->
-      case is_alpha_str(c) && string.length(c) == 3 {
-        True -> Ok(Nil)
-        False -> throw_range(state, "Invalid currency code: " <> c)
-      }
-    None ->
-      case style == StyleCurrency {
-        True ->
-          throw_type(state, "Currency code is required with currency style")
-        False -> Ok(Nil)
-      }
-  })
-  use #(currency_display, state) <- result.try(get_enum_opt(
-    state,
-    opts,
-    "currencyDisplay",
-    [
-      #("code", CurCode),
-      #("symbol", CurSymbol),
-      #("narrowSymbol", CurNarrowSymbol),
-      #("name", CurName),
-    ],
-    CurSymbol,
-  ))
-  use #(currency_sign, state) <- result.try(get_enum_opt(
-    state,
-    opts,
-    "currencySign",
-    [#("standard", CurStandard), #("accounting", CurAccounting)],
-    CurStandard,
-  ))
-  use #(unit, state) <- result.try(get_str_opt(state, opts, "unit", [], None))
-  use Nil <- result.try(case unit {
-    Some(u) ->
-      case fmt.is_well_formed_unit(u) {
-        True -> Ok(Nil)
-        False ->
-          throw_range(state, "Invalid unit argument for option unit: " <> u)
-      }
-    None ->
-      case style == StyleUnit {
-        True -> throw_type(state, "Unit is required with unit style")
-        False -> Ok(Nil)
-      }
-  })
-  use #(unit_display, state) <- result.try(get_enum_opt(
-    state,
-    opts,
-    "unitDisplay",
-    [#("short", UnitShort), #("narrow", UnitNarrow), #("long", UnitLong)],
-    UnitShort,
-  ))
-  let currency = option.map(currency, string.uppercase)
+  use #(style, state) <- result.try(read_unit_options(state, opts))
   let #(mnfd_default, mxfd_default) = case style {
-    StyleCurrency -> {
-      let d = fmt.currency_digits(option.unwrap(currency, "USD"))
+    StyleCurrency(currency:, ..) -> {
+      let d = fmt.currency_digits(currency)
       #(d, d)
     }
     StylePercent -> #(0, 0)
-    StyleDecimal | StyleUnit -> #(0, 3)
+    StyleDecimal | StyleUnit(..) -> #(0, 3)
   }
-  use #(notation, state) <- result.try(get_enum_opt(
+  use #(notation_kind, state) <- result.try(get_enum_opt(
     state,
     opts,
     "notation",
     notation_variants(),
-    NotationStandard,
+    NkStandard,
   ))
   use #(digits, state) <- result.try(digit_options(
     state,
     opts,
     mnfd_default,
     mxfd_default,
-    notation,
+    notation_kind,
   ))
-  use #(compact_display, state) <- result.try(get_enum_opt(
-    state,
-    opts,
-    "compactDisplay",
-    compact_display_variants(),
-    CompactShort,
-  ))
+  use #(notation, state) <- result.try(read_notation(state, opts, notation_kind))
   // useGrouping: boolean or "min2"/"auto"/"always" (§15.1.6 GetBooleanOrStringNumberFormatOption)
   use #(grouping_v, state) <- result.try(opt_get(state, opts, "useGrouping"))
   use #(use_grouping, state) <- result.try(case grouping_v {
     JsUndefined ->
       Ok(#(
         case notation {
-          NotationCompact -> GroupingMin2
+          NotationCompact(..) -> GroupingMin2
           NotationStandard | NotationScientific | NotationEngineering ->
             GroupingAuto
         },
@@ -2219,27 +2237,9 @@ fn number_format_state(
       locale:,
       numbering_system: nu,
       style:,
-      currency:,
-      currency_display: case style {
-        StyleCurrency -> Some(currency_display)
-        StyleDecimal | StylePercent | StyleUnit -> None
-      },
-      currency_sign: case style {
-        StyleCurrency -> Some(currency_sign)
-        StyleDecimal | StylePercent | StyleUnit -> None
-      },
-      unit:,
-      unit_display: case style {
-        StyleUnit -> Some(unit_display)
-        StyleDecimal | StylePercent | StyleCurrency -> None
-      },
       digits:,
       use_grouping:,
       notation:,
-      compact_display: case notation {
-        NotationCompact -> Some(compact_display)
-        NotationStandard | NotationScientific | NotationEngineering -> None
-      },
       sign_display:,
       bound_format: None,
     ),
@@ -2247,19 +2247,156 @@ fn number_format_state(
   ))
 }
 
+/// The `style` option's tag, before its style-conditional slots are read.
+type NumStyleKind {
+  KDecimal
+  KPercent
+  KCurrency
+  KUnit
+}
+
+/// `[[Style]]` after §15.1.3 steps 2-6: the currency style now carries its
+/// validated, uppercased code, so it can never lose it further down.
+type StyleWithCurrency {
+  ScDecimal
+  ScPercent
+  ScCurrency(currency: String)
+  ScUnit
+}
+
+/// SetNumberFormatUnitOptions (§15.1.3): reads `style` and its five
+/// style-conditional options in spec order, and returns the one `NumStyle`
+/// variant they select — a currency style always with its code, a unit style
+/// always with its identifier.
+fn read_unit_options(
+  state: State(host),
+  opts: Option(Ref),
+) -> Result(#(value.NumStyle, State(host)), Thrown(host)) {
+  use #(kind, state) <- result.try(get_enum_opt(
+    state,
+    opts,
+    "style",
+    [
+      #("decimal", KDecimal),
+      #("percent", KPercent),
+      #("currency", KCurrency),
+      #("unit", KUnit),
+    ],
+    KDecimal,
+  ))
+  use #(currency, state) <- result.try(get_str_opt(
+    state,
+    opts,
+    "currency",
+    [],
+    None,
+  ))
+  use Nil <- result.try(case currency {
+    Some(c) ->
+      case is_alpha_str(c) && string.length(c) == 3 {
+        True -> Ok(Nil)
+        False -> throw_range(state, "Invalid currency code: " <> c)
+      }
+    None -> Ok(Nil)
+  })
+  use sc <- result.try(case kind, currency {
+    KCurrency, Some(c) -> Ok(ScCurrency(currency: string.uppercase(c)))
+    KCurrency, None ->
+      throw_type(state, "Currency code is required with currency style")
+    KDecimal, _ -> Ok(ScDecimal)
+    KPercent, _ -> Ok(ScPercent)
+    KUnit, _ -> Ok(ScUnit)
+  })
+  use #(currency_display, state) <- result.try(get_enum_opt(
+    state,
+    opts,
+    "currencyDisplay",
+    [
+      #("code", CurCode),
+      #("symbol", CurSymbol),
+      #("narrowSymbol", CurNarrowSymbol),
+      #("name", CurName),
+    ],
+    CurSymbol,
+  ))
+  use #(currency_sign, state) <- result.try(get_enum_opt(
+    state,
+    opts,
+    "currencySign",
+    [#("standard", CurStandard), #("accounting", CurAccounting)],
+    CurStandard,
+  ))
+  use #(unit, state) <- result.try(get_str_opt(state, opts, "unit", [], None))
+  use Nil <- result.try(case unit {
+    Some(u) ->
+      case fmt.is_well_formed_unit(u) {
+        True -> Ok(Nil)
+        False ->
+          throw_range(state, "Invalid unit argument for option unit: " <> u)
+      }
+    None -> Ok(Nil)
+  })
+  // Everything but the unit style's `unitDisplay` (read last) is now known.
+  use build <- result.try(case sc, unit {
+    ScDecimal, _ -> Ok(fn(_ud) { StyleDecimal })
+    ScPercent, _ -> Ok(fn(_ud) { StylePercent })
+    ScCurrency(currency:), _ ->
+      Ok(fn(_ud) {
+        StyleCurrency(currency:, display: currency_display, sign: currency_sign)
+      })
+    ScUnit, Some(u) -> Ok(fn(ud) { StyleUnit(unit: u, display: ud) })
+    ScUnit, None -> throw_type(state, "Unit is required with unit style")
+  })
+  use #(unit_display, state) <- result.map(get_enum_opt(
+    state,
+    opts,
+    "unitDisplay",
+    [#("short", UnitShort), #("narrow", UnitNarrow), #("long", UnitLong)],
+    UnitShort,
+  ))
+  #(build(unit_display), state)
+}
+
+/// The `notation` option's tag, before `compactDisplay` completes it.
+type NotationKind {
+  NkStandard
+  NkScientific
+  NkEngineering
+  NkCompact
+}
+
 /// The `notation` option's spellings — shared by NumberFormat and PluralRules.
-fn notation_variants() -> List(#(String, Notation)) {
+fn notation_variants() -> List(#(String, NotationKind)) {
   [
-    #("standard", NotationStandard),
-    #("scientific", NotationScientific),
-    #("engineering", NotationEngineering),
-    #("compact", NotationCompact),
+    #("standard", NkStandard),
+    #("scientific", NkScientific),
+    #("engineering", NkEngineering),
+    #("compact", NkCompact),
   ]
 }
 
-/// The `compactDisplay` option's spellings.
-fn compact_display_variants() -> List(#(String, value.CompactDisplay)) {
-  [#("short", CompactShort), #("long", CompactLong)]
+/// GetOption "compactDisplay", folded into the compact `Notation` variant.
+fn read_notation(
+  state: State(host),
+  opts: Option(Ref),
+  kind: NotationKind,
+) -> Result(#(Notation, State(host)), Thrown(host)) {
+  use #(compact_display, state) <- result.map(get_enum_opt(
+    state,
+    opts,
+    "compactDisplay",
+    [#("short", CompactShort), #("long", CompactLong)],
+    CompactShort,
+  ))
+  #(
+    case kind {
+      NkStandard -> NotationStandard
+      NkScientific -> NotationScientific
+      NkEngineering -> NotationEngineering
+      NkCompact -> NotationCompact(display: compact_display)
+    },
+    state,
+  )
 }
 
 /// SetNumberFormatDigitOptions (§15.1.6) — resolves the digit-related slots.
@@ -2268,7 +2405,7 @@ fn digit_options(
   opts: Option(Ref),
   mnfd_default: Int,
   mxfd_default: Int,
-  notation: Notation,
+  notation: NotationKind,
 ) -> Result(#(IntlDigitOptions, State(host)), Thrown(host)) {
   use #(mnid, state) <- result.try(get_num_opt(
     state,
@@ -2365,7 +2502,7 @@ fn digit_options(
     PriorityMorePrecision | PriorityLessPrecision -> True
   }
   let need_fd = case rounding_priority {
-    PriorityAuto -> !{ has_sd || { !has_fd && notation == NotationCompact } }
+    PriorityAuto -> !{ has_sd || { !has_fd && notation == NkCompact } }
     PriorityMorePrecision | PriorityLessPrecision -> True
   }
   // sig / fd are #(min, max) when that rounding kind is in effect.
@@ -2492,13 +2629,7 @@ fn date_time_format_state(
   locales_v: JsValue,
   options_v: JsValue,
 ) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
-  dtf_state_required(
-    state,
-    locales_v,
-    options_v,
-    [#(DtfYear, "numeric"), #(DtfMonth, "numeric"), #(DtfDay, "numeric")],
-    DateAndTime,
-  )
+  dtf_state_required(state, locales_v, options_v, date_defaults(), DateAndTime)
 }
 
 /// Which group of date-time components a DateTimeFormat is required to
@@ -2521,14 +2652,60 @@ fn present_pairs(pairs: List(#(k, Option(a)))) -> List(#(k, a)) {
   })
 }
 
-/// CreateDateTimeFormat (§11.1.2). `default_components` are the
-/// #(component, width) locale defaults applied when the user requested no
-/// component of the `required` group.
+/// The date-group locale defaults (ToDateTimeOptions "date" defaults).
+fn date_defaults() -> DtfComponents {
+  DtfComponents(
+    ..value.empty_dtf_components,
+    year: Some(WNumeric),
+    month: Some(MonthNum(WNumeric)),
+    day: Some(WNumeric),
+  )
+}
+
+/// The time-group locale defaults (ToDateTimeOptions "time" defaults).
+fn time_defaults() -> DtfComponents {
+  DtfComponents(
+    ..value.empty_dtf_components,
+    hour: Some(WNumeric),
+    minute: Some(WNumeric),
+    second: Some(WNumeric),
+  )
+}
+
+/// resolvedOptions' view of a component option: what the user asked for, or —
+/// with no dateStyle/timeStyle and no explicit component of the required
+/// group — the locale default. With a style set, only the styles are visible.
+fn public_component(
+  user: Option(a),
+  default: Option(a),
+  styled: Bool,
+  required_present: Bool,
+) -> Option(a) {
+  case user, styled || required_present {
+    Some(_), _ -> user
+    None, False -> default
+    None, True -> None
+  }
+}
+
+/// The name widths (weekday, era, dayPeriod) as GetOption variants.
+fn name_width_variants() -> List(#(String, NameWidth)) {
+  [#("narrow", WNarrow), #("short", WShort), #("long", WLong)]
+}
+
+/// The numeric widths (year, day, hour, minute, second) as GetOption variants.
+fn numeric_width_variants() -> List(#(String, NumericWidth)) {
+  [#("2-digit", WTwoDigit), #("numeric", WNumeric)]
+}
+
+/// CreateDateTimeFormat (§11.1.2). `defaults` are the locale default
+/// components applied when the user requested no component of the `required`
+/// group.
 fn dtf_state_required(
   state: State(host),
   locales_v: JsValue,
   options_v: JsValue,
-  default_components: List(#(DtfComponent, String)),
+  defaults: DtfComponents,
   required: DtfRequired,
 ) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
   use #(requested, opts, state) <- result.try(constructor_prologue(
@@ -2554,11 +2731,11 @@ fn dtf_state_required(
   ))
   use Nil <- result.try(require_type_seq(state, nu_opt, "numberingSystem"))
   use #(hour12, state) <- result.try(get_bool_opt(state, opts, "hour12", None))
-  use #(hour_cycle_opt, state) <- result.try(get_str_opt(
+  use #(hour_cycle_opt, state) <- result.try(get_enum_opt(
     state,
     opts,
     "hourCycle",
-    ["h11", "h12", "h23", "h24"],
+    hour_cycle_variants(),
     None,
   ))
   // hour12 overrides hourCycle (§11.1.2 step 6).
@@ -2584,21 +2761,21 @@ fn dtf_state_required(
     Error(Nil) -> "en"
   }
   let hc_locale_default = case lang {
-    "ja" -> "h11"
-    _ -> "h12"
+    "ja" -> H11
+    _ -> H12
   }
   let #(hc, hc_from_ext) =
-    resolve_keyword(
+    resolve_typed_keyword(
       ext_kws,
       "hc",
       hour_cycle_opt,
-      fn(v) { v == "h11" || v == "h12" || v == "h23" || v == "h24" },
+      parse_hour_cycle,
       hc_locale_default,
     )
   // hour12 option resolution (hourCycle12 / hourCycle24 of the locale).
   let hc = case hour12 {
     Some(True) -> hc_locale_default
-    Some(False) -> "h23"
+    Some(False) -> H23
     None -> hc
   }
   let ext_used =
@@ -2606,7 +2783,11 @@ fn dtf_state_required(
       [
         #("ca", ca_from_ext, calendar),
         #("nu", nu_from_ext, nu),
-        #("hc", hc_from_ext && hour12 == None, hc),
+        #(
+          "hc",
+          hc_from_ext && hour12 == None,
+          value.hour_cycle_to_js_string(hc),
+        ),
       ],
       fn(t) {
         case t {
@@ -2635,67 +2816,67 @@ fn dtf_state_required(
     }
   })
   // Component options (table order).
-  use #(weekday, state) <- result.try(get_str_opt(
+  use #(weekday, state) <- result.try(get_enum_opt(
     state,
     opts,
     "weekday",
-    ["narrow", "short", "long"],
+    optional_variants(name_width_variants()),
     None,
   ))
-  use #(era, state) <- result.try(get_str_opt(
+  use #(era, state) <- result.try(get_enum_opt(
     state,
     opts,
     "era",
-    ["narrow", "short", "long"],
+    optional_variants(name_width_variants()),
     None,
   ))
-  use #(year, state) <- result.try(get_str_opt(
+  use #(year, state) <- result.try(get_enum_opt(
     state,
     opts,
     "year",
-    ["2-digit", "numeric"],
+    optional_variants(numeric_width_variants()),
     None,
   ))
-  use #(month, state) <- result.try(get_str_opt(
+  use #(month, state) <- result.try(get_enum_opt(
     state,
     opts,
     "month",
-    ["2-digit", "numeric", "narrow", "short", "long"],
+    optional_variants(month_width_variants()),
     None,
   ))
-  use #(day, state) <- result.try(get_str_opt(
+  use #(day, state) <- result.try(get_enum_opt(
     state,
     opts,
     "day",
-    ["2-digit", "numeric"],
+    optional_variants(numeric_width_variants()),
     None,
   ))
-  use #(day_period, state) <- result.try(get_str_opt(
+  use #(day_period, state) <- result.try(get_enum_opt(
     state,
     opts,
     "dayPeriod",
-    ["narrow", "short", "long"],
+    optional_variants(name_width_variants()),
     None,
   ))
-  use #(hour, state) <- result.try(get_str_opt(
+  use #(hour, state) <- result.try(get_enum_opt(
     state,
     opts,
     "hour",
-    ["2-digit", "numeric"],
+    optional_variants(numeric_width_variants()),
     None,
   ))
-  use #(minute, state) <- result.try(get_str_opt(
+  use #(minute, state) <- result.try(get_enum_opt(
     state,
     opts,
     "minute",
-    ["2-digit", "numeric"],
+    optional_variants(numeric_width_variants()),
     None,
   ))
-  use #(second, state) <- result.try(get_str_opt(
+  use #(second, state) <- result.try(get_enum_opt(
     state,
     opts,
     "second",
-    ["2-digit", "numeric"],
+    optional_variants(numeric_width_variants()),
     None,
   ))
   use #(fractional, state) <- result.try(get_num_opt(
@@ -2706,14 +2887,11 @@ fn dtf_state_required(
     3,
     None,
   ))
-  use #(tz_name_opt, state) <- result.try(get_str_opt(
+  use #(tz_name_opt, state) <- result.try(get_enum_opt(
     state,
     opts,
     "timeZoneName",
-    [
-      "short", "long", "shortOffset", "longOffset", "shortGeneric",
-      "longGeneric",
-    ],
+    optional_variants(tz_name_width_variants()),
     None,
   ))
   use #(_format_matcher, state) <- result.try(get_str_opt(
@@ -2723,34 +2901,56 @@ fn dtf_state_required(
     ["basic", "best fit"],
     Some("best fit"),
   ))
-  use #(date_style, state) <- result.try(get_str_opt(
+  use #(date_style, state) <- result.try(get_enum_opt(
     state,
     opts,
     "dateStyle",
-    ["full", "long", "medium", "short"],
+    optional_variants([
+      #("full", DsFull),
+      #("long", DsLong),
+      #("medium", DsMedium),
+      #("short", DsShort),
+    ]),
     None,
   ))
-  use #(time_style, state) <- result.try(get_str_opt(
+  use #(time_style, state) <- result.try(get_enum_opt(
     state,
     opts,
     "timeStyle",
-    ["full", "long", "medium", "short"],
+    optional_variants([
+      #("full", TsFull),
+      #("long", TsLong),
+      #("medium", TsMedium),
+      #("short", TsShort),
+    ]),
     None,
   ))
-  let explicit =
-    [
-      weekday, era, year, month, day, day_period, hour, minute, second,
-      tz_name_opt,
-    ]
-    |> list.any(option.is_some)
-    || option.is_some(fractional)
+  // The user's component options as a component table.
+  let user =
+    DtfComponents(
+      weekday:,
+      era:,
+      year:,
+      month:,
+      day:,
+      day_period:,
+      hour:,
+      minute:,
+      second:,
+      fractional_second_digits: fractional,
+      time_zone_name: tz_name_opt,
+    )
+  let explicit = list.any(dtf_component_order, fn(c) { has_component(user, c) })
   // ToDateTimeOptions: defaults apply when no component of the required
   // group was requested.
   let required_present = case required {
-    DateOnly -> list.any([weekday, year, month, day], option.is_some)
+    DateOnly ->
+      list.any([DtfWeekday, DtfYear, DtfMonth, DtfDay], has_component(user, _))
     TimeOnly ->
-      list.any([day_period, hour, minute, second], option.is_some)
-      || option.is_some(fractional)
+      list.any(
+        [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
+        has_component(user, _),
+      )
     DateAndTime -> explicit
   }
   use Nil <- result.try(case required {
@@ -2768,101 +2968,36 @@ fn dtf_state_required(
       }
     DateAndTime -> Ok(Nil)
   })
-  use Nil <- result.try(
-    case
-      { option.is_some(date_style) || option.is_some(time_style) } && explicit
-    {
-      True ->
-        throw_type(
-          state,
-          "Invalid option: dateStyle/timeStyle cannot be used with other date/time options",
-        )
-      False -> Ok(Nil)
-    },
-  )
-  // Expand styles / apply defaults into the effective formatting components.
-  let user_date =
-    present_pairs([
-      #(DtfWeekday, weekday),
-      #(DtfEra, era),
-      #(DtfYear, year),
-      #(DtfMonth, month),
-      #(DtfDay, day),
-    ])
-  let user_time =
-    present_pairs([
-      #(DtfDayPeriod, day_period),
-      #(DtfHour, hour),
-      #(DtfMinute, minute),
-      #(DtfSecond, second),
-      #(DtfFractionalSecondDigits, option.map(fractional, int.to_string)),
-      #(DtfTimeZoneName, tz_name_opt),
-    ])
-  let #(c_date, c_time) = case date_style, time_style, required_present {
-    None, None, False -> {
-      let merge = fn(
-        user: List(#(DtfComponent, String)),
-        defaults: List(#(DtfComponent, String)),
-      ) {
-        list.append(
-          user,
-          list.filter(defaults, fn(d) { !list.any(user, fn(u) { u.0 == d.0 }) }),
-        )
-      }
-      #(
-        merge(
-          user_date,
-          list.filter(default_components, fn(kv) {
-            list.contains([DtfWeekday, DtfEra, DtfYear, DtfMonth, DtfDay], kv.0)
-          }),
-        ),
-        merge(
-          user_time,
-          list.filter(default_components, fn(kv) {
-            list.contains([DtfHour, DtfMinute, DtfSecond], kv.0)
-          }),
-        ),
+  let styled = option.is_some(date_style) || option.is_some(time_style)
+  use Nil <- result.try(case styled && explicit {
+    True ->
+      throw_type(
+        state,
+        "Invalid option: dateStyle/timeStyle cannot be used with other date/time options",
       )
-    }
-    None, None, True -> #(user_date, user_time)
-    ds, ts, _ -> #(date_style_components(ds), time_style_components(ts))
+    False -> Ok(Nil)
+  })
+  // Expand styles / apply defaults into the effective formatting components.
+  let components = case styled, required_present {
+    True, _ ->
+      merge_components(
+        date_style_components(date_style),
+        time_style_components(time_style),
+      )
+    False, True -> user
+    False, False -> merge_components(user, defaults)
   }
-  let components = components_from_pairs(list.append(c_date, c_time))
   let has_hour = option.is_some(components.hour)
-  // resolvedOptions component view: the option the user requested, or —
-  // with no dateStyle/timeStyle and no explicit option of the required
-  // group — the locale default for that component. With styles set, only
-  // the styles themselves are visible.
-  let public = fn(user: Option(String), which: DtfComponent) -> Option(String) {
-    case user, date_style, time_style, required_present {
-      Some(_), _, _, _ -> user
-      None, None, None, False ->
-        list.key_find(default_components, which) |> option.from_result
-      None, _, _, _ -> None
-    }
-  }
-  // The nine component options that were explicitly provided — needed at
-  // format time to compute per-Temporal-type formats
-  // (GetDateTimeFormat with inherit = ~relevant~).
+  // The component options that were explicitly provided — needed at format
+  // time to compute per-Temporal-type formats (GetDateTimeFormat with
+  // inherit = ~relevant~).
   let explicit_names =
-    list.filter_map(
+    list.filter(
       [
-        #(DtfWeekday, weekday),
-        #(DtfYear, year),
-        #(DtfMonth, month),
-        #(DtfDay, day),
-        #(DtfDayPeriod, day_period),
-        #(DtfHour, hour),
-        #(DtfMinute, minute),
-        #(DtfSecond, second),
-        #(DtfFractionalSecondDigits, option.map(fractional, int.to_string)),
+        DtfWeekday, DtfYear, DtfMonth, DtfDay, DtfDayPeriod, DtfHour, DtfMinute,
+        DtfSecond, DtfFractionalSecondDigits,
       ],
-      fn(kv) {
-        case kv {
-          #(k, Some(_)) -> Ok(k)
-          #(_, None) -> Error(Nil)
-        }
-      },
+      has_component(user, _),
     )
   Ok(#(
     DateTimeFormatState(
@@ -2876,17 +3011,42 @@ fn dtf_state_required(
         True -> Some(hc)
         False -> None
       },
-      weekday: public(weekday, DtfWeekday),
-      era: public(era, DtfEra),
-      year: public(year, DtfYear),
-      month: public(month, DtfMonth),
-      day: public(day, DtfDay),
-      day_period: public(day_period, DtfDayPeriod),
-      hour: public(hour, DtfHour),
-      minute: public(minute, DtfMinute),
-      second: public(second, DtfSecond),
+      weekday: public_component(
+        weekday,
+        defaults.weekday,
+        styled,
+        required_present,
+      ),
+      era: public_component(era, defaults.era, styled, required_present),
+      year: public_component(year, defaults.year, styled, required_present),
+      month: public_component(month, defaults.month, styled, required_present),
+      day: public_component(day, defaults.day, styled, required_present),
+      day_period: public_component(
+        day_period,
+        defaults.day_period,
+        styled,
+        required_present,
+      ),
+      hour: public_component(hour, defaults.hour, styled, required_present),
+      minute: public_component(
+        minute,
+        defaults.minute,
+        styled,
+        required_present,
+      ),
+      second: public_component(
+        second,
+        defaults.second,
+        styled,
+        required_present,
+      ),
       fractional_second_digits: fractional,
-      time_zone_name: public(tz_name_opt, DtfTimeZoneName),
+      time_zone_name: public_component(
+        tz_name_opt,
+        defaults.time_zone_name,
+        styled,
+        required_present,
+      ),
       date_style:,
       time_style:,
       explicit: explicit_names,
@@ -2897,58 +3057,127 @@ fn dtf_state_required(
   ))
 }
 
-fn date_style_components(
-  style: Option(String),
-) -> List(#(DtfComponent, String)) {
+/// The `hourCycle` option's spellings.
+fn hour_cycle_variants() -> List(#(String, Option(HourCycle))) {
+  optional_variants([#("h11", H11), #("h12", H12), #("h23", H23), #("h24", H24)])
+}
+
+fn parse_hour_cycle(s: String) -> Option(HourCycle) {
+  list.key_find(hour_cycle_variants(), s)
+  |> option.from_result
+  |> option.flatten
+}
+
+/// The `month` option's spellings.
+fn month_width_variants() -> List(#(String, MonthWidth)) {
+  [
+    #("2-digit", MonthNum(WTwoDigit)),
+    #("numeric", MonthNum(WNumeric)),
+    #("narrow", MonthName(WNarrow)),
+    #("short", MonthName(WShort)),
+    #("long", MonthName(WLong)),
+  ]
+}
+
+/// The `timeZoneName` option's spellings.
+fn tz_name_width_variants() -> List(#(String, TimeZoneNameWidth)) {
+  [
+    #("short", TzShort),
+    #("long", TzLong),
+    #("shortOffset", TzShortOffset),
+    #("longOffset", TzLongOffset),
+    #("shortGeneric", TzShortGeneric),
+    #("longGeneric", TzLongGeneric),
+  ]
+}
+
+/// A GetOption variant table for an option whose default is "absent".
+fn optional_variants(
+  variants: List(#(String, a)),
+) -> List(#(String, Option(a))) {
+  list.map(variants, fn(kv) { #(kv.0, Some(kv.1)) })
+}
+
+/// Every DateTimeFormat component, in §11.1.2 table order.
+const dtf_component_order = [
+  DtfWeekday,
+  DtfEra,
+  DtfYear,
+  DtfMonth,
+  DtfDay,
+  DtfDayPeriod,
+  DtfHour,
+  DtfMinute,
+  DtfSecond,
+  DtfFractionalSecondDigits,
+  DtfTimeZoneName,
+]
+
+fn date_style_components(style: Option(DateStyle)) -> DtfComponents {
+  let base = value.empty_dtf_components
   case style {
-    Some("full") -> [
-      #(DtfWeekday, "long"),
-      #(DtfYear, "numeric"),
-      #(DtfMonth, "long"),
-      #(DtfDay, "numeric"),
-    ]
-    Some("long") -> [
-      #(DtfYear, "numeric"),
-      #(DtfMonth, "long"),
-      #(DtfDay, "numeric"),
-    ]
-    Some("medium") -> [
-      #(DtfYear, "numeric"),
-      #(DtfMonth, "short"),
-      #(DtfDay, "numeric"),
-    ]
-    Some("short") -> [
-      #(DtfYear, "2-digit"),
-      #(DtfMonth, "numeric"),
-      #(DtfDay, "numeric"),
-    ]
-    _ -> []
+    Some(DsFull) ->
+      DtfComponents(
+        ..base,
+        weekday: Some(WLong),
+        year: Some(WNumeric),
+        month: Some(MonthName(WLong)),
+        day: Some(WNumeric),
+      )
+    Some(DsLong) ->
+      DtfComponents(
+        ..base,
+        year: Some(WNumeric),
+        month: Some(MonthName(WLong)),
+        day: Some(WNumeric),
+      )
+    Some(DsMedium) ->
+      DtfComponents(
+        ..base,
+        year: Some(WNumeric),
+        month: Some(MonthName(WShort)),
+        day: Some(WNumeric),
+      )
+    Some(DsShort) ->
+      DtfComponents(
+        ..base,
+        year: Some(WTwoDigit),
+        month: Some(MonthNum(WNumeric)),
+        day: Some(WNumeric),
+      )
+    None -> base
   }
 }
 
-fn time_style_components(
-  style: Option(String),
-) -> List(#(DtfComponent, String)) {
+fn time_style_components(style: Option(TimeStyle)) -> DtfComponents {
+  let base = value.empty_dtf_components
   case style {
-    Some("full") -> [
-      #(DtfHour, "numeric"),
-      #(DtfMinute, "2-digit"),
-      #(DtfSecond, "2-digit"),
-      #(DtfTimeZoneName, "long"),
-    ]
-    Some("long") -> [
-      #(DtfHour, "numeric"),
-      #(DtfMinute, "2-digit"),
-      #(DtfSecond, "2-digit"),
-      #(DtfTimeZoneName, "short"),
-    ]
-    Some("medium") -> [
-      #(DtfHour, "numeric"),
-      #(DtfMinute, "2-digit"),
-      #(DtfSecond, "2-digit"),
-    ]
-    Some("short") -> [#(DtfHour, "numeric"), #(DtfMinute, "2-digit")]
-    _ -> []
+    Some(TsFull) ->
+      DtfComponents(
+        ..base,
+        hour: Some(WNumeric),
+        minute: Some(WTwoDigit),
+        second: Some(WTwoDigit),
+        time_zone_name: Some(TzLong),
+      )
+    Some(TsLong) ->
+      DtfComponents(
+        ..base,
+        hour: Some(WNumeric),
+        minute: Some(WTwoDigit),
+        second: Some(WTwoDigit),
+        time_zone_name: Some(TzShort),
+      )
+    Some(TsMedium) ->
+      DtfComponents(
+        ..base,
+        hour: Some(WNumeric),
+        minute: Some(WTwoDigit),
+        second: Some(WTwoDigit),
+      )
+    Some(TsShort) ->
+      DtfComponents(..base, hour: Some(WNumeric), minute: Some(WTwoDigit))
+    None -> base
   }
 }
 
@@ -3073,9 +3302,9 @@ fn iana_zone(lower: String) -> Option(#(String, Int)) {
 fn tzdata_zone(lower: String) -> Option(#(String, Int)) {
   let epoch_ns = date.now_ms() * 1_000_000
   option.from_result({
-    use name <- result.try(temporal_tz.lookup(lower))
-    use offset_ns <- result.map(temporal_tz.offset_ns_at(name, epoch_ns))
-    #(name, offset_ns / 60_000_000_000)
+    use zone <- result.try(temporal_tz.lookup(lower))
+    use offset_ns <- result.map(temporal_tz.offset_ns_at(zone, epoch_ns))
+    #(temporal_tz.zone_id(zone), offset_ns / 60_000_000_000)
   })
 }
 
@@ -3246,31 +3475,27 @@ fn plural_rules_state(
     ["cardinal", "ordinal"],
     Some("cardinal"),
   ))
-  use #(notation, state) <- result.try(get_enum_opt(
+  use #(notation_kind, state) <- result.try(get_enum_opt(
     state,
     opts,
     "notation",
     notation_variants(),
-    NotationStandard,
+    NkStandard,
   ))
-  use #(compact_display, state) <- result.try(get_enum_opt(
+  use #(notation, state) <- result.try(read_notation(state, opts, notation_kind))
+  let #(_locale, data_locale, _ext) = resolve_locale(requested)
+  use #(digits, state) <- result.try(digit_options(
     state,
     opts,
-    "compactDisplay",
-    compact_display_variants(),
-    CompactShort,
+    0,
+    3,
+    notation_kind,
   ))
-  let #(_locale, data_locale, _ext) = resolve_locale(requested)
-  use #(digits, state) <- result.try(digit_options(state, opts, 0, 3, notation))
   Ok(#(
     PluralRulesState(
       locale: data_locale,
       plural_type: option.unwrap(type_, "cardinal"),
       notation:,
-      compact_display: case notation {
-        NotationCompact -> Some(compact_display)
-        NotationStandard | NotationScientific | NotationEngineering -> None
-      },
       digits:,
     ),
     state,
@@ -3452,10 +3677,134 @@ fn display_names_state(
 
 // --- Intl.DurationFormat ---
 
+/// A duration unit. The one place the ten unit names are written down: option
+/// key, DurationRecord field, and singular unit tag all derive from it.
+pub type DurationUnit {
+  DuYears
+  DuMonths
+  DuWeeks
+  DuDays
+  DuHours
+  DuMinutes
+  DuSeconds
+  DuMilliseconds
+  DuMicroseconds
+  DuNanoseconds
+}
+
+/// The duration units in canonical (largest-first) spec order.
 const duration_units = [
-  "years", "months", "weeks", "days", "hours", "minutes", "seconds",
-  "milliseconds", "microseconds", "nanoseconds",
+  DuYears,
+  DuMonths,
+  DuWeeks,
+  DuDays,
+  DuHours,
+  DuMinutes,
+  DuSeconds,
+  DuMilliseconds,
+  DuMicroseconds,
+  DuNanoseconds,
 ]
+
+/// The unit's JS property name (`Duration` field, DurationFormat option key).
+fn duration_unit_js_name(u: DurationUnit) -> String {
+  case u {
+    DuYears -> "years"
+    DuMonths -> "months"
+    DuWeeks -> "weeks"
+    DuDays -> "days"
+    DuHours -> "hours"
+    DuMinutes -> "minutes"
+    DuSeconds -> "seconds"
+    DuMilliseconds -> "milliseconds"
+    DuMicroseconds -> "microseconds"
+    DuNanoseconds -> "nanoseconds"
+  }
+}
+
+/// The unit's singular NumberFormat unit identifier / part `unit` tag.
+fn duration_unit_singular(u: DurationUnit) -> String {
+  case u {
+    DuYears -> "year"
+    DuMonths -> "month"
+    DuWeeks -> "week"
+    DuDays -> "day"
+    DuHours -> "hour"
+    DuMinutes -> "minute"
+    DuSeconds -> "second"
+    DuMilliseconds -> "millisecond"
+    DuMicroseconds -> "microsecond"
+    DuNanoseconds -> "nanosecond"
+  }
+}
+
+/// A duration's ten fields (ToDurationRecord / ParseTemporalDurationString).
+/// Field access replaces the string lookups with a silent zero default.
+pub type DurationRecord {
+  DurationRecord(
+    years: Float,
+    months: Float,
+    weeks: Float,
+    days: Float,
+    hours: Float,
+    minutes: Float,
+    seconds: Float,
+    milliseconds: Float,
+    microseconds: Float,
+    nanoseconds: Float,
+  )
+}
+
+pub const zero_duration = DurationRecord(
+  years: 0.0,
+  months: 0.0,
+  weeks: 0.0,
+  days: 0.0,
+  hours: 0.0,
+  minutes: 0.0,
+  seconds: 0.0,
+  milliseconds: 0.0,
+  microseconds: 0.0,
+  nanoseconds: 0.0,
+)
+
+fn duration_field(d: DurationRecord, u: DurationUnit) -> Float {
+  case u {
+    DuYears -> d.years
+    DuMonths -> d.months
+    DuWeeks -> d.weeks
+    DuDays -> d.days
+    DuHours -> d.hours
+    DuMinutes -> d.minutes
+    DuSeconds -> d.seconds
+    DuMilliseconds -> d.milliseconds
+    DuMicroseconds -> d.microseconds
+    DuNanoseconds -> d.nanoseconds
+  }
+}
+
+fn set_duration_field(
+  d: DurationRecord,
+  u: DurationUnit,
+  v: Float,
+) -> DurationRecord {
+  case u {
+    DuYears -> DurationRecord(..d, years: v)
+    DuMonths -> DurationRecord(..d, months: v)
+    DuWeeks -> DurationRecord(..d, weeks: v)
+    DuDays -> DurationRecord(..d, days: v)
+    DuHours -> DurationRecord(..d, hours: v)
+    DuMinutes -> DurationRecord(..d, minutes: v)
+    DuSeconds -> DurationRecord(..d, seconds: v)
+    DuMilliseconds -> DurationRecord(..d, milliseconds: v)
+    DuMicroseconds -> DurationRecord(..d, microseconds: v)
+    DuNanoseconds -> DurationRecord(..d, nanoseconds: v)
+  }
+}
+
+fn duration_values(d: DurationRecord) -> List(Float) {
+  list.map(duration_units, duration_field(d, _))
+}
 
 fn duration_format_state(
   state: State(host),
@@ -3473,41 +3822,45 @@ fn duration_format_state(
     opts,
     requested,
   ))
-  use #(base_style, state) <- result.try(get_str_opt(
+  use #(base_style, state) <- result.try(get_enum_opt(
     state,
     opts,
     "style",
-    ["long", "short", "narrow", "digital"],
-    Some("short"),
+    [
+      #("long", BsLong),
+      #("short", BsShort),
+      #("narrow", BsNarrow),
+      #("digital", BsDigital),
+    ],
+    BsShort,
   ))
-  let base_style = option.unwrap(base_style, "short")
   // GetDurationUnitOptions for each unit in spec order, threading the
-  // previous unit's INTERNAL style ("fractional" possible) — numeric
+  // previous unit's INTERNAL style (`DurFractional` possible) — numeric
   // chaining and sub-second fraction folding depend on it.
   let unit = fn(state, name, prev) {
     duration_unit_options(state, opts, base_style, name, prev)
   }
-  use #(years, prev, state) <- result.try(unit(state, "years", "none"))
-  use #(months, prev, state) <- result.try(unit(state, "months", prev))
-  use #(weeks, prev, state) <- result.try(unit(state, "weeks", prev))
-  use #(days, prev, state) <- result.try(unit(state, "days", prev))
-  use #(hours, prev, state) <- result.try(unit(state, "hours", prev))
-  use #(minutes, prev, state) <- result.try(unit(state, "minutes", prev))
-  use #(seconds, prev, state) <- result.try(unit(state, "seconds", prev))
+  use #(years, prev, state) <- result.try(unit(state, DuYears, None))
+  use #(months, prev, state) <- result.try(unit(state, DuMonths, Some(prev)))
+  use #(weeks, prev, state) <- result.try(unit(state, DuWeeks, Some(prev)))
+  use #(days, prev, state) <- result.try(unit(state, DuDays, Some(prev)))
+  use #(hours, prev, state) <- result.try(unit(state, DuHours, Some(prev)))
+  use #(minutes, prev, state) <- result.try(unit(state, DuMinutes, Some(prev)))
+  use #(seconds, prev, state) <- result.try(unit(state, DuSeconds, Some(prev)))
   use #(milliseconds, prev, state) <- result.try(unit(
     state,
-    "milliseconds",
-    prev,
+    DuMilliseconds,
+    Some(prev),
   ))
   use #(microseconds, prev, state) <- result.try(unit(
     state,
-    "microseconds",
-    prev,
+    DuMicroseconds,
+    Some(prev),
   ))
   use #(nanoseconds, _prev, state) <- result.try(unit(
     state,
-    "nanoseconds",
-    prev,
+    DuNanoseconds,
+    Some(prev),
   ))
   use #(fractional, state) <- result.try(get_num_opt(
     state,
@@ -3521,7 +3874,7 @@ fn duration_format_state(
     DurationFormatState(
       locale:,
       numbering_system: nu,
-      style: base_style,
+      style: duration_base_style_js(base_style),
       years:,
       months:,
       weeks:,
@@ -3538,136 +3891,182 @@ fn duration_format_state(
   ))
 }
 
+/// The `[[<Unit>Style]]` values a unit's option accepts (its stylesList).
+fn duration_style_variants(
+  u: DurationUnit,
+) -> List(#(String, DurationUnitStyle)) {
+  let base = [#("long", DurLong), #("short", DurShort), #("narrow", DurNarrow)]
+  case u {
+    DuHours | DuMinutes | DuSeconds ->
+      list.append(base, [#("numeric", DurNumeric), #("2-digit", DurTwoDigit)])
+    DuMilliseconds | DuMicroseconds | DuNanoseconds ->
+      list.append(base, [#("numeric", DurNumeric)])
+    DuYears | DuMonths | DuWeeks | DuDays -> base
+  }
+}
+
+/// Whether a style makes the *next* unit chain onto it numerically.
+fn is_numeric_style(s: DurationUnitStyle) -> Bool {
+  case s {
+    DurNumeric | DurTwoDigit | DurFractional -> True
+    DurLong | DurShort | DurNarrow -> False
+  }
+}
+
+fn is_sub_second(u: DurationUnit) -> Bool {
+  case u {
+    DuMilliseconds | DuMicroseconds | DuNanoseconds -> True
+    DuYears | DuMonths | DuWeeks | DuDays | DuHours | DuMinutes | DuSeconds ->
+      False
+  }
+}
+
 /// GetDurationUnitOptions (Intl.DurationFormat §1.1.6): one unit's resolved
-/// style/display. Returns the unit options (with the public style — the
-/// internal "fractional" style is exposed as "numeric") plus the internal
-/// style to thread into the next unit.
+/// style/display, plus the internal style to thread into the next unit.
 fn duration_unit_options(
   state: State(host),
   opts: Option(Ref),
-  base_style: String,
-  unit: String,
-  prev_style: String,
-) -> Result(#(DurationUnitOptions, String, State(host)), Thrown(host)) {
-  let styles = case unit {
-    "hours" | "minutes" | "seconds" -> [
-      "long", "short", "narrow", "numeric", "2-digit",
-    ]
-    "milliseconds" | "microseconds" | "nanoseconds" -> [
-      "long", "short", "narrow", "numeric",
-    ]
-    _ -> ["long", "short", "narrow"]
-  }
-  use #(style_opt, state) <- result.try(get_str_opt(
+  base_style: DurationBaseStyle,
+  unit: DurationUnit,
+  prev_style: Option(DurationUnitStyle),
+) -> Result(
+  #(DurationUnitOptions, DurationUnitStyle, State(host)),
+  Thrown(host),
+) {
+  let name = duration_unit_js_name(unit)
+  use #(style_opt, state) <- result.try(get_enum_opt(
     state,
     opts,
-    unit,
-    styles,
+    name,
+    optional_variants(duration_style_variants(unit)),
     None,
   ))
-  let sub_second =
-    unit == "milliseconds" || unit == "microseconds" || unit == "nanoseconds"
-  let prev_numeric =
-    prev_style == "numeric"
-    || prev_style == "2-digit"
-    || prev_style == "fractional"
+  let sub_second = is_sub_second(unit)
+  let prev_numeric = case prev_style {
+    Some(s) -> is_numeric_style(s)
+    None -> False
+  }
+  let two_digit_unit = case unit {
+    DuMinutes | DuSeconds -> True
+    _ -> False
+  }
+  // Steps 2-3: default the style from baseStyle / the previous unit's style.
   let #(style, display_default) = case style_opt {
     Some(st) -> #(st, "always")
     None ->
       case base_style {
-        "digital" ->
+        // digitalBase: "short" for the calendar units, "numeric" for the rest.
+        BsDigital ->
           case unit {
-            "years" | "months" | "weeks" | "days" -> #("short", "auto")
-            "minutes" | "seconds" ->
-              case prev_numeric {
-                True -> #("2-digit", "always")
-                False -> #("numeric", "always")
-              }
-            _ -> #("numeric", "always")
+            DuYears | DuMonths | DuWeeks | DuDays -> #(DurShort, "auto")
+            _ -> #(DurNumeric, "always")
           }
-        _ ->
+        BsLong | BsShort | BsNarrow ->
           case prev_numeric {
             True ->
-              case unit {
-                "minutes" | "seconds" -> #("2-digit", "always")
-                _ ->
-                  case sub_second {
-                    True -> #("numeric", "always")
-                    False -> #(base_style, "auto")
-                  }
+              case two_digit_unit {
+                True -> #(DurNumeric, "always")
+                False -> #(DurNumeric, "auto")
               }
-            False -> #(base_style, "auto")
+            False -> #(duration_base_unit_style(base_style), "auto")
           }
       }
   }
-  // Sub-second "numeric" after a numeric unit folds into a fraction.
-  let #(style, display_default) = case
-    style == "numeric" && sub_second && prev_numeric
-  {
-    True -> #("fractional", "auto")
+  // Step 4: a numeric sub-second unit always folds into a fraction.
+  let #(style, display_default) = case style == DurNumeric && sub_second {
+    True -> #(DurFractional, "auto")
     False -> #(style, display_default)
   }
   use #(display, state) <- result.try(get_str_opt(
     state,
     opts,
-    unit <> "Display",
+    name <> "Display",
     ["auto", "always"],
     Some(display_default),
   ))
   let display = option.unwrap(display, display_default)
-  use Nil <- result.try(case display == "always" && style == "fractional" {
+  // Step 7.
+  use Nil <- result.try(case display == "always" && style == DurFractional {
     True ->
       throw_range(
         state,
-        unit <> "Display cannot be 'always' for fractional units",
+        name <> "Display cannot be 'always' for fractional units",
       )
     False -> Ok(Nil)
   })
-  use Nil <- result.try(case prev_style {
-    "fractional" ->
+  // Steps 8-9.
+  use style <- result.try(case prev_style {
+    Some(DurFractional) ->
       case style {
-        "fractional" -> Ok(Nil)
+        DurFractional -> Ok(style)
         _ ->
           throw_range(
             state,
-            unit <> " style must be fractional after a fractional unit",
+            name <> " style must be fractional after a fractional unit",
           )
       }
-    "numeric" | "2-digit" ->
+    Some(DurNumeric) | Some(DurTwoDigit) ->
       case style {
-        "fractional" | "numeric" | "2-digit" -> Ok(Nil)
+        DurFractional | DurNumeric | DurTwoDigit ->
+          // Step 9.b: minutes/seconds after a numeric unit are zero-padded.
+          Ok(case two_digit_unit {
+            True -> DurTwoDigit
+            False -> style
+          })
         _ ->
           throw_range(
             state,
-            unit <> " style cannot be mixed with numeric styles",
+            name <> " style cannot be mixed with numeric styles",
           )
       }
-    _ -> Ok(Nil)
+    Some(DurLong) | Some(DurShort) | Some(DurNarrow) | None -> Ok(style)
   })
-  // [[<unit>Style]] "fractional" is exposed as "numeric" (resolvedOptions).
-  let public_style = case style {
-    "fractional" -> "numeric"
-    st -> st
-  }
-  Ok(#(DurationUnitOptions(style: public_style, display:), style, state))
+  Ok(#(DurationUnitOptions(style:, display:), style, state))
 }
 
-/// The DurationFormat per-unit options paired with their unit name, in
-/// canonical spec order.
+/// The DurationFormat `style` option (`[[Style]]`).
+type DurationBaseStyle {
+  BsLong
+  BsShort
+  BsNarrow
+  BsDigital
+}
+
+fn duration_base_style_js(s: DurationBaseStyle) -> String {
+  case s {
+    BsLong -> "long"
+    BsShort -> "short"
+    BsNarrow -> "narrow"
+    BsDigital -> "digital"
+  }
+}
+
+/// The base style as a per-unit style — `digital` has none of its own (each
+/// unit takes its digitalBase instead), so it is not accepted here.
+fn duration_base_unit_style(base: DurationBaseStyle) -> DurationUnitStyle {
+  case base {
+    BsLong -> DurLong
+    BsShort | BsDigital -> DurShort
+    BsNarrow -> DurNarrow
+  }
+}
+
+/// The DurationFormat per-unit options paired with their unit, in canonical
+/// spec order.
 fn duration_unit_list(
   d: DurationFormatState,
-) -> List(#(String, DurationUnitOptions)) {
+) -> List(#(DurationUnit, DurationUnitOptions)) {
   [
-    #("years", d.years),
-    #("months", d.months),
-    #("weeks", d.weeks),
-    #("days", d.days),
-    #("hours", d.hours),
-    #("minutes", d.minutes),
-    #("seconds", d.seconds),
-    #("milliseconds", d.milliseconds),
-    #("microseconds", d.microseconds),
-    #("nanoseconds", d.nanoseconds),
+    #(DuYears, d.years),
+    #(DuMonths, d.months),
+    #(DuWeeks, d.weeks),
+    #(DuDays, d.days),
+    #(DuHours, d.hours),
+    #(DuMinutes, d.minutes),
+    #(DuSeconds, d.seconds),
+    #(DuMilliseconds, d.milliseconds),
+    #(DuMicroseconds, d.microseconds),
+    #(DuNanoseconds, d.nanoseconds),
   ]
 }
 
@@ -3703,20 +4102,34 @@ fn resolved_options(
       ])
       NumberFormatData(nf) -> {
         let dg = nf.digits
+        // The style-conditional slots exist exactly for the style that
+        // selects them, so resolvedOptions omits the rest.
+        let #(currency, currency_display, currency_sign) = case nf.style {
+          StyleCurrency(currency:, display:, sign:) -> #(
+            Some(JsString(currency)),
+            Some(currency_display_js(display)),
+            Some(currency_sign_js(sign)),
+          )
+          StyleDecimal | StylePercent | StyleUnit(..) -> #(None, None, None)
+        }
+        let #(unit, unit_display) = case nf.style {
+          StyleUnit(unit:, display:) -> #(
+            Some(JsString(unit)),
+            Some(unit_display_js(display)),
+          )
+          StyleDecimal | StylePercent | StyleCurrency(..) -> #(None, None)
+        }
         #(
           state,
           present_pairs([
             #("locale", Some(JsString(nf.locale))),
             #("numberingSystem", Some(JsString(nf.numbering_system))),
             #("style", Some(JsString(value.num_style_to_js_string(nf.style)))),
-            #("currency", option.map(nf.currency, JsString)),
-            #(
-              "currencyDisplay",
-              option.map(nf.currency_display, currency_display_js),
-            ),
-            #("currencySign", option.map(nf.currency_sign, currency_sign_js)),
-            #("unit", option.map(nf.unit, JsString)),
-            #("unitDisplay", option.map(nf.unit_display, unit_display_js)),
+            #("currency", currency),
+            #("currencyDisplay", currency_display),
+            #("currencySign", currency_sign),
+            #("unit", unit),
+            #("unitDisplay", unit_display),
             #(
               "minimumIntegerDigits",
               Some(value.from_int(dg.minimum_integer_digits)),
@@ -3742,10 +4155,7 @@ fn resolved_options(
               "notation",
               Some(JsString(value.notation_to_js_string(nf.notation))),
             ),
-            #(
-              "compactDisplay",
-              option.map(nf.compact_display, compact_display_js),
-            ),
+            #("compactDisplay", compact_display_of(nf.notation)),
             #(
               "signDisplay",
               Some(JsString(value.sign_display_to_js_string(nf.sign_display))),
@@ -3762,29 +4172,47 @@ fn resolved_options(
           #("calendar", Some(JsString(d.calendar))),
           #("numberingSystem", Some(JsString(d.numbering_system))),
           #("timeZone", Some(JsString(d.time_zone))),
-          #("hourCycle", option.map(d.hour_cycle, JsString)),
+          #(
+            "hourCycle",
+            option.map(d.hour_cycle, fn(hc) {
+              JsString(value.hour_cycle_to_js_string(hc))
+            }),
+          ),
           #(
             "hour12",
             option.map(d.hour_cycle, fn(hc) {
-              JsBool(hc == "h11" || hc == "h12")
+              JsBool(case hc {
+                H11 | H12 -> True
+                H23 | H24 -> False
+              })
             }),
           ),
-          #("weekday", option.map(d.weekday, JsString)),
-          #("era", option.map(d.era, JsString)),
-          #("year", option.map(d.year, JsString)),
-          #("month", option.map(d.month, JsString)),
-          #("day", option.map(d.day, JsString)),
-          #("dayPeriod", option.map(d.day_period, JsString)),
-          #("hour", option.map(d.hour, JsString)),
-          #("minute", option.map(d.minute, JsString)),
-          #("second", option.map(d.second, JsString)),
+          #("weekday", option.map(d.weekday, name_width_js)),
+          #("era", option.map(d.era, name_width_js)),
+          #("year", option.map(d.year, numeric_width_js)),
+          #("month", option.map(d.month, month_width_js)),
+          #("day", option.map(d.day, numeric_width_js)),
+          #("dayPeriod", option.map(d.day_period, name_width_js)),
+          #("hour", option.map(d.hour, numeric_width_js)),
+          #("minute", option.map(d.minute, numeric_width_js)),
+          #("second", option.map(d.second, numeric_width_js)),
           #(
             "fractionalSecondDigits",
             option.map(d.fractional_second_digits, value.from_int),
           ),
-          #("timeZoneName", option.map(d.time_zone_name, JsString)),
-          #("dateStyle", option.map(d.date_style, JsString)),
-          #("timeStyle", option.map(d.time_style, JsString)),
+          #("timeZoneName", option.map(d.time_zone_name, tz_name_width_js)),
+          #(
+            "dateStyle",
+            option.map(d.date_style, fn(s) {
+              JsString(value.date_style_to_js_string(s))
+            }),
+          ),
+          #(
+            "timeStyle",
+            option.map(d.time_style, fn(s) {
+              JsString(value.time_style_to_js_string(s))
+            }),
+          ),
         ]),
       )
       PluralRulesData(p) -> {
@@ -3803,10 +4231,7 @@ fn resolved_options(
               "notation",
               Some(JsString(value.notation_to_js_string(p.notation))),
             ),
-            #(
-              "compactDisplay",
-              option.map(p.compact_display, compact_display_js),
-            ),
+            #("compactDisplay", compact_display_of(p.notation)),
             #(
               "minimumIntegerDigits",
               Some(value.from_int(dg.minimum_integer_digits)),
@@ -3867,9 +4292,10 @@ fn resolved_options(
             #("style", JsString(df.style)),
           ],
           list.flat_map(duration_unit_list(df), fn(u) {
-            let #(name, o) = u
+            let #(unit, o) = u
+            let name = duration_unit_js_name(unit)
             [
-              #(name, JsString(o.style)),
+              #(name, JsString(value.duration_unit_style_to_js_string(o.style))),
               #(name <> "Display", JsString(o.display)),
             ]
           }),
@@ -3910,8 +4336,30 @@ fn unit_display_js(v: value.UnitDisplay) -> JsValue {
   JsString(value.unit_display_to_js_string(v))
 }
 
-fn compact_display_js(v: value.CompactDisplay) -> JsValue {
-  JsString(value.compact_display_to_js_string(v))
+/// `[[CompactDisplay]]` as its resolvedOptions value — present only when the
+/// notation is compact.
+fn compact_display_of(n: Notation) -> Option(JsValue) {
+  case n {
+    NotationCompact(display:) ->
+      Some(JsString(value.compact_display_to_js_string(display)))
+    NotationStandard | NotationScientific | NotationEngineering -> None
+  }
+}
+
+fn name_width_js(v: NameWidth) -> JsValue {
+  JsString(value.name_width_to_js_string(v))
+}
+
+fn numeric_width_js(v: NumericWidth) -> JsValue {
+  JsString(value.numeric_width_to_js_string(v))
+}
+
+fn month_width_js(v: MonthWidth) -> JsValue {
+  JsString(value.month_width_to_js_string(v))
+}
+
+fn tz_name_width_js(v: TimeZoneNameWidth) -> JsValue {
+  JsString(value.time_zone_name_width_to_js_string(v))
 }
 
 /// The roundingMode/roundingPriority/trailingZeroDisplay resolvedOptions
@@ -4061,14 +4509,8 @@ fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
       ..d,
       locale: nf.locale,
       style: nf.style,
-      currency: nf.currency,
-      currency_display: option.unwrap(nf.currency_display, d.currency_display),
-      currency_sign: option.unwrap(nf.currency_sign, d.currency_sign),
-      unit: nf.unit,
-      unit_display: option.unwrap(nf.unit_display, d.unit_display),
       use_grouping: nf.use_grouping,
       notation: nf.notation,
-      compact_display: option.unwrap(nf.compact_display, d.compact_display),
       sign_display: nf.sign_display,
     ),
     nf.digits,
@@ -4080,12 +4522,7 @@ fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
 fn num_opts_from_plural(p: PluralRulesState) -> fmt.NumOpts {
   let d = fmt.default_num_opts()
   with_digits(
-    fmt.NumOpts(
-      ..d,
-      locale: p.locale,
-      notation: p.notation,
-      compact_display: option.unwrap(p.compact_display, d.compact_display),
-    ),
+    fmt.NumOpts(..d, locale: p.locale, notation: p.notation),
     p.digits,
   )
 }
@@ -4311,30 +4748,38 @@ fn same_temporal_kind(a: TemporalFormattable, b: TemporalFormattable) -> Bool {
 /// ~relevant~ inheritance).
 fn tf_component_rules(
   t: TemporalFormattable,
-) -> #(List(DtfComponent), List(DtfComponent), List(DtfComponent), Bool) {
+) -> #(List(DtfComponent), List(DtfComponent), DtfComponents, Bool) {
   case t {
     TfDate(..) -> #(
       [DtfWeekday, DtfEra, DtfYear, DtfMonth, DtfDay],
       [DtfWeekday, DtfYear, DtfMonth, DtfDay],
-      [DtfYear, DtfMonth, DtfDay],
+      date_defaults(),
       True,
     )
     TfYearMonth(..) -> #(
       [DtfEra, DtfYear, DtfMonth],
       [DtfYear, DtfMonth],
-      [DtfYear, DtfMonth],
+      DtfComponents(
+        ..value.empty_dtf_components,
+        year: Some(WNumeric),
+        month: Some(MonthNum(WNumeric)),
+      ),
       True,
     )
     TfMonthDay(..) -> #(
       [DtfMonth, DtfDay],
       [DtfMonth, DtfDay],
-      [DtfMonth, DtfDay],
+      DtfComponents(
+        ..value.empty_dtf_components,
+        month: Some(MonthNum(WNumeric)),
+        day: Some(WNumeric),
+      ),
       False,
     )
     TfTime(..) -> #(
       [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
       [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
-      [DtfHour, DtfMinute, DtfSecond],
+      time_defaults(),
       False,
     )
     TfDateTime(..) -> #(
@@ -4346,10 +4791,10 @@ fn tf_component_rules(
         DtfWeekday, DtfYear, DtfMonth, DtfDay, DtfDayPeriod, DtfHour, DtfMinute,
         DtfSecond, DtfFractionalSecondDigits,
       ],
-      [DtfYear, DtfMonth, DtfDay, DtfHour, DtfMinute, DtfSecond],
+      merge_components(date_defaults(), time_defaults()),
       True,
     )
-    TfInstant(..) | TfZoned -> #([], [], [], False)
+    TfInstant(..) | TfZoned -> #([], [], value.empty_dtf_components, False)
   }
 }
 
@@ -4405,32 +4850,28 @@ fn dtf_temporal_state(
                 "DateTimeFormat has no suitable format for this Temporal type",
               )
           })
-          let kept =
-            list.filter_map(allowed, fn(name) {
-              case component(d.components, name) {
-                Some(v) -> Ok(#(name, v))
-                None -> Error(Nil)
-              }
-            })
-          Ok(#(with_components(d, kept), state))
+          Ok(#(
+            with_components(d, keep_components(d.components, allowed)),
+            state,
+          ))
         }
         False -> {
           // GetDateTimeFormat with inherit = ~relevant~ over the explicitly
           // provided component options.
           let in_required =
             list.filter(d.explicit, fn(name) { list.contains(required, name) })
-          let era_comps = case copy_era, d.era {
-            True, Some(e) -> [#(DtfEra, e)]
-            _, _ -> []
+          let era = case copy_era {
+            True -> d.components.era
+            False -> None
           }
           case in_required {
             [] ->
               case d.explicit {
-                [] -> {
-                  let comps =
-                    list.map(defaults, fn(name) { #(name, "numeric") })
-                  Ok(#(with_components(d, list.append(era_comps, comps)), state))
-                }
+                [] ->
+                  Ok(#(
+                    with_components(d, DtfComponents(..defaults, era:)),
+                    state,
+                  ))
                 _ ->
                   throw_type(
                     state,
@@ -4438,26 +4879,14 @@ fn dtf_temporal_state(
                   )
               }
             _ -> {
-              let comps =
-                list.filter_map(required, fn(name) {
-                  case list.contains(d.explicit, name) {
-                    False -> Error(Nil)
-                    True ->
-                      case name {
-                        DtfFractionalSecondDigits ->
-                          case d.fractional_second_digits {
-                            Some(n) -> Ok(#(name, int.to_string(n)))
-                            None -> Error(Nil)
-                          }
-                        _ ->
-                          case component(d.components, name) {
-                            Some(v) -> Ok(#(name, v))
-                            None -> Error(Nil)
-                          }
-                      }
-                  }
-                })
-              Ok(#(with_components(d, list.append(era_comps, comps)), state))
+              let kept =
+                keep_components(
+                  d.components,
+                  list.filter(required, fn(name) {
+                    list.contains(d.explicit, name)
+                  }),
+                )
+              Ok(#(with_components(d, DtfComponents(..kept, era:)), state))
             }
           }
         }
@@ -4466,12 +4895,12 @@ fn dtf_temporal_state(
   }
 }
 
-/// Replace the formatter's component table with `comps`.
+/// Replace the formatter's component table.
 fn with_components(
   d: DateTimeFormatState,
-  comps: List(#(DtfComponent, String)),
+  components: DtfComponents,
 ) -> DateTimeFormatState {
-  DateTimeFormatState(..d, components: components_from_pairs(comps))
+  DateTimeFormatState(..d, components:)
 }
 
 /// Howard Hinnant's days_from_civil: civil date -> days since 1970-01-01.
@@ -4642,52 +5071,47 @@ fn build_dtf_parts(
     fractional_second_digits: fractional,
     time_zone_name: tz_name,
   ) = d.components
-  let hc = option.unwrap(d.hour_cycle, "h12")
+  let hc = option.unwrap(d.hour_cycle, H12)
 
   let display_year = case fields.year <= 0 {
     True -> 1 - fields.year
     False -> fields.year
   }
-  let year_str = fn(style) {
-    case style {
-      "2-digit" -> fmt.pad2(display_year % 100)
-      _ -> int.to_string(display_year)
+  let year_str = fn(width) {
+    case width {
+      WTwoDigit -> fmt.pad2(display_year % 100)
+      WNumeric -> int.to_string(display_year)
     }
   }
   let weekday_parts = case weekday {
     Some(w) -> [#("weekday", fmt.weekday_name(fields.week_day, w))]
     None -> []
   }
-  let named_month = case month {
-    Some("long") | Some("short") | Some("narrow") -> True
-    _ -> False
-  }
   // Date portion.
-  let date_parts = case named_month {
-    True -> {
-      let m_part = [
-        #("month", fmt.month_name(fields.month, option.unwrap(month, "long"))),
-      ]
+  let date_parts = case month {
+    Some(MonthName(mw)) -> {
+      let m_part = [#("month", fmt.month_name(fields.month, mw))]
       let d_part = case day {
-        Some(ds) -> [
-          #("literal", " "),
-          #("day", day_str(ds, fields.day)),
-        ]
+        Some(dw) -> [#("literal", " "), #("day", day_str(dw, fields.day))]
         None -> []
       }
       let y_part = case year {
-        Some(ys) ->
+        Some(yw) ->
           case day {
-            Some(_) -> [#("literal", ", "), #("year", year_str(ys))]
-            None -> [#("literal", " "), #("year", year_str(ys))]
+            Some(_) -> [#("literal", ", "), #("year", year_str(yw))]
+            None -> [#("literal", " "), #("year", year_str(yw))]
           }
         None -> []
       }
       list.flatten([m_part, d_part, y_part])
     }
-    False -> {
-      // Numeric month / partial combos. Most locales we ship use M/D/Y with
-      // "/"; German-style locales order D.M.Y with ".".
+    // Numeric month / partial combos. Most locales we ship use M/D/Y with
+    // "/"; German-style locales order D.M.Y with ".".
+    Some(MonthNum(_)) | None -> {
+      let month_num = case month {
+        Some(MonthNum(mw)) -> Some(month_num_str(mw, fields.month))
+        Some(MonthName(_)) | None -> None
+      }
       let lang = case tags.parse(d.locale) {
         Ok(lid) -> lid.language
         Error(Nil) -> "en"
@@ -4697,32 +5121,14 @@ fn build_dtf_parts(
           ["de", "fi", "ru", "cs", "tr", "nb", "pl", "uk", "bg", "sr", "lv"],
           lang,
         )
-      let raw = [
-        #(
-          "month",
-          option.map(month, fn(ms) { month_num_str(ms, fields.month) }),
-        ),
-        #("day", option.map(day, fn(ds) { day_str(ds, fields.day) })),
-        #("year", option.map(year, year_str)),
-      ]
+      let m_pair = #("month", month_num)
+      let d_pair = #("day", option.map(day, fn(dw) { day_str(dw, fields.day) }))
+      let y_pair = #("year", option.map(year, year_str))
       let raw = case dotted {
-        True -> [
-          #("day", option.map(day, fn(ds) { day_str(ds, fields.day) })),
-          #(
-            "month",
-            option.map(month, fn(ms) { month_num_str(ms, fields.month) }),
-          ),
-          #("year", option.map(year, year_str)),
-        ]
-        False -> raw
+        True -> [d_pair, m_pair, y_pair]
+        False -> [m_pair, d_pair, y_pair]
       }
-      let pieces =
-        list.filter_map(raw, fn(kv) {
-          case kv {
-            #(t, Some(v)) -> Ok(#(t, v))
-            #(_, None) -> Error(Nil)
-          }
-        })
+      let pieces = present_pairs(raw)
       case dotted {
         True -> join_parts(pieces, ".")
         False -> join_parts(pieces, "/")
@@ -4739,8 +5145,8 @@ fn build_dtf_parts(
   }
   // Time portion.
   let #(display_hour, dp) = case hc {
-    "h11" -> #(fields.hour % 12, am_pm(fields.hour))
-    "h12" -> {
+    H11 -> #(fields.hour % 12, am_pm(fields.hour))
+    H12 -> {
       let h = fields.hour % 12
       #(
         case h {
@@ -4750,29 +5156,29 @@ fn build_dtf_parts(
         am_pm(fields.hour),
       )
     }
-    "h24" -> #(
+    H24 -> #(
       case fields.hour {
         0 -> 24
         h -> h
       },
       "",
     )
-    _ -> #(fields.hour, "")
+    H23 -> #(fields.hour, "")
   }
   let hour_parts = case hour {
-    Some("2-digit") -> [#("hour", fmt.pad2(display_hour))]
-    Some(_) -> [#("hour", int.to_string(display_hour))]
+    Some(WTwoDigit) -> [#("hour", fmt.pad2(display_hour))]
+    Some(WNumeric) -> [#("hour", int.to_string(display_hour))]
     None -> []
   }
   let minute_parts = case minute {
-    Some(style) -> {
+    Some(width) -> {
       let v = case hour, second {
         Some(_), _ -> fmt.pad2(fields.minute)
         None, Some(_) -> fmt.pad2(fields.minute)
         None, None ->
-          case style {
-            "2-digit" -> fmt.pad2(fields.minute)
-            _ -> int.to_string(fields.minute)
+          case width {
+            WTwoDigit -> fmt.pad2(fields.minute)
+            WNumeric -> int.to_string(fields.minute)
           }
       }
       case hour_parts {
@@ -4783,13 +5189,13 @@ fn build_dtf_parts(
     None -> []
   }
   let second_parts = case second {
-    Some(style) -> {
+    Some(width) -> {
       let v = case minute {
         Some(_) -> fmt.pad2(fields.second)
         None ->
-          case style {
-            "2-digit" -> fmt.pad2(fields.second)
-            _ -> int.to_string(fields.second)
+          case width {
+            WTwoDigit -> fmt.pad2(fields.second)
+            WNumeric -> int.to_string(fields.second)
           }
       }
       case minute_parts {
@@ -4800,24 +5206,20 @@ fn build_dtf_parts(
     None -> []
   }
   let fractional_parts = case fractional {
-    Some(fs) ->
-      case int.parse(fs) {
-        Ok(digits) -> {
-          let ms3 = string.pad_start(int.to_string(fields.millisecond), 3, "0")
-          let v = string.slice(ms3, 0, digits)
-          case second_parts {
-            [] -> [#("fractionalSecond", v)]
-            _ -> [#("literal", "."), #("fractionalSecond", v)]
-          }
-        }
-        Error(Nil) -> []
+    Some(digits) -> {
+      let ms3 = string.pad_start(int.to_string(fields.millisecond), 3, "0")
+      let v = string.slice(ms3, 0, digits)
+      case second_parts {
+        [] -> [#("fractionalSecond", v)]
+        _ -> [#("literal", "."), #("fractionalSecond", v)]
       }
+    }
     None -> []
   }
   let day_period_parts = case day_period, hour {
-    Some(dps), _ -> [
+    Some(dpw), _ -> [
       #("literal", " "),
-      #("dayPeriod", fmt.day_period_name(fields.hour, fields.minute, dps)),
+      #("dayPeriod", fmt.day_period_name(fields.hour, fields.minute, dpw)),
     ]
     None, Some(_) ->
       case dp {
@@ -4828,14 +5230,14 @@ fn build_dtf_parts(
   }
   // Standalone dayPeriod (no hour): no leading space.
   let day_period_parts = case hour, day_period {
-    None, Some(dps) -> [
-      #("dayPeriod", fmt.day_period_name(fields.hour, fields.minute, dps)),
+    None, Some(dpw) -> [
+      #("dayPeriod", fmt.day_period_name(fields.hour, fields.minute, dpw)),
     ]
     _, _ -> day_period_parts
   }
   let tz_parts = case tz_name {
-    Some(style) -> {
-      let name = tz_display(d.time_zone, style, d.tz_offset_minutes)
+    Some(width) -> {
+      let name = tz_display(d.time_zone, width, d.tz_offset_minutes)
       [#("literal", " "), #("timeZoneName", name)]
     }
     None -> []
@@ -4872,17 +5274,17 @@ fn am_pm(hour: Int) -> String {
   }
 }
 
-fn day_str(style: String, day: Int) -> String {
-  case style {
-    "2-digit" -> fmt.pad2(day)
-    _ -> int.to_string(day)
+fn day_str(width: NumericWidth, day: Int) -> String {
+  case width {
+    WTwoDigit -> fmt.pad2(day)
+    WNumeric -> int.to_string(day)
   }
 }
 
-fn month_num_str(style: String, month: Int) -> String {
-  case style {
-    "2-digit" -> fmt.pad2(month)
-    _ -> int.to_string(month)
+fn month_num_str(width: NumericWidth, month: Int) -> String {
+  case width {
+    WTwoDigit -> fmt.pad2(month)
+    WNumeric -> int.to_string(month)
   }
 }
 
@@ -4895,15 +5297,16 @@ fn join_parts(pieces: List(fmt.Part), sep: String) -> List(fmt.Part) {
   }
 }
 
-/// Render a formatter's [[TimeZone]] under a timeZoneName style.
-fn tz_display(name: String, style: String, offset: Int) -> String {
-  case name, style {
-    "UTC", "short" | "UTC", "shortGeneric" -> "UTC"
-    "UTC", "long" | "UTC", "longGeneric" -> "Coordinated Universal Time"
-    "UTC", "shortOffset" -> "GMT"
-    "UTC", "longOffset" -> "GMT"
-    _, "long" | _, "longOffset" | _, "longGeneric" -> gmt_offset(offset, True)
-    _, _ -> gmt_offset(offset, False)
+/// Render a formatter's [[TimeZone]] under a timeZoneName width.
+fn tz_display(name: String, width: TimeZoneNameWidth, offset: Int) -> String {
+  case name, width {
+    "UTC", TzShort | "UTC", TzShortGeneric -> "UTC"
+    "UTC", TzLong | "UTC", TzLongGeneric -> "Coordinated Universal Time"
+    "UTC", TzShortOffset -> "GMT"
+    "UTC", TzLongOffset -> "GMT"
+    _, TzLong | _, TzLongOffset | _, TzLongGeneric -> gmt_offset(offset, True)
+    _, TzShort | _, TzShortOffset | _, TzShortGeneric ->
+      gmt_offset(offset, False)
   }
 }
 
@@ -5017,33 +5420,24 @@ fn dtf_collapsed_range(
   Thrown(host),
 ) {
   let c = d.components
-  let month_style = c.month
-  let named_month = case month_style {
-    Some("long") | Some("short") | Some("narrow") -> True
-    _ -> False
-  }
   let date_only =
     c.hour == None && c.minute == None && c.second == None && c.weekday == None
-  let has_ymd = c.year != None && c.month != None && c.day != None
-  case named_month && date_only && has_ymd {
-    False -> Ok(None)
-    True -> {
+  // A named month with a year and a day is the only shape we collapse.
+  case c.month, c.year, c.day, date_only {
+    Some(MonthName(month_width)), Some(year_width), Some(day_width), True -> {
       use #(xf, state) <- result.try(dtf_fields(state, d, x_v))
       use #(yf, state) <- result.try(dtf_fields(state, d, y_v))
       {
-        let day_style = option.unwrap(c.day, "numeric")
-        let year_style = option.unwrap(c.year, "numeric")
+        let day_style = day_width
         let display_year = case xf.year <= 0 {
           True -> 1 - xf.year
           False -> xf.year
         }
-        let year_str = case year_style {
-          "2-digit" -> fmt.pad2(display_year % 100)
-          _ -> int.to_string(display_year)
+        let year_str = case year_width {
+          WTwoDigit -> fmt.pad2(display_year % 100)
+          WNumeric -> int.to_string(display_year)
         }
-        let mname = fn(m) {
-          fmt.month_name(m, option.unwrap(month_style, "short"))
-        }
+        let mname = fn(m) { fmt.month_name(m, month_width) }
         case xf.year == yf.year {
           False -> Ok(None)
           True ->
@@ -5079,6 +5473,7 @@ fn dtf_collapsed_range(
         }
       }
     }
+    _, _, _, _ -> Ok(None)
   }
 }
 
@@ -5750,20 +6145,10 @@ fn host_date_to_locale(
       }
     _ -> throw_type(state, "this is not a Date object")
   })
-  let date_defaults = [
-    #(DtfYear, "numeric"),
-    #(DtfMonth, "numeric"),
-    #(DtfDay, "numeric"),
-  ]
-  let time_defaults = [
-    #(DtfHour, "numeric"),
-    #(DtfMinute, "numeric"),
-    #(DtfSecond, "numeric"),
-  ]
   let defaults = case required {
-    DateOnly -> date_defaults
-    TimeOnly -> time_defaults
-    DateAndTime -> list.append(date_defaults, time_defaults)
+    DateOnly -> date_defaults()
+    TimeOnly -> time_defaults()
+    DateAndTime -> merge_components(date_defaults(), time_defaults())
   }
   use #(d, state) <- result.try(dtf_state_required(
     state,
@@ -6039,8 +6424,9 @@ fn duration_parts(
 ) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
   use #(fields, state) <- result.try(to_duration_record(state, duration_v))
   // DurationSign consistency + IsValidDuration ranges.
-  let has_neg = list.any(fields, fn(f) { f.1 <. 0.0 })
-  let has_pos = list.any(fields, fn(f) { f.1 >. 0.0 })
+  let values = duration_values(fields)
+  let has_neg = list.any(values, fn(v) { v <. 0.0 })
+  let has_pos = list.any(values, fn(v) { v >. 0.0 })
   use Nil <- result.try(case has_neg && has_pos {
     True -> throw_range(state, "Duration fields must have consistent sign")
     False -> Ok(Nil)
@@ -6056,7 +6442,7 @@ fn duration_parts(
 fn to_duration_record(
   state: State(host),
   duration_v: JsValue,
-) -> Result(#(List(#(String, Float)), State(host)), Thrown(host)) {
+) -> Result(#(DurationRecord, State(host)), Thrown(host)) {
   case duration_v {
     JsString(str) ->
       case parse_iso_duration(str) {
@@ -6065,68 +6451,76 @@ fn to_duration_record(
       }
     JsObject(dur_ref) -> {
       use acc <- result.try(
-        list.try_fold(duration_units, #([], state, False), fn(acc, unit) {
-          let #(fields, state, any) = acc
-          use #(v, state) <- result.try(object.get_value(
-            state,
-            dur_ref,
-            Named(unit),
-            duration_v,
-          ))
-          case v {
-            JsUndefined -> Ok(#([#(unit, 0.0), ..fields], state, any))
-            _ -> {
-              use #(n, state) <- result.try(coerce.js_to_number(state, v))
-              case n {
-                value.Finite(f) ->
-                  case f == float.floor(f) {
-                    True -> Ok(#([#(unit, f), ..fields], state, True))
-                    False ->
-                      throw_range(state, unit <> " must be an integral number")
-                  }
-                _ -> throw_range(state, unit <> " must be a finite number")
+        list.try_fold(
+          duration_units,
+          #(zero_duration, state, False),
+          fn(acc, unit) {
+            let #(fields, state, any) = acc
+            let name = duration_unit_js_name(unit)
+            use #(v, state) <- result.try(object.get_value(
+              state,
+              dur_ref,
+              Named(name),
+              duration_v,
+            ))
+            case v {
+              JsUndefined -> Ok(#(fields, state, any))
+              _ -> {
+                use #(n, state) <- result.try(coerce.js_to_number(state, v))
+                case n {
+                  value.Finite(f) ->
+                    case f == float.floor(f) {
+                      True ->
+                        Ok(#(set_duration_field(fields, unit, f), state, True))
+                      False ->
+                        throw_range(
+                          state,
+                          name <> " must be an integral number",
+                        )
+                    }
+                  _ -> throw_range(state, name <> " must be a finite number")
+                }
               }
             }
-          }
-        }),
+          },
+        ),
       )
-      let #(fields_rev, state, any_defined) = acc
+      let #(fields, state, any_defined) = acc
       use Nil <- result.try(case any_defined {
         True -> Ok(Nil)
         False -> throw_range(state, "Invalid duration object")
       })
-      Ok(#(list.reverse(fields_rev), state))
+      Ok(#(fields, state))
     }
     _ -> throw_type(state, "Duration must be an object or string")
   }
 }
 
 /// IsValidDuration: calendar units < 2^32; total time < 2^53 seconds.
-fn is_valid_duration(fields: List(#(String, Float))) -> Bool {
-  let get = fn(name) { list.key_find(fields, name) |> result.unwrap(0.0) }
+fn is_valid_duration(d: DurationRecord) -> Bool {
   let cal_ok =
-    list.all(["years", "months", "weeks"], fn(u) {
-      float.absolute_value(get(u)) <. 4_294_967_296.0
+    list.all([d.years, d.months, d.weeks], fn(v) {
+      float.absolute_value(v) <. 4_294_967_296.0
     })
   let total_seconds =
-    get("days")
+    d.days
     *. 86_400.0
-    +. get("hours")
+    +. d.hours
     *. 3600.0
-    +. get("minutes")
+    +. d.minutes
     *. 60.0
-    +. get("seconds")
-    +. get("milliseconds")
+    +. d.seconds
+    +. d.milliseconds
     /. 1000.0
-    +. get("microseconds")
+    +. d.microseconds
     /. 1_000_000.0
-    +. get("nanoseconds")
+    +. d.nanoseconds
     /. 1_000_000_000.0
   cal_ok && float.absolute_value(total_seconds) <. 9_007_199_254_740_992.0
 }
 
 /// Parse a Temporal ISO 8601 duration string: [+-]PnYnMnWnDTnHnMnS.
-fn parse_iso_duration(str: String) -> Result(List(#(String, Float)), Nil) {
+fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
   let trimmed = string.trim(str)
   let #(sign, rest) = case string.pop_grapheme(trimmed) {
     Ok(#("-", r)) -> #(-1.0, r)
@@ -6148,7 +6542,7 @@ fn parse_iso_duration(str: String) -> Result(List(#(String, Float)), Nil) {
   }
   use date_fields <- result.try(parse_duration_section(
     date_part,
-    [#("Y", "years"), #("M", "months"), #("W", "weeks"), #("D", "days")],
+    [#("Y", DuYears), #("M", DuMonths), #("W", DuWeeks), #("D", DuDays)],
     False,
   ))
   use time_fields <- result.try(case time_part {
@@ -6157,7 +6551,7 @@ fn parse_iso_duration(str: String) -> Result(List(#(String, Float)), Nil) {
     Some(t) ->
       parse_duration_section(
         t,
-        [#("H", "hours"), #("M", "minutes"), #("S", "seconds")],
+        [#("H", DuHours), #("M", DuMinutes), #("S", DuSeconds)],
         True,
       )
   })
@@ -6165,32 +6559,30 @@ fn parse_iso_duration(str: String) -> Result(List(#(String, Float)), Nil) {
   case all {
     [] -> Error(Nil)
     _ -> {
-      let lookup = fn(name) { list.key_find(all, name) |> result.unwrap(0.0) }
+      let parsed =
+        list.fold(all, zero_duration, fn(acc, kv) {
+          set_duration_field(acc, kv.0, kv.1)
+        })
       // Split fractional seconds into ms/us/ns.
-      let secs = lookup("seconds")
-      let whole = float.truncate(secs) |> int.to_float
-      let frac = secs -. whole
+      let whole = float.truncate(parsed.seconds) |> int.to_float
+      let frac = parsed.seconds -. whole
       let ns_total = float.round(frac *. 1_000_000_000.0)
       let ms = ns_total / 1_000_000
       let us = { ns_total % 1_000_000 } / 1000
       let ns = ns_total % 1000
-      Ok(
-        list.map(
-          [
-            #("years", lookup("years")),
-            #("months", lookup("months")),
-            #("weeks", lookup("weeks")),
-            #("days", lookup("days")),
-            #("hours", lookup("hours")),
-            #("minutes", lookup("minutes")),
-            #("seconds", whole),
-            #("milliseconds", int.to_float(ms)),
-            #("microseconds", int.to_float(us)),
-            #("nanoseconds", int.to_float(ns)),
-          ],
-          fn(kv) { #(kv.0, sign *. kv.1) },
-        ),
-      )
+      let signed = fn(v: Float) { sign *. v }
+      Ok(DurationRecord(
+        years: signed(parsed.years),
+        months: signed(parsed.months),
+        weeks: signed(parsed.weeks),
+        days: signed(parsed.days),
+        hours: signed(parsed.hours),
+        minutes: signed(parsed.minutes),
+        seconds: signed(whole),
+        milliseconds: signed(int.to_float(ms)),
+        microseconds: signed(int.to_float(us)),
+        nanoseconds: signed(int.to_float(ns)),
+      ))
     }
   }
 }
@@ -6198,9 +6590,9 @@ fn parse_iso_duration(str: String) -> Result(List(#(String, Float)), Nil) {
 /// Parse "3Y2M..." style segments in designator order.
 fn parse_duration_section(
   part: String,
-  designators: List(#(String, String)),
+  designators: List(#(String, DurationUnit)),
   allow_fraction: Bool,
-) -> Result(List(#(String, Float)), Nil) {
+) -> Result(List(#(DurationUnit, Float)), Nil) {
   case part {
     "" -> Ok([])
     _ ->
@@ -6216,11 +6608,11 @@ fn parse_duration_section(
 
 fn parse_duration_loop(
   gs: List(String),
-  designators: List(#(String, String)),
+  designators: List(#(String, DurationUnit)),
   allow_fraction: Bool,
   num_acc: String,
-  out: List(#(String, Float)),
-) -> Result(List(#(String, Float)), Nil) {
+  out: List(#(DurationUnit, Float)),
+) -> Result(List(#(DurationUnit, Float)), Nil) {
   case gs {
     [] ->
       case num_acc {
@@ -6274,9 +6666,9 @@ fn parse_duration_loop(
 
 /// Designators must appear in order; consuming one drops the earlier ones.
 fn take_designator(
-  designators: List(#(String, String)),
+  designators: List(#(String, DurationUnit)),
   d: String,
-) -> Result(#(String, List(#(String, String))), Nil) {
+) -> Result(#(DurationUnit, List(#(String, DurationUnit))), Nil) {
   case designators {
     [] -> Error(Nil)
     [#(key, field), ..rest] ->
@@ -6308,21 +6700,20 @@ fn parse_duration_number(s: String) -> Result(Float, Nil) {
 /// PartitionDurationFormatPattern — mirrors ECMA-402 Intl.DurationFormat §1.1.7.
 fn build_duration_parts(
   df: DurationFormatState,
-  fields: List(#(String, Float)),
+  fields: DurationRecord,
 ) -> List(#(String, String, String)) {
   let nu = df.numbering_system
   let base_style = df.style
   let frac_digits = df.fractional_digits
-  let get = fn(name) { list.key_find(fields, name) |> result.unwrap(0.0) }
-  let overall_negative = list.any(fields, fn(f) { f.1 <. 0.0 })
-  let fields = list.map(fields, fn(f) { #(f.0, f.1 +. 0.0) })
-  // The style of the next-smaller sub-second unit (seconds → ms → us → ns).
+  let overall_negative = list.any(duration_values(fields), fn(v) { v <. 0.0 })
+  // The style of the next-smaller sub-second unit (seconds → ms → us → ns);
+  // `None` for the units that have no such successor.
   let next_style_of = fn(unit) {
     case unit {
-      "seconds" -> df.milliseconds.style
-      "milliseconds" -> df.microseconds.style
-      "microseconds" -> df.nanoseconds.style
-      _ -> ""
+      DuSeconds -> Some(df.milliseconds.style)
+      DuMilliseconds -> Some(df.microseconds.style)
+      DuMicroseconds -> Some(df.nanoseconds.style)
+      _other -> None
     }
   }
   // Iterate units building groups; numeric units join via ":" separators.
@@ -6336,17 +6727,13 @@ fn build_duration_parts(
         False -> {
           let style = unit_opts.style
           let display = unit_opts.display
-          let raw_value = get(unit)
-          // Combine sub-second units when the next unit is numeric.
-          let next_style = next_style_of(unit)
-          let raw_value = raw_value +. 0.0
-          let combine =
-            {
-              unit == "seconds"
-              || unit == "milliseconds"
-              || unit == "microseconds"
-            }
-            && next_style == "numeric"
+          let raw_value = duration_field(fields, unit) +. 0.0
+          // Combine sub-second units when the next unit is numeric — only
+          // seconds/milliseconds/microseconds have such a next unit at all.
+          let combine = case next_style_of(unit) {
+            Some(next_style) -> folds_into_fraction(next_style)
+            None -> False
+          }
           let #(value_repr, is_zero, this_done, max_frac, min_frac, trunc_mode) = case
             combine
           {
@@ -6371,13 +6758,13 @@ fn build_duration_parts(
             )
           }
           // Display zero numeric minutes when seconds follow.
-          let display_required = case unit == "minutes" && need_sep {
+          let display_required = case unit == DuMinutes && need_sep {
             True ->
               df.seconds.display == "always"
-              || get("seconds") != 0.0
-              || get("milliseconds") != 0.0
-              || get("microseconds") != 0.0
-              || get("nanoseconds") != 0.0
+              || duration_field(fields, DuSeconds) != 0.0
+              || duration_field(fields, DuMilliseconds) != 0.0
+              || duration_field(fields, DuMicroseconds) != 0.0
+              || duration_field(fields, DuNanoseconds) != 0.0
             False -> False
           }
           let show = !is_zero || display != "auto" || display_required
@@ -6395,14 +6782,18 @@ fn build_duration_parts(
                 }
                 False -> #(SignNever, value_repr, False)
               }
-              let numeric_style = style == "numeric" || style == "2-digit"
+              let numeric_style = is_numeric_style(style)
               let opts =
                 fmt.NumOpts(
                   ..fmt.default_num_opts(),
                   sign_display: sign_display,
-                  min_int: case style == "2-digit" {
-                    True -> 2
-                    False -> 1
+                  min_int: case style {
+                    DurTwoDigit -> 2
+                    DurLong
+                    | DurShort
+                    | DurNarrow
+                    | DurNumeric
+                    | DurFractional -> 1
                   },
                   use_grouping: case numeric_style {
                     True -> GroupingNever
@@ -6422,24 +6813,20 @@ fn build_duration_parts(
                   },
                   style: case numeric_style {
                     True -> StyleDecimal
-                    False -> StyleUnit
-                  },
-                  unit: case numeric_style {
-                    True -> None
-                    False -> Some(singular_duration_unit(unit))
-                  },
-                  unit_display: case numeric_style {
-                    True -> UnitShort
-                    // DurationFormat unit styles are "long"/"short"/"narrow"
-                    // here (the numeric styles took the branch above).
-                    False -> unit_display_from_duration_style(style)
+                    // DurationFormat unit styles are long/short/narrow here
+                    // (the numeric styles took the branch above).
+                    False ->
+                      StyleUnit(
+                        unit: duration_unit_singular(unit),
+                        display: unit_display_from_duration_style(style),
+                      )
                   },
                 )
               let parts = case value_repr {
                 FloatValue(f) -> fmt.format_number_parts(opts, f)
                 DecValue(str) -> fmt.format_decimal_string_parts(opts, str)
               }
-              let unit_tag = singular_duration_unit(unit)
+              let unit_tag = duration_unit_singular(unit)
               let parts =
                 apply_numbering_system(parts, nu)
                 |> list.map(fn(part) {
@@ -6495,43 +6882,47 @@ type DurationValue {
   DecValue(String)
 }
 
-fn singular_duration_unit(unit: String) -> String {
-  string.slice(unit, 0, string.length(unit) - 1)
+/// Whether the *next* sub-second unit's style makes this unit fold its value
+/// into a fraction. `DurFractional` is the internal style GetDurationUnitOptions
+/// folds a numeric sub-second unit into; both spell "numeric" publicly.
+fn folds_into_fraction(style: DurationUnitStyle) -> Bool {
+  case style {
+    DurNumeric | DurFractional -> True
+    DurLong | DurShort | DurNarrow | DurTwoDigit -> False
+  }
 }
 
-/// A DurationFormat per-unit non-numeric style ("long"/"short"/"narrow") as
-/// the NumberFormat unitDisplay it renders with.
-fn unit_display_from_duration_style(style: String) -> value.UnitDisplay {
+/// A DurationFormat per-unit non-numeric style (long/short/narrow) as the
+/// NumberFormat unitDisplay it renders with.
+fn unit_display_from_duration_style(
+  style: DurationUnitStyle,
+) -> value.UnitDisplay {
   case style {
-    "long" -> UnitLong
-    "narrow" -> UnitNarrow
-    _ -> UnitShort
+    DurLong -> UnitLong
+    DurNarrow -> UnitNarrow
+    DurShort | DurNumeric | DurTwoDigit | DurFractional -> UnitShort
   }
 }
 
 /// durationToFractional: exact decimal string for combined sub-second units.
 fn duration_fractional_value(
-  fields: List(#(String, Float)),
-  unit: String,
+  fields: DurationRecord,
+  unit: DurationUnit,
 ) -> #(DurationValue, Bool) {
-  let get = fn(name) {
-    list.key_find(fields, name)
-    |> result.unwrap(0.0)
-    |> float.truncate
-  }
+  let get = fn(u) { duration_field(fields, u) |> float.truncate }
   let #(exponent, components) = case unit {
-    "seconds" -> #(9, [
-      #(get("seconds"), 1_000_000_000),
-      #(get("milliseconds"), 1_000_000),
-      #(get("microseconds"), 1000),
-      #(get("nanoseconds"), 1),
+    DuSeconds -> #(9, [
+      #(get(DuSeconds), 1_000_000_000),
+      #(get(DuMilliseconds), 1_000_000),
+      #(get(DuMicroseconds), 1000),
+      #(get(DuNanoseconds), 1),
     ])
-    "milliseconds" -> #(6, [
-      #(get("milliseconds"), 1_000_000),
-      #(get("microseconds"), 1000),
-      #(get("nanoseconds"), 1),
+    DuMilliseconds -> #(6, [
+      #(get(DuMilliseconds), 1_000_000),
+      #(get(DuMicroseconds), 1000),
+      #(get(DuNanoseconds), 1),
     ])
-    _ -> #(3, [#(get("microseconds"), 1000), #(get("nanoseconds"), 1)])
+    _other -> #(3, [#(get(DuMicroseconds), 1000), #(get(DuNanoseconds), 1)])
   }
   let total = list.fold(components, 0, fn(acc, c) { acc + c.0 * c.1 })
   let e = pow10_i(exponent)
@@ -6591,11 +6982,7 @@ fn segmenter_segment(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let name = "Intl.Segmenter.prototype.segment"
   run({
-    use #(_ref, data) <- result.try(branded(state, this, IntlSegmenter, name))
-    use sg <- result.try(case data {
-      SegmenterData(sg) -> Ok(sg)
-      _ -> throw_type(state, name <> " called on incompatible receiver")
-    })
+    use #(_ref, sg) <- result.try(branded_segmenter(state, this, name))
     use #(s, state) <- result.try(coerce.js_to_string(
       state,
       first_arg_or_undefined(args),
@@ -6603,11 +6990,7 @@ fn segmenter_segment(
     let seg =
       SegmentsData(SegmentsState(string: s, granularity: sg.granularity))
     let #(heap, ref) =
-      common.alloc_wrapper(
-        state.heap,
-        IntlObject(service: IntlSegments, data: seg),
-        segments_proto,
-      )
+      common.alloc_wrapper(state.heap, IntlObject(data: seg), segments_proto)
     Ok(#(JsObject(ref), State(..state, heap:)))
   })
 }
@@ -6619,11 +7002,7 @@ fn segments_iterator(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let name = "%Segments.prototype%[Symbol.iterator]"
   run({
-    use #(_ref, data) <- result.try(branded(state, this, IntlSegments, name))
-    use sg <- result.try(case data {
-      SegmentsData(sg) -> Ok(sg)
-      _ -> throw_type(state, name <> " called on incompatible receiver")
-    })
+    use #(_ref, sg) <- result.try(branded_segments(state, this, name))
     let iter =
       SegmentIteratorData(SegmentIteratorState(
         string: sg.string,
@@ -6631,11 +7010,7 @@ fn segments_iterator(
         position: 0,
       ))
     let #(heap, ref) =
-      common.alloc_wrapper(
-        state.heap,
-        IntlObject(service: IntlSegmentIterator, data: iter),
-        iter_proto,
-      )
+      common.alloc_wrapper(state.heap, IntlObject(data: iter), iter_proto)
     Ok(#(JsObject(ref), State(..state, heap:)))
   })
 }
@@ -6864,10 +7239,7 @@ fn locale_method(
         let #(heap, ref) =
           common.alloc_wrapper(
             state.heap,
-            IntlObject(
-              service: IntlLocale,
-              data: LocaleData(LocaleState(locale: new_tag)),
-            ),
+            IntlObject(data: LocaleData(LocaleState(locale: new_tag))),
             proto,
           )
         Ok(#(JsObject(ref), State(..state, heap:)))
