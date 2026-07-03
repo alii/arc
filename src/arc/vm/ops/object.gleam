@@ -370,6 +370,35 @@ pub fn string_char_at(s: String, idx: Int) -> Option(String)
 @external(erlang, "arc_string_ffi", "string_codepoint_length")
 pub fn string_length(s: String) -> Int
 
+/// Codepoint-based substring: `len` codepoints starting at codepoint `start`.
+///
+/// The counterpart of `gleam/string.slice` for JS strings. A grapheme cluster
+/// is never a JS string unit, so `string.slice` must not appear on any path
+/// that measures a JS string value; use this instead. Plain UTF-8 byte walk
+/// returning a sub-binary — no per-character allocation, unlike
+/// `string.slice`'s grapheme clustering (~20x slower). Same UTF-16 deviation
+/// as `string_char_at`.
+@external(erlang, "arc_string_ffi", "string_cp_slice")
+pub fn string_slice(s: String, start: Int, len: Int) -> String
+
+/// Drop the first `n` codepoints (clamps; n <= 0 returns `s` unchanged).
+/// The counterpart of `gleam/string.drop_start` for JS strings — sub-binary
+/// result, alloc-free walk, and it never merges a combining mark into the
+/// character before it.
+@external(erlang, "arc_string_ffi", "string_cp_drop")
+pub fn string_drop_start(s: String, n: Int) -> String
+
+/// Split into single-codepoint strings, one per index of the JS string.
+///
+/// The counterpart of `gleam/string.to_graphemes` for JS strings, and the
+/// only correct one: `to_graphemes` folds a combining mark into the character
+/// before it, so it yields FEWER entries than `string_length` reports and
+/// disagrees with `string_char_at` on every index after the mark. This walks
+/// the same codepoints `string_length` counts, so
+/// `list.length(string_explode(s)) == string_length(s)` always holds.
+@external(erlang, "arc_string_ffi", "string_cp_explode")
+pub fn string_explode(s: String) -> List(String)
+
 /// **[[GetOwnProperty]](P)** — dispatches to the appropriate spec algorithm
 /// based on object kind.
 ///
@@ -1021,15 +1050,16 @@ fn set_on_receiver(
                 // → [[DefineOwnProperty]] → false, with no value conversion.
                 True -> Ok(#(state, False))
                 False -> {
-                  let #(h, ok) = set_property(state.heap, recv_ref, key, val)
-                  Ok(#(State(..state, heap: h), ok))
+                  let #(h, outcome) =
+                    set_property(state.heap, recv_ref, key, val)
+                  define_outcome_to_bool(State(..state, heap: h), outcome)
                 }
               }
           }
         // §10.1.9.2 steps 2.c-2.h: ordinary object — define/update own property.
         _ -> {
-          let #(h, ok) = set_property(state.heap, recv_ref, key, val)
-          Ok(#(State(..state, heap: h), ok))
+          let #(h, outcome) = set_property(state.heap, recv_ref, key, val)
+          define_outcome_to_bool(State(..state, heap: h), outcome)
         }
       }
     // §10.1.9.2 step 2.b: Receiver is not an Object, return false.
@@ -1241,8 +1271,8 @@ fn set_on_receiver_with_slot(
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case receiver {
     JsObject(recv_ref) if recv_ref == ref -> {
-      let #(h, ok) = set_property_on_slot(state.heap, ref, slot, key, val)
-      Ok(#(State(..state, heap: h), ok))
+      let #(h, outcome) = set_property_on_slot(state.heap, ref, slot, key, val)
+      define_outcome_to_bool(State(..state, heap: h), outcome)
     }
     _ -> set_on_receiver(state, receiver, key, val)
   }
@@ -1252,9 +1282,9 @@ fn set_on_receiver_with_slot(
 ///
 /// Own-property-level write. Does NOT walk the proto chain — use set_value for
 /// the full [[Set]] algorithm. Respects writable flag and extensible flag.
-/// Returns `#(heap, success)`.
+/// Returns `#(heap, DefineOutcome)` — see `DefineOutcome` for the three answers.
 ///
-/// `success = False` when:
+/// `Rejected` when:
 ///   - Existing property is non-writable (OrdinaryDefineOwnProperty step 3/4)
 ///   - New property on non-extensible object (step 2)
 ///   - StringObject in-range index key: §10.4.3.2 step 2b returns
@@ -1263,9 +1293,11 @@ fn set_on_receiver_with_slot(
 ///     because StringCreate (§10.4.3.4) made it non-writable/non-configurable.
 ///   - ref is invalid / not an ObjectSlot
 ///
-/// Callers decide what to do with `False`: sloppy mode ignores it, strict mode
-/// throws TypeError, and Array.prototype mutators always throw (they use
+/// Callers decide what to do with `Rejected`: sloppy mode ignores it, strict
+/// mode throws TypeError, and Array.prototype mutators always throw (they use
 /// `Set(O, P, V, true)` per spec — the `true` flag means throw-on-failure).
+/// `ThrewRangeError`, in contrast, is an abrupt completion every caller must
+/// re-raise, sloppy mode included.
 ///
 /// For ArrayObject (§10.4.2.1):
 ///   - step 1: If P is "length", perform ArraySetLength(A, Desc) (§10.4.2.4)
@@ -1282,10 +1314,49 @@ pub fn set_property(
   ref: Ref,
   key: PropertyKey,
   val: JsValue,
-) -> #(Heap(host), Bool) {
+) -> #(Heap(host), DefineOutcome) {
   case heap.read(h, ref) {
     Some(slot) -> set_property_on_slot(h, ref, slot, key, val)
-    None -> #(h, False)
+    None -> #(h, Rejected)
+  }
+}
+
+/// The three answers a [[DefineOwnProperty]] can give.
+///
+/// The spec's internal method returns a Boolean *or* an abrupt completion, and
+/// exactly one define — ArraySetLength (§10.4.2.4 step 5) — takes the abrupt
+/// exit without any user code running: `arr.length = -1` (also `= 3.5`, `= NaN`)
+/// throws a **RangeError**. A `Bool` result cannot say that, so a rejection and
+/// a throw used to collapse into the same `False`, and sloppy-mode assignment
+/// swallowed the RangeError.
+///
+/// `ThrewRangeError` carries only the message: `set_property` is heap-only, and
+/// allocating the error object needs a `State`. Callers hold one, and every one
+/// of them must re-raise it — a RangeError from ArraySetLength is a genuine
+/// abrupt completion, NOT a "return false" that sloppy mode may ignore.
+pub type DefineOutcome {
+  /// [[DefineOwnProperty]] returned true — the property was written.
+  Defined
+  /// [[DefineOwnProperty]] returned false. Sloppy assignment ignores it,
+  /// strict assignment throws a TypeError, `Reflect.defineProperty` reports
+  /// `false`, and Array.prototype mutators (`Set(O, P, V, true)`) throw.
+  Rejected
+  /// ArraySetLength §10.4.2.4 step 5: `newLen != ToNumber(Desc.[[Value]])`.
+  /// Always re-thrown, in every mode.
+  ThrewRangeError(message: String)
+}
+
+/// Collapse a `DefineOutcome` for a caller that only distinguishes success from
+/// failure, throwing the RangeError through the ops-level `Result` channel.
+/// The `state` heap must already be the one `set_property` returned.
+fn define_outcome_to_bool(
+  state: State(host),
+  outcome: DefineOutcome,
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
+  case outcome {
+    Defined -> Ok(#(state, True))
+    Rejected -> Ok(#(state, False))
+    ThrewRangeError(msg) -> Error(state.range_error_value(state, msg))
   }
 }
 
@@ -1298,7 +1369,7 @@ fn set_property_on_slot(
   slot: HeapSlot(host),
   key: PropertyKey,
   val: JsValue,
-) -> #(Heap(host), Bool) {
+) -> #(Heap(host), DefineOutcome) {
   case slot {
     ObjectSlot(kind:, properties:, elements:, extensible:, ..) ->
       case kind {
@@ -1313,7 +1384,7 @@ fn set_property_on_slot(
             // §10.4.2.4 step 12: a non-writable length rejects value writes.
             Named("length") ->
               case length_writable {
-                False -> #(h, False)
+                False -> #(h, Rejected)
                 True -> array_set_length(h, ref, val, slot, length)
               }
             // §10.4.2.1 step 2: If P is an array index (ToUint32 is valid index):
@@ -1347,17 +1418,17 @@ fn set_property_on_slot(
                       ),
                     ),
                   ),
-                  True,
+                  Defined,
                 )
-                Ok(DataProperty(writable: False, ..)) -> #(h, False)
+                Ok(DataProperty(writable: False, ..)) -> #(h, Rejected)
                 // Accessor overrides are routed to the setter by [[Set]]
                 // before [[DefineOwnProperty]] is reached; reject here.
-                Ok(value.AccessorProperty(..)) -> #(h, False)
+                Ok(value.AccessorProperty(..)) -> #(h, Rejected)
                 Error(Nil) ->
                   // §10.4.2.1 step 2.h: If index >= oldLen and the length is
                   // not writable (or A is not extensible), return false.
                   case idx >= length && { !extensible || !length_writable } {
-                    True -> #(h, False)
+                    True -> #(h, Rejected)
                     False -> {
                       // §10.4.2.1 steps 2.i-2.k: define element, then set
                       // length to index+1 when index >= oldLen.
@@ -1373,7 +1444,7 @@ fn set_property_on_slot(
                             elements: new_elements,
                           ),
                         ),
-                        True,
+                        Defined,
                       )
                     }
                   }
@@ -1417,13 +1488,13 @@ fn set_property_on_slot(
                       ),
                     ),
                   ),
-                  True,
+                  Defined,
                 )
-                Ok(DataProperty(writable: False, ..)) -> #(h, False)
-                Ok(value.AccessorProperty(..)) -> #(h, False)
+                Ok(DataProperty(writable: False, ..)) -> #(h, Rejected)
+                Ok(value.AccessorProperty(..)) -> #(h, Rejected)
                 Error(Nil) ->
                   case !extensible && !elements.has(elements, idx) {
-                    True -> #(h, False)
+                    True -> #(h, Rejected)
                     False -> #(
                       heap.write(
                         h,
@@ -1433,7 +1504,7 @@ fn set_property_on_slot(
                           elements: elements.set(elements, idx, val),
                         ),
                       ),
-                      True,
+                      Defined,
                     )
                   }
               }
@@ -1457,31 +1528,39 @@ fn set_property_on_slot(
             // Desc, stringDesc) — false for our value-only Desc against a
             // {W:F, C:F} current descriptor. (Compatible no-op redefines would
             // return true per spec; we conservatively reject.)
-            True -> #(h, False)
+            True -> #(h, Rejected)
             // §10.4.3.2 step 3: Else, OrdinaryDefineOwnProperty(S, P, Desc).
             False -> set_string_property(h, ref, key, val, slot)
           }
         }
         // --- §10.1.6.1 OrdinaryDefineOwnProperty for all other objects ---
+        //
+        // TypedArrays land here too, and only their §10.4.5.3 step 2 arm is
+        // sound at this layer: a NON-canonical name is an ordinary property.
+        // A canonical numeric index (step 1) must run TypedArraySetElement,
+        // whose ToNumber/ToBigInt is observable — it needs a `State` and can
+        // throw, neither of which this heap-only entry point can express. The
+        // real MOP entry points do it: `set_value`'s TypedArray [[Set]] arm,
+        // `set_on_receiver`'s TypedArray receiver arm, and builtins/object's
+        // §10.4.5.3 [[DefineOwnProperty]] all route numeric indices to
+        // `typed_array_elements.typed_array_store` before reaching here.
         _ -> set_string_property(h, ref, key, val, slot)
       }
-    _ -> #(h, False)
+    _ -> #(h, Rejected)
   }
 }
 
 /// §10.4.2.4 ArraySetLength ( A, Desc ) — simplified.
 ///
 /// Step 3: Let newLen be ToUint32(Desc.[[Value]]).
-/// Step 5: If SameValueZero(newLen, ToNumber(Desc.[[Value]])) is false, throw RangeError.
-/// TODO(Deviation): we use coerce_length which rejects non-integer/negative/NaN but
-/// returns False instead of throwing RangeError. Should throw RangeError
-/// per spec step 5 when newLen != ToNumber(Desc.[[Value]]).
+/// Step 5: If SameValueZero(newLen, ToNumber(Desc.[[Value]])) is false, throw
+/// RangeError — `ThrewRangeError`, which every caller re-raises regardless of
+/// strict mode.
 ///
 /// Steps 9-10: Let oldLen be the current "length" property's [[Value]].
 /// Step 11: If newLen >= oldLen, set length and return true.
-/// Step 12: If the old "length" property is non-writable, return false.
-/// TODO(Deviation): we don't track writable on the virtual length property yet.
-/// Object.defineProperty(arr, 'length', {writable: false}) should freeze length.
+/// Step 12: If the old "length" property is non-writable, return false — the
+/// caller checks that (`length_writable`) before calling in.
 ///
 /// Step 18: Delete own elements with index >= newLen, in descending order.
 /// TODO(Deviation): spec stops at first non-configurable element (step 18.b) and
@@ -1494,11 +1573,11 @@ fn array_set_length(
   val: JsValue,
   slot: HeapSlot(host),
   old_length: Int,
-) -> #(Heap(host), Bool) {
+) -> #(Heap(host), DefineOutcome) {
   // §10.4.2.4 steps 3-5: Coerce value to valid uint32 length.
   case coerce_length(h, val) {
-    // Step 5: Would be RangeError; we return False.
-    None -> #(h, False)
+    // Step 5: newLen != numberLen — throw RangeError, in every mode.
+    None -> #(h, ThrewRangeError("Invalid array length"))
     Some(new_length) -> {
       let assert ObjectSlot(properties:, elements:, ..) = slot
       // §10.4.2.4 steps 8-18: If shrinking, delete own indices >= newLen in
@@ -1509,7 +1588,7 @@ fn array_set_length(
       case new_length < old_length {
         False -> #(
           heap.write(h, ref, ObjectSlot(..slot, kind: ArrayObject(new_length))),
-          True,
+          Defined,
         )
         True -> {
           let blocked =
@@ -1532,7 +1611,10 @@ fn array_set_length(
             Some(b) -> b + 1
             option.None -> new_length
           }
-          let new_elements = truncate_elements(elements, final_len, old_length)
+          // §10.4.2.4 step 18: delete own indices >= final_len. Filtering the
+          // storage directly beats iterating [final_len, old_length), which
+          // could be billions of indices for a sparse array.
+          let new_elements = elements.truncate(elements, final_len)
           let new_properties =
             dict.filter(properties, fn(k, _prop) {
               case k {
@@ -1551,7 +1633,12 @@ fn array_set_length(
                 elements: new_elements,
               ),
             ),
-            blocked == option.None,
+            case blocked {
+              // Step 17.b: a non-configurable index stopped the truncation —
+              // length is set to that index + 1 and the define reports false.
+              Some(_) -> Rejected
+              option.None -> Defined
+            },
           )
         }
       }
@@ -1609,22 +1696,11 @@ fn length_to_number(h: Heap(host), val: JsValue) -> Option(value.JsNum) {
   }
 }
 
-/// §10.4.2.4 step 18: Delete elements at indices >= new_len.
-///
-/// Instead of iterating the full [new_len, old_len) range (which could be
-/// billions for sparse arrays), we filter the underlying storage directly.
-fn truncate_elements(
-  elements: JsElements,
-  new_len: Int,
-  _idx: Int,
-) -> JsElements {
-  elements.truncate(elements, new_len)
-}
-
 /// §10.1.6.1 OrdinaryDefineOwnProperty / §10.1.6.3 ValidateAndApplyPropertyDescriptor
 /// (value-update subset).
 ///
-/// Set a string-keyed own property in the properties dict. Returns #(Heap, success).
+/// Set a string-keyed own property in the properties dict. Never throws — an
+/// ordinary define only ever answers `Defined` or `Rejected`.
 ///
 /// Step 2.a (ValidateAndApply): If current is undefined and extensible is false, return false.
 /// Steps 2.b-2.e: If current is undefined and extensible is true, create the property.
@@ -1642,7 +1718,7 @@ fn set_string_property(
   key: PropertyKey,
   val: JsValue,
   slot: HeapSlot(host),
-) -> #(Heap(host), Bool) {
+) -> #(Heap(host), DefineOutcome) {
   case slot {
     ObjectSlot(properties:, extensible:, ..) ->
       // §10.1.6.1 step 1: Let current be ? O.[[GetOwnProperty]](P).
@@ -1663,18 +1739,21 @@ fn set_string_property(
                 seq:,
               ),
             )
-          #(heap.write(h, ref, ObjectSlot(..slot, properties: new_props)), True)
+          #(
+            heap.write(h, ref, ObjectSlot(..slot, properties: new_props)),
+            Defined,
+          )
         }
         // §10.1.6.3 step 5.e: current.[[Writable]] is false → reject.
-        Ok(DataProperty(writable: False, ..)) -> #(h, False)
+        Ok(DataProperty(writable: False, ..)) -> #(h, Rejected)
         // Accessor property: [[DefineOwnProperty]] with just a value on an
         // accessor would convert it to data, but we don't support that yet.
-        Ok(value.AccessorProperty(..)) -> #(h, False)
+        Ok(value.AccessorProperty(..)) -> #(h, Rejected)
         // §10.1.6.3 step 2: current is undefined — property doesn't exist.
         Error(Nil) ->
           case extensible {
             // §10.1.6.3 step 2.a: If extensible is false, return false.
-            False -> #(h, False)
+            False -> #(h, Rejected)
             // §10.1.6.3 steps 2.b-2.e: extensible is true — create new data
             // property with {[[Value]]: V, [[Writable]]: true,
             // [[Enumerable]]: true, [[Configurable]]: true}.
@@ -1683,12 +1762,12 @@ fn set_string_property(
                 dict.insert(properties, key, value.data_property(val))
               #(
                 heap.write(h, ref, ObjectSlot(..slot, properties: new_props)),
-                True,
+                Defined,
               )
             }
           }
       }
-    _ -> #(h, False)
+    _ -> #(h, Rejected)
   }
 }
 
@@ -1955,6 +2034,33 @@ pub fn has_symbol_property(heap: Heap(host), ref: Ref, sym: SymbolId) -> Bool {
   }
 }
 
+/// The answer of a **pure** internal-method read: one that runs no user code,
+/// cannot throw, and therefore only has a defined answer while every object it
+/// touches is ordinary.
+///
+/// `NeedsTraps(ref)` says a Proxy was reached at `ref`, whose internal methods
+/// ARE traps — JS functions that observe the read, can mutate the heap, and can
+/// throw. There is no honest `Bool`/`Option` for that case, and this type
+/// refuses to invent one: a proxy's internal property table is always empty, so
+/// answering from it silently reports "absent" for every key. Callers must say
+/// what they do — delegate to the `*_stateful` twin, or spell out (via
+/// `or_when_proxy`) why a conservative answer is safe there.
+pub type PureLookup(a) {
+  Answered(a)
+  NeedsTraps(Ref)
+}
+
+/// Collapse a `PureLookup` by naming, at the call site, the answer a Proxy
+/// gets. Legitimate ONLY when the fallback is conservative — "not the
+/// intrinsic, so take the slow path", "a proxy carries no private elements" —
+/// never as a shortcut for "proxies probably don't reach here".
+pub fn or_when_proxy(lookup: PureLookup(a), when_proxy: a) -> a {
+  case lookup {
+    Answered(a) -> a
+    NeedsTraps(_) -> when_proxy
+  }
+}
+
 /// §10.1.7 [[HasProperty]] ( P ) / §10.1.7.1 OrdinaryHasProperty ( O, P )
 ///
 /// Step 1: Let hasOwn be ? O.[[GetOwnProperty]](P).
@@ -1963,43 +2069,52 @@ pub fn has_symbol_property(heap: Heap(host), ref: Ref, sym: SymbolId) -> Bool {
 /// Step 4: If parent is not null, return ? parent.[[HasProperty]](P).
 /// Step 5: Return false.
 ///
-/// Used by the `in` operator. Checks own properties (including elements
-/// for array-like objects via get_own_property), then walks prototype chain.
+/// Checks own properties (including elements for array-like objects via
+/// get_own_property), then walks the prototype chain.
 ///
-/// Pure (no Result) — our GetOwnProperty and GetPrototypeOf cannot throw
-/// (no Proxy traps), so steps 1/3 never produce abrupt completions.
-pub fn has_property(heap: Heap(host), ref: Ref, key: PropertyKey) -> Bool {
+/// The `in` operator and Reflect.has use `has_property_stateful` instead: a
+/// Proxy anywhere on the chain makes step 1 or step 4 the `has` trap, which
+/// this pure walk cannot run — so it stops there and reports `NeedsTraps`
+/// rather than reading the proxy's (always empty) internal property table and
+/// answering "absent" for everything.
+pub fn has_property(
+  heap: Heap(host),
+  ref: Ref,
+  key: PropertyKey,
+) -> PureLookup(Bool) {
   // Private-name keys ("#x") are invisible to ordinary [[HasProperty]] —
   // spec privates live in [[PrivateElements]], not the property table. The
   // brand check for `#x in obj` uses find_property (PrivateIn opcode), not
   // this function.
-  use <- bool.guard(value.is_private_name(key), False)
+  use <- bool.guard(value.is_private_name(key), Answered(False))
   case heap.read(heap, ref) {
+    // §10.5.7 Proxy [[HasProperty]] IS the `has` trap — not purely answerable.
+    Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> NeedsTraps(ref)
     // §10.4.6.6 Module Namespace [[HasProperty]]: true iff the key is an
     // exported name. Null prototype → no inheritance.
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
-      dict.has_key(exports, key.key_to_string(key))
+      Answered(dict.has_key(exports, key.key_to_string(key)))
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined, return true.
       case own_property_of_slot(heap, kind, properties, elements, key) {
-        Some(_) -> True
+        Some(_) -> Answered(True)
         // §10.4.5.2 TypedArray [[HasProperty]]: a canonical numeric index key
         // answers IsValidIntegerIndex directly — own_property_of_slot already
         // said the index is invalid, so the answer is false WITHOUT consulting
         // the prototype chain (TypedArray.prototype["1.5"] is unreachable).
         None ->
           case typed_array_numeric_key(kind, key) {
-            True -> False
+            True -> Answered(False)
             False ->
               // Step 3-4: Let parent be O.[[GetPrototypeOf]](). If not null, recurse.
               case prototype {
                 Some(proto_ref) -> has_property(heap, proto_ref, key)
                 // Step 5: Return false (null prototype).
-                None -> False
+                None -> Answered(False)
               }
           }
       }
-    _ -> False
+    _ -> Answered(False)
   }
 }
 
@@ -2043,18 +2158,27 @@ fn typed_array_numeric_key(
 /// (§7.3.31 PrivateGet / §7.3.32 PrivateSet throw on absence) — use this once
 /// instead of has_property + get_value/set_value, which would repeat the
 /// identical chain walk.
+///
+/// A Proxy on the chain stops the walk with `NeedsTraps`: its descriptors live
+/// behind the `getOwnPropertyDescriptor` trap, so no descriptor can be produced
+/// without running user code.
 pub fn find_property(
   heap: Heap(host),
   ref: Ref,
   key: PropertyKey,
-) -> Option(Property) {
+) -> PureLookup(Option(Property)) {
   case heap.read(heap, ref) {
+    Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> NeedsTraps(ref)
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       case own_property_of_slot(heap, kind, properties, elements, key) {
-        Some(prop) -> Some(prop)
-        None -> option.then(prototype, find_property(heap, _, key))
+        Some(prop) -> Answered(Some(prop))
+        None ->
+          case prototype {
+            Some(proto_ref) -> find_property(heap, proto_ref, key)
+            None -> Answered(None)
+          }
       }
-    _ -> None
+    _ -> Answered(None)
   }
 }
 
@@ -2475,10 +2599,129 @@ fn enumerate_keys_loop(
 // ============================================================================
 // Symbol-keyed property access
 
-/// §10.1.13 GetPrototypeFromConstructor via a real [[Get]] of
-/// newTarget.prototype — accessor `prototype` properties must be invoked
-/// (test262 prototype-from-newtarget-abrupt.js). Non-object results fall
-/// back to the intrinsic prototype.
+/// §7.3.22 SpeciesConstructor ( O, defaultConstructor )
+///
+///   1. Let C be ? Get(O, "constructor").
+///   2. If C is undefined, return defaultConstructor.
+///   3. If C is not an Object, throw a TypeError exception.
+///   4. Let S be ? Get(C, @@species).
+///   5. If S is either undefined or null, return defaultConstructor.
+///   6. If IsConstructor(S) is true, return S.
+///   7. Throw a TypeError exception.
+///
+/// The single implementation for the whole engine (ArrayBuffer.prototype.slice,
+/// RegExp.prototype[@@split] / [@@matchAll], Promise.prototype.then, ...): one
+/// pair of throw messages, one set of getter/proxy-trap-aware [[Get]]s.
+///
+/// Returns a bare `Ref`, not a `JsValue`: steps 6-7 have already proved the
+/// result is a constructor object, so no caller can forget to re-check.
+///
+/// NOTE: ArraySpeciesCreate (§23.1.3.4) and TypedArraySpeciesCreate (§23.2.4.1)
+/// are *different* abstract ops (extra IsArray / cross-realm / default-detection
+/// steps) — they are not thin wrappers around this one.
+pub fn species_constructor(
+  state: State(host),
+  o: JsValue,
+  default_ctor: Ref,
+) -> Result(#(Ref, State(host)), #(JsValue, State(host))) {
+  // Step 1: C = ? Get(O, "constructor").
+  use #(c, state) <- result.try(get_value_of(state, o, Named("constructor")))
+  case c {
+    // Step 2: absent constructor → the intrinsic default.
+    value.JsUndefined -> Ok(#(default_ctor, state))
+    JsObject(_) -> {
+      // Step 4: S = ? Get(C, @@species).
+      use #(s, state) <- result.try(get_symbol_value_of(
+        state,
+        c,
+        value.symbol_species,
+      ))
+      case s {
+        // Step 5: undefined/null species → the intrinsic default.
+        value.JsUndefined | value.JsNull -> Ok(#(default_ctor, state))
+        // Steps 6-7: anything else must be a constructor.
+        _ ->
+          case s, is_constructor(state.heap, s) {
+            JsObject(s_ref), True -> Ok(#(s_ref, state))
+            _, _ ->
+              Error(state.type_error_value(
+                state,
+                "species constructor is not a constructor",
+              ))
+          }
+      }
+    }
+    // Step 3: a present but non-object "constructor" is a TypeError.
+    _ ->
+      Error(state.type_error_value(
+        state,
+        "constructor property is not an object",
+      ))
+  }
+}
+
+/// §10.1.13.2 GetPrototypeFromConstructor ( constructor, intrinsicDefaultProto )
+///
+///   1. Let proto be ? Get(constructor, "prototype").
+///   2. If proto is not an Object, set proto to intrinsicDefaultProto.
+///   3. Return proto.
+///
+/// The single implementation for the whole engine: `new Foo()`, `super()`,
+/// `Reflect.construct`, the primitive-wrapper natives, and every native
+/// constructor's NewTarget preamble route through here. Step 1 is a real
+/// [[Get]], so a proxy newTarget's `get` trap and an accessor `prototype`
+/// property both fire and may throw (test262
+/// prototype-from-newtarget-abrupt.js) — hence the throw-propagating `Result`
+/// rather than a total function. `own_data_prototype` short-circuits the
+/// overwhelmingly common ordinary case with an observationally identical read.
+pub fn get_prototype_from_constructor(
+  state: State(host),
+  new_target_ref: Ref,
+  intrinsic_default: Ref,
+) -> Result(#(Ref, State(host)), #(JsValue, State(host))) {
+  case own_data_prototype(state.heap, new_target_ref) {
+    Some(proto_ref) -> Ok(#(proto_ref, state))
+    None -> {
+      use #(proto_val, state) <- result.map(get_value(
+        state,
+        new_target_ref,
+        Named("prototype"),
+        JsObject(new_target_ref),
+      ))
+      case proto_val {
+        JsObject(proto_ref) -> #(proto_ref, state)
+        _ -> #(intrinsic_default, state)
+      }
+    }
+  }
+}
+
+/// The own, non-proxy, data-property `prototype` of `ref`, when it holds an
+/// object. Two callers, one meaning — "newTarget itself declares a plain
+/// `prototype` object":
+///
+///   - `get_prototype_from_constructor` uses it as a fast path: for such an
+///     object [[Get]] returns exactly this value with no trap, no getter call
+///     and no prototype walk, so short-circuiting is unobservable.
+///   - `exec/call.do_construct` uses it to decide whether to re-prototype a
+///     native constructor's result for a subclassing newTarget: an accessor or
+///     absent `prototype` means the native's own choice stands.
+pub fn own_data_prototype(h: Heap(host), ref: Ref) -> Option(Ref) {
+  case heap.read(h, ref) {
+    // A proxy's `prototype` is whatever its `get` trap says — never a slot read.
+    Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> None
+    Some(ObjectSlot(properties:, ..)) ->
+      case dict.get(properties, Named("prototype")) {
+        Ok(DataProperty(value: JsObject(proto_ref), ..)) -> Some(proto_ref)
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// §10.1.13.2 GetPrototypeFromConstructor for a NewTarget that may be
+/// `undefined` (a plain [[Call]] of a native constructor), in the CPS shape
+/// builtins are written in.
 pub fn proto_from_new_target(
   state: State(host),
   new_target: JsValue,
@@ -2487,16 +2730,12 @@ pub fn proto_from_new_target(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case new_target {
     JsObject(nt_ref) -> {
-      use proto_val, state <- state.try_op(get_value(
+      use proto_ref, state <- state.try_op(get_prototype_from_constructor(
         state,
         nt_ref,
-        Named("prototype"),
-        new_target,
+        intrinsic_proto,
       ))
-      case proto_val {
-        JsObject(proto_ref) -> cont(proto_ref, state)
-        _ -> cont(intrinsic_proto, state)
-      }
+      cont(proto_ref, state)
     }
     _ -> cont(intrinsic_proto, state)
   }
@@ -3067,14 +3306,17 @@ fn inspect_object(
           "/" <> source <> "/" <> flags
         }
         value.DataViewObject(..) -> "DataView {}"
-        value.ArrayBufferObject(data: value.BufBytes(..) as data, ..) ->
+        value.ArrayBufferObject(data: Some(value.BufBytes(..) as data), ..) ->
           "ArrayBuffer { byteLength: "
           <> int.to_string(value.buffer_byte_size(data))
           <> " }"
-        value.ArrayBufferObject(data: value.BufShared(..) as data, ..) ->
+        value.ArrayBufferObject(data: Some(value.BufShared(..) as data), ..) ->
           "SharedArrayBuffer { byteLength: "
           <> int.to_string(value.buffer_byte_size(data))
           <> " }"
+        // Detached: [[ArrayBufferData]] is null, so byteLength is +0.
+        value.ArrayBufferObject(data: None, ..) ->
+          "ArrayBuffer { byteLength: 0 }"
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) ->
           value.typed_array_name(elem_kind)
           <> "("
@@ -3103,8 +3345,8 @@ fn inspect_object(
           <> string.join(list.sort(dict.keys(exports), string.compare), ", ")
           <> " }]"
         value.IteratorRecordObject(..) -> "[Iterator]"
-        value.IntlObject(service:, ..) ->
-          case service {
+        value.IntlObject(data:) ->
+          case value.intl_service(data) {
             value.IntlLocale -> "[Intl.Locale]"
             value.IntlCollator -> "[Intl.Collator]"
             value.IntlNumberFormat -> "[Intl.NumberFormat]"
@@ -3429,10 +3671,30 @@ pub fn value_is_callable(h: Heap(host), val: JsValue) -> Bool {
   }
 }
 
+/// **`? IsArray ( argument )`** — ES2024 §7.2.2, with step 3.a's abrupt
+/// completion already applied. This is the ONLY entry point: `IsArray` on a
+/// revoked proxy throws, and every spec algorithm that says `? IsArray(x)`
+/// must propagate that throw. Owning the message here means the seven call
+/// sites can no longer disagree about it (or forget it).
+pub fn try_is_array(
+  state: State(host),
+  val: JsValue,
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
+  case is_array(state.heap, val) {
+    Ok(b) -> Ok(#(b, state))
+    // Step 3.a: If proxy.[[ProxyHandler]] is null, throw a TypeError.
+    Error(Nil) ->
+      Error(proxy_error(
+        state,
+        "Cannot perform 'IsArray' on a proxy that has been revoked",
+      ))
+  }
+}
+
 /// §7.2.2 IsArray ( argument ). Pierces proxies to their target (step 3);
-/// Error(Nil) signals a revoked proxy was encountered — the caller must
-/// throw a TypeError.
-pub fn is_array(h: Heap(host), val: JsValue) -> Result(Bool, Nil) {
+/// Error(Nil) signals a revoked proxy was encountered. Private on purpose —
+/// callers go through `try_is_array`, which owns the TypeError.
+fn is_array(h: Heap(host), val: JsValue) -> Result(Bool, Nil) {
   case val {
     // Steps 2-4 for objects.
     JsObject(ref) -> is_array_ref(h, ref)
@@ -3443,7 +3705,7 @@ pub fn is_array(h: Heap(host), val: JsValue) -> Result(Bool, Nil) {
 
 /// IsArray (§7.2.2) on an object ref — step 2 (Array exotic object) and
 /// step 3 (Proxy: validate non-revoked, then recurse on [[ProxyTarget]]).
-pub fn is_array_ref(h: Heap(host), ref: Ref) -> Result(Bool, Nil) {
+fn is_array_ref(h: Heap(host), ref: Ref) -> Result(Bool, Nil) {
   case heap.read(h, ref) {
     // Step 2: If argument is an Array exotic object, return true.
     Some(ObjectSlot(kind: ArrayObject(_), ..)) -> Ok(True)
@@ -4097,10 +4359,8 @@ pub fn prevent_extensions_stateful(
 /// shared cells; for plain buffers it is the backing binary itself.
 pub fn typed_array_buffer_data(h: Heap(host), buffer: Ref) -> Option(BitArray) {
   case heap.read(h, buffer) {
-    Some(ObjectSlot(
-      kind: value.ArrayBufferObject(data:, detached: False, ..),
-      ..,
-    )) -> Some(value.buffer_bits(data))
+    Some(ObjectSlot(kind: value.ArrayBufferObject(data: Some(data), ..), ..)) ->
+      Some(value.buffer_bits(data))
     _ -> None
   }
 }
@@ -4220,19 +4480,26 @@ fn decode_typed_element(
   elem_kind: value.TypedArrayKind,
 ) -> JsValue {
   case elem_kind {
-    value.Int8Kind -> value.from_int(ta_get_int(data, off, 8, True))
-    value.Uint8Kind | value.Uint8ClampedKind ->
-      value.from_int(ta_get_int(data, off, 8, False))
-    value.Int16Kind -> value.from_int(ta_get_int(data, off, 16, True))
-    value.Uint16Kind -> value.from_int(ta_get_int(data, off, 16, False))
-    value.Int32Kind -> value.from_int(ta_get_int(data, off, 32, True))
-    value.Uint32Kind -> value.from_int(ta_get_int(data, off, 32, False))
-    value.Float32Kind -> JsNumber(ta_get_float(data, off, 32))
-    value.Float64Kind -> JsNumber(ta_get_float(data, off, 64))
-    value.BigInt64Kind ->
-      value.JsBigInt(value.BigInt(ta_get_int(data, off, 64, True)))
-    value.BigUint64Kind ->
-      value.JsBigInt(value.BigInt(ta_get_int(data, off, 64, False)))
+    value.NumKind(value.Int8Kind) ->
+      value.from_int(ta_get_int(data, off, typed_array_ffi.I8))
+    value.NumKind(value.Uint8Kind) | value.NumKind(value.Uint8ClampedKind) ->
+      value.from_int(ta_get_int(data, off, typed_array_ffi.U8))
+    value.NumKind(value.Int16Kind) ->
+      value.from_int(ta_get_int(data, off, typed_array_ffi.I16))
+    value.NumKind(value.Uint16Kind) ->
+      value.from_int(ta_get_int(data, off, typed_array_ffi.U16))
+    value.NumKind(value.Int32Kind) ->
+      value.from_int(ta_get_int(data, off, typed_array_ffi.I32))
+    value.NumKind(value.Uint32Kind) ->
+      value.from_int(ta_get_int(data, off, typed_array_ffi.U32))
+    value.NumKind(value.Float32Kind) ->
+      JsNumber(ta_get_float(data, off, typed_array_ffi.F32))
+    value.NumKind(value.Float64Kind) ->
+      JsNumber(ta_get_float(data, off, typed_array_ffi.F64))
+    value.BigKind(value.BigInt64Kind) ->
+      value.JsBigInt(value.BigInt(ta_get_int(data, off, typed_array_ffi.I64)))
+    value.BigKind(value.BigUint64Kind) ->
+      value.JsBigInt(value.BigInt(ta_get_int(data, off, typed_array_ffi.U64)))
   }
 }
 

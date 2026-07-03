@@ -304,14 +304,8 @@ fn is_array(
     [a, ..] -> a
     [] -> JsUndefined
   }
-  case object.is_array(state.heap, arg) {
-    Ok(b) -> #(state, Ok(JsBool(b)))
-    Error(Nil) ->
-      state.type_error(
-        state,
-        "Cannot perform 'IsArray' on a proxy that has been revoked",
-      )
-  }
+  use b, state <- state.try_op(object.try_is_array(state, arg))
+  #(state, Ok(JsBool(b)))
 }
 
 /// Allocate an array object (combines ArrayCreate + element population).
@@ -805,35 +799,19 @@ fn get_index_if_present(
             // of the slot get_own_index already read, so the hole path costs
             // one heap read, not two.
             object.OwnIndexAbsent(prototype: Some(proto)) ->
-              case object.has_property(state.heap, proto, Index(idx)) {
-                False -> Ok(#(None, state))
-                True -> {
-                  use #(val, state) <- result.map(object.get_value(
-                    state,
-                    proto,
-                    Index(idx),
-                    this,
-                  ))
-                  #(Some(val), state)
-                }
-              }
+              inherited_index(state, proto, Index(idx), this)
             object.OwnIndexAbsent(prototype: None) -> Ok(#(None, state))
             // Proxy: HasProperty/Get MUST run the "has"/"get" traps
             // (observable — they record calls, can throw, and the own-index
             // probe can't see through the proxy at all).
-            object.OwnIndexProxy -> proxy_index(state, ref, Index(idx), this)
+            object.OwnIndexProxy ->
+              inherited_index(state, ref, Index(idx), this)
           }
         // Index beyond the array-index cap (>= 2^32-1) or negative
         // canonicalizes to a Named string key — get_own_index only consults
         // Index keys, so take the generic HasProperty + Get path (own
         // properties included). Proxies still run their traps.
-        False -> {
-          let key = Named(int.to_string(idx))
-          case object.as_proxy(state.heap, ref) {
-            Some(_) -> proxy_index(state, ref, key, this)
-            None -> inherited_index(state, ref, key, this)
-          }
-        }
+        False -> inherited_index(state, ref, Named(int.to_string(idx)), this)
       }
     // String primitive: in-range index is an own data property per §10.4.3.5;
     // out-of-range falls through to String.prototype (§7.3.11 walks the
@@ -879,43 +857,30 @@ fn get_index_if_present(
   }
 }
 
-/// HasProperty + Get on a Proxy ref: runs the "has" trap (§10.5.7), and on
-/// True the "get" trap (§10.5.8) with `this` as receiver. Both traps are
-/// observable user code and can throw.
-fn proxy_index(
+/// HasProperty + Get against a start object with an explicit receiver. Used
+/// for a primitive's wrapper prototype chain (the primitive as receiver, so
+/// getters see the right `this`), for Named-canonicalized huge indices on the
+/// object itself, and for the hole path when the array's [[Prototype]] chain
+/// carries an inherited index.
+///
+/// Both steps go through the trap-aware internal methods: `start` — or
+/// anything on its prototype chain — may be a proxy, in which case
+/// [[HasProperty]]/[[Get]] are the `has`/`get` traps and run user code.
+fn inherited_index(
   state: State(host),
-  ref: Ref,
+  start: Ref,
   key: key.PropertyKey,
   this: JsValue,
 ) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
   use #(has, state) <- result.try(object.has_property_stateful(
     state,
-    ref,
+    start,
     object.PkString(key),
   ))
   case has {
     False -> Ok(#(None, state))
     True -> {
-      use #(val, state) <- result.map(object.get_value(state, ref, key, this))
-      #(Some(val), state)
-    }
-  }
-}
-
-/// HasProperty + Get against a start object with an explicit receiver. Used
-/// for a primitive's wrapper prototype chain (the primitive as receiver, so
-/// getters see the right `this`) and for Named-canonicalized huge indices on
-/// the object itself.
-fn inherited_index(
-  state: State(host),
-  proto: Ref,
-  key: key.PropertyKey,
-  this: JsValue,
-) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
-  case object.has_property(state.heap, proto, key) {
-    False -> Ok(#(None, state))
-    True -> {
-      use #(val, state) <- result.map(object.get_value(state, proto, key, this))
+      use #(val, state) <- result.map(object.get_value(state, start, key, this))
       #(Some(val), state)
     }
   }
@@ -1231,11 +1196,15 @@ fn elements_in_range_loop(els: JsElements, idx: Int, end: Int) -> Bool {
 /// user code that can mutate the array), so snapshot loops must fall back to
 /// the generic per-element path from that index. has_property is pure (no
 /// user code), so a False answer keeps the snapshot valid.
+///
+/// A proxy on the chain answers True: its `has`/`get` traps are user code, so
+/// the snapshot must be abandoned exactly as it is for an inherited getter.
 fn hole_is_inherited(state: State(host), proto: Option(Ref), idx: Int) -> Bool {
   case proto {
     None -> False
     Some(proto_ref) ->
       object.has_property(state.heap, proto_ref, index_key(idx))
+      |> object.or_when_proxy(True)
   }
 }
 
@@ -2339,20 +2308,16 @@ fn array_species_create(
   length: Int,
 ) -> Result(#(Option(Ref), State(host)), #(JsValue, State(host))) {
   case original {
-    JsObject(_) ->
+    JsObject(_) -> {
       // Step 1: isArray = ? IsArray(originalArray) — pierces proxies
       // (IsArray of a proxy is IsArray of its target, §7.2.2), so an
       // array-backed proxy DOES take the constructor/@@species path
       // (test262: slice/map/filter/concat create-proxy.js).
-      case object.is_array(state.heap, original) {
-        Error(Nil) ->
-          coerce.thrown_type_error(
-            state,
-            "Cannot perform 'IsArray' on a proxy that has been revoked",
-          )
+      use #(is_arr, state) <- result.try(object.try_is_array(state, original))
+      case is_arr {
         // Step 2: not an array → ArrayCreate(length).
-        Ok(False) -> Ok(#(None, state))
-        Ok(True) -> {
+        False -> Ok(#(None, state))
+        True -> {
           // Step 3: C = Get(originalArray, "constructor") — may hit a getter.
           use #(ctor, state) <- result.try(object.get_value_of(
             state,
@@ -2422,6 +2387,7 @@ fn array_species_create(
           }
         }
       }
+    }
     _ -> Ok(#(None, state))
   }
 }
@@ -2519,15 +2485,19 @@ fn write_species_element(
       "Cannot define property " <> int.to_string(idx) <> " on object",
     )
   })
-  let #(h, ok) = object.set_property(state.heap, target, index_key(idx), val)
+  let #(h, outcome) =
+    object.set_property(state.heap, target, index_key(idx), val)
   let state = State(..state, heap: h)
-  case ok {
-    False ->
+  case outcome {
+    object.Defined -> Ok(state)
+    object.Rejected ->
       coerce.thrown_type_error(
         state,
         "Cannot define property " <> int.to_string(idx) <> " on object",
       )
-    True -> Ok(state)
+    // ArraySetLength's RangeError is an abrupt completion, not a false result;
+    // unreachable for an index key, but never silently downgraded to TypeError.
+    object.ThrewRangeError(msg) -> Error(state.range_error_value(state, msg))
   }
 }
 
@@ -2635,15 +2605,7 @@ fn is_concat_spreadable(
       case flag {
         // Step 4: Return ? IsArray(E) — pierces proxies to their target
         // (§7.2.2) and throws TypeError on a revoked proxy.
-        JsUndefined ->
-          case object.is_array(state.heap, item) {
-            Ok(spreadable) -> Ok(#(spreadable, state))
-            Error(Nil) ->
-              coerce.thrown_type_error(
-                state,
-                "Cannot perform 'IsArray' on a proxy that has been revoked",
-              )
-          }
+        JsUndefined -> object.try_is_array(state, item)
         // Step 3: spreadable is not undefined → ToBoolean(spreadable).
         _ -> Ok(#(value.is_truthy(flag), state))
       }
@@ -5109,19 +5071,15 @@ fn flatten_into_loop(
         Some(elem) ->
           // If depth > 0 and element is an array, recursively flatten
           case depth > 0 {
-            True ->
+            True -> {
               // Step 3.c.ii: shouldFlatten = ? IsArray(element) — pierces
               // proxies to their target (§7.2.2; revoked → TypeError).
-              case elem, object.is_array(state.heap, elem) {
-                JsObject(_), Error(Nil) -> {
-                  let #(thrown, state) =
-                    state.type_error_value(
-                      state,
-                      "Cannot perform 'IsArray' on a proxy that has been revoked",
-                    )
-                  #(state, Error(thrown))
-                }
-                JsObject(sub_ref), Ok(True) -> {
+              use should_flatten, state <- state.try_op(object.try_is_array(
+                state,
+                elem,
+              ))
+              case elem, should_flatten {
+                JsObject(sub_ref), True -> {
                   // Step 3.c.iii.1: elementLen = ? LengthOfArrayLike(element)
                   // — an observable Get(element, "length") on proxies and
                   // array-likes with length accessors.
@@ -5150,6 +5108,7 @@ fn flatten_into_loop(
                     ..acc
                   ])
               }
+            }
             False ->
               // Depth is 0, just append
               flatten_into_loop(state, src, idx + 1, length, depth, [
@@ -5225,16 +5184,12 @@ fn flat_map_loop(
           ])
           // Step 3.c.ii (FlattenIntoArray with mapper): shouldFlatten =
           // ? IsArray(mapped) — pierces proxies (§7.2.2; revoked → TypeError).
-          case mapped, object.is_array(state.heap, mapped) {
-            JsObject(_), Error(Nil) -> {
-              let #(thrown, state) =
-                state.type_error_value(
-                  state,
-                  "Cannot perform 'IsArray' on a proxy that has been revoked",
-                )
-              #(state, Error(thrown))
-            }
-            JsObject(sub_ref), Ok(True) -> {
+          use should_flatten, state <- state.try_op(object.try_is_array(
+            state,
+            mapped,
+          ))
+          case mapped, should_flatten {
+            JsObject(sub_ref), True -> {
               // elementLen = ? LengthOfArrayLike(mapped) — observable Get
               // of "length" on proxies / length accessors.
               use sub_len, state <- state.try_op(object_length(state, sub_ref))
@@ -5524,25 +5479,17 @@ fn array_from_iterator(
   this_arg: JsValue,
   array_proto: Ref,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use #(iter, next_method), state <- state.try_op(
-    iterator.get_iterator_from_method(state, items, iter_method),
-  )
-  array_from_iterator_loop(
+  use rec, state <- state.try_op(iterator.get_iterator_from_method(
     state,
-    iter,
-    next_method,
-    map_fn,
-    this_arg,
-    array_proto,
-    0,
-    [],
-  )
+    items,
+    iter_method,
+  ))
+  array_from_iterator_loop(state, rec, map_fn, this_arg, array_proto, 0, [])
 }
 
 fn array_from_iterator_loop(
   state: State(host),
-  iter: JsValue,
-  next_method: JsValue,
+  rec: value.IteratorRecord,
   map_fn: Option(JsValue),
   this_arg: JsValue,
   array_proto: Ref,
@@ -5551,7 +5498,7 @@ fn array_from_iterator_loop(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // §7.4.8: an abrupt .next()/`done`/`value` read propagates WITHOUT
   // IteratorClose — the iterator record is already [[Done]].
-  case iterator.iterator_step_value(state, iter, next_method) {
+  case iterator.iterator_step_value(state, rec) {
     #(state, Error(thrown)) -> #(state, Error(thrown))
     #(state, Ok(None)) -> {
       let #(heap, ref) =
@@ -5564,7 +5511,8 @@ fn array_from_iterator_loop(
         Some(mf) ->
           case state.call(state, mf, this_arg, [item, value.from_int(k)]) {
             Ok(#(v, state)) -> #(state, Ok(v))
-            Error(#(thrown, state)) -> iterator.close_throw(state, iter, thrown)
+            Error(#(thrown, state)) ->
+              iterator.close_throw(state, rec.iterator, thrown)
           }
         None -> #(state, Ok(item))
       }
@@ -5573,8 +5521,7 @@ fn array_from_iterator_loop(
         Ok(mapped) ->
           array_from_iterator_loop(
             state,
-            iter,
-            next_method,
+            rec,
             map_fn,
             this_arg,
             array_proto,
