@@ -19,9 +19,11 @@ import arc/compiler/resolve
 import arc/compiler/scope
 import arc/esm
 import arc/parser/ast
+import arc/vm/internal/tuple_array
 import arc/vm/opcode.{type LexicalSlots, type SyntaxPerms}
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, CaptureLocal, JsUndefined, JsUninitialized,
+  type FuncTemplate, type JsValue, CaptureLocal, FuncTemplate, JsUndefined,
+  JsUninitialized,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -47,8 +49,77 @@ pub fn error_message(err: CompileError) -> String {
     emit.ContinueOutsideLoop -> "continue outside loop"
     emit.EarlySyntaxError(message:) -> message
     emit.UnsupportedFeature(feature:) -> "unsupported: " <> feature
-    emit.Internal(context:) -> "internal compiler error: " <> context
+    // The engine-bug variants: an AST shape the parser guarantees can never
+    // reach the emitter. Rendered with a stable "internal compiler error"
+    // prefix so they read the same as the old stringly `Internal(context)`.
+    emit.NonMemberLValue -> internal_error("non-member lvalue")
+    emit.AnonymousClassDeclaration ->
+      internal_error("anonymous class declaration")
+    emit.NonCompoundAssignOperator ->
+      internal_error("non-compound operator in compound assignment")
+    emit.MultiDeclaratorForHead ->
+      internal_error("for-in/of head with multiple declarators")
+    emit.AccessorInDestructuringPattern ->
+      internal_error("accessor/method in destructuring assignment")
+    emit.NonMemberDefaultTarget -> internal_error("keyed member default target")
+    emit.BareSuperExpression -> internal_error("bare super expression")
+    emit.BareSpreadElement -> internal_error("bare spread element")
+    emit.InvalidUpdateTarget -> internal_error("invalid ++/-- target")
+    emit.InvalidCompoundAssignTarget ->
+      internal_error("invalid compound-assignment target")
+    emit.NonIdentifierStaticMember ->
+      internal_error("non-identifier static member property")
+    emit.NonGenericUnaryOperator ->
+      internal_error("typeof/delete in generic unary expression")
   }
+}
+
+fn internal_error(context: String) -> String {
+  "internal compiler error: " <> context
+}
+
+/// Whether the direct-eval CALLER's frame has the global environment as its
+/// VariableEnvironment (script/REPL top level) or its own function frame.
+/// Sloppy direct eval in a global frame sends `var` declarations to the
+/// global object; in a function frame they land in the frame's eval_env dict.
+pub type VarEnvKind {
+  GlobalVarEnv
+  FrameVarEnv
+}
+
+/// The direct-eval CALLER's strictness (§19.2.1.1 PerformEval step 2's
+/// `strictCaller`). Named rather than `Bool` so it can't be transposed with
+/// the other flags `compile_eval_direct` used to take positionally.
+pub type Strictness {
+  Strict
+  Sloppy
+}
+
+/// Everything `compile_eval_direct` needs to know about the frame the direct
+/// eval runs in. Bundled (and labelled) so the four same-typed name lists
+/// can't be swapped for one another at the call site.
+pub type DirectEvalCaller {
+  DirectEvalCaller(
+    /// The caller's local binding names, in the order run_direct_eval seeds
+    /// their box refs into capture slots 0..N-1.
+    names: List(String),
+    /// The caller's lexical pseudo-slots (`this` / `new.target` / …); each
+    /// `Some` entry becomes one further capture slot after `names`.
+    slots: LexicalSlots,
+    /// What syntax the caller's body permits (§19.2.1.1 step 6).
+    perms: SyntaxPerms,
+    /// `strictCaller` — a strict caller upgrades the eval body to strict.
+    strictness: Strictness,
+    /// Whether the caller's VariableEnvironment is the global environment.
+    var_env: VarEnvKind,
+    /// Formal-parameter-scope bindings visible at the eval call site
+    /// (EvalDeclarationInstantiation step 3.d).
+    param_scope_names: List(String),
+    /// The caller's enclosing `with`-object holders, by binding name.
+    with_names: List(String),
+    /// The caller's PrivateEnvironment chain (§19.2.1.1 step 5).
+    private_names: List(String),
+  )
 }
 
 /// Sentinel head entry in FuncTemplate.local_names marking a frame whose
@@ -69,14 +140,15 @@ fn resolve_top_level(
   perms: SyntaxPerms,
   local_names: Option(List(#(String, Int))),
 ) -> FuncTemplate {
-  resolve.resolve(
-    code:,
-    constants:,
-    local_count: info.local_count,
-    functions: child_templates,
+  let #(bytecode, constants) = resolve.resolve(code, constants)
+  FuncTemplate(
     name: None,
     arity: 0,
     length: 0,
+    local_count: info.local_count,
+    bytecode:,
+    constants:,
+    functions: tuple_array.from_list(child_templates),
     env_descriptors: [],
     is_strict:,
     is_arrow: False,
@@ -91,27 +163,25 @@ fn resolve_top_level(
   )
 }
 
-/// Compile a parsed program into a FuncTemplate the VM can interpret.
+/// Compile a parsed SCRIPT body into a FuncTemplate the VM can interpret.
 /// `sb` is the scope-builder accumulated by the parser alongside the AST;
 /// scope analysis now finalizes that pre-built tree instead of re-walking
 /// the AST, so the parser is the SOLE producer of scope structure.
+///
+/// Module bodies go through `compile_module`: its `CompiledModuleBody`
+/// carries the `export_names` / `hoisted_funcs` / `export_seeds` a module
+/// cannot be linked (or run) without, so handing a module body to `compile`
+/// is not a runtime error — it does not typecheck.
 pub fn compile(
-  program: ast.Program,
+  body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
-  case program {
-    ast.Script(body) ->
-      compile_script(body, sb, scope.LexLocal, deletable_global_vars: False)
-    ast.Module(_) -> {
-      use body <- result.map(compile_module(program, sb, esm.analyze(program)))
-      body.template
-    }
-  }
+  compile_script(body, sb, scope.LexLocal, deletable_global_vars: False)
 }
 
 /// Everything `compile_module` produces for one ES module body: the root
-/// FuncTemplate plus the two pieces of compile-time scope information the
-/// module linker needs afterwards.
+/// FuncTemplate plus the compile-time scope information the module linker
+/// needs afterwards.
 pub type CompiledModuleBody {
   CompiledModuleBody(
     /// The module body's compiled function template.
@@ -126,6 +196,11 @@ pub type CompiledModuleBody {
     /// `template.functions`, in source order. The linker instantiates the
     /// exported ones before evaluation so importers observe the closures.
     hoisted_funcs: List(#(String, Int)),
+    /// Exported local name → the value the linker pre-seeds into its BoxSlot
+    /// before the body runs (§16.2 instantiation): `undefined` for var and
+    /// function declarations (hoisted, never TDZ), `uninitialized` for
+    /// let/const/class and the default export (TDZ until initialized).
+    export_seeds: Dict(String, JsValue),
   )
 }
 
@@ -138,18 +213,13 @@ pub type CompiledModuleBody {
 /// bindings (§16.2). Exported local bindings are force-boxed so their BoxSlot
 /// can be shared with importers. Mirrors QuickJS's JSVarRef aliasing.
 pub fn compile_module(
-  program: ast.Program,
+  items: List(ast.ModuleItem),
   sb: scope.ScopeBuilder,
   summary: esm.ModuleSummary,
 ) -> Result(CompiledModuleBody, CompileError) {
-  case program {
-    ast.Script(_) -> Error(emit.Internal("compile_module called on Script"))
-    ast.Module(body) -> {
-      let import_locals = import_local_names(summary.imports)
-      let forced_box = local_export_names(summary.exports)
-      compile_module_with_scope(body, sb, import_locals, forced_box)
-    }
-  }
+  let import_locals = import_local_names(summary.imports)
+  let forced_box = local_export_names(summary.exports)
+  compile_module_with_scope(items, sb, import_locals, forced_box, summary)
 }
 
 /// The local binding names introduced by a module's import declarations, in
@@ -183,25 +253,21 @@ fn local_export_names(exports: List(esm.ExportEntry)) -> List(String) {
 /// The value the linker pre-seeds into each exported local's BoxSlot before the
 /// module body runs (§16.2 instantiation): `undefined` for var and function
 /// declarations (hoisted, never TDZ), `uninitialized` for let/const/class and
-/// the default export (TDZ until the body initializes them).
-pub fn module_export_seeds(
-  program: ast.Program,
-  summary: esm.ModuleSummary,
+/// the default export (TDZ until the body initializes them). Computed here,
+/// alongside the bytecode, and handed to the linker on `CompiledModuleBody`.
+fn module_export_seeds(
+  items: List(ast.ModuleItem),
+  exports: List(esm.ExportEntry),
 ) -> Dict(String, JsValue) {
-  case program {
-    ast.Script(_) -> dict.new()
-    ast.Module(items) -> {
-      let undef = list.fold(items, set.new(), collect_undef_export_names)
-      local_export_names(summary.exports)
-      |> list.fold(dict.new(), fn(acc, name) {
-        let seed = case set.contains(undef, name) {
-          True -> JsUndefined
-          False -> JsUninitialized
-        }
-        dict.insert(acc, name, seed)
-      })
+  let undef = list.fold(items, set.new(), collect_undef_export_names)
+  local_export_names(exports)
+  |> list.fold(dict.new(), fn(acc, name) {
+    let seed = case set.contains(undef, name) {
+      True -> JsUndefined
+      False -> JsUninitialized
     }
-  }
+    dict.insert(acc, name, seed)
+  })
 }
 
 /// Names declared by `var` or `function` at module top level — hoisted to
@@ -246,6 +312,7 @@ fn compile_module_with_scope(
   sb: scope.ScopeBuilder,
   import_locals: List(String),
   forced_box: List(String),
+  summary: esm.ModuleSummary,
 ) -> Result(CompiledModuleBody, CompileError) {
   // Phase 1: finalize the parser-built scope tree. Imports occupy boxed
   // capture slots 0..N-1 (parent_names); exported locals are linker-seeded —
@@ -284,38 +351,34 @@ fn compile_module_with_scope(
       opcode.script_perms,
       None,
     )
-  CompiledModuleBody(template:, export_names: info.names, hoisted_funcs:)
+  CompiledModuleBody(
+    template:,
+    export_names: info.names,
+    hoisted_funcs:,
+    export_seeds: module_export_seeds(items, summary.exports),
+  )
 }
 
 /// Compile in REPL mode: top-level let/const/class go to the global lexical
 /// record so they persist across inputs.
 pub fn compile_repl(
-  program: ast.Program,
+  body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
-  case program {
-    ast.Script(body) ->
-      compile_script(body, sb, scope.LexGlobal, deletable_global_vars: False)
-    // REPL input is always parsed with `parser.Script`.
-    ast.Module(_) -> Error(emit.Internal("compile_repl called on a Module"))
-  }
+  compile_script(body, sb, scope.LexGlobal, deletable_global_vars: False)
 }
 
 /// Compile code for an INDIRECT eval call (or any global-scope dynamic
 /// evaluation). Top-level var → globalThis, let/const/class → fresh local
 /// LexicalEnvironment per §19.2.1.1 PerformEval step 16.
+///
+/// §19.2.1.3 EvalDeclarationInstantiation passes D = true: an eval-introduced
+/// global var / function binding is configurable.
 pub fn compile_eval(
-  program: ast.Program,
+  body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
-  case program {
-    // §19.2.1.3 EvalDeclarationInstantiation passes D = true: an
-    // eval-introduced global var / function binding is configurable.
-    ast.Script(body) ->
-      compile_script(body, sb, scope.LexLocal, deletable_global_vars: True)
-    // Eval source is always parsed with `parser.Script`.
-    ast.Module(_) -> Error(emit.Internal("compile_eval called on a Module"))
-  }
+  compile_script(body, sb, scope.LexLocal, deletable_global_vars: True)
 }
 
 /// Compile code for a DIRECT eval call. Like compile_eval, but seeds the
@@ -330,161 +393,147 @@ pub fn compile_eval(
 /// eval_env before global). When either side is strict, eval gets its own
 /// var environment — fall through to globals as before.
 pub fn compile_eval_direct(
-  program: ast.Program,
+  body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
-  parent_names: List(String),
-  parent_slots: LexicalSlots,
-  perms: SyntaxPerms,
-  caller_is_strict: Bool,
-  caller_is_global: Bool,
-  param_scope_names: List(String),
-  with_names: List(String),
-  outer_private_names: List(String),
+  caller: DirectEvalCaller,
 ) -> Result(FuncTemplate, CompileError) {
-  case program {
-    // Direct-eval source is always parsed with `parser.Script`.
-    ast.Module(_) ->
-      Error(emit.Internal("compile_eval_direct called on a Module"))
-    ast.Script(body) -> {
-      // Effective strictness for §19.2.1.1: caller's strictness OR a
-      // "use strict" directive in the eval source itself. Computed up
-      // front from the AST so the AnalyzeOpts seed (fallthrough/strict)
-      // matches the OLD resolver's `caller_is_strict || is_strict` —
-      // scope.finalize does NOT scan directives, so seeding `caller_is_strict`
-      // alone would route `eval('"use strict"; freeName')` from a sloppy
-      // function caller through ToEvalEnv (GetEvalVar) instead of ToGlobal
-      // (GetGlobal): different bytecode.
-      let effective_strict =
-        caller_is_strict || ast_util.has_use_strict_directive(body)
-      // Sloppy direct eval shares the caller's VariableEnvironment. For a
-      // function caller that is approximated by the frame's eval_env dict;
-      // for a GLOBAL caller (script/REPL top level) the VariableEnvironment
-      // IS the global environment, so `var` declarations and unresolved
-      // names go straight to the global object — no eval_env in play.
-      // Caller's parent locals occupy capture slots 0..N-1 by list order.
-      let parent_dict = indexed_names(parent_names)
-      // Caller's lexical box refs are seeded at slots len(parent_names)+i
-      // by run_direct_eval, in canonical order, one per Some entry in
-      // parent_slots. Treat each as a capture so get_lexical → GetBoxed.
-      let #(lexical_captures, _next) =
-        list.fold(
-          opcode.all_lexical_refs,
-          #(dict.new(), list.length(parent_names)),
-          fn(acc, ref) {
-            let #(m, i) = acc
-            case opcode.lexical_slot(parent_slots, ref) {
-              Some(_) -> #(dict.insert(m, ref, i), i + 1)
-              None -> acc
-            }
-          },
-        )
-      // The caller's enclosing with-object holders are themselves entries
-      // in parent_names; their capture-slot indices form the inherited
-      // with_stack the analyzer probes before falling through.
-      let with_stack =
-        list.filter_map(with_names, fn(n) { dict.get(parent_dict, n) })
-      // Phase 1: finalize the parser-built scope tree, seeded with the
-      // caller's environment.
-      let opts =
-        scope.AnalyzeOpts(
-          ..scope.default_analyze_opts(),
-          top_lex: scope.LexLocal,
-          fallthrough: case effective_strict || caller_is_global {
-            True -> scope.ToGlobal
-            False -> scope.ToEvalEnv
-          },
-          strict: effective_strict,
-          parent_names: parent_dict,
-          lexical_captures:,
-          with_stack:,
-        )
-      let tree = scope.finalize(sb, opts)
-      // §14.11.1 early error: `with` is illegal in strict code. The eval
-      // source is parsed sloppy (no directive), so when the CALLER's
-      // strictness upgrades this eval to strict, reject any with statement
-      // post-parse (anywhere in the body — strict eval makes all nested
-      // code strict). A "use strict" directive in the source itself is
-      // already rejected by the parser. The analyzer creates a With scope
-      // for every `with` at any depth, so scan the tree instead of
-      // re-walking the AST.
-      use Nil <- result.try(
-        case
-          caller_is_strict
-          && list.any(dict.values(tree.scopes), fn(s) { s.kind == scope.With })
-        {
-          True ->
-            Error(emit.EarlySyntaxError("'with' not allowed in strict mode"))
-          False -> Ok(Nil)
-        },
-      )
-      // Phase 2: emit. The direct-eval entry point folds the contextual
-      // inputs into the emitter's initial state so no post-emission op
-      // rewriting is needed:
-      //   - caller_is_strict → vars become local slots, Annex B suppressed
-      //     (§19.2.1.1 step 18 — strict eval gets its own VarEnvironment)
-      //   - param_scope_names / outer_private_names → seeded into the
-      //     emitter so top-level IrCallEval ops carry them (steps 3.d/5
-      //     transitive through nested direct eval)
-      //   - DeclareLexical(RefThis) skipped — lexical pseudo-slots arrive
-      //     via the caller's boxed slots (lexical_captures above)
-      // Shadow `tree` with the emitter's post-emission copy — scratch
-      // slots (alloc_scratch) bumped local_count there.
-      use #(code, constants, children, strict, tree) <- result.try(
-        emit.emit_eval_direct(
-          body,
-          tree,
-          caller_is_strict,
-          param_scope_names,
-          outer_private_names,
-        ),
-      )
-      // §19.2.1.1 PerformEval → EvalDeclarationInstantiation step 3.d:
-      // when this direct eval happens inside a formal-parameter initializer
-      // (param_scope_names non-empty), sloppy eval code must not var-declare
-      // a name already bound in the parameter scope (parameters + the
-      // implicit `arguments` binding). The spec walks the environment chain
-      // from the eval's LexicalEnvironment to its VariableEnvironment and
-      // throws a SyntaxError on any HasBinding hit — for a parameter
-      // initializer the only environment in between is the parameter scope.
-      // Strict eval (via caller OR the body's own "use strict") gets its own
-      // VariableEnvironment, so no check applies. Computed from the AST's
-      // VarDeclaredNames — no IR scan needed.
-      use Nil <- result.try(case strict {
-        True -> Ok(Nil)
-        False -> check_param_scope_var_conflict(body, param_scope_names)
-      })
-      let info = scope.function_info(tree, scope.root_scope_id)
-      let child_templates =
-        compile_children(children, tree, scope.root_scope_id)
-      // Expose the name table only when a nested top-level eval needs it —
-      // run_direct_eval consults state.func.local_names to decide between
-      // direct (aliasing) and indirect fallback semantics. A global caller's
-      // VariableEnvironment propagates: a nested eval in this body shares it,
-      // so keep the sentinel (see compile_script). Keyed on the analyzer's
-      // FunctionInfo.contains_direct_eval — populated by scope.finalize from
-      // the per-Scope flags the parser sets, so emit no longer needs to
-      // surface a `has_eval_call` side-channel.
-      let local_names = case info.contains_direct_eval, caller_is_global {
-        True, True ->
-          Some([#(global_frame_sentinel, -1), ..dict.to_list(info.names)])
-        True, False -> Some(dict.to_list(info.names))
-        False, _ -> None
-      }
-      // The template's strictness must reflect how the body was COMPILED
-      // (caller strictness upgrades the body — vars were rewritten to
-      // locals, Annex B dropped), not just the body's own directive, so a
-      // nested eval inherits the effective strictness at runtime.
-      Ok(resolve_top_level(
-        code,
-        constants,
-        info,
-        child_templates,
-        strict,
-        perms,
-        local_names,
-      ))
-    }
+  let caller_is_strict = caller.strictness == Strict
+  let caller_is_global = caller.var_env == GlobalVarEnv
+  // Effective strictness for §19.2.1.1: caller's strictness OR a
+  // "use strict" directive in the eval source itself. Computed up
+  // front from the AST so the AnalyzeOpts seed (fallthrough/strict)
+  // matches the OLD resolver's `caller_is_strict || is_strict` —
+  // scope.finalize does NOT scan directives, so seeding `caller_is_strict`
+  // alone would route `eval('"use strict"; freeName')` from a sloppy
+  // function caller through ToEvalEnv (GetEvalVar) instead of ToGlobal
+  // (GetGlobal): different bytecode.
+  let effective_strict =
+    caller_is_strict || ast_util.has_use_strict_directive(body)
+  // Sloppy direct eval shares the caller's VariableEnvironment. For a
+  // function caller that is approximated by the frame's eval_env dict;
+  // for a GLOBAL caller (script/REPL top level) the VariableEnvironment
+  // IS the global environment, so `var` declarations and unresolved
+  // names go straight to the global object — no eval_env in play.
+  // Caller's parent locals occupy capture slots 0..N-1 by list order.
+  let parent_dict = indexed_names(caller.names)
+  // Caller's lexical box refs are seeded at slots len(caller.names)+i
+  // by run_direct_eval, in canonical order, one per Some entry in
+  // caller.slots. Treat each as a capture so get_lexical → GetBoxed.
+  let #(lexical_captures, _next) =
+    list.fold(
+      opcode.all_lexical_refs,
+      #(dict.new(), list.length(caller.names)),
+      fn(acc, ref) {
+        let #(m, i) = acc
+        case opcode.lexical_slot(caller.slots, ref) {
+          Some(_) -> #(dict.insert(m, ref, i), i + 1)
+          None -> acc
+        }
+      },
+    )
+  // The caller's enclosing with-object holders are themselves entries
+  // in caller.names; their capture-slot indices form the inherited
+  // with_stack the analyzer probes before falling through.
+  let with_stack =
+    list.filter_map(caller.with_names, fn(n) { dict.get(parent_dict, n) })
+  // Phase 1: finalize the parser-built scope tree, seeded with the
+  // caller's environment.
+  let opts =
+    scope.AnalyzeOpts(
+      ..scope.default_analyze_opts(),
+      top_lex: scope.LexLocal,
+      fallthrough: case effective_strict || caller_is_global {
+        True -> scope.ToGlobal
+        False -> scope.ToEvalEnv
+      },
+      strict: effective_strict,
+      parent_names: parent_dict,
+      lexical_captures:,
+      with_stack:,
+    )
+  let tree = scope.finalize(sb, opts)
+  // §14.11.1 early error: `with` is illegal in strict code. The eval
+  // source is parsed sloppy (no directive), so when the CALLER's
+  // strictness upgrades this eval to strict, reject any with statement
+  // post-parse (anywhere in the body — strict eval makes all nested
+  // code strict). A "use strict" directive in the source itself is
+  // already rejected by the parser. The analyzer creates a With scope
+  // for every `with` at any depth, so scan the tree instead of
+  // re-walking the AST.
+  use Nil <- result.try(
+    case
+      caller_is_strict
+      && list.any(dict.values(tree.scopes), fn(s) { s.kind == scope.With })
+    {
+      True -> Error(emit.EarlySyntaxError("'with' not allowed in strict mode"))
+      False -> Ok(Nil)
+    },
+  )
+  // Phase 2: emit. The direct-eval entry point folds the contextual
+  // inputs into the emitter's initial state so no post-emission op
+  // rewriting is needed:
+  //   - caller_is_strict → vars become local slots, Annex B suppressed
+  //     (§19.2.1.1 step 18 — strict eval gets its own VarEnvironment)
+  //   - param_scope_names / private_names → seeded into the emitter so
+  //     top-level IrCallEval ops carry them (steps 3.d/5 transitive
+  //     through nested direct eval)
+  //   - DeclareLexical(RefThis) skipped — lexical pseudo-slots arrive
+  //     via the caller's boxed slots (lexical_captures above)
+  // Shadow `tree` with the emitter's post-emission copy — scratch
+  // slots (alloc_scratch) bumped local_count there.
+  use #(code, constants, children, strict, tree) <- result.try(
+    emit.emit_eval_direct(
+      body,
+      tree,
+      caller_is_strict,
+      caller.param_scope_names,
+      caller.private_names,
+    ),
+  )
+  // §19.2.1.1 PerformEval → EvalDeclarationInstantiation step 3.d:
+  // when this direct eval happens inside a formal-parameter initializer
+  // (param_scope_names non-empty), sloppy eval code must not var-declare
+  // a name already bound in the parameter scope (parameters + the
+  // implicit `arguments` binding). The spec walks the environment chain
+  // from the eval's LexicalEnvironment to its VariableEnvironment and
+  // throws a SyntaxError on any HasBinding hit — for a parameter
+  // initializer the only environment in between is the parameter scope.
+  // Strict eval (via caller OR the body's own "use strict") gets its own
+  // VariableEnvironment, so no check applies. Computed from the AST's
+  // VarDeclaredNames — no IR scan needed.
+  use Nil <- result.try(case strict {
+    True -> Ok(Nil)
+    False -> check_param_scope_var_conflict(body, caller.param_scope_names)
+  })
+  let info = scope.function_info(tree, scope.root_scope_id)
+  let child_templates = compile_children(children, tree, scope.root_scope_id)
+  // Expose the name table only when a nested top-level eval needs it —
+  // run_direct_eval consults state.func.local_names to decide between
+  // direct (aliasing) and indirect fallback semantics. A global caller's
+  // VariableEnvironment propagates: a nested eval in this body shares it,
+  // so keep the sentinel (see compile_script). Keyed on the analyzer's
+  // FunctionInfo.contains_direct_eval — populated by scope.finalize from
+  // the per-Scope flags the parser sets, so emit no longer needs to
+  // surface a `has_eval_call` side-channel.
+  let local_names = case info.contains_direct_eval, caller.var_env {
+    True, GlobalVarEnv ->
+      Some([#(global_frame_sentinel, -1), ..dict.to_list(info.names)])
+    True, FrameVarEnv -> Some(dict.to_list(info.names))
+    False, _ -> None
   }
+  // The template's strictness must reflect how the body was COMPILED
+  // (caller strictness upgrades the body — vars were rewritten to
+  // locals, Annex B dropped), not just the body's own directive, so a
+  // nested eval inherits the effective strictness at runtime.
+  Ok(resolve_top_level(
+    code,
+    constants,
+    info,
+    child_templates,
+    strict,
+    caller.perms,
+    local_names,
+  ))
 }
 
 fn compile_script(
@@ -608,14 +657,15 @@ fn compile_child(
     compile_children(child.functions, tree, child.scope_id)
 
   // Phase 3: Resolve labels.
-  resolve.resolve(
-    code: child.code,
-    constants: child.constants,
-    local_count: info.local_count,
-    functions: grandchild_templates,
+  let #(bytecode, constants) = resolve.resolve(child.code, child.constants)
+  FuncTemplate(
     name: child.name,
     arity: child.arity,
     length: child.length,
+    local_count: info.local_count,
+    bytecode:,
+    constants:,
+    functions: tuple_array.from_list(grandchild_templates),
     env_descriptors:,
     is_strict: child.is_strict,
     is_arrow: child.is_arrow,

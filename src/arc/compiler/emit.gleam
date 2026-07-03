@@ -365,6 +365,9 @@ pub type EmitError {
   /// A non-computed `MemberExpression` (`o.x`) whose property is not an
   /// Identifier. The parser only ever puts an Identifier there.
   NonIdentifierStaticMember
+  /// The generic `UnaryExpression` arm reached `typeof` / `delete`, which
+  /// have their own dedicated `emit_expr` arms above it.
+  NonGenericUnaryOperator
 }
 
 // ============================================================================
@@ -4269,11 +4272,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
 
     ast.UnaryExpression(_, op, arg) -> {
-      let kind = case translate_unaryop(op) {
-        Ok(kind) -> kind
-        Error(Nil) ->
-          panic as "typeof/delete are handled by their own emit_expr arms above"
-      }
+      // typeof/delete never reach here — their own arms above match first.
+      use kind <- result.try(
+        translate_unaryop(op)
+        |> option.to_result(NonGenericUnaryOperator),
+      )
       use e <- result.map(emit_expr(e, arg))
       emit_ir(e, IrUnaryOp(kind))
     }
@@ -6912,18 +6915,18 @@ fn translate_binop(op: ast.BinaryOp) -> opcode.BinOpKind {
 
 /// The unary operators that lower to a single `IrUnaryOp`. `typeof` and
 /// `delete` do NOT: they need the unresolvable-reference / property-reference
-/// treatment their dedicated `emit_expr` arms give them, so they return
-/// `Error(Nil)` here rather than a plausible-but-wrong opcode. (Same shape as
+/// treatment their dedicated `emit_expr` arms give them, so they map to `None`
+/// here rather than a plausible-but-wrong opcode. (Same shape as
 /// `compound_to_binop`, which rejects the operators its caller handles
 /// elsewhere.)
-fn translate_unaryop(op: ast.UnaryOp) -> Result(opcode.UnaryOpKind, Nil) {
+fn translate_unaryop(op: ast.UnaryOp) -> Option(opcode.UnaryOpKind) {
   case op {
-    ast.Negate -> Ok(opcode.Neg)
-    ast.UnaryPlus -> Ok(opcode.Pos)
-    ast.LogicalNot -> Ok(opcode.LogicalNot)
-    ast.BitwiseNot -> Ok(opcode.BitNot)
-    ast.Void -> Ok(opcode.Void)
-    ast.TypeOf | ast.Delete -> Error(Nil)
+    ast.Negate -> Some(opcode.Neg)
+    ast.UnaryPlus -> Some(opcode.Pos)
+    ast.LogicalNot -> Some(opcode.LogicalNot)
+    ast.BitwiseNot -> Some(opcode.BitNot)
+    ast.Void -> Some(opcode.Void)
+    ast.TypeOf | ast.Delete -> None
   }
 }
 
