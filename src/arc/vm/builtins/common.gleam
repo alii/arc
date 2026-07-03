@@ -52,7 +52,7 @@ pub fn init_generator_function(
         properties: named_props([
           #("length", fn_length_property(1)),
           #("name", fn_name_property(name)),
-          #("prototype", value.data(JsObject(fn_proto_ref))),
+          #("prototype", fn_prototype_property(fn_proto_ref)),
         ]),
         elements: elements.new(),
         prototype: Some(function_ctor),
@@ -120,7 +120,7 @@ pub fn init_async_function(
         properties: named_props([
           #("length", fn_length_property(1)),
           #("name", fn_name_property(name)),
-          #("prototype", value.data(JsObject(fn_proto_ref))),
+          #("prototype", fn_prototype_property(fn_proto_ref)),
         ]),
         elements: elements.new(),
         prototype: Some(function_ctor),
@@ -434,11 +434,16 @@ pub fn alloc_host_fn(
 
 /// ES2024 §20.2.2: Function name property — non-writable, non-enumerable, configurable.
 ///
-/// seq: 1 (constant) — "length" and "name" exist from function-object birth,
-/// before any other named key can be created, so the constant pair 0 ("length")
-/// < 1 ("name") < any next_prop_seq() value gives the spec §10.1.11 order
-/// (SetFunctionLength runs before SetFunctionName) without paying two global
-/// counter reads per function allocation (hot: every closure creation).
+/// seq: 1 (constant) — "length", "name" and "prototype" exist from
+/// function-object birth, before any other named key can be created, so the
+/// constant triple 0 ("length") < 1 ("name") < 2 ("prototype") gives the spec
+/// §10.1.11 order (SetFunctionLength before SetFunctionName before
+/// MakeConstructor) without paying three global counter reads per function
+/// allocation (hot: every closure creation).
+///
+/// These constants live in a RESERVED range 0..15 that `next_prop_seq()` sits
+/// strictly above (arc_vm_ffi.erl adds a +16 offset to the counter), so
+/// "birth-time key < any later key" holds regardless of runtime state.
 /// Redefinition paths preserve an existing key's seq, so a later
 /// delete + re-add still moves the key to the end via a real counter value.
 pub fn fn_name_property(name: String) -> Property {
@@ -460,6 +465,22 @@ pub fn fn_length_property(arity: Int) -> Property {
     enumerable: False,
     configurable: True,
     seq: 0,
+  )
+}
+
+/// A built-in constructor's "prototype" property — { W:F, E:F, C:F }
+/// (test262: built-ins/Function/prototype/S15.3.3.1_A1, _A3).
+///
+/// seq: 2 (constant) — see fn_name_property. Must NOT be `value.data`, whose
+/// fresh counter seq would sort "prototype" AFTER whichever static methods
+/// were allocated first, breaking Object.getOwnPropertyNames order.
+pub fn fn_prototype_property(proto: Ref) -> Property {
+  value.DataProperty(
+    value: JsObject(proto),
+    writable: False,
+    enumerable: False,
+    configurable: False,
+    seq: 2,
   )
 }
 
@@ -576,9 +597,8 @@ fn ctor_properties(
 ) -> List(#(String, Property)) {
   [
     // §20.2.3 etc.: a built-in constructor's "prototype" property is
-    // non-writable, non-enumerable, non-configurable (test262:
-    // built-ins/Function/prototype/S15.3.3.1_A1, _A3).
-    #("prototype", value.data(JsObject(proto))),
+    // non-writable, non-enumerable, non-configurable.
+    #("prototype", fn_prototype_property(proto)),
     #("length", fn_length_property(arity)),
     #("name", fn_name_property(name)),
     ..extras

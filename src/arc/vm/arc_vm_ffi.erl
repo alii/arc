@@ -1,19 +1,24 @@
 %% VM-core hot-path FFI: heap/property-table map operations, locals-tuple
-%% construction, identity/sequence primitives and the compile-task fork/join.
-%% Bound by src/arc/vm/{heap,value,exec/*,ops/object,realm}.gleam and
-%% src/arc/compiler/emit.gleam. String helpers live in arc_string_ffi,
-%% array/queue backing stores in arc_array_ffi, and CLI stdin/argv in
-%% arc_cli_ffi — nothing here does I/O.
+%% construction and identity/sequence primitives. Bound by
+%% src/arc/vm/{heap,value,exec/*,ops/object,realm}.gleam and
+%% src/arc/compiler/emit.gleam. Everything here is a pure, non-blocking term
+%% operation: no `receive`, no spawn, no I/O. String helpers live in
+%% arc_string_ffi, array/queue backing stores in arc_array_ffi, the
+%% parse/compile fork/join in arc_compile_task_ffi, and CLI stdin/argv in
+%% arc_cli_ffi.
 -module(arc_vm_ffi).
 -export([setup_locals_tuple/6, setup_locals_seeded/10]).
--export([return_code_sentinel/0]).
 -export([float_same_term/2]).
 -export([unique_positive_integer/0]).
 -export([next_prop_seq/0]).
 -export([put_existing_writable_data/3]).
 -export([define_own_data_property/3]).
--export([run_compile_task/2]).
 -export([heap_read/2]).
+
+%% Seq values 0..PROP_SEQ_RESERVED-1 are reserved for the birth-time constant
+%% property seqs in arc/vm/builtins/common.gleam; the runtime counter starts
+%% above them. See next_prop_seq/0.
+-define(PROP_SEQ_RESERVED, 16).
 
 %% Direct map lookup returning a Gleam Option. Hot path: the VM heap is a
 %% Gleam Dict (a bare Erlang map on this target) and read/2 is called for
@@ -24,55 +29,14 @@ heap_read(Map, Key) ->
         _ -> none
     end.
 
-%% BOUNDARY NOTE: run_compile_task below contains the ONLY `receive` in this
-%% module, and it is a sanctioned synchronous spawn-compute-join: the caller
-%% spawns a worker, blocks until that same worker replies (or dies), and
-%% nothing else can match the monitored ref. It is a structured fork/join
-%% barrier, not event-driven mailbox coupling — no external process, timer,
-%% or event can ever be observed through it. All event-driven mailbox
-%% functions (selective receives, subject messaging, timers) live in the
-%% dedicated mailbox FFI modules (src/arc/vm/arc_realm_ffi.erl,
-%% src/arc/vm/builtins/arc_waiter_ffi.erl), not here.
-%%
-%% Run a 0-arity parse/compile task. For big sources the task runs in a
-%% short-lived process whose initial heap is sized to the source, for two
-%% reasons: parsing allocates large transient structures (token list, AST,
-%% IR) that the generational copying GC would otherwise re-copy many times
-%% as the live set grows (a 4MB-source eval spent ~3x longer in GC than in
-%% actual work), and process death frees everything at once with no sweep.
-%% Small sources (the overwhelmingly common case) stay in-process — a spawn
-%% plus result copy would cost more than it saves.
--define(COMPILE_TASK_THRESHOLD, 262144).         %% bytes
--define(COMPILE_HEAP_WORDS_PER_BYTE, 16).
--define(COMPILE_HEAP_MAX_WORDS, 134217728).      %% 128M words (~1GB)
-
-run_compile_task(SourceBytes, Task) when SourceBytes < ?COMPILE_TASK_THRESHOLD ->
-    Task();
-run_compile_task(SourceBytes, Task) ->
-    Heap = min(SourceBytes * ?COMPILE_HEAP_WORDS_PER_BYTE,
-               ?COMPILE_HEAP_MAX_WORDS),
-    Self = self(),
-    Ref = make_ref(),
-    {Pid, MRef} = spawn_opt(
-        fun() -> Self ! {Ref, Task()} end,
-        [monitor, {min_heap_size, Heap}]),
-    receive
-        {Ref, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Pid, Reason} ->
-            %% The task crashed (it shouldn't — parse/compile return errors
-            %% as values). Propagate the same crash to the caller.
-            erlang:exit(Reason)
-    end.
-
 %% NOTE: an exec-wide min_heap_size floor (raising this process's minimum
 %% heap for the duration of bytecode execution) was tried twice and reverted
 %% twice: a large floor (8M words) makes the mutator walk a 64MB young heap
 %% and costs 40-60% on tight interpreter loops (arith/call microbenches)
 %% through cache locality, and it interacts badly with embedders that cap
 %% the process with max_heap_size. Keep exec heap flags default; oversized
-%% transient parse/compile heaps are handled by run_compile_task above.
+%% transient parse/compile heaps are handled by
+%% arc_compile_task_ffi:run_compile_task/2.
 
 %% Exact term equality for floats (=:=). Distinguishes -0.0 from +0.0
 %% (OTP 27+) — used by SameValue (§7.2.11).
@@ -141,13 +105,6 @@ locals_args([], Arity, N, Undef) ->
 locals_pad(0, _) -> [];
 locals_pad(N, Undef) -> [Undef | locals_pad(N - 1, Undef)].
 
-%% Constant single-opcode `[Return]` bytecode (Gleam's no-field `Return`
-%% constructor is the atom `return`). A literal, so it lives in the module
-%% literal pool and every call returns the same shared term — used as the
-%% sentinel code for native-handler frames in event_loop.gleam.
-return_code_sentinel() ->
-    {return}.
-
 unique_positive_integer() ->
     erlang:unique_integer([positive]).
 
@@ -155,8 +112,16 @@ unique_positive_integer() ->
 %% non-index string keys enumerate in ascending chronological order of
 %% property creation). Strictly increasing across the runtime, so relative
 %% order within any one object's property table follows creation order.
+%%
+%% The `+ ?PROP_SEQ_RESERVED` offset carves out 0..15 as a RESERVED range for
+%% the birth-time constant seqs stamped on function objects without paying a
+%% counter read (see arc/vm/builtins/common.gleam: fn_length_property = 0,
+%% fn_name_property = 1, fn_prototype_property = 2). `unique_integer` starts
+%% at 1 in a fresh runtime, so without the offset the very first counter value
+%% would collide with the "name" constant. With it, EVERY counter value is
+%% strictly greater than EVERY reserved constant, regardless of runtime state.
 next_prop_seq() ->
-    erlang:unique_integer([monotonic, positive]).
+    erlang:unique_integer([monotonic, positive]) + ?PROP_SEQ_RESERVED.
 
 %% Hot-path `obj.x = v` overwrite: update an EXISTING writable data
 %% property's value in one map traversal, preserving its flags and creation
@@ -177,14 +142,22 @@ put_existing_writable_data(Props, Key, Val) ->
 %% §7.3.5 CreateDataProperty on an ordinary property table: insert a
 %% {W:T, E:T, C:T} data property in one map traversal. A brand-new key is
 %% stamped with a fresh creation seq; an existing key keeps its old seq
-%% (§10.1.11 — redefinition keeps the enumeration position; both Property
-%% variants carry seq as their last element). Hot path: object literals.
+%% (§10.1.11 — redefinition keeps the enumeration position). Hot path:
+%% object literals.
+%%
+%% Both value.Property variants are matched by NAME and full arity, so if
+%% either record ever grows or reorders a field this crashes with a
+%% function_clause instead of reading some other field as the seq and
+%% silently scrambling every object's enumeration order.
 define_own_data_property(Props, Key, Val) ->
     case Props of
-        #{Key := Old} ->
-            Props#{Key := {data_property, Val, true, true, true,
-                           element(tuple_size(Old), Old)}};
+        #{Key := {data_property, _V, _W, _E, _C, Seq}} ->
+            Props#{Key := new_data_property(Val, Seq)};
+        #{Key := {accessor_property, _G, _S, _E, _C, Seq}} ->
+            Props#{Key := new_data_property(Val, Seq)};
         _ ->
-            Props#{Key => {data_property, Val, true, true, true,
-                           erlang:unique_integer([monotonic, positive])}}
+            Props#{Key => new_data_property(Val, next_prop_seq())}
     end.
+
+new_data_property(Val, Seq) ->
+    {data_property, Val, true, true, true, Seq}.

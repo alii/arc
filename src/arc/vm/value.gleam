@@ -1519,19 +1519,257 @@ pub type TemporalKind {
   TemporalZonedDateTimeKind
 }
 
-/// Temporal natives — dispatched by (kind, method-name) pairs rather than one
-/// enum variant per method (Temporal has ~200 methods; string dispatch keeps
-/// this type small). Names are fixed at builtin-init time, so an unknown name
-/// is unreachable.
+/// Date fields shared by PlainDate, PlainDateTime and ZonedDateTime.
+pub type TemporalDateGetter {
+  DgCalendarId
+  DgEra
+  DgEraYear
+  DgYear
+  DgMonth
+  DgMonthCode
+  DgDay
+  DgDayOfWeek
+  DgDayOfYear
+  DgWeekOfYear
+  DgYearOfWeek
+  DgDaysInWeek
+  DgDaysInMonth
+  DgDaysInYear
+  DgMonthsInYear
+  DgInLeapYear
+}
+
+/// Wall-clock fields shared by PlainTime, PlainDateTime and ZonedDateTime.
+pub type TemporalTimeGetter {
+  TgHour
+  TgMinute
+  TgSecond
+  TgMillisecond
+  TgMicrosecond
+  TgNanosecond
+}
+
+pub type TemporalDateTimeGetter {
+  DtDate(TemporalDateGetter)
+  DtTime(TemporalTimeGetter)
+}
+
+pub type TemporalYearMonthGetter {
+  YmCalendarId
+  YmEra
+  YmEraYear
+  YmYear
+  YmMonth
+  YmMonthCode
+  YmDaysInYear
+  YmDaysInMonth
+  YmMonthsInYear
+  YmInLeapYear
+}
+
+pub type TemporalMonthDayGetter {
+  MdCalendarId
+  MdMonthCode
+  MdDay
+}
+
+pub type TemporalDurationGetter {
+  DrYears
+  DrMonths
+  DrWeeks
+  DrDays
+  DrHours
+  DrMinutes
+  DrSeconds
+  DrMilliseconds
+  DrMicroseconds
+  DrNanoseconds
+  DrSign
+  DrBlank
+}
+
+pub type TemporalInstantGetter {
+  InEpochMilliseconds
+  InEpochNanoseconds
+}
+
+pub type TemporalZonedGetter {
+  ZgTimeZoneId
+  ZgEpochMilliseconds
+  ZgEpochNanoseconds
+  ZgOffsetNanoseconds
+  ZgOffset
+  ZgHoursInDay
+  ZgDate(TemporalDateGetter)
+  ZgTime(TemporalTimeGetter)
+}
+
+/// Every Temporal prototype getter, closed per type. The type a getter belongs
+/// to is the outer variant, so a getter that is registered on a prototype but
+/// has no dispatch arm (or vice versa) is a compile error, not `undefined`.
+pub type TemporalGetter {
+  PlainDateGetter(TemporalDateGetter)
+  PlainTimeGetter(TemporalTimeGetter)
+  PlainDateTimeGetter(TemporalDateTimeGetter)
+  PlainYearMonthGetter(TemporalYearMonthGetter)
+  PlainMonthDayGetter(TemporalMonthDayGetter)
+  DurationGetter(TemporalDurationGetter)
+  InstantGetter(TemporalInstantGetter)
+  ZonedDateTimeGetter(TemporalZonedGetter)
+}
+
+pub type PlainDateMethod {
+  PdToPlainYearMonth
+  PdToPlainMonthDay
+  PdToPlainDateTime
+  PdToZonedDateTime
+  PdAdd
+  PdSubtract
+  PdWith
+  PdWithCalendar
+  PdUntil
+  PdSince
+  PdEquals
+  PdToString
+  PdToLocaleString
+  PdToJson
+  PdValueOf
+}
+
+pub type PlainTimeMethod {
+  PtAdd
+  PtSubtract
+  PtWith
+  PtUntil
+  PtSince
+  PtRound
+  PtEquals
+  PtToString
+  PtToLocaleString
+  PtToJson
+  PtValueOf
+}
+
+pub type PlainDateTimeMethod {
+  PdtWith
+  PdtWithPlainTime
+  PdtWithCalendar
+  PdtAdd
+  PdtSubtract
+  PdtUntil
+  PdtSince
+  PdtRound
+  PdtEquals
+  PdtToString
+  PdtToLocaleString
+  PdtToJson
+  PdtValueOf
+  PdtToPlainDate
+  PdtToPlainTime
+  PdtToZonedDateTime
+}
+
+pub type PlainYearMonthMethod {
+  PymWith
+  PymAdd
+  PymSubtract
+  PymUntil
+  PymSince
+  PymEquals
+  PymToString
+  PymToLocaleString
+  PymToJson
+  PymValueOf
+  PymToPlainDate
+}
+
+pub type PlainMonthDayMethod {
+  PmdWith
+  PmdEquals
+  PmdToString
+  PmdToLocaleString
+  PmdToJson
+  PmdValueOf
+  PmdToPlainDate
+}
+
+pub type DurationMethod {
+  DmWith
+  DmNegated
+  DmAbs
+  DmAdd
+  DmSubtract
+  DmRound
+  DmTotal
+  DmToString
+  DmToJson
+  DmToLocaleString
+  DmValueOf
+}
+
+pub type InstantMethod {
+  ImAdd
+  ImSubtract
+  ImUntil
+  ImSince
+  ImRound
+  ImEquals
+  ImToString
+  ImToLocaleString
+  ImToJson
+  ImValueOf
+  ImToZonedDateTimeIso
+}
+
+pub type ZonedDateTimeMethod {
+  ZmWithTimeZone
+  ZmWithCalendar
+  ZmWithPlainTime
+  ZmWith
+  ZmAdd
+  ZmSubtract
+  ZmUntil
+  ZmSince
+  ZmRound
+  ZmEquals
+  ZmToString
+  ZmToLocaleString
+  ZmToJson
+  ZmValueOf
+  ZmStartOfDay
+  ZmGetTimeZoneTransition
+  ZmToInstant
+  ZmToPlainDate
+  ZmToPlainTime
+  ZmToPlainDateTime
+}
+
+/// Every Temporal prototype method, closed per type — same shape as
+/// `TemporalGetter`, so the method a prototype registers and the arm that
+/// implements it are checked against each other by the compiler.
+pub type TemporalMethodName {
+  PlainDateMethodName(PlainDateMethod)
+  PlainTimeMethodName(PlainTimeMethod)
+  PlainDateTimeMethodName(PlainDateTimeMethod)
+  PlainYearMonthMethodName(PlainYearMonthMethod)
+  PlainMonthDayMethodName(PlainMonthDayMethod)
+  DurationMethodName(DurationMethod)
+  InstantMethodName(InstantMethod)
+  ZonedDateTimeMethodName(ZonedDateTimeMethod)
+}
+
+/// Temporal natives. Constructors and statics dispatch on `kind` (statics also
+/// on a name); getters and methods carry a closed enum that already names the
+/// Temporal type they belong to, so registration and dispatch cannot drift.
 pub type TemporalNativeFn {
   /// `new Temporal.<Type>(...)`
   TemporalCtor(kind: TemporalKind, protos: TemporalProtos)
   /// Static method, e.g. Temporal.PlainDate.from / .compare
   TemporalStatic(kind: TemporalKind, name: String, protos: TemporalProtos)
   /// Prototype getter, e.g. get Temporal.PlainDate.prototype.year
-  TemporalGetterFn(kind: TemporalKind, name: String, protos: TemporalProtos)
+  TemporalGetterFn(getter: TemporalGetter, protos: TemporalProtos)
   /// Prototype method, e.g. Temporal.PlainDate.prototype.add
-  TemporalMethod(kind: TemporalKind, name: String, protos: TemporalProtos)
+  TemporalMethod(method: TemporalMethodName, protos: TemporalProtos)
   /// Temporal.Now.* functions
   TemporalNowFn(name: String, protos: TemporalProtos)
 }
@@ -3157,6 +3395,35 @@ pub fn prop_seq(prop: Property) -> Int {
   }
 }
 
+/// Give an already-built descriptor a FRESH creation seq, keeping everything
+/// else (including function-object identity in accessor get/set slots).
+///
+/// Two distinct keys must never share a Property record: equal seqs are an
+/// ordering tie whose resolution depends on the property table's iteration
+/// order. When one descriptor value is installed under two keys (e.g.
+/// Function.prototype's "caller" and "arguments", which share the single
+/// %ThrowTypeError% intrinsic), restamp the second one.
+pub fn restamp(prop: Property) -> Property {
+  case prop {
+    DataProperty(value:, writable:, enumerable:, configurable:, ..) ->
+      DataProperty(
+        value:,
+        writable:,
+        enumerable:,
+        configurable:,
+        seq: next_prop_seq(),
+      )
+    AccessorProperty(get:, set:, enumerable:, configurable:, ..) ->
+      AccessorProperty(
+        get:,
+        set:,
+        enumerable:,
+        configurable:,
+        seq: next_prop_seq(),
+      )
+  }
+}
+
 /// Carry an existing property's seq onto a replacement descriptor — used by
 /// update/redefine paths, which must keep the key's enumeration position.
 pub fn with_seq_of(prop: Property, old: Property) -> Property {
@@ -4683,8 +4950,8 @@ fn temporal_native_refs(f: TemporalNativeFn, acc: List(Ref)) -> List(Ref) {
     // Every Temporal native carries the eight sibling type prototypes.
     TemporalCtor(kind: _, protos:)
     | TemporalStatic(kind: _, name: _, protos:)
-    | TemporalGetterFn(kind: _, name: _, protos:)
-    | TemporalMethod(kind: _, name: _, protos:)
+    | TemporalGetterFn(getter: _, protos:)
+    | TemporalMethod(method: _, protos:)
     | TemporalNowFn(name: _, protos:) -> temporal_protos_refs(protos, acc)
   }
 }

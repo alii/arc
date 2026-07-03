@@ -76,9 +76,13 @@ pub fn init(
       enumerable: False,
       configurable: True,
     )
+  // Both keys share the %ThrowTypeError% identity but must NOT share the
+  // Property record: equal creation seqs would leave their enumeration order
+  // (§10.1.11) up to whatever the sort does with the tie. "caller" is defined
+  // first (§10.2.4), so "arguments" gets the later seq.
   let restricted_props = [
     #("caller", restricted),
-    #("arguments", restricted),
+    #("arguments", value.restamp(restricted)),
   ]
 
   // §20.2.3.6 Function.prototype [ @@hasInstance ] — {W:F, E:F, C:F}.
