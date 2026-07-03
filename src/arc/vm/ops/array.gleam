@@ -4,7 +4,6 @@ import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
-import arc/vm/internal/tree_array
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -681,7 +680,9 @@ fn spread_array_generic(
 }
 
 /// §7.1.20 LengthOfArrayLike(O) — ? ToLength(? Get(O, "length")). The Get can
-/// run a getter (and throw); ToNumber can run a user `valueOf`.
+/// run a getter (and throw); ToNumber can run a user `valueOf`. ToLength then
+/// clamps to [0, 2^53 - 1] — NaN and -Infinity give 0, +Infinity gives
+/// 2^53 - 1 (`coerce.jsnum_to_length`).
 fn array_like_length(
   state: State(host),
   ref: Ref,
@@ -692,10 +693,7 @@ fn array_like_length(
   use #(len_num, state) <- result.map(
     state.rethrow(coerce.js_to_number(state, len_val)),
   )
-  case len_num {
-    value.Finite(f) -> #(int.max(0, value.float_to_int(f)), state)
-    _ -> #(0, state)
-  }
+  #(coerce.jsnum_to_length(len_num), state)
 }
 
 /// Raw drain of an ArrayIteratorObject whose @@iterator and `next` are still
@@ -856,10 +854,10 @@ fn spread_via_iterator(
   iterable: JsValue,
   target_ref: Ref,
 ) -> Result(State(host), StepExit(host)) {
-  use #(#(iter, next), state) <- result.try(
+  use #(rec, state) <- result.try(
     state.rethrow(iterator.get_iterator_sync(state, iterable)),
   )
-  spread_iterator_loop(state, iter, next, target_ref)
+  spread_iterator_loop(state, rec, target_ref)
 }
 
 /// One IteratorStepValue per iteration until done. An abrupt completion from
@@ -869,17 +867,16 @@ fn spread_via_iterator(
 /// close-on-abrupt handling is needed here.
 fn spread_iterator_loop(
   state: State(host),
-  iter: JsValue,
-  next: JsValue,
+  rec: value.IteratorRecord,
   target_ref: Ref,
 ) -> Result(State(host), StepExit(host)) {
-  let #(state, step) = iterator.iterator_step_value(state, iter, next)
+  let #(state, step) = iterator.iterator_step_value(state, rec)
   case step {
     Error(thrown) -> Error(Threw(thrown, state))
     Ok(None) -> Ok(state)
     Ok(Some(v)) -> {
       let heap = push_onto_array(state.heap, target_ref, v)
-      spread_iterator_loop(State(..state, heap:), iter, next, target_ref)
+      spread_iterator_loop(State(..state, heap:), rec, target_ref)
     }
   }
 }
@@ -1048,21 +1045,12 @@ fn spread_length_of(
 /// chain for a missing own index (`Array.prototype[1] = x; [...[0,,2]]`
 /// yields x, not undefined). The raw-element copy can't see that, so any
 /// hole forces the per-index-Get path.
-/// Runs on every guarded array spread, so it must stay allocation-free: a
-/// single counting fold (no intermediate index list, no reverse, no sort).
+/// Only [0, length) counts: an `arguments` object stores out-of-range index
+/// writes in `elements` without bumping its `length`, so a total count would
+/// call a holey range dense (see `elements.count_present_below`).
+/// Runs on every guarded array spread, so it must stay allocation-free.
 fn is_dense(els: value.JsElements, length: Int) -> Bool {
-  count_present(els) == length
-}
-
-/// Number of present (non-hole) elements. O(k) with zero allocation for
-/// dense storage, O(1) for sparse (dict.size) and empty.
-fn count_present(els: value.JsElements) -> Int {
-  case els {
-    value.NoElements -> 0
-    value.DenseElements(data) ->
-      tree_array.sparse_fold(fn(_i, _v, n) { n + 1 }, 0, data)
-    value.SparseElements(data) -> dict.size(data)
-  }
+  elements.is_dense_below(els, length)
 }
 
 /// Repeatedly resume the generator, pushing each yielded value onto the

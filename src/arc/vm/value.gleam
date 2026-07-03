@@ -1259,14 +1259,16 @@ pub type ZipMode {
   ZipStrict
 }
 
-/// Per-input state for an Iterator.zip/zipKeyed helper. Index-aligned with
-/// the helper's padding list (and keys list for zipKeyed).
+/// Per-input state for an Iterator.zip/zipKeyed helper. Index-aligned with the
+/// keys list (zipKeyed only). Each member CARRIES its own "longest"-mode
+/// padding value rather than the helper holding a parallel padding list, so a
+/// padding entry can never go missing for a member. Outside "longest" mode the
+/// spec never reads padding at all — `alloc_zip` seeds it with `undefined`.
 pub type ZipMember {
-  /// Live iterator record: iterator object + cached next method.
-  ZipOpen(iter: JsValue, next_method: JsValue)
+  ZipOpen(record: IteratorRecord, padding: JsValue)
   /// Exhausted in "longest" mode — yields its padding value from now on.
   /// (Removed from the spec's openIters list; iters[i] set to null.)
-  ZipExhausted
+  ZipExhausted(padding: JsValue)
 }
 
 /// Iterator methods — ES2025 §27.1. Iterator constructor, Iterator.from,
@@ -1308,29 +1310,100 @@ pub type IteratorNativeFn {
 /// One of %RegExp%'s legacy internal slots (tc39
 /// proposal-regexp-legacy-features): [[RegExpInput]], [[RegExpLastMatch]],
 /// [[RegExpLastParen]], [[RegExpLeftContext]], [[RegExpRightContext]], and
-/// [[RegExpParenN]] for N in 1..9 (`LegacyParen(n)`). Keys the
-/// `RegExpConstructor` kind's `legacy` state dict and names the slot a
-/// `RegExpLegacyGetter` reads — structural equality/ordering makes it a
-/// valid Dict key, and the closed enum makes a mis-numbered slot impossible.
+/// [[RegExpParenN]] for N in 1..9. Names the field of `LegacyStatics` a
+/// `RegExpLegacyGetter` reads. Every paren index is a distinct constructor,
+/// so a mis-numbered slot (`$0`, `$10`) is not representable and reading a
+/// slot is total — no "unknown slot" fallback anywhere.
 pub type LegacySlot {
   LegacyInput
   LegacyLastMatch
   LegacyLastParen
   LegacyLeftContext
   LegacyRightContext
-  LegacyParen(n: Int)
+  LegacyParen1
+  LegacyParen2
+  LegacyParen3
+  LegacyParen4
+  LegacyParen5
+  LegacyParen6
+  LegacyParen7
+  LegacyParen8
+  LegacyParen9
+}
+
+/// The tc39 legacy-regexp proposal's %RegExp% internal slots, all present at
+/// once. InitializeLegacyRegExpStaticProperties sets every one to "" — hence
+/// `empty_legacy_statics()` — and UpdateLegacyRegExpStaticProperties rewrites
+/// every one on each successful builtin exec, so there is no such thing as an
+/// "unset" slot to distinguish from an empty one.
+pub type LegacyStatics {
+  LegacyStatics(
+    input: String,
+    last_match: String,
+    last_paren: String,
+    left_context: String,
+    right_context: String,
+    paren1: String,
+    paren2: String,
+    paren3: String,
+    paren4: String,
+    paren5: String,
+    paren6: String,
+    paren7: String,
+    paren8: String,
+    paren9: String,
+  )
+}
+
+/// InitializeLegacyRegExpStaticProperties — every slot the empty String.
+pub fn empty_legacy_statics() -> LegacyStatics {
+  LegacyStatics(
+    input: "",
+    last_match: "",
+    last_paren: "",
+    left_context: "",
+    right_context: "",
+    paren1: "",
+    paren2: "",
+    paren3: "",
+    paren4: "",
+    paren5: "",
+    paren6: "",
+    paren7: "",
+    paren8: "",
+    paren9: "",
+  )
+}
+
+/// Read one legacy slot. Total — every `LegacySlot` names a real field.
+pub fn legacy_slot(statics: LegacyStatics, slot: LegacySlot) -> String {
+  case slot {
+    LegacyInput -> statics.input
+    LegacyLastMatch -> statics.last_match
+    LegacyLastParen -> statics.last_paren
+    LegacyLeftContext -> statics.left_context
+    LegacyRightContext -> statics.right_context
+    LegacyParen1 -> statics.paren1
+    LegacyParen2 -> statics.paren2
+    LegacyParen3 -> statics.paren3
+    LegacyParen4 -> statics.paren4
+    LegacyParen5 -> statics.paren5
+    LegacyParen6 -> statics.paren6
+    LegacyParen7 -> statics.paren7
+    LegacyParen8 -> statics.paren8
+    LegacyParen9 -> statics.paren9
+  }
 }
 
 /// RegExp methods — constructor, prototype methods, accessor getters.
 pub type RegExpNativeFn {
   /// `legacy` holds the tc39 legacy-regexp proposal's internal slots
-  /// ([[RegExpInput]], [[RegExpLastMatch]], [[RegExpParen1]], …) keyed by
-  /// `LegacySlot`. Living inside the constructor's NativeFunction kind keeps
-  /// the state per-realm (each realm has its own %RegExp% object) while
-  /// staying invisible to OrdinaryOwnPropertyKeys — internal slots must never
-  /// show up in Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
-  /// Unwritten slots read as "" (InitializeLegacyRegExpStaticProperties).
-  RegExpConstructor(legacy: Dict(LegacySlot, String))
+  /// ([[RegExpInput]], [[RegExpLastMatch]], [[RegExpParen1]], …) as one typed
+  /// record. Living inside the constructor's NativeFunction kind keeps the
+  /// state per-realm (each realm has its own %RegExp% object) while staying
+  /// invisible to OrdinaryOwnPropertyKeys — internal slots must never show up
+  /// in Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
+  RegExpConstructor(legacy: LegacyStatics)
   RegExpPrototypeTest
   RegExpPrototypeExec
   RegExpPrototypeToString
@@ -1357,7 +1430,7 @@ pub type RegExpNativeFn {
   /// RegExp.input/$_, lastMatch/$&, lastParen/$+, leftContext/$`,
   /// rightContext/$', $1-$9. `ctor` is the owning realm's %RegExp%
   /// (GetLegacyRegExpStaticProperty's SameValue receiver check); `slot` is
-  /// the key in the RegExpConstructor kind's `legacy` state dict.
+  /// the field of the RegExpConstructor kind's `legacy` record it reads.
   RegExpLegacyGetter(ctor: Ref, slot: LegacySlot)
   /// Legacy static accessor setter — only RegExp.input/$_ has one.
   RegExpLegacyInputSetter(ctor: Ref)
@@ -2276,6 +2349,23 @@ pub type LocaleMethodName {
   LocaleGetWeekInfo
 }
 
+/// Which way an element of an allSettled-style combinator settled. Names the
+/// pair of strings the result wrapper object uses, so a `#(status, field)`
+/// tuple can never be built with a swapped or mismatched pair.
+pub type SettledOutcome {
+  Fulfilled
+  Rejected
+}
+
+/// The `#(status, value-field-name)` pair for an allSettled result wrapper:
+/// `{status: "fulfilled", value: v}` / `{status: "rejected", reason: r}`.
+pub fn settled_keys(outcome: SettledOutcome) -> #(String, String) {
+  case outcome {
+    Fulfilled -> #("fulfilled", "value")
+    Rejected -> #("rejected", "reason")
+  }
+}
+
 /// Native functions handled in call_native — need stack manipulation,
 /// call frame pushing, or VM re-entry that dispatch_native can't do.
 pub type CallNativeFn {
@@ -2340,8 +2430,8 @@ pub type CallNativeFn {
   /// Per-element handler for Promise.allKeyed / Promise.allSettledKeyed
   /// (PerformPromiseAllKeyed fulfilled/rejected element closures).
   /// `status_field` is None for the allKeyed fulfill handler (stores the raw
-  /// value); Some(#("fulfilled", "value")) / Some(#("rejected", "reason"))
-  /// for the allSettledKeyed handlers (stores a status wrapper object).
+  /// value); Some(Fulfilled) / Some(Rejected) for the allSettledKeyed handlers
+  /// (stores a status wrapper object built from `settled_keys`).
   PromiseKeyedElement(
     index: Int,
     remaining_ref: Ref,
@@ -2349,7 +2439,7 @@ pub type CallNativeFn {
     values_ref: Ref,
     already_called_ref: Ref,
     resolve: JsValue,
-    status_field: Option(#(String, String)),
+    status_field: Option(SettledOutcome),
   )
   /// GetCapabilitiesExecutor (§27.2.1.5.1) for NewPromiseCapability with a
   /// custom constructor — the boxes receive the resolve/reject functions the
@@ -2881,14 +2971,14 @@ pub type ExoticKind(ctx, host) {
   /// instead of an O(i) UTF-8 walk per indexed read.
   StringIteratorObject(remaining: List(UtfCodepoint))
   /// RegExp String Iterator — ES2024 §22.2.9, created by
-  /// RegExp.prototype[Symbol.matchAll]. `matcher` is [[IteratingRegExp]]
-  /// (the species-constructed matcher — any object with a callable `exec`,
-  /// so a JsValue rather than a Ref to a RegExpObject); `string` is
+  /// RegExp.prototype[Symbol.matchAll]. `matcher` is [[IteratingRegExp]] —
+  /// the object returned by Construct(C, ...), so always a Ref (any object
+  /// with a callable `exec`, not necessarily a RegExpObject); `string` is
   /// [[IteratedString]]; `global`/`unicode` cache [[Global]]/[[Unicode]]
   /// from the flags read at creation; `done` latches [[Done]] once the
   /// iterator is exhausted so later .next() calls short-circuit.
   RegExpStringIteratorObject(
-    matcher: JsValue,
+    matcher: Ref,
     string: String,
     global: Bool,
     unicode: Bool,
@@ -2917,12 +3007,14 @@ pub type ExoticKind(ctx, host) {
   /// `kind` carries the combinator's own state (callback, take/drop
   /// remaining, flatMap inner iterator). `counter` is the spec's running
   /// element index passed to map/filter/flatMap callbacks; take/drop's
-  /// countdown lives in their variants instead.
+  /// countdown lives in their variants instead. `gen_state` is the closure
+  /// generator's [[GeneratorState]]: GeneratorValidate rejects a reentrant
+  /// next/return while it is `Executing`, and `Completed` latches forever.
   IteratorHelperObject(
     kind: IteratorHelperKind,
     underlying: IteratorRecord,
     counter: Int,
-    done: Bool,
+    gen_state: GeneratorState,
   )
   /// Wrap For Valid Iterator — ES2025 §27.1.2.1.2. Created by Iterator.from
   /// when the source isn't already an instance of %Iterator.prototype%.
@@ -2930,34 +3022,29 @@ pub type ExoticKind(ctx, host) {
   /// Iterator.zip / Iterator.zipKeyed result — tc39 joint-iteration
   /// proposal's IteratorZip generator, modelled as a data-driven helper on
   /// %IteratorHelperPrototype%. `members` is the spec's iters list (a
-  /// ZipExhausted member is the spec's null entry); `keys` is None for
-  /// Iterator.zip (array results) and Some(property keys) for
-  /// Iterator.zipKeyed (null-proto object results). `padding` is
-  /// index-aligned with `members`.
-  /// `running` is the generator "executing" state (reentrant next/return
-  /// throws TypeError); `started` distinguishes suspended-start from
-  /// suspended-yield for .return() semantics.
+  /// ZipExhausted member is the spec's null entry, and each member carries its
+  /// own padding value); `keys` is None for Iterator.zip (array results) and
+  /// Some(property keys) for Iterator.zipKeyed (null-proto object results).
+  /// `gen_state` is the IteratorZip closure generator's [[GeneratorState]] —
+  /// `Executing` makes a reentrant next/return a TypeError, and suspended-start
+  /// vs suspended-yield picks the .return() path.
   IteratorZipObject(
     members: List(ZipMember),
     mode: ZipMode,
-    padding: List(JsValue),
     keys: Option(List(ObjectKey)),
-    done: Bool,
-    running: Bool,
-    started: Bool,
+    gen_state: GeneratorState,
   )
   /// Iterator.concat result — tc39 iterator-sequencing proposal, modelled as
   /// a data-driven helper on %IteratorHelperPrototype%. `remaining` holds the
   /// not-yet-opened items; `inner` is the currently open iterator record. The
   /// two are different types on purpose — a `ConcatItem` cannot be handed to
   /// something expecting an already-opened `IteratorRecord`, or vice versa.
-  /// `running` is the generator "executing" state (reentrant next/return
-  /// throws TypeError).
+  /// `gen_state` is the closure generator's [[GeneratorState]] — a reentrant
+  /// next/return while `Executing` is a TypeError.
   IteratorConcatObject(
     remaining: List(ConcatItem),
     inner: Option(IteratorRecord),
-    done: Bool,
-    running: Bool,
+    gen_state: GeneratorState,
   )
   /// Module Namespace Exotic Object — ES2024 §10.4.6. `exports` maps each
   /// exported name to the BoxSlot ref holding the binding's live value, so
@@ -2992,36 +3079,25 @@ pub type ExoticKind(ctx, host) {
 fn unique_positive_integer() -> Int
 
 /// §15.7.14 ClassDefinitionEvaluation step 5/6: mint the storage-key text for
-/// a fresh per-class-evaluation PrivateName. Format:
-/// "\u{0}" <> source_text <> "\u{0}" <> uid — the NUL marker keeps it in the
-/// hidden private namespace (see key.private_key), the uid makes each class
-/// evaluation's names distinct (spec PrivateName identity). The text is
-/// carried at runtime as a JsString bound to a class-scope const named after
-/// the source text ("#m"); access ops wrap it in Named(_) directly.
+/// a fresh per-class-evaluation PrivateName. The text is carried at runtime as
+/// a JsString bound to a class-scope const named after the source text ("#m");
+/// access ops wrap it in Named(_) directly. The format and the hidden
+/// namespace it belongs to are owned by `key.private_key_text`.
 pub fn mint_private_key(name: String) -> String {
-  "\u{0}" <> name <> "\u{0}" <> int.to_string(unique_positive_integer())
+  key.private_key_text(name, unique_positive_integer())
 }
 
 /// Source-text name ("#m") from a minted private storage-key text, for error
-/// messages.
+/// messages. Alias for `key.private_display_name`: the runtime carries minted
+/// keys as bare `String`s, so error sites reach for it here.
 pub fn private_display_name(key_text: String) -> String {
-  case key_text {
-    "\u{0}" <> rest ->
-      case string.split_once(rest, "\u{0}") {
-        Ok(#(name, _uid)) -> name
-        Error(Nil) -> rest
-      }
-    _ -> key_text
-  }
+  key.private_display_name(key_text)
 }
 
-/// Whether a PropertyKey is a class private element (NUL-marker-prefixed —
-/// see key.private_key). Reflection sites call this to skip private keys.
+/// Whether a PropertyKey is a class private element. Reflection sites call
+/// this to skip private keys. See `key.is_private_key`.
 pub fn is_private_name(key: PropertyKey) -> Bool {
-  case key {
-    Named("\u{0}" <> _) -> True
-    _ -> False
-  }
+  key.is_private_key(key)
 }
 
 /// A property key as it can actually exist on an object: §6.1.7 says that is
@@ -3034,8 +3110,7 @@ pub fn is_private_name(key: PropertyKey) -> Bool {
 /// The `display` string is NOT just for error messages: proxy
 /// `defineProperty` / `getOwnPropertyDescriptor` traps receive it as the
 /// property-key argument, so it must be the exact ToPropertyKey string —
-/// never `key.key_to_string`, which is a *renderer* that strips the engine's
-/// internal private-name NUL marker and would hand traps a mangled key.
+/// `key.key_to_text`, never `key.key_display_string`.
 pub type ObjectKey {
   StringPropKey(pkey: PropertyKey, display: String)
   SymbolPropKey(sym: SymbolId)
@@ -3413,6 +3488,11 @@ pub type HeapSlot(ctx, host) {
   /// by a closure AND mutated, both the local frame and EnvSlot hold a Ref to
   /// the same BoxSlot. Reads/writes go through this indirection.
   BoxSlot(value: JsValue)
+  /// Mutable integer cell — the promise combinators' remainingElementsCount
+  /// Record { [[Value]]: n }. A dedicated slot rather than a `BoxSlot` holding
+  /// a `JsNumber`, so the counter can never hold a non-number and silently
+  /// stop decrementing (a `Promise.all` that never resolves).
+  CounterSlot(count: Int)
   /// Sloppy-mode direct-eval var-injection dict. Per spec §19.2.1.1, `var`
   /// declarations inside a sloppy direct eval land in the caller's variable
   /// environment. Since caller locals are indexed at compile time, new names
@@ -3577,7 +3657,7 @@ pub fn heap_slot_to_string(slot: HeapSlot(ctx, host)) -> String {
               <> dict.fold(properties, [], fn(acc, key, property) {
               [
                 [
-                  key.key_to_string(key) <> ":",
+                  key.key_display_string(key) <> ":",
                   property_debug_lines(property) |> indent(4),
                 ],
                 ..acc
@@ -3745,7 +3825,7 @@ fn do_refs_in_slot(
         ArrayIteratorObject(source:, ..) -> [source, ..acc]
         // The iterated matcher is the only heap reference the RegExp String
         // Iterator's internal state can hold; the rest is scalar.
-        RegExpStringIteratorObject(matcher:, ..) -> push_value_ref(matcher, acc)
+        RegExpStringIteratorObject(matcher:, ..) -> [matcher, ..acc]
         SetIteratorObject(source:, ..) | MapIteratorObject(source:, ..) -> [
           source,
           ..acc
@@ -3767,18 +3847,15 @@ fn do_refs_in_slot(
         | IteratorRecordObject(iterated:, next_method:) ->
           push_value_ref(next_method, push_value_ref(iterated, acc))
         // `keys` holds no heap refs (an ObjectKey is a string or a symbol),
-        // so only members and padding are traced.
-        IteratorZipObject(members:, padding:, ..) -> {
-          let acc =
-            list.fold(members, acc, fn(a, m) {
-              case m {
-                ZipOpen(iter:, next_method:) ->
-                  push_value_ref(next_method, push_value_ref(iter, a))
-                ZipExhausted -> a
-              }
-            })
-          list.fold(padding, acc, fn(a, v) { push_value_ref(v, a) })
-        }
+        // so only the members (iterator record + its padding value) are traced.
+        IteratorZipObject(members:, ..) ->
+          list.fold(members, acc, fn(a, m) {
+            case m {
+              ZipOpen(record:, padding:) ->
+                push_value_ref(padding, push_iter_record(record, a))
+              ZipExhausted(padding:) -> push_value_ref(padding, a)
+            }
+          })
         IteratorConcatObject(remaining:, inner:, ..) -> {
           let acc =
             list.fold(remaining, acc, fn(a, item) {
@@ -3861,6 +3938,8 @@ fn do_refs_in_slot(
     }
     EnvSlot(slots:) -> list.fold(slots, acc, fn(a, v) { push_value_ref(v, a) })
     BoxSlot(value:) -> push_value_ref(value, acc)
+    // A plain Int — no reachable refs.
+    CounterSlot(count: _) -> acc
     EvalEnvSlot(vars:) ->
       dict.fold(vars, acc, fn(a, _k, v) { push_value_ref(v, a) })
     ForInIteratorSlot(keys:) ->
@@ -4379,7 +4458,7 @@ fn regexp_native_refs(f: RegExpNativeFn, acc: List(Ref)) -> List(Ref) {
       ctor,
       ..acc
     ]
-    // The constructor's legacy state is Int → String — no heap edges.
+    // The constructor's legacy state is all Strings — no heap edges.
     RegExpConstructor(legacy: _)
     | RegExpPrototypeTest
     | RegExpPrototypeExec

@@ -14,7 +14,10 @@ import arc/vm/builtins/helpers.{is_callable}
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/object
 import arc/vm/state.{type State}
-import arc/vm/value.{type JsValue, JsNull, JsObject, JsUndefined}
+import arc/vm/value.{
+  type IteratorRecord, type JsValue, IteratorRecord, JsNull, JsObject,
+  JsUndefined,
+}
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -35,14 +38,14 @@ pub fn type_error_any(
 /// §7.4.3 GetIterator(obj, sync): the @@iterator method must be callable and
 /// its result must be an Object; caches the next method (GetIteratorDirect).
 ///
-/// Returns the Iterator Record as `#(iterator, next_method)`. The "<obj> is
-/// not iterable" TypeError message is relied on by for-of (interpreter
-/// GetIterator), ArraySpread (`arc/vm/ops/array`) and Object.fromEntries /
-/// Object.groupBy — keep them in sync.
+/// Returns an `IteratorRecord`. The "<obj> is not iterable" TypeError message
+/// is relied on by for-of (interpreter GetIterator), ArraySpread
+/// (`arc/vm/ops/array`) and Object.fromEntries / Object.groupBy — keep them in
+/// sync.
 pub fn get_iterator_sync(
   state: State(host),
   obj: JsValue,
-) -> Result(#(#(JsValue, JsValue), State(host)), #(JsValue, State(host))) {
+) -> Result(#(IteratorRecord, State(host)), #(JsValue, State(host))) {
   use #(method, state) <- result.try(object.get_symbol_value_of(
     state,
     obj,
@@ -60,7 +63,7 @@ pub fn get_iterator_sync(
 
 /// §7.4.4 GetIteratorFromMethod(obj, method): iterator = ? Call(method, obj);
 /// the result must be an Object; the `next` method is read once and cached
-/// (GetIteratorDirect). Returns the Iterator Record as `#(iterator, next)`.
+/// (GetIteratorDirect). Returns an `IteratorRecord`.
 ///
 /// Public for consumers that already performed their own
 /// GetMethod(obj, @@iterator) — e.g. Array.from, which must fall back to the
@@ -70,7 +73,7 @@ pub fn get_iterator_from_method(
   state: State(host),
   obj: JsValue,
   method: JsValue,
-) -> Result(#(#(JsValue, JsValue), State(host)), #(JsValue, State(host))) {
+) -> Result(#(IteratorRecord, State(host)), #(JsValue, State(host))) {
   use #(iter, state) <- result.try(state.call(state, method, obj, []))
   case iter {
     JsObject(_) -> {
@@ -79,7 +82,7 @@ pub fn get_iterator_from_method(
         iter,
         Named("next"),
       ))
-      #(#(iter, next), state)
+      #(IteratorRecord(iterator: iter, next_method: next), state)
     }
     _ ->
       Error(state.type_error_value(
@@ -112,16 +115,16 @@ pub fn get_iterator_flattenable(
   obj: JsValue,
   handling: PrimitiveHandling,
   what: String,
-) -> #(State(host), Result(#(JsValue, JsValue), JsValue)) {
+) -> Result(#(IteratorRecord, State(host)), #(JsValue, State(host))) {
   let acceptable = case obj, handling {
     JsObject(_), _ -> True
     value.JsString(_), IterateStrings -> True
     _, _ -> False
   }
   case acceptable {
-    False -> type_error_any(state, what <> " is not an object")
+    False -> Error(state.type_error_value(state, what <> " is not an object"))
     True -> {
-      use method, state <- state.try_op(object.get_symbol_value_of(
+      use #(method, state) <- result.try(object.get_symbol_value_of(
         state,
         obj,
         value.symbol_iterator,
@@ -130,17 +133,17 @@ pub fn get_iterator_flattenable(
         JsUndefined | JsNull -> Ok(#(obj, state))
         _ -> state.call(state, method, obj, [])
       }
-      use iter, state <- state.try_op(iter_result)
+      use #(iter, state) <- result.try(iter_result)
       case iter {
         JsObject(_) -> {
-          use inner_next, state <- state.try_op(object.get_value_of(
+          use #(inner_next, state) <- result.map(object.get_value_of(
             state,
             iter,
             Named("next"),
           ))
-          #(state, Ok(#(iter, inner_next)))
+          #(IteratorRecord(iterator: iter, next_method: inner_next), state)
         }
-        _ -> type_error_any(state, what <> " is not iterable")
+        _ -> Error(state.type_error_value(state, what <> " is not iterable"))
       }
     }
   }
@@ -150,15 +153,15 @@ pub fn get_iterator_flattenable(
 // §7.4.5/§7.4.6/§7.4.8 — stepping an Iterator Record
 // ============================================================================
 
-/// Shared §7.4.6/§7.4.8 prefix: call next(obj), require the result is an
-/// Object, read .done; continue with the result object and the done flag.
+/// Shared §7.4.6/§7.4.8 prefix: call the record's cached next method on its
+/// iterator, require the result is an Object, read .done; continue with the
+/// result object and the done flag.
 pub fn iterator_step_result(
   state: State(host),
-  obj: JsValue,
-  next_method: JsValue,
+  rec: IteratorRecord,
   cont: fn(JsValue, Bool, State(host)) -> #(State(host), Result(a, JsValue)),
 ) -> #(State(host), Result(a, JsValue)) {
-  case state.call(state, next_method, obj, []) {
+  case state.call(state, rec.next_method, rec.iterator, []) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(result, state)) ->
       case result {
@@ -184,10 +187,9 @@ pub fn iterator_step_result(
 /// than re-implementing the §7.4.5/§7.4.6 done/value reads.
 pub fn iterator_step_value(
   state: State(host),
-  obj: JsValue,
-  next_method: JsValue,
+  rec: IteratorRecord,
 ) -> #(State(host), Result(Option(JsValue), JsValue)) {
-  use result, done, state <- iterator_step_result(state, obj, next_method)
+  use result, done, state <- iterator_step_result(state, rec)
   case done {
     True -> #(state, Ok(None))
     False -> {
@@ -205,15 +207,27 @@ pub fn iterator_step_value(
 // §7.4.11 IteratorClose
 // ============================================================================
 
-/// §7.4.11 IteratorClose with throw completion: get .return; if callable, call
-/// it (swallowing any throw — original error wins); return original error.
+/// §7.4.11 IteratorClose with throw completion, as a plain value: get .return;
+/// if callable, call it (swallowing any throw — the original error wins);
+/// hand back the throwable so the caller decides the result shape.
+pub fn close_and_throw(
+  state: State(host),
+  obj: JsValue,
+  original: JsValue,
+) -> #(JsValue, State(host)) {
+  let #(state, _ignored) = call_return(state, obj)
+  #(original, state)
+}
+
+/// `close_and_throw` at a dispatch boundary — the throw becomes the Error of a
+/// `#(State, Result(_, JsValue))` pair.
 pub fn close_throw(
   state: State(host),
   obj: JsValue,
   original: JsValue,
 ) -> #(State(host), Result(a, JsValue)) {
-  let #(state, _ignored) = call_return(state, obj)
-  #(state, Error(original))
+  let #(thrown, state) = close_and_throw(state, obj, original)
+  #(state, Error(thrown))
 }
 
 /// IteratorClose with a freshly-allocated TypeError.
@@ -318,9 +332,8 @@ pub fn add_entries_from_iterable(
   iterable: JsValue,
   add_entry: EntrySink(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use iter_rec, state <- state.try_op(get_iterator_sync(state, iterable))
-  let #(iter, next) = iter_rec
-  add_entries_loop(state, target, iter, next, add_entry)
+  use rec, state <- state.try_op(get_iterator_sync(state, iterable))
+  add_entries_loop(state, target, rec, add_entry)
 }
 
 /// One IteratorStepValue + entry processing per iteration. Abrupt
@@ -330,11 +343,10 @@ pub fn add_entries_from_iterable(
 fn add_entries_loop(
   state: State(host),
   target: JsValue,
-  iter: JsValue,
-  next: JsValue,
+  rec: IteratorRecord,
   add_entry: EntrySink(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use step, done, state <- iterator_step_result(state, iter, next)
+  use step, done, state <- iterator_step_result(state, rec)
   case done {
     True -> #(state, Ok(target))
     False -> {
@@ -347,21 +359,21 @@ fn add_entries_loop(
         JsObject(_) -> {
           use k, state <- or_close(
             object.get_value_of(state, entry, Index(0)),
-            iter,
+            rec.iterator,
           )
           use v, state <- or_close(
             object.get_value_of(state, entry, Index(1)),
-            iter,
+            rec.iterator,
           )
           case add_entry(state, k, v) {
-            Error(#(thrown, state)) -> close_throw(state, iter, thrown)
-            Ok(state) -> add_entries_loop(state, target, iter, next, add_entry)
+            Error(#(thrown, state)) -> close_throw(state, rec.iterator, thrown)
+            Ok(state) -> add_entries_loop(state, target, rec, add_entry)
           }
         }
         _ ->
           close_throw_type(
             state,
-            iter,
+            rec.iterator,
             "Iterator value "
               <> object.inspect(entry, state.heap)
               <> " is not an entry object",
