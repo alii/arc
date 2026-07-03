@@ -204,7 +204,10 @@ type AccessorPrefix {
 /// automatically — there is no per-field list to forget an entry in.
 /// (That is exactly how a nested function body's retroactive
 /// `"use strict"` used to leak `strict: True` into the enclosing sloppy
-/// scope: `strict` was missing from the hand-written restore list.)
+/// scope: `strict` was missing from the hand-written restore list; and how
+/// `has_non_simple_param` used to leak OUT of `function f({a}) { … }`'s
+/// parameter list into a nested arrow's body, rejecting the arrow's
+/// perfectly legal `"use strict"` directive.)
 ///
 /// Corollary: a `P` field that must survive across `restore_outer_context`
 /// (e.g. `class_private_depth`, the accumulator lists/sets, `sb`) must
@@ -256,6 +259,45 @@ type Ctx {
     // do-while/with). Used to forbid labeled function declarations in these
     // contexts per spec Annex B 3.4.
     in_single_stmt_pos: Bool,
+    // ---- Deferred cover-grammar early errors -------------------------
+    // Both are raised only when the covering expression is consumed as an
+    // ordinary expression rather than as a destructuring pattern; a
+    // function boundary neither inherits nor exports them, so they belong
+    // here (see `check_cover_grammar_errors` for the consumption points).
+    //
+    // Whether the expression being parsed contains a cover-grammar
+    // initializer like `{a = 0}` in an object literal. This is only valid
+    // if the expression ends up as a destructuring pattern (assignment LHS
+    // or arrow params). If the expression is used as a normal expression,
+    // this must trigger an error.
+    has_cover_initializer: Bool,
+    // Position of a duplicate non-computed `__proto__` property in the object
+    // literal being parsed, if any. §13.2.5.1's duplicate-__proto__ early
+    // error is NOT applied when the ObjectLiteral covers an
+    // ObjectAssignmentPattern (`({__proto__: a, __proto__: b} = obj)`), so —
+    // like has_cover_initializer — the error is deferred: raised when the
+    // expression is used as a plain expression, cleared when it's consumed
+    // as a destructuring pattern.
+    dup_proto_pos: Option(Int),
+    // ---- Formal-parameter parse state --------------------------------
+    // Whether we are inside formal parameter parsing. When true, yield
+    // expressions are forbidden even inside generators.
+    in_formal_params: Bool,
+    // Whether we are inside arrow function parameter parsing. When true,
+    // duplicate parameter names are always an error (even in sloppy mode).
+    in_arrow_params: Bool,
+    // Whether the current formal parameter list contains non-simple params
+    // (destructuring, defaults, or rest). When true, duplicate parameter
+    // names are always forbidden even in sloppy mode.
+    has_non_simple_param: Bool,
+    // Parameter names accumulated during formal parameter parsing.
+    // Used to detect duplicate parameter names across all params including
+    // destructured ones. Populated when in_formal_params is True.
+    param_bound_names: List(String),
+    // Function name saved during function parsing. When
+    // check_use_strict_in_body retroactively enables strict mode, this name
+    // is validated to reject eval/arguments.
+    pending_strict_name: Option(String),
   )
 }
 
@@ -306,34 +348,6 @@ type P {
     // 1 is default) from `{a: 0}` (invalid pattern: literal). Both have
     // last_expr_assignable=False, but only the assignment covers AssignmentPattern.
     last_expr_is_assignment: Bool,
-    // Whether the expression being parsed contains a cover-grammar initializer
-    // like `{a = 0}` in an object literal. This is only valid if the
-    // expression ends up as a destructuring pattern (assignment LHS or arrow
-    // params). If the expression is used as a normal expression, this must
-    // trigger an error.
-    has_cover_initializer: Bool,
-    // Position of a duplicate non-computed `__proto__` property in the object
-    // literal being parsed, if any. §13.2.5.1's duplicate-__proto__ early
-    // error is NOT applied when the ObjectLiteral covers an
-    // ObjectAssignmentPattern (`({__proto__: a, __proto__: b} = obj)`), so —
-    // like has_cover_initializer — the error is deferred: raised when the
-    // expression is used as a plain expression, cleared when it's consumed
-    // as a destructuring pattern.
-    dup_proto_pos: Option(Int),
-    // Whether we are inside formal parameter parsing. When true, yield
-    // expressions are forbidden even inside generators.
-    in_formal_params: Bool,
-    // Whether we are inside arrow function parameter parsing. When true,
-    // duplicate parameter names are always an error (even in sloppy mode).
-    in_arrow_params: Bool,
-    // Whether the current formal parameter list contains non-simple params
-    // (destructuring, defaults, or rest). When true, duplicate parameter
-    // names are always forbidden even in sloppy mode.
-    has_non_simple_param: Bool,
-    // Parameter names accumulated during formal parameter parsing.
-    // Used to detect duplicate parameter names across all params including
-    // destructured ones. Populated when in_formal_params is True.
-    param_bound_names: List(String),
     // Whether the expression being parsed contains a pattern that would be
     // invalid as a destructuring assignment target. Examples:
     // - [...x, y] (rest element not last in array)
@@ -361,10 +375,6 @@ type P {
     // and compound expressions.  Used to check strict-mode restrictions on
     // eval/arguments as operands of ++/-- and for-in/of LHS.
     last_expr_name: Option(String),
-    // Function name saved during function parsing. When
-    // check_use_strict_in_body retroactively enables strict mode, this name
-    // is validated to reject eval/arguments.
-    pending_strict_name: Option(String),
     // --- Parse-time scope tree (V8 model) -----------------------------
     // Replaces the old per-block scope_lexical/scope_var/scope_params/
     // scope_funcs/outer_lexical Sets. The parser threads a single
@@ -481,25 +491,25 @@ fn init_parser(
           in_block: False,
           module_top_level: False,
           in_single_stmt_pos: False,
+          has_cover_initializer: False,
+          dup_proto_pos: None,
+          in_formal_params: False,
+          in_arrow_params: False,
+          has_non_simple_param: False,
+          param_bound_names: [],
+          pending_strict_name: None,
         ),
         class_private_depth: 0,
         private_refs: [],
         outer_private_names: [],
         last_expr_assignable: False,
         last_expr_is_assignment: False,
-        has_cover_initializer: False,
-        dup_proto_pos: None,
-        in_formal_params: False,
-        in_arrow_params: False,
-        has_non_simple_param: False,
-        param_bound_names: [],
         has_invalid_pattern: False,
         export_names: set.new(),
         export_local_refs: [],
         import_bindings: set.new(),
         in_export_decl: False,
         last_expr_name: None,
-        pending_strict_name: None,
         sb: scope.sb_init(
           case mode {
             Module -> scope.Module
@@ -1232,24 +1242,31 @@ fn validate_and_register_binding_no_advance(
 /// Method params are already covered by `in_formal_params`; `in_method` still
 /// tightens the strict-mode dup check below.
 fn accumulate_param_name(p: P, name: String) -> Result(P, ParseError) {
-  case p.in_formal_params || p.in_arrow_params {
+  let bind = fn() {
+    Ok(
+      P(
+        ..p,
+        ctx: Ctx(..p.ctx, param_bound_names: [name, ..p.ctx.param_bound_names]),
+      ),
+    )
+  }
+  case p.ctx.in_formal_params || p.ctx.in_arrow_params {
     True ->
-      case list.contains(p.param_bound_names, name) {
+      case list.contains(p.ctx.param_bound_names, name) {
         True ->
           // In strict mode, arrow params, methods, or non-simple params: reject dups
           case
             p.ctx.strict
-            || p.in_arrow_params
+            || p.ctx.in_arrow_params
             || p.ctx.in_method
-            || p.has_non_simple_param
+            || p.ctx.has_non_simple_param
           {
             True -> Error(DuplicateParameterName(name, pos_of(p)))
             // Sloppy non-arrow non-method: dups allowed for simple params.
             // We still accumulate for retroactive strict check.
-            False ->
-              Ok(P(..p, param_bound_names: [name, ..p.param_bound_names]))
+            False -> bind()
           }
-        False -> Ok(P(..p, param_bound_names: [name, ..p.param_bound_names]))
+        False -> bind()
       }
     False -> Ok(p)
   }
@@ -2269,7 +2286,11 @@ fn parse_for_expression(
     let p2 = P(..p2, allow_in: p.allow_in)
     case peek(p2) {
       Semicolon ->
-        case p2.has_cover_initializer, p2.dup_proto_pos {
+        // A `for(;;)` init is an ordinary expression, never a destructuring
+        // pattern, so any deferred cover-grammar error is now due. (The
+        // shorthand-default case reports InvalidDestructuringTarget here
+        // rather than the generic ShorthandDefaultOutsideDestructuring.)
+        case p2.ctx.has_cover_initializer, p2.ctx.dup_proto_pos {
           True, _ -> Error(InvalidDestructuringTarget(pos_of(p2)))
           False, Some(pos) -> Error(DuplicateProtoProperty(pos))
           False, None ->
@@ -2312,9 +2333,12 @@ fn parse_for_expression(
                 let p2 =
                   P(
                     ..p2,
-                    has_cover_initializer: False,
                     has_invalid_pattern: False,
-                    dup_proto_pos: None,
+                    ctx: Ctx(
+                      ..p2.ctx,
+                      has_cover_initializer: False,
+                      dup_proto_pos: None,
+                    ),
                   )
                 case peek(p2) {
                   In -> parse_for_in_of_rest(p2, left, False, False)
@@ -2547,11 +2571,15 @@ fn parse_catch_clause(
         P(
           ..p3,
           sb:,
-          ctx: Ctx(..p3.ctx, in_block: True, binding_kind: BindingParam),
-          // Enable dup param detection for catch destructured bindings
-          in_formal_params: True,
-          param_bound_names: [],
-          has_non_simple_param: True,
+          ctx: Ctx(
+            ..p3.ctx,
+            in_block: True,
+            binding_kind: BindingParam,
+            // Enable dup param detection for catch destructured bindings
+            in_formal_params: True,
+            param_bound_names: [],
+            has_non_simple_param: True,
+          ),
         )
       use #(p4, param) <- result.try(parse_binding_pattern(p_inner))
       // §B.3.4: record whether the catch param is a bare identifier (or
@@ -2567,11 +2595,19 @@ fn parse_catch_clause(
             scope.RawScope(..s, catch_param_simple: simple)
           }),
         )
+      // A catch clause is NOT a function boundary, so the formal-parameter
+      // state it borrowed for the binding must be handed back explicitly —
+      // `p3.ctx` is the state at the `(`.
       use p5 <- result.try(expect(
         P(
           ..p4,
-          ctx: Ctx(..p4.ctx, binding_kind: BindingNone),
-          in_formal_params: False,
+          ctx: Ctx(
+            ..p4.ctx,
+            binding_kind: BindingNone,
+            in_formal_params: p3.ctx.in_formal_params,
+            param_bound_names: p3.ctx.param_bound_names,
+            has_non_simple_param: p3.ctx.has_non_simple_param,
+          ),
         ),
         RightParen,
       ))
@@ -2729,9 +2765,10 @@ fn parse_switch_case_stmts(
 
 /// Common head for function declarations and expressions: consume
 /// `[async] function [*] [name]`. Returns the state AFTER the optional
-/// name with `pending_strict_name` set, the state AT the name token (for
+/// name, the state AT the name token (for
 /// `pos_of`/`span_of`), the generator flag, and the name (empty when
-/// absent). `inner_name_ctx` validates the optional name against the
+/// absent — the caller passes it to `enter_function_context` as the
+/// body's `pending_strict_name`). `inner_name_ctx` validates the optional name against the
 /// FUNCTION'S OWN is_generator/is_async (function expressions, whose name
 /// is scoped to the body — `function yield(){}` is valid inside a
 /// generator) instead of the caller's (function declarations).
@@ -2759,12 +2796,7 @@ fn parse_function_head(
     False -> p3
   }
   use p4 <- result.map(eat_optional_name(p_for_name))
-  #(
-    P(..p4, pending_strict_name: string.to_option(func_name)),
-    p3,
-    is_generator,
-    func_name,
-  )
+  #(p4, p3, is_generator, func_name)
 }
 
 fn parse_function_decl_impl(
@@ -2799,7 +2831,13 @@ fn parse_function_decl_impl(
   // `parse_single_statement_inner` and is reset by
   // `enter_function_context`, so check `p4` BEFORE entering.
   let is_hoisted_decl = func_name != "" && !p4.ctx.in_single_stmt_pos
-  let p_fn = enter_function_context(p4, is_generator, is_async)
+  let p_fn =
+    enter_function_context(
+      p4,
+      is_generator,
+      is_async,
+      string.to_option(func_name),
+    )
   let p_fn = case is_hoisted_decl {
     True ->
       P(
@@ -2837,21 +2875,19 @@ fn parse_function_params_and_body(
   p: P,
 ) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
-  // Parse params with BindingParam so names land in the function scope
+  // Parse params with BindingParam so names land in the function scope.
+  // `enter_function_context` already zeroed the param state — this only
+  // opens the parameter list.
   let p2 =
     P(
       ..p2,
-      in_formal_params: True,
-      param_bound_names: [],
-      has_non_simple_param: False,
-      ctx: Ctx(..p2.ctx, binding_kind: BindingParam),
+      ctx: Ctx(..p2.ctx, in_formal_params: True, binding_kind: BindingParam),
     )
   use #(p3, params) <- result.try(parse_formal_parameters(p2))
   let p3 =
     P(
       ..p3,
-      in_formal_params: False,
-      ctx: Ctx(..p3.ctx, binding_kind: BindingNone),
+      ctx: Ctx(..p3.ctx, in_formal_params: False, binding_kind: BindingNone),
     )
   use p4 <- result.try(expect(p3, RightParen))
   // Check for "use strict" directive at start of function body.
@@ -3002,7 +3038,7 @@ fn parse_fn_body_maybe_var_boundary(
 /// "use strict" is discovered in function body. Catches cases like
 /// `function eval() { 'use strict'; }`.
 fn check_pending_strict_names(p: P) -> Result(Nil, ParseError) {
-  case p.pending_strict_name {
+  case p.ctx.pending_strict_name {
     None -> Ok(Nil)
     Some(name) ->
       case is_strict_binding_error(name) {
@@ -3016,7 +3052,7 @@ fn check_pending_strict_names(p: P) -> Result(Nil, ParseError) {
 /// This catches cases like `function a(yield){ 'use strict'; }` where the
 /// param was accepted before strict mode was activated.
 fn check_param_names_for_dups(p: P) -> Result(Nil, ParseError) {
-  check_param_names_list(p, p.param_bound_names, set.new())
+  check_param_names_list(p, p.ctx.param_bound_names, set.new())
 }
 
 fn check_param_names_list(
@@ -3045,7 +3081,7 @@ fn check_param_names_list(
 /// parameter names. Called when a destructured pattern, rest, or default
 /// is encountered in the parameter list.
 fn mark_non_simple_params(p: P) -> Result(P, ParseError) {
-  let p = P(..p, has_non_simple_param: True)
+  let p = P(..p, ctx: Ctx(..p.ctx, has_non_simple_param: True))
   // Retroactively check accumulated names for duplicates
   use Nil <- result.try(check_param_names_for_dups_only(p))
   Ok(p)
@@ -3055,7 +3091,7 @@ fn mark_non_simple_params(p: P) -> Result(P, ParseError) {
 /// Used when transitioning to non-simple params to retroactively detect
 /// duplicates like function(a, a, [b]){}.
 fn check_param_names_for_dups_only(p: P) -> Result(Nil, ParseError) {
-  check_names_for_dups_loop(p, p.param_bound_names, set.new())
+  check_names_for_dups_loop(p, p.ctx.param_bound_names, set.new())
 }
 
 fn check_names_for_dups_loop(
@@ -3129,10 +3165,7 @@ fn parse_setter_params_and_body(
   let p2 =
     P(
       ..p2,
-      in_formal_params: True,
-      param_bound_names: [],
-      has_non_simple_param: False,
-      ctx: Ctx(..p2.ctx, binding_kind: BindingParam),
+      ctx: Ctx(..p2.ctx, in_formal_params: True, binding_kind: BindingParam),
     )
   case peek(p2) {
     RightParen -> Error(SetterExactlyOneParam(pos_of(p2)))
@@ -3141,23 +3174,31 @@ fn parse_setter_params_and_body(
       // Check if param is destructured (non-simple)
       let param_name = get_simple_binding_name(p2)
       let p2 = case param_name == "" {
-        True -> P(..p2, has_non_simple_param: True)
+        True -> P(..p2, ctx: Ctx(..p2.ctx, has_non_simple_param: True))
         False -> p2
       }
       use #(p3, pat) <- result.try(parse_binding_pattern(p2))
       // Default value makes params non-simple
       let p3 = case peek(p3) {
-        Equal -> P(..p3, has_non_simple_param: True)
+        Equal -> P(..p3, ctx: Ctx(..p3.ctx, has_non_simple_param: True))
         _ -> p3
       }
+      let default_pos = pos_of(p3)
       use #(p4, final_pat) <- result.try(parse_pattern_default(p3, pat))
+      // The default value is an ordinary expression: `set x(v = {a = 1}) {}`
+      // is a SyntaxError. (`parse_formal_parameters` does the same for every
+      // other parameter list; a setter's single formal bypasses it.)
+      use Nil <- result.try(check_cover_grammar_errors(p4, default_pos))
       case peek(p4) {
         RightParen -> {
           let p5 =
             P(
               ..advance(p4),
-              in_formal_params: False,
-              ctx: Ctx(..p4.ctx, binding_kind: BindingNone),
+              ctx: Ctx(
+                ..p4.ctx,
+                in_formal_params: False,
+                binding_kind: BindingNone,
+              ),
             )
           // Check for "use strict" directive
           use p5 <- result.try(check_use_strict_in_body(p5))
@@ -3228,7 +3269,20 @@ fn parse_formal_parameters(
 ) -> Result(#(P, List(ast.Pattern)), ParseError) {
   case peek(p) {
     RightParen -> Ok(#(p, []))
-    _ -> parse_formal_parameter_list(p, set.new(), [])
+    _ -> {
+      let start = pos_of(p)
+      use #(p2, params) <- result.try(
+        parse_formal_parameter_list(p, set.new(), []),
+      )
+      // Parameter DEFAULTS are ordinary expressions (the parameter *targets*
+      // are binding patterns, which never set these flags), so a cover
+      // grammar left unconsumed by them is due now: `function f(x = {a=1}){}`
+      // and `f(x = {__proto__:1, __proto__:2}){}` are SyntaxErrors. The
+      // enclosing function boundary zeroed both flags, so nothing an outer
+      // expression owes can be misattributed here.
+      use Nil <- result.map(check_cover_grammar_errors(p2, start))
+      #(p2, params)
+    }
   }
 }
 
@@ -3261,7 +3315,7 @@ fn parse_formal_parameter_list(
       let param_name = get_simple_binding_name(p)
       // If param is destructured (not a simple identifier), mark non-simple
       let is_non_simple = param_name == ""
-      let p = case is_non_simple && !p.has_non_simple_param {
+      let p = case is_non_simple && !p.ctx.has_non_simple_param {
         True -> mark_non_simple_params(p)
         False -> Ok(p)
       }
@@ -3287,7 +3341,7 @@ fn parse_formal_param_after_dup_check(
   // Optional default — makes param list non-simple
   case peek(p2) {
     Equal -> {
-      let p2 = case !p2.has_non_simple_param {
+      let p2 = case !p2.ctx.has_non_simple_param {
         True -> mark_non_simple_params(p2)
         False -> Ok(p2)
       }
@@ -3361,9 +3415,9 @@ fn check_duplicate_param(
   use <- bool.guard(name == "", Ok(Nil))
   let must_be_unique =
     p.ctx.strict
-    || p.in_arrow_params
+    || p.ctx.in_arrow_params
     || p.ctx.in_method
-    || p.has_non_simple_param
+    || p.ctx.has_non_simple_param
   use <- bool.guard(
     must_be_unique && set.contains(seen, name),
     Error(DuplicateParameterName(name, pos_of(p))),
@@ -4395,6 +4449,23 @@ fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
   ))
 }
 
+/// Raise the deferred cover-grammar early errors (`{a = 0}` shorthand
+/// default, duplicate `__proto__`) of the expression just parsed, now that
+/// it is known NOT to have been consumed as a destructuring pattern.
+///
+/// Every consumption point of an ObjectLiteral-that-might-cover-a-pattern
+/// funnels here: expression statements, the `for(;;)` head, a concise arrow
+/// body, and formal-parameter defaults. `pos` is where the SyntaxError is
+/// reported for the shorthand-default case (the `__proto__` case carries the
+/// duplicate property's own recorded position).
+fn check_cover_grammar_errors(p: P, pos: Int) -> Result(Nil, ParseError) {
+  case p.ctx.has_cover_initializer, p.ctx.dup_proto_pos {
+    True, _ -> Error(ShorthandDefaultOutsideDestructuring(pos))
+    False, Some(dup_pos) -> Error(DuplicateProtoProperty(dup_pos))
+    False, None -> Ok(Nil)
+  }
+}
+
 fn parse_expression_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // Capture the raw string content before parsing, so a lone string-literal
   // statement can be recorded as a Directive with its un-decoded text.
@@ -4403,14 +4474,7 @@ fn parse_expression_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     _ -> option.None
   }
   use #(p2, expr) <- result.try(parse_expression(p))
-  use <- bool.guard(
-    p2.has_cover_initializer,
-    Error(ShorthandDefaultOutsideDestructuring(pos_of(p))),
-  )
-  use Nil <- result.try(case p2.dup_proto_pos {
-    Some(pos) -> Error(DuplicateProtoProperty(pos))
-    None -> Ok(Nil)
-  })
+  use Nil <- result.try(check_cover_grammar_errors(p2, pos_of(p)))
   use p3 <- result.try(eat_semicolon(p2))
   // A Directive is an expression statement whose expression is exactly a
   // string literal (not e.g. a concatenation), so only tag it then.
@@ -4566,7 +4630,11 @@ fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
                     True -> Error(EvalArgsAssignStrictMode(pos_of(p2)))
                     False ->
                       finish_assignment(
-                        P(..p2, has_invalid_pattern: False, dup_proto_pos: None),
+                        P(
+                          ..p2,
+                          has_invalid_pattern: False,
+                          ctx: Ctx(..p2.ctx, dup_proto_pos: None),
+                        ),
                         lhs_expr,
                         ast.Assign,
                         Some(True),
@@ -4618,7 +4686,7 @@ fn finish_assignment(
   op: ast.AssignmentOp,
   last_is_assignment: Option(Bool),
 ) -> Result(#(P, ast.Expression), ParseError) {
-  let p3 = advance(P(..p2, has_cover_initializer: False))
+  let p3 = advance(P(..p2, ctx: Ctx(..p2.ctx, has_cover_initializer: False)))
   use #(p4, rhs) <- result.map(parse_assignment_expression(p3))
   let p_out = case last_is_assignment {
     Some(flag) ->
@@ -4739,9 +4807,11 @@ fn try_single_ident_arrow(
   case has_line_break_before(p2) {
     True -> Error(NotAnArrow)
     False -> {
+      let p3 = enter_arrow_context(advance(p2), is_async, [name])
       // Save param name for the retroactive strict-mode check in the body.
-      let p3 = P(..advance(p2), param_bound_names: [name])
-      let p3 = enter_arrow_context(p3, is_async, [name])
+      // Set AFTER entering the arrow's context, which zeroes the boundary
+      // state (including `param_bound_names`) as it does for every function.
+      let p3 = P(..p3, ctx: Ctx(..p3.ctx, param_bound_names: [name]))
       // A bare-identifier param list is always simple — passed through for
       // the (no-op) var-boundary predicate only.
       let params = [ast.IdentifierPattern(name: name, span: span_of(ident_p))]
@@ -4773,12 +4843,10 @@ fn try_paren_arrow(
   let p_arrow =
     P(
       ..p_ctx,
-      in_arrow_params: True,
-      in_formal_params: True,
-      param_bound_names: [],
-      has_non_simple_param: False,
       ctx: Ctx(
         ..p_ctx.ctx,
+        in_arrow_params: True,
+        in_formal_params: True,
         binding_kind: BindingParam,
         // §15.3 ArrowParameters[?Yield, ?Await] — arrow params inherit the
         // ENCLOSING yield/await context (unlike full functions, whose params
@@ -4799,9 +4867,12 @@ fn try_paren_arrow(
         expect(
           P(
             ..p3,
-            in_arrow_params: False,
-            in_formal_params: False,
-            ctx: Ctx(..p3.ctx, binding_kind: BindingNone),
+            ctx: Ctx(
+              ..p3.ctx,
+              in_arrow_params: False,
+              in_formal_params: False,
+              binding_kind: BindingNone,
+            ),
           ),
           RightParen,
         )
@@ -4873,6 +4944,9 @@ fn finish_arrow(
   // end byte BEFORE restore_outer_context so the span is independent of any
   // future prev_end adjustment in the restore.
   let body_end = p_body.prev_end
+  // `ctx: outer.ctx` also hands the ENCLOSING expression back its deferred
+  // cover-grammar errors, which the arrow's own params/body context zeroed:
+  // `({a = 1}, () => {})` still owes a SyntaxError after the arrow.
   let p_restored = restore_outer_context(p_body, outer)
   // §13.15.1: AssignmentTargetType of ArrowFunction is ~invalid~ — clear the
   // assignable flag leaked from the arrow body's final expression so
@@ -4892,10 +4966,11 @@ fn parse_arrow_body(
   p: P,
   params: List(ast.Pattern),
 ) -> Result(#(P, ast.ArrowBody), ParseError) {
-  // Clear cover-grammar flags since arrow params are a valid
-  // destructuring context (e.g. ({a = 0}) => ... is valid; duplicate
-  // __proto__ in an object binding pattern is likewise not an early error).
-  let p = P(..p, has_cover_initializer: False, dup_proto_pos: None)
+  // The cover-grammar flags are already clear here: arrow params are a valid
+  // destructuring context (`({a = 0}) => …` is valid; a duplicate __proto__
+  // in an object BINDING pattern is likewise not an early error), and
+  // `enter_arrow_context` zeroed the enclosing expression's flags — which
+  // `finish_arrow`'s `restore_outer_context` will hand straight back.
   case peek(p) {
     LeftBrace -> {
       // Check for "use strict" directive in arrow body.
@@ -4910,7 +4985,12 @@ fn parse_arrow_body(
       Ok(#(p2, ast.ArrowBodyBlock(body_stmt)))
     }
     _ -> {
+      let start = pos_of(p)
       use #(p2, expr) <- result.try(parse_assignment_expression(p))
+      // A concise body is an ordinary expression, and `finish_arrow` is about
+      // to drop this context — so `() => ({a = 1})` must raise its deferred
+      // cover-grammar error HERE, not leak it to the enclosing statement.
+      use Nil <- result.try(check_cover_grammar_errors(p2, start))
       // Flip children_at[arrow-fn] to source order. The block-body
       // branch above goes through `parse_function_body_block` which
       // does the equivalent `sb_reorder_body_children`; this branch
@@ -4930,7 +5010,7 @@ fn parse_arrow_body(
 
 fn parse_yield_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   // Yield expressions are forbidden in formal parameter defaults
-  case p.in_formal_params {
+  case p.ctx.in_formal_params {
     True -> Error(YieldInFormalParameter(pos_of(p)))
     False -> parse_yield_expression_inner(p)
   }
@@ -6164,8 +6244,8 @@ fn parse_object_properties(
       // has_cover_initializer: the early error is skipped when this object
       // literal is consumed as an ObjectAssignmentPattern.
       let is_proto = is_proto_property(p)
-      let p = case is_proto && has_proto, p.dup_proto_pos {
-        True, None -> P(..p, dup_proto_pos: Some(pos_of(p)))
+      let p = case is_proto && has_proto, p.ctx.dup_proto_pos {
+        True, None -> P(..p, ctx: Ctx(..p.ctx, dup_proto_pos: Some(pos_of(p))))
         _, _ -> p
       }
       use #(p2, prop) <- result.try(parse_object_property(p))
@@ -6386,7 +6466,7 @@ fn parse_object_property_value(
               let p6 = advance(p5)
               use #(p7, rhs) <- result.map(parse_assignment_expression(p6))
               #(
-                P(..p7, has_cover_initializer: True),
+                P(..p7, ctx: Ctx(..p7.ctx, has_cover_initializer: True)),
                 ast.AssignmentExpression(
                   operator: ast.Assign,
                   left: key_expr,
@@ -6431,7 +6511,13 @@ fn parse_function_expression(
   ))
   // `enter_function_context` overwrites in_generator/in_async itself, so the
   // inner-context override applied to `p4` for name validation is harmless.
-  let p_inner = enter_function_context(p4, is_generator, is_async)
+  let p_inner =
+    enter_function_context(
+      p4,
+      is_generator,
+      is_async,
+      string.to_option(func_name),
+    )
   let fn_scope = p_inner.sb.current
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(p_inner) |> restore_context_fn(p),
@@ -7190,7 +7276,7 @@ fn check_use_strict_in_body(p: P) -> Result(P, ParseError) {
       // SyntaxError even when the function is ALREADY strict (class methods,
       // nested strict functions) - the sloppy path catches this in
       // check_retroactive_params, this catches the already-strict case.
-      case p.has_non_simple_param {
+      case p.ctx.has_non_simple_param {
         True ->
           case
             peek(p) == LeftBrace
@@ -7336,9 +7422,9 @@ fn check_retroactive_octals(
 /// parameter names that were parsed in sloppy mode.
 /// Also rejects "use strict" when params are non-simple (destructuring/rest/default).
 fn check_retroactive_params(p: P) -> Result(P, ParseError) {
-  case p.has_non_simple_param {
+  case p.ctx.has_non_simple_param {
     True -> Error(MisplacedUseStrictDirective(pos_of(p)))
-    False -> validate_retroactive_param_names(p, p.param_bound_names)
+    False -> validate_retroactive_param_names(p, p.ctx.param_bound_names)
   }
 }
 
@@ -7372,8 +7458,20 @@ fn validate_retroactive_param_names(
 ///
 /// The whole outer `Ctx` is put back by `restore_outer_context` at the
 /// matching function exit; `strict` is the only field carried IN (a nested
-/// function inherits the enclosing strictness).
-fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
+/// function inherits the enclosing strictness). This is therefore the ONE
+/// place a nested function's boundary state is initialised: no caller may
+/// hand-save-and-restore a `Ctx` field around a nested parse.
+///
+/// `strict_name` is the function's own BindingIdentifier (`None` for arrows,
+/// methods and static blocks, which have no binding name of their own) —
+/// remembered so a retroactive `"use strict"` in the body can reject
+/// `function eval() { "use strict"; }`.
+fn enter_function_context(
+  p: P,
+  is_generator: Bool,
+  is_async: Bool,
+  strict_name: Option(String),
+) -> P {
   let #(sb, _id) = scope.sb_push(p.sb, scope.Function)
   P(
     ..p,
@@ -7399,6 +7497,16 @@ fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
       in_block: False,
       module_top_level: False,
       in_single_stmt_pos: False,
+      // A function body neither inherits nor exports the enclosing
+      // expression's deferred cover-grammar errors, and starts with an
+      // empty formal-parameter list of its own.
+      has_cover_initializer: False,
+      dup_proto_pos: None,
+      in_formal_params: False,
+      in_arrow_params: False,
+      has_non_simple_param: False,
+      param_bound_names: [],
+      pending_strict_name: strict_name,
     ),
     // Push a fresh Function scope; the new scope's id is now sb.current
     // and sb.current_fn.
@@ -7415,7 +7523,7 @@ fn enter_function_context(p: P, is_generator: Bool, is_async: Bool) -> P {
 /// `in_static_block` is folded into `in_class_field_init` (which only drives
 /// the `arguments` check) rather than restored.
 fn enter_arrow_context(p: P, is_async: Bool, param_names: List(String)) -> P {
-  let inner = enter_function_context(p, False, is_async)
+  let inner = enter_function_context(p, False, is_async, None)
   // Mark the new function scope as an arrow so finalize knows it does NOT
   // own lexical pseudo-slots; declare each param into the arrow's scope
   // (try_single_ident_arrow reads the bare identifier before the scope is
@@ -7450,7 +7558,7 @@ fn enter_method_context(
   is_constructor: Bool,
   has_super_class: Bool,
 ) -> P {
-  let inner = enter_function_context(p, is_generator, is_async)
+  let inner = enter_function_context(p, is_generator, is_async, None)
   P(
     ..inner,
     ctx: Ctx(
@@ -7470,7 +7578,7 @@ fn enter_method_context(
 fn enter_static_block_context(p: P) -> P {
   // enter_function_context pushes a Function scope; for §15.7.14 a static
   // block is its own ClassStaticBlock function-kind scope, so re-tag it.
-  let inner = enter_function_context(p, False, True)
+  let inner = enter_function_context(p, False, True, None)
   let sb =
     scope.sb_update_current(inner.sb, fn(s) {
       scope.RawScope(..s, kind: scope.ClassStaticBlock, is_strict: True)
@@ -7500,7 +7608,9 @@ fn restore_context_fn(
 /// `ctx: outer.ctx` restores every nesting-sensitive flag/counter at once —
 /// including `strict`, which a body's retroactive `"use strict"` directive
 /// may have flipped and which must NOT leak into the enclosing sloppy code
-/// (`function f(){"use strict"} with({}) {}` is legal). Because the whole
+/// (`function f(){"use strict"} with({}) {}` is legal), the formal-parameter
+/// state, and the deferred cover-grammar errors the enclosing expression may
+/// still owe (`({a = 1}, () => {})` is a SyntaxError). Because the whole
 /// `Ctx` record is copied there is no per-field restore list to keep in
 /// sync with `Ctx`'s (and `enter_function_context`'s) field set.
 ///

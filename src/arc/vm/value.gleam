@@ -4902,13 +4902,27 @@ pub fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
   }
 }
 
+/// The two values §7.1.4 ToNumber refuses to convert. Both are spec-mandated
+/// TypeErrors, but the *caller* names the class and the message: a future
+/// conversion failure that the spec classes as something else (a RangeError,
+/// say) becomes a new variant here, and every caller stops compiling until it
+/// says what to throw. That is the whole point of not returning a String.
+///
+/// The engine-invariant failures ToNumber used to report as strings — an
+/// object that skipped ToPrimitive, the TDZ sentinel — are `panic`s inside
+/// `to_number`, not values a caller has to render.
+pub type ToNumberError {
+  BigIntNotConvertible
+  SymbolNotConvertible
+}
+
 /// ES2024 §7.1.4 ToNumber, primitives ONLY.
 ///
 /// Callers must run ToPrimitive (coerce.to_primitive / coerce.js_to_number /
 /// coerce.try_to_number) on objects first — an object here is a bug, never
 /// "NaN": the spec requires ToPrimitive (which runs user valueOf/toString and
 /// can throw) before the conversion table is consulted.
-pub fn to_number(val: JsValue) -> Result(JsNum, String) {
+pub fn to_number(val: JsValue) -> Result(JsNum, ToNumberError) {
   case val {
     JsNumber(n) -> Ok(n)
     JsUndefined -> Ok(NaN)
@@ -4916,10 +4930,13 @@ pub fn to_number(val: JsValue) -> Result(JsNum, String) {
     JsBool(True) -> Ok(Finite(1.0))
     JsBool(False) -> Ok(Finite(0.0))
     JsString(s) -> Ok(string_to_number(s))
-    JsBigInt(_) -> Error("Cannot convert BigInt to number")
-    JsSymbol(_) -> Error("Cannot convert Symbol to number")
-    JsObject(_) -> Error("Cannot convert object to number without ToPrimitive")
-    JsUninitialized -> Error("Cannot access before initialization")
+    JsBigInt(_) -> Error(BigIntNotConvertible)
+    JsSymbol(_) -> Error(SymbolNotConvertible)
+    JsObject(_) ->
+      panic as "ToNumber on an object: caller must run ToPrimitive first"
+    // elements.get/get_option promise the hole sentinel never leaks, and every
+    // TDZ load throws ReferenceError before the value reaches an operand.
+    JsUninitialized -> panic as "ToNumber on the TDZ sentinel"
   }
 }
 

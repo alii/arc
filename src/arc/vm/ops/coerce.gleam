@@ -184,7 +184,10 @@ pub fn js_to_number(
     other ->
       case value.to_number(other) {
         Ok(n) -> Ok(#(n, state))
-        Error(msg) -> thrown_type_error(state, msg)
+        Error(value.BigIntNotConvertible) ->
+          thrown_type_error(state, "Cannot convert BigInt to number")
+        Error(value.SymbolNotConvertible) ->
+          thrown_type_error(state, "Cannot convert Symbol to number")
       }
   }
 }

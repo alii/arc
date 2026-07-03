@@ -308,8 +308,9 @@ fn encode_primitives_loop(
             Ok(num) ->
               Some(encode_typed_number(ta_zeroed(size), 0, elem_kind, num))
             // Symbol/BigInt → TypeError; decline so the per-element path
-            // raises it at the right index.
-            Error(_to_number_throws) -> None
+            // raises it at the right index (with the right error class).
+            Error(value.BigIntNotConvertible)
+            | Error(value.SymbolNotConvertible) -> None
           }
       }
       case seg {

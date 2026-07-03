@@ -377,7 +377,10 @@ fn coerce_limit(
     Error(#(thrown, state)) -> Error(close_throw(state, this, thrown))
     Ok(#(prim, state)) ->
       case value.to_number(prim) {
-        Error(msg) -> Error(close_throw_type(state, this, msg))
+        Error(value.BigIntNotConvertible) ->
+          Error(close_throw_type(state, this, "Cannot convert BigInt to number"))
+        Error(value.SymbolNotConvertible) ->
+          Error(close_throw_type(state, this, "Cannot convert Symbol to number"))
         Ok(NaN) ->
           Error(close_throw_range(state, this, name <> " limit is NaN"))
         Ok(Infinity) -> Ok(#(limits.max_safe_integer, state))

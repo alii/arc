@@ -684,3 +684,100 @@ pub fn continue_label_must_denote_iteration_statement_test() {
     }
   }
 }
+
+/// Report the collected `expect_*` results, panicking with `label` when any
+/// of them failed.
+fn report(results: List(Result(Nil, String)), label: String) -> Nil {
+  let errors =
+    list.filter_map(results, fn(r) {
+      case r {
+        Ok(Nil) -> Error(Nil)
+        Error(reason) -> Ok(reason)
+      }
+    })
+  case errors {
+    [] -> Nil
+    _ -> {
+      list.each(errors, fn(e) { io.println("  FAIL: " <> e) })
+      panic as { int.to_string(list.length(errors)) <> " " <> label }
+    }
+  }
+}
+
+/// Formal-parameter state (`has_non_simple_param`, `param_bound_names`, …)
+/// belongs to the function it describes: a nested function or arrow must not
+/// see the ENCLOSING parameter list's state, or its own perfectly legal
+/// `"use strict"` directive gets rejected as "misplaced".
+pub fn function_boundary_resets_param_state_test() {
+  [
+    // The arrow's own params are simple, so its `"use strict"` is legal even
+    // though the enclosing function / catch clause has a destructured param.
+    expect_parses("function f({a}) { x => {\"use strict\"} }", parser.Script),
+    expect_parses("function f({a}) { (x) => {\"use strict\"} }", parser.Script),
+    expect_parses("try{}catch({a}){ x => {\"use strict\"} }", parser.Script),
+    expect_parses(
+      "function f({a}) { function g(){\"use strict\"} }",
+      parser.Script,
+    ),
+    // A sloppy `eval` param must not be retro-validated against a nested
+    // arrow's `"use strict"`.
+    expect_parses("function f(eval) { x => {\"use strict\"} }", parser.Script),
+    // ...but the enclosing function's OWN non-simple params still reject it.
+    expect_parse_error_containing(
+      "function f({a}) { \"use strict\" }",
+      parser.Script,
+      "use strict",
+    ),
+    // The nested function's own name is what a retroactive "use strict"
+    // checks — not the enclosing one's.
+    expect_parses(
+      "function eval() { function g(){\"use strict\"} }",
+      parser.Script,
+    ),
+    expect_parse_error(
+      "function g() { function eval(){\"use strict\"} }",
+      parser.Script,
+    ),
+  ]
+  |> report("function-boundary param-state cases failed")
+}
+
+/// The deferred cover-grammar early errors (`{a = 1}` shorthand default,
+/// duplicate `__proto__`) belong to the expression that owes them. An arrow
+/// function nested inside that expression clears them for its own params and
+/// body — and must hand them straight back on the way out.
+pub fn arrow_preserves_enclosing_cover_grammar_errors_test() {
+  [
+    // The comma/array expression still owes the deferred error after the arrow.
+    expect_parse_error("({a = 1}, () => {});", parser.Script),
+    expect_parse_error("({a = 1}) => {}, ({a = 1})", parser.Script),
+    expect_parse_error("[{a = 1}, () => {}];", parser.Script),
+    expect_parse_error(
+      "({__proto__: a, __proto__: b}, () => {});",
+      parser.Script,
+    ),
+    // Arrow params ARE a destructuring context: neither error applies there.
+    expect_parses("({a = 1}) => {};", parser.Script),
+    expect_parses("({__proto__: a, __proto__: b}) => {};", parser.Script),
+    expect_parses("({a = 1} = b);", parser.Script),
+    expect_parses("({__proto__: a, __proto__: b} = c);", parser.Script),
+    // A concise arrow body is an ordinary expression, so it owes the error
+    // itself rather than leaking it to the enclosing statement.
+    expect_parse_error("() => ({a = 1});", parser.Script),
+    expect_parse_error("() => ({__proto__: 1, __proto__: 2});", parser.Script),
+    expect_parse_error("x = () => ({a = 1});", parser.Script),
+    // Parameter DEFAULTS are ordinary expressions too, in every param list.
+    expect_parse_error("function f(x = {a = 1}) {}", parser.Script),
+    expect_parse_error("(function(x = {a = 1}) {});", parser.Script),
+    expect_parse_error("class C { m(x = {a = 1}) {} }", parser.Script),
+    expect_parse_error("var o = { set x(v = {a = 1}) {} };", parser.Script),
+    expect_parse_error(
+      "function f(x = {__proto__: 1, __proto__: 2}) {}",
+      parser.Script,
+    ),
+    expect_parses("function f(x = {a: 1}) {}", parser.Script),
+    expect_parses("var o = { set x(v = 1) {} };", parser.Script),
+    expect_parses("(x = {a: 1}) => {};", parser.Script),
+  ]
+  |> report("cover-grammar boundary cases failed")
+}

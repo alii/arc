@@ -181,10 +181,18 @@ const bigint_mix_error = OpTypeError(
   "Cannot mix BigInt and other types, use explicit conversions",
 )
 
-/// ToNumber for an operator operand. value.to_number only fails on values
-/// ToNumber rejects (BigInt, Symbol), and that failure is always a TypeError.
+/// ToNumber for an operator operand. Both refusals ToNumber can report are
+/// TypeErrors — but the class is chosen HERE, per variant, so a future
+/// `ToNumberError` variant that the spec classes differently is a compile
+/// error rather than a silently demoted RangeError.
 fn to_number(v: JsValue) -> Result(JsNum, OpError) {
-  result.map_error(value.to_number(v), OpTypeError)
+  case value.to_number(v) {
+    Ok(n) -> Ok(n)
+    Error(value.BigIntNotConvertible) ->
+      Error(OpTypeError("Cannot convert BigInt to number"))
+    Error(value.SymbolNotConvertible) ->
+      Error(OpTypeError("Cannot convert Symbol to number"))
+  }
 }
 
 fn bigint_arith(kind: PureBinOp, a: Int, b: Int) -> Result(JsValue, OpError) {
