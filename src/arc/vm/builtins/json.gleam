@@ -534,8 +534,11 @@ fn number_span_to_num(s: String, span: NumberSpan) -> value.JsNum {
   case span.frac_len > 0, span.exp_len > 0 {
     True, _ -> float_or_saturate(s, s)
     False, True -> {
-      let mantissa = string.slice(s, 0, span.int_len)
-      let exponent = string.drop_start(s, span.int_len)
+      // `s` is a JSON number token, so `int_len` counts ASCII characters and
+      // codepoint slicing is exact. `string.slice`/`string.drop_start` would
+      // segment graphemes here for no reason.
+      let mantissa = objops.string_slice(s, 0, span.int_len)
+      let exponent = objops.string_drop_start(s, span.int_len)
       float_or_saturate(mantissa <> ".0" <> exponent, s)
     }
     False, False ->
@@ -798,8 +801,6 @@ type StringifyCtx {
 
 const circular_msg = "Converting circular structure to JSON"
 
-const revoked_proxy_msg = "Cannot perform 'IsArray' on a proxy that has been revoked"
-
 /// §25.5.2 step 4: derive ReplacerFunction (callable replacer) or
 /// PropertyList (array replacer) from the second argument.
 fn build_replacer(
@@ -814,14 +815,17 @@ fn build_replacer(
       case helpers.is_callable(state.heap, replacer) {
         // Step 4.a: IsCallable → ReplacerFunction.
         True -> Ok(#(#(Some(replacer), None), state))
-        False ->
+        False -> {
           // Step 4.b.i: isArray = ? IsArray(replacer) — a revoked proxy
           // makes IsArray throw a TypeError.
-          case objops.is_array_ref(state.heap, ref) {
-            Error(Nil) -> coerce.thrown_type_error(state, revoked_proxy_msg)
-            Ok(False) -> Ok(#(#(None, None), state))
+          use #(is_arr, state) <- result.try(objops.try_is_array(
+            state,
+            replacer,
+          ))
+          case is_arr {
+            False -> Ok(#(#(None, None), state))
             // Step 4.b.iii: build PropertyList from the array elements.
-            Ok(True) -> {
+            True -> {
               use #(len, state) <- result.try(length_of_array_like(state, ref))
               use #(items, state) <- result.map(
                 collect_property_list(state, ref, 0, len, set.new(), []),
@@ -829,6 +833,7 @@ fn build_replacer(
               #(#(None, Some(items)), state)
             }
           }
+        }
       }
     _ -> Ok(#(#(None, None), state))
   }
@@ -851,7 +856,7 @@ fn collect_property_list(
       use #(v, state) <- result.try(objops.get_value(
         state,
         ref,
-        key.canonical_key(int.to_string(k)),
+        key.index_key(k),
         JsObject(ref),
       ))
       use #(item, state) <- result.try(replacer_item(state, v))
@@ -933,11 +938,13 @@ fn compute_gap(
         False -> string.repeat(" ", mv)
       }
     }
-    // Step 7: String → first 10 code units.
+    // Step 7: String → first 10 code units. Codepoints, not graphemes: a
+    // gap of ten combining marks is ten code units, and `string.slice` would
+    // fold them into one cluster and keep the whole string.
     JsString(s) ->
-      case string.length(s) <= 10 {
+      case objops.string_length(s) <= 10 {
         True -> s
-        False -> string.slice(s, 0, 10)
+        False -> objops.string_slice(s, 0, 10)
       }
     // Step 8: otherwise no gap.
     _ -> ""
@@ -1061,10 +1068,10 @@ fn serialize_property(
     JsObject(ref) ->
       case helpers.is_callable(state.heap, val) {
         True -> Ok(#(None, state))
-        False ->
-          case objops.is_array_ref(state.heap, ref) {
-            Error(Nil) -> coerce.thrown_type_error(state, revoked_proxy_msg)
-            Ok(True) -> {
+        False -> {
+          use #(is_arr, state) <- result.try(objops.try_is_array(state, val))
+          case is_arr {
+            True -> {
               use #(s, state) <- result.map(serialize_array(
                 state,
                 ctx,
@@ -1074,7 +1081,7 @@ fn serialize_property(
               ))
               #(Some(s), state)
             }
-            Ok(False) -> {
+            False -> {
               use #(s, state) <- result.map(serialize_object(
                 state,
                 ctx,
@@ -1085,6 +1092,7 @@ fn serialize_property(
               #(Some(s), state)
             }
           }
+        }
       }
     // Step 12: undefined / symbol → omitted.
     JsUndefined | value.JsSymbol(_) | value.JsUninitialized ->
@@ -1248,65 +1256,88 @@ fn finalize_brackets(
   }
 }
 
-/// Stringify a JS string with proper JSON escaping.
+/// Result of scanning UTF-8 bytes for the next byte QuoteJSONString must
+/// escape. The mirror image of `StringScan` on the parse side.
+type EscapeScan {
+  /// `n` clean bytes, then `byte` (which needs escaping), then `rest`.
+  FoundEscapable(n: Int, byte: Int, rest: BitArray)
+  /// Every remaining byte can be emitted verbatim.
+  AllClean
+}
+
+/// Scan forward for the first byte that must be escaped in a JSON string:
+/// a control character (< 0x20), '"' or '\\'.
 ///
-/// Fast path: byte-scan for characters that need escaping (control chars
-/// < 0x20, '"', '\\'). The overwhelming majority of strings are clean, so
-/// we return the quoted string directly with no intermediate allocations.
-/// Only fall back to the grapheme-walking escape builder when an escapable
-/// byte is found. Safe on UTF-8: all multi-byte sequence bytes are >= 0x80,
-/// so they can never be mistaken for an escapable ASCII byte.
-fn stringify_string(s: String) -> String {
-  case needs_json_escape(<<s:utf8>>) {
-    False -> "\"" <> s <> "\""
-    True ->
-      "\"" <> escape_string(string.to_graphemes(s), string_tree.new()) <> "\""
-  }
-}
-
-/// True if the UTF-8 bytes contain any character that must be escaped in a
-/// JSON string: control characters (< 0x20), double quote, or backslash.
-fn needs_json_escape(bytes: BitArray) -> Bool {
+/// Safe on UTF-8, and the reason escaping is byte-oriented at all: every byte
+/// of a multi-byte sequence is >= 0x80, so it can never be mistaken for an
+/// escapable ASCII byte, and a clean span cut at an escapable byte is always
+/// itself valid UTF-8.
+fn scan_escapable(bytes: BitArray, n: Int) -> EscapeScan {
   case bytes {
-    <<b, _:bits>> if b < 0x20 -> True
-    <<0x22, _:bits>> -> True
-    <<0x5c, _:bits>> -> True
-    <<_, rest:bits>> -> needs_json_escape(rest)
-    _ -> False
+    <<0x22, rest:bytes>> -> FoundEscapable(n, 0x22, rest)
+    <<0x5c, rest:bytes>> -> FoundEscapable(n, 0x5c, rest)
+    <<c, rest:bytes>> if c < 0x20 -> FoundEscapable(n, c, rest)
+    <<_, rest:bytes>> -> scan_escapable(rest, n + 1)
+    _ -> AllClean
   }
 }
 
-fn escape_string(chars: List(String), acc: StringTree) -> String {
-  case chars {
-    [] -> string_tree.to_string(acc)
-    [c, ..rest] -> {
-      let escaped = case c {
-        // CR LF forms a single grapheme cluster (UAX #29 GB3), so it would
-        // miss the single-char clauses below and leak through raw.
-        "\r\n" -> "\\r\\n"
-        "\"" -> "\\\""
-        "\\" -> "\\\\"
-        "\n" -> "\\n"
-        "\r" -> "\\r"
-        "\t" -> "\\t"
-        "\u{0008}" -> "\\b"
-        "\u{000C}" -> "\\f"
-        _ -> {
-          // Check for other control characters (0x00-0x1F)
-          case string.to_utf_codepoints(c) {
-            [cp] -> {
-              let code = string.utf_codepoint_to_int(cp)
-              case code < 0x20 {
-                True -> unicode_escape(code)
-                False -> c
-              }
-            }
-            _ -> c
-          }
-        }
-      }
-      escape_string(rest, string_tree.append(acc, escaped))
+/// Stringify a JS string with QuoteJSONString escaping (§25.5.2.3).
+///
+/// Fast path: the overwhelming majority of strings have nothing to escape, so
+/// the single scan finds nothing and `s` is quoted with no intermediate
+/// allocation. Otherwise `escape_from` continues from where the scan stopped.
+fn stringify_string(s: String) -> String {
+  let bytes = <<s:utf8>>
+  case scan_escapable(bytes, 0) {
+    AllClean -> "\"" <> s <> "\""
+    found -> "\"" <> escape_from(found, bytes, string_tree.new()) <> "\""
+  }
+}
+
+/// Slow path: `scan` is the result of scanning `bytes` from its start. Append
+/// the clean span before the escapable byte as one chunk (an O(1) sub-binary,
+/// not one append per character), then the escape, then continue on the rest.
+fn escape_from(scan: EscapeScan, bytes: BitArray, acc: StringTree) -> String {
+  case scan {
+    AllClean ->
+      string_tree.to_string(append_span(acc, bytes, bit_array.byte_size(bytes)))
+    FoundEscapable(n, byte, rest) -> {
+      let acc =
+        string_tree.append(append_span(acc, bytes, n), escape_byte(byte))
+      escape_from(scan_escapable(rest, 0), rest, acc)
     }
+  }
+}
+
+/// The escape sequence for a byte `scan_escapable` stopped on: '"', '\\', or
+/// a control character (< 0x20). Everything below 0x20 without a short form
+/// gets \u00XX. This is total over exactly the bytes `scan_escapable` returns.
+fn escape_byte(byte: Int) -> String {
+  case byte {
+    0x22 -> "\\\""
+    0x5c -> "\\\\"
+    0x08 -> "\\b"
+    0x09 -> "\\t"
+    0x0a -> "\\n"
+    0x0c -> "\\f"
+    0x0d -> "\\r"
+    _ -> unicode_escape(byte)
+  }
+}
+
+/// Append the first `n` bytes of `bytes` to `acc` as one chunk.
+fn append_span(acc: StringTree, bytes: BitArray, n: Int) -> StringTree {
+  case n {
+    0 -> acc
+    _ ->
+      case bit_array.slice(bytes, 0, n) |> result.try(bit_array.to_string) {
+        Ok(chunk) -> string_tree.append(acc, chunk)
+        // Unreachable: `bytes` is the UTF-8 encoding of a Gleam String and
+        // `n` always lands on an ASCII boundary (`scan_escapable` only stops
+        // on bytes < 0x80), so the span is valid UTF-8 and within bounds.
+        Error(Nil) -> acc
+      }
   }
 }
 

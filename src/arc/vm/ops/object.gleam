@@ -218,10 +218,7 @@ fn namespace_get(
   exports: dict.Dict(String, Ref),
   key: PropertyKey,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  let name = case key {
-    Named(n) -> n
-    Index(i) -> int.to_string(i)
-  }
+  let name = key.key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> Ok(#(value.JsUndefined, state))
     Ok(box) ->
@@ -466,7 +463,7 @@ fn namespace_own_property(
   exports: dict.Dict(String, Ref),
   key: PropertyKey,
 ) -> Option(Property) {
-  case dict.get(exports, key.key_to_string(key)) {
+  case dict.get(exports, key.key_to_text(key)) {
     Error(Nil) -> None
     Ok(box) -> {
       let val = heap.read_box(heap, box) |> option.unwrap(value.JsUndefined)
@@ -2093,7 +2090,7 @@ pub fn has_property(
     // §10.4.6.6 Module Namespace [[HasProperty]]: true iff the key is an
     // exported name. Null prototype → no inheritance.
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
-      Answered(dict.has_key(exports, key.key_to_string(key)))
+      Answered(dict.has_key(exports, key.key_to_text(key)))
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined, return true.
       case own_property_of_slot(heap, kind, properties, elements, key) {
@@ -2275,7 +2272,7 @@ pub fn delete_property(
     // §10.4.6.10 Module Namespace [[Delete]]: deleting an exported name fails
     // (non-configurable); a non-export "succeeds" vacuously.
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
-      case dict.has_key(exports, key.key_to_string(key)) {
+      case dict.has_key(exports, key.key_to_text(key)) {
         True -> #(h, False)
         False -> #(h, True)
       }
@@ -2514,13 +2511,15 @@ pub fn own_string_keys_flagged(
           let #(idx, named) = acc
           case key {
             Index(i) -> #([#(i, value.prop_enumerable(prop)), ..idx], named)
-            // Private names ("#x") never appear in [[OwnPropertyKeys]].
-            Named("\u{0}" <> _) -> acc
             Named("length") if is_array -> acc
-            Named(n) -> #(idx, [
-              #(value.prop_seq(prop), n, value.prop_enumerable(prop)),
-              ..named
-            ])
+            Named(n) -> {
+              // Private names ("#x") never appear in [[OwnPropertyKeys]].
+              use <- bool.guard(key.is_private_key(key), acc)
+              #(idx, [
+                #(value.prop_seq(prop), n, value.prop_enumerable(prop)),
+                ..named
+              ])
+            }
           }
         })
       // Step 1: array-index keys in ascending numeric order. An index lives
@@ -3445,7 +3444,7 @@ fn inspect_plain_object(
           case prop {
             DataProperty(enumerable: True, value: val, ..) ->
               Ok(
-                key.key_to_string(key)
+                key.key_display_string(key)
                 <> ": "
                 <> inspect_inner(val, heap, depth + 1, visited),
               )
@@ -3604,7 +3603,7 @@ pub type PropKey {
 /// key without a second user-observable ToPropertyKey.
 pub fn prop_key_value(pk: PropKey) -> JsValue {
   case pk {
-    PkString(key) -> JsString(key.key_to_string(key))
+    PkString(key) -> JsString(key.key_to_text(key))
     PkSymbol(sym) -> value.JsSymbol(sym)
   }
 }
@@ -3641,7 +3640,7 @@ pub fn set_prop_value(
 /// Human-readable key for invariant-violation error messages.
 fn pk_label(pk: PropKey) -> String {
   case pk {
-    PkString(key) -> "'" <> key.key_to_string(key) <> "'"
+    PkString(key) -> "'" <> key.key_display_string(key) <> "'"
     PkSymbol(_) -> "[symbol]"
   }
 }
@@ -3932,7 +3931,7 @@ pub fn has_property_stateful(
     )) ->
       case pk {
         PkString(key) ->
-          Ok(#(dict.has_key(exports, key.key_to_string(key)), state))
+          Ok(#(dict.has_key(exports, key.key_to_text(key)), state))
         PkSymbol(sym) ->
           Ok(#(result.is_ok(list.key_find(symbol_properties, sym)), state))
       }

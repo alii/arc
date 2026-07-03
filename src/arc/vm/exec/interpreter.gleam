@@ -3167,7 +3167,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> key.key_to_string(key)
+              <> key.key_display_string(key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -3190,7 +3190,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             "Cannot read properties of "
               <> value.nullish_label(v)
               <> " (reading '"
-              <> key.key_to_string(key)
+              <> key.key_display_string(key)
               <> "')",
           )
         [receiver, ..rest] -> {
@@ -3219,7 +3219,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
               state.throw_type_error(
                 state,
                 "Cannot assign to read only property '"
-                  <> key.key_to_string(key)
+                  <> key.key_display_string(key)
                   <> "' of object",
               )
             _, _ -> Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
@@ -3232,7 +3232,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           state.throw_type_error(
             state,
             "Cannot set properties of undefined or null (setting '"
-              <> key.key_to_string(key)
+              <> key.key_display_string(key)
               <> "')",
           )
         [value, _, ..rest] -> {
@@ -3243,7 +3243,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
               state.throw_type_error(
                 state,
                 "Cannot create property '"
-                  <> key.key_to_string(key)
+                  <> key.key_display_string(key)
                   <> "' on primitive value",
               )
             False ->
@@ -3643,7 +3643,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
               use state <- result.map(define_field_full(
                 state,
                 ref,
-                JsString(key.key_to_string(key)),
+                JsString(key.key_to_text(key)),
                 value,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -3710,7 +3710,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                   state.heap,
                   func,
                   "",
-                  key.key_to_string(pk),
+                  key.key_display_string(pk),
                 )
               let heap = make_method(heap, func, ref)
               let heap = object.define_method_property(heap, ref, pk, func)
@@ -3778,7 +3778,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                   state.heap,
                   func,
                   accessor_name_prefix(kind),
-                  key.key_to_string(pk),
+                  key.key_display_string(pk),
                 )
               let heap = make_method(heap, func, ref)
               let heap =
@@ -4001,7 +4001,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 False, True ->
                   state.throw_type_error(
                     state,
-                    "Cannot delete property '" <> key.key_to_string(key) <> "'",
+                    "Cannot delete property '"
+                      <> key.key_display_string(key)
+                      <> "'",
                   )
                 _, _ ->
                   Ok(
@@ -5733,7 +5735,7 @@ fn check_define_nonconfigurable(
         | Ok(value.AccessorProperty(configurable: False, ..)) ->
           state.throw_type_error(
             state,
-            "Cannot redefine property: " <> key.key_to_string(pk),
+            "Cannot redefine property: " <> key.key_display_string(pk),
           )
         _ -> Ok(Nil)
       }

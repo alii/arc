@@ -65,33 +65,103 @@ pub fn canonical_key(s: String) -> PropertyKey {
   }
 }
 
-/// Render a PropertyKey back to its spec string form (for error messages,
-/// for-in enumeration, etc.).
-pub fn key_to_string(key: PropertyKey) -> String {
+/// Canonical PropertyKey for an integer index — the Int-side sibling of
+/// `canonical_key`, and the ONLY sanctioned way to build a key from an
+/// integer index. Array indices (§6.1.7) are integers in [0, 2^32-2] and are
+/// stored as `Index(n)`; anything outside that range is stored under its
+/// ToString form as `Named`, exactly as `canonical_key` would classify it.
+///
+/// Array.prototype methods are generic over array-likes whose length can
+/// reach 2^53-1, so per-element keys derived from such lengths MUST go
+/// through this — a raw `Index(n)` for n > 2^32-2 can never match how the
+/// property was actually stored.
+pub fn index_key(n: Int) -> PropertyKey {
+  case n >= 0 && n <= max_array_index {
+    True -> Index(n)
+    False -> Named(int.to_string(n))
+  }
+}
+
+/// Render a PropertyKey the way a human should see it (error messages,
+/// `inspect` output, function names). This is a *renderer*, not the inverse
+/// of `canonical_key`: it deliberately mangles private-element keys down to
+/// their source text ("#x"), dropping the internal NUL marker and the
+/// per-evaluation uid. When you need the exact property-name text — a proxy
+/// trap argument, `Object.keys`, for-in — use `key_to_text`.
+pub fn key_display_string(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
-    // Private-element keys render as their source text ("#x"), without the
-    // internal NUL marker or the per-evaluation uid suffix (see private_key
-    // and value.mint_private_key).
-    Named("\u{0}" <> s) ->
-      case string.split_once(s, "\u{0}") {
-        Ok(#(name, _uid)) -> name
-        Error(Nil) -> s
-      }
+    Named(name) -> private_display_name(name)
+  }
+}
+
+/// The exact property-name text of a PropertyKey — the true inverse of
+/// `canonical_key` (`canonical_key(key_to_text(k)) == k` for every key that
+/// `canonical_key` can produce). Use this wherever the string is *data*:
+/// proxy trap arguments, `Object.keys` / [[OwnPropertyKeys]] results, for-in
+/// bindings, module-namespace export lookups. For human-facing text use
+/// `key_display_string`.
+pub fn key_to_text(key: PropertyKey) -> String {
+  case key {
+    Index(n) -> int.to_string(n)
     Named(s) -> s
   }
 }
 
-/// Build the storage key for a class private element ("#x"). Arc stores
-/// private fields/methods in the ordinary property table, but the spec keeps
-/// private elements in a separate [[PrivateElements]] list invisible to ALL
-/// ordinary property reflection (hasOwnProperty, ownKeys, for-in, `in`,
-/// spread, JSON, freeze, ...) — AND a plain string property named "#x"
-/// (created via o["#x"], computed keys, defineProperty, JSON.parse, ...) is a
-/// perfectly ordinary, fully reflectable property. So privates are keyed with
-/// a NUL-byte marker prefix ("\u{0}#x") that string-to-key conversion of
-/// source-level identifiers/literals never produces, keeping the two
-/// namespaces apart.
+// --- The private-element namespace ------------------------------------------
+//
+// Arc stores private fields/methods in the ordinary property table, but the
+// spec keeps private elements in a separate [[PrivateElements]] list invisible
+// to ALL ordinary property reflection (hasOwnProperty, ownKeys, for-in, `in`,
+// spread, JSON, freeze, ...) — AND a plain string property named "#x" (created
+// via o["#x"], computed keys, defineProperty, JSON.parse, ...) is a perfectly
+// ordinary, fully reflectable property. So privates are keyed with a NUL-byte
+// marker prefix ("\u{0}#x") that string-to-key conversion of source-level
+// identifiers/literals never produces, keeping the two namespaces apart.
+//
+// The four pieces of that convention live here and nowhere else: the marker
+// itself, the constructor (`private_key` / `private_key_text`), the predicate
+// (`is_private_key`) and the renderer (`private_display_name`).
+
+/// The marker prefix that puts a key in the hidden private-element namespace.
+/// Never write this literal outside this module.
+const private_marker = "\u{0}"
+
+/// Build the storage key for a class private element ("#x").
 pub fn private_key(name: String) -> PropertyKey {
-  Named("\u{0}" <> name)
+  Named(private_marker <> name)
+}
+
+/// Storage-key *text* for a freshly minted PrivateName (§15.7.14
+/// ClassDefinitionEvaluation step 5/6): marker <> source text <> marker <>
+/// uid. The uid makes each class evaluation's names distinct (spec PrivateName
+/// identity); the key text is carried at runtime as a JsString and wrapped in
+/// `Named(_)` at the access sites. See `value.mint_private_key`.
+pub fn private_key_text(name: String, uid: Int) -> String {
+  private_marker <> name <> private_marker <> int.to_string(uid)
+}
+
+/// Whether a PropertyKey lives in the private-element namespace. Reflection
+/// sites call this to skip private keys.
+pub fn is_private_key(key: PropertyKey) -> Bool {
+  case key {
+    // Pattern prefixes must be literals, so `private_marker` can't be spelled
+    // here — this is the one place the literal is repeated, next to its
+    // definition.
+    Named("\u{0}" <> _) -> True
+    _ -> False
+  }
+}
+
+/// Source-text name ("#x") of a private storage-key text — the marker prefix
+/// and any uid suffix stripped. A non-private text is returned unchanged.
+pub fn private_display_name(key_text: String) -> String {
+  case key_text {
+    "\u{0}" <> rest ->
+      case string.split_once(rest, "\u{0}") {
+        Ok(#(name, _uid)) -> name
+        Error(Nil) -> rest
+      }
+    _ -> key_text
+  }
 }

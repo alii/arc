@@ -720,20 +720,6 @@ fn require_array(
   }
 }
 
-/// Canonical PropertyKey for an integer index, matching key.canonical_key:
-/// array indices (§6.1.7) are integers in [0, 2^32-2], stored as Index(n);
-/// anything outside that range is stored under its ToString form as Named.
-/// Array.prototype methods are generic over array-likes whose length can
-/// reach 2^53-1, so per-element keys derived from such lengths MUST go
-/// through this — a raw Index(idx) for idx >= 2^32-1 can never match how the
-/// property was stored.
-fn index_key(idx: Int) -> key.PropertyKey {
-  case 0 <= idx && idx <= max_array_index {
-    True -> Index(idx)
-    False -> Named(int.to_string(idx))
-  }
-}
-
 /// Get (ES2024 §7.3.2) on an array-like by integer index.
 ///
 /// §7.3.2 Get ( O, P ): Return ? O.[[Get]](P, O).
@@ -747,7 +733,7 @@ fn get_index(
   this: JsValue,
   idx: Int,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  object.get_value_of(state, this, index_key(idx))
+  object.get_value_of(state, this, key.index_key(idx))
 }
 
 /// Fused HasProperty + Get on an array-like by integer index.
@@ -823,7 +809,7 @@ fn get_index_if_present(
           inherited_index(
             state,
             state.builtins.string.prototype,
-            index_key(idx),
+            key.index_key(idx),
             this,
           )
       }
@@ -834,21 +820,21 @@ fn get_index_if_present(
       inherited_index(
         state,
         state.builtins.boolean.prototype,
-        index_key(idx),
+        key.index_key(idx),
         this,
       )
     JsNumber(_) ->
       inherited_index(
         state,
         state.builtins.number.prototype,
-        index_key(idx),
+        key.index_key(idx),
         this,
       )
     value.JsSymbol(_) ->
       inherited_index(
         state,
         state.builtins.object.prototype,
-        index_key(idx),
+        key.index_key(idx),
         this,
       )
     // null/undefined (already rejected by require_array) and other values:
@@ -1203,23 +1189,15 @@ fn hole_is_inherited(state: State(host), proto: Option(Ref), idx: Int) -> Bool {
   case proto {
     None -> False
     Some(proto_ref) ->
-      object.has_property(state.heap, proto_ref, index_key(idx))
+      object.has_property(state.heap, proto_ref, key.index_key(idx))
       |> object.or_when_proxy(True)
   }
 }
 
-/// LengthOfArrayLike (ES2024 §7.3.18) — pure approximation.
+/// LengthOfArrayLike (ES2024 §7.3.18) — ℝ(? ToLength(? Get(obj, "length"))).
+/// Goes through the property lookup, so an accessor-valued "length" and
+/// prototype-chain lookups are honored.
 ///
-/// §7.3.18 LengthOfArrayLike ( obj ):
-///   1. Return ℝ(? ToLength(? Get(obj, "length"))).
-///
-/// Uses object.get_value to support accessor-valued "length" and prototype
-/// chain lookups.
-///
-/// ToLength (§7.1.17):
-///   1. Let len be ? ToIntegerOrInfinity(argument).
-///   2. If len ≤ 0, return +0𝔽.
-///   3. Return 𝔽(min(len, 2^53 - 1)).
 /// LengthOfArrayLike (§7.3.18) for an arbitrary object ref — dispatches on
 /// the slot kind the same way require_array does, without the ToObject /
 /// TypeError prologue. Used by concat's spread path, where the spread target
@@ -1420,7 +1398,7 @@ fn generic_set(
         coerce.thrown_type_error(
           state,
           "Cannot assign to read only property '"
-            <> key.key_to_string(key)
+            <> key.key_display_string(key)
             <> "' of object",
         )
     }
@@ -1440,7 +1418,7 @@ fn generic_set_index(
   idx: Int,
   val: JsValue,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  generic_set(state, ref, index_key(idx), val)
+  generic_set(state, ref, key.index_key(idx), val)
 }
 
 /// Convenience: Set(O, "length", 𝔽(len), true).
@@ -1493,7 +1471,9 @@ fn generic_delete(
     False ->
       coerce.thrown_type_error(
         state,
-        "Cannot delete property '" <> key.key_to_string(key) <> "' of object",
+        "Cannot delete property '"
+          <> key.key_display_string(key)
+          <> "' of object",
       )
   }
 }
@@ -1504,7 +1484,7 @@ fn generic_delete_index(
   ref: Ref,
   idx: Int,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  generic_delete(state, ref, index_key(idx))
+  generic_delete(state, ref, key.index_key(idx))
 }
 
 /// HasProperty (§7.3.11) by integer index, trap-aware: routes Proxy "has"
@@ -1516,7 +1496,7 @@ fn generic_has_op(
   ref: Ref,
   idx: Int,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
-  object.has_property_stateful(state, ref, object.PkString(index_key(idx)))
+  object.has_property_stateful(state, ref, object.PkString(key.index_key(idx)))
 }
 
 /// Get (ES2024 §7.3.2).
@@ -1537,7 +1517,7 @@ fn generic_get(
   idx: Int,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // §7.3.2 step 1: O.[[Get]](! ToString(𝔽(idx)), O)
-  object.get_value(state, ref, index_key(idx), JsObject(ref))
+  object.get_value(state, ref, key.index_key(idx), JsObject(ref))
 }
 
 // ============================================================================
@@ -1932,24 +1912,6 @@ fn array_slice(
   }
 }
 
-/// Internal helper implementing the element-copying loop shared by
-/// Array.prototype.slice (§23.1.3.25 step 14) and Array.prototype.concat
-/// (§23.1.3.1 step 5.c.iii).
-///
-/// Corresponds to the spec's "Repeat, while k < final" loop:
-///   a. Let Pk be ! ToString(𝔽(k)).
-///   b. Let kPresent be ? HasProperty(O, Pk).
-///   c. If kPresent is true, then
-///      i. Let kValue be ? Get(O, Pk).
-///      ii. Perform ? CreateDataPropertyOrThrow(A, ! ToString(𝔽(n)), kValue).
-///   d. Set k to k + 1. / e. Set n to n + 1.
-///
-/// When kPresent is false (a hole), we skip writing to dst — this preserves
-/// sparse array structure in the result, matching spec behavior.
-///
-/// Plain arrays with no index overrides take copy_range_snapshot (one heap
-/// read for the whole loop); everything else takes the generic per-element
-/// path.
 /// Copy a range via unconditional Get — holes read as undefined (through
 /// the prototype chain) and every destination index gets a value, so the
 /// result is DENSE. Used by the change-array-by-copy methods (§23.1.3.35
@@ -1982,6 +1944,24 @@ fn copy_range_dense(
   }
 }
 
+/// Internal helper implementing the element-copying loop shared by
+/// Array.prototype.slice (§23.1.3.25 step 14) and Array.prototype.concat
+/// (§23.1.3.1 step 5.c.iii).
+///
+/// Corresponds to the spec's "Repeat, while k < final" loop:
+///   a. Let Pk be ! ToString(𝔽(k)).
+///   b. Let kPresent be ? HasProperty(O, Pk).
+///   c. If kPresent is true, then
+///      i. Let kValue be ? Get(O, Pk).
+///      ii. Perform ? CreateDataPropertyOrThrow(A, ! ToString(𝔽(n)), kValue).
+///   d. Set k to k + 1. / e. Set n to n + 1.
+///
+/// When kPresent is false (a hole), we skip writing to dst — this preserves
+/// sparse array structure in the result, matching spec behavior.
+///
+/// Plain arrays with no index overrides take copy_range_snapshot (one heap
+/// read for the whole loop); everything else takes the generic per-element
+/// path.
 fn copy_range(
   state: State(host),
   src: JsValue,
@@ -2486,7 +2466,7 @@ fn write_species_element(
     )
   })
   let #(h, outcome) =
-    object.set_property(state.heap, target, index_key(idx), val)
+    object.set_property(state.heap, target, key.index_key(idx), val)
   let state = State(..state, heap: h)
   case outcome {
     object.Defined -> Ok(state)
@@ -2562,7 +2542,7 @@ fn drop_configurable_index_override(
 ) -> #(State(host), Bool) {
   case heap.read(state.heap, target) {
     Some(ObjectSlot(properties:, ..) as slot) ->
-      case dict.get(properties, index_key(idx)) {
+      case dict.get(properties, key.index_key(idx)) {
         Error(Nil) -> #(state, True)
         Ok(prop) ->
           case value.prop_configurable(prop) {
@@ -2574,7 +2554,7 @@ fn drop_configurable_index_override(
                   target,
                   ObjectSlot(
                     ..slot,
-                    properties: dict.delete(properties, index_key(idx)),
+                    properties: dict.delete(properties, key.index_key(idx)),
                   ),
                 )
               #(State(..state, heap: h), True)
@@ -2615,6 +2595,10 @@ fn is_concat_spreadable(
   }
 }
 
+/// One iteration of Array.prototype.concat's item loop (§23.1.3.1 step 5) for
+/// the plain-Array target: spread `item`'s elements into `elems` at `pos` when
+/// IsConcatSpreadable(item), else append it as a single element. Returns the
+/// grown store and the next write position.
 fn concat_item(
   state: State(host),
   elems: JsElements,
@@ -3551,7 +3535,7 @@ fn array_filter(
         Error(thrown) -> #(state, Error(thrown))
         Ok(kept) -> {
           let vals = list.reverse(kept)
-          let els = build_elements_from_list(vals, 0, elements.new())
+          let els = elements.from_list(vals)
           case
             write_species_result(state, target, els, list.length(vals), None)
           {
@@ -4843,7 +4827,7 @@ fn array_splice(
         shift,
       ))
       // Step 15: Insert items at actualStart.
-      use state <- state.try_state(splice_insert(
+      use state <- state.try_state(write_list_at(
         state,
         ref,
         actual_start,
@@ -4898,22 +4882,6 @@ fn splice_shift(
         // No shift needed
         False -> Ok(state)
       }
-  }
-}
-
-/// Insert items at the given start index.
-fn splice_insert(
-  state: State(host),
-  ref: Ref,
-  start: Int,
-  items: List(JsValue),
-) -> Result(State(host), #(JsValue, State(host))) {
-  case items {
-    [] -> Ok(state)
-    [item, ..rest] -> {
-      use state <- result.try(generic_set_index(state, ref, start, item))
-      splice_insert(state, ref, start + 1, rest)
-    }
   }
 }
 
@@ -5344,8 +5312,8 @@ fn copy_within_step(
 ///
 /// Creates a new Array from an array-like or iterable object.
 ///
-/// Simplified: handles arrays and array-like objects (objects with .length).
-/// Iterator protocol support is not yet implemented.
+/// Handles both iterables (via the iterator protocol) and array-like objects
+/// (objects with .length).
 fn array_from(
   args: List(JsValue),
   state: State(host),
@@ -5674,7 +5642,7 @@ fn array_to_spliced(
     elements.new(),
   ))
   // Insert items at actualStart
-  let new_elements = insert_items(new_elements, actual_start, items)
+  let new_elements = elements.write_list(new_elements, actual_start, items)
   // Copy [actualStart + actualSkipCount, length) from source
   let src_from = actual_start + actual_skip_count
   let dst_from = actual_start + item_count
@@ -5696,19 +5664,6 @@ fn array_to_spliced(
       array_proto,
     )
   #(State(..state, heap:), Ok(JsObject(ref)))
-}
-
-/// Insert a list of items into elements starting at the given index.
-fn insert_items(
-  elements: JsElements,
-  start: Int,
-  items: List(JsValue),
-) -> JsElements {
-  case items {
-    [] -> elements
-    [item, ..rest] ->
-      insert_items(elements.set(elements, start, item), start + 1, rest)
-  }
 }
 
 // ============================================================================
@@ -5851,7 +5806,7 @@ fn to_sorted_impl(
   ))
   use sorted, state <- state.try_op(sort(state, defined))
   let all_values = list.append(sorted, list.repeat(JsUndefined, undefs))
-  let new_elements = build_elements_from_list(all_values, 0, elements.new())
+  let new_elements = elements.from_list(all_values)
   let #(heap, ref) =
     common.alloc_array_from_elements(
       state.heap,
@@ -5870,19 +5825,6 @@ fn sort_values_default(
   use #(pairs, state) <- result.map(stringify_elements(state, defined, []))
   let sorted = list.sort(pairs, fn(a, b) { string.compare(a.0, b.0) })
   #(list.map(sorted, fn(pair) { pair.1 }), state)
-}
-
-/// Build a JsElements from a list, writing each value at consecutive indices.
-fn build_elements_from_list(
-  values: List(JsValue),
-  idx: Int,
-  acc: JsElements,
-) -> JsElements {
-  case values {
-    [] -> acc
-    [val, ..rest] ->
-      build_elements_from_list(rest, idx + 1, elements.set(acc, idx, val))
-  }
 }
 
 // ============================================================================
@@ -5922,7 +5864,7 @@ fn array_to_reversed(
   use reversed, state <- state.try_op(
     collect_elements_descending(state, this, length - 1, []),
   )
-  let new_elements = build_elements_from_list(reversed, 0, elements.new())
+  let new_elements = elements.from_list(reversed)
   let #(heap, ref) =
     common.alloc_array_from_elements(
       state.heap,

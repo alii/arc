@@ -60,17 +60,12 @@ fn to_object_key(
 /// The `display` string is NOT just for error messages: `object_key_value`
 /// hands it to proxy `defineProperty` / `getOwnPropertyDescriptor` traps as
 /// the property-key argument, and the String-exotic gOPD path compares it to
-/// "length". So it must be the exact ToPropertyKey string — never
-/// `key.key_to_string`, which is a *renderer* that strips the engine's
-/// internal private-name NUL marker and would hand traps a mangled key.
+/// "length". So it must be the exact ToPropertyKey string — `key.key_to_text`,
+/// never the `key.key_display_string` renderer.
 fn prop_key_to_object_key(pk: object.PropKey) -> ObjectKey {
   case pk {
     object.PkSymbol(sym) -> SymbolPropKey(sym)
-    object.PkString(pkey) ->
-      StringPropKey(pkey, case pkey {
-        Named(s) -> s
-        Index(i) -> int.to_string(i)
-      })
+    object.PkString(pkey) -> StringPropKey(pkey, key.key_to_text(pkey))
   }
 }
 
@@ -96,11 +91,14 @@ fn get_own_property_by_key(
 ) -> Option(value.Property) {
   case key {
     SymbolPropKey(sym) -> object.get_own_symbol_property(heap, ref, sym)
-    // Private elements (NUL-marker keys, see key.private_key) are stored in
-    // the ordinary property table but are invisible to reflection (spec keeps
-    // them in [[PrivateElements]]).
-    StringPropKey(pkey: Named("\u{0}" <> _), ..) -> None
-    StringPropKey(pkey:, ..) -> object.get_own_property(heap, ref, pkey)
+    // Private elements (see key.private_key) are stored in the ordinary
+    // property table but are invisible to reflection (spec keeps them in
+    // [[PrivateElements]]).
+    StringPropKey(pkey:, ..) ->
+      case key.is_private_key(pkey) {
+        True -> None
+        False -> object.get_own_property(heap, ref, pkey)
+      }
   }
 }
 
@@ -2398,7 +2396,7 @@ fn assign_source(
               ks,
               object.get_value,
               object.set_value,
-              fn(_state, key) { key.key_to_string(key) },
+              fn(_state, key) { key.key_display_string(key) },
             ),
           )
           // Symbol keys next (also enumerable-only):
