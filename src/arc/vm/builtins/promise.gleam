@@ -11,8 +11,10 @@ import arc/vm/value.{
   PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
 }
+import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 
 /// ES2024 §27.2.4 Properties of the Promise Constructor &
 /// ES2024 §27.2.5 Properties of the Promise Prototype Object
@@ -246,15 +248,14 @@ pub fn fulfill_promise(
   state
 }
 
-/// FulfillPromise, additionally reporting whether THIS call performed the
-/// pending -> fulfilled transition (`True`) or found the promise already
-/// settled and was a no-op (`False`). See `settle_outcome`.
+/// FulfillPromise, additionally reporting how the settle went. See
+/// `SettleOutcome` and `settle_outcome`.
 fn fulfill_promise_tracked(
   state: state.State(host),
   data_ref: Ref,
   result_value: JsValue,
-) -> #(state.State(host), Bool) {
-  let #(h, jobs, settled) =
+) -> #(state.State(host), SettleOutcome) {
+  let #(h, jobs, outcome) =
     settle_promise(
       state.heap,
       data_ref,
@@ -262,14 +263,22 @@ fn fulfill_promise_tracked(
       fn(fulfill, _reject) { fulfill },
       value.PromiseFulfilled(result_value),
     )
-  #(
-    state.State(
-      ..state,
-      heap: h,
-      job_queue: job_queue.append(state.job_queue, jobs),
-    ),
-    option.is_some(settled),
-  )
+  case outcome {
+    // Engine bug: this ref never pointed at a promise's internal slot.
+    NotAPromiseSlot -> {
+      log_not_a_promise_slot("FulfillPromise", data_ref)
+      #(state, outcome)
+    }
+    // Legitimate soft no-op (the spec's pending Assert), or the transition.
+    AlreadySettled | Transitioned(_) -> #(
+      state.State(
+        ..state,
+        heap: h,
+        job_queue: job_queue.append(state.job_queue, jobs),
+      ),
+      outcome,
+    )
+  }
 }
 
 /// Settle a promise from a host outcome: FulfillPromise on `Ok`,
@@ -285,10 +294,36 @@ pub fn settle_outcome(
   data_ref: Ref,
   outcome: Result(JsValue, JsValue),
 ) -> #(state.State(host), Bool) {
-  case outcome {
+  let #(state, settled) = case outcome {
     Ok(v) -> fulfill_promise_tracked(state, data_ref, v)
     Error(reason) -> reject_promise_tracked(state, data_ref, reason)
   }
+  case settled {
+    Transitioned(_) -> #(state, True)
+    AlreadySettled | NotAPromiseSlot -> #(state, False)
+  }
+}
+
+/// The three ways a settle attempt can end (see `settle_promise`).
+pub type SettleOutcome {
+  /// The promise was pending and this call moved it to fulfilled/rejected.
+  /// `is_handled` is the promise's [[PromiseIsHandled]] at that moment.
+  Transitioned(is_handled: Bool)
+  /// The promise was already settled — a legitimate no-op, which the spec
+  /// models as an Assert (e.g. `resolve(1); reject(2)`).
+  AlreadySettled
+  /// The ref does not point at a PromiseSlot at all — an engine bug, never
+  /// something a JS program can cause.
+  NotAPromiseSlot
+}
+
+fn log_not_a_promise_slot(op: String, data_ref: Ref) -> Nil {
+  io.println_error(
+    "arc internal error: "
+    <> op
+    <> " called with a ref that is not a PromiseSlot: "
+    <> string.inspect(data_ref),
+  )
 }
 
 /// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
@@ -296,8 +331,8 @@ pub fn settle_outcome(
 /// from the picked reaction list and write the settled PromiseSlot with
 /// cleared reaction lists.
 ///
-/// Returns Some(is_handled) when the transition happened, None when the
-/// promise was already settled (soft no-op for the spec's pending Assert).
+/// The `SettleOutcome` distinguishes the transition, the legitimate
+/// already-settled no-op, and a ref that is not a promise at all (engine bug).
 fn settle_promise(
   h: Heap(host),
   data_ref: Ref,
@@ -305,7 +340,7 @@ fn settle_promise(
   pick_reactions: fn(List(PromiseReaction), List(PromiseReaction)) ->
     List(PromiseReaction),
   settled_state: value.PromiseState,
-) -> #(Heap(host), List(Job), Option(Bool)) {
+) -> #(Heap(host), List(Job), SettleOutcome) {
   case heap.read(h, data_ref) {
     Some(PromiseSlot(
       state: value.PromisePending,
@@ -338,10 +373,12 @@ fn settle_promise(
             is_handled:,
           ),
         )
-      #(h, jobs, Some(is_handled))
+      #(h, jobs, Transitioned(is_handled:))
     }
     // Soft assertion: not pending -> no-op (spec says Assert)
-    _ -> #(h, [], None)
+    Some(PromiseSlot(..)) -> #(h, [], AlreadySettled)
+    // Not a promise's internal slot at all — an engine bug.
+    Some(_) | None -> #(h, [], NotAPromiseSlot)
   }
 }
 
@@ -371,15 +408,14 @@ pub fn reject_promise(
   state
 }
 
-/// RejectPromise, additionally reporting whether THIS call performed the
-/// pending -> rejected transition (`True`) or found the promise already
-/// settled and was a no-op (`False`). See `settle_outcome`.
+/// RejectPromise, additionally reporting how the settle went. See
+/// `SettleOutcome` and `settle_outcome`.
 fn reject_promise_tracked(
   state: state.State(host),
   data_ref: Ref,
   reason: JsValue,
-) -> #(state.State(host), Bool) {
-  let #(h, jobs, settled) =
+) -> #(state.State(host), SettleOutcome) {
+  let #(h, jobs, outcome) =
     settle_promise(
       state.heap,
       data_ref,
@@ -387,8 +423,8 @@ fn reject_promise_tracked(
       fn(_fulfill, reject) { reject },
       value.PromiseRejected(reason),
     )
-  case settled {
-    Some(is_handled) -> {
+  case outcome {
+    Transitioned(is_handled:) -> {
       // Step 7: HostPromiseRejectionTracker(promise, "reject")
       let unhandled_rejections = case is_handled {
         False -> [data_ref, ..state.unhandled_rejections]
@@ -401,11 +437,16 @@ fn reject_promise_tracked(
           job_queue: job_queue.append(state.job_queue, jobs),
           unhandled_rejections:,
         ),
-        True,
+        outcome,
       )
     }
     // Soft assertion: not pending -> no-op (spec says Assert)
-    None -> #(state, False)
+    AlreadySettled -> #(state, outcome)
+    // Engine bug: this ref never pointed at a promise's internal slot.
+    NotAPromiseSlot -> {
+      log_not_a_promise_slot("RejectPromise", data_ref)
+      #(state, outcome)
+    }
   }
 }
 

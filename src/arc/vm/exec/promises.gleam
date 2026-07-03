@@ -10,8 +10,8 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}
 import arc/vm/value.{
-  type JsValue, type Ref, ArrayObject, Finite, JsBool, JsNumber, JsObject,
-  JsString, JsUndefined, ObjectSlot, OrdinaryObject,
+  type JsValue, type Ref, ArrayObject, Finite, JsBool, JsObject, JsString,
+  JsUndefined, ObjectSlot, OrdinaryObject,
 }
 import gleam/bool
 import gleam/dict
@@ -276,27 +276,6 @@ fn iterator_close_for_throw(
   }
 }
 
-/// Adjust the remaining-elements counter by delta; report whether it hit 0.
-fn adjust_remaining(
-  h: Heap(host),
-  remaining_ref: Ref,
-  delta: Int,
-) -> #(Heap(host), Bool) {
-  case heap.read_box(h, remaining_ref) {
-    Some(JsNumber(Finite(n))) -> {
-      let new_count = n +. int.to_float(delta)
-      let h =
-        heap.write(
-          h,
-          remaining_ref,
-          value.BoxSlot(value: JsNumber(Finite(new_count))),
-        )
-      #(h, new_count <=. 0.0)
-    }
-    _ -> #(h, False)
-  }
-}
-
 /// Shared scaffold for Promise.all/allSettled/any/race (§27.2.4.1 steps 1-8):
 /// C = this value, NewPromiseCapability(C), GetPromiseResolve(C),
 /// GetIterator(iterable), then run `perform`. NewPromiseCapability errors
@@ -418,7 +397,7 @@ fn final_resolve_values(
   values_ref: Ref,
   resolve: JsValue,
 ) -> Result(State(host), CombinatorError(host)) {
-  let #(h, is_zero) = adjust_remaining(state.heap, remaining_ref, -1)
+  let #(h, is_zero) = heap.decrement_counter(state.heap, remaining_ref)
   let state = State(..state, heap: h)
   case is_zero {
     False -> Ok(state)
@@ -435,12 +414,15 @@ fn final_resolve_values(
 /// The body returns the element function's return value (the spec's
 /// `? Call(cap.[[Resolve]], ...)` result when the counter hits zero, undefined
 /// otherwise) — abrupt completions from that call propagate to our caller.
+///
+/// The body receives a `State` whose heap already carries the already-called
+/// write, so no caller can accidentally keep using the pre-write `state`.
 fn with_element_once(
   state: State(host),
   args: List(JsValue),
   rest_stack: List(JsValue),
   already_called_ref: Ref,
-  body: fn(Heap(host), JsValue) ->
+  body: fn(State(host), JsValue) ->
     Result(#(State(host), JsValue), StepExit(host)),
 ) -> Result(State(host), StepExit(host)) {
   use #(state, return_value) <- result.map(
@@ -453,7 +435,10 @@ fn with_element_once(
             already_called_ref,
             value.BoxSlot(value: JsBool(True)),
           )
-        body(h, list.first(args) |> result.unwrap(JsUndefined))
+        body(
+          State(..state, heap: h),
+          list.first(args) |> result.unwrap(JsUndefined),
+        )
       }
     },
   )
@@ -931,8 +916,7 @@ pub fn call_native_promise_all(
   // §27.2.4.1.1 PerformPromiseAll
   let #(h, values_ref) =
     common.alloc_array(state.heap, [], state.builtins.array.prototype)
-  let #(h, remaining_ref) =
-    heap.alloc(h, value.BoxSlot(value: value.from_int(1)))
+  let #(h, remaining_ref) = heap.alloc_counter(h, 1)
   let b = state.builtins
   perform_combinator_loop(
     State(..state, heap: h),
@@ -960,7 +944,7 @@ pub fn call_native_promise_all(
           ),
         )
       // Step 4.r: remainingElementsCount += 1.
-      let #(h, _is_zero) = adjust_remaining(h, remaining_ref, 1)
+      let h = heap.increment_counter(h, remaining_ref)
       #(h, resolve_fn, cap.reject)
     },
     fn(state) {
@@ -1017,8 +1001,7 @@ pub fn call_native_promise_all_settled(
   // §27.2.4.2.1 PerformPromiseAllSettled
   let #(h, values_ref) =
     common.alloc_array(state.heap, [], state.builtins.array.prototype)
-  let #(h, remaining_ref) =
-    heap.alloc(h, value.BoxSlot(value: value.from_int(1)))
+  let #(h, remaining_ref) = heap.alloc_counter(h, 1)
   let b = state.builtins
   perform_combinator_loop(
     State(..state, heap: h),
@@ -1056,7 +1039,7 @@ pub fn call_native_promise_all_settled(
             resolve: cap.resolve,
           ),
         )
-      let #(h, _is_zero) = adjust_remaining(h, remaining_ref, 1)
+      let h = heap.increment_counter(h, remaining_ref)
       #(h, resolve_fn, reject_fn)
     },
     fn(state) {
@@ -1084,8 +1067,7 @@ pub fn call_native_promise_any(
   // §27.2.4.3.1 PerformPromiseAny
   let #(h, errors_ref) =
     common.alloc_array(state.heap, [], state.builtins.array.prototype)
-  let #(h, remaining_ref) =
-    heap.alloc(h, value.BoxSlot(value: value.from_int(1)))
+  let #(h, remaining_ref) = heap.alloc_counter(h, 1)
   let b = state.builtins
   perform_combinator_loop(
     State(..state, heap: h),
@@ -1110,13 +1092,13 @@ pub fn call_native_promise_any(
             reject: cap.reject,
           ),
         )
-      let #(h, _is_zero) = adjust_remaining(h, remaining_ref, 1)
+      let h = heap.increment_counter(h, remaining_ref)
       #(h, cap.resolve, reject_fn)
     },
     fn(state) {
       // Step 4.d.ii: remaining -= 1; at zero, throw AggregateError — the
       // abrupt completion reaches IfAbruptRejectPromise with [[Done]] = true.
-      let #(h, is_zero) = adjust_remaining(state.heap, remaining_ref, -1)
+      let #(h, is_zero) = heap.decrement_counter(state.heap, remaining_ref)
       let errors =
         heap.read_array_like(h, errors_ref)
         |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
@@ -1207,8 +1189,7 @@ fn perform_promise_all_keyed(
         common.alloc_array(state.heap, [], state.builtins.array.prototype)
       let #(h, values_ref) =
         common.alloc_array(h, [], state.builtins.array.prototype)
-      let #(h, remaining_ref) =
-        heap.alloc(h, value.BoxSlot(value: value.from_int(1)))
+      let #(h, remaining_ref) = heap.alloc_counter(h, 1)
       let loop =
         KeyedLoop(
           c:,
@@ -1260,7 +1241,7 @@ fn perform_keyed_loop(
   case all_keys {
     [] -> {
       // Step 7: remainingElementsCount -= 1.
-      let #(h, is_zero) = adjust_remaining(state.heap, loop.remaining_ref, -1)
+      let #(h, is_zero) = heap.decrement_counter(state.heap, loop.remaining_ref)
       let state = State(..state, heap: h)
       case is_zero {
         False -> Ok(state)
@@ -1324,7 +1305,7 @@ fn perform_keyed_loop(
                 already_called_ref:,
                 resolve: loop.cap.resolve,
                 status_field: case loop.settled {
-                  True -> Some(#("fulfilled", "value"))
+                  True -> Some(value.Fulfilled)
                   False -> None
                 },
               ),
@@ -1345,12 +1326,12 @@ fn perform_keyed_loop(
                   values_ref: loop.values_ref,
                   already_called_ref:,
                   resolve: loop.cap.resolve,
-                  status_field: Some(#("rejected", "reason")),
+                  status_field: Some(value.Rejected),
                 ),
               )
           }
           // Step 6.b.xii: remainingElementsCount += 1.
-          let #(h, _is_zero) = adjust_remaining(h, loop.remaining_ref, 1)
+          let h = heap.increment_counter(h, loop.remaining_ref)
           let state = State(..state, heap: h)
           // Step 6.b.xiii: ? Invoke(nextPromise, "then",
           // «onFulfilled, onRejected»).
@@ -1455,17 +1436,23 @@ pub fn call_native_promise_keyed_element(
   values_ref: Ref,
   already_called_ref: Ref,
   resolve: JsValue,
-  status_field: option.Option(#(String, String)),
+  status_field: option.Option(value.SettledOutcome),
 ) -> Result(State(host), StepExit(host)) {
   let b = state.builtins
-  use h, val <- with_element_once(state, args, rest_stack, already_called_ref)
+  use state, val <- with_element_once(
+    state,
+    args,
+    rest_stack,
+    already_called_ref,
+  )
   // ~all~ stores the raw value; ~all-settled~ wraps it in
   // {status, value/reason} with %Object.prototype%.
   let #(h, stored) = case status_field {
-    None -> #(h, val)
-    Some(#(status, field)) -> {
+    None -> #(state.heap, val)
+    Some(outcome) -> {
+      let #(status, field) = value.settled_keys(outcome)
       let #(h, obj_ref) =
-        common.alloc_pojo(h, b.object.prototype, [
+        common.alloc_pojo(state.heap, b.object.prototype, [
           #("status", value.data_property(JsString(status))),
           #(field, value.data_property(val)),
         ])
@@ -1532,8 +1519,13 @@ pub fn call_native_promise_all_resolve_element(
   already_called_ref: Ref,
   resolve: JsValue,
 ) -> Result(State(host), StepExit(host)) {
-  use h, val <- with_element_once(state, args, rest_stack, already_called_ref)
-  let h = set_array_element(h, values_ref, index, val)
+  use state, val <- with_element_once(
+    state,
+    args,
+    rest_stack,
+    already_called_ref,
+  )
+  let h = set_array_element(state.heap, values_ref, index, val)
   promise_combinator_decrement_and_maybe_resolve(
     State(..state, heap: h),
     remaining_ref,
@@ -1543,7 +1535,7 @@ pub fn call_native_promise_all_resolve_element(
 }
 
 /// Promise.allSettled element handler — stores {status, value/reason}.
-/// Resolve passes #("fulfilled", "value"); reject passes #("rejected", "reason").
+/// Resolve passes `Fulfilled`; reject passes `Rejected`.
 pub fn call_native_promise_all_settled_element(
   state: State(host),
   args: List(JsValue),
@@ -1553,12 +1545,17 @@ pub fn call_native_promise_all_settled_element(
   values_ref: Ref,
   already_called_ref: Ref,
   resolve: JsValue,
-  status_field: #(String, String),
+  outcome: value.SettledOutcome,
 ) -> Result(State(host), StepExit(host)) {
-  let #(status, field) = status_field
-  use h, val <- with_element_once(state, args, rest_stack, already_called_ref)
+  let #(status, field) = value.settled_keys(outcome)
+  use state, val <- with_element_once(
+    state,
+    args,
+    rest_stack,
+    already_called_ref,
+  )
   let #(h, obj_ref) =
-    common.alloc_pojo(h, state.builtins.object.prototype, [
+    common.alloc_pojo(state.heap, state.builtins.object.prototype, [
       #("status", value.data_property(JsString(status))),
       #(field, value.data_property(val)),
     ])
@@ -1582,13 +1579,13 @@ pub fn call_native_promise_any_reject_element(
   already_called_ref: Ref,
   reject: JsValue,
 ) -> Result(State(host), StepExit(host)) {
-  use h, reason <- with_element_once(
+  use state, reason <- with_element_once(
     state,
     args,
     rest_stack,
     already_called_ref,
   )
-  let h = set_array_element(h, errors_ref, index, reason)
+  let h = set_array_element(state.heap, errors_ref, index, reason)
   promise_any_decrement_and_maybe_reject(
     State(..state, heap: h),
     remaining_ref,
@@ -1605,21 +1602,11 @@ fn promise_combinator_decrement(
   remaining_ref: Ref,
   on_zero: fn(State(host)) -> Result(#(State(host), JsValue), StepExit(host)),
 ) -> Result(#(State(host), JsValue), StepExit(host)) {
-  case heap.read(state.heap, remaining_ref) {
-    Some(value.BoxSlot(value: JsNumber(Finite(n)))) -> {
-      let new_count = n -. 1.0
-      let h =
-        heap.write(
-          state.heap,
-          remaining_ref,
-          value.BoxSlot(value: JsNumber(Finite(new_count))),
-        )
-      case new_count <=. 0.0 {
-        True -> on_zero(State(..state, heap: h))
-        False -> Ok(#(State(..state, heap: h), JsUndefined))
-      }
-    }
-    _ -> Ok(#(state, JsUndefined))
+  let #(h, is_zero) = heap.decrement_counter(state.heap, remaining_ref)
+  let state = State(..state, heap: h)
+  case is_zero {
+    True -> on_zero(state)
+    False -> Ok(#(state, JsUndefined))
   }
 }
 

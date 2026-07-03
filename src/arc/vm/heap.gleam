@@ -329,6 +329,51 @@ pub fn read_box(h: Heap(ctx, host), ref: Ref) -> Option(value.JsValue) {
   }
 }
 
+/// Allocate a `CounterSlot` holding `count` — the promise combinators'
+/// remainingElementsCount Record { [[Value]]: n }.
+pub fn alloc_counter(
+  h: Heap(ctx, host),
+  count: Int,
+) -> #(Heap(ctx, host), Ref) {
+  alloc(h, value.CounterSlot(count:))
+}
+
+/// remainingElementsCount += 1. There is nothing to report: an increment can
+/// never take the counter to zero.
+pub fn increment_counter(h: Heap(ctx, host), ref: Ref) -> Heap(ctx, host) {
+  let #(h, _count) = adjust_counter(h, ref, 1)
+  h
+}
+
+/// remainingElementsCount -= 1, reporting whether it reached zero (i.e.
+/// whether this decrement is the one that settles the combinator's promise).
+pub fn decrement_counter(
+  h: Heap(ctx, host),
+  ref: Ref,
+) -> #(Heap(ctx, host), Bool) {
+  let #(h, count) = adjust_counter(h, ref, -1)
+  #(h, count <= 0)
+}
+
+/// A counter ref that does not point at a `CounterSlot` is an engine bug —
+/// counter refs are only ever minted by `alloc_counter` and only ever handed
+/// to these functions, and the GC traces them from the element closures that
+/// hold them. Panicking beats the old silent no-op, which lost the decrement
+/// and left the combinator's promise pending forever.
+fn adjust_counter(
+  h: Heap(ctx, host),
+  ref: Ref,
+  delta: Int,
+) -> #(Heap(ctx, host), Int) {
+  case read(h, ref) {
+    Some(value.CounterSlot(count:)) -> {
+      let count = count + delta
+      #(write(h, ref, value.CounterSlot(count:)), count)
+    }
+    _ -> panic as "heap.adjust_counter: ref does not point to a CounterSlot"
+  }
+}
+
 /// Read an EvalEnvSlot's var dict.
 pub fn read_eval_env(
   h: Heap(ctx, host),
