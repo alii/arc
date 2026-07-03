@@ -19,15 +19,9 @@ pub fn new(default: a) -> TreeArray(a)
 @external(erlang, "arc_array_ffi", "tree_array_from_list")
 pub fn from_list(items: List(a), default: a) -> TreeArray(a)
 
-/// Convert to list of all set elements (0..size-1). O(n).
-@external(erlang, "arc_array_ffi", "tree_array_to_list")
-pub fn to_list(arr: TreeArray(a)) -> List(a)
-
-/// Read at index. Returns default for unset/out-of-bounds. O(log n).
-@external(erlang, "arc_array_ffi", "tree_array_get")
-pub fn get(index: Int, arr: TreeArray(a)) -> a
-
-/// Read as Option — None for unset slots. O(log n).
+/// Read as Option — None for unset slots and out-of-bounds/negative
+/// indices. O(log n). The only read path: there is deliberately no
+/// silent-default variant a caller could reach with a negative index.
 @external(erlang, "arc_array_ffi", "tree_array_get_option")
 pub fn get_option(index: Int, arr: TreeArray(a)) -> Option(a)
 

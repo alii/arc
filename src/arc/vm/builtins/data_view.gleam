@@ -14,7 +14,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, list_at}
 import arc/vm/heap
-import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -26,7 +25,6 @@ import arc/vm/value.{
   VFloat32, VFloat64, VInt16, VInt32, VInt8, VUint16, VUint32, VUint8,
 }
 import gleam/bit_array
-import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
@@ -83,22 +81,7 @@ pub fn init(
     )
   let h = common.add_to_string_tag(h, bt.prototype, "DataView")
   // §25.3.3.1: DataView.prototype is { writable: false, enumerable: false,
-  // configurable: false } — tighter than init_type's default builtin property.
-  let h =
-    heap.update(h, bt.constructor, fn(slot) {
-      case slot {
-        ObjectSlot(properties:, ..) ->
-          ObjectSlot(
-            ..slot,
-            properties: dict.insert(
-              properties,
-              Named("prototype"),
-              value.data(JsObject(bt.prototype)),
-            ),
-          )
-        other -> other
-      }
-    })
+  // configurable: false } — installed that way by common.init_type.
   #(h, bt)
 }
 
@@ -301,16 +284,22 @@ fn set_view_value(
       let heap =
         heap.update(state.heap, view.buffer, fn(slot) {
           case slot {
-            ObjectSlot(kind: ArrayBufferObject(data: old, ..) as k, ..) ->
+            ObjectSlot(kind: ArrayBufferObject(data: Some(old), ..) as k, ..) ->
               // Shared storage: persist only the element's bytes — other
               // regions may be concurrently written by other agents.
               ObjectSlot(
                 ..slot,
                 kind: ArrayBufferObject(
                   ..k,
-                  data: value.buffer_store_region(old, new_data, pos, elem_size),
+                  data: Some(value.buffer_store_region(
+                    old,
+                    new_data,
+                    pos,
+                    elem_size,
+                  )),
                 ),
               )
+            // Detached (`data: None`) or not a buffer: nothing to write into.
             other -> other
           }
         })
@@ -436,21 +425,19 @@ fn live_buffer_info(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buf_ref) {
     Some(ObjectSlot(
-      kind: ArrayBufferObject(data:, detached:, max_byte_length:, ..),
+      kind: ArrayBufferObject(data: Some(data), max_byte_length:, ..),
       ..,
     )) ->
-      case detached {
-        True ->
-          state.type_error(
-            state,
-            "Cannot perform operation on a detached ArrayBuffer",
-          )
-        False ->
-          cont(
-            #(value.buffer_byte_size(data), option.is_some(max_byte_length)),
-            state,
-          )
-      }
+      cont(
+        #(value.buffer_byte_size(data), option.is_some(max_byte_length)),
+        state,
+      )
+    // `data: None` is a detached buffer — [[ArrayBufferData]] is null.
+    Some(ObjectSlot(kind: ArrayBufferObject(data: None, ..), ..)) ->
+      state.type_error(
+        state,
+        "Cannot perform operation on a detached ArrayBuffer",
+      )
     _ -> state.type_error(state, "DataView buffer is not an ArrayBuffer")
   }
 }
@@ -462,7 +449,7 @@ fn buffer_data(
   cont: fn(BitArray, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buf_ref) {
-    Some(ObjectSlot(kind: ArrayBufferObject(data:, detached: False, ..), ..)) ->
+    Some(ObjectSlot(kind: ArrayBufferObject(data: Some(data), ..), ..)) ->
       cont(value.buffer_bits(data), state)
     _ ->
       state.type_error(

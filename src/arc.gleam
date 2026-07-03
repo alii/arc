@@ -1,12 +1,12 @@
 import arc/compiler
 import arc/dis
 import arc/engine.{Threw}
+import arc/esm
 import arc/internal/path
 import arc/parser
 import arc/repl/examples
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/exec/entry
-import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, vm_error_message}
@@ -67,11 +67,11 @@ fn format_repl_error(err: ReplError, heap: Heap(host)) -> String {
 /// by `eval` and the `/dis` command so both report syntax/compile errors the
 /// same way.
 fn compile_line(source: String) -> Result(value.FuncTemplate, ReplError) {
-  use #(program, sb) <- result.try(
-    parser.parse(source, parser.Script)
+  use #(body, sb) <- result.try(
+    parser.parse_script(source)
     |> result.map_error(ReplSyntax),
   )
-  compiler.compile_repl(program, sb)
+  compiler.compile_repl(body, sb)
   |> result.map_error(ReplCompile)
 }
 
@@ -291,19 +291,16 @@ fn format_cli_error(err: CliError(host)) -> String {
 /// Run a JS source file. `Ok(Nil)` means it ran to completion with nothing
 /// uncaught; every failure is returned as a typed `CliError` for `main` to
 /// render and exit non-zero on. The engine boots with its default host hooks
-/// (`engine.new()`); `finish` drains microtasks (and any embedder macrotask
-/// loop) after the top level returns.
-fn run_file(
-  path: String,
-  finish: fn(state.State(host)) -> state.State(host),
-) -> Result(Nil, CliError(host)) {
+/// (`engine.new()`) and its default post-script driver, which drains
+/// microtasks after the top level returns.
+fn run_file(path: String) -> Result(Nil, CliError(host)) {
   case simplifile.read(path) {
     Error(err) -> Error(ReadFailed(path:, error: err))
     Ok(source) -> {
       let is_module = !string.ends_with(path, ".cjs")
       case is_module {
-        True -> run_module_file(path, source, finish)
-        False -> run_script_file(source, finish)
+        True -> run_module_file(path, source)
+        False -> run_script_file(source)
       }
     }
   }
@@ -311,12 +308,15 @@ fn run_file(
 
 /// Run a file as an ES module using the bundle lifecycle.
 fn run_module_file(
-  path: String,
+  entry_path: String,
   source: String,
-  finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
-  engine.eval_module_with(eng, path, source, resolve_dep, load_dep, finish)
+  // The entry specifier is a module IDENTITY, and it comes straight from argv.
+  // Canonicalize it, or `arc ./a.js` names a different module than the `a.js` a
+  // dependency's `import "./a.js"` resolves to — one file, two module records.
+  let entry = path.canonicalize(entry_path)
+  engine.eval_module(eng, entry, source, resolve_dep, load_dep)
   |> result.replace(Nil)
   |> result.map_error(EvalFailed)
 }
@@ -346,12 +346,9 @@ fn load_dep(resolved: String) -> Result(String, String) {
 }
 
 /// Run a file as a script (only for .cjs files).
-fn run_script_file(
-  source: String,
-  finish: fn(state.State(host)) -> state.State(host),
-) -> Result(Nil, CliError(host)) {
+fn run_script_file(source: String) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
-  case engine.eval_with(eng, source, finish) {
+  case engine.eval(eng, source) {
     Ok(#(Threw(val), eng)) -> Error(Uncaught(engine: eng, thrown: val))
     Ok(_) -> Ok(Nil)
     Error(err) -> Error(EvalFailed(err))
@@ -368,18 +365,30 @@ fn run_dis(path: String) -> Result(Nil, CliError(host)) {
     simplifile.read(path)
     |> result.map_error(fn(err) { ReadFailed(path:, error: err) }),
   )
-  let mode = case string.ends_with(path, ".cjs") {
-    True -> parser.Script
-    False -> parser.Module
-  }
-  use #(program, sb) <- result.try(
-    parser.parse(source, mode)
-    |> result.map_error(fn(err) { EvalFailed(engine.ParseError(err)) }),
-  )
-  use template <- result.try(
-    compiler.compile(program, sb)
-    |> result.map_error(fn(err) { EvalFailed(engine.CompileError(err)) }),
-  )
+  // `.cjs` is a script; anything else is an ES module. Each goal symbol has
+  // its own parse + compile entry point, so the two paths never share a
+  // `Program` wrapper one of them would have to reject.
+  use template <- result.try(case string.ends_with(path, ".cjs") {
+    True -> {
+      use #(body, sb) <- result.try(
+        parser.parse_script(source)
+        |> result.map_error(fn(err) { EvalFailed(engine.ParseError(err)) }),
+      )
+      compiler.compile(body, sb)
+      |> result.map_error(fn(err) { EvalFailed(engine.CompileError(err)) })
+    }
+    False -> {
+      use #(items, sb) <- result.try(
+        parser.parse_module(source)
+        |> result.map_error(fn(err) { EvalFailed(engine.ParseError(err)) }),
+      )
+      use compiled <- result.map(
+        compiler.compile_module(items, sb, esm.analyze(items))
+        |> result.map_error(fn(err) { EvalFailed(engine.CompileError(err)) }),
+      )
+      compiled.template
+    }
+  })
   let out_path = path <> ".dis.txt"
   use Nil <- result.map(
     simplifile.write(out_path, dis.disassemble(template))
@@ -421,7 +430,7 @@ pub fn main() -> Nil {
       Ok(Nil)
     }
 
-    [path, ..] -> run_file(path, event_loop.finish)
+    [path, ..] -> run_file(path)
 
     [] -> {
       banner()

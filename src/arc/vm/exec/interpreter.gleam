@@ -4551,7 +4551,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // [args_array, callee] → [result]; this=undefined.
       case state.stack {
         [JsObject(args_ref), callee, ..rest] -> {
-          let args = call.extract_array_args(state.heap, args_ref)
+          let args = heap.read_array_values(state.heap, args_ref)
           call_value(State(..state, stack: rest), callee, args, JsUndefined)
         }
         [_, callee, ..] -> {
@@ -4568,7 +4568,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // [args_array, method, receiver] → [result]; this=receiver.
       case state.stack {
         [JsObject(args_ref), method, receiver, ..rest] -> {
-          let args = call.extract_array_args(state.heap, args_ref)
+          let args = heap.read_array_values(state.heap, args_ref)
           call_value(State(..state, stack: rest), method, args, receiver)
         }
         _ -> underflow(state, "CallMethodApply")
@@ -4579,7 +4579,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // [args_array, new_target, ctor] → [new instance]. Spread-new path.
       case state.stack {
         [JsObject(args_ref), JsObject(nt_ref), JsObject(ctor_ref), ..rest] -> {
-          let args = call.extract_array_args(state.heap, args_ref)
+          let args = heap.read_array_values(state.heap, args_ref)
           do_construct(state, ctor_ref, args, rest, nt_ref)
         }
         [_, _, non_ctor, ..] ->

@@ -1,3 +1,4 @@
+import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
@@ -267,16 +268,13 @@ fn ffi_heap_read(
 // pyramids found throughout the VM. Each reads a specific slot shape and returns
 // Option — use with option.map/option.then/option.unwrap at callsites.
 
-/// Read an ArrayObject, returning #(length, elements).
-pub fn read_array(
-  h: Heap(ctx, host),
-  ref: Ref,
-) -> Option(#(Int, value.JsElements)) {
-  case read(h, ref) {
-    Some(value.ObjectSlot(kind: value.ArrayObject(length:), elements:, ..)) ->
-      Some(#(length, elements))
-    _ -> None
-  }
+/// Read an array-like's elements as a dense list of `length` values, holes
+/// padded with undefined. Anything that is not an array/arguments object
+/// (or a dangling ref) reads as the empty list.
+pub fn read_array_values(h: Heap(ctx, host), ref: Ref) -> List(value.JsValue) {
+  read_array_like(h, ref)
+  |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
+  |> option.unwrap([])
 }
 
 /// Read an ArrayObject OR ArgumentsObject, returning #(length, elements).

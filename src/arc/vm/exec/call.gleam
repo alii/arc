@@ -150,7 +150,6 @@ pub fn call_function(
         False, True ->
           call_async_function(
             State(..state, heap:),
-            env_ref,
             callee_template,
             args,
             rest_stack,
@@ -405,7 +404,6 @@ fn call_async_generator_function(
 /// If the body hits `await`, save state and set up promise callbacks to resume.
 fn call_async_function(
   state: State(host),
-  env_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
@@ -440,7 +438,6 @@ fn call_async_function(
       resolve: resolve_fn,
       reject: reject_fn,
       func_template: callee_template,
-      env_ref:,
     ),
     FirstAwait(promise: JsObject(promise_ref)),
     rest_stack,
@@ -449,7 +446,7 @@ fn call_async_function(
 
 /// Everything an in-flight async function needs to settle or re-suspend —
 /// exactly the fields `AsyncFunctionSlot` already stores alongside the saved
-/// frame. Bundled so `finish_async_execution` takes a record instead of five
+/// frame. Bundled so `finish_async_execution` takes a record instead of four
 /// loose positional arguments that must stay in the right order.
 type AsyncCtx {
   AsyncCtx(
@@ -457,7 +454,6 @@ type AsyncCtx {
     resolve: JsValue,
     reject: JsValue,
     func_template: FuncTemplate,
-    env_ref: Ref,
   )
 }
 
@@ -485,8 +481,7 @@ fn finish_async_execution(
   entry: AsyncEntry,
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  let AsyncCtx(promise_data_ref:, resolve:, reject:, func_template:, env_ref:) =
-    ctx
+  let AsyncCtx(promise_data_ref:, resolve:, reject:, func_template:) = ctx
   let result_value = case entry {
     FirstAwait(promise:) -> promise
     Resumed(_) -> JsUndefined
@@ -502,7 +497,6 @@ fn finish_async_execution(
           resolve:,
           reject:,
           func_template:,
-          env_ref:,
           saved_pc: suspended.pc,
           saved_locals: suspended.locals,
           saved_stack: suspended.stack,
@@ -590,7 +584,6 @@ pub fn call_native_async_resume(
       resolve: slot_resolve,
       reject: slot_reject,
       func_template:,
-      env_ref: slot_env_ref,
       saved_pc:,
       saved_locals:,
       saved_stack:,
@@ -628,7 +621,6 @@ pub fn call_native_async_resume(
           resolve: slot_resolve,
           reject: slot_reject,
           func_template:,
-          env_ref: slot_env_ref,
         ),
         Resumed(slot: async_data_ref),
         rest_stack,
@@ -1992,11 +1984,6 @@ fn proxy_create(
   }
 }
 
-pub fn extract_array_args(h: Heap(host), ref: Ref) -> List(JsValue) {
-  heap.read_array_like(h, ref)
-  |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
-  |> option.unwrap([])
-}
 
 /// Allocate a {value, done} iterator-result object, push it, advance pc.
 fn push_iter_result(

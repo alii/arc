@@ -248,9 +248,6 @@ fn drive_top_level_await(
         resolve:,
         reject:,
         func_template: func,
-        // Modules close over no function environment; the slot only carries
-        // this ref through re-suspension, so the global object stands in.
-        env_ref: suspended.ctx.global_object,
         saved_pc: suspended.pc,
         saved_locals: suspended.locals,
         saved_stack: suspended.stack,

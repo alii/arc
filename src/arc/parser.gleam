@@ -7324,12 +7324,8 @@ fn look_next(look: Look) -> #(Token, Look) {
   case look.tokens {
     [token, ..rest] -> #(token, Look(..look, tokens: rest))
     [] -> {
-      let #(batch, scan) = lexer.scan_tokens(look.scan, 1)
-      case batch {
-        [token, ..rest] -> #(token, Look(tokens: rest, scan:))
-        // scan_tokens always yields at least an Eof token; unreachable.
-        [] -> #(lexer.Token(Eof, "", 0, 0, 0, False), look)
-      }
+      let #(token, scan) = lexer.scan_next(look.scan)
+      #(token, Look(tokens: [], scan:))
     }
   }
 }
@@ -7895,8 +7891,8 @@ fn advance(p: P) -> P {
     [lexer.Token(line: line, pos: pos, raw_len: rl, ..), ..rest] ->
       case rest {
         [] -> {
-          let #(batch, scan) = lexer.scan_tokens(p.scan, 1)
-          P(..p, tokens: batch, scan:, prev_line: line, prev_end: pos + rl)
+          let #(token, scan) = lexer.scan_next(p.scan)
+          P(..p, tokens: [token], scan:, prev_line: line, prev_end: pos + rl)
         }
         _ -> P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
       }
@@ -7917,8 +7913,8 @@ fn advance(p: P) -> P {
 fn ensure_current(p: P) -> P {
   case p.tokens {
     [] -> {
-      let #(batch, scan) = lexer.scan_tokens(p.scan, 1)
-      P(..p, tokens: batch, scan:)
+      let #(token, scan) = lexer.scan_next(p.scan)
+      P(..p, tokens: [token], scan:)
     }
     _ -> p
   }

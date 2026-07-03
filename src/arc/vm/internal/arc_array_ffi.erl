@@ -3,10 +3,10 @@
 %%   - array-module tree arrays   (src/arc/vm/internal/tree_array.gleam)
 %%   - the microtask job queue    (src/arc/vm/internal/job_queue.gleam)
 -module(arc_array_ffi).
--export([array_get/2, array_set/3, array_repeat/2]).
+-export([array_get/2, array_repeat/2]).
 -export([array_unsafe_get/2, array_set_unchecked/3]).
--export([tree_array_new/1, tree_array_from_list/2, tree_array_to_list/1,
-         tree_array_get/2, tree_array_get_option/2, tree_array_set/3,
+-export([tree_array_new/1, tree_array_from_list/2,
+         tree_array_get_option/2, tree_array_set/3,
          tree_array_size/1, tree_array_resize/2,
          tree_array_reset/2, tree_array_sparse_fold/3]).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1]).
@@ -17,11 +17,6 @@ array_get(Index, Tuple) ->
         true -> {some, element(Index + 1, Tuple)};
         false -> none
     end.
-array_set(Index, Value, Tuple) ->
-    case Index >= 0 andalso Index < tuple_size(Tuple) of
-        true -> {ok, setelement(Index + 1, Tuple, Value)};
-        false -> {error, nil}
-    end.
 
 %% Unchecked variants for hot-path reads where the compiler guarantees
 %% the index is in bounds (bytecode fetch, constant pool, locals). No
@@ -30,31 +25,28 @@ array_unsafe_get(Index, Tuple) ->
     element(Index + 1, Tuple).
 array_set_unchecked(Index, Value, Tuple) ->
     setelement(Index + 1, Tuple, Value).
-%% Cap tuple-backed arrays at 10M elements (~80MB on 64-bit).
-%% JS specs allow arrays up to 2^32-1 but we use a sparse dict for those.
-%% Mirrors limits.max_dense_index / limits.max_iteration in
-%% src/arc/vm/limits.gleam — keep the three in sync. Used by array_repeat
-%% and as the upper bound of tree_array_set's guard.
--define(MAX_DENSE_ELEMENTS, 10000000).
+%% Refuse to allocate an absurd tuple. This is a SANITY CAP on one BEAM
+%% allocation (10M elements ~ 80MB on 64-bit), not a JS policy: array_repeat's
+%% callers are the tuple-backed fixed arrays (a call frame's locals, a
+%% constant pool), whose sizes the compiler bounds. The dense-vs-sparse policy
+%% for JS array elements is a different number in a different place —
+%% limits.max_dense_index, applied by elements.set before it ever reaches this
+%% module — and the two were once the same hand-copied literal, which read as
+%% if a locals frame and a JS array shared a limit. They do not.
+-define(MAX_TUPLE_ALLOC, 10000000).
 
-array_repeat(Value, Count) when Count =< ?MAX_DENSE_ELEMENTS ->
+array_repeat(Value, Count) when Count =< ?MAX_TUPLE_ALLOC ->
     erlang:make_tuple(Count, Value);
 array_repeat(_Value, _Count) ->
     erlang:error(array_too_large).
 
 %% Erlang's array module — O(log n) functional array for JS elements.
-%% Default is the caller-provided JsUndefined so unset slots and to_list
-%% both return valid JsValues (no atom sentinel leaks into Gleam).
+%% Default is the caller-provided sentinel, so unset slots read back as a
+%% valid JsValue (no atom sentinel leaks into Gleam).
 tree_array_new(Default) ->
     array:new({default, Default}).
 tree_array_from_list(List, Default) ->
     array:from_list(List, Default).
-tree_array_to_list(A) ->
-    array:to_list(A).
-tree_array_get(Index, A) when Index >= 0 ->
-    array:get(Index, A);
-tree_array_get(_Index, A) ->
-    array:default(A).
 %% DenseElements uses JsUninitialized as default so holes (reset slots) are
 %% distinguishable from explicit `arr[i] = undefined`. A slot that equals
 %% default means "hole" → none. Out-of-bounds/negative → none.
@@ -71,13 +63,13 @@ tree_array_get_option(Index, A) when Index >= 0 ->
 tree_array_get_option(_Index, _A) ->
     none.
 %% elements.set (the only caller) promotes to the sparse representation at
-%% limits.max_dense_index BEFORE calling us, so every Index that arrives is
-%% 0 =< Index < max_dense_index; the guard re-enforces that cap at the FFI
-%% boundary as defense in depth. There is deliberately no fallback clause —
-%% an out-of-contract index must crash (function_clause), never be silently
-%% discarded as it once was.
-tree_array_set(Index, Value, A)
-    when Index >= 0, Index < ?MAX_DENSE_ELEMENTS ->
+%% limits.max_dense_index BEFORE calling us, so the dense/sparse policy is
+%% already decided by the time we get here and does not need restating (with a
+%% second, hand-copied copy of the constant) at this boundary. Erlang's `array`
+%% accepts any non-negative index, so the guard only rejects what `array` would
+%% reject anyway. There is deliberately no fallback clause — a negative index
+%% must crash (function_clause), never be silently discarded as it once was.
+tree_array_set(Index, Value, A) when Index >= 0 ->
     array:set(Index, Value, A).
 tree_array_size(A) ->
     array:size(A).

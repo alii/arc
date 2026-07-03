@@ -21,22 +21,15 @@ pub fn get(index: Int, arr: TupleArray(a)) -> Option(a)
 /// CALLER MUST GUARANTEE `0 <= index < size(arr)` or BEAM will badarg.
 /// Use only for compiler-generated indices (bytecode PC, constant pool,
 /// local slots, function table) where the invariant holds by construction.
-/// For untrusted indices use `get` which returns Option.
+/// For untrusted indices use `get`, which returns Option.
 @external(erlang, "arc_array_ffi", "array_unsafe_get")
 pub fn unsafe_get(index: Int, arr: TupleArray(a)) -> a
-
-/// Write element at index (0-based), returning a new array. O(n) copy.
-@external(erlang, "arc_array_ffi", "array_set")
-pub fn set(
-  index: Int,
-  value: a,
-  arr: TupleArray(a),
-) -> Result(TupleArray(a), Nil)
 
 /// Write element at index with no bounds check. O(n) copy.
 ///
 /// CALLER MUST GUARANTEE `0 <= index < size(arr)` or BEAM will badarg.
-/// Use only for compiler-generated indices. For untrusted indices use `set`.
+/// Use only for compiler-generated indices (locals, constant pool), where
+/// the invariant holds by construction.
 @external(erlang, "arc_array_ffi", "array_set_unchecked")
 pub fn set_unchecked(index: Int, value: a, arr: TupleArray(a)) -> TupleArray(a)
 

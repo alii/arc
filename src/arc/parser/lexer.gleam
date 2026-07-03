@@ -4,7 +4,6 @@
 import gleam/bit_array
 import gleam/bool
 import gleam/int
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
@@ -172,7 +171,6 @@ pub type LexError {
   ExpectedHexDigits(pos: Int)
   ExpectedOctalDigits(pos: Int)
   ExpectedBinaryDigits(pos: Int)
-  InvalidNumber(pos: Int)
   ConsecutiveNumericSeparator(pos: Int)
   LeadingNumericSeparator(pos: Int)
   TrailingNumericSeparator(pos: Int)
@@ -190,7 +188,6 @@ pub fn lex_error_to_string(error: LexError) -> String {
     ExpectedHexDigits(_) -> "Expected hex digits after 0x"
     ExpectedOctalDigits(_) -> "Expected octal digits after 0o"
     ExpectedBinaryDigits(_) -> "Expected binary digits after 0b"
-    InvalidNumber(_) -> "Invalid number"
     ConsecutiveNumericSeparator(_) ->
       "Numeric separator can not be used consecutively"
     LeadingNumericSeparator(_) ->
@@ -212,7 +209,6 @@ pub fn lex_error_pos(error: LexError) -> Int {
     ExpectedHexDigits(pos:) -> pos
     ExpectedOctalDigits(pos:) -> pos
     ExpectedBinaryDigits(pos:) -> pos
-    InvalidNumber(pos:) -> pos
     ConsecutiveNumericSeparator(pos:) -> pos
     LeadingNumericSeparator(pos:) -> pos
     TrailingNumericSeparator(pos:) -> pos
@@ -250,117 +246,81 @@ pub fn scanner_at(
   Scanner(bytes:, pos:, line:, mode:)
 }
 
-/// Lex up to `max` tokens from the scanner's position, in one pass that
-/// threads bare byte/line integers (no per-token allocation beyond the
-/// tokens themselves). This is the parser's bulk refill path.
+/// Lex exactly one token from the scanner's position, threading bare
+/// byte/line integers (no allocation beyond the token itself). This is the
+/// parser's refill path — it lexes on demand, one token at a time.
 ///
-/// The batch always ends the moment an Eof token is produced. A hard
-/// lexer error (unterminated block comment, invalid escape, …) is
+/// A hard lexer error (unterminated block comment, invalid escape, …) is
 /// materialised INTO the stream as a zero-length `Illegal` token carrying
-/// its message, followed by Eof: no grammar production accepts `Illegal`,
-/// so the parser reports a SyntaxError at exactly the error's position —
-/// and hard errors inside source the parser never reaches (or jumps over,
-/// e.g. a regex body) are never raised at all.
+/// its message: no grammar production accepts `Illegal`, so the parser
+/// reports a SyntaxError at exactly the error's position — and hard errors
+/// inside source the parser never reaches (or jumps over, e.g. a regex
+/// body) are never raised at all.
 ///
-/// Returns the tokens and the scanner just past the last one; the batch
-/// ends early the moment it produces an Eof token.
-pub fn scan_tokens(s: Scanner, max: Int) -> #(List(Token), Scanner) {
+/// Returns the token and the scanner just past it. Past end of input it
+/// yields Eof forever.
+pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
   let Scanner(bytes:, pos:, line:, mode:) = s
-  do_scan_tokens(bytes, pos, line, mode, max, [])
-}
-
-fn do_scan_tokens(
-  bytes: BitArray,
-  pos: Int,
-  line: Int,
-  mode: LexMode,
-  max: Int,
-  acc: List(Token),
-) -> #(List(Token), Scanner) {
-  case max {
-    0 -> #(list.reverse(acc), Scanner(bytes:, pos:, line:, mode:))
-    _ ->
-      // The single-token step is inlined here (not a call to scan_one) so
-      // the per-token hot path allocates nothing beyond the token and its
-      // list cell — same as the whole-file loop this replaced.
-      case skip_whitespace_and_comments(bytes, pos, mode) {
-        Error(err) -> #(
-          list.reverse(hard_error_tokens(err, bytes, pos, line, acc)),
-          Scanner(bytes:, pos:, line:, mode:),
+  case skip_whitespace_and_comments(bytes, pos, mode) {
+    Error(err) -> hard_error_token(err, bytes, pos, line, mode)
+    Ok(#(new_pos, ws_newlines, rest)) -> {
+      let token_line = line + ws_newlines
+      case read_fast_punct(rest) {
+        Some(#(kind, value)) -> #(
+          Token(kind, value, new_pos, token_line, 1, False),
+          Scanner(bytes:, pos: new_pos + 1, line: token_line, mode:),
         )
-        Ok(#(new_pos, ws_newlines, rest)) -> {
-          let token_line = line + ws_newlines
-          case read_fast_punct(rest) {
-            Some(#(kind, value)) ->
-              do_scan_tokens(bytes, new_pos + 1, token_line, mode, max - 1, [
-                Token(kind, value, new_pos, token_line, 1, False),
-                ..acc
-              ])
-            None ->
-              case char_at(bytes, new_pos) {
-                "" -> #(
-                  list.reverse([
-                    Token(Eof, "", new_pos, token_line, 0, False),
-                    ..acc
-                  ]),
-                  Scanner(bytes:, pos: new_pos, line: token_line, mode:),
-                )
-                _ ->
-                  case read_token(bytes, new_pos) {
-                    Error(err) -> #(
-                      list.reverse(hard_error_tokens(
-                        err,
-                        bytes,
-                        new_pos,
-                        token_line,
-                        acc,
-                      )),
-                      Scanner(bytes:, pos: new_pos, line: token_line, mode:),
-                    )
-                    Ok(token) -> {
-                      let token = Token(..token, line: token_line)
-                      let end_pos = token.pos + token.raw_len
-                      let end_line = case token.kind {
-                        // Only these token kinds can span multiple lines
-                        KString | TemplateLiteral | TemplateHead -> {
-                          let raw = byte_slice(bytes, token.pos, token.raw_len)
-                          token_line + count_newlines_in(raw)
-                        }
-                        _ -> token_line
-                      }
-                      do_scan_tokens(bytes, end_pos, end_line, mode, max - 1, [
-                        token,
-                        ..acc
-                      ])
+        None ->
+          case char_at(bytes, new_pos) {
+            "" -> #(
+              Token(Eof, "", new_pos, token_line, 0, False),
+              Scanner(bytes:, pos: new_pos, line: token_line, mode:),
+            )
+            _ ->
+              case read_token(bytes, new_pos) {
+                Error(err) ->
+                  hard_error_token(err, bytes, new_pos, token_line, mode)
+                Ok(token) -> {
+                  let token = Token(..token, line: token_line)
+                  let end_pos = token.pos + token.raw_len
+                  let end_line = case token.kind {
+                    // Only these token kinds can span multiple lines
+                    KString | TemplateLiteral | TemplateHead -> {
+                      let raw = byte_slice(bytes, token.pos, token.raw_len)
+                      token_line + count_newlines_in(raw)
                     }
+                    _ -> token_line
                   }
+                  #(token, Scanner(bytes:, pos: end_pos, line: end_line, mode:))
+                }
               }
           }
-        }
       }
+    }
   }
 }
 
 /// A hard lexer error materialised into the token stream: a zero-length
-/// Illegal token carrying its message, then Eof (both onto the reversed
-/// accumulator). `from`/`line` are where the failed token step started;
-/// the error may sit lines further down (an unterminated `/*` reports at
-/// the `/*`, past any newlines the skip already crossed), and the token's
-/// line must be the ERROR's line or ASI misjudges the line break before it.
-fn hard_error_tokens(
+/// Illegal token carrying its message, and a scanner parked at end of input
+/// so the next `scan_next` yields Eof and the stream stops there.
+///
+/// `from`/`line` are where the failed token step started; the error may sit
+/// lines further down (an unterminated `/*` reports at the `/*`, past any
+/// newlines the skip already crossed), and the token's line must be the
+/// ERROR's line or ASI misjudges the line break before it.
+fn hard_error_token(
   err: LexError,
   bytes: BitArray,
   from: Int,
   line: Int,
-  acc: List(Token),
-) -> List(Token) {
+  mode: LexMode,
+) -> #(Token, Scanner) {
   let epos = lex_error_pos(err)
   let err_line = line + count_newlines_in(byte_slice(bytes, from, epos - from))
-  [
-    Token(Eof, "", epos, err_line, 0, False),
+  #(
     Token(Illegal, lex_error_to_string(err), epos, err_line, 0, False),
-    ..acc
-  ]
+    Scanner(bytes:, pos: bit_array.byte_size(bytes), line: err_line, mode:),
+  )
 }
 
 /// Tokens recognizable from their first byte alone, with no multi-char
@@ -1235,11 +1195,11 @@ fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   case char_at(bytes, pos) {
     "." ->
       case is_legacy_octal {
-        True -> finish_number(bytes, start, pos)
+        True -> Ok(number_token(bytes, start, pos))
         False ->
           case char_at(bytes, pos + 1) {
             // Two dots: include trailing dot in number (123. is a valid float)
-            "." -> finish_number(bytes, start, pos + 1)
+            "." -> Ok(number_token(bytes, start, pos + 1))
             _ -> {
               use pos2 <- result.try(skip_digits(bytes, pos + 1))
               read_exponent(bytes, start, pos2)
@@ -1252,7 +1212,7 @@ fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
     // allow an exponent, and is_legacy_octal is False for those.
     "e" | "E" ->
       case is_legacy_octal {
-        True -> finish_number(bytes, start, pos)
+        True -> Ok(number_token(bytes, start, pos))
         False -> read_exponent(bytes, start, pos)
       }
     "n" -> {
@@ -1261,7 +1221,7 @@ fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
       use <- bool.guard(has_leading_zero, Error(InvalidBigIntLiteral(start)))
       Ok(number_token(bytes, start, pos + 1))
     }
-    _ -> finish_number(bytes, start, pos)
+    _ -> Ok(number_token(bytes, start, pos))
   }
 }
 
@@ -1311,10 +1271,10 @@ fn read_exponent(
       use pos3 <- result.try(skip_digits(bytes, pos2))
       case pos3 == pos2 {
         True -> Error(ExpectedExponentDigits(pos))
-        False -> finish_number(bytes, start, pos3)
+        False -> Ok(number_token(bytes, start, pos3))
       }
     }
-    _ -> finish_number(bytes, start, pos)
+    _ -> Ok(number_token(bytes, start, pos))
   }
 }
 
@@ -1331,12 +1291,14 @@ fn read_radix_number(
     False ->
       case char_at(bytes, end) {
         "n" -> Ok(number_token(bytes, start, end + 1))
-        _ -> finish_number(bytes, start, end)
+        _ -> Ok(number_token(bytes, start, end))
       }
   }
 }
 
-/// Build the token for a numeric literal spanning [start, end). Per the spec,
+/// Build the token for a numeric literal spanning [start, end) — always a
+/// non-empty span, since a number is only ever read starting from a decimal
+/// digit (or `.` + digit). Per the spec,
 /// NumericLiteral must not be immediately followed by IdentifierStart or
 /// DecimalDigit — but inside a regex literal (`/1a/`) the sequence is legal
 /// and re-scanned from source by the parser, so emit an Illegal token
@@ -1370,17 +1332,6 @@ fn number_token(bytes: BitArray, start: Int, end: Int) -> Token {
       let len = end - start
       tokn(Number, byte_slice(bytes, start, len), start, len)
     }
-  }
-}
-
-fn finish_number(
-  bytes: BitArray,
-  start: Int,
-  end: Int,
-) -> Result(Token, LexError) {
-  case end - start > 0 {
-    True -> Ok(number_token(bytes, start, end))
-    False -> Error(InvalidNumber(start))
   }
 }
 

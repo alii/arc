@@ -1099,10 +1099,7 @@ pub fn call_native_promise_any(
       // Step 4.d.ii: remaining -= 1; at zero, throw AggregateError — the
       // abrupt completion reaches IfAbruptRejectPromise with [[Done]] = true.
       let #(h, is_zero) = heap.decrement_counter(state.heap, remaining_ref)
-      let errors =
-        heap.read_array_like(h, errors_ref)
-        |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
-        |> option.unwrap([])
+      let errors = heap.read_array_values(h, errors_ref)
       case is_zero {
         False -> Ok(State(..state, heap: h))
         True -> {
@@ -1385,11 +1382,7 @@ fn create_keyed_result(
   keys_ref: Ref,
   values_ref: Ref,
 ) -> #(Heap(host), JsValue) {
-  let read_list = fn(arr_ref) {
-    heap.read_array_like(h, arr_ref)
-    |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
-    |> option.unwrap([])
-  }
+  let read_list = heap.read_array_values(h, _)
   let keys = read_list(keys_ref)
   let values = read_list(values_ref)
   // Step 2: Let obj be OrdinaryObjectCreate(null).
@@ -1638,10 +1631,7 @@ fn promise_any_decrement_and_maybe_reject(
 ) -> Result(#(State(host), JsValue), StepExit(host)) {
   // All elements rejected — reject with AggregateError
   use state <- promise_combinator_decrement(state, remaining_ref)
-  let errors =
-    heap.read_array_like(state.heap, errors_ref)
-    |> option.map(fn(p) { elements.to_list_padded(p.1, p.0) })
-    |> option.unwrap([])
+  let errors = heap.read_array_values(state.heap, errors_ref)
   let #(h, err) =
     make_aggregate_error(
       state.heap,

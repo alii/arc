@@ -147,9 +147,3 @@ fn setup_locals_seeded(
   local_count: Int,
   undef: JsValue,
 ) -> tuple_array.TupleArray(JsValue)
-
-/// FFI: a one-instruction `Return` code array used as a sentinel frame for
-/// natives driven outside the interpreter loop — see
-/// arc_vm_ffi:return_code_sentinel/0.
-@external(erlang, "arc_vm_ffi", "return_code_sentinel")
-pub fn return_code_sentinel() -> tuple_array.TupleArray(opcode.Op)

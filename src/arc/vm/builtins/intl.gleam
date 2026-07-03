@@ -131,7 +131,6 @@ pub fn init(
       [],
     )
   let h = common.add_to_string_tag(h, locale.prototype, "Intl.Locale")
-  let h = freeze_prototype_prop(h, locale.constructor, locale.prototype)
   // Locale methods need the prototype ref for maximize/minimize results.
   let #(h, locale_methods) =
     common.alloc_methods(
@@ -431,7 +430,6 @@ fn init_service(
       slo,
     )
   let h = common.add_to_string_tag(h, bt.prototype, "Intl." <> name)
-  let h = freeze_prototype_prop(h, bt.constructor, bt.prototype)
   #(h, bt)
 }
 
@@ -493,24 +491,6 @@ fn locale_method_js_name(method: LocaleMethodName) -> String {
     LocaleGetTextInfo -> "getTextInfo"
     LocaleGetWeekInfo -> "getWeekInfo"
   }
-}
-
-/// Intl constructors have non-writable, non-configurable .prototype.
-fn freeze_prototype_prop(h: Heap(host), ctor: Ref, proto: Ref) -> Heap(host) {
-  heap.update(h, ctor, fn(slot) {
-    case slot {
-      ObjectSlot(properties:, ..) ->
-        ObjectSlot(
-          ..slot,
-          properties: dict.insert(
-            properties,
-            Named("prototype"),
-            value.data(JsObject(proto)),
-          ),
-        )
-      other -> other
-    }
-  })
 }
 
 /// Insert named builtin properties into an existing object.
